@@ -6,10 +6,4 @@ publish.workspace = true
 description = "Accounts, connections and the secret vault"
 
 [dependencies]
-# V4: the session redactor and the paste guard. Kept free of the store so
-# steve-core, steve-knowledge and the channels can call them without pulling in the vault service.
-aho-corasick = "=1.1.5"
-data-encoding = "=2.11.1"
-regex = "=1.13.1"
 serde_json = { version = "=1.0.154", features = ["preserve_order"] }
-zeroize = "=1.9.1"

@@ -2,27 +2,29 @@
  * “YOLO 替你选了「…」” once answered, a countdown with 现在 / 我来定 in the cool-down, “YOLO 没接：<原因>” when it left
  * the card to you — plus the item's and the project's own setting (跟随全局 / 关 / YOLO / 完全放开) and the mark on
  * YOLO's timeline lines. */
-import { useEffect, useState } from "react"
+import { useCallback, useEffect, useRef, useState } from "react"
 import { ChevronDownIcon, ZapIcon } from "lucide-react"
 import { cn } from "cn"
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog"
 import { DropdownMenu, DropdownMenuContent, DropdownMenuGroup, DropdownMenuLabel, DropdownMenuRadioGroup, DropdownMenuRadioItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
-import type { YoloMode } from "@/api/yolo"
-import { st, yoloCancel, yoloNow, yoloScope, type Item } from "@/store"
+import { yoloApi, type PermMode, type RYoloItem, type YoloMode } from "@/api/yolo"
+import { st, useHubEvents, yoloCancel, yoloNow, yoloScope, type Item } from "@/store"
+import { modeLines, newest } from "@/yolo/modes"
 import { Dot, fullGives, fullKeeps, levelOf, type YoloState } from "@/yolo/switch"
 import { t, useT } from "@/i18n"
 
 /** how a choice reads on the card */
 const CHOICE = {
   pass: () => t("yolo:choice.pass"), rework: () => t("yolo:choice.rework"), yes: () => t("yolo:choice.yes"), continue: () => t("yolo:choice.continue"),
-  retry: () => t("yolo:choice.retry"), send: () => t("yolo:choice.send"), once: () => t("yolo:choice.once"), approved: () => t("yolo:choice.once"),
+  retry: () => t("yolo:choice.retry"), send: () => t("yolo:choice.send"), once: () => t("yolo:choice.once"), approved: () => t("yolo:choice.once"), allow_once: () => t("yolo:choice.once"),
 } as Record<string, () => string>
+/* a tool-call card's option ids are the agent's own (`allow_once`, `allow`, …); YOLO only ever picks the allow-once one */
 export const choiceText = (c: string | null | undefined, subject?: string) =>
-  !c ? "" : subject === "release" && c === "yes" ? t("yolo:choice.releaseYes") : Object.hasOwn(CHOICE, c) ? CHOICE[c]() : c
+  !c ? "" : subject === "release" && c === "yes" ? t("yolo:choice.releaseYes") : subject === "tool_call" ? t("yolo:choice.once") : Object.hasOwn(CHOICE, c) ? CHOICE[c]() : c
 
 /** the small grey “⚡ YOLO” in front of what YOLO did */
 export function YoloMark({ className }: { className?: string }) {
-  return <span className={cn("inline-flex shrink-0 items-center gap-0.5 text-[11.5px] font-medium leading-4 text-muted-foreground", className)} data-yolo-mark><ZapIcon className="size-3" strokeWidth={2} aria-hidden />YOLO</span>
+  return <span className={cn("inline-flex shrink-0 items-center gap-0.5 type-label text-muted-foreground", className)} data-yolo-mark><ZapIcon className="size-3" strokeWidth={2} aria-hidden />YOLO</span>
 }
 
 function useTick(on: boolean) {
@@ -108,16 +110,16 @@ function ScopeMenu({ type, id, cur, inherit, label, children }: { type: "project
   return (
     <>
       <DropdownMenu>
-        <DropdownMenuTrigger disabled={!!st.yolo?.forced_off} render={<button type="button" className="inline-flex h-7 shrink-0 items-center gap-1.5 rounded-md px-2 text-[12.5px] text-foreground/85 transition-colors hover:bg-muted disabled:opacity-50" aria-label={label} data-yolo-scope={type} data-yolo-scope-mode={cur} />}>
+        <DropdownMenuTrigger disabled={!!st.yolo?.forced_off} render={<button type="button" className="inline-flex h-7 shrink-0 items-center gap-1.5 rounded-lg px-2 type-callout text-foreground/80 hover:bg-accent hover:text-foreground disabled:opacity-50" aria-label={label} data-yolo-scope={type} data-yolo-scope-mode={cur} />}>
           {children}<ChevronDownIcon className="size-3.5 text-muted-foreground" />
         </DropdownMenuTrigger>
         <DropdownMenuContent align="start" className="w-[min(20rem,calc(100vw-2rem))] min-w-0 [overflow-wrap:anywhere]">
-          <DropdownMenuGroup><DropdownMenuLabel className="type-footnote text-muted-foreground">{label}</DropdownMenuLabel></DropdownMenuGroup>
+          <DropdownMenuGroup><DropdownMenuLabel className="type-label text-tertiary">{label}</DropdownMenuLabel></DropdownMenuGroup>
           <DropdownMenuSeparator />
           <DropdownMenuRadioGroup value={cur} onValueChange={(v) => pick(v as YoloMode)}>
             {opts.map(([m, title, sub]) => (
               <DropdownMenuRadioItem key={m} value={m} data-yolo-scope-opt={m} className="items-start">
-                <span className="flex min-w-0 flex-col"><span className="text-[13.5px]">{title}</span><span className="type-footnote text-muted-foreground">{sub}</span></span>
+                <span className="flex min-w-0 flex-col gap-0.5"><span className="type-callout font-medium">{title}</span><span className="type-footnote text-muted-foreground">{sub}</span></span>
               </DropdownMenuRadioItem>))}
           </DropdownMenuRadioGroup>
         </DropdownMenuContent>
@@ -129,7 +131,7 @@ function ScopeMenu({ type, id, cur, inherit, label, children }: { type: "project
             <AlertDialogDescription className="flex flex-col gap-2"><span className="text-foreground">{fullGives()}</span><span>{fullKeeps()}</span></AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter className="min-w-0 *:h-auto *:min-h-8 *:min-w-0 *:whitespace-normal"><AlertDialogCancel>{t("common:action.cancel")}</AlertDialogCancel>
-            <AlertDialogAction className="bg-attention text-white hover:bg-attention/90" onClick={() => void yoloScope(type, id, "full")} data-yolo-scope-full-ok>{t("yolo:level.full")}</AlertDialogAction></AlertDialogFooter>
+            <AlertDialogAction variant="attention" onClick={() => { setAsk(false); void yoloScope(type, id, "full") }} data-yolo-scope-full-ok>{t("yolo:level.full")}</AlertDialogAction></AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
     </>
@@ -144,12 +146,53 @@ export function YoloItemSwitch({ i }: { i: Item }) {
   const eff = yoloFor(i)
   const now = eff.state === "forced" ? t("yolo:scope.unavailable") : eff.state === "paused" ? t("yolo:why.paused") : levelText(eff.level)
   return (
-    <div className="flex flex-wrap items-center gap-x-1 type-footnote text-muted-foreground" data-yolo-item={eff.level}>
+    <div className="inline-flex min-w-0 flex-wrap items-center gap-x-1 type-footnote text-muted-foreground" data-yolo-item={eff.level}>
       <span className="pl-0.5">{t("yolo:scope.away")}</span>
       <ScopeMenu type="item" id={i.id} cur={cur} inherit={t("yolo:scope.inheritNow", { level: levelWord() })} label={t("yolo:scope.itemMenu")}>
         <Dot s={eff.state} /><span className="font-medium">{now}</span>
-        {eff.why && <span className="max-w-[28ch] truncate text-muted-foreground">{t("yolo:scope.why", { why: eff.why })}</span>}
+        {/* forced off or paused already says why in the word itself */}
+        {eff.why && eff.state !== "forced" && eff.state !== "paused" && <span className="max-w-[28ch] truncate text-muted-foreground">{t("yolo:scope.why", { why: eff.why })}</span>}
       </ScopeMenu>
+    </div>
+  )
+}
+
+const modeName = (m: PermMode | null) => (m ? t(`yolo:mode.name.${m}`) : t("yolo:mode.none"))
+
+/** under the item's switch: per session, the permission mode Steve wants next to the one the Node confirmed the
+ *  harness runs in; a change on its way, waiting for the turn's end or refused says so, never “in effect” */
+export function YoloItemModes({ i }: { i: Item }) {
+  const t = useT()
+  /* the answer is kept with the item it is for: another item's never shows, even for a render before it is cleared */
+  const [got, setGot] = useState<{ id: string; s: RYoloItem | null } | null>(null)
+  const req = useRef(newest()).current
+  const load = useCallback(() => {
+    const id = i.id, live = req.begin()
+    yoloApi.item(id).then((s) => { if (live()) setGot({ id, s }) }, () => { if (live()) setGot({ id, s: null }) })
+  }, [i.id, req])
+  /* another item (or leaving the page) voids what is still on its way */
+  useEffect(() => { load(); return req.drop }, [load, req])
+  const s = got?.id === i.id ? got.s : null
+  const ids = new Set(s?.sessions.map((x) => x.session_id) ?? [])
+  /* a streaming turn sends events all the time: the state is read again at most every few seconds then */
+  useHubEvents(["yolo", "yolo_action", "session", "decision", "event"], load, 1000, {
+    maxWait: 5000,
+    filter: (e) => e.type === "yolo" || e.type === "yolo_action" || (e.type === "event" ? ids.has(e.session_id) : "item_id" in e && e.item_id === i.id),
+  })
+  const lines = s ? modeLines(s.sessions) : []
+  if (!lines.length) return null
+  const tone = { ok: "text-success", wait: "text-attention", bad: "text-destructive" }
+  return (
+    <div className="-mt-3 mb-5 flex flex-col gap-0.5 pl-0.5 type-footnote text-muted-foreground" data-yolo-modes>
+      {lines.map((l, n) => (
+        <div key={n} className="flex min-w-0 flex-col" data-yolo-mode={l.key} data-yolo-mode-from={l.from} title={t("yolo:mode.detail", { wanted: modeName(l.wanted), from: t(`yolo:mode.from.${l.from}`), applied: modeName(l.applied) })}>
+          <span className="min-w-0 break-words"><span className="font-medium text-foreground/80">{t("yolo:mode.label")}</span>{" "}
+            <span className={tone[l.tone]}>{t(`yolo:mode.${l.key}`, { wanted: modeName(l.wanted), applied: modeName(l.applied), reason: l.reason })}</span>
+            {/* a mode not set by the bot or full access says where it comes from */}
+            {(l.from === "node_default" || l.from === "bot_bypass") && <span className="text-muted-foreground"> · {t(`yolo:mode.from.${l.from}`)}</span>}</span>
+          {l.residual && <span className="min-w-0 break-words" data-yolo-residual>{t("yolo:mode.residual")}</span>}
+        </div>
+      ))}
     </div>
   )
 }

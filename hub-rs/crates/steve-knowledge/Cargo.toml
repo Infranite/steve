@@ -8,8 +8,6 @@ description = "Knowledge base: sources, index, retrieval and citations"
 [dependencies]
 steve-store = { path = "../steve-store" }
 steve-modules = { path = "../steve-modules" }
-# the paste guard behind `TokenGuard`
-steve-vault = { path = "../steve-vault" }
 steve-i18n = { path = "../steve-i18n" }
 # the scan patterns (`steve_node_api::glob`), shared with the Node that scans
 steve-node-api = { path = "../steve-node-api" }

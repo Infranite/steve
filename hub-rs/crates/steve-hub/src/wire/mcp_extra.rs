@@ -1,6 +1,8 @@
 //! The modules' MCP tools served next to steve-mcp's Steve tools without changing steve-mcp: contacts
 //! (P3), knowledge (K3/K4), the vault's secret tools (V4), GitHub (G4), mail (E5) and the flow's
-//! `steve_event_get` (S10). A tool that opened an approval marks the session as waiting, like
+//! `steve_event_get` (S10), and one tool per remote A2A agent the session's Bot uses
+//! (`steve_modules::caps::a2a`). A client outside Steve with a user's access token is answered by
+//! [`super::outside_mcp`] instead. A tool that opened an approval marks the session as waiting, like
 //! `steve_request_approval`: `tools/list` answers get the module's
 //! definitions appended, `tools/call` for those names is answered here with the session's [`McpCx`];
 //! everything else passes through untouched.
@@ -17,6 +19,8 @@ use steve_store::Store;
 
 #[derive(Clone)]
 pub struct Extra {
+    /// 能力: the remote agents a session's Bot uses, as tools.
+    pub caps: steve_modules::caps::Capabilities,
     pub store: Store,
     pub modules: Modules,
     pub ports: Ports,
@@ -41,6 +45,7 @@ enum Owner {
     Flow,
     ReplySource,
     Im,
+    A2a,
 }
 
 /// `steve_devices` (B7): the Nodes work can run on, with their tags; `require` sends this item's
@@ -162,6 +167,8 @@ fn owner_of(name: &str) -> Option<Owner> {
         Some(Owner::ReplySource)
     } else if steve_channels::im_mcp::handles(name) {
         Some(Owner::Im)
+    } else if name.starts_with(steve_modules::caps::a2a::TOOL_PREFIX) {
+        Some(Owner::A2a)
     } else {
         None
     }
@@ -173,7 +180,7 @@ fn extra_tools() -> Vec<Value> {
     v.push(super::diagnostics::tool());
     v.extend(super::item_mcp::tools());
     v.push(workflow_tool());
-    v.extend(steve_knowledge::tools::tools().iter().cloned());
+    v.extend(steve_knowledge::tools::all_tools().iter().cloned());
     v.push(steve_knowledge::candidates::remember_tool());
     v.extend(steve_modules::vault::mcp::tools().iter().cloned());
     v.extend(steve_github::mcp::tools().iter().cloned());
@@ -189,7 +196,7 @@ fn extra_tools() -> Vec<Value> {
 fn workflow_tool() -> Value {
     json!({
         "name": "steve_workflow",
-        "description": "Read or replan this item's shared work graph. Only the parent item's responsible Bot may change the graph; child Bots can read their own work and upstream deliveries, deliver success through steve_deliver, or report a failure / rejected review with action fail and reason, then end their turn. Plan work, independent review and integration units; dependencies must pass before successors run. Graph changes require the latest expected_revision and a reason. A new graph starts at revision 0. A plan replaces the active specification; preserve existing unit IDs for unchanged work. Cancelling units does not waive required acceptance. Only the user can explicitly switch to single-session acceptance on the item page after pausing; Bot tokens cannot approve it. Do not transfer credentials or permissions between Bots.",
+        "description": "Read or replan this item's shared work graph. Only the parent item's responsible Bot may change the graph; child Bots can read their own work and upstream deliveries, deliver success through steve_deliver, or report a failure / rejected review with action fail and reason, then end their turn. A work graph exists to finish sooner: plan units that can run at the same time (split by independent scope, not by phase), plus an independent review and an integration unit. Dependencies must pass before successors run, and units sharing a resource key never run together, so keep keys fine-grained. Every ready unit runs unless max_parallel limits it; set it only for a real constraint. A plan reply may carry notes on what keeps its units from running at once. Graph changes require the latest expected_revision and a reason. A new graph starts at revision 0. A plan replaces the active specification; preserve existing unit IDs for unchanged work. Cancelling units does not waive required acceptance. Only the user can explicitly switch to single-session acceptance on the item page after pausing; Bot tokens cannot approve it. Do not transfer credentials or permissions between Bots.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -197,7 +204,7 @@ fn workflow_tool() -> Value {
                 "expected_revision": {"type": "integer", "minimum": 0},
                 "reason": {"type": "string", "minLength": 1},
                 "unit_id": {"type": "string"},
-                "max_parallel": {"type": "integer", "minimum": 1},
+                "max_parallel": {"type": "integer", "minimum": 1, "description": "Leave out: every ready unit whose resources are free runs. Set only for a real limit such as a shared device or a rate limit."},
                 "max_attempts": {"type": "integer", "minimum": 1},
                 "units": {
                     "type": "array",
@@ -206,7 +213,7 @@ fn workflow_tool() -> Value {
                         "properties": {
                             "id": {"type": "string", "minLength": 1},
                             "title": {"type": "string", "minLength": 1},
-                            "goal": {"type": "string", "minLength": 1},
+                            "goal": {"type": "string", "minLength": 1, "description": "The unit's brief as short Markdown people read on the item page: one sentence on what this unit delivers, then bullet sections **要做**, **验收**, and only if needed **上游** (which upstream results to use) and **约束**. Each bullet one line; no walls of text, logs or long file lists (put details in the conversation or upstream outputs)."},
                             "bot_id": {"type": "string", "minLength": 1},
                             "kind": {"type": "string", "enum": ["work", "review", "integrate"]},
                             "depends_on": {"type": "array", "items": {"type": "string"}},
@@ -290,6 +297,41 @@ pub async fn layer(State(x): State<Extra>, req: Request, next: Next) -> Response
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
         .map(str::to_string);
+    /* a user's access token: a client outside Steve, only the tools that need no session */
+    if let Some(t) = bearer
+        .clone()
+        .filter(|t| t.starts_with(steve_store::access::TOKEN_PREFIX))
+    {
+        let ws = parts
+            .headers
+            .get("x-steve-ws")
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string)
+            .or_else(|| {
+                parts.uri.query().and_then(|q| {
+                    q.split('&')
+                        .find_map(|kv| kv.strip_prefix("ws="))
+                        .map(str::to_string)
+                })
+            });
+        let store = x.store.clone();
+        let who = tokio::task::spawn_blocking(move || {
+            super::outside_mcp::identify(&store, &t, ws.as_deref())
+        })
+        .await
+        .ok()
+        .flatten();
+        let Some(who) = who else {
+            return StatusCode::UNAUTHORIZED.into_response();
+        };
+        if parts.method != axum::http::Method::POST {
+            return StatusCode::METHOD_NOT_ALLOWED.into_response();
+        }
+        let Some(m) = msg.clone() else {
+            return StatusCode::BAD_REQUEST.into_response();
+        };
+        return super::outside_mcp::handle(&x, who, m).await;
+    }
     if let Some(t) = bearer.clone() {
         let store = x.store.clone();
         let run =
@@ -379,8 +421,30 @@ pub async fn layer(State(x): State<Extra>, req: Request, next: Next) -> Response
     let Ok(mut v) = serde_json::from_slice::<Value>(&out) else {
         return Response::from_parts(rp, Body::from(out));
     };
+    // the remote agents of the session's Bot
+    let session_tools = match bearer {
+        Some(t) => {
+            let store = x.store.clone();
+            let session =
+                tokio::task::spawn_blocking(move || store.sessions().by_token(&t).ok().flatten())
+                    .await
+                    .ok()
+                    .flatten();
+            match session {
+                Some(s) => {
+                    let caps = x.caps.clone();
+                    tokio::task::spawn_blocking(move || caps.a2a_tools(&s.id))
+                        .await
+                        .unwrap_or_default()
+                }
+                None => vec![],
+            }
+        }
+        None => vec![],
+    };
     if let Some(tools) = v.pointer_mut("/result/tools").and_then(Value::as_array_mut) {
         tools.extend(extra_tools());
+        tools.extend(session_tools);
     }
     rp.headers.remove(header::CONTENT_LENGTH);
     Response::from_parts(rp, Body::from(v.to_string()))
@@ -443,6 +507,9 @@ async fn call_owned_inner(
         .await
         .map_err(|e| e.to_string())?;
     }
+    if matches!(tool_owner, Owner::A2a) {
+        return x.caps.a2a_call(&s.id, name, &args).await;
+    }
     let store = x.store.clone();
     let ws = s.workspace_id.clone();
     let user = tokio::task::spawn_blocking(move || owner(&store, &ws))
@@ -461,6 +528,7 @@ async fn call_owned_inner(
         Owner::Diagnostics => unreachable!("diagnostics preserve the session above"),
         Owner::Items => unreachable!("item management preserves the session above"),
         Owner::Workflow => unreachable!("workflow preserves the session above"),
+        Owner::A2a => unreachable!("remote agents are answered above"),
         Owner::Upgrade => {
             let ws = cx.ws.clone();
             let store = x.store.clone();
@@ -523,9 +591,9 @@ async fn call_owned_inner(
                 .map_err(|e| e.to_string()),
         },
         Owner::Remember => {
-            let (m, kb) = (x.modules.clone(), x.kb.clone());
+            let m = x.modules.clone();
             tokio::task::spawn_blocking(move || {
-                steve_knowledge::candidates::remember(&m, &kb, &cx, &args)
+                steve_knowledge::candidates::remember(&m, &cx, &args)
             })
             .await
             .unwrap_or_else(|e| Err(e.to_string()))
@@ -548,4 +616,12 @@ pub(crate) async fn call_module(
 /// The modules' tool definitions (what `tools/list` adds).
 pub(crate) fn module_tools() -> Vec<Value> {
     extra_tools()
+}
+
+/// The tools only some sessions have: one per remote agent its Bot uses.
+pub(crate) async fn session_tools(x: &Extra, session: &str) -> Vec<Value> {
+    let (caps, session) = (x.caps.clone(), session.to_string());
+    tokio::task::spawn_blocking(move || caps.a2a_tools(&session))
+        .await
+        .unwrap_or_default()
 }

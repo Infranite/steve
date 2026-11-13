@@ -3,8 +3,10 @@
  * Hub's ttl (30 s), on unmount, and when the tab is hidden. It is never logged. */
 import { useCallback, useEffect, useRef, useState } from "react"
 import { FingerprintIcon } from "lucide-react"
+import { cn } from "cn"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
+import { TextField } from "@/components/ui/input"
 import { Spinner } from "@/components/ui/spinner"
 import { AlertDialog, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog"
 import { api } from "@/api"
@@ -34,15 +36,19 @@ export async function registerPasskey(name: string): Promise<"ok" | "stale" | "f
 /** registration wants a fresh login: sign out, and the login screen brings the user back to this page */
 export const relogin = async () => { await api.logout().catch(() => {}); location.reload() }
 
-export function RegisterPasskey({ onDone, compact }: { onDone: () => void; compact?: boolean }) {
+/** `row`: as the last row of a panel (the name field takes the width, the button trails) */
+export function RegisterPasskey({ onDone, compact, row }: { onDone: () => void; compact?: boolean; row?: boolean }) {
   const t = useT()
   const [n, setN] = useState(deviceName()), [busy, setBusy] = useState(false), [stale, setStale] = useState(false)
-  if (!webauthnAvailable()) return <div className="type-callout text-muted-foreground">{t("vault:passkey.unavailable")}</div>
-  if (stale) return <div className="flex flex-col gap-2" role="alert"><div className="type-callout">{t("vault:passkey.stale")}</div><Button size="sm" className="self-start" onClick={() => void relogin()} data-relogin>{t("vault:passkey.relogin")}</Button></div>
+  if (!webauthnAvailable()) return <div className={cn("type-callout text-muted-foreground", row && "px-3 py-2.5")}>{t("vault:passkey.unavailable")}</div>
+  if (stale) return <div className="flex flex-col gap-2 rounded-xl bg-attention/12 px-4 py-3" role="alert"><div className="type-callout">{t("vault:passkey.stale")}</div><Button size="sm" className="self-start" onClick={() => void relogin()} data-relogin>{t("vault:passkey.relogin")}</Button></div>
   return (
-    <form className="flex flex-wrap items-center gap-2" onSubmit={async (e) => { e.preventDefault(); setBusy(true); const r = await registerPasskey(n.trim() || deviceName()); setBusy(false); if (r === "stale") setStale(true); if (r === "ok") onDone() }}>
-      <Input aria-label={t("vault:passkey.name")} className={compact ? "h-8 w-40 rounded-lg" : "h-8 w-48 rounded-lg"} maxLength={60} value={n} onChange={(e) => setN(e.target.value)} data-passkey-name />
-      <Button size="sm" type="submit" disabled={busy} data-register-passkey>{busy ? <Spinner /> : <FingerprintIcon />}{t("vault:passkey.register")}</Button>
+    <form className={row ? "flex min-w-0 items-center gap-2 px-3 py-2.5" : "flex flex-wrap items-center gap-2"} onSubmit={async (e) => { e.preventDefault(); setBusy(true); const r = await registerPasskey(n.trim() || deviceName()); setBusy(false); if (r === "stale") setStale(true); if (r === "ok") onDone() }}>
+      {/* as a settings row it matches the recovery-code field under it (affectUI Text Field); in the reveal dialog it
+       *  keeps the dialog's own input */}
+      {row ? <TextField size="sm" className="min-w-0 flex-1" aria-label={t("vault:passkey.name")} maxLength={60} value={n} onChange={(e) => setN(e.target.value)} data-passkey-name />
+        : <Input aria-label={t("vault:passkey.name")} className={compact ? "h-8 w-40" : "h-8 w-48"} maxLength={60} value={n} onChange={(e) => setN(e.target.value)} data-passkey-name />}
+      <Button size="sm" variant={row ? "outline" : "default"} type="submit" disabled={busy} data-register-passkey>{busy ? <Spinner /> : <FingerprintIcon />}{t("vault:passkey.register")}</Button>
     </form>
   )
 }

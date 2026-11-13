@@ -14,15 +14,15 @@ export function BasisView({ b }: { b: B | null }) {
   const summary = [t("channels:basis.title"), t("channels:basis.entries", { count: b.entries.length }), b.rewrites.length ? t("channels:basis.rewrites", { count: b.rewrites.length }) : "", b.verdict === "drafted" ? t("channels:basis.drafted") : ""].filter(Boolean).join(" · ")
   return (
     <Collapsible>
-      <CollapsibleTrigger className="mt-1 inline-flex items-center gap-1 rounded type-footnote text-muted-foreground hover:text-foreground focus-visible:outline-2 focus-visible:outline-ring" data-basis>
+      <CollapsibleTrigger className="mt-1 inline-flex items-center gap-1 rounded-md type-footnote text-muted-foreground hover:text-foreground focus-visible:outline-2 focus-visible:outline-ring" data-basis>
         <ShieldCheckIcon className="size-3.5" aria-hidden />{summary}</CollapsibleTrigger>
-      <CollapsibleContent className="mt-2 flex flex-col gap-1.5 rounded-lg bg-muted/60 px-3 py-2.5" data-basis-body>
+      <CollapsibleContent data-basis-body><div className="pt-2"><div className="flex flex-col gap-1.5 rounded-lg bg-background/70 px-3 py-2.5">
         {b.entries.map((x, n) => { const [out, dot] = OUT_LABEL[x.out] ?? [x.out, "idle"]; return (
           <div key={n} className="flex items-start gap-2 type-footnote"><StatusDot s={dot} className="mt-1" />
             <div className="min-w-0 flex-1"><div className="break-words text-foreground">{x.used}</div><div className="text-muted-foreground">{x.source_label} · {x.effective !== x.level ? t("channels:basis.levelChanged", { level: LEVEL[x.effective]?.[0] ?? x.effective, from: LEVEL[x.level]?.[0] ?? x.level }) : LEVEL[x.effective]?.[0] ?? x.effective} · {out}</div></div></div>) })}
         {b.rewrites.map((r, n) => <div key={"r" + n} className="flex items-start gap-2 border-t pt-1.5 type-footnote text-muted-foreground"><EyeOffIcon className="mt-0.5 size-3.5 shrink-0" aria-hidden /><span>{t("channels:basis.rewrite", { from: r.from, to: r.to, reason: r.reason })}</span></div>)}
         <div className="type-footnote text-tertiary">{t("channels:basis.onlyYou")}</div>
-      </CollapsibleContent>
+      </div></div></CollapsibleContent>
     </Collapsible>
   )
 }

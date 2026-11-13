@@ -27,7 +27,7 @@ use steve_flow::nodes::action::Action;
 use steve_flow::runs::RunRow;
 use steve_flow::testkit::FakeCore;
 use steve_flow::{FlowCx, FlowSetup, LinearExecutor, NodeOutcome, RunCx};
-use steve_knowledge::{Knowledge, NoGuard};
+use steve_knowledge::Knowledge;
 use steve_modules::accounts::connections::{self, Connections, ConnectionsConfig};
 use steve_modules::accounts::repo::{self as arepo, NewAccount};
 use steve_modules::accounts::service::ensure_seeds;
@@ -269,8 +269,7 @@ async fn setup() -> H {
     late.set(&ch);
     let api = api::routes(ch.clone()).with_state(env.modules.clone());
     let people = contacts::routes(Ports::default()).with_state(env.modules.clone());
-    let kb = steve_knowledge::routes(Knowledge::new(Arc::new(NoGuard), |_| {}))
-        .with_state(env.modules.clone());
+    let kb = steve_knowledge::routes(Knowledge::new(|_| {})).with_state(env.modules.clone());
 
     let (me, _) =
         FakeChannel::seed_connection(env.store(), &caller(WS, ME), Some("upx")).expect("you");

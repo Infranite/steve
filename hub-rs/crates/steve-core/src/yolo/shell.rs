@@ -347,25 +347,377 @@ fn heredoc_bodies(b: &mut Builder, cs: &[char], mut i: usize) -> Result<usize, P
     Ok(i.min(cs.len()))
 }
 
-/// Shell keywords and wrappers that run the rest of the words as a command.
+/// Shell keywords that run the rest of the words as a command.
 const KEYWORDS: &[&str] = &[
-    "if", "then", "else", "elif", "fi", "do", "done", "while", "until", "!", "{", "}", "time",
+    "if", "then", "else", "elif", "fi", "do", "done", "while", "until", "!", "{", "}",
 ];
 
 /// The command a simple command really runs: leading `VAR=value` assignments, keywords and wrappers
 /// (`env`, `sudo`, `nohup`, `nice`, `timeout`, `command`, `exec`, `xargs`…) removed, the program reduced
-/// to its file name. `None` when only assignments remain.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// to its file name. `None` when only assignments remain, or a wrapper other than `sudo`/`doas` is
+/// left without a command.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Argv {
     pub program: String,
     pub args: Vec<String>,
-    /// Ran through `sudo`/`doas`.
+    /// Ran through `sudo`/`doas`; alone (`sudo -i`, `sudo -s`) they are the program: a root shell.
     pub sudo: bool,
     /// Ran through `xargs`: more arguments come from standard input.
     pub xargs: bool,
+    /// A wrapper whose words could not be read (an option it is not known to take, an `env -S`
+    /// string that is more than words): where its command starts, and so what runs, is not known.
+    /// `program` and `args` are then that wrapper's.
+    pub unclear: Option<String>,
 }
 
-fn is_assignment(w: &str) -> bool {
+/// How a wrapper takes its options before the command it runs. Its command starts after them (and
+/// after `lead` more words); an option not listed here leaves that start unknown
+/// ([`Argv::unclear`]) rather than guessed.
+pub(crate) struct Wrapper {
+    pub names: &'static [&'static str],
+    /// Short options without a value.
+    pub flags: &'static str,
+    /// Short options with a value, attached (`-n5`) or the next word.
+    pub valued: &'static str,
+    /// Short options whose value can only be attached (`xargs -i{}`).
+    pub attached: &'static str,
+    /// Long options without a separate value (`--x` or `--x=v`), and with one (`--x v` or `--x=v`).
+    pub long_flags: &'static [&'static str],
+    pub long_valued: &'static [&'static str],
+    /// `-5` is an option (nice's old form).
+    pub numeric: bool,
+    /// Words between the options and the command (`timeout`'s duration, `taskset`'s mask).
+    pub lead: usize,
+}
+
+pub(crate) const NO_LONG: &[&str] = &[];
+pub(crate) const HELP: &[&str] = &["--help", "--version"];
+
+/// The wrappers [`argv`] sees through, as GNU and BSD document them.
+const WRAPPERS: &[Wrapper] = &[
+    Wrapper {
+        names: &["env"],
+        flags: "i0v",
+        valued: "uCSP",
+        attached: "",
+        long_flags: &[
+            "--ignore-environment",
+            "--null",
+            "--debug",
+            "--list-signal-handling",
+            "--block-signal",
+            "--default-signal",
+            "--ignore-signal",
+            "--help",
+            "--version",
+        ],
+        long_valued: &["--unset", "--chdir", "--split-string"],
+        numeric: false,
+        lead: 0,
+    },
+    Wrapper {
+        names: &["sudo"],
+        flags: "AbEeHiKklnPSsVvBN",
+        valued: "CDghpRrTtUu",
+        attached: "",
+        long_flags: &[
+            "--askpass",
+            "--background",
+            "--bell",
+            "--preserve-env",
+            "--edit",
+            "--set-home",
+            "--login",
+            "--remove-timestamp",
+            "--reset-timestamp",
+            "--list",
+            "--non-interactive",
+            "--preserve-groups",
+            "--stdin",
+            "--shell",
+            "--validate",
+            "--help",
+            "--version",
+        ],
+        long_valued: &[
+            "--close-from",
+            "--chdir",
+            "--group",
+            "--host",
+            "--prompt",
+            "--chroot",
+            "--role",
+            "--type",
+            "--command-timeout",
+            "--other-user",
+            "--user",
+        ],
+        numeric: false,
+        lead: 0,
+    },
+    Wrapper {
+        names: &["doas"],
+        flags: "nsL",
+        valued: "Cu",
+        attached: "",
+        long_flags: NO_LONG,
+        long_valued: NO_LONG,
+        numeric: false,
+        lead: 0,
+    },
+    Wrapper {
+        names: &["nohup", "builtin"],
+        flags: "",
+        valued: "",
+        attached: "",
+        long_flags: HELP,
+        long_valued: NO_LONG,
+        numeric: false,
+        lead: 0,
+    },
+    Wrapper {
+        names: &["command"],
+        flags: "pvV",
+        valued: "",
+        attached: "",
+        long_flags: NO_LONG,
+        long_valued: NO_LONG,
+        numeric: false,
+        lead: 0,
+    },
+    Wrapper {
+        names: &["exec"],
+        flags: "cl",
+        valued: "a",
+        attached: "",
+        long_flags: NO_LONG,
+        long_valued: NO_LONG,
+        numeric: false,
+        lead: 0,
+    },
+    Wrapper {
+        names: &["caffeinate"],
+        flags: "dimsu",
+        valued: "tw",
+        attached: "",
+        long_flags: NO_LONG,
+        long_valued: NO_LONG,
+        numeric: false,
+        lead: 0,
+    },
+    Wrapper {
+        names: &["stdbuf"],
+        flags: "",
+        valued: "ioe",
+        attached: "",
+        long_flags: HELP,
+        long_valued: &["--input", "--output", "--error"],
+        numeric: false,
+        lead: 0,
+    },
+    Wrapper {
+        names: &["unbuffer"],
+        flags: "p",
+        valued: "",
+        attached: "",
+        long_flags: NO_LONG,
+        long_valued: NO_LONG,
+        numeric: false,
+        lead: 0,
+    },
+    Wrapper {
+        names: &["chronic"],
+        flags: "ev",
+        valued: "",
+        attached: "",
+        long_flags: NO_LONG,
+        long_valued: NO_LONG,
+        numeric: false,
+        lead: 0,
+    },
+    Wrapper {
+        names: &["ionice"],
+        flags: "t",
+        valued: "cnpPu",
+        attached: "",
+        long_flags: &["--ignore", "--help", "--version"],
+        long_valued: &["--class", "--classdata", "--pid", "--pgid", "--uid"],
+        numeric: false,
+        lead: 0,
+    },
+    Wrapper {
+        names: &["taskset"],
+        flags: "acp",
+        valued: "",
+        attached: "",
+        long_flags: &["--all-tasks", "--cpu-list", "--pid", "--help", "--version"],
+        long_valued: NO_LONG,
+        numeric: false,
+        lead: 1,
+    },
+    Wrapper {
+        names: &["nice"],
+        flags: "",
+        valued: "n",
+        attached: "",
+        long_flags: HELP,
+        long_valued: &["--adjustment"],
+        numeric: true,
+        lead: 0,
+    },
+    Wrapper {
+        names: &["timeout", "gtimeout"],
+        flags: "v",
+        valued: "sk",
+        attached: "",
+        long_flags: &[
+            "--preserve-status",
+            "--foreground",
+            "--verbose",
+            "--help",
+            "--version",
+        ],
+        long_valued: &["--signal", "--kill-after"],
+        numeric: false,
+        lead: 1,
+    },
+    Wrapper {
+        names: &["xargs"],
+        flags: "0oprtx",
+        valued: "adEILnPsJRS",
+        attached: "eil",
+        long_flags: &[
+            "--null",
+            "--open-tty",
+            "--interactive",
+            "--no-run-if-empty",
+            "--verbose",
+            "--exit",
+            "--show-limits",
+            "--replace",
+            "--eof",
+            "--help",
+            "--version",
+        ],
+        long_valued: &[
+            "--arg-file",
+            "--delimiter",
+            "--max-lines",
+            "--max-args",
+            "--max-procs",
+            "--max-chars",
+            "--process-slot-var",
+        ],
+        numeric: false,
+        lead: 0,
+    },
+    // bash's keyword and the program (GNU's and BSD's)
+    Wrapper {
+        names: &["time"],
+        flags: "palvhqV",
+        valued: "fo",
+        attached: "",
+        long_flags: &[
+            "--portability",
+            "--verbose",
+            "--append",
+            "--quiet",
+            "--help",
+            "--version",
+        ],
+        long_valued: &["--format", "--output"],
+        numeric: false,
+        lead: 0,
+    },
+];
+
+/// An option as read: its name (`-S`, `--split-string`) and value.
+pub(crate) type Opt = (String, Option<String>);
+
+/// `w`'s options from `words[i]` on: the index after them, and the options; or why they cannot be
+/// read.
+pub(crate) fn options(
+    w: &Wrapper,
+    words: &[String],
+    mut i: usize,
+) -> Result<(usize, Vec<Opt>), String> {
+    let name = w.names[0];
+    let mut out = Vec::new();
+    while let Some(o) = words.get(i) {
+        if o == "--" {
+            i += 1;
+            break;
+        }
+        if !o.starts_with('-') || o == "-" {
+            break;
+        }
+        if let Some(long) = o.strip_prefix("--") {
+            let (n, v) = match long.split_once('=') {
+                Some((n, v)) => (format!("--{n}"), Some(v.to_string())),
+                None => (o.clone(), None),
+            };
+            if w.long_valued.contains(&n.as_str()) && v.is_none() {
+                out.push((n, words.get(i + 1).cloned()));
+                i += 2;
+            } else if w.long_valued.contains(&n.as_str()) || w.long_flags.contains(&n.as_str()) {
+                out.push((n, v));
+                i += 1;
+            } else {
+                return Err(format!("{name} 的选项 {o} 不认识"));
+            }
+            continue;
+        }
+        let cs: Vec<char> = o[1..].chars().collect();
+        if w.numeric && cs.iter().all(char::is_ascii_digit) {
+            out.push(("-n".into(), Some(o[1..].to_string())));
+            i += 1;
+            continue;
+        }
+        let mut step = 1;
+        for (j, &c) in cs.iter().enumerate() {
+            let rest: String = cs[j + 1..].iter().collect();
+            if w.valued.contains(c) {
+                if rest.is_empty() {
+                    out.push((format!("-{c}"), words.get(i + 1).cloned()));
+                    step = 2;
+                } else {
+                    out.push((format!("-{c}"), Some(rest)));
+                }
+                break;
+            }
+            if w.attached.contains(c) {
+                out.push((format!("-{c}"), (!rest.is_empty()).then_some(rest)));
+                break;
+            }
+            if !w.flags.contains(c) {
+                return Err(format!("{name} 的选项 {o} 不认识"));
+            }
+            out.push((format!("-{c}"), None));
+        }
+        i += step;
+    }
+    Ok((i, out))
+}
+
+/// The words of `env -S`'s string; `None` when it is more than words (an operator, a redirection,
+/// command substitution): env would not read those the way a shell does.
+fn split_string(s: &str) -> Option<Vec<String>> {
+    // env's own escapes (`\_` is a space, `\c` ends it) and `${VAR}` are not a shell's
+    if s.contains(['\\', '$']) {
+        return None;
+    }
+    let p = parse(s).ok()?;
+    if !p.opaque.is_empty() || p.cmds.len() > 1 {
+        return None;
+    }
+    match p.cmds.into_iter().next() {
+        None => Some(Vec::new()),
+        Some(c) if c.writes.is_empty() && c.stdin.is_none() => Some(c.words),
+        Some(_) => None,
+    }
+}
+
+pub(crate) fn is_assignment(w: &str) -> bool {
     match w.split_once('=') {
         Some((k, _)) => {
             !k.is_empty()
@@ -381,80 +733,73 @@ pub fn basename(p: &str) -> &str {
 }
 
 pub fn argv(words: &[String]) -> Option<Argv> {
+    let mut words = words.to_vec();
     let mut sudo = false;
     let mut xargs = false;
     let mut i = 0;
     loop {
-        let w = words.get(i)?;
+        let Some(w) = words.get(i) else {
+            // `sudo -i`, `sudo -s`, `sudo`: a root shell
+            return sudo.then(|| Argv {
+                program: "sudo".into(),
+                sudo,
+                xargs,
+                ..Default::default()
+            });
+        };
         if KEYWORDS.contains(&w.as_str()) || is_assignment(w) {
             i += 1;
             continue;
         }
-        let prog = basename(w);
-        // wrappers and the options they take before the command
-        let skip_opts = |i: &mut usize, with_value: &[&str]| {
-            *i += 1;
-            while let Some(o) = words.get(*i) {
-                if o == "--" {
-                    *i += 1;
-                    break;
-                }
-                if !o.starts_with('-') || o == "-" {
-                    break;
-                }
-                *i += if with_value.contains(&o.as_str()) {
-                    2
-                } else {
-                    1
-                };
-            }
+        let prog = basename(w).to_string();
+        // this word as the program, with what the wrappers before it said
+        let (was_sudo, was_xargs, name) = (sudo, xargs, prog.clone());
+        let here = move |words: &[String], unclear: Option<String>| Argv {
+            program: name,
+            args: words[i + 1..].to_vec(),
+            sudo: was_sudo,
+            xargs: was_xargs,
+            unclear,
         };
-        match prog {
-            "env" => {
-                skip_opts(&mut i, &["-u", "-C", "-S", "--unset", "--chdir"]);
-                continue;
-            }
-            "sudo" | "doas" => {
-                sudo = true;
-                skip_opts(
-                    &mut i,
-                    &["-u", "-g", "-C", "-D", "-h", "-p", "-r", "-t", "-U"],
-                );
-                continue;
-            }
-            "nohup" | "command" | "builtin" | "exec" | "caffeinate" | "stdbuf" | "unbuffer"
-            | "chronic" | "ionice" | "taskset" => {
-                skip_opts(&mut i, &["-n", "-c", "-w", "-i", "-o", "-e"]);
-                continue;
-            }
-            "nice" => {
-                skip_opts(&mut i, &["-n"]);
-                continue;
-            }
-            "timeout" | "gtimeout" => {
-                skip_opts(&mut i, &["-s", "-k", "--signal", "--kill-after"]);
-                // the duration
-                i += 1;
-                continue;
-            }
-            "xargs" => {
-                xargs = true;
-                skip_opts(
-                    &mut i,
-                    &[
-                        "-I", "-L", "-n", "-P", "-s", "-d", "-E", "-a", "-J", "-R", "-S",
-                    ],
-                );
-                continue;
+        let Some(spec) = WRAPPERS.iter().find(|s| s.names.contains(&prog.as_str())) else {
+            return Some(here(&words, None));
+        };
+        let (next, opts) = match options(spec, &words, i + 1) {
+            Ok(x) => x,
+            Err(why) => return Some(here(&words, Some(why))),
+        };
+        let has = |names: &[&str]| opts.iter().any(|(o, _)| names.contains(&o.as_str()));
+        match prog.as_str() {
+            "sudo" | "doas" => sudo = true,
+            "xargs" => xargs = true,
+            // these look a command up, or act on processes that already run: they run nothing
+            "command" if has(&["-v", "-V"]) => return Some(here(&words, None)),
+            "taskset" if has(&["-p", "--pid"]) => return Some(here(&words, None)),
+            "ionice" if has(&["-p", "-P", "-u", "--pid", "--pgid", "--uid"]) => {
+                return Some(here(&words, None));
             }
             _ => {}
         }
-        return Some(Argv {
-            program: prog.to_string(),
-            args: words[i + 1..].to_vec(),
-            sudo,
-            xargs,
-        });
+        // `env -S 'a b'` runs the words of its string, then the rest
+        if let Some((_, v)) = opts
+            .iter()
+            .find(|(o, _)| o == "-S" || o == "--split-string")
+        {
+            match v.as_deref().and_then(split_string) {
+                Some(split) => {
+                    let at = next.min(words.len());
+                    words.splice(at..at, split);
+                }
+                None => {
+                    return Some(here(&words, Some("env -S 的字符串看不清是哪些词".into())));
+                }
+            }
+        }
+        i = next + spec.lead;
+        // `env -`: a lone dash is `-i`, not the command
+        if prog == "env" && words.get(i).is_some_and(|w| w == "-") {
+            i += 1;
+        }
     }
 }
 
@@ -578,6 +923,62 @@ mod tests {
         assert!(x.xargs && x.program == "rm");
         assert_eq!(a("then git push").program, "git");
         assert!(argv(&["A=1".to_string()]).is_none());
+    }
+
+    /// ST-26: wrappers are read by their documented options, never by guessing where their command
+    /// starts; an option not listed leaves it unknown.
+    #[test]
+    fn wrappers_are_read_by_their_options() {
+        let a = |s: &str| argv(&parse(s).unwrap().cmds[0].words).unwrap();
+        let pa = |s: &str| {
+            let x = a(s);
+            (x.program, x.args, x.sudo, x.unclear.is_some())
+        };
+        let v = |w: &[&str]| w.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(pa("caffeinate -i pkill -f node").0, "pkill");
+        assert_eq!(pa("caffeinate -t 5 pkill -f node").0, "pkill");
+        assert_eq!(pa("time -p pkill -f node").0, "pkill");
+        assert_eq!(pa("taskset 0x1 pkill node").0, "pkill");
+        assert_eq!(
+            pa("taskset -p 0x1 4242").0,
+            "taskset",
+            "acts on a pid, runs nothing"
+        );
+        assert_eq!(pa("nice -5 make").0, "make");
+        assert_eq!(pa("nice -n5 make").0, "make");
+        assert_eq!(pa("timeout --preserve-status -s KILL 5 make").0, "make");
+        assert_eq!(pa("stdbuf -oL make").0, "make");
+        assert_eq!(pa("xargs -I{} -n 1 rm {}").0, "rm");
+        assert_eq!(pa("xargs -i{} rm {}").0, "rm");
+        assert_eq!(
+            pa("command -v pkill").0,
+            "command",
+            "looks it up, runs nothing"
+        );
+        assert_eq!(pa("command pkill").0, "pkill");
+        // env -S splits its string into the command
+        assert_eq!(
+            pa("env -S 'git push origin' HEAD"),
+            ("git".into(), v(&["push", "origin", "HEAD"]), false, false)
+        );
+        assert_eq!(pa("env -i -S'bash -s'").0, "bash");
+        assert_eq!(pa("env - pkill -f node").0, "pkill");
+        assert_eq!(pa("env --split-string='a b'").1, v(&["b"]));
+        assert!(pa("env -S 'a; b'").3, "more than words");
+        // a root shell without a command is sudo itself
+        for s in ["sudo -i", "sudo -s", "sudo", "sudo -u x -i", "doas -s"] {
+            assert_eq!(pa(s), ("sudo".into(), vec![], true, false), "{s}");
+        }
+        // an option a wrapper is not known to take: where its command starts is not known
+        for s in [
+            "env --frobnicate pkill",
+            "nohup -x pkill",
+            "timeout --frob 5 pkill",
+        ] {
+            let x = pa(s);
+            assert!(x.3, "{s}: {x:?}");
+            assert_ne!(x.0, "pkill", "{s}");
+        }
     }
 
     #[test]

@@ -46,6 +46,26 @@ pub const GITHUB_TYPES: &[EventTypeDef] = &[
     EventTypeDef::new("github.issue_opened", "新 Issue", "仓库里开了新 Issue"),
 ];
 
+/// The labels and descriptions of [`GITHUB_TYPES`] in every language (zh-CN: as declared there).
+const GITHUB_TYPE_KEYS: &[&str] = &[
+    "hub.github_type.check_failed",
+    "hub.github_type.check_failed_desc",
+    "hub.github_type.check_passed",
+    "hub.github_type.check_passed_desc",
+    "hub.github_type.review_requested",
+    "hub.github_type.review_requested_desc",
+    "hub.github_type.review",
+    "hub.github_type.review_desc",
+    "hub.github_type.pr_comment",
+    "hub.github_type.pr_comment_desc",
+    "hub.github_type.pr_merged",
+    "hub.github_type.pr_merged_desc",
+    "hub.github_type.pr_closed",
+    "hub.github_type.pr_closed_desc",
+    "hub.github_type.issue_opened",
+    "hub.github_type.issue_opened_desc",
+];
+
 /// A GitHub connection provider as an S1 event source: the same provider (all connection calls
 /// delegate to it) plus the `github` source and its types. Events come from G2 through
 /// [`GhSink`], never from S1's poller or `parse_push`: `Push` mode keeps the poller away, and PAT
@@ -62,6 +82,11 @@ impl ConnectionProvider for GithubSource {
     }
     fn name(&self) -> &str {
         self.0.name()
+    }
+    fn localize(&self, text: &str) -> Option<String> {
+        self.0
+            .localize(text)
+            .or_else(|| steve_i18n::reword!(text, GITHUB_TYPE_KEYS))
     }
     fn caps(&self) -> &[&'static str] {
         self.0.caps()
@@ -331,5 +356,42 @@ async fn hook(State(h): State<Hooks>, Path(id): Path<String>, req: Request) -> R
             tracing::warn!(connection = %id, "hook: {e}");
             empty(StatusCode::BAD_REQUEST)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use steve_modules::accounts::connections::shown;
+
+    /// The source page shows the GitHub types and the adapter's name in the reader's language.
+    #[test]
+    fn github_types_by_language() {
+        let src = GithubSource(Arc::new(steve_github::adapters::GitHubPat::default()));
+        let texts = || {
+            let mut out = vec![shown(&src, src.name())];
+            for t in GITHUB_TYPES {
+                out.push(shown(&src, t.label));
+                out.push(shown(&src, t.desc));
+            }
+            out
+        };
+        let en = steve_i18n::with(steve_i18n::EN, texts);
+        assert_eq!(en[0], "GitHub personal token");
+        assert_eq!(
+            en[1..3],
+            [
+                "Checks failed",
+                "Checks on a PR head or the default branch did not pass"
+            ]
+        );
+        assert!(
+            en.iter()
+                .all(|t| !t.chars().any(|c| ('\u{4e00}'..='\u{9fff}').contains(&c))),
+            "{en:?}"
+        );
+        let zh = steve_i18n::with(steve_i18n::ZH_CN, texts);
+        assert_eq!(zh[0], "GitHub 个人令牌");
+        assert_eq!(zh[1..3], [GITHUB_TYPES[0].label, GITHUB_TYPES[0].desc]);
     }
 }

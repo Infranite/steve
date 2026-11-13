@@ -742,12 +742,14 @@ impl Core {
     /// Below `low` but above the floor: nothing is refused yet; what Steve could give back it did.
     fn warn_low(&self, free: u64) -> Result<()> {
         let t = self.tx();
-        let text = format!(
-            "磁盘只剩 {}（提醒线 {}）：Steve 已回收已完成和闲置事项的构建缓存。低于 {} 时新事项将暂时不建工作区，可以在“设置 · 数据 · 工作区与磁盘”查看占用。",
-            human(free),
-            human(self.config().disk.low),
-            human(self.config().disk.floor)
-        );
+        let text = steve_i18n::stored(|| {
+            steve_i18n::t!(
+                "core.notice.disk_low",
+                free = human(free),
+                low = human(self.config().disk.low),
+                floor = human(self.config().disk.floor)
+            )
+        });
         for ws in t.db().workspace_ids()? {
             crate::notify::notify(t.db(), &ws, "disk", "info", &text, None)?;
         }
@@ -756,11 +758,13 @@ impl Core {
 
     fn warn_floor(&self, free: u64) -> Result<()> {
         let t = self.tx();
-        let text = format!(
-            "磁盘只剩 {}，低于开工下限 {}：Steve 已回收能回收的构建缓存，新事项暂时不会新建工作区。请清理磁盘，或在“设置 · 数据 · 工作区与磁盘”查看占用。",
-            human(free),
-            human(self.config().disk.floor)
-        );
+        let text = steve_i18n::stored(|| {
+            steve_i18n::t!(
+                "core.notice.disk_floor",
+                free = human(free),
+                floor = human(self.config().disk.floor)
+            )
+        });
         for ws in t.db().workspace_ids()? {
             crate::notify::notify(t.db(), &ws, "disk", "warn", &text, None)?;
         }

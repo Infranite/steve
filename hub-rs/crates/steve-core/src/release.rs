@@ -386,7 +386,13 @@ impl Tx<'_> {
             &ws,
             "release",
             "fail",
-            &format!("批准了发布，但没有发布：{reason}；{then}"),
+            &steve_i18n::stored(|| {
+                steve_i18n::t!(
+                    "core.notice.not_released_then",
+                    reason = reason,
+                    then = then
+                )
+            }),
             Some(item_id),
         )?;
         Ok(())
@@ -526,7 +532,9 @@ impl Tx<'_> {
                     &ws,
                     "release",
                     "fail",
-                    &format!("批准了发布，但没有发布：{reason}"),
+                    &steve_i18n::stored(|| {
+                        steve_i18n::t!("core.notice.not_released", reason = reason)
+                    }),
                     Some(item_id),
                 )?;
                 self.db()

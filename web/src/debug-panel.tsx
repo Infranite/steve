@@ -8,15 +8,19 @@ import { Spinner } from "@/components/ui/spinner"
 import { useT } from "@/i18n"
 import { clockDur, date, num } from "@/i18n/format"
 import { cn } from "cn"
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 
 const time = (at: number) => date(at, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", second: "2-digit" })
 const errorText = (error: unknown) => error instanceof Error ? error.message : String(error)
 const json = (value: unknown) => JSON.stringify(value, null, 2)
 
+
 export function ItemDebugDialog({ item, session, onClose }: { item: string; session?: string; onClose: () => void }) {
   const t = useT()
+  /* the dialog itself takes focus: a filter that grabs it opens with a focus ring nobody asked for */
+  const popup = useRef<HTMLDivElement>(null)
   return <Dialog open onOpenChange={(open) => !open && onClose()}>
-    <DialogContent className="flex max-h-[90dvh] flex-col gap-4 overflow-hidden p-4 sm:max-w-[900px] sm:p-6" data-debug-dialog>
+    <DialogContent ref={popup} initialFocus={popup} className="flex max-h-[90dvh] flex-col gap-4 overflow-hidden p-4 outline-none sm:max-w-[900px] sm:p-6" data-debug-dialog>
       <DialogHeader className="pr-10">
         <DialogTitle className="flex items-center gap-2"><BugIcon className="size-4 text-muted-foreground" />{t("views:debug.title", { item })}</DialogTitle>
         <DialogDescription>{t("views:debug.description")}</DialogDescription>
@@ -115,13 +119,14 @@ export function ItemDebugPanel({ item, session }: { item: string; session?: stri
   const coverage = page?.coverage ?? snapshot?.coverage
 
   return <div className="min-h-0 space-y-5 overflow-y-auto pr-1" data-debug-panel>
-    <section className="space-y-3 rounded-xl border p-3" data-debug-state>
+    <section className="space-y-3 rounded-xl bg-muted/60 p-4" data-debug-state>
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <h3 className="type-callout font-medium">{t("views:debug.current")}</h3>
+        <h3 className="type-headline">{t("views:debug.current")}</h3>
         <Button size="xs" variant="ghost" onClick={() => setRefresh((n) => n + 1)} disabled={snapshotLoading || changing} data-debug-refresh><RefreshCwIcon />{t("views:debug.refresh")}</Button>
       </div>
       {snapshotLoading && !snapshot && <p className="flex items-center gap-2 type-footnote text-muted-foreground"><Spinner className="size-3" />{t("views:debug.loading")}</p>}
-      {snapshotError && <p role="alert" className="break-words type-footnote text-destructive" data-debug-snapshot-error>{snapshotError}</p>}
+      {/* the same failure the event list reports (with its retry) is said once, there; here only the state is missing */}
+      {snapshotError && <p role={snapshotError === eventsError ? undefined : "alert"} className={cn("break-words type-footnote", snapshotError === eventsError ? "text-muted-foreground" : "text-destructive")} data-debug-snapshot-error>{snapshotError === eventsError ? t("views:debug.stateUnavailable") : snapshotError}</p>}
       {snapshot && <>
         <div className="flex flex-wrap gap-x-4 gap-y-1 type-footnote text-muted-foreground">
           <span>{t("views:debug.itemState", { status: snapshot.item.status })}</span>
@@ -129,16 +134,17 @@ export function ItemDebugPanel({ item, session }: { item: string; session?: stri
           <span>{t("views:debug.observed", { time: time(snapshot.observed_at) })}</span>
         </div>
         <CurrentBlockers snapshot={snapshot} />
-        <div className="flex flex-col items-start gap-3 border-t pt-3 sm:flex-row sm:items-center sm:justify-between">
+        <div className="flex flex-col items-start gap-3 border-t border-foreground/6 pt-3 sm:flex-row sm:items-center sm:justify-between">
           <div className="min-w-0 flex-1">
             <p className="type-callout" data-debug-capture-state>{capture?.active ? elapsed ? t("views:debug.expiryChecking") : t("views:debug.recording", { duration: clockDur(Math.max(0, (capture.expires_at ?? now) - now)) }) : t("views:debug.notRecording")}</p>
             <p className="mt-1 type-footnote text-muted-foreground">{t("views:debug.captureScope")}</p>
-            {capture?.stop_reason && <p className="mt-1 break-words font-mono text-xs text-muted-foreground">{t("views:debug.stopReason", { reason: capture.stop_reason })}</p>}
+            {capture?.stop_reason && <p className="mt-1 break-words type-footnote font-mono text-muted-foreground">{t("views:debug.stopReason", { reason: capture.stop_reason })}</p>}
           </div>
           {snapshot.can_capture ? <div className="flex items-center gap-2">
-            {!capture?.active && <select aria-label={t("views:debug.duration")} value={minutes} onChange={(event) => setMinutes(Number(event.target.value))} className="h-8 rounded-lg border bg-background px-2 type-footnote" disabled={changing} data-debug-minutes>
-              {[15, 30, 60].map((value) => <option key={value} value={value}>{t("views:debug.minutes", { count: value })}</option>)}
-            </select>}
+            {!capture?.active && <Select value={String(minutes)} onValueChange={(v) => v && setMinutes(Number(v))} disabled={changing}>
+              <SelectTrigger aria-label={t("views:debug.duration")} data-debug-minutes><SelectValue /></SelectTrigger>
+              <SelectContent align="end">{[15, 30, 60].map((value) => <SelectItem key={value} value={String(value)}>{t("views:debug.minutes", { count: value })}</SelectItem>)}</SelectContent>
+            </Select>}
             <Button size="sm" variant={capture?.active ? "outline" : "default"} disabled={changing || snapshotLoading} onClick={changeCapture} data-debug-toggle>{changing && <Spinner className="size-3" />}{capture?.active ? t("views:debug.stop") : t("views:debug.start")}</Button>
           </div> : <span className="type-footnote text-muted-foreground">{t("views:debug.ownerOnly")}</span>}
         </div>
@@ -147,31 +153,33 @@ export function ItemDebugPanel({ item, session }: { item: string; session?: stri
     </section>
 
     <section className="space-y-3" data-debug-events>
-      <div className="flex items-center justify-between gap-2"><h3 className="type-callout font-medium">{t("views:debug.events")}</h3><span className="type-footnote tabular-nums text-muted-foreground">{t("views:debug.loaded", { count: events.length })}</span></div>
+      <div className="flex items-center justify-between gap-2"><h3 className="type-headline">{t("views:debug.events")}</h3><span className="type-footnote tabular-nums text-muted-foreground">{t("views:debug.loaded", { count: events.length })}</span></div>
       <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
-        <label className="min-w-0 space-y-1 type-footnote text-muted-foreground">{t("views:debug.session")}<select className="h-8 w-full rounded-lg border bg-background px-2 text-foreground" value={sessionId} onChange={(event) => setSessionId(event.target.value)} data-debug-session>
-          <option value="">{t("views:debug.allSessions")}</option>
-          {sessionId && !sessions.some((value) => value.id === sessionId) && <option value={sessionId}>{sessionId}</option>}
-          {sessions.map((value) => <option key={value.id} value={value.id}>{value.id}</option>)}
-        </select></label>
-        <label className="min-w-0 space-y-1 type-footnote text-muted-foreground">{t("views:debug.kind")}<Input className="h-8 font-mono text-xs" value={kind} onChange={(event) => setKind(event.target.value)} list="debug-event-kinds" placeholder={t("views:debug.allKinds")} data-debug-kind /><datalist id="debug-event-kinds">{kinds.map((value) => <option key={value} value={value} />)}</datalist></label>
-        <label className="min-w-0 space-y-1 type-footnote text-muted-foreground">{t("views:debug.severity")}<select className="h-8 w-full rounded-lg border bg-background px-2 text-foreground" value={severity} onChange={(event) => setSeverity(event.target.value)} data-debug-severity>
-          <option value="">{t("views:debug.allLevels")}</option><option value="info">{t("views:debug.info")}</option><option value="warning">{t("views:debug.warning")}</option><option value="error">{t("views:debug.error")}</option>
-        </select></label>
-        <label className="min-w-0 space-y-1 type-footnote text-muted-foreground">{t("views:debug.attempt")}<Input className="h-8 font-mono text-xs" value={attempt} onChange={(event) => setAttempt(event.target.value)} placeholder={t("views:debug.allAttempts")} data-debug-attempt /></label>
+        <div className="flex min-w-0 flex-col gap-1 type-footnote text-muted-foreground"><span aria-hidden>{t("views:debug.session")}</span><Select value={sessionId} onValueChange={(v) => setSessionId(v ?? "")}>
+          <SelectTrigger size="default" className="w-full" aria-label={t("views:debug.session")} data-debug-session><SelectValue /></SelectTrigger>
+          <SelectContent><SelectItem value="">{t("views:debug.allSessions")}</SelectItem>
+            {sessionId && !sessions.some((value) => value.id === sessionId) && <SelectItem value={sessionId}>{sessionId}</SelectItem>}
+            {sessions.map((value) => <SelectItem key={value.id} value={value.id}>{value.id}</SelectItem>)}</SelectContent>
+        </Select></div>
+        <label className="flex min-w-0 flex-col gap-1 type-footnote text-muted-foreground">{t("views:debug.kind")}<Input className="h-8 type-footnote font-mono" value={kind} onChange={(event) => setKind(event.target.value)} list="debug-event-kinds" placeholder={t("views:debug.allKinds")} data-debug-kind /><datalist id="debug-event-kinds">{kinds.map((value) => <option key={value} value={value} />)}</datalist></label>
+        <div className="flex min-w-0 flex-col gap-1 type-footnote text-muted-foreground"><span aria-hidden>{t("views:debug.severity")}</span><Select value={severity} onValueChange={(v) => setSeverity(v ?? "")}>
+          <SelectTrigger size="default" className="w-full" aria-label={t("views:debug.severity")} data-debug-severity><SelectValue /></SelectTrigger>
+          <SelectContent><SelectItem value="">{t("views:debug.allLevels")}</SelectItem><SelectItem value="info">{t("views:debug.info")}</SelectItem><SelectItem value="warning">{t("views:debug.warning")}</SelectItem><SelectItem value="error">{t("views:debug.error")}</SelectItem></SelectContent>
+        </Select></div>
+        <label className="flex min-w-0 flex-col gap-1 type-footnote text-muted-foreground">{t("views:debug.attempt")}<Input className="h-8 type-footnote font-mono" value={attempt} onChange={(event) => setAttempt(event.target.value)} placeholder={t("views:debug.allAttempts")} data-debug-attempt /></label>
       </div>
       <p className="type-footnote text-muted-foreground">{t("views:debug.historyHint")}</p>
       <p className="type-footnote text-muted-foreground" data-debug-delivery>{t("views:debug.deliveryHint")}</p>
-      {coverage?.refresh_required && <p role="status" className="rounded-lg border border-attention/30 p-3 type-footnote text-attention" data-debug-coverage-refresh>{t("views:debug.coverageRefresh")}</p>}
-      {coverage?.recorder_available === false && <p role="alert" className="rounded-lg border border-destructive/30 p-3 type-footnote text-destructive" data-debug-recorder-unavailable>{t("views:debug.recorderUnavailable")}</p>}
-      {!!coverage?.instance_pending && coverage.instance_pending > 0 && <p role="status" className="rounded-lg border border-attention/30 p-3 type-footnote text-attention" data-debug-pending>{t("views:debug.pending", { count: coverage.instance_pending })}</p>}
-      {page && (page.truncated || page.gaps.length > 0) && <div role="status" className="rounded-lg border border-attention/30 bg-attention/5 p-3 type-footnote text-attention" data-debug-gaps>
+      {coverage?.refresh_required && <p role="status" className="rounded-lg bg-attention/10 px-3.5 py-2.5 type-callout text-attention" data-debug-coverage-refresh>{t("views:debug.coverageRefresh")}</p>}
+      {coverage?.recorder_available === false && <p role="alert" className="rounded-lg bg-destructive/10 px-3.5 py-2.5 type-callout text-destructive" data-debug-recorder-unavailable>{t("views:debug.recorderUnavailable")}</p>}
+      {!!coverage?.instance_pending && coverage.instance_pending > 0 && <p role="status" className="rounded-lg bg-attention/10 px-3.5 py-2.5 type-callout text-attention" data-debug-pending>{t("views:debug.pending", { count: coverage.instance_pending })}</p>}
+      {page && (page.truncated || page.gaps.length > 0) && <div role="status" className="rounded-lg bg-attention/10 px-3.5 py-2.5 type-callout text-attention" data-debug-gaps>
         <p>{t("views:debug.incomplete")}</p>
-        {page.gaps.length > 0 && <details className="mt-1"><summary className="cursor-pointer">{t("views:debug.gapDetails")}</summary><pre className="mt-2 whitespace-pre-wrap break-all font-mono text-xs">{json(page.gaps)}</pre></details>}
+        {page.gaps.length > 0 && <details className="mt-1"><summary className="cursor-pointer">{t("views:debug.gapDetails")}</summary><pre className="mt-2 whitespace-pre-wrap break-all type-footnote font-mono">{json(page.gaps)}</pre></details>}
       </div>}
       {eventsLoading && <p className="flex items-center gap-2 py-3 type-footnote text-muted-foreground"><Spinner className="size-3" />{t("views:debug.loading")}</p>}
-      {eventsError && <div role="alert" className="flex flex-wrap items-center gap-2 rounded-lg border border-destructive/30 p-3 type-footnote text-destructive" data-debug-events-error><span className="min-w-0 flex-1 break-words">{eventsError}</span><Button size="xs" variant="outline" onClick={() => events.length && page?.next_cursor ? void more() : setRefresh((n) => n + 1)} disabled={moreLoading}>{t("views:debug.retry")}</Button></div>}
-      {!eventsLoading && !eventsError && events.length === 0 && <p className="rounded-lg border border-dashed p-4 type-footnote text-muted-foreground" data-debug-empty>{t("views:debug.empty")}</p>}
+      {eventsError && <div role="alert" className="flex flex-wrap items-center gap-2 rounded-lg bg-destructive/10 px-3.5 py-2.5 type-callout text-destructive" data-debug-events-error><span className="min-w-0 flex-1 break-words">{eventsError}</span><Button size="xs" variant="outline" onClick={() => events.length && page?.next_cursor ? void more() : setRefresh((n) => n + 1)} disabled={moreLoading}>{t("views:debug.retry")}</Button></div>}
+      {!eventsLoading && !eventsError && events.length === 0 && <p className="rounded-lg bg-muted/60 px-4 py-6 text-center type-callout text-muted-foreground" data-debug-empty>{t("views:debug.empty")}</p>}
       <ol className="space-y-2">{events.map((event) => <EventRow key={event.event_id} item={item} event={event} />)}</ol>
       {page?.has_more && page.next_cursor && <Button className="w-full" size="sm" variant="outline" disabled={moreLoading} onClick={more} data-debug-more>{moreLoading && <Spinner className="size-3" />}{t("views:debug.more")}</Button>}
       {page?.coverage.retention_days != null && <p className="pb-1 type-footnote text-muted-foreground">{t("views:debug.retention", { days: num(page.coverage.retention_days) })}</p>}
@@ -183,15 +191,15 @@ function CurrentBlockers({ snapshot }: { snapshot: DebugSnapshot }) {
   const t = useT()
   const state = snapshot.state, blockers = state?.lifecycle?.blockers, deps = state?.dependencies, lane = state?.lane
   // The domain view is an evidence projection; missing data must never become "healthy".
-  return <div className="space-y-2 rounded-lg bg-muted/50 p-3" data-debug-blockers>
-    <h4 className="type-footnote font-medium">{t("views:debug.blockers")}</h4>
-    {blockers ? blockers.length ? <ul className="space-y-1 type-footnote">{blockers.map((blocker, n) => <li key={`${blocker.kind}:${n}`} className="break-words">{blocker.label}<span className="ml-2 font-mono text-[11px] text-muted-foreground">{blocker.kind}</span></li>)}</ul> : <p className="type-footnote text-muted-foreground">{t("views:debug.noBlocker")}</p> : <p className="type-footnote text-muted-foreground">{t("views:debug.noState")}</p>}
+  return <div className="space-y-2 border-t border-foreground/6 pt-3" data-debug-blockers>
+    <h4 className="type-label text-tertiary">{t("views:debug.blockers")}</h4>
+    {blockers ? blockers.length ? <ul className="space-y-1 type-footnote">{blockers.map((blocker, n) => <li key={`${blocker.kind}:${n}`} className="break-words">{blocker.label}<span className="ml-2 type-footnote font-mono text-muted-foreground">{blocker.kind}</span></li>)}</ul> : <p className="type-footnote text-muted-foreground">{t("views:debug.noBlocker")}</p> : <p className="type-footnote text-muted-foreground">{t("views:debug.noState")}</p>}
     {!!deps?.open_dependencies?.length && <p className="type-footnote">{t("views:debug.dependencies", { items: deps.open_dependencies.join(" · ") })}</p>}
     {deps?.resume_mode && <p className="type-footnote text-muted-foreground">{t("views:debug.resumeMode", { mode: deps.resume_mode === "automatic" ? t("views:debug.resumeAutomatic") : deps.resume_mode === "notify" ? t("views:debug.resumeNotify") : deps.resume_mode, source: deps.resume_source ?? t("views:debug.unknown") })}</p>}
     {deps?.resume_blocker && <p className="break-words type-footnote text-attention">{deps.resume_blocker}</p>}
     {lane?.summary && <p className="break-words type-footnote">{lane.summary}</p>}
     {state?.changed_during_read && <p role="status" className="type-footnote text-attention">{t("views:debug.stateChanged")}</p>}
-    {state && <details><summary className="cursor-pointer type-footnote text-muted-foreground">{t("views:debug.snapshotDetails")}</summary><pre className="mt-2 max-h-72 overflow-y-auto whitespace-pre-wrap break-all font-mono text-xs text-muted-foreground">{json(state)}</pre></details>}
+    {state && <details><summary className="cursor-pointer type-footnote text-muted-foreground">{t("views:debug.snapshotDetails")}</summary><pre className="mt-2 max-h-72 overflow-y-auto whitespace-pre-wrap break-all type-footnote font-mono text-muted-foreground">{json(state)}</pre></details>}
   </div>
 }
 
@@ -207,17 +215,17 @@ function EventRow({ item, event }: { item: string; event: DebugEvent }) {
       setCopied(true)
     } catch { setCopyError(true) }
   }
-  return <li className="rounded-xl border p-3" data-debug-event={event.event_id}>
+  return <li className="rounded-xl bg-muted/50 px-3.5 py-3 anim-in" data-debug-event={event.event_id}>
     <div className="flex flex-wrap items-start gap-x-3 gap-y-1">
-      <span className={cn("break-all font-mono text-xs", event.severity === "error" ? "text-destructive" : event.severity === "warning" ? "text-attention" : "text-foreground")}>{event.kind}</span>
+      <span className={cn("break-all type-footnote font-mono", event.severity === "error" ? "text-destructive" : event.severity === "warning" ? "text-attention" : "text-foreground")}>{event.kind}</span>
       <time className="type-footnote tabular-nums text-muted-foreground" dateTime={new Date(event.at).toISOString()}>{time(event.at)}</time>
       <Button size="icon-xs" variant="ghost" className="ml-auto shrink-0" aria-label={t("views:debug.copy")} onClick={copy} data-debug-copy>{copied ? <CheckIcon /> : <CopyIcon />}</Button>
     </div>
-    <p className="mt-1 break-all font-mono text-xs text-muted-foreground">{event.reason_code || t("views:debug.noReason")}</p>
-    <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 font-mono text-[11px] text-muted-foreground">{event.session_id && <span className="break-all">{event.session_id}</span>}{event.attempt_id && <span className="break-all">{event.attempt_id}</span>}</div>
+    <p className="mt-1 break-all type-footnote font-mono text-muted-foreground">{event.reason_code || t("views:debug.noReason")}</p>
+    <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 type-footnote font-mono text-muted-foreground">{event.session_id && <span className="break-all">{event.session_id}</span>}{event.attempt_id && <span className="break-all">{event.attempt_id}</span>}</div>
     <details className="mt-2" data-debug-detail>
       <summary className="cursor-pointer type-footnote text-muted-foreground hover:text-foreground">{t("views:debug.evidence")}</summary>
-      <pre className="mt-2 max-h-72 overflow-y-auto whitespace-pre-wrap break-all rounded-lg bg-muted/50 p-2 font-mono text-xs">{json(event)}</pre>
+      <pre className="mt-2 max-h-72 overflow-y-auto whitespace-pre-wrap break-all rounded-lg bg-background/70 px-3 py-2 type-footnote font-mono">{json(event)}</pre>
     </details>
     {copyError && <p role="alert" className="mt-1 type-footnote text-destructive">{t("views:debug.copyFailed")}</p>}
   </li>

@@ -24,7 +24,7 @@ function SecretUseCard({ w, act, busy, head, foot }: P) {
   return <>
     {head(w.q)}
     <CardContent className="pb-4" data-secret-use>
-      {w.draft && <pre className="max-h-56 overflow-auto whitespace-pre-wrap break-all rounded-lg bg-muted/70 px-3 py-2 font-mono text-[12px] leading-[18px] text-foreground/85">{w.draft}</pre>}
+      {w.draft && <pre className="max-h-56 overflow-auto whitespace-pre-wrap break-all rounded-lg bg-muted/60 px-3 py-2 type-code text-foreground/85">{w.draft}</pre>}
       <div className="mt-2 type-footnote text-muted-foreground">{grants.length ? t("vault:decision.secretUseNoteGrant") : t("vault:decision.secretUseNoteOnce")}</div>
     </CardContent>
     {foot(<>

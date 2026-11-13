@@ -6,7 +6,6 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Weak};
 
 use async_trait::async_trait;
-use steve_flow::nodes::bot::{Guard, NoGuard};
 use steve_flow::{EventSink, FlowCx};
 use steve_modules::Modules;
 use steve_modules::accounts::connections::Connections;
@@ -47,7 +46,6 @@ struct Inner {
     others: Vec<Arc<dyn OtherEvents>>,
     responder: Arc<dyn Responder>,
     flow: Option<Arc<FlowCx>>,
-    guard: Arc<dyn Guard>,
     reactor: Arc<dyn Reactor>,
     thread: Option<Arc<dyn Thread>>,
     locks: Locks,
@@ -84,7 +82,6 @@ pub struct ChannelsBuilder {
     others: Vec<Arc<dyn OtherEvents>>,
     responder: Arc<dyn Responder>,
     flow: Option<Arc<FlowCx>>,
-    guard: Arc<dyn Guard>,
     reactor: Arc<dyn Reactor>,
     thread: Option<Arc<dyn Thread>>,
     profiles: BTreeMap<String, Arc<dyn ProfileAdapter>>,
@@ -172,13 +169,6 @@ impl ChannelsBuilder {
         self
     }
 
-    /// The vault's secret scanner (`guard::scan`): message text passes it before any model sees it
-    /// (`intent`). Default: finds nothing.
-    pub fn guard(mut self, g: Arc<dyn Guard>) -> Self {
-        self.guard = g;
-        self
-    }
-
     /// Registers a channel adapter under its `id()` (the `connections.adapter` it serves). The
     /// same object must be registered with `Connections` as a provider.
     pub fn adapter(mut self, a: Arc<dyn ChannelAdapter>) -> Self {
@@ -208,7 +198,6 @@ impl ChannelsBuilder {
             others: self.others,
             responder: self.responder,
             flow: self.flow,
-            guard: self.guard,
             reactor: self.reactor,
             thread: self.thread,
             locks: Locks::default(),
@@ -240,7 +229,6 @@ impl Channels {
             others: Vec::new(),
             responder: Arc::new(Fallback),
             flow: None,
-            guard: Arc::new(NoGuard),
             reactor: Arc::new(AdapterReactor),
             thread: None,
             profiles: BTreeMap::new(),
@@ -300,10 +288,6 @@ impl Channels {
     /// YOLO decides `ws`'s cards now ([`ChannelsBuilder::yolo`]).
     pub(crate) fn yolo_on(&self, ws: &str) -> bool {
         self.0.yolo.as_ref().is_some_and(|y| y.on(ws))
-    }
-
-    pub fn guard(&self) -> &dyn Guard {
-        self.0.guard.as_ref()
     }
 
     /// Sets the knowledge store replies search (the same one as the knowledge module's).

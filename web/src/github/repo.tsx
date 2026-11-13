@@ -45,14 +45,14 @@ function Repo({ r: r0, reload }: { r: GhRepo; reload: () => void }) {
   const sync = async () => { setSyncing(true); try { await gh.sync(r.id); toast(t("github:repo.syncStarted")); setTimeout(reload, 2500) } catch (e) { toast(errMsg(e)) } finally { setSyncing(false) } }
   const s = r.settings
   return (
-    <Page title={<span className="font-mono">{r.full_name}</span>} back={["#/github", "GitHub"]} max={760}
+    <Page title={r.full_name} back={["#/github", "GitHub"]} max={760}
       sub={<Meta><span>{r.private ? t("github:repo.private") : t("github:repo.public")}</span><span><Trans t={t} i18nKey="github:repo.defaultBranch" values={{ branch: r.default_branch }} components={{ mono: <span className="font-mono" /> }} /></span><span>{t(r.connection.kind === "app" ? "github:repo.viaApp" : "github:repo.viaPat", { account: r.connection.account })}</span><Health r={r} />{r.last_delivery ? <span>{t("github:repo.lastDelivery", { time: tm(r.last_delivery) })}</span> : null}</Meta>}
       actions={<>
         <Button size="sm" variant="ghost" className="text-muted-foreground" onClick={() => void sync()} disabled={syncing} data-gh-sync>{syncing ? <Spinner className="size-3.5" /> : <RefreshCwIcon />}{t("github:repo.syncNow")}</Button>
         <Button size="sm" variant="ghost" className="text-muted-foreground" nativeButton={false} render={<a href={"https://github.com/" + r.full_name} target="_blank" rel="noreferrer" aria-label={t("github:repo.openOnGithub")} />}><ExternalLinkIcon /><span className="hidden sm:inline">{t("github:repo.openOnGithub")}</span></Button>
       </>}>
       <div className="flex flex-col gap-8">
-        {r.problem && <div role="alert" className="rounded-xl border border-destructive/40 px-4 py-3 type-callout">{r.problem}</div>}
+        {r.problem && <div role="alert" className="rounded-xl bg-destructive/8 px-4 py-3 type-callout text-destructive">{r.problem}</div>}
         <section><SectionLabel>{t("github:repo.settings")}</SectionLabel>
           <Group>
             <Row title={t("github:repo.project")} sub={t("github:repo.projectSub")}>
@@ -69,7 +69,7 @@ function Repo({ r: r0, reload }: { r: GhRepo; reload: () => void }) {
         </section>
         <section>
           <div className="mb-3"><Segmented value={tab} onChange={setTab} options={[["prs", t("github:repo.tabPrs", { n: r.open_prs })], ["issues", t("github:repo.tabIssues", { n: r.open_issues })], ["deliveries", t("github:repo.tabDeliveries")]] as const} /></div>
-          {tab === "prs" ? <Prs repo={r.id} /> : tab === "issues" ? <Issues repo={r.id} /> : <Deliveries repo={r.id} />}
+          <div key={tab} className="anim-in">{tab === "prs" ? <Prs repo={r.id} /> : tab === "issues" ? <Issues repo={r.id} /> : <Deliveries repo={r.id} />}</div>
         </section>
         <div><Button size="sm" variant="ghost" className="text-destructive" onClick={() => setUnlink(true)} data-gh-unlink><UnlinkIcon />{t("github:repo.unlink")}</Button></div>
       </div>
@@ -123,7 +123,7 @@ function Prs({ repo }: { repo: string }) {
       const failed = p.checks.filter((c) => c.state === "fail").map((c) => c.name)
       return (
         <Row key={p.id} data-gh-pr={p.number}
-          title={<span className="flex min-w-0 items-baseline gap-2"><span className="shrink-0 font-mono text-[12.5px] text-muted-foreground">#{p.number}</span><span className="truncate">{p.title}</span></span>}
+          title={<span className="flex min-w-0 items-baseline gap-2"><span className="shrink-0 font-mono tabular-nums text-muted-foreground">#{p.number}</span><span className="truncate">{p.title}</span></span>}
           sub={<Meta>
             {p.state !== "open" ? <span>{p.state === "merged" ? t("github:pr.merged") : t("github:pr.closed")}</span> : p.draft ? <span>{t("github:pr.draft")}</span> : null}
             <span className="inline-flex items-center gap-1.5" title={failed.length ? t("github:checks.failedTitle", { names: failed.join(sep) }) : undefined}><StatusDot s={dot} />{failed.length ? t("github:checks.withNames", { label, names: failed.slice(0, 3).join(sep) }) : label}</span>
@@ -132,7 +132,7 @@ function Prs({ repo }: { repo: string }) {
             <span className="font-mono">{p.head_ref}</span>
             {p.opened_by === "steve" && <span>{t("github:pr.bySteve")}</span>}
             <ItemLink item={p.item} />
-            <span>{tm(p.updated)}</span>
+            <span className="tabular-nums">{tm(p.updated)}</span>
           </Meta>}>
           <Ext href={p.url} label={t("github:pr.open", { number: p.number })} />
         </Row>)
@@ -148,7 +148,7 @@ function Issues({ repo }: { repo: string }) {
     <StateChips value={state} onChange={setState} />
     <ListOf v={v} retry={retry} empty={[t("github:issue.empty"), t("github:issue.emptySub")]} row={(i: GhIssue) => (
       <Row key={i.id} data-gh-issue={i.number}
-        title={<span className="flex min-w-0 items-baseline gap-2"><span className="shrink-0 font-mono text-[12.5px] text-muted-foreground">#{i.number}</span><span className="truncate">{i.title}</span></span>}
+        title={<span className="flex min-w-0 items-baseline gap-2"><span className="shrink-0 font-mono tabular-nums text-muted-foreground">#{i.number}</span><span className="truncate">{i.title}</span></span>}
         sub={<Meta>{i.state !== "open" && <span>{t("github:issue.closed")}</span>}{i.labels.length > 0 && <span>{i.labels.join(t("github:shared.listSep"))}</span>}<ItemLink item={i.item} /></Meta>}>
         <Ext href={i.url} label={t("github:issue.open", { number: i.number })} />
       </Row>)} />
@@ -162,8 +162,8 @@ function Deliveries({ repo }: { repo: string }) {
     <div className="mb-2 flex items-center justify-between gap-2"><span className="type-footnote text-muted-foreground">{t("github:delivery.hint")}</span><Button size="xs" variant="ghost" className="text-muted-foreground" onClick={retry}><RefreshCwIcon />{t("common:action.refresh")}</Button></div>
     <ListOf v={v} retry={retry} empty={[t("github:delivery.empty"), t("github:delivery.emptySub")]} row={(d: GhDelivery) => {
       const [dot, label] = delivery(d.status)
-      return <Row key={d.id} data-gh-delivery={d.status} title={<span className="font-mono text-[13px]">{d.event}{d.action ? "." + d.action : ""}</span>}
-        sub={<Meta><span>{tm(d.received)}</span><span className="inline-flex items-center gap-1.5"><StatusDot s={dot} />{label}</span>{d.error && <span className="text-destructive">{d.error}</span>}{d.id.startsWith("poll:") && <span>{t("github:delivery.poll")}</span>}</Meta>} />
+      return <Row key={d.id} data-gh-delivery={d.status} title={<span className="font-mono">{d.event}{d.action ? "." + d.action : ""}</span>}
+        sub={<Meta><span className="tabular-nums">{tm(d.received)}</span><span className="inline-flex items-center gap-1.5"><StatusDot s={dot} />{label}</span>{d.error && <span className="text-destructive">{d.error}</span>}{d.id.startsWith("poll:") && <span>{t("github:delivery.poll")}</span>}</Meta>} />
     }} />
   </>)
 }

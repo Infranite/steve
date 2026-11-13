@@ -43,7 +43,3 @@ export function useBusy() {
   return [busy, act] as const
 }
 
-/** `Meta` for a Row's subtitle: spans only, since the subtitle is a <p> */
-export const Dots = ({ children }: { children: React.ReactNode }) => (
-  <span className="inline-flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-1 [&>*+*]:before:mr-1.5 [&>*+*]:before:text-tertiary [&>*+*]:before:content-['·']">{children}</span>
-)

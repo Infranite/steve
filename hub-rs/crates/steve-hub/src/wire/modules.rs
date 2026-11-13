@@ -160,6 +160,9 @@ pub struct Built {
     pub recall: Arc<dyn steve_core::yolo::undo::Recall>,
     /// What runs for each connection of an adapter with a hook (started by one of `jobs`).
     pub lifecycle: Option<steve_channels::lifecycle::ConnectionRuntime>,
+    /// 能力, the capabilities library: the MCP secrets a session's Node takes
+    /// ([`super::bot_mcp`]) and the remote agents' tools ([`super::mcp_extra`]).
+    pub caps: steve_modules::caps::Capabilities,
 }
 
 /// The objects the event producers call, exactly as wired: G2's sink, E1's events, C1's inbound.
@@ -184,18 +187,15 @@ pub struct Tools {
     pub outbox: Arc<steve_channels::Outbox>,
 }
 
-/// The knowledge state: the vault's `guard::scan` as guard, `{type:"kb"}`
-/// events on the bus, and loaders for uploads, item and chat documents (notes and folders are built in).
+/// The knowledge state: `{type:"kb"}` events on the bus, and loaders for uploads, item and chat documents (notes and folders are built in).
 fn knowledge(
     steve_home: &Path,
     data_dir: &Path,
     bus: &crate::bus::Bus,
-    guard: Arc<super::ports::VaultGuard>,
 ) -> steve_knowledge::Knowledge {
     use steve_knowledge::sources::{chat::ChatLoader, items::ItemsLoader};
     let kb_bus = bus.clone();
     let kb = steve_knowledge::Knowledge::with_loaders(
-        guard,
         move |e: steve_knowledge::KbEvent| {
             kb_bus.publish_value(serde_json::json!({ "type": "kb", "id": e.id, "ws": e.ws }));
         },
@@ -262,8 +262,7 @@ pub fn build(env: Env<'_>) -> Result<Built, BackendError> {
         use_nodes,
         git_nodes,
     } = env;
-    use super::ports::{self as hp, VaultGuard};
-    let guard = Arc::new(VaultGuard);
+    use super::ports as hp;
     let mut registry = Registry::new();
     // one Ports for the contacts routes and for the registrations that need it
     let mut ports = steve_modules::accounts::ports();
@@ -289,7 +288,7 @@ pub fn build(env: Env<'_>) -> Result<Built, BackendError> {
     }));
     steve_core::yolo::draft::register(&mut registry, yolo_forced);
     // knowledge (K1–K5): candidate decisions, item documents on finish, prompt context, drafts
-    let kb = knowledge(steve_home, data_dir, bus, guard.clone());
+    let kb = knowledge(steve_home, data_dir, bus);
     if let Some(w) = workspaces {
         kb.set_folder_places(Arc::new(super::workspaces::KbFolders(w)));
     }
@@ -367,7 +366,6 @@ pub fn build(env: Env<'_>) -> Result<Built, BackendError> {
     // C5/C6: the disclosure check (B1's outbound check), the `chan_message` approvals, the outbox
     // (sends as you through the declared adapters), back to the source when an item is done
     let disclosure = steve_channels::Disclosure::new();
-    disclosure.secrets(Arc::new(hp::RedactorScan));
     registry.outbound_check(Box::new(disclosure.clone()));
     let out_link = steve_channels::OutLink::new();
     registry.decision(steve_channels::respond::SUBJECT_MESSAGE, out_link.handler());
@@ -376,7 +374,7 @@ pub fn build(env: Env<'_>) -> Result<Built, BackendError> {
     for a in &declared.act_as_user {
         outbox = outbox.act_as_user(a.clone());
     }
-    let outbox = Arc::new(outbox.secrets(Arc::new(hp::RedactorScan)));
+    let outbox = Arc::new(outbox);
     registry.item_hooks(Box::new(steve_channels::outbound::ReturnToSource::new(
         outbox.clone(),
         late.clone(),
@@ -470,9 +468,7 @@ pub fn build(env: Env<'_>) -> Result<Built, BackendError> {
         .events(Arc::new(mail_events.clone()))
         .notify(Arc::new(notices.clone()))
         .drafts(draft_link)
-        .secrets(Arc::new(hp::RedactorScan))
         .hooks(Arc::new(hp::MailDraftHooks(core.clone())))
-        .guard(guard.clone())
         .files(Arc::new(hp::HubFiles {
             backend,
             data_dir: data_dir.to_path_buf(),
@@ -483,10 +479,9 @@ pub fn build(env: Env<'_>) -> Result<Built, BackendError> {
     mail_hooks.bind(&mail);
 
     // S1–S4, S10: the flow engine with GitHub as an event source, the code nodes (http with
-    // `{{secrets}}`, cmd), the guarded `bot` node, mail actions, GitHub's `item.link`
+    // `{{secrets}}`, cmd), the `bot` node, mail actions, GitHub's `item.link`
     let mut setup = setup
         .connections(conns.clone())
-        .guard(guard.clone())
         .node(Arc::new(steve_flow::nodes::http::Http::new(vault.clone())))
         .node(Arc::new({
             let cmd = steve_flow::nodes::cmd::Cmd::new(steve_home);
@@ -495,9 +490,7 @@ pub fn build(env: Env<'_>) -> Result<Built, BackendError> {
                 None => cmd,
             }
         }))
-        .node(Arc::new(steve_flow::nodes::bot::BotNode::new(
-            guard.clone(),
-        )));
+        .node(Arc::new(steve_flow::nodes::bot::BotNode));
     for a in &declared.event_sources {
         setup = setup.event_adapter(a.clone());
     }
@@ -578,7 +571,6 @@ pub fn build(env: Env<'_>) -> Result<Built, BackendError> {
     let channels = channels
         .party_hooks(ports.hooks.clone())
         .flow(flow.clone())
-        .guard(guard.clone())
         .responder(replies)
         .other_events(Arc::new(super::signals::DirectoryEvents(directory.clone())))
         // “收到 → 完成” reactions, as the bot or (your `/bot`) as you
@@ -635,8 +627,12 @@ pub fn build(env: Env<'_>) -> Result<Built, BackendError> {
         }
         (rt.build(), bus.tap(&["connection"]))
     });
+    // 能力: MCP servers, skills and remote agents, defined once and assigned per Bot; the
+    // secrets in the vault
+    let caps = steve_modules::caps::Capabilities::new(vault.clone());
     let routes = routes
         .with_state(modules.clone())
+        .merge(steve_modules::caps::routes(caps.clone()))
         .merge(steve_modules::vault::routes(vault.clone()))
         .merge(steve_modules::vault::use_api::routes(vault))
         .merge(vault_items)
@@ -773,5 +769,6 @@ pub fn build(env: Env<'_>) -> Result<Built, BackendError> {
             outbox: outbox.clone(),
         }),
         lifecycle,
+        caps,
     })
 }

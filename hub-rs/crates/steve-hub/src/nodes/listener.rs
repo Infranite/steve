@@ -126,6 +126,11 @@ impl Admission for Admit {
             paused: link.paused,
         }))
     }
+
+    async fn reported(&self, node: &NodeId, error: &str) {
+        tracing::warn!(node = %node, "node could not link: {error}");
+        self.svc.fleet.link_failed(node, now(), error);
+    }
 }
 
 /// Requests of the Node: refused `stale` once this link is not the current one, then the guarded
@@ -173,6 +178,7 @@ async fn serve_after(
     drop(unproven);
     let (hello, admitted) = match accepted {
         Ok(x) => x,
+        Err(e) if e.code == handshake::REPORTED => return,
         Err(e) => {
             tracing::info!("node link refused: {e}");
             return;

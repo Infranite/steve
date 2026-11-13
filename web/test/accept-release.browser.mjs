@@ -13,12 +13,12 @@ try {
     assert.equal(await page.locator("[data-pass-no-release]").innerText(), "验收，先不发布")
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true, `overflow at ${width}px`)
     await page.locator("[data-pass-release]").click()
-    await page.getByText("已验收，开始发布").waitFor()
+    await page.locator("[data-toast-id]").getByText("已验收，开始发布").waitFor() // the toast; its screen-reader copy says the same
     assert.deepEqual(await page.evaluate(() => window.__calls), [{ id: "dec_1", choice: "pass", text: "release" }])
     await page.goto(base + "/test/fixtures/accept-release.html?again"); await page.locator("[data-pass-no-release]").waitFor()
     await page.evaluate(() => { window.__done = true })
     await page.locator("[data-pass-no-release]").click()
-    await page.getByText("已验收，这次不发布").waitFor()
+    await page.locator("[data-toast-id]").getByText("已验收，这次不发布").waitFor()
     assert.deepEqual(await page.evaluate(() => window.__calls), [{ id: "dec_1", choice: "pass", text: "no-release" }])
     // a project without a release: one button, as before
     await page.goto(base + "/test/fixtures/accept-release.html?norelease"); await page.locator("[data-pass]").waitFor()

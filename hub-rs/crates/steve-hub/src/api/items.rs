@@ -109,6 +109,34 @@ async fn create_now(
     Ok(Value::Object(item))
 }
 
+/// The fixed reasons of a dependency wait view (`steve_core`'s, stored nowhere: written in zh-CN).
+const DEP_WAIT_KEYS: &[&str] = &[
+    "hub.dep_wait.add_first",
+    "hub.dep_wait.no_resume",
+    "hub.dep_wait.holding",
+    "hub.dep_wait.fallback",
+    "hub.dep_wait.item_ending",
+    "hub.dep_wait.owner_only",
+    "hub.dep_wait.no_session",
+    "hub.dep_wait.work_running",
+];
+
+/// A dependency wait view with its fixed reasons in the request's language.
+fn dependency_shown(mut v: Value) -> Value {
+    for k in [
+        "register_blocker",
+        "resume_blocker",
+        "resume_fallback_reason",
+    ] {
+        if let Some(Value::String(s)) = v.get(k)
+            && let Some(t) = steve_i18n::reword!(s, DEP_WAIT_KEYS)
+        {
+            v[k] = Value::String(t);
+        }
+    }
+    v
+}
+
 pub async fn get_one(
     State(st): State<AppState>,
     Extension(c): Extension<Ctx>,
@@ -117,7 +145,7 @@ pub async fn get_one(
     own_item(&st, &c.ws, &id).await?;
     let lifecycle = st.domain.lifecycle_view(&id).await?;
     let workflow = st.domain.workflow_get(&id).await?;
-    let dependency_wait = st.domain.dependency_get(&id).await?;
+    let dependency_wait = dependency_shown(st.domain.dependency_get(&id).await?);
     st.read(move |r| {
         let i = own(r.item_get(&id)?, &c.ws, Noun::Item)?;
         let mut out = summary(r, i)?;
@@ -136,7 +164,10 @@ pub async fn get_one(
             Value::Object(r.artifact_roles(&id)?),
         );
         out.insert("annotations".into(), objs(r.annotations_list(&id)?));
-        out.insert("decisions".into(), objs(r.decisions_of_item(&id)?));
+        out.insert(
+            "decisions".into(),
+            objs(crate::decision_text::all(r.decisions_of_item(&id)?)),
+        );
         out.insert("dependents".into(), json!(r.deps_dependents(&id)?));
         out.insert("thread".into(), r.thread_item(&id)?.unwrap_or(Value::Null));
         ok(Value::Object(out))
@@ -150,7 +181,7 @@ pub async fn dependency_get(
     Path(id): Path<String>,
 ) -> ApiResult {
     own_item(&st, &c.ws, &id).await?;
-    ok(st.domain.dependency_get(&id).await?)
+    ok(dependency_shown(st.domain.dependency_get(&id).await?))
 }
 
 pub async fn dependency_wait(
@@ -633,4 +664,25 @@ pub async fn lifecycle(
         ok(json!({ "item": Value::Object(out) }))
     })
     .await
+}
+
+#[cfg(test)]
+mod dependency_text_tests {
+    use super::*;
+
+    #[test]
+    fn the_reasons_by_language() {
+        let v = json!({"register_blocker": "请先添加前置事项", "resume_blocker": "实例已禁用自动续跑", "reason": "等 ST-1"});
+        let en = steve_i18n::with(steve_i18n::EN, || dependency_shown(v.clone()));
+        assert_eq!(en["register_blocker"], "Add a prerequisite first");
+        assert_eq!(
+            en["resume_blocker"],
+            "This instance has automatic resume turned off"
+        );
+        assert_eq!(en["reason"], "等 ST-1");
+        assert_eq!(
+            steve_i18n::with(steve_i18n::ZH_CN, || dependency_shown(v.clone())),
+            v
+        );
+    }
 }

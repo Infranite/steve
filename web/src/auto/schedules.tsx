@@ -1,18 +1,20 @@
 /* #/auto/schedules — 定时任务 (schedules.md §9, prototype Schedules / NewScheduleDialog) */
 import { useEffect, useState, type ReactNode } from "react"
-import { CheckIcon, ChevronRightIcon, ClockIcon, HistoryIcon, PlayIcon, PlusIcon, XIcon } from "lucide-react"
+import { ChevronRightIcon, ClockIcon, HistoryIcon, PlayIcon, PlusIcon } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Switch } from "@/components/ui/switch"
 import { Input } from "@/components/ui/input"
+import { NumberField } from "@/components/ui/pickers"
 import { Textarea } from "@/components/ui/textarea"
 import { Field, FieldDescription, FieldGroup, FieldLabel } from "@/components/ui/field"
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible"
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog"
-import { Group, Meta, Empty, StatusDot, BotAvatar, go } from "@/ui"
+import { Empty, StatusDot, BotAvatar, go, Panel, Tile, Pill, Notice } from "@/ui"
+import { cn } from "@/lib/utils"
 import { st, botName, toast } from "@/store"
 import { flowApi, errText, type Load, type Parsed, type Schedule, type ScheduleBody, type ScheduleMode, type ScheduleRun } from "@/api/flow"
 import { HubError } from "@/api"
-import { Ico, Modal, Pick, Failed, when, botOptions, mainBot, RUN_STATUS } from "@/auto/common"
+import { Modal, Pick, Failed, Clamp, when, botOptions, mainBot, RUN_STATUS } from "@/auto/common"
 import { t, useT } from "@/i18n"
 import { num } from "@/i18n/format"
 
@@ -39,25 +41,23 @@ export function Schedules({ L, onNew }: { L: Load<Schedule[]>; onNew: () => void
       <AlertDialogFooter><AlertDialogCancel>{t("common:action.cancel")}</AlertDialogCancel><AlertDialogAction variant="destructive" onClick={() => { const d = del!; setDel(null); setOpen(null); void act("del", () => flowApi.deleteSchedule(d.id), t("auto:schedule.deleted")) }} data-del-schedule-confirm>{t("common:action.delete")}</AlertDialogAction></AlertDialogFooter>
     </AlertDialogContent></AlertDialog>
     {edit && <NewScheduleDialog edit={edit} onClose={() => setEdit(null)} onSaved={() => void L.reload()} />}
-    {!L.data.length ? <><Empty title={t("auto:schedule.emptyTitle")} sub={t("auto:schedule.emptySub")} /><div className="flex justify-center"><Button variant="outline" onClick={onNew}><PlusIcon />{t("auto:newSchedule")}</Button></div></>
-    : <Group>{L.data.map((s) => (
+    {!L.data.length ? <Empty title={t("auto:schedule.emptyTitle")} sub={t("auto:schedule.emptySub")} action={<Button variant="outline" onClick={onNew}><PlusIcon />{t("auto:newSchedule")}</Button>} />
+    : <Panel>{L.data.map((s) => (
       <Collapsible key={s.id} open={open === s.id} onOpenChange={(o) => setOpen(o ? s.id : null)}>
-        <div className="flex items-center gap-3 px-2 py-3">
-          <Ico I={ClockIcon} />
+        <div className="flex items-center gap-3 rounded-lg px-3 py-3 transition-colors hover:bg-accent">
+          <Tile I={ClockIcon} className={cn(!s.enabled && "opacity-60")} />
           <CollapsibleTrigger className="min-w-0 flex-1 text-left" data-schedule-row={s.id}>
-            <div className="truncate type-body">{s.name}</div>
-            <Meta className="mt-0.5"><span>{s.describe}</span><span>{s.enabled ? (s.next_at ? t("auto:schedule.next", { time: when(s.next_at) }) : t("auto:schedule.onPlan")) : t("auto:disabled")}</span>
-              {s.last && <span className="inline-flex items-center gap-1">{s.last.status === "failed" ? <XIcon className="size-3 text-destructive" aria-label={t("auto:schedule.lastFailed")} /> : <CheckIcon className="size-3 text-success" aria-label={t("auto:schedule.lastOk")} />}{s.last.text || RUN_STATUS[s.last.status]?.[0]}</span>}</Meta>
+            <div className={cn("truncate type-body font-medium", !s.enabled && "text-muted-foreground")}>{s.name}</div>
+            <div className="mt-0.5 truncate type-footnote text-muted-foreground">{[s.describe, s.enabled ? (s.next_at ? t("auto:schedule.next", { time: when(s.next_at) }) : t("auto:schedule.onPlan")) : t("auto:disabled")].join(" · ")}</div>
           </CollapsibleTrigger>
-          <BotAvatar k={s.bot} size={22} className="hidden sm:block" />
-          <Button size="xs" variant="ghost" className="hidden text-muted-foreground sm:inline-flex" disabled={busy === "run" + s.id} onClick={() => void act("run" + s.id, () => flowApi.runSchedule(s.id), t("auto:schedule.started", { name: s.name }))} data-run-now-row={s.id}><PlayIcon />{t("auto:schedule.runNow")}</Button>
+          {s.last?.status === "failed" && <Pill tone="destructive" data-schedule-failed>{t("auto:schedule.lastFailed")}</Pill>}
           <Switch checked={s.enabled} disabled={busy === "on" + s.id} onCheckedChange={(v) => void act("on" + s.id, () => flowApi.patchSchedule(s.id, { enabled: v }), v ? t("auto:enabled") : t("auto:schedule.disabledToast"))} aria-label={t("auto:enableName", { name: s.name })} />
         </div>
-        <CollapsibleContent className="h-(--collapsible-panel-height) overflow-hidden transition-[height] duration-200 data-ending-style:h-0 data-starting-style:h-0">
+        <CollapsibleContent>
           {open === s.id && <ScheduleDetail s={s} busy={busy} onRun={() => void act("run" + s.id, () => flowApi.runSchedule(s.id), t("auto:schedule.started", { name: s.name }))} onEdit={() => setEdit(s)} onDelete={() => setDel(s)} />}
         </CollapsibleContent>
       </Collapsible>
-    ))}</Group>}
+    ))}</Panel>}
   </>)
 }
 
@@ -69,34 +69,45 @@ function ScheduleDetail({ s, busy, onRun, onEdit, onDelete }: { s: Schedule; bus
   }
   useEffect(() => { void load() }, [s.id, s.last?.at, busy])
   const rows: [string, ReactNode][] = [
-    [t("auto:schedule.rowTime"), <>{s.describe} <span className="font-mono text-[12px] text-muted-foreground">{s.cron}</span> <span className="text-muted-foreground">· {s.tz}</span></>],
-    [t("auto:schedule.rowWhat"), <span className="whitespace-pre-wrap">{s.what}</span>],
+    [t("auto:schedule.rowWhat"), <span className="whitespace-pre-wrap [overflow-wrap:anywhere]">{s.what}</span>],
+    [t("auto:schedule.rowTime"), <>{s.describe} <span className="type-footnote text-muted-foreground">{s.tz} · <span className="font-mono">{s.cron}</span></span></>],
     [t("auto:schedule.rowRun"), <span className="inline-flex items-center gap-1.5"><BotAvatar k={s.bot} size={16} />{botName(s.bot)} · {modeLabel(s.mode)}</span>],
-    [t("auto:schedule.rowMissed"), t(`auto:schedule.missed.${s.missed}`)], [t("auto:schedule.rowOverlap"), t(`auto:schedule.overlap.${s.overlap}`)], [t("auto:schedule.rowBudget"), usd(s.budget_usd)],
+    [t("auto:schedule.rowRules"), <span className="text-muted-foreground">{t("auto:schedule.rules", { missed: t(`auto:schedule.missed.${s.missed}`), overlap: t(`auto:schedule.overlap.${s.overlap}`), budget: usd(s.budget_usd) })}</span>],
   ]
   return (
-    <div className="grid gap-4 px-2 pb-4 sm:grid-cols-2 sm:pl-12" data-schedule-detail={s.id}>
-      <dl className="grid grid-cols-[72px_1fr] gap-x-3 gap-y-1.5 type-callout">
-        {rows.map(([k, v]) => <div key={k} className="contents"><dt className="text-muted-foreground">{k}</dt><dd className="min-w-0">{v}</dd></div>)}
-      </dl>
-      <div>
-        <div className="mb-1.5 flex items-center gap-1.5 type-label text-muted-foreground"><HistoryIcon className="size-3.5" aria-hidden />{t("auto:schedule.runs")}</div>
-        {!runs ? <div className="type-footnote text-muted-foreground">{t("auto:loading")}</div> : !runs.length ? <div className="type-footnote text-muted-foreground">{t("auto:noRuns")}</div> : <ul className="flex max-h-64 flex-col overflow-y-auto" data-schedule-runs>
-          {runs.map((r) => {
-            const go_ = r.item_id ? () => go("#/items/" + r.item_id) : undefined
-            return (
-              <li key={r.id}><button type="button" disabled={!go_} onClick={go_} className="flex w-full items-center gap-2 rounded-md px-1 py-1 text-left type-footnote enabled:hover:bg-accent" title={r.error ?? undefined} data-schedule-run={r.id}>
-                <StatusDot s={RUN_STATUS[r.status]?.[1] ?? "idle"} /><span className="w-24 shrink-0 tabular-nums text-muted-foreground">{when(r.at)}</span>
-                <span className="min-w-0 flex-1 truncate">{r.error ? <span className="text-destructive">{r.error}</span> : r.outcome_label || RUN_STATUS[r.status]?.[0]}</span>
-                <span className="shrink-0 text-muted-foreground">{triggerLabel(r.trigger)}{r.cost_usd ? " · " + usd(r.cost_usd) : ""}</span>
-                {go_ && <ChevronRightIcon className="size-3.5 shrink-0 text-tertiary" aria-hidden />}
-              </button></li>)
-          })}
-          {more && <li><button type="button" className="px-1 py-1 type-footnote text-blue hover:underline" onClick={() => void load(runs[runs.length - 1]?.started)}>{t("auto:schedule.earlier")}</button></li>}
-        </ul>}
+    <div className="flex flex-col gap-4 px-3 pb-4 sm:pl-14" data-schedule-detail={s.id}>
+      {s.last?.status === "failed" && s.last.text && <Notice tone="destructive" data-schedule-error><Clamp text={s.last.text} /></Notice>}
+      <div className="grid gap-x-6 gap-y-4 sm:grid-cols-2">
+        <dl className="grid grid-cols-[64px_1fr] content-start gap-x-3 gap-y-2 type-callout">
+          {rows.map(([k, v]) => <div key={k} className="contents"><dt className="text-muted-foreground">{k}</dt><dd className="min-w-0">{v}</dd></div>)}
+        </dl>
+        <div className="min-w-0">
+          <div className="mb-1.5 flex items-center gap-1.5 type-label text-tertiary"><HistoryIcon className="size-3.5" aria-hidden />{t("auto:schedule.runs")}</div>
+          {!runs ? <div className="type-footnote text-muted-foreground">{t("auto:loading")}</div> : !runs.length ? <div className="type-footnote text-muted-foreground">{t("auto:noRuns")}</div> : <ul className="flex max-h-64 flex-col overflow-y-auto" data-schedule-runs>
+            {runs.map((r) => <RunRow key={r.id} r={r} />)}
+            {more && <li><button type="button" className="px-1 py-1 type-footnote text-blue hover:underline" onClick={() => void load(runs[runs.length - 1]?.started)}>{t("auto:schedule.earlier")}</button></li>}
+          </ul>}
+        </div>
       </div>
-      <div className="flex flex-wrap gap-2 sm:col-span-2"><Button size="sm" variant="outline" disabled={busy === "run" + s.id} onClick={onRun} data-run-now><PlayIcon />{t("auto:schedule.runNow")}</Button><Button size="sm" variant="ghost" className="text-muted-foreground" onClick={onEdit} data-edit-schedule>{t("common:action.edit")}</Button><span className="flex-1" /><Button size="sm" variant="ghost" className="text-destructive" onClick={onDelete} data-del-schedule>{t("common:action.delete")}</Button></div>
+      <div className="flex flex-wrap gap-2"><Button size="sm" variant="outline" disabled={busy === "run" + s.id} onClick={onRun} data-run-now><PlayIcon />{t("auto:schedule.runNow")}</Button><Button size="sm" variant="ghost" className="text-muted-foreground" onClick={onEdit} data-edit-schedule>{t("common:action.edit")}</Button><span className="flex-1" /><Button size="sm" variant="ghost" className="text-destructive" onClick={onDelete} data-del-schedule>{t("common:action.delete")}</Button></div>
     </div>
+  )
+}
+
+/** one run: its time, what came of it, how it was triggered; an error opens in place, an item opens the item */
+function RunRow({ r }: { r: ScheduleRun }) {
+  const [open, setOpen] = useState(false)
+  const on = r.item_id ? () => go("#/items/" + r.item_id) : r.error ? () => setOpen(!open) : undefined
+  return (
+    <li>
+      <button type="button" disabled={!on} onClick={on} aria-expanded={r.error && !r.item_id ? open : undefined} className="flex w-full items-center gap-2 rounded-md px-1 py-1 text-left type-footnote enabled:hover:bg-accent" data-schedule-run={r.id}>
+        <StatusDot s={RUN_STATUS[r.status]?.[1] ?? "idle"} /><span className="w-20 shrink-0 tabular-nums text-muted-foreground">{when(r.at)}</span>
+        <span className={cn("min-w-0 flex-1 truncate", r.error && "text-destructive")}>{r.error || r.outcome_label || RUN_STATUS[r.status]?.[0]}</span>
+        <span className="shrink-0 text-muted-foreground">{triggerLabel(r.trigger)}{r.cost_usd ? " · " + usd(r.cost_usd) : ""}</span>
+        {r.item_id && <ChevronRightIcon className="size-3.5 shrink-0 text-tertiary" aria-hidden />}
+      </button>
+      {open && r.error && <div className="mb-1 ml-5 rounded-md bg-destructive/8 px-2 py-1.5 type-footnote [overflow-wrap:anywhere] text-foreground/85" data-run-error>{r.error}</div>}
+    </li>
   )
 }
 
@@ -143,23 +154,23 @@ export function NewScheduleDialog({ edit, bot, onClose, onSaved }: { edit?: Sche
       footer={<><Button variant="outline" onClick={onClose}>{t("common:action.cancel")}</Button><Button disabled={!ok || busy} onClick={() => void submit()} data-testid="schedule-go">{edit ? t("common:action.save") : t("auto:schedule.create")}</Button></>}>
       {!edit && <div className="flex flex-wrap gap-1.5" role="group" aria-label={t("auto:schedule.templates")}>{tpl.map((x) => <Button key={x.n} size="xs" variant="outline" onClick={() => { setName(x.n); setW(x.when); setWhat(x.what); pickMode(x.mode); if (x.bot) setB(x.bot); setCron("") }} data-tpl={x.n}>{x.n}</Button>)}</div>}
       <FieldGroup className="gap-4">
-        <Field><FieldLabel htmlFor="sch-name">{t("auto:schedule.name")}</FieldLabel><Input id="sch-name" className="rounded-lg" maxLength={40} value={name} onChange={(e) => setName(e.target.value)} placeholder={t("auto:schedule.namePlaceholder")} data-schedule-name /></Field>
-        <Field><FieldLabel htmlFor="sch-when">{t("auto:schedule.when")}</FieldLabel><Input id="sch-when" className="rounded-lg" maxLength={60} value={w} onChange={(e) => setW(e.target.value)} placeholder={t("auto:schedule.whenPlaceholder")} aria-describedby="sch-when-desc" data-schedule-when disabled={!!cron.trim()} />
+        <Field><FieldLabel htmlFor="sch-name">{t("auto:schedule.name")}</FieldLabel><Input id="sch-name" maxLength={40} value={name} onChange={(e) => setName(e.target.value)} placeholder={t("auto:schedule.namePlaceholder")} data-schedule-name /></Field>
+        <Field><FieldLabel htmlFor="sch-when">{t("auto:schedule.when")}</FieldLabel><Input id="sch-when" maxLength={60} value={w} onChange={(e) => setW(e.target.value)} placeholder={t("auto:schedule.whenPlaceholder")} aria-describedby="sch-when-desc" data-schedule-when disabled={!!cron.trim()} />
           <FieldDescription id="sch-when-desc" aria-live="polite" data-parse>{cron.trim() ? t("auto:schedule.byCron") : perr ? <span className="text-destructive">{perr}</span> : parsed ? <span className="flex flex-col gap-0.5">
-            <span><span className="text-foreground">{parsed.describe}</span> <span className="font-mono text-[12px]">{t("auto:schedule.cronParen", { cron: parsed.cron })}</span>{parsed.by === "model" && " · " + t("auto:schedule.byModel")}</span>
+            <span><span className="text-foreground">{parsed.describe}</span> <span className="font-mono">{t("auto:schedule.cronParen", { cron: parsed.cron })}</span>{parsed.by === "model" && " · " + t("auto:schedule.byModel")}</span>
             <span>{t("auto:schedule.upcoming", { times: parsed.next.map(when).join(t("auto:sep.list")) })}</span>
             {parsed.assumed && <span>{parsed.assumed}</span>}{parsed.notes?.map((x) => <span key={x}>{x}</span>)}</span> : t("auto:schedule.whenHint")}</FieldDescription></Field>
         <button type="button" className="-mt-2 self-start type-footnote text-muted-foreground hover:text-foreground" aria-expanded={adv} onClick={() => setAdv(!adv)}>{adv ? t("auto:schedule.advHide") : t("auto:schedule.advShow")}</button>
-        {adv && <div className="grid grid-cols-2 gap-3">
-          <Field><FieldLabel htmlFor="sch-cron">{t("auto:schedule.cron")}</FieldLabel><Input id="sch-cron" className="rounded-lg font-mono text-[12px]" value={cron} onChange={(e) => setCron(e.target.value)} placeholder={parsed?.cron ?? edit?.cron ?? "30 9 * * 1-5"} /></Field>
+        {adv && <div className="grid grid-cols-2 gap-3 anim-in">
+          <Field><FieldLabel htmlFor="sch-cron">{t("auto:schedule.cron")}</FieldLabel><Input id="sch-cron" className="type-code" value={cron} onChange={(e) => setCron(e.target.value)} placeholder={parsed?.cron ?? edit?.cron ?? "30 9 * * 1-5"} /></Field>
           <Field><FieldLabel>{t("auto:schedule.tz")}</FieldLabel><Pick label={t("auto:schedule.tz")} value={tz || "_"} options={[{ v: "_", l: t("auto:schedule.tzDefault") }, ...TZS.map((v) => ({ v, l: v }))]} onChange={(v) => setTz(v === "_" ? "" : v)} className="w-full" /></Field>
+          <Field><FieldLabel>{t("auto:schedule.missedLabel")}</FieldLabel><Pick label={t("auto:schedule.missedLabel")} value={missed} options={[{ v: "catch_up_once", l: t("auto:schedule.missedCatchUp") }, { v: "skip", l: t("auto:schedule.missed.skip") }]} onChange={setMissed} className="w-full" /></Field>
+          <Field><FieldLabel>{t("auto:schedule.overlapLabel")}</FieldLabel><Pick label={t("auto:schedule.overlapLabel")} value={overlap} options={[{ v: "skip", l: t("auto:schedule.overlap.skip") }, { v: "run", l: t("auto:schedule.overlap.run") }]} onChange={setOverlap} className="w-full" /></Field>
         </div>}
-        <Field><FieldLabel htmlFor="sch-what">{t("auto:schedule.what")}</FieldLabel><Textarea id="sch-what" maxLength={2000} className="min-h-16 rounded-lg" value={what} onChange={(e) => setWhat(e.target.value)} placeholder={t("auto:schedule.whatPlaceholder")} data-schedule-what /></Field>
+        <Field><FieldLabel htmlFor="sch-what">{t("auto:schedule.what")}</FieldLabel><Textarea id="sch-what" maxLength={2000} className="min-h-16" value={what} onChange={(e) => setWhat(e.target.value)} placeholder={t("auto:schedule.whatPlaceholder")} data-schedule-what /></Field>
         <Field orientation="horizontal" className="justify-between"><FieldLabel>{t("auto:schedule.handTo")}</FieldLabel><Pick label={t("auto:schedule.handToAria")} value={b} options={botOptions()} onChange={setB} testId="sch-bot" /></Field>
         <Field orientation="horizontal" className="justify-between"><FieldLabel>{t("auto:schedule.modeLabel")}</FieldLabel><Pick label={t("auto:schedule.modeLabel")} value={mode} options={MODES.map((v) => ({ v, l: modeLabel(v) }))} onChange={pickMode} testId="sch-mode" /></Field>
-        <Field orientation="horizontal" className="justify-between"><FieldLabel>{t("auto:schedule.missedLabel")}</FieldLabel><Pick label={t("auto:schedule.missedLabel")} value={missed} options={[{ v: "catch_up_once", l: t("auto:schedule.missedCatchUp") }, { v: "skip", l: t("auto:schedule.missed.skip") }]} onChange={setMissed} /></Field>
-        <Field orientation="horizontal" className="justify-between"><FieldLabel>{t("auto:schedule.overlapLabel")}</FieldLabel><Pick label={t("auto:schedule.overlapLabel")} value={overlap} options={[{ v: "skip", l: t("auto:schedule.overlap.skip") }, { v: "run", l: t("auto:schedule.overlap.run") }]} onChange={setOverlap} /></Field>
-        <Field orientation="horizontal" className="justify-between"><FieldLabel htmlFor="sch-budget">{t("auto:schedule.budget")}</FieldLabel><Input id="sch-budget" type="number" min={0} max={50} step={0.5} className="w-24 rounded-lg" value={budget} onChange={(e) => { setBudget(e.target.value); setBudTouched(true) }} aria-invalid={!budOk} /></Field>
+        <Field orientation="horizontal" className="justify-between"><FieldLabel htmlFor="sch-budget">{t("auto:schedule.budget")}</FieldLabel><NumberField id="sch-budget" min={0} max={50} step={0.5} className="w-28" value={budget.trim() === "" || isNaN(Number(budget)) ? null : Number(budget)} onValueChange={(v) => { setBudget(v == null ? "" : String(v)); setBudTouched(true) }} aria-invalid={!budOk} /></Field>
       </FieldGroup>
     </Modal>
   )

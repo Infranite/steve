@@ -326,6 +326,7 @@ pub async fn run(cfg: &Config) -> anyhow::Result<()> {
     );
     let r = steve_node_cli::dial::serve_until_stopped(
         node,
+        Some(&home),
         &pairing,
         &id,
         &steve_node_wire::tls::Trust::LoopbackPlaintext,

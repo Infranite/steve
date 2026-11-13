@@ -1,6 +1,10 @@
 api DELETE /accounts/x
 api DELETE /attr-defs/x
 api DELETE /attrs/x
+api DELETE /bots/x/capabilities/x/x
+api DELETE /capabilities/a2a-agents/x
+api DELETE /capabilities/mcp-servers/x
+api DELETE /capabilities/skills/x
 api DELETE /connections/x
 api DELETE /contacts/x
 api DELETE /contacts/x/jobs/x
@@ -24,7 +28,11 @@ api DELETE /vault/items/x/fields/x
 api GET /accounts
 api GET /accounts/x
 api GET /attr-defs
+api GET /bots/x/capabilities
 api GET /bots/x/flows
+api GET /capabilities/a2a-agents
+api GET /capabilities/mcp-servers
+api GET /capabilities/skills
 api GET /chan-messages/x/basis
 api GET /chan-messages/x/context
 api GET /chan-messages/x/resources/x
@@ -60,11 +68,16 @@ api GET /github/repos/x
 api GET /items/x/people
 api GET /kb/candidates
 api GET /kb/candidates/expired
+api GET /kb/changes
 api GET /kb/docs
 api GET /kb/docs/x
 api GET /kb/mems
+api GET /kb/providers
 api GET /kb/search
 api GET /kb/sources
+api GET /kb/steward
+api GET /kb/subjects
+api GET /kb/subjects/x/x
 api GET /kb/uses
 api GET /mail/accounts
 api GET /mail/drafts/x
@@ -101,12 +114,14 @@ api GET /spaces/x
 api GET /spaces/x/members
 api GET /spaces/x/messages
 api GET /stats/breakdown
+api GET /stats/events
 api GET /stats/items
 api GET /stats/items/x
 api GET /stats/prices
 api GET /stats/series
 api GET /stats/sessions/x
 api GET /stats/summary
+api GET /stats/tree/x
 api GET /stewards/unowned
 api GET /stewards/x/x
 api GET /systems
@@ -120,9 +135,13 @@ api GET /vault/uses
 api GET /vaults
 api GET /yolo
 api GET /yolo/actions
+api GET /yolo/items/x
 api PATCH /accounts/x
 api PATCH /attr-defs/x
 api PATCH /attrs/x
+api PATCH /capabilities/a2a-agents/x
+api PATCH /capabilities/mcp-servers/x
+api PATCH /capabilities/skills/x
 api PATCH /channels/x
 api PATCH /connections/x
 api PATCH /contacts/x
@@ -145,6 +164,10 @@ api PATCH /teams/x
 api PATCH /vault/items/x
 api POST /accounts
 api POST /attr-defs
+api POST /capabilities/a2a-agents
+api POST /capabilities/a2a-agents/preview
+api POST /capabilities/mcp-servers
+api POST /capabilities/skills
 api POST /chan-messages/x/recall
 api POST /channels
 api POST /channels/cleanup
@@ -180,6 +203,8 @@ api POST /github/repos/x/sync
 api POST /items/x/people
 api POST /kb/candidates/resolve
 api POST /kb/candidates/x/restore
+api POST /kb/changes/x/keep
+api POST /kb/changes/x/undo
 api POST /kb/files
 api POST /kb/mems
 api POST /kb/notes
@@ -226,10 +251,12 @@ api POST /yolo/actions/x/cancel
 api POST /yolo/actions/x/now
 api POST /yolo/actions/x/undo
 api POST /yolo/resume
+api PUT /bots/x/capabilities/x/x
 api PUT /connections/x/credential
 api PUT /flow-settings/allow-private
 api PUT /flows/x
 api PUT /kb/notes/x
+api PUT /kb/steward
 api PUT /mail/drafts/x
 api PUT /stats/prices
 api PUT /stats/tz
@@ -257,7 +284,7 @@ media feishu_user
 profiles ext_ws
 profiles feishu_app
 profiles feishu_user
-provider ext_ws {"id":"ext_ws","system":"ext_ws","name":"外部渠道","auth":"credential","caps":["msg.receive","msg.send_as_user"],"device":false,"fields":[{"key":"url","label":"渠道服务地址","secret":false,"required":true,"type":"text","hint":"wss://…；明文 ws:// 只允许 127.0.0.1 或 ::1"},{"key":"token","label":"访问令牌","secret":true,"required":true,"type":"password"},{"key":"pin","label":"证书指纹","secret":false,"required":false,"type":"text","hint":"自签名证书时填 sha256:<64 位十六进制>"}]}
+provider ext_ws {"id":"ext_ws","system":"ext_ws","name":"其他聊天工具","auth":"credential","caps":["msg.receive","msg.send_as_user"],"device":false,"fields":[{"key":"url","label":"渠道服务地址","secret":false,"required":true,"type":"text","hint":"wss://…；明文 ws:// 只允许 127.0.0.1 或 ::1"},{"key":"token","label":"访问令牌","secret":true,"required":true,"type":"password"},{"key":"pin","label":"证书指纹","secret":false,"required":false,"type":"text","hint":"自签名证书时填 sha256:<64 位十六进制>"}]}
 provider feishu_app {"id":"feishu_app","system":"feishu_app","name":"飞书应用机器人","auth":"credential","caps":["msg.receive","msg.send","directory.read","events"],"device":false,"fields":[{"key":"app_id","label":"App ID","secret":false,"required":true,"type":"text","hint":"开发者后台 → 凭证与基础信息"},{"key":"app_secret","label":"App Secret","secret":true,"required":true,"type":"password"},{"key":"verification_token","label":"Verification Token","secret":true,"required":false,"type":"password","hint":"只有用 webhook 接收事件时需要；长连接不需要"},{"key":"encrypt_key","label":"Encrypt Key","secret":true,"required":false,"type":"password","hint":"只有用 webhook 接收事件时需要；长连接不需要"},{"key":"domain","label":"域名","secret":false,"required":true,"type":"select","default":"feishu","hint":"feishu = 飞书，lark = Lark"}]}
 provider feishu_user {"id":"feishu_user","system":"feishu","name":"飞书 · 你本人","auth":"oauth","caps":["msg.receive","msg.send_as_user"],"device":false}
 provider github_app managed

@@ -86,6 +86,29 @@ pub enum Configured {
     Unsupported,
 }
 
+/// Where a session's permission mode stands on its backend ([`AgentRuntime::mode_state`]): what
+/// its harness was confirmed to run in, what waits or is on its way, and what was refused. Mode
+/// names are Steve's (`plan`, `ask`, `accept_edits`, `auto`, `full_access`).
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize)]
+pub struct ModeState {
+    /// The mode the backend confirmed the harness runs in (its last open or configure that
+    /// finished with success). `None`: none confirmed yet.
+    pub applied: Option<String>,
+    /// A mode waiting for the session's next idle boundary or open, or on its way to the harness.
+    pub desired: Option<String>,
+    /// `desired` is on its way now (sent, not confirmed); else it waits.
+    pub sending: bool,
+    /// A turn of the session is not over: a waiting mode goes when it ends.
+    pub busy: bool,
+    /// No harness runs for the session: its next open carries the mode.
+    pub released: bool,
+    /// The last change did not take: what the backend or the harness said (its capability, a
+    /// Node owner's ceiling, a mode the adapter does not offer).
+    pub refused: Option<String>,
+    /// The outcome of the last change is unknown: the session is held until it is known.
+    pub unknown: bool,
+}
+
 /// What [`AgentRuntime::release`] did with a session's harness.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Released {
@@ -192,6 +215,24 @@ pub trait AgentRuntime: Send + Sync {
     fn set_mode(&self, session_id: &str, mode: &str) -> Result<Configured> {
         let _ = (session_id, mode);
         Ok(Configured::NotRunning)
+    }
+    /// The session runs on a Node that has no link now: why, as far as is known (shown on what
+    /// waits for it). `None`: it is linked, or runs elsewhere.
+    fn node_offline(&self, session_id: &str) -> Option<String> {
+        let _ = session_id;
+        None
+    }
+    /// Where the session's permission mode stands on its backend (`None`: the backend cannot
+    /// tell, or nothing runs it).
+    fn mode_state(&self, session_id: &str) -> Option<ModeState> {
+        let _ = session_id;
+        None
+    }
+    /// The Steve name of harness mode `mode` (`bypassPermissions` → `full_access`), as this
+    /// runtime's backends map it; `None`: none of them can express it.
+    fn mode_name(&self, mode: &str) -> Option<String> {
+        let _ = mode;
+        None
     }
     /// The session's last attempt has an outcome nobody can tell yet (reconciliation decides).
     fn uncertain(&self, session_id: &str) -> bool {

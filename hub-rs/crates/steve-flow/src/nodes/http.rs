@@ -13,10 +13,9 @@
 //!   ([`Vault::use_for_flow`]): a `secret.use` grant of the flow (`subject_type='flow'`) or your
 //!   approval of this step, else the run waits on an approval. Only references the flow's author
 //!   wrote are expanded: they are swapped for random placeholders before the other templates are
-//!   rendered, so event text that contains `{{secrets.…}}` stays text. Values never reach the
-//!   run's context or step input (those keep the template); the response and every error are
-//!   redacted with the vault's [`Redactor`] before they become the step output. With secrets, a
-//!   redirect to another host is not followed.
+//!   rendered, so event text that contains `{{secrets.…}}` stays text. The run's context and step
+//!   input keep the template; the response and errors become the step output as they are. With
+//!   secrets, a redirect to another host is not followed.
 //! - The response keeps 64 KiB. Output: `{status, content_type, body}` plus, when the body is a JSON
 //!   object, its keys at the top level (`{{steps.h.claimId}}`). Status ≥ 400 fails the step.
 
@@ -32,7 +31,6 @@ use rusqlite::{OptionalExtension, params};
 use serde_json::{Map, Value, json};
 use steve_modules::vault::Vault;
 use steve_modules::vault::flow_use::{FlowSecretOutcome, FlowSecretRequest};
-use steve_modules::vault::redact::Redactor;
 use steve_store::NewDecision;
 use zeroize::Zeroizing;
 
@@ -829,12 +827,6 @@ impl NodeKind for Http {
                 }
             }
         }
-        let redactor = Redactor::new(
-            values
-                .iter()
-                .map(|(k, v)| (k.rsplit('.').next().unwrap_or(k), v.as_bytes())),
-        );
-
         let out = self
             .send(
                 &method,
@@ -853,7 +845,7 @@ impl NodeKind for Http {
         drop(values);
         match out {
             Ok((status, content_type, raw)) => {
-                let text = cap(&redactor.scrub_bytes(&raw));
+                let text = cap(&raw);
                 let truncated = raw.len() > BODY_CAP;
                 let parsed = if truncated {
                     None
@@ -872,8 +864,7 @@ impl NodeKind for Http {
                 if truncated {
                     o.insert("truncated".into(), json!(true));
                 }
-                let mut output = Value::Object(o);
-                redactor.scrub_value(&mut output);
+                let output = Value::Object(o);
                 if status >= 400 {
                     let mut e = format!("请求失败：HTTP {status}");
                     if let Some(b) = output["body"].as_str() {
@@ -882,11 +873,11 @@ impl NodeKind for Http {
                             e.push_str(&format!("：{}", b.trim()));
                         }
                     }
-                    return NodeOutcome::Fail(redactor.scrub_str(&e).into_owned());
+                    return NodeOutcome::Fail(e);
                 }
                 NodeOutcome::next(output)
             }
-            Err(e) => NodeOutcome::Fail(redactor.scrub_str(&e).into_owned()),
+            Err(e) => NodeOutcome::Fail(e),
         }
     }
 }
@@ -906,7 +897,7 @@ fn cap(b: &[u8]) -> String {
 }
 
 impl Http {
-    /// Sends; `Ok((status, content type, body bytes ≤ cap + slack))`. Errors are step errors.
+    /// Sends; `Ok((status, content type, body bytes, at most one chunk past the cap))`. Errors are step errors.
     #[allow(clippy::too_many_arguments)]
     async fn send(
         &self,
@@ -1011,8 +1002,8 @@ impl Http {
             match resp.chunk().await {
                 Ok(Some(c)) => {
                     buf.extend_from_slice(&c);
-                    // keep a little more so a secret cut at the cap is still found by the redactor
-                    if buf.len() > BODY_CAP + 4096 {
+                    // one byte past the cap tells a truncated body apart
+                    if buf.len() > BODY_CAP {
                         break;
                     }
                 }

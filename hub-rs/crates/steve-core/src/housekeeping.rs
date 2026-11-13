@@ -74,12 +74,7 @@ impl Core {
             }
             /* one notification per run, not one per item */
             if !archived.is_empty() {
-                let more = if archived.len() > 3 { " 等" } else { "" };
-                let text = format!(
-                    "自动归档了 {} 件完成满 {days} 天的事项：{}{more}",
-                    archived.len(),
-                    archived[..archived.len().min(3)].join("、")
-                );
+                let text = crate::notice_line::archived(&archived, &days.to_string());
                 let one = (archived.len() == 1).then(|| archived[0].as_str());
                 crate::notify::notify(t.db(), &ws, "archive", "info", &text, one)?;
             }

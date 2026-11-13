@@ -739,7 +739,8 @@ fn publish_needs_a_release_action() {
     let k = Kit::new();
     let i = new_item(&k, "g");
     let s = only_session(&k, &i.id);
-    k.core.tool_publish(&s, "steve/st-1", "x").unwrap();
+    let e = k.core.tool_publish(&s, "steve/st-1", "x").unwrap_err();
+    assert!(e.to_string().contains("steve_deliver"), "{e}");
     assert_eq!(
         k.db().events_after(&s.id, 0).unwrap().pop().unwrap().data["text"],
         "这个项目没有配置发布动作，不能发布。"

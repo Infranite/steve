@@ -759,7 +759,8 @@ fn restart_finishes_a_retired_failed_attempt_after_its_turn_ends() {
     assert_eq!(history["history_attempts_total"], 1);
     assert_eq!(history["history_attempts"][0]["item_id"], child);
     assert_eq!(history["history_attempts"][0]["snapshot"]["session_id"], sid);
-    assert_eq!(history["history_attempts"][0]["snapshot"]["status"], "cancelled");
+    // a failure is that attempt's outcome: it stays failed in the archive (ST-10)
+    assert_eq!(history["history_attempts"][0]["snapshot"]["status"], "failed");
     assert!(history["history_attempts"][0]["snapshot"].get("outputs").is_none(), "history view stays compact");
 
     k.core.tx().workflow_tick().unwrap();
@@ -1039,4 +1040,135 @@ async fn an_old_graph_acceptance_cannot_start_wrapup_hooks_after_a_replan_crash(
         "stale acceptance must not authorize hooks before the changed gate invalidates it"
     );
     assert_ne!(k.phase(&parent), "closed");
+}
+
+#[test]
+fn a_plan_that_cannot_run_anything_at_once_is_said_back() {
+    let u = |id: &str, deps: &[&str], res: &[&str]| UnitSpec {
+        id: id.into(),
+        title: id.into(),
+        goal: id.into(),
+        bot_id: "dev".into(),
+        kind: "work".into(),
+        depends_on: deps.iter().map(|s| (*s).into()).collect(),
+        resources: res.iter().map(|s| (*s).into()).collect(),
+        required: true,
+    };
+    // ST-27's shape: one chain, nothing at once
+    let chain = [
+        u("evidence", &[], &["a"]),
+        u("design", &["evidence"], &["b"]),
+        u("review", &["design"], &["c"]),
+        u("integrate", &["review"], &["d"]),
+    ];
+    let notes = crate::workflow::plan_notes(&chain, Some(1));
+    assert_eq!(notes.len(), 1, "{notes:?}");
+    assert!(notes[0].contains("一个接一个"), "{notes:?}");
+    // independent units that share one key are serialised; a limit below the width is named
+    let shared = [
+        u("api", &[], &["repo"]),
+        u("web", &[], &["repo"]),
+        u("review", &["api", "web"], &["r"]),
+    ];
+    let notes = crate::workflow::plan_notes(&shared, Some(1));
+    assert!(
+        notes.iter().any(|n| n.contains("同一个资源「repo」")),
+        "{notes:?}"
+    );
+    assert!(
+        notes.iter().any(|n| n.contains("max_parallel=1")),
+        "{notes:?}"
+    );
+    // a graph that runs work at once says nothing
+    let good = [
+        u("api", &[], &["api"]),
+        u("web", &[], &["web"]),
+        u("review", &["api", "web"], &["r"]),
+        u("integrate", &["review"], &["i"]),
+    ];
+    assert!(crate::workflow::plan_notes(&good, None).is_empty());
+}
+
+fn unit_row(k: &Kit, parent: &str, id: &str) -> Value {
+    k.core.workflow_get(parent).unwrap()["units"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|u| u["id"] == id)
+        .unwrap()
+        .clone()
+}
+
+fn busy_blocker(k: &Kit, parent: &str, id: &str) -> bool {
+    k.core.workflow_get(parent).unwrap()["blockers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|b| b.as_str() == Some(&format!("{id}：执行或取消仍未确认结束")))
+}
+
+/// What the Hub recorded once a Node let a session go: phase released, nothing in flight.
+fn release_binding(k: &Kit, sid: &str) {
+    k.db()
+        .store()
+        .with_conn(|c| {
+            c.execute("INSERT OR IGNORE INTO nodes(node_id,owner,name,pubkey,fingerprint,state,created,last_seen) VALUES ('local','me','node',zeroblob(32),'fingerprint','active',1,1)", [])?;
+            c.execute("INSERT INTO runtime_sessions(session_id,node_id,workspace_ref,node_session_id,config_revision,phase,updated) VALUES (?1,'local','{}',?1,'r','released',1)", [sid])?;
+            Ok(())
+        })
+        .unwrap();
+}
+
+#[test]
+fn a_succeeded_unit_is_never_stopping_and_a_released_binding_is_idle_without_its_node() {
+    let (k, parent, specs) = setup(true);
+    plan(&k, &parent, &specs);
+    let sa = unit(&k, &parent, "a").session_id.unwrap();
+    let sb = unit(&k, &parent, "b").session_id.unwrap();
+
+    // Delivered while its turn is still ending: done, not "stop not yet confirmed". Completion
+    // still waits for the turn, which the blockers say.
+    report(&k, &parent, "a").unwrap();
+    assert_eq!(unit_row(&k, &parent, "a")["status"], "succeeded");
+    assert_eq!(unit_row(&k, &parent, "a")["stop_pending"], false);
+    assert!(busy_blocker(&k, &parent, "a"));
+    k.rt.end_turn(&k.core, &sa, "end_turn", None);
+    assert!(!busy_blocker(&k, &parent, "a"));
+
+    // Its Node is not attached (a snapshot Hub, a Node that is down): the runtime reports a parked
+    // session as busy. The binding the Hub recorded says it was let go with nothing in flight, so
+    // the finished unit holds nothing up.
+    k.rt.st().turning.insert(sa.clone());
+    assert!(
+        busy_blocker(&k, &parent, "a"),
+        "an unreleased parked session stays busy"
+    );
+    release_binding(&k, &sa);
+    assert!(!busy_blocker(&k, &parent, "a"));
+    assert_eq!(unit_row(&k, &parent, "a")["stop_pending"], false);
+
+    // A cancelled unit whose execution goes on is the one stop that is pending, until its binding
+    // is released with nothing in flight.
+    change(&k, &parent, "cancel", Some("b")).unwrap();
+    k.rt.st().turning.insert(sb.clone());
+    assert_eq!(unit_row(&k, &parent, "b")["status"], "cancelled");
+    assert_eq!(unit_row(&k, &parent, "b")["stop_pending"], true);
+    release_binding(&k, &sb);
+    k.db()
+        .store()
+        .with_conn(|c| {
+            c.execute("UPDATE sessions SET status='idle' WHERE id=?1", [&sb])?;
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(unit_row(&k, &parent, "b")["stop_pending"], false);
+    // a turn the Hub still has open on that binding keeps it busy again
+    k.db()
+        .store()
+        .with_conn(|c| {
+            c.execute("INSERT INTO runtime_turns(turn_id,session_id,state,created,updated) VALUES ('t_open',?1,'running',1,1)", [&sb])?;
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(unit_row(&k, &parent, "b")["stop_pending"], true);
 }

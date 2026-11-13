@@ -5,6 +5,7 @@ import { useEffect, useState, type MouseEvent } from "react"
 import { cn } from "cn"
 import { CheckIcon, UserRoundIcon, UserRoundXIcon } from "lucide-react"
 import { Button } from "@/components/ui/button"
+import { Skeleton } from "@/components/ui/skeleton"
 import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList, CommandSeparator } from "@/components/ui/command"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { toast } from "@/store"
@@ -40,7 +41,7 @@ function Chip({ objectType, objectId, className, bare }: { objectType: ObjectTyp
     const h = setTimeout(() => { people.contacts({ q: q.trim() || undefined, limit: 30 }).then((xs) => { if (live) setFound(xs) }, () => { if (live) setFound([]) }) }, q ? 150 : 0)
     return () => { live = false; clearTimeout(h) }
   }, [open, q])
-  if (L.err || !L.data) return L.err ? null : <span className={cn("inline-flex h-6 w-20 animate-pulse rounded-full bg-muted", className)} aria-hidden />
+  if (L.err || !L.data) return L.err ? null : <Skeleton className={cn("inline-flex h-6 w-20 rounded-full", className)} aria-hidden />
   const { object, stewards } = L.data
   const owners = ownersOf(stewards), confirmed = owners.filter((s) => s.status === "confirmed"), proposed = owners.filter((s) => s.status !== "confirmed")
   const label = confirmed.length ? joinList(confirmed.map((s) => (s.is_me ? t("people:rel.me") : s.person_name))) : proposed.length ? t("people:owner.proposed", { name: proposed[0].person_name }) : t("people:owner.none")

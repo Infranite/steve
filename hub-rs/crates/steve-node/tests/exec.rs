@@ -388,7 +388,7 @@ fn contains(hay: &[u8], needle: &[u8]) -> bool {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn secrets_reach_the_command_masked_and_leave_nothing_behind() {
+async fn secrets_reach_the_command_and_leave_nothing_behind() {
     let t = T::new();
     let n = t.node();
     let hub = Arc::new(steve_node_api::testkit::FakeSecrets::default());
@@ -397,21 +397,18 @@ async fn secrets_reach_the_command_masked_and_leave_nothing_behind() {
     let caps = n.probe(false).await.unwrap();
     assert!(caps.features.iter().any(|f| f == FEATURE_SECRET_FILE));
 
-    // env, in every form it may be printed in; stderr too
+    // env; stderr too; printed as it is
     hub.give("op_e1", "令牌", TOKEN.as_bytes());
     let mut s = spec(
         &w,
-        "echo \"t=$TOK\"; printf %s \"$TOK\" | base64; printf %s \"$TOK\" | xxd -p; echo err \"$TOK\" >&2",
+        "echo \"t=$TOK\"; echo err \"$TOK\" >&2",
         Duration::from_secs(10),
     );
     s.secrets = vec![secret("令牌", SecretDelivery::Env { name: "TOK".into() })];
     let (o, r) = run(&n, "op_e1", s).await;
     assert_eq!((o, r.exit_code), (Outcome::Succeeded, Some(0)), "{r:?}");
-    assert_eq!(
-        r.stdout,
-        "t=[已打码：令牌]\n[已打码：令牌]\n[已打码：令牌]\n"
-    );
-    assert_eq!(r.stderr, "err [已打码：令牌]\n");
+    assert_eq!(r.stdout, format!("t={TOKEN}\n"));
+    assert_eq!(r.stderr, format!("err {TOKEN}\n"));
 
     // stdin, and the same secret in env as well: taken once
     hub.give("op_e2", "密码", TOKEN.as_bytes());
@@ -430,9 +427,9 @@ async fn secrets_reach_the_command_masked_and_leave_nothing_behind() {
         ),
     ];
     let (_, r) = run(&n, "op_e2", s).await;
-    assert_eq!(r.stdout, "same\n[已打码：密码]\n", "{r:?}");
+    assert_eq!(r.stdout, format!("same\n{TOKEN}\n"), "{r:?}");
 
-    // a file: private, its path masked, gone once the command ended
+    // a file: private, gone once the command ended
     let stat_mode = if cfg!(target_os = "macos") {
         "stat -f '%Lp'"
     } else {
@@ -450,17 +447,17 @@ async fn secrets_reach_the_command_masked_and_leave_nothing_behind() {
     s.secrets = vec![secret("私钥", SecretDelivery::File { env: "KEYF".into() })];
     let (_, r) = run(&n, "op_e3", s).await;
     let lines: Vec<&str> = r.stdout.lines().collect();
+    let dir = std::fs::read_to_string(t.root.join("where")).unwrap();
     assert_eq!(
         lines,
         [
-            "path=[已打码：临时文件]/KEYF",
+            format!("path={}/KEYF", dir.trim()).as_str(),
             "600",
             "700",
-            "[已打码：私钥]"
+            TOKEN
         ],
         "{r:?}"
     );
-    let dir = std::fs::read_to_string(t.root.join("where")).unwrap();
     assert!(
         !Path::new(dir.trim()).exists(),
         "the temp directory is gone"
@@ -482,15 +479,25 @@ async fn secrets_reach_the_command_masked_and_leave_nothing_behind() {
     let dir = std::fs::read_to_string(t.root.join("where2")).unwrap();
     assert!(!Path::new(dir.trim()).exists());
 
+    // a value the command uses without printing it
+    let unprinted = "unprinted-value-5521";
+    hub.give("op_e5", "k", unprinted.as_bytes());
+    let mut s = spec(&w, "[ -n \"$K\" ] && echo set", Duration::from_secs(10));
+    s.secrets = vec![secret("k", SecretDelivery::Env { name: "K".into() })];
+    let (_, r) = run(&n, "op_e5", s).await;
+    assert_eq!(r.stdout, "set\n", "{r:?}");
+
     n.shutdown().await;
     drop(n);
-    // no value is in the journal, its WAL or anything else the Node keeps
+    // the Node keeps what a command printed (its receipt) and no value otherwise: not in the
+    // journal, its WAL or anything else, in no form
     let kept = all_bytes(&t.root.join("node"));
     assert!(!kept.is_empty());
     assert!(
-        !contains(&kept, TOKEN.as_bytes()),
+        !contains(&kept, unprinted.as_bytes()),
         "a secret in the Node's home"
     );
+    assert!(!contains(&kept, hex::encode(unprinted).as_bytes()));
     assert!(!contains(&kept, hex::encode(TOKEN).as_bytes()));
 }
 

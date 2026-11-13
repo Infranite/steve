@@ -35,7 +35,7 @@ Steve sits above Claude Code and Codex and keeps that record. It is one Rust bin
 | **Permission prompts** | Whichever tab you happen to look at | One Inbox, or YOLO within hard limits |
 | **"Done"** | The agent says so | Checks passed, plan closed, proof from the goal |
 | **Merging** | By hand, one branch at a time | Merge lanes: batched, fast-forward only |
-| **Secrets** | Pasted into the prompt | Used through the vault, output redacted |
+| **Secrets** | Pasted into the prompt | Kept in the vault, injected into the command |
 
 <div align="center">
 
@@ -77,9 +77,9 @@ YOLO only decides things that stay on your machine and can be undone. Money, hig
 <tr>
 <td width="33%" valign="top">
 
-#### 🗝️ Agents use secrets without seeing them
+#### 🗝️ Agents use secrets without reading the vault
 
-Steve runs the command with the secret and hands the agent redacted output. The redactor also catches base64, URL, hex and JSON-escaped copies.
+Steve runs the command with the secret in its environment, stdin or a temporary file, and hands the agent the command's output as it is. Steve never masks or filters what you type or what a model says.
 
 </td>
 <td width="33%" valign="top">
@@ -120,12 +120,12 @@ Acceptance is auto by default, or manual or waived. Auto takes the delivery as i
 Each task has a private, persistent `<home>/workspaces/<item>/outputs` directory for reports, designs, images and other deliverables outside Git. A Node's delivered files are copied there before the worktree can be cleaned up. Code and documents committed to Git remain in the repository. The item page opens files from this directory; the database stores their paths and status, not their contents. Multi-select **交付** tags (方案, 代码, 报告, 内容, 数据, 操作) describe the outcome separately from the item's single **类型** tag. When a goal asks for a design without already asking for implementation, or explicitly defers implementation until review, the delivered design waits for your decision: implement it, keep the design only, or request a revision. YOLO cannot answer that decision.
 
 - **Dependencies** are checked for cycles. A blocked item starts by itself when its dependencies finish, with a summary of what they did. Any point of a session can be **forked** into a new session or a child item, and the relation graph shows runs, handoffs, dependencies and forks.
-- **Bot collaboration** saves a work graph with dependencies, independent review and integration acceptance. The items list names unfinished child items that a parent is waiting for; a graph paused in the current item cycle appears under Paused and names its failed child attempts. The item collaboration area separates overview, current work and delivery history, with links to child items and sessions. It calls execution confirmed only when the Hub has fresh applied activity from the exact active Node attempt; otherwise the work remains active but unconfirmed. The relation graph has separate dependency and provenance views, and a structured list on narrow screens. Children inherit the parent’s request principal and run through the same Node routing, bot permissions, approvals and execution ceiling as ordinary items. Git projects require separate item worktrees; work without a project uses separate item directories. Unknown or mismatched principals, unavailable bots and unavailable Nodes block execution with a visible reason. After the old graph is paused and its children have settled, replanning starts fresh units for a new cycle; earlier verdicts remain linked for inspection but cannot satisfy the new cycle. Provider refusals leave review incomplete and preserve earlier successful work for a later user-approved retry. This supports same-principal collaboration; it does not add cross-principal OS isolation. See [workflow execution](docs/deployment.md#workflow-execution).
+- **Bot collaboration** saves a work graph with dependencies, independent review and integration acceptance. The items list names unfinished child items that a parent is waiting for; a graph paused in the current item cycle appears under Paused and names its failed child attempts. The item page states one current state (what is happening and whose move it is) in a "now" card with the decisions, blockers and workflow actions, above the conversation, where runs of process notes fold to one line. Under it, the collaboration is a list of the coordinator's steps, each with its Bot, state, progress, working time and cost, earlier tries folded into the step's row; "查看全图" opens the steps as one dependency graph. Selecting a step opens its detail, with links to the child item and session and the unit's actions. It calls execution confirmed only when the Hub has fresh applied activity from the exact active Node attempt; otherwise the work remains active but unconfirmed. The relation graph has separate dependency and provenance views, and a structured list on narrow screens. Children inherit the parent’s request principal and run through the same Node routing, bot permissions, approvals and execution ceiling as ordinary items. Git projects require separate item worktrees; work without a project uses separate item directories. Unknown or mismatched principals, unavailable bots and unavailable Nodes block execution with a visible reason. After the old graph is paused and its children have settled, replanning starts fresh units for a new cycle; earlier verdicts remain linked for inspection but cannot satisfy the new cycle. Provider refusals leave review incomplete and preserve earlier successful work for a later user-approved retry. This supports same-principal collaboration; it does not add cross-principal OS isolation. See [workflow execution](docs/deployment.md#workflow-execution).
 - **Outputs** are versioned and open in their own viewers: rendered documents, highlighted code, CSV tables, PDFs, media, folders and branch diffs. Annotate a region, a passage or a whole file, then send all the notes as one message.
 - **Each session has a message queue.** While the agent works, a message without attachments reaches it with the result of its next Steve tool call, without stopping the turn. Edit or withdraw a queued message, *send now* to interrupt the running turn, or send it to a new session. Messages delivered just before a restart come back marked "check, don't redo".
 - **Item debugging.** New items start one 30-minute window of detailed capture automatically; existing items are not enabled retroactively. Open Debug in an item's or session's menu to inspect blockers and recorded events. The owner can stop capture or start a new limited window; reads, restarts and continuing work do not extend it. Agents can query the same evidence with the read-only `steve_debug` tool. See [diagnostic capture and queries](docs/deployment.md#diagnostic-capture-and-queries) for access, retention and evidence limits.
 - **Worktrees.** Every item gets the branch `steve/<id>` in its own worktree. Build caches are given back when items close or sit idle, no new worktree is made below a free-space floor, and deletion is crash-safe.
-- List, board and graph views, with filters, bulk actions, tags, snooze, stars, due dates and automatic archiving. Categories are picked by the router or a keyword guesser, and unsure picks go to a review list.
+- List, board and collaboration views, with filters, bulk actions, tags, snooze, stars, due dates and automatic archiving. Categories are picked by the router or a keyword guesser, and unsure picks go to a review list.
 
 <table>
 <tr>
@@ -137,6 +137,8 @@ Each task has a private, persistent `<home>/workspaces/<item>/outputs` directory
 ### 🤖 Bots
 
 A bot is a harness (Claude Code or Codex) plus a model and thinking effort, a role, a persona, rules, a permission mode, an acceptance mode and a default project. Describe one in a sentence and Steve drafts it. `@Bot` hands work to that bot. Reassigning an item stops the old session and passes on the last progress. A bot can serve several workspaces with a different duty in each, and only sees the data of the one it is working in.
+
+**Capabilities** in the sidebar is the workspace's library of what bots can use, each defined once and chosen per bot on the bot's own **Capabilities** tab: MCP servers (a local command, or an HTTP or SSE endpoint, with environment variables or headers), skills (`SKILL.md` instructions written where the harness reads skills) and remote agents spoken to over A2A, each of which a bot gets as one Steve tool. Every harness gets them the same way: the servers through ACP next to Steve's own tools, the skills where the harness adapter declares it reads them. Secret values are kept in the vault and handed to the session's Node only when the harness opens. Steve itself is an MCP server too: Claude Desktop, Cursor or another agent can connect to it with an access token and find items, hand Steve work and search your knowledge base, and other agents can hand Steve tasks over A2A by its Agent Card. See [Capabilities](docs/deployment.md#capabilities-mcp-servers-skills-and-remote-agents).
 
 Steve stays out of your harness settings. It answers a permission prompt for that one call and never writes "always allow". It never edits your Codex config. Every session shows the command to resume it in the harness itself, and you can import your local Claude Code and Codex history.
 
@@ -153,6 +155,7 @@ No setting can widen these limits, and they are property-tested: money, high-sen
 
 - **Shell guard.** Default deny, with its own POSIX shell parser. `eval`, `sh -c`, `sudo` and command substitution are refused, and `kill` only works on processes the agent started.
 - **Countdowns and breakers.** While you're active, YOLO waits and shows *Now* and *I'll decide* buttons. It pauses the workspace after repeated failures, repeated undos, or a release it approved that went wrong.
+- **Full access.** An explicit, confirmed level above YOLO (workspace, project or item): agents' harnesses run without permission prompts. A running session switches at its next idle boundary; until then, what its harness still asks is approved within full access's own limits, checked on every command a line actually runs (here-documents, `find -exec`, `xargs`, wrappers such as `env -S` or `watch`, sed scripts, inline code) against the same hard limits as the line itself: Steve's data directory, port 8440 and launchd, money, pushing, speaking as you, root, stopping processes by name or ones the agent did not start, a program whose name is behind a variable, and code or commands that cannot be read statically still wait for you. Turning it off takes each session back to its bot's mode (asking, without a bot), and each item page shows the mode Steve wants, where it comes from and the one the Node has confirmed. See [permission modes and full access](docs/deployment.md#permission-modes-and-full-access).
 - **Record and undo.** Every decision is recorded per window and item, with its cost. Five kinds of undo: revert the decision, roll back the release, recall the message, re-answer, or pause the item.
 
 <p align="center"><img src="docs/assets/screenshots/inbox.webp" alt="Inbox: acceptances, approvals and questions in one place; YOLO picks up the routine ones" width="85%"><br><sub><b>Inbox</b>: acceptances, approvals and questions in one place; YOLO picks up the routine ones</sub></p>
@@ -184,7 +187,7 @@ Steve keeps contacts, organizations and teams. Identities are matched by handle,
 
 Each workspace has a master key in the OS key store (macOS Keychain, Linux Secret Service, or a protected directory). Each item has its own data key, and fields are encrypted with XChaCha20-Poly1305. Templates cover logins, cards, API credentials, SSH keys and more, and the template, not the client, decides which fields are secret. Revealing a secret takes a passkey (Touch ID or Face ID) with a single-use challenge bound to that field.
 
-Bots use secrets through `steve_secret_use` without reading them. Each use needs an approval or a time-boxed grant, is recorded, and returns redacted output. Cards and high-sensitivity items can never be granted. A paste guard strips card numbers, API tokens and private keys before anything reaches a model.
+Bots use secrets through `steve_secret_use` without reading them. Each use needs an approval or a time-boxed grant, is recorded, and returns the command's exit code and output. Cards and high-sensitivity items can never be granted. Steve does not scan, mask or refuse content: what you type reaches the model as typed, and a model that repeats a secret is a reason to switch harness or model.
 
 ### ⚡ Automation
 
@@ -220,7 +223,7 @@ There is no runtime plugin store yet; the Plugins page is a placeholder. Today y
 | **Hub Extension API** (`steve-hub/src/extension.rs`) | Connection providers, channel adapters, mail adapters, flow event sources, API routes and background jobs. Build a binary with `Assembly::builtin().with(MyExt)`. Conflicts stop the Hub at startup, naming the extension. Feishu, IMAP mail and GitHub are built this way. |
 | **Flow seams** (`FlowSetup`) | Custom node kinds, actions, item finders and event adapters. |
 | **Module seams** (`steve-modules`) | Item lifecycle hooks, declarative **item panels** in the sidebar (GitHub's *PR & checks* and the mail panel use them), prompt context and outbound checks. |
-| **MCP tools for agents** | One loopback `steve` MCP server, with tokens scoped to a single item. It covers progress, questions, approvals, delivery and publishing, plus knowledge, mail, GitHub, contacts and secrets. |
+| **MCP tools for agents** | One `steve` MCP server, with tokens scoped to a single item (from the Hub's machine only). It covers progress, questions, approvals, delivery and publishing, plus knowledge, mail, GitHub, contacts and secrets. Clients outside Steve reach a scoped part of it with an access token. |
 | **Webhooks** | `POST /hooks/:connection_id`, signature-checked before anything is written. |
 | **Knowledge store port** | SQLite FTS by default. [OpenViking](ops/openviking) is an optional vector backend (`STEVE_KB_STORE=openviking`). Every hit is re-checked against the Hub's own access rules. |
 
@@ -396,7 +399,7 @@ hub-rs/          Rust workspace: the Hub binary and its crates
   crates/steve-github     GitHub App/token, webhooks, PRs, checks, effects
   crates/steve-knowledge  knowledge base, retrieval, citations, memories
   crates/steve-flow       signals, flows, schedules
-  crates/steve-vault      redaction and paste guard; steve-keyhelper holds the macOS key
+  crates/steve-vault      what a launched harness may not read; steve-keyhelper holds the macOS key
   crates/steve-stats      usage, cost and delivery metrics
   crates/steve-node*      the Hub–Node protocol and the Node runtime that runs every session
   crates/steve-store      SQLite schema and migrations

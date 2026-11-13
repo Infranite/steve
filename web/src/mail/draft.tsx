@@ -5,6 +5,7 @@
  * Nothing is sent from here except through that decision. */
 import { useEffect, useState, type ReactNode } from "react"
 import { ChevronDownIcon, ShieldAlertIcon, ShieldCheckIcon, ShieldQuestionIcon, Undo2Icon } from "lucide-react"
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible"
 import { cn } from "cn"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
@@ -32,7 +33,7 @@ function Rcpts({ kind, xs }: { kind: "to" | "cc" | "bcc"; xs: Rcpt[] }) {
       <span className="flex min-w-0 flex-wrap gap-1.5">{xs.map((r) => (
         <span key={r.addr} className="inline-flex max-w-full items-center gap-1 rounded-full bg-muted px-2.5 py-0.5 type-footnote" title={r.addr} data-rcpt={r.addr}>
           <span className="truncate">{r.name || r.addr}</span>{r.name && <span className="hidden truncate text-muted-foreground sm:inline">{r.addr}</span>}
-          {r.external && <Badge variant="outline" className="ml-0.5 h-4 px-1 text-[10.5px] font-normal text-attention" data-external>{t("mail:draft.external")}</Badge>}
+          {r.external && <Badge variant="secondary" className="ml-0.5 h-4 bg-attention/12 px-1.5 text-attention" data-external>{t("mail:draft.external")}</Badge>}
         </span>))}</span>
     </div>
   )
@@ -47,12 +48,12 @@ function Basis({ b, onCheck, busy }: { b: Draft["basis"]; onCheck?: () => void; 
     : spans.length || v === "warn" || v === "block" ? [ShieldAlertIcon, spans.length ? t("mail:draft.leak", { count: spans.length }) : t("mail:draft.leakUncounted"), "text-attention"]
     : [ShieldCheckIcon, t("mail:draft.passed"), "text-muted-foreground"]
   return (
-    <div className="type-footnote" data-basis={v}>
-      <button type="button" className={cn("inline-flex items-center gap-1", cls, spans.length && "hover:text-foreground")} aria-expanded={open} disabled={!spans.length} onClick={() => setOpen(!open)}>
-        <I className="size-3.5" aria-hidden />{label}{spans.length > 0 && <ChevronDownIcon className={cn("size-3.5 transition-transform", open && "rotate-180")} aria-hidden />}</button>
+    <Collapsible open={open} onOpenChange={setOpen} className="type-footnote" data-basis={v}>
+      <CollapsibleTrigger className={cn("group/disc inline-flex items-center gap-1 rounded-md", cls, spans.length && "hover:text-foreground")} disabled={!spans.length}>
+        <I className="size-3.5" aria-hidden />{label}{spans.length > 0 && <ChevronDownIcon className="size-3.5 transition-transform duration-180 ease-(--ease-out) group-aria-expanded/disc:rotate-180" aria-hidden />}</CollapsibleTrigger>
       {v === "unchecked" && onCheck && <Button size="xs" variant="ghost" className="ml-1.5 text-muted-foreground" disabled={busy} onClick={onCheck} data-draft-check>{t("mail:draft.check")}</Button>}
-      {open && <ul className="mt-1.5 flex flex-col gap-1 pl-5">{spans.map((s, n) => <li key={n} className="list-disc"><mark className="rounded bg-attention/15 px-0.5 text-foreground">{s.text}</mark>{s.why && <span className="text-muted-foreground"> · {s.why}</span>}</li>)}</ul>}
-    </div>
+      <CollapsibleContent><ul className="flex flex-col gap-1 pl-5 pt-1.5">{spans.map((s, n) => <li key={n} className="list-disc"><mark className="rounded-md bg-attention/15 px-0.5 text-foreground">{s.text}</mark>{s.why && <span className="text-muted-foreground"> · {s.why}</span>}</li>)}</ul></CollapsibleContent>
+    </Collapsible>
   )
 }
 
@@ -105,8 +106,8 @@ function Fields({ x, readOnly }: { x: ReturnType<typeof useDraft>; readOnly: boo
       <Rcpts kind="to" xs={d.to} /><Rcpts kind="cc" xs={d.cc} /><Rcpts kind="bcc" xs={d.bcc} />
       <div className="flex items-baseline gap-2 type-callout"><span className="w-12 shrink-0 text-muted-foreground">{t("mail:draft.subject")}</span><span className="min-w-0 break-words">{d.subject}</span></div>
       {readOnly
-        ? <div className="max-h-72 overflow-auto whitespace-pre-wrap break-words rounded-lg bg-muted/50 px-3 py-2 type-body" data-draft-body-ro>{d.body}</div>
-        : <Textarea aria-label={t("mail:draft.body")} className="min-h-40 rounded-lg type-body" value={x.body} onChange={(e) => x.setBody(e.target.value)} maxLength={100_000} data-draft-body />}
+        ? <div className="max-h-72 overflow-auto whitespace-pre-wrap break-words rounded-lg bg-muted/60 px-3.5 py-2.5 type-body" data-draft-body-ro>{d.body}</div>
+        : <Textarea aria-label={t("mail:draft.body")} className="min-h-40 rounded-lg md:type-body" value={x.body} onChange={(e) => x.setBody(e.target.value)} maxLength={100_000} data-draft-body />}
       {x.dirty && !readOnly && <div className="type-footnote text-muted-foreground">{t("mail:draft.edited")}</div>}
       {d.files.length > 0 && <Files files={d.files} />}
       <Basis b={d.basis} busy={x.busy} onCheck={!readOnly && EDITABLE.has(d.status) ? () => void x.check() : undefined} />
@@ -172,13 +173,13 @@ export function ThreadDraft({ d, onChange }: { d: Draft; onChange: () => void })
   const t = useT()
   return (
     <DraftParts d0={d} onChange={onChange}>{({ fields, buttons, x }) => (
-      <Card className="gap-0 rounded-xl py-0" data-thread-draft={d.id}>
-        <CardHeader className="pt-3.5">
+      <Card className="gap-0 rounded-xl py-0 shadow-[var(--lift)] anim-in" data-thread-draft={d.id}>
+        <CardHeader className="px-4 pt-4">
           <CardDescription className="flex items-center gap-2 type-footnote"><StatusDot s={DRAFT_STATUS[x.d.status]?.[1] ?? "idle"} /><span className="font-medium text-foreground/80">{DRAFT_STATUS[x.d.status]?.[0] ?? x.d.status}</span>
             <span className="text-tertiary">·</span><span>{x.d.author === "me" ? t("mail:draft.byMe") : t("mail:draft.byBot", { bot: botName(x.d.author) })}</span></CardDescription>
           <CardTitle className="sr-only">{t("mail:draft.srTitle", { subject: x.d.subject })}</CardTitle>
         </CardHeader>
-        <CardContent className="pb-4 pt-3">{fields}</CardContent>
+        <CardContent className="px-4 pb-4 pt-3">{fields}</CardContent>
         <CardFooter className="flex-wrap justify-end gap-2 border-t px-3 py-2.5!">{buttons}</CardFooter>
       </Card>)}
     </DraftParts>

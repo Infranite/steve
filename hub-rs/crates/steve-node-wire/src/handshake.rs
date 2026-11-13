@@ -11,6 +11,12 @@
 //!    key (from pairing, or remembered from the first signed welcome) refuses any other; a Hub of
 //!    an earlier release sends neither field, and a Node of one ignores them.
 //!
+//! A Node that could not link (a fault the Hub cannot see from its side: a hello over the frame
+//! limit, a welcome that does not hold) may answer a challenge with `report {node_id, error, sig}`
+//! instead of a hello, `sig` the same binding over `"steve-node-report-v1"`. The Hub notes the
+//! reason for the Node's owner, answers `noted` and closes; nothing is linked. At most
+//! [`REPORT_MAX`] bytes of reason; a Hub of an earlier release refuses it as `invalid`.
+//!
 //! Unknown, pending and revoked Nodes and bad signatures all get one `denied` text: a refusal tells
 //! the dialler nothing about which it was. `denied` means only that: a Hub that could not decide
 //! (its store failed, the handshake ran out of time) answers `internal`, which a Node retries.
@@ -30,6 +36,10 @@ pub const BUDGET: Duration = Duration::from_secs(10);
 pub const DENIED: &str = "denied";
 /// The Hub could not decide (store error, timeout): not a refusal, the Node dials again.
 pub const INTERNAL: &str = "internal";
+/// The handshake ended with a [`Report`] noted, not a link.
+pub const REPORTED: &str = "reported";
+/// The longest reason a [`Report`] carries, in bytes.
+pub const REPORT_MAX: usize = 1024;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProtoRange {
@@ -77,6 +87,39 @@ pub struct Welcome {
     /// [`welcome_message`] signed by that key (hex).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub sig: String,
+}
+
+/// Why a Node could not link, said instead of a hello.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Report {
+    pub node_id: NodeId,
+    pub error: String,
+    #[serde(default)]
+    pub sig: String,
+}
+
+/// `s` cut to at most [`REPORT_MAX`] bytes, on a character boundary.
+pub fn clip_report(s: &str) -> &str {
+    let mut end = s.len().min(REPORT_MAX);
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
+/// The bytes a report signs: this Hub, this connection, this nonce, and the report.
+pub fn report_message(c: &Challenge, r: &Report) -> Vec<u8> {
+    let mut unsigned = r.clone();
+    unsigned.sig = String::new();
+    let v = serde_json::to_value(&unsigned).unwrap_or(Value::Null);
+    let mut m = b"steve-node-report-v1".to_vec();
+    for part in [&c.hub_id, &c.conn_id, &c.nonce] {
+        m.push(0);
+        m.extend_from_slice(part.as_bytes());
+    }
+    m.push(0);
+    m.extend_from_slice(&identity::sha256(canonical_json(&v).as_bytes()));
+    m
 }
 
 /// The bytes a welcome signs: this connection, this nonce, the hello it answers, and itself.
@@ -150,6 +193,9 @@ pub trait Admission: Send + Sync {
     /// transaction that again requires active or paused. `Ok(None)`: refused after all; `Err`: the
     /// store failed.
     async fn admit(&self, hello: &Hello) -> Result<Option<Admitted>, String>;
+    /// A Node whose key may connect said why it could not link ([`Report`], its signature checked,
+    /// `error` at most [`REPORT_MAX`] bytes).
+    async fn reported(&self, _node: &NodeId, _error: &str) {}
 }
 
 /// The bytes a hello signs.
@@ -177,14 +223,20 @@ async fn send_ctl(sink: &mut FrameSink, m: &str, p: Value) -> Result<(), Refused
 }
 
 async fn recv_ctl(stream: &mut FrameStream, want: &str) -> Result<Value, Refused> {
+    recv_ctl_of(stream, &[want]).await.map(|(_, p)| p)
+}
+
+/// The next control frame, one of `want`: which, and its payload.
+async fn recv_ctl_of(stream: &mut FrameStream, want: &[&str]) -> Result<(String, Value), Refused> {
+    let want0 = want[0];
     match stream.next().await {
         Some(Ok(Frame::Text(t))) => match Envelope::decode(&t) {
-            Some(e) if e.t == Kind::Ctl && e.m == want => Ok(e.p),
+            Some(e) if e.t == Kind::Ctl && want.contains(&e.m.as_str()) => Ok((e.m, e.p)),
             Some(e) if e.t == Kind::Ctl && e.m == "error" => Err(refused(
                 e.p["code"].as_str().unwrap_or(DENIED),
                 e.p["detail"].as_str().unwrap_or(""),
             )),
-            _ => Err(refused("invalid", format!("expected {want}"))),
+            _ => Err(refused("invalid", format!("expected {want0}"))),
         },
         // a bare close is a refusal only when it says so (a proxy or a restart closes too)
         Some(Ok(Frame::Close(code, reason))) => Err(refused(
@@ -252,7 +304,10 @@ pub async fn accept_as(
             serde_json::to_value(&challenge).unwrap_or_default(),
         )
         .await?;
-        let p = recv_ctl(stream, "hello").await?;
+        let (m, p) = recv_ctl_of(stream, &["hello", "report"]).await?;
+        if m == "report" {
+            return Err(take_report(sink, admission, &challenge, p).await);
+        }
         let hello: Hello =
             serde_json::from_value(p).map_err(|_| refused("invalid", "malformed hello"))?;
         if hello.proto.0 != PROTOCOL.0 || !hello.codecs.iter().any(|c| c == "json") {
@@ -305,10 +360,81 @@ pub async fn accept_as(
     };
     if let Err(e) = &r
         && e.code != "offline"
+        && e.code != REPORTED
     {
         refuse(sink, e).await;
     }
     r
+}
+
+/// A [`Report`] in place of a hello: noted when its signature holds, answered `noted`, closed. The
+/// refusal to return: [`REPORTED`] once noted (the link ends there), else why it was not.
+async fn take_report(
+    sink: &mut FrameSink,
+    admission: &dyn Admission,
+    challenge: &Challenge,
+    p: Value,
+) -> Refused {
+    let Ok(report) = serde_json::from_value::<Report>(p) else {
+        return refused("invalid", "malformed report");
+    };
+    if report.error.len() > REPORT_MAX {
+        return refused("invalid", "report too long");
+    }
+    let denied = || refused(DENIED, "this node may not connect");
+    let key = match admission.key(&report.node_id).await {
+        Ok(Some(k)) => k,
+        Ok(None) => return denied(),
+        Err(e) => {
+            tracing::warn!("node report: {e}");
+            return refused(INTERNAL, "the hub could not decide; dial again");
+        }
+    };
+    let ok = hex::decode(&report.sig)
+        .is_ok_and(|sig| identity::verify(&key, &report_message(challenge, &report), &sig));
+    if !ok {
+        return denied();
+    }
+    admission.reported(&report.node_id, &report.error).await;
+    let _ = send_ctl(sink, "noted", json!({})).await;
+    let _ = sink.send(Frame::Close(1000, REPORTED.into())).await;
+    let _ = sink.close().await;
+    refused(REPORTED, report.error)
+}
+
+/// The Node's side of a [`Report`]: answers the challenge with `error` (clipped to [`REPORT_MAX`])
+/// instead of a hello, and waits for the Hub to say it noted it. `hub_id`: the Hub this Node paired
+/// with; a challenge from any other is refused.
+pub async fn report(
+    sink: &mut FrameSink,
+    stream: &mut FrameStream,
+    node: &NodeId,
+    identity: &Identity,
+    hub_id: Option<&str>,
+    error: &str,
+) -> Result<(), Refused> {
+    let run = async {
+        let p = recv_ctl(stream, "challenge").await?;
+        let challenge: Challenge =
+            serde_json::from_value(p).map_err(|_| refused("invalid", "malformed challenge"))?;
+        if let Some(want) = hub_id
+            && want != challenge.hub_id
+        {
+            return Err(refused(DENIED, "not the hub this node paired with"));
+        }
+        let mut r = Report {
+            node_id: node.clone(),
+            error: clip_report(error).to_string(),
+            sig: String::new(),
+        };
+        r.sig = hex::encode(identity.sign(&report_message(&challenge, &r)));
+        send_ctl(sink, "report", serde_json::to_value(&r).unwrap_or_default()).await?;
+        recv_ctl(stream, "noted").await.map(|_| ())
+    };
+    match tokio::time::timeout(BUDGET, run).await {
+        Ok(r) => r,
+        Err(_) => Err(refused("offline", "handshake too slow")),
+    }
 }
 
 /// What the Node says about itself in its hello.

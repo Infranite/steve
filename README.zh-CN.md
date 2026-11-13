@@ -35,7 +35,7 @@ Steve 架在 Claude Code 和 Codex 之上，负责把这些记下来、管起来
 | **权限确认** | 刚好看到哪个标签页就答哪个 | 统一进“待处理”，或交给有硬边界的 YOLO |
 | **算不算完成** | 智能体说完成就算 | 检查通过、计划走完、拿出目标要求的证据 |
 | **合并** | 手动一个个合 | 合并通道：成批合并，只做快进 |
-| **密钥** | 直接贴进提示词 | 通过保险箱使用，输出脱敏 |
+| **密钥** | 直接贴进提示词 | 放在保险箱里，注入到命令中 |
 
 <div align="center">
 
@@ -77,9 +77,9 @@ YOLO 只决定留在本机、能撤销的事。涉及钱、高敏感密钥、推
 <tr>
 <td width="33%" valign="top">
 
-#### 🗝️ 用密钥，但看不到密钥
+#### 🗝️ 用密钥，但不读保险箱
 
-Steve 带着密钥执行命令，交给智能体的只有脱敏后的输出。base64、URL 编码、十六进制和 JSON 转义过的副本也会被认出来。
+Steve 把密钥放进命令的环境变量、标准输入或临时文件来执行，命令的输出原样交给智能体。Steve 不对你输入的内容或模型说的话做任何打码或过滤。
 
 </td>
 <td width="33%" valign="top">
@@ -121,7 +121,7 @@ Steve 带着密钥执行命令，交给智能体的只有脱敏后的输出。ba
 - **产出**有版本，各用各的查看器：渲染后的文档、高亮代码、CSV 表格、PDF、媒体、文件夹和分支 diff。可以对一块区域、一段文字或整个文件做批注，攒好后一次发出。
 - **每个会话一个消息队列**：智能体干活时，不带附件的消息会随它下一次调用 Steve 工具的结果送到，不打断当前回合。排队的消息可以编辑、撤回，可以“立即发送”打断当前回合，也可以发到新会话。重启前刚送达的消息回来时会标上“先核对，别重做”。
 - **Worktree**：每个事项在自己的 worktree 里，分支是 `steve/<id>`。事项关闭或闲置时归还构建缓存，剩余空间低于下限就不再新建 worktree，删除过程不怕崩溃。
-- 列表、看板和关系图三种视图，支持筛选、批量操作、标签、暂缓、星标、截止日期和自动归档。分类由路由或关键词判断，拿不准的进复核列表。
+- 列表、看板和协作三种视图，支持筛选、批量操作、标签、暂缓、星标、截止日期和自动归档。分类由路由或关键词判断，拿不准的进复核列表。
 
 <table>
 <tr>
@@ -133,6 +133,8 @@ Steve 带着密钥执行命令，交给智能体的只有脱敏后的输出。ba
 ### 🤖 Bot
 
 一个 Bot 由 harness（Claude Code 或 Codex）、模型和思考强度、职责、人设、规范、权限模式、验收方式和默认项目组成。用一句话描述，Steve 就能起草出来。`@Bot` 把活交给它。改派事项时旧会话会停掉，最后的进展交给新 Bot。一个 Bot 可以在多个工作区里担任不同职责，但只看得到当前工作区的数据。
+
+侧栏的「能力」是这个工作空间的能力库：MCP 服务器（本地命令，或者 HTTP / SSE 地址，带环境变量或请求头）、技能（`SKILL.md` 做事说明，写到 harness 读技能的地方）和通过 A2A 协作的远程 Agent（Bot 拿到的是一个 Steve 工具），在这里定义一次，再到每个 Bot 的「能力」里选用。哪种 harness 都一样拿到它们：MCP 服务器经 ACP 和 Steve 自己的工具并列，技能写到 harness 适配器声明的位置。机密的值存在保险箱里，只在 harness 打开时交给会话所在的 Node。Steve 自己也是一个 MCP 服务器：Claude Desktop、Cursor 或别的 Agent 可以用访问令牌连上来，查事项、交代工作、查知识库；别的 Agent 也可以照 Steve 的 Agent Card 通过 A2A 把任务交给它。见 [能力](docs/deployment.md#capabilities-mcp-servers-skills-and-remote-agents)。
 
 Steve 不动你的 harness 设置。权限提示只答这一次，从不写“始终允许”，也从不改你的 Codex 配置。每个会话都给出在 harness 里接着跑的命令，本机已有的 Claude Code 和 Codex 历史也能导进来。
 
@@ -178,7 +180,7 @@ Steve 管理联系人、组织和团队。身份依次按账号、邮箱、姓�
 
 每个工作区一把主密钥，放在系统密钥库里（macOS 钥匙串、Linux Secret Service，或受保护的目录）。每个条目有自己的数据密钥，字段用 XChaCha20-Poly1305 加密。模板覆盖登录、银行卡、API 凭据、SSH 密钥等，哪些字段是密文由模板决定，不由客户端决定。查看密文要用通行密钥（Touch ID / Face ID），挑战一次有效，且绑定到具体字段。
 
-Bot 通过 `steve_secret_use` 使用密钥，但读不到它。每次使用都要审批或有时限的授权，会留记录，拿回来的是脱敏输出。银行卡和高敏感条目永远不能授权。粘贴守卫会在内容到达模型之前去掉卡号、API token 和私钥。
+Bot 通过 `steve_secret_use` 使用密钥，但读不到它。每次使用都要审批或有时限的授权，会留记录，拿回来的是命令的退出码和输出。银行卡和高敏感条目永远不能授权。Steve 不扫描、不打码、不拦截内容：你输入的内容原样交给模型；模型复述了密钥，就该换一个 harness 或模型。
 
 ### ⚡ 自动化
 
@@ -364,7 +366,7 @@ hub-rs/          Rust workspace：Hub 可执行文件和各 crate
   crates/steve-github     GitHub App / token、webhook、PR、检查、外部操作
   crates/steve-knowledge  知识库、检索、引用、记忆
   crates/steve-flow       信号、流程、定时
-  crates/steve-vault      脱敏和粘贴守卫；steve-keyhelper 持有 macOS 密钥
+  crates/steve-vault      启动的 harness 不能读取的内容；steve-keyhelper 持有 macOS 密钥
   crates/steve-stats      用量、花费和交付指标
   crates/steve-node*      Hub–Node 协议和运行所有会话的 Node 运行时
   crates/steve-store      SQLite 表结构和迁移

@@ -1,25 +1,29 @@
 /* 统计页（stats.md §6）：#/stats 与下钻 #/stats/items/:id。只有 Rust Hub 有这些接口；
  * 拿不到（TS Hub）时显示“还没有接入”，不显示示例数据。费用处处标“估”。
- * ST-40 起的层级：运行状态（原顶部横栏）→ 核心指标与下钻 → 事项（新建与完成、状态分布）→ 耗时 → 用量与费用 → 质量与介入 → Agent → 事项明细。
- * 每张图都写明单位和时间范围；时间范围、项目、Bot 只在页头选一次，下面所有数字跟着变。 */
+ * stats v2 按用途从上到下：筛选（时间、项目、Bot）→ 一行“现在”（进行中 · 等你 · 失败，YOLO 状态）→ 关键数字（和上一段比）
+ * → 每天的产出（完成数和费用）→ 钱和时间花在哪（构成 + 最贵的事项，点进费用去向）→ Bot 对比 → harness · 模型对比
+ * → 事件浏览器（默认收起）。一节一个标题，卡片只用来装图和表。时间范围、项目、Bot 只在页头选一次，下面所有数字跟着变。 */
 import { useEffect, useState } from "react"
 import { CalendarIcon } from "lucide-react"
+import { Tag } from "@/panel"
 import { Button } from "@/components/ui/button"
-import { Input } from "@/components/ui/input"
+import { DateField } from "@/components/ui/pickers"
 import { Spinner } from "@/components/ui/spinner"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { st } from "@/store"
 import { Page, Segmented, Empty } from "@/ui"
 import { Select } from "@/view-shared"
 import { Unwired } from "@/unwired"
-import { stats, type Filter, type RangeKind, type Summary } from "@/api/stats"
-import { UsageKpis } from "@/stats/kpi"
-import { Trend } from "@/stats/trend"
-import { AgentSection, QualityHuman, Section, TimeSection, UsageSection } from "@/stats/tables"
-import { ItemsTable } from "@/stats/items"
-import { CoreKpis, DrillPanel, FlowChart, StatusBars, type Drill } from "@/stats/overview"
+import { stats, statsSeed, type Filter, type RangeKind, type Summary } from "@/api/stats"
+import { KeyNumbers } from "@/stats/kpi"
+import { Section } from "@/stats/tables"
+import { DrillPanel, NowLine, type Drill } from "@/stats/overview"
+import { DailyChart } from "@/stats/daily"
+import { WhereSection } from "@/stats/where"
+import { BotCompare, ModelCompare } from "@/stats/compare"
 import { RunState } from "@/yolo/status"
 import { StatsItemView } from "@/stats/drill"
+import { EventsSection } from "@/stats/events"
 import { Trans } from "react-i18next"
 import { t, useT } from "@/i18n"
 import { fmtN, fmtRange, fmtUsd, hhmm, oneDay, time, zoneName, useStats } from "@/stats/format"
@@ -48,11 +52,11 @@ function CustomRange({ f, set }: { f: Filter; set: (f: Filter) => void }) {
   const bad = !from || !to || from > to || (Date.parse(to) - Date.parse(from)) / 86400000 + 1 > 366
   return (
     <Popover open={open} onOpenChange={setOpen}>
-      <PopoverTrigger render={<Button size="sm" variant="outline" className="font-normal" data-custom-range />}><CalendarIcon />{f.range === "custom" && f.from ? t("common:time.range", { from: f.from, to: f.to }) : t("stats:page.pickDates")}</PopoverTrigger>
+      <PopoverTrigger render={<Button size="sm" variant="secondary" className="rounded-lg font-normal" data-custom-range />}><CalendarIcon className="text-muted-foreground" />{f.range === "custom" && f.from && f.to ? fmtRange(f.from, f.to) : t("stats:page.pickDates")}</PopoverTrigger>
       <PopoverContent align="start" className="w-72">
         <div className="flex flex-col gap-3">
-          <label className="flex flex-col gap-1 type-footnote text-muted-foreground">{t("stats:page.from")}<Input type="date" value={from} max={today} onChange={(e) => setFrom(e.target.value)} aria-label={t("stats:page.fromAria")} /></label>
-          <label className="flex flex-col gap-1 type-footnote text-muted-foreground">{t("stats:page.to")}<Input type="date" value={to} max={today} onChange={(e) => setTo(e.target.value)} aria-label={t("stats:page.toAria")} /></label>
+          <label className="flex flex-col gap-1 type-footnote text-muted-foreground">{t("stats:page.from")}<DateField value={from} max={today} onChange={setFrom} aria-label={t("stats:page.fromAria")} /></label>
+          <label className="flex flex-col gap-1 type-footnote text-muted-foreground">{t("stats:page.to")}<DateField value={to} max={today} onChange={setTo} aria-label={t("stats:page.toAria")} /></label>
           {bad && <div className="type-footnote text-muted-foreground">{t("stats:page.badRange")}</div>}
           <Button size="sm" disabled={bad} onClick={() => { set({ ...f, range: "custom", from, to }); setOpen(false) }} data-custom-apply>{t("stats:page.applyRange")}</Button>
         </div>
@@ -63,9 +67,8 @@ function CustomRange({ f, set }: { f: Filter; set: (f: Filter) => void }) {
 
 export function StatsView() {
   const t = useT()
-  const [f, setF0] = useState<Filter>(saved)
+  const [f, setF0] = useState<Filter>(() => { if (statsSeed.next) { saved = statsSeed.next; statsSeed.next = null } return saved })
   const setF = (x: Filter) => { saved = x; setF0(x) }
-  const [picked, setPicked] = useState<string | null>(null)
   const [drill, setDrill] = useState<Drill | null>(null)
   /* the page follows live changes only while its range includes today */
   const live = f.range !== "custom" || (f.to ?? "") >= localDay()
@@ -84,56 +87,59 @@ export function StatsView() {
   const bots = Object.keys(st.bots)
   const toolbar = (
     <div className="flex flex-wrap items-center gap-2" data-stats-toolbar>
-      <Segmented size="sm" value={f.range === "custom" ? "custom" : f.range} onChange={(v) => { setPicked(null); setDrill(null); if (v !== "custom") setF({ ...f, range: v, from: undefined, to: undefined }); else setF({ ...f, range: "custom", from: f.from ?? localDay(new Date(Date.now() - 13 * 86400000)), to: f.to ?? localDay() }) }} options={RANGES()} />
-      {f.range === "custom" && <CustomRange f={f} set={(x) => { setPicked(null); setDrill(null); setF(x) }} />}
-      <Select value={f.project ?? ""} onChange={(v) => setF({ ...f, project: v || undefined })} options={[{ v: "", l: t("stats:page.allProjects") }, ...st.projects.map((p) => ({ v: p.id, l: p.name }))]} testId="stats-project" />
-      <Select value={f.bot ?? ""} onChange={(v) => setF({ ...f, bot: v || undefined })} options={[{ v: "", l: t("stats:page.allBots") }, ...bots.map((k) => ({ v: k, l: st.bots[k].n }))]} testId="stats-bot" />
-      {s.s === "ok" && <span className="type-footnote text-muted-foreground" data-updated>{t("stats:page.updatedAt", { time: hhmm(s.at) })}</span>}
+      <Segmented size="sm" value={f.range === "custom" ? "custom" : f.range} onChange={(v) => { setDrill(null); if (v !== "custom") setF({ ...f, range: v, from: undefined, to: undefined }); else setF({ ...f, range: "custom", from: f.from ?? localDay(new Date(Date.now() - 13 * 86400000)), to: f.to ?? localDay() }) }} options={RANGES()} />
+      {f.range === "custom" && <CustomRange f={f} set={(x) => { setDrill(null); setF(x) }} />}
+      <Select value={f.project ?? ""} onChange={(v) => { setDrill(null); setF({ ...f, project: v || undefined }) }} options={[{ v: "", l: t("stats:page.allProjects") }, ...st.projects.map((p) => ({ v: p.id, l: p.name }))]} testId="stats-project" />
+      <Select value={f.bot ?? ""} onChange={(v) => { setDrill(null); setF({ ...f, bot: v || undefined }) }} options={[{ v: "", l: t("stats:page.allBots") }, ...bots.map((k) => ({ v: k, l: st.bots[k].n }))]} testId="stats-bot" />
+      {s.s === "ok" && <span className="type-footnote tabular-nums text-tertiary" data-updated>{t("stats:page.updatedAt", { time: hhmm(s.at) })}</span>}
     </div>
   )
   return (
-    <Page title={t("stats:page.title")} sub={s.s === "ok" ? (oneDay(f) ? t("stats:page.subHourly", { name: NAME(f.range), range: fmtRange(s.v.range.from, s.v.range.to), zone: zoneName(s.v.range.tz) }) : t("stats:page.sub", { name: NAME(f.range), range: fmtRange(s.v.range.from, s.v.range.to) })) : t("stats:page.estNote")} max={1040} toolbar={toolbar}>
+    <Page title={t("stats:page.title")} sub={s.s === "ok" ? (oneDay(f) ? t("stats:page.subHourly", { name: NAME(f.range), range: fmtRange(s.v.range.from, s.v.range.to), zone: zoneName(s.v.range.tz) }) : t("stats:page.sub", { name: NAME(f.range), range: fmtRange(s.v.range.from, s.v.range.to) })) : t("stats:page.estNote")} max={1280} toolbar={toolbar}>
       {s.s === "loading" ? <div className="flex justify-center py-24" role="status" aria-label={t("stats:word.loading")}><Spinner className="size-5 text-muted-foreground" /></div>
         : s.s === "error" ? <Empty title={t("stats:page.loadFailed")} sub={s.msg} />
-        : <StatsBody s={s.v} f={f} fkey={fkey} live={live} picked={picked} setPicked={setPicked} drill={drill} setDrill={setDrill} />}
+        : <StatsBody s={s.v} f={f} setF={setF} fkey={fkey} live={live} drill={drill} setDrill={setDrill} />}
     </Page>
   )
 }
 
-function StatsBody({ s, f, fkey, live, picked, setPicked, drill, setDrill }: { s: import("@/api/stats").Summary; f: Filter; fkey: string; live: boolean; picked: string | null; setPicked: (d: string | null) => void; drill: Drill | null; setDrill: (d: Drill | null) => void }) {
+function StatsBody({ s, f, setF, fkey, live, drill, setDrill }: { s: Summary; f: Filter; setF: (f: Filter) => void; fkey: string; live: boolean; drill: Drill | null; setDrill: (d: Drill | null) => void }) {
   const t = useT()
   const nothing = s.usage.total === 0 && s.usage.reported === 0 && s.usage.turns === 0 && s.throughput.created === 0 && s.throughput.done === 0 && s.human.decisions === 0 && s.throughput.wip === 0
   const since = s.since.tokens
-  const range = fmtRange(s.range.from, s.range.to), rangeName = NAME(f.range), prevName = PREV(f.range)
-  const [src] = useStats(() => stats.usage(f, "source"), [fkey], live)
+  const rangeName = NAME(f.range), prevName = PREV(f.range)
+  /* the “现在” drill-downs open under the status line; a day's opens under its chart */
+  const nowDrill = drill && !drill.startsWith("day:") ? drill : null
   return (
-    <div className="flex flex-col gap-14" data-stats>
-      <div className="flex flex-col gap-5" data-overview>
-        <RunState className="-mt-4 border-b pb-3" />
-        <CoreKpis s={s} f={f} prevName={prevName} rangeName={rangeName} drill={drill} setDrill={setDrill} />
-        {drill && <DrillPanel key={drill} d={drill} f={f} fkey={fkey} live={live} rangeName={rangeName} close={() => setDrill(null)} />}
-      </div>
-      <Section k="items" title={t("stats:page.items")} meta={oneDay(f) ? t("stats:page.itemsMetaHourly", { range }) : t("stats:page.itemsMetaDaily", { range })}>
-        <div className="grid grid-cols-1 gap-10 md:grid-cols-[minmax(0,3fr)_minmax(0,2fr)]">
-          <FlowChart s={s} f={f} fkey={fkey} live={live} drill={drill} setDrill={setDrill} />
-          <StatusBars f={f} drill={drill} setDrill={setDrill} />
+    <div className="@container/stats flex flex-col gap-10" data-stats>
+      <div className="flex flex-col gap-3" data-overview>
+        <div className="flex flex-col gap-1">
+        <NowLine f={f} drill={drill} setDrill={setDrill}>
+          {live ? <Tag tone="ok" data-live><span className="size-1.5 dot-running rounded-full bg-current" />{t("stats:panel.live")}</Tag> : <Tag>{t("stats:panel.past")}</Tag>}
+        </NowLine>
+        <RunState className="px-2" />
         </div>
-      </Section>
+        {nowDrill && <DrillPanel key={nowDrill} d={nowDrill} f={f} fkey={fkey} live={live} rangeName={rangeName} close={() => setDrill(null)} />}
+        <KeyNumbers s={s} prevName={prevName} />
+      </div>
       {nothing ? <Empty title={t("stats:page.nothing")} sub={t("stats:page.nothingSub")} /> : <>
-        <TimeSection s={s} f={f} fkey={fkey} live={live} range={range} />
-        <Section k="usage" title={t("stats:page.usage")} meta={range}>
-          <UsageKpis s={s} prevName={prevName} bySource={src.s === "ok" ? src.v.rows : undefined} />
-          <PriceNote spend={s.spend} />
-          <Trend f={f} fkey={fkey} live={live} range={[s.range.from, s.range.to]} tz={s.range.tz} picked={picked} onPick={setPicked} />
-          <UsageSection f={f} fkey={fkey} live={live} picked={picked} />
+        <Section k="daily" title={t("stats:v2.daily.section")} sub={t("stats:v2.daily.sectionSub")}>
+          <DailyChart s={s} f={f} fkey={fkey} live={live} drill={drill} setDrill={setDrill} rangeName={rangeName} />
         </Section>
-        <QualityHuman s={s} f={f} fkey={fkey} live={live} range={range} prevName={prevName} />
-        <AgentSection s={s} f={f} fkey={fkey} live={live} range={range} />
-        <Section k="item-table" title={t("stats:page.itemTable")} meta={t("stats:page.itemTableMeta", { range })}>
-          <ItemsTable f={f} fkey={fkey} live={live} />
+        <Section k="where" title={t("stats:v2.where.section")} sub={t("stats:v2.where.sectionSub")}>
+          <WhereSection s={s} f={f} fkey={fkey} live={live} />
+          <PriceNote spend={s.spend} />
+        </Section>
+        <Section k="bots" title={t("stats:v2.bots.title")} sub={f.bot ? t("stats:v2.bots.subOne") : t("stats:v2.bots.sub")}
+          right={f.bot ? <Button size="xs" variant="ghost" className="text-blue" onClick={() => setF({ ...f, bot: undefined })} data-bots-all>{t("stats:v2.bots.showAll")}</Button> : undefined}>
+          <BotCompare f={f} fkey={fkey} live={live} onBot={(bot) => { setDrill(null); setF({ ...f, bot }) }} />
+        </Section>
+        <Section k="models" title={t("stats:v2.models.title")} sub={t("stats:v2.models.sub")}>
+          <ModelCompare f={f} fkey={fkey} live={live} />
         </Section>
       </>}
-      <footer className="border-t pt-4 type-footnote text-muted-foreground" data-stats-foot>
+      <EventsSection f={f} fkey={fkey} live={live} />
+      <footer className="max-w-[72ch] type-footnote text-tertiary" data-stats-foot>
         {t("stats:page.foot.all", {
           cost: t("stats:page.foot.cost"),
           tokens: s.usage.reported
@@ -157,7 +163,7 @@ function PriceNote({ spend }: { spend: Summary["spend"] }) {
   const from = by.table && md ? t(failed ? "stats:page.priceNote.fromBothFailed" : "stats:page.priceNote.fromBoth", { md }) : by.table ? t("stats:page.priceNote.fromTable") : md ? t(failed ? "stats:page.priceNote.fromMdFailed" : "stats:page.priceNote.fromMd", { md }) : ""
   if (!spend.unpriced_tokens && !from) return null
   return (
-    <div className="-mt-3 flex flex-col gap-0.5 type-footnote text-muted-foreground" data-price-note>
+    <div className="flex flex-col gap-0.5 px-1 type-footnote text-muted-foreground" data-price-note>
       {spend.unpriced_tokens > 0 && (
         <div data-unpriced-note>
           <Trans t={t} i18nKey="stats:page.priceNote.unpriced" count={unpriced.length} values={{ models: unpriced.join(t("stats:word.listSep")) || t("stats:word.unknownModel"), tokens: fmtN(spend.unpriced_tokens) }} components={{ warn: <span className="text-attention" /> }} />

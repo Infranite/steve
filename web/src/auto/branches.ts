@@ -51,3 +51,10 @@ export function branchWarnings(g: Graph): BranchWarning[] {
   }
   return [...strong, ...weak]
 }
+/** the nodes the trigger can't reach (graph.rs `validate` refuses a graph with any: `flow.graph.unreachable`) */
+export function unreachableNodes(g: Graph): string[] {
+  const start = g.nodes.find((n) => n.kind === "trigger")?.id
+  const seen = new Set<string>(start ? [start] : []), stack = start ? [start] : []
+  while (stack.length) { const c = stack.pop()!; for (const e of g.edges) if (e.from === c && !seen.has(e.to)) { seen.add(e.to); stack.push(e.to) } }
+  return g.nodes.filter((n) => !seen.has(n.id)).map((n) => n.id)
+}

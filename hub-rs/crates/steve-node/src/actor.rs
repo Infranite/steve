@@ -2077,6 +2077,22 @@ async fn open_harness(
         (Some(s), Some(sd)) => Some((sd.env.clone(), harness_state(inner, s, &sd)?)),
         _ => None,
     };
+    // the Bot's skills where the adapter declares it reads them, in that directory
+    match (
+        &state,
+        inner.cfg.acp.adapter_properties(&harness).skills.as_deref(),
+    ) {
+        (Some((_, dir)), Some(sub)) => {
+            if let Err(why) = crate::bot_skills::place(dir, sub, &row.open.skills) {
+                tracing::warn!(session = %session, "the Bot's skills were not placed: {why}");
+            }
+        }
+        _ if !row.open.skills.is_empty() => tracing::info!(
+            session = %session,
+            "the Bot's skills are not given: the harness reads none, or the session has no harness directory of its own"
+        ),
+        _ => {}
+    }
     // its toolchains' outputs and caches in the item's and the person's own places
     let tools = crate::toolchain::for_run(
         &inner.cfg.home,
@@ -2268,13 +2284,22 @@ async fn open_harness(
             .mode_choice(&harness, row.open.policy.permissions),
     );
     let meta = inner.cfg.acp.session_meta(&harness);
+    // Steve's own tools first, then the Bot's own servers with their secrets taken just now
+    let mut mcp_servers = crate::mcp_servers(inner, session);
+    if !row.open.mcp_servers.is_empty() {
+        let hub = inner.secrets.lock().unwrap().clone();
+        let bots = crate::bot_mcp::servers(hub, session, &row.open.mcp_servers).await;
+        if let Some(all) = mcp_servers.as_array_mut() {
+            all.extend(bots);
+        }
+    }
     let handshake = acp_session::open(
         &conn,
         OpenConfig {
             client_version: &inner.cfg.acp.version,
             cwd: &cwd,
             resume: row.acp_id.as_deref(),
-            mcp_servers: crate::mcp_servers(inner, session),
+            mcp_servers,
             mode,
             model: row.open.choice.model.as_deref(),
             effort: row.open.choice.effort.as_deref(),

@@ -47,7 +47,26 @@ try {
     if (shots) await page.screenshot({ path: `${shots}/cleanup-${mode}-${width}.png`, fullPage: true })
     await confirm.click()
     if (mode === "changed") {
-      await page.getByText("关联决定已变化，请重新预览并确认清理", { exact: true }).waitFor()
+      await page.locator("[data-toast-id]").getByText("关联决定已变化，请重新预览并确认清理", { exact: true }).waitFor() // the toast; its screen-reader copy says the same
+      // an error raised from the dialog's own action stays clear of the dialog: above or beside its card, or – when the
+      // card leaves no room anywhere – pinned to the window's top, clear of the dialog's fields and buttons
+      await page.waitForTimeout(700) // the toast and the card settle
+      const geo = await page.evaluate(() => {
+        const box = el => { const r = el?.getBoundingClientRect(); return r && { top: r.top, bottom: r.bottom, left: r.left, right: r.right } }
+        return {
+          panel: box(document.querySelector(".ui-dlgc > .ui-dlgc__panel")),
+          toasts: [...document.querySelectorAll("[data-toast-id]")].map(box),
+          fields: [...document.querySelectorAll(".ui-dlgc__panel input, .ui-dlgc__panel textarea, .ui-dlgc__panel button:not(.ui-dlgc__close)")].map(box),
+          edge: document.querySelector(".ui-tsc")?.getAttribute("data-y"),
+        }
+      })
+      const meets = (a, b) => a.top < b.bottom && a.bottom > b.top && a.left < b.right && a.right > b.left
+      assert(geo.panel && geo.toasts.length, "dialog and toast are both up")
+      if (geo.panel.top >= 96) assert(geo.toasts.every(t => !meets(t, geo.panel)), `toast ${JSON.stringify(geo.toasts)} overlaps dialog ${JSON.stringify(geo.panel)} at ${width}`)
+      else {
+        assert.equal(geo.edge, "top", "a dialog with no room above it sends the toast to the top")
+        assert(geo.toasts.every(t => geo.fields.every(f => !meets(t, f))), `toast covers a field of the dialog at ${width}`)
+      }
       assert.equal(await page.locator("[data-fixture-state]").getAttribute("data-fixture-state"), "open")
       assert.equal(mutations.length, 1, "failure must not disconnect or retry automatically")
       assert.equal(await confirm.isEnabled(), true)

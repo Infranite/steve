@@ -430,6 +430,83 @@ impl Db {
     pub fn events_after(&self, session: &str, after: i64) -> Result<Vec<Event>> {
         Ok(self.s.events().after(session, after, 5000)?)
     }
+    /// The agent's final reply: what it said after its last tool call in the turn that ended (since
+    /// the last message it was sent), whole however long it is or however many events it streamed in.
+    /// What it waits for now is said there, not somewhere on the way. A turn that ended on a tool call
+    /// with nothing said after it has no final reply (empty): what it said before that call (a request
+    /// the call may have made moot) is never read as what it waits for now. Only a call's update that
+    /// comes late (the call began before the reply) does not count as a call after the reply.
+    pub fn final_reply(&self, session: &str) -> Result<String> {
+        /// How many of the turn's last events are read: a call whose beginning lies further back
+        /// counts as begun at its oldest update read.
+        const SCAN: usize = 5000;
+        let mut read = 0;
+        enum Seen {
+            Text(String),
+            Tool(Option<String>),
+        }
+        // the turn, newest first
+        let mut turn: Vec<Seen> = vec![];
+        let mut before = 0;
+        'back: loop {
+            let page = self.s.events().before(session, before, 500)?;
+            let Some(oldest) = page.last() else {
+                break;
+            };
+            before = oldest.seq;
+            for e in &page {
+                read += 1;
+                if let Some(t) = steve_transcript::assistant_text(&e.kind, &e.data) {
+                    turn.push(Seen::Text(t.to_string()));
+                    continue;
+                }
+                let user = e.kind == "user"
+                    || e.kind == "user_message_chunk"
+                    || e.kind == steve_transcript::TEXT
+                        && e.data.get("role").and_then(Value::as_str) == Some("user");
+                if user || read >= SCAN {
+                    break 'back;
+                }
+                if matches!(
+                    e.kind.as_str(),
+                    steve_transcript::TOOL | "tool_call" | "tool_call_update"
+                ) {
+                    let call = e
+                        .data
+                        .pointer("/tool/id")
+                        .or_else(|| e.data.get("toolCallId"))
+                        .and_then(Value::as_str)
+                        .map(String::from);
+                    turn.push(Seen::Tool(call));
+                }
+            }
+        }
+        // how many events of each call are older than the one looked at
+        let mut older: std::collections::HashMap<&str, usize> = Default::default();
+        for s in &turn {
+            if let Seen::Tool(Some(c)) = s {
+                *older.entry(c.as_str()).or_default() += 1;
+            }
+        }
+        let mut parts: Vec<&str> = vec![];
+        for s in &turn {
+            match s {
+                Seen::Text(t) => parts.push(t),
+                Seen::Tool(call) => {
+                    let late_update = call.as_deref().is_some_and(|c| {
+                        let n = older.get_mut(c).expect("counted");
+                        *n -= 1;
+                        *n > 0
+                    });
+                    if !late_update {
+                        break;
+                    }
+                }
+            }
+        }
+        parts.reverse();
+        Ok(parts.concat().trim().to_string())
+    }
     pub fn events_up_to(&self, session: &str, seq: i64) -> Result<Vec<Event>> {
         Ok(self.s.events().up_to(session, seq)?)
     }
@@ -444,26 +521,24 @@ impl Db {
             .optional()?)
         })?)
     }
-    /// The text of the session's newest `system` event.
-    pub fn last_system_text(&self, session: &str) -> Result<Option<String>> {
-        let data: Option<String> = self.s.reader::<_, steve_store::StoreError>(|c| {
-            Ok(c.query_row(
-                "SELECT data FROM events WHERE session_id = ? AND kind = 'system' ORDER BY seq DESC LIMIT 1",
-                [session],
-                |r| r.get(0),
-            )
-            .optional()?)
-        })?;
-        Ok(data
-            .and_then(|d| serde_json::from_str::<Value>(&d).ok())
-            .and_then(|v| v.get("text").and_then(Value::as_str).map(String::from)))
-    }
     /// Any event of the session at or after `ts`.
     pub fn has_events_since(&self, session: &str, ts: i64) -> Result<bool> {
         Ok(self.s.reader::<_, steve_store::StoreError>(|c| {
             Ok(c.query_row(
                 "SELECT 1 FROM events WHERE session_id = ? AND ts >= ? LIMIT 1",
                 rusqlite::params![session, ts],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some())
+        })?)
+    }
+    /// A message was sent to the session (a turn of its own began) after its event `seq`.
+    pub fn sent_after(&self, session: &str, seq: i64) -> Result<bool> {
+        Ok(self.s.reader::<_, steve_store::StoreError>(|c| {
+            Ok(c.query_row(
+                "SELECT 1 FROM events WHERE session_id = ? AND kind = 'user' AND seq > ? LIMIT 1",
+                rusqlite::params![session, seq],
                 |_| Ok(()),
             )
             .optional()?

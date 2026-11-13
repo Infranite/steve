@@ -52,6 +52,7 @@ export default {
     noMatch: "No matching items",
     noItems: "No items yet",
     noItemsSub: "Use “New item” at the top right to save your first password or token.",
+    noItemsLockedSub: "Items can be added once the vault opens again.",
     recentUses: "Recent use",
     noUses: "No use yet",
     rules: "Rules",
@@ -86,7 +87,7 @@ export default {
     fieldsNote: "Secret fields show only a mask; viewing or copying a value takes local verification, hides again after 30 seconds and is written to the use log.",
     useLog: "Use log",
     neverUsed: "Not used yet",
-    useLogNote: "Only who used it, when and why is recorded, never the value; values that show up in conversation logs are masked automatically.",
+    useLogNote: "Only who used it, when and why is recorded, never the value.",
   },
   edit: {
     title: "Edit “{{label}}”",
@@ -202,8 +203,8 @@ export default {
   decision: {
     grantFor_one: "Grant for {{count}} hour",
     grantFor_other: "Grant for {{count}} hours",
-    secretUseNoteGrant: "Steve runs this command for it and injects the secret; it only gets the exit code and masked output. While granted, the same bot using this item in the same scope won't ask you again.",
-    secretUseNoteOnce: "Steve runs this command for it and injects the secret; it only gets the exit code and masked output. This item needs your approval for every use.",
+    secretUseNoteGrant: "Steve runs this command for it and injects the secret; it gets the exit code and the command's output. While granted, the same bot using this item in the same scope won't ask you again.",
+    secretUseNoteOnce: "Steve runs this command for it and injects the secret; it gets the exit code and the command's output. This item needs your approval for every use.",
     deny: "Deny",
     grantMenu: "Grant…",
     once: "Approve once",

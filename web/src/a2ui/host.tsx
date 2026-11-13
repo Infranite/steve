@@ -19,8 +19,8 @@ export const useA2uiNested = () => useContext(Nested)
 export function A2uiPending({ loading }: { loading?: boolean }) {
   const t = useT()
   return (
-  <div className="my-3 flex items-center gap-2 rounded-xl border border-dashed px-4 py-3 type-callout text-muted-foreground" data-a2ui-pending={loading ? undefined : true} data-a2ui-loading={loading || undefined}>
-    <span className="size-1.5 animate-pulse rounded-full bg-muted-foreground" aria-hidden />{loading ? t("misc:a2ui.loading") : t("misc:a2ui.generating")}
+  <div className="my-3 flex items-center gap-2.5 rounded-xl bg-muted/60 px-4 py-3 type-callout text-muted-foreground anim-in" data-a2ui-pending={loading ? undefined : true} data-a2ui-loading={loading || undefined}>
+    <span className="size-1.5 rounded-full bg-blue dot-running" aria-hidden />{loading ? t("misc:a2ui.loading") : t("misc:a2ui.generating")}
   </div>
   )
 }

@@ -325,7 +325,7 @@ async fn messages_wait_for_the_turn_and_stop_ends_it() {
         )
         .await;
     assert_eq!(s, 400);
-    // changed to a text with a token in it: taken, with the token replaced (V4 paste guard)
+    // changed to a text with a token in it: taken as written
     let token = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
     let (s, _) = e
         .call(
@@ -337,8 +337,7 @@ async fn messages_wait_for_the_turn_and_stop_ends_it() {
     assert_eq!(s, 200);
     let (_, st) = e.call("GET", "/api/state", None).await;
     let thread = st["thread"].to_string();
-    assert!(!thread.contains(token), "{thread}");
-    assert!(thread.contains("排队一 ［已拦下的机密］"), "{thread}");
+    assert!(thread.contains(&format!("排队一 {token}")), "{thread}");
     let (s, _) = e
         .call(
             "PATCH",

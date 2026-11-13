@@ -67,10 +67,10 @@ try {
     assert.equal(overflow, false, `no horizontal overflow at ${width}px`)
     if (shots) await page.screenshot({ path: `${shots}/disk-${width}-${theme}-floor.png`, fullPage: true })
     await page.locator('[data-outbox-revive="github.after"]').click()
-    await page.getByText("已重新投递 2 条").waitFor()
+    await page.locator("[data-toast-id]").getByText("已重新投递 2 条").waitFor() // the toast; its screen-reader copy says the same
     await page.locator("[data-outbox-dead]").waitFor({ state: "detached" })
     await page.locator("[data-disk-reclaim]").click()
-    await page.getByText("释放了 11 GB，2 个按规则保留").waitFor()
+    await page.locator("[data-toast-id]").getByText("释放了 11 GB，2 个按规则保留").waitFor()
     await page.locator('[data-disk-pressure="low"]').waitFor()
     if (shots) await page.screenshot({ path: `${shots}/disk-${width}-${theme}-after.png`, fullPage: true })
     await page.close()

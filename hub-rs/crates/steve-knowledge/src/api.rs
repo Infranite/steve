@@ -35,7 +35,10 @@ pub fn routes(kb: Knowledge) -> Router<Modules> {
         .route("/kb/notes/{id}", put(update_note))
         .route("/kb/mems", get(list_mems).post(create_mem))
         .route("/kb/uses", get(list_uses))
+        .route("/kb/providers", get(providers))
         .merge(crate::candidates::routes())
+        .merge(crate::subjects::routes())
+        .merge(crate::steward::routes())
         .layer(Extension(kb))
 }
 
@@ -129,6 +132,15 @@ async fn create_mem(
     Body(b): Body<svc::MemBody>,
 ) -> ApiResult<Json<Value>> {
     m.blocking(move |m| svc::create_mem(m, &who, b).map(Json))
+        .await
+}
+
+async fn providers(
+    State(m): State<Modules>,
+    Extension(kb): Kb,
+    who: Caller,
+) -> ApiResult<Json<Value>> {
+    m.blocking(move |m| crate::provenance::providers(m, &kb, &who).map(Json))
         .await
 }
 

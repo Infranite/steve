@@ -1,15 +1,20 @@
 //! What an item's work is doing now (ST-10): one judgement, from durable state, for the turn end, the
 //! stall watch, Steve's continues and the diagnostics. A coordinator that ends its turn while its
-//! work graph runs, queues, waits for you or is paused is waiting on purpose; a required unit that
-//! failed is a real failure it has to act on. Never judged from the session's last words or its last
+//! work graph runs, queues, waits for you or is paused by you is waiting on purpose; a graph it
+//! paused itself without asking waits for you, and you are asked; a required unit that failed is a
+//! real failure it has to act on. Never judged from the session's last words or its last
 //! system line (an old release notice says nothing about why it is idle now).
 
-use steve_store::{WorkUnit, Workflow};
+use steve_store::{SessionStop, WorkUnit, Workflow};
 
 use crate::cycle::CLOSED;
+use crate::lifecycle::{stop_card, supersede_where};
 use crate::repo::Item;
 use crate::util::js_head;
 use crate::{Result, Tx};
+
+/// How input waiting on a Node with no link reads (followed by why).
+pub(crate) const NODE_WAIT: &str = "等待 Node 连接：";
 
 /// How many unit titles a line names.
 const NAMES: usize = 3;
@@ -23,10 +28,16 @@ pub(crate) enum Work {
     Queued(String),
     /// An open card of the item or of one of its units waits for you.
     User(String),
-    /// Stopped on purpose: the item or its work graph is paused.
+    /// Stopped on purpose: you paused the item or its work graph.
     Paused(String),
+    /// The coordinator paused its own work graph and asked you nothing: it waits for you to decide,
+    /// so it is a stop that reaches you (a card), not a quiet wait. Steve does not continue it: the
+    /// pause was the agent's own call (ST-5, ST-10, ST-27).
+    Halted(String),
     /// Waits on registered prerequisites.
     Blocked(String),
+    /// Waits for a time: the model's quota is back then ([`crate::quota`]).
+    Until(String),
     /// The work graph needs its coordinator: a required unit failed or was cancelled, it is out of
     /// attempts, the goal moved under it, or the graph cannot run here.
     Failed(String),
@@ -42,7 +53,9 @@ impl Work {
             Work::Queued(_) => "queued",
             Work::User(_) => "waiting_user",
             Work::Paused(_) => "paused",
+            Work::Halted(_) => "paused_by_agent",
             Work::Blocked(_) => "dependency_wait",
+            Work::Until(_) => "quota_wait",
             Work::Failed(_) => "failed",
             Work::Idle => "idle",
         }
@@ -55,7 +68,9 @@ impl Work {
             | Work::Queued(t)
             | Work::User(t)
             | Work::Paused(t)
+            | Work::Halted(t)
             | Work::Blocked(t)
+            | Work::Until(t)
             | Work::Failed(t) => Some(t),
             Work::Idle => None,
         }
@@ -63,34 +78,46 @@ impl Work {
 
     /// Someone is at it or it waits on purpose: nothing stopped, nobody is continued.
     pub(crate) fn waiting(&self) -> bool {
-        !matches!(self, Work::Failed(_) | Work::Idle)
+        !matches!(self, Work::Failed(_) | Work::Halted(_) | Work::Idle)
     }
 }
 
-/// How a session's last turn ended, kept from its turn end for the stall watch (in memory: after a
-/// restart the Hub's own recovery says what became of the turns it cut).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct LastStop {
-    pub stop_reason: String,
-    pub error: Option<String>,
-}
-
-impl LastStop {
-    /// Why an idle session is idle, from how its last turn ended; `true` when you stopped it
-    /// yourself (it is yours to go on with, Steve does not continue it).
-    pub(crate) fn cause(stop: Option<&LastStop>) -> (String, bool) {
-        match stop {
-            Some(s) if s.stop_reason == "cancelled" => ("你中断了这一回合".into(), true),
-            Some(LastStop { error: Some(e), .. }) if !e.trim().is_empty() => {
-                (format!("上一回合出错：{}", js_head(e, 160)), false)
-            }
-            Some(_) => ("上一回合结束后没有交付、提问，也没有后续工作".into(), false),
-            None => (
-                "会话空闲：没有回合在运行、没有排队输入，也没有交付或提问".into(),
-                false,
-            ),
+/// Why an idle session is idle, from how its last turn ended (kept in `session_stops`, so the same
+/// after a restart); `true` when you stopped it yourself: it is yours to go on with, Steve does not
+/// continue it. Never from the session's last system line.
+pub(crate) fn stopped(stop: Option<&SessionStop>) -> (String, bool) {
+    match stop {
+        Some(s) if yours(s) => ("你中断了这一回合".into(), true),
+        Some(s) if s.stop_asked.is_some() => {
+            ("你要求停止这一回合，还没有确认它已停下".into(), true)
         }
+        Some(SessionStop {
+            error: Some(e),
+            stop_reason: Some(_),
+            ..
+        }) if !e.trim().is_empty() => (format!("上一回合出错：{}", js_head(e, 160)), false),
+        Some(SessionStop {
+            stop_reason: Some(_),
+            ..
+        }) => ("上一回合结束后没有交付、提问，也没有后续工作".into(), false),
+        _ => (
+            "会话空闲：没有回合在运行、没有排队输入，也没有交付或提问".into(),
+            false,
+        ),
     }
+}
+
+/// The last turn was stopped by you: your Stop reached it, or it ended cancelled (the Hub's own
+/// cancels, a pause or a steer, leave nothing idle to judge).
+pub(crate) fn yours(s: &SessionStop) -> bool {
+    s.yours || s.stop_reason.as_deref() == Some("cancelled")
+}
+
+/// Your Stop holds the session: its last turn was stopped by you ([`yours`]), or you asked for a
+/// Stop whose turn end has not come (the backend could not confirm it, or that turn's end is still
+/// on its way). Either way going on is yours, never Steve's or YOLO's.
+pub(crate) fn held(s: &SessionStop) -> bool {
+    s.stop_reason.is_some() && yours(s) || s.stop_asked.is_some()
 }
 
 fn names(xs: &[String]) -> String {
@@ -99,26 +126,40 @@ fn names(xs: &[String]) -> String {
         .take(NAMES)
         .cloned()
         .collect::<Vec<_>>()
-        .join("、");
+        .join(&steve_i18n::t!("core.now.list_sep"));
     if xs.len() > NAMES {
-        s.push_str(&format!(" 等 {} 项", xs.len()));
+        s = steve_i18n::t!("core.now.names_more", names = s, count = xs.len());
     }
     s
 }
 
 impl Tx<'_> {
     /// What `item`'s work is doing now. The Hub's own holds (a release, maintenance) are not part of
-    /// it: they delay turns, they do not explain an item.
+    /// it: they delay turns, they do not explain an item. Its words are written into the item's `now`,
+    /// so they are zh-CN whoever asks ([`crate::now_line`] shows them in the reader's language).
     pub(crate) fn work(&self, item: &Item) -> Result<Work> {
+        steve_i18n::stored(|| self.work_of(item, true))
+    }
+
+    /// [`Tx::work`] for a continue about to be spent: the item's own cards saying it stopped are what
+    /// the continue answers (a turn starting expires them), not something it waits for.
+    pub(crate) fn work_to_continue(&self, item: &Item) -> Result<Work> {
+        steve_i18n::stored(|| self.work_of(item, false))
+    }
+
+    fn work_of(&self, item: &Item, stops: bool) -> Result<Work> {
         if item.status == "pause" {
-            return Ok(Work::Paused("事项已暂停".into()));
+            return Ok(Work::Paused(steve_i18n::t!("core.now.item_paused")));
         }
         if self.dependency_waiting(&item.id)? {
             let open = crate::lifecycle::deps_open(self.db(), &item.id)?;
             return Ok(Work::Blocked(if open.is_empty() {
-                "前置事项已完成，等待续跑".into()
+                steve_i18n::t!("core.now.deps_done")
             } else {
-                format!("等待前置事项完成：{}", open.join("、"))
+                steve_i18n::t!(
+                    "core.now.deps_wait",
+                    deps = open.join(&steve_i18n::t!("core.now.list_sep"))
+                )
             }));
         }
         if let Some(s) = self.active_session(&item.id)? {
@@ -126,49 +167,135 @@ impl Tx<'_> {
                 || self.rt().uncertain(&s.id)
                 || matches!(s.status.as_str(), "running" | "starting")
             {
-                return Ok(Work::Running("回合执行中".into()));
+                return Ok(Work::Running(steve_i18n::t!("core.now.turn_running")));
             }
             if !self.db().queued(&s.id)?.is_empty() {
-                return Ok(Work::Queued("有排队输入等待发送".into()));
+                return Ok(Work::Queued(match self.rt().node_offline(&s.id) {
+                    Some(why) => steve_i18n::t!("core.now.node_wait", why = js_head(&why, 160)),
+                    None => steve_i18n::t!("core.now.input_queued"),
+                }));
             }
         }
-        if let Some(d) = self
+        let open: Vec<_> = self
             .db()
             .decisions_of_item(&item.id)?
             .into_iter()
-            .find(|d| d.status == "open")
-        {
-            return Ok(Work::User(format!(
-                "等你处理：{}",
-                js_head(&d.question, 80)
-            )));
+            .filter(|d| d.status == "open" && (stops || !stop_card(d)))
+            .collect();
+        let user = |d: &steve_store::Decision| {
+            Work::User(steve_i18n::t!(
+                "core.now.waiting_user",
+                question = js_head(&d.question, 80)
+            ))
+        };
+        if let Some(d) = open.iter().find(|d| !stop_card(d)) {
+            return Ok(user(d));
         }
+        if open.is_empty()
+            && let Some(t) = self.quota_text(&item.id)
+        {
+            return Ok(Work::Until(t));
+        }
+        /* a card saying it stopped is outdated by units at work (one left from before a restart,
+         * or from before these rules): the graph's state stands, and [`Tx::work_tidy`] expires it */
         if let Some(g) = self.db().store().workflows().get(&item.id)?
             && !g.single_session()
             && let Some(w) = self.graph_work(&g)?
+            && (open.is_empty() || w.waiting())
         {
             return Ok(w);
+        }
+        if let Some(d) = open.first() {
+            return Ok(user(d));
         }
         Ok(Work::Idle)
     }
 
+    /// Cards the work has moved past, on every pass of the stall watch (so also right after a
+    /// restart, when no unit start is going to tell): a parent's stop cards while its units run,
+    /// queue, wait for you or are paused; the leftover questions and stop cards of a unit that failed
+    /// or was cancelled. Cards about an effect nobody knows, a release, an approval or an acceptance
+    /// stay.
+    pub(crate) fn work_tidy(&mut self) -> Result<usize> {
+        let mut n = 0;
+        for g in self.db().store().workflows().all_open()? {
+            if g.single_session() {
+                continue;
+            }
+            if self
+                .db()
+                .item(&g.item_id)?
+                .is_some_and(|i| !i.archived && i.phase == crate::cycle::ACTIVE)
+                && let Some(w) = self.graph_work(&g)?
+                && w.waiting()
+                && let Some(text) = w.text()
+            {
+                let gone = supersede_where(self.db(), &g.item_id, stop_card, text)?;
+                if gone > 0 {
+                    self.db().item_patch(&g.item_id, crate::patch![now: text])?;
+                }
+                n += gone;
+            }
+            for u in &g.units {
+                if let Some(child) = u.item_id.as_deref()
+                    && matches!(u.status.as_str(), "failed" | "cancelled")
+                {
+                    n += self.unit_cards_expire(child, u)?;
+                }
+            }
+        }
+        Ok(n)
+    }
+
+    /// A unit that failed or was cancelled waits on nobody: its own questions and stop cards go;
+    /// the coordinator retries or replans it.
+    pub(crate) fn unit_cards_expire(&mut self, child: &str, u: &WorkUnit) -> Result<usize> {
+        let why = format!(
+            "工作单元 {} {}，由主事项负责人重试或重规划",
+            u.spec.title,
+            if u.status == "cancelled" {
+                "已取消"
+            } else {
+                "未通过"
+            }
+        );
+        supersede_where(self.db(), child, |d| stop_card(d) || d.kind == "ask", &why)
+    }
+
     /// The graph's part: `None` when every unit is through and only the coordinator is left to act.
+    /// In zh-CN like [`Self::work`].
     pub(crate) fn graph_work(&self, g: &Workflow) -> Result<Option<Work>> {
-        if g.paused {
-            return Ok(Some(Work::Paused("协作已暂停".into())));
+        steve_i18n::stored(|| self.graph_work_in(g))
+    }
+
+    fn graph_work_in(&self, g: &Workflow) -> Result<Option<Work>> {
+        if let Some((by, why)) = g.paused_by() {
+            return Ok(Some(if by == steve_store::PAUSED_BY_AGENT {
+                Work::Halted(steve_i18n::t!(
+                    "core.now.workflow_halted",
+                    why = js_head(why, 160)
+                ))
+            } else {
+                Work::Paused(steve_i18n::t!("core.now.workflow_paused"))
+            }));
         }
         if !self.workflow_current(g)? {
-            return Ok(Some(Work::Failed(
-                "主事项目标或周期已变化，工作图需要重规划".into(),
-            )));
+            return Ok(Some(Work::Failed(steve_i18n::t!(
+                "core.now.workflow_replan"
+            ))));
         }
         let (mut running, mut user, mut queued, mut failed) = (vec![], vec![], vec![], vec![]);
         let mut to_start = false;
-        /* pending units downstream of a failed or cancelled one wait on nothing that will come */
+        /* pending units downstream of a failed or cancelled one, or of one out of attempts (it
+         * never starts again: workflow_drive starts only a unit with attempts left), wait on
+         * nothing that will come */
         let mut held: std::collections::HashSet<&str> = g
             .units
             .iter()
-            .filter(|u| matches!(u.status.as_str(), "failed" | "cancelled"))
+            .filter(|u| {
+                matches!(u.status.as_str(), "failed" | "cancelled")
+                    || u.status == "pending" && u.attempt >= g.max_attempts
+            })
             .map(|u| u.spec.id.as_str())
             .collect();
         loop {
@@ -205,16 +332,18 @@ impl Tx<'_> {
                 continue;
             }
             match u.status.as_str() {
-                "pending" if held.contains(u.spec.id.as_str()) => downstream.push(title),
                 "pending" if u.attempt >= g.max_attempts => {
-                    failed.push(format!("{title} 尝试次数已用完"));
+                    failed.push(steve_i18n::t!(
+                        "core.now.unit_out_of_attempts",
+                        title = title
+                    ));
                 }
+                "pending" if held.contains(u.spec.id.as_str()) => downstream.push(title),
                 "pending" => {
                     to_start = true;
                     queued.push(title);
                 }
-                "failed" if u.spec.required => failed.push(format!("{title} {}", said(u))),
-                "cancelled" if u.spec.required => failed.push(format!("{title} 已取消")),
+                "failed" | "cancelled" if u.spec.required => failed.push(said(&title, u)),
                 "succeeded"
                     if u.item_id.as_deref().is_some_and(|child| {
                         self.db().item(child).ok().flatten().is_some_and(|i| {
@@ -222,49 +351,52 @@ impl Tx<'_> {
                         })
                     }) =>
                 {
-                    queued.push(format!("{title}（交付待冻结）"));
+                    queued.push(steve_i18n::t!(
+                        "core.now.unit_frozen_pending",
+                        title = title
+                    ));
                 }
                 _ => {}
             }
         }
         if failed.is_empty() && !downstream.is_empty() {
             /* held only by optional work that failed: still for the coordinator to sort out */
-            failed.push("可选工作未通过".into());
+            failed.push(steve_i18n::t!("core.now.optional_failed"));
         }
-        let held = if downstream.is_empty() {
-            String::new()
-        } else {
-            format!("；受阻：{}", names(&downstream))
-        };
         if !running.is_empty() {
-            return Ok(Some(Work::Running(format!(
-                "协作执行中：{}",
-                names(&running)
+            return Ok(Some(Work::Running(steve_i18n::t!(
+                "core.now.workflow_running",
+                names = names(&running)
             ))));
         }
         if !user.is_empty() {
-            return Ok(Some(Work::User(format!(
-                "协作工作等你处理：{}",
-                names(&user)
+            return Ok(Some(Work::User(steve_i18n::t!(
+                "core.now.workflow_user",
+                names = names(&user)
             ))));
         }
         if to_start && let Err(e) = self.rt().check_workflow_execution(&g.item_id) {
-            return Ok(Some(Work::Failed(format!(
-                "协作工作无法开始：{}",
-                js_head(&e.to_string(), 160)
+            return Ok(Some(Work::Failed(steve_i18n::t!(
+                "core.now.workflow_cannot_start",
+                why = js_head(&e.to_string(), 160)
             ))));
         }
         if !queued.is_empty() {
-            return Ok(Some(Work::Queued(format!(
-                "协作排队中：{}",
-                names(&queued)
+            return Ok(Some(Work::Queued(steve_i18n::t!(
+                "core.now.workflow_queued",
+                names = names(&queued)
             ))));
         }
         if !failed.is_empty() {
-            return Ok(Some(Work::Failed(format!(
-                "协作工作未通过：{}{held}",
-                names(&failed)
-            ))));
+            return Ok(Some(Work::Failed(if downstream.is_empty() {
+                steve_i18n::t!("core.now.workflow_failed", names = names(&failed))
+            } else {
+                steve_i18n::t!(
+                    "core.now.workflow_failed_held",
+                    names = names(&failed),
+                    held = names(&downstream)
+                )
+            })));
         }
         Ok(None)
     }
@@ -287,9 +419,9 @@ impl Tx<'_> {
 }
 
 /// A failed or cancelled unit, in a few words: its reason when it gave one.
-fn said(u: &WorkUnit) -> String {
+fn said(title: &str, u: &WorkUnit) -> String {
     if u.status == "cancelled" {
-        return "已取消".into();
+        return steve_i18n::t!("core.now.unit_cancelled", title = title);
     }
     let why = u
         .reason
@@ -298,11 +430,12 @@ fn said(u: &WorkUnit) -> String {
         .unwrap_or(u.summary.as_str())
         .trim();
     if why.is_empty() {
-        "未通过".into()
+        steve_i18n::t!("core.now.unit_failed", title = title)
     } else {
-        format!(
-            "未通过：{}",
-            js_head(&crate::workflow::workflow_error(why), 80)
+        steve_i18n::t!(
+            "core.now.unit_failed_why",
+            title = title,
+            why = js_head(&crate::workflow::workflow_error(why), 80)
         )
     }
 }

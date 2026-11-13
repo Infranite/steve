@@ -1,7 +1,6 @@
 //! E3 acceptance: no decision → `execute` refuses and writes `mail.send.blocked`;
 //! undo within the 10 s delay → nothing sent; content edited before approval → 409; `reply_all`
-//! drops my addresses; recipients in the model output are ignored; a vault secret in the body is
-//! blocked; the MIME the fake SMTP receives carries the right `In-Reply-To`/`References`; a provider
+//! drops my addresses; recipients in the model output are ignored; the MIME the fake SMTP receives carries the right `In-Reply-To`/`References`; a provider
 //! failure opens a `fail` decision. Only the in-process fake SMTP/IMAP and a fixed fake gateway.
 
 mod support;
@@ -13,8 +12,8 @@ use steve_mail::compose::{QuickDraft, SAFETY};
 use steve_mail::drafts::{MSG_ALREADY_SENT, MSG_EDITED, NewDraft, RcptIn};
 use steve_mail::fake::fixtures;
 use steve_mail::repo;
-use steve_mail::send::{ERR_NO_APPROVAL, ERR_SECRET};
-use steve_mail::{DraftHooks, SecretScan, SendOutcome};
+use steve_mail::send::ERR_NO_APPROVAL;
+use steve_mail::{DraftHooks, SendOutcome};
 use steve_modules::decisions::dispatch;
 use steve_modules::testkit::{ME, WS, WS2, call, caller};
 use steve_modules::{ApiError, Clock};
@@ -22,17 +21,6 @@ use support::*;
 
 /// The fixed model answer: tries to add recipients, which must be ignored.
 const MODEL: &str = r#"{"subject":"Re: whatever the model says","body":"预算审批分三步：填表、主管签字、财务复核。","reply_all":true,"to":["evil@attacker.example"],"cc":["evil2@attacker.example"],"bcc":["spy@attacker.example"],"needs_attention":false,"why":"回答流程问题","cites":[]}"#;
-
-struct Secrets;
-impl SecretScan for Secrets {
-    fn find(&self, _: &str, text: &str) -> Vec<String> {
-        if text.contains("tok-7f3a9c") {
-            vec!["API 令牌".into()]
-        } else {
-            Vec::new()
-        }
-    }
-}
 
 #[derive(Default)]
 struct Hooks(Mutex<Vec<String>>);
@@ -405,42 +393,6 @@ async fn quick_draft_recipients_are_the_servers() {
     assert_eq!(d.to.len(), 1);
     assert_eq!(d.to[0].addr, "desk@acme.example");
     assert!(d.cc.is_empty());
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn a_vault_secret_in_the_body_is_blocked() {
-    let h = setup_with(Opts {
-        secrets: Some(Arc::new(Secrets)),
-        ..Default::default()
-    })
-    .await;
-    let (conn, thread) = with_thread(&h).await;
-    let d = h
-        .mail
-        .create_draft(
-            &me(),
-            my_draft(&conn, Some(&thread), None, "令牌是 tok-7f3a9c，别外传"),
-        )
-        .unwrap();
-    h.mail.send_draft(&me(), &d.id).unwrap();
-    h.env.clock.advance(10_000);
-    let out = h.mail.send_due().await.unwrap();
-    assert_eq!(
-        out[0].1,
-        SendOutcome::Blocked {
-            reason: ERR_SECRET.into()
-        }
-    );
-    let row = draft(&h, &d.id);
-    assert_eq!(row.status, "failed");
-    assert_eq!(row.error.as_deref(), Some(ERR_SECRET));
-    assert!(h.smtp.sent().is_empty());
-    let a = audits(&h, "mail.send.blocked");
-    assert_eq!(a[0]["reason"], "secret");
-    assert!(
-        !a[0].to_string().contains("tok-7f3a9c"),
-        "no secret in the audit"
-    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

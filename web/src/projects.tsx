@@ -1,5 +1,7 @@
 /* 工作空间与项目：工作空间是数据边界，切换后所有页面只显示这个空间的内容；一个工作空间管理多个项目，每个项目一个独立目录 */
-import { api, type RBrowse, type RNode } from "@/api"
+import { api, type RBrowse, type RLane, type RNode, type RProject } from "@/api"
+import { stats, statsSeed } from "@/api/stats"
+import type { GhOverview } from "@/api/github"
 import { Button } from "@/components/ui/button"
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { Field, FieldDescription, FieldGroup, FieldLabel } from "@/components/ui/field"
@@ -9,15 +11,16 @@ import { Switch } from "@/components/ui/switch"
 import { Textarea } from "@/components/ui/textarea"
 import { AskSteve } from "@/config-ui"
 import { crumbs, emptyNote, lookUp, nameOf, narrowed, projectNodes } from "@/dir-browse"
-import { GitHubLine } from "@/github/index"
-import { LaneSection } from "@/lane"
-import { RecentStats } from "@/stats/drill"
-import { botName, newProject, newWorkspace, patchProject, st, toast } from "@/store"
-import { BotName, closeSheet, Empty, go, Group, Meta, openSheet, Page, Row, SectionLabel } from "@/ui"
+import { GitHubLine, Health, projectRepo, useProjectGitHub } from "@/github/index"
+import { itemDisplayStatus } from "@/item-workflow-relation"
+import { How, LaneConventions, LaneNow, LaneSettings, MERGE, SHIP, Unknown, useLane, type LaneLoad } from "@/lane"
+import { fmtMs, fmtN, fmtPct, fmtUsd, useStats } from "@/stats/format"
+import { botName, closedSt, newProject, newWorkspace, patchProject, st, toast, type Item } from "@/store"
+import { Blank, BotName, Card, closeSheet, Empty, Fact, Figure, go, Group, Loading, Meta, openSheet, Page, Panel, Row, Section, Segmented } from "@/ui"
 import { ItemRowExport as ItemRow, Select } from "@/view-shared"
 import { YoloProjectSelect } from "@/yolo/badges"
 import { cn } from "cn"
-import { ArchiveIcon, ChevronRightIcon, CornerLeftUpIcon, FolderGit2Icon, FolderIcon, PlusIcon, SparklesIcon } from "lucide-react"
+import { ArchiveIcon, ChevronRightIcon, CornerLeftUpIcon, FolderGit2Icon, FolderIcon, PlusIcon, SparklesIcon, TriangleAlertIcon } from "lucide-react"
 import { Fragment, useEffect, useRef, useState } from "react"
 import { useT } from "@/i18n"
 
@@ -46,59 +49,176 @@ export function NewWorkspaceDialog() {
 /* ── 项目 ── */
 export function ProjectsView() {
   const t = useT()
-  const ps = st.projects, running = (id: string) => st.items.filter((i) => i.project === id && ["run", "wait", "block"].includes(i.st) && !i.arch).length
+  const ps = st.projects, running = (id: string) => st.items.filter((i) => i.project === id && ["run", "wait", "block"].includes(itemDisplayStatus(i)) && !i.arch).length
   return (
     <Page title={t("pages:projects.title")} sub={t("pages:projects.sub", { space: st.workspace?.name })} max={720}
       actions={<Button size="sm" onClick={() => openSheet("newProject")} data-new-project><PlusIcon />{t("pages:projects.newProject")}</Button>}>
       {ps.length ? <Group>{ps.map((p) => { const I = projectIcon(p.kind); return (
-        <Row key={p.id} icon={<span className="flex size-9 items-center justify-center rounded-lg bg-muted text-muted-foreground"><I className="size-[18px]" strokeWidth={1.5} /></span>} onClick={() => go("#/projects/" + p.id)} data-project-row={p.name}
+        <Row key={p.id} icon={<span className="flex size-9 items-center justify-center rounded-lg bg-muted text-muted-foreground"><I className="size-4.5" strokeWidth={1.5} /></span>} onClick={() => go("#/projects/" + p.id)} data-project-row={p.name}
           title={<span className="type-body font-medium">{p.name}</span>}
           sub={<Meta><span className="font-mono">{home(p.path)}</span><span>{p.kind === "git" ? (p.worktree ? t("pages:projects.gitWorktree") : "git") : t("pages:projects.plainDir")}</span>{p.default_bot && <span>{t("pages:projects.defaultBotIs", { bot: botName(p.default_bot) })}</span>}<span>{t("pages:projects.running", { count: running(p.id) })}</span>{p.release && <span>{t("pages:projects.releasable")}</span>}</Meta>}>
           <ChevronRightIcon className="size-4 text-tertiary" /></Row>) })}</Group>
         : <Empty title={t("pages:projects.empty")} sub={t("pages:projects.emptySub")} />}
-      <div className="mt-3 px-1 type-footnote text-muted-foreground">{t("pages:projects.hint")}</div>
+      <div className="mt-4 type-footnote text-tertiary">{t("pages:projects.hint")}</div>
     </Page>
   )
+}
+
+/* A project's page, in the order someone opens it for (Lee, 2026-11-13: "信息堆叠没有主次"):
+ *  概览  1. 事项: what is going on now — waiting on you first, then what failed or is stuck, then what runs, then the
+ *           latest finished; a merge batch in flight under them. One line when there is nothing.
+ *        2. 最近 7 天: how it is doing — done, landed and released, failures, cost, Agent time, your time
+ *           (GET /stats/summary?project=, and the lane's pace for a git project).
+ *        3. 仓库与交付: where it lives and how work lands, one fact a line; under it, folded, the conventions Steve
+ *           found in the repository (checks, lock files, migrations, release notes), each listed once.
+ *  设置  telling Steve, name and description, how its work runs, the merge lane's limits, the GitHub link. */
+type Tab = "overview" | "settings"
+let lastTab: { id: string; tab: Tab } = { id: "", tab: "overview" }
+const RECENT = 6
+/* the order of open items: your move first, then what failed or is stuck, then the paused, then what runs */
+const RANK: Partial<Record<Item["st"], number>> = { wait: 0, prop: 0, fail: 1, block: 1, pause: 2 }
+/** a project's items for its page: the open ones in that order, then the latest finished up to six in all */
+export function projectItems(project: string, items: Item[]) {
+  const mine = items.filter((i) => i.project === project && !i.arch)
+  const open = mine.filter((i) => !closedSt(i.st)).map((i) => ({ i, r: RANK[itemDisplayStatus(i)] ?? 3 })).sort((a, b) => a.r - b.r || b.i.updated - a.i.updated)
+  const closed = mine.filter((i) => closedSt(i.st)).sort((a, b) => b.updated - a.updated)
+  return { open: open.length, yours: open.filter((x) => x.r === 0).length, list: [...open.map((x) => x.i), ...closed.slice(0, Math.max(0, RECENT - open.length))] }
 }
 
 export function ProjectView({ id }: { id: string }) {
   const t = useT()
   const p = st.projects.find((x) => x.id === id)
-  const [n, setN] = useState(p?.name ?? ""), [d, setD] = useState(p?.description ?? "")
-  useEffect(() => { setN(p?.name ?? ""); setD(p?.description ?? "") }, [p?.updated])
+  const [tab, setTab0] = useState<Tab>(lastTab.id === id ? lastTab.tab : "overview")
+  const setTab = (v: Tab) => { lastTab = { id, tab: v }; setTab0(v) }
+  const [lane, setLane] = useLane(id, p?.kind === "git")
+  const [gh, setGh] = useProjectGitHub(id)
   if (!p) return <Page title={t("pages:projects.title")} back={["#/projects", t("pages:projects.title")]}><Empty title={t("pages:projects.notFound")} sub={t("pages:projects.notFoundSub")} /></Page>
-  const mine = st.items.filter((i) => i.project === p.id && !["done", "drop"].includes(i.st) && !i.arch), done = st.items.filter((i) => i.project === p.id && ["done", "drop"].includes(i.st) && !i.arch).slice(0, 5)
+  return (
+    <Page title={p.name} back={["#/projects", t("pages:projects.title")]} max={720} sub={p.description ? <span className="line-clamp-2" data-proj-desc>{p.description}</span> : undefined}
+      actions={<Button size="sm" variant="ghost" className="text-muted-foreground" onClick={() => { patchProject(p.id, { archived: !p.archived }, p.archived ? t("pages:projects.restored") : t("pages:projects.archived")); if (!p.archived) go("#/projects") }}><ArchiveIcon />{p.archived ? t("pages:projects.restore") : t("pages:projects.archive")}</Button>}>
+      <div className="mb-8"><Segmented value={tab} onChange={setTab} label={p.name} options={[["overview", t("pages:projects.tabOverview")], ["settings", t("pages:projects.settings")]] as const} /></div>
+      {tab === "overview"
+        ? <Overview p={p} lane={lane} onLane={setLane} gh={gh} onSettings={() => setTab("settings")} />
+        : <Settings p={p} lane={lane} onLane={setLane} gh={gh} onGh={setGh} />}
+    </Page>
+  )
+}
+
+type Parts = { p: RProject; lane: LaneLoad; onLane: (l: RLane) => void; gh: GhOverview | null }
+
+function Overview({ p, lane, onLane, gh, onSettings }: Parts & { onSettings: () => void }) {
+  const t = useT()
+  const { open, yours, list } = projectItems(p.id, st.items)
+  const v = lane.s === "ok" ? lane.v : null
+  return (
+    <div className="flex flex-col gap-8 anim-in" data-proj-overview>
+      <Section label={t("pages:projects.items")} data-proj-items
+        right={open > 0 ? <Meta inline className="font-normal">{yours > 0 && <span className="text-attention" data-proj-yours>{t("pages:projects.yours", { count: yours })}</span>}<span>{t("pages:projects.running", { count: open })}</span></Meta> : undefined}>
+        {list.length ? <Panel>{list.map((i) => <ItemRow key={i.id} i={i} proj={false} />)}</Panel> : <Blank data-proj-none>{t("pages:projects.noItems")}</Blank>}
+        {v && <div className="mt-3 empty:hidden"><LaneNow project={p.id} lane={v} onLane={onLane} /></div>}
+      </Section>
+      <Recent p={p} lane={v} />
+      <Where p={p} lane={lane} gh={gh} onSettings={onSettings} />
+    </div>
+  )
+}
+
+/** the last 7 days in six figures: what got done, landed and released, what failed, and what it cost in money and time */
+function Recent({ p, lane }: { p: RProject; lane: RLane | null }) {
+  const t = useT()
+  const [d] = useStats(() => stats.summary({ range: "7d", project: p.id }), [p.id])
+  const s = d.s === "ok" ? d.v : null, pace = lane?.pace
+  const fails = s ? Object.entries(s.quality.fails).filter(([, n]) => n > 0).sort((a, b) => b[1] - a[1]) : []
+  const figs = [
+    s && { k: "done", label: t("pages:projects.fig.done"), value: fmtN(s.throughput.done), sub: s.throughput.wip ? t("pages:projects.fig.wip", { count: s.throughput.wip }) : undefined },
+    pace && { k: "landed", label: t("pages:projects.fig.landed"), value: fmtN(pace.landed), sub: t("pages:projects.fig.releases", { count: pace.releases }) },
+    s && { k: "fails", label: t("pages:projects.fig.fails"), value: fmtN(fails.reduce((a, [, n]) => a + n, 0)), sub: fails.slice(0, 2).map(([k, n]) => `${t(`stats:quality.fail.${k}` as "stats:quality.fail.other")} ${n}`).join(" · ") || undefined },
+    s && { k: "cost", label: t("pages:projects.fig.cost"), value: s.spend.est > 0 ? fmtUsd(s.spend.est) : s.spend.reported > 0 ? "≥" + fmtUsd(s.spend.reported) : "—", sub: s.per_item.est_avg ? t("pages:projects.fig.perItem", { v: fmtUsd(s.per_item.est_avg) }) : undefined },
+    s && { k: "agent", label: t("pages:projects.fig.agent"), value: s.usage.turns ? fmtMs(s.usage.turn_ms) : "—", sub: s.usage.turns ? t("pages:projects.fig.turns", { count: s.usage.turns }) : undefined },
+    s && { k: "wait", label: t("pages:projects.fig.wait"), value: s.time.wait.n ? fmtMs(s.time.wait.sum) : "—", sub: s.human.decisions ? t("pages:projects.fig.decisions", { count: s.human.decisions }) : undefined },
+    s && !pace && s.quality.first_pass_n > 0 && { k: "first-pass", label: t("manage:ov.firstPass"), value: fmtPct(s.quality.first_pass), sub: t("manage:ov.ofDelivered", { n: s.quality.first_pass_n }) },
+  ].filter((x): x is { k: string; label: string; value: string; sub: string | undefined } => !!x)
+  const quiet = (!s || (!s.throughput.created && !s.throughput.done && !s.throughput.wip && !s.usage.turns)) && !pace?.landed
+  const openStats = () => { statsSeed.next = { range: "7d", project: p.id }; go("#/stats") }
+  return (
+    <Section label={t("pages:projects.recent")} data-proj-recent
+      right={s && !quiet ? <button type="button" onClick={openStats} className="type-footnote font-normal text-muted-foreground hover:text-foreground" data-proj-stats-open>{t("pages:projects.openStats")}</button> : undefined}>
+      {d.s === "loading" ? <Loading className="py-8" />
+        : quiet ? <Blank data-proj-quiet>{d.s === "error" ? d.msg : d.s === "absent" ? t("pages:projects.statsAbsent") : t("pages:projects.quiet")}</Blank>
+        : <Card className="grid grid-cols-2 gap-0 p-1 sm:grid-cols-3" data-proj-figures>{figs.map((f) => <Figure key={f.k} testId={f.k} label={f.label} value={f.value} sub={f.sub} />)}</Card>}
+    </Section>
+  )
+}
+
+/** where the project lives and how its work lands, one fact a line; the repository's conventions folded under them */
+function Where({ p, lane, gh, onSettings }: Omit<Parts, "onLane"> & { onSettings: () => void }) {
+  const t = useT()
+  const git = p.kind === "git", v = lane.s === "ok" ? lane.v : null
+  const device = st.devices.find((x) => x.id === p.device_id)?.name ?? "Hub"
+  const repo = gh ? projectRepo(gh, p.id) : undefined
+  const done = p.release && git && p.worktree ? (p.release.done_when === "tag" ? t("pages:projects.optTag") : p.release.done_when === "merge" ? t("pages:projects.optMerge") : t("pages:projects.optLocal")) : null
+  const code = "font-mono text-[13px] break-all"
+  const cmd = p.release?.cmd ? <span className={cn("mt-0.5 block text-muted-foreground", code)}>{home(p.release.cmd)}</span> : null
+  const facts = [
+    <Fact key="dir" label={t("pages:projects.dir")} testId="dir">
+      <span className={cn("block", code)}>{home(p.path)}</span>
+      <Meta className="mt-0.5"><span>{git ? (p.worktree ? t("pages:projects.gitWorktree") : t("pages:projects.gitRepo")) : t("pages:projects.plainDir")}</span><span>{t("pages:projects.onDevice", { device })}</span></Meta>
+    </Fact>,
+    git && lane.s === "loading" && <Fact key="loading" label={t("pages:projects.repo")} testId="repo"><span className="inline-flex items-center gap-2 text-muted-foreground"><Spinner />{t("shell:lane.loading")}</span></Fact>,
+    git && lane.s === "error" && <Fact key="error" label={t("pages:projects.repo")} testId="repo"><span className="text-muted-foreground">{t("shell:lane.unrecognized")}</span><span className="mt-0.5 block type-footnote break-words text-attention">{lane.msg}</span></Fact>,
+    v && <Fact key="repo" label={t("pages:projects.repo")} testId="repo">
+      <span className={code}>{v.target.upstream}</span><span className="text-muted-foreground"> · {t("pages:projects.branch", { branch: v.target.branch })}</span>
+      {v.fetch_error && <span className="mt-0.5 flex items-start gap-1 type-footnote text-attention"><TriangleAlertIcon className="mt-0.5 size-3.5 shrink-0" /><span className="break-all">{t("shell:lane.fetchError", { error: v.fetch_error })}</span></span>}
+    </Fact>,
+    git && gh && (repo
+      ? <Fact key="gh" label="GitHub" testId="github" onClick={() => go("#/github/" + repo.id)}>{repo.full_name}<Meta className="mt-0.5"><Health r={repo} /><span>{t("github:shared.openPrs", { count: repo.open_prs })}</span></Meta></Fact>
+      : <Fact key="gh" label="GitHub" testId="github" onClick={onSettings}><span className="text-muted-foreground">{t("pages:projects.ghNone")}</span></Fact>),
+    v && <Fact key="merge" label={t("pages:projects.merge")} testId="merge"><span className="inline-flex flex-wrap items-center gap-2">{MERGE[v.merge.value]?.() ?? v.merge.value}<How f={v.merge} /></span><Unknown f={v.merge} /></Fact>,
+    v && <Fact key="ship" label={t("pages:projects.release")} testId="ship" onClick={done ? onSettings : undefined}>
+      <span className="inline-flex flex-wrap items-center gap-2">{SHIP[v.ship.value]?.() ?? v.ship.value}<How f={v.ship} /></span>{v.ship.value === "script" && cmd}
+      {done && <span className="mt-0.5 block type-footnote text-muted-foreground">{t("pages:projects.doneIs", { v: done })}</span>}<Unknown f={v.ship} />
+    </Fact>,
+    !git && <Fact key="ship" label={t("pages:projects.release")} testId="ship">{p.release ? <>{t("pages:projects.releaseWith")}{cmd}</> : <span className="text-muted-foreground">{t("pages:projects.releaseNone")}</span>}</Fact>,
+  ]
+  return (
+    <Section label={git ? t("pages:projects.where") : t("pages:projects.whereDir")} data-proj-where>
+      <Panel>{facts}</Panel>
+      {v && <div className="mt-3"><LaneConventions lane={v} /></div>}
+    </Section>
+  )
+}
+
+function Settings({ p, lane, onLane, gh, onGh }: Parts & { onGh: (v: GhOverview) => void }) {
+  const t = useT()
+  const [n, setN] = useState(p.name), [d, setD] = useState(p.description)
+  useEffect(() => { setN(p.name); setD(p.description) }, [p.updated])
   const dirty = n.trim() !== p.name || d.trim() !== p.description
   return (
-    <Page title={p.name} back={["#/projects", t("pages:projects.title")]} max={720} sub={<Meta><span className="font-mono">{home(p.path)}</span><span>{p.kind === "git" ? t("pages:projects.gitRepo") : t("pages:projects.plainDir")}</span><span>{t("pages:projects.onDevice", { device: st.devices.find((x) => x.id === p.device_id)?.name ?? "Hub" })}</span><RecentStats project={p.id} /></Meta>}
-      actions={<Button size="sm" variant="ghost" className="text-muted-foreground" onClick={() => { patchProject(p.id, { archived: !p.archived }, p.archived ? t("pages:projects.restored") : t("pages:projects.archived")); if (!p.archived) go("#/projects") }}><ArchiveIcon />{p.archived ? t("pages:projects.restore") : t("pages:projects.archive")}</Button>}>
-      <div className="flex flex-col gap-8">
-        <AskSteve key={p.id} ctx={{ kind: "project", id: p.id }} placeholder={t("pages:projects.askPh")} />
-        <section><SectionLabel>{t("pages:projects.active", { count: mine.length })}</SectionLabel>{mine.length ? <Group>{mine.map((i) => <ItemRow key={i.id} i={i} proj={false} />)}</Group> : <Empty title={t("pages:projects.noActive")} />}</section>
-        <GitHubLine project={p.id} />
-        {p.kind === "git" && <LaneSection project={p.id} />}
-        {done.length > 0 && <section><SectionLabel>{t("pages:projects.recentDone")}</SectionLabel><Group>{done.map((i) => <ItemRow key={i.id} i={i} proj={false} />)}</Group></section>}
-        <section className="flex flex-col gap-4"><SectionLabel className="mb-0">{t("pages:projects.settings")}</SectionLabel>
-          <FieldGroup className="gap-4">
-            <Field className="gap-1.5"><FieldLabel className="type-label text-muted-foreground">{t("pages:projects.name")}</FieldLabel><Input className="rounded-lg" value={n} onChange={(e) => setN(e.target.value)} /></Field>
-            <Field className="gap-1.5"><FieldLabel className="type-label text-muted-foreground">{t("pages:projects.desc")}</FieldLabel><Textarea className="min-h-20 rounded-lg" value={d} onChange={(e) => setD(e.target.value)} />
-              <FieldDescription className="type-footnote">{t("pages:projects.descHint")}</FieldDescription></Field>
-            {dirty && <div className="flex gap-2"><Button size="sm" onClick={() => patchProject(p.id, { name: n.trim() || p.name, description: d.trim() })}>{t("common:action.save")}</Button><Button size="sm" variant="ghost" onClick={() => { setN(p.name); setD(p.description) }}>{t("common:action.cancel")}</Button></div>}
-          </FieldGroup>
-          <Group>
-            <Row title={t("pages:projects.defaultBot")} sub={t("pages:projects.defaultBotSub")}><Select align="end" testId="proj-bot" value={p.default_bot ?? "none"} onChange={(v) => patchProject(p.id, { default_bot: v === "none" ? null : v })} options={[{ v: "none", l: t("pages:projects.bySteve") }, ...Object.keys(st.bots).filter((k) => st.bots[k].on).map((k) => ({ v: k, l: <BotName k={k} /> }))]} /></Row>
-            {p.kind === "git" && <Row title={t("pages:projects.worktree")} sub={t("pages:projects.worktreeSub")}><Switch checked={p.worktree} onCheckedChange={(v) => patchProject(p.id, { worktree: v })} data-proj-worktree /></Row>}
-            {st.yolo && <Row title={t("pages:projects.yolo")} sub={p.kind === "git" && p.worktree ? t("pages:projects.yoloSubWorktree") : t("pages:projects.yoloSubReal")} data-proj-yolo><YoloProjectSelect id={p.id} realDir={p.kind !== "git" || !p.worktree} /></Row>}
-            <Row title={t("pages:projects.release")} sub={p.release ? <span>{t("pages:projects.releaseWith")}<span className="font-mono">{home(p.release.cmd)}</span></span> : t("pages:projects.releaseNone")} />
-            {p.release && p.kind === "git" && p.worktree && <Row title={t("pages:projects.doneWhen")} data-proj-done
-              sub={p.release.done_when ? t("pages:projects.doneRemote") : t("pages:projects.doneLocal")}>
-              <Select align="end" testId="proj-done" value={p.release.done_when ?? "local"}
-                onChange={(v) => { const r = p.release!; patchProject(p.id, { release: v === "local" ? { kind: r.kind, cmd: r.cmd } : { ...r, done_when: v as "merge" | "tag" } }) }}
-                options={[{ v: "local", l: t("pages:projects.optLocal") }, { v: "merge", l: t("pages:projects.optMerge") }, { v: "tag", l: t("pages:projects.optTag") }]} /></Row>}
-          </Group>
-        </section>
-      </div>
-    </Page>
+    <div className="flex flex-col gap-8 anim-in" data-proj-settings>
+      <AskSteve key={p.id} ctx={{ kind: "project", id: p.id }} placeholder={t("pages:projects.askPh")} />
+      <Section label={t("pages:projects.basics")}>
+        <FieldGroup className="gap-4 px-1">
+          <Field className="gap-1.5"><FieldLabel className="type-label text-tertiary">{t("pages:projects.name")}</FieldLabel><Input className="rounded-lg" value={n} onChange={(e) => setN(e.target.value)} data-proj-name /></Field>
+          <Field className="gap-1.5"><FieldLabel className="type-label text-tertiary">{t("pages:projects.desc")}</FieldLabel><Textarea className="min-h-20 rounded-lg" value={d} onChange={(e) => setD(e.target.value)} />
+            <FieldDescription className="type-footnote">{t("pages:projects.descHint")}</FieldDescription></Field>
+          {dirty && <div className="flex gap-2"><Button size="sm" onClick={() => patchProject(p.id, { name: n.trim() || p.name, description: d.trim() })}>{t("common:action.save")}</Button><Button size="sm" variant="ghost" onClick={() => { setN(p.name); setD(p.description) }}>{t("common:action.cancel")}</Button></div>}
+        </FieldGroup>
+      </Section>
+      <Section label={t("pages:projects.work")}>
+        <Panel>
+          <Row title={t("pages:projects.defaultBot")} sub={t("pages:projects.defaultBotSub")}><Select align="end" testId="proj-bot" value={p.default_bot ?? "none"} onChange={(v) => patchProject(p.id, { default_bot: v === "none" ? null : v })} options={[{ v: "none", l: t("pages:projects.bySteve") }, ...Object.keys(st.bots).filter((k) => st.bots[k].on).map((k) => ({ v: k, l: <BotName k={k} /> }))]} /></Row>
+          {p.kind === "git" && <Row title={t("pages:projects.worktree")} sub={t("pages:projects.worktreeSub")}><Switch checked={p.worktree} onCheckedChange={(v) => patchProject(p.id, { worktree: v })} data-proj-worktree /></Row>}
+          {st.yolo && <Row title={t("pages:projects.yolo")} sub={p.kind === "git" && p.worktree ? t("pages:projects.yoloSubWorktree") : t("pages:projects.yoloSubReal")} data-proj-yolo><YoloProjectSelect id={p.id} realDir={p.kind !== "git" || !p.worktree} /></Row>}
+          {p.release && p.kind === "git" && p.worktree && <Row title={t("pages:projects.doneWhen")} data-proj-done
+            sub={p.release.done_when ? t("pages:projects.doneRemote") : t("pages:projects.doneLocal")}>
+            <Select align="end" testId="proj-done" value={p.release.done_when ?? "local"}
+              onChange={(v) => { const r = p.release!; patchProject(p.id, { release: v === "local" ? { kind: r.kind, cmd: r.cmd } : { ...r, done_when: v as "merge" | "tag" } }) }}
+              options={[{ v: "local", l: t("pages:projects.optLocal") }, { v: "merge", l: t("pages:projects.optMerge") }, { v: "tag", l: t("pages:projects.optTag") }]} /></Row>}
+        </Panel>
+      </Section>
+      {lane.s === "ok" && p.kind === "git" && <Section label={lane.v.queue ? t("shell:mergeQueue.title") : t("shell:lane.title")} data-lane><LaneSettings project={p.id} lane={lane.v} onLane={onLane} /></Section>}
+      {gh && p.kind === "git" && <Section label="GitHub"><Panel><GitHubLine project={p.id} ov={gh} onOv={onGh} /></Panel></Section>}
+    </div>
   )
 }
 
@@ -129,16 +249,16 @@ function DirBrowser({ path, node, onPick, onSeen }: { path: string; node: string
     <div className="overflow-hidden rounded-lg border border-border" data-dir-browser>
       <div className="flex items-center gap-1 border-b border-border bg-muted/40 py-1 pr-2.5 pl-1">
         <Button type="button" size="icon-xs" variant="ghost" className="shrink-0 text-muted-foreground" disabled={at.parent == null} onClick={() => at.parent != null && go(at.parent)} title={t("pages:projects.browseUp")} data-dir-up><CornerLeftUpIcon /></Button>
-        <div className="flex min-w-0 flex-1 items-center overflow-x-auto whitespace-nowrap font-mono text-[12px] text-muted-foreground">
+        <div className="flex min-w-0 flex-1 items-center overflow-x-auto whitespace-nowrap type-code text-muted-foreground">
           {cs.map((c, i) => <Fragment key={c.path}>{i > (abs ? 1 : 0) && <span className="px-0.5 text-tertiary">/</span>}
-            <button type="button" onClick={() => go(c.path)} className={cn("rounded px-1 py-0.5 hover:bg-accent hover:text-foreground", i === cs.length - 1 && !typed && "text-foreground")}>{c.name}</button></Fragment>)}
+            <button type="button" onClick={() => go(c.path)} className={cn("rounded-md px-1 py-0.5 hover:bg-accent hover:text-foreground", i === cs.length - 1 && !typed && "text-foreground")}>{c.name}</button></Fragment>)}
         </div>
-        {at.git && !typed && <span className="shrink-0 rounded bg-muted px-1.5 py-0.5 type-footnote text-muted-foreground">git</span>}
+        {at.git && !typed && <span className="shrink-0 rounded-md bg-background px-1.5 py-0.5 type-label text-muted-foreground">git</span>}
       </div>
-      <div className="h-44 overflow-y-auto py-1">
+      <div className="h-44 overflow-y-auto p-1">
         {note ? <div className="px-3 py-4 text-center type-footnote text-muted-foreground">{note}</div>
           : shown.map((x) => { const I = x.git ? FolderGit2Icon : FolderIcon; return (
-            <button key={x.path} type="button" onClick={() => go(x.path)} className="flex w-full items-center gap-2 px-2.5 py-1 text-left text-[13px] hover:bg-accent" data-dir={x.name}>
+            <button key={x.path} type="button" onClick={() => go(x.path)} className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left type-callout hover:bg-accent" data-dir={x.name}>
               <I className="size-4 shrink-0 text-muted-foreground" strokeWidth={1.5} /><span className="min-w-0 flex-1 truncate">{x.name}</span>
               {x.git && <span className="type-footnote text-muted-foreground">git</span>}<ChevronRightIcon className="size-3.5 shrink-0 text-tertiary" /></button>) })}
         {at.more && !note && <div className="px-3 py-1.5 type-footnote text-muted-foreground">{t("pages:projects.browseMore", { count: at.dirs.length })}</div>}
@@ -172,7 +292,7 @@ export function NewProjectDialog() {
             <Select align="end" testId="project-node" value="hub" onChange={() => {}} options={nodeOptions} /></div>
             {nodeOptions.length > 1 && <FieldDescription className="type-footnote">{t("pages:projects.nodeHint")}</FieldDescription>}</Field>
           <Field className="gap-1.5"><FieldLabel htmlFor="pj-path">{t("pages:projects.dir")}</FieldLabel>
-            <Input id="pj-path" autoFocus className="rounded-lg font-mono text-[13px]" value={path} onChange={(e) => { setPath(e.target.value); setGit(null) }} placeholder="~/code/my-project" data-project-path />
+            <Input id="pj-path" autoFocus className="rounded-lg type-code" value={path} onChange={(e) => { setPath(e.target.value); setGit(null) }} placeholder="~/code/my-project" data-project-path />
             <DirBrowser path={path} node="hub" onPick={pick} onSeen={setGit} />
             <FieldDescription className="type-footnote">{t("pages:projects.browseHere")}</FieldDescription>
           </Field>

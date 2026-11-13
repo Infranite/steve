@@ -11,8 +11,7 @@
 //! stops.
 //!
 //! Secrets the command was given ([`Run::secret_env`], [`Run::stdin`]) are only in memory: put in
-//! its environment, or written to its stdin after the go line. What it prints is masked
-//! ([`Run::mask`]) before it leaves here.
+//! its environment, or written to its stdin after the go line.
 
 use std::io::Read;
 use std::os::fd::AsRawFd;
@@ -24,7 +23,6 @@ use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use steve_node_api::OperationId;
-use steve_vault::redact::Redactor;
 use zeroize::Zeroizing;
 
 use crate::procs::{self, GONE_WAIT};
@@ -48,8 +46,6 @@ pub(crate) struct Run {
     pub secret_env: Vec<(String, Zeroizing<Vec<u8>>)>,
     /// A secret for its stdin (else stdin is `/dev/null`).
     pub stdin: Option<Zeroizing<Vec<u8>>>,
-    /// What to mask in its output: the secrets it was given, and their temp files' directory.
-    pub mask: Option<Redactor>,
     /// Runs in the OS sandbox ([`crate::confine`]): a command for a run. The Node's own work (a
     /// push from its throwaway repository) does not.
     pub confined: bool,
@@ -174,10 +170,8 @@ pub(crate) fn run(inner: &Arc<crate::Inner>, op: &OperationId, r: &Run) -> Resul
             })
         })
     };
-    // a secret cut at the bound would not be recognized: keep enough past it to mask, then cut
-    let longest = r.mask.as_ref().map_or(0, Redactor::longest);
-    let mut stdout = Capped::new(r.cap + longest);
-    let mut stderr = Capped::new(r.cap + longest);
+    let mut stdout = Capped::new(r.cap);
+    let mut stderr = Capped::new(r.cap);
     let deadline = Instant::now()
         + Duration::from_millis(r.deadline.saturating_sub(crate::now()).max(0) as u64);
     let ended = loop {
@@ -209,8 +203,8 @@ pub(crate) fn run(inner: &Arc<crate::Inner>, op: &OperationId, r: &Run) -> Resul
     if let Some(f) = feeder {
         let _ = f.join();
     }
-    let (out, out_cut) = stdout.text(r.mask.as_ref(), r.cap);
-    let (err, err_cut) = stderr.text(r.mask.as_ref(), r.cap);
+    let (out, out_cut) = stdout.text(r.cap);
+    let (err, err_cut) = stderr.text(r.cap);
     Ok(Ran {
         ended,
         truncated: stdout.truncated || stderr.truncated || out_cut || err_cut,
@@ -310,13 +304,9 @@ impl Capped {
         }
     }
 
-    /// As text, masked, cut to `cap` bytes on a character boundary; and whether it was cut.
-    fn text(&self, mask: Option<&Redactor>, cap: usize) -> (String, bool) {
-        let kept = match mask {
-            Some(m) => m.scrub_bytes(&self.kept),
-            None => std::borrow::Cow::Borrowed(&self.kept[..]),
-        };
-        let s = String::from_utf8_lossy(&kept);
+    /// As text, cut to `cap` bytes on a character boundary; and whether it was cut.
+    fn text(&self, cap: usize) -> (String, bool) {
+        let s = String::from_utf8_lossy(&self.kept);
         if s.len() <= cap {
             return (s.into_owned(), false);
         }

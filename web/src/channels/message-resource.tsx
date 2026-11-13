@@ -90,9 +90,9 @@ export function MessageResource({ url, name, image = false, unavailable }: { url
     } catch (e) { if (!controller.signal.aborted) setError(e instanceof TypeError ? t("channels:resource.network") : e instanceof Error ? e.message : t("channels:resource.downloadFailed")) }
     finally { if (!controller.signal.aborted) setBusy(false) }
   }
-  return <div ref={root} className="min-w-0 max-w-full rounded-lg border bg-background p-2" data-message-resource={image ? "image" : "file"}>
-    {image && preview && !error && <button type="button" onClick={() => setOpen(true)} aria-label={tr("channels:resource.view", { name })} className="block max-w-full rounded focus-visible:ring-2 focus-visible:ring-ring">
-      <img src={preview} alt={name} className="max-h-64 max-w-full rounded object-contain" onError={() => setError(t("channels:resource.undecodable"))} />
+  return <div ref={root} className="min-w-0 max-w-full rounded-xl bg-muted/60 p-2.5" data-message-resource={image ? "image" : "file"}>
+    {image && preview && !error && <button type="button" onClick={() => setOpen(true)} aria-label={tr("channels:resource.view", { name })} className="mb-2 block max-w-full rounded-lg focus-visible:ring-2 focus-visible:ring-ring">
+      <img src={preview} alt={name} className="max-h-64 max-w-full rounded-lg object-contain" onError={() => setError(t("channels:resource.undecodable"))} />
     </button>}
     <div className="flex min-w-0 items-center gap-2 type-footnote">
       {image ? <ImageIcon className="size-4 shrink-0" /> : <FileIcon className="size-4 shrink-0" />}

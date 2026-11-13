@@ -4,10 +4,11 @@
  * it can do: 已开启 / 缺权限 / 已关闭 / 规划中. Nothing here claims a capability works without a connection that is up.
  * Routes: #/integrations, #/integrations/:provider. Data: GET /connections/integrations, the 渠道 accounts for defaults. */
 import { useState } from "react"
-import { CalendarIcon, ChevronRightIcon, GitPullRequestIcon, HashIcon, MailIcon, MessagesSquareIcon, PlugIcon, PlusIcon } from "lucide-react"
+import { CalendarIcon, ContactRoundIcon, FileTextIcon, GitPullRequestIcon, HashIcon, ListChecksIcon, MailIcon, MessagesSquareIcon, MicIcon, PlugIcon, PlusIcon, SendIcon, SheetIcon, StampIcon, WebhookIcon } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Spinner } from "@/components/ui/spinner"
-import { go, Page, Group, Row, SectionLabel, Meta, Empty, StatusDot } from "@/ui"
+import { go, Page, Group, Row, SectionLabel, Meta, Empty, StatusDot, Notice, Disclosure } from "@/ui"
+import { AppDirectory, type App, type AppCategory, type AppDirectoryLabels } from "@/components/affect/app-directory-clean"
 import { Unwired } from "@/unwired"
 import { t as tr, useT } from "@/i18n"
 import { useLoad } from "@/accounts/load"
@@ -21,13 +22,10 @@ import { FeishuGuide } from "@/integrations/feishu"
 import { InstallationCard } from "@/integrations/installation"
 import { CleanupDialog } from "@/integrations/disconnect"
 
-const ICON: Record<string, any> = { feishu: MessagesSquareIcon, github: GitPullRequestIcon, mail: MailIcon, slack: HashIcon, gcal: CalendarIcon }
-export const ProviderIcon = ({ id, size = 32 }: { id: string; size?: number }) => {
-  const I = ICON[id] ?? PlugIcon
-  return <span className="flex shrink-0 items-center justify-center rounded-lg bg-muted text-muted-foreground" style={{ width: size, height: size }} aria-hidden><I className="size-4" strokeWidth={1.5} /></span>
-}
-const Note = ({ children }: { children: React.ReactNode }) => <div className="mt-2 px-1 type-footnote text-muted-foreground">{children}</div>
-const Hint = ({ children, ...rest }: { children: React.ReactNode; [k: string]: any }) => <div className="rounded-xl border border-dashed px-4 py-3.5 type-callout text-muted-foreground" {...rest}>{children}</div>
+const ICON: Record<string, any> = { ext_ws: WebhookIcon, feishu: MessagesSquareIcon, github: GitPullRequestIcon, mail: MailIcon, slack: HashIcon, gcal: CalendarIcon }
+/** the provider's mark, for the tiles of the directory and the installation cards (they draw the frame) */
+export const ProviderGlyph = ({ id }: { id: string }) => { const I = ICON[id] ?? PlugIcon; return <I className="size-4 text-muted-foreground" strokeWidth={1.5} aria-hidden /> }
+const Note = ({ children }: { children: React.ReactNode }) => <div className="mt-3 type-footnote text-muted-foreground">{children}</div>
 const join = (xs: string[]) => xs.join(tr("integrations:list.sep"))
 /** #/integrations and #/integrations/:provider */
 export function IntegrationsRoute({ id }: { id?: string }) {
@@ -43,31 +41,68 @@ export function IntegrationsRoute({ id }: { id?: string }) {
 }
 
 /* ═════════ overview ═════════ */
+/** each capability area's icon in the directory's categories */
+const AREA_ICON: Record<string, any> = { channel: MessagesSquareIcon, send_as_you: SendIcon, docs: FileTextIcon, sheets: SheetIcon, calendar: CalendarIcon, tasks: ListChecksIcon, approval: StampIcon, minutes: MicIcon, mail: MailIcon, repo: GitPullRequestIcon, directory: ContactRoundIcon }
+const areaIcon = (area: string) => { const I = AREA_ICON[area] ?? PlugIcon; return <I className="size-4" strokeWidth={1.5} aria-hidden /> }
+
+/** every provider as a card of the directory, its categories the areas it supports today (planned ones are only named) */
 function Overview({ x }: { x: Integrations }) {
   const t = useT()
   const live = x.providers
   const n = live.reduce((k, p) => k + p.connections.length, 0)
+  const supported = (p: IProvider) => p.areas.filter((a) => a.state === "supported").map((a) => a.area)
+  const order = x.areas.map((a) => a.id)
+  const areas = [...new Set(live.flatMap(supported))].sort((a, b) => order.indexOf(a) - order.indexOf(b))
+  const categories: AppCategory[] = areas.map((a) => ({ id: a, label: areaLabel(a), icon: areaIcon(a) }))
+  const apps: App[] = live.map((p) => {
+    const insts = installationsOf(x, p.id), on = p.connections.length > 0
+    const sup = p.areas.filter((a) => a.state === "supported").map((a) => areaLabel(a.area)), plan = p.areas.filter((a) => a.state === "planned").map((a) => areaLabel(a.area))
+    const attention = insts.some((i) => i.missing > 0 || i.status !== "ok")
+    return {
+      id: p.id, name: p.name, connected: on, attention, categories: supported(p), logo: <ProviderGlyph id={p.id} />,
+      vendor: on ? (attention ? t("integrations:directory.attention") : t(p.id === "feishu" ? "integrations:page.connectedApps" : "integrations:page.connectedN", { count: insts.length })) : t("integrations:page.notConnected"),
+      keywords: [...sup, ...plan, ...p.adapters.map((a) => a.name), ...insts.map((i) => i.name)].join(" "),
+      description: on
+        ? <span className="flex flex-col">{insts.map((i) => {
+            const name = <><span className="text-foreground">{i.name}</span>{i.status !== "ok" && <> <StatusDot s={(CONN_STATUS[i.status] ?? [i.status, "idle"])[1]} /></>}</>
+            const l = installationLine(i, p)
+            const line = <span data-installation-line>{l.who && <>{l.who}<span className="text-tertiary">{tr("integrations:line.sep")}</span></>}<span className={l.bad ? "text-attention" : undefined}>{l.state}</span></span>
+            // one installation: its name, then its line; several: one line each
+            return insts.length === 1
+              ? <span key={i.id} className="flex flex-col" data-installation-row={i.id} data-installation-missing={i.missing}><span className="truncate">{name}</span><span className="truncate">{line}</span></span>
+              : <span key={i.id} className="truncate" data-installation-row={i.id} data-installation-missing={i.missing}>{name}<span className="text-tertiary"> · </span>{line}</span>
+          })}</span>
+        // what it supports today, as plain text: it wraps, the card clamps it at two lines and its tooltip has it all;
+        // the planned areas are on the provider's page (and still found by the search)
+        : sup.length ? t("integrations:page.supportedList", { list: join(sup) }) : "",
+      attrs: { "data-provider": p.id, "data-provider-state": on ? "connected" : "none", "data-provider-row": p.id },
+    }
+  })
+  const trouble = live.flatMap((p) => installationsOf(x, p.id).map((i) => ({ i, p, l: installationLine(i, p) }))).filter((y) => y.l.bad)
+  const labels: AppDirectoryLabels = {
+    connected: (count) => t("integrations:directory.connected", { count }), search: t("integrations:directory.search"), filter: t("integrations:directory.filter"),
+    all: t("integrations:directory.all"), onlyConnected: t("integrations:directory.onlyConnected"), notConnected: t("integrations:directory.notConnected"), show: t("integrations:directory.show"),
+    categories: t("integrations:directory.categories"), results: (q) => t("integrations:directory.results", { q }), noMatch: t("integrations:directory.noMatch"),
+    noneInCategory: t("integrations:directory.noneInCategory"), none: t("integrations:directory.none"),
+    clearSearch: t("integrations:directory.clearSearch"), clearFilter: t("integrations:directory.clearFilter"),
+    connectShort: t("integrations:page.connect"), connectedShort: t("integrations:directory.onlyConnected"), manage: t("integrations:directory.manage"),
+  }
   return (
-    <Page title={t("integrations:page.title")} sub={t("integrations:page.overviewSub")} max={760}>
-      <div className="flex flex-col gap-8" data-integrations data-connections={n}>
-        {n === 0 && <div className="rounded-xl border px-4 py-3.5" data-none-connected><div className="type-headline">{t("integrations:page.noneTitle")}</div>
-          <div className="mt-0.5 type-callout text-muted-foreground">{t("integrations:page.noneSub")}</div></div>}
-        <section><SectionLabel>{t("integrations:page.available", { n: live.length })}</SectionLabel>
-          <div className="flex flex-col gap-6">{live.map((p) => <ProviderBlock key={p.id} p={p} x={x} />)}</div></section>
+    // the page's own frame and title: the same width as the provider pages; with nothing connected the intro says so
+    <Page title={t("integrations:page.title")} sub={n === 0 ? <span data-none-connected>{t("integrations:page.noneSub")}</span> : t("integrations:page.overviewCount", { count: live.filter((p) => p.connections.length).length })}>
+      <div className="flex flex-col gap-6" data-integrations data-connections={n}>
+        {trouble.length > 0 && <Notice tone="attention" data-integrations-attention>
+          <ul className="flex flex-col gap-1">{trouble.map(({ i, p, l }) => <li key={i.id}><a href={"#/integrations/" + p.id} className="hover:underline" data-attention-installation={i.id}>{t("integrations:page.attnLine", { provider: p.name, name: i.name, state: l.state })}</a></li>)}</ul></Notice>}
+        {/* a handful of services fit at a glance: search, filter and categories only once there are many */}
+        <AppDirectory aria-label={t("integrations:page.title")} apps={apps} categories={categories} labels={labels} onOpen={(a) => go("#/integrations/" + a.id)} browse={live.length > 6} />
         <Note>{t("integrations:page.footNote")}</Note>
       </div>
     </Page>
   )
 }
 
-/** one provider: its name and state, one line per installation */
-function ProviderBlock({ p, x }: { p: IProvider; x: Integrations }) {
-  if (p.connections.length) return <InstallBlock p={p} insts={installationsOf(x, p.id)} />
-  return <ProviderBlockOld p={p} />
-}
-
-/** “Steve 机器人 · 代你处理 · 缺 N 项权限”: who Steve works as in this installation, and what to fix */
-export function installationLine(i: IInstallation, p: IProvider) {
+/** “Steve 机器人 · 代你处理” and “缺 N 项权限”: who Steve works as in this installation, and its state (`bad`: what to fix) */
+export function installationLine(i: IInstallation, p: IProvider): { who: string; state: string; bad: boolean } {
   const feishu = p.id === "feishu", has = (k: string) => i.identities.some((y) => y.kind === k)
   const offers = (k: string) => p.adapters.some((a) => (a.identity === "bot" || a.identity === "app" ? "steve" : "you") === k)
   const parts: string[] = []
@@ -75,44 +110,8 @@ export function installationLine(i: IInstallation, p: IProvider) {
   else if (offers("steve") && feishu) parts.push(tr("integrations:line.botOff"))
   if (has("you")) parts.push(tr("integrations:line.you"))
   else if (offers("you") && feishu) parts.push(tr("integrations:line.youOff"))
-  parts.push(i.missing ? tr("integrations:line.missing", { count: i.missing }) : i.status === "ok" ? tr("integrations:line.allGranted") : CONN_STATUS[i.status]?.[0] ?? i.status)
-  return parts.join(" · ")
-}
-
-function InstallBlock({ p, insts }: { p: IProvider; insts: IInstallation[] }) {
-  const t = useT()
-  return (
-    <div data-provider={p.id} data-provider-state="connected">
-      <Group>
-        <Row icon={<ProviderIcon id={p.id} />} onClick={() => go("#/integrations/" + p.id)} data-provider-row={p.id}
-          title={<span className="inline-flex flex-wrap items-center gap-x-2 gap-y-0.5"><span className="type-headline">{p.name}</span>
-            <span className="type-footnote text-muted-foreground">{t(p.id === "feishu" ? "integrations:page.connectedApps" : "integrations:page.connectedN", { count: insts.length })}</span></span>}>
-          <ChevronRightIcon className="size-4 text-tertiary" /></Row>
-        {insts.map((i) => { const [, dot] = CONN_STATUS[i.status] ?? [i.status, "idle"]; return (
-          <Row key={i.id} className="pl-12" onClick={() => go("#/integrations/" + p.id)} data-installation-row={i.id} data-installation-missing={i.missing}
-            title={<span className="inline-flex items-center gap-1.5">{i.name}{i.status !== "ok" && <StatusDot s={dot} />}</span>}
-            sub={<span className={i.missing ? "text-attention" : undefined} data-installation-line>{installationLine(i, p)}</span>}>
-            <ChevronRightIcon className="size-4 text-tertiary" /></Row>) })}
-      </Group>
-    </div>
-  )
-}
-
-/** a provider without connections: what it supports */
-function ProviderBlockOld({ p }: { p: IProvider }) {
-  const t = useT()
-  const sup = p.areas.filter((a) => a.state === "supported").map((a) => areaLabel(a.area)), plan = p.areas.filter((a) => a.state === "planned").map((a) => areaLabel(a.area))
-  return (
-    <div data-provider={p.id} data-provider-state={p.connections.length ? "connected" : "none"}>
-      <Group>
-        <Row icon={<ProviderIcon id={p.id} />} onClick={() => go("#/integrations/" + p.id)} data-provider-row={p.id}
-          title={<span className="inline-flex flex-wrap items-center gap-x-2 gap-y-0.5"><span className="type-headline">{p.name}</span>
-            <span className="type-footnote text-muted-foreground">{p.connections.length ? t("integrations:page.connectedN", { count: p.connections.length }) : t("integrations:page.notConnected")}</span></span>}
-          sub={[sup.length ? t("integrations:page.supportedList", { list: join(sup) }) : "", plan.length ? t("integrations:page.plannedList", { list: join(plan) }) : ""].filter(Boolean).join(" · ")}>
-          {!p.connections.length && <span className="hidden type-callout text-blue sm:inline">{t("integrations:page.connect")}</span>}<ChevronRightIcon className="size-4 text-tertiary" /></Row>
-      </Group>
-    </div>
-  )
+  const state = i.missing ? tr("integrations:line.missing", { count: i.missing }) : i.status === "ok" ? tr("integrations:line.allGranted") : CONN_STATUS[i.status]?.[0] ?? i.status
+  return { who: parts.join(tr("integrations:line.sep")), state, bad: i.missing > 0 || i.status !== "ok" }
 }
 
 /* ═════════ one provider ═════════ */
@@ -129,23 +128,35 @@ function ProviderView({ p, x, reload }: { p: IProvider; x: Integrations; reload:
     const domain: "feishu" | "lark" | undefined = raw === "lark" ? "lark" : raw === "feishu" ? "feishu" : undefined
     return { id: c.id, name: c.name || c.handle, domain }
   })
+  const guide = p.id === "feishu" ? <FeishuGuide adapters={p.adapters} bots={bots} selfDone={p.connections.some((c) => selfIds.includes(c.adapter))} callbackUrls={x.callback_urls} bare={insts.length > 0} />
+    : <WaysIn p={p} onConnect={setDlg} bare={insts.length > 0} />
   return (
     <Page title={p.name} back={["#/integrations", t("integrations:page.title")]} max={720}
       sub={<Meta><span>{insts.length ? t(p.id === "feishu" ? "integrations:page.connectedApps" : "integrations:page.connectedN", { count: insts.length }) : t("integrations:page.notConnected")}</span>{p.adapters.length > 0 && p.id !== "feishu" && <span>{p.adapters.map((a) => a.name).join(" / ")}</span>}</Meta>}>
       {dlg && <ConnectDialog adapter={asAdapter(dlg, p.id)} onClose={() => setDlg(null)} done={() => go("#/integrations/" + p.id)} />}
       <div className="flex flex-col gap-8" data-provider-page={p.id}>
-        {insts.length ? <section><SectionLabel>{t("integrations:page.connectedSection", { n: insts.length })}</SectionLabel>
-            <div className="flex flex-col gap-6">{insts.map((i) => <InstallationCard key={i.id} inst={i} p={p} chans={chans} onChange={reload} />)}</div></section>
-          : <section><SectionLabel>{t("integrations:page.connectedSection", { n: 0 })}</SectionLabel><Hint data-not-connected>{t("integrations:page.notConnectedHint", { name: p.name })}</Hint></section>}
+        {insts.length > 0 && <section><SectionLabel>{t("integrations:page.connectedSection", { n: insts.length })}</SectionLabel>
+          <div className="flex flex-col gap-6">{insts.map((i) => <InstallationCard key={i.id} inst={i} p={p} chans={chans} onChange={reload} />)}</div></section>}
         <Leftovers p={p} />
-        {p.id === "feishu" ? <FeishuGuide adapters={p.adapters} bots={bots} selfDone={p.connections.some((c) => selfIds.includes(c.adapter))} callbackUrls={x.callback_urls} />
-          : <WaysIn p={p} onConnect={setDlg} />}
-        {!insts.length && <section><SectionLabel>{t("integrations:page.whatItDoes")}</SectionLabel>
-          <Group>{[...p.areas].sort((x, y) => +(x.state === "planned") - +(y.state === "planned")).map((a) => <Row key={a.area} title={areaLabel(a.area)} sub={areaNote(p, a.area)} data-area={a.area} data-area-state={a.state}>
-            <span className="inline-flex items-center gap-1.5 type-footnote text-muted-foreground"><StatusDot s={a.state === "supported" ? (p.connections.length ? "done" : "idle") : "drop"} />{a.state === "planned" ? t("integrations:page.planned") : p.connections.length ? t("integrations:page.supported") : t("integrations:page.supportedNotConnected")}</span></Row>)}</Group>
-          {!p.connections.length && <Note>{t("integrations:page.supportedNote")}</Note>}</section>}
+        {/* connected: adding another is the exception, so it waits behind one line */}
+        {insts.length ? <Disclosure label={t(p.id === "feishu" ? "integrations:page.addAnotherApp" : "integrations:page.addAnother")} data-add-another>
+            <div className="pt-3">{guide}</div></Disclosure>
+          : guide}
+        {!insts.length && <WhatItDoes p={p} />}
       </div>
     </Page>
+  )
+}
+
+/** not connected yet: what it would do, the planned areas in one line */
+function WhatItDoes({ p }: { p: IProvider }) {
+  const t = useT()
+  const sup = p.areas.filter((a) => a.state === "supported"), plan = p.areas.filter((a) => a.state === "planned")
+  return (
+    <section><SectionLabel>{t("integrations:page.whatItDoes")}</SectionLabel>
+      <Group>{sup.map((a) => { const note = areaNote(p, a.area); return <Row key={a.area} title={areaLabel(a.area)} sub={note && <span className="line-clamp-2" title={note}>{note}</span>} data-area={a.area} data-area-state={a.state} /> })}</Group>
+      {plan.length > 0 && <div className="mt-2 px-1 type-footnote text-muted-foreground" data-planned-areas>{t("integrations:page.plannedList", { list: join(plan.map((a) => areaLabel(a.area))) })}</div>}
+    </section>
   )
 }
 
@@ -158,10 +169,10 @@ function areaNote(p: IProvider, area: string) {
 /** the hint under a way in, by adapter id (the id is the Hub's; the text is ours) */
 const WAY_HINT: Record<string, "githubApp" | "githubPat" | "imap"> = { github_app: "githubApp", github_pat: "githubPat", imap: "imap" }
 /** the generic ways in: a credential form, OAuth (with the device code when offered), or a module's own flow */
-function WaysIn({ p, onConnect }: { p: IProvider; onConnect: (a: IAdapter) => void }) {
+function WaysIn({ p, onConnect, bare }: { p: IProvider; onConnect: (a: IAdapter) => void; bare?: boolean }) {
   const t = useT()
   return (
-    <section><SectionLabel>{t("integrations:page.waysIn")}</SectionLabel>
+    <section>{!bare && <SectionLabel>{t("integrations:page.waysIn")}</SectionLabel>}
       <Group>{p.adapters.map((a) => (
         <Row key={a.id} title={a.name} sub={WAY_HINT[a.id] ? t(`integrations:way.${WAY_HINT[a.id]}`) : a.auth === "oauth" ? t("integrations:page.wayOAuth") : t("integrations:page.wayCredential")} data-way={a.id}>
           {a.auth === "managed" ? <Button size="sm" variant="outline" onClick={() => go("#/github")} data-way-go={a.id}>{t("integrations:page.goCreate")}</Button>

@@ -16,6 +16,7 @@ steve_i18n::init!();
 
 pub mod base;
 mod bus;
+pub mod caps;
 pub mod compact;
 pub mod db;
 pub mod diagnostics;
@@ -23,6 +24,7 @@ mod event_payload;
 pub mod maintenance;
 pub mod outbox;
 mod repo;
+pub mod seeded;
 mod tx;
 mod types;
 pub mod workflow_gate;

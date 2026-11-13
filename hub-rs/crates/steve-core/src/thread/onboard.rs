@@ -25,6 +25,13 @@ pub const RAN_OUT: &str = "turns";
 /// What the research run is told while the meeting is on.
 pub const BRIEF: &str = include_str!("onboard.txt");
 
+/// A conversation message's text as shown: the first meeting's welcome Steve said in zh-CN (to a zh-CN
+/// request, or before the welcome followed the request's language), in the request's language; `None`
+/// for anything else, and in zh-CN.
+pub fn welcome_shown(text: &str) -> Option<String> {
+    steve_i18n::reword!(text, &["core.onboard.welcome"])
+}
+
 impl Core {
     /// The first meeting is on.
     pub fn onboard_pending(&self, ws: &str) -> Result<bool> {
@@ -32,7 +39,8 @@ impl Core {
     }
 
     /// Begin the first meeting: Steve says hello in the main conversation, in the language of the
-    /// request. Returns the welcome message; one that is already on is left as it is.
+    /// request (a zh-CN one reads in another reader's language: [`welcome_shown`]). Returns the
+    /// welcome message; one that is already on is left as it is.
     pub fn onboard_start(&self, ws: &str, actor: &str) -> Result<String> {
         let db = self.store();
         if self.meeting(ws)? {

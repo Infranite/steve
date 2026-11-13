@@ -59,8 +59,7 @@ export default {
       fetch: "Fetching",
       meet: "Saving",
     },
-    liveMeta: "· tool {{n}} · {{time}}",
-    liveMetaSlow: "· tool {{n}} · {{time}} · still reading…",
+    slow: "still reading…",
     stop: "Stop",
   },
   offer: {
@@ -80,8 +79,8 @@ export default {
   rerun: "Answer again",
   queued: "Queued",
   quote: {
-    me: "You at {{time}}: “{{text}}”",
-    steve: "Steve at {{time}}: “{{text}}”",
+    me: "You, {{time}}: “{{text}}”",
+    steve: "Steve, {{time}}: “{{text}}”",
   },
   update: {
     done: "Done: {{title}}",
@@ -96,6 +95,7 @@ export default {
       released: "Released",
       done: "Done",
       dropped: "Dropped",
+      closedFailed: "Failed",
       failed: "Failed, needs you",
       accept: "Delivered, needs your review",
       release: "Needs your release approval",
@@ -208,7 +208,6 @@ export default {
     sent: "Sent",
     pending: "Sending",
     draft: "Sends once you approve",
-    blocked: "Held back: contains a secret",
     failed: "Not sent",
     unknown: "May have been sent, checking",
     discarded: "You didn't send it",

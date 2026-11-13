@@ -1,6 +1,6 @@
 //! The only way mail leaves Steve: an approval decision answered `send`, a delay you can
-//! undo, then [`Mail::execute`] — which checks the approval again, builds the MIME, refuses registered
-//! vault secrets, and calls the adapter. `MailAdapter::send(` appears nowhere else in this crate.
+//! undo, then [`Mail::execute`] — which checks the approval again, builds the MIME and calls the
+//! adapter. `MailAdapter::send(` appears nowhere else in this crate.
 //!
 //! - [`MailDraftHandler`]: the `mail_draft` decision handler (`send`/`no`, `retry`/`discard`, undo);
 //! - [`DraftLink`]: what the handler shares with [`Mail`] (the clock, the hooks, approvals that hit an
@@ -51,22 +51,6 @@ pub const UNKNOWN_OPTIONS: [&str; 2] = ["confirmed_not_sent", "discard"];
 /// The capability a connection needs to send mail.
 pub const SEND_CAP: &str = "mail.send";
 pub const ERR_NO_APPROVAL: &str = "没有有效的批准";
-pub const ERR_SECRET: &str = "正文里有保险箱里的机密，已拦下";
-
-/// The vault's redactor as the sender needs it (V4 implements it). Answers the
-/// field labels of registered secret values found in `text`; any hit blocks the mail.
-pub trait SecretScan: Send + Sync {
-    fn find(&self, ws: &str, text: &str) -> Vec<String>;
-}
-
-/// No redactor installed: finds nothing.
-pub struct NoSecrets;
-
-impl SecretScan for NoSecrets {
-    fn find(&self, _: &str, _: &str) -> Vec<String> {
-        Vec::new()
-    }
-}
 
 /// What steve-core does for drafts (the integrator implements it; calls come after the commit or from
 /// inside the decision's transaction, so implementations should only queue work).
@@ -380,7 +364,7 @@ pub(crate) fn undo_approval(tx: &Tx, d: &DraftRow, now: i64) -> MailResult<()> {
 pub enum SendOutcome {
     /// Sent; the outgoing `mail_messages` row.
     Sent { message: String },
-    /// Refused before anything left (no valid approval, a vault secret): audit `mail.send.blocked`.
+    /// Refused before anything left (no valid approval): audit `mail.send.blocked`.
     Blocked { reason: String },
     /// The provider failed; a `fail` decision is open.
     Failed { error: String },
@@ -668,22 +652,6 @@ impl Mail {
             Ok(b) => b,
             Err(e) => return self.fail(&d, &e.to_string()),
         };
-        // step 3: registered vault secrets never leave
-        let found = self
-            .0
-            .secrets
-            .find(&d.workspace_id, &format!("{}\n{}", d.subject, d.body));
-        if !found.is_empty() {
-            self.0.m.store.transaction(|tx| -> MailResult<()> {
-                repo::draft_transition(tx, &d.id, &["sending"], "failed", now)?;
-                repo::set_draft_error(tx, &d.id, Some(ERR_SECRET))?;
-                self.blocked(tx, &d, "secret", json!({"fields": found}))
-            })?;
-            self.notify_thread(&d);
-            return Ok(SendOutcome::Blocked {
-                reason: ERR_SECRET.into(),
-            });
-        }
         // Adapter lookup happens before any submission, so a local setup error is definite.
         let (adapter, cx) = match self.adapter_of(&d.workspace_id, &d.connection_id) {
             Ok(v) => v,

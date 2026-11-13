@@ -116,6 +116,24 @@ pub fn notify(
     Ok(id)
 }
 
+/// A stored notice text the Hub wrote itself in the request's language (`steve_core::notice_line`, and
+/// the Hub's own: a device's disk, a device that went offline, background delivery that gave up);
+/// `None`: as stored.
+pub fn shown(stored: &str) -> Option<String> {
+    const HUB: &[&str] = &[
+        "hub.node.disk_low",
+        "hub.node.handed_over",
+        "hub.notice.outbox_dead",
+    ];
+    steve_core::notice_line::shown(stored).or_else(|| steve_i18n::reword!(stored, HUB))
+}
+
+/// `text` of a message or a notice row in the request's language, when it is a notice.
+fn show_text(text: Option<&Value>) -> Option<Value> {
+    let t = text?.as_str()?;
+    Some(Value::String(shown(t)?))
+}
+
 /// The latest notices, newest first (ties: later insert first), at most `limit`.
 pub fn list(r: &dyn Repo, ws: &str, limit: i64) -> BResult<Vec<Value>> {
     let all = r.messages_in(ws, SPACE, WINDOW)?;
@@ -141,7 +159,8 @@ pub fn list(r: &dyn Repo, ws: &str, limit: i64) -> BResult<Vec<Value>> {
                 .cloned()
                 .unwrap_or_else(|| json!("success"));
             let closed = str_of(&m, "id").is_some_and(|id| shut.contains(id));
-            json!({ "id": m.get("id"), "kind": kind, "level": level, "text": m.get("text"), "item_id": m.get("item_id"), "created": m.get("created"), "closed": closed })
+            let text = show_text(m.get("text")).or_else(|| m.get("text").cloned());
+            json!({ "id": m.get("id"), "kind": kind, "level": level, "text": text, "item_id": m.get("item_id"), "created": m.get("created"), "closed": closed })
         })
         .collect())
 }
@@ -180,6 +199,24 @@ fn visible(r: &dyn Repo, ws: &str, msgs: Vec<Obj>) -> BResult<Vec<Obj>> {
             !m.get("meta")
                 .and_then(|x| x.get("hidden"))
                 .is_some_and(|h| h.as_bool() == Some(true))
+        })
+        /* a notice's line in the conversation reads like the notice */
+        .map(|mut m| {
+            if notice_of(&m, "kind").is_some()
+                && let Some(t) = show_text(m.get("text"))
+            {
+                m.insert("text".into(), t);
+            }
+            /* the first meeting's welcome Steve said in zh-CN, in the reader's language */
+            if m.get("meta").and_then(|x| x.get("onboard")) == Some(&Value::Bool(true))
+                && let Some(t) = m
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .and_then(steve_core::thread::onboard::welcome_shown)
+            {
+                m.insert("text".into(), Value::String(t));
+            }
+            m
         })
         .collect())
 }
@@ -298,6 +335,31 @@ mod tests {
                 ("没有发布：冲突".into(), true)
             ]
         );
+    }
+
+    /// The Hub's own notices read in the request's language, in the list and as a line of the
+    /// conversation; zh-CN gets the stored text, and other text stays as written.
+    #[test]
+    fn notices_by_language() {
+        let r = Fake::default();
+        let disk = steve_i18n::t!("hub.node.disk_low", name = "studio", free = "3 GB");
+        notify(&r, "w", "disk", "info", &disk, None).expect("notify");
+        // as steve-core's YOLO writes it
+        notify(&r, "w", "system", "fail", "YOLO 已暂停：连续出错", None).expect("notify");
+        notify(&r, "w", "release", "fail", "没有发布：冲突", Some("ST-1")).expect("notify");
+        let en = steve_i18n::with(steve_i18n::EN, || (closed_of(&r), lines(&r)));
+        let texts: Vec<_> = en.0.iter().map(|x| x.0.as_str()).collect();
+        assert_eq!(
+            texts,
+            [
+                "没有发布：冲突",
+                "YOLO paused: 连续出错",
+                "Device “studio” has only 3 GB left on its project disk. Free some space on that machine, or check it on the devices page."
+            ]
+        );
+        assert_eq!(en.1, ["YOLO paused: 连续出错", "没有发布：冲突"]);
+        let zh = steve_i18n::with(steve_i18n::ZH_CN, || lines(&r));
+        assert_eq!(zh, ["YOLO 已暂停：连续出错", "没有发布：冲突"]);
     }
 
     #[test]

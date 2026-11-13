@@ -2,11 +2,9 @@
 //! ([`HubSecrets::take`]) under the command's operation id right before it runs, once per secret,
 //! and kept in memory only. `File` writes the value to `<home>/secrets/<op>/<VAR>` (directory
 //! 0700, file 0600), removed when the command ends and, for what a crash left, when the Node
-//! opens. The values, in all their forms, and that directory's path are masked in what the
-//! command prints ([`Given::mask`]), as the vault's own injection does.
+//! opens.
 //!
-//! A secret id is what the Hub names the value by (the vault's field label): the mask shows it
-//! (`[已打码：<id>]`).
+//! A secret id is what the Hub names the value by (the vault's field label).
 
 use std::collections::HashMap;
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
@@ -14,11 +12,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use steve_node_api::*;
-use steve_vault::redact::Redactor;
 use zeroize::Zeroizing;
-
-/// The label the temp directory's path is masked with (as the vault's `inject.rs`).
-const TEMP_LABEL: &str = "临时文件";
 
 /// `<home>/secrets`.
 fn root(home: &Path) -> PathBuf {
@@ -133,7 +127,6 @@ impl Drop for TempDir {
 pub(crate) struct Given {
     pub env: Vec<(String, Zeroizing<Vec<u8>>)>,
     pub stdin: Option<Zeroizing<Vec<u8>>>,
-    pub mask: Option<Redactor>,
     /// Kept until the command ended.
     pub temp: Option<TempDir>,
 }
@@ -149,7 +142,6 @@ pub(crate) async fn take(
     let mut given = Given {
         env: vec![],
         stdin: None,
-        mask: None,
         temp: None,
     };
     if refs.is_empty() {
@@ -193,28 +185,16 @@ pub(crate) async fn take(
             SecretDelivery::Header { .. } => return Err("a header is for a push only".into()),
         }
     }
-    let temp_text = given
-        .temp
-        .as_ref()
-        .map(|t| t.0.to_string_lossy().into_owned());
-    let mut pats: Vec<(&str, &[u8])> = values
-        .iter()
-        .map(|(id, v)| (id.as_str(), v.as_slice()))
-        .collect();
-    if let Some(t) = &temp_text {
-        pats.push((TEMP_LABEL, t.as_bytes()));
-    }
-    given.mask = Some(Redactor::new(pats));
     Ok(given)
 }
 
 /// A push's credential ([`SecretDelivery::Header`]), taken from the Hub for `op` once: the header
-/// line `<name>: <value>` for git, and the mask of its value. `Err`: why the push does not run.
+/// line `<name>: <value>` for git. `Err`: why the push does not run.
 pub(crate) async fn header(
     hub: Option<Arc<dyn HubSecrets>>,
     op: &OperationId,
     r: &SecretRef,
-) -> Result<(Zeroizing<Vec<u8>>, Redactor), String> {
+) -> Result<Zeroizing<Vec<u8>>, String> {
     let SecretDelivery::Header { name } = &r.how else {
         return Err("a push credential goes as a header".into());
     };
@@ -235,6 +215,5 @@ pub(crate) async fn header(
     line.extend_from_slice(name.as_bytes());
     line.extend_from_slice(b": ");
     line.extend_from_slice(&value);
-    let mask = Redactor::new([(r.id.as_str(), value.as_slice())]);
-    Ok((line, mask))
+    Ok(line)
 }

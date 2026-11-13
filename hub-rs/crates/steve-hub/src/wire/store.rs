@@ -293,6 +293,14 @@ impl Repo for StoreBackend {
             while let Some(r) = rows.next()? {
                 x.workspaces.entry(r.get(0)?).or_default().push(r.get(1)?);
             }
+            let mut st = c.prepare_cached(
+                "SELECT a.bot_id, s.id, s.name, s.transport, a.enabled FROM bot_capabilities a
+                   JOIN mcp_servers s ON s.id = a.entry_id WHERE a.kind = 'mcp' ORDER BY a.bot_id, lower(s.name)",
+            )?;
+            let mut rows = st.query([])?;
+            while let Some(r) = rows.next()? {
+                x.mcp.entry(r.get(0)?).or_default().push(mcp_summary(r)?);
+            }
             each(
                 c,
                 "SELECT bot_id, count(*) FROM bot_memories WHERE workspace_id = ?1 GROUP BY bot_id",
@@ -431,6 +439,18 @@ impl Repo for StoreBackend {
             .into_iter()
             .map(|w| w.workspace_id)
             .collect())
+    }
+    fn bot_mcp_servers(&self, id: &str) -> BResult<Vec<Value>> {
+        self.batch(|c| {
+            let mut st = c.prepare_cached(
+                "SELECT a.bot_id, s.id, s.name, s.transport, a.enabled FROM bot_capabilities a
+                   JOIN mcp_servers s ON s.id = a.entry_id WHERE a.kind = 'mcp' AND a.bot_id = ? ORDER BY lower(s.name)",
+            )?;
+            let v = st
+                .query_map([id], mcp_summary)?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(v)
+        })
     }
     fn bot_in_workspace(&self, id: &str, ws: &str) -> BResult<bool> {
         self.0.bots().in_workspace(id, ws).map_err(err)
@@ -901,6 +921,16 @@ impl Repo for StoreBackend {
     }
 }
 
+/// A Bot's MCP server as its view lists it: `(bot_id, id, name, transport, enabled)` → the object.
+fn mcp_summary(r: &rusqlite::Row) -> rusqlite::Result<Value> {
+    Ok(serde_json::json!({
+        "id": r.get::<_, String>(1)?,
+        "name": r.get::<_, String>(2)?,
+        "transport": r.get::<_, String>(3)?,
+        "enabled": r.get::<_, i64>(4)? != 0,
+    }))
+}
+
 #[cfg(test)]
 mod event_page_tests {
     use super::*;
@@ -1035,13 +1065,21 @@ mod workflow_summary_tests {
         c.execute("INSERT INTO workflows (item_id, revision, cycle, paused, max_parallel, max_attempts, created, updated) VALUES ('ST-1', 1, 1, 1, 1, 3, 1, 1)", []).unwrap();
         c.execute("INSERT INTO workflow_units (workflow_id, id, position, spec, status, item_id) VALUES ('ST-1', 'review', 0, '{}', 'failed', 'ST-2')", []).unwrap();
         let backend = StoreBackend::new(store).unwrap();
-        let read = || backend.item_extras(s::WS).unwrap().unwrap().remove("ST-1").unwrap();
+        let read = || {
+            backend
+                .item_extras(s::WS)
+                .unwrap()
+                .unwrap()
+                .remove("ST-1")
+                .unwrap()
+        };
         let current = read();
         assert_eq!(current.workflow_paused, Some(true));
         assert_eq!(current.workflow_cycle, Some(1));
         assert_eq!(current.workflow_failed, ["ST-2"]);
 
-        c.execute("UPDATE items SET cycle = 2 WHERE id = 'ST-1'", []).unwrap();
+        c.execute("UPDATE items SET cycle = 2 WHERE id = 'ST-1'", [])
+            .unwrap();
         let previous = read();
         assert_eq!(previous.workflow_cycle, Some(1));
         assert!(previous.workflow_failed.is_empty());

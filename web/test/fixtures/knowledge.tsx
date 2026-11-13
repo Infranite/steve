@@ -1,6 +1,6 @@
 import { createRoot } from "react-dom/client"
 import "../../src/index.css"
-import { Toaster } from "sonner"
+import { Toaster } from "@/components/ui/toaster"
 import { KnowledgeView } from "../../src/knowledge"
 import { MemConfirm, memAsk } from "../../src/knowledge/parts"
 import { Card, CardHeader, CardTitle } from "../../src/components/ui/card"

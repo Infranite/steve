@@ -1,6 +1,6 @@
 import { StrictMode, useState } from "react"
 import { createRoot } from "react-dom/client"
-import { Toaster } from "sonner"
+import { Toaster } from "@/components/ui/toaster"
 import "../../src/index.css"
 import { CleanupDialog, DisconnectDialog } from "../../src/integrations/disconnect"
 function Fixture() {

@@ -834,7 +834,7 @@ async fn exec_answers_an_exec_result_and_masks_its_secrets() {
     };
     assert_eq!(
         (x.exit_code, x.stdout.as_str(), x.stderr.as_str()),
-        (Some(1), "token=***", "***!")
+        (Some(1), "token=s3cr3t", "s3cr3t!")
     );
     // a resend answers the same receipt and takes nothing
     assert_eq!(n.exec(c).await.unwrap(), first);

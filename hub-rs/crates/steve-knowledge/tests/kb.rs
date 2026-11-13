@@ -2,7 +2,6 @@
 //! `never` memories never returned, source scope changes reach the index, deleted memories leave
 //! it, old Bot memories become searchable after a sync; plus the REST shapes and error codes.
 
-use std::ops::Range;
 use std::sync::{Arc, Mutex};
 
 use axum::Router;
@@ -11,26 +10,11 @@ use steve_knowledge::index;
 use steve_knowledge::repo;
 use steve_knowledge::retrieve::{Purpose, Query, anchor_mems, retrieve};
 use steve_knowledge::sync;
-use steve_knowledge::{Guard, KbEvent, Knowledge};
+use steve_knowledge::{KbEvent, Knowledge};
 use steve_modules::testkit::{ME, OTHER, TestEnv, WS, WS2, call, caller};
 use steve_store::base::mems::{self, NewMem};
 use steve_store::base::{Level, ObjRef, Viewer, Visibility};
 use steve_store::{ChangeEvent, StoreError};
-
-/// Flags `ghp_` tokens like steve-vault's guard would.
-struct Tokens;
-impl Guard for Tokens {
-    fn scan(&self, text: &str) -> Vec<Range<usize>> {
-        let mut out = Vec::new();
-        for (i, _) in text.match_indices("ghp_") {
-            let end = text[i..]
-                .find(|c: char| !c.is_ascii_alphanumeric() && c != '_')
-                .map_or(text.len(), |e| i + e);
-            out.push(i..end);
-        }
-        out
-    }
-}
 
 struct Env {
     env: TestEnv,
@@ -43,7 +27,7 @@ fn setup() -> Env {
     let env = TestEnv::new(|_| {});
     let events: Arc<Mutex<Vec<KbEvent>>> = Arc::default();
     let sink = events.clone();
-    let kb = Knowledge::new(Arc::new(Tokens), move |e| sink.lock().unwrap().push(e));
+    let kb = Knowledge::new(move |e| sink.lock().unwrap().push(e));
     let app = steve_knowledge::routes(kb.clone()).with_state(env.modules.clone());
     Env {
         env,
@@ -656,6 +640,7 @@ async fn sources_list_and_doc_rules() {
     assert_eq!((s, v["error"].as_str()), (400, Some("参数不对：q")));
     let (s, _) = e.me("GET", "/kb/search?q=a&limit=21", None).await;
     assert_eq!(s, 400);
+    // a token in the query is searched as written
     let (s, v) = e
         .me(
             "GET",
@@ -663,10 +648,7 @@ async fn sources_list_and_doc_rules() {
             None,
         )
         .await;
-    assert_eq!(
-        (s, v["error"].as_str()),
-        (400, Some("检索词里像是有密码或令牌"))
-    );
+    assert_eq!(s, 200, "{v}");
     let (s, _) = e.me("GET", "/kb/docs?limit=500", None).await;
     assert_eq!(s, 400);
     let (s, _) = call(&e.app, None, "GET", "/kb/sources", None).await;
@@ -674,7 +656,7 @@ async fn sources_list_and_doc_rules() {
 }
 
 #[tokio::test]
-async fn secrets_are_redacted_before_indexing() {
+async fn tokens_are_indexed_as_written() {
     let e = setup();
     let doc = e
         .note(
@@ -684,12 +666,10 @@ async fn secrets_are_redacted_before_indexing() {
         )
         .await;
     let preview = doc["preview"][0]["text"].as_str().unwrap();
-    assert!(preview.contains("［已拦下的机密］") && !preview.contains("ghp_"));
+    assert!(preview.contains("ghp_abcDEF123"), "{preview}");
     let hits = e.search(ME, "CI 令牌").await;
     assert_eq!(hits.len(), 1);
-    assert!(!hits[0]["text"].as_str().unwrap().contains("abcDEF"));
-    // The note body itself is the user's own text and stays editable.
-    assert!(doc["body"].as_str().unwrap().contains("ghp_abcDEF123"));
+    assert!(hits[0]["text"].as_str().unwrap().contains("ghp_abcDEF123"));
 }
 
 #[tokio::test]
@@ -769,6 +749,43 @@ fn mem_rows_follow_their_memory_scope() {
         })
         .unwrap();
     assert_eq!((vis.as_str(), level.as_str()), ("workspace", "reasoning"));
+}
+
+/// A memory's fixed stored source (“你写的”) reads in the request's language; the row keeps it as stored.
+#[test]
+fn mem_source_label_in_the_request_language() {
+    let env = TestEnv::new(|_| {});
+    let shown = env
+        .store()
+        .transaction(|tx| {
+            let m = mems::create(
+                tx,
+                WS,
+                &NewMem {
+                    text: "周会改到周二".into(),
+                    source_type: "me".into(),
+                    source_label: "你写的".into(),
+                    created_by: ME.into(),
+                    ..Default::default()
+                },
+            )?;
+            let en = steve_i18n::with("en", || steve_knowledge::service::mem_json(tx, &m));
+            let zh = steve_knowledge::service::mem_json(tx, &m);
+            Ok::<_, StoreError>((
+                en["source_label"].clone(),
+                zh["source_label"].clone(),
+                m.source_label,
+            ))
+        })
+        .unwrap();
+    assert_eq!(
+        shown,
+        (
+            json!("Written by you"),
+            json!("你写的"),
+            "你写的".to_string()
+        )
+    );
 }
 
 /// A store that answers with anything (a broken or foreign store): the Hub's second filter keeps

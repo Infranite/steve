@@ -47,5 +47,8 @@
   "github.manifest.check_failed": "Couldn't verify this installation: %{error}",
   "github.manifest.foreign_installation": "This installation doesn't belong to this workspace's GitHub App",
   "github.manifest.another_account": "another account",
-  "github.manifest.already_installed": "This GitHub App is already installed on %{login}. An app can have only one installation for now"
+  "github.manifest.already_installed": "This GitHub App is already installed on %{login}. An app can have only one installation for now",
+  "github.text.pat_name": "GitHub personal token",
+  "github.text.pat_token": "Token",
+  "github.text.pat_token_hint": "GitHub Settings → Developer settings → Fine-grained tokens: pick the repositories, give Contents, Pull requests and Issues read and write, Checks and Actions read; to receive events also Webhooks read and write"
 }

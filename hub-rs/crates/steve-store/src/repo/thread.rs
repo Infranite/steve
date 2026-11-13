@@ -463,14 +463,13 @@ impl Thread<'_> {
 
     /// Your messages in the main conversation since `since` that were stored but never routed (the
     /// routing lane is in memory: a stop before routing leaves no route, no run, no reply), without
-    /// a notice yet. Guarded pastes are never routed and are skipped. The core checks whether a
+    /// a notice yet. The core checks whether a
     /// candidate has a usable durable routing Job; valid JSON alone cannot establish that.
     pub fn unrouted_since(&self, since: i64) -> Result<Vec<(String, String)>> {
         self.0.read(|c| {
             let mut st = c.prepare_cached(
                 "SELECT m.workspace_id, m.id FROM messages m
                   WHERE m.space = 'steve' AND m.author = 'me' AND m.created > ?
-                    AND NOT (m.meta IS NOT NULL AND json_valid(m.meta) AND json_extract(m.meta, '$.guarded') IS 1)
                     AND NOT EXISTS (SELECT 1 FROM route_log l WHERE l.message_id = m.id)
                     AND NOT EXISTS (SELECT 1 FROM thread_runs r WHERE r.message_id = m.id)
                     AND NOT EXISTS (SELECT 1 FROM messages x WHERE x.workspace_id = m.workspace_id AND x.space = 'steve'

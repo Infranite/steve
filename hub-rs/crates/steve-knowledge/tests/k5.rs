@@ -4,13 +4,12 @@
 
 use std::fs;
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::time::Duration;
 
 use axum::Router;
 use serde_json::{Value, json};
 use steve_knowledge::sources::folder::FolderPolicy;
-use steve_knowledge::{Knowledge, TokenGuard, drafts};
+use steve_knowledge::{Knowledge, drafts};
 use steve_modules::changes::{self, Origin, Proposal};
 use steve_modules::testkit::{ME, OTHER, TestEnv, WS, call, caller};
 use steve_store::base::Change;
@@ -25,7 +24,7 @@ struct Env {
 }
 
 fn setup() -> Env {
-    let kb = Knowledge::new(Arc::new(TokenGuard), |_| {});
+    let kb = Knowledge::new(|_| {});
     let k2 = kb.clone();
     let env = TestEnv::new(move |r| drafts::register(r, k2));
     let home_dir = tempfile::tempdir().unwrap();
@@ -224,19 +223,6 @@ async fn about_names_resolve_only_exactly() {
             line("（没认出：Acm）", "—", "没有加进“关于”"),
         ]
     );
-    // secrets are never drafted
-    let p = e
-        .draft(
-            ME,
-            "knowledge",
-            None,
-            "记住我的令牌",
-            json!([{"op": "mem.add", "text": "令牌是 ghp_abcdefghijklmnopqrstuvwxyz0123456789"}]),
-        )
-        .await;
-    assert_eq!(p.changes.len(), 1);
-    assert_eq!(p.changes[0].label, "（没有记下）");
-    assert!(e.ops(&p.id).is_empty());
     // an operation this target does not offer
     let p = e
         .draft(

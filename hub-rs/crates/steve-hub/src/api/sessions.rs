@@ -81,7 +81,9 @@ pub async fn events(
                     return Ok(body.finish());
                 }
                 let evs = r.events_after(&id, a)?.into_iter().map(|mut e| {
-                    let d = e.get("data").cloned().unwrap_or(Value::Null);
+                    let mut d = e.get("data").cloned().unwrap_or(Value::Null);
+                    let kind = e.get("kind").and_then(Value::as_str).unwrap_or_default();
+                    system_shown(&kind.to_owned(), &mut d);
                     e.insert("data".into(), super::slim::ev_out(d));
                     e
                 });
@@ -91,6 +93,23 @@ pub async fn events(
         }
     })
     .await
+}
+
+/// A system event the Hub wrote itself in zh-CN (a message parked for a Node that is not enabled
+/// here), its `text` in the request's language.
+fn system_shown(kind: &str, data: &mut Value) -> bool {
+    if kind != "system" || data.get("parked") != Some(&Value::Bool(true)) {
+        return false;
+    }
+    let Some(t) = data
+        .get("text")
+        .and_then(Value::as_str)
+        .and_then(|t| steve_i18n::reword!(t, &["hub.session.node_parked"]))
+    else {
+        return false;
+    };
+    data["text"] = Value::String(t);
+    true
 }
 
 /// The events response from stored JSON text: small rows that `evOut` would leave alone pass through as
@@ -124,8 +143,15 @@ impl EventsBody {
             "{{\"seq\":{seq},\"ts\":{ts},\"kind\":{},\"data\":",
             serde_json::to_string(&kind).unwrap_or_default()
         );
-        if clean {
+        let parked = kind == "system" && data.contains("\"parked\"");
+        if clean && !parked {
             out.push_str(&data);
+        } else if parked {
+            let mut v = serde_json::from_str::<Value>(&data).unwrap_or(Value::Null);
+            system_shown(&kind, &mut v);
+            out.push_str(
+                &serde_json::to_string(&super::slim::ev_out(v)).unwrap_or_else(|_| "null".into()),
+            );
         } else {
             let v = serde_json::from_str::<Value>(&data).unwrap_or(Value::Null);
             out.push_str(
@@ -547,6 +573,42 @@ pub async fn import(
 mod tests {
     use super::{EventsBody, after_bound, has_integer_keys};
     use http_body_util::BodyExt;
+
+    /// The parked-session notice reads in the request's language; zh-CN as stored.
+    #[tokio::test]
+    async fn the_parked_notice_by_language() {
+        let stored = steve_i18n::stored(|| steve_i18n::t!("hub.session.node_parked"));
+        let row = serde_json::json!({ "text": stored, "parked": true }).to_string();
+        let page = |l| {
+            steve_i18n::with(l, || {
+                let mut b = EventsBody::new();
+                b.push((1, 10, "system".to_string(), row.clone()));
+                b.push((
+                    2,
+                    11,
+                    "user".to_string(),
+                    r#"{"text":"该会话"}"#.to_string(),
+                ));
+                b.finish()
+            })
+        };
+        let text = |r: axum::response::Response| async move {
+            let body = r.into_body().collect().await.unwrap().to_bytes();
+            let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            (v[0]["data"]["text"].clone(), v[1]["data"]["text"].clone())
+        };
+        let (en, user) = text(page(steve_i18n::EN)).await;
+        assert!(
+            en.as_str()
+                .unwrap()
+                .starts_with("This session is bound to a Node"),
+            "{en}"
+        );
+        assert_eq!(user, "该会话");
+        let (zh, _) = text(page(steve_i18n::ZH_CN)).await;
+        assert_eq!(zh, stored.as_str());
+        assert!(stored.starts_with("该会话绑定在 Node 上"));
+    }
 
     #[tokio::test]
     async fn raw_events_match_the_slow_path() {

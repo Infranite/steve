@@ -23,9 +23,22 @@ try {
     assert.equal(await row("ST-44").locator('[data-workflow-relation="previous"]').innerText(), "旧周期协作记录 · 当前周期待处理")
     assert.equal(await row("ST-44").getAttribute("data-item-status"), "run", "a prior cycle's pause must not pause the current item")
     assert.equal(await row("ST-44").locator('[data-item-now]').count(), 0, "a prior cycle's summary is not current work")
+    /* the relation yields to the counts after it rather than pushing them past the row's edge */
+    assert.equal(await row("ST-44").locator("[data-workflow-relation]").evaluate((el) => el.parentElement.scrollWidth <= el.parentElement.clientWidth + 1), true, `the relation line fits at ${width}px`)
     assert.equal(await row("ST-26").locator('[data-workflow-relation="child"]').innerText(), "协作子项 · ST-5")
     assert.equal(await row("ST-27").locator("[data-workflow-relation]").count(), 0, "a completed workflow child does not keep its parent waiting")
     assert.equal(await row("ST-28").locator("[data-workflow-relation]").count(), 0, "an ordinary fork is not a workflow child")
+    const rel31 = row("ST-31").locator('[data-workflow-relation="child"]')
+    assert.equal(await rel31.evaluate((el) => el.scrollWidth <= el.clientWidth), true, `a long summary does not squeeze the relation away at ${width}px`)
+    // a truncated part keeps the dot after it, and the dot sits between the parts, never over one
+    for (const id of ["ST-31", "ST-18", "ST-26"]) {
+      const seps = await row(id).evaluate((el) => [...el.querySelectorAll("[data-meta-sep]")].filter((s) => s.getBoundingClientRect().width > 0).map((s) => {
+        const b = s.getBoundingClientRect(), p = s.previousElementSibling.getBoundingClientRect(), n = s.nextElementSibling.getBoundingClientRect(), m = s.parentElement.getBoundingClientRect()
+        return b.left >= p.right - 0.5 && b.right <= n.left + 0.5 && b.left >= m.left && b.right <= m.right
+      }))
+      assert.deepEqual(seps, [true, true], `${id}: both separators show between their parts at ${width}px`)
+    }
+    assert.equal(await row("ST-43").getAttribute("data-dense"), "true", "an item closed as failed folds like other closed ones")
     // a real wait: what the card asks and the way to it, not the stale summary
     const r = row("ST-52")
     assert.match(await r.locator('[data-item-wait="approve"]').innerText(), /^审批：合并 PR #12 并打 tag 发版 等 2 件$/)
@@ -33,7 +46,7 @@ try {
     assert.equal((await r.locator("[data-item-wait-go]").innerText()).trim(), "去审批")
     assert.equal((await row("ST-53").locator("[data-item-wait-go]").innerText()).trim(), "去回答")
     // nothing reaches past the row
-    for (const id of ["ST-49", "ST-48", "ST-52", "ST-53", "ST-5", "ST-26"]) {
+    for (const id of ["ST-49", "ST-48", "ST-52", "ST-53", "ST-5", "ST-26", "ST-31"]) {
       const over = await row(id).evaluate(el => { const b = el.getBoundingClientRect(); return [...el.querySelectorAll("*")].filter(e => e.getBoundingClientRect().right > b.right + 1).map(e => e.outerHTML.slice(0, 80)) })
       assert.deepEqual(over, [], `${id} overflows at ${width}px`)
     }
@@ -49,8 +62,65 @@ try {
     await grouped.locator('[data-items-group="pause"] [data-item-row="ST-10"]').waitFor()
     assert.equal(await grouped.locator('[data-items-group="run"] [data-item-row="ST-44"]').count(), 1)
     assert.equal(await grouped.locator('[data-items-group="run"] [data-item-row="ST-10"]').count(), 0)
+    assert.equal(await grouped.locator('[data-items-group="fail"] [data-item-row="ST-43"]').count(), 1, "failed items have their own group")
+    // the page's 等你 / 进行中 counts are what its filters and its board show
+    const sub = await grouped.locator("h1 + div").first().innerText()
+    const [, subRun, subWait] = sub.match(/(\d+) 件进行中 · (\d+) 件等你/) ?? []
+    assert.ok(subRun !== undefined, "the subtitle says how many run and wait")
+    // the board (affectUI Agent Inbox): four columns sorted as the list groups, in the page's width, never sideways
+    await grouped.locator("[data-seg=board]:visible").click()
+    const board = grouped.locator("[data-items-board]")
+    await board.waitFor()
+    const fit = await board.evaluate((el) => ({ right: el.getBoundingClientRect().right, scrolls: el.scrollWidth > el.clientWidth + 1 }))
+    assert.ok(fit.right <= width + 0.5, `board reaches past the window at ${width}px`)
+    assert.equal(fit.scrolls, false, `the board scrolls sideways at ${width}px`)
+    assert.equal(await grouped.evaluate(() => document.documentElement.scrollWidth > innerWidth), false, `page scrolls sideways with the board at ${width}px`)
+    const lanes = await board.evaluate((el) => [...el.querySelectorAll("[data-board-col]")].map((c) => ({ lane: c.dataset.boardCol, cards: [...c.querySelectorAll("[data-kanban-card]")].map((k) => k.dataset.kanbanCard), box: c.getBoundingClientRect().toJSON() })))
+    assert.deepEqual(lanes.map((l) => l.lane), ["needs", "running", "paused", "done"])
+    const laneOfCard = (id) => lanes.find((l) => l.cards.includes(id))?.lane
+    // a card for you: 等你; working or waiting on its parts: 进行中; a paused graph: paused, not waiting on an answer
+    for (const id of ["ST-52", "ST-53"]) assert.equal(laneOfCard(id), "needs", `${id} waits on you`)
+    for (const id of ["ST-48", "ST-5", "ST-44"]) assert.equal(laneOfCard(id), "running", `${id} is the agents' move`)
+    assert.equal(laneOfCard("ST-10"), "paused", "a paused graph is paused")
+    assert.equal(lanes.find((l) => l.lane === "needs").cards.length, +subWait, "the subtitle's 等你 is the board's 等你 column")
+    assert.equal(lanes.find((l) => l.lane === "running").cards.length, +subRun, "the subtitle's 进行中 is the board's 进行中 column")
+    // a paused card says why beside its state, not the state twice
+    const c10 = board.locator('[data-kanban-card="ST-10"]')
+    assert.equal(await c10.locator(".ui-aic__desc").innerText(), "ST-43 失败")
+    assert.equal(await c10.locator("[data-state-word]").evaluate((e) => e.firstChild.textContent), "协作已暂停")
+    // every card keeps its state in words, however slim the column
+    const words = await board.evaluate((el) => [...el.querySelectorAll("[data-kanban-card]")].map((c) => { const w = c.querySelector("[data-state-word]"); return [c.dataset.kanbanCard, !!w && w.getBoundingClientRect().width > 8 && getComputedStyle(w).display !== "none"] }).filter(([, ok]) => !ok))
+    assert.deepEqual(words, [], `a card lost its state word at ${width}px`)
+    assert.equal(laneOfCard("ST-29"), "done")
+    assert.equal(laneOfCard("ST-43"), undefined, "a failed item is closed and not on the board, as before")
+    // side by side on a laptop, one after another on a phone
+    const tops = lanes.map((l) => Math.round(l.box.top)), lefts = lanes.map((l) => Math.round(l.box.left))
+    if (width === 1066) assert.equal(new Set(tops).size, 1, "three columns side by side at 1066px")
+    else assert.equal(new Set(lefts).size, 1, "the columns stack on a phone")
+    // a card's words stay inside it
+    const over = await board.evaluate((el) => [...el.querySelectorAll("[data-kanban-card]")].flatMap((c) => { const b = c.getBoundingClientRect(); return [...c.querySelectorAll("*")].filter((e) => e.getBoundingClientRect().right > b.right + 1).map((e) => c.dataset.kanbanCard + ": " + e.outerHTML.slice(0, 60)) }))
+    assert.deepEqual(over, [], `a card overflows at ${width}px`)
+    // the card says what it waits for and how far its plan is; it opens in place, and Open leads to the item
+    const c52 = board.locator('[data-kanban-card="ST-52"]')
+    assert.match(await c52.innerText(), /审批：|合并 PR #12/)
+    assert.equal((await c52.locator("[data-plan]").innerText()).trim(), "2/2")
+    await c52.locator(".ui-aic__card-main").click()
+    await c52.locator("[data-board-open]").click()
+    assert.equal(new URL(grouped.url()).hash, "#/items/ST-52")
+    // or in one click from its corner
+    await grouped.goBack()
+    await board.locator('[data-board-go="ST-48"]').click()
+    assert.equal(new URL(grouped.url()).hash, "#/items/ST-48")
+    await grouped.goBack()
+    // the 等你 filter shows exactly the 等你 column, the 进行中 filter the 进行中 column
+    for (const [chip, lane] of [["等你", "needs"], ["进行中", "running"]]) {
+      await grouped.locator("[data-items-toolbar]").getByText(chip, { exact: true }).click()
+      const shown = await board.evaluate((el) => Object.fromEntries([...el.querySelectorAll("[data-board-col]")].map((c) => [c.dataset.boardCol, [...c.querySelectorAll("[data-kanban-card]")].map((k) => k.dataset.kanbanCard)])))
+      assert.deepEqual(shown[lane], lanes.find((l) => l.lane === lane).cards, `the ${chip} filter keeps its column`)
+      for (const other of Object.keys(shown)) if (other !== lane) assert.deepEqual(shown[other], [], `the ${chip} filter shows nothing under ${other}`)
+    }
     await grouped.close()
   }
   assert.deepEqual(errors, [])
-  console.log(JSON.stringify({ passed: true, scenarios: ["new cycle waiting for your word", "running after take-up", "approval reason and entry", "question entry", "no overflow", "1066/390px", "dark/light"] }))
+  console.log(JSON.stringify({ passed: true, scenarios: ["new cycle waiting for your word", "running after take-up", "approval reason and entry", "question entry", "no overflow", "board: four columns as the list groups, counts and filters agree, state words at 1066, opens the item", "1066/390px", "dark/light"] }))
 } finally { await browser.close() }

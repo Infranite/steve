@@ -50,5 +50,16 @@
   "mail.preset.163_hint": "在 163 邮箱设置里开启 IMAP 服务并生成授权码",
   "mail.preset.fastmail_hint": "在 Fastmail 设置的 Privacy & Security 里生成应用专用密码",
   "mail.provider.name": "邮箱",
-  "mail.provider.note": "收信、分诊、起草回复，经你批准发出"
+  "mail.provider.note": "收信、分诊、起草回复，经你批准发出",
+  "mail.text.imap_name": "其他邮箱（IMAP）",
+  "mail.text.address": "邮箱地址",
+  "mail.text.username": "用户名",
+  "mail.text.username_hint": "默认同邮箱地址",
+  "mail.text.password": "应用专用密码",
+  "mail.text.imap_host": "IMAP 服务器",
+  "mail.text.imap_port": "IMAP 端口",
+  "mail.text.imap_security": "IMAP 加密",
+  "mail.text.smtp_host": "SMTP 服务器",
+  "mail.text.smtp_port": "SMTP 端口",
+  "mail.text.smtp_security": "SMTP 加密"
 }

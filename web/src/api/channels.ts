@@ -50,7 +50,7 @@ export type Basis = { verdict: "pass" | "rewritten" | "drafted"; entries: BasisE
 export type ChanMessage = {
   attachments?: ChannelAttachment[]
   id: string; space_id: string; direction: "in" | "out"; sender: { name: string; party_id: string | null; account_id?: string | null }; persona_id: string | null; on_behalf: "none" | "persona" | "proxy"
-  text: string | null; status: "received" | "draft" | "pending" | "sent" | "failed" | "unknown" | "recalled" | "blocked"; work_item_id: string | null; decision_id: string | null; created: number; sent: number | null; purged: number | null; basis: Basis | null
+  text: string | null; status: "received" | "draft" | "pending" | "sent" | "failed" | "unknown" | "recalled"; work_item_id: string | null; decision_id: string | null; created: number; sent: number | null; purged: number | null; basis: Basis | null
   /** only recorded as history when it came in: written before the connection was on, or arrived too late (newer Hubs) */
   history?: "before" | "late" | "backfill" | null
 }
@@ -199,7 +199,7 @@ export const isDm = (s: Pick<Space, "kind">) => s.kind === "dm" || s.kind === "s
 export const spaceTitle = (s: Pick<Space, "title" | "name" | "kind" | "self_chat">) => s.title || (s.self_chat || s.kind === "self_dm" ? t("api:spaceTitle.self") : s.name || (isDm(s) ? t("api:spaceTitle.dm") : t("api:spaceTitle.group")))
 export const TRIGGER_EVERYWHERE = "*", TRIGGER_ALL_DMS = "dm:*"
 export const MSG_STATUS: Partial<Record<ChanMessage["status"], string>> = lazy({
-  draft: () => t("api:msgStatus.draft"), pending: () => t("api:msgStatus.pending"), failed: () => t("api:msgStatus.failed"), unknown: () => t("api:msgStatus.unknown"), recalled: () => t("api:msgStatus.recalled"), blocked: () => t("api:msgStatus.blocked"),
+  draft: () => t("api:msgStatus.draft"), pending: () => t("api:msgStatus.pending"), failed: () => t("api:msgStatus.failed"), unknown: () => t("api:msgStatus.unknown"), recalled: () => t("api:msgStatus.recalled"),
 })
 
 /* ───────── what an outbound message answers (its approval card) ───────── */

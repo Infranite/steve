@@ -700,7 +700,11 @@ impl ConnectionProvider for ExtWs {
     }
 
     fn name(&self) -> &str {
-        "外部渠道"
+        "其他聊天工具"
+    }
+
+    fn localize(&self, text: &str) -> Option<String> {
+        crate::adapters::localize(text)
     }
 
     fn caps(&self) -> &[&'static str] {
@@ -718,7 +722,7 @@ impl ConnectionProvider for ExtWs {
     fn integration(&self) -> Integration {
         Integration {
             provider: SYSTEM.into(),
-            provider_name: "外部渠道".into(),
+            provider_name: "其他聊天工具".into(),
             identity: "self".into(),
             capabilities: vec![
                 CapSpec::supported("channel", &["msg.receive"])

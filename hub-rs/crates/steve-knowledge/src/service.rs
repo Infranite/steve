@@ -19,7 +19,7 @@ use crate::sources;
 use crate::state::Knowledge;
 use crate::sync;
 
-/// `400` for a search text that looks like a secret.
+/// What a document and a note are called in messages.
 pub const NOUN_DOC: &str = "文档";
 pub const NOUN_NOTE: &str = "笔记";
 
@@ -87,11 +87,6 @@ pub fn search(m: &Modules, kb: &Knowledge, who: &Caller, p: SearchParams) -> Api
             .ok_or_else(|| ApiError::invalid("limit"))?,
     };
     Check::new().len("q", q.trim(), 1, 200).done()?;
-    if !kb.guard.scan(&q).is_empty() {
-        return Err(ApiError::rule(steve_i18n::t!(
-            "knowledge.search.secret_query"
-        )));
-    }
     prepare(m, who)?;
     let kinds: Option<Vec<String>> = p
         .kind
@@ -158,8 +153,8 @@ pub fn own_doc(
 pub fn doc_brief(d: &DocRow, s: &SourceRow) -> Value {
     json!({
         "id": d.id,
-        "source": {"id": s.id, "kind": s.kind, "name": s.name},
-        "title": d.title,
+        "source": {"id": s.id, "kind": s.kind, "name": crate::sources::name_shown(&s.kind, &s.name)},
+        "title": if s.kind == "chat" { crate::sources::chat_day_shown(&d.title) } else { d.title.clone() },
         "ref": d.r#ref,
         "visibility": d.eff_visibility(s),
         "level": d.eff_level(s),
@@ -401,7 +396,6 @@ pub fn create_note(m: &Modules, kb: &Knowledge, who: &Caller, b: NoteBody) -> Ap
         check_about(tx, who, &b.about)?;
         let id = notes::create(
             tx,
-            kb.guard.as_ref(),
             &who.ws,
             &who.me,
             &NewNote {
@@ -451,15 +445,7 @@ pub fn update_note(
         if s.kind != "notes" {
             return Err(ApiError::not_found(NOUN_NOTE));
         }
-        notes::update(
-            tx,
-            kb.guard.as_ref(),
-            &d,
-            &who.me,
-            title,
-            b.body.as_deref(),
-            now,
-        )?;
+        notes::update(tx, &d, &who.me, title, b.body.as_deref(), now)?;
         let (d, s) = own_doc_any(tx, id)?;
         doc_json_bare(tx, &d, &s)
     })?;
@@ -470,8 +456,9 @@ pub fn update_note(
 
 // ---- memories
 
-/// `Mem`, with `source_type` and the name of every `about` object (like
-/// `Doc.about`; an unknown object has an empty name).
+/// `Mem`, with `source_type`, the name of every `about` object (like `Doc.about`; an unknown object
+/// has an empty name) and `origin`: where it came from, with a link ([`crate::provenance::origin`]). A fixed stored `source_label`
+/// (“你写的”) comes in the request's language.
 pub fn mem_json(c: &Connection, m: &Mem) -> Value {
     let about: Vec<Value> = m
         .about
@@ -481,10 +468,12 @@ pub fn mem_json(c: &Connection, m: &Mem) -> Value {
             json!({"type": a.kind, "id": a.id, "name": name})
         })
         .collect();
+    let origin = crate::provenance::origin(c, m).unwrap_or(Value::Null);
     json!({
         "id": m.id, "kind": m.kind, "text": m.text, "source_type": m.source_type,
-        "source_label": m.source_label, "level": m.level, "status": m.status,
-        "visibility": m.visibility, "about": about, "created": m.created,
+        "source_label": crate::sources::label_shown(&m.source_label), "level": m.level, "status": m.status,
+        "visibility": m.visibility, "about": about, "created": m.created, "updated": m.updated,
+        "origin": origin,
     })
 }
 
@@ -513,7 +502,15 @@ pub fn list_mems(m: &Modules, who: &Caller, p: MemsParams) -> ApiResult<Value> {
             }
             _ => mems::all(c, &viewer, &f)?,
         };
-        let shown: Vec<Value> = list.iter().map(|x| mem_json(c, x)).collect();
+        let used = crate::provenance::use_counts(c, &who.ws, "mem")?;
+        let shown: Vec<Value> = list
+            .iter()
+            .map(|x| {
+                let mut v = mem_json(c, x);
+                crate::provenance::add_used(&mut v, &used);
+                v
+            })
+            .collect();
         Ok::<_, StoreError>((list, shown))
     })?;
     let q =

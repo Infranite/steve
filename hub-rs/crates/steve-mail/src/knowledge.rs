@@ -112,7 +112,7 @@ pub fn is_thread_doc(doc: &DocRow) -> bool {
 }
 
 /// Reads thread documents for the knowledge index queue. Register it before `FilesLoader`:
-/// `Knowledge::with_loaders(guard, notify, vec![Arc::new(ThreadLoader), Arc::new(FilesLoader::new(..))])`.
+/// `Knowledge::with_loaders(notify, vec![Arc::new(ThreadLoader), Arc::new(FilesLoader::new(..))])`.
 pub struct ThreadLoader;
 
 fn load_thread(c: &Connection, doc: &DocRow) -> MailResult<Option<String>> {
@@ -158,7 +158,6 @@ impl Mail {
             .reader(|c| self.own_thread(c, &viewer, thread_id))?;
         steve_knowledge::service::prepare(&self.0.m, who)?;
         let now = self.now();
-        let guard = self.0.guard.clone();
         let id = self.0.m.store.transaction(|tx| -> MailResult<String> {
             let msgs = repo::thread_messages(tx, &t.id)?;
             let src = steve_knowledge::sources::builtin(tx, &who.ws, SOURCE_KIND, &who.me, now)?;
@@ -200,15 +199,7 @@ impl Mail {
             };
             kb_repo::set_doc_about(tx, &who.ws, &id, &senders(&msgs))?;
             let doc = kb_repo::doc(tx, &id)?.ok_or(steve_store::StoreError::NotFound("文档"))?;
-            index::index_doc(
-                tx,
-                guard.as_ref(),
-                &doc,
-                &src,
-                &extracted(thread_text(&msgs)),
-                now,
-                false,
-            )?;
+            index::index_doc(tx, &doc, &src, &extracted(thread_text(&msgs)), now, false)?;
             Ok(id)
         })?;
         if let Some(kb) = &self.0.kb {

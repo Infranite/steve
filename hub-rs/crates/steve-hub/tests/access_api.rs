@@ -299,6 +299,14 @@ async fn a_web_client_on_another_origin_is_let_in_once_it_signed_in() {
         .unwrap();
     assert_eq!(r.status().as_u16(), 401);
     assert_eq!(r.headers().get("access-control-allow-origin").unwrap(), web);
+    // …and that its origin is not let in, so the page offers the token sign-in that lets it in
+    assert_eq!(r.headers().get("x-steve-origin").unwrap(), "refused");
+    assert!(
+        r.headers()["access-control-expose-headers"]
+            .to_str()
+            .unwrap()
+            .contains("x-steve-origin")
+    );
     // signed in from that origin: the API answers it
     let st = e.store();
     let owner = st.access().owner().unwrap().expect("owner");
@@ -315,6 +323,17 @@ async fn a_web_client_on_another_origin_is_let_in_once_it_signed_in() {
         .unwrap();
     assert_eq!(r.status().as_u16(), 200);
     assert_eq!(preflight("/api/state").await, (204, Some(web.into())));
+    let r = e
+        .http
+        .get(format!("{}/api/me", e.base))
+        .header("origin", web)
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        r.headers().get("x-steve-origin").is_none(),
+        "a let-in origin is not told it is refused"
+    );
     // another origin still is not
     let r = e
         .http
@@ -809,3 +828,205 @@ async fn qr_pair_mint_failure_rolls_back_claim_so_retry_succeeds() {
     assert_eq!(status_after["status"], "claimed");
 }
 
+/// 能力: a client outside Steve (Claude Desktop, Cursor, another agent) speaks MCP to `/mcp` with
+/// one of its user's access tokens: it lists only the tools that need no Steve session, reads and
+/// creates items, and is refused the rest. The same token works Steve's A2A endpoint, whose card is
+/// open at the well-known path.
+#[tokio::test]
+async fn an_outside_mcp_client_with_an_access_token_gets_the_scoped_tools() {
+    let e = start().await;
+    let st = e.store();
+    let owner = st.access().owner().unwrap().expect("owner");
+    let (_, token) = st
+        .access()
+        .token_create(&owner.id, "Claude Desktop", None)
+        .unwrap();
+    let rpc = |id: i64, method: &str, params: Value| json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params});
+    let mcp = |body: Value, auth: Option<String>| {
+        let (http, url) = (e.http.clone(), format!("{}/mcp", e.base));
+        async move {
+            let mut r = http
+                .post(url)
+                .header("accept", "application/json, text/event-stream")
+                .json(&body);
+            if let Some(a) = auth {
+                r = r.header("authorization", format!("Bearer {a}"));
+            }
+            let r = r.send().await.expect("mcp");
+            let s = r.status().as_u16();
+            (s, r.json::<Value>().await.unwrap_or(Value::Null))
+        }
+    };
+    let (s, init) = mcp(rpc(1, "initialize", json!({"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "t", "version": "1"}})), Some(token.clone())).await;
+    assert_eq!(s, 200, "{init}");
+    assert_eq!(init["result"]["serverInfo"]["name"], "steve");
+    let (_, list) = mcp(rpc(2, "tools/list", json!({})), Some(token.clone())).await;
+    let names: Vec<&str> = list["result"]["tools"]
+        .as_array()
+        .expect("tools")
+        .iter()
+        .map(|t| t["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        names,
+        [
+            "steve_knowledge_search",
+            "steve_knowledge_read",
+            "steve_items_search",
+            "steve_item_read",
+            "steve_sessions_list",
+            "steve_memory_list",
+            "steve_item_create",
+            "steve_item_supplement"
+        ]
+    );
+    st.with_conn(|c| {
+        c.execute_batch("INSERT OR IGNORE INTO bots (id, workspace_id, name, harness, updated) VALUES ('writer', 'default', '写作', 'claude-code', 1);")?;
+        Ok(())
+    })
+    .unwrap();
+    let bot = "写作";
+    let (_, made) = mcp(
+        rpc(3, "tools/call", json!({"name": "steve_item_create", "arguments": {"goal": "Write the release notes for the outside client", "title": "外部客户端的说明", "bot": bot}})),
+        Some(token.clone()),
+    )
+    .await;
+    let text = made["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap_or("")
+        .to_string();
+    assert!(made["result"]["isError"].is_null(), "{made}");
+    assert!(text.starts_with("Created "), "{text}");
+    let item: String = st
+        .with_conn(|c| {
+            Ok(c.query_row(
+                "SELECT id FROM items WHERE title = '外部客户端的说明'",
+                [],
+                |r| r.get(0),
+            )?)
+        })
+        .unwrap();
+    let (_, found) = mcp(
+        rpc(
+            4,
+            "tools/call",
+            json!({"name": "steve_items_search", "arguments": {"query": "外部客户端"}}),
+        ),
+        Some(token.clone()),
+    )
+    .await;
+    assert!(
+        found["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap_or("")
+            .contains(&item),
+        "{found}"
+    );
+    let (_, read) = mcp(
+        rpc(
+            5,
+            "tools/call",
+            json!({"name": "steve_item_read", "arguments": {"id": item}}),
+        ),
+        Some(token.clone()),
+    )
+    .await;
+    assert!(
+        read["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap_or("")
+            .contains("外部客户端的说明"),
+        "{read}"
+    );
+    // a session's own tools are not an outside client's
+    let (_, refused) = mcp(
+        rpc(6, "tools/call", json!({"name": "steve_deliver", "arguments": {"summary": "x", "outputs": [], "checks": []}})),
+        Some(token.clone()),
+    )
+    .await;
+    assert_eq!(refused["result"]["isError"], true, "{refused}");
+    // no token, a wrong one, a revoked one
+    assert_eq!(mcp(rpc(7, "tools/list", json!({})), None).await.0, 401);
+    assert_eq!(
+        mcp(rpc(7, "tools/list", json!({})), Some("stt_nope".into()))
+            .await
+            .0,
+        401
+    );
+
+    // A2A: the card is open; the endpoint takes the same token
+    let (s, card) = e
+        .call("GET", "/.well-known/agent-card.json", None, None)
+        .await;
+    assert_eq!(s, 200);
+    assert_eq!(card["name"], "Steve");
+    assert_eq!(card["url"], format!("{}/a2a", e.base));
+    let (s, _) = e
+        .call(
+            "POST",
+            "/a2a",
+            None,
+            Some(rpc(1, "tasks/get", json!({"id": item}))),
+        )
+        .await;
+    assert_eq!(s, 401);
+    let (s, task) = e
+        .call(
+            "POST",
+            "/a2a",
+            Some(&token),
+            Some(rpc(1, "tasks/get", json!({"id": item}))),
+        )
+        .await;
+    assert_eq!(s, 200, "{task}");
+    assert_eq!(task["result"]["kind"], "task", "{task}");
+    assert_eq!(task["result"]["id"], json!(item));
+    let (_, nope) = e
+        .call(
+            "POST",
+            "/a2a",
+            Some(&token),
+            Some(rpc(2, "tasks/get", json!({"id": "ST-99999"}))),
+        )
+        .await;
+    assert_eq!(nope["error"]["code"], -32001, "{nope}");
+
+    // where the page says to connect: this Hub's own address
+    let (_, ok) = e
+        .call(
+            "POST",
+            "/auth/token",
+            None,
+            Some(
+                json!({"user": owner.name, "token": token, "client": {"kind": "web", "name": "t"}}),
+            ),
+        )
+        .await;
+    let cred = ok["credential"].as_str().expect("credential").to_string();
+    let (s, v) = e
+        .call("GET", "/api/capabilities/steve", Some(&cred), None)
+        .await;
+    assert_eq!(s, 200, "{v}");
+    let urls: Vec<&str> = v["endpoints"]
+        .as_array()
+        .expect("endpoints")
+        .iter()
+        .map(|u| u["url"].as_str().unwrap())
+        .collect();
+    assert!(urls.contains(&format!("{}/mcp", e.base).as_str()), "{v}");
+    assert!(
+        v["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|t| t["name"] == "steve_deliver")
+    );
+    assert_eq!(v["outside"].as_array().unwrap().len(), 8);
+    // revoked: refused at once
+    let id = st.access().tokens(Some(&owner.id)).unwrap()[0].id.clone();
+    assert!(st.access().token_revoke(&id).unwrap());
+    assert_eq!(
+        mcp(rpc(8, "tools/list", json!({})), Some(token)).await.0,
+        401
+    );
+}

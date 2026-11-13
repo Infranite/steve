@@ -28,7 +28,7 @@ pub fn blob_path(data_dir: &Path, ws: &str, sha256: &str, id: &str) -> PathBuf {
 }
 
 /// Reads uploads for the index queue. `data_dir` is `STEVE_HOME/data`; the integrator passes it in
-/// `Knowledge::with_loaders(guard, notify, vec![Arc::new(FilesLoader::new(data_dir))])`.
+/// `Knowledge::with_loaders(notify, vec![Arc::new(FilesLoader::new(data_dir))])`.
 pub struct FilesLoader {
     data_dir: PathBuf,
 }

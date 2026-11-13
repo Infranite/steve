@@ -4,7 +4,7 @@ import { readEventPages } from "./event-pages"
  * everything here is filled from /api/state, item details and session events are loaded on demand, and every action
  * calls the Hub — the SSE stream then refreshes what changed. */
 import { useEffect, useRef, useSyncExternalStore } from "react"
-import { toast as sonner } from "sonner"
+import { toast as notify, type ToastOptions } from "./components/ui/toaster"
 import { promptNeedle, withDecisionNotes } from "./decision-notes"
 import { blockSlots, type FeedRow } from "./feed-order"
 import { api, cursorOf, setPageWorkspace, stream, Unauthenticated, type State, type RItem, type RItemDetail, type RSession, type RDecision, type RBot, type REvent, type RProject, type Proposal, type LocalSession, type HubEvent, type RNotice } from "./api"
@@ -15,14 +15,15 @@ import i18n, { t } from "./i18n"
 import type { StateUpdate, RFile, PlanStep, RHold, RQueued, RKindReview, SuggestChoice, A2uiRecord, A2uiSubmit, RAnnotation } from "./api"
 import type { Cite } from "./api/knowledge"
 import { yoloApi, type RYolo, type RYoloAction } from "./api/yolo"
+import { applyLook } from "./lib/motion"
 
 /* ───────── view types (from the prototype) ───────── */
-export type Ev = any[] // ['u',text,label?] ['q',string[]] ['th',text,secs] ['tool',kind,title,meta,detail,live?,add?,del?,failed?,tool?,desc?,input?,plan?] ['a',text] ['ho',text,toSid] ['hi',text] ['ask',text] ['sys',text] ['end',stopReason]
-export type Sess = { id: string; n: number; item: string | null; b: string | null; h?: string; harness?: string; nativeId?: string | null; cwd?: string; m?: string; reasoningEffort?: string | null; contextKnown?: boolean; st: "run" | "wait" | "idle" | "ended"; title: string; dur: string; ctx: number; src: string; up: string; ev: Ev[]; seqs: number[]; ts: number[]; from?: string | null; fork?: { s: string; at: number }; queue: RQueued[]; ro?: boolean; device: string; loaded: boolean; busy: boolean
+export type Ev = any[] // ['u',text,label?] ['q',string[]] ['th',text,secs] ['tool',kind,title,meta,detail,live?,add?,del?,failed?,tool?,desc?,input?,plan?,endedAt?,steveArgs?] ['a',text] ['ho',text,toSid] ['hi',text] ['ask',text] ['sys',text] ['end',stopReason]
+export type Sess = { id: string; n: number; item: string | null; b: string | null; h?: string; harness?: string; nativeId?: string | null; cwd?: string; m?: string; reasoningEffort?: string | null; contextKnown?: boolean; /** the context in tokens, as the harness reported it: used and the window's size */ ctxUsed?: number; ctxSize?: number; st: "run" | "wait" | "idle" | "ended"; title: string; dur: string; ctx: number; src: string; up: string; /** last activity (ms) */ at?: number; ev: Ev[]; seqs: number[]; ts: number[]; from?: string | null; fork?: { s: string; at: number }; queue: RQueued[]; ro?: boolean; device: string; loaded: boolean; busy: boolean
   /** not opened on its Node yet: no turn runs, the queue waits for the start; `since` is when it was created */
   starting?: boolean; since?: number }
 export type Wait = { type: "approve" | "ask" | "accept" | "propose" | "fail" | "confirm"; subjectId?: string; q: string; draft?: string; opts?: string[]; since: string; decision: string; subject: string; session: string | null; options: string[]; by: string; busy?: boolean }
-export type Done = { id: string; type: Wait["type"]; q: string; choice: string; tm: string; decision: string; canUndo: boolean; undone?: boolean; how: "chose" | "dismissed" | "expired"; rel?: Rel
+export type Done = { id: string; type: Wait["type"]; q: string; choice: string; tm: string; at: number; decision: string; canUndo: boolean; undone?: boolean; how: "chose" | "dismissed" | "expired"; rel?: Rel
   /** answered by YOLO: its reason (modules/yolo.md §3.3 `decided_by: "yolo"`) */
   yolo?: string
   /** the client it was answered from (A4c `result.via`), when it was one signed in with a token */
@@ -35,7 +36,7 @@ export type Rel = { tone: "run" | "fail" | "ok"; text: string; /** the Hub's out
 export type Out = [string, string, string | null, string, number?, ("record" | "result")?]
 export type PlanRound = { n: number; steps: [string, number][]; end: "done" | "replaced"; at: string }
 export type Item = {
-  id: string; t: string; b: string; st: "prop" | "run" | "wait" | "pause" | "done" | "drop" | "block"; phase?: "ready" | "active" | "closing" | "closed"; cycle?: number; deps?: string[]; src: [string, string]; ws: string; project: string | null; up: string; star?: boolean; acc: string
+  id: string; t: string; b: string; st: "prop" | "run" | "wait" | "pause" | "done" | "drop" | "block" | "fail"; phase?: "ready" | "active" | "closing" | "closed"; cycle?: number; deps?: string[]; src: [string, string]; ws: string; project: string | null; up: string; star?: boolean; acc: string
   goals: string[]; now: string; plan?: [string, number][]; rounds: PlanRound[]; wait?: Wait; waits: Wait[]; ss: string[]; tl: any[]; outs: Out[]; anns: RAnnotation[]; q: RQueued[]; qs: string | null; parent?: { item?: string; s?: string; at?: number } | null
   due?: string; pri?: "高" | "中" | "低"; arch?: boolean; snooze?: string; snoozeUntil?: number; tags?: string[]; branch: string | null; cwd: string | null; projNext?: boolean; detail: boolean; dependents: string[]; created: number; updated: number
   /** the last approved release of this item and what became of it */
@@ -49,7 +50,7 @@ export type Item = {
 export type Tag = { id: string; name: string; cat: string; desc: string; by: "Steve" | "你"; created: string }
 export type Bot = { id: string; main?: boolean; n: string; a: string; role: string; pers: string; pro: number; h: string; harness: string; m: string; model: string | null; on: boolean; acc: string; ws: string; project: string | null; perm: string; permMode: string; rule: string; prompt: string | null
   reasoningEffort?: string | null; mem: [string, string, string][]; memCount: number; memLoaded: boolean; routines: { t: string; d: string; m: string; on: boolean; last: string }[]; hue: string; color: string; round: number; skin: string | null; dev?: string; workspaces: string[] }
-export type Draft = { mid: string; thought: string; text: string }
+export type Draft = { mid: string; thought: string; text: string; /** when the reasoning began, and when the answer's text did (the reasoning is over) */ t0: number; t1?: number }
 export type Msg = { id?: string; clientId?: string; k: "me" | "steve" | "thinking" | "digest"; t?: string; item?: string; fresh?: boolean; chat?: string; files?: RFile[]; cfgs?: any[]; created?: number; steps?: Steps; notice?: { kind: string; level: string; ref?: string }; cites?: Cite[]
   /** Steve's welcome that opened the first meeting */
   meet?: boolean
@@ -109,8 +110,11 @@ function liveList<T extends unknown[]>(fixed: unknown[], at: number, f: () => st
 export const PRO: string[] = []
 ;(["rare", "moderate", "active"] as const).forEach((k, n) => Object.defineProperty(PRO, n, { get: () => t(`core:proactive.${k}`), enumerable: true }))
 type Tone = "accent" | "orange" | "green" | "neutral" | "red"
-const ST_TONE = { prop: "accent", block: "neutral", run: "accent", wait: "orange", pause: "neutral", done: "green", drop: "neutral" } as const
+/* fail: an item the Hub closed as failed (its cycle ended in failure) */
+const ST_TONE = { prop: "accent", block: "neutral", run: "accent", wait: "orange", pause: "neutral", done: "green", drop: "neutral", fail: "red" } as const
 export const ST: Record<string, [string, Tone]> = live(Object.keys(ST_TONE) as (keyof typeof ST_TONE)[], (k) => [t(`core:itemStatus.${k}`), ST_TONE[k]])
+/** a closed item's status: done, dropped, or closed as failed (the Hub's outcome `failed`) */
+export const closedSt = (s?: string) => s === "done" || s === "drop" || s === "fail"
 const SS_TONE = { run: "accent", wait: "orange", idle: "neutral", ended: "neutral" } as const
 export const SS: Record<string, [string, "accent" | "orange" | "green" | "neutral"]> = live(Object.keys(SS_TONE) as (keyof typeof SS_TONE)[], (k) => [t(`core:sessStatus.${k}`), SS_TONE[k]])
 const WAIT_TYPES = ["approve", "ask", "accept", "propose", "fail", "confirm"] as const
@@ -130,6 +134,8 @@ const PERM_MODE: Record<string, string> = { plan: "plan", default: "ask", accept
 export const permModes = (harness: string): string[] => { const m = raw.state?.runtimes?.find((r) => r.id === harness)?.modes; return Object.keys(PERM).filter((k) => !m || m.includes(PERM_MODE[k])) }
 /** the reasoning efforts `harness` takes, as its adapter reported them */
 export const harnessEfforts = (harness: string): string[] => raw.state?.runtimes?.find((r) => r.id === harness)?.efforts ?? []
+/** whether `harness` reads a Bot's skills, as its adapter declares (undefined: the Hub did not say) */
+export const harnessSkills = (harness: string): boolean | undefined => raw.state?.runtimes?.find((r) => r.id === harness)?.skills
 /** acceptance modes by their Hub value; the view model carries the label (Item.acc, Bot.acc), accKey turns it back */
 export const ACC: Record<string, string> = live(["inherit", "manual", "auto"] as const, (k) => t(`core:acc.${k}`))
 export const PERM: Record<string, string> = live(["plan", "default", "acceptEdits", "auto", "bypassPermissions"] as const, (k) => t(`core:perm.${k}`))
@@ -174,7 +180,7 @@ const raw = { state: null as State | null, details: new Map<string, RItemDetail>
 const ls = new Set<() => void>()
 export function emit() { st.ver++; ls.forEach((f) => f()) }
 export function useStore() { return useSyncExternalStore((cb) => { ls.add(cb); return () => ls.delete(cb) }, () => st.ver) }
-export function toast(t: string, opts?: Parameters<typeof sonner>[1]) { sonner(t, opts) }
+export function toast(t: string, opts?: ToastOptions) { notify(t, opts) }
 /** Tell the instance manager once per version (per browser) that a newer Steve can be installed from Settings · 关于. */
 export function announceUpdate(update: StateUpdate | null) {
   if (!update?.owner) return
@@ -215,7 +221,8 @@ export function briefHead(text: string): string {
   const line = text.split("\n").find((l) => l.trim())?.trim() ?? ""
   return !line ? t("core:brief.plain") : line.length > 120 ? line.slice(0, 120) + "…" : line
 }
-const STEVE_TOOL: Record<string, string> = live(["steve_update", "steve_ask", "steve_request_approval", "steve_deliver", "steve_publish", "steve_lane_status"] as const, (k) => t(`core:steveTool.${k}`))
+/** what Steve's own tools are called; one Steve has no word for goes by its name */
+export const STEVE_TOOL: Record<string, string> = live(["steve_update", "steve_ask", "steve_request_approval", "steve_deliver", "steve_publish", "steve_lane_status", "steve_workflow", "steve_item_read", "steve_items_search", "steve_item_dependencies", "steve_knowledge_search", "steve_knowledge_read", "steve_knowledge_get", "steve_debug", "steve_devices", "steve_reply_source", "steve_event_get", "steve_sessions_list", "steve_remember", "steve_memory_list", "steve_memory_tidy", "steve_note", "steve_whois", "steve_contacts_find", "steve_contacts_search", "steve_contact_get", "steve_contacts_remember", "steve_im_read", "steve_mail_thread", "steve_mail_attachment", "steve_mail_draft", "steve_mail_send", "steve_github_status", "steve_github_ci_log", "steve_github_comment", "steve_github_open_pr", "steve_secret_list", "steve_secret_use", "steve_steward_propose", "steve_upgrade"] as const, (k) => t(`core:steveTool.${k}`))
 const KIND: Record<string, string> = { read: "read", edit: "edit", search: "search", exec: "run", fetch: "search", think: "read", delete: "edit", move: "edit" }
 const unfence = (t: string) => t.replace(/^```[a-z]*\n?/, "").replace(/\n?```\s*$/, "")
 const diffText = (d: any) => [...String(d.old ?? "").split("\n").filter((l, _i, a) => a.length > 1 || l).map((l) => "- " + l), ...String(d.new ?? "").split("\n").map((l) => "+ " + l)].join("\n")
@@ -242,6 +249,8 @@ function toolEv(t: Ev, v: any) {
     if (Array.isArray(args.plan)) t[12] = args.plan.map((x: any) => [String(x.step ?? ""), !!x.done])
     if (typeof args.summary === "string") t[10] = args.summary.split("\n")[0].slice(0, 160)
     if (typeof args.question === "string") t[10] = args.question
+    /* [14]: what went into one of Steve's own tools, as the Hub stored it, for the call's card and timeline */
+    if (steve && Object.keys(args).length) t[14] = args
   }
   return t
 }
@@ -259,9 +268,10 @@ export function toEv(evs: REvent[], running: boolean): { ev: Ev[]; seqs: number[
       continue
     }
     if (e.kind === "tool") {
-      const v = d.tool ?? {}, id = String(v.id ?? ""), had = tools.get(id)
-      if (had) { toolEv(had, v); continue }
-      const t = toolEv([], v); tools.set(id, t); push(t, e.seq); continue
+      const v = d.tool ?? {}, id = String(v.id ?? ""), had = tools.get(id), over = v.phase === "succeeded" || v.phase === "failed"
+      /* [13]: when the call ended (the update that settled it), so a turn's timeline can draw each call as long as it took */
+      if (had) { const ended = had[13]; toolEv(had, v); if (ended != null || over) had[13] = ended ?? e.ts; continue }
+      const t = toolEv([], v); if (over) t[13] = e.ts; tools.set(id, t); push(t, e.seq); continue
     }
     if (e.kind === "system") { push(d.faulted ? ["sys", d.text, "faulted"] : ["sys", d.text], e.seq); continue }
     if (e.kind === "permission") { push(["ask", String(d.title ?? t("core:tool.permission")), d.decision], e.seq); continue }
@@ -284,7 +294,7 @@ function sessOf(s: RSession, openSessions: Set<string>): Sess {
   const evs = raw.events.get(s.id), running = s.status === "running" || s.status === "starting"
   const conv = evs ? convOf(s.id, evs, running) : { ev: [], seqs: [], ts: [] }
   return { id: s.id, n: s.no, item: s.item_id, b: s.bot_id, h: harnessLabel(s.harness), harness: s.harness, nativeId: s.harness_session_id ?? null, cwd: s.cwd, m: s.model ?? t("core:defaultModel"), st: running ? "run" : s.status === "ended" ? "ended" : openSessions.has(s.id) ? "wait" : "idle",
-    title: s.title, dur: dur(s.created, s.updated), reasoningEffort: s.reasoning_effort, contextKnown: s.used != null && s.size != null && s.size > 0, ctx: s.used && s.size ? Math.round((s.used / s.size) * 100) : 0, src: s.source, up: tm(s.updated), ev: conv.ev, seqs: conv.seqs, ts: conv.ts, queue: s.queued,
+    title: s.title, dur: dur(s.created, s.updated), reasoningEffort: s.reasoning_effort, contextKnown: s.used != null && s.size != null && s.size > 0, ctxUsed: s.used ?? undefined, ctxSize: s.size ?? undefined, ctx: s.used && s.size ? Math.round((s.used / s.size) * 100) : 0, src: s.source, up: tm(s.updated), at: s.updated, ev: conv.ev, seqs: conv.seqs, ts: conv.ts, queue: s.queued,
     ro: s.readonly, device: s.device_id, loaded: !!evs, busy: s.busy, starting: s.status === "starting", since: s.created }
 }
 function waitOf(d: RDecision): Wait {
@@ -334,7 +344,7 @@ function itemRel(id: string, ds: RDecision[]): Rel | undefined {
  * went on or finished, or you closed it. Closed ones are remembered by the Hub with the closed notifications (setting
  * noticeDismissed: notification ids and decision ids), so a refresh or another device does not bring them back.
  * The failure itself stays in the item's timeline and in the notifications. */
-const finished = (s?: string) => s === "done" || s === "drop"
+const finished = closedSt
 export function alertClosed(key?: string) {
   const xs = raw.state?.settings.noticeDismissed as unknown
   return !!key && Array.isArray(xs) && xs.includes(key)
@@ -433,7 +443,10 @@ function itemOf(i: RItem): Item {
   const after = new Map(blockSlots(rows).flatMap((at, k) => at < 0 ? [] : [[at, k] as const])), tl: any[] = []
   lines.forEach((t, n) => {
     const sid = started(t)
-    tl.push(sid ? ["sys", i18n.t("core:sessionStarted"), tm(t.ts)] : t.kind === "me" ? ["me", t.text, tm(t.ts), t.session_id ?? undefined, replies.get(t.id), t.files, t.via, t.id] : ["sys", t.text, tm(t.ts)])
+    /* [8] is the moment itself, for the page's day headings */
+    const row: any[] = sid ? ["sys", i18n.t("core:sessionStarted"), tm(t.ts)] : t.kind === "me" ? ["me", t.text, tm(t.ts), t.session_id ?? undefined, replies.get(t.id), t.files, t.via, t.id] : ["sys", t.text, tm(t.ts)]
+    row[8] = t.ts
+    tl.push(row)
     const k = after.get(n); if (k == null) return
     const sk = started(lines[k]); tl.push(sk ? ["sess", sk] : ["reply", replies.get(lines[k].id)])
   })
@@ -518,10 +531,11 @@ function build() {
   if (st.thinking || st.draft || st.live) st.thread.push({ k: "thinking" })
   st.notices = (s.notifications ?? []).map((n) => (n.level === "fail" && !n.closed && n.item_id && finished(itemIndex.get(n.item_id)?.status) ? { ...n, closed: true } : n)); st.noticeSeen = Math.max(st.noticeSeen, s.notifySeen ?? 0)
   st.orphans = openDec.filter((d) => !d.item_id || !s.items.some((i) => i.id === d.item_id)).map(orphanOf)
-  st.done = s.recent.filter((d) => d.item_id).map((d) => ({ id: d.item_id!, type: d.kind, q: d.question, choice: choiceLabel(d), tm: tm(d.resolved), decision: d.id, canUndo: !!d.undo && !!d.resolved && Date.now() - d.resolved < 86400_000, rel: relOf(d),
+  st.done = s.recent.filter((d) => d.item_id).map((d) => ({ id: d.item_id!, type: d.kind, q: d.question, choice: choiceLabel(d), tm: tm(d.resolved), at: d.resolved ?? 0, decision: d.id, canUndo: !!d.undo && !!d.resolved && Date.now() - d.resolved < 86400_000, rel: relOf(d),
     how: d.result?.dismissed ? "dismissed" : d.status === "expired" ? "expired" : "chose", yolo: d.result?.decided_by === "yolo" ? String(d.result?.yolo_reason ?? "") : undefined,
     via: typeof d.result?.via?.name === "string" ? d.result.via.name : undefined }))
   st.settings = s.settings; st.devices = s.devices; st.runtimes = s.runtimes
+  applyLook(s.settings)
   st.cfg = { ...s.settings, accDefault: ACC[s.settings.accDefault] ?? ACC.auto, harness: s.runtimes.map((r) => ({ id: r.id, n: r.name, ok: r.ok, ver: r.version, path: r.path, models: r.models, def: t("core:defaultModel"), login: r.note })) }
   st.owner = !!s.owner
   /* the tour shows on an empty instance until this browser finished it, or the owner met Steve or said no (the Hub remembers that) */
@@ -679,7 +693,8 @@ function onHub(e: HubEvent | ModuleEvent) {
   if (e.type === "steve.draft") {
     if (nextDraft || st.draft?.mid !== e.mid) priorDraftReplies = new Set([...st.thread, ...knownMsgs.values()].filter((m) => m.k === "steve" && m.origin === e.mid && m.id).map((m) => m.id!))
     nextDraft = false
-    st.draft = { mid: e.mid, thought: e.thought, text: e.text }
+    const was = st.draft?.mid === e.mid ? st.draft : undefined, now = Date.now()
+    st.draft = { mid: e.mid, thought: e.thought, text: e.text, t0: was?.t0 ?? now, t1: was?.t1 ?? (e.text ? now : undefined) }
     if (!st.thread.some((m) => m.k === "thinking")) st.thread.push({ k: "thinking" })
     drawDraft(); return
   }
@@ -782,7 +797,7 @@ export const isThinking = () => st.thinking
 export const projectName = (id: string | null | undefined) => st.projects.find((p) => p.id === id)?.name ?? t("common:state.none")
 export const depsOpen = (i: Item) => (i.deps || []).filter((d) => st.items.find((x) => x.id === d)?.st !== "done")
 export function stageOf(i: Item): string {
-  if (i.st === "prop") return "分流"; if (i.st === "block") return "规划"; if (i.st === "done" || i.st === "drop") return "收尾"
+  if (i.st === "prop") return "分流"; if (i.st === "block") return "规划"; if (closedSt(i.st)) return "收尾"
   if (i.wait?.type === "accept") return "交付与验收"; if (i.wait?.type === "propose") return "规划"
   if (/发布/.test(i.now)) return "收尾"
   if (/^正在开始|刚开始/.test(i.now)) return "定义"; return "执行"
@@ -1011,7 +1026,7 @@ export async function qSendNow(sid: string, qid: string) {
 export function saveGoal(id: string, v: string) { const i = it(id); if (!v || v === i.goals[i.goals.length - 1]) return; void call(api.goal(id, v), t("core:toast.goalUpdated")) }
 export function reassign(id: string, k: string) { if (k === it(id).b) return; void call(api.reassign(id, k), t("core:toast.handedTo", { bot: botName(k) })) }
 export function setSt(id: string, s: Item["st"]) {
-  const i = it(id), action = s === "pause" ? "pause" : s === "drop" ? "drop" : ["done", "drop"].includes(i.st) ? "reopen" : "resume"
+  const i = it(id), action = s === "pause" ? "pause" : s === "drop" ? "drop" : closedSt(i.st) ? "reopen" : "resume"
   void call(api.itemAction(id, action), t(({ pause: "core:toast.paused", drop: "core:toast.dropped", reopen: "core:toast.reopened", resume: "core:toast.resumed" } as const)[action]))
 }
 /** mark done right away; the toast can take it back (the Hub restores the item as it was) */
@@ -1105,7 +1120,19 @@ export function patchProject(id: string, p: Partial<RProject>, msg = t("common:s
 
 /* ───────── tags ───────── */
 export const tag = (id: string) => st.tags.find((t) => t.id === id)
-export const tagName = (id: string) => tag(id)?.name ?? id
+/* the built-in tags the Hub seeds in Chinese (ST-34): the six delivery tags by name (core:delivery in zh-CN), and the
+ * default descriptions of those and of the six categories (core:tagDesc, in either language the Hub seeded them in).
+ * A description someone wrote stays as it is. */
+let seeded: { names: Record<string, string>; descs: Record<string, string> } | null = null
+const seededTags = () => seeded ??= {
+  names: Object.fromEntries(Object.entries(i18n.getResource("zh-CN", "core", "delivery") ?? {}).map(([k, v]) => [v as string, k])),
+  descs: Object.fromEntries(["zh-CN", "en"].flatMap((l) => Object.entries(i18n.getResource(l, "core", "tagDesc") ?? {}).map(([k, v]) => [v as string, k]))),
+}
+/** a tag's name in the UI language: a built-in delivery tag translated, any other as it was named */
+export const tagLabel = (tg: Pick<Tag, "name" | "cat">): string => { const k = tg.cat === "交付" && seededTags().names[tg.name]; return k ? t(`core:delivery.${k}` as "core:delivery.plan") : tg.name }
+/** a tag's description in the UI language when it is still the one the Hub seeded */
+export const tagDesc = (tg: Pick<Tag, "desc">): string => { const k = seededTags().descs[tg.desc]; return k ? t(`core:tagDesc.${k}` as "core:tagDesc.bug") : tg.desc }
+export const tagName = (id: string) => { const tg = tag(id); return tg ? tagLabel(tg) : id }
 export const tagUses = (id: string) => st.tagUses[id] ?? 0
 /** tag categories as the Hub stores them (Chinese values); show one with tagCatLabel */
 export const TAG_CATS = ["项目", "类型", "交付", "领域", "客户", "主题"]

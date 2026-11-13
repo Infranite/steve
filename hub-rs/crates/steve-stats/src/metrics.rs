@@ -697,6 +697,25 @@ pub fn item_est(models: &BTreeMap<String, [i64; 4]>, prices: &PriceBook, day: &s
         .sum()
 }
 
+/// The tokens of an item's `{model: [in, out, cr, cw]}` on models with no price on `day`: left out of
+/// [`item_est`], so an estimate next to them is a lower bound.
+pub fn item_unpriced(models: &BTreeMap<String, [i64; 4]>, prices: &PriceBook, day: &str) -> i64 {
+    models
+        .iter()
+        .filter(|(m, n)| {
+            let t = Tokens {
+                input: Some(n[0]),
+                output: Some(n[1]),
+                cache_read: Some(n[2]),
+                cache_write: Some(n[3]),
+                reasoning: None,
+            };
+            prices.cost(m, day, &t).is_none()
+        })
+        .map(|(_, n)| n.iter().sum::<i64>())
+        .sum()
+}
+
 /// Every metric for `q`, `None` for a malformed day.
 pub fn summary(c: &Connection, q: &Query) -> Result<Option<Summary>> {
     let tz = tz_of(c, &q.workspace_id)?;

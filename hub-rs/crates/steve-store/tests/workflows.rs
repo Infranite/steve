@@ -118,6 +118,7 @@ fn explicit_single_session_mode_is_durable_audited_and_replan_revokes_it() {
         .workflows()
         .pause(&parent, true, "用户暂停")
         .unwrap();
+    assert_eq!(paused.paused_by(), Some(("user", "用户暂停")));
     is_conflict(
         t.store
             .workflows()
@@ -991,4 +992,78 @@ fn unit_delivery_artifacts_and_child_checkpoint_commit_or_roll_back_together() {
     );
     assert_eq!(t.store.artifacts().list(child).unwrap().len(), 1);
     assert_eq!(t.store.artifacts().roles(child).unwrap().len(), 1);
+}
+
+/// ST-37 #5: a failed attempt retired by a reset keeps its failure and reason in the archive, also
+/// when it was archived as cancelled before (the append-only history decides); a succeeded one
+/// reset is cancelled as before (above).
+#[test]
+fn a_retired_failed_attempt_keeps_its_failure() {
+    let (t, parent, specs) = setup();
+    plan(&t, &parent, &specs);
+    let a = start(&t, &parent, "a");
+    t.store
+        .workflows()
+        .deliver(
+            a.item_id.as_deref().unwrap(),
+            a.session_id.as_deref().unwrap(),
+            "实测失败证据",
+            &json!([]),
+            &json!([{"name":"实测","passed":false}]),
+            false,
+        )
+        .unwrap();
+    t.store.workflows().reset(&parent, "a", "重试").unwrap();
+    let child = a.item_id.as_deref().unwrap();
+    let (_, old) = t.store.workflows().by_child(child).unwrap().unwrap();
+    assert_eq!(
+        (old.status.as_str(), old.reason.as_deref()),
+        ("failed", Some("实测失败证据"))
+    );
+    // archived as cancelled by an older build
+    t.store
+        .with_conn(|c| {
+            c.execute(
+                "UPDATE workflow_attempts SET snapshot=json_set(snapshot,'$.status','cancelled','$.reason','尝试已失效：重试') WHERE item_id=?",
+                [child],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let (_, old) = t.store.workflows().by_child(child).unwrap().unwrap();
+    assert_eq!(
+        (old.status.as_str(), old.reason.as_deref()),
+        ("failed", Some("实测失败证据"))
+    );
+    assert_eq!(
+        t.store.workflows().get(&parent).unwrap().unwrap().units[0].status,
+        "pending",
+        "the unit itself starts again"
+    );
+}
+
+/// ST-37 #2/#4: a turn's end is recorded once per attempt, also read back by a second handle on
+/// the same file (a restart); a pause's mark stays with its turn until taken.
+#[test]
+fn a_turn_end_is_recorded_once_and_a_pause_mark_is_kept() {
+    let (t, parent, specs) = setup();
+    plan(&t, &parent, &specs);
+    let a = start(&t, &parent, "a");
+    let sid = a.session_id.as_deref().unwrap();
+    let s = t.store.sessions();
+    s.turn_paused(sid, "a1").unwrap();
+    assert!(s.turn_ended(sid, "a0", "end_turn").unwrap());
+    assert!(!s.turn_ended(sid, "a0", "end_turn").unwrap(), "told again");
+    let again = Store::open(t.store.path(), NoPublisher).unwrap();
+    assert_eq!(again.sessions().turns_paused(sid).unwrap(), ["a1"]);
+    assert!(!again.sessions().turn_ended(sid, "a0", "cancelled").unwrap());
+    assert!(again.sessions().turn_ended(sid, "a1", "cancelled").unwrap());
+    again.sessions().turn_unpaused(sid, None).unwrap();
+    assert!(s.turns_paused(sid).unwrap().is_empty());
+    // only the newest turns are kept
+    for n in 0..100 {
+        s.turn_ended(sid, &format!("b{n}"), "end_turn").unwrap();
+    }
+    assert!(s.turn_ended(sid, "a0", "end_turn").unwrap(), "long gone");
+    assert!(!s.turn_ended(sid, "b99", "end_turn").unwrap());
 }

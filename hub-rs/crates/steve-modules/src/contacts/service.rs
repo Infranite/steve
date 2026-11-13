@@ -776,6 +776,52 @@ pub fn patch_contact(m: &Modules, who: &Caller, id: &str, b: ContactPatch) -> Ap
     contact_by_id(m, &viewer, &id)
 }
 
+/// `PUT` / `DELETE /contacts/:id/avatar`: the contact's picture is the stored file `file` (an id of
+/// the Hub's attachments, already checked to be an image of this workspace), or none. Other keys of
+/// `avatar` (a provider's `url`, a `seed`) stay; a picture someone chose wins over them.
+pub fn set_avatar_file(
+    m: &Modules,
+    who: &Caller,
+    id: &str,
+    file: Option<&str>,
+) -> ApiResult<Contact> {
+    let (viewer, me) = start(m, who)?;
+    let id = resolve(id, &me).to_string();
+    m.store.transaction(|tx| {
+        let p = own_party(tx, &viewer, &id, "contact", "联系人", true)?;
+        let mut av = p.avatar.as_object().cloned().unwrap_or_default();
+        let old = av.get("file").cloned().unwrap_or(Value::Null);
+        match file {
+            Some(f) => av.insert("file".into(), json!(f)),
+            None => av.remove("file"),
+        };
+        let new = av.get("file").cloned().unwrap_or(Value::Null);
+        if new == old {
+            return Ok::<_, ApiError>(());
+        }
+        revise(
+            tx,
+            &p,
+            &PartyPatch::default(),
+            json!({ "avatar": old }),
+            json!({ "avatar": new }),
+            &who.me,
+        )?;
+        repo::set_avatar(tx, &p.id, &Value::Object(av))?;
+        base::audit(
+            tx,
+            &who.ws,
+            &who.me,
+            "party.update",
+            &p.id,
+            &json!({ "fields": ["avatar"] }),
+        )?;
+        event(tx, &who.ws, &p.id);
+        Ok(())
+    })?;
+    contact_by_id(m, &viewer, &id)
+}
+
 /// `{before, after}` of the changed columns of a patch.
 fn diff(p: &Party, x: &PartyPatch) -> (Map<String, Value>, Map<String, Value>) {
     let (mut b, mut a) = (Map::new(), Map::new());

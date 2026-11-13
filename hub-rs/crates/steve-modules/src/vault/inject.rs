@@ -8,8 +8,7 @@
 //! - `/bin/sh -c <command>` in its own process group; on timeout (default 120 s, at most 600 s) the
 //!   whole group is killed; when the command ends, whatever it left in its group is killed too and
 //!   the temp directory is deleted right away; leftovers are removed at startup ([`cleanup`]);
-//! - stdout and stderr keep their first 64 KiB each, redacted before anything else sees them: the
-//!   injected values in all their forms, and the temp directory's path.
+//! - stdout and stderr keep their first 64 KiB each, as the command wrote them.
 //!
 //! [`Vault::injection_values`] is one of the three decryption sites.
 
@@ -22,7 +21,6 @@ use std::sync::LazyLock;
 use std::time::{Duration, SystemTime};
 
 use regex::Regex;
-use steve_vault::redact::Redactor;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 
 use super::crypto::open_field;
@@ -39,8 +37,6 @@ pub const MAX_TIMEOUT_S: u64 = 600;
 pub const OUTPUT_CAP: usize = 64 * 1024;
 /// How long to keep reading pipes after the command ended (a straggler may still hold them).
 const DRAIN: Duration = Duration::from_secs(2);
-/// The label the temp directory's path is masked with.
-const TEMP_LABEL: &str = "临时文件";
 
 static VAR: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$").expect("var pattern"));
@@ -92,7 +88,7 @@ pub struct RunSpec {
     pub timeout: Duration,
 }
 
-/// What came back, already redacted.
+/// What came back.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunOutput {
     /// `None` when killed by a signal (timeout) or never started.
@@ -100,7 +96,7 @@ pub struct RunOutput {
     pub timed_out: bool,
     pub stdout: String,
     pub stderr: String,
-    /// The command could not be started (or a temp file not written): the reason, redacted.
+    /// The command could not be started (or a temp file not written): the reason.
     pub error: Option<String>,
 }
 
@@ -256,10 +252,9 @@ fn kill_group(pid: Option<u32>) {
     }
 }
 
-/// Redacts, then cuts to [`OUTPUT_CAP`] on a char boundary.
-fn finish(r: &Redactor, raw: &[u8]) -> String {
-    let red = r.scrub_bytes(raw);
-    let s = String::from_utf8_lossy(&red);
+/// Cuts to [`OUTPUT_CAP`] on a char boundary.
+fn finish(raw: &[u8]) -> String {
+    let s = String::from_utf8_lossy(raw);
     if s.len() <= OUTPUT_CAP {
         return s.into_owned();
     }
@@ -270,22 +265,14 @@ fn finish(r: &Redactor, raw: &[u8]) -> String {
     s[..end].to_string()
 }
 
-/// Runs `spec` with `values` (label → value) injected. Never returns a value or the temp path.
+/// Runs `spec` with `values` (label → value) injected.
 pub async fn run(home: &Path, spec: &RunSpec, values: &[(String, SecretBytes)]) -> RunOutput {
-    let mut pats: Vec<(&str, &[u8])> = values
-        .iter()
-        .map(|(l, v)| (l.as_str(), v.expose()))
-        .collect();
-    let dir_text = secrets_root(home).join(&spec.use_id);
-    let dir_text = dir_text.to_string_lossy().into_owned();
-    pats.push((TEMP_LABEL, dir_text.as_bytes()));
-    let redactor = Redactor::new(pats);
     let fail = |msg: String| RunOutput {
         exit_code: None,
         timed_out: false,
         stdout: String::new(),
         stderr: String::new(),
-        error: Some(redactor.scrub_str(&msg).into_owned()),
+        error: Some(msg),
     };
 
     let files: Vec<&Injection> = spec
@@ -361,15 +348,14 @@ pub async fn run(home: &Path, spec: &RunSpec, values: &[(String, SecretBytes)]) 
         }
         _ => None,
     };
-    let keep = OUTPUT_CAP + redactor.longest();
     let out = child
         .stdout
         .take()
-        .map(|r| tokio::spawn(read_capped(r, keep)));
+        .map(|r| tokio::spawn(read_capped(r, OUTPUT_CAP)));
     let err = child
         .stderr
         .take()
-        .map(|r| tokio::spawn(read_capped(r, keep)));
+        .map(|r| tokio::spawn(read_capped(r, OUTPUT_CAP)));
 
     let (status, timed_out) = match tokio::time::timeout(spec.timeout, child.wait()).await {
         Ok(s) => (s.ok(), false),
@@ -402,8 +388,8 @@ pub async fn run(home: &Path, spec: &RunSpec, values: &[(String, SecretBytes)]) 
             status.and_then(|s| s.code())
         },
         timed_out,
-        stdout: finish(&redactor, &o),
-        stderr: finish(&redactor, &e),
+        stdout: finish(&o),
+        stderr: finish(&e),
         error: timed_out.then(|| {
             format!(
                 "timed out after {} s; the command was stopped",
@@ -521,25 +507,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn env_injection_and_output_redaction() {
+    async fn env_injection_and_output_as_written() {
         let home = tempfile::tempdir().unwrap();
         let w = tempfile::tempdir().unwrap();
         let s = spec(
             w.path(),
-            "echo \"t=$TOK\"; printf %s \"$TOK\" | base64; printf %s \"$TOK\" | xxd -p; echo err \"$TOK\" >&2; pwd",
+            "echo \"t=$TOK\"; echo err \"$TOK\" >&2; pwd",
             vec![env("TOK", "令牌")],
         );
         let out = run(home.path(), &s, &vals(&[("令牌", TOKEN)])).await;
         assert_eq!(out.exit_code, Some(0), "{out:?}");
-        let all = out.combined();
-        assert!(!all.contains(TOKEN), "{all}");
-        assert!(!all.contains("aW5qLVQwa2Vu"), "base64 leaked: {all}");
-        assert!(!all.contains("696e6a2d54"), "hex leaked: {all}");
-        assert!(
-            out.stdout.starts_with("t=[已打码：令牌]\n[已打码：令牌]\n"),
-            "{all}"
-        );
-        assert_eq!(out.stderr, "err [已打码：令牌]\n");
+        assert!(out.stdout.starts_with(&format!("t={TOKEN}\n")), "{out:?}");
+        assert_eq!(out.stderr, format!("err {TOKEN}\n"));
         assert!(
             out.stdout
                 .contains(&*w.path().canonicalize().unwrap().to_string_lossy())
@@ -569,12 +548,12 @@ mod tests {
         let out = run(home.path(), &s, &vals(&[("私钥", TOKEN)])).await;
         assert_eq!(out.exit_code, Some(0), "{out:?}");
         let lines: Vec<&str> = out.stdout.lines().collect();
-        // the agent sees neither the path nor the value
-        assert_eq!(lines[0], "path=[已打码：临时文件]/KEYF");
+        let dir = secrets_root(home.path()).join(&s.use_id);
+        assert_eq!(lines[0], format!("path={}/KEYF", dir.display()));
         assert_eq!(lines[1], "600");
         assert_eq!(lines[2], "700");
-        assert_eq!(lines[3], "[已打码：私钥]");
-        assert!(!secrets_root(home.path()).join(&s.use_id).exists());
+        assert_eq!(lines[3], TOKEN);
+        assert!(!dir.exists());
         assert_eq!(
             std::fs::metadata(secrets_root(home.path()))
                 .unwrap()
@@ -602,7 +581,7 @@ mod tests {
             ],
         );
         let out = run(home.path(), &s, &vals(&[("密码", TOKEN)])).await;
-        assert_eq!(out.stdout, "same\n[已打码：密码]\n", "{out:?}");
+        assert_eq!(out.stdout, format!("same\n{TOKEN}\n"), "{out:?}");
     }
 
     #[tokio::test]

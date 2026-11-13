@@ -9,7 +9,7 @@ const errors = []; page.on('pageerror', e => errors.push(e.message))
 let pending = Array.from({length: 125}, (_, i) => ({ id: 'p'+i, name: '用户'+i, label: '用户'+i, nameless: i < 120, aliases: [], rels: [], tags: [], accounts: 1, items: 0, kind: 'unconfirmed', org: null, avatar: null }))
 let fail = true, orgFail = true, accounts = []
 let org = { id: 'o1', name: '旧组织', name_state: 'workspace', name_reason: 'permission', name_scope: 'tenant:tenant:readonly', kind: 'self', domains: [], aliases: [], tags: [], note: '', attrs: [], people: [], revision: 1 }
-let contact = { id:'c1', name:'同事', kind:'real', aliases:[], rels:[], tags:[], org:null, avatar:null, note:'', status:'active', visibility:'workspace', profile:{checked:1,next_check:null,source:'chat',fields:{name:{state:'known'},org:{state:'missing',reason:'pending'},title:{state:'missing',reason:'external'},email:{state:'missing',reason:'permission',scope:'contact:user.email:readonly'}}},jobs:[], attrs:[], teams:[], merges:[], reports_to:[] }
+let contact = { id:'c1', name:'同事', kind:'real', aliases:[], rels:[], tags:[], org:null, avatar:null, note:'', status:'active', visibility:'workspace', profile:{checked:1,next_check:null,source:'chat',fields:{name:{state:'known'},org:{state:'missing',reason:'pending'},title:{state:'missing',reason:'external'},email:{state:'missing',reason:'permission',scope:'contact:user.email:readonly'}}},jobs:[], attrs:[{ id:'a1', key:'address', label:'地址', value:'上海市浦东新区世纪大道 100 号 环球金融中心 52 层 5201 室', source_label:'手动', level:'conclusion', status:'confirmed' }], teams:[], merges:[], reports_to:[] }
 await page.route('**/*', async route => {
  const u = new URL(route.request().url()); if (u.origin !== base) return route.abort(); if (!u.pathname.startsWith('/api/')) return route.continue()
  let data = [], status = 200; const method = route.request().method(), body = method === 'PATCH' || method === 'POST' ? route.request().postDataJSON() : null
@@ -28,14 +28,14 @@ const fits = async () => assert.equal(await page.evaluate(()=>document.documentE
 try {
  await page.goto(base+'/test/fixtures/people-management.html'); await page.getByRole('button',{name:'全选筛选结果（125）'}).waitFor()
  await fits()
- await page.getByLabel('联系人筛选',{exact:true}).selectOption('nameless')
+ await page.getByLabel('联系人筛选',{exact:true}).click(); await page.getByRole('option',{name:'未知用户',exact:true}).click()
  await page.getByRole('button',{name:'全选筛选结果（120）'}).click()
  await page.getByRole('button',{name:'忽略所选（120）'}).click()
  await page.getByRole('alert').filter({hasText:'1 个操作失败'}).waitFor()
  assert.equal(pending.length,6)
  await page.getByRole('button',{name:'重试失败项',exact:true}).click()
  await page.getByText('没有匹配的联系人',{exact:true}).waitFor(); assert.equal(pending.length,5)
- await page.getByLabel('联系人筛选',{exact:true}).selectOption('all')
+ await page.getByLabel('联系人筛选',{exact:true}).click(); await page.getByRole('option',{name:'全部',exact:true}).click()
  await page.getByRole('button',{name:'全选筛选结果（5）'}).click(); await page.getByRole('button',{name:'取消选择',exact:true}).click()
  assert.equal(await page.getByRole('button',{name:'忽略所选（0）'}).isDisabled(),true)
  await page.getByLabel('搜索待确认联系人').fill('no-match'); await page.getByText('没有匹配的联系人',{exact:true}).waitFor()
@@ -44,10 +44,13 @@ try {
  await page.getByLabel('组织名称',{exact:true}).fill('新组织'); await page.getByRole('button',{name:'保存',exact:true}).click()
  await page.waitForTimeout(200); assert.equal(await page.getByLabel('组织名称',{exact:true}).inputValue(),'新组织')
  await page.getByRole('button',{name:'保存',exact:true}).click(); await page.getByRole('heading',{name:'新组织',exact:true}).waitFor(); await fits()
- await page.goto(base+'/test/fixtures/people-management.html?contact'); await page.getByText('飞书不向应用提供外部联系人的此项资料',{exact:true}).waitFor(); await page.getByRole('button',{name:'编辑资料',exact:true}).click()
+ await page.goto(base+'/test/fixtures/people-management.html?contact'); await page.getByText('职位：飞书不向应用提供外部联系人的此项资料',{exact:true}).waitFor(); assert.equal(await page.getByText('资料完整性').count(),0); await page.getByRole('button',{name:'编辑资料',exact:true}).click()
  await page.getByLabel('名字',{exact:true}).fill('新名字'); await page.getByRole('button',{name:'保存',exact:true}).click(); await page.getByRole('heading',{name:'新名字',exact:true}).waitFor()
- await page.getByRole('button',{name:'编辑任职'}).click(); await page.getByLabel('任职组织').selectOption('o1'); await page.getByLabel('部门',{exact:true}).fill('研发部'); await page.getByLabel('职位',{exact:true}).fill('工程师'); await page.getByRole('button',{name:'保存',exact:true}).click(); await page.getByText('新组织 · 研发部 · 工程师',{exact:true}).waitFor(); await fits()
- await page.getByRole('button',{name:'添加邮箱',exact:true}).click(); await page.getByLabel('邮箱地址').fill('colleague@example.com'); await page.getByRole('button',{name:'保存',exact:true}).click(); await page.getByText('colleague@example.com',{exact:true}).waitFor(); assert.equal(contact.profile.fields.email.state,'known'); await fits()
+ await page.getByRole('button',{name:'补充组织',exact:true}).click(); await page.getByLabel('任职组织').click(); await page.getByRole('option',{name:'新组织',exact:true}).click(); await page.getByLabel('部门',{exact:true}).fill('研发部'); await page.getByLabel('职位',{exact:true}).fill('工程师'); await page.getByRole('button',{name:'保存',exact:true}).click(); await page.locator('[data-fact=org]').getByText('新组织',{exact:true}).waitFor(); await page.locator('[data-fact=title]').getByText('研发部 · 工程师',{exact:true}).waitFor(); await fits()
+ await page.getByRole('button',{name:'补充邮箱',exact:true}).click(); await page.getByLabel('修改 邮箱').fill('colleague@example.com'); await page.keyboard.press('Enter'); await page.locator('[data-fact=email]').getByText('colleague@example.com',{exact:true}).waitFor(); assert.equal(contact.profile.fields.email.state,'known'); await fits()
+ /* a long value wraps in its own column on a phone: never squeezed to a character per line */
+ const values = await page.locator('[data-attr] [data-value]').evaluateAll((xs) => xs.map((x) => x.getBoundingClientRect().width))
+ assert.ok(values.length > 0, 'the contact shows its details'); for (const w of values) assert.ok(w > 120, `detail value squeezed to ${w}px at 390px`)
  await page.setViewportSize({width:1280,height:900}); await fits()
  assert.deepEqual(errors,[]); console.log('PASS: 125 contacts, filtered selection, partial failure/retry, zero results, org save retry/self kind, contact edit/jobs, 390px/1280px layout')
 } catch(e) { console.error(await page.locator("body").innerText(),errors); throw e } finally {await browser.close()}

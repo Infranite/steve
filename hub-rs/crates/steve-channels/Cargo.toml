@@ -55,8 +55,7 @@ rusqlite = { version = "=0.40.2", features = ["bundled"] }
 # F8 self poller: quiet hours in the workspace time zone (same versions as steve-flow).
 chrono = { version = "=0.4.45", default-features = false, features = ["std"] }
 chrono-tz = "=0.10.4"
-# C5: the vault's guard and redactor masks; the rule check's patterns (same version as steve-modules).
-steve-vault = { path = "../steve-vault" }
+# C5: the rule check's patterns (same version as steve-modules).
 regex = "=1.13.1"
 # API errors and draft cards in the request's language.
 steve-i18n = { path = "../steve-i18n" }

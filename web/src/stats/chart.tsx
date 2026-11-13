@@ -9,6 +9,7 @@ import { cn } from "cn"
 import type { Series } from "@/api/stats"
 import { t, useT } from "@/i18n"
 import { bucketName, bucketTick, hhmm, hourSpan } from "@/stats/format"
+import { PanelIcon } from "@/panel"
 
 /** identity colours, in order (index.css `--series-*`, validated light and dark) */
 export const SERIES = [1, 2, 3, 4, 5].map((n) => `var(--series-${n})`)
@@ -21,32 +22,47 @@ export const STATE = {
 } as const
 export const seriesColor = (i: number, key?: string) => (key === "other" ? OTHER : SERIES[i] ?? OTHER)
 
-/** a legend key: a square for bars and areas, a short stroke for lines */
-export const Swatch = ({ c, line }: { c: string; line?: boolean }) => <span aria-hidden className={cn("inline-block shrink-0", line ? "h-0.5 w-3 rounded-full" : "size-2.5 rounded-[3px]")} style={{ background: c }} />
-export type LegendEntry = { label: ReactNode; c: string; line?: boolean }
+
+/** a legend key: a dot for bars and areas, a short stroke for lines, a tinted dot ringed in its colour for a band */
+export const Swatch = ({ c, line, band }: { c: string; line?: boolean; band?: boolean }) => <span aria-hidden className={cn("inline-block shrink-0 rounded-full", line ? "h-0.5 w-3" : band ? "size-2.5" : "size-2")}
+  style={band ? { background: `color-mix(in oklab, ${c} 35%, transparent)`, boxShadow: `inset 0 0 0 1px ${c}` } : { background: c }} />
+/** the fill of a band (median to p85) in its line's colour */
+export const bandFill = (c: string) => `color-mix(in oklab, ${c} 16%, transparent)`
+export type LegendEntry = { label: ReactNode; c: string; line?: boolean; band?: boolean }
 export function Legend({ items, className }: { items: LegendEntry[]; className?: string }) {
   return (
     <div className={cn("flex flex-wrap gap-x-4 gap-y-1 type-footnote text-muted-foreground", className)} data-legend>
-      {items.map((x, i) => <span key={i} className="inline-flex min-w-0 items-center gap-1.5"><Swatch c={x.c} line={x.line} /><span className="truncate">{x.label}</span></span>)}
+      {items.map((x, i) => <span key={i} className="inline-flex min-w-0 items-center gap-1.5"><Swatch c={x.c} line={x.line} band={x.band} /><span className="truncate">{x.label}</span></span>)}
     </div>
   )
 }
 
-/** a chart's head: title, then “单位 · 时间范围” in grey, the legend under it; `right` holds the chart's own switches */
-export function ChartHead({ title, meta, legend, right, k }: { title: ReactNode; meta?: ReactNode; legend?: LegendEntry[]; right?: ReactNode; k?: string }) {
+/** a chart panel's head (stats.md §6.3, panel.tsx): icon, title and the chart's own switches; under them the legend on the
+ *  left and “单位 · 时间范围” on the right. The chart that follows goes in a `ChartBody`. */
+export function ChartHead({ title, meta, legend, right, k, icon, sub }: { title: ReactNode; meta?: ReactNode; legend?: LegendEntry[]; right?: ReactNode; k?: string; icon?: ReactNode; sub?: ReactNode }) {
   return (
-    <div className="mb-3" data-chart-head={k}>
-      <div className="flex flex-wrap items-start justify-between gap-x-3 gap-y-2">
-        <div className="min-w-0">
-          <h3 className="type-headline text-foreground">{title}</h3>
-          {meta && <div className="mt-0.5 type-footnote text-muted-foreground" data-chart-meta>{meta}</div>}
+    <div data-chart-head={k}>
+      <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-2 px-5 pt-4 pb-2">
+        <div className="flex min-w-0 items-center gap-3">
+          {icon && <PanelIcon>{icon}</PanelIcon>}
+          <div className="min-w-0">
+            <h3 className="truncate type-headline text-foreground">{title}</h3>
+            {sub && <div className="type-footnote text-pretty text-muted-foreground">{sub}</div>}
+          </div>
         </div>
         {right && <div className="flex flex-wrap items-center gap-2">{right}</div>}
       </div>
-      {legend && legend.length > 0 && <Legend items={legend} className="mt-2" />}
+      {(meta || (legend && legend.length > 0)) && (
+        <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1.5 px-5 pt-2">
+          {legend && legend.length > 0 ? <Legend items={legend} /> : <span />}
+          {meta && <div className="type-footnote tabular-nums text-tertiary" data-chart-meta>{meta}</div>}
+        </div>
+      )}
     </div>
   )
 }
+/** the chart under a `ChartHead`, in the same section (no hairline between them) */
+export const ChartBody = ({ children, className }: { children: ReactNode; className?: string }) => <div className={cn("flex-1 border-t-0! px-5 pt-3 pb-4", className)}>{children}</div>
 
 /** at most 5 identity series; the rest summed into “其他” (stacks only: a rate can't be summed) */
 export function fold(d: Series, max = 5): Series {
@@ -57,7 +73,9 @@ export function fold(d: Series, max = 5): Series {
 }
 
 export type Kind = "stack" | "group" | "line" | "band"
-const H = 220, PAD = { l: 48, r: 12, t: 12, b: 26 }
+/** a second measure drawn as a line over the bars, on its own axis at the right (the daily chart's cost over its items) */
+export type Overlay = { key: string; label: string; values: (number | null)[]; color: string; fmt: (v: number) => string; tipFmt?: (v: number) => string }
+const H = 220, PAD0 = { l: 48, r: 12, t: 12, b: 26 }
 
 /** the top of the axis: 1 / 2 / 2.5 / 5 × 10ⁿ; counts get an even whole number so the middle tick is whole too */
 function niceMax(v: number, int = false): number {
@@ -72,7 +90,7 @@ const bar = (xl: number, w: number, y0: number, h: number, r: number) => {
   return `M${xl},${y0}V${yt + r}Q${xl},${yt} ${xl + r},${yt}H${xl + w - r}Q${xl + w},${yt} ${xl + w},${yt + r}V${y0}Z`
 }
 
-export function Chart({ data, kind, fmt, picked, onPick, label, colors, height = H, int = false, unit = 1, tipFmt, xFmt = bucketTick }: {
+export function Chart({ data, kind, fmt, picked, onPick, label, colors, height = H, int = false, unit = 1, tipFmt, xFmt = bucketTick, overlay }: {
   data: Series; kind: Kind; fmt: (v: number) => string; picked?: string | null; onPick?: (day: string | null) => void; label: string
   /** one colour per series (defaults to the identity order) */
   colors?: string[]; height?: number
@@ -82,6 +100,8 @@ export function Chart({ data, kind, fmt, picked, onPick, label, colors, height =
   tipFmt?: (v: number) => string
   /** a bucket as the axis writes it (days by default) */
   xFmt?: (bucket: string) => string
+  /** a second measure as a line on a right-hand axis */
+  overlay?: Overlay
 }) {
   const t = useT()
   const box = useRef<HTMLDivElement>(null)
@@ -93,6 +113,7 @@ export function Chart({ data, kind, fmt, picked, onPick, label, colors, height =
     const ro = new ResizeObserver(() => setW(el.clientWidth || 640)); ro.observe(el); setW(el.clientWidth || 640)
     return () => ro.disconnect()
   }, [])
+  const PAD = overlay ? { ...PAD0, r: 56 } : PAD0
   const n = data.buckets.length, lines = data.series
   const color = (k: number) => colors?.[k] ?? seriesColor(k, lines[k]?.key)
   const iw = Math.max(1, w - PAD.l - PAD.r), ih = height - PAD.t - PAD.b, slot = iw / Math.max(1, n)
@@ -102,6 +123,8 @@ export function Chart({ data, kind, fmt, picked, onPick, label, colors, height =
   const y = (v: number) => PAD.t + ih - (v / max) * ih
   const x = (i: number) => PAD.l + slot * i + slot / 2
   const ticks = [0, 0.5, 1].map((k) => k * max)
+  const max2 = overlay ? niceMax(Math.max(0, ...overlay.values.map((v) => v ?? 0))) : 1
+  const y2 = (v: number) => PAD.t + ih - (v / max2) * ih
   const hourly = data.bucket === "hour", cur = hourly ? data.current ?? -1 : -1
   /** an hour after the current one: not yet */
   const future = (i: number) => cur >= 0 && i > cur
@@ -126,21 +149,22 @@ export function Chart({ data, kind, fmt, picked, onPick, label, colors, height =
     else if (e.key === "Escape") setHover(null)
   }
   const tip: ReactNode = at >= 0 && at < n && (
-    <div role="status" className="pointer-events-none absolute top-1 z-10 min-w-36 max-w-60 rounded-lg border bg-popover px-3 py-2 text-popover-foreground shadow-md"
+    <div role="status" className="pointer-events-none absolute top-1 z-10 min-w-36 max-w-60 rounded-lg bg-popover px-3 py-2 text-popover-foreground shadow-md transition-[left] duration-120 ease-(--ease-out)"
       style={{ left: Math.min(Math.max(0, x(at) + 12), Math.max(0, w - 200)) }} data-chart-tip>
       <div className="type-label text-muted-foreground">{bucketName(data.buckets[at])}</div>
       {at === cur && <div className="mt-0.5 type-footnote text-tertiary" data-tip-current>{t("stats:chart.openUntil", { time: hhmm(Date.now()) })}</div>}
       {future(at) ? <div className="mt-1 type-footnote text-muted-foreground" data-tip-future>{t("stats:chart.notYet")}</div> : lines.map((l, i) => (kind !== "band" || i === 0 || lines.length < 2) ? (
-        <div key={l.key} className="mt-1 flex items-center gap-2 type-footnote"><Swatch c={color(i)} line /><span className="min-w-0 flex-1 truncate text-muted-foreground">{l.label}</span><span className="font-medium tabular-nums text-foreground">{l.values[at] == null ? "—" : tf(l.values[at]!)}</span></div>
+        <div key={l.key} className="mt-1 flex items-center gap-2 type-footnote"><Swatch c={color(i)} line={kind === "line" || kind === "band"} /><span className="min-w-0 flex-1 truncate text-muted-foreground">{l.label}</span><span className="font-medium tabular-nums text-foreground">{l.values[at] == null ? "—" : tf(l.values[at]!)}</span></div>
       ) : (
-        <div key={l.key} className="mt-1 flex items-center gap-2 type-footnote"><Swatch c={STATE.band} /><span className="min-w-0 flex-1 truncate text-muted-foreground">{l.label}</span><span className="font-medium tabular-nums text-foreground">{l.values[at] == null ? "—" : tf(l.values[at]!)}</span></div>
+        <div key={l.key} className="mt-1 flex items-center gap-2 type-footnote"><Swatch c={color(0)} band /><span className="min-w-0 flex-1 truncate text-muted-foreground">{l.label}</span><span className="font-medium tabular-nums text-foreground">{l.values[at] == null ? "—" : tf(l.values[at]!)}</span></div>
       ))}
+      {overlay && !future(at) && <div className="mt-1 flex items-center gap-2 type-footnote" data-tip-overlay><Swatch c={overlay.color} line /><span className="min-w-0 flex-1 truncate text-muted-foreground">{overlay.label}</span><span className="font-medium tabular-nums text-foreground">{overlay.values[at] == null ? "—" : (overlay.tipFmt ?? overlay.fmt)(overlay.values[at]!)}</span></div>}
       {kind === "stack" && lines.length > 1 && !future(at) && <div className="mt-1 flex justify-between border-t pt-1 type-footnote"><span className="text-muted-foreground">{t("stats:chart.total")}</span><span className="font-medium tabular-nums">{tf(stackTop[at])}</span></div>}
       {onPick && !future(at) && <div className="mt-1 type-footnote text-tertiary">{data.buckets[at] === picked ? t("stats:chart.clickCancel") : hourly ? t("stats:chart.clickHour") : t("stats:chart.clickDay")}</div>}
     </div>
   )
   return (
-    <div ref={box} className="relative w-full select-none" data-chart={kind}>
+    <div ref={box} className="anim-in relative w-full select-none" data-chart={kind}>
       <svg width={w} height={height} role="img" aria-label={label} tabIndex={0} onKeyDown={key} onBlur={() => setHover(null)}
         className={cn("block overflow-visible rounded-md outline-none focus-visible:ring-2 focus-visible:ring-ring", onPick && "cursor-pointer")}
         onMouseLeave={() => setHover(null)}
@@ -148,20 +172,21 @@ export function Chart({ data, kind, fmt, picked, onPick, label, colors, height =
         onClick={() => { if (hover == null || !future(hover)) onPick?.(hover != null && data.buckets[hover] !== picked ? data.buckets[hover] : null) }}>
         {cur >= 0 && <g data-current={data.buckets[cur]}>
           <rect x={PAD.l + slot * cur} y={PAD.t} width={slot} height={ih} fill="var(--muted)" opacity={0.8} />
-          <text x={x(cur)} y={PAD.t - 3} textAnchor="middle" className="fill-tertiary text-[10px]">{t("stats:chart.open")}</text>
+          <text x={x(cur)} y={PAD.t - 3} textAnchor="middle" className="fill-tertiary type-footnote">{t("stats:chart.open")}</text>
         </g>}
         {ticks.map((v) => (
           <g key={v}>
-            <line x1={PAD.l} x2={w - PAD.r} y1={y(v)} y2={y(v)} stroke="var(--border)" strokeWidth={1} />
-            <text x={PAD.l - 8} y={y(v)} dy="0.32em" textAnchor="end" className="fill-muted-foreground text-[11px] tabular-nums">{fmt(v)}</text>
+            <line x1={PAD.l} x2={w - PAD.r} y1={y(v)} y2={y(v)} stroke="var(--border)" strokeWidth={1} strokeOpacity={v ? 0.6 : 1} />
+            <text x={PAD.l - 10} y={y(v)} dy="0.32em" textAnchor="end" className="fill-tertiary type-footnote tabular-nums">{fmt(v)}</text>
           </g>
         ))}
-        {data.buckets.map((d, i) => i % every === 0 && <text key={d} x={x(i)} y={height - 8} textAnchor="middle" className={cn("text-[11px] tabular-nums", d === picked || i === cur ? "fill-foreground font-medium" : future(i) ? "fill-tertiary" : "fill-muted-foreground")}>{xFmt(d)}</text>)}
+        {overlay && [0, 0.5, 1].map((k) => <text key={"r" + k} x={w - PAD.r + 10} y={y2(k * max2)} dy="0.32em" textAnchor="start" className="type-footnote tabular-nums" style={{ fill: overlay.color }} data-axis-right>{overlay.fmt(k * max2)}</text>)}
+        {data.buckets.map((d, i) => i % every === 0 && <text key={d} x={x(i)} y={height - 8} textAnchor="middle" className={cn("type-footnote tabular-nums", d === picked || i === cur ? "fill-foreground font-medium" : future(i) ? "fill-tertiary" : "fill-muted-foreground")}>{xFmt(d)}</text>)}
         {at >= 0 && at < n && kind !== "stack" && kind !== "group" && <line x1={x(at)} x2={x(at)} y1={PAD.t} y2={PAD.t + ih} stroke="var(--border)" strokeWidth={1} />}
         {kind === "stack" && data.buckets.map((d, i) => {
           let base = 0
           return (
-            <g key={d} data-bar={d} opacity={dim(i)}>
+            <g key={d} data-bar={d} opacity={dim(i)} className="transition-opacity duration-120">
               {lines.map((l, k) => {
                 const v = l.values[i] ?? 0
                 if (v <= 0) return null
@@ -174,7 +199,7 @@ export function Chart({ data, kind, fmt, picked, onPick, label, colors, height =
           )
         })}
         {kind === "group" && data.buckets.map((d, i) => (
-          <g key={d} data-bar={d} opacity={dim(i)}>
+          <g key={d} data-bar={d} opacity={dim(i)} className="transition-opacity duration-120">
             {lines.map((l, k) => {
               const v = l.values[i] ?? 0
               if (v <= 0) return null
@@ -188,7 +213,7 @@ export function Chart({ data, kind, fmt, picked, onPick, label, colors, height =
           const pts = data.buckets.map((_, i) => i).filter((i) => lo[i] != null && hi[i] != null)
           if (!pts.length) return null
           const d = pts.map((i, k) => (k ? "L" : "M") + x(i) + "," + y(hi[i]!)).join("") + pts.slice().reverse().map((i) => "L" + x(i) + "," + y(lo[i]!)).join("") + "Z"
-          return <path d={d} fill={STATE.band} />
+          return <path d={d} fill={bandFill(color(0))} />
         })()}
         {(kind === "line" || kind === "band") && lines.slice(0, kind === "band" ? 1 : undefined).map((l, k) => (
           <g key={l.key}>
@@ -198,6 +223,16 @@ export function Chart({ data, kind, fmt, picked, onPick, label, colors, height =
             ))}
           </g>
         ))}
+        {overlay && (() => {
+          let d = "", pen = false
+          overlay.values.forEach((v, i) => { if (v == null || future(i)) { pen = false; return } d += (pen ? "L" : "M") + x(i).toFixed(1) + "," + y2(v).toFixed(1); pen = true })
+          return (
+            <g data-overlay={overlay.key} className="pointer-events-none">
+              <path d={d} fill="none" stroke={overlay.color} strokeWidth={2} strokeLinejoin="round" strokeLinecap="round" />
+              {overlay.values.map((v, i) => v != null && !future(i) && <circle key={i} cx={x(i)} cy={y2(v)} r={i === at ? 4.5 : n > 31 ? 0 : 3} fill={overlay.color} stroke="var(--card)" strokeWidth={2} />)}
+            </g>
+          )
+        })()}
       </svg>
       {tip}
     </div>
@@ -205,19 +240,23 @@ export function Chart({ data, kind, fmt, picked, onPick, label, colors, height =
 }
 
 /** the same numbers as a table (每个图可切“表格”) */
-export function ChartTable({ data, fmt, picked, onPick }: { data: Series; fmt: (v: number) => string; picked?: string | null; onPick?: (d: string | null) => void }) {
+export function ChartTable({ data, fmt, fmts, picked, onPick, xFmt = bucketTick, height }: { data: Series; fmt: (v: number) => string; picked?: string | null; onPick?: (d: string | null) => void; xFmt?: (bucket: string) => string
+  /** a format per series, when they measure different things (a count and a cost) */
+  fmts?: ((v: number) => string)[]
+  /** the height of the chart it stands in for: the table scrolls inside it, so switching moves nothing around it */
+  height?: number }) {
   const t = useT()
   const hourly = data.bucket === "hour", cur = hourly ? data.current ?? -1 : -1
   return (
-    <div className="max-h-80 overflow-auto" data-chart-table>
+    <div className="anim-in overflow-auto overscroll-contain pb-4 [mask-image:linear-gradient(to_bottom,black_calc(100%-20px),transparent)]" style={{ height: height ?? undefined, maxHeight: height ? undefined : 320 }} data-chart-table>
       <table className="w-full type-footnote tabular-nums">
-        <thead className="sticky top-0 bg-background"><tr className="text-muted-foreground"><th className="py-1.5 pr-3 text-left font-medium">{hourly ? t("stats:col.hourSpan") : t("stats:col.date")}</th>{data.series.map((l) => <th key={l.key} className="py-1.5 pl-3 text-right font-medium">{l.label}</th>)}</tr></thead>
+        <thead className="sticky top-0 bg-card"><tr className="text-muted-foreground [&>th]:border-b"><th className="py-1.5 pr-3 text-left font-medium">{hourly ? t("stats:col.hourSpan") : t("stats:col.date")}</th>{data.series.map((l) => <th key={l.key} className="py-1.5 pl-3 text-right font-medium">{l.label}</th>)}</tr></thead>
         <tbody>{data.buckets.map((d, i) => {
           const later = cur >= 0 && i > cur, can = onPick && !later
           return (
-            <tr key={d} className={cn("border-t", can && "cursor-pointer hover:bg-accent", picked === d && "bg-accent", later && "text-tertiary")} onClick={() => can && onPick(picked === d ? null : d)} data-table-row={d}>
-              <td className="py-1.5 pr-3">{hourly ? hourSpan(d) : d}{i === cur && <span className="ml-1 text-tertiary">{t("stats:chart.open")}</span>}</td>
-              {data.series.map((l) => <td key={l.key} className="py-1.5 pl-3 text-right">{later ? t("stats:chart.notCome") : l.values[i] == null ? "—" : fmt(l.values[i]!)}</td>)}
+            <tr key={d} className={cn("[&+&]:border-t [&+&]:border-border/60", can && "cursor-pointer hover:bg-accent", picked === d && "bg-accent", later && "text-tertiary")} onClick={() => can && onPick(picked === d ? null : d)} data-table-row={d}>
+              <td className="py-1.5 pr-3 tabular-nums" title={hourly ? undefined : d}>{hourly ? hourSpan(d) : xFmt(d)}{i === cur && <span className="ml-1 text-tertiary">{t("stats:chart.open")}</span>}</td>
+              {data.series.map((l, k) => <td key={l.key} className="py-1.5 pl-3 text-right">{later ? t("stats:chart.notCome") : l.values[i] == null ? "—" : (fmts?.[k] ?? fmt)(l.values[i]!)}</td>)}
             </tr>)
         })}</tbody>
       </table>
@@ -228,35 +267,32 @@ export function ChartTable({ data, fmt, picked, onPick }: { data: Series; fmt: (
 export type BarRow = { key: string; label: ReactNode; value: number; c: string; sub?: ReactNode; title?: string }
 /** a distribution as horizontal bars: label, bar, value — every bar is labelled, so colour is never the only key.
  *  `onPick` makes each row a button (下钻); `total` sets the 100% (defaults to the largest bar). */
-export function HBars({ rows, fmt = String, onPick, picked, label, total, k, vw = "w-14" }: {
+export function HBars({ rows, fmt = String, onPick, picked, label, total, k, vw = "w-14", lw = "w-[5.5rem] sm:w-32" }: {
   rows: BarRow[]; fmt?: (v: number) => string; onPick?: (key: string) => void; picked?: string | null; label: string; total?: number; k?: string
   /** the width of the value column */
   vw?: string
+  /** the width of the label column */
+  lw?: string
 }) {
   const max = Math.max(1, total ?? Math.max(0, ...rows.map((r) => r.value)))
   return (
     <div role={onPick ? "group" : "list"} aria-label={label} className="flex flex-col" data-hbars={k}>
       {rows.map((r) => {
         const body = <>
-          <span className="w-[5.5rem] shrink-0 truncate text-left type-callout sm:w-28" title={r.title}>{r.label}</span>
-          <span className="relative h-2.5 min-w-0 flex-1 overflow-hidden rounded-r-[4px] bg-muted/60" aria-hidden>
-            {r.value > 0 && <span className="absolute inset-y-0 left-0 rounded-r-[4px]" style={{ width: `${Math.max(1.5, (r.value / max) * 100)}%`, background: r.c }} />}
+          <span className={cn(lw, "shrink-0 truncate text-left type-callout text-foreground/90")} title={r.title}>{r.label}</span>
+          <span className="relative h-1.5 min-w-0 flex-1 overflow-hidden rounded-full bg-muted" aria-hidden>
+            {r.value > 0 && <span className="absolute inset-y-0 left-0 rounded-full transition-[width] duration-260 ease-(--ease-out)" style={{ width: `${Math.max(1.5, (r.value / max) * 100)}%`, background: r.c }} />}
           </span>
           <span className={cn(vw, "shrink-0 text-right")}>
-            <span className="block type-headline tabular-nums">{fmt(r.value)}</span>
-            {r.sub != null && <span className="block truncate type-footnote tabular-nums text-muted-foreground">{r.sub}</span>}
+            <span className="block type-callout font-medium tabular-nums">{fmt(r.value)}</span>
+            {r.sub != null && <span className="block truncate type-footnote tabular-nums text-tertiary">{r.sub}</span>}
           </span>
         </>
-        const cls = "flex w-full items-center gap-3 rounded-md px-1.5 py-1.5"
+        const cls = "flex w-full items-center gap-3 rounded-lg px-1.5 py-1.5"
         return onPick
           ? <button key={r.key} type="button" onClick={() => onPick(r.key)} aria-pressed={picked === r.key} className={cn(cls, "text-left transition-colors hover:bg-muted/60 focus-visible:bg-muted/60 focus-visible:outline-none", picked === r.key && "bg-muted")} data-hbar={r.key}>{body}</button>
           : <div key={r.key} role="listitem" className={cls} data-hbar={r.key}>{body}</div>
       })}
     </div>
   )
-}
-
-/** a thin share bar in a table cell (4px, grey) */
-export function Share({ r }: { r: number }) {
-  return <span className="block h-1 w-full min-w-10 overflow-hidden rounded-full bg-muted" aria-hidden><span className="block h-full rounded-full bg-foreground/40" style={{ width: `${Math.max(0, Math.min(1, r)) * 100}%` }} /></span>
 }

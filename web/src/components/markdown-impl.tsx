@@ -1,5 +1,6 @@
 import { lazy, Suspense, useEffect, useRef, useState, type ComponentProps, type ReactNode } from "react"
 import { Streamdown, defaultComponents, defaultRehypePlugins, defaultRemarkPlugins, useIsCodeFenceIncomplete, type Components, type DefaultComponents, type DiagramPlugin } from "streamdown"
+import { cjk } from "@streamdown/cjk"
 import { code } from "@streamdown/code"
 import remarkBreaks from "remark-breaks"
 import { cn } from "cn"
@@ -130,7 +131,9 @@ const components: Components = {
     : /\blanguage-html\b/.test(props.className ?? "") ? <HtmlBlock {...props} />
     : /\blanguage-a2ui\b/.test(props.className ?? "") ? <A2uiCode {...props} /> : <defaultComponents.code {...props} />,
 }
-const plugins = { code, mermaid }
+/* cjk: CommonMark does not close `**` between a full-width mark and a Han character (`**“执行中”。**看…`), which leaves
+ * the asterisks showing in Chinese replies */
+const plugins = { cjk, code, mermaid }
 const remarkPlugins = [...Object.values(defaultRemarkPlugins), remarkBreaks, remarkHtmlAsText, remarkItemRefs]
 /* Streamdown's defaults minus rehype-raw: sanitize + harden still apply to what markdown itself produces */
 const rehypePlugins = [defaultRehypePlugins.sanitize, defaultRehypePlugins.harden]

@@ -90,7 +90,6 @@ export default {
     failed: "Not sent",
     unknown: "May have been sent, checking",
     recalled: "Recalled",
-    blocked: "Blocked",
   },
   cleanup: {
     keep: "Keep everything",
@@ -115,7 +114,7 @@ export default {
     generic: "Something went wrong",
   },
   area: {
-    channel: "Channels",
+    channel: "Chat",
     sendAsYou: "Send as you",
     docs: "Docs/knowledge base",
     sheets: "Sheets/Base",

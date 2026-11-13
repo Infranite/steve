@@ -48,7 +48,6 @@ pub struct H {
 pub struct Opts {
     pub imap: ImapConfig,
     pub smtp_tls: TlsMode,
-    pub secrets: Option<Arc<dyn steve_mail::SecretScan>>,
     pub hooks: Option<Arc<dyn steve_mail::DraftHooks>>,
     /// The outbound check to register (none: every draft is `unchecked`).
     pub check: Option<Arc<dyn steve_modules::outbound::OutboundCheck>>,
@@ -75,7 +74,6 @@ impl Default for Opts {
         Self {
             imap: ImapConfig::default(),
             smtp_tls: TlsMode::Implicit,
-            secrets: None,
             hooks: None,
             check: None,
         }
@@ -149,9 +147,6 @@ pub async fn setup_with(o: Opts) -> H {
     let notified: Arc<Mutex<Vec<String>>> = Arc::default();
     let n = notified.clone();
     let mut b = Mail::builder(env.modules.clone(), conns.clone(), cfg.clone()).drafts(link.clone());
-    if let Some(s) = o.secrets.clone() {
-        b = b.secrets(s);
-    }
     if let Some(h) = o.hooks.clone() {
         b = b.hooks(h);
     }

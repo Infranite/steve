@@ -96,7 +96,26 @@ pub struct Workflow {
     pub history: Vec<WorkflowHistory>,
 }
 
+/// Who paused a work graph ([`Workflow::paused_by`]).
+pub const PAUSED_BY_AGENT: &str = "agent";
+pub const PAUSED_BY_USER: &str = "user";
+pub const PAUSED_BY_ITEM: &str = "item";
+
 impl Workflow {
+    /// Who paused the graph and why, while it is paused: [`PAUSED_BY_AGENT`] (its coordinator or
+    /// another Bot, with the tool), [`PAUSED_BY_USER`] or [`PAUSED_BY_ITEM`] (the item itself was
+    /// paused or dropped). A pause recorded without saying who counts as the agent's.
+    pub fn paused_by(&self) -> Option<(&str, &str)> {
+        if !self.paused {
+            return None;
+        }
+        let h = self.history.iter().rev().find(|h| h.action == "pause")?;
+        Some((
+            h.detail["by"].as_str().unwrap_or(PAUSED_BY_AGENT),
+            h.reason.as_str(),
+        ))
+    }
+
     /// The existing append-only history is the authority for an explicit acceptance-mode change.
     /// Replanning reinstates collaboration; ordinary pause/cancel never waive required evidence.
     pub fn single_session(&self) -> bool {
@@ -403,11 +422,16 @@ fn record(
     Ok(())
 }
 
+/// Keeps a retired attempt's snapshot, cancelled by the reset or replan (a success is invalidated
+/// with it). A failure stays failed with its own reason: it is the authoritative outcome of that
+/// attempt, and a turn end that comes late closes its child as failed, never as cancelled.
 fn archive_attempt(tx: &Tx<'_>, parent: &str, unit: &WorkUnit, reason: &str) -> Result<()> {
     if let Some(child) = &unit.item_id {
         let mut old = unit.clone();
-        old.status = "cancelled".into();
-        old.reason = Some(format!("尝试已失效：{reason}"));
+        if old.status != "failed" {
+            old.status = "cancelled".into();
+            old.reason = Some(format!("尝试已失效：{reason}"));
+        }
         tx.execute(
             "INSERT OR IGNORE INTO workflow_attempts(item_id,workflow_id,unit_id,snapshot,created)
              VALUES (?,?,?,?,?)",
@@ -498,7 +522,12 @@ impl Workflows<'_> {
     /// A current turn is confirmed only by applied activity from the exact active Node attempt.
     /// The Hub's receive time, not the Node's clock, sets freshness. This is a read-only display
     /// fact; uncertain or stale work remains active but unconfirmed in the UI.
-    pub fn confirmed_activity(&self, child: &str, session: &str, at: i64) -> Result<Option<WorkflowActivity>> {
+    pub fn confirmed_activity(
+        &self,
+        child: &str,
+        session: &str,
+        at: i64,
+    ) -> Result<Option<WorkflowActivity>> {
         self.0.read(|c| crate::read_snapshot(c, |c| {
             let active: Option<(String, String, String)> = c.query_row(
                 "SELECT a.attempt_id,t.turn_id,s.node_id FROM runtime_sessions s
@@ -554,7 +583,11 @@ impl Workflows<'_> {
         }))
     }
 
-    pub fn archived_attempts_recent(&self, parent: &str, limit: i64) -> Result<(Vec<ArchivedWorkflowAttempt>, i64)> {
+    pub fn archived_attempts_recent(
+        &self,
+        parent: &str,
+        limit: i64,
+    ) -> Result<(Vec<ArchivedWorkflowAttempt>, i64)> {
         self.0.read(|c| crate::read_snapshot(c, |c| {
             let total: i64 = c.query_row("SELECT COUNT(*) FROM workflow_attempts WHERE workflow_id=?", [parent], |r| r.get(0))?;
             let rows = all(c,
@@ -590,17 +623,34 @@ impl Workflows<'_> {
             if current.is_some() {
                 return Ok(current);
             }
+            // a retired attempt: an authoritative failure in the append-only history stands over a
+            // snapshot archived as cancelled (rows archived before failed snapshots were kept)
             one(
                 c,
-                "SELECT workflow_id,snapshot FROM workflow_attempts WHERE item_id=?",
+                "SELECT a.workflow_id,a.snapshot,
+                        (SELECT h.reason FROM workflow_history h
+                         WHERE h.workflow_id=a.workflow_id AND h.action='deliver'
+                           AND json_extract(h.detail,'$.child')=a.item_id
+                           AND json_extract(h.detail,'$.status')='failed'
+                         ORDER BY h.revision DESC LIMIT 1) AS failed
+                 FROM workflow_attempts a WHERE a.item_id=?",
                 [child],
-                |r| Ok((r.get("workflow_id")?, decode(r, "snapshot")?)),
+                |r| {
+                    let mut u: WorkUnit = decode(r, "snapshot")?;
+                    if let Some(why) = r.get::<_, Option<String>>("failed")?
+                        && u.status != "failed"
+                    {
+                        u.status = "failed".into();
+                        u.reason = Some(why);
+                    }
+                    Ok((r.get("workflow_id")?, u))
+                },
             )
         })
     }
 
-    /// Retired attempts whose child item was left active. A failed delivery remains identifiable
-    /// in the append-only history even though archiving changes the snapshot status to cancelled.
+    /// Retired attempts whose child item was left active. A failed delivery is identified from the
+    /// append-only history (older rows archived a failed attempt's snapshot as cancelled).
     pub fn retired_open(&self) -> Result<Vec<(WorkUnit, bool)>> {
         self.0.read(|c| {
             all(
@@ -1017,7 +1067,13 @@ impl Workflows<'_> {
         })
     }
 
+    /// [`Self::pause_by`] you.
     pub fn pause(&self, parent: &str, paused: bool, reason: &str) -> Result<Workflow> {
+        self.pause_by(parent, paused, reason, PAUSED_BY_USER)
+    }
+
+    /// `by`: who pauses or resumes it (see [`Workflow::paused_by`]).
+    pub fn pause_by(&self, parent: &str, paused: bool, reason: &str, by: &str) -> Result<Workflow> {
         if reason.trim().is_empty() {
             return Err(conflict("暂停或恢复必须说明原因"));
         }
@@ -1040,7 +1096,7 @@ impl Workflows<'_> {
                 if paused { "pause" } else { "resume" },
                 reason,
                 None,
-                &json!({}),
+                &json!({ "by": by }),
             )?;
             must_graph(tx, parent)
         })

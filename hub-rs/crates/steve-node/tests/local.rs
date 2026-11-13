@@ -239,6 +239,8 @@ fn open_body(session: &str) -> OpenSession {
         env: Default::default(),
         state: Default::default(),
         artifact_view: None,
+        mcp_servers: vec![],
+        skills: vec![],
     }
 }
 
@@ -4768,4 +4770,163 @@ async fn a_declared_adapter_is_discovered_with_what_it_reports() {
     assert_eq!(t.sent("initialize"), 2);
     n.probe(false).await.unwrap();
     assert_eq!(t.sent("initialize"), 2);
+}
+
+/// The session's Bot's own MCP servers go to the harness in session/new after Steve's, each secret
+/// taken from the Hub under `mcp:<session>` as the harness opens and never written to the journal.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_bots_mcp_servers_reach_session_new_after_steves_with_secrets_taken_then() {
+    let t = T::new(&[]);
+    let n = t.node();
+    n.connect_tools(Arc::new(Tools::default())).await.unwrap();
+    let secrets = Arc::new(steve_node_api::testkit::FakeSecrets::default());
+    secrets.give("mcp:s_1", "bmcp_1#env:TOKEN", b"tok-very-secret");
+    n.connect_secrets(secrets.clone());
+    n.prepare_workspace(now_cmd("op_prep", prepare_proj()))
+        .await
+        .unwrap();
+    assert!(ok(&finished(&n, "op_prep").await));
+    let mut open = open_body("s_1");
+    open.mcp_servers = vec![
+        McpServer {
+            name: "files".into(),
+            transport: McpTransport::Stdio {
+                command: "npx".into(),
+                args: vec!["-y".into(), "files-mcp".into()],
+                env: vec![
+                    McpVar {
+                        name: "LOG".into(),
+                        value: "debug".into(),
+                        secret: None,
+                    },
+                    McpVar {
+                        name: "TOKEN".into(),
+                        value: String::new(),
+                        secret: Some("bmcp_1#env:TOKEN".into()),
+                    },
+                ],
+            },
+        },
+        McpServer {
+            name: "remote".into(),
+            transport: McpTransport::Http {
+                url: "https://mcp.example.com/mcp".into(),
+                headers: vec![McpVar {
+                    name: "X-Team".into(),
+                    value: "core".into(),
+                    secret: None,
+                }],
+            },
+        },
+    ];
+    n.open_session(now_cmd("op_open_s_1", open)).await.unwrap();
+    let s = finished(&n, "op_open_s_1").await;
+    assert!(ok(&s), "{s:?}");
+    t.until("session/new", |t| t.sent("session/new") == 1).await;
+    let log = std::fs::read_to_string(&t.log).unwrap();
+    let new = log
+        .lines()
+        .find(|l| l.contains("\"method\":\"session/new\""))
+        .unwrap();
+    let v: serde_json::Value = serde_json::from_str(new).unwrap();
+    let servers = v["params"]["mcpServers"].as_array().unwrap();
+    assert_eq!(servers.len(), 3, "{servers:?}");
+    assert_eq!(servers[0]["name"], "steve");
+    assert_eq!(
+        servers[1],
+        serde_json::json!({"name": "files", "command": "npx", "args": ["-y", "files-mcp"],
+            "env": [{"name": "LOG", "value": "debug"}, {"name": "TOKEN", "value": "tok-very-secret"}]})
+    );
+    assert_eq!(
+        servers[2],
+        serde_json::json!({"type": "http", "name": "remote", "url": "https://mcp.example.com/mcp",
+            "headers": [{"name": "X-Team", "value": "core"}]})
+    );
+    assert_eq!(
+        secrets.taken(),
+        vec![(
+            OperationId::new("mcp:s_1").unwrap(),
+            "bmcp_1#env:TOKEN".to_string()
+        )]
+    );
+    // the journal keeps the reference, never the value
+    for f in std::fs::read_dir(&t.home).unwrap().flatten() {
+        if f.path().is_file() {
+            let bytes = std::fs::read(f.path()).unwrap();
+            assert!(
+                !bytes.windows(15).any(|w| w == b"tok-very-secret"),
+                "{} holds the secret",
+                f.path().display()
+            );
+        }
+    }
+    // a name Steve's own tools use is refused
+    let mut bad = open_body("s_2");
+    bad.mcp_servers = vec![McpServer {
+        name: "steve".into(),
+        transport: McpTransport::Sse {
+            url: "https://x".into(),
+            headers: vec![],
+        },
+    }];
+    assert!(n.open_session(now_cmd("op_open_s_2", bad)).await.is_err());
+}
+
+/// A Bot's skills are written where the adapter declares it reads them, in the session's own harness
+/// directory, before session/new; the next open makes Steve's skills there exactly the session's.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_bots_skills_are_in_its_harness_directory_before_the_session_opens() {
+    let t = T::new(&[]);
+    let n = t.node();
+    n.prepare_workspace(now_cmd("op_prep", prepare_proj()))
+        .await
+        .unwrap();
+    assert!(ok(&finished(&n, "op_prep").await));
+    let skill = |name: &str, content: &str| Skill {
+        name: name.into(),
+        description: format!("Use for {name}."),
+        content: content.into(),
+    };
+    let open = |s: &str, skills: Vec<Skill>| {
+        let mut b = open_body(s);
+        b.state = Some(HarnessState {
+            dir: "default/owner/dev/claude-code".into(),
+            import_owner: false,
+        });
+        b.skills = skills;
+        b
+    };
+    n.open_session(now_cmd(
+        "op_open_s_1",
+        open(
+            "s_1",
+            vec![skill("code-review", "# Review\n"), skill("ship", "Ship.")],
+        ),
+    ))
+    .await
+    .unwrap();
+    assert!(ok(&finished(&n, "op_open_s_1").await));
+    t.until("session/new", |t| t.sent("session/new") == 1).await;
+    let dir = t
+        .home
+        .join("state/default/owner/dev/claude-code/harness/skills");
+    assert_eq!(
+        std::fs::read_to_string(dir.join("code-review/SKILL.md")).unwrap(),
+        "---\nname: code-review\ndescription: \"Use for code-review.\"\n---\n\n# Review\n"
+    );
+    assert!(dir.join("ship/SKILL.md").is_file());
+    // another session of the same Bot after one was switched off
+    n.open_session(now_cmd(
+        "op_open_s_2",
+        open("s_2", vec![skill("code-review", "# Review\n")]),
+    ))
+    .await
+    .unwrap();
+    assert!(ok(&finished(&n, "op_open_s_2").await));
+    assert!(dir.join("code-review/SKILL.md").is_file());
+    assert!(!dir.join("ship").exists());
+    // what a Node is given is checked
+    let mut bad = open_body("s_3");
+    bad.skills = vec![skill("Bad Name", "x")];
+    assert!(n.open_session(now_cmd("op_open_s_3", bad)).await.is_err());
 }

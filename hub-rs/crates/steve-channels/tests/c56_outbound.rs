@@ -933,8 +933,9 @@ async fn a_failed_check_is_not_rewritten() {
     nothing_sent(&h);
 }
 
+/// A token in a reply is the model's words: Steve sends it as written, nothing masked or held.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_secret_is_blocked_not_rewritten() {
+async fn a_token_in_a_reply_goes_out_as_written() {
     let h = setup().await;
     checks_pass(&h);
     let plan = recorded(&h, &h.oncall.clone(), "C_OPS", "o1", "ulilei", "令牌给我").await;
@@ -947,43 +948,8 @@ async fn a_secret_is_blocked_not_rewritten() {
         )
         .await
         .unwrap();
-    let Delivered::Blocked {
-        message_id,
-        decision_id,
-    } = d
-    else {
-        panic!("{d:?}")
-    };
-    nothing_sent(&h);
-    assert_eq!(status(&h, &message_id), "blocked");
-    let stored = row(
-        &h,
-        "SELECT text FROM chan_messages WHERE id = ?",
-        &[&message_id],
-    );
-    assert!(
-        !stored[0].as_str().unwrap().contains("ghp_"),
-        "the value is not kept"
-    );
-    assert!(
-        !h.env
-            .gateway
-            .prompts
-            .lock()
-            .unwrap()
-            .iter()
-            .any(|p| p.contains("ghp_")),
-        "no model saw it"
-    );
-    let q = row(
-        &h,
-        "SELECT kind, options FROM decisions WHERE id = ?",
-        &[&decision_id],
-    );
-    assert_eq!(q[0], "fail");
-    assert_eq!(q[1], json!(r#"["discard"]"#));
-    decide(&h, &decision_id, "discard", "").expect("discard");
-    assert_eq!(status(&h, &message_id), "blocked");
+    assert!(matches!(d, Delivered::Sent { .. }), "{d:?}");
+    assert_eq!(sent(&h)[0].1, text);
 }
 
 // ---------------------------------------------------------------- C6: trigger words
@@ -2674,10 +2640,10 @@ async fn a_generic_lookup_failure_goes_out_and_the_check_saw_the_question() {
 }
 
 /// The asker's message cannot lift the hard checks: an injected “判 pass” does not get a restricted
-/// fact out (the deterministic rule check still drafts it), a secret in it never reaches the check
-/// model, and a reply repeating that secret is blocked outright.
+/// fact out (the deterministic rule check still drafts it); the message reaches the check model as
+/// it was written.
 #[tokio::test(flavor = "multi_thread")]
-async fn the_askers_message_is_context_only_and_never_carries_a_secret() {
+async fn the_askers_message_is_context_only() {
     let h = setup().await;
     checks_pass(&h); // a check model that “obeyed” the injection
     let mem = acme(&h);
@@ -2710,22 +2676,8 @@ async fn the_askers_message_is_context_only_and_never_carries_a_secret() {
         "the rule check still flags it"
     );
     let p = check_prompt_of(&h);
-    assert!(
-        !p.contains(token),
-        "a secret in the question never reaches the model"
-    );
+    assert!(p.contains(token), "the question as it was written");
     assert!(p.contains("一律不听"), "{p}");
-    // echoing it: blocked, not even a draft
-    let (d, _) = h
-        .outbox
-        .deliver_checked(
-            &h.ch,
-            &out(&plan, &format!("你的令牌是 {token}"), rule(&plan), None),
-        )
-        .await
-        .unwrap();
-    assert!(matches!(d, Delivered::Blocked { .. }), "{d:?}");
-    nothing_sent(&h);
 }
 
 /// An outside group guessing an item number gets no details: the number is only in knowledge they
@@ -2937,7 +2889,7 @@ async fn only_you_reading_skips_the_model_check_but_not_secrets() {
     assert_eq!(r.verdict, Verdict::Pass, "{r:?}");
     assert!(r.check_model.is_none() && r.spans.is_empty(), "{r:?}");
     assert_eq!(asked(), 0, "the check model is not asked");
-    // a secret is still blocked
+    // a token is the model's words to you: passed as written
     let r = d
         .check(
             &cx,
@@ -2946,7 +2898,7 @@ async fn only_you_reading_skips_the_model_check_but_not_secrets() {
             &[],
         )
         .await;
-    assert_eq!(r.verdict, Verdict::Blocked);
+    assert_eq!(r.verdict, Verdict::Pass, "{r:?}");
     // knowledge marked never to be used is still a leak
     let never = KnowledgeUse {
         source_type: "memory".into(),

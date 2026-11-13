@@ -6,7 +6,7 @@ import { Button } from "@/components/ui/button"
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible"
 import { Spinner } from "@/components/ui/spinner"
 import { tm, toast, type Out } from "@/store"
-import { Segmented } from "@/ui"
+import { Segmented, Empty } from "@/ui"
 import { cn } from "cn"
 import { OfficeView } from "@/office"
 import { ChevronLeftIcon, ChevronRightIcon, CopyIcon, DownloadIcon, ExternalLinkIcon, FileIcon, FileTextIcon, FolderIcon, GalleryVerticalIcon, GitBranchIcon, ZoomInIcon, ZoomOutIcon } from "lucide-react"
@@ -25,10 +25,10 @@ function Note({ children }: { children: ReactNode }) {
 }
 function Missing({ reason }: { reason: string }) {
   const t = useT()
-  return <div className="flex flex-col items-center gap-1 py-12 text-center" data-out-missing><FileIcon className="size-6 text-tertiary" /><div className="type-callout">{t("pages:outputs.cantView")}</div><div className="max-w-md type-footnote text-muted-foreground">{reason}</div></div>
+  return <Empty compact icon={<FileIcon />} title={t("pages:outputs.cantView")} sub={reason} data-out-missing />
 }
 function Plain({ text }: { text: string }) {
-  return <pre className="max-h-[60vh] overflow-auto rounded-xl bg-muted/60 p-3 font-mono text-[12.5px] leading-5 whitespace-pre-wrap break-words" data-out-plain>{text}</pre>
+  return <pre className="max-h-[60vh] overflow-auto rounded-xl bg-muted/60 px-4 py-3 type-code whitespace-pre-wrap break-words" data-out-plain>{text}</pre>
 }
 function Code({ lang, text }: { lang: string; text: string }) {
   return text.length > HIGHLIGHT_MAX || lang === "text" ? <Plain text={text} /> : <Markdown className="type-callout [&_[data-streamdown=code-block]]:my-0" text={fence(lang, text)} />
@@ -52,17 +52,17 @@ function Table({ text, sep }: { text: string; sep: string }) {
   const rows = parseCsv(text, sep), [head, ...body] = rows
   if (!head) return <Plain text={text} />
   return (
-    <div className="max-h-[60vh] overflow-auto rounded-xl border" data-out-table>
-      <table className="w-full border-collapse type-footnote">
-        <thead className="sticky top-0 bg-muted"><tr>{head.map((h, n) => <th key={n} className="border-b px-2.5 py-1.5 text-left font-medium whitespace-nowrap">{h}</th>)}</tr></thead>
-        <tbody>{body.slice(0, 500).map((r, n) => <tr key={n} className="border-b last:border-0">{head.map((_, k) => <td key={k} className="px-2.5 py-1 align-top">{r[k] ?? ""}</td>)}</tr>)}</tbody>
+    <div className="max-h-[60vh] overflow-auto rounded-xl bg-muted/40" data-out-table>
+      <table className="w-full border-collapse type-callout tabular-nums">
+        <thead className="sticky top-0 bg-muted"><tr>{head.map((h, n) => <th key={n} className="px-3 py-2 text-left type-label text-muted-foreground whitespace-nowrap">{h}</th>)}</tr></thead>
+        <tbody>{body.slice(0, 500).map((r, n) => <tr key={n} className="border-b border-border/70 last:border-0">{head.map((_, k) => <td key={k} className="px-3 py-1.5 align-top">{r[k] ?? ""}</td>)}</tr>)}</tbody>
       </table>
     </div>
   )
 }
 function Html({ text }: { text: string }) {
   const t = useT()
-  return <iframe title={t("pages:outputs.htmlTitle")} sandbox="allow-scripts" referrerPolicy="no-referrer" srcDoc={text} className="block h-[60vh] w-full rounded-xl border bg-white" data-out-html />
+  return <iframe title={t("pages:outputs.htmlTitle")} sandbox="allow-scripts" referrerPolicy="no-referrer" srcDoc={text} className="block h-[60vh] w-full rounded-xl bg-white ring-1 ring-border" data-out-html />
 }
 
 /** a text file by what it is: a document, a page, a table, a diagram, JSON or code; rendered ones can show their source */
@@ -73,7 +73,7 @@ function TextView({ p }: { p: Extract<ROutPreview, { type: "text" }> }) {
   let json = p.text
   if (p.lang === "json" && !p.truncated) try { json = JSON.stringify(JSON.parse(p.text), null, 2) } catch { /* JSON lines, or broken: as written */ }
   const body = !rendered || tab === "源码" ? <Code lang={p.lang} text={p.lang === "json" ? json : p.text} />
-    : p.lang === "markdown" ? <div className="max-h-[60vh] overflow-auto rounded-xl border px-5 py-4" data-out-md><Markdown className="type-body" text={p.text} /></div>
+    : p.lang === "markdown" ? <div className="max-h-[60vh] overflow-auto rounded-xl bg-muted/40 px-6 py-5" data-out-md><Markdown className="type-body" text={p.text} /></div>
     : p.lang === "html" ? <Html text={p.text} />
     : p.lang === "mermaid" ? <Markdown text={fence("mermaid", p.text)} />
     : <Table text={p.text} sep={p.lang === "tsv" ? "\t" : ","} />
@@ -99,15 +99,15 @@ function Diff({ diff, truncated }: { diff: string; truncated: boolean }) {
         const lines = f.replace(/\n+$/, "").split("\n"), body = lines.slice(lines.findIndex((l) => l.startsWith("@@")))
         const add = lines.filter((l) => l.startsWith("+") && !l.startsWith("+++")).length, del = lines.filter((l) => l.startsWith("-") && !l.startsWith("---")).length
         return (
-          <Collapsible key={n} defaultOpen={files.length <= 4} className="overflow-hidden rounded-lg border">
-            <CollapsibleTrigger className="group/f flex w-full items-center gap-2 bg-muted/60 px-2.5 py-1.5 text-left hover:bg-muted">
-              <ChevronRightIcon className="size-3.5 shrink-0 text-muted-foreground transition-transform group-data-[panel-open]/f:rotate-90" />
-              <span className="min-w-0 flex-1 truncate font-mono text-[12.5px]">{name}</span>
-              <span className="shrink-0 font-mono text-[12px] tabular-nums"><span className="text-success">+{add}</span> <span className="text-destructive">−{del}</span></span>
+          <Collapsible key={n} defaultOpen={files.length <= 4} className="overflow-hidden rounded-lg bg-muted/40">
+            <CollapsibleTrigger className="group/f flex w-full items-center gap-2 bg-muted/60 px-3 py-2 text-left hover:bg-muted">
+              <ChevronRightIcon className="size-3.5 shrink-0 text-muted-foreground transition-transform duration-180 ease-(--ease-out) group-data-[panel-open]/f:rotate-90" />
+              <span className="min-w-0 flex-1 truncate type-code">{name}</span>
+              <span className="shrink-0 type-footnote font-mono tabular-nums"><span className="text-success">+{add}</span> <span className="text-destructive">−{del}</span></span>
             </CollapsibleTrigger>
             <CollapsibleContent>
-              <pre className="max-h-[50vh] overflow-auto py-1 font-mono text-[12px] leading-[18px]">{body[0]?.startsWith("@@") ? body.map((l, k) => (
-                <div key={k} className={cn("px-3 whitespace-pre", l.startsWith("@@") ? "bg-blue/10 text-muted-foreground" : l.startsWith("+") ? "bg-success/8" : l.startsWith("-") ? "bg-destructive/8" : "")}>{l || " "}</div>
+              <pre className="max-h-[50vh] overflow-auto py-1.5 type-footnote font-mono">{body[0]?.startsWith("@@") ? body.map((l, k) => (
+                <div key={k} className={cn("px-3 whitespace-pre", l.startsWith("@@") ? "bg-blue/8 text-muted-foreground" : l.startsWith("+") ? "bg-success/10" : l.startsWith("-") ? "bg-destructive/10" : "")}>{l || " "}</div>
               )) : <div className="px-3 text-muted-foreground">{t("pages:outputs.binaryDiff")}</div>}</pre>
             </CollapsibleContent>
           </Collapsible>
@@ -130,11 +130,11 @@ function Folder({ p, item, art, base, open, browse }: { p: Extract<ROutPreview, 
       {pics.length > 1 && <Button size="sm" variant="outline" className="self-start" onClick={browse} data-out-browse><GalleryVerticalIcon />{t("pages:outputs.browseAll", { count: pics.length })}</Button>}
       {pics.length > 0 && <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">{pics.map((e) => (
         <button key={e.name} type="button" onClick={() => open(at(e.name))} className="group flex flex-col gap-1 text-left" data-out-entry={e.name}>
-          <img src={outRawUrl(item, art, at(e.name))} alt={e.name} loading="lazy" className="aspect-[4/3] w-full rounded-lg border bg-muted object-cover object-top transition-opacity group-hover:opacity-85" />
+          <img src={outRawUrl(item, art, at(e.name))} alt={e.name} loading="lazy" className="aspect-[4/3] w-full rounded-lg bg-muted object-cover object-top ring-1 ring-foreground/6 transition-opacity duration-120 group-hover:opacity-85" />
           <span className="truncate type-footnote text-muted-foreground">{e.name}</span>
         </button>))}</div>}
-      {rest.length > 0 && <div className="flex flex-col overflow-hidden rounded-xl border">{rest.map((e) => (
-        <button key={e.name} type="button" onClick={() => open(at(e.name))} className="flex items-center gap-2.5 border-b px-3 py-2 text-left last:border-0 hover:bg-muted/60" data-out-entry={e.name}>
+      {rest.length > 0 && <div className="flex flex-col overflow-hidden rounded-xl bg-muted/40">{rest.map((e) => (
+        <button key={e.name} type="button" onClick={() => open(at(e.name))} className="flex items-center gap-2.5 border-b border-border/70 px-3.5 py-2.5 text-left last:border-0 hover:bg-muted" data-out-entry={e.name}>
           {e.dir ? <FolderIcon className="size-4 text-blue" /> : <FileTextIcon className="size-4 text-muted-foreground" />}
           <span className="min-w-0 flex-1 truncate type-callout">{e.name}</span>
           {e.size != null && <span className="shrink-0 type-footnote tabular-nums text-muted-foreground">{size(e.size)}</span>}
@@ -146,7 +146,7 @@ function Folder({ p, item, art, base, open, browse }: { p: Extract<ROutPreview, 
 }
 function Media({ p, url, page }: { p: Extract<ROutPreview, { type: "image" | "pdf" | "video" | "audio" }>; url: string; page?: number }) {
   /* served by range at any size: the browser plays and pages through it */
-  return p.type === "pdf" ? <iframe key={page ?? 0} title={p.name} src={page ? `${url}#page=${page}` : url} className="block h-[65vh] w-full rounded-xl border" data-out-pdf />
+  return p.type === "pdf" ? <iframe key={page ?? 0} title={p.name} src={page ? `${url}#page=${page}` : url} className="block h-[65vh] w-full rounded-xl ring-1 ring-border" data-out-pdf />
     : p.type === "video" ? <video src={url} controls className="max-h-[65vh] w-full rounded-xl bg-black" data-out-video />
     : <audio src={url} controls className="w-full" data-out-audio />
 }
@@ -225,9 +225,9 @@ function Gallery({ pics, at, go, notesOf, drawing, onDraw, focus, mode, setMode 
 
 function Commits({ cs }: { cs: { hash: string; subject: string; author: string; at: number | null }[] }) {
   return (
-    <div className="flex flex-col overflow-hidden rounded-xl border" data-out-commits>
-      {cs.map((c) => <div key={c.hash} className="flex items-baseline gap-2.5 border-b px-3 py-1.5 last:border-0">
-        <span className="shrink-0 font-mono text-[12px] text-muted-foreground">{c.hash}</span><span className="min-w-0 flex-1 truncate type-callout">{c.subject}</span>
+    <div className="flex flex-col overflow-hidden rounded-xl bg-muted/40" data-out-commits>
+      {cs.map((c) => <div key={c.hash} className="flex items-baseline gap-2.5 border-b border-border/70 px-3.5 py-2 last:border-0">
+        <span className="shrink-0 type-footnote font-mono text-muted-foreground">{c.hash}</span><span className="min-w-0 flex-1 truncate type-callout">{c.subject}</span>
         {c.at && <span className="shrink-0 type-footnote text-tertiary">{tm(c.at)}</span>}</div>)}
     </div>
   )
@@ -310,7 +310,7 @@ export function OutPreview({ o, item, anns = [], focus: focus0, siblings = [], o
   const body = err ? <Missing reason={err} />
     : !p ? <div className="flex justify-center py-16"><Spinner className="size-5 text-muted-foreground" /></div>
     : p.type === "missing" ? <Missing reason={p.reason} />
-    : p.type === "link" ? <div className="flex flex-col items-start gap-3 py-2"><span className="break-all font-mono text-[12.5px]">{p.url}</span><Button size="sm" onClick={() => window.open(p.url, "_blank", "noopener")}><ExternalLinkIcon />{t("pages:outputs.openLink")}</Button></div>
+    : p.type === "link" ? <div className="flex flex-col items-start gap-3 py-2"><span className="break-all type-code">{p.url}</span><Button size="sm" onClick={() => window.open(p.url, "_blank", "noopener")}><ExternalLinkIcon />{t("pages:outputs.openLink")}</Button></div>
     : p.type === "text" ? <TextView key={at} p={p} />
     : p.type === "binary" ? <Missing reason={legacy ? t("pages:outputs.legacy", { name: p.name }) : t("pages:outputs.binary", { name: p.name, size: size(p.size ?? 0) })} />
     : p.type === "office" ? (p.large ? <Missing reason={t("pages:outputs.tooLarge", { size: size(p.size ?? 0) })} /> : <OfficeView url={raw()} name={p.name} fallback={(r) => <Missing reason={r} />} />)
@@ -337,8 +337,8 @@ export function OutPreview({ o, item, anns = [], focus: focus0, siblings = [], o
       <div ref={box} className="min-w-0 shrink-0" data-out-body>{body}</div>
       {p && !err && p.type !== "missing" && <AnnBar item={item} art={art} path={at} notes={notes} allDrafts={drafts} pending={pending} setPending={setPending} sel={sel} clearSel={() => setSel(null)}
         canDraw={p.type === "image" && !p.large} drawing={drawing} setDrawing={setDrawing} pdf={p.type === "pdf"} onLocate={locate} />}
-      {(where || file || ref) && <div className="flex flex-wrap items-center gap-2 border-t pt-3">
-        {where && <span className="mr-auto min-w-0 truncate font-mono text-[12px] text-muted-foreground" title={where}>{where}{p && "size" in p && p.size != null ? ` · ${size(p.size)}` : ""}</span>}
+      {(where || file || ref) && <div className="flex flex-wrap items-center gap-2 border-t border-border/70 pt-3">
+        {where && <span className="mr-auto min-w-0 truncate type-footnote font-mono text-muted-foreground" title={where}>{where}{p && "size" in p && p.size != null ? ` · ${size(p.size)}` : ""}</span>}
         {file && <Button variant="ghost" size="sm" onClick={() => { location.href = raw(true) }}><DownloadIcon />{t("pages:outputs.download")}</Button>}
         {media && <Button variant="ghost" size="sm" onClick={() => window.open(raw(), "_blank", "noopener")}><ExternalLinkIcon />{t("pages:outputs.newTab")}</Button>}
         {ref && <Button variant="ghost" size="sm" className={cn(!where && "ml-auto")} onClick={() => { navigator.clipboard?.writeText(ref).catch(() => {}); toast(p?.type === "commit" ? t("pages:outputs.copiedCommit") : t("pages:outputs.copiedBranch")) }}><CopyIcon />{p?.type === "commit" ? t("pages:outputs.copyCommit") : t("pages:outputs.copyBranch")}</Button>}

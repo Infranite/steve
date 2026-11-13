@@ -2,17 +2,17 @@
  * every signed-in client of yours with the route it last came by. A token's text is shown once, when it is made. */
 import { ago } from "@/i18n/format"
 import { t as tr, useT } from "@/i18n"
-import { useEffect, useMemo, useState } from "react"
+import { useEffect, useMemo, useState, type ReactNode } from "react"
 import { CheckCircle2Icon, KeyRoundIcon, QrCodeIcon, RefreshCwIcon } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
-import { Input } from "@/components/ui/input"
+import { TextField } from "@/components/ui/input"
 import { Spinner } from "@/components/ui/spinner"
 import { api, modReq } from "@/api"
 import { HubChooser, useHubAddress } from "@/hub-ui"
 import { encodeQr, qrSvgPath } from "@/qr"
 import { toast } from "@/store"
-import { closeSheet, Group, Row, SectionLabel } from "@/ui"
+import { closeSheet, Row, Panel, Section, Card, Notice, Pill, Loading, Tile, Chevron, FieldRow } from "@/ui"
 import { cn } from "cn"
 
 export const ACCESS_CAT = Object.defineProperties(["access", "", KeyRoundIcon, ""], {
@@ -64,7 +64,7 @@ function QrSvg({ text, size = 216 }: { text: string; size?: number }) {
   }, [text])
   if (!rendered) return null
   return (
-    <div className="inline-flex rounded-2xl border border-border bg-white p-3 shadow-xs" data-pair-qr>
+    <div className="inline-flex rounded-xl bg-white p-3 shadow-[0_0_0_1px_rgb(16_24_40/0.06),0_2px_8px_-2px_rgb(16_24_40/0.1)]" data-pair-qr>
       <svg viewBox={rendered.viewBox} width={size} height={size} shapeRendering="crispEdges" role="img" aria-label="QR Code">
         <rect width="100%" height="100%" fill="#ffffff" />
         <path d={rendered.d} fill="#09090b" />
@@ -149,20 +149,20 @@ function PairContent({ onClaimed, ask = false }: { onClaimed?: () => void; ask?:
       {link && curStatus === "pending" && <QrSvg text={link.link} />}
 
       {!link && (
-        <p className="max-w-sm rounded-lg bg-attention/10 px-3 py-2 type-footnote text-attention" data-pair-loopback>
+        <p className="max-w-sm rounded-xl bg-attention/12 px-4 py-3 type-callout text-foreground/90" data-pair-loopback>
           {t("pages:access.pairRouteLoopback")}
         </p>
       )}
 
       {link && (
-        <div className="w-full max-w-sm rounded-xl border border-border bg-muted/30 px-3 py-2 text-left" data-pair-addresses>
-          <div className="mb-1 type-footnote text-muted-foreground">{t(pair.links.length > 1 ? "pages:access.pairAddressPick" : "pages:access.pairAddress")}</div>
+        <div className="w-full max-w-sm rounded-xl bg-muted/60 p-1.5 text-left" data-pair-addresses>
+          <div className="mb-1 px-2 pt-1 type-label text-tertiary">{t(pair.links.length > 1 ? "pages:access.pairAddressPick" : "pages:access.pairAddress")}</div>
           <div className="flex flex-col gap-0.5">
             {pair.links.map((l, n) => (
               <button key={l.url} type="button" onClick={() => setAt(n)} aria-pressed={l === link} disabled={pair.links.length < 2}
-                className={cn("flex items-center justify-between gap-2 rounded-md px-1.5 py-1 text-left font-mono text-[12px]", pair.links.length > 1 && "cursor-pointer hover:bg-accent", l === link && pair.links.length > 1 && "bg-accent")} data-pair-address={l.url}>
+                className={cn("flex items-center justify-between gap-2 rounded-lg px-2 py-1.5 text-left type-code", pair.links.length > 1 && "cursor-pointer hover:bg-background/70", l === link && pair.links.length > 1 && "bg-card shadow-[var(--lift)]")} data-pair-address={l.url}>
                 <span className="truncate">{l.url}</span>
-                <span className="shrink-0 rounded bg-muted px-1.5 py-0.5 font-sans text-[11px] text-muted-foreground">{t(`pages:access.route.${l.kind}`)}</span>
+                <Pill className="font-sans">{t(`pages:access.route.${l.kind}`)}</Pill>
               </button>
             ))}
           </div>
@@ -244,20 +244,21 @@ function OidcSection() {
     setBusy(false)
   }
   const off = async () => { try { const x = await access.dropOidc(); setO(x); setF({ issuer: "", client_id: "", secret: "" }) } catch (e) { toast((e as Error).message) } }
-  return <section data-oidc><SectionLabel>{t("pages:access.oidc")}</SectionLabel>
-    <p className="mb-3 type-footnote text-muted-foreground">{t("pages:access.oidcSub")}</p>
-    <Group>
-      <Row title={t("pages:access.oidcCallback")} sub={o.callback} />
+  /* a field with its label on the left (stacked on a phone), as a row of the panel */
+  const field = (label: string, input: ReactNode) => <label className="grid gap-1.5 px-3 py-2.5 sm:grid-cols-[9rem_minmax(0,1fr)] sm:items-center sm:gap-3">
+    <span className="type-callout text-muted-foreground">{label}</span>{input}</label>
+  return <Section data-oidc label={t("pages:access.oidc")} note={t("pages:access.oidcSub")}>
+    <Panel>
+      <Row title={t("pages:access.oidcCallback")} sub={<span className="type-code break-all">{o.callback}</span>} />
       {o.source === "env" ? <Row title={o.issuer ?? ""} sub={t("pages:access.oidcFromEnv")} /> : <>
-        <Row title={<Input value={f.issuer} onChange={(e) => setF({ ...f, issuer: e.target.value })} placeholder="https://id.example.com/application/o/steve/" data-oidc-issuer />} />
-        <Row title={<Input value={f.client_id} onChange={(e) => setF({ ...f, client_id: e.target.value })} placeholder={t("pages:access.oidcClient")} data-oidc-client />} />
-        <Row title={<Input type="password" value={f.secret} onChange={(e) => setF({ ...f, secret: e.target.value })} placeholder={o.has_secret ? t("pages:access.oidcSecretKept") : t("pages:access.oidcSecret")} autoComplete="new-password" data-oidc-secret />}>
-          <div className="flex gap-2">{o.source === "settings" && <Button size="sm" variant="ghost" onClick={() => void off()} data-oidc-off>{t("pages:access.oidcOff")}</Button>}
-            <Button size="sm" onClick={() => void save()} disabled={busy || !f.issuer.trim() || !f.client_id.trim()} data-oidc-save>{busy ? <Spinner className="size-4" /> : t("pages:access.oidcSave")}</Button></div>
-        </Row>
+        {field("Issuer", <TextField size="sm" value={f.issuer} onChange={(e) => setF({ ...f, issuer: e.target.value })} placeholder="https://id.example.com/application/o/steve/" data-oidc-issuer />)}
+        {field(t("pages:access.oidcClient"), <TextField size="sm" value={f.client_id} onChange={(e) => setF({ ...f, client_id: e.target.value })} placeholder={t("pages:access.oidcClient")} data-oidc-client />)}
+        {field(t("pages:access.oidcSecret"), <TextField size="sm" type="password" value={f.secret} onChange={(e) => setF({ ...f, secret: e.target.value })} placeholder={o.has_secret ? t("pages:access.oidcSecretKept") : t("pages:access.oidcSecret")} autoComplete="new-password" data-oidc-secret />)}
+        <div className="flex justify-end gap-2 px-3 py-2.5">{o.source === "settings" && <Button size="sm" variant="ghost" className="text-muted-foreground" onClick={() => void off()} data-oidc-off>{t("pages:access.oidcOff")}</Button>}
+          <Button size="sm" variant="outline" onClick={() => void save()} disabled={busy || !f.issuer.trim() || !f.client_id.trim()} data-oidc-save>{busy ? <Spinner className="size-4" /> : t("pages:access.oidcSave")}</Button></div>
       </>}
-    </Group>
-  </section>
+    </Panel>
+  </Section>
 }
 
 /** a route as words: “局域网 · TLS” */
@@ -286,64 +287,52 @@ export function AccessSettingsPane() {
     setBusy(false)
   }
   const revoke = async (f: () => Promise<unknown>) => { try { await f(); await load() } catch (e) { toast((e as Error).message) } }
-  if (error) return <p className="type-callout text-destructive">{error}</p>
-  if (!v) return <Spinner className="size-5 text-muted-foreground" />
+  if (error) return <Notice tone="destructive">{error}</Notice>
+  if (!v) return <Loading />
   const live = (x: { revoked: number | null }) => !x.revoked
   return <div className="flex flex-col gap-8" data-access-pane>
-    <section><SectionLabel>{t("pages:access.here")}</SectionLabel><Group>
+    <Section label={t("pages:access.here")}><Panel>
       <Row title={t("pages:access.hub")} sub={[hub, v.hub.version].filter(Boolean).join(" · ")} data-access-hub />
       <Row title={t("pages:access.thisClient")} sub={v.current ? routeText(t, v.route) : t("pages:access.browserSession")}>
         <Button size="sm" variant="outline" onClick={async () => { await api.logout().catch(() => {}); location.reload() }} data-sign-out>{t("pages:access.signOut")}</Button>
       </Row>
-    </Group></section>
+    </Panel></Section>
 
-    <section data-hub-switcher>
-      <SectionLabel>{t("pages:access.hubs")}</SectionLabel>
-      <p className="mb-3 type-footnote text-muted-foreground">{t("pages:access.hubsSub")}</p>
-      <HubChooser manage className="max-w-md" />
-    </section>
+    <Section data-hub-switcher label={t("pages:access.hubs")} note={t("pages:access.hubsSub")}>
+      <HubChooser manage bare />
+    </Section>
 
-    <section data-pair-device-section>
-      <SectionLabel>{t("pages:access.pairTitle")}</SectionLabel>
-      <p className="mb-3 type-footnote text-muted-foreground">{t("pages:access.pairSub")}</p>
+    <Section data-pair-device-section label={t("pages:access.pairTitle")} note={showPair ? undefined : t("pages:access.pairSub")}>
       {showPair ? (
-        <div className="rounded-2xl border border-border bg-card p-5">
+        <Card className="p-5 anim-in">
           <PairContent onClaimed={() => void load()} />
-        </div>
+        </Card>
       ) : (
-        <Group>
-          <Row title={t("pages:access.pairTitle")}>
-            <Button size="sm" onClick={() => setShowPair(true)} data-open-pair-qr>
-              <QrCodeIcon className="size-4" />
-              {t("pages:access.pairButton")}
-            </Button>
-          </Row>
-        </Group>
+        <Panel><Row icon={<Tile I={QrCodeIcon} />} title={t("pages:access.pairButton")} onClick={() => setShowPair(true)} data-open-pair-qr><Chevron /></Row></Panel>
       )}
-    </section>
+    </Section>
 
-    <section><SectionLabel>{t("pages:access.tokens")}</SectionLabel>
-      <p className="mb-3 type-footnote text-muted-foreground">{t("pages:access.tokensSub")}</p>
-      {fresh && <div className="mb-3 rounded-xl border border-border p-3" data-fresh-token>
+    <Section label={t("pages:access.tokens")} note={t("pages:access.tokensSub")}>
+      {fresh && <div className="mb-3 rounded-xl bg-success/10 px-4 py-3 anim-in" data-fresh-token>
         <div className="type-footnote text-muted-foreground">{t("pages:access.shownOnce")}</div>
-        <code className="mt-1 block break-all font-mono text-[13px]">{fresh}</code>
+        <code className="mt-1 block break-all type-code text-foreground">{fresh}</code>
         <div className="mt-2 flex gap-2"><Button size="sm" variant="outline" onClick={() => { void navigator.clipboard?.writeText(fresh); toast(t("pages:access.copied")) }}>{t("pages:access.copy")}</Button><Button size="sm" variant="ghost" onClick={() => setFresh(null)}>{t("pages:access.done")}</Button></div>
       </div>}
-      <Group>
+      <Panel>
         {v.tokens.filter(live).map((x) => <Row key={x.id} title={x.name} sub={t("pages:access.tokenSub", { made: ago(x.created), used: x.last_used ? ago(x.last_used) : t("pages:access.never") })}>
           <Button size="sm" variant="ghost" onClick={() => void revoke(() => access.revokeToken(x.id))} data-revoke-token={x.id}>{t("pages:access.revoke")}</Button></Row>)}
-        <Row title={<Input value={name} onChange={(e) => setName(e.target.value)} placeholder={t("pages:access.tokenName")} className="max-w-56" data-token-name />}>
-          <Button size="sm" onClick={() => void create()} disabled={busy} data-new-token>{busy ? <Spinner className="size-4" /> : t("pages:access.newToken")}</Button></Row>
-      </Group>
-    </section>
+        <FieldRow onSubmit={(e) => { e.preventDefault(); void create() }}><TextField size="sm" className="min-w-0 flex-1" value={name} onChange={(e) => setName(e.target.value)} placeholder={t("pages:access.tokenName")} aria-label={t("pages:access.tokenName")} data-token-name />
+          <Button size="sm" variant="outline" type="submit" disabled={busy} data-new-token>{busy ? <Spinner className="size-4" /> : t("pages:access.newToken")}</Button></FieldRow>
+      </Panel>
+    </Section>
 
     <OidcSection />
 
-    <section><SectionLabel>{t("pages:access.clients")}</SectionLabel><Group>
-      {v.clients.filter(live).map((c) => <Row key={c.id} title={<span className="flex items-center gap-2">{c.name}<span className="type-footnote text-muted-foreground">{c.kind}{c.platform ? ` · ${c.platform}` : ""}</span>{c.id === v.current && <span className="rounded bg-muted px-1.5 py-px text-[11px] text-muted-foreground">{t("pages:access.current")}</span>}</span>}
+    <Section label={t("pages:access.clients")}><Panel>
+      {v.clients.filter(live).map((c) => <Row key={c.id} className="group/client" title={<span className="flex items-center gap-2">{c.name}<span className="type-footnote text-muted-foreground">{c.kind}{c.platform ? ` · ${c.platform}` : ""}</span>{c.id === v.current && <Pill tone="info">{t("pages:access.current")}</Pill>}</span>}
         sub={`${routeText(t, c.last_route)}${c.last_ip ? ` · ${c.last_ip}` : ""} · ${c.last_seen ? ago(c.last_seen) : t("pages:access.never")}`}>
-        {c.id !== v.current && <Button size="sm" variant="ghost" onClick={() => void revoke(() => access.revokeClient(c.id))} data-revoke-client={c.id}>{t("pages:access.signOutClient")}</Button>}</Row>)}
+        {c.id !== v.current && <Button size="sm" variant="ghost" className="text-muted-foreground opacity-0 group-hover/client:opacity-100 group-focus-within/client:opacity-100 focus-visible:opacity-100 pointer-coarse:opacity-100" onClick={() => void revoke(() => access.revokeClient(c.id))} data-revoke-client={c.id}>{t("pages:access.signOutClient")}</Button>}</Row>)}
       {!v.clients.some(live) && <Row title={t("pages:access.noClients")} />}
-    </Group></section>
+    </Panel></Section>
   </div>
 }

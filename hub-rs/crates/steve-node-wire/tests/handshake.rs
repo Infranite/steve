@@ -18,6 +18,8 @@ struct Mem {
     generation: Mutex<u64>,
     /// The store fails.
     broken: Mutex<bool>,
+    /// What Nodes reported instead of a hello.
+    reports: Mutex<Vec<(String, String)>>,
 }
 
 #[async_trait]
@@ -35,6 +37,12 @@ impl Admission for Mem {
             generation: *g,
             paused: false,
         }))
+    }
+    async fn reported(&self, node: &NodeId, error: &str) {
+        self.reports
+            .lock()
+            .unwrap()
+            .push((node.to_string(), error.to_string()));
     }
 }
 
@@ -395,4 +403,69 @@ async fn pins_come_only_in_a_signed_welcome() {
     assert_eq!(w.pins, pins);
     let (_, w) = run_pinned(None, None, pins).await.unwrap();
     assert!(w.pins.is_empty());
+}
+
+async fn report(
+    adm: Arc<Mem>,
+    node: &str,
+    id: &Identity,
+    error: &str,
+) -> (
+    Result<(Hello, Admitted), handshake::Refused>,
+    Result<(), handshake::Refused>,
+) {
+    let (mut h, mut n) = pair();
+    let hub = tokio::spawn(async move {
+        handshake::accept(&mut h.sink, &mut h.stream, "hub_1", adm.as_ref()).await
+    });
+    let r = handshake::report(
+        &mut n.sink,
+        &mut n.stream,
+        &nid(node),
+        id,
+        Some("hub_1"),
+        error,
+    )
+    .await;
+    (hub.await.unwrap(), r)
+}
+
+#[tokio::test]
+async fn a_node_that_cannot_link_says_why_and_nothing_links() {
+    let adm = Arc::new(Mem::default());
+    let id = Identity::generate().unwrap();
+    adm.keys.lock().unwrap().insert("n1".into(), id.public());
+    let (h, n) = report(
+        adm.clone(),
+        "n1",
+        &id,
+        "internal: hello over the frame limit",
+    )
+    .await;
+    n.unwrap();
+    assert_eq!(h.unwrap_err().code, handshake::REPORTED);
+    assert_eq!(
+        *adm.reports.lock().unwrap(),
+        [(
+            "n1".to_string(),
+            "internal: hello over the frame limit".to_string()
+        )]
+    );
+    assert_eq!(*adm.generation.lock().unwrap(), 0, "a report links nothing");
+
+    // a long reason is clipped on a character boundary, within the limit
+    let long = "链".repeat(1000);
+    let (_, n) = report(adm.clone(), "n1", &id, &long).await;
+    n.unwrap();
+    let got = adm.reports.lock().unwrap().last().unwrap().1.clone();
+    assert!(got.len() <= handshake::REPORT_MAX && long.starts_with(&got) && !got.is_empty());
+
+    // another key, or an unknown Node, is refused like a hello and noted nowhere
+    let other = Identity::generate().unwrap();
+    for (node, key) in [("n1", &other), ("ghost", &id)] {
+        let (h, n) = report(adm.clone(), node, key, "x").await;
+        assert_eq!(h.unwrap_err().code, "denied");
+        assert_eq!(n.unwrap_err().code, "denied");
+    }
+    assert_eq!(adm.reports.lock().unwrap().len(), 2);
 }

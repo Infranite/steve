@@ -2,7 +2,7 @@ import { createRoot } from "react-dom/client"
 import "../../src/index.css"
 import { ItemRow } from "../../src/view-shared"
 import { ItemsView } from "../../src/views"
-import { SidebarProvider } from "../../src/components/ui/sidebar"
+import { SidebarInset, SidebarProvider } from "../../src/components/ui/sidebar"
 import { st, useStore, type Item, type Bot, type Wait } from "../../src/store"
 
 document.documentElement.classList.toggle("dark", matchMedia("(prefers-color-scheme: dark)").matches)
@@ -22,11 +22,15 @@ st.items = [
   item("ST-53", "选择数据库迁移方案", { st: "wait", now: "等你回答", wait: wait("ask", "迁移要在白天还是晚上做？这会影响要不要先停写入，一个很长的问题，看看会不会把行撑出去"), waits: [] }),
   item("ST-5", "修复权限状态", { now: "协作执行中：统一边界" }),
   item("ST-10", "修复协作状态", { now: "协作已暂停", workflowPaused: true, workflowFailed: ["ST-43"] }),
-  item("ST-44", "下一周期继续", { cycle: 2, workflowCycle: 1, workflowPaused: true, now: "协作已暂停" }),
+  item("ST-44", "下一周期继续", { cycle: 2, workflowCycle: 1, workflowPaused: true, now: "协作已暂停", q: [{ id: "q1", t: "补充一" }, { id: "q2", t: "补充二" }] as any, ss: ["s1", "s2"], parent: "ST-1" }),
   item("ST-26", "统一边界", { src: ["协作工作", "workflow"], parent: { item: "ST-5" }, now: "正在执行检查" }),
   item("ST-18", "旧评审", { phase: "closed", src: ["协作工作", "workflow"], parent: { item: "ST-5" }, now: "已失败但保留旧状态" }),
   item("ST-27", "另一项", { now: "正在处理" }),
   item("ST-28", "普通派生", { parent: { item: "ST-27" }, now: "独立工作" }),
+  /* a child whose summary is a long error: the relation still reads in full */
+  item("ST-31", "独立审查状态判定", { src: ["协作工作", "workflow"], parent: { item: "ST-10" }, now: "失败：Internal error: API Error: 400 the request was rejected as invalid because the upstream refused it" }),
+  /* closed as failed: a finished row in its own group, not lost from the list */
+  item("ST-43", "独立审查回归覆盖", { st: "fail", phase: "closed", now: "失败：评审不通过" }),
   item("ST-29", "已结束的旧单元", { st: "done", phase: "closed", src: ["协作工作", "workflow"], parent: { item: "ST-27" }, now: "已完成" }),
 ]
 st.items[3].waits = [st.items[3].wait!]
@@ -34,4 +38,4 @@ function Fixture() {
   useStore()
   return <main style={{ maxWidth: 880, margin: "auto", padding: 20 }} className="flex flex-col">{st.items.map((i) => <ItemRow key={i.id} i={i} />)}</main>
 }
-createRoot(document.getElementById("root")!).render(new URLSearchParams(location.search).has("groups") ? <SidebarProvider><ItemsView /></SidebarProvider> : <Fixture />)
+createRoot(document.getElementById("root")!).render(new URLSearchParams(location.search).has("groups") ? <SidebarProvider><SidebarInset className="relative min-w-0 overflow-hidden"><ItemsView /></SidebarInset></SidebarProvider> : <Fixture />)

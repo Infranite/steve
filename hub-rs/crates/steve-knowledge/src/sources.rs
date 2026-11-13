@@ -27,6 +27,36 @@ pub const BUILTIN: [(&str, &str, &str, &str); 6] = [
     ("bot_mems", "Bot 记忆", "workspace", "conclusion"),
 ];
 
+/// A source's name as shown: a built-in one still under its seeded (zh-CN) name in the request's
+/// language, any other as named.
+pub fn name_shown(kind: &str, stored: &str) -> String {
+    let seeded = BUILTIN.iter().any(|b| b.0 == kind && b.1 == stored);
+    if !seeded {
+        return stored.to_owned();
+    }
+    match kind {
+        "notes" => steve_i18n::t!("knowledge.builtin.notes"),
+        "files" => steve_i18n::t!("knowledge.builtin.files"),
+        "items" => steve_i18n::t!("knowledge.builtin.items"),
+        "chat" => steve_i18n::t!("knowledge.builtin.chat"),
+        "mems" => steve_i18n::t!("knowledge.builtin.mems"),
+        "bot_mems" => steve_i18n::t!("knowledge.builtin.bot_mems"),
+        _ => stored.to_owned(),
+    }
+}
+
+/// A day of the main conversation as stored (`2026-10-31 的对话`, `10-31 的对话`: a document's title,
+/// a label of what came from it) in the request's language; anything else as written.
+pub fn chat_day_shown(stored: &str) -> String {
+    steve_i18n::reword!(stored, &["knowledge.chat.day"]).unwrap_or_else(|| stored.to_owned())
+}
+
+/// A stored `source_label` / `origin_label` in the request's language.
+pub fn label_shown(stored: &str) -> String {
+    steve_i18n::reword!(stored, &["knowledge.chat.day"])
+        .unwrap_or_else(|| steve_modules::shown::source_label(stored))
+}
+
 pub fn is_builtin(kind: &str) -> bool {
     BUILTIN.iter().any(|b| b.0 == kind)
 }
@@ -97,7 +127,7 @@ pub fn source_json(c: &Connection, s: &SourceRow) -> Result<Value> {
     Ok(json!({
         "id": s.id,
         "kind": s.kind,
-        "name": s.name,
+        "name": name_shown(&s.kind, &s.name),
         "path": cfg.get("path").cloned().unwrap_or(Value::Null),
         "include": list("include"),
         "exclude": list("exclude"),
@@ -111,4 +141,36 @@ pub fn source_json(c: &Connection, s: &SourceRow) -> Result<Value> {
         "builtin": is_builtin(&s.kind),
         "revision": s.revision,
     }))
+}
+
+#[cfg(test)]
+mod shown_tests {
+    use super::*;
+    use steve_i18n::{EN, ZH_CN, with};
+
+    #[test]
+    fn built_in_names_and_chat_days_by_language() {
+        assert_eq!(
+            with(EN, || name_shown("chat", "主线对话")),
+            "Main conversation"
+        );
+        assert_eq!(
+            with(EN, || name_shown("bot_mems", "Bot 记忆")),
+            "Bot memories"
+        );
+        // renamed, or not a built-in one: as named
+        assert_eq!(with(EN, || name_shown("chat", "聊天")), "聊天");
+        assert_eq!(with(EN, || name_shown("folder", "主线对话")), "主线对话");
+        assert_eq!(with(ZH_CN, || name_shown("chat", "主线对话")), "主线对话");
+        assert_eq!(
+            with(EN, || chat_day_shown("2026-11-12 的对话")),
+            "Conversation on 2026-11-12"
+        );
+        assert_eq!(
+            with(EN, || label_shown("11-12 的对话")),
+            "Conversation on 11-12"
+        );
+        assert_eq!(with(EN, || label_shown("你写的")), "Written by you");
+        assert_eq!(with(ZH_CN, || label_shown("11-12 的对话")), "11-12 的对话");
+    }
 }

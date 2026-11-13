@@ -94,7 +94,6 @@ export default {
     failed: "没发出去",
     unknown: "可能已发出，正在核对",
     recalled: "已撤回",
-    blocked: "已拦下",
   },
   /* what cleaning up an identity removes (api/cleanup.ts) */
   cleanup: {
@@ -122,7 +121,7 @@ export default {
   },
   /* integrations (api/integrations.ts) */
   area: {
-    channel: "渠道",
+    channel: "聊天",
     sendAsYou: "以你的名义发送",
     docs: "文档/知识库",
     sheets: "表格/多维表格",

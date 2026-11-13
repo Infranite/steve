@@ -9,7 +9,9 @@ use serde_json::Value;
 
 use super::{Sets, all, exists, must, one, to_json};
 use crate::types::{double, json_or};
-use crate::{ChangeEvent, Event, FileRef, Queued, Result, Session, Store, now, sha, uid};
+use crate::{
+    ChangeEvent, Event, FileRef, Queued, Result, Session, SessionStop, Store, now, sha, uid,
+};
 
 impl Store {
     pub fn sessions(&self) -> Sessions<'_> {
@@ -235,6 +237,110 @@ impl Sessions<'_> {
         })
     }
 
+    /// How the session's last turn ended and whether you stopped it (`session_stops`).
+    pub fn stop(&self, id: &str) -> Result<Option<SessionStop>> {
+        self.0.read(|c| {
+            Ok(c.query_row(
+                "SELECT attempt, stop_reason, error, yours, stop_asked, ended, seq, asked_seq FROM session_stops WHERE session_id = ?",
+                [id],
+                |r| {
+                    Ok(SessionStop {
+                        attempt: r.get(0)?,
+                        stop_reason: r.get(1)?,
+                        error: r.get(2)?,
+                        yours: r.get::<_, i64>(3)? != 0,
+                        stop_asked: r.get(4)?,
+                        ended: r.get(5)?,
+                        seq: r.get(6)?,
+                        asked_seq: r.get(7)?,
+                    })
+                },
+            )
+            .optional()?)
+        })
+    }
+
+    /// You asked to stop the session's turn `attempt` (`""`: none named; `None`: nothing was
+    /// stopped after all). Kept until a turn ends, with the session's last event then.
+    pub fn stop_asked(&self, id: &str, attempt: Option<&str>) -> Result<()> {
+        self.0.write(|w| {
+            w.c.run(
+                "INSERT INTO session_stops (session_id, stop_asked, asked_seq, updated) VALUES (?1, ?2, (SELECT COALESCE(MAX(seq), 0) FROM events WHERE session_id = ?1), ?3) ON CONFLICT(session_id) DO UPDATE SET stop_asked = ?2, asked_seq = excluded.asked_seq, updated = ?3",
+                params![id, attempt, now()],
+            )?;
+            Ok(())
+        })
+    }
+
+    /// A turn of the session ended: how, and whether it was the one you stopped (a Stop asked for
+    /// it is used up either way).
+    pub fn stop_ended(
+        &self,
+        id: &str,
+        attempt: Option<&str>,
+        stop_reason: &str,
+        error: Option<&str>,
+        yours: bool,
+    ) -> Result<()> {
+        let at = now();
+        self.0.write(|w| {
+            w.c.run(
+                "INSERT INTO session_stops (session_id, attempt, stop_reason, error, yours, stop_asked, ended, seq, updated) VALUES (?1, ?2, ?3, ?4, ?5, NULL, ?6, (SELECT MAX(seq) FROM events WHERE session_id = ?1), ?6) ON CONFLICT(session_id) DO UPDATE SET attempt = ?2, stop_reason = ?3, error = ?4, yours = ?5, stop_asked = NULL, asked_seq = NULL, ended = ?6, seq = excluded.seq, updated = ?6",
+                params![id, attempt, stop_reason, error, yours as i64, at],
+            )?;
+            Ok(())
+        })
+    }
+
+    /// The end of the session's turn `attempt` came (`session_turns`): `true` the first time,
+    /// `false` when it was recorded already (the same end told again, also after a restart).
+    pub fn turn_ended(&self, id: &str, attempt: &str, stop_reason: &str) -> Result<bool> {
+        let at = now();
+        self.0.write(|w| {
+            let n = w.c.execute(
+                "INSERT INTO session_turns (session_id, attempt, stop_reason, ended, updated) VALUES (?1, ?2, ?3, ?4, ?4) ON CONFLICT(session_id, attempt) DO UPDATE SET stop_reason = ?3, ended = ?4, updated = ?4 WHERE ended IS NULL",
+                params![id, attempt, stop_reason, at],
+            )?;
+            prune_turns(w.c, id)?;
+            Ok(n > 0)
+        })
+    }
+
+    /// The graph stopped the session's turn `attempt` (a pause): kept until that turn's end comes.
+    pub fn turn_paused(&self, id: &str, attempt: &str) -> Result<()> {
+        self.0.write(|w| {
+            w.c.execute(
+                "INSERT INTO session_turns (session_id, attempt, paused, updated) VALUES (?1, ?2, 1, ?3) ON CONFLICT(session_id, attempt) DO UPDATE SET paused = 1, updated = ?3",
+                params![id, attempt, now()],
+            )?;
+            prune_turns(w.c, id)?;
+            Ok(())
+        })
+    }
+
+    /// The session's turns a pause stopped whose mark still stands.
+    pub fn turns_paused(&self, id: &str) -> Result<Vec<String>> {
+        self.0.read(|c| {
+            all(
+                c,
+                "SELECT attempt FROM session_turns WHERE session_id = ? AND paused = 1 ORDER BY updated, attempt",
+                [id],
+                |r| r.get(0),
+            )
+        })
+    }
+
+    /// A pause's mark of the session's turn `attempt` goes (`None`: every turn's).
+    pub fn turn_unpaused(&self, id: &str, attempt: Option<&str>) -> Result<()> {
+        self.0.write(|w| {
+            w.c.execute(
+                "UPDATE session_turns SET paused = 0, updated = ?3 WHERE session_id = ?1 AND paused = 1 AND (?2 IS NULL OR attempt = ?2)",
+                params![id, attempt, now()],
+            )?;
+            Ok(())
+        })
+    }
+
     /// Import keys already used (system.ts `localSessions`).
     pub fn import_keys(&self) -> Result<HashSet<String>> {
         self.0.read(|c| {
@@ -276,8 +382,6 @@ impl Sessions<'_> {
             tx.run("DELETE FROM view_shadow WHERE session_id = ?", [id])?;
             tx.run("DELETE FROM sessions WHERE id = ?", [id])?;
             tx.commit()?;
-            // the session's injected values go with it (V4 redactor)
-            steve_vault::redact::forget(id);
             w.publish(ChangeEvent::Session {
                 id: id.into(),
                 item_id: None,
@@ -291,6 +395,15 @@ pub struct Events<'a>(&'a Store);
 
 /// Events [`Events::compact`] reads and rewrites per transaction.
 const COMPACT_PAGE: i64 = 200;
+
+/// Only a session's newest turns are kept (an end told again comes soon after the first).
+fn prune_turns(c: &rusqlite::Connection, id: &str) -> Result<()> {
+    c.execute(
+        "DELETE FROM session_turns WHERE session_id = ?1 AND rowid NOT IN (SELECT rowid FROM session_turns WHERE session_id = ?1 ORDER BY updated DESC, rowid DESC LIMIT 64)",
+        [id],
+    )?;
+    Ok(())
+}
 
 fn event_row(r: &rusqlite::Row) -> rusqlite::Result<Event> {
     Ok(Event {
@@ -314,11 +427,8 @@ impl Events<'_> {
     /// Appends an event and returns its `seq`. The published event carries `data` as stored.
     ///
     /// The one place session events are written (transcript entries, Steve tools, core), always in
-    /// Steve's own terms (`steve.v1`): values injected
-    /// into the session (V4 `steve_secret_use`) are scrubbed from `data` first, so they reach
-    /// neither the table nor the SSE stream.
-    pub fn add(&self, session_id: &str, kind: &str, mut data: Value) -> Result<i64> {
-        steve_vault::redact::scrub(session_id, &mut data);
+    /// Steve's own terms (`steve.v1`).
+    pub fn add(&self, session_id: &str, kind: &str, data: Value) -> Result<i64> {
         let (stored, payloads) = crate::event_payload::split(kind, &data)?;
         let stored = to_json(&stored)?;
         self.0.write(|w| {
@@ -531,6 +641,24 @@ impl Events<'_> {
                 [session_id],
                 |r| r.get(0),
             )?)
+        })
+    }
+
+    /// Up to `limit` events with `seq < before`, newest first (`before <= 0`: from the last one):
+    /// a reader of the latest words pages back with it however long the session is.
+    pub fn before(&self, session_id: &str, before: i64, limit: i64) -> Result<Vec<Event>> {
+        let before = if before <= 0 { i64::MAX } else { before };
+        self.0.read(|c| {
+            crate::read_snapshot(c, |tx| {
+                let mut events: Vec<Event> = all(
+                    tx,
+                    "SELECT seq, ts, kind, data FROM events WHERE session_id = ? AND seq < ? ORDER BY seq DESC LIMIT ?",
+                    params![session_id, before, limit],
+                    event_row,
+                )?;
+                for e in &mut events { hydrate_event(tx, session_id, e)?; }
+                Ok(events)
+            })
         })
     }
 

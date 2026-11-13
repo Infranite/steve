@@ -15,7 +15,7 @@ use steve_modules::contacts::mcp::McpCx;
 use steve_modules::{ApiError, ApiResult, Modules};
 use steve_store::base::{Level, Viewer};
 
-use crate::context::{item_viewer, scrub_query};
+use crate::context::{item_viewer, query_text};
 use crate::retrieve::{Hit, Purpose, Query, SEMANTIC_DOWN_NOTE, record_use, retrieve_all};
 use crate::service::own_doc;
 use crate::state::Knowledge;
@@ -68,9 +68,20 @@ pub fn tools() -> &'static [Value] {
     &TOOLS
 }
 
+static ALL_TOOLS: LazyLock<Vec<Value>> = LazyLock::new(|| {
+    let mut v = TOOLS.clone();
+    v.extend(crate::steward::tools());
+    v
+});
+
+/// [`tools`] and the memory upkeep tools ([`crate::steward`]): what the MCP endpoint lists.
+pub fn all_tools() -> &'static [Value] {
+    &ALL_TOOLS
+}
+
 /// Is `name` one of this module's tools?
 pub fn handles(name: &str) -> bool {
-    name == SEARCH || name == READ
+    name == SEARCH || name == READ || crate::steward::handles(name)
 }
 
 /// Runs one tool. `Ok` is the result text, `Err` the `isError` text (steve-mcp's convention).
@@ -114,6 +125,7 @@ pub fn call_sync(
             let from = args.get("from").and_then(Value::as_f64).unwrap_or(0.0);
             read(m, cx, str_arg(args, "id"), from).map_err(|e| e.to_string())
         }),
+        n if crate::steward::handles(n) => crate::steward::call(m, cx, n, args),
         _ => return Err(format!("MCP error -32602: Tool {name} not found")),
     };
     if let Err(e) = &r {
@@ -207,14 +219,9 @@ pub fn search(
     if q.is_empty() {
         return Err(ApiError::rule("Give a search query."));
     }
-    if !kb.guard.scan(q).is_empty() {
-        return Err(ApiError::rule(
-            "The query looks like it contains a password or token. Search without it.",
-        ));
-    }
     let k = limit.map_or(SEARCH_DEFAULT, |l| (l.max(1.0) as usize).min(SEARCH_MAX));
     let viewer = session_viewer(m, cx)?;
-    let text = scrub_query(kb.guard.as_ref(), q);
+    let text = query_text(q);
     let now = m.clock.now();
     let (hits, semantic_down) = m.store.reader(|c| {
         let mut query = Query::new(kb.store(), &viewer, &text, Purpose::Agent);

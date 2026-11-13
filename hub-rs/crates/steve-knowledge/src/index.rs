@@ -19,7 +19,7 @@ use crate::chunk::{Chunk, TRUNCATED_ERROR, chunk};
 use crate::extract_text::Extracted;
 use crate::repo::{self, DocRow, SourceRow};
 use crate::seg::seg;
-use crate::state::{Guard, Knowledge, redact};
+use crate::state::Knowledge;
 
 /// Documents per transaction in the queue worker.
 pub const BATCH: usize = 20;
@@ -202,19 +202,18 @@ pub fn doc_label(source: &SourceRow, title: &str) -> String {
     format!("{prefix} · {title}")
 }
 
-/// Indexes a document from its extracted text: secrets redacted, hashed, chunked, written.
+/// Indexes a document from its extracted text: hashed, chunked, written.
 /// Unchanged text (same hash, already indexed) only gets its scope and label refreshed unless `force`.
 pub fn index_doc(
     tx: &Tx,
-    guard: &dyn Guard,
     doc: &DocRow,
     source: &SourceRow,
     ex: &Extracted,
     now: i64,
     force: bool,
 ) -> Result<usize> {
-    let text = redact(guard, &ex.text);
-    let hash = sha(&text);
+    let text = &ex.text;
+    let hash = sha(text);
     let label = doc_label(source, &doc.title);
     let meta = ChunkMeta {
         ws: &doc.workspace_id,
@@ -385,7 +384,7 @@ pub async fn run_batch(m: &Modules, kb: &Knowledge, ids: &[String]) -> Result<()
         .collect()
         .await;
     let now = m.clock.now();
-    let (store, guard) = (m.store.clone(), kb.guard.clone());
+    let store = m.store.clone();
     let done = blocking(move || {
         store.transaction(|tx| {
             let mut done = Vec::new();
@@ -406,7 +405,7 @@ pub async fn run_batch(m: &Modules, kb: &Knowledge, ids: &[String]) -> Result<()
                         } else {
                             &doc
                         };
-                        index_doc(tx, guard.as_ref(), d, src, ex, now, false)?;
+                        index_doc(tx, d, src, ex, now, false)?;
                     }
                     Loaded::Skipped(why) => {
                         // Title-only: one empty chunk carries the title into the index.

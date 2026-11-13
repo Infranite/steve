@@ -16,13 +16,13 @@ export function RunState({ className }: { className?: string }) {
   const what = { on: t("yolo:run.on"), full: t("yolo:scope.fullSub"), off: t("yolo:scope.offSub"), paused: y.paused?.reason ?? "", forced: y.forced_reason ?? t("yolo:run.forced") }[s]
   const live = s === "on" || s === "full"
   const n = (v: number, text: string, f: "decided" | "declined" | "all", k: string) => (
-    <button type="button" className="inline-flex items-baseline gap-1 rounded-sm hover:text-foreground" onClick={() => openDigest(f)} data-run-count={k}>
+    <button type="button" className="inline-flex items-baseline gap-1 rounded-md hover:text-foreground" onClick={() => openDigest(f)} data-run-count={k}>
       {text}<span className="font-medium tabular-nums text-foreground">{v}</span>
     </button>
   )
   return (
     <div role={s === "paused" ? "alert" : "status"} className={cn("flex flex-wrap items-center gap-x-3 gap-y-1 type-footnote text-muted-foreground", className)} data-run-state={s}>
-      <span className="inline-flex min-w-0 items-center gap-2"><Dot s={s} className="size-2" /><span className="font-medium text-foreground">{label(s)}</span><span className="min-w-0 truncate">{what}</span></span>
+      <span className="inline-flex min-w-0 items-center gap-2"><Dot s={s} className="size-2 shrink-0" /><span className="shrink-0 whitespace-nowrap font-medium text-foreground">{label(s)}</span><span className="min-w-0 break-words">{what}</span></span>
       {live && <span className="inline-flex flex-wrap items-baseline gap-x-3" data-run-counts>
         {n(y.counts.decided, t("yolo:run.decided"), "decided", "decided")}
         {n(y.counts.declined, t("yolo:run.declined"), "declined", "declined")}

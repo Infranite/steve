@@ -23,7 +23,7 @@ use crate::cite;
 use crate::retrieve::{
     Hit, Purpose, Query, Retrieved, SEMANTIC_DOWN_NOTE, anchor_mems, record_use, retrieve_all,
 };
-use crate::state::{Guard, Knowledge};
+use crate::state::Knowledge;
 
 /// Retrieved hits per scene.
 pub const SESSION_K: usize = 8;
@@ -86,25 +86,9 @@ pub fn render_snippets(head: &str, rules: &str, prefix: &str, hits: &[Hit]) -> S
     lines.join("\n")
 }
 
-/// The text to search with: secrets the guard finds are blanked out (never searched, never stored in
-/// `kb_uses`), whitespace collapsed, cut to [`QUERY_MAX`] characters.
-pub fn scrub_query(guard: &dyn Guard, text: &str) -> String {
-    let mut s = text.to_string();
-    let mut ranges = guard.scan(text);
-    ranges.sort_by_key(|r| std::cmp::Reverse(r.start));
-    for r in ranges {
-        let (mut a, mut b) = (r.start.min(s.len()), r.end.min(s.len()));
-        while !s.is_char_boundary(a) {
-            a -= 1;
-        }
-        while !s.is_char_boundary(b) {
-            b += 1;
-        }
-        if a < b {
-            s.replace_range(a..b, " ");
-        }
-    }
-    s.split_whitespace()
+/// The text to search with: whitespace collapsed, cut to [`QUERY_MAX`] characters.
+pub fn query_text(text: &str) -> String {
+    text.split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")
         .chars()
@@ -190,7 +174,7 @@ pub fn latest_session(c: &Connection, item_id: &str) -> ApiResult<Option<String>
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct SessionCtx {
     pub text: String,
-    /// The search text (title + latest goal, scrubbed).
+    /// The search text (title + latest goal, whitespace collapsed).
     pub query: String,
     pub hits: Vec<Hit>,
     pub cards: Vec<ContactCard>,
@@ -218,10 +202,7 @@ pub fn session_context(
     anchors.extend(cards.iter().map(|k| ObjRef::new("party", &k.party_id)));
     let rules = anchor_mems(c, &viewer, &anchors, ANCHOR_MEMS, now)?;
 
-    let query = scrub_query(
-        kb.guard.as_ref(),
-        &format!("{} {}", item.title, latest_goal(c, &item.id)?),
-    );
+    let query = query_text(&format!("{} {}", item.title, latest_goal(c, &item.id)?));
     let mut q = Query::new(kb.store(), &viewer, &query, Purpose::Agent);
     q.anchors = &anchors;
     q.k = SESSION_K;
@@ -299,7 +280,7 @@ pub fn chat_context(
     text: &str,
     now: i64,
 ) -> ApiResult<Option<ChatKnowledge>> {
-    let query = scrub_query(kb.guard.as_ref(), text);
+    let query = query_text(text);
     let mut rules = Vec::new();
     if !viewer.user.is_empty()
         && let Some(me) = contacts::repo::me_of(c, &viewer.ws, &viewer.user)?
@@ -359,7 +340,6 @@ pub fn chat_finish(answer: &str, cx: &ChatCtx) -> ChatDone {
 pub fn reply_hits(
     c: &Connection,
     store: &dyn crate::port::KnowledgeStore,
-    guard: &dyn Guard,
     viewer: &Viewer,
     message: &str,
     recent: &[String],
@@ -372,7 +352,7 @@ pub fn reply_hits(
         text.push(' ');
         text.push_str(r);
     }
-    let query = scrub_query(guard, &text);
+    let query = query_text(&text);
     let mut q = Query::new(store, viewer, &query, Purpose::Reply);
     q.anchors = anchors;
     q.k = REPLY_K;

@@ -10,7 +10,7 @@ import { Badge } from "@/components/ui/badge"
 import { Switch } from "@/components/ui/switch"
 import { Spinner } from "@/components/ui/spinner"
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible"
-import { go, Group, Row, StatusDot } from "@/ui"
+import { go, Group, Row, SectionLabel, StatusDot } from "@/ui"
 import { Select } from "@/view-shared"
 import { t as tr, useT } from "@/i18n"
 import { tm, toast } from "@/store"
@@ -19,7 +19,8 @@ import { accountsApi, CONN_STATUS, connStatusOf } from "@/api/accounts"
 import { selfSideOf } from "@/integrations/sides"
 import { channelsApi, type ChannelAccount, type Rule, type Space } from "@/api/channels"
 import { areaLabel, feishuGrantUrl, type FeishuAppDetail, type FeishuUserDetail, type IAdapter, type IConnection, type IInstallation, type IProvider, type MissingRow } from "@/api/integrations"
-import { ProviderIcon } from "@/integrations/index"
+import { ProviderGlyph } from "@/integrations/index"
+import { IntegrationSection, IntegrationSettings } from "@/components/affect/integration-settings-clean"
 import { FeishuConnectDialog, SelfButtons } from "@/integrations/feishu"
 import { CleanupDialog, DisconnectDialog, type Leaving } from "@/integrations/disconnect"
 import { OwnerChip } from "../people/owner-chip"
@@ -54,7 +55,7 @@ const presetOf = (ps: Preset[], rs: Rule[] | null): string | undefined => (rs ? 
 
 /** a setting that is on but can't work: said next to it, never silently */
 const Blocked = ({ children, ...rest }: { children: React.ReactNode; [k: string]: any }) => (
-  <div className="flex items-start gap-1.5 px-1 pt-1.5 type-footnote text-attention" role="note" {...rest}><TriangleAlertIcon className="mt-0.5 size-3.5 shrink-0" aria-hidden />{children}</div>
+  <div className="flex items-start gap-1.5 pt-1.5 type-footnote text-attention" role="note" {...rest}><TriangleAlertIcon className="mt-0.5 size-3.5 shrink-0" aria-hidden />{children}</div>
 )
 const Line = ({ children, className = "" }: { children: React.ReactNode; className?: string }) => <div className={"type-callout text-muted-foreground " + className}>{children}</div>
 
@@ -71,38 +72,28 @@ export function InstallationCard({ inst, p, chans, onChange }: { inst: IInstalla
   const all = inst.identities.map((i) => ({ id: i.connection.id, label: label(i.kind), stops: stops(i.kind) }))
   const chanOf = (c?: IConnection) => (c ? chans?.find((a) => a.connection.id === c.id) ?? null : null)
   return (
-    <section className="overflow-hidden rounded-2xl border bg-card" data-installation={inst.id} data-installation-missing={inst.missing} aria-label={inst.name}>
-      {leave && <DisconnectDialog title={leave.title} name={inst.name} leaving={leave.leaving} onClose={() => setLeave(null)} onDone={() => { setLeave(null); onChange() }}
-        keptNote={feishu ? t("integrations:inst.keptNoteFeishu") : undefined} />}
-      <header className="flex items-start gap-3 border-b px-4 py-3.5">
-        <ProviderIcon id={p.id} size={36} />
-        <div className="min-w-0 flex-1">
-          <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5"><span className="type-headline" data-installation-name>{inst.name}</span>
-            {inst.missing > 0 && <Badge variant="outline" className="border-attention/40 font-normal text-attention" data-missing-badge>{t("integrations:inst.missingBadge", { count: inst.missing })}</Badge>}</div>
-          <div className="mt-0.5 flex flex-wrap items-center gap-x-1.5 type-footnote text-muted-foreground">
-            <span className="inline-flex items-center gap-1"><StatusDot s={dot} />{s}</span>
-            <span className="text-tertiary">·</span><span>{feishu ? (app?.domain === "lark" ? t("integrations:inst.larkApp") : t("integrations:inst.feishuApp")) : p.name}</span>
-            {app && <><span className="text-tertiary">·</span><span className="font-mono text-[12px]">{app.app_id}</span></>}
-          </div>
-        </div>
-        {app && <a className="hidden shrink-0 items-center gap-1 rounded type-footnote text-blue hover:underline sm:inline-flex" href={app.console_url} target="_blank" rel="noreferrer noopener">{t("integrations:inst.console")}<ExternalLinkIcon className="size-3" /></a>}
-      </header>
-      {feishu && <div className="border-b bg-muted/30 px-4 py-2.5 type-footnote text-muted-foreground" data-who-works>
-        {t("integrations:inst.whoWorks")}</div>}
-      <div className="flex flex-col divide-y">
-        {(["steve", "you"] as const).map((k) => {
-          const c = k === "steve" ? steve : you
-          if (c) return <Identity key={k} kind={k} c={c} p={p} chan={chanOf(c)} app={app} appConn={steve} onLeave={() => setLeave({ title: t("integrations:inst.disconnectWhat", { what: label(k) }), leaving: [{ id: c.id, label: label(k), stops: stops(k) }] })} />
-          if (!hasAdapter(k)) return null
-          return <Enable key={k} kind={k} p={p} inst={inst} />
-        })}
-      </div>
-      {steve && you && feishu && <VoiceRule bot={chanOf(steve)} me={chanOf(you)} />}
-      <footer className="flex flex-wrap items-center justify-between gap-2 border-t px-4 py-2.5">
+    <IntegrationSettings name={inst.name} logo={<ProviderGlyph id={p.id} />} data-installation={inst.id} data-installation-missing={inst.missing}
+      badge={inst.missing > 0 ? <Badge variant="secondary" className="bg-attention/12 text-attention" data-missing-badge>{t("integrations:inst.missingBadge", { count: inst.missing })}</Badge> : undefined}
+      meta={<span className="inline-flex flex-wrap items-center gap-x-1.5" data-installation-name={inst.name}>
+        <span className="inline-flex items-center gap-1"><StatusDot s={dot} />{s}</span>
+        <span className="text-tertiary">·</span><span>{feishu ? (app?.domain === "lark" ? t("integrations:inst.larkApp") : t("integrations:inst.feishuApp")) : p.name}</span>
+        {app && <><span className="text-tertiary">·</span><span className="font-mono">{app.app_id}</span></>}</span>}
+      aside={app && <a className="hidden shrink-0 items-center gap-1 rounded-md type-callout text-blue hover:underline sm:inline-flex" href={app.console_url} target="_blank" rel="noreferrer noopener">{t("integrations:inst.console")}<ExternalLinkIcon className="size-3" /></a>}
+      footer={<div className="flex w-full flex-wrap items-center justify-between gap-2 px-1">
         <Tech inst={inst} p={p} />
         {inst.identities.length > 1 && <Button size="sm" variant="ghost" className="text-destructive" onClick={() => setLeave({ title: t(feishu ? "integrations:inst.disconnectAllFeishu" : "integrations:inst.disconnectAllOther", { name: inst.name }), leaving: all })} data-disconnect-installation>{feishu ? t("integrations:inst.disconnectAllApp") : t("integrations:inst.disconnectAllConn")}</Button>}
-      </footer>
-    </section>
+      </div>}>
+      {leave && <DisconnectDialog title={leave.title} name={inst.name} leaving={leave.leaving} onClose={() => setLeave(null)} onDone={() => { setLeave(null); onChange() }}
+        keptNote={feishu ? t("integrations:inst.keptNoteFeishu") : undefined} />}
+      {feishu && <IntegrationSection data-who-works><div className="type-callout text-muted-foreground">{t("integrations:inst.whoWorks")}</div></IntegrationSection>}
+      {(["steve", "you"] as const).map((k) => {
+        const c = k === "steve" ? steve : you
+        if (c) return <IntegrationSection key={k}><Identity kind={k} c={c} p={p} chan={chanOf(c)} app={app} appConn={steve} onLeave={() => setLeave({ title: t("integrations:inst.disconnectWhat", { what: label(k) }), leaving: [{ id: c.id, label: label(k), stops: stops(k) }] })} /></IntegrationSection>
+        if (!hasAdapter(k)) return null
+        return <IntegrationSection key={k}><Enable kind={k} p={p} inst={inst} /></IntegrationSection>
+      })}
+      {steve && you && feishu && <IntegrationSection><VoiceRule bot={chanOf(steve)} me={chanOf(you)} /></IntegrationSection>}
+    </IntegrationSettings>
   )
 }
 
@@ -112,9 +103,9 @@ function Enable({ kind, p, inst }: { kind: "steve" | "you"; p: IProvider; inst: 
   const [dlg, setDlg] = useState(false)
   const feishu = isFeishu(p.id), side = selfSideOf(p.adapters) as IAdapter | null
   return (
-    <div className="px-4 py-4" data-identity={kind} data-identity-state="off">
+    <div className="py-1" data-identity={kind} data-identity-state="off">
       {dlg && <FeishuConnectDialog bots={[]} onClose={() => setDlg(false)} side={side} />}
-      <div className="flex flex-wrap items-center gap-2"><span className="type-headline">{kind === "steve" ? t("integrations:inst.titleSteveBot") : t("integrations:inst.titleYouFeishu")}</span><Badge variant="outline" className="font-normal text-muted-foreground">{t("integrations:inst.optionalOff")}</Badge></div>
+      <div className="flex flex-wrap items-center gap-2"><span className="type-headline">{kind === "steve" ? t("integrations:inst.titleSteveBot") : t("integrations:inst.titleYouFeishu")}</span><Badge variant="secondary" className="font-medium text-muted-foreground">{t("integrations:inst.optionalOff")}</Badge></div>
       <Line className="mt-1">{kind === "you"
         ? t("integrations:inst.enableYou")
         : t("integrations:inst.enableSteve")}</Line>
@@ -137,13 +128,14 @@ function Identity({ kind, c, p, chan, app, appConn, onLeave }: { kind: "steve" |
   const what = feishu
     ? kind === "steve"
       ? t("integrations:inst.whatSteveFeishu", { name })
-      : <Trans t={t} i18nKey="integrations:inst.whatYouFeishu" values={{ name }} components={{ code: <code className="font-mono text-[12px]" /> }} />
+      : <Trans t={t} i18nKey="integrations:inst.whatYouFeishu" values={{ name }} components={{ code: <code className="font-mono" /> }} />
     : kind === "steve" ? t("integrations:inst.whatSteve", { name }) : t("integrations:inst.whatYou", { name })
   return (
-    <div className="flex flex-col gap-3 px-4 py-4" data-identity={kind} data-identity-state="on" data-conn={c.id}>
+    <div className="flex flex-col gap-4 py-1" data-identity={kind} data-identity-state="on" data-conn={c.id}>
       <div>
         <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5"><span className="type-headline">{title}</span>
-          <span className="inline-flex items-center gap-1 type-footnote text-muted-foreground"><StatusDot s={dot} />{s}</span></div>
+          {/* the card's header says the state; an identity repeats it only when it differs */}
+          {(c.status !== "ok" || c.installed === false) && <span className="inline-flex items-center gap-1 type-footnote text-muted-foreground"><StatusDot s={dot} />{s}</span>}</div>
         <Line className="mt-1">{what}</Line>
       </div>
       {c.installed === false && <Blocked data-blocked="not_installed">{t("api:notInstalledNote")}</Blocked>}
@@ -222,16 +214,16 @@ function Capabilities({ c, kind, feishu, planned }: { c: IConnection; kind: "ste
   const NOTE: Record<string, string> = feishu ? { channel: kind === "steve" ? t("integrations:inst.cap.channelSteve") : t("integrations:inst.cap.channelYou"), send_as_you: t("integrations:inst.cap.sendAsYou"), directory: t("integrations:inst.cap.directory") } : {}
   return (
     <div data-capabilities={kind}>
-      <div className="mb-1.5 px-1 type-footnote font-medium text-muted-foreground">{t("integrations:inst.cap.title")}</div>
+      <SectionLabel>{t("integrations:inst.cap.title")}</SectionLabel>
       <ul className="flex flex-col gap-1.5">{live.map((a) => { const [l, d] = label(a); return (
-        <li key={a.area} className="flex items-start gap-2 px-1" data-cap-area={a.area} data-cap-state={a.state}>
+        <li key={a.area} className="flex items-start gap-2" data-cap-area={a.area} data-cap-state={a.state}>
           <StatusDot s={d} className="mt-1.5" />
-          <div className="min-w-0 flex-1 type-callout"><span>{areaLabel(a.area)}</span><span className="text-muted-foreground"> · {NOTE[a.area] ?? a.note ?? ""}</span>
+          <div className="min-w-0 flex-1 type-callout"><span>{areaLabel(a.area)}</span>{(NOTE[a.area] ?? a.note) && <span className="text-muted-foreground"> · {NOTE[a.area] ?? a.note}</span>}
             {a.state === "missing" && <div className="type-footnote text-attention">{t(a.caps.length ? "integrations:inst.cap.missingSome" : "integrations:inst.cap.missingAll", { list: join(a.missing_scopes.map(purpose)) })}</div>}
           </div>
           <span className="shrink-0 type-footnote text-muted-foreground">{l}</span>
         </li>) })}</ul>
-      {planned.length > 0 && <div className="mt-1.5 px-1 type-footnote text-muted-foreground" data-planned-line>{t("integrations:inst.cap.planned", { list: join(planned) })}</div>}
+      {planned.length > 0 && <div className="mt-2 type-footnote text-muted-foreground" data-planned-line>{t("integrations:inst.cap.planned", { list: join(planned) })}</div>}
     </div>
   )
 }
@@ -256,7 +248,7 @@ function BotPermissions({ c, app }: { c: IConnection; app?: FeishuAppDetail }) {
     if (r) toast(r.status === "ok" ? t("integrations:inst.rechecked") : t("integrations:inst.checkedStatus", { status: CONN_STATUS[r.status]?.[0] ?? r.status }))
   }
   return (
-    <div className="flex flex-col gap-2 rounded-xl bg-muted/40 px-3.5 py-3" data-permissions-block="bot" data-missing-count={rows.length}>
+    <div className="flex flex-col gap-2 rounded-xl bg-muted/60 p-4" data-permissions-block="bot" data-missing-count={rows.length}>
       <div className="type-callout font-medium">{rows.length ? t("integrations:inst.botMissing", { count: rows.length }) : t("integrations:inst.botPerms")}</div>
       {rows.length ? <>
         <MissingList rows={rows} />
@@ -282,9 +274,9 @@ function UserPermissions({ c, app, appConn, side }: { c: IConnection; app?: Feis
   const t = useT()
   const rows = missingOf(c), d = userOf(c), via = d?.app_connection ?? appConn?.id
   const need = rows.length > 0 || c.status === "reauth"
-  if (!need) return <div className="px-1 type-footnote text-muted-foreground" data-permissions-block="you" data-missing-count={0}>{t("integrations:inst.youAllGranted")}</div>
+  if (!need) return <div className="type-footnote text-muted-foreground" data-permissions-block="you" data-missing-count={0}>{t("integrations:inst.youAllGranted")}</div>
   return (
-    <div className="flex flex-col gap-2 rounded-xl bg-muted/40 px-3.5 py-3" data-permissions-block="you" data-missing-count={rows.length}>
+    <div className="flex flex-col gap-2 rounded-xl bg-muted/60 p-4" data-permissions-block="you" data-missing-count={rows.length}>
       <div className="type-callout font-medium">{rows.length ? t("integrations:inst.youMissing", { count: rows.length }) : t("integrations:inst.reauthExpired")}</div>
       {rows.length > 0 && <MissingList rows={rows} />}
       <div className="flex flex-wrap items-center gap-2">
@@ -303,7 +295,7 @@ function VoiceRule({ bot, me }: { bot: ChannelAccount | null; me: ChannelAccount
   // one space per chat: a group both identities see is the same space in both lists
   const mine = groups(me), shared: Space[] = groups(bot).filter((s) => mine.some((m) => m.id === s.id))
   return (
-    <div className="flex gap-2.5 border-t bg-muted/30 px-4 py-3" data-voice-rule data-shared-groups={shared.length}>
+    <div className="flex gap-2.5" data-voice-rule data-shared-groups={shared.length}>
       <InfoIcon className="mt-0.5 size-4 shrink-0 text-muted-foreground" aria-hidden />
       <div className="min-w-0 flex-1 type-callout">
         <div className="font-medium">{t("integrations:inst.voiceTitle")}</div>
@@ -322,19 +314,19 @@ function Tech({ inst, p }: { inst: IInstallation; p: IProvider }) {
   const feishu = isFeishu(p.id)
   return (
     <Collapsible className="min-w-0 flex-1">
-      <CollapsibleTrigger className="rounded type-footnote text-muted-foreground hover:text-foreground hover:underline" data-tech-toggle>{t("integrations:inst.tech")}</CollapsibleTrigger>
-      <CollapsibleContent className="mt-2 flex flex-col gap-2 type-footnote text-muted-foreground" data-tech>
+      <CollapsibleTrigger className="rounded-md type-footnote text-muted-foreground hover:text-foreground" data-tech-toggle>{t("integrations:inst.tech")}</CollapsibleTrigger>
+      <CollapsibleContent data-tech><div className="pt-2 flex flex-col gap-2 type-footnote text-muted-foreground">
         {inst.identities.map(({ kind, connection: c }) => { const a = appOf(c), u = userOf(c); return (
           <dl key={c.id} className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5">
-            <dt>{kind === "steve" ? t("integrations:inst.botConn") : t("integrations:inst.yourConn")}</dt><dd className="break-all font-mono text-[12px]">{c.id} · {c.adapter}</dd>
-            {a && <><dt>App ID</dt><dd className="break-all font-mono text-[12px]">{a.app_id}</dd></>}
+            <dt>{kind === "steve" ? t("integrations:inst.botConn") : t("integrations:inst.yourConn")}</dt><dd className="break-all font-mono">{c.id} · {c.adapter}</dd>
+            {a && <><dt>App ID</dt><dd className="break-all font-mono">{a.app_id}</dd></>}
             {feishu && <><dt>{t("integrations:inst.token")}</dt><dd>{kind === "steve" ? t("integrations:inst.tokenSteve") : t("integrations:inst.tokenYou")}</dd></>}
-            {u && <><dt>{t("integrations:inst.requested")}</dt><dd className="break-all font-mono text-[12px]">{u.requested.join(" ")}</dd></>}
+            {u && <><dt>{t("integrations:inst.requested")}</dt><dd className="break-all font-mono">{u.requested.join(" ")}</dd></>}
             <dt>{t("integrations:inst.lastOk")}</dt><dd>{c.health.last_ok ? tm(c.health.last_ok) : "—"}</dd>
             {c.health.last_error && <><dt>{t("integrations:inst.lastError")}</dt><dd className="break-all">{c.health.last_error}</dd></>}
-            {a?.grant && <><dt>{t("integrations:inst.grantLink")}</dt><dd className="break-all font-mono text-[12px]">{t(a.grant.from === "feishu" ? "integrations:inst.grantFromFeishu" : "integrations:inst.grantFromSteve", { url: a.grant.url })}</dd></>}
+            {a?.grant && <><dt>{t("integrations:inst.grantLink")}</dt><dd className="break-all font-mono">{t(a.grant.from === "feishu" ? "integrations:inst.grantFromFeishu" : "integrations:inst.grantFromSteve", { url: a.grant.url })}</dd></>}
           </dl>) })}
-      </CollapsibleContent>
+      </div></CollapsibleContent>
     </Collapsible>
   )
 }

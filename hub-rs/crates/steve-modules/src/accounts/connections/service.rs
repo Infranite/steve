@@ -21,8 +21,8 @@ use super::cx::{
 use super::oauth::{self, DevicePoll, TokenSet, pkce_challenge, random_token};
 use super::pending::{Device, DeviceStatus, Devices, Flow, PendingStates};
 use super::provider::{
-    AccountInfo, AuthKind, CONFIG_VERSION_KEY, ConnectionProvider, FieldDef, Health, Owner,
-    PAIR_KEY, Paired, ProviderError, StewardHint, TokenKind,
+    AccountInfo, AuthKind, CONFIG_VERSION_KEY, ConnectionProvider, Health, Owner, PAIR_KEY, Paired,
+    ProviderError, StewardHint, TokenKind,
 };
 use super::repo::{self, ConnRow, HealthState};
 use crate::accounts::claim::claim_self;
@@ -172,7 +172,7 @@ pub struct AdapterOut {
     /// The device flow is offered.
     pub device: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub fields: Option<Vec<FieldDef>>,
+    pub fields: Option<Vec<super::provider::FieldOut>>,
 }
 
 /// What connecting produced.
@@ -589,11 +589,11 @@ impl Connections {
             .map(|p| AdapterOut {
                 id: p.id().into(),
                 system: p.system().into(),
-                name: p.name().into(),
+                name: super::provider::shown(p.as_ref(), p.name()),
                 auth: p.auth(),
                 caps: p.caps().iter().map(|c| c.to_string()).collect(),
                 device: p.oauth().is_some_and(|s| s.device_url.is_some()),
-                fields: matches!(p.auth(), AuthKind::Credential).then(|| p.fields().to_vec()),
+                fields: super::provider::fields_shown(p.as_ref()),
             })
             .collect()
     }
@@ -1900,7 +1900,7 @@ impl Connections {
         Ok(config)
     }
 
-    /// Splits a form into vault secrets and plain config by the provider's [`FieldDef`]s. Values
+    /// Splits a form into vault secrets and plain config by the provider's [`FieldDef`](super::FieldDef)s. Values
     /// are looked up by key, then by label.
     fn split_fields(
         p: &dyn ConnectionProvider,

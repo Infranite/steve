@@ -2,15 +2,16 @@
  * bots, mailboxes, devices, connections, personas — with add / remove; plus 没有负责人 for the contacts
  * overview. Hidden on a Hub without these routes. */
 import { useState } from "react"
+import { cn } from "cn"
 import { AtSignIcon, BotIcon, ChevronRightIcon, PlugIcon, PlusIcon, ServerIcon, UsersIcon, VenetianMaskIcon, XIcon } from "lucide-react"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Command, CommandEmpty, CommandGroup, CommandItem, CommandList } from "@/components/ui/command"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { api } from "@/api"
-import { go, Group, Row } from "@/ui"
+import { go, Group, Panel, Row, SectionLabel, Meta } from "@/ui"
 import { ownership, objectHref, type Holding, type ObjectInfo, type ObjectType } from "@/api/ownership"
-import { Loading, Section, SubMeta, act, joinList, label, useLoad } from "@/people/common"
+import { Loading, Section, act, joinList, label, useLoad } from "@/people/common"
 import { useT } from "@/i18n"
 import { OwnerChip, changedToast } from "@/people/owner-chip"
 
@@ -29,37 +30,56 @@ export function HoldingsSection({ person, name, isMe, isBot }: { person: string;
       {!h ? <Loading /> : <div className="flex flex-col gap-4" data-holdings>
         {isBot && <Group><Row title={t("people:shared.owner")} sub={t("people:holdings.botOwnerSub")}><OwnerChip objectType="party" objectId={person} bare /></Row></Group>}
         <div>
-          <div className="mb-1.5 px-1 type-footnote text-muted-foreground">{t("people:holdings.accounts", { n: nAcc })}</div>
+          <SectionLabel>{t("people:holdings.accounts", { n: nAcc })}</SectionLabel>
           {nAcc ? <Group>{h.accounts.flatMap((g) => g.accounts.map((a) => (
-            <Row key={a.id} title={<span className="font-mono text-[13px]">{a.handle}</span>}
-              sub={<SubMeta><span>{g.system}</span><span>{a.kind_label}</span>{a.name && a.name !== a.handle && <span>{a.name}</span>}</SubMeta>}
+            <Row key={a.id} title={<span className="font-mono type-callout">{a.handle}</span>}
+              sub={<Meta inline><span>{g.system}</span><span>{a.kind_label}</span>{a.name && a.name !== a.handle && <span>{a.name}</span>}</Meta>}
               onClick={() => go("#/accounts/" + a.id)} data-holding-acct={a.handle}><ChevronRightIcon className="size-4 text-tertiary" /></Row>)))}</Group>
-            : <div className="px-1 py-1 type-callout text-muted-foreground">{t("people:holdings.noAccounts")}</div>}
+            : <div className="py-1 type-callout text-muted-foreground">{t("people:holdings.noAccounts")}</div>}
         </div>
         {!isBot && <div>
-          <div className="mb-1.5 px-1 type-footnote text-muted-foreground">{t("people:holdings.responsible", { n: h.responsible.length })}</div>
+          <SectionLabel>{t("people:holdings.responsible", { n: h.responsible.length })}</SectionLabel>
           {h.responsible.length ? <Group>{h.responsible.map((x) => <HoldingRow key={x.object.object_type + x.object.object_id + x.role} x={x} person={person} />)}</Group>
-            : <div className="px-1 py-1 type-callout text-muted-foreground">{t("people:holdings.noResponsible")}</div>}
+            : <div className="py-1 type-callout text-muted-foreground">{t("people:holdings.noResponsible")}</div>}
         </div>}
-        <div className="px-1 type-footnote text-muted-foreground">{isBot ? t("people:holdings.botNote") : isMe ? t("people:holdings.noteMe") : t("people:holdings.noteOther", { name })}</div>
+        <div className="type-footnote text-muted-foreground">{isBot ? t("people:holdings.botNote") : isMe ? t("people:holdings.noteMe") : t("people:holdings.noteOther", { name })}</div>
       </div>}
     </Section>
   )
 }
 
-function HoldingRow({ x, person }: { x: Holding; person: string }) {
+/** 负责的 on a person's page: the bots, devices, connections and identities they answer for, as one plain list;
+ *  nothing at all, and the section is not there (their accounts are the page's 关联账号) */
+export function ResponsibleSection({ person, name, isMe }: { person: string; name: string; isMe: boolean }) {
+  const t = useT()
+  const L = useLoad(() => ownership.holdings(person), [person], ["party", "decision"])
+  const xs = L.data?.responsible ?? []
+  if (L.err || !xs.length) return null
+  return (
+    <Section label={t("people:holdings.responsible", { n: xs.length })} right={<AddHolding person={person} name={name} isMe={isMe} />} data-holdings>
+      <Panel>{xs.map((x) => <HoldingRow key={x.object.object_type + x.object.object_id + x.role} x={x} person={person} plain />)}</Panel>
+    </Section>
+  )
+}
+
+/** `plain` (负责的 on a person's page): one line under the name – the kind and what it is – and the role and how it was
+ *  learned only when they say something (not the usual 负责人 / 默认); removing it shows on hover */
+function HoldingRow({ x, person, plain }: { x: Holding; person: string; plain?: boolean }) {
   const t = useT()
   const href = objectHref(x.object), o = x.object
   const remove = async () => changedToast(await act(ownership.remove(o.object_type, o.object_id, { person_id: person, role: x.role })), t("people:holdings.released", { name: o.name }))
   const others = x.others.filter((s) => s.role === "owner" && s.status === "confirmed").map((s) => s.person_name)
+  const sub = plain
+    ? <span className="block truncate">{[o.type_label, x.role !== "owner" && x.role_label, x.source !== "seed" && x.source !== "manual" && label("source", x.source), others.length > 0 && t("people:holdings.alsoOwners", { names: joinList(others) }), o.detail].filter(Boolean).join(" · ")}</span>
+    : <><Meta inline><span>{o.type_label}</span><span>{x.role_label}</span><span>{label("source", x.source)}</span>{others.length > 0 && <span>{t("people:holdings.alsoOwners", { names: joinList(others) })}</span>}</Meta>{o.detail && <span className="block truncate">{clip(o.detail)}</span>}</>
   return (
-    <Row icon={<ObjIcon t={o.object_type} />} onClick={href ? () => go(href) : undefined} data-holding={o.name}
-      title={<span className="inline-flex items-center gap-1.5">{o.name}{x.status !== "confirmed" && <Badge variant="outline" className="font-normal text-attention">{t("people:shared.pending")}</Badge>}</span>}
-      sub={<SubMeta><span>{o.type_label}</span><span>{x.role_label}</span>{o.detail && <span>{clip(o.detail)}</span>}<span>{label("source", x.source)}</span>{others.length > 0 && <span>{t("people:holdings.alsoOwners", { names: joinList(others) })}</span>}</SubMeta>}>
+    <Row icon={<ObjIcon t={o.object_type} />} onClick={href ? () => go(href) : undefined} controls data-holding={o.name} className={plain ? "group/hold" : undefined}
+      title={<span className="inline-flex items-center gap-1.5">{o.name}{x.status !== "confirmed" && <Badge variant="secondary" className="bg-attention/12 text-attention">{t("people:shared.pending")}</Badge>}</span>}
+      sub={sub}>
       {x.status !== "confirmed" && x.decision_id && <span className="flex gap-1" onClick={(e) => e.stopPropagation()}>
         <Button size="xs" variant="outline" onClick={() => void act(api.decide(x.decision_id!, "yes"), t("people:holdings.confirmed"))} data-holding-yes>{t("common:action.confirm")}</Button>
         <Button size="xs" variant="ghost" className="text-muted-foreground" onClick={() => void act(api.decide(x.decision_id!, "no"), t("people:holdings.ignored"))}>{t("people:shared.wrong")}</Button></span>}
-      {x.status === "confirmed" && <Button variant="ghost" size="icon-xs" aria-label={t("people:holdings.releaseAria", { name: o.name })} className="text-muted-foreground" onClick={(e) => { e.stopPropagation(); void remove() }} data-holding-remove={o.name}><XIcon /></Button>}
+      {x.status === "confirmed" && <Button variant="ghost" size="icon-xs" aria-label={t("people:holdings.releaseAria", { name: o.name })} className={cn("text-muted-foreground", plain && "transition-opacity duration-120 [@media(hover:hover)]:opacity-0 [@media(hover:hover)]:group-hover/hold:opacity-100 [@media(hover:hover)]:group-focus-within/hold:opacity-100")} onClick={(e) => { e.stopPropagation(); void remove() }} data-holding-remove={o.name}><XIcon /></Button>}
     </Row>
   )
 }
@@ -93,9 +113,10 @@ export function UnownedSection() {
   return (
     <section className="mt-8" data-unowned><Section label={t("people:holdings.unowned", { n: L.data.length })}>
       <Group>{L.data.map((o) => { const href = objectHref(o); return (
-        <Row key={o.object_type + o.object_id} icon={<ObjIcon t={o.object_type} />} title={o.name} sub={<SubMeta><span>{o.type_label}</span>{o.detail && <span>{clip(o.detail)}</span>}</SubMeta>} onClick={href ? () => go(href) : undefined} data-unowned-row={o.name}>
+        <Row key={o.object_type + o.object_id} icon={<ObjIcon t={o.object_type} />} className="[&>[data-slot=item-actions]]:self-start"
+          title={<span className="inline-flex flex-wrap items-baseline gap-x-1.5">{o.name}<span className="type-footnote text-muted-foreground">{o.type_label}</span></span>} sub={o.detail ? clip(o.detail) : undefined} onClick={href ? () => go(href) : undefined} controls data-unowned-row={o.name}>
           <OwnerChip objectType={o.object_type} objectId={o.object_id} bare /></Row>) })}</Group>
-      <div className="mt-2 px-1 type-footnote text-muted-foreground">{t("people:holdings.unownedNote")}</div>
+      <div className="mt-3 type-footnote text-muted-foreground">{t("people:holdings.unownedNote")}</div>
     </Section></section>
   )
 }

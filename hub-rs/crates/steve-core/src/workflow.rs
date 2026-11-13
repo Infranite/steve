@@ -126,7 +126,21 @@ impl Core {
                 "单会话验收只能由用户在事项页明确确认，Bot 不能代为批准",
             ));
         }
-        t.workflow_change(item, args, current.bot_id.as_deref().unwrap_or("agent"))
+        // A plan that cannot run anything at once is said back to its author (a hint, never a refusal).
+        let notes = match args["action"].as_str() {
+            Some("plan") => serde_json::from_value::<Vec<UnitSpec>>(args["units"].clone())
+                .map(|specs| plan_notes(&specs, args["max_parallel"].as_u64().map(|n| n as usize)))
+                .unwrap_or_default(),
+            _ => vec![],
+        };
+        let mut out =
+            t.workflow_change(item, args, current.bot_id.as_deref().unwrap_or("agent"))?;
+        if !notes.is_empty()
+            && let Some(o) = out.as_object_mut()
+        {
+            o.insert("notes".into(), json!(notes));
+        }
+        Ok(out)
     }
 }
 
@@ -155,7 +169,15 @@ impl Tx<'_> {
             return Ok(false);
         };
         for s in self.db().sessions_of_item(id)? {
-            if self.busy(&s.id)
+            // A binding that was let go with nothing in flight holds no process anywhere. Asking
+            // the runtime instead would count it busy whenever its Node is not attached (a parked
+            // session is busy by default), and every finished unit would look like it was still
+            // stopping and hold up replans, retries and completion.
+            let released = self
+                .db()
+                .store()
+                .reader(|c| steve_store::runtime::released_idle(c, &s.id))?;
+            if (!released && self.busy(&s.id))
                 || self.rt().uncertain(&s.id)
                 || matches!(s.status.as_str(), "running" | "starting")
                 || !self.db().queued(&s.id)?.is_empty()
@@ -252,37 +274,67 @@ impl Tx<'_> {
         let ready = self.rt().check_workflow_execution(item);
         if let Some(units) = out["units"].as_array_mut() {
             for (row, unit) in units.iter_mut().zip(&g.units) {
-                row["waiting_on"] = json!(unit.spec.depends_on.iter().filter(|id| {
-                    g.units.iter().find(|other| &other.spec.id == *id).is_none_or(|other| other.status != "succeeded")
-                }).collect::<Vec<_>>());
-                row["stop_pending"] = json!(matches!(unit.status.as_str(), "succeeded" | "failed" | "cancelled") && self.workflow_busy(unit)?);
+                row["waiting_on"] = json!(
+                    unit.spec
+                        .depends_on
+                        .iter()
+                        .filter(|id| {
+                            g.units
+                                .iter()
+                                .find(|other| &other.spec.id == *id)
+                                .is_none_or(|other| other.status != "succeeded")
+                        })
+                        .collect::<Vec<_>>()
+                );
+                // A stop is pending only where one was asked for: a cancelled or failed unit whose
+                // execution has not been confirmed over. A unit that succeeded was never stopped;
+                // its turn may still be ending after the delivery, which the blockers say.
+                row["stop_pending"] = json!(
+                    matches!(unit.status.as_str(), "failed" | "cancelled")
+                        && self.workflow_busy(unit)?
+                );
                 if matches!(unit.status.as_str(), "running" | "dispatching") {
                     // A workflow row and a busy Node are not proof of fresh execution. The runtime
                     // evidence contract may only upgrade this state for the exact active attempt.
                     row["activity"] = json!({"state":"unconfirmed"});
-                    if unit.status == "running" && current_cycle && ready.is_ok()
+                    if unit.status == "running"
+                        && current_cycle
+                        && ready.is_ok()
                         && let (Some(child), Some(session)) = (&unit.item_id, &unit.session_id)
                         && !self.rt().uncertain(session)
-                        && let Some(activity) = self.db().store().workflows().confirmed_activity(child, session, steve_store::now())?
+                        && let Some(activity) = self.db().store().workflows().confirmed_activity(
+                            child,
+                            session,
+                            steve_store::now(),
+                        )?
                     {
                         row["activity"] = json!(activity);
                     }
                 }
             }
         }
-        let (archived, archived_total) = self.db().store().workflows().archived_attempts_recent(item, 50)?;
-        out["history_attempts"] = json!(archived.into_iter().map(|old| json!({
-            "item_id": old.item_id,
-            "unit_id": old.unit_id,
-            "created": old.created,
-            "snapshot": {
-                "title": excerpt(&old.snapshot.spec.title, VIEW_TEXT),
-                "status": old.snapshot.status,
-                "attempt": old.snapshot.attempt,
-                "session_id": old.snapshot.session_id,
-                "reason": old.snapshot.reason.map(|r| excerpt(&r, VIEW_TEXT)),
-            },
-        })).collect::<Vec<_>>());
+        let (archived, archived_total) = self
+            .db()
+            .store()
+            .workflows()
+            .archived_attempts_recent(item, 50)?;
+        out["history_attempts"] = json!(
+            archived
+                .into_iter()
+                .map(|old| json!({
+                    "item_id": old.item_id,
+                    "unit_id": old.unit_id,
+                    "created": old.created,
+                    "snapshot": {
+                        "title": excerpt(&old.snapshot.spec.title, VIEW_TEXT),
+                        "status": old.snapshot.status,
+                        "attempt": old.snapshot.attempt,
+                        "session_id": old.snapshot.session_id,
+                        "reason": old.snapshot.reason.map(|r| excerpt(&r, VIEW_TEXT)),
+                    },
+                }))
+                .collect::<Vec<_>>()
+        );
         out["history_attempts_total"] = json!(archived_total);
         out["history_total"] = json!(history_total);
         out["current_cycle"] = json!(current_cycle);
@@ -459,7 +511,9 @@ impl Tx<'_> {
                     .transpose()?
                     .map(|n| usize::try_from(n).map_err(|_| conflict("max_parallel 超出范围")))
                     .transpose()?
-                    .unwrap_or_else(|| graph.as_ref().map_or(2, |g| g.max_parallel));
+                    // Left out, the limit is the graph itself: every ready unit whose resources are free
+                    // runs. Only a real constraint (a shared device, a rate limit) asks for less.
+                    .unwrap_or(specs.len().max(1));
                 let attempts = args
                     .get("max_attempts")
                     .map(|v| {
@@ -475,10 +529,16 @@ impl Tx<'_> {
                     .replace(item, rev, reason, &specs, parallel, attempts)?;
             }
             "pause" | "resume" => {
+                /* a Bot's pause waits for you; yours is your own (crate::work) */
+                let by = if actor == "agent" || self.db().bot(actor)?.is_some() {
+                    steve_store::PAUSED_BY_AGENT
+                } else {
+                    steve_store::PAUSED_BY_USER
+                };
                 self.db()
                     .store()
                     .workflows()
-                    .pause(item, action == "pause", reason)?;
+                    .pause_by(item, action == "pause", reason, by)?;
                 if action == "pause" {
                     self.workflow_stop_units(item)?;
                 }
@@ -540,6 +600,12 @@ impl Tx<'_> {
         for s in self.db().sessions_of_item(child)? {
             // Freeze the attempt now; cancellation is sent outside the core lock.
             if let Some(turn) = self.rt().running(&s.id) {
+                /* kept with the turn, not in memory: its cancelled end is the pause's also after a
+                 * quick resume and a restart in between (`graph_stop_take`) */
+                self.db()
+                    .store()
+                    .sessions()
+                    .turn_paused(&s.id, &turn.attempt)?;
                 self.st.cancels.push((turn, child.into()));
             }
         }
@@ -583,10 +649,12 @@ impl Tx<'_> {
         };
         match action {
             ItemAction::Pause | ItemAction::Drop => {
-                self.db()
-                    .store()
-                    .workflows()
-                    .pause(item, true, "主事项暂停或取消")?;
+                self.db().store().workflows().pause_by(
+                    item,
+                    true,
+                    "主事项暂停或取消",
+                    steve_store::PAUSED_BY_ITEM,
+                )?;
                 self.workflow_stop_units(item)?;
                 if action == ItemAction::Drop {
                     for u in g
@@ -605,10 +673,12 @@ impl Tx<'_> {
                 }
             }
             ItemAction::Resume if !g.single_session() => {
-                self.db()
-                    .store()
-                    .workflows()
-                    .pause(item, false, "主事项恢复")?;
+                self.db().store().workflows().pause_by(
+                    item,
+                    false,
+                    "主事项恢复",
+                    steve_store::PAUSED_BY_ITEM,
+                )?;
             }
             _ => {}
         }
@@ -653,7 +723,8 @@ impl Tx<'_> {
                 // A crash can land after the graph recorded a failure but before the turn-end
                 // callback closed its child. The failed attempt is durable; finish that item once
                 // its session is no longer running, including failures from older installations.
-                if u.status == "failed"
+                // A cancelled unit's child likewise, once its turn is over.
+                if matches!(u.status.as_str(), "failed" | "cancelled")
                     && let Some(child) = u.item_id.as_deref()
                     && self
                         .db()
@@ -661,13 +732,8 @@ impl Tx<'_> {
                         .is_some_and(|i| i.phase == crate::cycle::ACTIVE)
                     && !self.unit_turn(u)?
                 {
-                    let reason = u
-                        .reason
-                        .as_deref()
-                        .filter(|s| !s.trim().is_empty())
-                        .or_else(|| (!u.summary.trim().is_empty()).then_some(u.summary.as_str()))
-                        .unwrap_or("工作单元未通过");
-                    self.lc_stop(child, FAIL, "workflow", reason, None)?;
+                    let (kind, why) = unit_end(u);
+                    self.lc_stop(child, kind, "workflow", &why, None)?;
                 }
                 if (g.paused
                     || parent.status == "pause"
@@ -1015,8 +1081,59 @@ impl Tx<'_> {
             )?;
             self.lc_invalidate(&parent, "工作单元未通过")?;
             self.db().item_patch(child, patch![now: summary])?;
+            // its questions and stop cards are moot now: the coordinator decides what comes next
+            if let Some((_, failed)) = self.db().store().workflows().by_child(child)? {
+                self.unit_cards_expire(child, &failed)?;
+            }
         }
         self.mark(&s.id, Mark::Delivered);
+        Ok(())
+    }
+
+    /// The end of the session's turn `attempt` (`None`: the backend names none) came: whether the
+    /// graph stopped that very turn (a pause). Every mark of the session goes: an older turn's end
+    /// that is still to come is a stale one, never this session's current turn. The marks are kept
+    /// with the session's turns (`session_turns`), so a restart between the pause, a quick resume
+    /// and the end changes nothing.
+    pub(crate) fn graph_stop_take(&mut self, sid: &str, attempt: Option<&str>) -> Result<bool> {
+        let sessions = self.db().store().sessions();
+        let marks = sessions.turns_paused(sid)?;
+        if marks.is_empty() {
+            return Ok(false);
+        }
+        sessions.turn_unpaused(sid, None)?;
+        Ok(match attempt {
+            Some(a) => {
+                let end = crate::runtime::Running {
+                    session: sid.into(),
+                    attempt: a.into(),
+                };
+                marks.into_iter().any(|m| {
+                    self.rt().same_turn(
+                        &crate::runtime::Running {
+                            session: sid.into(),
+                            attempt: m,
+                        },
+                        &end,
+                    )
+                })
+            }
+            None => true,
+        })
+    }
+
+    /// A stale end of turn `e` came: a pause's mark of that turn goes, the others stay.
+    pub(crate) fn graph_stop_drop(&mut self, e: &crate::runtime::Running) -> Result<()> {
+        let sessions = self.db().store().sessions();
+        for m in sessions.turns_paused(&e.session)? {
+            let t = crate::runtime::Running {
+                session: e.session.clone(),
+                attempt: m,
+            };
+            if self.rt().same_turn(&t, e) {
+                sessions.turn_unpaused(&e.session, Some(&t.attempt))?;
+            }
+        }
         Ok(())
     }
 
@@ -1025,6 +1142,8 @@ impl Tx<'_> {
         let Some(child) = s.item_id.as_deref() else {
             return Ok(false);
         };
+        let paused_here =
+            self.graph_stop_take(&s.id, end.attempt.as_deref())? && end.stop_reason == "cancelled";
         let item = self.item(child)?;
         if !self.workflow_child(&item)? {
             return Ok(false);
@@ -1041,6 +1160,8 @@ impl Tx<'_> {
         } else {
             if unit.status == "running"
                 && !g.paused
+                /* the pause stopped it; resumed meanwhile, the same session goes on (workflow_drive) */
+                && !paused_here
                 && !self
                     .db()
                     .decisions_of_item(child)?
@@ -1059,17 +1180,24 @@ impl Tx<'_> {
             }
             if item.phase != CLOSED
                 && let Some((_, settled)) = self.db().store().workflows().by_child(child)?
-                && settled.status == "failed"
+                && matches!(settled.status.as_str(), "failed" | "cancelled")
             {
-                // Both explicit failure and a turn ending without delivery finish this attempt.
-                // Its evidence remains on the graph; a retry claims a new child.
-                self.lc_stop(child, FAIL, "workflow", &settled.summary, None)?;
+                // Explicit failure, a turn ending without delivery and a cancel all finish this
+                // attempt. Its evidence remains on the graph; a retry claims a new child.
+                let (kind, why) = unit_end(&settled);
+                self.lc_stop(child, kind, "workflow", &why, None)?;
             }
         }
         self.workflow_drive(&parent)?;
-        let latest = self.db().store().workflows().by_child(child)?;
+        /* only the graph's current attempt is news: a retired one keeps its outcome (a failure
+         * stays failed) but the coordinator already decided what came after it */
+        let latest = self.db().store().workflows().get(&parent)?.and_then(|g| {
+            g.units
+                .into_iter()
+                .find(|u| u.item_id.as_deref() == Some(child))
+        });
         if !g.paused
-            && latest.is_some_and(|(_, u)| matches!(u.status.as_str(), "succeeded" | "failed"))
+            && latest.is_some_and(|u| matches!(u.status.as_str(), "succeeded" | "failed"))
             && let Some(coordinator) = self
                 .active_session(&parent)?
                 .filter(|s| s.status != "ended")
@@ -1079,5 +1207,86 @@ impl Tx<'_> {
                 "workflow.progress", &[])?;
         }
         Ok(true)
+    }
+}
+
+/// What keeps a plan from running units at the same time: a graph that is one chain, independent units serialised
+/// by a shared resource key, or a concurrency limit below what the graph allows. Collaboration exists to finish
+/// sooner; a plan without parallel work costs more than doing it in one session.
+pub fn plan_notes(specs: &[UnitSpec], max_parallel: Option<usize>) -> Vec<String> {
+    use std::collections::HashMap;
+    let ids: HashMap<&str, &UnitSpec> = specs.iter().map(|u| (u.id.as_str(), u)).collect();
+    fn level<'a>(
+        u: &'a UnitSpec,
+        ids: &HashMap<&str, &'a UnitSpec>,
+        memo: &mut HashMap<&'a str, usize>,
+        depth: usize,
+    ) -> usize {
+        if let Some(l) = memo.get(u.id.as_str()) {
+            return *l;
+        }
+        let l = 1 + u
+            .depends_on
+            .iter()
+            .filter_map(|d| ids.get(d.as_str()))
+            .map(|d| {
+                if depth > 64 {
+                    0
+                } else {
+                    level(d, ids, memo, depth + 1)
+                }
+            })
+            .max()
+            .unwrap_or(0);
+        memo.insert(u.id.as_str(), l);
+        l
+    }
+    let mut memo = HashMap::new();
+    let levels: Vec<usize> = specs.iter().map(|u| level(u, &ids, &mut memo, 0)).collect();
+    let mut width: HashMap<usize, Vec<&UnitSpec>> = HashMap::new();
+    for (u, l) in specs.iter().zip(&levels) {
+        width.entry(*l).or_default().push(u);
+    }
+    let widest = width.values().map(Vec::len).max().unwrap_or(0);
+    let mut out = vec![];
+    if specs.len() >= 3 && widest <= 1 {
+        out.push(format!(
+            "这张工作图的 {} 个单元只能一个接一个执行，没有任何两个能同时进行：它比在你自己的会话里直接做更慢，也更贵（每个单元都要新开会话重读上下文）。把工作拆成互不依赖、能同时进行的部分（同一部分的调查、设计和实现留在一个单元里），或者在本会话里直接完成，只把独立评审交给评审 Bot。",
+            specs.len()
+        ));
+    }
+    for group in width.values() {
+        for (n, a) in group.iter().enumerate() {
+            for b in &group[n + 1..] {
+                if let Some(r) = a.resources.iter().find(|r| b.resources.contains(r)) {
+                    out.push(format!(
+                        "「{}」和「{}」互不依赖，但声明了同一个资源「{}」，会被排成先后执行。每个单元有自己的工作目录；只有真的会互相冲突时才共用资源键，并且细到模块或路径。",
+                        a.title, b.title, r
+                    ));
+                }
+            }
+        }
+    }
+    if let Some(m) = max_parallel
+        && m < widest
+    {
+        out.push(format!(
+            "max_parallel={m} 让最多 {m} 个单元同时执行，而这张图有 {widest} 个单元可以同时进行。没有真实限制（共用设备、频率限制）时不要填 max_parallel。"
+        ));
+    }
+    out
+}
+
+/// How a failed or cancelled unit's child item ends, and why (its own reason when it gave one).
+fn unit_end(u: &WorkUnit) -> (&'static str, String) {
+    let said = u
+        .reason
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| (!u.summary.trim().is_empty()).then_some(u.summary.as_str()));
+    if u.status == "cancelled" {
+        (CANCEL, said.unwrap_or("工作单元已取消").into())
+    } else {
+        (FAIL, said.unwrap_or("工作单元未通过").into())
     }
 }

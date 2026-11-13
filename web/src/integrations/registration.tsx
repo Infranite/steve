@@ -70,17 +70,17 @@ export function FeishuRegistrationPanel() {
   const left = remainingSeconds(r?.expires_at ?? 0, now)
   const startAllowed = vaultReady !== false && !loading && !busy && !unavailable && !error && !pending && r?.state !== "credentials_saved"
   const terminal = r && !pending && r.state !== "credentials_saved" && r.state !== "succeeded"
-  return <div className="flex flex-col gap-3 rounded-xl border p-4" data-app-registration>
-    <div className="type-body font-medium">{t("integrations:reg.title")}</div>
-    <p className="type-callout text-muted-foreground">{t("integrations:reg.intro")}</p>
+  return <div className="flex flex-col gap-3 rounded-xl bg-card p-5 shadow-[var(--lift)]" data-app-registration>
+    <div className="type-headline">{t("integrations:reg.title")}</div>
+    <p className="-mt-1.5 type-callout text-muted-foreground">{t("integrations:reg.intro")}</p>
     <p className="type-footnote text-muted-foreground">{t("integrations:reg.fit")}</p>
     {vaultReady === false && <div role="status" className="flex flex-wrap items-center gap-2 type-callout">{t("integrations:reg.vaultFirst")}<Button variant="outline" onClick={() => go("#/vault")}>{t("integrations:feishu.vaultGo")}</Button></div>}
-    {loading ? <div role="status" className="flex items-center gap-2 type-callout"><Spinner />{t("integrations:reg.restoring")}</div> : r && <div className="flex flex-col gap-2 rounded-lg bg-muted/50 p-3" data-registration-state={r.state}>
+    {loading ? <div role="status" className="flex items-center gap-2 type-callout"><Spinner />{t("integrations:reg.restoring")}</div> : r && <div className="flex flex-col items-start gap-2 rounded-xl bg-muted/60 p-4 anim-in" data-registration-state={r.state}>
       <div role="status" className="flex items-center gap-2 type-callout font-medium">{pending && <Spinner />}{registrationLabel(r)}</div>
       {r.state === "pending" && <>
         {url && <Button nativeButton={false} render={<a href={url} target="_blank" rel="noreferrer noopener" />} data-registration-link><ExternalLinkIcon />{t("integrations:reg.openConfirm")}</Button>}
         {!url && <p role="alert" className="type-callout text-destructive">{t("integrations:reg.noUrl")}</p>}
-        {r.user_code && <div className="type-callout">{t("integrations:reg.userCode")}<code className="select-all font-mono">{r.user_code}</code></div>}
+        {r.user_code && <div className="type-callout">{t("integrations:reg.userCode")}<code className="select-all font-mono tabular-nums">{r.user_code}</code></div>}
         <p className="type-footnote text-muted-foreground">{left ? t("integrations:reg.linkLeft", { left: t("common:dur.minSec", { m: Math.floor(left / 60), s: left % 60 }) }) : t("integrations:reg.linkChecking")}</p>
       </>}
       {r.app_may_exist && r.state !== "cancelled" && <p className="type-footnote text-muted-foreground">{t("integrations:reg.mayExist")}</p>}

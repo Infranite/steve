@@ -23,7 +23,6 @@
 //!     .event_adapter(gmail.clone())                                // each `EventAdapter` (S5, S6…)
 //!     .node(Arc::new(steve_flow::nodes::http::Http::new(vault.clone())))  // S3: `http` with `{{secrets}}` (built in without the vault)
 //!     .node(Arc::new(steve_flow::nodes::cmd::Cmd::new(&steve_home)))      // S3: `cmd` (built in with the temp dir as home)
-//!     .node(Arc::new(steve_flow::nodes::bot::BotNode::new(guard)))  // S4: `bot` with the vault's `guard::scan` (built in without a guard)
 //!     .action(reply_as.clone())                                    // channel actions (effectful)
 //!     .item_finder("branch", github_branches.clone());             // better `item.link` lookups
 //! let flow = setup.build(modules, Arc::new(steve_flow::GraphEngine));
@@ -41,7 +40,6 @@
 //!
 //! S10 call sites in steve-core / steve-mcp (integrator):
 //! ```ignore
-//! let setup = setup.guard(vault_guard.clone());                    // `guard::scan` for steve_event_get (default finds nothing)
 //! // Orchestrator::delete_bot(id, to): after it succeeded, for every workspace `w` the bot served
 //! // (`bot_workspaces` rows survive the soft delete), with the heir it used there (`to`, or the main
 //! // bot where `to` is not a member):
@@ -163,8 +161,6 @@ pub struct FlowCx {
     pub drops: ingest::DropStats,
     /// SSE `signal` coalescing.
     pub signals: signals::SignalDebounce,
-    /// The vault's secret scanner, for text handed to agents (`steve_event_get`).
-    pub guard: Arc<dyn nodes::bot::Guard>,
     wake: Arc<Notify>,
     followups: Mutex<mpsc::UnboundedReceiver<Followup>>,
     /// `true` once the scheduler's boot recovered the interrupted runs ([`Self::recovered`]).
@@ -279,7 +275,6 @@ pub struct FlowSetup {
     actions: nodes::action::Actions,
     nodes: Vec<Arc<dyn NodeKind>>,
     finders: link::ItemFinders,
-    guard: Arc<dyn nodes::bot::Guard>,
     wake: Arc<Notify>,
     tx: mpsc::UnboundedSender<Followup>,
     rx: mpsc::UnboundedReceiver<Followup>,
@@ -296,7 +291,6 @@ impl FlowSetup {
             actions: nodes::action::Actions::default(),
             nodes: Vec::new(),
             finders: link::ItemFinders::default(),
-            guard: Arc::new(nodes::bot::NoGuard),
             wake: Arc::new(Notify::new()),
             tx,
             rx,
@@ -353,13 +347,6 @@ impl FlowSetup {
         self
     }
 
-    /// The vault's `guard::scan` for event text handed to agents (`steve_event_get`); without it
-    /// nothing is redacted.
-    pub fn guard(mut self, g: Arc<dyn nodes::bot::Guard>) -> Self {
-        self.guard = g;
-        self
-    }
-
     /// Registers an event source (its `id()` is the `connections.adapter` it serves).
     pub fn event_adapter(mut self, a: Arc<dyn EventAdapter>) -> Self {
         self.events.add(a);
@@ -387,7 +374,6 @@ impl FlowSetup {
             events: self.events,
             drops: ingest::DropStats::default(),
             signals: signals::SignalDebounce::default(),
-            guard: self.guard,
             wake: self.wake,
             followups: Mutex::new(self.rx),
             recovered: tokio::sync::watch::Sender::new(false),

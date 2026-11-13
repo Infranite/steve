@@ -1,6 +1,7 @@
 /* The YOLO control (modules/yolo.md §8; 完全放开 added 2026-11-02): one place to choose how much Steve may do while
  * you are away — 关 / YOLO 替你审批 / 完全放开 — with a line on what each means. Switching on shows what YOLO would
- * do with the cards open now; full access asks you to confirm in plain words what it gives away. While on: counts
+ * do with the cards open now; full access asks you to confirm in plain words what it gives away. The levels are an
+ * affectUI Autonomy Dial: what each one hands over moves between "handled for you" and "asks you first". While on: counts
  * and the record; paused by the breaker: why and 恢复; forced off on this Hub: why, nothing to press.
  * The status shows as a quiet dot + label (sidebar, toolbars), never as a coloured pill. */
 import { useEffect, useState } from "react"
@@ -13,6 +14,7 @@ import { yoloApi, type RYolo, type RYoloPreview, type YoloLevel } from "@/api/yo
 import { st, yoloResume, yoloSet } from "@/store"
 import { closeSheet, go, openSheet } from "@/ui"
 import { choiceText } from "@/yolo/badges"
+import { AutonomyDial, type AgentAction, type AutonomyLevel, type DialText } from "@/components/affect/autonomy-dial"
 import { Trans } from "react-i18next"
 import { t, useT } from "@/i18n"
 
@@ -37,9 +39,9 @@ export const DOT: Record<YoloState, string> = { on: "bg-blue", full: "bg-attenti
 export const label = (s: YoloState) => t(`yolo:label.${s}`)
 
 export const levels = (): { m: YoloLevel; title: string; sub: string }[] => [
-  { m: "off", title: t("common:state.off"), sub: t("yolo:switch.offSub") },
-  { m: "on", title: t("yolo:level.on"), sub: t("yolo:switch.onSub") },
-  { m: "full", title: t("yolo:level.full"), sub: t("yolo:switch.fullSub") },
+  { m: "off", title: t("common:state.off"), sub: t("yolo:scope.offSub") },
+  { m: "on", title: t("yolo:level.on"), sub: t("yolo:scope.onSub") },
+  { m: "full", title: t("yolo:level.full"), sub: t("yolo:scope.fullSub") },
 ]
 
 /** the YOLO record opened on one of its filters (统计页的“替你做了 / 留给你”下钻到这里) */
@@ -59,30 +61,33 @@ export function YoloPill({ className, short = false }: { className?: string; sho
   const n = s === "on" || s === "full" ? y.counts.decided : 0
   return (
     <button type="button" onClick={() => openSheet("yolo")} aria-label={t("yolo:switch.pillLabel", { label: label(s) })} data-yolo-pill={s}
-      className={cn("inline-flex h-7 shrink-0 items-center gap-1.5 rounded-md px-2 text-[12.5px] transition-colors hover:bg-muted",
-        s === "off" || s === "forced" ? "text-muted-foreground" : "text-foreground/85", className)}>
+      className={cn("inline-flex h-7 shrink-0 items-center gap-1.5 rounded-lg px-2 type-callout hover:bg-accent",
+        s === "off" || s === "forced" ? "text-muted-foreground" : "text-foreground/80", className)}>
       <Dot s={s} /><span className="font-medium">{label(s)}</span>
       {!short && n > 0 && <span className="tabular-nums text-muted-foreground">{t("yolo:switch.pillCount", { count: n })}</span>}
     </button>
   )
 }
 
-function LevelRow({ m, title, sub, on, current, disabled, pick }: { m: YoloLevel; title: string; sub: string; on: boolean; current: boolean; disabled: boolean; pick: () => void }) {
-  const t = useT()
-  return (
-    <button type="button" role="radio" aria-checked={on} disabled={disabled} onClick={pick} data-yolo-level={m}
-      className={cn("flex min-w-0 w-full items-start gap-3 rounded-xl border px-3.5 py-3 text-left transition-colors disabled:opacity-50",
-        on ? (m === "full" ? "border-attention/60 bg-attention/5" : "border-foreground/25 bg-muted/50") : "border-transparent hover:bg-muted/50")}>
-      <span className={cn("mt-[3px] flex size-4 shrink-0 items-center justify-center rounded-full border", on ? (m === "full" ? "border-attention" : "border-foreground") : "border-border")} aria-hidden>
-        {on && <span className={cn("size-2 rounded-full", m === "full" ? "bg-attention" : "bg-foreground")} />}
-      </span>
-      <span className="min-w-0 flex-1">
-        <span className="flex flex-wrap items-center gap-x-2 type-headline">{title}{current && <span className="type-footnote font-normal text-muted-foreground">{t("yolo:switch.current")}</span>}</span>
-        <span className="mt-0.5 block type-footnote text-muted-foreground">{sub}</span>
-      </span>
-    </button>
-  )
-}
+const LEVEL_NO: Record<YoloLevel, AutonomyLevel> = { off: 0, on: 1, full: 2 }
+const NO_LEVEL: YoloLevel[] = ["off", "on", "full"]
+type WithDetail = "cmd" | "accept" | "continue" | "ask" | "release" | "botReply" | "aiSend" | "anyCmd"
+const A = (id: WithDetail, risk: AgentAction["risk"]): AgentAction => ({ id, risk, label: t(`yolo:dial.action.${id}`), detail: t(`yolo:dial.action.${id}Detail`) })
+const B = (id: "propose" | "anyFile" | "pay" | "vault" | "send" | "otherRelease", risk: AgentAction["risk"]): AgentAction => ({ id, risk, label: t(`yolo:dial.action.${id}`) })
+/** What each level hands over, in the Hub's words (judge.rs `Policy::default`, the hard limits and what full access
+ *  keeps): safe ones YOLO decides, risky ones only full access lets through, and the locked ones always come to you. */
+export const dialActions = (): AgentAction[] => [
+  A("cmd", "safe"), A("accept", "safe"), A("continue", "safe"), A("ask", "safe"), B("propose", "safe"), A("release", "safe"),
+  A("botReply", "safe"), A("aiSend", "safe"), A("anyCmd", "risky"), B("anyFile", "risky"),
+  B("pay", "destructive"), B("vault", "destructive"), B("send", "destructive"), B("otherRelease", "destructive"),
+]
+export const LOCKED = ["pay", "vault", "send", "otherRelease"]
+export const dialText = (): Partial<DialText> => ({
+  levels: levels().map((l) => ({ label: l.m === "off" ? l.title : label(l.m), hint: l.sub })) as DialText["levels"],
+  group: t("yolo:switch.modes"), own: t("yolo:dial.own"), ask: t("yolo:dial.ask"), ownEmpty: t("yolo:dial.ownEmpty"), askEmpty: t("yolo:dial.askEmpty"),
+  risky: t("yolo:dial.risky"), destructive: t("yolo:dial.destructive"), current: t("yolo:switch.current"), locked: t("yolo:dial.locked"),
+  announce: (level, own, ask) => t("yolo:dial.announce", { level, own, ask }),
+})
 
 /** the control (sheet kind `yolo`) */
 export function YoloDialog() {
@@ -105,22 +110,26 @@ export function YoloDialog() {
     <Dialog open onOpenChange={(o) => !o && closeSheet()}>
       <DialogContent className="max-h-[calc(100dvh-2rem)] grid-rows-[auto_minmax(0,1fr)_auto] gap-4 rounded-2xl p-4 [overflow-wrap:anywhere] sm:max-w-[520px] sm:p-6" data-yolo-dialog={s}>
         <DialogHeader className="min-w-0 pr-8">
-          <DialogTitle className="type-headline">{t("yolo:switch.title")}</DialogTitle>
+          <DialogTitle className="type-title">{t("yolo:switch.title")}</DialogTitle>
           <DialogDescription className="type-callout">{t("yolo:switch.desc")}</DialogDescription>
         </DialogHeader>
         <div className="flex min-h-0 min-w-0 flex-col gap-4 overflow-y-auto p-1 *:shrink-0" data-yolo-scroll>
-          {s === "forced" && <div className="rounded-xl bg-muted/60 px-3.5 py-3 type-callout text-muted-foreground" data-yolo-forced>{t("yolo:switch.forced", { reason: y.forced_reason })}</div>}
-          {s === "paused" && <div role="alert" className="flex flex-wrap items-start gap-2.5 rounded-xl border border-destructive/40 px-3.5 py-3 type-callout" data-yolo-paused>
+          {s === "forced" && <div className="rounded-xl bg-muted/60 px-4 py-3 type-callout text-muted-foreground" data-yolo-forced>{t("yolo:switch.forced", { reason: y.forced_reason })}</div>}
+          {s === "paused" && <div role="alert" className="flex flex-wrap items-start gap-2.5 rounded-xl bg-destructive/10 px-4 py-3 type-callout" data-yolo-paused>
             <Dot s="paused" className="mt-[7px]" />
             <div className="min-w-0 flex-1"><div className="font-medium">{label("paused")}</div><div className="mt-0.5 text-muted-foreground">{t("yolo:switch.pausedNote", { reason: y.paused?.reason })}</div></div>
             <Button size="sm" disabled={busy} onClick={() => void run(async () => { await yoloResume(); closeSheet() })} data-yolo-resume>{t("yolo:run.resume")}</Button></div>}
-          <div role="radiogroup" aria-label={t("yolo:switch.modes")} className="flex min-w-0 shrink-0 flex-col gap-1">
-            {levels().map((l) => <LevelRow key={l.m} {...l} on={sel === l.m} current={cur === l.m && !locked} disabled={locked && l.m !== "off"} pick={() => { setSel(l.m); setOk(false) }} />)}
-          </div>
-          {(cur === "on" || cur === "full") && !locked && <div className="flex flex-wrap items-center gap-x-1.5 type-footnote text-muted-foreground" data-yolo-on>
+          {locked && cur !== "off" && <div className="flex flex-wrap items-center gap-x-1.5 type-footnote text-muted-foreground" data-yolo-stored={cur}>
+            <span>{t("yolo:switch.storedLocked", { level: label(cur) })}</span>
+            {sel !== "off" && <><span>·</span><button type="button" className="text-blue hover:underline" onClick={() => setSel("off")} data-yolo-stored-off>{t("yolo:switch.storedOff")}</button></>}</div>}
+          {/* forced off or paused: nothing is handled for you, so the dial shows 关 whatever mode is stored */}
+          <AutonomyDial className="[--ui-adlc-max:100%]" title="" actions={dialActions()} pinned={LOCKED} lockable={false} text={dialText()} bullets={false}
+            level={locked ? 0 : LEVEL_NO[sel]} onLevelChange={(n) => { setSel(NO_LEVEL[n]); setOk(false) }} currentLevel={locked ? undefined : LEVEL_NO[cur]}
+            disabledLevels={locked ? [1, 2] : []} tones={{ 2: "attention" }} levelProps={(n) => ({ "data-yolo-level": NO_LEVEL[n] })}>
+            {(cur === "on" || cur === "full") && !locked && <div className="flex flex-wrap items-center gap-x-1.5 type-footnote text-muted-foreground" data-yolo-on>
             <span><Trans t={t} i18nKey={y.counts.scheduled ? "yolo:switch.countsScheduled" : "yolo:switch.counts"} values={{ decided: y.counts.decided, declined: y.counts.declined, scheduled: y.counts.scheduled }} components={{ b: <b className="font-medium text-foreground" /> }} /></span>
             <span>·</span><button type="button" className="text-blue hover:underline" onClick={() => { closeSheet(); go("#/yolo") }} data-yolo-digest-link>{t("yolo:switch.viewRecord")}</button></div>}
-          {turningOn && <div className="flex min-w-0 shrink-0 flex-col gap-2" data-yolo-preview>
+          {turningOn && <div className="anim-in flex min-w-0 shrink-0 flex-col gap-2" data-yolo-preview>
             {!pv && !err && <div className="flex items-center gap-2 type-footnote text-muted-foreground"><Spinner className="size-3.5" />{t("yolo:switch.previewLoading")}</div>}
             {err && <div className="type-footnote text-destructive">{err}</div>}
             {pv && <>
@@ -131,17 +140,18 @@ export function YoloDialog() {
               {n > 0 && <label className="flex items-start gap-2 type-footnote"><Checkbox checked={all} onCheckedChange={(v) => setAll(!!v)} data-yolo-include-open /><span className="min-w-0">{t("yolo:switch.includeOpen", { count: n })}</span></label>}
             </>}
           </div>}
-          {needsOk && <div className="flex min-w-0 shrink-0 flex-col gap-2 rounded-xl bg-attention/8 px-3.5 py-3" data-yolo-full-confirm>
+          {needsOk && <div className="anim-in flex min-w-0 shrink-0 flex-col gap-2 rounded-xl bg-attention/10 px-4 py-3" data-yolo-full-confirm>
             <div className="type-callout font-medium">{fullGives()}</div>
             <div className="type-footnote text-muted-foreground">{fullKeeps()}</div>
             <label className="mt-1 flex items-start gap-2 type-callout"><Checkbox className="mt-0.5" checked={ok} onCheckedChange={(v) => setOk(!!v)} data-yolo-full-ok /><span className="min-w-0">{t("yolo:switch.fullOk")}</span></label>
           </div>}
+          </AutonomyDial>
           {s !== "forced" && !needsOk && <div className="type-footnote text-tertiary" data-yolo-never>{never()}</div>}
         </div>
         <DialogFooter className="min-w-0 gap-2 *:h-auto *:min-h-8 *:min-w-0 *:whitespace-normal">
           <Button variant="ghost" onClick={closeSheet}>{action ? t("common:action.cancel") : t("yolo:switch.done")}</Button>
           {action && <Button disabled={busy || (needsOk && !ok) || (turningOn && !pv && !err)} data-yolo-apply={sel}
-            className={cn(sel === "full" && "bg-attention text-white hover:bg-attention/90")} variant={sel === "off" ? "outline" : "default"}
+            variant={sel === "full" ? "attention" : sel === "off" ? "outline" : "default"}
             onClick={() => void run(async () => { await yoloSet(sel, turningOn && all); closeSheet() })}>{action}</Button>}
         </DialogFooter>
       </DialogContent>

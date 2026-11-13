@@ -50,5 +50,16 @@
   "mail.preset.163_hint": "Turn on IMAP in 163 Mail settings and create an authorization code",
   "mail.preset.fastmail_hint": "Create an app password under Privacy & Security in Fastmail settings",
   "mail.provider.name": "Mailbox",
-  "mail.provider.note": "Receives, triages and drafts replies; sends with your approval"
+  "mail.provider.note": "Receives, triages and drafts replies; sends with your approval",
+  "mail.text.imap_name": "Other mailbox (IMAP)",
+  "mail.text.address": "Email address",
+  "mail.text.username": "Username",
+  "mail.text.username_hint": "Defaults to the email address",
+  "mail.text.password": "App password",
+  "mail.text.imap_host": "IMAP server",
+  "mail.text.imap_port": "IMAP port",
+  "mail.text.imap_security": "IMAP encryption",
+  "mail.text.smtp_host": "SMTP server",
+  "mail.text.smtp_port": "SMTP port",
+  "mail.text.smtp_security": "SMTP encryption"
 }

@@ -124,6 +124,18 @@ pub const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/060.sql"),
     // 60: a research run's session under a neutral name, with the harness adapter it belongs to.
     include_str!("../migrations/061.sql"),
+    // 62: a Bot's own MCP servers (`bot_mcp_servers`); their secrets stay in the vault.
+    include_str!("../migrations/062.sql"),
+    // 63: a Bot's skills (`bot_skills`), written where its harness reads them when a session opens.
+    include_str!("../migrations/063.sql"),
+    // 64: what agents changed in the memories (`mem_changes`) and merges (`mem_supersedes`).
+    include_str!("../migrations/064.sql"),
+    // 65: the capabilities library: MCP servers, skills and A2A agents per workspace, assigned per
+    // Bot (`bot_capabilities`); 62's and 63's rows move into it.
+    include_str!("../migrations/065.sql"),
+    // 66: how each session's last turn ended and whether you stopped it (`session_stops`), and each
+    // turn by attempt (`session_turns`): its end judged once, a pause's stop kept.
+    include_str!("../migrations/066.sql"),
 ];
 
 /// 027's item columns and their one-time backfill (applied by `run_pending` when `items.phase` is missing).

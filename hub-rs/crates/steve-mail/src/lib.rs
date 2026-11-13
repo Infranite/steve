@@ -26,7 +26,7 @@
 //! Slice E6 — knowledge and conversational configuration: [`knowledge`] (“加进知识库”,
 //! candidates when a thread is done, [`knowledge::ThreadLoader`]), [`config::targets`] (target
 //! `mail_account`, op `mail.account.patch`) and the thread routes `archive` / `read` / `to-knowledge`.
-//! Integrator: `Mail::builder(..).knowledge(kb)`; `Knowledge::with_loaders(guard, notify,
+//! Integrator: `Mail::builder(..).knowledge(kb)`; `Knowledge::with_loaders(notify,
 //! vec![Arc::new(ThreadLoader), Arc::new(FilesLoader::new(data_dir))])`; `config::targets::register(r)`.
 
 steve_i18n::init!();
@@ -75,7 +75,7 @@ pub use adapters::ImapAdapter;
 pub use config::MailConfig;
 pub use error::{AdapterError, MailError, MailResult};
 pub use events::{Delivery, MailEvent, MailEvents, MailNotify, RecordingEvents};
-pub use send::{DraftHooks, DraftLink, SecretScan, SendOutcome};
+pub use send::{DraftHooks, DraftLink, SendOutcome};
 pub use sync::{BACKOFF_MAX, BACKOFF_MIN, POLL};
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -91,9 +91,7 @@ pub struct MailBuilder {
     events: Arc<dyn MailEvents>,
     notify: Arc<dyn MailNotify>,
     link: Option<DraftLink>,
-    secrets: Arc<dyn SecretScan>,
     hooks: Arc<dyn DraftHooks>,
-    guard: Arc<dyn steve_knowledge::Guard>,
     files: Arc<dyn attach::FileStore>,
     items: Arc<dyn items::MailItems>,
     kb: Option<steve_knowledge::Knowledge>,
@@ -112,19 +110,9 @@ impl MailBuilder {
         self.link = Some(link);
         self
     }
-    /// The vault redactor (V4); without it nothing is recognised as a secret.
-    pub fn secrets(mut self, s: Arc<dyn SecretScan>) -> Self {
-        self.secrets = s;
-        self
-    }
     /// steve-core's side of drafts (agent feedback, finishing items).
     pub fn hooks(mut self, h: Arc<dyn DraftHooks>) -> Self {
         self.hooks = h;
-        self
-    }
-    /// `guard::scan` for mail text going into prompts (default: the knowledge module's token guard).
-    pub fn guard(mut self, g: Arc<dyn steve_knowledge::Guard>) -> Self {
-        self.guard = g;
         self
     }
     /// steve-hub's attachment store (landing attachments, files an agent attaches; E5).
@@ -160,8 +148,6 @@ impl MailBuilder {
         Mail(Arc::new(Inner {
             link,
             send_recovered: Mutex::new(false),
-            secrets: self.secrets,
-            guard: self.guard,
             files: self.files,
             items: self.items,
             kb: self.kb,
@@ -194,8 +180,6 @@ struct Inner {
     link: DraftLink,
     /// One startup recovery gate for the single sender; shared by all Mail clones.
     send_recovered: Mutex<bool>,
-    secrets: Arc<dyn SecretScan>,
-    guard: Arc<dyn steve_knowledge::Guard>,
     files: Arc<dyn attach::FileStore>,
     items: Arc<dyn items::MailItems>,
     kb: Option<steve_knowledge::Knowledge>,
@@ -217,9 +201,7 @@ impl Mail {
             events: Arc::new(events::NoEvents),
             notify: Arc::new(events::NoNotify),
             link: None,
-            secrets: Arc::new(send::NoSecrets),
             hooks: Arc::new(send::NoHooks),
-            guard: Arc::new(steve_knowledge::TokenGuard),
             files: Arc::new(attach::NoFiles),
             items: Arc::new(items::NoItems),
             kb: None,

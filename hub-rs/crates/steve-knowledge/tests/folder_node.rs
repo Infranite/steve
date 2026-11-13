@@ -11,7 +11,7 @@ use async_trait::async_trait;
 use steve_knowledge::repo::{self, DocRow};
 use steve_knowledge::sources::folder::{self, FolderPolicy, SourceBody};
 use steve_knowledge::sources::folder_node::{DENIED, FolderPlace, FolderPlaces, OFFLINE, Unplaced};
-use steve_knowledge::{Knowledge, TokenGuard, index};
+use steve_knowledge::{Knowledge, index};
 use steve_modules::testkit::{ME, TestEnv, WS, caller};
 use steve_node_api::testkit::FakeNode;
 use steve_node_api::*;
@@ -177,7 +177,7 @@ fn setup() -> Env {
     let wiki = home.join("wiki");
     fs::create_dir_all(home.join(".steve")).unwrap();
     fs::create_dir_all(&wiki).unwrap();
-    let kb = Knowledge::with_loaders(Arc::new(TokenGuard), |_| {}, vec![]);
+    let kb = Knowledge::with_loaders(|_| {}, vec![]);
     assert!(kb.set_folder_policy(FolderPolicy::new(&home, home.join(".steve"))));
     let fake = FakeNode::new("n_kb");
     fake.set_roots(vec![RootInfo {

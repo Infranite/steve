@@ -1056,6 +1056,22 @@ impl ConnectionProvider for ImapAdapter {
     fn name(&self) -> &str {
         "其他邮箱（IMAP）"
     }
+    fn localize(&self, text: &str) -> Option<String> {
+        const KEYS: &[&str] = &[
+            "mail.text.imap_name",
+            "mail.text.address",
+            "mail.text.username",
+            "mail.text.username_hint",
+            "mail.text.password",
+            "mail.text.imap_host",
+            "mail.text.imap_port",
+            "mail.text.imap_security",
+            "mail.text.smtp_host",
+            "mail.text.smtp_port",
+            "mail.text.smtp_security",
+        ];
+        steve_i18n::reword!(text, KEYS)
+    }
     fn caps(&self) -> &[&'static str] {
         &["mail.read", "mail.draft", "mail.send", "events"]
     }
@@ -1332,6 +1348,32 @@ impl SyncSession for ImapSync {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The form and the name in the reader's language; zh-CN as declared.
+    #[test]
+    fn form_text_by_language() {
+        use steve_modules::accounts::connections::{fields_shown, shown};
+        let a = ImapAdapter::new(MailConfig::new(std::env::temp_dir()));
+        let texts = || {
+            let mut out = vec![shown(&a, a.name())];
+            for f in fields_shown(&a).unwrap() {
+                out.push(f.label);
+                out.extend(f.hint);
+            }
+            out
+        };
+        let en = steve_i18n::with(steve_i18n::EN, texts);
+        assert_eq!(en[0], "Other mailbox (IMAP)");
+        assert!(en.contains(&"Email address".to_string()), "{en:?}");
+        assert!(
+            en.iter()
+                .all(|t| !t.chars().any(|c| ('\u{4e00}'..='\u{9fff}').contains(&c))),
+            "{en:?}"
+        );
+        let zh = steve_i18n::with(steve_i18n::ZH_CN, texts);
+        assert_eq!(zh[0], "其他邮箱（IMAP）");
+        assert_eq!(zh[1], "邮箱地址");
+    }
 
     #[test]
     fn roles_by_name() {

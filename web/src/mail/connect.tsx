@@ -2,11 +2,12 @@
  * IMAP / SMTP hosts, ports and encryption and says how to get an app password; 其他 opens the server settings. The
  * password field is a password input with autocomplete off; values only go into the `POST /connections` body. */
 import { useState } from "react"
-import { ChevronDownIcon, ExternalLinkIcon, LockIcon } from "lucide-react"
+import { ExternalLinkIcon, LockIcon } from "lucide-react"
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible"
 import { cn } from "cn"
 import { Input } from "@/components/ui/input"
 import { Field, FieldDescription, FieldLabel } from "@/components/ui/field"
-import { Chips } from "@/ui"
+import { Chips, DiscChevron, DISC_TRIGGER } from "@/ui"
 import { Select } from "@/view-shared"
 import { IMAP_PRESETS, type ImapPreset } from "@/api/mail"
 import type { RFieldDef } from "@/api/accounts"
@@ -55,17 +56,17 @@ export function ImapFields({ fields, vals, setVals }: { fields: RFieldDef[]; val
       </Field>
       {input("address", { placeholder: "you@example.com" })}
       {input("password")}
-      <div>
-        <button type="button" className="inline-flex items-center gap-1 type-callout text-muted-foreground hover:text-foreground" aria-expanded={open} onClick={() => setOpen(!open)} data-imap-server-toggle>
-          {t("mail:connect.serverSettings")}<ChevronDownIcon className={cn("size-4 transition-transform", open && "rotate-180")} aria-hidden />
-          {!open && v("imap_host") && <span className="ml-1 font-mono text-[12px]">{v("imap_host")}:{v("imap_port")} · {v("smtp_host")}:{v("smtp_port")}</span>}
-        </button>
-        {open && <div className="mt-3 grid grid-cols-1 gap-4 sm:grid-cols-[1fr_96px_120px]" data-imap-server>
+      <Collapsible open={open} onOpenChange={setOpen}>
+        <CollapsibleTrigger className={cn(DISC_TRIGGER, "max-w-full")} data-imap-server-toggle>
+          <DiscChevron />{t("mail:connect.serverSettings")}
+          {!open && v("imap_host") && <span className="ml-1 truncate font-mono type-footnote">{v("imap_host")}:{v("imap_port")} · {v("smtp_host")}:{v("smtp_port")}</span>}
+        </CollapsibleTrigger>
+        <CollapsibleContent><div className="grid grid-cols-1 gap-4 p-px pt-3 sm:grid-cols-[1fr_96px_120px]" data-imap-server>
           {server.filter((k) => k.startsWith("imap")).map((k) => input(k))}
           {server.filter((k) => k.startsWith("smtp")).map((k) => input(k))}
           <div className="sm:col-span-3">{input("username")}</div>
-        </div>}
-      </div>
+        </div></CollapsibleContent>
+      </Collapsible>
     </div>
   )
 }

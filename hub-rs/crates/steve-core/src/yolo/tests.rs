@@ -653,6 +653,7 @@ fn tool_in(pl: &Place, kind: Option<&str>, raw: Value) -> Facts {
             project_dir: Some(pl.root.join("project")),
             branch: Some("steve/st-1".into()),
             own_pids: vec![],
+            full: false,
         }),
     );
     f.question = "允许执行：t".into();
@@ -916,6 +917,7 @@ fn every_row_of_the_table() {
                 asked: None,
                 own_action: None,
                 steve_tried: false,
+                yours: false,
             }),
         )
     };
@@ -1375,7 +1377,7 @@ fn every_row_of_the_table() {
                 &["discard"],
                 Subject::Chan(outbound(
                     Identity::Bot,
-                    Disclosure::Blocked,
+                    Disclosure::Unchecked,
                     false,
                     OutboundStage::Blocked,
                 )),
@@ -1551,6 +1553,7 @@ fn delays_texts_and_undo() {
             asked: None,
             own_action: None,
             steve_tried: false,
+            yours: false,
         }),
     );
     let Verdict::Auto { text, .. } = run(&f, &pl) else {
@@ -1571,6 +1574,7 @@ fn delays_texts_and_undo() {
             asked: None,
             own_action: None,
             steve_tried: false,
+            yours: false,
         }),
     );
     let Verdict::Auto { text, delay_s, .. } = run(&f, &pl) else {
@@ -2025,7 +2029,7 @@ fn limited_subjects(pl: &Place) -> Vec<(&'static str, Facts, u8)> {
                 &all_ids,
                 Subject::Chan(o(
                     Identity::SelfAccount,
-                    Disclosure::Blocked,
+                    Disclosure::Unchecked,
                     true,
                     OutboundStage::Blocked,
                 )),
@@ -2258,7 +2262,7 @@ proptest! {
         }
         // fail cards offer `delivered` and `tosteve`; flows offer `continue_once`; none of them is chosen
         for (subject, opts) in [
-            (Subject::Stall(Stall { cause: StallCause::Other, no_progress: 0, attempts: 0, asked: None, own_action: None, steve_tried: false }), vec!["delivered", "tosteve"]),
+            (Subject::Stall(Stall { cause: StallCause::Other, no_progress: 0, attempts: 0, asked: None, own_action: None, steve_tried: false, yours: false }), vec!["delivered", "tosteve"]),
             (Subject::FlowRun { over_budget: false }, vec!["continue_once"]),
             (Subject::SecretUse { template: "api_key".into(), sensitivity: "normal".into() }, vec!["grant_8h", "allow"]),
         ] {

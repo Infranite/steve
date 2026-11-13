@@ -26,21 +26,19 @@ pub mod state;
 pub mod sync;
 
 // K2: folder and file sources.
-pub mod guard;
 pub mod scan;
 // K3: item and chat sources, candidate memories.
 pub mod candidates;
 pub mod extract;
 
 pub use api::routes;
-pub use guard::TokenGuard;
 pub use retrieve::{
     Hit, Purpose, Query, Retrieved, SEMANTIC_DOWN_NOTE, anchor_mems, record_use, retrieve,
     retrieve_all,
 };
 pub use sources::files::FilesLoader;
 pub use sources::folder::{FolderLoader, FolderPolicy, spawn_scans};
-pub use state::{Guard, KbEvent, Knowledge, NoGuard};
+pub use state::{KbEvent, Knowledge};
 
 // K4: prompts, citations, MCP tools, uses.
 pub mod cite;
@@ -52,3 +50,8 @@ pub use context::{KnowledgeContext, chat_context, session_context};
 
 // K5: conversational configuration.
 pub mod drafts;
+
+// Provenance, subjects and the memory upkeep tools (knowledge page, knowledge steward).
+pub mod provenance;
+pub mod steward;
+pub mod subjects;

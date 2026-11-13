@@ -2,95 +2,134 @@
 @import "tw-animate-css";
 @import "shadcn/tailwind.css";
 @import "@xyflow/react/dist/style.css";
+@import "./styles/affectui-theme.css";
+@import "./styles/affectui-placement.css";
+@import "./styles/affectui-forms.css";
+@import "./styles/affectui-overlays.css";
 @source "../../node_modules/streamdown/dist/*.js";
 @source "../../node_modules/@streamdown/code/dist/*.js";
 
 @custom-variant dark (&:is(.dark *));
 
-/* ─── Steve design tokens — see DESIGN.md ───────────────────────────── */
+/* ─── Steve design tokens — visual system v2 "Quiet Precision" ─────────────────────────────────────────
+ * Neutrals are Radix slate (slightly cool), the one accent is Radix indigo; status colors are used for status only.
+ * Hierarchy comes from type and surface brightness, not from lines: hairlines are faint, cards lift with a soft
+ * shadow in light and a lighter surface with a top highlight in dark. Token names are the old ones, so every
+ * component follows. */
 :root {
-  --background: #ffffff;
-  --foreground: #1d1d1f;
+  --background: #fbfbfc;
+  --foreground: #1c2024;
   --card: #ffffff;
-  --card-foreground: #1d1d1f;
+  --card-foreground: #1c2024;
   --popover: #ffffff;
-  --popover-foreground: #1d1d1f;
-  --primary: #1d1d1f;
+  --popover-foreground: #1c2024;
+  --primary: #3e63dd;
   --primary-foreground: #ffffff;
-  --secondary: #f5f5f7;
-  --secondary-foreground: #1d1d1f;
-  --muted: #f5f5f7;
-  --muted-foreground: #6e6e73;
-  --accent: #f0f0f2; /* hover wash, menu highlight */
-  --accent-foreground: #1d1d1f;
-  --destructive: #c9251c;
-  --border: #e5e5ea;
-  --input: #e5e5ea;
-  --ring: #0071e3;
-  --tertiary: #8e8e93;
-  --blue: #0071e3;
-  --attention: #ff9500;
-  --success: #28a745;
-  --danger-icon: #e5352b;
-  --chart-1: #0071e3; --chart-2: #6e6e73; --chart-3: #aeaeb2; --chart-4: #1d1d1f; --chart-5: #ff9500;
-  /* 统计图里“谁”的颜色（模型、Bot、项目、token 类型）：低饱和、避开状态色，按顺序取，第 6 个起并入“其他”（灰）。
-   * 两套都过了 dataviz 校验：亮度带、色度下限、相邻色盲分离 ≥ 8 ΔE。状态仍用 blue / attention / success / destructive。 */
-  --series-1: #2f5fae; --series-2: #3fb8a0; --series-3: #7457d1; --series-4: #c9a24a; --series-5: #b04a7a; --series-other: #aeaeb2;
+  --secondary: #f0f0f3;
+  --secondary-foreground: #1c2024;
+  --muted: #f0f0f3;
+  --muted-foreground: #60646c;
+  --accent: #ececf0; /* hover wash, menu highlight */
+  --accent-foreground: #1c2024;
+  --destructive: #dc3e42;
+  --border: #e6e7eb;
+  --input: #d9d9e0;
+  --ring: #3e63dd;
+  --tertiary: #80838d;
+  --blue: #3e63dd;
+  --attention: #c27c0e;
+  --success: #2b9a66;
+  --danger-icon: #e5484d;
+  --chart-1: #3e63dd; --chart-2: #8b8d98; --chart-3: #c1c2cb; --chart-4: #1c2024; --chart-5: #e2a336;
+  /* 统计图里“谁”的颜色（模型、Bot、项目、token 类型）：低饱和、避开状态色，按顺序取，第 6 个起并入“其他”（灰）。 */
+  --series-1: #2f5fae; --series-2: #3fb8a0; --series-3: #7457d1; --series-4: #c9a24a; --series-5: #b04a7a; --series-other: #b9bbc6;
   --radius: 0.75rem;
-  --sidebar: rgb(245 245 247 / 0.86);
-  --sidebar-foreground: #1d1d1f;
-  --sidebar-primary: #1d1d1f;
+  --sidebar: #f6f6f8;
+  --sidebar-foreground: #1c2024;
+  --sidebar-primary: #1c2024;
   --sidebar-primary-foreground: #ffffff;
-  --sidebar-accent: rgb(0 0 0 / 0.06);
-  --sidebar-accent-foreground: #1d1d1f;
-  --sidebar-border: #e5e5ea;
-  --sidebar-ring: #0071e3;
-  --canvas-graph: #fafafa;
-  --code: #f6f6f7; /* code block surface */
+  --sidebar-accent: rgb(28 32 36 / 0.06);
+  --sidebar-accent-foreground: #1c2024;
+  --sidebar-border: #e6e7eb;
+  --sidebar-ring: #3e63dd;
+  --canvas-graph: #f9f9fb;
+  --code: #f6f6f8; /* code block surface */
+  --raised: #ffffff; /* a surface one step above a sunken fill (the selected segment) */
+  /* elevation: a layer above the page */
+  --lift: 0 1px 2px rgb(16 24 40 / 0.04), 0 0 0 1px rgb(16 24 40 / 0.035);
+  --lift-hover: 0 2px 8px -2px rgb(16 24 40 / 0.08), 0 0 0 1px rgb(16 24 40 / 0.05);
+  --highlight: inset 0 0 0 0 transparent;
+  --sh-xs: 0 1px 2px rgb(16 24 40 / 0.04);
+  --sh-sm: 0 1px 3px rgb(16 24 40 / 0.06), 0 1px 2px rgb(16 24 40 / 0.03);
+  --sh-md: 0 6px 16px -4px rgb(16 24 40 / 0.1), 0 0 0 1px rgb(16 24 40 / 0.05);
+  --sh-lg: 0 12px 32px -6px rgb(16 24 40 / 0.14), 0 0 0 1px rgb(16 24 40 / 0.05);
+  --sh-xl: 0 28px 64px -12px rgb(16 24 40 / 0.22), 0 0 0 1px rgb(16 24 40 / 0.06);
 }
 .dark {
-  /* v6: a deeper canvas so the user bubble, cards and the composer read as layers instead of grey on grey */
-  --background: #161618;
-  --foreground: #f5f5f7;
-  --card: #1e1e21;
-  --card-foreground: #f5f5f7;
-  --popover: #232326;
-  --popover-foreground: #f5f5f7;
-  --primary: #f5f5f7;
-  --primary-foreground: #161618;
-  --secondary: #26262a;
-  --secondary-foreground: #f5f5f7;
-  --muted: #26262a;
-  --muted-foreground: #9a9a9f;
-  --accent: #26262a;
-  --accent-foreground: #f5f5f7;
-  --destructive: #ff453a;
-  --border: #2e2e32;
-  --input: #38383d;
-  --ring: #0a84ff;
-  --tertiary: #7c7c80;
-  --blue: #0a84ff;
-  --attention: #ff9f0a;
-  --success: #30d158;
-  --danger-icon: #ff453a;
-  --chart-1: #0a84ff; --chart-2: #98989d; --chart-3: #636366; --chart-4: #f5f5f7; --chart-5: #ff9f0a;
-  --series-1: #4f7fd4; --series-2: #3aa58f; --series-3: #8f78e6; --series-4: #b08a3a; --series-5: #cc6597; --series-other: #636366;
-  --sidebar: rgb(30 30 33 / 0.9);
-  --sidebar-foreground: #f5f5f7;
-  --sidebar-primary: #f5f5f7;
-  --sidebar-primary-foreground: #161618;
-  --sidebar-accent: rgb(255 255 255 / 0.07);
-  --sidebar-accent-foreground: #f5f5f7;
-  --sidebar-border: #2a2a2e;
-  --sidebar-ring: #0a84ff;
-  --canvas-graph: #131315;
-  --code: #1c1c1f;
+  --background: #111113;
+  --foreground: #edeef0;
+  --card: #18191b;
+  --card-foreground: #edeef0;
+  --popover: #1d1e21;
+  --popover-foreground: #edeef0;
+  --primary: #3e63dd;
+  --primary-foreground: #ffffff;
+  --secondary: #212225;
+  --secondary-foreground: #edeef0;
+  --muted: #212225;
+  --muted-foreground: #a6aab2;
+  --accent: #26282c;
+  --accent-foreground: #edeef0;
+  --destructive: #ec5d5e;
+  --border: #25272b;
+  --input: #34373c;
+  --ring: #5472e4;
+  --tertiary: #6f747d;
+  --blue: #6683ec;
+  --attention: #e8a92e;
+  --success: #3dbe82;
+  --danger-icon: #ec5d5e;
+  --chart-1: #5472e4; --chart-2: #8b8d98; --chart-3: #4b5058; --chart-4: #edeef0; --chart-5: #e8a92e;
+  --series-1: #4f7fd4; --series-2: #3aa58f; --series-3: #8f78e6; --series-4: #b08a3a; --series-5: #cc6597; --series-other: #5a6169;
+  --sidebar: #0e0e10;
+  --sidebar-foreground: #edeef0;
+  --sidebar-primary: #edeef0;
+  --sidebar-primary-foreground: #111113;
+  --sidebar-accent: rgb(255 255 255 / 0.06);
+  --sidebar-accent-foreground: #edeef0;
+  --sidebar-border: #1d1e21;
+  --sidebar-ring: #5472e4;
+  --canvas-graph: #0e0e10;
+  --code: #161719;
+  --raised: #2b2d31;
+  --lift: inset 0 1px 0 rgb(255 255 255 / 0.035), 0 0 0 1px rgb(255 255 255 / 0.055);
+  --lift-hover: inset 0 1px 0 rgb(255 255 255 / 0.05), 0 0 0 1px rgb(255 255 255 / 0.09);
+  --sh-xs: 0 1px 2px rgb(0 0 0 / 0.3);
+  --sh-sm: 0 1px 3px rgb(0 0 0 / 0.35);
+  --sh-md: 0 8px 24px -6px rgb(0 0 0 / 0.55), inset 0 1px 0 rgb(255 255 255 / 0.05), 0 0 0 1px rgb(255 255 255 / 0.07);
+  --sh-lg: 0 16px 40px -8px rgb(0 0 0 / 0.6), inset 0 1px 0 rgb(255 255 255 / 0.05), 0 0 0 1px rgb(255 255 255 / 0.08);
+  --sh-xl: 0 32px 72px -12px rgb(0 0 0 / 0.7), inset 0 1px 0 rgb(255 255 255 / 0.06), 0 0 0 1px rgb(255 255 255 / 0.09);
+}
+
+/* fonts and radii are variables the utilities read (not inlined), so an appearance choice (web/src/themes) can change
+ * them on <html> */
+@theme {
+  /* Geist for Latin, the system's CJK face for Chinese (per glyph), Geist Mono for code, ids and figures in tables */
+  --font-sans: "Geist Variable", -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Segoe UI", sans-serif;
+  --font-heading: "Geist Variable", -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Segoe UI", sans-serif;
+  --font-mono: "Geist Mono Variable", "SF Mono", ui-monospace, Menlo, Consolas, monospace;
+  /* radius: 6 small controls and badges · 8 buttons and inputs · 12 cards and panels · 16 dialogs and sheets · pill.
+   * lg and xl both land on the card radius so the many places that picked one or the other agree */
+  --radius-sm: 6px;
+  --radius-md: 6px;
+  --radius-lg: 8px;
+  --radius-xl: 12px;
+  --radius-2xl: 16px;
+  --radius-3xl: 18px;
+  --radius-4xl: 9999px;
 }
 
 @theme inline {
-  --font-sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", Roboto, "Helvetica Neue", sans-serif;
-  --font-heading: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", Roboto, sans-serif;
-  --font-mono: "SF Mono", ui-monospace, "JetBrains Mono", Menlo, Consolas, monospace;
   --color-background: var(--background);
   --color-foreground: var(--foreground);
   --color-card: var(--card);
@@ -125,54 +164,73 @@
   --color-sidebar-ring: var(--sidebar-ring);
   --color-canvas-graph: var(--canvas-graph);
   --color-code: var(--code);
-  /* radius scale pinned to DESIGN.md: control 8 · card/list 12 · dialog 16 · composer 20 · pill */
-  --radius-sm: 6px;
-  --radius-md: 8px;
-  --radius-lg: 10px;
-  --radius-xl: 12px;
-  --radius-2xl: 16px;
-  --radius-3xl: 20px;
-  --radius-4xl: 9999px;
-  --ease-apple: cubic-bezier(0.2, 0.8, 0.2, 1);
+  /* motion: fast 120 (hover, press) · base 180 (popovers, toggles) · slow 260 (dialogs, sheets, expand) */
+  --ease-apple: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
+  /* elevation reads the theme's variables, so dark mode gets its own (a static value would be baked in) */
+  --shadow-xs: var(--sh-xs);
+  --shadow-sm: var(--sh-sm);
+  --shadow-md: var(--sh-md);
+  --shadow-lg: var(--sh-lg);
+  --shadow-xl: var(--sh-xl);
 }
 
 /* elevation: cards are hairline-only; only floating layers cast shadows */
+
+/* type size (Settings → 外观 → 字号): every size of the type scale, the Tailwind text-* sizes and the affectUI parts'
+ * font sizes are multiplied by --type-scale; "大" sets html.font-large (web/src/lib/motion.ts). Spacing and widths stay,
+ * so layouts keep their geometry and only the words grow */
+:root { --type-scale: 1; }
+html.font-large { --type-scale: 1.125; }
 @theme {
-  --shadow-xs: 0 0 #0000;
-  --shadow-sm: 0 0 #0000;
-  --shadow-md: 0 4px 16px rgb(0 0 0 / 0.08), 0 0 0 0.5px rgb(0 0 0 / 0.06);
-  --shadow-lg: 0 8px 28px rgb(0 0 0 / 0.12), 0 0 0 0.5px rgb(0 0 0 / 0.06);
-  --shadow-xl: 0 24px 64px rgb(0 0 0 / 0.18), 0 0 0 0.5px rgb(0 0 0 / 0.08);
+  --text-xs: calc(0.75rem * var(--type-scale)); --text-sm: calc(0.875rem * var(--type-scale)); --text-base: calc(1rem * var(--type-scale));
+  --text-lg: calc(1.125rem * var(--type-scale)); --text-xl: calc(1.25rem * var(--type-scale)); --text-2xl: calc(1.5rem * var(--type-scale));
 }
 
-/* type scale — DESIGN.md */
-@utility type-large-title { font-family: var(--font-heading); font-size: 26px; line-height: 32px; font-weight: 600; letter-spacing: -0.02em; }
-@utility type-title { font-family: var(--font-heading); font-size: 20px; line-height: 28px; font-weight: 600; letter-spacing: -0.015em; }
-@utility type-headline { font-size: 15px; line-height: 22px; font-weight: 600; letter-spacing: -0.005em; }
-@utility type-body { font-size: 14px; line-height: 22px; font-weight: 400; }
+/* type scale — the only sizes (no text-[Npx]): display · title · headline · body · chat · callout · footnote · label · code */
+@utility type-display { font-family: var(--font-heading); font-size: calc(28px * var(--type-scale)); line-height: calc(36px * var(--type-scale)); font-weight: 600; letter-spacing: -0.022em; }
+@utility type-large-title { font-family: var(--font-heading); font-size: calc(28px * var(--type-scale)); line-height: calc(36px * var(--type-scale)); font-weight: 600; letter-spacing: -0.022em; }
+@utility type-title { font-family: var(--font-heading); font-size: calc(20px * var(--type-scale)); line-height: calc(28px * var(--type-scale)); font-weight: 600; letter-spacing: -0.014em; }
+@utility type-headline { font-size: calc(15px * var(--type-scale)); line-height: calc(22px * var(--type-scale)); font-weight: 600; letter-spacing: -0.006em; }
+@utility type-body { font-size: calc(14px * var(--type-scale)); line-height: calc(22px * var(--type-scale)); font-weight: 400; }
 /* conversation text: one step up from body, CJK needs the extra leading */
-@utility type-chat { font-size: 15px; line-height: 26px; font-weight: 400; }
-@utility type-callout { font-size: 13px; line-height: 20px; font-weight: 400; }
-@utility type-footnote { font-size: 12px; line-height: 16px; font-weight: 400; }
-@utility type-label { font-size: 12px; line-height: 16px; font-weight: 500; }
-@utility type-code { font-family: var(--font-mono); font-size: 12.5px; line-height: 20px; }
+@utility type-chat { font-size: calc(15px * var(--type-scale)); line-height: calc(26px * var(--type-scale)); font-weight: 400; }
+@utility type-callout { font-size: calc(13px * var(--type-scale)); line-height: calc(20px * var(--type-scale)); font-weight: 400; }
+@utility type-footnote { font-size: calc(12px * var(--type-scale)); line-height: calc(18px * var(--type-scale)); font-weight: 400; }
+@utility type-label { font-size: calc(12px * var(--type-scale)); line-height: calc(16px * var(--type-scale)); font-weight: 500; letter-spacing: 0.01em; }
+@utility type-code { font-family: var(--font-mono); font-size: calc(12.5px * var(--type-scale)); line-height: calc(20px * var(--type-scale)); }
 
 @layer base {
   * { @apply border-border outline-ring/50; }
   html { @apply font-sans; -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; text-rendering: optimizeLegibility; }
   /* a sideways swipe must not pull the page past its edge (ST-50: a light seam showed beside the conversation) */
   html, body { overflow-x: clip; overscroll-behavior-x: none; }
-  body { @apply bg-background text-foreground; font-size: 14px; line-height: 22px; font-feature-settings: "kern"; }
+  body { @apply bg-background text-foreground; font-size: calc(14px * var(--type-scale)); line-height: calc(22px * var(--type-scale)); font-feature-settings: "kern", "ss01"; }
+  /* figures line up wherever they are compared */
+  .font-mono, .tabular-nums, time { font-variant-numeric: tabular-nums; }
+  /* every interactive surface eases its colors instead of snapping */
+  :where(button, a, [role="button"], [role="menuitem"], [role="option"], [role="tab"], input, textarea, select, summary) {
+    transition-property: background-color, border-color, color, box-shadow, opacity, transform;
+    transition-duration: 120ms; transition-timing-function: var(--ease-out);
+  }
   ::selection { background: color-mix(in srgb, var(--blue) 22%, transparent); }
   h1, h2, h3 { text-wrap: balance; }
 }
 
+/* motion scale: 120ms colour and press · 180ms popovers, toggles, chevrons, entrances and page changes · 260ms dialogs,
+ * sheets, expand and collapse; all on --ease-out. */
 /* running dot — the only looping animation in the product */
 @keyframes steve-breathe { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: .35; transform: scale(.82); } }
 .dot-running { animation: steve-breathe 1.6s ease-in-out infinite; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: 1ms !important; animation-iteration-count: 1 !important; transition-duration: 1ms !important; }
 }
+/* the reduced-motion setting (Settings → 外观) does the same as the system preference, on any system */
+html.reduce-motion *, html.reduce-motion *::before, html.reduce-motion *::after {
+  animation-duration: 1ms !important; animation-iteration-count: 1 !important; transition-duration: 1ms !important; scroll-behavior: auto !important;
+}
+html.reduce-motion::view-transition-group(*), html.reduce-motion::view-transition-old(*), html.reduce-motion::view-transition-new(*) { animation: none !important; }
 
 /* React Flow — quiet chrome */
 .react-flow__attribution { display: none; }
@@ -184,14 +242,33 @@
 /* entrance: short, no blur, no bounce */
 @keyframes steve-in { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
 @keyframes steve-fade { from { opacity: 0; } to { opacity: 1; } }
-.anim-in { animation: steve-in 200ms var(--ease-apple, cubic-bezier(0.2, 0.8, 0.2, 1)) both; }
-.anim-page { animation: steve-fade 160ms ease-out both; }
+.anim-in { animation: steve-in 180ms var(--ease-out) both; }
+.anim-page { animation: steve-in 180ms var(--ease-out) both; }
+/* a floating layer drawn by hand (the composer's # @ / menu, a suggestion list): it rises in like the others and,
+ * kept mounted for a moment by useLinger, fades back out instead of vanishing */
+@keyframes steve-float-out { to { opacity: 0; transform: translateY(2px) scale(0.98); } }
+.anim-float { animation: steve-in 180ms var(--ease-out) both; }
+.anim-float[data-leaving] { animation: steve-float-out 120ms var(--ease-in-out) both; pointer-events: none; }
+/* route changes: the content area cross-fades and rises a little; the sidebar stays (view transitions) */
+::view-transition-old(page) { animation: 120ms var(--ease-in-out) both steve-out; }
+::view-transition-new(page) { animation: 180ms var(--ease-out) both steve-in; }
+::view-transition-old(root), ::view-transition-new(root) { animation: none; }
+@keyframes steve-out { to { opacity: 0; } }
+/* floating layers open from where they were asked for, quickly */
+[data-slot$="-content"][data-open], [data-slot="popover-content"], [data-slot="dropdown-menu-content"], [data-slot="select-content"], [data-slot="tooltip-content"] {
+  animation-duration: 180ms !important; animation-timing-function: var(--ease-out) !important;
+}
+[data-slot="dialog-content"], [data-slot="alert-dialog-content"], [data-slot="sheet-content"] { animation-duration: 260ms !important; transition-duration: 260ms !important; transition-timing-function: var(--ease-out) !important; }
+/* things that open and close in place animate their height (Chrome 129+; elsewhere they just open) */
+:root { interpolate-size: allow-keywords; }
+details::details-content { transition: height 260ms var(--ease-out), content-visibility 260ms allow-discrete; height: 0; overflow: clip; }
+details[open]::details-content { height: auto; }
 
 /* Markdown in messages and cards — sized to the type scale, not a document */
 .md { overflow-wrap: anywhere; }
 .md > * + * { margin-top: 8px; }
-.md :is(h1, h2, h3, h4, h5, h6) { margin: 14px 0 4px; font-size: 15px; line-height: 22px; font-weight: 600; }
-.md :is(h1, h2) { font-size: 16px; }
+.md :is(h1, h2, h3, h4, h5, h6) { margin: 14px 0 4px; font-size: calc(15px * var(--type-scale)); line-height: calc(22px * var(--type-scale)); font-weight: 600; }
+.md :is(h1, h2) { font-size: calc(16px * var(--type-scale)); }
 /* Streamdown lists are list-inside with padded items: wrapped lines fall under the bullet and items drift apart. Hang them instead */
 .md :is(ul, ol) { list-style-position: outside; padding-left: 1.35em; }
 .md li { padding: 0; }
@@ -200,17 +277,17 @@
 .md li::marker { color: var(--muted-foreground); }
 /* code: one surface, a quiet header, no frame inside the frame */
 .md [data-streamdown="code-block"] { margin: 12px 0; padding: 0; gap: 0; border-radius: 10px; background: var(--code); overflow: hidden; }
-.md [data-streamdown="code-block-header"] { height: 32px; padding: 0 12px; border-bottom: 1px solid var(--border); font-size: 12px; }
+.md [data-streamdown="code-block-header"] { height: 32px; padding: 0 12px; border-bottom: 1px solid var(--border); font-size: calc(12px * var(--type-scale)); }
 .md [data-streamdown="code-block-header"] > span { margin-left: 0; }
-.md [data-streamdown="code-block-body"] { border: 0; border-radius: 0; background: transparent; padding: 10px 14px; font-size: 12.5px; line-height: 20px; }
+.md [data-streamdown="code-block-body"] { border: 0; border-radius: 0; background: transparent; padding: 10px 14px; font-size: calc(12.5px * var(--type-scale)); line-height: calc(20px * var(--type-scale)); }
 .md [data-streamdown="code-block-actions"] { border: 0; background: transparent; padding: 0; backdrop-filter: none; }
 .md [data-streamdown="code-block"] > .absolute { top: 2px; right: 6px; }
 .md :not(pre) > code { padding: 1px 5px; border-radius: 5px; background: var(--muted); font-size: 0.9em; }
-.md table { font-size: 13px; }
+.md table { font-size: calc(13px * var(--type-scale)); }
 /* tables sit in the text, no frame or toolbar: rules between rows, the header in secondary weight */
 /* as wide as its content up to the column; wider content scrolls sideways */
 .md [data-md-table] table { width: auto; border-collapse: collapse; }
-.md [data-md-table] :is(th, td) { padding: 7px 12px 7px 0; border-bottom: 1px solid var(--border); text-align: left; vertical-align: top; line-height: 20px; }
+.md [data-md-table] :is(th, td) { padding: 7px 12px 7px 0; border-bottom: 1px solid var(--border); text-align: left; vertical-align: top; line-height: calc(20px * var(--type-scale)); }
 .md [data-md-table] :is(th, td):last-child { padding-right: 0; }
 .md [data-md-table] th { font-weight: 600; color: var(--muted-foreground); white-space: nowrap; }
 .md [data-md-table] tbody tr:last-child > td { border-bottom: 0; }

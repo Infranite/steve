@@ -13,7 +13,12 @@ try {
   assert.deepEqual(await card.locator("[data-suggest-choice]").allInnerTexts(), ["追加到 ST-40", "单独建项"])
   assert.equal(await page.getByText("在这里回答", { exact: true }).count(), 0)
   assert.equal(await page.getByText(/这是给/).count(), 0)
-  const primary = async (l) => (await l.getAttribute("class")).split(" ").includes("bg-primary")
+  // the accent: the button is actually painted in the theme's --primary, not just given the variant
+  const primary = async (l) => l.evaluate((el) => {
+    const probe = document.createElement("span"); probe.style.backgroundColor = "var(--primary)"; el.parentElement.appendChild(probe)
+    const want = getComputedStyle(probe).backgroundColor; probe.remove()
+    return getComputedStyle(el).backgroundColor === want
+  })
   assert.equal(await primary(card.locator('[data-suggest-choice="item"]')), true, "the recommended choice stands out")
   assert.equal(await primary(card.locator('[data-suggest-choice="new"]')), false)
   /* an older card keeps “在这里出方案” as its primary choice */

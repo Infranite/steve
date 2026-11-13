@@ -2,6 +2,7 @@
 //! Every request runs in one workspace (header `x-steve-ws` or cookie `steve_ws`, checked against membership).
 
 mod annotations;
+mod avatar;
 mod bots;
 pub mod dedupe;
 mod diagnostics;
@@ -503,6 +504,13 @@ pub fn router(st: AppState, modules: Router) -> Router {
             post(files::upload).layer(axum::extract::DefaultBodyLimit::disable()),
         )
         .route("/files/{id}", get(files::download))
+        // a contact's picture: its own upload limit, like /files
+        .route(
+            "/contacts/{id}/avatar",
+            put(avatar::put)
+                .delete(avatar::delete)
+                .layer(axum::extract::DefaultBodyLimit::disable()),
+        )
         // conversation
         .route("/thread", post(misc::thread_say))
         .route("/thread/stop", post(misc::thread_stop))
@@ -659,6 +667,8 @@ pub fn router(st: AppState, modules: Router) -> Router {
                 .delete(crate::access::oidc_delete),
         )
         .route("/access/tokens", post(crate::access::token_create))
+        // 能力: Steve itself as a built-in MCP server, and where outside clients connect
+        .route("/capabilities/steve", get(crate::caps_api::steve_h))
         .route("/access/tokens/{id}", delete(crate::access::token_revoke))
         .route("/access/clients/{id}", delete(crate::access::client_revoke))
         .route("/access/pairings", post(crate::access::pair_create))
@@ -821,6 +831,12 @@ pub(crate) fn extras_one(r: &dyn Repo, id: &str) -> BResult<ItemExtras> {
 
 /// `{...i, goal, goals, tags, deps, sessionIds, open, queued, live}`.
 pub(crate) fn summary_with(mut i: Obj, x: ItemExtras) -> Obj {
+    /* the work judgement's `now` lines are stored in zh-CN: in the request's language here */
+    if let Some(Value::String(now)) = i.get_mut("now")
+        && let std::borrow::Cow::Owned(shown) = steve_core::now_line::shown(now)
+    {
+        *now = shown;
+    }
     let live = x
         .sessions
         .iter()
@@ -905,11 +921,21 @@ pub(crate) fn sessions_out(r: &dyn Repo, d: &dyn Domain, ws: &str) -> BResult<Ve
     }
 }
 
+/// Workspaces as the pages show them: a seeded name in the request's language ([`steve_store::seeded`]).
+pub(crate) fn workspaces_out(mut ws: Vec<Obj>) -> Vec<Obj> {
+    for w in &mut ws {
+        steve_store::seeded::show(w, steve_store::seeded::WORKSPACE);
+    }
+    ws
+}
+
 /// `botOut`: the bot plus its workspace ids and its memory count in `ws`.
 pub(crate) fn bot_out(r: &dyn Repo, mut b: Obj, ws: &str) -> BResult<Obj> {
     let id = str_of(&b, "id");
+    steve_store::seeded::show(&mut b, steve_store::seeded::BOT);
     b.insert("workspaces".into(), json!(r.bot_workspaces(&id)?));
     b.insert("memories".into(), json!(r.memories_count(&id, ws)?));
+    b.insert("mcp_servers".into(), json!(r.bot_mcp_servers(&id)?));
     Ok(b)
 }
 
@@ -927,12 +953,18 @@ pub(crate) fn bots_out(r: &dyn Repo, ws: &str) -> BResult<(Vec<Obj>, Vec<Value>)
     let mut bots = vec![];
     for mut b in r.bots_list(Some(ws))? {
         let id = str_of(&b, "id");
+        steve_store::seeded::show(&mut b, steve_store::seeded::BOT);
         b.insert("workspaces".into(), json!(bot_ws(r, x.as_ref(), &id)?));
         let n = match &x {
             Some(x) => x.memories.get(&id).copied().unwrap_or(0),
             None => r.memories_count(&id, ws)?,
         };
         b.insert("memories".into(), json!(n));
+        let mcp = match &x {
+            Some(x) => x.mcp.get(&id).cloned().unwrap_or_default(),
+            None => r.bot_mcp_servers(&id)?,
+        };
+        b.insert("mcp_servers".into(), json!(mcp));
         bots.push(b);
     }
     let mut all = vec![];
@@ -1009,5 +1041,24 @@ mod tests {
             own(None, "default", Noun::Session).unwrap_err().message,
             "没有这个会话"
         );
+    }
+
+    #[test]
+    fn an_items_work_line_comes_in_the_requests_language() {
+        let item = |now: &str| {
+            let mut i = Obj::new();
+            i.insert("id".into(), json!("ST-1"));
+            i.insert("now".into(), json!(now));
+            i
+        };
+        let now = |locale, s: &str| {
+            steve_i18n::with(locale, || summary_with(item(s), ItemExtras::default()))["now"].clone()
+        };
+        assert_eq!(
+            now(steve_i18n::EN, "协作已暂停"),
+            json!("Collaboration paused")
+        );
+        assert_eq!(now(steve_i18n::ZH_CN, "协作已暂停"), json!("协作已暂停"));
+        assert_eq!(now(steve_i18n::EN, "正在改 README"), json!("正在改 README"));
     }
 }

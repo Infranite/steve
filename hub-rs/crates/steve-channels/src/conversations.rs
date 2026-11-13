@@ -568,7 +568,6 @@ impl Channels {
         let status = match d {
             Delivered::Sent { .. } => "sent",
             Delivered::Drafted { .. } => "draft",
-            Delivered::Blocked { .. } => "blocked",
             Delivered::Failed { .. } => "failed",
             Delivered::Queued { .. } => "pending",
             Delivered::Skipped => "skipped",

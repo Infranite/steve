@@ -38,7 +38,6 @@ async fn e6() -> E6 {
     let kb_events: Arc<Mutex<Vec<String>>> = Arc::default();
     let ev = kb_events.clone();
     let kb = Knowledge::with_loaders(
-        Arc::new(steve_knowledge::NoGuard),
         move |e: steve_knowledge::KbEvent| ev.lock().unwrap().push(e.id),
         vec![Arc::new(ThreadLoader)],
     );
@@ -131,7 +130,6 @@ async fn a_thread_added_to_the_knowledge_base_is_searchable_for_reasoning_only()
         })
         .unwrap();
     let kb = Knowledge::with_loaders(
-        Arc::new(steve_knowledge::NoGuard),
         |_| {},
         vec![
             Arc::new(ThreadLoader),

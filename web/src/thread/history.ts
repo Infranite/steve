@@ -3,7 +3,7 @@
  * for the life of the page, so the window moving on as new messages come does not tear a gap into what you read. */
 import { useSyncExternalStore } from "react"
 import { modReq, qs, type RMessage } from "@/api"
-import { knownMsgs as known, msgOf, st, type Msg } from "@/store"
+import { closedSt, knownMsgs as known, msgOf, st, type Msg } from "@/store"
 
 let more = true, ended = false, loading = false, ver = 0, scope = ""
 const ls = new Set<() => void>()
@@ -30,7 +30,7 @@ const oldest = () => { let n = Infinity; for (const m of known.values()) n = Mat
 async function page(before: number, after?: number, limit = after ? 2000 : 100) {
   const r = await modReq<{ messages: RMessage[]; has_more: boolean }>("GET", "/thread/history" + qs({ before: Number.isFinite(before) ? before : undefined, after, limit }))
   /* as the window shows them: a failure line of a finished item is history the notifications keep */
-  const over = (id: string | null) => { const st0 = id ? st.items.find((i) => i.id === id)?.st : undefined; return st0 === "done" || st0 === "drop" }
+  const over = (id: string | null) => closedSt(id ? st.items.find((i) => i.id === id)?.st : undefined)
   for (const m of r.messages) if (!m.meta?.held && !(m.meta?.notice && over(m.item_id))) known.set(m.id, msgOf(m))
   if (!after) ended = !r.has_more
   return r.has_more
@@ -70,6 +70,18 @@ export async function searchThread(q: string, signal?: AbortSignal): Promise<{ m
 /* ───────── jumping to a message, and back ───────── */
 export type Jump = { id: string; created?: number }
 const JUMP = "steve-chat-jump"
-/** go to a message of the conversation (a search hit, a topic, a quote), from wherever the reader is */
-export function jumpToMsg(id: string, created?: number) { window.dispatchEvent(new CustomEvent<Jump>(JUMP, { detail: { id, created } })) }
-export function onJump(f: (j: Jump) => void) { const h = (e: Event) => f((e as CustomEvent<Jump>).detail); window.addEventListener(JUMP, h); return () => window.removeEventListener(JUMP, h) }
+/** a jump no conversation took yet (the reader was elsewhere and the chat view is still on its way), kept a moment
+ *  for the one that mounts next */
+let pending: { j: Jump; at: number } | null = null
+const KEEP = 2000
+/** go to a message of the conversation (a search hit, a topic, a quote), from wherever the reader is: right away when
+ *  a conversation is shown, or as soon as one is (within a couple of seconds) */
+export function jumpToMsg(id: string, created?: number) { pending = { j: { id, created }, at: Date.now() }; window.dispatchEvent(new CustomEvent<Jump>(JUMP, { detail: { id, created } })) }
+export function onJump(f: (j: Jump) => void) {
+  const h = (e: Event) => { pending = null; f((e as CustomEvent<Jump>).detail) }
+  window.addEventListener(JUMP, h)
+  /* the jump that waited for a conversation, once this one is listening */
+  let live = true
+  queueMicrotask(() => { if (live && pending && Date.now() - pending.at < KEEP) { const { j } = pending; pending = null; f(j) } })
+  return () => { live = false; window.removeEventListener(JUMP, h) }
+}

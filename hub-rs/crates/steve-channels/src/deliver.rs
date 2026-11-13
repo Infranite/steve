@@ -4,7 +4,7 @@
 //!
 //! [`DraftOnly`] (the default) makes every message a pending draft (`chan_messages`
 //! `direction=out, status=draft`) with its `approve` decision. C6's [`crate::outbound::Outbox`] is the
-//! real one (authorization → disclosure check → redactor → send → basis → audit).
+//! real one (authorization → disclosure check → send → basis → audit).
 
 use async_trait::async_trait;
 use steve_knowledge::Hit;
@@ -182,11 +182,6 @@ pub enum Delivered {
     },
     /// Sent (only C6 does this).
     Sent { message_id: String },
-    /// A secret value was in it: not sent, not drafted (a `fail` decision tells you).
-    Blocked {
-        message_id: String,
-        decision_id: String,
-    },
     /// The provider refused it; a `fail` decision (retry / discard) is open.
     Failed {
         message_id: String,
@@ -204,7 +199,6 @@ impl Delivered {
         match self {
             Self::Drafted { message_id, .. }
             | Self::Sent { message_id }
-            | Self::Blocked { message_id, .. }
             | Self::Failed { message_id, .. }
             | Self::Queued { message_id } => Some(message_id),
             Self::Skipped => None,
@@ -213,9 +207,9 @@ impl Delivered {
 
     pub fn decision_id(&self) -> Option<&str> {
         match self {
-            Self::Drafted { decision_id, .. }
-            | Self::Blocked { decision_id, .. }
-            | Self::Failed { decision_id, .. } => Some(decision_id),
+            Self::Drafted { decision_id, .. } | Self::Failed { decision_id, .. } => {
+                Some(decision_id)
+            }
             _ => None,
         }
     }

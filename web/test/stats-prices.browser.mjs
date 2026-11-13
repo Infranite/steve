@@ -67,6 +67,12 @@ try {
     const over = await page.evaluate(() => [...document.querySelectorAll("[data-stats-settings] section")].filter((s) => s.getBoundingClientRect().right > innerWidth + 1).length)
     assert.equal(over, 0)
 
+    /* the editable price table fits its column on a desktop: its fields take their cells' width */
+    if (width === 1440) {
+      const [table, room] = await page.locator('[data-price-row="0"]').evaluate((tr) => { const t = tr.closest("table"); return [t.scrollWidth, t.parentElement.clientWidth] })
+      assert.ok(table <= room, `the price table is ${table}px wide in a ${room}px column`)
+    }
+
     /* 立即同步 */
     await page.locator("[data-catalog-sync]").click()
     await page.locator("[data-catalog-error]").waitFor({ state: "detached" })

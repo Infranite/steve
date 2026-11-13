@@ -668,3 +668,14 @@ async fn another_workspaces_requests_in_the_lane_are_counted_not_shown_or_steere
     assert_eq!(running["members"].as_array().unwrap().len(), 1, "{v}");
     assert_eq!(running["others"], 1, "{v}");
 }
+
+/// With remote Nodes off, the owner's Node routes still answer in JSON instead of the web page.
+#[tokio::test]
+async fn with_remote_nodes_off_the_node_list_says_so() {
+    let e = start().await;
+    let (s, v) = e.call("GET", "/api/nodes", None).await;
+    assert_eq!((s, v), (200, json!({"nodes": [], "off": true})));
+    let (s, v) = e.call("POST", "/api/nodes/pairings", Some(json!({}))).await;
+    assert_eq!(s, 409, "{v}");
+    assert!(v["error"].as_str().unwrap_or_default().contains("STEVE_NODE_LISTEN"), "{v}");
+}

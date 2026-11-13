@@ -1,6 +1,6 @@
 import { StrictMode } from "react"
 import { createRoot } from "react-dom/client"
-import { Toaster } from "sonner"
+import { Toaster } from "@/components/ui/toaster"
 import "../../src/index.css"
 import { WorkspaceDisk } from "../../src/disk-settings"
 import { OutboxDead } from "../../src/outbox-settings"

@@ -46,15 +46,15 @@ export function AskSteve({ ctx, placeholder, className }: { ctx: Ctx; placeholde
   }
   return (
     <div className={cn("flex flex-col gap-3", className)} data-ask-steve>
-      <div className="flex items-center gap-2 rounded-2xl border bg-card py-1.5 pl-3.5 pr-1.5 shadow-[0_1px_3px_rgb(0_0_0/0.04)] focus-within:border-blue/60">
-        <SparklesIcon className="size-4 shrink-0 text-muted-foreground" strokeWidth={1.75} />
+      <div className="flex items-center gap-2 rounded-xl bg-card py-1.5 pl-3.5 pr-1.5 shadow-[var(--lift)] transition-shadow duration-180 ease-(--ease-out) focus-within:shadow-[var(--lift-hover),0_0_0_3px_color-mix(in_srgb,var(--ring)_22%,transparent)]">
+        <SparklesIcon className="size-4 shrink-0 text-blue" strokeWidth={1.75} />
         <input value={v} onChange={(e) => setV(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter" && !e.nativeEvent.isComposing) void send() }} placeholder={placeholder}
-          className="h-8 min-w-0 flex-1 bg-transparent text-[14px] outline-none placeholder:text-tertiary" data-ask-input />
+          className="h-8 min-w-0 flex-1 bg-transparent type-body outline-none placeholder:text-tertiary" data-ask-input />
         <Button size="icon-sm" className="rounded-full" disabled={!v.trim() || busy} onClick={() => void send()} aria-label={t("shell:config.askDraft")} data-ask-send>{busy ? <Spinner className="size-3.5" /> : <ArrowUpIcon className="size-4" />}</Button>
       </div>
       {busy && <div className="px-1 type-footnote text-muted-foreground shimmer">{t("shell:config.drafting")}</div>}
-      {note && <div className="px-1 type-footnote text-muted-foreground">{note}</div>}
-      {p && <ProposalCard p={p} />}
+      {note && <div className="px-1 type-footnote text-muted-foreground anim-in">{note}</div>}
+      {p && <div className="anim-in"><ProposalCard p={p} /></div>}
     </div>
   )
 }

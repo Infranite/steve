@@ -11,8 +11,7 @@
 //!
 //! The model is shown the spec's names (`mem.add`, `kb_source.create` …); stored operations carry a
 //! `kb.` prefix (`kb.mem.add`, `kb.source.create` …) because contacts already registers `mem.add`.
-//! Names resolve only by exact name or alias; anything else is a “（没认出：X）” line. Drafts never
-//! carry secrets: text the guard flags is not drafted.
+//! Names resolve only by exact name or alias; anything else is a “（没认出：X）” line.
 //!
 //! Integration (integrator): `steve_knowledge::drafts::register(&mut registry, kb.clone())` with the
 //! same [`Knowledge`] given to the routes and to [`crate::spawn_scans`] (which runs the first scan of
@@ -70,7 +69,7 @@ pub fn register(r: &mut Registry, kb: Knowledge) {
         .target(KIND_KNOWLEDGE, Box::new(KnowledgeTarget(kb.clone())))
         .op(OP_SOURCE_PATCH, Box::new(SourcePatchOp(kb.clone())))
         .op(OP_SOURCE_CREATE, Box::new(SourceCreateOp(kb.clone())))
-        .op(OP_MEM_ADD, Box::new(MemAddOp(kb.clone())))
+        .op(OP_MEM_ADD, Box::new(MemAddOp))
         .op(OP_NOTE_CREATE, Box::new(NoteCreateOp(kb.clone())))
         .op(OP_DOC_PATCH, Box::new(DocPatchOp(kb)));
 }
@@ -177,11 +176,6 @@ impl Field {
 
 fn unrecognized() -> String {
     steve_i18n::t!("knowledge.draft.unrecognized")
-}
-
-/// Text the guard flags is never drafted (a preview line and the refusal at apply).
-fn secret() -> String {
-    steve_i18n::t!("knowledge.draft.secret")
 }
 
 fn list_text(xs: &[String]) -> String {
@@ -737,8 +731,8 @@ fn plan_ops(
         }
         let (stored, lines) = match name.as_str() {
             "kb_source.create" => plan_create(kb, c, viewer, &op)?,
-            "mem.add" => plan_mem(kb, c, viewer, &op)?,
-            "note.create" => plan_note(kb, c, viewer, &op)?,
+            "mem.add" => plan_mem(c, viewer, &op)?,
+            "note.create" => plan_note(c, viewer, &op)?,
             "doc.patch" => plan_doc(c, viewer, &op)?,
             _ => (None, vec![]),
         };
@@ -956,12 +950,8 @@ fn unclear() -> String {
     steve_i18n::t!("knowledge.draft.unclear")
 }
 
-fn not_saved() -> String {
-    steve_i18n::t!("knowledge.draft.not_saved")
-}
-
 /// `mem.add`: one line “新记忆 — <text> · <种类> · <级别> · <范围> · 关于 …”.
-fn plan_mem(kb: &Knowledge, c: &Connection, viewer: &Viewer, op: &Value) -> ApiResult<Planned> {
+fn plan_mem(c: &Connection, viewer: &Viewer, op: &Value) -> ApiResult<Planned> {
     let text = op.get("text").and_then(text_of).unwrap_or_default();
     if !(1..=2000).contains(&text.chars().count()) {
         return Ok((
@@ -972,9 +962,6 @@ fn plan_mem(kb: &Knowledge, c: &Connection, viewer: &Viewer, op: &Value) -> ApiR
                 steve_i18n::t!("knowledge.draft.missing_mem_text"),
             )],
         ));
-    }
-    if !kb.guard.scan(&text).is_empty() {
-        return Ok((None, vec![Change::new(not_saved(), "—", secret())]));
     }
     let kind_said = op.get("kind").and_then(text_of).unwrap_or_default();
     let kind = if kind_said.is_empty() {
@@ -1034,7 +1021,7 @@ fn plan_mem(kb: &Knowledge, c: &Connection, viewer: &Viewer, op: &Value) -> ApiR
 }
 
 /// `note.create`: one line “新建笔记 — <title>”.
-fn plan_note(kb: &Knowledge, c: &Connection, viewer: &Viewer, op: &Value) -> ApiResult<Planned> {
+fn plan_note(c: &Connection, viewer: &Viewer, op: &Value) -> ApiResult<Planned> {
     let body = op.get("body").and_then(text_of).unwrap_or_default();
     let title = op
         .get("title")
@@ -1058,9 +1045,6 @@ fn plan_note(kb: &Knowledge, c: &Connection, viewer: &Viewer, op: &Value) -> Api
                 steve_i18n::t!("knowledge.draft.note_unclear"),
             )],
         ));
-    }
-    if !kb.guard.scan(&title).is_empty() || !kb.guard.scan(&body).is_empty() {
-        return Ok((None, vec![Change::new(not_saved(), "—", secret())]));
     }
     let (vis, level) = match scope_of(c, viewer, op)? {
         Ok(x) => x,
@@ -1256,7 +1240,7 @@ fn scope_arg<T: serde::de::DeserializeOwned>(op: &Value, key: &str) -> ApiResult
 }
 
 /// `kb.mem.add {kind, text, level, visibility, about:[{type,id}]}`: confirmed (the user said it).
-struct MemAddOp(Knowledge);
+struct MemAddOp;
 
 fn check_about(c: &Connection, cx: &OpCx, about: &[ObjRef]) -> ApiResult<()> {
     for a in about {
@@ -1302,9 +1286,6 @@ fn mem_args(op: &Value) -> ApiResult<MemArgs> {
 impl ChangeOp for MemAddOp {
     fn validate(&self, c: &Connection, cx: &OpCx, op: &Value) -> ApiResult<()> {
         let a = mem_args(op)?;
-        if !self.0.guard.scan(&a.text).is_empty() {
-            return Err(ApiError::rule(secret()));
-        }
         if !repo::scope_exists(c, cx.ws, &a.visibility)? {
             return Err(ApiError::not_found("团队"));
         }
@@ -1385,7 +1366,6 @@ impl ChangeOp for NoteCreateOp {
     fn apply(&self, tx: &Tx, cx: &OpCx, op: &Value) -> ApiResult<Value> {
         let id = notes::create(
             tx,
-            self.0.guard.as_ref(),
             cx.ws,
             cx.actor,
             &NewNote {

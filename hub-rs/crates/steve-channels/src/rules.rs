@@ -15,7 +15,6 @@ use chrono::{Datelike, TimeZone, Timelike};
 use rusqlite::{Connection, params};
 use serde_json::{Value, json};
 use steve_flow::graph::{Edge, Graph, Node};
-use steve_flow::nodes::bot::{Guard, redact};
 use steve_modules::{ApiError, Gateway, Tier};
 
 use crate::ChannelResult;
@@ -579,11 +578,9 @@ pub struct ContextLine {
     pub text: String,
 }
 
-/// [`IntentJudge`] over the model gateway's fast tier, with the last 5 messages as context. Text
-/// goes through the secret guard first.
+/// [`IntentJudge`] over the model gateway's fast tier, with the last 5 messages as context.
 pub struct GatewayJudge<'a> {
     pub gateway: &'a dyn Gateway,
-    pub guard: &'a dyn Guard,
     pub message: &'a str,
     pub sender: &'a str,
     pub space: &'a str,
@@ -610,14 +607,14 @@ impl GatewayJudge<'_> {
                 p.push_str(&format!(
                     "- {}：{}\n",
                     l.who,
-                    cut(&redact(self.guard, &l.text), CONTEXT_LINE_MAX)
+                    cut(&l.text, CONTEXT_LINE_MAX)
                 ));
             }
         }
         p.push_str(&format!(
             "\n要判断的消息（{}）：\n{}\n\n",
             self.sender,
-            cut(&redact(self.guard, self.message), INTENT_TEXT_MAX)
+            cut(self.message, INTENT_TEXT_MAX)
         ));
         p.push_str("只回答 JSON：{\"match\": true} 或 {\"match\": false}。");
         p

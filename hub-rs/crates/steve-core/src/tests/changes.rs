@@ -59,6 +59,52 @@ async fn a_bot_draft_encodes_labels_and_undo_restores() {
     assert!(k.core.undo(&p.id, "me", WS).is_err());
 }
 
+/// A bot's long text drafted on its own: from the text the editor shows, the whole new text in the
+/// patch, a short before/after on the card; the same text again drafts nothing.
+#[tokio::test]
+async fn a_bot_text_draft_starts_from_the_editor_and_carries_the_whole_text() {
+    let k = Kit::new();
+    k.gw.set(|p, _| {
+        assert!(p.contains("the bot \"Steve 开发\""), "{p}");
+        assert!(p.contains("  prompt · 系统提示词"), "{p}");
+        assert!(p.contains("\"你是开发助手\""), "{p}");
+        Ok(r#"{"changes":[{"key":"prompt","value":"你是开发助手。\n回答先给结论。"},{"key":"rules","value":"x"}]}"#.into())
+    });
+    let p = k
+        .core
+        .draft_bot_text(WS, "dev", "prompt", Some("你是开发助手"), "回答先给结论")
+        .await
+        .unwrap();
+    assert_eq!(p.href, "#/bots/dev");
+    assert_eq!(
+        p.patch,
+        json!({"prompt": "你是开发助手。\n回答先给结论。"})
+            .as_object()
+            .unwrap()
+            .clone()
+    );
+    assert_eq!(p.changes.len(), 1);
+    k.gw.set(|_, _| Ok(r#"{"changes":[{"key":"rules","value":"先跑测试"}]}"#.into()));
+    let same = k
+        .core
+        .draft_bot_text(WS, "dev", "rules", Some("先跑测试"), "测试先跑")
+        .await
+        .unwrap();
+    assert!(same.changes.is_empty() && same.patch.is_empty());
+    assert!(
+        k.core
+            .draft_bot_text(WS, "dev", "name", None, "x")
+            .await
+            .is_err()
+    );
+    assert!(
+        k.core
+            .draft_bot_text("other", "dev", "rules", None, "x")
+            .await
+            .is_err()
+    );
+}
+
 #[tokio::test]
 async fn a_new_bot_is_drafted_made_and_undone() {
     let k = Kit::new();

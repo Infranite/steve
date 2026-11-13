@@ -4,8 +4,15 @@ import { useMemo } from "react"
 import { cva, type VariantProps } from "class-variance-authority"
 import { cn } from "cn"
 
+import { formFieldCleanCss } from "@/components/affect/form-field-clean"
 import { Label } from "@/components/ui/label"
 import { Separator } from "@/components/ui/separator"
+
+/* Steve's Field parts keep their compound shape (a Field with its FieldLabel, control, FieldDescription and
+ * FieldError, any layout in between), drawn in affectUI's Form Field look: the field is its .ui-fldc frame, the label
+ * its label, the description its quiet hint line and the error that line in red. For one control with a label, hint
+ * and error, affectUI's FormField itself (components/affect/form-field-clean) does the id and aria wiring too. */
+const FieldStyle = () => <style href="ui-form-field-clean" precedence="default">{formFieldCleanCss}</style>
 
 function FieldSet({ className, ...props }: React.ComponentProps<"fieldset">) {
   return (
@@ -52,7 +59,7 @@ function FieldGroup({ className, ...props }: React.ComponentProps<"div">) {
 }
 
 const fieldVariants = cva(
-  "group/field flex w-full gap-3 data-[invalid=true]:text-destructive",
+  "ui-fldc group/field flex w-full gap-1.5",
   {
     variants: {
       orientation: {
@@ -72,16 +79,24 @@ const fieldVariants = cva(
 function Field({
   className,
   orientation = "vertical",
+  "data-invalid": invalid,
+  "data-disabled": disabled,
+  children,
   ...props
-}: React.ComponentProps<"div"> & VariantProps<typeof fieldVariants>) {
+}: React.ComponentProps<"div"> & VariantProps<typeof fieldVariants> & { "data-invalid"?: boolean | string; "data-disabled"?: boolean | string }) {
   return (
     <div
       role="group"
       data-slot="field"
       data-orientation={orientation}
+      data-invalid={invalid === true || invalid === "true" || invalid === "" ? "true" : undefined}
+      data-disabled={disabled === true || disabled === "true" || disabled === "" ? "true" : undefined}
       className={cn(fieldVariants({ orientation }), className)}
       {...props}
-    />
+    >
+      <FieldStyle />
+      {children}
+    </div>
   )
 }
 
@@ -120,7 +135,7 @@ function FieldTitle({ className, ...props }: React.ComponentProps<"div">) {
     <div
       data-slot="field-label"
       className={cn(
-        "flex w-fit items-center gap-2 text-sm font-medium group-data-[disabled=true]/field:opacity-50",
+        "ui-fldc__label flex w-fit items-center gap-2 group-data-[disabled=true]/field:opacity-50",
         className
       )}
       {...props}
@@ -133,7 +148,7 @@ function FieldDescription({ className, ...props }: React.ComponentProps<"p">) {
     <p
       data-slot="field-description"
       className={cn(
-        "text-left text-sm leading-normal font-normal text-muted-foreground group-has-data-horizontal/field:text-balance [[data-variant=legend]+&]:-mt-1.5",
+        "ui-fldc__message text-left group-has-data-horizontal/field:text-balance [[data-variant=legend]+&]:-mt-1.5",
         "last:mt-0 nth-last-2:-mt-1",
         "[&>a]:underline [&>a]:underline-offset-4 [&>a:hover]:text-primary",
         className
@@ -216,7 +231,7 @@ function FieldError({
     <div
       role="alert"
       data-slot="field-error"
-      className={cn("text-sm font-normal text-destructive", className)}
+      className={cn("ui-fldc__message text-destructive", className)}
       {...props}
     >
       {content}

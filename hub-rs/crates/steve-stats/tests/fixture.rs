@@ -582,6 +582,19 @@ fn invariants_hold() {
     }
     assert_eq!(sm.usage.total, 3 * 1060);
     assert_eq!(sm.spend.unpriced_tokens, 1060);
+    // the items table says how much of an item's tokens its estimate leaves out
+    let page = s
+        .with_conn(|c| views::items(c, &q, "est", None, None, 100, 0))
+        .unwrap();
+    let st1 = page.rows.iter().find(|r| r.item_id == "ST-1").unwrap();
+    assert_eq!(st1.unpriced_tokens, 1060);
+    assert!(st1.est > 0.0);
+    assert!(
+        page.rows
+            .iter()
+            .filter(|r| r.item_id != "ST-1")
+            .all(|r| r.unpriced_tokens == 0)
+    );
     assert_eq!(sm.usage.hit_rate, Some(2700.0 / 3030.0));
     assert_eq!(sm.since.tokens.as_deref(), Some("2026-11-01"));
     // a filter is a subset that adds up the same way
@@ -669,4 +682,72 @@ fn refresher_still_processes_dirty_rows_and_new_decisions() {
     );
     assert_eq!(refresher.tick(&s, 200).unwrap(), 1);
     assert!(!s.stats().refresh_pending(0).unwrap());
+}
+
+#[test]
+fn tree_follows_who_started_whom() {
+    let (_d, s) = store();
+    s.with_conn(|c| {
+        Ok(c.execute_batch(
+            r#"UPDATE items SET parent = '{"item":"ST-1"}' WHERE id IN ('ST-2', 'ST-3');
+               UPDATE items SET parent = '{"item":"ST-3","session":"s3","at":2}' WHERE id = 'ST-5';
+               UPDATE items SET parent = 'not json' WHERE id = 'ST-4';"#,
+        )?)
+    })
+    .unwrap();
+    refresh::rebuild(&s, WS).unwrap();
+    let (ws, tree) = s
+        .with_conn(|c| Ok(views::tree(c, "ST-1")?))
+        .unwrap()
+        .unwrap();
+    assert_eq!(ws, WS);
+    assert!(!tree.truncated);
+    let shape: Vec<_> = tree
+        .nodes
+        .iter()
+        .map(|n| (n.item_id.as_str(), n.parent_id.as_deref(), n.depth))
+        .collect();
+    assert_eq!(
+        shape,
+        [
+            ("ST-1", None, 0),
+            ("ST-2", Some("ST-1"), 1),
+            ("ST-3", Some("ST-1"), 1),
+            ("ST-5", Some("ST-3"), 2)
+        ]
+    );
+    // each row is the item's own figures, as on its drill-down
+    for n in &tree.nodes {
+        let (_, d) = s
+            .with_conn(|c| Ok(views::item_detail(c, &n.item_id, m(400), true)?))
+            .unwrap()
+            .unwrap();
+        assert_eq!(n.reported, d.usage.reported, "{}", n.item_id);
+        assert_eq!(n.agent_ms, d.facts.agent_ms, "{}", n.item_id);
+    }
+    assert!(
+        s.with_conn(|c| Ok(views::tree(c, "ST-404")?))
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
+fn tree_stops_at_its_depth() {
+    let (_d, s) = store();
+    let chain = (6..=6 + views::TREE_DEPTH + 1)
+        .map(|no| {
+            format!(
+                "INSERT INTO items (id, workspace_id, no, title, status, stage, bot_id, created, updated, parent) VALUES ('ST-{no}', 'default', {no}, 't', 'run', '执行', 'dev', 0, 0, '{{\"item\":\"ST-{}\"}}');",
+                no - 1
+            )
+        })
+        .collect::<String>();
+    s.with_conn(|c| Ok(c.execute_batch(&chain)?)).unwrap();
+    let (_, tree) = s
+        .with_conn(|c| Ok(views::tree(c, "ST-5")?))
+        .unwrap()
+        .unwrap();
+    assert!(tree.truncated);
+    assert_eq!(tree.nodes.last().unwrap().depth, views::TREE_DEPTH);
 }

@@ -423,7 +423,9 @@ async fn sign_out(State(st): State<AppState>, headers: HeaderMap) -> axum::respo
         .ok()
         .flatten();
         if let Some((uid, cid)) = revoked_client {
-            drop_pending_pairings(|p| p.user_id == uid && p.creator_client_id.as_deref() == Some(cid.as_str()));
+            drop_pending_pairings(|p| {
+                p.user_id == uid && p.creator_client_id.as_deref() == Some(cid.as_str())
+            });
         }
     } else if let (Some(tok), true) = (
         crate::api::cookie(&headers, "steve_session"),
@@ -747,7 +749,10 @@ mod tests {
         let cfg_pub = mk("0.0.0.0", true, "https://steve.example");
         let links = pair_links(&cfg_pub, "stp_abc", "My Hub", &ep_pub);
         assert_eq!(
-            links.iter().map(|l| (l.kind, l.url.as_str())).collect::<Vec<_>>(),
+            links
+                .iter()
+                .map(|l| (l.kind, l.url.as_str()))
+                .collect::<Vec<_>>(),
             vec![
                 ("public", "https://steve.example"),
                 ("lan", "http://192.168.1.42:8440"),
@@ -757,7 +762,10 @@ mod tests {
         );
         let query = "v=1&code=stp_abc&name=My%20Hub&pub=https%3A%2F%2Fsteve.example\
                      &lan=http%3A%2F%2F192.168.1.42%3A8440%2Chttp%3A%2F%2F100.64.0.9%3A8440";
-        assert_eq!(links[0].link, format!("https://steve.example/#/pair?{query}"));
+        assert_eq!(
+            links[0].link,
+            format!("https://steve.example/#/pair?{query}")
+        );
         assert_eq!(
             links[1].link,
             format!("http://192.168.1.42:8440/#/pair?{query}"),
@@ -920,7 +928,7 @@ pub async fn cors(
         );
         h.insert(
             header::ACCESS_CONTROL_EXPOSE_HEADERS,
-            HeaderValue::from_static("x-steve-cursor, content-disposition"),
+            HeaderValue::from_static("x-steve-cursor, content-disposition, x-steve-origin"),
         );
         h.append(header::VARY, HeaderValue::from_static("origin"));
     };
@@ -949,9 +957,14 @@ pub async fn cors(
     }
     let mut res = next.run(req).await;
     /* a page not signed in yet must be able to read that it is not (a 401 says nothing else), or it
-     * never shows its sign-in */
+     * never shows its sign-in; one whose origin is not let in also reads that, for only signing in by
+     * token there lets it in (a browser sign-in returns to the Hub's own addresses, not to it) */
     if allowed || res.status() == StatusCode::UNAUTHORIZED {
         mark(&mut res);
+    }
+    if !allowed && res.status() == StatusCode::UNAUTHORIZED {
+        res.headers_mut()
+            .insert("x-steve-origin", HeaderValue::from_static("refused"));
     }
     res
 }
@@ -1108,7 +1121,9 @@ pub async fn client_revoke(
         return Err(crate::error::ApiError::not_found("client"));
     }
     let uid = c.me.clone();
-    drop_pending_pairings(|p| p.user_id == uid && p.creator_client_id.as_deref() == Some(id.as_str()));
+    drop_pending_pairings(|p| {
+        p.user_id == uid && p.creator_client_id.as_deref() == Some(id.as_str())
+    });
     ORIGINS.lock().unwrap_or_else(|e| e.into_inner()).clear();
     Ok(reply(StatusCode::OK, json!({"ok": true})))
 }
@@ -1254,6 +1269,11 @@ fn machine_lan_ipv4s() -> Vec<std::net::Ipv4Addr> {
 #[cfg(not(unix))]
 fn machine_lan_ipv4s() -> Vec<std::net::Ipv4Addr> {
     Vec::new()
+}
+
+/// [`pair_endpoints_with`] on this machine's own interfaces.
+pub fn pair_endpoints(cfg: &crate::config::Config, headers: &HeaderMap) -> PairEndpoints {
+    pair_endpoints_with(cfg, headers, &machine_lan_ipv4s())
 }
 
 /// Resolves the public and internal/LAN URLs a companion device can use to reach this Hub.
@@ -1448,7 +1468,9 @@ pub async fn pair_create(
     let creator_token_id = if let Some(cid) = creator_client_id.clone() {
         let s_tok = store.clone();
         tokio::task::spawn_blocking(move || {
-            Ok::<_, steve_store::StoreError>(s_tok.access().client(&cid)?.and_then(|cl| cl.token_id))
+            Ok::<_, steve_store::StoreError>(
+                s_tok.access().client(&cid)?.and_then(|cl| cl.token_id),
+            )
         })
         .await
         .map_err(internal)?

@@ -116,7 +116,7 @@ pub struct PromptParts {
     /// `(title, status)` of the sender's open items.
     pub items: Vec<(String, String)>,
     pub knowledge: String,
-    /// The thread, oldest first, already scanned by the guard.
+    /// The thread, oldest first.
     pub context: String,
     /// The message being answered.
     pub replying_to: String,
@@ -245,7 +245,6 @@ impl Mail {
             .reader(|c| self.own_thread(c, &viewer, &q.thread_id))?;
         let mailbox = self.own_mailbox(who, &thread.connection_id)?;
         let now = self.now();
-        let guard = self.0.guard.clone();
         let sqlite = steve_knowledge::port::SqliteStore;
         let store: &dyn steve_knowledge::port::KnowledgeStore = match &self.0.kb {
             Some(kb) => kb.store(),
@@ -319,15 +318,12 @@ impl Mail {
                 anchors.push(ObjRef::new("item", i));
             }
             let mut hits = anchor_mems(c, &viewer, &anchors, ANCHOR_MEMS, now)?;
-            // layer 7: retrieve(subject + new text, k=8, Draft); the query never carries a secret
-            let query = steve_knowledge::context::scrub_query(
-                guard.as_ref(),
-                &format!(
-                    "{} {}",
-                    orig.subject,
-                    orig.body_new.as_deref().unwrap_or(&orig.snippet)
-                ),
-            );
+            // layer 7: retrieve(subject + new text, k=8, Draft)
+            let query = steve_knowledge::context::query_text(&format!(
+                "{} {}",
+                orig.subject,
+                orig.body_new.as_deref().unwrap_or(&orig.snippet)
+            ));
             let mut rq = Query::new(store, &viewer, &query, Purpose::Draft);
             rq.anchors = &anchors;
             rq.k = DRAFT_K;
@@ -346,7 +342,7 @@ impl Mail {
                 h.n = i + 1;
             }
 
-            // the thread: the last five messages' new text, ≤12000 characters, through the guard
+            // the thread: the last five messages' new text, ≤12000 characters
             let msgs = repo::thread_messages(c, &thread.id)?;
             let start = msgs.len().saturating_sub(CONTEXT_MESSAGES);
             let mut blocks: Vec<String> = Vec::new();
@@ -359,7 +355,6 @@ impl Mail {
                     .body_new
                     .clone()
                     .unwrap_or_else(|| format!("（正文已过保留期，摘要：{}）", m.snippet));
-                let text = steve_knowledge::state::redact(guard.as_ref(), &text);
                 let text = cut_chars(&text, left);
                 left = left.saturating_sub(text.chars().count());
                 blocks.push(format!("{}\n\n{}", line_of(m), text));

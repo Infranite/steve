@@ -144,7 +144,7 @@ pub fn sync_day(m: &Modules, kb: &Knowledge, ws: &str, day: &str) -> ApiResult<O
             }
         };
         let doc = repo::doc(tx, &id)?.ok_or_else(|| ApiError::not_found("文档"))?;
-        index::index_doc(tx, kb.guard.as_ref(), &doc, &src, &extracted(text), now, false)?;
+        index::index_doc(tx, &doc, &src, &extracted(text), now, false)?;
         Ok(Some((id, true)))
     })?;
     Ok(out.and_then(|(id, alive)| {

@@ -39,8 +39,8 @@ export function NewRuleDialog({ source: pre, onClose }: { source?: string; onClo
       <FieldGroup className="gap-4">
         {how === "steve" ? <>
           <Field orientation="horizontal" className="justify-between"><FieldLabel>{t("auto:newRule.source")}</FieldLabel><Pick label={t("auto:newRule.source")} value={src} options={Object.entries(SOURCE_LABEL).map(([v, l]) => ({ v, l }))} onChange={setSrc} testId="rule-src" /></Field>
-          <Field><FieldLabel htmlFor="rule-desc">{t("auto:newRule.what")}</FieldLabel><Textarea id="rule-desc" autoFocus maxLength={2000} className="min-h-24 rounded-lg" placeholder={t("auto:newRule.whatPlaceholder")} value={text} onChange={(e) => setText(e.target.value)} data-rule-desc /></Field>
-        </> : <Field><FieldLabel htmlFor="rule-json">{t("auto:newRule.json")}</FieldLabel><Textarea id="rule-json" autoFocus className="min-h-48 rounded-lg bg-muted/50 font-mono text-[12px]" placeholder={'{"name": "…", "graph": {"nodes": […], "edges": […]}}'} value={text} onChange={(e) => setText(e.target.value)} data-rule-json />
+          <Field><FieldLabel htmlFor="rule-desc">{t("auto:newRule.what")}</FieldLabel><Textarea id="rule-desc" autoFocus maxLength={2000} className="min-h-24" placeholder={t("auto:newRule.whatPlaceholder")} value={text} onChange={(e) => setText(e.target.value)} data-rule-desc /></Field>
+        </> : <Field><FieldLabel htmlFor="rule-json">{t("auto:newRule.json")}</FieldLabel><Textarea id="rule-json" autoFocus className="min-h-48 type-code" placeholder={'{"name": "…", "graph": {"nodes": […], "edges": […]}}'} value={text} onChange={(e) => setText(e.target.value)} data-rule-json />
           <FieldDescription>{t("auto:newRule.jsonHint")}</FieldDescription></Field>}
       </FieldGroup>
     </Modal>

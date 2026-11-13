@@ -149,12 +149,14 @@ impl Tx<'_> {
         if let Stop::Stopped {
             last, answered_you, ..
         } = &stop
-            && (crate::yolo::answer::looks_like_question(last).is_some()
-                || *answered_you
-                || crate::yolo::limits::own_action(last).is_some())
+            && (crate::yolo::answer::looks_like_question(last).is_some() || *answered_you)
         {
-            /* and it waits for something only you can do (sign in, scan a code, confirm on a
-             * device): continuing it would only have it take the step as done */
+            return Ok(Some(stop.why().into()));
+        }
+        /* and it waits for something only you can do (sign in, scan a code, confirm on a device),
+         * said anywhere in its final reply however long: continuing it would only have it take the
+         * step as done. Whatever way it stopped. */
+        if crate::yolo::limits::own_action(&self.db().final_reply(sid)?).is_some() {
             return Ok(Some(stop.why().into()));
         }
         if self.waiting_on_lane(item_id)? {
@@ -314,7 +316,7 @@ impl Tx<'_> {
         }
         /* looked at again right before a continue is spent: the stop may be old news (a probe
          * that came back late, a unit that started meanwhile), and a waiting item is not continued */
-        let work = self.work(&self.item(&i.id)?)?;
+        let work = self.work_to_continue(&self.item(&i.id)?)?;
         if work.waiting() {
             self.diagnostic_session(
                 &s.id,
@@ -331,6 +333,25 @@ impl Tx<'_> {
                 self.db().item_patch(&i.id, patch![now: t])?;
             }
             return Ok(None);
+        }
+        /* you stopped its last turn: going on is yours, whatever stopped it besides (a failure the
+         * coordinator was told of, a voided delivery); nothing of the budget is spent */
+        if self
+            .db()
+            .store()
+            .sessions()
+            .stop(&s.id)?
+            .is_some_and(|k| crate::work::held(&k))
+        {
+            self.diagnostic_session(
+                &s.id,
+                None,
+                "takeover.evaluated",
+                "user_stopped",
+                false,
+                Default::default(),
+            );
+            return Ok(Some(why.into()));
         }
         let n = self.takeover_count(&i.id)?;
         let cap = self.cfg().takeover_continues;

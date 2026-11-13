@@ -1,0 +1,125 @@
+/* affectUI components (web/src/components/affect) read these 38 --aui-* tokens. Each points at a Steve token that
+ * already switches between light and dark, so one block covers both modes and the components look like the rest of
+ * the app: Geist, the slate neutrals, the one indigo accent, Steve's radii, shadows and easing. */
+:root {
+  --aui-font: var(--font-sans);
+  --aui-font-mono: var(--font-mono);
+  --aui-radius: var(--radius-lg);
+  --aui-radius-sm: var(--radius-sm);
+  --aui-radius-lg: var(--radius-xl);
+  --aui-ink: var(--foreground);
+  --aui-muted: var(--muted-foreground);
+  --aui-placeholder: var(--tertiary);
+  --aui-surface: var(--card);
+  --aui-subtle: var(--muted);
+  --aui-overlay: var(--popover);
+  --aui-border: var(--border);
+  --aui-border-strong: var(--input);
+  --aui-primary: var(--primary);
+  --aui-on-primary: var(--primary-foreground);
+  /* the hover of a solid primary button, as Steve's own Button: darker in light mode, lighter in dark */
+  --aui-primary-hover: color-mix(in oklch, var(--primary), black 9%);
+  --aui-focus: color-mix(in srgb, var(--ring) 70%, transparent);
+  --aui-danger: var(--destructive);
+  --aui-danger-soft: color-mix(in srgb, var(--destructive) 12%, transparent);
+  --aui-warning: var(--attention);
+  --aui-warning-soft: color-mix(in srgb, var(--attention) 14%, transparent);
+  --aui-success: var(--success);
+  --aui-success-soft: color-mix(in srgb, var(--success) 12%, transparent);
+  --aui-info: var(--blue);
+  --aui-info-soft: color-mix(in srgb, var(--blue) 12%, transparent);
+  --aui-blue: var(--blue);
+  --aui-green: var(--success);
+  --aui-amber: var(--attention);
+  --aui-orange: var(--attention);
+  --aui-red: var(--destructive);
+  --aui-shadow-card: var(--lift);
+  --aui-shadow-card-hover: var(--lift-hover);
+  --aui-shadow-popover: var(--sh-lg);
+  --aui-ease: var(--ease-out);
+}
+
+/* Switch: Steve's switches keep a white thumb on the indigo track in both modes (affectUI darkens it in dark mode,
+ * which suits its near-white track but not Steve's indigo one) */
+:where(.dark, [data-theme="dark"]) .ui-swc__input:checked + .ui-swc__track .ui-swc__thumb { background: var(--aui-on-primary); box-shadow: 0 1px 2px rgb(0 0 0 / 0.3); }
+
+/* Text Field, Text Area, Select in dark mode: affectUI draws the box in the card's own colour with a 0.5px ring, which
+ * on Steve's near-black cards leaves the field hard to find until it has focus. Here they take Steve's input look:
+ * the muted fill and a full 1px edge in the input colour, firmer on hover and focus. */
+:where(.dark, [data-theme="dark"]) :is(.ui-tfc, .ui-tac, .ui-selc) {
+  --aui-field-edge: 0 0 0 1px var(--input);
+  --aui-field-edge-hover: 0 0 0 1px color-mix(in srgb, var(--muted-foreground) 45%, var(--input));
+  --aui-field-edge-focus: 0 0 0 1px color-mix(in srgb, var(--ring) 80%, transparent);
+}
+:where(.dark, [data-theme="dark"]) .ui-tfc.ui-tfc { --ui-tfc-surface: var(--muted); --ui-tfc-shadow: var(--aui-field-edge); --ui-tfc-shadow-hover: var(--aui-field-edge-hover); --ui-tfc-shadow-focus: var(--aui-field-edge-focus); }
+:where(.dark, [data-theme="dark"]) .ui-tac.ui-tac { --ui-tac-surface: var(--muted); --ui-tac-shadow: var(--aui-field-edge); --ui-tac-shadow-hover: var(--aui-field-edge-hover); --ui-tac-shadow-focus: var(--aui-field-edge-focus); }
+:where(.dark, [data-theme="dark"]) .ui-selc.ui-selc { --ui-selc-surface: var(--muted); --ui-selc-shadow: var(--aui-field-edge); --ui-selc-shadow-hover: var(--aui-field-edge-hover); --ui-selc-shadow-open: var(--aui-field-edge-focus); }
+
+/* Text Field: the input takes the width of its box, not the browser's default 20 characters, so a field in a table
+ * cell or a narrow column shrinks with it instead of pushing the table wider */
+.ui-tfc .ui-tfc__input { width: 100%; }
+
+/* A settings row whose control is a Select (settings-controls.tsx SetSelect): below 640px the select goes under its
+ * label at full width, as affectUI's settings screens do, so the label and its description keep the row's width */
+@media (max-width: 639.98px) {
+  [data-slot="item"]:has(> [data-slot="item-actions"] > [data-set-select]) { flex-direction: column; align-items: stretch; gap: 0.5rem; }
+  [data-slot="item"]:has(> [data-slot="item-actions"] > [data-set-select]) > [data-slot="item-actions"] { width: 100%; }
+  [data-slot="item-actions"] > [data-set-select] { width: 100%; }
+}
+
+.dark {
+  --aui-primary-hover: color-mix(in oklch, var(--primary), white 8%);
+}
+
+/* Breadcrumb in a page's bar (ui.tsx Page): the way back is a link in the body text, the page's own name comes in
+ * once the large title has scrolled away (data-quiet until then). The ‹ before the way back is a phone's; beside the
+ * sidebar the trail reads on its own. */
+.steve-crumbs.ui-bcrc { --ui-bcrc-muted: var(--muted-foreground); font-size: inherit; line-height: inherit; }
+.steve-crumbs .ui-bcrc__item:first-child .ui-bcrc__link { gap: 2px; }
+.steve-crumbs :is(.ui-bcrc__sep, .ui-bcrc__item[data-current]) { transition: opacity 180ms var(--ease-out); }
+.steve-crumbs[data-quiet] :is(.ui-bcrc__sep, .ui-bcrc__item[data-current]) { opacity: 0; }
+.steve-crumbs[data-quiet] .ui-bcrc__current { animation: none; }
+@media (min-width: 768px) { .steve-crumbs .ui-bcrc__item:first-child .ui-bcrc__icon { display: none; } }
+
+/* Card: an interactive card lifts every control inside it above its stretched title (position: relative), which would
+ * pull a Switch's hidden input into the flow and push the switch off its line; the input keeps its own overlay */
+.ui-crdc[data-interactive] .ui-swc .ui-swc__input.ui-swc__input { position: absolute; }
+
+/* ───── Display primitives (components/ui/*: badge, card, empty, skeleton, spinner, kbd, separator, code-block,
+ * avatar): the colors these affectUI components keep as literals, pointed at Steve's tokens so both themes follow ───── */
+/* Badge: the neutral tone in Steve's muted ink, and the "kind" tone (affectUI's purple) in the one accent */
+.ui-bdgc {
+  --ui-bdgc-neutral-fg: var(--muted-foreground);
+  --ui-bdgc-neutral-dot: var(--tertiary);
+  --ui-bdgc-purple-bg: color-mix(in srgb, var(--primary) 12%, transparent);
+  --ui-bdgc-purple-fg: var(--blue);
+}
+/* Skeleton: the muted fill; the sheen a lighter wash of the card in light mode and a faint one of the ink in dark */
+.ui-sklc { --ui-sklc-fill: var(--muted); --ui-sklc-sheen: color-mix(in srgb, var(--card) 70%, transparent); }
+:where(.dark, [data-theme="dark"]) .ui-sklc { --ui-sklc-sheen: color-mix(in srgb, var(--foreground) 5%, transparent); }
+/* Empty State: framed means Steve's inline "nothing here" fill (a muted wash, no line drawn inside a card); the icon
+ * tile on it lifts a step toward the page */
+.ui-estc { --ui-estc-frame: color-mix(in srgb, var(--muted) 60%, transparent); --ui-estc-line: transparent; --ui-estc-icon: var(--muted-foreground); }
+.ui-estc:not([data-bare]) { --ui-estc-tile: color-mix(in srgb, var(--background) 70%, transparent); }
+/* Code Block: Steve's code surface and hover wash; the colorizer in the series hues, which switch with the theme */
+.ui-codec {
+  --ui-codec-bg: var(--code);
+  --ui-codec-wash: var(--accent);
+  --ui-codec-mark: color-mix(in srgb, var(--primary) 8%, transparent);
+  --ui-codec-mark-edge: color-mix(in srgb, var(--primary) 55%, transparent);
+  --ui-codec-com: var(--tertiary);
+  --ui-codec-str: var(--series-2);
+  --ui-codec-kw: var(--series-3);
+  --ui-codec-num: var(--series-4);
+  --ui-codec-lit: var(--series-4);
+  --ui-codec-fn: var(--blue);
+  --ui-codec-key: var(--foreground);
+  --ui-codec-var: var(--blue);
+}
+/* Avatar: the edge and ring in Steve's border and page colors */
+.ui-avtc { --ui-avtc-text: var(--muted-foreground); --ui-avtc-edge: color-mix(in srgb, var(--foreground) 8%, transparent); --ui-avtc-ring: var(--background); --ui-avtc-mark: var(--blue); }
+/* Separator: Steve's hairlines are one pixel (affectUI's 0.5px rounds away to nothing on a 1x screen) */
+.ui-sepc { --ui-sepc-weight: 1px; }
+/* Parallel Attempts: the running step's text in dark mode is a literal light blue; it takes the accent's blue so an
+ * appearance choice (web/src/themes) reaches it */
+:where(.dark, [data-theme="dark"]) .ui-pac.ui-pac { --ui-pac-running-ink: var(--blue); }

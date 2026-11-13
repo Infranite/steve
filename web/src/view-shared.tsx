@@ -4,9 +4,9 @@ import { Field, FieldContent, FieldDescription, FieldLabel, FieldTitle } from "@
 import { Progress } from "@/components/ui/progress"
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group"
 import { SelectContent, SelectItem, SelectTrigger, SelectValue, Select as UISelect } from "@/components/ui/select"
-import { botName, closeRel, depsOpen, kindOf, st, WACT, waitLine, type Item } from "@/store"
+import { botName, closedSt, closeRel, depsOpen, isKind, kindOf, st, tag, tagLabel, WACT, waitLine, type Item } from "@/store"
 import { itemDisplayStatus, workflowRelation, workflowRelationText } from "@/item-workflow-relation"
-import { BotAvatar, go, ItemNo, KindTag, Meta, RelNote, StatusDot, Tags } from "@/ui"
+import { BotAvatar, go, ItemNo, Meta, RelNote, StatusDot } from "@/ui"
 import { cn } from "cn"
 import { FolderIcon, GitBranchIcon, StarIcon } from "lucide-react"
 import { type ReactNode } from "react"
@@ -26,16 +26,21 @@ export function ProjectChip({ id, className, plain }: { id: string | null; class
   return <a href={"#/projects/" + p.id} onClick={(e) => e.stopPropagation()} className={cn("inline-flex items-center gap-1 text-foreground/80 hover:text-foreground hover:underline", className)} data-project-chip={p.id}><FolderIcon className="size-3.5" strokeWidth={1.75} />{p.name}</a>
 }
 
-export function Select({ value, options, onChange, align = "start", testId, quiet, className }: { value: string; options: { v: string; l: ReactNode; disabled?: boolean }[]; onChange: (v: string) => void; align?: "start" | "end"; testId?: string; quiet?: boolean; className?: string }) {
+/** the system's picker. A toolbar filter by default (`sm`, the muted fill every control shares); `size="default"` for a
+ *  form field; `quiet` for one that shows as plain text until hovered. `label` names it for assistive tech and tests. */
+export function Select({ value, options, onChange, align = "start", testId, quiet, className, label, disabled, placeholder, size = "sm" }: { value: string; options: { v: string; l: ReactNode; disabled?: boolean }[]; onChange: (v: string) => void; align?: "start" | "end"; testId?: string; quiet?: boolean; className?: string; label?: string; disabled?: boolean; placeholder?: string; size?: "sm" | "default" }) {
   return (
-    <UISelect items={Object.fromEntries(options.map((o) => [o.v, o.l]))} value={value} onValueChange={(v) => v != null && onChange(String(v))}>
-      <SelectTrigger size="sm" className={cn("rounded-lg bg-transparent font-normal", quiet ? "-ml-px max-w-full border-transparent px-2 hover:bg-accent [&>svg]:opacity-0 hover:[&>svg]:opacity-100" : "border-border", className)} data-select={testId}><SelectValue /></SelectTrigger>
+    <UISelect items={Object.fromEntries(options.map((o) => [o.v, o.l]))} value={value || (placeholder ? null : value)} onValueChange={(v) => v != null && onChange(String(v))} disabled={disabled}>
+      <SelectTrigger size={size} aria-label={label} className={cn("min-w-0 max-w-full rounded-lg font-normal", size === "default" ? "type-callout" : "type-footnote", quiet ? "-ml-px bg-transparent px-2 shadow-none! hover:bg-accent [&_.ui-selc__chevron]:opacity-0 hover:[&_.ui-selc__chevron]:opacity-100" : "text-foreground", className)} data-select={testId}><SelectValue placeholder={placeholder} className="min-w-0 overflow-hidden truncate" /></SelectTrigger>
       <SelectContent align={align === "end" ? "end" : "start"} className="min-w-44">{options.map((o) => <SelectItem key={o.v} value={o.v} disabled={o.disabled}>{o.l}</SelectItem>)}</SelectContent>
     </UISelect>
   )
 }
 
 export const selected = new Set<string>();
+
+/** the count after a section heading's label, one step quieter than the label */
+export const Count = ({ n }: { n: number }) => (n ? <span className="ml-2 font-normal tabular-nums text-tertiary/80">{n}</span> : null)
 
 /** plan progress as a count with a short bar; on a finished item only when steps were left open, which is worth a look */
 export function PlanBar({ i, warn }: { i: Item; warn?: boolean }) {
@@ -50,31 +55,34 @@ export function PlanBar({ i, warn }: { i: Item; warn?: boolean }) {
  *  `proj` / `bot` off: the list is already about one project or bot, so the row doesn't repeat it */
 export function ItemRow({ i, pick, proj = true, bot = true }: { i: Item; pick?: () => void; proj?: boolean; bot?: boolean }) {
   const t = useT()
-  const on = selected.has(i.id), closed = i.st === "done" || i.st === "drop", w = i.wait
+  const on = selected.has(i.id), closed = closedSt(i.st), w = i.wait
   const relation = workflowRelation(i, st.items)
   const planOpen = !!i.plan?.length && i.plan.some((x) => x[1] !== 1)
   const extra = [
-    i.ss.length > 1 && <span key="ss">{t("shell:item.sessions", { count: i.ss.length })}</span>,
-    i.q.length > 0 && <span key="q">{t("shell:item.queued", { count: i.q.length })}</span>,
-    i.parent && <span key="p" className="inline-flex items-center gap-1"><GitBranchIcon className="size-3" />{t("shell:item.forked")}</span>,
-    !!i.deps?.length && <span key="d">{t("shell:item.deps", { done: i.deps.length - depsOpen(i).length, total: i.deps.length })}</span>,
+    i.ss.length > 1 && <span key="ss" className="shrink-0 whitespace-nowrap">{t("shell:item.sessions", { count: i.ss.length })}</span>,
+    i.q.length > 0 && <span key="q" className="shrink-0 whitespace-nowrap">{t("shell:item.queued", { count: i.q.length })}</span>,
+    i.parent && <span key="p" className="inline-flex shrink-0 items-center gap-1 whitespace-nowrap"><GitBranchIcon className="size-3" />{t("shell:item.forked")}</span>,
+    /* an open item names what it is still waiting for; once nothing is in its way the relation is history and stays on the item page */
+    !closed && depsOpen(i).length > 0 && <span key="d" className="shrink-0 whitespace-nowrap" title={depsOpen(i).map((d) => `${d} ${st.items.find((x) => x.id === d)?.t ?? ""}`).join("\n")} data-waits-on>{depsOpen(i).length > 1 ? t("shell:item.waitsOnMany", { id: depsOpen(i)[0], count: depsOpen(i).length }) : t("shell:item.waitsOn", { id: depsOpen(i)[0] })}</span>,
   ].filter(Boolean)
+  /* a list row carries one tag, its kind, as quiet text (colour stays for status); the rest are in its hover title and
+   * on the item page */
+  const kind = kindOf(i) ? tag(kindOf(i)!) : undefined
+  const others = (i.tags ?? []).map(tag).filter((x) => x && !isKind(x)).map((x) => tagLabel(x!))
   const side = (
     <span className="ml-auto flex shrink-0 items-center gap-2.5 pl-2 type-footnote text-muted-foreground">
-      <Tags ids={i.tags} max={2} className="hidden flex-nowrap sm:inline-flex" />
-      {/* a phone row has room for the category only */}
-      {kindOf(i) && <KindTag id={kindOf(i)!} className="sm:hidden" />}
-      {i.pri === "高" && !closed && <span className="rounded bg-attention/12 px-1.5 text-attention">{t("shell:item.high")}</span>}
+      {kind && <span className="max-w-24 truncate text-tertiary" title={[kind.name, ...others].join(" · ")} data-kind={kind.name}>{kind.name}</span>}
+      {i.pri === "高" && !closed && <span className="inline-flex h-5 items-center rounded-md bg-attention/12 px-1.5 font-medium text-attention">{t("shell:item.high")}</span>}
       {i.due && !closed && <span className={cn("whitespace-nowrap", /今天/.test(i.due) && "text-foreground/80")}>{t("shell:item.due", { due: dueLabel(i.due) })}</span>}
       {proj && i.project && <span className="hidden max-w-28 md:inline-flex"><ProjectChip id={i.project} plain /></span>}
       {(!closed || planOpen) && <PlanBar i={i} warn={closed} />}
       {bot && i.b && <span title={botName(i.b)} className="hidden sm:inline-flex"><BotAvatar k={i.b} size={18} /></span>}
-      <span className="min-w-11 whitespace-nowrap text-right tabular-nums">{i.up}</span>
+      <span className="min-w-11 whitespace-nowrap text-right tabular-nums text-tertiary">{i.up}</span>
     </span>
   )
   return (
     <div role="button" tabIndex={0} onClick={() => (pick ? pick() : go("#/items/" + i.id))} onKeyDown={(e) => e.key === "Enter" && go("#/items/" + i.id)} data-item-row={i.id} data-item-status={itemDisplayStatus(i)} data-dense={closed || undefined}
-      className={cn("group flex cursor-pointer gap-2.5 rounded-lg px-2 transition-colors duration-150 hover:bg-accent", closed ? "items-center py-1.5" : "items-start py-2.5", pick && on && "bg-blue/5")}>
+      className={cn("group flex cursor-pointer gap-2.5 rounded-lg px-2 transition-colors duration-120 hover:bg-accent", closed ? "items-center py-1.5" : "items-start py-2.5", pick && on && "bg-blue/10 hover:bg-blue/10")}>
       {pick ? <Checkbox checked={on} className={cn(!closed && "mt-[3px]")} aria-label={t("shell:item.select", { id: i.id })} data-pick={i.id} /> : <StatusDot s={itemDisplayStatus(i)} className={cn(!closed && "mt-[7px]")} />}
       <div className="min-w-0 flex-1">
         <div className="flex min-w-0 items-center gap-2">
@@ -87,13 +95,14 @@ export function ItemRow({ i, pick, proj = true, bot = true }: { i: Item; pick?: 
         {/* a card waiting on you says what it asks and takes you to it; otherwise the row says what is going on now */}
         {!closed && w && (
           <div className="mt-0.5 flex min-w-0 items-center gap-2 pl-14">
-            <Meta className="min-w-0 flex-1 flex-nowrap overflow-hidden [&>*:first-child]:min-w-0 [&>*:first-child]:truncate"><span className="type-callout text-foreground/80" data-item-wait={w.type}>{waitLine(w)}{i.waits.length > 1 && <span className="text-muted-foreground">{t("shell:item.andMore", { count: i.waits.length })}</span>}</span>{extra}</Meta>
+            <Meta one className="min-w-0 flex-1 overflow-hidden [&>*:first-child]:min-w-0 [&>*:first-child]:truncate"><span className="type-callout text-foreground/80" data-item-wait={w.type}>{waitLine(w)}{i.waits.length > 1 && <span className="text-muted-foreground">{t("shell:item.andMore", { count: i.waits.length })}</span>}</span>{extra}</Meta>
             {!pick && <Button size="xs" variant="outline" className="shrink-0" onClick={(e) => { e.stopPropagation(); go("#/items/" + i.id) }} data-item-wait-go={i.id}>{t("shell:item.goAct", { act: WACT[w.type] ?? t("shell:item.handle") })}</Button>}
           </div>
         )}
         {!closed && !w && (i.now || relation || extra.length > 0) && (
-          <Meta className="mt-0.5 flex-nowrap pl-14">
-            {relation && <span className="min-w-0 truncate type-callout font-medium text-foreground/80" data-workflow-relation={relation.kind}>{workflowRelationText(relation)}</span>}
+          <Meta one className="mt-0.5 pl-14">
+            {/* beside a "now" line the relation keeps its width and the line truncates; alone it yields to the counts after it */}
+            {relation && <span className={cn("min-w-0 max-w-[60%] truncate type-callout font-medium text-foreground/80", i.now && relation.kind !== "paused" && relation.kind !== "previous" && "shrink-0")} data-workflow-relation={relation.kind}>{workflowRelationText(relation)}</span>}
             {i.now && relation?.kind !== "paused" && relation?.kind !== "previous" && <span className="min-w-0 truncate type-callout" data-item-now>{i.now}</span>}
             {extra}
           </Meta>

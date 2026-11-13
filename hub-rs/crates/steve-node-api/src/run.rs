@@ -192,6 +192,206 @@ pub struct OpenSession {
     /// are unsupported until the Hub explicitly opens a session with a view.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub artifact_view: Option<Digest>,
+    /// The MCP servers of the session's Bot, given to the harness in `session/new|load` after
+    /// Steve's own. A secret value is a reference only ([`McpVar::secret`]): the Node takes it from
+    /// the Hub ([`crate::ports::HubSecrets`], operation [`mcp_secrets_op`]) each time it opens the
+    /// harness, and it is never journaled. An older Node ignores them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mcp_servers: Vec<McpServer>,
+    /// The skills of the session's Bot. A harness whose adapter declares where it reads skills
+    /// (`AdapterProperties::skills`, under its own state directory) finds them there when it
+    /// opens; the Node keeps that directory's Steve-made skills to exactly these. Ignored by an
+    /// adapter that reads none and when the session has no state directory of its own. An older
+    /// Node ignores them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skills: Vec<Skill>,
+}
+
+/// One skill: written as `<name>/SKILL.md`, its front matter `name` and `description`, then
+/// `content` (Markdown instructions for the harness).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Skill {
+    pub name: String,
+    pub description: String,
+    pub content: String,
+}
+
+impl Skill {
+    /// The most skills a session is given.
+    pub const MAX: usize = 32;
+    /// The most bytes of one skill's content, and of all of a session's together.
+    pub const MAX_CONTENT: usize = 32 * 1024;
+    pub const MAX_TOTAL: usize = 128 * 1024;
+    /// The most characters of a description.
+    pub const MAX_DESCRIPTION: usize = 1024;
+
+    /// A usable skill name: 1–64 of `a-z`, `0-9` and single `-` between them (a directory name
+    /// every harness takes).
+    pub fn name_ok(name: &str) -> bool {
+        !name.is_empty()
+            && name.len() <= 64
+            && name
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+            && !name.starts_with('-')
+            && !name.ends_with('-')
+            && !name.contains("--")
+    }
+
+    /// The `SKILL.md` text: the front matter (the description as a quoted string), then the content.
+    pub fn markdown(&self) -> String {
+        let quoted = serde_json::to_string(self.description.trim()).unwrap_or_default();
+        format!(
+            "---\nname: {}\ndescription: {quoted}\n---\n\n{}\n",
+            self.name,
+            self.content.trim_end()
+        )
+    }
+
+    /// Checks what a Node is given: at most [`Self::MAX`], names usable and once each, a
+    /// description of one line, content within [`Self::MAX_CONTENT`] (all together within
+    /// [`Self::MAX_TOTAL`]), no NUL anywhere.
+    pub fn check_all(skills: &[Skill]) -> crate::common::ApiResult<()> {
+        use crate::common::{ApiError, ErrorCode};
+        let bad = |m: &str| Err(ApiError::new(ErrorCode::Invalid, m.to_string()));
+        if skills.len() > Self::MAX {
+            return bad("too many skills");
+        }
+        let mut names: Vec<&str> = vec![];
+        let mut total = 0usize;
+        for s in skills {
+            if !Self::name_ok(&s.name) || names.contains(&s.name.as_str()) {
+                return bad("a skill name that is not usable");
+            }
+            names.push(&s.name);
+            let d = s.description.trim();
+            if d.is_empty()
+                || d.chars().count() > Self::MAX_DESCRIPTION
+                || d.contains(['\n', '\r', '\0'])
+            {
+                return bad("a skill description that is not usable");
+            }
+            if s.content.len() > Self::MAX_CONTENT || s.content.contains('\0') {
+                return bad("a skill content that is not usable");
+            }
+            total += s.content.len();
+        }
+        if total > Self::MAX_TOTAL {
+            return bad("too much skill content");
+        }
+        Ok(())
+    }
+}
+
+/// One MCP server for the harness, as ACP's `McpServer` (stdio, http or sse).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct McpServer {
+    /// The server's name as the harness shows it (`[A-Za-z0-9_-]`, never `steve`).
+    pub name: String,
+    #[serde(flatten)]
+    pub transport: McpTransport,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "transport", rename_all = "snake_case")]
+pub enum McpTransport {
+    Stdio {
+        command: String,
+        #[serde(default)]
+        args: Vec<String>,
+        #[serde(default)]
+        env: Vec<McpVar>,
+    },
+    Http {
+        url: String,
+        #[serde(default)]
+        headers: Vec<McpVar>,
+    },
+    Sse {
+        url: String,
+        #[serde(default)]
+        headers: Vec<McpVar>,
+    },
+}
+
+/// An env variable (stdio) or HTTP header (http, sse): a plain `value`, or a `secret` the Node takes
+/// from the Hub under this id.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct McpVar {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub value: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub secret: Option<String>,
+}
+
+/// The prefix of [`mcp_secrets_op`].
+pub const MCP_SECRETS_OP: &str = "mcp:";
+
+/// The operation a session's MCP secrets are taken under: `mcp:<session>`. The Hub answers it for
+/// the Node the session is bound to, for as long as the server is the session's Bot's.
+pub fn mcp_secrets_op(session: &SessionId) -> OperationId {
+    OperationId::new(format!("{MCP_SECRETS_OP}{}", session.as_str()))
+        .unwrap_or_else(|_| OperationId::new("mcp:").expect("valid"))
+}
+
+impl McpServer {
+    /// Checks what a Node is given: at most 32 servers, names usable and once each (`steve` is
+    /// Steve's own), commands and urls set, at most 64 variables each, named, without line breaks.
+    pub fn check_all(servers: &[McpServer]) -> crate::common::ApiResult<()> {
+        use crate::common::{ApiError, ErrorCode};
+        let bad = |m: &str| Err(ApiError::new(ErrorCode::Invalid, m.to_string()));
+        if servers.len() > 32 {
+            return bad("too many MCP servers");
+        }
+        let mut names: Vec<String> = vec![];
+        for s in servers {
+            let n = s.name.to_ascii_lowercase();
+            if s.name.is_empty()
+                || s.name.len() > 64
+                || !s
+                    .name
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
+                || n == "steve"
+                || names.contains(&n)
+            {
+                return bad("an MCP server name that is not usable");
+            }
+            names.push(n);
+            let vars = match &s.transport {
+                McpTransport::Stdio { command, env, .. } => {
+                    if command.trim().is_empty() {
+                        return bad("an MCP server without a command");
+                    }
+                    env
+                }
+                McpTransport::Http { url, headers } | McpTransport::Sse { url, headers } => {
+                    if !(url.starts_with("http://") || url.starts_with("https://")) {
+                        return bad("an MCP server url that is not http(s)");
+                    }
+                    headers
+                }
+            };
+            if vars.len() > 64 {
+                return bad("too many MCP server variables");
+            }
+            for v in vars {
+                let line = |x: &str| x.contains(['\n', '\r', '\0']);
+                if v.name.is_empty()
+                    || v.name.len() > 256
+                    || line(&v.name)
+                    || line(&v.value)
+                    || v.secret
+                        .as_ref()
+                        .is_some_and(|id| id.is_empty() || id.len() > 256)
+                {
+                    return bad("an MCP server variable that is not usable");
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 /// A principal's own directory for one harness (path model §4.5.1): its configuration, logins,

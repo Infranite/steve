@@ -6,14 +6,14 @@ import { cn } from "cn"
 import { BanIcon, BellOffIcon, CheckIcon, EllipsisIcon, InfoIcon, TriangleAlertIcon, UserIcon, UsersIcon } from "lucide-react"
 import { DropdownMenu, DropdownMenuContent, DropdownMenuGroup, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
 import { ContactAvatar } from "@/people/avatar"
-import { ATTENTION, SPACE_KIND, attentionOf, isDm, spaceTitle, type Attention, type Conflict, type Space } from "@/api/channels"
+import { ATTENTION, SPACE_KIND, attentionOf, isDm, spaceTitle, type Attention, type ChannelAccount, type Conflict, type Space } from "@/api/channels"
 import { t, useT } from "@/i18n"
 
 /** group: a group icon; DM: the other party's initials; your chat with yourself: a person */
 export function SpaceAvatar({ s, size = 32 }: { s: Space; size?: number }) {
   if (s.self_chat || s.kind === "self_dm") return <span className="inline-flex shrink-0 items-center justify-center rounded-full bg-blue/12 text-blue" style={{ width: size, height: size }} aria-hidden><UserIcon style={{ width: size * 0.55, height: size * 0.55 }} strokeWidth={1.75} /></span>
   if (isDm(s)) return <ContactAvatar name={s.counterpart?.name || spaceTitle(s)} size={size} />
-  return <span className="inline-flex shrink-0 items-center justify-center rounded-[28%] bg-muted text-muted-foreground" style={{ width: size, height: size }} aria-hidden><UsersIcon style={{ width: size * 0.5, height: size * 0.5 }} strokeWidth={1.5} /></span>
+  return <span className={cn("inline-flex shrink-0 items-center justify-center bg-muted text-muted-foreground", size >= 48 ? "rounded-xl" : "rounded-lg")} style={{ width: size, height: size }} aria-hidden><UsersIcon style={{ width: size * 0.5, height: size * 0.5 }} strokeWidth={1.5} /></span>
 }
 
 /** a name that never pushes the layout sideways: one line, ellipsis, full name on hover */
@@ -63,7 +63,7 @@ export function Conflicts({ items, keys, className }: { items?: Conflict[]; keys
   const xs = (items ?? []).filter((c) => keys.includes(c.key))
   if (!xs.length) return null
   return (
-    <div className={cn("mt-2 flex flex-col gap-1", className)}>
+    <div className={cn("mt-2 flex flex-col gap-1 anim-in", className)}>
       {xs.map((c, n) => (
         <div key={n} className={cn("flex items-start gap-1.5 rounded-lg px-3 py-2 type-footnote", c.level === "conflict" ? "bg-attention/10 text-foreground" : "bg-muted/60 text-muted-foreground")} data-conflict={c.key} data-conflict-level={c.level}>
           {c.level === "conflict" ? <TriangleAlertIcon className="mt-px size-3.5 shrink-0 text-attention" aria-hidden /> : <InfoIcon className="mt-px size-3.5 shrink-0" aria-hidden />}
@@ -71,4 +71,18 @@ export function Conflicts({ items, keys, className }: { items?: Conflict[]; keys
         </div>))}
     </div>
   )
+}
+
+/** what Steve does in a space, in a few words: the attention first (不提醒 / 屏蔽 stop the rest), then 只记录, then the role
+ *  with the identity it speaks as */
+export function doingLine(s: Space, a: ChannelAccount | null) {
+  const att = attentionOf(s)
+  if (att === "blocked") return t("channels:list.doing.blocked")
+  if (att === "quiet") return t("channels:list.doing.quiet")
+  if (s.muted || s.role === "record") return t("channels:list.doing.record")
+  if (s.role === "observe") return t("channels:list.doing.observe")
+  const self = (s.voice?.mode ?? a?.mode) === "self"
+  const who = s.persona?.name ?? a?.persona?.name ?? t("channels:word.defaultPersona")
+  if (self) return t("channels:list.doing.draftSelf")
+  return t(s.role === "draft" ? "channels:list.doing.draft" : "channels:list.doing.answer", { who })
 }

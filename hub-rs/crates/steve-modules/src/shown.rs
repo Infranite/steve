@@ -23,6 +23,12 @@ pub fn source_label(stored: &str) -> String {
 
 /// The name of a system: a built-in one still under its seeded name in the request's language.
 pub fn system_name(id: &str, builtin: bool, stored: &str) -> String {
+    // the external-channel extension declares its system under its zh-CN name
+    if id == "ext_ws"
+        && let Some(s) = steve_i18n::reword!(stored, &["modules.system.ext_ws"])
+    {
+        return s;
+    }
     if !builtin {
         return stored.to_string();
     }
@@ -41,5 +47,20 @@ pub fn system_name(id: &str, builtin: bool, stored: &str) -> String {
         "bank" => t!("modules.system.bank"),
         "feishu_tenant" => t!("modules.system.feishu_tenant"),
         _ => stored.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_external_channel_system_by_language() {
+        let name = |l| steve_i18n::with(l, || system_name("ext_ws", false, "其他聊天工具"));
+        assert_eq!(name(steve_i18n::EN), "Other chat app");
+        assert_eq!(name(steve_i18n::ZH_CN), "其他聊天工具");
+        // renamed: as stored
+        let own = steve_i18n::with(steve_i18n::EN, || system_name("ext_ws", false, "公司渠道"));
+        assert_eq!(own, "公司渠道");
     }
 }

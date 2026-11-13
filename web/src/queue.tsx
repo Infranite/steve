@@ -1,4 +1,4 @@
-/* The queue strip under a composer: every message waiting for the session's next turn is its own row,
+/* The queue in a composer's card (affectUI Run Controls' queue): every message waiting for the session's next turn is its own row,
  * with 编辑 (inline), 撤回 (back into the composer when it is empty, else an undo toast) and 立即发送 (interrupts the
  * running turn; the queue, this message first, is the next turn). Attachments stay with the message.
  * While the session is still starting there is no turn to interrupt, so nothing offers 立即发送, and Steve's brief
@@ -6,9 +6,9 @@
  * The main conversation has the same strip (ChatQueue): what you say while Steve is on a turn waits for it.
  * On an item page the queue is shown on the comments instead (QueuedComment); the strip keeps only what pairs with none. */
 import { useState, type ReactNode } from "react"
-import { ClockIcon, PencilIcon, RocketIcon, SendHorizontalIcon, Undo2Icon } from "lucide-react"
+import { ClockIcon, RocketIcon } from "lucide-react"
+import { IconEdit, IconSteer, IconUndo, RunAct, RunQueue, RunQueued } from "@/components/affect/run-controls-clean"
 import { Spinner } from "@/components/ui/spinner"
-import { Button } from "@/components/ui/button"
 import { Textarea } from "@/components/ui/textarea"
 import { Files } from "@/attach"
 import { Markdown } from "@/components/markdown"
@@ -28,27 +28,23 @@ export function queueNote(s: Sess | null) {
 
 const snip = (s: string) => (s.length > 24 ? s.slice(0, 24) + "…" : s)
 
-/** `prefix`: what the Hub put in front of the user's words (item supplements: “补充信息：”); shown and edited without it */
-export function QueueStrip({ sid, rows, note, composer, prefix = "", starting, className }: {
-  sid: string; rows: RQueued[]; note: string; composer?: { current: ComposerHandle | null }; prefix?: string; starting?: boolean; className?: string
+/** `prefix`: what the Hub put in front of the user's words (item supplements: “补充信息：”); shown and edited without it.
+ *  `numbered`: each row says its place (下一条, #2…); off where some of the queue is shown elsewhere (an item's comments) */
+export function QueueStrip({ sid, rows, note, composer, prefix = "", starting, numbered = true, className }: {
+  sid: string; rows: RQueued[]; note: string; composer?: { current: ComposerHandle | null }; prefix?: string; starting?: boolean; numbered?: boolean; className?: string
 }) {
   const t = useT()
   if (!rows.length) return null
   const strip = (s: string) => (prefix && s.startsWith(prefix) ? s.slice(prefix.length) : s)
   const brief = !!starting && rows.every((q) => q.via === "steve")
   return (
-    <div role="region" aria-label={t("shell:queue.region")} className={"mb-2 rounded-xl border border-dashed " + (className ?? "")} data-sq>
-      <div className="flex items-center gap-2 px-3.5 pt-2 pb-1 type-footnote text-muted-foreground" data-sq-note>
-        <ClockIcon className="size-3.5 shrink-0" aria-hidden /><span>{brief ? t("shell:queue.briefWaiting") : t("shell:queue.queuedN", { count: rows.length, note })}</span>
-      </div>
-      <ul className="flex flex-col">
-        {rows.map((q) => <Row key={q.id} q={q} shown={strip(q.text)} ops={starting && q.via === "steve" ? "none" : {
-          edit: (text) => qEdit(sid, q.id, (q.text.startsWith(prefix) ? prefix : "") + text),
-          withdraw: () => qWithdraw(sid, q.id, composer?.current, strip),
-          sendNow: starting ? undefined : () => qSendNow(sid, q.id),
-        }} />)}
-      </ul>
-    </div>
+    <RunQueue label={t("shell:queue.region")} className={className} data-sq note={brief ? t("shell:queue.briefWaiting") : t("shell:queue.queuedN", { count: rows.length, note })}>
+      {rows.map((q, n) => <Row key={q.id} q={q} shown={strip(q.text)} place={numbered && !brief ? n : undefined} ops={starting && q.via === "steve" ? "none" : {
+        edit: (text) => qEdit(sid, q.id, (q.text.startsWith(prefix) ? prefix : "") + text),
+        withdraw: () => qWithdraw(sid, q.id, composer?.current, strip),
+        sendNow: starting ? undefined : () => qSendNow(sid, q.id),
+      }} />)}
+    </RunQueue>
   )
 }
 
@@ -58,17 +54,12 @@ export function ChatQueue({ composer }: { composer?: { current: ComposerHandle |
   if (!rows.length) return null
   const note = st.hold ? t("shell:queue.afterRelease") : chatBusy() && (st.thinking || st.live) ? t("shell:queue.afterTurnInOrder") : t("shell:queue.now")
   return (
-    <div role="region" aria-label={t("shell:queue.region")} className="mb-2 rounded-xl border border-dashed" data-sq data-chat-queue>
-      <div className="flex items-center gap-2 px-3.5 pt-2 pb-1 type-footnote text-muted-foreground" data-sq-note>
-        <ClockIcon className="size-3.5 shrink-0" aria-hidden /><span>{t("shell:queue.queuedN", { count: rows.length, note })}</span>
-      </div>
-      <ul className="flex flex-col">
-        {rows.map((m) => <Row key={m.id ?? m.clientId} q={{ id: m.id ?? "", text: m.t ?? "", files: m.files, via: "me" }} shown={m.t ?? ""} ops={m.id ? {
-          edit: (text) => threadQueuedEdit(m.id!, text),
-          withdraw: () => threadQueuedWithdraw(m.id!, composer?.current),
-        } : null} />)}
-      </ul>
-    </div>
+    <RunQueue label={t("shell:queue.region")} data-sq data-chat-queue note={t("shell:queue.queuedN", { count: rows.length, note })}>
+      {rows.map((m, n) => <Row key={m.id ?? m.clientId} q={{ id: m.id ?? "", text: m.t ?? "", files: m.files, via: "me" }} shown={m.t ?? ""} place={n} ops={m.id ? {
+        edit: (text) => threadQueuedEdit(m.id!, text),
+        withdraw: () => threadQueuedWithdraw(m.id!, composer?.current),
+      } : null} />)}
+    </RunQueue>
   )
 }
 
@@ -93,37 +84,37 @@ type QEdit = ReturnType<typeof useQueuedEdit>
 
 function EditBox({ e }: { e: QEdit }) {
   const t = useT()
-  return <Textarea autoFocus value={e.edit ?? ""} onChange={(x) => e.setEdit(x.target.value)} aria-label={t("shell:queue.editLabel")} className="min-h-14 bg-card text-[14px]" data-queued-input
+  return <Textarea autoFocus value={e.edit ?? ""} onChange={(x) => e.setEdit(x.target.value)} aria-label={t("shell:queue.editLabel")} className="min-h-14 bg-card type-body" data-queued-input
     onKeyDown={(x) => { if (x.key === "Escape") { x.preventDefault(); e.setEdit(null) } if (x.key === "Enter" && (x.metaKey || x.ctrlKey)) { x.preventDefault(); void e.save() } }} />
 }
 
-function Actions({ e, shown, ops, via, className }: { e: QEdit; shown: string; ops: Exclude<QOps, "none" | null>; via: string; className?: string }) {
+/** 编辑 and 撤回 as quiet icons, 立即发送 (it interrupts the turn) in words; while editing, 保存 and 取消 */
+function Actions({ e, shown, ops, via }: { e: QEdit; shown: string; ops: Exclude<QOps, "none" | null>; via: string }) {
   const { edit, busy, run } = e, t = useT()
-  return <div className={"flex shrink-0 flex-wrap items-center gap-0.5 " + (className ?? "")}>
+  return <>
     {edit !== null ? <>
-      <Button size="xs" onClick={() => void e.save()} disabled={busy || !edit.trim()} data-queued-save>{t("common:action.save")}</Button>
-      <Button size="xs" variant="ghost" className="text-muted-foreground" onClick={() => e.setEdit(null)} disabled={busy}>{t("common:action.cancel")}</Button>
+      <RunAct icon={null} text={t("common:action.save")} label={t("common:action.save")} tone="accent" onClick={() => void e.save()} disabled={busy || !edit.trim()} data-queued-save />
+      <RunAct icon={null} text={t("common:action.cancel")} label={t("common:action.cancel")} onClick={() => e.setEdit(null)} disabled={busy} />
     </> : <>
-      {via !== "steve" && <Button size="xs" variant="ghost" className="text-muted-foreground" aria-label={t("shell:queue.editAria", { text: snip(shown) })} disabled={busy} onClick={() => e.setEdit(shown)} data-queued-edit><PencilIcon />{t("common:action.edit")}</Button>}
-      <Button size="xs" variant="ghost" className="text-muted-foreground" aria-label={t("shell:queue.withdrawAria", { text: snip(shown) })} disabled={busy} onClick={() => void run(ops.withdraw)} data-queued-withdraw><Undo2Icon />{t("shell:queue.withdraw")}</Button>
-      {ops.sendNow && <Button size="xs" variant="ghost" className="text-blue" aria-label={t("shell:queue.sendNowAria", { text: snip(shown) })} disabled={busy} onClick={() => void run(ops.sendNow!)} data-queued-send><SendHorizontalIcon />{t("shell:queue.sendNow")}</Button>}
+      {via !== "steve" && <RunAct icon={<IconEdit />} label={t("shell:queue.editAria", { text: snip(shown) })} disabled={busy} onClick={() => e.setEdit(shown)} data-queued-edit />}
+      <RunAct icon={<IconUndo />} label={t("shell:queue.withdrawAria", { text: snip(shown) })} disabled={busy} onClick={() => void run(ops.withdraw)} data-queued-withdraw />
+      {ops.sendNow && <RunAct icon={<IconSteer />} text={t("shell:queue.sendNow")} tone="accent" label={t("shell:queue.sendNowAria", { text: snip(shown) })} disabled={busy} onClick={() => void run(ops.sendNow!)} data-queued-send />}
     </>}
-  </div>
+  </>
 }
 
-function Row({ q, shown, ops }: { q: QRow; shown: string; ops: QOps }) {
+function Row({ q, shown, ops, place }: { q: QRow; shown: string; ops: QOps; place?: number }) {
   const e = useQueuedEdit(shown, ops), t = useT()
   return (
-    <li className="flex flex-col gap-1 border-t border-dashed px-3.5 py-2 sm:flex-row sm:items-start sm:gap-3" data-queued={q.id}>
-      <div className="min-w-0 flex-1">
-        {e.edit !== null ? <EditBox e={e} />
-          : q.via === "steve" ? <Brief text={shown} label={t("shell:queue.steveBrief")} className="type-callout text-muted-foreground" />
-          : (shown !== "（附件）" || !q.files?.length) && <div className="line-clamp-4 break-words" data-queued-text><Markdown text={shown} className="type-callout" /></div>}
-        <Files files={q.files} className="mt-1.5" />
-      </div>
-      {!ops && <div className="flex shrink-0 items-center gap-1.5 py-1 type-footnote text-muted-foreground" data-queued-sending><Spinner className="size-3" />{t("shell:queue.submitting")}</div>}
-      {ops && ops !== "none" && <Actions e={e} shown={shown} ops={ops} via={q.via} className="-ml-2 sm:ml-0" />}
-    </li>
+    <RunQueued data-queued={q.id} data-editing={e.edit !== null || undefined}
+      place={place === undefined || e.edit !== null ? undefined : place === 0 ? t("shell:queue.next") : t("shell:queue.place", { n: place + 1 })}
+      actions={!ops ? <span className="inline-flex items-center gap-1.5 type-footnote text-muted-foreground" data-queued-sending><Spinner className="size-3" />{t("shell:queue.submitting")}</span>
+        : ops !== "none" ? <Actions e={e} shown={shown} ops={ops} via={q.via} /> : undefined}>
+      {e.edit !== null ? <EditBox e={e} />
+        : q.via === "steve" ? <Brief text={shown} label={t("shell:queue.steveBrief")} className="type-callout text-muted-foreground" />
+        : (shown !== "（附件）" || !q.files?.length) && <div className="line-clamp-3 break-words text-foreground" data-queued-text><Markdown text={shown} className="type-callout" /></div>}
+      <Files files={q.files} className="mt-1.5" />
+    </RunQueued>
   )
 }
 
@@ -166,9 +157,9 @@ export function QueuedComment({ sid, q, prefix = "", composer, note, starting, a
   return <div className="min-w-0 flex-1" data-queued={q.id} data-queued-comment>
     {e.edit !== null ? <div className="mb-1"><EditBox e={e} /></div> : (shown !== "（附件）" || !q.files?.length) && body(shown)}
     <Files files={q.files} className="my-1" />
-    <div className="flex flex-wrap items-center gap-x-2 type-footnote text-muted-foreground">
-      <span className="inline-flex items-center gap-1" data-sq-note>{at} · <ClockIcon className="size-3 shrink-0" aria-hidden />{t("shell:queue.queuedNote", { note })}</span>
-      <Actions e={e} shown={shown} ops={ops} via={q.via} className="-ml-2 sm:ml-0" />
+    <div className="flex flex-wrap items-center gap-x-2 type-footnote text-tertiary">
+      <span className="inline-flex items-center gap-1 tabular-nums" data-sq-note>{at} · <ClockIcon className="size-3 shrink-0" aria-hidden />{t("shell:queue.queuedNote", { note })}</span>
+      <span className="ui-rclc -ml-1.5 inline-flex items-center gap-0.5 sm:ml-0"><Actions e={e} shown={shown} ops={ops} via={q.via} /></span>
     </div>
   </div>
 }

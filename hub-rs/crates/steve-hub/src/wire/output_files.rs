@@ -41,7 +41,7 @@ pub fn directory(home: &Path, item: &str) -> io::Result<PathBuf> {
         .join("outputs"))
 }
 
-/// Save redacted Markdown using a content-derived name. Retrying a delivery yields the same
+/// Save Markdown using a content-derived name. Retrying a delivery yields the same
 /// path; a crash leaves either the old complete file or a complete new one.
 pub fn save_report(home: &Path, item: &str, text: &str) -> io::Result<PathBuf> {
     save_bytes(home, item, "report.md", text.as_bytes())

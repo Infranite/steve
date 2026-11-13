@@ -1,7 +1,7 @@
 //! MCP tools of the vault: `steve_secret_list` and `steve_secret_use`.
 //! Definitions in the `{name, description, inputSchema}` shape of steve-mcp's `tools.json`; serving
 //! them is the integrator's (list after the Steve tools, route the names to [`call`] with the
-//! session's [`UseCx`]). Results never contain a value: only metadata, or redacted command output.
+//! session's [`UseCx`]). Results hold metadata, or the command output.
 
 use std::sync::LazyLock;
 
@@ -29,7 +29,7 @@ static TOOLS: LazyLock<Vec<Value>> = LazyLock::new(|| {
         }),
         json!({
             "name": USE,
-            "description": "Run a command that needs a credential from the user's vault. Steve injects the values and runs the command for you; you get the exit code and the output with secrets removed. Usually the user must approve first.",
+            "description": "Run a command that needs a credential from the user's vault. Steve injects the values and runs the command for you; you get the exit code and the output as the command printed it. Usually the user must approve first.",
             "inputSchema": {
                 "$schema": "http://json-schema.org/draft-07/schema#",
                 "type": "object",

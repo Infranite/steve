@@ -22,8 +22,6 @@ steve-flow = { path = "../steve-flow" }
 steve-modules = { path = "../steve-modules" }
 steve-node-api = { path = "../steve-node-api" }
 steve-store = { path = "../steve-store" }
-# The leak check on what a PR opened without asking would publish (push.rs).
-steve-vault = { path = "../steve-vault" }
 steve-i18n = { path = "../steve-i18n" }
 rust-i18n = "=4.2.4"
 async-trait = "=0.1.92"

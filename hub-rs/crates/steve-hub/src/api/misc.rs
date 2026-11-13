@@ -31,7 +31,7 @@ pub async fn me(State(st): State<AppState>, Extension(c): Extension<Ctx>) -> Api
     let version = st.cfg.version.clone();
     let web_version = crate::web::web_version(&st.cfg);
     st.read(move |r| {
-        let ws = r.workspaces_of_user(&c.me)?;
+        let ws = super::workspaces_out(r.workspaces_of_user(&c.me)?);
         ok(json!({ "user": c.user, "version": version, "web_version": web_version, "workspaces": objs(ws), "workspace": c.ws, "client": c.client }))
     })
     .await
@@ -141,10 +141,14 @@ async fn compute_state(st: &AppState, c: Ctx) -> Result<Value, ApiError> {
             );
         }
         // `workspace: undefined` drops the key
-        if let Some(x) = r.workspace_get(w)? {
+        if let Some(mut x) = r.workspace_get(w)? {
+            steve_store::seeded::show(&mut x, steve_store::seeded::WORKSPACE);
             out.insert("workspace".into(), Value::Object(x));
         }
-        out.insert("workspaces".into(), objs(r.workspaces_of_user(&c.me)?));
+        out.insert(
+            "workspaces".into(),
+            objs(super::workspaces_out(r.workspaces_of_user(&c.me)?)),
+        );
         let t0 = std::time::Instant::now();
         let mut items = super::summaries(r, w)?;
         for i in &mut items {
@@ -160,16 +164,25 @@ async fn compute_state(st: &AppState, c: Ctx) -> Result<Value, ApiError> {
         let t_items = t0.elapsed();
         out.insert(
             "decisions".into(),
-            objs(agent_busy(r, r.decisions_open(w)?)?),
+            objs(crate::decision_text::all(agent_busy(
+                r,
+                r.decisions_open(w)?,
+            )?)),
         );
         out.insert(
             "recent".into(),
-            objs(r.decisions_recent(w, now_ms() - 7 * 24 * 3_600_000)?),
+            objs(crate::decision_text::all(
+                r.decisions_recent(w, now_ms() - 7 * 24 * 3_600_000)?,
+            )),
         );
         let (bots, all) = super::bots_out(r, w)?;
         out.insert("bots".into(), objs(bots));
         out.insert("allBots".into(), Value::Array(all));
-        out.insert("projects".into(), objs(r.projects_list(w)?));
+        let mut projects = r.projects_list(w)?;
+        for p in &mut projects {
+            steve_store::seeded::show(p, steve_store::seeded::PROJECT);
+        }
+        out.insert("projects".into(), objs(projects));
         out.insert("tags".into(), objs(r.tags_list(w)?));
         out.insert("tagUses".into(), Value::Object(r.tag_uses(w)?));
         out.insert("thread".into(), objs(crate::notify::thread(r, w)?));
@@ -258,6 +271,7 @@ fn workspace_in(v: &Value, partial: bool) -> Result<Obj, ApiError> {
         p.insert("item_prefix".into(), json!(x));
     }
     c.finish()?;
+    steve_store::seeded::store(&mut p, steve_store::seeded::WORKSPACE);
     Ok(p)
 }
 
@@ -300,8 +314,12 @@ pub async fn workspace_patch(
         )));
     }
     let p = workspace_in(&body(&b)?, true)?;
-    st.write(move |r| ok(Value::Object(r.workspace_patch(&id, &p)?)))
-        .await
+    st.write(move |r| {
+        let mut w = r.workspace_patch(&id, &p)?;
+        steve_store::seeded::show(&mut w, steve_store::seeded::WORKSPACE);
+        ok(Value::Object(w))
+    })
+    .await
 }
 
 pub async fn workspace_switch(
@@ -369,16 +387,10 @@ pub async fn thread_say(
         .dedupe
         .once(&c.ws, &c.me, "thread", client_id, move || async move {
             let (st, c) = (st2, c2);
-            // V4 paste guard: a password or token is replaced before the message is stored or
-            // routed; the rest of it goes on as usual, with Steve's note on where to keep the secret
-            let guarded = steve_vault::guard::intercept(&text);
             let refs = super::files::refs(&st, &c.ws, files).await?;
             st.domain
-                .say_to(&c.ws, &c.me, &guarded.text, refs, checked, item, reply_to)
+                .say_to(&c.ws, &c.me, &text, refs, checked, item, reply_to)
                 .await?;
-            if guarded.blocked {
-                st.domain.say_guard_note(&c.ws).await?;
-            }
             Ok::<_, ApiError>(json!({ "ok": true }))
         })
         .await?;
@@ -457,13 +469,7 @@ pub async fn thread_queued_edit(
     if text.is_empty() {
         return Err(ApiError::Invalid(vec!["text".into()]));
     }
-    // V4 paste guard: what is sent is guarded, so is what it is changed to (the secret replaced)
-    let guarded = steve_vault::guard::intercept(&text);
-    if !st
-        .domain
-        .thread_queued_edit(&c.ws, &id, &guarded.text)
-        .await?
-    {
+    if !st.domain.thread_queued_edit(&c.ws, &id, &text).await? {
         return Err(ApiError::Json(409, steve_i18n::t!("hub.queued.gone")));
     }
     ok_true()
@@ -976,21 +982,24 @@ pub async fn config_draft(
     if let Some(mut t) = k.sub("target", false) {
         let kind = t.enum_("kind", &kinds);
         let id = t.opt_str("id", Str::ANY);
+        // a bot's long text (its working rules or its own system prompt) drafted on its own, from
+        // `base`, the text the editor shows
+        let field = t.opt_enum("field", &["rules", "prompt"]);
+        let base = t.opt_str("base", Str::max(40000));
         k.absorb(t);
         target.insert("kind".into(), json!(kind));
         if let Some(id) = id {
             target.insert("id".into(), json!(id));
         }
+        if let Some(f) = field {
+            target.insert("field".into(), json!(f));
+        }
+        if let Some(b) = base {
+            target.insert("base".into(), json!(b));
+        }
     }
     let text = k.str("text", Str::len(1, 4000));
     k.finish()?;
-    // V4 paste guard: no draft (and no model call) from a text with a password or token in it
-    if steve_vault::guard::intercept(&text).blocked {
-        return Ok(crate::error::json_response(
-            400,
-            &json!({ "error": steve_vault::guard::REPLY, "href": steve_vault::guard::REPLY_HREF }),
-        ));
-    }
     let kind = target
         .get("kind")
         .and_then(Value::as_str)

@@ -296,8 +296,27 @@ async fn stats_routes() {
         (200, &json!(0.75)),
         "{v}"
     );
+    // agent working time and time waiting on you, per day (the daily chart's third line)
+    let (s, v) = e
+        .call("GET", "/api/stats/series?metric=turn_ms", None)
+        .await;
+    assert_eq!(
+        (s, &v["series"][0]["values"][6]),
+        (200, &json!(60_000.0)),
+        "{v}"
+    );
+    let (s, v) = e
+        .call("GET", "/api/stats/series?metric=wait_ms", None)
+        .await;
+    assert_eq!(
+        (s, v["buckets"].as_array().map(Vec::len)),
+        (200, Some(7)),
+        "{v}"
+    );
     for q in [
         "metric=wip&group=model",
+        "metric=wait_ms&group=model",
+        "metric=turn_ms&group=token_type",
         "metric=nope",
         "metric=tokens&bucket=week",
     ] {

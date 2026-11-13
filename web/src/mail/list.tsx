@@ -2,12 +2,12 @@
  * and a search box over `GET /mail/threads`. No mailbox yet → the onboarding card; a Hub without the mail module (or
  * without the thread list) → the Unwired placeholder. */
 import { useEffect, useMemo, useState } from "react"
-import { MailIcon, PaperclipIcon, SearchIcon, PlusIcon } from "lucide-react"
+import { MailIcon, PaperclipIcon, PlusIcon } from "lucide-react"
 import { cn } from "cn"
 import { Button } from "@/components/ui/button"
-import { Input } from "@/components/ui/input"
 import { Spinner } from "@/components/ui/spinner"
-import { Page, Group, Segmented, Chips, Empty, ItemNo, StatusDot, go } from "@/ui"
+import { Page, Group, Segmented, Empty, ItemNo, StatusDot, go, SearchField, ConnectPrompt } from "@/ui"
+import { Select } from "@/view-shared"
 import { Unwired } from "@/unwired"
 import { tm } from "@/store"
 import { ContactAvatar } from "@/people/avatar"
@@ -38,14 +38,8 @@ function Onboarding() {
   const t = useT()
   return (
     <Page title={t("mail:shared.title")} sub={t("mail:list.onboardingSub")} max={640}>
-      <div className="flex items-start gap-3 rounded-xl border px-4 py-4" data-mail-onboarding>
-        <span className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-muted text-muted-foreground"><MailIcon className="size-[18px]" strokeWidth={1.5} /></span>
-        <div className="min-w-0 flex-1">
-          <div className="type-headline">{t("mail:list.onboardingTitle")}</div>
-          <div className="mt-0.5 type-callout text-muted-foreground">{t("mail:list.onboardingBody")}</div>
-          <Button size="sm" className="mt-3" onClick={() => go("#/accounts")} data-mail-connect><PlusIcon />{t("mail:list.connect")}</Button>
-        </div>
-      </div>
+      <ConnectPrompt icon={<MailIcon />} title={t("mail:list.onboardingTitle")} sub={t("mail:list.onboardingBody")} data-mail-onboarding
+        action={<Button onClick={() => go("#/integrations/mail")} data-mail-connect><PlusIcon />{t("mail:list.connect")}</Button>} />
     </Page>
   )
 }
@@ -64,13 +58,10 @@ function Threads({ accounts }: { accounts: MailAccount[] }) {
   const unread = accounts.reduce((n, a) => n + a.unread, 0)
   return (
     <Page title={tr("mail:shared.title")} sub={unread ? tr("mail:shared.unread", { count: unread }) : undefined} max={820}
-      toolbar={<div className="relative"><SearchIcon className="pointer-events-none absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" aria-hidden />
-        <Input type="search" aria-label={tr("mail:list.searchAria")} placeholder={tr("mail:list.searchPlaceholder")} className="h-8 w-56 rounded-lg pl-8" value={q} onChange={(e) => setQ(e.target.value)} data-mail-search /></div>}>
-      <div className="mb-4 flex flex-col gap-3">
-        {accounts.length > 1 && <Chips value={account ? labels[accounts.findIndex((a) => a.connection_id === account)] : ALL} options={[ALL, ...labels]}
-          onChange={(l) => setAccount(l === ALL ? "" : accounts[labels.indexOf(l)]?.connection_id ?? "")} className="flex-wrap" />}
-        <div className="-mx-1 overflow-x-auto px-1"><Segmented value={view} onChange={setView} options={VIEWS} /></div>
-      </div>
+      toolbar={<div className="flex w-full min-w-0 items-center gap-2 sm:w-auto sm:justify-end">
+        {accounts.length > 1 && <Select testId="mail-account" value={account || "__all"} onChange={(v) => setAccount(v === "__all" ? "" : v)} options={[{ v: "__all", l: ALL }, ...accounts.map((a, n) => ({ v: a.connection_id, l: a.unread ? tr("mail:list.accountUnread", { name: labels[n], count: a.unread }) : labels[n] }))]} />}
+        <SearchField size="sm" type="search" className="min-w-0 flex-1 sm:w-56 sm:flex-none" aria-label={tr("mail:list.searchAria")} placeholder={tr("mail:list.searchPlaceholder")} value={q} onChange={(e) => setQ(e.target.value)} data-mail-search /></div>}>
+      <div className="-mx-1 mb-4 overflow-x-auto px-1"><Segmented value={view} onChange={setView} options={VIEWS} /></div>
       {T.s === "loading" ? <div className="flex justify-center py-16"><Spinner className="size-5 text-muted-foreground" /></div>
         : T.s === "error" ? <Empty title={T.err} />
         : !T.data.length ? <Empty title={qq ? tr("mail:list.noMatch") : tr(`mail:list.empty.${view}`)} />
@@ -83,7 +74,7 @@ function ThreadRow({ t, showAccount }: { t: ThreadBrief; showAccount: boolean })
   const tr = useT()
   const name = t.from?.name || t.from?.addr || tr("mail:list.noSender")
   return (
-    <button type="button" onClick={() => go("#/mail/t/" + t.id)} role="listitem" className="flex w-full items-start gap-3 rounded-lg px-2 py-2.5 text-left transition-colors hover:bg-accent" data-thread-row={t.id} data-unread={t.unread > 0 || undefined}>
+    <button type="button" onClick={() => go("#/mail/t/" + t.id)} role="listitem" className="flex w-full items-start gap-3 rounded-lg px-2 py-3 text-left transition-colors hover:bg-accent" data-thread-row={t.id} data-unread={t.unread > 0 || undefined}>
       <ContactAvatar name={name} size={32} className="mt-0.5" />
       <span className="min-w-0 flex-1">
         <span className="flex min-w-0 items-baseline gap-1.5">
@@ -94,11 +85,12 @@ function ThreadRow({ t, showAccount }: { t: ThreadBrief; showAccount: boolean })
           {t.has_attachments && <PaperclipIcon className="size-3.5 shrink-0 text-muted-foreground" aria-label={tr("mail:shared.hasAttachments")} />}
           <span className="shrink-0 type-footnote tabular-nums text-muted-foreground">{tm(t.last_at)}</span>
         </span>
-        <span className={cn("block truncate type-callout", t.unread > 0 ? "text-foreground" : "text-foreground/85")}>{t.unread > 0 && <span className="mr-1.5 inline-block size-2 rounded-full bg-blue align-middle" aria-label={tr("mail:list.unread")} />}{t.subject || tr("mail:shared.noSubject")}</span>
-        <span className="block truncate type-footnote text-muted-foreground">{t.snippet}</span>
-        {(t.signal || t.item_id || t.draft || showAccount) && <span className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 type-footnote text-muted-foreground">
-          {t.signal && <span className="inline-flex items-center gap-1.5" data-thread-signal><StatusDot s={/等你|需要/.test(t.signal.outcome_label) ? "wait" : "idle"} />{t.signal.outcome_label}</span>}
-          {t.draft && <span className="inline-flex items-center gap-1.5" data-thread-draft-status={t.draft.status}><StatusDot s={DRAFT_STATUS[t.draft.status]?.[1] ?? "idle"} />{tr("mail:list.draftStatus", { status: DRAFT_STATUS[t.draft.status]?.[0] ?? t.draft.status })}</span>}
+        <span className={cn("mt-0.5 block truncate type-callout", t.unread > 0 ? "font-medium text-foreground" : "text-foreground/85")}>{t.unread > 0 && <span className="mr-1.5 inline-block size-2 rounded-full bg-blue align-middle" aria-label={tr("mail:list.unread")} />}{t.subject || tr("mail:shared.noSubject")}</span>
+        <span className="block truncate type-callout text-muted-foreground">{t.snippet}</span>
+        {(t.signal || t.item_id || t.draft || showAccount) && <span className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1 type-footnote text-muted-foreground">
+          {/* a draft waiting for you is the next step, so it comes first; the signal says why the mail is here */}
+          {t.draft && <span className={cn("inline-flex items-center gap-1.5", t.draft.status === "pending" && "font-medium text-foreground")} data-thread-draft-status={t.draft.status}><StatusDot s={DRAFT_STATUS[t.draft.status]?.[1] ?? "idle"} />{tr("mail:list.draftStatus", { status: DRAFT_STATUS[t.draft.status]?.[0] ?? t.draft.status })}</span>}
+          {t.signal && <span className="inline-flex items-center gap-1.5" data-thread-signal>{!t.draft && <StatusDot s={/等你|需要/.test(t.signal.outcome_label) ? "wait" : "idle"} />}{t.signal.outcome_label}</span>}
           {t.item_id && <ItemNo id={t.item_id} />}
           {showAccount && <span className="truncate">{t.connection.address}</span>}
         </span>}

@@ -1,6 +1,6 @@
 import { createRoot } from "react-dom/client"
 import "../../src/index.css"
-import { Toaster } from "sonner"
+import { Toaster } from "@/components/ui/toaster"
 import { api, type A2uiSubmit, type RMessage, type State } from "../../src/api"
 import { ChatView } from "../../src/chat-view"
 import { SidebarProvider } from "../../src/components/ui/sidebar"

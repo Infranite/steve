@@ -20,8 +20,8 @@ import { useT } from "@/i18n"
 function Modal({ title, desc, onClose, children, footer, w = 480 }: { title: string; desc?: string; onClose: () => void; children: React.ReactNode; footer?: React.ReactNode; w?: number }) {
   return (
     <Dialog open onOpenChange={(o) => !o && onClose()}>
-      <DialogContent className="gap-4 rounded-2xl" style={{ maxWidth: w }}>
-        <DialogHeader><DialogTitle className="type-headline">{title}</DialogTitle>{desc && <DialogDescription className="type-callout">{desc}</DialogDescription>}</DialogHeader>
+      <DialogContent className="gap-4" style={{ maxWidth: w }}>
+        <DialogHeader><DialogTitle className="type-title">{title}</DialogTitle>{desc && <DialogDescription className="type-callout">{desc}</DialogDescription>}</DialogHeader>
         {children}
         {footer && <DialogFooter className="gap-2">{footer}</DialogFooter>}
       </DialogContent>
@@ -47,9 +47,9 @@ export function NewAccountDialog({ systems, onClose, onDone }: { systems: RSyste
         <FieldGroup className="gap-4">
           <Field orientation="horizontal" className="justify-between"><FieldLabel>{t("accounts:newAccount.system")}</FieldLabel><Select testId="na-sys" value={s} onChange={setS} options={usable.map((x) => ({ v: x.id, l: x.name }))} /></Field>
           <Field orientation="horizontal" className="justify-between"><FieldLabel>{t("accounts:newAccount.kind")}</FieldLabel><Select testId="na-kind" value={kind} onChange={setKind} options={Object.entries(KIND_LABEL).map(([v, l]) => ({ v, l }))} /></Field>
-          <Field><FieldLabel htmlFor="na-handle">{t("accounts:newAccount.handle")}</FieldLabel><Input id="na-handle" autoFocus className="rounded-lg" value={h} maxLength={200} onChange={(e) => setH(e.target.value)} placeholder={sys?.family === "card" ? t("accounts:newAccount.handleCard") : sys?.family === "email" ? t("accounts:newAccount.handleEmail") : t("accounts:newAccount.handleOther")} data-na-handle autoComplete="off" />
+          <Field><FieldLabel htmlFor="na-handle">{t("accounts:newAccount.handle")}</FieldLabel><Input id="na-handle" autoFocus value={h} maxLength={200} onChange={(e) => setH(e.target.value)} placeholder={sys?.family === "card" ? t("accounts:newAccount.handleCard") : sys?.family === "email" ? t("accounts:newAccount.handleEmail") : t("accounts:newAccount.handleOther")} data-na-handle autoComplete="off" />
             {sys?.family === "card" && <FieldDescription>{t("accounts:newAccount.cardNote")}</FieldDescription>}</Field>
-          <Field><FieldLabel htmlFor="na-name">{t("accounts:newAccount.displayName")}</FieldLabel><Input id="na-name" className="rounded-lg" value={n} maxLength={80} onChange={(e) => setN(e.target.value)} placeholder={t("accounts:newAccount.displayNamePlaceholder")} /></Field>
+          <Field><FieldLabel htmlFor="na-name">{t("accounts:newAccount.displayName")}</FieldLabel><Input id="na-name" value={n} maxLength={80} onChange={(e) => setN(e.target.value)} placeholder={t("accounts:newAccount.displayNamePlaceholder")} /></Field>
         </FieldGroup>
         <button type="submit" hidden />
       </form>
@@ -64,7 +64,7 @@ function CredentialFields({ fields, vals, setVals, only }: { fields: RFieldDef[]
   return <>{xs.map((f) => (
     <Field key={f.key}>
       <FieldLabel htmlFor={"cf-" + f.key}>{f.label}{f.secret && <LockIcon className="ml-1 inline size-3 text-muted-foreground" aria-label={t("accounts:connect.secret")} />}{!f.required && <span className="ml-1 font-normal text-muted-foreground">{t("accounts:connect.optional")}</span>}</FieldLabel>
-      <Input id={"cf-" + f.key} className="rounded-lg font-mono" type={f.secret ? "password" : f.type === "number" ? "number" : "text"} autoComplete="off" spellCheck={false} required={f.required}
+      <Input id={"cf-" + f.key} className="font-mono" type={f.secret ? "password" : f.type === "number" ? "number" : "text"} autoComplete="off" spellCheck={false} required={f.required}
         value={vals[f.key] ?? f.default ?? ""} onChange={(e) => setVals({ ...vals, [f.key]: e.target.value })} data-cred-field={f.key} />
       {f.hint && <FieldDescription>{f.hint}</FieldDescription>}
     </Field>))}</>
@@ -141,7 +141,7 @@ function DeviceDialog({ adapter, d, onClose, done }: { adapter: RAdapter; d: RDe
     <Modal title={t("accounts:connect.title", { name: adapter.name })} desc={t("accounts:device.desc")} onClose={onClose} w={420}
       footer={<Button variant="outline" onClick={onClose}>{err ? t("common:action.close") : t("common:action.cancel")}</Button>}>
       <div className="flex flex-col items-center gap-3 py-2" data-device-flow>
-        <div className="select-all rounded-xl bg-muted px-5 py-3 font-mono text-[26px] tracking-[0.2em]" aria-label={t("accounts:device.code")} data-device-code>{d.user_code}</div>
+        <div className="select-all rounded-xl bg-muted/60 px-5 py-3 type-display font-mono! tracking-[0.2em]!" aria-label={t("accounts:device.code")} data-device-code>{d.user_code}</div>
         <a href={url} target="_blank" rel="noreferrer noopener" className="inline-flex items-center gap-1 type-callout text-blue hover:underline">{d.verification_uri}<ExternalLinkIcon className="size-3.5" /></a>
         <div className="type-footnote text-muted-foreground" role="status">{err ? <span className="text-destructive">{err}</span> : <span className="inline-flex items-center gap-1.5"><Spinner className="size-3" />{t("accounts:device.waiting", { name: adapter.name, left: `${Math.floor(left / 60)}:${String(left % 60).padStart(2, "0")}` })}</span>}</div>
       </div>

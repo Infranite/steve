@@ -18,7 +18,7 @@
 //!    and effective level.
 //!
 //! Everything is read as the account owner's user, with the space's scope: what that user may see
-//! and the space's own memories. Message text passes the vault's guard before the model sees it.
+//! and the space's own memories.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -26,7 +26,6 @@ use std::time::Duration;
 use async_trait::async_trait;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::Value;
-use steve_flow::nodes::bot::{Guard, redact};
 use steve_knowledge::Hit;
 use steve_knowledge::context::{level_label, render_snippets, reply_hits};
 use steve_modules::{ApiError, GatewayOut, Tier};
@@ -147,16 +146,15 @@ pub struct Layers {
     pub hits: Vec<Hit>,
     /// Layer 7 was found without the meaning search (the knowledge store's semantic pass failed).
     pub kb_semantic_down: bool,
-    /// Oldest first: `(who, text)`, already through the guard.
+    /// Oldest first: `(who, text)`.
     pub history: Vec<(String, String)>,
     pub sender: String,
-    /// Through the guard.
     pub message: String,
     /// A task instead of (or on top of) answering the message: a flow's `text` with `generate`.
     pub instruction: Option<String>,
     /// Your name (the account owner), for the drafted-as-you check.
     pub owner: String,
-    /// The message this one replies to `(who, text)`, through the guard.
+    /// The message this one replies to `(who, text)`.
     pub replied: Option<(String, String)>,
 }
 
@@ -432,19 +430,9 @@ fn sender_items(c: &Connection, ws: &str, party: &str) -> ChannelResult<Vec<Stri
     Ok(rows)
 }
 
-/// `steve_flow`'s guard as the knowledge module's.
-struct KbGuard<'a>(&'a dyn Guard);
-
-impl steve_knowledge::Guard for KbGuard<'_> {
-    fn scan(&self, text: &str) -> Vec<std::ops::Range<usize>> {
-        self.0.scan(text)
-    }
-}
-
 /// Gathers the layers for answering `plan`'s message.
 pub fn gather(
     c: &Connection,
-    guard: &dyn Guard,
     store: &dyn steve_knowledge::port::KnowledgeStore,
     plan: &Plan,
     opts: &ComposeOpts,
@@ -547,23 +535,18 @@ pub fn gather(
         anchor_ids.extend(rules.iter().map(|h| format!("{}:{}", h.obj_type, h.obj_id)));
     }
 
-    // history and the message (through the guard)
+    // history and the message
     let history: Vec<(String, String)> = messages::context_before(
         c,
         &space.id,
         &plan.message_id,
         opts.history.unwrap_or(HISTORY),
-    )?
-    .into_iter()
-    .map(|(who, t)| (who, redact(guard, &t)))
-    .collect();
+    )?;
     let recent: Vec<String> = history.iter().map(|(_, t)| t.clone()).collect();
-    let replied = messages::replied_to(c, &space.id, &plan.message_id)?
-        .map(|(who, t)| (who, redact(guard, &t)));
+    let replied = messages::replied_to(c, &space.id, &plan.message_id)?;
 
     // 7: retrieval as the owner, the sender and the space as anchors
-    let kg = KbGuard(guard);
-    let found = reply_hits(c, store, &kg, &viewer, &plan.text, &recent, &objs, now)
+    let found = reply_hits(c, store, &viewer, &plan.text, &recent, &objs, now)
         .map_err(|e| ApiError::Internal(e.to_string()))?;
     let kb_semantic_down = found.semantic_down;
     let hits = found
@@ -590,7 +573,7 @@ pub fn gather(
         kb_semantic_down,
         history,
         sender: plan.sender_name.clone(),
-        message: redact(guard, &plan.text),
+        message: plan.text.clone(),
         instruction: opts.instruction.clone(),
     })
 }
@@ -700,7 +683,7 @@ impl Composer {
         let now = ch.now();
         let layers = ch
             .store()
-            .reader(|c| gather(c, ch.guard(), ch.knowledge_store(), plan, opts, now))?;
+            .reader(|c| gather(c, ch.knowledge_store(), plan, opts, now))?;
         let media = crate::media_agent::prepare(ch, plan, self.media.as_deref()).await?;
         let mut p = prompt(&layers);
         if !media.text.is_empty() {

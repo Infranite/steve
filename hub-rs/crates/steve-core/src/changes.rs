@@ -432,6 +432,7 @@ fn bot_field_shown(key: &str) -> Option<String> {
         "perm_mode" => steve_i18n::t!("core.draft.bot.perm_mode"),
         "default_project" => steve_i18n::t!("core.draft.bot.default_project"),
         "enabled" => steve_i18n::t!("core.draft.bot.enabled"),
+        "prompt" => steve_i18n::t!("core.draft.bot.prompt"),
         _ => return None,
     })
 }
@@ -1119,6 +1120,82 @@ impl Core {
             ),
             _ => return Err(msg(steve_i18n::t!("core.settings.not_found"))),
         })
+    }
+
+    /// Draft a new version of one of a bot's long texts (`field`: `rules`, its working rules, or
+    /// `prompt`, a system prompt of its own) from a request in plain words. `base` is the text the
+    /// request is about (what the editor shows, saved or not; empty to write one from nothing),
+    /// else the saved one. The proposal carries the whole new text in its patch.
+    pub async fn draft_bot_text(
+        &self,
+        ws: &str,
+        id: &str,
+        field: &str,
+        base: Option<&str>,
+        request: &str,
+    ) -> Result<Proposal> {
+        crate::stats::tagged("draft", ws, async {
+            let db = self.store();
+            let b = match db.bot(id)? {
+                Some(b) if db.bot_in_workspace(&b.id, ws)? => b,
+                _ => return Err(msg(steve_i18n::t!("core.bot.not_found"))),
+            };
+            let (saved, label) = match field {
+                "rules" => (b.rules.clone(), "工作规范（附在自动生成的系统提示词里）"),
+                "prompt" => (
+                    b.prompt.clone().unwrap_or_default(),
+                    "系统提示词（自己写的全文，替换自动生成的那份；记忆和安全规则另外附上）",
+                ),
+                _ => return Err(msg(steve_i18n::t!("core.settings.not_found"))),
+            };
+            let cur = base.map(str::to_string).unwrap_or(saved);
+            let spec = FieldSpec {
+                key: field.into(),
+                label: label.into(),
+                ty: "text",
+                values: None,
+                current: json!(cur),
+            };
+            let what = format!(
+                "the bot \"{}\" (role: {}; way of speaking: {})",
+                b.name,
+                if b.role.trim().is_empty() { "-" } else { b.role.trim() },
+                if b.persona.trim().is_empty() { "-" } else { b.persona.trim() },
+            );
+            let said = draft_fields(self.gw(), &what, std::slice::from_ref(&spec), request).await?;
+            let new = said
+                .into_iter()
+                .find(|(k, _)| k == field)
+                .map(|(_, v)| jstr(&v).trim().to_string())
+                .unwrap_or_default();
+            let (mut changes, mut patch) = (vec![], Map::new());
+            if !new.is_empty() && new != cur.trim() {
+                changes.push(Change {
+                    label: field_shown("bot", field, true, label),
+                    from: value_shown("bot", field, show(&json!(cur))),
+                    to: value_shown("bot", field, show(&json!(new))),
+                });
+                patch.insert(field.into(), json!(new));
+            }
+            let target = Target {
+                kind: "bot".into(),
+                id: Some(b.id.clone()),
+            };
+            let p = Proposal {
+                id: uid("chg"),
+                ws: ws.into(),
+                title: steve_i18n::t!("core.draft.title.bot", bot = b.display()),
+                href: format!("#/bots/{}", b.id),
+                target,
+                changes,
+                patch,
+                created: now(),
+                current: vec![],
+            };
+            self.tx().st.drafts.insert(p.id.clone(), p.clone());
+            Ok(p)
+        })
+        .await
     }
 
     async fn draft_untagged(&self, ws: &str, target: Target, request: &str) -> Result<Proposal> {

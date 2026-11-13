@@ -13,7 +13,7 @@ const short: Msg[] = [
   { id: "answer", k: "steve", t: "可以。我会整理消息层级、阅读间距和输入区，让每一轮对话更容易浏览。", created: now - 100000,
     steps: { tools: [], ms: 1800, route: { kind: "answer", title: "", bot: "steve", project: null, tags: [], newTags: [], why: "整理对话页的视觉层级和阅读体验", model: null, fallback: false, ms: 200 } } },
 ]
-const long: Msg = { id: "long", k: "steve", created: now, replyTo: "request", t: "已整理好页面的视觉方案。\n\n### 这次调整\n\n- **消息层级**：正文、思考和引用分开呈现。\n- **阅读体验**：长回复保持舒适的行宽，手机上自然换行。\n- **输入区**：保留草稿、事项引用和停止生成。\n\n```ts\nconst conversation = { message: \"这是一段用于验证窄屏代码滚动的较长内容\", status: \"ready\" }\n```\n\n| 区域 | 调整 |\n| --- | --- |\n| 顶栏 | 固定高度 |\n| 消息 | 统一阅读栏 |\n\n下一步可以在浅色和深色主题中检查效果。" }
+const long: Msg = { id: "long", k: "steve", created: now, replyTo: "request", t: "已整理好页面的视觉方案。\n\n### 这次调整\n\n- **消息层级**：正文、思考和引用分开呈现。\n- **阅读体验**：长回复保持舒适的行宽，手机上自然换行。\n- **输入区**：保留草稿、事项引用和停止生成。\n- **“执行中”没有具体活动。**看不到当前执行者。\n\n```ts\nconst conversation = { message: \"这是一段用于验证窄屏代码滚动的较长内容\", status: \"ready\" }\n```\n\n| 区域 | 调整 |\n| --- | --- |\n| 顶栏 | 固定高度 |\n| 消息 | 统一阅读栏 |\n\n下一步可以在浅色和深色主题中检查效果。" }
 const steve: Bot = { id: "steve", main: true, n: "Steve", a: "", role: "你的助手", pers: "", pro: 1, h: "Codex", harness: "codex", m: "", model: null, on: true, acc: "manual", ws: "", project: null, perm: "", permMode: "auto", rule: "", prompt: null, mem: [], memCount: 0, memLoaded: true, routines: [], hue: "", color: "#8b9eac", round: 60, skin: null, workspaces: [] }
 const dev: Bot = { ...steve, id: "dev", main: false, n: "Steve 开发 Bot" }
 st.bots = { steve, dev }
@@ -27,7 +27,9 @@ const rich: Msg[] = [...short,
   { id: "note", k: "steve", t: "ST-48 的 Release 构建失败：" + url, item: "ST-48", created: now - 30000, notice: { kind: "build", level: "error", ref: "n1" } },
   { id: "offer", k: "steve", t: "路径 `hub-rs/crates/steve-store/migrations/../../../web/src/components/ui/message-scroller.tsx` 里没有用到。", created: now - 20000, offer: { title: "把对话页里没用到的消息滚动组件和它的样式一起删掉，顺便整理滚动条", state: "open" } as any },
 ]
-st.thread = location.search.includes("empty") ? [] : location.search.includes("long") ? [...short, long] : location.search.includes("rich") ? rich : short
+/* quoting the long reply: the quote line shows its words, not its Markdown */
+const quoted: Msg = { id: "quoted", k: "me", created: now + 1000, replyTo: "long", t: "好" }
+st.thread = location.search.includes("empty") ? [] : location.search.includes("long") ? [...short, long, quoted] : location.search.includes("rich") ? rich : short
 st.notices = []
 let replies = 0
 window.addEventListener("fixture-reply", () => { replies++; st.thread = [...st.thread, { id: "reply-" + replies, k: "steve", created: Date.now(), t: "新到的一条回复。\n\n- 第一点\n- 第二点\n- 第三点" }]; emit() })

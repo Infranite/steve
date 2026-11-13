@@ -4,17 +4,15 @@
 //! leaves decisions consistent; candidates expire after 30 days. Plus the chat source, the 待确认 list
 //! and `steve_remember`.
 
-use std::sync::Arc;
-
 use axum::Router;
 use serde_json::{Value, json};
+use steve_knowledge::Knowledge;
 use steve_knowledge::candidates::{
     self, EXPIRE_AFTER_MS, MAX_PER_ORIGIN, MemDecisions, NewCandidate, Origin, OriginKind, SAVED,
 };
 use steve_knowledge::extract::PROMPT_HEAD;
 use steve_knowledge::retrieve::{Purpose, Query, retrieve};
 use steve_knowledge::sources::{chat, items};
-use steve_knowledge::{Knowledge, NoGuard};
 use steve_modules::contacts::mcp::McpCx;
 use steve_modules::decisions;
 use steve_modules::testkit::{ME, OTHER, TestEnv, WS, call, caller};
@@ -31,7 +29,7 @@ fn setup() -> Env {
     let env = TestEnv::new(|r| {
         r.decision(candidates::SUBJECT, Box::new(MemDecisions));
     });
-    let kb = Knowledge::new(Arc::new(NoGuard), |_| {});
+    let kb = Knowledge::new(|_| {});
     let app = steve_knowledge::routes(kb.clone()).with_state(env.modules.clone());
     env.store()
         .with_conn(|c| {
@@ -565,7 +563,6 @@ async fn steve_remember_saves_a_candidate() {
     let m = &e.env.modules;
     let r = candidates::remember(
         m,
-        &e.kb,
         &cx,
         &json!({"text": "Acme 每年三月续签", "kind": "fact", "about": "Acme"}),
     );
@@ -584,12 +581,11 @@ async fn steve_remember_saves_a_candidate() {
 
     let err = candidates::remember(
         m,
-        &e.kb,
         &cx,
         &json!({"text": "x", "kind": "fact", "about": "王五"}),
     );
     assert!(err.unwrap_err().contains("王五"));
-    let err = candidates::remember(m, &e.kb, &cx, &json!({"text": "x", "kind": "summary"}));
+    let err = candidates::remember(m, &cx, &json!({"text": "x", "kind": "summary"}));
     assert!(err.unwrap_err().contains("at kind"));
     assert_eq!(candidates::remember_tool()["name"], "steve_remember");
 }

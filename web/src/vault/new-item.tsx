@@ -9,7 +9,7 @@ import { Spinner } from "@/components/ui/spinner"
 import { Field, FieldDescription, FieldGroup, FieldLabel } from "@/components/ui/field"
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { Select } from "@/view-shared"
-import { go, Segmented } from "@/ui"
+import { go, Segmented, Loading } from "@/ui"
 import { vaultApi, SENS_LABEL, type RTemplate, type RVault, type Sensitivity } from "@/api/vault"
 import { useBusy, report } from "@/accounts/load"
 import { useT } from "@/i18n"
@@ -34,25 +34,25 @@ export function NewVaultDialog({ account, onClose }: { account?: { id: string; d
   const ok = !!T && !!vault && !!title.trim() && !busy
   return (
     <Dialog open onOpenChange={(x) => !x && onClose()}>
-      <DialogContent className="max-h-[90dvh] gap-4 overflow-y-auto rounded-2xl sm:max-w-[480px]">
-        <DialogHeader><DialogTitle className="type-headline">{t("vault:newItem.title")}</DialogTitle><DialogDescription className="type-callout">{account ? t("vault:newItem.descAccount", { name: account.display_name }) : t("vault:newItem.desc")}</DialogDescription></DialogHeader>
-        {!tpls ? <div className="flex justify-center py-8"><Spinner className="size-5 text-muted-foreground" /></div> :
+      <DialogContent className="max-h-[90dvh] gap-4 overflow-y-auto sm:max-w-[480px]">
+        <DialogHeader><DialogTitle className="type-title">{t("vault:newItem.title")}</DialogTitle><DialogDescription className="type-callout">{account ? t("vault:newItem.descAccount", { name: account.display_name }) : t("vault:newItem.desc")}</DialogDescription></DialogHeader>
+        {!tpls ? <Loading className="py-8" /> :
         <form className="contents" autoComplete="off" onSubmit={(e) => { e.preventDefault(); if (ok) void submit() }}>
           <FieldGroup className="gap-4">
             <Field orientation="horizontal" className="justify-between"><FieldLabel>{t("vault:newItem.template")}</FieldLabel><Select testId="nv-tpl" value={tpl} onChange={(v) => { setTpl(v); setVals({}); setSens("") }} options={tpls.map((x) => ({ v: x.id, l: x.name }))} /></Field>
             <Field orientation="horizontal" className="justify-between"><FieldLabel>{t("vault:newItem.vault")}</FieldLabel><Segmented size="sm" value={scope} onChange={setScope} options={[["personal", t("vault:scope.personal")], ["shared", t("vault:scope.shared")]] as const} /></Field>
-            <Field><FieldLabel htmlFor="nv-title">{t("vault:newItem.itemTitle")}</FieldLabel><Input id="nv-title" autoFocus className="rounded-lg" maxLength={80} value={title} onChange={(e) => setTitle(e.target.value)} placeholder={t("vault:newItem.titlePlaceholder")} data-nv-title /></Field>
-            <Field><FieldLabel htmlFor="nv-site">{t("vault:newItem.site")}</FieldLabel><Input id="nv-site" className="rounded-lg" value={site} onChange={(e) => setSite(e.target.value)} placeholder="github.com" data-nv-site /></Field>
+            <Field><FieldLabel htmlFor="nv-title">{t("vault:newItem.itemTitle")}</FieldLabel><Input id="nv-title" autoFocus maxLength={80} value={title} onChange={(e) => setTitle(e.target.value)} placeholder={t("vault:newItem.titlePlaceholder")} data-nv-title /></Field>
+            <Field><FieldLabel htmlFor="nv-site">{t("vault:newItem.site")}</FieldLabel><Input id="nv-site" value={site} onChange={(e) => setSite(e.target.value)} placeholder="github.com" data-nv-site /></Field>
             {T?.fields.map((f) => (
               <Field key={f.label}><FieldLabel htmlFor={"nv-f-" + f.label}>{f.label}{f.secret && <LockIcon className="ml-1 inline size-3 text-muted-foreground" aria-label={t("vault:newItem.secret")} />}</FieldLabel>
                 {f.secret && /私钥|恢复码|内容/.test(f.label)
-                  ? <Textarea id={"nv-f-" + f.label} className="min-h-20 rounded-lg font-mono [-webkit-text-security:disc]" autoComplete="off" spellCheck={false} value={vals[f.label] ?? ""} onChange={(e) => setVals({ ...vals, [f.label]: e.target.value })} data-nv-field={f.label} />
-                  : <Input id={"nv-f-" + f.label} type={f.secret ? "password" : "text"} autoComplete={f.secret ? "new-password" : "off"} spellCheck={false} className="rounded-lg" value={vals[f.label] ?? ""} onChange={(e) => setVals({ ...vals, [f.label]: e.target.value })} data-nv-field={f.label} />}
+                  ? <Textarea id={"nv-f-" + f.label} className="min-h-20 font-mono [-webkit-text-security:disc]" autoComplete="off" spellCheck={false} value={vals[f.label] ?? ""} onChange={(e) => setVals({ ...vals, [f.label]: e.target.value })} data-nv-field={f.label} />
+                  : <Input id={"nv-f-" + f.label} type={f.secret ? "password" : "text"} autoComplete={f.secret ? "new-password" : "off"} spellCheck={false} value={vals[f.label] ?? ""} onChange={(e) => setVals({ ...vals, [f.label]: e.target.value })} data-nv-field={f.label} />}
               </Field>))}
             <Field orientation="horizontal" className="justify-between"><FieldLabel>{t("vault:newItem.sensitivity")}</FieldLabel>
               {T?.id === "bank_card" ? <span className="type-callout text-muted-foreground">{SENS_LABEL.high}</span>
                 : <Select testId="nv-sens" value={level} onChange={(v) => setSens(v as Sensitivity)} options={(["normal", "sensitive", "high"] as const).map((x) => ({ v: x, l: SENS_LABEL[x] }))} />}</Field>
-            <FieldDescription>{level === "high" ? t("vault:newItem.highNote") : t("vault:newItem.defaultNote")}</FieldDescription>
+            <FieldDescription className="type-footnote">{level === "high" ? t("vault:newItem.highNote") : t("vault:newItem.defaultNote")}</FieldDescription>
           </FieldGroup>
           <button type="submit" hidden />
         </form>}

@@ -1,5 +1,6 @@
 // Vite fixture only. Every API request is intercepted; no Hub, account or model is used.
 import assert from "node:assert/strict"
+import { settle } from "./settle.mjs"
 const { chromium } = await import(process.env.PLAYWRIGHT_MODULE || "playwright")
 const browser = await chromium.launch({ headless: true, ...(process.env.PLAYWRIGHT_EXECUTABLE ? { executablePath: process.env.PLAYWRIGHT_EXECUTABLE } : {}) })
 const base = process.env.STEVE_TEST_WEB || "http://127.0.0.1:5189"
@@ -9,7 +10,6 @@ const coverage = { retention_days: 7, earliest_cursor: 1, latest_cursor: 3, inst
 const event = (id, cursor, extra = {}) => ({ event_id: id, cursor, at: at - cursor * 1000, kind: "dependency.resume", reason_code: "open_dependency", severity: "info", session_id: "session-one", attempt_id: "attempt-one", details: { dependency: "ST-100" }, ...extra })
 const first = event("event-3", 3), earlier = event("event-2", 2)
 const complete = (events, rest = {}) => ({ events, next_cursor: null, has_more: false, coverage, gaps: [], truncated: false, ...rest })
-const settle = (page) => page.evaluate(() => Promise.allSettled(document.getAnimations().filter((a) => a.effect?.getTiming().iterations !== Infinity).map((a) => a.finished)))
 
 async function setup(page, { owner = true, lang = "zh-CN" } = {}) {
   const requests = [], mutations = []
@@ -59,7 +59,7 @@ try {
   assert.match(await page.locator("[data-debug-delivery]").innerText(), /无法检测的缺口/)
   assert.equal(await page.locator("[data-debug-pending], [data-debug-recorder-unavailable], [data-debug-coverage-refresh]").count(), 0)
   assert.match(await page.locator("[data-debug-blockers]").innerText(), /ST-100 尚未完成/)
-  assert.equal(await page.locator("[data-debug-minutes]").inputValue(), "30")
+  assert.equal((await page.locator("[data-debug-minutes]").innerText()).trim(), "30 分钟")
   await page.locator("[data-debug-toggle]").click()
   await page.getByRole("button", { name: "停止记录", exact: true }).waitFor()
   assert.deepEqual(data.mutations, [{ enabled: true, minutes: 30 }])
@@ -102,6 +102,8 @@ try {
   await page.locator("[data-debug-gaps]").waitFor()
   assert.equal(await page.locator("[data-debug-recorder-unavailable]").count(), 0)
   await page.locator("[data-debug-detail] summary").click()
+  /* the details open with a height transition: their text is laid out once it has run */
+  await page.waitForFunction(() => /event-3/.test(document.querySelector("[data-debug-detail]")?.innerText ?? ""), null, { timeout: 5000 }).catch(() => {})
   assert.match(await page.locator("[data-debug-detail]").innerText(), /event-3/)
   await page.evaluate(() => { Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText: async (text) => { window.copiedEvidence = text } } }) })
   await page.locator("[data-debug-copy]").click()
@@ -115,7 +117,7 @@ try {
   await page.locator("[data-session-menu]").click()
   await page.locator("[data-session-debug]").click()
   await page.locator('[data-debug-event="event-3"]').waitFor()
-  assert.equal(await page.locator("[data-debug-session]").inputValue(), "session-two")
+  assert.equal((await page.locator("[data-debug-session]").innerText()).trim(), "session-two")
   assert.equal(data.requests.at(-1).session_id, "session-two")
   await page.close()
 

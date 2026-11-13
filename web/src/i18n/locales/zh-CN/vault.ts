@@ -51,6 +51,7 @@ export default {
     noMatch: "没有符合的条目",
     noItems: "还没有条目",
     noItemsSub: "用右上角的“新建条目”保存第一个密码或令牌。",
+    noItemsLockedSub: "保险箱打开后才能新建条目。",
     recentUses: "最近使用",
     noUses: "还没有使用记录",
     rules: "规则",
@@ -83,7 +84,7 @@ export default {
     fieldsNote: "机密字段只显示掩码；查看或复制原值要本机验证，30 秒后自动隐藏，并写进使用记录。",
     useLog: "使用记录",
     neverUsed: "还没有使用过",
-    useLogNote: "只记录谁在什么时候为什么用了它，不记录值；会话记录里出现的值会自动打码。",
+    useLogNote: "只记录谁在什么时候为什么用了它，不记录值。",
   },
   edit: {
     title: "修改“{{label}}”",
@@ -196,8 +197,8 @@ export default {
   },
   decision: {
     grantFor_other: "授权 {{count}} 小时",
-    secretUseNoteGrant: "Steve 替它运行这条命令并注入机密，它只拿到退出码和打码后的输出。授权期间，同一个 Bot 在同一个范围里再用这个条目不再问你。",
-    secretUseNoteOnce: "Steve 替它运行这条命令并注入机密，它只拿到退出码和打码后的输出。这个条目每次使用都要你批准。",
+    secretUseNoteGrant: "Steve 替它运行这条命令并注入机密，它拿到退出码和命令的输出。授权期间，同一个 Bot 在同一个范围里再用这个条目不再问你。",
+    secretUseNoteOnce: "Steve 替它运行这条命令并注入机密，它拿到退出码和命令的输出。这个条目每次使用都要你批准。",
     deny: "拒绝",
     grantMenu: "授权…",
     once: "批准这一次",

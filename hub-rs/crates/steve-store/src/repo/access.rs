@@ -156,6 +156,38 @@ impl Access<'_> {
         })
     }
 
+    /// The user holding the live access token `token` itself, and the token (its use noted): how a
+    /// client that sends a fixed `Authorization` header, such as an MCP client, is let in without
+    /// signing in first. `None` for anything else.
+    pub fn token_user(&self, token: &str) -> Result<Option<(User, AccessToken)>> {
+        let token = token.trim();
+        if !token.starts_with(TOKEN_PREFIX) {
+            return Ok(None);
+        }
+        let t = now();
+        let found: Option<AccessToken> = self.0.read(|c| {
+            one(
+                c,
+                &format!("SELECT t.* FROM access_tokens t WHERE t.hash = ? AND {LIVE_TOKEN}"),
+                params![sha(token), t],
+                AccessToken::from_row,
+            )
+        })?;
+        let Some(tok) = found else { return Ok(None) };
+        // once a minute is enough to say it is in use
+        if tok.last_used.is_none_or(|u| t - u > 60_000) {
+            self.0.write(|w| {
+                w.c.run(
+                    "UPDATE access_tokens SET last_used = ? WHERE id = ?",
+                    params![t, tok.id],
+                )?;
+                Ok(())
+            })?;
+        }
+        let user = self.0.users().get(&tok.user_id)?;
+        Ok(user.map(|u| (u, tok)))
+    }
+
     /// Revokes a token, and the clients signed in with it; false when there was no live one.
     pub fn token_revoke(&self, id: &str) -> Result<bool> {
         self.0.write(|w| {

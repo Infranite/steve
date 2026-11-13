@@ -598,3 +598,35 @@ fn a_peers_words_are_one_bounded_line() {
     assert_eq!(peer_text(&long).chars().count(), 501);
     assert_eq!(peer_text("short"), "short");
 }
+
+/// Answers every request with more than a frame holds.
+struct Huge;
+#[async_trait]
+impl Handler for Huge {
+    async fn handle(&self, _: &str, _: Value) -> ApiResult<Value> {
+        Ok(json!({"pad": "x".repeat(envelope::MAX_FRAME + 1)}))
+    }
+}
+
+/// An answer too large for a frame comes back as an error that names the call, and the link stays.
+#[tokio::test]
+async fn an_oversized_answer_names_its_call() {
+    let (h, n) = pair();
+    let _hub = Conn::spawn(h.sink, h.stream, 1, Arc::new(Huge), opts("h"));
+    let node = Conn::spawn(n.sink, n.stream, 1, Arc::new(Nothing), opts("n"));
+    let e = node.call("tool.call", json!({}), None).await.unwrap_err();
+    assert_eq!(e.code, ErrorCode::Exhausted);
+    assert!(
+        e.safe_detail
+            .starts_with("the answer to tool.call request ")
+            && e.safe_detail
+                .contains(&format!("over the {} limit", envelope::MAX_FRAME)),
+        "{}",
+        e.safe_detail
+    );
+    let e = node
+        .call("tool.inspect", json!({}), None)
+        .await
+        .unwrap_err();
+    assert!(e.safe_detail.contains("tool.inspect"), "{}", e.safe_detail);
+}

@@ -1,13 +1,15 @@
 import { HubError, Unauthenticated } from "@/api"
-import { useEffect, useRef, useState } from "react"
+import { useEffect, useRef, useState, type ReactNode } from "react"
 import { readableVersion, updates, updateActive, updateKey, repairKey, sameReleaseVersion, updatePhaseLabel, checkStale, committedFailure, type UpdateBackup, type UpdateState, type UpdateOperation } from "@/updates"
 import { downloadPercent, enableOneClick, installLabel, serviceCommands, stageIndex, stageLabel, upgradeGuide, upgradeStages, verifyUpgrade, type Health, type Install } from "@/upgrade-guide"
-import { CheckIcon, CircleAlertIcon, CopyIcon, LoaderCircleIcon, RefreshCwIcon } from "lucide-react"
+import { CheckIcon, CircleAlertIcon, CopyIcon, RefreshCwIcon, ServerIcon } from "lucide-react"
 import { Markdown } from "@/components/markdown"
 import { Button } from "@/components/ui/button"
-import { CodeBlock, CodeBlockContent, CodeBlockCopyButton } from "@/components/ui/code-block"
+import { CodeBlock } from "@/components/ui/code-block"
+import { Spinner } from "@/components/ui/spinner"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
-import { Group, Row, SectionLabel } from "@/ui"
+import { Row, go, Panel, Section, Card, Notice, Note, Chevron, Tile, LIFT, EASE } from "@/ui"
+import { ChevronRightIcon } from "lucide-react"
 import { cn } from "cn"
 import { LOADED_WEB_VERSION, st, toast, useStore } from "@/store"
 import { useT } from "@/i18n"
@@ -19,7 +21,7 @@ function VersionValue({ v, label }: { v: string; label: string }) {
   const r = readableVersion(v)
   return <span className="flex min-w-0 items-center gap-1">
     <span className="type-callout tabular-nums text-muted-foreground" title={r.raw} data-version-value>
-      {r.when ? <>{r.when}<span className="mx-1.5 text-tertiary">·</span><span className="font-mono text-[12.5px]">{r.commit}</span></> : <span className="font-mono text-[12.5px]">{r.raw}</span>}
+      {r.when ? <>{r.when}<span className="mx-1.5 text-tertiary">·</span><span className="type-code">{r.commit}</span></> : <span className="type-code">{r.raw}</span>}
     </span>
     <Tooltip><TooltipTrigger render={<Button variant="ghost" size="icon-xs" aria-label={t("pages:version.copyAria", { label })} className="text-muted-foreground" onClick={() => { navigator.clipboard?.writeText(r.raw).catch(() => {}); toast(t("pages:version.copiedValue", { value: r.raw })) }} />}><CopyIcon /></TooltipTrigger><TooltipContent>{t("pages:version.copyFull")}</TooltipContent></Tooltip>
   </span>
@@ -31,17 +33,17 @@ export function AboutVersions() {
   const t = useT()
   const newer = !!st.webVersion && st.webVersion !== LOADED_WEB_VERSION
   const differ = !!st.version && st.version !== LOADED_WEB_VERSION
-  return <section data-version-info>
-    <SectionLabel>{t("pages:version.section")}</SectionLabel>
-    <Group>
+  return <div className="flex flex-col gap-8"><Section data-version-info label={t("pages:version.section")}>
+    <Panel>
       <Row title={t("pages:version.frontend")} sub={t("pages:version.currentPage")}><VersionValue v={LOADED_WEB_VERSION} label={t("pages:version.frontendVersion")} /></Row>
       <Row title={t("pages:version.backend")} sub="Hub"><VersionValue v={st.version} label={t("pages:version.backendVersion")} /></Row>
       {newer && <Row title={t("pages:version.availableFrontend")} sub={t("pages:version.availableSub")} data-web-update>
         <span className="flex items-center gap-2"><VersionValue v={st.webVersion} label={t("pages:version.availableFrontendVersion")} /><Button size="sm" variant="outline" onClick={() => location.reload()}><RefreshCwIcon />{t("pages:version.reload")}</Button></span></Row>}
-    </Group>
+    </Panel>
+    {differ && !newer && <Notice tone="attention" className="mt-3" data-version-differ>{t("pages:version.differ")}</Notice>}
+    </Section>
     <UpgradeSettings />
-    {differ && !newer && <p className="mt-2 type-footnote text-muted-foreground" data-version-differ>{t("pages:version.differ")}</p>}
-  </section>
+  </div>
 }
 
 
@@ -138,53 +140,64 @@ export function UpgradeSettings() {
     no_release: t("pages:upgrade.status.no_release"), error: t("pages:upgrade.status.error"), unsupported_platform: t("pages:upgrade.status.unsupported_platform"),
   }
   const releaseURL = (() => { try { const u = new URL(check?.release_url ?? ""); return u.protocol === "https:" ? u.href : undefined } catch { return undefined } })()
-  return <div className="mt-5" data-upgrade-settings>
-    <SectionLabel>{t("pages:upgrade.section")}</SectionLabel>
-    <Group>
+  const checked = check && t("pages:upgrade.checkedAt", { time: date(check.checked_at, { year: "numeric", month: "numeric", day: "numeric", hour: "numeric", minute: "2-digit" }) })
+  return <Section data-upgrade-settings label={t("pages:upgrade.section")}>
+    {state && !canExecute && <UpgradeUnavailable state={state} manual={manual} />}
+    <Panel className="anim-in">
       <Row title="GitHub Release" sub={state?.repository ?? t("pages:upgrade.reading")}>
         <Button size="sm" variant="outline" disabled={!state || !owner || busy || active || !!connection} onClick={() => void action("check")} data-upgrade-check><RefreshCwIcon />{busy ? t("pages:upgrade.wait") : t("pages:upgrade.check")}</Button>
       </Row>
-    </Group>
-    {connection && <p role="status" className="mt-2 type-footnote text-muted-foreground" data-upgrade-connection>{connection}</p>}
-    {state && <div className="mt-3 space-y-3 type-callout">
-      {canExecute
-        ? <p className="text-muted-foreground" data-upgrade-capability data-install-kind={install?.kind}>{install?.kind === "local_release" ? t("pages:upgrade.local") : t("pages:upgrade.managed")}</p>
-        : <UpgradeUnavailable state={state} manual={manual} />}
-      {check && <div data-upgrade-check-status={check.status}>
-        <p>{messages[check.status]}</p>
-        {check.error && <p className="mt-1 text-destructive">{check.error}</p>}
-        <p className="mt-1 type-footnote text-muted-foreground">{t("pages:upgrade.checkedAt", { time: date(check.checked_at, { year: "numeric", month: "numeric", day: "numeric", hour: "numeric", minute: "2-digit", second: "2-digit" }) })}</p>
-        {releaseURL && <a className="underline underline-offset-4" href={releaseURL} target="_blank" rel="noopener noreferrer">{t("pages:upgrade.releaseNotes")}</a>}
-        {check.notes && <details className="mt-2"><summary className="cursor-pointer">{t("pages:upgrade.changes")}</summary><div className="mt-2 max-h-[60vh] overflow-auto break-words text-muted-foreground" data-release-notes><Markdown text={check.notes} className="type-callout [&_h1]:mt-0 [&_h1]:text-[17px] [&_h2]:text-[15px] [&_h3]:text-[14px]" /></div></details>}
-        {canExecute && repair && !active && <Button className="mt-3" size="sm" disabled={busy || !!connection} onClick={() => void action("repair")} data-upgrade-repair>{t("pages:upgrade.repairBtn", { version: check.version })}</Button>}
-        {canExecute && !repair && check.status === "available" && check.version && !active && op?.version !== check.version && <Button className="mt-3" size="sm" disabled={busy || !!connection} onClick={() => void action("execute")} data-upgrade-execute>{t("pages:upgrade.executeBtn", { version: check.version })}</Button>}
+      {state && check && <div className="flex flex-col gap-2 px-3 py-3 type-callout" data-upgrade-check-status={check.status}>
+        <div className="flex items-start gap-3">
+          <div className="min-w-0 flex-1">
+            <p className="type-body">{messages[check.status]}</p>
+            <p className="mt-0.5 type-footnote text-muted-foreground">{checked}</p>
+          </div>
+          {releaseURL && <a className="shrink-0 pt-0.5 type-footnote text-blue hover:underline" href={releaseURL} target="_blank" rel="noopener noreferrer">{t("pages:upgrade.releaseNotes")}</a>}
+        </div>
+        {check.error && <p className="text-destructive">{check.error}</p>}
+        {check.notes && <Fold label={t("pages:upgrade.changes")}><div className="max-h-[60vh] overflow-auto break-words text-muted-foreground" data-release-notes><Markdown text={check.notes} className="type-callout [&_h1]:mt-0 [&_h1]:type-headline [&_h2]:type-headline [&_h3]:type-body [&_h3]:font-semibold" /></div></Fold>}
+        {canExecute && repair && !active && <Button className="self-start" size="sm" disabled={busy || !!connection} onClick={() => void action("repair")} data-upgrade-repair>{t("pages:upgrade.repairBtn", { version: check.version })}</Button>}
+        {canExecute && !repair && check.status === "available" && check.version && !active && op?.version !== check.version && <Button className="self-start" size="sm" disabled={busy || !!connection} onClick={() => void action("execute")} data-upgrade-execute>{t("pages:upgrade.executeBtn", { version: check.version })}</Button>}
       </div>}
-      {!canExecute && manual && install && check?.status === "available" && check.version && <ManualGuide install={install} version={check.version} onVerify={() => setVerifying(check.version)} />}
-      {verifying && <UpgradeVerify target={verifying} onClose={() => setVerifying(null)} />}
-      {op && <div className="rounded-lg border p-3 space-y-2" data-upgrade-phase={op.phase} role="status">
-        <p>{updatePhaseLabel[op.phase]} · <span className="font-mono break-all">{op.version}</span></p>
+      {state && op && <div className="flex flex-col gap-2 px-3 py-3 type-callout" data-upgrade-phase={op.phase} role="status">
+        <p className="type-body font-medium">{updatePhaseLabel[op.phase]} · <span className="type-code break-all">{op.version}</span></p>
         {op.phase === "awaiting_approval" && <><p className="text-muted-foreground">{t("pages:upgrade.requested", { who: op.requested_by })}</p>{canExecute && <div className="flex flex-wrap gap-2"><Button size="sm" disabled={busy || !!connection} onClick={() => void action("approve")} data-upgrade-approve>{t("pages:upgrade.approve")}</Button><Button size="sm" variant="outline" disabled={busy || !!connection} onClick={() => void action("reject")} data-upgrade-reject>{t("pages:upgrade.reject")}</Button></div>}</>}
         {(active || op.phase === "succeeded") && stageIndex(op.phase) >= 0 && <UpgradeProgress phase={op.phase} verified={verified === op.id} runnerKind={op.runner?.kind} />}
         {op.progress && <UpgradeActivity op={op} connected={!connection} />}
         {op.phase === "draining" && op.drain && <UpgradeWaiting drain={op.drain} />}
         {active && op.phase !== "awaiting_approval" && <p className="text-muted-foreground">{t("pages:upgrade.restartNote")}</p>}
-        {canExecute && !repair && ["failed", "rolled_back"].includes(op.phase) && check?.status === "available" && check.version === op.version && <Button size="sm" variant="outline" disabled={busy || !!connection} onClick={() => void action("retry")} data-upgrade-retry>{t("pages:upgrade.retry")}</Button>}
+        {canExecute && !repair && ["failed", "rolled_back"].includes(op.phase) && check?.status === "available" && check.version === op.version && <Button className="self-start" size="sm" variant="outline" disabled={busy || !!connection} onClick={() => void action("retry")} data-upgrade-retry>{t("pages:upgrade.retry")}</Button>}
         {op.error && <p className="text-destructive break-words">{op.error}</p>}
         {op.phase !== "awaiting_approval" && op.phase !== "succeeded" && <UpgradeRecovery op={op} backup={state.backup ?? null} install={install} />}
         {op.phase === "succeeded" && <UpgradeVerify target={op.version} embedded onResult={done => setVerified(done ? op.id : null)} />}
       </div>}
-      <div className="rounded-lg border p-3 space-y-2" data-upgrade-services>
-        <p className="font-medium">{t("pages:upgrade.services.title")}</p>
-        <a href="#/devices" className="underline underline-offset-4">{t("pages:upgrade.services.devices")}</a>
-        {owner && install?.home && ["managed", "local_release"].includes(install.kind) && <details>
-          <summary className="cursor-pointer">{t("pages:upgrade.services.terminal")}</summary>
-          <p className="mt-2 text-muted-foreground">{t("pages:upgrade.services.note")}</p>
-          {serviceCommands(install.home).map(command => <Command key={command} command={command} />)}
-        </details>}
-      </div>
-    </div>}
-    {error && <p className="mt-2 type-footnote text-destructive" role="alert">{error}</p>}
-  </div>
+      {state && <div data-upgrade-services>
+        <Row icon={<Tile I={ServerIcon} />} title={t("pages:upgrade.services.title")} sub={t("pages:upgrade.services.devices")} onClick={() => go("#/devices")}><Chevron /></Row>
+        {owner && install?.home && ["managed", "local_release"].includes(install.kind) && <div className="px-3 pb-3 type-callout">
+          <Fold label={t("pages:upgrade.services.terminal")} quiet>
+            <p className="text-muted-foreground">{t("pages:upgrade.services.note")}</p>
+            {serviceCommands(install.home).map(command => <Command key={command} command={command} />)}
+          </Fold>
+        </div>}
+      </div>}
+    </Panel>
+    {connection && <p role="status" className="mt-2 px-1 type-footnote text-muted-foreground" data-upgrade-connection>{connection}</p>}
+    {state && canExecute && <Note data-upgrade-capability data-install-kind={install?.kind}>{install?.kind === "local_release" ? t("pages:upgrade.local") : t("pages:upgrade.managed")}</Note>}
+    {state && !canExecute && manual && install && check?.status === "available" && check.version && <ManualGuide install={install} version={check.version} onVerify={() => setVerifying(check.version)} />}
+    {verifying && <UpgradeVerify target={verifying} onClose={() => setVerifying(null)} />}
+    {error && <p className="mt-2 px-1 type-footnote text-destructive" role="alert">{error}</p>}
+  </Section>
+}
+
+/** a disclosure inside a panel: a quiet summary with a chevron that turns, and a body whose height eases open */
+function Fold({ label, quiet, children }: { label: string; quiet?: boolean; children: ReactNode }) {
+  return <details className="group/fold">
+    <summary className={cn("inline-flex cursor-pointer list-none items-center gap-1 rounded-md type-callout [&::-webkit-details-marker]:hidden", quiet ? "text-muted-foreground hover:text-foreground" : "text-blue hover:text-blue/80")}>
+      <ChevronRightIcon className={cn("size-3.5 shrink-0 transition-transform group-open/fold:rotate-90", EASE)} aria-hidden />{label}
+    </summary>
+    <div className="flex flex-col gap-1.5 pt-2">{children}</div>
+  </details>
 }
 
 /** No upgrade button here: say so, the Hub's reason for this installation, and what to do instead. */
@@ -196,34 +209,31 @@ function UpgradeUnavailable({ state, manual }: { state: UpdateState; manual: boo
     : check?.status === "available" ? t("pages:upgrade.unavailable.nextAvailable")
     : check ? t("pages:upgrade.unavailable.nextLater") : t("pages:upgrade.unavailable.nextUnchecked")
   const enable = manual && install ? enableOneClick(install.kind) : undefined
-  return <div className="rounded-lg border p-3 space-y-1.5" data-upgrade-capability data-upgrade-unavailable data-install-kind={kind}>
+  return <Notice className="mb-3" data-upgrade-capability data-upgrade-unavailable data-install-kind={kind}>
     <p className="font-medium">{kind ? t("pages:upgrade.unavailable.titleKind", { kind: installLabel(kind) }) : t("pages:upgrade.unavailable.title")}</p>
-    {state.capability.reason && <p className="text-muted-foreground" data-upgrade-reason>{state.capability.reason}</p>}
-    {next && <p>{next}</p>}
-    {enable && <p className="type-footnote text-muted-foreground" data-upgrade-enable>{enable}</p>}
-  </div>
+    {state.capability.reason && <p className="mt-0.5 text-muted-foreground" data-upgrade-reason>{state.capability.reason}</p>}
+    {next && <p className="mt-0.5 text-muted-foreground">{next}</p>}
+    {enable && <p className="mt-0.5 type-footnote text-muted-foreground" data-upgrade-enable>{enable}</p>}
+  </Notice>
 }
 
 function Command({ command }: { command: string }) {
   const t = useT()
-  return <CodeBlock size="sm" className="mt-1.5 bg-muted/70 ring-0" data-upgrade-command>
-    <CodeBlockContent wrap className="pe-10! type-code">{command}</CodeBlockContent>
-    <CodeBlockCopyButton value={command} aria-label={t("pages:upgrade.copyCommand")} className="absolute end-1.5 top-1.5 text-muted-foreground" />
-  </CodeBlock>
+  return <CodeBlock code={command} language="bash" compact wrap className="mt-1.5" labels={{ copy: t("pages:upgrade.copyCommand") }} data-upgrade-command />
 }
 
 /** Installations Steve does not switch itself: this machine's commands, what is backed up, how to recover. */
 function ManualGuide({ install, version, onVerify }: { install: Install; version: string; onVerify: () => void }) {
   const t = useT()
   const g = upgradeGuide(install, version)
-  return <div className="rounded-lg border p-3 space-y-3" data-upgrade-guide={install.kind}>
+  return <Card className="mt-3 space-y-4 type-callout" data-upgrade-guide={install.kind}>
     <div>
       <p className="font-medium">{t("pages:upgrade.guideTitle", { version: version.replace(/^v/, ""), label: g.label })}</p>
       <p className="mt-1 text-muted-foreground">{g.summary}</p>
     </div>
     <ol className="space-y-3">
       {g.steps.map((step, n) => <li key={n} className="flex gap-2.5" data-upgrade-step>
-        <span className="mt-px flex size-5 shrink-0 items-center justify-center rounded-full bg-muted type-footnote tabular-nums">{n + 1}</span>
+        <span className="mt-px flex size-5 shrink-0 items-center justify-center rounded-full bg-blue/10 type-label tabular-nums text-blue">{n + 1}</span>
         <div className="min-w-0 flex-1">
           <p>{step.title}</p>
           {step.command && <Command command={step.command} />}
@@ -232,15 +242,15 @@ function ManualGuide({ install, version, onVerify }: { install: Install; version
       </li>)}
     </ol>
     <div data-upgrade-backup>
-      <p className="type-label text-muted-foreground">{t("pages:upgrade.backup")}</p>
+      <p className="type-label text-tertiary">{t("pages:upgrade.backup")}</p>
       <p className="mt-1 type-footnote text-muted-foreground break-words">{g.backup}</p>
     </div>
     <div data-upgrade-recovery>
-      <p className="type-label text-muted-foreground">{t("pages:upgrade.recoveryTitle")}</p>
+      <p className="type-label text-tertiary">{t("pages:upgrade.recoveryTitle")}</p>
       <ul className="mt-1 list-disc space-y-1 ps-5 type-footnote text-muted-foreground break-words">{g.recovery.map((r, n) => <li key={n}>{r}</li>)}</ul>
     </div>
     <Button size="sm" variant="outline" onClick={onVerify} data-upgrade-verify-start>{t("pages:upgrade.doneCheck")}</Button>
-  </div>
+  </Card>
 }
 
 /** The supervisor's journal as steps; the last one is this page's own check after reconnecting. */
@@ -251,7 +261,7 @@ function UpgradeProgress({ phase, verified, runnerKind }: { phase: string; verif
     {upgradeStages.map((s, n) => {
       const state = n < at ? "done" : n === at ? "current" : "pending"
       return <li key={s.key} className={cn("flex items-center gap-2 type-footnote", state === "pending" && "text-muted-foreground")} data-stage={state}>
-        {state === "done" ? <CheckIcon className="size-3.5 text-success" /> : state === "current" ? <LoaderCircleIcon className="size-3.5 animate-spin text-primary" /> : <span className="size-3.5 flex items-center justify-center"><span className="size-1.5 rounded-full bg-muted-foreground/40" /></span>}
+        {state === "done" ? <CheckIcon className="size-3.5 text-success" /> : state === "current" ? <Spinner className="size-3.5 text-primary" aria-hidden /> : <span className="size-3.5 flex items-center justify-center"><span className="size-1.5 rounded-full bg-muted-foreground/40" /></span>}
         {stageLabel(s.key, runnerKind)}
       </li>
     })}
@@ -283,15 +293,15 @@ function UpgradeActivity({ op, connected }: { op: UpdateOperation; connected: bo
   const label = t(`pages:upgrade.activity.${key}`)
   const percent = downloadPercent(p)
   const measuring = percent !== undefined && !!p.download
-  return <div className="space-y-1.5 rounded-md bg-muted/40 p-3" data-upgrade-activity={p.step}>
+  return <div className="space-y-1.5 rounded-lg bg-muted/60 px-3.5 py-3" data-upgrade-activity={p.step}>
     <p className="flex items-center gap-2 font-medium">
-      {active && connected && p.step !== "complete" && <LoaderCircleIcon className="size-3.5 shrink-0 animate-spin" />}
+      {active && connected && p.step !== "complete" && <Spinner className="size-3.5 shrink-0" aria-hidden />}
       {active ? label : t("pages:upgrade.activity.last", { step: label })}
     </p>
     {p.detail && <p className="break-words type-footnote text-muted-foreground">{p.detail}</p>}
     {measuring && <>
       <div role="progressbar" aria-label={t("pages:upgrade.activity.downloadProgress")} aria-valuemin={0} aria-valuemax={100} aria-valuenow={percent} className="h-1.5 overflow-hidden rounded-full bg-muted" data-upgrade-download>
-        <div className="h-full bg-primary" style={{ width: `${percent}%` }} />
+        <div className="h-full rounded-full bg-primary transition-[width] duration-260 ease-(--ease-out)" style={{ width: `${percent}%` }} />
       </div>
       <p className="type-footnote tabular-nums">{byteSize(p.download!.received_bytes)} / {byteSize(p.download!.total_bytes)} · {percent}%</p>
     </>}
@@ -381,7 +391,7 @@ export function UpgradeVerify({ target, embedded, onClose, onResult }: { target:
     return () => { stopped = true; clearTimeout(timer) }
   }, [target, round])
   const v = target.replace(/^v/, "")
-  return <div className={cn("space-y-2", !embedded && "rounded-lg border p-3")} data-upgrade-verify={result.done ? "passed" : checking ? "checking" : "failed"} role="status">
+  return <div className={cn("space-y-2", !embedded && cn(LIFT, "mt-3 p-4 type-callout"))} data-upgrade-verify={result.done ? "passed" : checking ? "checking" : "failed"} role="status">
     <p className={cn("font-medium", result.done && "text-success")}>
       {result.done ? t("pages:upgrade.verify.done", { v }) : result.needsReload ? t("pages:upgrade.verify.needsReload", { v }) : checking ? t("pages:upgrade.verify.checking") : t("pages:upgrade.verify.notYet", { v })}
     </p>

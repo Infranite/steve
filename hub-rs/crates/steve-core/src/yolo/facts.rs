@@ -245,6 +245,7 @@ impl Engine {
         let subject = match (d.kind.as_str(), d.subject_type.as_str()) {
             ("approve", "tool_call") => match self.tool_input(&d.id) {
                 Some(t) => Subject::Tool(Tool {
+                    full: self.full_access(d),
                     own_pids: t.own_pids.clone().unwrap_or_default(),
                     kind: t.kind,
                     title: d.question.trim_start_matches("允许执行：").to_string(),
@@ -291,8 +292,14 @@ impl Engine {
                     (StallCause::Stopped, Some(sid)) => self.session_tail(sid)?,
                     _ => String::new(),
                 };
-                // only its last words: what it waits for now, not what it did on the way
-                let own_action = super::limits::own_action(crate::util::js_tail(&tail, 400));
+                // its final reply, whole: what it waits for now, not what it did on the way (a
+                // request to scan a code at its start is not lost behind a long explanation)
+                let own_action = match sid.as_deref() {
+                    Some(sid) => super::limits::own_action(
+                        &self.core().store().final_reply(sid).map_err(ce)?,
+                    ),
+                    _ => None,
+                };
                 let asked = match (&cause, sid.as_deref()) {
                     (StallCause::Stopped, Some(_)) if !present => {
                         match answer::looks_like_question(&tail) {
@@ -317,6 +324,17 @@ impl Engine {
                     asked,
                     own_action,
                     steve_tried: d.question.contains(crate::takeover::STEVE_TRIED),
+                    yours: match sid.as_deref() {
+                        Some(sid) => self
+                            .core()
+                            .store()
+                            .store()
+                            .sessions()
+                            .stop(sid)
+                            .map_err(|e| ce(e.into()))?
+                            .is_some_and(|k| crate::work::held(&k)),
+                        None => false,
+                    },
                 })
             }
             ("approve", "release") => {
@@ -407,6 +425,25 @@ impl Engine {
             .any(|x| x.kind == "accept" && x.status == "resolved" && x.result["choice"] == "pass"))
     }
 
+    /// The tool request comes from a session that runs with full access (完全放开) now: the item's
+    /// effective setting is full and the session is not read-only (a read-only session never
+    /// bypasses prompts, so its requests stay the guard's).
+    pub(crate) fn full_access(&self, d: &Decision) -> bool {
+        let full = self
+            .yolo()
+            .effective(&d.workspace_id, d.item_id.as_deref())
+            .is_ok_and(|e| e.full);
+        full && d.item_id.is_some()
+            && d.session_id.as_deref().is_some_and(|s| {
+                self.core()
+                    .store()
+                    .session(s)
+                    .ok()
+                    .flatten()
+                    .is_some_and(|s| s.readonly == 0)
+            })
+    }
+
     /// The user acted on the item lately: a message or an answer of theirs on its timeline, or a
     /// message of theirs queued for its session, within the same window.
     fn present(&self, item: &str, presence_s: u64) -> ApiResult<bool> {
@@ -472,11 +509,10 @@ impl Engine {
         } else {
             Identity::Bot
         };
-        let disclosure = match (status.as_str(), verdict.as_deref()) {
-            ("blocked", _) => Disclosure::Blocked,
-            (_, Some("pass")) => Disclosure::Pass,
-            (_, Some("rewritten")) => Disclosure::Rewritten,
-            (_, Some("drafted")) => Disclosure::Leak,
+        let disclosure = match verdict.as_deref() {
+            Some("pass") => Disclosure::Pass,
+            Some("rewritten") => Disclosure::Rewritten,
+            Some("drafted") => Disclosure::Leak,
             _ => Disclosure::Unchecked,
         };
         let has = |o: &str| d.options.iter().any(|x| x == o);
@@ -525,7 +561,6 @@ impl Engine {
         let disclosure = match verdict.as_deref() {
             Some("pass") => Disclosure::Pass,
             Some("leak") => Disclosure::Leak,
-            Some("blocked") => Disclosure::Blocked,
             _ => Disclosure::Unchecked,
         };
         let mut addrs = Vec::new();

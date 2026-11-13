@@ -1153,6 +1153,19 @@ impl steve_core::AgentRuntime for RoutedRuntime {
         self.node.as_ref().is_some_and(|n| n.is_holding())
             || self.fleet.as_ref().is_some_and(|f| f.is_holding())
     }
+    fn node_offline(&self, session_id: &str) -> Option<String> {
+        let node = node_of(&self.store, session_id).filter(|n| !n.is_empty())?;
+        // the Node in the Hub's own process is always there
+        if self
+            .node
+            .as_ref()
+            .is_some_and(|n| n.node_id().as_str() == node)
+        {
+            return None;
+        }
+        let id = steve_node_api::NodeId::new(node).ok()?;
+        self.fleet.as_ref()?.offline(&id)
+    }
     fn uncertain(&self, session_id: &str) -> bool {
         self.node_for(session_id)
             .is_some_and(|n| n.is_uncertain(session_id))
@@ -1213,6 +1226,20 @@ impl steve_core::AgentRuntime for RoutedRuntime {
                 .unwrap_or(false),
             _ => false,
         }
+    }
+    fn mode_state(&self, session_id: &str) -> Option<steve_core::ModeState> {
+        match self.route(session_id) {
+            Backend::Node(n) => n
+                .mode_state(session_id)
+                .inspect_err(|e| tracing::error!("mode state {session_id}: {e}"))
+                .ok()
+                .flatten(),
+            Backend::Parked | Backend::Unbound => None,
+        }
+    }
+    fn mode_name(&self, mode: &str) -> Option<String> {
+        super::node_binding::permission_mode(mode)
+            .map(|p| super::node_runtime::mode_str(p).to_string())
     }
     fn set_mode(&self, session_id: &str, mode: &str) -> steve_core::Result<steve_core::Configured> {
         use super::node_runtime::Configured as Node;
@@ -1828,18 +1855,6 @@ impl Domain for CoreDomain {
         })
         .await
     }
-    async fn say_guard_note(&self, ws: &str) -> BResult<()> {
-        let (c, ws) = (self.core.clone(), ws.to_string());
-        blocking(move || {
-            c.say_note(
-                &ws,
-                steve_vault::guard::ROUTED,
-                steve_vault::guard::REPLY_HREF,
-            )
-            .map(|_| ())
-        })
-        .await
-    }
     async fn stop(&self, ws: &str) -> BResult<bool> {
         let (c, ws) = (self.core.clone(), ws.to_string());
         blocking(move || c.stop(&ws)).await
@@ -2012,6 +2027,19 @@ impl Domain for CoreDomain {
                 .to_string(),
             id: target.get("id").and_then(Value::as_str).map(str::to_string),
         };
+        if let (Some(field), "bot", Some(id)) = (
+            target.get("field").and_then(Value::as_str),
+            t.kind.as_str(),
+            t.id.as_deref(),
+        ) {
+            let base = target.get("base").and_then(Value::as_str);
+            return to_obj(
+                self.core
+                    .draft_bot_text(ws, id, field, base, text)
+                    .await
+                    .map_err(cerr)?,
+            );
+        }
         to_obj(self.core.draft(ws, t, text).await.map_err(cerr)?)
     }
     async fn config_apply(&self, id: &str, actor: &str, ws: &str) -> BResult<Obj> {
@@ -2207,9 +2235,7 @@ impl steve_mcp::Backend for CoreMcp {
                             || goal.contains("分析")
                             || goal.contains("调研");
                         if referenced || text_result || report_goal || summary.len() > 2000 {
-                            let safe = steve_vault::redact::scrub_text(&s.id, &summary);
-                            let report =
-                                super::output_files::save_report(&home, item, safe.as_ref())?;
+                            let report = super::output_files::save_report(&home, item, &summary)?;
                             let location = report.to_string_lossy().into_owned();
                             for o in &mut outputs {
                                 if super::output_files::summary_reference(o.location.as_deref())
@@ -2414,6 +2440,69 @@ mod routed_tests {
             rt.set_mode("s1", "auto").unwrap(),
             steve_core::Configured::Unsupported
         ));
+    }
+
+    /// The Hub's own Node in a process of its own could not link: a session bound to it is waiting
+    /// for it, with the reason that Node noted in its home; once it links, it is not.
+    #[tokio::test]
+    async fn a_session_on_an_unlinked_node_says_why() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut rt = routed(dir.path());
+        let fleet = crate::nodes::NodeFleet::new(
+            rt.store.clone(),
+            dir.path().to_path_buf(),
+            Some(Arc::new(super::super::node_tools::tests::Ends)),
+            None,
+        );
+        rt.fleet = Some(fleet.clone());
+        rt.store
+            .transaction::<_, steve_store::StoreError>(|tx| {
+                tx.execute(
+                    "INSERT INTO sessions(id,workspace_id,harness,cwd,status,created,updated) VALUES ('s1','default','claude-code','.','active',1,1)",
+                    [],
+                )?;
+                steve_store::runtime::bind_session_in(
+                    tx,
+                    &steve_store::runtime::SessionBinding {
+                        session: "s1",
+                        node: "local",
+                        workspace: &serde_json::json!({"node": "local", "id": "w1"}),
+                        node_session: "s1",
+                        config_revision: "r1",
+                    },
+                    1,
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(rt.node_offline("s1").as_deref(), Some("未连接"));
+        assert_eq!(rt.node_offline("unbound"), None);
+        let home = dir.path().join("node");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(
+            home.join(steve_node_cli::dial::LINK_STATUS),
+            r#"{"at":5,"error":"internal: control message hello is 69214 bytes, over the 65536 limit"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            rt.node_offline("s1").as_deref(),
+            Some("internal: control message hello is 69214 bytes, over the 65536 limit")
+        );
+        assert_eq!(fleet.link_failure("local").map(|f| f.0), Some(5));
+        assert_eq!(fleet.link_failure("n2"), None, "nothing reported yet");
+        // a remote Node's reason arrives in its handshake report, and goes once it links
+        let n2 = steve_node_api::NodeId::new("n2").unwrap();
+        fleet.link_failed(&n2, 7, "invalid: a welcome whose signature does not hold");
+        assert_eq!(
+            fleet.link_failure("n2"),
+            Some((7, "invalid: a welcome whose signature does not hold".into()))
+        );
+        assert_eq!(
+            fleet.offline(&n2).as_deref(),
+            Some("invalid: a welcome whose signature does not hold")
+        );
+        fleet.linked(&n2, steve_node_api::PROTOCOL);
+        assert_eq!(fleet.link_failure("n2"), None);
     }
 
     /// A RoutedRuntime with the local Node on (a fake one), item `i1` with an idle session `s1`
@@ -2665,7 +2754,7 @@ mod yolo_input_tests {
     /// What the guard makes of these: unknown is asked, never judged against a guessed base.
     #[test]
     fn the_guard_asks_when_the_directory_is_unknown() {
-        use steve_core::yolo::{guard, judge};
+        use steve_core::yolo::{full_guard, guard, judge};
         let w = ws("w1");
         let t = yolo_input(Some(&w), None, &req(write(&w, "a"), vec![]));
         let tool = judge::Tool {
@@ -2679,6 +2768,7 @@ mod yolo_input_tests {
             project_dir: None,
             branch: None,
             own_pids: t.own_pids.unwrap_or_default(),
+            full: false,
         };
         let env = judge::Env {
             steve_home: PathBuf::from("/nonexistent/steve"),
@@ -2688,6 +2778,14 @@ mod yolo_input_tests {
         assert!(
             !matches!(guard::check(&tool, &[], &env), guard::Guard::Allow { .. }),
             "asked"
+        );
+        // under full access too: what the Node cannot place is not judged
+        assert!(
+            !matches!(
+                full_guard::full(&tool, &env),
+                Ok(guard::Guard::Allow { .. })
+            ),
+            "asked under full access"
         );
     }
 }

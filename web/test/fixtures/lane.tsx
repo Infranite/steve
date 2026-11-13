@@ -1,6 +1,6 @@
 import { createRoot } from "react-dom/client"
 import "../../src/index.css"
-import { Toaster } from "sonner"
+import { Toaster } from "@/components/ui/toaster"
 import { api, type RLane, type RProject } from "../../src/api"
 import { SidebarProvider } from "../../src/components/ui/sidebar"
 import "../../src/manage"

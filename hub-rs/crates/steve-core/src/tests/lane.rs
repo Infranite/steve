@@ -598,3 +598,69 @@ fn what_can_not_be_read_is_unknown_never_none() {
         p.checks
     );
 }
+
+#[test]
+fn a_fetched_profile_reads_github_during_the_fetch_and_the_repository_after_it() {
+    use crate::lane::profile::{Merge, profile_fetched};
+    let t = tempfile::tempdir().unwrap();
+    let r = repo(t.path());
+    g(
+        &r,
+        &["remote", "set-url", "origin", "git@github.com:Acme/App.git"],
+    );
+    g(
+        &r,
+        &[
+            "config",
+            &format!(
+                "url.{}.insteadOf",
+                t.path().join("origin.git").to_string_lossy()
+            ),
+            "git@github.com:Acme/App.git",
+        ],
+    );
+    /* each GitHub read takes a while */
+    let gh = fake_gh(
+        t.path(),
+        &[
+            (
+                "repos/acme/app/rules/branches/main",
+                r#"[{"type":"pull_request"}]"#,
+            ),
+            ("repos/acme/app/branches/main", r#"{"protected":false}"#),
+            ("graphql", r#"{"data":{"repository":{"mergeQueue":null}}}"#),
+        ],
+    );
+    let slow = std::fs::read_to_string(&gh)
+        .unwrap()
+        .replacen("case", "sleep 0.6\ncase", 1);
+    std::fs::write(&gh, slow).unwrap();
+
+    /* someone else lands a commit; the fetch brings it */
+    let other = t.path().join("other");
+    g(
+        t.path(),
+        &[
+            "clone",
+            "-q",
+            &t.path().join("origin.git").to_string_lossy(),
+            &other.to_string_lossy(),
+        ],
+    );
+    let theirs = commit(&other, "b.txt", "b\n", "theirs");
+    g(&other, &["push", "-q", "origin", "main"]);
+
+    let started = std::time::Instant::now();
+    let (fetch, p) = profile_fetched(&r, None, None, &gh, || {
+        std::thread::sleep(std::time::Duration::from_millis(600));
+        crate::upstream::fetch(&r)?;
+        Err("half done".into())
+    });
+    let took = started.elapsed();
+    let p = p.unwrap();
+    assert_eq!(fetch.as_deref(), Some("half done"));
+    assert!(p.reads.ends_with(&theirs[..7]), "{}", p.reads);
+    assert_eq!(p.merge.value, Merge::HostPr);
+    // the four GitHub reads and the fetch overlap: one after another they take 3s
+    assert!(took < std::time::Duration::from_millis(2000), "{took:?}");
+}

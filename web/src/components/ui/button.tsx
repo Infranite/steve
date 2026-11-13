@@ -1,55 +1,119 @@
+import { Children, isValidElement, type ComponentPropsWithRef, type ReactElement, type ReactNode } from "react"
 import { Button as ButtonPrimitive } from "@base-ui/react/button"
-import { cva, type VariantProps } from "class-variance-authority"
 import { cn } from "cn"
 
-const buttonVariants = cva(
-  "group/button inline-flex shrink-0 items-center justify-center rounded-2xl border border-transparent bg-clip-padding text-sm font-medium whitespace-nowrap transition-all outline-none select-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/30 active:not-aria-[haspopup]:translate-y-px disabled:pointer-events-none disabled:opacity-50 aria-invalid:border-destructive aria-invalid:ring-3 aria-invalid:ring-destructive/20 dark:aria-invalid:border-destructive/50 dark:aria-invalid:ring-destructive/40 [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4",
-  {
-    variants: {
-      variant: {
-        default: "bg-primary text-primary-foreground hover:bg-primary/80",
-        outline:
-          "border-border bg-background hover:bg-muted hover:text-foreground aria-expanded:bg-muted aria-expanded:text-foreground dark:bg-transparent dark:hover:bg-input/30",
-        secondary:
-          "bg-secondary text-secondary-foreground hover:bg-[color-mix(in_oklch,var(--secondary),var(--foreground)_5%)] aria-expanded:bg-secondary aria-expanded:text-secondary-foreground",
-        ghost:
-          "hover:bg-muted hover:text-foreground aria-expanded:bg-muted aria-expanded:text-foreground dark:hover:bg-muted/50",
-        destructive:
-          "bg-destructive/10 text-destructive hover:bg-destructive/20 focus-visible:border-destructive/40 focus-visible:ring-destructive/20 dark:bg-destructive/20 dark:hover:bg-destructive/30 dark:focus-visible:ring-destructive/40",
-        link: "text-primary underline-offset-4 hover:underline",
-      },
-      size: {
-        default:
-          "h-8 gap-1.5 px-3 has-data-[icon=inline-end]:pr-2.5 has-data-[icon=inline-start]:pl-2.5",
-        xs: "h-6 gap-1 px-2.5 text-xs has-data-[icon=inline-end]:pr-2 has-data-[icon=inline-start]:pl-2 [&_svg:not([class*='size-'])]:size-3",
-        sm: "h-7 gap-1 px-3 has-data-[icon=inline-end]:pr-2 has-data-[icon=inline-start]:pl-2",
-        lg: "h-9 gap-1.5 px-4 has-data-[icon=inline-end]:pr-3 has-data-[icon=inline-start]:pl-3",
-        icon: "size-8",
-        "icon-xs": "size-6 [&_svg:not([class*='size-'])]:size-3",
-        "icon-sm": "size-7",
-        "icon-lg": "size-9",
-      },
-    },
-    defaultVariants: {
-      variant: "default",
-      size: "default",
-    },
-  }
-)
+import { Button as AffectButton, buttonCleanCss } from "@/components/affect/button-clean"
+import { IconButton } from "@/components/affect/icon-button-clean"
 
-function Button({
-  className,
-  variant = "default",
-  size = "default",
-  ...props
-}: ButtonPrimitive.Props & VariantProps<typeof buttonVariants>) {
+/* Steve's Button, drawn by affectUI's Button (and its Icon Button for the square icon-only sizes). The exports and
+ * props stay Steve's, so every call site keeps working: variant and size map onto affectUI's, className still wins over
+ * the component's own styles (they sit in Tailwind's components layer), icons given as children go into affectUI's
+ * icon slots, and a Button that renders as another element (render, nativeButton={false}) keeps base-ui's primitive
+ * with the same affectUI look. Steve's own extras – the attention and link tones, the 36px lg size, the muted
+ * secondary – are in styles/affectui-forms.css. */
+
+type Variant = "default" | "outline" | "secondary" | "ghost" | "destructive" | "attention" | "link"
+type Size = "default" | "xs" | "sm" | "lg" | "icon" | "icon-xs" | "icon-sm" | "icon-lg"
+
+const TONE: Record<Variant, "primary" | "secondary" | "ghost" | "destructive"> = {
+  default: "primary", outline: "secondary", secondary: "secondary", ghost: "ghost", destructive: "destructive", attention: "primary", link: "ghost",
+}
+/* Steve's heights 24 · 28 · 32 · 36 onto affectUI's 24 · 28 · 32 (36 is Steve's own: data-steve-size="lg") */
+const SCALE: Record<Size, "sm" | "md" | "lg"> = {
+  xs: "sm", sm: "md", default: "lg", lg: "lg", "icon-xs": "sm", "icon-sm": "md", icon: "lg", "icon-lg": "lg",
+}
+
+type ButtonProps = ButtonPrimitive.Props & { variant?: Variant | null; size?: Size | null }
+
+/* An icon child: a component element with no children and nothing but an icon's props (lucide's, Spinner's). An
+ * avatar, a Kbd, or an icon that hides itself at some width stays in the label as it is. */
+const ICON_PROPS = new Set(["className", "size", "strokeWidth", "absoluteStrokeWidth", "aria-hidden", "data-icon", "style", "color"])
+type IconElement = ReactElement<{ className?: string; "data-icon"?: string }>
+function isIcon(n: ReactNode): n is IconElement {
+  if (!isValidElement(n) || typeof n.type === "string" || typeof n.type === "symbol") return false
+  const props = n.props as Record<string, unknown>
+  if (props.children != null) return false
+  if (!Object.keys(props).every((k) => ICON_PROPS.has(k))) return false
+  return !/(^|\s|:)hidden(\s|$)/.test(String(props.className ?? ""))
+}
+
+/* Leading and trailing icons out of the children; what is left is the label */
+function split(children: ReactNode) {
+  const parts = Children.toArray(children)
+  let icon: ReactNode, iconRight: ReactNode
+  const first = parts[0]
+  if (isIcon(first) && first.props["data-icon"] !== "inline-end") icon = parts.shift()
+  const last = parts[parts.length - 1]
+  if (isIcon(last) && (parts.length > 1 || last.props["data-icon"] === "inline-end")) iconRight = parts.pop()
+  const label = parts.length === 0 ? undefined : parts.length === 1 ? parts[0] : parts
+  return { icon, iconRight, label }
+}
+
+function Button({ className, variant, size, render, nativeButton, focusableWhenDisabled, children, ...props }: ButtonProps) {
+  const v: Variant = variant ?? "default"
+  const s: Size = size ?? "default"
+  const steve = { "data-slot": "button", "data-steve-variant": v, "data-steve-size": s }
+  const square = s.startsWith("icon")
+
+  // Another element (a link), or base-ui's disabled-but-focusable: the primitive, in affectUI's look
+  if (render || nativeButton === false || focusableWhenDisabled) {
+    return (
+      <>
+        <style href="ui-button-clean" precedence="default">{buttonCleanCss}</style>
+        <ButtonPrimitive
+          {...steve}
+          render={render}
+          nativeButton={nativeButton}
+          focusableWhenDisabled={focusableWhenDisabled}
+          className={typeof className === "function" ? (st) => cn("ui-buttonc", className(st)) : cn("ui-buttonc", className)}
+          data-variant={TONE[v]}
+          data-size={SCALE[s]}
+          data-icon-only={square || undefined}
+          {...props}
+        >
+          {children}
+        </ButtonPrimitive>
+      </>
+    )
+  }
+
+  const rest = props as Omit<ComponentPropsWithRef<"button">, "children" | "className">
+  const cls = typeof className === "string" ? className : undefined
+  const { icon, iconRight, label } = split(children as ReactNode)
+
+  // A square button that is only an icon and names what it does: affectUI's Icon Button. The name is its accessible
+  // label; the tooltip stays the caller's (a title, or a Tooltip around it), so nothing shows two.
+  const name = rest["aria-label"]
+  if (square && icon && !iconRight && label === undefined && typeof name === "string" && name && TONE[v] !== "destructive") {
+    return (
+      <IconButton
+        {...steve}
+        {...rest}
+        icon={icon}
+        label={name}
+        title={rest.title ?? ""}
+        variant={TONE[v] as "primary" | "secondary" | "ghost"}
+        size={SCALE[s] === "sm" ? "sm" : "md"}
+        className={cls}
+      />
+    )
+  }
+
   return (
-    <ButtonPrimitive
-      data-slot="button"
-      className={cn(buttonVariants({ variant, size, className }))}
-      {...props}
-    />
+    <AffectButton
+      {...steve}
+      {...rest}
+      variant={TONE[v]}
+      size={SCALE[s]}
+      icon={icon}
+      iconRight={iconRight}
+      data-square={square && label !== undefined ? "" : undefined}
+      className={cls}
+    >
+      {label}
+    </AffectButton>
   )
 }
 
-export { Button, buttonVariants }
+export { Button }
+export type { ButtonProps }

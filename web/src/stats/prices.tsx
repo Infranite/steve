@@ -4,12 +4,12 @@
 import { useEffect, useState } from "react"
 import { ChartNoAxesColumnIcon, PlusIcon, RefreshCwIcon, TrashIcon } from "lucide-react"
 import { Button } from "@/components/ui/button"
-import { Input } from "@/components/ui/input"
+import { TextField } from "@/components/ui/input"
+import { SetSelect } from "@/settings-controls"
 import { Spinner } from "@/components/ui/spinner"
 import { stats, type Price, type Prices, type Quote } from "@/api/stats"
 import { toast } from "@/store"
 import { Group, Row, SectionLabel } from "@/ui"
-import { Select } from "@/view-shared"
 import { t, useT } from "@/i18n"
 import { num } from "@/i18n/format"
 import { fmtN, time, useStats } from "@/stats/format"
@@ -61,7 +61,7 @@ function CatalogSync({ v, reload }: { v: Prices; reload: () => void }) {
         </Row>
       </Group>
       {c.enabled && c.error && (
-        <div className="mt-2 rounded-lg border border-attention/40 bg-attention/5 px-3 py-2 type-footnote" role="alert" data-catalog-error>
+        <div className="anim-in mt-2 rounded-lg bg-attention/10 px-3 py-2 type-callout text-attention" role="alert" data-catalog-error>
           {c.tried
             ? t(c.synced ? "stats:prices.syncErrorKeepAt" : "stats:prices.syncErrorTableAt", { time: time(c.tried), error: c.error })
             : t(c.synced ? "stats:prices.syncErrorKeep" : "stats:prices.syncErrorTable", { error: c.error })}
@@ -83,7 +83,7 @@ export function StatsSettingsPane() {
   const [err, setErr] = useState("")
   useEffect(() => { if (d.s === "ok") setRows(d.v.prices.map(toDraft)) }, [d])
   if (d.s === "loading" || (d.s === "ok" && !rows)) return <div className="flex justify-center py-16"><Spinner className="size-5 text-muted-foreground" /></div>
-  if (d.s === "absent") return <div className="rounded-xl border px-4 py-3.5 type-callout text-muted-foreground" data-stats-unwired>{t("stats:prices.unwired")}</div>
+  if (d.s === "absent") return <div className="rounded-xl bg-card px-4 py-3.5 type-callout text-muted-foreground shadow-[var(--lift)]" data-stats-unwired>{t("stats:prices.unwired")}</div>
   if (d.s === "error") return <div className="type-callout text-muted-foreground" role="alert">{d.msg}</div>
   const v = d.v, list = rows!, cols = COLS()
   const set = (i: number, k: keyof Draft, val: string) => { setBad(null); setErr(""); setRows(list.map((r, n) => (n === i ? { ...r, [k]: val } : r))) }
@@ -110,19 +110,19 @@ export function StatsSettingsPane() {
           <p className="mb-3 type-callout text-muted-foreground">{t("stats:prices.modelsIntro")}</p>
           <div className="-mx-4 overflow-x-auto px-4 sm:mx-0 sm:px-0">
             <table className="w-full min-w-[620px] type-callout" aria-label={t("stats:prices.modelsAria")}>
-              <thead className="border-b text-left type-footnote text-muted-foreground"><tr><th className="py-2 font-medium">{t("stats:col.model")}</th><th className="py-2 pl-2 font-medium">{t("stats:col.source")}</th>{cols.map(([, l]) => <th key={l} className="py-2 pl-2 text-right font-medium">{l}</th>)}<th className="py-2 pl-2 text-right font-medium">tokens</th><th className="w-16" /></tr></thead>
+              <thead className="border-b text-left type-footnote text-muted-foreground"><tr><th className="py-2 font-medium">{t("stats:col.model")}</th><th className="py-2 pl-2 font-medium">{t("stats:col.source")}</th>{cols.map(([, l]) => <th key={l} className="whitespace-nowrap py-2 pl-3 text-right font-medium">{l}</th>)}<th className="whitespace-nowrap py-2 pl-3 text-right font-medium">tokens</th><th className="w-16" /></tr></thead>
               <tbody>{v.models.map((m) => {
                 const q = m.price
                 return (
                   <tr key={m.model} className="border-b last:border-0" data-price-model={m.model} data-price-source={q?.source ?? "none"}>
-                    <td className="max-w-56 truncate py-2 font-mono text-[12.5px]" title={m.model}>{m.model || t("stats:word.unknownModel")}</td>
-                    <td className="py-2 pl-2" title={q?.note || undefined}>
+                    <td className="max-w-56 truncate py-2.5 type-code" title={m.model}>{m.model || t("stats:word.unknownModel")}</td>
+                    <td className="min-w-40 max-w-64 py-2 pl-2" title={q?.note || undefined}>
                       {q ? <span className={q.source === "models_dev" ? "text-foreground" : "text-muted-foreground"}>{q.source === "models_dev" ? "Models.dev" : t("stats:prices.table")}</span> : <span className="text-attention">{t("stats:word.unpriced")}</span>}
                       {q?.via && <span className="ml-1 type-footnote text-muted-foreground">{t("stats:prices.estBy", { match: q.match })}</span>}
                       {q?.note && <div className="type-footnote text-muted-foreground">{q.note}</div>}
                     </td>
-                    {cols.map(([k]) => <td key={k} className="py-2 pl-2 text-right tabular-nums">{q ? money(q[k] as number) : "—"}</td>)}
-                    <td className="py-2 pl-2 text-right tabular-nums text-muted-foreground">{fmtN(m.tokens)}</td>
+                    {cols.map(([k]) => <td key={k} className="py-2 pl-3 text-right tabular-nums">{q ? money(q[k] as number) : "—"}</td>)}
+                    <td className="py-2 pl-3 text-right tabular-nums text-muted-foreground">{fmtN(m.tokens)}</td>
                     <td className="py-2 pl-1 text-right">{m.model && q?.source !== "table" && <Button size="xs" variant="ghost" className="text-blue" disabled={inTable(m.model)} onClick={() => add(m.model, q)} data-price-override={m.model}>{q ? t("stats:prices.override") : t("stats:prices.addPrice")}</Button>}</td>
                   </tr>
                 )
@@ -140,9 +140,9 @@ export function StatsSettingsPane() {
             <thead className="border-b text-left type-footnote text-muted-foreground"><tr><th className="py-2 font-medium">{t("stats:col.model")}</th>{cols.map(([, l]) => <th key={l} className="w-20 py-2 pl-2 font-medium">{l}</th>)}<th className="py-2 pl-2 font-medium">{t("stats:col.note")}</th><th className="w-8" /></tr></thead>
             <tbody>{list.map((r, i) => (
               <tr key={i} className="border-b last:border-0" data-price-row={i}>
-                <td className="py-1.5"><Input value={r.match} onChange={(e) => set(i, "match", e.target.value)} aria-label={t("stats:prices.rowModel", { n: i + 1 })} aria-invalid={bad?.[0] === i && bad[1] === "match"} className="h-8 font-mono text-[12.5px]" placeholder={t("stats:prices.matchPlaceholder")} /></td>
-                {cols.map(([k, l]) => <td key={k} className="py-1.5 pl-2"><Input inputMode="decimal" value={r[k as keyof Draft]} onChange={(e) => set(i, k as keyof Draft, e.target.value)} aria-label={t("stats:prices.rowPrice", { n: i + 1, col: l })} aria-invalid={bad?.[0] === i && bad[1] === k} className="h-8 text-right tabular-nums" /></td>)}
-                <td className="py-1.5 pl-2"><Input value={r.note} onChange={(e) => set(i, "note", e.target.value)} aria-label={t("stats:prices.rowNote", { n: i + 1 })} className="h-8" /></td>
+                <td className="py-1.5"><TextField size="sm" value={r.match} onChange={(e) => set(i, "match", e.target.value)} aria-label={t("stats:prices.rowModel", { n: i + 1 })} error={bad?.[0] === i && bad[1] === "match"} inputClassName="type-code" placeholder={t("stats:prices.matchPlaceholder")} /></td>
+                {cols.map(([k, l]) => <td key={k} className="py-1.5 pl-2"><TextField size="sm" inputMode="decimal" value={r[k as keyof Draft]} onChange={(e) => set(i, k as keyof Draft, e.target.value)} aria-label={t("stats:prices.rowPrice", { n: i + 1, col: l })} error={bad?.[0] === i && bad[1] === k} inputClassName="text-right tabular-nums" /></td>)}
+                <td className="py-1.5 pl-2"><TextField size="sm" value={r.note} onChange={(e) => set(i, "note", e.target.value)} aria-label={t("stats:prices.rowNote", { n: i + 1 })} /></td>
                 <td className="py-1.5 pl-1"><Button size="icon-xs" variant="ghost" className="text-muted-foreground" aria-label={t("stats:prices.rowDelete", { n: i + 1 })} onClick={() => setRows(list.filter((_, n) => n !== i))}><TrashIcon /></Button></td>
               </tr>
             ))}</tbody>
@@ -161,7 +161,7 @@ export function StatsSettingsPane() {
           <SectionLabel>{t("stats:prices.unpriced")}</SectionLabel>
           <p className="mb-2 type-callout text-muted-foreground">{t("stats:prices.unpricedIntro")}</p>
           <Group>{v.unpriced.map((u) => (
-            <Row key={u.model} title={<span className="font-mono text-[13px]">{u.model || t("stats:word.unknownModel")}</span>} sub={t("stats:prices.unpricedTokens", { n: fmtN(u.tokens) })}>
+            <Row key={u.model} title={<span className="type-code">{u.model || t("stats:word.unknownModel")}</span>} sub={t("stats:prices.unpricedTokens", { n: fmtN(u.tokens) })}>
               {u.model && <Button size="xs" variant="ghost" className="text-blue" onClick={() => add(u.model)} disabled={inTable(u.model)}>{t("stats:prices.addPrice")}</Button>}
             </Row>
           ))}</Group>
@@ -171,7 +171,7 @@ export function StatsSettingsPane() {
         <SectionLabel>{t("stats:prices.tzSection")}</SectionLabel>
         <Group>
           <Row title={t("stats:prices.tz")} sub={v.hub_tz ? t("stats:prices.tzSubHub", { tz: v.hub_tz }) : t("stats:prices.tzSub")}>
-            <Select value={v.tz ?? ""} align="end" testId="stats-tz" onChange={(z) => { void stats.setTz(z || null).then(() => { toast(t("stats:prices.tzChanged")); reload() }, (e) => toast(e instanceof Error ? e.message : String(e))) }}
+            <SetSelect value={v.tz ?? ""} testId="stats-tz" label={t("stats:prices.tz")} className="w-56" onChange={(z) => { void stats.setTz(z || null).then(() => { toast(t("stats:prices.tzChanged")); reload() }, (e) => toast(e instanceof Error ? e.message : String(e))) }}
               options={[{ v: "", l: v.hub_tz ? t("stats:prices.followHubTz", { tz: v.hub_tz }) : t("stats:prices.followHub") }, ...[...new Set([...(v.tz ? [v.tz] : []), ...ZONES])].map((z) => ({ v: z, l: z }))]} />
           </Row>
           <Row title={t("stats:prices.rebuild")} sub={t("stats:prices.rebuildSub")}>

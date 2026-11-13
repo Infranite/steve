@@ -25,7 +25,6 @@ use steve_store::{Decision, Tx};
 
 use crate::extract::Names;
 use crate::service::{mem_json, prepare};
-use crate::state::{Knowledge, redact};
 use crate::sync;
 
 /// `subject_type` of memory confirm decisions.
@@ -353,12 +352,13 @@ pub fn answer(tx: &Tx, ws: &str, actor: &str, id: &str, choice: &str, text: &str
                 },
             )?;
             sync::sync_mem(tx, &mem.id, now)?;
-            let supersedes = candidate_row(tx, &mem.id)?.and_then(|r| r.3);
-            if let Some(old) = supersedes
-                && let Some(o) = mems::get(tx, &old)?
-                && o.workspace_id == ws
-                && o.status == "confirmed"
-            {
+            for old in replaced(tx, &mem.id)? {
+                let Some(o) = mems::get(tx, &old)? else {
+                    continue;
+                };
+                if o.workspace_id != ws || o.status != "confirmed" {
+                    continue;
+                }
                 mems::patch(
                     tx,
                     &o.id,
@@ -381,6 +381,8 @@ pub fn answer(tx: &Tx, ws: &str, actor: &str, id: &str, choice: &str, text: &str
         "no" => {
             tx.prepare_cached("DELETE FROM mem_candidates WHERE mem_id = ?")?
                 .execute([&mem.id])?;
+            tx.prepare_cached("DELETE FROM mem_supersedes WHERE mem_id = ?")?
+                .execute([&mem.id])?;
             mems::delete(tx, &mem.id)?;
             sync::sync_mem(tx, &mem.id, now)?;
             base::audit(tx, ws, actor, "mm.reject", &mem.id, &json!({}))?;
@@ -388,6 +390,25 @@ pub fn answer(tx: &Tx, ws: &str, actor: &str, id: &str, choice: &str, text: &str
         _ => return Err(ApiError::invalid("choice")),
     }
     Ok(())
+}
+
+/// The confirmed memories a candidate replaces once confirmed: its `supersedes`, and every memory a
+/// merge names (`mem_supersedes`).
+fn replaced(c: &Connection, id: &str) -> ApiResult<Vec<String>> {
+    let mut out: Vec<String> = candidate_row(c, id)?
+        .and_then(|r| r.3)
+        .into_iter()
+        .collect();
+    let more: Vec<String> = c
+        .prepare_cached("SELECT old_id FROM mem_supersedes WHERE mem_id = ? ORDER BY rowid")?
+        .query_map([id], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    for x in more {
+        if !out.contains(&x) {
+            out.push(x);
+        }
+    }
+    Ok(out)
 }
 
 /// The `DecisionHandler` of `subject_type = "mem"` (moved here from contacts P4). Register it
@@ -424,9 +445,10 @@ impl DecisionHandler for MemDecisions {
             },
         )?;
         sync::sync_mem(tx, &mem.id, now)?;
-        if let Some(old) = candidate_row(tx, &mem.id)?.and_then(|r| r.3)
-            && mems::get(tx, &old)?.is_some_and(|o| o.status == "stale")
-        {
+        for old in replaced(tx, &mem.id)? {
+            if !mems::get(tx, &old)?.is_some_and(|o| o.status == "stale") {
+                continue;
+            }
             mems::patch(
                 tx,
                 &old,
@@ -540,11 +562,14 @@ fn candidates_of(c: &Connection, viewer: &Viewer) -> ApiResult<Vec<Value>> {
         let (why, scope) = reasons(c, mem.decision_id.as_deref())?;
         out.push(json!({
             "mem": mem_json(c, &mem),
-            "record": record_name(&mem.kind),
+            "record": match record_name(&mem.kind) {
+                "长期记忆" => steve_i18n::t!("knowledge.record.memory"),
+                _ => steve_i18n::t!("knowledge.record.entry"),
+            },
             "why": why,
             "scope": scope,
             "origin": origin,
-            "origin_label": label,
+            "origin_label": crate::sources::label_shown(&label),
             "evidence": evidence,
             "supersedes": supersedes,
             "decision_id": mem.decision_id,
@@ -642,7 +667,7 @@ pub fn expired(m: &Modules, who: &Caller) -> ApiResult<Value> {
             let (Some(mem), Some((_, label, evidence, _))) = (mems::get(c, &id)?, candidate_row(c, &id)?) else {
                 continue;
             };
-            out.push(json!({ "mem": mem_json(c, &mem), "origin_label": label, "evidence": evidence, "expired": at }));
+            out.push(json!({ "mem": mem_json(c, &mem), "origin_label": crate::sources::label_shown(&label), "evidence": evidence, "expired": at }));
         }
         Ok(Value::Array(out))
     })
@@ -755,7 +780,7 @@ pub fn remember_tool() -> Value {
 /// `steve_remember`: no model call, the text becomes a candidate of the user the
 /// agent works for. `Ok` is the result text, `Err` the `isError` text. Synchronous: call it from a
 /// blocking task.
-pub fn remember(m: &Modules, kb: &Knowledge, cx: &McpCx, args: &Value) -> Result<String, String> {
+pub fn remember(m: &Modules, cx: &McpCx, args: &Value) -> Result<String, String> {
     let s = |k: &str| args.get(k).and_then(Value::as_str);
     let mut issues = Vec::new();
     if s("text").is_none() {
@@ -779,7 +804,7 @@ pub fn remember(m: &Modules, kb: &Knowledge, cx: &McpCx, args: &Value) -> Result
             issues.join("; ")
         ));
     }
-    let text = redact(kb.guard.as_ref(), s("text").unwrap_or_default().trim());
+    let text = s("text").unwrap_or_default().trim().to_string();
     let n = text.chars().count();
     if n == 0 || n > 2000 {
         return Err("text must be 1 to 2000 characters.".into());

@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use steve_modules::vault::inject::{How, RunOutput};
-use steve_modules::vault::{NodePlace, NodeUse, UseNodes, UseValues, VaultResult, pasted_secret};
+use steve_modules::vault::{NodePlace, NodeUse, UseNodes, UseValues, VaultResult};
 use steve_node_api::*;
 use steve_store::{Store, StoreError};
 
@@ -39,9 +39,6 @@ const UNKNOWN: &str = "命令的结果未知：它可能已经运行过，不会
 const NO_FILES: &str = "这台设备不接受以文件方式交付的机密";
 /// The session's Node runs no commands.
 const NO_EXECS: &str = "这台设备不运行命令，不能在它上面使用机密";
-/// A command with a secret written into it: the ledger and the Node's journal keep the command as
-/// it is (the vault refuses it when asked; this is the last stop before either).
-const PASTED: &str = "命令里有像机密的内容，不会在设备上运行；请改用 env 或 stdin 注入";
 /// As the vault says it (`modules.vault.cwd_outside`, zh-CN: a tool result).
 const CWD_OUTSIDE: &str = "目录不在这个会话的工作区里";
 
@@ -54,9 +51,19 @@ struct Held {
     values: Arc<dyn UseValues>,
 }
 
+/// Values a Node takes for one of its sessions rather than for one command: the secrets of the
+/// session's Bot's MCP servers, under [`MCP_SECRETS_OP`]`<session>`, each time its harness opens
+/// ([`super::bot_mcp`]). Asked again every time, so nothing is held between opens.
+pub trait SessionSecrets: Send + Sync {
+    /// `id`'s value for `session` on `node`; `None`: not this session's (or not on this Node).
+    fn value(&self, node: &str, session: &str, id: &str) -> Option<zeroize::Zeroizing<Vec<u8>>>;
+}
+
 /// What every Node may take now, by operation. One per Hub.
 #[derive(Default)]
 pub struct NodeSecrets {
+    /// The sessions' own values (set once at boot; without it they are `denied`).
+    sessions: std::sync::OnceLock<Arc<dyn SessionSecrets>>,
     held: Mutex<HashMap<String, Held>>,
     ended: Mutex<VecDeque<String>>,
     /// Push grants being observed; one observer per operation.
@@ -66,6 +73,11 @@ pub struct NodeSecrets {
 impl NodeSecrets {
     pub fn new() -> Arc<NodeSecrets> {
         Arc::default()
+    }
+
+    /// Where the sessions' own values come from (once).
+    pub fn set_sessions(&self, s: Arc<dyn SessionSecrets>) {
+        let _ = self.sessions.set(s);
     }
 
     /// The channel of one Node: it takes only what was given to it.
@@ -253,6 +265,19 @@ struct Bound {
 impl HubSecrets for Bound {
     async fn take(&self, operation: OperationId, id: String) -> ApiResult<SecretBytes> {
         let err = |code, m: &str| Err(ApiError::new(code, m.to_string()).on(&operation));
+        if let Some(session) = operation.as_str().strip_prefix(MCP_SECRETS_OP) {
+            let Some(s) = self.all.sessions.get().cloned() else {
+                return err(ErrorCode::Denied, "no secret for this session");
+            };
+            let (node, session) = (self.node.to_string(), session.to_string());
+            let v = tokio::task::spawn_blocking(move || s.value(&node, &session, &id))
+                .await
+                .map_err(|e| ApiError::new(ErrorCode::Internal, e.to_string()))?;
+            return match v {
+                Some(v) => Ok(SecretBytes::new(v.to_vec())),
+                None => err(ErrorCode::Denied, "no such secret for this session"),
+            };
+        }
         let values = {
             let mut held = self.all.held.lock().unwrap_or_else(|e| e.into_inner());
             let Some(h) = held.get_mut(operation.as_str()) else {
@@ -422,9 +447,6 @@ impl UseNodes for VaultNodes {
     }
 
     async fn run(&self, u: NodeUse, values: Arc<dyn UseValues>) -> RunOutput {
-        if pasted_secret(&u.command) {
-            return failed(PASTED.into());
-        }
         // the roots may have changed since it was asked (an approval can take a day)
         if let Err(e) = self.workspaces.refresh_roots() {
             return failed(e.to_string());
@@ -568,6 +590,17 @@ mod tests {
 
     const TOKEN: &str = "vlt-T0ken-value-8812";
     const SESSION: &str = "ses_v1";
+
+    const UNPRINTED: &str = "vlt-unprinted-value-4471";
+
+    /// One value for every label.
+    struct Fixed(&'static str);
+
+    impl UseValues for Fixed {
+        fn value(&self, _label: &str) -> VaultResult<VaultBytes> {
+            Ok(VaultBytes::new(self.0.as_bytes().to_vec()))
+        }
+    }
 
     /// A use's values: `TOKEN` for every label, counted.
     #[derive(Default)]
@@ -807,7 +840,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_use_runs_once_on_the_sessions_node_masked_and_kept_nowhere() {
+    async fn a_use_runs_once_on_the_sessions_node_and_keeps_no_value() {
         let tmp = tempfile::tempdir().unwrap();
         let t = hub_at(tmp.path());
         assert_eq!(
@@ -835,14 +868,19 @@ mod tests {
         let out = t.uses.run(u.clone(), values.clone()).await;
         let sub = t.root.join("work/sub").canonicalize().unwrap();
         assert_eq!(out.exit_code, Some(0), "{out:?}");
-        assert_eq!(
-            out.stdout,
-            format!(
-                "{}\nt=[已打码：令牌]\n[已打码：令牌]\nin=[已打码：令牌]\nf=[已打码：临时文件]/KEYF\n[已打码：令牌]\n",
-                sub.display()
-            )
+        // what the command prints is its own: not masked
+        use base64::Engine as _;
+        let lines: Vec<&str> = out.stdout.lines().collect();
+        let b64 = base64::engine::general_purpose::STANDARD.encode(TOKEN);
+        let (env, stdin) = (format!("t={TOKEN}"), format!("in={TOKEN}"));
+        let sub = sub.display().to_string();
+        assert_eq!(lines[..4], [sub.as_str(), &env, &b64, &stdin], "{out:?}");
+        assert!(
+            lines[4].starts_with("f=") && lines[4].ends_with("/KEYF"),
+            "{out:?}"
         );
-        assert_eq!(out.stderr, "err [已打码：令牌]\n");
+        assert_eq!(lines[5..], [TOKEN], "{out:?}");
+        assert_eq!(out.stderr, format!("err {TOKEN}\n"));
         assert_eq!(
             values.0.load(Ordering::SeqCst),
             1,
@@ -872,64 +910,31 @@ mod tests {
         let out = t.uses.run(gone, values.clone()).await;
         assert!(out.error.is_some() && out.exit_code.is_none(), "{out:?}");
 
-        // the ledger, the Hub's store and the Node's journal hold no value in any form
+        // a value the command uses without printing it
+        let quiet = use_of(
+            "su_4",
+            "[ -n \"$TOK\" ] && echo set",
+            vec![inj("TOK", How::Env)],
+        );
+        let out = t.uses.run(quiet, Arc::new(Fixed(UNPRINTED))).await;
+        assert_eq!(out.stdout, "set\n", "{out:?}");
+
+        // the ledger, the Hub's store and the Node's journal keep what a command printed (its
+        // answer) and no value otherwise, in no form
         t._node.shutdown().await;
         let kept = all_bytes(&t.root);
         assert!(
             contains(&kept, b"vault_use:su_1"),
             "the ledger was looked at"
         );
-        for form in [TOKEN.as_bytes().to_vec(), hex::encode(TOKEN).into_bytes()] {
+        for form in [
+            UNPRINTED.as_bytes().to_vec(),
+            hex::encode(UNPRINTED).into_bytes(),
+            hex::encode(TOKEN).into_bytes(),
+        ] {
             assert!(!contains(&kept, &form), "a value on disk");
         }
         let _ = t.store;
-    }
-
-    /// A token written into the command itself is never sent: the ledger and the Node's journal
-    /// keep the command as it is. A `$VAR` after `password=` is a reference and runs.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_token_pasted_into_the_command_is_not_sent_or_stored() {
-        let tmp = tempfile::tempdir().unwrap();
-        let t = hub_at(tmp.path());
-        let pasted = "ghp_PastedIntoTheCommand0123456789abcd";
-        let values = Arc::new(Values::default());
-        let out = t
-            .uses
-            .run(
-                use_of(
-                    "su_p",
-                    &format!("curl -H 'Authorization: Bearer {pasted}' -H \"X: $TOK\" x"),
-                    vec![inj("TOK", How::Env)],
-                ),
-                values.clone(),
-            )
-            .await;
-        assert_eq!(out.error.as_deref(), Some(PASTED), "{out:?}");
-        assert!(t.runtime.ledger(&op_of("su_p")).unwrap().is_none());
-        assert_eq!(values.0.load(Ordering::SeqCst), 0);
-
-        let out = t
-            .uses
-            .run(
-                use_of("su_r", "echo \"password=$TOK\"", vec![inj("TOK", How::Env)]),
-                values.clone(),
-            )
-            .await;
-        assert_eq!(out.exit_code, Some(0), "{out:?}");
-        assert_eq!(out.stdout, "password=[已打码：令牌]\n");
-
-        t._node.shutdown().await;
-        let all = all_bytes(&t.root);
-        assert!(
-            contains(&all, b"vault_use:su_r"),
-            "the ledger was looked at"
-        );
-        let node = all_bytes(&t.root.join("node"));
-        assert!(
-            contains(&node, b"password=$TOK"),
-            "the journal was looked at"
-        );
-        assert!(!contains(&all, pasted.as_bytes()), "a pasted token on disk");
     }
 
     /// Runs in a child process (see `a_hub_that_dies_mid_use_never_runs_it_again`).

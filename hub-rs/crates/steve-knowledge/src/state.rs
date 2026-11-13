@@ -1,10 +1,9 @@
 //! What the knowledge module needs from the rest of the Hub, beyond [`steve_modules::Modules`]:
-//! the secret scanner (steve-vault's `guard::scan`, wired by the integrator), a way to emit the
+//! a way to emit the
 //! `{type:"kb"}` SSE event (not yet a `ChangeEvent` variant), and the document loaders the index
 //! queue reads bodies with (notes and folders always; files need the data directory, see
 //! [`crate::sources::files::FilesLoader`]).
 
-use std::ops::Range;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use serde::Serialize;
@@ -14,57 +13,6 @@ use crate::index::DocLoader;
 use crate::repo::DocRow;
 use crate::sources::folder::FolderPolicy;
 use crate::sources::folder_node::{FolderPlaces, NodeFolders};
-
-/// What every secret found in indexed text is replaced with.
-pub const REDACTED: &str = "［已拦下的机密］";
-
-/// `steve_vault::guard::scan` as this crate needs it: byte ranges of things that look like
-/// passwords or tokens. The integrator wraps the real scanner; [`NoGuard`] finds nothing.
-pub trait Guard: Send + Sync {
-    fn scan(&self, text: &str) -> Vec<Range<usize>>;
-}
-
-/// A scanner that finds nothing (until steve-vault's guard is wired).
-#[derive(Debug, Default, Clone, Copy)]
-pub struct NoGuard;
-
-impl Guard for NoGuard {
-    fn scan(&self, _: &str) -> Vec<Range<usize>> {
-        Vec::new()
-    }
-}
-
-/// Replaces every range the guard reports with [`REDACTED`]. Overlapping or unsorted ranges and
-/// ranges off char boundaries are tolerated (widened to the enclosing characters).
-pub fn redact(guard: &dyn Guard, text: &str) -> String {
-    let mut ranges = guard.scan(text);
-    if ranges.is_empty() {
-        return text.to_string();
-    }
-    ranges.sort_by_key(|r| r.start);
-    let mut out = String::with_capacity(text.len());
-    let mut pos = 0;
-    for r in ranges {
-        let mut start = r.start.min(text.len()).max(pos);
-        while !text.is_char_boundary(start) {
-            start -= 1;
-        }
-        let mut end = r.end.min(text.len());
-        while !text.is_char_boundary(end) {
-            end += 1;
-        }
-        if end <= pos {
-            continue;
-        }
-        if start >= pos {
-            out.push_str(&text[pos..start]);
-            out.push_str(REDACTED);
-        }
-        pos = end;
-    }
-    out.push_str(&text[pos..]);
-    out
-}
 
 /// `{type:"kb", id, ws}`: `id` is a document or source id. Sent after the commit.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -81,7 +29,6 @@ type Notify = dyn Fn(KbEvent) + Send + Sync;
 pub struct Knowledge(Arc<Inner>);
 
 pub struct Inner {
-    pub guard: Arc<dyn Guard>,
     /// Where knowledge is found ([`crate::port`]); the Hub's FTS index unless another is set.
     store: OnceLock<Arc<dyn crate::port::KnowledgeStore>>,
     notify: Arc<Notify>,
@@ -106,12 +53,11 @@ impl Knowledge {
     /// `notify` forwards `{type:"kb"}` events to the SSE bus (integrator; tests collect them).
     /// Notes and folder files are always loadable; further loaders (uploads) come from
     /// [`Knowledge::with_loaders`].
-    pub fn new(guard: Arc<dyn Guard>, notify: impl Fn(KbEvent) + Send + Sync + 'static) -> Self {
-        Self::with_loaders(guard, notify, Vec::new())
+    pub fn new(notify: impl Fn(KbEvent) + Send + Sync + 'static) -> Self {
+        Self::with_loaders(notify, Vec::new())
     }
 
     pub fn with_loaders(
-        guard: Arc<dyn Guard>,
         notify: impl Fn(KbEvent) + Send + Sync + 'static,
         mut loaders: Vec<Arc<dyn DocLoader>>,
     ) -> Self {
@@ -124,7 +70,6 @@ impl Knowledge {
             }),
         );
         Self(Arc::new(Inner {
-            guard,
             store: OnceLock::new(),
             notify: Arc::new(notify),
             loaders,
@@ -167,9 +112,9 @@ impl Knowledge {
         std::mem::take(&mut *self.scan_requests.lock().unwrap_or_else(|e| e.into_inner()))
     }
 
-    /// No guard, events dropped: for tests and tools.
+    /// Events dropped: for tests and tools.
     pub fn bare() -> Self {
-        Self::new(Arc::new(NoGuard), |_| {})
+        Self::new(|_| {})
     }
 
     pub fn notify(&self, ws: &str, id: &str) {
@@ -210,22 +155,8 @@ impl Knowledge {
 mod tests {
     use super::*;
 
-    struct Tok;
-    impl Guard for Tok {
-        fn scan(&self, text: &str) -> Vec<Range<usize>> {
-            text.match_indices("ghp_x")
-                .map(|(i, s)| i..i + s.len())
-                .collect()
-        }
-    }
-
     #[test]
-    fn redacts_ranges() {
-        assert_eq!(
-            redact(&Tok, "令牌 ghp_x 和 ghp_x。"),
-            "令牌 ［已拦下的机密］ 和 ［已拦下的机密］。"
-        );
-        assert_eq!(redact(&Tok, "无"), "无");
+    fn kb_event_json() {
         assert_eq!(
             serde_json::to_string(&KbEvent {
                 id: "kd_1".into(),

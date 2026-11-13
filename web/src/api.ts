@@ -1,9 +1,9 @@
 /* Hub API: raw shapes (as the Hub's store returns them) and calls. store.ts maps them onto the view model. */
 import { lang, t } from "@/i18n"
 import { resumableStream } from "./stream-cursor"
-import { clientInfo, hubBase, hubUrl, signedIn } from "./hub"
+import { clientInfo, hello, hubBase, hubUrl, signedIn } from "./hub"
 import type { Workflow } from "./workflow"
-export type ItemStatus = "prop" | "run" | "wait" | "pause" | "done" | "drop" | "block"
+export type ItemStatus = "prop" | "run" | "wait" | "pause" | "done" | "drop" | "fail" | "block"
 export type PlanStep = { step: string; done: boolean; left?: boolean }
 export type RItem = {
   id: string; workspace_id: string; no: number; title: string; status: ItemStatus; stage: string; bot_id: string | null; project_id: string | null; cwd: string | null; branch: string | null
@@ -99,7 +99,7 @@ export type RDevice = { id: string; name: string; roles: string[]; os: string; v
 /** one directory of a Node's machine, for choosing a project's directory: `path` and `parent` show the home directory as `~`;
  *  `denied`: it exists but the Hub is not allowed to read it */
 export type RBrowse = { path: string; parent: string | null; exists: boolean; denied: boolean; git: boolean; dirs: { name: string; path: string; git: boolean }[]; more: boolean }
-export type RNode = { node_id: string; name: string; fingerprint: string; state: "pending" | "active" | "paused" | "revoked"; linked: boolean; local: boolean; last_seen?: number | null }
+export type RNode = { node_id: string; name: string; fingerprint: string; state: "pending" | "active" | "paused" | "revoked"; linked: boolean; local: boolean; last_seen?: number | null; link_error?: { at: number; error: string } }
 /** a Node machine's day (B3): the latest sample, and load per CPU, memory in use (0..1) and round trip over time */
 export type RVitals = { latest: { at: number; cpus?: number; load?: [number, number, number]; mem_total?: number; mem_available?: number; roots?: { root: string; display?: string; free: number; total: number; inodes_free?: number }[]; sessions?: number; rtt_ms?: number | null }; series: { at: number; load: number | null; mem: number | null; rtt: number | null }[] }
 export type RPairing = { code: string; expires: number; pin: string | null; hub_id: string }
@@ -112,13 +112,15 @@ export type RTailcat = { available: boolean; enabled: boolean; running?: boolean
 export type RRuntime = {
   id: string; name: string; ok: boolean; version: string; path: string; models: string[]; note: string; custom?: boolean; builtin?: boolean; error?: string | null; install_hint?: string | null
   adapter_version?: string | null; default_model?: string | null; efforts?: string[]; modes?: string[] | null
+  /** its adapter declares where it reads skills, so a Bot's skills reach its sessions (absent: not said) */
+  skills?: boolean
   caps?: { sessions: boolean; jobs: boolean; images: boolean; resume: boolean; history: boolean; mcp_http: boolean; system_prompt: boolean; fork?: boolean } | null
   auth?: { id: string; name: string; description?: string | null }[]
   /** an adapter Steve installed and keeps up to date: its last check (`policy`: STEVE_ADAPTER_UPDATES) */
   update?: { policy: "auto" | "check" | "off"; installed?: string | null; latest?: string | null; checked?: number | null; error?: string | null; pending?: boolean } | null
 }
 export type REvent = { seq: number; ts: number; kind: string; data: any }
-export type Proposal = { id: string; title: string; target: { kind: string; id?: string }; href: string; changes: { label: string; from: string; to: string }[] }
+export type Proposal = { id: string; title: string; target: { kind: string; id?: string }; href: string; changes: { label: string; from: string; to: string }[]; patch?: Record<string, unknown> }
 export type LocalSession = { key: string; harness: string; title: string; cwd: string; when: number; size: number; imported: boolean }
 /** a newer Steve release the Hub's last version check found (`owner`: this user may install it) */
 export type StateUpdate = { version: string; owner: boolean }
@@ -175,13 +177,25 @@ export const withWs = (path: string) => { const url = hubUrl(path); return pageW
 
 /** what the Hub's last 401 offered: its sign-in page (`link`: OIDC or the local development login) and/or signing in
  * with a user's name and an access token (`token`, A1) */
-export const signIn: { link: string | null; token: boolean } = { link: null, token: false }
+export const signIn: { link: string | null; token: boolean; /** the Hub does not let this page's origin in yet (it says so on a 401, or refuses the call outright, below): a
+   * browser sign-in could not come back here, signing in by token lets the origin in */ refused: boolean } = { link: null, token: false, refused: false }
 export class Unauthenticated extends Error { login: string | null; constructor(login: string | null, token?: boolean) { super("unauthenticated"); this.login = login; signIn.link = login; if (token !== undefined) signIn.token = token } }
+/** A Hub on another origin refuses a page it has not let in yet before the call is made (its preflight answers 403),
+ * and the page sees only a failed fetch, never the 401. When the Hub still answers `hello` (open to any origin), the
+ * page is not signed in there rather than cut off: it is shown how to sign in, by token, which lets its origin in. */
+async function refused(e: unknown): Promise<never> {
+  if (hubBase() && e instanceof TypeError) {
+    const h = await hello(hubBase(), 4000).catch(() => null)
+    if (h) { signIn.refused = true; throw new Unauthenticated(null, h.login.token) }
+  }
+  throw e
+}
 const CUT = {}
 async function req<T>(method: string, path: string, body?: unknown, seen?: (r: Response) => void): Promise<T> {
-  /* a read that stalls (proxy, dropped connection) must fail, not leave a view loading forever */
-  const r = await fetch(hubUrl("/api" + path), { method, headers: wsHeaders(body !== undefined ? { "content-type": "application/json" } : {}), body: body !== undefined ? JSON.stringify(body) : undefined, credentials: "include", signal: method === "GET" ? AbortSignal.timeout(30_000) : undefined })
-  if (r.status === 401) { const j = await r.json().catch(() => ({})); throw new Unauthenticated(j.login ?? null, j.token === true) }
+  /* a read that stalls (proxy, dropped connection) must fail, not leave a view loading forever; a delete (no body) is
+   * keepalive so one sent as the page goes away, like a forget whose Undo ran out, still reaches the Hub */
+  const r = await fetch(hubUrl("/api" + path), { method, headers: wsHeaders(body !== undefined ? { "content-type": "application/json" } : {}), body: body !== undefined ? JSON.stringify(body) : undefined, credentials: "include", signal: method === "GET" ? AbortSignal.timeout(30_000) : undefined, keepalive: method === "DELETE" }).catch(refused)
+  if (r.status === 401) { const j = await r.json().catch(() => ({})); if (r.headers.get("x-steve-origin") === "refused") signIn.refused = true; throw new Unauthenticated(j.login ?? null, j.token === true) }
   const j = await r.json().catch(() => (r.ok && method === "GET" ? CUT : {}))
   if (j === CUT) throw new Error(t("shell:http.incomplete")) // a cut-off body used to come back as {} and break the caller silently
   if (!r.ok) throw new Error(j.error ?? t("shell:http.failed", { status: r.status }))
@@ -210,7 +224,7 @@ export async function modReq<T>(method: string, path: string, body?: unknown, si
   const json = (r.headers.get("content-type") ?? "").includes("application/json")
   const j: any = json ? await r.json().catch(() => undefined) : undefined
   /* the session's own 401 carries `login`; a 401 from a module (e.g. 请重新登录后再登记) is an ordinary error */
-  if (r.status === 401 && (!j || j.error === "unauthenticated" || "login" in j)) throw new Unauthenticated(j?.login ?? null, j?.token === true)
+  if (r.status === 401 && (!j || j.error === "unauthenticated" || "login" in j)) { if (r.headers.get("x-steve-origin") === "refused") signIn.refused = true; throw new Unauthenticated(j?.login ?? null, j?.token === true) }
   if (!json) {
     if (r.ok && method !== "GET") return {} as T // 204, or an empty body
     if (r.ok || r.status === 404 || r.status === 405) throw new NotWired()
@@ -291,12 +305,14 @@ export const api = {
   kindsReview: () => get<RKindReview[]>("/tags/kinds/review"), kindsReviewed: (ids: string[]) => post<RKindReview[]>("/tags/kinds/review", { ids }),
   kindsBackfill: (dry = false) => post<RKindBackfill>("/tags/kinds/backfill", { dry }),
   settings: (p: Record<string, string>) => patch("/settings", p),
-  draft: (target: { kind: string; id?: string }, text: string) => post<Proposal>("/config/draft", { target, text }), apply: (id: string) => post(`/config/${id}/apply`), undoConfig: (id: string) => post(`/config/${id}/undo`), dropConfig: (id: string) => post(`/config/${id}/drop`),
+  /** `field` + `base` (bot targets): draft only the bot's working rules or own system prompt, from the text the editor shows */
+  draft: (target: { kind: string; id?: string; field?: "rules" | "prompt"; base?: string }, text: string) => post<Proposal>("/config/draft", { target, text }), apply: (id: string) => post(`/config/${id}/apply`), undoConfig: (id: string) => post(`/config/${id}/undo`), dropConfig: (id: string) => post(`/config/${id}/drop`),
   devices: (fresh = false) => get<{ devices: RDevice[]; runtimes: RRuntime[] }>("/devices" + (fresh ? "?fresh=1" : "")),
   /** declares a harness adapter in the Hub's manifest (in force after the Hub restarts) */
   addHarness: (p: { id: string; name?: string; command: string; args?: string[]; env?: Record<string, string>; properties?: Record<string, unknown> }) => post<{ saved: boolean; restart: boolean }>("/system/harnesses", p),
   removeHarness: (id: string) => del<{ removed: boolean; restart: boolean }>("/system/harnesses/" + encodeURIComponent(id)), patchDevice: (id: string, p: { name?: string; status?: string; max_sessions?: number }) => patch("/devices/" + id, p),
-  nodes: () => get<{ nodes: RNode[] }>("/nodes"),
+  /** `off`: this Hub does not listen for remote Nodes (STEVE_NODE_LISTEN=0, or a read-only copy) */
+  nodes: () => get<{ nodes: RNode[]; off?: boolean }>("/nodes"),
   createPairing: () => post<RPairing>("/nodes/pairings"),
   vitals: () => get<{ nodes: Record<string, RVitals> }>("/vitals"),
   nodeTags: () => get<{ tags: Record<string, string[]> }>("/node-tags"),

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict"
 import test from "node:test"
-import { orderedUnits, workflowProgress } from "../src/workflow.ts"
+import { orderedUnits, stopPending } from "../src/workflow.ts"
 
 const unit = (id, depends_on = [], status = "pending", required = true) => ({ id, depends_on, status, required })
 
@@ -16,13 +16,10 @@ test("malformed historical dependencies remain visible and cannot hang the item 
   assert.equal(orderedUnits(units)[0].id, "missing")
 })
 
-test("completion progress counts required successful work only", () => {
-  const workflow = { units: [unit("work", [], "succeeded"), unit("review", ["work"], "failed"), unit("optional", [], "succeeded", false), unit("other", [], "running")] }
-  assert.deepEqual(workflowProgress(workflow), { passed: 1, total: 3, running: 0, active_unconfirmed: 1, waiting: 0 })
-  workflow.units[3].activity = { state: "confirmed" }
-  assert.deepEqual(workflowProgress(workflow), { passed: 1, total: 3, running: 1, active_unconfirmed: 0, waiting: 0 })
-  workflow.units[0].activity = { state: "confirmed" }
-  assert.equal(workflowProgress(workflow).running, 1, "terminal results never become running work")
-  workflow.current_cycle = false
-  assert.deepEqual(workflowProgress(workflow), { passed: 0, total: 3, running: 0, active_unconfirmed: 0, waiting: 0 }, "prior-cycle work is not current progress")
+test("stop pending shows only on a stopped unit, never on one that succeeded", () => {
+  assert.equal(stopPending({ status: "cancelled", stop_pending: true }), true)
+  assert.equal(stopPending({ status: "failed", stop_pending: true }), true)
+  assert.equal(stopPending({ status: "succeeded", stop_pending: true }), false, "an older Hub flagged finished units whose Node was not attached")
+  assert.equal(stopPending({ status: "cancelled", stop_pending: false }), false)
+  assert.equal(stopPending({ status: "cancelled" }), false)
 })

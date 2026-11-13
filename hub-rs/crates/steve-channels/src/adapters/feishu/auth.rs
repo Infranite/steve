@@ -271,6 +271,9 @@ impl ConnectionProvider for FeishuApp {
     fn name(&self) -> &str {
         "飞书应用机器人"
     }
+    fn localize(&self, text: &str) -> Option<String> {
+        crate::adapters::localize(text)
+    }
     fn caps(&self) -> &[&'static str] {
         &["msg.receive", "msg.send", "directory.read", "events"]
     }
@@ -502,6 +505,9 @@ impl ConnectionProvider for FeishuUser {
     }
     fn name(&self) -> &str {
         "飞书 · 你本人"
+    }
+    fn localize(&self, text: &str) -> Option<String> {
+        crate::adapters::localize(text)
     }
     fn caps(&self) -> &[&'static str] {
         &["msg.receive", "msg.send_as_user"]

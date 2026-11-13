@@ -10,7 +10,7 @@ import { Switch } from "@/components/ui/switch"
 import { Spinner } from "@/components/ui/spinner"
 import { Field, FieldDescription, FieldGroup, FieldLabel } from "@/components/ui/field"
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog"
-import { go, Page, Group, Row, SectionLabel, Empty, BotAvatar } from "@/ui"
+import { go, Page, Group, Row, SectionLabel, Empty, BotAvatar, Panel, Chevron, Blank } from "@/ui"
 import { Select } from "@/view-shared"
 import { Unwired } from "@/unwired"
 import { st, botName } from "@/store"
@@ -26,8 +26,9 @@ const usedText = (p: Persona) => {
   return a + s ? [a ? t("channels:persona.usedAccounts", { count: a }) : "", s ? t("channels:persona.usedSpaces", { count: s }) : ""].filter(Boolean).join(" · ") : t("channels:persona.usedNone")
 }
 
-/** the list, all of them or one Bot's (the Bot page's 对外身份 tab) */
-export function PersonasSection({ bot }: { bot?: string }) {
+/** the list, all of them or one Bot's (the Bot page's 对外身份 tab). `panel`: the rows in a lifted Panel, as the
+ *  configuration pages lay them out */
+export function PersonasSection({ bot, panel = false }: { bot?: string; panel?: boolean }) {
   const t = useT()
   const L = useLoad(() => channelsApi.personas(), [], ["persona", "space", "channel"])
   const [busy, act] = useBusy()
@@ -39,15 +40,16 @@ export function PersonasSection({ bot }: { bot?: string }) {
     const p = await act(() => channelsApi.newPersona({ ...newPersonaDefaults(), bot_id: bot ?? "steve" }))
     if (p) go("#/channels/personas/" + p.id)
   }
+  const List = panel ? Panel : Group
   return (
     <section data-personas>
       <SectionLabel right={<Button size="xs" variant="ghost" className="text-muted-foreground" disabled={busy} onClick={() => void create()} data-new-persona><PlusIcon />{t("channels:persona.create")}</Button>}>{t("channels:persona.listLabel", { n: xs.length })}</SectionLabel>
-      {xs.length ? <Group>{xs.map((p) => (
+      {xs.length ? <List>{xs.map((p) => (
         <Row key={p.id} icon={<PersonaAvatar bot={p.bot_id} size={32} />} onClick={() => go("#/channels/personas/" + p.id)} data-persona-row={p.name}
           title={<span className="inline-flex items-center gap-1.5">{p.name}{p.is_default && <span className="type-footnote text-muted-foreground">{t("channels:persona.isDefault")}</span>}</span>}
-          sub={t("channels:persona.rowSub", { bot: botName(p.bot_id), used: usedText(p) })}><ChevronRightIcon className="size-4 text-tertiary" /></Row>))}</Group>
+          sub={t("channels:persona.rowSub", { bot: botName(p.bot_id), used: usedText(p) })}><Chevron /></Row>))}</List>
         : <Empty title={t("channels:persona.emptyTitle")} sub={t("channels:persona.emptySub")} />}
-      <div className="mt-2 px-1 type-footnote text-muted-foreground">{t("channels:persona.explain")}</div>
+      <div className="mt-3 type-footnote text-muted-foreground">{t("channels:persona.explain")}</div>
     </section>
   )
 }
@@ -95,7 +97,13 @@ function PersonaView({ id }: { id: string }) {
         <AlertDialogFooter><AlertDialogCancel>{t("common:action.cancel")}</AlertDialogCancel><AlertDialogAction variant="destructive" disabled={busy} onClick={async () => { const r = await act(() => channelsApi.deletePersona(p.id)); if (r) go("#/channels/personas") }} data-del-confirm>{t("common:action.delete")}</AlertDialogAction></AlertDialogFooter>
       </AlertDialogContent></AlertDialog>
       <div className="flex flex-col gap-8">
-        <div className="-mt-2 flex items-center gap-4"><PersonaAvatar bot={p.bot_id} size={64} /><div className="min-w-0"><div className="type-body">{form.intro || t("channels:persona.noIntro")}</div><div className="mt-0.5 type-footnote text-muted-foreground">{t("channels:persona.platformNote")}</div><OwnerChip objectType="persona" objectId={p.id} className="mt-1.5" /></div></div>
+        {/* the intro is the first field below; the head says where this face shows up, which is what a change affects */}
+        <div className="-mt-2 flex items-center gap-4"><PersonaAvatar bot={p.bot_id} size={56} /><div className="min-w-0"><div className="type-body" data-persona-used>{usedText(p)}</div><div className="mt-0.5 type-footnote text-muted-foreground">{t("channels:persona.platformNote")}</div><OwnerChip objectType="persona" objectId={p.id} className="mt-1.5" /></div></div>
+        <section><SectionLabel>{t("channels:persona.usedIn")}</SectionLabel>
+          {accN + p.used_by.spaces.length ? <Group>
+            {p.used_by.accounts.map((a) => <Row key={a.account_id} title={a.name} sub={t("channels:persona.usedAccount")} onClick={() => go("#/channels/acc/" + a.account_id)}><ChevronRightIcon className="size-4 text-tertiary" /></Row>)}
+            {p.used_by.spaces.map((s) => <Row key={s.id} title={s.name} sub={t(s.own ? "channels:persona.usedOwn" : "channels:persona.usedFollow")} onClick={() => go("#/channels/space/" + s.id)} data-used-space={s.name}><ChevronRightIcon className="size-4 text-tertiary" /></Row>)}
+          </Group> : <Blank>{t("channels:persona.noUseLine")}</Blank>}</section>
         <form className="contents" onSubmit={(e) => { e.preventDefault(); if (changed && ok && !busy) void save() }}>
           <FieldGroup className="gap-5">
             <F label={t("channels:persona.name")} n={form.name.length} max={20}><Input className="rounded-lg" value={form.name} maxLength={20} onChange={(e) => setForm({ ...form, name: e.target.value })} aria-invalid={!form.name.trim()} data-persona-name /></F>
@@ -109,19 +117,15 @@ function PersonaView({ id }: { id: string }) {
         <section data-reveal><SectionLabel>{t("channels:persona.revealLabel")}</SectionLabel>
           <Group>{RV.map((k) => { const l = t(`channels:persona.rv.${k}`); return <Row key={k} title={l} sub={t(`channels:persona.rv.${k}Sub`)}><Switch aria-label={t("channels:persona.revealAria", { what: l })} checked={reveal[k]} disabled={busy} onCheckedChange={(v) => void setRv(k, v)} data-reveal-key={k} /></Row> })}</Group>
           <div className="mt-3 rounded-xl bg-muted/60 px-4 py-3" aria-live="polite"><div className="type-footnote text-muted-foreground">{t("channels:persona.askWho")}</div><div className="mt-1 type-body" data-intro-preview>{preview}</div></div>
-          <div className="mt-2 px-1 type-footnote text-muted-foreground">{t("channels:persona.revealNote")}</div></section>
-        <section><SectionLabel>{t("channels:persona.usedIn")}</SectionLabel>
-          {accN + p.used_by.spaces.length ? <Group>
-            {p.used_by.accounts.map((a) => <Row key={a.account_id} title={a.name} sub={t("channels:persona.usedAccount")} onClick={() => go("#/channels/acc/" + a.account_id)}><ChevronRightIcon className="size-4 text-tertiary" /></Row>)}
-            {p.used_by.spaces.map((s) => <Row key={s.id} title={s.name} sub={t(s.own ? "channels:persona.usedOwn" : "channels:persona.usedFollow")} onClick={() => go("#/channels/space/" + s.id)} data-used-space={s.name}><ChevronRightIcon className="size-4 text-tertiary" /></Row>)}
-          </Group> : <Empty title={t("channels:persona.noUseTitle")} sub={t("channels:persona.noUseSub")} />}</section>
+          <div className="mt-3 type-footnote text-muted-foreground">{t("channels:persona.revealNote")}</div></section>
+
       </div>
     </Page>
   )
 }
 /** a labelled field; the counter shows near the limit */
 const F = ({ label, hint, children, n, max }: { label: string; hint?: string; children: React.ReactNode; n?: number; max?: number }) => (
-    <Field className="gap-1.5"><FieldLabel className="type-label text-muted-foreground">{label}{max !== undefined && n !== undefined && n > max * 0.8 && <span className={n > max ? "ml-auto text-destructive" : "ml-auto"}>{n}/{max}</span>}</FieldLabel>{children}{hint && <FieldDescription className="type-footnote">{hint}</FieldDescription>}</Field>)
+    <Field className="gap-1.5"><FieldLabel className="type-label text-muted-foreground">{label}{max !== undefined && n !== undefined && n > max * 0.8 && <span className={n > max ? "ml-auto tabular-nums text-destructive" : "ml-auto tabular-nums"}>{n}/{max}</span>}</FieldLabel>{children}{hint && <FieldDescription className="type-footnote">{hint}</FieldDescription>}</Field>)
 /** what deleting a persona changes: the accounts that default to it, the spaces that chose it */
 function delImpact(accN: number, ownSpaces: number) {
   if (!(accN + ownSpaces)) return t("channels:persona.delNone")

@@ -1,7 +1,7 @@
 //! S3 acceptance: a script with an endless loop is stopped within 1 s
 //! and `fetch` is a ReferenceError; `http` to 127.0.0.1 (and localhost, private names, redirects to
-//! them) is refused; `{{secrets}}` values appear nowhere in `context`, step output, decisions or
-//! logs; an effect without a grant opens an approval, with one it runs (`http.effect`, `cmd.run`);
+//! them) is refused; Steve writes `{{secrets}}` values nowhere (step input, decisions, logs; the
+//! step output is what the server answered); an effect without a grant opens an approval, with one it runs (`http.effect`, `cmd.run`);
 //! a secret without a `secret.use` grant opens an approval.
 //!
 //! The HTTP server is a tiny one on 127.0.0.1, reached through the name `api.test` (a fake resolver)
@@ -83,7 +83,7 @@ impl Lookup for FakeDns {
 type Got = (String, String, HashMap<String, String>, String);
 
 /// A one-request-per-connection HTTP/1.1 server: `/echo` answers with what it got (so the secret
-/// comes back and must be redacted), `/to-ip` and `/to-name` redirect to internal targets,
+/// comes back), `/to-ip` and `/to-name` redirect to internal targets,
 /// `/claims` returns a claim id.
 async fn server() -> (u16, Arc<Mutex<Vec<Got>>>) {
     let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -395,40 +395,6 @@ fn grant(e: &FlowEnv, flow: &str, capability: &str, rtype: &str, rid: &str) {
         .unwrap();
 }
 
-/// Every text column of the tables a run, its decisions and the vault's use log write.
-fn all_rows_text(e: &FlowEnv) -> String {
-    let mut out = String::new();
-    e.env
-        .store()
-        .with_conn(|c| {
-            for t in [
-                "flow_runs",
-                "flow_run_steps",
-                "flow_waits",
-                "decisions",
-                "secret_uses",
-                "audit",
-            ] {
-                let Ok(mut st) = c.prepare(&format!("SELECT * FROM {t}")) else {
-                    continue;
-                };
-                let n = st.column_count();
-                let mut rows = st.query([])?;
-                while let Some(r) = rows.next()? {
-                    for i in 0..n {
-                        if let Ok(Some(s)) = r.get::<_, Option<String>>(i) {
-                            out.push_str(&s);
-                            out.push('\n');
-                        }
-                    }
-                }
-            }
-            Ok(())
-        })
-        .unwrap();
-    out
-}
-
 fn logs() -> String {
     String::from_utf8_lossy(&LOGS.lock().unwrap()).into_owned()
 }
@@ -581,10 +547,10 @@ async fn secrets_are_injected_but_never_stored_or_logged() {
     assert_eq!(headers["authorization"], format!("Bearer {TOKEN}"));
     assert_eq!(body, format!("note={sneaky}"));
 
-    // the echo came back with the value: the step output has it masked
+    // the echo came back with the value: the step output has it as the server sent it
     let (st, out, _) = step(&e, &run);
     assert_eq!(st, "ok");
-    assert_eq!(out["auth"], "Bearer [已打码：令牌]", "{out}");
+    assert_eq!(out["auth"], format!("Bearer {TOKEN}"), "{out}");
 
     // a dry run neither asks for nor releases the secret
     let (st, v) = api(
@@ -650,12 +616,14 @@ async fn secrets_are_injected_but_never_stored_or_logged() {
     );
     assert_eq!(g.as_deref(), Some("gr_s"));
 
-    // the value is nowhere: context, steps, waits, decisions, use log, audit, logs
-    let rows = all_rows_text(&e);
-    assert!(rows.contains("[已打码：令牌]"), "the check reads the steps");
-    assert!(!rows.contains(TOKEN), "a secret value is in the database");
-    let ctx: String = q(&e, "SELECT context FROM flow_runs WHERE id = ?", [&run]);
-    assert!(ctx.contains("[已打码：令牌]") && !ctx.contains(TOKEN));
+    // Steve itself writes the value nowhere: the step input keeps the template, the logs never
+    // have it (the step output is what the server answered, as it is)
+    let input: Option<String> = q(
+        &e,
+        "SELECT input FROM flow_run_steps WHERE run_id = ? AND node_id = 'n' ORDER BY seq DESC LIMIT 1",
+        [&run],
+    );
+    assert!(!input.unwrap_or_default().contains(TOKEN));
     assert!(!logs().contains(TOKEN), "a secret value is in the logs");
     drop(vault);
 }

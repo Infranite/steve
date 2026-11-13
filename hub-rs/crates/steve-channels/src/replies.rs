@@ -410,7 +410,6 @@ fn acted(d: &Delivered, item: Option<String>, label: Option<String>) -> Acted {
         label: label.unwrap_or_else(|| match d {
             Delivered::Drafted { .. } => "等你确认回复".into(),
             Delivered::Sent { .. } => "已回复".into(),
-            Delivered::Blocked { .. } => "回复里有机密值，已拦下".into(),
             Delivered::Failed { .. } => "回复没有发出去".into(),
             Delivered::Queued { .. } => "回复正在发出".into(),
             Delivered::Skipped => String::new(),

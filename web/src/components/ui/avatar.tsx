@@ -1,106 +1,37 @@
-import * as React from "react"
-import { Avatar as AvatarPrimitive } from "@base-ui/react/avatar"
-import { cn } from "cn"
+import { Children, cloneElement, isValidElement, type CSSProperties } from "react"
+import { useT } from "@/i18n"
+import { Avatar as AffectAvatar, AvatarGroup as AffectAvatarGroup, type AvatarProps as AffectAvatarProps, type AvatarGroupProps as AffectAvatarGroupProps, type AvatarSize } from "@/components/affect/avatar-clean"
 
-function Avatar({
-  className,
-  size = "default",
-  ...props
-}: AvatarPrimitive.Root.Props & {
-  size?: "default" | "sm" | "lg"
-}) {
-  return (
-    <AvatarPrimitive.Root
-      data-slot="avatar"
-      data-size={size}
-      className={cn(
-        "group/avatar relative flex size-8 shrink-0 rounded-full select-none after:absolute after:inset-0 after:rounded-full after:border after:border-border after:mix-blend-darken data-[size=lg]:size-10 data-[size=sm]:size-6 dark:after:mix-blend-lighten",
-        className
-      )}
-      {...props}
-    />
-  )
+/* Steve's Avatar, drawn by affectUI's Avatar (components/affect/avatar-clean.tsx): a picture, falling back to initials
+ * on a soft color of the person's own, a status dot, and a group that overlaps and ends in +N. It replaces the
+ * composable shadcn avatar (AvatarImage, AvatarFallback, AvatarBadge, AvatarGroupCount), which had no callers:
+ * affectUI takes the picture as src, the fallback from name, the badge as status and the count from max/total.
+ * Sizes: Steve's sm, default and lg (24, 32, 40), affectUI's 20…40, or any pixel size, which scales the initials,
+ * the corner and the dot from the nearest of affectUI's steps. */
+const STEPS: AvatarSize[] = [20, 24, 32, 40]
+const NAMED = { sm: 24, default: 32, lg: 40 } as const
+
+export type AvatarProps = Omit<AffectAvatarProps, "size"> & { size?: keyof typeof NAMED | number }
+
+function scale(size: AvatarProps["size"]): { step: AvatarSize; style?: CSSProperties } {
+  const px = typeof size === "number" && Number.isFinite(size) && size > 0 ? size : NAMED[(size as keyof typeof NAMED) ?? "default"] ?? 32
+  if (STEPS.includes(px as AvatarSize)) return { step: px as AvatarSize }
+  const step = STEPS.reduce((a, b) => (Math.abs(b - px) < Math.abs(a - px) ? b : a))
+  return { step, style: { "--s": `${px}px`, "--fs": `${Math.round(px * 0.38 * 2) / 2}px`, "--dot": `${Math.max(6, Math.round(px / 4))}px`, "--sq": `${Math.max(3, Math.round(px / 8))}px`, "--gap": `${Math.max(1, px / 16)}px` } as CSSProperties }
 }
 
-function AvatarImage({ className, ...props }: AvatarPrimitive.Image.Props) {
-  return (
-    <AvatarPrimitive.Image
-      data-slot="avatar-image"
-      className={cn(
-        "aspect-square size-full rounded-full object-cover",
-        className
-      )}
-      {...props}
-    />
-  )
+function Avatar({ size, style, ...props }: AvatarProps) {
+  const s = scale(size)
+  return <AffectAvatar data-slot="avatar" size={s.step} style={s.style ? { ...s.style, ...style } : style} {...props} />
 }
 
-function AvatarFallback({
-  className,
-  ...props
-}: AvatarPrimitive.Fallback.Props) {
-  return (
-    <AvatarPrimitive.Fallback
-      data-slot="avatar-fallback"
-      className={cn(
-        "flex size-full items-center justify-center rounded-full bg-muted text-sm text-muted-foreground group-data-[size=sm]/avatar:text-xs",
-        className
-      )}
-      {...props}
-    />
-  )
+/* affectUI's group sizes only its own Avatar; Steve's children are this wrapper, so the group hands them its size
+ * itself, and names the +N pill in the reader's language. */
+function AvatarGroup({ size, children, ...props }: Omit<AffectAvatarGroupProps, "size" | "moreLabel"> & { size?: keyof typeof NAMED | AvatarSize }) {
+  const t = useT()
+  const px = typeof size === "number" ? size : NAMED[size ?? "default"]
+  const sized = Children.map(children, (c) => (isValidElement<AvatarProps>(c) && c.type === Avatar ? cloneElement(c, { size: px }) : c))
+  return <AffectAvatarGroup data-slot="avatar-group" size={px} moreLabel={(count) => t("common:a11y.more", { count })} {...props}>{sized}</AffectAvatarGroup>
 }
 
-function AvatarBadge({ className, ...props }: React.ComponentProps<"span">) {
-  return (
-    <span
-      data-slot="avatar-badge"
-      className={cn(
-        "absolute right-0 bottom-0 z-10 inline-flex items-center justify-center rounded-full bg-primary text-primary-foreground bg-blend-color ring-2 ring-background select-none",
-        "group-data-[size=sm]/avatar:size-2 group-data-[size=sm]/avatar:[&>svg]:hidden",
-        "group-data-[size=default]/avatar:size-2.5 group-data-[size=default]/avatar:[&>svg]:size-2",
-        "group-data-[size=lg]/avatar:size-3 group-data-[size=lg]/avatar:[&>svg]:size-2",
-        className
-      )}
-      {...props}
-    />
-  )
-}
-
-function AvatarGroup({ className, ...props }: React.ComponentProps<"div">) {
-  return (
-    <div
-      data-slot="avatar-group"
-      className={cn(
-        "group/avatar-group flex -space-x-2 *:data-[slot=avatar]:ring-2 *:data-[slot=avatar]:ring-background",
-        className
-      )}
-      {...props}
-    />
-  )
-}
-
-function AvatarGroupCount({
-  className,
-  ...props
-}: React.ComponentProps<"div">) {
-  return (
-    <div
-      data-slot="avatar-group-count"
-      className={cn(
-        "relative flex size-8 shrink-0 items-center justify-center rounded-full bg-muted text-sm text-muted-foreground ring-2 ring-background group-has-data-[size=lg]/avatar-group:size-10 group-has-data-[size=sm]/avatar-group:size-6 [&>svg]:size-4 group-has-data-[size=lg]/avatar-group:[&>svg]:size-5 group-has-data-[size=sm]/avatar-group:[&>svg]:size-3",
-        className
-      )}
-      {...props}
-    />
-  )
-}
-
-export {
-  Avatar,
-  AvatarImage,
-  AvatarFallback,
-  AvatarGroup,
-  AvatarGroupCount,
-  AvatarBadge,
-}
+export { Avatar, AvatarGroup }

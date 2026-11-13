@@ -1,11 +1,13 @@
 /* 知识 (knowledge.md §9): search, long-term memories, knowledge entries, notes and documents, sources, and
  * candidates waiting for you. The four kinds of record (ST-41): 事项记录 and 会话记录 are documents kept as
  * they are; 长期记忆 (preference, rule) and 知识条目 (fact, event) are what Steve distils from them, one tab each.
- * Every list is the Hub's; on a Hub without /api/kb the whole page is the "还没有接入" placeholder. */
+ * Every list is the Hub's; on a Hub without /api/kb the whole page is the "还没有接入" placeholder. The two memory
+ * tabs are an affectUI Memory Panel (components/affect/memory-panel). */
 import { useHubEvents } from "@/store"
 import { Fragment, useCallback, useEffect, useRef, useState, type ReactNode } from "react"
 import { cn } from "cn"
-import { FilePlusIcon, FolderPlusIcon, MoreHorizontalIcon, PlusIcon, RefreshCwIcon, SearchIcon, TrashIcon, UploadIcon, XIcon } from "lucide-react"
+import { BotIcon, FilePlusIcon, FileTextIcon, FolderPlusIcon, MailIcon, MessagesSquareIcon, MoreHorizontalIcon, PlusIcon, PuzzleIcon, RefreshCwIcon, SearchIcon, SparklesIcon, TrashIcon, UploadIcon, UserIcon, UsersIcon, ZapIcon } from "lucide-react"
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import { Input } from "@/components/ui/input"
@@ -15,53 +17,71 @@ import { Spinner } from "@/components/ui/spinner"
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
 import { Field, FieldDescription, FieldGroup, FieldLabel } from "@/components/ui/field"
-import { Page, SectionLabel, Group, Row, Segmented, Chips, Empty, StatusDot, go } from "@/ui"
+import { Page, SectionLabel, Group, Panel, Row, Segmented, Chips, Empty, Blank, Meta, Tile, StatusDot, useScrollMore, go, DiscChevron, DISC_TRIGGER, SearchField } from "@/ui"
 import { toast, tm } from "@/store"
 import { useUploads } from "@/attach"
-import { kb, levelLabel, visLabel, memKind, recordOf, MEM_KINDS, SOURCE_KIND, LEVEL_DOT, type Candidate, type ExpiredCandidate, type DocBrief, type Hit, type KbSource, type Mem } from "@/api/knowledge"
-import { KbGate, LevelSel, VisSel, errMsg } from "@/knowledge/fields"
+import { kb, levelLabel, visLabel, memKind, recordOf, LONG_TERM, SOURCE_KIND, LEVEL_DOT, type Candidate, type ExpiredCandidate, type DocBrief, type Hit, type KbSource, type Mem, type MemProvider } from "@/api/knowledge"
+import { KbGate, LevelSel, META_SELECT, VisSel, errMsg } from "@/knowledge/fields"
 import { DocView, NoteView } from "@/knowledge/doc"
+import { SubjectsTab, SubjectView } from "@/knowledge/subjects"
+import { StewardTab } from "@/knowledge/steward"
+import { OriginLine, originText, parseSubject, savedLine } from "@/knowledge/origin"
+import { MemoryPanel, type Memory, type PanelText } from "@/components/affect/memory-panel"
 import { t as tt, useT } from "@/i18n"
 
 /* tab values are ids (also data-seg / data-kb-tab); the labels come from knowledge:tab.* */
-type Tab = "搜索" | "长期记忆" | "知识条目" | "笔记与文档" | "来源" | "待确认"
+type Tab = "搜索" | "长期记忆" | "知识条目" | "subjects" | "笔记与文档" | "来源" | "待确认" | "steward"
 type RecordName = "长期记忆" | "知识条目"
 let tab: Tab = "长期记忆", query = "", tabHash = ""
 
-/** `#/knowledge`, `#/knowledge?mem=…`, `#/knowledge/doc/:id?seq=`, `#/knowledge/note/:id` */
+/** `#/knowledge`, `#/knowledge?mem=…`, `#/knowledge?tab=subjects|steward|pending`, `#/knowledge/doc/:id?seq=`,
+ *  `#/knowledge/note/:id`, `#/knowledge/about/<type>:<id>` */
 export function KnowledgeView({ sub, id }: { sub?: string; id?: string }) {
   const [docId] = (id ?? "").split("?")
-  return <KbGate>{sub === "doc" && docId ? <DocView id={docId} /> : sub === "note" && docId ? <NoteView id={docId} /> : <KnowledgeHome />}</KbGate>
+  const subject = sub === "about" ? parseSubject(docId) : null
+  return <KbGate>{sub === "doc" && docId ? <DocView id={docId} /> : sub === "note" && docId ? <NoteView id={docId} /> : subject ? <SubjectView key={docId} type={subject.type} id={subject.id} /> : <KnowledgeHome />}</KbGate>
 }
 
 const hashParam = (k: string) => new URLSearchParams(location.hash.split("?")[1] ?? "").get(k)
 
+const TAB_FADE: Record<string, string> = {
+  end: "[mask-image:linear-gradient(to_right,#000_80%,transparent)]",
+  start: "[mask-image:linear-gradient(to_left,#000_80%,transparent)]",
+  "start end": "[mask-image:linear-gradient(to_right,transparent,#000_15%,#000_80%,transparent)]",
+}
 function KnowledgeHome() {
   const t = useT()
   const [, f] = useState(0), r = () => f((x) => x + 1)
   const focusMem = hashParam("mem")
   if (focusMem && tab !== "长期记忆" && tab !== "知识条目") tab = "长期记忆"
-  /* 待处理's line “N 条记忆待确认” opens the batch page (once per visit of that link) */
-  if (hashParam("tab") === "pending" && tabHash !== location.hash) { tab = "待确认"; tabHash = location.hash }
-  else if (hashParam("tab") !== "pending") tabHash = ""
+  /* 待处理's line “N 条记忆待确认” opens the batch page, a subject's back link the subjects (once per visit of that link) */
+  const linked = ({ pending: "待确认", subjects: "subjects", steward: "steward" } as const)[hashParam("tab") ?? ""] as Tab | undefined
+  if (linked && tabHash !== location.hash) { tab = linked; tabHash = location.hash }
+  else if (!linked) tabHash = ""
   const [pend, setPend] = useState(0)
   const loadPend = useCallback(() => { kb.candidates().then((xs) => setPend(xs.length), () => {}) }, [])
   useEffect(loadPend, [loadPend])
   useHubEvents(["mm", "kb"], loadPend)
   const setTab = (x: Tab) => { tab = x; r() }
-  const opts = [["搜索", t("knowledge:tab.search")], ["长期记忆", t("knowledge:tab.mems")], ["知识条目", t("knowledge:tab.entries")], ["笔记与文档", t("knowledge:tab.docs")], ["来源", t("knowledge:tab.sources")],
-    ["待确认", <span key="p" className="inline-flex items-center gap-1">{t("knowledge:tab.pending")}{pend > 0 && <span className="rounded-full bg-attention px-1.5 text-[10px] font-semibold text-white" data-pending-count>{pend}</span>}</span>, t("knowledge:tab.pending")]] as const
+  /* six tabs run past a phone's width: the cut edge fades, and the open tab scrolls into view */
+  const [tabsRef, tabsMore] = useScrollMore<HTMLDivElement>("x")
+  useEffect(() => { tabsRef.current?.querySelector<HTMLElement>(`[data-seg="${CSS.escape(tab)}"]`)?.scrollIntoView({ block: "nearest", inline: "nearest" }) }, [tab])
+  const opts = [["搜索", t("knowledge:tab.search")], ["长期记忆", t("knowledge:tab.mems")], ["知识条目", t("knowledge:tab.entries")], ["subjects", t("knowledge:tab.subjects")], ["笔记与文档", t("knowledge:tab.docs")], ["来源", t("knowledge:tab.sources")],
+    ["待确认", <span key="p" className="inline-flex items-center gap-1">{t("knowledge:tab.pending")}{pend > 0 && <span className="rounded-full bg-attention/14 px-1.5 type-label tabular-nums text-attention" data-pending-count>{pend}</span>}</span>, t("knowledge:tab.pending")],
+    ["steward", t("knowledge:tab.steward")]] as const
   return (
     <Page title={t("knowledge:page.title")} sub={t("knowledge:page.sub")} max={760}>
       <div className="flex flex-col gap-5">
         <SearchBox onQuery={(q) => { query = q; if (q && tab !== "搜索") tab = "搜索"; r() }} />
-        <div className="-mx-1 overflow-x-auto px-1 pb-0.5 [scrollbar-width:none]"><Segmented value={tab} onChange={setTab} options={opts} /></div>
-        <div data-kb-tab={tab}>
+        <div ref={tabsRef} className={cn("-mx-1 overflow-x-auto px-1 pb-0.5 [scrollbar-width:none]", TAB_FADE[tabsMore ?? ""])} data-more={tabsMore}><Segmented value={tab} onChange={setTab} options={opts} /></div>
+        <div key={tab} className="anim-in" data-kb-tab={tab}>
           {tab === "搜索" && <SearchTab q={query} />}
           {(tab === "长期记忆" || tab === "知识条目") && <MemsTab key={tab} record={tab} focus={focusMem} onRecord={setTab} />}
+          {tab === "subjects" && <SubjectsTab />}
           {tab === "笔记与文档" && <DocsTab />}
           {tab === "来源" && <SourcesTab />}
           {tab === "待确认" && <CandidatesTab onChange={setPend} />}
+          {tab === "steward" && <StewardTab />}
         </div>
       </div>
     </Page>
@@ -73,12 +93,8 @@ function SearchBox({ onQuery }: { onQuery: (q: string) => void }) {
   const [v, setV] = useState(query), timer = useRef<number>(0)
   const set = (x: string) => { setV(x); clearTimeout(timer.current); timer.current = window.setTimeout(() => onQuery(x.trim()), 250) }
   return (
-    <div role="search" className="flex items-center gap-2 rounded-xl border bg-card px-3 focus-within:border-blue/60">
-      <SearchIcon className="size-4 shrink-0 text-muted-foreground" strokeWidth={1.75} />
-      <input type="search" aria-label={t("knowledge:search.aria")} value={v} onChange={(e) => set(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") { clearTimeout(timer.current); onQuery(v.trim()) } }}
-        placeholder={t("knowledge:search.placeholder")} maxLength={200} className="h-10 min-w-0 flex-1 bg-transparent text-[14px] outline-none placeholder:text-tertiary [&::-webkit-search-cancel-button]:hidden" data-kb-search />
-      {v && <Button variant="ghost" size="icon-xs" aria-label={t("knowledge:search.clear")} className="text-muted-foreground" onClick={() => { setV(""); onQuery("") }}><XIcon /></Button>}
-    </div>
+    <SearchField size="lg" type="search" aria-label={t("knowledge:search.aria")} value={v} onChange={(e) => set(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") { clearTimeout(timer.current); onQuery(v.trim()) } }}
+      placeholder={t("knowledge:search.placeholder")} maxLength={200} clearable onClear={() => { clearTimeout(timer.current); onQuery("") }} data-kb-search />
   )
 }
 
@@ -88,7 +104,7 @@ function Highlight({ text, q }: { text: string; q: string }) {
   const terms = q.split(/\s+/).filter(Boolean).map((x) => x.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
   if (!terms.length) return <>{text}</>
   const re = new RegExp(`(${terms.join("|")})`, "gi")
-  return <>{text.split(re).map((p, n) => (n % 2 ? <mark key={n} className="rounded-sm bg-attention/20 px-px text-foreground">{p}</mark> : <Fragment key={n}>{p}</Fragment>))}</>
+  return <>{text.split(re).map((p, n) => (n % 2 ? <mark key={n} className="rounded-md bg-attention/20 px-0.5 text-foreground">{p}</mark> : <Fragment key={n}>{p}</Fragment>))}</>
 }
 const LevelTag = ({ l }: { l: string }) => <span className="inline-flex shrink-0 items-center gap-1 type-footnote text-muted-foreground" data-level={l}><StatusDot s={LEVEL_DOT[l] ?? "idle"} />{levelLabel(l)}</span>
 
@@ -105,7 +121,7 @@ function SearchTab({ q }: { q: string }) {
   if (err) return <Empty title={t("knowledge:search.failed")} sub={err} />
   if (!res || res.q !== q) return <div className="flex justify-center py-12" role="status" aria-label={t("knowledge:search.searching")}><Spinner className="size-5 text-muted-foreground" /></div>
   /* the meaning search was down: the hits are from keywords only, and the page says so */
-  const down = res.down && <p className="px-1 pb-2 type-footnote text-muted-foreground" role="note" data-kb-keywords-only>{t("knowledge:search.keywordsOnly")}</p>
+  const down = res.down && <p className="pb-2 type-footnote text-muted-foreground" role="note" data-kb-keywords-only>{t("knowledge:search.keywordsOnly")}</p>
   if (!res.hits.length) return <>{down}<Empty title={t("knowledge:search.noneTitle")} sub={t("knowledge:search.noneSub", { q })} /></>
   return (
     <section aria-label={t("knowledge:search.results")}>{down}<SectionLabel>{t("knowledge:search.count", { count: res.hits.length, ms: res.ms })}</SectionLabel>
@@ -125,57 +141,118 @@ const RECORD: Record<RecordName, { kind: string; key: "mem" | "entry" }> = {
   长期记忆: { kind: "rule", key: "mem" },
   知识条目: { kind: "fact", key: "entry" },
 }
-const aboutKey = (m: Mem) => m.about.map((a) => a.type + ":" + a.id).sort().join(",")
-const aboutName = (a: Mem["about"][number]) => a.name ?? (a.type === "party" ? tt("knowledge:mems.aboutParty", { id: a.id }) : a.type === "item" ? tt("knowledge:mems.aboutItem", { id: a.id }) : a.id)
-const aboutLabel = (m: Mem) => (m.about.length ? tt("knowledge:mems.aboutLabel", { names: m.about.map(aboutName).join(tt("knowledge:listSep")) }) : tt("knowledge:mems.general"))
+/** the tab a memory of `kind` lives on (an id; `recordOf` is its label in the UI language) */
+const recordTab = (kind: string): RecordName => (LONG_TERM.includes(kind) ? "长期记忆" : "知识条目")
+/** the kinds each record keeps, in the order the panel groups them; the first is what a new one becomes */
+const KINDS: Record<RecordName, string[]> = { 长期记忆: ["rule", "preference"], 知识条目: ["fact", "event", "summary"] }
+/** how long a forgotten memory can still come back before the Hub deletes it */
+const UNDO_MS = 6000
 
+/** every word the panel shows in Steve (no memory switch, no search of its own: the page has one) */
+type Unshown = "memoryOff" | "off" | "useMemory" | "offNote" | "search" | "closeSearch" | "noneFor"
+/** the rest are per record: none, newMemory, newPlaceholder */
+export const panelText = (): Omit<PanelText, Unshown | "none" | "newMemory" | "newPlaceholder"> => ({
+  paused: tt("knowledge:mems.stale"), cancel: tt("common:action.cancel"), save: tt("common:action.save"), edit: tt("knowledge:panel.edit"),
+  pause: tt("knowledge:panel.pause"), resume: tt("knowledge:panel.resume"), forget: tt("knowledge:panel.forget"), undo: tt("knowledge:panel.undo"),
+  editAria: tt("knowledge:panel.editAria"), editOf: (text) => tt("knowledge:panel.editOf", { text }), pauseOf: (text) => tt("knowledge:panel.pauseOf", { text }),
+  resumeOf: (text) => tt("knowledge:panel.resumeOf", { text }), forgetOf: (text) => tt("knowledge:mems.deleteAria", { text }),
+  memories: (count) => tt("knowledge:panel.memories", { count }), pausedN: (count) => tt("knowledge:panel.pausedN", { count }),
+  forgot: [tt("knowledge:panel.forgotBefore"), tt("knowledge:panel.forgotAfter")], editing: tt("knowledge:panel.editing"), adding: tt("knowledge:panel.adding"),
+  other: tt("knowledge:panel.other"), used: tt("knowledge:panel.used"), notUsed: tt("knowledge:panel.notUsed"), category: tt("knowledge:panel.category"),
+  all: tt("knowledge:all"),
+  noneHere: tt("knowledge:panel.noneHere"), newCategory: tt("knowledge:panel.newCategory"), general: tt("knowledge:mems.general"),
+})
+
+/** 长期记忆 and 知识条目: an affectUI Memory Panel over the Hub's memories — grouped by kind, edited in place, marked
+ *  stale (kept, no longer used) or forgotten with a few seconds to undo before the Hub deletes it; each keeps its
+ *  disclosure level and visibility pickers, and candidates say they still wait for you in 待确认. */
 function MemsTab({ record, focus, onRecord }: { record: RecordName; focus: string | null; onRecord: (r: RecordName) => void }) {
   const t = useT()
   const R = RECORD[record], k = R.key
-  /* "" is every kind; the chips show kind labels, with the "all" label first */
-  const [xs, setXs] = useState<Mem[] | null>(null), [err, setErr] = useState(""), [kind, setKind] = useState(""), [v, setV] = useState(""), [busy, setBusy] = useState(false)
-  const load = useCallback(() => kb.mems().then(setXs, (e) => setErr(errMsg(e))), [])
+  const [xs, setXs] = useState<Mem[] | null>(null), [err, setErr] = useState("")
+  /* forgotten ones: deleted on the Hub once Undo has passed (or when the page goes); until then a reload leaves them out */
+  const gone = useRef(new Map<string, { m: Mem; at: number; timer: number }>())
+  /* deleted early because the app was hidden while Undo still showed: Undo writes them back */
+  const left = useRef(new Map<string, Mem>())
+  const load = useCallback(() => kb.mems().then((a) => setXs(a.filter((m) => !gone.current.has(m.id))), (e) => setErr(errMsg(e))), [])
   useEffect(() => { void load() }, [load])
   useHubEvents(["mm"], () => void load())
+  const drop = useCallback((id: string) => {
+    const g = gone.current.get(id); if (!g) return
+    clearTimeout(g.timer); gone.current.delete(id)
+    kb.deleteMem(id).catch((e) => { toast(errMsg(e)); void load() })
+  }, [load])
+  useEffect(() => () => { for (const id of [...gone.current.keys()]) drop(id) }, [drop])
+  /* the page going away (reload, tab closed, app hidden) fires neither the timer nor unmount: send the deletes now */
+  useEffect(() => {
+    const flush = () => { for (const [id, g] of gone.current) { clearTimeout(g.timer); kb.deleteMemOnLeave(id); left.current.set(id, g.m) } gone.current.clear() }
+    const hidden = () => { if (document.visibilityState === "hidden") flush() }
+    addEventListener("pagehide", flush); document.addEventListener("visibilitychange", hidden)
+    return () => { removeEventListener("pagehide", flush); document.removeEventListener("visibilitychange", hidden) }
+  }, [])
   /* a linked memory opens on the tab it belongs to */
   const focused = focus ? xs?.find((m) => m.id === focus) : undefined
-  useEffect(() => { if (focused && recordOf(focused.kind) !== record) onRecord(recordOf(focused.kind) as RecordName) }, [focused, record, onRecord])
+  useEffect(() => { if (focused && recordTab(focused.kind) !== record) onRecord(recordTab(focused.kind)) }, [focused, record, onRecord])
   useEffect(() => { if (focus && xs) document.querySelector(`[data-mem="${CSS.escape(focus)}"]`)?.scrollIntoView({ block: "center" }) }, [focus, xs])
-  const add = async () => {
-    const text = v.trim(); if (!text || busy) return
-    setBusy(true)
-    try { await kb.addMem({ text, kind: R.kind }); setV(""); toast(t("knowledge:mems.added")); await load() } catch (e) { toast(errMsg(e)) } finally { setBusy(false) }
+  const kinds = KINDS[record], kindOf = (label: string) => kinds.find((c) => memKind(c) === label) ?? R.kind
+  const patch = async (id: string, p: Parameters<typeof kb.patchMem>[1]) => {
+    setXs((a) => a?.map((x) => (x.id === id ? { ...x, ...p } : x)) ?? null)
+    try { const n = await kb.patchMem(id, p); setXs((a) => a?.map((x) => (x.id === id ? { ...x, ...n } : x)) ?? null) } catch (e) { toast(errMsg(e)); void load() }
   }
-  const patch = async (m: Mem, p: Parameters<typeof kb.patchMem>[1]) => { try { const n = await kb.patchMem(m.id, p); setXs((a) => a?.map((x) => (x.id === m.id ? { ...x, ...n } : x)) ?? null) } catch (e) { toast(errMsg(e)) } }
-  const remove = async (m: Mem) => { try { await kb.deleteMem(m.id); setXs((a) => a?.filter((x) => x.id !== m.id) ?? null); toast(t("knowledge:mems.deleted")) } catch (e) { toast(errMsg(e)) } }
-  const mine = (xs ?? []).filter((m) => recordOf(m.kind) === record)
-  const all = t("knowledge:all")
-  const kinds = [all, ...MEM_KINDS.filter(([c]) => mine.some((m) => m.kind === c)).map(([, l]) => l)]
-  const shown = mine.filter((m) => !kind || memKind(m.kind) === kind)
-  const groups = new Map<string, Mem[]>(); for (const m of shown) { const g = aboutKey(m); groups.set(g, [...(groups.get(g) ?? []), m]) }
+  const add = async (text: string, label: string) => {
+    try { await kb.addMem({ text, kind: kindOf(label) }); toast(t("knowledge:mems.added")); await load() } catch (e) { toast(errMsg(e)) }
+  }
+  const forget = (id: string) => {
+    const at = xs?.findIndex((x) => x.id === id) ?? -1; if (!xs || at < 0) return
+    setXs((a) => a?.filter((x) => x.id !== id) ?? null)
+    gone.current.set(id, { m: xs[at], at, timer: window.setTimeout(() => drop(id), UNDO_MS) })
+  }
+  const restore = (id: string) => {
+    const l = left.current.get(id)
+    if (l) { left.current.delete(id); kb.addMem({ text: l.text, kind: l.kind, level: l.level, visibility: l.visibility }).then(() => load(), (e) => toast(errMsg(e))); return }
+    const g = gone.current.get(id); if (!g) return
+    clearTimeout(g.timer); gone.current.delete(id)
+    setXs((a) => (a ? [...a.slice(0, g.at), g.m, ...a.slice(g.at)] : a))
+  }
+  const mine = (xs ?? []).filter((m) => recordTab(m.kind) === record)
+  const byId = new Map(mine.map((m) => [m.id, m]))
+  const memories: Memory[] = mine.map((m) => ({
+    id: m.id, text: m.text, category: memKind(m.kind), paused: m.status === "stale",
+    /* what it is about and where it came from, each a link (the subject's page, the conversation, item or session) */
+    source: originText(m), sourceNode: <span data-mem-origin><OriginLine m={m} /></span>,
+    /* labelled: a source like "11-12 的对话" carries its own date; then how often it was used */
+    date: savedLine(m) || undefined,
+    tag: m.status === "candidate" ? t("knowledge:mems.pending") : undefined, canPause: m.status !== "candidate",
+  }))
   return (
-    <div className="flex flex-col gap-6">
-      <div className="flex items-center gap-2 rounded-xl border bg-card py-1 pl-3 pr-1 focus-within:border-blue/60">
-        <input aria-label={t(`knowledge:record.${k}.addAria`)} value={v} onChange={(e) => setV(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter" && !e.nativeEvent.isComposing) void add() }} maxLength={2000}
-          placeholder={t(`knowledge:record.${k}.hint`)} className="h-8 min-w-0 flex-1 bg-transparent text-[14px] outline-none placeholder:text-tertiary" data-mem-input />
-        <Button size="sm" disabled={!v.trim() || busy} onClick={() => void add()} data-mem-add>{busy ? <Spinner className="size-3.5" /> : <PlusIcon />}{t("knowledge:mems.add")}</Button>
-      </div>
-      {kinds.length > 2 && <Chips value={kind && kinds.includes(kind) ? kind : all} onChange={(x) => setKind(x === all ? "" : x)} options={kinds} />}
-      {err ? <Empty title={t(`knowledge:record.${k}.failed`)} sub={err} /> : !xs ? <Loading /> : !shown.length ? <Empty title={t(`knowledge:record.${k}.none`)} sub={t(`knowledge:record.${k}.empty`)} /> :
-        [...groups.entries()].map(([g, ms]) => (
-          <section key={g}><SectionLabel>{aboutLabel(ms[0])} · {ms.length}</SectionLabel>
-            <Group>{ms.map((m) => (
-              <Row key={m.id} data-mem={m.id} className={cn(STACK, m.id === focus && "bg-blue/5", m.status === "stale" && "opacity-60")}
-                title={<span className="inline-flex flex-wrap items-center gap-2">{m.text}{m.status === "candidate" && <Badge variant="outline" className="font-normal text-attention">{t("knowledge:mems.pending")}</Badge>}{m.status === "stale" && <Badge variant="outline" className="font-normal text-muted-foreground">{t("knowledge:mems.stale")}</Badge>}</span>}
-                sub={t("knowledge:mems.sub", { kind: memKind(m.kind), source: m.source_label || t("knowledge:mems.youWrote") })}>
-                <span className="flex flex-wrap items-center justify-end gap-0.5 max-sm:justify-start">
-                  <LevelSel v={m.level} on={(l) => l && void patch(m, { level: l })} testId={"mem-level-" + m.id} />
-                  <VisSel v={m.visibility} on={(x) => void patch(m, { visibility: x })} testId={"mem-vis-" + m.id} />
-                  <Button variant="ghost" size="icon-xs" aria-label={t("knowledge:mems.deleteAria", { text: m.text })} className="text-muted-foreground" onClick={() => void remove(m)} data-mem-del><XIcon /></Button>
-                </span>
-              </Row>))}</Group>
-          </section>))}
-      <div className="-mt-2 px-1 type-footnote text-muted-foreground">{t("knowledge:mems.footer", { note: t(`knowledge:record.${k}.note`) })}</div>
+    <div className="flex flex-col gap-4">
+      {err ? <Empty title={t(`knowledge:record.${k}.failed`)} sub={err} /> : !xs ? <Loading /> : !mine.length && !gone.current.size ? <>
+        <Empty title={t(`knowledge:record.${k}.none`)} sub={t(`knowledge:record.${k}.empty`)} />
+        <AddFirst record={record} onAdd={(text) => add(text, memKind(R.kind))} />
+      </> :
+        <MemoryPanel className="[--ui-mpc-width:100%]" title={t(`knowledge:tab.${k === "mem" ? "mems" : "entries"}`)} showTitle={false} searchable={false} memories={memories} categories={kinds.map(memKind)}
+          maxHeight={0} undoFor={UNDO_MS} showSwitch={false} focus={focus} text={{ ...panelText(), none: t(`knowledge:record.${k}.none`), newMemory: t(`knowledge:record.${k}.addAria`), newPlaceholder: t(`knowledge:record.${k}.hint`) } satisfies Omit<PanelText, Unshown>}
+          addedSource={t("knowledge:mems.youWrote")} onChange={() => {}}
+          onAdd={(m) => void add(m.text, m.category)} onEdit={(id, text) => void patch(id, { text })}
+          onPause={(id, paused) => void patch(id, { status: paused ? "stale" : "confirmed" })} onForget={forget} onRestore={(m) => restore(m.id)}
+          renderMeta={(x) => { const m = byId.get(x.id); return m && <>
+            <LevelSel v={m.level} on={(l) => l && void patch(m.id, { level: l })} testId={"mem-level-" + m.id} className={META_SELECT} />
+            <VisSel v={m.visibility} on={(v) => void patch(m.id, { visibility: v })} testId={"mem-vis-" + m.id} className={META_SELECT} />
+          </> }} />}
+      <div className="type-footnote text-muted-foreground">{t("knowledge:mems.footer", { note: t(`knowledge:record.${k}.note`) })}</div>
+    </div>
+  )
+}
+/** an empty record: the one line to write its first entry */
+function AddFirst({ record, onAdd }: { record: RecordName; onAdd: (text: string) => Promise<void> }) {
+  const t = useT(), k = RECORD[record].key
+  const [v, setV] = useState(""), [busy, setBusy] = useState(false)
+  const go = async () => { const text = v.trim(); if (!text || busy) return; setBusy(true); try { await onAdd(text); setV("") } finally { setBusy(false) } }
+  return (
+    <div className="flex items-center gap-2 rounded-xl bg-card py-1.5 pl-3.5 pr-1.5 shadow-[var(--lift)] transition-[box-shadow] duration-180 focus-within:shadow-[var(--lift-hover)] focus-within:ring-[3px] focus-within:ring-ring/25">
+      <input aria-label={t(`knowledge:record.${k}.addAria`)} value={v} onChange={(e) => setV(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter" && !e.nativeEvent.isComposing) void go() }} maxLength={2000}
+        placeholder={t(`knowledge:record.${k}.hint`)} className="h-8 min-w-0 flex-1 bg-transparent type-body outline-none placeholder:text-tertiary" data-mem-input />
+      <Button size="sm" disabled={!v.trim() || busy} onClick={() => void go()} data-mem-add>{busy ? <Spinner className="size-3.5" /> : <PlusIcon />}{t("knowledge:mems.add")}</Button>
     </div>
   )
 }
@@ -227,7 +304,7 @@ function NewNoteDialog({ open, onClose }: { open: boolean; onClose: () => void }
         <DialogHeader><DialogTitle className="type-headline">{t("knowledge:newNote.title")}</DialogTitle><DialogDescription className="type-callout">{t("knowledge:newNote.desc")}</DialogDescription></DialogHeader>
         <FieldGroup className="gap-4">
           <Field><FieldLabel htmlFor="kb-note-title">{t("knowledge:newNote.titleLabel")}</FieldLabel><Input id="kb-note-title" autoFocus maxLength={120} value={title} onChange={(e) => setTitle(e.target.value)} placeholder={t("knowledge:newNote.titlePlaceholder")} data-note-title /></Field>
-          <Field><FieldLabel htmlFor="kb-note-body">{t("knowledge:newNote.bodyLabel")}</FieldLabel><Textarea id="kb-note-body" className="min-h-40 font-mono text-[13px]" value={body} onChange={(e) => setBody(e.target.value)} placeholder={t("knowledge:newNote.bodyPlaceholder")} data-note-body
+          <Field><FieldLabel htmlFor="kb-note-body">{t("knowledge:newNote.bodyLabel")}</FieldLabel><Textarea id="kb-note-body" className="min-h-40 font-mono" value={body} onChange={(e) => setBody(e.target.value)} placeholder={t("knowledge:newNote.bodyPlaceholder")} data-note-body
             onKeyDown={(e) => { if ((e.metaKey || e.ctrlKey) && e.key === "Enter") void save() }} /></Field>
         </FieldGroup>
         <DialogFooter className="gap-2"><Button variant="ghost" onClick={onClose}>{t("common:action.cancel")}</Button><Button disabled={!title.trim() || busy} onClick={() => void save()} data-note-save>{busy && <Spinner className="size-3.5" />}{t("common:action.save")}</Button></DialogFooter>
@@ -243,15 +320,20 @@ const statsLine = (s: KbSource) => {
   /* a scan that could not see everything deletes nothing */
   if (x.kept) parts.push(tt("knowledge:sources.kept", { count: x.kept })); else if (x.incomplete?.length) parts.push(tt("knowledge:sources.incomplete"))
   /* built-in sources follow their objects as they change; only folders are scanned */
-  if (s.status === "syncing") parts.push(tt("knowledge:sources.syncing")); else if (s.last_sync) parts.push(tt("knowledge:sources.lastSync", { time: tm(s.last_sync) })); else if (!s.builtin) parts.push(tt("knowledge:sources.neverSynced"))
+  if (s.status === "syncing") parts.push(tt("knowledge:sources.syncing")); else if (s.last_sync) parts.push(tt("knowledge:sources.lastSync", { time: tm(s.last_sync) })); else if (!s.builtin) parts.push(tt("knowledge:sources.neverSynced")); else parts.push(tt("knowledge:sources.live"))
   return parts.join(" · ")
 }
+/** a source's state in words, with its dot: 正常, 同步中, 出错, 已暂停 */
+const sourceState = (s: KbSource): [string, string] => (s.paused ? ["idle", tt("knowledge:sources.state.paused")] : s.status === "error" ? ["fail", tt("knowledge:sources.state.error")] : s.status === "syncing" ? ["run", tt("knowledge:sources.state.syncing")] : ["done", tt("knowledge:sources.state.ok")])
 function SourcesTab() {
   const t = useT()
   const [xs, setXs] = useState<KbSource[] | null>(null), [err, setErr] = useState(""), [folder, setFolder] = useState(false)
+  const [prov, setProv] = useState<{ memory: MemProvider[]; store: string } | null>(null)
   const load = useCallback(() => kb.sources().then(setXs, (e) => setErr(errMsg(e))), [])
-  useEffect(() => { void load() }, [load])
+  const loadProv = useCallback(() => kb.providers().then(setProv, () => setProv(null)), [])
+  useEffect(() => { void load(); void loadProv() }, [load, loadProv])
   useHubEvents(["kb"], () => void load())
+  useHubEvents(["mm"], () => void loadProv())
   /* a scan runs in the background: poll while one is going */
   const syncing = xs?.some((s) => s.status === "syncing")
   useEffect(() => { if (!syncing) return; const iv = setInterval(() => void load(), 2000); return () => clearInterval(iv) }, [syncing, load])
@@ -259,30 +341,57 @@ function SourcesTab() {
   const sync = async (s: KbSource) => { try { await kb.sync(s.id); toast(t("knowledge:sources.syncStarted")); setTimeout(() => void load(), 300) } catch (e) { toast(errMsg(e)) } }
   const remove = async (s: KbSource) => { try { await kb.deleteSource(s.id); toast(t("knowledge:sources.removed")); void load() } catch (e) { toast(errMsg(e)) } }
   return (
-    <div className="flex flex-col gap-5">
-      <div className="flex flex-wrap justify-end gap-2"><AddFiles onDone={() => void load()} /><Button size="sm" onClick={() => setFolder(true)} data-add-folder><FolderPlusIcon />{t("knowledge:sources.addFolder")}</Button></div>
-      {err ? <Empty title={t("knowledge:sources.failed")} sub={err} /> : !xs ? <Loading /> :
-        <Group>{xs.map((s) => (
-          <Row key={s.id} data-source={s.id} data-source-kind={s.kind} className={cn(STACK, s.paused && "opacity-70")}
-            title={<span className="inline-flex flex-wrap items-center gap-2">{s.name}<span className="type-footnote text-muted-foreground">{SOURCE_KIND[s.kind] ?? s.kind}</span>{s.status === "error" && <Badge variant="outline" className="font-normal text-destructive">{t("knowledge:sources.error")}</Badge>}</span>}
-            sub={<span className="flex flex-col"><span data-source-stats>{statsLine(s)}</span>{s.path && <span className="truncate font-mono text-[11.5px]">{s.path.replace(/^\/Users\/[^/]+/, "~")}</span>}{s.error && <span className="text-destructive">{s.error}</span>}</span>}>
-            <span className="flex flex-wrap items-center justify-end gap-0.5 max-sm:justify-start">
-              <LevelSel v={s.level} on={(l) => l && void patch(s, { level: l }, t("knowledge:sources.levelChanged"))} testId={"src-level-" + s.id} />
-              <VisSel v={s.visibility} on={(x) => void patch(s, { visibility: x })} testId={"src-vis-" + s.id} />
-              <Switch checked={!s.paused} onCheckedChange={(on) => void patch(s, { paused: !on }, on ? t("knowledge:sources.resumed") : t("knowledge:sources.paused"))} aria-label={s.paused ? t("knowledge:sources.resumeAria", { name: s.name }) : t("knowledge:sources.pauseAria", { name: s.name })} className="ml-1" data-source-on />
-              {s.kind === "folder" && <DropdownMenu>
-                <DropdownMenuTrigger render={<Button variant="ghost" size="icon-xs" aria-label={t("knowledge:sources.moreAria", { name: s.name })} className="text-muted-foreground" data-source-menu />}><MoreHorizontalIcon /></DropdownMenuTrigger>
-                <DropdownMenuContent align="end" className="min-w-36">
-                  <DropdownMenuItem disabled={s.status === "syncing" || s.paused} onClick={() => void sync(s)} data-source-sync><RefreshCwIcon />{t("knowledge:sources.syncNow")}</DropdownMenuItem>
-                  <DropdownMenuSeparator />
-                  <DropdownMenuItem variant="destructive" onClick={() => void remove(s)} data-source-del><TrashIcon />{t("knowledge:sources.remove")}</DropdownMenuItem>
-                </DropdownMenuContent>
-              </DropdownMenu>}
-            </span>
-          </Row>))}</Group>}
-      <div className="-mt-2 px-1 type-footnote text-muted-foreground">{t("knowledge:sources.footer")}</div>
+    <div className="flex flex-col gap-6">
+      <section>
+        <SectionLabel right={<span className="flex flex-wrap justify-end gap-2"><AddFiles onDone={() => void load()} /><Button size="sm" onClick={() => setFolder(true)} data-add-folder><FolderPlusIcon />{t("knowledge:sources.addFolder")}</Button></span>}>{t("knowledge:sources.docsTitle")}</SectionLabel>
+        {err ? <Empty title={t("knowledge:sources.failed")} sub={err} /> : !xs ? <Loading /> :
+          <Panel>{xs.map((s) => { const [dot, state] = sourceState(s); return (
+            <Row key={s.id} data-source={s.id} data-source-kind={s.kind} data-source-state={s.paused ? "paused" : s.status} className={cn(STACK, s.paused && "opacity-70")}
+              title={<span className="inline-flex flex-wrap items-center gap-x-2 gap-y-0.5">{s.name}<span className="type-footnote text-muted-foreground">{SOURCE_KIND[s.kind] ?? s.kind}</span></span>}
+              sub={<span className="flex flex-col gap-0.5"><span className="inline-flex flex-wrap items-center gap-x-1.5"><span className="inline-flex items-center gap-1" data-source-status><StatusDot s={dot} />{state}</span><span aria-hidden>·</span><span data-source-stats>{statsLine(s)}</span></span>{s.path && <span className="truncate font-mono">{s.path.replace(/^\/Users\/[^/]+/, "~")}</span>}{s.error && <span className="break-words text-destructive" data-source-error>{s.error}</span>}</span>}>
+              <span className="flex flex-wrap items-center justify-end gap-0.5 max-sm:justify-start">
+                <LevelSel v={s.level} on={(l) => l && void patch(s, { level: l }, t("knowledge:sources.levelChanged"))} testId={"src-level-" + s.id} className={cn(META_SELECT, "h-7! px-2 hover:bg-accent")} />
+                <VisSel v={s.visibility} on={(x) => void patch(s, { visibility: x })} testId={"src-vis-" + s.id} className={cn(META_SELECT, "h-7! px-2 hover:bg-accent")} />
+                <Switch checked={!s.paused} onCheckedChange={(on) => void patch(s, { paused: !on }, on ? t("knowledge:sources.resumed") : t("knowledge:sources.paused"))} aria-label={s.paused ? t("knowledge:sources.resumeAria", { name: s.name }) : t("knowledge:sources.pauseAria", { name: s.name })} className="ml-1" data-source-on />
+                {s.kind === "folder" && <DropdownMenu>
+                  <DropdownMenuTrigger render={<Button variant="ghost" size="icon-xs" aria-label={t("knowledge:sources.moreAria", { name: s.name })} className="text-muted-foreground" data-source-menu />}><MoreHorizontalIcon /></DropdownMenuTrigger>
+                  <DropdownMenuContent align="end" className="min-w-36">
+                    <DropdownMenuItem disabled={s.status === "syncing" || s.paused} onClick={() => void sync(s)} data-source-sync><RefreshCwIcon />{t("knowledge:sources.syncNow")}</DropdownMenuItem>
+                    <DropdownMenuSeparator />
+                    <DropdownMenuItem variant="destructive" onClick={() => void remove(s)} data-source-del><TrashIcon />{t("knowledge:sources.remove")}</DropdownMenuItem>
+                  </DropdownMenuContent>
+                </DropdownMenu>}
+              </span>
+            </Row>) })}</Panel>}
+        <div className="mt-2 px-1 type-footnote text-muted-foreground">{t("knowledge:sources.footer")}</div>
+      </section>
+      {prov && <MemProviders prov={prov} />}
       <FolderDialog open={folder} onClose={() => setFolder(false)} onDone={() => void load()} />
     </div>
+  )
+}
+
+/** who writes the memories: you, the conversation, items, agents, Bots, plugins — with how many each wrote and how
+ *  many still wait for you */
+const PROVIDER_ICON: Record<string, typeof UserIcon> = { you: UserIcon, conversation: MessagesSquareIcon, item: FileTextIcon, agent: BotIcon, mail: MailIcon, space: UsersIcon, event: ZapIcon, plugin: PuzzleIcon }
+const providerName = (p: MemProvider) => {
+  const k = ["you", "conversation", "item", "agent", "mail", "space", "event", "plugin"].includes(p.kind) ? p.kind : "other"
+  return tt(`knowledge:sources.provider.${k as "you"}`)
+}
+function MemProviders({ prov }: { prov: { memory: MemProvider[]; store: string } }) {
+  const t = useT()
+  return (
+    <section data-mem-providers>
+      <SectionLabel>{t("knowledge:sources.memTitle")}</SectionLabel>
+      {!prov.memory.length ? <Blank>{t("knowledge:sources.memNone")}</Blank> :
+        <Panel>{prov.memory.map((p) => (
+          <Row key={p.kind + p.writer} data-provider={p.kind} icon={<Tile I={PROVIDER_ICON[p.kind] ?? SparklesIcon} />}
+            title={<span className="inline-flex flex-wrap items-baseline gap-x-2">{providerName(p)}{p.writer_name && p.kind !== "you" && <span className="type-footnote text-muted-foreground">{t("knowledge:origin.by", { name: p.writer_name })}</span>}</span>}
+            sub={<Meta inline><span>{t("knowledge:sources.memCount", { count: p.count })}</span>{p.candidates > 0 && <span className="text-attention">{t("knowledge:subject.pending", { count: p.candidates })}</span>}{p.stale > 0 && <span>{t("knowledge:sources.memStale", { count: p.stale })}</span>}{p.last > 0 && <span>{t("knowledge:sources.memLast", { time: tm(p.last) })}</span>}</Meta>}>
+            <span className="type-callout tabular-nums text-muted-foreground">{p.confirmed}</span>
+          </Row>))}</Panel>}
+      <div className="mt-2 px-1 type-footnote text-muted-foreground" data-kb-store={prov.store}>{t(prov.store === "openviking" ? "knowledge:sources.storeOv" : "knowledge:sources.storeBuiltin")} {t("knowledge:sources.memFooter")}</div>
+    </section>
   )
 }
 
@@ -329,8 +438,8 @@ function FolderDialog({ open, onClose, onDone }: { open: boolean; onClose: () =>
           {field("kb-folder-path", t("knowledge:folder.path"), <Input id="kb-folder-path" autoFocus className="font-mono" value={path} onChange={(e) => setPath(e.target.value)} placeholder="/Users/user/Documents/wiki" data-folder-path />, t("knowledge:folder.pathDesc"))}
           {field("kb-folder-name", t("knowledge:folder.name"), <Input id="kb-folder-name" maxLength={40} value={name} onChange={(e) => setName(e.target.value)} placeholder={t("knowledge:folder.namePlaceholder")} data-folder-name />)}
           <div className="grid gap-4 sm:grid-cols-2">
-            {field("kb-folder-inc", t("knowledge:folder.include"), <Textarea id="kb-folder-inc" className="min-h-20 font-mono text-[12.5px]" value={inc} onChange={(e) => setInc(e.target.value)} data-folder-include />, t("knowledge:folder.includeDesc"))}
-            {field("kb-folder-exc", t("knowledge:folder.exclude"), <Textarea id="kb-folder-exc" className="min-h-20 font-mono text-[12.5px]" value={exc} onChange={(e) => setExc(e.target.value)} data-folder-exclude />)}
+            {field("kb-folder-inc", t("knowledge:folder.include"), <Textarea id="kb-folder-inc" className="min-h-20 font-mono" value={inc} onChange={(e) => setInc(e.target.value)} data-folder-include />, t("knowledge:folder.includeDesc"))}
+            {field("kb-folder-exc", t("knowledge:folder.exclude"), <Textarea id="kb-folder-exc" className="min-h-20 font-mono" value={exc} onChange={(e) => setExc(e.target.value)} data-folder-exclude />)}
           </div>
           {err && <div role="alert" className="type-callout text-destructive" data-folder-error>{err}</div>}
         </FieldGroup>
@@ -363,14 +472,14 @@ function CandidatesTab({ onChange }: { onChange: (n: number) => void }) {
         {t("knowledge:cand.title", { count: xs.length })}</SectionLabel>
       <Group>{xs.map((c) => (
         <Row key={c.mem.id} data-candidate={c.mem.id} className={STACK}
-          title={<span className="inline-flex flex-wrap items-center gap-2">{c.mem.text}<Badge variant="outline" className="font-normal text-muted-foreground" data-cand-record>{c.record ?? recordOf(c.mem.kind)}</Badge></span>}
-          sub={<span className="flex flex-col gap-0.5"><span>{t("knowledge:cand.source", { kind: memKind(c.mem.kind), source: c.origin_label || c.mem.source_label })}</span>{c.why && <span className="break-words text-foreground/80" data-cand-why>{t("knowledge:cand.why", { why: c.why })}</span>}{c.scope && <span className="break-words">{t("knowledge:cand.scope", { scope: c.scope })}</span>}{c.evidence && <span className="break-words">{t("knowledge:cand.evidence", { evidence: c.evidence })}</span>}{c.supersedes && <span className="break-words">{t("knowledge:cand.supersedes", { text: c.supersedes.text })}</span>}</span>}>
+          title={<span className="inline-flex flex-wrap items-center gap-2">{c.mem.text}<Badge variant="secondary" className="text-muted-foreground" data-cand-record>{c.record ?? recordOf(c.mem.kind)}</Badge></span>}
+          sub={<span className="flex flex-col gap-0.5"><span data-cand-origin>{memKind(c.mem.kind)}<span aria-hidden> · </span><OriginLine m={c.origin_label && !c.mem.origin ? { ...c.mem, source_label: c.origin_label } : c.mem} /></span>{c.why && <span className="break-words text-foreground/80" data-cand-why>{t("knowledge:cand.why", { why: c.why })}</span>}{c.scope && <span className="break-words">{t("knowledge:cand.scope", { scope: c.scope })}</span>}{c.evidence && <span className="break-words">{t("knowledge:cand.evidence", { evidence: c.evidence })}</span>}{c.supersedes && <span className="break-words">{t("knowledge:cand.supersedes", { text: c.supersedes.text })}</span>}</span>}>
           <span className="flex items-center gap-1">
             <Button size="xs" variant="ghost" className="text-muted-foreground" disabled={busy} onClick={() => void resolve([c.mem.id], "no")} data-cand-no>{t("knowledge:cand.no")}</Button>
             <Button size="xs" variant="outline" disabled={busy} onClick={() => void resolve([c.mem.id], "yes")} data-cand-yes>{t("common:action.save")}</Button>
           </span>
         </Row>))}</Group>
-      <div className="mt-2 px-1 type-footnote text-muted-foreground">{t("knowledge:cand.footer")}</div>
+      <div className="mt-3 type-footnote text-muted-foreground">{t("knowledge:cand.footer")}</div>
       <ExpiredCandidates onRestored={load} />
     </section>
   )
@@ -390,14 +499,14 @@ function ExpiredCandidates({ onRestored }: { onRestored: () => void }) {
     try { await kb.restore(id); toast(t("knowledge:cand.restored")); await load(); onRestored() } catch (e) { toast(errMsg(e)) } finally { setBusy(false) }
   }
   return (
-    <section className="mt-6" data-cand-expired>
-      <button type="button" className="px-1 type-footnote text-muted-foreground hover:underline" onClick={() => setOpen((o) => !o)} data-cand-expired-toggle>{t("knowledge:cand.expired", { count: xs.length })}</button>
-      {open && <Group className="mt-2">{xs.map((c) => (
+    <Collapsible open={open} onOpenChange={setOpen} render={<section />} className="mt-6" data-cand-expired>
+      <CollapsibleTrigger className={DISC_TRIGGER + " type-footnote"} data-cand-expired-toggle><DiscChevron className="size-3" />{t("knowledge:cand.expired", { count: xs.length })}</CollapsibleTrigger>
+      <CollapsibleContent><Group className="pt-2">{xs.map((c) => (
         <Row key={c.mem.id} data-cand-expired-row={c.mem.id} className={STACK} title={c.mem.text}
           sub={<span className="flex flex-col gap-0.5"><span>{t("knowledge:cand.source", { kind: memKind(c.mem.kind), source: c.origin_label || c.mem.source_label })}</span>{c.evidence && <span className="break-words">{t("knowledge:cand.evidence", { evidence: c.evidence })}</span>}</span>}>
           <Button size="xs" variant="outline" disabled={busy} onClick={() => void restore(c.mem.id)} data-cand-restore>{t("knowledge:cand.restore")}</Button>
-        </Row>))}</Group>}
-    </section>
+        </Row>))}</Group></CollapsibleContent>
+    </Collapsible>
   )
 }
 

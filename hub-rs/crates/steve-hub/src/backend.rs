@@ -115,6 +115,8 @@ pub struct BotExtras {
     pub workspaces: std::collections::HashMap<String, Vec<String>>,
     /// bot id → memory count in the workspace
     pub memories: std::collections::HashMap<String, i64>,
+    /// bot id → its own MCP servers ([`Repo::bot_mcp_servers`])
+    pub mcp: std::collections::HashMap<String, Vec<Value>>,
 }
 
 /// Storage operations, one per repo.ts function the API layer calls. Writes publish their bus events
@@ -266,6 +268,10 @@ pub trait Repo {
     /// Workspace ids of the bot's memberships (`bot_workspaces` row order).
     fn bot_workspaces(&self, id: &str) -> BResult<Vec<String>> {
         todo_backend!("bot_workspaces")
+    }
+    /// The Bot's own MCP servers as its view shows them: `{id, name, transport, enabled}` by name.
+    fn bot_mcp_servers(&self, id: &str) -> BResult<Vec<Value>> {
+        Ok(vec![])
     }
     /// Membership, deleted bots included.
     fn bot_in_workspace(&self, id: &str, ws: &str) -> BResult<bool> {
@@ -955,11 +961,6 @@ pub trait Domain: Send + Sync + 'static {
             return Err(BackendError::unimplemented("say_to"));
         }
         self.say(ws, user, text, files, mentions).await
-    }
-    /// The paste guard's note under a message whose secret was replaced before it was routed
-    /// (`guard::ROUTED`, linking to the vault).
-    async fn say_guard_note(&self, ws: &str) -> BResult<()> {
-        todo_backend!("say_guard_note")
     }
     async fn stop(&self, ws: &str) -> BResult<bool> {
         todo_backend!("stop")
