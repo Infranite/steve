@@ -2268,13 +2268,22 @@ async fn open_harness(
             .mode_choice(&harness, row.open.policy.permissions),
     );
     let meta = inner.cfg.acp.session_meta(&harness);
+    // Steve's own tools first, then the Bot's own servers with their secrets taken just now
+    let mut mcp_servers = crate::mcp_servers(inner, session);
+    if !row.open.mcp_servers.is_empty() {
+        let hub = inner.secrets.lock().unwrap().clone();
+        let bots = crate::bot_mcp::servers(hub, session, &row.open.mcp_servers).await;
+        if let Some(all) = mcp_servers.as_array_mut() {
+            all.extend(bots);
+        }
+    }
     let handshake = acp_session::open(
         &conn,
         OpenConfig {
             client_version: &inner.cfg.acp.version,
             cwd: &cwd,
             resume: row.acp_id.as_deref(),
-            mcp_servers: crate::mcp_servers(inner, session),
+            mcp_servers,
             mode,
             model: row.open.choice.model.as_deref(),
             effort: row.open.choice.effort.as_deref(),

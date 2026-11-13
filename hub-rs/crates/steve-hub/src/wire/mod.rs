@@ -7,6 +7,7 @@
 
 pub mod acp_stats;
 pub mod auth;
+pub mod bot_mcp;
 pub mod chan;
 pub mod core;
 pub mod diagnostics;
@@ -850,6 +851,8 @@ pub fn wire_assembly(
     {
         tracing::warn!("single sign-on from the settings: {e}");
     }
+    // the secrets of the Bots' own MCP servers, for the Node a session runs on
+    secrets.set_sessions(bot_mcp::McpSecrets::new(db.clone(), built.bot_mcp.clone()));
     let extra = mcp_extra::Extra {
         store: db.clone(),
         modules: built.modules.clone(),

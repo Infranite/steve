@@ -295,5 +295,9 @@
   "modules.not_found.event_source": "No such event source",
   "modules.not_found.html_body": "No such HTML body",
   "modules.not_found.app_registration": "No such app registration",
-  "modules.not_found.workspace": "No such workspace"
+  "modules.not_found.workspace": "No such workspace",
+  "modules.not_found.mcp_server": "No such MCP server",
+  "modules.bot_mcp.name_taken": "This bot already has an MCP server named %{name}",
+  "modules.bot_mcp.secret_needed": "%{name} is a secret: give its value the first time it is saved",
+  "modules.bot_mcp.too_many": "A bot can have at most %{max} MCP servers"
 }

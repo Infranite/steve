@@ -134,6 +134,8 @@ Steve 把密钥放进命令的环境变量、标准输入或临时文件来执�
 
 一个 Bot 由 harness（Claude Code 或 Codex）、模型和思考强度、职责、人设、规范、权限模式、验收方式和默认项目组成。用一句话描述，Steve 就能起草出来。`@Bot` 把活交给它。改派事项时旧会话会停掉，最后的进展交给新 Bot。一个 Bot 可以在多个工作区里担任不同职责，但只看得到当前工作区的数据。
 
+Bot 还可以接自己的 MCP 服务器（Bot 页的「能力」）：本地命令（stdio），或者 HTTP / SSE 地址，带环境变量或请求头。这个 Bot 的每个会话都通过 ACP 拿到它们，和 Steve 自己的工具并列，哪种 harness 都一样。机密的值存在保险箱里，只在 harness 打开时交给会话所在的 Node。见 [Bot 的 MCP 服务器](docs/deployment.md#bot-mcp-servers)。
+
 Steve 不动你的 harness 设置。权限提示只答这一次，从不写“始终允许”，也从不改你的 Codex 配置。每个会话都给出在 harness 里接着跑的命令，本机已有的 Claude Code 和 Codex 历史也能导进来。
 
 - **记忆**：Steve 从完成的事项、每天的对话、邮件和智能体那里提出候选记忆，附上出处原话和要替换的旧记忆。你确认之前都不生效。

@@ -32,6 +32,7 @@
 steve_i18n::init!();
 
 pub mod accounts;
+pub mod bot_mcp;
 pub mod changes;
 pub mod clock;
 pub mod contacts;

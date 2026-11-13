@@ -124,6 +124,8 @@ pub const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/060.sql"),
     // 60: a research run's session under a neutral name, with the harness adapter it belongs to.
     include_str!("../migrations/061.sql"),
+    // 62: a Bot's own MCP servers (`bot_mcp_servers`); their secrets stay in the vault.
+    include_str!("../migrations/062.sql"),
 ];
 
 /// 027's item columns and their one-time backfill (applied by `run_pending` when `items.phase` is missing).

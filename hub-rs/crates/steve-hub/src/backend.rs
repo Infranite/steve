@@ -115,6 +115,8 @@ pub struct BotExtras {
     pub workspaces: std::collections::HashMap<String, Vec<String>>,
     /// bot id → memory count in the workspace
     pub memories: std::collections::HashMap<String, i64>,
+    /// bot id → its own MCP servers ([`Repo::bot_mcp_servers`])
+    pub mcp: std::collections::HashMap<String, Vec<Value>>,
 }
 
 /// Storage operations, one per repo.ts function the API layer calls. Writes publish their bus events
@@ -266,6 +268,10 @@ pub trait Repo {
     /// Workspace ids of the bot's memberships (`bot_workspaces` row order).
     fn bot_workspaces(&self, id: &str) -> BResult<Vec<String>> {
         todo_backend!("bot_workspaces")
+    }
+    /// The Bot's own MCP servers as its view shows them: `{id, name, transport, enabled}` by name.
+    fn bot_mcp_servers(&self, id: &str) -> BResult<Vec<Value>> {
+        Ok(vec![])
     }
     /// Membership, deleted bots included.
     fn bot_in_workspace(&self, id: &str, ws: &str) -> BResult<bool> {

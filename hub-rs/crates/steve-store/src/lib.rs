@@ -15,6 +15,7 @@
 steve_i18n::init!();
 
 pub mod base;
+pub mod bot_mcp;
 mod bus;
 pub mod compact;
 pub mod db;

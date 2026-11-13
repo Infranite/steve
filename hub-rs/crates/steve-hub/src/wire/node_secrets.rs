@@ -51,9 +51,19 @@ struct Held {
     values: Arc<dyn UseValues>,
 }
 
+/// Values a Node takes for one of its sessions rather than for one command: the secrets of the
+/// session's Bot's MCP servers, under [`MCP_SECRETS_OP`]`<session>`, each time its harness opens
+/// ([`super::bot_mcp`]). Asked again every time, so nothing is held between opens.
+pub trait SessionSecrets: Send + Sync {
+    /// `id`'s value for `session` on `node`; `None`: not this session's (or not on this Node).
+    fn value(&self, node: &str, session: &str, id: &str) -> Option<zeroize::Zeroizing<Vec<u8>>>;
+}
+
 /// What every Node may take now, by operation. One per Hub.
 #[derive(Default)]
 pub struct NodeSecrets {
+    /// The sessions' own values (set once at boot; without it they are `denied`).
+    sessions: std::sync::OnceLock<Arc<dyn SessionSecrets>>,
     held: Mutex<HashMap<String, Held>>,
     ended: Mutex<VecDeque<String>>,
     /// Push grants being observed; one observer per operation.
@@ -63,6 +73,11 @@ pub struct NodeSecrets {
 impl NodeSecrets {
     pub fn new() -> Arc<NodeSecrets> {
         Arc::default()
+    }
+
+    /// Where the sessions' own values come from (once).
+    pub fn set_sessions(&self, s: Arc<dyn SessionSecrets>) {
+        let _ = self.sessions.set(s);
     }
 
     /// The channel of one Node: it takes only what was given to it.
@@ -250,6 +265,19 @@ struct Bound {
 impl HubSecrets for Bound {
     async fn take(&self, operation: OperationId, id: String) -> ApiResult<SecretBytes> {
         let err = |code, m: &str| Err(ApiError::new(code, m.to_string()).on(&operation));
+        if let Some(session) = operation.as_str().strip_prefix(MCP_SECRETS_OP) {
+            let Some(s) = self.all.sessions.get().cloned() else {
+                return err(ErrorCode::Denied, "no secret for this session");
+            };
+            let (node, session) = (self.node.to_string(), session.to_string());
+            let v = tokio::task::spawn_blocking(move || s.value(&node, &session, &id))
+                .await
+                .map_err(|e| ApiError::new(ErrorCode::Internal, e.to_string()))?;
+            return match v {
+                Some(v) => Ok(SecretBytes::new(v.to_vec())),
+                None => err(ErrorCode::Denied, "no such secret for this session"),
+            };
+        }
         let values = {
             let mut held = self.all.held.lock().unwrap_or_else(|e| e.into_inner());
             let Some(h) = held.get_mut(operation.as_str()) else {

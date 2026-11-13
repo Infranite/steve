@@ -295,5 +295,9 @@
   "modules.not_found.event_source": "没有这个事件源",
   "modules.not_found.html_body": "没有这个 HTML 正文",
   "modules.not_found.app_registration": "没有这个应用注册",
-  "modules.not_found.workspace": "没有这个工作空间"
+  "modules.not_found.workspace": "没有这个工作空间",
+  "modules.not_found.mcp_server": "没有这个 MCP 服务器",
+  "modules.bot_mcp.name_taken": "这个 Bot 已经有一个叫 %{name} 的 MCP 服务器",
+  "modules.bot_mcp.secret_needed": "%{name} 是机密，第一次保存时要填上它的值",
+  "modules.bot_mcp.too_many": "一个 Bot 最多接 %{max} 个 MCP 服务器"
 }

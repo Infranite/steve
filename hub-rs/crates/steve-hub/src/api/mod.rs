@@ -925,6 +925,7 @@ pub(crate) fn bot_out(r: &dyn Repo, mut b: Obj, ws: &str) -> BResult<Obj> {
     steve_store::seeded::show(&mut b, steve_store::seeded::BOT);
     b.insert("workspaces".into(), json!(r.bot_workspaces(&id)?));
     b.insert("memories".into(), json!(r.memories_count(&id, ws)?));
+    b.insert("mcp_servers".into(), json!(r.bot_mcp_servers(&id)?));
     Ok(b)
 }
 
@@ -949,6 +950,11 @@ pub(crate) fn bots_out(r: &dyn Repo, ws: &str) -> BResult<(Vec<Obj>, Vec<Value>)
             None => r.memories_count(&id, ws)?,
         };
         b.insert("memories".into(), json!(n));
+        let mcp = match &x {
+            Some(x) => x.mcp.get(&id).cloned().unwrap_or_default(),
+            None => r.bot_mcp_servers(&id)?,
+        };
+        b.insert("mcp_servers".into(), json!(mcp));
         bots.push(b);
     }
     let mut all = vec![];

@@ -293,6 +293,13 @@ impl Repo for StoreBackend {
             while let Some(r) = rows.next()? {
                 x.workspaces.entry(r.get(0)?).or_default().push(r.get(1)?);
             }
+            let mut st = c.prepare_cached(
+                "SELECT bot_id, id, name, transport, enabled FROM bot_mcp_servers ORDER BY bot_id, name",
+            )?;
+            let mut rows = st.query([])?;
+            while let Some(r) = rows.next()? {
+                x.mcp.entry(r.get(0)?).or_default().push(mcp_summary(r)?);
+            }
             each(
                 c,
                 "SELECT bot_id, count(*) FROM bot_memories WHERE workspace_id = ?1 GROUP BY bot_id",
@@ -431,6 +438,17 @@ impl Repo for StoreBackend {
             .into_iter()
             .map(|w| w.workspace_id)
             .collect())
+    }
+    fn bot_mcp_servers(&self, id: &str) -> BResult<Vec<Value>> {
+        self.batch(|c| {
+            let mut st = c.prepare_cached(
+                "SELECT bot_id, id, name, transport, enabled FROM bot_mcp_servers WHERE bot_id = ? ORDER BY name",
+            )?;
+            let v = st
+                .query_map([id], mcp_summary)?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(v)
+        })
     }
     fn bot_in_workspace(&self, id: &str, ws: &str) -> BResult<bool> {
         self.0.bots().in_workspace(id, ws).map_err(err)
@@ -899,6 +917,16 @@ impl Repo for StoreBackend {
     fn device_patch(&self, id: &str, p: &Obj) -> BResult<()> {
         self.0.devices().patch(id, &patch(p)?).map_err(err)
     }
+}
+
+/// A Bot's MCP server as its view lists it: `(bot_id, id, name, transport, enabled)` → the object.
+fn mcp_summary(r: &rusqlite::Row) -> rusqlite::Result<Value> {
+    Ok(serde_json::json!({
+        "id": r.get::<_, String>(1)?,
+        "name": r.get::<_, String>(2)?,
+        "transport": r.get::<_, String>(3)?,
+        "enabled": r.get::<_, i64>(4)? != 0,
+    }))
 }
 
 #[cfg(test)]

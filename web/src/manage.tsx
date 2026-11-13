@@ -39,6 +39,7 @@ import { showTag } from "@/views"
 import { AskSteve } from "@/config-ui"
 import { AppearanceSection } from "@/appearance-settings"
 import { VAULT_CAT, VaultSettingsPane } from "@/vault/settings"
+import { BotMcpSection, PlannedCaps } from "@/bot-mcp"
 import { STATS_CAT, StatsSettingsPane } from "@/stats/prices"
 import { AUDIT_CAT, AuditSettingsPane } from "@/audit-settings"
 import { MODELS_CAT, ModelsSettingsPane, SteveJudges } from "@/models-settings"
@@ -426,8 +427,10 @@ function BotCaps({ k, onPerm }: { k: string; onPerm: () => void }) {
       <Section label={t("manage:caps.tools")} note={d.s === "absent" ? t("manage:caps.usageAbsent") : t("manage:caps.usageNote", { harness: b.h })}>
         {d.s === "loading" ? <Loading className="py-8" /> : <SkillGrid skills={skills} categories={[catSteve, catMcp, b.h]} labels={{ all: t("manage:caps.all"), categories: t("manage:caps.categories"), empty: t("manage:caps.none") }} />}
       </Section>
+      <BotMcpSection bot={k} />
       <Section label={t("manage:caps.perm")} note={t("manage:caps.later")}>
         <Panel><Row title={permName(t, b.permMode)} sub={permLabel(t, b.permMode)} data-caps-perm={b.permMode}><Button size="xs" variant="ghost" className="text-muted-foreground" onClick={onPerm}>{t("manage:caps.change")}</Button></Row></Panel></Section>
+      <Section label={t("manage:mcp.more")}><PlannedCaps /></Section>
     </div>
   )
 }

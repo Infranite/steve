@@ -160,6 +160,8 @@ pub struct Built {
     pub recall: Arc<dyn steve_core::yolo::undo::Recall>,
     /// What runs for each connection of an adapter with a hook (started by one of `jobs`).
     pub lifecycle: Option<steve_channels::lifecycle::ConnectionRuntime>,
+    /// The Bots' own MCP servers: the secret values a session's Node takes ([`super::bot_mcp`]).
+    pub bot_mcp: steve_modules::bot_mcp::BotMcp,
 }
 
 /// The objects the event producers call, exactly as wired: G2's sink, E1's events, C1's inbound.
@@ -624,8 +626,11 @@ pub fn build(env: Env<'_>) -> Result<Built, BackendError> {
         }
         (rt.build(), bus.tap(&["connection"]))
     });
+    // a Bot's own MCP servers, their secrets in the vault
+    let bot_mcp = steve_modules::bot_mcp::BotMcp::new(vault.clone());
     let routes = routes
         .with_state(modules.clone())
+        .merge(steve_modules::bot_mcp::routes(bot_mcp.clone()))
         .merge(steve_modules::vault::routes(vault.clone()))
         .merge(steve_modules::vault::use_api::routes(vault))
         .merge(vault_items)
@@ -762,5 +767,6 @@ pub fn build(env: Env<'_>) -> Result<Built, BackendError> {
             outbox: outbox.clone(),
         }),
         lifecycle,
+        bot_mcp,
     })
 }

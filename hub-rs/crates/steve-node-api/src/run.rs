@@ -192,6 +192,123 @@ pub struct OpenSession {
     /// are unsupported until the Hub explicitly opens a session with a view.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub artifact_view: Option<Digest>,
+    /// The MCP servers of the session's Bot, given to the harness in `session/new|load` after
+    /// Steve's own. A secret value is a reference only ([`McpVar::secret`]): the Node takes it from
+    /// the Hub ([`crate::ports::HubSecrets`], operation [`mcp_secrets_op`]) each time it opens the
+    /// harness, and it is never journaled. An older Node ignores them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mcp_servers: Vec<McpServer>,
+}
+
+/// One MCP server for the harness, as ACP's `McpServer` (stdio, http or sse).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct McpServer {
+    /// The server's name as the harness shows it (`[A-Za-z0-9_-]`, never `steve`).
+    pub name: String,
+    #[serde(flatten)]
+    pub transport: McpTransport,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "transport", rename_all = "snake_case")]
+pub enum McpTransport {
+    Stdio {
+        command: String,
+        #[serde(default)]
+        args: Vec<String>,
+        #[serde(default)]
+        env: Vec<McpVar>,
+    },
+    Http {
+        url: String,
+        #[serde(default)]
+        headers: Vec<McpVar>,
+    },
+    Sse {
+        url: String,
+        #[serde(default)]
+        headers: Vec<McpVar>,
+    },
+}
+
+/// An env variable (stdio) or HTTP header (http, sse): a plain `value`, or a `secret` the Node takes
+/// from the Hub under this id.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct McpVar {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub value: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub secret: Option<String>,
+}
+
+/// The prefix of [`mcp_secrets_op`].
+pub const MCP_SECRETS_OP: &str = "mcp:";
+
+/// The operation a session's MCP secrets are taken under: `mcp:<session>`. The Hub answers it for
+/// the Node the session is bound to, for as long as the server is the session's Bot's.
+pub fn mcp_secrets_op(session: &SessionId) -> OperationId {
+    OperationId::new(format!("{MCP_SECRETS_OP}{}", session.as_str()))
+        .unwrap_or_else(|_| OperationId::new("mcp:").expect("valid"))
+}
+
+impl McpServer {
+    /// Checks what a Node is given: at most 32 servers, names usable and once each (`steve` is
+    /// Steve's own), commands and urls set, at most 64 variables each, named, without line breaks.
+    pub fn check_all(servers: &[McpServer]) -> crate::common::ApiResult<()> {
+        use crate::common::{ApiError, ErrorCode};
+        let bad = |m: &str| Err(ApiError::new(ErrorCode::Invalid, m.to_string()));
+        if servers.len() > 32 {
+            return bad("too many MCP servers");
+        }
+        let mut names: Vec<String> = vec![];
+        for s in servers {
+            let n = s.name.to_ascii_lowercase();
+            if s.name.is_empty()
+                || s.name.len() > 64
+                || !s
+                    .name
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
+                || n == "steve"
+                || names.contains(&n)
+            {
+                return bad("an MCP server name that is not usable");
+            }
+            names.push(n);
+            let vars = match &s.transport {
+                McpTransport::Stdio { command, env, .. } => {
+                    if command.trim().is_empty() {
+                        return bad("an MCP server without a command");
+                    }
+                    env
+                }
+                McpTransport::Http { url, headers } | McpTransport::Sse { url, headers } => {
+                    if !(url.starts_with("http://") || url.starts_with("https://")) {
+                        return bad("an MCP server url that is not http(s)");
+                    }
+                    headers
+                }
+            };
+            if vars.len() > 64 {
+                return bad("too many MCP server variables");
+            }
+            for v in vars {
+                let line = |x: &str| x.contains(['\n', '\r', '\0']);
+                if v.name.is_empty()
+                    || v.name.len() > 256
+                    || line(&v.name)
+                    || line(&v.value)
+                    || v.secret
+                        .as_ref()
+                        .is_some_and(|id| id.is_empty() || id.len() > 256)
+                {
+                    return bad("an MCP server variable that is not usable");
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 /// A principal's own directory for one harness (path model §4.5.1): its configuration, logins,
