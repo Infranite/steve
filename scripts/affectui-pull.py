@@ -6,6 +6,9 @@ as a header and never written anywhere. Every Pro file gets the notice the affec
 top: those files stay under that license, not under Steve's.
 
     python3 scripts/affectui-pull.py agent-lanes trace-waterfall
+
+Items come in the "clean" style (one card, no gray tray around it), which matches Steve's surfaces; the file and
+its class names carry the -clean suffix the registry gives it. --classic fetches the other style.
 """
 import json
 import os
@@ -35,8 +38,8 @@ def tiers() -> dict[str, str]:
     return {m[0]: m[1] for m in re.findall(r"affectui\.com/[a-z-]+/([a-z0-9-]+)\):.*\((Free|Pro)\b", text)}
 
 
-def pull(slug: str, key: str | None, tier: str) -> None:
-    req = urllib.request.Request(f"https://www.affectui.com/r/{slug}.json")
+def pull(slug: str, key: str | None, tier: str, clean: bool) -> None:
+    req = urllib.request.Request(f"https://www.affectui.com/r/{slug}{'-clean' if clean else ''}.json")
     if key:
         req.add_header("Authorization", f"Bearer {key}")
     with urllib.request.urlopen(req) as r:
@@ -56,9 +59,10 @@ def main() -> None:
     if len(sys.argv) < 2:
         sys.exit(__doc__)
     OUT.mkdir(parents=True, exist_ok=True)
+    args = [a for a in sys.argv[1:] if a != "--classic"]
     key, tier = token(), tiers()
-    for slug in sys.argv[1:]:
-        pull(slug, key, tier.get(slug, "Pro"))
+    for slug in args:
+        pull(slug, key, tier.get(slug, "Pro"), "--classic" not in sys.argv)
 
 
 if __name__ == "__main__":
