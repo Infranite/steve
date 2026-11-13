@@ -206,7 +206,7 @@ fn workflow_tool() -> Value {
                         "properties": {
                             "id": {"type": "string", "minLength": 1},
                             "title": {"type": "string", "minLength": 1},
-                            "goal": {"type": "string", "minLength": 1},
+                            "goal": {"type": "string", "minLength": 1, "description": "The unit's brief as short Markdown people read on the item page: one sentence on what this unit delivers, then bullet sections **要做**, **验收**, and only if needed **上游** (which upstream results to use) and **约束**. Each bullet one line; no walls of text, logs or long file lists (put details in the conversation or upstream outputs)."},
                             "bot_id": {"type": "string", "minLength": 1},
                             "kind": {"type": "string", "enum": ["work", "review", "integrate"]},
                             "depends_on": {"type": "array", "items": {"type": "string"}},
