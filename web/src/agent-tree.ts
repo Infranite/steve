@@ -167,3 +167,47 @@ export function rollup(stats: TreeStat[]): Map<string, Cost> {
 export function workTime(s: TreeStat | undefined): number | null {
   return s?.agent_ms ?? null
 }
+
+/** a span of time an agent worked on a node: its first turn to its end (or now, while it runs) */
+export type Segment = { key: string; item?: string; start: number; end: number; status: AgentStatus; attempt?: number }
+/** one row of the collaboration: a unit with its earlier attempts folded into it, or a fork; `depth` indents
+ * what a row's agent started itself */
+export type TeamRow = { node: AgentNode; depth: number; tries: AgentNode[]; segments: Segment[]; ms: number }
+const msOf = (t: number) => t < 1e12 ? t * 1000 : t
+/** the tree as rows in order, with the spans of time from the Hub's figures (`GET /stats/tree`): earlier attempts
+ * are not rows of their own but part of their unit's row, so a retried step reads as one step tried again */
+export function teamRows(root: AgentNode, stats: TreeStat[], now: number): TeamRow[] {
+  const by = new Map(stats.map((s) => [s.item_id, s]))
+  const span = (n: AgentNode): Segment | null => {
+    const s = n.item ? by.get(n.item) : undefined
+    if (!s?.first_turn) return null
+    const start = msOf(s.first_turn)
+    const end = s.done_at ? msOf(s.done_at) : s.dropped_at ? msOf(s.dropped_at) : isActive(n.status) ? now : start + (s.agent_ms ?? 0)
+    return { key: n.key, item: n.item, start, end: Math.max(start, end), status: n.status, attempt: n.attempt }
+  }
+  const worked = (n: AgentNode) => (n.item ? by.get(n.item)?.agent_ms : 0) ?? 0
+  const out: TeamRow[] = []
+  const add = (kids: AgentNode[], depth: number) => {
+    let held: AgentNode[] = []
+    for (const n of kids) {
+      if (n.kind === "attempt") { held.push(n); continue }
+      const tries = held.filter((a) => a.unitId && a.unitId === n.unitId)
+      held = held.filter((a) => !tries.includes(a))
+      const segments = [...tries, n].map(span).filter((x): x is Segment => !!x)
+      out.push({ node: n, depth, tries, segments, ms: [...tries, n].reduce((s, x) => s + worked(x), 0) })
+      for (const a of tries) add(a.children, depth + 1)
+      add(n.children, depth + 1)
+    }
+    // attempts whose unit is gone from the graph still show, as rows of their own
+    for (const a of held) out.push({ node: a, depth, tries: [], segments: [span(a)].filter((x): x is Segment => !!x), ms: worked(a) })
+  }
+  add(root.children, 0)
+  return out
+}
+
+/** the first start and last end over all rows, or null before anything ran */
+export function teamRange(rows: TeamRow[]): [number, number] | null {
+  const xs = rows.flatMap((r) => r.segments)
+  if (!xs.length) return null
+  return [Math.min(...xs.map((s) => s.start)), Math.max(...xs.map((s) => s.end))]
+}

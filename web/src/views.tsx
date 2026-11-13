@@ -1,4 +1,4 @@
-import { AgentDetail, AgentDetailPanel, AgentTree, hasAgentTree, History, Notices, TeamPanel, useAgentTree, useSelectedNode, WorkflowButtons } from "@/agent-tree-view"
+import { AgentDetailPanel, hasAgentTree, History, Notices, TeamTimeline, useAgentTree, useSelectedNode, WorkflowButtons } from "@/agent-tree-view"
 import { itemState, type ItemState } from "@/item-state"
 import type { AgentStatus } from "@/agent-tree"
 import { clip } from "@/thread/topics"
@@ -43,9 +43,9 @@ import { YoloPill, yoloState } from "@/yolo/switch"
 import { RunState } from "@/yolo/status"
 import { cn } from "cn"
 import { lang, t as tr, useT } from "@/i18n"
-import { nearTime, num } from "@/i18n/format"
+import { dayHeading, hm as clock, nearTime, num } from "@/i18n/format"
 import { ArchiveIcon, BanIcon, BookOpenIcon, BotIcon, CalendarIcon, ChartNoAxesColumnIcon, CheckIcon, ChevronRightIcon, CircleAlertIcon, CircleCheckIcon, CircleDashedIcon, CircleHelpIcon, ContactRoundIcon, CopyIcon, DownloadIcon, FolderIcon, GitPullRequestIcon, HourglassIcon, KeyRoundIcon, LinkIcon, ListIcon, LoaderCircleIcon, LockIcon, MailIcon, MessageSquareIcon, MessagesSquareIcon, MinusIcon, MoreHorizontalIcon, PanelRightIcon, PauseIcon, PencilIcon, PlayIcon, PlugIcon, PlusIcon, RadioIcon, RotateCcwIcon, SearchIcon, ServerIcon, SettingsIcon, SquareIcon, SquareTerminalIcon, StarIcon, TrashIcon, UserRoundIcon, WorkflowIcon, XIcon, ZapIcon } from "lucide-react"
-import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react"
+import { Fragment, useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react"
 export { ChoiceCards,ItemRowExport,Select } from "@/view-shared"
 let selecting = false
 const RelationGraph = lazyView(() => import("@/graph").then((m) => ({ default: m.RelationGraph })))
@@ -325,13 +325,27 @@ export function StatePill({ state }: { state: ItemState }) {
   const t = useT()
   return <span className={cn("inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap type-footnote", STATE_TONE[state.tone][0])} data-status={state.kind}><span className="size-1.5 rounded-full bg-current" />{t(`views:itemState.${state.kind}`)}</span>
 }
-/** runs of `quiet` rows (three or more in a row) as arrays, to be folded; everything else as it is */
+/** runs of `quiet` rows (two or more in a row) as arrays, to be folded; everything else as it is */
 function foldProcess<T>(rows: T[], quiet: (x: T) => boolean): (T | T[])[] {
   const out: (T | T[])[] = []
   for (let n = 0; n < rows.length;) {
     let m = n
     while (m < rows.length && quiet(rows[m])) m++
-    if (m - n >= 3) { out.push(rows.slice(n, m)); n = m } else { out.push(rows[n]); n++ }
+    if (m - n >= 2) { out.push(rows.slice(n, m)); n = m } else { out.push(rows[n]); n++ }
+  }
+  return out
+}
+/** an activity line's time under its day heading: the clock only, when the moment is known */
+const when = (e: any[]) => typeof e[8] === "number" ? clock(e[8]) : e[2]
+/** activity in days: each day's heading and its rows; a row without a moment (a session, a reply) stays in the day
+ * before it */
+function byDay<T extends { e: any[] }>(groups: (T | T[])[]): [string, (T | T[])[]][] {
+  const out: [string, (T | T[])[]][] = []
+  for (const g of groups) {
+    const ts = (Array.isArray(g) ? g[0] : g).e[8]
+    const day = typeof ts === "number" ? dayHeading(ts) : out.at(-1)?.[0] ?? ""
+    if (out.at(-1)?.[0] !== day) out.push([day, []])
+    out.at(-1)![1].push(g)
   }
   return out
 }
@@ -343,7 +357,7 @@ function ProcessRun({ count, last, children }: { count: number; last: any[]; chi
       <span className="flex size-5 shrink-0 items-center justify-center"><ChevronRightIcon className={cn("size-3.5 transition-transform duration-[180ms] ease-[var(--ease-out)]", open && "rotate-90")} /></span>
       <span className="shrink-0">{t("views:itemState.process", { count })}</span>
       <span className={cn("min-w-0 truncate text-tertiary transition-opacity duration-[180ms]", open && "opacity-0")}>· {clip(String(last[1] ?? ""), 120)}</span>
-      <span className="ml-auto shrink-0 tabular-nums text-tertiary">{last[2]}</span>
+      <span className="ml-auto shrink-0 tabular-nums text-tertiary">{when(last)}</span>
     </CollapsibleTrigger>
     <CollapsibleContent className={cn(COLLAPSE, "ml-2.5 border-l pl-2")}>{children}</CollapsibleContent>
   </Collapsible>
@@ -377,7 +391,7 @@ function GoalText({ text, children, after }: { text: string; children: ReactNode
     {after}
   </>
 }
-const GOAL_FOLD = 192
+const GOAL_FOLD = 68
 function Prop({ label, children, top }: { label: string; children: ReactNode; top?: boolean }) {
   return <><dt className={cn("pt-1.5 type-callout text-muted-foreground", top && "pt-1")}>{label}</dt><dd className="min-w-0 type-callout text-foreground">{children}</dd></>
 }
@@ -468,7 +482,6 @@ export function ItemView({ id }: { id: string }) {
   const rootState = i ? itemState(i, i.workflow, i.ss.some((k) => st.S[k]?.st === "run")) : null
   const at = useAgentTree(id, i?.workflow, rootState ? ROOT_STATUS[rootState.kind] : undefined)
   const [agent, selectAgent] = useSelectedNode(at)
-  const [treeOpen, setTreeOpen] = useState(false)
   if (!i) return <Page title={t("views:item.title")} back={["#/items", t("views:items.title")]}><Empty title={t("views:item.notFound")} sub={t("views:item.notFoundSub")} /></Page>
   const designReview = i.waits.find((w) => w.subject === "design_implementation")
   const dependents = st.items.filter((x) => i.dependents.includes(x.id) || (x.deps || []).includes(i.id))
@@ -549,10 +562,10 @@ export function ItemView({ id }: { id: string }) {
     if (e[0] === "me") return (
       <div key={n} className="flex items-start gap-2 py-1.5" data-comment><span className="mt-px flex size-5 shrink-0 items-center justify-center rounded-full bg-blue/10 text-blue" title={t("views:item.me")} aria-label={t("views:item.me")}><UserRoundIcon className="size-3" strokeWidth={2.25} /></span>
         <div className="min-w-0 flex-1">{notes.length ? <div data-comment-notes><div className="type-body">{t("views:item.notes", { count: notes.length })}</div><AnnRefs item={i.id} anns={notes} outs={i.outs} open={(o, ann) => setPreview({ o, focus: ann })} /></div>
-          : (e[1] !== "（附件）" || !e[5]?.length) && <div className="type-body"><Markdown text={e[1]} /></div>}<Files files={e[5]} className="my-1" /><div className="type-footnote tabular-nums text-tertiary">{e[2]}{e[3] && st.S[e[3]] ? ` · ${t("views:item.deliveredTo", { n: st.S[e[3]].n })}` : ""}{e[6] === "thread" && <a href="#/" className="ml-1.5 rounded-md bg-muted px-1.5 hover:text-foreground" data-from-thread>{t("views:item.fromThread")}</a>}</div></div></div>
+          : (e[1] !== "（附件）" || !e[5]?.length) && <div className="type-body"><Markdown text={e[1]} /></div>}<Files files={e[5]} className="my-1" /><div className="type-footnote tabular-nums text-tertiary">{when(e)}{e[3] && st.S[e[3]] ? ` · ${t("views:item.deliveredTo", { n: st.S[e[3]].n })}` : ""}{e[6] === "thread" && <a href="#/" className="ml-1.5 rounded-md bg-muted px-1.5 hover:text-foreground" data-from-thread>{t("views:item.fromThread")}</a>}</div></div></div>
     )
     const yolo = typeof e[1] === "string" && e[1].startsWith("YOLO")
-    return <div key={n} className="flex items-center gap-2 py-1 type-footnote text-muted-foreground" data-yolo-line={yolo ? "" : undefined}><span className="flex size-5 shrink-0 items-center justify-center"><span className="size-1 rounded-full bg-tertiary" /></span>{yolo && <YoloMark />}<span className="min-w-0 truncate" title={String(e[1] ?? "")}>{clip(yolo ? e[1].replace(/^YOLO[：:]\s*/, "") : String(e[1] ?? ""), 240)}</span><span className="shrink-0 tabular-nums text-tertiary">{e[2]}</span></div>
+    return <div key={n} className="flex items-center gap-2 py-1 type-footnote text-muted-foreground" data-yolo-line={yolo ? "" : undefined}><span className="flex size-5 shrink-0 items-center justify-center"><span className="size-1 rounded-full bg-tertiary" /></span>{yolo && <YoloMark />}<span className="min-w-0 truncate" title={String(e[1] ?? "")}>{clip(yolo ? e[1].replace(/^YOLO[：:]\s*/, "") : String(e[1] ?? ""), 240)}</span><span className="shrink-0 tabular-nums text-tertiary">{when(e)}</span></div>
   }
   return (
     <Page small title={titleEdit ? <Input autoFocus defaultValue={i.t} className="h-9 rounded-lg type-title!" data-title-input
@@ -581,14 +594,7 @@ export function ItemView({ id }: { id: string }) {
       <OutDialog item={i.id} outs={i.outs} anns={i.anns} view={preview} setView={setPreview} reviewLabel={t(designReview ? "views:item.reviewDesign" : "views:item.messageBot")}
         onReview={() => { setPreview(null); window.setTimeout(() => { if (designReview) document.querySelector<HTMLTextAreaElement>("[data-design-feedback]")?.focus(); else itemComposer.current?.focus() }, 250) }} />
       {i.arch && <div className="mb-8 flex items-center gap-3 rounded-xl bg-muted/60 px-4 py-2.5 type-callout" data-arch-banner><ArchiveIcon className="size-4 text-muted-foreground" /><span className="flex-1">{t("views:item.archived")}</span><Button size="sm" variant="ghost" onClick={() => archive([i.id], false)}>{t("views:item.restore")}</Button></div>}
-      {!treeOpen && <AgentDetailPanel at={at} node={agent} onClose={() => selectAgent(null)} />}
-      {/* the full tree: a picked agent opens beside it inside the dialog (a panel under the overlay could not be used) */}
-      {treeOpen && <Dialog open onOpenChange={(o) => !o && setTreeOpen(false)}><DialogContent className="max-h-[90dvh] w-[calc(100%-2rem)] overflow-y-auto rounded-2xl sm:max-w-[1200px] [&_[data-agent-header]]:pr-10" data-agent-tree-dialog>
-        <DialogTitle className="sr-only">{t("views:agentTree.title")}</DialogTitle>
-        <div className={cn("grid min-w-0 gap-6", agent && "lg:grid-cols-[minmax(0,1fr)_340px]")}>
-          <AgentTree at={at} selected={agent?.key ?? null} onSelect={selectAgent} controls={false} />
-          {agent && <div key={agent.key} className="anim-in min-w-0 self-start rounded-xl bg-muted/60 p-4 lg:sticky lg:top-0 lg:mt-12" data-agent-panel><AgentDetail at={at} node={agent} onClose={() => selectAgent(null)} /></div>}
-        </div></DialogContent></Dialog>}
+      <AgentDetailPanel at={at} node={agent} onClose={() => selectAgent(null)} />
       <div className="grid gap-10 lg:grid-cols-[minmax(0,1fr)_300px]">
         <div className="flex min-w-0 flex-col gap-8">
           {goal}
@@ -613,23 +619,27 @@ export function ItemView({ id }: { id: string }) {
             {i.rel && <RelNote rel={i.rel} box={i.rel.tone !== "ok"} className="mt-3" onClose={i.rel.tone === "fail" ? () => closeRel(i) : undefined} />}
             {i.dependencyWait && !!i.deps?.length && <div className="mt-4"><DependencyWaitPanel key={`${i.id}:${i.dependencyWait.cycle}`} item={i.id} wait={i.dependencyWait} /></div>}
           </section>
-          {/* the conversation: what people said and what came back; runs of process lines fold to one line */}
+          {/* who works on it: one row per step on one time axis */}
+          {tree && <TeamTimeline at={at} selected={agent?.key ?? null} onSelect={selectAgent} />}
+          {/* the conversation: what people said and what came back, under day headings; runs of process lines fold to one line */}
           <section className="flex flex-col gap-3">
             <div className="flex flex-wrap items-center justify-between gap-2">
               <Segmented size="sm" value={dtab} onChange={(v) => { dtab = v; r() }} options={[["动态", t("views:item.tabActivity")], ["产出", t("views:item.tabOutputs")]] as const} />
             </div>
             {dtab === "动态" && (
               <div key="activity" className="anim-in flex flex-col" data-worklog>
-                {foldProcess(feed, (x) => x.e[0] === "sys" && !queued.byComment.has(x.n)).map((g) => Array.isArray(g)
-                  ? <ProcessRun key={"run:" + g[0].n} count={g.length} last={g[g.length - 1].e}>{g.map(entry)}</ProcessRun>
-                  : entry(g))}
+                {byDay(foldProcess(feed, (x) => x.e[0] === "sys" && !queued.byComment.has(x.n))).map(([day, gs]) => <Fragment key={day}>
+                  {day && <h3 className="mb-1 mt-5 type-label text-tertiary first:mt-0" data-day>{day}</h3>}
+                  {gs.map((g) => Array.isArray(g)
+                    ? <ProcessRun key={"run:" + g[0].n} count={g.length} last={g[g.length - 1].e}>{g.map(entry)}</ProcessRun>
+                    : entry(g))}
+                </Fragment>)}
               </div>
             )}
             {dtab === "产出" && <div key="outputs" className="anim-in"><OutList outs={i.outs} anns={i.anns} open={(o) => setPreview({ o })} /></div>}
           </section>
         </div>
         <aside className="flex min-w-0 flex-col gap-8" data-item-side>
-          {tree && <TeamPanel at={at} selected={agent?.key ?? null} onSelect={selectAgent} onExpand={() => setTreeOpen(true)} />}
           {(i.plan || i.rounds.length > 0 || i.workflow) && <section data-progress>
             <h3 className="mb-2 type-label text-tertiary">{t("views:itemState.progress")}</h3>
             <div className="flex flex-wrap items-center gap-x-1 gap-y-1 type-callout" data-stage={stageOf(i)}>

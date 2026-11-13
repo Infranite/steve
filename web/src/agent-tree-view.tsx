@@ -1,11 +1,11 @@
-/* ── the item page's collaboration area: an agent tree ──
- * One card per agent: who it is (Bot and model), what it was asked to do, its state, and what it cost and took.
- * The coordinator's direct children sit on a bus under it while they fit side by side; anything deeper, and
- * everything on a narrow page, hangs from a rail under the card that started it. The header line counts the
- * agents, the running ones, failures (a pill opening them with retry) and cards waiting for you, and the total
- * cost. A card selected shows its detail in the page's side column (a sheet on narrow pages). */
-import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react"
-import { CheckIcon, ChevronDownIcon, ChevronRightIcon, CircleCheckIcon, CircleDashedIcon, CirclePauseIcon, CircleStopIcon, GitForkIcon, HourglassIcon, LoaderCircleIcon, MessageCircleQuestionIcon, MoreHorizontalIcon, NetworkIcon, PauseIcon, PlayIcon, RotateCcwIcon, SquareIcon, TriangleAlertIcon, XIcon } from "lucide-react"
+/* ── the item page's collaboration area ──
+ * One row per step the coordinator started, in the order the work goes: what it was asked, which Bot did it, how
+ * it ended, and a bar for when it worked, on one time axis for all rows, so a sequence reads as a staircase and
+ * parallel work as overlap. A step tried again stays one row: its earlier attempts are struck segments on the
+ * same bar and "passed on try 3" under its title. A row selected shows its detail beside the page (a sheet on
+ * narrow pages). */
+import { useEffect, useState, type ReactNode } from "react"
+import { BanIcon, CheckIcon, ChevronDownIcon, ChevronRightIcon, CircleCheckIcon, CircleDashedIcon, CirclePauseIcon, GitForkIcon, HourglassIcon, LoaderCircleIcon, MessageCircleQuestionIcon, MoreHorizontalIcon, PauseIcon, PlayIcon, RotateCcwIcon, SquareIcon, TriangleAlertIcon, XIcon } from "lucide-react"
 import { api } from "@/api"
 import { stats as statsApi } from "@/api/stats"
 import { Button } from "@/components/ui/button"
@@ -14,13 +14,13 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigge
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { Sheet, SheetContent, SheetTitle } from "@/components/ui/sheet"
 import { useT } from "@/i18n"
-import { clockDur } from "@/i18n/format"
+import { clockDur, hm, longDur, monthDayShort } from "@/i18n/format"
 import { cn } from "@/lib/utils"
 import { fmtN, fmtUsd } from "@/stats/format"
 import { botName, loadItem, st } from "@/store"
 import { BotAvatar } from "@/ui"
 import { orderedUnits, type Workflow } from "@/workflow"
-import { buildAgentTree, workTime, findNode, isActive, isOver, rollup, summarize, type AgentNode, type AgentStatus, type Cost, type TreeItem, type TreeStat } from "@/agent-tree"
+import { buildAgentTree, workTime, findNode, isActive, isOver, rollup, summarize, teamRange, teamRows, type AgentNode, type AgentStatus, type Cost, type Segment, type TeamRow, type TreeItem, type TreeStat } from "@/agent-tree"
 
 type Action = "pause" | "resume" | "retry" | "cancel" | "single_session"
 
@@ -102,7 +102,7 @@ export function useAgentTree(root: string, workflow?: Workflow | null, rootStatu
     </AlertDialog>
   </>
   return {
-    root, tree, summary, workflow, shown, busy, error, dialogs, change,
+    root, tree, summary, workflow, shown, busy, error, dialogs, change, stats: rows,
     askRework: setRework, askSingle: () => workflow && setConfirmSingle(workflow.revision),
     stat: (item?: string) => item ? byItem.get(item) : undefined,
     total: (item?: string) => item ? totals.get(item) : undefined,
@@ -135,7 +135,7 @@ const STATUS_INK: Record<AgentStatus, string> = {
 const ICON: Record<AgentStatus, typeof CheckIcon> = {
   idle: CircleDashedIcon,
   running: LoaderCircleIcon, unconfirmed: LoaderCircleIcon, starting: LoaderCircleIcon, asking: MessageCircleQuestionIcon, blocked: TriangleAlertIcon,
-  done: CheckIcon, failed: TriangleAlertIcon, waiting: HourglassIcon, pending: CircleDashedIcon, paused: CirclePauseIcon, stopped: CircleStopIcon, proposed: CircleDashedIcon,
+  done: CheckIcon, failed: TriangleAlertIcon, waiting: HourglassIcon, pending: CircleDashedIcon, paused: CirclePauseIcon, stopped: BanIcon, proposed: CircleDashedIcon,
 }
 export function AgentStatusPill({ s, className }: { s: AgentStatus; className?: string }) {
   const t = useT(), I = ICON[s]
@@ -158,119 +158,6 @@ function figures(at: AgentTreeState, n: AgentNode, t: ReturnType<typeof useT>) {
   return { text: [c?.text, time ? clockDur(time) : null].filter(Boolean).join(" · "), hint: c?.hint }
 }
 
-function Card({ at, n, selected, onSelect, open, toggle }: { at: AgentTreeState; n: AgentNode; selected: boolean; onSelect: () => void; open: boolean; toggle: () => void }) {
-  const t = useT()
-  const kind = n.unit && n.unit.kind !== "work" ? t(`views:workflow.${n.unit.kind}`) : n.kind === "fork" ? t("views:agentTree.fork") : null
-  const line = figures(at, n, t)
-  return (
-    <div role="button" tabIndex={0} aria-pressed={selected} onClick={onSelect} onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onSelect() } }}
-      className={cn("group/card @container/card anim-in relative w-full min-w-0 cursor-pointer rounded-xl bg-card p-3.5 text-left shadow-[var(--lift)] transition-[box-shadow,opacity] duration-[180ms] ease-[var(--ease-out)] hover:shadow-[var(--lift-hover)] focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-blue/30",
-        selected && "ring-2 ring-blue", n.kind === "attempt" && "opacity-60 hover:opacity-100", n.status === "pending" && !selected && "bg-transparent shadow-none outline-1 -outline-offset-1 outline-dashed outline-border")}
-      data-agent-node={n.key} data-agent-kind={n.kind}>
-      <div className="flex min-w-0 items-start gap-2">
-        <BotAvatar k={n.bot} size={28} className="mt-0.5" />
-        <div className="min-w-0 flex-1">
-          <div className="truncate type-callout font-medium">{n.bot ? botName(n.bot) : t("views:agentTree.noBot")}</div>
-          <div className="truncate type-footnote text-tertiary">{model(n.bot) || " "}</div>
-        </div>
-        <AgentStatusPill s={n.status} className="@max-[200px]/card:hidden" />
-      </div>
-      <p className="mt-2.5 line-clamp-2 break-words type-callout text-foreground">
-        {kind && <span className="mr-1.5 rounded-md bg-muted px-1.5 py-px type-footnote text-muted-foreground">{kind}</span>}{n.title}</p>
-      {n.waitingOn.length > 0 && <p className="mt-1.5 truncate type-footnote text-muted-foreground" data-agent-waiting>{t("views:workflow.waitingFor", { names: n.waitingOn.join(" · ") })}</p>}
-      {n.decisions > 0 && <p className="mt-1.5 type-footnote font-medium text-attention">{t("views:agentTree.asking", { count: n.decisions })}</p>}
-      {n.kind === "attempt" && <p className="mt-1.5 type-footnote text-muted-foreground">{t("views:agentTree.attempt", { n: n.attempt })}</p>}
-      <div className={cn("mt-2.5 min-h-5 items-center gap-2 type-footnote tabular-nums text-muted-foreground", line.text || n.children.length > 0 ? "flex" : "hidden @max-[200px]/card:flex")}>
-        <AgentStatusPill s={n.status} className="hidden @max-[200px]/card:inline-flex" />
-        <span className="min-w-0 flex-1 truncate" title={line.hint} data-agent-figures>{line.text}</span>
-        {n.children.length > 0 && <button type="button" onClick={(e) => { e.stopPropagation(); toggle() }} onKeyDown={(e) => e.stopPropagation()} aria-expanded={open}
-          aria-label={t(open ? "views:agentTree.collapse" : "views:agentTree.expand", { count: n.children.length })}
-          className="-mr-1 inline-flex h-5 items-center gap-0.5 rounded-md px-1 hover:bg-accent hover:text-foreground" data-agent-toggle={n.key}>
-          {n.children.length}{open ? <ChevronDownIcon className="size-3" /> : <ChevronRightIcon className="size-3" />}</button>}
-      </div>
-    </div>
-  )
-}
-
-const LINE = "bg-border"
-/** a card and, under it, a rail with everything it started */
-function Branch(p: { at: AgentTreeState; n: AgentNode; selected: string | null; onSelect: (k: string) => void; closed: Set<string>; toggle: (k: string) => void }) {
-  const { n, closed } = p, open = !closed.has(n.key)
-  return <div className="min-w-0 max-w-[480px]">
-    <Card at={p.at} n={n} selected={p.selected === n.key} onSelect={() => p.onSelect(n.key)} open={open} toggle={() => p.toggle(n.key)} />
-    {open && n.children.length > 0 && <Rail {...p} nodes={n.children} />}
-  </div>
-}
-function Rail(p: { at: AgentTreeState; nodes: AgentNode[]; selected: string | null; onSelect: (k: string) => void; closed: Set<string>; toggle: (k: string) => void }) {
-  return <ul className="relative ml-4" data-agent-rail>
-    <span aria-hidden className={cn("absolute -top-[3px] -left-[3px] size-[7px] rounded-full border border-tertiary/60 bg-background")} />
-    {p.nodes.map((c, i) => {
-      const last = i === p.nodes.length - 1
-      return <li key={c.key} className="relative pt-2.5 pl-5">
-        <span aria-hidden className={cn("absolute left-0 top-0 w-px", LINE)} style={{ height: last ? 34 : "100%" }} />
-        <span aria-hidden className={cn("absolute left-0 h-px w-5", LINE)} style={{ top: 34 }} />
-        <Branch {...p} n={c} />
-      </li>
-    })}
-  </ul>
-}
-
-const COLUMN = 204, CELL = 236, GAP = 12, INDENT = 32
-/** the coordinator, then its children: side by side under it while they fit in one row; in rows of a grid hung
- * from one trunk when there are more (a long work graph keeps the page's width instead of becoming a column);
- * on a narrow page, a rail */
-function Canvas({ at, selected, onSelect }: { at: AgentTreeState; selected: string | null; onSelect: (k: string) => void }) {
-  const ref = useRef<HTMLDivElement>(null), [width, setWidth] = useState(0)
-  const [closed, setClosed] = useState<Set<string>>(new Set())
-  useLayoutEffect(() => {
-    const el = ref.current
-    if (!el) return
-    const ro = new ResizeObserver(() => setWidth(el.clientWidth))
-    ro.observe(el); setWidth(el.clientWidth)
-    return () => ro.disconnect()
-  }, [])
-  const root = at.tree!
-  const toggle = (k: string) => setClosed((s) => { const x = new Set(s); if (x.has(k)) x.delete(k); else x.add(k); return x })
-  const open = !closed.has(root.key), kids = open ? root.children : []
-  const cols = Math.max(1, Math.floor((width - INDENT + GAP) / (CELL + GAP)))
-  const mode = kids.length > 1 && width >= kids.length * COLUMN ? "bus" : kids.length > 1 && cols >= 2 ? "grid" : "rail"
-  const props = { at, selected, onSelect, closed, toggle }
-  const rootCard = <Card at={at} n={root} selected={selected === root.key} onSelect={() => onSelect(root.key)} open={open} toggle={() => toggle(root.key)} />
-  const dot = "absolute size-[7px] rounded-full border border-tertiary/60 bg-background"
-  return <div ref={ref} className="min-w-0" data-agent-canvas={mode}>
-    {mode === "bus" ? <div className="flex flex-col items-center">
-      <div className="w-full max-w-[300px]">{rootCard}</div>
-      <span aria-hidden className={cn("relative h-5 w-px", LINE)}><span className={cn(dot, "-top-[3px] -left-[3px]")} /></span>
-      <div className="flex w-full" data-agent-bus>
-        {kids.map((c, i) => <div key={c.key} className="relative min-w-0 flex-1 px-1.5 pt-5">
-          <span aria-hidden className={cn("absolute top-0 h-px", LINE)} style={{ left: i === 0 ? "50%" : 0, right: i === kids.length - 1 ? "50%" : 0 }} />
-          <span aria-hidden className={cn("absolute top-0 left-1/2 h-5 w-px", LINE)} />
-          <Branch {...props} n={c} />
-        </div>)}
-      </div>
-    </div> : mode === "grid" ? (() => {
-      // rows of `cols` cells; each row's bus runs from the trunk to the middle of its last cell
-      const cell = (width - INDENT - (cols - 1) * GAP) / cols
-      const rows = Array.from({ length: Math.ceil(kids.length / cols) }, (_, r) => kids.slice(r * cols, r * cols + cols))
-      return <div data-agent-grid>
-        <div className="max-w-[320px]">{rootCard}</div>
-        {rows.map((row, r) => <div key={r} className="relative pt-4" style={{ paddingLeft: INDENT }}>
-          {r === 0 && <span aria-hidden className={cn(dot, "top-[-3px]")} style={{ left: 13 }} />}
-          <span aria-hidden className={cn("absolute top-0 w-px", LINE)} style={{ left: 16, height: r === rows.length - 1 ? 9 : "100%" }} />
-          <span aria-hidden className={cn("absolute top-2 h-px", LINE)} style={{ left: 16, width: INDENT - 16 + (row.length - 1) * (cell + GAP) + cell / 2 }} />
-          <div className="grid items-start" style={{ gridTemplateColumns: `repeat(${cols}, minmax(0, 1fr))`, columnGap: GAP, rowGap: GAP }}>
-            {row.map((c) => <div key={c.key} className="relative min-w-0">
-              <span aria-hidden className={cn("absolute -top-2 left-1/2 h-2 w-px", LINE)} />
-              <Branch {...props} n={c} />
-            </div>)}
-          </div>
-        </div>)}
-      </div>
-    })() : <Branch {...props} n={root} />}
-  </div>
-}
-
-/** the header line, notices, the tree and the graph's change history */
 /** the workflow's own controls: pause or resume the graph, and, while paused, switch to single-session acceptance */
 export function WorkflowButtons({ at }: { at: AgentTreeState }) {
   const t = useT(), workflow = at.workflow
@@ -314,63 +201,105 @@ export function TreePills({ at, onSelect }: { at: AgentTreeState; onSelect: (k: 
   </>
 }
 
-/** the header line, notices, the tree and the graph's change history; `controls` off when the item page shows
- * the notices and buttons itself (the full tree opened from its side column) */
+/** the collaboration with the work graph's own controls, notices and change history (a page without its own "now"
+ * card shows them here) */
 export function AgentTree({ at, selected, onSelect, controls = true }: { at: AgentTreeState; selected: string | null; onSelect: (k: string | null) => void; controls?: boolean }) {
-  const t = useT()
-  const { tree, summary, workflow } = at
-  if (!tree || !summary) return null
-  const total = at.total(tree.item)
-  return <section className="min-w-0" data-agent-tree data-workflow={workflow ? "" : undefined}>
-    <div className="mb-4 flex flex-wrap items-center gap-x-3 gap-y-2" data-agent-header>
-      <h2 className="flex items-center gap-2 type-headline"><NetworkIcon className="size-4 text-muted-foreground" />{t("views:agentTree.title")}</h2>
-      <span className="flex-1" />
-      <span className="type-footnote tabular-nums text-muted-foreground" data-agent-count>{t("views:agentTree.agents", { count: summary.agents })}</span>
-      {summary.active > 0 && <span className="type-footnote tabular-nums text-blue">{t("views:agentTree.active", { count: summary.active })}</span>}
-      <TreePills at={at} onSelect={onSelect} />
-      {total?.known && (() => { const c = costOf(total, t); return <span className="type-footnote tabular-nums text-foreground" title={c.hint} data-agent-total>{t("views:agentTree.cost", { usd: c.text })}</span> })()}
-      {controls && <WorkflowButtons at={at} />}
-    </div>
+  if (!at.tree || !at.summary) return null
+  return <section className="min-w-0" data-agent-tree data-workflow={at.workflow ? "" : undefined}>
     {controls && at.dialogs}
     {controls && <Notices at={at} />}
-    <Canvas at={at} selected={selected} onSelect={(k) => onSelect(k === selected ? null : k)} />
-    {workflow && <History workflow={workflow} />}
+    <TeamTimeline at={at} selected={selected} onSelect={onSelect} actions={controls && <WorkflowButtons at={at} />} />
+    {at.workflow && <History workflow={at.workflow} />}
   </section>
 }
 
-/** the item page's side column: everyone working on it, one row each, in the tree's order; a running agent's row
- * moves, the rest is quiet. The full tree opens from here. */
-export function TeamPanel({ at, selected, onSelect, onExpand }: { at: AgentTreeState; selected: string | null; onSelect: (k: string | null) => void; onExpand: () => void }) {
+/* a bar's fill by how its span ended; an attempt given up is hatched, not filled, so it never reads as done */
+const BAR: Partial<Record<AgentStatus, string>> = {
+  done: "bg-foreground/25", running: "bg-blue", starting: "bg-blue/60", unconfirmed: "bg-blue/60",
+  failed: "bg-destructive/80", asking: "bg-attention", blocked: "bg-attention/60",
+  stopped: "bg-[repeating-linear-gradient(135deg,var(--color-muted-foreground)_0_1px,transparent_1px_4px)] opacity-70 ring-1 ring-inset ring-muted-foreground/50",
+}
+const STEP_MS = [1, 2, 5, 10, 15, 30, 60, 120, 180, 360, 720, 1440].map((m) => m * 60_000)
+/** a few round times across the range for the axis */
+function ticks([a, b]: [number, number], max = 4): number[] {
+  const step = STEP_MS.find((s) => (b - a) / s <= max) ?? STEP_MS[STEP_MS.length - 1]
+  const out: number[] = []
+  for (let x = Math.ceil(a / step) * step; x <= b && out.length < 12; x += step) out.push(x)
+  return out
+}
+/** re-renders every half minute while something runs, so a running bar grows */
+function useNow(live: boolean) {
+  const [now, setNow] = useState(() => Date.now())
+  useEffect(() => { if (!live) return; const id = setInterval(() => setNow(Date.now()), 30_000); return () => clearInterval(id) }, [live])
+  return now
+}
+const ROW = "grid w-full min-w-0 grid-cols-[minmax(0,1fr)_auto] gap-x-4 gap-y-1.5 sm:grid-cols-[minmax(0,15rem)_minmax(0,1fr)_4.5rem]"
+
+/** the item page's collaboration: one row per step in the order of the work, each with a bar on one time axis */
+export function TeamTimeline({ at, selected, onSelect, actions }: { at: AgentTreeState; selected: string | null; onSelect: (k: string | null) => void; actions?: ReactNode }) {
   const t = useT()
   const { tree, summary } = at
+  const now = useNow(!!summary?.active)
   if (!tree || !summary) return null
+  const rows = teamRows(tree, at.stats, now), range = teamRange(rows)
+  const span = range ? Math.max(range[1] - range[0], 60_000) : 1
+  const pos = (x: number) => range ? ((x - range[0]) / span) * 100 : 0
   const total = at.total(tree.item), c = total?.known ? costOf(total, t) : null
-  const row = (n: AgentNode, depth: number): ReactNode => {
-    const I = ICON[n.status], f = figures(at, n, t), on = selected === n.key
-    return <li key={n.key}>
-      <button type="button" onClick={() => onSelect(on ? null : n.key)} aria-pressed={on} data-agent-node={n.key} data-agent-kind={n.kind}
-        className={cn("group flex w-full min-w-0 items-start gap-2 rounded-lg py-1.5 pr-1.5 text-left transition-colors hover:bg-accent", on && "bg-accent", n.kind === "attempt" && "opacity-55 hover:opacity-100")}
-        style={{ paddingLeft: 6 + depth * 14 }}>
-        <I className={cn("mt-[3px] size-3.5 shrink-0", STATUS_INK[n.status], isActive(n.status) && "motion-safe:animate-spin")} strokeWidth={2.25} aria-label={t(`views:agentTree.status.${n.status}`)} />
-        <span className="min-w-0 flex-1">
-          <span className="block truncate type-callout text-foreground">{n.unit && n.unit.kind !== "work" && <span className="mr-1 text-muted-foreground">{t(`views:workflow.${n.unit.kind}`)} ·</span>}{n.title}</span>
-          <span className="block truncate type-footnote text-tertiary" title={f.hint}>{[n.bot ? botName(n.bot) : null, n.kind === "attempt" ? t("views:agentTree.attempt", { n: n.attempt }) : null, f.text].filter(Boolean).join(" · ")}</span>
-        </span>
-        {n.decisions > 0 && <span className="mt-0.5 inline-flex h-5 min-w-5 shrink-0 items-center justify-center rounded-md bg-attention/12 px-1 type-label tabular-nums text-attention">{n.decisions}</span>}
-      </button>
-      {n.children.length > 0 && <ul>{n.children.map((k) => row(k, depth + 1))}</ul>}
-    </li>
+  const days = !!range && new Date(range[0]).toDateString() !== new Date(range[1]).toDateString()
+  const label = (x: number) => days ? `${monthDayShort(x)} ${hm(x)}` : hm(x)
+  const marks = range ? ticks(range) : []
+  const steps = rows.filter((r) => r.depth === 0).length
+  const meta = [tree.bot ? t("views:agentTree.coordinator", { name: botName(tree.bot) }) : null, t("views:agentTree.steps", { count: steps }), t("views:agentTree.agents", { count: summary.agents })]
+  const tip = (r: TeamRow, s: Segment) => {
+    const cost = at.total(s.item), w = workTime(at.stat(s.item))
+    return [r.tries.length && s.attempt ? t("views:agentTree.attempt", { n: s.attempt }) : null, t(`views:agentTree.status.${s.status}`), `${label(s.start)}–${hm(s.end)}`,
+      w ? t("views:agentTree.worked", { time: clockDur(w) }) : null, cost?.known ? costOf(cost, t).text : null].filter(Boolean).join(" · ")
   }
   return <section className="min-w-0" data-agent-team>
-    <div className="mb-2 flex items-center gap-2">
-      <h3 className="type-label text-tertiary">{t("views:agentTree.team")}</h3>
-      <span className="type-footnote tabular-nums text-tertiary">{t("views:agentTree.agents", { count: summary.agents })}{summary.active > 0 && <span className="text-blue"> · {t("views:agentTree.active", { count: summary.active })}</span>}</span>
+    <div className="mb-2 flex flex-wrap items-center gap-x-3 gap-y-1.5" data-agent-header>
+      <h2 className="type-label text-tertiary">{t("views:agentTree.title")}</h2>
+      {at.old && <span className="rounded-md bg-muted px-1.5 type-label text-muted-foreground" data-agent-old>{t("views:agentTree.earlierRound")}</span>}
+      <span className="type-footnote tabular-nums text-tertiary" data-agent-count>{meta.filter(Boolean).join(" · ")}{c && <span title={c.hint} data-agent-total> · {t("views:agentTree.cost", { usd: c.text })}</span>}</span>
+      {summary.active > 0 && <span className="type-footnote tabular-nums text-blue">{t("views:agentTree.active", { count: summary.active })}</span>}
       <span className="flex-1" />
-      <Button variant="ghost" size="xs" className="text-muted-foreground" onClick={onExpand} data-agent-expand>{t("views:agentTree.showTree")}</Button>
+      <TreePills at={at} onSelect={(k) => onSelect(k)} />
+      {actions}
     </div>
-    {(summary.failed.length > 0 || summary.asking.length > 0) && <div className="mb-1.5 flex flex-wrap gap-1.5"><TreePills at={at} onSelect={(k) => onSelect(k)} /></div>}
-    <ul className="-mx-1.5" data-agent-rows>{tree.children.map((n) => row(n, 0))}</ul>
-    {c && <p className="mt-2 type-footnote tabular-nums text-tertiary" title={c.hint} data-agent-total>{t("views:agentTree.totalWithChildren", { usd: c.text })}</p>}
+    <div className="relative -mx-2" data-agent-rows>
+      {range && <div className={cn(ROW, "px-2 max-sm:hidden")} aria-hidden data-agent-axis>
+        <span /><span className="relative h-5">{marks.map((x) => <span key={x} className="absolute top-0 -translate-x-1/2 type-footnote tabular-nums text-tertiary" style={{ left: `${pos(x)}%` }}>{label(x)}</span>)}</span><span />
+      </div>}
+      <ul>{rows.map((r) => {
+        const n = r.node, I = ICON[n.status], on = selected === n.key
+        const tried = r.tries.length > 0
+        const note = tried ? n.status === "done" ? t("views:agentTree.passedOn", { n: n.attempt ?? r.tries.length + 1 }) : t("views:agentTree.retried", { count: r.tries.length }) : null
+        const word = n.status === "done" ? null : t(`views:agentTree.status.${n.status}`)
+        return <li key={n.key}>
+          <button type="button" onClick={() => onSelect(on ? null : n.key)} aria-pressed={on} data-agent-node={n.key} data-agent-kind={n.kind} data-agent-status={n.status} data-agent-tries={r.tries.length || undefined}
+            className={cn(ROW, "group rounded-lg px-2 py-2 text-left transition-colors duration-[120ms] hover:bg-accent/60", on && "bg-accent")}>
+            <span className="flex min-w-0 items-start gap-2.5" style={{ paddingLeft: r.depth * 16 }}>
+              <I className={cn("mt-[3px] size-3.5 shrink-0", STATUS_INK[n.status], isActive(n.status) && "motion-safe:animate-spin")} strokeWidth={2.25} aria-label={t(`views:agentTree.status.${n.status}`)} />
+              <span className="min-w-0">
+                <span className={cn("block truncate type-callout", n.status === "stopped" ? "text-muted-foreground" : "text-foreground")}>{n.title}</span>
+                <span className="flex min-w-0 items-center gap-1.5 type-footnote text-tertiary">
+                  <BotAvatar k={n.bot} size={14} /><span className="truncate">{[n.bot ? botName(n.bot) : t("views:agentTree.noBot"), note].filter(Boolean).join(" · ")}</span>
+                  {word && <span className={cn("shrink-0", STATUS_INK[n.status])}>· {word}</span>}
+                  {n.decisions > 0 && <span className="shrink-0 font-medium text-attention">· {t("views:agentTree.asking", { count: n.decisions })}</span>}
+                </span>
+              </span>
+            </span>
+            <span className="relative min-h-3 self-stretch max-sm:order-last max-sm:col-span-2 sm:-my-2" data-agent-track>
+              {marks.map((x) => <span key={x} aria-hidden className="absolute inset-y-0 w-px bg-border/60 max-sm:hidden" style={{ left: `${pos(x)}%` }} />)}
+              {r.segments.map((s) => <span key={s.key} className={cn("absolute top-1/2 h-2 -translate-y-1/2 rounded-full", BAR[s.status] ?? "bg-muted-foreground/30", on && s.status === "done" && "bg-foreground/45")}
+                style={{ left: `${pos(s.start)}%`, width: `max(4px, ${pos(s.end) - pos(s.start)}%)` }} title={tip(r, s)} data-agent-bar={s.status} />)}
+              {!r.segments.length && <span className="absolute inset-y-0 left-0 flex max-w-full items-center truncate type-footnote text-tertiary">{n.waitingOn.length ? t("views:workflow.waitingFor", { names: n.waitingOn.join(" · ") }) : t("views:agentTree.notStarted")}</span>}
+            </span>
+            <span className="self-center whitespace-nowrap text-right type-footnote tabular-nums text-muted-foreground max-sm:row-start-1 max-sm:col-start-2" title={r.ms > 0 ? t("views:agentTree.worked", { time: clockDur(r.ms) }) : undefined}>{r.ms > 0 ? longDur(r.ms) : ""}</span>
+          </button>
+        </li>
+      })}</ul>
+      {summary.active > 0 && range && <span aria-hidden className="pointer-events-none absolute inset-y-0 hidden w-px bg-blue/40 sm:block" style={{ left: `calc(0.5rem + 15rem + 1rem + (100% - 0.5rem * 2 - 15rem - 4.5rem - 2rem) * ${pos(now) / 100})` }} />}
+    </div>
   </section>
 }
 
@@ -415,6 +344,8 @@ export function AgentDetail({ at, node, onClose }: { at: AgentTreeState; node: A
   const running = !!u && (u.status === "running" || u.status === "dispatching")
   const line = figures(at, node, t)
   const item = node.item ? st.items.find((i) => i.id === node.item) : undefined
+  /* a unit's earlier attempts are folded into its row; their outcome shows here */
+  const tries = node.kind === "unit" && at.tree ? at.tree.children.filter((c) => c.kind === "attempt" && c.unitId === node.unitId) : []
   return <div className="flex min-w-0 flex-col gap-4" data-agent-detail={node.key}>
     <div className="flex items-start gap-2.5">
       <BotAvatar k={node.bot} size={36} />
@@ -450,6 +381,11 @@ export function AgentDetail({ at, node, onClose }: { at: AgentTreeState; node: A
       {st.bots[u.bot_id]?.on === false && <p className="text-attention">{t("views:workflow.botDisabled")}</p>}
     </div>}
     {node.reason && <p className="break-words rounded-lg bg-muted/60 px-3 py-2 type-callout">{node.reason}</p>}
+    {tries.length > 0 && <section data-agent-tries><h4 className="mb-1.5 type-label text-tertiary">{t("views:agentTree.earlierTries")}</h4>
+      <ul className="flex flex-col gap-1">{tries.map((a) => { const f = figures(at, a, t); return <li key={a.key} className="flex min-w-0 items-center gap-2 type-callout">
+        <AgentStatusPill s={a.status} /><span className="shrink-0 tabular-nums">{t("views:agentTree.attempt", { n: a.attempt })}</span>
+        <span className="min-w-0 flex-1 truncate type-footnote tabular-nums text-muted-foreground" title={a.reason ?? undefined}>{[f.text, a.reason].filter(Boolean).join(" · ")}</span>
+        {a.session && <a href={`#/sessions/${encodeURIComponent(a.session)}`} className="shrink-0 type-footnote text-muted-foreground hover:text-foreground">{t("views:agentTree.openTry")}</a>}</li> })}</ul></section>}
     {u?.goal && <section><h4 className="mb-1.5 type-label text-tertiary">{t("views:agentTree.goal")}</h4><p className="whitespace-pre-wrap break-words type-callout">{u.goal}</p></section>}
     {u?.summary && <section><h4 className="mb-1.5 type-label text-tertiary">{t("views:agentTree.summary")}</h4><p className="whitespace-pre-wrap break-words type-callout">{u.summary}</p></section>}
     {!!u?.outputs?.length && <section data-workflow-outputs><h4 className="mb-1.5 type-label text-tertiary">{t("views:workflow.outputs")}</h4>

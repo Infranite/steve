@@ -50,6 +50,7 @@ export default {
     daysAgo_other: "{{count}} days ago",
     today: "Today {{time}}",
     yesterday: "Yesterday {{time}}",
+    todayDay: "Today", yesterdayDay: "Yesterday",
     tomorrow: "Tomorrow {{time}}",
     weekdayAt: "{{weekday}} {{time}}",
     dateAt: "{{date}} {{time}}",

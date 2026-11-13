@@ -48,6 +48,7 @@ export default {
     daysAgo_other: "{{count}} 天前",
     today: "今天 {{time}}",
     yesterday: "昨天 {{time}}",
+    todayDay: "今天", yesterdayDay: "昨天",
     tomorrow: "明天 {{time}}",
     weekdayAt: "{{weekday}} {{time}}",
     dateAt: "{{date}} {{time}}",

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict"
 import test from "node:test"
-import { buildAgentTree, workTime, findNode, rollup, summarize, unitStatus } from "../src/agent-tree.ts"
+import { buildAgentTree, workTime, findNode, rollup, summarize, teamRange, teamRows, unitStatus } from "../src/agent-tree.ts"
 
 const item = (id, extra = {}) => ({ id, t: `title ${id}`, b: "dev", st: "run", src: ["Steve", "chat"], waits: [], ...extra })
 const unit = (id, status, extra = {}) => ({ id, title: `unit ${id}`, goal: "", bot_id: "dev", kind: "work", depends_on: [], resources: [], required: true, status, attempt: 1, ...extra })
@@ -64,4 +64,23 @@ test("cost rolls up the Hub's whole subtree; time is the agent's working time", 
 test("an item closed as failed is a failed node, not one still to start", () => {
   const tree = buildAgentTree("ST-1", [item("ST-1"), item("ST-2", { st: "fail", parent: { item: "ST-1" } })])
   assert.equal(tree.children[0].status, "failed")
+})
+
+test("team rows: a retried step is one row with every attempt's span; forks follow their row", () => {
+  const wf = workflow([
+    unit("api", "succeeded", { item_id: "ST-3", attempt: 2 }),
+    unit("review", "pending", { depends_on: ["api"], kind: "review" }),
+  ], { history_attempts: [{ item_id: "ST-2", unit_id: "api", created: 1, snapshot: { title: "old api", status: "cancelled", attempt: 1 } }] })
+  const items = [item("ST-1"), item("ST-2", { src: ["Steve", "workflow"], parent: { item: "ST-1" } }), item("ST-3", { src: ["Steve", "workflow"], parent: { item: "ST-1" }, st: "done" }),
+    item("ST-4", { parent: { item: "ST-3", s: "s", at: 4 } })]
+  const tree = buildAgentTree("ST-1", items, wf)
+  const stat = (id, first, done, ms, dropped = null) => ({ item_id: id, parent_id: "ST-1", depth: 1, tokens: 1, est: 0, reported: 0, agent_ms: ms, first_turn: first, done_at: done, dropped_at: dropped })
+  const T = 1_700_000_000_000
+  const rows = teamRows(tree, [stat("ST-2", T / 1000, null, 60_000), stat("ST-3", T + 200_000, T + 500_000, 120_000), stat("ST-4", T + 600_000, null, 1000)], T + 900_000)
+  assert.deepEqual(rows.map((r) => [r.node.key, r.depth, r.tries.length]), [["unit:api", 0, 1], ["ST-4", 1, 0], ["unit:review", 0, 0]])
+  assert.deepEqual(rows[0].segments.map((s) => [s.status, s.start - T, s.end - T]), [["stopped", 0, 60_000], ["done", 200_000, 500_000]], "seconds become milliseconds; a span without an end lasts its working time")
+  assert.equal(rows[0].ms, 180_000, "the row's time holds every attempt")
+  assert.equal(rows[1].segments[0].end, T + 900_000, "a running fork reaches now")
+  assert.deepEqual(rows[2].segments, [], "a step not started has no bar")
+  assert.deepEqual(teamRange(rows), [T, T + 900_000])
 })

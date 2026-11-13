@@ -48,6 +48,14 @@ export function pastTime(ts: number | null | undefined, now = Date.now()) {
   return monthDayShort(d)
 }
 
+/** the day of a moment as a heading: "今天", "昨天", else "11月12日 周三" */
+export function dayHeading(ts: number, now = Date.now()) {
+  const d = new Date(ts), days = Math.round((startOfDay(new Date(now)) - startOfDay(d)) / DAY)
+  if (days === 0) return t("common:time.todayDay")
+  if (days === 1) return t("common:time.yesterdayDay")
+  return `${monthDay(d)} ${weekday(d)}`
+}
+
 /** a moment near now, usually ahead: "今天 08:30", "明天 08:30", "昨天 08:30", "周五 09:00", else "11-12 09:00" */
 export function nearTime(ts: number | null | undefined, now = Date.now()) {
   if (!ts) return ""
