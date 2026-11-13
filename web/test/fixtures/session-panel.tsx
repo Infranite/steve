@@ -40,7 +40,8 @@ api.item = (async (id: string) => ({ ...items.find((x) => x.id === id), goalsLis
   timeline: [{ id: 1, ts: s(320), actor: "sys", kind: "sys", text: "交付", session_id: "s1" }, { id: 2, ts: s(500), actor: "sys", kind: "sys", text: "交付", session_id: "s0" }],
   artifacts: [{ id: "art1", kind: "报告", title: "数据契约核实摘要", location: "outputs/a.md", created: s(320) }, { id: "art2", kind: "报告", title: "别的会话的产出", location: null, created: s(500) }] })) as any
 api.resumeInfo = (async () => ({ harness: sess.harness, id: null, cwd: "/tmp/st-2", cwd_exists: true, command: null, transcript: null })) as any
-stats.session = async () => ({ session_id: "s1", turns: codex ? 0 : 2, usage: codex ? usage(0, 0, 0, 0) : usage(40_000, 5_000, 900_000, 0.42) })
+/* the harness's own bill differs from Steve's estimate: the panel says both */
+stats.session = async () => ({ session_id: "s1", turns: codex ? 0 : 2, usage: codex ? usage(0, 0, 0, 0) : { ...usage(40_000, 5_000, 900_000, 0.42), reported: 1.2 } })
 stats.item = (async () => ({ turns: [{ id: "t1", session_id: "s1", started: s(10), ended: s(100), stop_reason: "end_turn", attempt: 0, transient: false, tools: 2, tool_errors: 0, usage: usage(30_000, 3_000, 600_000, 0.3) },
   { id: "t2", session_id: "s1", started: s(200), ended: s(320), stop_reason: "end_turn", attempt: 0, transient: false, tools: 1, tool_errors: 0, usage: usage(10_000, 2_000, 300_000, 0.12) }] })) as any
 kb.uses = (async () => ({ hits: codex ? [] : [

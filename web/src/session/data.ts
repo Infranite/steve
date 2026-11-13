@@ -1,10 +1,10 @@
 /* What the session page says about a session, worked out from what the Hub already reports: its turns (from the
- * transcript's events, with each turn's tokens and estimated cost where the Hub's stats have them), what it delivered,
- * the files it changed and where it sits among items and sessions. Nothing here guesses: a figure the Hub does not
+ * transcript's events), what it delivered and the files it changed. Nothing here guesses: a figure the Hub does not
  * report stays unknown. Kept free of React and of views so node --test can load it. */
 /** a transcript tuple of store.ts (`Ev`) */
 type Ev = any[]
 
+/** a turn's tokens and estimated cost, as the Hub's per-turn stats (`/stats/items/:id` turns) report them */
 export type TurnUsage = { input: number; output: number; cache_read: number; cache_write: number; total: number; est: number; reported: number; unpriced_tokens: number }
 /** one turn of a session: from the prompt that opened it to the end the harness reported */
 export type Turn = {
@@ -18,7 +18,6 @@ export type Turn = {
   /** still running (the session runs and no end came yet) */ live: boolean
   tools: number; fails: number
   /** the stop reason the harness gave ("end_turn", "cancelled"…) */ stop?: string
-  /** the turn's own usage, from the Hub's stats (an item's sessions only) */ usage?: TurnUsage
 }
 const PROMPT = ["u", "hi", "q"]
 /** one line of plain text: Markdown marks and code fences dropped */
@@ -51,21 +50,6 @@ export function turnsOf(ev: Ev[], ts: number[], running: boolean, head: (s: stri
   })
   if (cur && running) (cur as Turn).live = true
   return out
-}
-
-type StatTurn = { session_id: string; started: number; ended: number | null; stop_reason: string | null; tools: number; tool_errors: number; usage: TurnUsage }
-/** each turn's usage from the Hub's per-turn stats (`/stats/items/:id` turns), matched by when it started and ended
- *  (within 5 s, as the timeline view matches them); a turn without a match keeps none */
-export function withUsage(turns: Turn[], stats: StatTurn[] | undefined, sid: string): Turn[] {
-  const mine = (stats ?? []).filter((x) => x.session_id === sid)
-  if (!mine.length) return turns
-  const used = new Set<StatTurn>()
-  return turns.map((t) => {
-    const m = mine.find((x) => !used.has(x) && Math.abs(x.started - t.start) <= 5000 && (t.end == null || x.ended == null || Math.abs(x.ended - t.end) <= 5000))
-    if (!m) return t
-    used.add(m)
-    return { ...t, usage: m.usage }
-  })
 }
 
 /** the files the session changed, from its edit calls that succeeded: path, lines added, lines removed; most changed first */

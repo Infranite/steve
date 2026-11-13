@@ -706,12 +706,12 @@ export function SessionView({ k }: { k: string }) {
   return (
     <div className="flex h-full min-h-0">
       <div className="min-w-0 flex-1">
-        <Page noTitle title={t("views:session.numbered", { n: s.n })} back={i ? ["#/items/" + i.id, t("views:items.title")] : ["#/sessions", t("views:sessions.title")]} max={720} scrollRef={scroller}
+        <Page noTitle title={t("views:session.numbered", { n: s.n })} back={i ? ["#/items/" + i.id, t("views:items.title")] : ["#/sessions", t("views:sessions.title")]} max={720} center scrollRef={scroller}
           bar={<div className="flex min-w-0 items-center gap-2" data-session-bar><span className="hidden shrink-0 sm:inline-flex" data-session-mark={s.harness ?? ""}>{mark}</span><span className="truncate type-headline">{s.n ? t("views:session.numberedBar", { n: s.n }) : ""}{renaming ? <Input autoFocus defaultValue={s.title} className="inline-flex h-7 w-56 rounded-md" data-rename-input onBlur={(e) => { const v = e.target.value.trim(); if (v && v !== s.title) sessPatch(k, { title: v }, t("views:session.renamed")); setRenaming(false) }} onKeyDown={(e) => e.key === "Enter" && (e.target as HTMLInputElement).blur()} /> : s.title}</span><Status s={s.st} sess pill className="hidden sm:inline-flex" />{i && <ProjectChip id={i.project} className="hidden shrink-0 type-footnote text-muted-foreground sm:inline-flex" />}</div>}
           actions={<>{!s.ro && <SessionStats id={k} ctx={s.contextKnown ? s.ctx : undefined} />}<Button size="icon-sm" variant="ghost" className="text-muted-foreground sm:hidden" aria-label={t("views:session.info")} onClick={() => setInfoOpen(true)} data-session-info><PanelRightIcon /></Button><Button size="sm" variant="ghost" className="hidden text-muted-foreground sm:inline-flex xl:hidden" onClick={() => setInfoOpen(true)} data-session-info-wide><PanelRightIcon />{t("views:session.info")}</Button>{s.ro && <span className="inline-flex items-center gap-1 type-footnote text-muted-foreground"><LockIcon className="size-3" />{t("views:session.readOnly")}</span>}{menu}</>}
           footer={
-            /* on the page's own frame and reading width: the composer and the transcript share one left edge */
-            <div className="mx-auto w-full max-w-[1104px] shrink-0 px-4 pb-[76px] sm:px-8 lg:pb-5"><div className="max-w-[760px]">
+            /* the transcript's column, centred as it is: the composer and the transcript share both edges */
+            <div className="mx-auto w-full max-w-[824px] shrink-0 px-4 pb-[76px] sm:px-8 lg:pb-5"><div>
               <div className="flex flex-wrap items-center gap-x-4 gap-y-1 py-2 type-footnote text-tertiary" data-session-runtime>
                 {/* harness and model: the composer's label says them (the read-only note has none, so here it does) */}
                 {s.ro && <span className="inline-flex min-w-0 items-center gap-1.5 break-all text-muted-foreground" data-runtime-harness><HarnessMark harness={s.harness ?? s.h} className="size-3.5" />{hm(s)}</span>}

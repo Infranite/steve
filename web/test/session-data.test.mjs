@@ -1,6 +1,6 @@
 import assert from "node:assert/strict"
 import { test } from "node:test"
-import { filesOf, outputsOf, turnsOf, withUsage, workedMs } from "../src/session/data.ts"
+import { filesOf, outputsOf, turnsOf, workedMs } from "../src/session/data.ts"
 
 const ev = [["u", "fix the bug"], ["th", "…"], ["tool", "edit", "Edit", "a.ts", "", 0, 3, 1, 0], ["tool", "run", "Bash", "ls", "", 0, null, null, 1], ["a", "done"], ["end", "end_turn"],
   ["hi", "brief", null, "Steve brief\nmore"], ["u", "steer"], ["tool", "edit", "Edit", "a.ts", "", 0, 2, 0, 0], ["end", "cancelled"], ["u", "again"], ["th", "x"]]
@@ -18,13 +18,6 @@ test("an imported transcript has no ends: a prompt after the work opens the next
   const imp = [["u", "a"], ["a", "x"], ["u", "b"], ["tool", "run", "Bash", "ls"], ["u", "c"]]
   assert.equal(turnsOf(imp, [1, 1, 1, 1, 1], false).length, 1)
   assert.equal(turnsOf(imp, [1, 1, 1, 1, 1], false, undefined, true).length, 3)
-})
-
-test("a turn takes the usage of the stats turn that started and ended with it, within 5 s", () => {
-  const t = turnsOf(ev, ts.map((x) => x * 1000), false)
-  const u = { input: 1, output: 2, cache_read: 3, cache_write: 0, total: 6, est: 0.1, reported: 0, unpriced_tokens: 0 }
-  const got = withUsage(t, [{ session_id: "s", started: 102_000, ended: 199_000, usage: u }, { session_id: "other", started: 300_000, ended: 400_000, usage: u }], "s")
-  assert.deepEqual(got.map((x) => x.usage?.total), [6, undefined, undefined])
 })
 
 test("files changed add up per path, failed edits left out, most changed first", () => {

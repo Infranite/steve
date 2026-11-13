@@ -219,13 +219,9 @@ export default {
   parts: {
     cites_other: "依据 · {{count}} 条知识",
     sessionTitle: "用到的知识",
-    sessionTitleN: "用到的知识 · {{count}}",
     deleted: "已删除",
     why: "按这次检索找到：",
     snippets_other: "{{count}} 段",
-    moreSearches_other: "再显示 {{count}} 次检索",
-    fewerSearches: "收起",
-    sessionNone: "这个会话还没有用到知识库",
     wordingAria: "这条的措辞",
     reword: "改措辞",
     no: "不保存",

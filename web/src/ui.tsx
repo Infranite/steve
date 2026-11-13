@@ -454,7 +454,10 @@ export function PanelHead({ title, onClose, closeLabel, closeTest, children, cla
 }
 
 /* ───────── page frame: large title that collapses into the bar on scroll ───────── */
-export function Page({ title, sub, back, actions, toolbar, toolbarTop = false, children, footer, max = 760, bar, noTitle = false, scrollRef, small = false, lead }: {
+export function Page({ title, sub, back, actions, toolbar, toolbarTop = false, children, footer, max = 760, bar, noTitle = false, scrollRef, small = false, lead, center = false }: {
+  /** a reading page that is only its column (a conversation): the column centred in the room it has, not on the
+   *  frame's left edge */
+  center?: boolean
   /** beside the title and its description (an avatar, a large icon): only in the title block, never in the bar */
   lead?: ReactNode
   /** pin the toolbar to the title line instead of the bottom of the title block */
@@ -485,7 +488,7 @@ export function Page({ title, sub, back, actions, toolbar, toolbarTop = false, c
         {/* one frame for every page (1040, or 1280 for wide ones) so a title is always in the same place; a reading
           * page keeps its narrower column on the frame's left edge instead of centring a width of its own */}
         <div className={cn("mx-auto w-full px-4 sm:px-8", footer ? "pb-6" : "pb-24 md:pb-12")} style={{ maxWidth: frameOf(max) + 64 }}>
-          <div style={{ maxWidth: max <= 820 ? READING : undefined }}>
+          <div className={cn(center && "mx-auto")} style={{ maxWidth: max <= 820 ? READING : undefined }}>
           {/* the title block keeps 20rem before the toolbar beside it wraps below, so a phone never squeezes the description */}
           {!noTitle && (
             <div className="flex flex-wrap items-end gap-x-4 gap-y-3 pb-8 pt-3">
