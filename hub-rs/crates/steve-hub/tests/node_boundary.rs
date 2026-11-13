@@ -225,6 +225,8 @@ const ALLOWED: &[Entry] = &[
     /* the harness libraries: what they start is reached only through the Harness entries */
     e(Spawn, "steve-acp/src/rpc.rs", 1, Library, "an ACP adapter process"),
     e(Spawn, "steve-acp/src/config.rs", 1, Hub, "`npm root -g`, to find the adapters"),
+    e(Fs, "steve-acp/src/config.rs", 1, Library, "extensionless npm bin shebang check (`#!/usr/bin/env node`), so Node runs JS adapters directly"),
+    e(Fs, "steve-acp/src/adapters.rs", 1, Library, "adapter package.json `bin` entry resolution under `<steve-home>/adapters` or `npm root -g`"),
     e(Spawn, "steve-vault/src/harness.rs", 1, Library, "whether seatbelt starts here (sandbox-exec on /usr/bin/true): the Node's sandbox and the pre-switch check"),
     e(Dir, "steve-vault/src/harness.rs", 1, Library, "the protected name prefixes the Node hides from a bubblewrap run"),
     e(Dir, "steve-toolchains/src/lib.rs", 4, Library, "project marker listings for Node detection and per-project discovery; Hub callers use only the data definitions"),

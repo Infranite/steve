@@ -416,7 +416,11 @@ async fn a_failing_recovery_is_reported_and_the_hub_still_serves() {
     // and it gave up the turn the kill cut (B6)
     assert!(
         until(30, || async {
-            count(&h, "SELECT COUNT(*) FROM node_commands WHERE method=?", "abandon") == 1
+            count(
+                &h,
+                "SELECT COUNT(*) FROM node_commands WHERE method=?",
+                "abandon",
+            ) == 1
         })
         .await,
         "the cut turn is given up"

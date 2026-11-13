@@ -19,6 +19,8 @@ mod artifact;
 mod attachments;
 mod confine;
 
+mod bot_mcp;
+mod bot_skills;
 pub mod cow;
 pub mod disk_observation;
 pub mod disk_usage;
@@ -31,10 +33,8 @@ mod procs;
 pub mod reclaim;
 mod research;
 mod scan;
-mod staging;
 mod secrets;
-mod bot_mcp;
-mod bot_skills;
+mod staging;
 mod toolchain;
 mod tools;
 mod vitals;
@@ -358,8 +358,9 @@ impl Inner {
             if changed.is_some() && changed != *seen {
                 match std::fs::read(&*path)
                     .map_err(|e| e.to_string())
-                    .and_then(|b| serde_json::from_slice::<Vec<Root>>(&b).map_err(|e| e.to_string()))
-                {
+                    .and_then(|b| {
+                        serde_json::from_slice::<Vec<Root>>(&b).map_err(|e| e.to_string())
+                    }) {
                     Ok(roots) => {
                         *self.roots.write().unwrap() = Arc::new(roots);
                         *seen = changed;
@@ -2838,7 +2839,11 @@ impl ExecutionControl for LocalNode {
     async fn snapshot(&self, page: PageRequest) -> ApiResult<Snapshot> {
         // limit=0 opts into bounded head pages. Older Hubs still receive the original complete
         // heads vector; a new Hub uses the cursor to request both entry and head pages.
-        let limit = if page.limit == 0 { 100 } else { page.limit as usize };
+        let limit = if page.limit == 0 {
+            100
+        } else {
+            page.limit as usize
+        };
         let (token, offset, head_offset, paged_heads) = match &page.cursor {
             None => {
                 // the operations, their waits and the stream heads, as of one moment
@@ -2885,7 +2890,9 @@ impl ExecutionControl for LocalNode {
                 (
                     t.parse().map_err(|_| bad())?,
                     o.parse().map_err(|_| bad())?,
-                    h.map(|h| h.parse().map_err(|_| bad())).transpose()?.unwrap_or(0),
+                    h.map(|h| h.parse().map_err(|_| bad()))
+                        .transpose()?
+                        .unwrap_or(0),
                     h.is_some(),
                 )
             }
@@ -2900,7 +2907,12 @@ impl ExecutionControl for LocalNode {
         let entries: Vec<SnapshotEntry> =
             s.entries.iter().skip(offset).take(limit).cloned().collect();
         let heads: Vec<StreamHead> = if paged_heads {
-            s.heads.iter().skip(head_offset).take(limit).cloned().collect()
+            s.heads
+                .iter()
+                .skip(head_offset)
+                .take(limit)
+                .cloned()
+                .collect()
         } else {
             s.heads.clone()
         };
@@ -3827,11 +3839,33 @@ impl Discovery for LocalNode {
             .keys()
             .map(|h| {
                 let p = probed.get(h).cloned().unwrap_or_default();
+                // For `probe_initialize: false` adapters (`adapters.get(h)` is `None`), check
+                // whether the binary is actually present so `c.sessions` reflects reality;
+                // adapters with a `Probe` keep the `sessions = true` capability shape (their
+                // readiness lives on `c.adapter.status` + `c.adapter.session`).
+                let present = if adapters.contains_key(h) {
+                    true
+                } else {
+                    self.0.cfg.acp.adapter_command(h).is_ok_and(|(bin, _)| {
+                        if bin.components().count() > 1 || bin.is_absolute() {
+                            if steve_acp::is_node_script(&bin) {
+                                bin.is_file()
+                            } else {
+                                steve_acp::is_executable_file(&bin)
+                            }
+                        } else {
+                            bin.to_str().is_some_and(|s| {
+                                steve_acp::which_in(s, std::env::var_os("PATH").as_deref())
+                                    .is_some()
+                            })
+                        }
+                    })
+                };
                 let mut c = HarnessCapability {
                     name: h.clone(),
                     version: p.version,
-                    sessions: true,
-                    jobs: self.0.cfg.capacity.jobs > 0,
+                    sessions: present,
+                    jobs: present && self.0.cfg.capacity.jobs > 0,
                     models: p.models,
                     resume: true,
                     cancel: true,

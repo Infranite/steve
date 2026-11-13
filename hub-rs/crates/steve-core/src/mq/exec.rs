@@ -204,7 +204,18 @@ pub async fn run_batch(
     checks: bool,
     record: &(dyn Fn(Record) + Send + Sync),
 ) -> Ran {
-    run_batch_on(node, s, batch, run, members, policy, checks, &Land::Push, record).await
+    run_batch_on(
+        node,
+        s,
+        batch,
+        run,
+        members,
+        policy,
+        checks,
+        &Land::Push,
+        record,
+    )
+    .await
 }
 
 /// [`run_batch`], landing the way `land` says: pushed to the target, or through a pull request of
@@ -366,7 +377,9 @@ pub async fn run_batch_on(
             let titles: Vec<String> = merged.iter().map(|m| m.label.clone()).collect();
             let at = attempt;
             let opf = |kind: &str, n: usize| op_id(&s.target_id, batch, run, at, kind, n);
-            match super::host::land_pr(node, s, l, batch, attempt, &opf, &tip, &titles, record).await {
+            match super::host::land_pr(node, s, l, batch, attempt, &opf, &tip, &titles, record)
+                .await
+            {
                 super::host::PrOutcome::Done(o) => {
                     ran.outcome = Some(o);
                     return ran;

@@ -1145,7 +1145,11 @@ pub fn new_issue(
 
 /// The one GraphQL mutation Steve sends: `enqueuePullRequest` (a pull request into its repository's
 /// merge queue), recorded in [`super::model::World::merge_queue`].
-async fn graphql(State(s): State<AppState>, h: HeaderMap, axum::Json(body): axum::Json<Value>) -> R {
+async fn graphql(
+    State(s): State<AppState>,
+    h: HeaderMap,
+    axum::Json(body): axum::Json<Value>,
+) -> R {
     let mut w = s.lock();
     principal(&s, &w, &h)?;
     let q = body["query"].as_str().unwrap_or_default();
@@ -1160,7 +1164,11 @@ async fn graphql(State(s): State<AppState>, h: HeaderMap, axum::Json(body): axum
         .map(|p| (p.repo.clone(), p.number, p.id));
     match found {
         Some((repo, number, pid)) => {
-            if !w.merge_queue.iter().any(|(r, n)| *r == repo && *n == number) {
+            if !w
+                .merge_queue
+                .iter()
+                .any(|(r, n)| *r == repo && *n == number)
+            {
                 w.merge_queue.push((repo, number));
             }
             ok(
@@ -1168,6 +1176,9 @@ async fn graphql(State(s): State<AppState>, h: HeaderMap, axum::Json(body): axum
                 json!({"data": {"enqueuePullRequest": {"mergeQueueEntry": {"id": format!("MQE_{pid}")}}}}),
             )
         }
-        None => ok(200, json!({"errors": [{"message": "Could not resolve to a PullRequest"}]})),
+        None => ok(
+            200,
+            json!({"errors": [{"message": "Could not resolve to a PullRequest"}]}),
+        ),
     }
 }

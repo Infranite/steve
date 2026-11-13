@@ -421,6 +421,65 @@ async fn principal_state_reports_recorded_paths_and_enforces_owner_and_workspace
         )
         .await;
     assert_eq!(status, 401);
+
+    // 6. `/api/sessions/:id/resume`: owner sees isolated principal state env; non-owner member and
+    // remote-Node sessions never leak internal `state/.../harness` paths or check Hub-local transcripts.
+    store
+        .with_conn(|c| {
+            c.execute(
+                "UPDATE sessions SET acp_session_id = 'acp-123' WHERE id IN (?1, ?2)",
+                params![s_local, s_remote],
+            )?;
+            Ok(())
+        })
+        .expect("set acp_session_id");
+
+    let (status, r_owner) = e
+        .get(
+            &format!("/api/sessions/{s_local}/resume"),
+            Some(&e.owner_cookie),
+            Some(WS),
+        )
+        .await;
+    assert_eq!(status, 200, "{r_owner}");
+    let owner_cmd = r_owner["command"].as_str().unwrap_or_default();
+    assert!(
+        owner_cmd.contains(&expected_local_abs),
+        "owner resume command should include isolated local harness dir: {owner_cmd}"
+    );
+    assert_eq!(r_owner["transcript_checked"], true);
+
+    let (status, r_member) = e
+        .get(
+            &format!("/api/sessions/{s_local}/resume"),
+            Some(&member_cookie),
+            Some(WS),
+        )
+        .await;
+    assert_eq!(status, 200, "{r_member}");
+    let member_cmd = r_member["command"].as_str().unwrap_or_default();
+    assert!(
+        !member_cmd.contains(recorded_local) && !member_cmd.contains("node/state"),
+        "non-owner resume command must not leak principal state path: {member_cmd}"
+    );
+    assert_eq!(r_member["transcript"], Value::Null);
+    assert_eq!(r_member["transcript_checked"], false);
+
+    let (status, r_remote) = e
+        .get(
+            &format!("/api/sessions/{s_remote}/resume"),
+            Some(&e.owner_cookie),
+            Some(WS),
+        )
+        .await;
+    assert_eq!(status, 200, "{r_remote}");
+    let remote_cmd = r_remote["command"].as_str().unwrap_or_default();
+    assert!(
+        !remote_cmd.contains(recorded_remote) && !remote_cmd.contains("node/state"),
+        "remote-Node resume command must not point at Hub-local state dir: {remote_cmd}"
+    );
+    assert_eq!(r_remote["transcript"], Value::Null);
+    assert_eq!(r_remote["transcript_checked"], false);
 }
 
 #[tokio::test(flavor = "multi_thread")]

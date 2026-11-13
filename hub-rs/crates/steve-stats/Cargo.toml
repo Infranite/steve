@@ -5,6 +5,7 @@ version.workspace = true
 publish.workspace = true
 
 [dependencies]
+steve-acp = { path = "../steve-acp" }
 steve-store = { path = "../steve-store" }
 steve-i18n = { path = "../steve-i18n" }
 rust-i18n = "=4.2.4"

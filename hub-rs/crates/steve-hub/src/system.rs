@@ -173,6 +173,9 @@ fn shown(mut list: Value) -> Value {
         let note = match r["note"].as_str().unwrap_or_default() {
             "acp" => steve_i18n::t!("hub.runtime.via_acp"),
             "adapter_missing" => match r["install_hint"].as_str().filter(|h| !h.is_empty()) {
+                Some(hint) if hint.contains(' ') => {
+                    steve_i18n::t!("hub.runtime.install_cmd", cmd = hint)
+                }
                 Some(hint) => steve_i18n::t!("hub.runtime.no_adapter", adapter = hint),
                 None => steve_i18n::t!("hub.runtime.adapter_missing"),
             },
@@ -227,8 +230,10 @@ fn rows(cfg: &Config, harnesses: Option<&[steve_node_api::HarnessCapability]>) -
                 (Some(AdapterStatus::Ready), _) => (false, "session_failed"),
                 (Some(AdapterStatus::AdapterMissing), _) => (false, "adapter_missing"),
                 (Some(AdapterStatus::InitializeFailed), _) => (false, "initialize_failed"),
+                // older protocol without `adapter`: trust `sessions` from the Node's probe
+                (None, Some(_)) if reported.is_some_and(|r| r.sessions) => (true, "acp"),
                 // without a Node's answer: there or not
-                (None, None) if Path::new(path).exists() => (true, "acp"),
+                (None, None) if command_present(path) => (true, "acp"),
                 (None, _) => (false, "adapter_missing"),
             };
             // a name the manifest gave wins, then the adapter's own for one of one's own
@@ -262,6 +267,12 @@ fn rows(cfg: &Config, harnesses: Option<&[steve_node_api::HarnessCapability]>) -
                     "system_prompt": adapter.is_some_and(|a| a.system_prompt),
                 })),
                 "auth": adapter.map(|a| a.auth.clone()).unwrap_or_default(),
+                "resume_command": adapter
+                    .and_then(|a| a.resume_command.clone())
+                    .or_else(|| spec.properties.resume_cli.clone()),
+                "fork_command": adapter
+                    .and_then(|a| a.fork_command.clone())
+                    .or_else(|| spec.properties.fork_cli.clone()),
                 "ok": ok,
                 "note": note,
                 "error": adapter.and_then(|a| a.error.clone().or_else(|| a.session_error.clone())),
@@ -271,6 +282,22 @@ fn rows(cfg: &Config, harnesses: Option<&[steve_node_api::HarnessCapability]>) -
             })
         })
         .collect()
+}
+
+fn command_present(path: &str) -> bool {
+    if path.is_empty() {
+        return false;
+    }
+    let p = Path::new(path);
+    if p.components().count() > 1 || p.is_absolute() {
+        if steve_acp::is_node_script(p) {
+            p.is_file()
+        } else {
+            steve_acp::is_executable_file(p)
+        }
+    } else {
+        steve_acp::which_in(path, std::env::var_os("PATH").as_deref()).is_some()
+    }
 }
 
 /// The version number in what a harness says of its version (`2.1.0 (Claude Code)`,
@@ -685,6 +712,7 @@ mod tests {
             vars.iter()
                 .find(|(n, _)| *n == k)
                 .map(|(_, v)| v.to_string())
+                .or_else(|| k.starts_with("STEVE_ADAPTER_").then(|| "/x/adapter".into()))
         })
         .expect("config");
         let rt = Runtimes::new(Arc::new(cfg));
@@ -699,8 +727,13 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         let list = rt.get(false).await;
-        assert_eq!(list[0]["id"], json!("claude-code"));
-        assert_eq!(list[0]["ok"], json!(false));
+        let claude = list
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["id"] == "claude-code")
+            .unwrap();
+        assert_eq!(claude["ok"], json!(false));
     }
 
     /// A Node that cannot answer yet (just after the Hub starts) is not "no adapter": the rows say
@@ -719,6 +752,10 @@ mod tests {
             vars.iter()
                 .find(|(n, _)| *n == k)
                 .map(|(_, v)| v.to_string())
+                .or_else(|| {
+                    k.starts_with("STEVE_ADAPTER_")
+                        .then(|| "/nonexistent/adapter".into())
+                })
         })
         .expect("config");
         let rt = Runtimes::new(Arc::new(cfg));
@@ -769,10 +806,15 @@ mod tests {
             vars.iter()
                 .find(|(n, _)| *n == k)
                 .map(|(_, v)| v.to_string())
+                .or_else(|| k.starts_with("STEVE_ADAPTER_").then(|| "/x/adapter".into()))
         })
         .expect("config");
         let all = rows(&cfg, None);
-        assert_eq!(all.len(), 3, "the built-in ones and the declared one alike");
+        assert_eq!(
+            all.len(),
+            steve_acp::adapters::builtin_ids().count() + 1,
+            "the built-in ones and the declared one alike"
+        );
         let mine = |rows: &[Value]| rows.iter().find(|r| r["id"] == "mine").unwrap().clone();
         let row = mine(&all);
         assert_eq!(row["name"], json!("Mine"));
@@ -815,6 +857,8 @@ mod tests {
                 }),
                 session_error: None,
                 update: None,
+                resume_command: None,
+                fork_command: None,
             }),
         };
         let mut no_session = reported.clone();
