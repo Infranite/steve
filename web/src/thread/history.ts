@@ -70,6 +70,18 @@ export async function searchThread(q: string, signal?: AbortSignal): Promise<{ m
 /* ───────── jumping to a message, and back ───────── */
 export type Jump = { id: string; created?: number }
 const JUMP = "steve-chat-jump"
-/** go to a message of the conversation (a search hit, a topic, a quote), from wherever the reader is */
-export function jumpToMsg(id: string, created?: number) { window.dispatchEvent(new CustomEvent<Jump>(JUMP, { detail: { id, created } })) }
-export function onJump(f: (j: Jump) => void) { const h = (e: Event) => f((e as CustomEvent<Jump>).detail); window.addEventListener(JUMP, h); return () => window.removeEventListener(JUMP, h) }
+/** a jump no conversation took yet (the reader was elsewhere and the chat view is still on its way), kept a moment
+ *  for the one that mounts next */
+let pending: { j: Jump; at: number } | null = null
+const KEEP = 2000
+/** go to a message of the conversation (a search hit, a topic, a quote), from wherever the reader is: right away when
+ *  a conversation is shown, or as soon as one is (within a couple of seconds) */
+export function jumpToMsg(id: string, created?: number) { pending = { j: { id, created }, at: Date.now() }; window.dispatchEvent(new CustomEvent<Jump>(JUMP, { detail: { id, created } })) }
+export function onJump(f: (j: Jump) => void) {
+  const h = (e: Event) => { pending = null; f((e as CustomEvent<Jump>).detail) }
+  window.addEventListener(JUMP, h)
+  /* the jump that waited for a conversation, once this one is listening */
+  let live = true
+  queueMicrotask(() => { if (live && pending && Date.now() - pending.at < KEEP) { const { j } = pending; pending = null; f(j) } })
+  return () => { live = false; window.removeEventListener(JUMP, h) }
+}
