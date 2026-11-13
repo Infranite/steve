@@ -423,7 +423,7 @@ export default {
     context: "上下文",
     ctxTitle: "上下文窗口",
     ctxUsed: "已占用",
-    ctxWhole: "{{h}} 只报告占用总量，不分系统提示、工具、文件和对话，所以这里只有一块。",
+    ctxWhole: "窗口大小和占用都是 {{h}} 自己上报的，它只报总量，不分系统提示、工具、文件和对话，所以这里只有一块。{{h}} 不认识的模型（比如经网关接入的其他厂商模型）会按它的默认窗口上报，这时占比只供参考。",
     ctxUnreported: "{{h}} 没有报告上下文用量。",
     usage: "消耗",
     usageTitle_other: "{{count}} 个回合的 token",

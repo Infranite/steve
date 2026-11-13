@@ -445,7 +445,7 @@ export default {
     context: "Context",
     ctxTitle: "Context window",
     ctxUsed: "In use",
-    ctxWhole: "{{h}} reports only the total in use, not the system prompt, tools, files and conversation apart, so there is one part here.",
+    ctxWhole: "{{h}} itself reports the window size and the tokens in use, only as totals (not the system prompt, tools, files and conversation apart), so there is one part here. For a model it does not know (another vendor's model behind a gateway, say) it reports its default window, so the share is only a guide.",
     ctxUnreported: "{{h}} has not reported its context use.",
     usage: "Consumption",
     usageTitle_one: "Tokens of {{count}} turn",
