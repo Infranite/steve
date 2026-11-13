@@ -48,7 +48,7 @@ try {
     assert.equal(rows[236].closed, true)
     await page.reload()
     await page.getByRole("button", { name: "打开群聊和私聊", exact: true }).click()
-    await page.getByRole("button", { name: "已关闭", exact: true }).click()
+    await page.getByRole("radio", { name: "已关闭", exact: true }).click()
     await page.getByRole("button", { name: "恢复并打开：项目群 236", exact: true }).click()
     await page.waitForURL("**#/c/chan:sp236")
     assert.equal(rows[236].closed, false)
@@ -58,7 +58,7 @@ try {
     assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth))
     // A write started under the old filter must refresh the current filter.
     await page.getByRole("button", { name: "打开群聊和私聊", exact: true }).click()
-    await page.getByRole("button", { name: "未关闭", exact: true }).click()
+    await page.getByRole("radio", { name: "未关闭", exact: true }).click()
     await page.getByRole("textbox", { name: "搜索会话" }).fill("项目群 0")
     await page.getByRole("button", { name: "关闭：项目群 0", exact: true }).waitFor()
     delayed = true
@@ -71,7 +71,7 @@ try {
     assert.equal(await page.locator("[data-conversation-row]").count(), 1)
     assert.equal(await page.getByRole("textbox", { name: "搜索会话" }).inputValue(), "项目群 235")
     // Unmount on workspace switch invalidates an outstanding restore/navigation.
-    await page.getByRole("button", { name: "已关闭", exact: true }).click()
+    await page.getByRole("radio", { name: "已关闭", exact: true }).click()
     await page.getByRole("textbox", { name: "搜索会话" }).fill("项目群 0")
     delayed = true
     await page.getByRole("button", { name: "恢复并打开：项目群 0", exact: true }).click()

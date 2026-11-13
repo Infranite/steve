@@ -7,7 +7,7 @@ import { useEffect, useState } from "react"
 import { CalendarIcon, GaugeIcon, ListOrderedIcon } from "lucide-react"
 import { Panel, Tag } from "@/panel"
 import { Button } from "@/components/ui/button"
-import { Input } from "@/components/ui/input"
+import { DateField } from "@/components/ui/pickers"
 import { Spinner } from "@/components/ui/spinner"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { st } from "@/store"
@@ -54,8 +54,8 @@ function CustomRange({ f, set }: { f: Filter; set: (f: Filter) => void }) {
       <PopoverTrigger render={<Button size="sm" variant="secondary" className="rounded-lg font-normal" data-custom-range />}><CalendarIcon className="text-muted-foreground" />{f.range === "custom" && f.from && f.to ? fmtRange(f.from, f.to) : t("stats:page.pickDates")}</PopoverTrigger>
       <PopoverContent align="start" className="w-72">
         <div className="flex flex-col gap-3">
-          <label className="flex flex-col gap-1 type-footnote text-muted-foreground">{t("stats:page.from")}<Input type="date" value={from} max={today} onChange={(e) => setFrom(e.target.value)} aria-label={t("stats:page.fromAria")} /></label>
-          <label className="flex flex-col gap-1 type-footnote text-muted-foreground">{t("stats:page.to")}<Input type="date" value={to} max={today} onChange={(e) => setTo(e.target.value)} aria-label={t("stats:page.toAria")} /></label>
+          <label className="flex flex-col gap-1 type-footnote text-muted-foreground">{t("stats:page.from")}<DateField value={from} max={today} onChange={setFrom} aria-label={t("stats:page.fromAria")} /></label>
+          <label className="flex flex-col gap-1 type-footnote text-muted-foreground">{t("stats:page.to")}<DateField value={to} max={today} onChange={setTo} aria-label={t("stats:page.toAria")} /></label>
           {bad && <div className="type-footnote text-muted-foreground">{t("stats:page.badRange")}</div>}
           <Button size="sm" disabled={bad} onClick={() => { set({ ...f, range: "custom", from, to }); setOpen(false) }} data-custom-apply>{t("stats:page.applyRange")}</Button>
         </div>

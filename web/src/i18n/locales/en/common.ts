@@ -91,4 +91,20 @@ export default {
     unitHours: "hours",
     unitMinutes: "minutes",
   },
+  /** the date, time and number pickers' controls (components/affect via ui/*) */
+  picker: {
+    prevMonth: "Previous month",
+    nextMonth: "Next month",
+    showTimes: "Show times",
+    hideTimes: "Hide times",
+    times: "Times",
+    increase: "Increase",
+    decrease: "Decrease",
+    clear: "Clear",
+    showPassword: "Show password",
+    hidePassword: "Hide password",
+    copy: "Copy",
+    copied: "Copied",
+    optional: "Optional",
+  },
 }

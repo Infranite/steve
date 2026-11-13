@@ -219,7 +219,7 @@ export function DesignView() {
           <div className="grid gap-8 lg:grid-cols-2">
             <Section label={t("views:design.inputs")}>
               <Card className="flex flex-col gap-3 p-5">
-                <div className="relative"><SearchIcon className="pointer-events-none absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-tertiary" /><Input className="pl-8" placeholder={t("views:design.searchItems")} /></div>
+                <Input prefix={<SearchIcon />} placeholder={t("views:design.searchItems")} />
                 <Input disabled placeholder={t("views:design.disabled")} />
                 <Textarea className="min-h-20" placeholder={t("views:design.textareaPlaceholder")} />
                 <div className="flex items-center gap-2"><Select testId="design-select" value={sel} onChange={setSel} options={[{ v: "chat", l: t("views:design.viewList") }, { v: "board", l: t("views:design.viewBoard") }, { v: "graph", l: t("views:design.viewGraph") }]} /></div>

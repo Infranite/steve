@@ -138,7 +138,7 @@ function TriggerSection({ a, onSave, busy }: { a: ChannelAccount; onSave: (t: Pa
             <Input aria-label={t("channels:trigger.addAria")} className="h-7 w-24 rounded-full md:type-footnote" placeholder={t("channels:trigger.addPlaceholder")} value={word} onChange={(e) => setWord(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter" && word.trim()) { e.preventDefault(); add() } }} data-trigger-word /></span></Row>
         <div className="flex min-w-0 flex-col gap-2 px-2 py-2.5" data-trigger-scope={scope}>
           <div className="type-body">{t("channels:trigger.where")}</div>
-          <Segmented className="w-full [&>div]:w-full" size="sm" value={scope} onChange={setScope} options={[["all", t("channels:trigger.scopeAll")], ["dms", t("channels:trigger.scopeDms")], ["some", t("channels:trigger.scopeSome")]] as const} />
+          <Segmented full className="w-full" size="sm" value={scope} onChange={setScope} options={[["all", t("channels:trigger.scopeAll")], ["dms", t("channels:trigger.scopeDms")], ["some", t("channels:trigger.scopeSome")]] as const} />
           {scope === "some" && <div className="flex min-w-0 flex-wrap items-center gap-1" data-trigger-chosen>
             {chosen.slice(0, SCOPE_MAX).map((id) => { const x = byId.get(id); const name = x ? spaceTitle(x) : t("channels:trigger.goneSpace"); return (
               <span key={id} className="inline-flex h-6 min-w-0 max-w-[12rem] items-center gap-1 rounded-full bg-primary/10 pl-2.5 pr-1 type-footnote font-medium text-primary" title={name} data-trigger-where={name}>

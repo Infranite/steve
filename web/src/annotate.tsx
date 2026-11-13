@@ -1,6 +1,7 @@
 import { api, outRawUrl, type RAnchor, type RAnnotation } from "@/api"
 import { Button } from "@/components/ui/button"
 import { Textarea } from "@/components/ui/textarea"
+import { NumberField } from "@/components/ui/pickers"
 import { loadItem, tm, toast, type Out } from "@/store"
 import { cn } from "cn"
 import { CrosshairIcon, FileTextIcon, MessageSquarePlusIcon, PencilIcon, SendIcon, SquareDashedIcon, TextSelectIcon, Trash2Icon, XIcon } from "lucide-react"
@@ -141,7 +142,7 @@ export function AnnBar({ item, art, path, notes, allDrafts, pending, setPending,
   pending: Pending | null; setPending: (p: Pending | null) => void; sel: Sel | null; clearSel: () => void
   canDraw: boolean; drawing: boolean; setDrawing: (v: boolean) => void; pdf: boolean; onLocate: (a: RAnnotation) => void
 }) {
-  const [text, setText] = useState(""), [page, setPage] = useState("1"), [busy, setBusy] = useState(false)
+  const [text, setText] = useState(""), [page, setPage] = useState<number | null>(1), [busy, setBusy] = useState(false)
   const [edit, setEdit] = useState<{ id: string; text: string } | null>(null)
   const [sendBusy, setSendBusy] = useState(false), t = useT()
   useEffect(() => { setText("") }, [pending])
@@ -149,7 +150,7 @@ export function AnnBar({ item, art, path, notes, allDrafts, pending, setPending,
   const elsewhere = allDrafts.filter((a) => !notes.some((x) => x.a.id === a.id)).length
   const save = async () => {
     if (!pending || !text.trim() || busy) return
-    const anchor: RAnchor = pending.anchor.type === "page" ? { ...pending.anchor, page: Math.max(1, Math.floor(+page) || 1) } : pending.anchor
+    const anchor: RAnchor = pending.anchor.type === "page" ? { ...pending.anchor, page: Math.max(1, Math.floor(page ?? 1) || 1) } : pending.anchor
     setBusy(true)
     try { await api.annAdd(item, { art: pending.art, path: pending.path || undefined, anchor, note: text.trim() }); setPending(null); setDrawing(false); toast(t("shell:ann.savedDraft")); void loadItem(item, true) }
     catch (e) { toast(t("shell:ann.saveFailed", { error: (e as Error).message })) } finally { setBusy(false) }
@@ -171,7 +172,7 @@ export function AnnBar({ item, art, path, notes, allDrafts, pending, setPending,
       </div>}
       {pending && <div className="flex flex-col gap-2 rounded-xl border p-2.5" data-ann-new={pending.anchor.type}>
         <div className="flex items-center gap-2 type-footnote text-muted-foreground"><CrosshairIcon className="size-3.5 shrink-0" />
-          {pending.anchor.type === "page" ? <label className="flex items-center gap-1.5"><Trans t={t} i18nKey="shell:ann.pageInput" components={{ n: <input type="number" min={1} value={page} onChange={(e) => setPage(e.target.value)} className="h-6 w-16 rounded-md border bg-background px-1.5 text-foreground" data-ann-page-input /> }} /></label>
+          {pending.anchor.type === "page" ? <label className="flex items-center gap-1.5"><Trans t={t} i18nKey="shell:ann.pageInput" components={{ n: <NumberField size="sm" min={1} step={1} formatOptions={{ maximumFractionDigits: 0 }} value={page} onValueChange={setPage} className="w-24" inputClassName="text-foreground" data-ann-page-input /> }} /></label>
             : <span className="min-w-0 truncate">{placeOf({ anchor: pending.anchor, path: pending.path })}</span>}</div>
         <Textarea autoFocus value={text} onChange={(e) => setText(e.target.value)} placeholder={t("shell:ann.placeholder")} className="min-h-16 rounded-lg" data-ann-input
           onKeyDown={(e) => { e.stopPropagation(); if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) void save() }} />

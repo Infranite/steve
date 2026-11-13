@@ -4,7 +4,7 @@
 import { useEffect, useState } from "react"
 import { ChartNoAxesColumnIcon, PlusIcon, RefreshCwIcon, TrashIcon } from "lucide-react"
 import { Button } from "@/components/ui/button"
-import { TextField } from "@/components/affect/text-field-clean"
+import { TextField } from "@/components/ui/input"
 import { SetSelect } from "@/settings-controls"
 import { Spinner } from "@/components/ui/spinner"
 import { stats, type Price, type Prices, type Quote } from "@/api/stats"

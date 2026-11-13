@@ -59,7 +59,7 @@ try {
   assert.match(await page.locator("[data-debug-delivery]").innerText(), /无法检测的缺口/)
   assert.equal(await page.locator("[data-debug-pending], [data-debug-recorder-unavailable], [data-debug-coverage-refresh]").count(), 0)
   assert.match(await page.locator("[data-debug-blockers]").innerText(), /ST-100 尚未完成/)
-  assert.equal(await page.locator("[data-debug-minutes]").inputValue(), "30")
+  assert.equal((await page.locator("[data-debug-minutes]").innerText()).trim(), "30 分钟")
   await page.locator("[data-debug-toggle]").click()
   await page.getByRole("button", { name: "停止记录", exact: true }).waitFor()
   assert.deepEqual(data.mutations, [{ enabled: true, minutes: 30 }])
@@ -117,7 +117,7 @@ try {
   await page.locator("[data-session-menu]").click()
   await page.locator("[data-session-debug]").click()
   await page.locator('[data-debug-event="event-3"]').waitFor()
-  assert.equal(await page.locator("[data-debug-session]").inputValue(), "session-two")
+  assert.equal((await page.locator("[data-debug-session]").innerText()).trim(), "session-two")
   assert.equal(data.requests.at(-1).session_id, "session-two")
   await page.close()
 

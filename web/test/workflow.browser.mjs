@@ -187,7 +187,7 @@ try {
       await page.locator("[data-graph-detail] button").click()
       assert.equal(await page.evaluate(() => window.__graphOpened), "ST-61")
     }
-    await page.getByRole("button", { name: "来源与派生" }).click()
+    await page.getByRole("radio", { name: "来源与派生" }).click()
     await page.locator('[data-graph-mode="lineage"]').waitFor()
     assert.equal(await page.locator('[data-graph-list-node="session-old"]').count(), 1, "source session is retained")
     if (width < 640) { await page.locator('[data-graph-list-node="ST-61"]').click(); assert.match(await page.locator("[data-graph-detail]").innerText(), /来源位置 23/) }

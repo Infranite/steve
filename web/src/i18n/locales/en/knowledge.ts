@@ -22,7 +22,6 @@ export default {
   search: {
     aria: "Search the knowledge base",
     placeholder: "Search memories, knowledge, notes and docs",
-    clear: "Clear",
     idleTitle: "Search the knowledge base",
     idleSub: "Covers memories, knowledge entries, notes, folders, item records and conversation records.",
     failed: "Search failed",

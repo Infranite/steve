@@ -88,4 +88,20 @@ export default {
     unitHours: "小时",
     unitMinutes: "分钟",
   },
+  /** the date, time and number pickers' controls (components/affect via ui/*) */
+  picker: {
+    prevMonth: "上个月",
+    nextMonth: "下个月",
+    showTimes: "显示时间列表",
+    hideTimes: "收起时间列表",
+    times: "时间",
+    increase: "增加",
+    decrease: "减少",
+    clear: "清除",
+    showPassword: "显示密码",
+    hidePassword: "隐藏密码",
+    copy: "复制",
+    copied: "已复制",
+    optional: "可选",
+  },
 }

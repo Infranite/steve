@@ -96,7 +96,9 @@ function UnknownRow({ c, checked, onCheck, busy, onChanged }: { c: PendingContac
   const where = seen && joinList(seen.spaces.map((x) => (x.kind === "dm" ? t("people:pending.dm", { name: x.name }) : x.name)))
   return (
     <Row data-unconfirmed={label} data-nameless={nameless || undefined}
-      icon={<span className="flex items-center gap-2.5"><Checkbox aria-label={t("people:pending.select", { name: label })} checked={checked} disabled={busy} onCheckedChange={(v) => onCheck(!!v)} />
+      icon={<span className="flex items-center gap-2.5">{/* a 28px target around the 16px box (WCAG 2.5.8) without moving the row: a click on the margin toggles it too */}
+        <span className="-m-1.5 grid cursor-pointer place-items-center p-1.5" onClick={(e) => { if (e.target === e.currentTarget && !busy) onCheck(!checked) }} data-pending-pick>
+          <Checkbox aria-label={t("people:pending.select", { name: label })} checked={checked} disabled={busy} onCheckedChange={(v) => onCheck(!!v)} /></span>
         {url ? <img src={url} alt="" className="size-8 rounded-full object-cover" /> : <ContactAvatar name={nameless ? "?" : label} unconfirmed size={32} />}</span>}
       title={<span className="inline-flex min-w-0 items-center gap-1.5"><a href={"#/contacts/" + c.id} className="truncate hover:underline">{label}</a>{orgLine(c) && <span className="truncate type-footnote font-normal text-muted-foreground">{orgLine(c)}</span>}</span>}
       sub={<span className="flex min-w-0 flex-col gap-0.5">

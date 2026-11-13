@@ -1,87 +1,68 @@
-import * as React from "react"
-import { Toggle as TogglePrimitive } from "@base-ui/react/toggle"
-import { ToggleGroup as ToggleGroupPrimitive } from "@base-ui/react/toggle-group"
-import { type VariantProps } from "class-variance-authority"
-import { cn } from "cn"
+import { Children, isValidElement, type ReactNode } from "react"
 
-import { toggleVariants } from "@/components/ui/toggle"
+import { ToggleGroup as AffectToggleGroup, type ToggleGroupItem as AffectItem } from "@/components/affect/toggle-group-clean"
 
-const ToggleGroupContext = React.createContext<
-  VariantProps<typeof toggleVariants> & {
-    spacing?: number
-    orientation?: "horizontal" | "vertical"
-  }
->({
-  size: "default",
-  variant: "default",
-  spacing: 2,
-  orientation: "horizontal",
-})
+/* Steve's ToggleGroup (base-ui's API: a value array, onValueChange, ToggleGroupItem children), drawn by affectUI's
+ * Toggle Group. The items are read from the children; an item's data-* attributes, aria-label, title and disabled
+ * go onto its button. affectUI styles the items itself, so an item's className is not used. multiple (or base-ui's
+ * toggleMultiple) lets several be on; otherwise one at most, as base-ui's default. Both variants are affectUI's separate
+ * chips (its "buttons"), the look Steve's filters had. */
 
-function ToggleGroup({
-  className,
-  variant,
-  size,
-  spacing = 2,
-  orientation = "horizontal",
-  children,
-  ...props
-}: ToggleGroupPrimitive.Props &
-  VariantProps<typeof toggleVariants> & {
-    spacing?: number
-    orientation?: "horizontal" | "vertical"
-  }) {
-  return (
-    <ToggleGroupPrimitive
-      data-slot="toggle-group"
-      data-variant={variant}
-      data-size={size}
-      data-spacing={spacing}
-      data-orientation={orientation}
-      style={{ "--gap": spacing } as React.CSSProperties}
-      className={cn(
-        "group/toggle-group flex w-fit flex-row items-center gap-[--spacing(var(--gap))] data-[spacing=0]:data-[variant=outline]:rounded-2xl data-vertical:flex-col data-vertical:items-stretch",
-        className
-      )}
-      {...props}
-    >
-      <ToggleGroupContext.Provider
-        value={{ variant, size, spacing, orientation }}
-      >
-        {children}
-      </ToggleGroupContext.Provider>
-    </ToggleGroupPrimitive>
-  )
+type ItemProps = {
+  value: string
+  children?: ReactNode
+  disabled?: boolean
+  title?: string
+  className?: string
+  "aria-label"?: string
+  [data: `data-${string}`]: string | undefined
 }
 
-function ToggleGroupItem({
-  className,
-  children,
-  variant = "default",
-  size = "default",
-  ...props
-}: TogglePrimitive.Props & VariantProps<typeof toggleVariants>) {
-  const context = React.useContext(ToggleGroupContext)
+/** Only read by ToggleGroup – renders nothing on its own */
+function ToggleGroupItem(_: ItemProps): ReactNode {
+  return null
+}
 
-  return (
-    <TogglePrimitive
-      data-slot="toggle-group-item"
-      data-variant={context.variant || variant}
-      data-size={context.size || size}
-      data-spacing={context.spacing}
-      className={cn(
-        "shrink-0 group-data-[spacing=0]/toggle-group:rounded-none group-data-[spacing=0]/toggle-group:px-2 group-data-[spacing=0]/toggle-group:shadow-none focus:z-10 focus-visible:z-10 group-data-[spacing=0]/toggle-group:has-data-[icon=inline-end]:pr-1.5 group-data-[spacing=0]/toggle-group:has-data-[icon=inline-start]:pl-1.5 group-data-horizontal/toggle-group:data-[spacing=0]:first:rounded-l-2xl group-data-vertical/toggle-group:data-[spacing=0]:first:rounded-t-2xl group-data-horizontal/toggle-group:data-[spacing=0]:last:rounded-r-2xl group-data-vertical/toggle-group:data-[spacing=0]:last:rounded-b-2xl data-[state=on]:bg-muted group-data-horizontal/toggle-group:data-[spacing=0]:data-[variant=outline]:border-l-0 group-data-vertical/toggle-group:data-[spacing=0]:data-[variant=outline]:border-t-0 group-data-horizontal/toggle-group:data-[spacing=0]:data-[variant=outline]:first:border-l group-data-vertical/toggle-group:data-[spacing=0]:data-[variant=outline]:first:border-t",
-        toggleVariants({
-          variant: context.variant || variant,
-          size: context.size || size,
-        }),
-        className
-      )}
-      {...props}
-    >
-      {children}
-    </TogglePrimitive>
-  )
+type GroupProps = {
+  value?: readonly string[]
+  defaultValue?: readonly string[]
+  onValueChange?: (value: string[]) => void
+  multiple?: boolean
+  toggleMultiple?: boolean
+  disabled?: boolean
+  size?: "sm" | "default" | "lg"
+  variant?: "default" | "outline"
+  spacing?: number
+  orientation?: "horizontal" | "vertical"
+  className?: string
+  children?: ReactNode
+  "aria-label"?: string
+  "aria-labelledby"?: string
+  [data: `data-${string}`]: string | boolean | undefined
+}
+
+function ToggleGroup({ value, defaultValue, onValueChange, multiple, toggleMultiple, disabled, size, variant, className, children, "aria-label": ariaLabel, "aria-labelledby": ariaLabelledby, spacing: _spacing, orientation: _orientation, ...rest }: GroupProps) {
+  const items: AffectItem[] = []
+  Children.forEach(children, (c) => {
+    if (!isValidElement<ItemProps>(c) || c.type !== ToggleGroupItem) return
+    const { value: v, children: label, disabled: off, title, "aria-label": name, className: _c, ...data } = c.props
+    items.push({ value: String(v), label, disabled: off, title, ariaLabel: name, data: data as AffectItem["data"] })
+  })
+  const data = Object.fromEntries(Object.entries(rest).filter(([k]) => k.startsWith("data-")).map(([k, v]) => [k, v === true ? "" : v || undefined]))
+  const shared = {
+    items,
+    // Steve's sm (28) and default (32) are affectUI's md and lg
+    size: size === "sm" ? "md" as const : "lg" as const,
+    variant: "buttons" as const,
+    disabled,
+    className,
+    "aria-label": ariaLabel,
+    "aria-labelledby": ariaLabelledby,
+    data: { "data-slot": "toggle-group", ...data },
+  }
+  if (multiple || toggleMultiple)
+    return <AffectToggleGroup {...shared} type="multiple" value={value ? [...value] : undefined} defaultValue={defaultValue ? [...defaultValue] : undefined} onChange={(v) => onValueChange?.(v)} />
+  return <AffectToggleGroup {...shared} type="single" value={value === undefined ? undefined : value[0] ?? null} defaultValue={defaultValue?.[0] ?? null} onChange={(v) => onValueChange?.(v == null ? [] : [v])} />
 }
 
 export { ToggleGroup, ToggleGroupItem }

@@ -61,7 +61,7 @@ export function SpaceView({ id }: { id: string }) {
       <div className="flex flex-col gap-8" data-space={s.id}>
         {!s.configured && <div className="rounded-xl bg-muted/60 px-4 py-3 type-callout" data-space-new>{t("channels:space.newNote", { kind: kindLine(s).split(" · ")[0] })}{s.suggest_quiet && <span className="mt-1 block text-muted-foreground">{t("channels:space.suggestQuiet", { reason: s.suggest_quiet })}</span>}</div>}
         {s.attention !== undefined && <section data-attention><SectionLabel>{t("channels:bits.disturb")}</SectionLabel>
-          <Segmented className="w-full [&>div]:w-full" value={att} onChange={(v) => v !== att && setAttention(v)} options={(Object.keys(ATTENTION) as Attention[]).map((a) => [a, ATTENTION[a][0]] as const)} />
+          <Segmented full className="w-full" value={att} onChange={(v) => v !== att && setAttention(v)} options={(Object.keys(ATTENTION) as Attention[]).map((a) => [a, ATTENTION[a][0]] as const)} />
           <Note>{ATTENTION[att][1]}</Note>
           <Conflicts items={s.conflicts} keys={["trigger"]} /></section>}
         <section data-role><SectionLabel>{t("channels:space.steveHere")}</SectionLabel>

@@ -1,0 +1,9 @@
+- Buttons, view switchers, filter chips, checkboxes, switches, text fields, text areas and selects now look and behave the same on every page, in both light and dark mode. A changed button label glides to its new width; the view switchers have a raised pill that slides to the chosen view and follows the arrow keys; a checkbox's check draws itself.
+- Selects open a list with a highlight that follows the pointer and the arrow keys, and typing a letter jumps to the matching option. Toolbar filters show their whole label instead of cutting it short.
+- Picking dates for a custom range on the Stats page now uses a small calendar in your language, with days after today ruled out. The working-hours rule on a channel picks its start and end times from a list or takes what you type, such as 930 or 21.30. A schedule's budget and a flow step's timeout have − and + buttons and stay within their limits.
+- Filters that don't switch a view, such as the conversation state on the Conversations page and the graph mode on an item, are now announced to screen readers as a choice of one option.
+- The items list search stays a small magnifier until you click it or type.
+- Every search box (sessions, conversations, chat history, mail, contacts, signals, knowledge and items) now has the same look. Knowledge's search clears with its × or Esc.
+- The buttons inside text fields (show or hide a token, clear, copy) are named in your language for screen readers, on the sign-in page and the GitHub token field too.
+- The working-hours rule's weekday chips, the page number on a PDF note and the item debug panel's filters now use the same controls as the rest of Steve. Lists that belong at a field's right edge open aligned to it.
+- The component showroom has a new Form controls section with every control in its states.

@@ -1,7 +1,7 @@
 /* affectUI (MIT) – https://www.affectui.com, MIT License, Copyright (c) 2026 Florian Höller (adfects); full text: https://github.com/flohoeller/affectui/blob/main/LICENSE */
 "use client";
 
-import { useEffect, useId, useRef, useState, type ComponentPropsWithRef, type ReactNode } from "react";
+import { useEffect, useId, useRef, useState, type ComponentPropsWithRef, type CSSProperties, type ReactNode } from "react";
 
 /*
  * Text Field – a single self-contained file, clean style.
@@ -35,6 +35,12 @@ export type TextFieldProps = Omit<ComponentPropsWithRef<"input">, "size" | "pref
   onClear?: () => void;
   /** Extra class on the input itself; className goes on the wrapper */
   inputClassName?: string;
+  /** Steve: inline style for the wrapper (style goes on the input) */
+  fieldStyle?: CSSProperties;
+  /** Steve: attributes for the wrapper (data-* hooks), as everything else lands on the input */
+  fieldProps?: { [k: `data-${string}`]: string | boolean | undefined; role?: string };
+  /** Steve: the buttons' names, in the page's language */
+  labels?: { clear?: string; show?: string; hide?: string; copy?: string; copied?: string; optional?: string };
 };
 
 export function TextField({
@@ -52,6 +58,9 @@ export function TextField({
   onKeyDown,
   className,
   inputClassName,
+  fieldStyle,
+  labels,
+  fieldProps,
   id,
   type = "text",
   value,
@@ -124,7 +133,9 @@ export function TextField({
 
   return (
     <div
+      {...fieldProps}
       className={["ui-tfc", className].filter(Boolean).join(" ")}
+      style={fieldStyle}
       data-size={scale}
       data-invalid={invalid || undefined}
       data-disabled={disabled || undefined}
@@ -132,14 +143,14 @@ export function TextField({
     >
       {/* React 19 hoists this into <head> once, no matter how many fields render */}
       <style href="ui-text-field-clean" precedence="default">
-        {css}
+        {layered}
       </style>
       {label != null && (
         <div className="ui-tfc__head">
           <label className="ui-tfc__label" htmlFor={inputId}>
             {label}
           </label>
-          {optional && <span className="ui-tfc__optional">Optional</span>}
+          {optional && <span className="ui-tfc__optional">{labels?.optional ?? "Optional"}</span>}
         </div>
       )}
       {/* A click anywhere on the box – the prefix, the padding – puts the caret in the input */}
@@ -192,7 +203,7 @@ export function TextField({
         />
         {suffix != null && <span className="ui-tfc__affix" data-side="end">{suffix}</span>}
         {showClear && (
-          <button type="button" className="ui-tfc__action" aria-label="Clear" tabIndex={-1} onClick={clear}>
+          <button type="button" className="ui-tfc__action" aria-label={labels?.clear ?? "Clear"} tabIndex={-1} onClick={clear}>
             <ClearIcon />
           </button>
         )}
@@ -200,7 +211,7 @@ export function TextField({
           <button
             type="button"
             className="ui-tfc__action"
-            aria-label={revealed ? "Hide password" : "Show password"}
+            aria-label={revealed ? labels?.hide ?? "Hide password" : labels?.show ?? "Show password"}
             aria-pressed={revealed}
             onClick={() => setRevealed((r) => !r)}
           >
@@ -214,7 +225,7 @@ export function TextField({
             type="button"
             className="ui-tfc__action"
             data-copied={copied || undefined}
-            aria-label={copied ? "Copied" : "Copy"}
+            aria-label={copied ? labels?.copied ?? "Copied" : labels?.copy ?? "Copy"}
             onClick={copy}
             disabled={disabled || !text}
           >
@@ -225,7 +236,7 @@ export function TextField({
         )}
         {copyable && (
           <span className="ui-tfc__sr" role="status">
-            {copied ? "Copied" : ""}
+            {copied ? labels?.copied ?? "Copied" : ""}
           </span>
         )}
       </div>
@@ -527,3 +538,6 @@ const css = /* css */ `
 :where(.dark, [data-theme="dark"]) .ui-tfc[data-readonly] .ui-tfc__box,
 :where(.dark, [data-theme="dark"]) .ui-tfc[data-disabled] .ui-tfc__box { box-shadow: 0 0 0 0.5px rgba(255, 255, 255, 0.12); }
 `;
+
+/* Steve: in Tailwind's components layer, so a call site's utility classes (h-auto, w-full, text-*) still win */
+const layered = `@layer theme, base, components, utilities;\n@layer components {\n${css}\n}`;

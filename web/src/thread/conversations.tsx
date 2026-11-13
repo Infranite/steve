@@ -119,7 +119,7 @@ export function ConvSwitcher({ current, badge }: { current?: string; badge?: Con
         <div className="flex flex-col gap-1"><DialogTitle>{t("thread:conv.list")}</DialogTitle>
         <DialogDescription>{t("thread:conv.listHelp")}</DialogDescription></div>
         <SearchField aria-label={t("thread:conv.search")} placeholder={t("thread:conv.searchPlaceholder")} value={query} onChange={e => setQuery(e.target.value)} />
-        <Segmented full className="sm:w-fit [&>button]:min-w-20" label={t("thread:conv.stateLabel")} value={state} onChange={setState} options={(["open", "closed", "all"] as const).map((key) => [key, t(`thread:conv.state.${key}`)] as const)} />
+        <Segmented pressed full className="sm:w-fit" label={t("thread:conv.stateLabel")} value={state} onChange={setState} options={(["open", "closed", "all"] as const).map((key) => [key, t(`thread:conv.state.${key}`)] as const)} />
         {updates && <Button size="sm" variant="secondary" className="w-fit justify-self-start anim-in" onClick={() => load()}>{t("thread:conv.updated")}</Button>}
         {error && <div role="alert" className="flex items-center gap-2 type-callout text-destructive">{error}<Button size="sm" variant="outline" onClick={() => load()}>{t("common:action.retry")}</Button></div>}
         <div className="-mx-2 min-h-24 overflow-y-auto overscroll-contain px-2" style={{ maxHeight: "48dvh" }} aria-busy={loading}>

@@ -1,0 +1,69 @@
+/* Steve's base form primitives (components/ui: button, toggle-group, checkbox, radio-group, tabs, input, textarea,
+ * field, label, select, switch and ui.tsx Segmented) are drawn by affectUI. These are the few things Steve's call
+ * sites ask of them that affectUI doesn't have. All of it sits in Tailwind's components layer, like the components'
+ * own styles, so a call site's utility classes still win. */
+@layer components {
+  /* Button: icons a call site puts among the label's children, and a label made of several parts */
+  .ui-buttonc > svg:not([class*="size-"]), .ui-buttonc__label svg:not([class*="size-"]) { width: var(--icon); height: var(--icon); }
+  .ui-buttonc > svg, .ui-buttonc__label svg { flex: none; pointer-events: none; }
+  .ui-buttonc__label:has(> *) { display: inline-flex; align-items: center; gap: var(--gap); }
+  /* Steve's lg (36) and its square sizes that show a short label (… or a count) instead of an icon */
+  .ui-buttonc:is([data-steve-size="lg"], [data-steve-size="icon-lg"]) { --h: 36px; --px: 14px; --fs: 14px; }
+  .ui-buttonc[data-square] { width: var(--h); padding: 0; }
+  /* Steve's secondary: a muted fill, no edge */
+  .ui-buttonc[data-steve-variant="secondary"] { background: var(--secondary); color: var(--secondary-foreground); box-shadow: none; }
+  .ui-buttonc[data-steve-variant="secondary"]:hover:not(:disabled) { background: var(--accent); box-shadow: none; }
+  /* attention: consent to something with reach (full access) – the attention hue, never the accent */
+  .ui-buttonc[data-steve-variant="attention"] { --ui-btnc-solid: var(--attention); --ui-btnc-on-solid: #fff; --ui-btnc-solid-hover: color-mix(in oklch, var(--attention), black 9%); }
+  .dark .ui-buttonc[data-steve-variant="attention"] { --ui-btnc-on-solid: rgb(0 0 0 / 0.85); --ui-btnc-solid-hover: color-mix(in oklch, var(--attention), white 8%); }
+  /* link: text in the accent, underlined on hover */
+  .ui-buttonc[data-steve-variant="link"] { height: auto; padding: 0; background: transparent; color: var(--primary); }
+  .ui-buttonc[data-steve-variant="link"]:hover:not(:disabled) { background: transparent; color: var(--primary); text-decoration: underline; text-underline-offset: 4px; }
+  /* A menu or popover the button opens stays marked while it is open */
+  .ui-buttonc:is([data-variant="ghost"], [data-variant="secondary"])[aria-expanded="true"] { background: var(--accent); }
+
+  /* Icon Button at Steve's 32 and 36, and Steve's smaller glyph in the 24 one */
+  .ui-icbc[data-steve-size="icon"] { --size: 32px; --icon: 16px; }
+  .ui-icbc[data-steve-size="icon-lg"] { --size: 36px; --icon: 16px; }
+  .ui-icbc[data-steve-size="icon-xs"] { --icon: 12px; }
+  .ui-icbc:is([data-variant="ghost"], [data-variant="secondary"])[aria-expanded="true"] { background: var(--accent); }
+}
+
+@layer components {
+  /* A search that is only its magnifier until it has focus or a query (the items list): the field grows to its
+   * width, and while folded the box has no edge and the placeholder hides */
+  .ui-tfc.steve-collapse-search { overflow: hidden; transition: width 180ms var(--ease-out); }
+  .ui-tfc.steve-collapse-search .ui-tfc__box { padding-inline: 6px; }
+  .ui-tfc.steve-collapse-search .ui-tfc__box:has(> .ui-tfc__affix) .ui-tfc__input { min-width: 0; flex-basis: 0; }
+  .ui-tfc.steve-collapse-search:not(:focus-within):has(.ui-tfc__input:placeholder-shown) .ui-tfc__box { background: transparent; box-shadow: none; cursor: pointer; }
+  .ui-tfc.steve-collapse-search:not(:focus-within):has(.ui-tfc__input:placeholder-shown) .ui-tfc__box:hover { background: var(--accent); }
+  .ui-tfc.steve-collapse-search:not(:focus-within) .ui-tfc__input::placeholder { color: transparent; }
+}
+
+@layer components {
+  .ui-tfc.steve-collapse-search .ui-tfc__affix { flex: none; max-width: none; }
+  /* Select: a field sized to its text (the toolbar filters) keeps the whole text – flex: 1 would size it from zero and
+   * cut it by a fraction of a pixel; it still ends in … once its container is too narrow */
+  .ui-selc .ui-selc__value { flex: 1 1 auto; width: calc-size(max-content, size + 2px); }
+  /* WebKit (Safari, the Apple client's WKWebView) has no calc-size(): the text keeps its own width plus the same 2px */
+  @supports not (width: calc-size(auto, size)) {
+    .ui-selc .ui-selc__value { flex: 0 1 auto; width: auto; padding-inline-end: 2px; }
+  }
+}
+
+@layer components {
+  /* Button: a label is never cut short – the button keeps its text's width, as Steve's buttons always did (layouts
+   * wrap or stack instead; the browser tests check that no text is clipped) */
+  .ui-buttonc .ui-buttonc__label { overflow: visible; text-overflow: clip; }
+  /* Checkbox: the input stays on the box instead of reaching 6px past it, so it never widens what holds it; Steve's
+   * checkboxes either carry their text or sit inside a <label> (or a clickable row), which is the larger target */
+  .ui-chkc .ui-chkc__input { inset: 0; width: 100%; height: 100%; }
+  /* A box without its own text never shrinks in a squeezed row, as Steve's shrink-0 box did */
+  .ui-chkc:not(:has(.ui-chkc__text)), .ui-swc:not(:has(.ui-swc__text)) { flex: none; }
+}
+
+/* Date Picker, Time Picker, Number Input in dark mode: the same input look as Text Field and Select get in
+ * affectui-theme.css – the muted fill and a full 1px edge, firmer on hover and focus (unlayered, as those are) */
+:where(.dark, [data-theme="dark"]) .ui-dpkc.ui-dpkc { --ui-dpkc-surface: var(--muted); --ui-dpkc-shadow: 0 0 0 1px var(--input); --ui-dpkc-shadow-hover: 0 0 0 1px color-mix(in srgb, var(--muted-foreground) 45%, var(--input)); --ui-dpkc-shadow-open: 0 0 0 1px color-mix(in srgb, var(--ring) 80%, transparent); }
+:where(.dark, [data-theme="dark"]) .ui-tpkc.ui-tpkc { --ui-tpkc-surface: var(--muted); --ui-tpkc-shadow: 0 0 0 1px var(--input); --ui-tpkc-shadow-hover: 0 0 0 1px color-mix(in srgb, var(--muted-foreground) 45%, var(--input)); }
+:where(.dark, [data-theme="dark"]) .ui-nmic.ui-nmic { --ui-nmic-surface: var(--muted); --ui-nmic-shadow: 0 0 0 1px var(--input); --ui-nmic-shadow-hover: 0 0 0 1px color-mix(in srgb, var(--muted-foreground) 45%, var(--input)); --ui-nmic-shadow-focus: 0 0 0 1px color-mix(in srgb, var(--ring) 80%, transparent); }

@@ -43,7 +43,7 @@ import { AUDIT_CAT, AuditSettingsPane } from "@/audit-settings"
 import { MODELS_CAT, ModelsSettingsPane, SteveJudges } from "@/models-settings"
 import { ModelPicker } from "@/model-picker"
 import { SetSelect, SetSwitch } from "@/settings-controls"
-import { TextField } from "@/components/affect/text-field-clean"
+import { TextField } from "@/components/ui/input"
 import { TextArea } from "@/components/affect/text-area-clean"
 import { RecentStats } from "@/stats/drill"
 import { AboutVersions } from "@/version"
@@ -237,7 +237,7 @@ export function BotView({ k }: { k: string }) {
       title={<span className="block truncate">{b.main ? b.n : t("manage:bot.name", { name: b.n })}</span>}
       sub={<div><div className="mb-1 text-muted-foreground">{b.role || t("manage:detail.noRole")}</div><Meta><span>{b.h}</span><span>{b.m}</span><span>{t("manage:detail.pers", { v: b.pers || t("manage:detail.unset") })}</span><span>{t("manage:detail.pro", { v: proLabel(t, b.pro) })}</span></Meta><RecentStats bot={k} className="mt-0.5 block type-footnote" /></div>}
       actions={<>{!b.main && <><span className="hidden type-footnote text-muted-foreground sm:inline">{b.on ? t("manage:bot.enabled") : t("manage:bot.disabled")}</span><SetSwitch testId="bot-on" checked={b.on} onChange={(v) => void saveBot(k, { on: v }, v ? t("manage:bot.enabled") : t("manage:bot.disabled"))} label={t("manage:bot.enable")} /></>}<BotMenu k={k} /></>}>
-      <Strip className="mb-8" watch={botTab}><Segmented className="min-w-max [&_[data-slot=tabs-list]]:w-full [&_[data-slot=tabs-trigger]]:flex-1" value={botTab} onChange={(v) => { botTab = v; r() }} options={tabs} /></Strip>
+      <Strip className="mb-8" watch={botTab}><Segmented full className="min-w-max" value={botTab} onChange={(v) => { botTab = v; r() }} options={tabs} /></Strip>
       {botTab === "概览" && (mine.length ? <Panel className="anim-in">{mine.map((i) => <ItemRow key={i.id} i={i} bot={false} />)}</Panel> : <Empty title={t("manage:detail.noRunning")} />)}
       {/* the channels page's list, laid into this page's section and panel */}
       {botTab === "对外身份" && <div className="anim-in"><PersonasSection bot={k} panel /></div>}

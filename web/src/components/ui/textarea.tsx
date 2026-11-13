@@ -1,15 +1,33 @@
-import * as React from "react"
+import type { ComponentPropsWithRef } from "react"
 import { cn } from "cn"
 
-function Textarea({ className, ...props }: React.ComponentProps<"textarea">) {
+import { TextArea } from "@/components/affect/text-area-clean"
+
+/* Steve's Textarea, drawn by affectUI's Text Area: Text Field's box over several lines, growing with the text (rows is
+ * where it starts, then up to maxRows before it scrolls). Props stay a <textarea>'s and land on it; className is
+ * split as for Input – the text's classes and min-h/max-h go on the textarea, the rest (width, margins) on the field.
+ * affectUI's extras are there too: maxRows, expandable, onSubmitShortcut (⌘/Ctrl+Enter). */
+
+type TextareaProps = Omit<ComponentPropsWithRef<"textarea">, "rows"> & {
+  rows?: number
+  maxRows?: number
+  expandable?: boolean
+  onSubmitShortcut?: (value: string) => void
+}
+
+const AREA = /^(?:[a-z0-9-]+:)*!?(?:type-|font-|text-|tabular-nums|uppercase|tracking-|leading-|placeholder:|min-h-|max-h-|\[-webkit-text-security)/
+
+function Textarea({ className, rows = 2, maxRows = 16, ...props }: TextareaProps) {
+  const parts = (className ?? "").split(/\s+/).filter(Boolean)
+  const area = parts.filter((c) => AREA.test(c))
   return (
-    <textarea
+    <TextArea
       data-slot="textarea"
-      className={cn(
-        "flex field-sizing-content min-h-16 w-full resize-none rounded-lg border border-transparent bg-muted px-2.5 focus-visible:bg-card py-2 text-base transition-[color,box-shadow] duration-180 outline-none placeholder:text-muted-foreground focus-visible:border-ring/60 focus-visible:ring-3 focus-visible:ring-ring/15 disabled:cursor-not-allowed disabled:opacity-50 aria-invalid:border-destructive aria-invalid:ring-3 aria-invalid:ring-destructive/20 md:text-sm dark:aria-invalid:border-destructive/50 dark:aria-invalid:ring-destructive/40",
-        className
-      )}
       {...props}
+      minRows={rows}
+      maxRows={Math.max(maxRows, rows)}
+      className={cn("w-full", parts.filter((c) => !area.includes(c)).join(" "))}
+      inputClassName={area.join(" ") || undefined}
     />
   )
 }

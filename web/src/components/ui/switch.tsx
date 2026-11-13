@@ -1,30 +1,30 @@
-"use client"
+import type { ChangeEvent, ComponentPropsWithRef, ReactNode } from "react"
 
-import { Switch as SwitchPrimitive } from "@base-ui/react/switch"
-import { cn } from "cn"
+import { Switch as AffectSwitch } from "@/components/affect/switch-clean"
 
-function Switch({
-  className,
-  size = "default",
-  ...props
-}: SwitchPrimitive.Root.Props & {
+/* Steve's Switch, drawn by affectUI's: a real checkbox with role="switch" whose thumb stretches as it is pressed – the
+ * same switch the settings pages use. Props stay base-ui's – checked, defaultChecked, onCheckedChange(checked),
+ * size "sm" | "default" – plus affectUI's own label, description and placement for a switch with its text. className
+ * goes on the wrapper; id, name, aria-* and data-* on the input. */
+
+type SwitchProps = Omit<ComponentPropsWithRef<"input">, "type" | "size" | "role" | "onChange" | "checked" | "defaultChecked"> & {
+  checked?: boolean
+  defaultChecked?: boolean
+  onCheckedChange?: (checked: boolean, event: ChangeEvent<HTMLInputElement>) => void
   size?: "sm" | "default"
-}) {
+  label?: ReactNode
+  description?: ReactNode
+  placement?: "start" | "end"
+}
+
+function Switch({ size = "default", onCheckedChange, ...props }: SwitchProps) {
   return (
-    <SwitchPrimitive.Root
+    <AffectSwitch
       data-slot="switch"
-      data-size={size}
-      className={cn(
-        "peer group/switch relative inline-flex shrink-0 items-center rounded-2xl border-2 transition-all outline-none group-has-[:focus-visible]/field-label:ring-0 after:absolute after:-inset-x-3 after:-inset-y-2 focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/30 aria-invalid:border-destructive aria-invalid:ring-3 aria-invalid:ring-destructive/20 data-[size=default]:h-5 data-[size=default]:w-8 data-[size=sm]:h-4 data-[size=sm]:w-6 dark:aria-invalid:border-destructive/50 dark:aria-invalid:ring-destructive/40 data-checked:border-primary data-checked:bg-primary group-has-[:focus-visible]/field-label:data-checked:border-primary data-unchecked:border-transparent data-unchecked:bg-input/90 group-has-[:focus-visible]/field-label:data-unchecked:border-transparent data-disabled:cursor-not-allowed data-disabled:opacity-50",
-        className
-      )}
       {...props}
-    >
-      <SwitchPrimitive.Thumb
-        data-slot="switch-thumb"
-        className="pointer-events-none block rounded-2xl bg-background shadow-sm ring-0 transition-transform not-dark:bg-clip-padding group-data-[size=default]/switch:size-4 group-data-[size=sm]/switch:size-3 data-checked:translate-x-[calc(100%-4px)] dark:data-checked:bg-primary-foreground data-unchecked:translate-x-0 dark:data-unchecked:bg-foreground"
-      />
-    </SwitchPrimitive.Root>
+      size={size === "sm" ? "sm" : "md"}
+      onChange={(e) => onCheckedChange?.(e.target.checked, e)}
+    />
   )
 }
 

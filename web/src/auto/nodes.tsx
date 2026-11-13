@@ -6,6 +6,7 @@ import { ArrowRightIcon, BotIcon, CodeIcon, FilterIcon, GlobeIcon, HourglassIcon
 import { cn } from "@/lib/utils"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
+import { NumberField } from "@/components/ui/pickers"
 import { Textarea } from "@/components/ui/textarea"
 import { Switch } from "@/components/ui/switch"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
@@ -124,7 +125,7 @@ export function Inspector({ g, n, onChange, flows, sources, step, flowId }: {
         {n.kind === "script" && <F label={t("auto:node.script")} hint={t("auto:node.scriptHint")}>
           <Textarea className="min-h-40 type-code" value={c.code ?? ""} onChange={(e) => set((x) => { x.code = e.target.value })} spellCheck={false} data-script-editor /></F>}
         {n.kind === "cmd" && <><F label={t("auto:node.command")} hint={t("auto:node.commandHint")}><Input className="type-code" value={c.command ?? ""} onChange={(e) => set((x) => { x.command = e.target.value })} /></F>
-          <F label={t("auto:node.timeoutS")}><Input type="number" min={1} max={600} className="w-28" value={c.timeout_s ?? 120} onChange={(e) => set((x) => { x.timeout_s = Number(e.target.value) })} /></F></>}
+          <F label={t("auto:node.timeoutS")}><NumberField min={1} max={600} className="w-32" unit="s" value={c.timeout_s ?? 120} onValueChange={(v) => set((x) => { x.timeout_s = v ?? 120 })} /></F></>}
         {n.kind === "http" && <HttpEditor c={c} set={set} />}
         {n.kind === "flow" && <F label={t("auto:node.callFlow")} hint={t("auto:node.callFlowHint")}>
           <Pick label={t("auto:node.callFlow")} value={c.flow_id || "_"} options={[{ v: "_", l: t("auto:node.pickFlow") }, ...flows.filter((f) => f.id !== flowId).map((f) => ({ v: f.id, l: f.name }))]} onChange={(v) => set((x) => { x.flow_id = v === "_" ? "" : v })} className="w-full" /></F>}

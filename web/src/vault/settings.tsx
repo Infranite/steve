@@ -2,7 +2,7 @@
 import { useState } from "react"
 import { LockIcon, TrashIcon } from "lucide-react"
 import { Button } from "@/components/ui/button"
-import { TextField } from "@/components/affect/text-field-clean"
+import { TextField } from "@/components/ui/input"
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog"
 import { Row, Empty, go, Panel, Section, Loading, FieldRow } from "@/ui"
 import { tm } from "@/store"

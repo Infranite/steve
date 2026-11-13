@@ -4,6 +4,7 @@ import { CheckIcon, ChevronRightIcon, ClockIcon, HistoryIcon, PlayIcon, PlusIcon
 import { Button } from "@/components/ui/button"
 import { Switch } from "@/components/ui/switch"
 import { Input } from "@/components/ui/input"
+import { NumberField } from "@/components/ui/pickers"
 import { Textarea } from "@/components/ui/textarea"
 import { Field, FieldDescription, FieldGroup, FieldLabel } from "@/components/ui/field"
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible"
@@ -159,7 +160,7 @@ export function NewScheduleDialog({ edit, bot, onClose, onSaved }: { edit?: Sche
         <Field orientation="horizontal" className="justify-between"><FieldLabel>{t("auto:schedule.modeLabel")}</FieldLabel><Pick label={t("auto:schedule.modeLabel")} value={mode} options={MODES.map((v) => ({ v, l: modeLabel(v) }))} onChange={pickMode} testId="sch-mode" /></Field>
         <Field orientation="horizontal" className="justify-between"><FieldLabel>{t("auto:schedule.missedLabel")}</FieldLabel><Pick label={t("auto:schedule.missedLabel")} value={missed} options={[{ v: "catch_up_once", l: t("auto:schedule.missedCatchUp") }, { v: "skip", l: t("auto:schedule.missed.skip") }]} onChange={setMissed} /></Field>
         <Field orientation="horizontal" className="justify-between"><FieldLabel>{t("auto:schedule.overlapLabel")}</FieldLabel><Pick label={t("auto:schedule.overlapLabel")} value={overlap} options={[{ v: "skip", l: t("auto:schedule.overlap.skip") }, { v: "run", l: t("auto:schedule.overlap.run") }]} onChange={setOverlap} /></Field>
-        <Field orientation="horizontal" className="justify-between"><FieldLabel htmlFor="sch-budget">{t("auto:schedule.budget")}</FieldLabel><Input id="sch-budget" type="number" min={0} max={50} step={0.5} className="w-24 tabular-nums" value={budget} onChange={(e) => { setBudget(e.target.value); setBudTouched(true) }} aria-invalid={!budOk} /></Field>
+        <Field orientation="horizontal" className="justify-between"><FieldLabel htmlFor="sch-budget">{t("auto:schedule.budget")}</FieldLabel><NumberField id="sch-budget" min={0} max={50} step={0.5} className="w-28" value={budget.trim() === "" || isNaN(Number(budget)) ? null : Number(budget)} onValueChange={(v) => { setBudget(v == null ? "" : String(v)); setBudTouched(true) }} aria-invalid={!budOk} /></Field>
       </FieldGroup>
     </Modal>
   )

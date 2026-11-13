@@ -1,83 +1,71 @@
-import { Tabs as TabsPrimitive } from "@base-ui/react/tabs"
-import { cva, type VariantProps } from "class-variance-authority"
+import { Children, createContext, isValidElement, useContext, useId, useState, type ComponentProps, type ReactNode } from "react"
 import { cn } from "cn"
 
-function Tabs({
-  className,
-  orientation = "horizontal",
-  ...props
-}: TabsPrimitive.Root.Props) {
-  return (
-    <TabsPrimitive.Root
-      data-slot="tabs"
-      data-orientation={orientation}
-      className={cn(
-        "group/tabs flex gap-2 data-horizontal:flex-col",
-        className
-      )}
-      {...props}
-    />
-  )
+import { SegmentedControl, type SegmentOption } from "@/components/affect/segmented-control-clean"
+
+/* Steve's Tabs (base-ui's API: Tabs, TabsList, TabsTrigger, TabsContent with a value of any type), drawn by affectUI's
+ * Segmented Control as a tablist: a raised pill sliding along a muted track, arrow keys between the tabs, each tab
+ * tied to its panel. The triggers are read from TabsList's children; their data-* attributes go on the tab. */
+
+type Value = string | number
+type Ctx = { value: Value | undefined; set: (v: Value) => void; base: string; keys: Map<string, Value> }
+const TabsContext = createContext<Ctx | null>(null)
+const key = (v: Value) => String(v)
+
+type TabsProps = Omit<ComponentProps<"div">, "defaultValue" | "onChange"> & {
+  value?: Value
+  defaultValue?: Value
+  onValueChange?: (value: Value) => void
+  orientation?: "horizontal" | "vertical"
 }
 
-const tabsListVariants = cva(
-  "group/tabs-list relative isolate inline-flex w-fit items-center justify-center rounded-lg p-0.5 text-muted-foreground group-data-horizontal/tabs:h-8 group-data-vertical/tabs:h-fit group-data-vertical/tabs:flex-col group-data-vertical/tabs:p-1 data-[variant=line]:rounded-none",
-  {
-    variants: {
-      variant: {
-        default: "bg-muted",
-        line: "gap-1 bg-transparent",
-      },
-    },
-    defaultVariants: {
-      variant: "default",
-    },
+function Tabs({ value, defaultValue, onValueChange, orientation = "horizontal", className, ...props }: TabsProps) {
+  const [own, setOwn] = useState<Value | undefined>(defaultValue)
+  const base = useId()
+  const [keys] = useState(() => new Map<string, Value>())
+  const current = value !== undefined ? value : own
+  const set = (v: Value) => {
+    if (value === undefined) setOwn(v)
+    onValueChange?.(v)
   }
-)
-
-function TabsList({
-  className,
-  variant = "default",
-  ...props
-}: TabsPrimitive.List.Props & VariantProps<typeof tabsListVariants>) {
   return (
-    <TabsPrimitive.List
-      data-slot="tabs-list"
-      data-variant={variant}
-      className={cn(tabsListVariants({ variant }), className)}
-      {...props}
-    >
-      {props.children}
-      {/* the active segment's surface slides to the new one instead of jumping */}
-      {variant === "default" && <TabsPrimitive.Indicator data-slot="tabs-indicator" className="absolute top-0.5 bottom-0.5 left-(--active-tab-left) -z-10 w-(--active-tab-width) rounded-md bg-(--raised) shadow-[0_1px_2px_rgb(16_24_40/0.08),0_0_0_1px_rgb(16_24_40/0.04)] transition-[left,width] duration-180 ease-(--ease-out) dark:shadow-[inset_0_1px_0_rgb(255_255_255/0.06)]" />}
-    </TabsPrimitive.List>
+    <TabsContext.Provider value={{ value: current, set, base, keys }}>
+      <div data-slot="tabs" data-orientation={orientation} className={cn("flex flex-col gap-2", className)} {...props} />
+    </TabsContext.Provider>
   )
 }
 
-function TabsTrigger({ className, ...props }: TabsPrimitive.Tab.Props) {
+type TriggerProps = { value: Value; children?: ReactNode; disabled?: boolean; className?: string; title?: string; "aria-label"?: string; [data: `data-${string}`]: string | undefined }
+
+/** Only read by TabsList – renders nothing on its own */
+function TabsTrigger(_: TriggerProps): ReactNode {
+  return null
+}
+
+function TabsList({ className, children, variant = "default", "aria-label": ariaLabel, size = "md" }: { className?: string; children?: ReactNode; variant?: "default" | "line"; "aria-label"?: string; size?: "sm" | "md" | "lg" }) {
+  const ctx = useContext(TabsContext)
+  if (!ctx) throw new Error("TabsList outside Tabs")
+  const options: SegmentOption[] = []
+  Children.forEach(children, (c) => {
+    if (!isValidElement<TriggerProps>(c) || c.type !== TabsTrigger) return
+    const { value, children: label, disabled, title, "aria-label": name, className: _c, ...data } = c.props
+    ctx.keys.set(key(value), value)
+    options.push({ value: key(value), label, disabled, title, ariaLabel: name, id: `${ctx.base}-tab-${key(value)}`, controls: `${ctx.base}-panel-${key(value)}`, data: { "data-slot": "tabs-trigger", ...data } })
+  })
   return (
-    <TabsPrimitive.Tab
-      data-slot="tabs-trigger"
-      className={cn(
-        "relative inline-flex h-full flex-1 items-center justify-center gap-1.5 rounded-md border border-transparent! px-1.5 py-0.5 text-sm font-medium whitespace-nowrap text-foreground/60 transition-all group-data-vertical/tabs:w-full group-data-vertical/tabs:justify-start group-data-vertical/tabs:px-3 group-data-vertical/tabs:py-0.5 hover:text-foreground focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 focus-visible:outline-1 focus-visible:outline-ring disabled:pointer-events-none disabled:opacity-50 aria-disabled:pointer-events-none aria-disabled:opacity-50 dark:text-muted-foreground dark:hover:text-foreground [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4",
-        "group-data-[variant=line]/tabs-list:bg-transparent group-data-[variant=line]/tabs-list:data-active:bg-transparent dark:group-data-[variant=line]/tabs-list:data-active:border-transparent dark:group-data-[variant=line]/tabs-list:data-active:bg-transparent",
-        "data-active:text-foreground dark:data-active:text-foreground",
-        "after:absolute after:bg-foreground after:opacity-0 after:transition-opacity group-data-horizontal/tabs:after:inset-x-0 group-data-horizontal/tabs:after:bottom-[-5px] group-data-horizontal/tabs:after:h-0.5 group-data-vertical/tabs:after:inset-y-0 group-data-vertical/tabs:after:-right-1 group-data-vertical/tabs:after:w-0.5 group-data-[variant=line]/tabs-list:data-active:after:opacity-100",
-        className
-      )}
-      {...props}
-    />
+    <SegmentedControl options={options} value={ctx.value === undefined ? undefined : key(ctx.value)} onChange={(v) => ctx.set(ctx.keys.get(v) ?? v)} kind="tabs"
+      variant={variant === "line" ? "underline" : "tray"} size={size} aria-label={ariaLabel} className={className} trackData={{ "data-slot": "tabs-list" }} />
   )
 }
 
-function TabsContent({ className, ...props }: TabsPrimitive.Panel.Props) {
+function TabsContent({ value, className, children, ...props }: Omit<ComponentProps<"div">, "value"> & { value: Value }) {
+  const ctx = useContext(TabsContext)
+  if (!ctx || ctx.value === undefined || key(ctx.value) !== key(value)) return null
   return (
-    <TabsPrimitive.Panel
-      data-slot="tabs-content"
-      className={cn("flex-1 text-sm outline-none", className)}
-      {...props}
-    />
+    <div role="tabpanel" id={`${ctx.base}-panel-${key(value)}`} aria-labelledby={`${ctx.base}-tab-${key(value)}`} data-slot="tabs-content" className={cn("flex-1 outline-none", className)} {...props}>
+      {children}
+    </div>
   )
 }
 
-export { Tabs, TabsList, TabsTrigger, TabsContent, tabsListVariants }
+export { Tabs, TabsList, TabsTrigger, TabsContent }

@@ -159,7 +159,7 @@ export function TextArea({
     >
       {/* React 19 hoists this into <head> once, no matter how many fields render */}
       <style href="ui-text-area-clean" precedence="default">
-        {css}
+        {layered}
       </style>
       {label != null && (
         <div className="ui-tac__head">
@@ -434,3 +434,6 @@ const css = /* css */ `
 :where(.dark, [data-theme="dark"]) .ui-tac[data-readonly] .ui-tac__box,
 :where(.dark, [data-theme="dark"]) .ui-tac[data-disabled] .ui-tac__box { box-shadow: 0 0 0 0.5px rgba(255, 255, 255, 0.12); }
 `;
+
+/* Steve: in Tailwind's components layer, so a call site's utility classes (h-auto, w-full, text-*) still win */
+const layered = `@layer theme, base, components, utilities;\n@layer components {\n${css}\n}`;

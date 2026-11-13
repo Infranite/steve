@@ -3,9 +3,17 @@
  * reference: its sample data lives here and only here, its words in views:showroom, and none of its buttons reach the Hub. */
 import { useState, type ReactNode } from "react"
 import { cn } from "cn"
-import { ArrowLeftIcon, FileTextIcon, QuoteIcon, SearchIcon, TerminalIcon } from "lucide-react"
-import { Page, ThemeSwitch, Card, Empty } from "@/ui"
+import { ArrowLeftIcon, FileTextIcon, MoreHorizontalIcon, PlusIcon, QuoteIcon, SearchIcon, TerminalIcon } from "lucide-react"
+import { Page, ThemeSwitch, Card, Empty, Segmented, Chips } from "@/ui"
 import { lang, useT } from "@/i18n"
+import { Button } from "@/components/ui/button"
+import { Checkbox } from "@/components/ui/checkbox"
+import { Switch } from "@/components/ui/switch"
+import { Input } from "@/components/ui/input"
+import { Textarea } from "@/components/ui/textarea"
+import { DateField, TimeField, NumberField } from "@/components/ui/pickers"
+import { Field, FieldError, FieldLabel } from "@/components/ui/field"
+import { Select } from "@/view-shared"
 import { fmtN, fmtUsd } from "@/stats/format"
 import { ParallelAttempts, type Attempt } from "@/components/affect/parallel-attempts-clean"
 import { stepLabels } from "@/agent-tree-view"
@@ -15,7 +23,6 @@ import { longDur } from "@/i18n/format"
 import { RunInspector, type RunSpan } from "@/components/affect/run-inspector-clean"
 import { AgentHandoff, type HandoffAgent, type Handoff, type HandoffTask } from "@/components/affect/agent-handoff-clean"
 import { AgentFleet, type FleetAgent } from "@/components/affect/agent-fleet-clean"
-import { Button } from "@/components/ui/button"
 import { AgentInbox, type AgentTask } from "@/components/affect/agent-inbox"
 import { RunningNow, type RunningTask } from "@/components/affect/running-now"
 import { TraceWaterfall, type TraceSpan } from "@/components/affect/trace-waterfall"
@@ -222,7 +229,7 @@ function SampleComposer({ running, text: first = "", queue = [], ctx }: { runnin
   )
 }
 
-const IDS: Id[] = ["parallel-attempts", "run-inspector", "agent-handoff", "agent-fleet", "agent-inbox", "running-now", "trace-waterfall", "tool-call-card", "thinking-loader", "decision-card", "approval-card", "away-summary", "message-actions", "cost-waterfall", "compact-breakdown", "autonomy-dial", "memory-panel", "chat-composer", "display"]
+const IDS: Id[] = ["parallel-attempts", "run-inspector", "agent-handoff", "agent-fleet", "agent-inbox", "running-now", "trace-waterfall", "tool-call-card", "thinking-loader", "decision-card", "approval-card", "away-summary", "message-actions", "cost-waterfall", "compact-breakdown", "autonomy-dial", "memory-panel", "chat-composer", "display", "form-controls"]
 
 export function DesignShowroom() {
   const t = useT()
@@ -447,9 +454,72 @@ export function DesignShowroom() {
           <State label={L(t, "dpEmptyPage")}><Card className="p-0"><Empty icon={<SearchIcon />} title={S(t, "dpEmptyTitle")} sub={S(t, "dpEmptySub")} /></Card></State>
           <State label={L(t, "dpEmptyPanel")}><Empty compact icon={<TerminalIcon />} title={S(t, "dpEmptyTitle")} sub={S(t, "dpEmptySub")} /></State>
         </Exhibit>
+        <FormControls />
 
         <a href="#/design" className="inline-flex items-center gap-1.5 self-start type-callout text-blue hover:underline"><ArrowLeftIcon className="size-4" />{t("views:design.title")}</a>
       </div>
     </Page>
+  )
+}
+
+/** Steve's base controls (components/ui), drawn by affectUI: each in its states, wired to local state only */
+function FormControls() {
+  const t = useT()
+  const ranges = [["today", t("stats:page.range.today")], ["7d", t("stats:page.range.d7")], ["30d", t("stats:page.range.d30")]] as const
+  const [range, setRange] = useState<string>("7d"), [mode, setMode] = useState<string>("blocking"), [chip, setChip] = useState(t("stats:page.range.today"))
+  const [on, setOn] = useState(true), [sw, setSw] = useState(true), [kind, setKind] = useState("all")
+  const [day, setDay] = useState("2026-11-13"), [time, setTime] = useState<string | null>("09:00"), [num, setNum] = useState<number | null>(20)
+  return (
+    <Exhibit id="form-controls" wide>
+      <State label={L(t, "fcButtons")}>
+        <div className="flex flex-wrap items-center gap-2">
+          <Button>{t("common:action.save")}</Button>
+          <Button variant="outline">{t("common:action.cancel")}</Button>
+          <Button variant="ghost">{t("common:action.edit")}</Button>
+          <Button variant="destructive">{t("common:action.delete")}</Button>
+          <Button variant="attention">{t("common:action.confirm")}</Button>
+          <Button disabled>{t("common:action.save")}</Button>
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          {(["xs", "sm", "default", "lg"] as const).map((z) => <Button key={z} size={z} variant="outline"><PlusIcon />{t("common:action.add")}</Button>)}
+          {(["icon-xs", "icon-sm", "icon", "icon-lg"] as const).map((z) => <Button key={z} size={z} variant="ghost" aria-label={t("common:action.more")}><MoreHorizontalIcon /></Button>)}
+        </div>
+      </State>
+      <State label={L(t, "fcChoice")}>
+        <div className="flex flex-wrap items-center gap-3">
+          <Segmented value={range} onChange={setRange} options={ranges} />
+          <Segmented pressed size="sm" value={mode} onChange={setMode} options={[["blocking", t("shell:graph.blocking")], ["lineage", t("shell:graph.lineage")]] as const} />
+          <Chips value={chip} onChange={setChip} options={ranges.map(([, l]) => l)} />
+        </div>
+      </State>
+      <State label={L(t, "fcChecks")}>
+        <div className="flex flex-wrap items-start gap-x-8 gap-y-3">
+          <Checkbox checked={on} onCheckedChange={setOn} label={t("yolo:switch.fullOk")} />
+          <Checkbox checked={false} indeterminate label={L(t, "fcCheckA")} />
+          <Checkbox checked={false} disabled label={L(t, "fcCheckB")} />
+          <Switch checked={sw} onCheckedChange={setSw} label={t("common:action.open")} />
+          <Switch size="sm" checked={false} disabled label={t("common:action.close")} />
+        </div>
+      </State>
+      <State label={L(t, "fcFields")}>
+        <div className="grid gap-3 sm:grid-cols-2">
+          <Input prefix={<SearchIcon />} placeholder={t("views:items.search")} />
+          <Field data-invalid>
+            <FieldLabel htmlFor="showroom-fc-item">{L(t, "fcItemNo")}</FieldLabel>
+            <Input id="showroom-fc-item" defaultValue="ST-999" aria-invalid aria-describedby="showroom-fc-item-err" />
+            <FieldError id="showroom-fc-item-err">{L(t, "fcItemErr")}</FieldError>
+          </Field>
+          <Textarea rows={2} placeholder={L(t, "fcNote")} />
+          <Select size="default" value={kind} onChange={setKind} options={[{ v: "all", l: t("views:items.allKinds") }, { v: "bug", l: "bug" }, { v: "feat", l: "feat" }]} />
+        </div>
+      </State>
+      <State label={L(t, "fcPickers")}>
+        <div className="flex flex-wrap items-center gap-3">
+          <DateField value={day} onChange={setDay} className="w-56" aria-label={t("stats:page.fromAria")} />
+          <TimeField value={time} onChange={setTime} className="w-28" aria-label={t("common:picker.times")} />
+          <NumberField value={num} onValueChange={setNum} min={0} max={50} step={0.5} className="w-32" />
+        </div>
+      </State>
+    </Exhibit>
   )
 }

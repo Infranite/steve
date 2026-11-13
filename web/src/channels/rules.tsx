@@ -4,6 +4,8 @@ import { useEffect, useState } from "react"
 import { PlusIcon, XIcon } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
+import { TimeField } from "@/components/ui/pickers"
+import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group"
 import { Group, useLinger } from "@/ui"
 import { Select } from "@/view-shared"
 import { people, type PartyOption } from "@/api/people"
@@ -96,11 +98,11 @@ function Params({ w, onChange }: { w: When; onChange: (w: When) => void }) {
   if (w.kind === "hours") return (
     <span className="flex flex-wrap items-center gap-2 type-footnote text-muted-foreground">
       <Select testId="hours-side" value={w.outside ? "out" : "in"} onChange={(v) => onChange({ ...w, outside: v === "out" })} options={[{ v: "out", l: t("channels:rules.outside") }, { v: "in", l: t("channels:rules.inside") }]} />
-      <Input aria-label={t("channels:rules.start")} type="time" className="h-8 w-28 rounded-lg" value={w.start} onChange={(e) => onChange({ ...w, start: e.target.value })} />–
-      <Input aria-label={t("channels:rules.end")} type="time" className="h-8 w-28 rounded-lg" value={w.end} onChange={(e) => onChange({ ...w, end: e.target.value })} />
-      <span className="inline-flex gap-0.5" role="group" aria-label={t("channels:rules.workdays")}>{DAYS.map((d, n) => { const on = w.days.includes(n + 1); return (
-        <button key={d} type="button" aria-pressed={on} onClick={() => onChange({ ...w, days: on ? w.days.filter((x) => x !== n + 1) : [...w.days, n + 1].sort() })}
-          className={on ? "size-6 rounded-full bg-primary type-label text-primary-foreground" : "size-6 rounded-full bg-muted type-label text-muted-foreground hover:text-foreground"}>{t(`channels:rules.day.${d}`)}</button>) })}</span>
+      <TimeField aria-label={t("channels:rules.start")} className="w-28" value={w.start} onChange={(v) => v && onChange({ ...w, start: v })} />–
+      <TimeField aria-label={t("channels:rules.end")} className="w-28" value={w.end} onChange={(v) => v && onChange({ ...w, end: v })} />
+      <ToggleGroup multiple size="sm" aria-label={t("channels:rules.workdays")} value={w.days.map(String)} onValueChange={(v) => onChange({ ...w, days: v.map(Number).sort((a, b) => a - b) })} data-rule-days>
+        {DAYS.map((d, n) => <ToggleGroupItem key={d} value={String(n + 1)}>{t(`channels:rules.day.${d}`)}</ToggleGroupItem>)}
+      </ToggleGroup>
     </span>
   )
   return null

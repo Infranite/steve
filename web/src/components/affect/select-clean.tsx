@@ -14,6 +14,9 @@ import { useEffect, useId, useLayoutEffect, useRef, useState, type KeyboardEvent
 export type SelectOption = {
   value: string;
   label: string;
+  /** Steve: what the option shows when it is more than text (a bot's avatar and name); label still names it for
+   *  type-ahead and the tooltip */
+  content?: ReactNode;
   /** A quiet second line under the label */
   description?: string;
   /** A 16px icon before the label, e.g. an inline SVG */
@@ -45,6 +48,12 @@ export type SelectProps = {
   required?: boolean;
   id?: string;
   className?: string;
+  /** Steve: extra classes on the trigger (className goes on the wrapper) */
+  triggerClassName?: string;
+  /** Steve: which edge of the field the list lines up with – end for a field near the right edge */
+  align?: "start" | "end";
+  /** Steve: the list's least width in px (it is never narrower than the field) */
+  listMinWidth?: number;
   "aria-label"?: string;
   ref?: Ref<HTMLButtonElement>;
   /** data-* attributes go on the trigger, the element a test or a script finds and presses */
@@ -67,6 +76,9 @@ export function Select({
   required,
   id,
   className,
+  triggerClassName,
+  align = "start",
+  listMinWidth = 180,
   "aria-label": ariaLabel,
   ref,
   ...data
@@ -137,8 +149,8 @@ export function Select({
     const above = r.top - gap - edge;
     const want = Math.min(list.current?.scrollHeight ?? 280, 288);
     const up = below < Math.min(want, 160) && above > below;
-    const width = Math.max(r.width, 180);
-    const left = Math.min(Math.max(edge, r.left), window.innerWidth - width - edge);
+    const width = Math.min(Math.max(r.width, listMinWidth), window.innerWidth - 2 * edge);
+    const left = Math.min(Math.max(edge, align === "end" ? r.right - width : r.left), window.innerWidth - width - edge);
     setPlace({ top: up ? r.top - gap : r.bottom + gap, left, width, maxHeight: Math.max(120, Math.min(288, up ? above : below)), up });
   };
 
@@ -249,7 +261,7 @@ export function Select({
     >
       {/* React 19 hoists this into <head> once, no matter how many selects render */}
       <style href="ui-select-clean" precedence="default">
-        {css}
+        {layered}
       </style>
       {label != null && (
         <div className="ui-selc__head">
@@ -268,7 +280,7 @@ export function Select({
         {...data}
         id={triggerId}
         type="button"
-        className="ui-selc__trigger"
+        className={["ui-selc__trigger", triggerClassName].filter(Boolean).join(" ")}
         role="combobox"
         aria-haspopup="listbox"
         aria-expanded={open}
@@ -288,8 +300,8 @@ export function Select({
             {chosen.icon}
           </span>
         )}
-        <span className="ui-selc__value" data-empty={chosen ? undefined : ""} title={chosen?.label}>
-          {chosen ? chosen.label : placeholder}
+        <span className="ui-selc__value" data-empty={chosen ? undefined : ""} title={chosen?.label || undefined}>
+          {chosen ? chosen.content ?? chosen.label : placeholder}
         </span>
         <span className="ui-selc__chevron" aria-hidden="true">
           <ChevronIcon />
@@ -330,7 +342,7 @@ export function Select({
                 </span>
               )}
               <span className="ui-selc__text">
-                <span className="ui-selc__option-label">{o.label}</span>
+                <span className="ui-selc__option-label">{o.content ?? o.label}</span>
                 {o.description && <span className="ui-selc__option-hint">{o.description}</span>}
               </span>
               <span className="ui-selc__check" aria-hidden="true">
@@ -560,3 +572,6 @@ const css = /* css */ `
   --ui-selc-focus: var(--aui-focus, rgba(77, 141, 255, 0.8));
 }
 `;
+
+/* Steve: in Tailwind's components layer, so a call site's utility classes (h-auto, w-full, text-*) still win */
+const layered = `@layer theme, base, components, utilities;\n@layer components {\n${css}\n}`;

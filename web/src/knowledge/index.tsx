@@ -6,7 +6,7 @@
 import { useHubEvents } from "@/store"
 import { Fragment, useCallback, useEffect, useRef, useState, type ReactNode } from "react"
 import { cn } from "cn"
-import { FilePlusIcon, FolderPlusIcon, MoreHorizontalIcon, PlusIcon, RefreshCwIcon, SearchIcon, TrashIcon, UploadIcon, XIcon } from "lucide-react"
+import { FilePlusIcon, FolderPlusIcon, MoreHorizontalIcon, PlusIcon, RefreshCwIcon, SearchIcon, TrashIcon, UploadIcon } from "lucide-react"
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
@@ -17,7 +17,7 @@ import { Spinner } from "@/components/ui/spinner"
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
 import { Field, FieldDescription, FieldGroup, FieldLabel } from "@/components/ui/field"
-import { Page, SectionLabel, Group, Row, Segmented, Chips, Empty, StatusDot, useScrollMore, go, DiscChevron, DISC_TRIGGER } from "@/ui"
+import { Page, SectionLabel, Group, Row, Segmented, Chips, Empty, StatusDot, useScrollMore, go, DiscChevron, DISC_TRIGGER, SearchField } from "@/ui"
 import { toast, tm } from "@/store"
 import { useUploads } from "@/attach"
 import { kb, levelLabel, visLabel, memKind, recordOf, LONG_TERM, SOURCE_KIND, LEVEL_DOT, type Candidate, type ExpiredCandidate, type DocBrief, type Hit, type KbSource, type Mem } from "@/api/knowledge"
@@ -85,12 +85,8 @@ function SearchBox({ onQuery }: { onQuery: (q: string) => void }) {
   const [v, setV] = useState(query), timer = useRef<number>(0)
   const set = (x: string) => { setV(x); clearTimeout(timer.current); timer.current = window.setTimeout(() => onQuery(x.trim()), 250) }
   return (
-    <div role="search" className="flex items-center gap-2.5 px-3.5 rounded-xl bg-card shadow-[var(--lift)] transition-[box-shadow] duration-180 focus-within:shadow-[var(--lift-hover)] focus-within:ring-[3px] focus-within:ring-ring/25">
-      <SearchIcon className="size-4 shrink-0 text-muted-foreground" strokeWidth={1.75} />
-      <input type="search" aria-label={t("knowledge:search.aria")} value={v} onChange={(e) => set(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") { clearTimeout(timer.current); onQuery(v.trim()) } }}
-        placeholder={t("knowledge:search.placeholder")} maxLength={200} className="h-11 min-w-0 flex-1 bg-transparent type-body outline-none placeholder:text-tertiary [&::-webkit-search-cancel-button]:hidden" data-kb-search />
-      {v && <Button variant="ghost" size="icon-xs" aria-label={t("knowledge:search.clear")} className="text-muted-foreground" onClick={() => { setV(""); onQuery("") }}><XIcon /></Button>}
-    </div>
+    <SearchField size="lg" type="search" aria-label={t("knowledge:search.aria")} value={v} onChange={(e) => set(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") { clearTimeout(timer.current); onQuery(v.trim()) } }}
+      placeholder={t("knowledge:search.placeholder")} maxLength={200} clearable onClear={() => { clearTimeout(timer.current); onQuery("") }} data-kb-search />
   )
 }
 

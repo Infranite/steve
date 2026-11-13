@@ -26,7 +26,6 @@ export default {
   search: {
     aria: "搜索知识库",
     placeholder: "搜索长期记忆、知识、笔记和文档",
-    clear: "清除",
     idleTitle: "在知识库里找",
     idleSub: "长期记忆、知识条目、笔记、文件夹、事项记录和会话记录都能搜到。",
     failed: "搜索失败",

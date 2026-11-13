@@ -1,6 +1,6 @@
 /* Shared building blocks for the Steve prototype — see DESIGN.md.
  * Quiet chrome: grey scale everywhere, blue = selected/running, orange = needs you. */
-import { Children, Fragment, Suspense, lazy, memo, useEffect, useId, useLayoutEffect, useRef, useState, useSyncExternalStore, type ComponentProps, type InputHTMLAttributes, type ReactNode, type Ref } from "react"
+import { Children, Fragment, Suspense, lazy, memo, useEffect, useId, useRef, useState, useSyncExternalStore, type ComponentProps, type InputHTMLAttributes, type ReactNode, type Ref } from "react"
 import { flushSync } from "react-dom"
 import { Robot } from "@/robot"
 import { clockDur } from "@/i18n/format"
@@ -11,6 +11,8 @@ import { ChevronLeftIcon, FileTextIcon, GitForkIcon, InboxIcon, ListTodoIcon, Mo
   CircleAlertIcon as RelFailIcon, CircleCheckIcon as RelOkIcon, MegaphoneIcon as RelRunIcon,
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
+import { useFieldLabels } from "@/components/ui/input"
+import { TextField as AffectTextField } from "@/components/affect/text-field-clean"
 import { Trail, SubSteps, type TrailItem, type Chip } from "@/components/work-trail"
 import { ThinkingLoader } from "@/components/affect/thinking-loader"
 import { Item as UIItem, ItemActions, ItemContent, ItemDescription, ItemGroup, ItemMedia, ItemSeparator, ItemTitle } from "@/components/ui/item"
@@ -20,7 +22,7 @@ import { Card as UICard, CardAction, CardDescription, CardFooter, CardHeader, Ca
 import { Breadcrumb } from "@/components/affect/breadcrumb-clean"
 import { Bubble, BubbleContent } from "@/components/ui/bubble"
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group"
-import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs"
+import { SegmentedControl } from "@/components/affect/segmented-control-clean"
 import { CodeBlock } from "@/components/ui/code-block"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 import { Spinner } from "@/components/ui/spinner"
@@ -202,41 +204,19 @@ export function Row({ title, sub, children, onClick, icon, className, controls =
     </UIItem>
   )
 }
-/** view switcher (shadcn Tabs). `pressed`: the same control as a group of buttons with aria-pressed, for a filter that
- *  does not switch tab panels; `full` stretches it to its container with equal segments. */
+/** view switcher: affectUI's Segmented Control, a raised pill sliding along a muted track. It is a tablist (role tab,
+ *  aria-selected); `pressed`: the same control as a radio group, for a filter that does not switch views; `full`
+ *  stretches it to its container with equal segments. An option is a value, or [value, label, tooltip] – with
+ *  `iconOnly` the label is an icon and the tooltip names it. data-seg on each option, data-slot tabs/tabs-list/
+ *  tabs-trigger as before. */
 export function Segmented<T extends string>({ value, onChange, options, className, iconOnly = false, size = "default", label, pressed = false, full = false }: { value: T; onChange: (v: T) => void; options: readonly (T | readonly [T, ReactNode, string?])[]; className?: string; iconOnly?: boolean; size?: "default" | "sm"; label?: string; pressed?: boolean; full?: boolean }) {
-  if (pressed || full) return <PressedSegments value={value} onChange={onChange} options={options} className={className} iconOnly={iconOnly} size={size} label={label} full={full} />
+  const opts = options.map((o) => {
+    const [v, l, tip] = typeof o === "string" ? [o, o, undefined] : o
+    return { value: v as T, ...(iconOnly ? { icon: l } : { label: l }), ariaLabel: tip, title: tip, data: { "data-seg": v, "data-slot": "tabs-trigger" } }
+  })
   return (
-    <Tabs value={value} onValueChange={(v) => onChange(v as T)} className={className}>
-      <TabsList aria-label={label} className={cn("bg-muted", size === "sm" && "h-7!")}>
-        {options.map((o) => {
-          const [v, l, tip] = typeof o === "string" ? [o, o, undefined] : o
-          return <TabsTrigger key={v} value={v} aria-label={tip} title={tip} data-seg={v} className={cn("px-3 type-callout font-medium", iconOnly && "px-2", size === "sm" && "px-2.5 type-footnote font-medium")}>{l}</TabsTrigger>
-        })}
-      </TabsList>
-    </Tabs>
-  )
-}
-/** Segmented as buttons: the well, the raised thumb sliding to the pressed one */
-function PressedSegments<T extends string>({ value, onChange, options, className, iconOnly, size, label, full }: { value: T; onChange: (v: T) => void; options: readonly (T | readonly [T, ReactNode, string?])[]; className?: string; iconOnly: boolean; size: "default" | "sm"; label?: string; full: boolean }) {
-  const box = useRef<HTMLDivElement>(null), [thumb, setThumb] = useState<[number, number] | null>(null)
-  useLayoutEffect(() => {
-    const el = box.current
-    if (!el) return
-    const place = () => { const on = el.querySelector<HTMLElement>('[aria-pressed="true"]'); setThumb(on ? [on.offsetLeft, on.offsetWidth] : null) }
-    place()
-    const ro = new ResizeObserver(place); ro.observe(el)
-    return () => ro.disconnect()
-  }, [value, options.length])
-  return (
-    <div ref={box} role="group" aria-label={label} className={cn("relative isolate inline-flex w-fit items-center rounded-lg bg-muted p-0.5", size === "sm" ? "h-7" : "h-8", full && "flex w-full", className)}>
-      {thumb && <span aria-hidden className="absolute inset-y-0.5 left-0 -z-10 rounded-md bg-(--raised) shadow-[0_1px_2px_rgb(16_24_40/0.08),0_0_0_1px_rgb(16_24_40/0.04)] transition-[translate,width] duration-180 ease-(--ease-out) dark:shadow-[inset_0_1px_0_rgb(255_255_255/0.06)]" style={{ width: thumb[1], translate: `${thumb[0]}px 0` }} />}
-      {options.map((o) => {
-        const [v, l, tip] = typeof o === "string" ? [o, o, undefined] : o
-        return <button key={v} type="button" aria-pressed={v === value} aria-label={tip} title={tip} data-seg={v} onClick={() => onChange(v as T)}
-          className={cn("h-full whitespace-nowrap rounded-md px-3 type-callout font-medium transition-colors duration-120 ease-(--ease-out)", full && "min-w-0 flex-1", iconOnly && "px-2", size === "sm" && "px-2.5 type-footnote font-medium", v === value ? "text-foreground" : "text-muted-foreground hover:text-foreground")}>{l}</button>
-      })}
-    </div>
+    <SegmentedControl options={opts} value={value} onChange={onChange} size={size === "sm" ? "md" : "lg"} variant="tray" fullWidth={full} kind={pressed ? "radio" : "tabs"}
+      aria-label={label} className={cn("steve-seg", className)} data={{ "data-slot": "tabs" }} trackData={{ "data-slot": "tabs-list" }} />
   )
 }
 /** filters (shadcn ToggleGroup) — single choice, never empty */
@@ -389,15 +369,15 @@ export function Strip({ children, className, watch }: { children: ReactNode; cla
   return <div ref={ref} className={cn("-mx-1 max-w-[calc(100%+0.5rem)] overflow-x-auto px-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden", className)} style={mask ? { maskImage: mask, WebkitMaskImage: mask } : undefined} data-more={more}>{children}</div>
 }
 
-/** the search field: a quiet wash rather than a frame, the icon inside, a soft ring on focus without a border jump.
- *  `sm` for a toolbar beside other small controls. */
-export function SearchField({ className, trailing, inputRef, size = "default", ...input }: Omit<InputHTMLAttributes<HTMLInputElement>, "size"> & { trailing?: ReactNode; inputRef?: Ref<HTMLInputElement>; size?: "default" | "sm" }) {
+/** the search field: Steve's Input (affectUI's Text Field) with the magnifier inside, the one search look on every
+ *  page. `sm` for a toolbar beside other small controls, `lg` for a page whose main thing is the search. */
+export function SearchField({ className, trailing, inputRef, size = "default", clearable, onClear, ...input }: Omit<InputHTMLAttributes<HTMLInputElement>, "size" | "prefix"> & { trailing?: ReactNode; inputRef?: Ref<HTMLInputElement>; size?: "default" | "sm" | "lg"; clearable?: boolean; onClear?: () => void }) {
+  const labels = useFieldLabels()
   return (
-    <label className={cn("flex min-w-0 items-center gap-2 rounded-lg bg-foreground/5 transition-[background-color,box-shadow] duration-180 ease-(--ease-out) focus-within:bg-transparent focus-within:ring-1 focus-within:ring-ring/45 focus-within:shadow-[0_0_0_4px_color-mix(in_srgb,var(--ring)_12%,transparent)]", size === "sm" ? "h-8 px-2.5" : "h-9 px-3", className)} data-search-field>
-      <SearchIcon className={cn("shrink-0 text-tertiary", size === "sm" ? "size-3.5" : "size-4")} aria-hidden />
-      <input ref={inputRef} {...input} className={cn("min-w-0 flex-1 bg-transparent outline-none placeholder:text-tertiary", size === "sm" ? "type-callout" : "type-body")} />
-      {trailing}
-    </label>
+    <AffectTextField {...input} ref={inputRef} labels={labels} clearable={clearable} onClear={onClear} size={size === "sm" ? "sm" : size === "lg" ? "lg" : "md"}
+      className={cn("min-w-0", className)} fieldProps={{ "data-search-field": true, role: "search" }}
+      prefix={<SearchIcon className={size === "sm" ? "size-3.5" : "size-4"} aria-hidden />}
+      suffix={trailing != null && trailing !== false ? <span className="inline-flex items-center ps-1.5">{trailing}</span> : undefined} />
   )
 }
 

@@ -8,7 +8,7 @@ import { Spinner } from "@/components/ui/spinner"
 import { useT } from "@/i18n"
 import { clockDur, date, num } from "@/i18n/format"
 import { cn } from "cn"
-import { NativeSelect } from "@/components/ui/native-select"
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 
 const time = (at: number) => date(at, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", second: "2-digit" })
 const errorText = (error: unknown) => error instanceof Error ? error.message : String(error)
@@ -141,9 +141,10 @@ export function ItemDebugPanel({ item, session }: { item: string; session?: stri
             {capture?.stop_reason && <p className="mt-1 break-words type-footnote font-mono text-muted-foreground">{t("views:debug.stopReason", { reason: capture.stop_reason })}</p>}
           </div>
           {snapshot.can_capture ? <div className="flex items-center gap-2">
-            {!capture?.active && <NativeSelect aria-label={t("views:debug.duration")} value={minutes} onChange={(event) => setMinutes(Number(event.target.value))} disabled={changing} data-debug-minutes>
-              {[15, 30, 60].map((value) => <option key={value} value={value}>{t("views:debug.minutes", { count: value })}</option>)}
-            </NativeSelect>}
+            {!capture?.active && <Select value={String(minutes)} onValueChange={(v) => v && setMinutes(Number(v))} disabled={changing}>
+              <SelectTrigger aria-label={t("views:debug.duration")} data-debug-minutes><SelectValue /></SelectTrigger>
+              <SelectContent align="end">{[15, 30, 60].map((value) => <SelectItem key={value} value={String(value)}>{t("views:debug.minutes", { count: value })}</SelectItem>)}</SelectContent>
+            </Select>}
             <Button size="sm" variant={capture?.active ? "outline" : "default"} disabled={changing || snapshotLoading} onClick={changeCapture} data-debug-toggle>{changing && <Spinner className="size-3" />}{capture?.active ? t("views:debug.stop") : t("views:debug.start")}</Button>
           </div> : <span className="type-footnote text-muted-foreground">{t("views:debug.ownerOnly")}</span>}
         </div>
@@ -154,16 +155,18 @@ export function ItemDebugPanel({ item, session }: { item: string; session?: stri
     <section className="space-y-3" data-debug-events>
       <div className="flex items-center justify-between gap-2"><h3 className="type-headline">{t("views:debug.events")}</h3><span className="type-footnote tabular-nums text-muted-foreground">{t("views:debug.loaded", { count: events.length })}</span></div>
       <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
-        <label className="min-w-0 space-y-1 type-footnote text-muted-foreground">{t("views:debug.session")}<NativeSelect className="w-full" value={sessionId} onChange={(event) => setSessionId(event.target.value)} data-debug-session>
-          <option value="">{t("views:debug.allSessions")}</option>
-          {sessionId && !sessions.some((value) => value.id === sessionId) && <option value={sessionId}>{sessionId}</option>}
-          {sessions.map((value) => <option key={value.id} value={value.id}>{value.id}</option>)}
-        </NativeSelect></label>
-        <label className="min-w-0 space-y-1 type-footnote text-muted-foreground">{t("views:debug.kind")}<Input className="h-8 type-footnote font-mono" value={kind} onChange={(event) => setKind(event.target.value)} list="debug-event-kinds" placeholder={t("views:debug.allKinds")} data-debug-kind /><datalist id="debug-event-kinds">{kinds.map((value) => <option key={value} value={value} />)}</datalist></label>
-        <label className="min-w-0 space-y-1 type-footnote text-muted-foreground">{t("views:debug.severity")}<NativeSelect className="w-full" value={severity} onChange={(event) => setSeverity(event.target.value)} data-debug-severity>
-          <option value="">{t("views:debug.allLevels")}</option><option value="info">{t("views:debug.info")}</option><option value="warning">{t("views:debug.warning")}</option><option value="error">{t("views:debug.error")}</option>
-        </NativeSelect></label>
-        <label className="min-w-0 space-y-1 type-footnote text-muted-foreground">{t("views:debug.attempt")}<Input className="h-8 type-footnote font-mono" value={attempt} onChange={(event) => setAttempt(event.target.value)} placeholder={t("views:debug.allAttempts")} data-debug-attempt /></label>
+        <div className="flex min-w-0 flex-col gap-1 type-footnote text-muted-foreground"><span aria-hidden>{t("views:debug.session")}</span><Select value={sessionId} onValueChange={(v) => setSessionId(v ?? "")}>
+          <SelectTrigger size="default" className="w-full" aria-label={t("views:debug.session")} data-debug-session><SelectValue /></SelectTrigger>
+          <SelectContent><SelectItem value="">{t("views:debug.allSessions")}</SelectItem>
+            {sessionId && !sessions.some((value) => value.id === sessionId) && <SelectItem value={sessionId}>{sessionId}</SelectItem>}
+            {sessions.map((value) => <SelectItem key={value.id} value={value.id}>{value.id}</SelectItem>)}</SelectContent>
+        </Select></div>
+        <label className="flex min-w-0 flex-col gap-1 type-footnote text-muted-foreground">{t("views:debug.kind")}<Input className="h-8 type-footnote font-mono" value={kind} onChange={(event) => setKind(event.target.value)} list="debug-event-kinds" placeholder={t("views:debug.allKinds")} data-debug-kind /><datalist id="debug-event-kinds">{kinds.map((value) => <option key={value} value={value} />)}</datalist></label>
+        <div className="flex min-w-0 flex-col gap-1 type-footnote text-muted-foreground"><span aria-hidden>{t("views:debug.severity")}</span><Select value={severity} onValueChange={(v) => setSeverity(v ?? "")}>
+          <SelectTrigger size="default" className="w-full" aria-label={t("views:debug.severity")} data-debug-severity><SelectValue /></SelectTrigger>
+          <SelectContent><SelectItem value="">{t("views:debug.allLevels")}</SelectItem><SelectItem value="info">{t("views:debug.info")}</SelectItem><SelectItem value="warning">{t("views:debug.warning")}</SelectItem><SelectItem value="error">{t("views:debug.error")}</SelectItem></SelectContent>
+        </Select></div>
+        <label className="flex min-w-0 flex-col gap-1 type-footnote text-muted-foreground">{t("views:debug.attempt")}<Input className="h-8 type-footnote font-mono" value={attempt} onChange={(event) => setAttempt(event.target.value)} placeholder={t("views:debug.allAttempts")} data-debug-attempt /></label>
       </div>
       <p className="type-footnote text-muted-foreground">{t("views:debug.historyHint")}</p>
       <p className="type-footnote text-muted-foreground" data-debug-delivery>{t("views:debug.deliveryHint")}</p>

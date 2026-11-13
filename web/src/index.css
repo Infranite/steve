@@ -4,6 +4,7 @@
 @import "@xyflow/react/dist/style.css";
 @import "./styles/affectui-theme.css";
 @import "./styles/affectui-placement.css";
+@import "./styles/affectui-forms.css";
 @source "../../node_modules/streamdown/dist/*.js";
 @source "../../node_modules/@streamdown/code/dist/*.js";
 
