@@ -9,17 +9,20 @@ import {
   useState,
   type KeyboardEvent,
   type ReactNode,
+  type RefObject,
 } from "react";
 
 /*
- * Memory Panel – what an AI assistant remembers about someone, and a calm place to change it, in one self-contained file.
+ * Memory Panel (Clean) – what an AI assistant remembers about someone, and a calm place to change it, in one self-contained file.
+ * Clean style: no tray – one white card with hairline shadows. Head, filters, the list, New memory and the status line
+ * are rows of that card; quiet gray type, thin 16px icons, states as soft tinted fills.
  * Memories are short facts grouped by category, each with where it came from.
  *   · a master switch turns memory off: the list dims and a short note unfolds under the head
  *   · category chips (and a small search) filter the list – rows fold away instead of jumping
  *   · hover a memory for its actions: edit the text in place, pause it (it stays, but isn't used) or forget it
- *   · a forgotten memory folds away and the gray tray offers Undo for a few seconds
- *   · "New memory" at the bottom unfolds into an inline editor with a category picker
- *   · the tray line counts memories and paused ones with rolling numbers and says what you are pointing at
+ *   · a forgotten memory folds away and the last row of the card offers Undo for a few seconds
+ *   · "New memory" unfolds into an inline editor with a category picker
+ *   · the last row counts memories and paused ones with rolling numbers and says what you are pointing at
  * The styles are injected below, so no extra files are needed.
  */
 
@@ -83,11 +86,11 @@ export type MemoryPanelProps = {
   title?: string;
   /** Height of the list before it scrolls, in px */
   maxHeight?: number;
-  /** How long Undo stays on the tray, in ms */
+  /** How long Undo stays in the last row, in ms */
   undoFor?: number;
   /** Source and date given to memories added here */
   addedSource?: string;
-  /** A button on the tray, e.g. { label: "Manage", onClick } – Undo takes its place for a moment */
+  /** A button in the last row, e.g. { label: "Manage", onClick } – Undo takes its place for a moment */
   action?: { label: string; onClick: () => void };
   className?: string;
   /* Steve: */
@@ -155,6 +158,28 @@ function useRolling(target: Record<string, number>, duration: number) {
   return shown;
 }
 
+/** True while a sideways-scrolling row has more content hidden past its right edge */
+function useMore(ref: RefObject<HTMLElement | null>) {
+  const [more, setMore] = useState(false);
+  useEffect(() => {
+    const row = ref.current;
+    if (!row) return;
+    const check = () => setMore(row.scrollLeft + row.clientWidth < row.scrollWidth - 1);
+    check();
+    const ro = new ResizeObserver(check);
+    ro.observe(row);
+    const mo = new MutationObserver(check);
+    mo.observe(row, { childList: true, subtree: true, characterData: true });
+    row.addEventListener("scroll", check, { passive: true });
+    return () => {
+      ro.disconnect();
+      mo.disconnect();
+      row.removeEventListener("scroll", check);
+    };
+  }, [ref]);
+  return more;
+}
+
 /**
  * Text that changes without a jump: the old line stays for a moment and fades out underneath while the new one fades in.
  * Quick changes just retarget – nothing piles up.
@@ -176,13 +201,13 @@ function Swap({ id, children }: { id: string; children: ReactNode }) {
     return () => window.clearTimeout(timer);
   }, [out]);
   return (
-    <span className="ui-mp__swap">
+    <span className="ui-mpc__swap">
       {out && (
-        <span key={`out-${out.id}`} className="ui-mp__swap-item" data-out="" aria-hidden="true">
+        <span key={`out-${out.id}`} className="ui-mpc__swap-item" data-out="" aria-hidden="true">
           {out.node}
         </span>
       )}
-      <span key={id} className="ui-mp__swap-item">
+      <span key={id} className="ui-mpc__swap-item">
         {children}
       </span>
     </span>
@@ -191,69 +216,24 @@ function Swap({ id, children }: { id: string; children: ReactNode }) {
 
 /* ---------- Icons ---------- */
 
-const line = {
-  stroke: "currentColor",
-  strokeWidth: 1.4,
-  strokeLinecap: "round",
-  strokeLinejoin: "round",
-} as const;
-const Icon = ({ children, size = 14 }: { children: ReactNode; size?: number }) => (
-  <svg width={size} height={size} viewBox="0 0 14 14" fill="none" aria-hidden="true">
-    {children}
+/* 16px, thin 1.1px lines with round caps – or solid shapes */
+const Glyph = ({ d, solid }: { d: string; solid?: boolean }) => (
+  <svg viewBox="0 0 16 16" className="ui-mpc__glyph" data-solid={solid || undefined} aria-hidden="true">
+    <path d={d} fillRule="evenodd" />
   </svg>
 );
-const EditIcon = () => (
-  <Icon>
-    <path d="M8.6 3.1 10.9 5.4M2.8 11.2l.5-2.6 6-6a1.2 1.2 0 0 1 1.7 0l.6.6a1.2 1.2 0 0 1 0 1.7l-6 6-2.8.3Z" {...line} />
-  </Icon>
-);
-const PauseIcon = () => (
-  <Icon>
-    <path d="M5.3 3.8v6.4M8.7 3.8v6.4" {...line} strokeWidth={1.6} />
-  </Icon>
-);
-const PlayIcon = () => (
-  <Icon>
-    <path d="M4.8 3.6v6.8a.4.4 0 0 0 .6.3l5.2-3.4a.4.4 0 0 0 0-.6L5.4 3.3a.4.4 0 0 0-.6.3Z" {...line} />
-  </Icon>
-);
-const ForgetIcon = () => (
-  <Icon>
-    <path d="M2.8 4.2h8.4M5.6 4.2V3a.8.8 0 0 1 .8-.8h1.2a.8.8 0 0 1 .8.8v1.2M3.9 4.2l.5 6.6a1 1 0 0 0 1 .9h3.2a1 1 0 0 0 1-.9l.5-6.6" {...line} />
-  </Icon>
-);
-const UndoIcon = () => (
-  <Icon size={12}>
-    <path d="M4.6 2.8 2.4 5l2.2 2.2M2.6 5h5.6a3.2 3.2 0 0 1 0 6.4H6" {...line} />
-  </Icon>
-);
-const PlusIcon = () => (
-  <Icon>
-    <path d="M7 3v8M3 7h8" {...line} />
-  </Icon>
-);
-const SearchIcon = () => (
-  <Icon>
-    <circle cx="6.2" cy="6.2" r="3.6" {...line} />
-    <path d="m8.9 8.9 2.4 2.4" {...line} />
-  </Icon>
-);
-const CloseIcon = () => (
-  <Icon size={12}>
-    <path d="m4 4 6 6m0-6-6 6" {...line} />
-  </Icon>
-);
+const EditIcon = () => <Glyph d="M9.8 3.7l2.5 2.5M3 13l.6-3 6.9-6.9a1.4 1.4 0 0 1 2 0l.4.4a1.4 1.4 0 0 1 0 2L6 12.4 3 13Z" />;
+const PauseIcon = () => <Glyph solid d="M4.5 3.5a1 1 0 0 1 1-1h1a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1h-1a1 1 0 0 1-1-1v-9Zm4 0a1 1 0 0 1 1-1h1a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1h-1a1 1 0 0 1-1-1v-9Z" />;
+const PlayIcon = () => <Glyph solid d="M4.5 3.4v9.2a.9.9 0 0 0 1.37.77l7.4-4.6a.9.9 0 0 0 0-1.54l-7.4-4.6a.9.9 0 0 0-1.37.77Z" />;
+const ForgetIcon = () => <Glyph d="M2.5 4.5h11M6.5 4.5V3.2a.7.7 0 0 1 .7-.7h1.6a.7.7 0 0 1 .7.7v1.3M4 4.5l.6 8a1.1 1.1 0 0 0 1.1 1h4.6a1.1 1.1 0 0 0 1.1-1l.6-8M6.8 7.2v3.6M9.2 7.2v3.6" />;
+const UndoIcon = () => <Glyph d="M5.5 3.5 3 6l2.5 2.5M3.2 6h6.3a3.5 3.5 0 0 1 0 7H7" />;
+const PlusIcon = () => <Glyph d="M8 3.5v9M3.5 8h9" />;
+const SearchIcon = () => <Glyph d="M7.2 11.9a4.7 4.7 0 1 0 0-9.4 4.7 4.7 0 0 0 0 9.4ZM10.6 10.6l2.9 2.9" />;
+const CloseIcon = () => <Glyph d="m4.5 4.5 7 7m0-7-7 7" />;
 const InfoIcon = () => (
-  <Icon>
-    <circle cx="7" cy="7" r="5.2" {...line} />
-    <path d="M7 6.4v3M7 4.6v.01" {...line} strokeWidth={1.6} />
-  </Icon>
+  <Glyph solid d="M8 1.5a6.5 6.5 0 1 1 0 13 6.5 6.5 0 0 1 0-13Zm0 5.4a.6.6 0 0 0-.6.6v3.6a.6.6 0 0 0 1.2 0V7.5a.6.6 0 0 0-.6-.6Zm0-2.3a.8.8 0 1 0 0 1.6.8.8 0 0 0 0-1.6Z" />
 );
-const ArrowIcon = () => (
-  <Icon size={12}>
-    <path d="M2.5 7h8M7.5 4l3 3-3 3" {...line} />
-  </Icon>
-);
+const ArrowIcon = () => <Glyph d="M3.5 8h9M9 4.5 12.5 8 9 11.5" />;
 
 /* ---------- One memory ---------- */
 
@@ -292,10 +272,10 @@ const Row = memo(function Row({
   focus: boolean;
 }) {
   return (
-    <li className="ui-mp__fold ui-mp__fold--row" data-open={open ? "" : undefined} data-leaving={leaving ? "" : undefined} inert={!open}>
-      <div className="ui-mp__clip">
+    <li className="ui-mpc__fold ui-mpc__fold--row" data-open={open ? "" : undefined} data-leaving={leaving ? "" : undefined} inert={!open}>
+      <div className="ui-mpc__clip">
         <div
-          className="ui-mp__item"
+          className="ui-mpc__item"
           data-memory={m.id}
           data-mem={m.id}
           data-focus={focus ? "" : undefined}
@@ -310,7 +290,7 @@ const Row = memo(function Row({
         >
           {editing ? (
             <textarea
-              className="ui-mp__edit"
+              className="ui-mpc__edit"
               value={draft}
               rows={1}
               dir="auto"
@@ -339,39 +319,39 @@ const Row = memo(function Row({
               }}
             />
           ) : (
-            <p className="ui-mp__text" dir="auto">
+            <p className="ui-mpc__text" dir="auto">
               {m.text}
             </p>
           )}
-          <div className="ui-mp__meta">
-            <span className="ui-mp__source">
+          <div className="ui-mpc__meta">
+            <span className="ui-mpc__source">
               {m.source && (
-                <span className="ui-mp__source-name" dir="auto" title={m.source}>
+                <span className="ui-mpc__source-name" dir="auto" title={m.source}>
                   {m.source}
                 </span>
               )}
-              {m.source && m.date && <span className="ui-mp__dot"> · </span>}
-              {m.date && <span className="ui-mp__date">{m.date}</span>}
+              {m.source && m.date && <span className="ui-mpc__dot"> · </span>}
+              {m.date && <span className="ui-mpc__date">{m.date}</span>}
             </span>
-            {m.tag && <span className="ui-mp__tag" data-on="" data-kind="note">{m.tag}</span>}
-            <span className="ui-mp__tag" data-on={m.paused ? "" : undefined} aria-hidden={!m.paused}>
+            {m.tag && <span className="ui-mpc__tag" data-on="" data-kind="note">{m.tag}</span>}
+            <span className="ui-mpc__tag" data-on={m.paused ? "" : undefined} aria-hidden={!m.paused}>
               {text.paused}
             </span>
-            {meta && <span className="ui-mp__extra">{meta}</span>}
+            {meta && <span className="ui-mpc__extra">{meta}</span>}
             {editing ? (
-              <span className="ui-mp__acts ui-mp__acts--edit">
-                <button type="button" className="ui-mp__text-btn" onClick={() => act.current.cancelEdit()}>
+              <span className="ui-mpc__acts ui-mpc__acts--edit">
+                <button type="button" className="ui-mpc__text-btn" onClick={() => act.current.cancelEdit()}>
                   {text.cancel}
                 </button>
-                <button type="button" className="ui-mp__text-btn ui-mp__text-btn--main" onClick={() => act.current.saveEdit()} data-mem-save="">
+                <button type="button" className="ui-mpc__text-btn ui-mpc__text-btn--main" onClick={() => act.current.saveEdit()} data-mem-save="">
                   {text.save}
                 </button>
               </span>
             ) : (
-              <span className="ui-mp__acts">
+              <span className="ui-mpc__acts">
                 <button
                   type="button"
-                  className="ui-mp__icon"
+                  className="ui-mpc__icon"
                   data-act="edit"
                   data-mem-edit=""
                   aria-label={text.editOf(m.text)}
@@ -382,20 +362,20 @@ const Row = memo(function Row({
                 </button>
                 {m.canPause !== false && <button
                   type="button"
-                  className="ui-mp__icon"
+                  className="ui-mpc__icon"
                   data-act="pause"
                   data-mem-pause=""
                   aria-label={m.paused ? text.resumeOf(m.text) : text.pauseOf(m.text)}
                   title={m.paused ? text.resume : text.pause}
                   onClick={() => act.current.togglePause(m)}
                 >
-                  <span className="ui-mp__icon-swap" key={m.paused ? "play" : "pause"}>
+                  <span className="ui-mpc__icon-swap" key={m.paused ? "play" : "pause"}>
                     {m.paused ? <PlayIcon /> : <PauseIcon />}
                   </span>
                 </button>}
                 <button
                   type="button"
-                  className="ui-mp__icon ui-mp__icon--forget"
+                  className="ui-mpc__icon ui-mpc__icon--forget"
                   data-act="forget"
                   data-mem-del=""
                   aria-label={text.forgetOf(m.text)}
@@ -442,6 +422,11 @@ export function MemoryPanel({
   const uid = useId();
   const rootRef = useRef<HTMLDivElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
+  const chipsRef = useRef<HTMLDivElement>(null);
+  const catsRef = useRef<HTMLDivElement>(null);
+  // Chip rows fade at their right edge only while more chips hide past it
+  const chipsMore = useMore(chipsRef);
+  const catsMore = useMore(catsRef);
 
   // Without onChange the panel keeps its own copy; with it the parent holds the truth
   const [inner, setInner] = useState(memories);
@@ -511,7 +496,7 @@ export function MemoryPanel({
     return () => window.clearTimeout(timer);
   }, [born]);
 
-  // Undo stays on the tray for a few seconds
+  // Undo stays in the last row for a few seconds
   useEffect(() => {
     if (!forgot) return;
     const timer = window.setTimeout(() => setForgot(null), undoFor);
@@ -608,7 +593,7 @@ export function MemoryPanel({
   const closeAdd = () => {
     setAdding(false);
     window.requestAnimationFrame(() =>
-      rootRef.current?.querySelector<HTMLElement>(".ui-mp__add")?.focus({ preventScroll: true }),
+      rootRef.current?.querySelector<HTMLElement>(".ui-mpc__add")?.focus({ preventScroll: true }),
     );
   };
   const saveAdd = () => {
@@ -629,7 +614,7 @@ export function MemoryPanel({
     setSearching(false);
     setQuery("");
     window.requestAnimationFrame(() =>
-      rootRef.current?.querySelector<HTMLElement>(".ui-mp__search-open")?.focus({ preventScroll: true }),
+      rootRef.current?.querySelector<HTMLElement>(".ui-mpc__search-open")?.focus({ preventScroll: true }),
     );
   };
 
@@ -653,7 +638,7 @@ export function MemoryPanel({
     buttons[next]?.scrollIntoView({ block: "nearest", inline: "nearest" });
   };
 
-  /* ---------- What the tray says ---------- */
+  /* ---------- What the last row says ---------- */
 
   let caption: ReactNode = (
     <>
@@ -665,10 +650,10 @@ export function MemoryPanel({
   if (forgot) {
     caption = (
       <>
-        <span className="ui-mp__forgot">
-          <span className="ui-mp__flat">{text.forgot[0]}</span>
-          <b className="ui-mp__quote">{forgot.memory.text}</b>
-          <span className="ui-mp__flat">{text.forgot[1]}</span>
+        <span className="ui-mpc__forgot">
+          <span className="ui-mpc__flat">{text.forgot[0]}</span>
+          <b className="ui-mpc__quote">{forgot.memory.text}</b>
+          <span className="ui-mpc__flat">{text.forgot[1]}</span>
         </span>
       </>
     );
@@ -695,22 +680,22 @@ export function MemoryPanel({
   return (
     <div
       ref={rootRef}
-      className={["ui-mp", className].filter(Boolean).join(" ")}
+      className={["ui-mpc", className].filter(Boolean).join(" ")}
       role="group"
       aria-labelledby={`${uid}-title`}
       data-off={on ? undefined : ""}
-      style={{ ["--ui-mp-max" as string]: maxHeight ? `${maxHeight}px` : "none" }}
+      style={{ ["--ui-mpc-max" as string]: maxHeight ? `${maxHeight}px` : "none" }}
     >
-      <style href="ui-memory-panel" precedence="default">
+      <style href="ui-memory-panel-clean" precedence="default">
         {css}
       </style>
 
-      <div className="ui-mp__card">
-        <div className="ui-mp__head" hidden={!showTitle && !showSwitch}>
-          <span id={`${uid}-title`} className="ui-mp__title" title={title}>
+      <div className="ui-mpc__card">
+        <div className="ui-mpc__head" hidden={!showTitle && !showSwitch}>
+          <span id={`${uid}-title`} className="ui-mpc__title" title={title}>
             {title}
           </span>
-          <span className="ui-mp__count" aria-hidden="true">
+          <span className="ui-mpc__count" aria-hidden="true">
             {num.format(total)}
           </span>
           {showSwitch && <button
@@ -718,20 +703,20 @@ export function MemoryPanel({
             role="switch"
             aria-checked={on}
             aria-controls={`${uid}-note`}
-            className="ui-mp__switch"
+            className="ui-mpc__switch"
             onClick={() => setOn(!on)}
           >
-            <span className="ui-mp__switch-label">{text.useMemory}</span>
-            <span className="ui-mp__track" aria-hidden="true">
-              <span className="ui-mp__knob" />
+            <span className="ui-mpc__switch-label">{text.useMemory}</span>
+            <span className="ui-mpc__track" aria-hidden="true">
+              <span className="ui-mpc__knob" />
             </span>
           </button>}
         </div>
 
         {/* A short note unfolds while memory is off */}
-        <div id={`${uid}-note`} className="ui-mp__fold" data-open={on ? undefined : ""} inert={on}>
-          <div className="ui-mp__clip">
-            <p className="ui-mp__note">
+        <div id={`${uid}-note`} className="ui-mpc__fold" data-open={on ? undefined : ""} inert={on}>
+          <div className="ui-mpc__clip">
+            <p className="ui-mpc__note">
               <InfoIcon />
               <span>{text.offNote}</span>
             </p>
@@ -739,9 +724,11 @@ export function MemoryPanel({
         </div>
 
         {/* Filter row: category chips, or a search field in their place */}
-        <div className="ui-mp__filters" data-searching={searching ? "" : undefined}>
+        <div className="ui-mpc__filters" data-searching={searching ? "" : undefined}>
           <div
-            className="ui-mp__chips"
+            ref={chipsRef}
+            className="ui-mpc__chips"
+            data-more={chipsMore ? "" : undefined}
             role="radiogroup"
             aria-label={text.category}
             inert={searching}
@@ -757,21 +744,21 @@ export function MemoryPanel({
                   role="radio"
                   aria-checked={checked}
                   tabIndex={checked ? 0 : -1}
-                  className="ui-mp__chip"
+                  className="ui-mpc__chip"
                   data-linked={c !== null && hotMemory?.category === c ? "" : undefined}
                   onClick={() => setFilter(c)}
                 >
                   {c === null ? text.all : c || text.other}
-                  <span className="ui-mp__chip-count">{num.format(count)}</span>
+                  <span className="ui-mpc__chip-count">{num.format(count)}</span>
                 </button>
               );
             })}
           </div>
           {searchable && <>
-          <div className="ui-mp__search" inert={!searching}>
+          <div className="ui-mpc__search" inert={!searching}>
             <SearchIcon />
             <input
-              className="ui-mp__input"
+              className="ui-mpc__input"
               type="text"
               value={query}
               placeholder={text.search}
@@ -791,13 +778,13 @@ export function MemoryPanel({
                 if (el && !searching) delete el.dataset.focused;
               }}
             />
-            <button type="button" className="ui-mp__icon" aria-label={text.closeSearch} onClick={closeSearch}>
+            <button type="button" className="ui-mpc__icon" aria-label={text.closeSearch} onClick={closeSearch}>
               <CloseIcon />
             </button>
           </div>
           <button
             type="button"
-            className="ui-mp__icon ui-mp__search-open"
+            className="ui-mpc__icon ui-mpc__search-open"
             aria-label={text.search}
             aria-expanded={searching}
             inert={searching}
@@ -813,7 +800,7 @@ export function MemoryPanel({
 
         <div
           ref={listRef}
-          className="ui-mp__list"
+          className="ui-mpc__list"
           onPointerLeave={() => setHot(null)}
         >
           {groups.map((g) => {
@@ -821,12 +808,12 @@ export function MemoryPanel({
             if (!items.length) return null;
             const open = items.some((m) => shows(m) && !leaving[m.id]);
             return (
-              <section key={g} className="ui-mp__fold" data-open={open ? "" : undefined} inert={!open} aria-label={g || text.other}>
-                <div className="ui-mp__clip">
-                  <h3 className="ui-mp__group" dir="auto">
+              <section key={g} className="ui-mpc__fold" data-open={open ? "" : undefined} inert={!open} aria-label={g || text.other}>
+                <div className="ui-mpc__clip">
+                  <h3 className="ui-mpc__group" dir="auto">
                     {g || text.other}
                   </h3>
-                  <ul className="ui-mp__items">
+                  <ul className="ui-mpc__items">
                     {items.map((m) => (
                       <Row
                         key={m.id}
@@ -848,9 +835,9 @@ export function MemoryPanel({
             );
           })}
 
-          <div className="ui-mp__fold" data-open={anyVisible ? undefined : ""} inert={anyVisible}>
-            <div className="ui-mp__clip">
-              <p className="ui-mp__empty" dir="auto">
+          <div className="ui-mpc__fold" data-open={anyVisible ? undefined : ""} inert={anyVisible}>
+            <div className="ui-mpc__clip">
+              <p className="ui-mpc__empty" dir="auto">
                 {list.length === 0 ? text.none : q ? text.noneFor(query.trim()) : text.noneHere}
               </p>
             </div>
@@ -858,20 +845,20 @@ export function MemoryPanel({
         </div>
 
         {/* New memory: a row that unfolds into an inline editor */}
-        <div className="ui-mp__bottom">
-          <div className="ui-mp__fold" data-open={adding ? undefined : ""} inert={adding}>
-            <div className="ui-mp__clip">
-              <button type="button" className="ui-mp__add" aria-expanded={adding} aria-controls={`${uid}-new`} onClick={openAdd} data-mem-new="">
+        <div className="ui-mpc__bottom">
+          <div className="ui-mpc__fold" data-open={adding ? undefined : ""} inert={adding}>
+            <div className="ui-mpc__clip">
+              <button type="button" className="ui-mpc__add" aria-expanded={adding} aria-controls={`${uid}-new`} onClick={openAdd} data-mem-new="">
                 <PlusIcon />
                 {text.newMemory}
               </button>
             </div>
           </div>
-          <div id={`${uid}-new`} className="ui-mp__fold" data-open={adding ? "" : undefined} inert={!adding}>
-            <div className="ui-mp__clip">
-              <div className="ui-mp__new">
+          <div id={`${uid}-new`} className="ui-mpc__fold" data-open={adding ? "" : undefined} inert={!adding}>
+            <div className="ui-mpc__clip">
+              <div className="ui-mpc__new">
                 <textarea
-                  className="ui-mp__edit ui-mp__edit--new"
+                  className="ui-mpc__edit ui-mpc__edit--new"
                   value={newText}
                   rows={1}
                   placeholder={text.newPlaceholder}
@@ -900,9 +887,11 @@ export function MemoryPanel({
                     }
                   }}
                 />
-                <div className="ui-mp__new-row">
+                <div className="ui-mpc__new-row">
                   <div
-                    className="ui-mp__cats"
+                    ref={catsRef}
+                    className="ui-mpc__cats"
+                    data-more={catsMore ? "" : undefined}
                     role="radiogroup"
                     aria-label={text.newCategory}
                     onKeyDown={(e) => {
@@ -923,21 +912,21 @@ export function MemoryPanel({
                         role="radio"
                         aria-checked={addCategory === g}
                         tabIndex={addCategory === g ? 0 : -1}
-                        className="ui-mp__cat"
+                        className="ui-mpc__cat"
                         title={g || text.other}
                         onClick={() => setNewCat(g)}
                       >
-                        <span className="ui-mp__cat-label" dir="auto">{g || text.other}</span>
+                        <span className="ui-mpc__cat-label" dir="auto">{g || text.other}</span>
                       </button>
                     ))}
                   </div>
-                  <span className="ui-mp__acts ui-mp__acts--edit">
-                    <button type="button" className="ui-mp__text-btn" onClick={closeAdd}>
+                  <span className="ui-mpc__acts ui-mpc__acts--edit">
+                    <button type="button" className="ui-mpc__text-btn" onClick={closeAdd}>
                       {text.cancel}
                     </button>
                     <button
                       type="button"
-                      className="ui-mp__text-btn ui-mp__text-btn--main"
+                      className="ui-mpc__text-btn ui-mpc__text-btn--main"
                       disabled={!newText.trim()}
                       onClick={saveAdd}
                       data-mem-add=""
@@ -950,241 +939,261 @@ export function MemoryPanel({
             </div>
           </div>
         </div>
-      </div>
 
-      {/* The tray: counts, what you point at, and Undo after forgetting */}
-      <div className="ui-mp__foot">
-        <span className="ui-mp__caption" aria-live="polite">
-          <Swap id={captionKey}>{caption}</Swap>
-        </span>
-        {forgot ? (
-          <button key={`undo-${forgot.key}`} type="button" className="ui-mp__action ui-mp__action--undo" onClick={undo}>
-            <UndoIcon />
-            {text.undo}
-          </button>
-        ) : (
-          action && (
-            <button key="action" type="button" className="ui-mp__action" title={action.label} onClick={action.onClick}>
-              <span className="ui-mp__action-label">{action.label}</span>
-              <ArrowIcon />
+        {/* The last row of the card: counts, what you point at, and Undo after forgetting */}
+        <div className="ui-mpc__foot">
+          <span className="ui-mpc__caption" aria-live="polite">
+            <Swap id={captionKey}>{caption}</Swap>
+          </span>
+          {forgot ? (
+            <button key={`undo-${forgot.key}`} type="button" className="ui-mpc__action ui-mpc__action--undo" onClick={undo}>
+              <UndoIcon />
+              {text.undo}
             </button>
-          )
-        )}
+          ) : (
+            action && (
+              <button key="action" type="button" className="ui-mpc__action" title={action.label} onClick={action.onClick}>
+                <span className="ui-mpc__action-label">{action.label}</span>
+                <ArrowIcon />
+              </button>
+            )
+          )}
+        </div>
       </div>
     </div>
   );
 }
 
 const css = /* css */ `
-.ui-mp {
-  --ui-mp-tray: var(--aui-subtle, #f0f0f0);
-  --ui-mp-card: #ffffff;
-  --ui-mp-line: var(--aui-border, #ececec);
-  --ui-mp-ink: var(--aui-ink, #171717);
-  --ui-mp-text: var(--aui-ink, #404040);
-  --ui-mp-muted: var(--aui-muted, #8f8f8f);
-  --ui-mp-well: var(--aui-subtle, #f4f4f5);
-  --ui-mp-hover: #ececee;
-  --ui-mp-track: #dcdce0;
-  --ui-mp-accent: var(--aui-blue, #4fb0fe);
-  --ui-mp-red: var(--aui-danger, #c4320a);
-  --ui-mp-red-bg: color-mix(in srgb, var(--aui-red, #f04438) 10%, transparent);
-  --ui-mp-tag: #5f5f66;
-  --ui-mp-tag-bg: rgba(110, 110, 120, 0.1);
-  --ui-mp-focus: var(--aui-focus, rgba(0, 96, 226, 0.7));
-  --ui-mp-ease: cubic-bezier(0.32, 0.72, 0.24, 1);
+/* Colors and motion as variables – override them on .ui-mpc */
+.ui-mpc {
+  /* Steve: colors from Steve's tokens, which switch between light and dark themselves */
+  --ui-mpc-card: var(--aui-surface, #ffffff);
+  --ui-mpc-ink: var(--aui-ink, rgba(0, 0, 0, 0.88));
+  --ui-mpc-strong: var(--aui-ink, #000000);
+  --ui-mpc-text: var(--aui-muted, rgba(0, 0, 0, 0.61));
+  --ui-mpc-muted: var(--aui-muted, rgba(0, 0, 0, 0.45));
+  --ui-mpc-faint: var(--aui-placeholder, rgba(0, 0, 0, 0.27));
+  --ui-mpc-icon: var(--aui-muted, rgba(0, 0, 0, 0.447));
+  --ui-mpc-line: var(--aui-border, rgba(0, 0, 0, 0.06));
+  --ui-mpc-wash: var(--aui-subtle, rgba(0, 0, 0, 0.03));
+  --ui-mpc-fill: color-mix(in srgb, var(--aui-ink, #000) 6%, transparent);
+  --ui-mpc-fill-strong: color-mix(in srgb, var(--aui-ink, #000) 12%, transparent);
+  --ui-mpc-accent: var(--aui-blue, rgba(0, 96, 226, 0.765));
+  --ui-mpc-focus: var(--aui-focus, rgba(0, 96, 226, 0.7));
+  --ui-mpc-red: var(--aui-danger, #f04438);
+  --ui-mpc-red-soft: var(--aui-danger-soft, color-mix(in srgb, #f04438 8%, transparent));
+  --ui-mpc-amber: var(--aui-warning, #8f6c00);
+  --ui-mpc-amber-soft: var(--aui-warning-soft, color-mix(in srgb, #e8b000 12%, transparent));
+  --ui-mpc-solid: var(--aui-primary, rgba(0, 0, 0, 0.88));
+  --ui-mpc-on-solid: var(--aui-on-primary, #fcfcfc);
+  --ui-mpc-knob: #ffffff;
+  /* Strokes are shadows: a 0.5px hairline plus a soft lift */
+  --ui-mpc-shadow: var(--aui-shadow-card, 0 0 0 0.5px rgba(0, 0, 0, 0.06), 0 1px 1px -1px rgba(0, 0, 0, 0.1), 0 1px 2px 0 rgba(0, 0, 0, 0.05));
+  --ui-mpc-ease: var(--aui-ease, cubic-bezier(0.22, 1, 0.36, 1));
   box-sizing: border-box;
   width: 100%;
-  max-width: var(--ui-mp-width, 380px);
+  max-width: var(--ui-mpc-width, 400px);
   min-width: 0;
   container-type: inline-size;
-  padding: 4px;
-  border-radius: calc(var(--aui-radius-lg, 16px) + 4px);
-  background: var(--ui-mp-tray);
-  font-family: var(--aui-font, "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif);
+  font-family: var(--aui-font, "Inter", "InterVariable", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif);
   font-size: 13px;
   line-height: 20px;
-  color: var(--ui-mp-text);
+  font-weight: 400;
+  color: var(--ui-mpc-ink);
   text-align: left;
   -webkit-font-smoothing: antialiased;
 }
-.ui-mp *, .ui-mp *::before, .ui-mp *::after { box-sizing: border-box; }
-:where(.ui-mp) button { margin: 0; padding: 0; border: 0; background: none; font: inherit; color: inherit; text-align: inherit; cursor: pointer; -webkit-tap-highlight-color: transparent; }
-:where(.ui-mp) :is(p, h3, ul) { margin: 0; padding: 0; list-style: none; font: inherit; }
-.ui-mp button:focus-visible { outline: 2px solid var(--ui-mp-focus); outline-offset: 2px; }
-/* Typing in a field: no ring – the caret shows where you are, the edge only firms up a little */
-.ui-mp :is(input, textarea):focus-visible { outline: none; }
-.ui-mp svg { display: block; flex: none; }
-.ui-mp b { font-weight: 500; color: var(--ui-mp-ink); }
+.ui-mpc *, .ui-mpc *::before, .ui-mpc *::after { box-sizing: border-box; }
+:where(.ui-mpc) button { margin: 0; padding: 0; border: 0; background: none; font: inherit; color: inherit; text-align: inherit; cursor: pointer; -webkit-tap-highlight-color: transparent; }
+:where(.ui-mpc) :is(p, h3, ul) { margin: 0; padding: 0; list-style: none; font: inherit; }
+.ui-mpc button:focus-visible { outline: 2px solid var(--ui-mpc-focus); outline-offset: 2px; }
+/* Text fields: no focus box while typing – also against global :focus-visible rules of the host page */
+.ui-mpc :is(input, textarea):focus-visible { outline: none; }
+:where(.ui-mpc) svg { display: block; flex: none; }
+.ui-mpc b { font-weight: 500; color: var(--ui-mpc-ink); }
 
-.ui-mp__card { border-radius: var(--aui-radius-lg, 16px); background: var(--aui-surface, var(--ui-mp-card)); box-shadow: var(--aui-shadow-card, 0 0 0 1px var(--ui-mp-line), 0 1px 2px rgba(0, 0, 0, 0.04)); }
+.ui-mpc__glyph { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.1; stroke-linecap: round; stroke-linejoin: round; }
+.ui-mpc__glyph[data-solid] { fill: currentColor; stroke: none; }
+
+/* One white card – the edge is a shadow, not a border */
+.ui-mpc__card { border-radius: var(--aui-radius-lg, 10px); background: var(--aui-surface, var(--ui-mpc-card)); box-shadow: var(--aui-shadow-card, var(--ui-mpc-shadow)); }
 
 /* Everything that opens or goes does it the same quiet way: it unfolds or folds and fades, nothing travels */
-.ui-mp__fold { display: grid; grid-template-rows: 0fr; opacity: 0; transition: grid-template-rows 420ms var(--ui-mp-ease), opacity 220ms ease; }
-.ui-mp__fold[data-open] { grid-template-rows: 1fr; opacity: 1; transition: grid-template-rows 420ms var(--ui-mp-ease), opacity 320ms ease 80ms; }
-.ui-mp__fold--row[data-leaving] { transition: grid-template-rows 320ms var(--ui-mp-ease), opacity 200ms ease, filter 200ms ease; filter: blur(2px); }
-.ui-mp__clip { min-height: 0; overflow: hidden; }
+.ui-mpc__fold { display: grid; grid-template-rows: 0fr; opacity: 0; transition: grid-template-rows 420ms var(--ui-mpc-ease), opacity 220ms ease; }
+.ui-mpc__fold[data-open] { grid-template-rows: 1fr; opacity: 1; transition: grid-template-rows 420ms var(--ui-mpc-ease), opacity 320ms ease 80ms; }
+.ui-mpc__fold--row[data-leaving] { transition: grid-template-rows 320ms var(--ui-mpc-ease), opacity 200ms ease, filter 200ms ease; filter: blur(2px); }
+.ui-mpc__clip { min-height: 0; overflow: hidden; }
 
 /* ----- Head ----- */
-.ui-mp__head { display: flex; align-items: center; gap: 8px; height: 48px; padding: 0 12px 0 14px; }
-.ui-mp__head[hidden] { display: none; }
-.ui-mp__head[hidden] + .ui-mp__fold + .ui-mp__filters { padding-top: 10px; }
-.ui-mp__title { min-width: 0; overflow: hidden; font-size: 13.5px; font-weight: 600; color: var(--ui-mp-ink); white-space: nowrap; text-overflow: ellipsis; }
-.ui-mp__count { flex: none; min-width: 20px; height: 20px; padding: 0 6px; border-radius: calc(var(--aui-radius-sm, 7px) - 2px); background: var(--ui-mp-well); font-size: 12px; font-weight: 500; line-height: 20px; text-align: center; color: var(--ui-mp-muted); font-variant-numeric: tabular-nums; }
-.ui-mp__switch { display: inline-flex; flex: none; align-items: center; gap: 8px; height: 28px; margin-left: auto; padding: 0 2px 0 8px; border-radius: calc(var(--aui-radius-sm, 7px) + 1px); font-size: 12.5px; color: var(--ui-mp-text); transition: background-color 160ms ease; }
-.ui-mp__switch:hover { background: var(--ui-mp-well); }
-.ui-mp__track { position: relative; width: 28px; height: 16px; border-radius: 8px; background: var(--ui-mp-track); transition: background-color 240ms ease; }
-.ui-mp__knob { position: absolute; top: 2px; left: 2px; width: 12px; height: 12px; border-radius: 50%; background: #fff; box-shadow: 0 1px 2px rgba(0, 0, 0, 0.18); transition: transform 280ms var(--ui-mp-ease); }
-.ui-mp__switch[aria-checked="true"] .ui-mp__track { background: var(--aui-primary, var(--ui-mp-ink)); }
-.ui-mp__switch[aria-checked="true"] .ui-mp__knob { transform: translateX(12px); }
+.ui-mpc__head { display: flex; align-items: center; gap: 8px; padding: 12px 10px 0 16px; }
+.ui-mpc__head[hidden] { display: none; }
+.ui-mpc__head[hidden] + .ui-mpc__fold + .ui-mpc__filters { padding-top: 10px; }
+.ui-mpc__title { min-width: 0; overflow: hidden; font-size: 15px; font-weight: 500; line-height: 24px; color: var(--ui-mpc-strong); white-space: nowrap; text-overflow: ellipsis; }
+.ui-mpc__count { flex: none; min-width: 20px; height: 18px; padding: 0 5px; border-radius: var(--aui-radius-sm, 5px); background: var(--ui-mpc-fill); font-size: 11px; font-weight: 500; line-height: 18px; text-align: center; color: var(--ui-mpc-text); font-variant-numeric: tabular-nums; }
+.ui-mpc__switch { display: inline-flex; flex: none; align-items: center; gap: 8px; height: 28px; margin-left: auto; padding: 0 6px 0 8px; border-radius: calc(var(--aui-radius-sm, 5px) + 1px); color: var(--ui-mpc-text); transition: background-color 90ms ease, color 90ms ease; }
+.ui-mpc__switch:hover { background: var(--ui-mpc-wash); color: var(--ui-mpc-ink); }
+.ui-mpc__track { position: relative; width: 26px; height: 16px; border-radius: 5px; background: var(--ui-mpc-fill-strong); transition: background-color 220ms ease; }
+.ui-mpc__knob { position: absolute; top: 2px; left: 2px; width: 12px; height: 12px; border-radius: 3.5px; background: var(--ui-mpc-knob); box-shadow: 0 0 0 0.5px rgba(0, 0, 0, 0.06), 0 1px 2px rgba(0, 0, 0, 0.16); transition: transform 260ms var(--ui-mpc-ease); }
+.ui-mpc__switch[aria-checked="true"] .ui-mpc__track { background: var(--ui-mpc-accent); }
+.ui-mpc__switch[aria-checked="true"] .ui-mpc__knob { transform: translateX(10px); }
 
-.ui-mp__note { display: flex; gap: 8px; margin: 0 12px 10px !important; padding: 8px 10px; border-radius: calc(var(--aui-radius-lg, 16px) - 6px); background: var(--ui-mp-well); font-size: 12.5px; line-height: 18px; color: var(--ui-mp-text); }
-.ui-mp__note svg { margin-top: 2px; color: var(--ui-mp-muted); }
+/* The note while memory is off: a soft gray fill, no stroke */
+.ui-mpc__note { display: flex; gap: 8px; margin: 10px 12px 0 16px !important; padding: 8px 10px; border-radius: calc(var(--aui-radius-lg, 10px) - 2px); background: var(--ui-mpc-wash); font-size: 12px !important; line-height: 16px !important; color: var(--ui-mpc-text); }
+.ui-mpc__note .ui-mpc__glyph { color: var(--ui-mpc-icon); }
 
-/* ----- Filters ----- */
-.ui-mp__filters { position: relative; display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 4px; padding: 0 10px 10px 12px; }
-.ui-mp__chips, .ui-mp__search { grid-area: 1 / 1; transition: opacity 220ms ease, filter 220ms ease; }
-.ui-mp__chips { display: flex; gap: 4px; min-width: 0; margin: -2px -4px; padding: 2px 4px; overflow-x: auto; scrollbar-width: none; mask-image: linear-gradient(90deg, #000 calc(100% - 14px), transparent); }
-.ui-mp__chips::-webkit-scrollbar { display: none; }
-.ui-mp__chip { display: inline-flex; flex: none; align-items: center; gap: 5px; height: 26px; padding: 0 8px; border-radius: calc(var(--aui-radius-sm, 7px) + 1px); font-size: 12.5px; color: var(--ui-mp-text); white-space: nowrap; transition: background-color 160ms ease, color 160ms ease, box-shadow 160ms ease; }
-.ui-mp__chip:hover { background: var(--ui-mp-well); }
-.ui-mp__chip[data-linked] { color: var(--ui-mp-ink); }
-.ui-mp__chip[data-linked]:not([aria-checked="true"]) { background: var(--ui-mp-well); }
-.ui-mp__chip[aria-checked="true"] { background: var(--ui-mp-well); color: var(--ui-mp-ink); box-shadow: inset 0 0 0 1px var(--ui-mp-line); }
-.ui-mp__chip-count { font-size: 11.5px; color: var(--ui-mp-muted); font-variant-numeric: tabular-nums; }
-.ui-mp__search { display: flex; align-items: center; gap: 6px; height: 28px; padding: 0 2px 0 8px; border-radius: calc(var(--aui-radius, 10px) - 2px); background: var(--ui-mp-well); color: var(--ui-mp-muted); opacity: 0; visibility: hidden; }
-.ui-mp__input { flex: 1; min-width: 0; height: 28px; margin: 0; padding: 0; border: 0; background: none; font: inherit; font-size: 12.5px; color: var(--ui-mp-ink); outline: none; }
-.ui-mp__input::placeholder { color: var(--ui-mp-muted); }
-.ui-mp__search .ui-mp__icon { width: 24px; height: 24px; }
-.ui-mp__filters[data-searching] .ui-mp__chips { opacity: 0; filter: blur(2px); }
-.ui-mp__filters[data-searching] .ui-mp__search { grid-area: 1 / 1 / 2 / 3; opacity: 1; visibility: visible; }
-.ui-mp__filters[data-searching] .ui-mp__search-open { opacity: 0; visibility: hidden; }
-.ui-mp__search-open { grid-area: 1 / 2; transition: opacity 200ms ease, background-color 160ms ease, color 160ms ease; }
+/* ----- Filters: the button-switch look ----- */
+.ui-mpc__filters { position: relative; display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 8px; padding: 12px 10px 12px 16px; border-bottom: 0.5px solid var(--ui-mpc-line); transition: opacity 300ms ease; }
+.ui-mpc__chips, .ui-mpc__search { grid-area: 1 / 1; transition: opacity 220ms ease, filter 220ms ease; }
+.ui-mpc__chips { display: flex; gap: 4px; min-width: 0; margin: -3px; padding: 3px; overflow-x: auto; scrollbar-width: none; }
+.ui-mpc__chips[data-more], .ui-mpc__cats[data-more] { -webkit-mask-image: linear-gradient(90deg, #000 calc(100% - 24px), transparent); mask-image: linear-gradient(90deg, #000 calc(100% - 24px), transparent); }
+.ui-mpc__chips::-webkit-scrollbar { display: none; }
+.ui-mpc__chip { display: inline-flex; flex: none; align-items: center; gap: 6px; padding: 4px 10px; border-radius: calc(var(--aui-radius-sm, 5px) + 1px); box-shadow: inset 0 0 0 0.5px var(--ui-mpc-line); font-size: 13px; font-weight: 500; line-height: 20px; color: var(--ui-mpc-text); white-space: nowrap; transition: background-color 90ms ease, color 90ms ease; }
+.ui-mpc__chip:hover { background: var(--ui-mpc-wash); }
+.ui-mpc__chip[data-linked] { color: var(--ui-mpc-ink); }
+.ui-mpc__chip[aria-checked="true"] { background: var(--ui-mpc-fill); color: var(--ui-mpc-ink); }
+.ui-mpc__chip-count { font-size: 12px; font-weight: 400; color: var(--ui-mpc-muted); font-variant-numeric: tabular-nums; }
+.ui-mpc__chip[aria-checked="true"] .ui-mpc__chip-count { color: var(--ui-mpc-text); }
+.ui-mpc__search { display: flex; align-items: center; gap: 6px; height: 28px; padding: 0 2px 0 8px; border-radius: calc(var(--aui-radius, 7px) - 1px); box-shadow: inset 0 0 0 0.5px var(--ui-mpc-line); background: var(--ui-mpc-wash); color: var(--ui-mpc-icon); opacity: 0; visibility: hidden; }
+.ui-mpc__input { flex: 1; min-width: 0; height: 28px; margin: 0; padding: 0; border: 0; background: none; font: inherit; font-size: 13px; color: var(--ui-mpc-strong); caret-color: var(--ui-mpc-accent); outline: none; }
+.ui-mpc__input::placeholder { color: var(--ui-mpc-faint); opacity: 1; }
+.ui-mpc__search .ui-mpc__icon { width: 24px; height: 24px; }
+.ui-mpc__filters[data-searching] .ui-mpc__chips { opacity: 0; filter: blur(2px); }
+.ui-mpc__filters[data-searching] .ui-mpc__search { grid-area: 1 / 1 / 2 / 3; opacity: 1; visibility: visible; }
+.ui-mpc__filters[data-searching] .ui-mpc__search-open { opacity: 0; visibility: hidden; }
+.ui-mpc__search-open { grid-area: 1 / 2; transition: opacity 200ms ease, background-color 90ms ease, color 90ms ease; }
 
 /* ----- List ----- */
-.ui-mp__list { max-height: var(--ui-mp-max); padding: 2px 6px 6px; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; scrollbar-color: var(--ui-mp-track) transparent; border-top: 1px solid var(--ui-mp-line); transition: opacity 300ms ease; }
-.ui-mp[data-off] .ui-mp__list, .ui-mp[data-off] .ui-mp__filters { opacity: 0.5; }
-.ui-mp[data-off] .ui-mp__list:hover, .ui-mp[data-off] .ui-mp__list:focus-within { opacity: 0.85; }
-.ui-mp__filters { transition: opacity 300ms ease; }
-.ui-mp__group { padding: 10px 8px 2px; font-size: 12px !important; font-weight: 500 !important; line-height: 18px !important; color: var(--ui-mp-muted); }
-.ui-mp__item { padding: 8px 8px 6px; border-radius: calc(var(--aui-radius-sm, 7px) + 3px); transition: background-color 160ms ease, opacity 220ms ease; }
-.ui-mp__item[data-hot], .ui-mp__item[data-editing] { background: var(--ui-mp-well); }
-.ui-mp__text { font-size: 14px; line-height: 22px; color: var(--ui-mp-ink); overflow-wrap: anywhere; transition: color 240ms ease; }
-.ui-mp__item[data-paused] .ui-mp__text { color: var(--ui-mp-muted); }
-.ui-mp__meta { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 6px; min-height: 24px; font-size: 12px; color: var(--ui-mp-muted); }
+.ui-mpc__list { max-height: var(--ui-mpc-max); padding: 2px 6px 6px; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; scrollbar-color: var(--ui-mpc-fill-strong) transparent; transition: opacity 300ms ease; }
+.ui-mpc[data-off] .ui-mpc__list, .ui-mpc[data-off] .ui-mpc__filters { opacity: 0.5; }
+.ui-mpc[data-off] .ui-mpc__list:hover, .ui-mpc[data-off] .ui-mpc__list:focus-within { opacity: 0.85; }
+.ui-mpc__group { padding: 12px 10px 4px; font-size: 12px !important; font-weight: 500 !important; line-height: 16px !important; color: var(--ui-mpc-muted); }
+/* The hovered row gets a soft wash – short and crisp, and gone when the pointer leaves */
+.ui-mpc__item { padding: 8px 10px 7px; border-radius: calc(var(--aui-radius-sm, 5px) + 3px); transition: background-color 90ms ease-out, opacity 220ms ease; }
+.ui-mpc__item[data-hot], .ui-mpc__item[data-editing] { background: var(--ui-mpc-wash); }
+/* Steve: memory text reads as body text */
+.ui-mpc__text { font-size: 14px; line-height: 22px; color: var(--ui-mpc-ink); overflow-wrap: anywhere; transition: color 240ms ease; }
+.ui-mpc__item[data-paused] .ui-mpc__text { color: var(--ui-mpc-muted); }
+.ui-mpc__meta { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 6px; min-height: 20px; margin-top: 2px; font-size: 12px; line-height: 16px; color: var(--ui-mpc-muted); }
 /* Steve: pickers on the meta line, a tag such as "waiting for you", the memory a link pointed at */
-.ui-mp__extra { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 0 8px; min-width: 0; }
-.ui-mp__tag[data-kind="note"] { background: var(--aui-warning-soft, rgba(240, 160, 60, 0.12)); color: var(--aui-warning, #b25e00); }
-.ui-mp__item[data-focus] { background: color-mix(in srgb, var(--aui-primary, #4f46e5) 7%, transparent); }
-.ui-mp__source { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
-.ui-mp__tag { display: inline-flex; flex: none; align-items: center; height: 18px; padding: 0 6px; border-radius: calc(var(--aui-radius-sm, 7px) - 2px); background: var(--ui-mp-tag-bg); font-size: 11.5px; font-weight: 500; color: var(--ui-mp-tag); opacity: 0; transform: scale(0.9); transition: opacity 220ms ease, transform 280ms var(--ui-mp-ease); }
-.ui-mp__tag:not([data-on]) { position: absolute; visibility: hidden; }
-.ui-mp__tag[data-on] { opacity: 1; transform: none; animation: ui-mp-in 280ms var(--ui-mp-ease) both; }
-.ui-mp__acts { display: inline-flex; flex: none; align-items: center; gap: 2px; margin: -1px -4px -1px auto; opacity: 0; transition: opacity 180ms ease; }
-.ui-mp__item:is([data-hot], :focus-within) .ui-mp__acts, .ui-mp__acts--edit { opacity: 1; }
-.ui-mp__icon { display: grid; flex: none; place-items: center; width: 26px; height: 26px; border-radius: calc(var(--aui-radius-sm, 7px) + 1px); color: var(--ui-mp-muted); transition: background-color 160ms ease, color 160ms ease, opacity 200ms ease; }
-.ui-mp__icon:hover { background: var(--ui-mp-hover); color: var(--ui-mp-ink); }
-.ui-mp__icon--forget:hover { background: var(--ui-mp-red-bg); color: var(--ui-mp-red); }
-.ui-mp__icon-swap { display: grid; animation: ui-mp-in 260ms ease both; }
-.ui-mp__text-btn { display: inline-flex; align-items: center; height: 26px; padding: 0 9px; border-radius: calc(var(--aui-radius-sm, 7px) + 1px); font-size: 12.5px; font-weight: 500; color: var(--ui-mp-text); transition: background-color 160ms ease, color 160ms ease, opacity 160ms ease; }
-.ui-mp__text-btn:hover { background: var(--ui-mp-hover); color: var(--ui-mp-ink); }
-.ui-mp__text-btn--main { background: var(--aui-primary, var(--ui-mp-ink)); color: var(--aui-on-primary, var(--ui-mp-card)); }
-.ui-mp__text-btn--main:hover { background: var(--aui-primary, var(--ui-mp-ink)); color: var(--aui-on-primary, var(--ui-mp-card)); opacity: 0.86; }
-.ui-mp__text-btn:disabled { cursor: default; opacity: 0.35; }
-.ui-mp__item .ui-mp__edit { font-size: 14px; line-height: 22px; }
-.ui-mp__edit { display: block; width: 100%; min-height: 20px; margin: 0; padding: 0; border: 0; background: none; font: inherit; color: var(--ui-mp-ink); resize: none; overflow: hidden; outline: none; }
-.ui-mp__edit::placeholder { color: var(--ui-mp-muted); }
-.ui-mp__item .ui-mp__edit:focus-visible { outline: none; }
-.ui-mp__empty { padding: 18px 8px 12px; font-size: 12.5px; text-align: center; color: var(--ui-mp-muted); }
+.ui-mpc__extra { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 0 8px; min-width: 0; }
+.ui-mpc__tag[data-kind="note"] { background: var(--aui-warning-soft, rgba(240, 160, 60, 0.12)); color: var(--aui-warning, #b25e00); }
+.ui-mpc__item[data-focus] { background: color-mix(in srgb, var(--aui-primary, #4f46e5) 7%, transparent); }
+.ui-mpc__source { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.ui-mpc__dot { color: var(--ui-mpc-faint); }
+.ui-mpc__tag { display: inline-flex; flex: none; align-items: center; height: 18px; padding: 0 6px; border-radius: var(--aui-radius-sm, 5px); background: var(--ui-mpc-amber-soft); font-size: 11px; font-weight: 500; line-height: 16px; color: var(--ui-mpc-amber); opacity: 0; transform: scale(0.9); transition: opacity 220ms ease, transform 280ms var(--ui-mpc-ease); }
+.ui-mpc__tag:not([data-on]) { position: absolute; visibility: hidden; }
+.ui-mpc__tag[data-on] { opacity: 1; transform: none; animation: ui-mpc-in 280ms var(--ui-mpc-ease) both; }
+.ui-mpc__acts { display: inline-flex; flex: none; align-items: center; gap: 2px; margin: -4px -6px -4px auto; opacity: 0; transition: opacity 120ms ease; }
+.ui-mpc__item:is([data-hot], :focus-within) .ui-mpc__acts, .ui-mpc__acts--edit { opacity: 1; }
+.ui-mpc__acts--edit { gap: 4px; margin-top: 4px; margin-right: -2px; margin-bottom: 0; }
+.ui-mpc__item[data-editing] { padding-bottom: 8px; }
+/* Ghost icon button */
+.ui-mpc__icon { display: grid; flex: none; place-items: center; width: 28px; height: 28px; border-radius: calc(var(--aui-radius-sm, 5px) + 1px); color: var(--ui-mpc-icon); transition: background-color 90ms ease, color 90ms ease, opacity 200ms ease; }
+.ui-mpc__icon:hover { background: var(--ui-mpc-wash); color: var(--ui-mpc-ink); }
+.ui-mpc__item .ui-mpc__icon:hover { background: var(--ui-mpc-fill); }
+.ui-mpc__item .ui-mpc__icon--forget:hover { background: var(--ui-mpc-red-soft); color: var(--ui-mpc-red); }
+.ui-mpc__icon-swap { display: grid; animation: ui-mpc-in 260ms ease both; }
+/* Cancel: ghost text; Save: the dark chip */
+.ui-mpc__text-btn { display: inline-flex; flex: none; align-items: center; height: 28px; padding: 0 10px; border-radius: calc(var(--aui-radius-sm, 5px) + 1px); font-size: 13px; font-weight: 500; line-height: 20px; color: var(--ui-mpc-text); white-space: nowrap; transition: background-color 90ms ease, color 90ms ease, opacity 160ms ease; }
+.ui-mpc__text-btn:hover { background: var(--ui-mpc-fill); color: var(--ui-mpc-ink); }
+.ui-mpc__text-btn--main, .ui-mpc__text-btn--main:hover { background: var(--ui-mpc-solid); color: var(--ui-mpc-on-solid); }
+.ui-mpc__text-btn--main:hover { opacity: 0.88; }
+.ui-mpc__text-btn:disabled { cursor: default; opacity: 0.3; }
+.ui-mpc__edit { display: block; width: 100%; min-height: 20px; margin: 0; padding: 0; border: 0; background: none; font: inherit; color: var(--ui-mpc-strong); caret-color: var(--ui-mpc-accent); resize: none; overflow: hidden; outline: none; }
+.ui-mpc__edit::placeholder { color: var(--ui-mpc-faint); opacity: 1; }
+.ui-mpc__empty { padding: 20px 8px 14px; font-size: 13px; text-align: center; color: var(--ui-mpc-muted); }
+.ui-mpc__item .ui-mpc__edit { font-size: 14px; line-height: 22px; }
+.ui-mpc__item .ui-mpc__edit:focus-visible { outline: none; }
 
 /* ----- New memory ----- */
-.ui-mp__bottom { padding: 4px 6px 6px; border-top: 1px solid var(--ui-mp-line); }
-.ui-mp__add { display: flex; align-items: center; gap: 8px; width: 100%; height: 32px; padding: 0 8px; border-radius: calc(var(--aui-radius-sm, 7px) + 3px); font-size: 13px; color: var(--ui-mp-muted); transition: background-color 160ms ease, color 160ms ease; }
-.ui-mp__add:hover { background: var(--ui-mp-well); color: var(--ui-mp-ink); }
-.ui-mp__new { margin: 2px 0 0; padding: 8px 8px 6px; border-radius: var(--aui-radius, 10px); background: var(--ui-mp-well); }
-.ui-mp__new-row { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 6px; margin-top: 8px; }
-.ui-mp__cats { display: flex; flex: 1 1 auto; flex-wrap: wrap; gap: 4px; min-width: 0; }
-.ui-mp__cat { display: inline-flex; align-items: center; height: 24px; padding: 0 8px; border-radius: calc(var(--aui-radius-sm, 7px) - 1px); font-size: 12px; color: var(--ui-mp-muted); transition: background-color 160ms ease, color 160ms ease, box-shadow 160ms ease; }
-.ui-mp__cat:hover { color: var(--ui-mp-ink); }
-.ui-mp__cat[aria-checked="true"] { background: var(--ui-mp-card); color: var(--ui-mp-ink); box-shadow: 0 0 0 1px var(--ui-mp-line), 0 1px 2px rgba(0, 0, 0, 0.04); }
+.ui-mpc__bottom { padding: 6px; border-top: 0.5px solid var(--ui-mpc-line); }
+.ui-mpc__add { display: flex; align-items: center; gap: 8px; width: 100%; height: 32px; padding: 0 10px; border-radius: calc(var(--aui-radius-sm, 5px) + 1px); color: var(--ui-mpc-text); transition: background-color 90ms ease, color 90ms ease; }
+.ui-mpc__add .ui-mpc__glyph { color: var(--ui-mpc-icon); transition: color 90ms ease; }
+.ui-mpc__add:hover { background: var(--ui-mpc-wash); color: var(--ui-mpc-ink); }
+.ui-mpc__add:hover .ui-mpc__glyph { color: var(--ui-mpc-ink); }
+.ui-mpc__new { padding: 6px 4px 2px 10px; }
+.ui-mpc__new-row { display: flex; align-items: center; gap: 8px; margin-top: 10px; }
+.ui-mpc__cats { display: flex; flex: 1 1 auto; gap: 4px; min-width: 0; margin: -3px; padding: 3px; overflow-x: auto; scrollbar-width: none; }
+.ui-mpc__cats::-webkit-scrollbar { display: none; }
+.ui-mpc__cat { display: inline-flex; flex: none; align-items: center; padding: 4px 8px; border-radius: calc(var(--aui-radius-sm, 5px) + 1px); box-shadow: inset 0 0 0 0.5px var(--ui-mpc-line); font-size: 12px; font-weight: 500; line-height: 20px; color: var(--ui-mpc-text); white-space: nowrap; transition: background-color 90ms ease, color 90ms ease; }
+.ui-mpc__cat:hover { background: var(--ui-mpc-wash); }
+.ui-mpc__cat[aria-checked="true"] { background: var(--ui-mpc-fill); color: var(--ui-mpc-ink); }
+.ui-mpc__new .ui-mpc__acts--edit { margin: 0; }
 
-/* ----- Tray ----- */
-.ui-mp__foot { display: flex; align-items: center; gap: 8px; min-height: 38px; padding: 4px 4px 0 10px; }
-.ui-mp__caption { flex: 1; min-width: 0; overflow: hidden; font-size: 12.5px; color: var(--ui-mp-muted); white-space: nowrap; font-variant-numeric: tabular-nums; }
-.ui-mp__swap { display: grid; min-width: 0; }
-.ui-mp__swap-item { grid-area: 1 / 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; animation: ui-mp-swap-in 320ms ease both; }
-.ui-mp__swap-item[data-out] { animation: ui-mp-swap-out 220ms ease both; }
-.ui-mp__forgot { display: flex; min-width: 0; }
-.ui-mp__flat { flex: none; white-space: pre; }
-.ui-mp__quote { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-.ui-mp__action { display: inline-flex; flex: none; align-items: center; gap: 5px; height: 26px; padding: 0 8px; border-radius: calc(var(--aui-radius-sm, 7px) + 3px); font-size: 12.5px; font-weight: 500; color: var(--ui-mp-text); white-space: nowrap; animation: ui-mp-swap-in 300ms ease both; transition: background-color 160ms ease, color 160ms ease; }
-.ui-mp__action:hover { background: var(--ui-mp-card); color: var(--ui-mp-ink); }
-.ui-mp__action--undo { padding: 0 9px 0 7px; background: var(--ui-mp-card); color: var(--ui-mp-ink); box-shadow: 0 0 0 1px var(--ui-mp-line), 0 1px 2px rgba(0, 0, 0, 0.04); }
-.ui-mp__action:not(.ui-mp__action--undo) svg { transition: transform 220ms var(--ui-mp-ease); }
-.ui-mp__action:not(.ui-mp__action--undo):hover svg { transform: translateX(2px); }
+/* ----- The last row of the card ----- */
+.ui-mpc__foot { display: flex; align-items: center; gap: 8px; min-height: 44px; padding: 0 8px 0 16px; border-top: 0.5px solid var(--ui-mpc-line); }
+.ui-mpc__caption { flex: 1; min-width: 0; overflow: hidden; font-size: 12px; line-height: 16px; color: var(--ui-mpc-muted); white-space: nowrap; font-variant-numeric: tabular-nums; }
+.ui-mpc__swap { display: grid; min-width: 0; }
+.ui-mpc__swap-item { grid-area: 1 / 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; animation: ui-mpc-swap-in 320ms ease both; }
+.ui-mpc__swap-item[data-out] { animation: ui-mpc-swap-out 220ms ease both; }
+.ui-mpc__forgot { display: flex; min-width: 0; }
+.ui-mpc__flat { flex: none; white-space: pre; }
+.ui-mpc__quote { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+/* The action button: ghost text with an arrow */
+.ui-mpc__action { display: inline-flex; flex: none; align-items: center; gap: 4px; height: 28px; padding: 0 6px 0 10px; border-radius: calc(var(--aui-radius-sm, 5px) + 1px); font-size: 13px; font-weight: 500; line-height: 20px; color: var(--ui-mpc-text); white-space: nowrap; animation: ui-mpc-swap-in 300ms ease both; transition: background-color 90ms ease, color 90ms ease; }
+.ui-mpc__action .ui-mpc__glyph { color: var(--ui-mpc-icon); transition: transform 220ms var(--ui-mpc-ease), color 90ms ease; }
+.ui-mpc__action:hover { background: var(--ui-mpc-wash); color: var(--ui-mpc-ink); }
+.ui-mpc__action:not(.ui-mpc__action--undo):hover .ui-mpc__glyph { transform: translateX(2px); color: var(--ui-mpc-ink); }
+/* Undo: the white button with the hairline shadow */
+.ui-mpc__action--undo { gap: 6px; padding: 0 10px 0 8px; background: var(--ui-mpc-card); box-shadow: var(--ui-mpc-shadow); color: var(--ui-mpc-strong); }
+.ui-mpc__action--undo:hover { background: #fafafa; color: var(--ui-mpc-strong); }
 
 /* Worst-case data: the date never hides behind a long source, long labels shorten with the full text on hover */
-.ui-mp__source { display: flex; }
-.ui-mp__source-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-.ui-mp__dot, .ui-mp__date { flex: none; white-space: pre; }
-.ui-mp__text { white-space: pre-line; text-align: start; }
-.ui-mp__group, .ui-mp__empty { overflow-wrap: anywhere; }
-.ui-mp__group { text-align: start; }
-.ui-mp__action:not(.ui-mp__action--undo) { flex: 0 1 auto; min-width: 0; max-width: 60%; }
-.ui-mp__action-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-.ui-mp__cat { max-width: 100%; white-space: nowrap; }
-.ui-mp__cat-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.ui-mpc__source { display: flex; }
+.ui-mpc__source-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.ui-mpc__dot, .ui-mpc__date { flex: none; white-space: pre; }
+.ui-mpc__text { white-space: pre-line; text-align: start; }
+.ui-mpc__group, .ui-mpc__empty { overflow-wrap: anywhere; }
+.ui-mpc__group { text-align: start; }
+.ui-mpc__action:not(.ui-mpc__action--undo) { flex: 0 1 auto; min-width: 0; max-width: 60%; }
+.ui-mpc__action-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.ui-mpc__cat { max-width: 100%; white-space: nowrap; }
+.ui-mpc__cat-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 
-@keyframes ui-mp-in { from { opacity: 0; transform: scale(0.9); } }
-@keyframes ui-mp-swap-in { from { opacity: 0; filter: blur(2px); } }
-@keyframes ui-mp-swap-out { from { opacity: 1; } to { opacity: 0; filter: blur(2px); } }
+@keyframes ui-mpc-in { from { opacity: 0; transform: scale(0.9); } }
+@keyframes ui-mpc-swap-in { from { opacity: 0; filter: blur(2px); } }
+@keyframes ui-mpc-swap-out { from { opacity: 1; } to { opacity: 0; filter: blur(2px); } }
 
 /* Narrow panels: chips drop their counts and the switch keeps only its track, so the filters fit */
-@container (max-width: 340px) {
-  .ui-mp__chip-count { display: none; }
-  .ui-mp__chip { padding: 0 7px; }
+@container (max-width: 360px) {
+  .ui-mpc__chip-count { display: none; }
+  .ui-mpc__head { padding-left: 14px; }
+  .ui-mpc__filters { padding-left: 14px; }
+  .ui-mpc__foot { padding-left: 14px; }
+  .ui-mpc__note { margin-left: 14px !important; }
 }
 @container (max-width: 320px) {
-  .ui-mp__switch-label { display: none; }
-  .ui-mp__switch { padding: 0 2px; }
+  .ui-mpc__switch-label { display: none; }
+  .ui-mpc__switch { padding: 0 6px; }
+  .ui-mpc__chip { padding: 4px 8px; }
 }
 
 /* Steve: when the meta line wraps, the actions get a line of their own – show them rather than leave a blank one */
 @container (max-width: 520px) {
-  .ui-mp__acts { opacity: 1; }
+  .ui-mpc__acts { opacity: 1; }
 }
 
+/* Touch screens: actions always visible, taller targets */
 @media (pointer: coarse) {
-  .ui-mp__acts { opacity: 1; }
-  .ui-mp__icon { width: 32px; height: 32px; }
-  .ui-mp__meta { min-height: 32px; }
-  .ui-mp__chip, .ui-mp__text-btn { height: 32px; }
-  .ui-mp__cat { height: 30px; }
-  .ui-mp__switch, .ui-mp__add { height: 36px; }
-  .ui-mp__action { height: 30px; }
+  .ui-mpc__acts { opacity: 1; }
+  .ui-mpc__icon { width: 34px; height: 34px; }
+  .ui-mpc__acts { margin-top: -7px; margin-bottom: -7px; }
+  .ui-mpc__acts--edit { margin-top: 4px; margin-bottom: 0; }
+  .ui-mpc__chip { padding: 6px 12px; }
+  .ui-mpc__cat { padding: 5px 10px; }
+  .ui-mpc__text-btn, .ui-mpc__action { height: 34px; }
+  .ui-mpc__switch, .ui-mpc__add { height: 36px; }
+  .ui-mpc__search, .ui-mpc__input { height: 34px; }
+  .ui-mpc__foot { min-height: 52px; }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .ui-mp *, .ui-mp *::before, .ui-mp *::after { animation: none !important; transition: none !important; }
+  .ui-mpc *, .ui-mpc *::before, .ui-mpc *::after { animation: none !important; transition: none !important; }
 }
 
 /* Dark mode: follows a .dark class or data-theme="dark" on any ancestor, e.g. <html> */
-:where(.dark, [data-theme="dark"]) .ui-mp {
-  --ui-mp-tray: var(--aui-subtle, #111113);
-  --ui-mp-card: #19191b;
-  --ui-mp-line: var(--aui-border, #2a2a2e);
-  --ui-mp-ink: var(--aui-ink, #ededed);
-  --ui-mp-text: var(--aui-ink, #c8c8cc);
-  --ui-mp-muted: var(--aui-muted, #8b8b92);
-  --ui-mp-well: var(--aui-subtle, #222225);
-  --ui-mp-hover: #2c2c30;
-  --ui-mp-track: #3a3a40;
-  --ui-mp-red: var(--aui-danger, #ff8a7a);
-  --ui-mp-red-bg: color-mix(in srgb, var(--aui-red, #ff6b5f) 16%, transparent);
-  --ui-mp-tag: #b4b4bb;
-  --ui-mp-tag-bg: rgba(160, 160, 170, 0.14);
-  --ui-mp-focus: var(--aui-focus, rgba(77, 141, 255, 0.8));
-}
-:where(.dark, [data-theme="dark"]) .ui-mp__knob { background: #19191b; }
-:where(.dark, [data-theme="dark"]) .ui-mp__switch[aria-checked="false"] .ui-mp__knob { background: #8b8b92; }
+/* Steve: dark mode comes with the tokens above; only the off switch's knob is dark-specific */
+:where(.dark, [data-theme="dark"]) .ui-mpc__action--undo:hover { background: var(--ui-mpc-fill); }
+:where(.dark, [data-theme="dark"]) .ui-mpc__switch[aria-checked="false"] .ui-mpc__knob { background: rgba(255, 255, 255, 0.55); }
 `;

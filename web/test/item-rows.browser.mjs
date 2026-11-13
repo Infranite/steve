@@ -86,7 +86,7 @@ try {
     assert.equal(lanes.find((l) => l.lane === "running").cards.length, +subRun, "the subtitle's 进行中 is the board's 进行中 column")
     // a paused card says why beside its state, not the state twice
     const c10 = board.locator('[data-kanban-card="ST-10"]')
-    assert.equal(await c10.locator(".ui-ai__desc").innerText(), "ST-43 失败")
+    assert.equal(await c10.locator(".ui-aic__desc").innerText(), "ST-43 失败")
     assert.equal(await c10.locator("[data-state-word]").evaluate((e) => e.firstChild.textContent), "协作已暂停")
     // every card keeps its state in words, however slim the column
     const words = await board.evaluate((el) => [...el.querySelectorAll("[data-kanban-card]")].map((c) => { const w = c.querySelector("[data-state-word]"); return [c.dataset.kanbanCard, !!w && w.getBoundingClientRect().width > 8 && getComputedStyle(w).display !== "none"] }).filter(([, ok]) => !ok))
@@ -104,7 +104,7 @@ try {
     const c52 = board.locator('[data-kanban-card="ST-52"]')
     assert.match(await c52.innerText(), /审批：|合并 PR #12/)
     assert.equal((await c52.locator("[data-plan]").innerText()).trim(), "2/2")
-    await c52.locator(".ui-ai__card-main").click()
+    await c52.locator(".ui-aic__card-main").click()
     await c52.locator("[data-board-open]").click()
     assert.equal(new URL(grouped.url()).hash, "#/items/ST-52")
     // or in one click from its corner

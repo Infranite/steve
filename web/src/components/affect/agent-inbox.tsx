@@ -5,7 +5,7 @@ import { useEffect, useId, useLayoutEffect, useRef, useState, type CSSProperties
 
 /*
  * Agent Inbox – every background task your agents are working on, as a calm board, in a single self-contained file.
- * On a soft gray tray, tasks sit in three columns – Needs you, Running, Done – as white cards: a status glyph and the title,
+ * Tasks sit in soft gray columns – Needs you, Running, Done – as white cards: a status glyph and the title,
  * two lines on what the agent is doing, and a quiet footer with the state ("Waiting for you", "Running · 2m 14s")
  * and how many tools and sources it used.
  *   · click a card and it unfolds in place: the last steps as a tiny timeline, and what you can do now –
@@ -118,8 +118,6 @@ export type AgentInboxProps = {
   onOpen?: (task: AgentTask) => void;
   /** Heading on the left of the bar */
   title?: string;
-  /** A button in the bar, e.g. { label: "New task", onClick } */
-  action?: { label: string; onClick: () => void };
   /** Controlled layout */
   view?: AgentInboxView;
   defaultView?: AgentInboxView;
@@ -207,7 +205,7 @@ const Spark = () => (
 );
 /* Steve: a paused task shows two bars and an idle one an open ring, not the running spinner or the waiting triangle */
 const StateIcon = ({ status, tone }: { status: AgentTaskStatus; tone?: AgentTask["tone"] }) => (
-  <span className="ui-ai__state-icon" data-status={tone === "pause" ? "paused" : tone === "neutral" ? "idle" : status} aria-hidden="true">
+  <span className="ui-aic__state-icon" data-status={tone === "pause" ? "paused" : tone === "neutral" ? "idle" : status} aria-hidden="true">
     {tone === "pause" ? (
       <svg width="12" height="12" viewBox="0 0 12 12">
         <rect x="2.6" y="2" width="2.3" height="8" rx="0.8" fill="currentColor" />
@@ -237,7 +235,7 @@ const StateIcon = ({ status, tone }: { status: AgentTaskStatus; tone?: AgentTask
     {status === "failed" && (
       <svg width="12" height="12" viewBox="0 0 12 12">
         <circle cx="6" cy="6" r="4.8" fill="currentColor" />
-        <path d="M6 3.6v2.8M6 8.3v.1" stroke="var(--ui-ai-card)" strokeWidth="1.5" strokeLinecap="round" />
+        <path d="M6 3.6v2.8M6 8.3v.1" stroke="var(--ui-aic-card)" strokeWidth="1.5" strokeLinecap="round" />
       </svg>
     )}
     </>}
@@ -260,12 +258,6 @@ const ListIcon = () => (
   </svg>
 );
 
-const PlusIcon = () => (
-  <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true">
-    <path d="M6 2.2v7.6M2.2 6h7.6" {...line} strokeWidth={1.5} />
-  </svg>
-);
-
 export function AgentInbox({
   tasks,
   onApprove,
@@ -273,7 +265,6 @@ export function AgentInbox({
   onRetry,
   onOpen,
   title = "Agent inbox",
-  action,
   view,
   defaultView = "board",
   onViewChange,
@@ -373,7 +364,7 @@ export function AgentInbox({
   const onKeyDown = (e: KeyboardEvent) => {
     if (e.key === "Escape" && opened) {
       e.stopPropagation();
-      cards.current.get(opened)?.querySelector<HTMLElement>(".ui-ai__card-main")?.focus({ preventScroll: true });
+      cards.current.get(opened)?.querySelector<HTMLElement>(".ui-aic__card-main")?.focus({ preventScroll: true });
       setOpened(null);
     }
   };
@@ -404,7 +395,7 @@ export function AgentInbox({
         key={t.key}
         data-id={t.id}
         data-kanban-card={t.id}
-        className="ui-ai__card"
+        className="ui-aic__card"
         data-faded={highlight && t.id !== highlight ? "" : undefined}
         data-status={t.status}
         data-tone={t.tone}
@@ -415,36 +406,36 @@ export function AgentInbox({
           else cards.current.delete(t.key);
         }}
       >
-        <button type="button" className="ui-ai__card-main" aria-expanded={isOpen} aria-controls={panel} onClick={() => toggle(t.key)}>
-          {t.code && <span className="ui-ai__code">{t.code}</span>}
-          <span className="ui-ai__title-row">
-            <span className="ui-ai__spark">
+        <button type="button" className="ui-aic__card-main" aria-expanded={isOpen} aria-controls={panel} onClick={() => toggle(t.key)}>
+          {t.code && <span className="ui-aic__code">{t.code}</span>}
+          <span className="ui-aic__title-row">
+            <span className="ui-aic__spark">
               <Spark />
             </span>
-            <span className="ui-ai__title" dir="auto" title={t.title}>
+            <span className="ui-aic__title" dir="auto" title={t.title}>
               {t.title}
             </span>
           </span>
           {desc && (
-            <span className="ui-ai__desc" dir="auto">
+            <span className="ui-aic__desc" dir="auto">
               {desc}
             </span>
           )}
-          <span className="ui-ai__foot">
-            <span className="ui-ai__state" data-status={t.status} data-bare={timed ? undefined : ""} data-said={t.stateText ? "" : undefined} title={t.time ? `${said} · ${t.time}` : undefined}>
+          <span className="ui-aic__foot">
+            <span className="ui-aic__state" data-status={t.status} data-bare={timed ? undefined : ""} data-said={t.stateText ? "" : undefined} title={t.time ? `${said} · ${t.time}` : undefined}>
               <StateIcon status={t.status} tone={t.tone} />
               {/* The word may shorten, the time never does */}
-              <span className="ui-ai__state-word" data-state-word>{word}{dot && <span className="ui-ai__dot"> ·</span>}</span>
+              <span className="ui-aic__state-word" data-state-word>{word}{dot && <span className="ui-aic__dot"> ·</span>}</span>
               {timed && (
-                <span className="ui-ai__time">
+                <span className="ui-aic__time">
                   {t.time ?? <Clock since={sinceOf(t)} fixed={elapsed ?? 0} />}
                 </span>
               )}
             </span>
-            <span className="ui-ai__meta">
+            <span className="ui-aic__meta">
               {prog && (
                 <span title={L.progress.replace("{done}", exact.format(prog.done)).replace("{total}", exact.format(prog.total))} data-plan>
-                  <span className="ui-ai__plan" aria-hidden="true"><span style={{ width: `${(Math.min(prog.done, prog.total) / prog.total) * 100}%` }} /></span>
+                  <span className="ui-aic__plan" aria-hidden="true"><span style={{ width: `${(Math.min(prog.done, prog.total) / prog.total) * 100}%` }} /></span>
                   {exact.format(prog.done)}/{exact.format(prog.total)}
                 </span>
               )}
@@ -453,18 +444,18 @@ export function AgentInbox({
         </button>
         {/* Steve: opening the task is one click; the card itself unfolds */}
         {onOpen && (
-          <button type="button" className="ui-ai__go" aria-label={`${L.open} ${t.code ?? t.title}`} title={L.open} onClick={() => onOpen(t)} data-board-go={t.id}>
+          <button type="button" className="ui-aic__go" aria-label={`${L.open} ${t.code ?? t.title}`} title={L.open} onClick={() => onOpen(t)} data-board-go={t.id}>
             <GoIcon />
           </button>
         )}
 
-        <div id={panel} className="ui-ai__fold" data-open={isOpen ? "" : undefined} inert={!isOpen}>
-          <div className="ui-ai__clip">
-            <div className="ui-ai__more">
-              {agent && <div className="ui-ai__agent" dir="auto">{agent}</div>}
-              {t.details && <div className="ui-ai__details">{t.details}</div>}
+        <div id={panel} className="ui-aic__fold" data-open={isOpen ? "" : undefined} inert={!isOpen}>
+          <div className="ui-aic__clip">
+            <div className="ui-aic__more">
+              {agent && <div className="ui-aic__agent" dir="auto">{agent}</div>}
+              {t.details && <div className="ui-aic__details">{t.details}</div>}
               {steps.length > 0 && (
-                <ol className="ui-ai__steps">
+                <ol className="ui-aic__steps">
                   {steps.map((s, i) => (
                     <li key={i} data-last={i === steps.length - 1 ? "" : undefined}>
                       <span dir="auto">{s.label}</span>
@@ -473,25 +464,25 @@ export function AgentInbox({
                   ))}
                 </ol>
               )}
-              <div className="ui-ai__actions">
+              <div className="ui-aic__actions">
                 {/* Steve: a decision is answered on its own card (many kinds, many answers), so Approve / Reject only with handlers */}
                 {t.status === "waiting" && onReject && (
-                  <button type="button" className="ui-ai__btn" onClick={() => decide(t, "failed", L.reject, onReject)}>
+                  <button type="button" className="ui-aic__btn" onClick={() => decide(t, "failed", L.reject, onReject)}>
                     {L.reject}
                   </button>
                 )}
                 {t.status === "waiting" && onApprove && (
-                  <button type="button" className="ui-ai__btn ui-ai__btn--primary" onClick={() => decide(t, "running", L.approve, onApprove)}>
+                  <button type="button" className="ui-aic__btn ui-aic__btn--primary" onClick={() => decide(t, "running", L.approve, onApprove)}>
                     {L.approve}
                   </button>
                 )}
                 {t.status === "failed" && onRetry && (
-                  <button type="button" className="ui-ai__btn" onClick={() => decide(t, "running", L.retry, onRetry)}>
+                  <button type="button" className="ui-aic__btn" onClick={() => decide(t, "running", L.retry, onRetry)}>
                     {L.retry}
                   </button>
                 )}
                 {onOpen && (
-                  <button type="button" className={["ui-ai__btn", t.status === "waiting" && !onApprove ? "ui-ai__btn--primary" : ""].filter(Boolean).join(" ")} onClick={() => onOpen(t)} data-board-open={t.id}>
+                  <button type="button" className={["ui-aic__btn", t.status === "waiting" && !onApprove ? "ui-aic__btn--primary" : ""].filter(Boolean).join(" ")} onClick={() => onOpen(t)} data-board-open={t.id}>
                     {L.open}
                   </button>
                 )}
@@ -510,64 +501,55 @@ export function AgentInbox({
   const summary = L.summary.replace("{needs}", String(counts.needs)).replace("{running}", String(counts.running));
 
   return (
-    <div ref={rootRef} className={["ui-ai", className].filter(Boolean).join(" ")} data-view={layout} onKeyDown={onKeyDown}>
-      <style href="ui-agent-inbox" precedence="default">
+    <div ref={rootRef} className={["ui-aic", className].filter(Boolean).join(" ")} data-view={layout} onKeyDown={onKeyDown}>
+      <style href="ui-agent-inbox-clean" precedence="default">
         {css}
       </style>
 
-      {bar && <div className="ui-ai__bar">
-        <span className="ui-ai__heading">
-          <span className="ui-ai__crumb">{L.crumb}</span>
-          <span className="ui-ai__slash" aria-hidden="true">
+      {bar && <div className="ui-aic__bar">
+        <span className="ui-aic__heading">
+          <span className="ui-aic__crumb">{L.crumb}</span>
+          <span className="ui-aic__slash" aria-hidden="true">
             /
           </span>
-          <span className="ui-ai__heading-title" title={title}>
+          <span className="ui-aic__heading-title" title={title}>
             {title}
           </span>
         </span>
-        <div className="ui-ai__tools">
-        {action && (
-          // In a narrow inbox only the plus remains – the label stays its name
-          <button type="button" className="ui-ai__action" aria-label={action.label} title={action.label} onClick={action.onClick}>
-            <PlusIcon />
-            <span className="ui-ai__action-label">{action.label}</span>
-          </button>
-        )}
         {(view === undefined || onViewChange) && (
-        <div className="ui-ai__views" role="radiogroup" aria-label={L.layout}>
+        <div className="ui-aic__views" role="radiogroup" aria-label={L.layout}>
           {(["board", "list"] as const).map((v) => (
-            <button key={v} type="button" role="radio" aria-checked={layout === v} className="ui-ai__view" onClick={() => setView(v)}>
+            <button key={v} type="button" role="radio" aria-checked={layout === v} className="ui-aic__view" onClick={() => setView(v)}>
               {v === "board" ? <BoardIcon /> : <ListIcon />}
               {v === "board" ? L.board : L.list}
             </button>
           ))}
         </div>
         )}
-        </div>
       </div>}
 
       {/* Steve: an empty column folds to a narrow rail on the board, so the columns with cards keep their width */}
-      <div className="ui-ai__lanes" style={{ "--ui-ai-cols": lanes.map((l) => (counts[l] ? "minmax(0, 1fr)" : "2.75rem")).join(" ") } as CSSProperties}>
+      <div className="ui-aic__lanes" style={{ "--ui-aic-cols": lanes.map((l) => (counts[l] ? "minmax(0, 1fr)" : "2.75rem")).join(" ") } as CSSProperties}>
         {lanes.map((lane) => {
           const all = list.filter((t) => laneFor(t) === lane), n = cap?.[lane];
           const folds = n !== undefined && all.length > n + 2, shown = folds && !unfolded.includes(lane) ? all.slice(0, n) : all;
           return (
-          <section key={lane} className="ui-ai__lane" aria-label={L[lane]} data-lane={lane} data-board-col={lane} data-empty={counts[lane] ? undefined : ""} title={counts[lane] ? undefined : L[lane]}>
-            <header className="ui-ai__lane-head">
-              <span className="ui-ai__lane-spark" aria-hidden="true">
+          <section key={lane} className="ui-aic__lane" aria-label={L[lane]} data-lane={lane} data-board-col={lane} data-empty={counts[lane] ? undefined : ""} title={counts[lane] ? undefined : L[lane]}>
+            <header className="ui-aic__lane-head">
+              <span className="ui-aic__lane-spark" aria-hidden="true">
                 <Spark />
               </span>
-              <span className="ui-ai__lane-name">{L[lane]}</span>
-              <span className="ui-ai__count" title={counts[lane] > 999 ? exact.format(counts[lane]) : undefined}>
+              <span className="ui-aic__lane-name">{L[lane]}</span>
+              <span className="ui-aic__count" title={counts[lane] > 999 ? exact.format(counts[lane]) : undefined}>
                 {many(counts[lane])}
               </span>
             </header>
-            <ul className="ui-ai__cards">
+            <ul className="ui-aic__cards">
               {shown.map(card)}
-              {counts[lane] === 0 && <li className="ui-ai__empty">{L.empty}</li>}
+              {counts[lane] === 0 && <li className="ui-aic__empty">{L.empty}</li>}
               {folds && (
                 <li>
-                  <button type="button" className="ui-ai__all" onClick={() => setUnfolded((w) => (w.includes(lane) ? w.filter((x) => x !== lane) : [...w, lane]))} data-lane-more={lane}>
+                  <button type="button" className="ui-aic__all" onClick={() => setUnfolded((w) => (w.includes(lane) ? w.filter((x) => x !== lane) : [...w, lane]))} data-lane-more={lane}>
                     {unfolded.includes(lane) ? L.collapse : L.showAll.replace("{count}", exact.format(all.length))}
                   </button>
                 </li>
@@ -578,7 +560,7 @@ export function AgentInbox({
         })}
       </div>
 
-      <span className="ui-ai__sr" aria-live="polite">
+      <span className="ui-aic__sr" aria-live="polite">
         {summary}
       </span>
     </div>
@@ -586,194 +568,196 @@ export function AgentInbox({
 }
 
 const css = /* css */ `
-/* Colors and motion as variables – override them on .ui-ai */
-.ui-ai {
-  --ui-ai-tray: var(--aui-subtle, #f0f0f0);
-  --ui-ai-card: var(--aui-surface, #ffffff);
-  --ui-ai-line: var(--aui-border, #ececec);
-  --ui-ai-chip: var(--aui-subtle, #f5f5f5);
-  --ui-ai-track: color-mix(in srgb, var(--aui-ink, #171717) 7%, var(--ui-ai-tray));
-  --ui-ai-ink: var(--aui-ink, #171717);
-  --ui-ai-text: var(--aui-muted, #6b6b6b);
-  --ui-ai-muted: var(--aui-muted, #8a8a8a);
-  --ui-ai-faint: var(--aui-placeholder, #b8b8b8);
-  --ui-ai-blue: var(--aui-blue, #4fb0fe);
-  --ui-ai-amber: var(--aui-amber, #e8b000);
-  --ui-ai-green: var(--aui-success, #1e8a4f);
-  --ui-ai-red: var(--aui-red, #f04438);
-  --ui-ai-brand-bg: var(--aui-info-soft, #eaf1ff);
-  --ui-ai-brand-fg: var(--aui-info, #2456d6);
-  --ui-ai-warn-bg: var(--aui-warning-soft, #fff1e0);
-  --ui-ai-warn-fg: var(--aui-warning, #b25e00);
-  --ui-ai-ok-bg: var(--aui-success-soft, #e6f6ed);
-  --ui-ai-ok-fg: var(--aui-success, #1e8a4f);
-  --ui-ai-danger-bg: var(--aui-danger-soft, #fdecea);
-  --ui-ai-danger-fg: var(--aui-danger, #c4320a);
-  --ui-ai-paused-bg: var(--aui-subtle, #f0f0f0);
-  --ui-ai-paused-fg: var(--aui-muted, #6b6b6b);
-  --ui-ai-focus: var(--aui-focus, rgba(0, 96, 226, 0.7));
-  --ui-ai-ease: var(--aui-ease, cubic-bezier(0.22, 1, 0.36, 1));
+.ui-aic {
+  --ui-aic-lane: var(--aui-subtle, #f4f4f5);
+  --ui-aic-card: var(--aui-surface, #ffffff);
+  --ui-aic-line: var(--aui-border, #e9e9ec);
+  --ui-aic-chip: var(--aui-subtle, #f5f5f5);
+  --ui-aic-track: color-mix(in srgb, var(--aui-ink, #171717) 7%, var(--ui-aic-lane));
+  --ui-aic-ink: var(--aui-ink, #1c1c1f);
+  --ui-aic-text: var(--aui-muted, #55555c);
+  --ui-aic-muted: var(--aui-muted, #8e8e96);
+  --ui-aic-faint: var(--aui-placeholder, #b4b4bb);
+  --ui-aic-blue: var(--aui-blue, #4fb0fe);
+  --ui-aic-amber: var(--aui-amber, #e8b000);
+  --ui-aic-green: var(--aui-success, #1e8a4f);
+  --ui-aic-red: var(--aui-red, #f04438);
+  --ui-aic-brand-bg: var(--aui-info-soft, #eaf1ff);
+  --ui-aic-brand-fg: var(--aui-info, #2456d6);
+  --ui-aic-warn-bg: var(--aui-warning-soft, #fff1e0);
+  --ui-aic-warn-fg: var(--aui-warning, #b25e00);
+  --ui-aic-ok-bg: var(--aui-success-soft, #e6f6ed);
+  --ui-aic-ok-fg: var(--aui-success, #1e8a4f);
+  --ui-aic-danger-bg: var(--aui-danger-soft, #fdecea);
+  --ui-aic-danger-fg: var(--aui-danger, #c4320a);
+  --ui-aic-paused-bg: var(--aui-subtle, #f0f0f0);
+  --ui-aic-paused-fg: var(--aui-muted, #6b6b6b);
+  --ui-aic-focus: var(--aui-focus, rgba(0, 96, 226, 0.7));
+  --ui-aic-ease: cubic-bezier(0.32, 0.72, 0.24, 1);
   box-sizing: border-box;
   width: 100%;
   min-width: 0;
-  padding: 4px;
-  border-radius: calc(var(--aui-radius-lg, 16px) + 4px);
-  background: var(--ui-ai-tray);
   /* Steve: named, so the narrow-inbox rules below ask the inbox and not the nearest card */
-  container: ui-ai / inline-size;
+  container: ui-aic / inline-size;
   font-family: var(--aui-font, "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif);
-  font-size: 14px;
+  font-size: 13px;
   line-height: 20px;
-  letter-spacing: -0.006em;
-  color: var(--ui-ai-text);
+  color: var(--ui-aic-text);
   text-align: left;
   -webkit-font-smoothing: antialiased;
 }
-.ui-ai *, .ui-ai *::before, .ui-ai *::after { box-sizing: border-box; }
-:where(.ui-ai) button { margin: 0; padding: 0; border: 0; background: none; font: inherit; color: inherit; text-align: inherit; cursor: pointer; -webkit-tap-highlight-color: transparent; }
-.ui-ai button:focus-visible { outline: 2px solid var(--ui-ai-focus); outline-offset: 2px; }
-.ui-ai ul, .ui-ai ol { margin: 0; padding: 0; list-style: none; }
-.ui-ai svg { display: block; flex: none; }
-.ui-ai__sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+.ui-aic *, .ui-aic *::before, .ui-aic *::after { box-sizing: border-box; }
+:where(.ui-aic) button { margin: 0; padding: 0; border: 0; background: none; font: inherit; color: inherit; text-align: inherit; cursor: pointer; -webkit-tap-highlight-color: transparent; }
+.ui-aic button:focus-visible { outline: 2px solid var(--ui-aic-focus); outline-offset: 2px; }
+.ui-aic ul, .ui-aic ol { margin: 0; padding: 0; list-style: none; }
+.ui-aic svg { display: block; flex: none; }
+.ui-aic__sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 
-/* ----- Bar on the tray: where you are, an optional action and the layout ----- */
-.ui-ai__bar { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 8px 8px 10px 14px; }
-.ui-ai__heading { display: flex; align-items: center; gap: 8px; min-width: 0; font-size: 14px; font-weight: 600; color: var(--ui-ai-ink); white-space: nowrap; }
-.ui-ai__crumb { flex: none; color: var(--ui-ai-muted); font-weight: 500; }
-.ui-ai__slash { flex: none; color: var(--aui-placeholder, var(--ui-ai-faint)); font-weight: 400; }
-.ui-ai__heading-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-.ui-ai__tools { display: flex; flex: none; align-items: center; gap: 8px; }
-.ui-ai__action-label { max-width: 200px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
-.ui-ai__action { display: inline-flex; align-items: center; gap: 6px; height: 30px; padding: 0 12px 0 10px; border-radius: 999px; font-size: 13px; font-weight: 500; color: var(--ui-ai-ink); transition: background-color 160ms ease; }
-.ui-ai__action:hover { background: var(--ui-ai-track); }
-/* A gray track, the chosen layout raised in white */
-.ui-ai__views { display: flex; flex: none; padding: 3px; border-radius: calc(var(--aui-radius, 10px) + 2px); background: var(--ui-ai-track); }
-.ui-ai__view { display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 12px; border-radius: calc(var(--aui-radius, 10px) - 1px); font-size: 13px; font-weight: 500; color: var(--ui-ai-muted); transition: background-color 200ms ease, color 200ms ease, box-shadow 200ms ease; }
-.ui-ai__view:hover { color: var(--ui-ai-ink); }
-.ui-ai__view[aria-checked="true"] { background: var(--ui-ai-card); color: var(--ui-ai-ink); box-shadow: var(--aui-shadow-card, 0 1px 2px rgba(0, 0, 0, 0.08)); }
+/* ----- Bar: where you are, and the layout ----- */
+.ui-aic__bar { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; padding: 0 2px; }
+.ui-aic__heading { display: flex; align-items: center; gap: 10px; min-width: 0; font-size: 14px; font-weight: 500; color: var(--ui-aic-ink); white-space: nowrap; }
+.ui-aic__crumb { flex: none; color: var(--ui-aic-muted); font-weight: 400; }
+.ui-aic__slash { flex: none; color: var(--aui-placeholder, var(--ui-aic-faint)); }
+.ui-aic__heading-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.ui-aic__views { display: flex; flex: none; gap: 2px; padding: 3px; border-radius: calc(var(--aui-radius, 7px) + 3px); background: var(--ui-aic-lane); }
+.ui-aic__view { display: inline-flex; align-items: center; gap: 6px; height: 26px; padding: 0 10px; border-radius: var(--aui-radius, 7px); font-size: 12.5px; font-weight: 500; color: var(--ui-aic-muted); transition: background-color 180ms ease, color 180ms ease, box-shadow 180ms ease; }
+.ui-aic__view:hover { color: var(--ui-aic-ink); }
+.ui-aic__view[aria-checked="true"] { background: var(--ui-aic-card); color: var(--ui-aic-ink); box-shadow: var(--aui-shadow-card, 0 1px 2px rgba(0, 0, 0, 0.08)); }
 
-/* ----- Columns: headings on the tray, white cards below ----- */
-.ui-ai__lanes { display: grid; grid-template-columns: var(--ui-ai-cols, repeat(3, minmax(0, 1fr))); gap: 4px; align-items: start; }
-.ui-ai__lane { min-width: 0; }
-.ui-ai__lane-head { display: flex; align-items: center; gap: 8px; height: 32px; padding: 0 10px; }
-.ui-ai__lane-spark { display: grid; color: var(--ui-ai-blue); }
-.ui-ai__lane[data-lane="needs"] .ui-ai__lane-spark { color: var(--ui-ai-amber); }
-.ui-ai__lane[data-lane="done"] .ui-ai__lane-spark { color: var(--ui-ai-green); }
-.ui-ai__lane[data-lane="paused"] .ui-ai__lane-spark { color: var(--ui-ai-muted); }
-.ui-ai__lane-name { overflow: hidden; font-size: 13px; font-weight: 600; color: var(--ui-ai-ink); white-space: nowrap; text-overflow: ellipsis; }
-.ui-ai__count { display: grid; place-items: center; min-width: 20px; height: 20px; padding: 0 6px; border-radius: 999px; background: var(--ui-ai-card); box-shadow: 0 0 0 1px var(--ui-ai-line); font-size: 11.5px; font-weight: 500; color: var(--ui-ai-text); font-variant-numeric: tabular-nums; }
-.ui-ai__cards { display: grid; gap: 4px; }
-.ui-ai__empty { padding: 18px 0 20px; border-radius: var(--aui-radius-lg, 16px); box-shadow: inset 0 0 0 1px var(--ui-ai-track); font-size: 13px; text-align: center; color: var(--ui-ai-muted); }
+/* ----- Columns ----- */
+.ui-aic__lanes { display: grid; grid-template-columns: var(--ui-aic-cols, repeat(3, minmax(0, 1fr))); gap: 8px; align-items: start; }
+.ui-aic__lane { min-width: 0; padding: 4px 4px 4px; border-radius: calc(var(--aui-radius-lg, 10px) + 4px); background: var(--ui-aic-lane); }
+.ui-aic__lane-head { display: grid; grid-template-columns: 20px 1fr minmax(20px, auto); align-items: center; height: 34px; padding: 0 8px 0 10px; }
+.ui-aic__lane-spark { color: var(--ui-aic-blue); opacity: 0.7; }
+.ui-aic__lane[data-lane="needs"] .ui-aic__lane-spark { color: var(--ui-aic-amber); }
+.ui-aic__lane[data-lane="done"] .ui-aic__lane-spark { color: var(--ui-aic-green); }
+.ui-aic__lane[data-lane="paused"] .ui-aic__lane-spark { color: var(--ui-aic-muted); }
+/* Steve: 12px – Chinese names have no capitals to carry a smaller size */
+.ui-aic__lane-name { overflow: hidden; font-size: 12px; font-weight: 500; letter-spacing: 0.04em; text-align: center; text-transform: uppercase; color: var(--ui-aic-muted); white-space: nowrap; text-overflow: ellipsis; }
+.ui-aic__count { display: grid; place-items: center; min-width: 20px; height: 18px; padding: 0 5px; border-radius: calc(var(--aui-radius-sm, 5px) + 1px); background: color-mix(in srgb, var(--aui-ink, #000) 6%, transparent); font-size: 11px; font-weight: 500; color: var(--ui-aic-text); font-variant-numeric: tabular-nums; }
+.ui-aic__cards { display: grid; gap: 6px; }
+.ui-aic__empty { padding: 18px 0 20px; font-size: 12.5px; text-align: center; color: var(--aui-placeholder, var(--ui-aic-faint)); }
 
 /* ----- A card ----- */
-.ui-ai__card[data-faded] { opacity: 0.4; }
-.ui-ai__card { position: relative; border-radius: var(--aui-radius-lg, 16px); background: var(--ui-ai-card); box-shadow: var(--aui-shadow-card, 0 0 0 1px var(--ui-ai-line), 0 1px 2px rgba(0, 0, 0, 0.04)); transition: box-shadow 200ms ease, opacity 240ms ease; }
-.ui-ai__card:hover, .ui-ai__card[data-open] { box-shadow: var(--aui-shadow-card-hover, var(--lift-hover, 0 0 0 1px #e0e0e0, 0 6px 16px -8px rgba(0, 0, 0, 0.14))); }
-.ui-ai__card-main { display: grid; gap: 6px; width: 100%; padding: 14px 14px 12px; border-radius: var(--aui-radius-lg, 16px); container: ai-card / inline-size; }
+.ui-aic__card[data-faded] { opacity: 0.4; }
+.ui-aic__card { position: relative; border-radius: var(--aui-radius-lg, 10px); background: var(--ui-aic-card); box-shadow: var(--aui-shadow-card, 0 0 0 1px var(--ui-aic-line), 0 1px 2px rgba(0, 0, 0, 0.04)); transition: box-shadow 200ms ease, opacity 240ms ease; }
+.ui-aic__card:hover, .ui-aic__card[data-open] { box-shadow: var(--aui-shadow-card-hover, var(--lift-hover, 0 0 0 1px #dcdce1, 0 4px 14px -6px rgba(0, 0, 0, 0.12))); }
+.ui-aic__card-main { display: grid; gap: 6px; width: 100%; padding: 12px 14px 12px 12px; border-radius: var(--aui-radius-lg, 10px); container: aic-card / inline-size; }
 /* Top-aligned: the spark stays on the first line when a long title wraps */
-.ui-ai__code { padding-left: 26px; font-family: var(--aui-font-mono, ui-monospace, monospace); font-size: 12px; line-height: 16px; color: var(--ui-ai-muted); text-align: start; }
-.ui-ai__plan { position: relative; display: block; width: 32px; height: 4px; border-radius: 999px; background: var(--ui-ai-track); overflow: hidden; }
-.ui-ai__plan > span { position: absolute; inset: 0 auto 0 0; border-radius: inherit; background: var(--ui-ai-muted); }
-.ui-ai__card[data-tone="pause"] .ui-ai__spark, .ui-ai__card[data-tone="neutral"] .ui-ai__spark { color: var(--ui-ai-muted); }
-.ui-ai__card[data-tone="pause"] .ui-ai__state, .ui-ai__card[data-tone="neutral"] .ui-ai__state { background: var(--ui-ai-paused-bg); color: var(--ui-ai-paused-fg); }
-.ui-ai__title-row { display: flex; align-items: flex-start; gap: 10px; min-width: 0; }
-.ui-ai__spark { display: grid; flex: none; place-items: center; width: 16px; height: 20px; color: var(--ui-ai-blue); transition: color 300ms ease; }
-.ui-ai__card[data-status="waiting"] .ui-ai__spark { color: var(--ui-ai-amber); }
-.ui-ai__card[data-status="failed"] .ui-ai__spark { color: var(--ui-ai-red); }
-.ui-ai__card[data-status="done"] .ui-ai__spark { color: var(--ui-ai-green); }
+.ui-aic__code { padding-left: 26px; font-family: var(--aui-font-mono, ui-monospace, monospace); font-size: 12px; line-height: 16px; color: var(--ui-aic-muted); text-align: start; }
+.ui-aic__plan { position: relative; display: block; width: 32px; height: 4px; border-radius: 999px; background: var(--ui-aic-track); overflow: hidden; }
+.ui-aic__plan > span { position: absolute; inset: 0 auto 0 0; border-radius: inherit; background: var(--ui-aic-muted); }
+.ui-aic__card[data-tone="pause"] .ui-aic__spark, .ui-aic__card[data-tone="neutral"] .ui-aic__spark { color: var(--ui-aic-muted); }
+.ui-aic__card[data-tone="pause"] .ui-aic__state, .ui-aic__card[data-tone="neutral"] .ui-aic__state { color: var(--ui-aic-paused-fg); }
+.ui-aic__title-row { display: flex; align-items: flex-start; gap: 10px; min-width: 0; }
+.ui-aic__spark { display: grid; flex: none; place-items: center; width: 16px; height: 20px; color: var(--ui-aic-blue); transition: color 300ms ease; }
+.ui-aic__card[data-status="waiting"] .ui-aic__spark { color: var(--ui-aic-amber); }
+.ui-aic__card[data-status="failed"] .ui-aic__spark { color: var(--ui-aic-red); }
+.ui-aic__card[data-status="done"] .ui-aic__spark { color: var(--ui-aic-green); }
 /* Steve: two lines before it is cut, so a slim card still says what the task is */
-.ui-ai__title { display: -webkit-box; min-width: 0; overflow: hidden; font-size: 14px; font-weight: 600; line-height: 20px; color: var(--ui-ai-ink); text-align: start; overflow-wrap: anywhere; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
-.ui-ai__desc { display: -webkit-box; padding-left: 26px; overflow: hidden; font-size: 13px; line-height: 19px; color: var(--ui-ai-text); text-align: start; overflow-wrap: anywhere; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+.ui-aic__title { display: -webkit-box; min-width: 0; overflow: hidden; font-size: 14px; font-weight: 600; line-height: 20px; color: var(--ui-aic-ink); text-align: start; overflow-wrap: anywhere; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+.ui-aic__desc { display: -webkit-box; padding-left: 26px; overflow: hidden; font-size: 13px; line-height: 19px; color: var(--ui-aic-text); text-align: start; overflow-wrap: anywhere; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
 /* Open: the whole title and description, nothing cut off */
-.ui-ai__card[data-open] .ui-ai__title { -webkit-line-clamp: unset; }
-.ui-ai__card[data-open] .ui-ai__desc { -webkit-line-clamp: unset; }
-.ui-ai__foot { display: flex; align-items: center; justify-content: space-between; gap: 10px; min-width: 0; margin-top: 6px; padding-left: 26px; }
-/* The state: a pill on a soft tone, with its glyph */
-.ui-ai__state { display: inline-flex; align-items: center; gap: 6px; min-width: 0; height: 24px; padding: 0 10px 0 8px; border-radius: 999px; background: var(--ui-ai-brand-bg); font-size: 12.5px; font-weight: 500; color: var(--ui-ai-brand-fg); white-space: nowrap; font-variant-numeric: tabular-nums; }
-.ui-ai__state[data-status="waiting"] { background: var(--ui-ai-warn-bg); color: var(--ui-ai-warn-fg); }
-.ui-ai__state[data-status="done"] { background: var(--ui-ai-ok-bg); color: var(--ui-ai-ok-fg); }
-.ui-ai__state[data-status="failed"] { background: var(--ui-ai-danger-bg); color: var(--ui-ai-danger-fg); }
+.ui-aic__card[data-open] .ui-aic__title { -webkit-line-clamp: unset; }
+.ui-aic__card[data-open] .ui-aic__desc { -webkit-line-clamp: unset; }
+.ui-aic__foot { display: flex; align-items: center; justify-content: space-between; gap: 10px; min-width: 0; margin-top: 4px; padding-left: 26px; }
+.ui-aic__state { display: inline-flex; align-items: center; gap: 8px; min-width: 0; font-size: 12.5px; color: var(--ui-aic-text); white-space: nowrap; font-variant-numeric: tabular-nums; }
 /* Never cut down to a single letter – a few letters and … at least; a space's width to the time, cut or not */
-.ui-ai__state-word { min-width: 2.6em; overflow: hidden; text-overflow: ellipsis; white-space: pre; margin-right: calc(0.28em - 6px); }
-.ui-ai__time { flex: none; }
-.ui-ai__dot { white-space: pre; }
-.ui-ai__state-icon { display: grid; flex: none; place-items: center; width: 12px; height: 12px; color: currentColor; animation: ui-ai-pop 360ms var(--ui-ai-ease) both; }
-.ui-ai__state-icon[data-status="running"] svg { animation: ui-ai-spin 900ms linear infinite; }
-.ui-ai__meta { display: inline-flex; flex: none; align-items: center; font-size: 12.5px; color: var(--ui-ai-muted); font-variant-numeric: tabular-nums; }
-.ui-ai__meta > span { display: inline-flex; align-items: center; gap: 5px; padding: 0 9px; }
-.ui-ai__meta > span + span { border-left: 1px solid var(--ui-ai-line); }
-.ui-ai__meta > span:last-child { padding-right: 0; }
+.ui-aic__state-word { min-width: 2.6em; overflow: hidden; text-overflow: ellipsis; white-space: pre; margin-right: calc(0.28em - 8px); }
+.ui-aic__time { flex: none; }
+.ui-aic__dot { white-space: pre; }
+.ui-aic__state-icon { display: grid; flex: none; place-items: center; width: 12px; height: 12px; color: var(--ui-aic-blue); animation: ui-aic-pop 360ms var(--ui-aic-ease) both; }
+/* Steve: paused and idle tasks read gray */
+.ui-aic__state-icon:is([data-status="paused"], [data-status="idle"]) { color: var(--ui-aic-muted); }
+.ui-aic__state-icon[data-status="running"] svg { animation: ui-aic-spin 900ms linear infinite; }
+.ui-aic__state-icon[data-status="waiting"] { color: var(--ui-aic-amber); }
+.ui-aic__state-icon[data-status="done"] { color: var(--ui-aic-green); }
+.ui-aic__state-icon[data-status="failed"] { color: var(--ui-aic-red); }
+.ui-aic__meta { display: inline-flex; flex: none; align-items: center; font-size: 12px; color: var(--ui-aic-muted); font-variant-numeric: tabular-nums; }
+.ui-aic__meta > span { display: inline-flex; align-items: center; gap: 5px; padding: 0 9px; }
+.ui-aic__meta > span + span { border-left: 1px solid var(--ui-aic-line); }
+.ui-aic__meta > span:last-child { padding-right: 0; }
 
 /* Open: steps and decisions unfold under the card's text */
-.ui-ai__fold { display: grid; grid-template-rows: 0fr; opacity: 0; transition: grid-template-rows 460ms var(--ui-ai-ease), opacity 240ms ease; }
-.ui-ai__fold[data-open] { grid-template-rows: 1fr; opacity: 1; transition: grid-template-rows 460ms var(--ui-ai-ease), opacity 320ms ease 100ms; }
-.ui-ai__clip { min-height: 0; overflow: hidden; }
-.ui-ai__more { margin: 0 14px; padding: 12px 0 14px; border-top: 1px solid var(--ui-ai-line); }
-.ui-ai__agent { font-size: 12.5px; font-weight: 500; color: var(--ui-ai-muted); }
-.ui-ai__details { margin-top: 6px; font-size: 12.5px; color: var(--ui-ai-muted); }
+.ui-aic__fold { display: grid; grid-template-rows: 0fr; opacity: 0; transition: grid-template-rows 460ms var(--ui-aic-ease), opacity 240ms ease; }
+.ui-aic__fold[data-open] { grid-template-rows: 1fr; opacity: 1; transition: grid-template-rows 460ms var(--ui-aic-ease), opacity 320ms ease 100ms; }
+.ui-aic__clip { min-height: 0; overflow: hidden; }
+/* Starts at the card's left edge, like the spark – the full width for reading */
+.ui-aic__more { margin: 0 14px 0 12px; padding: 10px 0 12px; border-top: 1px solid var(--ui-aic-line); }
+.ui-aic__agent { font-size: 12px; color: var(--ui-aic-muted); }
+.ui-aic__details { margin-top: 6px; font-size: 12.5px; color: var(--ui-aic-muted); }
 /* Steve: Open, one click, in the card's top corner; the card's first line leaves it room */
-.ui-ai__go { position: absolute; top: 9px; right: 9px; display: grid; place-items: center; width: 24px; height: 24px; border-radius: var(--aui-radius-sm, 8px); color: var(--ui-ai-faint); transition: background-color 160ms ease, color 160ms ease; }
-.ui-ai__go:hover { background: var(--ui-ai-chip); color: var(--ui-ai-ink); }
-.ui-ai__card[data-go] .ui-ai__card-main > :first-child { padding-right: 24px; }
+.ui-aic__go { position: absolute; top: 9px; right: 9px; display: grid; place-items: center; width: 24px; height: 24px; border-radius: var(--aui-radius-sm, 8px); color: var(--ui-aic-faint); transition: background-color 160ms ease, color 160ms ease; }
+.ui-aic__go:hover { background: var(--ui-aic-chip); color: var(--ui-aic-ink); }
+.ui-aic__card[data-go] .ui-aic__card-main > :first-child { padding-right: 24px; }
 /* Steve: a capped column's Show all */
-.ui-ai__all { display: block; width: 100%; height: 32px; border-radius: var(--aui-radius, 10px); font-size: 13px; font-weight: 500; color: var(--ui-ai-muted); text-align: center; transition: background-color 160ms ease, color 160ms ease; }
-.ui-ai__all:hover { background: var(--ui-ai-track); color: var(--ui-ai-ink); }
-.ui-ai__steps { position: relative; display: grid; gap: 6px; margin-top: 8px !important; padding-left: 14px !important; }
-.ui-ai__steps li { position: relative; display: flex; justify-content: space-between; gap: 10px; font-size: 13px; line-height: 18px; color: var(--ui-ai-text); }
-.ui-ai__steps li::before { content: ""; position: absolute; top: 6px; left: -14px; width: 6px; height: 6px; border-radius: 50%; background: var(--ui-ai-faint); }
-.ui-ai__steps li:not(:last-child)::after { content: ""; position: absolute; top: 15px; bottom: -9px; left: -11.5px; width: 1px; background: var(--ui-ai-line); }
-.ui-ai__steps li[data-last]::before { background: var(--ui-ai-ink); }
-.ui-ai__steps li > span { min-width: 0; text-align: start; overflow-wrap: anywhere; white-space: pre-line; }
+.ui-aic__all { display: block; width: 100%; height: 32px; border-radius: var(--aui-radius, 10px); font-size: 13px; font-weight: 500; color: var(--ui-aic-muted); text-align: center; transition: background-color 160ms ease, color 160ms ease; }
+.ui-aic__all:hover { background: var(--ui-aic-track); color: var(--ui-aic-ink); }
+.ui-aic__steps { position: relative; display: grid; gap: 5px; margin-top: 6px !important; padding-left: 12px !important; }
+.ui-aic__steps li { position: relative; display: flex; justify-content: space-between; gap: 10px; font-size: 12.5px; line-height: 18px; color: var(--ui-aic-text); }
+.ui-aic__steps li::before { content: ""; position: absolute; top: 7px; left: -12px; width: 4px; height: 4px; border-radius: 50%; background: var(--ui-aic-faint); }
+/* Short line segments between the dots, with a little air on both ends */
+.ui-aic__steps li:not(:last-child)::after { content: ""; position: absolute; top: 15px; bottom: -8px; left: -10.5px; width: 1px; background: var(--ui-aic-line); }
+.ui-aic__steps li[data-last]::before { background: var(--ui-aic-ink); }
+.ui-aic__steps li > span { min-width: 0; text-align: start; overflow-wrap: anywhere; white-space: pre-line; }
 /* A long time wraps on its side instead of squeezing the step to nothing */
-.ui-ai__steps time { flex: none; max-width: 45%; color: var(--ui-ai-muted); text-align: end; }
-.ui-ai__actions { display: flex; justify-content: flex-end; gap: 6px; margin-top: 12px; }
-.ui-ai__actions:empty { display: none; }
-.ui-ai__btn { display: inline-flex; align-items: center; height: 32px; padding: 0 14px; border-radius: var(--aui-radius, 10px); background: var(--ui-ai-card); box-shadow: 0 0 0 1px var(--ui-ai-line), 0 1px 2px rgba(0, 0, 0, 0.04); font-size: 13.5px; font-weight: 500; color: var(--ui-ai-ink); transition: background-color 160ms ease, opacity 160ms ease; }
-.ui-ai__btn:hover { background: var(--ui-ai-chip); }
-.ui-ai__btn--primary { background: var(--aui-primary, var(--ui-ai-ink)); box-shadow: none; color: var(--aui-on-primary, var(--ui-ai-card)); }
-.ui-ai__btn--primary:hover { background: var(--aui-primary, var(--ui-ai-ink)); opacity: 0.88; }
+.ui-aic__steps time { flex: none; max-width: 45%; color: var(--ui-aic-muted); text-align: end; }
+.ui-aic__actions { display: flex; justify-content: flex-end; gap: 6px; margin-top: 10px; }
+.ui-aic__actions:empty { display: none; }
+.ui-aic__btn { display: inline-flex; align-items: center; height: 28px; padding: 0 12px; border-radius: calc(var(--aui-radius, 7px) + 1px); box-shadow: inset 0 0 0 1px var(--ui-aic-line); background: var(--ui-aic-card); font-size: 12.5px; font-weight: 500; color: var(--ui-aic-ink); transition: background-color 160ms ease; }
+.ui-aic__btn:hover { background: var(--ui-aic-lane); }
+.ui-aic__btn--primary { background: var(--aui-primary, var(--ui-aic-ink)); box-shadow: none; color: var(--aui-on-primary, var(--ui-aic-card)); }
+.ui-aic__btn--primary:hover { background: color-mix(in srgb, var(--aui-primary, #171717) 88%, var(--aui-ink, #000)); }
 
 /* ----- List layout: the columns stack, one after another ----- */
-.ui-ai[data-view="list"] .ui-ai__lanes { grid-template-columns: minmax(0, 1fr); gap: 8px; }
+.ui-aic[data-view="list"] .ui-aic__lanes { grid-template-columns: minmax(0, 1fr); }
+.ui-aic[data-view="list"] .ui-aic__lane-head { grid-template-columns: 20px auto 1fr; gap: 4px; }
+.ui-aic[data-view="list"] .ui-aic__lane-name { text-align: left; }
+.ui-aic[data-view="list"] .ui-aic__count { justify-self: start; }
 /* Steve: on a wide board an empty column is a rail with its name down the side */
-@container ui-ai (min-width: 621px) {
-  .ui-ai[data-view="board"] .ui-ai__lane[data-empty] { min-height: 12rem; border-radius: var(--aui-radius-lg, 16px); box-shadow: inset 0 0 0 1px var(--ui-ai-track); }
-  .ui-ai[data-view="board"] .ui-ai__lane[data-empty] .ui-ai__lane-head { flex-direction: column; height: auto; padding: 12px 0; gap: 8px; }
-  .ui-ai[data-view="board"] .ui-ai__lane[data-empty] .ui-ai__lane-name { writing-mode: vertical-rl; color: var(--ui-ai-muted); }
-  .ui-ai[data-view="board"] .ui-ai__lane[data-empty] .ui-ai__cards { display: none; }
+@container ui-aic (min-width: 621px) {
+  .ui-aic[data-view="board"] .ui-aic__lane[data-empty] { min-height: 12rem; }
+  .ui-aic[data-view="board"] .ui-aic__lane[data-empty] .ui-aic__lane-head { display: flex; flex-direction: column; height: auto; padding: 12px 0; gap: 8px; }
+  .ui-aic[data-view="board"] .ui-aic__lane[data-empty] .ui-aic__lane-name { writing-mode: vertical-rl; }
+  .ui-aic[data-view="board"] .ui-aic__lane[data-empty] .ui-aic__cards { display: none; }
 }
-.ui-ai__lanes { animation: ui-ai-in 320ms ease both; }
+.ui-aic__lanes { animation: ui-aic-in 320ms ease both; }
 
-@keyframes ui-ai-spin { to { transform: rotate(360deg); } }
-@keyframes ui-ai-pop { from { opacity: 0; transform: scale(0.6); } }
-@keyframes ui-ai-in { from { opacity: 0.4; } }
+@keyframes ui-aic-spin { to { transform: rotate(360deg); } }
+@keyframes ui-aic-pop { from { opacity: 0; transform: scale(0.6); } }
+@keyframes ui-aic-in { from { opacity: 0.4; } }
 
 /* Narrow containers: always the list, without the switch */
-@container ui-ai (max-width: 620px) {
-  .ui-ai__views { display: none; }
-  .ui-ai__action { justify-content: center; width: 30px; padding: 0; background: var(--ui-ai-track); }
-  .ui-ai__action-label { display: none; }
-  .ui-ai .ui-ai__lanes { grid-template-columns: minmax(0, 1fr); gap: 8px; }
+@container ui-aic (max-width: 620px) {
+  .ui-aic__views { display: none; }
+  .ui-aic .ui-aic__lanes { grid-template-columns: minmax(0, 1fr); }
+  .ui-aic .ui-aic__lane-head { grid-template-columns: 20px auto 1fr; gap: 4px; }
+  .ui-aic .ui-aic__lane-name { text-align: left; }
+  .ui-aic .ui-aic__count { justify-self: start; }
 }
 /* Slim cards (three columns in a narrow board): the text starts under the spark, so the footer keeps its words */
-@container ai-card (max-width: 280px) {
-  .ui-ai__desc, .ui-ai__foot, .ui-ai__code { padding-left: 0; }
-  .ui-ai__state:not([data-status="failed"]):not([data-bare]):not([data-said]) .ui-ai__state-word { display: none; }
-  .ui-ai__state[data-said] .ui-ai__time, .ui-ai__state[data-said] .ui-ai__dot { display: none; }
+@container aic-card (max-width: 280px) {
+  .ui-aic__desc, .ui-aic__foot, .ui-aic__code { padding-left: 0; }
+  .ui-aic__state:is([data-status="running"], [data-status="done"]):not([data-bare]):not([data-said]) .ui-aic__state-word { display: none; }
+  .ui-aic__state[data-said] .ui-aic__time, .ui-aic__state[data-said] .ui-aic__dot { display: none; }
+  /* Too little room beside big counts: the counts move to a line of their own instead of squeezing "Waiting for you" */
+  .ui-aic__foot { flex-wrap: wrap; row-gap: 2px; }
+  .ui-aic__state[data-status="waiting"] { flex: 1 1 110px; }
 }
-@container ui-ai (max-width: 360px) {
-  .ui-ai__desc, .ui-ai__foot, .ui-ai__code { padding-left: 0; }
+@container ui-aic (max-width: 360px) {
+  .ui-aic__desc, .ui-aic__foot, .ui-aic__code { padding-left: 0; }
   /* A long title wraps to three lines at most – the open card shows all of it */
-  .ui-ai__card:not([data-open]) .ui-ai__title { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; }
+  .ui-aic__card:not([data-open]) .ui-aic__title { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; }
 }
 
 @media (pointer: coarse) {
-  .ui-ai__view { height: 34px; }
-  .ui-ai__btn { height: 40px; padding: 0 18px; }
+  .ui-aic__view { height: 32px; }
+  .ui-aic__btn { height: 36px; padding: 0 16px; }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .ui-ai *, .ui-ai *::before, .ui-ai *::after { animation: none !important; transition: none !important; }
+  .ui-aic *, .ui-aic *::before, .ui-aic *::after { animation: none !important; transition: none !important; }
 }
 
+/* Steve: dark mode comes with the tokens above */
 `;

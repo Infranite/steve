@@ -13,10 +13,10 @@ import {
 
 /*
  * Approval Card – an AI agent asks before it does something consequential, in a single self-contained file.
- * A header with the action, a risk badge and a preview (recipients, key-value details), then
- * "Always allow this action" in a white card; Approve (⌘↵) / Deny sit on the gray tray below it.
- * An optional countdown ("Expires in 0:42") sits quietly in the tray and pauses while you hover or
- * focus the card. After a decision the tray footer folds away into a compact row: the check or cross
+ * A header with the action and a risk tag, then the preview (recipients, key-value details) as plain rows under a
+ * hairline – all in one clean white card. Its last row holds "Always allow this action" and Deny / Approve (⌘↵);
+ * with actions="tray" the buttons sit on a gray tray below the card instead. An optional countdown ("Expires in 0:42")
+ * pauses while you hover or focus the card. After a decision the card folds into a compact row: the check or cross
  * draws in and the height glides down.
  * The styles are injected below, so no extra files are needed.
  */
@@ -99,7 +99,7 @@ export function ApprovalCard({
   editLabel = "Edit",
   shortcuts = true,
   label,
-  actions = "tray",
+  actions = "card",
   resolvedLabels = { approved: "Approved", denied: "Denied", expired: "Expired" },
   approveAttrs,
   denyAttrs,
@@ -299,11 +299,24 @@ export function ApprovalCard({
     status === "approved" ? resolvedLabels.approved : reason === "timeout" ? resolvedLabels.expired : resolvedLabels.denied;
   const describedBy = [description ? descId : null, total && !resolved ? timerId : null].filter(Boolean).join(" ");
 
-  // The countdown and the decision – on the tray below the card, or inside it with actions="card"
+  const alwaysBox = allowAlways && (
+    <label className="ui-apc__always">
+      <span className="ui-apc__box">
+        <input type="checkbox" checked={always} disabled={busy} onChange={(e) => setAlways(e.target.checked)} />
+        <svg viewBox="0 0 16 16" aria-hidden="true">
+          <path d="M4 8.3 6.8 11 12 5.2" />
+        </svg>
+      </span>
+      <span className="ui-apc__always-label">{alwaysLabel}</span>
+    </label>
+  );
+
+  // The countdown and the decision – one row at the bottom of the card, or on the gray tray with actions="tray"
   const foot = (
-    <div className="ui-ap__foot">
+    <div className="ui-apc__foot">
+      {actions === "card" && alwaysBox}
       {total > 0 && (
-        <span className="ui-ap__expires" data-paused={paused || undefined} data-low={secondsLeft <= 10 || undefined} aria-hidden="true">
+        <span className="ui-apc__expires" data-paused={paused || undefined} data-low={secondsLeft <= 10 || undefined} aria-hidden="true">
           <svg viewBox="0 0 16 16">
             <circle cx="8" cy="8" r="6" />
             <path d="M8 5v3.2l2 1.3" />
@@ -311,11 +324,11 @@ export function ApprovalCard({
           Expires in {clock(secondsLeft)}
         </span>
       )}
-      <div className="ui-ap__actions">
+      <div className="ui-apc__actions">
         {onEdit && (
           <button
             type="button"
-            className="ui-ap__btn ui-ap__btn--ghost"
+            className="ui-apc__btn ui-apc__btn--ghost"
             aria-disabled={busy || undefined}
             onClick={() => !busy && onEdit()}
           >
@@ -324,7 +337,7 @@ export function ApprovalCard({
         )}
         <button
           type="button"
-          className="ui-ap__btn ui-ap__btn--quiet ui-ap__deny"
+          className="ui-apc__btn ui-apc__btn--quiet ui-apc__deny"
           aria-disabled={busy || undefined}
           onClick={() => deny("user")}
           {...denyAttrs}
@@ -334,7 +347,7 @@ export function ApprovalCard({
         <button
           ref={approveBtn}
           type="button"
-          className="ui-ap__btn ui-ap__btn--primary ui-ap__approve"
+          className="ui-apc__btn ui-apc__btn--primary ui-apc__approve"
           aria-keyshortcuts="Meta+Enter Control+Enter"
           aria-disabled={busy || undefined}
           onClick={() => void approve()}
@@ -342,12 +355,12 @@ export function ApprovalCard({
         >
           {approveLabel}
           {busy ? (
-            <svg className="ui-ap__spinner" viewBox="0 0 16 16" aria-hidden="true">
+            <svg className="ui-apc__spinner" viewBox="0 0 16 16" aria-hidden="true">
               <circle cx="8" cy="8" r="6" />
             </svg>
           ) : (
             shortcuts && (
-              <kbd className="ui-ap__kbd" aria-hidden="true">
+              <kbd className="ui-apc__kbd" aria-hidden="true">
                 {mod === "⌘" ? "⌘↵" : "Ctrl ↵"}
               </kbd>
             )
@@ -360,7 +373,7 @@ export function ApprovalCard({
   return (
     <div
       ref={root}
-      className={["ui-ap", className].filter(Boolean).join(" ")}
+      className={["ui-apc", className].filter(Boolean).join(" ")}
       role="group"
       aria-labelledby={resolved ? rowTitleId : titleId}
       aria-describedby={describedBy || undefined}
@@ -379,20 +392,20 @@ export function ApprovalCard({
       }}
     >
       {/* React 19 hoists this into <head> once, no matter how many cards render */}
-      <style href="ui-approval-card" precedence="default">
+      <style href="ui-approval-card-clean" precedence="default">
         {css}
       </style>
 
       {/* The label sits on the gray tray, above the card */}
       {label && (
-        <div className="ui-ap__label" title={typeof label === "string" ? label : undefined}>
+        <div className="ui-apc__label" title={typeof label === "string" ? label : undefined}>
           {label}
         </div>
       )}
 
       {(!resolved || leaving) && (
         <div
-          className="ui-ap__pending"
+          className="ui-apc__pending"
           data-leaving={leaving || undefined}
           data-entering={entering || undefined}
           inert={leaving}
@@ -403,9 +416,9 @@ export function ApprovalCard({
             if (entering) setEntering(false);
           }}
         >
-          <div className="ui-ap__card">
-            <div className="ui-ap__head">
-              <span className="ui-ap__icon" aria-hidden="true">
+          <div className="ui-apc__card">
+            <div className="ui-apc__head">
+              <span className="ui-apc__icon" aria-hidden="true">
                 {icon ?? (
                   <svg viewBox="0 0 24 24">
                     <path d="M12 3 5 5.8v5.4c0 4.3 2.9 8.2 7 9.8 4.1-1.6 7-5.5 7-9.8V5.8L12 3Z" />
@@ -413,32 +426,32 @@ export function ApprovalCard({
                   </svg>
                 )}
               </span>
-              <div className="ui-ap__titles">
-                <h3 className="ui-ap__title" dir="auto" title={title} id={leaving ? undefined : titleId}>
+              <div className="ui-apc__titles">
+                <h3 className="ui-apc__title" dir="auto" title={title} id={leaving ? undefined : titleId}>
                   {title}
                 </h3>
                 {description && (
-                  <p className="ui-ap__desc" dir="auto" title={typeof description === "string" ? description : undefined} id={leaving ? undefined : descId}>
+                  <p className="ui-apc__desc" dir="auto" title={typeof description === "string" ? description : undefined} id={leaving ? undefined : descId}>
                     {description}
                   </p>
                 )}
               </div>
               {risk && (
-                <span className="ui-ap__risk" data-risk={risk}>
-                  <span className="ui-ap__risk-dot" aria-hidden="true" />
+                <span className="ui-apc__risk" data-risk={risk}>
+                  <span className="ui-apc__risk-dot" aria-hidden="true" />
                   {RISK_LABEL[risk]}
-                  <span className="ui-ap__risk-word"> risk</span>
+                  <span className="ui-apc__risk-word"> risk</span>
                 </span>
               )}
             </div>
 
             {(body || details?.length) && (
-              <div className="ui-ap__preview">
-                {body && <div className="ui-ap__custom">{body}</div>}
+              <div className="ui-apc__preview">
+                {body && <div className="ui-apc__custom">{body}</div>}
                 {details?.length ? (
-                  <dl className="ui-ap__details">
+                  <dl className="ui-apc__details">
                     {details.map((d, i) => (
-                      <div className="ui-ap__detail" key={d.label + i}>
+                      <div className="ui-apc__detail" key={d.label + i}>
                         <dt dir="auto" title={d.label}>{d.label}</dt>
                         <dd dir="auto">{d.value}</dd>
                       </div>
@@ -448,29 +461,14 @@ export function ApprovalCard({
               </div>
             )}
 
-            {allowAlways && (
-              <label className="ui-ap__always">
-                <span className="ui-ap__box">
-                  <input
-                    type="checkbox"
-                    checked={always}
-                    disabled={busy}
-                    onChange={(e) => setAlways(e.target.checked)}
-                  />
-                  <svg viewBox="0 0 16 16" aria-hidden="true">
-                    <path d="M4 8.3 6.8 11 12 5.2" />
-                  </svg>
-                </span>
-                <span className="ui-ap__always-label">{alwaysLabel}</span>
-              </label>
-            )}
+            {actions === "tray" && alwaysBox}
             {actions === "card" && foot}
           </div>
 
           {actions === "tray" && foot}
 
           {total > 0 && (
-            <span className="ui-ap__sr" id={leaving ? undefined : timerId}>
+            <span className="ui-apc__sr" id={leaving ? undefined : timerId}>
               {`Expires in ${spoken(secondsLeft)} unless approved. The timer pauses while the card is hovered or focused.`}
             </span>
           )}
@@ -480,7 +478,7 @@ export function ApprovalCard({
       {resolved && (
         <div
           ref={row}
-          className="ui-ap__card ui-ap__resolved"
+          className="ui-apc__card ui-apc__resolved"
           tabIndex={-1}
           data-status={status}
           onFocus={() => (rowFocused.current = true)}
@@ -489,7 +487,7 @@ export function ApprovalCard({
             if (e.relatedTarget || e.currentTarget.isConnected) rowFocused.current = false;
           }}
         >
-          <span className="ui-ap__mark" aria-hidden="true">
+          <span className="ui-apc__mark" aria-hidden="true">
             <svg viewBox="0 0 16 16">
               {status === "approved" ? (
                 <path d="M4.2 8.4 6.9 11 11.8 5.6" pathLength={1} />
@@ -498,18 +496,18 @@ export function ApprovalCard({
               )}
             </svg>
           </span>
-          <span className="ui-ap__row-title" dir="auto" title={title} id={rowTitleId}>
+          <span className="ui-apc__row-title" dir="auto" title={title} id={rowTitleId}>
             {title}
           </span>
-          <span className="ui-ap__row-status">
+          <span className="ui-apc__row-status">
             {resolvedLabel}
-            {status === "approved" && always && <span className="ui-ap__row-extra"> · Always</span>}
-            {decidedAt !== null && <span className="ui-ap__row-time"> · {ago(decidedAt)}</span>}
+            {status === "approved" && always && <span className="ui-apc__row-extra"> · Always</span>}
+            {decidedAt !== null && <span className="ui-apc__row-time"> · {ago(decidedAt)}</span>}
           </span>
         </div>
       )}
 
-      <span className="ui-ap__sr" role="status" aria-live="polite">
+      <span className="ui-apc__sr" role="status" aria-live="polite">
         {announce}
       </span>
     </div>
@@ -541,38 +539,38 @@ function ago(t: number) {
 /* ---------- Styles ---------- */
 
 const css = /* css */ `
-/* Colors and motion as variables – override them on .ui-ap */
-.ui-ap {
-  --ui-ap-tray: var(--aui-subtle, #f0f0f0);
-  --ui-ap-bg: var(--aui-surface, #ffffff);
-  --ui-ap-ink: var(--aui-ink, #171717);
-  --ui-ap-text: var(--aui-muted, #6b6b6b);
-  --ui-ap-muted: var(--aui-muted, #8a8a8a);
-  --ui-ap-line: var(--aui-border, #ececec);
-  --ui-ap-soft: var(--aui-subtle, #fafafa);
-  --ui-ap-tile: var(--aui-subtle, #f4f4f4);
-  --ui-ap-hover: color-mix(in srgb, var(--aui-ink, #171717) 8%, transparent);
-  --ui-ap-primary: var(--aui-primary, #171717);
-  --ui-ap-primary-hover: color-mix(in srgb, var(--aui-primary, #171717) 88%, var(--aui-ink, #000));
-  --ui-ap-primary-ink: var(--aui-on-primary, #ffffff);
-  --ui-ap-primary-kbd: rgba(255, 255, 255, 0.14);
-  --ui-ap-primary-kbd-ink: rgba(255, 255, 255, 0.72);
-  --ui-ap-kbd: color-mix(in srgb, var(--aui-ink, #000) 6%, transparent);
-  --ui-ap-box: var(--aui-border-strong, #d4d4d4);
-  --ui-ap-box-hover: var(--aui-muted, #b5b5b5);
-  --ui-ap-focus: var(--aui-focus, rgba(0, 96, 226, 0.7));
-  --ui-ap-timer-low: var(--aui-warning, #b25e00);
-  --ui-ap-low-bg: var(--aui-subtle, #f2f2f2);
-  --ui-ap-low-ink: var(--aui-muted, #6b6b6b);
-  --ui-ap-med-bg: var(--aui-warning-soft, #fbf5e2);
-  --ui-ap-med-ink: var(--aui-warning, #8f6c00);
-  --ui-ap-high-bg: var(--aui-danger-soft, #fdedeb);
-  --ui-ap-high-ink: var(--aui-danger, #c4320a);
-  --ui-ap-ok-bg: var(--aui-success-soft, #e9f6ee);
-  --ui-ap-ok-ink: var(--aui-success, #1e8a4f);
-  --ui-ap-no-bg: var(--aui-subtle, #f2f2f2);
-  --ui-ap-no-ink: var(--aui-muted, #6b6b6b);
-  --ui-ap-ease: var(--aui-ease, cubic-bezier(0.22, 1, 0.36, 1));
+/* Colors and motion as variables – override them on .ui-apc */
+.ui-apc {
+  --ui-apc-tray: var(--aui-subtle, #f0f0f0);
+  --ui-apc-bg: var(--aui-surface, #ffffff);
+  --ui-apc-ink: var(--aui-ink, #171717);
+  --ui-apc-text: var(--aui-muted, #6b6b6b);
+  --ui-apc-muted: var(--aui-muted, #8a8a8a);
+  --ui-apc-line: var(--aui-border, #ececec);
+  --ui-apc-soft: var(--aui-subtle, #fafafa);
+  --ui-apc-tile: var(--aui-subtle, #f4f4f4);
+  --ui-apc-hover: color-mix(in srgb, var(--aui-ink, #171717) 8%, transparent);
+  --ui-apc-primary: var(--aui-primary, #171717);
+  --ui-apc-primary-hover: color-mix(in srgb, var(--aui-primary, #171717) 88%, var(--aui-ink, #000));
+  --ui-apc-primary-ink: var(--aui-on-primary, #ffffff);
+  --ui-apc-primary-kbd: rgba(255, 255, 255, 0.14);
+  --ui-apc-primary-kbd-ink: rgba(255, 255, 255, 0.72);
+  --ui-apc-kbd: color-mix(in srgb, var(--aui-ink, #000) 6%, transparent);
+  --ui-apc-box: var(--aui-border-strong, #d4d4d4);
+  --ui-apc-box-hover: var(--aui-muted, #b5b5b5);
+  --ui-apc-focus: var(--aui-focus, rgba(0, 96, 226, 0.7));
+  --ui-apc-timer-low: var(--aui-warning, #b25e00);
+  --ui-apc-low-bg: var(--aui-subtle, #f2f2f2);
+  --ui-apc-low-ink: var(--aui-muted, #6b6b6b);
+  --ui-apc-med-bg: var(--aui-warning-soft, #fbf5e2);
+  --ui-apc-med-ink: var(--aui-warning, #8f6c00);
+  --ui-apc-high-bg: var(--aui-danger-soft, #fdedeb);
+  --ui-apc-high-ink: var(--aui-danger, #c4320a);
+  --ui-apc-ok-bg: var(--aui-success-soft, #e9f6ee);
+  --ui-apc-ok-ink: var(--aui-success, #1e8a4f);
+  --ui-apc-no-bg: var(--aui-subtle, #f2f2f2);
+  --ui-apc-no-ink: var(--aui-muted, #6b6b6b);
+  --ui-apc-ease: var(--aui-ease, cubic-bezier(0.22, 1, 0.36, 1));
   position: relative;
   box-sizing: border-box;
   width: 100%;
@@ -580,67 +578,67 @@ const css = /* css */ `
   overflow: hidden;
   container-type: inline-size;
   padding: 4px;
-  border-radius: calc(var(--aui-radius-lg, 16px) + 4px);
-  background: var(--ui-ap-tray);
-  color: var(--ui-ap-text);
+  border-radius: calc(var(--aui-radius-lg, 10px) + 10px);
+  background: var(--ui-apc-tray);
+  color: var(--ui-apc-text);
   font-family: var(--aui-font, "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif);
   font-size: 13px;
   line-height: 1.45;
   letter-spacing: -0.006em;
   text-align: left;
   -webkit-font-smoothing: antialiased;
-  transition: height 520ms var(--ui-ap-ease);
+  transition: height 520ms var(--ui-apc-ease);
 }
-.ui-ap *,
-.ui-ap *::before,
-.ui-ap *::after {
+.ui-apc *,
+.ui-apc *::before,
+.ui-apc *::after {
   box-sizing: border-box;
 }
 
 /* The white card – the pending request and the resolved row both live in one */
-.ui-ap__card {
+.ui-apc__card {
   position: relative;
-  border-radius: var(--aui-radius-lg, 16px);
-  background: var(--ui-ap-bg);
-  box-shadow: var(--aui-shadow-card, 0 0 0 1px var(--ui-ap-line), 0 1px 2px rgba(0, 0, 0, 0.04));
+  border-radius: calc(var(--aui-radius-lg, 10px) + 6px);
+  background: var(--ui-apc-bg);
+  box-shadow: var(--aui-shadow-card, 0 0 0 1px var(--ui-apc-line), 0 1px 2px rgba(0, 0, 0, 0.04));
 }
 
 /* ---------- Pending ---------- */
-.ui-ap__pending > .ui-ap__card {
+.ui-apc__pending > .ui-apc__card {
   padding: 16px;
 }
-.ui-ap__pending[data-leaving] {
+.ui-apc__pending[data-leaving] {
   position: absolute;
   top: 4px;
   left: 4px;
   right: 4px;
   pointer-events: none;
-  animation: ui-ap-out 280ms var(--ui-ap-ease) both;
+  animation: ui-apc-out 280ms var(--ui-apc-ease) both;
 }
-.ui-ap__pending[data-entering] {
-  animation: ui-ap-in 420ms var(--ui-ap-ease) 80ms both;
+.ui-apc__pending[data-entering] {
+  animation: ui-apc-in 420ms var(--ui-apc-ease) 80ms both;
 }
-.ui-ap[data-busy] .ui-ap__pending {
+.ui-apc[data-busy] .ui-apc__pending {
   pointer-events: none;
 }
 
-.ui-ap__head {
+.ui-apc__head {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: start;
   gap: 12px;
 }
-.ui-ap__icon {
+.ui-apc__icon {
   display: grid;
   place-items: center;
   width: 32px;
   height: 32px;
   border-radius: 9px;
-  background: var(--ui-ap-tile);
-  box-shadow: inset 0 0 0 1px var(--ui-ap-line);
-  color: var(--ui-ap-ink);
+  background: transparent;
+  box-shadow: inset 0 0 0 1px var(--ui-apc-line);
+  color: var(--ui-apc-ink);
 }
-.ui-ap__icon svg {
+.ui-apc__icon svg {
   width: 16px;
   height: 16px;
   fill: none;
@@ -649,14 +647,14 @@ const css = /* css */ `
   stroke-linecap: round;
   stroke-linejoin: round;
 }
-.ui-ap__titles {
+.ui-apc__titles {
   min-width: 0;
   padding-top: 1px;
 }
-.ui-ap__title {
+.ui-apc__title {
   margin: 0;
   overflow: hidden;
-  color: var(--ui-ap-ink);
+  color: var(--ui-apc-ink);
   font-size: 14px;
   font-weight: 550;
   line-height: 20px;
@@ -666,7 +664,7 @@ const css = /* css */ `
   text-overflow: ellipsis;
 }
 /* Secondary context: one line, the whole of it in the tooltip */
-.ui-ap__desc {
+.ui-apc__desc {
   margin: 1px 0 0;
   overflow: hidden;
   font-size: 13px;
@@ -676,89 +674,82 @@ const css = /* css */ `
   text-overflow: ellipsis;
 }
 
-.ui-ap__risk {
+.ui-apc__risk {
   display: inline-flex;
   align-items: center;
   gap: 6px;
   height: 22px;
   margin-top: 1px;
-  padding: 0 9px 0 8px;
-  border-radius: 999px;
-  background: var(--ui-ap-low-bg);
-  color: var(--ui-ap-low-ink);
+  padding: 0 7px;
+  border-radius: calc(var(--aui-radius-sm, 5px) + 1px);
+  background: var(--ui-apc-low-bg);
+  color: var(--ui-apc-low-ink);
   font-size: 12px;
   font-weight: 500;
   line-height: 1;
   white-space: nowrap;
 }
-.ui-ap__risk-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: currentColor;
-  opacity: 0.8;
+.ui-apc__risk-dot {
+  display: none;
 }
-.ui-ap__risk-word {
+.ui-apc__risk-word {
   white-space: pre;
 }
-.ui-ap__risk[data-risk="medium"] {
-  background: var(--ui-ap-med-bg);
-  color: var(--ui-ap-med-ink);
+.ui-apc__risk[data-risk="medium"] {
+  background: var(--ui-apc-med-bg);
+  color: var(--ui-apc-med-ink);
 }
-.ui-ap__risk[data-risk="high"] {
-  background: var(--ui-ap-high-bg);
-  color: var(--ui-ap-high-ink);
+.ui-apc__risk[data-risk="high"] {
+  background: var(--ui-apc-high-bg);
+  color: var(--ui-apc-high-ink);
 }
 
-/* Preview: custom content and key-value rows in one soft panel */
-.ui-ap__preview {
+/* Preview: custom content and key-value rows, plain on the card under one hairline – no second gray panel */
+.ui-apc__preview {
   display: grid;
   gap: 12px;
   max-height: 360px;
   overflow-y: auto;
   overscroll-behavior: contain;
   margin-top: 14px;
-  padding: 12px;
-  border-radius: calc(var(--aui-radius-lg, 16px) - 6px);
-  background: var(--ui-ap-soft);
-  box-shadow: inset 0 0 0 1px var(--ui-ap-line);
+  padding-top: 14px;
+  border-top: 1px solid var(--ui-apc-line);
 }
-.ui-ap__custom {
+.ui-apc__custom {
   min-width: 0;
 }
-.ui-ap__custom + .ui-ap__details {
-  padding-top: 12px;
-  border-top: 1px solid var(--ui-ap-line);
+.ui-apc__custom + .ui-apc__details {
+  padding-top: 2px;
 }
-.ui-ap__details {
+.ui-apc__details {
   display: grid;
   /* Long labels take at most 40% (and 180px) – the values are what you approve */
   grid-template-columns: fit-content(min(40%, 180px)) minmax(0, 1fr);
   gap: 6px 16px;
   margin: 0;
 }
-.ui-ap__detail {
+.ui-apc__detail {
   display: contents;
 }
-.ui-ap__detail dt {
+.ui-apc__detail dt {
   min-width: 0;
   overflow: hidden;
-  color: var(--ui-ap-muted);
+  color: var(--ui-apc-muted);
   /* Wraps between words only – a word too long for the column ends in an ellipsis, the full label is in the tooltip */
   overflow-wrap: normal;
   text-overflow: ellipsis;
 }
-.ui-ap__detail dd {
+.ui-apc__detail dd {
   min-width: 0;
   margin: 0;
   overflow-x: auto;
-  color: var(--ui-ap-ink);
+  color: var(--ui-apc-ink);
   text-align: start;
   overflow-wrap: anywhere;
 }
 
 /* "Always allow" closes the card */
-.ui-ap__always {
+.ui-apc__always {
   display: flex;
   width: fit-content;
   max-width: 100%;
@@ -769,11 +760,11 @@ const css = /* css */ `
   cursor: pointer;
   user-select: none;
 }
-.ui-ap__always-label {
+.ui-apc__always-label {
   min-width: 0;
   overflow-wrap: anywhere;
 }
-.ui-ap__box {
+.ui-apc__box {
   position: relative;
   display: grid;
   flex: none;
@@ -781,67 +772,73 @@ const css = /* css */ `
   width: 16px;
   height: 16px;
 }
-.ui-ap__box input {
+.ui-apc__box input {
   appearance: none;
   -webkit-appearance: none;
   width: 16px;
   height: 16px;
   margin: 0;
   border-radius: 5px;
-  background: var(--ui-ap-bg);
-  box-shadow: inset 0 0 0 1px var(--ui-ap-box);
+  background: var(--ui-apc-bg);
+  box-shadow: inset 0 0 0 1px var(--ui-apc-box);
   cursor: pointer;
   transition: background-color 160ms ease, box-shadow 160ms ease;
 }
-.ui-ap__box input:hover {
-  box-shadow: inset 0 0 0 1px var(--ui-ap-box-hover);
+.ui-apc__box input:hover {
+  box-shadow: inset 0 0 0 1px var(--ui-apc-box-hover);
 }
-.ui-ap__box input:checked {
-  background: var(--ui-ap-primary);
-  box-shadow: inset 0 0 0 1px var(--ui-ap-primary);
+.ui-apc__box input:checked {
+  background: var(--ui-apc-primary);
+  box-shadow: inset 0 0 0 1px var(--ui-apc-primary);
 }
-.ui-ap__box input:focus-visible {
-  outline: 2px solid var(--ui-ap-focus);
+.ui-apc__box input:focus-visible {
+  outline: 2px solid var(--ui-apc-focus);
   outline-offset: 2px;
 }
-.ui-ap__box svg {
+.ui-apc__box svg {
   position: absolute;
   inset: 0;
   width: 16px;
   height: 16px;
   fill: none;
-  stroke: var(--ui-ap-primary-ink);
+  stroke: var(--ui-apc-primary-ink);
   stroke-width: 1.8;
   stroke-linecap: round;
   stroke-linejoin: round;
   opacity: 0;
   transform: scale(0.6);
-  transition: opacity 160ms ease, transform 260ms var(--ui-ap-ease);
+  transition: opacity 160ms ease, transform 260ms var(--ui-apc-ease);
   pointer-events: none;
 }
-.ui-ap__box input:checked + svg {
+.ui-apc__box input:checked + svg {
   opacity: 1;
   transform: none;
 }
 
 /* Optional label on the gray tray above the card */
-.ui-ap__label {
+.ui-apc__label {
   overflow: hidden;
   padding: 6px 8px 4px;
-  color: var(--ui-ap-muted);
+  color: var(--ui-apc-muted);
   font-size: 12.5px;
   line-height: 16px;
   white-space: nowrap;
   text-overflow: ellipsis;
 }
 /* The leaving request is laid over the resolved row – below the label when there is one */
-.ui-ap[data-label] .ui-ap__pending[data-leaving] { top: 30px; }
+.ui-apc[data-label] .ui-apc__pending[data-leaving] { top: 30px; }
 
-/* actions="card": the buttons close the white card instead of sitting on the tray */
-.ui-ap__card > .ui-ap__foot { min-height: 0; margin-top: 14px; padding: 0; }
+/* actions="card" (the default): one clean white card – no gray tray around it, the decision is its last row */
+.ui-apc[data-actions="card"] { padding: 0; border-radius: calc(var(--aui-radius-lg, 10px) + 6px); background: transparent; }
+.ui-apc[data-actions="card"] .ui-apc__card { box-shadow: inset 0 0 0 1px var(--ui-apc-line); }
+.ui-apc[data-actions="card"] .ui-apc__pending[data-leaving] { top: 0; left: 0; right: 0; }
+.ui-apc[data-actions="card"][data-label] .ui-apc__pending[data-leaving] { top: 26px; }
+.ui-apc[data-actions="card"] .ui-apc__label { padding-left: 2px; }
+.ui-apc__card > .ui-apc__foot { min-height: 0; margin-top: 16px; padding: 14px 0 0; border-top: 1px solid var(--ui-apc-line); }
+.ui-apc__card > .ui-apc__foot .ui-apc__always { margin-top: 0; }
 
 /* The tray below the card: countdown on the left, buttons on the right */
-.ui-ap__foot {
+.ui-apc__foot {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
@@ -849,18 +846,18 @@ const css = /* css */ `
   min-height: 44px;
   padding: 6px 2px 2px 10px;
 }
-.ui-ap__expires {
+.ui-apc__expires {
   display: inline-flex;
   align-items: center;
   gap: 6px;
   min-width: 0;
-  color: var(--ui-ap-muted);
+  color: var(--ui-apc-muted);
   font-size: 12.5px;
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
   transition: color 300ms ease;
 }
-.ui-ap__expires svg {
+.ui-apc__expires svg {
   width: 14px;
   height: 14px;
   flex: none;
@@ -870,10 +867,10 @@ const css = /* css */ `
   stroke-linecap: round;
   stroke-linejoin: round;
 }
-.ui-ap__expires[data-low] {
-  color: var(--ui-ap-timer-low);
+.ui-apc__expires[data-low] {
+  color: var(--ui-apc-timer-low);
 }
-.ui-ap__actions {
+.ui-apc__actions {
   display: flex;
   flex: 0 1 auto;
   flex-wrap: wrap;
@@ -882,7 +879,7 @@ const css = /* css */ `
   min-width: 0;
   margin-left: auto;
 }
-.ui-ap__btn {
+.ui-apc__btn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -890,7 +887,7 @@ const css = /* css */ `
   height: 34px;
   padding: 0 12px;
   border: 0;
-  border-radius: var(--aui-radius, 10px);
+  border-radius: calc(var(--aui-radius, 7px) + 3px);
   font: inherit;
   font-size: 13px;
   font-weight: 500;
@@ -898,71 +895,71 @@ const css = /* css */ `
   white-space: nowrap;
   cursor: pointer;
   -webkit-tap-highlight-color: transparent;
-  transition: background-color 160ms ease, box-shadow 160ms ease, transform 160ms var(--ui-ap-ease), opacity 160ms ease;
+  transition: background-color 160ms ease, box-shadow 160ms ease, transform 160ms var(--ui-apc-ease), opacity 160ms ease;
 }
-.ui-ap__btn:active,
-.ui-ap__btn[data-pressed] {
+.ui-apc__btn:active,
+.ui-apc__btn[data-pressed] {
   transform: scale(0.97);
 }
-.ui-ap__btn:focus-visible {
-  outline: 2px solid var(--ui-ap-focus);
+.ui-apc__btn:focus-visible {
+  outline: 2px solid var(--ui-apc-focus);
   outline-offset: 2px;
 }
-.ui-ap__btn--primary {
+.ui-apc__btn--primary {
   padding-right: 8px;
-  background: var(--ui-ap-primary);
-  color: var(--ui-ap-primary-ink);
+  background: var(--ui-apc-primary);
+  color: var(--ui-apc-primary-ink);
   box-shadow: 0 1px 2px rgba(0, 0, 0, 0.12);
 }
-.ui-ap__btn--primary:hover,
-.ui-ap__btn--primary[data-pressed] {
-  background: var(--ui-ap-primary-hover);
+.ui-apc__btn--primary:hover,
+.ui-apc__btn--primary[data-pressed] {
+  background: var(--ui-apc-primary-hover);
 }
 /* Quiet: transparent on the tray, a soft fill on hover */
-.ui-ap__btn--quiet {
+.ui-apc__btn--quiet {
   padding-right: 8px;
   background: transparent;
-  color: var(--ui-ap-ink);
+  color: var(--ui-apc-ink);
 }
-.ui-ap__btn--quiet:hover,
-.ui-ap__btn--quiet[data-pressed] {
-  background: var(--ui-ap-hover);
+.ui-apc__btn--quiet:hover,
+.ui-apc__btn--quiet[data-pressed] {
+  background: var(--ui-apc-hover);
 }
-.ui-ap__btn--ghost {
+.ui-apc__btn--ghost {
   background: transparent;
-  color: var(--ui-ap-text);
+  color: var(--ui-apc-text);
 }
-.ui-ap__btn--ghost:hover {
-  background: var(--ui-ap-hover);
-  color: var(--ui-ap-ink);
+.ui-apc__btn--ghost:hover {
+  background: var(--ui-apc-hover);
+  color: var(--ui-apc-ink);
 }
-.ui-ap[data-busy] .ui-ap__btn:not(.ui-ap__approve),
-.ui-ap[data-busy] .ui-ap__always {
+.ui-apc[data-busy] .ui-apc__btn:not(.ui-apc__approve),
+.ui-apc[data-busy] .ui-apc__always {
   opacity: 0.5;
 }
-.ui-ap[data-busy] .ui-ap__approve {
+.ui-apc[data-busy] .ui-apc__approve {
   cursor: progress;
 }
 
-.ui-ap__kbd {
+.ui-apc__kbd {
   display: inline-grid;
   place-items: center;
   min-width: 20px;
   height: 20px;
   padding: 0 5px;
-  border-radius: calc(var(--aui-radius-sm, 7px) - 1px);
-  background: var(--ui-ap-kbd);
-  color: var(--ui-ap-muted);
+  border-radius: calc(var(--aui-radius-sm, 5px) + 1px);
+  background: var(--ui-apc-kbd);
+  color: var(--ui-apc-muted);
   font: inherit;
   font-size: 11px;
   font-weight: 500;
   line-height: 1;
 }
-.ui-ap__btn--primary .ui-ap__kbd {
-  background: var(--ui-ap-primary-kbd);
-  color: var(--ui-ap-primary-kbd-ink);
+.ui-apc__btn--primary .ui-apc__kbd {
+  background: var(--ui-apc-primary-kbd);
+  color: var(--ui-apc-primary-kbd-ink);
 }
-.ui-ap__spinner {
+.ui-apc__spinner {
   width: 20px;
   height: 14px;
   fill: none;
@@ -971,39 +968,39 @@ const css = /* css */ `
   stroke-linecap: round;
   stroke-dasharray: 26 38;
   transform-origin: 50% 50%;
-  animation: ui-ap-spin 800ms linear infinite;
+  animation: ui-apc-spin 800ms linear infinite;
 }
 
 /* ---------- Resolved row ---------- */
-.ui-ap__resolved {
+.ui-apc__resolved {
   display: flex;
   align-items: center;
   gap: 10px;
   min-height: 48px;
   padding: 12px 14px;
   outline: none;
-  animation: ui-ap-in 420ms var(--ui-ap-ease) 120ms both;
+  animation: ui-apc-in 420ms var(--ui-apc-ease) 120ms both;
 }
-.ui-ap__resolved:focus-visible {
-  outline: 2px solid var(--ui-ap-focus);
+.ui-apc__resolved:focus-visible {
+  outline: 2px solid var(--ui-apc-focus);
   outline-offset: -2px;
 }
-.ui-ap__mark {
+.ui-apc__mark {
   display: grid;
   flex: none;
   place-items: center;
   width: 22px;
   height: 22px;
   border-radius: 50%;
-  background: var(--ui-ap-ok-bg);
-  color: var(--ui-ap-ok-ink);
-  animation: ui-ap-pop 460ms var(--ui-ap-ease) 140ms both;
+  background: var(--ui-apc-ok-bg);
+  color: var(--ui-apc-ok-ink);
+  animation: ui-apc-pop 460ms var(--ui-apc-ease) 140ms both;
 }
-.ui-ap__resolved[data-status="denied"] .ui-ap__mark {
-  background: var(--ui-ap-no-bg);
-  color: var(--ui-ap-no-ink);
+.ui-apc__resolved[data-status="denied"] .ui-apc__mark {
+  background: var(--ui-apc-no-bg);
+  color: var(--ui-apc-no-ink);
 }
-.ui-ap__mark svg {
+.ui-apc__mark svg {
   width: 14px;
   height: 14px;
   fill: none;
@@ -1012,28 +1009,28 @@ const css = /* css */ `
   stroke-linecap: round;
   stroke-linejoin: round;
 }
-.ui-ap__mark path {
+.ui-apc__mark path {
   stroke-dasharray: 1;
   stroke-dashoffset: 1;
-  animation: ui-ap-draw 420ms var(--ui-ap-ease) 300ms forwards;
+  animation: ui-apc-draw 420ms var(--ui-apc-ease) 300ms forwards;
 }
-.ui-ap__row-title {
+.ui-apc__row-title {
   flex: 1 1 auto;
   min-width: 0;
   overflow: hidden;
-  color: var(--ui-ap-ink);
+  color: var(--ui-apc-ink);
   font-size: 13.5px;
   font-weight: 500;
   white-space: nowrap;
   text-overflow: ellipsis;
 }
-.ui-ap__row-status {
+.ui-apc__row-status {
   flex: none;
-  color: var(--ui-ap-muted);
+  color: var(--ui-apc-muted);
   white-space: nowrap;
 }
 
-.ui-ap__sr {
+.ui-apc__sr {
   position: absolute;
   width: 1px;
   height: 1px;
@@ -1047,71 +1044,71 @@ const css = /* css */ `
 
 /* Narrow cards: buttons share the full width, the hints go */
 @container (max-width: 400px) {
-  .ui-ap__actions {
+  .ui-apc__actions {
     flex: 1 1 100%;
     margin-left: 0;
   }
-  .ui-ap__foot {
+  .ui-apc__foot {
     padding-left: 2px;
   }
-  .ui-ap__expires {
+  .ui-apc__expires {
     padding-left: 8px;
   }
   /* Equal widths – unless a long label needs more, then it takes a row of its own */
-  .ui-ap__actions .ui-ap__btn {
+  .ui-apc__actions .ui-apc__btn {
     flex: 1 1 0;
     padding: 0 10px;
   }
-  .ui-ap__kbd {
+  .ui-apc__kbd {
     display: none;
   }
 }
 @container (max-width: 340px) {
-  .ui-ap__pending > .ui-ap__card { padding: 14px; }
-  .ui-ap__head { gap: 10px; }
-  .ui-ap__risk-word { display: none; }
-  .ui-ap__row-time { display: none; }
-  .ui-ap__details { column-gap: 12px; }
+  .ui-apc__pending > .ui-apc__card { padding: 14px; }
+  .ui-apc__head { gap: 10px; }
+  .ui-apc__risk-word { display: none; }
+  .ui-apc__row-time { display: none; }
+  .ui-apc__details { column-gap: 12px; }
 }
 /* Touch screens have no shortcuts */
 @media (hover: none) {
-  .ui-ap__kbd { display: none; }
+  .ui-apc__kbd { display: none; }
 }
 
-@keyframes ui-ap-out {
+@keyframes ui-apc-out {
   to { opacity: 0; transform: translateY(-6px) scale(0.985); filter: blur(2px); }
 }
-@keyframes ui-ap-in {
+@keyframes ui-apc-in {
   from { opacity: 0; transform: translateY(4px); filter: blur(2px); }
   to { opacity: 1; transform: none; filter: none; }
 }
-@keyframes ui-ap-pop {
+@keyframes ui-apc-pop {
   from { opacity: 0; transform: scale(0.5); }
   to { opacity: 1; transform: none; }
 }
-@keyframes ui-ap-draw {
+@keyframes ui-apc-draw {
   to { stroke-dashoffset: 0; }
 }
-@keyframes ui-ap-spin {
+@keyframes ui-apc-spin {
   to { transform: rotate(360deg); }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .ui-ap,
-  .ui-ap *,
-  .ui-ap *::before,
-  .ui-ap *::after {
+  .ui-apc,
+  .ui-apc *,
+  .ui-apc *::before,
+  .ui-apc *::after {
     animation-duration: 1ms !important;
     animation-delay: 0ms !important;
     transition-duration: 1ms !important;
   }
-  .ui-ap__spinner { animation: ui-ap-spin 1.6s linear infinite !important; }
-  .ui-ap__mark path { stroke-dashoffset: 0; }
+  .ui-apc__spinner { animation: ui-apc-spin 1.6s linear infinite !important; }
+  .ui-apc__mark path { stroke-dashoffset: 0; }
 }
 
 /* Dark mode: follows a .dark class or data-theme="dark" on any ancestor, e.g. <html> */
-:where(.dark, [data-theme="dark"]) .ui-ap {
+:where(.dark, [data-theme="dark"]) .ui-apc {
   /* Steve: the colors above follow tokens that already switch with dark mode */
-  --ui-ap-box-hover: rgba(255, 255, 255, 0.32);
+  --ui-apc-box-hover: rgba(255, 255, 255, 0.32);
 }
 `;

@@ -24,31 +24,31 @@ try {
   for (const theme of ["dark", "light"]) {
     /* a laptop: the pill is a row in the sidebar, and the page header has none */
     const { page, posts } = await open(1440, theme)
-    const side = page.locator("[data-sidebar-running] .ui-rn__trigger")
+    const side = page.locator("[data-sidebar-running] .ui-rnc__trigger")
     await side.waitFor()
     assert.equal(await page.locator(".steve-rn-head:visible").count(), 0, "no second pill in the header beside the sidebar")
     // the same counts as the items page: one in progress, one waiting on you; paused items are under the pill, not in its count
     assert.equal((await side.innerText()).replace(/\s+/g, " ").trim(), "1 进行中 · 1 等你")
     await side.click()
-    const pill = page.locator("[data-sidebar-running]"), rows = pill.locator(".ui-rn__row")
+    const pill = page.locator("[data-sidebar-running]"), rows = pill.locator(".ui-rnc__row")
     assert.deepEqual(await rows.evaluateAll((rs) => rs.map((r) => [r.dataset.id, r.dataset.state])), [["ST-53", "needs-you"], ["ST-48", "running"], ["ST-7", "paused"], ["ST-10", "paused"]], "what needs you, then what runs, then what is paused; nothing done")
     // a paused graph is opened, not resumed here, and is announced as paused, not as waiting on you
-    const graph = pill.locator('.ui-rn__row[data-id="ST-10"] .ui-rn__act button')
+    const graph = pill.locator('.ui-rnc__row[data-id="ST-10"] .ui-rnc__act button')
     assert.equal(await graph.innerText(), "打开")
     assert.match(await graph.getAttribute("aria-label"), /已暂停$/)
     // Pause and Resume post the item's action
-    await pill.locator('.ui-rn__row[data-id="ST-48"] .ui-rn__act button').click()
-    await pill.locator('.ui-rn__row[data-id="ST-7"] .ui-rn__act button').click()
+    await pill.locator('.ui-rnc__row[data-id="ST-48"] .ui-rnc__act button').click()
+    await pill.locator('.ui-rnc__row[data-id="ST-7"] .ui-rnc__act button').click()
     await page.waitForTimeout(100)
     assert.deepEqual(posts, [["/api/items/ST-48/actions", { action: "pause" }], ["/api/items/ST-7/actions", { action: "resume" }]])
     // Open leads to the item and closes the pill; 全部事项 to the items
-    await pill.locator('.ui-rn__row[data-id="ST-53"] .ui-rn__act button').click()
+    await pill.locator('.ui-rnc__row[data-id="ST-53"] .ui-rnc__act button').click()
     assert.equal(new URL(page.url()).hash, "#/items/ST-53")
-    assert.equal(await page.locator(".ui-rn__panel:visible").count(), 0)
+    assert.equal(await page.locator(".ui-rnc__panel:visible").count(), 0)
     await side.click()
-    await pill.locator(".ui-rn__all").click()
+    await pill.locator(".ui-rnc__all").click()
     assert.equal(new URL(page.url()).hash, "#/items")
-    assert.equal(await page.locator(".ui-rn__panel:visible").count(), 0)
+    assert.equal(await page.locator(".ui-rnc__panel:visible").count(), 0)
     // the sidebar's 事项 carries no count of its own (the pill says what runs); 待处理 keeps its count of open cards
     assert.equal(await page.locator('[data-nav="items"]').locator("xpath=..").locator('[data-sidebar="menu-badge"]').count(), 0)
     assert.equal((await page.locator('[data-nav="inbox"]').locator("xpath=..").locator('[data-sidebar="menu-badge"]').innerText()).trim(), "1")
@@ -57,7 +57,7 @@ try {
 
     /* a phone: the sidebar is away, so the pill sits in the page header; with nothing open, nothing there */
     const phone = (await open(390, theme)).page
-    const head = phone.locator(".steve-rn-head .ui-rn__trigger")
+    const head = phone.locator(".steve-rn-head .ui-rnc__trigger")
     await head.waitFor()
     assert.ok(await head.isVisible(), "the page header carries the pill on a phone")
     const hb = await head.boundingBox()

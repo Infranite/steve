@@ -4,11 +4,11 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 
 /*
- * Thinking Loader – a small "the model is working" pill, in a single self-contained file.
- * A spinner of eight rays and a label with a light sweeping over it. The label walks through
- * phases (Thinking → Searching the web → …): the old one rolls up and blurs out, the new one
- * rolls in, and the pill glides to its new width. When done, the spinner turns into a check
- * and the label settles on "Thought for 6s".
+ * Thinking Loader (clean style) – a small "the model is working" chip, in a single self-contained file.
+ * One white chip with hairline shadows, a thin eight-ray spinner in the accent blue and a quiet gray
+ * label with a darker band sweeping over it. The label walks through phases (Thinking → Searching
+ * the web → …): the old one rolls up and blurs out, the new one rolls in, and the chip glides to its
+ * new width. When done, the spinner turns into a check and the label settles on "Thought for 6s".
  * The styles are injected below, so no extra files are needed.
  */
 
@@ -144,7 +144,7 @@ export function ThinkingLoader({
   return (
     <span
       ref={root}
-      className={["ui-tl", className].filter(Boolean).join(" ")}
+      className={["ui-tlc", className].filter(Boolean).join(" ")}
       data-size={size}
       data-variant={variant}
       data-done={done || undefined}
@@ -152,12 +152,12 @@ export function ThinkingLoader({
       aria-live="polite"
     >
       {/* React 19 hoists this into <head> once, no matter how many loaders render */}
-      <style href="ui-thinking-loader" precedence="default">
+      <style href="ui-thinking-loader-clean" precedence="default">
         {css}
       </style>
 
-      <span className="ui-tl__icon" aria-hidden="true">
-        <svg className="ui-tl__spinner" viewBox="0 0 16 16">
+      <span className="ui-tlc__icon" aria-hidden="true">
+        <svg className="ui-tlc__spinner" viewBox="0 0 16 16">
           {RAYS.map((i) => (
             <line
               key={i}
@@ -170,16 +170,16 @@ export function ThinkingLoader({
             />
           ))}
         </svg>
-        <svg className="ui-tl__check" viewBox="0 0 16 16">
+        <svg className="ui-tlc__check" viewBox="0 0 16 16">
           <path d="M3.5 8.4 6.6 11.3 12.5 4.9" pathLength={1} />
         </svg>
       </span>
 
-      <span ref={box} className="ui-tl__text">
+      <span ref={box} className="ui-tlc__text">
         {leaving && (
           <span
             key={leaving.key}
-            className="ui-tl__label ui-tl__label--out"
+            className="ui-tlc__label ui-tlc__label--out"
             aria-hidden="true"
             dir="auto"
             onAnimationEnd={() => setLeaving(null)}
@@ -190,7 +190,7 @@ export function ThinkingLoader({
         <span
           key={shown.key}
           ref={current}
-          className={["ui-tl__label", shown.key > 0 && "ui-tl__label--in", !done && "ui-tl__shine"].filter(Boolean).join(" ")}
+          className={["ui-tlc__label", shown.key > 0 && "ui-tlc__label--in", !done && "ui-tlc__shine"].filter(Boolean).join(" ")}
           data-text={shown.text}
           title={shown.text}
           dir="auto"
@@ -203,176 +203,181 @@ export function ThinkingLoader({
 }
 
 const css = /* css */ `
-.ui-tl {
+.ui-tlc {
   /* Steve: colors from Steve's tokens, which switch between light and dark themselves */
-  --ui-tl-ink: var(--aui-ink);
-  --ui-tl-text: var(--aui-muted);
-  --ui-tl-ray: var(--aui-ink);
-  --ui-tl-bg: var(--aui-surface);
-  --ui-tl-line: var(--aui-border);
-  --ui-tl-shine: color-mix(in srgb, var(--aui-surface) 85%, transparent);
-  --ui-tl-done: var(--aui-success);
-  --ui-tl-ease: var(--aui-ease, cubic-bezier(0.22, 1, 0.36, 1));
-  --ui-tl-h: 34px;
-  --ui-tl-font: 14px;
-  --ui-tl-icon: 15px;
+  --ui-tlc-ink: var(--aui-ink);
+  --ui-tlc-text: var(--aui-muted);
+  --ui-tlc-accent: var(--aui-blue);
+  --ui-tlc-bg: var(--aui-surface);
+  --ui-tlc-shadow: var(--aui-shadow-card);
+  --ui-tlc-shine: color-mix(in srgb, var(--aui-surface) 85%, transparent);
+  --ui-tlc-done: var(--aui-success);
+  --ui-tlc-ease: var(--aui-ease, cubic-bezier(0.22, 1, 0.36, 1));
+  --ui-tlc-h: 32px;
+  --ui-tlc-font: 13px;
+  --ui-tlc-lh: 20px;
+  --ui-tlc-icon: 16px;
   display: inline-flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
   box-sizing: border-box;
-  height: var(--ui-tl-h);
-  padding: 0 15px 0 12px;
-  border-radius: 999px;
-  background: var(--ui-tl-bg);
-  box-shadow: var(--aui-shadow-card, inset 0 0 0 1px var(--ui-tl-line), 0 1px 2px rgba(0, 0, 0, 0.04));
-  color: var(--ui-tl-text);
-  font-family: var(--aui-font, "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif);
-  font-size: var(--ui-tl-font);
-  font-weight: 450;
-  line-height: 1;
-  letter-spacing: -0.006em;
+  height: var(--ui-tlc-h);
+  padding: 0 10px 0 8px;
+  border-radius: calc(var(--aui-radius, 7px) + 1px);
+  background: var(--ui-tlc-bg);
+  box-shadow: var(--ui-tlc-shadow);
+  color: var(--ui-tlc-text);
+  font-family: var(--aui-font, "Inter", "InterVariable", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif);
+  font-size: var(--ui-tlc-font);
+  font-weight: 500;
+  line-height: var(--ui-tlc-lh);
+  letter-spacing: -0.003em;
   max-width: 100%;
   vertical-align: middle;
   -webkit-font-smoothing: antialiased;
 }
-.ui-tl[data-size="sm"] {
-  --ui-tl-h: 28px;
-  --ui-tl-font: 13px;
-  --ui-tl-icon: 13px;
-  gap: 7px;
-  padding: 0 12px 0 10px;
+.ui-tlc[data-size="sm"] {
+  --ui-tlc-h: 26px;
+  --ui-tlc-font: 12px;
+  --ui-tlc-lh: 16px;
+  --ui-tlc-icon: 14px;
+  gap: 5px;
+  padding: 0 8px 0 6px;
+  border-radius: calc(var(--aui-radius, 7px) - 1px);
 }
-.ui-tl[data-variant="plain"] {
+.ui-tlc[data-variant="plain"] {
+  height: auto;
   padding: 0;
   background: none;
   box-shadow: none;
 }
 
 /* Spinner and check share one square and swap with a little scale */
-.ui-tl__icon {
+.ui-tlc__icon {
   position: relative;
   flex: none;
-  width: var(--ui-tl-icon);
-  height: var(--ui-tl-icon);
+  width: var(--ui-tlc-icon);
+  height: var(--ui-tlc-icon);
 }
-.ui-tl__icon svg {
+.ui-tlc__icon svg {
   position: absolute;
   inset: 0;
   width: 100%;
   height: 100%;
   overflow: visible;
-  transition: opacity 240ms ease, transform 420ms var(--ui-tl-ease);
+  transition: opacity 240ms ease, transform 420ms var(--ui-tlc-ease);
 }
-.ui-tl__spinner line {
-  stroke: var(--ui-tl-ray);
-  stroke-width: 1.6;
+/* Thin rays in the accent blue – they fade one after another, so the spinner turns without rotating */
+.ui-tlc__spinner line {
+  stroke: var(--ui-tlc-accent);
+  stroke-width: 1.1;
   stroke-linecap: round;
-  opacity: 0.18;
-  animation: ui-tl-ray 800ms linear infinite;
+  opacity: 0.2;
+  animation: ui-tlc-ray 800ms linear infinite;
 }
-.ui-tl__check {
+.ui-tlc__check {
   opacity: 0;
   transform: scale(0.6);
   fill: none;
-  stroke: var(--ui-tl-done);
-  stroke-width: 1.8;
+  stroke: var(--ui-tlc-done, var(--ui-tlc-accent));
+  stroke-width: 1.2;
   stroke-linecap: round;
   stroke-linejoin: round;
 }
-.ui-tl__check path {
+.ui-tlc__check path {
   stroke-dasharray: 1;
   stroke-dashoffset: 1;
 }
-.ui-tl[data-done] .ui-tl__spinner {
+.ui-tlc[data-done] .ui-tlc__spinner {
   opacity: 0;
   transform: scale(0.6) rotate(-45deg);
 }
-.ui-tl[data-done] .ui-tl__check {
+.ui-tlc[data-done] .ui-tlc__check {
   opacity: 1;
   transform: none;
 }
-.ui-tl[data-done] .ui-tl__check path {
-  animation: ui-tl-draw 360ms var(--ui-tl-ease) 120ms forwards;
+.ui-tlc[data-done] .ui-tlc__check path {
+  animation: ui-tlc-draw 360ms var(--ui-tlc-ease) 120ms forwards;
 }
 
 /* The text box glides to the width of the incoming label; labels roll through it */
 /* min-width 0: in a narrow container the box gives way and the label ends in "…" */
-.ui-tl__text {
+.ui-tlc__text {
   position: relative;
   display: block;
   min-width: 0;
-  height: 1.3em;
+  height: var(--ui-tlc-lh);
   overflow: hidden;
-  transition: width 460ms var(--ui-tl-ease);
+  transition: width 460ms var(--ui-tlc-ease);
 }
-.ui-tl__label {
+.ui-tlc__label {
   position: absolute;
   top: 0;
   left: 0;
-  line-height: 1.3em;
+  line-height: var(--ui-tlc-lh);
   white-space: nowrap;
 }
-.ui-tl[data-cut] .ui-tl__label {
+.ui-tlc[data-cut] .ui-tlc__label {
   max-width: 100%;
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.ui-tl[data-done] .ui-tl__label {
-  color: var(--ui-tl-ink);
+.ui-tlc[data-done] .ui-tlc__label {
+  color: var(--ui-tlc-ink);
 }
-.ui-tl__label--in {
-  animation: ui-tl-in 460ms var(--ui-tl-ease) both;
+.ui-tlc__label--in {
+  animation: ui-tlc-in 460ms var(--ui-tlc-ease) both;
 }
-.ui-tl__label--out {
-  animation: ui-tl-out 320ms var(--ui-tl-ease) both;
+.ui-tlc__label--out {
+  animation: ui-tlc-out 320ms var(--ui-tlc-ease) both;
 }
 
-/* A soft light sweeping over the label while it works */
-.ui-tl__shine::after {
+/* A darker band sweeping through the gray label while it works */
+.ui-tlc__shine::after {
   content: attr(data-text);
   content: attr(data-text) / "";
   position: absolute;
   inset: 0;
   white-space: nowrap;
   color: transparent;
-  background: linear-gradient(90deg, transparent 38%, var(--ui-tl-shine) 50%, transparent 62%) 100% 0 / 300% 100% no-repeat;
+  background: linear-gradient(90deg, transparent 38%, var(--ui-tlc-shine) 50%, transparent 62%) 100% 0 / 300% 100% no-repeat;
   -webkit-background-clip: text;
   background-clip: text;
-  animation: ui-tl-sweep 1.8s linear infinite;
+  animation: ui-tlc-sweep 1.6s linear infinite;
   pointer-events: none;
 }
 
-@keyframes ui-tl-ray {
+@keyframes ui-tlc-ray {
   0% { opacity: 1; }
-  100% { opacity: 0.18; }
+  100% { opacity: 0.2; }
 }
-@keyframes ui-tl-in {
+@keyframes ui-tlc-in {
   from { opacity: 0; transform: translateY(70%); filter: blur(3px); }
   to { opacity: 1; transform: none; filter: none; }
 }
-@keyframes ui-tl-out {
+@keyframes ui-tlc-out {
   from { opacity: 1; transform: none; filter: none; }
   to { opacity: 0; transform: translateY(-70%); filter: blur(3px); }
 }
-@keyframes ui-tl-draw {
+@keyframes ui-tlc-draw {
   to { stroke-dashoffset: 0; }
 }
-@keyframes ui-tl-sweep {
+@keyframes ui-tlc-sweep {
   from { background-position: 100% 0; }
   to { background-position: 0% 0; }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .ui-tl *,
-  .ui-tl *::after {
+  .ui-tlc *,
+  .ui-tlc *::after {
     animation-duration: 1ms !important;
     animation-delay: 0ms !important;
     animation-iteration-count: 1 !important;
     transition-duration: 1ms !important;
   }
-  .ui-tl__spinner line { opacity: 0.6; }
-  .ui-tl__shine::after { display: none; }
-  .ui-tl__check path { stroke-dashoffset: 0; }
+  .ui-tlc__spinner line { opacity: 0.6; }
+  .ui-tlc__shine::after { display: none; }
+  .ui-tlc__check path { stroke-dashoffset: 0; }
 }
 
 /* Steve: dark mode comes with the tokens above */

@@ -4,8 +4,10 @@
 import { Fragment, useEffect, useId, useRef, useState, type KeyboardEvent, type ReactNode, type Ref } from "react";
 
 /*
- * Message Actions – the small bar under an AI chat message, in one self-contained file.
- *   · Copy: the icon turns into a check and the tooltip says "Copied"
+ * Message Actions (Clean) – the small bar under an AI chat message, in one self-contained file.
+ * Clean style: ghost icon buttons with thin or solid 16px glyphs, a pressed action takes the selected-tab look,
+ * the feedback reasons are tab buttons and Send is the dark chip. Made to sit as the last row of a white card.
+ *   · Copy: the icon turns into a green check and the tooltip says "Copied"
  *   · Regenerate: the arrow spins once; with more than one version a "‹ 2 / 3 ›" switcher unfolds next to it
  *   · Thumbs up / down fill with a little pop; thumbs down unfolds a short feedback row with reasons and a send button
  *   · Read aloud: the speaker becomes a tiny equalizer while it plays, a second press stops it
@@ -81,13 +83,13 @@ function Swap({ id, children, className }: { id: string; children: ReactNode; cl
     return () => window.clearTimeout(timer);
   }, [out]);
   return (
-    <span className={["ui-ma__swap", className].filter(Boolean).join(" ")}>
+    <span className={["ui-mac__swap", className].filter(Boolean).join(" ")}>
       {out && (
-        <span key={`out-${out.id}`} className="ui-ma__swap-item" data-out="" aria-hidden="true">
+        <span key={`out-${out.id}`} className="ui-mac__swap-item" data-out="" aria-hidden="true">
           {out.node}
         </span>
       )}
-      <span key={id} className="ui-ma__swap-item">
+      <span key={id} className="ui-mac__swap-item">
         {children}
       </span>
     </span>
@@ -109,12 +111,12 @@ export function MessageText({ version, children, className }: { version: string 
     return () => ro.disconnect();
   }, []);
   return (
-    <div className={["ui-ma-text", className].filter(Boolean).join(" ")} style={{ height }}>
-      <style href="ui-message-actions" precedence="default">
+    <div className={["ui-mac-text", className].filter(Boolean).join(" ")} style={{ height }}>
+      <style href="ui-message-actions-clean" precedence="default">
         {css}
       </style>
-      <div ref={inner} className="ui-ma-text__inner" dir="auto">
-        <Swap id={String(version)} className="ui-ma-text__swap">
+      <div ref={inner} className="ui-mac-text__inner" dir="auto">
+        <Swap id={String(version)} className="ui-mac-text__swap">
           {children}
         </Swap>
       </div>
@@ -124,20 +126,26 @@ export function MessageText({ version, children, className }: { version: string 
 
 /* ---------- Icons ---------- */
 
-const Glyph = ({ d }: { d: string }) => (
-  <svg viewBox="0 0 24 24" className="ui-ma__glyph" aria-hidden="true">
+const Glyph = ({ d, solid }: { d: string; solid?: boolean }) => (
+  <svg viewBox="0 0 16 16" className="ui-mac__glyph" data-solid={solid || undefined} aria-hidden="true">
     <path d={d} />
   </svg>
 );
+/** The speaker: a solid body with two thin sound waves */
+const Speaker = () => (
+  <svg viewBox="0 0 16 16" className="ui-mac__glyph" aria-hidden="true">
+    <path className="ui-mac__fill" d="M7.4 3.2a.6.6 0 0 1 1 .46v8.68a.6.6 0 0 1-1 .46L4.6 10.5H3A1.5 1.5 0 0 1 1.5 9V7A1.5 1.5 0 0 1 3 5.5h1.6l2.8-2.3Z" />
+    <path d="M10.6 6.2a2.6 2.6 0 0 1 0 3.6M12.4 4.4a5.2 5.2 0 0 1 0 7.2" />
+  </svg>
+);
 const icons = {
-  copy: "M9 9.5A1.5 1.5 0 0 1 10.5 8h8A1.5 1.5 0 0 1 20 9.5v9a1.5 1.5 0 0 1-1.5 1.5h-8A1.5 1.5 0 0 1 9 18.5zM15 8V5.5A1.5 1.5 0 0 0 13.5 4h-8A1.5 1.5 0 0 0 4 5.5v9A1.5 1.5 0 0 0 5.5 16H9",
-  check: "M5.5 12.5l4.2 4.2L18.5 7.8",
-  redo: "M19.5 12a7.5 7.5 0 1 1-2.2-5.3L19.5 9M19.5 4.5V9H15",
-  thumb: "M7.5 10.5v9M7.5 10.5l3.3-6a1.8 1.8 0 0 1 3.3 1.2l-.6 3.8H18a2 2 0 0 1 2 2.3l-1.2 6.4a2 2 0 0 1-2 1.8H5a1 1 0 0 1-1-1v-7.5a1 1 0 0 1 1-1z",
-  speaker: "M11 5.5 6.8 9H4v6h2.8l4.2 3.5zM15.2 9.2a4 4 0 0 1 0 5.6M17.9 6.6a7.8 7.8 0 0 1 0 10.8",
-  prev: "m14.5 7-5 5 5 5",
-  next: "m9.5 7 5 5-5 5",
-  close: "m7.5 7.5 9 9m0-9-9 9",
+  copy: "M5.5 2A1.5 1.5 0 0 0 4 3.5V4h5A3 3 0 0 1 12 7v5h.5a1.5 1.5 0 0 0 1.5-1.5v-7A1.5 1.5 0 0 0 12.5 2h-7ZM3.5 5A1.5 1.5 0 0 0 2 6.5v6A1.5 1.5 0 0 0 3.5 14H9a1.5 1.5 0 0 0 1.5-1.5v-6A1.5 1.5 0 0 0 9 5H3.5Z",
+  check: "M1.5 8a6.5 6.5 0 1 1 13 0 6.5 6.5 0 0 1-13 0Zm8.9-1.2a.5.5 0 0 0-.8-.6L7.44 9.23 6.35 8.15a.5.5 0 1 0-.7.7l1.5 1.5a.5.5 0 0 0 .76-.06l2.5-3.5Z",
+  tick: "M3.5 8.5 6.5 11.5 12.5 4.5",
+  redo: "M13 8a5 5 0 1 1-1.46-3.54M13 2.5v2.5h-2.5",
+  thumb: "M4.5 7v6.5H3a1 1 0 0 1-1-1V8a1 1 0 0 1 1-1h1.5Zm1 6.5h5.95a1.5 1.5 0 0 0 1.47-1.2l.86-4.3A1.5 1.5 0 0 0 12.31 6.2H9.5l.42-2.08A1.4 1.4 0 0 0 7.3 3.1L5.5 6.8v6.7Z",
+  next: "M10.85 7.65a.5.5 0 0 1 0 .7L7.2 12a.5.5 0 0 1-.7-.7L9.79 8 6.5 4.7a.5.5 0 1 1 .7-.7l3.65 3.65Z",
+  close: "m4.5 4.5 7 7m0-7-7 7",
 };
 
 const DEFAULT_ACTIONS: MessageActionKey[] = ["copy", "regenerate", "feedback", "speak"];
@@ -313,11 +321,11 @@ export function MessageActions({
     controls?: string;
     refEl?: Ref<HTMLButtonElement>;
   }) => (
-    <span className="ui-ma__item" key={o.key} data-flash={o.flash ? "" : undefined}>
+    <span className="ui-mac__item" key={o.key} data-flash={o.flash ? "" : undefined}>
       <button
         ref={o.refEl}
         type="button"
-        className={`ui-ma__btn ui-ma__btn--${o.key}`}
+        className={`ui-mac__btn ui-mac__btn--${o.key}`}
         aria-label={o.labelText}
         aria-pressed={o.pressed}
         aria-expanded={o.expanded}
@@ -327,7 +335,7 @@ export function MessageActions({
       >
         {o.children}
       </button>
-      <span className="ui-ma__tip" aria-hidden="true">
+      <span className="ui-mac__tip" aria-hidden="true">
         <Swap id={o.tip}>{o.tip}</Swap>
       </span>
     </span>
@@ -343,19 +351,19 @@ export function MessageActions({
         flash: Boolean(copied),
         extra: { "data-done": copied ? "" : undefined },
         children: (
-          <span className="ui-ma__icon ui-ma__morph">
-            <span className="ui-ma__layer" data-on={copied ? undefined : ""}>
-              <Glyph d={icons.copy} />
+          <span className="ui-mac__icon ui-mac__morph">
+            <span className="ui-mac__layer" data-on={copied ? undefined : ""}>
+              <Glyph d={icons.copy} solid />
             </span>
-            <span className="ui-ma__layer ui-ma__layer--check" data-on={copied ? "" : undefined}>
-              <Glyph d={icons.check} />
+            <span className="ui-mac__layer ui-mac__layer--check" data-on={copied ? "" : undefined}>
+              <Glyph d={icons.check} solid />
             </span>
           </span>
         ),
       });
     if (key === "regenerate")
       return (
-        <span className="ui-ma__regen" key="regenerate">
+        <span className="ui-mac__regen" key="regenerate">
           {button({
             key: "regenerate",
             tip: regenerating ? "Writing…" : "Regenerate",
@@ -363,27 +371,27 @@ export function MessageActions({
             onClick: regenerate,
             extra: { "data-busy": regenerating ? "" : undefined },
             children: (
-              <span className="ui-ma__icon">
-                <span className="ui-ma__spin" key={spin} data-spin={spin ? "" : undefined}>
+              <span className="ui-mac__icon">
+                <span className="ui-mac__spin" key={spin} data-spin={spin ? "" : undefined}>
                   <Glyph d={icons.redo} />
                 </span>
               </span>
             ),
           })}
-          <span className="ui-ma__versions" data-open={count > 1 ? "" : undefined} inert={count < 2}>
-            <span className="ui-ma__versions-clip" role="group" aria-label="Versions">
+          <span className="ui-mac__versions" data-open={count > 1 ? "" : undefined} inert={count < 2}>
+            <span className="ui-mac__versions-clip" role="group" aria-label="Versions">
               <button
                 type="button"
-                className="ui-ma__step"
+                className="ui-mac__step"
                 data-dir="prev"
                 aria-label="Previous version"
                 disabled={index === 0}
                 onClick={() => goTo(index - 1)}
               >
-                <Glyph d={icons.prev} />
+                <Glyph d={icons.next} solid />
               </button>
-              <span className="ui-ma__count" aria-label={`Version ${fmt(index + 1)} of ${fmt(count)}`}>
-                <Swap id={String(index)} className="ui-ma__count-now">
+              <span className="ui-mac__count" aria-label={`Version ${fmt(index + 1)} of ${fmt(count)}`}>
+                <Swap id={String(index)} className="ui-mac__count-now">
                   {fmt(index + 1)}
                 </Swap>
                 <span aria-hidden="true">/</span>
@@ -391,13 +399,13 @@ export function MessageActions({
               </span>
               <button
                 type="button"
-                className="ui-ma__step"
+                className="ui-mac__step"
                 data-dir="next"
                 aria-label="Next version"
                 disabled={index >= count - 1}
                 onClick={() => goTo(index + 1)}
               >
-                <Glyph d={icons.next} />
+                <Glyph d={icons.next} solid />
               </button>
             </span>
           </span>
@@ -413,8 +421,8 @@ export function MessageActions({
           pressed: vote === "up",
           onClick: thumbsUp,
           children: (
-            <span className="ui-ma__icon ui-ma__thumb">
-              <Glyph d={icons.thumb} />
+            <span className="ui-mac__icon ui-mac__thumb">
+              <Glyph d={icons.thumb} solid />
             </span>
           ),
         })}
@@ -428,8 +436,8 @@ export function MessageActions({
           onClick: thumbsDown,
           refEl: downRef,
           children: (
-            <span className="ui-ma__icon ui-ma__thumb">
-              <Glyph d={icons.thumb} />
+            <span className="ui-mac__icon ui-mac__thumb">
+              <Glyph d={icons.thumb} solid />
             </span>
           ),
         })}
@@ -442,11 +450,11 @@ export function MessageActions({
       pressed: playing,
       onClick: speak,
       children: (
-        <span className="ui-ma__icon ui-ma__morph">
-          <span className="ui-ma__layer" data-on={playing ? undefined : ""}>
-            <Glyph d={icons.speaker} />
+        <span className="ui-mac__icon ui-mac__morph">
+          <span className="ui-mac__layer" data-on={playing ? undefined : ""}>
+            <Speaker />
           </span>
-          <span className="ui-ma__layer ui-ma__eq" data-on={playing ? "" : undefined}>
+          <span className="ui-mac__layer ui-mac__eq" data-on={playing ? "" : undefined}>
             <i />
             <i />
             <i />
@@ -466,39 +474,39 @@ export function MessageActions({
 
   return (
     <div
-      className={["ui-ma", className].filter(Boolean).join(" ")}
+      className={["ui-mac", className].filter(Boolean).join(" ")}
       data-quiet={quiet ? "" : undefined}
       data-active={active ? "" : undefined}
     >
-      <style href="ui-message-actions" precedence="default">
+      <style href="ui-message-actions-clean" precedence="default">
         {css}
       </style>
 
-      <div className="ui-ma__bar" role="group" aria-label={label}>
+      <div className="ui-mac__bar" role="group" aria-label={label}>
         {parts}
         {more.map((m) =>
-          button({ key: m.key, tip: m.label, labelText: m.label, onClick: m.onClick, extra: { ...m.attrs, disabled: m.disabled }, children: <span className="ui-ma__icon">{m.icon}</span> }),
+          button({ key: m.key, tip: m.label, labelText: m.label, onClick: m.onClick, extra: { ...m.attrs, disabled: m.disabled }, children: <span className="ui-mac__icon">{m.icon}</span> }),
         )}
       </div>
 
       {actions.includes("feedback") && (
-        <div id={`${uid}-feedback`} className="ui-ma__fold" data-open={panel ? "" : undefined} inert={!panel}>
-          <div className="ui-ma__clip">
-            <div className="ui-ma__panel" role="group" aria-labelledby={`${uid}-ask`} onKeyDown={onPanelKey}>
-              <div className="ui-ma__panel-head">
-                <span id={`${uid}-ask`} className="ui-ma__ask">
+        <div id={`${uid}-feedback`} className="ui-mac__fold" data-open={panel ? "" : undefined} inert={!panel}>
+          <div className="ui-mac__clip">
+            <div className="ui-mac__panel" role="group" aria-labelledby={`${uid}-ask`} onKeyDown={onPanelKey}>
+              <div className="ui-mac__panel-head">
+                <span id={`${uid}-ask`} className="ui-mac__ask">
                   What went wrong?
                 </span>
-                <button type="button" className="ui-ma__close" aria-label="Close feedback" onClick={closePanel}>
+                <button type="button" className="ui-mac__close" aria-label="Close feedback" onClick={closePanel}>
                   <Glyph d={icons.close} />
                 </button>
               </div>
-              <div className="ui-ma__chips">
+              <div className="ui-mac__chips">
                 {(Array.isArray(reasons) ? reasons : []).map((r, i) => (
                   <button
                     key={`${r}-${i}`}
                     type="button"
-                    className="ui-ma__chip"
+                    className="ui-mac__chip"
                     aria-pressed={reason === r}
                     disabled={sent}
                     onClick={() => setReason(reason === r ? null : r)}
@@ -510,7 +518,7 @@ export function MessageActions({
                 ))}
                 <button
                   type="button"
-                  className="ui-ma__send"
+                  className="ui-mac__send"
                   data-sent={sent ? "" : undefined}
                   disabled={!reason}
                   aria-disabled={sent || undefined}
@@ -519,7 +527,7 @@ export function MessageActions({
                   <Swap id={sent ? "sent" : "send"}>
                     {sent ? (
                       <>
-                        <Glyph d={icons.check} />
+                        <Glyph d={icons.tick} />
                         Thanks!
                       </>
                     ) : (
@@ -529,10 +537,10 @@ export function MessageActions({
                 </button>
               </div>
               {Array.isArray(reasons) && reasons.includes("Other") && (
-                <div className="ui-ma__fold" data-open={reason === "Other" && !sent ? "" : undefined} inert={reason !== "Other" || sent}>
-                  <div className="ui-ma__clip">
+                <div className="ui-mac__fold" data-open={reason === "Other" && !sent ? "" : undefined} inert={reason !== "Other" || sent}>
+                  <div className="ui-mac__clip">
                     <input
-                      className="ui-ma__input"
+                      className="ui-mac__input"
                       value={other}
                       placeholder="Tell us more (optional)"
                       dir="auto"
@@ -550,7 +558,7 @@ export function MessageActions({
         </div>
       )}
 
-      <span className="ui-ma__sr" aria-live="polite">
+      <span className="ui-mac__sr" aria-live="polite">
         {status}
       </span>
     </div>
@@ -558,179 +566,190 @@ export function MessageActions({
 }
 
 const css = /* css */ `
-.ui-ma {
-  --ui-ma-card: var(--aui-surface, #ffffff);
-  --ui-ma-line: var(--aui-border, #ececec);
-  --ui-ma-ink: var(--aui-ink, #171717);
-  --ui-ma-text: var(--aui-ink, #404040);
-  --ui-ma-muted: var(--aui-muted, #8f8f8f);
-  --ui-ma-well: var(--aui-subtle, #f4f4f5);
-  --ui-ma-hover: var(--aui-subtle, rgba(23, 23, 23, 0.06));
-  --ui-ma-accent: var(--aui-blue, #4fb0fe);
-  --ui-ma-accent-bg: color-mix(in srgb, var(--aui-blue, #0190fe) 10%, transparent);
-  --ui-ma-ok: var(--aui-success, #1e8a4f);
-  --ui-ma-ok-bg: color-mix(in srgb, var(--aui-green, #5fc88a) 11%, transparent);
-  --ui-ma-tip-bg: var(--aui-ink, #171717);
-  --ui-ma-tip-text: var(--aui-surface, #ffffff);
-  --ui-ma-focus: var(--aui-focus, rgba(0, 96, 226, 0.7));
-  --ui-ma-ease: cubic-bezier(0.32, 0.72, 0.24, 1);
+/* Colors and motion as variables – override them on .ui-mac */
+.ui-mac {
+  --ui-mac-card: var(--aui-surface, #ffffff);
+  --ui-mac-strong: var(--aui-ink, #000000);
+  --ui-mac-ink: var(--aui-ink, rgba(0, 0, 0, 0.88));
+  --ui-mac-text: var(--aui-muted, rgba(0, 0, 0, 0.61));
+  --ui-mac-muted: var(--aui-muted, rgba(0, 0, 0, 0.45));
+  /* Steve: the washes mix from the ink, so they hold in light and dark */
+  --ui-mac-faint: var(--aui-placeholder, rgba(0, 0, 0, 0.27));
+  --ui-mac-icon: var(--aui-muted, rgba(0, 0, 0, 0.447));
+  --ui-mac-line: var(--aui-border, rgba(0, 0, 0, 0.06));
+  --ui-mac-fill: color-mix(in srgb, var(--aui-ink, #000) 6%, transparent);
+  --ui-mac-wash: var(--aui-subtle, rgba(0, 0, 0, 0.03));
+  --ui-mac-solid: var(--aui-primary, rgba(0, 0, 0, 0.88));
+  --ui-mac-solid-hover: color-mix(in srgb, var(--aui-primary, #000) 88%, var(--aui-ink, #000));
+  --ui-mac-on-solid: var(--aui-on-primary, #fcfcfc);
+  --ui-mac-accent: var(--aui-blue, rgba(0, 96, 226, 0.765));
+  --ui-mac-ok: var(--aui-success, #1e8a4f);
+  --ui-mac-ok-bg: color-mix(in srgb, var(--aui-green, #5fc88a) 8%, transparent);
+  /* Strokes are shadows: a 0.5px hairline plus a soft lift */
+  --ui-mac-shadow: var(--aui-shadow-card, 0 0 0 0.5px rgba(0, 0, 0, 0.06), 0 1px 1px -1px rgba(0, 0, 0, 0.1), 0 1px 2px 0 rgba(0, 0, 0, 0.05));
+  --ui-mac-shadow-pop: var(--aui-shadow-popover, 0 0 0 0.5px rgba(0, 0, 0, 0.08), 0 12px 28px -10px rgba(0, 0, 0, 0.16), 0 1px 2px 0 rgba(0, 0, 0, 0.05));
+  --ui-mac-focus: var(--aui-focus, rgba(0, 96, 226, 0.7));
+  --ui-mac-ease: var(--aui-ease, cubic-bezier(0.22, 1, 0.36, 1));
   box-sizing: border-box;
   display: block;
   width: 100%;
   min-width: 0;
   container-type: inline-size;
-  font-family: var(--aui-font, "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif);
+  font-family: var(--aui-font, "Inter", "InterVariable", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif);
   font-size: 13px;
+  font-weight: 400;
   line-height: 20px;
-  color: var(--ui-ma-text);
+  color: var(--ui-mac-ink);
   text-align: left;
   -webkit-font-smoothing: antialiased;
 }
-.ui-ma *, .ui-ma *::before, .ui-ma *::after { box-sizing: border-box; }
-:where(.ui-ma) button { margin: 0; padding: 0; border: 0; background: none; font: inherit; color: inherit; text-align: inherit; cursor: pointer; -webkit-tap-highlight-color: transparent; }
-.ui-ma button:focus-visible { outline: 2px solid var(--ui-ma-focus); outline-offset: 2px; }
+.ui-mac *, .ui-mac *::before, .ui-mac *::after { box-sizing: border-box; }
+:where(.ui-mac) button { margin: 0; padding: 0; border: 0; background: none; font: inherit; color: inherit; text-align: inherit; cursor: pointer; -webkit-tap-highlight-color: transparent; }
+.ui-mac button:focus-visible { outline: 2px solid var(--ui-mac-focus); outline-offset: 2px; }
 /* Typing in a field: no ring – the caret shows where you are, the edge only firms up a little */
-.ui-ma .ui-ma__input:is(:focus, :focus-visible) { outline: none; box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--ui-ma-ink) 14%, transparent); }
-.ui-ma svg { display: block; flex: none; }
-.ui-ma__sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+.ui-mac .ui-mac__input:is(:focus, :focus-visible) { outline: none; box-shadow: var(--ui-mac-shadow), inset 0 0 0 0.5px var(--aui-border-strong, var(--ui-mac-faint)); }
+.ui-mac svg { display: block; flex: none; }
+.ui-mac__sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 
 /* ----- The bar: quiet until the message is hovered, something inside is focused or busy ----- */
 /* Wraps to a second row in a very narrow message instead of running out of it */
-.ui-ma__bar { display: flex; flex-wrap: wrap; align-items: center; gap: 2px; min-height: 30px; transition: opacity 240ms ease; }
-.ui-ma[data-quiet] .ui-ma__bar { opacity: 0.6; }
-.ui-ma[data-quiet]:hover .ui-ma__bar,
-.ui-ma[data-quiet]:focus-within .ui-ma__bar,
-.ui-ma[data-quiet][data-active] .ui-ma__bar,
-:where([data-ui-message]:hover, [data-ui-message]:focus-within) .ui-ma[data-quiet] .ui-ma__bar { opacity: 1; }
+.ui-mac__bar { display: flex; flex-wrap: wrap; align-items: center; gap: 2px; min-height: 28px; transition: opacity 240ms ease; }
+.ui-mac[data-quiet] .ui-mac__bar { opacity: 0.6; }
+.ui-mac[data-quiet]:hover .ui-mac__bar,
+.ui-mac[data-quiet]:focus-within .ui-mac__bar,
+.ui-mac[data-quiet][data-active] .ui-mac__bar,
+:where([data-ui-message]:hover, [data-ui-message]:focus-within) .ui-mac[data-quiet] .ui-mac__bar { opacity: 1; }
 
-.ui-ma__item { position: relative; display: inline-flex; flex: none; }
-.ui-ma__btn { display: grid; place-items: center; width: 30px; height: 30px; border-radius: calc(var(--aui-radius-sm, 7px) + 1px); color: var(--ui-ma-muted); transition: background-color 160ms ease, color 160ms ease; }
-.ui-ma__btn:hover { background: var(--ui-ma-hover); color: var(--ui-ma-ink); }
-.ui-ma__btn:active .ui-ma__icon { transform: scale(0.9); }
-.ui-ma__btn[aria-pressed="true"] { color: var(--ui-ma-ink); }
-.ui-ma__btn--speak[aria-pressed="true"] { color: var(--ui-ma-accent); background: var(--ui-ma-accent-bg); }
-.ui-ma__btn--copy[data-done] { color: var(--ui-ma-ok); }
+/* Ghost icon buttons; pressed takes the selected-tab look */
+.ui-mac__item { position: relative; display: inline-flex; flex: none; }
+.ui-mac__btn { display: grid; place-items: center; width: 28px; height: 28px; border-radius: calc(var(--aui-radius-sm, 5px) + 1px); color: var(--ui-mac-icon); transition: background-color 160ms ease, color 160ms ease, box-shadow 160ms ease; }
+.ui-mac__btn:hover { background: var(--ui-mac-wash); color: var(--ui-mac-ink); }
+.ui-mac__btn:active .ui-mac__icon { transform: scale(0.9); }
+.ui-mac__btn[aria-pressed="true"],
+.ui-mac__btn[aria-pressed="true"]:hover { background: var(--ui-mac-fill); box-shadow: inset 0 0 0 0.5px var(--ui-mac-line); color: var(--ui-mac-ink); }
+.ui-mac__btn--copy[data-done] { color: var(--ui-mac-ok); }
 
-.ui-ma__icon { position: relative; display: grid; place-items: center; width: 16px; height: 16px; transition: transform 160ms var(--ui-ma-ease); }
+.ui-mac__icon { position: relative; display: grid; place-items: center; width: 16px; height: 16px; transition: transform 160ms var(--ui-mac-ease); }
 /* Steve: actions of its own (lucide icons), and one that cannot run now */
-.ui-ma__icon > svg:not(.ui-ma__glyph) { width: 16px; height: 16px; }
-.ui-ma__btn:disabled { opacity: 0.4; cursor: default; }
-.ui-ma__glyph { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+.ui-mac__icon > svg:not(.ui-mac__glyph) { width: 16px; height: 16px; }
+.ui-mac__btn:disabled { opacity: 0.4; cursor: default; }
+.ui-mac__glyph { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.1; stroke-linecap: round; stroke-linejoin: round; }
+.ui-mac__glyph[data-solid] { fill: currentColor; stroke: none; }
+.ui-mac__fill { fill: currentColor; stroke: none; }
 
 /* Two icons on top of each other – one blurs away while the other comes in */
-.ui-ma__morph { display: grid; }
-.ui-ma__layer { grid-area: 1 / 1; display: grid; place-items: center; opacity: 0; transform: scale(0.6); filter: blur(2px); transition: opacity 200ms ease, transform 300ms var(--ui-ma-ease), filter 200ms ease; }
-.ui-ma__layer[data-on] { opacity: 1; transform: none; filter: none; }
-.ui-ma__layer--check .ui-ma__glyph { stroke-width: 2; stroke-dasharray: 22; stroke-dashoffset: 22; }
-.ui-ma__layer--check[data-on] .ui-ma__glyph { stroke-dashoffset: 0; transition: stroke-dashoffset 340ms var(--ui-ma-ease) 60ms; }
+.ui-mac__morph { display: grid; }
+.ui-mac__layer { grid-area: 1 / 1; display: grid; place-items: center; opacity: 0; transform: scale(0.6); filter: blur(2px); transition: opacity 200ms ease, transform 300ms var(--ui-mac-ease), filter 200ms ease; }
+.ui-mac__layer[data-on] { opacity: 1; transform: none; filter: none; }
 
 /* Regenerate spins once per press, and keeps going while busy */
-.ui-ma__spin { display: grid; place-items: center; }
-.ui-ma__spin[data-spin] { animation: ui-ma-spin 640ms var(--ui-ma-ease); }
-.ui-ma__btn[data-busy] { color: var(--ui-ma-ink); }
-.ui-ma__btn[data-busy] .ui-ma__spin { animation: ui-ma-spin 900ms linear infinite; }
+.ui-mac__spin { display: grid; place-items: center; }
+.ui-mac__spin[data-spin] { animation: ui-mac-spin 640ms var(--ui-mac-ease); }
+.ui-mac__btn[data-busy] { color: var(--ui-mac-ink); }
+.ui-mac__btn[data-busy] .ui-mac__spin { animation: ui-mac-spin 900ms linear infinite; }
 
-/* Thumbs: down is the same glyph turned around; a vote fills it with a little pop */
-.ui-ma__btn--down .ui-ma__glyph { transform: rotate(180deg); }
-.ui-ma__thumb .ui-ma__glyph { transition: fill 200ms ease; }
-.ui-ma__btn[aria-pressed="true"] .ui-ma__thumb { animation: ui-ma-pop 420ms var(--ui-ma-ease); }
-.ui-ma__btn[aria-pressed="true"] .ui-ma__thumb .ui-ma__glyph { fill: currentColor; }
+/* Thumbs: down is the same glyph turned upside down; a vote gives it a little pop */
+.ui-mac__btn--down .ui-mac__glyph { transform: scaleY(-1); }
+.ui-mac__btn[aria-pressed="true"] .ui-mac__thumb { animation: ui-mac-pop 420ms var(--ui-mac-ease); }
 
-/* Read aloud: four bars that bounce while it plays */
-.ui-ma__eq { display: flex; align-items: center; justify-content: center; gap: 2px; width: 16px; height: 16px; }
-.ui-ma__eq i { display: block; width: 2px; height: 12px; border-radius: 1px; background: currentColor; transform: scaleY(0.3); }
-.ui-ma__eq[data-on] i { animation: ui-ma-eq 900ms ease-in-out infinite; }
-.ui-ma__eq[data-on] i:nth-child(2) { animation-delay: -300ms; animation-duration: 760ms; }
-.ui-ma__eq[data-on] i:nth-child(3) { animation-delay: -520ms; animation-duration: 1000ms; }
-.ui-ma__eq[data-on] i:nth-child(4) { animation-delay: -140ms; animation-duration: 820ms; }
+/* Read aloud: four bars in the accent blue that bounce while it plays */
+.ui-mac__eq { display: flex; align-items: center; justify-content: center; gap: 2px; width: 16px; height: 16px; color: var(--ui-mac-accent); }
+.ui-mac__eq i { display: block; width: 2px; height: 11px; border-radius: 1px; background: currentColor; transform: scaleY(0.3); }
+.ui-mac__eq[data-on] i { animation: ui-mac-eq 900ms ease-in-out infinite; }
+.ui-mac__eq[data-on] i:nth-child(2) { animation-delay: -300ms; animation-duration: 760ms; }
+.ui-mac__eq[data-on] i:nth-child(3) { animation-delay: -520ms; animation-duration: 1000ms; }
+.ui-mac__eq[data-on] i:nth-child(4) { animation-delay: -140ms; animation-duration: 820ms; }
 
-/* ----- Tooltips: above the button, on hover after a beat, on keyboard focus, and briefly after Copy ----- */
-.ui-ma__tip { position: absolute; bottom: calc(100% + 6px); left: 50%; z-index: 3; display: block; width: max-content; padding: 3px 7px; border-radius: 6px; background: var(--ui-ma-tip-bg); font-size: 11.5px; font-weight: 500; line-height: 16px; color: var(--ui-ma-tip-text); white-space: nowrap; pointer-events: none; opacity: 0; transform: translate(-50%, 3px); transition: opacity 140ms ease, transform 200ms var(--ui-ma-ease); }
+/* ----- Tooltips: a small white popover above the button – on hover after a beat, on keyboard focus, and briefly after Copy ----- */
+.ui-mac__tip { position: absolute; bottom: calc(100% + 6px); left: 50%; z-index: 3; display: block; width: max-content; padding: 2px 8px; border-radius: 6px; background: var(--aui-overlay, var(--ui-mac-card)); box-shadow: var(--ui-mac-shadow-pop); font-size: 12px; font-weight: 500; line-height: 20px; color: var(--ui-mac-ink); white-space: nowrap; pointer-events: none; opacity: 0; transform: translate(-50%, 3px); transition: opacity 140ms ease, transform 200ms var(--ui-mac-ease); }
 /* Steve: the bar starts at the message's edge, so the first tooltip opens to the right instead of off the screen */
-.ui-ma__bar > .ui-ma__item:first-child .ui-ma__tip { left: 0; transform: translate(0, 3px); }
-.ui-ma__bar > .ui-ma__item:first-child:is(:hover, [data-flash], :has(:focus-visible)) .ui-ma__tip { transform: translate(0, 0); }
-.ui-ma__btn:focus-visible + .ui-ma__tip,
-.ui-ma__item[data-flash] .ui-ma__tip { opacity: 1; transform: translate(-50%, 0); transition-delay: 0ms; }
+.ui-mac__bar > .ui-mac__item:first-child .ui-mac__tip { left: 0; transform: translate(0, 3px); }
+.ui-mac__bar > .ui-mac__item:first-child:is(:hover, [data-flash], :has(:focus-visible)) .ui-mac__tip { transform: translate(0, 0); }
+.ui-mac__btn:focus-visible + .ui-mac__tip,
+.ui-mac__item[data-flash] .ui-mac__tip { opacity: 1; transform: translate(-50%, 0); transition-delay: 0ms; }
 @media (hover: hover) {
-  .ui-ma__item:hover .ui-ma__tip { opacity: 1; transform: translate(-50%, 0); transition-delay: 380ms; }
+  .ui-mac__item:hover .ui-mac__tip { opacity: 1; transform: translate(-50%, 0); transition-delay: 380ms; }
 }
 
 /* ----- Version switcher: unfolds next to Regenerate once there are two versions ----- */
-.ui-ma__regen { display: inline-flex; align-items: center; flex: none; }
-.ui-ma__versions { display: grid; grid-template-columns: 0fr; opacity: 0; transition: grid-template-columns 420ms var(--ui-ma-ease), opacity 220ms ease; }
-.ui-ma__versions[data-open] { grid-template-columns: 1fr; opacity: 1; transition: grid-template-columns 420ms var(--ui-ma-ease), opacity 320ms ease 100ms; }
-.ui-ma__versions-clip { display: flex; align-items: center; min-width: 0; overflow: hidden; padding-right: 2px; }
-.ui-ma__step { display: grid; flex: none; place-items: center; width: 20px; height: 30px; border-radius: var(--aui-radius-sm, 7px); color: var(--ui-ma-muted); transition: background-color 160ms ease, color 160ms ease, opacity 160ms ease; }
-.ui-ma__step .ui-ma__glyph { width: 14px; height: 14px; }
-.ui-ma__step:hover:not(:disabled) { background: var(--ui-ma-hover); color: var(--ui-ma-ink); }
-.ui-ma__step:disabled { cursor: default; opacity: 0.4; }
-.ui-ma__count { display: inline-flex; align-items: center; gap: 2px; padding: 0 1px; font-size: 12px; color: var(--ui-ma-muted); white-space: nowrap; font-variant-numeric: tabular-nums; }
-.ui-ma__count-now { color: var(--ui-ma-ink); font-weight: 500; }
+.ui-mac__regen { display: inline-flex; align-items: center; flex: none; }
+.ui-mac__versions { display: grid; grid-template-columns: 0fr; opacity: 0; transition: grid-template-columns 420ms var(--ui-mac-ease), opacity 220ms ease; }
+.ui-mac__versions[data-open] { grid-template-columns: 1fr; opacity: 1; transition: grid-template-columns 420ms var(--ui-mac-ease), opacity 320ms ease 100ms; }
+.ui-mac__versions-clip { display: flex; align-items: center; min-width: 0; overflow: hidden; padding-right: 2px; }
+.ui-mac__step { display: grid; flex: none; place-items: center; width: 20px; height: 28px; border-radius: calc(var(--aui-radius-sm, 5px) + 1px); color: var(--ui-mac-icon); transition: background-color 160ms ease, color 160ms ease, opacity 160ms ease; }
+.ui-mac__step[data-dir="prev"] .ui-mac__glyph { transform: scaleX(-1); }
+.ui-mac__step:hover:not(:disabled) { background: var(--ui-mac-wash); color: var(--ui-mac-ink); }
+.ui-mac__step:disabled { cursor: default; opacity: 0.45; }
+.ui-mac__count { display: inline-flex; align-items: center; gap: 2px; padding: 0 2px; font-size: 12px; line-height: 16px; color: var(--aui-placeholder, var(--ui-mac-faint)); white-space: nowrap; font-variant-numeric: tabular-nums; }
+.ui-mac__count-now { color: var(--ui-mac-ink); font-weight: 500; }
+.ui-mac__count > .ui-mac__swap:last-child { color: var(--ui-mac-muted); }
 
 /* ----- Swapping text ----- */
-.ui-ma__swap { display: inline-grid; min-width: 0; }
-.ui-ma__swap-item { grid-area: 1 / 1; display: inline-flex; align-items: center; justify-content: center; gap: 4px; min-width: 0; animation: ui-ma-in 300ms ease both; }
-.ui-ma__swap-item[data-out] { animation: ui-ma-out 220ms ease both; }
+.ui-mac__swap { display: inline-grid; min-width: 0; }
+.ui-mac__swap-item { grid-area: 1 / 1; display: inline-flex; align-items: center; justify-content: center; gap: 4px; min-width: 0; animation: ui-mac-in 300ms ease both; }
+.ui-mac__swap-item[data-out] { animation: ui-mac-out 220ms ease both; }
 
-/* ----- Feedback row: unfolds below the bar ----- */
-.ui-ma__fold { display: grid; grid-template-rows: 0fr; opacity: 0; transition: grid-template-rows 420ms var(--ui-ma-ease), opacity 220ms ease; }
-.ui-ma__fold[data-open] { grid-template-rows: 1fr; opacity: 1; transition: grid-template-rows 420ms var(--ui-ma-ease), opacity 320ms ease 80ms; }
-.ui-ma__clip { min-height: 0; overflow: hidden; margin: -1px; padding: 1px; }  /* the 1px keeps the card's hairline from being clipped */
-.ui-ma__panel { max-width: 440px; margin: 6px 0 0; padding: 12px 14px 14px; border-radius: var(--aui-radius-lg, 16px); background: var(--ui-ma-card); box-shadow: var(--aui-shadow-card, 0 0 0 1px var(--aui-border, var(--ui-ma-line)), 0 1px 2px rgba(0, 0, 0, 0.04)); }
-.ui-ma__panel-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 24px; }
-.ui-ma__ask { font-size: 12.5px; font-weight: 500; color: var(--ui-ma-ink); }
-.ui-ma__close { display: grid; flex: none; place-items: center; width: 24px; height: 24px; margin-right: -4px; border-radius: var(--aui-radius-sm, 7px); color: var(--ui-ma-muted); transition: background-color 160ms ease, color 160ms ease; }
-.ui-ma__close .ui-ma__glyph { width: 14px; height: 14px; }
-.ui-ma__close:hover { background: var(--ui-ma-hover); color: var(--ui-ma-ink); }
-.ui-ma__chips { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 6px; }
-.ui-ma__chip { max-width: 100%; overflow: hidden; text-overflow: ellipsis; height: 26px; padding: 0 9px; border-radius: calc(var(--aui-radius-sm, 7px) + 1px); background: var(--ui-ma-well); font-size: 12px; color: var(--ui-ma-text); white-space: nowrap; transition: background-color 160ms ease, color 160ms ease, box-shadow 160ms ease, opacity 200ms ease; }
-.ui-ma__chip:hover:not(:disabled) { background: var(--ui-ma-line); color: var(--ui-ma-ink); }
-.ui-ma__chip[aria-pressed="true"], .ui-ma__chip[aria-pressed="true"]:hover:not(:disabled) { background: var(--ui-ma-accent-bg); color: var(--ui-ma-accent); }
-.ui-ma__chip:disabled { cursor: default; }
-.ui-ma__chip:disabled:not([aria-pressed="true"]) { opacity: 0.45; }
-.ui-ma__send { display: inline-flex; align-items: center; justify-content: center; min-width: 58px; height: 26px; margin-left: auto; padding: 0 11px; border-radius: calc(var(--aui-radius-sm, 7px) + 1px); background: var(--aui-primary, var(--ui-ma-ink)); font-size: 12px; font-weight: 500; color: var(--aui-on-primary, var(--ui-ma-card)); white-space: nowrap; transition: background-color 220ms ease, color 220ms ease, opacity 200ms ease; }
-.ui-ma__send:disabled { cursor: default; opacity: 0.32; }
-.ui-ma__send[data-sent] { cursor: default; background: var(--ui-ma-ok-bg); color: var(--ui-ma-ok); }
-.ui-ma__send .ui-ma__glyph { width: 13px; height: 13px; stroke-width: 2.2; }
-.ui-ma__input { display: block; width: 100%; height: 30px; margin-top: 8px; padding: 0 10px; border: 0; border-radius: calc(var(--aui-radius, 10px) - 2px); background: var(--ui-ma-well); font: inherit; font-size: 12.5px; color: var(--ui-ma-ink); outline: none; }
-.ui-ma__input::placeholder { color: var(--aui-placeholder, var(--ui-ma-muted)); }
+/* ----- Feedback row: unfolds below the bar, no card of its own – it sits in the card the bar sits in ----- */
+.ui-mac__fold { display: grid; grid-template-rows: 0fr; opacity: 0; transition: grid-template-rows 420ms var(--ui-mac-ease), opacity 220ms ease; }
+.ui-mac__fold[data-open] { grid-template-rows: 1fr; opacity: 1; transition: grid-template-rows 420ms var(--ui-mac-ease), opacity 320ms ease 80ms; }
+.ui-mac__clip { min-height: 0; overflow: hidden; margin: -3px; padding: 3px; }  /* the 3px keep hairlines and focus rings from being clipped */
+.ui-mac__panel { padding: 10px 8px 8px; }
+.ui-mac__panel-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 24px; }
+.ui-mac__ask { font-size: 13px; font-weight: 500; line-height: 20px; color: var(--ui-mac-strong); }
+.ui-mac__close { display: grid; flex: none; place-items: center; width: 24px; height: 24px; margin-right: -4px; border-radius: calc(var(--aui-radius-sm, 5px) + 1px); color: var(--ui-mac-icon); transition: background-color 160ms ease, color 160ms ease; }
+.ui-mac__close:hover { background: var(--ui-mac-wash); color: var(--ui-mac-ink); }
+.ui-mac__chips { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 8px; }
+/* Reasons: the tab-button look – a hairline, gray text; the picked one gets the gray fill */
+.ui-mac__chip { max-width: 100%; overflow: hidden; text-overflow: ellipsis; height: 28px; padding: 4px 10px; border-radius: calc(var(--aui-radius-sm, 5px) + 1px); box-shadow: inset 0 0 0 0.5px var(--ui-mac-line); font-size: 13px; font-weight: 500; line-height: 20px; color: var(--ui-mac-text); white-space: nowrap; transition: background-color 140ms ease, color 140ms ease, opacity 200ms ease; }
+.ui-mac__chip:hover:not(:disabled) { background: var(--ui-mac-wash); color: var(--ui-mac-ink); }
+.ui-mac__chip[aria-pressed="true"], .ui-mac__chip[aria-pressed="true"]:hover:not(:disabled) { background: var(--ui-mac-fill); color: var(--ui-mac-ink); }
+.ui-mac__chip:disabled { cursor: default; }
+.ui-mac__chip:disabled:not([aria-pressed="true"]) { opacity: 0.45; }
+/* Send: the dark chip; once sent a soft green fill */
+.ui-mac__send { display: inline-flex; align-items: center; justify-content: center; min-width: 60px; height: 28px; margin-left: auto; padding: 0 10px; border-radius: calc(var(--aui-radius-sm, 5px) + 1px); background: var(--ui-mac-solid); font-size: 13px; font-weight: 500; line-height: 20px; color: var(--ui-mac-on-solid); white-space: nowrap; transition: background-color 220ms ease, color 220ms ease, opacity 200ms ease; }
+.ui-mac__send:hover:not(:disabled):not([data-sent]) { background: var(--ui-mac-solid-hover); }
+.ui-mac__send:disabled { cursor: default; opacity: 0.3; }
+.ui-mac__send[data-sent] { cursor: default; background: var(--ui-mac-ok-bg); color: var(--ui-mac-ok); }
+.ui-mac__send .ui-mac__glyph { width: 14px; height: 14px; stroke-width: 1.5; }
+.ui-mac__input { display: block; width: 100%; height: 32px; margin-top: 8px; padding: 0 10px; border: 0; border-radius: calc(var(--aui-radius, 7px) - 1px); background: var(--ui-mac-card); box-shadow: var(--ui-mac-shadow); font: inherit; font-size: 13px; line-height: 20px; color: var(--ui-mac-ink); outline: none; }
+.ui-mac__input::placeholder { color: var(--aui-placeholder, var(--ui-mac-faint)); }
 
 /* ----- Message text that crossfades between versions (MessageText) ----- */
-.ui-ma-text { overflow: hidden; transition: height 360ms var(--ui-ma-ease, cubic-bezier(0.32, 0.72, 0.24, 1)); }
-.ui-ma-text__swap { display: grid; }
-.ui-ma-text__inner { min-width: 0; overflow-wrap: anywhere; }
-.ui-ma-text__swap > .ui-ma__swap-item { display: block; animation: ui-ma-text-in 420ms ease both; }
-.ui-ma-text__swap > .ui-ma__swap-item[data-out] { animation: ui-ma-out 260ms ease both; }
+.ui-mac-text { overflow: hidden; transition: height 360ms var(--ui-mac-ease, var(--aui-ease, cubic-bezier(0.22, 1, 0.36, 1))); }
+.ui-mac-text__swap { display: grid; }
+.ui-mac-text__inner { min-width: 0; overflow-wrap: anywhere; }
+.ui-mac-text__swap > .ui-mac__swap-item { display: block; animation: ui-mac-text-in 420ms ease both; }
+.ui-mac-text__swap > .ui-mac__swap-item[data-out] { animation: ui-mac-out 260ms ease both; }
 
-@keyframes ui-ma-in { from { opacity: 0; filter: blur(2px); } }
-@keyframes ui-ma-text-in { from { opacity: 0; filter: blur(3px); } }
-@keyframes ui-ma-out { from { opacity: 1; } to { opacity: 0; filter: blur(2px); } }
-@keyframes ui-ma-spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
-@keyframes ui-ma-pop { 0% { transform: scale(1); } 40% { transform: scale(1.28) rotate(-8deg); } 100% { transform: scale(1); } }
-@keyframes ui-ma-eq { 0%, 100% { transform: scaleY(0.3); } 50% { transform: scaleY(1); } }
+@keyframes ui-mac-in { from { opacity: 0; filter: blur(2px); } }
+@keyframes ui-mac-text-in { from { opacity: 0; filter: blur(3px); } }
+@keyframes ui-mac-out { from { opacity: 1; } to { opacity: 0; filter: blur(2px); } }
+@keyframes ui-mac-spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+@keyframes ui-mac-pop { 0% { transform: scale(1); } 40% { transform: scale(1.22) rotate(-8deg); } 100% { transform: scale(1); } }
+@keyframes ui-mac-eq { 0%, 100% { transform: scaleY(0.3); } 50% { transform: scaleY(1); } }
 
-/* Narrow: the feedback row stacks its send button under the chips */
+/* Narrow: the feedback row stacks its send button under the reasons */
 @container (max-width: 320px) {
-  .ui-ma__send { flex-basis: 100%; }
+  .ui-mac__send { flex-basis: 100%; }
 }
 
 @media (pointer: coarse) {
-  .ui-ma[data-quiet] .ui-ma__bar { opacity: 1; }
-  .ui-ma__btn { width: 38px; height: 38px; border-radius: calc(var(--aui-radius-sm, 7px) + 3px); }
-  .ui-ma__step { width: 28px; height: 38px; }
-  .ui-ma__chip, .ui-ma__send { height: 34px; }
-  .ui-ma__close { width: 32px; height: 32px; }
-  .ui-ma__input { height: 38px; }
+  .ui-mac[data-quiet] .ui-mac__bar { opacity: 1; }
+  .ui-mac__btn { width: 36px; height: 36px; }
+  .ui-mac__step { width: 28px; height: 36px; }
+  .ui-mac__chip, .ui-mac__send { height: 34px; padding-top: 7px; padding-bottom: 7px; }
+  .ui-mac__close { width: 32px; height: 32px; }
+  .ui-mac__input { height: 38px; }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .ui-ma *, .ui-ma *::before, .ui-ma *::after, .ui-ma-text, .ui-ma-text * { animation: none !important; transition: none !important; }
-  .ui-ma__eq[data-on] i:nth-child(odd) { transform: scaleY(0.8); }
-  .ui-ma__eq[data-on] i:nth-child(even) { transform: scaleY(0.5); }
+  .ui-mac *, .ui-mac *::before, .ui-mac *::after, .ui-mac-text, .ui-mac-text * { animation: none !important; transition: none !important; }
+  .ui-mac__eq[data-on] i:nth-child(odd) { transform: scaleY(0.8); }
+  .ui-mac__eq[data-on] i:nth-child(even) { transform: scaleY(0.5); }
 }
 
 /* Dark mode: follows a .dark class or data-theme="dark" on any ancestor, e.g. <html> */
-:where(.dark, [data-theme="dark"]) .ui-ma {
+:where(.dark, [data-theme="dark"]) .ui-mac {
   /* Steve: the colors above follow tokens that already switch with dark mode */
 }
 `;

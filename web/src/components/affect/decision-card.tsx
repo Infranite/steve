@@ -6,7 +6,7 @@ import { useEffect, useId, useLayoutEffect, useRef, useState, type CSSProperties
 /*
  * Decision Card – a question from an agent, asked the way Claude asks one, in a single self-contained file.
  * It sits just above your chat composer as a card of its own: the composer stays for new prompts, the card takes the answer.
- * Classic style: a gray layer with the head on it – "Needs you", the task, "1 of 2", Later – and a white card with the rest.
+ * Clean style: one white card with a hairline edge and a soft lift – no gray layer around it.
  *   · the question, then three to five numbered rows – a title and one line each, one may be Recommended
  *   · approval: two or three facts (To, Subject, …), then Approve and Decline · pick: small preview tiles
  *   · the last row takes your own words – a round send arrow shows once you type, Enter sends
@@ -146,8 +146,8 @@ const ArrowUp = () => (
 
 /** A pick's preview: gray blocks on a small white page */
 const Blocks = ({ blocks }: { blocks: DecisionBlock[] }) => (
-  <svg className="ui-dc__wire" viewBox="0 0 120 80" preserveAspectRatio="xMidYMid meet" aria-hidden="true">
-    <rect className="ui-dc__wire-page" x="0.5" y="0.5" width="119" height="79" rx="6" />
+  <svg className="ui-dcc__wire" viewBox="0 0 120 80" preserveAspectRatio="xMidYMid meet" aria-hidden="true">
+    <rect className="ui-dcc__wire-page" x="0.5" y="0.5" width="119" height="79" rx="6" />
     {blocks.map((b, i) => (
       <rect key={i} data-tone={b.tone ?? "soft"} x={b.x} y={b.y} width={b.w} height={b.h} rx={b.r ?? 2} />
     ))}
@@ -198,10 +198,10 @@ export function DecisionCard({ decisions, onDecide, onLater, defaultFolded = fal
     if (!w) return;
     const box = root.current;
     const el =
-      (w === "show" && box?.querySelector<HTMLElement>(".ui-dc__show")) ||
-      ((w === "prev" || w === "next") && box?.querySelector<HTMLElement>(`.ui-dc__page[data-step="${w}"]`)) ||
+      (w === "show" && box?.querySelector<HTMLElement>(".ui-dcc__show")) ||
+      ((w === "prev" || w === "next") && box?.querySelector<HTMLElement>(`.ui-dcc__page[data-step="${w}"]`)) ||
       // No options: the field for your own words takes the focus
-      box?.querySelector<HTMLElement>('[role="option"][tabindex="0"], .ui-dc__input');
+      box?.querySelector<HTMLElement>('[role="option"][tabindex="0"], .ui-dcc__input');
     el?.focus({ preventScroll: true });
   });
 
@@ -251,22 +251,22 @@ export function DecisionCard({ decisions, onDecide, onLater, defaultFolded = fal
   };
 
   return (
-    <div ref={root} className={["ui-dc", className].filter(Boolean).join(" ")} data-mode={mode}>
-      <style href="ui-decision-card" precedence="default">
+    <div ref={root} className={["ui-dcc", className].filter(Boolean).join(" ")} data-mode={mode}>
+      <style href="ui-decision-card-clean" precedence="default">
         {css}
       </style>
-      <span className="ui-dc__sr" role="status" aria-live="polite">
+      <span className="ui-dcc__sr" role="status" aria-live="polite">
         {say}
       </span>
-      <div className="ui-dc__wrap" inert={mode === "none"}>
-        <div className="ui-dc__inner">
+      <div className="ui-dcc__wrap" inert={mode === "none"}>
+        <div className="ui-dcc__inner">
           {mode === "min" ? (
-            <div className="ui-dc__box ui-dc__box--min">
-              <div className="ui-dc__head">
-                <span className="ui-dc__badge">{L.needsYou}</span>
-                <span className="ui-dc__task ui-dc__num">{L.waiting(open.length)}</span>
-                <span className="ui-dc__tools">
-                  <button type="button" className="ui-dc__link ui-dc__show" onClick={show}>
+            <div className="ui-dcc__box ui-dcc__box--min">
+              <div className="ui-dcc__head">
+                <span className="ui-dcc__badge">{L.needsYou}</span>
+                <span className="ui-dcc__task ui-dcc__num">{L.waiting(open.length)}</span>
+                <span className="ui-dcc__tools">
+                  <button type="button" className="ui-dcc__link ui-dcc__show" onClick={show}>
                     {L.show}
                   </button>
                 </span>
@@ -316,7 +316,7 @@ function Card({
   onLater?: () => void;
   onPage: (step: number) => void;
 }) {
-  const qid = `ui-dc-q-${useId().replace(/:/g, "")}`;
+  const qid = `ui-dcc-q-${useId().replace(/:/g, "")}`;
   const rows = rowsOf(d, L);
   const tiles = d.kind === "pick";
   const [at, setAt] = useState(() => Math.max(0, rows.findIndex((r) => r.recommended)));
@@ -361,42 +361,42 @@ function Card({
   };
 
   return (
-    <div ref={box} className="ui-dc__box" role="group" aria-labelledby={qid} aria-busy={busy || undefined} data-pulse={pulse || undefined} onKeyDown={onKey} {...d.attrs}>
-      <div className="ui-dc__head">
-        <span className="ui-dc__badge">{d.badge ?? L.needsYou}</span>
-        <span className="ui-dc__task" dir="auto">
+    <div ref={box} className="ui-dcc__box" role="group" aria-labelledby={qid} aria-busy={busy || undefined} data-pulse={pulse || undefined} onKeyDown={onKey} {...d.attrs}>
+      <div className="ui-dcc__head">
+        <span className="ui-dcc__badge">{d.badge ?? L.needsYou}</span>
+        <span className="ui-dcc__task" dir="auto">
           {d.task}
         </span>
-        <span className="ui-dc__tools">
+        <span className="ui-dcc__tools">
           {count > 1 && (
-            <span className="ui-dc__pager">
-              <button type="button" className="ui-dc__page" data-step="prev" aria-label={L.previous} onClick={() => onPage(-1)}>
+            <span className="ui-dcc__pager">
+              <button type="button" className="ui-dcc__page" data-step="prev" aria-label={L.previous} onClick={() => onPage(-1)}>
                 <ArrowLeft />
               </button>
               {/* As wide as its longest count, so "9 of 12" → "10 of 12" doesn't shift the head */}
-              <span className="ui-dc__num ui-dc__count" style={{ minWidth: `${L.of(count, count).length}ch` }}>
+              <span className="ui-dcc__num ui-dcc__count" style={{ minWidth: `${L.of(count, count).length}ch` }}>
                 {L.of(index + 1, count)}
               </span>
-              <button type="button" className="ui-dc__page" data-step="next" aria-label={L.next} onClick={() => onPage(1)}>
+              <button type="button" className="ui-dcc__page" data-step="next" aria-label={L.next} onClick={() => onPage(1)}>
                 <ArrowRight />
               </button>
             </span>
           )}
           {d.tools}
           {onLater && (
-            <button type="button" className="ui-dc__link" aria-keyshortcuts="Escape" onClick={onLater}>
+            <button type="button" className="ui-dcc__link" aria-keyshortcuts="Escape" onClick={onLater}>
               {L.later}
             </button>
           )}
         </span>
       </div>
-      <div className="ui-dc__body">
-        <p id={qid} className="ui-dc__q" dir="auto">
+      <div className="ui-dcc__body">
+        <p id={qid} className="ui-dcc__q" dir="auto">
           {d.question}
         </p>
-        {d.detail && <div className="ui-dc__detail">{d.detail}</div>}
+        {d.detail && <div className="ui-dcc__detail">{d.detail}</div>}
         {d.facts && d.facts.length > 0 && (
-          <dl className="ui-dc__facts">
+          <dl className="ui-dcc__facts">
             {d.facts.slice(0, 3).map((f, i) => (
               <div key={i}>
                 <dt title={f.label}>{f.label}</dt>
@@ -406,19 +406,19 @@ function Card({
           </dl>
         )}
         {rows.length > 0 && <div
-          className={tiles ? "ui-dc__tiles" : "ui-dc__rows"}
+          className={tiles ? "ui-dcc__tiles" : "ui-dcc__rows"}
           role="listbox"
           aria-labelledby={qid}
           aria-orientation={tiles ? "horizontal" : "vertical"}
           data-many={tiles && rows.length > 3 ? "" : undefined}
-          style={tiles ? ({ "--ui-dc-cols": Math.max(3, rows.length) } as CSSProperties) : undefined}
+          style={tiles ? ({ "--ui-dcc-cols": Math.max(3, rows.length) } as CSSProperties) : undefined}
         >
           {rows.map((r, i) => (
             <button
               key={r.id}
               type="button"
               role="option"
-              className={tiles ? "ui-dc__tile" : "ui-dc__opt"}
+              className={tiles ? "ui-dcc__tile" : "ui-dcc__opt"}
               data-row={i}
               aria-selected={i === at}
               aria-keyshortcuts={String(i + 1)}
@@ -428,37 +428,37 @@ function Card({
               onClick={() => !busy && onAnswer(r.answer)}
             >
               {tiles && (
-                <span className="ui-dc__frame" aria-hidden="true">
+                <span className="ui-dcc__frame" aria-hidden="true">
                   {r.preview ?? (r.blocks ? <Blocks blocks={r.blocks} /> : null)}
                 </span>
               )}
-              {tiles && r.recommended && <span className="ui-dc__tag ui-dc__tag--tile">{L.recommended}</span>}
-              <span className="ui-dc__row">
-                <span className="ui-dc__key ui-dc__num" aria-hidden="true">
+              {tiles && r.recommended && <span className="ui-dcc__tag ui-dcc__tag--tile">{L.recommended}</span>}
+              <span className="ui-dcc__row">
+                <span className="ui-dcc__key ui-dcc__num" aria-hidden="true">
                   {i + 1}
                 </span>
-                <span className="ui-dc__text">
-                  <span className="ui-dc__title" dir="auto" {...r.attrs}>
+                <span className="ui-dcc__text">
+                  <span className="ui-dcc__title" dir="auto" {...r.attrs}>
                     {r.title}
                   </span>
                   {!tiles && r.summary && (
-                    <span className="ui-dc__summary" dir="auto">
+                    <span className="ui-dcc__summary" dir="auto">
                       {r.summary}
                     </span>
                   )}
                 </span>
-                {r.recommended && <span className="ui-dc__tag ui-dc__tag--row">{L.recommended}</span>}
+                {r.recommended && <span className="ui-dcc__tag ui-dcc__tag--row">{L.recommended}</span>}
               </span>
             </button>
           ))}
         </div>}
-        {ownSpec && <div className="ui-dc__own" onClick={(e) => e.target === e.currentTarget && own.current?.focus()}>
-          <span className="ui-dc__key ui-dc__num" aria-hidden="true">
+        {ownSpec && <div className="ui-dcc__own" onClick={(e) => e.target === e.currentTarget && own.current?.focus()}>
+          <span className="ui-dcc__key ui-dcc__num" aria-hidden="true">
             {rows.length + 1}
           </span>
           <input
             ref={own}
-            className="ui-dc__input"
+            className="ui-dcc__input"
             value={draft}
             placeholder={ownSpec.placeholder ?? L.own}
             aria-label={`${(ownSpec.placeholder ?? L.own).replace(/…$/, "")}: ${d.question}`}
@@ -473,11 +473,11 @@ function Card({
             }}
           />
           {ownSpec.send ? (
-            <button type="button" className="ui-dc__send ui-dc__send--word" disabled={busy || (ownSpec.required !== false && !draft.trim())} data-shown={ownSpec.required === false || draft.trim() ? "" : undefined} data-empty={draft.trim() ? undefined : ""} onClick={sendOwn} {...ownSpec.sendAttrs}>
+            <button type="button" className="ui-dcc__send ui-dcc__send--word" disabled={busy || (ownSpec.required !== false && !draft.trim())} data-shown={ownSpec.required === false || draft.trim() ? "" : undefined} data-empty={draft.trim() ? undefined : ""} onClick={sendOwn} {...ownSpec.sendAttrs}>
               {ownSpec.send}
             </button>
           ) : (
-            <button type="button" className="ui-dc__send" aria-label={L.send} title={L.send} aria-disabled={!draft.trim() || busy || undefined} data-shown={draft.trim() ? "" : undefined} tabIndex={draft.trim() ? 0 : -1} onClick={sendOwn} {...ownSpec.sendAttrs}>
+            <button type="button" className="ui-dcc__send" aria-label={L.send} title={L.send} aria-disabled={!draft.trim() || busy || undefined} data-shown={draft.trim() ? "" : undefined} tabIndex={draft.trim() ? 0 : -1} onClick={sendOwn} {...ownSpec.sendAttrs}>
               <ArrowUp />
             </button>
           )}
@@ -490,177 +490,179 @@ function Card({
 /* ---------- Styles ---------- */
 
 const css = /* css */ `
-/* Colors, sizes and motion as variables – override them on .ui-dc */
-.ui-dc {
-  --ui-dc-tray: var(--aui-subtle, #f0f0f0);
-  --ui-dc-tray-pulse: var(--aui-border, #e4e4e4);
-  --ui-dc-card: var(--aui-surface, #ffffff);
-  --ui-dc-ink: var(--aui-ink, #171717);
-  --ui-dc-text: var(--aui-muted, #6b6b6b);
-  --ui-dc-muted: var(--aui-muted, #8a8a8a);
-  --ui-dc-faint: var(--aui-placeholder, #b8b8b8);
-  --ui-dc-line: var(--aui-border, #ececec);
-  --ui-dc-fill: var(--aui-subtle, #f2f2f2);
-  --ui-dc-well: var(--aui-subtle, #f7f7f7);
-  --ui-dc-wait-bg: var(--aui-warning-soft, #fff1e0);
-  --ui-dc-wait-fg: var(--aui-warning, #b25e00);
-  --ui-dc-wire-ink: rgba(0, 0, 0, 0.42);
-  --ui-dc-wire-mid: rgba(0, 0, 0, 0.16);
-  --ui-dc-wire-soft: rgba(0, 0, 0, 0.07);
-  --ui-dc-focus: var(--aui-focus, rgba(0, 96, 226, 0.7));
-  --ui-dc-solid: var(--aui-primary, #171717);
-  --ui-dc-on-solid: var(--aui-on-primary, #ffffff);
-  --ui-dc-placeholder: var(--aui-placeholder, #a3a3a3);
-  --ui-dc-shadow: 0 0 0 1px var(--ui-dc-line), 0 1px 2px rgba(0, 0, 0, 0.04);
-  --ui-dc-ease: cubic-bezier(0.23, 1, 0.32, 1);
+/* Colors, sizes and motion as variables – override them on .ui-dcc */
+.ui-dcc {
+  --ui-dcc-card: var(--aui-surface, #ffffff);
+  --ui-dcc-ink: var(--aui-ink, rgba(0, 0, 0, 0.88));
+  --ui-dcc-text: var(--aui-muted, rgba(0, 0, 0, 0.61));
+  --ui-dcc-muted: var(--aui-muted, rgba(0, 0, 0, 0.45));
+  --ui-dcc-faint: var(--aui-placeholder, rgba(0, 0, 0, 0.27));
+  --ui-dcc-line: var(--aui-border, rgba(0, 0, 0, 0.06));
+  --ui-dcc-fill: var(--aui-subtle, rgba(0, 0, 0, 0.05));
+  --ui-dcc-well: var(--aui-subtle, rgba(0, 0, 0, 0.025));
+  --ui-dcc-pulse: color-mix(in srgb, var(--aui-ink, #000) 4.5%, transparent);
+  --ui-dcc-wait-bg: var(--aui-warning-soft, #ff9c0029);
+  --ui-dcc-wait-fg: var(--aui-warning, #b25e00);
+  --ui-dcc-wire-ink: rgba(0, 0, 0, 0.42);
+  --ui-dcc-wire-mid: rgba(0, 0, 0, 0.16);
+  --ui-dcc-wire-soft: rgba(0, 0, 0, 0.07);
+  --ui-dcc-focus: var(--aui-focus, rgba(0, 96, 226, 0.7));
+  --ui-dcc-solid: var(--aui-primary, rgba(0, 0, 0, 0.88));
+  --ui-dcc-on-solid: var(--aui-on-primary, #fcfcfc);
+  --ui-dcc-placeholder: var(--aui-placeholder, rgba(0, 0, 0, 0.36));
+  /* Strokes are shadows: a 0.5px hairline plus a soft lift */
+  --ui-dcc-shadow: 0 0 0 0.5px rgba(0, 0, 0, 0.06), 0 1px 1px -1px rgba(0, 0, 0, 0.1), 0 1px 2px 0 rgba(0, 0, 0, 0.05);
+  --ui-dcc-float: 0 0 0 0.5px rgba(0, 0, 0, 0.07), 0 1px 2px rgba(0, 0, 0, 0.05), 0 10px 28px -12px rgba(0, 0, 0, 0.16);
+  --ui-dcc-ease: cubic-bezier(0.23, 1, 0.32, 1);
   position: relative;
   box-sizing: border-box;
   width: 100%;
   min-width: 0;
-  container: ui-dc / inline-size;
+  container: ui-dcc / inline-size;
   font-family: var(--aui-font, "Inter", "InterVariable", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif);
   font-size: 13px;
   font-weight: 400;
   line-height: 20px;
-  color: var(--ui-dc-text);
+  color: var(--ui-dcc-text);
   text-align: left;
   -webkit-font-smoothing: antialiased;
 }
-.ui-dc *, .ui-dc *::before, .ui-dc *::after { box-sizing: border-box; }
-:where(.ui-dc) button { margin: 0; padding: 0; border: 0; background: none; font: inherit; color: inherit; text-align: inherit; cursor: pointer; -webkit-tap-highlight-color: transparent; }
-.ui-dc button:focus-visible { outline: 2px solid var(--ui-dc-focus); outline-offset: 2px; }
-.ui-dc :is(p, dl, dd) { margin: 0; }
-.ui-dc svg { display: block; flex: none; }
-.ui-dc__sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
-.ui-dc__num { font-variant-numeric: tabular-nums; }
+.ui-dcc *, .ui-dcc *::before, .ui-dcc *::after { box-sizing: border-box; }
+:where(.ui-dcc) button { margin: 0; padding: 0; border: 0; background: none; font: inherit; color: inherit; text-align: inherit; cursor: pointer; -webkit-tap-highlight-color: transparent; }
+.ui-dcc button:focus-visible { outline: 2px solid var(--ui-dcc-focus); outline-offset: 2px; }
+.ui-dcc :is(p, dl, dd) { margin: 0; }
+.ui-dcc svg { display: block; flex: none; }
+.ui-dcc__sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+.ui-dcc__num { font-variant-numeric: tabular-nums; }
 
 /* Folds away after the last answer: the row shrinks to nothing, the content fades */
-.ui-dc__wrap { display: grid; grid-template-rows: 1fr; opacity: 1; transition: grid-template-rows 420ms var(--ui-dc-ease), opacity 260ms ease; }
-.ui-dc[data-mode="none"] .ui-dc__wrap { grid-template-rows: 0fr; opacity: 0; }
+.ui-dcc__wrap { display: grid; grid-template-rows: 1fr; opacity: 1; transition: grid-template-rows 420ms var(--ui-dcc-ease), opacity 260ms ease; }
+.ui-dcc[data-mode="none"] .ui-dcc__wrap { grid-template-rows: 0fr; opacity: 0; }
 /* Room for the focus rings and the card's edge while it clips */
-.ui-dc__inner { min-width: 0; min-height: 0; margin: -8px; padding: 8px; overflow: hidden; }
+.ui-dcc__inner { min-width: 0; min-height: 0; margin: -8px; padding: 8px; overflow: hidden; }
 /* Open: the card's shadow may spill past the fold – it only clips while it grows open */
-.ui-dc:not([data-mode="none"]) .ui-dc__inner { overflow: visible; animation: ui-dc-clip 420ms both; }
-@keyframes ui-dc-clip { 0%, 99.9% { overflow: hidden; } 100% { overflow: visible; } }
+.ui-dcc:not([data-mode="none"]) .ui-dcc__inner { overflow: visible; animation: ui-dcc-clip 420ms both; }
+@keyframes ui-dcc-clip { 0%, 99.9% { overflow: hidden; } 100% { overflow: visible; } }
 
-/* ----- The gray layer, with the head on it ----- */
-.ui-dc__box { display: flex; flex-direction: column; gap: 0; min-width: 0; padding: 4px; border-radius: calc(var(--aui-radius-lg, 16px) + 2px); background: var(--ui-dc-tray); animation: ui-dc-in 260ms ease both; transition: background-color 400ms ease; }
-.ui-dc__box[data-pulse] { background: var(--ui-dc-tray-pulse); }
-.ui-dc__head { display: flex; align-items: center; gap: 8px; min-width: 0; height: 32px; padding: 0 4px 0 8px; }
-.ui-dc__badge { flex: none; padding: 0 6px; border-radius: calc(var(--aui-radius-sm, 7px) - 2px); background: var(--ui-dc-wait-bg); font-size: 11px; font-weight: 500; line-height: 18px; color: var(--ui-dc-wait-fg); white-space: nowrap; }
-.ui-dc__task { flex: 1; min-width: 0; overflow: hidden; font-size: 12px; color: var(--ui-dc-muted); white-space: nowrap; text-overflow: ellipsis; }
-.ui-dc__tools { display: flex; flex: none; align-items: center; gap: 4px; margin-left: auto; }
-.ui-dc__count { text-align: center; }
-.ui-dc__pager { display: inline-flex; align-items: center; gap: 2px; font-size: 12px; color: var(--ui-dc-muted); white-space: nowrap; }
-.ui-dc__page { display: grid; place-items: center; width: 22px; height: 22px; border-radius: calc(var(--aui-radius-sm, 7px) - 1px); color: var(--ui-dc-muted); transition: background-color 140ms ease, color 140ms ease; }
-.ui-dc__page:hover { background: var(--ui-dc-card); color: var(--ui-dc-ink); }
-.ui-dc__link { display: inline-flex; align-items: center; height: 24px; padding: 0 8px; border-radius: calc(var(--aui-radius-sm, 7px) - 1px); font-size: 12px; font-weight: 500; color: var(--ui-dc-text); white-space: nowrap; transition: background-color 140ms ease, color 140ms ease; }
-.ui-dc__link:hover { background: var(--ui-dc-card); color: var(--ui-dc-ink); }
-.ui-dc__box--min { animation-duration: 200ms; }
+/* ----- One white card: the head on top ----- */
+.ui-dcc__box { display: flex; flex-direction: column; gap: 2px; min-width: 0; padding: 6px; border-radius: calc(var(--aui-radius-lg, 10px) + 4px); background: var(--aui-surface, var(--ui-dcc-card)); box-shadow: var(--aui-shadow-card, var(--ui-dcc-float)); animation: ui-dcc-in 260ms ease both; transition: background-color 400ms ease; }
+.ui-dcc__box[data-pulse] { background: color-mix(in srgb, var(--ui-dcc-card), #808080 9%); }
+.ui-dcc__head { display: flex; align-items: center; gap: 8px; min-width: 0; height: 28px; padding: 0 2px 0 6px; }
+.ui-dcc__badge { flex: none; padding: 0 6px; border-radius: var(--aui-radius-sm, 5px); background: var(--ui-dcc-wait-bg); font-size: 11px; font-weight: 500; line-height: 18px; color: var(--ui-dcc-wait-fg); white-space: nowrap; }
+.ui-dcc__task { flex: 1; min-width: 0; overflow: hidden; font-size: 12px; color: var(--ui-dcc-muted); white-space: nowrap; text-overflow: ellipsis; }
+.ui-dcc__tools { display: flex; flex: none; align-items: center; gap: 4px; margin-left: auto; }
+.ui-dcc__count { text-align: center; }
+.ui-dcc__pager { display: inline-flex; align-items: center; gap: 2px; font-size: 12px; color: var(--ui-dcc-muted); white-space: nowrap; }
+.ui-dcc__page { display: grid; place-items: center; width: 22px; height: 22px; border-radius: calc(var(--aui-radius-sm, 5px) + 1px); color: var(--ui-dcc-muted); transition: background-color 140ms ease, color 140ms ease; }
+.ui-dcc__page:hover { background: var(--ui-dcc-fill); color: var(--ui-dcc-ink); }
+.ui-dcc__link { display: inline-flex; align-items: center; height: 24px; padding: 0 8px; border-radius: calc(var(--aui-radius-sm, 5px) + 1px); font-size: 12px; font-weight: 500; color: var(--ui-dcc-text); white-space: nowrap; transition: background-color 140ms ease, color 140ms ease; }
+.ui-dcc__link:hover { background: var(--ui-dcc-fill); color: var(--ui-dcc-ink); }
+.ui-dcc__box--min { animation-duration: 200ms; }
+.ui-dcc__box--min .ui-dcc__head { height: 28px; }
 
-/* ----- The white card: question, rows and your own answer ----- */
-.ui-dc__body { display: flex; flex-direction: column; gap: 4px; min-width: 0; padding: 6px; border-radius: calc(var(--aui-radius-lg, 16px) - 2px); background: var(--aui-surface, var(--ui-dc-card)); box-shadow: var(--aui-shadow-card, var(--ui-dc-shadow)); }
-.ui-dc__q { padding: 4px 6px 2px; font-size: 15px; font-weight: 600; line-height: 22px; letter-spacing: -0.006em; color: var(--ui-dc-ink); overflow-wrap: anywhere; }
+/* ----- Question, rows and your own answer ----- */
+.ui-dcc__body { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.ui-dcc__q { padding: 4px 6px 2px; font-size: 15px; font-weight: 600; line-height: 22px; letter-spacing: -0.006em; color: var(--ui-dcc-ink); overflow-wrap: anywhere; }
 /* The labels share one column, as wide as the longest (up to 112px) – values wrap to two lines, then end in … */
-.ui-dc__facts { display: grid; grid-template-columns: minmax(56px, max-content) minmax(0, 1fr); gap: 2px 12px; padding: 2px 6px 4px; }
-.ui-dc__facts > div { display: grid; grid-column: 1 / -1; grid-template-columns: subgrid; font-size: 13px; line-height: 20px; }
-.ui-dc__facts dt { max-width: 112px; overflow: hidden; color: var(--ui-dc-muted); white-space: nowrap; text-overflow: ellipsis; }
-.ui-dc__facts dd { display: -webkit-box; min-width: 0; overflow: hidden; color: var(--ui-dc-ink); overflow-wrap: break-word; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; }
+.ui-dcc__facts { display: grid; grid-template-columns: minmax(56px, max-content) minmax(0, 1fr); gap: 2px 12px; padding: 2px 6px 4px; }
+.ui-dcc__facts > div { display: grid; grid-column: 1 / -1; grid-template-columns: subgrid; font-size: 13px; line-height: 20px; }
+.ui-dcc__facts dt { max-width: 112px; overflow: hidden; color: var(--ui-dcc-muted); white-space: nowrap; text-overflow: ellipsis; }
+.ui-dcc__facts dd { display: -webkit-box; min-width: 0; overflow: hidden; color: var(--ui-dcc-ink); overflow-wrap: break-word; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; }
 
-.ui-dc__rows { display: grid; grid-template-columns: minmax(0, 1fr); }
-.ui-dc__opt { display: flex; align-items: center; width: 100%; min-width: 0; min-height: 36px; padding: 4px 8px 4px 6px; border-radius: calc(var(--aui-radius-sm, 7px) + 1px); color: var(--ui-dc-ink); transition: background-color 120ms ease; }
-.ui-dc__opt:hover, .ui-dc__rows:focus-within .ui-dc__opt[aria-selected="true"] { background: var(--ui-dc-fill); }
-.ui-dc :is(.ui-dc__opt, .ui-dc__tile):focus-visible { outline-offset: -2px; }
-.ui-dc__row { display: flex; flex: 1; align-items: center; gap: 10px; min-width: 0; }
-.ui-dc__key { display: grid; flex: none; place-items: center; width: 22px; height: 22px; border-radius: calc(var(--aui-radius-sm, 7px) - 1px); background: var(--ui-dc-fill); font-size: 12px; font-weight: 500; line-height: 16px; color: var(--ui-dc-muted); transition: background-color 120ms ease, box-shadow 120ms ease; }
-.ui-dc__text { display: flex; flex: 1; flex-direction: column; min-width: 0; }
+.ui-dcc__rows { display: grid; grid-template-columns: minmax(0, 1fr); }
+.ui-dcc__opt { display: flex; align-items: center; width: 100%; min-width: 0; min-height: 36px; padding: 4px 8px 4px 6px; border-radius: calc(var(--aui-radius-sm, 5px) + 3px); color: var(--ui-dcc-ink); transition: background-color 120ms ease; }
+.ui-dcc__opt:hover, .ui-dcc__rows:focus-within .ui-dcc__opt[aria-selected="true"] { background: var(--ui-dcc-fill); }
+.ui-dcc :is(.ui-dcc__opt, .ui-dcc__tile):focus-visible { outline-offset: -2px; }
+.ui-dcc__row { display: flex; flex: 1; align-items: center; gap: 10px; min-width: 0; }
+.ui-dcc__key { display: grid; flex: none; place-items: center; width: 22px; height: 22px; border-radius: calc(var(--aui-radius-sm, 5px) + 1px); background: var(--ui-dcc-fill); font-size: 12px; font-weight: 500; line-height: 16px; color: var(--ui-dcc-muted); transition: background-color 120ms ease, box-shadow 120ms ease; }
+.ui-dcc__text { display: flex; flex: 1; flex-direction: column; min-width: 0; }
 /* A long title wraps to a second line, then ends in … – the summary stays on one */
-.ui-dc__title { display: -webkit-box; overflow: hidden; font-size: 13px; font-weight: 500; line-height: 20px; overflow-wrap: break-word; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; }
-.ui-dc__summary { overflow: hidden; font-size: 12px; line-height: 16px; color: var(--ui-dc-muted); white-space: nowrap; text-overflow: ellipsis; }
-.ui-dc__tag { flex: none; padding: 0 6px; border-radius: calc(var(--aui-radius-sm, 7px) - 2px); background: var(--ui-dc-fill); font-size: 11px; font-weight: 500; line-height: 18px; color: var(--ui-dc-muted); white-space: nowrap; transition: background-color 120ms ease, box-shadow 120ms ease; }
+.ui-dcc__title { display: -webkit-box; overflow: hidden; font-size: 13px; font-weight: 500; line-height: 20px; overflow-wrap: break-word; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; }
+.ui-dcc__summary { overflow: hidden; font-size: 12px; line-height: 16px; color: var(--ui-dcc-muted); white-space: nowrap; text-overflow: ellipsis; }
+.ui-dcc__tag { flex: none; padding: 0 6px; border-radius: var(--aui-radius-sm, 5px); background: var(--ui-dcc-fill); font-size: 11px; font-weight: 500; line-height: 18px; color: var(--ui-dcc-muted); white-space: nowrap; transition: background-color 120ms ease, box-shadow 120ms ease; }
 /* On a gray row the number and the tag turn white, so they stay apart from it */
-.ui-dc__opt:hover :is(.ui-dc__key, .ui-dc__tag), .ui-dc__rows:focus-within .ui-dc__opt[aria-selected="true"] :is(.ui-dc__key, .ui-dc__tag) { background: var(--ui-dc-card); box-shadow: var(--ui-dc-shadow); }
+.ui-dcc__opt:hover :is(.ui-dcc__key, .ui-dcc__tag), .ui-dcc__rows:focus-within .ui-dcc__opt[aria-selected="true"] :is(.ui-dcc__key, .ui-dcc__tag) { background: var(--ui-dcc-card); box-shadow: var(--ui-dcc-shadow); }
 
 /* ----- pick: preview tiles ----- */
-.ui-dc__tiles { display: grid; grid-template-columns: repeat(var(--ui-dc-cols, 3), minmax(0, 1fr)); gap: 4px; }
-.ui-dc__tile { display: flex; flex-direction: column; gap: 6px; min-width: 0; padding: 4px; border-radius: calc(var(--aui-radius-lg, 16px) - 6px); color: var(--ui-dc-ink); transition: background-color 120ms ease; }
-.ui-dc__tile:hover, .ui-dc__tiles:focus-within .ui-dc__tile[aria-selected="true"] { background: var(--ui-dc-fill); }
-.ui-dc__frame { position: relative; display: grid; place-items: center; aspect-ratio: 3 / 2; overflow: hidden; padding: 6px; border-radius: 7px; background: var(--ui-dc-well); box-shadow: inset 0 0 0 1px var(--ui-dc-line); }
-.ui-dc__frame > * { width: 100%; height: 100%; }
-.ui-dc__tile { position: relative; }
-.ui-dc__tile .ui-dc__tag--tile { position: absolute; top: 10px; right: 10px; background: var(--ui-dc-card); box-shadow: var(--ui-dc-shadow); }
-.ui-dc__tile .ui-dc__tag--row { display: none; }
-.ui-dc__wire-page { fill: var(--ui-dc-card); }
-.ui-dc__wire [data-tone="ink"] { fill: var(--ui-dc-wire-ink); }
-.ui-dc__wire [data-tone="mid"] { fill: var(--ui-dc-wire-mid); }
-.ui-dc__wire [data-tone="soft"] { fill: var(--ui-dc-wire-soft); }
-.ui-dc__tile .ui-dc__row { align-items: flex-start; gap: 8px; padding: 0 2px 2px; }
-.ui-dc__tile .ui-dc__key { width: 20px; height: 20px; font-size: 11px; }
-.ui-dc__tile:hover .ui-dc__key, .ui-dc__tiles:focus-within .ui-dc__tile[aria-selected="true"] .ui-dc__key { background: var(--ui-dc-card); box-shadow: var(--ui-dc-shadow); }
+.ui-dcc__tiles { display: grid; grid-template-columns: repeat(var(--ui-dcc-cols, 3), minmax(0, 1fr)); gap: 4px; }
+.ui-dcc__tile { display: flex; flex-direction: column; gap: 6px; min-width: 0; padding: 4px; border-radius: var(--aui-radius-lg, 10px); color: var(--ui-dcc-ink); transition: background-color 120ms ease; }
+.ui-dcc__tile:hover, .ui-dcc__tiles:focus-within .ui-dcc__tile[aria-selected="true"] { background: var(--ui-dcc-fill); }
+.ui-dcc__frame { position: relative; display: grid; place-items: center; aspect-ratio: 3 / 2; overflow: hidden; padding: 6px; border-radius: 7px; background: var(--ui-dcc-well); box-shadow: inset 0 0 0 1px var(--ui-dcc-line); }
+.ui-dcc__frame > * { width: 100%; height: 100%; }
+.ui-dcc__tile { position: relative; }
+.ui-dcc__tile .ui-dcc__tag--tile { position: absolute; top: 10px; right: 10px; background: var(--ui-dcc-card); box-shadow: var(--ui-dcc-shadow); }
+.ui-dcc__tile .ui-dcc__tag--row { display: none; }
+.ui-dcc__wire-page { fill: var(--ui-dcc-card); }
+.ui-dcc__wire [data-tone="ink"] { fill: var(--ui-dcc-wire-ink); }
+.ui-dcc__wire [data-tone="mid"] { fill: var(--ui-dcc-wire-mid); }
+.ui-dcc__wire [data-tone="soft"] { fill: var(--ui-dcc-wire-soft); }
+.ui-dcc__tile .ui-dcc__row { align-items: flex-start; gap: 8px; padding: 0 2px 2px; }
+.ui-dcc__tile .ui-dcc__key { width: 20px; height: 20px; font-size: 11px; }
+.ui-dcc__tile:hover .ui-dcc__key, .ui-dcc__tiles:focus-within .ui-dcc__tile[aria-selected="true"] .ui-dcc__key { background: var(--ui-dcc-card); box-shadow: var(--ui-dcc-shadow); }
 
 /* ----- Your own answer: the last row ----- */
-.ui-dc__own { display: flex; align-items: center; gap: 10px; min-width: 0; min-height: 36px; padding: 4px 6px; border-radius: calc(var(--aui-radius-sm, 7px) + 1px); cursor: text; transition: background-color 120ms ease, box-shadow 120ms ease; }
-.ui-dc__own:hover { background: var(--ui-dc-well); }
+.ui-dcc__own { display: flex; align-items: center; gap: 10px; min-width: 0; min-height: 36px; padding: 4px 6px; border-radius: calc(var(--aui-radius-sm, 5px) + 3px); cursor: text; transition: background-color 120ms ease, box-shadow 120ms ease; }
+.ui-dcc__own:hover { background: var(--ui-dcc-well); }
 /* Typing: no ring – the caret shows where you are, the edge only firms up a little */
-.ui-dc__own:focus-within { background: var(--ui-dc-well); box-shadow: inset 0 0 0 1px var(--ui-dc-line); }
-.ui-dc__input { flex: 1; min-width: 0; text-overflow: ellipsis; height: 28px; margin: 0; padding: 0; border: 0; background: none; font: inherit; font-size: 13px; color: var(--ui-dc-ink); outline: none; }
-.ui-dc__input::placeholder { color: var(--ui-dc-placeholder); }
-.ui-dc__send { display: grid; flex: none; place-items: center; width: 24px; height: 24px; border-radius: 999px; background: var(--ui-dc-solid); color: var(--ui-dc-on-solid); opacity: 0; transform: scale(0.8); pointer-events: none; transition: opacity 140ms ease, transform 180ms var(--ui-dc-ease); }
-.ui-dc__send[data-shown] { opacity: 1; transform: none; pointer-events: auto; }
-.ui-dc__send[data-shown]:active { transform: scale(0.92); }
+.ui-dcc__own:focus-within { background: var(--ui-dcc-well); box-shadow: inset 0 0 0 1px var(--ui-dcc-line); }
+.ui-dcc__input { flex: 1; min-width: 0; text-overflow: ellipsis; height: 28px; margin: 0; padding: 0; border: 0; background: none; font: inherit; font-size: 13px; color: var(--ui-dcc-ink); outline: none; }
+.ui-dcc__input::placeholder { color: var(--ui-dcc-placeholder); }
+.ui-dcc__send { display: grid; flex: none; place-items: center; width: 24px; height: 24px; border-radius: 999px; background: var(--ui-dcc-solid); color: var(--ui-dcc-on-solid); opacity: 0; transform: scale(0.8); pointer-events: none; transition: opacity 140ms ease, transform 180ms var(--ui-dcc-ease); }
+.ui-dcc__send[data-shown] { opacity: 1; transform: none; pointer-events: auto; }
+.ui-dcc__send[data-shown]:active { transform: scale(0.92); }
 /* Steve: a send button with its word (the answer the field gives, e.g. "Send back for rework") */
-.ui-dc__send--word { width: auto; height: 28px; padding: 0 10px; border-radius: var(--aui-radius-sm, 7px); font-size: 12px; font-weight: 500; white-space: nowrap; }
-.ui-dc__send--word:disabled { opacity: 0.45; cursor: default; }
+.ui-dcc__send--word { width: auto; height: 28px; padding: 0 10px; border-radius: var(--aui-radius-sm, 7px); font-size: 12px; font-weight: 500; white-space: nowrap; }
+.ui-dcc__send--word:disabled { opacity: 0.45; cursor: default; }
 /* Steve: a field that needs words keeps its send out of the way until there are some; one that may go empty shows it quiet until you type */
-.ui-dc__send--word:not([data-shown]) { display: none; }
-.ui-dc__send--word[data-empty] { background: transparent; color: var(--ui-dc-text); box-shadow: inset 0 0 0 1px var(--ui-dc-line); }
-.ui-dc__send--word[data-empty]:hover { background: var(--ui-dc-fill); color: var(--ui-dc-ink); }
-.ui-dc__opt[aria-disabled="true"] { opacity: 0.55; cursor: default; }
+.ui-dcc__send--word:not([data-shown]) { display: none; }
+.ui-dcc__send--word[data-empty] { background: transparent; color: var(--ui-dcc-text); box-shadow: inset 0 0 0 1px var(--ui-dcc-line); }
+.ui-dcc__send--word[data-empty]:hover { background: var(--ui-dcc-fill); color: var(--ui-dcc-ink); }
+.ui-dcc__opt[aria-disabled="true"] { opacity: 0.55; cursor: default; }
 /* Steve: what the question is about – a draft, a command, the conversation it came from */
-.ui-dc__detail:empty { display: none; }
-.ui-dc__detail { display: flex; flex-direction: column; gap: 8px; min-width: 0; padding: 2px 6px 6px; font-size: 13px; line-height: 20px; color: var(--ui-dc-text); overflow-wrap: anywhere; }
+.ui-dcc__detail:empty { display: none; }
+.ui-dcc__detail { display: flex; flex-direction: column; gap: 8px; min-width: 0; padding: 2px 6px 6px; font-size: 13px; line-height: 20px; color: var(--ui-dcc-text); overflow-wrap: anywhere; }
 
 /* Phones: everything stays inside the card's edges */
-@container ui-dc (max-width: 560px) {
-  .ui-dc__facts > div { grid-template-columns: 56px minmax(0, 1fr); }
-  .ui-dc__tiles[data-many] { grid-template-columns: repeat(3, minmax(0, 1fr)); }
-  .ui-dc__pager { gap: 0; }
+@container ui-dcc (max-width: 560px) {
+  .ui-dcc__facts > div { grid-template-columns: 56px minmax(0, 1fr); }
+  .ui-dcc__tiles[data-many] { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .ui-dcc__pager { gap: 0; }
 }
 /* Small phones: the tiles turn into rows – the number and title first, the preview small on the right */
-@container ui-dc (max-width: 420px) {
-  .ui-dc__tiles, .ui-dc__tiles[data-many] { grid-template-columns: minmax(0, 1fr); gap: 0; }
-  .ui-dc__tile { flex-direction: row; align-items: center; gap: 10px; min-height: 44px; padding: 4px 6px; border-radius: calc(var(--aui-radius-sm, 7px) + 1px); }
-  .ui-dc__tile .ui-dc__row { flex: 1; align-items: center; gap: 10px; padding: 0; }
-  .ui-dc__tile .ui-dc__key { width: 22px; height: 22px; font-size: 12px; }
-  .ui-dc__frame { order: 1; flex: none; width: 54px; padding: 3px; border-radius: 6px; }
-  .ui-dc__tile .ui-dc__tag--tile { display: none; }
-  .ui-dc__tile .ui-dc__tag--row { display: block; }
-  .ui-dc__tile:hover .ui-dc__tag--row, .ui-dc__tiles:focus-within .ui-dc__tile[aria-selected="true"] .ui-dc__tag--row { background: var(--ui-dc-card); box-shadow: var(--ui-dc-shadow); }
+@container ui-dcc (max-width: 420px) {
+  .ui-dcc__tiles, .ui-dcc__tiles[data-many] { grid-template-columns: minmax(0, 1fr); gap: 0; }
+  .ui-dcc__tile { flex-direction: row; align-items: center; gap: 10px; min-height: 44px; padding: 4px 6px; border-radius: calc(var(--aui-radius-sm, 5px) + 3px); }
+  .ui-dcc__tile .ui-dcc__row { flex: 1; align-items: center; gap: 10px; padding: 0; }
+  .ui-dcc__tile .ui-dcc__key { width: 22px; height: 22px; font-size: 12px; }
+  .ui-dcc__frame { order: 1; flex: none; width: 54px; padding: 3px; border-radius: 6px; }
+  .ui-dcc__tile .ui-dcc__tag--tile { display: none; }
+  .ui-dcc__tile .ui-dcc__tag--row { display: block; }
+  .ui-dcc__tile:hover .ui-dcc__tag--row, .ui-dcc__tiles:focus-within .ui-dcc__tile[aria-selected="true"] .ui-dcc__tag--row { background: var(--ui-dcc-card); box-shadow: var(--ui-dcc-shadow); }
 }
 
 /* Touch: every row at least 44px, every button 32px to see and 40px to hit */
 @media (pointer: coarse) {
-  .ui-dc__opt, .ui-dc__own { min-height: 44px; }
-  .ui-dc__page, .ui-dc__send { position: relative; width: 32px; height: 32px; }
-  .ui-dc__send--word { width: auto; }
-  .ui-dc__link { position: relative; height: 32px; }
-  .ui-dc__page::after, .ui-dc__send::after, .ui-dc__link::after { content: ""; position: absolute; inset: -4px; }
-  .ui-dc__head, .ui-dc__box--min .ui-dc__head { height: 40px; }
+  .ui-dcc__opt, .ui-dcc__own { min-height: 44px; }
+  .ui-dcc__page, .ui-dcc__send { position: relative; width: 32px; height: 32px; }
+  .ui-dcc__send--word { width: auto; }
+  .ui-dcc__link { position: relative; height: 32px; }
+  .ui-dcc__page::after, .ui-dcc__send::after, .ui-dcc__link::after { content: ""; position: absolute; inset: -4px; }
+  .ui-dcc__head, .ui-dcc__box--min .ui-dcc__head { height: 40px; }
 }
 
-@keyframes ui-dc-in { from { opacity: 0; } }
+@keyframes ui-dcc-in { from { opacity: 0; } }
 
 @media (prefers-reduced-motion: reduce) {
-  .ui-dc *, .ui-dc *::before, .ui-dc *::after { animation: none !important; transition: none !important; }
-  .ui-dc__wrap { transition: none; }
+  .ui-dcc *, .ui-dcc *::before, .ui-dcc *::after { animation: none !important; transition: none !important; }
+  .ui-dcc__wrap { transition: none; }
 }
 
 /* Dark mode: follows a .dark class or data-theme="dark" on any ancestor, e.g. <html> */
-:where(.dark, [data-theme="dark"]) .ui-dc {
+:where(.dark, [data-theme="dark"]) .ui-dcc {
   /* Steve: every color above follows its token, which already switches with dark mode */
-  --ui-dc-wire-ink: rgba(255, 255, 255, 0.5);
-  --ui-dc-wire-mid: rgba(255, 255, 255, 0.2);
-  --ui-dc-wire-soft: rgba(255, 255, 255, 0.08);
-  --ui-dc-shadow: 0 0 0 1px var(--ui-dc-line), 0 1px 2px rgba(0, 0, 0, 0.3);
+  --ui-dcc-wire-ink: rgba(255, 255, 255, 0.5);
+  --ui-dcc-wire-mid: rgba(255, 255, 255, 0.2);
+  --ui-dcc-wire-soft: rgba(255, 255, 255, 0.08);
+  --ui-dcc-shadow: 0 0 0 1px var(--ui-dcc-line), 0 1px 2px rgba(0, 0, 0, 0.3);
 }
 `;

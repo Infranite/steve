@@ -4,11 +4,11 @@
 import { useEffect, useId, useLayoutEffect, useRef, useState, type CSSProperties, type FocusEvent, type KeyboardEvent, type ReactNode } from "react";
 
 /*
- * Running Now – a live status of background agent tasks, in a single self-contained file.
+ * Running Now (Clean) – a live status of background agent tasks, in a single self-contained file.
  * Collapsed it is one quiet pill for a header or a sidebar – "3 running · 2 need you". Open, a popover lists the tasks:
  * a ring that fills as the task moves on, the title, the step it is on, "2/4", and Pause / Resume – a task that waits
  * on you says so with a small badge and an Open button instead.
- * Classic style: the popover is a gray tray with the tasks on a white card, the way to all tasks on the tray below it.
+ * Clean style: one white button and one white popover card with hairline shadows, no tray.
  * Icons: Hugeicons Free (MIT, © Hugeicons, hugeicons.com). The styles are injected below, so no extra files are needed.
  */
 
@@ -97,7 +97,7 @@ const progressOf = (t: RunningTask) => {
 };
 /** Steve: a task's color is its state's (run blue, waiting amber, paused gray, done green), not how far it is */
 const progressColor = (t: RunningTask) =>
-  t.state === "done" ? "var(--ui-rn-done)" : t.state === "paused" ? "var(--ui-rn-muted)" : t.state === "needs-you" ? "var(--ui-rn-amber)" : "var(--ui-rn-blue)";
+  t.state === "done" ? "var(--ui-rnc-done)" : t.state === "paused" ? "var(--ui-rnc-muted)" : t.state === "needs-you" ? "var(--ui-rnc-amber)" : "var(--ui-rnc-blue)";
 
 /* ---------- Component ---------- */
 
@@ -192,7 +192,7 @@ export function RunningNow({
     if (said.length) setAnnounce(said.join(". "));
   });
 
-  const rows = () => [...(listRef.current?.querySelectorAll<HTMLButtonElement>(".ui-rn__main") ?? [])];
+  const rows = () => [...(listRef.current?.querySelectorAll<HTMLButtonElement>(".ui-rnc__main") ?? [])];
   /** Into the list: the first (or last) task – the footer link or the panel itself when there are none */
   const focusIn = (last = false) =>
     requestAnimationFrame(() => {
@@ -214,7 +214,7 @@ export function RunningNow({
     }
     const all = rows();
     // From a row or from its Pause / Resume / Open button
-    const li = (e.target as HTMLElement).closest?.(".ui-rn__row");
+    const li = (e.target as HTMLElement).closest?.(".ui-rnc__row");
     const i = all.findIndex((b) => b.parentElement === li);
     if (i < 0) return;
     const next = e.key === "ArrowDown" ? Math.min(all.length - 1, i + 1) : e.key === "ArrowUp" ? Math.max(0, i - 1) : e.key === "Home" ? 0 : e.key === "End" ? all.length - 1 : null;
@@ -225,7 +225,7 @@ export function RunningNow({
 
   const lastFocus = useRef<{ el: HTMLElement; id?: string; index: number } | null>(null);
   const onPanelFocus = (e: FocusEvent<HTMLDivElement>) => {
-    const li = (e.target as HTMLElement).closest<HTMLElement>(".ui-rn__row");
+    const li = (e.target as HTMLElement).closest<HTMLElement>(".ui-rnc__row");
     lastFocus.current = { el: e.target as HTMLElement, id: li?.dataset.id, index: li ? rows().findIndex((b) => b.parentElement === li) : -1 };
   };
   useLayoutEffect(() => {
@@ -248,12 +248,12 @@ export function RunningNow({
 
   return (
     <>
-      <style href="ui-running-now" precedence="default">
+      <style href="ui-running-now-clean" precedence="default">
         {css}
       </style>
       <div
         ref={rootRef}
-        className={["ui-rn", className].filter(Boolean).join(" ")}
+        className={["ui-rnc", className].filter(Boolean).join(" ")}
         data-open={open || undefined}
         data-align={align}
         data-both={(running > 0 && waiting > 0) || undefined}
@@ -268,7 +268,7 @@ export function RunningNow({
         <button
           ref={triggerRef}
           type="button"
-          className="ui-rn__trigger"
+          className="ui-rnc__trigger"
           aria-haspopup="dialog"
           aria-expanded={open}
           aria-controls={panelId}
@@ -283,59 +283,59 @@ export function RunningNow({
           {running || waiting ? (
             <>
               {running > 0 && (
-                <span className="ui-rn__part">
-                  <span className="ui-rn__ring" aria-hidden="true" />
-                  <Swap className="ui-rn__n" value={num.format(running)} />
-                  <span className="ui-rn__word">{labels.running}</span>
+                <span className="ui-rnc__part">
+                  <span className="ui-rnc__ring" aria-hidden="true" />
+                  <Swap className="ui-rnc__n" value={num.format(running)} />
+                  <span className="ui-rnc__word">{labels.running}</span>
                 </span>
               )}
               {running > 0 && waiting > 0 && (
-                <span className="ui-rn__sep" aria-hidden="true">
+                <span className="ui-rnc__sep" aria-hidden="true">
                   ·
                 </span>
               )}
               {waiting > 0 && (
-                <span className="ui-rn__part">
-                  <span className="ui-rn__dot" aria-hidden="true" />
-                  <Swap className="ui-rn__n" value={num.format(waiting)} />
-                  <span className="ui-rn__word">{waitingWord}</span>
+                <span className="ui-rnc__part">
+                  <span className="ui-rnc__dot" aria-hidden="true" />
+                  <Swap className="ui-rnc__n" value={num.format(waiting)} />
+                  <span className="ui-rnc__word">{waitingWord}</span>
                 </span>
               )}
             </>
           ) : paused > 0 ? (
-            <span className="ui-rn__part">
-              <span className="ui-rn__ring" data-idle="" aria-hidden="true" />
-              <Swap className="ui-rn__n" value={num.format(paused)} />
-              <span className="ui-rn__word">{labels.pausedCount}</span>
+            <span className="ui-rnc__part">
+              <span className="ui-rnc__ring" data-idle="" aria-hidden="true" />
+              <Swap className="ui-rnc__n" value={num.format(paused)} />
+              <span className="ui-rnc__word">{labels.pausedCount}</span>
             </span>
           ) : (
-            <span className="ui-rn__part">
-              <span className="ui-rn__ring" data-idle="" aria-hidden="true" />
-              <span className="ui-rn__word">{labels.idle}</span>
+            <span className="ui-rnc__part">
+              <span className="ui-rnc__ring" data-idle="" aria-hidden="true" />
+              <span className="ui-rnc__word">{labels.idle}</span>
             </span>
           )}
           <ChevronDown />
         </button>
 
-        <div ref={panelRef} id={panelId} className="ui-rn__panel" style={shift ? { translate: `${shift}px 0` } : undefined} role="dialog" aria-label={labels.title} tabIndex={-1} hidden={!open} onKeyDown={onPanelKey} onFocus={onPanelFocus}>
-          <div className="ui-rn__head">
-            <span className="ui-rn__label">{labels.title}</span>
-            <span className="ui-rn__count">{num.format(list.length)}</span>
+        <div ref={panelRef} id={panelId} className="ui-rnc__panel" style={shift ? { translate: `${shift}px 0` } : undefined} role="dialog" aria-label={labels.title} tabIndex={-1} hidden={!open} onKeyDown={onPanelKey} onFocus={onPanelFocus}>
+          <div className="ui-rnc__head">
+            <span className="ui-rnc__label">{labels.title}</span>
+            <span className="ui-rnc__count">{num.format(list.length)}</span>
           </div>
-          <div className="ui-rn__body">
+          <div className="ui-rnc__body">
             {list.length ? (
-              <ul ref={listRef} className="ui-rn__list">
+              <ul ref={listRef} className="ui-rnc__list">
                 {list.map((t) => (
                   <Row key={t.id} task={t} labels={labels} onPause={onPause} onResume={onResume} onOpen={onOpen} />
                 ))}
               </ul>
             ) : (
-              <p className="ui-rn__empty">{labels.empty}</p>
+              <p className="ui-rnc__empty">{labels.empty}</p>
             )}
           </div>
           {onOpenAll && (
-            <div className="ui-rn__foot">
-              <button type="button" className="ui-rn__all" onClick={onOpenAll}>
+            <div className="ui-rnc__foot">
+              <button type="button" className="ui-rnc__all" onClick={onOpenAll}>
                 <TasksIcon />
                 <span>{labels.openAll}</span>
                 <ChevronRight />
@@ -344,7 +344,7 @@ export function RunningNow({
           )}
         </div>
 
-        <span className="ui-rn__sr" role="status" aria-live="polite">
+        <span className="ui-rnc__sr" role="status" aria-live="polite">
           {announce}
         </span>
       </div>
@@ -373,43 +373,43 @@ function Row({
   const step = t.state === "done" ? labels.done : t.state === "paused" ? t.step || labels.paused : t.step;
   const state = t.state === "needs-you" ? labels.needsYouBadge : t.state === "paused" ? labels.paused : t.state === "done" ? labels.done : labels.running;
   return (
-    <li className="ui-rn__row" data-state={t.state} data-id={t.id}>
+    <li className="ui-rnc__row" data-state={t.state} data-id={t.id}>
       <button
         type="button"
-        className="ui-rn__main"
+        className="ui-rnc__main"
         aria-label={`${t.title} – ${state}. ${t.state === "done" || !t.step ? "" : `${t.step}. `}${total ? labels.stepsOf.replace("{done}", num.format(done)).replace("{total}", num.format(total)) : ""}`}
         onClick={() => onOpen?.(t.id)}
       >
         <Ring value={value} color={progressColor(t)} />
-        <span className="ui-rn__text">
-          <span className="ui-rn__title" dir="auto" title={t.title}>
+        <span className="ui-rnc__text">
+          <span className="ui-rnc__title" dir="auto" title={t.title}>
             {t.title}
           </span>
-          <Swap className="ui-rn__step" value={step} />
+          <Swap className="ui-rnc__step" value={step} />
         </span>
         {t.state === "needs-you" ? (
-          <span className="ui-rn__badge">{labels.needsYouBadge}</span>
+          <span className="ui-rnc__badge">{labels.needsYouBadge}</span>
         ) : total > 0 ? (
-          <span className="ui-rn__steps">
+          <span className="ui-rnc__steps">
             {num.format(done)}/{num.format(total)}
           </span>
         ) : null}
       </button>
-      <span className="ui-rn__act">
+      <span className="ui-rnc__act">
         {t.state === "needs-you" || (t.state === "paused" && t.resumable === false) ? (
-          <button type="button" className="ui-rn__btn ui-rn__btn--text" aria-label={`${labels.open} ${t.title} – ${(t.state === "paused" ? labels.paused : labels.needsYouBadge).toLowerCase()}`} onClick={() => onOpen?.(t.id)}>
+          <button type="button" className="ui-rnc__btn ui-rnc__btn--text" aria-label={`${labels.open} ${t.title} – ${(t.state === "paused" ? labels.paused : labels.needsYouBadge).toLowerCase()}`} onClick={() => onOpen?.(t.id)}>
             {labels.open}
           </button>
         ) : t.state === "running" && onPause ? (
-          <button type="button" className="ui-rn__btn" aria-label={`${labels.pause} ${t.title}`} title={labels.pause} onClick={() => onPause?.(t.id)}>
+          <button type="button" className="ui-rnc__btn" aria-label={`${labels.pause} ${t.title}`} title={labels.pause} onClick={() => onPause?.(t.id)}>
             <PauseIcon />
           </button>
         ) : t.state === "paused" && onResume ? (
-          <button type="button" className="ui-rn__btn" aria-label={`${labels.resume} ${t.title}`} title={labels.resume} onClick={() => onResume?.(t.id)}>
+          <button type="button" className="ui-rnc__btn" aria-label={`${labels.resume} ${t.title}`} title={labels.resume} onClick={() => onResume?.(t.id)}>
             <PlayIcon />
           </button>
         ) : t.state === "done" ? (
-          <span className="ui-rn__btn" aria-hidden="true">
+          <span className="ui-rnc__btn" aria-hidden="true">
             <CheckIcon />
           </span>
         ) : null}
@@ -423,9 +423,9 @@ function Ring({ value, color }: { value: number; color: string }) {
   const r = 2;
   const c = 2 * Math.PI * r;
   return (
-    <svg className="ui-rn__mark" viewBox="0 0 14 14" width="14" height="14" aria-hidden="true" style={{ color }}>
+    <svg className="ui-rnc__mark" viewBox="0 0 14 14" width="14" height="14" aria-hidden="true" style={{ color }}>
       <circle cx="7" cy="7" r="6" fill="none" stroke="currentColor" strokeWidth="1.5" />
-      <circle className="ui-rn__pie" cx="7" cy="7" r={r} fill="none" stroke="currentColor" strokeWidth={r * 2} style={{ strokeDasharray: `${c * value} ${c}` } as CSSProperties} transform="rotate(-90 7 7)" />
+      <circle className="ui-rnc__pie" cx="7" cy="7" r={r} fill="none" stroke="currentColor" strokeWidth={r * 2} style={{ strokeDasharray: `${c * value} ${c}` } as CSSProperties} transform="rotate(-90 7 7)" />
     </svg>
   );
 }
@@ -444,7 +444,7 @@ function Swap({ value, className }: { value: string; className?: string }) {
     return () => clearTimeout(timer);
   }, [value]);
   return (
-    <span className={["ui-rn__swap", className].filter(Boolean).join(" ")}>
+    <span className={["ui-rnc__swap", className].filter(Boolean).join(" ")}>
       {items.map((i) => (
         <span key={i.k} data-out={i.out || undefined} data-fresh={i.fresh || undefined} aria-hidden={i.out || undefined} dir="auto" title={i.out ? undefined : i.v}>
           {i.v}
@@ -486,49 +486,46 @@ const TasksIcon = () => (
   </Svg>
 );
 const ChevronDown = () => (
-  <svg className="ui-rn__chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+  <svg className="ui-rnc__chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
     <path d="M18 9C18 9 13.58 15 12 15C10.42 15 6 9 6 9" />
   </svg>
 );
 const ChevronRight = () => (
-  <svg className="ui-rn__chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+  <svg className="ui-rnc__chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
     <path d="M9 6C9 6 15 10.42 15 12C15 13.58 9 18 9 18" />
   </svg>
 );
 
 /* ---------- Styles ---------- */
 
-
 const css = /* css */ `
-/* Colors and motion as variables – override them on .ui-rn */
-.ui-rn {
-  --ui-rn-tray: var(--aui-subtle, #f0f0f0);
-  --ui-rn-tray-hover: color-mix(in srgb, var(--aui-ink, #171717) 7%, var(--ui-rn-tray));
-  --ui-rn-card: var(--aui-overlay, #ffffff);
-  --ui-rn-strong: var(--aui-ink, #171717);
-  --ui-rn-ink: var(--aui-ink, #171717);
-  --ui-rn-text: var(--aui-muted, #6b6b6b);
-  --ui-rn-muted: var(--aui-muted, #8a8a8a);
-  --ui-rn-faint: var(--aui-placeholder, #b8b8b8);
-  --ui-rn-icon: var(--aui-muted, #8a8a8a);
-  --ui-rn-line: var(--aui-border, #ececec);
-  --ui-rn-hover: var(--aui-subtle, #f5f5f5);
-  --ui-rn-press: color-mix(in srgb, var(--aui-ink, #171717) 9%, transparent);
-  --ui-rn-fill: var(--aui-subtle, #f2f2f2);
-  --ui-rn-focus: var(--aui-focus, rgba(0, 96, 226, 0.7));
-  --ui-rn-amber: var(--aui-amber, #e8b000);
-  --ui-rn-blue: var(--aui-blue, #0190fe);
-  --ui-rn-done: var(--aui-success, #1e8a4f);
-  --ui-rn-badge: var(--aui-warning, #8f6c00);
-  --ui-rn-badge-wash: var(--aui-warning-soft, #f9f1d6);
+/* Colors and motion as variables – override them on .ui-rnc */
+.ui-rnc {
+  /* Steve: colors from Steve's tokens, which switch between light and dark themselves */
+  --ui-rnc-card: var(--aui-overlay, #ffffff);
+  --ui-rnc-strong: var(--aui-ink, #000000);
+  --ui-rnc-ink: var(--aui-ink, rgba(0, 0, 0, 0.88));
+  --ui-rnc-text: var(--aui-muted, rgba(0, 0, 0, 0.61));
+  --ui-rnc-muted: var(--aui-muted, rgba(0, 0, 0, 0.45));
+  --ui-rnc-faint: var(--aui-placeholder, rgba(0, 0, 0, 0.27));
+  --ui-rnc-icon: var(--aui-muted, rgba(0, 0, 0, 0.447));
+  --ui-rnc-line: var(--aui-border, rgba(0, 0, 0, 0.06));
+  --ui-rnc-hover: var(--aui-subtle, rgba(0, 0, 0, 0.04));
+  --ui-rnc-press: color-mix(in srgb, var(--aui-ink, #171717) 9%, transparent);
+  --ui-rnc-focus: var(--aui-focus, rgba(0, 96, 226, 0.7));
+  --ui-rnc-amber: var(--aui-amber, #e8b000);
+  --ui-rnc-blue: var(--aui-blue, #0190fe);
+  --ui-rnc-done: var(--aui-success, #1e8a4f);
+  --ui-rnc-badge: var(--aui-warning, #8f6c00);
+  --ui-rnc-badge-wash: var(--aui-warning-soft, #f9f1d6);
   /* A 1px edge and a soft lift; the popover floats a little higher */
-  --ui-rn-shadow: var(--aui-shadow-card, 0 0 0 1px var(--ui-rn-line), 0 1px 2px rgba(0, 0, 0, 0.04));
-  --ui-rn-pop: var(--aui-shadow-popover, 0 0 0 1px var(--ui-rn-line), 0 1px 2px rgba(0, 0, 0, 0.04), 0 14px 32px -12px rgba(0, 0, 0, 0.18));
-  --ui-rn-ease: var(--aui-ease, cubic-bezier(0.32, 0.72, 0.24, 1));
+  --ui-rnc-shadow: var(--aui-shadow-card, 0 0 0 1px var(--ui-rnc-line), 0 1px 2px rgba(0, 0, 0, 0.04));
+  --ui-rnc-pop: var(--aui-shadow-popover, 0 0 0 1px var(--ui-rnc-line), 0 1px 2px rgba(0, 0, 0, 0.04), 0 14px 32px -12px rgba(0, 0, 0, 0.18));
+  --ui-rnc-ease: var(--aui-ease, cubic-bezier(0.32, 0.72, 0.24, 1));
   /* How wide the popover is */
-  --ui-rn-w: 348px;
+  --ui-rnc-w: 340px;
   /* One task row */
-  --ui-rn-row: 52px;
+  --ui-rnc-row: 52px;
   position: relative;
   display: inline-block;
   flex: none;
@@ -538,130 +535,134 @@ const css = /* css */ `
   font-size: 13px;
   line-height: 20px;
   font-weight: 400;
-  color: var(--ui-rn-text);
+  color: var(--ui-rnc-ink);
   text-align: start;
   -webkit-font-smoothing: antialiased;
 }
-.ui-rn *, .ui-rn *::before, .ui-rn *::after { box-sizing: border-box; }
-:where(.ui-rn) button { margin: 0; padding: 0; border: 0; background: none; font: inherit; color: inherit; text-align: inherit; cursor: pointer; -webkit-tap-highlight-color: transparent; }
-.ui-rn button:focus-visible { outline: 2px solid var(--ui-rn-focus); outline-offset: 2px; }
-.ui-rn :is(p, ul) { margin: 0; padding: 0; list-style: none; }
-.ui-rn svg { display: block; flex: none; }
-.ui-rn__sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+.ui-rnc *, .ui-rnc *::before, .ui-rnc *::after { box-sizing: border-box; }
+:where(.ui-rnc) button { margin: 0; padding: 0; border: 0; background: none; font: inherit; color: inherit; text-align: inherit; cursor: pointer; -webkit-tap-highlight-color: transparent; }
+.ui-rnc button:focus-visible { outline: 2px solid var(--ui-rnc-focus); outline-offset: 2px; }
+.ui-rnc :is(p, ul) { margin: 0; padding: 0; list-style: none; }
+.ui-rnc svg { display: block; flex: none; }
+.ui-rnc__sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 
-/* ----- The trigger: a gray pill with the counts in it ----- */
-.ui-rn__trigger {
+/* ----- The trigger: one white button, the counts in it ----- */
+.ui-rnc__trigger {
   display: inline-flex;
   align-items: center;
   gap: 8px;
   max-width: 100%;
-  height: 30px;
-  padding: 0 9px 0 11px;
-  border-radius: calc(var(--aui-radius, 10px) - 2px);
-  background: var(--ui-rn-tray);
+  height: 28px;
+  padding: 0 8px 0 10px;
+  border-radius: calc(var(--aui-radius, 7px) - 1px);
+  background: var(--aui-surface, var(--ui-rnc-card));
+  box-shadow: var(--ui-rnc-shadow);
   font-size: 12px;
   line-height: 16px;
-  color: var(--ui-rn-muted);
+  color: var(--ui-rnc-text);
   white-space: nowrap;
   transition: background-color 120ms ease;
 }
-.ui-rn__trigger:hover, .ui-rn[data-open] .ui-rn__trigger { background: var(--ui-rn-tray-hover); }
-.ui-rn__part { display: inline-flex; flex: none; align-items: center; gap: 4px; }
-.ui-rn__n { flex: none; font-weight: 500; color: var(--ui-rn-ink); font-variant-numeric: tabular-nums; }
-.ui-rn__sep { flex: none; color: var(--aui-placeholder, var(--ui-rn-faint)); }
-.ui-rn__ring { flex: none; width: 8px; height: 8px; margin-right: 2px; border-radius: 50%; box-shadow: inset 0 0 0 1.5px var(--ui-rn-blue); }
-.ui-rn__ring[data-idle] { box-shadow: inset 0 0 0 1.5px var(--ui-rn-faint); }
-.ui-rn__dot { flex: none; width: 6px; height: 6px; margin: 0 3px 0 1px; border-radius: 50%; background: var(--ui-rn-amber); }
-.ui-rn__trigger > .ui-rn__chev { width: 12px; height: 12px; margin-left: -2px; color: var(--ui-rn-icon); transition: rotate 180ms var(--ui-rn-ease); }
-.ui-rn[data-open] .ui-rn__trigger > .ui-rn__chev { rotate: 180deg; }
+.ui-rnc__trigger:hover { background: color-mix(in srgb, var(--ui-rnc-card), #000 2%); }
+.ui-rnc__part { display: inline-flex; flex: none; align-items: center; gap: 4px; }
+.ui-rnc__n { flex: none; font-weight: 500; color: var(--ui-rnc-ink); font-variant-numeric: tabular-nums; }
+.ui-rnc__sep { flex: none; color: var(--aui-placeholder, var(--ui-rnc-faint)); }
+.ui-rnc__ring { flex: none; width: 8px; height: 8px; margin-right: 2px; border-radius: 50%; box-shadow: inset 0 0 0 1.5px var(--ui-rnc-blue); }
+.ui-rnc__ring[data-idle] { box-shadow: inset 0 0 0 1.5px var(--ui-rnc-faint); }
+.ui-rnc__dot { flex: none; width: 6px; height: 6px; margin: 0 3px 0 1px; border-radius: 50%; background: var(--ui-rnc-amber); }
+.ui-rnc__trigger > .ui-rnc__chev { width: 12px; height: 12px; margin-left: -2px; color: var(--ui-rnc-icon); transition: rotate 180ms var(--ui-rnc-ease); }
+.ui-rnc[data-open] .ui-rnc__trigger > .ui-rnc__chev { rotate: 180deg; }
 
-/* ----- The popover: a gray tray, the tasks on a white card in it ----- */
-.ui-rn__panel {
+/* ----- The popover: one white card under the trigger ----- */
+.ui-rnc__panel {
   position: absolute;
   top: calc(100% + 6px);
   inset-inline-end: 0;
   z-index: 50;
-  width: min(var(--ui-rn-w), calc(100vw - 32px));
+  width: min(var(--ui-rnc-w), calc(100vw - 32px));
   padding: 4px;
-  border-radius: var(--aui-radius-lg, 16px);
-  background: var(--ui-rn-tray);
-  box-shadow: var(--ui-rn-pop);
+  border-radius: var(--aui-radius-lg, 10px);
+  background: var(--aui-overlay, var(--ui-rnc-card));
+  box-shadow: var(--ui-rnc-pop);
   transform-origin: top right;
-  animation: ui-rn-pop 180ms var(--ui-rn-ease) both;
+  animation: ui-rnc-pop 180ms var(--ui-rnc-ease) both;
 }
-.ui-rn[data-align="start"] .ui-rn__panel { inset-inline: 0 auto; transform-origin: top left; }
-.ui-rn:dir(rtl) .ui-rn__panel { transform-origin: top left; }
-.ui-rn[data-align="start"]:dir(rtl) .ui-rn__panel { transform-origin: top right; }
-.ui-rn__panel[hidden] { display: none; }
-.ui-rn__panel:focus { outline: none; }
-.ui-rn__head { display: flex; align-items: center; gap: 6px; height: 32px; padding: 0 10px 2px; }
-.ui-rn__label { font-size: 13px; font-weight: 500; line-height: 20px; color: var(--ui-rn-strong); }
-.ui-rn__count { font-size: 12px; line-height: 16px; color: var(--ui-rn-muted); font-variant-numeric: tabular-nums; }
-.ui-rn__body { padding: 4px; border-radius: calc(var(--aui-radius-lg, 16px) - 4px); background: var(--ui-rn-card); box-shadow: var(--ui-rn-shadow); }
-.ui-rn__list { display: grid; grid-template-columns: minmax(0, 1fr); max-height: min(calc(var(--ui-rn-row) * 5.5), max(calc(var(--ui-rn-row) * 2.5), calc(100dvh - 200px))); overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; }
-.ui-rn__empty { padding: 14px 8px 16px; font-size: 12px; line-height: 16px; color: var(--ui-rn-muted); }
+.ui-rnc[data-align="start"] .ui-rnc__panel { inset-inline: 0 auto; transform-origin: top left; }
+.ui-rnc:dir(rtl) .ui-rnc__panel { transform-origin: top left; }
+.ui-rnc[data-align="start"]:dir(rtl) .ui-rnc__panel { transform-origin: top right; }
+.ui-rnc__panel[hidden] { display: none; }
+.ui-rnc__panel:focus { outline: none; }
+.ui-rnc__head { display: flex; align-items: center; gap: 6px; height: 28px; padding: 0 8px; }
+.ui-rnc__label { font-size: 10px; font-weight: 500; line-height: 16px; letter-spacing: 0.5px; text-transform: uppercase; color: var(--ui-rnc-muted); }
+.ui-rnc__count { font-size: 10px; font-weight: 500; line-height: 16px; color: var(--aui-placeholder, var(--ui-rnc-faint)); font-variant-numeric: tabular-nums; }
+.ui-rnc__body { display: grid; grid-template-columns: minmax(0, 1fr); }
+.ui-rnc__list { display: grid; grid-template-columns: minmax(0, 1fr); max-height: min(calc(var(--ui-rnc-row) * 5.5), max(calc(var(--ui-rnc-row) * 2.5), calc(100dvh - 200px))); overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; }
+.ui-rnc__empty { padding: 14px 8px 16px; font-size: 12px; line-height: 16px; color: var(--ui-rnc-muted); }
 
 /* One row – always 52px, whatever state it's in */
-.ui-rn__row { position: relative; display: flex; align-items: center; flex: none; height: var(--ui-rn-row); border-radius: calc(var(--aui-radius-sm, 7px) + 1px); transition: background-color 120ms ease; }
-.ui-rn__row:hover { background: var(--ui-rn-hover); }
-.ui-rn__main { display: flex; flex: 1; align-items: center; gap: 10px; min-width: 0; height: 100%; padding: 0 6px 0 9px; border-radius: calc(var(--aui-radius-sm, 7px) + 1px); }
-.ui-rn__main:focus-visible { background: var(--ui-rn-hover); outline: 2px solid var(--ui-rn-focus); outline-offset: -2px; }
-.ui-rn__mark { flex: none; transition: color 400ms ease; }
-.ui-rn__pie { transition: stroke-dasharray 700ms var(--ui-rn-ease); }
-.ui-rn__text { display: grid; flex: 1; min-width: 0; }
-.ui-rn__title { overflow: hidden; font-weight: 500; color: var(--ui-rn-ink); white-space: nowrap; text-overflow: ellipsis; }
-.ui-rn__step { font-size: 12px; line-height: 16px; color: var(--ui-rn-muted); }
-.ui-rn__row[data-state="done"] .ui-rn__title { color: var(--ui-rn-text); }
-.ui-rn__steps { flex: none; font-size: 12px; line-height: 16px; color: var(--ui-rn-muted); font-variant-numeric: tabular-nums; }
-.ui-rn__badge { flex: none; height: 20px; padding: 0 7px; border-radius: calc(var(--aui-radius-sm, 7px) - 2px); background: var(--ui-rn-badge-wash); font-size: 11.5px; font-weight: 500; line-height: 20px; color: var(--ui-rn-badge); white-space: nowrap; animation: ui-rn-in 260ms var(--ui-rn-ease) both; }
-.ui-rn__act { display: flex; flex: none; justify-content: flex-end; min-width: 40px; padding-right: 6px; }
-.ui-rn__btn { display: grid; place-items: center; width: 28px; height: 28px; border-radius: var(--aui-radius-sm, 7px); color: var(--ui-rn-icon); transition: background-color 120ms ease, color 120ms ease; }
-.ui-rn__btn svg { width: 14px; height: 14px; }
-button.ui-rn__btn:hover { background: var(--ui-rn-press); color: var(--ui-rn-ink); }
-span.ui-rn__btn { color: var(--ui-rn-blue); }
-.ui-rn__btn--text { width: auto; padding: 0 9px; background: var(--ui-rn-fill); font-size: 12px; font-weight: 500; line-height: 16px; color: var(--ui-rn-ink); animation: ui-rn-in 260ms var(--ui-rn-ease) both; }
-button.ui-rn__btn--text:hover { background: var(--ui-rn-press); }
+.ui-rnc__row { position: relative; display: flex; align-items: center; flex: none; height: var(--ui-rnc-row); border-radius: calc(var(--aui-radius-sm, 5px) + 1px); transition: background-color 120ms ease; }
+.ui-rnc__row:hover { background: var(--ui-rnc-hover); }
+.ui-rnc__main { display: flex; flex: 1; align-items: center; gap: 10px; min-width: 0; height: 100%; padding: 0 6px 0 9px; border-radius: calc(var(--aui-radius-sm, 5px) + 1px); }
+.ui-rnc__main:focus-visible { background: var(--ui-rnc-hover); outline: 2px solid var(--ui-rnc-focus); outline-offset: -2px; }
+.ui-rnc__mark { flex: none; transition: color 400ms ease; }
+.ui-rnc__pie { transition: stroke-dasharray 700ms var(--ui-rnc-ease); }
+.ui-rnc__text { display: grid; flex: 1; min-width: 0; }
+.ui-rnc__title { overflow: hidden; font-weight: 500; color: var(--ui-rnc-ink); white-space: nowrap; text-overflow: ellipsis; }
+.ui-rnc__step { font-size: 12px; line-height: 16px; color: var(--ui-rnc-muted); }
+.ui-rnc__row[data-state="done"] .ui-rnc__title { color: var(--ui-rnc-text); }
+.ui-rnc__steps { flex: none; font-size: 12px; line-height: 16px; color: var(--ui-rnc-muted); font-variant-numeric: tabular-nums; }
+.ui-rnc__badge { flex: none; height: 18px; padding: 0 6px; border-radius: var(--aui-radius-sm, 5px); background: var(--ui-rnc-badge-wash); font-size: 11px; font-weight: 500; line-height: 18px; color: var(--ui-rnc-badge); white-space: nowrap; animation: ui-rnc-in 260ms var(--ui-rnc-ease) both; }
+.ui-rnc__act { display: flex; flex: none; justify-content: flex-end; min-width: 40px; padding-right: 6px; }
+.ui-rnc__btn { display: grid; place-items: center; width: 28px; height: 28px; border-radius: calc(var(--aui-radius-sm, 5px) + 1px); color: var(--ui-rnc-icon); transition: background-color 120ms ease, color 120ms ease; }
+.ui-rnc__btn svg { width: 14px; height: 14px; }
+button.ui-rnc__btn:hover { background: var(--ui-rnc-press); color: var(--ui-rnc-ink); }
+span.ui-rnc__btn { color: var(--ui-rnc-blue); }
+.ui-rnc__btn--text { width: auto; padding: 0 8px; background: var(--aui-surface, var(--ui-rnc-card)); box-shadow: var(--ui-rnc-shadow); font-size: 12px; font-weight: 500; line-height: 16px; color: var(--ui-rnc-ink); animation: ui-rnc-in 260ms var(--ui-rnc-ease) both; }
+button.ui-rnc__btn--text:hover { background: color-mix(in srgb, var(--ui-rnc-card), #000 3%); }
 
 /* Text that swaps: stacked in one cell, the old line leaves upwards while the new one rises in */
-.ui-rn__swap { display: inline-grid; min-width: 0; overflow: hidden; }
-.ui-rn__swap > * { grid-area: 1 / 1; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
-.ui-rn__swap > [data-fresh] { animation: ui-rn-swap-in 340ms var(--ui-rn-ease) both; }
-.ui-rn__swap > [data-out] { animation: ui-rn-swap-out 340ms var(--ui-rn-ease) both; }
+.ui-rnc__swap { display: inline-grid; min-width: 0; overflow: hidden; }
+.ui-rnc__swap > * { grid-area: 1 / 1; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.ui-rnc__swap > [data-fresh] { animation: ui-rnc-swap-in 340ms var(--ui-rnc-ease) both; }
+.ui-rnc__swap > [data-out] { animation: ui-rnc-swap-out 340ms var(--ui-rnc-ease) both; }
 
-/* ----- Footer: on the tray, the way to the full list ----- */
-.ui-rn__foot { padding: 4px 0 0; }
-.ui-rn__all { display: flex; align-items: center; gap: 8px; width: 100%; height: 32px; padding: 0 9px 0 13px; border-radius: calc(var(--aui-radius-sm, 7px) + 3px); color: var(--ui-rn-text); transition: background-color 120ms ease, color 120ms ease; }
-.ui-rn__all:hover { background: var(--ui-rn-tray-hover); color: var(--ui-rn-ink); }
-.ui-rn__all > svg:first-child { width: 14px; height: 14px; color: var(--ui-rn-icon); }
-.ui-rn__all > span { flex: 1; font-weight: 500; }
-.ui-rn__all > .ui-rn__chev { width: 12px; height: 12px; color: var(--ui-rn-icon); transition: translate 180ms var(--ui-rn-ease); }
-.ui-rn__all:hover > .ui-rn__chev { translate: 2px 0; }
-.ui-rn:dir(rtl) .ui-rn__all > .ui-rn__chev { scale: -1 1; }
-.ui-rn:dir(rtl) .ui-rn__all:hover > .ui-rn__chev { translate: -2px 0; }
+/* ----- Footer: the way to the full list ----- */
+.ui-rnc__foot { margin: 4px -4px -4px; padding: 4px; border-top: 0.5px solid var(--ui-rnc-line); }
+.ui-rnc__all { display: flex; align-items: center; gap: 8px; width: 100%; height: 32px; padding: 0 8px 0 9px; border-radius: calc(var(--aui-radius-sm, 5px) + 1px); color: var(--ui-rnc-ink); transition: background-color 120ms ease; }
+.ui-rnc__all:hover { background: var(--ui-rnc-hover); }
+.ui-rnc__all > svg:first-child { width: 14px; height: 14px; color: var(--ui-rnc-icon); }
+.ui-rnc__all > span { flex: 1; }
+.ui-rnc__all > .ui-rnc__chev { width: 12px; height: 12px; color: var(--ui-rnc-icon); transition: translate 180ms var(--ui-rnc-ease); }
+.ui-rnc__all:hover > .ui-rnc__chev { translate: 2px 0; }
+.ui-rnc:dir(rtl) .ui-rnc__all > .ui-rnc__chev { scale: -1 1; }
+.ui-rnc:dir(rtl) .ui-rnc__all:hover > .ui-rnc__chev { translate: -2px 0; }
 
-@keyframes ui-rn-pop { from { opacity: 0; transform: translateY(-4px) scale(0.98); } }
-@keyframes ui-rn-in { from { opacity: 0; transform: scale(0.92); } }
-@keyframes ui-rn-swap-in { from { opacity: 0; transform: translateY(60%); } }
-@keyframes ui-rn-swap-out { to { opacity: 0; transform: translateY(-60%); } }
+@keyframes ui-rnc-pop { from { opacity: 0; transform: translateY(-4px) scale(0.98); } }
+@keyframes ui-rnc-in { from { opacity: 0; transform: scale(0.92); } }
+@keyframes ui-rnc-swap-in { from { opacity: 0; transform: translateY(60%); } }
+@keyframes ui-rnc-swap-out { to { opacity: 0; transform: translateY(-60%); } }
 
 /* Phones: with both counts (or long ones) the trigger keeps only the numbers – its label still reads the whole summary */
 @media (max-width: 359px) {
-  .ui-rn[data-both] .ui-rn__word { display: none; }
+  .ui-rnc[data-both] .ui-rnc__word { display: none; }
 }
 @media (max-width: 419px) {
-  .ui-rn[data-both][data-long] .ui-rn__word { display: none; }
+  .ui-rnc[data-both][data-long] .ui-rnc__word { display: none; }
 }
 /* Touch screens: bigger targets */
 @media (hover: none) and (pointer: coarse) {
-  .ui-rn__trigger { height: 36px; }
-  .ui-rn { --ui-rn-row: 56px; }
-  .ui-rn__btn { width: 36px; height: 36px; }
-  .ui-rn__btn--text { width: auto; }
-  .ui-rn__all { height: 40px; }
+  .ui-rnc__trigger { height: 36px; }
+  .ui-rnc { --ui-rnc-row: 56px; }
+  .ui-rnc__btn { width: 36px; height: 36px; }
+  .ui-rnc__btn--text { width: auto; }
+  .ui-rnc__all { height: 40px; }
 }
 @media (prefers-reduced-motion: reduce) {
-  .ui-rn *, .ui-rn *::before, .ui-rn *::after { animation: none !important; transition: none !important; }
-  .ui-rn__swap > [data-out] { visibility: hidden; }
+  .ui-rnc *, .ui-rnc *::before, .ui-rnc *::after { animation: none !important; transition: none !important; }
+  .ui-rnc__swap > [data-out] { visibility: hidden; }
 }
 
+/* Steve: dark mode comes with the tokens above; only the hover lifts are dark-specific */
+:where(.dark, [data-theme="dark"]) .ui-rnc__trigger:hover { background: color-mix(in srgb, var(--ui-rnc-card), #fff 4%); }
+:where(.dark, [data-theme="dark"]) button.ui-rnc__btn--text:hover { background: color-mix(in srgb, var(--ui-rnc-card), #fff 5%); }
 `;

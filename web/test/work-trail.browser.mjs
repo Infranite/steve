@@ -8,7 +8,7 @@ const browser = await chromium.launch({ headless: true, ...(process.env.PLAYWRIG
 const base = process.env.STEVE_TEST_WEB || "http://127.0.0.1:5189"
 const errors = []
 /* a line's words; a tool call shown as a Tool Call Card says them in its summary (its name and status sit beside it) */
-const lines = (loc) => loc.locator(":scope > li").evaluateAll((xs) => xs.map((x) => ((x.matches("[data-tool-card]") ? x.querySelector(".ui-tcl__summary") : x.querySelector("button, div"))?.textContent ?? "").trim()))
+const lines = (loc) => loc.locator(":scope > li").evaluateAll((xs) => xs.map((x) => ((x.matches("[data-tool-card]") ? x.querySelector(".ui-tclc__summary") : x.querySelector("button, div"))?.textContent ?? "").trim()))
 try {
   for (const [width, dark] of [[1280, false], [1280, true], [390, false]]) {
     const page = await browser.newPage({ locale: "zh-CN", viewport: { width, height: 1100 } })
@@ -28,10 +28,10 @@ try {
     assert.equal(await run.locator("[data-trail-end]").count(), 0)
     /* a single call is a Tool Call Card: the tool's own name, Steve's words as its summary, and opened what went in */
     const task = run.locator('[data-tool-card="Task"]')
-    assert.equal(await task.locator(".ui-tcl__name").textContent(), "Task")
-    await task.locator(".ui-tcl__head").click()
+    assert.equal(await task.locator(".ui-tclc__name").textContent(), "Task")
+    await task.locator(".ui-tclc__head").click()
     await settle(page)
-    assert.match(await task.locator(".ui-tcl__body").innerText(), /参数[\s\S]*品牌研究员：扫描瑞典竞品品牌/)
+    assert.match(await task.locator(".ui-tclc__body").innerText(), /参数[\s\S]*品牌研究员：扫描瑞典竞品品牌/)
 
     /* the conversation: research folded open, merged lines with their briefs as chips, the failed call marked, a check at the end */
     const steps = page.locator("[data-fixture-steps] [data-trail]")
@@ -70,9 +70,9 @@ try {
     assert.equal(await trace.locator('[role="treeitem"]').count(), 17)
     assert.equal(await trace.locator('[role="treeitem"][data-kind="subagent"]').count(), 1)
     assert.equal(await trace.locator('[role="treeitem"][data-kind="llm"]').count(), 2)
-    assert.deepEqual(await trace.locator(".ui-trw__stat dt").allTextContents(), ["用时", "思考", "工具调用", "失败"])
-    assert.equal((await trace.locator(".ui-trw__bar-head .ui-trw__pill").textContent()).trim(), "完成")
-    assert.match(await trace.locator(".ui-trw__task").textContent(), /让我们在瑞典上线/)
+    assert.deepEqual(await trace.locator(".ui-trwc__stat dt").allTextContents(), ["用时", "思考", "工具调用", "失败"])
+    assert.equal((await trace.locator(".ui-trwc__bar-head .ui-trwc__pill").textContent()).trim(), "完成")
+    assert.match(await trace.locator(".ui-trwc__task").textContent(), /让我们在瑞典上线/)
 
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false)
     await page.close()

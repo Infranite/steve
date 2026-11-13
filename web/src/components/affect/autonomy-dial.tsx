@@ -5,9 +5,8 @@ import { Children, useEffect, useId, useLayoutEffect, useRef, useState, type Key
 
 /*
  * Autonomy Dial – how much an agent may do on its own, in a single self-contained file.
- * A white card on a soft gray tray: three levels as a segmented control – Always ask, If risky, Full auto – with a raised
- * pill that glides to the chosen one, and the agent's real actions on the tray below, as small cards in two groups,
- * "Runs on its own" and "Asks you first"; risky and destructive ones carry a small tag.
+ * One quiet white card: three levels as a segmented control – Always ask, If risky, Full auto – and the agent's real
+ * actions below it in two groups, "Runs on its own" and "Asks you first"; risky and destructive ones carry a small tag.
  *   · pick a level and the actions glide from one group to the other, so the setting reads as what it does
  *   · the lock on an action pins it to "Asks you first", whatever the dial says – e.g. spending money
  *   · the counts next to both groups roll when they change
@@ -170,7 +169,7 @@ function Roll({ value }: { value: number }) {
     setShown(value);
   }, [value]); // eslint-disable-line react-hooks/exhaustive-deps
   return (
-    <span key={shown} className="ui-adl__roll" data-dir={dir ?? undefined}>
+    <span key={shown} className="ui-adlc__roll" data-dir={dir ?? undefined}>
       {num.format(shown)}
     </span>
   );
@@ -233,19 +232,6 @@ export function AutonomyDial({
   /* ---------- The levels: a segmented control, arrow keys move between them ---------- */
 
   const segRef = useRef<HTMLDivElement>(null);
-  const [pill, setPill] = useState<{ x: number; y: number; w: number; h: number } | null>(null);
-  // The pill sits under the chosen level – the levels are as wide as their words, so it is measured
-  useLayoutEffect(() => {
-    const measure = () => {
-      const btn = segRef.current?.querySelector<HTMLElement>(`[data-level="${lvl}"]`);
-      if (btn) setPill({ x: btn.offsetLeft, y: btn.offsetTop, w: btn.offsetWidth, h: btn.offsetHeight });
-    };
-    measure();
-    // Steve: the segments follow the dialog's width and the text size
-    const ro = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(measure);
-    if (segRef.current) ro?.observe(segRef.current);
-    return () => ro?.disconnect();
-  }, [lvl]);
   const onKey = (e: KeyboardEvent) => {
     const step = e.key === "ArrowRight" || e.key === "ArrowDown" ? 1 : e.key === "ArrowLeft" || e.key === "ArrowUp" ? -1 : 0;
     if (!step) return;
@@ -267,13 +253,13 @@ export function AutonomyDial({
   const lastShape = useRef(shape);
   if (rootRef.current && shape !== lastShape.current) {
     before.current = new Map([...rows.current].map(([id, el]) => [id, el.getBoundingClientRect()]));
-    height.current = rootRef.current?.offsetHeight ?? 0;
+    height.current = cardRef.current?.offsetHeight ?? 0;
   }
   useLayoutEffect(() => {
     if (lastShape.current === shape) return;
     lastShape.current = shape;
     if (reduced()) return;
-    const card = rootRef.current;
+    const card = cardRef.current;
     if (card && height.current && Math.abs(card.offsetHeight - height.current) > 1) {
       card.animate([{ height: `${height.current}px` }, { height: `${card.offsetHeight}px` }], { duration: 420, easing: EASE });
     }
@@ -301,28 +287,28 @@ export function AutonomyDial({
     return (
       <li
         key={a.key}
-        className="ui-adl__row"
+        className="ui-adlc__row"
         data-asks={asks ? "" : undefined}
         ref={(el) => {
           if (el) rows.current.set(a.key, el);
           else rows.current.delete(a.key);
         }}
       >
-        {(a.icon || bullets) && <span className="ui-adl__icon">{a.icon ?? <DotIcon />}</span>}
-        <span className="ui-adl__name">
-          <span className="ui-adl__line">
-            <span className="ui-adl__label" dir="auto" title={a.label}>
+        {(a.icon || bullets) && <span className="ui-adlc__icon">{a.icon ?? <DotIcon />}</span>}
+        <span className="ui-adlc__name">
+          <span className="ui-adlc__line">
+            <span className="ui-adlc__label" dir="auto" title={a.label}>
               {a.label}
             </span>
             {a.risk !== "safe" && (
-              <span className="ui-adl__risk" data-risk={a.risk}>
+              <span className="ui-adlc__risk" data-risk={a.risk}>
                 {a.risk === "risky" ? <RiskyIcon /> : <DestructiveIcon />}
                 {RISK[a.risk]}
               </span>
             )}
           </span>
           {a.detail && (
-            <span className="ui-adl__detail" dir="auto" title={String(a.detail)}>
+            <span className="ui-adlc__detail" dir="auto" title={String(a.detail)}>
               {a.detail}
             </span>
           )}
@@ -330,7 +316,7 @@ export function AutonomyDial({
         {lockable ? (
           <button
             type="button"
-            className="ui-adl__pin"
+            className="ui-adlc__pin"
             aria-pressed={isPinned}
             aria-label={isPinned ? text.unlock(a.label) : text.lock(a.label)}
             title={isPinned ? text.unlock(a.label) : text.lock(a.label)}
@@ -340,7 +326,7 @@ export function AutonomyDial({
           </button>
         ) : (
           isPinned && (
-            <span className="ui-adl__pin" data-fixed="" role="img" aria-label={text.locked} title={text.locked}>
+            <span className="ui-adlc__pin" data-fixed="" role="img" aria-label={text.locked} title={text.locked}>
               <LockedIcon />
             </span>
           )
@@ -352,22 +338,22 @@ export function AutonomyDial({
   const current = LEVELS[lvl];
 
   return (
-    <div ref={rootRef} className={["ui-adl", className].filter(Boolean).join(" ")} data-level={lvl} data-tone={tones[lvl]}>
-      <style href="ui-autonomy-dial" precedence="default">
+    <div ref={rootRef} className={["ui-adlc", className].filter(Boolean).join(" ")} data-level={lvl} data-tone={tones[lvl]}>
+      <style href="ui-autonomy-dial-clean" precedence="default">
         {css}
       </style>
 
-      <div ref={cardRef} className="ui-adl__card">
-        {title && <header className="ui-adl__head">
-          <span className="ui-adl__spark">
+      <div ref={cardRef} className="ui-adlc__card">
+        {title && <header className="ui-adlc__head">
+          <span className="ui-adlc__spark">
             <Spark />
           </span>
-          <span className="ui-adl__heading">
-            <span className="ui-adl__title" dir="auto" title={title}>
+          <span className="ui-adlc__heading">
+            <span className="ui-adlc__title" dir="auto" title={title}>
               {title}
             </span>
             {subtitle && (
-              <span className="ui-adl__sub" dir="auto" title={subtitle}>
+              <span className="ui-adlc__sub" dir="auto" title={subtitle}>
                 {subtitle}
               </span>
             )}
@@ -375,17 +361,15 @@ export function AutonomyDial({
         </header>}
 
         {/* ----- The levels ----- */}
-        <div className="ui-adl__levels">
+        <div className="ui-adlc__levels">
           <div
             ref={segRef}
-            className="ui-adl__segmented"
+            className="ui-adlc__segmented"
             role="radiogroup"
             aria-label={text.group}
             aria-describedby={`${uid}-hint`}
-            style={pill ? { ["--x" as string]: `${pill.x}px`, ["--y" as string]: `${pill.y}px`, ["--w" as string]: `${pill.w}px`, ["--h" as string]: `${pill.h}px` } : undefined}
             onKeyDown={onKey}
           >
-            <span className="ui-adl__pill" aria-hidden="true" />
             {LEVELS.map((l) => (
               <button
                 key={l.id}
@@ -396,57 +380,58 @@ export function AutonomyDial({
                 data-level={l.id}
                 data-tone={tones[l.id]}
                 disabled={disabledLevels.includes(l.id)}
-                className="ui-adl__level"
+                className="ui-adlc__level"
                 onClick={() => setLevel(l.id)}
                 {...levelProps?.(l.id)}
               >
                 {l.label}
                 {currentLevel === l.id && currentLevel !== lvl && (
-                  <span className="ui-adl__current" title={text.current}>
-                    <span className="ui-adl__sr">{text.current}</span>
+                  <span className="ui-adlc__current" title={text.current}>
+                    <span className="ui-adlc__sr">{text.current}</span>
                   </span>
                 )}
               </button>
             ))}
           </div>
           {/* Steve: what the chosen level means is said, not only announced */}
-          <p className="ui-adl__hint" id={`${uid}-hint`}>
+          <p className="ui-adlc__hint" id={`${uid}-hint`}>
             {current.hint}
           </p>
         </div>
+
+        {/* Steve: what switching would do now, under the levels and before the actions */}
+        {Children.toArray(children).length > 0 && <div className="ui-adlc__between">{children}</div>}
+
+        {/* ----- What it does on its own, and what waits for you ----- */}
+        <div className="ui-adlc__groups">
+          <section className="ui-adlc__group" aria-labelledby={`${uid}-own`}>
+            <h4 className="ui-adlc__group-head" id={`${uid}-own`}>
+              {text.own}
+              <span className="ui-adlc__count">
+                <Roll value={own.length} />
+              </span>
+            </h4>
+            <ul className="ui-adlc__list">
+              {own.map((a) => row(a, false))}
+              {own.length === 0 && <li className="ui-adlc__empty">{text.ownEmpty}</li>}
+            </ul>
+          </section>
+          <section className="ui-adlc__group" aria-labelledby={`${uid}-ask`}>
+            <h4 className="ui-adlc__group-head" id={`${uid}-ask`}>
+              {text.ask}
+              <span className="ui-adlc__count">
+                <Roll value={ask.length} />
+              </span>
+            </h4>
+            <ul className="ui-adlc__list">
+              {ask.map((a) => row(a, true))}
+              {ask.length === 0 && <li className="ui-adlc__empty">{text.askEmpty}</li>}
+            </ul>
+          </section>
+        </div>
       </div>
 
-      {Children.toArray(children).length > 0 && <div className="ui-adl__between">{children}</div>}
-
-      {/* ----- On the tray: what it does on its own, and what waits for you ----- */}
-      <div className="ui-adl__groups">
-        <section className="ui-adl__group" aria-labelledby={`${uid}-own`}>
-          <h4 className="ui-adl__group-head" id={`${uid}-own`}>
-            {text.own}
-            <span className="ui-adl__count">
-              <Roll value={own.length} />
-            </span>
-          </h4>
-          <ul className="ui-adl__list">
-            {own.map((a) => row(a, false))}
-            {own.length === 0 && <li className="ui-adl__empty">{text.ownEmpty}</li>}
-          </ul>
-        </section>
-        <section className="ui-adl__group" aria-labelledby={`${uid}-ask`}>
-          <h4 className="ui-adl__group-head" id={`${uid}-ask`}>
-            {text.ask}
-            <span className="ui-adl__count">
-              <Roll value={ask.length} />
-            </span>
-          </h4>
-          <ul className="ui-adl__list">
-            {ask.map((a) => row(a, true))}
-            {ask.length === 0 && <li className="ui-adl__empty">{text.askEmpty}</li>}
-          </ul>
-        </section>
-      </div>
-
-      <span className="ui-adl__sr" aria-live="polite">
+      <span className="ui-adlc__sr" aria-live="polite">
         {text.announce(current.label, own.length, ask.length)}
       </span>
     </div>
@@ -454,139 +439,133 @@ export function AutonomyDial({
 }
 
 const css = /* css */ `
-/* Colors and motion as variables – override them on .ui-adl */
-.ui-adl {
-  --ui-adl-tray: var(--aui-subtle, #f0f0f0);
-  --ui-adl-card: var(--aui-surface, #ffffff);
-  --ui-adl-ink: var(--aui-ink, #171717);
-  --ui-adl-text: var(--aui-muted, #6b6b6b);
-  --ui-adl-muted: var(--aui-muted, #8a8a8a);
-  --ui-adl-faint: var(--aui-placeholder, #b8b8b8);
-  --ui-adl-line: var(--aui-border, #ececec);
-  --ui-adl-chip: var(--aui-subtle, #f5f5f5);
-  --ui-adl-track: var(--aui-subtle, #f0f0f0);
-  --ui-adl-accent: var(--aui-blue, #4fb0fe);
-  --ui-adl-warn-bg: var(--aui-warning-soft, #fff1e0);
-  --ui-adl-warn-fg: var(--aui-warning, #b25e00);
-  --ui-adl-danger-bg: var(--aui-danger-soft, #fdecea);
-  --ui-adl-danger-fg: var(--aui-danger, #c4320a);
-  --ui-adl-focus: var(--aui-focus, rgba(0, 96, 226, 0.7));
-  --ui-adl-ease: var(--aui-ease, cubic-bezier(0.22, 1, 0.36, 1));
+/* Colors and motion as variables – override them on .ui-adlc */
+.ui-adlc {
+  --ui-adlc-card: var(--aui-surface, #ffffff);
+  /* Steve: colors from Steve's tokens, which switch between light and dark themselves */
+  --ui-adlc-strong: var(--aui-ink, #000000);
+  --ui-adlc-ink: var(--aui-ink, rgba(0, 0, 0, 0.88));
+  --ui-adlc-text: var(--aui-muted, rgba(0, 0, 0, 0.61));
+  --ui-adlc-muted: var(--aui-muted, rgba(0, 0, 0, 0.45));
+  --ui-adlc-faint: var(--aui-placeholder, rgba(0, 0, 0, 0.27));
+  --ui-adlc-icon: var(--aui-muted, rgba(0, 0, 0, 0.447));
+  --ui-adlc-line: var(--aui-border, rgba(0, 0, 0, 0.06));
+  --ui-adlc-wash: var(--aui-subtle, rgba(0, 0, 0, 0.03));
+  --ui-adlc-fill: var(--aui-subtle, rgba(0, 0, 0, 0.06));
+  --ui-adlc-fill-hover: color-mix(in srgb, var(--aui-ink, #000) 8%, var(--ui-adlc-fill));
+  --ui-adlc-accent: var(--aui-blue, rgba(0, 96, 226, 0.765));
+  --ui-adlc-brand-bg: var(--aui-info-soft, #008ff519);
+  --ui-adlc-brand-fg: var(--aui-info, #006dcbf2);
+  --ui-adlc-warn-bg: var(--aui-warning-soft, #ff9c0029);
+  --ui-adlc-warn-fg: var(--aui-warning, #b25e00);
+  --ui-adlc-danger-bg: var(--aui-danger-soft, #f52b0018);
+  --ui-adlc-danger-fg: var(--aui-danger, #d72400da);
+  --ui-adlc-amber: var(--aui-warning, #b25e00);
+  --ui-adlc-red: var(--aui-danger, #d72400da);
+  --ui-adlc-focus: var(--aui-focus, rgba(0, 96, 226, 0.7));
+  /* Strokes are shadows: a 0.5px hairline plus a soft lift */
+  --ui-adlc-shadow: var(--aui-shadow-card, 0 0 0 0.5px rgba(0, 0, 0, 0.06), 0 1px 1px -1px rgba(0, 0, 0, 0.1), 0 1px 2px 0 rgba(0, 0, 0, 0.05));
+  --ui-adlc-ease: cubic-bezier(0.32, 0.72, 0.24, 1);
   position: relative;
   box-sizing: border-box;
   width: 100%;
-  max-width: var(--ui-adl-max, 420px);
-  padding: 4px;
-  overflow: hidden;
-  border-radius: calc(var(--aui-radius-lg, 16px) + 4px);
-  background: var(--ui-adl-tray);
+  max-width: var(--ui-adlc-max, 400px);
   container-type: inline-size;
-  font-family: var(--aui-font, "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif);
-  font-size: 14px;
+  font-family: var(--aui-font, "Inter", "InterVariable", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif);
+  font-size: 13px;
+  font-weight: 400;
   line-height: 20px;
-  letter-spacing: -0.006em;
-  color: var(--ui-adl-text);
+  color: var(--ui-adlc-text);
   text-align: left;
   -webkit-font-smoothing: antialiased;
 }
-.ui-adl *, .ui-adl *::before, .ui-adl *::after { box-sizing: border-box; }
-:where(.ui-adl) button { margin: 0; padding: 0; border: 0; background: none; font: inherit; color: inherit; text-align: inherit; cursor: pointer; -webkit-tap-highlight-color: transparent; }
-.ui-adl button:focus-visible { outline: 2px solid var(--ui-adl-focus); outline-offset: 2px; }
-.ui-adl ul { margin: 0; padding: 0; list-style: none; }
-.ui-adl h4 { margin: 0; }
-.ui-adl svg { display: block; flex: none; }
-.ui-adl__sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+.ui-adlc *, .ui-adlc *::before, .ui-adlc *::after { box-sizing: border-box; }
+:where(.ui-adlc) button { margin: 0; padding: 0; border: 0; background: none; font: inherit; color: inherit; text-align: inherit; cursor: pointer; -webkit-tap-highlight-color: transparent; }
+.ui-adlc button:focus-visible { outline: 2px solid var(--ui-adlc-focus); outline-offset: 2px; }
+.ui-adlc ul { margin: 0; padding: 0; list-style: none; }
+.ui-adlc h4 { margin: 0; }
+.ui-adlc svg { display: block; flex: none; }
+.ui-adlc__sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 
-/* The white card holds the heading and the levels */
-.ui-adl__card { position: relative; border-radius: var(--aui-radius-lg, 16px); background: var(--ui-adl-card); box-shadow: var(--aui-shadow-card, 0 0 0 1px var(--ui-adl-line), 0 1px 2px rgba(0, 0, 0, 0.04)); }
-.ui-adl__head { display: flex; align-items: center; gap: 12px; padding: 16px 16px 0; }
-.ui-adl__card > .ui-adl__levels:first-child { padding-top: 12px; }
-.ui-adl__spark { display: grid; flex: none; place-items: center; width: 16px; color: var(--ui-adl-accent); }
-.ui-adl__heading { display: grid; min-width: 0; }
-.ui-adl__title { overflow: hidden; font-weight: 600; color: var(--ui-adl-ink); white-space: nowrap; text-overflow: ellipsis; }
-.ui-adl__sub { overflow: hidden; font-size: 12.5px; line-height: 18px; color: var(--ui-adl-muted); white-space: nowrap; text-overflow: ellipsis; }
+/* One white card – the edge is a shadow, not a border */
+.ui-adlc__card { overflow: hidden; border-radius: var(--aui-radius-lg, 10px); background: var(--ui-adlc-card); box-shadow: var(--aui-shadow-card, var(--ui-adlc-shadow)); }
 
-/* ----- The levels: a gray track, a raised white pill glides to the chosen one ----- */
-.ui-adl__levels { padding: 14px 16px 16px; }
-.ui-adl__segmented { position: relative; display: flex; flex-wrap: wrap; padding: 3px; border-radius: calc(var(--aui-radius, 10px) + 2px); background: var(--ui-adl-track); }
-.ui-adl__pill { position: absolute; top: 0; left: 0; width: var(--w, 0); height: var(--h, 0); border-radius: calc(var(--aui-radius, 10px) - 1px); background: var(--ui-adl-card); box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08), 0 0 0 1px rgba(0, 0, 0, 0.04); transform: translate(var(--x, 0), var(--y, 0)); transition: transform 260ms var(--ui-adl-ease), width 260ms var(--ui-adl-ease), height 260ms var(--ui-adl-ease); }
-.ui-adl__level { position: relative; flex: 1 1 0; min-width: fit-content; max-width: 100%; min-height: 30px; padding: 5px 8px; border-radius: calc(var(--aui-radius, 10px) - 1px); font-size: 13px; font-weight: 500; line-height: 20px; color: var(--ui-adl-muted); text-align: center !important; overflow-wrap: break-word; transition: color 180ms ease; }
-.ui-adl__level[aria-checked="true"] { color: var(--ui-adl-ink); }
-.ui-adl__level[aria-checked="false"]:not(:disabled):hover { color: var(--ui-adl-ink); }
+.ui-adlc__head { display: flex; align-items: center; gap: 10px; padding: 16px 16px 0; }
+.ui-adlc__card > .ui-adlc__levels:first-child { padding-top: 12px; }
+.ui-adlc__spark { display: grid; flex: none; place-items: center; width: 16px; color: var(--ui-adlc-accent); }
+.ui-adlc__heading { display: grid; min-width: 0; }
+.ui-adlc__title { overflow: hidden; font-weight: 500; color: var(--ui-adlc-strong); white-space: nowrap; text-overflow: ellipsis; }
+.ui-adlc__sub { overflow: hidden; font-size: 12px; line-height: 16px; color: var(--ui-adlc-muted); white-space: nowrap; text-overflow: ellipsis; }
+
+/* ----- The levels: three tab buttons ----- */
+.ui-adlc__levels { padding: 16px 16px 18px; }
+/* Steve: the levels wrap rather than clip when the dialog is narrow or the words are long */
+.ui-adlc__segmented { position: relative; display: flex; flex-wrap: wrap; gap: 8px; }
+/* Separate buttons: the others are gray, the chosen one is white with a hairline and a soft lift */
+.ui-adlc__level { position: relative; flex: 1 1 0; min-width: fit-content; max-width: 100%; padding: 3px 8px; border-radius: calc(var(--aui-radius-sm, 5px) + 1px); background: var(--ui-adlc-fill); font-size: 12px; font-weight: 500; line-height: 18px; color: var(--ui-adlc-text); text-align: center !important; overflow-wrap: break-word; transition: color 180ms ease, background-color 180ms ease, box-shadow 180ms ease; }
+.ui-adlc__level[aria-checked="true"] { background: var(--ui-adlc-card); box-shadow: var(--ui-adlc-shadow); color: var(--ui-adlc-strong); }
+.ui-adlc__level[aria-checked="false"]:not(:disabled):hover { background: var(--ui-adlc-fill-hover); color: var(--ui-adlc-ink); }
 /* Steve: levels that can't be picked now, the one in force while another is picked, full access in its colour, the hint */
-.ui-adl__level:disabled { cursor: default; opacity: 0.45; }
-.ui-adl__current { display: inline-block; width: 5px; height: 5px; margin: 0 0 1px 6px; border-radius: 50%; background: currentColor; opacity: 0.55; vertical-align: middle; }
-.ui-adl__level[data-tone="attention"][aria-checked="true"] { color: var(--ui-adl-warn-fg); }
-.ui-adl[data-tone="attention"] .ui-adl__pill { box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--ui-adl-warn-fg) 45%, transparent); background: color-mix(in srgb, var(--ui-adl-warn-fg) 9%, var(--ui-adl-card)); }
-.ui-adl__hint { margin: 10px 2px 0; font-size: 12px; line-height: 18px; color: var(--ui-adl-muted); overflow-wrap: anywhere; }
-.ui-adl__pin[data-fixed] { opacity: 1; cursor: default; color: var(--ui-adl-muted); }
-.ui-adl__pin[data-fixed]:hover { background: none; }
+.ui-adlc__level:disabled { cursor: default; opacity: 0.45; }
+.ui-adlc__current { display: inline-block; width: 5px; height: 5px; margin: 0 0 1px 6px; border-radius: 50%; background: currentColor; opacity: 0.55; vertical-align: middle; }
+.ui-adlc__level[data-tone="attention"][aria-checked="true"] { color: var(--ui-adlc-warn-fg); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--ui-adlc-warn-fg) 45%, transparent); background: color-mix(in srgb, var(--ui-adlc-warn-fg) 9%, var(--ui-adlc-card)); }
+.ui-adlc__hint { margin: 10px 2px 0; font-size: 12px; line-height: 18px; color: var(--ui-adlc-muted); overflow-wrap: anywhere; }
+.ui-adlc__pin[data-fixed] { opacity: 1; cursor: default; color: var(--ui-adlc-muted); }
+.ui-adlc__pin[data-fixed]:hover { background: none; }
 
-/* ----- On the tray: the two groups ----- */
-.ui-adl__groups { display: grid; gap: 14px; padding: 14px 4px 4px; }
-.ui-adl__group-head { display: flex; align-items: center; gap: 6px; margin: 0 8px 8px !important; font-size: 12.5px; font-weight: 500; line-height: 18px; color: var(--ui-adl-muted); }
-.ui-adl__count { display: grid; place-items: center; min-width: 18px; height: 18px; padding: 0 5px; overflow: hidden; border-radius: calc(var(--aui-radius-sm, 7px) - 1px); background: var(--ui-adl-card); box-shadow: 0 0 0 1px var(--ui-adl-line), 0 1px 2px rgba(0, 0, 0, 0.04); font-size: 11px; color: var(--ui-adl-text); font-variant-numeric: tabular-nums; }
-.ui-adl__roll { display: block; }
-.ui-adl__roll[data-dir="up"] { animation: ui-adl-roll-up 360ms var(--ui-adl-ease) both; }
-.ui-adl__roll[data-dir="down"] { animation: ui-adl-roll-down 360ms var(--ui-adl-ease) both; }
-.ui-adl__list { display: grid; gap: 3px; }
-.ui-adl__between { display: flex; flex-direction: column; gap: 10px; min-width: 0; padding: 12px 8px 0; }
-.ui-adl__row { position: relative; display: flex; align-items: center; gap: 12px; min-height: 38px; padding: 5px 6px 5px 12px; border-radius: calc(var(--aui-radius-lg, 16px) - 4px); background: var(--ui-adl-card); box-shadow: var(--aui-shadow-card, 0 0 0 1px var(--ui-adl-line), 0 1px 2px rgba(0, 0, 0, 0.04)); }
-.ui-adl__icon { display: grid; flex: none; place-items: center; width: 16px; height: 16px; color: var(--ui-adl-muted); }
-.ui-adl__icon > svg { width: 16px; height: 16px; }
+/* ----- The two groups: spacing between them, one hairline above ----- */
+.ui-adlc__groups { display: grid; gap: 14px; padding: 14px 10px 12px; border-top: 0.5px solid var(--ui-adlc-line); }
+.ui-adlc__group-head { display: flex; align-items: center; gap: 6px; margin: 0 6px 4px !important; font-size: 12px; font-weight: 400; line-height: 16px; color: var(--ui-adlc-muted); }
+/* The count: a small white label with a hairline and a soft lift – no taller than the heading */
+.ui-adlc__count { display: grid; place-items: center; min-width: 16px; height: 16px; padding: 0 4px; overflow: hidden; border-radius: calc(var(--aui-radius-sm, 5px) - 1px); background: var(--ui-adlc-card); box-shadow: var(--ui-adlc-shadow); font-size: 11px; font-weight: 500; line-height: 16px; color: var(--ui-adlc-text); font-variant-numeric: tabular-nums; }
+.ui-adlc__roll { display: block; }
+.ui-adlc__roll[data-dir="up"] { animation: ui-adlc-roll-up 360ms var(--ui-adlc-ease) both; }
+.ui-adlc__roll[data-dir="down"] { animation: ui-adlc-roll-down 360ms var(--ui-adlc-ease) both; }
+.ui-adlc__list { display: grid; }
+.ui-adlc__between { display: flex; flex-direction: column; gap: 10px; min-width: 0; padding: 0 16px 14px; }
+.ui-adlc__row { position: relative; display: flex; align-items: center; gap: 12px; min-height: 30px; padding: 3px 4px 3px 6px; border-radius: calc(var(--aui-radius-sm, 5px) + 1px); background: var(--ui-adlc-card); transition: background-color 160ms ease; }
+.ui-adlc__row:hover { background: var(--ui-adlc-wash); }
+.ui-adlc__icon { display: grid; flex: none; place-items: center; width: 16px; height: 16px; color: var(--ui-adlc-icon); }
+.ui-adlc__icon > svg { width: 16px; height: 16px; }
 /* An image as icon fits its 16px tile, whatever its shape */
-.ui-adl__icon { overflow: hidden; }
-.ui-adl__icon > img { display: block; width: 16px; height: 16px; object-fit: contain; }
-.ui-adl__name { display: grid; flex: 1; min-width: 0; }
-.ui-adl__line { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 8px; min-width: 0; }
-.ui-adl__label { min-width: 0; font-size: 13px; font-weight: 500; color: var(--ui-adl-ink); overflow-wrap: anywhere; }
-.ui-adl__detail { font-size: 12px; line-height: 18px; color: var(--ui-adl-muted); overflow-wrap: anywhere; }
-/* Risk: a small pill right after the name – glyph and word; safe actions carry nothing */
-.ui-adl__risk { display: inline-flex; flex: none; align-items: center; gap: 3px; height: 20px; padding: 0 8px 0 6px; border-radius: 999px; background: var(--ui-adl-warn-bg); font-size: 11.5px; font-weight: 500; line-height: 16px; color: var(--ui-adl-warn-fg); }
-.ui-adl__risk > svg { width: 12px; height: 12px; }
-.ui-adl__risk[data-risk="destructive"] { background: var(--ui-adl-danger-bg); color: var(--ui-adl-danger-fg); }
-.ui-adl__pin { display: grid; flex: none; place-items: center; width: 30px; height: 30px; border-radius: calc(var(--aui-radius-sm, 7px) + 2px); color: var(--ui-adl-faint); opacity: 0; transition: opacity 160ms ease, color 160ms ease, background-color 160ms ease; }
-.ui-adl__row:hover .ui-adl__pin, .ui-adl__pin:focus-visible, .ui-adl__pin[aria-pressed="true"] { opacity: 1; }
-.ui-adl__pin:hover { background: var(--ui-adl-chip); color: var(--ui-adl-ink); }
-.ui-adl__pin[aria-pressed="true"] { color: var(--ui-adl-text); }
-/* Empty group: one quiet tag across the whole width */
-.ui-adl__empty { display: flex; align-items: center; justify-content: center; min-height: 42px; padding: 8px 12px; border-radius: calc(var(--aui-radius-lg, 16px) - 4px); background: var(--aui-subtle, rgba(0, 0, 0, 0.035)); font-size: 12.5px; line-height: 18px; color: var(--ui-adl-muted); text-align: center; }
+.ui-adlc__icon { overflow: hidden; }
+.ui-adlc__icon > img { display: block; width: 16px; height: 16px; object-fit: contain; }
+.ui-adlc__name { display: grid; flex: 1; min-width: 0; }
+/* Steve: names and details wrap rather than clip – Chinese action names run long */
+.ui-adlc__line { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 8px; min-width: 0; }
+.ui-adlc__label { min-width: 0; color: var(--ui-adlc-ink); overflow-wrap: anywhere; }
+.ui-adlc__detail { font-size: 12px; line-height: 16px; color: var(--ui-adlc-muted); overflow-wrap: anywhere; }
+/* Risk: a small tag right after the name – glyph and word on a subtle tone; safe actions carry nothing */
+.ui-adlc__risk { display: inline-flex; flex: none; align-items: center; gap: 3px; height: 18px; padding: 0 6px 0 4px; border-radius: calc(var(--aui-radius-sm, 5px) - 1px); background: var(--ui-adlc-warn-bg); font-size: 11px; font-weight: 500; line-height: 16px; color: var(--ui-adlc-warn-fg); }
+.ui-adlc__risk > svg { width: 12px; height: 12px; }
+.ui-adlc__risk[data-risk="destructive"] { background: var(--ui-adlc-danger-bg); color: var(--ui-adlc-danger-fg); }
+.ui-adlc__pin { display: grid; flex: none; place-items: center; width: 28px; height: 28px; border-radius: calc(var(--aui-radius-sm, 5px) + 1px); color: var(--ui-adlc-faint); opacity: 0; transition: opacity 160ms ease, color 160ms ease, background-color 160ms ease; }
+.ui-adlc__row:hover .ui-adlc__pin, .ui-adlc__pin:focus-visible, .ui-adlc__pin[aria-pressed="true"] { opacity: 1; }
+.ui-adlc__pin:hover { background: var(--ui-adlc-fill); color: var(--ui-adlc-ink); }
+.ui-adlc__pin[aria-pressed="true"] { color: var(--ui-adlc-icon); }
+/* Empty group: one quiet gray tag across the whole width */
+.ui-adlc__empty { display: flex; align-items: center; justify-content: center; min-height: 30px; margin: 2px 0; padding: 6px 10px; border-radius: calc(var(--aui-radius-sm, 5px) + 1px); background: var(--ui-adlc-wash); font-size: 12px; line-height: 16px; color: var(--ui-adlc-muted); text-align: center; }
 
-@keyframes ui-adl-roll-up { from { opacity: 0; transform: translateY(70%); } }
-@keyframes ui-adl-roll-down { from { opacity: 0; transform: translateY(-70%); } }
+@keyframes ui-adlc-roll-up { from { opacity: 0; transform: translateY(70%); } }
+@keyframes ui-adlc-roll-down { from { opacity: 0; transform: translateY(-70%); } }
 
+/* Narrow containers: the detail lines go, the levels get tighter */
 @container (max-width: 340px) {
-  .ui-adl__level { padding: 5px 4px; font-size: 12px; }
+  .ui-adlc__segmented { gap: 4px; }
+  .ui-adlc__level { padding: 4px 6px; font-size: 12px; }
 }
+/* Touch: no hover – the locks are always visible */
 @media (hover: none) {
-  .ui-adl__pin { opacity: 1; }
+  .ui-adlc__pin { opacity: 1; }
 }
 @media (pointer: coarse) {
-  .ui-adl__level { min-height: 36px; }
-  .ui-adl__pin { width: 36px; height: 36px; }
+  .ui-adlc__level { padding: 8px 10px; }
+  .ui-adlc__pin { width: 34px; height: 34px; }
+  .ui-adlc__row { min-height: 44px; }
 }
 @media (prefers-reduced-motion: reduce) {
-  .ui-adl *, .ui-adl *::before, .ui-adl *::after { animation: none !important; transition: none !important; }
+  .ui-adlc *, .ui-adlc *::before, .ui-adlc *::after { animation: none !important; transition: none !important; }
 }
 
-/* Dark mode: follows a .dark class or data-theme="dark" on any ancestor, e.g. <html> */
-:where(.dark, [data-theme="dark"]) .ui-adl {
-  --ui-adl-tray: var(--aui-subtle, #111113);
-  --ui-adl-card: var(--aui-surface, #19191b);
-  --ui-adl-ink: var(--aui-ink, #ededed);
-  --ui-adl-text: var(--aui-muted, #a1a1a1);
-  --ui-adl-muted: var(--aui-muted, #8b8b92);
-  --ui-adl-faint: var(--aui-placeholder, #5c5c63);
-  --ui-adl-line: var(--aui-border, #2a2a2e);
-  --ui-adl-chip: var(--aui-subtle, #232326);
-  --ui-adl-track: var(--aui-subtle, #232326);
-  --ui-adl-accent: var(--aui-blue, #4fb0fe);
-  --ui-adl-warn-bg: color-mix(in srgb, var(--aui-orange, #f2a15c) 14%, transparent);
-  --ui-adl-warn-fg: var(--aui-warning, #ffb35c);
-  --ui-adl-danger-bg: color-mix(in srgb, var(--aui-red, #ff6b5f) 14%, transparent);
-  --ui-adl-danger-fg: var(--aui-danger, #ff8a7a);
-  --ui-adl-focus: var(--aui-focus, rgba(77, 141, 255, 0.8));
-}
-:where(.dark, [data-theme="dark"]) .ui-adl__pill { background: color-mix(in srgb, var(--aui-ink, #ededed) 9%, var(--ui-adl-card)); box-shadow: 0 1px 2px rgba(0, 0, 0, 0.4); }
-:where(.dark, [data-theme="dark"]) .ui-adl__empty { background: var(--aui-subtle, rgba(255, 255, 255, 0.04)); }
+/* Steve: dark mode comes with the tokens above */
 `;

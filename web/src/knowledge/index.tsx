@@ -226,7 +226,7 @@ function MemsTab({ record, focus, onRecord }: { record: RecordName; focus: strin
         <Empty title={t(`knowledge:record.${k}.none`)} sub={t(`knowledge:record.${k}.empty`)} />
         <AddFirst record={record} onAdd={(text) => add(text, memKind(R.kind))} />
       </> :
-        <MemoryPanel className="[--ui-mp-width:100%]" title={t(`knowledge:tab.${k === "mem" ? "mems" : "entries"}`)} showTitle={false} searchable={false} memories={memories} categories={kinds.map(memKind)}
+        <MemoryPanel className="[--ui-mpc-width:100%]" title={t(`knowledge:tab.${k === "mem" ? "mems" : "entries"}`)} showTitle={false} searchable={false} memories={memories} categories={kinds.map(memKind)}
           maxHeight={0} undoFor={UNDO_MS} showSwitch={false} focus={focus} text={{ ...panelText(), none: t(`knowledge:record.${k}.none`), newMemory: t(`knowledge:record.${k}.addAria`), newPlaceholder: t(`knowledge:record.${k}.hint`) } satisfies Omit<PanelText, Unshown>}
           addedSource={t("knowledge:mems.youWrote")} onChange={() => {}}
           onAdd={(m) => void add(m.text, m.category)} onEdit={(id, text) => void patch(id, { text })}

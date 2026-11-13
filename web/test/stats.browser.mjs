@@ -140,7 +140,7 @@ try {
     assert.equal(await split.getAttribute("data-usage-split-measure"), "cost")
     assert.deepEqual(await split.locator("[data-usage-part]").evaluateAll((els) => els.map((e) => e.getAttribute("data-usage-part"))), ["agent", "gateway"])
     assert.equal(await page.locator("[data-usage] [data-usage-row]").count(), 2)
-    await page.waitForFunction(() => /\$36\.80/.test(document.querySelector("[data-usage-split] .ui-cb__big")?.textContent ?? ""))
+    await page.waitForFunction(() => /\$36\.80/.test(document.querySelector("[data-usage-split] .ui-cbc__big")?.textContent ?? ""))
     assert.match((await split.locator('[data-usage-part="agent"]').innerText()).replace(/\s+/g, " "), /Agent \$18\.40 50%/)
     // the event explorer: a window dragged on the histogram narrows the list, the counts and the label agree, zoom fills the window
     if (width === 1440) {
@@ -319,7 +319,7 @@ try {
     const cw = page.locator("[data-cost-waterfall]")
     await cw.locator('[data-cost-item="ST-2"]').waitFor()
     // the total is the item's and its sub-item's, the steps run in the order they began, the sub-item starts folded
-    assert.match(await cw.locator(".ui-cwf__stats").innerText(), /\$1\.75/)
+    assert.match(await cw.locator(".ui-cwfc__stats").innerText(), /\$1\.75/)
     assert.match(await cw.innerText(), /1 件子事项/)
     assert.deepEqual(await cw.locator("[data-turn], [data-cost-item]").evaluateAll((els) => els.filter((e) => !e.closest("[data-hidden]")).map((e) => e.getAttribute("data-turn") ?? e.getAttribute("data-cost-item"))), ["a", "ST-2", "b"])
     assert.equal(await cw.locator('[data-cost-item="ST-2"]').getAttribute("aria-expanded"), "false")
@@ -329,18 +329,18 @@ try {
     assert.equal(await cw.locator('[data-turn="a"] [data-unpriced-mark]').count(), 0)
     assert.match(await cw.locator("[data-unpriced-total]").innerText(), /另有 500K tokens 未定价/)
     // the most expensive step is a sub-item's turn: named with its sub-item, so it can't be taken for the item's own turn
-    assert.match(await cw.locator(".ui-cwf__top-name").innerText(), /^ST-2 · 回合 \d\d:\d\d$/)
+    assert.match(await cw.locator(".ui-cwfc__top-name").innerText(), /^ST-2 · 回合 \d\d:\d\d$/)
     // unfolding the sub-item shows its own turn; a turn's details lead to its conversation
-    await cw.locator('[data-cost-item="ST-2"] .ui-cwf__chev').click()
+    await cw.locator('[data-cost-item="ST-2"] .ui-cwfc__chev').click()
     assert.equal(await cw.locator('[data-cost-item="ST-2"]').getAttribute("aria-expanded"), "true")
     await cw.locator('[data-turn="c"]').click()
     assert.equal(await cw.locator("[data-turn-session]").getAttribute("href"), "#/sessions/ses_c")
-    assert.match((await cw.locator(".ui-cwf__detail").innerText()).replace(/\s+/g, " "), /工具 3 次[\s\S]*\$1\.25/)
+    assert.match((await cw.locator(".ui-cwfc__detail").innerText()).replace(/\s+/g, " "), /工具 3 次[\s\S]*\$1\.25/)
     // the details split what the waterfall's "In" adds up (input with the cache)
-    assert.match(await cw.locator(".ui-cwf__detail").innerText(), /未缓存输入 10K/)
+    assert.match(await cw.locator(".ui-cwfc__detail").innerText(), /未缓存输入 10K/)
     // tokens: the same steps measured in tokens
     await cw.getByRole("tab", { name: "tokens" }).click()
-    assert.equal(await cw.locator(".ui-cwf").getAttribute("data-mode"), "tokens")
+    assert.equal(await cw.locator(".ui-cwfc").getAttribute("data-mode"), "tokens")
     const wide = await page.evaluate(() => [...document.querySelectorAll("[data-cost-waterfall] *")].filter((e) => e.getBoundingClientRect().right > innerWidth + 1).map((e) => e.className).slice(0, 3))
     assert.deepEqual(wide, [], "nothing past the right edge")
     if (shots) await cw.screenshot({ path: `${shots}/stats-cost-${width}-${theme}.png`, animations: "disabled" })

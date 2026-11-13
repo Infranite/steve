@@ -11,8 +11,8 @@ import { fmtN } from "@/stats/format";
  * Trace Waterfall – where the time and the money of an agent run go, in a single self-contained file.
  * Like the performance panel of an APM tool, but for agents: on the left the run as a tree of spans – the agent,
  * its LLM calls, tool calls and sub-agents – and on the right a timeline where every span is a bar that starts
- * when it started and is as long as it took. A white card on a soft gray tray, the whole run in numbers on top.
- *   · bars are tinted by kind: agents a quiet slate, LLM calls violet, tool calls teal, errors red
+ * when it started and is as long as it took. One quiet white card with hairlines, the whole run in numbers on top.
+ *   · bars are tinted by kind: agents a quiet gray, LLM calls indigo, tool calls teal, errors red
  *   · a running span grows live with a soft shimmer at its leading edge, and a "now" line moves across
  *   · when the run outgrows the timeline, the axis rescales smoothly – ticks glide and fade, bars follow
  *   · every row shows how long it took and, where it costs something, what it cost; the slowest call is marked
@@ -147,7 +147,7 @@ const Warning = () => (
   </svg>
 );
 const Spinner = () => (
-  <svg className="ui-trw__spin" width="12" height="12" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+  <svg className="ui-trwc__spin" width="12" height="12" viewBox="0 0 24 24" fill="none" aria-hidden="true">
     <circle cx="12" cy="12" r="8.5" stroke="currentColor" strokeOpacity="0.25" strokeWidth="2.5" />
     <path d="M12 3.5A8.5 8.5 0 0 1 20.5 12" stroke="currentColor" strokeLinecap="round" strokeWidth="2.5" />
   </svg>
@@ -188,7 +188,7 @@ type RowProps = {
 
 /** A child's mark on its parent's bar – memoized too: a live root holds one for every span below it */
 const Mark = memo(function Mark({ kind, status, start, dur }: { kind: TraceSpanKind; status: TraceSpanStatus; start: number; dur: number }) {
-  return <span className="ui-trw__mark" data-kind={kind} data-status={status} style={{ "--s": start, "--d": dur } as CSSProperties} aria-hidden="true" />;
+  return <span className="ui-trwc__mark" data-kind={kind} data-status={status} style={{ "--s": start, "--d": dur } as CSSProperties} aria-hidden="true" />;
 });
 
 const SpanRow = memo(function SpanRow({ span: s, depth, hidden, leaving: leaveDelay, folded: isFolded, open, focusable, slowest: isSlowest, now, range, trackW, delay, formatCost, on }: RowProps) {
@@ -213,7 +213,7 @@ const SpanRow = memo(function SpanRow({ span: s, depth, hidden, leaving: leaveDe
   return (
     <div
       ref={leaving ? undefined : (el) => on.current?.el(s.id, el)}
-      className="ui-trw__row"
+      className="ui-trwc__row"
       role="treeitem"
       aria-level={depth + 1}
       aria-expanded={kids.length ? !isFolded : undefined}
@@ -233,11 +233,11 @@ const SpanRow = memo(function SpanRow({ span: s, depth, hidden, leaving: leaveDe
       onFocus={(e) => e.target === e.currentTarget && on.current?.focus(s.id)}
       onKeyDown={(e) => on.current?.key(e, s.id)}
     >
-      <div className="ui-trw__name">
+      <div className="ui-trwc__name">
         {/* Deep trees stop indenting after a few levels, so the name always keeps its room */}
-        {depth > 0 && <span className="ui-trw__guides" style={{ width: `calc(min(${depth}, var(--ui-trw-depth)) * var(--ui-trw-indent))` }} aria-hidden="true" />}
+        {depth > 0 && <span className="ui-trwc__guides" style={{ width: `calc(min(${depth}, var(--ui-trwc-depth)) * var(--ui-trwc-indent))` }} aria-hidden="true" />}
         <span
-          className="ui-trw__chev"
+          className="ui-trwc__chev"
           data-leaf={kids.length ? undefined : ""}
           aria-hidden="true"
           onClick={(e) => {
@@ -248,54 +248,54 @@ const SpanRow = memo(function SpanRow({ span: s, depth, hidden, leaving: leaveDe
         >
           {kids.length > 0 && <Chevron />}
         </span>
-        <span className="ui-trw__icon" data-logo={s.icon ? "" : undefined}>
-          {s.icon ?? <span className="ui-trw__swatch" />}
+        <span className="ui-trwc__icon" data-logo={s.icon ? "" : undefined}>
+          {s.icon ?? <span className="ui-trwc__swatch" />}
         </span>
-        <span className="ui-trw__label">
-          <span className="ui-trw__title" dir="auto">
+        <span className="ui-trwc__label">
+          <span className="ui-trwc__title" dir="auto">
             {s.name}
           </span>
           {s.detail && (
-            <span className="ui-trw__detail" dir="auto">
+            <span className="ui-trwc__detail" dir="auto">
               {s.detail}
             </span>
           )}
         </span>
-        {hiddenCount > 0 && <span className="ui-trw__more">+{count(hiddenCount)}</span>}
+        {hiddenCount > 0 && <span className="ui-trwc__more">+{count(hiddenCount)}</span>}
         {s.status === "running" && !kids.length && (
-          <span className="ui-trw__state" data-status="running">
+          <span className="ui-trwc__state" data-status="running">
             <Spinner />
           </span>
         )}
         {s.status === "failed" && (
-          <span className="ui-trw__state" data-status="failed">
+          <span className="ui-trwc__state" data-status="failed">
             <Warning />
           </span>
         )}
         {/* Narrow: the duration sits at the end of the name line */}
-        <span className="ui-trw__meta">
+        <span className="ui-trwc__meta">
           {isSlowest && (
-            <span className="ui-trw__slow" title={t("core:trace.slowest")}>
+            <span className="ui-trwc__slow" title={t("core:trace.slowest")}>
               {t("core:trace.slowest")}
             </span>
           )}
-          <span className="ui-trw__amount" data-live={s.status === "running" ? "" : undefined}>
+          <span className="ui-trwc__amount" data-live={s.status === "running" ? "" : undefined}>
             {took(dur)}
             {/* The cost steps aside on the narrowest screens – it stays in the details and the totals */}
-            {showCost && <span className="ui-trw__meta-cost"> · {formatCost(cost!)}</span>}
+            {showCost && <span className="ui-trwc__meta-cost"> · {formatCost(cost!)}</span>}
           </span>
         </span>
       </div>
-      <div className="ui-trw__track">
-        <span className="ui-trw__bar" data-bar="" data-kind={s.kind} data-status={s.status} style={{ ...vars, animationDelay: `${delay + 60}ms` }} />
+      <div className="ui-trwc__track">
+        <span className="ui-trwc__bar" data-bar="" data-kind={s.kind} data-status={s.status} style={{ ...vars, animationDelay: `${delay + 60}ms` }} />
         {marks.map((m) => (
           <Mark key={m.id} kind={m.kind} status={m.status} start={m.start} dur={durOf(m)} />
         ))}
-        <span className="ui-trw__tag" data-side={side} style={vars}>
-          <span className="ui-trw__amount" data-live={s.status === "running" ? "" : undefined}>
+        <span className="ui-trwc__tag" data-side={side} style={vars}>
+          <span className="ui-trwc__amount" data-live={s.status === "running" ? "" : undefined}>
             {label}
           </span>
-          {isSlowest && <span className="ui-trw__slow">{t("core:trace.slowest")}</span>}
+          {isSlowest && <span className="ui-trwc__slow">{t("core:trace.slowest")}</span>}
         </span>
       </div>
     </div>
@@ -390,7 +390,7 @@ export function TraceWaterfall({
     if (!el) return;
     const set = (v: number) => {
       shownRange.current = v;
-      el.style.setProperty("--ui-trw-range", String(v));
+      el.style.setProperty("--ui-trwc-range", String(v));
     };
     cancelAnimationFrame(rangeRaf.current);
     if (firstRange.current || reduced()) {
@@ -613,7 +613,7 @@ export function TraceWaterfall({
     return (
       <div
         ref={popRef}
-        className="ui-trw__pop"
+        className="ui-trwc__pop"
         role="dialog"
         aria-label={t("core:trace.details", { name: s.name })}
         data-closing={openSpan ? undefined : ""}
@@ -626,25 +626,25 @@ export function TraceWaterfall({
           rowEls.current.get(s.id)?.focus();
         }}
       >
-        <div className="ui-trw__pop-head">
-          <span className="ui-trw__icon" data-logo={s.icon ? "" : undefined}>
-            {s.icon ?? <span className="ui-trw__swatch" />}
+        <div className="ui-trwc__pop-head">
+          <span className="ui-trwc__icon" data-logo={s.icon ? "" : undefined}>
+            {s.icon ?? <span className="ui-trwc__swatch" />}
           </span>
-          <span className="ui-trw__pop-who">
-            <span className="ui-trw__pop-name" dir="auto">
+          <span className="ui-trwc__pop-who">
+            <span className="ui-trwc__pop-name" dir="auto">
               {s.name}
             </span>
-            <span className="ui-trw__pop-kind">
+            <span className="ui-trwc__pop-kind">
               {KIND(s.kind)}
               {s.model ? ` · ${s.model}` : s.detail ? ` · ${s.detail}` : ""}
             </span>
           </span>
-          <span className="ui-trw__pill" data-status={s.status}>
+          <span className="ui-trwc__pill" data-status={s.status}>
             {STATUS(s.status)}
           </span>
           <button
             type="button"
-            className="ui-trw__close"
+            className="ui-trwc__close"
             aria-label={t("core:trace.close")}
             onClick={() => {
               setOpen(null);
@@ -654,7 +654,7 @@ export function TraceWaterfall({
             <Cancel />
           </button>
         </div>
-        <dl className="ui-trw__pop-stats">
+        <dl className="ui-trwc__pop-stats">
           {stats.map(([k, v]) => (
             <div key={k}>
               <dt>{k}</dt>
@@ -663,21 +663,21 @@ export function TraceWaterfall({
           ))}
         </dl>
         {s.error && (
-          <p className="ui-trw__pop-error">
+          <p className="ui-trwc__pop-error">
             <Warning />
-            <span className="ui-trw__pop-error-text" dir="auto">
+            <span className="ui-trwc__pop-error-text" dir="auto">
               {s.error}
             </span>
           </p>
         )}
         {s.input && (
-          <div className="ui-trw__pop-io">
+          <div className="ui-trwc__pop-io">
             <span>{t("core:trace.input")}</span>
             <p dir="auto">{s.input}</p>
           </div>
         )}
         {s.output && (
-          <div className="ui-trw__pop-io">
+          <div className="ui-trwc__pop-io">
             <span>{t("core:trace.output")}</span>
             <p dir="auto">{s.output}</p>
           </div>
@@ -700,34 +700,34 @@ export function TraceWaterfall({
   const tickList = [...ticks.map((v) => ({ v, leaving: false })), ...fading.filter((v) => !ticks.includes(v)).map((v) => ({ v, leaving: true }))];
 
   return (
-    <div ref={rootRef} className={["ui-trw", className].filter(Boolean).join(" ")} data-live={state === "running" ? "" : undefined} style={{ "--ui-trw-at": now } as CSSProperties}>
-      <style href="ui-trace-waterfall" precedence="default">
+    <div ref={rootRef} className={["ui-trwc", className].filter(Boolean).join(" ")} data-live={state === "running" ? "" : undefined} style={{ "--ui-trwc-at": now } as CSSProperties}>
+      <style href="ui-trace-waterfall-clean" precedence="default">
         {css}
       </style>
 
-      <header className="ui-trw__bar-head">
-        <span className="ui-trw__spark">
+      <header className="ui-trwc__bar-head">
+        <span className="ui-trwc__spark">
           <Spark />
         </span>
-        <span className="ui-trw__heading" title={title}>
+        <span className="ui-trwc__heading" title={title}>
           {title}
         </span>
-        <span className="ui-trw__task" dir="auto">
+        <span className="ui-trwc__task" dir="auto">
           {root.input ?? root.name}
         </span>
-        <span className="ui-trw__pill" data-status={state} aria-live="polite">
-          {state === "running" && <span className="ui-trw__pulse" aria-hidden="true" />}
+        <span className="ui-trwc__pill" data-status={state} aria-live="polite">
+          {state === "running" && <span className="ui-trwc__pulse" aria-hidden="true" />}
           {state === "running" ? t("core:trace.live") : STATUS(state)}
         </span>
       </header>
 
-      <div className="ui-trw__card">
-        <dl className="ui-trw__stats" data-cols={stats.length} style={{ "--ui-trw-cols": stats.length } as CSSProperties}>
+      <div className="ui-trwc__card">
+        <dl className="ui-trwc__stats" data-cols={stats.length} style={{ "--ui-trwc-cols": stats.length } as CSSProperties}>
           {stats.map((s) => (
-            <div key={s.label} className="ui-trw__stat" data-kind={s.kind}>
+            <div key={s.label} className="ui-trwc__stat" data-kind={s.kind}>
               <dt>{s.label}</dt>
               <dd title={s.full && s.full !== s.value ? s.full : undefined}>
-                <span className="ui-trw__amount" data-live={s.live ? "" : undefined}>
+                <span className="ui-trwc__amount" data-live={s.live ? "" : undefined}>
                   {s.value}
                 </span>
               </dd>
@@ -735,20 +735,20 @@ export function TraceWaterfall({
           ))}
         </dl>
 
-        <div ref={bodyRef} className="ui-trw__body">
+        <div ref={bodyRef} className="ui-trwc__body">
           {/* Ticks, grid lines and the "now" line – positioned against the gliding range */}
-          <div ref={layerRef} className="ui-trw__layer" aria-hidden="true">
+          <div ref={layerRef} className="ui-trwc__layer" aria-hidden="true">
             {tickList.map(({ v, leaving }) => (
-              <span key={v} className="ui-trw__tick" data-zero={v === 0 ? "" : undefined} data-edge={v > range * 0.84 ? "" : undefined} data-leaving={leaving ? "" : undefined} style={{ "--v": v } as CSSProperties}>
+              <span key={v} className="ui-trwc__tick" data-zero={v === 0 ? "" : undefined} data-edge={v > range * 0.84 ? "" : undefined} data-leaving={leaving ? "" : undefined} style={{ "--v": v } as CSSProperties}>
                 <span>{tickLabel(v)}</span>
               </span>
             ))}
-            {state === "running" && <span className="ui-trw__now" />}
+            {state === "running" && <span className="ui-trwc__now" />}
           </div>
-          <div className="ui-trw__axis" aria-hidden="true">
+          <div className="ui-trwc__axis" aria-hidden="true">
             <span>{t("core:trace.span")}</span>
           </div>
-          <div ref={rowsRef} className="ui-trw__rows" role="tree" aria-label={title}>
+          <div ref={rowsRef} className="ui-trwc__rows" role="tree" aria-label={title}>
             {rows.map((r) => (
               <SpanRow
                 key={r.leaving !== undefined ? `${r.span.id}~out` : r.span.id}
@@ -776,298 +776,293 @@ export function TraceWaterfall({
   );
 }
 
+
 const css = /* css */ `
-/* Colors, sizes and motion as variables – override them on .ui-trw */
-.ui-trw {
+/* Colors, sizes and motion as variables – override them on .ui-trwc */
+.ui-trwc {
   /* Steve: every color comes from Steve's tokens, which already switch between light and dark. Thinking is the one
    * indigo kind, tool calls a stronger slate, the turn itself a quiet slate; status colors only for status. */
-  --ui-trw-tray: var(--aui-subtle);
-  --ui-trw-card: var(--aui-surface);
-  --ui-trw-strong: var(--aui-ink);
-  --ui-trw-ink: var(--aui-ink);
-  --ui-trw-text: var(--aui-muted);
-  --ui-trw-muted: var(--aui-placeholder);
-  --ui-trw-faint: var(--aui-placeholder);
-  --ui-trw-line: var(--aui-border);
-  --ui-trw-grid: color-mix(in srgb, var(--aui-border) 55%, transparent);
-  --ui-trw-guide: var(--aui-border);
-  --ui-trw-hover: color-mix(in srgb, var(--aui-ink) 3%, transparent);
-  --ui-trw-selected: color-mix(in srgb, var(--aui-primary) 6%, transparent);
-  --ui-trw-chip: var(--aui-subtle);
-  --ui-trw-wash: var(--aui-subtle);
-  --ui-trw-accent: var(--aui-primary);
-  --ui-trw-now: color-mix(in srgb, var(--aui-primary) 55%, transparent);
-  --ui-trw-agent-bg: color-mix(in srgb, var(--aui-ink) 5%, transparent);
-  --ui-trw-agent-edge: color-mix(in srgb, var(--aui-ink) 12%, transparent);
-  --ui-trw-agent-ink: var(--aui-muted);
-  --ui-trw-agent-mark: var(--aui-placeholder);
-  --ui-trw-llm-bg: color-mix(in srgb, var(--aui-info) 14%, transparent);
-  --ui-trw-llm-edge: color-mix(in srgb, var(--aui-info) 38%, transparent);
-  --ui-trw-llm-ink: var(--aui-info);
-  --ui-trw-llm-mark: var(--aui-info);
-  --ui-trw-tool-bg: color-mix(in srgb, var(--aui-ink) 11%, transparent);
-  --ui-trw-tool-edge: color-mix(in srgb, var(--aui-ink) 24%, transparent);
-  --ui-trw-tool-ink: var(--aui-ink);
-  --ui-trw-tool-mark: var(--aui-muted);
-  --ui-trw-error-bg: var(--aui-danger-soft);
-  --ui-trw-error-edge: color-mix(in srgb, var(--aui-danger) 45%, transparent);
-  --ui-trw-error-ink: var(--aui-danger);
-  --ui-trw-error-mark: var(--aui-danger);
-  --ui-trw-brand-bg: var(--aui-info-soft);
-  --ui-trw-brand-fg: var(--aui-info);
-  --ui-trw-ok-bg: var(--aui-success-soft);
-  --ui-trw-ok-fg: var(--aui-success);
-  --ui-trw-slow-bg: var(--aui-warning-soft);
-  --ui-trw-slow-fg: var(--aui-warning);
-  --ui-trw-focus: var(--aui-focus);
-  --ui-trw-shine: color-mix(in srgb, var(--aui-ink) 35%, transparent);
-  --ui-trw-shadow: var(--aui-shadow-card);
-  --ui-trw-pop: var(--aui-shadow-popover);
-  --ui-trw-row: 32px;
-  --ui-trw-bar: 16px;
-  --ui-trw-axis: 30px;
-  --ui-trw-name: 236px;
-  --ui-trw-pad: 10px;
-  --ui-trw-gap: 14px;
-  --ui-trw-end: 16px;
-  --ui-trw-indent: 14px;
+  --ui-trwc-card: var(--aui-surface);
+  --ui-trwc-strong: var(--aui-ink);
+  --ui-trwc-ink: var(--aui-ink);
+  --ui-trwc-text: var(--aui-muted);
+  --ui-trwc-muted: var(--aui-placeholder);
+  --ui-trwc-faint: var(--aui-placeholder);
+  --ui-trwc-line: var(--aui-border);
+  --ui-trwc-grid: color-mix(in srgb, var(--aui-border) 55%, transparent);
+  --ui-trwc-guide: var(--aui-border);
+  --ui-trwc-hover: color-mix(in srgb, var(--aui-ink) 3%, transparent);
+  --ui-trwc-selected: color-mix(in srgb, var(--aui-primary) 6%, transparent);
+  --ui-trwc-chip: var(--aui-subtle);
+  --ui-trwc-fill: var(--aui-subtle);
+  --ui-trwc-wash: var(--aui-subtle);
+  --ui-trwc-accent: var(--aui-primary);
+  --ui-trwc-now: color-mix(in srgb, var(--aui-primary) 55%, transparent);
+  --ui-trwc-agent-bg: color-mix(in srgb, var(--aui-ink) 5%, transparent);
+  --ui-trwc-agent-edge: color-mix(in srgb, var(--aui-ink) 12%, transparent);
+  --ui-trwc-agent-ink: var(--aui-muted);
+  --ui-trwc-agent-mark: var(--aui-placeholder);
+  --ui-trwc-llm-bg: color-mix(in srgb, var(--aui-info) 14%, transparent);
+  --ui-trwc-llm-edge: color-mix(in srgb, var(--aui-info) 38%, transparent);
+  --ui-trwc-llm-ink: var(--aui-info);
+  --ui-trwc-llm-mark: var(--aui-info);
+  --ui-trwc-tool-bg: color-mix(in srgb, var(--aui-ink) 11%, transparent);
+  --ui-trwc-tool-edge: color-mix(in srgb, var(--aui-ink) 24%, transparent);
+  --ui-trwc-tool-ink: var(--aui-ink);
+  --ui-trwc-tool-mark: var(--aui-muted);
+  --ui-trwc-error-bg: var(--aui-danger-soft);
+  --ui-trwc-error-edge: color-mix(in srgb, var(--aui-danger) 45%, transparent);
+  --ui-trwc-error-ink: var(--aui-danger);
+  --ui-trwc-error-mark: var(--aui-danger);
+  --ui-trwc-brand-bg: var(--aui-info-soft);
+  --ui-trwc-brand-fg: var(--aui-info);
+  --ui-trwc-ok-bg: var(--aui-success-soft);
+  --ui-trwc-ok-fg: var(--aui-success);
+  --ui-trwc-slow-bg: var(--aui-warning-soft);
+  --ui-trwc-slow-fg: var(--aui-warning);
+  --ui-trwc-focus: var(--aui-focus);
+  --ui-trwc-shine: color-mix(in srgb, var(--aui-ink) 35%, transparent);
+  --ui-trwc-shadow: var(--aui-shadow-card);
+  --ui-trwc-pop: var(--aui-shadow-popover);
+  --ui-trwc-row: 30px;
+  --ui-trwc-bar: 14px;
+  --ui-trwc-axis: 30px;
+  --ui-trwc-name: 232px;
+  --ui-trwc-pad: 10px;
+  --ui-trwc-gap: 14px;
+  --ui-trwc-end: 16px;
+  --ui-trwc-indent: 14px;
   /* Deeper levels stop indenting, so a deep tree keeps room for its names */
-  --ui-trw-depth: 8;
-  --ui-trw-ease: var(--aui-ease, cubic-bezier(0.22, 1, 0.36, 1));
-  --ui-trw-range: 10000;
+  --ui-trwc-depth: 8;
+  --ui-trwc-ease: cubic-bezier(0.32, 0.72, 0.24, 1);
+  --ui-trwc-range: 10000;
   position: relative;
   box-sizing: border-box;
   width: 100%;
-  padding: 4px;
-  border-radius: calc(var(--aui-radius-lg, 16px) + 4px);
-  background: var(--ui-trw-tray);
-  container: ui-trw / inline-size;
-  font-family: var(--aui-font, "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif);
-  font-size: 14px;
+  border-radius: calc(var(--aui-radius-lg, 10px) + 2px);
+  background: var(--aui-surface, var(--ui-trwc-card));
+  box-shadow: var(--aui-shadow-card, var(--ui-trwc-shadow));
+  container: ui-trwc / inline-size;
+  font-family: var(--aui-font, "Inter", "InterVariable", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif);
+  font-size: 13px;
   font-weight: 400;
   line-height: 20px;
-  letter-spacing: -0.006em;
-  color: var(--ui-trw-text);
+  color: var(--ui-trwc-text);
   text-align: left;
   -webkit-font-smoothing: antialiased;
 }
-.ui-trw *, .ui-trw *::before, .ui-trw *::after { box-sizing: border-box; }
-:where(.ui-trw) button { margin: 0; padding: 0; border: 0; background: none; font: inherit; color: inherit; text-align: inherit; cursor: pointer; -webkit-tap-highlight-color: transparent; }
-.ui-trw button:focus-visible { outline: 2px solid var(--ui-trw-focus); outline-offset: 2px; }
-.ui-trw :is(p, dl, dd) { margin: 0; }
-.ui-trw svg { display: block; flex: none; }
+.ui-trwc *, .ui-trwc *::before, .ui-trwc *::after { box-sizing: border-box; }
+:where(.ui-trwc) button { margin: 0; padding: 0; border: 0; background: none; font: inherit; color: inherit; text-align: inherit; cursor: pointer; -webkit-tap-highlight-color: transparent; }
+.ui-trwc button:focus-visible { outline: 2px solid var(--ui-trwc-focus); outline-offset: 2px; }
+.ui-trwc :is(p, dl, dd) { margin: 0; }
+.ui-trwc svg { display: block; flex: none; }
 
-/* ----- On the tray: what ran, and whether it still runs ----- */
-.ui-trw__bar-head { display: flex; align-items: center; gap: 8px; min-width: 0; padding: 8px 8px 12px 12px; }
-.ui-trw__spark { display: grid; flex: none; place-items: center; width: 16px; color: var(--ui-trw-accent); }
-.ui-trw__heading { flex: 0 1 auto; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-weight: 600; color: var(--ui-trw-strong); }
-.ui-trw__task { flex: 1; min-width: 0; overflow: hidden; font-size: 13px; color: var(--ui-trw-muted); white-space: nowrap; text-overflow: ellipsis; }
-.ui-trw__pill { display: inline-flex; flex: none; align-items: center; gap: 6px; height: 22px; padding: 0 9px; border-radius: 999px; background: var(--ui-trw-chip); font-size: 12px; font-weight: 500; line-height: 16px; color: var(--ui-trw-text); white-space: nowrap; }
-.ui-trw__bar-head .ui-trw__pill { background: var(--ui-trw-card); box-shadow: var(--ui-trw-shadow); }
-.ui-trw__pill[data-status="running"] { color: var(--ui-trw-brand-fg); }
-.ui-trw__pop .ui-trw__pill[data-status="running"] { background: var(--ui-trw-brand-bg); }
-.ui-trw__pill[data-status="done"] { color: var(--ui-trw-ok-fg); }
-.ui-trw__pop .ui-trw__pill[data-status="done"] { background: var(--ui-trw-ok-bg); }
-.ui-trw__pill[data-status="failed"] { color: var(--ui-trw-error-ink); }
-.ui-trw__pop .ui-trw__pill[data-status="failed"] { background: var(--ui-trw-error-bg); }
-.ui-trw__pill[data-status="cancelled"] { color: var(--ui-trw-muted); }
-.ui-trw__pulse { width: 6px; height: 6px; border-radius: 50%; background: currentColor; animation: ui-trw-pulse 1400ms ease-in-out infinite; }
+/* ----- The bar: what ran, and whether it still runs ----- */
+.ui-trwc__bar-head { display: flex; align-items: center; gap: 8px; min-width: 0; padding: 12px 14px 12px 16px; border-bottom: 0.5px solid var(--ui-trwc-line); }
+.ui-trwc__spark { display: grid; flex: none; place-items: center; width: 16px; color: var(--ui-trwc-accent); }
+.ui-trwc__heading { flex: 0 1 auto; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-weight: 500; color: var(--ui-trwc-strong); }
+.ui-trwc__task { flex: 1; min-width: 0; overflow: hidden; color: var(--ui-trwc-muted); white-space: nowrap; text-overflow: ellipsis; }
+.ui-trwc__pill { display: inline-flex; flex: none; align-items: center; gap: 5px; height: 20px; padding: 0 7px; border-radius: var(--aui-radius-sm, 5px); background: var(--ui-trwc-fill); font-size: 12px; font-weight: 500; line-height: 16px; color: var(--ui-trwc-text); white-space: nowrap; }
+.ui-trwc__pill[data-status="running"] { background: var(--ui-trwc-brand-bg); color: var(--ui-trwc-brand-fg); }
+.ui-trwc__pill[data-status="done"] { background: var(--ui-trwc-ok-bg); color: var(--ui-trwc-ok-fg); }
+.ui-trwc__pill[data-status="failed"] { background: var(--ui-trwc-error-bg); color: var(--ui-trwc-error-ink); }
+.ui-trwc__pill[data-status="cancelled"] { color: var(--ui-trwc-muted); }
+.ui-trwc__pulse { width: 6px; height: 6px; border-radius: 50%; background: currentColor; animation: ui-trwc-pulse 1400ms ease-in-out infinite; }
 
-/* ----- The white card: the run in numbers, then the waterfall ----- */
-.ui-trw__card { border-radius: var(--aui-radius-lg, 16px); background: var(--ui-trw-card); box-shadow: var(--aui-shadow-card, var(--ui-trw-shadow)); }
-.ui-trw__stats { display: grid; grid-template-columns: repeat(var(--ui-trw-cols, 6), minmax(0, 1fr)); padding: 14px 0; border-bottom: 1px solid var(--ui-trw-line); }
-.ui-trw__stat { display: grid; gap: 2px; min-width: 0; padding: 0 16px; }
+/* ----- The run in numbers, then the waterfall – all on the one card ----- */
+.ui-trwc__stats { display: grid; grid-template-columns: repeat(var(--ui-trwc-cols, 6), minmax(0, 1fr)); padding: 12px 0; border-bottom: 0.5px solid var(--ui-trwc-line); }
+.ui-trwc__stat { display: grid; gap: 2px; min-width: 0; padding: 0 16px; }
 /* The first value a little further from the edge, the last one a little closer – so the row looks even */
-.ui-trw__stat:first-child { padding-left: 22px; }
-.ui-trw__stat:last-child { padding-right: 10px; }
-.ui-trw__stat + .ui-trw__stat { border-left: 1px solid var(--ui-trw-line); }
-.ui-trw__stat dt { overflow: hidden; font-size: 12px; line-height: 16px; color: var(--ui-trw-muted); white-space: nowrap; text-overflow: ellipsis; }
-.ui-trw__stat dd { overflow: hidden; font-size: 16px; font-weight: 600; line-height: 22px; letter-spacing: -0.01em; color: var(--ui-trw-ink); white-space: nowrap; text-overflow: ellipsis; font-variant-numeric: tabular-nums; }
-.ui-trw__stat[data-kind="failed"] dd { color: var(--ui-trw-error-ink); }
+.ui-trwc__stat:first-child { padding-left: 22px; }
+.ui-trwc__stat:last-child { padding-right: 10px; }
+.ui-trwc__stat + .ui-trwc__stat { border-left: 0.5px solid var(--ui-trwc-line); }
+.ui-trwc__stat dt { overflow: hidden; font-size: 12px; font-weight: 500; line-height: 16px; color: var(--ui-trwc-muted); white-space: nowrap; text-overflow: ellipsis; }
+.ui-trwc__stat dd { overflow: hidden; font-size: 15px; font-weight: 500; line-height: 24px; color: var(--ui-trwc-ink); white-space: nowrap; text-overflow: ellipsis; font-variant-numeric: tabular-nums; }
+.ui-trwc__stat[data-kind="failed"] dd { color: var(--ui-trwc-error-ink); }
 
-.ui-trw__body { position: relative; padding-bottom: 18px; }
+.ui-trwc__body { position: relative; padding-bottom: 18px; }
 /* The axis and its grid lines run behind the rows; the range glides, so everything is placed in calc() */
-.ui-trw__layer { position: absolute; top: 0; bottom: 0; left: calc(var(--ui-trw-pad) + var(--ui-trw-name) + var(--ui-trw-gap)); right: var(--ui-trw-end); overflow: hidden; pointer-events: none; }
-.ui-trw__tick { position: absolute; top: 0; bottom: 0; left: calc(var(--v) * 100% / var(--ui-trw-range)); width: 1px; background: var(--ui-trw-grid); animation: ui-trw-fade 420ms ease both; transition: opacity 420ms ease; }
-.ui-trw__tick[data-zero] { background: var(--ui-trw-line); }
-.ui-trw__tick[data-leaving] { opacity: 0; }
-.ui-trw__tick > span { position: absolute; top: 8px; left: 6px; font-size: 11px; line-height: 14px; color: var(--ui-trw-muted); white-space: nowrap; font-variant-numeric: tabular-nums; }
+.ui-trwc__layer { position: absolute; top: 0; bottom: 0; left: calc(var(--ui-trwc-pad) + var(--ui-trwc-name) + var(--ui-trwc-gap)); right: var(--ui-trwc-end); overflow: hidden; pointer-events: none; }
+.ui-trwc__tick { position: absolute; top: 0; bottom: 0; left: calc(var(--v) * 100% / var(--ui-trwc-range)); width: 0.5px; background: var(--ui-trwc-grid); animation: ui-trwc-fade 420ms ease both; transition: opacity 420ms ease; }
+.ui-trwc__tick[data-zero] { width: 0.5px; background: rgba(0, 0, 0, 0.1); }
+.ui-trwc__tick[data-leaving] { opacity: 0; }
+.ui-trwc__tick > span { position: absolute; top: 7px; left: 6px; font-size: 12px; line-height: 16px; color: var(--ui-trwc-muted); white-space: nowrap; font-variant-numeric: tabular-nums; }
 /* Steve: a label too near the end of the axis would be cut off – its line stays, the label goes */
-.ui-trw__tick[data-edge] > span { display: none; }
-.ui-trw__now { position: absolute; top: 0; bottom: 0; left: calc(var(--ui-trw-at) * 100% / var(--ui-trw-range)); width: 1px; background: var(--ui-trw-now); }
-.ui-trw__now::before { content: ""; position: absolute; top: calc(var(--ui-trw-axis) - 3px); left: -2.5px; width: 6px; height: 6px; border-radius: 50%; background: var(--ui-trw-accent); box-shadow: 0 0 0 3px var(--ui-trw-card); }
-.ui-trw__axis { display: flex; align-items: center; height: var(--ui-trw-axis); padding-left: calc(var(--ui-trw-pad) + 6px); border-bottom: 1px solid var(--ui-trw-line); font-size: 11px; line-height: 14px; color: var(--ui-trw-muted); }
-.ui-trw__rows { position: relative; padding-top: 4px; }
+.ui-trwc__tick[data-edge] > span { display: none; }
+.ui-trwc__now { position: absolute; top: 0; bottom: 0; left: calc(var(--ui-trwc-at) * 100% / var(--ui-trwc-range)); width: 1px; background: var(--ui-trwc-now); }
+.ui-trwc__now::before { content: ""; position: absolute; top: calc(var(--ui-trwc-axis) - 2.5px); left: -2px; width: 5px; height: 5px; border-radius: 50%; background: var(--ui-trwc-accent); box-shadow: 0 0 0 3px var(--aui-surface, var(--ui-trwc-card)); }
+.ui-trwc__axis { display: flex; align-items: center; height: var(--ui-trwc-axis); padding-left: calc(var(--ui-trwc-pad) + 6px); border-bottom: 0.5px solid var(--ui-trwc-line); font-size: 12px; font-weight: 500; line-height: 16px; color: var(--ui-trwc-muted); }
+.ui-trwc__rows { position: relative; padding-top: 4px; }
 
 /* ----- One row: its name on the left, its bar on the right ----- */
-.ui-trw__row {
+.ui-trwc__row {
   display: grid;
-  grid-template-columns: var(--ui-trw-name) minmax(0, 1fr);
-  column-gap: var(--ui-trw-gap);
-  height: var(--ui-trw-row);
-  padding: 0 var(--ui-trw-end) 0 var(--ui-trw-pad);
+  grid-template-columns: var(--ui-trwc-name) minmax(0, 1fr);
+  column-gap: var(--ui-trwc-gap);
+  height: var(--ui-trwc-row);
+  padding: 0 var(--ui-trwc-end) 0 var(--ui-trwc-pad);
   overflow: hidden;
   outline: none;
   cursor: pointer;
-  transition: height 360ms var(--ui-trw-ease), opacity 260ms ease, background-color 140ms ease;
-  animation: ui-trw-row 420ms var(--ui-trw-ease) backwards;
+  transition: height 360ms var(--ui-trwc-ease), opacity 260ms ease, background-color 140ms ease;
+  animation: ui-trwc-row 420ms var(--ui-trwc-ease) backwards;
 }
-.ui-trw__row:hover { background: var(--ui-trw-hover); }
-.ui-trw__row[data-open] { background: var(--ui-trw-selected); }
-.ui-trw__row:focus-visible { outline: 2px solid var(--ui-trw-focus); outline-offset: -2px; }
+.ui-trwc__row:hover { background: var(--ui-trwc-hover); }
+.ui-trwc__row[data-open] { background: var(--ui-trwc-selected); }
+.ui-trwc__row:focus-visible { outline: 2px solid var(--ui-trwc-focus); outline-offset: -2px; }
 /* Folded away or leaving: the row closes to no height */
-.ui-trw__row:is([data-hidden], [data-leaving]) { height: 0; opacity: 0; pointer-events: none; }
-.ui-trw__row[data-leaving] { animation: ui-trw-leave ${EXIT}ms var(--ui-trw-ease) both; }
-.ui-trw__row[data-leaving][data-hidden] { animation: none; }
-.ui-trw__row[data-leaving] :is(.ui-trw__bar, .ui-trw__tag, .ui-trw__more, .ui-trw__slow) { animation: none; }
+.ui-trwc__row:is([data-hidden], [data-leaving]) { height: 0; opacity: 0; pointer-events: none; }
+.ui-trwc__row[data-leaving] { animation: ui-trwc-leave ${EXIT}ms var(--ui-trwc-ease) both; }
+.ui-trwc__row[data-leaving][data-hidden] { animation: none; }
+.ui-trwc__row[data-leaving] :is(.ui-trwc__bar, .ui-trwc__tag, .ui-trwc__more, .ui-trwc__slow) { animation: none; }
 
-.ui-trw__name { display: flex; align-items: center; min-width: 0; height: var(--ui-trw-row); }
+.ui-trwc__name { display: flex; align-items: center; min-width: 0; height: var(--ui-trwc-row); }
 /* One faint line per level, under the chevron of each parent */
-.ui-trw__guides { flex: none; align-self: stretch; background: repeating-linear-gradient(90deg, transparent 0 7.5px, var(--ui-trw-guide) 7.5px 8.5px, transparent 8.5px var(--ui-trw-indent)); }
-.ui-trw__chev { display: grid; flex: none; place-items: center; width: 16px; height: 20px; margin-right: 4px; border-radius: calc(var(--aui-radius-sm, 7px) - 2px); color: var(--ui-trw-muted); transition: background-color 140ms ease, color 140ms ease; }
-.ui-trw__chev:not([data-leaf]):hover { background: var(--ui-trw-chip); color: var(--ui-trw-ink); }
-.ui-trw__chev > svg { transition: transform 240ms var(--ui-trw-ease); }
-.ui-trw__row[data-folded] .ui-trw__chev > svg { transform: rotate(-90deg); }
-.ui-trw__icon { display: grid; flex: none; place-items: center; width: 20px; height: 20px; margin-right: 8px; border-radius: 6px; background: var(--ui-trw-card); box-shadow: 0 0 0 1px var(--ui-trw-line); }
-.ui-trw__icon > svg { width: 12px; height: 12px; }
-.ui-trw__swatch { width: 8px; height: 8px; border-radius: 2.5px; background: var(--k-mark); }
-.ui-trw__label { display: flex; align-items: baseline; gap: 6px; flex: 1; min-width: 0; overflow: hidden; white-space: nowrap; }
-.ui-trw__title { flex: none; max-width: 100%; overflow: hidden; font-size: 13px; color: var(--ui-trw-ink); text-overflow: ellipsis; }
-.ui-trw__row[data-parent] .ui-trw__title { font-weight: 500; }
-.ui-trw__detail { min-width: 0; overflow: hidden; font-size: 12px; color: var(--ui-trw-muted); text-overflow: ellipsis; }
-.ui-trw__more { flex: none; height: 18px; margin-left: 6px; padding: 0 6px; border-radius: 999px; background: var(--ui-trw-chip); font-size: 11px; font-weight: 500; line-height: 18px; color: var(--ui-trw-text); font-variant-numeric: tabular-nums; animation: ui-trw-pop 220ms var(--ui-trw-ease) both; }
-.ui-trw__state { display: grid; flex: none; place-items: center; width: 16px; margin-left: 4px; }
-.ui-trw__state[data-status="running"] { color: var(--ui-trw-brand-fg); }
-.ui-trw__state[data-status="failed"] { color: var(--ui-trw-error-ink); }
-.ui-trw__spin { animation: ui-trw-spin 900ms linear infinite; }
-.ui-trw__meta { display: none; }
+.ui-trwc__guides { flex: none; align-self: stretch; background: repeating-linear-gradient(90deg, transparent 0 7.75px, var(--ui-trwc-guide) 7.75px 8.25px, transparent 8.25px var(--ui-trwc-indent)); }
+.ui-trwc__chev { display: grid; flex: none; place-items: center; width: 16px; height: 20px; margin-right: 4px; border-radius: calc(var(--aui-radius-sm, 5px) - 1px); color: var(--ui-trwc-muted); transition: background-color 140ms ease, color 140ms ease; }
+.ui-trwc__chev:not([data-leaf]):hover { background: var(--ui-trwc-fill); color: var(--ui-trwc-ink); }
+.ui-trwc__chev > svg { transition: transform 240ms var(--ui-trwc-ease); }
+.ui-trwc__row[data-folded] .ui-trwc__chev > svg { transform: rotate(-90deg); }
+.ui-trwc__icon { display: grid; flex: none; place-items: center; width: 20px; height: 20px; margin-right: 8px; border-radius: 5px; background: var(--ui-trwc-card); box-shadow: var(--ui-trwc-shadow); }
+.ui-trwc__icon > svg { width: 12px; height: 12px; }
+.ui-trwc__swatch { width: 8px; height: 8px; border-radius: 2px; background: var(--k-mark); }
+.ui-trwc__label { display: flex; align-items: baseline; gap: 6px; flex: 1; min-width: 0; overflow: hidden; white-space: nowrap; }
+.ui-trwc__title { flex: none; max-width: 100%; overflow: hidden; color: var(--ui-trwc-ink); text-overflow: ellipsis; }
+.ui-trwc__row[data-parent] .ui-trwc__title { font-weight: 500; color: var(--ui-trwc-strong); }
+.ui-trwc__detail { min-width: 0; overflow: hidden; font-size: 12px; color: var(--ui-trwc-muted); text-overflow: ellipsis; }
+.ui-trwc__more { flex: none; height: 18px; margin-left: 6px; padding: 0 5px; border-radius: calc(var(--aui-radius-sm, 5px) - 1px); background: var(--ui-trwc-fill); font-size: 11px; font-weight: 500; line-height: 18px; color: var(--ui-trwc-text); font-variant-numeric: tabular-nums; animation: ui-trwc-pop 220ms var(--ui-trwc-ease) both; }
+.ui-trwc__state { display: grid; flex: none; place-items: center; width: 16px; margin-left: 4px; }
+.ui-trwc__state[data-status="running"] { color: var(--ui-trwc-brand-fg); }
+.ui-trwc__state[data-status="failed"] { color: var(--ui-trwc-error-ink); }
+.ui-trwc__spin { animation: ui-trwc-spin 900ms linear infinite; }
+.ui-trwc__meta { display: none; }
 
 /* ----- The bar ----- */
-.ui-trw [data-kind] { --k-bg: var(--ui-trw-agent-bg); --k-edge: var(--ui-trw-agent-edge); --k-ink: var(--ui-trw-agent-ink); --k-mark: var(--ui-trw-agent-mark); }
-.ui-trw [data-kind="llm"] { --k-bg: var(--ui-trw-llm-bg); --k-edge: var(--ui-trw-llm-edge); --k-ink: var(--ui-trw-llm-ink); --k-mark: var(--ui-trw-llm-mark); }
-.ui-trw [data-kind="tool"] { --k-bg: var(--ui-trw-tool-bg); --k-edge: var(--ui-trw-tool-edge); --k-ink: var(--ui-trw-tool-ink); --k-mark: var(--ui-trw-tool-mark); }
-.ui-trw [data-kind][data-status="failed"] { --k-bg: var(--ui-trw-error-bg); --k-edge: var(--ui-trw-error-edge); --k-ink: var(--ui-trw-error-ink); --k-mark: var(--ui-trw-error-mark); }
-.ui-trw__track { position: relative; min-width: 0; height: var(--ui-trw-row); overflow: hidden; }
-.ui-trw__bar {
+.ui-trwc [data-kind] { --k-bg: var(--ui-trwc-agent-bg); --k-edge: var(--ui-trwc-agent-edge); --k-ink: var(--ui-trwc-agent-ink); --k-mark: var(--ui-trwc-agent-mark); }
+.ui-trwc [data-kind="llm"] { --k-bg: var(--ui-trwc-llm-bg); --k-edge: var(--ui-trwc-llm-edge); --k-ink: var(--ui-trwc-llm-ink); --k-mark: var(--ui-trwc-llm-mark); }
+.ui-trwc [data-kind="tool"] { --k-bg: var(--ui-trwc-tool-bg); --k-edge: var(--ui-trwc-tool-edge); --k-ink: var(--ui-trwc-tool-ink); --k-mark: var(--ui-trwc-tool-mark); }
+.ui-trwc [data-kind][data-status="failed"] { --k-bg: var(--ui-trwc-error-bg); --k-edge: var(--ui-trwc-error-edge); --k-ink: var(--ui-trwc-error-ink); --k-mark: var(--ui-trwc-error-mark); }
+.ui-trwc__track { position: relative; min-width: 0; height: var(--ui-trwc-row); overflow: hidden; }
+.ui-trwc__bar {
   position: absolute;
-  top: calc(50% - var(--ui-trw-bar) / 2);
-  left: calc(var(--s) * 100% / var(--ui-trw-range));
-  width: max(3px, calc(var(--d) * 100% / var(--ui-trw-range)));
-  height: var(--ui-trw-bar);
+  top: calc(50% - var(--ui-trwc-bar) / 2);
+  left: calc(var(--s) * 100% / var(--ui-trwc-range));
+  width: max(3px, calc(var(--d) * 100% / var(--ui-trwc-range)));
+  height: var(--ui-trwc-bar);
   overflow: hidden;
-  border-radius: 5px;
+  border-radius: 4px;
   background: var(--k-bg);
-  box-shadow: inset 0 0 0 1px var(--k-edge);
+  box-shadow: inset 0 0 0 0.5px var(--k-edge);
   transition: box-shadow 160ms ease, background-color 240ms ease, opacity 240ms ease;
-  animation: ui-trw-grow 560ms var(--ui-trw-ease) backwards;
+  animation: ui-trwc-grow 560ms var(--ui-trwc-ease) backwards;
 }
-.ui-trw__row:is(:hover, [data-open]) .ui-trw__bar { box-shadow: inset 0 0 0 1px var(--k-mark); }
+.ui-trwc__row:is(:hover, [data-open]) .ui-trwc__bar { box-shadow: inset 0 0 0 1px var(--k-mark); }
 /* Folded: the parent bar steps back, its children show on it as small marks */
-.ui-trw__row[data-folded] .ui-trw__bar { opacity: 0.75; }
-.ui-trw__mark { position: absolute; top: calc(50% - 3px); left: calc(var(--s) * 100% / var(--ui-trw-range)); width: max(2px, calc(var(--d) * 100% / var(--ui-trw-range))); height: 6px; border-radius: 2px; background: var(--k-mark); opacity: 0; transform: scaleY(0.2); transition: opacity 200ms ease, transform 200ms var(--ui-trw-ease); pointer-events: none; }
-.ui-trw__row[data-folded] .ui-trw__mark { opacity: 0.85; transform: none; transition-delay: 140ms; }
+.ui-trwc__row[data-folded] .ui-trwc__bar { opacity: 0.75; }
+.ui-trwc__mark { position: absolute; top: calc(50% - 2.5px); left: calc(var(--s) * 100% / var(--ui-trwc-range)); width: max(2px, calc(var(--d) * 100% / var(--ui-trwc-range))); height: 5px; border-radius: 1.5px; background: var(--k-mark); opacity: 0; transform: scaleY(0.2); transition: opacity 200ms ease, transform 200ms var(--ui-trwc-ease); pointer-events: none; }
+.ui-trwc__row[data-folded] .ui-trwc__mark { opacity: 0.9; transform: none; transition-delay: 140ms; }
 /* Still running: a sheen sweeps along and the leading edge glows */
-.ui-trw__bar[data-status="running"]::before { content: ""; position: absolute; inset: 0; background: linear-gradient(90deg, transparent, var(--ui-trw-card), transparent) -60px 0 / 60px 100% no-repeat; opacity: 0.7; animation: ui-trw-sweep 1500ms linear infinite; }
-.ui-trw__bar[data-status="running"]::after { content: ""; position: absolute; top: 0; right: 0; bottom: 0; width: min(28px, 100%); background: linear-gradient(90deg, transparent, var(--k-edge)); animation: ui-trw-glow 1100ms ease-in-out infinite alternate; }
+.ui-trwc__bar[data-status="running"]::before { content: ""; position: absolute; inset: 0; background: linear-gradient(90deg, transparent, var(--ui-trwc-card), transparent) -60px 0 / 60px 100% no-repeat; opacity: 0.7; animation: ui-trwc-sweep 1500ms linear infinite; }
+.ui-trwc__bar[data-status="running"]::after { content: ""; position: absolute; top: 0; right: 0; bottom: 0; width: min(28px, 100%); background: linear-gradient(90deg, transparent, var(--k-edge)); animation: ui-trwc-glow 1100ms ease-in-out infinite alternate; }
 
-/* How long it took, after the bar – or inside its end, or before it, when there is no room */
-/* It sits on the card's color, so grid lines and the "now" line pass behind it */
-.ui-trw__tag { position: absolute; top: calc(50% - 9px); display: flex; align-items: center; gap: 6px; height: 18px; padding: 0 4px; border-radius: 5px; background: var(--ui-trw-card); font-size: 11.5px; line-height: 16px; color: var(--ui-trw-text); white-space: nowrap; font-variant-numeric: tabular-nums; pointer-events: none; }
-.ui-trw__tag[data-side="after"] { left: calc((var(--s) + var(--d)) * 100% / var(--ui-trw-range) + 2px); }
-.ui-trw__tag[data-side="inside"] { right: calc(100% - (var(--s) + var(--d)) * 100% / var(--ui-trw-range) + 2px); flex-direction: row-reverse; background: none; color: var(--k-ink); }
-.ui-trw__tag[data-side="before"] { right: calc(100% - var(--s) * 100% / var(--ui-trw-range) + 2px); flex-direction: row-reverse; }
-.ui-trw__row[data-open] .ui-trw__tag { background: none; }
-.ui-trw__row[data-status="failed"] .ui-trw__tag { color: var(--ui-trw-error-ink); }
-.ui-trw__slow { flex: none; height: 16px; padding: 0 5px; border-radius: calc(var(--aui-radius-sm, 7px) - 3px); background: var(--ui-trw-slow-bg); font-size: 10.5px; font-weight: 500; line-height: 16px; color: var(--ui-trw-slow-fg); animation: ui-trw-pop 260ms var(--ui-trw-ease) both; }
+/* How long it took – on the card's color, so grid lines and the "now" line pass behind it */
+.ui-trwc__tag { position: absolute; top: calc(50% - 9px); display: flex; align-items: center; gap: 6px; height: 18px; padding: 0 4px; border-radius: 4px; background: var(--aui-surface, var(--ui-trwc-card)); font-size: 12px; line-height: 16px; color: var(--ui-trwc-text); white-space: nowrap; font-variant-numeric: tabular-nums; pointer-events: none; }
+.ui-trwc__tag[data-side="after"] { left: calc((var(--s) + var(--d)) * 100% / var(--ui-trwc-range) + 2px); }
+.ui-trwc__tag[data-side="inside"] { right: calc(100% - (var(--s) + var(--d)) * 100% / var(--ui-trwc-range) + 2px); flex-direction: row-reverse; background: none; color: var(--k-ink); }
+.ui-trwc__tag[data-side="before"] { right: calc(100% - var(--s) * 100% / var(--ui-trwc-range) + 2px); flex-direction: row-reverse; }
+.ui-trwc__row[data-open] .ui-trwc__tag { background: none; }
+.ui-trwc__row[data-status="failed"] .ui-trwc__tag { color: var(--ui-trwc-error-ink); }
+.ui-trwc__slow { flex: none; height: 16px; padding: 0 5px; border-radius: calc(var(--aui-radius-sm, 5px) - 1px); background: var(--ui-trwc-slow-bg); font-size: 10px; font-weight: 500; line-height: 16px; letter-spacing: 0.3px; text-transform: uppercase; color: var(--ui-trwc-slow-fg); animation: ui-trwc-pop 260ms var(--ui-trwc-ease) both; }
 /* Numbers that still climb: a light shimmer runs over them */
-.ui-trw__amount[data-live] {
-  background: linear-gradient(90deg, currentColor 0%, currentColor 38%, var(--ui-trw-shine) 50%, currentColor 62%, currentColor 100%) 0 0 / 300% 100%;
+.ui-trwc__amount[data-live] {
+  background: linear-gradient(90deg, currentColor 0%, currentColor 38%, var(--ui-trwc-shine) 50%, currentColor 62%, currentColor 100%) 0 0 / 300% 100%;
   -webkit-background-clip: text;
   background-clip: text;
   -webkit-text-fill-color: transparent;
-  animation: ui-trw-shine 1100ms linear infinite;
+  animation: ui-trwc-shine 1100ms linear infinite;
 }
 
 /* ----- The details window ----- */
-.ui-trw__pop { position: absolute; top: 0; left: 0; z-index: 5; display: grid; gap: 10px; width: min(330px, calc(100% - 16px)); padding: 12px; border-radius: var(--aui-radius-lg, 16px); background: var(--aui-overlay, var(--ui-trw-card)); box-shadow: var(--aui-shadow-popover, var(--ui-trw-pop)); cursor: auto; transform-origin: 24px top; animation: ui-trw-open 220ms var(--ui-trw-ease) both; }
-.ui-trw__pop[data-side="above"] { transform-origin: 24px bottom; }
-.ui-trw__pop[data-closing] { animation: ui-trw-close 160ms ease forwards; pointer-events: none; }
-.ui-trw__pop-head { display: flex; align-items: center; gap: 0; min-width: 0; }
-.ui-trw__pop-head .ui-trw__icon { width: 28px; height: 28px; margin-right: 10px; border-radius: 8px; }
-.ui-trw__pop-head .ui-trw__icon > svg { width: 15px; height: 15px; }
-.ui-trw__pop-who { display: grid; flex: 1; min-width: 0; }
-.ui-trw__pop-name { overflow: hidden; font-size: 13.5px; font-weight: 600; line-height: 18px; color: var(--ui-trw-strong); overflow-wrap: anywhere; }
-.ui-trw__pop-kind { overflow: hidden; font-size: 12px; line-height: 16px; color: var(--ui-trw-muted); overflow-wrap: anywhere; }
-.ui-trw__pop-head .ui-trw__pill { height: 20px; margin-left: 8px; padding: 0 7px; font-size: 11px; }
-.ui-trw__close { display: grid; flex: none; place-items: center; width: 28px; height: 28px; margin: -2px -4px 0 4px; border-radius: calc(var(--aui-radius-sm, 7px) + 1px); color: var(--ui-trw-muted); transition: background-color 140ms ease, color 140ms ease; }
-.ui-trw__close:hover { background: var(--ui-trw-chip); color: var(--ui-trw-ink); }
-.ui-trw__pop-stats { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; padding: 10px 12px; border-radius: calc(var(--aui-radius-lg, 16px) - 6px); background: var(--ui-trw-wash); }
-.ui-trw__pop-stats dt { font-size: 11px; line-height: 14px; color: var(--ui-trw-muted); }
-.ui-trw__pop-stats dd { font-size: 13px; font-weight: 600; line-height: 18px; color: var(--ui-trw-ink); font-variant-numeric: tabular-nums; }
-.ui-trw__pop-error { display: flex; gap: 8px; padding: 8px 10px; border-radius: calc(var(--aui-radius-lg, 16px) - 6px); background: var(--ui-trw-error-bg); font-size: 12.5px; line-height: 17px; color: var(--ui-trw-error-ink); }
-.ui-trw__pop-error > svg { margin-top: 2.5px; }
-.ui-trw__pop-error-text { min-width: 0; overflow-wrap: anywhere; }
-.ui-trw__pop-io { display: grid; gap: 2px; }
-.ui-trw__pop-io > span { font-size: 11px; line-height: 14px; color: var(--ui-trw-muted); }
-.ui-trw__pop-io > p { display: -webkit-box; overflow: hidden; overflow-wrap: anywhere; font-size: 12.5px; line-height: 17px; color: var(--ui-trw-text); -webkit-line-clamp: 3; -webkit-box-orient: vertical; }
+.ui-trwc__pop { position: absolute; top: 0; left: 0; z-index: 5; display: grid; gap: 10px; width: min(320px, calc(100% - 16px)); padding: 12px; border-radius: var(--aui-radius-lg, 10px); background: var(--aui-overlay, var(--ui-trwc-card)); box-shadow: var(--aui-shadow-popover, var(--ui-trwc-pop)); cursor: auto; transform-origin: 24px top; animation: ui-trwc-open 220ms var(--ui-trwc-ease) both; }
+.ui-trwc__pop[data-side="above"] { transform-origin: 24px bottom; }
+.ui-trwc__pop[data-closing] { animation: ui-trwc-close 160ms ease forwards; pointer-events: none; }
+.ui-trwc__pop-head { display: flex; align-items: center; min-width: 0; }
+.ui-trwc__pop-head .ui-trwc__icon { width: 28px; height: 28px; margin-right: 10px; border-radius: 6px; }
+.ui-trwc__pop-head .ui-trwc__icon > svg { width: 15px; height: 15px; }
+.ui-trwc__pop-who { display: grid; flex: 1; min-width: 0; }
+.ui-trwc__pop-name { overflow: hidden; font-weight: 500; line-height: 18px; color: var(--ui-trwc-strong); overflow-wrap: anywhere; }
+.ui-trwc__pop-kind { overflow: hidden; font-size: 12px; line-height: 16px; color: var(--ui-trwc-muted); overflow-wrap: anywhere; }
+.ui-trwc__pop-head .ui-trwc__pill { height: 18px; margin-left: 8px; padding: 0 6px; font-size: 11px; border-radius: calc(var(--aui-radius-sm, 5px) - 1px); }
+.ui-trwc__close { display: grid; flex: none; place-items: center; width: 28px; height: 28px; margin: -2px -4px 0 4px; border-radius: calc(var(--aui-radius-sm, 5px) + 1px); color: var(--ui-trwc-muted); transition: background-color 140ms ease, color 140ms ease; }
+.ui-trwc__close:hover { background: var(--ui-trwc-fill); color: var(--ui-trwc-ink); }
+.ui-trwc__pop-stats { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; padding: 8px 10px; border-radius: calc(var(--aui-radius-sm, 5px) + 3px); background: var(--ui-trwc-wash); box-shadow: inset 0 0 0 0.5px var(--ui-trwc-line); }
+.ui-trwc__pop-stats dt { font-size: 10px; font-weight: 500; line-height: 16px; letter-spacing: 0.5px; text-transform: uppercase; color: var(--ui-trwc-muted); }
+.ui-trwc__pop-stats dd { font-weight: 500; line-height: 20px; color: var(--ui-trwc-ink); font-variant-numeric: tabular-nums; }
+.ui-trwc__pop-error { display: flex; gap: 8px; padding: 8px 10px; border-radius: calc(var(--aui-radius-sm, 5px) + 3px); background: var(--ui-trwc-error-bg); font-size: 12px; line-height: 16px; color: var(--ui-trwc-error-ink); }
+.ui-trwc__pop-error > svg { margin-top: 2px; }
+.ui-trwc__pop-error-text { min-width: 0; overflow-wrap: anywhere; }
+.ui-trwc__pop-io { display: grid; gap: 2px; }
+.ui-trwc__pop-io > span { font-size: 10px; font-weight: 500; line-height: 16px; letter-spacing: 0.5px; text-transform: uppercase; color: var(--ui-trwc-muted); }
+.ui-trwc__pop-io > p { display: -webkit-box; overflow: hidden; overflow-wrap: anywhere; font-size: 12px; line-height: 16px; color: var(--ui-trwc-text); -webkit-line-clamp: 3; -webkit-box-orient: vertical; }
 
 /* ----- Narrow: the name on its own line, its bar under it across the whole width ----- */
-@container ui-trw (max-width: 560px) {
-  .ui-trw__bar-head { padding: 8px 8px 10px 10px; }
-  .ui-trw__stats { grid-template-columns: repeat(3, minmax(0, 1fr)); row-gap: 12px; padding: 12px 0; }
-  .ui-trw__stat { padding: 0 12px; }
-  .ui-trw__stat:is(:first-child, :nth-child(4)) { padding-left: 16px; }
-  .ui-trw__stat:is(:nth-child(3), :last-child) { padding-right: 8px; }
-  .ui-trw__stat:nth-child(4) { border-left: 0; }
-  .ui-trw__stat dd { font-size: 15px; }
+@container ui-trwc (max-width: 560px) {
+  .ui-trwc__bar-head { padding: 10px 12px; }
+  .ui-trwc__stats { grid-template-columns: repeat(3, minmax(0, 1fr)); row-gap: 10px; padding: 10px 0; }
+  .ui-trwc__stat { padding: 0 12px; }
+  .ui-trwc__stat:is(:first-child, :nth-child(4)) { padding-left: 16px; }
+  .ui-trwc__stat:is(:nth-child(3), :last-child) { padding-right: 8px; }
+  .ui-trwc__stat:nth-child(4) { border-left: 0; }
   /* Steve: four numbers (no cost or tokens known) stay on one line */
-  .ui-trw__stats[data-cols="4"] { grid-template-columns: repeat(4, minmax(0, 1fr)); }
-  .ui-trw__stats[data-cols="4"] .ui-trw__stat:nth-child(4) { padding-left: 12px; border-left: 1px solid var(--ui-trw-line); }
-  /* A container query can't restyle its own container – the sizes change on the card */
-  .ui-trw__card { --ui-trw-row: 48px; --ui-trw-depth: 6; --ui-trw-bar: 10px; --ui-trw-end: 12px; }
-  .ui-trw__layer { left: var(--ui-trw-pad); right: var(--ui-trw-end); }
+  .ui-trwc__stats[data-cols="4"] { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  .ui-trwc__stats[data-cols="4"] .ui-trwc__stat:nth-child(4) { padding-left: 12px; border-left: 0.5px solid var(--ui-trwc-line); }
+  /* A container query can't restyle its own container – the sizes change on the body */
+  .ui-trwc__body { --ui-trwc-row: 46px; --ui-trwc-depth: 6; --ui-trwc-bar: 10px; --ui-trwc-end: 12px; }
+  .ui-trwc__layer { left: var(--ui-trwc-pad); right: var(--ui-trwc-end); }
   /* The grid lines would cross the names – here they only mark the axis, and "now" is a dot on it */
-  .ui-trw__tick { bottom: auto; height: var(--ui-trw-axis); }
-  .ui-trw__tick[data-zero] { background: var(--ui-trw-grid); }
-  .ui-trw__now { bottom: auto; height: var(--ui-trw-axis); }
-  .ui-trw__axis > span { display: none; }
-  .ui-trw__row { grid-template-columns: minmax(0, 1fr); grid-template-rows: 30px 12px; column-gap: 0; }
-  .ui-trw__name { height: 30px; }
-  .ui-trw__track { height: 12px; }
-  .ui-trw__bar { border-radius: 3.5px; }
-  .ui-trw__mark { top: calc(50% - 2px); height: 4px; }
-  .ui-trw__tag { display: none; }
-  .ui-trw__meta { display: flex; flex: none; align-items: center; gap: 6px; margin-left: 8px; font-size: 11.5px; line-height: 16px; color: var(--ui-trw-text); white-space: nowrap; font-variant-numeric: tabular-nums; }
-  .ui-trw__row[data-status="failed"] .ui-trw__meta { color: var(--ui-trw-error-ink); }
-  .ui-trw__pop-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .ui-trwc__tick { bottom: auto; height: var(--ui-trwc-axis); }
+  .ui-trwc__now { bottom: auto; height: var(--ui-trwc-axis); }
+  .ui-trwc__axis > span { display: none; }
+  .ui-trwc__row { grid-template-columns: minmax(0, 1fr); grid-template-rows: 28px 12px; column-gap: 0; }
+  .ui-trwc__name { height: 28px; }
+  .ui-trwc__track { height: 12px; }
+  .ui-trwc__bar { border-radius: 3px; }
+  .ui-trwc__mark { top: calc(50% - 2px); height: 4px; }
+  .ui-trwc__tag { display: none; }
+  .ui-trwc__meta { display: flex; flex: none; align-items: center; gap: 6px; margin-left: 8px; font-size: 12px; line-height: 16px; color: var(--ui-trwc-text); white-space: nowrap; font-variant-numeric: tabular-nums; }
+  .ui-trwc__row[data-status="failed"] .ui-trwc__meta { color: var(--ui-trwc-error-ink); }
+  .ui-trwc__pop-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 /* Phones: the name gets the room – only the duration beside it, "Slowest" becomes a small dot */
-@container ui-trw (max-width: 400px) {
-  .ui-trw__meta-cost { display: none; }
-  .ui-trw__meta .ui-trw__slow { width: 6px; height: 6px; padding: 0; border-radius: 50%; background: var(--ui-trw-slow-fg); font-size: 0; }
+@container ui-trwc (max-width: 400px) {
+  .ui-trwc__stat { padding-inline: 10px; }
+  .ui-trwc__stat:is(:first-child, :nth-child(4)) { padding-left: 14px; }
+  .ui-trwc__stat dt { letter-spacing: 0.2px; }
+  .ui-trwc__meta-cost { display: none; }
+  .ui-trwc__meta .ui-trwc__slow { width: 6px; height: 6px; padding: 0; border-radius: 50%; background: var(--ui-trwc-slow-fg); font-size: 0; }
 }
-@container ui-trw (max-width: 360px) {
-  .ui-trw__detail { display: none; }
+@container ui-trwc (max-width: 360px) {
+  .ui-trwc__detail { display: none; }
 }
 
-@keyframes ui-trw-row { from { height: 0; opacity: 0; transform: translateY(-4px); } }
-@keyframes ui-trw-leave { from { height: var(--ui-trw-row); opacity: 1; } to { height: 0; opacity: 0; } }
-@keyframes ui-trw-grow { from { clip-path: inset(0 100% 0 0 round 5px); } to { clip-path: inset(0 0 0 0 round 5px); } }
-@keyframes ui-trw-fade { from { opacity: 0; } }
-@keyframes ui-trw-pop { from { opacity: 0; transform: scale(0.9); } }
-@keyframes ui-trw-open { from { opacity: 0; transform: translateY(-4px) scale(0.96); } }
-@keyframes ui-trw-close { to { opacity: 0; transform: translateY(-3px) scale(0.97); } }
-@keyframes ui-trw-sweep { to { background-position: calc(100% + 60px) 0; } }
-@keyframes ui-trw-glow { from { opacity: 0.45; } to { opacity: 1; } }
-@keyframes ui-trw-pulse { 50% { opacity: 0.35; } }
-@keyframes ui-trw-spin { to { transform: rotate(360deg); } }
-@keyframes ui-trw-shine { from { background-position: 100% 0; } to { background-position: 0 0; } }
+@keyframes ui-trwc-row { from { height: 0; opacity: 0; transform: translateY(-4px); } }
+@keyframes ui-trwc-leave { from { height: var(--ui-trwc-row); opacity: 1; } to { height: 0; opacity: 0; } }
+@keyframes ui-trwc-grow { from { clip-path: inset(0 100% 0 0 round 4px); } to { clip-path: inset(0 0 0 0 round 4px); } }
+@keyframes ui-trwc-fade { from { opacity: 0; } }
+@keyframes ui-trwc-pop { from { opacity: 0; transform: scale(0.9); } }
+@keyframes ui-trwc-open { from { opacity: 0; transform: translateY(-4px) scale(0.96); } }
+@keyframes ui-trwc-close { to { opacity: 0; transform: translateY(-3px) scale(0.97); } }
+@keyframes ui-trwc-sweep { to { background-position: calc(100% + 60px) 0; } }
+@keyframes ui-trwc-glow { from { opacity: 0.45; } to { opacity: 1; } }
+@keyframes ui-trwc-pulse { 50% { opacity: 0.35; } }
+@keyframes ui-trwc-spin { to { transform: rotate(360deg); } }
+@keyframes ui-trwc-shine { from { background-position: 100% 0; } to { background-position: 0 0; } }
 
 @media (pointer: coarse) {
-  .ui-trw__chev { width: 24px; height: 28px; margin-left: -4px; }
+  .ui-trwc__chev { width: 24px; height: 28px; margin-left: -4px; }
 }
 @media (prefers-reduced-motion: reduce) {
-  .ui-trw *, .ui-trw *::before, .ui-trw *::after { animation: none !important; transition: none !important; }
+  .ui-trwc *, .ui-trwc *::before, .ui-trwc *::after { animation: none !important; transition: none !important; }
 }
 
 /* Steve: dark mode comes with the tokens above */

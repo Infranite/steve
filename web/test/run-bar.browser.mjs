@@ -19,7 +19,7 @@ try {
     /* running: the step under way is the label, cut off with an ellipsis; one live region, not two */
     const bar = page.locator('[data-runbar="run"]')
     await bar.waitFor()
-    const label = bar.locator(".ui-tl__label:not(.ui-tl__label--out)")
+    const label = bar.locator(".ui-tlc__label:not(.ui-tlc__label--out)")
     assert.match(await label.textContent(), w.run)
     const cut = await label.evaluate((x) => ({ over: x.scrollWidth > x.clientWidth, ellipsis: getComputedStyle(x).textOverflow, right: x.getBoundingClientRect().right }))
     assert.equal(cut.over, true, "a long command overflows its label")
@@ -37,23 +37,23 @@ try {
     const trace = page.locator('[data-fixture="stopped"] [data-turn-trace="cancelled"]')
     await trace.waitFor()
     await settle(page)
-    const pill = trace.locator(".ui-trw__bar-head .ui-trw__pill")
+    const pill = trace.locator(".ui-trwc__bar-head .ui-trwc__pill")
     assert.equal((await pill.textContent()).trim(), w.stopped)
     assert.equal(await pill.getAttribute("data-status"), "cancelled")
     /* the totals: thinking counts only the thinking (the note is not one), the duration fits its column */
-    const stats = Object.fromEntries(await trace.locator(".ui-trw__stat").evaluateAll((xs) => xs.map((x) => [x.querySelector("dt").textContent, x.querySelector("dd").textContent])))
+    const stats = Object.fromEntries(await trace.locator(".ui-trwc__stat").evaluateAll((xs) => xs.map((x) => [x.querySelector("dt").textContent, x.querySelector("dd").textContent])))
     assert.equal(stats[w.think], "1", JSON.stringify(stats))
-    for (const dd of await trace.locator(".ui-trw__stat dd").all()) {
+    for (const dd of await trace.locator(".ui-trwc__stat dd").all()) {
       const [sw, cw, text] = await dd.evaluate((x) => [x.scrollWidth, x.clientWidth, x.textContent])
       assert.ok(sw <= cw, `stat "${text}" fits: ${sw} > ${cw}`)
     }
-    assert.match(await trace.locator(".ui-trw__stat dd").first().getAttribute("title"), /\d/)
+    assert.match(await trace.locator(".ui-trwc__stat dd").first().getAttribute("title"), /\d/)
     /* rows say what the steps say: Steve's verb next to the tool's name */
     const read = trace.locator('[role="treeitem"]', { hasText: "Read" }).first()
-    assert.match(await read.locator(".ui-trw__detail").textContent(), w.read)
+    assert.match(await read.locator(".ui-trwc__detail").textContent(), w.read)
     /* Steve's own tool: what went in, as the Hub stored it */
     await trace.locator('[role="treeitem"]', { hasText: "steve_workflow" }).first().click()
-    assert.match(await trace.locator(".ui-trw__pop").innerText(), /expected_revision[\s\S]*37/)
+    assert.match(await trace.locator(".ui-trwc__pop").innerText(), /expected_revision[\s\S]*37/)
 
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false)
     await page.close()

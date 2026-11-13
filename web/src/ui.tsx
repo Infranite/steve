@@ -1236,7 +1236,7 @@ function TranscriptImpl({ k, tail, range, skip }: TP & { ev?: unknown; st?: stri
     <div className="flex flex-col gap-4" data-transcript={k}>
       {from > 0 && <button type="button" onClick={() => setFull(true)} className="self-start type-footnote text-muted-foreground hover:text-foreground" data-show-all>{t("core:transcript.moreSegs", { count: from })}</button>}
       {segs.map((g, n) => n < from ? null : <SegView key={k + ":" + g.idx + ":" + g.t} k={k} g={g} live={n === liveIdx} />)}
-      {s.st === "run" && liveIdx < 0 && tailOpen && <div className="flex" data-transcript-pending><ThinkingLoader variant="plain" size="sm" phases={[t(last?.t === "a" ? "core:transcript.replying" : "core:transcript.startingShort")]} phase={0} className="[--ui-tl-ray:var(--blue)]!" /></div>}
+      {s.st === "run" && liveIdx < 0 && tailOpen && <div className="flex" data-transcript-pending><ThinkingLoader variant="plain" size="sm" phases={[t(last?.t === "a" ? "core:transcript.replying" : "core:transcript.startingShort")]} phase={0} className="[--ui-tlc-accent:var(--blue)]!" /></div>}
     </div>
   )
 }
@@ -1265,7 +1265,7 @@ export function RunBar({ k, onStop }: { k: string; onStop?: () => void }) {
       className={cn("mb-2 flex items-center gap-2.5 rounded-xl type-callout transition-colors duration-180 ease-(--ease-out)",
         tone === "run" ? "min-h-10 bg-blue/8 px-3.5 py-2" : tone === "wait" ? "min-h-10 bg-attention/10 px-3.5 py-2" : "min-h-8 py-1")}>
       {/* running: a Thinking Loader whose label is the step under way, rolling over as the steps change */}
-      {run ? <span className="flex min-w-0 flex-1 items-center" data-doing><ThinkingLoader variant="plain" size="sm" phases={[starting ? label : doing(turn)]} phase={0} className="min-w-0 [--ui-tl-ray:var(--blue)]! [--ui-tl-ink:var(--foreground)]!" /></span>
+      {run ? <span className="flex min-w-0 flex-1 items-center" data-doing><ThinkingLoader variant="plain" size="sm" phases={[starting ? label : doing(turn)]} phase={0} className="min-w-0 [--ui-tlc-accent:var(--blue)]! [--ui-tlc-ink:var(--foreground)]!" /></span>
         : tone === "wait" ? <StatusDot s="wait" className="mx-1" /> : tone === "done" ? <CircleCheckIcon className="size-4 shrink-0 text-success" strokeWidth={1.75} /> : tone === "stop" ? <CircleSlashIcon className="size-4 shrink-0 text-muted-foreground" strokeWidth={1.75} /> : <StatusDot s="ended" className="mx-1" />}
       {!run && <span className={cn("shrink-0 font-medium", tone === "wait" ? "text-attention" : "text-foreground/85")}>{label}</span>}
       {/* plain text in its own box: a flex row cuts text off without the ellipsis */}

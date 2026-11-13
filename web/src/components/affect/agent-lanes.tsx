@@ -190,25 +190,25 @@ export function AgentLanes({ agents, tasks, range, now, tick, labels, selected, 
   })
 
   return (
-    <div className={["ui-al", className].filter(Boolean).join(" ")} style={style}>
-      <style href="ui-agent-lanes" precedence="default">{css}</style>
-      <div className="ui-al__card" ref={card} data-narrow={narrow ? "" : undefined}>
-        <div className="ui-al__body">
+    <div className={["ui-alc", className].filter(Boolean).join(" ")} style={style}>
+      <style href="ui-agent-lanes-clean" precedence="default">{css}</style>
+      <div className="ui-alc__card" ref={card} data-narrow={narrow ? "" : undefined}>
+        <div className="ui-alc__body">
           {/* Who */}
-          <ul className="ui-al__agents">
+          <ul className="ui-alc__agents">
             {layout.lanes.map(({ agent: a, rows }) => {
               const waits = tasks.some((t) => t.agentId === a.id && t.status === "waiting")
               return (
-                <li key={a.id} className="ui-al__agent" style={{ height: laneHeight(rows, head), paddingTop: head }} title={narrow ? a.name : undefined}>
-                  <span className="ui-al__agent-row">
-                    <span className="ui-al__avatar" data-logo={a.avatar ? "" : undefined}>{a.avatar ?? initials(a.name)}</span>
-                    <span className="ui-al__who" data-state={waits ? "waiting" : undefined}>
-                      <span className="ui-al__name-line">
-                        <span className="ui-al__name" dir="auto" title={a.name}>{a.name}</span>
-                        {waits ? <span className="ui-al__state"><span>{labels.needsYou}</span></span>
-                          : a.tag && <span className="ui-al__state"><span>{a.tag}</span></span>}
+                <li key={a.id} className="ui-alc__agent" style={{ height: laneHeight(rows, head), paddingTop: head }} title={narrow ? a.name : undefined}>
+                  <span className="ui-alc__agent-row">
+                    <span className="ui-alc__avatar" data-logo={a.avatar ? "" : undefined}>{a.avatar ?? initials(a.name)}</span>
+                    <span className="ui-alc__who" data-state={waits ? "waiting" : undefined}>
+                      <span className="ui-alc__name-line">
+                        <span className="ui-alc__name" dir="auto" title={a.name}>{a.name}</span>
+                        {waits ? <span className="ui-alc__state"><span>{labels.needsYou}</span></span>
+                          : a.tag && <span className="ui-alc__state"><span>{a.tag}</span></span>}
                       </span>
-                      {a.model && <span className="ui-al__model"><span className="ui-al__model-name" title={a.model}>{a.model}</span></span>}
+                      {a.model && <span className="ui-alc__model"><span className="ui-alc__model-name" title={a.model}>{a.model}</span></span>}
                     </span>
                   </span>
                 </li>
@@ -217,33 +217,33 @@ export function AgentLanes({ agents, tasks, range, now, tick, labels, selected, 
           </ul>
 
           {/* When */}
-          <div className="ui-al__scroll" ref={scroller}>
-            <div className="ui-al__track" ref={track} style={{ height: layout.height }}>
-              <div className="ui-al__grid" aria-hidden="true">
+          <div className="ui-alc__scroll" ref={scroller}>
+            <div className="ui-alc__track" ref={track} style={{ height: layout.height }}>
+              <div className="ui-alc__grid" aria-hidden="true">
                 {/* a tick right at "now" would run into its label */}
                 {ticks.filter((t) => !shown || Math.abs(t - now!) > span * 0.08).map((t) => (
-                  <span key={t} className="ui-al__tick" style={{ left: `${x(t)}%` }}><span>{tick(t)}</span></span>
+                  <span key={t} className="ui-alc__tick" style={{ left: `${x(t)}%` }}><span>{tick(t)}</span></span>
                 ))}
               </div>
-              {layout.lanes.slice(1).map(({ agent: a }) => <span key={a.id} className="ui-al__sep" style={{ top: layout.tops.get(a.id) }} aria-hidden="true" />)}
+              {layout.lanes.slice(1).map(({ agent: a }) => <span key={a.id} className="ui-alc__sep" style={{ top: layout.tops.get(a.id) }} aria-hidden="true" />)}
 
-              <svg className="ui-al__curves" viewBox={`0 0 1000 ${Math.max(1, layout.height)}`} preserveAspectRatio="none" aria-hidden="true">
+              <svg className="ui-alc__curves" viewBox={`0 0 1000 ${Math.max(1, layout.height)}`} preserveAspectRatio="none" aria-hidden="true">
                 {curves.map((c) => <path key={c.id} d={c.d} data-live={c.live ? "" : undefined} data-handoff={c.id} vectorEffect="non-scaling-stroke" />)}
               </svg>
 
               {layout.lanes.map(({ agent: a, row, rows }) => (
-                <ul key={a.id} className="ui-al__lane" style={{ top: layout.tops.get(a.id), height: laneHeight(rows, head) }} aria-label={labels.lane(a)}>
-                  {narrow && <li className="ui-al__lane-name" aria-hidden="true"><span dir="auto">{a.name}</span></li>}
+                <ul key={a.id} className="ui-alc__lane" style={{ top: layout.tops.get(a.id), height: laneHeight(rows, head) }} aria-label={labels.lane(a)}>
+                  {narrow && <li className="ui-alc__lane-name" aria-hidden="true"><span dir="auto">{a.name}</span></li>}
                   {tasks.filter((t) => t.agentId === a.id).map((t) => {
                     const b = boxOf(t), left = x(b.start), width = Math.max(0, x(b.end) - left)
                     return (
-                      <li key={t.id} className="ui-al__slot" data-status={t.status} style={{ left: `${left}%`, width: `${width}%`, top: head + PAD + (row.get(t.id) ?? 0) * SUB + 4 }}>
-                        <button type="button" className="ui-al__block" data-status={t.status} title={t.tip ?? t.title} aria-label={t.label ?? t.title}
+                      <li key={t.id} className="ui-alc__slot" data-status={t.status} style={{ left: `${left}%`, width: `${width}%`, top: head + PAD + (row.get(t.id) ?? 0) * SUB + 4 }}>
+                        <button type="button" className="ui-alc__block" data-status={t.status} title={t.tip ?? t.title} aria-label={t.label ?? t.title}
                           aria-pressed={onSelect ? selected === t.id : undefined} data-selected={selected === t.id ? "" : undefined}
                           data-earlier={t.earlier ? "" : undefined} data-cut-start={t.cutStart ? "" : undefined} data-cut-end={t.cutEnd ? "" : undefined}
                           onClick={() => onSelect?.(t)} {...t.attrs}>
-                          <span className="ui-al__label" dir="auto">{t.title}</span>
-                          {t.status === "waiting" && <span className="ui-al__flag" aria-hidden="true"><HandIcon />{labels.needsYou}</span>}
+                          <span className="ui-alc__label" dir="auto">{t.title}</span>
+                          {t.status === "waiting" && <span className="ui-alc__flag" aria-hidden="true"><HandIcon />{labels.needsYou}</span>}
                         </button>
                       </li>
                     )
@@ -251,7 +251,7 @@ export function AgentLanes({ agents, tasks, range, now, tick, labels, selected, 
                 </ul>
               ))}
 
-              {shown && <span className="ui-al__now" style={{ left: `${x(now!)}%` }} aria-hidden="true"><span>{labels.now}</span></span>}
+              {shown && <span className="ui-alc__now" style={{ left: `${x(now!)}%` }} aria-hidden="true"><span>{labels.now}</span></span>}
             </div>
           </div>
         </div>
@@ -262,29 +262,29 @@ export function AgentLanes({ agents, tasks, range, now, tick, labels, selected, 
 }
 
 const css = /* css */ `
-/* Colors and motion as variables – override them on .ui-al */
-.ui-al {
-  --ui-al-strong: var(--aui-ink, #171717);
-  --ui-al-ink: var(--aui-ink, #171717);
-  --ui-al-text: var(--aui-muted, #6b6b6b);
-  --ui-al-muted: var(--aui-muted, #8a8a8a);
-  --ui-al-faint: var(--aui-placeholder, #b8b8b8);
-  --ui-al-line: color-mix(in srgb, var(--aui-border, #ececec) 70%, transparent);
-  --ui-al-rail: var(--aui-placeholder, #c4c4c8);
-  --ui-al-fill: var(--aui-subtle, #ececec);
-  --ui-al-done: color-mix(in srgb, var(--aui-ink, #171717) 7%, transparent);
-  --ui-al-done-hover: color-mix(in srgb, var(--aui-ink, #171717) 11%, transparent);
-  --ui-al-run-bg: color-mix(in srgb, var(--aui-blue, #0190fe) 14%, transparent);
-  --ui-al-run-fg: var(--aui-blue, #4fb0fe);
-  --ui-al-run-edge: color-mix(in srgb, var(--aui-blue, #0190fe) 60%, transparent);
-  --ui-al-warn-bg: var(--aui-warning-soft, #fff1e0);
-  --ui-al-warn-fg: var(--aui-warning, #b25e00);
-  --ui-al-danger-bg: var(--aui-danger-soft, #fdecea);
-  --ui-al-danger-fg: var(--aui-danger, #c4320a);
-  --ui-al-focus: var(--aui-focus, rgba(0, 96, 226, 0.7));
-  --ui-al-shadow: var(--aui-shadow-card, 0 0 0 1px #ececec, 0 1px 2px rgba(0, 0, 0, 0.04));
-  --ui-al-agents: 176px;
-  --ui-al-min: 0px;
+/* Colors and motion as variables – override them on .ui-alc */
+.ui-alc {
+  --ui-alc-strong: var(--aui-ink, #171717);
+  --ui-alc-ink: var(--aui-ink, #171717);
+  --ui-alc-text: var(--aui-muted, #6b6b6b);
+  --ui-alc-muted: var(--aui-muted, #8a8a8a);
+  --ui-alc-faint: var(--aui-placeholder, #b8b8b8);
+  --ui-alc-line: color-mix(in srgb, var(--aui-border, #ececec) 70%, transparent);
+  --ui-alc-rail: var(--aui-placeholder, #c4c4c8);
+  --ui-alc-fill: var(--aui-subtle, #ececec);
+  --ui-alc-done: color-mix(in srgb, var(--aui-ink, #171717) 7%, transparent);
+  --ui-alc-done-hover: color-mix(in srgb, var(--aui-ink, #171717) 11%, transparent);
+  --ui-alc-run-bg: color-mix(in srgb, var(--aui-blue, #0190fe) 14%, transparent);
+  --ui-alc-run-fg: var(--aui-blue, #4fb0fe);
+  --ui-alc-run-edge: color-mix(in srgb, var(--aui-blue, #0190fe) 60%, transparent);
+  --ui-alc-warn-bg: var(--aui-warning-soft, #fff1e0);
+  --ui-alc-warn-fg: var(--aui-warning, #b25e00);
+  --ui-alc-danger-bg: var(--aui-danger-soft, #fdecea);
+  --ui-alc-danger-fg: var(--aui-danger, #c4320a);
+  --ui-alc-focus: var(--aui-focus, rgba(0, 96, 226, 0.7));
+  --ui-alc-shadow: var(--aui-shadow-card, 0 0 0 1px #ececec, 0 1px 2px rgba(0, 0, 0, 0.04));
+  --ui-alc-agents: 176px;
+  --ui-alc-min: 0px;
   position: relative;
   box-sizing: border-box;
   width: 100%;
@@ -292,102 +292,102 @@ const css = /* css */ `
   font-family: var(--aui-font, ui-sans-serif, system-ui, sans-serif);
   font-size: 13px;
   line-height: 20px;
-  color: var(--ui-al-text);
+  color: var(--ui-alc-text);
   text-align: left;
   -webkit-font-smoothing: antialiased;
 }
 /* The resets reach only the lanes' own parts: these styles are not in a cascade layer, so they would win over the
    utility classes of whatever the caller puts in the footer */
-.ui-al__body *, .ui-al__body *::before, .ui-al__body *::after { box-sizing: border-box; }
-:where(.ui-al__block) { margin: 0; padding: 0; border: 0; background: none; font: inherit; color: inherit; text-align: inherit; cursor: pointer; -webkit-tap-highlight-color: transparent; }
-.ui-al__block:focus-visible { outline: 2px solid var(--ui-al-focus); outline-offset: 2px; }
-:is(.ui-al__agents, .ui-al__lane) { margin: 0; padding: 0; list-style: none; }
-.ui-al__body svg { display: block; flex: none; }
+.ui-alc__body *, .ui-alc__body *::before, .ui-alc__body *::after { box-sizing: border-box; }
+:where(.ui-alc__block) { margin: 0; padding: 0; border: 0; background: none; font: inherit; color: inherit; text-align: inherit; cursor: pointer; -webkit-tap-highlight-color: transparent; }
+.ui-alc__block:focus-visible { outline: 2px solid var(--ui-alc-focus); outline-offset: 2px; }
+:is(.ui-alc__agents, .ui-alc__lane) { margin: 0; padding: 0; list-style: none; }
+.ui-alc__body svg { display: block; flex: none; }
 
 /* One card holds the lanes */
-.ui-al__card { border-radius: var(--aui-radius-lg, 12px); background: var(--aui-surface, #fff); box-shadow: var(--ui-al-shadow); }
+.ui-alc__card { border-radius: var(--aui-radius-lg, 12px); background: var(--aui-surface, #fff); box-shadow: var(--ui-alc-shadow); }
 
 /* ----- Lanes ----- */
-.ui-al__body { display: grid; grid-template-columns: var(--ui-al-agents) minmax(0, 1fr); padding: 30px 16px 10px 0; }
-.ui-al__agent { min-width: 0; padding: 0 12px 0 16px; }
-.ui-al__agent-row { display: flex; align-items: center; gap: 10px; height: ${PAD * 2 + SUB}px; min-width: 0; }
-.ui-al__avatar { display: grid; flex: none; place-items: center; width: 24px; height: 24px; overflow: hidden; border-radius: 50%; background: var(--ui-al-fill); font-size: 10px; font-weight: 500; color: var(--ui-al-text); }
-.ui-al__avatar[data-logo] { background: none; }
-.ui-al__who { display: grid; min-width: 0; }
-.ui-al__name { overflow: hidden; font-weight: 500; color: var(--ui-al-ink); white-space: nowrap; text-overflow: ellipsis; }
-.ui-al__name-line { display: flex; align-items: center; min-width: 0; }
-.ui-al__model { display: flex; min-width: 0; font-size: 12px; line-height: 16px; color: var(--ui-al-muted); white-space: nowrap; }
-.ui-al__model-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-.ui-al__state { display: inline-flex; flex: none; margin-left: 6px; }
-.ui-al__state > span { padding: 0 5px; border-radius: calc(var(--aui-radius-sm, 6px) - 2px); background: var(--ui-al-fill); font-size: 11px; font-weight: 500; line-height: 16px; color: var(--ui-al-text); white-space: nowrap; }
-.ui-al__who[data-state="waiting"] .ui-al__state > span { background: var(--ui-al-warn-bg); color: var(--ui-al-warn-fg); }
+.ui-alc__body { display: grid; grid-template-columns: var(--ui-alc-agents) minmax(0, 1fr); padding: 30px 16px 10px 0; }
+.ui-alc__agent { min-width: 0; padding: 0 12px 0 16px; }
+.ui-alc__agent-row { display: flex; align-items: center; gap: 10px; height: ${PAD * 2 + SUB}px; min-width: 0; }
+.ui-alc__avatar { display: grid; flex: none; place-items: center; width: 24px; height: 24px; overflow: hidden; border-radius: 50%; background: var(--ui-alc-fill); font-size: 10px; font-weight: 500; color: var(--ui-alc-text); }
+.ui-alc__avatar[data-logo] { background: none; }
+.ui-alc__who { display: grid; min-width: 0; }
+.ui-alc__name { overflow: hidden; font-weight: 500; color: var(--ui-alc-ink); white-space: nowrap; text-overflow: ellipsis; }
+.ui-alc__name-line { display: flex; align-items: center; min-width: 0; }
+.ui-alc__model { display: flex; min-width: 0; font-size: 12px; line-height: 16px; color: var(--ui-alc-muted); white-space: nowrap; }
+.ui-alc__model-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.ui-alc__state { display: inline-flex; flex: none; margin-left: 6px; }
+.ui-alc__state > span { padding: 0 5px; border-radius: calc(var(--aui-radius-sm, 6px) - 2px); background: var(--ui-alc-fill); font-size: 11px; font-weight: 500; line-height: 16px; color: var(--ui-alc-text); white-space: nowrap; }
+.ui-alc__who[data-state="waiting"] .ui-alc__state > span { background: var(--ui-alc-warn-bg); color: var(--ui-alc-warn-fg); }
 
-.ui-al__scroll { min-width: 0; overflow-x: auto; overflow-y: visible; margin-top: -30px; padding-top: 30px; scrollbar-width: thin; }
-.ui-al__track { position: relative; min-width: var(--ui-al-min); }
+.ui-alc__scroll { min-width: 0; overflow-x: auto; overflow-y: visible; margin-top: -30px; padding-top: 30px; scrollbar-width: thin; }
+.ui-alc__track { position: relative; min-width: var(--ui-alc-min); }
 /* Quiet lane separators and time ticks */
-.ui-al__sep { position: absolute; left: 0; right: 0; height: 0; border-top: 1px solid var(--ui-al-line); pointer-events: none; }
-.ui-al__grid { position: absolute; inset: 0; pointer-events: none; }
-.ui-al__tick { position: absolute; top: 0; bottom: 0; width: 0; border-left: 1px dashed var(--ui-al-line); }
-.ui-al__tick > span { position: absolute; bottom: 100%; left: 0; margin-bottom: 8px; font-size: 11px; line-height: 14px; color: var(--ui-al-faint); white-space: nowrap; transform: translateX(-50%); font-variant-numeric: tabular-nums; }
+.ui-alc__sep { position: absolute; left: 0; right: 0; height: 0; border-top: 1px solid var(--ui-alc-line); pointer-events: none; }
+.ui-alc__grid { position: absolute; inset: 0; pointer-events: none; }
+.ui-alc__tick { position: absolute; top: 0; bottom: 0; width: 0; border-left: 1px dashed var(--ui-alc-line); }
+.ui-alc__tick > span { position: absolute; bottom: 100%; left: 0; margin-bottom: 8px; font-size: 11px; line-height: 14px; color: var(--ui-alc-faint); white-space: nowrap; transform: translateX(-50%); font-variant-numeric: tabular-nums; }
 
-.ui-al__curves { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; pointer-events: none; }
-.ui-al__curves path { fill: none; stroke: var(--ui-al-rail); stroke-width: 1; stroke-dasharray: 3 3; }
-.ui-al__curves path[data-live] { stroke: var(--ui-al-run-edge); animation: ui-al-flow 900ms linear infinite; }
+.ui-alc__curves { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; pointer-events: none; }
+.ui-alc__curves path { fill: none; stroke: var(--ui-alc-rail); stroke-width: 1; stroke-dasharray: 3 3; }
+.ui-alc__curves path[data-live] { stroke: var(--ui-alc-run-edge); animation: ui-alc-flow 900ms linear infinite; }
 
-.ui-al__lane { position: absolute; left: 0; right: 0; }
-.ui-al__slot { position: absolute; height: ${SUB - 8}px; min-width: ${MIN_PX}px; padding-right: 2px; }
-.ui-al__block { position: relative; display: flex; align-items: center; gap: 6px; width: 100%; height: 100%; min-width: ${MIN_PX - 2}px; padding: 0 8px; overflow: hidden; border-radius: var(--aui-radius-sm, 6px); background: var(--ui-al-done); font-size: 12px; font-weight: 500; line-height: 16px; color: var(--ui-al-text); white-space: nowrap; transition: background-color 120ms ease, color 120ms ease, box-shadow 120ms ease; }
-.ui-al__block { container-type: inline-size; }
+.ui-alc__lane { position: absolute; left: 0; right: 0; }
+.ui-alc__slot { position: absolute; height: ${SUB - 8}px; min-width: ${MIN_PX}px; padding-right: 2px; }
+.ui-alc__block { position: relative; display: flex; align-items: center; gap: 6px; width: 100%; height: 100%; min-width: ${MIN_PX - 2}px; padding: 0 8px; overflow: hidden; border-radius: var(--aui-radius-sm, 6px); background: var(--ui-alc-done); font-size: 12px; font-weight: 500; line-height: 16px; color: var(--ui-alc-text); white-space: nowrap; transition: background-color 120ms ease, color 120ms ease, box-shadow 120ms ease; }
+.ui-alc__block { container-type: inline-size; }
 /* A block too short for a word shows none, never a clipped letter */
-@container (max-width: 34px) { .ui-al__label { display: none; } }
+@container (max-width: 34px) { .ui-alc__label { display: none; } }
 /* the flag needs the room of its word next to a word of the title; a shorter block keeps only its amber */
-@container (max-width: 96px) { .ui-al__flag { display: none; } }
-.ui-al__label { min-width: 0; overflow: hidden; text-overflow: ellipsis; text-align: start; }
-.ui-al__block:hover { background: var(--ui-al-done-hover); color: var(--ui-al-ink); }
-.ui-al__block:is([data-status="running"], [data-status="starting"]) { background: var(--ui-al-run-bg); color: var(--ui-al-run-fg); box-shadow: inset -2px 0 0 var(--ui-al-run-edge); }
-.ui-al__block[data-status="starting"] { opacity: 0.75; }
-.ui-al__block[data-status="running"]::after { content: ""; position: absolute; inset: 0; background: linear-gradient(90deg, transparent 0%, color-mix(in srgb, var(--aui-surface, #fff) 55%, transparent) 50%, transparent 100%) 0 0 / 50% 100% no-repeat; animation: ui-al-shimmer 2200ms ease-in-out infinite; }
-.ui-al__block:is([data-status="waiting"], [data-status="blocked"]) { background: var(--ui-al-warn-bg); color: var(--ui-al-warn-fg); }
-.ui-al__block[data-status="failed"] { background: var(--ui-al-danger-bg); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--ui-al-danger-fg) 40%, transparent); color: var(--ui-al-danger-fg); }
+@container (max-width: 96px) { .ui-alc__flag { display: none; } }
+.ui-alc__label { min-width: 0; overflow: hidden; text-overflow: ellipsis; text-align: start; }
+.ui-alc__block:hover { background: var(--ui-alc-done-hover); color: var(--ui-alc-ink); }
+.ui-alc__block:is([data-status="running"], [data-status="starting"]) { background: var(--ui-alc-run-bg); color: var(--ui-alc-run-fg); box-shadow: inset -2px 0 0 var(--ui-alc-run-edge); }
+.ui-alc__block[data-status="starting"] { opacity: 0.75; }
+.ui-alc__block[data-status="running"]::after { content: ""; position: absolute; inset: 0; background: linear-gradient(90deg, transparent 0%, color-mix(in srgb, var(--aui-surface, #fff) 55%, transparent) 50%, transparent 100%) 0 0 / 50% 100% no-repeat; animation: ui-alc-shimmer 2200ms ease-in-out infinite; }
+.ui-alc__block:is([data-status="waiting"], [data-status="blocked"]) { background: var(--ui-alc-warn-bg); color: var(--ui-alc-warn-fg); }
+.ui-alc__block[data-status="failed"] { background: var(--ui-alc-danger-bg); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--ui-alc-danger-fg) 40%, transparent); color: var(--ui-alc-danger-fg); }
 /* Stopped: hatched, never filled – it does not read as done */
-.ui-al__block[data-status="stopped"] { background: repeating-linear-gradient(135deg, var(--ui-al-done) 0 4px, transparent 4px 7px); box-shadow: inset 0 0 0 1px var(--ui-al-done-hover); color: var(--ui-al-muted); }
-.ui-al__block[data-status="paused"] { background: var(--ui-al-fill); box-shadow: inset 0 0 0 1px var(--ui-al-done-hover); color: var(--ui-al-muted); }
-.ui-al__block[data-earlier] { opacity: 0.6; }
+.ui-alc__block[data-status="stopped"] { background: repeating-linear-gradient(135deg, var(--ui-alc-done) 0 4px, transparent 4px 7px); box-shadow: inset 0 0 0 1px var(--ui-alc-done-hover); color: var(--ui-alc-muted); }
+.ui-alc__block[data-status="paused"] { background: var(--ui-alc-fill); box-shadow: inset 0 0 0 1px var(--ui-alc-done-hover); color: var(--ui-alc-muted); }
+.ui-alc__block[data-earlier] { opacity: 0.6; }
 /* The coordinator's own span is the backdrop of the work: quiet, whatever state it is in, unless it runs now */
-.ui-al__block[data-coord]:not([data-status="running"]) { background: var(--ui-al-done); box-shadow: none; color: var(--ui-al-text); }
-.ui-al__block[data-coord]::after { display: none; }
-.ui-al__block[data-earlier] .ui-al__label { text-decoration: line-through; text-decoration-color: color-mix(in srgb, currentColor 45%, transparent); }
+.ui-alc__block[data-coord]:not([data-status="running"]) { background: var(--ui-alc-done); box-shadow: none; color: var(--ui-alc-text); }
+.ui-alc__block[data-coord]::after { display: none; }
+.ui-alc__block[data-earlier] .ui-alc__label { text-decoration: line-through; text-decoration-color: color-mix(in srgb, currentColor 45%, transparent); }
 /* Cut by the window: the cut edge is square and fades */
-.ui-al__block[data-cut-start] { border-top-left-radius: 0; border-bottom-left-radius: 0; -webkit-mask-image: linear-gradient(to right, transparent 0, #000 24px); mask-image: linear-gradient(to right, transparent 0, #000 24px); padding-left: 20px; }
-.ui-al__block[data-cut-end] { border-top-right-radius: 0; border-bottom-right-radius: 0; -webkit-mask-image: linear-gradient(to left, transparent 0, #000 24px); mask-image: linear-gradient(to left, transparent 0, #000 24px); }
-.ui-al__block[data-cut-start][data-cut-end] { -webkit-mask-image: linear-gradient(to right, transparent 0, #000 24px, #000 calc(100% - 24px), transparent); mask-image: linear-gradient(to right, transparent 0, #000 24px, #000 calc(100% - 24px), transparent); }
-.ui-al__block[data-selected] { box-shadow: inset 0 0 0 1.5px var(--aui-primary, #171717); color: var(--ui-al-strong); opacity: 1; }
+.ui-alc__block[data-cut-start] { border-top-left-radius: 0; border-bottom-left-radius: 0; -webkit-mask-image: linear-gradient(to right, transparent 0, #000 24px); mask-image: linear-gradient(to right, transparent 0, #000 24px); padding-left: 20px; }
+.ui-alc__block[data-cut-end] { border-top-right-radius: 0; border-bottom-right-radius: 0; -webkit-mask-image: linear-gradient(to left, transparent 0, #000 24px); mask-image: linear-gradient(to left, transparent 0, #000 24px); }
+.ui-alc__block[data-cut-start][data-cut-end] { -webkit-mask-image: linear-gradient(to right, transparent 0, #000 24px, #000 calc(100% - 24px), transparent); mask-image: linear-gradient(to right, transparent 0, #000 24px, #000 calc(100% - 24px), transparent); }
+.ui-alc__block[data-selected] { box-shadow: inset 0 0 0 1.5px var(--aui-primary, #171717); color: var(--ui-alc-strong); opacity: 1; }
 
 /* Needs you: a small flag at the block's end, after its title (which gives way to it) */
-.ui-al__flag { display: inline-flex; flex: none; align-items: center; gap: 3px; margin-left: auto; margin-right: -4px; padding: 0 5px; border-radius: 4px; background: var(--aui-surface, #fff); box-shadow: var(--ui-al-shadow); font-size: 11px; font-weight: 500; line-height: 16px; color: var(--ui-al-warn-fg); white-space: nowrap; pointer-events: none; animation: ui-al-pulse 1600ms ease-in-out infinite; }
-.ui-al__slot:has(.ui-al__block[data-status="waiting"]) { z-index: 2; }
+.ui-alc__flag { display: inline-flex; flex: none; align-items: center; gap: 3px; margin-left: auto; margin-right: -4px; padding: 0 5px; border-radius: 4px; background: var(--aui-surface, #fff); box-shadow: var(--ui-alc-shadow); font-size: 11px; font-weight: 500; line-height: 16px; color: var(--ui-alc-warn-fg); white-space: nowrap; pointer-events: none; animation: ui-alc-pulse 1600ms ease-in-out infinite; }
+.ui-alc__slot:has(.ui-alc__block[data-status="waiting"]) { z-index: 2; }
 /* Narrow cards: the agent's name over its lane, staying in view while the track scrolls */
-.ui-al__lane-name { position: sticky; left: 0; display: block; width: max-content; max-width: 100%; height: ${HEAD}px; padding: 3px 0 0 2px; font-size: 11px; font-weight: 500; line-height: 13px; color: var(--ui-al-muted); white-space: nowrap; pointer-events: none; }
-.ui-al__lane-name > span { display: block; max-width: 220px; overflow: hidden; text-overflow: ellipsis; }
+.ui-alc__lane-name { position: sticky; left: 0; display: block; width: max-content; max-width: 100%; height: ${HEAD}px; padding: 3px 0 0 2px; font-size: 11px; font-weight: 500; line-height: 13px; color: var(--ui-alc-muted); white-space: nowrap; pointer-events: none; }
+.ui-alc__lane-name > span { display: block; max-width: 220px; overflow: hidden; text-overflow: ellipsis; }
 
 /* Now: a thin line with a small label over it */
-.ui-al__now { position: absolute; top: -6px; bottom: 0; width: 0; border-left: 1px solid var(--ui-al-run-edge); pointer-events: none; z-index: 3; }
-.ui-al__now > span { position: absolute; bottom: 100%; right: -1px; padding: 0 5px; border-radius: 4px; background: var(--ui-al-run-bg); font-size: 10px; font-weight: 500; line-height: 14px; color: var(--ui-al-run-fg); white-space: nowrap; }
+.ui-alc__now { position: absolute; top: -6px; bottom: 0; width: 0; border-left: 1px solid var(--ui-alc-run-edge); pointer-events: none; z-index: 3; }
+.ui-alc__now > span { position: absolute; bottom: 100%; right: -1px; padding: 0 5px; border-radius: 4px; background: var(--ui-alc-run-bg); font-size: 10px; font-weight: 500; line-height: 14px; color: var(--ui-alc-run-fg); white-space: nowrap; }
 
-@keyframes ui-al-pulse { 50% { opacity: 0.55; } }
-@keyframes ui-al-shimmer { from { background-position: -100% 0; } to { background-position: 200% 0; } }
-@keyframes ui-al-flow { to { stroke-dashoffset: -6; } }
+@keyframes ui-alc-pulse { 50% { opacity: 0.55; } }
+@keyframes ui-alc-shimmer { from { background-position: -100% 0; } to { background-position: 200% 0; } }
+@keyframes ui-alc-flow { to { stroke-dashoffset: -6; } }
 
 /* Narrow containers: the names column shrinks to the avatars, the track scrolls sideways */
 @container (max-width: 560px) {
   /* a container query styles what is inside the container, so the widths are set on the card */
-  .ui-al__card { --ui-al-agents: 44px; --ui-al-min: 520px; }
-  .ui-al__agent { padding: 0 0 0 12px; }
-  .ui-al__who { display: none; }
-  .ui-al__body { padding-right: 0; }
-  .ui-al__scroll { padding-right: 12px; }
+  .ui-alc__card { --ui-alc-agents: 44px; --ui-alc-min: 520px; }
+  .ui-alc__agent { padding: 0 0 0 12px; }
+  .ui-alc__who { display: none; }
+  .ui-alc__body { padding-right: 0; }
+  .ui-alc__scroll { padding-right: 12px; }
 }
 @media (prefers-reduced-motion: reduce) {
-  .ui-al *, .ui-al *::before, .ui-al *::after { animation: none !important; transition: none !important; }
+  .ui-alc *, .ui-alc *::before, .ui-alc *::after { animation: none !important; transition: none !important; }
 }
 `

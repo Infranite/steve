@@ -123,7 +123,7 @@ export function YoloDialog() {
             <span>{t("yolo:switch.storedLocked", { level: label(cur) })}</span>
             {sel !== "off" && <><span>·</span><button type="button" className="text-blue hover:underline" onClick={() => setSel("off")} data-yolo-stored-off>{t("yolo:switch.storedOff")}</button></>}</div>}
           {/* forced off or paused: nothing is handled for you, so the dial shows 关 whatever mode is stored */}
-          <AutonomyDial className="[--ui-adl-max:100%]" title="" actions={dialActions()} pinned={LOCKED} lockable={false} text={dialText()} bullets={false}
+          <AutonomyDial className="[--ui-adlc-max:100%]" title="" actions={dialActions()} pinned={LOCKED} lockable={false} text={dialText()} bullets={false}
             level={locked ? 0 : LEVEL_NO[sel]} onLevelChange={(n) => { setSel(NO_LEVEL[n]); setOk(false) }} currentLevel={locked ? undefined : LEVEL_NO[cur]}
             disabledLevels={locked ? [1, 2] : []} tones={{ 2: "attention" }} levelProps={(n) => ({ "data-yolo-level": NO_LEVEL[n] })}>
             {(cur === "on" || cur === "full") && !locked && <div className="flex flex-wrap items-center gap-x-1.5 type-footnote text-muted-foreground" data-yolo-on>

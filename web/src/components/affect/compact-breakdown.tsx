@@ -6,7 +6,8 @@ import { useT } from "@/i18n";
 import { num as localNum } from "@/i18n/format";
 
 /*
- * Compact Breakdown – one total split into its parts, in a small card and a single self-contained file.
+ * Compact Breakdown (clean style) – one total split into its parts, in one white card with hairline shadows
+ * and a single self-contained file.
  * A big number, a thin stacked bar and the parts as a ranked list. Switching the period rolls every number,
  * the bar glides to its new split and the rows trade places when the ranking changes. Hovering a part (in the
  * bar or the list) dims the rest and rolls the big number to that part's value; leaving rolls it back.
@@ -43,7 +44,7 @@ export type CompactBreakdownProps = {
   format?: (value: number) => string;
   /** Text under the big number while nothing is hovered */
   totalLabel?: string;
-  /** Replaces the line on the gray tray (default: the largest part); null hides the tray line */
+  /** Replaces the last row of the card (default: the largest part); null hides that row */
   footer?: ReactNode;
   className?: string;
   /** Steve: inside a panel – no gray tray and no card of its own */
@@ -55,7 +56,7 @@ export type CompactBreakdownProps = {
 /* ---------- Helpers ---------- */
 
 const defaultFormat = (n: number) => new Intl.NumberFormat("en-US", { maximumFractionDigits: 0 }).format(n);
-const PALETTE = ["var(--ui-cb-c1)", "var(--ui-cb-c2)", "var(--ui-cb-c3)", "var(--ui-cb-c4)", "var(--ui-cb-c5)"];
+const PALETTE = ["var(--ui-cbc-c1)", "var(--ui-cbc-c2)", "var(--ui-cbc-c3)", "var(--ui-cbc-c4)", "var(--ui-cbc-c5)"];
 const EASE = "cubic-bezier(0.22, 1, 0.36, 1)";
 const ease = (t: number) => 1 - Math.pow(1 - t, 4);
 const reduced = () => typeof window !== "undefined" && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
@@ -141,7 +142,7 @@ export function CompactBreakdown({
       seen.label = item.label;
       if (item.color) seen.color = item.color;
     } else {
-      known.current.push({ key, label: item.label, color: item.color ?? PALETTE[known.current.length] ?? "var(--ui-cb-c5)" });
+      known.current.push({ key, label: item.label, color: item.color ?? PALETTE[known.current.length] ?? "var(--ui-cbc-c5)" });
     }
   }
 
@@ -182,7 +183,7 @@ export function CompactBreakdown({
     tops.current = next;
   }, [order]);
 
-  // The period switch: a pill that slides under the chosen option
+  // The period switch: a light fill that slides to the chosen option – short and crisp
   const switchRef = useRef<HTMLDivElement>(null);
   const pillRef = useRef<HTMLSpanElement>(null);
   const placed = useRef(false);
@@ -239,24 +240,24 @@ export function CompactBreakdown({
     if (to === null || i < 0) return;
     e.preventDefault();
     const next = live[Math.max(0, Math.min(live.length - 1, to))];
-    rowEls.current.get(next.key)?.querySelector<HTMLElement>(".ui-cb__item")?.focus();
+    rowEls.current.get(next.key)?.querySelector<HTMLElement>(".ui-cbc__item")?.focus();
   };
 
   return (
-    <div className={["ui-cb", className].filter(Boolean).join(" ")} role="group" aria-labelledby={`${uid}-title`} data-bare={bare ? "" : undefined}>
+    <div className={["ui-cbc", className].filter(Boolean).join(" ")} role="group" aria-labelledby={`${uid}-title`} data-bare={bare ? "" : undefined}>
       {/* React 19 hoists this into <head> once, no matter how many cards render */}
-      <style href="ui-compact-breakdown" precedence="default">
+      <style href="ui-compact-breakdown-clean" precedence="default">
         {css}
       </style>
 
-      <div className="ui-cb__card">
-        <header className="ui-cb__head">
-          <h3 id={`${uid}-title`} className="ui-cb__title" title={title} dir="auto">
+      <div className="ui-cbc__body">
+        <header className="ui-cbc__head">
+          <h3 id={`${uid}-title`} className="ui-cbc__title" title={title} dir="auto">
             {title}
           </h3>
           {periods && periods.length > 1 && (
-            <div ref={switchRef} className="ui-cb__switch" role="radiogroup" aria-label={t("stats:breakdown.period")} onKeyDown={onSwitchKey}>
-              <span ref={pillRef} className="ui-cb__pill" aria-hidden="true" />
+            <div ref={switchRef} className="ui-cbc__switch" role="radiogroup" aria-label={t("stats:breakdown.period")} onKeyDown={onSwitchKey}>
+              <span ref={pillRef} className="ui-cbc__pill" aria-hidden="true" />
               {periods.map((p) => (
                 <button
                   key={p.id}
@@ -264,7 +265,7 @@ export function CompactBreakdown({
                   role="radio"
                   aria-checked={p.id === activePeriod}
                   tabIndex={p.id === activePeriod ? 0 : -1}
-                  className="ui-cb__option"
+                  className="ui-cbc__option"
                   title={p.label}
                   onClick={() => choose(p.id)}
                 >
@@ -276,12 +277,12 @@ export function CompactBreakdown({
         </header>
 
         {/* The big number: the total – or the hovered part, rolled to */}
-        <div className="ui-cb__figure">
-          <p className="ui-cb__big" aria-hidden="true">
+        <div className="ui-cbc__figure">
+          <p className="ui-cbc__big" aria-hidden="true">
             {format(shown["#figure"] ?? 0)}
           </p>
           {hasDelta && !activeRow && (
-            <span key={`${activePeriod}-${delta}`} className="ui-cb__delta" data-up={up || undefined} data-tone={deltaTone}>
+            <span key={`${activePeriod}-${delta}`} className="ui-cbc__delta" data-up={up || undefined} data-tone={deltaTone}>
               <svg viewBox="0 0 12 12" aria-hidden="true">
                 <path d={up ? "M6 9.5v-7M2.8 5.6 6 2.4l3.2 3.2" : "M6 2.5v7M2.8 6.4 6 9.6l3.2-3.2"} />
               </svg>
@@ -289,31 +290,31 @@ export function CompactBreakdown({
             </span>
           )}
         </div>
-        <p className="ui-cb__caption" aria-hidden="true">
-          <span key={activeRow?.key ?? "#total"} className="ui-cb__caption-in">
+        <p className="ui-cbc__caption" aria-hidden="true">
+          <span key={activeRow?.key ?? "#total"} className="ui-cbc__caption-in">
             {activeRow ? (
               <>
-                <i className="ui-cb__swatch" style={{ background: activeRow.color }} />
-                <span className="ui-cb__caption-label" dir="auto">{activeRow.label}</span>
-                <span className="ui-cb__caption-share">· {pct(share(activeRow.key))}</span>
+                <i className="ui-cbc__swatch" style={{ background: activeRow.color }} />
+                <span className="ui-cbc__caption-label" dir="auto">{activeRow.label}</span>
+                <span className="ui-cbc__caption-share">· {pct(share(activeRow.key))}</span>
               </>
             ) : (
               totalLabel
             )}
           </span>
         </p>
-        <p className="ui-cb__sr">
+        <p className="ui-cbc__sr">
           {totalLabel}: {format(total)}
           {hasDelta ? t(up ? "stats:breakdown.upSr" : "stats:breakdown.downSr", { pct: deltaText }) : ""}
         </p>
 
-        <div className="ui-cb__bar" data-active={activeValid ? "" : undefined} aria-hidden="true" onPointerLeave={() => setActive(null)}>
+        <div className="ui-cbc__bar" data-active={activeValid ? "" : undefined} aria-hidden="true" onPointerLeave={() => setActive(null)}>
           {known.current.map((k) => {
             const w = share(k.key);
             return w > 0.05 ? (
               <span
                 key={k.key}
-                className="ui-cb__seg"
+                className="ui-cbc__seg"
                 data-active={k.key === activeValid || undefined}
                 style={{ flexGrow: w, background: k.color }}
                 onPointerEnter={() => now.has(k.key) && setActive(k.key)}
@@ -322,7 +323,7 @@ export function CompactBreakdown({
           })}
         </div>
 
-        <ul className="ui-cb__list" data-active={activeValid ? "" : undefined} onPointerLeave={() => setActive(null)}>
+        <ul className="ui-cbc__list" data-active={activeValid ? "" : undefined} onPointerLeave={() => setActive(null)}>
           {rows.map((r) => (
             <li
               key={r.key}
@@ -330,12 +331,12 @@ export function CompactBreakdown({
                 if (el) rowEls.current.set(r.key, el);
                 else rowEls.current.delete(r.key);
               }}
-              className="ui-cb__row"
+              className="ui-cbc__row"
               data-leaving={r.leaving || undefined}
               {...rowProps?.({ key: r.key, label: r.label })}
             >
               <div
-                className="ui-cb__item"
+                className="ui-cbc__item"
                 tabIndex={!r.leaving && r.key === stop ? 0 : -1}
                 data-active={r.key === activeValid || undefined}
                 onPointerEnter={() => !r.leaving && setActive(r.key)}
@@ -343,23 +344,24 @@ export function CompactBreakdown({
                 onBlur={() => setActive(null)}
                 onKeyDown={(e) => onItemKey(e, r.key)}
               >
-                <i className="ui-cb__swatch" style={{ background: r.color }} />
-                <span className="ui-cb__label" title={r.label} dir="auto">
+                <i className="ui-cbc__swatch" style={{ background: r.color }} />
+                <span className="ui-cbc__label" title={r.label} dir="auto">
                   {r.label}
                 </span>
-                <span className="ui-cb__value">{format(shown[r.key] ?? 0)}</span>
-                <span className="ui-cb__share">{pct(share(r.key))}</span>
+                <span className="ui-cbc__value">{format(shown[r.key] ?? 0)}</span>
+                <span className="ui-cbc__share">{pct(share(r.key))}</span>
               </div>
             </li>
           ))}
         </ul>
       </div>
 
+      {/* The last row inside the card */}
       {footer !== null && (
-        <div className="ui-cb__foot">
+        <div className="ui-cbc__foot">
           {footer ??
             (top && (
-              <span key={top.key} className="ui-cb__foot-in">
+              <span key={top.key} className="ui-cbc__foot-in">
                 {t("stats:breakdown.largest")} <b title={top.label} dir="auto">{top.label}</b>
               </span>
             ))}
@@ -370,28 +372,31 @@ export function CompactBreakdown({
 }
 
 const css = /* css */ `
-/* Colors and motion as variables – override them on .ui-cb */
-.ui-cb {
+/* Colors and motion as variables – override them on .ui-cbc */
+.ui-cbc {
   /* Steve: every color from the --aui-* map (affectui-theme.css) and the stats page's series, one block for both modes */
-  --ui-cb-tray: var(--aui-subtle);
-  --ui-cb-card: var(--aui-surface);
-  --ui-cb-line: var(--aui-border);
-  --ui-cb-ink: var(--aui-ink);
-  --ui-cb-text: var(--aui-ink);
-  --ui-cb-muted: var(--aui-muted);
-  --ui-cb-well: var(--aui-subtle);
-  --ui-cb-hover: var(--aui-subtle);
-  --ui-cb-up: var(--aui-success);
-  --ui-cb-up-bg: var(--aui-success-soft);
-  --ui-cb-down: var(--aui-danger);
-  --ui-cb-down-bg: var(--aui-danger-soft);
-  --ui-cb-c1: var(--series-1);
-  --ui-cb-c2: var(--series-2);
-  --ui-cb-c3: var(--series-3);
-  --ui-cb-c4: var(--series-4);
-  --ui-cb-c5: var(--series-5);
-  --ui-cb-focus: var(--aui-focus);
-  --ui-cb-ease: var(--aui-ease);
+  --ui-cbc-card: var(--aui-surface);
+  --ui-cbc-ink: var(--aui-ink);
+  --ui-cbc-strong: var(--aui-ink);
+  --ui-cbc-text: var(--aui-ink);
+  --ui-cbc-muted: var(--aui-muted);
+  --ui-cbc-faint: var(--aui-placeholder);
+  --ui-cbc-line: var(--aui-border);
+  --ui-cbc-wash: var(--aui-subtle);
+  --ui-cbc-fill: color-mix(in srgb, var(--aui-ink) 6%, transparent);
+  --ui-cbc-up: var(--aui-success);
+  --ui-cbc-up-bg: var(--aui-success-soft);
+  --ui-cbc-down: var(--aui-danger);
+  --ui-cbc-down-bg: var(--aui-danger-soft);
+  --ui-cbc-c1: var(--series-1);
+  --ui-cbc-c2: var(--series-2);
+  --ui-cbc-c3: var(--series-3);
+  --ui-cbc-c4: var(--series-4);
+  --ui-cbc-c5: var(--series-5);
+  --ui-cbc-shadow: var(--aui-shadow-card);
+  --ui-cbc-focus: var(--aui-focus);
+  --ui-cbc-ease: var(--aui-ease);
+  --ui-cbc-snap: cubic-bezier(0.25, 0.9, 0.3, 1);
   box-sizing: border-box;
   container-type: inline-size;
   display: grid;
@@ -399,118 +404,172 @@ const css = /* css */ `
   grid-template-columns: minmax(0, 1fr);
   width: 100%;
   max-width: 360px;
-  padding: 4px;
-  border-radius: calc(var(--aui-radius-lg, 16px) + 4px);
-  background: var(--ui-cb-tray);
-  font-family: var(--aui-font, "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif);
+  overflow: hidden;
+  border-radius: var(--aui-radius-lg, 10px);
+  background: var(--ui-cbc-card);
+  box-shadow: var(--ui-cbc-shadow);
+  font-family: var(--aui-font, "Inter", "InterVariable", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif);
   font-size: 13px;
-  line-height: 1.45;
-  color: var(--ui-cb-text);
+  line-height: 20px;
+  font-weight: 400;
+  color: var(--ui-cbc-ink);
   -webkit-font-smoothing: antialiased;
 }
-.ui-cb *, .ui-cb *::before, .ui-cb *::after { box-sizing: border-box; }
-:where(.ui-cb) button { margin: 0; padding: 0; border: 0; background: none; font: inherit; color: inherit; cursor: pointer; }
-:where(.ui-cb) :is(h3, p, ul) { margin: 0; padding: 0; }
-:where(.ui-cb) ul { list-style: none; }
-.ui-cb :is(button, [tabindex="0"]):focus-visible { outline: 2px solid var(--ui-cb-focus); outline-offset: 2px; }
-.ui-cb b { font-weight: 500; color: var(--ui-cb-ink); }
-.ui-cb__sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+.ui-cbc *, .ui-cbc *::before, .ui-cbc *::after { box-sizing: border-box; }
+:where(.ui-cbc) button { margin: 0; padding: 0; border: 0; background: none; font: inherit; color: inherit; cursor: pointer; }
+:where(.ui-cbc) :is(h3, p, ul) { margin: 0; padding: 0; }
+:where(.ui-cbc) ul { list-style: none; }
+:where(.ui-cbc) svg { display: block; flex: none; }
+.ui-cbc :is(button, [tabindex="0"]):focus-visible { outline: 2px solid var(--ui-cbc-focus); outline-offset: 2px; }
+.ui-cbc b { font-weight: 500; color: var(--ui-cbc-ink); }
+.ui-cbc__sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
 
-.ui-cb__card { border-radius: var(--aui-radius-lg, 16px); background: var(--ui-cb-card); box-shadow: var(--aui-shadow-card, 0 0 0 1px var(--ui-cb-line), 0 1px 2px rgba(0, 0, 0, 0.04)); padding: 12px 14px 8px; }
+.ui-cbc__body { padding: 16px 16px 10px; }
 
 /* Head: title, the period switch on the right */
-.ui-cb__head { display: flex; align-items: center; justify-content: space-between; gap: 10px; min-height: 30px; }
-.ui-cb__title { overflow: hidden; font-size: 13.5px; font-weight: 600; line-height: 20px; color: var(--ui-cb-ink); white-space: nowrap; text-overflow: ellipsis; }
-.ui-cb__switch { position: relative; display: grid; grid-auto-columns: minmax(0, auto); grid-auto-flow: column; flex: 0 1 auto; min-width: 0; padding: 2px; border-radius: var(--aui-radius, 10px); background: var(--ui-cb-well); box-shadow: inset 0 0 0 1px var(--ui-cb-line); }
-.ui-cb__pill {
+.ui-cbc__head { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 28px; }
+.ui-cbc__title { overflow: hidden; font-size: 15px; font-weight: 500; line-height: 24px; color: var(--ui-cbc-strong); white-space: nowrap; text-overflow: ellipsis; }
+/* The "button switch": separate chips with a hairline; the light-gray fill slides to the chosen one */
+.ui-cbc__switch { position: relative; display: grid; grid-auto-columns: minmax(0, auto); grid-auto-flow: column; gap: 4px; flex: 0 1 auto; min-width: 0; }
+.ui-cbc__pill {
   position: absolute;
   top: 0;
   left: 0;
-  border-radius: calc(var(--aui-radius, 10px) - 2px);
-  background: var(--ui-cb-card);
-  box-shadow: 0 0 0 1px var(--ui-cb-line), 0 1px 2px rgba(0, 0, 0, 0.06);
+  border-radius: calc(var(--aui-radius-sm, 5px) + 1px);
+  background: var(--ui-cbc-fill);
   opacity: 0;
   pointer-events: none;
-  transition: transform 420ms var(--ui-cb-ease), width 420ms var(--ui-cb-ease);
+  transition: transform 200ms var(--ui-cbc-snap), width 200ms var(--ui-cbc-snap);
 }
-.ui-cb__option { position: relative; z-index: 1; height: 24px; padding: 0 8px; border-radius: calc(var(--aui-radius, 10px) - 2px); font-size: 12px; font-weight: 500; color: var(--ui-cb-muted); white-space: nowrap; transition: color 200ms ease; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-.ui-cb__option:hover, .ui-cb__option[aria-checked="true"] { color: var(--ui-cb-ink); }
+.ui-cbc__option {
+  position: relative;
+  z-index: 1;
+  height: 28px;
+  padding: 4px 10px;
+  border-radius: calc(var(--aui-radius-sm, 5px) + 1px);
+  box-shadow: inset 0 0 0 0.5px var(--ui-cbc-line);
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 20px;
+  color: var(--ui-cbc-text);
+  white-space: nowrap;
+  /* Long period names shorten instead of pushing the card wider */
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  transition: color 90ms ease, background-color 90ms ease;
+}
+.ui-cbc__option[aria-checked="true"] { color: var(--ui-cbc-ink); }
+@media (hover: hover) {
+  .ui-cbc__option[aria-checked="false"]:hover { background: var(--ui-cbc-wash); }
+}
 
 /* The big number and the change against the period before */
-.ui-cb__figure { display: flex; align-items: center; gap: 8px; margin-top: 12px; }
-.ui-cb__big { font-size: 26px; font-weight: 600; line-height: 32px; letter-spacing: -0.02em; color: var(--ui-cb-ink); font-variant-numeric: tabular-nums; }
-.ui-cb__delta {
+.ui-cbc__figure { display: flex; align-items: center; gap: 8px; margin-top: 14px; }
+.ui-cbc__big { font-size: 24px; font-weight: 500; line-height: 32px; letter-spacing: -0.02em; color: var(--ui-cbc-strong); font-variant-numeric: tabular-nums; }
+.ui-cbc__delta {
   display: inline-flex;
   align-items: center;
   gap: 2px;
   height: 20px;
   padding: 0 6px 0 4px;
-  border-radius: 999px;
-  background: var(--ui-cb-down-bg);
-  color: var(--ui-cb-down);
+  border-radius: var(--aui-radius-sm, 5px);
+  background: var(--ui-cbc-down-bg);
+  color: var(--ui-cbc-down);
   font-size: 12px;
   font-weight: 500;
+  line-height: 16px;
   font-variant-numeric: tabular-nums;
-  animation: ui-cb-pop 380ms var(--ui-cb-ease) both;
+  animation: ui-cbc-pop 380ms var(--ui-cbc-ease) both;
 }
-.ui-cb__delta[data-up] { background: var(--ui-cb-up-bg); color: var(--ui-cb-up); }
+.ui-cbc__delta[data-up] { background: var(--ui-cbc-up-bg); color: var(--ui-cbc-up); }
 /* Steve: a change that is neither good nor bad (spend) – muted, like the page's own "vs. last period" text */
-.ui-cb__delta[data-tone="neutral"] { background: var(--ui-cb-well); color: var(--ui-cb-muted); }
-.ui-cb__delta svg { width: 12px; height: 12px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
-.ui-cb__caption { height: 18px; overflow: hidden; font-size: 12.5px; line-height: 18px; color: var(--ui-cb-muted); font-variant-numeric: tabular-nums; }
-.ui-cb__caption-label { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
-.ui-cb__caption-share { flex: none; }
-.ui-cb__caption-in { display: inline-flex; max-width: 100%; align-items: center; gap: 6px; animation: ui-cb-in 260ms var(--ui-cb-ease) both; }
+.ui-cbc__delta[data-tone="neutral"] { background: var(--ui-cbc-wash); color: var(--ui-cbc-muted); }
+.ui-cbc__delta svg { width: 12px; height: 12px; fill: none; stroke: currentColor; stroke-width: 1.3; stroke-linecap: round; stroke-linejoin: round; }
+.ui-cbc__caption { height: 16px; overflow: hidden; font-size: 12px; line-height: 16px; color: var(--ui-cbc-muted); font-variant-numeric: tabular-nums; }
+.ui-cbc__caption-label { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.ui-cbc__caption-share { flex: none; }
+.ui-cbc__caption-in { display: inline-flex; max-width: 100%; align-items: center; gap: 6px; animation: ui-cbc-in 260ms var(--ui-cbc-ease) both; }
 
 /* The stacked bar – parts keep their place and color, only the widths glide */
-.ui-cb__bar { display: flex; gap: 2px; height: 8px; margin-top: 12px; padding: 0; border-radius: 4px; }
+.ui-cbc__bar { display: flex; gap: 2px; height: 6px; margin-top: 16px; padding: 0; border-radius: 3px; }
 /* Shares as flex-grow, so the 2px gaps come out of the bar instead of making it wider than the card */
-.ui-cb__seg { flex: 0 1 0; height: 100%; min-width: 2px; border-radius: 2.5px; transition: opacity 200ms ease, transform 260ms var(--ui-cb-ease); }
-.ui-cb__seg:first-child { border-radius: 4px 2.5px 2.5px 4px; }
-.ui-cb__seg:last-child { border-radius: 2.5px 4px 4px 2.5px; }
-.ui-cb__bar[data-active] .ui-cb__seg:not([data-active]) { opacity: 0.25; }
-.ui-cb__seg[data-active] { transform: scaleY(1.5); }
+.ui-cbc__seg { flex: 0 1 0; height: 100%; min-width: 2px; border-radius: 1.5px; transition: opacity 160ms ease, transform 200ms var(--ui-cbc-ease); }
+.ui-cbc__seg:first-child { border-radius: 3px 1.5px 1.5px 3px; }
+.ui-cbc__seg:last-child { border-radius: 1.5px 3px 3px 1.5px; }
+.ui-cbc__bar[data-active] .ui-cbc__seg:not([data-active]) { opacity: 0.3; }
+.ui-cbc__seg[data-active] { transform: scaleY(1.5); }
 
 /* The ranked list */
-.ui-cb__list { position: relative; display: grid; margin-top: 8px; }
-.ui-cb__row { display: grid; grid-template-rows: 1fr; transition: grid-template-rows 320ms var(--ui-cb-ease), opacity 200ms ease; }
-.ui-cb__row[data-leaving] { grid-template-rows: 0fr; opacity: 0; pointer-events: none; }
-.ui-cb__item { display: flex; align-items: center; gap: 9px; min-height: 0; height: 30px; margin: 0 -8px; padding: 0 8px; overflow: hidden; border-radius: calc(var(--aui-radius-sm, 7px) + 1px); cursor: default; transition: background-color 160ms ease, opacity 200ms ease; }
-.ui-cb__item[data-active] { background: var(--ui-cb-hover); }
-.ui-cb__list[data-active] .ui-cb__item:not([data-active]) { opacity: 0.45; }
-.ui-cb__swatch { flex: none; width: 8px; height: 8px; border-radius: 2.5px; }
-.ui-cb__label { flex: 1; min-width: 0; overflow: hidden; color: var(--ui-cb-text); white-space: nowrap; text-overflow: ellipsis; }
-.ui-cb__value { flex: none; white-space: nowrap; color: var(--ui-cb-ink); font-weight: 500; font-variant-numeric: tabular-nums; }
-.ui-cb__share { flex: none; width: 34px; white-space: nowrap; text-align: right; color: var(--ui-cb-muted); font-variant-numeric: tabular-nums; }
+.ui-cbc__list { position: relative; display: grid; margin-top: 10px; }
+.ui-cbc__row { display: grid; grid-template-rows: 1fr; transition: grid-template-rows 320ms var(--ui-cbc-ease), opacity 200ms ease; }
+.ui-cbc__row[data-leaving] { grid-template-rows: 0fr; opacity: 0; pointer-events: none; }
+.ui-cbc__item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 0;
+  height: 32px;
+  margin: 0 -8px;
+  padding: 0 8px;
+  overflow: hidden;
+  border-radius: calc(var(--aui-radius-sm, 5px) + 1px);
+  cursor: default;
+  /* The hover wash is short and crisp – no long glide between rows */
+  transition: background-color 90ms ease-out, opacity 160ms ease;
+}
+.ui-cbc__item[data-active] { background: var(--ui-cbc-wash); }
+.ui-cbc__list[data-active] .ui-cbc__item:not([data-active]) { opacity: 0.45; }
+.ui-cbc__swatch { flex: none; width: 8px; height: 8px; border-radius: 2px; }
+.ui-cbc__label { flex: 1; min-width: 0; overflow: hidden; color: var(--ui-cbc-ink); white-space: nowrap; text-overflow: ellipsis; }
+.ui-cbc__value { flex: none; white-space: nowrap; color: var(--ui-cbc-ink); font-weight: 500; font-variant-numeric: tabular-nums; }
+.ui-cbc__share { flex: none; width: 34px; white-space: nowrap; font-size: 12px; line-height: 16px; text-align: right; color: var(--ui-cbc-muted); font-variant-numeric: tabular-nums; }
 
-/* The line on the gray tray */
-.ui-cb__foot { display: flex; align-items: center; min-height: 34px; padding: 4px 10px 0; overflow: hidden; font-size: 12.5px; color: var(--ui-cb-muted); white-space: nowrap; }
-.ui-cb__foot-in { overflow: hidden; text-overflow: ellipsis; animation: ui-cb-in 320ms var(--ui-cb-ease) both; }
+/* The last row inside the card */
+.ui-cbc__foot {
+  display: flex;
+  align-items: center;
+  min-height: 40px;
+  padding: 0 16px;
+  overflow: hidden;
+  border-top: 0.5px solid var(--ui-cbc-line);
+  font-size: 12px;
+  line-height: 16px;
+  color: var(--ui-cbc-muted);
+  white-space: nowrap;
+}
+.ui-cbc__foot-in { overflow: hidden; text-overflow: ellipsis; animation: ui-cbc-in 320ms var(--ui-cbc-ease) both; }
 
-@keyframes ui-cb-in {
-  from { opacity: 0; transform: translateY(5px); filter: blur(2px); }
+@keyframes ui-cbc-in {
+  from { opacity: 0; transform: translateY(4px); filter: blur(2px); }
   to { opacity: 1; transform: none; filter: none; }
 }
-@keyframes ui-cb-pop {
+@keyframes ui-cbc-pop {
   from { opacity: 0; transform: scale(0.85); }
   to { opacity: 1; transform: none; }
 }
 
-/* Narrow cards: the share column goes, the values stay */
+/* Narrow cards: tighter chips, then the share column goes and the values stay */
+@container (max-width: 320px) {
+  .ui-cbc__body { padding: 14px 14px 8px; }
+  .ui-cbc__foot { padding: 0 14px; }
+  .ui-cbc__switch { gap: 2px; }
+  .ui-cbc__option { padding: 4px 8px; }
+}
 @container (max-width: 250px) {
-  .ui-cb__share { display: none; }
-  .ui-cb__option { padding: 0 6px; }
+  .ui-cbc__share { display: none; }
+  .ui-cbc__option { padding: 4px 6px; }
 }
 @media (hover: none) and (pointer: coarse) {
-  .ui-cb__option { height: 32px; padding: 0 10px; }
-  .ui-cb__item { height: 36px; }
+  .ui-cbc__option { height: 32px; padding: 6px 10px; }
+  .ui-cbc__item { height: 40px; }
+  .ui-cbc__foot { min-height: 44px; }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .ui-cb *, .ui-cb *::before, .ui-cb *::after { animation: none !important; transition: none !important; }
+  .ui-cbc *, .ui-cbc *::before, .ui-cbc *::after { animation: none !important; transition: none !important; }
 }
 
 /* Steve: inside a panel – the panel is the card */
-.ui-cb[data-bare] { max-width: none; padding: 0; border-radius: 0; background: none; }
-.ui-cb[data-bare] .ui-cb__card { padding: 0; border-radius: 0; background: none; box-shadow: none; }
+.ui-cbc[data-bare] { max-width: none; border-radius: 0; background: none; box-shadow: none; }
 `;
