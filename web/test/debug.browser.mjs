@@ -102,6 +102,8 @@ try {
   await page.locator("[data-debug-gaps]").waitFor()
   assert.equal(await page.locator("[data-debug-recorder-unavailable]").count(), 0)
   await page.locator("[data-debug-detail] summary").click()
+  /* the details open with a height transition: their text is laid out once it has run */
+  await page.waitForFunction(() => /event-3/.test(document.querySelector("[data-debug-detail]")?.innerText ?? ""), null, { timeout: 5000 }).catch(() => {})
   assert.match(await page.locator("[data-debug-detail]").innerText(), /event-3/)
   await page.evaluate(() => { Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText: async (text) => { window.copiedEvidence = text } } }) })
   await page.locator("[data-debug-copy]").click()

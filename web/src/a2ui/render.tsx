@@ -9,6 +9,7 @@ import type { A2uiRecord } from "@/api"
 import { Markdown } from "@/components/markdown"
 import { Button } from "@/components/ui/button"
 import { Checkbox } from "@/components/ui/checkbox"
+import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group"
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
 import { Spinner } from "@/components/ui/spinner"
@@ -43,7 +44,7 @@ export function A2uiBlock({ src, streaming, code }: { src: string; streaming?: b
 function Broken({ why, problems, code }: { why: string; problems: Problem[]; code: ReactNode }) {
   const t = useT(), [open, setOpen] = useState(false)
   return (
-    <div className="my-3 rounded-xl border px-4 py-3" data-a2ui-broken>
+    <div className="my-3 rounded-xl bg-attention/10 px-4 py-3" data-a2ui-broken>
       <div className="flex flex-wrap items-center gap-x-2 gap-y-1 type-callout">
         <L.TriangleAlertIcon className="size-4 shrink-0 text-attention" aria-hidden />
         <span className="text-foreground">{t("misc:a2ui.broken", { why })}</span>
@@ -156,7 +157,7 @@ function Weighted({ id, children }: { id: string; children: ReactNode }) {
   const w = useRun().s.comps.get(id)?.weight
   return typeof w === "number" && w > 0 ? <div className="min-w-0" style={{ flex: `${w} 1 0` }}>{children}</div> : <>{children}</>
 }
-const Unsupported = ({ what }: { what: string }) => <div className="rounded-md border border-dashed px-2 py-1 type-footnote text-muted-foreground" data-a2ui-unsupported>{what}</div>
+const Unsupported = ({ what }: { what: string }) => <div className="rounded-md bg-muted/60 px-2.5 py-1.5 type-footnote text-muted-foreground" data-a2ui-unsupported>{what}</div>
 const a11y = (c: Comp, s: Scope) => { const a = c.accessibility as { label?: unknown } | undefined; return a?.label !== undefined ? str(resolve(a.label, s)) : undefined }
 
 const JUSTIFY: Record<string, string> = { start: "justify-start", center: "justify-center", end: "justify-end", spaceBetween: "justify-between", spaceAround: "justify-around", spaceEvenly: "justify-evenly", stretch: "justify-stretch" }
@@ -210,7 +211,7 @@ function List(p: P) {
   return <div role="list" className={cn("flex min-w-0 gap-2", h ? "flex-row overflow-x-auto pb-1" : "flex-col", ALIGN[String(p.c.align)] ?? "items-stretch")}><Kids {...p} /></div>
 }
 function Card({ c, scope, depth, trail }: P) {
-  return <div className="min-w-0 rounded-xl border bg-card px-4 py-3.5" data-a2ui-card><Child id={c.child} scope={scope} depth={depth} trail={trail} /></div>
+  return <div className="min-w-0 rounded-xl bg-card p-4 shadow-[var(--lift)]" data-a2ui-card><Child id={c.child} scope={scope} depth={depth} trail={trail} /></div>
 }
 function TabsC({ c, scope, depth, trail }: P) {
   const t = useT()
@@ -257,7 +258,7 @@ function ButtonC({ c, scope, depth, trail }: P) {
   const v = String(c.variant ?? "default")
   return (
     <div className="flex min-w-0 flex-col items-start gap-1">
-      <Button type="button" size="sm" variant={v === "primary" ? "default" : v === "borderless" ? "ghost" : "outline"} className="max-w-full rounded-full"
+      <Button type="button" size="sm" variant={v === "primary" ? "default" : v === "borderless" ? "ghost" : "outline"} className="max-w-full"
         disabled={!run.trigger && ev && (!!run.locked || !!run.busy)} aria-label={a11y(c, scope)} onClick={click} data-a2ui-button={c.id} data-a2ui-submitted={mine || undefined}>
         {run.busy === c.id ? <Spinner className="size-3.5" /> : mine ? <L.CheckIcon /> : null}
         <span className="truncate"><Child id={c.child} scope={scope} depth={depth} trail={trail} /></span>
@@ -320,16 +321,20 @@ function ChoicePicker({ c, scope }: P) {
   return (
     <Field label={label}>
       {c.filterable === true && opts.length > 6 && <Input value={q} onChange={(e) => setQ(e.target.value)} placeholder={t("misc:a2ui.filter")} className="h-8 max-w-60" />}
-      <div role={multi ? "group" : "radiogroup"} aria-label={label || undefined} className={cn("flex min-w-0 flex-wrap", chips ? "gap-2" : "flex-col gap-1.5")} data-a2ui-choice={c.id}>
-        {shown.map((o) => {
-          const on = sel.includes(o.value)
-          return chips
-            ? <button key={o.value} type="button" role={multi ? "checkbox" : "radio"} aria-checked={on} disabled={b.off} onClick={() => pick(o.value)} data-a2ui-option={o.value}
-                className={cn("rounded-full border px-3 py-1 type-callout transition-colors disabled:opacity-60", on ? "border-foreground bg-foreground text-background" : "hover:bg-muted")}>{o.label}</button>
-            : <label key={o.value} className="flex items-center gap-2 type-body" data-a2ui-option={o.value}>
-                <input type={multi ? "checkbox" : "radio"} checked={on} disabled={b.off} onChange={() => pick(o.value)} className="size-4 accent-[var(--foreground)]" name={multi ? undefined : `a2ui-${c.id}-${scope.base}`} />{o.label}</label>
-        })}
-      </div>
+      {chips || multi
+        ? <div role={multi ? "group" : "radiogroup"} aria-label={label || undefined} className={cn("flex min-w-0 flex-wrap", chips ? "gap-1" : "flex-col gap-2")} data-a2ui-choice={c.id}>
+            {shown.map((o) => {
+              const on = sel.includes(o.value)
+              return chips
+                ? <button key={o.value} type="button" role={multi ? "checkbox" : "radio"} aria-checked={on} disabled={b.off} onClick={() => pick(o.value)} data-a2ui-option={o.value}
+                    className={cn("h-7 rounded-lg px-2.5 type-callout transition-colors duration-120 disabled:opacity-60", on ? "bg-accent font-medium text-foreground" : "text-muted-foreground hover:bg-accent hover:text-foreground")}>{o.label}</button>
+                : <label key={o.value} className="flex items-center gap-2.5 type-body" data-a2ui-option={o.value}>
+                    <Checkbox checked={on} disabled={b.off} onCheckedChange={() => pick(o.value)} />{o.label}</label>
+            })}
+          </div>
+        : <RadioGroup value={sel[0] ?? null} onValueChange={(v) => pick(String(v))} disabled={b.off} name={`a2ui-${c.id}-${scope.base}`} aria-label={label || undefined} className="flex min-w-0 flex-col gap-2" data-a2ui-choice={c.id}>
+            {shown.map((o) => <label key={o.value} className="flex items-center gap-2.5 type-body" data-a2ui-option={o.value}><RadioGroupItem value={o.value} />{o.label}</label>)}
+          </RadioGroup>}
     </Field>
   )
 }
@@ -339,7 +344,7 @@ function Slider({ c, scope }: P) {
   return (
     <Field label={str(resolve(c.label, scope))}>
       <div className="flex items-center gap-3">
-        <input type="range" min={min} max={max} step={max - min <= 10 && !Number.isInteger(max - min) ? 0.1 : 1} value={Number.isFinite(v) ? v : min} disabled={b.off} onChange={(e) => b.set(Number(e.target.value))} className="min-w-0 flex-1 accent-[var(--foreground)]" />
+        <input type="range" min={min} max={max} step={max - min <= 10 && !Number.isInteger(max - min) ? 0.1 : 1} value={Number.isFinite(v) ? v : min} disabled={b.off} onChange={(e) => b.set(Number(e.target.value))} className="min-w-0 flex-1 accent-primary" />
         <span className="w-12 shrink-0 text-right type-callout tabular-nums">{Number.isFinite(v) ? v : min}</span>
       </div>
     </Field>

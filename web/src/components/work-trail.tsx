@@ -5,7 +5,7 @@
  * an agent's run alike; it only knows what a step is called, its state and its detail, never which harness made it. */
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react"
 import { cn } from "cn"
-import { CheckIcon, ChevronRightIcon, CircleIcon, CircleSlashIcon, XIcon } from "lucide-react"
+import { CheckIcon, ChevronRightIcon, CircleCheckIcon, CircleIcon, CircleSlashIcon, XIcon } from "lucide-react"
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible"
 import { Markdown } from "@/components/markdown"
 import { Spinner } from "@/components/ui/spinner"
@@ -40,7 +40,7 @@ function Marker({ s }: { s: StepState | "end" | "cancel" }) {
     <span className="absolute left-0 top-0.5 flex size-4 items-center justify-center" aria-hidden data-trail-marker={s}>
       {s === "run" ? <Spinner className="size-3.5 text-foreground/70" />
         : s === "fail" ? <XIcon className="size-3.5 text-destructive" strokeWidth={2.25} />
-        : s === "end" ? <span className="flex size-3.5 items-center justify-center rounded-full bg-blue text-white"><CheckIcon className="size-2.5" strokeWidth={3.5} /></span>
+        : s === "end" ? <CircleCheckIcon className="size-3.5 text-success" strokeWidth={1.75} />
         : s === "cancel" ? <CircleSlashIcon className="size-3.5 text-muted-foreground" strokeWidth={1.75} />
         : <span className="size-1.5 rounded-full bg-tertiary/70" />}
     </span>
@@ -55,7 +55,7 @@ function Row({ s, children, className, ...rest }: { s: StepState | "end" | "canc
   )
 }
 const HEAD = "flex min-h-5 w-full min-w-0 items-center gap-1.5 py-0.5 text-left type-callout text-muted-foreground"
-const Chevron = () => <ChevronRightIcon className="size-3.5 shrink-0 opacity-0 transition group-hover/row:opacity-100 group-aria-expanded/row:rotate-90 group-aria-expanded/row:opacity-100" />
+const Chevron = () => <ChevronRightIcon className="size-3.5 shrink-0 opacity-0 transition duration-180 ease-(--ease-out) group-hover/row:opacity-100 group-aria-expanded/row:rotate-90 group-aria-expanded/row:opacity-100" />
 /** a head that opens a body when there is one */
 function Fold({ head, body, open: open0 = false, className }: { head: ReactNode; body?: ReactNode; open?: boolean; className?: string }) {
   if (!body) return <div className={cn(HEAD, className)}>{head}</div>
@@ -74,7 +74,7 @@ export function Chips({ chips, max = 4 }: { chips: Chip[]; max?: number }) {
   return (
     <div className="mt-1 mb-0.5 flex flex-wrap items-center gap-1.5" data-trail-chips>
       {shown.map((c, n) => (
-        <span key={n} title={c.title ?? c.label} className={cn("inline-flex h-6 max-w-[240px] items-center gap-1 rounded-md bg-muted px-1.5 text-foreground/80", c.mono ? "font-mono text-[11.5px]" : "text-[12.5px]")}>
+        <span key={n} title={c.title ?? c.label} className={cn("inline-flex h-6 max-w-60 items-center gap-1 rounded-md bg-muted/80 px-1.5 type-footnote text-foreground/80", c.mono && "font-mono")}>
           {c.icon && <c.icon className="size-3.5 shrink-0 text-muted-foreground" strokeWidth={1.5} />}<span className="min-w-0 truncate">{c.label}</span>
         </span>))}
       {chips.length > max && <span className="type-footnote text-muted-foreground">{t("core:trail.more", { count: chips.length - max })}</span>}
@@ -85,11 +85,11 @@ export function Chips({ chips, max = 4 }: { chips: Chip[]; max?: number }) {
 export function SubSteps({ steps, live }: { steps: [string, boolean][]; live: boolean }) {
   const next = steps.findIndex(([, done]) => !done)
   return (
-    <ul className="mt-1.5 mb-1 flex max-w-[560px] flex-col divide-y overflow-hidden rounded-xl border bg-card" data-plan>
+    <ul className="mt-1.5 mb-1 flex max-w-140 flex-col rounded-xl bg-muted/60 py-1.5" data-plan>
       {steps.map(([text, done], n) => (
-        <li key={n} className="flex min-w-0 items-start gap-2.5 px-3 py-2 type-callout" data-plan-step={done ? "done" : n === next && live ? "run" : "todo"}>
+        <li key={n} className="flex min-w-0 items-start gap-2.5 px-3.5 py-1.5 type-callout" data-plan-step={done ? "done" : n === next && live ? "run" : "todo"}>
           <span className="mt-0.5 flex size-4 shrink-0 items-center justify-center">{done
-            ? <span className="flex size-3.5 items-center justify-center rounded-full bg-foreground text-background"><CheckIcon className="size-2.5" strokeWidth={3.5} /></span>
+            ? <CheckIcon className="size-3.5 text-muted-foreground" strokeWidth={2} />
             : n === next && live ? <Spinner className="size-3.5 text-muted-foreground" /> : <CircleIcon className="size-3.5 text-tertiary" strokeWidth={1.75} />}</span>
           <span className={cn("min-w-0 break-words", done ? "text-foreground" : "text-muted-foreground")}>{text}</span>
         </li>))}
@@ -119,9 +119,9 @@ function ToolRow({ s, live }: { s: ToolStep; live: boolean }) {
   const t = useT(), running = live && s.state === "run", st: StepState = s.state === "run" && !live ? "done" : s.state
   const head = <>
     <span className={cn("shrink-0", running && "shimmer", st === "fail" && "text-destructive")}>{s.verb[running ? 0 : 1]}</span>
-    {s.subj && <span className={cn("min-w-0 truncate text-foreground/85", s.mono && "font-mono text-[12px]")} title={s.full ?? s.subj}>{s.subj}</span>}
+    {s.subj && <span className={cn("min-w-0 truncate text-foreground/85", s.mono && "font-mono type-footnote")} title={s.full ?? s.subj}>{s.subj}</span>}
     {s.extra}
-    {st === "fail" && <span className="shrink-0 rounded-md bg-destructive/10 px-1.5 text-[11px] leading-[18px] text-destructive">{t("core:transcript.failed")}</span>}
+    {st === "fail" && <span className="shrink-0 rounded-md bg-destructive/10 px-1.5 type-label text-destructive">{t("core:transcript.failed")}</span>}
   </>
   return (
     <Row s={st} data-step data-step-kind={s.attrs?.kind} data-running={running || undefined} data-failed={st === "fail" || undefined} {...attrsOf(s.attrs)}>

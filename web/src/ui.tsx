@@ -27,7 +27,7 @@ import { Command, CommandGroup, CommandItem, CommandList } from "@/components/ui
 import { Bubble, BubbleContent } from "@/components/ui/bubble"
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group"
 import { Kbd } from "@/components/ui/kbd"
-import { Sidebar as UISidebar, SidebarContent, SidebarFooter, SidebarGroup, SidebarGroupLabel, SidebarGroupContent, SidebarHeader, SidebarMenu, SidebarMenuBadge, SidebarMenuButton, SidebarMenuItem, SidebarRail, SidebarSeparator, SidebarTrigger } from "@/components/ui/sidebar"
+import { Sidebar as UISidebar, SidebarContent, SidebarFooter, SidebarGroup, SidebarGroupLabel, SidebarGroupContent, SidebarHeader, SidebarMenu, SidebarMenuBadge, SidebarMenuButton, SidebarMenuItem, SidebarRail, SidebarTrigger } from "@/components/ui/sidebar"
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { InputGroup, InputGroupAddon, InputGroupButton, InputGroupTextarea } from "@/components/ui/input-group"
 import { CodeBlock, CodeBlockContent, CodeBlockLine } from "@/components/ui/code-block"
@@ -41,7 +41,7 @@ import { Markdown } from "@/components/markdown"
 import { PermissionDetails, PermissionRecord } from "@/components/permission"
 import { LOADED_WEB_VERSION, permissionDecision, useStore } from "@/store"
 import { shortVersion } from "@/updates"
-import { st, emit, briefHead, pendingCards, acceptChoosesRelease, ST, SS, WT, FAIL_CHOICE, SNOOZE_KEYS, snoozeLabel, tagCatLabel, tagLabel, tagDesc, botName, decide, dismiss, setSt, snooze, tag, isKind, kindColor, sortTags, loadEvents, type Item, type Reply, type Rel, type Sess } from "@/store"
+import { st, emit, briefHead, pendingCards, acceptChoosesRelease, ST, SS, WT, FAIL_CHOICE, SNOOZE_KEYS, snoozeLabel, tagCatLabel, tagLabel, tagDesc, botName, decide, dismiss, setSt, snooze, tag, isKind, sortTags, loadEvents, type Item, type Reply, type Rel, type Sess } from "@/store"
 import { YoloBadge } from "@/yolo/badges"
 import { YoloPill } from "@/yolo/switch"
 import { WorkspaceSwitcher } from "@/workspace-switcher"
@@ -87,6 +87,15 @@ export function ThemeSwitch({ className, labels = false }: { className?: string;
   return <Segmented className={className} value={themePref} onChange={(v) => setTheme(v as ThemePref)} iconOnly={!labels} size="sm"
     options={[o("light", SunIcon, t("core:theme.light")), o("dark", MoonIcon, t("core:theme.dark")), o("system", MonitorIcon, t("core:theme.system"))]} />
 }
+/** the theme as one quiet button that steps light → dark → system; its tooltip names the current one */
+function ThemeCycle({ className }: { className?: string }) {
+  const t = useT()
+  const order: ThemePref[] = ["light", "dark", "system"], I = themePref === "light" ? SunIcon : themePref === "dark" ? MoonIcon : MonitorIcon
+  const label = `${t("core:sidebar.appearance")} · ${t(`core:theme.${themePref}`)}`
+  return <Tooltip><TooltipTrigger render={<button type="button" aria-label={label} data-theme-cycle={themePref} onClick={() => setTheme(order[(order.indexOf(themePref) + 1) % order.length])} />}
+    className={cn("flex size-8 shrink-0 items-center justify-center rounded-lg text-muted-foreground transition-colors duration-120 ease-(--ease-out) hover:bg-sidebar-accent hover:text-foreground", className)}>
+    <I className="size-4" strokeWidth={1.75} /></TooltipTrigger><TooltipContent side="top">{label}</TooltipContent></Tooltip>
+}
 /** the UI language, remembered on this device; each name is written in its own language */
 export function LanguageSwitch({ className }: { className?: string }) {
   const t = useT()
@@ -103,8 +112,8 @@ export function RelNote({ rel, box, className, onClose }: { rel: Rel; box?: bool
   const color = rel.tone === "fail" ? "text-destructive" : rel.tone === "ok" ? "text-success" : "text-blue"
   return (
     <div role={rel.tone === "fail" ? "alert" : "status"} data-rel={rel.tone}
-      className={cn("flex min-w-0 items-start gap-1.5", box ? "rounded-lg border px-3 py-2 type-callout" : "type-footnote", box && rel.tone === "fail" && "border-destructive/40", className)}>
-      <I className={cn("mt-[2px] size-3.5 shrink-0", box && "size-4", color)} strokeWidth={2} />
+      className={cn("flex min-w-0 items-start gap-1.5", box ? "rounded-xl px-3.5 py-2.5 type-callout" : "type-footnote", box && (rel.tone === "fail" ? "bg-destructive/10" : rel.tone === "ok" ? "bg-success/10" : "bg-blue/10"), className)}>
+      <I className={cn("mt-0.5 size-3.5 shrink-0", box && "size-4", color)} strokeWidth={2} />
       <span className={cn("min-w-0", box ? "flex-1 text-foreground" : color, !box && "truncate")} title={rel.text}>{rel.text}</span>
       {onClose && <AlertClose onClose={onClose} className={box ? "-my-0.5" : "-my-1"} />}
     </div>
@@ -127,7 +136,7 @@ const PILL: Record<string, string> = { run: "bg-blue/10 text-blue", wait: "bg-at
 /** `pill`: a tinted capsule, for the one status a page is about */
 export function Status({ s, sess = false, pill = false, className }: { s: string; sess?: boolean; pill?: boolean; className?: string }) {
   const label = (sess ? SS : ST)[s]?.[0] ?? ""
-  return <span className={cn("inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap type-footnote text-muted-foreground", pill && cn("rounded-full px-2 py-0.5 font-medium", PILL[s] ?? "bg-muted"), className)} data-status={s}><StatusDot s={s} />{label}</span>
+  return <span className={cn("inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap type-footnote text-muted-foreground", pill && cn("h-6 rounded-full px-2.5 font-medium", PILL[s] ?? "bg-muted"), className)} data-status={s}><StatusDot s={s} />{label}</span>
 }
 export function BotAvatar({ k, size = 24, className }: { k: string | null; size?: number; className?: string; style?: string; seed?: string }) {
   if (k && st.bots[k]) return <Robot k={k} size={size} className={className} />
@@ -141,12 +150,12 @@ export function BotName({ k, className }: { k: string | null; className?: string
   if (!k) return null
   return <span className={cn("inline-flex items-center gap-1.5 whitespace-nowrap", className)}><BotAvatar k={k} size={16} />{botName(k)}</span>
 }
-/** an item's category: an outline pill with its own muted dot, always first and never removable on its own */
+/** an item's category: a quiet muted pill (no hue: colour on a row means status), always first and never removable on its own */
 export function KindTag({ id, className }: { id: string; className?: string }) {
   const tr = useT(), t = tag(id)
   if (!t) return null
   return <span title={tr("core:tag.kindTitle", { desc: tagDesc(t) })} className={cn("inline-flex h-5 shrink-0 items-center gap-1 rounded-md bg-muted px-1.5 type-footnote leading-none text-foreground/80", className)} data-kind={t.name}>
-    <span aria-hidden className="size-1.5 rounded-full" style={{ background: kindColor(t.name) }} />{t.name}</span>
+    {t.name}</span>
 }
 /** tags: type first, then delivery and domain; delivery nature stays visible without a hover */
 export function Tags({ ids, className, onRemove, max }: { ids?: string[]; className?: string; onRemove?: (id: string) => void; max?: number }) {
@@ -161,13 +170,13 @@ export function Tags({ ids, className, onRemove, max }: { ids?: string[]; classN
       {shown.map((t) => (
         <span key={t.id} title={tr("core:tag.title", { cat: tagCatLabel(t.cat), desc: tagDesc(t) })} className={cn("inline-flex h-5 items-center gap-0.5 rounded-md bg-muted px-1.5 type-footnote leading-none", t.cat === "交付" ? "text-foreground/80" : "text-muted-foreground")} data-tag={t.name} data-delivery={t.cat === "交付" || undefined}>
           {/* in a list the delivery kind reads without its category (the title says it); editing it shows it whole */}
-          {t.cat === "交付" && onRemove && <span className="mr-0.5 text-muted-foreground">{tagCatLabel(t.cat)} ·</span>}{tagLabel(t)}{onRemove && <button type="button" aria-label={tr("core:tag.remove", { name: tagLabel(t) })} onClick={(e) => { e.stopPropagation(); onRemove(t.id) }} className="-mr-1 ml-0.5 flex size-4 items-center justify-center rounded-full hover:bg-muted hover:text-foreground"><XIcon className="size-3" /></button>}
+          {t.cat === "交付" && onRemove && <span className="mr-0.5 text-muted-foreground">{tagCatLabel(t.cat)} ·</span>}{tagLabel(t)}{onRemove && <button type="button" aria-label={tr("core:tag.remove", { name: tagLabel(t) })} onClick={(e) => { e.stopPropagation(); onRemove(t.id) }} className="-mr-1 ml-0.5 flex size-4 items-center justify-center rounded-full text-muted-foreground hover:bg-foreground/10 hover:text-foreground"><XIcon className="size-3" /></button>}
         </span>))}
       {max && rest.length > max && <span className="type-footnote text-muted-foreground">+{rest.length - max}</span>}
     </span>
   )
 }
-export const ItemNo = ({ id, className }: { id: string; className?: string }) => <span className={cn("shrink-0 font-mono text-[12px] tabular-nums text-muted-foreground", className)} data-no>{id}</span>
+export const ItemNo = ({ id, className }: { id: string; className?: string }) => <span className={cn("shrink-0 type-footnote font-mono tabular-nums text-muted-foreground", className)} data-no>{id}</span>
 /** a "·" between parts, as its own element after each part but the last. The part keeps a dot-wide right margin and
  *  the dot, pulled back over it, takes no width of its own: it stays on the line of the part before it (a wrapped line
  *  never starts with one), and sits outside the part, so a part that truncates, has a border or a gap keeps it whole.
@@ -197,13 +206,13 @@ export const permissionQuestion = (q: string) => (lang() === "zh-CN" ? q : q.rep
 export function Row({ title, sub, children, onClick, icon, className, controls = false, ...rest }: { title: ReactNode; sub?: ReactNode; children?: ReactNode; onClick?: () => void; icon?: ReactNode; className?: string; controls?: boolean; [k: string]: any }) {
   const id = useId(), cover = !!onClick && controls
   return (
-    <UIItem size="sm" role="listitem" className={cn("min-h-12 rounded-lg border-0 px-2 py-2.5", onClick && "cursor-pointer text-left hover:bg-accent", cover && "relative has-[[data-row-cover]:focus-visible]:ring-[3px] has-[[data-row-cover]:focus-visible]:ring-ring/50", className)}
+    <UIItem size="sm" role="listitem" className={cn("min-h-12 rounded-lg border-0 px-2 py-2.5", onClick && "cursor-pointer text-left transition-colors duration-120 ease-(--ease-out) hover:bg-accent active:bg-accent/70", cover && "relative has-[[data-row-cover]:focus-visible]:ring-[3px] has-[[data-row-cover]:focus-visible]:ring-ring/50", className)}
       render={onClick && !cover ? <button type="button" onClick={onClick} /> : undefined} {...rest}>
       {cover && <button type="button" onClick={onClick} aria-labelledby={id} className="absolute inset-0 cursor-pointer rounded-[inherit] outline-none" data-row-cover />}
       {icon && <ItemMedia>{icon}</ItemMedia>}
       <ItemContent className="min-w-0 gap-0.5">
         <ItemTitle id={id} className="w-full type-body font-normal">{title}</ItemTitle>
-        {sub && <ItemDescription className="type-footnote">{sub}</ItemDescription>}
+        {sub && <ItemDescription className="type-footnote text-muted-foreground">{sub}</ItemDescription>}
       </ItemContent>
       {children && <ItemActions className={cn("shrink-0", cover && "relative")}>{children}</ItemActions>}
     </UIItem>
@@ -226,18 +235,18 @@ export function Segmented<T extends string>({ value, onChange, options, classNam
 export function Chips<T extends string>({ value, onChange, options, className }: { value: T; onChange: (v: T) => void; options: readonly T[]; className?: string }) {
   return (
     <ToggleGroup value={[value]} onValueChange={(v: any[]) => v.length && onChange(v[v.length - 1] as T)} size="sm" spacing={1} className={className}>
-      {options.map((o) => <ToggleGroupItem key={o} value={o} data-seg={o} className="h-7 rounded-md px-2.5 type-callout text-muted-foreground hover:bg-accent hover:text-foreground data-pressed:bg-accent data-pressed:font-medium data-pressed:text-foreground">{o}</ToggleGroupItem>)}
+      {options.map((o) => <ToggleGroupItem key={o} value={o} data-seg={o} className="h-7 rounded-lg px-2.5 type-callout text-muted-foreground hover:bg-accent hover:text-foreground data-pressed:bg-accent data-pressed:font-medium data-pressed:text-foreground">{o}</ToggleGroupItem>)}
     </ToggleGroup>
   )
 }
 /** `action`: what to do about it, inside the empty state rather than a page-height below it */
 export function Empty({ title, sub, icon, action }: { title: string; sub?: string; icon?: ReactNode; action?: ReactNode }) {
   return (
-    <UIEmpty className="px-4 py-16 sm:px-12">
+    <UIEmpty className="px-4 py-16 anim-in sm:px-12">
       <EmptyHeader>
         {icon && <EmptyMedia variant="icon">{icon}</EmptyMedia>}
         <EmptyTitle className="type-headline">{title}</EmptyTitle>
-        {sub && <EmptyDescription className="type-callout">{sub}</EmptyDescription>}
+        {sub && <EmptyDescription className="type-callout text-muted-foreground">{sub}</EmptyDescription>}
       </EmptyHeader>
       {action && <EmptyContent>{action}</EmptyContent>}
     </UIEmpty>
@@ -254,7 +263,7 @@ export function Page({ title, sub, back, actions, toolbar, toolbarTop = false, c
   const own = useRef<HTMLDivElement>(null)
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <header className={cn("relative z-10 flex h-12 shrink-0 items-center gap-2 px-3 transition-[border-color,background-color] duration-200 sm:px-5", scrolled || noTitle ? "border-b bg-background/80 backdrop-blur-xl" : "border-b border-transparent")}>
+      <header className={cn("relative z-10 flex h-12 shrink-0 items-center gap-2 px-3 transition-[border-color,background-color] duration-180 sm:px-5", scrolled || noTitle ? "border-b bg-background/80 backdrop-blur-xl" : "border-b border-transparent")}>
         <SidebarTrigger className="-ml-1 hidden text-muted-foreground md:inline-flex" />
         {back ? (
           /* beside a custom bar the way back keeps its width and the bar truncates; it used to slide under the bar */
@@ -266,7 +275,7 @@ export function Page({ title, sub, back, actions, toolbar, toolbarTop = false, c
             </BreadcrumbList>
           </Breadcrumb>
         ) : null}
-        {bar ?? (!back && <span className={cn("min-w-0 truncate type-headline transition-opacity duration-200", scrolled || noTitle ? "opacity-100" : "opacity-0")}>{title}</span>)}
+        {bar ?? (!back && <span className={cn("min-w-0 truncate type-headline transition-opacity duration-180", scrolled || noTitle ? "opacity-100" : "opacity-0")}>{title}</span>)}
         <span className="flex-1" />
         <div className="flex shrink-0 items-center gap-1.5">{actions}</div>
       </header>
@@ -351,9 +360,14 @@ export function Sidebar({ route: full }: { route: string }) {
         <I className="size-4! text-muted-foreground transition-colors" strokeWidth={1.75} /><span>{l}</span>
       </SidebarMenuButton>
       {!!cnt[h] && (h === "inbox"
-        ? <SidebarMenuBadge className="h-[18px] min-w-[18px] rounded-full bg-attention px-1.5 type-footnote font-semibold tabular-nums text-white! peer-hover/menu-button:text-white!">{cnt[h]}</SidebarMenuBadge>
+        ? <SidebarMenuBadge className="h-4.5 min-w-4.5 rounded-full bg-attention px-1.5 type-label font-semibold tabular-nums text-white! peer-hover/menu-button:text-white!">{cnt[h]}</SidebarMenuBadge>
         : <SidebarMenuBadge className="type-footnote tabular-nums text-muted-foreground">{cnt[h]}</SidebarMenuBadge>)}
     </SidebarMenuItem>
+  )
+  const foot = (h: string, l: string, I: any, on: boolean) => (
+    <Tooltip key={h}><TooltipTrigger render={<a href={"#/" + h} data-nav={h} aria-current={on ? "page" : undefined} aria-label={l} />}
+      className={cn("flex size-8 shrink-0 items-center justify-center rounded-lg text-muted-foreground transition-colors duration-120 ease-(--ease-out) hover:bg-sidebar-accent hover:text-foreground", on && "bg-sidebar-accent text-primary hover:text-primary")}>
+      <I className="size-4" strokeWidth={1.75} /></TooltipTrigger><TooltipContent side="top">{l}</TooltipContent></Tooltip>
   )
   return (
     <UISidebar collapsible="icon" className="border-r border-sidebar-border [&_[data-slot=sidebar-inner]]:backdrop-blur-2xl">
@@ -366,7 +380,7 @@ export function Sidebar({ route: full }: { route: string }) {
             </SidebarMenuButton>
           </SidebarMenuItem>
           <WorkspaceSwitcher /><HubSwitcher />
-          {st.yolo && <SidebarMenuItem className="px-1.5 py-0.5 group-data-[collapsible=icon]:hidden" data-sidebar-yolo><YoloPill /></SidebarMenuItem>}
+          {st.yolo && <SidebarMenuItem className="group-data-[collapsible=icon]:hidden" data-sidebar-yolo><YoloPill className="h-8 w-full rounded-lg px-2.5" /></SidebarMenuItem>}
           <SidebarMenuItem>
             <SidebarMenuButton tooltip={t("core:sidebar.searchTip")} onClick={() => openSheet("command")} className="text-muted-foreground" data-open-command>
               <SearchIcon className="size-4!" strokeWidth={1.5} /><span className="flex-1">{t("common:action.search")}</span><Kbd className="group-data-[collapsible=icon]:hidden">⌘K</Kbd>
@@ -378,21 +392,23 @@ export function Sidebar({ route: full }: { route: string }) {
        *  with more beyond it fades and the footer keeps a hairline, so the lower groups read as scrolled, not cut off */}
       <SidebarContent ref={nav} className="[scrollbar-width:thin]! data-[more~=end]:mask-b-from-[calc(100%-2rem)] data-[more~=start]:mask-t-from-[calc(100%-2rem)]" data-sidebar-nav data-more={more}>
         {NAV_GROUPS.map((group) => <SidebarGroup key={group} className="py-1">
-          <SidebarGroupLabel className="h-7 type-label text-tertiary">{t(`core:navGroup.${group}`)}</SidebarGroupLabel>
+          <SidebarGroupLabel className="h-7 type-label text-muted-foreground">{t(`core:navGroup.${group}`)}</SidebarGroupLabel>
           <SidebarGroupContent><SidebarMenu>{NAV.filter((x) => x.group === group).map((x) => item(x.h, t(`core:nav.${x.l}`), x.I, (route === x.h && !(x.h === "contacts" && meOn)) || (x.h === "contacts" && (route === "orgs" || route === "teams"))))}</SidebarMenu></SidebarGroupContent>
         </SidebarGroup>)}
       </SidebarContent>
-      <SidebarFooter className="border-t border-sidebar-border">
-        <SidebarMenu>
-          {people && item("contacts/me", t("core:nav.me"), UserRoundIcon, meOn)}
-          {item("devices", t("core:nav.devices"), ServerIcon, route === "devices")}
-          {item("accounts", t("core:nav.accounts"), KeyRoundIcon, route === "accounts" || route === "vault")}
-          {item("settings", t("core:nav.settings"), SettingsIcon, route === "settings" || route === "plugins")}
-        </SidebarMenu>
-        <SidebarSeparator className="mx-0" />
-        <div className="flex items-center justify-between px-1 pb-1 group-data-[collapsible=icon]:hidden"><span className="type-footnote text-muted-foreground">{t("core:sidebar.appearance")}</span><ThemeSwitch /></div>
+      {/* the footer is one row of places (me, devices, accounts, settings) beside the theme, and the versions under it:
+       *  short, so the nav groups above keep their room on a laptop screen */}
+      <SidebarFooter className="gap-1 border-t border-sidebar-border">
+        <div className="flex items-center gap-0.5 group-data-[collapsible=icon]:flex-col">
+          {people && foot("contacts/me", t("core:nav.me"), UserRoundIcon, meOn)}
+          {foot("devices", t("core:nav.devices"), ServerIcon, route === "devices")}
+          {foot("accounts", t("core:nav.accounts"), KeyRoundIcon, route === "accounts" || route === "vault")}
+          {foot("settings", t("core:nav.settings"), SettingsIcon, route === "settings" || route === "plugins")}
+          <span className="flex-1 group-data-[collapsible=icon]:hidden" />
+          <ThemeCycle className="group-data-[collapsible=icon]:hidden" />
+        </div>
         {/* ST-21: this page's frontend and the Hub's backend; the full numbers are in 设置 · 关于 */}
-        <a href="#/settings/about" title={t("core:sidebar.versions", { web: LOADED_WEB_VERSION, hub: st.version || t("pages:version.fetching") })} className="block truncate rounded-lg px-2 py-0.5 type-footnote tabular-nums text-muted-foreground hover:bg-muted group-data-[collapsible=icon]:hidden" data-sidebar-versions>{t("core:sidebar.versions", { web: shortVersion(LOADED_WEB_VERSION), hub: st.version ? shortVersion(st.version) : t("core:sidebar.versionUnknown") })}</a>
+        <a href="#/settings/about" title={t("core:sidebar.versions", { web: LOADED_WEB_VERSION, hub: st.version || t("pages:version.fetching") })} className="block truncate rounded-lg px-2 py-0.5 type-footnote tabular-nums text-muted-foreground hover:bg-sidebar-accent hover:text-foreground group-data-[collapsible=icon]:hidden" data-sidebar-versions>{t("core:sidebar.versions", { web: shortVersion(LOADED_WEB_VERSION), hub: st.version ? shortVersion(st.version) : t("core:sidebar.versionUnknown") })}</a>
         <HubUpdateNotice />
         {!!st.webVersion && st.webVersion !== LOADED_WEB_VERSION && <a href="#/settings/about" className="block rounded-lg px-2 py-1 type-footnote text-primary hover:bg-muted group-data-[collapsible=icon]:hidden" data-sidebar-web-update>{t("core:sidebar.webUpdate")}</a>}
       </SidebarFooter>
@@ -415,14 +431,14 @@ export function MobileTabs({ route: full }: { route: string }) {
   const tabs = [{ h: "", l: tr("core:nav.chat"), I: MessageCircleIcon }, { h: "inbox", l: tr("core:nav.inbox"), I: InboxIcon, b: n }, { h: "items", l: tr("core:nav.items"), I: ListTodoIcon }, { h: "more", l: tr("core:nav.mine"), I: UserIcon, dot: !!st.update }]
   const more = ["more", "projects", "sessions", "stats", "mail", "signals", "settings", "bots", "design", "auto", "plugins", "personas", "contacts", "orgs", "teams", "accounts", "vault", "devices", "knowledge", "github", "yolo"]
   return (
-    <nav className="fixed inset-x-0 bottom-0 z-40 flex h-[60px] border-t bg-background/85 pb-[env(safe-area-inset-bottom)] backdrop-blur-xl md:hidden">
+    <nav className="fixed inset-x-0 bottom-0 z-40 flex h-15 bg-background/95 pb-[env(safe-area-inset-bottom)] shadow-[0_-1px_0_var(--border)] backdrop-blur-2xl backdrop-saturate-180 md:hidden">
       {tabs.map((t) => {
         const on = route === t.h || (t.h === "more" && more.includes(route))
         return (
-          <a key={t.h} href={"#/" + t.h} data-tab={t.h || "chat"} className={cn("relative flex flex-1 flex-col items-center justify-center gap-1 text-[10.5px] font-medium", on ? "text-blue" : "text-muted-foreground")}>
-            <t.I className="size-[22px]" strokeWidth={on ? 1.9 : 1.5} />{t.l}
-            {t.b ? <span className="absolute left-1/2 top-1.5 ml-2 flex h-4 min-w-4 items-center justify-center rounded-full bg-attention px-1 text-[10px] font-semibold text-white">{t.b}</span> : null}
-            {"dot" in t && t.dot ? <span className="absolute left-1/2 top-2 ml-2.5 size-2 rounded-full bg-attention" data-tab-update-dot /> : null}
+          <a key={t.h} href={"#/" + t.h} data-tab={t.h || "chat"} className={cn("relative flex flex-1 flex-col items-center justify-center gap-0.5 type-label transition-[color,transform] duration-120 active:scale-95", on ? "text-primary" : "text-muted-foreground")}>
+            <t.I className="size-5.5" strokeWidth={on ? 1.9 : 1.5} />{t.l}
+            {t.b ? <span className="absolute left-1/2 top-1.5 ml-2 flex h-4 min-w-4 items-center justify-center rounded-full bg-attention px-1 type-label leading-none font-semibold tabular-nums text-white ring-2 ring-background">{t.b}</span> : null}
+            {"dot" in t && t.dot ? <span className="absolute left-1/2 top-2 ml-2.5 size-2 rounded-full bg-attention ring-2 ring-background" data-tab-update-dot /> : null}
           </a>
         )
       })}
@@ -528,8 +544,8 @@ function ComposerInput({ placeholder, onSend, model, left, autoFocus, className,
     : menu.kind === "@" && men.opts ? men.opts
     : menu.kind === "@"
     ? [...Object.keys(st.bots).filter((k) => st.bots[k].on && !st.bots[k].main && (!menu.q || st.bots[k].n.includes(menu.q))).map((k) => ({ id: k, ins: "@" + st.bots[k].n.replace(/\s+/g, ""), label: <><BotAvatar k={k} size={18} /><span className="type-callout">{tr("core:composer.botName", { name: st.bots[k].n })}</span><span className="min-w-0 flex-1 truncate type-footnote text-muted-foreground">{tr("core:composer.handTo", { role: st.bots[k].role })}</span></> })),
-      ...st.pp.contacts.filter((c) => !c.me && c.kind !== "未确认" && (!menu.q || [c.n, ...c.aliases].some((x) => x.toLowerCase().includes(menu.q.toLowerCase())))).slice(0, 5).map((c) => ({ id: c.id, ins: "@" + c.n.split(" ")[0], label: <><span className="flex size-[18px] items-center justify-center rounded-full bg-muted text-[10px]">{c.n[0]}</span><span className="type-callout">{c.n}</span><span className="min-w-0 flex-1 truncate type-footnote text-muted-foreground">{tr("core:composer.relate", { info: [st.pp.orgs.find((o) => o.id === c.org)?.n, c.title].filter(Boolean).join(" · ") })}</span></> })),
-      ...st.pp.teams.filter((g) => !menu.q || g.n.includes(menu.q)).slice(0, 3).map((g) => ({ id: g.id, ins: "@" + g.n.replace(/\s+/g, ""), label: <><UsersRoundIcon className="size-[18px] text-muted-foreground" /><span className="type-callout">{g.n}</span><span className="min-w-0 flex-1 truncate type-footnote text-muted-foreground">{tr("core:composer.team", { count: g.members.length })}</span></> }))]
+      ...st.pp.contacts.filter((c) => !c.me && c.kind !== "未确认" && (!menu.q || [c.n, ...c.aliases].some((x) => x.toLowerCase().includes(menu.q.toLowerCase())))).slice(0, 5).map((c) => ({ id: c.id, ins: "@" + c.n.split(" ")[0], label: <><span className="flex size-4.5 items-center justify-center rounded-full bg-muted type-label leading-none text-muted-foreground">{c.n[0]}</span><span className="type-callout">{c.n}</span><span className="min-w-0 flex-1 truncate type-footnote text-muted-foreground">{tr("core:composer.relate", { info: [st.pp.orgs.find((o) => o.id === c.org)?.n, c.title].filter(Boolean).join(" · ") })}</span></> })),
+      ...st.pp.teams.filter((g) => !menu.q || g.n.includes(menu.q)).slice(0, 3).map((g) => ({ id: g.id, ins: "@" + g.n.replace(/\s+/g, ""), label: <><UsersRoundIcon className="size-4.5 text-muted-foreground" /><span className="type-callout">{g.n}</span><span className="min-w-0 flex-1 truncate type-footnote text-muted-foreground">{tr("core:composer.team", { count: g.members.length })}</span></> }))]
     : COMMANDS.filter(([n, c]) => !menu.q || n.includes(menu.q) || tr(`core:cmd.${c}`).toLowerCase().includes(menu.q.toLowerCase())).map(([, c]) => ({ id: c, ins: "", cmd: c, label: <><SlashIcon className="size-3.5 text-muted-foreground" /><span className="type-callout">{tr(`core:cmd.${c}`)}</span><span className="min-w-0 flex-1 truncate type-footnote text-muted-foreground">{tr(`core:cmd.${c}Desc`)}</span></> }))
   const track = (val: string, caret: number) => {
     const before = val.slice(0, caret)
@@ -563,7 +579,7 @@ function ComposerInput({ placeholder, onSend, model, left, autoFocus, className,
       onDragLeave={(e) => { if (isFileDrag(e)) setDrag((n) => Math.max(0, n - 1)) }}
       onDrop={(e) => { if (isFileDrag(e)) { e.preventDefault(); setDrag(0); takeFiles(e.dataTransfer.files) } }}>
       {menu && opts.length > 0 && (
-        <Command shouldFilter={false} value={opts[sel]?.id} className="absolute inset-x-2 bottom-full z-30 mb-2 h-auto max-w-[460px] rounded-xl border shadow-lg anim-in" data-ref-menu={menu.kind}>
+        <Command shouldFilter={false} value={opts[sel]?.id} className="absolute inset-x-2 bottom-full z-30 mb-2 h-auto max-w-md rounded-xl shadow-lg ring-1 ring-foreground/6 anim-in dark:bg-popover dark:shadow-[0_16px_40px_-8px_rgb(0_0_0/0.6)] dark:ring-white/10" data-ref-menu={menu.kind}>
           <CommandList>
             {(menu.kind === "@" && men.opts ? men.groups(opts) : [{ head, xs: opts }]).filter((g) => g.xs.length).map((g, k) => (
             <CommandGroup key={k} heading={<span className="inline-flex items-center gap-1.5">{g.head}</span>}>
@@ -574,21 +590,21 @@ function ComposerInput({ placeholder, onSend, model, left, autoFocus, className,
           </CommandList>
         </Command>
       )}
-      <InputGroup className={cn("rounded-[20px] border-border bg-card shadow-[0_2px_12px_rgb(0_0_0/0.05)] dark:shadow-none has-[[data-slot=input-group-control]:focus-visible]:border-foreground/25 has-[[data-slot=input-group-control]:focus-visible]:ring-0", disabled && "opacity-60", drag > 0 && "border-blue ring-2 ring-blue/20", className)} data-composer={testId}>
+      <InputGroup className={cn("rounded-2xl border-border bg-card shadow-[var(--lift-hover)] transition-[border-color,box-shadow] duration-180 ease-(--ease-out) dark:border-transparent has-[[data-slot=input-group-control]:focus-visible]:border-ring/50 has-[[data-slot=input-group-control]:focus-visible]:ring-3 has-[[data-slot=input-group-control]:focus-visible]:ring-ring/10", disabled && "opacity-60", drag > 0 && "border-blue ring-3 ring-blue/15", className)} data-composer={testId}>
         {up.list.length > 0 && (
           <InputGroupAddon align="block-start" className="px-3 pt-3">
             <PendingList list={up.list} onRemove={(key) => { if (!inFlight.current) up.remove(key) }} />
           </InputGroupAddon>
         )}
         <div className="relative w-full">
-        <div ref={mirror} aria-hidden data-composer-marks className="pointer-events-none absolute inset-0 overflow-hidden [scrollbar-gutter:stable] whitespace-pre-wrap break-words px-4 pb-2 pt-3 text-[14px] leading-[22px] text-foreground">
-          {marked.map(([t, k], n) => k ? <span key={n} data-mark={k} className={cn("rounded-[4px] ring-2", MARK[k])}>{t}</span> : <Fragment key={n}>{t}</Fragment>)}{v.endsWith("\n") && "\u200b"}
+        <div ref={mirror} aria-hidden data-composer-marks className="pointer-events-none absolute inset-0 overflow-hidden [scrollbar-gutter:stable] whitespace-pre-wrap break-words px-4 pb-2 pt-3 type-body text-foreground">
+          {marked.map(([t, k], n) => k ? <span key={n} data-mark={k} className={cn("rounded-md ring-2", MARK[k])}>{t}</span> : <Fragment key={n}>{t}</Fragment>)}{v.endsWith("\n") && "\u200b"}
         </div>
         <InputGroupTextarea ref={ta} autoFocus={autoFocus} disabled={disabled || sending} value={v} placeholder={drag > 0 ? tr("core:composer.dropFiles") : placeholder} rows={1}
           onPaste={(e) => { if (e.clipboardData?.files?.length && takeFiles(e.clipboardData.files)) e.preventDefault() }}
           onChange={(e) => { if (chat && !v && e.target.value) cue("input"); else if (chat && v && !e.target.value && !st.thinking) cue("idle"); setV(e.target.value); track(e.target.value, e.target.selectionStart ?? e.target.value.length) }}
           onScroll={(e) => { if (mirror.current) mirror.current.scrollTop = e.currentTarget.scrollTop }}
-          className="relative max-h-40 min-h-11 [scrollbar-gutter:stable] px-4 pt-3 text-[14px] leading-[22px] text-transparent caret-foreground placeholder:text-tertiary selection:bg-blue/25 selection:text-transparent"
+          className="relative max-h-40 min-h-11 [scrollbar-gutter:stable] px-4 pt-3 focus-visible:bg-transparent dark:focus-visible:bg-transparent type-body leading-5.5 text-transparent caret-foreground placeholder:text-tertiary selection:bg-blue/25 selection:text-transparent"
           onKeyDown={(e) => {
             if (menu && opts.length) {
               if (e.key === "ArrowDown") { e.preventDefault(); setSel((x) => (x + 1) % opts.length); return }
@@ -603,12 +619,13 @@ function ComposerInput({ placeholder, onSend, model, left, autoFocus, className,
         <InputGroupAddon align="block-end" className="gap-1 px-2.5 pb-2.5">
           <AttachButton onFiles={(f) => takeFiles(f)} disabled={disabled || sending} />
           {model && <span className="px-1.5 type-footnote text-muted-foreground" data-model>{model}</span>}
-          {left}
+          {/* a phone gives the caller's toggles the small size, so the composer stays one compact row */}
+          {left && <span className="contents max-sm:[&_[data-slot=tabs-list]]:h-7! max-sm:[&_[data-slot=tabs-trigger]]:px-2 max-sm:[&_[data-slot=tabs-trigger]]:type-footnote">{left}</span>}
           <span className="flex-1" />
           <span className={cn("mr-1 hidden items-center gap-1 whitespace-nowrap type-footnote text-tertiary", chat ? "lg:inline-flex" : "xl:inline-flex")}>{chat && <><Kbd>#</Kbd>{tr("core:composer.hintItem")}<Kbd>@</Kbd>Bot<Kbd>/</Kbd>{tr("core:composer.hintCommand")}</>}{!chat && <><Kbd>⏎</Kbd>{tr("core:composer.hintSend")}<Kbd>⇧⏎</Kbd>{tr("core:composer.hintNewline")}</>}</span>
           {queues && <Tooltip><TooltipTrigger render={<InputGroupButton size="icon-sm" variant="outline" aria-label={tr(stopping ? "core:composer.stopping" : "core:composer.stop")} data-stop data-stopping={stopping || undefined} onClick={stop} disabled={stopping} className="rounded-full" />}>
             {stopping ? <Spinner className="size-4" /> : <SquareIcon className="size-3 fill-current" />}</TooltipTrigger><TooltipContent>{stopping ? tr("core:composer.stoppingTip") : <>{tr("core:composer.stopTip")} <Kbd>Esc</Kbd></>}</TooltipContent></Tooltip>}
-          <InputGroupButton size="icon-sm" variant="default" aria-label={tr(sending ? "core:composer.submitting" : queues ? "core:composer.queueSend" : "core:composer.send")} title={queues ? tr("core:composer.queueSendTip") : undefined} data-send data-send-queues={queues || undefined} onClick={() => void send()} disabled={sending || up.uploading || (!v.trim() && !up.ready.length) || disabled} className="rounded-full disabled:opacity-25">{sending ? <Spinner className="size-4" /> : <ArrowUpIcon className="size-4" strokeWidth={2.25} />}</InputGroupButton>
+          <InputGroupButton size="icon-sm" variant="default" aria-label={tr(sending ? "core:composer.submitting" : queues ? "core:composer.queueSend" : "core:composer.send")} title={queues ? tr("core:composer.queueSendTip") : undefined} data-send data-send-queues={queues || undefined} onClick={() => void send()} disabled={sending || up.uploading || (!v.trim() && !up.ready.length) || disabled} className="rounded-full shadow-xs disabled:bg-muted disabled:text-tertiary disabled:opacity-100 disabled:shadow-none">{sending ? <Spinner className="size-4" /> : <ArrowUpIcon className="size-4" strokeWidth={2.25} />}</InputGroupButton>
         </InputGroupAddon>
       </InputGroup>
     </div>
@@ -680,7 +697,7 @@ function Detail({ text }: { text: string }) {
   const lines = String(text || "").split("\n").filter(Boolean)
   if (!lines.length) return null
   return (
-    <CodeBlock size="sm" className="mt-1 max-w-[640px] bg-muted/70 ring-0">
+    <CodeBlock size="sm" className="mt-1 max-w-160 rounded-lg bg-muted/60 ring-0">
       <CodeBlockContent className="max-h-80 overflow-auto type-code">
         {lines.map((l, n) => <CodeBlockLine key={n} variant={l.startsWith("+") ? "added" : l.startsWith("-") ? "removed" : "default"} className={cn(l.startsWith("+") && "bg-success/10 after:text-success", l.startsWith("✓") && "text-success")}>{l.replace(/^[+-] /, "")}</CodeBlockLine>)}
       </CodeBlockContent>
@@ -690,9 +707,9 @@ function Detail({ text }: { text: string }) {
 /** a command and what it printed, as a terminal */
 function Terminal({ cmd, out, failed }: { cmd: string; out: string; failed: boolean }) {
   return (
-    <div className={cn("mt-1 mb-1.5 max-w-[640px] overflow-hidden rounded-xl bg-[#1c1c1e] font-mono text-[12px] leading-[18px] text-[#e5e5ea] ring-1 ring-black/5 dark:bg-black/40 dark:ring-white/10", failed && "ring-destructive/40")} data-terminal>
-      <div className="whitespace-pre-wrap break-all border-b border-white/10 px-3 py-2"><span className="select-none text-[#30d158]">$ </span>{cmd}</div>
-      {out && <pre className={cn("max-h-72 overflow-auto whitespace-pre-wrap break-all px-3 py-2 text-[#aeaeb2]", failed && "text-[#ff8a80]")}>{out}</pre>}
+    <div className={cn("mt-1 mb-1.5 max-w-160 overflow-hidden rounded-lg bg-code type-code text-foreground shadow-[var(--lift)]", failed && "bg-destructive/6")} data-terminal>
+      <div className="whitespace-pre-wrap break-all px-3.5 pt-2.5 pb-2"><span className={cn("select-none", failed ? "text-destructive" : "text-tertiary")}>$ </span>{cmd}</div>
+      {out && <pre className={cn("max-h-72 overflow-auto whitespace-pre-wrap break-all px-3.5 pb-2.5 text-muted-foreground", failed && "text-destructive/90")}>{out}</pre>}
     </div>
   )
 }
@@ -721,7 +738,7 @@ function trailOf(evs: any[], ts: number[], t1: number | undefined, live: boolean
     const merged = g ? (calls: number, distinct: number, running: boolean) => g === "tool" ? t("core:trail.group.tool", { name: v.verb, count: calls })
       : t(`core:trail.group.${g}${running ? "Live" : ""}` as "core:trail.group.read", { count: g === "read" || g === "edit" ? distinct : calls }) : undefined
     const plan: [string, boolean][] | undefined = e[12]?.length ? e[12] : undefined
-    const diff = e[1] === "edit" && e[6] != null ? <span className="shrink-0 font-mono text-[12px] tabular-nums"><span className="text-success">+{e[6]}</span>{e[7] ? <span className="ml-1 text-destructive">−{e[7]}</span> : null}</span> : undefined
+    const diff = e[1] === "edit" && e[6] != null ? <span className="shrink-0 type-footnote font-mono tabular-nums"><span className="text-success">+{e[6]}</span>{e[7] ? <span className="ml-1 text-destructive">−{e[7]}</span> : null}</span> : undefined
     const body = plan ? (j === lastPlan ? undefined : <SubSteps steps={plan} live={false} />) : v.I === TerminalIcon ? <Terminal cmd={v.full ?? v.subj} out={String(e[4] ?? "").trim()} failed={state === "fail"} /> : e[4] ? <Detail text={e[4]} /> : undefined
     return { t: "tool", key, state, verb, subj: DELEGATE.includes(tool) ? e[10] ?? v.subj : v.subj, mono: v.mono, full: v.full, group, merged, chip, extra: diff, body,
       below: plan && j === lastPlan ? <SubSteps steps={plan} live={live} /> : undefined, attrs: { kind: e[1] } }
@@ -731,7 +748,7 @@ function trailOf(evs: any[], ts: number[], t1: number | undefined, live: boolean
 function Doing({ evs }: { evs: any[] }) {
   const t = useT()
   const run = evs.findLast((e) => e[0] === "tool" && e[5] === 1)
-  if (run) { const v = stepView(run); return <><span className="shrink-0">{v.verb}</span>{v.subj && <span className={cn("min-w-0 truncate text-muted-foreground", v.mono && "font-mono text-[11.5px]")}>{v.subj}</span>}</> }
+  if (run) { const v = stepView(run); return <><span className="shrink-0">{v.verb}</span>{v.subj && <span className={cn("min-w-0 truncate text-muted-foreground", v.mono && "font-mono type-footnote")}>{v.subj}</span>}</> }
   const last = evs[evs.length - 1]
   return <span>{t(!last ? "core:transcript.preparing" : last[0] === "th" ? "core:transcript.thinking" : last[0] === "a" ? "core:transcript.replying" : last[0] === "ask" ? "core:transcript.awaitingApproval" : "core:transcript.processing")}</span>
 }
@@ -750,13 +767,13 @@ function WorkBlock({ k, g, live }: { k: string; g: Seg; live: boolean }) {
   const items = trailOf(g.evs, g.at ?? [], g.t1, live)
   return (
     <Collapsible open={open} onOpenChange={setOpen} data-work={live ? "live" : "done"} className="anim-in">
-      <CollapsibleTrigger className="group/work flex w-full min-w-0 items-center gap-1.5 rounded-lg py-1 text-left type-callout">
-        <ChevronDownIcon className="size-4 shrink-0 -rotate-90 text-muted-foreground transition group-aria-expanded/work:rotate-0" />
+      <CollapsibleTrigger className="group/work flex w-full min-w-0 items-center gap-1.5 rounded-lg py-1 text-left type-callout hover:[&>svg]:text-foreground">
+        <ChevronDownIcon className="size-4 shrink-0 -rotate-90 text-muted-foreground transition-transform duration-180 ease-(--ease-out) group-aria-expanded/work:rotate-0" />
         <span className={cn("shrink-0", live ? "text-foreground" : "text-foreground/85")}>{live ? <span className="shimmer">{t("core:transcript.working")}</span> : t(cancelled ? "core:transcript.interrupted" : "core:transcript.handled")}</span>
         {(ms > 0 || live) && <span className="shrink-0 tabular-nums text-muted-foreground" data-work-clock>{live ? clock(ms) : fmtDur(ms)}</span>}
         {stats.length > 0 && <span className="min-w-0 truncate text-muted-foreground">· {stats.join(" · ")}</span>}
       </CollapsibleTrigger>
-      <CollapsibleContent className="h-(--collapsible-panel-height) overflow-hidden transition-[height] duration-200 data-ending-style:h-0 data-starting-style:h-0">
+      <CollapsibleContent className="h-(--collapsible-panel-height) overflow-hidden transition-[height] duration-260 ease-(--ease-out) data-ending-style:h-0 data-starting-style:h-0">
         <div className="mt-1 flex flex-col">
           <Trail items={items} live={live} tail={live ? 12 : undefined} end={live || !g.end ? undefined : cancelled ? { s: "cancel", label: t("core:transcript.interrupted") } : { s: "end", label: t("core:trail.finished") }} />
         </div>
@@ -769,11 +786,11 @@ function FilesCard({ files }: { files: [string, number, number][] }) {
   const t = useT()
   const add = files.reduce((n, f) => n + f[1], 0), del = files.reduce((n, f) => n + f[2], 0)
   return (
-    <div className="overflow-hidden rounded-xl border bg-card anim-in" data-files-changed>
-      <div className="flex items-center gap-2 border-b bg-muted/40 px-3.5 py-2 type-footnote"><FileDiffIcon className="size-3.5 text-muted-foreground" /><span className="font-medium text-foreground">{t("core:transcript.filesChanged", { count: files.length })}</span><span className="font-mono tabular-nums"><span className="text-success">+{add}</span> <span className="text-destructive">−{del}</span></span></div>
-      <ul className="flex flex-col py-1">{files.slice(0, 12).map(([p, a, d]) => (
-        <li key={p} className="flex min-w-0 items-center gap-2 px-3.5 py-1 font-mono text-[12px]" title={p}><span className="shrink-0 text-foreground">{base(p)}</span><span className="min-w-0 truncate text-muted-foreground">{p.split("/").slice(-4, -1).join("/")}</span><span className="ml-auto shrink-0 tabular-nums"><span className="text-success">+{a}</span> <span className="text-destructive">−{d}</span></span></li>
-      ))}{files.length > 12 && <li className="px-3.5 py-1 type-footnote text-muted-foreground">{t("core:transcript.moreFiles", { count: files.length - 12 })}</li>}</ul>
+    <div className="max-w-160 overflow-hidden rounded-xl bg-card shadow-[var(--lift)] anim-in" data-files-changed>
+      <div className="flex items-center gap-2 px-4 pt-3 pb-1.5 type-callout"><FileDiffIcon className="size-4 text-muted-foreground" strokeWidth={1.75} /><span className="font-medium text-foreground">{t("core:transcript.filesChanged", { count: files.length })}</span><span className="type-footnote font-mono tabular-nums"><span className={add ? "text-success" : "text-tertiary"}>+{add}</span> <span className={del ? "text-destructive" : "text-tertiary"}>−{del}</span></span></div>
+      <ul className="flex flex-col pb-2.5">{files.slice(0, 12).map(([p, a, d]) => (
+        <li key={p} className="flex min-w-0 items-center gap-2 px-4 py-0.5 type-footnote font-mono" title={p}><span className="shrink-0 text-foreground">{base(p)}</span><span className="min-w-0 truncate text-muted-foreground">{p.split("/").slice(-4, -1).join("/")}</span><span className="ml-auto shrink-0 tabular-nums"><span className={a ? "text-success" : "text-tertiary"}>+{a}</span> <span className={d ? "text-destructive" : "text-tertiary"}>−{d}</span></span></li>
+      ))}{files.length > 12 && <li className="px-4 py-0.5 type-footnote text-muted-foreground">{t("core:transcript.moreFiles", { count: files.length - 12 })}</li>}</ul>
     </div>
   )
 }
@@ -801,7 +818,7 @@ function ForkBtn({ k, at }: { k: string; at: number }) {
   return (
     <Tooltip>
       <TooltipTrigger render={<Button variant="ghost" size="icon-xs" aria-label={t("core:transcript.fork")} data-fork={at} onClick={() => openSheet("fork", { k, at })}
-        className="shrink-0 rounded-full text-muted-foreground opacity-0 transition-opacity duration-150 group-hover/msg:opacity-100 focus-visible:opacity-100 [@media(hover:none)]:opacity-100" />}><GitForkIcon /></TooltipTrigger>
+        className="shrink-0 rounded-full text-muted-foreground opacity-0 transition-opacity duration-120 group-hover/msg:opacity-100 focus-visible:opacity-100 [@media(hover:none)]:opacity-100" />}><GitForkIcon /></TooltipTrigger>
       <TooltipContent>{t("core:transcript.fork")}</TooltipContent>
     </Tooltip>
   )
@@ -813,9 +830,9 @@ export function Brief({ text, label, className }: { text: string; label?: string
   return (
     <Collapsible className={cn("min-w-0", className)} data-brief>
       <CollapsibleTrigger className="group/brief flex max-w-full items-center gap-1 text-left hover:text-foreground">
-        <span className="min-w-0 truncate">{who}{head}</span><ChevronRightIcon className="size-3.5 shrink-0 transition-transform group-data-[panel-open]/brief:rotate-90" />
+        <span className="min-w-0 truncate">{who}{head}</span><ChevronRightIcon className="size-3.5 shrink-0 transition-transform duration-180 ease-(--ease-out) group-data-[panel-open]/brief:rotate-90" />
       </CollapsibleTrigger>
-      <CollapsibleContent><div className="mt-1.5 max-h-80 overflow-auto break-words rounded-lg border px-3 py-2 text-muted-foreground" data-brief-body><Markdown text={text} className="type-footnote" /></div></CollapsibleContent>
+      <CollapsibleContent><div className="mt-1.5 max-h-80 overflow-auto break-words border-l-2 border-border py-0.5 pl-3 text-muted-foreground" data-brief-body><Markdown text={text} className="type-footnote" /></div></CollapsibleContent>
     </Collapsible>
   )
 }
@@ -838,7 +855,7 @@ const SegView = memo(function SegView({ k, g, live }: { k: string; g: Seg; live:
       <div className="flex max-w-[85%] flex-col items-end gap-1.5">
         <Files files={e[3]} align="end" />
         {(e[1] !== "（附件）" || !e[3]?.length) && <Bubble variant="muted" align="end" className="max-w-full">
-          <BubbleContent className="min-w-0 break-words rounded-2xl px-3.5 py-2 type-body text-foreground">{e[2] && <div className="mb-0.5 type-label text-muted-foreground">{e[2]}</div>}<Markdown text={e[1]} /></BubbleContent>
+          <BubbleContent className="min-w-0 break-words rounded-2xl px-4 py-2.5 type-body text-foreground">{e[2] && <div className="mb-0.5 type-label text-muted-foreground">{e[2]}</div>}<Markdown text={e[1]} /></BubbleContent>
         </Bubble>}
       </div>
     </div>
@@ -850,12 +867,12 @@ const SegView = memo(function SegView({ k, g, live }: { k: string; g: Seg; live:
     </div>
   )
   if (g.t === "q") return (
-    <div className="ml-auto max-w-[85%] rounded-2xl bg-muted px-3.5 py-2.5 anim-in" data-merged>
+    <div className="ml-auto max-w-[85%] rounded-2xl bg-muted px-4 py-2.5 anim-in" data-merged>
       <div className="mb-1 flex items-center gap-1.5 type-label text-muted-foreground"><InboxIcon className="size-3.5" />{t("core:transcript.merged", { count: e[1].length })}</div>
       {e[1].map((x: string) => <Markdown key={x} text={x} className="type-body" />)}
     </div>
   )
-  if (g.t === "hi") return <div className="flex gap-2 rounded-xl bg-muted/50 px-3 py-2 type-callout text-muted-foreground" data-handoff><CornerDownRightIcon className="mt-0.5 size-4 shrink-0" strokeWidth={1.5} /><div className="min-w-0 flex-1"><Brief text={e[3] ?? e[1]} label={t("core:transcript.steveBrief")} /><Files files={e[2]} className="mt-1.5" /></div></div>
+  if (g.t === "hi") return <div className="flex gap-2.5 rounded-xl bg-muted/60 px-3.5 py-2.5 type-callout text-muted-foreground anim-in" data-handoff><CornerDownRightIcon className="mt-0.5 size-4 shrink-0" strokeWidth={1.5} /><div className="min-w-0 flex-1"><Brief text={e[3] ?? e[1]} label={t("core:transcript.steveBrief")} /><Files files={e[2]} className="mt-1.5" /></div></div>
   if (g.t === "ho") return (
     <div className="flex items-center gap-3 type-footnote text-muted-foreground"><span className="h-px flex-1 bg-border" />
       <button type="button" onClick={() => go("#/sessions/" + e[2])} className="inline-flex items-center gap-1 text-blue hover:underline">{e[1]}<ArrowUpRightIcon className="size-3" /></button><span className="h-px flex-1 bg-border" /></div>
@@ -956,15 +973,15 @@ export function RunBar({ k, onStop }: { k: string; onStop?: () => void }) {
   const what = run ? <Doing evs={turn} /> : tone === "wait" ? t("core:runBar.waitWhat") : stats.join(" · ")
   return (
     <div role="status" aria-live="polite" data-runbar={tone}
-      className={cn("mb-2 flex min-h-10 items-center gap-2.5 rounded-xl border px-3.5 py-2 type-footnote transition-colors",
-        tone === "run" ? "border-blue/25 bg-blue/[0.06]" : tone === "wait" ? "border-attention/35 bg-attention/[0.07]" : "bg-muted/40")}>
-      {run ? <span className="relative flex size-4 shrink-0 items-center justify-center"><span className="absolute size-4 animate-ping rounded-full bg-blue/25" /><span className="size-2 rounded-full bg-blue" /></span>
+      className={cn("mb-2 flex min-h-10 items-center gap-2.5 rounded-xl px-3.5 py-2 type-callout transition-colors duration-180 ease-(--ease-out)",
+        tone === "run" ? "bg-blue/8" : tone === "wait" ? "bg-attention/10" : "bg-muted/60")}>
+      {run ? <span className="flex size-4 shrink-0 items-center justify-center"><StatusDot s="run" /></span>
         : tone === "wait" ? <StatusDot s="wait" className="mx-1" /> : tone === "done" ? <CircleCheckIcon className="size-4 shrink-0 text-success" strokeWidth={1.75} /> : tone === "stop" ? <CircleSlashIcon className="size-4 shrink-0 text-muted-foreground" strokeWidth={1.75} /> : <StatusDot s="ended" className="mx-1" />}
       <span className={cn("shrink-0 font-medium", tone === "run" ? "text-blue" : tone === "wait" ? "text-attention" : "text-foreground/85")}>{label}</span>
       {/* plain text in its own box: a flex row cuts text off without the ellipsis */}
       {what && <span className={cn("flex min-w-0 items-baseline gap-1.5 truncate", run ? "text-foreground/85" : "text-muted-foreground")} data-doing>{typeof what === "string" ? <span className="min-w-0 truncate">{what}</span> : what}</span>}
-      <span className="ml-auto shrink-0 tabular-nums text-muted-foreground">{run ? clock(now - t0) : endAt && t0 ? t("core:runBar.took", { dur: fmtDur(endAt - t0) }) : ""}</span>
-      {run && onStop && <Button size="xs" variant="outline" className="shrink-0 bg-background" onClick={onStop} data-interrupt><SquareIcon className="fill-current" />{t("core:runBar.interrupt")}</Button>}
+      <span className="ml-auto shrink-0 type-footnote tabular-nums text-muted-foreground">{run ? clock(now - t0) : endAt && t0 ? t("core:runBar.took", { dur: fmtDur(endAt - t0) }) : ""}</span>
+      {run && onStop && <Button size="xs" variant="outline" className="shrink-0 bg-card" onClick={onStop} data-interrupt><SquareIcon className="fill-current" />{t("core:runBar.interrupt")}</Button>}
     </div>
   )
 }
@@ -985,19 +1002,21 @@ export function SessionBlock({ k, defaultOpen, replies }: { k: string; defaultOp
   const toggle = () => { if (open) { expanded.delete(k); collapsedLive.add(k) } else { expanded.add(k); collapsedLive.delete(k) } f((x) => x + 1) }
   const lastA = [...s.ev].reverse().find((e) => e[0] === "a")
   return (
-    <div data-session-block={k}>
+    <Collapsible open={open} onOpenChange={(v) => { if (v !== open) toggle() }} data-session-block={k}>
       <div className="group/sess flex min-h-9 items-center gap-2">
         <span className="flex size-5 shrink-0 items-center justify-center"><SquareTerminalIcon className="size-4 text-muted-foreground" strokeWidth={1.5} /></span>
-        <button type="button" onClick={toggle} className="flex min-w-0 flex-1 items-center gap-2.5 text-left" aria-expanded={open}>
+        <button type="button" onClick={toggle} className="group/toggle flex min-w-0 flex-1 items-center gap-2.5 text-left" aria-expanded={open}>
           <span className="shrink-0 type-callout font-medium">{t("core:session.no", { n: s.n })}</span>
           <Status s={s.st} sess />
           <span className="min-w-0 truncate type-footnote text-muted-foreground">{open ? `${st.devices.find((d) => d.id === s.device)?.name ?? "Hub"} · ${s.h} · ${s.m} · ${s.dur}${s.ctx ? t("core:session.context", { pct: s.ctx }) : ""}` : lastA ? plainLine(String(lastA[1])) : s.starting ? t("core:transcript.startingShort") : s.st === "run" ? t("core:runBar.run") : ""}</span>
-          <span className="ml-auto shrink-0 type-footnote text-muted-foreground">{t(open ? "core:session.collapse" : "core:session.expand")}</span>
+          <span className="ml-auto shrink-0 type-footnote text-muted-foreground group-hover/toggle:text-foreground">{t(open ? "core:session.collapse" : "core:session.expand")}</span>
         </button>
         <Tooltip><TooltipTrigger render={<Button variant="ghost" size="icon-xs" onClick={() => go("#/sessions/" + k)} data-enter-session={k} aria-label={t("core:session.enter")} className="text-muted-foreground" />}><ArrowUpRightIcon /></TooltipTrigger><TooltipContent>{t("core:session.enter")}</TooltipContent></Tooltip>
       </div>
-      {open && <div className="mb-2 ml-[9px] mt-1 border-l pl-[19px]"><Transcript k={k} compact={!live} tail={4} skip={skip?.length ? skip : undefined} /></div>}
-    </div>
+      <CollapsibleContent className="h-(--collapsible-panel-height) overflow-hidden transition-[height] duration-260 ease-(--ease-out) data-ending-style:h-0 data-starting-style:h-0">
+        <div className="mb-2 ml-2.5 mt-1 border-l pl-4.5"><Transcript k={k} compact={!live} tail={4} skip={skip?.length ? skip : undefined} /></div>
+      </CollapsibleContent>
+    </Collapsible>
   )
 }
 
@@ -1017,7 +1036,7 @@ export function ReplyBlock({ r }: { r: Reply }) {
   /* counted as the work block counts them: commands, files changed */
   const stats = open ? [] : workStats(s.ev.slice(r.from, r.to))
   return (
-    <div className="mb-1.5 ml-[9px] border-l pl-[19px]" data-reply={r.s}>
+    <div className="mb-1.5 ml-2.5 border-l pl-4.5" data-reply={r.s}>
       <div className="flex min-h-7 min-w-0 items-center gap-1.5 type-footnote text-muted-foreground">
         <BotAvatar k={who} size={16} /><span className="shrink-0 font-medium text-foreground/80">{botName(who)}</span>
         <span className="shrink-0">{t("core:session.replyNo", { n: s.n })}</span>
@@ -1026,8 +1045,12 @@ export function ReplyBlock({ r }: { r: Reply }) {
         <button type="button" onClick={() => setOpen(!open)} aria-expanded={open} className="ml-auto shrink-0 hover:text-foreground" data-reply-toggle>{t(open ? "core:session.collapseWork" : "core:session.expandWork")}</button>
         <Tooltip><TooltipTrigger render={<Button variant="ghost" size="icon-xs" onClick={() => go("#/sessions/" + r.s)} aria-label={t("core:session.enter")} className="text-muted-foreground" />}><ArrowUpRightIcon /></TooltipTrigger><TooltipContent>{t("core:session.enter")}</TooltipContent></Tooltip>
       </div>
-      {open ? <div className="pb-2 pt-1"><Transcript k={r.s} compact={!r.live} range={[r.from, r.to]} /></div>
-        : r.text ? <div className="line-clamp-6 whitespace-pre-wrap break-words pb-1 type-body text-foreground" data-reply-text><Markdown text={r.text} /></div> : null}
+      <Collapsible open={open} onOpenChange={setOpen}>
+        <CollapsibleContent className="h-(--collapsible-panel-height) overflow-hidden transition-[height] duration-260 ease-(--ease-out) data-ending-style:h-0 data-starting-style:h-0">
+          <div className="pb-2 pt-1"><Transcript k={r.s} compact={!r.live} range={[r.from, r.to]} /></div>
+        </CollapsibleContent>
+      </Collapsible>
+      {!open && r.text ? <div className="line-clamp-6 whitespace-pre-wrap break-words pb-1 type-body text-foreground animate-[steve-fade_180ms_var(--ease-out)_both]" data-reply-text><Markdown text={r.text} /></div> : null}
     </div>
   )
 }
@@ -1041,7 +1064,7 @@ export function DecisionCard({ i, w = i.wait!, showItem = true }: { i: Item; w?:
   const busy = localBusy || st.pendingActions.has("decision:" + w.decision)
   const act = async (c: string, t?: string) => { if (busy) return; setBusy(true); try { await decide(i.id, c, t, w.decision) } finally { setBusy(false) } }
   const head = (title: ReactNode) => (
-    <CardHeader className="flex min-w-0 flex-col gap-2 pt-3.5 pb-3">
+    <CardHeader className="flex min-w-0 flex-col gap-2 pt-4 pb-3">
       <div className="flex w-full min-w-0 flex-wrap items-center justify-between gap-x-3 gap-y-1">
       <CardDescription className="flex min-w-0 max-w-full items-center gap-2 type-footnote">
         <StatusDot s={w.type === "propose" ? "prop" : w.type === "fail" ? "fail" : "wait"} /><span className="shrink-0 whitespace-nowrap font-medium text-foreground/80">{w.subject === "tool_call" ? t("core:wait.tool") : w.subject === "release" ? t("core:wait.release") : WT[w.type]}</span>
@@ -1068,10 +1091,10 @@ export function DecisionCard({ i, w = i.wait!, showItem = true }: { i: Item; w?:
       </div>
       {title && <CardTitle className="col-span-full min-w-0 break-words type-headline">{title}</CardTitle>}
       <YoloBadge decision={w.decision} subject={w.subject} />
-      {w.busy && <div role="status" className="col-span-full flex items-center gap-1.5 type-footnote text-muted-foreground" data-agent-busy><span className="size-1.5 shrink-0 animate-pulse rounded-full bg-blue" aria-hidden />{t("core:card.agentBusy")}</div>}
+      {w.busy && <div role="status" className="col-span-full flex items-center gap-1.5 type-footnote text-muted-foreground" data-agent-busy><StatusDot s="run" className="size-1.5" />{t("core:card.agentBusy")}</div>}
     </CardHeader>
   )
-  const foot = (c: ReactNode) => <CardFooter className="flex-wrap justify-end gap-2 border-t bg-muted/20 px-4 py-2.5!">{c}</CardFooter>
+  const foot = (c: ReactNode) => <CardFooter className="flex-wrap justify-end gap-2 bg-muted/50 px-4 py-3! dark:bg-muted/40">{c}</CardFooter>
   const draft = <>{w.subject === "chan_message" && (w.type === "approve" || w.type === "fail") && <OutContext id={w.subjectId} />}
     {w.draft ? <div className="max-h-72 overflow-auto break-words type-body text-muted-foreground"><Markdown text={w.draft} /></div> : null}</>
   let body: ReactNode = null
@@ -1129,23 +1152,23 @@ export function DecisionCard({ i, w = i.wait!, showItem = true }: { i: Item; w?:
       <QuestionnaireItem name="answer" required={!typed} className={cn("gap-3 px-(--card-spacing) pb-4", w.busy ? "mt-2" : "-mt-2")}>
         <QuestionnaireTitle className="mb-1! break-words type-headline">{w.q}</QuestionnaireTitle>
         {!free && !!w.opts?.length && <QuestionnaireChoices className="-mx-2 gap-0.5">
-          {w.opts.map((o) => <QuestionnaireChoice key={o} value={o} className="min-h-10 rounded-lg border-transparent px-2 py-2.5 hover:bg-accent data-checked:border-transparent data-checked:bg-blue/5">{o}</QuestionnaireChoice>)}
+          {w.opts.map((o) => <QuestionnaireChoice key={o} value={o} className="min-h-10 rounded-lg border-transparent px-2 py-2.5 hover:bg-accent data-checked:border-transparent data-checked:bg-blue/8">{o}</QuestionnaireChoice>)}
         </QuestionnaireChoices>}
         {typed && <Textarea autoFocus className="min-h-16 rounded-lg" placeholder={t("core:card.answerPlaceholder")} value={txt} onChange={(e) => setTxt(e.target.value)} data-free-answer />}
       </QuestionnaireItem>
-      <QuestionnaireActions className="flex justify-end gap-2 border-t px-3 py-2.5">{!!w.opts?.length && <Button type="button" variant="ghost" className="mr-auto text-muted-foreground" onClick={() => setFree(!free)}>{t(free ? "core:card.fromOptions" : "core:card.ownAnswer")}</Button>}{typed
+      <QuestionnaireActions className="flex justify-end gap-2 bg-muted/50 px-4 py-3 dark:bg-muted/40">{!!w.opts?.length && <Button type="button" variant="ghost" className="mr-auto text-muted-foreground" onClick={() => setFree(!free)}>{t(free ? "core:card.fromOptions" : "core:card.ownAnswer")}</Button>}{typed
         ? <Button type="button" data-answer disabled={busy || !txt.trim()} onClick={() => void act("answer", txt.trim())}>{t("core:card.answer")}</Button>
         : <QuestionnaireSubmit data-answer disabled={busy}>{t("core:card.answer")}</QuestionnaireSubmit>}</QuestionnaireActions>
     </Questionnaire>
   </> }
-  return <Card size="sm" className="gap-0 py-0" data-decision={w.type} data-decision-wrap={i.id || w.decision} aria-busy={busy}>{busy && <div role="status" className="px-4 py-2 type-footnote text-muted-foreground">{t("core:card.submitting")}</div>}{body}</Card>
+  return <Card size="sm" className="gap-0 py-0 shadow-[var(--lift)] anim-in" data-decision={w.type} data-decision-wrap={i.id || w.decision} aria-busy={busy}>{busy && <div role="status" className="px-4 py-2 type-footnote text-muted-foreground">{t("core:card.submitting")}</div>}{body}</Card>
 }
 
 export function ItemRef({ id }: { id: string }) {
   const i = st.items.find((x) => x.id === id)
   if (!i) return null
   return (
-    <UIItem variant="outline" size="sm" render={<button type="button" onClick={() => go("#/items/" + id)} />} data-item-ref={id} className="mt-3 w-full max-w-[460px] rounded-xl bg-card text-left hover:bg-accent anim-in">
+    <UIItem variant="outline" size="sm" render={<button type="button" onClick={() => go("#/items/" + id)} />} data-item-ref={id} className="mt-3 w-full max-w-md rounded-xl border-transparent bg-card text-left shadow-[var(--lift)] hover:bg-card hover:shadow-[var(--lift-hover)] anim-in">
       <ItemMedia variant="icon" className="rounded-lg bg-muted text-muted-foreground"><ListTodoIcon className="size-4" strokeWidth={1.5} /></ItemMedia>
       <ItemContent className="min-w-0 gap-0.5">
         <ItemTitle className="w-full min-w-0 type-body"><span className="min-w-0 truncate">{i.t}</span></ItemTitle>

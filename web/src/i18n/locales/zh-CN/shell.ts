@@ -782,6 +782,7 @@ export default {
   },
   /* item-outputs.tsx: an item's 产出 tab */
   outs: {
+    toBot: "交给 Bot 修改",
     drafts_other: "{{count}} 条草稿",
     notes_other: "{{count}} 条批注",
     record: "过程记录",

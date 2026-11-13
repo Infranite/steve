@@ -815,6 +815,7 @@ export default {
     drafting: "Steve is drafting…",
   },
   outs: {
+    toBot: "Ask the bot to revise",
     drafts_one: "{{count}} draft",
     drafts_other: "{{count}} drafts",
     notes_one: "{{count}} note",

@@ -37,11 +37,11 @@ export function QueueStrip({ sid, rows, note, composer, prefix = "", starting, c
   const strip = (s: string) => (prefix && s.startsWith(prefix) ? s.slice(prefix.length) : s)
   const brief = !!starting && rows.every((q) => q.via === "steve")
   return (
-    <div role="region" aria-label={t("shell:queue.region")} className={"mb-2 rounded-xl border border-dashed " + (className ?? "")} data-sq>
-      <div className="flex items-center gap-2 px-3.5 pt-2 pb-1 type-footnote text-muted-foreground" data-sq-note>
+    <div role="region" aria-label={t("shell:queue.region")} className={"mb-2 rounded-xl bg-muted/60 anim-in " + (className ?? "")} data-sq>
+      <div className="flex items-center gap-2 px-4 pt-2.5 pb-1 type-footnote text-muted-foreground" data-sq-note>
         <ClockIcon className="size-3.5 shrink-0" aria-hidden /><span>{brief ? t("shell:queue.briefWaiting") : t("shell:queue.queuedN", { count: rows.length, note })}</span>
       </div>
-      <ul className="flex flex-col">
+      <ul className="flex flex-col divide-y divide-foreground/6 pb-0.5">
         {rows.map((q) => <Row key={q.id} q={q} shown={strip(q.text)} ops={starting && q.via === "steve" ? "none" : {
           edit: (text) => qEdit(sid, q.id, (q.text.startsWith(prefix) ? prefix : "") + text),
           withdraw: () => qWithdraw(sid, q.id, composer?.current, strip),
@@ -58,11 +58,11 @@ export function ChatQueue({ composer }: { composer?: { current: ComposerHandle |
   if (!rows.length) return null
   const note = st.hold ? t("shell:queue.afterRelease") : chatBusy() && (st.thinking || st.live) ? t("shell:queue.afterTurnInOrder") : t("shell:queue.now")
   return (
-    <div role="region" aria-label={t("shell:queue.region")} className="mb-2 rounded-xl border border-dashed" data-sq data-chat-queue>
-      <div className="flex items-center gap-2 px-3.5 pt-2 pb-1 type-footnote text-muted-foreground" data-sq-note>
+    <div role="region" aria-label={t("shell:queue.region")} className="mb-2 rounded-xl bg-muted/60 anim-in" data-sq data-chat-queue>
+      <div className="flex items-center gap-2 px-4 pt-2.5 pb-1 type-footnote text-muted-foreground" data-sq-note>
         <ClockIcon className="size-3.5 shrink-0" aria-hidden /><span>{t("shell:queue.queuedN", { count: rows.length, note })}</span>
       </div>
-      <ul className="flex flex-col">
+      <ul className="flex flex-col divide-y divide-foreground/6 pb-0.5">
         {rows.map((m) => <Row key={m.id ?? m.clientId} q={{ id: m.id ?? "", text: m.t ?? "", files: m.files, via: "me" }} shown={m.t ?? ""} ops={m.id ? {
           edit: (text) => threadQueuedEdit(m.id!, text),
           withdraw: () => threadQueuedWithdraw(m.id!, composer?.current),
@@ -93,7 +93,7 @@ type QEdit = ReturnType<typeof useQueuedEdit>
 
 function EditBox({ e }: { e: QEdit }) {
   const t = useT()
-  return <Textarea autoFocus value={e.edit ?? ""} onChange={(x) => e.setEdit(x.target.value)} aria-label={t("shell:queue.editLabel")} className="min-h-14 bg-card text-[14px]" data-queued-input
+  return <Textarea autoFocus value={e.edit ?? ""} onChange={(x) => e.setEdit(x.target.value)} aria-label={t("shell:queue.editLabel")} className="min-h-14 bg-card type-body" data-queued-input
     onKeyDown={(x) => { if (x.key === "Escape") { x.preventDefault(); e.setEdit(null) } if (x.key === "Enter" && (x.metaKey || x.ctrlKey)) { x.preventDefault(); void e.save() } }} />
 }
 
@@ -114,11 +114,11 @@ function Actions({ e, shown, ops, via, className }: { e: QEdit; shown: string; o
 function Row({ q, shown, ops }: { q: QRow; shown: string; ops: QOps }) {
   const e = useQueuedEdit(shown, ops), t = useT()
   return (
-    <li className="flex flex-col gap-1 border-t border-dashed px-3.5 py-2 sm:flex-row sm:items-start sm:gap-3" data-queued={q.id}>
+    <li className="flex flex-col gap-1 px-4 py-2 anim-in sm:flex-row sm:items-start sm:gap-3" data-queued={q.id}>
       <div className="min-w-0 flex-1">
         {e.edit !== null ? <EditBox e={e} />
           : q.via === "steve" ? <Brief text={shown} label={t("shell:queue.steveBrief")} className="type-callout text-muted-foreground" />
-          : (shown !== "（附件）" || !q.files?.length) && <div className="line-clamp-4 break-words" data-queued-text><Markdown text={shown} className="type-callout" /></div>}
+          : (shown !== "（附件）" || !q.files?.length) && <div className="line-clamp-4 break-words text-foreground" data-queued-text><Markdown text={shown} className="type-callout" /></div>}
         <Files files={q.files} className="mt-1.5" />
       </div>
       {!ops && <div className="flex shrink-0 items-center gap-1.5 py-1 type-footnote text-muted-foreground" data-queued-sending><Spinner className="size-3" />{t("shell:queue.submitting")}</div>}

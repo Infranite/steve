@@ -2,7 +2,7 @@
 export default {
   debug: {
     open: "Debug", title: "{{item}} · Debug", description: "Inspect blockers and execution evidence. New items capture decision details for their first 30 minutes.",
-    current: "Current state", refresh: "Refresh", loading: "Loading…",
+    current: "Current state", stateUnavailable: "The current state can't be read right now.", refresh: "Refresh", loading: "Loading…",
     itemState: "Item state: {{status}}", revision: "Cycle {{cycle}} · Goal revision {{revision}}", observed: "Observed at {{time}}",
     blockers: "Current blockers", noState: "No blocker snapshot is available yet. Refresh before drawing a conclusion.", noBlocker: "This snapshot reports no lifecycle blockers. Check the execution events as well.",
     dependencies: "Waiting for: {{items}}", resumeMode: "When prerequisites finish: {{mode}} · Policy source: {{source}}",

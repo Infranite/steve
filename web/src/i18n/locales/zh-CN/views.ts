@@ -2,7 +2,7 @@
 export default {
   debug: {
     open: "调试", title: "{{item}} · 调试", description: "查看当前阻塞与执行证据，新事项默认记录创建后 30 分钟的判断细节。",
-    current: "当前状态", refresh: "刷新", loading: "正在读取…",
+    current: "当前状态", stateUnavailable: "暂时读不到当前状态。", refresh: "刷新", loading: "正在读取…",
     itemState: "事项状态：{{status}}", revision: "周期 {{cycle}} · 目标版本 {{revision}}", observed: "采样于 {{time}}",
     blockers: "当前阻塞", noState: "尚未取得阻塞快照，请刷新后再判断。", noBlocker: "此快照未报告生命周期阻塞；请结合执行事件判断。",
     dependencies: "等待前置：{{items}}", resumeMode: "前置完成后：{{mode}} · 策略来源：{{source}}",

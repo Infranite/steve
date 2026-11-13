@@ -9,7 +9,7 @@ export function A2uiActionNote({ a }: { a: A2uiRecord }) {
   const fields = Object.entries(a.context ?? {}).filter(([, v]) => v !== undefined && v !== null && v !== "").slice(0, 6)
   return (
     <div className="flex max-w-[80%] flex-col items-end gap-1 self-end anim-in" data-me-msg data-a2ui-action={a.name}>
-      <div className="flex min-w-0 max-w-full items-center gap-1.5 rounded-[20px] bg-muted px-4 py-2 type-callout">
+      <div className="flex min-w-0 max-w-full items-center gap-1.5 rounded-2xl bg-muted px-4 py-2.5 type-callout">
         <MousePointerClickIcon className="size-3.5 shrink-0 text-muted-foreground" aria-hidden />
         <span className="min-w-0 truncate">{t("misc:a2ui.submittedNote", { label: a.label || a.name })}</span>
       </div>

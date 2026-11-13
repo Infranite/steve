@@ -29,6 +29,10 @@ try {
     await input.fill("对话样式验收草稿")
     await page.reload()
     assert.equal(await input.inputValue(), "对话样式验收草稿")
+    // The typed text is drawn by the mark layer behind the textarea: focused, the textarea stays see-through in either theme.
+    await input.focus()
+    await page.waitForTimeout(250)
+    assert.equal(await input.evaluate((el) => document.activeElement === el && getComputedStyle(el).backgroundColor), "rgba(0, 0, 0, 0)", `focused composer covers its text (${theme})`)
     await input.fill("/")
     await page.locator('[data-ref-menu="/"]').waitFor()
     await input.press("Escape")

@@ -18,11 +18,11 @@ export type OutOpen = { o: Out; focus?: string }
 function OutRowV({ x, anns, open, n }: { x: OutV<Out>; anns: RAnnotation[]; open: (o: Out) => void; n: string }) {
   const o = x.o, mine = anns.filter((a) => a.artifact_id === o[3]), drafts = mine.filter((a) => a.status !== "sent").length, t = useT()
   return (
-    <Row title={<span className="break-words font-mono text-[13px]">{o[1]}</span>} sub={o[2] ?? undefined} onClick={() => open(o)} data-out={n} data-out-id={o[3]}>
+    <Row title={<span className="break-words type-callout font-mono">{o[1]}</span>} sub={o[2] ?? undefined} onClick={() => open(o)} data-out={n} data-out-id={o[3]}>
       <span className="flex shrink-0 items-center gap-1.5 type-footnote text-muted-foreground">
-        {drafts > 0 && <span className="rounded-full bg-attention/12 px-1.5 text-attention" data-out-drafts>{t("shell:outs.drafts", { count: drafts })}</span>}
+        {drafts > 0 && <span className="rounded-full bg-attention/12 px-2 font-medium text-attention" data-out-drafts>{t("shell:outs.drafts", { count: drafts })}</span>}
         {mine.length - drafts > 0 && <span data-out-sent>{t("shell:outs.notes", { count: mine.length - drafts })}</span>}
-        {x.record ? <span className="rounded bg-muted px-1.5">{t("shell:outs.record")}</span> : x.old ? <span className="rounded bg-muted px-1.5">{x.v < x.vs ? t("shell:outs.oldVersion") : t("shell:outs.earlier")}</span> : null}
+        {x.record ? <span className="rounded-md bg-muted px-1.5">{t("shell:outs.record")}</span> : x.old ? <span className="rounded-md bg-muted px-1.5">{x.v < x.vs ? t("shell:outs.oldVersion") : t("shell:outs.earlier")}</span> : null}
         {x.vs > 1 && <span className="tabular-nums" data-out-ver>v{x.v}</span>}
         <span>{o[0]}</span>
       </span>
@@ -41,11 +41,11 @@ export function OutList({ outs, anns, open }: { outs: Out[]; anns: RAnnotation[]
         : <div className="py-6 text-center type-callout text-muted-foreground" data-outs-none>{t("shell:outs.noFinal")}</div>}
       {count > 0 && <Collapsible defaultOpen={!g.final.length} data-out-records>
         <CollapsibleTrigger className="group/rec flex items-center gap-1.5 type-footnote text-muted-foreground hover:text-foreground" data-out-records-toggle>
-          <ChevronRightIcon className="size-3.5 transition-transform group-data-[panel-open]/rec:rotate-90" /><HistoryIcon className="size-3.5" />{t("shell:outs.records", { count })}<span className="text-tertiary">{t("shell:outs.recordsHint")}</span>
+          <ChevronRightIcon className="size-3.5 transition-transform duration-180 ease-(--ease-out) group-data-[panel-open]/rec:rotate-90" /><HistoryIcon className="size-3.5" />{t("shell:outs.records", { count })}<span className="text-tertiary">{t("shell:outs.recordsHint")}</span>
         </CollapsibleTrigger>
         <CollapsibleContent className="mt-2 flex flex-col gap-3 pl-5">
           {g.records.map((r) => <div key={r.delivery} data-out-delivery={r.delivery}>
-            <div className="type-footnote text-muted-foreground">{t("shell:outs.delivery", { n: r.delivery })}{r.at ? ` · ${tm(r.at)}` : ""}</div>
+            <div className="type-label text-tertiary">{t("shell:outs.delivery", { n: r.delivery })}{r.at ? ` · ${tm(r.at)}` : ""}</div>
             <Group>{r.outs.map((x) => <OutRowV key={x.o[3]} x={x} anns={anns} open={open} n={`r${r.delivery}-${x.o[3]}`} />)}</Group>
           </div>)}
         </CollapsibleContent>
@@ -64,10 +64,11 @@ export function OutDialog({ item, outs, anns, view, setView, onReview, reviewLab
   const siblings = group.map((y) => y.o).filter(isImageOut)
   return (
     <Dialog open={!!view} onOpenChange={(o) => !o && setView(null)}>
-      <DialogContent className="flex max-h-[92dvh] flex-col gap-3 rounded-2xl max-sm:max-w-[calc(100%-1rem)] max-sm:p-4 sm:max-w-[960px]" data-preview>
-        <DialogHeader><DialogTitle className="type-headline break-words pr-6">{view?.o[1]}</DialogTitle>
-          <DialogDescription className="type-callout">{view?.o[0]} · {t("shell:outs.from", { item })}{x && x.vs > 1 && <span className={cn(x.v < x.vs && "text-attention")} data-preview-ver> · {x.v < x.vs ? t("shell:outs.versionOfOld", { v: x.v, count: x.vs }) : t("shell:outs.versionOf", { v: x.v, count: x.vs })}</span>}{x?.record && " · " + t("shell:outs.record")}</DialogDescription>
-          {onReview && <Button size="sm" variant="outline" className="self-start" onClick={onReview} data-output-review>{reviewLabel ?? t("views:item.messageBot")}</Button>}</DialogHeader>
+      <DialogContent className="flex max-h-[92dvh] flex-col gap-4 rounded-2xl max-sm:max-w-[calc(100%-1rem)] max-sm:p-4 sm:max-w-240" data-preview>
+        {/* the action sits at the header's end, beside the close button: an action, not a caption */}
+        <DialogHeader className="gap-3 sm:flex-row sm:items-start sm:pr-10"><div className="flex min-w-0 flex-1 flex-col gap-1"><DialogTitle className="type-title break-words max-sm:pr-6">{view?.o[1]}</DialogTitle>
+          <DialogDescription className="type-callout text-muted-foreground">{view?.o[0]} · {t("shell:outs.from", { item })}{x && x.vs > 1 && <span className={cn(x.v < x.vs && "text-attention")} data-preview-ver> · {x.v < x.vs ? t("shell:outs.versionOfOld", { v: x.v, count: x.vs }) : t("shell:outs.versionOf", { v: x.v, count: x.vs })}</span>}{x?.record && " · " + t("shell:outs.record")}</DialogDescription></div>
+          {onReview && <Button size="sm" className="shrink-0 self-start" onClick={onReview} title={reviewLabel ?? t("views:item.messageBot")} data-output-review>{!reviewLabel || reviewLabel === t("views:item.messageBot") ? t("shell:outs.toBot") : reviewLabel}</Button>}</DialogHeader>
         {view && <OutPreview key={view.o[3]} o={view.o} item={item} anns={anns} focus={view.focus} siblings={siblings} outs={outs} onOpen={(o, focus) => setView({ o, focus })} />}
       </DialogContent>
     </Dialog>
