@@ -30,7 +30,7 @@ const SPAN: Record<AgentStatus, RunSpanStatus> = {
 }
 
 /** how long a call or an agent took: tenths of a second while it is short */
-const took = (ms: number) => ms < 10_000 ? t0("common:dur.seconds", { count: Math.round(ms / 100) / 10 }) : longDur(ms)
+const took = (ms: number) => ms < 50 ? "<" + t0("common:dur.seconds", { count: 0.1 }) : ms < 10_000 ? t0("common:dur.seconds", { count: Math.round(ms / 100) / 10 }) : longDur(ms)
 
 /** the sessions an agent of the tree worked in: its item's, else the one it names */
 function sessionsOf(n: AgentNode): string[] {
@@ -75,11 +75,12 @@ function startOf(at: AgentTreeState, root: AgentNode): number {
   return xs.length ? Math.min(...xs) : Date.now()
 }
 
-/** an output as a thing handed on: a file, a result (a decision when it says so), a record as a note */
+/** an output as a thing handed on: a record as a note, a file (by its kind or a path), a result as a fact (a
+ * decision when its kind says so); the Bot names the kind freely, so anything else is a note */
 function kindOf(o: NonNullable<WorkflowUnit["outputs"]>[number]): HandoffItemKind {
-  if (/file|文件|code|代码|diff|patch|doc|文档|image|图片|screenshot|截图|pdf/i.test(o.kind) || (o.location && /[/\\.]/.test(o.location) && !/^https?:/.test(o.location))) return "file"
   if (o.role === "record") return "note"
-  if (o.role === "result") return /decision|决定|决策|plan|方案/i.test(o.kind + o.title) ? "decision" : "fact"
+  if (/file|code|diff|patch|doc|image|screenshot|pdf/i.test(o.kind) || (o.location && !/^https?:/.test(o.location))) return "file"
+  if (o.role === "result") return /decision/i.test(o.kind) ? "decision" : "fact"
   return "note"
 }
 

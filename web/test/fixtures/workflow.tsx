@@ -32,7 +32,8 @@ const initial: Workflow = {
 function Fixture() {
   const query = new URLSearchParams(location.search)
   const [workflow, setWorkflow] = useState<Workflow>({ ...initial, current_cycle: query.has("prior") ? false : undefined,
-    units: [...initial.units, ...(query.has("many") ? ["a", "b", "c", "d", "e"].map((x) => unit(`extra-${x}`, `补充工作 ${x}`, "work", "pending")) : [])].map((u) => query.has("rework") && u.id === "web" ? { ...u, status: "failed" } : query.has("reworkActive") && u.id === "review" ? { ...u, status: "running" } : u),
+    units: [...initial.units, ...(query.has("many") ? ["a", "b", "c", "d", "e"].map((x) => unit(`extra-${x}`, `补充工作 ${x}`, "work", "pending")) : []),
+      ...(query.has("done") ? ["a", "b", "c", "d"].map((x) => unit(`done-${x}`, `已完成工作 ${x}`, "work", "succeeded")) : [])].map((u) => query.has("rework") && u.id === "web" ? { ...u, status: "failed" } : query.has("reworkActive") && u.id === "review" ? { ...u, status: "running" } : u),
     history_attempts: query.has("archive") ? [{ item_id: "ST-old", unit_id: "api", created: 1, snapshot: { title: "旧接口尝试", status: "cancelled", attempt: 1, session_id: "old-session", reason: "已被返工替代" } }] : [],
     history_attempts_total: query.has("archive") ? 2 : 0 })
   const [wait, setWait] = useState<DependencyWait>({
@@ -86,7 +87,8 @@ function Fixture() {
   return <TreeFixture workflow={workflow} fork={query.has("fork")} />
 }
 
-/* the item page's collaboration area: a coordinator, its units (with their child items), a fork and figures */
+/* the item page's collaboration area: a coordinator, its units (with their child items), a fork and figures; the
+ * full view's call tree and handoffs read the same */
 function TreeFixture({ workflow, fork }: { workflow: Workflow; fork: boolean }) {
   const child = (id: string, t: string, unit: string, st: Item["st"]) => ({ id, t, st, b: workflow.units.find((u) => u.id === unit)!.bot_id, src: ["Steve", "workflow"], parent: { item: "ST-60" }, waits: unit === "web" ? [{}] : [], ss: [] })
   st.items = [

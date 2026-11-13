@@ -397,7 +397,7 @@ const css = /* css */ `
 .ui-pac[data-steps] .ui-pac__row > .ui-pac__act { pointer-events: auto; }
 .ui-pac__row[data-clickable] { cursor: pointer; }
 .ui-pac__row[data-clickable]:hover { box-shadow: var(--aui-shadow-card-hover, var(--ui-pac-shadow)); }
-.ui-pac__row[data-selected] { box-shadow: var(--ui-pac-shadow), 0 0 0 1.5px var(--ui-pac-focus); }
+.ui-pac__row[data-selected], .ui-pac__row[data-selected]:hover { box-shadow: var(--ui-pac-shadow), 0 0 0 1.5px var(--ui-pac-focus); }
 .ui-pac__fig { font-size: 12px; line-height: 18px; color: var(--ui-pac-ink); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .ui-pac[data-steps] .ui-pac__meta:empty::before, .ui-pac__fig:empty::before { content: "\\200b"; }
 .ui-pac__act { display: flex; justify-content: flex-end; align-items: center; min-width: 0; }
@@ -423,6 +423,11 @@ const css = /* css */ `
   .ui-pac[data-steps] .ui-pac__row { grid-template-columns: 28px minmax(0, 1fr) minmax(56px, auto); grid-template-areas: "icon who end" "lane lane act"; row-gap: 8px; column-gap: 10px; padding: 10px 12px; }
   .ui-pac[data-steps] .ui-pac__row:has(.ui-pac__act:empty) { grid-template-areas: "icon who end" "lane lane lane"; }
   .ui-pac[data-steps] .ui-pac__line { display: block; min-height: 0; white-space: nowrap; }
+  /* who ran the step stays: on its own line under the step's name */
+  .ui-pac[data-steps] .ui-pac__name { flex-wrap: wrap; row-gap: 0; }
+  .ui-pac[data-steps] .ui-pac__name-text { flex: 1 1 100%; }
+  .ui-pac[data-steps] .ui-pac__approach { display: block; flex: 1 1 100%; font-size: 12px; line-height: 16px; white-space: nowrap; }
+  .ui-pac[data-steps] .ui-pac__approach::before { content: none; }
   .ui-pac__act { grid-area: act; }
   .ui-pac__act:empty { display: none; }
 }

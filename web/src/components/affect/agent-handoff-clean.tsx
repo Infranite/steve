@@ -941,7 +941,10 @@ const css = /* css */ `
 .ui-ahc__col-face { display: grid; flex: none; place-items: center; width: 16px; height: 16px; border-radius: 4px; background: var(--ui-ahc-card); box-shadow: var(--ui-ahc-shadow); font-size: 9px; color: var(--ui-ahc-ink); }
 .ui-ahc__col-name { min-width: 1.6em; max-width: 45%; overflow: hidden; text-overflow: ellipsis; }
 .ui-ahc[data-inbound] .ui-ahc__col-name { max-width: none; }
-.ui-ahc[data-inbound] .ui-ahc__col { height: 360px; }
+.ui-ahc[data-inbound] .ui-ahc__col { height: 360px; overflow-y: auto; scrollbar-width: none; }
+@container ui-ahc (max-width: 620px) {
+  .ui-ahc[data-inbound] .ui-ahc__col { height: auto; -webkit-mask-image: none; mask-image: none; }
+}
 .ui-ahc__now-idle[data-state] { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .ui-ahc__now-idle[data-state="done"] { color: var(--ui-ahc-board-green); }
 .ui-ahc__now-idle[data-state="warning"] { color: var(--ui-ahc-red); }

@@ -177,35 +177,6 @@ export function WorkflowButtons({ at }: { at: AgentTreeState }) {
   </div>
 }
 
-/** current failures (with retry) and cards waiting for you under this item, as two small pills */
-export function TreePills({ at, onSelect }: { at: AgentTreeState; onSelect: (k: string) => void }) {
-  const t = useT(), { summary, workflow } = at
-  if (!summary) return null
-  const canAct = !!workflow && !at.single
-  return <>
-    {summary.failed.length > 0 && <Popover>
-      <PopoverTrigger render={<button type="button" className="inline-flex h-6 items-center gap-1 rounded-md bg-destructive/10 px-2 type-label text-destructive hover:bg-destructive/14" data-agent-failed />}>
-        {t("views:agentTree.failed", { count: summary.failed.length })}<ChevronDownIcon className="size-3" /></PopoverTrigger>
-      <PopoverContent align="end" className="w-80 gap-3 rounded-xl p-3" data-agent-failed-list>
-        {summary.failed.map((n) => <div key={n.key} className="flex flex-col gap-1.5">
-          <div className="flex items-start gap-2 type-callout"><TriangleAlertIcon className="mt-0.5 size-4 shrink-0 text-destructive" /><div className="min-w-0"><div className="break-words font-medium">{n.title}</div>{n.reason && <div className="mt-0.5 break-words type-footnote text-muted-foreground">{n.reason}</div>}</div></div>
-          <div className="flex justify-end gap-2">
-            <Button size="sm" variant="ghost" onClick={() => onSelect(n.key)}>{t("views:agentTree.details")}</Button>
-            {canAct && n.unit && <Button size="sm" disabled={at.busy || at.unavailable || at.old || n.unit.attempt >= workflow!.max_attempts} onClick={() => void at.change("retry", n.unit!.id)} data-workflow-retry={n.unit.id}><RotateCcwIcon />{t("views:workflow.retry")}</Button>}
-          </div>
-        </div>)}
-      </PopoverContent>
-    </Popover>}
-    {summary.asking.length > 0 && <Popover>
-      <PopoverTrigger render={<button type="button" className="inline-flex h-6 items-center gap-1 rounded-md bg-attention/12 px-2 type-label text-attention hover:bg-attention/14" data-workflow-decisions />}>
-        {t("views:agentTree.askingAll", { count: summary.asking.reduce((s, n) => s + n.decisions, 0) })}<ChevronDownIcon className="size-3" /></PopoverTrigger>
-      <PopoverContent align="end" className="w-72 gap-1 rounded-xl p-1.5">
-        {summary.asking.map((n) => <a key={n.key} href={`#/items/${encodeURIComponent(n.item!)}`} className="rounded-lg px-2 py-1.5 type-callout hover:bg-accent">{n.title} · {t("views:workflow.handleDecision")}</a>)}
-      </PopoverContent>
-    </Popover>}
-  </>
-}
-
 /** the collaboration with the work graph's own controls, notices and change history (a page without its own "now"
  * card shows them here) */
 export function AgentTree({ at, selected, onSelect, controls = true }: { at: AgentTreeState; selected: string | null; onSelect: (k: string | null) => void; controls?: boolean }) {
@@ -381,7 +352,7 @@ function GraphDialog({ at, onClose, onSelect }: { at: AgentTreeState; onClose: (
     </DialogContent>
   </Dialog>
   return <Sheet open onOpenChange={(o) => !o && onClose()}>
-    <SheetContent side="bottom" className="flex h-[92dvh] flex-col gap-3 overflow-hidden rounded-t-2xl p-4 pb-[max(1rem,env(safe-area-inset-bottom))]" data-agent-graph>
+    <SheetContent side="bottom" className="flex h-[92dvh] data-[side=bottom]:h-[92dvh] flex-col gap-3 overflow-hidden rounded-t-2xl p-4 pb-[max(1rem,env(safe-area-inset-bottom))]" data-agent-graph>
       <SheetTitle className="type-headline">{t("views:agentTree.graph.title")}</SheetTitle>
       {body}
     </SheetContent>
