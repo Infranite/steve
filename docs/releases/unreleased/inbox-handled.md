@@ -1,0 +1,1 @@
+The 已处理 tab of 待处理 reads back the last 7 days by day and by item: one row per item, its latest outcome on one line and how many more decisions it had, opening to each decision with its question, who made it and, while it can still be taken back, an undo. Filters separate decisions you made, the ones Steve made for you under YOLO, and the ones that lapsed on their own.
