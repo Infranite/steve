@@ -56,9 +56,17 @@ const WARN = "flex gap-2 rounded-lg bg-attention/10 px-3 py-2 type-callout text-
 /** what the transcript check found, in one sentence */
 function Check({ r, h }: { r: RResume; h: string }) {
   const tr = r.transcript, t = useT()
+  if (!tr && r.transcript_checked === false) return null
   if (!tr) return <p className={WARN} data-resume-check="missing"><CircleAlertIcon className="mt-0.5 size-4 shrink-0 text-attention" />{t("shell:resume.checkMissing", { h })}</p>
   if (!tr.matches) return <p className={WARN} data-resume-check="mismatch"><CircleAlertIcon className="mt-0.5 size-4 shrink-0 text-attention" />{tr.id && tr.id !== r.id ? t("shell:resume.checkIdMismatch", { h, id: tr.id }) : t("shell:resume.checkCwdMismatch", { h, cwd: homeTilde(tr.cwd ?? "") })}</p>
   return <p className="flex gap-1.5 type-callout text-muted-foreground" data-resume-check="ok"><CircleCheckIcon className="mt-0.5 size-4 shrink-0 text-success" />{tr.updated ? t("shell:resume.checkOkUpdated", { h, time: tm(tr.updated) }) : t("shell:resume.checkOk", { h })}</p>
+}
+
+/** the shell command template to fork a session in `harness`, with `{id}` filled in */
+const forkCmd = (harness: string, id: string | null): string | null => {
+  const tpl = st.runtimes.find((x) => x.id === harness)?.fork_command
+  const quoted = id ? (/^[\w./:@%+-][\w./=:@%+,-]*$/.test(id) ? id : `'${id.replace(/'/g, "'\\''")}'`) : ""
+  return tpl && id ? tpl.replace("{id}", () => quoted) : null
 }
 
 /** the full resume details; fetched when shown, again when the session's id or state changes */
@@ -76,6 +84,7 @@ export function ResumeCard({ k }: { k: string }) {
   const h = s.h ?? s.harness ?? "harness"
   if (err && !r) return <p className="type-footnote text-muted-foreground" data-resume="error">{t("shell:resume.loadFailed", { error: err })}</p>
   if (!r) return <p className="type-footnote text-muted-foreground" data-resume="loading">{t("shell:resume.loading")}</p>
+  const fork = r.fork_command ?? forkCmd(r.harness, r.id)
   return (
     <div className="flex flex-col gap-3" data-resume={r.id ? "ready" : "none"}>
       <div className="flex items-center gap-2"><HarnessMark harness={s.harness ?? s.h} /><span className="type-headline">{h}</span><span className="type-callout text-muted-foreground">{t("shell:resume.original")}</span></div>
@@ -86,7 +95,7 @@ export function ResumeCard({ k }: { k: string }) {
       {r.cwd && <Field label={t("shell:resume.cwdLabel")} value={r.cwd} what={t("shell:resume.what.cwd")} testId="cwd">{!r.cwd_exists && <span className="flex gap-1.5 type-callout text-foreground/80" data-resume-cwd-missing><CircleAlertIcon className="mt-0.5 size-4 shrink-0 text-attention" />{t("shell:resume.cwdMissing")}</span>}</Field>}
       {r.id && <Check r={r} h={h} />}
       {r.id && <ul className="flex list-disc flex-col gap-1 pl-4 type-footnote text-tertiary marker:text-tertiary">
-        {s.st === "run" && <li data-resume-running>{r.harness === "claude-code" ? t("shell:resume.runningFork") : t("shell:resume.running")}</li>}
+        {s.st === "run" && <li data-resume-running>{fork ? t("shell:resume.runningFork", { fork }) : t("shell:resume.running")}</li>}
         <li>{t("shell:resume.terminalNote")}</li>
       </ul>}
     </div>

@@ -119,12 +119,14 @@ export default {
   effort: {
     default: "跟随模型默认",
     none: "关闭 · none",
+    off: "关闭 · off",
     minimal: "最低 · minimal",
     low: "低 · low",
     medium: "中 · medium",
     high: "高 · high",
     xhigh: "极高 · xhigh",
     max: "最大 · max",
+    ultra: "极致 · ultra",
   },
   detail: {
     tabOverview: "概览",

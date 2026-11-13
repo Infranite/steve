@@ -54,7 +54,7 @@ export default {
   /* Settings · 模型 (models-settings.tsx) */
   models: {
     cat: { title: "模型", desc: "Steve 用哪个 harness 和模型做判断、新会话默认" },
-    effort: { none: "关闭", minimal: "最低", low: "低", medium: "中", high: "高", xhigh: "很高", max: "最高" },
+    effort: { none: "关闭", off: "关闭", minimal: "最低", low: "低", medium: "中", high: "高", xhigh: "很高", max: "最高", ultra: "极致" },
     followModel: "跟随模型默认",
     defaultModel: "默认模型",
     /* the effort after a model choice: "思考高" */
@@ -339,7 +339,7 @@ export default {
       hello: "我帮你把事情交出去、盯进度，该你决定时叫你。先花一分钟看看我在这台机器上找到了什么。",
       start: "开始",
       runtimes: "默认用 {{first}} 干活，每个 Bot 可以单独设置。",
-      noRuntime: "这台机器上还没有找到可用的 harness（Claude Code 或 Codex），先装好再交代事情。",
+      noRuntime: "这台机器上还没有找到可用的 harness，先装好再交代事情。",
       runtime: "运行环境",
       projects_other: "事情按工作空间和项目来管：现在在「{{space}}」，有 {{count}} 个项目。项目就是一个目录，事项选了项目就在那里干活。",
       project: "项目",

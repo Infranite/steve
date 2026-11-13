@@ -126,12 +126,27 @@ export const waitLine = (w: Wait) => t("core:wait.line", { kind: w.subject === "
 /* the name a harness's runtime reports (an adapter of one's own included), when the Hub listed it */
 export const runtimeName = (h: string): string | undefined => raw.state?.runtimes?.find((r) => r.id === h)?.name
 const harnessLabel = (h: string) => runtimeName(h) ?? h
-/** the harness adapter a new bot runs on unless one is chosen: the first that is ready */
-export const defaultHarness = (): string => { const rs = raw.state?.runtimes ?? []; return (rs.find((r) => r.ok) ?? rs[0])?.id ?? "" }
+/** the harness adapter a new bot runs on unless one is chosen: the workspace's main bot's if ready, else the first that is ready */
+export const defaultHarness = (): string => {
+  const rs = raw.state?.runtimes ?? []
+  const main = raw.state?.bots?.find((b) => b.main)?.harness
+  if (main && rs.some((r) => r.id === main && r.ok)) return main
+  return (rs.find((r) => r.ok) ?? rs[0])?.id ?? ""
+}
 /** Steve's permission mode (`plan`, `ask`, …) of a stored bot mode */
 const PERM_MODE: Record<string, string> = { plan: "plan", default: "ask", acceptEdits: "accept_edits", auto: "auto", bypassPermissions: "full_access" }
 /** the bot modes `harness` can be set to (all while the Hub does not know) */
-export const permModes = (harness: string): string[] => { const m = raw.state?.runtimes?.find((r) => r.id === harness)?.modes; return Object.keys(PERM).filter((k) => !m || m.includes(PERM_MODE[k])) }
+export const permModes = (harness: string): string[] => {
+  const m = raw.state?.runtimes?.find((r) => r.id === harness)?.modes
+  if (!m || !m.length) return Object.keys(PERM)
+  const xs = Object.keys(PERM).filter((k) => m.includes(PERM_MODE[k]))
+  return xs.length ? xs : ["default"]
+}
+/** a compatible permission mode for `harness`, in priority order */
+export const defaultPermMode = (harness: string): string => {
+  const ms = permModes(harness)
+  return (["default", "auto", "acceptEdits", "plan", "bypassPermissions"] as const).find((k) => ms.includes(k)) ?? ms[0] ?? "default"
+}
 /** the reasoning efforts `harness` takes, as its adapter reported them */
 export const harnessEfforts = (harness: string): string[] => raw.state?.runtimes?.find((r) => r.id === harness)?.efforts ?? []
 /** whether `harness` reads a Bot's skills, as its adapter declares (undefined: the Hub did not say) */
@@ -1097,7 +1112,12 @@ export async function saveBot(k: string, p: { n?: string; role?: string; pers?: 
   if (p.color !== undefined || p.round !== undefined || p.skin !== undefined) q.avatar = { color: p.color ?? b.color, round: p.round ?? b.round, skin: p.skin !== undefined ? p.skin : b.skin }
   await call(api.patchBot(k, q), msg)
 }
-export async function makeBot(n: string, role: string, harness = defaultHarness(), model: string | null = null) { const r = await call(api.newBot({ name: n, role, harness, model }), t("core:toast.botCreated")); return r?.id }
+export async function makeBot(n: string, role: string, harness = defaultHarness(), model: string | null = null) {
+  const q: Partial<RBot> & { name: string } = { name: n, role, model }
+  if (harness) { q.harness = harness; q.perm_mode = defaultPermMode(harness) }
+  const r = await call(api.newBot(q), t("core:toast.botCreated"))
+  return r?.id
+}
 export async function draftBot(desc: string) { const r = await call(api.draftBot(desc), t("core:toast.botDrafted")); return r?.id }
 export async function deleteBot(k: string, to: string, mem: "删除" | "导出") {
   const b = st.bots[k]; const r = await call(api.deleteBot(k, to, mem === "删除" ? "delete" : "export")); if (!r) return

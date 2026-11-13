@@ -438,3 +438,47 @@ test("the Hub remembers the owner's answer for every browser; anyone else's tour
   m.store.skipOnboarding(); await flush()
   assert.deepEqual(calls, ["skip"]); assert.equal(m.store.st.onboard, -1); assert.equal(theirs.kept.get("steve-onboarded"), "1")
 })
+
+test("defaultHarness, permModes, defaultPermMode and makeBot adapt across heterogeneous runtimes", async () => {
+  const h = harness(), s = h.store, created = []
+  h.api.newBot = async (p) => { created.push(p); return { id: "bot-2" } }
+  h.state.runtimes = [
+    { id: "claude-code", name: "Claude Code", ok: false, modes: ["plan", "ask", "accept_edits", "auto", "full_access"] },
+    { id: "cursor", name: "Cursor", ok: true, modes: ["plan", "ask"] },
+    { id: "opencode", name: "OpenCode", ok: true, modes: ["plan", "auto"] },
+    { id: "custom-empty", name: "Custom Empty", ok: true, modes: [] },
+    { id: "custom-exotic", name: "Custom Exotic", ok: true, modes: ["weird_mode"] },
+  ]
+  h.state.bots = [{ id: "main", name: "Steve", role: "main", main: true, harness: "opencode", perm_mode: "auto", accept_mode: "inherit", proactivity: 1, workspaces: ["ws"] }]
+  s.start(); await flush()
+
+  // Main bot's harness is ready -> defaultHarness picks main bot's harness ("opencode")
+  assert.equal(s.defaultHarness(), "opencode")
+
+  // If main bot's harness is unavailable -> falls back to first ready runtime ("cursor")
+  h.state.bots[0].harness = "claude-code"
+  await s.refresh()
+  assert.equal(s.defaultHarness(), "cursor")
+
+  // permModes maps Hub mode names to store keys and never returns empty
+  assert.deepEqual([...s.permModes("cursor")], ["plan", "default"])
+  assert.deepEqual([...s.permModes("opencode")], ["plan", "auto"])
+  assert.equal(s.permModes("custom-empty").length, 5)
+  assert.deepEqual([...s.permModes("custom-exotic")], ["default"])
+
+  // defaultPermMode picks a compatible mode in priority order (default -> auto -> acceptEdits -> plan -> bypassPermissions)
+  assert.equal(s.defaultPermMode("cursor"), "default")
+  assert.equal(s.defaultPermMode("opencode"), "auto")
+  assert.equal(s.defaultPermMode("custom-exotic"), "default")
+
+  // makeBot sends a compatible perm_mode for the selected harness
+  const id1 = await s.makeBot("Worker A", "coder", "opencode")
+  assert.equal(id1, "bot-2")
+  assert.equal(created[0].harness, "opencode")
+  assert.equal(created[0].perm_mode, "auto")
+
+  const id2 = await s.makeBot("Worker B", "coder")
+  assert.equal(id2, "bot-2")
+  assert.equal(created[1].harness, "cursor")
+  assert.equal(created[1].perm_mode, "default")
+})
