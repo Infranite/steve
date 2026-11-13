@@ -42,6 +42,7 @@ import { shortVersion } from "@/updates"
 import { st, emit, briefHead, pendingCards, ST, SS, WT, tagCatLabel, tagLabel, tagDesc, botName, decide, tag, isKind, sortTags, loadEvents, type Item, type Reply, type Rel, type Sess } from "@/store"
 import { YoloBadge } from "@/yolo/badges"
 import { YoloPill } from "@/yolo/switch"
+import { RunningNowPill } from "@/running-pill"
 import { WorkspaceSwitcher } from "@/workspace-switcher"
 import { HubSwitcher } from "@/hub-ui"
 import { useUploads, PendingList, AttachButton, Files } from "@/attach"
@@ -209,10 +210,7 @@ export function Group({ children, className }: { children: ReactNode; className?
 }
 /** `controls`: the children hold their own buttons. A button cannot contain a button, so the row's click target is
  *  then a cover button under the content, and the children sit above it. */
-/** a tool permission question as the Hub words it (“允许执行：<command>”), led in the UI language */
-export const permissionQuestion = (q: string) => (lang() === "zh-CN" ? q : q.replace(/^允许执行(?:[：:]\s*(?=\S))?/, (m) => t("core:wait.allowRun") + (m.length > 4 ? ": " : "")))
-/** the command a tool permission question asks about, without the Hub's prefix */
-export const permissionCommand = (q: string) => q.replace(/^允许执行[：:]\s*/, "")
+export { permissionCommand, permissionQuestion } from "@/permission-question"
 export function Row({ title, sub, children, onClick, icon, className, controls = false, ...rest }: { title: ReactNode; sub?: ReactNode; children?: ReactNode; onClick?: () => void; icon?: ReactNode; className?: string; controls?: boolean; [k: string]: any }) {
   const id = useId(), cover = !!onClick && controls
   return (
@@ -527,6 +525,8 @@ export function Page({ title, sub, back, actions, toolbar, toolbarTop = false, c
         ) : null}
         {bar ?? (!back && <span className={cn("min-w-0 truncate type-headline transition-opacity duration-180", scrolled || noTitle ? "opacity-100" : "opacity-0")}>{title}</span>)}
         <span className="flex-1" />
+        {/* on a phone the sidebar is away: the running-status pill sits in the page's header instead */}
+        <span className="md:hidden"><RunningNowPill className="steve-rn-head" align="end" quiet /></span>
         <div className="flex shrink-0 items-center gap-1.5">{actions}</div>
       </header>
       <div ref={scrollRef ?? own} onScroll={(e) => setScrolled(e.currentTarget.scrollTop > 36)} className="min-h-0 flex-1 overflow-y-auto">
@@ -608,7 +608,8 @@ export function Sidebar({ route: full }: { route: string }) {
   const route = full.split("?")[0] // #/knowledge?mem=… still highlights 知识
   const S = st.bots.steve ?? Object.values(st.bots)[0], n = pendingCards().length
   const people = usePeopleOn(), meOn = route === "contacts" && location.hash.startsWith("#/contacts/me")
-  const cnt: Record<string, number> = { inbox: n, items: st.items.filter((i) => itemDisplayStatus(i) === "run" && !i.arch).length }
+  /* what is in progress is the running-status pill's, under the header; the inbox keeps its count of open cards */
+  const cnt: Record<string, number> = { inbox: n }
   const [nav, more] = useScrollMore<HTMLDivElement>("y")
   /* the page you are on stays in view when the groups scroll */
   useEffect(() => {
@@ -644,6 +645,7 @@ export function Sidebar({ route: full }: { route: string }) {
           </SidebarMenuItem>
           <WorkspaceSwitcher /><HubSwitcher />
           {st.yolo && <SidebarMenuItem className="group-data-[collapsible=icon]:hidden" data-sidebar-yolo><YoloPill className="h-8 w-full rounded-lg px-2.5" /></SidebarMenuItem>}
+          <SidebarMenuItem className="group-data-[collapsible=icon]:hidden" data-sidebar-running><RunningNowPill className="steve-rn-side" /></SidebarMenuItem>
           <SidebarMenuItem>
             <SidebarMenuButton tooltip={t("core:sidebar.searchTip")} onClick={() => openSheet("command")} className="text-muted-foreground" data-open-command>
               <SearchIcon className="size-4!" strokeWidth={1.5} /><span className="flex-1">{t("common:action.search")}</span><Kbd className="group-data-[collapsible=icon]:hidden">⌘K</Kbd>

@@ -121,6 +121,7 @@ const ALLOW = {
   "queue.tsx": [["（附件）"], `attachment-only placeholder: ${HUB}`],
   "thread/topics.ts": [["（附件）"], `attachment-only placeholder: ${HUB}`],
   "ui.tsx": [["新事项", "新项目", "汇报", "新", "（附件）", "未确认", "允许执行", "：", "交付"], `slash command names, tag category, attachment placeholder, contact kind, permission question prefix: ${HUB}`],
+  "permission-question.ts": [["允许执行", "："], `permission question prefix: ${HUB}`],
   "decision-notes.ts": [["不发布", "：", "批准", "拒绝", "。补充：", "。原因：", "添加标签", "移除标签", "稍后提醒", "暂停", "放弃", "归档", "恢复", "撤销了决定", "同意开始", "不需要", "批准发布", "回答", "返工"], "parses and rebuilds the Hub's decision timeline text"],
   "devices.tsx": [["暂停接活", "正常", "执行节点"], `device status and the Hub's runner role: ${HUB}`],
   "store.ts": [["高", "中", "低", "你", "开始会话", "分流", "规划", "收尾", "交付与验收", "发布", "正在开始", "刚开始", "定义", "执行", "不", "排队", "插话", "删除", "导出", "项目", "类型", "交付", "领域", "客户", "主题", "交接", "依赖", "派生", "等前置事项完成后自动开始"], `priorities, tag categories, stage and edge ids, timeline text and a legacy wait label matched for translation: ${HUB}`],

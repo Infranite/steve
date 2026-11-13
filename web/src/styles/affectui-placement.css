@@ -1,0 +1,10 @@
+/* Where Steve puts affectUI components (web/src/components/affect), kept out of the vendored files so they stay easy
+ * to update. Colors come from the components' own variables, which affectui-theme.css maps to Steve's tokens. */
+
+/* the running-status pill: in the sidebar a full-width row like the YOLO pill above it; in a phone's page header a
+ * compact one */
+.ui-rn.steve-rn-side { display: block; }
+.ui-rn.steve-rn-side .ui-rn__trigger { width: 100%; height: 32px; padding: 0 8px 0 10px; border-radius: var(--aui-radius-sm, 8px); background: transparent; font-size: 13px; }
+.ui-rn.steve-rn-side .ui-rn__trigger:hover, .ui-rn.steve-rn-side[data-open] .ui-rn__trigger { background: var(--ui-rn-tray); }
+.ui-rn.steve-rn-side .ui-rn__trigger > .ui-rn__chev { margin-left: auto; }
+.ui-rn.steve-rn-head .ui-rn__trigger { height: 28px; }

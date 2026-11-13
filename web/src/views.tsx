@@ -2,7 +2,8 @@ import { AgentDetailPanel, hasAgentTree, History, Notices, TeamLanes, useAgentTr
 import { itemState, type ItemState } from "@/item-state"
 import type { AgentStatus } from "@/agent-tree"
 import { clip } from "@/thread/topics"
-import { itemDisplayStatus, workflowRelation, workflowRelationText } from "@/item-workflow-relation"
+import { itemDisplayState, itemDisplayStatus } from "@/item-workflow-relation"
+import { laneOf } from "@/item-lanes"
 import { DependencyWaitPanel } from "@/dependency-wait-panel"
 import { ItemDebugDialog } from "@/debug-panel"
 import { usePeopleOn } from "@/api/people"
@@ -28,15 +29,16 @@ import { GitHubMoreRow } from "@/github/index"
 import { HubMore } from "@/hub-ui"
 import { SessionKnowledge } from "@/knowledge/parts"
 import { lazyView } from "@/lazy"
+import { ItemsBoard } from "@/item-board"
 import { AnnRefs } from "@/annotate"
 import { OutDialog, OutList, type OutOpen } from "@/item-outputs"
 import { ItemPeopleProp } from "@/people/item-people"
 import { QueuedComment, queuedComments, queueNote, QueueStrip } from "@/queue"
 import { NativeIdLine, ResumeCard } from "@/resume"
 import { ItemStatsRows, SessionStats } from "@/stats/drill"
-import { ACC, accKey, closedSt, accOf, active, addDep, archive, bulk, closeRel, deleteItem, depsOpen, doFork, hm, importSessions, interrupt, it, itemThread, link, loadEvents, loadItem, loadLocalSessions, markDone, newItem, patchItem, pending, pendingCards, memCards, reassign, rmDep, saveGoal, sessPatch, sessRemove, sessSend, setAcc, setSt, setTags, setKind, kindOf, kindTags, isKind, DOMAIN_CATS, snoozed, st, stageOf, star, supp, tag, tagCatLabel, tagDesc, tagLabel, threadFollow, tm, toast, undoDecision, unsnooze, WT, type Item, type PlanRound, type Reply } from "@/store"
-import { BotAvatar, BotName, permissionQuestion, Chips, closeSheet, useScrollMore, Composer, DecisionCard, Empty, go, Group, ItemNo, KindTag, Meta, openSheet, Page, RelNote, ReplyBlock, Row, RunBar, SectionLabel, Segmented, SessionBlock, Status, StatusDot, Tags, ThemeSwitch, Transcript, type ComposerHandle, Chevron, Panel, Section, Tile, PANEL_W } from "@/ui"
-import { ChoiceCards, Count, dueLabel, ItemRow, PlanBar, ProjectChip, Select, selected } from "@/view-shared"
+import { ACC, accKey, closedSt, accOf, active, addDep, archive, bulk, closeRel, deleteItem, depsOpen, doFork, hm, importSessions, interrupt, it, itemThread, link, loadEvents, loadItem, loadLocalSessions, markDone, newItem, patchItem, pendingCards, memCards, reassign, rmDep, saveGoal, sessPatch, sessRemove, sessSend, setAcc, setSt, setTags, setKind, kindOf, kindTags, isKind, DOMAIN_CATS, snoozed, st, stageOf, star, supp, tag, tagCatLabel, tagDesc, tagLabel, threadFollow, tm, toast, undoDecision, unsnooze, WT, type Item, type PlanRound, type Reply } from "@/store"
+import { BotAvatar, BotName, permissionQuestion, Chips, closeSheet, Composer, DecisionCard, Empty, go, Group, ItemNo, KindTag, Meta, openSheet, Page, RelNote, ReplyBlock, Row, RunBar, SectionLabel, Segmented, SessionBlock, Status, StatusDot, Tags, ThemeSwitch, Transcript, type ComposerHandle, Chevron, Panel, Section, Tile, PANEL_W } from "@/ui"
+import { ChoiceCards, Count, dueLabel, ItemRow, ProjectChip, Select, selected } from "@/view-shared"
 import { choiceText, YoloItemSwitch, YoloMark } from "@/yolo/badges"
 import { YoloPill, yoloState } from "@/yolo/switch"
 import { RunState } from "@/yolo/status"
@@ -44,7 +46,7 @@ import { cn } from "cn"
 import { lang, t as tr, useT } from "@/i18n"
 import { dayHeading, hm as clock, nearTime, num } from "@/i18n/format"
 import { ArchiveIcon, BanIcon, BookOpenIcon, BotIcon, CalendarIcon, ChartNoAxesColumnIcon, CheckIcon, ChevronRightIcon, CircleAlertIcon, CircleCheckIcon, CircleDashedIcon, CircleHelpIcon, ContactRoundIcon, CopyIcon, DownloadIcon, FolderIcon, GitPullRequestIcon, HourglassIcon, KeyRoundIcon, LinkIcon, ListIcon, LoaderCircleIcon, LockIcon, MailIcon, MessageSquareIcon, MessagesSquareIcon, MinusIcon, MoreHorizontalIcon, PanelRightIcon, PauseIcon, PencilIcon, PlayIcon, PlugIcon, PlusIcon, RadioIcon, RotateCcwIcon, SearchIcon, ServerIcon, SettingsIcon, SquareIcon, SquareTerminalIcon, StarIcon, TrashIcon, UserRoundIcon, WorkflowIcon, XIcon, ZapIcon } from "lucide-react"
-import { Fragment, useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react"
+import { Fragment, useEffect, useRef, useState, type ReactNode } from "react"
 export { ChoiceCards,ItemRowExport,Select } from "@/view-shared"
 let selecting = false
 const RelationGraph = lazyView(() => import("@/graph").then((m) => ({ default: m.RelationGraph })))
@@ -119,43 +121,14 @@ const FILTER = (set: boolean) => cn("h-7 px-2 type-callout [&>svg]:opacity-60", 
 export const showItems = (f: "全部" | "等你" | "进行中", project?: string, bot?: string) => { filt = f === "等你" ? "wait" : f === "进行中" ? "run" : "all"; projF = project ?? "all"; botF = bot ?? "all"; tagF = "all"; kindF = "all"; q = ""; itemsView = "list"; go("#/items") }
 export const showTag = (id: string) => { if (isKind(tag(id))) kindF = id; else tagF = id; filt = "all"; itemsView = "list"; go("#/items") }
 const PRI_ORDER: Record<string, number> = { 高: 0, 中: 1, 低: 2 }
-/** the board: a column per open status. An empty column folds to a narrow rail with its name down the side, and the
- *  columns with cards share the rest (each at least 11rem), so three busy statuses fit a 1066px window beside the
- *  sidebar; when they still don't, the board scrolls sideways in its own area, columns snapping to its edge and the
- *  side with more fading out, and the page itself never scrolls sideways. On a phone a column with cards takes most of
- *  the width and the board snaps column by column, so a card is never squeezed to a few characters a line. */
-function ItemsBoard({ groups, xs }: { groups: [Item["st"], string][]; xs: Item[] }) {
-  const t = useT(), [ref, more] = useScrollMore<HTMLDivElement>("x")
-  const cols = groups.map(([s, l]) => [s, l, xs.filter((i) => itemDisplayStatus(i) === s)] as const)
-  return (
-    <div ref={ref} className="-mx-1 grid snap-x snap-mandatory scroll-px-1 grid-flow-col grid-cols-[var(--cols-phone)] gap-3 overflow-x-auto px-1 pb-2 data-[more~=end]:mask-r-from-[calc(100%-3rem)] data-[more~=start]:mask-l-from-[calc(100%-3rem)] sm:snap-proximity sm:grid-cols-[var(--cols)]"
-      style={{ "--cols": cols.map(([, , g]) => (g.length ? "minmax(11rem,1fr)" : "2.5rem")).join(" "), "--cols-phone": cols.map(([, , g]) => (g.length ? "minmax(78vw,1fr)" : "2.5rem")).join(" ") } as CSSProperties} data-items-board data-more={more}>
-        {cols.map(([s, l, g]) => !g.length ? (
-        <div key={s} className="flex min-h-72 snap-start flex-col items-center gap-2 rounded-xl bg-muted/50 py-3.5 text-tertiary" title={l} data-board-col={s} data-board-empty>
-          <StatusDot s={s} /><span className="type-label [writing-mode:vertical-rl]">{l}</span><span className="type-label tabular-nums">0</span>
-        </div>) : (
-        <div key={s} className="flex min-h-72 min-w-0 snap-start flex-col gap-2 rounded-xl bg-muted/50 p-2" data-board-col={s}>
-          <div className="flex items-center gap-2 px-2 pb-1 pt-1.5 type-label text-foreground/80"><StatusDot s={s} />{l}<span className="tabular-nums text-tertiary">{g.length}</span></div>
-          {g.map((i) => { const relation = workflowRelation(i, st.items); return (
-            <button key={i.id} type="button" onClick={() => go("#/items/" + i.id)} className="rounded-lg bg-card p-3 text-left shadow-[var(--lift)] hover:shadow-[var(--lift-hover)] active:scale-[.99]" data-kanban-card={i.id}>
-              <ItemNo id={i.id} /><div className="mt-1 type-body font-medium leading-5 text-foreground">{i.t}</div>
-              {relation && <div className="mt-1 type-footnote font-medium text-foreground/80" data-workflow-relation={relation.kind}>{workflowRelationText(relation)}</div>}
-              {relation?.kind !== "paused" && relation?.kind !== "previous" && i.now && <div className="mt-1 line-clamp-2 type-callout text-muted-foreground">{i.now}</div>}
-              <Tags ids={i.tags} max={2} className="mt-2" />
-              {/* the plan bar keeps its own corner so a narrow card never wraps it under a dangling separator */}
-              <div className="mt-3 flex items-center gap-2 type-footnote text-muted-foreground"><Meta className="min-w-0 flex-1"><BotName k={i.b} />{i.project && <ProjectChip id={i.project} plain />}{i.due && <span>{t("views:items.due", { due: dueLabel(i.due) })}</span>}</Meta>{i.plan && <PlanBar i={i} />}</div>
-            </button>
-          ) })}
-        </div>))}
-    </div>
-  )
-}
 export function ItemsView() {
   const t = useT()
   const [, f] = useState(0); const r = () => f((x) => x + 1)
   const [confirmDel, setConfirmDel] = useState<string | null>(null)
   const arch = filt === "arch"
-  let xs = st.items.filter((i) => (arch ? i.arch : !i.arch) && (arch || filt === "all" || (filt === "wait" && ["wait", "prop"].includes(i.st)) || (filt === "run" && itemDisplayStatus(i) === "run") || (filt === "star" && i.star))
+  /* the counts above, the 等你 / 进行中 filters, the board's columns and the running-status pill sort items one way (item-lanes.ts) */
+  const open = st.items.filter((i) => !i.arch).map((i) => laneOf(itemDisplayState(i)))
+  let xs = st.items.filter((i) => (arch ? i.arch : !i.arch) && (arch || filt === "all" || (filt === "wait" && laneOf(itemDisplayState(i)) === "needs") || (filt === "run" && laneOf(itemDisplayState(i)) === "running") || (filt === "star" && i.star))
     && (botF === "all" || i.b === botF) && (tagF === "all" || !!i.tags?.includes(tagF)) && (kindF === "all" || !!i.tags?.includes(kindF)) && (projF === "all" || (projF === "none" ? !i.project : i.project === projF)) && (!q || i.t.includes(q) || i.id.toLowerCase().includes(q.toLowerCase())))
   if (sortBy === "due") xs = [...xs].sort((a, b) => (a.due ? 0 : 1) - (b.due ? 0 : 1))
   if (sortBy === "pri") xs = [...xs].sort((a, b) => PRI_ORDER[a.pri ?? "中"] - PRI_ORDER[b.pri ?? "中"])
@@ -173,7 +146,7 @@ export function ItemsView() {
         <Button size="xs" variant="ghost" className="text-destructive" onClick={() => setConfirmDel(i.id)} data-delete-item={i.id}>{t("common:action.delete")}</Button></div>
     : <ItemRow key={i.id} i={i} pick={pick(i.id)} proj={multiProj} bot={multiBot} />
   return (
-    <Page title={t("views:items.title")} sub={arch ? t("views:items.subArch") : t("views:items.sub", { run: st.items.filter((i) => itemDisplayStatus(i) === "run" && !i.arch).length, wait: pending().length })} max={1080}
+    <Page title={t("views:items.title")} sub={arch ? t("views:items.subArch") : t("views:items.sub", { run: open.filter((l) => l === "running").length, wait: open.filter((l) => l === "needs").length })} max={1080}
       actions={<>{itemsView === "list" && !arch && <Button size="sm" variant="ghost" className="text-muted-foreground" onClick={() => { selecting = !selecting; selected.clear(); r() }} data-select-mode>{selecting ? t("views:items.selectDone") : t("views:items.select")}</Button>}<Button size="sm" onClick={() => openSheet("newItem")} data-new-item><PlusIcon />{t("views:items.newItem")}</Button></>}
       toolbar={<span className="hidden sm:block">{seg}</span>}>
       <AlertDialog open={!!confirmDel} onOpenChange={(o) => !o && setConfirmDel(null)}>
@@ -215,7 +188,7 @@ export function ItemsView() {
                 <Group>{(fold ? g.slice(0, CLOSED_SHOWN) : g).map(rowOf)}</Group>
               </section>) : null })}</div>)
         : <Empty title={arch ? t("views:items.emptyArch") : st.items.length ? t("views:items.emptyFiltered") : t("views:items.emptyNone")} sub={arch ? (st.cfg.archDays === "0" ? t("views:items.archManual") : t("views:items.archAuto", { count: Number(st.cfg.archDays) })) : st.items.length ? undefined : t("views:items.emptyNoneSub")} />)}
-      {itemsView === "board" && <ItemsBoard groups={groups.filter((g) => g[0] !== "drop" && g[0] !== "fail")} xs={xs} />}
+      {itemsView === "board" && <ItemsBoard xs={xs} cap={CLOSED_SHOWN} />}
       {itemsView === "graph" && (
         <div className="flex flex-col gap-4">
           <GraphLegend />

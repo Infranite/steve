@@ -108,6 +108,19 @@ export default {
     singleHint: "The user chose single-session acceptance. Cancelled units do not count as passed; this cycle's delivery no longer requires all collaboration reviews and integration checks to pass. Replan before restarting collaboration.",
     reason: { single_session: "The user explicitly chose single-session acceptance from the item page; cancelled units do not count as passed", pause: "The user paused the workflow from the item page", resume: "The user resumed the workflow from the item page", retry: "The user retried failed work from the item page", cancel: "The user requested to stop a work unit from the item page", rework: "The user confirmed rework; this unit and downstream results are invalidated and archived" },
   },
+  /* the items board (affectUI Agent Inbox): four columns from each item's one state – whose move it is */
+  board: {
+    needs: "Your move", running: "In progress", paused: "Paused / blocked", done: "Done",
+    waiting: "Waiting on you", runningState: "In progress", doneState: "Done", failed: "Failed",
+    doneIn: "Done", empty: "No items here", open: "Open", showAll: "Show all {count}", collapse: "Show fewer",
+    summary: "{needs} waiting on you, {running} in progress", progress: "{done} of {total} plan steps done",
+  },
+  /* the running-status pill in the sidebar and the page header (affectUI Running Now) */
+  runningNow: {
+    title: "Item activity", running: "in progress", needsYou: "waiting on you", needsYouBadge: "Your move",
+    paused: "Paused", pausedCount: "paused", done: "Done", pause: "Pause", resume: "Resume", open: "Open",
+    openAll: "All items", empty: "Nothing in progress right now", idle: "Nothing in progress", stepsOf: "{done} of {total} plan steps",
+  },
   inbox: {
     title: "Inbox",
     tabPending: "Pending",

@@ -98,6 +98,19 @@ export default {
     singleHint: "用户已改为单会话验收。已取消的协作单元不视为通过；本轮交付不再要求协作评审与集成验收全部通过。恢复协作需要重新规划。",
     reason: { single_session: "用户在事项页明确确认改为单会话验收；取消的协作单元不视为通过", pause: "用户在事项页暂停编排", resume: "用户在事项页恢复编排", retry: "用户在事项页重试未通过的工作", cancel: "用户在事项页请求停止工作单元", rework: "用户确认返工，当前及下游成果失效并归档" },
   },
+  /* the items board (affectUI Agent Inbox): four columns from each item's one state – whose move it is */
+  board: {
+    needs: "等你", running: "进行中", paused: "已暂停 / 等前置", done: "已完成",
+    waiting: "等你", runningState: "进行中", doneState: "已完成", failed: "失败",
+    doneIn: "完成于", empty: "这里没有事项", open: "打开", showAll: "显示全部 {count} 件", collapse: "收起",
+    summary: "{needs} 件等你，{running} 件进行中", progress: "计划 {done}/{total} 步已完成",
+  },
+  /* the running-status pill in the sidebar and the page header (affectUI Running Now) */
+  runningNow: {
+    title: "事项动态", running: "进行中", needsYou: "等你", needsYouBadge: "等你",
+    paused: "已暂停", pausedCount: "已暂停", done: "已完成", pause: "暂停", resume: "继续", open: "打开",
+    openAll: "全部事项", empty: "现在没有进行中的事项", idle: "没有进行中的事项", stepsOf: "计划 {done}/{total} 步",
+  },
   /* the 待处理 page: decisions waiting on the user, and the ones made lately */
   inbox: {
     title: "待处理",
