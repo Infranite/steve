@@ -1,0 +1,37 @@
+/* affectUI components (web/src/components/affect) read these 36 --aui-* tokens. Each points at a Steve token that
+ * already switches between light and dark, so one block covers both modes and the components look like the rest of
+ * the app: Geist, the slate neutrals, the one indigo accent, Steve's radii, shadows and easing. */
+:root {
+  --aui-font: var(--font-sans);
+  --aui-font-mono: var(--font-mono);
+  --aui-radius: var(--radius-lg);
+  --aui-radius-sm: var(--radius-sm);
+  --aui-radius-lg: var(--radius-xl);
+  --aui-ink: var(--foreground);
+  --aui-muted: var(--muted-foreground);
+  --aui-placeholder: var(--tertiary);
+  --aui-surface: var(--card);
+  --aui-subtle: var(--muted);
+  --aui-overlay: var(--popover);
+  --aui-border: var(--border);
+  --aui-border-strong: var(--input);
+  --aui-primary: var(--primary);
+  --aui-on-primary: var(--primary-foreground);
+  --aui-focus: color-mix(in srgb, var(--ring) 70%, transparent);
+  --aui-danger: var(--destructive);
+  --aui-danger-soft: color-mix(in srgb, var(--destructive) 12%, transparent);
+  --aui-warning: var(--attention);
+  --aui-warning-soft: color-mix(in srgb, var(--attention) 14%, transparent);
+  --aui-success: var(--success);
+  --aui-success-soft: color-mix(in srgb, var(--success) 12%, transparent);
+  --aui-info: var(--blue);
+  --aui-info-soft: color-mix(in srgb, var(--blue) 12%, transparent);
+  --aui-blue: var(--blue);
+  --aui-green: var(--success);
+  --aui-amber: var(--attention);
+  --aui-orange: var(--attention);
+  --aui-red: var(--destructive);
+  --aui-shadow-card: var(--lift);
+  --aui-shadow-popover: var(--sh-lg);
+  --aui-ease: var(--ease-out);
+}
