@@ -589,7 +589,8 @@ impl Tx<'_> {
     /// is compared with what it landed. `false`: nothing to freeze, or not the same result.
     pub(crate) fn lc_refreeze(&mut self, item_id: &str) -> Result<bool> {
         let i = self.item(item_id)?;
-        let Some(mut c) = closing_of(&i).filter(|c| i.phase == CLOSING && c.kind == COMPLETE) else {
+        let Some(mut c) = closing_of(&i).filter(|c| i.phase == CLOSING && c.kind == COMPLETE)
+        else {
             return Ok(false);
         };
         let now = if self.git_on_node(item_id) {

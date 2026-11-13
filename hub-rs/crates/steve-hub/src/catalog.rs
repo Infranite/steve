@@ -46,7 +46,7 @@ impl Entry {
 }
 
 /// Families in the order the picker shows them.
-pub const FAMILIES: [&str; 13] = [
+pub const FAMILIES: [&str; 15] = [
     "Claude Opus",
     "Claude Sonnet",
     "Claude Haiku",
@@ -54,6 +54,8 @@ pub const FAMILIES: [&str; 13] = [
     "Claude",
     "GPT",
     "Gemini",
+    "Grok",
+    "Mistral",
     "Kimi",
     "DeepSeek",
     "GLM",
@@ -90,8 +92,14 @@ pub fn family(base: &str) -> &'static str {
         ("sonnet", "Claude Sonnet"),
         ("haiku", "Claude Haiku"),
         ("gpt", "GPT"),
+        ("o1", "GPT"),
         ("o3", "GPT"),
+        ("o4", "GPT"),
         ("gemini", "Gemini"),
+        ("grok", "Grok"),
+        ("mistral", "Mistral"),
+        ("codestral", "Mistral"),
+        ("devstral", "Mistral"),
         ("kimi", "Kimi"),
         ("deepseek", "DeepSeek"),
         ("glm", "GLM"),
@@ -294,6 +302,9 @@ mod tests {
     #[test]
     fn families() {
         assert_eq!(family("claude-opus-4-8"), "Claude Opus");
+        assert_eq!(family("o4-mini"), "GPT");
+        assert_eq!(family("xai/grok-4"), "Grok");
+        assert_eq!(family("devstral-medium"), "Mistral");
         assert_eq!(family("deepseek/deepseek-flash"), "DeepSeek");
         assert_eq!(family("local/mac-mini/unsloth/Qwen3.6-35B"), "Qwen");
         assert_eq!(family("auto-mode-classifier"), "其他");

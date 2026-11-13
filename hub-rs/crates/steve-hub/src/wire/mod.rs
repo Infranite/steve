@@ -622,15 +622,8 @@ pub fn wire_assembly(
             mode == NodeMode::Local,
         )?)
     };
-    // the harness adapters this Hub knows, with what the local Node says of them (kept fresh)
+    // the harness adapters this Hub knows, with what the Nodes say of them (kept fresh)
     let harnesses = crate::harnesses::HubHarnesses::of(cfg);
-    if let Some(h) = &model_node {
-        node_jobs.push(Box::pin(
-            harnesses
-                .clone()
-                .follow(h.node.clone() as Arc<dyn steve_node_api::Node>),
-        ));
-    }
     let models = || {
         let m = steve_core::models::Models::new(
             db.clone(),
@@ -671,6 +664,16 @@ pub fn wire_assembly(
     let (nodes, bind_remote) = remote_nodes(cfg, &db, host.clone(), &vars);
     if let Some(s) = &nodes {
         let _ = s.secrets.set(secrets.clone());
+    }
+    if model_node.is_some() || nodes.is_some() {
+        node_jobs.push(Box::pin(
+            harnesses.clone().follow_all(
+                model_node
+                    .as_ref()
+                    .map(|h| h.node.clone() as Arc<dyn steve_node_api::Node>),
+                nodes.clone(),
+            ),
+        ));
     }
     let fleet = nodes.as_ref().map(|s| s.fleet.clone());
     // where the Hub's own Node runs sessions: in this process, or in one of its own (B1)
@@ -732,11 +735,17 @@ pub fn wire_assembly(
         core_cfg,
     );
     core.models().set_harnesses(harnesses.source());
-    // once Steve's harness has said what it offers, the cheap purposes get its quick model (once)
+    // once Steve's harness has said what it offers, untouched seeded bots reconcile if needed and
+    // the cheap purposes get its quick model (once)
     let models = core.models().clone();
+    let core_for_probe = core.clone();
     harnesses.on_update(move || {
         let m = models.clone();
-        tokio::task::spawn_blocking(move || m.migrate_all());
+        let c = core_for_probe.clone();
+        tokio::task::spawn_blocking(move || {
+            let _ = c.reconcile_seeded_bots();
+            m.migrate_all();
+        });
     });
     let _ = host.core.set(core.clone());
     /* an item bound to a Node has its git read there (N0e-E11b); without any Node, nothing changes */
@@ -939,11 +948,10 @@ pub fn wire_assembly(
     }
     let module_routes = built
         .routes
-        .merge(crate::api::stats::routes(crate::api::stats::StatsApi::new(
-            db.clone(),
-            bus.clone(),
-            price_url,
-        )))
+        .merge(crate::api::stats::routes(
+            crate::api::stats::StatsApi::new(db.clone(), bus.clone(), price_url)
+                .with_harness_source(harnesses.source()),
+        ))
         .merge(crate::api::yolo::routes(engine.clone()));
     Ok(Wired {
         backend,
@@ -954,6 +962,7 @@ pub fn wire_assembly(
             routed,
             harnesses: harnesses.clone(),
             node: local_node,
+            nodes: nodes.clone(),
             lifecycle: built.lifecycle.clone(),
         }),
         auth: auth.router(),

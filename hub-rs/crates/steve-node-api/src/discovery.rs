@@ -74,6 +74,12 @@ pub struct AdapterInfo {
     /// the npm registry found. `None` for one installed otherwise, or a Node that is older.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub update: Option<AdapterUpdate>,
+    /// Shell template (`{id}` replaced with the session id) to resume a session in the CLI.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resume_command: Option<String>,
+    /// Shell template (`{id}` replaced with the session id) to fork a session in the CLI.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fork_command: Option<String>,
 }
 
 /// The update state of an adapter Steve keeps up to date ([`AdapterInfo::update`]).

@@ -16,13 +16,43 @@ mod scan;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-/// A harness's name as a string literal.
+/// A harness's name or CLI binary as a string literal.
 const LITERALS: &[&str] = &[
     "\"claude-code\"",
+    "\"claude-agent-acp\"",
+    "\"claude-code-acp\"",
     "\"codex\"",
+    "\"codex-acp\"",
     "\"claude\"",
     "\"claude-cli\"",
     "\"codex-cli\"",
+    "\"gemini\"",
+    "\"gemini-cli\"",
+    "\"github-copilot-cli\"",
+    "\"copilot\"",
+    "\"opencode\"",
+    "\"qwen-code\"",
+    "\"qwen\"",
+    "\"goose\"",
+    "\"goose-acp\"",
+    "\"kimi-code\"",
+    "\"kimi\"",
+    "\"grok-build\"",
+    "\"grok\"",
+    "\"kilo\"",
+    "\"factory-droid\"",
+    "\"droid\"",
+    "\"codebuddy-code\"",
+    "\"codebuddy\"",
+    "\"cursor\"",
+    "\"cursor-agent\"",
+    "\"kiro\"",
+    "\"kiro-cli\"",
+    "\"mistral-vibe\"",
+    "\"vibe\"",
+    "\"vibe-acp\"",
+    "\"qoder\"",
+    "\"qodercli\"",
 ];
 
 /// Code that branches on a harness by name.
@@ -81,6 +111,26 @@ fn found() -> BTreeMap<(String, String), usize> {
         }
     }
     out
+}
+
+#[test]
+fn literals_cover_all_builtin_adapter_ids_and_bins() {
+    for id in steve_acp::adapters::builtin_ids() {
+        let lit = format!("\"{id}\"");
+        assert!(
+            LITERALS.contains(&lit.as_str()),
+            "missing builtin adapter id literal {lit} in LITERALS"
+        );
+    }
+    for (_id, cli_bin, detect_bins) in steve_acp::adapters::builtin_bins() {
+        for bin in std::iter::once(cli_bin).chain(detect_bins.iter().copied()) {
+            let lit = format!("\"{bin}\"");
+            assert!(
+                LITERALS.contains(&lit.as_str()),
+                "missing builtin binary literal {lit} in LITERALS"
+            );
+        }
+    }
 }
 
 #[test]

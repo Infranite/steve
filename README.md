@@ -26,7 +26,7 @@ English · [简体中文](README.zh-CN.md)
 
 Coding agents are good at the work itself. Run more than two or three of them and the bookkeeping falls apart: a dozen terminal tabs, context lost between sessions, permission prompts nobody answered, and no record of what was actually delivered or whether the checks passed.
 
-Steve sits above Claude Code and Codex and keeps that record. It is one Rust binary on your own machine, with a SQLite database and an encrypted vault. You talk to it in a single chat. For each message it decides whether to answer directly, research your code and documents read-only, open a tracked item, or pass the message on to work already in progress. Items go to bots, and each item runs in its own git worktree.
+Steve sits above Claude Code, Codex, Gemini CLI, GitHub Copilot CLI, OpenCode, Cursor and ten other ACP coding CLIs and keeps that record. It is one Rust binary on your own machine, with a SQLite database and an encrypted vault. You talk to it in a single chat. For each message it decides whether to answer directly, research your code and documents read-only, open a tracked item, or pass the message on to work already in progress. Items go to bots, and each item runs in its own git worktree.
 
 | | 😵 Agents in terminal tabs | ✨ With Steve |
 |---|---|---|
@@ -105,7 +105,7 @@ Configuration done through chat, corrections to automations, contact merges and 
 
 Each message is sorted into one of nine routes: answer, research, item, suggest, ask, supplement, status, config or reroute. Code-level guards can overrule the model, and CI runs a routing eval built from real messages. When Steve can't tell whether a message is new work or belongs to an existing item, it asks.
 
-- **Inline research** answers questions about your code and documents in the chat, citing `path:line`. Read-only is enforced three times: a tool allowlist (Read, Grep, Glob), a Hub guard that stops the run at the first non-read tool, and a `sandbox-exec` profile on macOS. The instance owner's own main conversation is the exception: asked to look at, tidy, install or fix something on the Hub's machine, Steve does it with that OS user's access, while its own keys, database and programs stay out of reach.
+- **Inline research** answers questions about your code and documents in the chat, citing `path:line`. Read-only is enforced three times: a tool allowlist (Read, Grep, Glob), a Hub guard that stops the run at the first non-read tool, and a read-only OS sandbox (`sandbox-exec` on macOS, bubblewrap on Linux). The instance owner's own main conversation is the exception: asked to look at, tidy, install or fix something on the Hub's machine, Steve does it with that OS user's access, while its own keys, database and programs stay out of reach.
 - An answer can end with *"Make it an item: …"*. Click it or just reply "do it".
 - Each item has one card in the chat. It updates in place (running, waiting, delivered, released) and only moves to the bottom when it needs you.
 - You can configure Steve by talking to it: *"Use Opus for the frontend bot, and switch on YOLO except for billing-api."* It drafts field-level changes to bots, projects, models, tags, flows and contacts. You apply them with one click and can undo for 24 hours.
@@ -136,11 +136,11 @@ Each task has a private, persistent `<home>/workspaces/<item>/outputs` directory
 
 ### 🤖 Bots
 
-A bot is a harness (Claude Code or Codex) plus a model and thinking effort, a role, a persona, rules, a permission mode, an acceptance mode and a default project. Describe one in a sentence and Steve drafts it. `@Bot` hands work to that bot. Reassigning an item stops the old session and passes on the last progress. A bot can serve several workspaces with a different duty in each, and only sees the data of the one it is working in.
+A bot is a harness (16 built-in ACP coding CLIs, plus any custom ACP adapter in `harness.json`) plus a model and thinking effort, a role, a persona, rules, a permission mode, an acceptance mode and a default project. Describe one in a sentence and Steve drafts it. `@Bot` hands work to that bot. Reassigning an item stops the old session and passes on the last progress. A bot can serve several workspaces with a different duty in each, and only sees the data of the one it is working in.
 
 **Capabilities** in the sidebar is the workspace's library of what bots can use, each defined once and chosen per bot on the bot's own **Capabilities** tab: MCP servers (a local command, or an HTTP or SSE endpoint, with environment variables or headers), skills (`SKILL.md` instructions written where the harness reads skills) and remote agents spoken to over A2A, each of which a bot gets as one Steve tool. Every harness gets them the same way: the servers through ACP next to Steve's own tools, the skills where the harness adapter declares it reads them. Secret values are kept in the vault and handed to the session's Node only when the harness opens. Steve itself is an MCP server too: Claude Desktop, Cursor or another agent can connect to it with an access token and find items, hand Steve work and search your knowledge base, and other agents can hand Steve tasks over A2A by its Agent Card. See [Capabilities](docs/deployment.md#capabilities-mcp-servers-skills-and-remote-agents).
 
-Steve stays out of your harness settings. It answers a permission prompt for that one call and never writes "always allow". It never edits your Codex config. Every session shows the command to resume it in the harness itself, and you can import your local Claude Code and Codex history.
+Steve stays out of your harness settings. It answers a permission prompt for that one call and never writes "always allow". It never edits your harness config. Every session shows the command to resume (and, where supported, fork) it in the harness itself, and you can import your local Claude Code and Codex history.
 
 - **Memories** are proposed from finished items, chat days, mail and agents, each with the quote it came from and the memory it would replace. Nothing takes effect until you confirm it.
 - **Models per purpose.** Routing, chat, research, titles, extraction, YOLO, drafting, flows and mail each have their own model, effort and ordered fallbacks. Prices sync daily from Models.dev, and past estimates keep the prices of their day.
@@ -256,8 +256,8 @@ flowchart LR
         V[(Vault)]
     end
     subgraph Node["Agent runtime · local, or a paired Node (experimental)"]
-        CC[Claude Code]
-        CX[Codex]
+        CC[Claude Code · Codex]
+        CX[Gemini · Copilot · +12 ACP CLIs]
         WT[[git worktrees]]
     end
     W <-->|REST + SSE| C
@@ -301,7 +301,7 @@ Homebrew verifies and installs the published native binaries; no Python runtime,
 | **Homebrew install** | Homebrew; no Python runtime dependency. Apple Silicon macOS, or Linux x86_64 with glibc 2.35+. Homebrew's own OS support policy also applies. |
 | **Source build** | Git, stable Rust/Cargo, Node.js 24 LTS with npm |
 | **Run** | Apple Silicon macOS 14+, or Linux x86_64 with glibc 2.35+ (Ubuntu 22.04+, Debian 12+). Windows isn't supported. |
-| **Agent execution** | The selected [Claude Code](https://docs.anthropic.com/claude-code) or [Codex](https://github.com/openai/codex) harness, its ACP adapter and authentication on the executing Node |
+| **Agent execution** | Any of the 16 built-in ACP coding CLIs (or a custom ACP adapter in `harness.json`) and authentication on the executing Node |
 
 ### 1. Build from source *(development)*
 
@@ -315,13 +315,13 @@ cargo build --locked --manifest-path hub-rs/Cargo.toml -p steve-hub
 
 ### 2. Install the adapters
 
-Steve talks to harnesses through their ACP adapters, `@agentclientprotocol/claude-agent-acp` and `@agentclientprotocol/codex-acp`. They need Node.js (npm). `steve setup` installs them into the home's `adapters` directory and the Node keeps them up to date; for a development Hub, install them the same way:
+Steve talks to harnesses over ACP. Twelve of the 16 built-in harnesses (`claude-code`, `codex`, `gemini`, `github-copilot-cli`, `opencode`, `qwen-code`, `goose`, `kimi-code`, `grok-build`, `kilo`, `factory-droid`, `codebuddy-code`) can be installed and kept up to date with npm under the home's `adapters` directory; four (`cursor`, `kiro`, `mistral-vibe`, `qoder`) are discovered on `PATH` from their own installers. `steve setup` offers the npm-managed ones and pre-ticks those whose CLI is already on `PATH`; for a development Hub, install the ones you use the same way:
 
 ```sh
-STEVE_HOME="$HOME/.steve-dev" hub-rs/target/debug/steve-hub --adapters install
+STEVE_HOME="$HOME/.steve-dev" hub-rs/target/debug/steve-hub --adapters install claude-code codex
 ```
 
-A global npm install is used when the home has none. If `claude` isn't at `/opt/homebrew/bin/claude`, set `CLAUDE_CODE_EXECUTABLE`. To point at adapters elsewhere, set `STEVE_ADAPTER_CLAUDE` / `STEVE_ADAPTER_CODEX`.
+An adapter already on `PATH` or installed globally with npm is used when `<steve-home>/adapters` has none. If `claude` isn't at `/opt/homebrew/bin/claude`, set `CLAUDE_CODE_EXECUTABLE`. To point at an adapter elsewhere, set its `STEVE_ADAPTER_*` variable (see [Harness setup](docs/deployment.md#harness-setup)) or declare it in `harness.json`.
 
 ### 3. Run
 
@@ -363,13 +363,14 @@ For an existing Hub that completed managed setup, run `steve setup --reconfigure
 | `STEVE_NODE_MODE` | `service` (default) runs the Hub's own Node in a process of its own, so a Hub restart or upgrade leaves running turns going ([details](docs/deployment.md#the-hubs-own-node-in-a-process-of-its-own)); `local` runs it in the Hub's process; `off` parks sessions |
 | `STEVE_LOCAL_NODE_PORT` | With `STEVE_NODE_MODE=service`, the loopback port the Hub's own Node links on (default: Hub port + 3) |
 | `STEVE_TOOLCHAINS` | Default `on` (on a Node) sets each detected toolchain's places for a session whose principal is known: cargo's `target/` goes into the item's own `.steve/build/cargo`, and download and build caches that are only caches (npm, bun, pip, uv, poetry, conda, Go, NuGet, Bundler) into that person's own cache on the Node. A tool's home, config or credentials are never moved. Toolchains are data (23 built in); a moved build starts cold. Explicit `off` keeps the original places |
-| `STEVE_PRINCIPAL_STATE` | Default `on` gives each new session's principal their own harness directory on its Node (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`). The Node's owner starts from their own settings there (a login only when the settings carry it, such as Claude Code's `apiKeyHelper`); anyone else, and a Codex login, starts empty. A login setup UI/API is not yet available; see the [operator procedure and setup gap](docs/deployment.md#harness-setup) before continuing tasks. Existing sessions keep their recorded state; explicit `off` uses shared state for new sessions |
-| `STEVE_CONFINE` | The OS sandbox of what a Node starts for a run: seatbelt on macOS, bubblewrap on Linux. Levels:<br>`0`/`off`: no sandbox.<br>`1`/`on` (the default): Steve's secrets, keys, databases and programs are out of reach, and a run in a workspace writes only there and in its repository, harness and toolchain directories, temporary directories, the usual tool caches and the harnesses' homes. Reads stay open, and the environment is left as the user's system sets it.<br>`2`: level 1, with runs starting from a fresh login environment of the user plus what Steve sets for them.<br>A harness with its own seatbelt sandbox (Codex) keeps that one, and tools that start their own `sandbox-exec` fail inside it |
+| `STEVE_PRINCIPAL_STATE` | Default `on` gives each new session's principal their own harness directory on its Node (through the adapter's declared state variable or XDG directories, e.g. `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `GEMINI_CLI_HOME`). The Node's owner starts from their own settings files there, as the adapter declares them and copied as they are (a login only when the settings carry it, such as Claude Code's `apiKeyHelper`); anyone else, and any harness's OAuth/token file, starts empty. A login setup UI/API is not yet available; see the [operator procedure and setup gap](docs/deployment.md#harness-setup) before continuing tasks. Existing sessions keep their recorded state; explicit `off` uses shared state for new sessions |
+| `STEVE_CONFINE` | The OS sandbox of what a Node starts for a run: seatbelt on macOS, bubblewrap on Linux. Levels:<br>`0`/`off`: no sandbox.<br>`1`/`on` (the default): Steve's secrets, keys, databases and programs are out of reach, and a run in a workspace writes only there and in its repository, harness and toolchain directories, temporary directories, the usual tool caches and the harnesses' homes. Reads stay open, except that a session of someone other than the Node's owner does not see the owner's harness homes (logins, tokens, history), as the adapters declare them; the environment is left as the user's system sets it.<br>`2`: level 1, with runs starting from a fresh login environment of the user plus what Steve sets for them.<br>A harness with its own seatbelt sandbox (Codex) keeps that one, and tools that start their own `sandbox-exec` fail inside it |
 | `STEVE_CONFINE_WRITABLE` | Extra places (`:`-separated absolute paths) a run may write at level 1 or 2 |
 | `STEVE_NODE_LISTEN`, `STEVE_NODE_BIND` | Experimental multi-device listener defaults to `1`; explicit `0` disables it. `STEVE_NO_RESUME=1` always disables remote execution. `STEVE_NODE_BIND` has no default: set only to an operator-selected paired Node ID |
 | `STEVE_DISK_OBSERVE` | Default `on` (on a Node) records bounded asynchronous working-directory disk observations in its journal; explicit `off` disables new records. This grants no execution or cleanup permission ([budgets and retention](docs/deployment.md#node-disk-observations)) |
 | `STEVE_TAILCAT`, `STEVE_TAILCAT_PORT` | Remote Nodes over tailcat (optional, turned on in Devices): the `tailcat` program when it is not on `PATH`, and the loopback port its Node-only listener uses (default: Hub port + 2) |
 | `STEVE_NODE_INSTALLERS` | A local directory with the release's `steve-installer.json` and installer archives, for remote Node installs from a Hub without access to GitHub |
+| `STEVE_ADAPTER_*`, `STEVE_DEFAULT_MODEL_*` | Override a built-in harness's ACP adapter path (`STEVE_ADAPTER_CLAUDE`, `STEVE_ADAPTER_CODEX`, `STEVE_ADAPTER_GEMINI`, …) or default model (`STEVE_DEFAULT_MODEL_CLAUDE`, …); full table in [Harness setup](docs/deployment.md#harness-setup) |
 | `STEVE_ADAPTER_UPDATES` | What a Node does about newer releases of the ACP adapters Steve installed: `auto` (default: checks daily and upgrades when no session runs), `check` (shows them only), `off` |
 | `STEVE_NODE_PLACEMENT` | `spread` (default) sends a project-less item's new session to a linked remote Node that is clearly less loaded than the Hub's machine; `local` keeps new sessions on the Hub's machine unless `STEVE_NODE_BIND` names a Node |
 | `STEVE_NODE_HANDOFF_MIN` | Minutes a device may be offline while messages wait for its session before Steve continues the item in a new session elsewhere (default 30; `0` never) |

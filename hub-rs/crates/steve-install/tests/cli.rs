@@ -27,7 +27,11 @@ fn help_in(args: &[&str], env: &[(&str, &str)]) -> String {
         .envs(env.iter().copied())
         .output()
         .unwrap();
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     String::from_utf8(out.stdout).unwrap()
 }
 
@@ -36,15 +40,43 @@ fn the_language_is_the_flag_then_steve_lang_then_the_locale() {
     let zh = help_in(&[], &[("STEVE_LANG", "zh-CN")]);
     let en = help_in(&[], &[("STEVE_LANG", "en")]);
     assert_ne!(zh, en);
-    assert!(zh.chars().any(|c| ('\u{4e00}'..='\u{9fff}').contains(&c)), "{zh}");
-    assert!(!en.chars().any(|c| ('\u{4e00}'..='\u{9fff}').contains(&c)), "{en}");
+    assert!(
+        zh.chars().any(|c| ('\u{4e00}'..='\u{9fff}').contains(&c)),
+        "{zh}"
+    );
+    assert!(
+        !en.chars().any(|c| ('\u{4e00}'..='\u{9fff}').contains(&c)),
+        "{en}"
+    );
     // --lang wins over every variable, and any tag of a language chooses it
     assert_eq!(help_in(&["--lang", "en"], &[("STEVE_LANG", "zh-CN")]), en);
-    assert_eq!(help_in(&["--lang", "zh-Hans"], &[("STEVE_LANG", "en"), ("LANG", "en_US.UTF-8")]), zh);
+    assert_eq!(
+        help_in(
+            &["--lang", "zh-Hans"],
+            &[("STEVE_LANG", "en"), ("LANG", "en_US.UTF-8")]
+        ),
+        zh
+    );
     // STEVE_LANG, then LC_ALL, LC_MESSAGES, LANG: the first that names one of ours
-    assert_eq!(help_in(&[], &[("STEVE_LANG", "en"), ("LC_ALL", "zh_CN.UTF-8")]), en);
-    assert_eq!(help_in(&[], &[("LC_ALL", "zh_CN.UTF-8"), ("LANG", "en_US.UTF-8")]), zh);
-    assert_eq!(help_in(&[], &[("LC_ALL", "C"), ("LC_MESSAGES", "en_GB"), ("LANG", "zh_CN.UTF-8")]), en);
+    assert_eq!(
+        help_in(&[], &[("STEVE_LANG", "en"), ("LC_ALL", "zh_CN.UTF-8")]),
+        en
+    );
+    assert_eq!(
+        help_in(&[], &[("LC_ALL", "zh_CN.UTF-8"), ("LANG", "en_US.UTF-8")]),
+        zh
+    );
+    assert_eq!(
+        help_in(
+            &[],
+            &[
+                ("LC_ALL", "C"),
+                ("LC_MESSAGES", "en_GB"),
+                ("LANG", "zh_CN.UTF-8")
+            ]
+        ),
+        en
+    );
     assert_eq!(help_in(&[], &[("LANG", "zh_TW.UTF-8")]), zh);
     // a language Steve has no texts in is an error, not a guess
     let home = tempfile::tempdir().unwrap();
@@ -155,20 +187,31 @@ fn adapters_commands_reach_the_selected_homes_release() {
         let mut args = args.to_vec();
         args.extend(["--home", at]);
         let out = invoke(&temp.path().join("unused-home"), &args);
-        (out.status.code(), String::from_utf8_lossy(&out.stderr).into_owned())
+        (
+            out.status.code(),
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+        )
     };
     assert_eq!(run(&["adapters", "install", "codex"]).0, Some(0));
-    assert_eq!(run(&["adapters", "install", "claude-code", "codex", "hub"]).0, Some(0));
+    assert_eq!(
+        run(&["adapters", "install", "claude-code", "codex", "hub"]).0,
+        Some(0)
+    );
     assert_eq!(run(&["adapters", "upgrade"]).0, Some(0));
     assert_eq!(run(&["adapters", "install", "codex", "node"]).0, Some(0));
     // no action is `status`, and what the release's command exits with is the answer
     assert_eq!(run(&["adapters"]).0, Some(3));
     let (code, said) = run(&["adapters", "remove", "codex"]);
     assert_eq!(code, Some(1), "{said}");
+    let (code, said) = run(&["adapters", "upgrade", "codex"]);
+    assert_eq!(code, Some(1), "{said}");
     let (code, said) = run(&["adapters", "install", "codex", "hub", "more"]);
     assert_eq!(code, Some(1), "{said}");
     assert_eq!(
-        fs::read_to_string(&calls).unwrap().lines().collect::<Vec<_>>(),
+        fs::read_to_string(&calls)
+            .unwrap()
+            .lines()
+            .collect::<Vec<_>>(),
         [
             format!("hub|{at}|zh-CN|--adapters install codex"),
             format!("hub|{at}|zh-CN|--adapters install claude-code codex"),
@@ -182,7 +225,13 @@ fn adapters_commands_reach_the_selected_homes_release() {
     fs::create_dir_all(&empty).unwrap();
     let out = invoke(
         &temp.path().join("unused-home"),
-        &["adapters", "install", "codex", "--home", empty.to_str().unwrap()],
+        &[
+            "adapters",
+            "install",
+            "codex",
+            "--home",
+            empty.to_str().unwrap(),
+        ],
     );
     assert_eq!(out.status.code(), Some(1));
     assert_eq!(fs::read_to_string(&calls).unwrap().lines().count(), 5);
