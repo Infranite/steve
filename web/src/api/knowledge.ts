@@ -18,7 +18,25 @@ export type DocBrief = {
 }
 export type Doc = DocBrief & { body?: string; about: ObjRef[]; tags: string[]; preview: { seq: number; heading: string; text: string }[]; uses: number; error: string | null }
 export type Hit = { n: number; type: string; id: string; seq: number; title: string; heading?: string; text: string; label: string; source_kind: string; level: Level; visibility: string; score: number; href: string }
-export type Mem = { id: string; kind: string; text: string; source_label: string; level: Level; status: "candidate" | "confirmed" | "stale"; visibility: string; about: ObjRef[]; created: number }
+/** where a memory came from (`kind`: you | conversation | item | agent | mail | space | event | plugin | other), with a
+ *  link there when there is one, who wrote it and the words it was based on */
+export type Origin = { kind: string; type: string; id: string | null; label: string; href: string; writer: string; writer_name: string | null; evidence: string }
+export type Mem = {
+  id: string; kind: string; text: string; source_label: string; level: Level; status: "candidate" | "confirmed" | "stale"; visibility: string; about: ObjRef[]; created: number
+  updated?: number; origin?: Origin; used?: { count: number; last: number | null }
+}
+/** a person, project, bot … Steve knows things about (`GET /kb/subjects`) */
+export type Subject = { type: string; id: string; name: string; href: string; mems: number; candidates: number; docs: number; last: number }
+/** where knowledge was handed out: a session, an answer, your search */
+export type SubjectUse = { consumer_type: string; consumer_id: string; href: string; name: string; query: string; created: number; obj: { type: string; id: string; label: string } }
+export type SubjectDetail = { type: string; id: string; name: string; href: string; mems: Mem[]; docs: (DocBrief & { used?: Mem["used"] })[]; uses: SubjectUse[] }
+/** who writes the memories, as the 来源 tab lists them */
+export type MemProvider = { kind: string; writer: string; writer_name: string | null; count: number; confirmed: number; candidates: number; stale: number; last: number }
+/** what an agent changed in the memories (`GET /kb/changes`); a merge's state follows its candidate */
+export type GoneMem = { id: string; gone: true }
+export type Change = { id: string; op: "merge" | "resolve" | "flag" | "stale" | "about" | "source"; state: "applied" | "undone" | "pending" | "confirmed" | "dismissed" | "stale" | "open" | "kept"; reason: string; mem: Mem | GoneMem; targets: (Mem | GoneMem)[]; after: Record<string, unknown>; created: number }
+export type ChangeRun = { run_id: string; href: string; title: string | null; writer: string; writer_name: string | null; at: number; changes: Change[] }
+export const isGone = (m: Mem | GoneMem): m is GoneMem => "gone" in m
 /** `record`, `why`, `scope`: what it would become and why it is worth keeping (ST-41; absent on older Hubs) */
 export type Candidate = { mem: Mem; origin: string; origin_label: string; evidence: string; supersedes: Mem | null; decision_id: string | null; record?: string; why?: string; scope?: string }
 export type ExpiredCandidate = { mem: Mem; origin_label: string; evidence: string; expired: number }
@@ -55,6 +73,16 @@ export const kb = {
   /** candidates that expired unanswered; `restore` puts one back for another 30 days */
   expired: () => get<ExpiredCandidate[]>("/kb/candidates/expired"),
   restore: (id: string) => req<{ ok: true }>("POST", `/kb/candidates/${enc(id)}/restore`),
+  subjects: () => get<Subject[]>("/kb/subjects"),
+  subject: (type: string, id: string) => get<SubjectDetail>(`/kb/subjects/${enc(type)}/${enc(id)}`),
+  providers: () => get<{ memory: MemProvider[]; store: string }>("/kb/providers"),
+  changes: (run?: string) => get<ChangeRun[]>("/kb/changes" + qs({ run })),
+  /** which schedule is the knowledge steward (the page set it up) */
+  steward: () => get<{ schedule_id: string | null }>("/kb/steward"),
+  setSteward: (schedule_id: string | null) => req<{ schedule_id: string | null }>("PUT", "/kb/steward", { schedule_id }),
+  undoChange: (id: string) => req<{ ok: true }>("POST", `/kb/changes/${enc(id)}/undo`),
+  /** answers a flagged conflict: `keep` holds and the others go stale, `null` keeps them all */
+  keepChange: (id: string, keep: string | null) => req<{ ok: true }>("POST", `/kb/changes/${enc(id)}/keep`, { keep }),
   uses: (consumer_type: "session" | "chat", consumer_id: string) => get<{ hits: Use[] }>("/kb/uses" + qs({ consumer_type, consumer_id })),
 }
 

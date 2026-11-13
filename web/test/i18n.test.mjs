@@ -130,6 +130,7 @@ const ALLOW = {
   "view-shared.tsx": [["高", "今天", "无", "明天", "周五", "下周一"], `priority and due values (labels via t()): ${HUB}`],
   "stats/overview.tsx": [["全部", "等你", "进行中"], "filter ids passed to views.showItems"],
   "knowledge/index.tsx": [["搜索", "长期记忆", "知识条目", "笔记与文档", "来源", "待确认"], "tab ids (labels via t()); 长期记忆/知识条目 are the Hub's record names"],
+  "knowledge/steward.tsx": [["每天", "每周日", "每月", "日"], "the steward's schedule phrases, which the Hub's rule parser reads"],
   "knowledge/parts.tsx": [["存为长期记忆吗？", "存为知识条目吗？", "记住这条吗？", "为什么值得保留："], "the Hub's question and reason prefixes, matched"],
   "mail/list.tsx": [["等你", "需要"], "matched in the Hub's outcome label"],
   "bot-page.tsx": [["设置", "概览", "对外身份", "能力", "系统提示词", "定时与流程", "记忆", "自己写", "自动生成"], "the Bot page's tab ids and prompt modes (manage.tsx's); every one is shown through t()"],

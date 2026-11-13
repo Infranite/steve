@@ -6,7 +6,7 @@
 import { useHubEvents } from "@/store"
 import { Fragment, useCallback, useEffect, useRef, useState, type ReactNode } from "react"
 import { cn } from "cn"
-import { FilePlusIcon, FolderPlusIcon, MoreHorizontalIcon, PlusIcon, RefreshCwIcon, SearchIcon, TrashIcon, UploadIcon } from "lucide-react"
+import { BotIcon, FilePlusIcon, FileTextIcon, FolderPlusIcon, MailIcon, MessagesSquareIcon, MoreHorizontalIcon, PlusIcon, PuzzleIcon, RefreshCwIcon, SearchIcon, SparklesIcon, TrashIcon, UploadIcon, UserIcon, UsersIcon, ZapIcon } from "lucide-react"
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
@@ -17,25 +17,29 @@ import { Spinner } from "@/components/ui/spinner"
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
 import { Field, FieldDescription, FieldGroup, FieldLabel } from "@/components/ui/field"
-import { Page, SectionLabel, Group, Row, Segmented, Chips, Empty, StatusDot, useScrollMore, go, DiscChevron, DISC_TRIGGER, SearchField } from "@/ui"
+import { Page, SectionLabel, Group, Panel, Row, Segmented, Chips, Empty, Blank, Meta, Tile, StatusDot, useScrollMore, go, DiscChevron, DISC_TRIGGER, SearchField } from "@/ui"
 import { toast, tm } from "@/store"
 import { useUploads } from "@/attach"
-import { kb, levelLabel, visLabel, memKind, recordOf, LONG_TERM, SOURCE_KIND, LEVEL_DOT, type Candidate, type ExpiredCandidate, type DocBrief, type Hit, type KbSource, type Mem } from "@/api/knowledge"
+import { kb, levelLabel, visLabel, memKind, recordOf, LONG_TERM, SOURCE_KIND, LEVEL_DOT, type Candidate, type ExpiredCandidate, type DocBrief, type Hit, type KbSource, type Mem, type MemProvider } from "@/api/knowledge"
 import { KbGate, LevelSel, META_SELECT, VisSel, errMsg } from "@/knowledge/fields"
 import { DocView, NoteView } from "@/knowledge/doc"
+import { SubjectsTab, SubjectView } from "@/knowledge/subjects"
+import { StewardTab } from "@/knowledge/steward"
+import { OriginLine, originText, parseSubject, savedLine } from "@/knowledge/origin"
 import { MemoryPanel, type Memory, type PanelText } from "@/components/affect/memory-panel"
-import { monthDayShort } from "@/i18n/format"
 import { t as tt, useT } from "@/i18n"
 
 /* tab values are ids (also data-seg / data-kb-tab); the labels come from knowledge:tab.* */
-type Tab = "搜索" | "长期记忆" | "知识条目" | "笔记与文档" | "来源" | "待确认"
+type Tab = "搜索" | "长期记忆" | "知识条目" | "subjects" | "笔记与文档" | "来源" | "待确认" | "steward"
 type RecordName = "长期记忆" | "知识条目"
 let tab: Tab = "长期记忆", query = "", tabHash = ""
 
-/** `#/knowledge`, `#/knowledge?mem=…`, `#/knowledge/doc/:id?seq=`, `#/knowledge/note/:id` */
+/** `#/knowledge`, `#/knowledge?mem=…`, `#/knowledge?tab=subjects|steward|pending`, `#/knowledge/doc/:id?seq=`,
+ *  `#/knowledge/note/:id`, `#/knowledge/about/<type>:<id>` */
 export function KnowledgeView({ sub, id }: { sub?: string; id?: string }) {
   const [docId] = (id ?? "").split("?")
-  return <KbGate>{sub === "doc" && docId ? <DocView id={docId} /> : sub === "note" && docId ? <NoteView id={docId} /> : <KnowledgeHome />}</KbGate>
+  const subject = sub === "about" ? parseSubject(docId) : null
+  return <KbGate>{sub === "doc" && docId ? <DocView id={docId} /> : sub === "note" && docId ? <NoteView id={docId} /> : subject ? <SubjectView key={docId} type={subject.type} id={subject.id} /> : <KnowledgeHome />}</KbGate>
 }
 
 const hashParam = (k: string) => new URLSearchParams(location.hash.split("?")[1] ?? "").get(k)
@@ -50,9 +54,10 @@ function KnowledgeHome() {
   const [, f] = useState(0), r = () => f((x) => x + 1)
   const focusMem = hashParam("mem")
   if (focusMem && tab !== "长期记忆" && tab !== "知识条目") tab = "长期记忆"
-  /* 待处理's line “N 条记忆待确认” opens the batch page (once per visit of that link) */
-  if (hashParam("tab") === "pending" && tabHash !== location.hash) { tab = "待确认"; tabHash = location.hash }
-  else if (hashParam("tab") !== "pending") tabHash = ""
+  /* 待处理's line “N 条记忆待确认” opens the batch page, a subject's back link the subjects (once per visit of that link) */
+  const linked = ({ pending: "待确认", subjects: "subjects", steward: "steward" } as const)[hashParam("tab") ?? ""] as Tab | undefined
+  if (linked && tabHash !== location.hash) { tab = linked; tabHash = location.hash }
+  else if (!linked) tabHash = ""
   const [pend, setPend] = useState(0)
   const loadPend = useCallback(() => { kb.candidates().then((xs) => setPend(xs.length), () => {}) }, [])
   useEffect(loadPend, [loadPend])
@@ -61,8 +66,9 @@ function KnowledgeHome() {
   /* six tabs run past a phone's width: the cut edge fades, and the open tab scrolls into view */
   const [tabsRef, tabsMore] = useScrollMore<HTMLDivElement>("x")
   useEffect(() => { tabsRef.current?.querySelector<HTMLElement>(`[data-seg="${CSS.escape(tab)}"]`)?.scrollIntoView({ block: "nearest", inline: "nearest" }) }, [tab])
-  const opts = [["搜索", t("knowledge:tab.search")], ["长期记忆", t("knowledge:tab.mems")], ["知识条目", t("knowledge:tab.entries")], ["笔记与文档", t("knowledge:tab.docs")], ["来源", t("knowledge:tab.sources")],
-    ["待确认", <span key="p" className="inline-flex items-center gap-1">{t("knowledge:tab.pending")}{pend > 0 && <span className="rounded-full bg-attention/14 px-1.5 type-label tabular-nums text-attention" data-pending-count>{pend}</span>}</span>, t("knowledge:tab.pending")]] as const
+  const opts = [["搜索", t("knowledge:tab.search")], ["长期记忆", t("knowledge:tab.mems")], ["知识条目", t("knowledge:tab.entries")], ["subjects", t("knowledge:tab.subjects")], ["笔记与文档", t("knowledge:tab.docs")], ["来源", t("knowledge:tab.sources")],
+    ["待确认", <span key="p" className="inline-flex items-center gap-1">{t("knowledge:tab.pending")}{pend > 0 && <span className="rounded-full bg-attention/14 px-1.5 type-label tabular-nums text-attention" data-pending-count>{pend}</span>}</span>, t("knowledge:tab.pending")],
+    ["steward", t("knowledge:tab.steward")]] as const
   return (
     <Page title={t("knowledge:page.title")} sub={t("knowledge:page.sub")} max={760}>
       <div className="flex flex-col gap-5">
@@ -71,9 +77,11 @@ function KnowledgeHome() {
         <div key={tab} className="anim-in" data-kb-tab={tab}>
           {tab === "搜索" && <SearchTab q={query} />}
           {(tab === "长期记忆" || tab === "知识条目") && <MemsTab key={tab} record={tab} focus={focusMem} onRecord={setTab} />}
+          {tab === "subjects" && <SubjectsTab />}
           {tab === "笔记与文档" && <DocsTab />}
           {tab === "来源" && <SourcesTab />}
           {tab === "待确认" && <CandidatesTab onChange={setPend} />}
+          {tab === "steward" && <StewardTab />}
         </div>
       </div>
     </Page>
@@ -135,7 +143,6 @@ const RECORD: Record<RecordName, { kind: string; key: "mem" | "entry" }> = {
 }
 /** the tab a memory of `kind` lives on (an id; `recordOf` is its label in the UI language) */
 const recordTab = (kind: string): RecordName => (LONG_TERM.includes(kind) ? "长期记忆" : "知识条目")
-const aboutName = (a: Mem["about"][number]) => a.name ?? (a.type === "party" ? tt("knowledge:mems.aboutParty", { id: a.id }) : a.type === "item" ? tt("knowledge:mems.aboutItem", { id: a.id }) : a.id)
 /** the kinds each record keeps, in the order the panel groups them; the first is what a new one becomes */
 const KINDS: Record<RecordName, string[]> = { 长期记忆: ["rule", "preference"], 知识条目: ["fact", "event", "summary"] }
 /** how long a forgotten memory can still come back before the Hub deletes it */
@@ -211,9 +218,10 @@ function MemsTab({ record, focus, onRecord }: { record: RecordName; focus: strin
   const byId = new Map(mine.map((m) => [m.id, m]))
   const memories: Memory[] = mine.map((m) => ({
     id: m.id, text: m.text, category: memKind(m.kind), paused: m.status === "stale",
-    source: [m.about.length ? tt("knowledge:mems.aboutLabel", { names: m.about.map(aboutName).join(tt("knowledge:listSep")) }) : "", t("knowledge:panel.source", { source: m.source_label || t("knowledge:mems.youWrote") })].filter(Boolean).join(" · "),
-    /* labelled: a source like "11-12 的对话" carries its own date */
-    date: m.created ? t("knowledge:panel.saved", { date: monthDayShort(m.created) }) : undefined,
+    /* what it is about and where it came from, each a link (the subject's page, the conversation, item or session) */
+    source: originText(m), sourceNode: <span data-mem-origin><OriginLine m={m} /></span>,
+    /* labelled: a source like "11-12 的对话" carries its own date; then how often it was used */
+    date: savedLine(m) || undefined,
     tag: m.status === "candidate" ? t("knowledge:mems.pending") : undefined, canPause: m.status !== "candidate",
   }))
   return (
@@ -312,15 +320,20 @@ const statsLine = (s: KbSource) => {
   /* a scan that could not see everything deletes nothing */
   if (x.kept) parts.push(tt("knowledge:sources.kept", { count: x.kept })); else if (x.incomplete?.length) parts.push(tt("knowledge:sources.incomplete"))
   /* built-in sources follow their objects as they change; only folders are scanned */
-  if (s.status === "syncing") parts.push(tt("knowledge:sources.syncing")); else if (s.last_sync) parts.push(tt("knowledge:sources.lastSync", { time: tm(s.last_sync) })); else if (!s.builtin) parts.push(tt("knowledge:sources.neverSynced"))
+  if (s.status === "syncing") parts.push(tt("knowledge:sources.syncing")); else if (s.last_sync) parts.push(tt("knowledge:sources.lastSync", { time: tm(s.last_sync) })); else if (!s.builtin) parts.push(tt("knowledge:sources.neverSynced")); else parts.push(tt("knowledge:sources.live"))
   return parts.join(" · ")
 }
+/** a source's state in words, with its dot: 正常, 同步中, 出错, 已暂停 */
+const sourceState = (s: KbSource): [string, string] => (s.paused ? ["idle", tt("knowledge:sources.state.paused")] : s.status === "error" ? ["fail", tt("knowledge:sources.state.error")] : s.status === "syncing" ? ["run", tt("knowledge:sources.state.syncing")] : ["done", tt("knowledge:sources.state.ok")])
 function SourcesTab() {
   const t = useT()
   const [xs, setXs] = useState<KbSource[] | null>(null), [err, setErr] = useState(""), [folder, setFolder] = useState(false)
+  const [prov, setProv] = useState<{ memory: MemProvider[]; store: string } | null>(null)
   const load = useCallback(() => kb.sources().then(setXs, (e) => setErr(errMsg(e))), [])
-  useEffect(() => { void load() }, [load])
+  const loadProv = useCallback(() => kb.providers().then(setProv, () => setProv(null)), [])
+  useEffect(() => { void load(); void loadProv() }, [load, loadProv])
   useHubEvents(["kb"], () => void load())
+  useHubEvents(["mm"], () => void loadProv())
   /* a scan runs in the background: poll while one is going */
   const syncing = xs?.some((s) => s.status === "syncing")
   useEffect(() => { if (!syncing) return; const iv = setInterval(() => void load(), 2000); return () => clearInterval(iv) }, [syncing, load])
@@ -328,30 +341,57 @@ function SourcesTab() {
   const sync = async (s: KbSource) => { try { await kb.sync(s.id); toast(t("knowledge:sources.syncStarted")); setTimeout(() => void load(), 300) } catch (e) { toast(errMsg(e)) } }
   const remove = async (s: KbSource) => { try { await kb.deleteSource(s.id); toast(t("knowledge:sources.removed")); void load() } catch (e) { toast(errMsg(e)) } }
   return (
-    <div className="flex flex-col gap-5">
-      <div className="flex flex-wrap justify-end gap-2"><AddFiles onDone={() => void load()} /><Button size="sm" onClick={() => setFolder(true)} data-add-folder><FolderPlusIcon />{t("knowledge:sources.addFolder")}</Button></div>
-      {err ? <Empty title={t("knowledge:sources.failed")} sub={err} /> : !xs ? <Loading /> :
-        <Group>{xs.map((s) => (
-          <Row key={s.id} data-source={s.id} data-source-kind={s.kind} className={cn(STACK, s.paused && "opacity-70")}
-            title={<span className="inline-flex flex-wrap items-center gap-2">{s.name}<span className="type-footnote text-muted-foreground">{SOURCE_KIND[s.kind] ?? s.kind}</span>{s.status === "error" && <Badge variant="destructive">{t("knowledge:sources.error")}</Badge>}</span>}
-            sub={<span className="flex flex-col"><span data-source-stats>{statsLine(s)}</span>{s.path && <span className="truncate font-mono">{s.path.replace(/^\/Users\/[^/]+/, "~")}</span>}{s.error && <span className="text-destructive">{s.error}</span>}</span>}>
-            <span className="flex flex-wrap items-center justify-end gap-0.5 max-sm:justify-start">
-              <LevelSel v={s.level} on={(l) => l && void patch(s, { level: l }, t("knowledge:sources.levelChanged"))} testId={"src-level-" + s.id} className={cn(META_SELECT, "h-7! px-2 hover:bg-accent")} />
-              <VisSel v={s.visibility} on={(x) => void patch(s, { visibility: x })} testId={"src-vis-" + s.id} className={cn(META_SELECT, "h-7! px-2 hover:bg-accent")} />
-              <Switch checked={!s.paused} onCheckedChange={(on) => void patch(s, { paused: !on }, on ? t("knowledge:sources.resumed") : t("knowledge:sources.paused"))} aria-label={s.paused ? t("knowledge:sources.resumeAria", { name: s.name }) : t("knowledge:sources.pauseAria", { name: s.name })} className="ml-1" data-source-on />
-              {s.kind === "folder" && <DropdownMenu>
-                <DropdownMenuTrigger render={<Button variant="ghost" size="icon-xs" aria-label={t("knowledge:sources.moreAria", { name: s.name })} className="text-muted-foreground" data-source-menu />}><MoreHorizontalIcon /></DropdownMenuTrigger>
-                <DropdownMenuContent align="end" className="min-w-36">
-                  <DropdownMenuItem disabled={s.status === "syncing" || s.paused} onClick={() => void sync(s)} data-source-sync><RefreshCwIcon />{t("knowledge:sources.syncNow")}</DropdownMenuItem>
-                  <DropdownMenuSeparator />
-                  <DropdownMenuItem variant="destructive" onClick={() => void remove(s)} data-source-del><TrashIcon />{t("knowledge:sources.remove")}</DropdownMenuItem>
-                </DropdownMenuContent>
-              </DropdownMenu>}
-            </span>
-          </Row>))}</Group>}
-      <div className="-mt-3 type-footnote text-muted-foreground">{t("knowledge:sources.footer")}</div>
+    <div className="flex flex-col gap-6">
+      <section>
+        <SectionLabel right={<span className="flex flex-wrap justify-end gap-2"><AddFiles onDone={() => void load()} /><Button size="sm" onClick={() => setFolder(true)} data-add-folder><FolderPlusIcon />{t("knowledge:sources.addFolder")}</Button></span>}>{t("knowledge:sources.docsTitle")}</SectionLabel>
+        {err ? <Empty title={t("knowledge:sources.failed")} sub={err} /> : !xs ? <Loading /> :
+          <Panel>{xs.map((s) => { const [dot, state] = sourceState(s); return (
+            <Row key={s.id} data-source={s.id} data-source-kind={s.kind} data-source-state={s.paused ? "paused" : s.status} className={cn(STACK, s.paused && "opacity-70")}
+              title={<span className="inline-flex flex-wrap items-center gap-x-2 gap-y-0.5">{s.name}<span className="type-footnote text-muted-foreground">{SOURCE_KIND[s.kind] ?? s.kind}</span></span>}
+              sub={<span className="flex flex-col gap-0.5"><span className="inline-flex flex-wrap items-center gap-x-1.5"><span className="inline-flex items-center gap-1" data-source-status><StatusDot s={dot} />{state}</span><span aria-hidden>·</span><span data-source-stats>{statsLine(s)}</span></span>{s.path && <span className="truncate font-mono">{s.path.replace(/^\/Users\/[^/]+/, "~")}</span>}{s.error && <span className="break-words text-destructive" data-source-error>{s.error}</span>}</span>}>
+              <span className="flex flex-wrap items-center justify-end gap-0.5 max-sm:justify-start">
+                <LevelSel v={s.level} on={(l) => l && void patch(s, { level: l }, t("knowledge:sources.levelChanged"))} testId={"src-level-" + s.id} className={cn(META_SELECT, "h-7! px-2 hover:bg-accent")} />
+                <VisSel v={s.visibility} on={(x) => void patch(s, { visibility: x })} testId={"src-vis-" + s.id} className={cn(META_SELECT, "h-7! px-2 hover:bg-accent")} />
+                <Switch checked={!s.paused} onCheckedChange={(on) => void patch(s, { paused: !on }, on ? t("knowledge:sources.resumed") : t("knowledge:sources.paused"))} aria-label={s.paused ? t("knowledge:sources.resumeAria", { name: s.name }) : t("knowledge:sources.pauseAria", { name: s.name })} className="ml-1" data-source-on />
+                {s.kind === "folder" && <DropdownMenu>
+                  <DropdownMenuTrigger render={<Button variant="ghost" size="icon-xs" aria-label={t("knowledge:sources.moreAria", { name: s.name })} className="text-muted-foreground" data-source-menu />}><MoreHorizontalIcon /></DropdownMenuTrigger>
+                  <DropdownMenuContent align="end" className="min-w-36">
+                    <DropdownMenuItem disabled={s.status === "syncing" || s.paused} onClick={() => void sync(s)} data-source-sync><RefreshCwIcon />{t("knowledge:sources.syncNow")}</DropdownMenuItem>
+                    <DropdownMenuSeparator />
+                    <DropdownMenuItem variant="destructive" onClick={() => void remove(s)} data-source-del><TrashIcon />{t("knowledge:sources.remove")}</DropdownMenuItem>
+                  </DropdownMenuContent>
+                </DropdownMenu>}
+              </span>
+            </Row>) })}</Panel>}
+        <div className="mt-2 px-1 type-footnote text-muted-foreground">{t("knowledge:sources.footer")}</div>
+      </section>
+      {prov && <MemProviders prov={prov} />}
       <FolderDialog open={folder} onClose={() => setFolder(false)} onDone={() => void load()} />
     </div>
+  )
+}
+
+/** who writes the memories: you, the conversation, items, agents, Bots, plugins — with how many each wrote and how
+ *  many still wait for you */
+const PROVIDER_ICON: Record<string, typeof UserIcon> = { you: UserIcon, conversation: MessagesSquareIcon, item: FileTextIcon, agent: BotIcon, mail: MailIcon, space: UsersIcon, event: ZapIcon, plugin: PuzzleIcon }
+const providerName = (p: MemProvider) => {
+  const k = ["you", "conversation", "item", "agent", "mail", "space", "event", "plugin"].includes(p.kind) ? p.kind : "other"
+  return tt(`knowledge:sources.provider.${k as "you"}`)
+}
+function MemProviders({ prov }: { prov: { memory: MemProvider[]; store: string } }) {
+  const t = useT()
+  return (
+    <section data-mem-providers>
+      <SectionLabel>{t("knowledge:sources.memTitle")}</SectionLabel>
+      {!prov.memory.length ? <Blank>{t("knowledge:sources.memNone")}</Blank> :
+        <Panel>{prov.memory.map((p) => (
+          <Row key={p.kind + p.writer} data-provider={p.kind} icon={<Tile I={PROVIDER_ICON[p.kind] ?? SparklesIcon} />}
+            title={<span className="inline-flex flex-wrap items-baseline gap-x-2">{providerName(p)}{p.writer_name && p.kind !== "you" && <span className="type-footnote text-muted-foreground">{t("knowledge:origin.by", { name: p.writer_name })}</span>}</span>}
+            sub={<Meta inline><span>{t("knowledge:sources.memCount", { count: p.count })}</span>{p.candidates > 0 && <span className="text-attention">{t("knowledge:subject.pending", { count: p.candidates })}</span>}{p.stale > 0 && <span>{t("knowledge:sources.memStale", { count: p.stale })}</span>}{p.last > 0 && <span>{t("knowledge:sources.memLast", { time: tm(p.last) })}</span>}</Meta>}>
+            <span className="type-callout tabular-nums text-muted-foreground">{p.confirmed}</span>
+          </Row>))}</Panel>}
+      <div className="mt-2 px-1 type-footnote text-muted-foreground" data-kb-store={prov.store}>{t(prov.store === "openviking" ? "knowledge:sources.storeOv" : "knowledge:sources.storeBuiltin")} {t("knowledge:sources.memFooter")}</div>
+    </section>
   )
 }
 
@@ -433,7 +473,7 @@ function CandidatesTab({ onChange }: { onChange: (n: number) => void }) {
       <Group>{xs.map((c) => (
         <Row key={c.mem.id} data-candidate={c.mem.id} className={STACK}
           title={<span className="inline-flex flex-wrap items-center gap-2">{c.mem.text}<Badge variant="secondary" className="text-muted-foreground" data-cand-record>{c.record ?? recordOf(c.mem.kind)}</Badge></span>}
-          sub={<span className="flex flex-col gap-0.5"><span>{t("knowledge:cand.source", { kind: memKind(c.mem.kind), source: c.origin_label || c.mem.source_label })}</span>{c.why && <span className="break-words text-foreground/80" data-cand-why>{t("knowledge:cand.why", { why: c.why })}</span>}{c.scope && <span className="break-words">{t("knowledge:cand.scope", { scope: c.scope })}</span>}{c.evidence && <span className="break-words">{t("knowledge:cand.evidence", { evidence: c.evidence })}</span>}{c.supersedes && <span className="break-words">{t("knowledge:cand.supersedes", { text: c.supersedes.text })}</span>}</span>}>
+          sub={<span className="flex flex-col gap-0.5"><span data-cand-origin>{memKind(c.mem.kind)}<span aria-hidden> · </span><OriginLine m={c.origin_label && !c.mem.origin ? { ...c.mem, source_label: c.origin_label } : c.mem} /></span>{c.why && <span className="break-words text-foreground/80" data-cand-why>{t("knowledge:cand.why", { why: c.why })}</span>}{c.scope && <span className="break-words">{t("knowledge:cand.scope", { scope: c.scope })}</span>}{c.evidence && <span className="break-words">{t("knowledge:cand.evidence", { evidence: c.evidence })}</span>}{c.supersedes && <span className="break-words">{t("knowledge:cand.supersedes", { text: c.supersedes.text })}</span>}</span>}>
           <span className="flex items-center gap-1">
             <Button size="xs" variant="ghost" className="text-muted-foreground" disabled={busy} onClick={() => void resolve([c.mem.id], "no")} data-cand-no>{t("knowledge:cand.no")}</Button>
             <Button size="xs" variant="outline" disabled={busy} onClick={() => void resolve([c.mem.id], "yes")} data-cand-yes>{t("common:action.save")}</Button>

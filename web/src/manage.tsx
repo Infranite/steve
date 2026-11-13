@@ -152,7 +152,7 @@ export function DeleteBotDialog({ k }: { k: string }) {
 }
 /* starter bots: [id, harness, model]; the name, role and rules come from manage:tpl in the UI language */
 /* a template runs on the harness a new bot gets (the first that is ready) and its default model */
-const TEMPLATES = ["review", "research", "writing"] as const
+const TEMPLATES = ["review", "research", "writing", "knowledge"] as const
 type TplId = (typeof TEMPLATES)[number]
 const tplText = (t: T, id: TplId) => ({ name: t(`manage:tpl.${id}Name`), role: t(`manage:tpl.${id}Role`), rule: t(`manage:tpl.${id}Rule`) })
 export function NewBotDialog() {

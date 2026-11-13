@@ -823,9 +823,15 @@ async fn knowledge_note_is_found_over_http_and_mcp() {
         "steve_knowledge_search",
         "steve_knowledge_read",
         "steve_remember",
+        "steve_memory_list",
+        "steve_memory_tidy",
     ] {
         assert!(list.contains(t), "{t} missing: {list}");
     }
+    // the memory upkeep tools answer over the same endpoint
+    let (s, out) = mcp(json!({ "jsonrpc": "2.0", "id": 9, "method": "tools/call", "params": { "name": "steve_memory_list", "arguments": {} } })).await;
+    assert_eq!(s, 200, "{out}");
+    assert!(out.contains("memories"), "{out}");
     // the item was raised by the logged-in user, so the session sees their private note
     let (s, out) = mcp(json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": { "name": "steve_knowledge_search", "arguments": { "query": "灰度验证" } } })).await;
     assert_eq!(s, 200, "{out}");

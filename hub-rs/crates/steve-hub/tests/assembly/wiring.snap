@@ -64,11 +64,16 @@ api GET /github/repos/x
 api GET /items/x/people
 api GET /kb/candidates
 api GET /kb/candidates/expired
+api GET /kb/changes
 api GET /kb/docs
 api GET /kb/docs/x
 api GET /kb/mems
+api GET /kb/providers
 api GET /kb/search
 api GET /kb/sources
+api GET /kb/steward
+api GET /kb/subjects
+api GET /kb/subjects/x/x
 api GET /kb/uses
 api GET /mail/accounts
 api GET /mail/drafts/x
@@ -190,6 +195,8 @@ api POST /github/repos/x/sync
 api POST /items/x/people
 api POST /kb/candidates/resolve
 api POST /kb/candidates/x/restore
+api POST /kb/changes/x/keep
+api POST /kb/changes/x/undo
 api POST /kb/files
 api POST /kb/mems
 api POST /kb/notes
@@ -240,6 +247,7 @@ api PUT /connections/x/credential
 api PUT /flow-settings/allow-private
 api PUT /flows/x
 api PUT /kb/notes/x
+api PUT /kb/steward
 api PUT /mail/drafts/x
 api PUT /stats/prices
 api PUT /stats/tz

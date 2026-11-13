@@ -41,6 +41,8 @@ export type Memory = {
   /** Kept, but not used in answers */
   paused?: boolean;
   /* Steve: */
+  /** The source as links (what it is about, where it came from); `source` stays its plain text */
+  sourceNode?: ReactNode;
   /** A quiet tag after the source, e.g. "Waiting for you" */
   tag?: string;
   /** false: no pause button (e.g. a candidate that is confirmed elsewhere) */
@@ -350,7 +352,7 @@ const Row = memo(function Row({
             <span className="ui-mpc__source">
               {m.source && (
                 <span className="ui-mpc__source-name" dir="auto" title={m.source}>
-                  {m.source}
+                  {m.sourceNode ?? m.source}
                 </span>
               )}
               {m.source && m.date && <span className="ui-mpc__dot"> · </span>}

@@ -355,3 +355,14 @@ async fn resolve_flag_stale_and_about_are_listed_and_undoable() {
     assert_eq!(s, 200);
     assert_eq!(e.changes().await[0]["changes"][3]["state"], "dismissed");
 }
+
+#[tokio::test]
+async fn the_page_remembers_which_schedule_is_the_steward() {
+    let e = setup();
+    let (_, v) = e.me("GET", "/kb/steward", None).await;
+    assert_eq!(v, json!({"schedule_id": null}));
+    let (s, _) = e.me("PUT", "/kb/steward", Some(json!({"schedule_id": "fl_1"}))).await;
+    assert_eq!(s, 200);
+    let (_, v) = e.me("GET", "/kb/steward", None).await;
+    assert_eq!(v["schedule_id"], "fl_1");
+}

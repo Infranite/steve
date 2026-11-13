@@ -425,6 +425,47 @@ pub fn routes() -> Router<Modules> {
         .route("/kb/changes", get(changes_route))
         .route("/kb/changes/{id}/undo", post(undo_route))
         .route("/kb/changes/{id}/keep", post(keep_route))
+        .route("/kb/steward", get(steward_get).put(steward_put))
+}
+
+/// Which schedule is the knowledge steward (`kb_marks`): the page sets it up from the Bot and schedule
+/// templates and finds it here again. Only a pointer; the schedule itself is an ordinary one.
+const STEWARD_MARK: &str = "steward:schedule";
+
+#[derive(Debug, Deserialize)]
+pub struct StewardBody {
+    #[serde(default)]
+    pub schedule_id: Option<String>,
+}
+
+async fn steward_get(State(m): State<Modules>, who: Caller) -> ApiResult<Json<Value>> {
+    m.blocking(move |m| {
+        let id = m
+            .store
+            .reader(|c| crate::repo::mark(c, &who.ws, STEWARD_MARK))?;
+        Ok(Json(json!({ "schedule_id": id.filter(|x| !x.is_empty()) })))
+    })
+    .await
+}
+
+async fn steward_put(
+    State(m): State<Modules>,
+    who: Caller,
+    Body(b): Body<StewardBody>,
+) -> ApiResult<Json<Value>> {
+    m.blocking(move |m| {
+        let id = b.schedule_id.unwrap_or_default();
+        if id.chars().count() > 100 {
+            return Err(ApiError::invalid("schedule_id"));
+        }
+        let now = m.clock.now();
+        m.store
+            .transaction(|tx| crate::repo::set_mark(tx, &who.ws, STEWARD_MARK, &id, now))?;
+        Ok(Json(
+            json!({ "schedule_id": (!id.is_empty()).then_some(id) }),
+        ))
+    })
+    .await
 }
 
 #[derive(Debug, Default, Deserialize)]
