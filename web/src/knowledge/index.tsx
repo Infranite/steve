@@ -7,7 +7,6 @@ import { Fragment, useCallback, useEffect, useRef, useState, type ReactNode } fr
 import { cn } from "cn"
 import { FilePlusIcon, FolderPlusIcon, MoreHorizontalIcon, PlusIcon, RefreshCwIcon, SearchIcon, TrashIcon, UploadIcon, XIcon } from "lucide-react"
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible"
-import { Chevron, DISC_TRIGGER } from "@/integrations/kit"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import { Input } from "@/components/ui/input"
@@ -17,7 +16,7 @@ import { Spinner } from "@/components/ui/spinner"
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
 import { Field, FieldDescription, FieldGroup, FieldLabel } from "@/components/ui/field"
-import { Page, SectionLabel, Group, Row, Segmented, Chips, Empty, StatusDot, Meta, useScrollMore, go } from "@/ui"
+import { Page, SectionLabel, Group, Row, Segmented, Chips, Empty, StatusDot, Meta, useScrollMore, go, DiscChevron, DISC_TRIGGER } from "@/ui"
 import { toast, tm } from "@/store"
 import { useUploads } from "@/attach"
 import { kb, levelLabel, visLabel, memKind, recordOf, LONG_TERM, MEM_KINDS, SOURCE_KIND, LEVEL_DOT, type Candidate, type ExpiredCandidate, type DocBrief, type Hit, type KbSource, type Mem } from "@/api/knowledge"
@@ -404,7 +403,7 @@ function ExpiredCandidates({ onRestored }: { onRestored: () => void }) {
   }
   return (
     <Collapsible open={open} onOpenChange={setOpen} render={<section />} className="mt-6" data-cand-expired>
-      <CollapsibleTrigger className={DISC_TRIGGER + " type-footnote"} data-cand-expired-toggle><Chevron className="size-3" />{t("knowledge:cand.expired", { count: xs.length })}</CollapsibleTrigger>
+      <CollapsibleTrigger className={DISC_TRIGGER + " type-footnote"} data-cand-expired-toggle><DiscChevron className="size-3" />{t("knowledge:cand.expired", { count: xs.length })}</CollapsibleTrigger>
       <CollapsibleContent><Group className="pt-2">{xs.map((c) => (
         <Row key={c.mem.id} data-cand-expired-row={c.mem.id} className={STACK} title={c.mem.text}
           sub={<span className="flex flex-col gap-0.5"><span>{t("knowledge:cand.source", { kind: memKind(c.mem.kind), source: c.origin_label || c.mem.source_label })}</span>{c.evidence && <span className="break-words">{t("knowledge:cand.evidence", { evidence: c.evidence })}</span>}</span>}>

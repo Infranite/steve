@@ -8,10 +8,9 @@ import { Input } from "@/components/ui/input"
 import { Spinner } from "@/components/ui/spinner"
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible"
 import { Checkbox } from "@/components/ui/checkbox"
-import { Chevron, Disclosure, DISC_TRIGGER, SUMMARY } from "@/integrations/kit"
 import { Field, FieldDescription, FieldGroup, FieldLabel } from "@/components/ui/field"
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
-import { go, SectionLabel } from "@/ui"
+import { go, SectionLabel, DiscChevron, Disclosure, DISC_TRIGGER, SUMMARY } from "@/ui"
 import { Select, ChoiceCards } from "@/view-shared"
 import { toast } from "@/store"
 import { HubError } from "@/api"
@@ -53,7 +52,7 @@ export function PermissionList({ checks }: { checks: PermissionCheck[] | null })
       <ul className="flex flex-col divide-y rounded-xl bg-muted/60" aria-label={t("integrations:feishu.permissions")}>{rows.map((r) => { const [label, I, c] = STATUS[r.status] ?? STATUS.unknown, l = label(); return (
         <li key={r.scope} className="flex items-start gap-2.5 px-3.5 py-2.5" data-perm={r.scope} data-perm-status={r.status}>
           {checks ? <I className={"mt-0.5 size-4 shrink-0 " + c} aria-label={l} /> : <span className="mt-1.5 size-1.5 shrink-0 rounded-full bg-tertiary" aria-hidden />}
-          <div className="min-w-0 flex-1"><div className="type-callout">{r.purpose}</div><div className="type-footnote text-muted-foreground">{levelLabel(r.level)}{checks ? ` · ${l}` : ""}</div><details className="group/disc mt-1 type-footnote text-muted-foreground"><summary className={SUMMARY}><Chevron className="size-3" />{t("integrations:feishu.scopeId")}</summary><code className="mt-0.5 block break-all pl-4 font-mono">{r.scope}</code></details></div>
+          <div className="min-w-0 flex-1"><div className="type-callout">{r.purpose}</div><div className="type-footnote text-muted-foreground">{levelLabel(r.level)}{checks ? ` · ${l}` : ""}</div><details className="group/disc mt-1 type-footnote text-muted-foreground"><summary className={SUMMARY}><DiscChevron className="size-3" />{t("integrations:feishu.scopeId")}</summary><code className="mt-0.5 block break-all pl-4 font-mono">{r.scope}</code></details></div>
         </li>) })}</ul>
       {!checks && <div className="type-footnote text-muted-foreground">{t("integrations:feishu.staticNote")}</div>}
     </div>
@@ -124,7 +123,7 @@ export function FeishuConnectDialog({ bots, onClose, initial = "bot", side }: { 
           {personas.length > 0 && <Field orientation="horizontal" className="justify-between"><div><FieldLabel>{t("integrations:feishu.persona")}</FieldLabel><FieldDescription>{t("integrations:feishu.personaSub")}</FieldDescription></div>
             <Select align="end" testId="acc-persona" value={persona} onChange={setPersona} options={personas.map((p) => ({ v: p.id, l: p.name }))} /></Field>}
         </FieldGroup>
-        <Collapsible><CollapsibleTrigger className={DISC_TRIGGER} data-console-steps><Chevron />{t("integrations:feishu.consoleSteps")}</CollapsibleTrigger>
+        <Collapsible><CollapsibleTrigger className={DISC_TRIGGER} data-console-steps><DiscChevron />{t("integrations:feishu.consoleSteps")}</CollapsibleTrigger>
           <CollapsibleContent><div className="pt-3 flex flex-col gap-3">
             <ol className="list-decimal pl-5 type-callout text-muted-foreground">{consoleSteps().map((s) => <li key={s}>{s}</li>)}</ol>
             <PermissionList checks={null} />
@@ -135,7 +134,7 @@ export function FeishuConnectDialog({ bots, onClose, initial = "bot", side }: { 
       </form> : bots.length ? <FieldGroup className="gap-4">
         <Field orientation="horizontal" className="justify-between"><div><FieldLabel>{t("integrations:feishu.viaApp")}</FieldLabel><FieldDescription>{t("integrations:feishu.viaAppSub")}</FieldDescription></div>
           <Select align="end" testId="self-app" value={app} onChange={setApp} options={bots.map((a) => ({ v: a.id, l: a.name }))} /></Field>
-        <div className="type-footnote text-muted-foreground">{t("integrations:feishu.selfNote")}</div><details className="group/disc type-footnote text-muted-foreground"><summary className={SUMMARY}><Chevron className="size-3" />{t("integrations:feishu.showScopes")}</summary><div className="mt-0.5 pl-4">{userPerms()}</div></details>
+        <div className="type-footnote text-muted-foreground">{t("integrations:feishu.selfNote")}</div><details className="group/disc type-footnote text-muted-foreground"><summary className={SUMMARY}><DiscChevron className="size-3" />{t("integrations:feishu.showScopes")}</summary><div className="mt-0.5 pl-4">{userPerms()}</div></details>
       </FieldGroup> : <div className="rounded-xl bg-muted/60 px-4 py-3.5 type-callout text-muted-foreground">{t("integrations:feishu.botFirst")}</div>}
     </Modal>
   )
@@ -277,7 +276,7 @@ export function FeishuGuide({ adapters, bots, selfDone, callbackUrls }: { adapte
         <SelfButtons app={selected} variant="outline" side={side} />
       </div>
     </div>}
-    <Collapsible><CollapsibleTrigger className={DISC_TRIGGER + " text-left"}><Chevron />{t("integrations:feishu.advancedOAuth")}</CollapsibleTrigger>
+    <Collapsible><CollapsibleTrigger className={DISC_TRIGGER + " text-left"}><DiscChevron />{t("integrations:feishu.advancedOAuth")}</CollapsibleTrigger>
       <CollapsibleContent><div className="pt-3 flex flex-col gap-2 type-footnote text-muted-foreground">
         <p>{t("integrations:feishu.oauthNoUrl")}</p>
         {callbackUrls.length ? <>

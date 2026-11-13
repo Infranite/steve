@@ -14,8 +14,7 @@ import { toast } from "@/store"
 import { report } from "@/accounts/load"
 import { accountsApi, type RUsage } from "@/api/accounts"
 import { cleanupApi, LEVEL_TEXT, type CleanupLevel, type CleanupPlan, type CleanupTarget } from "@/api/cleanup"
-import { SectionLabel } from "@/ui"
-import { Chevron, SUMMARY } from "@/integrations/kit"
+import { SectionLabel, DiscChevron, SUMMARY } from "@/ui"
 
 /** one identity being disconnected: `stops` says what it no longer does */
 export type Leaving = { id: string; label: string; stops: string }
@@ -45,7 +44,7 @@ export function PlanSummary({ plan, level }: { plan: CleanupPlan; level: Cleanup
     <div className="flex flex-col gap-2 rounded-xl bg-muted/60 px-4 py-3 type-callout" data-cleanup-plan data-plan-spaces={plan.spaces} data-plan-messages={plan.messages} data-plan-contacts={plan.contacts} data-plan-kept={plan.kept_count}>
       <div>{sentence}</div>
       {(plan.decisions ?? 0) > 0 && <div className="type-footnote text-muted-foreground" data-cleanup-undo-note>{t("integrations:cleanup.undoNote")}</div>}
-      {plan.kept.length > 0 && <details className="group/disc type-footnote text-muted-foreground"><summary className={SUMMARY}><Chevron className="size-3" />{t("integrations:cleanup.showKept")}</summary>
+      {plan.kept.length > 0 && <details className="group/disc type-footnote text-muted-foreground"><summary className={SUMMARY}><DiscChevron className="size-3" />{t("integrations:cleanup.showKept")}</summary>
         <ul className="mt-1 flex max-h-40 flex-col gap-0.5 overflow-y-auto">{plan.kept.map((k) => <li key={k.kind + k.id}>{k.name || k.id} · {k.reason}</li>)}</ul></details>}
     </div>
   )

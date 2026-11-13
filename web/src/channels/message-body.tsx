@@ -1,6 +1,5 @@
 import { lazy, Suspense } from "react"
 import { ChartNoAxesColumnIcon, ExternalLinkIcon, ImageIcon, SquarePenIcon } from "lucide-react"
-import { Disclosure } from "@/integrations/kit"
 import { cardLink } from "@/channels/card-link"
 import { MessageResource } from "@/channels/message-resource"
 import type { ChanMessage } from "@/api/channels"
@@ -8,6 +7,7 @@ import { useT } from "@/i18n"
 
 const CardMarkdown = lazy(() => import("@/channels/card-markdown"))
 import type { CardAttachment, CardBlock } from "@/api/channel-content"
+import { Disclosure } from "@/ui"
 
 function Md({ text }: { text?: string }) {
   return text ? <Suspense fallback={<div className="whitespace-pre-wrap break-words">{text}</div>}><CardMarkdown text={text.slice(0, 8000)} /></Suspense> : null

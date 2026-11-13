@@ -1,0 +1,5 @@
+- Motion follows one scale everywhere: 120ms for colour and press, 180ms for menus, toggles and page changes, 260ms for dialogs, sheets and anything that expands or collapses. Every collapsible section now eases open and shut, and the composer's # @ / menu fades out instead of vanishing.
+- Settings, Bot, accounts, vault, automation and the connect pages share one set of cards, notices, status pills and section labels, so the same idea looks the same on every page. Selects, search fields and segmented filters use one muted style.
+- In a conversation, a finished turn is a single quiet line above the composer, and a long system notice reads as a muted note with an icon instead of a centred line. On a phone the run bar keeps the state and the time.
+- Lines of facts ("a · b · c") wrap without leaving a dot at the end or start of a line.
+- The Bot page shows the avatar beside the name; the "full access" confirmations use the attention colour; toasts and the ⌘K palette follow the same surface and type scale as the rest of the app.

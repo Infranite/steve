@@ -4,11 +4,10 @@
 import { useState } from "react"
 import { ExternalLinkIcon, LockIcon } from "lucide-react"
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible"
-import { Chevron, DISC_TRIGGER } from "@/integrations/kit"
 import { cn } from "cn"
 import { Input } from "@/components/ui/input"
 import { Field, FieldDescription, FieldLabel } from "@/components/ui/field"
-import { Chips } from "@/ui"
+import { Chips, DiscChevron, DISC_TRIGGER } from "@/ui"
 import { Select } from "@/view-shared"
 import { IMAP_PRESETS, type ImapPreset } from "@/api/mail"
 import type { RFieldDef } from "@/api/accounts"
@@ -59,7 +58,7 @@ export function ImapFields({ fields, vals, setVals }: { fields: RFieldDef[]; val
       {input("password")}
       <Collapsible open={open} onOpenChange={setOpen}>
         <CollapsibleTrigger className={cn(DISC_TRIGGER, "max-w-full")} data-imap-server-toggle>
-          <Chevron />{t("mail:connect.serverSettings")}
+          <DiscChevron />{t("mail:connect.serverSettings")}
           {!open && v("imap_host") && <span className="ml-1 truncate font-mono type-footnote">{v("imap_host")}:{v("imap_port")} · {v("smtp_host")}:{v("smtp_port")}</span>}
         </CollapsibleTrigger>
         <CollapsibleContent><div className="grid grid-cols-1 gap-4 p-px pt-3 sm:grid-cols-[1fr_96px_120px]" data-imap-server>
