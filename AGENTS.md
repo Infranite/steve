@@ -16,3 +16,10 @@ Read the "Development checks" and "Changes and releases" sections of `CONTRIBUTI
 - Ordinary installations consume trusted release artifacts without a source checkout, compiler, or upstream publishing credentials. Source modification and publication belong to an explicitly configured maintainer workflow.
 - Keep diagnosis and recovery usable when the Hub or model backend is unavailable. Acceptance must include clean supported installations with no access to a contributor's private services.
 - Keep implemented public contracts and operator instructions in the README, `docs/deployment.md`, release notes and code comments, following `CONTRIBUTING.md`. Private design notes must not be required to operate the software. Self-improvement remains a later direction, not a claim of implemented functionality.
+
+## UI components
+
+- affectUI (https://www.affectui.com, catalogue in `llms.txt`) is the first choice for UI. Before building a component, check whether an affectUI item covers it, and use it even where Steve already has its own version. Its `--aui-*` tokens follow Steve's theme through `web/src/styles/affectui-theme.css`.
+- Fetch items with `python3 scripts/affectui-pull.py <slug>` into `web/src/components/affect/`. Pro items need the maintainer's key (`AFFECTUI_TOKEN` or `~/.config/affectui/token`). Never commit the key.
+- Keep the notice the script writes on line 1 of every affectUI file. Pro files stay under the affectUI license, not Steve's. They may be adapted inside Steve but not published on their own.
+- Wire components to real Steve data. Don't add another component library for something affectUI covers.
