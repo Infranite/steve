@@ -224,7 +224,8 @@ function Relations({ s }: { s: Sess }) {
     if (i && x.parent?.item === i.id) down.push({ id: x.id, kind: "item", why: x.src[1] === "workflow" ? t("views:sessionPanel.why.flowChild") : t("views:sessionPanel.why.forked") })
     else if (x.parent?.s === s.id) down.push({ id: x.id, kind: "item", why: t("views:sessionPanel.why.fromHere") })
   }
-  for (const d of i?.dependents ?? []) if (find(d) && !down.some((r) => r.id === d)) down.push({ id: d, kind: "item", why: t("views:sessionPanel.why.dependent") })
+  /* what waits on the item: the items that list it among their prerequisites */
+  for (const x of st.items) if (i && x.deps?.includes(i.id) && !down.some((r) => r.id === x.id)) down.push({ id: x.id, kind: "item", why: t("views:sessionPanel.why.dependent") })
   for (const k of Object.keys(st.S)) if (k !== s.id && st.S[k].fork?.s === s.id) down.push({ id: k, kind: "sess", why: t("views:sessionPanel.why.sessionForked") })
   for (const k of i?.ss ?? []) if (k !== s.id && st.S[k]) same.push({ id: k, kind: "sess", why: st.S[k].title })
   const lonely = !up.length && !down.length && !same.length
