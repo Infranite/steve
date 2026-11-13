@@ -710,6 +710,8 @@ export default {
     childOf: "协作子项 · {{id}}",
     relationSep: "、",
     deps: "前置 {{done}}/{{total}}",
+    waitsOn: "等 {{id}}",
+    waitsOnMany: "等 {{id}} 等 {{count}} 件",
     high: "高",
     due: "截止 {{due}}",
     select: "选择 {{id}}",

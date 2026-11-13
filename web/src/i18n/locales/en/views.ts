@@ -167,7 +167,6 @@ export default {
     title: "Items",
     viewList: "List",
     viewBoard: "Board",
-    viewGraph: "Graph",
     viewCollab: "Collaboration",
     fleet: {
       title: "Items coordinating work", agents_one: "{{count}} item", agents_other: "{{count}} items", subs_one: "{{count}} step", subs_other: "{{count}} steps", noSubs: "No steps planned yet", empty: "No item is coordinating steps right now",
@@ -223,10 +222,6 @@ export default {
     archAuto_other: "Items done for {{count}} days are archived automatically, or archive them by hand.",
     emptyNoneSub: "Hand off a task in the conversation, or click “New item”.",
     due: "Due {{due}}",
-    graphAll: "Showing all items.",
-    graphFiltered: "Showing connected items; switch to show all.",
-    graphLinkedOnly: "Linked only",
-    graphShowAll: "Show all",
   },
   fork: {
     title: "Fork from here",

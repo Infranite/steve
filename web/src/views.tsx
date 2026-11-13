@@ -103,7 +103,7 @@ const ItemsFleet = lazy(() => import("@/items-collab").then((m) => ({ default: m
 /* view, filter and sort are keys; their labels are translated where they are rendered */
 type ItemsFilt = "all" | "wait" | "run" | "star" | "arch"
 type ItemsSort = "updated" | "due" | "pri" | "no"
-let itemsView: "list" | "board" | "graph" | "collab" = "list"; let filt: ItemsFilt = "all", q = "", showAll = false, botF = "all", sortBy: ItemsSort = "updated", tagF = "all", kindF = "all", projF = "all"
+let itemsView: "list" | "board" | "collab" = "list"; let filt: ItemsFilt = "all", q = "", botF = "all", sortBy: ItemsSort = "updated", tagF = "all", kindF = "all", projF = "all"
 const FILTS: ItemsFilt[] = ["all", "wait", "run", "star", "arch"]
 const filtLabel = (k: ItemsFilt) => tr(({ all: "views:items.filterAll", wait: "views:items.filterWait", run: "views:items.filterRun", star: "views:items.filterStar", arch: "views:items.filterArch" } as const)[k])
 const SORTS: ItemsSort[] = ["updated", "due", "pri", "no"]
@@ -129,7 +129,7 @@ export function ItemsView() {
   if (sortBy === "pri") xs = [...xs].sort((a, b) => PRI_ORDER[a.pri ?? "中"] - PRI_ORDER[b.pri ?? "中"])
   if (sortBy === "no") xs = [...xs].sort((a, b) => +b.id.split("-")[1] - +a.id.split("-")[1])
   const groups: [Item["st"], string][] = [["wait", t("views:items.groupWait")], ["prop", t("views:items.groupProp")], ["run", t("views:items.groupRun")], ["block", t("views:items.groupBlock")], ["pause", t("views:items.groupPause")], ["done", t("views:items.groupDone")], ["fail", t("views:items.groupFail")], ["drop", t("views:items.groupDrop")]]
-  const seg = <Segmented value={itemsView} onChange={(v) => { itemsView = v; selecting = false; selected.clear(); r() }} options={[["list", t("views:items.viewList")], ["board", t("views:items.viewBoard")], ["graph", t("views:items.viewGraph")], ["collab", t("views:items.viewCollab")]] as const} />
+  const seg = <Segmented value={itemsView} onChange={(v) => { itemsView = v; selecting = false; selected.clear(); r() }} options={[["list", t("views:items.viewList")], ["board", t("views:items.viewBoard")], ["collab", t("views:items.viewCollab")]] as const} />
   const pick = selecting ? (id: string) => () => { selected.has(id) ? selected.delete(id) : selected.add(id); r() } : () => undefined
   const ids = [...selected]
   const done = () => { selected.clear(); selecting = false; r() }
@@ -151,8 +151,7 @@ export function ItemsView() {
         </AlertDialogContent>
       </AlertDialog>
       <div className="mb-4 sm:hidden">{seg}</div>
-      {/* the graph draws every item's relations, so the list filters would only look like they apply */}
-      {itemsView !== "graph" && <div className="mb-6 flex items-center gap-1 max-sm:-mx-4 max-sm:overflow-x-auto max-sm:px-4 max-sm:[scrollbar-width:none] sm:flex-wrap [&>*]:shrink-0" data-items-toolbar>
+      <div className="mb-6 flex items-center gap-1 max-sm:-mx-4 max-sm:overflow-x-auto max-sm:px-4 max-sm:[scrollbar-width:none] sm:flex-wrap [&>*]:shrink-0" data-items-toolbar>
         <Chips value={filtLabel(filt)} onChange={(v) => { filt = FILTS.find((k) => filtLabel(k) === v) ?? "all"; done() }} options={FILTS.map(filtLabel)} />
         <span className="flex-1 max-sm:hidden" />
         <Select quiet className={FILTER(kindF !== "all")} testId="kind-filter" value={tag(kindF) ? kindF : "all"} onChange={(v) => { kindF = v; r() }} options={[{ v: "all", l: t("views:items.allKinds") }, ...kindTags().map((x) => ({ v: x.id, l: <KindTag id={x.id} className="border-0 bg-transparent px-0" /> }))]} />
@@ -161,7 +160,7 @@ export function ItemsView() {
         <Select quiet className={FILTER(botF !== "all")} testId="bot-filter" value={botF} onChange={(v) => { botF = v; r() }} options={[{ v: "all", l: t("views:items.allBots") }, ...Object.keys(st.bots).map((k) => ({ v: k, l: <BotName k={k} /> }))]} />
         {itemsView === "list" && <Select quiet className={FILTER(sortBy !== "updated")} testId="sort" value={sortBy} onChange={(v) => { sortBy = v as ItemsSort; r() }} options={SORTS.map((v) => ({ v, l: sortLabel(v) }))} />}
         <Input prefix={<SearchIcon className="size-3.5" />} className={cn("steve-collapse-search h-7 type-callout", q ? "w-40" : "w-7 focus-within:w-40")} placeholder={t("views:items.search")} aria-label={t("views:items.search")} data-items-search defaultValue={q} onChange={(e) => { q = e.target.value; r() }} />
-      </div>}
+      </div>
       {selecting && (
         <div className="anim-in sticky top-2 z-10 mb-6 flex flex-wrap items-center gap-2 rounded-xl bg-popover/95 px-3 py-2 shadow-md backdrop-blur-xl" data-bulk-bar>
           <span className="type-callout font-medium tabular-nums">{t("views:items.selected", { count: ids.length })}</span>
@@ -185,13 +184,6 @@ export function ItemsView() {
         : <Empty title={arch ? t("views:items.emptyArch") : st.items.length ? t("views:items.emptyFiltered") : t("views:items.emptyNone")} sub={arch ? (st.cfg.archDays === "0" ? t("views:items.archManual") : t("views:items.archAuto", { count: Number(st.cfg.archDays) })) : st.items.length ? undefined : t("views:items.emptyNoneSub")} />)}
       {itemsView === "board" && <ItemsBoard xs={xs} cap={CLOSED_SHOWN} />}
       {itemsView === "collab" && <Suspense fallback={<div className="flex justify-center py-16"><Spinner className="size-4" /></div>}><ItemsFleet xs={xs} /></Suspense>}
-      {itemsView === "graph" && (
-        <div className="flex flex-col gap-4">
-          <GraphLegend />
-          <RelationGraph scope="all" hideSimple={!showAll} height={560} onOpen={openNode} />
-          <div className="flex flex-wrap items-center gap-2 type-callout text-muted-foreground">{showAll ? t("views:items.graphAll") : t("views:items.graphFiltered")}<Button size="xs" variant="ghost" className="text-foreground/80" onClick={() => { showAll = !showAll; r() }}>{showAll ? t("views:items.graphLinkedOnly") : t("views:items.graphShowAll")}</Button></div>
-        </div>
-      )}
       </div>
     </Page>
   )

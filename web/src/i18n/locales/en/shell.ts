@@ -737,6 +737,8 @@ export default {
     childOf: "Workflow child of {{id}}",
     relationSep: ", ",
     deps: "Prerequisites {{done}}/{{total}}",
+    waitsOn: "waits on {{id}}",
+    waitsOnMany: "waits on {{id}} +{{count}}",
     high: "High",
     due: "Due {{due}}",
     select: "Select {{id}}",

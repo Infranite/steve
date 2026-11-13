@@ -62,7 +62,8 @@ export function ItemRow({ i, pick, proj = true, bot = true }: { i: Item; pick?: 
     i.ss.length > 1 && <span key="ss" className="shrink-0 whitespace-nowrap">{t("shell:item.sessions", { count: i.ss.length })}</span>,
     i.q.length > 0 && <span key="q" className="shrink-0 whitespace-nowrap">{t("shell:item.queued", { count: i.q.length })}</span>,
     i.parent && <span key="p" className="inline-flex shrink-0 items-center gap-1 whitespace-nowrap"><GitBranchIcon className="size-3" />{t("shell:item.forked")}</span>,
-    !!i.deps?.length && <span key="d" className="shrink-0 whitespace-nowrap">{t("shell:item.deps", { done: i.deps.length - depsOpen(i).length, total: i.deps.length })}</span>,
+    /* an open item names what it is still waiting for; once nothing is in its way the relation is history and stays on the item page */
+    !closed && depsOpen(i).length > 0 && <span key="d" className="shrink-0 whitespace-nowrap" title={depsOpen(i).map((d) => `${d} ${st.items.find((x) => x.id === d)?.t ?? ""}`).join("\n")} data-waits-on>{depsOpen(i).length > 1 ? t("shell:item.waitsOnMany", { id: depsOpen(i)[0], count: depsOpen(i).length }) : t("shell:item.waitsOn", { id: depsOpen(i)[0] })}</span>,
   ].filter(Boolean)
   /* a list row carries one tag, its kind, as quiet text (colour stays for status); the rest are in its hover title and
    * on the item page */

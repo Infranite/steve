@@ -157,7 +157,6 @@ export default {
     title: "事项",
     viewList: "列表",
     viewBoard: "看板",
-    viewGraph: "关系图",
     viewCollab: "协作",
     fleet: {
       title: "协作中的事项", agents_other: "{{count}} 个事项", subs_other: "{{count}} 步", noSubs: "还没有拆出步骤", empty: "现在没有在协调多步工作的事项",
@@ -210,10 +209,6 @@ export default {
     archAuto_other: "完成满 {{count}} 天的事项会自动归档，也可以手动归档。",
     emptyNoneSub: "在对话里交代一件事，或者点“新事项”。",
     due: "截止 {{due}}",
-    graphAll: "已显示全部事项。",
-    graphFiltered: "只显示有关联的事项；可切换为全部显示。",
-    graphLinkedOnly: "只看有关联的",
-    graphShowAll: "全部显示",
   },
   fork: {
     title: "从这条派生",
