@@ -44,7 +44,6 @@ const ProjectsView = lazyView(() => import("@/projects").then((m) => ({ default:
 const ProjectView = lazyView(() => import("@/projects").then((m) => ({ default: m.ProjectView })))
 const NewProjectDialog = lazyView(() => import("@/projects").then((m) => ({ default: m.NewProjectDialog })))
 const NewWorkspaceDialog = lazyView(() => import("@/projects").then((m) => ({ default: m.NewWorkspaceDialog })))
-const PluginsView = lazyView(() => import("@/plugins").then((m) => ({ default: m.PluginsView })))
 const ChannelsRoute = lazyView(() => import("@/channels/channels").then((m) => ({ default: m.ChannelsRoute })))
 const IntegrationsRoute = lazyView(() => import("@/integrations").then((m) => ({ default: m.IntegrationsRoute })))
 const GitHubView = lazyView(() => import("@/github/index").then((m) => ({ default: m.GitHubView })))
@@ -60,6 +59,7 @@ const MeView = lazyView(() => import("@/people/routes").then((m) => ({ default: 
 const OrgView = lazyView(() => import("@/people/routes").then((m) => ({ default: m.OrgView })))
 const TeamView = lazyView(() => import("@/people/routes").then((m) => ({ default: m.TeamView })))
 import { Robot } from "@/robot"
+import { syncPluginThemes } from "@/plugin-themes"
 import { HoldBanner } from "@/queue"
 import { YoloDialog } from "@/yolo/switch"
 const YoloDigestView = lazyView(() => import("@/yolo/digest").then((m) => ({ default: m.YoloDigestView })))
@@ -133,6 +133,8 @@ export default function App() {
   const [intent, setIntent] = useState<"" | "add" | "pair">("")
   const [others, setOthers] = useState(false)
   const up = hub === "ok" && st.ready && !st.login
+  /* theme plugins installed on the Hub become choices in 外观 (plugin-themes.ts) once signed in */
+  useEffect(() => { if (up) void syncPluginThemes() }, [up])
   useEffect(() => {
     if (a !== "hub") return
     setIntent(b === "pair" ? "pair" : "add")
@@ -177,7 +179,7 @@ export default function App() {
     a.split("?")[0] === "github" ? <GitHubView repo={b?.split("?")[0]} /> :
     a === "integrations" ? <IntegrationsRoute id={b} /> :
     a === "channels" ? <ChannelsRoute b={b} id={c} /> :
-    a === "auto" && (b === "acc" || b === "space") ? <Redirect to={`#/channels/${b}/${c ?? ""}`} /> : a === "personas" ? <Redirect to={"#/channels/personas" + (b ? "/" + b : "")} /> :
+    a === "auto" && (b === "acc" || b === "space") ? <Redirect to={`#/channels/${b}/${c ?? ""}`} /> : a === "personas" ? <Redirect to={"#/channels/personas" + (b ? "/" + b : "")} /> : a === "plugins" ? <Redirect to="#/settings/plugins" /> :
     a.split("?")[0] === "signals" ? <SignalsView /> : a === "auto" ? <AutoRoute b={b} c={c} /> :
     a === "mail" || a.startsWith("mail?") ? (b === "t" && c ? <ThreadView key={c} id={c} /> : <MailView />) :
     a === "accounts" || a.startsWith("accounts?") ? <AccountsRoute route={a} id={b} sub={c} /> :
@@ -185,7 +187,6 @@ export default function App() {
     a === "yolo" ? <YoloDigestView window={b} /> :
     a === "stats" ? <StatsRoute b={b} c={c} /> :
     a === "contacts" ? (b === "me" ? <MeView /> : b ? <ContactView key={b} id={b} /> : <ContactsView />) : a === "orgs" ? (b ? <OrgView key={b} id={b} /> : <ContactsView />) : a === "teams" ? (b ? <TeamView key={b} id={b} /> : <ContactsView />) :
-    a === "plugins" ? <PluginsView /> :
     a === "more" ? <MoreView /> : a === "c" && b ? <ChatView key={b} conv={decodeURIComponent(b)} /> : <ChatView />
   const sh = getSheet()
   return (
