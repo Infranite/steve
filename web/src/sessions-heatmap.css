@@ -1,0 +1,14 @@
+/* react-activity-calendar's tooltip in the app's popover look (its own sheet is not loaded) */
+.react-activity-calendar__tooltip {
+  z-index: 50;
+  width: max-content;
+  max-width: calc(100vw - 20px);
+  padding: 4px 8px;
+  border-radius: 6px;
+  background: var(--popover);
+  color: var(--popover-foreground);
+  box-shadow: 0 0 0 1px var(--border), 0 4px 12px rgb(0 0 0 / 0.12);
+  font-size: 12px;
+  line-height: 18px;
+  font-variant-numeric: tabular-nums;
+}
