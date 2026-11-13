@@ -174,7 +174,9 @@ export function YoloItemModes({ i }: { i: Item }) {
   useEffect(() => { load(); return req.drop }, [load, req])
   const s = got?.id === i.id ? got.s : null
   const ids = new Set(s?.sessions.map((x) => x.session_id) ?? [])
-  useHubEvents(["yolo", "yolo_action", "session", "decision", "event"], load, 400, {
+  /* a streaming turn sends events all the time: the state is read again at most every few seconds then */
+  useHubEvents(["yolo", "yolo_action", "session", "decision", "event"], load, 1000, {
+    maxWait: 5000,
     filter: (e) => e.type === "yolo" || e.type === "yolo_action" || (e.type === "event" ? ids.has(e.session_id) : "item_id" in e && e.item_id === i.id),
   })
   const lines = s ? modeLines(s.sessions) : []
