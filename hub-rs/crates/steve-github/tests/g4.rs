@@ -523,7 +523,8 @@ async fn a_comment_asks_first_then_grant_8h_lets_the_next_through() {
     let grant = r["grant"].as_str().expect("grant").to_string();
     let posted = h.fake.comments(REPO, n);
     assert_eq!(posted.len(), 1);
-    assert!(posted[0].starts_with("修好了") && !posted[0].contains(FAKE_TOKEN));
+    /* posted as written: Steve masks nothing (the owner approved this text) */
+    assert_eq!(posted[0], format!("修好了，令牌 {FAKE_TOKEN} 别管"));
     assert_eq!(
         q(
             &h,
