@@ -287,7 +287,7 @@ export default {
     /* a deliberate change from "主题、字号、动态效果": the language switch lives in this section now */
     catLookSub: "主题、配色、字体、圆角、语言",
     catPlugins: "插件",
-    catPluginsSub: "插件库、安装和接入",
+    catPluginsSub: "已安装和运行中的插件、插件库、主题",
     catData: "数据与隐私",
     catDataSub: "数据位置、备份、清理",
     catAbout: "关于",
@@ -358,6 +358,7 @@ export default {
     reduceMotionSub: "也会跟随系统设置",
     palette: "配色与字体",
     paletteNote: "只影响这台设备，选了就生效。",
+    morePlugins: "更多主题可以作为插件安装",
     reset: "恢复默认",
     preview: "预览",
     accent: "强调色",

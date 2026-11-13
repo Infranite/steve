@@ -115,7 +115,8 @@ export function AppearanceSection() {
   const opt = (m: Manifest, style: "sans" | "mono" | null) => [m.id, <span key={m.id} style={style ? { fontFamily: m.fonts?.[style] } : undefined}>{nameOf(t, m)}</span>, nameOf(t, m)] as const
   const skins = themesFor("skin")
   return (
-    <Section label={t("manage:look.palette")} note={t("manage:look.paletteNote")} data-appearance-section
+    <Section label={t("manage:look.palette")} data-appearance-section
+      note={<>{t("manage:look.paletteNote")} <a href="#/settings/plugins" className="text-foreground/80 underline-offset-2 hover:text-foreground hover:underline" data-appearance-plugins>{t("manage:look.morePlugins")}</a></>}
       right={changed ? <Button size="xs" variant="ghost" className="text-muted-foreground" onClick={resetAppearance} data-appearance-reset><RotateCcwIcon />{t("manage:look.reset")}</Button> : undefined}>
       <Card className="p-0">
         <div className="p-3"><Preview /></div>
