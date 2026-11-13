@@ -12,7 +12,7 @@ import { ArrowUpIcon, ChevronLeftIcon, FileTextIcon, GitForkIcon, InboxIcon, Lis
   MoonIcon, PencilIcon, SearchIcon, SquareTerminalIcon,
   SunIcon, TerminalIcon, ArrowUpRightIcon, UsersRoundIcon, CornerDownRightIcon, MonitorIcon, HashIcon, AtSignIcon, SlashIcon, XIcon, SquareIcon, CircleCheckIcon, CircleSlashIcon, ChevronDownIcon, ChevronRightIcon, CircleAlertIcon, InfoIcon, TriangleAlertIcon, FileDiffIcon, FilePlusIcon, GlobeIcon, SparklesIcon, WrenchIcon,
   CircleAlertIcon as RelFailIcon, CircleCheckIcon as RelOkIcon, MegaphoneIcon as RelRunIcon,
-  } from "lucide-react"
+} from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Trail, SubSteps, type TrailItem, type Chip } from "@/components/work-trail"
 import { ThinkingLoader } from "@/components/affect/thinking-loader"
