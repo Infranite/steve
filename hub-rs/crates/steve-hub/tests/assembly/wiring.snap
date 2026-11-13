@@ -19,6 +19,8 @@ api DELETE /mems/x
 api DELETE /orgs/x
 api DELETE /passkeys/x
 api DELETE /personas/x
+api DELETE /plugins/installed/x/x
+api DELETE /plugins/stores/x
 api DELETE /schedules/x
 api DELETE /spaces/x/flow
 api DELETE /stewards/x/x
@@ -101,6 +103,8 @@ api GET /passkeys
 api GET /people/x/holdings
 api GET /personas
 api GET /personas/x
+api GET /plugins
+api GET /plugins/themes
 api GET /runs/x
 api GET /schedules
 api GET /schedules/x
@@ -228,6 +232,10 @@ api POST /parties/x/memories
 api POST /passkeys/register/finish
 api POST /passkeys/register/start
 api POST /personas
+api POST /plugins/installed/x/x
+api POST /plugins/installed/x/x/connect
+api POST /plugins/stores
+api POST /plugins/stores/x/refresh
 api POST /runs/x/cancel
 api POST /schedules
 api POST /schedules/parse
@@ -273,7 +281,7 @@ decl feishu_app platform 1ms
 decl feishu_user platform 1ms
 event_source github_app
 event_source github_pat
-jobs 14
+jobs 15
 lifecycle ext_ws
 lifecycle feishu_app
 lifecycle feishu_user

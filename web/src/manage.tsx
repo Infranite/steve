@@ -40,6 +40,7 @@ import { BotCaps } from "@/caps/bot"
 import { STATS_CAT, StatsSettingsPane } from "@/stats/prices"
 import { AUDIT_CAT, AuditSettingsPane } from "@/audit-settings"
 import { MODELS_CAT, ModelsSettingsPane, SteveJudges } from "@/models-settings"
+import { PLUGINS_CAT, PluginsSettingsPane } from "@/plugins"
 import { ModelPicker } from "@/model-picker"
 import { SetSelect, SetSwitch } from "@/settings-controls"
 import { TextField } from "@/components/ui/input"
@@ -338,6 +339,8 @@ const cats = (t: T): [string, string, any, string][] => [
   STATS_CAT,
   /* the audit trail names every member, client and token: the Hub answers the instance's owner only */
   ...(st.owner ? [AUDIT_CAT] : []),
+  /* what this Hub has installed beside it (channels, themes): the instance's, so it sits with data and about */
+  PLUGINS_CAT,
   ["data", t("manage:settings.catData"), DatabaseIcon, t("manage:settings.catDataSub")],
   ["about", t("manage:settings.catAbout"), InfoIcon, t("manage:settings.catAboutSub")],
 ]
@@ -350,7 +353,7 @@ export function SettingsView() {
   const [, cat] = useRoute()
   const wide = typeof window !== "undefined" && window.innerWidth >= 768
   const cur = cat ?? (wide ? "general" : "")
-  if (["runtime", "accounts", "plugins"].includes(cur)) { setTimeout(() => go(cur === "runtime" ? "#/devices" : cur === "accounts" ? "#/accounts" : "#/plugins")); return null }
+  if (["runtime", "accounts"].includes(cur)) { setTimeout(() => go(cur === "runtime" ? "#/devices" : "#/accounts")); return null }
   const CATS = cats(t)
   const C = CATS.find((c) => c[0] === cur)
   const nav = (
@@ -405,6 +408,7 @@ function Pane({ id }: { id: string }) {
   if (id === "audit") return <AuditSettingsPane />
   if (id === "models") return <ModelsSettingsPane />
   if (id === "access") return <AccessSettingsPane />
+  if (id === "plugins") return <PluginsSettingsPane />
   if (id === "general") return <div className="flex flex-col gap-8">
     <Section label={t("manage:general.assistant")}><Panel><Row icon={<BotAvatar k="steve" size={36} />} title={st.bots.steve?.n} sub={t("manage:general.assistantSub")} onClick={() => go("#/bots/steve")}><Chevron /></Row></Panel></Section>
     <Panel>

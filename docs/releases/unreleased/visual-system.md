@@ -1,1 +1,0 @@
-- The interface has a new visual system: Geist with the system CJK face, one indigo accent on cool slate neutrals, a fixed type scale and radius scale, soft elevation instead of hairlines everywhere, one page frame so titles line up on every page, sliding segmented controls and route transitions.

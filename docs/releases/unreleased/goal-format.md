@@ -1,1 +1,0 @@
-- Item goals that Steve writes from the conversation, and the briefs a coordinator writes for collaboration units, are short Markdown: one sentence on what will be done and what counts as done, then only the sections that apply (background, to do, acceptance, out of scope) as brief bullets, so an opened goal reads at a glance instead of as one long paragraph.

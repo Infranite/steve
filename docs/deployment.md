@@ -224,7 +224,7 @@ Individual targets can also be run directly (`./scripts/build-apple-client.sh te
 
 A messaging system Steve has no built-in adapter for can be connected through a separate channel service: a program that signs in to that system as you and speaks Steve's external channel protocol over a WebSocket. The service runs on its own (on your machine or LAN); the Hub dials out to it, so the Hub opens no port for it, and a crash or restart of the service only pauses the channel.
 
-- **Connect:** in **接入 · 外部渠道**, enter the service's address (`wss://…`; plain `ws://` only to `127.0.0.1` or `::1`), the access token the service issued for this Hub, and, for a self-signed certificate, its pin (`sha256:<64 hex digits>`). The Hub checks the address, says hello, asks the service who is signed in, and the connection becomes yours.
+- **Connect:** in **连接 · 其他聊天工具** (Connections · Other chat app), enter the service's address (`wss://…`; plain `ws://` only to `127.0.0.1` or `::1`), the access token the service issued for this Hub, and, for a self-signed certificate, its pin (`sha256:<64 hex digits>`). The Hub checks the address, says hello, asks the service who is signed in, and the connection becomes yours.
 - **Receiving** follows the connection's `msg.receive` capability. Messages written before the connection was turned on, read back after an interruption, or your own, are only recorded.
 - **Sending as you** (replies, reactions, recalls) goes through the service, which may refuse or limit it; a service that forbids writes leaves the connection read-only.
 - **The protocol** a service implements, with its conformance checklist and test vectors, is the documentation of `steve_channels::adapters::ext_ws::protocol` (`hub-rs/crates/steve-channels/src/adapters/ext_ws/protocol.rs`). The Hub's test suite runs a fake service against it (`hub-rs/crates/steve-channels/tests/ext_ws.rs`).
@@ -241,13 +241,89 @@ The saved graph, attempts, child items, sessions and Node turn ledger survive re
 
 The items list reads the work graph's pause flag, cycle and failed units. A parent with a paused graph in its current cycle is grouped under **Paused**, even when the parent item's lifecycle status is still `run`; its row names failed current-unit child attempts. That applies to a graph you paused. A graph its coordinator Bot paused without asking you anything waits for you instead: Steve opens a card with the coordinator's pause reason (when its turn ends, or within a few minutes for a graph paused earlier), the item moves to **Waiting for you**, and Steve does not continue the coordinator over its own pause. Resuming the graph withdraws the card. A pause recorded before this release counts as the coordinator's unless it came from pausing the item itself. An active parent lists only unfinished workflow children as current waits. A work graph from an earlier cycle is labeled as a prior-cycle record, not as the current cycle's pause. Historical closed children remain available in the graph and item history without being shown as current waits.
 
-The item page derives one state for the item — waiting for you, a work graph to replan, unavailable or paused collaboration, working, queued, idle or closed — and every place on the page (header, "now" card, the tree's root) shows that state. An item that coordinates a work graph or started other items lists its team in the side column, a compact agent tree of who started whom, and opens the full tree from there. The coordinator's units follow dependency order; each unit's earlier attempts stay beside it, dimmed, and items forked from any node hang under it. Dependencies are not drawn as edges: a waiting unit names what it waits for. The direct children sit side by side while they fit and otherwise, like every deeper level, hang from a rail. The header counts agents, running work, current failures (with retry) and decisions waiting for you, and shows the estimated cost of the whole subtree from `GET /api/stats/tree/{id}`, which returns the item and the items started from it (at most eight levels and 200 items) with each one's own usage and agent time. Selecting a card opens its detail beside the page, or as a sheet on narrow screens; open the linked child item or session for its full record. A running unit can be stopped individually. Reworking a completed unit previews its downstream invalidation, requires active work to stop and settle, and uses the existing attempt budget and revision checks before resetting; earlier child items remain available in the archive. A running workflow unit is labeled confirmed execution only when the Hub has applied a recent assistant, tool, permission or plan event for the exact active session, turn, attempt and Node, after that attempt started. The Hub receive time must be less than ten minutes old, and the Node must still be active and recently seen. Missing, stale or uncertain evidence is shown as active but unconfirmed; it does not change scheduling or approval authority. The relation graph, opened from the item menu, can show blocking dependencies or provenance, with missing references visible and ownership edges distinct from dependencies. On narrow screens the same relations appear as a structured list; selecting a node shows its detail before an explicit open action. Archived attempts are read-only links to their child items. They do not count as current-cycle delivery.
+The item page derives one state for the item — waiting for you, a work graph to replan, unavailable or paused collaboration, working, queued, idle or closed — and every place on the page (header, "now" card, the collaboration header) shows that state. An item that coordinates a work graph or started other items shows its collaboration under the "now" card as one row per step, in dependency order: the step's Bot and model, what it is doing or how it ended, on which try it passed, a progress bar, and its working time and cost with earlier tries included. A step's earlier attempts fold into its row and are listed in its detail. Steps that need you, failed or are running always show; of the finished ones only the latest three, the rest on request. The header counts what needs you, failed, runs and is done (with retry for failures), and shows the coordinator, the elapsed time against the agents' working time and the estimated cost of the whole subtree from `GET /api/stats/tree/{id}`, which returns the item and the items started from it (at most eight levels and 200 items) with each one's own usage and agent time. "查看全图" opens the steps as one dependency graph, where an arrow means the later step waits for the earlier one and steps that could run at the same time share a column. Selecting a step opens its detail beside the page, or as a sheet on narrow screens; open the linked child item or session for its full record. The items page's 协作 view lists every open coordinating item with its steps. A running unit can be stopped individually. Reworking a completed unit previews its downstream invalidation, requires active work to stop and settle, and uses the existing attempt budget and revision checks before resetting; earlier child items remain available in the archive. A running workflow unit is labeled confirmed execution only when the Hub has applied a recent assistant, tool, permission or plan event for the exact active session, turn, attempt and Node, after that attempt started. The Hub receive time must be less than ten minutes old, and the Node must still be active and recently seen. Missing, stale or uncertain evidence is shown as active but unconfirmed; it does not change scheduling or approval authority. The relation graph, opened from the item menu, can show blocking dependencies or provenance, with missing references visible and ownership edges distinct from dependencies. On narrow screens the same relations appear as a structured list; selecting a node shows its detail before an explicit open action. Archived attempts are read-only links to their child items. They do not count as current-cycle delivery.
 
 The work graph API shows bounded unit summaries and the latest 20 plan changes; full audit history remains in storage, and full non-Git deliverables are available from the child item's outputs. A provider usage-policy refusal or invalid API request has no review verdict: Steve records the failed attempt, keeps successful upstream units, and requires a user to retry after resolving the provider policy or request configuration. A graph from a prior item cycle does not grant acceptance for the new cycle. After the old graph is paused and every old execution has stopped, replanning archives its units with their original verdicts and starts pending units for the current cycle. Old successes remain visible as history but never satisfy the new cycle's review or integration gates.
 
 For a design or report delivery, Steve saves the delivery text as a Markdown file in `<home>/workspaces/<item>/outputs` and registers its path as an item output. Declared files produced in a Node workspace are copied to the same directory before delivery completes, so a removed worktree or an offline Node does not hide them. The database stores the output path and state, not the file body. Restore both the database and `workspaces` from the same daily backup. A design-only goal, or one that explicitly defers implementation until design confirmation, opens a user-only decision bound to the delivered design and goal version; choosing implementation continues the same item, while choosing design only closes that design cycle.
 
 At startup, the Hub repairs old output records that point to a prose summary when the full saved text can still be found. Before it changes a record, it creates a verified `pre-delivery-recovery-*.sqlite3` copy in `<home>/backups`. The repair is safe to retry after a failed start. Files that were deleted before the upgrade cannot be restored this way.
+
+## Plugins
+
+A plugin is something that is not part of Steve, installed from a plugin library: a program run beside the Hub as a process of its own, or data the web client reads. It is reached through one of Steve's documented contracts and never links into the Hub. There are two kinds: a channel plugin, a [channel service](#an-external-channel-service) the Hub starts and connects for you, and a theme plugin, a skin for the web client that is only data.
+
+**Using them.** Plugins are in Settings → Plugins (`#/settings/plugins`): first anything that needs attention (a connection whose plugin is not running, a library that could not be read), then what is installed, what the libraries offer, and the libraries. Plugins sit under Settings rather than beside Capabilities because they are the instance's, installed once by its owner for everyone, while Capabilities are what each Bot is given. The instance's owner adds libraries and installs, upgrades and uninstalls plugins; anyone signed in connects an installed plugin with their own settings (an address, a token, whatever that plugin asks for). Connecting starts one process for that person and creates an external-channel connection of theirs, which then appears in Accounts like any other. The connection's token is kept in the vault, so the vault has to be turned on first. Disconnecting it in Accounts stops the process and removes its settings and data. A library with something installed from it, and a plugin somebody is connected through, cannot be removed until that is undone.
+
+**Trust.** Installing a plugin runs its program as the Hub's user, outside the sandbox the Node gives agent runs. A library is trusted as much as the owner trusts it by adding it; what is installed is exactly the archive whose sha256 the library's index names. The official library, `https://github.com/Infranite/steve-extensions`, is listed on a new installation and nothing is read from it until the owner asks. `STEVE_PLUGIN_LIBRARY` names another first library, or `off` for none; once the owner has changed the list, the list is what they made it.
+
+**A library's address** is one of:
+
+- `https://github.com/<owner>/<repo>` (or `<owner>/<repo>`): `steve-store.json` at the root of the repository's default branch;
+- the `https://` address of an index file itself, on any host (plain `http://` only on `127.0.0.1` and `::1`);
+- an absolute directory on the Hub's machine with `steve-store.json` in it: a library in development, or one that is not published.
+
+**The index**, `steve-store.json` (format 1; unknown members are ignored):
+
+```json
+{
+  "store": 1,
+  "name": "Example plugins",
+  "plugins": [{
+    "id": "example",
+    "name": "Example",
+    "summary": {"en": "What it does", "zh-CN": "它做什么"},
+    "kind": "channel",
+    "version": "0.1.0",
+    "contract": 1,
+    "entry": "bin/example",
+    "homepage": "https://example.org/plugin",
+    "config": [
+      {"key": "address", "label": "Service address", "hint": "wss://…"},
+      {"key": "token", "label": "Access token", "secret": true},
+      {"key": "note", "label": "Note", "required": false}
+    ],
+    "artifacts": {
+      "aarch64-apple-darwin": {"url": "https://example.org/example-0.1.0-aarch64-apple-darwin.tar.gz", "sha256": "…"}
+    }
+  }]
+}
+```
+
+- `id` and a setting's `key` are a lowercase letter or digit followed by lowercase letters, digits, `-` and `_`, at most 40 characters. `name`, `summary`, `label` and `hint` are a string or a map from language to string.
+- `version` is a semantic version. The index names one version of each plugin, the one to install now; an installed plugin with an older version is offered as an update after the owner reads the library again.
+- `config` lists the settings a person enters when connecting. A `secret` one is entered like a password and never shown again; a setting is required unless it says `"required": false`.
+- `artifacts` is keyed by the target the Hub was built for (`steve-hub --build-info` prints it). A plugin without an artifact for the Hub's target is listed and cannot be installed there. `url` is `https://`, or a path relative to the index, which is the only form a directory library uses. The archive is a `.tar.gz` of regular files and directories, at most 256 MiB; an archive with a link or a path that leaves it is refused. `entry` is the executable in it.
+- `kind` and `contract` say how the Hub runs the plugin: `channel` or `theme`, each at contract 1. One whose kind or contract this Hub does not know is listed as needing a newer Steve.
+- An artifact keyed `any` is used on every target that has none of its own; a theme, which is data, usually has only that one.
+
+**A channel plugin** (`"kind": "channel"`, `"contract": 1`) implements the external channel protocol (`hub-rs/crates/steve-channels/src/adapters/ext_ws/protocol.rs`) for one signed-in person. The Hub starts its `entry` once per connection, with `PATH`, `HOME`, the locale, `TMPDIR` and `TZ` of its own environment and these variables:
+
+| Variable | Meaning |
+|---|---|
+| `STEVE_PLUGIN_LISTEN` | `127.0.0.1:<port>`: where to serve the protocol, with the WebSocket at `/ws` and media under `/v1/media/` |
+| `STEVE_PLUGIN_TOKEN_FILE` | A file with the bearer token the Hub presents; refuse anything else |
+| `STEVE_PLUGIN_CONFIG` | A JSON file: an object with the person's settings, each a string under its `key` |
+| `STEVE_PLUGIN_DATA` | A directory that is the instance's to write; it is also the working directory |
+| `STEVE_PLUGIN_SUPERVISED` | `1`: the Hub holds standard input open; exit when it reaches end of file, which means the Hub is gone |
+
+The plugin has 20 seconds to start listening when it is first connected. One that exits is started again after a pause that grows from a second to a minute; meanwhile its connection behaves like any external channel whose service is unreachable. To stop it the Hub closes its standard input and sends `SIGTERM`, and kills it after five seconds.
+
+**A theme plugin** (`"kind": "theme"`, `"contract": 1`) is a skin for the web client. Nothing of it runs, on the Hub or in the browser: its `entry` is a [theme manifest](#appearance-and-themes) in the archive, a JSON object of at most 64 KiB, and the Hub refuses to install an archive whose `entry` is not one. It has no `config` and is not connected. Once it is installed the web client reads the installed manifests (`GET /api/plugins/themes`, for anyone signed in), checks each one and registers it, and the theme is a choice of its kind in Settings → Appearance for everyone on the Hub, on each of their devices. A manifest the client refuses is shown as refused on the Plugins page, with the reason. Uninstalling it removes the choice; a device that used it goes back to the default.
+
+```json
+{
+  "id": "ocean", "name": {"en": "Ocean", "zh-CN": "海洋"}, "summary": "A blue accent",
+  "kind": "theme", "version": "1.0.0", "contract": 1, "entry": "theme.json",
+  "artifacts": {"any": {"url": "dist/ocean-1.0.0.tar.gz", "sha256": "…"}}
+}
+```
+
+**On disk**, everything is under `<home>/plugins` and readable without a running Hub:
+
+- `stores.json`: the libraries and the index last read from each;
+- `installed/<library>/<plugin>/`: `installed.json` beside the unpacked version;
+- `instances/<id>/`: `instance.json`, the settings (`config.json`) and `token`, both readable by the Hub's user only, the plugin's `data/`, and `plugin.log` with what it wrote to standard output and error (started again once it passes 1 MiB). Look there first when a plugin does not start.
 
 ## Diagnostic capture and queries
 
@@ -668,8 +744,9 @@ Optional statistics failures are isolated from turn-state commits when SQLite ca
 Settings → Appearance chooses, per device, light or dark, an accent (Indigo, Blue, Violet, Green, Orange, Rose,
 Graphite), the neutrals (Slate, Gray, Sand), the text font (Geist, System, PingFang first), the monospace font
 (Geist Mono, System mono) and the corner radius (Compact, Standard, Rounded). The choice is kept in the browser's
-`localStorage` under `steve-appearance` (light/dark under `steve-theme`); nothing is stored on the Hub, so the
-"tell Steve" box on that page, which drafts Hub settings, does not change it.
+`localStorage` under `steve-appearance` (light/dark under `steve-theme`); nothing of it is stored on the Hub, so the
+"tell Steve" box on that page, which drafts Hub settings, does not change it. Font size and Reduce motion on the same
+page are Hub settings and follow you to every browser.
 
 Every choice is a theme manifest, and the built-in ones are written the same way (`web/src/themes/builtin.ts`). A
 manifest overrides a whitelist of the design tokens in `web/src/index.css`, separately for light and dark:
@@ -705,7 +782,7 @@ manifest overrides a whitelist of the design tokens in `web/src/index.css`, sepa
 Only the light text on `primary` and the `blue` text on the page and cards need WCAG AA (4.5:1); the built-ins are
 tested for it on every neutral in both modes (`web/test/themes.test.mjs`).
 
-Themes from elsewhere, such as a future theme plugin, are added in the web client with `registerTheme(manifest)` from
+A [theme plugin](#plugins) installed on the Hub is registered this way for everyone on it. Themes from elsewhere are added in the web client with `registerTheme(manifest)` from
 `web/src/themes` (also `window.steveThemes.registerTheme` for a script that is not bundled with the client). It
 returns `{ ok: true }` or `{ ok: false, errors }`: a manifest with an unknown field or token, a token its kind may not
 set, or a value outside the syntax above is refused as a whole and nothing on screen changes. A registered theme

@@ -1,1 +1,0 @@
-- A Bot asked to release in a project without a release action now gets an error telling it to deliver instead. Before, it was told the release was requested and waited for one that never came.
