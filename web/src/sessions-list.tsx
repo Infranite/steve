@@ -9,6 +9,7 @@ import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group"
 import { t as tr, useT } from "@/i18n"
 import { hm, monthDay, weekday } from "@/i18n/format"
 import { SearchField } from "@/search-field"
+import { SessionsHeatmap } from "@/sessions-heatmap"
 import { SS, st, type Sess } from "@/store"
 import { BotAvatar, Empty, Group, ItemNo, openSheet, Page, SectionLabel, StatusDot } from "@/ui"
 import { Count, Select } from "@/view-shared"
@@ -138,6 +139,7 @@ export function SessionsView() {
           {(harnesses.length > 1 || hf !== "all") && <Select quiet className={cn("h-7 px-2 type-callout! [&>svg]:opacity-60", hf !== "all" ? "bg-accent font-medium! text-foreground" : "text-muted-foreground")} testId="harness-filter" value={hf} onChange={(v) => { hf = v; reset() }} options={[{ v: "all", l: t("views:sessions.allHarness") }, ...harnesses.map((x) => ({ v: x, l: x }))]} />}
         </div>
       </div>
+      <SessionsHeatmap />
       {xs.length ? (
         <div className="flex flex-col gap-8 anim-in">
           {liveRows.length > 0 && (

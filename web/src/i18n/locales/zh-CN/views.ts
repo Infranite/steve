@@ -344,6 +344,19 @@ export default {
     emptyFiltered: "没有匹配的会话",
     emptyNone: "还没有会话",
     emptyNoneSub: "事项开始后，每个会话都会出现在这里；也可以导入本机的 Claude Code、Codex 历史会话。",
+    heat: {
+      failed: "暂时读不到活动数据",
+      title: "活跃度",
+      tasks: "任务",
+      tokens: "Token",
+      dayTasks_other: "{{count}} 个任务",
+      dayTokens: "{{n}} tokens",
+      none: "没有活动",
+      sumTasks: "过去一年有 {{days}} 天在推进任务，单日最多 {{max}} 个",
+      sumTokens: "过去一年用了 {{total}} tokens，单日最多 {{max}}",
+      less: "少",
+      more: "多",
+    },
   },
   /* one session's page */
   session: {

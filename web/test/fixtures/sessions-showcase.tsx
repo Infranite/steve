@@ -1,6 +1,7 @@
 import { createRoot } from "react-dom/client"
 import "../../src/index.css"
 import { Toaster } from "sonner"
+import { stats } from "../../src/api/stats"
 import { api, type RDecision, type RItem, type RSession, type State } from "../../src/api"
 import { SidebarProvider, SidebarInset } from "../../src/components/ui/sidebar"
 import { TooltipProvider } from "../../src/components/ui/tooltip"
@@ -37,6 +38,20 @@ const state = { version: "test", web_version: "test", workspace: { id: "default"
 api.state = async () => structuredClone(state)
 api.events = async () => []
 api.searchSessions = async (s: string) => (s === "缓存" ? ["s20", "s4"] : [])
+/* a year of activity: quiet weekends, a busier last two months, a few heavy days */
+stats.series = async (f, metric) => {
+  const out: string[] = [], vals: number[] = []
+  const d = new Date(f.from + "T00:00"), end = new Date(f.to + "T00:00")
+  let seed = 7
+  const rnd = () => ((seed = (seed * 9301 + 49297) % 233280) / 233280)
+  for (let i = 0; d <= end; i++, d.setDate(d.getDate() + 1)) {
+    const wk = d.getDay() === 0 || d.getDay() === 6, recent = (end.getTime() - d.getTime()) / 86_400_000 < 60
+    const busy = rnd() < (wk ? 0.25 : 0.7) ? Math.round(rnd() * (recent ? 14 : 6)) + (recent ? 2 : 0) : 0
+    out.push(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`)
+    vals.push(metric === "tokens" ? busy * (200_000 + rnd() * 900_000) : busy)
+  }
+  return { bucket: "day", buckets: out, series: [{ key: "total", label: "", values: vals }] }
+}
 void refresh()
 function Fixture() {
   useStore()

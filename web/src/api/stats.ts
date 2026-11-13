@@ -27,7 +27,7 @@ export type Summary = {
   since: { tokens: string | null; gateway: string | null }
   prev: Omit<Summary, "prev"> | null
 }
-export type Metric = "tokens" | "cost" | "done" | "created" | "wip" | "lead" | "hit_rate" | "turns" | "decisions"
+export type Metric = "tokens" | "cost" | "done" | "created" | "wip" | "lead" | "hit_rate" | "turns" | "decisions" | "active"
 export type Group = "none" | "model" | "bot" | "project" | "source" | "purpose" | "token_type"
 /** `bucket: "hour"` (a one-day range, ST-43): buckets `YYYY-MM-DDTHH:00` in the stats zone `tz`, `spans` their [start, end) in ms,
  *  `current` the hour that holds now (still running); hours after it are `null` — not yet, not 0 */

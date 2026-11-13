@@ -41,6 +41,7 @@
   "stats.total.lead": "前置时间",
   "stats.total.hit_rate": "缓存命中率",
   "stats.total.turns": "回合",
+  "stats.total.active": "任务",
   "stats.total.decisions": "决定",
   "stats.price_note.official": "官方标价",
   "stats.price_note.haiku": "官方标价，提示词 ≤100K；更长的提示词官方价是 0.50/2.50，这里不区分",

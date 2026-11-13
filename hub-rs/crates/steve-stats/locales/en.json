@@ -41,6 +41,7 @@
   "stats.total.lead": "Lead time",
   "stats.total.hit_rate": "Cache hit rate",
   "stats.total.turns": "Turns",
+  "stats.total.active": "Pieces of work",
   "stats.total.decisions": "Decisions",
   "stats.price_note.official": "List price",
   "stats.price_note.haiku": "List price for prompts ≤100K; longer prompts list at 0.50/2.50, not told apart here",

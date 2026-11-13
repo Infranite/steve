@@ -175,6 +175,9 @@ pub enum Metric {
     HitRate,
     Turns,
     Decisions,
+    /// Distinct pieces of work an agent turned on: an item counts once per bucket, and a conversation with no
+    /// item is a piece of its own (the sessions page's activity heatmap).
+    Active,
 }
 
 impl Metric {
@@ -189,6 +192,7 @@ impl Metric {
             "hit_rate" => Metric::HitRate,
             "turns" => Metric::Turns,
             "decisions" => Metric::Decisions,
+            "active" => Metric::Active,
             _ => return None,
         })
     }
@@ -198,7 +202,9 @@ impl Metric {
         match self {
             Metric::Tokens | Metric::Cost => true,
             Metric::HitRate | Metric::Turns => group != "token_type",
-            Metric::Done | Metric::Created => matches!(group, "none" | "bot" | "project"),
+            Metric::Done | Metric::Created | Metric::Active => {
+                matches!(group, "none" | "bot" | "project")
+            }
             Metric::Wip | Metric::Lead | Metric::Decisions => group == "none",
         }
     }
@@ -393,6 +399,7 @@ fn lines(
         Metric::HitRate => steve_i18n::t!("stats.total.hit_rate"),
         Metric::Turns => steve_i18n::t!("stats.total.turns"),
         Metric::Decisions => steve_i18n::t!("stats.total.decisions"),
+        Metric::Active => steve_i18n::t!("stats.total.active"),
     };
     let mut rate = false;
     let mut order: &[&str] = &[];
@@ -476,6 +483,36 @@ fn lines(
                     continue;
                 };
                 if !seen.insert((id, i)) {
+                    continue;
+                }
+                let key = match group {
+                    "bot" => bot.as_str(),
+                    "project" => project.as_str(),
+                    _ => "total",
+                };
+                acc.add(key, i, n, 1.0, 0.0);
+            }
+        }
+        Metric::Active => {
+            let Some((lo, hi)) = bounds(&q.from, &q.to, tz) else {
+                return Ok(vec![]);
+            };
+            let rows: Vec<(String, i64, String, String)> = c
+                .prepare_cached(
+                    "SELECT COALESCE(item_id, 'session:' || session_id), started, COALESCE(bot_id, ''), COALESCE(project_id, '')
+                     FROM agent_turns WHERE workspace_id = ?1 AND started >= ?2 AND started < ?3
+                       AND (?4 IS NULL OR project_id = ?4) AND (?5 IS NULL OR bot_id = ?5)",
+                )?
+                .query_map(params![q.workspace_id, lo, hi, q.project, q.bot], |r| {
+                    Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+                })?
+                .collect::<rusqlite::Result<_>>()?;
+            let mut seen = std::collections::HashSet::new();
+            for (work, ts, bot, project) in rows {
+                let Some(&i) = index.get(bucket_of(ts).as_str()) else {
+                    continue;
+                };
+                if !seen.insert((work, i)) {
                     continue;
                 }
                 let key = match group {
