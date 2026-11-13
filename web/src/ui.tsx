@@ -506,7 +506,7 @@ function ComposerInput({ placeholder, onSend, model, left, autoFocus, className,
   const isFileDrag = (e: React.DragEvent) => [...(e.dataTransfer?.types ?? [])].includes("Files")
   type Opt = { id: string; label: ReactNode; ins: string; cmd?: string }
   const opts: Opt[] = !menu ? [] : menu.kind === "#"
-    ? st.items.filter((i) => !i.arch && (!menu.q || i.id.toLowerCase().includes(menu.q.toLowerCase()) || i.t.includes(menu.q))).slice(0, 6).map((i) => ({ id: i.id, ins: i.id, label: <><ItemNo id={i.id} className="w-14" /><span className="min-w-0 flex-1 truncate type-callout">{i.t}</span><Status s={i.st} /></> }))
+    ? st.items.filter((i) => !i.arch && (!menu.q || i.id.toLowerCase().includes(menu.q.toLowerCase()) || i.t.includes(menu.q))).slice(0, 6).map((i) => ({ id: i.id, ins: i.id, label: <><ItemNo id={i.id} className="w-14" /><span className="min-w-0 flex-1 truncate type-callout">{i.t}</span><Status s={itemDisplayStatus(i)} /></> }))
     : menu.kind === "@" && men.opts ? men.opts
     : menu.kind === "@"
     ? [...Object.keys(st.bots).filter((k) => st.bots[k].on && !st.bots[k].main && (!menu.q || st.bots[k].n.includes(menu.q))).map((k) => ({ id: k, ins: "@" + st.bots[k].n.replace(/\s+/g, ""), label: <><BotAvatar k={k} size={18} /><span className="type-callout">{tr("core:composer.botName", { name: st.bots[k].n })}</span><span className="min-w-0 flex-1 truncate type-footnote text-muted-foreground">{tr("core:composer.handTo", { role: st.bots[k].role })}</span></> })),
@@ -1133,7 +1133,7 @@ export function ItemRef({ id }: { id: string }) {
         <ItemTitle className="w-full min-w-0 type-body"><span className="min-w-0 truncate">{i.t}</span></ItemTitle>
         <ItemDescription className="truncate type-footnote"><span className="font-mono tabular-nums">{i.id}</span> · {botName(i.b)} · {i.now}</ItemDescription>
       </ItemContent>
-      <ItemActions><Status s={i.st} /></ItemActions>
+      <ItemActions><Status s={itemDisplayStatus(i)} /></ItemActions>
     </UIItem>
   )
 }

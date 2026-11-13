@@ -1,5 +1,6 @@
 /* #/contacts/:id and #/contacts/me — one contact (prototype people.tsx ContactView) */
 import { useState } from "react"
+import { itemDisplayStatus } from "@/item-workflow-relation"
 import { cn } from "cn"
 import { CheckIcon, ChevronRightIcon, EllipsisIcon, ListTodoIcon, MailIcon, PencilIcon, MessageSquareIcon, CalendarIcon, PlusIcon, StarIcon, XIcon, ZapIcon } from "lucide-react"
 import { Button } from "@/components/ui/button"
@@ -109,7 +110,7 @@ function ContactBody({ c, reload }: { c: Contact; reload: () => void }) {
         <Section label={t("people:contact.teams", { n: c.teams.length })}>{c.teams.length ? <Group>{c.teams.map((g) => <Row key={g.id} icon={<ContactAvatar name={g.name} type="team" size={28} />} title={g.name} sub={`${label("teamKind", g.kind)} · ${label("role", g.role)}`} onClick={() => go("#/teams/" + g.id)} data-contact-team={g.name}><ChevronRightIcon className="size-4 text-tertiary" /></Row>)}</Group> : <Empty title={t("people:contact.noTeams")} />}</Section>
         <Section label={t("people:shared.relatedItems", { n: items.data?.length ?? 0 })}>
           {!items.data ? <Loading /> : items.data.length ? <Group>{items.data.map((x) => { const i = st.items.find((y) => y.id === x.item_id); return (
-            <Row key={x.item_id + x.role} title={<span><ItemNo id={x.item_id} className="mr-2" />{i?.t ?? x.title ?? ""}</span>} sub={<SubMeta><span>{label("itemRole", x.role)}</span>{x.confidence < 1 && <span>{t("people:shared.inferred")}</span>}</SubMeta>} onClick={() => go("#/items/" + x.item_id)} data-party-item={x.item_id}>{i && <Status s={i.st} />}</Row>) })}</Group> : <Empty title={t("people:shared.noRelatedItems")} />}
+            <Row key={x.item_id + x.role} title={<span><ItemNo id={x.item_id} className="mr-2" />{i?.t ?? x.title ?? ""}</span>} sub={<SubMeta><span>{label("itemRole", x.role)}</span>{x.confidence < 1 && <span>{t("people:shared.inferred")}</span>}</SubMeta>} onClick={() => go("#/items/" + x.item_id)} data-party-item={x.item_id}>{i && <Status s={itemDisplayStatus(i)} />}</Row>) })}</Group> : <Empty title={t("people:shared.noRelatedItems")} />}
         </Section>
         <Section label={t("people:contact.touches")}>
           {!tl.data ? <Loading /> : tl.data.length ? <div className="flex flex-col" data-touches>{tl.data.map((x, n) => { const I = TOUCH_I[x.kind] ?? ZapIcon; return (

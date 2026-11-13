@@ -35,10 +35,9 @@ export default {
   /* an item's one state (item-state.ts): the headline of its page */
   itemState: {
     done: "Done", dropped: "Dropped", failed: "Closed as failed", proposed: "Waiting for your go-ahead", asking: "Waiting for you",
-    replan: "The last round is over; it needs a new plan", unavailable: "Collaboration can't run right now", graphPaused: "Collaboration paused", paused: "Paused",
+    unavailable: "Collaboration can't run right now", graphPaused: "Collaboration paused", paused: "Paused",
     blocked: "Waiting for prerequisites", working: "Working", queued: "Your message is queued", idle: "Nothing running",
     you: "Your move", agents: "With the agents",
-    replanHint: "Tell it below what to do next; it plans again for the current goal. The last round's results are kept.",
     idleHint: "It stopped: nothing is running and it hasn't asked you anything. Say so below if it should go on.",
     progress: "Progress", details: "Details", moreProps: "More details",
     process_one: "{{count}} process note",

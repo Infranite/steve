@@ -1,5 +1,6 @@
 /* #/orgs/:id — one organization (prototype people.tsx OrgView) */
 import { useState } from "react"
+import { itemDisplayStatus } from "@/item-workflow-relation"
 import { ChevronRightIcon, PlusIcon } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { st } from "@/store"
@@ -40,7 +41,7 @@ function OrgPage({ id }: { id: string }) {
             {newAttr && <NewAttr party={o.id} init={{ label: "" }} onDone={() => { setNewAttr(false); void reload() }} />}
           </Group>
         </Section>
-        <Section label={t("people:shared.relatedItems", { n: items.data?.length ?? 0 })}>{!items.data ? <Loading /> : items.data.length ? <Group>{items.data.map((x) => { const i = st.items.find((y) => y.id === x.item_id); return <Row key={x.item_id + x.role} title={<span><ItemNo id={x.item_id} className="mr-2" />{i?.t ?? x.title ?? ""}</span>} sub={label("itemRole", x.role)} onClick={() => go("#/items/" + x.item_id)}>{i && <Status s={i.st} />}</Row> })}</Group> : <Empty title={t("people:shared.noRelatedItems")} />}</Section>
+        <Section label={t("people:shared.relatedItems", { n: items.data?.length ?? 0 })}>{!items.data ? <Loading /> : items.data.length ? <Group>{items.data.map((x) => { const i = st.items.find((y) => y.id === x.item_id); return <Row key={x.item_id + x.role} title={<span><ItemNo id={x.item_id} className="mr-2" />{i?.t ?? x.title ?? ""}</span>} sub={label("itemRole", x.role)} onClick={() => go("#/items/" + x.item_id)}>{i && <Status s={itemDisplayStatus(i)} />}</Row> })}</Group> : <Empty title={t("people:shared.noRelatedItems")} />}</Section>
         <MemSection party={o.id} mems={mems.data} label={t("people:shared.steveRemembers")} />
       </div>
     </Page>

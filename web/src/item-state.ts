@@ -7,7 +7,6 @@ import type { Workflow } from "./workflow.ts"
 export type StateKind =
   | "done" | "dropped" | "failed" | "proposed"
   | "asking"        // a card waits for you
-  | "replan"        // the work graph belongs to an earlier cycle: the coordinator has to plan again
   | "unavailable"   // the graph cannot execute (Node, principal, bot)
   | "graphPaused"   // the graph is paused
   | "paused"        // the item is paused
@@ -22,10 +21,10 @@ export type ItemState = { kind: StateKind; tone: Tone; /** whose move: you, the 
 export type StateItem = { st: string; now?: string; waits?: { q: string }[]; q?: unknown[] | null }
 
 const TONE: Record<StateKind, Tone> = {
-  done: "done", dropped: "neutral", failed: "fail", proposed: "wait", asking: "wait", replan: "wait", unavailable: "fail",
+  done: "done", dropped: "neutral", failed: "fail", proposed: "wait", asking: "wait", unavailable: "fail",
   graphPaused: "pause", paused: "pause", blocked: "pause", working: "run", queued: "run", idle: "neutral",
 }
-const YOURS: StateKind[] = ["proposed", "asking", "replan", "unavailable", "graphPaused", "paused"]
+const YOURS: StateKind[] = ["proposed", "asking", "unavailable", "graphPaused", "paused"]
 const CLOSED: StateKind[] = ["done", "dropped", "failed"]
 
 const make = (kind: StateKind, detail?: string): ItemState =>
@@ -39,8 +38,8 @@ export function itemState(i: StateItem, workflow: Workflow | null | undefined, r
   if (i.st === "prop") return make("proposed")
   if (i.waits?.length) return make("asking", i.waits[0].q)
   if (running) return make("working", i.now)
-  if (workflow && workflow.acceptance_mode !== "single_session") {
-    if (workflow.current_cycle === false) return make("replan")
+  // a graph from an earlier cycle is history: the item goes on in the current cycle like any other
+  if (workflow && workflow.acceptance_mode !== "single_session" && workflow.current_cycle !== false) {
     if (workflow.execution_ready === false) return make("unavailable", workflow.blockers[0])
     if (workflow.paused) return make("graphPaused", workflow.blockers[0])
   }

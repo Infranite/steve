@@ -293,7 +293,7 @@ export function LinkDialog({ k }: { k: string }) {
   return (
     <Modal open title={t("views:link.title")} desc={t("views:link.desc")}>
       <Group>{st.items.filter((i) => !closedSt(i.st)).map((i) => (
-        <Row key={i.id} title={i.t} onClick={() => { link(k, i.id); closeSheet() }}><Status s={i.st} /></Row>
+        <Row key={i.id} title={i.t} onClick={() => { link(k, i.id); closeSheet() }}><Status s={itemDisplayStatus(i)} /></Row>
       ))}</Group>
     </Modal>
   )
@@ -307,12 +307,12 @@ const STATE_TONE: Record<ItemState["tone"], [string, string]> = {
   done: ["text-success", "bg-success/10 text-success"], fail: ["text-destructive", "bg-destructive/10 text-destructive"], neutral: ["text-muted-foreground", "bg-muted text-muted-foreground"],
 }
 const ROOT_STATUS: Record<ItemState["kind"], AgentStatus> = {
-  done: "done", dropped: "stopped", failed: "failed", proposed: "proposed", asking: "asking", replan: "paused", unavailable: "blocked",
+  done: "done", dropped: "stopped", failed: "failed", proposed: "proposed", asking: "asking", unavailable: "blocked",
   graphPaused: "paused", paused: "paused", blocked: "blocked", working: "running", queued: "starting", idle: "idle",
 }
 const NOW_RING: Record<ItemState["tone"], string> = { run: "border-blue/30", wait: "border-attention/40 bg-attention/[0.03]", pause: "border-border", done: "border-border", fail: "border-destructive/35", neutral: "border-border" }
 const STATE_ICON: Record<ItemState["kind"], typeof CheckIcon> = {
-  done: CheckIcon, dropped: BanIcon, failed: CircleAlertIcon, proposed: CircleHelpIcon, asking: CircleHelpIcon, replan: RotateCcwIcon,
+  done: CheckIcon, dropped: BanIcon, failed: CircleAlertIcon, proposed: CircleHelpIcon, asking: CircleHelpIcon,
   unavailable: CircleAlertIcon, graphPaused: PauseIcon, paused: PauseIcon, blocked: HourglassIcon, working: LoaderCircleIcon, queued: HourglassIcon, idle: CircleDashedIcon,
 }
 function StateMark({ state }: { state: ItemState }) {
@@ -749,7 +749,7 @@ export function SessionView({ k }: { k: string }) {
     <div className="flex flex-col gap-6">
       {i ? (
         <div><SectionLabel>{t("views:session.item")}</SectionLabel>
-          <button type="button" onClick={() => go("#/items/" + i.id)} className="-mx-2 w-[calc(100%+16px)] rounded-lg px-2 py-1.5 text-left transition-colors hover:bg-accent"><div className="type-callout font-medium"><span className="mr-1.5 font-mono text-[12px] font-normal text-muted-foreground">{i.id}</span>{i.t}</div><Status s={i.st} className="mt-1" /></button>
+          <button type="button" onClick={() => go("#/items/" + i.id)} className="-mx-2 w-[calc(100%+16px)] rounded-lg px-2 py-1.5 text-left transition-colors hover:bg-accent"><div className="type-callout font-medium"><span className="mr-1.5 font-mono text-[12px] font-normal text-muted-foreground">{i.id}</span>{i.t}</div><Status s={itemDisplayStatus(i)} className="mt-1" /></button>
           <div className="mt-1 px-1 type-callout text-muted-foreground"><ProjectChip id={i.project} /></div></div>
       ) : (
         <div><SectionLabel>{t("views:session.unlinked")}</SectionLabel><div className="flex flex-wrap gap-2">{!s.ro && <Button size="sm" variant="outline" onClick={() => openSheet("link", { k })} data-link>{t("views:session.link")}</Button>}<Button size="sm" variant="outline" onClick={() => openSheet("fork", { k, at: Math.max(0, s.ev.length - 1) })}>{t("views:session.toItem")}</Button></div></div>

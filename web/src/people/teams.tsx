@@ -1,5 +1,6 @@
 /* 团队: the 团队 tab of #/contacts, #/teams/:id, the new-team dialog (prototype people.tsx TeamsTab, TeamRow, TeamView, NewTeamDialog) */
 import { useEffect, useState } from "react"
+import { itemDisplayStatus } from "@/item-workflow-relation"
 import { ChevronRightIcon, PlusIcon, RefreshCwIcon, XIcon } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
@@ -102,7 +103,7 @@ function TeamPage({ id }: { id: string }) {
         {subs.length > 0 && <Section label={t("people:team.subs")}><Group>{subs.map((x) => <TeamRow key={x.id} g={x} spaces={spaces.data} />)}</Group></Section>}
         {spaces.data && <Section label={t("people:team.space")}><Group><Row title={spaces.data.find((x) => x.id === g.space_id)?.name ?? t("people:team.noSpace")} sub={t("people:team.spaceSub")}>
           <Select align="end" testId="team-space" value={g.space_id ?? "none"} onChange={(x) => void act(people.patchTeam(g.id, { space_id: x === "none" ? null : x }))} options={[{ v: "none", l: t("people:team.unbind") }, ...spaces.data.map((x) => ({ v: x.id, l: x.name }))]} /></Row></Group></Section>}
-        <Section label={t("people:team.items", { n: items.data?.length ?? 0 })}>{!items.data ? <Loading /> : items.data.length ? <Group>{[...new Map(items.data.map((x) => [x.item_id, x])).values()].map((x) => { const i = st.items.find((y) => y.id === x.item_id); return <Row key={x.item_id} title={<span><ItemNo id={x.item_id} className="mr-2" />{i?.t ?? x.title ?? ""}</span>} sub={label("itemRole", x.role)} onClick={() => go("#/items/" + x.item_id)}>{i && <Status s={i.st} />}</Row> })}</Group> : <Empty title={t("people:shared.noRelatedItems")} />}</Section>
+        <Section label={t("people:team.items", { n: items.data?.length ?? 0 })}>{!items.data ? <Loading /> : items.data.length ? <Group>{[...new Map(items.data.map((x) => [x.item_id, x])).values()].map((x) => { const i = st.items.find((y) => y.id === x.item_id); return <Row key={x.item_id} title={<span><ItemNo id={x.item_id} className="mr-2" />{i?.t ?? x.title ?? ""}</span>} sub={label("itemRole", x.role)} onClick={() => go("#/items/" + x.item_id)}>{i && <Status s={itemDisplayStatus(i)} />}</Row> })}</Group> : <Empty title={t("people:shared.noRelatedItems")} />}</Section>
         <MemSection party={g.id} mems={mems.data} label={t("people:shared.steveRemembers")} />
         <div className="px-1 type-footnote text-muted-foreground">{t("people:team.visNote", { vis: visLabel(g.visibility), name: g.name })}</div>
       </div>

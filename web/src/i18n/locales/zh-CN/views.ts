@@ -34,10 +34,9 @@ export default {
   /* an item's one state (item-state.ts): the headline of its page */
   itemState: {
     done: "已完成", dropped: "已放弃", failed: "失败结束", proposed: "等你决定要不要做", asking: "等你决定",
-    replan: "上一轮协作已结束，等重新规划", unavailable: "协作暂时无法执行", graphPaused: "协作已暂停", paused: "已暂停",
+    unavailable: "协作暂时无法执行", graphPaused: "协作已暂停", paused: "已暂停",
     blocked: "等前置事项完成", working: "正在做", queued: "你的消息在排队", idle: "没有在运行",
     you: "该你了", agents: "交给 agent",
-    replanHint: "在下面告诉它下一步做什么，它会按当前目标重新规划；上一轮的成果都还在。",
     idleHint: "它停下了，没有在运行，也没有问你。需要继续就在下面说一声。",
     progress: "进度", details: "详情", moreProps: "更多属性",
     process_other: "过程记录 {{count}} 条",
