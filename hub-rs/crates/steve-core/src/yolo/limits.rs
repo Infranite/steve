@@ -88,18 +88,23 @@ const WHAT_KEYS: &[&str] = &[
     "core.yolo.limit.crates",
     "core.yolo.limit.image",
     "core.yolo.limit.release_target",
+    "core.yolo.limit.curl_glob",
+    "core.yolo.limit.update_ref_stdin",
+    "core.yolo.limit.other_branch_rewrite",
     "core.yolo.limit.payment",
     "core.yolo.limit.outward",
     "core.yolo.limit.waits_for_you",
     "core.yolo.limit.needs_you",
     "core.yolo.limit.outward_ask",
     "core.yolo.limit.steve_home_at",
+    "core.yolo.limit.steve_home_maybe",
     "core.yolo.limit.outside",
     "core.yolo.limit.unknown_target",
     "core.yolo.limit.launchd",
     "core.yolo.limit.curl_method",
     "core.yolo.limit.gh_write",
     "core.yolo.limit.git_c",
+    "core.yolo.limit.git_config_env",
     "core.yolo.limit.git_unknown",
     "core.yolo.limit.git_config",
     "core.yolo.limit.git_elsewhere",
@@ -2002,6 +2007,14 @@ mod tests {
             "Touches STEVE_HOME: ../Cargo.toml"
         );
         assert_eq!(en("碰到 STEVE_HOME"), "Touches STEVE_HOME");
+        assert_eq!(
+            en("可能碰到 STEVE_HOME：~/.stev?"),
+            "May touch STEVE_HOME: ~/.stev?"
+        );
+        assert_eq!(
+            en("git -c core.fsmonitor=x 可能让 git 运行别的命令或推送"),
+            "git -c core.fsmonitor=x may make git run another command or push"
+        );
         assert_eq!(
             en("cp 的目标来自变量或标准输入，看不出在哪"),
             "The target of cp comes from a variable or standard input; can't tell where it is"

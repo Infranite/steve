@@ -759,7 +759,8 @@ fn restart_finishes_a_retired_failed_attempt_after_its_turn_ends() {
     assert_eq!(history["history_attempts_total"], 1);
     assert_eq!(history["history_attempts"][0]["item_id"], child);
     assert_eq!(history["history_attempts"][0]["snapshot"]["session_id"], sid);
-    assert_eq!(history["history_attempts"][0]["snapshot"]["status"], "cancelled");
+    // a failure is that attempt's outcome: it stays failed in the archive (ST-10)
+    assert_eq!(history["history_attempts"][0]["snapshot"]["status"], "failed");
     assert!(history["history_attempts"][0]["snapshot"].get("outputs").is_none(), "history view stays compact");
 
     k.core.tx().workflow_tick().unwrap();
