@@ -979,6 +979,17 @@ impl Channels {
             return Err(ApiError::conflict("这条消息已经记下了"));
         };
         fallback::supplied(tx, &message_id, conn, source, false)?;
+        if history.is_none() && !msg.sender.is_bot {
+            crate::pipeline::observe_reply(
+                tx,
+                ws,
+                &space.id,
+                msg.reply_to.as_deref(),
+                sender_party.as_deref(),
+                &message_id,
+                now,
+            )?;
+        }
         // history keeps the space where its own time puts it
         let at = if history.is_some() {
             msg.created.min(now)

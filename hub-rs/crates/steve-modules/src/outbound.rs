@@ -198,3 +198,71 @@ pub async fn check(
         None => CheckResult::unchecked(),
     }
 }
+
+/// Platform-neutral content. Rich cards/HTML belong to the connector adapter; all adapters can
+/// receive the lossless Markdown fallback, including actions as labelled links. No model rewrites
+/// or content masking happen here.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Content {
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub markdown: String,
+    #[serde(default)]
+    pub fields: Vec<(String, String)>,
+    #[serde(default)]
+    pub actions: Vec<(String, String)>,
+    #[serde(default)]
+    pub references: Vec<(String, String)>,
+}
+
+impl Content {
+    pub fn markdown(&self) -> String {
+        let mut parts = Vec::new();
+        if !self.title.is_empty() {
+            parts.push(format!("# {}", self.title));
+        }
+        if !self.markdown.is_empty() {
+            parts.push(self.markdown.clone());
+        }
+        parts.extend(self.fields.iter().map(|(k, v)| format!("{k}: {v}")));
+        parts.extend(
+            self.actions
+                .iter()
+                .chain(&self.references)
+                .map(|(label, url)| format!("{label}: {url}")),
+        );
+        parts.join("\n\n")
+    }
+}
+
+/// Routing never chooses an identity for a caller. `Bot` must resolve to a bot account; `AsYou`
+/// to a personal account owned by the live requester, then the existing outbound approvals apply.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Identity {
+    Bot,
+    AsYou,
+}
+
+/// One semantic send, independent of its platform representation. `source_message_id` defaults a
+/// reply to its original channel. `space_id` is an explicit channel switch, not a hint to a model.
+/// For a person, routing only considers known active DMs containing that person's platform alias.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeliveryIntent {
+    pub key: String,
+    pub identity: Identity,
+    pub content: Content,
+    #[serde(default)]
+    pub source_message_id: Option<String>,
+    #[serde(default)]
+    pub space_id: Option<String>,
+    #[serde(default)]
+    pub party_id: Option<String>,
+    #[serde(default)]
+    pub reason: String,
+    #[serde(default)]
+    pub urgency: String,
+}

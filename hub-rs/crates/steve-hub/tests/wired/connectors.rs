@@ -203,6 +203,61 @@ async fn registry_pins_and_dispatch_use_current_session_account_and_references()
         1
     );
     let calls = fake.calls("connector.call").len();
+    // Existing source-reply MCP now commits an intent and a real C6 draft atomically. No model
+    // backend or outbound platform is required to exercise identity and durable submission.
+    e.sql("INSERT INTO spaces(id,workspace_id,system_id,connection_id,kind,external_id,name,created,updated) SELECT 'output-space','default',a.system_id,c.id,'dm','output-dm','Output',1,1 FROM connections c JOIN accounts a ON a.id=c.account_id WHERE c.id=?1", &[&conn]);
+    e.sql("INSERT INTO space_identities(space_id,connection_id,workspace_id,joined) VALUES ('output-space',?1,'default',1)", &[&conn]);
+    e.sql("INSERT INTO space_settings(space_id,workspace_id,disclosure,updated) VALUES ('output-space','default','public',1)", &[]);
+    e.sql("INSERT INTO chan_messages(id,workspace_id,space_id,direction,external_id,text,status,created) VALUES ('output-source','default','output-space','in','source-external','Progress?','received',1)", &[]);
+    e.sql("INSERT INTO links(workspace_id,subject_type,subject_id,predicate,object_type,object_id,source,confidence,created) VALUES ('default','item','connector-item','from','chan_message','output-source','fixture',1.0,1)", &[]);
+    let first = answer(
+        &call(
+            &e,
+            "steve_reply_source",
+            json!({"text":"Progress recorded","key":"wired-output"}),
+        )
+        .await,
+    );
+    assert_eq!(first["status"], "draft");
+    let again = answer(
+        &call(
+            &e,
+            "steve_reply_source",
+            json!({"text":"Progress recorded","key":"wired-output"}),
+        )
+        .await,
+    );
+    assert_eq!(first["id"], again["id"]);
+    let delivery = e
+        .call(
+            "GET",
+            &format!("/api/deliveries/{}", first["id"].as_str().unwrap()),
+            None,
+        )
+        .await;
+    assert_eq!(delivery.0, 200);
+    assert_eq!(delivery.1["message_id"], first["message_id"]);
+    let intent = json!({
+        "key":"wired-output", "identity":"as_you",
+        "content":{"markdown":"Progress recorded"},
+        "source_message_id":"output-source",
+        "reason":"item:connector-item", "urgency":"normal"
+    });
+    let submitted = e
+        .call("POST", "/api/deliveries", Some(intent.clone()))
+        .await;
+    assert_eq!(submitted.0, 200, "{submitted:?}");
+    assert_eq!(submitted.1["id"], first["id"]);
+    let mut changed = intent;
+    changed["content"]["markdown"] = json!("A different update");
+    assert_eq!(
+        e.call("POST", "/api/deliveries", Some(changed)).await.0,
+        409
+    );
+    let n: i64 = db
+        .query_row("SELECT count(*) FROM output_deliveries", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(n, 1);
     e.sql("UPDATE connector_refs SET expires=1", &[]);
     assert_eq!(
         call(
@@ -299,6 +354,17 @@ async fn registry_pins_and_dispatch_use_current_session_account_and_references()
             true,
             "{principal} must not borrow the item's new requester"
         );
+        let denied = call(
+            &e,
+            "steve_reply_source",
+            json!({"text":"Must not borrow owner access","key":format!("denied-{principal}")}),
+        )
+        .await;
+        assert_eq!(denied["result"]["isError"], true, "{principal}: {denied}");
+        let n: i64 = db
+            .query_row("SELECT count(*) FROM output_deliveries", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 1);
         e.sql(
             "DELETE FROM runtime_sessions WHERE session_id='connector-session'",
             &[],
@@ -345,6 +411,21 @@ async fn registry_pins_and_dispatch_use_current_session_account_and_references()
         .await["result"]["isError"],
         true
     );
+    e.sql(
+        "UPDATE sessions SET item_id='connector-item' WHERE id='connector-session'",
+        &[],
+    );
+    let denied = call(
+        &e,
+        "steve_reply_source",
+        json!({"text":"Departed requester","key":"departed"}),
+    )
+    .await;
+    assert_eq!(denied["result"]["isError"], true, "{denied}");
+    let n: i64 = db
+        .query_row("SELECT count(*) FROM output_deliveries", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(n, 1);
     assert_eq!(fake.calls("connector.call").len(), calls);
     assert!(fake.calls("messages.history").is_empty());
 }

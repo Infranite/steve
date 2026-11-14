@@ -132,8 +132,14 @@ fn reply_source_tool() -> Value {
         "inputSchema": {
             "$schema": "http://json-schema.org/draft-07/schema#",
             "type": "object",
-            "properties": { "text": { "type": "string", "description": "in the language of that chat" } },
-            "required": ["text"]
+            "properties": {
+                "text": { "type": "string", "description": "in the language of that chat" },
+                "key": { "type": "string", "description": "Stable identity of this update; reuse on retry, change for a new update." },
+                "space_id": { "type": "string", "description": "Explicit reachable conversation for a channel switch; omitted means the original channel." },
+                "party_id": { "type": "string", "description": "Recipient person; when supplied, their alias must belong to the target conversation." }
+            },
+            "required": ["text"],
+            "additionalProperties": false
         }
     })
 }
@@ -584,12 +590,39 @@ async fn call_owned_inner(
                 }
             )),
             (Some(_), None) => Ok(steve_channels::outbound::SRC_NO_SOURCE.to_string()),
-            (Some(text), Some(item)) => x
-                .tools
-                .outbox
-                .reply_source(&x.tools.channels, &cx.ws, item, text)
-                .await
-                .map_err(|e| e.to_string()),
+            (Some(text), Some(item)) => {
+                let who = steve_modules::Caller {
+                    ws: cx.ws.clone(),
+                    me: cx.user.clone(),
+                };
+                // Old clients need no new argument: the same update from this session has the
+                // same intent identity after a tool timeout or Hub restart, not a fresh UUID.
+                let key = args["key"].as_str().map(str::to_string).unwrap_or_else(|| {
+                    format!(
+                        "source:{}:{}:{}",
+                        cx.session_id.as_deref().unwrap_or("none"),
+                        item,
+                        steve_channels::outbound::text_hash(text),
+                    )
+                });
+                x.tools
+                    .outbox
+                    .reply_source_as(
+                        &x.tools.channels,
+                        &who,
+                        item,
+                        text,
+                        &key,
+                        args["space_id"].as_str().map(str::to_string),
+                        args["party_id"].as_str().map(str::to_string),
+                    )
+                    .await
+                    .map(|d| match d {
+                        Some(d) => serde_json::to_string(&d).unwrap_or_default(),
+                        None => steve_channels::outbound::SRC_NO_SOURCE.to_string(),
+                    })
+                    .map_err(|e| e.to_string())
+            }
         },
         Owner::Remember => {
             let m = x.modules.clone();

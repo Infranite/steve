@@ -130,6 +130,7 @@ pub mod names;
 pub mod outbound;
 pub mod personas;
 mod personas_api;
+pub mod pipeline;
 pub mod queries;
 pub mod reactions;
 pub mod replies;

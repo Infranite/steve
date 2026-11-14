@@ -913,3 +913,40 @@ Tools are discovered with `steve_tools_search` and executed through `steve_tool_
 Segments use `first`/`last` positive packet positions. Todos use `text` and `positions`, and only explicit source words justify a `due` timestamp (`due_quote`). Todos are the owner's personal list with `source:"steve"`, not Bot work items. Memories use source `first`/`last`: `id` indexes an existing visible memory; without it `text` and optional `kind` propose a private candidate, and optional `supersedes` references a visible confirmed memory for the existing confirmation flow. Both todos and memories may link an existing `matter`, or use `matter_at` (a position of a segment in the same submission) to link the newly created matter without inventing its ID. Summary-only packets forbid these associations. IDs, participants, message ranges and chain identity are derived or validated by modules, not trusted from model prose.
 
 The Bot reads and judges multiple conversations in one session but saves each chunk separately. For a large window it reads persisted segment pages, combines them with the previous summary and publishes **one complete-window summary**, never one summary per chunk. A later item/session resumes done chunks after yield, failure or expiration. A stale lease or a different run cannot write; repeated done-chunk submissions are no-ops. Failure before a chunk transaction commits leaves neither its writes nor its acknowledgement. The deterministic alert rules still count categories, firing/recovery and handlers; only queued anomalies/human discussion reach the Bot. No automatic history pull, attachment-body download, output-notification pipeline or dedicated messages page is implemented here.
+
+## Output intents
+
+The source-reply tool (`steve_reply_source`) now submits to the existing channel outbox through a durable intent ledger. It uses the session's recorded principal, re-resolved against **live workspace membership**. Service work does not borrow the workspace owner's personal access. The same backend is available to authenticated clients:
+
+- `POST /api/deliveries` accepts the intent below and returns `{id,message_id,space_id,connection_id,status,decision_id,attempts,last_error,replied_at,reply_message_id}`. `key` is a stable identity for one semantic send, scoped to the requester and workspace. Reuse it after a timeout or restart; choose another key for a genuinely new message. A reused key with different intent data returns a conflict. Empty content and content exceeding 4,000 characters are rejected, not truncated.
+- `GET /api/deliveries/:id` returns the authoritative state from the channel message and retained ledger. Only its original, still-active requester can read it. Repeating `POST` returns this same record and never retries the transport.
+- `PATCH /api/people/:party/output-preference` accepts `{"space_id":"<Steve DM ID>"}` or `{"space_id":null}` to set or clear the caller's manual preference for that person. It must be a visible, live, reachable direct conversation containing that person's known account alias. Learning updates a separate value and cannot overwrite a manual setting. An unavailable manual destination is an error, not permission to fall back to another channel.
+
+Example body (identifiers are Steve IDs, not provider IDs):
+
+```json
+{
+  "key": "item-progress-1",
+  "identity": "bot",
+  "source_message_id": "cm_source",
+  "content": {
+    "title": "Progress",
+    "markdown": "The requested work is complete.",
+    "fields": [["Result", "Ready"]],
+    "actions": [["Open result", "https://example.org/result"]],
+    "references": [["Original request", "https://example.org/request"]]
+  },
+  "reason": "item:example",
+  "urgency": "normal"
+}
+```
+
+`identity` is `bot` or `as_you`, and must match the resolved account. An `as_you` account must belong to the requester. Supply `source_message_id`, `space_id`, or `party_id`. Replies default to the source conversation even if a preference exists. An explicit `space_id` switches destinations; when `party_id` is also supplied, that person's stored alias must belong to the destination. A new message to a person considers known active DMs, manual preference first, then learned preference, then the first reachable Steve conversation ID in lexical order. There is no model-based routing, discovery of unknown recipients or automatic creation of DMs. A cross-channel send keeps its source ID in the audit/ledger but never forwards the source platform's reply ID into a different conversation. Include any desired public source link in `content.references`; the Hub does not invent provider links.
+
+The optional `key`, `space_id` and `party_id` arguments are also available on `steve_reply_source`. With no explicit key, identical text from the same session and item uses a deterministic key. Its successful result is the delivery JSON above, not a claim that a queued or drafted message was sent. An item with no chat source still returns the existing no-source answer.
+
+Content is platform-neutral: Markdown plus a title, fields, actions and references. This first path renders a lossless Markdown/plain-text fallback, including labelled action URLs. The existing channel adapter performs platform rendering; the Hub contains no new platform-specific dependency, completion runner or masking. The existing disclosure check and authorization still run. A bot send requested by a live member is authorized as a bot (not through personal approval tiers); personal sends retain the existing approval card, YOLO handling and undo window. The requester, recipient membership, account access and exact stored route are checked again by the queue before sending; a changed conversation voice is not permission to send as another account.
+
+The intent, pinned route and channel message commit in one transaction. The channel outbox remains the **only sender**, with the same message ID as transport dedupe key. Attempts and last errors remain in the ledger after temporary send state is removed. `unknown` means the send may already have happened: repeated submissions never resend it, and the existing queue can repeat only the frozen message within an adapter's declared provider-deduplication window. With no such guarantee, or after its window, the existing uncertain-send decision asks the user to reconcile it; it is not converted to a fresh send. Confirmed failures use the existing retry/discard decisions. Recall uses `POST /api/chan-messages/:message_id/recall`, when the adapter supports it. Real, non-history inbound replies with the outbound provider message ID record a reply receipt; direct-message replies also teach the channel preference, independently of manual overrides.
+
+Current scope is **source replies and explicit intent submissions over channel adapters**, not all output workflows. Arbitrary connector-operation writes, email drafts, GitHub writes, legacy generated replies and flow actions retain their existing paths; they have not all acquired this ledger or a single unified send-tier contract. Hub notification events/outbox consumers are not yet routed here. Event/urgency routing, default notification bots, now/digest/log choices, quiet hours, aggregation/escalation, scheduled digest subscriptions, digest generation and an activity-feed UI remain unimplemented in this path. `urgency` is recorded, not a routing or escalation policy. Read receipts, reaction/button receipts, automatic reply-wait completion and cross-device read sync are also not implemented; only observed replies and existing adapter recall are connected. No new environment or running service is needed to enable the persisted contract; migration 071 is applied by ordinary database startup.

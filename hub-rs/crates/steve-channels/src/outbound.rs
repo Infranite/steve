@@ -784,6 +784,8 @@ fn unchecked(r: &CheckResult) -> bool {
 pub fn direct_ok(mode: Mode, auth: &Auth) -> bool {
     match (mode, auth) {
         (_, Auth::None) => false,
+        (Mode::Bot, Auth::Requester { .. }) => true,
+        (Mode::Own, Auth::Requester { .. }) => false,
         (_, Auth::Decision { .. }) => true,
         (Mode::Bot, Auth::Rule { .. } | Auth::Grant { .. } | Auth::Step { .. }) => true,
         (Mode::Bot, Auth::Trigger { .. }) => false,
@@ -837,11 +839,18 @@ pub fn verify(
     if row.sender_account_id.as_deref() != Some(account.as_str()) {
         return Ok(Err("sender".into()));
     }
+    if let Err(why) = crate::pipeline::verify_route(c, &row.id)? {
+        return Ok(Err(why));
+    }
     if !direct_ok(mode, auth) {
         return Ok(Err(format!("{} on {}", auth.code(), mode.code())));
     }
     let ok = match auth {
         Auth::None => false,
+        Auth::Requester { user } => c.query_row(
+            "SELECT EXISTS(SELECT 1 FROM output_deliveries d JOIN workspace_members m ON m.workspace_id=d.workspace_id AND m.user_id=d.requester WHERE d.message_id=? AND d.workspace_id=? AND d.requester=?)",
+            params![row.id,row.ws,user], |r| r.get(0),
+        )?,
         Auth::Decision { id } => {
             let d = base::decisions::get(c, id)?;
             d.is_some_and(|d| {
@@ -1022,7 +1031,21 @@ impl Outbox {
         ch: &Channels,
         req: &OutRequest,
     ) -> ChannelResult<(Delivered, Option<CheckResult>)> {
+        self.deliver_enveloped(ch, req, None).await
+    }
+
+    pub(crate) async fn deliver_enveloped(
+        &self,
+        ch: &Channels,
+        req: &OutRequest,
+        envelope: Option<&crate::pipeline::Envelope>,
+    ) -> ChannelResult<(Delivered, Option<CheckResult>)> {
         self.bind(ch);
+        if let Some(e) = envelope
+            && let Some(d) = ch.store().reader(|c| crate::pipeline::existing(c, e))?
+        {
+            return Ok((crate::pipeline::outcome(&d), None));
+        }
         let t = &req.target;
         let mut text = req.text.trim().to_string();
         if text.is_empty() {
@@ -1126,7 +1149,13 @@ impl Outbox {
         } else {
             basis::REWRITTEN
         };
-        let (id, decision) = ch.store().transaction(|tx| -> ChannelResult<_> {
+        let (id, decision, reused) = ch.store().transaction(|tx| -> ChannelResult<_> {
+            // Concurrent submissions serialize here, before either can create a second message.
+            if let Some(e) = envelope
+                && let Some(d) = crate::pipeline::existing(tx, e)?
+            {
+                return Ok((d.message_id.clone(), d.decision_id.clone(), Some(d)));
+            }
             let id = insert_out(
                 tx,
                 &NewOut {
@@ -1138,6 +1167,9 @@ impl Outbox {
                 },
                 now,
             )?;
+            if let Some(e) = envelope {
+                crate::pipeline::record(tx, e, req, &id, now)?;
+            }
             // a direct one is found again under this authorization if the Hub stops before it is out
             if direct {
                 send_state::keep(tx, &id, &req.auth)?;
@@ -1173,8 +1205,11 @@ impl Outbox {
                 Some(open_approval(tx, &t.ws, &id, q, &text, rewrite)?)
             };
             messages::event(tx, &t.ws, &t.space_id, &id);
-            Ok((id, decision))
+            Ok((id, decision, None))
         })?;
+        if let Some(d) = reused {
+            return Ok((crate::pipeline::outcome(&d), Some(res)));
+        }
         if let Some(d) = decision {
             // waiting for your approval is not “working on it”: the acknowledgement comes off, and
             // the answer's own end (sent ✅ / failed ❌, `cleared → done | failed`) shows later
@@ -1615,6 +1650,7 @@ impl Outbox {
             {
                 return Ok(None);
             }
+            tx.execute("UPDATE output_deliveries SET last_error=? WHERE message_id=?",params![error,row.id])?;
             let space =
                 spaces::get(tx, &row.space_id)?.ok_or_else(|| ApiError::not_found("空间"))?;
             let d = if permanent {
