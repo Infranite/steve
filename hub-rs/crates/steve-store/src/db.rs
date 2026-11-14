@@ -144,6 +144,8 @@ pub const MIGRATIONS: &[&str] = &[
     // 69: tool search: what each Bot keeps loaded (`bot_tool_pins`) and how often each tool was found
     // and called (`tool_usage`).
     include_str!("../migrations/069.sql"),
+    // 70: expiring connector references bound to workspace, connection and account.
+    include_str!("../migrations/070.sql"),
 ];
 
 /// 027's item columns and their one-time backfill (applied by `run_pending` when `items.phase` is missing).

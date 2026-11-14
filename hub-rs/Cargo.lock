@@ -5207,6 +5207,7 @@ dependencies = [
  "chrono-tz",
  "futures-util",
  "hex",
+ "jsonschema",
  "prost",
  "rand 0.10.3",
  "regex",

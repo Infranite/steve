@@ -171,3 +171,42 @@ fn released_migrations_are_frozen() {
         );
     }
 }
+
+#[test]
+fn connector_reference_migration_is_registered_and_upgrades_v69_once() {
+    let c = fresh();
+    assert_eq!(
+        one(
+            &c,
+            "SELECT count(*) FROM sqlite_master WHERE name='connector_refs' AND type='table'"
+        ),
+        1
+    );
+    // Recreate the immediately previous schema without guessing the conditional runner columns.
+    c.execute_batch("DROP TABLE connector_refs; UPDATE schema_version SET v=69; UPDATE schema_compat SET min_reader=69;").unwrap();
+    db::migrate(&c).unwrap();
+    assert_eq!(
+        one(
+            &c,
+            "SELECT count(*) FROM sqlite_master WHERE name='connector_refs' AND type='table'"
+        ),
+        1
+    );
+    assert_eq!(
+        one(
+            &c,
+            "SELECT count(*) FROM pragma_foreign_key_list('connector_refs')"
+        ),
+        3
+    );
+    assert_eq!(
+        one(
+            &c,
+            "SELECT count(*) FROM sqlite_master WHERE name IN ('connector_refs_connection','connector_refs_expiry')"
+        ),
+        2
+    );
+    db::migrate(&c).unwrap();
+    assert_eq!(db::compat(&c).unwrap().schema, db::SCHEMA_VERSION);
+    assert_eq!(one(&c, "SELECT count(*) FROM pragma_foreign_key_check"), 0);
+}
