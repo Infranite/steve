@@ -52,6 +52,7 @@ struct H {
     _keys: TempDir,
     fake: FakeExtWs,
     ext: Arc<ExtWs>,
+    bot: Arc<ExtWs>,
     conns: Connections,
     ch: Channels,
     /// The Hub's clock when the test started (the fake's clock too).
@@ -62,10 +63,13 @@ async fn setup() -> H {
     let fake = FakeExtWs::start().await.expect("fake service");
     let core = Arc::new(FakeCore::default());
     let flow_setup = FlowSetup::new(core);
+    let disclosure = steve_channels::disclosure::Disclosure::with_models(Vec::new());
     let env = TestEnv::new(|r| {
         flow_setup.register(r);
         connections::register(r);
+        r.outbound_check(Box::new(disclosure.clone()));
     });
+    disclosure.bind(env.store().clone(), env.gateway.clone());
     let t0 = env.clock.now();
     fake.with(|w| w.now = Some(t0));
     env.store()
@@ -82,18 +86,26 @@ async fn setup() -> H {
     );
     vault.init(WS, ME).expect("vault init");
     let ext = Arc::new(ExtWs::with_timing(timing()));
+    let bot = Arc::new(ExtWs::bot_with_timing(timing()));
     let conns = Connections::builder(
         env.modules.clone(),
         vault,
         ConnectionsConfig::new(Vec::new(), true, |_| None),
     )
     .provider(ext.clone())
+    .provider(bot.clone())
     .build();
     let flow = flow_setup
         .connections(conns.clone())
         .build(env.modules.clone(), Arc::new(LinearExecutor));
     let ch = Channels::builder(env.modules.clone(), conns.clone(), Arc::new(flow))
         .decl(ext_ws::decl())
+        .decl(ext_ws::bot_decl())
+        .adapter(bot.clone())
+        .media(bot.clone())
+        .connector(bot.clone())
+        .history(bot.clone())
+        .profiles(bot.clone())
         .media(ext.clone())
         .connector(ext.clone())
         .history(ext.clone())
@@ -104,6 +116,7 @@ async fn setup() -> H {
         _keys: keys,
         fake,
         ext,
+        bot,
         conns,
         ch,
         t0,
@@ -142,6 +155,11 @@ impl H {
                 ext_ws::ADAPTER,
                 Some(ext_ws::decl()),
                 Arc::new(ExtWsHook::new(self.ch.clone(), self.ext.clone())),
+            )
+            .hook(
+                ext_ws::BOT_ADAPTER,
+                Some(ext_ws::bot_decl()),
+                Arc::new(ExtWsHook::new(self.ch.clone(), self.bot.clone())),
             )
             .build();
         let (tx, rx) = mpsc::channel(256);
@@ -1421,4 +1439,391 @@ async fn connector_participants_aliases_and_departed_conversation_cannot_reuse_r
     );
     assert!(h.fake.calls("messages.history").is_empty());
     rt.shutdown().await;
+}
+
+// Explicit bot identity exercises the same credential form, lifecycle, inbound and real Outbox.
+fn bot_identity(h: &H) {
+    h.fake.with(|w| {
+        w.identity = Some("bot".into());
+        w.account_identity = Some("bot".into());
+    });
+}
+
+async fn connect_bot(h: &H) -> String {
+    h.conns
+        .create(
+            &caller(WS, ME),
+            ext_ws::BOT_ADAPTER,
+            &fields(&h.fake.url(), fake::TOKEN),
+            json!({}),
+        )
+        .await
+        .expect("bot connected")
+        .id
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn bot_connect_claims_a_bot_not_me_and_outbox_sends_as_bot_with_source_receipt() {
+    use steve_channels::deliver::{Auth, OutRequest, OutTarget, Purpose};
+    use steve_channels::outbound::{OutLink, Outbox};
+    use steve_channels::spaces;
+    use steve_store::base::Viewer;
+
+    let h = setup().await;
+    bot_identity(&h);
+    h.fake.with(|w| w.source_only = true);
+    let id = connect_bot(&h).await;
+    let account = h.rows(
+        "SELECT a.kind,p.contact_kind,p.user_id,c.caps FROM connections c
+        JOIN accounts a ON a.id=c.account_id JOIN parties p ON p.id=a.party_id WHERE c.id=?",
+        &[&id],
+    );
+    assert_eq!(account[0][0], "app_bot");
+    assert_eq!(account[0][1], "bot");
+    assert!(account[0][2].is_null(), "a bot is not me: {account:?}");
+    let caps: Vec<String> = serde_json::from_str(account[0][3].as_str().unwrap()).unwrap();
+    assert!(caps.iter().any(|c| c == "msg.send"));
+    assert!(!caps.iter().any(|c| c == "msg.send_as_user"));
+    assert!(h.conns.cx_for(WS, &id, Some("msg.send_as_user")).is_err());
+    let alias = h.rows(
+        "SELECT p.contact_kind,p.user_id FROM accounts a JOIN parties p ON p.id=a.party_id
+        WHERE a.system_id='mail' AND a.handle='ada@example.com'",
+        &[],
+    );
+    assert_eq!(alias[0][0], "bot");
+    assert!(alias[0][1].is_null());
+
+    let (rt, _tx) = h.runtime();
+    until("bot subscribed", || h.subscribes().len() == 1).await;
+    assert_eq!(
+        h.rows(
+            "SELECT mode FROM channel_settings WHERE connection_id=?",
+            &[&id]
+        )[0][0],
+        "bot"
+    );
+    let mut incoming = msg(&h, "bot_chat", "bot_in", "u_somebody", "hello bot", 1);
+    incoming["id"] = Value::Null;
+    let seq = h.fake.push_message(incoming);
+    until("bot inbound stored", || h.fake.acked() == seq).await;
+    let inbound = h.rows(
+        "SELECT m.id,m.space_id FROM chan_messages m JOIN spaces s ON s.id=m.space_id
+        WHERE s.external_id='bot_chat'",
+        &[],
+    );
+    let source = inbound[0][0].as_str().unwrap().to_string();
+    let space_id = inbound[0][1].as_str().unwrap().to_string();
+    let plan = h
+        .env
+        .store()
+        .reader(|c| steve_channels::flow_actions::plan_of(c, WS, &source))
+        .unwrap();
+    assert_eq!(plan.mode, spaces::Mode::Bot);
+    // A source-only reply keeps its real remote source_id, not the Hub's fp: id.
+    let now = h.ch.now();
+    h.env
+        .store()
+        .transaction(|tx| {
+            spaces::set_account_rules(
+                tx,
+                &Viewer::bare(WS, ME),
+                &id,
+                &json!([{"when":{"kind":"all"},"act":"reply"}]),
+                now,
+            )
+        })
+        .unwrap();
+    h.env.gateway.script(
+        steve_channels::disclosure::CHECK_HEAD,
+        r#"{"verdict":"pass","spans":[]}"#,
+    );
+    let outbox = Outbox::new(OutLink::new());
+    let (result, check) = outbox
+        .deliver_checked(
+            &h.ch,
+            &OutRequest {
+                target: OutTarget::reply(&plan),
+                text: "bot answer".into(),
+                purpose: Purpose::Reply,
+                approve: false,
+                generation: None,
+                auth: Auth::Rule {
+                    source: source.clone(),
+                    act: steve_channels::rules::Act::Reply,
+                },
+            },
+        )
+        .await
+        .unwrap();
+    let out_id = match result {
+        steve_channels::deliver::Delivered::Sent { message_id }
+        | steve_channels::deliver::Delivered::Queued { message_id } => message_id,
+        other => panic!("bot must use the real outbound path: {other:?}, disclosure: {check:?}"),
+    };
+    h.env.clock.advance(10_000);
+    outbox.send_due(&h.ch).await;
+    assert_eq!(
+        h.rows("SELECT status FROM chan_messages WHERE id=?", &[&out_id])[0][0],
+        "sent"
+    );
+    let writes = h.fake.with(|w| w.writes.clone());
+    assert_eq!(writes.len(), 1, "{writes:?}");
+    assert_eq!(writes[0].0, "messages.reply");
+    assert_eq!(writes[0].1["to"]["source_id"], "bot_in");
+    assert_eq!(
+        writes[0].1["expected_sender"],
+        json!({"kind":"id","value":fake::ME})
+    );
+    assert!(writes[0].1["idempotency_key"].as_str().is_some());
+    let receipt = h.rows(
+        "SELECT source_id FROM chan_message_seen WHERE connection_id=? AND message_id=?",
+        &[&id, &out_id],
+    );
+    assert_eq!(receipt[0][0], writes[0].2["source_id"]);
+    assert!(!space_id.is_empty());
+    assert!(writes[0].2["id"].is_null());
+    assert_eq!(writes[0].1["expected_identity"], "bot");
+    let mut echo = msg(
+        &h,
+        "bot_chat",
+        writes[0].2["source_id"].as_str().unwrap(),
+        fake::ME,
+        "bot answer",
+        2,
+    );
+    echo["id"] = Value::Null;
+    echo["is_mine"] = true.into();
+    echo["sender"]["is_bot"] = true.into();
+    let seq = h.fake.push_message(echo);
+    until("bot echo acked", || h.fake.acked() == seq).await;
+    assert_eq!(
+        h.rows(
+            "SELECT count(*) FROM chan_messages WHERE space_id=?",
+            &[&space_id]
+        )[0][0],
+        2,
+        "source receipt deduplicates the bot's source-only echo"
+    );
+    // Identity switches on a live socket, even with the same handle, must be refused remotely.
+    h.fake.with(|w| w.account_identity = Some("self".into()));
+    assert!(
+        steve_channels::channel::ChannelAdapter::send_message(
+            h.bot.as_ref(),
+            &h.cx(&id),
+            &space("bot_chat"),
+            &OutContent::text("must not become as you"),
+            &SendKey("live-flip".into())
+        )
+        .await
+        .is_err()
+    );
+    // A bot can never reach the self trait even when called directly by a mistaken caller.
+    assert!(
+        ActAsUser::send(
+            h.bot.as_ref(),
+            &h.cx(&id),
+            &space("bot_chat"),
+            &OutContent::text("not as you"),
+            &SendKey("wrong".into())
+        )
+        .await
+        .is_err()
+    );
+    assert_eq!(h.fake.with(|w| w.writes.len()), 1);
+    rt.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn bot_identity_must_be_explicit_and_match_both_hello_and_account() {
+    for (hello, account) in [
+        (None, None),
+        (Some("bot"), None),
+        (Some("self"), Some("bot")),
+        (Some("bot"), Some("self")),
+        (Some("unknown"), Some("bot")),
+    ] {
+        let h = setup().await;
+        h.fake.with(|w| {
+            w.identity = hello.map(str::to_string);
+            w.account_identity = account.map(str::to_string);
+        });
+        assert!(
+            h.conns
+                .create(
+                    &caller(WS, ME),
+                    ext_ws::BOT_ADAPTER,
+                    &fields(&h.fake.url(), fake::TOKEN),
+                    json!({})
+                )
+                .await
+                .is_err()
+        );
+        assert!(h.rows("SELECT id FROM connections", &[]).is_empty());
+        assert!(h.fake.with(|w| w.writes.is_empty()));
+    }
+    let h = setup().await;
+    bot_identity(&h);
+    assert!(
+        h.conns
+            .create(
+                &caller(WS, ME),
+                ext_ws::ADAPTER,
+                &fields(&h.fake.url(), fake::TOKEN),
+                json!({})
+            )
+            .await
+            .is_err(),
+        "self cannot accept bot identity"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_same_account_cannot_be_reused_between_bot_and_self() {
+    // Both directions retain the existing connection, owner and caps; no takeover or merge.
+    for first_bot in [false, true] {
+        let h = setup().await;
+        let id = if first_bot {
+            bot_identity(&h);
+            connect_bot(&h).await
+        } else {
+            h.connect().await
+        };
+        let before = h.rows("SELECT a.party_id,c.adapter,c.caps FROM connections c JOIN accounts a ON a.id=c.account_id WHERE c.id=?", &[&id]);
+        h.fake.with(|w| {
+            let identity = if first_bot { "self" } else { "bot" };
+            w.identity = Some(identity.into());
+            w.account_identity = Some(identity.into());
+        });
+        let other = if first_bot {
+            ext_ws::ADAPTER
+        } else {
+            ext_ws::BOT_ADAPTER
+        };
+        assert!(
+            h.conns
+                .create(
+                    &caller(WS, ME),
+                    other,
+                    &fields(&h.fake.url(), fake::TOKEN),
+                    json!({})
+                )
+                .await
+                .is_err()
+        );
+        assert_eq!(h.rows("SELECT a.party_id,c.adapter,c.caps FROM connections c JOIN accounts a ON a.id=c.account_id WHERE c.id=?", &[&id]), before);
+        assert_eq!(h.rows("SELECT count(*) FROM connections", &[])[0][0], 1);
+        // The original provider also refuses a remote identity flip, before writing.
+        let ext = if first_bot { &h.bot } else { &h.ext };
+        let result = if first_bot {
+            steve_channels::channel::ChannelAdapter::send_message(
+                ext.as_ref(),
+                &h.cx(&id),
+                &space("c"),
+                &OutContent::text("wrong identity"),
+                &SendKey("flip".into()),
+            )
+            .await
+        } else {
+            ActAsUser::send(
+                ext.as_ref(),
+                &h.cx(&id),
+                &space("c"),
+                &OutContent::text("wrong identity"),
+                &SendKey("flip".into()),
+            )
+            .await
+        };
+        assert!(result.is_err());
+        assert!(h.fake.with(|w| w.writes.is_empty()));
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn bot_connector_writes_require_bot_caps_and_never_discover_as_you_operations() {
+    let h = setup().await;
+    bot_identity(&h);
+    h.fake.with(|w| {
+        let mut manifest = connector_manifest();
+        let mut bot_write = manifest["operations"][2].clone();
+        bot_write["name"] = "update_bot".into();
+        bot_write["annotations"]["steve"]["asYou"] = false.into();
+        manifest["operations"]
+            .as_array_mut()
+            .unwrap()
+            .push(bot_write);
+        // Even a read advertised as as-you must not appear on a bot account.
+        let mut as_you_read = manifest["operations"][1].clone();
+        as_you_read["name"] = "read_as_you".into();
+        as_you_read["annotations"]["steve"]["asYou"] = true.into();
+        manifest["operations"]
+            .as_array_mut()
+            .unwrap()
+            .push(as_you_read);
+        w.connector = Some(manifest);
+        w.features = vec!["me".into(), "changes".into()];
+        w.connector_results.insert(
+            "search".into(),
+            json!({"references":[{
+                "kind":"reference","external_id":"document-1","original_type":"document"
+            }]}),
+        );
+    });
+    let conn = connect_bot(&h).await;
+    let who = caller(WS, ME);
+    let tools = h.ch.connector_tools(&who).await.unwrap();
+    let names: Vec<_> = tools.iter().map(|t| t.operation.name.as_str()).collect();
+    assert_eq!(names, ["search", "read", "update_bot"]);
+    for denied in ["update", "read_as_you"] {
+        assert!(
+            h.ch.connector_call(
+                &who,
+                &steve_channels::connector::tool_name(&conn, denied),
+                json!({"reference":"anything","text":"do not send"}),
+                "wrong-identity"
+            )
+            .await
+            .is_err()
+        );
+    }
+    let search = steve_channels::connector::tool_name(&conn, "search");
+    let found =
+        h.ch.connector_call(&who, &search, json!({"query":"document"}), "search")
+            .await
+            .unwrap();
+    let reference = found["references"][0]["reference_id"].as_str().unwrap();
+    let update = steve_channels::connector::tool_name(&conn, "update_bot");
+    h.ch.connector_call(
+        &who,
+        &update,
+        json!({"reference":reference,"text":"bot edit"}),
+        "bot-write",
+    )
+    .await
+    .unwrap();
+    let writes = h.fake.with(|w| w.writes.clone());
+    assert_eq!(writes.len(), 1);
+    assert_eq!(writes[0].1["expected_identity"], "bot");
+    assert_eq!(writes[0].1["arguments"]["reference"], "document-1");
+    h.env
+        .store()
+        .transaction(|tx| {
+            tx.execute(
+                "UPDATE connections SET caps='[\"msg.receive\"]' WHERE id=?",
+                [&conn],
+            )?;
+            Ok::<_, steve_modules::ApiError>(())
+        })
+        .unwrap();
+    assert!(
+        h.ch.connector_call(
+            &who,
+            &update,
+            json!({"reference":reference,"text":"revoked"}),
+            "revoked"
+        )
+        .await
+        .is_err()
+    );
+    assert_eq!(h.fake.with(|w| w.writes.len()), 1);
+    assert!(h.fake.calls("messages.history").is_empty());
 }

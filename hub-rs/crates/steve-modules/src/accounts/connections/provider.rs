@@ -245,6 +245,9 @@ pub struct AccountInfo {
     /// `accounts.kind` (`personal`, `app_bot`, `work_email`…).
     pub kind: String,
     pub owner: Owner,
+    /// A provider with explicit bot/self identity must not reuse an account of the other kind.
+    /// Opt-in: existing providers retain their account-adoption behavior.
+    pub strict_identity_owner: bool,
     /// Handles valid only under this connection (Feishu `open_id`s): written to `account_handles`
     /// with the connection id.
     pub extra_handles: Vec<String>,
@@ -265,6 +268,7 @@ impl AccountInfo {
             display_name: display_name.into(),
             kind: "personal".into(),
             owner: Owner::Me,
+            strict_identity_owner: false,
             extra_handles: Vec::new(),
             config: Value::Null,
             steward_hint: None,

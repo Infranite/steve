@@ -255,6 +255,9 @@ pub struct Plugin {
     pub version: String,
     /// The version of its kind's run contract it was built for.
     pub contract: u32,
+    /// Explicit connection identity. Missing retains the original self contract.
+    #[serde(default)]
+    pub identity: steve_channels::adapters::ext_ws::wire::Identity,
     /// The executable, relative to the root of the unpacked archive.
     pub entry: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -416,6 +419,17 @@ mod tests {
                 "artifacts": {"aarch64-apple-darwin": {"url": "echo.tar.gz", "sha256": "0".repeat(64)}}
             }]
         })
+    }
+
+    #[test]
+    fn connection_identity_defaults_to_self_and_bot_is_explicit() {
+        use steve_channels::adapters::ext_ws::wire::Identity;
+        let mut v = sample();
+        assert_eq!(parsed(&v).unwrap().plugins[0].identity, Identity::Self_);
+        v["plugins"][0]["identity"] = "bot".into();
+        assert_eq!(parsed(&v).unwrap().plugins[0].identity, Identity::Bot);
+        v["plugins"][0]["identity"] = "unknown".into();
+        assert!(parsed(&v).is_err());
     }
 
     #[test]

@@ -224,7 +224,7 @@ impl ChannelSide {
     /// - on your own account, `features.recall` and `features.reactions` say what the
     ///   act-as-user view supports ([`ActAsUser::supports_recall`],
     ///   [`ActAsUser::supports_reactions`]);
-    /// - [`MessageIds::None`] ⇒ no channel adapter;
+    /// - [`MessageIds::None`] with a channel adapter requires `preserves_source_ids`;
     /// - `created_precision_ms` is within [`PRECISION_MS`];
     /// - `receive_cap` is one of the provider's capabilities;
     /// - the provider's identity is `self` exactly when the side is [`Mode::Own`].
@@ -317,9 +317,14 @@ impl ChannelSide {
                 ));
             }
         }
-        if self.decl.message_ids == MessageIds::None && self.adapter.is_some() {
+        if self.decl.message_ids == MessageIds::None
+            && self
+                .adapter
+                .as_ref()
+                .is_some_and(|a| !a.preserves_source_ids())
+        {
             return Err(format!(
-                "adapter {want} has no platform message ids but a channel adapter"
+                "adapter {want} has no platform message ids but its channel adapter does not preserve source ids"
             ));
         }
         if !PRECISION_MS.contains(&self.decl.created_precision_ms) {
@@ -590,12 +595,12 @@ mod tests {
                 .check(),
             Ok(())
         );
-        // without platform message ids there is no bot-style channel adapter
+        // A legacy adapter returning only a platform id cannot claim source-only support.
         assert_eq!(
             ChannelSide::new(app_decl().message_ids(MessageIds::None), app.clone())
                 .adapter(app.clone())
                 .check(),
-            Err("adapter feishu_app has no platform message ids but a channel adapter".into())
+            Err("adapter feishu_app has no platform message ids but its channel adapter does not preserve source ids".into())
         );
         assert_eq!(
             side(

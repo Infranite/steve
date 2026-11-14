@@ -1,18 +1,20 @@
 //! # External channel over WebSocket: protocol v1
 //!
-//! Status: version 1, implemented by the Hub's built-in adapter `ext_ws`
+//! Status: version 1, implemented by the Hub's built-in adapters `ext_ws` and `ext_ws.bot`
 //! ([`super`]); §13 lists what this Hub does and does not do yet. This is the reference copy: the Hub
 //! owns and publishes this text, and a channel service implements it from this text alone. MUST,
 //! MUST NOT, SHOULD and MAY are used as in RFC 2119.
 //!
 //! ## 0. Terms
 //!
-//! - **Hub**: the Steve Hub; its built-in adapter `ext_ws` is the **client**. **Channel service**
-//!   (**remote**, **server**): an external process bridging one messaging system for one signed-in
-//!   user. **Connection**: one Hub `connections` row of adapter `ext_ws` (URL, credential, identity).
+//! - **Hub**: the Steve Hub; its built-in adapters `ext_ws` and `ext_ws.bot` are the **clients**.
+//!   **Channel service** (**remote**, **server**): an external process bridging one messaging system
+//!   for one signed-in user or bot (§15). **Connection**: one Hub `connections` row of adapter
+//!   `ext_ws` or `ext_ws.bot` (URL, credential, identity).
 //! - **Chat**: a conversation at the remote (DM, group, channel, thread) with a stable `chat_id`, the
-//!   Hub space's `ext_id`. **User**: the person signed in at the remote; the Hub acts as them
-//!   (`Mode::Own`).
+//!   Hub space's `ext_id`. **Account**: the person or bot signed in at the remote. Unless explicitly
+//!   scoped by §15, references below to the signed-in user also apply to the connected account.
+//!   Self uses `Mode::Own`; an explicitly selected bot uses `Mode::Bot`.
 //!
 //! ## 1. Roles and direction
 //!
@@ -702,8 +704,9 @@
 //! `asYou`. Declarations are metadata, not authorization. Every call rechecks current caller,
 //! account/connection and schema, then resolves Hub-issued IDs to that account's provider IDs.
 //!
-//! `connector.call {name,arguments,expected_sender?,idempotency_key?}` returns JSON. Writes require
-//! the connection's send-as-you capability, current signed-in identity and write policy. The Hub
+//! `connector.call {name,arguments,expected_sender?,expected_identity?,idempotency_key?}` returns JSON.
+//! Writes require the connection's send-as-you capability (or bot `msg.send` with explicit
+//! `steve.asYou:false`, §15), current signed-in identity and write policy. The Hub
 //! sends once; a timeout or lost socket returns `{status:"unknown",request_id, retry:false}`.
 //! There is no automatic retry, including rate-limit responses. The service must check
 //! `expected_sender` before side effects and implement idempotency-key conflict detection (§4.4).
@@ -730,3 +733,44 @@
 //! privacy comes from the connection account. Remote Hub IDs, visibility or flow controls are
 //! ignored. Undeclared event types are skipped and acked. Platform-specific payloads stay in the
 //! plugin and can be fetched through a declared explicit read operation.
+
+//!
+//! ## 15. Explicit bot/self identity (2026-11-14)
+//!
+//! The Hub registers two static channel sides sharing this protocol: `ext_ws` is self (`Mode::Own`,
+//! `msg.receive` + `msg.send_as_user`, `claims_self:true`); `ext_ws.bot` is an explicit bot
+//! (`Mode::Bot`, `msg.receive` + `msg.send`, `claims_self:false`). Select the adapter on the
+//! credential create request. A channel/connector plugin's index entry selects it with
+//! `identity:"self"|"bot"` (default self). The plugin runner uses this selection, not a guessed
+//! identity from messages. There is no automatic conversion or fallback to the other provider.
+//!
+//! Both the hello result and `me.get` result MAY add a top-level `identity:"self"|"bot"`.
+//! Missing means self, preserving existing services. A bot MUST declare `"bot"` in both results;
+//! unknown/null values, disagreement between results or disagreement with the selected provider
+//! are refused. `me.get.user` is the connected account's primary handle, display and aliases in
+//! either mode. The Hub remembers identity kind with realm and primary handle and rechecks it on
+//! reconnect and session recovery. A bot creates an `app_bot` account on a bot contact, never on
+//! the connecting person's “me”; its handles do not participate in `claims_self`. The Hub refuses
+//! using a known human account as a bot, or a known bot account as self, without moving it.
+//!
+//! Every write additionally carries `expected_identity:"self"|"bot"`. A bot-aware service MUST
+//! compare BOTH expected identity kind and expected primary handle to its current credential
+//! before any side effect; either mismatch returns `account_changed`. A same-handle identity
+//! switch on an already open socket must not turn a bot write into a send-as-user operation.
+//! This is additive: an existing self-only service may ignore the new expected_identity field.
+//!
+//! Bot text sends and thread replies use the normal Hub outbox authorization, idempotency and
+//! retry rules and a ChannelAdapter, not the ActAsUser view. A successful result MUST include a
+//! stable source_id, shared with every later echo; id MAY be absent. The Hub retains the full
+//! Sent receipt, replies by the stored source_id when needed, and deduplicates source-only echoes.
+//! It retains the 24-hour send-idempotency contract of §4.4. This minimal bot side advertises only
+//! thread reply, not recall, reactions, editing, member listing or complete message coverage.
+//! Self keeps its existing own-message suppression, approval, reactions and recall paths.
+//!
+//! Bot connector writes require `msg.send` and explicit `steve.asYou:false` (write operations
+//! otherwise default to as-you); as-you operations are neither discovered nor dispatched for bots.
+//! Self connector writes still require `msg.send_as_user`. Current identity and write policy are
+//! checked as before. Connector write unknown-outcome/no-replay semantics remain those of §14.
+//!
+//! This is only a generic identity/transport prerequisite: no built-in platform is migrated or
+//! removed, and no notification defaults or existing platform adoption workflow changes.
