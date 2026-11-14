@@ -4,6 +4,8 @@
 //! on a temp STEVE_HOME with a file keystore; no agent and no external host is ever contacted (the
 //! test connections point their API base at a closed local port).
 
+mod connectors;
+
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;

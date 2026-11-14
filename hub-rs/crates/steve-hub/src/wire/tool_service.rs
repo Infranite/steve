@@ -129,6 +129,41 @@ impl ToolService {
         builtin_catalog()
     }
 
+    /// Resolve the current session's item actor under the same visibility rule as knowledge and
+    /// conversation reads. A connector never inherits a workspace owner's identity. Sessions with
+    /// no identified item actor cannot access personal connector accounts.
+    async fn connector_caller(
+        &self,
+        s: &steve_store::Session,
+    ) -> Result<steve_modules::Caller, String> {
+        let (store, sid, ws) = (self.mcp.store.clone(), s.id.clone(), s.workspace_id.clone());
+        tokio::task::spawn_blocking(move || {
+            let current = store
+                .sessions()
+                .get(&sid)
+                .map_err(|e| e.to_string())?
+                .filter(|row| row.workspace_id == ws && row.status != "ended")
+                .ok_or_else(|| "Connector session no longer exists".to_string())?;
+            let item = current
+                .item_id
+                .ok_or_else(|| "Connector session has no item actor".to_string())?;
+            store
+                .reader(|c| {
+                    let viewer = steve_knowledge::context::item_viewer(c, &ws, &item)?;
+                    if viewer.user.is_empty() {
+                        return Err(steve_modules::ApiError::Unauthenticated);
+                    }
+                    Ok(steve_modules::Caller {
+                        ws: viewer.ws,
+                        me: viewer.user,
+                    })
+                })
+                .map_err(|e: steve_modules::ApiError| e.to_string())
+        })
+        .await
+        .map_err(|e| e.to_string())?
+    }
+
     /// Everything session `s` can call ([`tool_registry`]): the built-in tools with
     /// `steve_tools_search` and `steve_tool_call`, the remote agents and library MCP servers its Bot
     /// has switched on (`reach`: whose tools to list now), and what it lists.
@@ -164,6 +199,12 @@ impl ToolService {
                 Default::default()
             }
         };
+        if let Ok(caller) = self.connector_caller(s).await {
+            match self.extra.tools.channels.connector_tools(&caller).await {
+                Ok(tools) => entries.extend(tools.into_iter().map(tool_registry::connector_entry)),
+                Err(e) => tracing::warn!(session = %s.id, "connector catalog: {e}"),
+            }
+        }
         for a in &agents {
             entries.push(tool_registry::a2a_entry(
                 &a.id,
@@ -326,6 +367,18 @@ impl ToolService {
             };
             check_args(name, &e.input_schema, &args)?;
             match &e.source {
+                Source::Connector { .. } => {
+                    let caller = self.connector_caller(&s).await?;
+                    // An opaque request key belongs to this invocation, never to model parameters.
+                    // Channels rechecks the live declaration, account access and target bindings.
+                    let key = uuid::Uuid::new_v4().to_string();
+                    self.extra
+                        .tools
+                        .channels
+                        .connector_call(&caller, name, args, &key)
+                        .await
+                        .map(|v| v.to_string())
+                }
                 Source::A2a { .. } => self.extra.caps.a2a_call(&s.id, name, &args).await,
                 Source::Mcp { id, .. } => {
                     let (store, id, sid) = (self.mcp.store.clone(), id.clone(), s.id.clone());

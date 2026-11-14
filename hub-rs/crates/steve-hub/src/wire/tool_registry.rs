@@ -6,8 +6,8 @@
 //! The sources: Steve's built-in tools (steve-mcp and the modules', [`super::tool_service`]), the
 //! library's MCP servers the session's Bot has switched on (proxied by the Hub,
 //! [`super::library_mcp`]), the remote A2A agents it uses (`steve_a2a_<name>`), and connector tools
-//! (none yet: a connector declares its read and write operations in its handshake, and they become
-//! entries of [`Source::Connector`]).
+//! (a connector declares its read and write operations in its handshake; the visible connections
+//! become account-bound entries of [`Source::Connector`]).
 //!
 //! A session lists only a small core ([`steve_modules::caps::tools::CORE`]) and what its Bot pinned;
 //! every other tool is found with `steve_tools_search` (structured filters and keyword scoring, no
@@ -29,8 +29,7 @@ pub enum Source {
     Mcp { id: String, name: String },
     /// A remote A2A agent: its id and name.
     A2a { id: String, name: String },
-    /// A connector's operation on one account (phase C).
-    #[allow(dead_code)]
+    /// A connector's operation on one authorized connection/account.
     Connector { connector: String, account: String },
 }
 
@@ -204,6 +203,40 @@ pub fn a2a_entry(id: &str, name: &str, tool: &Value) -> Entry {
         as_you: false,
         remote: None,
         upstream_annotations: Value::Null,
+    }
+}
+
+/// A validated connector operation, already scoped to a connection visible to this session.
+pub fn connector_entry(t: steve_channels::connector::Tool) -> Entry {
+    let op = t.operation;
+    let read_only = op.read_only();
+    let as_you = op.as_you();
+    let resources = op
+        .annotations
+        .pointer("/steve/resources")
+        .and_then(Value::as_array)
+        .map(|xs| {
+            xs.iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .filter(|xs: &Vec<String>| !xs.is_empty())
+        .unwrap_or_else(|| vec![t.connector.clone()]);
+    Entry {
+        name: t.name,
+        description: op.description,
+        input_schema: op.input_schema,
+        read_only,
+        destructive: !read_only && op.annotations["destructiveHint"].as_bool().unwrap_or(true),
+        source: Source::Connector {
+            connector: t.connector,
+            account: t.account,
+        },
+        resources,
+        as_you,
+        remote: Some(op.name),
+        upstream_annotations: op.annotations,
     }
 }
 
@@ -700,6 +733,33 @@ pub fn summary(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn connector_metadata_uses_authorized_source_and_preserves_operation_contract() {
+        let op: steve_channels::connector::Operation = serde_json::from_value(json!({
+            "name":"update", "description":"Update original", "capability":"write",
+            "inputSchema":{"type":"object","properties":{"reference":{"type":"string"}},
+                "required":["reference"],"additionalProperties":false},
+            "bindings":{"reference":"reference"},
+            "annotations":{"readOnlyHint":false,"idempotentHint":true,
+                "steve":{"resources":["document"],"asYou":true,"source":"forged"}}
+        }))
+        .unwrap();
+        let e = connector_entry(steve_channels::connector::Tool {
+            name: steve_channels::connector::tool_name("conn-1", "update"),
+            connector: "example".into(),
+            account: "conn-1".into(),
+            operation: op,
+        });
+        assert_eq!(e.source.label(), "connector:example/conn-1");
+        assert_eq!(e.kind(), "write");
+        assert!(e.destructive && e.as_you);
+        assert_eq!(e.resources, vec!["document"]);
+        assert_eq!(e.remote.as_deref(), Some("update"));
+        let annotations = e.descriptor().annotations;
+        assert_eq!(annotations["steve"]["source"], "connector:example/conn-1");
+        assert_eq!(annotations["idempotentHint"], true);
+    }
 
     fn steve(name: &str, desc: &str, read_only: bool) -> Entry {
         let (res, as_you) = steve_meta(name);

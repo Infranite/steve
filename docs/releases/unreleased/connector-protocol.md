@@ -2,4 +2,4 @@ External services can declare a generic connector protocol over the existing aut
 
 Rich attachments, documents and web pages keep metadata and references rather than inline originals. Explicit search/history/read operations can register expiring, account-bound Hub reference IDs without importing messages or backfilling history. Each call rechecks the current account, connection, declaration and target visibility. Connector event IDs deduplicate across reconnects; lost write responses remain unknown and are never automatically retried. Existing messaging bridges retain their previous protocol and gap-repair behavior.
 
-Development integration is not complete yet: the protocol/channel/plugin code is present, but unified tool-registry discovery/call and activation of the prepared reference migration are pending. Connector reference calls are not enabled at this stage.
+Connector operations participate in unified tool search, source/resource/read-write filters, Bot tool pins, session catalogs and generic tool dispatch. The Hub derives account access from the current session item actor, never from model-supplied identifiers or a workspace-owner fallback.

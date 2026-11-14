@@ -1342,3 +1342,83 @@ async fn connector_message_binding_uses_provider_id_or_connection_source_never_h
     );
     rt.shutdown().await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn connector_participants_aliases_and_departed_conversation_cannot_reuse_references() {
+    let h = setup().await;
+    h.fake.with(|w| {
+        let mut manifest = connector_manifest();
+        manifest["operations"].as_array_mut().unwrap().push(json!({
+            "name":"message","description":"Read one message","capability":"read",
+            "inputSchema":{"type":"object","properties":{"message":{"type":"string"}},"required":["message"],"additionalProperties":false},
+            "annotations":{"readOnlyHint":true},"bindings":{"message":"message"}
+        }));
+        w.connector = Some(manifest);
+        w.connector_results.insert("search".into(), json!({"references":[{
+            "kind":"reference","external_id":"doc","conversation_id":"issue-9","original_type":"document"
+        }]}));
+    });
+    let conn = h.connect().await;
+    let (rt, _tx) = h.runtime();
+    until("subscribed", || !h.subscribes().is_empty()).await;
+    let seq = h
+        .fake
+        .push_message(msg(&h, "issue-9", "message-9", "u_7", "Issue", 1));
+    until("message ack", || h.fake.acked() == seq).await;
+    let member = json!({"id":{"kind":"id","value":"u_8"},"display":"Contributor",
+        "aliases":[{"kind":"email","value":"contributor@example.org"}],"role":"admin"});
+    let seq = h.fake.push(vec![json!({"type":"participants","conversation_id":"issue-9","change":"added","members":[member.clone()]})]);
+    until("participant ack", || h.fake.acked() == seq).await;
+    let found = h.rows("SELECT sm.role FROM space_members sm JOIN spaces s ON s.id=sm.space_id JOIN accounts a ON a.id=sm.account_id JOIN accounts alias ON alias.party_id=a.party_id WHERE s.external_id='issue-9' AND alias.handle='contributor@example.org'", &[]);
+    assert_eq!(
+        found.len(),
+        1,
+        "participant alias resolves to the member's party"
+    );
+    assert_eq!(found[0][0], "admin");
+    let seq = h.fake.push(vec![json!({"type":"participants","conversation_id":"issue-9","change":"removed","members":[member]})]);
+    until("participant removal ack", || h.fake.acked() == seq).await;
+    assert!(h.rows("SELECT sm.account_id FROM space_members sm JOIN accounts a ON a.id=sm.account_id JOIN accounts alias ON alias.party_id=a.party_id WHERE alias.handle='contributor@example.org'", &[]).is_empty());
+    let who = caller(WS, ME);
+    let search = steve_channels::connector::tool_name(&conn, "search");
+    let read = steve_channels::connector::tool_name(&conn, "read");
+    let message = steve_channels::connector::tool_name(&conn, "message");
+    let result =
+        h.ch.connector_call(&who, &search, json!({"query":"doc"}), "search")
+            .await
+            .unwrap();
+    let reference = result["references"][0]["reference_id"].as_str().unwrap();
+    h.ch.connector_call(&who, &read, json!({"reference":reference}), "before-leave")
+        .await
+        .unwrap();
+    let rows = h.rows("SELECT m.id,m.space_id FROM chan_messages m JOIN spaces s ON s.id=m.space_id WHERE s.external_id='issue-9'", &[]);
+    let (id, space) = (rows[0][0].as_str().unwrap(), rows[0][1].as_str().unwrap());
+    h.env
+        .store()
+        .transaction(|tx| {
+            tx.execute(
+                "UPDATE space_identities SET left_at=1 WHERE space_id=? AND connection_id=?",
+                rusqlite::params![space, conn],
+            )?;
+            Ok::<_, steve_modules::ApiError>(())
+        })
+        .unwrap();
+    let before = h.fake.calls("connector.call").len();
+    for (tool, args) in [
+        (&read, json!({"reference":reference})),
+        (&message, json!({"message":id})),
+    ] {
+        assert!(
+            h.ch.connector_call(&who, tool, args, "after-leave")
+                .await
+                .is_err()
+        );
+    }
+    assert_eq!(
+        h.fake.calls("connector.call").len(),
+        before,
+        "first-seen-via is not current membership"
+    );
+    assert!(h.fake.calls("messages.history").is_empty());
+    rt.shutdown().await;
+}

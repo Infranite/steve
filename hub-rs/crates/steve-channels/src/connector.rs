@@ -351,7 +351,7 @@ impl Channels {
                 };
                 let visible = spaces::own(c, viewer, &space)?;
                 let linked: bool = c.query_row("SELECT EXISTS(SELECT 1 FROM space_identities WHERE space_id=? AND connection_id=? AND left_at IS NULL)", params![space,conn], |r| r.get(0))?;
-                if !linked && visible.via != conn { return Err(ApiError::not_found("conversation")); }
+                if !linked || visible.status != "active" { return Err(ApiError::not_found("conversation")); }
                 let settings = spaces::settings(c, &space)?;
                 if settings.disclosure == "never" || settings.attention == spaces::Attention::Blocked { return Err(ApiError::not_found("conversation")); }
                 self.check_connector_conversation(c, viewer, conn, &visible.external_id)?;
@@ -372,6 +372,13 @@ impl Channels {
         }
         if let Some(space) = spaces::find(c, &viewer.ws, conn, external)? {
             spaces::own(c, viewer, &space.id)?;
+            let linked: bool = c.query_row(
+                "SELECT EXISTS(SELECT 1 FROM space_identities WHERE space_id=? AND connection_id=? AND left_at IS NULL)",
+                params![space.id, conn], |r| r.get(0),
+            )?;
+            if !linked || space.status != "active" {
+                return Err(ApiError::not_found("conversation"));
+            }
             let settings = spaces::settings(c, &space.id)?;
             if settings.disclosure == "never" || settings.attention == spaces::Attention::Blocked {
                 return Err(ApiError::not_found("conversation"));
