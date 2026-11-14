@@ -100,6 +100,15 @@ pub trait WorkspaceExecutor: Send + Sync {
 
 #[async_trait]
 pub trait Discovery: Send + Sync {
+    /// Idempotently replace the active-turn capacity (1–256). Running turns are never interrupted;
+    /// lowering it defers new starts until enough finish. The Hub persists the setting and reapplies
+    /// it before dispatching turns, including after reconnect/restart. Workspace-only Nodes refuse.
+    async fn set_session_capacity(&self, _sessions: u32) -> ApiResult<()> {
+        Err(ApiError::new(
+            ErrorCode::Unsupported,
+            "live session capacity unsupported",
+        ))
+    }
     async fn probe(&self, fresh: bool) -> ApiResult<Capabilities>;
     async fn history(&self, page: PageRequest) -> ApiResult<Page<HistoryEntry>>;
     async fn import_history(&self, c: Command<HistoryImport>) -> ApiResult<Receipt>;

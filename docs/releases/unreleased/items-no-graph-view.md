@@ -1,1 +1,0 @@
-The 事项 page drops its 关系图 view: drawing every item's relations grew into a tangle as items accumulated and said little. An open item's row now names what it is still waiting for ("等 ST-28"), and an item's own relations still open from its menu.

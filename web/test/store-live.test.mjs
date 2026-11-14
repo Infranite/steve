@@ -57,6 +57,30 @@ test("stream paint preserves unrelated sessions, bots, items and thread referenc
   assert.equal(s.st.S.b, before.b); assert.equal(s.st.bots, before.bots); assert.equal(s.st.items, before.items); assert.equal(s.st.thread, before.thread)
 })
 
+test("capacity-only refreshes update wait counts and actual Node reasons without new transcript events", async () => {
+  const h = harness(), s = h.store, row = h.state.sessions[0]
+  row.room = { running: 32, max: 32, waiting: 2, reason: "capacity" }
+  s.start(); await flush(); await s.loadEvents("a")
+  const events = s.st.S.a.ev
+  assert.equal(s.st.S.a.room.running, 32)
+  row.room = { running: 33, max: 16, waiting: 3, reason: "capacity" }
+  await s.refresh()
+  assert.equal(s.st.S.a.room.max, 16)
+  assert.equal(s.st.S.a.room.waiting, 3)
+  assert.equal(s.st.S.a.ev, events)
+  row.room = { running: 0, max: 64, waiting: 1, reason: "node", detail: "journal storage full" }
+  await s.refresh()
+  assert.equal(s.st.S.a.room.reason, "node")
+  assert.equal(s.st.S.a.room.detail, "journal storage full")
+  row.room = null
+  await s.refresh()
+  assert.equal(s.st.S.a.room, null)
+  assert.equal(s.st.S.a.ev, events)
+  row.status = "ended"; row.room = { running: 32, max: 32, waiting: 1, reason: "capacity" }
+  await s.refresh()
+  assert.equal(s.st.S.a.room, null, "settled sessions cannot retain a stale wait")
+})
+
 test("each state refresh applies the Hub's type size and reduced-motion settings to the page", async () => {
   const h = harness(), s = h.store
   h.state.settings = { fontSize: "大", reduceMotion: "开" }

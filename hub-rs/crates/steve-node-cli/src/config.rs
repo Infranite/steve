@@ -179,7 +179,7 @@ impl Home {
             // sessions, and commands (flow steps, vault uses, pushes) when its owner lets them run
             // here (`policy.json` `exec`, B4); jobs stay with the Hub
             capacity: steve_node_api::Capacity {
-                sessions: 16,
+                sessions: steve_node_api::Capacity::SESSIONS_DEFAULT,
                 jobs: 0,
                 execs: if ceiling.exec { 4 } else { 0 },
             },
@@ -209,6 +209,17 @@ pub fn loopback_plaintext_allowed() -> bool {
 mod tests {
     use super::*;
     use steve_node_api::PermissionMode;
+
+    #[test]
+    fn standalone_node_defaults_to_32_turns_without_widening_other_resources() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = Home(dir.path().to_path_buf());
+        let cfg = home.node_config(NodeId::new("n1").unwrap()).unwrap();
+        assert_eq!(cfg.capacity.sessions, 32);
+        assert_eq!(cfg.capacity.jobs, 0);
+        assert_eq!(cfg.capacity.execs, 0);
+        assert_eq!(cfg.ceiling, steve_node::PolicyCeiling::default());
+    }
 
     /// H1: without a policy file the Node takes no FullAccess, commands or jobs; the owner widens
     /// it, and a file that does not parse (a typo included) stops the Node rather than default.

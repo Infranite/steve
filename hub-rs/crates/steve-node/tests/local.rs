@@ -1188,6 +1188,10 @@ async fn a_node_with_no_session_capacity_takes_workspace_work_only() {
         .unwrap_err();
     assert_eq!(e.code, ErrorCode::Unsupported);
     assert_eq!(t.sent("initialize"), 0, "no harness started");
+    assert_eq!(
+        n.set_session_capacity(32).await.unwrap_err().code,
+        ErrorCode::Unsupported
+    );
 }
 
 // ── a real crash: the Node is a child process killed with SIGKILL ──
@@ -4929,4 +4933,81 @@ async fn a_bots_skills_are_in_its_harness_directory_before_the_session_opens() {
     let mut bad = open_body("s_3");
     bad.skills = vec![skill("Bad Name", "x")];
     assert!(n.open_session(now_cmd("op_open_s_3", bad)).await.is_err());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn live_session_capacity_changes_the_actual_limiter_without_stopping_turns() {
+    let t = T::new(&[]);
+    let n = t.node();
+    ready(&n, "capacity_1").await;
+    for session in ["capacity_2", "capacity_3"] {
+        let op = format!("open_{session}");
+        n.open_session(now_cmd(&op, open_body(session)))
+            .await
+            .unwrap();
+        assert!(ok(&finished(&n, &op).await));
+    }
+    n.set_session_capacity(1).await.unwrap();
+    n.start_turn(now_cmd(
+        "capacity_op1",
+        turn("capacity_1", "capacity_t1", "capacity_a1", "@sleep 20000"),
+    ))
+    .await
+    .unwrap();
+    let second = now_cmd(
+        "capacity_op2",
+        turn("capacity_2", "capacity_t2", "capacity_a2", "@sleep 20000"),
+    );
+    assert_eq!(
+        n.start_turn(second.clone()).await.unwrap_err().code,
+        ErrorCode::Exhausted
+    );
+    n.set_session_capacity(2).await.unwrap();
+    n.start_turn(second).await.unwrap();
+    n.set_session_capacity(1).await.unwrap();
+    for op in ["capacity_op1", "capacity_op2"] {
+        assert!(
+            !n.operation(OperationId::new(op).unwrap())
+                .await
+                .unwrap()
+                .state
+                .is_finished()
+        );
+    }
+    let third = now_cmd(
+        "capacity_op3",
+        turn("capacity_3", "capacity_t3", "capacity_a3", "hello"),
+    );
+    assert_eq!(
+        n.start_turn(third.clone()).await.unwrap_err().code,
+        ErrorCode::Exhausted
+    );
+    for op in ["capacity_op1", "capacity_op2"] {
+        n.cancel(now_cmd(
+            &format!("cancel_{op}"),
+            Cancel {
+                target: OperationId::new(op).unwrap(),
+                reason: "test".into(),
+            },
+        ))
+        .await
+        .unwrap();
+        finished(&n, op).await;
+        if op == "capacity_op1" {
+            assert_eq!(
+                n.start_turn(third.clone()).await.unwrap_err().code,
+                ErrorCode::Exhausted
+            );
+        }
+    }
+    n.start_turn(third).await.unwrap();
+    finished(&n, "capacity_op3").await;
+    assert_eq!(n.probe(false).await.unwrap().capacity.sessions, 1);
+    for invalid in [0, 257] {
+        assert_eq!(
+            n.set_session_capacity(invalid).await.unwrap_err().code,
+            ErrorCode::Invalid
+        );
+    }
+    n.shutdown().await;
 }

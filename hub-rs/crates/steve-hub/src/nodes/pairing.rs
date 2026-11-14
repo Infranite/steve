@@ -6,7 +6,7 @@
 //!   (`sig` over `"steve-pair-v1" ‖ sha256(code) ‖ pubkey`); the claim is one atomic update. Wrong,
 //!   used and expired codes all get the same `denied`, and claims are rate-limited per code (see [`Limiter`]).
 //!   The Node is `pending` until its owner confirms the fingerprint the CLI printed.
-//! - `GET /api/nodes`, `POST /api/nodes/{id}/confirm|pause|resume|rename|revoke`: the owner's only.
+//! - `GET /api/nodes`, `POST /api/nodes/{id}/confirm|pause|resume|rename|revoke|limit`: the owner's only.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -377,19 +377,30 @@ pub async fn rotate(
 
 pub async fn list(State(svc): State<Arc<NodeService>>, caller: Caller) -> Response {
     let store = svc.store.clone();
-    let rows =
-        match blocking(move || store.reader(|c| steve_store::nodes::list_for_owner(c, &caller.me)))
-            .await
-        {
-            Ok(r) => r,
-            Err(r) => return *r,
-        };
+    // each with how many of its turns run and wait, against its `max_sessions`
+    let rows = match blocking(move || {
+        store.reader(|c| {
+            steve_store::nodes::list_for_owner(c, &caller.me)?
+                .into_iter()
+                .map(|n| Ok((steve_store::runtime::session_room(c, &n.node_id)?, n)))
+                .collect::<steve_store::Result<Vec<_>>>()
+        })
+    })
+    .await
+    {
+        Ok(r) => r,
+        Err(r) => return *r,
+    };
     let items: Vec<Value> = rows
         .into_iter()
-        .map(|n| {
+        .map(|(room, n)| {
             let linked = svc.registry.current(&n.node_id).is_some();
             let mut v = serde_json::to_value(&n).unwrap_or(Value::Null);
             v["linked"] = json!(linked);
+            v["running"] = json!(room.running);
+            v["waiting"] = json!(room.waiting);
+            // the limit in force: the Hub's own Node keeps it on the Hub's device row
+            v["max_sessions"] = json!(room.max);
             if !linked && let Some((at, why)) = svc.fleet.link_failure(&n.node_id) {
                 v["link_error"] = json!({ "at": at, "error": why });
             }
@@ -407,6 +418,9 @@ pub async fn list(State(svc): State<Arc<NodeService>>, caller: Caller) -> Respon
 pub struct RenameBody {
     #[serde(default)]
     name: String,
+    /// `limit`: how many sessions the Node runs at once (1–256).
+    #[serde(default)]
+    max_sessions: Option<i64>,
 }
 
 pub async fn act(
@@ -416,7 +430,9 @@ pub async fn act(
     body: Option<Json<RenameBody>>,
 ) -> Response {
     let (store, me, node) = (svc.store.clone(), caller.me.clone(), id.clone());
-    let name = body.map(|b| b.0.name).unwrap_or_default();
+    let (name, max_sessions) = body
+        .map(|b| (b.0.name, b.0.max_sessions))
+        .unwrap_or_default();
     let action2 = action.clone();
     let done = blocking(move || {
         store.transaction(|tx| {
@@ -426,6 +442,10 @@ pub async fn act(
                 "pause" => set_state(tx, &node, &me, "active", "paused")?,
                 "resume" => set_state(tx, &node, &me, "paused", "active")?,
                 "revoke" => revoke(tx, &node, &me, now())?,
+                "limit" => match max_sessions {
+                    Some(n) => set_max_sessions(tx, &node, &me, n)?,
+                    None => false,
+                },
                 "rename" => {
                     let n: String = name.chars().filter(|c| !c.is_control()).take(64).collect();
                     !n.trim().is_empty() && rename(tx, &node, &me, &n)?
@@ -433,7 +453,17 @@ pub async fn act(
                 _ => return Ok(None),
             };
             if ok {
-                audit(tx, Some(&node), Some(&me), &action2, None, now())?;
+                let detail = (action2 == "limit")
+                    .then(|| max_sessions.map(|n| n.to_string()))
+                    .flatten();
+                audit(
+                    tx,
+                    Some(&node),
+                    Some(&me),
+                    &action2,
+                    detail.as_deref(),
+                    now(),
+                )?;
             }
             Ok(Some(ok))
         })

@@ -79,6 +79,7 @@ impl<N: Node + ?Sized + 'static> Handler for NodeServer<N> {
             }
             HISTORY_LOCATE => en(&n.locate(de(p)?).await?),
             NODE_VITALS => en(&n.vitals().await?),
+            NODE_SESSION_CAPACITY => en(&n.set_session_capacity(de(p)?).await?),
             other => Err(unsupported(other)),
         }
     }

@@ -1,6 +1,0 @@
-- Badges, key chips, loading spinners and skeletons, separators, cards and empty states look the same as before on every page, with small refinements: a spinner is a thin arc on a faint ring, a skeleton has a soft sheen that sweeps all of them together, and the lines between rows are one-pixel hairlines.
-- Contacts show their initials on a soft color of their own that reads well in both light and dark mode; organizations and teams get the same soft color behind their icon. A contact that is not confirmed yet still shows as a dashed gray circle.
-- Upgrade and service commands on the Updates page sit in a compact code block that colors the command and has its own copy button. The changes shown under an edit in a work trail mark added lines with a green tint and a + and removed lines with a red tint and a −, and passing checks (✓) stay green.
-- Screen readers hear key names, "+N more" in an avatar group, code regions and loading spinners in the language you chose.
-- On the Stats page, the four core figures (in progress, waiting for you, done, failed or blocked) roll in like an odometer when the page opens and roll to their new value when it changes, using the number format of your language.
-- The component showroom at #/design/components has a new section that shows these building blocks side by side in both themes.

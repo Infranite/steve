@@ -886,13 +886,21 @@ pub(crate) fn summaries(r: &dyn Repo, ws: &str) -> BResult<Vec<Obj>> {
 }
 
 /// `sessOut`: the raw row without `token_hash`/`import_key`, `readonly` as a boolean, plus `busy` and `queued`,
-/// and the harness's own session id (`harness_session_id`, also for an imported session).
+/// the harness's own session id (`harness_session_id`, also for an imported session), and `room` when its
+/// next turn waits because its device is full (`{running, max, waiting}`, [`steve_store::runtime::session_room`]).
 pub(crate) fn sess_out(r: &dyn Repo, d: &dyn Domain, s: Obj) -> BResult<Obj> {
-    let q = r.queued_list(&str_of(&s, "id"))?;
-    Ok(sess_out_with(d, s, q))
+    let id = str_of(&s, "id");
+    let q = r.queued_list(&id)?;
+    let room = r.waiting_for_room()?.remove(&id);
+    Ok(sess_out_with(d, s, q, room))
 }
 
-pub(crate) fn sess_out_with(d: &dyn Domain, mut s: Obj, queued: Vec<Obj>) -> Obj {
+pub(crate) fn sess_out_with(
+    d: &dyn Domain,
+    mut s: Obj,
+    queued: Vec<Obj>,
+    room: Option<Value>,
+) -> Obj {
     let id = str_of(&s, "id");
     let native = crate::resume::native_id(&s);
     // shift_remove keeps the column order of the remaining keys
@@ -903,18 +911,22 @@ pub(crate) fn sess_out_with(d: &dyn Domain, mut s: Obj, queued: Vec<Obj>) -> Obj
     s.insert("busy".into(), json!(d.is_busy(&id)));
     s.insert("queued".into(), objs(queued));
     s.insert("harness_session_id".into(), json!(native));
+    s.insert("room".into(), room.unwrap_or(Value::Null));
     s
 }
 
 /// `sessions.list(ws).map(sessOut)`, batched when the backend can.
 pub(crate) fn sessions_out(r: &dyn Repo, d: &dyn Domain, ws: &str) -> BResult<Vec<Obj>> {
     let list = r.sessions_list(ws)?;
+    let mut rooms = r.waiting_for_room()?;
     match r.queued_by_session(ws)? {
         Some(mut m) => Ok(list
             .into_iter()
             .map(|s| {
-                let q = m.remove(&str_of(&s, "id")).unwrap_or_default();
-                sess_out_with(d, s, q)
+                let id = str_of(&s, "id");
+                let q = m.remove(&id).unwrap_or_default();
+                let room = rooms.remove(&id);
+                sess_out_with(d, s, q, room)
             })
             .collect()),
         None => list.into_iter().map(|s| sess_out(r, d, s)).collect(),

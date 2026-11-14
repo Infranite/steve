@@ -991,3 +991,231 @@ async fn a_new_issue_becomes_a_suggestion() {
         "a proposed item for the issue"
     );
 }
+
+/// A plugin from a directory library: listed, installed, connected (its process started with the
+/// run contract and an external-channel connection made to it as the caller), and gone with its
+/// connection. The plugin here is a script that says where it was told to listen; the fake
+/// channel service answers there in its place.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_plugin_is_installed_connected_and_goes_with_its_connection() {
+    use sha2::Digest;
+    use steve_channels::fake::ext_ws::FakeExtWs;
+    let e = start().await;
+    let (s, v) = e.call("GET", "/api/plugins", None).await;
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(v["owner"], true, "{v}");
+    // the official library, not read until the owner asks
+    assert_eq!(v["stores"][0]["official"], true, "{v}");
+    assert_eq!(v["stores"][0]["checked"], Value::Null, "{v}");
+    let target = v["target"].as_str().expect("target").to_string();
+
+    let lib = e._home.path().join("library");
+    std::fs::create_dir_all(&lib).expect("library");
+    let script = b"#!/bin/sh\necho \"$STEVE_PLUGIN_LISTEN\" > listen.txt\ncp \"$STEVE_PLUGIN_CONFIG\" config.txt\nexec cat\n";
+    let mut tar = tar::Builder::new(flate2::write::GzEncoder::new(
+        Vec::new(),
+        flate2::Compression::fast(),
+    ));
+    let mut h = tar::Header::new_gnu();
+    h.set_size(script.len() as u64);
+    h.set_mode(0o755);
+    h.set_cksum();
+    tar.append_data(&mut h, "bin/echo", &script[..])
+        .expect("tar");
+    let archive = tar.into_inner().expect("tar").finish().expect("gz");
+    std::fs::write(lib.join("echo.tar.gz"), &archive).expect("archive");
+    let mut artifacts = serde_json::Map::new();
+    artifacts.insert(
+        target,
+        json!({"url": "echo.tar.gz", "sha256": hex::encode(sha2::Sha256::digest(&archive))}),
+    );
+    // a theme plugin beside it: a manifest for any machine
+    let manifest = json!({"id": "ocean", "name": "Ocean", "kind": "accent", "tokens": {"light": {"primary": "#0b6bc0"}}});
+    let theme = {
+        let bytes = manifest.to_string();
+        let mut tar = tar::Builder::new(flate2::write::GzEncoder::new(
+            Vec::new(),
+            flate2::Compression::fast(),
+        ));
+        let mut h = tar::Header::new_gnu();
+        h.set_size(bytes.len() as u64);
+        h.set_mode(0o644);
+        h.set_cksum();
+        tar.append_data(&mut h, "theme.json", bytes.as_bytes())
+            .expect("tar");
+        tar.into_inner().expect("tar").finish().expect("gz")
+    };
+    std::fs::write(lib.join("ocean.tar.gz"), &theme).expect("archive");
+    let index = json!({"store": 1, "name": "Test library", "plugins": [{
+        "id": "echo", "name": "Echo", "summary": "Says it back", "kind": "channel",
+        "version": "0.1.0", "contract": 1, "entry": "bin/echo",
+        "config": [{"key": "address", "label": "Address"}, {"key": "token", "label": "Token", "secret": true}],
+        "artifacts": artifacts,
+    }, {
+        "id": "ocean", "name": "Ocean", "summary": "A blue accent", "kind": "theme",
+        "version": "1.0.0", "contract": 1, "entry": "theme.json",
+        "artifacts": {"any": {"url": "ocean.tar.gz", "sha256": hex::encode(sha2::Sha256::digest(&theme))}},
+    }]});
+    std::fs::write(lib.join("steve-store.json"), index.to_string()).expect("index");
+
+    let (s, v) = e
+        .call("POST", "/api/plugins/stores", Some(json!({"address": lib})))
+        .await;
+    assert_eq!((s, &v["id"]), (200, &json!("library")), "{v}");
+    let (s, v) = e
+        .call(
+            "POST",
+            "/api/plugins/installed/library/echo/connect",
+            Some(json!({"config": {}})),
+        )
+        .await;
+    assert_eq!(s, 404, "not installed yet: {v}");
+    let (s, v) = e
+        .call("POST", "/api/plugins/installed/library/echo", None)
+        .await;
+    assert_eq!((s, &v["version"]), (200, &json!("0.1.0")), "{v}");
+    let (s, v) = e
+        .call(
+            "POST",
+            "/api/plugins/installed/library/echo/connect",
+            Some(json!({"config": {"address": "x"}})),
+        )
+        .await;
+    assert_eq!(s, 400, "a required setting is missing: {v}");
+
+    // connect: the Hub starts the plugin and waits for it to listen; the fake does, on the
+    // address and with the token the plugin was given
+    let instances = e._home.path().join("steve/plugins/instances");
+    let config = json!({"address": "wss://gateway.example/ws", "token": "gateway-secret"});
+    let connect = "/api/plugins/installed/library/echo/connect";
+    // the connection's token goes to the vault like any credential
+    assert_eq!(e.call("POST", "/api/vault/init", None).await.0, 200);
+    let service = {
+        let instances = instances.clone();
+        tokio::spawn(async move {
+            for _ in 0..400 {
+                let dirs: Vec<_> = std::fs::read_dir(&instances)
+                    .into_iter()
+                    .flatten()
+                    .flatten()
+                    .map(|d| d.path())
+                    .collect();
+                if let [dir] = &dirs[..]
+                    && let Ok(listen) = std::fs::read_to_string(dir.join("data/listen.txt"))
+                    && let Ok(token) = std::fs::read_to_string(dir.join("token"))
+                {
+                    let fake = FakeExtWs::start_at(listen.trim().parse().expect("listen address"))
+                        .await
+                        .expect("fake");
+                    fake.with(|w| w.token = token);
+                    return (dir.clone(), fake);
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+            panic!("the plugin never said where it listens");
+        })
+    };
+    let (s, v) = e
+        .call("POST", connect, Some(json!({"config": config})))
+        .await;
+    assert_eq!(s, 200, "{v}");
+    let (dir, fake) = service.await.expect("service");
+    let connection = v["connection"].as_str().expect("connection").to_string();
+    assert_eq!(
+        v["instance"],
+        dir.file_name().and_then(|n| n.to_str()).expect("id")
+    );
+    // the plugin got the settings as entered, in a file only the Hub's user reads
+    let got: Value =
+        serde_json::from_slice(&std::fs::read(dir.join("data/config.txt")).expect("config"))
+            .expect("json");
+    assert_eq!(got, config);
+    {
+        use std::os::unix::fs::PermissionsExt;
+        for f in ["config.json", "token"] {
+            let mode = std::fs::metadata(dir.join(f))
+                .expect(f)
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o600, "{f}");
+        }
+    }
+    // the connection is an ordinary external-channel one, on the account the service signed in as
+    let (_, cs) = e.call("GET", "/api/connections", None).await;
+    let made = cs
+        .as_array()
+        .or_else(|| cs["items"].as_array())
+        .and_then(|l| l.iter().find(|c| c["id"] == connection.as_str()))
+        .unwrap_or_else(|| panic!("the connection is listed: {cs}"));
+    assert_eq!(made["adapter"], "ext_ws", "{made}");
+    assert!(!fake.calls("hello").is_empty());
+    let (_, v) = e.call("GET", "/api/plugins", None).await;
+    let echo = &v["stores"]
+        .as_array()
+        .expect("stores")
+        .iter()
+        .find(|s| s["id"] == "library")
+        .expect("library")["plugins"][0];
+    assert_eq!(echo["installed"]["version"], "0.1.0", "{echo}");
+    assert_eq!(
+        echo["connections"][0]["connection"],
+        connection.as_str(),
+        "{echo}"
+    );
+    assert_eq!(
+        echo["connections"][0]["status"]["state"], "running",
+        "{echo}"
+    );
+    assert!(!v.to_string().contains("gateway-secret"), "{v}");
+
+    // in use: it stays installed
+    let (s, v) = e
+        .call("DELETE", "/api/plugins/installed/library/echo", None)
+        .await;
+    assert_eq!(s, 409, "{v}");
+    // disconnecting is all it takes to stop the plugin and remove what it kept
+    let (s, v) = e
+        .call("DELETE", &format!("/api/connections/{connection}"), None)
+        .await;
+    assert!(s < 300, "{s} {v}");
+    for _ in 0..200 {
+        if !dir.exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert!(!dir.exists(), "the instance is removed with its connection");
+    let (s, v) = e
+        .call("DELETE", "/api/plugins/installed/library/echo", None)
+        .await;
+    assert_eq!(s, 200, "{v}");
+    // a theme is installed for the web client to read; there is nothing to connect
+    let (s, v) = e
+        .call("POST", "/api/plugins/installed/library/ocean", None)
+        .await;
+    assert_eq!(s, 200, "{v}");
+    let (s, v) = e
+        .call(
+            "POST",
+            "/api/plugins/installed/library/ocean/connect",
+            Some(json!({"config": {}})),
+        )
+        .await;
+    assert_eq!(s, 400, "{v}");
+    let (s, v) = e.call("GET", "/api/plugins/themes", None).await;
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(v["themes"][0]["manifest"], manifest, "{v}");
+    let (s, v) = e
+        .call("DELETE", "/api/plugins/installed/library/ocean", None)
+        .await;
+    assert_eq!(s, 200, "{v}");
+    // libraries and installing are the instance owner's
+    e.sql("UPDATE users SET role = 'member'", &[]);
+    let (s, v) = e.call("DELETE", "/api/plugins/stores/library", None).await;
+    assert_eq!(s, 403, "{v}");
+    let (s, v) = e.call("GET", "/api/plugins", None).await;
+    assert_eq!((s, &v["owner"]), (200, &json!(false)), "{v}");
+    assert!(v["stores"][0].get("address").is_none(), "{v}");
+}

@@ -143,6 +143,11 @@ pub trait Repo {
     fn bot_extras(&self, ws: &str) -> BResult<Option<BotExtras>> {
         Ok(None)
     }
+    /// The sessions whose next turn waits because its device is full, keyed by session id, each
+    /// with its device's room (`{running, max, waiting}`).
+    fn waiting_for_room(&self) -> BResult<std::collections::HashMap<String, Value>> {
+        Ok(Default::default())
+    }
     /// `events_after` with `data` as the stored JSON text, row by row: `(seq, ts, kind, data)`.
     /// `false` = not supported here (the caller uses `events_after`). Rows are handed over one at
     /// a time so a large page is never held twice.
