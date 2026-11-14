@@ -808,6 +808,19 @@ pub fn list(c: &Connection, ws: &str, f: &Filter) -> Result<Vec<Value>> {
 
 /// One matter with its timeline across conversations, people, links and history; `None` when it does not exist.
 pub fn get(c: &Connection, ws: &str, id: &str) -> Result<Option<Value>> {
+    let Some(viewer) = crate::conv::owner_viewer(c, ws)? else {
+        return Ok(None);
+    };
+    get_for(c, &viewer, id)
+}
+
+/// Matter detail for the actual caller; owner status does not bypass memory visibility.
+pub fn get_for(
+    c: &Connection,
+    viewer: &steve_store::base::Viewer,
+    id: &str,
+) -> Result<Option<Value>> {
+    let ws = viewer.ws.as_str();
     let Some((id, _, _)) = resolve(c, ws, id)? else {
         return Ok(None);
     };
@@ -870,13 +883,17 @@ pub fn get(c: &Connection, ws: &str, id: &str) -> Result<Option<Value>> {
         .prepare_cached("SELECT id, text, state FROM todos WHERE matter_id = ? ORDER BY created DESC LIMIT 20")?
         .query_map([&id], |r| Ok(json!({"id": r.get::<_, String>(0)?, "text": r.get::<_, String>(1)?, "state": r.get::<_, String>(2)?})))?
         .collect::<rusqlite::Result<_>>()?;
+    let scope = viewer.sql("m");
+    let mut args: Vec<rusqlite::types::Value> = vec![ws.to_string().into(), id.clone().into()];
+    args.extend(scope.params);
     let mems: Vec<Value> = c
-        .prepare_cached(
+        .prepare(&format!(
             "SELECT m.id, m.text, m.status FROM mem_about a JOIN mems m ON m.id = a.mem_id
-              WHERE a.workspace_id = ? AND a.object_type = 'matter' AND a.object_id = ? AND m.status IN ('confirmed', 'candidate')
-              ORDER BY m.updated DESC LIMIT 20",
-        )?
-        .query_map(params![ws, id], |r| Ok(json!({"id": r.get::<_, String>(0)?, "text": r.get::<_, String>(1)?, "status": r.get::<_, String>(2)?})))?
+              WHERE a.workspace_id = ? AND a.object_type = 'matter' AND a.object_id = ?
+                AND m.workspace_id = a.workspace_id AND m.status IN ('confirmed', 'candidate') AND {}
+              ORDER BY m.updated DESC LIMIT 20", scope.sql,
+        ))?
+        .query_map(rusqlite::params_from_iter(args), |r| Ok(json!({"id": r.get::<_, String>(0)?, "text": r.get::<_, String>(1)?, "status": r.get::<_, String>(2)?})))?
         .collect::<rusqlite::Result<_>>()?;
     out["timeline"] = json!(segs);
     out["people"] = json!(all_people);

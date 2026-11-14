@@ -266,9 +266,10 @@ async fn read_matter(
 ) -> ApiResult<Json<Value>> {
     m.blocking(move |m| {
         owner(m, &who)?;
+        let viewer = m.viewer(&who)?;
         Ok(Json(
             m.store
-                .reader(|c| matter::get(c, &who.ws, &id))?
+                .reader(|c| matter::get_for(c, &viewer, &id))?
                 .ok_or_else(|| ApiError::not_found("matter"))?,
         ))
     })

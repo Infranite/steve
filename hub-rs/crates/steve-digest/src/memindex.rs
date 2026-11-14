@@ -134,7 +134,45 @@ pub fn link(
     Ok(added)
 }
 
-/// Removes what [`link`] added.
+/// Can the original insertion still be undone without removing a later link's index?
+/// A merge can retarget `about`, and another indexing operation can add a range relying on it.
+pub fn can_unlink(c: &Connection, ws: &str, a: &Added) -> Result<bool> {
+    for (kind, id) in &a.about {
+        let exists: bool = c.query_row(
+            "SELECT EXISTS(SELECT 1 FROM mem_about WHERE mem_id = ? AND workspace_id = ? AND object_type = ? AND object_id = ?)",
+            params![a.mem, ws, kind, id], |r| r.get(0),
+        )?;
+        if !exists {
+            return Ok(false);
+        }
+        if crate::conv::TYPES.contains(&kind.as_str()) {
+            let conv = ConvRef::new(kind, id).key();
+            let other: bool = c.query_row(
+                "SELECT EXISTS(SELECT 1 FROM mem_ranges WHERE mem_id = ?1 AND workspace_id = ?2 AND conv = ?3
+                    AND (?4 IS NULL OR first_id <> ?4))",
+                params![a.mem, ws, conv, a.range.as_ref().filter(|r| r.conv == conv).map(|r| &r.first_id)],
+                |r| r.get(0),
+            )?;
+            if other {
+                return Ok(false);
+            }
+        }
+    }
+    if let Some(r) = &a.range {
+        let unchanged: bool = c.query_row(
+            "SELECT EXISTS(SELECT 1 FROM mem_ranges WHERE mem_id = ? AND workspace_id = ? AND conv = ?
+                AND first_id = ? AND last_id = ? AND first_at = ? AND last_at = ?)",
+            params![a.mem, ws, r.conv, r.first_id, r.last_id, r.first_at, r.last_at],
+            |r| r.get(0),
+        )?;
+        if !unchanged {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+/// Removes what [`link`] added, after the caller checked [`can_unlink`] in the same transaction.
 pub fn unlink(tx: &Tx, ws: &str, a: &Added) -> Result<()> {
     for (t, id) in &a.about {
         tx.execute(

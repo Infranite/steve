@@ -915,3 +915,231 @@ fn failed_fifo_packet_can_be_explicitly_retried_without_resetting_receipts() {
         0
     );
 }
+
+#[tokio::test]
+async fn matter_detail_never_exposes_other_members_private_memories() {
+    let e = env();
+    let app = steve_digest::routes()
+        .merge(steve_knowledge::routes(steve_knowledge::Knowledge::new(
+            |_| {},
+        )))
+        .with_state(e.modules.clone());
+    let owner = caller(WS, ME);
+    let other = caller(WS, OTHER);
+    let (status, matter) = call(
+        &app,
+        Some(&owner),
+        "POST",
+        "/digest/matters",
+        Some(&json!({"title": "Shared matter"})),
+    )
+    .await;
+    assert_eq!(status, 200, "{matter}");
+    let id = matter["id"].as_str().unwrap();
+    let mut public_id = String::new();
+    for (user, visibility, text) in [
+        (&other, "private", "Another member's private memory"),
+        (&other, "workspace", "A workspace memory"),
+        (&owner, "private", "Owner's private memory"),
+    ] {
+        let (status, memory) = call(
+            &app,
+            Some(user),
+            "POST",
+            "/kb/mems",
+            Some(&json!({
+                "text": text, "visibility": visibility, "about": [{"type": "matter", "id": id}]
+            })),
+        )
+        .await;
+        assert_eq!(status, 200, "{memory}");
+        if visibility == "workspace" {
+            public_id = memory["id"].as_str().unwrap().to_string();
+        }
+    }
+    let (status, detail) = call(
+        &app,
+        Some(&owner),
+        "GET",
+        &format!("/digest/matters/{id}"),
+        None,
+    )
+    .await;
+    assert_eq!(status, 200, "{detail}");
+    let memories = detail["memories"].as_array().unwrap();
+    assert_eq!(memories.len(), 2, "{detail}");
+    assert!(memories.iter().any(|m| m["id"] == public_id));
+    assert!(
+        memories
+            .iter()
+            .any(|m| m["text"] == "Owner's private memory")
+    );
+    assert!(
+        !detail
+            .to_string()
+            .contains("Another member's private memory")
+    );
+}
+
+#[tokio::test]
+async fn memory_index_undo_conflicts_with_later_ranges_without_partial_deletion() {
+    let e = env();
+    let app = steve_digest::routes().with_state(e.modules.clone());
+    let owner = caller(WS, ME);
+    msg(&e, "s1", "range1", NOW, None, None, "first");
+    msg(&e, "s1", "range2", NOW + 1, None, None, "second");
+    let mem = e
+        .store()
+        .transaction(|tx| {
+            mems::create(
+                tx,
+                WS,
+                &NewMem {
+                    text: "Indexed fact".into(),
+                    created_by: ME.into(),
+                    ..Default::default()
+                },
+            )
+        })
+        .unwrap();
+    let path = format!("/digest/memories/{}/index", mem.id);
+    let mut changes = Vec::new();
+    for (message, at) in [("range1", NOW), ("range2", NOW + 1)] {
+        let (status, body) = call(
+            &app,
+            Some(&owner),
+            "POST",
+            &path,
+            Some(&json!({
+                "conv": "space:s1", "range": {"conv": "space:s1", "first_id": message,
+                    "last_id": message, "first_at": at, "last_at": at}
+            })),
+        )
+        .await;
+        assert_eq!(status, 200, "{body}");
+        changes.push(body["change"].as_str().unwrap().to_string());
+    }
+    let before = e
+        .store()
+        .reader(|c| memindex::index(c, WS, &mem.id))
+        .unwrap();
+    let (status, body) = call(
+        &app,
+        Some(&owner),
+        "POST",
+        &format!("/digest/changes/{}/undo", changes[0]),
+        None,
+    )
+    .await;
+    assert_eq!(status, 409, "{body}");
+    assert_eq!(
+        e.store()
+            .reader(|c| memindex::index(c, WS, &mem.id))
+            .unwrap(),
+        before
+    );
+    let state: String = e
+        .store()
+        .reader(|c| {
+            Ok::<_, StoreError>(c.query_row(
+                "SELECT state FROM digest_changes WHERE id = ?",
+                [&changes[0]],
+                |r| r.get(0),
+            )?)
+        })
+        .unwrap();
+    assert_eq!(state, "applied");
+    // Removing the later operation first makes the original insertion safe to undo again.
+    for change in changes.iter().rev() {
+        let (status, body) = call(
+            &app,
+            Some(&owner),
+            "POST",
+            &format!("/digest/changes/{change}/undo"),
+            None,
+        )
+        .await;
+        assert_eq!(status, 200, "{body}");
+    }
+    assert_eq!(
+        e.store()
+            .reader(|c| memindex::index(c, WS, &mem.id))
+            .unwrap(),
+        json!({"about": [], "ranges": []})
+    );
+}
+
+#[tokio::test]
+async fn memory_index_undo_conflicts_after_matter_merge_without_partial_deletion() {
+    let e = env();
+    let app = steve_digest::routes().with_state(e.modules.clone());
+    let owner = caller(WS, ME);
+    let (a, b, mem) = e
+        .store()
+        .transaction(|tx| {
+            Ok::<_, matter::Refused>((
+                matter::create(tx, WS, "First", ME, NOW)?,
+                matter::create(tx, WS, "Second", ME, NOW)?,
+                mems::create(
+                    tx,
+                    WS,
+                    &NewMem {
+                        text: "Fact".into(),
+                        created_by: ME.into(),
+                        ..Default::default()
+                    },
+                )?,
+            ))
+        })
+        .unwrap();
+    let path = format!("/digest/memories/{}/index", mem.id);
+    let (status, body) = call(
+        &app,
+        Some(&owner),
+        "POST",
+        &path,
+        Some(&json!({"conv": "space:s1", "matter": a})),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    let change = body["change"].as_str().unwrap();
+    let (status, body) = call(
+        &app,
+        Some(&owner),
+        "POST",
+        &format!("/digest/matters/{a}/relate"),
+        Some(&json!({"op": "merge", "other": b})),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    let before = e
+        .store()
+        .reader(|c| memindex::index(c, WS, &mem.id))
+        .unwrap();
+    let (status, body) = call(
+        &app,
+        Some(&owner),
+        "POST",
+        &format!("/digest/changes/{change}/undo"),
+        None,
+    )
+    .await;
+    assert_eq!(status, 409, "{body}");
+    assert_eq!(
+        e.store()
+            .reader(|c| memindex::index(c, WS, &mem.id))
+            .unwrap(),
+        before
+    );
+    let state: String = e
+        .store()
+        .reader(|c| {
+            Ok::<_, StoreError>(c.query_row(
+                "SELECT state FROM digest_changes WHERE id = ?",
+                [change],
+                |r| r.get(0),
+            )?)
+        })
+        .unwrap();
+    assert_eq!(state, "applied");
+}

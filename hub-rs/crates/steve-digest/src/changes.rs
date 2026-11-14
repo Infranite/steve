@@ -168,6 +168,11 @@ pub fn undo(m: &Modules, ws: &str, actor: &str, id: &str) -> ApiResult<Value> {
             "mem_link" => {
                 let a: memindex::Added = serde_json::from_value(after.clone())
                     .map_err(|_| ApiError::invalid("after"))?;
+                if !memindex::can_unlink(tx, ws, &a)? {
+                    return Err(ApiError::Conflict(steve_i18n::t!(
+                        "digest.change.target_moved"
+                    )));
+                }
                 memindex::unlink(tx, ws, &a)?;
             }
             "mem_new" => {

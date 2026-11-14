@@ -56,9 +56,9 @@ fn ref_noun(kind: &str) -> &'static str {
 }
 
 /// Every `about` object must exist in the workspace (`404 没有这个<名词>`).
-fn check_about(c: &Connection, who: &Caller, about: &[ObjRef]) -> ApiResult<()> {
+fn check_about(c: &Connection, viewer: &Viewer, about: &[ObjRef]) -> ApiResult<()> {
     for a in about {
-        if !repo::ref_exists(c, &who.ws, &who.me, a)? {
+        if !repo::ref_exists_for(c, viewer, a)? {
             return Err(ApiError::not_found(ref_noun(&a.kind)));
         }
     }
@@ -166,20 +166,20 @@ pub fn doc_brief(d: &DocRow, s: &SourceRow) -> Value {
 }
 
 /// `Doc`: the brief plus body (notes only), about, tags, preview, uses, error.
-pub fn doc_json(c: &Connection, d: &DocRow, s: &SourceRow) -> ApiResult<Value> {
-    let mut v = doc_json_bare(c, d, s)?;
+pub fn doc_json(c: &Connection, viewer: &Viewer, d: &DocRow, s: &SourceRow) -> ApiResult<Value> {
+    let mut v = doc_json_bare(c, viewer, d, s)?;
     add_uses(c, &mut v, &d.workspace_id, &d.id)?;
     Ok(v)
 }
 
 /// `doc_json` without `uses`. Counting uses scans the retrieval log, so the write paths build
 /// this inside the transaction and add the count after commit, on a reader.
-fn doc_json_bare(c: &Connection, d: &DocRow, s: &SourceRow) -> ApiResult<Value> {
+fn doc_json_bare(c: &Connection, viewer: &Viewer, d: &DocRow, s: &SourceRow) -> ApiResult<Value> {
     let mut v = doc_brief(d, s);
     let about = repo::doc_about(c, &d.id)?
         .into_iter()
         .map(|a| {
-            let name = repo::ref_name(c, &a)?.unwrap_or_default();
+            let name = repo::ref_name_for(c, viewer, &a)?.unwrap_or_default();
             Ok(json!({"type": a.kind, "id": a.id, "name": name}))
         })
         .collect::<Result<Vec<_>, StoreError>>()?;
@@ -272,7 +272,7 @@ pub fn get_doc(m: &Modules, who: &Caller, id: &str) -> ApiResult<Value> {
     let viewer = m.viewer(who)?;
     m.store.reader(|c| {
         let (d, s) = own_doc(c, &viewer, id, NOUN_DOC)?;
-        doc_json(c, &d, &s)
+        doc_json(c, &viewer, &d, &s)
     })
 }
 
@@ -302,7 +302,7 @@ pub fn patch_doc(
     let out = m.store.transaction(|tx| {
         let (d, s) = own_doc(tx, &viewer, id, NOUN_DOC)?;
         if let Some(about) = &b.about {
-            check_about(tx, who, about)?;
+            check_about(tx, &viewer, about)?;
             repo::set_doc_about(tx, &who.ws, &d.id, about)?;
         }
         let vis = b.visibility.clone().unwrap_or(d.visibility.clone());
@@ -321,7 +321,7 @@ pub fn patch_doc(
             &json!({"visibility": vis, "level": level, "about": b.about.as_ref().map(Vec::len)}),
         )?;
         let (d, s) = own_doc_any(tx, &d.id)?;
-        doc_json_bare(tx, &d, &s)
+        doc_json_bare(tx, &viewer, &d, &s)
     })?;
     let out = with_uses(m, &who.ws, out)?;
     kb.notify(&who.ws, id);
@@ -391,9 +391,10 @@ pub fn create_note(m: &Modules, kb: &Knowledge, who: &Caller, b: NoteBody) -> Ap
         .len("body", &b.body, 0, 200_000)
         .that("about", b.about.len() <= 20)
         .done()?;
+    let viewer = m.viewer(who)?;
     let now = m.clock.now();
     let out = m.store.transaction(|tx| {
-        check_about(tx, who, &b.about)?;
+        check_about(tx, &viewer, &b.about)?;
         let id = notes::create(
             tx,
             &who.ws,
@@ -408,7 +409,7 @@ pub fn create_note(m: &Modules, kb: &Knowledge, who: &Caller, b: NoteBody) -> Ap
             now,
         )?;
         let (d, s) = own_doc_any(tx, &id)?;
-        doc_json_bare(tx, &d, &s)
+        doc_json_bare(tx, &viewer, &d, &s)
     })?;
     let out = with_uses(m, &who.ws, out)?;
     if let Some(id) = out.get("id").and_then(Value::as_str) {
@@ -447,7 +448,7 @@ pub fn update_note(
         }
         notes::update(tx, &d, &who.me, title, b.body.as_deref(), now)?;
         let (d, s) = own_doc_any(tx, id)?;
-        doc_json_bare(tx, &d, &s)
+        doc_json_bare(tx, &viewer, &d, &s)
     })?;
     let out = with_uses(m, &who.ws, out)?;
     kb.notify(&who.ws, id);
@@ -460,11 +461,26 @@ pub fn update_note(
 /// has an empty name) and `origin`: where it came from, with a link ([`crate::provenance::origin`]). A fixed stored `source_label`
 /// (“你写的”) comes in the request's language.
 pub fn mem_json(c: &Connection, m: &Mem) -> Value {
+    mem_json_with(c, None, m)
+}
+
+/// Display historical/shared references with the reader's source visibility, not the writer's.
+pub fn mem_json_for(c: &Connection, viewer: &Viewer, m: &Mem) -> Value {
+    mem_json_with(c, Some(viewer), m)
+}
+
+fn mem_json_with(c: &Connection, viewer: Option<&Viewer>, m: &Mem) -> Value {
     let about: Vec<Value> = m
         .about
         .iter()
         .map(|a| {
-            let name = repo::ref_name(c, a).ok().flatten().unwrap_or_default();
+            let name = match viewer {
+                Some(v) => repo::ref_name_for(c, v, a),
+                None => repo::ref_name(c, a),
+            }
+            .ok()
+            .flatten()
+            .unwrap_or_default();
             json!({"type": a.kind, "id": a.id, "name": name})
         })
         .collect();
@@ -506,7 +522,7 @@ pub fn list_mems(m: &Modules, who: &Caller, p: MemsParams) -> ApiResult<Value> {
         let shown: Vec<Value> = list
             .iter()
             .map(|x| {
-                let mut v = mem_json(c, x);
+                let mut v = mem_json_for(c, &viewer, x);
                 crate::provenance::add_used(&mut v, &used);
                 v
             })
@@ -557,9 +573,10 @@ pub fn create_mem(m: &Modules, who: &Caller, b: MemBody) -> ApiResult<Value> {
         .that("about", b.about.len() <= 10)
         .done()?;
     prepare(m, who)?;
+    let viewer = m.viewer(who)?;
     let now = m.clock.now();
     let mem = m.store.transaction(|tx| {
-        check_about(tx, who, &b.about)?;
+        check_about(tx, &viewer, &b.about)?;
         let mem = mems::create(
             tx,
             &who.ws,
@@ -587,5 +604,6 @@ pub fn create_mem(m: &Modules, who: &Caller, b: MemBody) -> ApiResult<Value> {
         )?;
         Ok::<_, ApiError>(mem)
     })?;
-    Ok(m.store.reader(|c| Ok::<_, StoreError>(mem_json(c, &mem)))?)
+    Ok(m.store
+        .reader(|c| Ok::<_, StoreError>(mem_json_for(c, &viewer, &mem)))?)
 }
