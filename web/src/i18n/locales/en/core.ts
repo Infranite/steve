@@ -212,6 +212,7 @@ export default {
     remove: "Remove tag {{name}}",
   },
   nav: {
+    feed: "Feed",
     chat: "Chat",
     inbox: "Inbox",
     items: "Items",
@@ -233,7 +234,7 @@ export default {
     settings: "Settings",
     mine: "Me",
   },
-  navGroup: { work: "Work", connect: "Connections & data", automate: "Automation" },
+  navGroup: { connect: "Connections & data", automate: "Automation" },
   sidebar: {
     toggle: "Toggle sidebar",
     sheetTitle: "Sidebar",

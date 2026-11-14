@@ -117,7 +117,7 @@ try {
     await page.locator("[data-notify-mode]").click()
     assert.equal(await page.getByRole("option", { name: "即时 · Bot 私聊", exact: true }).getAttribute("aria-disabled"), "true")
     await page.keyboard.press("Escape")
-    await page.getByText("还没有个人通知", { exact: true }).waitFor()
+    await page.locator("[data-notification-feed]").waitFor()
     await page.close()
   }
   // An unreachable saved target remains unavailable, never silently redirected to the other reachable DM.
@@ -130,22 +130,13 @@ try {
     assert.equal(model.policy.space_id, "gone-dm"); assert.equal(model.policy.enabled, false)
     await page.close()
   }
-  // Inbox retry, personal read failure/success, retention, and no workspace dismissal API call.
+  // Settings has exactly one reading entry, no duplicate inbox or implicit seen calls.
   {
-    const { page, model, calls } = await open({ inboxFail: true, seenFail: true, inbox: [entry("n1"), entry("n2", { body: null, state: "purged", seen_at: 1 }), entry("n3", { state: "submitted", seen_at: 1 })] })
-    const alert = page.getByRole("alert").filter({ hasText: "未能加载个人收件箱" })
-    await alert.waitFor(); model.inboxFail = false
-    await alert.getByRole("button", { name: "重试" }).click()
-    const row = page.locator('[data-personal-notification="n1"]')
-    await row.locator("[data-personal-seen]").click()
-    await row.getByRole("alert").waitFor(); assert.match(await row.innerText(), /未读/)
-    model.seenFail = false
-    await row.getByRole("button", { name: "重试" }).click()
-    await row.getByText(/仅积累 · 已读/).waitFor()
-    assert.equal(await row.locator("[data-personal-seen]").count(), 0)
-    assert.match(await page.locator('[data-personal-notification="n2"]').innerText(), /正文已按保留规则/)
-    assert.match(await page.locator('[data-personal-notification="n3"]').innerText(), /送达未确认/)
-    assert.deepEqual(calls.filter((c) => c.method === "POST").map((c) => c.path), ["/api/me/notifications/n1/seen", "/api/me/notifications/n1/seen"])
+    const { page, calls } = await open()
+    await page.locator("[data-notification-feed]").waitFor()
+    assert.equal(await page.locator("[data-notification-feed]").getAttribute("href"), "#/feed?kind=completion")
+    assert.equal(await page.locator("[data-personal-notification]").count(), 0)
+    assert.equal(calls.some((call) => call.path === "/api/me/notifications" || call.path.endsWith("/seen")), false)
     await page.close()
   }
   // Empty provider labels stay localized, never display opaque IDs as a human-readable option.
@@ -185,18 +176,15 @@ try {
     await page.locator("[data-notify-enabled]").click()
     await page.locator("[data-notify-save]").click()
     await page.locator("[data-notify-save-status]").filter({ hasText: /^已保存$/ }).waitFor()
-    await page.locator('[data-personal-notification="n1"] [data-personal-seen]').click()
-    await page.locator('[data-personal-notification="n1"]').getByText(/仅积累 · 已读/).waitFor()
     assert.equal(model.policy.enabled, false)
-    assert.notEqual(model.inbox[0].seen_at, null)
     const writes = calls.filter((c) => c.method === "PUT" || c.path.endsWith("/seen"))
-    assert.equal(writes.length, 2)
+    assert.equal(writes.length, 1)
     assert.ok(writes.every((c) => c.workspace === "ws_1"), "all old-form writes stay bound to A")
     assert.deepEqual(otherModel, unchangedB, "B policy and pending notification stay unchanged")
     releaseState()
     await page.waitForFunction(() => location.hash === "#/")
     await page.goto(base + "/#/settings/notify")
-    await page.locator('[data-personal-notification="b-waiting"]').waitFor()
+    await page.locator("[data-notification-feed]").waitFor()
     assert.ok(await page.locator("[data-notify-enabled]").isChecked(), "B must not inherit A's disabled draft")
     assert.equal(await page.locator('[data-personal-notification="n1"]').count(), 0)
     assert.deepEqual(otherModel, unchangedB)
@@ -212,11 +200,11 @@ try {
     assert.equal(await page.evaluate(() => document.documentElement.classList.contains("dark")), theme === "dark")
     if (shots) {
       await page.screenshot({ path: `${shots}/notifications-${width}-${theme}.png`, fullPage: true })
-      await page.locator("[data-personal-notification]").last().scrollIntoViewIfNeeded()
+      await page.locator("[data-notification-feed]").scrollIntoViewIfNeeded()
       await page.screenshot({ path: `${shots}/notifications-inbox-${width}-${theme}.png`, fullPage: true })
       await fits(page)
     }
-    await choose(page, "[data-notify-mode]", "记录 · 仅收件箱")
+    await choose(page, "[data-notify-mode]", "记录 · 仅信息流")
     assert.match(await page.locator("[data-notify-mode-scope]").innerText(), /不发消息.*不定时发送/)
     await choose(page, "[data-notify-mode]", "即时 · Bot 私聊")
     await choose(page, "[data-notify-target]", target.space_name)
@@ -247,7 +235,7 @@ try {
   }
   {
     const { page } = await open({ lang: "en", inbox: [], targets: [] })
-    await page.getByText("My notification inbox", { exact: true }).waitFor()
+    await page.getByRole("link", { name: "Read personal completion notifications in Feed", exact: true }).waitFor()
     assert.match(await page.locator("[data-notify-mode-scope]").innerText(), /No messages or scheduled summaries/)
     await page.close()
   }

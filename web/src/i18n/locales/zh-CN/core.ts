@@ -217,6 +217,7 @@ export default {
     remove: "移除标签 {{name}}",
   },
   nav: {
+    feed: "信息流",
     chat: "对话",
     inbox: "待处理",
     items: "事项",
@@ -238,7 +239,7 @@ export default {
     settings: "设置",
     mine: "我的",
   },
-  navGroup: { work: "工作", connect: "连接与资料", automate: "自动化" },
+  navGroup: { connect: "连接与资料", automate: "自动化" },
   sidebar: {
     toggle: "收起或展开侧栏",
     sheetTitle: "侧栏",
