@@ -2,7 +2,7 @@
  * 思考强度（在 Bot 页改）。页面只铺开「默认配置」和少数单独配置的用途；跟随默认的收起，编辑在侧栏里做，备用模型放进高级选项。
  * 最近 7 天实际调用了什么在「运行记录」里看，跟当前配置分开。最下面是新会话在每个 harness 上的默认模型。 */
 import { ago as fmtAgo } from "@/i18n/format"
-import { t as tr, useT } from "@/i18n"
+import { lang, t as tr, useT } from "@/i18n"
 import { Trans } from "react-i18next"
 import { useEffect, useRef, useState, type ReactNode, type Ref } from "react"
 import { cn } from "cn"
@@ -42,7 +42,7 @@ const api = {
 }
 /** the name of a model without its provider path or family prefix: `claude/claude-haiku-5-5` → `haiku-5-5` */
 const short = (m: string) => m.replace(/^.*\//, "").replace(/^claude-/, "")
-const EFFORTS = ["none", "minimal", "low", "medium", "high", "xhigh", "max"] as const
+const EFFORTS = ["none", "off", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"] as const
 const effortName = (e?: string | null) => !e ? tr("pages:models.followModel") : (EFFORTS as readonly string[]).includes(e) ? tr(`pages:models.effort.${e as (typeof EFFORTS)[number]}`) : e
 const defaultModel = () => tr("pages:models.defaultModel")
 const listOf = (xs: string[]) => xs.join(tr("pages:listSep"))
@@ -82,7 +82,7 @@ export function ModelsSettingsPane() {
   const logRef = useRef<HTMLElement>(null)
   /* a change made elsewhere (the Bot page, a Steve draft, another tab) arrives as a settings or bot event */
   const b = st.bots.steve
-  const stamp = JSON.stringify([Object.entries(st.settings ?? {}).filter(([k]) => k.startsWith("models.")), b?.harness, b?.model, b?.reasoningEffort])
+  const stamp = JSON.stringify([lang(), Object.entries(st.settings ?? {}).filter(([k]) => k.startsWith("models.")), b?.harness, b?.model, b?.reasoningEffort])
   useEffect(() => { api.get().then((x) => { setV(x); setErr(null) }, (e) => setErr(isNotWired(e) ? "absent" : e instanceof Error ? e.message : String(e))) }, [stamp])
   if (err === "absent") return <Blank data-models-unwired>{t("pages:models.unwired")}</Blank>
   if (err) return <Notice tone="destructive" role="alert">{err}</Notice>
@@ -211,10 +211,15 @@ function RunLog({ v, open, setOpen, ref }: { v: View; open: boolean; setOpen: (o
  *  fallback models and the recommended choice sit under 高级选项. */
 function Editor({ p, v, steve, startOwn, onSave, onCancel }: { p: Purpose; v: View; steve: Choice; startOwn: boolean; onSave: (c: Choice | null, ok: string) => Promise<void>; onCancel: () => void }) {
   const t = useT()
+  const initRawHarness = p.value?.harness ?? steve.harness
+  const initHarness = v.harnesses.some((x) => x.id === initRawHarness) ? initRawHarness : (v.harnesses.find((x) => x.id === steve.harness) ?? v.harnesses[0])?.id ?? initRawHarness
+  const initH = v.harnesses.find((x) => x.id === initHarness)
+  const initRawEffort = initHarness === initRawHarness ? (p.value?.effort ?? "") : ""
+  const initEffort = initRawEffort && initH && (initH.efforts.length === 0 ? false : initH.efforts.some((e) => e.key === initRawEffort)) ? initRawEffort : ""
   const [mode, setMode] = useState<"follow" | "own">(!p.follows || startOwn ? "own" : "follow")
-  const [harness, setHarness] = useState(p.value?.harness ?? steve.harness)
-  const [list, setList] = useState<string[]>(p.value?.models ?? [])
-  const [effort, setEffort] = useState<string>(p.value?.effort ?? "")
+  const [harness, setHarness] = useState(initHarness)
+  const [list, setList] = useState<string[]>(initHarness === initRawHarness ? (p.value?.models ?? []) : [])
+  const [effort, setEffort] = useState<string>(initEffort)
   const [adv, setAdv] = useState(false)
   const [busy, setBusy] = useState(false)
   const h = v.harnesses.find((x) => x.id === harness)
@@ -228,6 +233,9 @@ function Editor({ p, v, steve, startOwn, onSave, onCancel }: { p: Purpose; v: Vi
   const dirty = mode === "follow" ? !p.follows : p.follows || !same(next, p.value)
   const run = async (c: Choice | null, ok: string) => { setBusy(true); await onSave(c, ok); setBusy(false) }
   const inherited = onSteve ? t("pages:models.editor.inheritSteve", { model: steve.models[0] ?? defaultModel() }) : t("pages:models.editor.inheritHarness", { harness: harnessName(harness), model: h?.default_models[0] ?? t("pages:models.editor.itsOwn") })
+  const harnessOpt = (id: string, name: string) => ({ v: id, l: <span className="inline-flex min-w-0 items-center gap-2"><HarnessMark harness={id} /><span className="truncate">{name}</span></span> })
+  const harnessOpts = [...v.harnesses.map((x) => harnessOpt(x.id, x.name)), ...(harness && !h ? [harnessOpt(harness, harnessName(harness))] : [])]
+  const effortOpts = [{ v: "default", l: onSteve && steve.effort ? t("pages:models.editor.followDefaultEffort", { effort: effortName(steve.effort) }) : t("pages:models.followModel") }, ...(h?.efforts ?? []).map((e) => ({ v: e.key, l: e.label })), ...(effort && !(h?.efforts ?? []).some((e) => e.key === effort) ? [{ v: effort, l: effortName(effort) }] : [])]
   return (
     <div className="flex min-h-full flex-col" data-models-editor={p.key}>
       <SheetHeader className="gap-1 px-5 pb-4 pt-5 pr-14">
@@ -242,10 +250,10 @@ function Editor({ p, v, steve, startOwn, onSave, onCancel }: { p: Purpose; v: Vi
             <ChoiceLine c={steve} wrap className="mt-0.5" />
           </div>
         ) : <>
-          <Field id="Harness" label="Harness"><Select className="w-full" value={harness} testId={`harness-${p.key}`} onChange={switchHarness} options={v.harnesses.map((x) => ({ v: x.id, l: <span className="inline-flex min-w-0 items-center gap-2"><HarnessMark harness={x.id} /><span className="truncate">{x.name}</span></span> }))} /></Field>
+          <Field id="Harness" label="Harness"><Select className="w-full" value={harness} testId={`harness-${p.key}`} onChange={switchHarness} options={harnessOpts} /></Field>
           <Field id="model" label={t("pages:models.editor.model")}><ModelPicker harness={harness} value={primary} allowDefault defaultLabel={inherited} testId={`model-${p.key}`} onChange={setPrimary} /></Field>
           <Field id="effort" label={t("pages:models.editor.effort")}><Select className="w-full" value={effort || "default"} testId={`effort-${p.key}`} onChange={(x) => setEffort(x === "default" ? "" : x)}
-            options={[{ v: "default", l: onSteve && steve.effort ? t("pages:models.editor.followDefaultEffort", { effort: effortName(steve.effort) }) : t("pages:models.followModel") }, ...(h?.efforts ?? []).map((e) => ({ v: e.key, l: e.label }))]} /></Field>
+            options={effortOpts} /></Field>
           <div className="border-t pt-3 anim-in" data-models-adv={adv ? "open" : "closed"}>
             <button type="button" className="flex w-full items-center gap-1.5 py-1 text-left type-callout text-muted-foreground hover:text-foreground" onClick={() => setAdv(!adv)} aria-expanded={adv} data-adv-toggle>
               <Turn open={adv} className="text-current" />

@@ -5698,6 +5698,7 @@ dependencies = [
  "rust-i18n",
  "serde",
  "serde_json",
+ "steve-acp",
  "steve-i18n",
  "steve-store",
  "tempfile",

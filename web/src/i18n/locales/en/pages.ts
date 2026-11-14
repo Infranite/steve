@@ -52,7 +52,7 @@ export default {
   },
   models: {
     cat: { title: "Models", desc: "Which harness and model Steve judges with, and defaults for new conversations" },
-    effort: { none: "off", minimal: "minimal", low: "low", medium: "medium", high: "high", xhigh: "very high", max: "max" },
+    effort: { none: "off", off: "off", minimal: "minimal", low: "low", medium: "medium", high: "high", xhigh: "very high", max: "max", ultra: "ultra" },
     followModel: "Model default",
     defaultModel: "Default model",
     thinking: "thinking {{effort}}",
@@ -339,7 +339,7 @@ export default {
       hello: "I take things off your plate, keep track of progress, and call you when a decision is yours. First, a minute on what I found on this machine.",
       start: "Start",
       runtimes: "I'll work with {{first}} by default; each bot can be set separately.",
-      noRuntime: "No usable harness (Claude Code or Codex) on this machine yet. Install one before handing things over.",
+      noRuntime: "No usable harness on this machine yet. Install one before handing things over.",
       runtime: "Runtime",
       projects_one: "Work is organized by space and project: you're in “{{space}}”, with {{count}} project. A project is a folder, and an item with a project works there.",
       projects_other: "Work is organized by space and project: you're in “{{space}}”, with {{count}} projects. A project is a folder, and an item with a project works there.",

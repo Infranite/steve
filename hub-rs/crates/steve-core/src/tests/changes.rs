@@ -128,7 +128,7 @@ async fn a_new_bot_is_drafted_made_and_undone() {
             {"label": "名字", "from": "—", "to": "验收"},
             {"label": "职责", "from": "—", "to": "独立验收"},
             {"label": "权限", "from": "—", "to": "可以改文件、运行命令；对外操作仍需你批准"},
-            {"label": "思考强度", "from": "—", "to": "high"}
+            {"label": "思考强度", "from": "—", "to": "高"}
         ])
     );
     let r = k.core.apply(&p.id, "me", WS).unwrap();

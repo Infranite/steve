@@ -1,2 +1,2 @@
 # Places in web/src that still tell harnesses apart by name (harness-parity.test.mjs). Only shrinks.
-src/resume.tsx	"claude-code"	1
+src/caps/snippets.ts	"cursor"	3

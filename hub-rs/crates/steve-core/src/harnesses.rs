@@ -47,12 +47,26 @@ impl Harness {
     pub fn declared(id: &str, declared: Option<&steve_acp::Declaration>) -> Harness {
         let spec = steve_acp::adapters::spec(id, declared);
         let p = &spec.properties;
+        let ids: Vec<String> = [
+            p.modes.plan.as_str(),
+            p.modes.ask.as_str(),
+            p.modes.accept_edits.as_str(),
+            p.modes.auto.as_str(),
+            p.modes.full_access.as_str(),
+        ]
+        .into_iter()
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+        .collect();
+        let offered = p
+            .modes
+            .offered_with(Some(&ids), p.blind_set_mode, Some(&p.mode_meta));
         Harness {
             id: id.to_string(),
             name: spec.name.clone(),
             builtin: spec.builtin,
             ready: None,
-            modes: None,
+            modes: (offered.len() < 5).then_some(offered),
             models: p
                 .fallback_models
                 .iter()
@@ -96,14 +110,17 @@ impl Harness {
         };
         let own = self.default_model.as_deref().and_then(|d| split(d).0);
         self.fast_models.iter().find_map(|w| {
-            let w = w.to_ascii_lowercase();
+            let kw = words(&w.to_ascii_lowercase());
+            if kw.is_empty() {
+                return None;
+            }
             self.models
                 .iter()
                 .enumerate()
                 .filter_map(|(at, m)| {
                     let (route, name) = split(&m.id);
                     let ws = words(&name);
-                    ws.contains(&w).then(|| {
+                    ws.windows(kw.len()).any(|win| win == kw).then(|| {
                         let rank = (
                             route == own,
                             numbers(&name),
@@ -131,6 +148,41 @@ impl Harness {
     /// Whether it can be set to permission mode `mode` (unknown yet: yes).
     pub fn offers_mode(&self, mode: PermissionMode) -> bool {
         self.modes.as_ref().is_none_or(|m| m.contains(&mode))
+    }
+
+    /// Default `perm_mode` key for a new bot on this harness: Ask when offered, else Auto,
+    /// AcceptEdits, FullAccess, or Plan.
+    pub fn default_perm_mode(&self) -> &'static str {
+        const ORDER: [(PermissionMode, &str); 5] = [
+            (PermissionMode::Ask, "default"),
+            (PermissionMode::Auto, "auto"),
+            (PermissionMode::AcceptEdits, "acceptEdits"),
+            (PermissionMode::FullAccess, "bypassPermissions"),
+            (PermissionMode::Plan, "plan"),
+        ];
+        ORDER
+            .iter()
+            .find(|(m, _)| self.offers_mode(*m))
+            .map_or("default", |(_, k)| *k)
+    }
+}
+
+/// Default `(harness_id, perm_mode)` for a new bot: `preferred` (e.g. the main bot's harness) when
+/// it is in `list` and not proven unavailable (`ready != Some(false)`), else the first `ready ==
+/// Some(true)` harness, else the first `ready != Some(false)`, else the first in `list` or the
+/// built-in default adapter.
+pub fn default_bot_choice(list: &[Harness], preferred: Option<&str>) -> (String, String) {
+    let pick = preferred
+        .and_then(|id| list.iter().find(|h| h.id == id && h.ready != Some(false)))
+        .or_else(|| list.iter().find(|h| h.ready == Some(true)))
+        .or_else(|| list.iter().find(|h| h.ready != Some(false)))
+        .or_else(|| list.first());
+    match pick {
+        Some(h) => (h.id.clone(), h.default_perm_mode().into()),
+        None => (
+            steve_acp::adapters::DEFAULT_ADAPTER.0.into(),
+            "default".into(),
+        ),
     }
 }
 
@@ -250,6 +302,20 @@ mod tests {
         assert_eq!(
             pick(&["luna", "mini"], Some("gpt-6.1-sol"), &codex).as_deref(),
             Some("gpt-6-luna")
+        );
+        // multi-word hyphenated fast keyword (`flash-lite` beats `flash` when listed earlier)
+        assert_eq!(
+            pick(
+                &["flash-lite", "flash"],
+                None,
+                &[
+                    "gemini-2.5-pro",
+                    "gemini-2.5-flash",
+                    "gemini-2.5-flash-lite"
+                ],
+            )
+            .as_deref(),
+            Some("gemini-2.5-flash-lite")
         );
         // nothing before a probe has answered
         let mut h = offering(&["haiku"], None, &claude);

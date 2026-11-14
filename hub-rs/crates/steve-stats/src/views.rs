@@ -91,6 +91,10 @@ pub fn today(c: &Connection, ws: &str, now: i64) -> Result<String> {
 /// Names of the fixed keys (sources, purposes, harnesses, fail reasons, decision kinds), in the
 /// request's language.
 pub fn fixed_label(key: &str) -> Option<String> {
+    let spec = steve_acp::adapters::spec(key, None);
+    if spec.builtin {
+        return Some(spec.name);
+    }
     Some(match key {
         "agent" => steve_i18n::t!("stats.label.agent"),
         "gateway" => steve_i18n::t!("stats.label.gateway"),
@@ -110,8 +114,6 @@ pub fn fixed_label(key: &str) -> Option<String> {
         "yolo" => steve_i18n::t!("stats.label.yolo"),
         "digest" => steve_i18n::t!("stats.label.digest"),
         "other" => steve_i18n::t!("stats.label.other"),
-        "claude-code" => steve_i18n::t!("stats.label.claude_code"),
-        "codex" => steve_i18n::t!("stats.label.codex"),
         "stall" => steve_i18n::t!("stats.label.stall"),
         "error" => steve_i18n::t!("stats.label.error"),
         "restart" => steve_i18n::t!("stats.label.restart"),
@@ -126,11 +128,12 @@ pub fn fixed_label(key: &str) -> Option<String> {
     })
 }
 
-/// Bot and project names of a workspace, for labelling keys.
+/// Bot, project and declared harness names of a workspace, for labelling keys.
 #[derive(Debug, Default)]
 pub struct Names {
     bots: HashMap<String, String>,
     projects: HashMap<String, String>,
+    harnesses: HashMap<String, String>,
 }
 
 impl Names {
@@ -144,7 +147,14 @@ impl Names {
             // bots are global (a bot joins many workspaces); a deleted one keeps its name
             bots: pairs("SELECT id, name FROM bots WHERE ?1 IS NOT NULL")?,
             projects: pairs("SELECT id, name FROM projects WHERE workspace_id = ?")?,
+            harnesses: HashMap::new(),
         })
+    }
+
+    /// Adds display names for custom/declared harness adapters.
+    pub fn with_harnesses(mut self, harnesses: HashMap<String, String>) -> Self {
+        self.harnesses = harnesses;
+        self
     }
 
     /// The label of `key` in dimension `dim` (`model`, `bot`, `project`, `source`, `purpose`, …).
@@ -156,7 +166,15 @@ impl Names {
             ("bot", k) => self.bots.get(k).cloned().unwrap_or_else(|| k.into()),
             ("project", k) => self.projects.get(k).cloned().unwrap_or_else(|| k.into()),
             ("model", k) | ("day", k) => k.into(),
-            (_, k) => fixed_label(k).unwrap_or_else(|| k.into()),
+            ("harness", k) => self
+                .harnesses
+                .get(k)
+                .cloned()
+                .or_else(|| fixed_label(k))
+                .unwrap_or_else(|| k.into()),
+            (_, k) => fixed_label(k)
+                .or_else(|| self.harnesses.get(k).cloned())
+                .unwrap_or_else(|| k.into()),
         }
     }
 }
@@ -317,6 +335,7 @@ impl Acc {
 fn group_key<'a>(d: &'a Daily, group: &str) -> &'a str {
     match group {
         "model" => &d.model,
+        "harness" => &d.harness,
         "bot" => &d.bot_id,
         "project" => &d.project_id,
         "source" => &d.source,
@@ -341,6 +360,18 @@ pub fn series(
     group: &str,
     bucket: Bucket,
 ) -> Result<Series> {
+    series_with_harnesses(c, q, metric, group, bucket, &HashMap::new())
+}
+
+/// Like [`series`], with custom/declared harness display names for `group=harness` / source labels.
+pub fn series_with_harnesses(
+    c: &Connection,
+    q: &Query,
+    metric: Metric,
+    group: &str,
+    bucket: Bucket,
+    harnesses: &HashMap<String, String>,
+) -> Result<Series> {
     let tz = tz_of(c, &q.workspace_id)?;
     let spans = match bucket {
         Bucket::Day => None,
@@ -350,7 +381,16 @@ pub fn series(
         Some(h) => h.iter().map(|x| x.0.clone()).collect(),
         None => days(&q.from, &q.to),
     };
-    let mut series = lines(c, q, metric, group, &buckets, spans.as_deref(), tz)?;
+    let mut series = lines(
+        c,
+        q,
+        metric,
+        group,
+        &buckets,
+        spans.as_deref(),
+        tz,
+        harnesses,
+    )?;
     let mut current = None;
     if let (Bucket::Hour { now }, Some(h)) = (bucket, &spans) {
         for (i, (_, start, end)) in h.iter().enumerate() {
@@ -373,6 +413,7 @@ pub fn series(
 }
 
 /// The lines of [`series`] over `buckets` (the days, or the hours with their `spans`).
+#[allow(clippy::too_many_arguments)]
 fn lines(
     c: &Connection,
     q: &Query,
@@ -381,6 +422,7 @@ fn lines(
     buckets: &[String],
     spans: Option<&[(String, i64, i64)]>,
     tz: Option<chrono_tz::Tz>,
+    harnesses: &HashMap<String, String>,
 ) -> Result<Vec<Line>> {
     let n = buckets.len();
     let index: HashMap<&str, usize> = buckets
@@ -395,7 +437,7 @@ fn lines(
             day(ts, tz)
         }
     };
-    let names = Names::load(c, &q.workspace_id)?;
+    let names = Names::load(c, &q.workspace_id)?.with_harnesses(harnesses.clone());
     let mut acc = Acc::default();
     let total_label = |m: Metric| match m {
         Metric::Tokens => steve_i18n::t!("stats.total.tokens"),

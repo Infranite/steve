@@ -588,7 +588,9 @@ mod tests {
         let events = m["default_events"].as_array().unwrap();
         assert_eq!(events.len(), 8);
         assert!(
-            !events.iter().any(|e| e.as_str().is_some_and(|e| e.starts_with("installation"))),
+            !events
+                .iter()
+                .any(|e| e.as_str().is_some_and(|e| e.starts_with("installation"))),
             "GitHub refuses a manifest that subscribes to the installation events"
         );
         assert_eq!(manifest("Lee", "u", "o")["name"], "Steve · Lee");

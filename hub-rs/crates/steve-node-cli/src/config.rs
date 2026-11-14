@@ -72,10 +72,12 @@ impl Home {
         if let Ok(h) = std::env::var("STEVE_HOME")
             && !h.is_empty()
         {
-            return Ok(Home(PathBuf::from(h)));
+            let p = PathBuf::from(h);
+            return Ok(Home(std::path::absolute(&p).unwrap_or(p)));
         }
         let home = std::env::var("HOME").context("HOME is not set")?;
-        Ok(Home(Path::new(&home).join(".steve-node")))
+        let p = Path::new(&home).join(".steve-node");
+        Ok(Home(std::path::absolute(&p).unwrap_or(p)))
     }
     pub fn identity(&self) -> PathBuf {
         self.0.join("node/identity.key")
@@ -135,7 +137,15 @@ impl Home {
     }
 
     pub fn harness(&self) -> Result<Harness> {
-        let p = self.0.join("harness.json");
+        self.harness_from_vars(|k| {
+            std::env::var_os(k)
+                .filter(|v| !v.is_empty())
+                .map(PathBuf::from)
+        })
+    }
+
+    pub fn harness_from_vars(&self, var: impl Fn(&str) -> Option<PathBuf>) -> Result<Harness> {
+        let p = var("STEVE_HARNESS_MANIFEST").unwrap_or_else(|| self.0.join("harness.json"));
         if !p.exists() {
             return Ok(Harness::default());
         }
@@ -143,25 +153,58 @@ impl Home {
     }
 
     pub fn acp(&self) -> Result<steve_acp::AcpConfig> {
-        let h = self.harness()?;
         let user_home = std::env::var("HOME").map(PathBuf::from).unwrap_or_default();
-        let (mut adapters, declared) = steve_acp::adapters::split_entries(h.adapters);
-        // the built-in ones harness.json does not name: this Node's own install (`steve setup
-        // node`, kept up to date by the Node), else the default adapter's command on PATH
-        for (id, _) in steve_acp::adapters::builtin_packages() {
-            if let Some(own) = steve_acp::managed::command(&self.0, id).filter(|c| c.exists()) {
-                adapters.entry(id.into()).or_insert(own);
-            }
-        }
-        let (id, command) = steve_acp::adapters::DEFAULT_ADAPTER;
-        adapters.entry(id.into()).or_insert_with(|| command.into());
+        let path_env = std::env::var_os("PATH");
+        self.acp_from_vars(
+            |k| {
+                std::env::var_os(k)
+                    .filter(|v| !v.is_empty())
+                    .map(PathBuf::from)
+            },
+            path_env.as_deref(),
+            user_home,
+            || Some(steve_acp::npm_root()),
+        )
+    }
+
+    pub fn acp_from_vars(
+        &self,
+        var: impl Fn(&str) -> Option<PathBuf>,
+        path_env: Option<&std::ffi::OsStr>,
+        user_home: PathBuf,
+        mut npm_root: impl FnMut() -> Option<PathBuf>,
+    ) -> Result<steve_acp::AcpConfig> {
+        let h = self.harness_from_vars(&var)?;
+        let (declared_commands, declared) = steve_acp::adapters::split_entries(h.adapters);
+        let steve_home = std::path::absolute(&self.0).unwrap_or_else(|_| self.0.clone());
+        let mut root: Option<Option<PathBuf>> = None;
+        let adapters = steve_acp::resolve_builtin_adapters(
+            &steve_home,
+            &declared_commands,
+            &var,
+            path_env,
+            || {
+                root.get_or_insert_with(&mut npm_root)
+                    .clone()
+                    .unwrap_or_default()
+            },
+        );
+        let node = var("STEVE_NODE")
+            .or(h.node)
+            .or_else(|| steve_acp::which_in("node", path_env))
+            .unwrap_or_else(|| "node".into());
+        let claude_executable = var("CLAUDE_CODE_EXECUTABLE")
+            .or(h.claude_executable)
+            .or_else(|| steve_acp::default_claude_executable(path_env))
+            .unwrap_or_default();
+        let codex_home = var("CODEX_HOME").unwrap_or_else(|| user_home.join(".codex"));
         Ok(steve_acp::AcpConfig {
             declared,
             adapters,
-            node: h.node.unwrap_or_else(|| "node".into()),
-            claude_executable: h.claude_executable.unwrap_or_else(|| "claude".into()),
-            steve_home: self.0.clone(),
-            codex_home: user_home.join(".codex"),
+            node,
+            claude_executable,
+            steve_home,
+            codex_home,
             user_home,
             version: option_env!("STEVE_BUILD_VERSION")
                 .unwrap_or(env!("CARGO_PKG_VERSION"))
@@ -263,18 +306,31 @@ mod tests {
     #[test]
     fn harness_json_takes_paths_and_declared_adapters() {
         let dir = tempfile::tempdir().unwrap();
+        let bin = tempfile::tempdir().unwrap();
+        let fake_acp = bin.path().join("claude-agent-acp");
+        std::fs::write(&fake_acp, "#!/bin/sh\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&fake_acp, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let path_env = bin.path().as_os_str();
         let home = Home(dir.path().to_path_buf());
         std::fs::write(
             dir.path().join("harness.json"),
             r#"{"adapters": {"codex": "/opt/codex-acp"}, "node": "/opt/node"}"#,
         )
         .unwrap();
-        let acp = home.acp().unwrap();
+        let acp = home
+            .acp_from_vars(|_| None, Some(path_env), dir.path().to_path_buf(), || None)
+            .unwrap();
         assert_eq!(acp.adapters["codex"], PathBuf::from("/opt/codex-acp"));
         // the default adapter is still looked up on PATH
-        assert!(
+        assert_eq!(
             acp.adapters
-                .contains_key(steve_acp::adapters::DEFAULT_ADAPTER.0)
+                .get(steve_acp::adapters::DEFAULT_ADAPTER.0)
+                .map(PathBuf::as_path),
+            Some(fake_acp.as_path())
         );
         assert!(acp.declared.is_empty());
         std::fs::write(
@@ -283,7 +339,9 @@ mod tests {
                 "env": {"MINE_MODE": "acp"}, "properties": {"modes": {"ask": "ask"}}}}}"#,
         )
         .unwrap();
-        let acp = home.acp().unwrap();
+        let acp = home
+            .acp_from_vars(|_| None, Some(path_env), dir.path().to_path_buf(), || None)
+            .unwrap();
         assert_eq!(acp.adapters["mine"], PathBuf::from("/opt/mine"));
         let spec = acp.adapter_spec("mine");
         assert_eq!(spec.name, "Mine");

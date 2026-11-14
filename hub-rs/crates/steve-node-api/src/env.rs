@@ -10,7 +10,7 @@
 /// The key that puts directories in front of `PATH` (the only way to change it).
 pub const PATH_PREPEND: &str = "PATH_PREPEND";
 
-const LOCKED: [&str; 20] = [
+const LOCKED: [&str; 22] = [
     "HOME",
     "TMPDIR",
     "TMP",
@@ -24,6 +24,8 @@ const LOCKED: [&str; 20] = [
     "GIT_CONFIG_SYSTEM",
     "GIT_CONFIG_NOSYSTEM",
     "CLAUDE_CODE_EXECUTABLE",
+    "DISABLE_AUTOUPDATER",
+    "GH_TOKEN",
     "BASH_ENV",
     "ENV",
     "PROMPT_COMMAND",
@@ -33,7 +35,7 @@ const LOCKED: [&str; 20] = [
     "PYTHONINSPECT",
 ];
 
-const LOCKED_PREFIXES: [&str; 10] = [
+const LOCKED_PREFIXES: [&str; 33] = [
     "STEVE_",
     "XDG_",
     "DYLD_",
@@ -44,6 +46,29 @@ const LOCKED_PREFIXES: [&str; 10] = [
     "CODEX_",
     "ANTHROPIC_",
     "OPENAI_",
+    "GEMINI_",
+    "GOOGLE_",
+    "COPILOT_",
+    "GITHUB_COPILOT_",
+    "OPENCODE_",
+    "QWEN_",
+    "DASHSCOPE_",
+    "GOOSE_",
+    "KIMI_",
+    "MOONSHOT_",
+    "GROK_",
+    "XAI_",
+    "KILO_",
+    "KILOCODE_",
+    "FACTORY_",
+    "DROID_",
+    "CODEBUDDY_",
+    "CURSOR_",
+    "KIRO_",
+    "VIBE_",
+    "MISTRAL_",
+    "QODER_",
+    "OPENROUTER_",
 ];
 
 /// Why `key` is not one a user may set (`None`: it is).
@@ -96,6 +121,22 @@ mod tests {
             "CLAUDE_CONFIG_DIR",
             "ANTHROPIC_BASE_URL",
             "OPENAI_API_KEY",
+            "GEMINI_CLI_HOME",
+            "GOOGLE_API_KEY",
+            "COPILOT_HOME",
+            "OPENCODE_CONFIG_DIR",
+            "QWEN_HOME",
+            "GOOSE_PATH_ROOT",
+            "KIMI_CODE_HOME",
+            "GROK_HOME",
+            "KILO_CONFIG_DIR",
+            "FACTORY_HOME_OVERRIDE",
+            "CODEBUDDY_CONFIG_DIR",
+            "CURSOR_CONFIG_DIR",
+            "KIRO_HOME",
+            "VIBE_HOME",
+            "MISTRAL_API_KEY",
+            "QODER_CONFIG_DIR",
             "KEY_FILE",
             "1X",
             "A-B",

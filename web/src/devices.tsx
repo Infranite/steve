@@ -21,6 +21,7 @@ import { CODE, TailcatSection } from "@/devices-tailcat"
 import { t, useT } from "@/i18n"
 import { hm } from "@/i18n/format"
 import { useHubAddress } from "@/hub-ui"
+import { homeTilde } from "@/resume"
 
 const onDevice = (id: string) => Object.keys(st.S).filter((k) => st.S[k].device === id && !st.S[k].ro)
 const stateText = (d: RDevice) => (d.status === "暂停接活" ? t("shell:devices.onlinePaused") : t("shell:devices.online"))
@@ -151,10 +152,10 @@ export function DeviceView({ id }: { id: string }) {
         </Panel>
         <Panel k="runtimes" icon={<CpuIcon />} title={t("shell:devices.runtimes")} sub={t("shell:devices.runtimesSub", { ok: st.runtimes.filter((r) => r.ok).length, count: st.runtimes.length })}
           right={<Button size="xs" variant="ghost" className="text-muted-foreground" disabled={busy} onClick={() => void recheck()}>{busy ? <Spinner className="size-3" /> : <RefreshCwIcon />}{t("shell:devices.recheck")}</Button>}>
-          {st.runtimes.length ? <div className="py-1.5">{st.runtimes.map((r) => <div key={r.id} className="relative mx-2 flex items-start gap-4 rounded-lg px-3 py-3 [&+&]:before:absolute [&+&]:before:inset-x-3 [&+&]:before:top-0 [&+&]:before:h-px [&+&]:before:bg-border/60" data-runtime={r.id}>
+          {st.runtimes.length ? <div className="py-1.5">{[...st.runtimes].sort((a, b) => Number(b.ok) - Number(a.ok)).map((r) => <div key={r.id} className="relative mx-2 flex items-start gap-4 rounded-lg px-3 py-3 [&+&]:before:absolute [&+&]:before:inset-x-3 [&+&]:before:top-0 [&+&]:before:h-px [&+&]:before:bg-border/60" data-runtime={r.id}>
             <div className="min-w-0 flex-1">
               <div className="flex flex-wrap items-center gap-2 type-body text-foreground">{r.name}<span className="font-mono type-footnote text-muted-foreground">{r.version || r.adapter_version}</span><span className="type-footnote text-tertiary">{r.custom ? t("shell:devices.harness.custom") : t("shell:devices.harness.builtin")}</span></div>
-              <div className="mt-0.5 flex flex-col gap-0.5 type-footnote text-muted-foreground"><span className="truncate">{r.note} · <span className="font-mono">{r.path.replace(/^\/Users\/[^/]+/, "~")}</span></span>{!r.ok && r.error && <span className="text-attention" data-runtime-error>{r.error}</span>}<AdapterUpdate r={r} /><RuntimeChips r={r} /></div>
+              <div className="mt-0.5 flex flex-col gap-0.5 type-footnote text-muted-foreground"><span className="truncate">{r.note}{r.path ? <>{r.note ? " · " : ""}<span className="font-mono">{homeTilde(r.path)}</span></> : null}</span>{!r.ok && r.error && <span className="text-attention" data-runtime-error>{r.error}</span>}{r.auth && r.auth.length > 0 && <span data-runtime-auth>{t("shell:devices.harness.auth", { methods: r.auth.map((a) => a.name).join(t("shell:list.sep")) })}</span>}<AdapterUpdate r={r} /><RuntimeChips r={r} /></div>
             </div>
             <Tag tone={r.ok ? "ok" : "wait"}>{r.ok ? t("shell:devices.available") : t("shell:devices.unavailable")}</Tag>
           </div>)}</div> : <div className="px-5 py-4 type-callout text-muted-foreground">{t("shell:devices.noRuntimes")}</div>}
@@ -163,7 +164,7 @@ export function DeviceView({ id }: { id: string }) {
         {isHub && <NodeTags node="local" />}
         <Panel k="projects" icon={<FolderIcon />} title={t("shell:devices.projectsTitle")} sub={t("shell:devices.projectsSub", { count: dirs.length })}
           right={<Button size="xs" variant="ghost" className="text-muted-foreground" onClick={() => go("#/projects")}>{t("shell:devices.manageProjects")}</Button>}>
-          {dirs.length ? <div className="py-1.5">{dirs.map((p) => <PanelRow key={p.id} title={p.name} sub={<span className="font-mono">{p.path.replace(/^\/Users\/[^/]+/, "~")}</span>} onClick={() => go("#/projects/" + p.id)}><ChevronRightIcon className="size-4 text-tertiary" /></PanelRow>)}</div>
+          {dirs.length ? <div className="py-1.5">{dirs.map((p) => <PanelRow key={p.id} title={p.name} sub={<span className="font-mono">{homeTilde(p.path)}</span>} onClick={() => go("#/projects/" + p.id)}><ChevronRightIcon className="size-4 text-tertiary" /></PanelRow>)}</div>
             : <div className="px-5 py-4 type-callout text-muted-foreground">{t("shell:devices.noProjects")}</div>}
         </Panel>
         {isHub && <Panel k="hub" icon={<ServerIcon />} title={t("shell:devices.hubNode")} sub={t("shell:devices.hubNodeSub")}>

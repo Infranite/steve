@@ -41,7 +41,7 @@ export type RDecision = { id: string; kind: "accept" | "ask" | "approve" | "fail
   agent_busy?: boolean }
 export type RBot = { id: string; name: string; role: string; main: boolean; harness: string; model: string | null; reasoning_effort?: string | null; rules: string; persona: string; proactive: number; accept_mode: string; perm_mode: string; avatar: { color?: string; skin?: string | null; round?: number }; default_project: string | null; prompt: string | null; device: string | null; enabled: boolean; revision: number; updated: number; workspaces: string[]; memories: number }
 /** GET /sessions/:id/resume: the harness's own session, how to resume it there, and whether its transcript is on the Hub's machine */
-export type RResume = { harness: string; id: string | null; cwd: string; cwd_exists: boolean; command: string | null; transcript: { path: string; updated: number | null; id: string | null; cwd: string | null; matches: boolean } | null }
+export type RResume = { harness: string; id: string | null; cwd: string; cwd_exists: boolean; command: string | null; fork_command?: string | null; transcript_checked?: boolean; transcript: { path: string; updated: number | null; id: string | null; cwd: string | null; matches: boolean } | null }
 /** `GET /projects/:id/lane`: the target's profile, each fact with where it came from */
 export type RLaneFact<T> = { value: T; how: { state: "found" } | { state: "default" } | { state: "unknown"; why: string }; evidence: string[] }
 export type RLane = {
@@ -120,6 +120,7 @@ export type RRuntime = {
   skills?: boolean
   caps?: { sessions: boolean; jobs: boolean; images: boolean; resume: boolean; history: boolean; mcp_http: boolean; system_prompt: boolean; fork?: boolean } | null
   auth?: { id: string; name: string; description?: string | null }[]
+  resume_command?: string | null; fork_command?: string | null
   /** an adapter Steve installed and keeps up to date: its last check (`policy`: STEVE_ADAPTER_UPDATES) */
   update?: { policy: "auto" | "check" | "off"; installed?: string | null; latest?: string | null; checked?: number | null; error?: string | null; pending?: boolean } | null
 }

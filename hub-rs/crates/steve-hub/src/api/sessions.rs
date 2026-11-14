@@ -406,11 +406,50 @@ pub async fn resume(
 ) -> ApiResult {
     let s = own_session(&st, &c.ws, &id).await?;
     let homes = crate::resume::Homes::of(&st.cfg);
-    // the local Node on: it finds the transcript, the Hub reads no harness files
+    let is_owner = c.user.get("role").and_then(Value::as_str) == Some("owner");
+    let session_state = if let Some(store) = st.modules.as_ref().map(|m| m.store.clone()) {
+        let sid = id.clone();
+        let data_dir = st.cfg.data_dir.clone();
+        blocking(move || {
+            use rusqlite::OptionalExtension;
+            let row = store
+                .reader::<_, steve_store::StoreError>(|conn| {
+                    Ok(conn
+                        .query_row(
+                            "SELECT node_id, state_dir FROM runtime_sessions WHERE session_id = ?1",
+                            [&sid],
+                            |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?)),
+                        )
+                        .optional()?)
+                })
+                .ok()
+                .flatten();
+            Ok(match row {
+                Some((node_id, _)) if node_id != "local" && node_id != "local-jobs" => {
+                    crate::resume::SessionState::RemoteNode
+                }
+                Some((_, Some(dir))) if !dir.trim().is_empty() => {
+                    crate::resume::SessionState::IsolatedLocal {
+                        harness_dir: data_dir
+                            .join("node")
+                            .join("state")
+                            .join(dir)
+                            .join("harness"),
+                        expose_path: is_owner,
+                    }
+                }
+                _ => crate::resume::SessionState::AmbientLocal,
+            })
+        })
+        .await?
+    } else {
+        crate::resume::SessionState::AmbientLocal
+    };
+    // the local Node on: it finds ambient transcripts, the Hub reads no ambient harness files
     if let Some(node) = st.node.as_ref().map(|n| n.node()) {
-        return ok(crate::resume::info_on(&homes, &s, node.as_ref()).await);
+        return ok(crate::resume::info_on_state(&homes, &s, node.as_ref(), &session_state).await);
     }
-    let v = blocking(move || Ok(crate::resume::info(&homes, &s))).await?;
+    let v = blocking(move || Ok(crate::resume::info_for_state(&homes, &s, &session_state))).await?;
     ok(v)
 }
 

@@ -358,10 +358,27 @@ async fn model_settings() {
         ps[2]["effective"],
         json!({"harness": "claude-code", "models": []})
     );
-    assert_eq!(v["agents"][0]["default"], Value::Null);
-    assert_eq!(v["harnesses"][0]["id"], "claude-code");
-    assert_eq!(v["harnesses"][0]["efforts"][4]["key"], "max");
-    assert_eq!(v["harnesses"][1]["id"], "codex");
+    fn h_of<'a>(v: &'a Value, id: &str) -> &'a Value {
+        v["harnesses"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|h| h["id"] == id)
+            .unwrap()
+    }
+    fn a_of<'a>(v: &'a Value, id: &str) -> &'a Value {
+        v["agents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|a| a["harness"] == id)
+            .unwrap()
+    }
+    assert_eq!(a_of(&v, "claude-code")["default"], Value::Null);
+    assert_eq!(h_of(&v, "claude-code")["efforts"][4]["key"], "max");
+    assert_eq!(h_of(&v, "codex")["id"], "codex");
+    assert_eq!(h_of(&v, "gemini")["id"], "gemini");
+    assert_eq!(v["harnesses"].as_array().unwrap().len(), 16);
     let (code, v) = c
         .call(
             "PATCH",
@@ -375,7 +392,7 @@ async fn model_settings() {
         v["purposes"][0]["effective"],
         json!({"harness": "codex", "models": ["gpt-6-sol"], "effort": "low"})
     );
-    assert_eq!(v["agents"][1]["value"], "gpt-6-sol");
+    assert_eq!(a_of(&v, "codex")["value"], "gpt-6-sol");
     assert_eq!(
         c.call(
             "PATCH",
@@ -493,10 +510,20 @@ async fn system_models_lists_what_each_harness_offers_and_never_the_keys() {
         ["gpt-6.1-sol", "gpt-6-sol", "gpt-6-luna", "gpt-5.6-luna"]
     );
     assert_eq!(v["families"], json!(["GPT"]));
+    let (code, v) = c
+        .call("GET", "/api/system/models?harness=gemini", None, None)
+        .await;
+    assert_eq!(code, 200, "{v}");
+    assert_eq!(v["name"], "Gemini CLI");
     assert_eq!(
-        c.call("GET", "/api/system/models?harness=gemini", None, None)
-            .await
-            .0,
+        c.call(
+            "GET",
+            "/api/system/models?harness=no-such-harness",
+            None,
+            None
+        )
+        .await
+        .0,
         400
     );
     // nothing ran the key helper

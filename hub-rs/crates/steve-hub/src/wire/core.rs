@@ -1297,6 +1297,8 @@ pub struct CoreDomain {
     /// The local Node (`STEVE_NODE_MODE=local`): stopped with the Hub, its harnesses
     /// with it.
     pub node: Option<Arc<steve_node::LocalNode>>,
+    /// Remote Nodes linked to this Hub, when the Node listener is enabled.
+    pub nodes: Option<Arc<crate::nodes::NodeService>>,
     /// The connections' runs (long connections, pollers): stopped with the Hub.
     pub lifecycle: Option<steve_channels::lifecycle::ConnectionRuntime>,
 }
@@ -1983,8 +1985,14 @@ impl Domain for CoreDomain {
     }
 
     async fn harnesses(&self, fresh: bool) -> BResult<Vec<steve_core::harnesses::Harness>> {
-        if fresh && let Some(n) = &self.node {
-            self.harnesses.refresh(n.as_ref(), true).await;
+        if fresh {
+            let local = self
+                .node
+                .as_ref()
+                .map(|n| n.as_ref() as &dyn steve_node_api::Node);
+            self.harnesses
+                .refresh_all(local, self.nodes.as_deref(), true)
+                .await;
         }
         Ok(self.core.models().harnesses())
     }
