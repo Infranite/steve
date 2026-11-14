@@ -33,7 +33,9 @@ const run = async ({ width, height, scheme }) => {
   page.setDefaultTimeout(10000)
   const errors = []; page.on('pageerror', (e) => errors.push(e.message))
   await page.route('**/*', async (route) => {
-    const u = new URL(route.request().url()); if (u.origin !== base) return route.abort(); if (!u.pathname.startsWith('/api/')) return route.continue()
+    const u = new URL(route.request().url()); if (u.origin !== base) return route.abort()
+    if (u.pathname === '/auth/hello') return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ name: 'steve', api: 1, version: 'fixture' }) })
+    if (!u.pathname.startsWith('/api/')) return route.continue()
     const method = route.request().method(), p = u.pathname
     if (p === '/api/state') return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(state()) })
     if (p === '/api/stats/breakdown') return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ by: 'tool', rows: [] }) })
@@ -46,7 +48,8 @@ const run = async ({ width, height, scheme }) => {
   const settle = async (n) => { for (let i = 0; i < 50 && calls.length < n; i++) await page.waitForTimeout(100) }
   const caps = async (id) => {
     await page.goto(base + '/#/bots/' + id)
-    await page.locator('[data-slot=tabs-trigger]:has-text("能力")').click()
+    try { await page.getByRole('tab', { name: '能力', exact: true }).click() }
+    catch (e) { console.error({ pageErrors: errors, body: await page.locator('body').innerText() }); throw e }
     await page.locator('[data-mcp]').waitFor()
   }
   await page.addInitScript(() => { localStorage.setItem('steve-lang', 'zh-CN') })
@@ -54,6 +57,8 @@ const run = async ({ width, height, scheme }) => {
   /* no servers: Steve · 内置 first, then what MCP servers are and the way to add one */
   await caps('doc')
   await page.locator('[data-steve-server]').waitFor()
+  await page.locator('[data-tool-pins]').waitFor()
+  assert.match(await page.locator('[data-tool-pin-count]').innerText(), /8 个核心工具.*0 \/ 32/)
   assert.match(await page.locator('[data-steve-server]').innerText(), /Steve · 内置[^]*总是启用/)
   await page.locator('[data-mcp-empty]').waitFor()
   assert.match(await page.locator('[data-mcp-empty]').innerText(), /MCP 服务器给 Bot 增加工具/)

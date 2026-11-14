@@ -40,6 +40,8 @@ export type A2aAgentIn = Partial<{ card_url: string; name: string; auth: A2aAuth
 /** an Agent Card as fetched, not kept */
 export type AgentCard = { name: string; description?: string; url: string; version?: string; protocolVersion?: string; provider?: { organization?: string }; skills?: { id: string; name?: string; description?: string; tags?: string[] }[] }
 
+export type ToolPin = { kind: "tool" | "mcp" | "a2a"; target: string }
+export type BotTools = { core: string[]; pins: ToolPin[]; usage: { tool: string; searched: number; called: number }[]; days: number }
 export type BotCaps = { mcp: McpServer[]; skills: Skill[]; a2a: A2aAgent[] }
 
 export type SteveTool = { name: string; description: string }
@@ -75,6 +77,8 @@ export const capsApi = {
     update: (id: string, b: A2aAgentIn) => req<A2aAgent>("PATCH", one("a2a-agents", id), b),
     remove: (id: string) => req<{ ok: true }>("DELETE", one("a2a-agents", id)),
   },
+  tools: (bot: string) => req<BotTools>("GET", `/bots/${encodeURIComponent(bot)}/tools`),
+  pin: (bot: string, pin: ToolPin, on: boolean) => req(on ? "PUT" : "DELETE", `/bots/${encodeURIComponent(bot)}/tool-pins/${pin.kind}/${encodeURIComponent(pin.target)}`),
   bot: (bot: string) => req<BotCaps>("GET", `/bots/${encodeURIComponent(bot)}/capabilities`),
   assign: (bot: string, kind: CapKind, id: string, enabled = true) => req("PUT", `/bots/${encodeURIComponent(bot)}/capabilities/${kind}/${encodeURIComponent(id)}`, { enabled }),
   unassign: (bot: string, kind: CapKind, id: string) => req("DELETE", `/bots/${encodeURIComponent(bot)}/capabilities/${kind}/${encodeURIComponent(id)}`),
