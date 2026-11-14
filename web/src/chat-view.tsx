@@ -187,6 +187,7 @@ export function ChatView({ conv }: { conv?: string } = {}) {
   const saved = useRef<ReadPos | null | undefined>(undefined)
   if (saved.current === undefined) saved.current = conv ? null : readPos(posKey)
   const stuck = useRef(!saved.current || saved.current.bottom), [unread, setUnread] = useState(false)
+  const unreadNow = useRef(unread); unreadNow.current = unread
   const restoring = useRef(!stuck.current)
   /* new messages since you left the bottom: everything said after the latest one you had */
   const leftAt = useRef(0)
@@ -218,6 +219,8 @@ export function ChatView({ conv }: { conv?: string } = {}) {
   useEffect(() => {
     if (stuck.current) bottom()
     else if (restoring.current) return
+    // An inert upward gesture, or a viewport that now fits every message, is not unseen content.
+    else if (scroller.current && scroller.current.scrollHeight - scroller.current.scrollTop - scroller.current.clientHeight < 40) bottom()
     else if (list.some((m) => m.created && m.created > leftAt.current && m.k !== "thinking") || (st.draft?.text && !back)) setUnread(true)
   }, [list.length, list.at(-1)?.id, list.at(-1)?.t, st.draft?.text])
   /* older messages came in above: the one you were reading stays where it was */
@@ -228,15 +231,18 @@ export function ChatView({ conv }: { conv?: string } = {}) {
     const near = () => { if (el.scrollHeight - el.scrollTop - el.clientHeight >= 40) leave(); else if (!stuck.current) { stuck.current = true; setUnread(false); setBack(null) } }
     /* only scrolling up leaves the bottom: a wheel or swipe that cannot move further down fires no scroll event to undo it */
     let y = 0
-    const wheel = (e: WheelEvent) => { if (e.deltaY < 0) leave() }, touch = (e: TouchEvent) => { y = e.touches[0]?.clientY ?? 0 }
-    const swipe = (e: TouchEvent) => { const t = e.touches[0]?.clientY ?? y; if (t > y) leave(); y = t }
-    const key = (e: KeyboardEvent) => { if (["PageUp", "ArrowUp", "Home"].includes(e.key)) leave() }
+    const wheel = (e: WheelEvent) => { if (e.deltaY < 0 && el.scrollTop > 0) leave() }, touch = (e: TouchEvent) => { y = e.touches[0]?.clientY ?? 0 }
+    const swipe = (e: TouchEvent) => { const t = e.touches[0]?.clientY ?? y; if (t > y && el.scrollTop > 0) leave(); y = t }
+    const key = (e: KeyboardEvent) => { if (el.scrollTop > 0 && ["PageUp", "ArrowUp", "Home"].includes(e.key)) leave() }
     el.addEventListener("wheel", wheel, { passive: true }); el.addEventListener("touchstart", touch, { passive: true }); el.addEventListener("touchmove", swipe, { passive: true }); el.addEventListener("scroll", near, { passive: true }); el.addEventListener("keydown", key)
     window.addEventListener("steve-open-steps", leave)
     /* unfolding something you are reading must not jump you to the bottom */
     const unfold = (e: Event) => { if ((e.target as HTMLElement).closest?.("[data-steps-toggle]")) leave() }; el.addEventListener("click", unfold)
     /* the list grows, or the composer and queue above it grow and shrink the viewport */
-    const ro = new ResizeObserver(() => { if (stuck.current) el.scrollTop = el.scrollHeight }); ro.observe(inner); ro.observe(el)
+    const ro = new ResizeObserver(() => {
+      if (stuck.current) el.scrollTop = el.scrollHeight
+      else if (unreadNow.current && el.scrollHeight - el.scrollTop - el.clientHeight < 40) bottom()
+    }); ro.observe(inner); ro.observe(el)
     return () => { ro.disconnect(); el.removeEventListener("wheel", wheel); el.removeEventListener("touchstart", touch); el.removeEventListener("touchmove", swipe); el.removeEventListener("scroll", near); el.removeEventListener("keydown", key); window.removeEventListener("steve-open-steps", leave); el.removeEventListener("click", unfold) }
   }, [])
   /* the top of the list: the conversation before what was loaded comes in (yours only) */
