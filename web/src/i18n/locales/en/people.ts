@@ -280,6 +280,8 @@ export default {
     noteAria: "Organization note",
   },
   owner: {
+    loadFailed: "Couldn't load the owner",
+    unavailable: "Owner information is unavailable",
     undo: "Undo",
     undone: "Undone",
     proposed: "{{name}}?",

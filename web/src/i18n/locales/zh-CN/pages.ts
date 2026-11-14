@@ -394,6 +394,7 @@ export default {
     emptyHead: "有什么要 {{name}} 做的？",
     emptyBody: "能直接回答的当场答；要动手的建成事项去做，做完或需要你拿主意时再来找你。",
     missing: "没有这个对话，或者你看不到它所在的空间。",
+    loadFailed: "对话载入失败，请重试。",
     readonlyUi: "群聊里的界面只能看，操作请在你和 Steve 的主线对话里进行",
     stopped: "你停下了这次回答",
     jumpBack: "返回刚才位置",

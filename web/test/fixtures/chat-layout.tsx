@@ -1,8 +1,9 @@
+import { useEffect, useState } from "react"
 import { createRoot } from "react-dom/client"
 import "../../src/index.css"
 import { ChatView } from "../../src/chat-view"
 import { SidebarProvider } from "../../src/components/ui/sidebar"
-import { st, emit, useStore, type Msg, type Bot, type Item } from "../../src/store"
+import { st, emit, useStore, hubSubs, type Msg, type Bot, type Item } from "../../src/store"
 
 document.documentElement.classList.toggle("dark", matchMedia("(prefers-color-scheme: dark)").matches)
 const now = Date.now()
@@ -38,6 +39,19 @@ window.addEventListener("fixture-reply", () => { replies++; st.thread = [...st.t
 window.addEventListener("fixture-thinking", () => { st.thread = [...short, { k: "thinking" }]; st.thinking = true; st.phase = "answer"; emit() })
 function Fixture() {
   useStore()
-  return <SidebarProvider><main style={{ height: "100dvh", width: "100%", minWidth: 0 }}><ChatView /></main></SidebarProvider>
+  const [conv, setConv] = useState(new URLSearchParams(location.search).get("conv") ?? undefined)
+  useEffect(() => {
+    const refresh = () => hubSubs.forEach(f => f({ type: "chan_message", id: "fixture" }))
+    const switchScope = (e: Event) => {
+      st.workspace = { ...st.workspace, id: (e as CustomEvent<string>).detail } as typeof st.workspace
+      emit()
+    }
+    const switchConv = (e: Event) => setConv((e as CustomEvent<string>).detail)
+    window.addEventListener("fixture-refresh", refresh)
+    window.addEventListener("fixture-scope", switchScope)
+    window.addEventListener("fixture-conversation", switchConv)
+    return () => { window.removeEventListener("fixture-refresh", refresh); window.removeEventListener("fixture-scope", switchScope); window.removeEventListener("fixture-conversation", switchConv) }
+  }, [])
+  return <SidebarProvider><main style={{ height: "100dvh", width: "100%", minWidth: 0 }}><ChatView conv={conv} /></main></SidebarProvider>
 }
 createRoot(document.getElementById("root")!).render(<Fixture />)

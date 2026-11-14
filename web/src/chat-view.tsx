@@ -175,7 +175,7 @@ export function ChatView({ conv }: { conv?: string } = {}) {
   const S = st.bots.steve, away = useAway()
   const t = useT()
   useHistory()
-  const im = useConversation(conv)
+  const { data: im, error: imError, loading: imLoading, reload: reloadIm } = useConversation(conv)
   const list: Msg[] = conv ? im?.msgs ?? [] : mainThread(st.thread)
   /* decisions the thread already asks in place stay out of the card above the composer */
   const inThread = conv ? new Set<string>() : threadDecisions(list)
@@ -306,7 +306,9 @@ export function ChatView({ conv }: { conv?: string } = {}) {
           {!conv && list.length > 0 && <div ref={top} className="-mb-4 flex min-h-5 justify-center type-footnote text-tertiary" data-chat-older={loading ? "loading" : more ? "more" : ended ? "start" : "none"}>
             {loading ? <span className="flex items-center gap-2"><Spinner className="size-3.5" />{t("pages:chat.loadingOlder")}</span> : more ? <button type="button" className="hover:text-foreground" onClick={() => { keep.current = anchorNow(); void loadOlder() }}>{t("pages:chat.older")}</button> : ended && <span>{t("pages:chat.start")}</span>}
           </div>}
-          {conv && im === null && <div className="py-16 text-center type-body text-muted-foreground" data-conv-missing>{t("pages:chat.missing")}</div>}
+          {conv && imLoading && <p role="status" className="flex items-center justify-center gap-2 py-3 type-callout text-muted-foreground" data-conv-loading><Spinner className="size-3.5" />{t("common:state.loading")}</p>}
+          {conv && imError && <div role="alert" className="flex flex-wrap items-center justify-center gap-2 py-3 type-callout text-destructive" data-conv-error><span>{t("pages:chat.loadFailed")}</span><Button size="sm" variant="outline" onClick={reloadIm} data-conv-retry>{t("common:action.retry")}</Button></div>}
+          {conv && !imLoading && !imError && im === null && <div className="py-16 text-center type-body text-muted-foreground" data-conv-missing>{t("pages:chat.missing")}</div>}
           {list.map((m, n) => {
             const key = m.clientId ?? m.id ?? m.k
             const prev = list[n - 1], day = m.created && (!prev?.created || new Date(prev.created).toDateString() !== new Date(m.created).toDateString())

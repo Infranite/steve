@@ -279,6 +279,8 @@ export default {
     noteAria: "组织备注",
   },
   owner: {
+    loadFailed: "负责人载入失败",
+    unavailable: "负责人信息暂不可用",
     undo: "撤销",
     undone: "已撤销",
     proposed: "{{name}}？",
