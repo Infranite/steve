@@ -1025,3 +1025,167 @@ async fn events_are_scoped_to_the_workspace() {
             .any(|x| matches!(x, steve_store::ChangeEvent::Flow { ws, .. } if ws == WS))
     );
 }
+
+#[tokio::test]
+async fn explicit_requester_reaches_item_without_changing_legacy_service_schedules() {
+    // The fixture has two members: personal execution is not a single-user shortcut.
+    let e = env();
+    for requester in [None, Some(ME)] {
+        let mut body = daily("item_auto");
+        if let Some(user) = requester {
+            body["requester"] = json!(user);
+        }
+        let s = create(&e, body).await;
+        assert_eq!(s["requester"], json!(requester));
+        let (run, go) = start_manual(&e.flow, WS, s["id"].as_str().unwrap()).unwrap();
+        assert!(go);
+        drive(&e.flow, &run).await.unwrap();
+        let row = e
+            .env
+            .store()
+            .reader(|c| runs::get(c, &run))
+            .unwrap()
+            .unwrap();
+        let item = row.work_item_id.unwrap();
+        let actual: Option<String> = e
+            .env
+            .store()
+            .reader(|c| {
+                Ok::<_, steve_store::StoreError>(c.query_row(
+                    "SELECT requested_by FROM items WHERE id = ?",
+                    [&item],
+                    |r| r.get(0),
+                )?)
+            })
+            .unwrap();
+        assert_eq!(actual.as_deref(), requester);
+    }
+}
+
+#[tokio::test]
+async fn requester_authorizes_only_self_and_only_self_can_edit_personal_schedule() {
+    use steve_modules::testkit::OTHER;
+    let e = env();
+    let mut body = daily("item");
+    body["requester"] = json!(OTHER);
+    let (st, _) = call(
+        &e.router(),
+        Some(&caller(WS, ME)),
+        "POST",
+        "/schedules",
+        Some(&body),
+    )
+    .await;
+    assert_eq!(st, 403);
+    body["requester"] = json!(ME);
+    let s = create(&e, body.clone()).await;
+    let path = format!("/schedules/{}", s["id"].as_str().unwrap());
+    for patch in [
+        json!({"what": "use someone else's access"}),
+        json!({"requester": null}),
+    ] {
+        let (st, _) = call(
+            &e.router(),
+            Some(&caller(WS, OTHER)),
+            "PATCH",
+            &path,
+            Some(&patch),
+        )
+        .await;
+        assert_eq!(st, 403);
+    }
+    body["mode"] = json!("report");
+    let (st, _) = call(
+        &e.router(),
+        Some(&caller(WS, ME)),
+        "POST",
+        "/schedules",
+        Some(&body),
+    )
+    .await;
+    assert_eq!(st, 400);
+    let (st, v) = call(
+        &e.router(),
+        Some(&caller(WS, ME)),
+        "PATCH",
+        &path,
+        Some(&json!({"what": "updated"})),
+    )
+    .await;
+    assert_eq!(st, 200);
+    assert_eq!(v["requester"], ME);
+    let (st, v) = call(
+        &e.router(),
+        Some(&caller(WS, ME)),
+        "PATCH",
+        &path,
+        Some(&json!({"requester": null})),
+    )
+    .await;
+    assert_eq!(st, 200);
+    assert!(v["requester"].is_null());
+}
+
+#[tokio::test]
+async fn removed_requester_and_old_graph_cannot_borrow_personal_execution() {
+    let e = env();
+    let s = create(&e, daily("item")).await;
+    let id = s["id"].as_str().unwrap();
+    let (old_run, _) = start_manual(&e.flow, WS, id).unwrap();
+    let (st, _) = call(
+        &e.router(),
+        Some(&caller(WS, ME)),
+        "PATCH",
+        &format!("/schedules/{id}"),
+        Some(&json!({"requester": ME})),
+    )
+    .await;
+    assert_eq!(st, 200);
+    let _ = drive(&e.flow, &old_run).await;
+    assert!(
+        e.core
+            .calls()
+            .iter()
+            .all(|c| !matches!(c, CoreCall::Create(_)))
+    );
+    let (run, go) = start_manual(&e.flow, WS, id).unwrap();
+    assert!(go);
+    e.env
+        .store()
+        .with_conn(|c| {
+            c.execute(
+                "DELETE FROM workspace_members WHERE workspace_id = ? AND user_id = ?",
+                params![WS, ME],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let _ = drive(&e.flow, &run).await;
+    assert!(
+        e.core
+            .calls()
+            .iter()
+            .all(|c| !matches!(c, CoreCall::Create(_)))
+    );
+}
+
+#[tokio::test]
+async fn bot_deletion_revokes_personal_schedule_instead_of_lending_access_to_heir() {
+    let e = env();
+    let mut body = daily("item");
+    body["bot"] = json!("ops");
+    body["requester"] = json!(ME);
+    let s = create(&e, body).await;
+    e.env
+        .store()
+        .transaction(|tx| steve_flow::on_bot_deleted(tx, WS, "ops", "steve", monday_8am()))
+        .unwrap();
+    let saved = e
+        .env
+        .store()
+        .reader(|c| steve_flow::schedules::own(c, WS, s["id"].as_str().unwrap()))
+        .unwrap();
+    assert!(!saved.enabled);
+    assert!(saved.spec.requester.is_none());
+    assert_eq!(saved.spec.bot, "steve");
+}

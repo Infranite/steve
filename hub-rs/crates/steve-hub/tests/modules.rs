@@ -827,8 +827,9 @@ async fn knowledge_note_is_found_over_http_and_mcp() {
     ] {
         assert!(list.contains(t), "{t} missing: {list}");
     }
-    let (_, discovered) = mcp(json!({"jsonrpc":"2.0", "id":10, "method":"tools/call", "params":{"name":"steve_tools_search", "arguments":{"resource":"memory"}}})).await;
     for t in ["steve_remember", "steve_memory_list", "steve_memory_tidy"] {
+        // Search a specific tool: the default first page may also contain digest memory tools.
+        let (_, discovered) = mcp(json!({"jsonrpc":"2.0", "id":10, "method":"tools/call", "params":{"name":"steve_tools_search", "arguments":{"query":t,"resource":"memory"}}})).await;
         assert!(discovered.contains(t), "{t} missing: {discovered}");
     }
     // the memory upkeep tools answer over the same endpoint

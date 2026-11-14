@@ -29,6 +29,10 @@ const READ_ONLY: &[&str] = &[
     "steve_knowledge_search",
     "steve_knowledge_read",
     steve_knowledge::steward::LIST,
+    steve_digest::tools::READ,
+    steve_digest::tools::REPORT,
+    steve_digest::tools::MATTERS,
+    steve_digest::tools::MATTER,
     "steve_contacts_find",
     "steve_contact_get",
     "steve_im_read",
@@ -129,9 +133,8 @@ impl ToolService {
         builtin_catalog()
     }
 
-    /// Resolve the current session's item actor under the same visibility rule as knowledge and
-    /// conversation reads. A connector never inherits a workspace owner's identity. Sessions with
-    /// no identified item actor cannot access personal connector accounts.
+    /// Use the same recorded session principal and live membership check as ordinary module tools.
+    /// Neither a later item requester edit nor an owner audit may lend personal connector access.
     async fn connector_caller(
         &self,
         s: &steve_store::Session,
@@ -144,18 +147,18 @@ impl ToolService {
                 .map_err(|e| e.to_string())?
                 .filter(|row| row.workspace_id == ws && row.status != "ended")
                 .ok_or_else(|| "Connector session no longer exists".to_string())?;
-            let item = current
-                .item_id
-                .ok_or_else(|| "Connector session has no item actor".to_string())?;
             store
                 .reader(|c| {
-                    let viewer = steve_knowledge::context::item_viewer(c, &ws, &item)?;
-                    if viewer.user.is_empty() {
-                        return Err(steve_modules::ApiError::Unauthenticated);
-                    }
+                    let (session_ws, principal) = super::principal::of_session(c, &current.id)?
+                        .filter(|(session_ws, _)| session_ws == &ws)
+                        .ok_or(steve_modules::ApiError::Unauthenticated)?;
+                    let principal = super::principal::resolve(c, &session_ws, principal.user())?;
+                    let user = principal
+                        .user()
+                        .ok_or(steve_modules::ApiError::Unauthenticated)?;
                     Ok(steve_modules::Caller {
-                        ws: viewer.ws,
-                        me: viewer.user,
+                        ws: session_ws,
+                        me: user.to_string(),
                     })
                 })
                 .map_err(|e: steve_modules::ApiError| e.to_string())
@@ -532,6 +535,50 @@ impl steve_modules::context::PromptContext for CatalogContext {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn digest_tools_use_existing_dispatch_and_discovery_not_a_larger_core() {
+        let entries = tool_registry::steve_entries(
+            steve_digest::tools::tools()
+                .into_iter()
+                .map(|t| steve_node_api::ToolDescriptor {
+                    name: t["name"].as_str().unwrap().into(),
+                    description: t["description"].as_str().unwrap().into(),
+                    input_schema: t["inputSchema"].clone(),
+                    read_only: READ_ONLY.contains(&t["name"].as_str().unwrap()),
+                    annotations: serde_json::Value::Null,
+                })
+                .collect(),
+        );
+        for e in &entries {
+            assert!(matches!(
+                mcp_extra::owner_of(&e.name),
+                Some(mcp_extra::Owner::Digest)
+            ));
+            assert!(e.resources.iter().any(|r| r == "digest"));
+            assert!(!steve_modules::caps::tools::CORE.contains(&e.name.as_str()));
+            assert_eq!(
+                e.read_only,
+                [
+                    steve_digest::tools::READ,
+                    steve_digest::tools::REPORT,
+                    steve_digest::tools::MATTERS,
+                    steve_digest::tools::MATTER
+                ]
+                .contains(&e.name.as_str())
+            );
+        }
+        let (found, _) = tool_registry::search(
+            &entries,
+            &[],
+            &tool_registry::Query {
+                text: "digest".into(),
+                limit: 20,
+                ..Default::default()
+            },
+        );
+        assert_eq!(found.len(), 8);
+    }
 
     #[test]
     fn a_result_over_the_cap_is_cut_and_says_so() {

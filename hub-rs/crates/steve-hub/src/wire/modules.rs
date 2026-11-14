@@ -50,7 +50,7 @@ impl steve_flow::Core for FlowCore {
                     opening: None,
                     files: vec![],
                     actor: Some("steve".into()),
-                    requester: None,
+                    requester: req.requester,
                 })
                 .map_err(|e| e.to_string())?;
             if req.accept_auto {
@@ -621,6 +621,7 @@ pub fn build(env: Env<'_>) -> Result<Built, BackendError> {
         .merge(crate::plugins::api::routes(plugins.clone(), conns.clone()))
         .merge(steve_knowledge::routes(kb.clone()))
         .merge(steve_digest::routes())
+        .merge(super::digest_bot::routes(flow.clone()))
         .merge(steve_modules::contacts::routes(ports))
         .merge(steve_modules::accounts::routes())
         .merge(steve_flow::routes(flow.clone()))
@@ -700,6 +701,7 @@ pub fn build(env: Env<'_>) -> Result<Built, BackendError> {
     let mut jobs: Vec<Job> = vec![
         Box::pin(super::outbox::run(dispatcher, store.clone(), flow.clone())),
         Box::pin(steve_flow::Scheduler::new(flow.clone()).run()),
+        Box::pin(super::digest_bot::run(modules.clone(), flow.clone())),
         Box::pin(steve_flow::Poller::new(flow.clone()).run()),
         Box::pin(steve_flow::retention::run(flow.clone())),
         Box::pin(steve_channels::messages::retention(modules.clone())),
@@ -749,7 +751,7 @@ pub fn build(env: Env<'_>) -> Result<Built, BackendError> {
         modules.clone(),
         kb.clone(),
     ));
-    // Intake only: phase D will consume the durable packets; no Bot starts here.
+    // Deterministic intake; the ordinary digest schedule consumes these packets through tools.
     drop(steve_digest::job::spawn_job(modules.clone()));
     // memories and Bot memories are re-indexed when the store says they changed
     let mut changes = bus.tap(&["mm", "bot"]);

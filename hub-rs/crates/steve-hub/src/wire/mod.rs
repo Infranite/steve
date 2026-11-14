@@ -11,6 +11,7 @@ pub mod bot_skills;
 pub mod chan;
 pub mod core;
 pub mod diagnostics;
+pub mod digest_bot;
 pub mod flow_cmd;
 pub mod git_push;
 pub mod host_node;

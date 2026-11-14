@@ -149,6 +149,8 @@ fn steve_meta(name: &str) -> (&'static [&'static str], bool) {
         "reply_source" | "im_read" => &["chat", "message"],
         "whois" | "person_holdings" => &["contact", "person"],
         "remember" | "memory_list" | "memory_tidy" => &["memory", "knowledge"],
+        n if n.starts_with("digest") => &["digest", "conversation", "matter", "memory", "todo"],
+        n if n.starts_with("matter") => &["digest", "matter", "conversation"],
         "steward_propose" => &["contact", "steward"],
         "tools_search" | "tool_call" => &["tool"],
         n if n.starts_with("item") => &["item"],

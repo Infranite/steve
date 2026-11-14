@@ -1,5 +1,6 @@
-//! The digest base (chat-knowledge phase B): what the digest Bot (phase D) and the output side
-//! (phase E) build on. Everything here is deterministic; no model is called.
+//! Conversation intake/storage and the tool contract for an ordinary digest Bot. Extraction and
+//! write validation are deterministic; the configured Bot judges meaning through its harness.
+//! No model is called by this crate, and output delivery remains separate.
 //!
 //! - [`conv`]: a conversation, source-neutral (`space:<id>` — a group, DM or topic; `mail_thread:<id>`;
 //!   connectors add more types), and the messages Steve stored for it, read the same way for every source.
@@ -20,13 +21,15 @@
 //!   per chunk.
 //! - [`matter`] (事), [`todo`] (我的待办), [`memindex`] (the conversation, people, matter and message range of a
 //!   memory), [`changes`] (every digest write, undoable).
-//! Phase D supplies the Bot and its MCP tools; this crate never starts a harness or calls a model.
+//! - [`bot`] and [`tools`]: ordinary Bot rules, leased chunk reads, validated writes and persisted reports.
+//!   The Hub binds its ordinary schedule; this crate never starts a harness or calls a model.
 //! - [`api`]: the routes of the conversation page, the knowledge page's matters and 待处理's 我的待办.
 
 steve_i18n::init!();
 
 pub mod alerts;
 pub mod api;
+pub mod bot;
 pub mod candidates;
 pub mod changes;
 pub mod chunk;
@@ -40,6 +43,7 @@ pub mod profile;
 pub mod queue;
 pub mod summary;
 pub mod todo;
+pub mod tools;
 pub mod window;
 
 pub use api::routes;

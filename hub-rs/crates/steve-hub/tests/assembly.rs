@@ -442,8 +442,8 @@ async fn feishu_self_wires_without_feishu_bot() {
     );
     let rt = w.lifecycle.as_ref().expect("a connection runtime");
     assert_eq!(rt.adapters(), ["ext_ws", "feishu_user"]);
-    // the base 14 (including library MCP idle cleanup) and the connection runtime
-    assert_eq!(w.jobs.len(), 15);
+    // the base 15 (including MCP idle cleanup and the digest queue) and connection runtime
+    assert_eq!(w.jobs.len(), 16);
     // without both, the rest still wires
     let h = home();
     let asm = Assembly::builtin()
@@ -534,8 +534,8 @@ async fn an_extension_runs_its_own_connection_hook() {
         steve_hub::wire::wire_assembly(&h.cfg, &Bus::new(), h.vars.clone(), &asm).expect("wire");
     let rt = w.lifecycle.as_ref().expect("a connection runtime");
     assert_eq!(rt.adapters(), ["github_pat"]);
-    // the base 14 (including library MCP idle cleanup) and the connection runtime
-    assert_eq!(w.jobs.len(), 15);
+    // the base 15 (including MCP idle cleanup and the digest queue) and connection runtime
+    assert_eq!(w.jobs.len(), 16);
 }
 
 #[tokio::test]
@@ -557,8 +557,8 @@ async fn an_assembly_registers_only_its_extensions() {
     );
     assert_eq!(channels.profile_adapter_ids(), ["ext_ws", "feishu_app"]);
     assert_eq!(w.tools.outbox.as_user_ids(), ["ext_ws"]);
-    // the built-in 16 (including library MCP idle cleanup) and the probe's
-    assert_eq!(w.jobs.len(), 17);
+    // the built-in 17 (including MCP idle cleanup and the digest queue) and the probe's
+    assert_eq!(w.jobs.len(), 18);
     // the device flow and the OAuth start of you on Feishu went with it; the bot's stayed, and
     // another extension's routes are under its own prefix
     let paths: BTreeSet<String> = [
@@ -591,8 +591,8 @@ async fn an_empty_assembly_still_wires_the_hub() {
     assert!(w.tools.mail.adapter_ids().is_empty());
     assert!(w.seams.flow.events.all().is_empty());
     // the built-in extensions' two (registrations resumed, the connection runtime) are gone;
-    // library MCP idle cleanup remains part of the base wiring.
-    assert_eq!(w.jobs.len(), 14);
+    // library MCP idle cleanup and the digest queue remain part of the base wiring.
+    assert_eq!(w.jobs.len(), 15);
     assert!(w.lifecycle.is_none());
 }
 

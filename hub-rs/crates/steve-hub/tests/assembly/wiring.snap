@@ -56,6 +56,7 @@ api GET /contacts
 api GET /contacts/x
 api GET /conversations
 api GET /conversations/x/messages
+api GET /digest/bot
 api GET /digest/changes
 api GET /digest/conversations/x
 api GET /digest/matters
@@ -282,6 +283,7 @@ api POST /yolo/resume
 api PUT /bots/x/capabilities/x/x
 api PUT /bots/x/tool-pins/x/x
 api PUT /connections/x/credential
+api PUT /digest/bot
 api PUT /flow-settings/allow-private
 api PUT /flows/x
 api PUT /kb/notes/x
@@ -302,7 +304,7 @@ decl feishu_app platform 1ms
 decl feishu_user platform 1ms
 event_source github_app
 event_source github_pat
-jobs 16
+jobs 17
 lifecycle ext_ws
 lifecycle feishu_app
 lifecycle feishu_user

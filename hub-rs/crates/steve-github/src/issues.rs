@@ -131,6 +131,7 @@ impl GitHub {
         let item = flow
             .core
             .create_item(ItemRequest {
+                requester: None,
                 ws: ws.clone(),
                 title: cut(i.title.trim(), TITLE_MAX),
                 // the issue is somebody else's text: the agent reads it as data

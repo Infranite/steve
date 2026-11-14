@@ -91,7 +91,7 @@ async fn registry_pins_and_dispatch_use_current_session_account_and_references()
             |r| r.get(0),
         )
         .unwrap();
-    e.sql("INSERT INTO items (id,workspace_id,no,title,status,stage,bot_id,created,updated) VALUES ('connector-item','default',9001,'connector fixture','active','working','steve',1,1)", &[]);
+    e.sql("INSERT INTO items (id,workspace_id,no,title,status,stage,bot_id,requested_by,created,updated) VALUES ('connector-item','default',9001,'connector fixture','active','working','steve',?1,1,1)", &[&me]);
     e.sql("INSERT INTO audit (workspace_id,ts,actor,action,target) VALUES ('default',1,?1,'item.create','connector-item')", &[&me]);
     let hash = hex::encode(<sha2::Sha256 as sha2::Digest>::digest(
         b"connector-session-token",
@@ -259,12 +259,58 @@ async fn registry_pins_and_dispatch_use_current_session_account_and_references()
             .0,
         200
     );
-    // In a shared workspace, the item's audited actor wins; never borrow the owner identity.
+    // The recorded requester wins over an owner audit; never borrow the owner identity.
     e.sql("INSERT INTO users (id,workspace_id,subject,name,role,created) VALUES ('connector-other','default','connector-other','Other','member',1)", &[]);
     e.sql("INSERT INTO workspace_members (workspace_id,user_id,role,created) VALUES ('default','connector-other','member',1)", &[]);
-    e.sql("UPDATE audit SET actor='connector-other' WHERE target='connector-item' AND action='item.create'", &[]);
+    e.sql(
+        "UPDATE items SET requested_by='connector-other' WHERE id='connector-item'",
+        &[],
+    );
     let hidden = answer(&call(&e, "steve_tools_search", json!({"source":"connector"})).await);
     assert!(hidden["tools"].as_array().unwrap().is_empty(), "{hidden}");
+    assert_eq!(
+        call(
+            &e,
+            "steve_tool_call",
+            json!({"name":search,"arguments":{"query":"Design"}})
+        )
+        .await["result"]["isError"],
+        true
+    );
+    // A Node-bound session keeps its own principal even if the item later names the owner.
+    e.sql(
+        "UPDATE items SET requested_by=?1 WHERE id='connector-item'",
+        &[&me],
+    );
+    for principal in ["connector-other", "svc:default"] {
+        e.sql("INSERT INTO runtime_sessions(session_id,node_id,workspace_ref,node_session_id,config_revision,phase,updated,principal) VALUES ('connector-session','node','{}','connector-session','r','ready',1,?1)", &[&principal]);
+        let hidden = answer(&call(&e, "steve_tools_search", json!({"source":"connector"})).await);
+        assert!(
+            hidden["tools"].as_array().unwrap().is_empty(),
+            "{principal}: {hidden}"
+        );
+        assert_eq!(
+            call(
+                &e,
+                "steve_tool_call",
+                json!({"name":search,"arguments":{"query":"Design"}})
+            )
+            .await["result"]["isError"],
+            true,
+            "{principal} must not borrow the item's new requester"
+        );
+        e.sql(
+            "DELETE FROM runtime_sessions WHERE session_id='connector-session'",
+            &[],
+        );
+    }
+    // Service work with an owner audit must not acquire the owner's connector either.
+    e.sql(
+        "UPDATE items SET requested_by=NULL WHERE id='connector-item'",
+        &[],
+    );
+    let hidden = answer(&call(&e, "steve_tools_search", json!({"source":"connector"})).await);
+    assert!(hidden["tools"].as_array().unwrap().is_empty());
     assert_eq!(
         call(
             &e,
@@ -280,6 +326,25 @@ async fn registry_pins_and_dispatch_use_current_session_account_and_references()
     );
     let hidden = answer(&call(&e, "steve_tools_search", json!({"source":"connector"})).await);
     assert!(hidden["tools"].as_array().unwrap().is_empty());
+    // Conversely, a recorded personal principal is usable only while still a member.
+    e.sql("INSERT INTO runtime_sessions(session_id,node_id,workspace_ref,node_session_id,config_revision,phase,updated,principal) VALUES ('connector-session','node','{}','connector-session','r','ready',1,?1)", &[&me]);
+    let visible = answer(&call(&e, "steve_tools_search", json!({"source":"connector"})).await);
+    assert_eq!(visible["tools"].as_array().unwrap().len(), 2);
+    e.sql(
+        "DELETE FROM workspace_members WHERE workspace_id='default' AND user_id=?1",
+        &[&me],
+    );
+    let hidden = answer(&call(&e, "steve_tools_search", json!({"source":"connector"})).await);
+    assert!(hidden["tools"].as_array().unwrap().is_empty());
+    assert_eq!(
+        call(
+            &e,
+            "steve_tool_call",
+            json!({"name":search,"arguments":{"query":"Design"}})
+        )
+        .await["result"]["isError"],
+        true
+    );
     assert_eq!(fake.calls("connector.call").len(), calls);
     assert!(fake.calls("messages.history").is_empty());
 }

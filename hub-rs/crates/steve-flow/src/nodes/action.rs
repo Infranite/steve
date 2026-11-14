@@ -93,6 +93,12 @@ async fn item_create(cx: &FlowCx, run: &RunRow, cfg: &Value) -> FlowResult<Actio
     let Some(s) = schedule_of(cx, run)? else {
         return Ok(fail("建事项的动作目前只用于定时任务"));
     };
+    // Runs pin their graph version. Never lend a newly configured requester's identity to
+    // an older goal; removing/changing authorization also invalidates waiting old runs.
+    let requester = cfg["requester"].as_str().map(str::to_string);
+    if requester != s.spec.requester {
+        return Ok(fail("Schedule requester changed; start a new run"));
+    }
     let tz = s.spec.zone();
     let at = run.at();
     let ws = run.workspace_id.clone();
@@ -111,7 +117,11 @@ async fn item_create(cx: &FlowCx, run: &RunRow, cfg: &Value) -> FlowResult<Actio
         .unwrap_or_default();
     let what = cfg["goal"].as_str().unwrap_or(&s.spec.what);
     let propose = cfg["mode"] == "propose";
+    // Recheck membership at execution, not just when the schedule was configured.
+    cx.store()
+        .reader(|c| schedules::check_refs(c, &ws, &s.spec))?;
     let req = ItemRequest {
+        requester,
         ws: ws.clone(),
         title: format!("{} · {}", s.name, schedules::local(at, tz, "%m-%d")),
         goal: format!("{what}\n\n（定时任务「{}」，{planned}{last}）", s.name),
@@ -649,6 +659,7 @@ pub async fn item_create_event(cx: &mut RunCx<'_>, cfg: &Value, input: &Value) -
         });
     let propose = cfg["mode"] == "propose";
     let req = ItemRequest {
+        requester: None,
         ws: ws.clone(),
         title,
         goal,
