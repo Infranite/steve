@@ -220,10 +220,13 @@ export class NotWired extends Error { constructor() { super(t("shell:http.unreac
 export class HubError extends Error { status: number; constructor(status: number, msg: string) { super(msg); this.status = status } }
 export const isNotWired = (e: unknown): e is NotWired => e instanceof NotWired
 
-export async function modReq<T>(method: string, path: string, body?: unknown, signal?: AbortSignal): Promise<T> {
+/** A resource that outlives a workspace/Hub switch can bind requests to the scope it was loaded in. */
+export type ModuleScope = { workspace: string; hub: string }
+export async function modReq<T>(method: string, path: string, body?: unknown, signal?: AbortSignal, scope?: ModuleScope): Promise<T> {
   let r: Response
   try {
-    r = await fetch(hubUrl("/api" + path), { method, headers: wsHeaders(body !== undefined ? { "content-type": "application/json" } : {}), body: body !== undefined ? JSON.stringify(body) : undefined, credentials: "include", cache: "no-store", signal: signal ?? (method === "GET" ? AbortSignal.timeout(30_000) : undefined) })
+    const headers = { ...wsHeaders(body !== undefined ? { "content-type": "application/json" } : {}), ...(scope ? { "x-steve-ws": scope.workspace } : {}) }
+    r = await fetch(scope ? scope.hub + "/api" + path : hubUrl("/api" + path), { method, headers, body: body !== undefined ? JSON.stringify(body) : undefined, credentials: "include", cache: "no-store", signal: signal ?? (method === "GET" ? AbortSignal.timeout(30_000) : undefined) })
   } catch { throw new NotWired() }
   const json = (r.headers.get("content-type") ?? "").includes("application/json")
   const j: any = json ? await r.json().catch(() => undefined) : undefined
