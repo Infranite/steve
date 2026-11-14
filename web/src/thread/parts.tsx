@@ -8,6 +8,10 @@ import { CornerDownRightIcon, FileTextIcon, LibraryIcon, RotateCcwIcon, SearchIc
 import { Button } from "@/components/ui/button"
 import { Spinner } from "@/components/ui/spinner"
 import { Trail, useTick, type StepState, type ToolStep, type TrailItem } from "@/components/work-trail"
+import { SteveModelControl } from "@/steve-model"
+import { api } from "@/api"
+import { newClientId } from "@/composer-draft"
+import { chatBusy, refresh } from "@/store"
 import { Markdown } from "@/components/markdown"
 import { Textarea } from "@/components/ui/textarea"
 import { clip as clipPlain } from "@/thread/topics"
@@ -131,10 +135,27 @@ export function AskChips({ m, conv }: { m: Msg; conv?: boolean }) {
 
 /** "（Hub 重启，没答完）": ask the question again (your own conversation only: an IM turn is asked in its chat) */
 export function Rerun({ m, conv }: { m: Msg; conv?: boolean }) {
-  const t = useT()
-  if (!m.rerun || conv) return null
-  const q = st.thread.find((x) => x.id === m.rerun)
-  return q?.t ? <div className="mt-3"><Button size="sm" variant="outline" className="rounded-full" onClick={() => void chatSend(q.t!)} data-rerun><RotateCcwIcon />{t("thread:rerun")}</Button></div> : null
+  const t = useT(), clientId = useRef(newClientId()), inFlight = useRef(false)
+  const [busy, setBusy] = useState(false), [error, setError] = useState("")
+  const failed = m.steps?.answer?.failed || m.steps?.research?.stopped === "failed"
+  if (conv || !m.rerun && !failed) return null
+  const q = threadMsg(m.rerun ?? m.origin ?? m.replyTo ?? "")
+  if (q?.k !== "me" || !q.t || m.item) return null
+  const retry = async () => {
+    if (inFlight.current || chatBusy()) throw new Error(t("pages:models.setup.busy"))
+    inFlight.current = true; setBusy(true); setError("")
+    try {
+      // Reuse one idempotency key after an ambiguous network failure. Address the original question
+      // explicitly: neither the composer's current quote/focus nor a draft may redirect this retry.
+      await api.say(q.t!, (q.files ?? []).map((f) => f.id), [], { reply_to: q.id, client_id: clientId.current })
+      await refresh().catch(() => {})
+    } catch (e) { const msg = e instanceof Error ? e.message : String(e); setError(msg); throw e }
+    finally { inFlight.current = false; setBusy(false) }
+  }
+  return <div className="mt-3 flex flex-col items-start gap-2" data-model-recovery>
+    <div className="flex flex-wrap items-center gap-2"><Button type="button" size="sm" variant="outline" className="rounded-full" disabled={busy || chatBusy()} onClick={() => void retry().catch(() => {})} data-rerun><RotateCcwIcon />{t("thread:rerun")}</Button><SteveModelControl retry={retry} /></div>
+    {error && <p role="alert" className="type-footnote text-destructive">{error}</p>}
+  </div>
 }
 
 /* ───────── queue · quote ───────── */

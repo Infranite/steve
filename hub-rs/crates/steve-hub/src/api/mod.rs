@@ -6,8 +6,8 @@ mod avatar;
 mod bots;
 pub mod dedupe;
 mod diagnostics;
-mod files;
 pub(crate) mod feed;
+mod files;
 mod items;
 mod misc;
 mod node_env;
@@ -680,6 +680,7 @@ pub fn router(st: AppState, modules: Router) -> Router {
             "/settings/models",
             get(misc::models_get).patch(misc::models_patch),
         )
+        .route("/settings/models/select", post(misc::models_select))
         .route("/settings", patch(misc::settings_patch))
         .route("/onboard/start", post(misc::onboard_start))
         .route("/onboard/skip", post(misc::onboard_skip))

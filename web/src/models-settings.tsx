@@ -18,7 +18,7 @@ import { Select } from "@/view-shared"
 import { Robot } from "@/robot"
 import { ModelPicker, harnessName } from "@/model-picker"
 import { HarnessMark } from "@/components/harness-mark"
-import { editBot } from "@/manage"
+import { SteveModelControl } from "@/steve-model"
 import { reducedMotion } from "@/lib/motion"
 
 /* the label and description are read when the settings list renders, so they follow the UI language */
@@ -108,7 +108,7 @@ export function ModelsSettingsPane() {
               <ChoiceLine c={{ ...steveChoice, effort: null }} wrap className="type-body" />
               <p className="mt-0.5 type-footnote text-muted-foreground" data-steve-effort>{t("pages:models.effortLine", { effort: effortName(s.effort) })}{s.model_note && ` · ${s.model_note}`}{s.models.length > 1 && ` · ${t("pages:models.fallbackHint")}`}</p>
             </div>
-            <Button size="sm" variant="outline" className="shrink-0" onClick={() => editBot(s.bot_id ?? "steve")} data-edit-steve>{t("pages:models.change")}</Button>
+            <SteveModelControl label={t("pages:models.change")} />
           </div>
           {s.note && <Notice tone="attention" role="note" className="py-2.5">{s.note}</Notice>}
         </Card>

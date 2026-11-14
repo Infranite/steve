@@ -444,6 +444,46 @@ async fn model_settings() {
     );
 }
 
+/// A provider outage cannot prevent saving a different default; no harness session is started.
+#[tokio::test(flavor = "multi_thread")]
+async fn select_default_model_without_inference() {
+    let hub = start().await;
+    let c = Client::login(&hub).await;
+    let (_, before) = c.call("GET", "/api/settings/models", None, None).await;
+    let choice = json!({"harness": "codex", "model": "gpt-test", "expected_revision": before["bot_revision"], "follow_purposes": true});
+    let (code, v) = c
+        .call(
+            "POST",
+            "/api/settings/models/select",
+            Some(choice.clone()),
+            None,
+        )
+        .await;
+    assert_eq!(code, 200, "{v}");
+    assert_eq!(v["steve"]["harness"], "codex");
+    assert_eq!(v["steve"]["model"], "gpt-test");
+    for p in v["purposes"].as_array().unwrap() {
+        assert_eq!(p["follows"], true);
+        assert_eq!(p["effective"]["harness"], "codex");
+        assert_eq!(p["effective"]["models"][0], "gpt-test");
+    }
+    assert_eq!(
+        c.call("POST", "/api/settings/models/select", Some(choice), None)
+            .await
+            .0,
+        409
+    );
+    let bad = json!({"harness":"unknown", "model": "bad model", "expected_revision":v["bot_revision"], "follow_purposes": true});
+    assert_eq!(
+        c.call("POST", "/api/settings/models/select", Some(bad), None)
+            .await
+            .0,
+        400
+    );
+    let (_, after) = c.call("GET", "/api/settings/models", None, None).await;
+    assert_eq!(after["steve"], v["steve"]);
+}
+
 /// `GET /api/system/models`: what each harness adapter offers (with the Node off: the list its
 /// manifest declares), never anything of the harness's own settings (no key helper runs, no key is
 /// read). An adapter the Hub does not have is refused.

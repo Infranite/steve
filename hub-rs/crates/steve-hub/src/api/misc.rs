@@ -929,6 +929,19 @@ pub async fn models_patch(
     ok(st.domain.models_view(&c.ws).await?)
 }
 
+/// Save a default without needing a working model. Steve is shared across workspaces, so only
+/// the instance owner can make this change; purpose overrides reset only in the current workspace.
+pub async fn models_select(
+    State(st): State<AppState>,
+    Extension(c): Extension<Ctx>,
+    b: Bytes,
+) -> ApiResult {
+    owner_or(&c, || steve_i18n::t!("hub.onboard.owner_only"))?;
+    let choice: steve_core::models::SteveSelection = serde_json::from_value(body(&b)?)
+        .map_err(|_| ApiError::bad_request(steve_i18n::t!("hub.models.invalid_selection")))?;
+    ok(st.domain.models_select(&c.ws, &choice, &c.me).await?)
+}
+
 /// `POST /api/onboard/start`: Steve opens the first meeting in the main conversation (the tour's
 /// last step, and "meet again" in the settings). Answers `{message}`, the welcome; one that is on
 /// already is left alone. The instance's owner only: the meeting acts on this machine.

@@ -559,5 +559,8 @@
   "core.now.closed_waived": "Done (no review needed)",
   "core.now.closed_auto": "Accepted automatically",
   "core.now.closed_accepted": "Accepted",
-  "core.now.closed_failed": "Failed: %{why}"
+  "core.now.closed_failed": "Failed: %{why}",
+  "core.models.selection.invalid": "Choose an installed harness that supports Steve’s read-only judgments and a valid model ID.",
+  "core.models.selection.forbidden": "Steve does not belong to this workspace.",
+  "core.models.selection.changed": "Steve’s model was changed elsewhere. Reload the choices and try again."
 }

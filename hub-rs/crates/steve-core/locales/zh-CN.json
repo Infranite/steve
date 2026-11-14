@@ -559,5 +559,8 @@
   "core.now.closed_waived": "已完成（免确认）",
   "core.now.closed_auto": "已自动验收",
   "core.now.closed_accepted": "已验收",
-  "core.now.closed_failed": "失败：%{why}"
+  "core.now.closed_failed": "失败：%{why}",
+  "core.models.selection.invalid": "请选择已安装、支持 Steve 只读判断的 harness 和有效的模型 ID。",
+  "core.models.selection.forbidden": "Steve 不在此工作区中。",
+  "core.models.selection.changed": "Steve 的模型已在别处修改，请重新加载后再选择。"
 }

@@ -1056,6 +1056,16 @@ pub trait Domain: Send + Sync + 'static {
     }
 
     // ── first meeting ──
+    /// Explicit model choice from setup or chat; independent of model availability.
+    async fn models_select(
+        &self,
+        ws: &str,
+        choice: &steve_core::models::SteveSelection,
+        actor: &str,
+    ) -> BResult<Value> {
+        todo_backend!("models_select")
+    }
+
     /// Begins the first meeting (`steve_core::thread::onboard`): the id of its welcome message.
     async fn onboard_start(&self, ws: &str, actor: &str) -> BResult<String> {
         todo_backend!("onboard_start")

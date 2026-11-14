@@ -2018,6 +2018,20 @@ impl Domain for CoreDomain {
         );
         blocking(move || Ok(c.models().write(&ws, &values, &actor, "settings.models")?)).await
     }
+    async fn models_select(
+        &self,
+        ws: &str,
+        choice: &steve_core::models::SteveSelection,
+        actor: &str,
+    ) -> BResult<Value> {
+        let (c, ws, choice, actor) = (
+            self.core.clone(),
+            ws.to_string(),
+            choice.clone(),
+            actor.to_string(),
+        );
+        blocking(move || c.models().select_steve(&ws, &choice, &actor)).await
+    }
     async fn onboard_start(&self, ws: &str, actor: &str) -> BResult<String> {
         let (c, ws, actor) = (self.core.clone(), ws.to_string(), actor.to_string());
         blocking(move || c.onboard_start(&ws, &actor)).await

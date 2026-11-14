@@ -284,6 +284,17 @@ impl Choice {
     }
 }
 
+/// A human's explicit default choice; saving it never calls a model or probes a provider.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SteveSelection {
+    pub harness: String,
+    pub model: Option<String>,
+    pub expected_revision: i64,
+    /// Clear this workspace's purpose overrides so they also stop using an exhausted provider.
+    pub follow_purposes: bool,
+}
+
 /// What the environment says (`STEVE_MODELS_*`, `STEVE_DEFAULT_MODEL_*`).
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Defaults {
@@ -784,6 +795,7 @@ impl Models {
                 json!({
                     "id": h.id, "name": h.name, "builtin": h.builtin, "ready": h.ready,
                     "modes": h.modes,
+                    "judgments": h.offers_mode(steve_node_api::PermissionMode::Plan),
                     "efforts": efforts_shown(&h.efforts),
                     "default_model": h.default_model,
                     "default_models": self.defaults.harness_list(Some(h)),
@@ -792,6 +804,7 @@ impl Models {
             .collect();
         json!({
             "steve": st,
+            "bot_revision": self.store.bots().main().ok().flatten().map(|b| b.revision),
             "purposes": purposes,
             "agents": agents,
             "harnesses": harnesses,
@@ -808,6 +821,61 @@ impl Models {
                 (k.clone(), v.unwrap_or(Value::Null))
             })
             .collect()
+    }
+
+    /// Switch Steve and (when requested) the current workspace's judgments together. Re-entrant
+    /// repository calls share the transaction: readers and events never see a half-applied choice.
+    /// Unknown quota is deliberately not treated as a successful provider health check.
+    pub fn select_steve(
+        &self,
+        ws: &str,
+        choice: &SteveSelection,
+        actor: &str,
+    ) -> crate::Result<Value> {
+        use crate::CoreError;
+        let invalid = || CoreError::Status(400, steve_i18n::t!("core.models.selection.invalid"));
+        let target = self.harness(&choice.harness).ok_or_else(invalid)?;
+        if target.ready == Some(false)
+            || !target.offers_mode(steve_node_api::PermissionMode::Plan)
+            || choice.model.as_deref().is_some_and(|m| !valid_model(m))
+        {
+            return Err(invalid());
+        }
+        self.store.atomic(|| {
+            let bot = self.store.bots().main()?.ok_or_else(invalid)?;
+            if !self.store.bots().in_workspace(&bot.id, ws)? {
+                return Err(CoreError::Status(
+                    403,
+                    steve_i18n::t!("core.models.selection.forbidden"),
+                ));
+            }
+            if bot.revision != choice.expected_revision {
+                return Err(CoreError::Status(
+                    409,
+                    steve_i18n::t!("core.models.selection.changed"),
+                ));
+            }
+            let patch = steve_store::BotPatch {
+                harness: Some(choice.harness.clone()),
+                model: Some(choice.model.clone()),
+                // A model change must not carry an incompatible reasoning level across adapters.
+                reasoning_effort: Some(bot.reasoning_effort.filter(|e| target.takes_effort(e))),
+                ..Default::default()
+            };
+            self.store.bots().patch(&bot.id, &patch, actor)?;
+            let mut values = Map::new();
+            if choice.follow_purposes {
+                for p in PURPOSES {
+                    values.insert(key(p.key), Value::Null);
+                }
+                // A later discovery must not silently put the initial fast-model overrides back.
+                values.insert(MIGRATED_KEY.into(), json!(2));
+                values.insert(FAST_KEY.into(), json!(1));
+            }
+            values.insert(agent_key(&choice.harness), json!(choice.model));
+            self.write(ws, &values, actor, "settings.models.select")?;
+            Ok(self.view(ws))
+        })
     }
 
     /// Validates `patch` ([`validate`]), stores it (a settings revision) and audits it. Returns the

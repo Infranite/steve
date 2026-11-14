@@ -91,7 +91,7 @@ Two things stay shared. The owner's main conversation works in the OS user's hom
 
 ## The first meeting
 
-The first time the instance's owner opens an empty Hub in the browser, a short tour ends by offering a first meeting. Accepting it makes Steve open a conversation in its own main conversation; declining it, or skipping the tour, is remembered by the Hub for every browser. Other users only see the tour.
+The first time the instance's owner opens an empty Hub in the browser, a short tour asks them to choose a harness and model before offering a first meeting. No provider is inferred as the owner's preference. The model choice is saved without inference, so this step works even when the previous provider is out of quota; the tour may also be skipped. Accepting it makes Steve open a conversation in its own main conversation; declining it, or skipping the tour, is remembered by the Hub for every browser. Other users only see the tour.
 
 In the meeting Steve asks what to call you and what you use it for, and then, one at a time and only after you agree in the conversation:
 
@@ -103,6 +103,8 @@ Every one of these writes goes through the same validation, audit log and settin
 
 The meeting ends when Steve finishes it, when you say you want to skip it or press **Skip introductions** under its welcome, or by itself after twelve of your messages. Until then, what you say in the main conversation goes straight to Steve without the routing step, except a message that names a Bot or an item. After it, changes go through the usual pages and change cards; its tools no longer exist. Settings · General · Onboarding starts the tour, and with it a new meeting, again.
 
+The model shortcut is also `POST /api/settings/models/select` with the owner’s access token: `{harness, model, expected_revision, follow_purposes}`. Read `bot_revision` from `GET /api/settings/models` for `expected_revision`; `model: null` explicitly selects the harness default, and `follow_purposes: true` clears the current workspace’s purpose overrides. A stale revision returns 409 without writing. The endpoint does not make a model request.
+
 A Hub driven without the web client can use `POST /api/onboard/start` and `POST /api/onboard/skip` (the owner's access token) for the same two actions.
 
 ### The activity log
@@ -112,6 +114,8 @@ Settings · Activity log (the instance's owner only) shows the workspace's audit
 ### Models without the meeting
 
 Steve names no model by itself: every judgment runs on the model of Steve's own Bot, which is the harness's default and usually its strongest. For the frequent, small judgments (routing a message, titles, the disclosure check, a flow's Bot nodes) that is slow, so they get one default whether or not the meeting happened: once the harness Steve runs on has reported its models, the Hub puts those four purposes on that harness's quick model, one time per workspace and only where nothing is set. Which model counts as quick is a property of the harness adapter (`fast_models`: words that name them, best first; the built-in adapters declare theirs, and an adapter in the harness manifest may declare its own). Of the models the harness offers, the one picked has such a word as a whole word of its name; when several do, the one on the same route as the harness's default model (`route/name`), then the newest by the numbers in its name. A harness that offers no such model leaves everything on Steve's model.
+
+The main conversation also has a model control above its composer, and failed answers offer a model change followed by an explicit retry. The choice changes Steve's default across workspaces and this workspace's new-session default on that harness. By default, it clears this workspace's per-purpose overrides (including the initial fast-model choices), so routing does not continue to use an exhausted provider after the switch. Clear the checkbox to keep those overrides; the panel names the affected purposes. Existing Bots and running turns keep their configuration. These writes are atomic, audited and revision-checked; a stale panel must reload before saving. Only the instance owner can use this shortcut. Installed/discovered models are not proof of sign-in or remaining quota, and Steve never moves to another provider without the user's choice. Retry resends the original message and attachments; completed operations can run again. Native-only adapters without a read-only mode are not eligible for Steve's judgments, but remain available for agent sessions with their declared permissions.
 
 The result is an ordinary override under Settings · Models: change it or put the purpose back on Steve there, and it stays that way. `STEVE_MODELS_FAST` (and `STEVE_MODELS_CHECK` for the disclosure check), when set, name these models instead.
 

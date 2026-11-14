@@ -108,6 +108,7 @@ Each message is sorted into one of nine routes: answer, research, item, suggest,
 - **Inline research** answers questions about your code and documents in the chat, citing `path:line`. Read-only is enforced three times: a tool allowlist (Read, Grep, Glob), a Hub guard that stops the run at the first non-read tool, and a read-only OS sandbox (`sandbox-exec` on macOS, bubblewrap on Linux). The instance owner's own main conversation is the exception: asked to look at, tidy, install or fix something on the Hub's machine, Steve does it with that OS user's access, while its own keys, database and programs stay out of reach.
 - An answer can end with *"Make it an item: …"*. Click it or just reply "do it".
 - Each item has one card in the chat. It updates in place (running, waiting, delivered, released) and only moves to the bottom when it needs you.
+- Choose a harness and model before the first meeting, or skip and configure it later. The main conversation keeps a model shortcut available when a provider is out of quota; failed answers offer a model change and explicit retry. Saving the choice needs no inference.
 - You can configure Steve by talking to it: *"Use Opus for the frontend bot, and switch on YOLO except for billing-api."* It drafts field-level changes to bots, projects, models, tags, flows and contacts. You apply them with one click and can undo for 24 hours.
 - Replies can render A2UI surfaces: forms, choices, tabs and charts. Nothing the agent writes runs as code, and a form is submitted once, even across tabs and reloads.
 

@@ -1,6 +1,7 @@
 import { createRoot } from "react-dom/client"
 import "../../src/index.css"
 import { api } from "../../src/api"
+import { modelSetupApi } from "../../src/steve-model"
 import { Onboarding } from "../../src/onboarding"
 import { st, useStore, meeting } from "../../src/store"
 
@@ -15,6 +16,13 @@ st.owner = !q.includes("member")
 st.workspace = { id: "w1", name: "个人", description: "", item_prefix: "ST", sort: 0, created: now }
 const rt = (id: string, name: string, ok: boolean, models: string[], extra = {}) => ({ id, name, ok, version: "", path: "", models, note: "通过 ACP 适配器运行", ...extra })
 st.runtimes = q.includes("bare") ? [] : [rt("claude-code", "Claude Code", true, ["opus", "sonnet", "haiku"]), rt("codex", "Codex", true, []), rt("gemini", "Gemini CLI", false, [], { error: "没有找到 gemini 命令", install_hint: "@google/gemini-cli" })]
+let view = {
+  steve: { harness: "claude-code", model: null as string | null, models: [] as string[] }, bot_revision: 1,
+  harnesses: st.runtimes.map((r) => ({ id: r.id, name: r.name, ready: r.ok, judgments: true })),
+  purposes: [{ key: "route", label: "分流", follows: false, effective: { harness: "claude-code", models: ["haiku"] } }],
+}
+modelSetupApi.get = async () => structuredClone(view)
+modelSetupApi.select = async (c) => { calls.push("model:" + c.harness); view = { ...view, bot_revision: view.bot_revision + 1, steve: { harness: c.harness, model: c.model, models: c.model ? [c.model] : [] } }; return structuredClone(view) }
 const proj = (id: string, name: string, path: string, archived = false) => ({ id, workspace_id: "w1", name, description: "", device_id: "hub", path, kind: "git" as const, worktree: true, default_bot: null, release: null, archived, created: now, updated: now })
 st.projects = q.includes("bare") ? [] : [proj("p1", "Steve", "/home/example/Agents/clients/a-rather-long-client-folder/steve-dev-loop"), proj("p2", "website", "~/Sites/website"), proj("p3", "notes", "~/notes"), proj("p4", "infra", "~/infra"), proj("p5", "scratch", "~/scratch"), proj("p6", "old", "~/old", true)]
 st.onboard = 0

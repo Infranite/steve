@@ -441,3 +441,84 @@ async fn the_adapter_gets_the_images_of_a_chat_answer() {
             "data": base64::engine::general_purpose::STANDARD.encode(b"PNGDATA")})
     );
 }
+
+/// Model recovery must work while the old provider is down, and remove the fast-purpose overrides
+/// which would otherwise keep routing on that provider after switching the main Bot.
+#[tokio::test]
+async fn explicit_model_selection_switches_judgments_without_a_model_call() {
+    let k = Kit::new();
+    let models = k.core.models();
+    let before = models.view(WS);
+    let choice = crate::models::SteveSelection {
+        harness: "codex".into(),
+        model: Some("gpt-test".into()),
+        expected_revision: before["bot_revision"].as_i64().unwrap(),
+        follow_purposes: true,
+    };
+    let after = models.select_steve(WS, &choice, "me").unwrap();
+    assert_eq!(after["steve"]["harness"], "codex");
+    for p in after["purposes"].as_array().unwrap() {
+        assert_eq!(p["follows"], true);
+        assert_eq!(p["effective"]["harness"], "codex");
+        assert_eq!(p["effective"]["models"][0], "gpt-test");
+    }
+    assert!(!models.migrate(WS).unwrap());
+    assert!(models.custom(WS, "route").is_none());
+    // A stale tab cannot overwrite the newer preference.
+    assert!(matches!(
+        models.select_steve(WS, &choice, "me"),
+        Err(crate::CoreError::Status(409, _))
+    ));
+}
+
+#[tokio::test]
+async fn explicit_model_selection_can_keep_separate_purposes() {
+    let k = Kit::new();
+    let models = k.core.models();
+    let route = models.custom(WS, "route");
+    let choice = crate::models::SteveSelection {
+        harness: "codex".into(),
+        model: None,
+        expected_revision: models.view(WS)["bot_revision"].as_i64().unwrap(),
+        follow_purposes: false,
+    };
+    models.select_steve(WS, &choice, "me").unwrap();
+    assert_eq!(models.custom(WS, "route"), route);
+}
+
+#[tokio::test]
+async fn failed_model_selection_rolls_back_the_bot_and_settings() {
+    let k = Kit::new();
+    let models = k.core.models();
+    let before = models.view(WS);
+    k.db().store().transaction::<_, steve_store::StoreError>(|tx| {
+        tx.execute_batch("CREATE TRIGGER reject_model_settings BEFORE INSERT ON settings BEGIN SELECT RAISE(ABORT, 'test settings failure'); END;")?;
+        Ok(())
+    }).unwrap();
+    let choice = crate::models::SteveSelection {
+        harness: "codex".into(),
+        model: Some("gpt-test".into()),
+        expected_revision: before["bot_revision"].as_i64().unwrap(),
+        follow_purposes: true,
+    };
+    assert!(models.select_steve(WS, &choice, "me").is_err());
+    let after = models.view(WS);
+    assert_eq!(after["steve"], before["steve"]);
+    assert_eq!(after["bot_revision"], before["bot_revision"]);
+    assert_eq!(after["purposes"], before["purposes"]);
+}
+
+#[tokio::test]
+async fn model_selection_rejects_unknown_or_native_only_harnesses_before_writing() {
+    let k = Kit::new();
+    let models = k.core.models();
+    let before = models.view(WS);
+    for harness in ["does-not-exist", "pi"] {
+        let choice = crate::models::SteveSelection {
+            harness: harness.into(), model: Some("a-model".into()),
+            expected_revision: before["bot_revision"].as_i64().unwrap(), follow_purposes: true,
+        };
+        assert!(matches!(models.select_steve(WS, &choice, "me"), Err(crate::CoreError::Status(400, _))));
+        assert_eq!(models.view(WS)["steve"], before["steve"]);
+    }
+}

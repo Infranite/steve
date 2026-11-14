@@ -16,6 +16,7 @@ import { ProposalCard } from "@/config-ui"
 import { Cites, linkCites } from "@/knowledge/parts"
 import { Robot } from "@/robot"
 import { Onboarding } from "@/onboarding"
+import { SteveModelControl } from "@/steve-model"
 import { chatBusy, chatSend, endMeeting, focusItem, meeting, isPromoting, isThinking, makeItem, pendingCards, quoteMsg, reroute, st, stopReply, tm, toast, type Item, type Msg } from "@/store"
 import { ChatQueue } from "@/queue"
 import { AwaySummary, type AwayItem } from "@/components/affect/away-summary"
@@ -354,6 +355,7 @@ export function ChatView({ conv }: { conv?: string } = {}) {
         {conv ? im && <ImReadOnly b={im.badge} /> : <>
         <ComposerDecisions skip={inThread} />
         <ComposerBars />
+        <div className="flex min-w-0 justify-start px-1" data-chat-model><SteveModelControl /></div>
         <Composer draftKey={draftKey(st.workspace?.id, "chat")} handle={composer} queue={<ChatQueue composer={composer} />} placeholder={focusItem() ? t("pages:chat.placeholderFocus", { item: focusItem() }) : chatBusy() ? t("pages:chat.placeholderBusy", { name: S?.n ?? "Steve" }) : t("pages:chat.placeholder", { name: S?.n ?? "Steve" })} testId="chat" onSend={(t, files, refs, mentions, clientId) => { bottom(); return chatSend(t, files, refs, mentions, clientId) }} busy={working} onStop={stopReply}
           onCommand={(c) => { if (c === "digest") { void chatSend("/汇报"); return } openSheet(c) }} />
         </>}
