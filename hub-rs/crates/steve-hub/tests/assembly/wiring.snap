@@ -56,6 +56,7 @@ api GET /contacts
 api GET /contacts/x
 api GET /conversations
 api GET /conversations/x/messages
+api GET /deliveries/x
 api GET /digest/bot
 api GET /digest/changes
 api GET /digest/conversations/x
@@ -102,6 +103,8 @@ api GET /mail/threads
 api GET /mail/threads/x
 api GET /match-rules
 api GET /me/contact
+api GET /me/notification-policy
+api GET /me/notifications
 api GET /mention-options
 api GET /merges
 api GET /orgs
@@ -173,6 +176,7 @@ api PATCH /mail/threads/x
 api PATCH /match-rules/x
 api PATCH /mems/x
 api PATCH /orgs/x
+api PATCH /people/x/output-preference
 api PATCH /personas/x
 api PATCH /schedules/x
 api PATCH /sources/x
@@ -204,6 +208,7 @@ api POST /contacts
 api POST /contacts/x/confirm
 api POST /contacts/x/jobs
 api POST /contacts/x/merge
+api POST /deliveries
 api POST /digest/changes/x/undo
 api POST /digest/conversations/x/cut
 api POST /digest/matters
@@ -246,6 +251,7 @@ api POST /mail/threads/x/draft
 api POST /mail/threads/x/read
 api POST /mail/threads/x/to-item
 api POST /mail/threads/x/to-knowledge
+api POST /me/notifications/x/seen
 api POST /merges/x/split
 api POST /orgs
 api POST /parties/x/attrs
@@ -289,6 +295,7 @@ api PUT /flows/x
 api PUT /kb/notes/x
 api PUT /kb/steward
 api PUT /mail/drafts/x
+api PUT /me/notification-policy
 api PUT /stats/prices
 api PUT /stats/tz
 api PUT /stewards/x/x
@@ -304,7 +311,7 @@ decl feishu_app platform 1ms
 decl feishu_user platform 1ms
 event_source github_app
 event_source github_pat
-jobs 17
+jobs 18
 lifecycle ext_ws
 lifecycle feishu_app
 lifecycle feishu_user

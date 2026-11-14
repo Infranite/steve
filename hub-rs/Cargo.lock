@@ -5224,6 +5224,7 @@ dependencies = [
  "steve-modules",
  "steve-node-wire",
  "steve-store",
+ "steve-work-api",
  "subtle",
  "tempfile",
  "thiserror 2.0.21",

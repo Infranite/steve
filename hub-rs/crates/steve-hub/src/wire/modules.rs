@@ -672,6 +672,7 @@ pub fn build(env: Env<'_>) -> Result<Built, BackendError> {
     let mut module_consumers: Vec<Arc<dyn steve_store::outbox::Consumer>> = vec![
         steve_mail::outbox::MailEventsOut::new(mail.clone()),
         gh.outbox_consumer(),
+        Arc::new(steve_channels::notifications::Intake),
     ];
     let mirror = steve_knowledge::openviking::Mirror::ID;
     let mirrored_before = store
@@ -700,6 +701,10 @@ pub fn build(env: Env<'_>) -> Result<Built, BackendError> {
     }
     let mut jobs: Vec<Job> = vec![
         Box::pin(super::outbox::run(dispatcher, store.clone(), flow.clone())),
+        Box::pin(steve_channels::notifications::run(
+            channels.clone(),
+            outbox.clone(),
+        )),
         Box::pin(steve_flow::Scheduler::new(flow.clone()).run()),
         Box::pin(super::digest_bot::run(modules.clone(), flow.clone())),
         Box::pin(steve_flow::Poller::new(flow.clone()).run()),

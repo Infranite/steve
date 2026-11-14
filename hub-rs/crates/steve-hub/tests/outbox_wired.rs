@@ -22,6 +22,9 @@ struct Env {
     http: reqwest::Client,
     cookie: String,
     db: std::path::PathBuf,
+    channels: steve_channels::Channels,
+    outbox: Arc<steve_channels::Outbox>,
+    fake: Arc<steve_channels::fake::channel::FakeChannel>,
 }
 
 impl Env {
@@ -73,6 +76,29 @@ async fn until(secs: u64, f: impl Fn() -> bool) -> bool {
     false
 }
 
+struct NotificationFake(Arc<steve_channels::fake::channel::FakeChannel>);
+impl steve_hub::extension::Extension for NotificationFake {
+    fn id(&self) -> &str {
+        "notification.fake"
+    }
+    fn declare(
+        &self,
+        d: &mut steve_hub::extension::Declare<'_>,
+    ) -> Result<(), steve_hub::extension::ExtensionError> {
+        use steve_channels::ChannelAdapter;
+        use steve_channels::ext::{ChannelDecl, ChannelSide};
+        d.channel(
+            ChannelSide::new(
+                ChannelDecl::new(steve_channels::fake::channel::FakeChannel::ID)
+                    .handle_system("slack")
+                    .features(self.0.features()),
+                self.0.clone(),
+            )
+            .adapter(self.0.clone()),
+        )
+    }
+}
+
 async fn start() -> Env {
     steve_modules::net::forbid_in_this_process();
     let home = tempfile::tempdir().expect("tmp");
@@ -112,7 +138,12 @@ async fn start() -> Env {
     }
     let db = cfg.data_dir.join("steve.sqlite3");
     let bus = Bus::new();
-    let w = steve_hub::wire::wire_with(&cfg, &bus, Arc::new(get.clone())).expect("wire");
+    let fake = Arc::new(steve_channels::fake::channel::FakeChannel::new());
+    let assembly = steve_hub::Assembly::builtin().with(NotificationFake(fake.clone()));
+    let w =
+        steve_hub::wire::wire_assembly(&cfg, &bus, Arc::new(get.clone()), &assembly).expect("wire");
+    let channels = w.seams.channels.clone();
+    let outbox = w.tools.outbox.clone();
     let domain = w.domain.clone();
     let store = w.modules.as_ref().unwrap().store.clone();
     let st = AppState::new(cfg.clone(), w.backend, w.domain, bus)
@@ -150,6 +181,9 @@ async fn start() -> Env {
         .expect("session cookie");
     Env {
         domain,
+        channels,
+        outbox,
+        fake,
         store,
         _home: home,
         base,
@@ -162,13 +196,18 @@ async fn start() -> Env {
 #[tokio::test(flavor = "multi_thread")]
 async fn finishing_through_the_api_runs_an_item_flow_once_through_the_outbox() {
     let e = start().await;
-    // both consumers were registered while wiring, from the beginning of the topic
+    // all three consumers were registered while wiring, from the beginning of the topic
     assert_eq!(
         e.one(
             "SELECT count(*) FROM outbox_consumers WHERE topic = 'work.item.done' AND since_seq = 0"
         ),
-        2
+        3
     );
+    // An explicit personal log policy exercises real completion -> wired dispatcher -> inbox.
+    let (s,v)=e.call("PUT","/api/me/notification-policy",Some(json!({
+        "enabled":true,"mode":"log","party_id":null,"space_id":null,"timezone":"UTC","quiet_start":null,"quiet_end":null
+    }))).await;
+    assert_eq!(s, 200, "{v}");
     let (s, v) = e
         .call(
             "POST",
@@ -218,8 +257,8 @@ async fn finishing_through_the_api_runs_an_item_flow_once_through_the_outbox() {
         1
     );
     assert!(
-        until(10, || e.one("SELECT count(*) FROM outbox_receipts") == 2).await,
-        "both consumers received it"
+        until(10, || e.one("SELECT count(*) FROM outbox_receipts") == 3).await,
+        "all three consumers received it"
     );
     assert!(
         until(10, || e
@@ -228,6 +267,21 @@ async fn finishing_through_the_api_runs_an_item_flow_once_through_the_outbox() {
         .await,
         "the flow ran"
     );
+    assert!(
+        until(10, || e.one("SELECT count(*) FROM personal_notifications")
+            == 1)
+        .await
+    );
+    let (s, inbox) = e.call("GET", "/api/me/notifications", None).await;
+    assert_eq!(s, 200, "{inbox}");
+    assert_eq!(inbox[0]["mode"], "log");
+    assert!(inbox[0]["body"].as_str().unwrap().contains("写周报"));
+    let id = inbox[0]["id"].as_str().unwrap();
+    let (s, v) = e
+        .call("POST", &format!("/api/me/notifications/{id}/seen"), None)
+        .await;
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(e.one("SELECT count(*) FROM output_deliveries"), 0);
     // give a stray old path the time it would need, then: one event, one run
     tokio::time::sleep(Duration::from_millis(500)).await;
     assert_eq!(
@@ -449,4 +503,118 @@ async fn dead_deliveries_are_listed_by_consumer_and_revived() {
     );
     let (_, v) = e.call("GET", "/api/system/outbox", None).await;
     assert_eq!(v["groups"], json!([]), "{v}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn real_completion_notification_reaches_e1_and_existing_c6_fake_adapter() {
+    use steve_channels::fake::channel::FakeChannel;
+    let e = start().await;
+    let user = e.one_text("SELECT id FROM users WHERE subject='dev:local'");
+    let who = steve_modules::Caller {
+        ws: "default".into(),
+        me: user,
+    };
+    FakeChannel::seed_connection(&e.store, &who, Some("u-notify-self")).unwrap();
+    let (conn, _) = FakeChannel::seed_connection(&e.store, &who, None).unwrap();
+    e.store
+        .transaction(|tx| {
+            steve_channels::spaces::set_account_rules(
+                tx,
+                &steve_store::base::Viewer::bare(&who.ws, &who.me),
+                &conn,
+                &json!([{"when":{"kind":"all"},"act":"record"}]),
+                e.channels.now(),
+            )
+        })
+        .unwrap();
+    e.fake.space(
+        "D_NOTIFICATION_SELF",
+        "",
+        steve_channels::SpaceKind::Dm,
+        false,
+        &[("u-notify-self", "Self")],
+    );
+    let inbound = e
+        .channels
+        .on_message(
+            "default",
+            &conn,
+            FakeChannel::message(
+                "D_NOTIFICATION_SELF",
+                "notification-source",
+                "u-notify-self",
+                "record",
+            ),
+        )
+        .await
+        .unwrap();
+    let party = e.one_text(
+        "SELECT id FROM parties WHERE user_id=(SELECT id FROM users WHERE subject='dev:local')",
+    );
+    let (s,v)=e.call("PUT","/api/me/notification-policy",Some(json!({
+        "enabled":true,"mode":"now","party_id":party,"space_id":inbound.space_id,"timezone":"UTC","quiet_start":null,"quiet_end":null
+    }))).await;
+    assert_eq!(s, 200, "{v}");
+    let (_, state) = e.call("GET", "/api/state", None).await;
+    let bot = state["bots"][0]["id"].as_str().unwrap();
+    e.exec("INSERT INTO items(id,workspace_id,no,title,status,stage,bot_id,created,updated) VALUES('ST-91','default',91,'Real completion notification','run','执行',?,1,1)",&[&bot]);
+    let (s, v) = e
+        .call(
+            "POST",
+            "/api/items/ST-91/actions",
+            Some(json!({"action":"finish"})),
+        )
+        .await;
+    assert_eq!(s, 200, "{v}");
+    assert!(
+        until(15, || e.one(
+            "SELECT count(*) FROM personal_notifications WHERE delivery_id IS NOT NULL"
+        ) == 1)
+        .await
+    );
+    assert_eq!(
+        e.one("SELECT count(*) FROM outbox_events WHERE topic='work.item.done'"),
+        1
+    );
+    assert_eq!(
+        e.one("SELECT count(*) FROM outbox_receipts WHERE consumer_id='notifications.work_done'"),
+        1
+    );
+    assert_eq!(e.one("SELECT count(*) FROM output_deliveries"), 1);
+    // The test has no model backend: the unchanged disclosure contract leaves a draft. Explicit
+    // existing C6 approval, not a notification bypass, then sends through the fake adapter.
+    let status = e.one_text(
+        "SELECT m.status FROM output_deliveries d JOIN chan_messages m ON m.id=d.message_id",
+    );
+    if status == "draft" {
+        let card=e.one_text("SELECT m.decision_id FROM output_deliveries d JOIN chan_messages m ON m.id=d.message_id");
+        let (s, v) = e
+            .call(
+                "POST",
+                &format!("/api/decisions/{card}"),
+                Some(json!({"choice":"yes","text":""})),
+            )
+            .await;
+        assert_eq!(s, 200, "{v}");
+        e.exec(
+            "UPDATE decisions SET result=json_set(result,'$.send_at',0) WHERE id=?",
+            &[&card],
+        );
+        e.outbox.send_due(&e.channels).await;
+    }
+    assert_eq!(e.fake.sent.lock().unwrap().len(), 1);
+    assert!(
+        e.fake.sent.lock().unwrap()[0]
+            .1
+            .text
+            .contains("Real completion notification")
+    );
+    steve_channels::notifications::pump(&e.channels, &e.outbox)
+        .await
+        .unwrap();
+    assert_eq!(e.fake.sent.lock().unwrap().len(), 1);
+    assert_eq!(
+        e.one("SELECT count(*) FROM output_deliveries WHERE attempts=1"),
+        1
+    );
 }

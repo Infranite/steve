@@ -127,6 +127,7 @@ pub mod members;
 pub mod membership;
 pub mod messages;
 pub mod names;
+pub mod notifications;
 pub mod outbound;
 pub mod personas;
 mod personas_api;
