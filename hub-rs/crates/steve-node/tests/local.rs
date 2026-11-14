@@ -32,7 +32,8 @@ async fn snapshot_pages_thousands_of_stream_heads_without_oversized_frames() {
         tx.execute(
             "INSERT INTO streams(stream,epoch,produced,acknowledged) VALUES (?1,'epoch01',1,1)",
             [format!("stream_{i:04}_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")],
-        ).unwrap();
+        )
+        .unwrap();
     }
     tx.commit().unwrap();
 
@@ -40,10 +41,13 @@ async fn snapshot_pages_thousands_of_stream_heads_without_oversized_frames() {
     let mut seen = std::collections::HashSet::new();
     let mut pages = 0;
     loop {
-        let page = n.snapshot(PageRequest {
-            cursor: cursor.clone(),
-            limit: if cursor.is_none() { 0 } else { 100 },
-        }).await.unwrap();
+        let page = n
+            .snapshot(PageRequest {
+                cursor: cursor.clone(),
+                limit: if cursor.is_none() { 0 } else { 100 },
+            })
+            .await
+            .unwrap();
         assert!(serde_json::to_vec(&page).unwrap().len() < 64 * 1024);
         assert!(page.heads.len() <= 100);
         for head in page.heads {
@@ -51,7 +55,9 @@ async fn snapshot_pages_thousands_of_stream_heads_without_oversized_frames() {
         }
         pages += 1;
         cursor = page.next;
-        if cursor.is_none() { break; }
+        if cursor.is_none() {
+            break;
+        }
     }
     assert_eq!(seen.len(), 4_000);
     assert_eq!(pages, 40);
@@ -1293,6 +1299,7 @@ impl HubTools for Tools {
                 description: "Update the item.".into(),
                 input_schema: serde_json::json!({"type": "object", "properties": {"now": {"type": "string"}}}),
                 read_only: false,
+                annotations: serde_json::Value::Null,
             }],
         })
     }

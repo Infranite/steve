@@ -1,0 +1,12 @@
+{
+  "digest.owner_only": "Only the workspace owner can read or change digest data",
+  "digest.not_same": "These matters were marked different; an explicit manual override is required",
+  "digest.profile_moved": "Digest settings changed; refresh and try again",
+  "digest.noun.change": "digest change",
+  "digest.noun.todo": "todo",
+  "digest.change.undone_already": "This change was already undone",
+  "digest.change.summary_newer": "A newer conversation summary exists",
+  "digest.change.todo_moved": "The todo changed since this operation",
+  "digest.change.mem_answered": "The memory candidate was already handled",
+  "digest.change.target_moved": "The target changed since this operation"
+}

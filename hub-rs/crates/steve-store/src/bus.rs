@@ -130,6 +130,9 @@ pub enum ChangeEvent {
     },
     #[serde(rename = "persona")]
     Persona { id: String, ws: String },
+    /// The digest base changed: `id` is a conversation (`space:…`), matter, todo or packet.
+    #[serde(rename = "digest")]
+    Digest { id: String, ws: String },
     /// `id` is the connection id.
     #[serde(rename = "channel")]
     Channel { id: String, ws: String },
@@ -170,6 +173,7 @@ impl ChangeEvent {
             | Self::Space { ws, .. }
             | Self::ChanMessage { ws, .. }
             | Self::Persona { ws, .. }
+            | Self::Digest { ws, .. }
             | Self::Channel { ws, .. }
             | Self::Yolo { ws }
             | Self::YoloAction { ws, .. }

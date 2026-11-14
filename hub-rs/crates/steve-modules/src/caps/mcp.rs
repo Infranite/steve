@@ -1,5 +1,5 @@
-//! The library's MCP servers: what the harness of a Bot assigned one gets in the ACP `mcpServers` of
-//! every session, next to Steve's own tools, the same way for every harness (`steve_store::caps::mcp`).
+//! The library's MCP servers, proxied by the Hub's single tool endpoint for every harness
+//! (`steve_store::caps::mcp`). A session never receives the server configuration or its secrets.
 //!
 //! - `GET /capabilities/mcp-servers` → `McpServerOut[]` (each with `bots: [{id, enabled}]`)
 //! - `POST /capabilities/mcp-servers {name, transport: stdio|http|sse, command?, args?, env?, url?,
@@ -11,12 +11,12 @@
 //! the workspace's system vault, one `connection_credential` item per server (fields
 //! `env:<name>` / `header:<name>`), and is never stored with the server, answered, logged or audited;
 //! answers show it as `{name, secret: true}`. Saving a secret again without a value keeps the one
-//! the vault has. The session's Node takes the values when its harness opens
-//! ([`Capabilities::mcp_secret`]).
+//! the vault has. The Hub takes the values when its shared MCP client opens the server
+//! ([`Capabilities::mcp_server_secrets`]).
 //!
 //! Every change is audited (`mcp_server.create|update|delete`, names only) and publishes the change
-//! event of every Bot that uses the server. The Hub hands a session's servers to its Node
-//! (`steve_hub::wire::bot_mcp`), secrets as [`secret_id`]s.
+//! event of every Bot that uses the server. The Hub lists and calls the server's tools on behalf
+//! of a session, after checking the Bot still has it enabled.
 
 use std::sync::LazyLock;
 
@@ -422,7 +422,7 @@ impl Capabilities {
             )?),
             None => None,
         };
-        s.updated = now();
+        s.updated = now().max(s.updated.saturating_add(1));
         let ws = s.workspace_id.clone();
         self.vault.store().transaction(|tx: &Tx| {
             let drop_old = |tx: &Tx| -> VaultResult<()> {
@@ -471,6 +471,36 @@ impl Capabilities {
             super::publish_users(tx, "mcp", &s.id)?;
             out_with_users(tx, &s)
         })
+    }
+
+    /// Server `sid`'s secret values, label → value (`env:<name>` / `header:<name>`), for the Hub's own
+    /// connection to it: the Hub proxies the server's tools, so the values never leave it. `who` names
+    /// the Bot the connection is first opened for, in the vault's use log.
+    pub fn mcp_server_secrets(
+        &self,
+        sid: &str,
+        who: &str,
+    ) -> VaultResult<Vec<(String, Zeroizing<String>)>> {
+        let s = self
+            .vault
+            .store()
+            .reader(|c| repo::get(c, sid))?
+            .ok_or_else(|| VaultError::from(ApiError::not_found("MCP 服务器")))?;
+        let labels = s.secret_labels();
+        let Some(item) = s.credential_item.as_deref().filter(|_| !labels.is_empty()) else {
+            return Ok(vec![]);
+        };
+        let purpose = format!("MCP {} · {who}", s.name);
+        self.vault
+            .with_credential(&s.workspace_id, item, &s.id, &purpose, |c| {
+                labels
+                    .iter()
+                    .filter_map(|l| {
+                        c.text(l)
+                            .map(|t| (l.clone(), Zeroizing::new(t.to_string())))
+                    })
+                    .collect()
+            })
     }
 
     /// The value the Node of `session` takes for `id` (`<server>#<label>`) as its harness opens: a

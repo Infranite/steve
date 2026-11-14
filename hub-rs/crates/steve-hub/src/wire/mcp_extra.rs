@@ -1,11 +1,8 @@
-//! The modules' MCP tools served next to steve-mcp's Steve tools without changing steve-mcp: contacts
-//! (P3), knowledge (K3/K4), the vault's secret tools (V4), GitHub (G4), mail (E5) and the flow's
-//! `steve_event_get` (S10), and one tool per remote A2A agent the session's Bot uses
-//! (`steve_modules::caps::a2a`). A client outside Steve with a user's access token is answered by
-//! [`super::outside_mcp`] instead. A tool that opened an approval marks the session as waiting, like
-//! `steve_request_approval`: `tools/list` answers get the module's
-//! definitions appended, `tools/call` for those names is answered here with the session's [`McpCx`];
-//! everything else passes through untouched.
+//! Session MCP routing and dispatch for the modules' Steve tools. Authenticated session list/call
+//! requests go through [`super::tool_service::ToolService`], as does the Node tool bridge: one
+//! registry, core plus Bot pins, and search/call for the rest. User access tokens retain the scoped
+//! [`super::outside_mcp`] catalog; research tokens retain their separate research catalog. Session
+//! tokens stay loopback-only. Module calls keep their existing approval and session context.
 
 use axum::body::{Body, Bytes};
 use axum::extract::{Request, State};
@@ -26,11 +23,13 @@ pub struct Extra {
     pub ports: Ports,
     pub kb: steve_knowledge::Knowledge,
     pub tools: super::modules::Tools,
+    /// The Hub's connections to the library's MCP servers.
+    pub library: std::sync::Arc<super::library_mcp::LibraryMcp>,
 }
 
 /// Which module answers a tool name.
 #[derive(Clone, Copy)]
-enum Owner {
+pub(crate) enum Owner {
     Devices,
     Diagnostics,
     Items,
@@ -138,7 +137,7 @@ fn reply_source_tool() -> Value {
     })
 }
 
-fn owner_of(name: &str) -> Option<Owner> {
+pub(crate) fn owner_of(name: &str) -> Option<Owner> {
     if name == DEVICES {
         Some(Owner::Devices)
     } else if name == super::diagnostics::TOOL {
@@ -174,7 +173,7 @@ fn owner_of(name: &str) -> Option<Owner> {
     }
 }
 
-/// The module tool definitions appended to `tools/list`, in this order.
+/// All built-in module definitions, before registry selection.
 fn extra_tools() -> Vec<Value> {
     let mut v: Vec<Value> = mcp::tools().to_vec();
     v.push(super::diagnostics::tool());
@@ -276,7 +275,12 @@ pub(crate) fn owner(store: &Store, ws: &str) -> Option<String> {
         .flatten()
 }
 
-pub async fn layer(State(x): State<Extra>, req: Request, next: Next) -> Response {
+pub async fn layer(
+    State(service): State<std::sync::Arc<super::tool_service::ToolService>>,
+    req: Request,
+    next: Next,
+) -> Response {
+    let x = &service.extra;
     let (parts, body) = req.into_parts();
     let Ok(bytes) = axum::body::to_bytes(body, LIMIT).await else {
         return StatusCode::PAYLOAD_TOO_LARGE.into_response();
@@ -356,98 +360,76 @@ pub async fn layer(State(x): State<Extra>, req: Request, next: Next) -> Response
         }
     }
 
-    if method == "tools/call" {
-        let m = msg.clone().unwrap_or(Value::Null);
-        let name = m
-            .pointer("/params/name")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string();
-        if let Some(tool_owner) = owner_of(&name) {
-            let token = parts
-                .headers
-                .get(header::AUTHORIZATION)
-                .and_then(|v| v.to_str().ok())
-                .and_then(|v| v.strip_prefix("Bearer "))
-                .map(str::to_string);
-            let store = x.store.clone();
-            let session = match token {
-                Some(t) => tokio::task::spawn_blocking(move || {
-                    store.sessions().by_token(&t).ok().flatten()
-                })
-                .await
-                .ok()
-                .flatten(),
-                None => None,
-            };
-            let Some(s) = session else {
-                return StatusCode::UNAUTHORIZED.into_response();
-            };
-            let args = m
-                .pointer("/params/arguments")
-                .cloned()
-                .unwrap_or_else(|| json!({}));
-            let id = m.get("id").cloned().unwrap_or(Value::Null);
-            let out = call_owned(&x, s, tool_owner, &name, args).await;
-            return match out {
-                Ok(text) => json_rpc(
-                    &id,
-                    json!({ "content": [{ "type": "text", "text": text }] }),
-                ),
-                Err(text) => json_rpc(
-                    &id,
-                    json!({ "content": [{ "type": "text", "text": text }], "isError": true }),
-                ),
-            };
+    // Session tokens remain loopback-only, exactly as steve-mcp's authentication layer.
+    // Do not let intercepting tools/list or tools/call bypass that boundary.
+    if method == "tools/list" || method == "tools/call" || method == "initialize" {
+        use axum::extract::{ConnectInfo, FromRequestParts};
+        let mut auth_parts = parts.clone();
+        let peer = ConnectInfo::<std::net::SocketAddr>::from_request_parts(&mut auth_parts, &())
+            .await
+            .ok()
+            .map(|c| c.0);
+        if !peer.is_some_and(|p| p.ip().is_loopback()
+            || matches!(p.ip(), std::net::IpAddr::V6(v) if v.to_ipv4_mapped().is_some_and(|v| v.is_loopback()))) {
+            return StatusCode::FORBIDDEN.into_response();
         }
-    }
-
-    let res = next.run(rebuild(bytes)).await;
-    if method != "tools/list" || res.status() != StatusCode::OK {
-        return res;
-    }
-    let is_json = res
-        .headers()
-        .get(header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .is_some_and(|t| t.starts_with("application/json"));
-    if !is_json {
-        return res;
-    }
-    let (mut rp, rb) = res.into_parts();
-    let Ok(out) = axum::body::to_bytes(rb, LIMIT).await else {
-        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-    };
-    let Ok(mut v) = serde_json::from_slice::<Value>(&out) else {
-        return Response::from_parts(rp, Body::from(out));
-    };
-    // the remote agents of the session's Bot
-    let session_tools = match bearer {
-        Some(t) => {
-            let store = x.store.clone();
-            let session =
+        let store = x.store.clone();
+        let session = match bearer {
+            Some(t) => {
                 tokio::task::spawn_blocking(move || store.sessions().by_token(&t).ok().flatten())
                     .await
                     .ok()
-                    .flatten();
-            match session {
-                Some(s) => {
-                    let caps = x.caps.clone();
-                    tokio::task::spawn_blocking(move || caps.a2a_tools(&s.id))
-                        .await
-                        .unwrap_or_default()
-                }
-                None => vec![],
+                    .flatten()
             }
+            None => None,
+        };
+        let Some(s) = session else {
+            return StatusCode::UNAUTHORIZED.into_response();
+        };
+        if parts.method != axum::http::Method::POST {
+            return StatusCode::METHOD_NOT_ALLOWED.into_response();
         }
-        None => vec![],
-    };
-    if let Some(tools) = v.pointer_mut("/result/tools").and_then(Value::as_array_mut) {
-        tools.extend(extra_tools());
-        tools.extend(session_tools);
+        let m = msg.as_ref().unwrap();
+        let id = m.get("id").cloned().unwrap_or(Value::Null);
+        if method == "tools/list" {
+            let r = service
+                .registry(&s, super::tool_service::Reach::Listed)
+                .await;
+            let tools: Vec<Value> = r.listed_entries().iter().map(|e| e.mcp()).collect();
+            return json_rpc(&id, json!({"tools": tools}));
+        }
+        if method == "initialize" {
+            return json_rpc(
+                &id,
+                json!({
+                    "protocolVersion": m.pointer("/params/protocolVersion").cloned().unwrap_or(json!("2025-06-18")),
+                    "capabilities": {"tools": {}},
+                    "serverInfo": {"name": "steve", "version": env!("CARGO_PKG_VERSION")},
+                    "instructions": "Your list contains Steve's core tools and your Bot's pins. Find other enabled tools with steve_tools_search, then run them with steve_tool_call {name, arguments}. The tool catalog in your brief describes the available areas."
+                }),
+            );
+        }
+        let name = m
+            .pointer("/params/name")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let args = m
+            .pointer("/params/arguments")
+            .cloned()
+            .unwrap_or_else(|| json!({}));
+        let (text, failed) = match service.call(s, name, args).await {
+            Ok(t) => (t, false),
+            Err(t) => (t, true),
+        };
+        return json_rpc(
+            &id,
+            json!({
+                "content": [{"type": "text", "text": super::tool_service::bound_result(name, text)}],
+                "isError": failed,
+            }),
+        );
     }
-    rp.headers.remove(header::CONTENT_LENGTH);
-    Response::from_parts(rp, Body::from(v.to_string()))
+    next.run(rebuild(bytes)).await
 }
 
 /// A module's tool (`owner`), run for session `s`: the success text or the error text. Independent of
@@ -613,15 +595,7 @@ pub(crate) async fn call_module(
     Some(call_owned(x, s, owner, name, args).await)
 }
 
-/// The modules' tool definitions (what `tools/list` adds).
+/// The modules' complete definitions for the shared registry.
 pub(crate) fn module_tools() -> Vec<Value> {
     extra_tools()
-}
-
-/// The tools only some sessions have: one per remote agent its Bot uses.
-pub(crate) async fn session_tools(x: &Extra, session: &str) -> Vec<Value> {
-    let (caps, session) = (x.caps.clone(), session.to_string());
-    tokio::task::spawn_blocking(move || caps.a2a_tools(&session))
-        .await
-        .unwrap_or_default()
 }

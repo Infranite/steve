@@ -871,15 +871,25 @@ async fn an_outside_mcp_client_with_an_access_token_gets_the_scoped_tools() {
         names,
         [
             "steve_knowledge_search",
-            "steve_knowledge_read",
             "steve_items_search",
-            "steve_item_read",
-            "steve_sessions_list",
-            "steve_memory_list",
             "steve_item_create",
-            "steve_item_supplement"
+            "steve_tools_search",
+            "steve_tool_call"
         ]
     );
+    let (_, found) = mcp(
+        rpc(
+            20,
+            "tools/call",
+            json!({"name":"steve_tools_search", "arguments":{"query":"read item"}}),
+        ),
+        Some(token.clone()),
+    )
+    .await;
+    assert!(found.to_string().contains("steve_item_read"), "{found}");
+    let (_, refused) = mcp(rpc(21, "tools/call", json!({"name":"steve_tool_call", "arguments":{"name":"steve_secret_use", "arguments":{}}})), Some(token.clone())).await;
+    assert_eq!(refused["result"]["isError"], true, "{refused}");
+
     st.with_conn(|c| {
         c.execute_batch("INSERT OR IGNORE INTO bots (id, workspace_id, name, harness, updated) VALUES ('writer', 'default', '写作', 'claude-code', 1);")?;
         Ok(())

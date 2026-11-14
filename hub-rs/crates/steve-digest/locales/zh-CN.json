@@ -1,0 +1,12 @@
+{
+  "digest.owner_only": "只有工作空间所有者可以查看或更改梳理数据",
+  "digest.not_same": "你已标记为不是同一件事；手动强制合并才能继续",
+  "digest.profile_moved": "梳理设置已更改，请刷新后重试",
+  "digest.noun.change": "梳理改动",
+  "digest.noun.todo": "待办",
+  "digest.change.undone_already": "这项改动已撤销",
+  "digest.change.summary_newer": "已有较新的会话摘要，不能撤销这一版",
+  "digest.change.todo_moved": "待办已更改，不能撤销旧改动",
+  "digest.change.mem_answered": "记忆已处理，不能撤销候选",
+  "digest.change.target_moved": "对象已更改，不能撤销旧改动"
+}

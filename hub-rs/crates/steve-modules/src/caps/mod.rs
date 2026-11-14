@@ -27,6 +27,7 @@
 pub mod a2a;
 pub mod mcp;
 pub mod skills;
+pub mod tools;
 
 use axum::extract::{Path, State};
 use axum::routing::{get, patch, post, put};
@@ -81,6 +82,11 @@ pub fn routes<S: Clone + Send + Sync + 'static>(svc: Capabilities) -> Router<S> 
             patch(a2a::update_h).delete(a2a::remove_h),
         )
         .route("/bots/{id}/capabilities", get(bot_list_h))
+        .route("/bots/{id}/tools", get(tools::list_h))
+        .route(
+            "/bots/{id}/tool-pins/{kind}/{target}",
+            put(tools::pin_h).delete(tools::unpin_h),
+        )
         .route(
             "/bots/{id}/capabilities/{kind}/{entry}",
             put(assign_h).delete(unassign_h),
@@ -174,7 +180,7 @@ pub(crate) fn publish_users(tx: &Tx, kind: &str, id: &str) -> Result<(), ApiErro
 
 /// A library entry of any kind, as far as assignment needs it: its workspace and the name its
 /// harness sees.
-fn entry_of(c: &Connection, kind: &str, id: &str) -> Result<(String, String), ApiError> {
+pub(crate) fn entry_of(c: &Connection, kind: &str, id: &str) -> Result<(String, String), ApiError> {
     let found = match kind {
         "mcp" => steve_store::caps::mcp::get(c, id)?.map(|s| (s.workspace_id, s.name)),
         "skill" => steve_store::caps::skills::get(c, id)?.map(|s| (s.workspace_id, s.name)),
@@ -184,7 +190,7 @@ fn entry_of(c: &Connection, kind: &str, id: &str) -> Result<(String, String), Ap
     found.ok_or_else(|| ApiError::not_found(noun(kind)))
 }
 
-fn noun(kind: &str) -> &'static str {
+pub(crate) fn noun(kind: &str) -> &'static str {
     match kind {
         "mcp" => "MCP 服务器",
         "skill" => "技能",

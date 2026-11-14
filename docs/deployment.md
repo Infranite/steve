@@ -12,6 +12,7 @@
 - [Remote Nodes](#remote-nodes)
 - [Harness setup](#harness-setup)
 - [Diagnostic capture and queries](#diagnostic-capture-and-queries)
+- [Conversation digest base](#conversation-digest-base)
 
 ## Homebrew installation
 
@@ -695,9 +696,26 @@ Library answers carry `bots: [{id, enabled}]`. A `POST` with `"bot": "<id>"` als
 
 A server has a name (`[A-Za-z0-9_-]`, unique per workspace in any case, not `steve`) and a transport: `stdio` with `command`, `args` and `env`, or `http` / `sse` with `url` and `headers`. Each variable or header is `{"name","value"}` or, for a secret, `{"name","value","secret":true}`.
 
-When a session of a bot opens (or reopens after it was released), the Hub puts the servers the bot has switched on into the Node's `open_session` command. The Node passes them to the adapter in ACP `session/new` / `session/load` (`mcpServers`) after Steve's own `steve` server, so every harness gets them the same way. A change applies the next time a session's harness opens. A `stdio` command runs on the session's Node, inside the same sandbox as the harness; install what it needs there.
+The Hub is the only entry point for tools. A session's Node and harness receive Steve's endpoint only, not plugin server configurations or credentials. The Hub proxies the servers the Bot has switched on and shares one connection per library server across its sessions and Bots. `stdio` commands run on the **Hub host**, through the Node's OS sandbox API with a private temporary working directory; install the command and its dependencies on that host, not on each session's Node. HTTP and legacy SSE endpoints are reached from the Hub. Confinement follows `STEVE_CONFINE`, including its documented unavailable/off behavior; an MCP server is trusted operator-installed code, not a new permission boundary. Servers needing a project directory must receive an explicit configured path/argument; there is no per-session working directory or per-session plugin process.
 
-Secret values go into the workspace's system vault (one credential item per server, fields `env:<name>` and `header:<name>`). The server row, API answers, the audit log, the Hub's command ledger and the Node journal hold only the name and a reference. The Node takes each value from the Hub under `mcp:<session>` each time the harness opens; the Hub answers only the Node the session is bound to, and only for a server the session's bot has switched on. Each use appears in the vault's use log. Saving a server again without a secret's value keeps the stored one; deleting the server destroys its credential item. A server whose secret cannot be taken (no vault, a Node from before this release) is left out of that session, with a warning in the Node log, and the session opens without it. An older Node ignores the servers altogether.
+Secret values go into the workspace's system vault (one credential item per server, fields `env:<name>` and `header:<name>`). Rows and API answers retain references, not secret values. The Hub resolves credentials when it opens the shared connection and records the use against the server in the vault use log. Opening a harness does not take plugin credentials. Saving a server without a secret's value keeps the stored one; deleting it destroys its credential item. A missing credential or unavailable vault makes that server unreachable, not a blank credential substitution. A plugin can itself return sensitive content; this proxy does not mask tool inputs or outputs.
+
+Catalogs refresh in the background after ten minutes; failed first listings retry after one minute. Edits invalidate the old revision, and the minute sweep closes deleted/changed connections and connections idle for ten minutes. A cold pinned listing waits up to 20 seconds; search/discovery up to 45 seconds while the shared listing continues in the background (60-second listing budget). Calls have a 115-second overall budget including discovery. An unreachable server is reported in search results, while other sources remain usable. A timed-out call is **not retried**; its outcome may be unknown, so inspect the remote system before repeating a write. HTTP redirects are not followed, and legacy SSE message endpoints must stay on the same origin as the stream.
+
+#### Tool discovery and Bot pins
+
+Each session lists these eight core tools, followed by available Bot pins: `steve_update`, `steve_ask`, `steve_request_approval`, `steve_deliver`, `steve_items_search`, `steve_knowledge_search`, `steve_tools_search`, `steve_tool_call`. Other built-in tools, enabled MCP tools and enabled A2A agents remain callable without loading all their schemas into every turn. A short, bounded catalog summary in the session brief names capability areas and example tools. There is no dependency on MCP `tools/list_changed`: a pin is reflected when a harness next lists its tools; generic search/call works without a harness-specific discovery feature.
+
+- `steve_tools_search {"query":"comment on a pull request","source":"mcp","kind":"write","resource":"repository","limit":8}` uses deterministic keyword matching, not a model. All fields are optional; `source` accepts `steve`, `mcp`, `a2a`, `connector` or a source name, `kind` is `read|write`, and `limit` is 1–25 (default 8). Empty queries plus filters browse a source. Already-listed tools are omitted except an exact tool-name query. Results include definitions, `more` when matches exceed the limit, and unreachable-source diagnostics; narrow the query to see other matches.
+- `steve_tool_call {"name":"<returned name>","arguments":{...}}` validates the target's JSON Schema before dispatch, including local `$ref` and composition. Invalid arguments return an error without invocation. HTTP/file schema-reference retrieval is disabled; schemas requiring external references fail validation. The wrapper cannot call itself or the search wrapper. Pins change visibility, never capability authorization; disabled or unassigned sources cannot be called through a cached definition.
+- Definitions use MCP `name`, `description`, `inputSchema` and `annotations`. MCP server names are namespaced as `<server>__<tool>`, capped at 64 ASCII characters with a stable hash for long or sanitized names. Existing MCP annotations are preserved. `annotations.steve` supplies `source` (`steve`, `mcp:<name>`, `a2a:<name>`), `kind`, `resources` and `asYou`. Plugins may declare `resources: [string]` and `asYou: boolean` under their own `annotations.steve`; defaults are the server name and false. Read/write uses `readOnlyHint` (missing means write). These are descriptive hints, not authorization or an implemented output-pipeline enforcement policy. Connector operation declarations are not part of this release.
+- Plugin results currently cross the Steve bridge as text: text content is retained, non-text content is described, and `structuredContent` is serialized when no text is present. Rich images/audio/resources are not passed through as native MCP blocks. Oversized results are truncated with an explicit note. A catalog must contain named tools with object `inputSchema`; malformed/duplicate tools or more than 20 catalog pages are reported as listing errors rather than silently weakened or truncated.
+
+Pins and usage are available through the authenticated workspace API (there is no pin editor added by this change):
+
+- `GET /api/bots/{id}/tools` → `{core, pins: [{kind,target}], usage: [{tool,searched,called}], days:30}`.
+- `PUT /api/bots/{id}/tool-pins/{kind}/{target}` pins; `DELETE` the same path unpins. `kind=tool` names one tool (including an MCP tool); `kind=mcp` names a server ID and pins all its tools; `kind=a2a` names an agent ID. MCP/A2A entries must be enabled for that Bot when pinned. Up to 32 pins per Bot, duplicate requests are idempotent, core tools need no pin. Unassigning/deleting an entry removes its server/agent pin; unavailable tool-name pins are simply not listed. Changes are audited as `bot_tool.pin|unpin` and emit a Bot change event.
+- Usage is per Bot and tool: `searched` counts appearances in returned search results, `called` counts dispatched attempts (including remote errors, excluding failed argument validation). Updates are asynchronous, grouped by UTC day, summed over 30 days and retained for 90 days. This is not billing or an exactly-once execution ledger.
 
 #### Skills
 
@@ -711,7 +729,7 @@ When a session of a bot opens (or reopens), the Hub puts the skills the bot has 
 
 A remote agent is added by the address of its [A2A](https://a2a-protocol.org) Agent Card. An address that names only a host is looked up at the standard `/.well-known/agent-card.json`, then the older `/.well-known/agent.json`. The Hub reads the card (at most 512 KiB; it needs a `name` and the agent's `url`) and the page shows its name, description, version and skills before it is kept. **Read the Agent Card again** fetches it anew. If the agent wants a key, choose `bearer` (sent as `Authorization: Bearer <key>`) or a header of your own (`<header>: <key>`); the key goes into the vault (field `auth` of the agent's credential item) and is shown only as `has_secret`.
 
-A bot that uses a remote agent gets one Steve tool for it, `steve_a2a_<name>` (the name defaults to one made from the card's, lower-case letters, digits and `_`). Its description is the card's description and skills. It takes `message`, and optionally `context_id` and `task_id` from an earlier answer: the Hub sends A2A `message/send` (JSON-RPC, blocking) to the agent's `url`, asks again with `tasks/get` while the task is `submitted` or `working`, and answers with what the agent said, its artifacts, and its task and context ids. A task still running after 100 seconds (a Node gives a Steve tool call two minutes) is answered with its `task_id`; calling the tool again with only that id gets the result later. When the agent waits for input (`input-required`), the answer says so; the bot replies with the same tool and `task_id`. The tool is Steve's, so every harness gets it the same way; it is listed in a session's tools from the next list the harness asks for. Each use of the key is in the vault's use log. Streaming and push notifications are not used.
+A bot that uses a remote agent gets one Steve tool for it, `steve_a2a_<name>` (the name defaults to one made from the card's, lower-case letters, digits and `_`). Its description is the card's description and skills. It takes `message`, and optionally `context_id` and `task_id` from an earlier answer: the Hub sends A2A `message/send` (JSON-RPC, blocking) to the agent's `url`, asks again with `tasks/get` while the task is `submitted` or `working`, and answers with what the agent said, its artifacts, and its task and context ids. A task still running after 100 seconds (a Node gives a Steve tool call two minutes) is answered with its `task_id`; calling the tool again with only that id gets the result later. When the agent waits for input (`input-required`), the answer says so; the bot replies with the same tool and `task_id`. The tool is Steve's, so every harness gets it the same way; it is discoverable by search, and appears directly in the next tools list when pinned. Each use of the key is in the vault's use log. Streaming and push notifications are not used.
 
 #### Steve as an agent
 
@@ -726,7 +744,7 @@ Steve publishes its own Agent Card at `/.well-known/agent-card.json` (and `/.wel
 
 Steve's own tools are an MCP server too: every bot's session has it ("Steve · built-in" on the Capabilities pages, always on, its tools folded inside with what each is for). A client outside Steve – Claude Desktop, Cursor, another agent – can use the same endpoint, `/mcp` on the Hub's port, with one of its user's access tokens (see [Access tokens and clients](#access-tokens-and-clients)) sent as `Authorization: Bearer stt_…`. Unlike a Steve session's own token, which works only from the Hub's machine, an access token is accepted from any address the Hub answers. The client acts as that user in their first workspace; `?ws=<id>` on the URL or an `x-steve-ws` header names another. A revoked or expired token is refused at once.
 
-Such a client gets only the tools that need no Steve session:
+Such a client lists `steve_knowledge_search`, `steve_items_search`, `steve_item_create`, `steve_tools_search` and `steve_tool_call` by default. Search/call can discover and run only the following session-independent allowlist, never a Bot's plugin catalog:
 
 | Tool | What it does |
 | --- | --- |
@@ -745,7 +763,7 @@ Everything that belongs to a session's own turn (`steve_update`, `steve_ask`, `s
 { "mcpServers": { "steve": { "type": "http", "url": "https://<hub>/mcp", "headers": { "Authorization": "Bearer stt_…" } } } }
 ```
 
-Cursor takes the same without `type` in `~/.cursor/mcp.json`. Claude Desktop starts local commands from `claude_desktop_config.json`, so it reaches the Hub through `mcp-remote` (Node.js): `{"command": "npx", "args": ["-y", "mcp-remote", "https://<hub>/mcp", "--header", "Authorization:${STEVE_AUTH}"], "env": {"STEVE_AUTH": "Bearer stt_…"}}`. Claude Code: `claude mcp add --transport http steve https://<hub>/mcp --header "Authorization: Bearer stt_…"`. A client on another machine needs the Hub to listen beyond loopback, or a public address with HTTPS from your own reverse proxy (see the setup above). `GET /api/capabilities/steve` answers the same lists and addresses: `{tools, outside, endpoints: [{url, kind}], agent_card, a2a}`.
+Cursor takes the same without `type` in `~/.cursor/mcp.json`. Claude Desktop starts local commands from `claude_desktop_config.json`, so it reaches the Hub through `mcp-remote` (Node.js): `{"command": "npx", "args": ["-y", "mcp-remote", "https://<hub>/mcp", "--header", "Authorization:${STEVE_AUTH}"], "env": {"STEVE_AUTH": "Bearer stt_…"}}`. Claude Code: `claude mcp add --transport http steve https://<hub>/mcp --header "Authorization: Bearer stt_…"`. A client on another machine needs the Hub to listen beyond loopback, or a public address with HTTPS from your own reverse proxy (see the setup above). `GET /api/capabilities/steve` answers the built-in definitions (with schemas, annotations and `core` flags), default core names and addresses: `{tools, core, outside, outside_core, endpoints: [{url, kind}], agent_card, a2a}`. `outside` describes the full outside-client allowlist; `outside_core` names its three base tools, with search/call added to its default MCP list.
 
 ### Permission modes and full access
 
@@ -813,3 +831,56 @@ A [theme plugin](#plugins) installed on the Hub is registered this way for every
 returns `{ ok: true }` or `{ ok: false, errors }`: a manifest with an unknown field or token, a token its kind may not
 set, or a value outside the syntax above is refused as a whole and nothing on screen changes. A registered theme
 appears among the choices of its kind; a stored choice whose theme is not registered shows the default until it is.
+
+
+## Conversation digest base
+
+The Hub's deterministic intake checks stored channel spaces and mail threads once a minute. It does not fetch connector history, start a harness, call a model or send messages. Conversation identifiers are `space:<Steve space ID>` and `mail_thread:<Steve thread ID>`; packet facts use Steve's message, contact and item IDs. Other source types need an explicit reader/access adapter, not a provider-specific ID guessed by a model. The owner's source visibility applies: another member's personal channels and private mail are not intake sources. Digest REST endpoints require the workspace owner; workspace membership alone is insufficient.
+
+### Profiles and independent windows
+
+Every conversation has its own cursor, window sequence, daily spend and settings. Kinds are `project`, `team`, `feed`, `dm`, `mail`, `pr` and `issue`; the currently supported readers are spaces and mail threads. Rules infer DM, mail, bot-heavy feed or team until an explicit classification replaces them. Role reuses the channel's existing duty, rather than introducing a second role field.
+
+All kinds default to **50 messages**, a **30-minute quiet period** and **24-hour maximum wait**. A window is due when any threshold is reached. `window` accepts 5–2000, including 500; each large window is split by estimated tokens, preferring reply/topic boundaries and time gaps, with a small context overlap. Default chunk budget is 6000 estimated tokens including the rendered header/context. One individually oversized message remains whole, so can exceed that estimate; this is not a model tokenizer or a hard billing limit.
+
+`PATCH /api/digest/conversations/{conv}` accepts `kind`, `kind_source` (`you|model`; `rule` is the derived default), `window`, `quiet_ms`, `max_wait_ms`, `depth`, `daily_budget`, `priority` (0–3), `notify` (`now|digest|record`), `notify_source` (`learned|you`; `default` follows the kind) and optional `revision`. Time values are milliseconds. A missing setting is unchanged; explicit JSON `null` removes its override and restores the kind default. A stale supplied revision returns 409. For example, `{"window":500,"depth":"full"}` overrides only that conversation; `{"window":null}` restores 50. Quiet time can be 1 minute–24 hours, maximum wait 10 minutes–7 days, and budget 0–10000000 (0 means unlimited). Classification/notification source labels are stored provenance, not evidence that a model or learning worker has run.
+
+Depth is `full`, `summary`, `alerts`, `record` or `paused`. Full/summary queue packets for a later consumer; alerts folds machine firing/recovery events into a rule summary and queues only unresolved alerts/human discussion; record receipts messages without a packet; paused keeps messages waiting. Muted/blocked sources use record behavior. Default daily budgets are 300000 for team/project, 200000 for DM/mail and 100000 for feed/PR/issue. Budgets are soft: after a window takes spend to the limit, later windows wait for the next Hub-local day. Manual cuts bypass that budget, not source visibility or paused/record depth. Notification choices are persisted only; this base does not deliver digest notifications.
+
+Packets, chunks, per-message receipts and cursor advancement commit atomically. Receipts, not a timestamp watermark alone, prevent duplicates while accepting equal-time, late-arriving and backfilled messages. Default intake includes all stored history. A positive initial lookback is fixed when the conversation first runs, including when paused: it does not slide forward while a backlog waits.
+
+### Queue settings and recovery
+
+The workspace `digest` setting is a JSON object, managed through the existing workspace settings mechanism. Omitted fields use these defaults:
+
+```json
+{"enabled":true,"every_min":30,"packets":20,"chunk_tokens":6000,"overlap":2,"context":3,"backlog_days":0,"lease_min":120,"max_attempts":3}
+```
+
+`enabled:false` stops scheduled intake. A manual cut is still available. `backlog_days:0` means all stored history; a positive value sets the initial lookback floor for new cursors. It never downloads history. `every_min` and `packets` determine when a batch is due, not when a Bot runs: **the digest Bot/consumer is not part of this implementation**. Packets remain queued until a consumer is installed.
+
+The Rust queue contract exposes due/lease/renew/chunk completion/packet completion. Priority orders eligible packets; a conversation's earliest unfinished packet must finish before its next one can lease. Leases fence stale workers; expiration counts as an attempt. Retries preserve finished chunks, and a packet cannot finish while any chunk is unfinished. Exhaustion leaves `failed`, which intentionally blocks later packets of that conversation. The owner can inspect it and explicitly `POST /api/digest/packets/{id}/retry`; only failed packets reset their attempt budget, with completed chunks and message receipts retained. Restarting the Hub does not reset the queue.
+
+### Owner API and storage contracts
+
+All paths below are relative to `/api`, use the existing authenticated workspace selection, and do not initiate model/network work:
+
+| Method/path | Contract |
+| --- | --- |
+| `GET/PATCH /digest/conversations/{conv}` | Conversation facts, effective profile/overrides, cursor, latest summary, queue counts; update settings |
+| `POST /digest/conversations/{conv}/cut` | Cut currently stored pending messages in this conversation |
+| `GET /digest/packets`, `GET /digest/packets/{id}` | Inspect durable packets/facts/candidates and chunk progress; list accepts state/conv/limit |
+| `POST /digest/packets/{id}/retry` | Explicit recovery of a failed packet; returns whether it changed |
+| `GET/POST /digest/matters`, `GET/PATCH /digest/matters/{id}` | Search/read/create/edit a matter; title, summary and open/done/dropped state |
+| `POST /digest/matters/{id}/relate` | `op`: merge/not_same with `other`, split with `segments`/`title`, link/unlink with item/project `object`; explicit `force` can override not_same on merge |
+| `GET/POST /digest/todos`, `POST /digest/todos/{id}` | Owner's personal todos, separate from Bot items; create text/matter/due/refs/parties; transition with state/item |
+| `GET/POST /digest/memories/{id}/index` | Read/link an existing visible memory's conversation/matter/parties/range; does not create a separate memory system |
+| `GET /digest/changes`, `POST /digest/changes/{id}/undo` | Inspect/undo recorded digest changes, refusing incompatible later edits |
+
+Todo `refs` are pairs such as `[[{"type":"space","id":"sp_example"},"cm_example"]]`; a relate `object` is `{"type":"item","id":"ST-12"}`. The memory index POST uses `conv` as a conversation key, optional `matter`, `parties` and the exact `range` object.
+
+Matter retrieval returns a cross-conversation segment timeline, participant counts and item/project links. Split/merge operations retain explicit not_same boundaries, including those involving a merged alias. Segment storage validates **positive packet/chunk positions** and derives message IDs, times, people and chains from persisted facts; context positions are never writeback evidence. Candidate retrieval uses same chain/topic, referenced items, nearby participant overlap and SQLite matter/memory full text (Chinese bigrams included). It supplies candidates, not model decisions. Memory candidates respect owner visibility, expiry and the `never` disclosure level.
+
+Memory links use the existing `mems`/`mem_about` store, plus exact message ranges (`conv`, `first_id`, `last_id`, `first_at`, `last_at`); referenced entities and range endpoints must exist in the workspace. `steve_memory_list` keeps its existing human-readable about field and additionally returns structured `index.about`/`index.ranges`. Matter detail respects the reader's memory visibility, including other members' private memories. Mail-thread references and their displayed subjects use the reader's source visibility even in shared memories or notes; viewer-free search indexing does not copy mail subjects into shared text. Personal todo states are open/done/dropped/handed; handed links an existing workspace item, never automatically creates or starts a Bot. Automated-source deadlines require quoted words actually present in the referenced message. The base includes guarded undo for recorded summary/segment/todo/memory changes; memory-index undo returns 409 without changing data when a later range still relies on its conversation link or a matter merge has retargeted its link. Matter editing has its own event history, not a universal undo for every action.
+
+Automatic semantic summaries, matter/todo/memory proposals, a digest Bot and its MCP writeback tools, notification delivery and dedicated UI remain separate work. Nothing in this base requires an external model backend, a private gateway or a source checkout to operate a released Hub.

@@ -33,6 +33,7 @@ use rmcp::{
         streamable_http_server::session::never::NeverSessionManager,
     },
 };
+use serde_json::Value;
 use steve_node_api::*;
 
 /// Who is running what: the Node answers which attempt a session runs now.
@@ -41,7 +42,7 @@ pub trait Current: Send + Sync + 'static {
 }
 
 /// Whom a token was given to.
-#[derive(Clone, PartialEq)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 enum Holder {
     /// A session's harness: its calls count for the attempt it runs at the time.
     Session(SessionId),
@@ -54,9 +55,9 @@ pub(crate) struct Endpoint {
     tokens: Mutex<HashMap<String, Holder>>,
     current: Arc<dyn Current>,
     calls: AtomicU64,
-    /// The catalog the Hub last gave (it is the Hub's, the same for every execution): what a
-    /// session lists while it runs no attempt. Calls always fetch it anew.
-    catalog: Mutex<Option<Catalog>>,
+    /// The last catalog per token holder, never another Bot's pins or a research grant. Idle
+    /// sessions may reuse their own list; calls always fetch and authorize it anew.
+    catalog: Mutex<HashMap<Holder, Catalog>>,
     /// Random per process. The Hub keys its durable tool journal by (execution, CallId), and an
     /// execution can outlive this process (it is in the Node journal), so a bare counter would
     /// repeat `mcp0` after a restart and get the earlier call's result back for a call that never
@@ -71,7 +72,7 @@ impl Endpoint {
             tokens: Mutex::new(HashMap::new()),
             current,
             calls: AtomicU64::new(0),
-            catalog: Mutex::new(None),
+            catalog: Mutex::new(HashMap::new()),
             boot: boot_id(),
         })
     }
@@ -117,11 +118,13 @@ impl Endpoint {
     pub fn revoke_session(&self, session: &SessionId) {
         let h = Holder::Session(session.clone());
         self.tokens.lock().unwrap().retain(|_, s| *s != h);
+        self.catalog.lock().unwrap().remove(&h);
     }
 
     pub fn revoke_job(&self, exec: &ExecutionRef) {
         let h = Holder::Job(exec.clone());
         self.tokens.lock().unwrap().retain(|_, s| *s != h);
+        self.catalog.lock().unwrap().remove(&h);
     }
 
     fn holder_of(&self, token: &str) -> Option<Holder> {
@@ -222,6 +225,29 @@ async fn auth(State(ep): State<Arc<Endpoint>>, req: Request, next: Next) -> Resp
     let Some(holder) = (!token.is_empty()).then(|| ep.holder_of(token)).flatten() else {
         return empty(StatusCode::UNAUTHORIZED);
     };
+    // rmcp's typed ToolAnnotations drops extension fields. Serve the Hub's list as raw MCP JSON
+    // so standard hints and annotations.steve survive this protocol bridge unchanged.
+    if req.method() == axum::http::Method::POST {
+        let (parts, body) = req.into_parts();
+        let bytes = match axum::body::to_bytes(body, 4 * 1024 * 1024).await {
+            Ok(bytes) => bytes,
+            Err(_) => return empty(StatusCode::PAYLOAD_TOO_LARGE),
+        };
+        if let Ok(msg) = serde_json::from_slice::<Value>(&bytes)
+            && msg["method"] == "tools/list"
+        {
+            let id = msg.get("id").cloned().unwrap_or(Value::Null);
+            let handler = Handler { ep: ep.clone() };
+            let result = match handler.listing(&holder).await {
+                Ok(catalog) => serde_json::json!({"jsonrpc":"2.0", "id":id, "result":{
+                    "tools":catalog.tools.iter().map(descriptor_mcp).collect::<Vec<_>>()
+                }}),
+                Err(error) => serde_json::json!({"jsonrpc":"2.0", "id":id, "error":error}),
+            };
+            return axum::Json(result).into_response();
+        }
+        req = Request::from_parts(parts, Body::from(bytes));
+    }
     req.extensions_mut().insert(Authed(holder));
     next.run(req).await
 }
@@ -249,25 +275,34 @@ impl Handler {
     }
 
     /// The Hub's catalog for `exec`, kept for listing at idle.
-    async fn catalog(&self, hub: &dyn HubTools, exec: ExecutionRef) -> Result<Catalog, McpError> {
+    async fn catalog(
+        &self,
+        hub: &dyn HubTools,
+        exec: ExecutionRef,
+        holder: &Holder,
+    ) -> Result<Catalog, McpError> {
         let c = hub
             .catalog(exec)
             .await
             .map_err(|e| McpError::internal_error(e.safe_detail, None))?;
-        *self.ep.catalog.lock().unwrap() = Some(c.clone());
+        self.ep
+            .catalog
+            .lock()
+            .unwrap()
+            .insert(holder.clone(), c.clone());
         Ok(c)
     }
 
     /// What a holder lists: the catalog for its running attempt; for a session running none, the
-    /// last catalog this Node had, else (none yet) the catalog once its attempt starts, waiting
+    /// last catalog this session had, else (none yet) the catalog once its attempt starts, waiting
     /// up to [`LIST_WAIT`]. A job's token lists only while the job lives.
     async fn listing(&self, holder: &Holder) -> Result<Catalog, McpError> {
         let hub = self.hub()?;
         let session = match (self.execution(holder), holder) {
-            (Ok(exec), _) => return self.catalog(&*hub, exec).await,
+            (Ok(exec), _) => return self.catalog(&*hub, exec, holder).await,
             (Err(e), Holder::Job(_)) => return Err(e),
             (Err(e), Holder::Session(s)) => {
-                if let Some(c) = self.ep.catalog.lock().unwrap().clone() {
+                if let Some(c) = self.ep.catalog.lock().unwrap().get(holder).cloned() {
                     return Ok(c);
                 }
                 (s.clone(), e)
@@ -277,7 +312,7 @@ impl Handler {
         while tokio::time::Instant::now() < end {
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
             if let Some(exec) = self.ep.current.execution(&session.0) {
-                return self.catalog(&*hub, exec).await;
+                return self.catalog(&*hub, exec, holder).await;
             }
         }
         Err(session.1)
@@ -297,6 +332,13 @@ impl Handler {
             }
         }
     }
+}
+
+fn descriptor_mcp(t: &ToolDescriptor) -> Value {
+    let mut annotations = t.annotations.as_object().cloned().unwrap_or_default();
+    annotations.insert("readOnlyHint".into(), serde_json::json!(t.read_only));
+    serde_json::json!({"name":t.name, "description":t.description,
+        "inputSchema":t.input_schema, "annotations":annotations})
 }
 
 fn text(t: impl Into<String>) -> Vec<ContentBlock> {
@@ -372,7 +414,7 @@ impl ServerHandler for Handler {
             .ep
             .next_call()
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-        let catalog = self.catalog(&*hub, exec.clone()).await?;
+        let catalog = self.catalog(&*hub, exec.clone(), &holder).await?;
         let call = ToolCall {
             id,
             execution: exec,
@@ -404,6 +446,125 @@ mod tests {
         fn execution(&self, _: &SessionId) -> Option<ExecutionRef> {
             None
         }
+    }
+
+    #[test]
+    fn descriptors_preserve_standard_and_steve_annotations() {
+        let annotations = serde_json::json!({"title":"Read", "idempotentHint":true,
+            "steve":{"source":"mcp:files", "resources":["document"], "asYou":false}});
+        let descriptor = ToolDescriptor {
+            name: "files__read".into(),
+            description: "Read.".into(),
+            input_schema: serde_json::json!({"type":"object"}),
+            read_only: true,
+            annotations: annotations.clone(),
+        };
+        let value = descriptor_mcp(&descriptor);
+        assert_eq!(value["annotations"]["steve"], annotations["steve"]);
+        assert_eq!(value["annotations"]["idempotentHint"], true);
+        assert_eq!(value["annotations"]["readOnlyHint"], true);
+    }
+
+    #[tokio::test]
+    async fn idle_catalogs_never_cross_session_or_job_holders() {
+        let ep = Endpoint::new(Arc::new(Nobody));
+        let one = Holder::Session(SessionId::new("one").unwrap());
+        let two = Holder::Session(SessionId::new("two").unwrap());
+        let catalog = Catalog {
+            revision: Revision::new("one").unwrap(),
+            tools: vec![],
+        };
+        ep.catalog.lock().unwrap().insert(one.clone(), catalog);
+        assert!(ep.catalog.lock().unwrap().get(&two).is_none());
+        ep.revoke_session(&SessionId::new("one").unwrap());
+        assert!(ep.catalog.lock().unwrap().is_empty());
+    }
+
+    struct CatalogHub(Catalog);
+    #[async_trait::async_trait]
+    impl HubTools for CatalogHub {
+        async fn catalog(&self, _: ExecutionRef) -> ApiResult<Catalog> {
+            // The actual link serializes this same contract.
+            Ok(serde_json::from_value(serde_json::to_value(&self.0).unwrap()).unwrap())
+        }
+        async fn call(&self, _: ToolCall) -> ApiResult<ToolResult> {
+            unreachable!()
+        }
+        async fn call_status(&self, _: ToolKey) -> ApiResult<ToolResult> {
+            unreachable!()
+        }
+        async fn cancel_call(&self, _: ToolKey) -> ApiResult<ToolResult> {
+            unreachable!()
+        }
+    }
+
+    #[tokio::test]
+    async fn annotations_survive_catalog_wire_and_node_mcp_http() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        struct Active;
+        impl Current for Active {
+            fn execution(&self, s: &SessionId) -> Option<ExecutionRef> {
+                Some(ExecutionRef::Turn {
+                    session: s.clone(),
+                    turn: TurnId::new("turn").unwrap(),
+                    attempt: AttemptId::new("attempt").unwrap(),
+                })
+            }
+        }
+        let ep = Endpoint::new(Arc::new(Active));
+        let annotations = serde_json::json!({"readOnlyHint":true,"idempotentHint":true,
+            "steve":{"source":"mcp:files","kind":"read","resources":["document"],"asYou":false}});
+        ep.connect(Arc::new(CatalogHub(Catalog {
+            revision: Revision::new("catalog").unwrap(),
+            tools: vec![ToolDescriptor {
+                name: "files__read".into(),
+                description: "Read.".into(),
+                input_schema: serde_json::json!({"type":"object"}),
+                read_only: true,
+                annotations: annotations.clone(),
+            }],
+        })));
+        let url = ep.serve().await.unwrap();
+        let token = ep.token(&SessionId::new("one").unwrap());
+        let payload = r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#;
+        let mut stream = tokio::net::TcpStream::connect(
+            url.strip_prefix("http://")
+                .unwrap()
+                .trim_end_matches("/mcp"),
+        )
+        .await
+        .unwrap();
+        stream.write_all(format!("POST /mcp HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}",payload.len()).as_bytes()).await.unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).await.unwrap();
+        let (_, body) = response.split_once("\r\n\r\n").unwrap();
+        let result: Value = serde_json::from_str(body).unwrap();
+        assert_eq!(
+            result["result"]["tools"][0]["annotations"], annotations,
+            "{response}"
+        );
+
+        // Idle after a running turn: only that session can reuse its own pinned catalog.
+        let idle = Endpoint::new(Arc::new(Nobody));
+        idle.connect(Arc::new(CatalogHub(Catalog {
+            revision: Revision::new("unused").unwrap(),
+            tools: vec![],
+        })));
+        let one = Holder::Session(SessionId::new("one").unwrap());
+        let two = Holder::Session(SessionId::new("two").unwrap());
+        let own = ep.catalog.lock().unwrap().get(&one).unwrap().clone();
+        idle.catalog.lock().unwrap().insert(one.clone(), own);
+        let handler = Handler { ep: idle };
+        assert_eq!(
+            handler.listing(&one).await.unwrap().tools[0].name,
+            "files__read"
+        );
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(20), handler.listing(&two))
+                .await
+                .is_err(),
+            "another holder must wait for its own execution, never receive the first one's catalog"
+        );
     }
 
     /// A restarted Node (a new Endpoint) must not hand out a CallId the previous process already
