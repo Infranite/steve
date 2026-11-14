@@ -498,6 +498,8 @@ export default {
     done: "Turn complete",
     waitWhat: "A card is waiting for your decision at the end of the conversation",
     took: "Took {{dur}}",
+    nodeWait: "Queued: {{detail}} — retries automatically",
+    room: "Queued: the device is at its limit, {{running}}/{{max}}",
   },
   session: {
     no: "Conversation #{{n}}",

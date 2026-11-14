@@ -342,6 +342,8 @@ Open **http://127.0.0.1:8440** and sign in. `STEVE_DEV_LOGIN=1` adds a one-click
 
 Steve reads its settings from the environment. For a service, put them in `$STEVE_HOME/steve.env` (template: [`ops/steve.env.example`](ops/steve.env.example)). Keep secrets out of the checkout and reference them with `*_FILE` variables.
 
+Each Node defaults to **32 concurrent session turns**. Change the per-device setting (1–256) in **Devices → device details → Concurrent sessions**; it is saved on the Hub, not in an environment variable. Eligible excess turns queue durably and start automatically. Changes apply at the next dispatch without restarting; lowering the setting leaves current turns running. Idle sessions, model jobs and commands have separate accounting. See [capacity queues and Node versions](docs/deployment.md#concurrent-sessions-and-capacity-queues).
+
 For an existing Hub that completed managed setup, run `steve setup --reconfigure` (or add `--home /absolute/path/to/hub`) to edit its listening addresses, browser URL and, when one is configured, its OIDC issuer/client ID. It reads the current literal `steve.env`, preserves other lines and comments, and keeps the existing secret file and installation identity. Review the proposed changes and explicitly confirm before configuration checks, private backups and saving. It does not restart the service; use `steve hub restart` with the original home and service label when ready. See [reconfiguring an installed Hub](docs/deployment.md#reconfiguring-an-installed-hub) for checks and interruption recovery. This command does not reconfigure or re-pair Nodes.
 
 | Variable | Purpose |

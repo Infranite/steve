@@ -113,6 +113,8 @@ rpc_table! {
     IMPORT_PAGE = "import.page": HubToNode Control Read false;
     HISTORY_LOCATE = "history.locate": HubToNode Control Read false;
     NODE_VITALS = "node.vitals": HubToNode Control Read false;
+    // Idempotent setting, not an execution: resending it cannot duplicate work.
+    NODE_SESSION_CAPACITY = "node.session_capacity": HubToNode Control Read false;
     // EventSink
     EVENTS_COMMIT = "events.commit": NodeToHub Events Commit false;
     // HubTools

@@ -481,6 +481,8 @@ export default {
     done: "本回合已完成",
     waitWhat: "有卡片等你决定，见对话末尾",
     took: "用时 {{dur}}",
+    nodeWait: "排队：{{detail}}；会自动重试",
+    room: "排队：设备并行已满 {{running}}/{{max}}",
   },
   session: {
     no: "会话 #{{n}}",

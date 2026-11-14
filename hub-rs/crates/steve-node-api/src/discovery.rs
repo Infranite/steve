@@ -168,6 +168,14 @@ pub struct Capacity {
     pub execs: u32,
 }
 
+impl Capacity {
+    /// Concurrent turns on a newly started session-capable Node, before the Hub synchronizes its
+    /// saved per-device setting. Idle sessions, jobs and execs do not consume these slots.
+    pub const SESSIONS_DEFAULT: u32 = 32;
+    /// Largest configurable concurrent-turn count.
+    pub const SESSIONS_MAX: u32 = 256;
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Capabilities {
     pub node: NodeId,

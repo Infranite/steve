@@ -281,8 +281,8 @@ fn open_in_process_node(
 }
 
 /// The Hub's own Node as the Hub configures it (in its process, or in one of its own, B1): no
-/// ceiling, the Hub's harnesses and roots, sessions, flow commands, and with `jobs` Steve's own
-/// model work (think and research).
+/// ceiling, 32 concurrent turns until its saved device setting is synchronized, the Hub's harnesses
+/// and roots, sessions, flow commands, and with `jobs` Steve's own model work (think and research).
 pub(crate) fn local_node_config(
     cfg: &Config,
     node: steve_node_api::NodeId,
@@ -297,7 +297,7 @@ pub(crate) fn local_node_config(
         acp: acp_config(cfg),
         roots,
         capacity: steve_node_api::Capacity {
-            sessions: 64,
+            sessions: steve_node_api::Capacity::SESSIONS_DEFAULT,
             // think and research jobs share it
             jobs: if jobs { LOCAL_JOB_CAPACITY } else { 0 },
             // flow `cmd` steps (N0e-E6)
@@ -406,6 +406,13 @@ pub(crate) fn local_node_mode(vars: &Vars, no_resume: bool) -> Result<bool, Back
 /// back instead; a start left unknown after a refused abandon would also hold its slot until the
 /// next boot.
 pub const LOCAL_JOB_CAPACITY: u32 = u32::MAX;
+
+// The stored scheduler setting and the executor's actual limiter use the same defaults/range.
+const _: () = assert!(
+    steve_node_api::Capacity::SESSIONS_MAX as i64 == steve_store::runtime::SESSIONS_MAX
+        && steve_node_api::Capacity::SESSIONS_DEFAULT as i64
+            == steve_store::runtime::SESSIONS_DEFAULT
+);
 
 /// New sessions get their principal's own harness directory by default. An explicit `off`
 /// keeps the Node's shared harness state; existing sessions retain their recorded directory.

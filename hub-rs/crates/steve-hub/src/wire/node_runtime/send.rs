@@ -12,6 +12,7 @@ impl NodeRuntime {
     /// Leases one command, sends it and merges what came back. False: nothing to send.
     pub(super) async fn send_one(&self) -> bool {
         let lease = match self.tx(|tx| {
+            self.note_waiting_in(tx)?;
             match rt::lease_command_in(
                 tx,
                 self.node_id.as_str(),
@@ -45,6 +46,12 @@ impl NodeRuntime {
                     1_000
                 };
                 rt::retry_command_in(tx, &lease, now(), now() + delay, uncertain)?;
+                if !uncertain && !lease.maybe_sent {
+                    tx.execute(
+                        "UPDATE node_commands SET receipt=json_set(COALESCE(receipt,'{}'),'$.last_error',json(?)) WHERE operation_id=? AND state='pending'",
+                        rusqlite::params![serde_json::to_string(e).map_err(conflict)?, lease.operation],
+                    )?;
+                }
                 // a start_turn the user stopped meanwhile, refused before acceptance every time
                 // it went: it provably never ran, so it ends here instead of going out again. One
                 // earlier uncertain send may still arrive: the cancel waits for the Node instead
@@ -141,6 +148,35 @@ impl NodeRuntime {
         true
     }
 
+    /// Turns waiting because this Node runs as many as its owner set ([`rt::session_room`]): each
+    /// session is told once, with the numbers, and its turn goes by itself once one ends. The
+    /// mark is on the command, so a restart does not tell it again.
+    fn note_waiting_in(&self, tx: &Tx) -> Result<(), StoreError> {
+        let room = rt::session_room(tx, self.node_id.as_str())?;
+        if !room.full() || room.waiting == 0 {
+            return Ok(());
+        }
+        let fresh = rt::waiting_commands(tx, self.node_id.as_str())?;
+        for (op, session) in fresh {
+            tx.execute(
+                "UPDATE node_commands SET receipt=json_set(COALESCE(receipt,'{}'),'$.waiting',1) WHERE operation_id=?",
+                [&op],
+            )?;
+            if let Some(session) = session {
+                system_in(
+                    tx,
+                    &session,
+                    &steve_i18n::t!(
+                        "hub.node.waiting_for_room",
+                        running = room.running,
+                        max = room.max
+                    ),
+                )?;
+            }
+        }
+        Ok(())
+    }
+
     /// A command the Node refused because it is out of room: the refusal is kept on the command
     /// with how many came in a row, which sets its next delay (2 s doubling, at most 60 s). The
     /// first one tells the session, once; the command itself stays the same and is not counted
@@ -160,10 +196,9 @@ impl NodeRuntime {
             .optional()?
             .flatten();
         let n = before.unwrap_or(0) + 1;
-        let refusal = json!({ "success": false, "payload": e, "exhausted": n });
         tx.execute(
-            "UPDATE node_commands SET receipt=? WHERE operation_id=? AND state='pending'",
-            rusqlite::params![refusal.to_string(), lease.operation],
+            "UPDATE node_commands SET receipt=json_set(COALESCE(receipt,'{}'),'$.success',json('false'),'$.payload',json(?),'$.exhausted',?) WHERE operation_id=? AND state='pending'",
+            rusqlite::params![serde_json::to_string(e).map_err(conflict)?, n, lease.operation],
         )?;
         if n == 1
             && let Some(session) = command_any_session_in(tx, &lease.operation)?
@@ -171,7 +206,7 @@ impl NodeRuntime {
             system_in(
                 tx,
                 &session,
-                "Node 存储/容量已满，暂停接新工作，恢复后自动继续",
+                &steve_i18n::t!("hub.node.waiting_for_node", detail = e.safe_detail.as_str()),
             )?;
         }
         Ok(exhausted_delay(n))
@@ -186,7 +221,23 @@ impl NodeRuntime {
         match l.method.as_str() {
             "prepare_workspace" => n.prepare_workspace(parse(&l.request)?).await,
             "open_session" => n.open_session(parse(&l.request)?).await,
-            "start_turn" => n.start_turn(parse(&l.request)?).await,
+            "start_turn" => {
+                let limit = self
+                    .store
+                    .reader(|c| rt::session_limit(c, self.node_id.as_str()))
+                    .map_err(|e| {
+                        ApiError::new(ErrorCode::Offline, format!("session capacity: {e}"))
+                    })?;
+                // Reapply before each start, not once per Hub boot: a separately running Node may
+                // have restarted/reconnected meanwhile. This is resource scheduling, not policy.
+                // Old peers retain their own limiter and return their actual refusal when full.
+                match n.set_session_capacity(limit as u32).await {
+                    Ok(()) => {}
+                    Err(e) if e.code == ErrorCode::Unsupported => {}
+                    Err(e) => return Err(e),
+                }
+                n.start_turn(parse(&l.request)?).await
+            }
             "start_job" => n.start_job(parse(&l.request)?).await,
             "cancel" => n.cancel(parse(&l.request)?).await,
             "release_session" => n.release_session(parse(&l.request)?).await,

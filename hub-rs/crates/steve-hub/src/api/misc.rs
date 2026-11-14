@@ -1305,6 +1305,7 @@ pub async fn devices(State(st): State<AppState>, Query(q): Query<Fresh>) -> ApiR
 
 pub async fn device_patch(
     State(st): State<AppState>,
+    Extension(c): Extension<Ctx>,
     Path(id): Path<String>,
     b: Bytes,
 ) -> ApiResult {
@@ -1322,10 +1323,16 @@ pub async fn device_patch(
         Num {
             int: true,
             min: Some(1.0),
-            max: Some(16.0),
+            max: Some(steve_store::runtime::SESSIONS_MAX as f64),
             gt: None,
         },
     ) {
+        if id != steve_store::runtime::HUB_DEVICE {
+            return Err(ApiError::bad_request(steve_i18n::t!(
+                "hub.devices.limit_node_api"
+            )));
+        }
+        owner_or(&c, || steve_i18n::t!("hub.devices.limit_owner_only"))?;
         p.insert("max_sessions".into(), js_num(m));
     }
     k.finish()?;

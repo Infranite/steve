@@ -295,6 +295,8 @@ impl HomeLock {
 
 pub(crate) struct Inner {
     cfg: NodeConfig,
+    /// Active-turn slots, updated by the Hub without disturbing running work.
+    session_capacity: AtomicUsize,
     /// The roots allowed now (set at open, replaced by the host).
     roots: std::sync::RwLock<Arc<Vec<Root>>>,
     /// A file the Hub on this machine writes the roots to, and when it was read last
@@ -1337,6 +1339,7 @@ impl LocalNode {
             adapter_probes: Default::default(),
             adapter_updates: Default::default(),
             imports: Default::default(),
+            session_capacity: AtomicUsize::new(cfg.capacity.sessions as usize),
             cfg,
             j,
             incarnation,
@@ -2319,7 +2322,7 @@ impl SessionExecutor for LocalNode {
                 .into_iter()
                 .filter(|(_, o)| o.method == "start_turn" && !o.receipt.state.is_finished())
                 .count() as u32;
-            if running >= self.0.cfg.capacity.sessions {
+            if running as usize >= self.0.session_capacity.load(Ordering::SeqCst) {
                 return Err(ApiError::new(ErrorCode::Exhausted, "no session capacity"));
             }
             if let Some((_, other)) = t.attempt(&tu.run.attempt)?
@@ -3798,6 +3801,25 @@ fn root_of(at: &RootPath) -> RootPath {
 
 #[async_trait]
 impl Discovery for LocalNode {
+    async fn set_session_capacity(&self, sessions: u32) -> ApiResult<()> {
+        if self.0.cfg.capacity.sessions == 0 {
+            return unsupported("this node runs no sessions");
+        }
+        if !(1..=Capacity::SESSIONS_MAX).contains(&sessions) {
+            return Err(ApiError::new(
+                ErrorCode::Invalid,
+                "session capacity must be 1–256",
+            ));
+        }
+        // Share admission's journal lock so the change has a well-defined ordering against starts.
+        self.0.j.tx(|_| {
+            self.0
+                .session_capacity
+                .store(sessions as usize, Ordering::SeqCst);
+            Ok(())
+        })
+    }
+
     async fn vitals(&self) -> ApiResult<NodeVitals> {
         let roots = self.0.roots();
         let sessions = self.0.actors.lock().unwrap().len() as u32;
@@ -3863,7 +3885,10 @@ impl Discovery for LocalNode {
                     access: r.access,
                 })
                 .collect(),
-            capacity: self.0.cfg.capacity.clone(),
+            capacity: Capacity {
+                sessions: self.0.session_capacity.load(Ordering::SeqCst) as u32,
+                ..self.0.cfg.capacity.clone()
+            },
             // a command's secret as a temp file on this machine
             features: vec![FEATURE_SECRET_FILE.into(), FEATURE_ARTIFACT_READ.into()],
         })
