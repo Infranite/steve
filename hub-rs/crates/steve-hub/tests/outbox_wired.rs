@@ -618,3 +618,144 @@ async fn real_completion_notification_reaches_e1_and_existing_c6_fake_adapter() 
         1
     );
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn notification_targets_http_uses_live_caller_not_owner_or_query_identity() {
+    use steve_channels::{SpaceKind, fake::channel::FakeChannel};
+    use steve_modules::Caller;
+    async fn get(e: &Env, cookie: Option<&str>, ws: &str) -> (u16, Value) {
+        let mut req = e
+            .http
+            .get(format!(
+                "{}/api/me/notification-targets?user_id=ignored&party_id=ignored",
+                e.base
+            ))
+            .header("x-steve-ws", ws);
+        if let Some(cookie) = cookie {
+            req = req.header("cookie", cookie);
+        }
+        let response = req.send().await.unwrap();
+        let status = response.status().as_u16();
+        (status, response.json().await.unwrap())
+    }
+    let e = start().await;
+    let owner = e.one_text("SELECT id FROM users WHERE subject='dev:local'");
+    let other = e
+        .store
+        .users()
+        .create("notification-target:other", "Other", None, "member")
+        .unwrap();
+    e.store
+        .auth_sessions()
+        .create(&other, "notification-target-member", 3_600_000)
+        .unwrap();
+    let other_cookie = "steve_session=notification-target-member";
+    let me = Caller {
+        ws: "default".into(),
+        me: owner.clone(),
+    };
+    let them = Caller {
+        ws: "default".into(),
+        me: other.clone(),
+    };
+    FakeChannel::seed_connection(&e.store, &me, Some("target-owner")).unwrap();
+    FakeChannel::seed_connection(&e.store, &them, Some("target-member")).unwrap();
+    let (conn, _) = FakeChannel::seed_connection(&e.store, &me, None).unwrap();
+    e.store
+        .transaction(|tx| {
+            steve_channels::spaces::set_account_rules(
+                tx,
+                &steve_store::base::Viewer::bare(&me.ws, &me.me),
+                &conn,
+                &json!([{"when":{"kind":"all"},"act":"record"}]),
+                e.channels.now(),
+            )
+        })
+        .unwrap();
+    let mut expected = Vec::new();
+    for (who, handle, ext) in [
+        (&me, "target-owner", "D_TARGET_OWNER"),
+        (&them, "target-member", "D_TARGET_MEMBER"),
+    ] {
+        e.fake.space(
+            ext,
+            "Personal DM",
+            SpaceKind::Dm,
+            false,
+            &[(handle, "Self")],
+        );
+        let inbound = e
+            .channels
+            .on_message(
+                "default",
+                &conn,
+                FakeChannel::message(ext, ext, handle, "record only"),
+            )
+            .await
+            .unwrap();
+        let party: String = e
+            .store
+            .reader(|c| -> steve_modules::ApiResult<String> {
+                Ok(c.query_row(
+                    "SELECT id FROM parties WHERE workspace_id=? AND user_id=?",
+                    [&who.ws, &who.me],
+                    |r| r.get(0),
+                )?)
+            })
+            .unwrap();
+        expected.push((party, inbound.space_id));
+    }
+    assert_eq!(get(&e, None, "default").await.0, 401);
+    for (cookie, (party, space)) in [(&*e.cookie, &expected[0]), (other_cookie, &expected[1])] {
+        let before = e.one("SELECT count(*) FROM audit");
+        let (s, v) = get(&e, Some(cookie), "default").await;
+        assert_eq!(s, 200, "{v}");
+        assert_eq!(v["targets"].as_array().unwrap().len(), 1, "{v}");
+        let t = &v["targets"][0];
+        assert_eq!(t["party_id"], *party);
+        assert_eq!(t["space_id"], *space);
+        assert_eq!(t["channel"], "slack");
+        assert_eq!(
+            t.as_object().unwrap().len(),
+            5,
+            "no roster, account or credential fields"
+        );
+        assert_eq!(e.one("SELECT count(*) FROM audit"), before);
+    }
+    assert_eq!(e.one("SELECT count(*) FROM notification_policies"), 0);
+    assert_eq!(e.one("SELECT count(*) FROM output_deliveries"), 0);
+    assert!(e.fake.sent.lock().unwrap().is_empty());
+    // Same caller, another live workspace: no cross-workspace choices or owner fallback.
+    e.exec(
+        "INSERT INTO workspaces(id,name,created) VALUES('notification-empty','Empty',1)",
+        &[],
+    );
+    e.exec("INSERT INTO workspace_members(workspace_id,user_id,role,created) VALUES('notification-empty',?,'owner',1)", &[&owner]);
+    let (s, v) = get(&e, Some(&e.cookie), "notification-empty").await;
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(v, json!({"targets":[]}));
+    assert_eq!(
+        get(&e, Some(other_cookie), "notification-empty").await.0,
+        409
+    );
+    // Losing the user link immediately empties just that caller's choices, without seeding a
+    // replacement party or borrowing the workspace owner's route.
+    let parties = e.one("SELECT count(*) FROM parties");
+    e.exec(
+        "UPDATE parties SET user_id=NULL WHERE id=?",
+        &[&expected[1].0],
+    );
+    let (s, v) = get(&e, Some(other_cookie), "default").await;
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(v, json!({"targets":[]}));
+    assert_eq!(e.one("SELECT count(*) FROM parties"), parties);
+    // A still-valid session is not membership. The HTTP Caller layer refuses the stale scope.
+    e.exec(
+        "DELETE FROM workspace_members WHERE workspace_id='default' AND user_id=?",
+        &[&other],
+    );
+    assert_eq!(get(&e, Some(other_cookie), "default").await.0, 409);
+    let (s, v) = get(&e, Some(&e.cookie), "default").await;
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(v["targets"][0]["party_id"], expected[0].0);
+}

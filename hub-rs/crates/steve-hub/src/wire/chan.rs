@@ -18,6 +18,7 @@ pub fn routes(ch: Channels, outbox: Arc<Outbox>) -> Router<Modules> {
             "/me/notification-policy",
             get(notification_policy).put(set_notification_policy),
         )
+        .route("/me/notification-targets", get(notification_targets))
         .route("/me/notifications", get(personal_notifications))
         .route("/me/notifications/{id}/seen", post(notification_seen))
         .route("/deliveries", post(submit_delivery))
@@ -285,6 +286,15 @@ async fn set_notification_policy(
 ) -> ApiResult<Json<Value>> {
     steve_channels::notifications::put_policy(&ch, &who, &policy)?;
     Ok(Json(json!({"ok":true})))
+}
+
+async fn notification_targets(
+    Extension(ch): Extension<Channels>,
+    who: Caller,
+) -> ApiResult<Json<Value>> {
+    Ok(Json(
+        json!({"targets": steve_channels::notifications::targets(&ch, &who)?}),
+    ))
 }
 
 async fn personal_notifications(
