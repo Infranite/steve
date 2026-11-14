@@ -215,8 +215,11 @@ try {
     if (shots) await page.screenshot({ path: `${shots}/notifications-now-${width}-${theme}.png`, fullPage: true })
     const enabled = page.locator("[data-notify-enabled]")
     await enabled.hover()
-    const hover = await enabled.evaluate((el) => {
+    const hover = await enabled.evaluate(async (el) => {
       const wrapper = el.closest(".ui-swc"), track = el.nextElementSibling
+      // Hover can still be between colors, even with reduced motion's 1ms transition.
+      // Assert the settled token, rather than Chromium's interpolated OKLab value.
+      await Promise.all(track.getAnimations().map((animation) => animation.finished))
       const probe = document.createElement("span"); probe.style.background = "var(--aui-primary-hover)"; wrapper.append(probe)
       const expected = getComputedStyle(probe).backgroundColor; probe.remove()
       return { actual: getComputedStyle(track).backgroundColor, expected }
