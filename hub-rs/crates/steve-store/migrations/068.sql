@@ -1,4 +1,4 @@
--- 67: the digest base (chat-knowledge phase B): conversation profiles and digest settings, the
+-- 68: the digest base (chat-knowledge phase B): conversation profiles and digest settings, the
 -- per-conversation cursor, the durable digest packet queue, conversation summaries, alert rollups,
 -- matters (事) with their segments across conversations, personal todos (我的待办), the message
 -- ranges a memory came from, and the log of every digest write (undo). New tables only.

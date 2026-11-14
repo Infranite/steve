@@ -136,7 +136,8 @@ pub const MIGRATIONS: &[&str] = &[
     // 66: how each session's last turn ended and whether you stopped it (`session_stops`), and each
     // turn by attempt (`session_turns`): its end judged once, a pause's stop kept.
     include_str!("../migrations/066.sql"),
-    include_str!("../migrations/067.sql"),
+    // 68: deterministic conversation digest intake and durable knowledge indexes.
+    include_str!("../migrations/068.sql"),
 ];
 
 /// 027's item columns and their one-time backfill (applied by `run_pending` when `items.phase` is missing).
