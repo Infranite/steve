@@ -648,7 +648,7 @@ fn devices_and_links() {
             got.status.as_str(),
             got.max_sessions
         ),
-        ("Hub", "2", "正常", 4)
+        ("Hub", "2", "正常", 32)
     );
     assert_eq!(
         serde_json::to_value(got).unwrap()["roles"],
