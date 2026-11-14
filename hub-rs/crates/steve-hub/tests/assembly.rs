@@ -438,10 +438,17 @@ async fn feishu_self_wires_without_feishu_bot() {
         steve_hub::wire::wire_assembly(&h.cfg, &Bus::new(), h.vars.clone(), &asm).expect("wire");
     assert_eq!(
         w.seams.channels.connections().provider_ids(),
-        ["ext_ws", "feishu_user", "github_app", "github_pat", "imap"]
+        [
+            "ext_ws",
+            "ext_ws.bot",
+            "feishu_user",
+            "github_app",
+            "github_pat",
+            "imap"
+        ]
     );
     let rt = w.lifecycle.as_ref().expect("a connection runtime");
-    assert_eq!(rt.adapters(), ["ext_ws", "feishu_user"]);
+    assert_eq!(rt.adapters(), ["ext_ws", "ext_ws.bot", "feishu_user"]);
     // the base 16 (including MCP idle cleanup, the digest queue and personal notifications) and connection runtime
     assert_eq!(w.jobs.len(), 17);
     // without both, the rest still wires
@@ -553,9 +560,19 @@ async fn an_assembly_registers_only_its_extensions() {
     let channels = &w.seams.channels;
     assert_eq!(
         channels.connections().provider_ids(),
-        ["ext_ws", "feishu_app", "github_app", "github_pat", "imap"]
+        [
+            "ext_ws",
+            "ext_ws.bot",
+            "feishu_app",
+            "github_app",
+            "github_pat",
+            "imap"
+        ]
     );
-    assert_eq!(channels.profile_adapter_ids(), ["ext_ws", "feishu_app"]);
+    assert_eq!(
+        channels.profile_adapter_ids(),
+        ["ext_ws", "ext_ws.bot", "feishu_app"]
+    );
     assert_eq!(w.tools.outbox.as_user_ids(), ["ext_ws"]);
     // the built-in 18 (including MCP idle cleanup, the digest queue and personal notifications) and the probe's
     assert_eq!(w.jobs.len(), 19);
