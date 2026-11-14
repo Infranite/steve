@@ -40,6 +40,7 @@ tracing = "=0.1.44"
 steve-modules = { path = "../steve-modules" }
 # F6: the transaction type of identify / merge.
 steve-store = { path = "../steve-store" }
+steve-work-api = { path = "../steve-work-api" }
 async-trait = "=0.1.92"
 url = "=2.5.8"
 zeroize = "=1.9.1"

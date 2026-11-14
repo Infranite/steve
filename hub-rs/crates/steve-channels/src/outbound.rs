@@ -839,7 +839,7 @@ pub fn verify(
     if row.sender_account_id.as_deref() != Some(account.as_str()) {
         return Ok(Err("sender".into()));
     }
-    if let Err(why) = crate::pipeline::verify_route(c, &row.id)? {
+    if let Err(why) = crate::pipeline::verify_route(c, &row.id, now)? {
         return Ok(Err(why));
     }
     if !direct_ok(mode, auth) {
@@ -970,6 +970,8 @@ pub struct Outbox {
     pinned: Option<Arc<dyn PinnedModel>>,
     /// Drafts being rewritten now (“改写后再看”), each on a task of its own.
     rewriting: Arc<Mutex<std::collections::HashSet<String>>>,
+    #[cfg(feature = "fake")]
+    before_attempt: Mutex<Option<(Arc<tokio::sync::Barrier>, Arc<tokio::sync::Barrier>)>>,
 }
 
 impl Outbox {
@@ -979,7 +981,19 @@ impl Outbox {
             as_user: BTreeMap::new(),
             pinned: None,
             rewriting: Arc::default(),
+            #[cfg(feature = "fake")]
+            before_attempt: Mutex::new(None),
         }
+    }
+
+    /// Test-only barrier after claim, before the final authorization/attempt transaction.
+    #[cfg(feature = "fake")]
+    pub fn pause_before_attempt(
+        &self,
+        entered: Arc<tokio::sync::Barrier>,
+        release: Arc<tokio::sync::Barrier>,
+    ) {
+        *lock(&self.before_attempt) = Some((entered, release));
     }
 
     /// Acts as you (sends, reacts, recalls) on your own connections (`Mode::Own`) of the adapter
@@ -1301,6 +1315,10 @@ impl Outbox {
             if !(pending || (again && row.status == "unknown")) {
                 return Ok(Err(SendOutcome::Skipped));
             }
+            if crate::notifications::deferred(tx, &row.id, now)? {
+                tx.execute("UPDATE personal_notifications SET next_attempt_at=? WHERE delivery_id=(SELECT id FROM output_deliveries WHERE message_id=?)",params![now+10_000,row.id])?;
+                return Ok(Err(SendOutcome::Skipped));
+            }
             // tried before: again only while the provider drops repeats
             let tried = send_state::get(tx, &row.id)?.and_then(|s| s.first_at);
             if let Some(first) = tried {
@@ -1477,10 +1495,33 @@ impl Outbox {
                 return self.failed(ch, &row, &e.to_string(), claim);
             }
         };
-        // the first try's text and mentions, kept: a repeat under the same dedupe key is the same
-        let (text, at) = ch
-            .store()
-            .transaction(|tx| send_state::attempt(tx, &row.id, auth, &text, &at, now))?;
+        #[cfg(feature = "fake")]
+        {
+            let pause = lock(&self.before_attempt).take();
+            if let Some((entered, release)) = pause {
+                entered.wait().await;
+                release.wait().await;
+            }
+        }
+        // Re-read live consent and the pinned recipient at the actual attempt boundary. No await
+        // separates this transaction from the adapter invocation. A completed PUT before this point
+        // wins; it cannot cancel an already-started external request.
+        let attempted = ch.store().transaction(|tx| -> ChannelResult<Option<(String, Vec<String>)>> {
+            let now = ch.now();
+            let ours:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM chan_messages WHERE id=? AND status='pending' AND sent=?)",params![row.id,claim],|r|r.get(0))?;
+            if !ours { return Ok(None); }
+            if crate::notifications::deferred(tx, &row.id, now)?
+                || verify(tx, &row, auth, now)?.is_err()
+            {
+                tx.execute("UPDATE chan_messages SET sent=NULL WHERE id=? AND status='pending' AND sent=?",params![row.id,claim])?;
+                tx.execute("UPDATE personal_notifications SET next_attempt_at=? WHERE delivery_id=(SELECT id FROM output_deliveries WHERE message_id=?)",params![now+10_000,row.id])?;
+                return Ok(None);
+            }
+            Ok(Some(send_state::attempt(tx, &row.id, auth, &text, &at, now)?))
+        })?;
+        let Some((text, at)) = attempted else {
+            return Ok(SendOutcome::Skipped);
+        };
         let in_thread = reply_in_thread(kind, row.thread_key.as_deref());
         let sent: Result<Sent, ProviderError> = match (mode, self.as_user.get(&adapter)) {
             (Mode::Own, Some(u)) => {
@@ -1741,7 +1782,8 @@ impl Outbox {
                 "SELECT m.id, d.id, d.result FROM chan_messages m JOIN decisions d ON d.id = m.decision_id
                   WHERE m.direction = 'out' AND m.status = 'pending' AND (m.sent IS NULL OR m.sent < ?)
                     AND d.status = 'resolved' AND d.subject_type = ? AND d.subject_id = m.id
-                  ORDER BY m.created LIMIT 50",
+                  ORDER BY coalesce((SELECT n.next_attempt_at FROM personal_notifications n
+                    JOIN output_deliveries od ON od.id=n.delivery_id WHERE od.message_id=m.id),0),m.created LIMIT 50",
             )?;
             let rows = st
                 .query_map(params![now - CLAIM_STALE_MS, SUBJECT_MESSAGE], |r| {
@@ -1786,10 +1828,14 @@ impl Outbox {
                 "SELECT m.id, m.created, s.first_at FROM chan_messages m JOIN chan_send_state s ON s.message_id = m.id
                   WHERE m.direction = 'out' AND m.status = 'pending' AND m.decision_id IS NULL
                     AND ((m.sent IS NULL AND m.created < ?1) OR m.sent < ?2)
+                    AND (s.first_at IS NOT NULL OR NOT EXISTS (
+                      SELECT 1 FROM personal_notifications n JOIN output_deliveries od ON od.id=n.delivery_id
+                      JOIN notification_policies p ON p.workspace_id=n.workspace_id AND p.user_id=n.user_id
+                      WHERE od.message_id=m.id AND p.enabled=1 AND (p.mode<>'now' OR n.next_attempt_at>?3)))
                   ORDER BY m.created LIMIT 50",
             )?;
             let v = st
-                .query_map(params![now - UNCLAIMED_MS, now - CLAIM_STALE_MS], |r| {
+                .query_map(params![now - UNCLAIMED_MS, now - CLAIM_STALE_MS, now], |r| {
                     Ok((r.get(0)?, r.get(1)?, r.get(2)?))
                 })?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -1820,7 +1866,10 @@ impl Outbox {
                 }
                 continue;
             }
-            if created < now - LATE_MS {
+            let notification = ch.store().reader(|c| -> ChannelResult<bool> {
+                Ok(c.query_row("SELECT EXISTS(SELECT 1 FROM personal_notifications n JOIN output_deliveries d ON d.id=n.delivery_id WHERE d.message_id=?)", [&m], |r| r.get(0))?)
+            }).unwrap_or(false);
+            if created < now - LATE_MS && !notification {
                 if let Err(e) = self.ask_late(ch, &m) {
                     tracing::warn!(message = m, "late reply not asked about: {e}");
                 }
@@ -1876,7 +1925,8 @@ impl Outbox {
                   WHERE m.direction = 'out' AND m.status = 'unknown'
                     AND NOT EXISTS (SELECT 1 FROM decisions d WHERE d.subject_type = ?1
                                       AND d.subject_id = m.id AND d.status = 'open')
-                  ORDER BY m.created LIMIT 50",
+                  ORDER BY coalesce((SELECT n.next_attempt_at FROM personal_notifications n
+                    JOIN output_deliveries od ON od.id=n.delivery_id WHERE od.message_id=m.id),0),m.created LIMIT 50",
             )?;
             let v = st
                 .query_map([SUBJECT_MESSAGE], |r| {

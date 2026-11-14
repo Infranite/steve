@@ -103,11 +103,15 @@ pub(crate) fn record(
 ) -> ChannelResult<()> {
     require_requester(tx, &e.who)?;
     let t = &req.target;
+    crate::notifications::verify_intent(tx, &e.who, &e.intent, now)?;
+    crate::notifications::verify_pinned(tx, &e.who, &e.intent, &t.space_id)?;
+    let delivery_id = uid("od");
     tx.execute(
         "INSERT INTO output_deliveries(id,workspace_id,requester,idempotency_key,fingerprint,intent,connection_id,space_id,source_message_id,message_id,created)
          VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-        params![uid("od"),e.who.ws,e.who.me,e.intent.key,e.fingerprint,serde_json::to_string(&e.intent)?,t.connection_id,t.space_id,t.source_message_id,message,now],
+        params![delivery_id,e.who.ws,e.who.me,e.intent.key,e.fingerprint,serde_json::to_string(&e.intent)?,t.connection_id,t.space_id,t.source_message_id,message,now],
     )?;
+    crate::notifications::attach(tx, &e.who, &e.intent, &delivery_id)?;
     steve_store::base::audit(
         tx,
         &e.who.ws,
@@ -121,7 +125,11 @@ pub(crate) fn record(
 
 /// The queue cannot silently reroute a stored intent to another voice/account, nor keep using an
 /// account after its requester leaves. Legacy outbound messages have no intent and keep C6 rules.
-pub(crate) fn verify_route(c: &Connection, message: &str) -> ChannelResult<Result<(), String>> {
+pub(crate) fn verify_route(
+    c: &Connection,
+    message: &str,
+    now: i64,
+) -> ChannelResult<Result<(), String>> {
     let row: Option<(String,String,String,String,String)> = c.query_row(
         "SELECT workspace_id,requester,connection_id,space_id,intent FROM output_deliveries WHERE message_id=?",
         [message], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?)),
@@ -135,6 +143,11 @@ pub(crate) fn verify_route(c: &Connection, message: &str) -> ChannelResult<Resul
     }
     let viewer = Viewer::load(c, &who.ws, &who.me)?;
     let i: DeliveryIntent = serde_json::from_str(&intent)?;
+    if let Err(e) = crate::notifications::verify_intent(c, &who, &i, now)
+        .and_then(|_| crate::notifications::verify_pinned(c, &who, &i, &space))
+    {
+        return Ok(Err(format!("personal notification consent/route: {e}")));
+    }
     match reachable(c, &viewer, &space, i.identity, i.party_id.as_deref()) {
         Ok(t) if t.connection_id == conn => Ok(Ok(())),
         _ => Ok(Err("stored output route is no longer reachable".into())),
@@ -207,7 +220,11 @@ fn reachable(
     })
 }
 
-fn route(c: &Connection, viewer: &Viewer, i: &DeliveryIntent) -> ChannelResult<OutTarget> {
+pub(crate) fn route(
+    c: &Connection,
+    viewer: &Viewer,
+    i: &DeliveryIntent,
+) -> ChannelResult<OutTarget> {
     let source = if let Some(id) = &i.source_message_id {
         let row:Option<(String,Option<String>,Option<String>)>=c.query_row(
             "SELECT space_id,external_id,thread_key FROM chan_messages WHERE workspace_id=? AND id=? AND direction='in' AND purged IS NULL",
@@ -297,6 +314,7 @@ impl Outbox {
         let viewer = ch.modules().viewer(who)?;
         let target = ch.store().reader(|c| {
             require_requester(c, who)?;
+            crate::notifications::verify_intent(c, who, &e.intent, ch.now())?;
             route(c, &viewer, &e.intent)
         })?;
         // Account visibility is stricter than a shared conversation: never borrow somebody else's

@@ -14,6 +14,12 @@ use steve_modules::{ApiError, ApiResult, Caller, Modules};
 
 pub fn routes(ch: Channels, outbox: Arc<Outbox>) -> Router<Modules> {
     Router::new()
+        .route(
+            "/me/notification-policy",
+            get(notification_policy).put(set_notification_policy),
+        )
+        .route("/me/notifications", get(personal_notifications))
+        .route("/me/notifications/{id}/seen", post(notification_seen))
         .route("/deliveries", post(submit_delivery))
         .route("/deliveries/{id}", get(delivery))
         .route(
@@ -261,4 +267,40 @@ async fn delivery(
             )?)?))
         })
         .await
+}
+
+async fn notification_policy(
+    Extension(ch): Extension<Channels>,
+    who: Caller,
+) -> ApiResult<Json<Value>> {
+    Ok(Json(serde_json::to_value(
+        steve_channels::notifications::get_policy(&ch, &who)?,
+    )?))
+}
+
+async fn set_notification_policy(
+    Extension(ch): Extension<Channels>,
+    who: Caller,
+    Json(policy): Json<steve_channels::notifications::Policy>,
+) -> ApiResult<Json<Value>> {
+    steve_channels::notifications::put_policy(&ch, &who, &policy)?;
+    Ok(Json(json!({"ok":true})))
+}
+
+async fn personal_notifications(
+    Extension(ch): Extension<Channels>,
+    who: Caller,
+) -> ApiResult<Json<Value>> {
+    Ok(Json(serde_json::to_value(
+        steve_channels::notifications::list(&ch, &who)?,
+    )?))
+}
+
+async fn notification_seen(
+    Extension(ch): Extension<Channels>,
+    who: Caller,
+    Path(id): Path<String>,
+) -> ApiResult<Json<Value>> {
+    steve_channels::notifications::seen(&ch, &who, &id)?;
+    Ok(Json(json!({"ok":true})))
 }
