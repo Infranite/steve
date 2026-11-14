@@ -3923,11 +3923,33 @@ impl Discovery for LocalNode {
             .keys()
             .map(|h| {
                 let p = probed.get(h).cloned().unwrap_or_default();
+                // For `probe_initialize: false` adapters (`adapters.get(h)` is `None`), check
+                // whether the binary is actually present so `c.sessions` reflects reality;
+                // adapters with a `Probe` keep the `sessions = true` capability shape (their
+                // readiness lives on `c.adapter.status` + `c.adapter.session`).
+                let present = if adapters.contains_key(h) {
+                    true
+                } else {
+                    self.0.cfg.acp.adapter_command(h).is_ok_and(|(bin, _)| {
+                        if bin.components().count() > 1 || bin.is_absolute() {
+                            if steve_acp::is_node_script(&bin) {
+                                bin.is_file()
+                            } else {
+                                steve_acp::is_executable_file(&bin)
+                            }
+                        } else {
+                            bin.to_str().is_some_and(|s| {
+                                steve_acp::which_in(s, std::env::var_os("PATH").as_deref())
+                                    .is_some()
+                            })
+                        }
+                    })
+                };
                 let mut c = HarnessCapability {
                     name: h.clone(),
                     version: p.version,
-                    sessions: true,
-                    jobs: self.0.cfg.capacity.jobs > 0,
+                    sessions: present,
+                    jobs: present && self.0.cfg.capacity.jobs > 0,
                     models: p.models,
                     resume: true,
                     cancel: true,

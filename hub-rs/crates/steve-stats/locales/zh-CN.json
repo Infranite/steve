@@ -17,8 +17,6 @@
   "stats.label.yolo": "YOLO 代答",
   "stats.label.digest": "汇报",
   "stats.label.other": "其他",
-  "stats.label.claude_code": "Claude Code",
-  "stats.label.codex": "Codex",
   "stats.label.stall": "停滞",
   "stats.label.error": "会话出错",
   "stats.label.restart": "Hub 重启",

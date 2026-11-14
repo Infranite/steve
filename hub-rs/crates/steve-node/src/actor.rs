@@ -248,6 +248,7 @@ pub(crate) struct LiveNew {
     pgid: i64,
     started: Option<u64>,
     view: SessionView,
+    cumulative_prompt_tokens: Option<(u64, u64, u64, u64, u64)>,
 }
 
 struct Live {
@@ -259,6 +260,7 @@ struct Live {
     image: bool,
     pgid: i64,
     started: Option<u64>,
+    cumulative_prompt_tokens: Option<(u64, u64, u64, u64, u64)>,
 }
 
 impl Drop for Live {
@@ -277,6 +279,7 @@ impl From<LiveNew> for Live {
             image: l.image,
             pgid: l.pgid,
             started: l.started,
+            cumulative_prompt_tokens: l.cumulative_prompt_tokens,
         }
     }
 }
@@ -1041,6 +1044,20 @@ impl Actor {
                             t.put_session(&row)
                         });
                         self.live = Some(l.into());
+                        if let Some(baseline) = self
+                            .live
+                            .as_ref()
+                            .and_then(|live| live.cumulative_prompt_tokens)
+                            && let Some(run) = self.run.as_mut()
+                            && self
+                                .inner
+                                .cfg
+                                .acp
+                                .adapter_properties(&run.spec.run.choice.harness)
+                                .usage_prompt_cumulative
+                        {
+                            run.norm.set_prompt_cumulative_baseline(baseline);
+                        }
                         if saved.is_err() {
                             if self.stop_process().await.gone() {
                                 self.end(failure(
@@ -1095,17 +1112,27 @@ impl Actor {
         let token = self.next_token();
         let meter = Epoch::new(derived_id("m", &format!("{}.{token}", spec.run.attempt)))
             .unwrap_or_else(|_| Epoch::new("m").expect("valid"));
+        let props = self
+            .inner
+            .cfg
+            .acp
+            .adapter_properties(&spec.run.choice.harness);
+        let mut norm = Normalizer::new(root, spec.run.attempt.as_str(), meter)
+            .input_includes_cache(props.usage_input_includes_cache);
+        if props.usage_prompt_cumulative {
+            let baseline = self
+                .live
+                .as_ref()
+                .filter(|l| !l.conn.has_exited())
+                .and_then(|l| l.cumulative_prompt_tokens)
+                .unwrap_or((0, 0, 0, 0, 0));
+            norm = norm.prompt_cumulative_baseline(baseline);
+        }
         self.run = Some(Run {
             token,
             exec,
             op,
-            norm: Normalizer::new(root, spec.run.attempt.as_str(), meter).input_includes_cache(
-                self.inner
-                    .cfg
-                    .acp
-                    .adapter_properties(&spec.run.choice.harness)
-                    .usage_input_includes_cache,
-            ),
+            norm,
             spec,
             phase: Phase::Starting,
             acted: false,
@@ -1335,6 +1362,12 @@ impl Actor {
         let mut evs: Vec<(Subject, EventBody)> = vec![];
         let mut config: Vec<Fact> = vec![];
         if self.attributed(generation, token) {
+            if u.get("sessionUpdate").and_then(Value::as_str) == Some("usage_update")
+                && let Some(t) = Normalizer::cumulative_tokens_from_usage_update(u)
+                && let Some(live) = self.live.as_mut()
+            {
+                live.cumulative_prompt_tokens = Some(t);
+            }
             let run = self.run.as_mut().expect("checked");
             for f in run.norm.update(u) {
                 match f {
@@ -1363,6 +1396,12 @@ impl Actor {
             .as_ref()
             .is_some_and(|l| l.generation == generation)
         {
+            if u.get("sessionUpdate").and_then(Value::as_str) == Some("usage_update")
+                && let Some(t) = Normalizer::cumulative_tokens_from_usage_update(u)
+                && let Some(live) = self.live.as_mut()
+            {
+                live.cumulative_prompt_tokens = Some(t);
+            }
             // outside our attempts only the harness's own background cost counts
             let mut n = Normalizer::new("/", "bg", Epoch::new("bg").expect("valid"));
             for f in n.update(u) {
@@ -1730,9 +1769,13 @@ impl Actor {
                     .and_then(Value::as_str)
                     .unwrap_or("end_turn")
                     .to_string();
-                let usage = final_usage(run, &resp);
                 if let Some(run) = self.run.as_mut() {
-                    run.final_usage = usage;
+                    run.final_usage = final_usage(run, &resp);
+                    if let Some(cum) = run.norm.cumulative_prompt_tokens()
+                        && let Some(live) = self.live.as_mut()
+                    {
+                        live.cumulative_prompt_tokens = Some(cum);
+                    }
                 }
                 match stopped {
                     Some((outcome, e)) => failure(outcome, e, acted),
@@ -1759,6 +1802,15 @@ impl Actor {
                 // this one ends only once its group is confirmed gone
                 if gone && !self.stop_process().await.gone() {
                     return self.unknown_end("the harness did not stop");
+                }
+                if !gone
+                    && let Some(cum) = self
+                        .run
+                        .as_ref()
+                        .and_then(|r| r.norm.cumulative_prompt_tokens())
+                    && let Some(live) = self.live.as_mut()
+                {
+                    live.cumulative_prompt_tokens = Some(cum);
                 }
                 match stopped {
                     Some((outcome, err)) => failure(outcome, err, acted),
@@ -1972,6 +2024,79 @@ impl Actor {
 /// The principal's own directory for a harness (path model §4.5.1), made when missing under the
 /// Node's `state/` (0700). A principal who owns this Node starts with what the adapter declares of
 /// their own directory here (their settings, their login); a file already there is theirs to keep.
+fn valid_rel_path(rel: &str) -> Result<Vec<std::ffi::OsString>, ApiError> {
+    let p = std::path::Path::new(rel);
+    if p.is_absolute() {
+        return Err(ApiError::new(
+            ErrorCode::Invalid,
+            format!("harness state: path '{rel}' must be relative"),
+        ));
+    }
+    let mut segs = Vec::new();
+    for c in p.components() {
+        match c {
+            std::path::Component::Normal(seg) if !seg.is_empty() => segs.push(seg.to_os_string()),
+            _ => {
+                return Err(ApiError::new(
+                    ErrorCode::Invalid,
+                    format!("harness state: unsafe relative path '{rel}'"),
+                ));
+            }
+        }
+    }
+    if segs.is_empty() {
+        return Err(ApiError::new(
+            ErrorCode::Invalid,
+            format!("harness state: empty relative path '{rel}'"),
+        ));
+    }
+    Ok(segs)
+}
+
+fn read_owner_regular_file(own: &std::path::Path, segs: &[std::ffi::OsString]) -> Option<Vec<u8>> {
+    // Reject if `own` itself is a symlink; intermediate segments under `own` must be real dirs.
+    let own_meta = std::fs::symlink_metadata(own).ok()?;
+    if own_meta.file_type().is_symlink() || !own_meta.is_dir() {
+        return None;
+    }
+    let mut cur = own.to_path_buf();
+    for (idx, seg) in segs.iter().enumerate() {
+        cur.push(seg);
+        let meta = std::fs::symlink_metadata(&cur).ok()?;
+        if meta.file_type().is_symlink() {
+            return None;
+        }
+        if idx + 1 < segs.len() {
+            if !meta.is_dir() {
+                return None;
+            }
+        } else if !meta.is_file() {
+            return None;
+        }
+    }
+    #[cfg(unix)]
+    {
+        use std::io::Read as _;
+        use std::os::unix::fs::OpenOptionsExt as _;
+        let mut f = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(&cur)
+            .ok()?;
+        let meta = f.metadata().ok()?;
+        if !meta.is_file() || meta.len() > 4 * 1024 * 1024 {
+            return None;
+        }
+        let mut buf = Vec::with_capacity(meta.len() as usize);
+        f.read_to_end(&mut buf).ok()?;
+        Some(buf)
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::read(&cur).ok()
+    }
+}
+
 fn harness_state(
     inner: &Inner,
     s: &HarnessState,
@@ -1993,19 +2118,49 @@ fn harness_state(
         crate::attachments::private_dir(&dir)
             .map_err(|e| internal(format!("harness state: {e}")))?;
     }
-    if s.import_owner {
-        let own = std::env::var_os(&sd.env)
-            .filter(|v| !v.is_empty())
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|| inner.cfg.acp.user_home.join(&sd.default));
+    if sd.xdg {
+        let xdg_root = dir.join("xdg");
+        crate::attachments::private_dir(&xdg_root)
+            .map_err(|e| internal(format!("harness state: {e}")))?;
+        for sub in ["data", "config", "state", "cache"] {
+            crate::attachments::private_dir(&xdg_root.join(sub))
+                .map_err(|e| internal(format!("harness state: {e}")))?;
+        }
+    }
+    let mut target = dir.clone();
+    if sd.home_override && !sd.default.is_empty() {
+        for seg in valid_rel_path(&sd.default)? {
+            target.push(seg);
+            crate::attachments::private_dir(&target)
+                .map_err(|e| internal(format!("harness state: {e}")))?;
+        }
+    } else if let Some(sub) = sd.import_into.as_deref().filter(|s| !s.is_empty()) {
+        for seg in valid_rel_path(sub)? {
+            target.push(seg);
+            crate::attachments::private_dir(&target)
+                .map_err(|e| internal(format!("harness state: {e}")))?;
+        }
+    }
+    if s.import_owner
+        && let Some(own) = sd.owner_source(&inner.cfg.acp.user_home)
+    {
         for f in &sd.import {
-            let (from, to) = (own.join(f), dir.join(f));
-            if !from.is_file() || std::fs::symlink_metadata(&to).is_ok() {
+            let segs = valid_rel_path(f)?;
+            let mut to = target.clone();
+            for (idx, seg) in segs.iter().enumerate() {
+                to.push(seg);
+                if idx + 1 < segs.len() {
+                    crate::attachments::private_dir(&to)
+                        .map_err(|e| internal(format!("harness state: {f}: {e}")))?;
+                }
+            }
+            if std::fs::symlink_metadata(&to).is_ok() {
                 continue;
             }
-            let bytes =
-                std::fs::read(&from).map_err(|e| internal(format!("harness state: {f}: {e}")))?;
-            crate::attachments::publish_private_if_absent(&to, &bytes)
+            let Some(raw) = read_owner_regular_file(&own, &segs) else {
+                continue;
+            };
+            crate::attachments::publish_private_if_absent(&to, &raw)
                 .map_err(|e| internal(format!("harness state: {f}: {e}")))?;
         }
     }
@@ -2070,11 +2225,13 @@ async fn open_harness(
         .adapter_command(&harness)
         .map_err(|e| ApiError::new(ErrorCode::Unsupported, e))?;
     // the principal's own harness directory, when the Hub asks for one and the adapter can move it
-    let state = match (
-        &row.open.state,
-        inner.cfg.acp.adapter_properties(&harness).state,
-    ) {
-        (Some(s), Some(sd)) => Some((sd.env.clone(), harness_state(inner, s, &sd)?)),
+    let declared_state = inner.cfg.acp.adapter_properties(&harness).state;
+    let state = match (&row.open.state, declared_state.as_ref()) {
+        (Some(s), Some(sd)) => {
+            let dir = harness_state(inner, s, sd)?;
+            let env = sd.isolation_env_for(&dir, Some(&inner.cfg.acp.user_home), s.import_owner);
+            Some((dir, env))
+        }
         _ => None,
     };
     // the Bot's skills where the adapter declares it reads them, in that directory
@@ -2082,7 +2239,7 @@ async fn open_harness(
         &state,
         inner.cfg.acp.adapter_properties(&harness).skills.as_deref(),
     ) {
-        (Some((_, dir)), Some(sub)) => {
+        (Some((dir, _)), Some(sub)) => {
             if let Err(why) = crate::bot_skills::place(dir, sub, &row.open.skills) {
                 tracing::warn!(session = %session, "the Bot's skills were not placed: {why}");
             }
@@ -2092,6 +2249,13 @@ async fn open_harness(
             "the Bot's skills are not given: the harness reads none, or the session has no harness directory of its own"
         ),
         _ => {}
+    }
+    if state.is_none()
+        && let Some(sd) = &declared_state
+    {
+        for d in sd.ambient_dirs(&inner.cfg.acp.user_home) {
+            let _ = std::fs::create_dir_all(d);
+        }
     }
     // its toolchains' outputs and caches in the item's and the person's own places
     let tools = crate::toolchain::for_run(
@@ -2108,17 +2272,32 @@ async fn open_harness(
         .then(|| inner.confine.fresh_env().map(<[_]>::to_vec))
         .flatten();
     // in the OS sandbox, unless the harness sandboxes its own shell (macOS nests none)
-    let (program, args) = if inner.cfg.acp.adapter_properties(&harness).nested_sandbox {
-        inner.confine.wrap_in(
+    let adapter_props = inner.cfg.acp.adapter_properties(&harness);
+    let mut args = args;
+    if adapter_props.nested_sandbox
+        && crate::confine::is_outer_sandbox_active(false, Some(&inner.confine))
+    {
+        for flag in &adapter_props.outer_sandbox_args {
+            if !args.iter().any(|a| a == flag.as_str()) {
+                args.push(flag.into());
+            }
+        }
+    }
+    let hide_cli_creds = row.open.state.as_ref().is_some_and(|st| !st.import_owner);
+    let (program, args) = if adapter_props.nested_sandbox {
+        inner.confine.wrap_in_mode(
             program,
             args,
             &[],
             &state
                 .iter()
-                .map(|(_, d)| d.clone())
+                .map(|(d, _)| d.clone())
                 .chain(tools.person.clone())
                 .collect::<Vec<_>>(),
             Some(std::path::Path::new(&cwd)),
+            state.is_some(),
+            hide_cli_creds,
+            Some(&inner.cfg.acp.user_home),
         )
     } else {
         (program, args)
@@ -2141,6 +2320,10 @@ async fn open_harness(
         retired,
         stall: inner.cfg.storage.ingress_stall,
     };
+    type SeenTokens = (u64, u64, u64, u64, u64);
+    let seen_tokens: Arc<std::sync::Mutex<Option<SeenTokens>>> =
+        Arc::new(std::sync::Mutex::new(None));
+    let seen_tokens_reader = seen_tokens.clone();
     let conn = Conn::spawn_registered_observed(
         Spawn {
             program,
@@ -2155,8 +2338,8 @@ async fn open_harness(
                 // them
                 env.extend(tools.env);
                 env.extend(inner.cfg.acp.adapter_env(&harness));
-                if let Some((var, dir)) = &state {
-                    env.push((var.into(), dir.clone().into_os_string()));
+                if let Some((_, vars)) = &state {
+                    env.extend(vars.iter().cloned());
                 }
                 // level 2: the login environment first, everything above over it
                 if let Some(f) = &fresh {
@@ -2224,6 +2407,12 @@ async fn open_harness(
                 Incoming::Notification { method, params } if method == "session/update" => {
                     // counted as it arrives (admission): a flood is stopped before it is all kept
                     let u = params.get("update")?;
+                    if token == 0
+                        && u.get("sessionUpdate").and_then(Value::as_str) == Some("usage_update")
+                        && let Some(t) = Normalizer::cumulative_tokens_from_usage_update(u)
+                    {
+                        *seen_tokens_reader.lock().unwrap() = Some(t);
+                    }
                     let update = Msg::Update {
                         generation,
                         token,
@@ -2283,7 +2472,11 @@ async fn open_harness(
             .acp
             .mode_choice(&harness, row.open.policy.permissions),
     );
-    let meta = inner.cfg.acp.session_meta(&harness);
+    let meta =
+        inner
+            .cfg
+            .acp
+            .session_meta_with_mode(&harness, false, Some(row.open.policy.permissions));
     // Steve's own tools first, then the Bot's own servers with their secrets taken just now
     let mut mcp_servers = crate::mcp_servers(inner, session);
     if !row.open.mcp_servers.is_empty() {
@@ -2351,6 +2544,7 @@ async fn open_harness(
         inner.j.tx(|t| t.drop_proc(session, pgid))?;
         return Err(NodeStop::AdapterExited.error());
     }
+    let cumulative_prompt_tokens = *seen_tokens.lock().unwrap();
     Ok(LiveNew {
         conn,
         retire,
@@ -2360,63 +2554,33 @@ async fn open_harness(
         pgid,
         started,
         view,
+        cumulative_prompt_tokens,
     })
 }
 
-/// The token figures of the prompt's answer: the main loop's, and per model everything.
-fn final_usage(run: &Run, resp: &Value) -> Vec<(Subject, EventBody)> {
+/// The token figures of the prompt's answer: normalized through [`Normalizer::prompt_response`] so
+/// alternate ACP field shapes, `usage_input_includes_cache`, and `usage_prompt_cumulative` apply
+/// uniformly across sessions and one-shot calls.
+fn final_usage(run: &mut Run, resp: &Value) -> Vec<(Subject, EventBody)> {
     let exec = run.exec.clone();
     let attempt = exec.attempt().clone();
-    let tok = |u: &Value| Tokens {
-        input: u.get("inputTokens").and_then(Value::as_u64),
-        output: u.get("outputTokens").and_then(Value::as_u64),
-        cache_read: u
-            .get("cachedReadTokens")
-            .or_else(|| u.get("cachedInputTokens"))
-            .and_then(Value::as_u64),
-        cache_write: u.get("cachedWriteTokens").and_then(Value::as_u64),
-        reasoning: None,
-    };
-    let mut reports = vec![];
-    if let Some(u) = resp.get("usage").filter(|u| u.is_object()) {
-        reports.push((None, UsageScope::Main, tok(u)));
-    }
-    if let Some(m) = resp
-        .pointer("/_meta/quota/model_usage")
-        .and_then(Value::as_array)
-    {
-        for x in m {
-            if let Some(tc) = x.get("token_count") {
-                reports.push((
-                    x.get("model").and_then(Value::as_str).map(String::from),
-                    UsageScope::All,
-                    tok(tc),
-                ));
-            }
-        }
-    }
     let Ok(meter) = Epoch::new(derived_id("f", attempt.as_str())) else {
         return vec![];
     };
-    reports
+    run.norm
+        .prompt_response(resp)
         .into_iter()
+        .filter_map(|f| match f {
+            Fact::Event(EventBody::Usage { report }) => Some(report),
+            _ => None,
+        })
         .enumerate()
-        .map(|(i, (model, scope, tokens))| {
+        .map(|(i, mut report)| {
+            report.report_id = derived_id("f", &format!("{attempt}.{i}"));
+            report.meter_epoch = meter.clone();
             (
                 Subject::Execution(exec.clone()),
-                EventBody::Usage {
-                    report: UsageReport {
-                        report_id: derived_id("f", &format!("{attempt}.{i}")),
-                        model,
-                        meter_epoch: meter.clone(),
-                        scope,
-                        measurement: Measurement::Final,
-                        tokens,
-                        context_used: None,
-                        context_limit: None,
-                        cost: None,
-                    },
-                },
+                EventBody::Usage { report },
             )
         })
         .collect()
@@ -2475,5 +2639,39 @@ fn failure(outcome: Outcome, e: ApiError, acted: bool) -> Completion {
         result: vec![],
         continuation: None,
         job: None,
+    }
+}
+
+#[cfg(test)]
+mod state_import_tests {
+    use super::*;
+
+    #[test]
+    fn valid_rel_path_rejects_traversal_and_absolute() {
+        assert!(valid_rel_path("settings.json").is_ok());
+        assert!(valid_rel_path("settings/cli.json").is_ok());
+        assert!(valid_rel_path(".gemini").is_ok());
+        assert!(valid_rel_path("../secret.json").is_err());
+        assert!(valid_rel_path("a/../b.json").is_err());
+        assert!(valid_rel_path("/etc/passwd").is_err());
+        assert!(valid_rel_path("./settings.json").is_err());
+        assert!(valid_rel_path("").is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_owner_regular_file_refuses_symlinks() {
+        let t = tempfile::tempdir().unwrap();
+        let own = t.path().join("own");
+        std::fs::create_dir_all(&own).unwrap();
+        let outside = t.path().join("outside.json");
+        std::fs::write(&outside, "{}").unwrap();
+        std::os::unix::fs::symlink(&outside, own.join("settings.json")).unwrap();
+        let segs = valid_rel_path("settings.json").unwrap();
+        assert!(read_owner_regular_file(&own, &segs).is_none());
+
+        std::fs::write(own.join("real.json"), "{\"ok\":true}").unwrap();
+        let real_segs = valid_rel_path("real.json").unwrap();
+        assert!(read_owner_regular_file(&own, &real_segs).is_some());
     }
 }

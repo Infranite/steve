@@ -222,17 +222,25 @@ impl Core {
             arrived: e.arrived,
         });
         let batch = e.batch_no.map(|n| format!("MQ-{n}"));
-        let (state, next, summary, advice): (&'static str, Next, String, String) = match e.state.as_str() {
+        let (state, next, summary, advice): (&'static str, Next, String, String) = match e
+            .state
+            .as_str()
+        {
             "queued" => (
                 "queued",
                 Next::Wait,
-                format!("在合并队列里排队（{target}）：目标空闲就开始合入，同一目标忙时和其他改动一起成批。"),
+                format!(
+                    "在合并队列里排队（{target}）：目标空闲就开始合入，同一目标忙时和其他改动一起成批。"
+                ),
                 WAIT.into(),
             ),
             "batched" => (
                 "merging",
                 Next::Wait,
-                format!("{} 正在合入 {into}：在 Node 上集成、按目标的检查验证后推送。", batch.clone().unwrap_or_default()),
+                format!(
+                    "{} 正在合入 {into}：在 Node 上集成、按目标的检查验证后推送。",
+                    batch.clone().unwrap_or_default()
+                ),
                 WAIT.into(),
             ),
             "landed" => {
@@ -244,7 +252,10 @@ impl Core {
                 (
                     "merged_waiting_release",
                     Next::Wait,
-                    format!("已合入 {into}（{}），按项目约定核对完成条件。", batch.clone().unwrap_or_default()),
+                    format!(
+                        "已合入 {into}（{}），按项目约定核对完成条件。",
+                        batch.clone().unwrap_or_default()
+                    ),
                     WAIT.into(),
                 )
             }
@@ -270,7 +281,8 @@ impl Core {
                 "left",
                 Next::Nothing,
                 "这一项不在合并队列里了（见时间线），按项目原来的方式合并。".into(),
-                "推送、开 PR、合并、打 tag 是对外动作，先用 steve_request_approval 请求批准。".into(),
+                "推送、开 PR、合并、打 tag 是对外动作，先用 steve_request_approval 请求批准。"
+                    .into(),
             ),
         };
         st.state = state;

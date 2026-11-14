@@ -19,12 +19,19 @@ pub enum SandboxMode {
     Off,
 }
 
-/// True on macOS with `sandbox-exec` installed and usable from here (not from inside another
-/// sandbox, which macOS cannot nest: Steve's own tests run in a confined session). Asked once.
+/// True on macOS with `sandbox-exec` installed and usable from here, or on Linux with `bwrap`
+/// installed and usable from here. Asked once.
 pub fn available() -> bool {
     static WORKS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *WORKS
-        .get_or_init(|| Path::new(SANDBOX_EXEC).exists() && steve_vault::harness::seatbelt_works())
+    *WORKS.get_or_init(|| {
+        if cfg!(target_os = "macos") {
+            Path::new(SANDBOX_EXEC).exists() && steve_vault::harness::seatbelt_works()
+        } else if cfg!(target_os = "linux") {
+            steve_vault::harness::bwrap_works()
+        } else {
+            false
+        }
+    })
 }
 
 /// Whether a run under `mode` is sandboxed; `None` when `Required` but unavailable.
@@ -42,7 +49,7 @@ pub fn profile(writable: &[PathBuf]) -> Option<String> {
     let mut allow = String::new();
     for w in writable {
         let s = w.to_str()?;
-        if s.contains(['"', '\\']) || !w.is_absolute() {
+        if s.contains(['"', '\\']) || s.chars().any(char::is_control) || !w.is_absolute() {
             return None;
         }
         allow.push_str(&format!(" (subpath \"{s}\")"));

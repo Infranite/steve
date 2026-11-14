@@ -119,12 +119,14 @@ export default {
   effort: {
     default: "Model default",
     none: "Off · none",
+    off: "Off · off",
     minimal: "Minimal · minimal",
     low: "Low · low",
     medium: "Medium · medium",
     high: "High · high",
     xhigh: "Extra high · xhigh",
     max: "Max · max",
+    ultra: "Ultra · ultra",
   },
   detail: {
     tabOverview: "Overview",

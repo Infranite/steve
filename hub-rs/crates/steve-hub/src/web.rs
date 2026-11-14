@@ -222,10 +222,10 @@ fn page_redirect(web_port: u16, req: &Request) -> Option<String> {
     // `/auth/…` and `/api/…` are this port's own: the web port sends `/auth/…` back here, and a
     // path of them that is no route is answered as one, not passed back and forth.
     let p = req.uri().path();
-    if ["/auth", "/api"]
-        .iter()
-        .any(|own| p.strip_prefix(own).is_some_and(|rest| rest.is_empty() || rest.starts_with('/')))
-    {
+    if ["/auth", "/api"].iter().any(|own| {
+        p.strip_prefix(own)
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+    }) {
         return None;
     }
     let host = host_of(h)?;
@@ -429,7 +429,10 @@ mod tests {
         assert_eq!(
             page_redirect(
                 8441,
-                &req(&[("host", "192.168.1.20:8440"), ("accept", page)], "/authors")
+                &req(
+                    &[("host", "192.168.1.20:8440"), ("accept", page)],
+                    "/authors"
+                )
             )
             .as_deref(),
             Some("http://192.168.1.20:8441/authors"),

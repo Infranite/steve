@@ -213,10 +213,32 @@ impl Confine {
         writable: &[PathBuf],
         cwd: Option<&Path>,
     ) -> (PathBuf, Vec<OsString>) {
+        self.wrap_in_mode(program, args, readable, writable, cwd, false, false, None)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn wrap_in_mode(
+        &self,
+        program: PathBuf,
+        args: Vec<OsString>,
+        readable: &[PathBuf],
+        writable: &[PathBuf],
+        cwd: Option<&Path>,
+        isolated_state: bool,
+        hide_cli_creds: bool,
+        user_home: Option<&Path>,
+    ) -> (PathBuf, Vec<OsString>) {
         // the places a run in a workspace writes, level 1 and up
         let writes = match cwd {
-            Some(cwd) if self.files => Some(writable_places(cwd, writable)),
+            Some(cwd) if self.files => {
+                Some(writable_places(cwd, writable, isolated_state, user_home))
+            }
             _ => None,
+        };
+        let hidden_cli = if hide_cli_creds {
+            user_home.map(cli_credential_paths).unwrap_or_default()
+        } else {
+            Vec::new()
         };
         match &self.sandbox {
             Sandbox::Off(_) => (program, args),
@@ -225,6 +247,7 @@ impl Confine {
                 if let Some(places) = &writes {
                     profile.push_str(&seatbelt_writes(places));
                 }
+                profile.push_str(&seatbelt_hide_cli(&hidden_cli));
                 profile.push_str(rules);
                 let opened = readable
                     .iter()
@@ -301,6 +324,7 @@ impl Confine {
                 for f in &p.hidden_files {
                     a.extend(["--ro-bind".into(), "/dev/null".into(), f.into()]);
                 }
+                bwrap_hide_cli(&mut a, &hidden_cli);
                 for r in readable {
                     let r = std::fs::canonicalize(r).unwrap_or_else(|_| r.clone());
                     a.extend(["--ro-bind".into(), r.clone().into(), r.into()]);
@@ -320,6 +344,162 @@ impl Confine {
             }
         }
     }
+
+    /// Wraps a read-only job (`acp_think` or `research`) on Linux using Bubblewrap with
+    /// `--ro-bind / /`, control-plane hiding, sensitive home masking, and `--bind` only on
+    /// `writable` (the run's scratch dir and declared harness state dirs).
+    pub(crate) fn wrap_readonly(
+        &self,
+        program: PathBuf,
+        args: Vec<OsString>,
+        writable: &[PathBuf],
+        chdir: Option<&Path>,
+        user_home: &Path,
+    ) -> (PathBuf, Vec<OsString>) {
+        match &self.sandbox {
+            Sandbox::Bwrap {
+                bwrap,
+                steve_home,
+                node_home,
+            } => bwrap_readonly_with_plan(
+                bwrap,
+                Some((steve_home, node_home)),
+                program,
+                args,
+                writable,
+                chdir,
+                user_home,
+            ),
+            _ => {
+                if let Some(bwrap) = steve_vault::harness::bwrap_path() {
+                    bwrap_readonly_standalone(&bwrap, program, args, writable, chdir, user_home)
+                } else {
+                    (program, args)
+                }
+            }
+        }
+    }
+}
+
+pub(crate) fn is_outer_sandbox_active(
+    has_readonly_sandbox: bool,
+    confine: Option<&Confine>,
+) -> bool {
+    has_readonly_sandbox || confine.is_some_and(|c| !matches!(c.sandbox, Sandbox::Off(_)))
+}
+
+pub(crate) fn bwrap_readonly_standalone(
+    bwrap: &Path,
+    program: PathBuf,
+    args: Vec<OsString>,
+    writable: &[PathBuf],
+    chdir: Option<&Path>,
+    user_home: &Path,
+) -> (PathBuf, Vec<OsString>) {
+    bwrap_readonly_with_plan(bwrap, None, program, args, writable, chdir, user_home)
+}
+
+fn bwrap_readonly_with_plan(
+    bwrap: &Path,
+    homes: Option<(&Path, &Path)>,
+    program: PathBuf,
+    args: Vec<OsString>,
+    writable: &[PathBuf],
+    chdir: Option<&Path>,
+    user_home: &Path,
+) -> (PathBuf, Vec<OsString>) {
+    let mut a: Vec<OsString> = vec![
+        "--ro-bind".into(),
+        "/".into(),
+        "/".into(),
+        "--dev".into(),
+        "/dev".into(),
+        "--proc".into(),
+        "/proc".into(),
+    ];
+    if let Some((steve_home, node_home)) = homes {
+        let p = steve_vault::harness::bwrap_plan(steve_home, node_home);
+        for d in &p.masked {
+            a.extend(["--tmpfs".into(), d.into()]);
+        }
+        // Re-bind run directories read-only first so job scratch / worktree paths exist inside
+        // the masked STEVE_HOME without becoming broadly writable.
+        for d in &p.writable {
+            a.extend(["--ro-bind".into(), d.into(), d.into()]);
+        }
+        for d in &p.hidden_dirs {
+            if d.is_dir() {
+                a.extend(["--tmpfs".into(), d.into()]);
+            }
+        }
+        for f in &p.hidden_files {
+            a.extend(["--ro-bind".into(), "/dev/null".into(), f.into()]);
+        }
+    }
+    let sensitive_home: Vec<PathBuf> = steve_research::guard::SENSITIVE_HOME_DIRS
+        .iter()
+        .map(|rel| user_home.join(rel))
+        .collect();
+    bwrap_hide_cli(&mut a, &sensitive_home);
+    for w in writable {
+        let w = std::fs::canonicalize(w).unwrap_or_else(|_| w.clone());
+        if w.is_dir() {
+            a.extend(["--bind".into(), w.clone().into(), w.into()]);
+        } else if w.is_file() {
+            a.extend(["--bind".into(), w.clone().into(), w.into()]);
+        }
+    }
+    if let Some(cwd) = chdir {
+        let cwd = std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
+        if cwd.is_dir() {
+            a.extend(["--chdir".into(), cwd.into()]);
+        }
+    }
+    a.push("--".into());
+    a.push(program.into());
+    a.extend(args);
+    (bwrap.to_path_buf(), a)
+}
+
+/// The built-in harnesses' own places under the owner's home (logins, tokens, history), hidden
+/// from a session of another principal, whose harness keeps its state in its own directory.
+fn cli_credential_paths(user_home: &Path) -> Vec<PathBuf> {
+    let (dirs, files) = harness_home_places();
+    dirs.iter()
+        .chain(files.iter())
+        .map(|rel| user_home.join(rel))
+        .collect()
+}
+
+fn seatbelt_hide_cli(paths: &[PathBuf]) -> String {
+    let mut s = String::new();
+    let mut seen = std::collections::HashSet::new();
+    for p in paths {
+        let real = std::fs::canonicalize(p).unwrap_or_else(|_| p.clone());
+        for cand in [p, &real] {
+            let cs = cand.to_string_lossy();
+            if cs.contains(['"', '\\']) || cs.chars().any(char::is_control) {
+                continue;
+            }
+            if seen.insert(cs.clone().into_owned()) {
+                s.push_str(&format!(
+                    "(deny file-read* file-write* (literal \"{cs}\") (subpath \"{cs}\"))\n"
+                ));
+            }
+        }
+    }
+    s
+}
+
+fn bwrap_hide_cli(a: &mut Vec<OsString>, paths: &[PathBuf]) {
+    for p in paths {
+        let real = std::fs::canonicalize(p).unwrap_or_else(|_| p.clone());
+        if real.is_dir() {
+            a.extend(["--tmpfs".into(), real.into()]);
+        } else if real.is_file() {
+            a.extend(["--ro-bind".into(), "/dev/null".into(), real.into()]);
+        }
+    }
 }
 
 /// Where a run in a workspace may write (level 1 and up).
@@ -330,9 +510,9 @@ pub(crate) struct Places {
     pub files: Vec<PathBuf>,
 }
 
-/// The caches and harness homes under the user's home a run may write: what tools write as a
-/// matter of course, so isolating files does not break them.
-const HOME_WRITABLE: &[&str] = &[
+/// Toolchain and package caches under the user's home a run may write regardless of principal
+/// isolation: what compilers and package managers write as a matter of course.
+const HOME_CACHES: &[&str] = &[
     ".cache",
     "Library/Caches",
     ".npm",
@@ -350,13 +530,40 @@ const HOME_WRITABLE: &[&str] = &[
     ".nuget",
     ".gem",
     ".cocoapods",
-    ".local/state",
-    ".config",
-    ".claude",
-    ".codex",
 ];
 
-fn writable_places(cwd: &Path, writable: &[PathBuf]) -> Places {
+/// What else a run in ambient mode (the owner's own harness state, `!isolated_state`) writes
+/// under the home: the configuration and state roots tools write as a matter of course.
+const HOME_AMBIENT: &[&str] = &[".local/state", ".config"];
+
+/// Where the built-in harnesses keep their state under the user's home, as their adapters declare
+/// it (`StateDir::home_places`): directories, then single files, home-relative.
+fn harness_home_places() -> (Vec<String>, Vec<String>) {
+    let (mut dirs, mut files) = (Vec::<String>::new(), Vec::<String>::new());
+    for id in steve_acp::adapters::builtin_ids() {
+        if let Some(sd) = &steve_acp::adapters::spec(id, None).properties.state {
+            let (d, f) = sd.home_places();
+            for x in d {
+                if !dirs.iter().any(|y| y == x) {
+                    dirs.push(x.to_string());
+                }
+            }
+            for x in f {
+                if !files.iter().any(|y| y == x) {
+                    files.push(x.to_string());
+                }
+            }
+        }
+    }
+    (dirs, files)
+}
+
+fn writable_places(
+    cwd: &Path,
+    writable: &[PathBuf],
+    isolated_state: bool,
+    user_home: Option<&Path>,
+) -> Places {
     let mut dirs: Vec<PathBuf> = vec![cwd.to_path_buf()];
     // a worktree's commits go into the repository it belongs to
     if let Some(common) = git_common_dir(cwd) {
@@ -370,9 +577,17 @@ fn writable_places(cwd: &Path, writable: &[PathBuf]) -> Places {
         dirs.push(PathBuf::from(t));
     }
     let mut files = vec![];
-    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
-        dirs.extend(HOME_WRITABLE.iter().map(|d| home.join(d)));
-        files.push(home.join(".claude.json"));
+    let home = user_home
+        .map(Path::to_path_buf)
+        .or_else(|| std::env::var_os("HOME").map(PathBuf::from));
+    if let Some(home) = home {
+        dirs.extend(HOME_CACHES.iter().map(|d| home.join(d)));
+        if !isolated_state {
+            let (harness_dirs, harness_files) = harness_home_places();
+            dirs.extend(HOME_AMBIENT.iter().map(|d| home.join(d)));
+            dirs.extend(harness_dirs.iter().map(|d| home.join(d)));
+            files.extend(harness_files.iter().map(|f| home.join(f)));
+        }
     }
     if let Some(extra) = std::env::var_os("STEVE_CONFINE_WRITABLE") {
         dirs.extend(std::env::split_paths(&extra).filter(|p| p.is_absolute()));
@@ -759,5 +974,84 @@ mod tests {
         let c = Confine::choose(h, h, Some("1".into()));
         assert!(c.fresh_env().is_none());
         assert!(!Confine::choose(h, h, Some("0".into())).on());
+    }
+
+    #[test]
+    fn isolated_runs_write_no_harness_home_of_the_owner() {
+        let t = tempfile::tempdir().unwrap();
+        let fake_home = t.path().join("home");
+        std::fs::create_dir_all(&fake_home).unwrap();
+        let ws = t.path().join("ws");
+        std::fs::create_dir_all(&ws).unwrap();
+
+        let isolated = writable_places(&ws, &[], true, Some(&fake_home));
+        assert!(!isolated.dirs.contains(&fake_home.join(".claude")));
+        assert!(!isolated.dirs.contains(&fake_home.join(".config")));
+        assert!(!isolated.files.contains(&fake_home.join(".claude.json")));
+
+        let ambient = writable_places(&ws, &[], false, Some(&fake_home));
+        assert!(ambient.dirs.contains(&fake_home.join(".claude")));
+        assert!(ambient.dirs.contains(&fake_home.join(".config/goose")));
+        assert!(ambient.dirs.contains(&fake_home.join(".config")));
+        assert!(ambient.files.contains(&fake_home.join(".claude.json")));
+
+        let creds = cli_credential_paths(&fake_home);
+        assert!(creds.contains(&fake_home.join(".claude.json")));
+        assert!(creds.contains(&fake_home.join(".qoder.json")));
+        assert!(creds.contains(&fake_home.join(".local/share/opencode")));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn non_owner_seatbelt_denies_ambient_cli_credentials() {
+        if !steve_vault::harness::seatbelt_works() {
+            return;
+        }
+        let t = tempfile::tempdir().unwrap();
+        let root = t.path().canonicalize().unwrap();
+        let fake_home = root.join("u");
+        let ws = root.join("ws");
+        let principal_state = root.join("node/state/p1/harness");
+        std::fs::create_dir_all(fake_home.join(".local/share/opencode")).unwrap();
+        std::fs::write(fake_home.join(".local/share/opencode/auth.json"), "secret").unwrap();
+        std::fs::write(fake_home.join(".claude.json"), "{\"oauth\":\"tok\"}").unwrap();
+        std::fs::create_dir_all(&ws).unwrap();
+        std::fs::create_dir_all(&principal_state).unwrap();
+        std::fs::write(principal_state.join("ok.txt"), "mine").unwrap();
+
+        let c = Confine::choose(&root.join("steve"), &root.join("node"), Some("1".into()));
+        let run = |cmd: String, hide: bool| {
+            let (p, a) = c.wrap_in_mode(
+                "/bin/sh".into(),
+                vec!["-c".into(), cmd.into()],
+                &[],
+                std::slice::from_ref(&principal_state),
+                Some(&ws),
+                true,
+                hide,
+                Some(&fake_home),
+            );
+            std::process::Command::new(p)
+                .args(a)
+                .output()
+                .unwrap()
+                .status
+                .success()
+        };
+        assert!(!run(
+            format!(
+                "cat {}/.local/share/opencode/auth.json",
+                fake_home.display()
+            ),
+            true
+        ));
+        assert!(!run(
+            format!("cat {}/.claude.json", fake_home.display()),
+            true
+        ));
+        assert!(run(
+            format!("cat {}/ok.txt", principal_state.display()),
+            true
+        ));
     }
 }

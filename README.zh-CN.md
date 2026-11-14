@@ -26,7 +26,7 @@
 
 编码智能体干活很快，难的是同时开好几个之后怎么管：十几个终端标签来回切，上下文在会话之间丢掉，权限确认没人回，最后到底交付了什么、检查过没过，也没有记录。
 
-Steve 架在 Claude Code 和 Codex 之上，负责把这些记下来、管起来。它是跑在你自己机器上的一个 Rust 程序，数据存在 SQLite 里，密钥放在加密保险箱里。你只需要在一个对话里交代，每条消息由它判断怎么处理：直接回答、只读查代码和文档、新建一个要跟踪的事项，或者转给正在进行的事项。事项交给 Bot 去做，每个事项都在自己的 git worktree 里跑。
+Steve 架在 Claude Code、Codex、Gemini CLI、GitHub Copilot CLI、OpenCode、Cursor 等 16 种主流 ACP 编码 CLI 之上，负责把这些记下来、管起来。它是跑在你自己机器上的一个 Rust 程序，数据存在 SQLite 里，密钥放在加密保险箱里。你只需要在一个对话里交代，每条消息由它判断怎么处理：直接回答、只读查代码和文档、新建一个要跟踪的事项，或者转给正在进行的事项。事项交给 Bot 去做，每个事项都在自己的 git worktree 里跑。
 
 | | 😵 终端里直接跑智能体 | ✨ 用 Steve |
 |---|---|---|
@@ -105,7 +105,7 @@ Steve 把密钥放进命令的环境变量、标准输入或临时文件来执�
 
 每条消息会被归到九类之一：回答、调研、事项、建议、追问、补充、进度、配置、改判。代码护栏可以推翻模型的判断，CI 里会跑一套用真实消息做的路由评测。拿不准一条消息是新工作还是属于已有事项时，Steve 会先问你。
 
-- **就地调研**：在对话里直接回答关于代码和文档的问题，并标出 `path:line`。只读有三道保证：工具白名单（Read、Grep、Glob）、碰到第一个非只读工具就终止的 Hub 守卫，以及 macOS 上的 `sandbox-exec` 沙箱。
+- **就地调研**：在对话里直接回答关于代码和文档的问题，并标出 `path:line`。只读有三道保证：工具白名单（Read、Grep、Glob）、碰到第一个非只读工具就终止的 Hub 守卫，以及系统只读沙箱（macOS 用 `sandbox-exec`，Linux 用 bubblewrap）。
 - 回答末尾可以附一句“要我改吗？→ 做成事项：…”，点一下或回一句“改吧”就行。
 - 每个事项在对话里只有一张卡片，状态（进行中、等你、已交付、已发布）原地更新，只有需要你时才挪到最下面。
 - 配置可以直接说：“前端 Bot 改用 Opus，开 YOLO，billing-api 除外。”Steve 会起草字段级的改动，范围包括 Bot、项目、模型、标签、流程和联系人。一键应用，24 小时内可以撤销。
@@ -132,11 +132,11 @@ Steve 把密钥放进命令的环境变量、标准输入或临时文件来执�
 
 ### 🤖 Bot
 
-一个 Bot 由 harness（Claude Code 或 Codex）、模型和思考强度、职责、人设、规范、权限模式、验收方式和默认项目组成。用一句话描述，Steve 就能起草出来。`@Bot` 把活交给它。改派事项时旧会话会停掉，最后的进展交给新 Bot。一个 Bot 可以在多个工作区里担任不同职责，但只看得到当前工作区的数据。
+一个 Bot 由 harness（内置 16 种 ACP 编码 CLI，或 `harness.json` 中声明的任意自定义 ACP 适配器）、模型和思考强度、职责、人设、规范、权限模式、验收方式和默认项目组成。用一句话描述，Steve 就能起草出来。`@Bot` 把活交给它。改派事项时旧会话会停掉，最后的进展交给新 Bot。一个 Bot 可以在多个工作区里担任不同职责，但只看得到当前工作区的数据。
 
 侧栏的「能力」是这个工作空间的能力库：MCP 服务器（本地命令，或者 HTTP / SSE 地址，带环境变量或请求头）、技能（`SKILL.md` 做事说明，写到 harness 读技能的地方）和通过 A2A 协作的远程 Agent（Bot 拿到的是一个 Steve 工具），在这里定义一次，再到每个 Bot 的「能力」里选用。哪种 harness 都一样拿到它们：MCP 服务器经 ACP 和 Steve 自己的工具并列，技能写到 harness 适配器声明的位置。机密的值存在保险箱里，只在 harness 打开时交给会话所在的 Node。Steve 自己也是一个 MCP 服务器：Claude Desktop、Cursor 或别的 Agent 可以用访问令牌连上来，查事项、交代工作、查知识库；别的 Agent 也可以照 Steve 的 Agent Card 通过 A2A 把任务交给它。见 [能力](docs/deployment.md#capabilities-mcp-servers-skills-and-remote-agents)。
 
-Steve 不动你的 harness 设置。权限提示只答这一次，从不写“始终允许”，也从不改你的 Codex 配置。每个会话都给出在 harness 里接着跑的命令，本机已有的 Claude Code 和 Codex 历史也能导进来。
+Steve 不动你的 harness 设置。权限提示只答这一次，从不写“始终允许”，也从不改你的 harness 配置。每个会话都给出在 harness 里接着跑（及派生）的命令，本机已有的 Claude Code 和 Codex 历史也能导进来。
 
 - **记忆**：Steve 从完成的事项、每天的对话、邮件和智能体那里提出候选记忆，附上出处原话和要替换的旧记忆。你确认之前都不生效。
 - **按用途选模型**：路由、对话、调研、标题、提取、YOLO、起草、流程和邮件各配各的模型、思考强度和备用顺序。价格每天从 Models.dev 同步，历史估算按当天的价格算。
@@ -247,8 +247,8 @@ flowchart LR
         V[(保险箱)]
     end
     subgraph Node["智能体运行时 · 本机，或已配对的 Node（实验中）"]
-        CC[Claude Code]
-        CX[Codex]
+        CC[Claude Code · Codex]
+        CX[Gemini · Copilot · +12 ACP CLI]
         WT[[git worktrees]]
     end
     W <-->|REST + SSE| C
@@ -273,7 +273,7 @@ flowchart LR
 |---|---|
 | **构建** | Git、稳定版 Rust/Cargo、Node.js 24 LTS 和 npm |
 | **运行** | Apple Silicon macOS 14+，或 glibc 2.35+ 的 Linux x86_64（Ubuntu 22.04+、Debian 12+）。不支持 Windows。 |
-| **智能体**（可选） | 已安装并登录的 [Claude Code](https://docs.anthropic.com/claude-code) 和/或 [Codex](https://github.com/openai/codex) |
+| **智能体**（可选） | 在执行节点的机器上已安装并完成认证的任意内置 ACP 编码 CLI（共 16 种）或 `harness.json` 中的自定义适配器 |
 
 ### 1. 构建
 
@@ -287,13 +287,13 @@ cargo build --locked --manifest-path hub-rs/Cargo.toml -p steve-hub
 
 ### 2. 安装适配器
 
-Steve 通过 ACP 适配器调用 harness：`@agentclientprotocol/claude-agent-acp` 和 `@agentclientprotocol/codex-acp`，需要 Node.js（npm）。`steve setup` 会把它们装进安装目录下的 `adapters`，之后由 Node 保持最新；开发用的 Hub 也这样装：
+Steve 通过 ACP 协议调用编码 CLI。16 个内置 harness 中，12 个（`claude-code`、`codex`、`gemini`、`github-copilot-cli`、`opencode`、`qwen-code`、`goose`、`kimi-code`、`grok-build`、`kilo`、`factory-droid`、`codebuddy-code`）可由 npm 安装到数据目录下的 `adapters` 并由 Node 自动保鲜；其余 4 个（`cursor`、`kiro`、`mistral-vibe`、`qoder`）通过各自安装器装好后直接从 `PATH` 发现。`steve setup` 会默认勾选本机 `PATH` 上已检测到的 CLI；开发用的 Hub 也可按需安装：
 
 ```sh
-STEVE_HOME="$HOME/.steve-dev" hub-rs/target/debug/steve-hub --adapters install
+STEVE_HOME="$HOME/.steve-dev" hub-rs/target/debug/steve-hub --adapters install claude-code codex
 ```
 
-安装目录里没有时，也会用 npm 全局安装的。`claude` 不在 `/opt/homebrew/bin/claude` 时设置 `CLAUDE_CODE_EXECUTABLE`；适配器装在别处时设置 `STEVE_ADAPTER_CLAUDE` / `STEVE_ADAPTER_CODEX`。
+数据目录里没有时，也会自动使用 `PATH` 上的 CLI 或 npm 全局安装的包。`claude` 不在 `/opt/homebrew/bin/claude` 时设置 `CLAUDE_CODE_EXECUTABLE`；适配器装在别处时设置对应的 `STEVE_ADAPTER_*` 变量（完整列表见 [docs/deployment.md](docs/deployment.md#harness-setup)）或在 `harness.json` 中声明。
 
 ### 3. 运行
 
@@ -330,13 +330,14 @@ Steve 从环境变量读取配置。作为服务运行时写在 `$STEVE_HOME/ste
 | `STEVE_VAULT_KEYSTORE` | `auto`（钥匙串 / Secret Service）、`dir`（配合 `STEVE_VAULT_KEY_DIR`），或测试用的 `file` |
 | `STEVE_NODE_MODE` | `service`（默认）让 Hub 自己的 Node 在单独的进程里运行，Hub 重启或升级时正在跑的回合不受影响（见 [docs/deployment.md](docs/deployment.md#the-hubs-own-node-in-a-process-of-its-own)）；`local` 在 Hub 进程内运行；`off` 时会话只排队 |
 | `STEVE_LOCAL_NODE_PORT` | `STEVE_NODE_MODE=service` 时本机 Node 连接 Hub 使用的本机回环端口（默认 Hub 端口 + 3） |
-| `STEVE_CONFINE` | Node 启动的运行进程所在的系统沙箱（macOS 用 seatbelt；Linux 用 bubblewrap）。分级：<br>`0`/`off`：不隔离。<br>`1`/`on`（默认）：Steve 的密钥、数据库和程序不可访问；在工作目录里运行的进程只能写自己的工作目录及其所属仓库、harness 和工具链目录、临时目录、常用的工具缓存和 harness 自己的主目录；读取不受限制，环境变量保持用户系统原样。<br>`2`：在 1 的基础上，运行进程从用户全新的登录环境启动，再加上 Steve 为它设置的变量。<br>Codex 等自带 seatbelt 沙箱的 harness 继续使用自己的沙箱 |
+| `STEVE_CONFINE` | Node 启动的运行进程所在的系统沙箱（macOS 用 seatbelt；Linux 用 bubblewrap）。分级：<br>`0`/`off`：不隔离。<br>`1`/`on`（默认）：Steve 的密钥、数据库和程序不可访问；在工作目录里运行的进程只能写自己的工作目录及其所属仓库、harness 和工具链目录、临时目录、常用的工具缓存和 harness 自己的主目录；读取不受限制，只是 Node 主人以外的人的会话看不到主人的 harness 主目录（登录、令牌、历史，以适配器声明的为准）；环境变量保持用户系统原样。<br>`2`：在 1 的基础上，运行进程从用户全新的登录环境启动，再加上 Steve 为它设置的变量。<br>Codex 等自带 seatbelt 沙箱的 harness 继续使用自己的沙箱 |
 | `STEVE_CONFINE_WRITABLE` | 1、2 级下额外允许写入的位置（绝对路径，用 `:` 分隔） |
 | `STEVE_NODE_LISTEN`、`STEVE_NODE_BIND` | 实验中的多设备 Node，默认关闭 |
 | `STEVE_NODE_PLACEMENT` | `spread`（默认）：没有项目的事项开新会话时，交给负载明显更低的已连接远程 Node；`local`：新会话留在 Hub 所在机器，除非 `STEVE_NODE_BIND` 指定了 Node |
 | `STEVE_NODE_HANDOFF_MIN` | 设备离线、又有消息在等它的会话时，过多少分钟后 Steve 在别处开新会话继续事项（默认 30；`0` 表示不转移） |
 | `STEVE_TAILCAT`、`STEVE_TAILCAT_PORT` | 经 tailcat 接入远程 Node（可选，在“设备”页开启）：`tailcat` 不在 `PATH` 上时指定程序位置，以及只提供 Node 接口的本机端口（默认 Hub 端口 + 2） |
 | `STEVE_NODE_INSTALLERS` | 远程安装 Node 时使用的本地目录，里面放发布的 `steve-installer.json` 和安装包，供访问不了 GitHub 的 Hub 使用 |
+| `STEVE_ADAPTER_*`、`STEVE_DEFAULT_MODEL_*` | 覆盖内置 harness 的适配器路径（`STEVE_ADAPTER_CLAUDE`、`STEVE_ADAPTER_CODEX`、`STEVE_ADAPTER_GEMINI` 等）或默认模型（`STEVE_DEFAULT_MODEL_CLAUDE` 等）；完整对照表见 [docs/deployment.md](docs/deployment.md#harness-setup) |
 | `STEVE_ADAPTER_UPDATES` | Node 怎么对待 Steve 安装的 ACP 适配器的新版本：`auto`（默认：每天检查，没有会话运行时升级）、`check`（只显示）、`off` |
 
 > [!IMPORTANT]
@@ -359,8 +360,7 @@ hub-rs/          Rust workspace：Hub 可执行文件和各 crate
   crates/steve-hub        HTTP 服务（axum）、REST + SSE、扩展、升级、后台任务
   crates/steve-core       事项、生命周期、对话路由、YOLO、合并通道、模型网关
   crates/steve-modules    模块扩展点（钩子、面板、变更集）、联系人、账号、保险箱
-  crates/steve-acp        通过 ACP 运行 Claude Code / Codex 会话
-  crates/steve-print      Steve 自己做判断时的一次性 harness 调用
+  crates/steve-acp        通过 ACP 运行各编码 CLI 会话与一次性调用，及适配器注册表
   crates/steve-research   只读的就地调研（白名单、守卫、沙箱）
   crates/steve-mcp        智能体对接的 `steve` MCP 服务
   crates/steve-channels   飞书 / Lark、空间、人设、披露检查

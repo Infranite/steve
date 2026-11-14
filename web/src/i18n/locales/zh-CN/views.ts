@@ -813,7 +813,7 @@ export default {
     title: "导入本机会话",
     desc: "选择要导入的会话。导入后只读，可以搜索、查看、派生或据此建事项；本机的原始记录不改动。",
     go_other: "导入 {{count}} 个",
-    goNone: "导入  个",
+    goNone: "导入",
     onHub: "{{harness}} · 这台 Hub 上",
     allDone: "都导入过了",
     reading: "正在读取本机会话…",

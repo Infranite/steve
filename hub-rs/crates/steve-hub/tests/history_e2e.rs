@@ -388,8 +388,9 @@ async fn history_through_the_local_node_matches_the_hubs_own_import() {
     // the harnesses as the Node's probe reports them
     let devices = node.ok("GET", "/api/devices?fresh=1", None).await;
     let runtimes = devices["runtimes"].as_array().unwrap();
-    assert_eq!(runtimes[0]["version"], "2.1.0");
-    assert_eq!(runtimes[1]["version"], "0.80.0");
+    let rt = |id: &str| runtimes.iter().find(|r| r["id"] == id).unwrap();
+    assert_eq!(rt("claude-code")["version"], "2.1.0");
+    assert_eq!(rt("codex")["version"], "0.80.0");
     // the Hub without a Node starts no harness to ask it: no version
     let old = legacy.ok("GET", "/api/devices?fresh=1", None).await;
     assert_eq!(old["runtimes"][0]["version"], "");
