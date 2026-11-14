@@ -12,6 +12,7 @@
 - [Remote Nodes](#remote-nodes)
 - [Harness setup](#harness-setup)
 - [Diagnostic capture and queries](#diagnostic-capture-and-queries)
+- [Conversation digest base](#conversation-digest-base)
 
 ## Homebrew installation
 
@@ -710,3 +711,56 @@ Themes from elsewhere, such as a future theme plugin, are added in the web clien
 returns `{ ok: true }` or `{ ok: false, errors }`: a manifest with an unknown field or token, a token its kind may not
 set, or a value outside the syntax above is refused as a whole and nothing on screen changes. A registered theme
 appears among the choices of its kind; a stored choice whose theme is not registered shows the default until it is.
+
+
+## Conversation digest base
+
+The Hub's deterministic intake checks stored channel spaces and mail threads once a minute. It does not fetch connector history, start a harness, call a model or send messages. Conversation identifiers are `space:<Steve space ID>` and `mail_thread:<Steve thread ID>`; packet facts use Steve's message, contact and item IDs. Other source types need an explicit reader/access adapter, not a provider-specific ID guessed by a model. The owner's source visibility applies: another member's personal channels and private mail are not intake sources. Digest REST endpoints require the workspace owner; workspace membership alone is insufficient.
+
+### Profiles and independent windows
+
+Every conversation has its own cursor, window sequence, daily spend and settings. Kinds are `project`, `team`, `feed`, `dm`, `mail`, `pr` and `issue`; the currently supported readers are spaces and mail threads. Rules infer DM, mail, bot-heavy feed or team until an explicit classification replaces them. Role reuses the channel's existing duty, rather than introducing a second role field.
+
+All kinds default to **50 messages**, a **30-minute quiet period** and **24-hour maximum wait**. A window is due when any threshold is reached. `window` accepts 5–2000, including 500; each large window is split by estimated tokens, preferring reply/topic boundaries and time gaps, with a small context overlap. Default chunk budget is 6000 estimated tokens including the rendered header/context. One individually oversized message remains whole, so can exceed that estimate; this is not a model tokenizer or a hard billing limit.
+
+`PATCH /api/digest/conversations/{conv}` accepts `kind`, `kind_source` (`you|model`; `rule` is the derived default), `window`, `quiet_ms`, `max_wait_ms`, `depth`, `daily_budget`, `priority` (0–3), `notify` (`now|digest|record`), `notify_source` (`learned|you`; `default` follows the kind) and optional `revision`. Time values are milliseconds. A missing setting is unchanged; explicit JSON `null` removes its override and restores the kind default. A stale supplied revision returns 409. For example, `{"window":500,"depth":"full"}` overrides only that conversation; `{"window":null}` restores 50. Quiet time can be 1 minute–24 hours, maximum wait 10 minutes–7 days, and budget 0–10000000 (0 means unlimited). Classification/notification source labels are stored provenance, not evidence that a model or learning worker has run.
+
+Depth is `full`, `summary`, `alerts`, `record` or `paused`. Full/summary queue packets for a later consumer; alerts folds machine firing/recovery events into a rule summary and queues only unresolved alerts/human discussion; record receipts messages without a packet; paused keeps messages waiting. Muted/blocked sources use record behavior. Default daily budgets are 300000 for team/project, 200000 for DM/mail and 100000 for feed/PR/issue. Budgets are soft: after a window takes spend to the limit, later windows wait for the next Hub-local day. Manual cuts bypass that budget, not source visibility or paused/record depth. Notification choices are persisted only; this base does not deliver digest notifications.
+
+Packets, chunks, per-message receipts and cursor advancement commit atomically. Receipts, not a timestamp watermark alone, prevent duplicates while accepting equal-time, late-arriving and backfilled messages. Default intake includes all stored history. A positive initial lookback is fixed when the conversation first runs, including when paused: it does not slide forward while a backlog waits.
+
+### Queue settings and recovery
+
+The workspace `digest` setting is a JSON object, managed through the existing workspace settings mechanism. Omitted fields use these defaults:
+
+```json
+{"enabled":true,"every_min":30,"packets":20,"chunk_tokens":6000,"overlap":2,"context":3,"backlog_days":0,"lease_min":120,"max_attempts":3}
+```
+
+`enabled:false` stops scheduled intake. A manual cut is still available. `backlog_days:0` means all stored history; a positive value sets the initial lookback floor for new cursors. It never downloads history. `every_min` and `packets` determine when a batch is due, not when a Bot runs: **the digest Bot/consumer is not part of this implementation**. Packets remain queued until a consumer is installed.
+
+The Rust queue contract exposes due/lease/renew/chunk completion/packet completion. Priority orders eligible packets; a conversation's earliest unfinished packet must finish before its next one can lease. Leases fence stale workers; expiration counts as an attempt. Retries preserve finished chunks, and a packet cannot finish while any chunk is unfinished. Exhaustion leaves `failed`, which intentionally blocks later packets of that conversation. The owner can inspect it and explicitly `POST /api/digest/packets/{id}/retry`; only failed packets reset their attempt budget, with completed chunks and message receipts retained. Restarting the Hub does not reset the queue.
+
+### Owner API and storage contracts
+
+All paths below are relative to `/api`, use the existing authenticated workspace selection, and do not initiate model/network work:
+
+| Method/path | Contract |
+| --- | --- |
+| `GET/PATCH /digest/conversations/{conv}` | Conversation facts, effective profile/overrides, cursor, latest summary, queue counts; update settings |
+| `POST /digest/conversations/{conv}/cut` | Cut currently stored pending messages in this conversation |
+| `GET /digest/packets`, `GET /digest/packets/{id}` | Inspect durable packets/facts/candidates and chunk progress; list accepts state/conv/limit |
+| `POST /digest/packets/{id}/retry` | Explicit recovery of a failed packet; returns whether it changed |
+| `GET/POST /digest/matters`, `GET/PATCH /digest/matters/{id}` | Search/read/create/edit a matter; title, summary and open/done/dropped state |
+| `POST /digest/matters/{id}/relate` | `op`: merge/not_same with `other`, split with `segments`/`title`, link/unlink with item/project `object`; explicit `force` can override not_same on merge |
+| `GET/POST /digest/todos`, `POST /digest/todos/{id}` | Owner's personal todos, separate from Bot items; create text/matter/due/refs/parties; transition with state/item |
+| `GET/POST /digest/memories/{id}/index` | Read/link an existing visible memory's conversation/matter/parties/range; does not create a separate memory system |
+| `GET /digest/changes`, `POST /digest/changes/{id}/undo` | Inspect/undo recorded digest changes, refusing incompatible later edits |
+
+Todo `refs` are pairs such as `[[{"type":"space","id":"sp_example"},"cm_example"]]`; a relate `object` is `{"type":"item","id":"ST-12"}`. The memory index POST uses `conv` as a conversation key, optional `matter`, `parties` and the exact `range` object.
+
+Matter retrieval returns a cross-conversation segment timeline, participant counts and item/project links. Split/merge operations retain explicit not_same boundaries, including those involving a merged alias. Segment storage validates **positive packet/chunk positions** and derives message IDs, times, people and chains from persisted facts; context positions are never writeback evidence. Candidate retrieval uses same chain/topic, referenced items, nearby participant overlap and SQLite matter/memory full text (Chinese bigrams included). It supplies candidates, not model decisions. Memory candidates respect owner visibility, expiry and the `never` disclosure level.
+
+Memory links use the existing `mems`/`mem_about` store, plus exact message ranges (`conv`, `first_id`, `last_id`, `first_at`, `last_at`); referenced entities and range endpoints must exist in the workspace. `steve_memory_list` keeps its existing human-readable about field and additionally returns structured `index.about`/`index.ranges`. Personal todo states are open/done/dropped/handed; handed links an existing workspace item, never automatically creates or starts a Bot. Automated-source deadlines require quoted words actually present in the referenced message. The base includes guarded undo for recorded summary/segment/todo/memory changes; matter editing has its own event history, not a universal undo for every action.
+
+Automatic semantic summaries, matter/todo/memory proposals, a digest Bot and its MCP writeback tools, notification delivery and dedicated UI remain separate work. Nothing in this base requires an external model backend, a private gateway or a source checkout to operate a released Hub.

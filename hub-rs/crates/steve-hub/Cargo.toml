@@ -23,6 +23,7 @@ steve-acp = { path = "../steve-acp" }
 steve-modules = { path = "../steve-modules" }
 steve-flow = { path = "../steve-flow" }
 steve-knowledge = { path = "../steve-knowledge" }
+steve-digest = { path = "../steve-digest" }
 steve-github = { path = "../steve-github" }
 steve-channels = { path = "../steve-channels" }
 steve-mail = { path = "../steve-mail" }

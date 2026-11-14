@@ -18,6 +18,7 @@ const EXPECTED: &[&str] = &[
     "steve-mail",
     "steve-github",
     "steve-knowledge",
+    "steve-digest",
     "steve-stats",
     "steve-store",
     "steve-acp",

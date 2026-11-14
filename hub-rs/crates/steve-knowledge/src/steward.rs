@@ -128,10 +128,14 @@ fn list_tool(m: &Modules, viewer: &Viewer, args: &Value) -> ApiResult<String> {
                         .unwrap_or_else(|| a.id.clone())
                 })
                 .collect();
+            let ranges: Vec<Value> = c.prepare_cached("SELECT conv, first_id, last_id, first_at, last_at, packet_id FROM mem_ranges WHERE workspace_id = ? AND mem_id = ? ORDER BY first_at, conv, first_id")?
+                .query_map(params![viewer.ws, x.id], |r| Ok(json!({"conv": r.get::<_, String>(0)?, "first_id": r.get::<_, String>(1)?, "last_id": r.get::<_, String>(2)?,
+                    "first_at": r.get::<_, i64>(3)?, "last_at": r.get::<_, i64>(4)?, "packet_id": r.get::<_, Option<String>>(5)?})))?
+                .collect::<rusqlite::Result<_>>()?;
             let o = provenance::origin(c, x)?;
             let (n, last) = used.get(&x.id).copied().unwrap_or((0, 0));
             out.push(json!({
-                "id": x.id, "kind": x.kind, "status": x.status, "text": x.text, "about": about,
+                "id": x.id, "kind": x.kind, "status": x.status, "text": x.text, "about": about, "index": {"about": x.about, "ranges": ranges},
                 "source": if o["kind"] == "you" { json!("written by the user") } else { o["label"].clone() },
                 "source_kind": o["kind"], "written_by": o["writer_name"],
                 "created": iso(x.created), "updated": iso(x.updated),

@@ -451,6 +451,8 @@ pub fn ref_exists(c: &Connection, ws: &str, me: &str, r: &ObjRef) -> Result<bool
         "bot" => "SELECT 1 FROM bot_workspaces WHERE bot_id = ?1 AND workspace_id = ?2",
         "project" => "SELECT 1 FROM projects WHERE id = ?1 AND workspace_id = ?2",
         "space" => "SELECT 1 FROM spaces WHERE id = ?1 AND workspace_id = ?2",
+        "mail_thread" => "SELECT 1 FROM mail_threads WHERE id = ?1 AND workspace_id = ?2",
+        "matter" => "SELECT 1 FROM matters WHERE id = ?1 AND workspace_id = ?2",
         "persona" => "SELECT 1 FROM personas WHERE id = ?1 AND workspace_id = ?2",
         _ => return Ok(false),
     };
@@ -469,6 +471,8 @@ pub fn ref_name(c: &Connection, r: &ObjRef) -> Result<Option<String>> {
         "bot" => "SELECT name FROM bots WHERE id = ?",
         "project" => "SELECT name FROM projects WHERE id = ?",
         "space" => "SELECT name FROM spaces WHERE id = ?",
+        "mail_thread" => "SELECT subject FROM mail_threads WHERE id = ?",
+        "matter" => "SELECT title FROM matters WHERE id = ?",
         "persona" => "SELECT name FROM personas WHERE id = ?",
         _ => return Ok(None),
     };

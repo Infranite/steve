@@ -598,6 +598,7 @@ pub fn build(env: Env<'_>) -> Result<Built, BackendError> {
     let started = crate::extension::Started::new(&channels, bus, vars);
     let routes = Router::new()
         .merge(steve_knowledge::routes(kb.clone()))
+        .merge(steve_digest::routes())
         .merge(steve_modules::contacts::routes(ports))
         .merge(steve_modules::accounts::routes())
         .merge(steve_flow::routes(flow.clone()))
@@ -728,6 +729,8 @@ pub fn build(env: Env<'_>) -> Result<Built, BackendError> {
         modules.clone(),
         kb.clone(),
     ));
+    // Intake only: phase D will consume the durable packets; no Bot starts here.
+    drop(steve_digest::job::spawn_job(modules.clone()));
     // memories and Bot memories are re-indexed when the store says they changed
     let mut changes = bus.tap(&["mm", "bot"]);
     let m = modules.clone();
