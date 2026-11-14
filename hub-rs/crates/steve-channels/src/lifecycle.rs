@@ -129,6 +129,18 @@ impl ConnSink {
         self.channels.on_message(&self.ws, &self.conn, msg).await
     }
 
+    /// A checked generic connector event. Connection/workspace are bound to this live run.
+    pub async fn connector_event(
+        &self,
+        ev: steve_flow::RawEvent,
+    ) -> ChannelResult<steve_flow::Ingested> {
+        self.open()?;
+        self.channels
+            .sink()
+            .ingest(&self.ws, Some(&self.conn), ev)
+            .await
+    }
+
     /// A change of a space or its members.
     pub async fn space_event(&self, ev: SpaceEvent) -> ChannelResult<Option<SpaceChange>> {
         self.open()?;

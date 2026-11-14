@@ -582,6 +582,7 @@ export default {
     addSub: "可以是 GitHub 仓库、索引文件（steve-store.json）的 https:// 地址，或 Hub 所在机器上的绝对目录。Steve 先读取索引，读得到才添加。渠道插件是在 Hub 所在机器上运行的程序，只添加你信任的库。",
     added: "已添加插件库",
     kindChannel: "渠道",
+    kindConnector: "连接器",
     kindTheme: "主题",
     kindOther: "{{kind}}",
     from: "来自 {{name}}",

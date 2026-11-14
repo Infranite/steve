@@ -58,7 +58,7 @@
 //! runs its program as the Hub's user. Only the owner adds libraries and installs; what is
 //! installed is exactly the archive the index named.
 //!
-//! # Running a channel plugin (`kind: "channel"`, contract 1)
+//! # Running a channel or connector plugin (`kind: "channel" | "connector"`, contract 1)
 //!
 //! A channel plugin is a channel service of the external channel protocol
 //! ([`steve_channels::adapters::ext_ws::protocol`]): it signs in to a messaging system as one

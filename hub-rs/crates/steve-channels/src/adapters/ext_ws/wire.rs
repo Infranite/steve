@@ -424,6 +424,8 @@ pub struct Hello {
     pub session: Status,
     /// `ok` | `degraded` | `down`.
     pub upstream: String,
+    /// Generic connector extension, independent of messaging v1.
+    pub connector: Option<crate::connector::Manifest>,
 }
 
 /// Why a hello result is refused.
@@ -463,7 +465,18 @@ impl Hello {
                     .collect()
             })
             .unwrap_or_default();
-        let missing: Vec<String> = REQUIRED_FEATURES
+        let connector = v
+            .get("connector")
+            .filter(|v| !v.is_null())
+            .map(crate::connector::Manifest::parse)
+            .transpose()
+            .map_err(HelloError::Malformed)?;
+        let required: &[&str] = if connector.is_some() {
+            &["me", "changes"]
+        } else {
+            &REQUIRED_FEATURES
+        };
+        let missing: Vec<String> = required
             .iter()
             .filter(|f| !features.contains(**f))
             .map(|f| f.to_string())
@@ -512,6 +525,7 @@ impl Hello {
             limits: Limits::from_hello(v.get("limits").unwrap_or(&Value::Null)),
             session,
             upstream,
+            connector,
         })
     }
 
@@ -758,13 +772,7 @@ impl WireSender {
 
 /// `dm` | `group` | `channel` | `thread`.
 pub fn chat_kind(s: Option<&str>) -> Option<crate::channel::SpaceKind> {
-    use crate::channel::SpaceKind;
-    match s? {
-        "dm" => Some(SpaceKind::Dm),
-        "group" => Some(SpaceKind::Group),
-        "channel" | "thread" => Some(SpaceKind::Channel),
-        _ => None,
-    }
+    crate::channel::SpaceKind::parse(s?)
 }
 
 /// A checked `Chat` (§6).
@@ -903,7 +911,8 @@ impl WireMessage {
 fn attachment(v: &Value) -> Option<Value> {
     let kind = match v.get("type").and_then(Value::as_str)? {
         "image" => "image",
-        "file" | "audio" | "video" => "file",
+        "file" => "file",
+        k @ ("audio" | "video" | "document" | "webpage" | "commit" | "log") => k,
         _ => return None,
     };
     let key = v
@@ -913,6 +922,18 @@ fn attachment(v: &Value) -> Option<Value> {
     let mut o = json!({"type": kind, "key": key});
     if let Some(n) = text_field(v, "name", 256) {
         o["name"] = n.into();
+    }
+    if let Some(title) = text_field(v, "title", 512) {
+        o["title"] = title.into();
+    }
+    if let Some(url) = text_field(v, "url", 2048).filter(|u| {
+        url::Url::parse(u).is_ok_and(|u| {
+            matches!(u.scheme(), "http" | "https")
+                && u.username().is_empty()
+                && u.password().is_none()
+        })
+    }) {
+        o["url"] = url.into();
     }
     if let Some(s) = v.get("size").and_then(Value::as_u64) {
         o["size"] = s.into();

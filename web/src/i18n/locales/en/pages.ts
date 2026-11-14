@@ -600,6 +600,7 @@ export default {
     addSub: "A GitHub repository, the https:// address of an index file (steve-store.json), or an absolute directory on the Hub's machine. Steve reads the index first and adds the library only if that works. Channel plugins are programs that run on the Hub's machine: add only libraries you trust.",
     added: "Library added",
     kindChannel: "Channel",
+    kindConnector: "Connector",
     kindTheme: "Theme",
     kindOther: "{{kind}}",
     from: "from {{name}}",

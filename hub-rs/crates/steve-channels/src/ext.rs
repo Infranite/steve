@@ -14,6 +14,7 @@ use steve_modules::accounts::connections::ConnectionProvider;
 use crate::channel::{ActAsUser, ChannelAdapter, ChannelFeatures, ProfileAdapter};
 
 pub use crate::channel::{ActTarget, MessageRef, SendKey, Sent};
+pub use crate::connector::ConnectorTools;
 pub use crate::history::HistoryRead;
 pub use crate::lifecycle::{ConnRun, ConnSink, ConnState, ConnectionHook};
 pub use crate::media::{MediaError, MediaFetch};
@@ -167,6 +168,8 @@ pub struct ChannelSide {
     /// Reading a conversation's history when an agent asks (`steve_im_read`). Optional: without
     /// it the agent reads the messages the Hub stored.
     pub history: Option<Arc<dyn HistoryRead>>,
+    /// Declared, explicitly invoked connector operations on this account.
+    pub connector: Option<Arc<dyn ConnectorTools>>,
 }
 
 impl ChannelSide {
@@ -179,6 +182,7 @@ impl ChannelSide {
             profiles: None,
             media: None,
             history: None,
+            connector: None,
         }
     }
 
@@ -199,6 +203,11 @@ impl ChannelSide {
 
     pub fn media(mut self, m: Arc<dyn MediaFetch>) -> Self {
         self.media = Some(m);
+        self
+    }
+
+    pub fn connector(mut self, c: Arc<dyn ConnectorTools>) -> Self {
+        self.connector = Some(c);
         self
     }
 
@@ -236,6 +245,10 @@ impl ChannelSide {
                 self.act_as_user.as_ref().map(|a| a.adapter_id()),
             ),
             ("media view", self.media.as_ref().map(|m| m.adapter_id())),
+            (
+                "connector view",
+                self.connector.as_ref().map(|m| m.adapter_id()),
+            ),
             (
                 "history view",
                 self.history.as_ref().map(|h| h.adapter_id()),

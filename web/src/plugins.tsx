@@ -79,7 +79,7 @@ const say = (x: Text | null | undefined): string => (typeof x === "string" ? x :
 const DOT: Record<State, string> = { starting: "run", running: "done", waiting: "wait", stopped: "idle" }
 const isTheme = (p: Plugin) => p.kind === "theme"
 const kindIcon = (p: Plugin) => (isTheme(p) ? PaletteIcon : PlugIcon)
-const kindKey = (p: Plugin) => (isTheme(p) ? "pages:plugins.kindTheme" : p.kind === "channel" ? "pages:plugins.kindChannel" : "pages:plugins.kindOther")
+const kindKey = (p: Plugin) => (isTheme(p) ? "pages:plugins.kindTheme" : p.kind === "connector" ? "pages:plugins.kindConnector" : p.kind === "channel" ? "pages:plugins.kindChannel" : "pages:plugins.kindOther")
 const nameOf = (p: Plugin) => say(p.name) || p.id
 /** a library that was never read has no name of its own yet: the official one is called that, any other by its id */
 const storeName = (s: Store) => say(s.name) || (s.official ? tr("pages:plugins.officialName") : s.id)
@@ -171,7 +171,7 @@ function InstalledCard({ s, p, v, mine, changed, onConnect }: { s: Store; p: Plu
         meta={<Meta one><span className="font-mono" data-plugin-version>{inst.version}</span><span className="truncate">{t("pages:plugins.from", { name: storeName(s) })}</span>
           {p.homepage && /^https?:\/\//.test(p.homepage) && <a href={p.homepage} target="_blank" rel="noreferrer" className="inline-flex items-center gap-0.5 hover:text-foreground hover:underline" data-plugin-homepage>{t("pages:plugins.homepage")}<ExternalLinkIcon className="size-3" aria-hidden /></a>}</Meta>}
         aside={<span className="flex shrink-0 items-center gap-1">
-          {p.kind === "channel" && !p.unsupported && <Button size="sm" disabled={busy} onClick={onConnect} data-plugin-connect>{t("pages:plugins.connect")}</Button>}
+          {(p.kind === "channel" || p.kind === "connector") && !p.unsupported && <Button size="sm" disabled={busy} onClick={onConnect} data-plugin-connect>{t("pages:plugins.connect")}</Button>}
           {v.owner && <DropdownMenu>
             <DropdownMenuTrigger render={<Button variant="ghost" size="icon-sm" className="text-muted-foreground" aria-label={t("pages:plugins.more", { name })} data-plugin-more />}><MoreHorizontalIcon /></DropdownMenuTrigger>
             <DropdownMenuContent align="end" className="min-w-36"><DropdownMenuItem variant="destructive" onClick={() => setRm(true)} data-plugin-uninstall><TrashIcon />{t("pages:plugins.uninstall")}</DropdownMenuItem></DropdownMenuContent>

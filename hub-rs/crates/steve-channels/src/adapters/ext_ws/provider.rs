@@ -547,7 +547,7 @@ fn hub_ref(h: &Handle, realm: &str, known: &HashSet<String>) -> Option<HandleRef
     Some(HandleRef::new(system, handle))
 }
 
-fn sender(s: &WireSender, realm: &str, known: &HashSet<String>) -> Sender {
+pub(crate) fn sender(s: &WireSender, realm: &str, known: &HashSet<String>) -> Sender {
     let primary = hub_ref(&s.id, realm, known).unwrap_or_else(|| {
         let (sys, h) = s.id.hub(realm);
         HandleRef::new(sys, h)
@@ -760,6 +760,7 @@ impl ConnectionProvider for ExtWs {
             REALM: me.realm,
             ME: me.primary.to_value(),
             "server": s.hello().server,
+            "connector": s.hello().connector,
         }));
         if me.primary.kind == HandleKind::Email {
             info = info.alias("mail", &me.primary.value.to_lowercase());
@@ -1158,5 +1159,70 @@ mod tests {
         };
         assert!(same_identity(&cfg, &realm).is_err());
         assert_eq!(account_handle(&me), "acme:id:u_123");
+    }
+}
+
+#[async_trait]
+impl crate::connector::ConnectorTools for ExtWs {
+    fn adapter_id(&self) -> &str {
+        ADAPTER
+    }
+
+    async fn catalog(&self, cx: &ConnCx) -> Result<Option<crate::connector::Manifest>, String> {
+        // Discovery must remain usable without waking every remote service. The live handshake
+        // wins; otherwise use connect-time metadata. Dispatch always opens/checks a real session
+        // and compares its current declaration before sending, so this cache grants no permission.
+        if let Some(s) = self.live(cx.id()) {
+            if s.status().status != SessionStatus::Ok {
+                return Err("connector session is not signed in".into());
+            }
+            return Ok(s.hello().connector.clone());
+        }
+        cx.config()
+            .get("connector")
+            .filter(|v| !v.is_null())
+            .map(crate::connector::Manifest::parse)
+            .transpose()
+    }
+
+    async fn call(
+        &self,
+        cx: &ConnCx,
+        op: &crate::connector::Operation,
+        args: Value,
+        key: &str,
+    ) -> Result<Value, String> {
+        let guard = self.session(cx).await.map_err(|e| e.to_string())?;
+        let s = &guard.s;
+        if s.status().status != SessionStatus::Ok {
+            return Err("connector session is not signed in".into());
+        }
+        let current = s
+            .hello()
+            .connector
+            .as_ref()
+            .and_then(|m| m.operations.iter().find(|o| o.name == op.name))
+            .ok_or("connector operation no longer declared")?;
+        if current != op {
+            return Err("connector declaration changed; discover again".into());
+        }
+        let mut p = json!({"name": op.name, "arguments": args});
+        if !op.read_only() {
+            writable(s).map_err(|e| e.to_string())?;
+            if key.is_empty() {
+                return Err("write requires a request identity".into());
+            }
+            self.pace(cx.id(), s).await;
+            p["expected_sender"] = expected_sender(cx).map_err(|e| e.to_string())?;
+            p["idempotency_key"] = wire::idempotency_key(key).into();
+        }
+        // Deliberately not ExtWs::read/write: neither a read nor write is replayed here.
+        match s.call("connector.call", p, s.timing().call).await {
+            Ok(v) => Ok(v),
+            Err(CallError::Timeout | CallError::Closed(_)) if !op.read_only() => {
+                Ok(json!({"status": "unknown", "request_id": key, "retry": false}))
+            }
+            Err(e) => Err(format!("connector call: {e:?}")),
+        }
     }
 }

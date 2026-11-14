@@ -124,6 +124,7 @@ impl Extension for ExternalChannel {
             ChannelSide::new(ext_ws::decl(), ext.clone())
                 .act_as_user(ext.clone())
                 .media(ext.clone())
+                .connector(ext.clone())
                 .history(ext.clone())
                 .profiles(ext.clone()),
         )?;

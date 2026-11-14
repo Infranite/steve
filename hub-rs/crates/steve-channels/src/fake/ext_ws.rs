@@ -44,6 +44,10 @@ pub struct World {
     pub signed_in: Value,
     pub versions: Vec<u32>,
     pub features: Vec<String>,
+    pub connector: Option<Value>,
+    pub connector_results: HashMap<String, Value>,
+    /// Execute one connector write, then close before its response (unknown outcome).
+    pub lose_connector_response: bool,
     pub limits: Value,
     pub write_policy: String,
     pub session: String,
@@ -164,6 +168,9 @@ impl FakeExtWs {
             .iter()
             .map(|s| s.to_string())
             .collect(),
+            connector: None,
+            connector_results: HashMap::new(),
+            lose_connector_response: false,
             limits: json!({"max_frame_bytes": 1_048_576, "max_text_bytes": 153_600,
                 "max_batch_items": 100, "max_unacked_batches": 4, "max_ids_per_call": 50,
                 "history_max_limit": 50, "write_per_sec": 5, "write_burst": 5,
@@ -430,6 +437,11 @@ async fn serve(socket: WebSocket, world: Arc<Mutex<World>>) {
             break;
         }
         let r = answer(&world, &me, method, &params);
+        if method == "connector.call" && lock(&world).lose_connector_response {
+            lock(&world).lose_connector_response = false;
+            close(&me, 1011, "lost connector reply");
+            break;
+        }
         let stop = matches!(&r, Err(e) if e.reason == Reason::UnsupportedVersion);
         let _ = me.send(text(wire::response(&id, r)));
         if stop {
@@ -490,7 +502,7 @@ fn answer(
                         "realm": w.realm, "time_precision_ms": 1, "time_ms": now,
                         "features": w.features, "limits": w.limits,
                         "session": {"status": w.session}, "upstream": {"status": "ok"},
-                        "write_policy": w.write_policy}),
+                        "write_policy": w.write_policy, "connector": w.connector}),
                     )
                 }
                 Err(supported) => Err(RpcError {
@@ -499,6 +511,30 @@ fn answer(
                     data: json!({"reason": "unsupported_version", "supported": supported}),
                 }),
             }
+        }
+        "connector.call" => {
+            let name = p["name"].as_str().unwrap_or("");
+            let declared = w
+                .connector
+                .as_ref()
+                .and_then(|m| m["operations"].as_array())
+                .and_then(|ops| ops.iter().find(|o| o["name"] == name));
+            let Some(op) = declared else {
+                return err(Reason::Unsupported, "operation not declared");
+            };
+            let write = op["annotations"]["readOnlyHint"] != true;
+            if write && (p["expected_sender"] != w.signed_in || w.write_policy != "allowed") {
+                return err(Reason::WriteForbidden, "sender/write policy");
+            }
+            let result = w
+                .connector_results
+                .get(name)
+                .cloned()
+                .unwrap_or(json!({"ok": true}));
+            if write {
+                w.writes.push((method.into(), p.clone(), result.clone()));
+            }
+            Ok(result)
         }
         "ping" => Ok(json!({"time_ms": now})),
         "me.get" => Ok(json!({"realm": w.realm, "user": {"id": w.signed_in,

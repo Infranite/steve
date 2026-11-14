@@ -95,6 +95,7 @@ async fn setup() -> H {
     let ch = Channels::builder(env.modules.clone(), conns.clone(), Arc::new(flow))
         .decl(ext_ws::decl())
         .media(ext.clone())
+        .connector(ext.clone())
         .history(ext.clone())
         .profiles(ext.clone())
         .build();
@@ -965,4 +966,269 @@ async fn history_media_and_people_are_read_through_the_service() {
     assert_eq!(a.profiles.len(), 1);
     assert_eq!(a.profiles[0].name, "Grace");
     assert_eq!(a.profiles[0].email.as_deref(), Some("grace@example.com"));
+}
+
+// Generic connector extension. Nothing in these tests contacts a real account or platform.
+fn connector_manifest() -> Value {
+    json!({"version":1,"id":"example","events":["issue.updated"],"operations":[
+        {"name":"search","capability":"search","description":"Search documents on this account",
+         "inputSchema":{"type":"object","properties":{"query":{"type":"string"}},"required":["query"],"additionalProperties":false},
+         "annotations":{"readOnlyHint":true,"steve":{"resources":["document"],"asYou":false}}},
+        {"name":"read","capability":"read","description":"Read an original by its Hub reference",
+         "inputSchema":{"type":"object","properties":{"reference":{"type":"string"}},"required":["reference"],"additionalProperties":false},
+         "annotations":{"readOnlyHint":true,"steve":{"resources":["document"],"asYou":false}},"bindings":{"reference":"reference"}},
+        {"name":"update","capability":"write","description":"Update a referenced original",
+         "inputSchema":{"type":"object","properties":{"reference":{"type":"string"},"text":{"type":"string"}},"required":["reference","text"],"additionalProperties":false},
+         "annotations":{"readOnlyHint":false,"destructiveHint":true,"steve":{"resources":["document"],"asYou":true}},"bindings":{"reference":"reference"}}
+    ]})
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn connector_discovery_explicit_read_references_and_unknown_write() {
+    let h = setup().await;
+    h.fake.with(|w| {
+        w.connector = Some(connector_manifest());
+        // Generic connectors need neither messaging history nor media support.
+        w.features = vec!["me".into(), "changes".into()];
+        w.connector_results.insert(
+            "search".into(),
+            json!({"content":[{"type":"text","text":"One document"}],"references":[{
+            "kind":"reference","external_id":"provider-document-1","conversation_id":"project-1",
+            "source_message_id":"provider-message-7","original_type":"document","title":"Design",
+            "body":"must not persist","reference_id":"forged-by-plugin"}]}),
+        );
+        w.connector_results.insert(
+            "read".into(),
+            json!({"content":[{"type":"text","text":"Original fetched on demand"}]}),
+        );
+    });
+    let conn = h.connect().await;
+    let who = caller(WS, ME);
+    let tools = h.ch.connector_tools(&who).await.unwrap();
+    assert_eq!(tools.len(), 3);
+    assert!(h.fake.calls("messages.history").is_empty());
+    assert!(h.fake.calls("connector.call").is_empty());
+    let search = &tools
+        .iter()
+        .find(|t| t.operation.name == "search")
+        .unwrap()
+        .name;
+    let read = &tools
+        .iter()
+        .find(|t| t.operation.name == "read")
+        .unwrap()
+        .name;
+    let write = &tools
+        .iter()
+        .find(|t| t.operation.name == "update")
+        .unwrap()
+        .name;
+    let result =
+        h.ch.connector_call(&who, search, json!({"query":"Design"}), "search-1")
+            .await
+            .unwrap();
+    let reference = result["references"][0]["reference_id"].as_str().unwrap();
+    assert!(reference.starts_with("ref_"));
+    assert_ne!(reference, "forged-by-plugin");
+    assert!(result["references"][0].get("external_id").is_none());
+    assert!(result["references"][0].get("body").is_none());
+    assert!(
+        h.rows("SELECT id FROM chan_messages", &[]).is_empty(),
+        "search must not import history"
+    );
+    assert!(
+        h.ch.connector_call(
+            &who,
+            read,
+            json!({"reference":"provider-document-1"}),
+            "bad-id"
+        )
+        .await
+        .is_err()
+    );
+    assert!(
+        h.ch.connector_call(
+            &who,
+            read,
+            json!({"reference":reference,"unexpected":true}),
+            "bad-schema"
+        )
+        .await
+        .is_err()
+    );
+    let original =
+        h.ch.connector_call(&who, read, json!({"reference":reference}), "read-1")
+            .await
+            .unwrap();
+    assert_eq!(original["content"][0]["text"], "Original fetched on demand");
+    assert_eq!(
+        h.fake.calls("connector.call").last().unwrap()["arguments"]["reference"],
+        "provider-document-1"
+    );
+    h.fake.with(|w| w.lose_connector_response = true);
+    let unknown =
+        h.ch.connector_call(
+            &who,
+            write,
+            json!({"reference":reference,"text":"updated"}),
+            "write-1",
+        )
+        .await
+        .unwrap();
+    assert_eq!(unknown["status"], "unknown");
+    assert_eq!(unknown["retry"], false);
+    assert_eq!(
+        h.fake.with(|w| w.writes.len()),
+        1,
+        "writes must not be replayed"
+    );
+    h.env
+        .store()
+        .transaction(|tx| {
+            tx.execute(
+                "UPDATE connector_refs SET expires=0 WHERE id=?",
+                [reference],
+            )?;
+            Ok::<_, steve_modules::ApiError>(())
+        })
+        .unwrap();
+    assert!(
+        h.ch.connector_call(&who, read, json!({"reference":reference}), "expired")
+            .await
+            .unwrap_err()
+            .contains("expired")
+    );
+    // A second personal account cannot use the first account's Hub-issued reference.
+    h.fake
+        .with(|w| w.signed_in = json!({"kind":"id","value":"u_other"}));
+    let other = h.connect().await;
+    assert_ne!(other, conn);
+    let name = steve_channels::connector::tool_name(&other, "read");
+    assert!(
+        h.ch.connector_call(&who, &name, json!({"reference":reference}), "cross-account")
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn connector_events_reconnect_dedupe_and_no_automatic_backfill() {
+    let h = setup().await;
+    h.fake.with(|w| w.connector = Some(connector_manifest()));
+    let _id = h.connect().await;
+    let (rt, _tx) = h.runtime();
+    until("subscribed", || !h.subscribes().is_empty()).await;
+    let event = json!({"type":"event","event_type":"issue.updated","event_id":"stable-1",
+        "occurred_ms": h.t0+1,"summary":"Issue updated","conversation_id":"project-1","topic_id":"issue-7",
+        "space_id":"forged-hub-space","message_id":"forged-hub-message"});
+    let seq = h.fake.push(vec![event.clone()]);
+    until("acked event", || h.fake.acked() == seq).await;
+    h.fake.drop_all();
+    until("connector reconnected", || h.subscribes().len() == 2).await;
+    assert_eq!(
+        h.subscribes()[1]["from"],
+        json!({"cursor":format!("c:{seq}")})
+    );
+    let seq = h.fake.push(vec![
+        event,
+        json!({"type":"gap","chats":["project-1"],"from_ms":h.t0-1000,"to_ms":h.t0}),
+    ]);
+    until("acked duplicate and gap", || h.fake.acked() == seq).await;
+    let rows = h.rows(
+        "SELECT id,payload FROM ext_events WHERE source='connector'",
+        &[],
+    );
+    assert_eq!(rows.len(), 1, "stable event ID deduplicates");
+    assert!(!rows[0][1].as_str().unwrap().contains("forged-hub"));
+    assert!(h.fake.calls("messages.history").is_empty());
+    rt.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn connector_rich_message_keeps_only_reference_metadata() {
+    let h = setup().await;
+    h.fake.with(|w| w.connector = Some(connector_manifest()));
+    let _conn = h.connect().await;
+    let (rt, _tx) = h.runtime();
+    until("subscribed", || !h.subscribes().is_empty()).await;
+    let mut m = msg(&h, "pr-7", "rich-1", "u_7", "Pull request description", 1);
+    m["chat_kind"] = json!("pr");
+    m["thread_id"] = json!("topic-7");
+    m["reply_to"] = json!({"id":"parent-message"});
+    m["sender"]["aliases"] = json!([{"kind":"email","value":"dev@example.org"}]);
+    m["attachments"] = json!([
+        {"type":"document","key":"original-key","title":"Design","size":42,"body":"must not persist","reference_id":"forged"},
+        {"type":"webpage","key":"page-key","url":"https://example.org/design","html":"must not persist"}
+    ]);
+    let seq = h.fake.push_message(m);
+    until("rich reference ack", || h.fake.acked() == seq).await;
+    let rows = h.rows("SELECT m.id,m.attachments,s.kind,m.thread_key,m.reply_to FROM chan_messages m JOIN spaces s ON s.id=m.space_id WHERE s.external_id='pr-7'",&[]);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0][2], "pr");
+    assert_eq!(rows[0][3], "topic-7");
+    assert_eq!(rows[0][4], "parent-message");
+    let a: Value = serde_json::from_str(rows[0][1].as_str().unwrap()).unwrap();
+    assert!(a[0]["reference_id"].as_str().unwrap().starts_with("ref_"));
+    assert!(a[0].get("body").is_none());
+    assert!(a[1].get("html").is_none());
+    let presented = h
+        .env
+        .store()
+        .reader(|c| {
+            Ok::<_, steve_modules::ApiError>(
+                steve_channels::media::present(c, rows[0][0].as_str().unwrap()).unwrap(),
+            )
+        })
+        .unwrap();
+    assert!(presented.1[0].get("key").is_none());
+    assert!(h.fake.calls("media.download").is_empty());
+    rt.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn connector_catalog_and_references_do_not_bypass_current_permissions() {
+    let h = setup().await;
+    h.fake.with(|w| {
+        w.connector = Some(connector_manifest());
+    });
+    let conn = h.connect().await;
+    let who = caller(WS, ME);
+    let name = steve_channels::connector::tool_name(&conn, "search");
+    assert_eq!(h.ch.connector_tools(&who).await.unwrap().len(), 3);
+    let unknown_user = caller(WS, "not-the-account-owner");
+    assert!(
+        h.ch.connector_tools(&unknown_user)
+            .await
+            .unwrap_or_default()
+            .is_empty()
+    );
+    h.conns
+        .patch(&who, &conn, None, Some(vec!["msg.receive".into()]))
+        .unwrap();
+    assert_eq!(
+        h.ch.connector_tools(&who).await.unwrap().len(),
+        2,
+        "disabled write cap hides write operations"
+    );
+    h.conns.patch(&who, &conn, Some(true), None).unwrap();
+    assert!(
+        h.ch.connector_call(&who, &name, json!({"query":"anything"}), "paused")
+            .await
+            .is_err()
+    );
+    assert!(h.fake.calls("connector.call").is_empty());
+    h.conns.patch(&who, &conn, Some(false), None).unwrap();
+    h.fake.with(|w| {
+        w.connector.as_mut().unwrap()["operations"] = json!([]);
+    });
+    assert!(
+        h.ch.connector_call(&who, &name, json!({"query":"anything"}), "removed")
+            .await
+            .unwrap_err()
+            .contains("no longer declared")
+    );
+    assert!(
+        h.fake.calls("connector.call").is_empty(),
+        "cached connect metadata is not a dispatch grant"
+    );
 }

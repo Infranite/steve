@@ -684,3 +684,49 @@
 //!   `raw: {"body_unavailable": true}` (§5.3).
 //! - **Media**: the size cap, same origin, bearer and no redirects are the adapter's; how a file is
 //!   stored (image or file) is the Hub's media pipeline's (§8).
+
+//!
+//! ## 14. Generic connector extension (2026-11-14)
+//!
+//! A v1 hello MAY include `connector: {version: 1, id, operations, events}`. This extension needs
+//! only `me` and `changes`; other features remain independent. Legacy bridges without this
+//! declaration keep the required messaging feature set and history gap repair. Connector mode
+//! starts at now/resumes its cursor, but never repairs gaps by importing history automatically.
+//!
+//! `operations` (at most 64) are MCP `{name,description,inputSchema,annotations}` plus `capability`
+//! (`search|history|read|write`) and `bindings` (top-level argument ->
+//! `conversation|message|topic|reference`). Schemas are closed objects, bound fields are strings,
+//! and non-search operations require a bound target. Names are ASCII alphanumeric/underscore/hyphen,
+//! at most 64 bytes; the Hub derives the exported, connection-scoped tool name itself. Reads must
+//! set `readOnlyHint:true`; writes set false. `annotations.steve` may declare `resources` and
+//! `asYou`. Declarations are metadata, not authorization. Every call rechecks current caller,
+//! account/connection and schema, then resolves Hub-issued IDs to that account's provider IDs.
+//!
+//! `connector.call {name,arguments,expected_sender?,idempotency_key?}` returns JSON. Writes require
+//! the connection's send-as-you capability, current signed-in identity and write policy. The Hub
+//! sends once; a timeout or lost socket returns `{status:"unknown",request_id, retry:false}`.
+//! There is no automatic retry, including rate-limit responses. The service must check
+//! `expected_sender` before side effects and implement idempotency-key conflict detection (§4.4).
+//!
+//! Results may include `references` (at most 200), each with `kind` (a binding kind), `external_id`,
+//! optional `conversation_id`, `source_message_id`, required `original_type`, and optional checked
+//! title/name/size/MIME/HTTP(S) URL/`expires_ms`. The Hub registers an account/connection-scoped
+//! `reference_id`, never accepting a plugin-chosen Hub ID. Defaults expire after one day, maximum
+//! 30 days. Expired/missing references are errors, not permission to guess a provider ID. Reads
+//! are explicit and may return original content; registering references never imports history or
+//! triggers historical participants/automation. The Hub retains provenance/type, not inline bytes.
+//!
+//! Conversation kinds are `dm|group|channel|thread|mail_thread|meeting|pr|issue`. Message
+//! `source_id`, platform `id`, `thread_id`, `reply_to.id` and `root_id` retain their existing roles.
+//! Attachments additionally support `document|webpage|commit|log|audio|video`; unknown fields and
+//! inline body/HTML/bytes are dropped. The Hub adds a deterministic per-message `reference_id`.
+//! `participants` batch items contain `conversation_id`, `change:added|removed`, and `members`
+//! (at most 256), whose IDs/aliases use the sender shape. They update the common membership model.
+//!
+//! Declared `events` (at most 64 type keys) arrive as batch items
+//! `{type:"event",event_type,event_id,occurred_ms,summary,conversation_id?,topic_id?}`. Stable
+//! `event_id` is deduplicated by the ordinary Hub event sink under the authenticated connection;
+//! the batch cursor is saved only after ingestion, then acked. The source is `connector`; event
+//! privacy comes from the connection account. Remote Hub IDs, visibility or flow controls are
+//! ignored. Undeclared event types are skipped and acked. Platform-specific payloads stay in the
+//! plugin and can be fetched through a declared explicit read operation.

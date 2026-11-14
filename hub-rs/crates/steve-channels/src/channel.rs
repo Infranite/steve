@@ -70,6 +70,8 @@ pub enum SpaceKind {
     Thread,
     MailThread,
     Meeting,
+    Pr,
+    Issue,
 }
 
 impl SpaceKind {
@@ -81,6 +83,8 @@ impl SpaceKind {
             Self::Thread => "thread",
             Self::MailThread => "mail_thread",
             Self::Meeting => "meeting",
+            Self::Pr => "pr",
+            Self::Issue => "issue",
         }
     }
 
@@ -92,6 +96,8 @@ impl SpaceKind {
             "thread" => Self::Thread,
             "mail_thread" => Self::MailThread,
             "meeting" => Self::Meeting,
+            "pr" => Self::Pr,
+            "issue" => Self::Issue,
             _ => return None,
         })
     }
@@ -147,6 +153,8 @@ pub struct SpaceInfo {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MemberInfo {
     pub handle: HandleRef,
+    /// Other platform/email handles for this participant, resolved by the common identity path.
+    pub aliases: Vec<HandleRef>,
     pub name: String,
     /// `owner | admin | member | bot`
     pub role: String,
