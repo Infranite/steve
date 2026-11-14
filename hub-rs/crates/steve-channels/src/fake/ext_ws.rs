@@ -36,6 +36,9 @@ pub struct Batch {
 pub struct World {
     pub token: String,
     pub realm: String,
+    /// Independent declarations allow regression tests of hello/account disagreements.
+    pub identity: Option<String>,
+    pub account_identity: Option<String>,
     /// The primary handle `me.get` answers.
     pub me: Value,
     pub me_display: String,
@@ -50,6 +53,7 @@ pub struct World {
     pub lose_connector_response: bool,
     pub limits: Value,
     pub write_policy: String,
+    pub source_only: bool,
     pub session: String,
     /// The fake's clock (unix ms); `None`: the real one.
     pub now: Option<i64>,
@@ -147,6 +151,8 @@ impl FakeExtWs {
         let world = World {
             token: TOKEN.into(),
             realm: REALM.into(),
+            identity: None,
+            account_identity: None,
             me: json!({"kind": "id", "value": ME}),
             me_display: "Ada Lovelace".into(),
             me_aliases: vec![json!({"kind": "email", "value": "ada@example.com"})],
@@ -176,6 +182,7 @@ impl FakeExtWs {
                 "history_max_limit": 50, "write_per_sec": 5, "write_burst": 5,
                 "max_attachment_bytes": 104_857_600, "max_inflight_requests": 32}),
             write_policy: "allowed".into(),
+            source_only: false,
             session: "ok".into(),
             now: None,
             messages: Vec::new(),
@@ -497,13 +504,15 @@ fn answer(
                             s.hello = true;
                         }
                     }
-                    Ok(
-                        json!({"protocol": v, "server": {"name": "fake", "version": "1"},
+                    let mut result = json!({"protocol": v, "server": {"name": "fake", "version": "1"},
                         "realm": w.realm, "time_precision_ms": 1, "time_ms": now,
                         "features": w.features, "limits": w.limits,
                         "session": {"status": w.session}, "upstream": {"status": "ok"},
-                        "write_policy": w.write_policy, "connector": w.connector}),
-                    )
+                        "write_policy": w.write_policy, "connector": w.connector});
+                    if let Some(identity) = &w.identity {
+                        result["identity"] = identity.clone().into();
+                    }
+                    Ok(result)
                 }
                 Err(supported) => Err(RpcError {
                     reason: Reason::UnsupportedVersion,
@@ -523,7 +532,12 @@ fn answer(
                 return err(Reason::Unsupported, "operation not declared");
             };
             let write = op["annotations"]["readOnlyHint"] != true;
-            if write && (p["expected_sender"] != w.signed_in || w.write_policy != "allowed") {
+            if write
+                && (p["expected_sender"] != w.signed_in
+                    || w.write_policy != "allowed"
+                    || p["expected_identity"].as_str()
+                        != Some(w.account_identity.as_deref().unwrap_or("self")))
+            {
                 return err(Reason::WriteForbidden, "sender/write policy");
             }
             let result = w
@@ -537,8 +551,14 @@ fn answer(
             Ok(result)
         }
         "ping" => Ok(json!({"time_ms": now})),
-        "me.get" => Ok(json!({"realm": w.realm, "user": {"id": w.signed_in,
-            "display": w.me_display, "aliases": w.me_aliases}})),
+        "me.get" => {
+            let mut result = json!({"realm": w.realm, "user": {"id": w.signed_in,
+                "display": w.me_display, "aliases": w.me_aliases}});
+            if let Some(identity) = &w.account_identity {
+                result["identity"] = identity.clone().into();
+            }
+            Ok(result)
+        }
         "chats.get" => {
             let chat = p["chat_id"].as_str().unwrap_or_default();
             match w.chats.get(chat) {
@@ -659,7 +679,9 @@ fn write(w: &mut World, method: &str, p: &Value, now: i64) -> Result<Value, RpcE
         return err(Reason::WriteForbidden, "writes are forbidden");
     }
     // the signed-in user, before any side effect
-    if p["expected_sender"] != w.signed_in {
+    if p["expected_sender"] != w.signed_in
+        || p["expected_identity"].as_str() != Some(w.account_identity.as_deref().unwrap_or("self"))
+    {
         return err(Reason::AccountChanged, "someone else is signed in");
     }
     if let Some(ms) = w.rate_limit_next.take() {
@@ -690,7 +712,8 @@ fn write(w: &mut World, method: &str, p: &Value, now: i64) -> Result<Value, RpcE
         "messages.send" | "messages.reply" => {
             let n = w.next_out;
             w.next_out += 1;
-            json!({"source_id": format!("out_{n}"), "id": format!("m_out_{n}"),
+            json!({"source_id": format!("out_{n}"),
+                "id": if w.source_only { None } else { Some(format!("m_out_{n}")) },
                 "created_ms": now, "thread_id": null})
         }
         "reactions.add" => {

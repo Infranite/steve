@@ -55,9 +55,7 @@ use steve_store::{Decision, Item, NewDecision, Tx, uid};
 
 use crate::adapters::feishu::send::{at_handle, reply_in_thread};
 use crate::basis::{self, NewBasis, Rewrite};
-use crate::channel::{
-    ActAsUser, ActTarget, MessageRef, OutContent, SendKey, SendTarget, Sent, SpaceKind,
-};
+use crate::channel::{ActAsUser, ActTarget, MessageRef, OutContent, SendKey, Sent, SpaceKind};
 use crate::compose::PinnedModel;
 use crate::deliver::{Auth, Delivered, Generation, OutRequest, OutTarget, Outbound, Purpose};
 use crate::disclosure::{self, MAX_REWRITES};
@@ -1470,14 +1468,17 @@ impl Outbox {
             }
             _ => match ch.adapter(&adapter) {
                 Some(a) => {
-                    // a message only the Hub has an id for can't be replied to at the provider:
-                    // the answer goes to the space
-                    let to = match row.reply_to.as_ref().filter(|r| !fallback::is_fallback(r)) {
-                        Some(r) => SendTarget::Reply {
-                            ext_msg_id: r.clone(),
+                    // Preserve source-only reply targets for adapters that support them. The
+                    // default send_message bridge falls back to the space without a platform id.
+                    let to = match &row.reply_to {
+                        Some(r) => ActTarget::Reply {
+                            to: ch
+                                .store()
+                                .reader(|c| replied_ref(c, &row.space_id, &space.connection_id, r))
+                                .unwrap_or_else(|_| MessageRef::platform(&space.external_id, r)),
                             in_thread,
                         },
-                        None => SendTarget::Space {
+                        None => ActTarget::Space {
                             ext_id: space.external_id.clone(),
                         },
                     };
@@ -1485,9 +1486,8 @@ impl Outbox {
                     content.uuid = Some(row.id.clone());
                     content.at = at;
                     content.space_ext_id = Some(space.external_id.clone());
-                    a.send(&cx, &to, &content)
+                    a.send_message(&cx, &to, &content, &SendKey(row.id.clone()))
                         .await
-                        .map(Sent::id)
                         .map_err(provider_error)
                 }
                 None => Err(ProviderError::Rejected("这个渠道还不能发送消息".into())),

@@ -411,10 +411,39 @@ impl Status {
     }
 }
 
+/// The identity served by one credential. Missing declarations retain the original self contract.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Identity {
+    #[default]
+    #[serde(rename = "self")]
+    Self_,
+    Bot,
+}
+
+impl Identity {
+    pub fn parse(v: Option<&Value>) -> Result<Self, String> {
+        match v {
+            None => Ok(Self::Self_),
+            Some(Value::String(s)) if s == "self" => Ok(Self::Self_),
+            Some(Value::String(s)) if s == "bot" => Ok(Self::Bot),
+            _ => Err("identity must be self or bot".into()),
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Self_ => "self",
+            Self::Bot => "bot",
+        }
+    }
+}
+
 /// A checked hello result.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Hello {
     pub protocol: u32,
+    pub identity: Identity,
     pub realm: String,
     pub server: String,
     pub time_precision_ms: i64,
@@ -516,6 +545,7 @@ impl Hello {
             _ => "ok".to_string(),
         };
         Ok(Hello {
+            identity: Identity::parse(v.get("identity")).map_err(HelloError::Malformed)?,
             protocol,
             realm,
             server,

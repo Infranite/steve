@@ -230,11 +230,19 @@ impl Channels {
                 .map_err(|e| ApiError::invalid(e.to_string()))?;
             match provider.catalog(&cx).await {
                 Ok(Some(m)) => {
+                    let bot = self
+                        .connections()
+                        .provider(&row.adapter)
+                        .is_some_and(|p| p.integration().identity == "bot");
                     for operation in m.operations {
-                        if !operation.read_only()
-                            && !row.caps.iter().any(|c| c == "msg.send_as_user")
-                        {
+                        if bot && operation.as_you() {
                             continue;
+                        }
+                        if !operation.read_only() {
+                            let cap = if bot { "msg.send" } else { "msg.send_as_user" };
+                            if !row.caps.iter().any(|c| c == cap) {
+                                continue;
+                            }
                         }
                         out.push(Tool {
                             name: tool_name(&id, &operation.name),
@@ -287,7 +295,18 @@ impl Channels {
             .connections()
             .get(who, &tool.account)
             .map_err(|e| e.to_string())?;
-        let cap = (!tool.operation.read_only()).then_some("msg.send_as_user");
+        let bot = self
+            .connections()
+            .provider(&row.adapter)
+            .is_some_and(|p| p.integration().identity == "bot");
+        if bot && tool.operation.as_you() {
+            return Err("a bot connection cannot act as you".into());
+        }
+        let cap = (!tool.operation.read_only()).then_some(if bot {
+            "msg.send"
+        } else {
+            "msg.send_as_user"
+        });
         let cx = self
             .connections()
             .cx_for(&viewer.ws, &tool.account, cap)

@@ -103,13 +103,13 @@ impl Extension for FeishuSelf {
     }
 }
 
-/// `ext_ws`: you through an external channel service the Hub dials over a WebSocket (its URL and
-/// token entered on the credential form): the feed of each receiving connection, acting as you,
-/// media, history for an agent and people. Nothing runs until a connection is made.
+/// External channel services the Hub dials over WebSocket: self (`ext_ws`, ActAsUser) and an
+/// explicitly selected bot (`ext_ws.bot`, ChannelAdapter). Each has its own feed/session registry;
+/// both expose media, explicit history, connector tools and people. Nothing runs until connected.
 #[derive(Default)]
 pub(crate) struct ExternalChannel {
     /// The views its last declaration registered, shared with its feeds.
-    ext: Mutex<Option<Arc<ExtWs>>>,
+    ext: Mutex<Option<(Arc<ExtWs>, Arc<ExtWs>)>>,
 }
 
 impl Extension for ExternalChannel {
@@ -128,21 +128,35 @@ impl Extension for ExternalChannel {
                 .history(ext.clone())
                 .profiles(ext.clone()),
         )?;
-        *self.ext.lock().unwrap_or_else(|e| e.into_inner()) = Some(ext);
+        let bot = Arc::new(ExtWs::bot());
+        d.channel(
+            ChannelSide::new(ext_ws::bot_decl(), bot.clone())
+                .adapter(bot.clone())
+                .media(bot.clone())
+                .connector(bot.clone())
+                .history(bot.clone())
+                .profiles(bot.clone()),
+        )?;
+        *self.ext.lock().unwrap_or_else(|e| e.into_inner()) = Some((ext, bot));
         Ok(())
     }
 
     fn start(&self, s: &Started) -> Result<Mounted, ExtensionError> {
-        let ext = self
+        let (ext, bot) = self
             .ext
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone()
             .ok_or_else(|| ExtensionError::new("started without its declared provider"))?;
-        Ok(Mounted::default().lifecycle(
-            ext_ws::ADAPTER,
-            Arc::new(ExtWsHook::new(s.channels.clone(), ext)),
-        ))
+        Ok(Mounted::default()
+            .lifecycle(
+                ext_ws::ADAPTER,
+                Arc::new(ExtWsHook::new(s.channels.clone(), ext)),
+            )
+            .lifecycle(
+                ext_ws::BOT_ADAPTER,
+                Arc::new(ExtWsHook::new(s.channels.clone(), bot)),
+            ))
     }
 }
 
