@@ -1,6 +1,6 @@
 # Places that still tell harnesses apart by name (tests/harness_parity.rs). The list only
 # shrinks: move each to a declared adapter property or an ACP capability.
-steve-channels/src/adapters/ext_ws/feed.rs	"cursor"	4
+steve-channels/src/adapters/ext_ws/feed.rs	"cursor"	2
 steve-flow/src/runs.rs	"cursor"	1
 steve-hub/src/api/diagnostics.rs	"cursor"	1
 steve-hub/src/api/stats.rs	"cursor"	2
@@ -10,7 +10,6 @@ steve-hub/src/catalog.rs	"grok"	1
 steve-hub/src/catalog.rs	"kimi"	1
 steve-hub/src/catalog.rs	"kiro"	1
 steve-hub/src/catalog.rs	"qwen"	1
-steve-hub/src/wire/diagnostics.rs	"cursor"	1
 steve-node-api/src/run.rs	harness !=	1
 steve-node/src/history.rs	"claude-code"	1
 steve-node/src/history.rs	"codex"	1

@@ -75,6 +75,57 @@ fn crates_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("..")
 }
 
+/// `cursor` is also a pagination field in JSON protocols, not a choice of Cursor's adapter.
+/// Only object keys inside `json!` are exempt: values, comparisons and lookups still count.
+fn pagination_key(raw: &str, code: &str, at: usize, literal: &str) -> bool {
+    if literal != "\"cursor\"" || !raw[at + literal.len()..].trim_start().starts_with(':') {
+        return false;
+    }
+    let mut braces = Vec::new();
+    for (i, b) in code.bytes().take(at).enumerate() {
+        match b {
+            b'{' => braces.push(i),
+            b'}' => {
+                braces.pop();
+            }
+            _ => {}
+        }
+    }
+    braces.into_iter().any(|i| {
+        let prefix: String = code[..i].chars().filter(|c| !c.is_whitespace()).collect();
+        prefix.strip_suffix("json!(").is_some_and(|head| {
+            head.chars()
+                .next_back()
+                .is_none_or(|c| !c.is_alphanumeric() && c != '_')
+        })
+    })
+}
+
+#[test]
+fn pagination_keys_are_not_adapter_names_but_values_and_branches_are() {
+    for (raw, exempt) in [
+        (r#"json!({"cursor": c})"#, true),
+        (r#"serde_json::json ! ( { "cursor" : c })"#, true),
+        (r#"json!({"page": {"cursor": c}})"#, true),
+        (r#"custom_json!({"cursor": c})"#, false),
+        (r#"json!({"harness": "cursor"})"#, false),
+        (r#"harness == "cursor""#, false),
+        (r#"harnesses.get("cursor")"#, false),
+        (
+            r#"match harness { "cursor" => run(), _ => other() }"#,
+            false,
+        ),
+    ] {
+        let code = scan::production(raw).unwrap();
+        let at = raw.find("\"cursor\"").unwrap();
+        assert_eq!(
+            pagination_key(raw, &code, at, "\"cursor\""),
+            exempt,
+            "{raw}"
+        );
+    }
+}
+
 fn found() -> BTreeMap<(String, String), usize> {
     let mut names: Vec<String> = std::fs::read_dir(crates_dir())
         .unwrap()
@@ -97,6 +148,7 @@ fn found() -> BTreeMap<(String, String), usize> {
                 let n = raw
                     .match_indices(lit)
                     .filter(|(at, _)| code.get(*at) == Some(&b'"'))
+                    .filter(|(at, _)| !pagination_key(&raw, &s.code, *at, lit))
                     .count();
                 if n > 0 {
                     out.insert((s.rel.clone(), lit.to_string()), n);
