@@ -1,5 +1,5 @@
 //! Owner-facing base APIs, relative to `/api`. Raw conversation data is not a workspace-wide feed.
-//! The digest Bot and its MCP tool surface are supplied separately in phase D.
+//! The ordinary digest Bot consumes the same store through `tools`; schedule binding is Hub wiring.
 use axum::extract::{Path, Query, State};
 use axum::routing::{get, post};
 use axum::{Json, Router};

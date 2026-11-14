@@ -280,18 +280,44 @@ pub fn lease(
     b: &Batching,
     max: usize,
 ) -> Result<(String, Vec<String>)> {
+    lease_matching(tx, ws, now, b, max, |_| Ok(true))
+}
+
+/// Lease only packets the consumer can still read. The predicate is evaluated before leasing,
+/// so a source that became private neither spends attempts nor blocks other conversations.
+pub fn lease_matching(
+    tx: &Tx,
+    ws: &str,
+    now: i64,
+    b: &Batching,
+    max: usize,
+    mut visible: impl FnMut(&Packet) -> Result<bool>,
+) -> Result<(String, Vec<String>)> {
     release_expired(tx, ws, now)?;
     let batch = uid("dbt");
-    let ids: Vec<String> = tx
-        .prepare_cached(&format!(
-            "SELECT p.id FROM digest_packets p WHERE p.workspace_id = ? AND p.state = 'queued'
-                AND NOT EXISTS (SELECT 1 FROM digest_packets older WHERE older.workspace_id = p.workspace_id
-                    AND older.conv = p.conv AND older.seq < p.seq AND older.state <> 'done')
-             ORDER BY p.priority DESC, p.created, p.conv, p.seq LIMIT {}",
-            max.min(500)
-        ))?
-        .query_map([ws], |r| r.get(0))?
-        .collect::<rusqlite::Result<_>>()?;
+    let mut st = tx.prepare_cached(
+        "SELECT p.id FROM digest_packets p WHERE p.workspace_id = ? AND p.state = 'queued'
+            AND NOT EXISTS (SELECT 1 FROM digest_packets older WHERE older.workspace_id = p.workspace_id
+                AND older.conv = p.conv AND older.seq < p.seq AND older.state <> 'done')
+         ORDER BY p.priority DESC, p.created, p.conv, p.seq",
+    )?;
+    // Stream candidates until enough readable packets are found. A fixed pre-filter limit would
+    // let many now-private sources permanently starve readable conversations behind them.
+    let ids = st.query_map([ws], |r| r.get::<_, String>(0))?;
+    let mut selected = Vec::new();
+    for id in ids {
+        if selected.len() >= max.min(500) {
+            break;
+        }
+        let id = id?;
+        let Some(packet) = get(tx, ws, &id)? else {
+            continue;
+        };
+        if visible(&packet)? {
+            selected.push(id);
+        }
+    }
+    let ids = selected;
     for id in &ids {
         tx.execute(
             "UPDATE digest_packets SET state = 'leased', attempts = attempts + 1, batch_id = ?, lease_until = ?, updated = ? WHERE id = ?",

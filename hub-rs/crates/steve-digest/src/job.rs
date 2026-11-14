@@ -1,4 +1,4 @@
-//! Deterministic intake only. Phase D owns consuming packets and starting a digest Bot.
+//! Deterministic intake only. The ordinary digest schedule consumes packets through tools.
 use std::time::Duration;
 
 use steve_modules::Modules;

@@ -37,6 +37,7 @@ pub(crate) enum Owner {
     Upgrade,
     Contacts,
     Knowledge,
+    Digest,
     Remember,
     Vault,
     Github,
@@ -150,6 +151,8 @@ pub(crate) fn owner_of(name: &str) -> Option<Owner> {
         Some(Owner::Upgrade)
     } else if mcp::handles(name) {
         Some(Owner::Contacts)
+    } else if steve_digest::tools::handles(name) {
+        Some(Owner::Digest)
     } else if steve_knowledge::tools::handles(name) {
         Some(Owner::Knowledge)
     } else if name == steve_knowledge::candidates::REMEMBER {
@@ -180,6 +183,7 @@ fn extra_tools() -> Vec<Value> {
     v.extend(super::item_mcp::tools());
     v.push(workflow_tool());
     v.extend(steve_knowledge::tools::all_tools().iter().cloned());
+    v.extend(steve_digest::tools::tools());
     v.push(steve_knowledge::candidates::remember_tool());
     v.extend(steve_modules::vault::mcp::tools().iter().cloned());
     v.extend(steve_github::mcp::tools().iter().cloned());
@@ -258,8 +262,32 @@ fn json_rpc(id: &Value, result: Value) -> Response {
         .into_response()
 }
 
-/// The user an agent works for. The Hub is single-user for now, so that is the workspace's owner (the
-/// first owner membership); with several users this becomes the item's requester.
+/// All ordinary module tools consume the authenticated session principal, never an owner alias.
+/// Revoked members retain only workspace service access, including recorded Node sessions.
+fn session_cx(store: &Store, s: &steve_store::Session) -> Result<mcp::McpCx, String> {
+    let user = store
+        .reader(|c| {
+            let (ws, principal) = super::principal::of_session(c, &s.id)?
+                .filter(|(ws, _)| ws == &s.workspace_id)
+                .ok_or_else(|| {
+                    steve_store::StoreError::Hook("session principal not found".into())
+                })?;
+            // Even a recorded personal principal loses personal access when membership is revoked.
+            Ok::<_, steve_store::StoreError>(
+                super::principal::resolve(c, &ws, principal.user())?.key(),
+            )
+        })
+        .map_err(|e| e.to_string())?;
+    Ok(mcp::McpCx {
+        ws: s.workspace_id.clone(),
+        user,
+        bot_id: s.bot_id.clone().unwrap_or_else(|| "agent".into()),
+        item_id: s.item_id.clone(),
+        session_id: Some(s.id.clone()),
+    })
+}
+
+/// Legacy owner-facing modules. New personal tools must use the authenticated session principal.
 pub(crate) fn owner(store: &Store, ws: &str) -> Option<String> {
     store
         .with_conn(|c| {
@@ -493,19 +521,9 @@ async fn call_owned_inner(
         return x.caps.a2a_call(&s.id, name, &args).await;
     }
     let store = x.store.clone();
-    let ws = s.workspace_id.clone();
-    let user = tokio::task::spawn_blocking(move || owner(&store, &ws))
+    let cx = tokio::task::spawn_blocking(move || session_cx(&store, &s))
         .await
-        .ok()
-        .flatten()
-        .unwrap_or_default();
-    let cx = mcp::McpCx {
-        ws: s.workspace_id,
-        user,
-        bot_id: s.bot_id.unwrap_or_else(|| "agent".into()),
-        item_id: s.item_id,
-        session_id: Some(s.id),
-    };
+        .map_err(|e| e.to_string())??;
     let out: Result<String, String> = match tool_owner {
         Owner::Diagnostics => unreachable!("diagnostics preserve the session above"),
         Owner::Items => unreachable!("item management preserves the session above"),
@@ -531,6 +549,7 @@ async fn call_owned_inner(
             }
         }
         Owner::Contacts => mcp::call(&x.modules, &x.ports, &cx, name, &args).await,
+        Owner::Digest => steve_digest::tools::call(&x.modules, &cx, name, &args).await,
         Owner::Knowledge => steve_knowledge::tools::call(&x.modules, &x.kb, &cx, name, &args).await,
         // synchronous (one write transaction): off the runtime
         Owner::Vault => {
@@ -598,4 +617,143 @@ pub(crate) async fn call_module(
 /// The modules' complete definitions for the shared registry.
 pub(crate) fn module_tools() -> Vec<Value> {
     extra_tools()
+}
+
+#[cfg(test)]
+mod session_identity_tests {
+    use super::*;
+    use steve_modules::testkit::{ME, OTHER, TestEnv, WS};
+    #[tokio::test]
+    async fn digest_and_knowledge_preserve_personal_and_service_session_identity() {
+        let e = TestEnv::new(|_| {});
+        e.store().with_conn(|c| {
+            c.execute("INSERT INTO bots (id,workspace_id,name,harness,updated) VALUES ('steve',?,'Digest','fixture',1)", [WS])?;
+            Ok(())
+        }).unwrap();
+        let kb = steve_knowledge::Knowledge::new(|_| {});
+        let app = steve_knowledge::routes(kb).with_state(e.modules.clone());
+        let mut docs = Vec::new();
+        for (user, visibility) in [(ME, "private"), (OTHER, "private"), (ME, "workspace")] {
+            let (status, doc) = steve_modules::testkit::call(
+                &app, Some(&steve_modules::testkit::caller(WS, user)), "POST", "/kb/notes",
+                Some(&json!({"title": "Identity boundary", "body": "source evidence", "visibility": visibility})),
+            ).await;
+            assert_eq!(status, 200, "{doc}");
+            docs.push(doc["id"].as_str().unwrap().to_string());
+        }
+        for user in [None, Some(ME), Some(OTHER)] {
+            let item = e
+                .store()
+                .items()
+                .create(
+                    WS,
+                    &steve_store::NewItem {
+                        title: "Digest fixture".into(),
+                        bot_id: "steve".into(),
+                        requested_by: user.map(str::to_string),
+                        ..Default::default()
+                    },
+                )
+                .unwrap()
+                .unwrap();
+            let session = e
+                .store()
+                .sessions()
+                .create(&steve_store::NewSession {
+                    workspace_id: WS.into(),
+                    item_id: Some(item.id),
+                    harness: "fixture".into(),
+                    ..Default::default()
+                })
+                .unwrap();
+            // Node sessions pin identity; a later requester edit cannot lend a different user's access.
+            e.store().transaction(|tx| {
+                tx.execute("INSERT INTO runtime_sessions(session_id,node_id,workspace_ref,node_session_id,config_revision,phase,updated) VALUES (?,'node','{}',?,'r','ready',1)", rusqlite::params![session.id, session.id])?;
+                super::super::principal::record_in(tx, &session.id, None)?;
+                Ok::<_, steve_store::StoreError>(())
+            }).unwrap();
+            let cx = session_cx(e.store(), &session).unwrap();
+            assert_eq!(cx.user, user.unwrap_or("svc:default"));
+            assert!(
+                mcp::call_sync(
+                    &e.modules,
+                    &Ports::default(),
+                    &cx,
+                    mcp::FIND,
+                    &json!({"query": "nobody"})
+                )
+                .is_ok()
+            );
+            if user.is_none() {
+                assert_eq!(
+                    e.store()
+                        .reader(|c| c
+                            .query_row(
+                                "SELECT COUNT(*) FROM parties WHERE workspace_id=? AND user_id=?",
+                                rusqlite::params![WS, cx.user],
+                                |r| r.get::<_, i64>(0)
+                            )
+                            .map_err(steve_store::StoreError::from))
+                        .unwrap(),
+                    0
+                );
+            }
+            assert_eq!(
+                e.store()
+                    .reader(|c| steve_knowledge::context::item_user(
+                        c,
+                        WS,
+                        cx.item_id.as_deref().unwrap()
+                    ))
+                    .unwrap()
+                    .as_deref(),
+                user
+            );
+            for (index, doc) in docs.iter().enumerate() {
+                let allowed = index == 2
+                    || (index == 0 && user == Some(ME))
+                    || (index == 1 && user == Some(OTHER));
+                assert_eq!(
+                    steve_knowledge::tools::read(&e.modules, &cx, doc, 0.0).is_ok(),
+                    allowed,
+                    "caller {user:?}, doc {index}"
+                );
+            }
+            assert_eq!(
+                steve_digest::tools::call_sync(
+                    &e.modules,
+                    &cx,
+                    steve_digest::tools::BATCH,
+                    &json!({})
+                )
+                .is_ok(),
+                user == Some(ME)
+            );
+            if user == Some(OTHER) {
+                e.store()
+                    .transaction(|tx| {
+                        tx.execute(
+                            "DELETE FROM workspace_members WHERE workspace_id = ? AND user_id = ?",
+                            rusqlite::params![WS, OTHER],
+                        )?;
+                        Ok::<_, steve_store::StoreError>(())
+                    })
+                    .unwrap();
+                let cx = session_cx(e.store(), &session).unwrap();
+                assert_eq!(cx.user, "svc:default");
+                assert!(steve_knowledge::tools::read(&e.modules, &cx, &docs[1], 0.0).is_err());
+                assert!(steve_knowledge::tools::read(&e.modules, &cx, &docs[2], 0.0).is_ok());
+                assert!(
+                    e.store()
+                        .reader(|c| steve_knowledge::context::item_user(
+                            c,
+                            WS,
+                            cx.item_id.as_deref().unwrap()
+                        ))
+                        .unwrap()
+                        .is_none()
+                );
+            }
+        }
+    }
 }

@@ -235,6 +235,7 @@ pub async fn to_item(cx: &FlowCx, ws: &str, event_id: &str) -> FlowResult<String
     let item = cx
         .core
         .create_item(ItemRequest {
+            requester: None,
             ws: ws.into(),
             title: summary.chars().take(80).collect(),
             goal,

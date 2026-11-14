@@ -17,7 +17,7 @@ use steve_modules::{ApiError, ApiResult, Caller, Modules};
 use steve_store::Tx;
 
 use crate::graph::Graph;
-use crate::schedules::{self, Fields};
+use crate::schedules;
 use crate::{FlowCx, FlowResult, flows};
 
 /// Author of the versions [`on_bot_deleted`] saves.
@@ -195,20 +195,7 @@ pub fn on_bot_deleted(tx: &Tx, ws: &str, bot: &str, heir: &str, now: i64) -> Flo
         .into_iter()
         .filter(|s| s.spec.bot == bot)
     {
-        let mut spec = s.spec.clone();
-        spec.bot = heir.to_string();
-        schedules::update(
-            tx,
-            &s,
-            &Fields {
-                name: &s.name,
-                spec: &spec,
-                enabled: s.enabled,
-            },
-            AUTHOR,
-            &note,
-            now,
-        )?;
+        schedules::reassign_deleted_bot(tx, &s, heir, AUTHOR, &note, now)?;
         steve_store::base::revision(
             tx,
             ws,

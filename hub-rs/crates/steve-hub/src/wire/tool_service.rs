@@ -29,6 +29,10 @@ const READ_ONLY: &[&str] = &[
     "steve_knowledge_search",
     "steve_knowledge_read",
     steve_knowledge::steward::LIST,
+    steve_digest::tools::READ,
+    steve_digest::tools::REPORT,
+    steve_digest::tools::MATTERS,
+    steve_digest::tools::MATTER,
     "steve_contacts_find",
     "steve_contact_get",
     "steve_im_read",
@@ -479,6 +483,50 @@ impl steve_modules::context::PromptContext for CatalogContext {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn digest_tools_use_existing_dispatch_and_discovery_not_a_larger_core() {
+        let entries = tool_registry::steve_entries(
+            steve_digest::tools::tools()
+                .into_iter()
+                .map(|t| steve_node_api::ToolDescriptor {
+                    name: t["name"].as_str().unwrap().into(),
+                    description: t["description"].as_str().unwrap().into(),
+                    input_schema: t["inputSchema"].clone(),
+                    read_only: READ_ONLY.contains(&t["name"].as_str().unwrap()),
+                    annotations: serde_json::Value::Null,
+                })
+                .collect(),
+        );
+        for e in &entries {
+            assert!(matches!(
+                mcp_extra::owner_of(&e.name),
+                Some(mcp_extra::Owner::Digest)
+            ));
+            assert!(e.resources.iter().any(|r| r == "digest"));
+            assert!(!steve_modules::caps::tools::CORE.contains(&e.name.as_str()));
+            assert_eq!(
+                e.read_only,
+                [
+                    steve_digest::tools::READ,
+                    steve_digest::tools::REPORT,
+                    steve_digest::tools::MATTERS,
+                    steve_digest::tools::MATTER
+                ]
+                .contains(&e.name.as_str())
+            );
+        }
+        let (found, _) = tool_registry::search(
+            &entries,
+            &[],
+            &tool_registry::Query {
+                text: "digest".into(),
+                limit: 20,
+                ..Default::default()
+            },
+        );
+        assert_eq!(found.len(), 8);
+    }
 
     #[test]
     fn a_result_over_the_cap_is_cut_and_says_so() {

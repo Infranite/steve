@@ -70,7 +70,7 @@ pub fn list(
         .collect::<rusqlite::Result<_>>()?)
 }
 
-fn get(c: &Connection, ws: &str, id: &str) -> Result<Option<Value>> {
+pub(crate) fn get(c: &Connection, ws: &str, id: &str) -> Result<Option<Value>> {
     Ok(c.prepare_cached(&format!(
         "SELECT {COLS} FROM digest_changes WHERE workspace_id = ? AND id = ?"
     ))?

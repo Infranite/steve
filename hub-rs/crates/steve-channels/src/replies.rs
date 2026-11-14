@@ -186,6 +186,7 @@ impl Replies {
                 }
             };
             let req = bot.map(|bot| ItemRequest {
+                requester: None,
                 ws: ws.clone(),
                 title,
                 goal,
