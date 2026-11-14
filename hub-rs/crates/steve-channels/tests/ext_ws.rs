@@ -1232,3 +1232,113 @@ async fn connector_catalog_and_references_do_not_bypass_current_permissions() {
         "cached connect metadata is not a dispatch grant"
     );
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn connector_message_binding_uses_provider_id_or_connection_source_never_hub_fingerprint() {
+    let h = setup().await;
+    let mut manifest = connector_manifest();
+    manifest["operations"].as_array_mut().unwrap().push(json!({
+        "name":"read_message","capability":"read","description":"Read one known message",
+        "inputSchema":{"type":"object","properties":{"message":{"type":"string"}},"required":["message"],"additionalProperties":false},
+        "annotations":{"readOnlyHint":true},"bindings":{"message":"message"}
+    }));
+    h.fake.with(|w| w.connector = Some(manifest));
+    let conn = h.connect().await;
+    let (rt, _tx) = h.runtime();
+    until("subscribed", || !h.subscribes().is_empty()).await;
+    let mut no_id = msg(
+        &h,
+        "c_42",
+        "source-without-platform-id",
+        "u_7",
+        "No platform ID",
+        1,
+    );
+    no_id.as_object_mut().unwrap().remove("id");
+    let seq = h.fake.push_message(no_id);
+    until("stored fallback message", || h.fake.acked() == seq).await;
+    let seq = h.fake.push_message(msg(
+        &h,
+        "c_42",
+        "source-with-platform-id",
+        "u_7",
+        "Has platform ID",
+        2,
+    ));
+    until("stored platform message", || h.fake.acked() == seq).await;
+    let rows = h.rows("SELECT m.id,m.external_id,x.source_id FROM chan_messages m JOIN chan_message_seen x ON x.message_id=m.id WHERE x.connection_id=? ORDER BY m.created,m.id",&[&conn]);
+    assert_eq!(rows.len(), 2);
+    let name = steve_channels::connector::tool_name(&conn, "read_message");
+    let fallback_hub = rows
+        .iter()
+        .find(|row| row[2] == "source-without-platform-id")
+        .unwrap()[0]
+        .as_str()
+        .unwrap()
+        .to_string();
+    for row in rows {
+        let hub = row[0].as_str().unwrap();
+        let stored = row[1].as_str().unwrap();
+        let source = row[2].as_str().unwrap();
+        h.ch.connector_call(
+            &caller(WS, ME),
+            &name,
+            json!({"message":hub}),
+            "read-message",
+        )
+        .await
+        .unwrap();
+        let calls = h.fake.calls("connector.call");
+        assert!(
+            !calls.last().unwrap()["arguments"]
+                .to_string()
+                .contains("fp:"),
+            "no Hub fingerprint in any connector.call argument"
+        );
+        let remote = calls.last().unwrap()["arguments"]["message"]
+            .as_str()
+            .unwrap();
+        assert!(
+            !remote.starts_with("fp:"),
+            "Hub-only content IDs must never reach the provider"
+        );
+        assert_eq!(
+            remote,
+            if source == "source-without-platform-id" {
+                assert!(stored.starts_with("fp:"));
+                source
+            } else {
+                assert_eq!(stored, "m_source-with-platform-id");
+                stored
+            }
+        );
+    }
+    // The connection's delivery mapping is required when the platform supplied no message ID.
+    h.env
+        .store()
+        .transaction(|tx| {
+            tx.execute(
+                "DELETE FROM chan_message_seen WHERE connection_id=? AND message_id=?",
+                rusqlite::params![conn, fallback_hub],
+            )?;
+            Ok::<_, steve_modules::ApiError>(())
+        })
+        .unwrap();
+    let before = h.fake.calls("connector.call").len();
+    assert!(
+        h.ch.connector_call(
+            &caller(WS, ME),
+            &name,
+            json!({"message":fallback_hub}),
+            "missing-source"
+        )
+        .await
+        .is_err()
+    );
+    assert_eq!(
+        h.fake.calls("connector.call").len(),
+        before,
+        "missing source must be refused before dispatch"
+    );
+    rt.shutdown().await;
+}

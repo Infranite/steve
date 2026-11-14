@@ -327,10 +327,13 @@ impl Channels {
                 let (space, external) = match kind {
                     Binding::Conversation => (id.to_string(), None),
                     Binding::Message | Binding::Topic => {
-                        let row: Option<(String, Option<String>, Option<String>)> = c.query_row(
-                            "SELECT m.space_id, coalesce(m.external_id,x.source_id), m.thread_key FROM chan_messages m JOIN chan_message_seen x ON x.message_id=m.id AND x.connection_id=?2 WHERE m.id=?1 AND m.purged IS NULL", params![id,conn],
-                            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).optional()?;
-                        let (space, message, topic) = row.ok_or_else(|| ApiError::not_found("message"))?;
+                        let row: Option<(String, Option<String>, Option<String>, Option<String>)> = c.query_row(
+                            "SELECT m.space_id, m.external_id, m.thread_key, x.source_id FROM chan_messages m JOIN chan_message_seen x ON x.message_id=m.id AND x.connection_id=?2 WHERE m.id=?1 AND m.purged IS NULL", params![id,conn],
+                            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))).optional()?;
+                        let (space, message, topic, source) = row.ok_or_else(|| ApiError::not_found("message"))?;
+                        // `external_id` is not NULL for messages without a provider ID: it is a
+                        // Hub-only fp:… key. Use the common filter before this connection's source ID.
+                        let message = crate::fallback::platform(message).or_else(|| crate::fallback::platform(source));
                         (space, Some(if *kind == Binding::Topic { topic } else { message }.filter(|s| !s.is_empty()).ok_or_else(|| ApiError::invalid("message has no external identifier"))?))
                     },
                     Binding::Reference => {
