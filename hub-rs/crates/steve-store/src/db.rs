@@ -146,6 +146,8 @@ pub const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/069.sql"),
     // 70: expiring connector references bound to workspace, connection and account.
     include_str!("../migrations/070.sql"),
+    // 71: durable output intents and manual/learned channel preferences.
+    include_str!("../migrations/071.sql"),
 ];
 
 /// 027's item columns and their one-time backfill (applied by `run_pending` when `items.phase` is missing).
