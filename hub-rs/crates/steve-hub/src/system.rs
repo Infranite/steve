@@ -246,6 +246,10 @@ fn rows(cfg: &Config, harnesses: Option<&[steve_node_api::HarnessCapability]>) -
                 Some(o) if !o.models.is_empty() => o.models.iter().map(|m| m.id.clone()).collect(),
                 _ => spec.properties.fallback_models.clone(),
             };
+            // A missing login/scratch session does not make declared permission limits unknown.
+            let modes = session.map(|o| o.modes.clone()).or_else(|| {
+                steve_core::harnesses::Harness::declared(id, declared).modes
+            });
             json!({
                 "id": id,
                 "name": name,
@@ -259,7 +263,7 @@ fn rows(cfg: &Config, harnesses: Option<&[steve_node_api::HarnessCapability]>) -
                 "models": models,
                 "default_model": session.and_then(|o| o.default_model.clone()),
                 "efforts": session.map_or_else(|| spec.properties.fallback_efforts.clone(), |o| o.efforts.clone()),
-                "modes": session.map(|o| o.modes.clone()),
+                "modes": modes,
                 "caps": reported.map(|h| json!({
                     "sessions": h.sessions, "jobs": h.jobs, "images": h.images, "resume": h.resume,
                     "history": adapter.is_some_and(|a| a.list_sessions),
@@ -810,6 +814,8 @@ mod tests {
         })
         .expect("config");
         let all = rows(&cfg, None);
+        let native = |rows: &[Value]| rows.iter().find(|r| r["id"] == "pi").unwrap().clone();
+        assert_eq!(native(&all)["modes"], json!(["full_access"]));
         assert_eq!(
             all.len(),
             steve_acp::adapters::builtin_ids().count() + 1,
@@ -876,6 +882,12 @@ mod tests {
         // initialize answered but no scratch session: said so
         no_session.adapter.as_mut().unwrap().session = None;
         no_session.adapter.as_mut().unwrap().session_error = Some("sign in first".into());
+        let mut native_no_login = no_session.clone();
+        native_no_login.name = "pi".into();
+        assert_eq!(
+            native(&rows(&cfg, Some(&[native_no_login])))["modes"],
+            json!(["full_access"])
+        );
         let row = mine(&rows(&cfg, Some(&[no_session])));
         assert_eq!(
             (&row["ok"], &row["note"]),
