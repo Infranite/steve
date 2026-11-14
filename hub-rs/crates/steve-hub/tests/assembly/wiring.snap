@@ -2,6 +2,7 @@ api DELETE /accounts/x
 api DELETE /attr-defs/x
 api DELETE /attrs/x
 api DELETE /bots/x/capabilities/x/x
+api DELETE /bots/x/tool-pins/x/x
 api DELETE /capabilities/a2a-agents/x
 api DELETE /capabilities/mcp-servers/x
 api DELETE /capabilities/skills/x
@@ -32,6 +33,7 @@ api GET /accounts/x
 api GET /attr-defs
 api GET /bots/x/capabilities
 api GET /bots/x/flows
+api GET /bots/x/tools
 api GET /capabilities/a2a-agents
 api GET /capabilities/mcp-servers
 api GET /capabilities/skills
@@ -278,6 +280,7 @@ api POST /yolo/actions/x/now
 api POST /yolo/actions/x/undo
 api POST /yolo/resume
 api PUT /bots/x/capabilities/x/x
+api PUT /bots/x/tool-pins/x/x
 api PUT /connections/x/credential
 api PUT /flow-settings/allow-private
 api PUT /flows/x
@@ -299,7 +302,7 @@ decl feishu_app platform 1ms
 decl feishu_user platform 1ms
 event_source github_app
 event_source github_pat
-jobs 15
+jobs 16
 lifecycle ext_ws
 lifecycle feishu_app
 lifecycle feishu_user
