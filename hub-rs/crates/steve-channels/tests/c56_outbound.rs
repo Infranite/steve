@@ -3708,3 +3708,350 @@ async fn untracked_or_as_you_text_to_your_own_people_is_checked_by_the_model() {
     h.outbox.deliver(&h.ch, &r).await.unwrap();
     assert_eq!(asked(&h), 3, "nothing tracked: the model looks");
 }
+
+// Output pipeline acceptance exercises the existing C6 transport, not a test-only sender.
+fn intent(plan: &Plan, key: &str) -> steve_modules::outbound::DeliveryIntent {
+    steve_modules::outbound::DeliveryIntent {
+        key: key.into(),
+        identity: steve_modules::outbound::Identity::Bot,
+        content: steve_modules::outbound::Content {
+            markdown: "进度已更新。".into(),
+            ..Default::default()
+        },
+        source_message_id: Some(plan.message_id.clone()),
+        space_id: None,
+        party_id: None,
+        reason: "progress".into(),
+        urgency: "normal".into(),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn output_pipeline_key_is_atomic_and_unknown_submission_never_resends() {
+    let h = setup().await;
+    checks_pass(&h);
+    let plan = recorded(&h, &h.pm, "C_OPS", "pi1", "ulilei", "进度").await;
+    *h.fake.lose_answer.lock().unwrap() = true;
+    let i = intent(&plan, "stable-update");
+    let who = caller(WS, ME);
+    let (a, b) = tokio::join!(
+        h.outbox.submit(&h.ch, &who, i.clone()),
+        h.outbox.submit(&h.ch, &who, i.clone())
+    );
+    let (a, b) = (a.unwrap(), b.unwrap());
+    assert_eq!(a.id, b.id);
+    assert_eq!(sent(&h).len(), 1);
+    assert_eq!(count(&h, "SELECT count(*) FROM output_deliveries", &[]), 1);
+    let again = h.outbox.submit(&h.ch, &who, i.clone()).await.unwrap();
+    assert_eq!(again.status, "unknown");
+    assert_eq!(again.attempts, 1);
+    assert_eq!(again.message_id, a.message_id);
+    assert_eq!(sent(&h).len(), 1);
+    let recreated = Outbox::new(OutLink::new());
+    let after_restart = recreated.submit(&h.ch, &who, i.clone()).await.unwrap();
+    assert_eq!(after_restart.id, a.id);
+    assert_eq!(after_restart.attempts, 1);
+    let mut changed = i;
+    changed.content.markdown = "different".into();
+    assert!(h.outbox.submit(&h.ch, &who, changed).await.is_err());
+    h.env.clock.advance(3_600_001);
+    assert_eq!(h.outbox.send_due(&h.ch).await, 0);
+    assert_eq!(status(&h, &a.message_id), "unknown");
+    assert_eq!(sent(&h).len(), 1);
+    assert!(
+        steve_channels::pipeline::get(&h.ch, &who, &a.id)
+            .unwrap()
+            .decision_id
+            .is_some()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn output_pipeline_rejects_service_and_departed_requester_including_queued_approval() {
+    let h = setup().await;
+    checks_pass(&h);
+    let plan = recorded(&h, &h.me, "C_OPS", "pi2", "ulilei", "进度").await;
+    let mut i = intent(&plan, "own-update");
+    i.identity = steve_modules::outbound::Identity::AsYou;
+    let who = caller(WS, ME);
+    assert!(
+        h.outbox
+            .submit(&h.ch, &caller(WS, &format!("svc:{WS}")), i.clone())
+            .await
+            .is_err()
+    );
+    let d = h.outbox.submit(&h.ch, &who, i.clone()).await.unwrap();
+    assert_eq!(d.status, "draft");
+    nothing_sent(&h);
+    decide(&h, d.decision_id.as_deref().unwrap(), "yes", "").unwrap();
+    exec(
+        &h,
+        &format!("DELETE FROM workspace_members WHERE workspace_id='{WS}' AND user_id='{ME}'"),
+    );
+    h.env.clock.advance(11_000);
+    h.outbox.send_due(&h.ch).await;
+    nothing_sent(&h);
+    assert!(h.outbox.submit(&h.ch, &who, i).await.is_err());
+    assert!(steve_channels::pipeline::get(&h.ch, &who, &d.id).is_err());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn output_pipeline_route_is_pinned_and_identity_cannot_be_forged() {
+    let h = setup().await;
+    checks_pass(&h);
+    let plan = recorded(&h, &h.me, "C_OPS", "pi3", "ulilei", "进度").await;
+    assert!(
+        h.outbox
+            .submit(&h.ch, &caller(WS, ME), intent(&plan, "wrong-identity"))
+            .await
+            .is_err()
+    );
+    assert_eq!(count(&h, "SELECT count(*) FROM output_deliveries", &[]), 0);
+    let mut i = intent(&plan, "pinned");
+    i.identity = steve_modules::outbound::Identity::AsYou;
+    let d = h.outbox.submit(&h.ch, &caller(WS, ME), i).await.unwrap();
+    decide(&h, d.decision_id.as_deref().unwrap(), "yes", "").unwrap();
+    // Revoking the route before the undo window ends must not send through a fallback identity.
+    exec(
+        &h,
+        &format!(
+            "UPDATE space_identities SET left_at=2 WHERE space_id='{}'",
+            plan.space_id
+        ),
+    );
+    h.env.clock.advance(11_000);
+    h.outbox.send_due(&h.ch).await;
+    nothing_sent(&h);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn output_pipeline_ledger_rolls_back_with_the_existing_message_insert() {
+    let h = setup().await;
+    checks_pass(&h);
+    let plan = recorded(&h, &h.pm, "C_OPS", "pi4", "ulilei", "进度").await;
+    exec(
+        &h,
+        "CREATE TRIGGER reject_ledger BEFORE INSERT ON output_deliveries BEGIN SELECT RAISE(ABORT,'injected ledger failure'); END;",
+    );
+    let before = count(
+        &h,
+        "SELECT count(*) FROM chan_messages WHERE direction='out'",
+        &[],
+    );
+    assert!(
+        h.outbox
+            .submit(&h.ch, &caller(WS, ME), intent(&plan, "rollback"))
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        count(
+            &h,
+            "SELECT count(*) FROM chan_messages WHERE direction='out'",
+            &[]
+        ),
+        before
+    );
+    assert_eq!(count(&h, "SELECT count(*) FROM output_deliveries", &[]), 0);
+    nothing_sent(&h);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn output_pipeline_explicit_switch_does_not_reuse_foreign_reply_id() {
+    let h = setup().await;
+    checks_pass(&h);
+    let src = recorded(&h, &h.pm, "C_OPS", "pi5", "ulilei", "进度").await;
+    let dst = recorded(&h, &h.pm, "C_REQ", "pi6", "ulilei", "另一个渠道").await;
+    let mut i = intent(&src, "switch");
+    i.space_id = Some(dst.space_id.clone());
+    let d = h.outbox.submit(&h.ch, &caller(WS, ME), i).await.unwrap();
+    assert_eq!(d.status, "sent");
+    assert_eq!(d.space_id, dst.space_id);
+    assert!(matches!(&sent(&h)[0].0,SendTarget::Space{ext_id} if ext_id=="C_REQ"));
+    assert_eq!(
+        row(
+            &h,
+            "SELECT source_message_id FROM output_deliveries WHERE id=?",
+            &[&d.id]
+        )[0],
+        src.message_id
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn output_pipeline_real_source_reply_uses_existing_outbox_and_stable_ledger() {
+    let h = setup().await;
+    checks_pass(&h);
+    let src = recorded(&h, &h.pm, "C_OPS", "pi7", "ulilei", "进度").await;
+    let item = h
+        .env
+        .store()
+        .items()
+        .create(
+            WS,
+            &steve_store::NewItem {
+                title: "update".into(),
+                bot_id: "steve".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .unwrap();
+    h.env
+        .store()
+        .transaction(|tx| -> ApiResult<_> {
+            links::add(
+                tx,
+                WS,
+                &NewLink::new(
+                    ObjRef::new("item", &item.id),
+                    "from",
+                    ObjRef::new("chan_message", &src.message_id),
+                    "test",
+                ),
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let who = caller(WS, ME);
+    let d = h
+        .outbox
+        .reply_source_as(&h.ch, &who, &item.id, "任务完成", "source-key", None, None)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(d.status, "sent");
+    assert_eq!(d.attempts, 1);
+    let cleanup = steve_channels::cleanup::routes(h.ch.clone()).with_state(h.env.modules.clone());
+    let (st, result) = call(
+        &cleanup,
+        Some(&who),
+        "POST",
+        "/channels/cleanup",
+        Some(&json!({"connection_id":h.pm,"level":"text","confirm":true})),
+    )
+    .await;
+    assert_eq!(st, 200, "{result}");
+    assert_eq!(
+        row(
+            &h,
+            "SELECT json_extract(intent,'$.content') FROM output_deliveries WHERE id=?",
+            &[&d.id]
+        )[0],
+        "{}"
+    );
+    h.env
+        .store()
+        .transaction(|tx| -> ApiResult<()> {
+            spaces::see(tx, WS, &src.space_id, &h.me, h.ch.now())?;
+            spaces::set_voice(tx, WS, &src.space_id, Some(&h.me), h.ch.now())?;
+            Ok(())
+        })
+        .unwrap();
+    let again = h
+        .outbox
+        .reply_source_as(&h.ch, &who, &item.id, "任务完成", "source-key", None, None)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(d.id, again.id);
+    assert_eq!(sent(&h).len(), 1);
+    assert!(
+        h.outbox
+            .reply_source_as(&h.ch, &who, &item.id, "改了内容", "source-key", None, None)
+            .await
+            .is_err()
+    );
+    exec(
+        &h,
+        &format!("DELETE FROM workspace_members WHERE workspace_id='{WS}' AND user_id='{ME}'"),
+    );
+    assert!(
+        h.outbox
+            .reply_source_as(&h.ch, &who, &item.id, "任务完成", "source-key", None, None)
+            .await
+            .is_err()
+    );
+}
+
+#[test]
+fn output_pipeline_structured_content_has_lossless_text_fallback() {
+    use steve_modules::outbound::Content;
+    let c = Content {
+        title: "标题".into(),
+        markdown: "原始 **正文** token-keep-verbatim".into(),
+        fields: vec![("状态".into(), "就绪".into())],
+        actions: vec![("查看".into(), "https://example.org/item/1".into())],
+        references: vec![("来源".into(), "https://example.org/source/2".into())],
+    };
+    assert_eq!(
+        c.markdown(),
+        "# 标题\n\n原始 **正文** token-keep-verbatim\n\n状态: 就绪\n\n查看: https://example.org/item/1\n\n来源: https://example.org/source/2"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn output_pipeline_manual_preference_wins_but_replies_default_to_source_and_learn() {
+    let h = setup().await;
+    checks_pass(&h);
+    h.fake
+        .space("D_LI_TWO", "", SpaceKind::Dm, false, &[("ulilei", "李雷")]);
+    let one = recorded(&h, &h.pm, "D_LI", "pref1", "ulilei", "hello").await;
+    let two = recorded(&h, &h.pm, "D_LI_TWO", "pref2", "ulilei", "hello").await;
+    exec(&h,&format!("INSERT INTO parties(id,workspace_id,type,name,created_by,created,updated) VALUES ('output-person','{WS}','contact','Recipient','{ME}',1,1);
+        UPDATE accounts SET party_id='output-person' WHERE id IN (SELECT sender_account_id FROM chan_messages WHERE id IN ('{}','{}'));
+        UPDATE chan_messages SET sender_party_id='output-person' WHERE id IN ('{}','{}');",one.message_id,two.message_id,one.message_id,two.message_id));
+    let who = caller(WS, ME);
+    steve_channels::pipeline::set_preference(&h.ch, &who, "output-person", Some(&two.space_id))
+        .unwrap();
+    exec(
+        &h,
+        &format!(
+            "UPDATE output_channel_preferences SET learned_space_id='{}'",
+            one.space_id
+        ),
+    );
+    let mut i = intent(&one, "person-pref");
+    i.source_message_id = None;
+    i.party_id = Some("output-person".into());
+    let d = h.outbox.submit(&h.ch, &who, i).await.unwrap();
+    assert_eq!(d.space_id, two.space_id);
+    assert_eq!(d.status, "sent");
+    let mut i = intent(&one, "same-channel");
+    i.party_id = Some("output-person".into());
+    let d = h.outbox.submit(&h.ch, &who, i).await.unwrap();
+    assert_eq!(d.space_id, one.space_id);
+    let external = row(
+        &h,
+        "SELECT external_id FROM chan_messages WHERE id=?",
+        &[&d.message_id],
+    )[0]
+    .as_str()
+    .unwrap()
+    .to_string();
+    let mut reply = msg("D_LI", "pref-reply", "ulilei", "got it", false);
+    reply.reply_to = Some(external);
+    push(&h, &h.pm, reply).await;
+    let receipt = steve_channels::pipeline::get(&h.ch, &who, &d.id).unwrap();
+    assert!(receipt.replied_at.is_some());
+    assert!(receipt.reply_message_id.is_some());
+    let prefs = row(
+        &h,
+        "SELECT manual_space_id,learned_space_id FROM output_channel_preferences WHERE party_id='output-person'",
+        &[],
+    );
+    assert_eq!(prefs[0], two.space_id);
+    assert_eq!(prefs[1], one.space_id);
+    // A person not in a chosen conversation is not reachable merely because the requester can see it.
+    exec(
+        &h,
+        &format!(
+            "DELETE FROM space_members WHERE space_id='{}' AND account_id IN (SELECT id FROM accounts WHERE party_id='output-person')",
+            two.space_id
+        ),
+    );
+    let mut i = intent(&one, "unreachable");
+    i.space_id = Some(two.space_id);
+    i.party_id = Some("output-person".into());
+    assert!(h.outbox.submit(&h.ch, &who, i).await.is_err());
+}
