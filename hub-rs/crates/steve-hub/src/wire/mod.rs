@@ -7,7 +7,6 @@
 
 pub mod acp_stats;
 pub mod auth;
-pub mod bot_mcp;
 pub mod bot_skills;
 pub mod chan;
 pub mod core;
@@ -17,6 +16,7 @@ pub mod git_push;
 pub mod host_node;
 pub mod item_git;
 pub mod item_mcp;
+pub mod library_mcp;
 pub mod local_service;
 pub mod mcp;
 pub mod mcp_extra;
@@ -39,6 +39,7 @@ pub mod research;
 pub mod research_mcp;
 pub mod signals;
 pub mod store;
+pub mod tool_registry;
 pub mod tool_service;
 pub mod view;
 pub mod workspaces;
@@ -860,8 +861,6 @@ pub fn wire_assembly(
     {
         tracing::warn!("single sign-on from the settings: {e}");
     }
-    // the secrets of the Bots' own MCP servers, for the Node a session runs on
-    secrets.set_sessions(bot_mcp::McpSecrets::new(db.clone(), built.caps.clone()));
     let extra = mcp_extra::Extra {
         caps: built.caps.clone(),
         store: db.clone(),
@@ -869,7 +868,20 @@ pub fn wire_assembly(
         ports: steve_modules::accounts::ports(),
         kb: built.kb.clone(),
         tools: built.tools.clone(),
+        library: built.library.clone(),
     };
+    // connections to the library's MCP servers that no call used for a while close
+    {
+        let library = built.library.clone();
+        jobs.push(Box::pin(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(60));
+            loop {
+                tick.tick().await;
+                let library = library.clone();
+                let _ = tokio::task::spawn_blocking(move || library.sweep()).await;
+            }
+        }));
+    }
     let tool_service = Arc::new(tool_service::ToolService {
         mcp: Arc::new(core::CoreMcp {
             store: db.clone(),
@@ -923,7 +935,7 @@ pub fn wire_assembly(
         workspaces: workspaces.clone(),
     }))
     .layer(axum::middleware::from_fn_with_state(
-        extra,
+        tool_service.clone(),
         mcp_extra::layer,
     ));
     // statistics: the item facts refresher runs after boot (after recover has closed the turns the

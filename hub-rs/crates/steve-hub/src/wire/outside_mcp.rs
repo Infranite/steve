@@ -14,8 +14,11 @@ use axum::response::{IntoResponse, Response};
 use serde_json::{Value, json};
 use steve_store::{Store, User};
 
+use steve_modules::caps::tools::{CALL, SEARCH};
+
 use super::mcp_extra::Extra;
 use super::research_mcp::{self, ItemScope};
+use super::tool_registry;
 
 pub const ITEM_CREATE: &str = "steve_item_create";
 pub const ITEM_SUPPLEMENT: &str = "steve_item_supplement";
@@ -116,12 +119,102 @@ pub fn allows(name: &str) -> bool {
     tools().iter().any(|t| t["name"] == name)
 }
 
+/// What an outside client lists: finding items and knowledge, handing Steve work, and finding and
+/// running the rest of its tools (`steve_tools_search`, `steve_tool_call`), as a session does.
+pub const CORE: &[&str] = &[
+    research_mcp::ITEMS_SEARCH,
+    steve_knowledge::tools::SEARCH,
+    ITEM_CREATE,
+];
+
+/// The outside client's tools as registry entries.
+fn entries() -> Vec<tool_registry::Entry> {
+    tool_registry::steve_entries(
+        tools()
+            .into_iter()
+            .map(|t| steve_node_api::ToolDescriptor {
+                name: t["name"].as_str().unwrap_or_default().to_string(),
+                description: t["description"].as_str().unwrap_or_default().to_string(),
+                input_schema: t["inputSchema"].clone(),
+                read_only: t["annotations"]["readOnlyHint"].as_bool().unwrap_or(false),
+                annotations: serde_json::Value::Null,
+            })
+            .collect(),
+    )
+}
+
+/// The `tools/list` an outside client gets.
+pub fn listed() -> Vec<Value> {
+    let mut v: Vec<Value> = tools()
+        .into_iter()
+        .filter(|t| t["name"].as_str().is_some_and(|n| CORE.contains(&n)))
+        .collect();
+    for d in [tool_registry::search_tool(), tool_registry::call_tool()] {
+        v.push(json!({
+            "name": d.name,
+            "description": d.description.replace(
+                "Steve's own (items, work graph, knowledge, memories, contacts, secrets, GitHub, mail, chats, devices, diagnostics), the MCP servers and remote agents your Bot uses",
+                "Steve's tools for a client outside Steve (items, sessions, knowledge, memories)",
+            ),
+            "inputSchema": d.input_schema,
+            "annotations": {"readOnlyHint": d.read_only, "destructiveHint": false, "openWorldHint": false},
+        }));
+    }
+    v
+}
+
+/// `steve_tools_search` and `steve_tool_call` for an outside client: over its own tools only.
+async fn search_or_call(
+    x: &Extra,
+    o: &Outside,
+    name: &str,
+    args: &Value,
+) -> Result<String, String> {
+    let schema = if name == SEARCH {
+        tool_registry::search_tool()
+    } else {
+        tool_registry::call_tool()
+    };
+    tool_registry::validate(&schema.input_schema, args).map_err(|e| e.join("; "))?;
+    let all = entries();
+    if name == SEARCH {
+        let q = tool_registry::Query::from_args(args);
+        let skip: Vec<String> = CORE.iter().map(|s| s.to_string()).collect();
+        let (found, total) = tool_registry::search(&all, &skip, &q);
+        return Ok(tool_registry::search_answer(&found, total, &[]));
+    }
+    let inner = args["name"].as_str().unwrap_or_default().trim();
+    if inner == SEARCH || inner == CALL {
+        return Err(format!("Call {inner} directly, not through {CALL}."));
+    }
+    let Some(e) = all.iter().find(|e| e.name == inner) else {
+        return Err(format!(
+            "{inner} is not available to a client outside Steve. Find the tools it has with {SEARCH}."
+        ));
+    };
+    let inner_args = match &args["arguments"] {
+        Value::Null => json!({}),
+        v => v.clone(),
+    };
+    tool_registry::validate(&e.input_schema, &inner_args).map_err(|issues| {
+        format!(
+            "Invalid arguments for tool {inner}: {}. Its inputSchema: {}",
+            issues.join("; "),
+            e.input_schema
+        )
+    })?;
+    Box::pin(call(x, o, inner, &inner_args)).await
+}
+
 fn text_arg<'a>(args: &'a Value, key: &str) -> Option<&'a str> {
     args[key].as_str().map(str::trim).filter(|s| !s.is_empty())
 }
 
 /// Runs `name` for `o`: the success text, or the error text the client reads.
 pub async fn call(x: &Extra, o: &Outside, name: &str, args: &Value) -> Result<String, String> {
+    if name == SEARCH || name == CALL {
+        return search_or_call(x, o, name, args).await;
+    }
     if !allows(name) {
         return Err(format!(
             "{name} is not available to a client outside Steve: it belongs to a Steve session's own turn."
@@ -303,14 +396,14 @@ pub async fn handle(x: &Extra, o: Outside, msg: Value) -> Response {
                 "protocolVersion": msg.pointer("/params/protocolVersion").cloned().unwrap_or(json!("2025-06-18")),
                 "capabilities": {"tools": {}},
                 "serverInfo": {"name": "steve", "version": env!("CARGO_PKG_VERSION")},
-                "instructions": "Steve is the user's AI work hub. Find and read their items (ST-…), hand Steve new work, add to an item, and search their knowledge base.",
+                "instructions": "Steve is the user's AI work hub. Find and read their items (ST-…), hand Steve new work, add to an item, and search their knowledge base. The tool list holds the common tools; find the others (reading an item, adding to one, the agent sessions, the user's memories) with steve_tools_search and run them with steve_tool_call.",
             }),
         ),
         m if m.starts_with("notifications/") || msg.get("id").is_none() => {
             StatusCode::ACCEPTED.into_response()
         }
         "ping" => rpc(&id, json!({})),
-        "tools/list" => rpc(&id, json!({"tools": tools()})),
+        "tools/list" => rpc(&id, json!({"tools": listed()})),
         "tools/call" => {
             let name = msg
                 .pointer("/params/name")
@@ -369,5 +462,37 @@ mod tests {
         ] {
             assert!(!allows(n), "{n}");
         }
+    }
+
+    #[test]
+    fn an_outside_client_lists_a_core_and_finds_the_rest() {
+        let names: Vec<String> = listed()
+            .iter()
+            .map(|t| t["name"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "steve_knowledge_search",
+                "steve_items_search",
+                ITEM_CREATE,
+                SEARCH,
+                CALL
+            ]
+        );
+        let all = entries();
+        let skip: Vec<String> = CORE.iter().map(|s| s.to_string()).collect();
+        let (found, _) = tool_registry::search(
+            &all,
+            &skip,
+            &tool_registry::Query {
+                text: "read one item".into(),
+                limit: 3,
+                ..Default::default()
+            },
+        );
+        assert_eq!(found[0].name, "steve_item_read");
+        // only its own tools: nothing of a session's turn
+        assert!(all.iter().all(|e| allows(&e.name)));
     }
 }

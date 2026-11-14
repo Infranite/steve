@@ -488,7 +488,10 @@ async fn system_models_lists_what_each_harness_offers_and_never_the_keys() {
         .iter()
         .filter_map(|m| m["id"].as_str())
         .collect();
-    assert_eq!(ids, ["gpt-6.1-sol", "gpt-6-sol", "gpt-6-luna", "gpt-5.6-luna"]);
+    assert_eq!(
+        ids,
+        ["gpt-6.1-sol", "gpt-6-sol", "gpt-6-luna", "gpt-5.6-luna"]
+    );
     assert_eq!(v["families"], json!(["GPT"]));
     assert_eq!(
         c.call("GET", "/api/system/models?harness=gemini", None, None)
@@ -687,9 +690,8 @@ async fn contacts_tools_are_served_over_mcp() {
     for t in [
         "steve_update",
         "steve_deliver",
-        "steve_contacts_find",
-        "steve_contacts_remember",
-        "steve_im_read",
+        "steve_tools_search",
+        "steve_tool_call",
     ] {
         assert!(list.contains(t), "{t} missing: {list}");
     }
@@ -819,14 +821,15 @@ async fn knowledge_note_is_found_over_http_and_mcp() {
     assert_eq!(s, 200, "{list}");
     for t in [
         "steve_update",
-        "steve_contacts_find",
         "steve_knowledge_search",
-        "steve_knowledge_read",
-        "steve_remember",
-        "steve_memory_list",
-        "steve_memory_tidy",
+        "steve_tools_search",
+        "steve_tool_call",
     ] {
         assert!(list.contains(t), "{t} missing: {list}");
+    }
+    let (_, discovered) = mcp(json!({"jsonrpc":"2.0", "id":10, "method":"tools/call", "params":{"name":"steve_tools_search", "arguments":{"resource":"memory"}}})).await;
+    for t in ["steve_remember", "steve_memory_list", "steve_memory_tidy"] {
+        assert!(discovered.contains(t), "{t} missing: {discovered}");
     }
     // the memory upkeep tools answer over the same endpoint
     let (s, out) = mcp(json!({ "jsonrpc": "2.0", "id": 9, "method": "tools/call", "params": { "name": "steve_memory_list", "arguments": {} } })).await;
@@ -1237,6 +1240,11 @@ async fn ownership_routes_and_tools() {
     let mcp = agent_session(&hub, &c).await;
     let (s, list) = mcp(json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" })).await;
     assert_eq!(s, 200, "{list}");
+    assert!(
+        !list.contains("steve_whois"),
+        "not loaded by default: {list}"
+    );
+    let (_, list) = mcp(json!({"jsonrpc":"2.0", "id":3, "method":"tools/call", "params":{"name":"steve_tools_search", "arguments":{"resource":"contact"}}})).await;
     for t in [
         "steve_whois",
         "steve_person_holdings",
@@ -1465,4 +1473,202 @@ async fn contact_avatars_are_squared_stored_and_cleared() {
         .call("GET", &format!("/api/contacts/{zid}"), None, None)
         .await;
     assert_eq!(z["avatar"]["file"], json!(file), "only 我's went");
+}
+
+/// The real Hub endpoint discovers a plugin once, checks its schema, proxies calls, and lists
+/// per-Bot pins. No external services or model backend are used.
+#[tokio::test(flavor = "multi_thread")]
+async fn tools_are_searched_validated_proxied_and_pinned_through_the_hub() {
+    use axum::{
+        Json, Router,
+        extract::State,
+        http::{HeaderMap, StatusCode},
+        response::IntoResponse,
+        routing::post,
+    };
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    #[derive(Clone, Default)]
+    struct Counts {
+        initialized: Arc<AtomicUsize>,
+        called: Arc<AtomicUsize>,
+    }
+    async fn remote(
+        State(count): State<Counts>,
+        headers: HeaderMap,
+        Json(msg): Json<Value>,
+    ) -> axum::response::Response {
+        assert_eq!(headers.get("x-plugin-key").unwrap(), "plugin-secret");
+        if msg["method"] != "initialize" {
+            assert_eq!(headers.get("mcp-session-id").unwrap(), "plugin-session");
+        }
+        let result = match msg["method"].as_str().unwrap() {
+            "initialize" => {
+                count.initialized.fetch_add(1, Ordering::SeqCst);
+                json!({"protocolVersion":"2025-06-18", "capabilities":{"tools":{}}, "serverInfo":{"name":"fixture", "version":"1"}})
+            }
+            "notifications/initialized" => return StatusCode::ACCEPTED.into_response(),
+            "tools/list" => json!({"tools":[{
+                "name":"echo", "description":"Echo an item reference.",
+                "inputSchema":{"type":"object", "$defs":{"id":{"type":"string", "pattern":"^ST-[0-9]+$"}},
+                    "properties":{"id":{"$ref":"#/$defs/id"}}, "required":["id"], "additionalProperties":false},
+                "annotations":{"readOnlyHint":true, "idempotentHint":true}
+            }]}),
+            "tools/call" => {
+                count.called.fetch_add(1, Ordering::SeqCst);
+                json!({"content":[{"type":"text", "text":msg["params"]["arguments"]["id"]}]})
+            }
+            other => panic!("unexpected MCP method {other}"),
+        };
+        (
+            [("mcp-session-id", "plugin-session")],
+            Json(json!({"jsonrpc":"2.0", "id":msg["id"], "result":result})),
+        )
+            .into_response()
+    }
+    let counts = Counts::default();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/mcp", listener.local_addr().unwrap());
+    let app = Router::new()
+        .route("/mcp", post(remote))
+        .with_state(counts.clone());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let hub = start().await;
+    let c = Client::login(&hub).await;
+    assert_eq!(c.call("POST", "/api/vault/init", None, None).await.0, 200);
+    let (code, plugin) = c.call("POST", "/api/capabilities/mcp-servers", Some(json!({
+        "name":"fixture", "transport":"http", "url":url,
+        "headers":[{"name":"x-plugin-key", "value":"plugin-secret", "secret":true}], "bot":"steve"
+    })), None).await;
+    assert_eq!(code, 200, "{plugin}");
+    let id = plugin["id"].as_str().unwrap();
+    let mcp = agent_session(&hub, &c).await;
+    let rpc = |name: &str, args: Value| json!({"jsonrpc":"2.0", "id":1, "method":"tools/call", "params":{"name":name, "arguments":args}});
+    let (_, list) = mcp(json!({"jsonrpc":"2.0", "id":2, "method":"tools/list"})).await;
+    let list: Value = serde_json::from_str(&list).unwrap();
+    assert_eq!(
+        list["result"]["tools"].as_array().unwrap().len(),
+        8,
+        "{list}"
+    );
+    let (_, result) = mcp(rpc(
+        "steve_tools_search",
+        json!({"query":"echo", "source":"fixture", "kind":"read"}),
+    ))
+    .await;
+    let result: Value = serde_json::from_str(&result).unwrap();
+    assert_ne!(result["result"]["isError"], true, "{result}");
+    let search: Value =
+        serde_json::from_str(result["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(search["tools"][0]["name"], "fixture__echo", "{search}");
+    assert_eq!(search["tools"][0]["annotations"]["idempotentHint"], true);
+    for args in [json!({"id":"bad"}), json!({"id":"ST-1", "extra":true})] {
+        let (_, out) = mcp(rpc(
+            "steve_tool_call",
+            json!({"name":"fixture__echo", "arguments":args}),
+        ))
+        .await;
+        assert_eq!(
+            serde_json::from_str::<Value>(&out).unwrap()["result"]["isError"],
+            true,
+            "{out}"
+        );
+    }
+    assert_eq!(
+        counts.called.load(Ordering::SeqCst),
+        0,
+        "invalid arguments never reach the server"
+    );
+    let (_, out) = mcp(rpc(
+        "steve_tool_call",
+        json!({"name":"fixture__echo", "arguments":{"id":"ST-7"}}),
+    ))
+    .await;
+    assert_eq!(
+        serde_json::from_str::<Value>(&out).unwrap()["result"]["content"][0]["text"],
+        "ST-7",
+        "{out}"
+    );
+    let pin = "/api/bots/steve/tool-pins/tool/fixture__echo";
+    assert_eq!(c.call("PUT", pin, None, None).await.0, 200);
+    let (_, list) = mcp(json!({"jsonrpc":"2.0", "id":3, "method":"tools/list"})).await;
+    let list: Value = serde_json::from_str(&list).unwrap();
+    assert_eq!(
+        list["result"]["tools"].as_array().unwrap().len(),
+        9,
+        "{list}"
+    );
+    let (_, out) = mcp(rpc("fixture__echo", json!({"id":"ST-8"}))).await;
+    assert_eq!(
+        serde_json::from_str::<Value>(&out).unwrap()["result"]["content"][0]["text"],
+        "ST-8"
+    );
+    assert_eq!(
+        counts.initialized.load(Ordering::SeqCst),
+        1,
+        "one shared MCP connection, not one per call"
+    );
+    assert_eq!(counts.called.load(Ordering::SeqCst), 2);
+    // Wait only for the asynchronous usage accounting, not a model or external service.
+    let mut usage = Value::Null;
+    for _ in 0..100 {
+        usage = c.call("GET", "/api/bots/steve/tools", None, None).await.1;
+        if usage["usage"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|u| u["tool"] == "fixture__echo" && u["called"] == 2)
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let row = usage["usage"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|u| u["tool"] == "fixture__echo")
+        .unwrap();
+    assert_eq!(row["searched"], 1, "{usage}");
+    assert_eq!(row["called"], 2, "{usage}");
+    c.call(
+        "PUT",
+        &format!("/api/bots/steve/capabilities/mcp/{id}"),
+        Some(json!({"enabled":false})),
+        None,
+    )
+    .await;
+    let (_, out) = mcp(rpc(
+        "steve_tool_call",
+        json!({"name":"fixture__echo", "arguments":{"id":"ST-9"}}),
+    ))
+    .await;
+    assert_eq!(
+        serde_json::from_str::<Value>(&out).unwrap()["result"]["isError"],
+        true
+    );
+    assert_eq!(
+        counts.called.load(Ordering::SeqCst),
+        2,
+        "disabling revokes calls, even with a cached catalog and pin"
+    );
+    c.call(
+        "PUT",
+        &format!("/api/bots/steve/capabilities/mcp/{id}"),
+        Some(json!({"enabled":true})),
+        None,
+    )
+    .await;
+    c.call("DELETE", pin, None, None).await;
+    let (_, list) = mcp(json!({"jsonrpc":"2.0", "id":4, "method":"tools/list"})).await;
+    assert_eq!(
+        serde_json::from_str::<Value>(&list).unwrap()["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .len(),
+        8
+    );
+    server.abort();
 }

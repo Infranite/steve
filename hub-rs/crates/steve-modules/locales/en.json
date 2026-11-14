@@ -300,6 +300,7 @@
   "modules.not_found.mcp_server": "No such MCP server",
   "modules.not_found.skill": "No such skill",
   "modules.not_found.a2a_agent": "No such remote agent",
+  "modules.caps.too_many_pins": "A bot can keep at most %{max} tools pinned",
   "modules.caps.too_many": "A bot can use at most %{max} of these",
   "modules.caps.library_full": "The library holds at most %{max} of these",
   "modules.caps.name_used": "This bot already uses another one named %{name}",

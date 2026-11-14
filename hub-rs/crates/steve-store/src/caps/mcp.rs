@@ -1,10 +1,10 @@
-//! The workspace's MCP servers (migration 65, `mcp_servers`): what the harness of a Bot assigned one
-//! gets in the ACP `mcpServers` of every session, next to Steve's own tools ([`super`]).
+//! The workspace's MCP servers (migration 65, `mcp_servers`), assigned to Bots and proxied by the
+//! Hub's shared MCP client. Sessions reach their tools through Steve's endpoint ([`super`]).
 //!
 //! A row never holds a secret value. An env variable or header marked secret is stored by name only
 //! (`{"name","secret":true}`); its value is a field of the server's `credential_item` in the
-//! workspace's system vault, labelled [`secret_label`], and is taken by the session's Node when the
-//! harness opens. [`insert`] and [`update`] drop any value given with a secret.
+//! workspace's system vault, labelled [`secret_label`], and is taken by the Hub when its client
+//! opens the shared connection. [`insert`] and [`update`] drop any value given with a secret.
 
 use rusqlite::{Connection, OptionalExtension, Row, params};
 use serde::{Deserialize, Serialize};

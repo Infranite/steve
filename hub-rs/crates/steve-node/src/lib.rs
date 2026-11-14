@@ -19,6 +19,8 @@ mod artifact;
 mod attachments;
 mod confine;
 
+mod bot_mcp;
+mod bot_skills;
 pub mod cow;
 pub mod disk_observation;
 pub mod disk_usage;
@@ -31,10 +33,8 @@ mod procs;
 pub mod reclaim;
 mod research;
 mod scan;
-mod staging;
 mod secrets;
-mod bot_mcp;
-mod bot_skills;
+mod staging;
 mod toolchain;
 mod tools;
 mod vitals;
@@ -65,6 +65,68 @@ pub fn confinement(
     mode: Option<String>,
 ) -> Result<&'static str, String> {
     confine::Confine::choose(steve_home, node_home, mode).state()
+}
+
+/// A sandbox for programs the Hub itself starts outside any run (the library's stdio MCP servers it
+/// proxies): the same one this Node's runs get, so what such a program does cannot reach Steve's
+/// secrets, keys and databases either. Without a sandbox here, programs start as they are.
+#[derive(Clone)]
+pub struct Sandbox(confine::Confine);
+
+impl Sandbox {
+    /// The sandbox for a Steve with these homes, tried once (`STEVE_CONFINE` as for runs).
+    pub fn open(steve_home: &Path, node_home: &Path) -> Sandbox {
+        Sandbox(confine::Confine::open(steve_home, node_home))
+    }
+
+    /// Starts a local capability server with private temporary cwd, piped MCP stdio and this
+    /// sandbox (including the fresh level-2 environment). Dropping it stops its process group and
+    /// removes the scratch directory. The Hub owns protocol handling, never process construction.
+    pub fn spawn_capability(
+        sandbox: Option<&Self>,
+        program: PathBuf,
+        args: Vec<std::ffi::OsString>,
+        env: Vec<(String, String)>,
+    ) -> std::io::Result<CapabilityProcess> {
+        let cwd = tempfile::Builder::new().prefix("steve-mcp-").tempdir()?;
+        let (program, args) = match sandbox {
+            Some(s) => s.0.wrap_in(program, args, &[], &[], Some(cwd.path())),
+            None => (program, args),
+        };
+        let mut command = tokio::process::Command::new(program);
+        if let Some(fresh) = sandbox.and_then(|s| s.0.fresh_env()) {
+            command.env_clear().envs(fresh.iter().cloned());
+        }
+        let child = command
+            .args(args)
+            .current_dir(cwd.path())
+            .envs(env)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .process_group(0)
+            .kill_on_drop(true)
+            .spawn()?;
+        Ok(CapabilityProcess { child, _cwd: cwd })
+    }
+}
+
+/// A capability process owned by the Hub, started only through the Node's sandbox face.
+pub struct CapabilityProcess {
+    pub child: tokio::process::Child,
+    _cwd: tempfile::TempDir,
+}
+
+impl Drop for CapabilityProcess {
+    fn drop(&mut self) {
+        // The child has not been waited/reaped, so its id cannot have been reused. Stop wrapper
+        // descendants too (npx and similar launchers), not just the immediate child.
+        if let Some(pid) = self.child.id() {
+            unsafe {
+                libc::kill(-(pid as libc::pid_t), libc::SIGKILL);
+            }
+        }
+    }
 }
 
 /// What this Node is and where it keeps its things.
@@ -360,8 +422,9 @@ impl Inner {
             if changed.is_some() && changed != *seen {
                 match std::fs::read(&*path)
                     .map_err(|e| e.to_string())
-                    .and_then(|b| serde_json::from_slice::<Vec<Root>>(&b).map_err(|e| e.to_string()))
-                {
+                    .and_then(|b| {
+                        serde_json::from_slice::<Vec<Root>>(&b).map_err(|e| e.to_string())
+                    }) {
                     Ok(roots) => {
                         *self.roots.write().unwrap() = Arc::new(roots);
                         *seen = changed;
@@ -2841,7 +2904,11 @@ impl ExecutionControl for LocalNode {
     async fn snapshot(&self, page: PageRequest) -> ApiResult<Snapshot> {
         // limit=0 opts into bounded head pages. Older Hubs still receive the original complete
         // heads vector; a new Hub uses the cursor to request both entry and head pages.
-        let limit = if page.limit == 0 { 100 } else { page.limit as usize };
+        let limit = if page.limit == 0 {
+            100
+        } else {
+            page.limit as usize
+        };
         let (token, offset, head_offset, paged_heads) = match &page.cursor {
             None => {
                 // the operations, their waits and the stream heads, as of one moment
@@ -2888,7 +2955,9 @@ impl ExecutionControl for LocalNode {
                 (
                     t.parse().map_err(|_| bad())?,
                     o.parse().map_err(|_| bad())?,
-                    h.map(|h| h.parse().map_err(|_| bad())).transpose()?.unwrap_or(0),
+                    h.map(|h| h.parse().map_err(|_| bad()))
+                        .transpose()?
+                        .unwrap_or(0),
                     h.is_some(),
                 )
             }
@@ -2903,7 +2972,12 @@ impl ExecutionControl for LocalNode {
         let entries: Vec<SnapshotEntry> =
             s.entries.iter().skip(offset).take(limit).cloned().collect();
         let heads: Vec<StreamHead> = if paged_heads {
-            s.heads.iter().skip(head_offset).take(limit).cloned().collect()
+            s.heads
+                .iter()
+                .skip(head_offset)
+                .take(limit)
+                .cloned()
+                .collect()
         } else {
             s.heads.clone()
         };

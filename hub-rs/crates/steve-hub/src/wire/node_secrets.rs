@@ -53,7 +53,7 @@ struct Held {
 
 /// Values a Node takes for one of its sessions rather than for one command: the secrets of the
 /// session's Bot's MCP servers, under [`MCP_SECRETS_OP`]`<session>`, each time its harness opens
-/// ([`super::bot_mcp`]). Asked again every time, so nothing is held between opens.
+/// (legacy wire clients only; the Hub no longer installs a provider). Asked again every time.
 pub trait SessionSecrets: Send + Sync {
     /// `id`'s value for `session` on `node`; `None`: not this session's (or not on this Node).
     fn value(&self, node: &str, session: &str, id: &str) -> Option<zeroize::Zeroizing<Vec<u8>>>;

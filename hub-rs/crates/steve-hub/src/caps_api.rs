@@ -19,18 +19,27 @@ fn first_sentence(d: &str) -> String {
     d[..end].trim().to_string()
 }
 
-/// Every Steve tool a session can have, by name, with its first sentence.
+/// Every Steve tool a session can have, by name, with its first sentence, whether it reads or writes
+/// and whether every session lists it (`core`); the core first, in its order.
 pub fn session_tools() -> Vec<Value> {
-    let mut out: Vec<Value> = steve_mcp::tools::list()
+    use crate::wire::tool_registry as reg;
+    use steve_modules::caps::tools::CORE;
+    let mut all = crate::wire::tool_service::builtin_catalog();
+    all.push(reg::search_tool());
+    all.push(reg::call_tool());
+    let pos = |n: &str| CORE.iter().position(|c| *c == n).unwrap_or(CORE.len());
+    all.sort_by_key(|t| pos(&t.name));
+    reg::steve_entries(all)
         .into_iter()
-        .map(|t| {
-            json!({"name": t.name, "description": first_sentence(t.description.as_deref().unwrap_or(""))})
+        .map(|e| {
+            let mut v = e.mcp();
+            v["description"] = json!(first_sentence(&e.description));
+            v["core"] = json!(CORE.contains(&e.name.as_str()));
+            v["resources"] = json!(e.resources);
+            v["as_you"] = json!(e.as_you);
+            v
         })
-        .collect();
-    out.extend(crate::wire::mcp_extra::module_tools().into_iter().map(|t| {
-        json!({"name": t["name"], "description": first_sentence(t["description"].as_str().unwrap_or(""))})
-    }));
-    out
+        .collect()
 }
 
 pub async fn steve_h(State(st): State<AppState>, headers: HeaderMap) -> Json<Value> {
@@ -52,7 +61,9 @@ pub async fn steve_h(State(st): State<AppState>, headers: HeaderMap) -> Json<Val
         .collect();
     Json(json!({
         "tools": session_tools(),
+        "core": steve_modules::caps::tools::CORE,
         "outside": outside,
+        "outside_core": crate::wire::outside_mcp::CORE,
         "endpoints": urls,
         "agent_card": format!("{base}{}", crate::a2a_server::CARD_PATHS[0]),
         "a2a": format!("{base}{}", crate::a2a_server::PATH),

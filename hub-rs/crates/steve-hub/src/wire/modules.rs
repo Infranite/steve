@@ -160,9 +160,10 @@ pub struct Built {
     pub recall: Arc<dyn steve_core::yolo::undo::Recall>,
     /// What runs for each connection of an adapter with a hook (started by one of `jobs`).
     pub lifecycle: Option<steve_channels::lifecycle::ConnectionRuntime>,
-    /// 能力, the capabilities library: the MCP secrets a session's Node takes
-    /// ([`super::bot_mcp`]) and the remote agents' tools ([`super::mcp_extra`]).
+    /// 能力, the capabilities library: the remote agents' tools ([`super::mcp_extra`]).
     pub caps: steve_modules::caps::Capabilities,
+    /// The Hub's connections to the library's MCP servers ([`super::tool_registry`]).
+    pub library: Arc<super::library_mcp::LibraryMcp>,
 }
 
 /// The objects the event producers call, exactly as wired: G2's sink, E1's events, C1's inbound.
@@ -319,6 +320,20 @@ pub fn build(env: Env<'_>) -> Result<Built, BackendError> {
     let keys = steve_modules::vault::keystore::from_env(steve_home, |k| vars(k))
         .map_err(|e| BackendError::msg(format!("vault keystore: {e}")))?;
     let vault = steve_modules::vault::Vault::new(store.clone(), keys);
+    // 能力: MCP servers, skills and remote agents, defined once and assigned per Bot; the
+    // secrets in the vault. The Hub is the MCP client of the library's servers (their stdio ones
+    // start in the sandbox a Node's runs get), and a session's brief says what its tools cover.
+    let caps = steve_modules::caps::Capabilities::new(vault.clone());
+    let library = super::library_mcp::LibraryMcp::new(
+        caps.clone(),
+        Some(steve_node::Sandbox::open(
+            steve_home,
+            &data_dir.join("node"),
+        )),
+    );
+    registry.prompt_context(Box::new(super::tool_service::CatalogContext {
+        library: library.clone(),
+    }));
     // what an interrupted rotation of an earlier Hub left `retiring` is finished once, off the start
     {
         let v = vault.clone();
@@ -632,9 +647,6 @@ pub fn build(env: Env<'_>) -> Result<Built, BackendError> {
         }
         (rt.build(), bus.tap(&["connection"]))
     });
-    // 能力: MCP servers, skills and remote agents, defined once and assigned per Bot; the
-    // secrets in the vault
-    let caps = steve_modules::caps::Capabilities::new(vault.clone());
     let routes = routes
         .with_state(modules.clone())
         .merge(steve_modules::caps::routes(caps.clone()))
@@ -778,5 +790,6 @@ pub fn build(env: Env<'_>) -> Result<Built, BackendError> {
         }),
         lifecycle,
         caps,
+        library,
     })
 }
