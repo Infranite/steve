@@ -70,6 +70,8 @@ pub enum SpaceKind {
     Thread,
     MailThread,
     Meeting,
+    Pr,
+    Issue,
 }
 
 impl SpaceKind {
@@ -81,6 +83,8 @@ impl SpaceKind {
             Self::Thread => "thread",
             Self::MailThread => "mail_thread",
             Self::Meeting => "meeting",
+            Self::Pr => "pr",
+            Self::Issue => "issue",
         }
     }
 
@@ -92,6 +96,8 @@ impl SpaceKind {
             "thread" => Self::Thread,
             "mail_thread" => Self::MailThread,
             "meeting" => Self::Meeting,
+            "pr" => Self::Pr,
+            "issue" => Self::Issue,
             _ => return None,
         })
     }
@@ -147,6 +153,8 @@ pub struct SpaceInfo {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MemberInfo {
     pub handle: HandleRef,
+    /// Other platform/email handles for this participant, resolved by the common identity path.
+    pub aliases: Vec<HandleRef>,
     pub name: String,
     /// `owner | admin | member | bot`
     pub role: String,
@@ -670,6 +678,39 @@ pub trait ChannelAdapter: ConnectionProvider {
         to: &SendTarget,
         content: &OutContent,
     ) -> Result<String, AdapterError>;
+
+    /// Every successful send_message preserves a stable source_id in its Sent result. Required
+    /// for a bot declaration without platform message IDs; false for legacy send-only adapters.
+    fn preserves_source_ids(&self) -> bool {
+        false
+    }
+
+    /// Rich send result for adapters whose stable delivery id is not a platform message id.
+    /// Existing adapters keep their platform-id contract via the default implementation.
+    async fn send_message(
+        &self,
+        cx: &ConnCx,
+        to: &ActTarget,
+        content: &OutContent,
+        key: &SendKey,
+    ) -> Result<Sent, AdapterError> {
+        let target = match to {
+            ActTarget::Space { ext_id } => SendTarget::Space {
+                ext_id: ext_id.clone(),
+            },
+            ActTarget::Reply { to, in_thread } => match to.id() {
+                Some(id) => SendTarget::Reply {
+                    ext_msg_id: id.into(),
+                    in_thread: *in_thread,
+                },
+                None => SendTarget::Space {
+                    ext_id: to.space_ext_id.clone(),
+                },
+            },
+        };
+        let _ = key;
+        self.send(cx, &target, content).await.map(Sent::id)
+    }
 
     async fn recall(&self, cx: &ConnCx, ext_msg_id: &str) -> Result<(), AdapterError>;
 

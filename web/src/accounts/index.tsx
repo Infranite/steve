@@ -88,12 +88,18 @@ function AccountsView() {
       {dlg?.k === "new" && <NewAccountDialog systems={systems} onClose={() => setDlg(null)} onDone={(id) => { setDlg(null); go("#/accounts/" + id) }} />}
       {dlg?.k === "connect" && <ConnectDialog adapter={dlg.a} onClose={() => setDlg(null)} />}
       <div className="flex flex-col gap-8">
-        <Section label={t("accounts:page.connectedSection", { n: num(conn.length) })}><BySystem xs={conn} empty={t("accounts:page.connectedEmpty")} /></Section>
-        <Panel><Row icon={<Tile I={PlugIcon} />} title={t("accounts:page.integrations")} sub={t("accounts:page.integrationsSub")} onClick={() => go("#/integrations")} data-goto-integrations><Chevron /></Row></Panel>
-        <Section label={t("accounts:page.companySection", { n: num(company.length) })}><BySystem xs={company} empty={t("accounts:page.companyEmpty")} />
-          <Note>{t("accounts:page.companyNote")}</Note></Section>
-        <Section label={t("accounts:page.otherSection", { n: num(rest.length) })}><BySystem xs={rest} empty={t("accounts:page.otherEmpty")} />
-          <Note>{t("accounts:page.otherNote")}</Note></Section>
+        {/* no accounts at all: one line on where they come from, not three empty boxes with a note each */}
+        {!mine.length && !company.length ? <div className="flex flex-col gap-3" data-accounts-empty>
+          <Blank>{t("accounts:page.allEmpty")}</Blank>
+          <Panel><Row icon={<Tile I={PlugIcon} />} title={t("accounts:page.integrations")} sub={t("accounts:page.integrationsSub")} onClick={() => go("#/integrations")} data-goto-integrations><Chevron /></Row></Panel>
+        </div> : <>
+          <Section label={t("accounts:page.connectedSection", { n: num(conn.length) })}><BySystem xs={conn} empty={t("accounts:page.connectedEmpty")} /></Section>
+          <Panel><Row icon={<Tile I={PlugIcon} />} title={t("accounts:page.integrations")} sub={t("accounts:page.integrationsSub")} onClick={() => go("#/integrations")} data-goto-integrations><Chevron /></Row></Panel>
+          {company.length > 0 && <Section label={t("accounts:page.companySection", { n: num(company.length) })}><BySystem xs={company} empty={t("accounts:page.companyEmpty")} />
+            <Note>{t("accounts:page.companyNote")}</Note></Section>}
+          {rest.length > 0 && <Section label={t("accounts:page.otherSection", { n: num(rest.length) })}><BySystem xs={rest} empty={t("accounts:page.otherEmpty")} />
+            <Note>{t("accounts:page.otherNote")}</Note></Section>}
+        </>}
         <MatchRules rules={rules} onChange={L.reload} />
       </div>
     </Page>

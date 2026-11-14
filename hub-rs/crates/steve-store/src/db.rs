@@ -136,6 +136,21 @@ pub const MIGRATIONS: &[&str] = &[
     // 66: how each session's last turn ended and whether you stopped it (`session_stops`), and each
     // turn by attempt (`session_turns`): its end judged once, a pause's stop kept.
     include_str!("../migrations/066.sql"),
+    // 67: each device's concurrent sessions (`max_sessions`), enforced by the Hub: 32 by default,
+    // 1–256, on the Hub's `devices` row and on each paired Node's `nodes` row.
+    include_str!("../migrations/067.sql"),
+    // 68: deterministic conversation digest intake and durable knowledge indexes.
+    include_str!("../migrations/068.sql"),
+    // 69: tool search: what each Bot keeps loaded (`bot_tool_pins`) and how often each tool was found
+    // and called (`tool_usage`).
+    include_str!("../migrations/069.sql"),
+    // 70: expiring connector references bound to workspace, connection and account.
+    include_str!("../migrations/070.sql"),
+    // 71: durable output intents and manual/learned channel preferences.
+    include_str!("../migrations/071.sql"),
+    // 72: explicit personal notification policies and inbox, linked to E1 delivery receipts.
+    include_str!("../migrations/072.sql"),
+    include_str!("../migrations/073.sql"),
 ];
 
 /// 027's item columns and their one-time backfill (applied by `run_pending` when `items.phase` is missing).

@@ -118,6 +118,7 @@ pub async fn members(cx: &ConnCx, ext_id: &str) -> Result<Vec<MemberInfo>, Feish
             let tk = s(m, "tenant_key");
             out.push(MemberInfo {
                 handle: HandleRef::new(USER_SYSTEM, id),
+                aliases: Vec::new(),
                 name: s(m, "name").to_string(),
                 role: "member".into(),
                 external: !tk.is_empty() && !tenant.is_empty() && tk != tenant,
@@ -255,6 +256,7 @@ pub fn parse_chat_event(env: &Value) -> Option<SpaceEvent> {
                     let tk = s(u, "tenant_key");
                     Some(MemberInfo {
                         handle: user_handle(&u["user_id"])?,
+                        aliases: Vec::new(),
                         name: s(u, "name").to_string(),
                         role: "member".into(),
                         external: !tk.is_empty() && !tenant.is_empty() && tk != tenant,

@@ -475,7 +475,13 @@ pub fn present(c: &Connection, id: &str) -> Option<(Option<String>, Value)> {
         .enumerate()
         .map(|(i, a)| {
             if !is_resource(a) {
-                return a.clone();
+                let mut public = a.clone();
+                if public.get("reference_id").is_some() {
+                    if let Some(o) = public.as_object_mut() {
+                        o.remove("key");
+                    }
+                }
+                return public;
             }
             let why = blocked(&r, a).or(if r.direction != "in" {
                 Some(MediaError::Unsupported)

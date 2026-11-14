@@ -57,7 +57,7 @@ fn create_item_starts_a_session_in_a_scratch_dir_with_the_protocol() {
     assert!(!p.contains("\n\n"));
     assert_eq!(
         k.timeline_texts(&i.id),
-        vec!["Steve 建立事项，交给Steve，按目标归为 feat", "开始会话 #1"]
+        vec!["Steve 建立事项，交给 Steve，按目标归为 feat", "开始会话 #1"]
     );
     /* an MCP token was minted for the session and matches its hash */
     let ep = k.core.mcp_endpoint(&s.id).unwrap();
@@ -119,7 +119,7 @@ fn create_item_with_project_bot_and_tags() {
     assert_eq!(k.db().tags_of_item(&i.id).unwrap(), vec![bug, t.id]);
     assert_eq!(
         k.timeline_texts(&i.id)[0],
-        "Steve 建立事项，交给Steve 开发 Bot，项目 Proj"
+        "Steve 建立事项，交给 Steve 开发 Bot，项目 Proj"
     );
     let prompt = &k.rt.prompts_of(&only_session(&k, &i.id).id)[0];
     assert!(prompt.contains("Project: Proj — 说明."));
@@ -543,7 +543,7 @@ fn fail_look_pauses_and_tosteve_reassigns() {
     let ns = last_session(&k, &i.id);
     assert_eq!(ns.bot_id.as_deref(), Some("steve"));
     assert!(k.rt.prompts_of(&ns.id)[0].ends_with("这个事项从别的 Bot 交接给你。"));
-    assert!(k.timeline_texts(&i.id).contains(&"换成Steve".to_string()));
+    assert!(k.timeline_texts(&i.id).contains(&"换成 Steve".to_string()));
 }
 
 #[test]
@@ -1519,7 +1519,7 @@ fn deleting_a_bot_hands_its_items_over() {
     assert!(k.db().bot("dev").unwrap().is_none());
     assert!(
         k.timeline_texts(&running.id)
-            .contains(&"Steve 开发 Bot 已删除，交给Steve".to_string())
+            .contains(&"Steve 开发 Bot 已删除，交给 Steve".to_string())
     );
 }
 

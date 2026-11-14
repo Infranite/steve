@@ -444,23 +444,56 @@ pub fn member_count(c: &Connection, ws: &str) -> Result<i64> {
 
 /// Does `r` name an object of this workspace the user may refer to? Used for `about` lists.
 pub fn ref_exists(c: &Connection, ws: &str, me: &str, r: &ObjRef) -> Result<bool> {
+    ref_exists_for(c, &Viewer::load(c, ws, me)?, r)
+}
+
+/// Like `ref_exists`, with the caller's registered source scopes as well as team scopes.
+pub fn ref_exists_for(c: &Connection, viewer: &Viewer, r: &ObjRef) -> Result<bool> {
+    if r.kind == "mail_thread" {
+        return Ok(mail_thread_name(c, viewer, &r.id)?.is_some());
+    }
     let sql = match r.kind.as_str() {
-        "me" => return Ok(r.id == me || r.id == "me"),
+        "me" => return Ok(r.id == viewer.user || r.id == "me"),
         "party" => "SELECT 1 FROM parties WHERE id = ?1 AND workspace_id = ?2",
         "item" => "SELECT 1 FROM items WHERE id = ?1 AND workspace_id = ?2",
         "bot" => "SELECT 1 FROM bot_workspaces WHERE bot_id = ?1 AND workspace_id = ?2",
         "project" => "SELECT 1 FROM projects WHERE id = ?1 AND workspace_id = ?2",
         "space" => "SELECT 1 FROM spaces WHERE id = ?1 AND workspace_id = ?2",
+        "matter" => "SELECT 1 FROM matters WHERE id = ?1 AND workspace_id = ?2",
         "persona" => "SELECT 1 FROM personas WHERE id = ?1 AND workspace_id = ?2",
         _ => return Ok(false),
     };
     Ok(c.prepare_cached(sql)?
-        .query_row(params![r.id, ws], |_| Ok(()))
+        .query_row(params![r.id, viewer.ws], |_| Ok(()))
         .optional()?
         .is_some())
 }
 
-/// A display name for an `about` object (contact, bot, item, project …); `None` if unknown.
+fn mail_thread_name(c: &Connection, viewer: &Viewer, id: &str) -> Result<Option<String>> {
+    let row: Option<(String, String, String)> = c
+        .prepare_cached("SELECT subject, visibility, created_by FROM mail_threads WHERE workspace_id = ? AND id = ?")?
+        .query_row(params![viewer.ws, id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+        .optional()?;
+    Ok(row.and_then(|(name, visibility, by)| {
+        viewer
+            .sees(&Visibility::from_db(&visibility), &by)
+            .then_some(name)
+    }))
+}
+
+/// Display a reference for this viewer, including historical/shared `about` rows.
+pub fn ref_name_for(c: &Connection, viewer: &Viewer, r: &ObjRef) -> Result<Option<String>> {
+    if r.kind == "mail_thread" {
+        return mail_thread_name(c, viewer, &r.id);
+    }
+    if !ref_exists_for(c, viewer, r)? {
+        return Ok(None);
+    }
+    ref_name(c, r)
+}
+
+/// A display name without a viewer. Source-private names are deliberately omitted: callers such as
+/// the shared memory index must not persist a mail subject in a more widely visible memory's text.
 pub fn ref_name(c: &Connection, r: &ObjRef) -> Result<Option<String>> {
     let sql = match r.kind.as_str() {
         "me" => return Ok(Some("我".into())),
@@ -469,6 +502,7 @@ pub fn ref_name(c: &Connection, r: &ObjRef) -> Result<Option<String>> {
         "bot" => "SELECT name FROM bots WHERE id = ?",
         "project" => "SELECT name FROM projects WHERE id = ?",
         "space" => "SELECT name FROM spaces WHERE id = ?",
+        "matter" => "SELECT title FROM matters WHERE id = ?",
         "persona" => "SELECT name FROM personas WHERE id = ?",
         _ => return Ok(None),
     };

@@ -124,7 +124,8 @@ pub fn handles(name: &str) -> bool {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct McpCx {
     pub ws: String,
-    /// The user the agent works for (the item's user): visibility is theirs, candidates are theirs.
+    /// Authenticated execution principal: a live member id, or `svc:<workspace>` for service work.
+    /// Visibility and candidates belong to this caller, never an inferred workspace owner.
     pub user: String,
     /// The session's bot (`writer` and `requested_by` of what it saves).
     pub bot_id: String,
@@ -247,12 +248,16 @@ fn validate(
     }
 }
 
-/// The viewer of the session's user, creating “我” and the own organization like any contacts call.
+/// Personal callers initialize “我”; a service has no person to initialize and sees only workspace
+/// objects and scopes explicitly granted to its principal, never the workspace owner's profile.
 pub(crate) fn viewer(m: &Modules, cx: &McpCx) -> ApiResult<Viewer> {
     let who = Caller {
         ws: cx.ws.clone(),
         me: cx.user.clone(),
     };
+    if cx.user == format!("svc:{}", cx.ws) {
+        return m.viewer(&who);
+    }
     super::service::start(m, &who).map(|(v, _)| v)
 }
 

@@ -7,16 +7,17 @@
 
 pub mod acp_stats;
 pub mod auth;
-pub mod bot_mcp;
 pub mod bot_skills;
 pub mod chan;
 pub mod core;
 pub mod diagnostics;
+pub mod digest_bot;
 pub mod flow_cmd;
 pub mod git_push;
 pub mod host_node;
 pub mod item_git;
 pub mod item_mcp;
+pub mod library_mcp;
 pub mod local_service;
 pub mod mcp;
 pub mod mcp_extra;
@@ -39,6 +40,7 @@ pub mod research;
 pub mod research_mcp;
 pub mod signals;
 pub mod store;
+pub mod tool_registry;
 pub mod tool_service;
 pub mod view;
 pub mod workspaces;
@@ -281,8 +283,8 @@ fn open_in_process_node(
 }
 
 /// The Hub's own Node as the Hub configures it (in its process, or in one of its own, B1): no
-/// ceiling, the Hub's harnesses and roots, sessions, flow commands, and with `jobs` Steve's own
-/// model work (think and research).
+/// ceiling, 32 concurrent turns until its saved device setting is synchronized, the Hub's harnesses
+/// and roots, sessions, flow commands, and with `jobs` Steve's own model work (think and research).
 pub(crate) fn local_node_config(
     cfg: &Config,
     node: steve_node_api::NodeId,
@@ -297,7 +299,7 @@ pub(crate) fn local_node_config(
         acp: acp_config(cfg),
         roots,
         capacity: steve_node_api::Capacity {
-            sessions: 64,
+            sessions: steve_node_api::Capacity::SESSIONS_DEFAULT,
             // think and research jobs share it
             jobs: if jobs { LOCAL_JOB_CAPACITY } else { 0 },
             // flow `cmd` steps (N0e-E6)
@@ -406,6 +408,13 @@ pub(crate) fn local_node_mode(vars: &Vars, no_resume: bool) -> Result<bool, Back
 /// back instead; a start left unknown after a refused abandon would also hold its slot until the
 /// next boot.
 pub const LOCAL_JOB_CAPACITY: u32 = u32::MAX;
+
+// The stored scheduler setting and the executor's actual limiter use the same defaults/range.
+const _: () = assert!(
+    steve_node_api::Capacity::SESSIONS_MAX as i64 == steve_store::runtime::SESSIONS_MAX
+        && steve_node_api::Capacity::SESSIONS_DEFAULT as i64
+            == steve_store::runtime::SESSIONS_DEFAULT
+);
 
 /// New sessions get their principal's own harness directory by default. An explicit `off`
 /// keeps the Node's shared harness state; existing sessions retain their recorded directory.
@@ -622,15 +631,8 @@ pub fn wire_assembly(
             mode == NodeMode::Local,
         )?)
     };
-    // the harness adapters this Hub knows, with what the local Node says of them (kept fresh)
+    // the harness adapters this Hub knows, with what the Nodes say of them (kept fresh)
     let harnesses = crate::harnesses::HubHarnesses::of(cfg);
-    if let Some(h) = &model_node {
-        node_jobs.push(Box::pin(
-            harnesses
-                .clone()
-                .follow(h.node.clone() as Arc<dyn steve_node_api::Node>),
-        ));
-    }
     let models = || {
         let m = steve_core::models::Models::new(
             db.clone(),
@@ -671,6 +673,16 @@ pub fn wire_assembly(
     let (nodes, bind_remote) = remote_nodes(cfg, &db, host.clone(), &vars);
     if let Some(s) = &nodes {
         let _ = s.secrets.set(secrets.clone());
+    }
+    if model_node.is_some() || nodes.is_some() {
+        node_jobs.push(Box::pin(
+            harnesses.clone().follow_all(
+                model_node
+                    .as_ref()
+                    .map(|h| h.node.clone() as Arc<dyn steve_node_api::Node>),
+                nodes.clone(),
+            ),
+        ));
     }
     let fleet = nodes.as_ref().map(|s| s.fleet.clone());
     // where the Hub's own Node runs sessions: in this process, or in one of its own (B1)
@@ -732,11 +744,17 @@ pub fn wire_assembly(
         core_cfg,
     );
     core.models().set_harnesses(harnesses.source());
-    // once Steve's harness has said what it offers, the cheap purposes get its quick model (once)
+    // once Steve's harness has said what it offers, untouched seeded bots reconcile if needed and
+    // the cheap purposes get its quick model (once)
     let models = core.models().clone();
+    let core_for_probe = core.clone();
     harnesses.on_update(move || {
         let m = models.clone();
-        tokio::task::spawn_blocking(move || m.migrate_all());
+        let c = core_for_probe.clone();
+        tokio::task::spawn_blocking(move || {
+            let _ = c.reconcile_seeded_bots();
+            m.migrate_all();
+        });
     });
     let _ = host.core.set(core.clone());
     /* an item bound to a Node has its git read there (N0e-E11b); without any Node, nothing changes */
@@ -853,8 +871,6 @@ pub fn wire_assembly(
     {
         tracing::warn!("single sign-on from the settings: {e}");
     }
-    // the secrets of the Bots' own MCP servers, for the Node a session runs on
-    secrets.set_sessions(bot_mcp::McpSecrets::new(db.clone(), built.caps.clone()));
     let extra = mcp_extra::Extra {
         caps: built.caps.clone(),
         store: db.clone(),
@@ -862,7 +878,20 @@ pub fn wire_assembly(
         ports: steve_modules::accounts::ports(),
         kb: built.kb.clone(),
         tools: built.tools.clone(),
+        library: built.library.clone(),
     };
+    // connections to the library's MCP servers that no call used for a while close
+    {
+        let library = built.library.clone();
+        jobs.push(Box::pin(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(60));
+            loop {
+                tick.tick().await;
+                let library = library.clone();
+                let _ = tokio::task::spawn_blocking(move || library.sweep()).await;
+            }
+        }));
+    }
     let tool_service = Arc::new(tool_service::ToolService {
         mcp: Arc::new(core::CoreMcp {
             store: db.clone(),
@@ -916,7 +945,7 @@ pub fn wire_assembly(
         workspaces: workspaces.clone(),
     }))
     .layer(axum::middleware::from_fn_with_state(
-        extra,
+        tool_service.clone(),
         mcp_extra::layer,
     ));
     // statistics: the item facts refresher runs after boot (after recover has closed the turns the
@@ -939,11 +968,10 @@ pub fn wire_assembly(
     }
     let module_routes = built
         .routes
-        .merge(crate::api::stats::routes(crate::api::stats::StatsApi::new(
-            db.clone(),
-            bus.clone(),
-            price_url,
-        )))
+        .merge(crate::api::stats::routes(
+            crate::api::stats::StatsApi::new(db.clone(), bus.clone(), price_url)
+                .with_harness_source(harnesses.source()),
+        ))
         .merge(crate::api::yolo::routes(engine.clone()));
     Ok(Wired {
         backend,
@@ -954,6 +982,7 @@ pub fn wire_assembly(
             routed,
             harnesses: harnesses.clone(),
             node: local_node,
+            nodes: nodes.clone(),
             lifecycle: built.lifecycle.clone(),
         }),
         auth: auth.router(),

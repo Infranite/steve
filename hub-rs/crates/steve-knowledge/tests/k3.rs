@@ -19,6 +19,62 @@ use steve_modules::testkit::{ME, OTHER, TestEnv, WS, call, caller};
 use steve_store::base::mems::{self, Mem};
 use steve_store::base::{Level, ObjRef, Viewer};
 
+#[test]
+fn private_address_is_not_injected_into_shared_workspace_chat() {
+    let h = setup();
+    h.env
+        .store()
+        .transaction(|tx| -> steve_modules::ApiResult<()> {
+            let who = caller(WS, ME);
+            let me = steve_modules::contacts::service::ensure_base(tx, &who)?;
+            steve_modules::contacts::repo::value_insert(
+                tx,
+                WS,
+                &steve_modules::contacts::repo::NewValue {
+                    party_id: me.id,
+                    key: "call".into(),
+                    label: "Internal name".into(),
+                    value: "Private nickname".into(),
+                    source: "me".into(),
+                    source_label: "Manual".into(),
+                    source_ref: None,
+                    level: Level::Public,
+                    status: "confirmed".into(),
+                    decision_id: None,
+                },
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let context = || {
+        h.env
+            .store()
+            .reader(|c| {
+                let viewer = Viewer::load(c, WS, ME)?;
+                steve_knowledge::chat_context(
+                    c,
+                    &h.kb,
+                    &viewer,
+                    "unrelated question",
+                    steve_store::now(),
+                )
+            })
+            .unwrap()
+    };
+    assert!(!context().is_some_and(|k| k.ctx.text.contains("Private nickname")));
+    h.env
+        .store()
+        .with_conn(|c| {
+            c.execute(
+                "DELETE FROM workspace_members WHERE workspace_id=?1 AND user_id<>?2",
+                rusqlite::params![WS, ME],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    assert!(context().is_some_and(|k| k.ctx.text.contains("Private nickname")));
+}
+
 struct Env {
     env: TestEnv,
     kb: Knowledge,

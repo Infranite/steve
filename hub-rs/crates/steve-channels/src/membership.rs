@@ -11,7 +11,7 @@ use rusqlite::{OptionalExtension, params};
 use steve_store::Tx;
 
 use crate::channel::{HandleRef, MemberInfo, SpaceEvent, SpaceInfo, SpaceKind};
-use crate::inbound::{ConnFacts, conn_facts, facts_system, identify_handle_as};
+use crate::inbound::{ConnFacts, conn_facts, facts_system, identify_with_aliases};
 use crate::spaces::{self, Mode, NewSpace, SpaceRow};
 use crate::{ChannelResult, Channels};
 
@@ -96,12 +96,13 @@ fn add_members(
     };
     let mut n = 0;
     for m in members {
-        if let Some(id) = identify_handle_as(
+        if let Some(id) = identify_with_aliases(
             tx,
             ws,
             conn,
             actor,
             &m.handle,
+            &m.aliases,
             Some(&m.name),
             &label,
             m.role == "bot",

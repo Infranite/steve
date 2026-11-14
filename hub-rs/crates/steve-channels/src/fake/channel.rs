@@ -81,6 +81,7 @@ impl FakeChannel {
             .iter()
             .map(|(h, n)| MemberInfo {
                 handle: Self::handle(h),
+                aliases: Vec::new(),
                 name: (*n).into(),
                 role: "member".into(),
                 external: false,

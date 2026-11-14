@@ -16,13 +16,45 @@ mod scan;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-/// A harness's name as a string literal.
+/// A harness's name or CLI binary as a string literal.
 const LITERALS: &[&str] = &[
     "\"claude-code\"",
+    "\"claude-agent-acp\"",
+    "\"claude-code-acp\"",
     "\"codex\"",
+    "\"codex-acp\"",
     "\"claude\"",
     "\"claude-cli\"",
     "\"codex-cli\"",
+    "\"pi\"",
+    "\"openma-pi-acp\"",
+    "\"gemini\"",
+    "\"gemini-cli\"",
+    "\"github-copilot-cli\"",
+    "\"copilot\"",
+    "\"opencode\"",
+    "\"qwen-code\"",
+    "\"qwen\"",
+    "\"goose\"",
+    "\"goose-acp\"",
+    "\"kimi-code\"",
+    "\"kimi\"",
+    "\"grok-build\"",
+    "\"grok\"",
+    "\"kilo\"",
+    "\"factory-droid\"",
+    "\"droid\"",
+    "\"codebuddy-code\"",
+    "\"codebuddy\"",
+    "\"cursor\"",
+    "\"cursor-agent\"",
+    "\"kiro\"",
+    "\"kiro-cli\"",
+    "\"mistral-vibe\"",
+    "\"vibe\"",
+    "\"vibe-acp\"",
+    "\"qoder\"",
+    "\"qodercli\"",
 ];
 
 /// Code that branches on a harness by name.
@@ -43,6 +75,57 @@ const LIST: &str = "tests/harness_parity.txt";
 
 fn crates_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("..")
+}
+
+/// `cursor` is also a pagination field in JSON protocols, not a choice of Cursor's adapter.
+/// Only object keys inside `json!` are exempt: values, comparisons and lookups still count.
+fn pagination_key(raw: &str, code: &str, at: usize, literal: &str) -> bool {
+    if literal != "\"cursor\"" || !raw[at + literal.len()..].trim_start().starts_with(':') {
+        return false;
+    }
+    let mut braces = Vec::new();
+    for (i, b) in code.bytes().take(at).enumerate() {
+        match b {
+            b'{' => braces.push(i),
+            b'}' => {
+                braces.pop();
+            }
+            _ => {}
+        }
+    }
+    braces.into_iter().any(|i| {
+        let prefix: String = code[..i].chars().filter(|c| !c.is_whitespace()).collect();
+        prefix.strip_suffix("json!(").is_some_and(|head| {
+            head.chars()
+                .next_back()
+                .is_none_or(|c| !c.is_alphanumeric() && c != '_')
+        })
+    })
+}
+
+#[test]
+fn pagination_keys_are_not_adapter_names_but_values_and_branches_are() {
+    for (raw, exempt) in [
+        (r#"json!({"cursor": c})"#, true),
+        (r#"serde_json::json ! ( { "cursor" : c })"#, true),
+        (r#"json!({"page": {"cursor": c}})"#, true),
+        (r#"custom_json!({"cursor": c})"#, false),
+        (r#"json!({"harness": "cursor"})"#, false),
+        (r#"harness == "cursor""#, false),
+        (r#"harnesses.get("cursor")"#, false),
+        (
+            r#"match harness { "cursor" => run(), _ => other() }"#,
+            false,
+        ),
+    ] {
+        let code = scan::production(raw).unwrap();
+        let at = raw.find("\"cursor\"").unwrap();
+        assert_eq!(
+            pagination_key(raw, &code, at, "\"cursor\""),
+            exempt,
+            "{raw}"
+        );
+    }
 }
 
 fn found() -> BTreeMap<(String, String), usize> {
@@ -67,6 +150,7 @@ fn found() -> BTreeMap<(String, String), usize> {
                 let n = raw
                     .match_indices(lit)
                     .filter(|(at, _)| code.get(*at) == Some(&b'"'))
+                    .filter(|(at, _)| !pagination_key(&raw, &s.code, *at, lit))
                     .count();
                 if n > 0 {
                     out.insert((s.rel.clone(), lit.to_string()), n);
@@ -81,6 +165,26 @@ fn found() -> BTreeMap<(String, String), usize> {
         }
     }
     out
+}
+
+#[test]
+fn literals_cover_all_builtin_adapter_ids_and_bins() {
+    for id in steve_acp::adapters::builtin_ids() {
+        let lit = format!("\"{id}\"");
+        assert!(
+            LITERALS.contains(&lit.as_str()),
+            "missing builtin adapter id literal {lit} in LITERALS"
+        );
+    }
+    for (_id, cli_bin, detect_bins) in steve_acp::adapters::builtin_bins() {
+        for bin in std::iter::once(cli_bin).chain(detect_bins.iter().copied()) {
+            let lit = format!("\"{bin}\"");
+            assert!(
+                LITERALS.contains(&lit.as_str()),
+                "missing builtin binary literal {lit} in LITERALS"
+            );
+        }
+    }
 }
 
 #[test]

@@ -12,24 +12,37 @@ import { Empty, go, SearchField, Segmented } from "@/ui"
 import { Button } from "@/components/ui/button"
 import { Dialog, DialogContent, DialogTitle, DialogDescription } from "@/components/ui/dialog"
 import { t as tr, useT } from "@/i18n"
+import { HubError } from "@/api"
+import { hubBase } from "@/hub"
 
 /** one IM conversation, its messages as the chat renders them plus what only IM turns have */
 export function useConversation(space: string | undefined) {
-  const [data, setData] = useState<{ badge: ConvBadge; msgs: Msg[]; raw: Map<string, ConvMessage> } | null | undefined>()
-  const request = useRef(0)
+  type Data = { badge: ConvBadge; msgs: Msg[]; raw: Map<string, ConvMessage> }
+  const workspace = st.workspace?.id, hub = hubBase()
+  const scope = JSON.stringify([hub, workspace, space])
+  const [state, setState] = useState<{ scope: string; data?: Data | null; error: boolean; loading: boolean }>({ scope, error: false, loading: !!space })
+  const request = useRef(0), current = useRef(scope)
+  current.current = scope
   const load = useCallback(() => {
     const id = ++request.current
     if (!space) return
+    const active = () => id === request.current && current.current === scope && st.workspace?.id === workspace && hubBase() === hub
+    setState(old => ({ scope, data: old.scope === scope ? old.data : undefined, error: false, loading: true }))
     conversationsApi.messages(space).then((r) => {
-      if (id !== request.current) return
-      if (!r) { setData(null); return }
-      setData({ badge: r.conversation, msgs: r.messages.map(msgOf), raw: new Map(r.messages.map((m) => [m.id, m])) })
-    }).catch(() => { if (id === request.current) setData(null) })
-  }, [space])
-  useEffect(() => { setData(undefined); load(); return () => { request.current++ } }, [load])
+      if (!active()) return
+      setState({ scope, data: { badge: r.conversation, msgs: r.messages.map(msgOf), raw: new Map(r.messages.map((m) => [m.id, m])) }, error: false, loading: false })
+    }).catch((e) => {
+      if (!active()) return
+      // Only a resource 404 means missing. Transport/module failures are retryable and retain the loaded messages.
+      if (e instanceof HubError && e.status === 404) setState({ scope, data: null, error: false, loading: false })
+      else setState(old => ({ scope, data: old.scope === scope ? old.data : undefined, error: true, loading: false }))
+    })
+  }, [space, scope, workspace, hub])
+  useEffect(() => { load(); return () => { request.current++ } }, [load])
   /* a chat message's event names its space (`sp_…`), the conversation is `chan:sp_…` */
   useHubEvents(["message", "chan_message"], load, 250, { filter: (e) => matchesSpace(e as { space_id?: string }, space?.replace(/^chan:/, "")) })
-  return data
+  // Hide the previous scope immediately, before the new effect starts its request.
+  return { data: state.scope === scope ? state.data : undefined, error: state.scope === scope && state.error, loading: state.scope === scope ? state.loading : !!space, reload: load }
 }
 
 const kindLabel = (b: ConvBadge) => (b.dm ? tr("thread:conv.dm") : b.member_count ? tr("thread:conv.groupMembers", { count: b.member_count }) : tr("thread:conv.group"))

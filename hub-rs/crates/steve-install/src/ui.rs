@@ -3,11 +3,11 @@
 //! `TERM=dumb`, `STEVE_PLAIN=1`) the same calls print and read plain lines, so scripts and logs
 //! keep working. `NO_COLOR` keeps the frame and drops the colours.
 use anyhow::Result;
-use steve_i18n::t;
 use std::io::{self, IsTerminal, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
+use steve_i18n::t;
 
 /// The user left a prompt (Ctrl-C, Ctrl-D): already said on the terminal, exit code 130.
 #[derive(Debug)]
@@ -131,7 +131,11 @@ pub fn width(text: &str) -> usize {
 fn columns() -> usize {
     let mut size: libc::winsize = unsafe { std::mem::zeroed() };
     let ok = unsafe { libc::ioctl(1, libc::TIOCGWINSZ, &mut size) } == 0;
-    if ok && size.ws_col >= 20 { size.ws_col as usize } else { 80 }
+    if ok && size.ws_col >= 20 {
+        size.ws_col as usize
+    } else {
+        80
+    }
 }
 
 /// Unstyled `text` cut to `max` columns, with an ellipsis when something was cut.
@@ -162,7 +166,9 @@ fn wrap(text: &str, max: usize) -> Vec<String> {
         let mut used = 0;
         for c in paragraph.chars() {
             if used + char_width(c) > max {
-                let at = line.rfind(' ').filter(|at| c != ' ' && width(&line[*at..]) <= 24);
+                let at = line
+                    .rfind(' ')
+                    .filter(|at| c != ' ' && width(&line[*at..]) <= 24);
                 let rest = match at {
                     Some(at) => {
                         let rest = line[at + 1..].to_owned();
@@ -225,7 +231,8 @@ pub fn banner(tagline: &str) {
     }
     let mut text = String::from("\n");
     if columns() >= 48 {
-        const STOPS: [(f32, f32, f32); 3] = [(244., 114., 182.), (167., 139., 250.), (56., 189., 248.)];
+        const STOPS: [(f32, f32, f32); 3] =
+            [(244., 114., 182.), (167., 139., 250.), (56., 189., 248.)];
         const BANDS: [u8; 6] = [211, 177, 141, 105, 75, 45];
         let span = LOGO[0].chars().count() as f32 - 1.;
         for row in LOGO {
@@ -257,7 +264,10 @@ pub fn banner(tagline: &str) {
             text.push_str(if colours() { "\x1b[0m\n" } else { "\n" });
         }
     } else {
-        text.push_str(&format!("  {}\n", paint(Tone::Accent, &paint(Tone::Bold, "STEVE"))));
+        text.push_str(&format!(
+            "  {}\n",
+            paint(Tone::Accent, &paint(Tone::Bold, "STEVE"))
+        ));
     }
     text.push_str(&format!("  {}\n\n", paint(Tone::Dim, tagline)));
     out(&text);
@@ -334,7 +344,10 @@ fn mark(glyph: &str, tone: Tone, text: &str, detail: &str) {
     } else if detail.is_empty() {
         println!("{text}");
     } else {
-        println!("{}", t!("install.ui.text_with_detail", text = text, detail = detail));
+        println!(
+            "{}",
+            t!("install.ui.text_with_detail", text = text, detail = detail)
+        );
     }
 }
 
@@ -365,7 +378,11 @@ pub fn fail(text: &str) {
 pub fn heading(text: &str) {
     if decorated() {
         spaced();
-        out(&format!("{}  {}\n", paint(Tone::Green, "◇"), paint(Tone::Bold, text)));
+        out(&format!(
+            "{}  {}\n",
+            paint(Tone::Green, "◇"),
+            paint(Tone::Bold, text)
+        ));
     } else {
         println!("{text}");
     }
@@ -386,10 +403,15 @@ pub fn note(rows: &[(&str, String)]) {
     let mut block = String::new();
     if inner + 8 > columns() {
         for (label, value) in rows {
-            block.push_str(&format!("{}  {}  {value}\n", bar(), paint(Tone::Dim, &pad(label, labels))));
+            block.push_str(&format!(
+                "{}  {}  {value}\n",
+                bar(),
+                paint(Tone::Dim, &pad(label, labels))
+            ));
         }
     } else {
-        let edge = |l: &str, r: &str| paint(Tone::Accent, &format!("{l}{}{r}", "─".repeat(inner + 2)));
+        let edge =
+            |l: &str, r: &str| paint(Tone::Accent, &format!("{l}{}{r}", "─".repeat(inner + 2)));
         block.push_str(&format!("{}  {}\n", bar(), edge("╭", "╮")));
         for (label, value) in rows {
             block.push_str(&format!(
@@ -432,7 +454,10 @@ impl Spinner {
                         String::new()
                     };
                     let line = clip(&text, columns().saturating_sub(12));
-                    out(&format!("\r\x1b[K{}  {line}{elapsed}", paint(Tone::Accent, FRAMES[at % FRAMES.len()])));
+                    out(&format!(
+                        "\r\x1b[K{}  {line}{elapsed}",
+                        paint(Tone::Accent, FRAMES[at % FRAMES.len()])
+                    ));
                     at += 1;
                     std::thread::sleep(Duration::from_millis(80));
                 }
@@ -441,7 +466,11 @@ impl Spinner {
             println!("{text}…");
             None
         };
-        Spinner { stop, thread, started }
+        Spinner {
+            stop,
+            thread,
+            started,
+        }
     }
 
     fn clear(&mut self) {
@@ -516,7 +545,11 @@ pub struct Choice {
 
 impl Choice {
     pub fn new(key: &str, label: &str, hint: &str) -> Choice {
-        Choice { key: key.into(), label: label.into(), hint: hint.into() }
+        Choice {
+            key: key.into(),
+            label: label.into(),
+            hint: hint.into(),
+        }
     }
 }
 
@@ -562,7 +595,11 @@ impl Drop for Raw {
 
 fn byte(wait: Option<i32>) -> io::Result<Option<u8>> {
     if let Some(milliseconds) = wait {
-        let mut fd = libc::pollfd { fd: 0, events: libc::POLLIN, revents: 0 };
+        let mut fd = libc::pollfd {
+            fd: 0,
+            events: libc::POLLIN,
+            revents: 0,
+        };
         if unsafe { libc::poll(&mut fd, 1, milliseconds) } <= 0 {
             return Ok(None);
         }
@@ -643,7 +680,11 @@ fn cancelled(drawn: &mut usize, title: &str) -> anyhow::Error {
         drawn,
         &[
             format!("{}  {title}", paint(Tone::Red, "■")),
-            format!("{}  {}", paint(Tone::Dim, "└"), paint(Tone::Red, &t!("install.ui.cancelled"))),
+            format!(
+                "{}  {}",
+                paint(Tone::Dim, "└"),
+                paint(Tone::Red, &t!("install.ui.cancelled"))
+            ),
             String::new(),
         ],
     );
@@ -659,8 +700,17 @@ fn option_lines(choices: &[Choice], at: usize, glyph: impl Fn(usize) -> String) 
         .map(|(i, choice)| {
             let label = pad(&choice.label, labels);
             let hint = clip(&choice.hint, room.saturating_sub(labels + 2));
-            let label = if i == at { paint(Tone::Bold, &label) } else { paint(Tone::Dim, &label) };
-            format!("{}  {} {label}  {}", bar(), glyph(i), paint(Tone::Dim, &hint))
+            let label = if i == at {
+                paint(Tone::Bold, &label)
+            } else {
+                paint(Tone::Dim, &label)
+            };
+            format!(
+                "{}  {} {label}  {}",
+                bar(),
+                glyph(i),
+                paint(Tone::Dim, &hint)
+            )
         })
         .collect()
 }
@@ -671,16 +721,31 @@ pub fn select(title: &str, choices: &[Choice], initial: usize) -> Result<usize> 
     let raw = Raw::enter()?;
     let (mut at, mut drawn) = (initial.min(choices.len() - 1), 0);
     loop {
-        let mut lines = vec![format!("{}  {}", paint(Tone::Accent, "◆"), paint(Tone::Bold, title))];
+        let mut lines = vec![format!(
+            "{}  {}",
+            paint(Tone::Accent, "◆"),
+            paint(Tone::Bold, title)
+        )];
         lines.extend(option_lines(choices, at, |i| {
-            if i == at { paint(Tone::Accent, "●") } else { paint(Tone::Dim, "○") }
+            if i == at {
+                paint(Tone::Accent, "●")
+            } else {
+                paint(Tone::Dim, "○")
+            }
         }));
-        lines.push(format!("{}  {}", paint(Tone::Dim, "└"), paint(Tone::Dim, &t!("install.ui.select_hint"))));
+        lines.push(format!(
+            "{}  {}",
+            paint(Tone::Dim, "└"),
+            paint(Tone::Dim, &t!("install.ui.select_hint"))
+        ));
         redraw(&mut drawn, &lines);
         match key()? {
             Key::Up | Key::Left | Key::Char('k') => at = (at + choices.len() - 1) % choices.len(),
             Key::Down | Key::Right | Key::Char('j') => at = (at + 1) % choices.len(),
-            Key::Char(c) if c.is_ascii_digit() && (1..=choices.len()).contains(&(c as usize - '0' as usize)) => {
+            Key::Char(c)
+                if c.is_ascii_digit()
+                    && (1..=choices.len()).contains(&(c as usize - '0' as usize)) =>
+            {
                 at = c as usize - '1' as usize;
             }
             Key::Enter | Key::Space => break,
@@ -700,13 +765,27 @@ pub fn select(title: &str, choices: &[Choice], initial: usize) -> Result<usize> 
 pub fn multiselect(title: &str, choices: &[Choice], ticked: &[bool]) -> Result<Vec<bool>> {
     spaced();
     let raw = Raw::enter()?;
-    let mut on: Vec<bool> = (0..choices.len()).map(|i| ticked.get(i).copied().unwrap_or(true)).collect();
+    let mut on: Vec<bool> = (0..choices.len())
+        .map(|i| ticked.get(i).copied().unwrap_or(true))
+        .collect();
     let (mut at, mut drawn) = (0, 0);
     loop {
-        let mut lines = vec![format!("{}  {}", paint(Tone::Accent, "◆"), paint(Tone::Bold, title))];
+        let mut lines = vec![format!(
+            "{}  {}",
+            paint(Tone::Accent, "◆"),
+            paint(Tone::Bold, title)
+        )];
         lines.extend(option_lines(choices, at, |i| {
-            let pointer = if i == at { paint(Tone::Accent, "›") } else { " ".into() };
-            let tick = if on[i] { paint(Tone::Green, "■") } else { paint(Tone::Dim, "□") };
+            let pointer = if i == at {
+                paint(Tone::Accent, "›")
+            } else {
+                " ".into()
+            };
+            let tick = if on[i] {
+                paint(Tone::Green, "■")
+            } else {
+                paint(Tone::Dim, "□")
+            };
             format!("{pointer} {tick}")
         }));
         lines.push(format!(
@@ -732,8 +811,17 @@ pub fn multiselect(title: &str, choices: &[Choice], ticked: &[bool]) -> Result<V
         }
     }
     drop(raw);
-    let chosen: Vec<&str> = choices.iter().zip(&on).filter(|(_, on)| **on).map(|(c, _)| c.label.as_str()).collect();
-    let answer = if chosen.is_empty() { t!("install.ui.multiselect_none") } else { chosen.join(&t!("install.ui.list_separator")) };
+    let chosen: Vec<&str> = choices
+        .iter()
+        .zip(&on)
+        .filter(|(_, on)| **on)
+        .map(|(c, _)| c.label.as_str())
+        .collect();
+    let answer = if chosen.is_empty() {
+        t!("install.ui.multiselect_none")
+    } else {
+        chosen.join(&t!("install.ui.list_separator"))
+    };
     answered(&mut drawn, title, &answer);
     Ok(on)
 }
@@ -755,12 +843,27 @@ pub fn confirm(title: &str, initial: bool) -> Result<bool> {
             &mut drawn,
             &[
                 format!("{}  {}", paint(Tone::Accent, "◆"), paint(Tone::Bold, title)),
-                format!("{}  {}  {}  {}", bar(), option(yes, &t!("install.ui.yes")), paint(Tone::Dim, "/"), option(!yes, &t!("install.ui.no"))),
-                format!("{}  {}", paint(Tone::Dim, "└"), paint(Tone::Dim, &t!("install.ui.confirm_hint"))),
+                format!(
+                    "{}  {}  {}  {}",
+                    bar(),
+                    option(yes, &t!("install.ui.yes")),
+                    paint(Tone::Dim, "/"),
+                    option(!yes, &t!("install.ui.no"))
+                ),
+                format!(
+                    "{}  {}",
+                    paint(Tone::Dim, "└"),
+                    paint(Tone::Dim, &t!("install.ui.confirm_hint"))
+                ),
             ],
         );
         match key()? {
-            Key::Up | Key::Down | Key::Left | Key::Right | Key::Space | Key::Char('h' | 'l' | 'j' | 'k') => yes = !yes,
+            Key::Up
+            | Key::Down
+            | Key::Left
+            | Key::Right
+            | Key::Space
+            | Key::Char('h' | 'l' | 'j' | 'k') => yes = !yes,
             Key::Char('y' | 'Y') => {
                 yes = true;
                 break;
@@ -778,7 +881,15 @@ pub fn confirm(title: &str, initial: bool) -> Result<bool> {
         }
     }
     drop(raw);
-    answered(&mut drawn, title, &if yes { t!("install.ui.yes") } else { t!("install.ui.no") });
+    answered(
+        &mut drawn,
+        title,
+        &if yes {
+            t!("install.ui.yes")
+        } else {
+            t!("install.ui.no")
+        },
+    );
     Ok(yes)
 }
 
@@ -786,7 +897,9 @@ pub fn confirm(title: &str, initial: bool) -> Result<bool> {
 /// answer takes `default`. The end of input cancels.
 pub fn input(title: &str, default: Option<&str>) -> Result<String> {
     spaced();
-    let hint = default.map(|d| paint(Tone::Dim, &t!("install.ui.input_default", default = d))).unwrap_or_default();
+    let hint = default
+        .map(|d| paint(Tone::Dim, &t!("install.ui.input_default", default = d)))
+        .unwrap_or_default();
     out(&format!(
         "{}  {}{hint}\n{}  {} ",
         paint(Tone::Accent, "◆"),
@@ -801,10 +914,18 @@ pub fn input(title: &str, default: Option<&str>) -> Result<String> {
         return Err(cancelled(&mut drawn, title));
     }
     let typed = line.trim();
-    let answer = if typed.is_empty() { default.unwrap_or("") } else { typed };
+    let answer = if typed.is_empty() {
+        default.unwrap_or("")
+    } else {
+        typed
+    };
     let mut drawn = 2;
     let empty = t!("install.ui.input_empty");
-    answered(&mut drawn, title, if answer.is_empty() { &empty } else { answer });
+    answered(
+        &mut drawn,
+        title,
+        if answer.is_empty() { &empty } else { answer },
+    );
     Ok(answer.to_owned())
 }
 
@@ -826,9 +947,15 @@ pub fn summary(text: &str) -> String {
     let mut styled = String::from("\n");
     for (at, line) in text.lines().enumerate() {
         if at == 0 {
-            styled.push_str(&format!("  {}\n", paint(Tone::Accent, &paint(Tone::Bold, line))));
+            styled.push_str(&format!(
+                "  {}\n",
+                paint(Tone::Accent, &paint(Tone::Bold, line))
+            ));
         } else if let Some((label, value)) = line.split_once(separator.as_str()) {
-            styled.push_str(&format!("  {}  {value}\n", paint(Tone::Dim, &pad(label, labels))));
+            styled.push_str(&format!(
+                "  {}  {value}\n",
+                paint(Tone::Dim, &pad(label, labels))
+            ));
         } else if line.is_empty() {
             styled.push('\n');
         } else {
@@ -869,11 +996,21 @@ mod tests {
     fn wrap_breaks_at_spaces_and_between_chinese_characters() {
         let lines = wrap("the quick brown fox jumps over the lazy dog", 16);
         assert!(lines.iter().all(|l| width(l) <= 16), "{lines:?}");
-        assert_eq!(lines.join(" "), "the quick brown fox jumps over the lazy dog");
+        assert_eq!(
+            lines.join(" "),
+            "the quick brown fox jumps over the lazy dog"
+        );
         let text = "这个监听地址推不出网页地址：填你在浏览器里打开用的地址。";
         let lines = wrap(text, 20);
-        assert!(lines.len() > 1 && lines.iter().all(|l| width(l) <= 20), "{lines:?}");
-        assert_eq!(lines.concat(), text, "nothing is lost where there is no space to break at");
+        assert!(
+            lines.len() > 1 && lines.iter().all(|l| width(l) <= 20),
+            "{lines:?}"
+        );
+        assert_eq!(
+            lines.concat(),
+            text,
+            "nothing is lost where there is no space to break at"
+        );
         assert_eq!(wrap("one\ntwo", 40), ["one", "two"]);
         assert_eq!(wrap("", 40), Vec::<String>::new());
         // a width too small to be a terminal is treated as ten columns

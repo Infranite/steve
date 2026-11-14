@@ -589,7 +589,8 @@ impl Tx<'_> {
     /// is compared with what it landed. `false`: nothing to freeze, or not the same result.
     pub(crate) fn lc_refreeze(&mut self, item_id: &str) -> Result<bool> {
         let i = self.item(item_id)?;
-        let Some(mut c) = closing_of(&i).filter(|c| i.phase == CLOSING && c.kind == COMPLETE) else {
+        let Some(mut c) = closing_of(&i).filter(|c| i.phase == CLOSING && c.kind == COMPLETE)
+        else {
             return Ok(false);
         };
         let now = if self.git_on_node(item_id) {
@@ -1103,18 +1104,19 @@ impl Tx<'_> {
         if !effects.is_empty() && c.kind != COMPLETE {
             reason = format!("{reason}；已发生：{}", effects.join("；"));
         }
-        let now_text = match c.kind.as_str() {
+        // stored in zh-CN, shown in the reader's language (crate::now_line)
+        let now_text = steve_i18n::stored(|| match c.kind.as_str() {
             COMPLETE => match c.policy.as_str() {
-                "waived" => "已完成（免确认）".to_string(),
+                "waived" => steve_i18n::t!("core.now.closed_waived"),
                 // a module's result (a mail that went out) says what happened
                 "automatic" if c.by == "steve" => c.reason.clone(),
-                "automatic" => "已自动验收".to_string(),
+                "automatic" => steve_i18n::t!("core.now.closed_auto"),
                 _ if c.reason == crate::proof::MARKED => c.reason.clone(),
-                _ => "已验收".to_string(),
+                _ => steve_i18n::t!("core.now.closed_accepted"),
             },
-            FAIL => format!("失败：{}", c.reason),
+            FAIL => steve_i18n::t!("core.now.closed_failed", why = c.reason),
             _ => c.reason.clone(),
-        };
+        });
         let closed = crate::util::now();
         let mut w = Self::base(i);
         w.phase = CLOSED.into();

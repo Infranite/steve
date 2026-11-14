@@ -430,6 +430,26 @@ fn sender_items(c: &Connection, ws: &str, party: &str) -> ChannelResult<Vec<Stri
     Ok(rows)
 }
 
+/// Draft-as-you uses the verified account's linked user, never the workspace owner or the
+/// connection creator. The existing profile resolver owns address scope and external fallback.
+fn own_name(c: &Connection, ws: &str, conn: &str, space: &str) -> ChannelResult<String> {
+    let user: String = c
+        .query_row(
+            "SELECT p.user_id FROM connections c
+               JOIN accounts a ON a.id = c.account_id AND a.workspace_id = c.workspace_id
+               JOIN parties p ON p.id = a.party_id AND p.workspace_id = c.workspace_id
+               JOIN workspace_members m ON m.workspace_id = c.workspace_id AND m.user_id = p.user_id
+              WHERE c.id = ?1 AND c.workspace_id = ?2 AND a.verified = 1
+                AND a.status = 'active' AND p.status <> 'deleted'",
+            params![conn, ws],
+            |r| r.get(0),
+        )
+        .optional()?
+        .ok_or_else(|| ApiError::not_found("已验证的个人账号用户"))?;
+    steve_modules::contacts::profile::address(c, ws, &user, true, None, Some(space))?
+        .ok_or_else(|| ApiError::not_found("个人资料"))
+}
+
 /// Gathers the layers for answering `plan`'s message.
 pub fn gather(
     c: &Connection,
@@ -441,7 +461,15 @@ pub fn gather(
     let ws = &plan.ws;
     let space = spaces::get(c, &plan.space_id)?.ok_or_else(|| ApiError::not_found("空间"))?;
     let set = spaces::settings(c, &space.id)?;
-    let owner = personas::owner_name(c, ws)?;
+    let owner = match plan.mode {
+        Mode::Own => own_name(c, ws, &plan.connection_id, &plan.space_id)?,
+        Mode::Bot => personas::owner_name_in(c, ws, None, Some(&plan.space_id))?,
+    };
+    let internal_name = if crate::conversations::owner_only(c, ws, &space, &plan.connection_id)? {
+        Some(personas::owner_internal_name(c, ws, &plan.connection_id)?)
+    } else {
+        None
+    };
     let viewer = viewer(c, ws, &plan.connection_id, &space.id)?;
 
     // 2–3: the persona and the Bot behind it
@@ -458,7 +486,10 @@ pub fn gather(
                 None => bindings::effective(c, &space)?.map(|e| e.persona),
             };
             match p {
-                Some(p) => (persona_layer(&p, &owner), Some(p.bot_id)),
+                Some(p) => {
+                    let owner = personas::owner_name_in(c, ws, Some(&p.id), Some(&plan.space_id))?;
+                    (persona_layer(&p, &owner), Some(p.bot_id))
+                }
                 None => (String::new(), None),
             }
         }
@@ -492,6 +523,11 @@ pub fn gather(
         anchors.push(format!(
             "发送人：{}（Steve 对这个人还不了解）",
             or_name(&plan.sender_name)
+        ));
+    }
+    if let Some(name) = internal_name {
+        anchors.push(format!(
+            "这里只与用户本人对话，称呼对方为：{name}。向别人介绍用户时仍用对外称呼。"
         ));
     }
     let summary = mems::about(

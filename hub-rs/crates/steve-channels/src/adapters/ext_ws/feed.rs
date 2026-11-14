@@ -460,6 +460,12 @@ impl Feed<'_> {
                     Ok(g) => gaps.push(g),
                     Err(e) => tracing::warn!(conn = self.conn(), "ext_ws: gap dropped: {e}"),
                 },
+                Some("participants") => {
+                    self.participants(it).await;
+                }
+                Some("event") => {
+                    self.connector_event(it).await?;
+                }
                 Some("chat") => {
                     if let (Ok(c), Some(ch)) = (
                         wire::id(it, "chat_id"),
@@ -603,6 +609,21 @@ impl Feed<'_> {
     /// One message through the pipeline (its dedupe drops what is already stored). A message the
     /// pipeline refuses is dropped and logged; a store failure ends the session, unacked.
     async fn deliver(&mut self, mut msg: InboundMessage) -> Step {
+        if self.s.hello().connector.is_some() {
+            for a in &mut msg.attachments {
+                if let Some(key) = a["key"].as_str() {
+                    a["reference_id"] = crate::connector::reference_id(
+                        self.conn(),
+                        &msg.space_ext_id,
+                        msg.source_id.as_deref().unwrap_or(&msg.external_id),
+                        key,
+                    )
+                    .into();
+                }
+            }
+            // Rich bodies are represented by text + checked metadata/references, not opaque blobs.
+            msg.raw = json!({"connector": true});
+        }
         if msg.space_name.is_none() && !self.seen_chats.contains(&msg.space_ext_id) {
             self.seen_chats.insert(msg.space_ext_id.clone());
             if self.unknown_chat(&msg.space_ext_id)
@@ -641,6 +662,117 @@ impl Feed<'_> {
             .reader(|c| crate::spaces::find(c, ws, conn, chat))
             .map(|s| s.is_none())
             .unwrap_or(false)
+    }
+
+    /// Participant IDs and aliases use the same identity normalization as message senders.
+    async fn participants(&self, item: &Value) {
+        if self.s.hello().connector.is_none() {
+            return;
+        }
+        let (Ok(chat), Some(members)) = (
+            wire::id(item, "conversation_id"),
+            item["members"].as_array().filter(|m| m.len() <= 256),
+        ) else {
+            return;
+        };
+        let members = members
+            .iter()
+            .filter_map(|v| {
+                let wire = wire::WireSender::parse(v).ok()?;
+                let sender = provider::sender(&wire, &self.realm, &self.known);
+                Some(crate::channel::MemberInfo {
+                    handle: sender.handle,
+                    aliases: sender.aliases,
+                    name: sender.display_name.unwrap_or_default(),
+                    role: if sender.is_bot {
+                        "bot".into()
+                    } else {
+                        v["role"]
+                            .as_str()
+                            .filter(|r| matches!(*r, "owner" | "admin" | "member"))
+                            .unwrap_or("member")
+                            .into()
+                    },
+                    external: sender.external,
+                })
+            })
+            .collect::<Vec<_>>();
+        let event = if item["change"] == "removed" {
+            SpaceEvent::MembersRemoved {
+                space_ext_id: chat,
+                has_external: None,
+                members: members.into_iter().map(|m| m.handle).collect(),
+            }
+        } else {
+            SpaceEvent::MembersAdded {
+                space_ext_id: chat,
+                has_external: None,
+                members,
+            }
+        };
+        if let Err(e) = self.run.inbound.space_event(event).await {
+            tracing::warn!(
+                conn = self.conn(),
+                "connector participants not applied: {e}"
+            );
+        }
+    }
+
+    /// The remote describes platform objects, never Hub IDs or visibility. EventSink binds
+    /// privacy to this connection's owner and persists the stable event ID before we ack.
+    async fn connector_event(&self, item: &Value) -> Step {
+        let Some(manifest) = &self.s.hello().connector else {
+            return Ok(());
+        };
+        let Some(kind) = item["event_type"]
+            .as_str()
+            .filter(|k| manifest.events.iter().any(|e| e == k))
+        else {
+            return Ok(());
+        };
+        let (Ok(id), Ok(occurred)) = (
+            wire::id(item, "event_id"),
+            wire::time(item, "occurred_ms", self.now()),
+        ) else {
+            tracing::warn!(
+                conn = self.conn(),
+                "connector event has invalid identity/time"
+            );
+            return Ok(());
+        };
+        let summary = item["summary"]
+            .as_str()
+            .unwrap_or(kind)
+            .chars()
+            .take(1000)
+            .collect::<String>();
+        let mut event = steve_flow::RawEvent::new(
+            "connector",
+            kind,
+            format!("event:{}", wire::idempotency_key(&id)),
+            occurred,
+            &summary,
+        );
+        event.thread_key = wire::opt_id(item, "topic_id").ok().flatten();
+        event.scope_ext_id = wire::opt_id(item, "conversation_id").ok().flatten();
+        // Only checked reference metadata accompanies events. No eager remote object/download.
+        event.payload = json!({"connector": manifest.id, "event_id": id,
+            "conversation_id": event.scope_ext_id, "topic_id": event.thread_key});
+        if occurred < self.watermark {
+            event.record_only = Some("before connector watermark".into());
+        }
+        match self.run.inbound.connector_event(event).await {
+            Ok(_) => Ok(()),
+            Err(ApiError::Internal(e)) => {
+                self.s.close(1011, "event not stored");
+                Err(End::Lost(format!("event not stored: {e}")))
+            }
+            Err(_) if self.run.inbound.is_stopped() => Err(End::Stopped),
+            Err(e) => {
+                tracing::warn!(conn = self.conn(), "connector event dropped: {e}");
+                Ok(())
+            }
+        }
     }
 
     /// `chats.get`, best effort.
@@ -710,6 +842,16 @@ impl Feed<'_> {
     /// Reads `[from, to)` of the listed chats (`None`: every chat of the connection) back as
     /// backfill, at most 10 pages of 50 per chat (§5.5); what could not be read is noted.
     async fn repair(&mut self, chats: Option<Vec<String>>, from: i64, to: i64) -> Step {
+        // Connector history is pull-only. A gap is observable, not permission to import history.
+        if self.s.hello().connector.is_some() {
+            tracing::warn!(
+                conn = self.conn(),
+                from,
+                to,
+                "connector gap: history not backfilled"
+            );
+            return Ok(());
+        }
         if from >= to {
             return Ok(());
         }

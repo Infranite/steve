@@ -10,7 +10,7 @@ import { Input } from "@/components/ui/input"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { modReq } from "@/api"
 import { runtimeName } from "@/store"
-import { t, useT } from "@/i18n"
+import { lang, t, useT } from "@/i18n"
 import { HarnessMark, ModelMark, modelKind } from "@/components/harness-mark"
 
 export type Used = { calls: number; ok_at: number | null; failed_at: number | null }
@@ -21,23 +21,26 @@ export type Catalog = { harness: string; name: string; source: string; default: 
 export const harnessName = (h: string) => runtimeName(h) ?? h
 
 const cache = new Map<string, Promise<Catalog>>()
-/** the harness's model list, fetched once per page load (`fresh` asks the Hub to read it again) */
+/** the harness's model list, fetched once per page load and UI language (`fresh` asks the Hub to read it again) */
 export function loadCatalog(harness: string, fresh = false): Promise<Catalog> {
-  if (fresh || !cache.has(harness)) {
+  const key = `${lang()}:${harness}`
+  if (fresh || !cache.has(key)) {
     const p = modReq<Catalog>("GET", `/system/models?harness=${encodeURIComponent(harness)}${fresh ? "&fresh=1" : ""}`)
-    p.catch(() => cache.delete(harness))
-    cache.set(harness, p)
+    p.catch(() => cache.delete(key))
+    cache.set(key, p)
   }
-  return cache.get(harness)!
+  return cache.get(key)!
 }
 export function useCatalog(harness: string | null | undefined): Catalog | null {
+  useT()
+  const l = lang()
   const [c, setC] = useState<Catalog | null>(null)
   useEffect(() => {
     let on = true
     setC(null)
     if (harness) loadCatalog(harness).then((x) => on && setC(x), () => on && setC({ harness, name: harnessName(harness), source: t("shell:model.unreadable"), default: null, families: [], models: [] }))
     return () => { on = false }
-  }, [harness])
+  }, [harness, l])
   return c
 }
 
@@ -72,7 +75,8 @@ export function ModelPicker({ harness, value, onChange, allowDefault, defaultLab
   const defLabel = defaultLabel ?? (cat?.default ? t("shell:model.defaultIs", { model: cat.default }) : t("shell:model.defaultOwn", { harness: harnessName(harness) }))
   const pick = (m: string) => { onChange(m); setOpen(false); setOther(false); setQ("") }
   const models = (cat?.models ?? []).filter((m) => !exclude.includes(m.id))
-  const fams = (cat?.families ?? []).filter((f) => models.some((m) => m.family === f))
+  const knownFams = cat?.families ?? []
+  const fams = [...knownFams, ...new Set(models.map((m) => m.family).filter((f) => !knownFams.includes(f)))].filter((f) => models.some((m) => m.family === f))
   const shown = value ? (cur?.label && cur.label !== value ? `${cur.label} · ${value}` : value) : allowDefault ? defLabel : placeholder ?? t("shell:model.choose")
   /* the maker's mark of the chosen model; the harness's for its default or a model of a maker Steve does not know */
   const markOf = (m: string) => (m && modelKind(m) !== "other" ? <ModelMark model={m} /> : <HarnessMark harness={harness} />)
@@ -111,6 +115,7 @@ export function ModelPicker({ harness, value, onChange, allowDefault, defaultLab
             <CommandList className="max-h-[min(360px,55vh)]">
               <CommandEmpty>{!cat ? t("shell:model.loading") : models.length || q ? t("shell:model.noMatch") : t("shell:model.none", { harness: harnessName(harness) })}</CommandEmpty>
               {allowDefault && !q && <CommandGroup><CommandItem value="__default" data-checked={!value} onSelect={() => pick("")} data-model-opt="">{markOf(cat?.default ?? "")}<span className="min-w-0 truncate">{defLabel}</span></CommandItem></CommandGroup>}
+              {cat && cat.models.length === 0 && !q && allowDefault && <div className="px-3 py-2 type-footnote text-muted-foreground" data-model-empty-hint>{t("shell:model.none", { harness: harnessName(harness) })}</div>}
               {fams.map((f) => (
                 <CommandGroup key={f} heading={f}>
                   {models.filter((m) => m.family === f).map((m) => (

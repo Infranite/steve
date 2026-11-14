@@ -10,6 +10,28 @@ try {
   for (const width of [1440, 390]) for (const theme of ["light", "dark"]) {
     const page = await browser.newPage({ locale: "zh-CN", viewport: { width, height: width === 390 ? 844 : 1000 }, reducedMotion: "reduce", colorScheme: theme })
     page.on("pageerror", e => errors.push(e.message))
+    // A short conversation cannot scroll: wheel/keyboard intent alone must not create unread messages.
+    await page.goto(base + "/test/fixtures/chat-layout.html?empty")
+    const shortScroll = page.locator("[data-chat-scroll]")
+    await shortScroll.waitFor()
+    await page.evaluate(() => window.dispatchEvent(new Event("fixture-reply")))
+    await page.locator('[data-msg="reply-1"]').waitFor()
+    assert.equal(await shortScroll.evaluate(el => el.scrollHeight <= el.clientHeight), true)
+    await page.mouse.move(width / 2, 300)
+    await page.mouse.wheel(0, -400)
+    await shortScroll.focus()
+    await page.keyboard.press("Home")
+    await shortScroll.evaluate(el => {
+      const point = (clientY) => new Touch({ identifier: 1, target: el, clientY })
+      el.dispatchEvent(new TouchEvent("touchstart", { touches: [point(100)] }))
+      el.dispatchEvent(new TouchEvent("touchmove", { touches: [point(200)] }))
+    })
+    await page.evaluate(() => window.dispatchEvent(new Event("fixture-reply")))
+    await page.locator('[data-msg="reply-2"]').waitFor()
+    await page.waitForTimeout(150)
+    assert.equal(await shortScroll.evaluate(el => el.scrollHeight <= el.clientHeight), true)
+    assert.equal(await page.locator("[data-new-messages]").count(), 0, "visible replies are not new-message jumps")
+    if (shots) await page.screenshot({ path: `${shots}/chat-no-scroll-${width}-${theme}.png`, animations: "disabled" })
     await page.goto(base + "/test/fixtures/chat-layout.html")
     await page.locator('[data-msg="answer"]').waitFor()
     await page.waitForTimeout(400)
@@ -96,11 +118,25 @@ try {
     await page.waitForTimeout(200)
     assert.ok(await atBottom())
     assert.equal(await newMsg.count(), 0)
+    // If resizing makes the unseen reply visible, there is no longer anything to jump to.
+    await page.mouse.move(width / 2, 300)
+    await page.mouse.wheel(0, -500)
+    await page.waitForTimeout(200)
+    await page.evaluate(() => window.dispatchEvent(new Event("fixture-reply")))
+    await page.locator('[data-msg="reply-3"]').waitFor()
+    await newMsg.waitFor()
+    await page.setViewportSize({ width, height: 5000 })
+    await page.waitForFunction(() => !document.querySelector("[data-new-messages]"))
+    assert.ok(await atBottom())
+    await page.setViewportSize({ width, height: width === 390 ? 844 : 1000 })
     // A sideways swipe never scrolls the conversation or the rail, even when something in them is a little too wide.
     await page.goto(base + "/test/fixtures/chat-layout.html?rich")
     await page.locator('[data-item-card="ST-47"]').waitFor()
     await page.waitForTimeout(400)
     if (shots) await page.screenshot({ path: `${shots}/chat-rich-${width}-${theme}.png`, animations: "disabled" })
+    // Steve's name heads a run of his messages once; a quote of the message right above is left out.
+    assert.equal(await page.locator('[data-msg="offer"] [data-chat-author]').count(), 1)
+    assert.equal(await page.locator('[data-msg="upd"] [data-chat-author]').count(), 0)
     assert.ok(await page.locator("[data-notice-line]").evaluate(el => el.scrollWidth <= el.clientWidth), "a long link in a notice wraps")
     for (const sel of ["[data-chat-scroll]", ...(width === 1440 ? ['[data-rail="aside"]'] : [])]) {
       const pane = page.locator(sel)
@@ -113,7 +149,7 @@ try {
     if (width === 390) {
       await page.locator("[data-rail-toggle]").click()
       await page.locator('[data-rail="sheet"]').waitFor()
-      assert.ok(await page.getByRole("heading", { name: "通知和摘要" }).count())
+      assert.ok(await page.getByRole("heading", { name: "事项和通知" }).count())
       await page.keyboard.press("Escape")
     } else {
       await page.locator("[data-rail-toggle]").click()
@@ -128,5 +164,5 @@ try {
     await page.close()
   }
   assert.deepEqual(errors, [])
-  console.log(JSON.stringify({ passed: true, scenarios: ["1440/390px × light/dark", "keyboard actions", "steps disclosure", "draft reload", "slash menu", "steady header", "long Markdown overflow", "follow new messages at the bottom", "no sideways scroll", "rail/sheet", "thinking and stop", "empty conversation"] }))
+  console.log(JSON.stringify({ passed: true, scenarios: ["1440/390px × light/dark", "keyboard actions", "steps disclosure", "draft reload", "slash menu", "steady header", "long Markdown overflow", "follow new messages at the bottom", "no sideways scroll", "rail/sheet", "thinking and stop", "empty conversation", "one name per run of replies"] }))
 } finally { await browser.close() }

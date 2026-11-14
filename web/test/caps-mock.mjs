@@ -39,7 +39,9 @@ export function capsHub(lib) {
     const body = () => route.request().postDataJSON()
     if (p === '/api/capabilities/steve') return json(200, steveServer())
     if (p === '/api/access/tokens' && method === 'POST') { const b = body(); calls.push(['TOKEN', b]); return json(200, { token: 'stt_test_once', item: { id: 'tok_1', name: b.name } }) }
-    let m = /^\/api\/bots\/([^/]+)\/capabilities$/.exec(p)
+    let m = /^\/api\/bots\/([^/]+)\/tools$/.exec(p)
+    if (m && method === 'GET') return json(200, { core: ['steve_update', 'steve_ask', 'steve_request_approval', 'steve_deliver', 'steve_items_search', 'steve_knowledge_search', 'steve_tools_search', 'steve_tool_call'], pins: [], usage: [], days: 30 })
+    m = /^\/api\/bots\/([^/]+)\/capabilities$/.exec(p)
     if (m) return json(200, { mcp: forBot('mcp', m[1]), skills: forBot('skill', m[1]), a2a: forBot('a2a', m[1]) })
     m = /^\/api\/bots\/([^/]+)\/capabilities\/(mcp|skill|a2a)\/([^/]+)$/.exec(p)
     if (m && method === 'PUT') { const b = body(); calls.push(['PUT', m[1], m[2], m[3], b]); assign(m[2], m[1], m[3], b.enabled !== false); return json(200, { ok: true }) }

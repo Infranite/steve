@@ -42,7 +42,7 @@ pub enum Mode {
     Item,
     /// Item that starts with a proposal.
     Propose,
-    /// Steve posts a report in the main thread.
+    /// Steve publishes a report to the workspace Feed.
     Report,
 }
 
@@ -82,7 +82,7 @@ impl Mode {
             Mode::ItemAuto => "建事项，自动验收",
             Mode::Item => "建事项",
             Mode::Propose => "先给方案",
-            Mode::Report => "在对话里汇报",
+            Mode::Report => "发布到信息流，工作空间成员可见",
         }
     }
 }
@@ -90,6 +90,9 @@ impl Mode {
 /// `flows.schedule`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Spec {
+    /// Explicit personal execution; absent on existing schedules means workspace service access.
+    #[serde(default)]
+    pub requester: Option<String>,
     /// The phrase as first said (“每周五 09:00”); the UI shows `describe(cron)`.
     pub when: String,
     pub cron: String,
@@ -125,7 +128,9 @@ impl Spec {
     /// The generated graph: `trigger(time) → action`.
     pub fn graph(&self) -> Value {
         let action = match self.mode {
-            Mode::Report => json!({ "action": "report", "what": self.what, "bot": self.bot }),
+            Mode::Report => {
+                json!({ "action": "report", "what": self.what, "bot": self.bot, "destination": "workspace_feed" })
+            }
             m => json!({
                 "action": "item.create",
                 "mode": if m == Mode::Propose { "propose" } else { "start" },
@@ -134,6 +139,7 @@ impl Spec {
                 "project": self.project_id,
                 "tags": self.tags,
                 "goal": self.what,
+                "requester": self.requester,
             }),
         };
         json!({
@@ -252,6 +258,19 @@ pub fn bot_of(c: &Connection, ws: &str, id: &str) -> FlowResult<Option<(String, 
 
 /// The ownership checks: `bot`, `project_id` and `tags` belong to the workspace.
 pub fn check_refs(c: &Connection, ws: &str, s: &Spec) -> FlowResult<()> {
+    if s.requester.is_some() && s.mode == Mode::Report {
+        return Err(ApiError::invalid("requester"));
+    }
+    if let Some(user) = &s.requester {
+        let member: bool = c.query_row(
+            "SELECT EXISTS(SELECT 1 FROM workspace_members WHERE workspace_id = ? AND user_id = ?)",
+            params![ws, user],
+            |r| r.get(0),
+        )?;
+        if !member {
+            return Err(ApiError::invalid("requester"));
+        }
+    }
     if bot_of(c, ws, &s.bot)?.is_none() {
         return Err(ApiError::not_found("Bot"));
     }
@@ -321,6 +340,11 @@ pub fn insert(
         spec,
         enabled,
     } = *f;
+    if spec.requester.as_deref().is_some_and(|u| u != actor) {
+        return Err(ApiError::Forbidden(
+            "Only the requester can authorize personal schedule execution".into(),
+        ));
+    }
     let id = uid("flw");
     let graph = spec.graph().to_string();
     tx.execute(
@@ -346,6 +370,53 @@ pub fn insert(
 /// Writes a changed schedule. A changed graph is a new version; a changed time, time zone, or
 /// re-enabling recomputes `next_at` from `now` (time spent disabled is never “missed”).
 pub fn update(
+    tx: &Tx,
+    old: &Schedule,
+    f: &Fields,
+    author: &str,
+    note: &str,
+    now: i64,
+) -> FlowResult<()> {
+    let spec = f.spec;
+    if old.spec.requester.as_deref().is_some_and(|u| u != author)
+        || spec.requester.as_deref().is_some_and(|u| u != author)
+    {
+        return Err(ApiError::Forbidden(
+            "Only the requester can edit a personal schedule".into(),
+        ));
+    }
+    write_update(tx, old, f, author, note, now)
+}
+
+/// Deleting a Bot cannot transfer its personal authorization to a different Bot. Service
+/// schedules keep their existing handoff; personal schedules are disabled and authorization
+/// revoked. Only this narrow system transition bypasses the requester's edit check.
+pub(crate) fn reassign_deleted_bot(
+    tx: &Tx,
+    old: &Schedule,
+    heir: &str,
+    author: &str,
+    note: &str,
+    now: i64,
+) -> FlowResult<()> {
+    let mut spec = old.spec.clone();
+    spec.bot = heir.into();
+    let personal = spec.requester.take().is_some();
+    write_update(
+        tx,
+        old,
+        &Fields {
+            name: &old.name,
+            spec: &spec,
+            enabled: old.enabled && !personal,
+        },
+        author,
+        note,
+        now,
+    )
+}
+
+fn write_update(
     tx: &Tx,
     old: &Schedule,
     f: &Fields,
@@ -417,6 +488,7 @@ pub struct Last {
 /// The `Schedule` shape of the API.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ScheduleView {
+    pub requester: Option<String>,
     pub id: String,
     pub name: String,
     pub when: String,
@@ -453,6 +525,7 @@ pub fn view(c: &Connection, s: &Schedule) -> FlowResult<ScheduleView> {
         .map(|e| e.describe())
         .unwrap_or_else(|_| steve_i18n::t!("flow.cron.raw", cron = s.spec.cron));
     Ok(ScheduleView {
+        requester: s.spec.requester.clone(),
         id: s.id.clone(),
         name: s.name.clone(),
         when: s.spec.when.clone(),

@@ -50,7 +50,7 @@ impl steve_flow::Core for FlowCore {
                     opening: None,
                     files: vec![],
                     actor: Some("steve".into()),
-                    requester: None,
+                    requester: req.requester,
                 })
                 .map_err(|e| e.to_string())?;
             if req.accept_auto {
@@ -160,9 +160,10 @@ pub struct Built {
     pub recall: Arc<dyn steve_core::yolo::undo::Recall>,
     /// What runs for each connection of an adapter with a hook (started by one of `jobs`).
     pub lifecycle: Option<steve_channels::lifecycle::ConnectionRuntime>,
-    /// 能力, the capabilities library: the MCP secrets a session's Node takes
-    /// ([`super::bot_mcp`]) and the remote agents' tools ([`super::mcp_extra`]).
+    /// 能力, the capabilities library: the remote agents' tools ([`super::mcp_extra`]).
     pub caps: steve_modules::caps::Capabilities,
+    /// The Hub's connections to the library's MCP servers ([`super::tool_registry`]).
+    pub library: Arc<super::library_mcp::LibraryMcp>,
 }
 
 /// The objects the event producers call, exactly as wired: G2's sink, E1's events, C1's inbound.
@@ -319,6 +320,20 @@ pub fn build(env: Env<'_>) -> Result<Built, BackendError> {
     let keys = steve_modules::vault::keystore::from_env(steve_home, |k| vars(k))
         .map_err(|e| BackendError::msg(format!("vault keystore: {e}")))?;
     let vault = steve_modules::vault::Vault::new(store.clone(), keys);
+    // 能力: MCP servers, skills and remote agents, defined once and assigned per Bot; the
+    // secrets in the vault. The Hub is the MCP client of the library's servers (their stdio ones
+    // start in the sandbox a Node's runs get), and a session's brief says what its tools cover.
+    let caps = steve_modules::caps::Capabilities::new(vault.clone());
+    let library = super::library_mcp::LibraryMcp::new(
+        caps.clone(),
+        Some(steve_node::Sandbox::open(
+            steve_home,
+            &data_dir.join("node"),
+        )),
+    );
+    registry.prompt_context(Box::new(super::tool_service::CatalogContext {
+        library: library.clone(),
+    }));
     // what an interrupted rotation of an earlier Hub left `retiring` is finished once, off the start
     {
         let v = vault.clone();
@@ -561,6 +576,9 @@ pub fn build(env: Env<'_>) -> Result<Built, BackendError> {
         channels = channels.media(m.clone());
     }
     // how an agent reads each adapter's conversations on demand (`steve_im_read`)
+    for c in &declared.connectors {
+        channels = channels.connector(c.clone());
+    }
     for h in &declared.history {
         channels = channels.history(h.clone());
     }
@@ -602,6 +620,9 @@ pub fn build(env: Env<'_>) -> Result<Built, BackendError> {
     let routes = Router::new()
         .merge(crate::plugins::api::routes(plugins.clone(), conns.clone()))
         .merge(steve_knowledge::routes(kb.clone()))
+        .merge(steve_digest::routes())
+        .merge(crate::api::feed::routes())
+        .merge(super::digest_bot::routes(flow.clone()))
         .merge(steve_modules::contacts::routes(ports))
         .merge(steve_modules::accounts::routes())
         .merge(steve_flow::routes(flow.clone()))
@@ -631,9 +652,6 @@ pub fn build(env: Env<'_>) -> Result<Built, BackendError> {
         }
         (rt.build(), bus.tap(&["connection"]))
     });
-    // 能力: MCP servers, skills and remote agents, defined once and assigned per Bot; the
-    // secrets in the vault
-    let caps = steve_modules::caps::Capabilities::new(vault.clone());
     let routes = routes
         .with_state(modules.clone())
         .merge(steve_modules::caps::routes(caps.clone()))
@@ -655,6 +673,7 @@ pub fn build(env: Env<'_>) -> Result<Built, BackendError> {
     let mut module_consumers: Vec<Arc<dyn steve_store::outbox::Consumer>> = vec![
         steve_mail::outbox::MailEventsOut::new(mail.clone()),
         gh.outbox_consumer(),
+        Arc::new(steve_channels::notifications::Intake),
     ];
     let mirror = steve_knowledge::openviking::Mirror::ID;
     let mirrored_before = store
@@ -683,7 +702,12 @@ pub fn build(env: Env<'_>) -> Result<Built, BackendError> {
     }
     let mut jobs: Vec<Job> = vec![
         Box::pin(super::outbox::run(dispatcher, store.clone(), flow.clone())),
+        Box::pin(steve_channels::notifications::run(
+            channels.clone(),
+            outbox.clone(),
+        )),
         Box::pin(steve_flow::Scheduler::new(flow.clone()).run()),
+        Box::pin(super::digest_bot::run(modules.clone(), flow.clone())),
         Box::pin(steve_flow::Poller::new(flow.clone()).run()),
         Box::pin(steve_flow::retention::run(flow.clone())),
         Box::pin(steve_channels::messages::retention(modules.clone())),
@@ -733,6 +757,8 @@ pub fn build(env: Env<'_>) -> Result<Built, BackendError> {
         modules.clone(),
         kb.clone(),
     ));
+    // Deterministic intake; the ordinary digest schedule consumes these packets through tools.
+    drop(steve_digest::job::spawn_job(modules.clone()));
     // memories and Bot memories are re-indexed when the store says they changed
     let mut changes = bus.tap(&["mm", "bot"]);
     let m = modules.clone();
@@ -775,5 +801,6 @@ pub fn build(env: Env<'_>) -> Result<Built, BackendError> {
         }),
         lifecycle,
         caps,
+        library,
     })
 }

@@ -1860,3 +1860,155 @@ fn domains_are_normalized() {
     assert_eq!(normalize_domain("sarah@acme.com"), "acme.com");
     assert_eq!(normalize_domain("www.acme.co.uk"), "acme.co.uk");
 }
+
+// ---------------------------------------------------------------- structured owner profile v2
+
+#[tokio::test]
+async fn owner_email_supplement_is_isolated_idempotent_and_never_overwrites_manual_or_rejected() {
+    let t = env();
+    let r = app(&t, Ports::default());
+    exec(
+        &t,
+        &format!(
+            "UPDATE users SET email = 'owner@example.test' WHERE id = '{ME}'; UPDATE users SET email = 'other@example.test' WHERE id = '{OTHER}'"
+        ),
+    );
+    let (_, owner) = req(&r, &me(), "GET", "/me/contact", None).await;
+    let (_, second) = req(&r, &other(), "GET", "/me/contact", None).await;
+    assert!(
+        owner["attrs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|a| a["key"] == "email"
+                && a["value"] == "owner@example.test"
+                && a["source"] == "profile")
+    );
+    assert!(!second["attrs"].to_string().contains("owner@example.test"));
+    assert!(second["attrs"].to_string().contains("other@example.test"));
+    assert_eq!(owner["profile"]["fields"]["email"]["state"], "known");
+    let email = &owner["attrs"][0];
+    let (s, _) = req(
+        &r,
+        &me(),
+        "PATCH",
+        &format!("/attrs/{}", email["id"].as_str().unwrap()),
+        Some(json!({"value":"manual@example.test"})),
+    )
+    .await;
+    assert_eq!(s, 200);
+    // The periodic steward uses precisely this refresh path too.
+    for _ in 0..2 {
+        let got = contacts::service::me_contact(&t.modules, &me()).unwrap();
+        assert_eq!(got.attrs.len(), 1);
+        assert_eq!(got.attrs[0].value, "manual@example.test");
+        assert_eq!(got.attrs[0].source, "me");
+    }
+    req(
+        &r,
+        &me(),
+        "PATCH",
+        &format!("/attrs/{}", email["id"].as_str().unwrap()),
+        Some(json!({"status":"stale"})),
+    )
+    .await;
+    let got = contacts::service::me_contact(&t.modules, &me()).unwrap();
+    assert_eq!(got.attrs.len(), 1);
+    assert_eq!(got.attrs[0].status, "stale");
+}
+
+#[tokio::test]
+async fn owner_address_contexts_never_fall_back_to_each_other_and_scopes_do_not_escape() {
+    use contacts::profile::address;
+    let t = env();
+    let r = app(&t, Ports::default());
+    let (_, owner) = req(&r, &me(), "GET", "/me/contact", None).await;
+    let party = id(&owner);
+    let set = |key: &str, value: &str| json!({"key": key, "label": key, "value": value, "level": "public"});
+    req(
+        &r,
+        &me(),
+        "POST",
+        &format!("/parties/{party}/attrs"),
+        Some(set("call", "Private nickname")),
+    )
+    .await;
+    let get = |external, persona: Option<&str>, space: Option<&str>| {
+        t.store()
+            .with_conn(|c| Ok(address(c, WS, ME, external, persona, space).unwrap()))
+            .unwrap()
+            .unwrap()
+    };
+    assert_eq!(get(false, None, None), "Private nickname");
+    assert_eq!(get(true, None, None), "Dev");
+    req(
+        &r,
+        &me(),
+        "POST",
+        &format!("/parties/{party}/attrs"),
+        Some(set("call_external", "Public name")),
+    )
+    .await;
+    assert_eq!(get(false, None, None), "Private nickname");
+    assert_eq!(get(true, None, None), "Public name");
+    for (kind, scope, name) in [
+        ("persona", "p1", "Persona name"),
+        ("space", "s1", "Space name"),
+    ] {
+        let (s, _) = req(
+            &r,
+            &me(),
+            "POST",
+            &format!("/parties/{party}/attrs"),
+            Some(set(
+                "call_ext_scope",
+                &json!({"kind":kind,"id":scope,"name":name}).to_string(),
+            )),
+        )
+        .await;
+        assert_eq!(s, 200);
+    }
+    assert_eq!(get(true, Some("p1"), None), "Persona name");
+    assert_eq!(get(true, Some("p1"), Some("s1")), "Space name");
+    assert_eq!(get(true, Some("p2"), Some("s2")), "Public name");
+    assert_eq!(get(false, Some("p1"), Some("s1")), "Private nickname");
+    t.store()
+        .transaction(|tx| {
+            contacts::repo::value_insert(
+                tx,
+                WS,
+                &contacts::repo::NewValue {
+                    party_id: party.clone(),
+                    key: "call_external".into(),
+                    label: "new candidate".into(),
+                    value: "Unconfirmed nickname".into(),
+                    source: "agent".into(),
+                    source_label: "inferred".into(),
+                    source_ref: None,
+                    level: steve_store::base::Level::Public,
+                    status: "candidate".into(),
+                    decision_id: None,
+                },
+            )?;
+            Ok::<_, steve_store::StoreError>(())
+        })
+        .unwrap();
+    assert_eq!(get(true, None, None), "Public name");
+    // Another member cannot pick up either the nickname or scoped names.
+    req(&r, &other(), "GET", "/me/contact", None).await;
+    let other_name = t
+        .store()
+        .with_conn(|c| Ok(address(c, WS, OTHER, true, Some("p1"), Some("s1")).unwrap()))
+        .unwrap()
+        .unwrap();
+    assert_ne!(other_name, "Space name");
+    let (s, _) = req(
+        &r,
+        &me(),
+        "POST",
+        &format!("/parties/{party}/attrs"),
+        Some(set("call_ext_scope", "not JSON")),
+    )
+    .await;
+    assert_eq!(s, 400);
+}

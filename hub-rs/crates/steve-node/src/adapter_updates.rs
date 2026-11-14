@@ -200,8 +200,11 @@ esac
         let cfg = AcpConfig {
             adapters: ids
                 .iter()
-                .map(|id| (id.to_string(), managed::command(&home, id).unwrap()))
-                .chain([("elsewhere".to_string(), PathBuf::from("/opt/tools/elsewhere-acp"))])
+                .filter_map(|id| Some((id.to_string(), managed::command(&home, id)?)))
+                .chain([(
+                    "elsewhere".to_string(),
+                    PathBuf::from("/opt/tools/elsewhere-acp"),
+                )])
                 .collect(),
             declared: HashMap::new(),
             node: temp.path().join("node"),
@@ -212,7 +215,11 @@ esac
             version: "test".into(),
         };
         std::fs::create_dir_all(managed::dir(&home)).unwrap();
-        std::fs::write(managed::dir(&home).join("selected.json"), format!("[\"{kept}\"]\n")).unwrap();
+        std::fs::write(
+            managed::dir(&home).join("selected.json"),
+            format!("[\"{kept}\"]\n"),
+        )
+        .unwrap();
 
         let updates = AdapterUpdates::default();
         // something runs: the newer release waits
@@ -221,14 +228,34 @@ esac
         // idle: the chosen one is installed, the other is neither asked about nor installed
         assert_eq!(updates.check(&cfg, || true).await, (false, true));
         let package = |id: &str| managed::package(id).unwrap();
-        assert_eq!(managed::installed(&home, package(kept)).as_deref(), Some("9.9.9"));
+        assert_eq!(
+            managed::installed(&home, package(kept)).as_deref(),
+            Some("9.9.9")
+        );
         assert_eq!(managed::installed(&home, package(left_out)), None);
         let asked = std::fs::read_to_string(&log).unwrap();
-        assert!(asked.contains(package(kept)) && !asked.contains(package(left_out)), "{asked}");
+        assert!(
+            asked.contains(package(kept)) && !asked.contains(package(left_out)),
+            "{asked}"
+        );
         let found = updates.get(&cfg, kept).unwrap();
-        assert_eq!((found.installed.as_deref(), found.latest.as_deref(), found.pending), (Some("9.9.9"), Some("9.9.9"), false));
-        assert_eq!(updates.get(&cfg, left_out).unwrap().latest, None, "nothing was asked about it");
-        assert!(updates.get(&cfg, "elsewhere").is_none(), "an adapter installed otherwise is left alone");
+        assert_eq!(
+            (
+                found.installed.as_deref(),
+                found.latest.as_deref(),
+                found.pending
+            ),
+            (Some("9.9.9"), Some("9.9.9"), false)
+        );
+        assert_eq!(
+            updates.get(&cfg, left_out).unwrap().latest,
+            None,
+            "nothing was asked about it"
+        );
+        assert!(
+            updates.get(&cfg, "elsewhere").is_none(),
+            "an adapter installed otherwise is left alone"
+        );
         // up to date: nothing more to install
         assert_eq!(updates.check(&cfg, || true).await, (false, false));
     }

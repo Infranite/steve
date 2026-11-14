@@ -47,8 +47,7 @@ pub struct Parsed {
     pub signature_org: Option<String>,
 }
 
-impl Parsed {
-}
+impl Parsed {}
 
 /// Parses a message. `header_only`: the raw bytes are only the header (very large mail), so there is
 /// no text and no attachment list.

@@ -11,8 +11,9 @@ const plain = (t: string) => t.replace(/```[\s\S]*?```/g, " ").replace(/[`*_>#|[
 export const clip = (t: string, n: number) => { const x = plain(t); return x.length > n ? x.slice(0, n) + "…" : x }
 const dayOf = (ts: number) => new Date(ts).toDateString()
 
-/** the conversation cut at pauses and day changes, newest first; a topic is named by the first thing you said in it */
-export function topicsOf(msgs: Msg[]): Topic[] {
+/** the conversation cut at pauses and day changes, newest first; a topic is named by the first thing you said in it, and
+ *  one where only Steve spoke by the item his card is about (`itemTitle`), else by his words */
+export function topicsOf(msgs: Msg[], itemTitle?: (id: string) => string | undefined): Topic[] {
   const out: (Topic & { named: boolean })[] = []
   let cur: (Topic & { named: boolean }) | null = null, last = 0
   for (const m of msgs) {
@@ -22,7 +23,9 @@ export function topicsOf(msgs: Msg[]): Topic[] {
       cur = { id: m.id, at: m.created, end: m.created, title: "", count: 0, items: [], named: false }
     }
     cur.count++; cur.end = m.created; last = m.created
-    if (!cur.named && m.t && m.t !== "（附件）") { cur.title = clip(m.t, 40); cur.named = m.k === "me" }
+    const card = m.k === "steve" ? m.card?.item : undefined, named = card && itemTitle?.(card)
+    if (!cur.named && named && !cur.title) cur.title = clip(`${card} ${named}`, 40)
+    else if (!cur.named && m.t && m.t !== "（附件）" && (m.k === "me" || !cur.title)) { cur.title = clip(m.t, 40); cur.named = m.k === "me" }
     for (const id of [m.item, m.card?.item, ...(m.k === "me" ? m.t?.match(ITEM) ?? [] : [])]) if (id && !cur.items.includes(id)) cur.items.push(id)
   }
   if (cur) out.push(cur)

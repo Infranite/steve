@@ -10,7 +10,7 @@ document.documentElement.classList.toggle("dark", location.search.includes("dark
 const view = new URLSearchParams(location.search).get("view") ?? "list"
 function Fixture() {
   useStore()
-  const page = view === "space" ? <ChannelsRoute b="space" id="sp_ops" /> : view === "account" ? <ChannelsRoute b="acc" id="conn_me" /> : view === "integrations" ? <IntegrationsRoute /> : <ChannelsRoute />
+  const page = view === "space" ? <ChannelsRoute b="space" id="sp_ops" /> : view === "account" ? <ChannelsRoute b="acc" id="conn_me" /> : view === "integrations" ? <IntegrationsRoute /> : view === "provider" ? <IntegrationsRoute id="mail" /> : <ChannelsRoute />
   return <SidebarProvider><main style={{ width: "100%", minWidth: 0 }}>{page}</main></SidebarProvider>
 }
 createRoot(document.getElementById("root")!).render(<Fixture />)

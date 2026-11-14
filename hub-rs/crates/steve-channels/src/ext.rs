@@ -14,6 +14,7 @@ use steve_modules::accounts::connections::ConnectionProvider;
 use crate::channel::{ActAsUser, ChannelAdapter, ChannelFeatures, ProfileAdapter};
 
 pub use crate::channel::{ActTarget, MessageRef, SendKey, Sent};
+pub use crate::connector::ConnectorTools;
 pub use crate::history::HistoryRead;
 pub use crate::lifecycle::{ConnRun, ConnSink, ConnState, ConnectionHook};
 pub use crate::media::{MediaError, MediaFetch};
@@ -167,6 +168,8 @@ pub struct ChannelSide {
     /// Reading a conversation's history when an agent asks (`steve_im_read`). Optional: without
     /// it the agent reads the messages the Hub stored.
     pub history: Option<Arc<dyn HistoryRead>>,
+    /// Declared, explicitly invoked connector operations on this account.
+    pub connector: Option<Arc<dyn ConnectorTools>>,
 }
 
 impl ChannelSide {
@@ -179,6 +182,7 @@ impl ChannelSide {
             profiles: None,
             media: None,
             history: None,
+            connector: None,
         }
     }
 
@@ -202,6 +206,11 @@ impl ChannelSide {
         self
     }
 
+    pub fn connector(mut self, c: Arc<dyn ConnectorTools>) -> Self {
+        self.connector = Some(c);
+        self
+    }
+
     pub fn history(mut self, h: Arc<dyn HistoryRead>) -> Self {
         self.history = Some(h);
         self
@@ -215,7 +224,7 @@ impl ChannelSide {
     /// - on your own account, `features.recall` and `features.reactions` say what the
     ///   act-as-user view supports ([`ActAsUser::supports_recall`],
     ///   [`ActAsUser::supports_reactions`]);
-    /// - [`MessageIds::None`] ⇒ no channel adapter;
+    /// - [`MessageIds::None`] with a channel adapter requires `preserves_source_ids`;
     /// - `created_precision_ms` is within [`PRECISION_MS`];
     /// - `receive_cap` is one of the provider's capabilities;
     /// - the provider's identity is `self` exactly when the side is [`Mode::Own`].
@@ -236,6 +245,10 @@ impl ChannelSide {
                 self.act_as_user.as_ref().map(|a| a.adapter_id()),
             ),
             ("media view", self.media.as_ref().map(|m| m.adapter_id())),
+            (
+                "connector view",
+                self.connector.as_ref().map(|m| m.adapter_id()),
+            ),
             (
                 "history view",
                 self.history.as_ref().map(|h| h.adapter_id()),
@@ -304,9 +317,14 @@ impl ChannelSide {
                 ));
             }
         }
-        if self.decl.message_ids == MessageIds::None && self.adapter.is_some() {
+        if self.decl.message_ids == MessageIds::None
+            && self
+                .adapter
+                .as_ref()
+                .is_some_and(|a| !a.preserves_source_ids())
+        {
             return Err(format!(
-                "adapter {want} has no platform message ids but a channel adapter"
+                "adapter {want} has no platform message ids but its channel adapter does not preserve source ids"
             ));
         }
         if !PRECISION_MS.contains(&self.decl.created_precision_ms) {
@@ -577,12 +595,12 @@ mod tests {
                 .check(),
             Ok(())
         );
-        // without platform message ids there is no bot-style channel adapter
+        // A legacy adapter returning only a platform id cannot claim source-only support.
         assert_eq!(
             ChannelSide::new(app_decl().message_ids(MessageIds::None), app.clone())
                 .adapter(app.clone())
                 .check(),
-            Err("adapter feishu_app has no platform message ids but a channel adapter".into())
+            Err("adapter feishu_app has no platform message ids but its channel adapter does not preserve source ids".into())
         );
         assert_eq!(
             side(

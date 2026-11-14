@@ -16,6 +16,7 @@ pub fn js_slice(s: &str, n: usize) -> &str {
 }
 
 /// `${v}` in a JS template: missing → `undefined`, strings unquoted, other JSON as text.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn js_str(v: Option<&Value>) -> String {
     match v {
         None => "undefined".into(),

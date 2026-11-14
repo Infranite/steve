@@ -10,15 +10,41 @@ use std::time::Duration;
 use serde_json::{Value, json};
 
 use crate::rpc::{Conn, RpcError};
-use crate::util::{coalesce, js_str, truthy};
+use crate::util::{coalesce, truthy};
+
+/// Whether a `configOptions` entry represents the session model (`id == "model"` or
+/// `category == "model"`).
+pub fn is_model_option(o: &Value) -> bool {
+    o.get("id").and_then(Value::as_str) == Some("model")
+        || o.get("category").and_then(Value::as_str) == Some("model")
+}
+
+/// The configuration option of the model, if the adapter reports one.
+pub fn model_option(config: &Value) -> Option<&Value> {
+    config
+        .get("configOptions")?
+        .as_array()?
+        .iter()
+        .find(|o| is_model_option(o))
+}
+
+/// The configuration option of the permission mode, if the adapter reports one.
+pub fn mode_option(config: &Value) -> Option<&Value> {
+    config.get("configOptions")?.as_array()?.iter().find(|o| {
+        o.get("category").and_then(Value::as_str) == Some("mode")
+            || o.get("id").and_then(Value::as_str) == Some("mode")
+    })
+}
 
 /// The configuration option of the reasoning effort, if the adapter reports one.
 pub fn effort_option(config: &Value) -> Option<&Value> {
     config.get("configOptions")?.as_array()?.iter().find(|o| {
-        o.get("id")
+        o.get("id").and_then(Value::as_str).is_some_and(|id| {
+            ["thought_level", "reasoning_effort", "effort", "thinking"].contains(&id)
+        }) || o
+            .get("category")
             .and_then(Value::as_str)
-            .is_some_and(|id| ["thought_level", "reasoning_effort", "effort"].contains(&id))
-            || o.get("category").and_then(Value::as_str) == Some("thought_level")
+            .is_some_and(|cat| ["thought_level", "thinking"].contains(&cat))
     })
 }
 
@@ -52,6 +78,9 @@ pub struct OpenConfig<'a> {
 /// the adapter does not offer it ([`crate::adapters::ModeMap::choice`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModeChoice {
+    /// Steve's canonical mode key (`plan`, `ask`, `accept_edits`, `auto`, `full_access`) for
+    /// error diagnostics when `id` is empty.
+    pub requested: &'static str,
     pub id: String,
     /// A narrower mode that may be set instead (Plan asks before every change when the adapter
     /// has no plan mode).
@@ -60,21 +89,62 @@ pub struct ModeChoice {
     /// no modes at all asks for every permission, so nothing needs to be set. A wider mode is
     /// refused there.
     pub narrow: bool,
+    /// Send `session/set_mode` even when `available` is `None` (`blind_set_mode`).
+    pub blind: bool,
+    /// `_meta` sent on `session/new|load` for this mode (`mode_meta`).
+    pub meta: Option<Value>,
+    /// Native tool execution has no harness approval modes. It must be explicitly selected.
+    pub native_execution: bool,
 }
 
 impl ModeChoice {
+    fn label(&self) -> &str {
+        if self.id.is_empty() {
+            self.requested
+        } else {
+            &self.id
+        }
+    }
+
     /// The id to set given the modes the adapter offers (`None`: it reports none): `Ok(None)` sets
     /// nothing; an error when the mode cannot be had.
     pub fn resolve(&self, available: Option<&[String]>) -> Result<Option<String>, String> {
+        if self.native_execution {
+            return if self.requested == "full_access" {
+                Ok(None)
+            } else {
+                Err(format!(
+                    "unsupported: permission mode {} (the adapter executes native tools without approval modes)",
+                    self.requested
+                ))
+            };
+        }
+        let non_empty = |s: &str| (!s.is_empty()).then(|| s.to_owned());
         match available {
-            None if self.narrow => Ok(None),
-            None => Err(format!("unsupported: permission mode {}", self.id)),
-            Some(ids) if ids.contains(&self.id) => Ok(Some(self.id.clone())),
+            None => {
+                if self.blind {
+                    if let Some(id) = non_empty(&self.id) {
+                        return Ok(Some(id));
+                    }
+                    if let Some(f) = self.fallback.as_deref().and_then(non_empty) {
+                        return Ok(Some(f));
+                    }
+                }
+                let has_mapping =
+                    !self.id.is_empty() || self.fallback.as_deref().is_some_and(|f| !f.is_empty());
+                if self.meta.is_some() || (self.narrow && has_mapping) {
+                    Ok(None)
+                } else {
+                    Err(format!("unsupported: permission mode {}", self.label()))
+                }
+            }
+            Some(ids) if !self.id.is_empty() && ids.contains(&self.id) => Ok(Some(self.id.clone())),
             Some(ids) => match &self.fallback {
-                Some(f) if ids.contains(f) => Ok(Some(f.clone())),
+                Some(f) if !f.is_empty() && ids.contains(f) => Ok(Some(f.clone())),
+                _ if self.meta.is_some() => Ok(None),
                 _ => Err(format!(
                     "unsupported: permission mode {} (the adapter offers {})",
-                    self.id,
+                    self.label(),
                     ids.join(", ")
                 )),
             },
@@ -82,26 +152,35 @@ impl ModeChoice {
     }
 }
 
+fn available_modes(r: &Value) -> Option<Vec<String>> {
+    r.pointer("/modes/availableModes")?
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|m| m.get("id").and_then(Value::as_str).map(String::from))
+                .collect::<Vec<_>>()
+        })
+        .filter(|v| !v.is_empty())
+}
+
+fn collect_option_values(v: &Value, out: &mut Vec<String>) {
+    for m in v.as_array().into_iter().flatten() {
+        if let Some(group) = m.get("options") {
+            collect_option_values(group, out);
+        } else if let Some(val) = m.get("value").and_then(Value::as_str) {
+            out.push(val.to_owned());
+        }
+    }
+}
+
 /// The mode ids a `session/new|load` response offers (`modes.availableModes`, else the `mode`
 /// config option); `None` when it reports neither.
 pub fn offered_modes(r: &Value) -> Option<Vec<String>> {
-    let ids = |v: &Value, key: &str| {
-        v.as_array().map(|a| {
-            a.iter()
-                .filter_map(|m| m.get(key).and_then(Value::as_str).map(String::from))
-                .collect::<Vec<_>>()
-        })
-    };
-    r.pointer("/modes/availableModes")
-        .and_then(|v| ids(v, "id"))
-        .or_else(|| {
-            r.get("configOptions")?
-                .as_array()?
-                .iter()
-                .find(|o| o.get("category").and_then(Value::as_str) == Some("mode"))
-                .and_then(|o| o.get("options"))
-                .and_then(|v| ids(v, "value"))
-        })
+    available_modes(r).or_else(|| {
+        let mut out = vec![];
+        collect_option_values(mode_option(r)?.get("options")?, &mut out);
+        (!out.is_empty()).then_some(out)
+    })
 }
 
 /// A system prompt for the session (ACP `systemPrompt` on `session/new`).
@@ -151,7 +230,11 @@ pub async fn open(
 ) -> Result<Opened, RpcError> {
     let init = json!({
         "protocolVersion": 1,
-        "clientCapabilities": { "fs": { "readTextFile": false, "writeTextFile": false }, "terminal": false },
+        "clientCapabilities": {
+            "fs": { "readTextFile": false, "writeTextFile": false },
+            "terminal": false,
+            "_meta": { "parameterizedModelPicker": true },
+        },
         "clientInfo": { "name": "steve", "version": c.client_version },
     });
     let init = l
@@ -197,19 +280,24 @@ pub async fn open(
             let r = l
                 .request("session/new", p, Some(Duration::from_secs(120)))
                 .await?;
-            let id = js_str(r.get("sessionId"));
+            let id = r
+                .get("sessionId")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| err("adapter returned no sessionId on session/new".into()))?
+                .to_owned();
             reports.new_session(&id);
             (r, id)
         }
     };
-    // Claude Code reports models in `models`; Codex only as the "model" config option
-    let model_opt = r
-        .get("configOptions")
-        .and_then(Value::as_array)
-        .and_then(|os| {
-            os.iter()
-                .find(|o| o.get("id").and_then(Value::as_str) == Some("model"))
-        });
+    // Claude Code reports models in `models`; Codex and other ACP adapters as a model configOption
+    let model_opt = model_option(&r);
+    let model_opt_id = model_opt
+        .and_then(|o| o.get("id"))
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned);
     let models = r.get("models").filter(|v| !v.is_null());
     let reported = coalesce([
         models.and_then(|m| m.get("currentModelId")),
@@ -231,31 +319,34 @@ pub async fn open(
             Err(e) => return Err(err(e)),
         },
     };
-    if let Some(mode) = &mode
-        && let Err(e) = l
-            .request(
-                "session/set_mode",
-                json!({ "sessionId": acp_id, "modeId": mode }),
-                Some(Duration::from_secs(30)),
-            )
-            .await
-    {
-        return Err(err(format!("权限模式 {mode} 没能生效：{}", e.message)));
-    }
     let mut config = r.clone();
+    if let Some(mode) = &mode {
+        let mode_opt_id = mode_option(&r)
+            .and_then(|o| o.get("id"))
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty());
+        match apply_mode(l, &acp_id, mode, mode_opt_id, available_modes(&r).is_some()).await {
+            Ok(Some(updated)) => {
+                if updated.get("configOptions").is_some() {
+                    config = updated;
+                }
+            }
+            Ok(None) => {}
+            Err(e) => return Err(err(format!("权限模式 {mode} 没能生效：{}", e.message))),
+        }
+    }
     if let Some(model) = model {
-        match apply_model(l, &acp_id, model, model_opt.is_some()).await {
+        let opt_id = model_option(&config)
+            .and_then(|o| o.get("id"))
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .or(model_opt_id.as_deref());
+        match apply_model(l, &acp_id, model, opt_id).await {
             Ok(updated) => {
                 let actual = updated
                     .pointer("/models/currentModelId")
                     .and_then(Value::as_str)
-                    .or_else(|| {
-                        updated
-                            .get("configOptions")
-                            .and_then(Value::as_array)
-                            .and_then(|os| os.iter().find(|o| o["id"] == "model"))
-                            .and_then(|o| o["currentValue"].as_str())
-                    });
+                    .or_else(|| model_option(&updated).and_then(|o| o["currentValue"].as_str()));
                 match actual {
                     Some(actual) if actual == model => reports.model(actual),
                     // An adapter may answer with its own short id for the model that was asked
@@ -334,15 +425,56 @@ fn named(answer: &Value, actual: &str, asked: &str) -> bool {
             })
         })
     }
-    let option = answer
-        .get("configOptions")
-        .and_then(Value::as_array)
-        .and_then(|os| os.iter().find(|o| o["id"] == "model"))
-        .and_then(|o| o.get("options"));
+    let option = model_option(answer).and_then(|o| o.get("options"));
     option.is_some_and(|l| any(l, "value", actual, asked))
         || answer
             .pointer("/models/availableModels")
             .is_some_and(|l| any(l, "modelId", actual, asked))
+}
+
+fn method_not_found(e: &RpcError) -> bool {
+    e.data
+        .as_ref()
+        .and_then(|d| d.get("code"))
+        .and_then(Value::as_i64)
+        == Some(-32601)
+}
+
+async fn apply_mode(
+    l: &Conn,
+    acp_id: &str,
+    mode: &str,
+    config_id: Option<&str>,
+    prefer_set_mode: bool,
+) -> Result<Option<Value>, RpcError> {
+    let t = Some(Duration::from_secs(30));
+    let by_set_mode = || {
+        l.request(
+            "session/set_mode",
+            json!({ "sessionId": acp_id, "modeId": mode }),
+            t,
+        )
+    };
+    let by_option = |cid: &str| {
+        l.request(
+            "session/set_config_option",
+            json!({ "sessionId": acp_id, "configId": cid, "value": mode }),
+            t,
+        )
+    };
+    match (config_id, prefer_set_mode) {
+        (Some(cid), false) => match by_option(cid).await {
+            Ok(v) => Ok(Some(v)),
+            Err(e) if method_not_found(&e) => by_set_mode().await.map(Some),
+            Err(e) => Err(e),
+        },
+        (Some(cid), true) => match by_set_mode().await {
+            Ok(v) => Ok(Some(v)),
+            Err(e) if method_not_found(&e) => by_option(cid).await.map(Some),
+            Err(e) => Err(e),
+        },
+        (None, _) => by_set_mode().await.map(Some),
+    }
 }
 
 /// Switch the session's model. claude-agent-acp 0.99.1 and codex-acp only take the "model" config
@@ -354,13 +486,14 @@ async fn apply_model(
     l: &Conn,
     acp_id: &str,
     model: &str,
-    has_option: bool,
+    option_id: Option<&str>,
 ) -> Result<Value, RpcError> {
     let t = Some(Duration::from_secs(30));
+    let cid = option_id.unwrap_or("model");
     let by_option = || {
         l.request(
             "session/set_config_option",
-            json!({ "sessionId": acp_id, "configId": "model", "value": model }),
+            json!({ "sessionId": acp_id, "configId": cid, "value": model }),
             t,
         )
     };
@@ -371,28 +504,15 @@ async fn apply_model(
             t,
         )
     };
-    let not_found = |e: &RpcError| {
-        e.data
-            .as_ref()
-            .and_then(|d| d.get("code"))
-            .and_then(Value::as_i64)
-            == Some(-32601)
-    };
-    let r = if has_option {
+    let r = if option_id.is_some() {
         by_option().await
     } else {
         match by_set_model().await {
-            Err(e) if not_found(&e) => by_option().await,
+            Err(e) if method_not_found(&e) => by_option().await,
             r => r,
         }
     }?;
-    let current = r
-        .get("configOptions")
-        .and_then(Value::as_array)
-        .and_then(|os| {
-            os.iter()
-                .find(|o| o.get("id").and_then(Value::as_str) == Some("model"))
-        })
+    let current = model_option(&r)
         .and_then(|o| o.get("currentValue"))
         .and_then(Value::as_str);
     // its own short id for the asked model is no news

@@ -5,6 +5,7 @@
 pub mod a2a;
 pub mod mcp;
 pub mod skills;
+pub mod tools;
 
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::Serialize;
@@ -95,15 +96,18 @@ pub fn set(
     Ok(())
 }
 
+/// Takes an entry off a Bot, and its pin with it.
 pub fn remove(c: &Connection, bot: &str, kind: &str, entry_id: &str) -> Result<bool> {
+    tools::set_pin(c, bot, kind, entry_id, false, 0)?;
     Ok(c.execute(
         "DELETE FROM bot_capabilities WHERE bot_id = ? AND kind = ? AND entry_id = ?",
         [bot, kind, entry_id],
     )? > 0)
 }
 
-/// An entry is gone: nobody uses it any more.
+/// An entry is gone: nobody uses (or pins) it any more.
 pub fn remove_entry(c: &Connection, kind: &str, entry_id: &str) -> Result<usize> {
+    tools::drop_target(c, kind, entry_id)?;
     Ok(c.execute(
         "DELETE FROM bot_capabilities WHERE kind = ? AND entry_id = ?",
         [kind, entry_id],

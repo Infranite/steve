@@ -587,8 +587,15 @@ fn setup_with(home: &Path, candidate: &Path, label: &str, tools: &Tools) -> Resu
     let output = command.stdin(Stdio::inherit()).output()?;
     if !output.status.success() {
         let said = String::from_utf8_lossy(&output.stderr);
-        let last = said.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("");
-        bail!("first-install signing identity setup failed: {}", last.trim());
+        let last = said
+            .lines()
+            .rev()
+            .find(|l| !l.trim().is_empty())
+            .unwrap_or("");
+        bail!(
+            "first-install signing identity setup failed: {}",
+            last.trim()
+        );
     }
     owned_file(&keychain)?;
     let password_file = signing.join("keychain-pass");

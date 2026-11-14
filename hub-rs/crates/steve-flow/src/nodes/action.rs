@@ -51,7 +51,7 @@ fn fail(error: impl Into<String>) -> ActionOutcome {
 pub async fn run(cx: &FlowCx, run: &RunRow, cfg: &Value) -> ActionOutcome {
     let res = match cfg["action"].as_str().unwrap_or("") {
         "item.create" => item_create(cx, run, cfg).await,
-        "report" => report(cx, run, cfg).await,
+        "report" => report(cx, run, run.cursor.as_deref().unwrap_or("action"), cfg).await,
         "digest" => digest_action(cx, run, cfg),
         other => Ok(fail(format!("不认识的动作：{other}"))),
     };
@@ -93,6 +93,12 @@ async fn item_create(cx: &FlowCx, run: &RunRow, cfg: &Value) -> FlowResult<Actio
     let Some(s) = schedule_of(cx, run)? else {
         return Ok(fail("建事项的动作目前只用于定时任务"));
     };
+    // Runs pin their graph version. Never lend a newly configured requester's identity to
+    // an older goal; removing/changing authorization also invalidates waiting old runs.
+    let requester = cfg["requester"].as_str().map(str::to_string);
+    if requester != s.spec.requester {
+        return Ok(fail("Schedule requester changed; start a new run"));
+    }
     let tz = s.spec.zone();
     let at = run.at();
     let ws = run.workspace_id.clone();
@@ -111,7 +117,11 @@ async fn item_create(cx: &FlowCx, run: &RunRow, cfg: &Value) -> FlowResult<Actio
         .unwrap_or_default();
     let what = cfg["goal"].as_str().unwrap_or(&s.spec.what);
     let propose = cfg["mode"] == "propose";
+    // Recheck membership at execution, not just when the schedule was configured.
+    cx.store()
+        .reader(|c| schedules::check_refs(c, &ws, &s.spec))?;
     let req = ItemRequest {
+        requester,
         ws: ws.clone(),
         title: format!("{} · {}", s.name, schedules::local(at, tz, "%m-%d")),
         goal: format!("{what}\n\n（定时任务「{}」，{planned}{last}）", s.name),
@@ -186,8 +196,29 @@ pub fn report_prompt(what: &str, digest_text: &str, notes: &[String], items: &[S
     )
 }
 
-async fn report(cx: &FlowCx, run: &RunRow, cfg: &Value) -> FlowResult<ActionOutcome> {
+/// A caller-provided RunRow cannot publish in another workspace or borrow another flow's id.
+fn report_scope(c: &rusqlite::Connection, run: &RunRow) -> FlowResult<()> {
+    let owned: bool = c.query_row(
+        "SELECT EXISTS(SELECT 1 FROM flow_runs r JOIN flows f ON f.id=r.flow_id AND f.workspace_id=r.workspace_id WHERE r.id=? AND r.flow_id=? AND r.workspace_id=?)",
+        rusqlite::params![run.id,run.flow_id,run.workspace_id], |r|r.get(0),
+    )?;
+    if !owned {
+        return Err(steve_modules::ApiError::not_found("运行"));
+    }
+    Ok(())
+}
+
+async fn report(cx: &FlowCx, run: &RunRow, node: &str, cfg: &Value) -> FlowResult<ActionOutcome> {
     let ws = run.workspace_id.clone();
+    cx.store().reader(|c| report_scope(c, run))?;
+    // Recover BEFORE digest collection or model work after a committed publication.
+    if let Some(output) = cx
+        .store()
+        .reader(|c| steve_store::feed::report_result(c, &ws, &run.id, node))?
+    {
+        let cost = output["cost_usd"].as_f64().unwrap_or(0.0);
+        return Ok(report_done(output, cost));
+    }
     let what = cfg["what"].as_str().unwrap_or("").to_string();
     let (entries, items) = cx.store().reader(|c| -> FlowResult<_> {
         let since = runs::last_real(c, &run.workspace_id, &run.flow_id, Some(&run.id))?
@@ -238,24 +269,49 @@ async fn report(cx: &FlowCx, run: &RunRow, cfg: &Value) -> FlowResult<ActionOutc
             cost,
         });
     }
-    let meta = json!({ "schedule": run.flow_id, "run": run.id });
-    if let Err(e) = cx.core.post_steve_message(&ws, &text, meta).await {
-        return Ok(ActionOutcome::Retry {
-            error: format!("汇报没发出去：{e}"),
-            cost,
-        });
-    }
     let ids: Vec<String> = entries.iter().map(|e| e.id.clone()).collect();
     let now = cx.now();
-    cx.store()
-        .transaction(|tx| digest::mark_taken(tx, &ids, now))?;
-    Ok(ActionOutcome::Done {
-        output: json!({ "text": text, "digest": ids.len() }),
+    let content = steve_modules::outbound::Content {
+        title: schedule_of(cx, run)?
+            .map(|s| s.name)
+            .unwrap_or_else(|| "Report".into()),
+        markdown: text.clone(),
+        ..Default::default()
+    };
+    let result = json!({ "text": text, "digest": ids.len(), "cost_usd": cost });
+    let published = cx.store().transaction(|tx| -> FlowResult<Value> {
+        report_scope(tx, run)?;
+        let (result, inserted) = steve_store::feed::publish_report(
+            tx,
+            &ws,
+            &run.flow_id,
+            &run.id,
+            node,
+            &content,
+            &result,
+            now,
+        )?;
+        if inserted {
+            digest::mark_taken(tx, &ids, now)?;
+        }
+        Ok(result)
+    });
+    match published {
+        Ok(output) => Ok(report_done(output, cost)),
+        Err(e) => Ok(ActionOutcome::Retry {
+            error: format!("汇报未发布到信息流：{e}"),
+            cost,
+        }),
+    }
+}
+fn report_done(output: Value, cost: f64) -> ActionOutcome {
+    ActionOutcome::Done {
+        output,
         outcome: "report",
-        label: "汇报已发出".into(),
+        label: "已发布到信息流".into(),
         item_id: None,
         cost,
-    })
+    }
 }
 
 fn digest_action(cx: &FlowCx, run: &RunRow, cfg: &Value) -> FlowResult<ActionOutcome> {
@@ -407,7 +463,10 @@ pub fn builtin_rules(name: &str) -> Vec<Rule> {
         )],
         "ignore" => vec![Rule::new(&[], "reason 是文字")],
         "digest" => vec![Rule::new(&[], "text 是文字，可以不填")],
-        "report" => vec![Rule::new(&[], "what 是文字")],
+        "report" => vec![Rule::new(
+            &[],
+            "what 是文字；destination 不填或为 workspace_feed，发布到信息流，工作空间成员可见",
+        )],
         _ => Vec::new(),
     }
 }
@@ -649,6 +708,7 @@ pub async fn item_create_event(cx: &mut RunCx<'_>, cfg: &Value, input: &Value) -
         });
     let propose = cfg["mode"] == "propose";
     let req = ItemRequest {
+        requester: None,
         ws: ws.clone(),
         title,
         goal,
@@ -949,7 +1009,7 @@ impl Action for Ignore {
     }
 }
 
-/// `report {what}` (schedules): Steve reports in the main thread.
+/// `report {what}`: publishes generated content to the workspace Feed.
 pub struct Report;
 
 #[async_trait]
@@ -959,13 +1019,19 @@ impl Action for Report {
     }
     fn validate(&self, cfg: &Value) -> Result<(), String> {
         opt_str(cfg, "what")?;
+        if cfg
+            .get("destination")
+            .is_some_and(|d| d != "workspace_feed")
+        {
+            return Err("Report destination must be workspace_feed".into());
+        }
         Ok(())
     }
     fn outcome(&self) -> Option<&'static str> {
         Some("report")
     }
     async fn run(&self, cx: &mut RunCx<'_>, cfg: &Value, _input: &Value) -> NodeOutcome {
-        let o = report(cx.flow, &cx.run, cfg)
+        let o = report(cx.flow, &cx.run, &cx.node.id, cfg)
             .await
             .unwrap_or_else(|e| fail(e.to_string()));
         from_schedule(cx, o)

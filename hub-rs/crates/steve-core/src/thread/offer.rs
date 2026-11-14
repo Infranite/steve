@@ -396,7 +396,7 @@ impl Core {
             .message_patch_meta(msg_id, &Value::Object(meta))?;
         th.route_outcome(&origin, "offer_taken", Some(&item.id))?;
         let text = format!(
-            "好，做成事项 {} 交给{}了，对话内容作为上下文带入。",
+            "好，做成事项 {} 交给 {} 了，对话内容作为上下文带入。",
             item.id,
             self.bot_name(&item)
         );

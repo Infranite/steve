@@ -460,7 +460,6 @@ export default {
     collabSub: "允许它响应其他机器人的消息。关闭可以避免互相触发",
     collabOn: "已允许协作",
     collabOff: "已关闭协作",
-    members: "成员",
     membersUnknown: "人数未知",
     externalSub: "有外部成员，默认按客户群对待",
     internalSub: "都是本公司的人",

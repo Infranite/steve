@@ -324,14 +324,15 @@ impl Core {
         harness is left as the user set it, model or not */
         db.store().with_conn(|c| {
             c.execute(
-                "UPDATE bots SET harness = 'claude-code' WHERE id = 'steve' AND harness = ''",
-                [],
+                "UPDATE bots SET harness = ?1 WHERE id = 'steve' AND harness = ''",
+                [steve_acp::adapters::DEFAULT_ADAPTER.0],
             )?;
             Ok(())
         })?;
         /* bots seeded before projects existed: give them their project and a face once */
         db.bot_seed_fixups(steve_project.as_ref().map(|p| p.id.as_str()))?;
         drop(t);
+        let _ = self.reconcile_seeded_bots();
         /* Steve became a bot: the cheap purposes keep their fast list as an override, once */
         for ws in self.0.store.store().workspaces().ids()? {
             if self.models().migrate(&ws)? {
@@ -339,6 +340,61 @@ impl Core {
             }
         }
         Ok(())
+    }
+
+    /// When a fresh installation only has a non-default CLI ready (`claude-code` is proven
+    /// unavailable, `ready == Some(false)`) and the seeded `steve`/`dev` bots are still untouched
+    /// (`revision == 1`, no model or reasoning effort), moves them onto the first ready harness so
+    /// Steve's judgments and developer runs work out of the box without editing `steve` by hand.
+    pub fn reconcile_seeded_bots(&self) -> Result<bool> {
+        let hs = self.models().harnesses();
+        let Some(target) = hs.iter().find(|h| h.ready == Some(true)) else {
+            return Ok(false);
+        };
+        let store = self.0.store.store();
+        let mut changed = Vec::new();
+        store.with_conn(|c| {
+            for id in ["steve", "dev"] {
+                let row: Option<(String, Option<String>, Option<String>, i64)> = c
+                    .query_row(
+                        "SELECT harness, model, reasoning_effort, revision FROM bots WHERE id = ?1 AND deleted = 0",
+                        [id],
+                        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                    )
+                    .ok();
+                let Some((cur_h, model, effort, rev)) = row else {
+                    continue;
+                };
+                if rev != 1 || model.is_some() || effort.is_some() {
+                    continue;
+                }
+                let unavailable = hs
+                    .iter()
+                    .find(|h| h.id == cur_h)
+                    .is_some_and(|h| h.ready == Some(false));
+                if !unavailable || cur_h == target.id {
+                    continue;
+                }
+                let perm = if id == "dev" && target.offers_mode(steve_node_api::PermissionMode::Auto)
+                {
+                    "auto"
+                } else {
+                    target.default_perm_mode()
+                };
+                let n = c.execute(
+                    "UPDATE bots SET harness = ?1, perm_mode = ?2, updated = ?3 WHERE id = ?4 AND revision = 1",
+                    rusqlite::params![target.id, perm, steve_store::now(), id],
+                )?;
+                if n > 0 {
+                    changed.push(id);
+                }
+            }
+            Ok(())
+        })?;
+        for id in &changed {
+            store.publish(steve_store::ChangeEvent::Bot { id: (*id).into() });
+        }
+        Ok(!changed.is_empty())
     }
 
     /// The bot's own part of the prompt: written by the user, or generated from its settings.
@@ -1186,7 +1242,7 @@ impl Tx<'_> {
             &item.id,
             "steve",
             "sys",
-            &format!("Steve 建立事项，交给{}{where_}{kind}", bot.display()),
+            &format!("Steve 建立事项，交给 {}{where_}{kind}", bot.display()),
             None,
         )?;
         let mut detail = json!({"bot": bot.id, "project": item.project_id});
@@ -1309,13 +1365,19 @@ impl Tx<'_> {
                 .models()
                 .agent_model(&item.workspace_id, &bot.harness)
         });
+        let reasoning_effort = bot.reasoning_effort.clone().filter(|e| {
+            self.c
+                .models()
+                .harness(&bot.harness)
+                .is_none_or(|h| h.takes_effort(e))
+        });
         let s = self.db().session_create(&NewSession {
             workspace_id: item.workspace_id.clone(),
             item_id: Some(item_id.into()),
             bot_id: Some(bot.id.clone()),
             harness: bot.harness.clone(),
             model,
-            reasoning_effort: bot.reasoning_effort.clone(),
+            reasoning_effort,
             cwd,
             title: item.title.clone(),
             token: tok.clone(),
@@ -3993,7 +4055,7 @@ impl Tx<'_> {
                 .decision_resolve(&d.id, json!({"reassigned": true}), "expired", None)?;
         }
         self.db()
-            .timeline_add(id, actor, "sys", &format!("换成{}", b.display()), None)?;
+            .timeline_add(id, actor, "sys", &format!("换成 {}", b.display()), None)?;
         let prev = if handoff.is_empty() {
             String::new()
         } else {
@@ -4431,7 +4493,7 @@ impl Tx<'_> {
                     &i.id,
                     "steve",
                     "sys",
-                    &format!("{} Bot 已删除，交给{}", b.name, target.display()),
+                    &format!("{} Bot 已删除，交给 {}", b.name, target.display()),
                     None,
                 )?;
                 moved.push(i.id.clone());

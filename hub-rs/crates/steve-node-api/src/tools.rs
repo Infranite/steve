@@ -15,6 +15,9 @@ pub struct ToolDescriptor {
     /// JSON Schema of the arguments.
     pub input_schema: Value,
     pub read_only: bool,
+    /// MCP annotations, including source metadata, passed through without interpretation.
+    #[serde(default)]
+    pub annotations: Value,
 }
 
 /// The tools one execution may see. Hiding a tool is only for the harness's sake: every call is

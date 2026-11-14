@@ -224,7 +224,6 @@ export default {
     removed: "Source removed",
     addFolder: "Add folder",
     failed: "Sources can't be opened",
-    error: "Error",
     levelChanged: "Default level changed; existing content follows",
     resumed: "Resumed",
     paused: "Paused: no syncing, left out of search",

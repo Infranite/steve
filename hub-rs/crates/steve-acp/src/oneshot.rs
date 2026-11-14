@@ -245,7 +245,9 @@ fn awaiting_input(fact: &ToolFact) -> bool {
                 fact.paths.is_empty()
                     && fact.command.is_none()
                     && fact.query.is_none()
-                    && fact.raw.pointer("/rawInput/glob").is_none()
+                    && ["glob", "include", "file_pattern", "files"]
+                        .iter()
+                        .all(|k| fact.raw["rawInput"].get(*k).is_none())
             }
             ToolCategory::Exec => fact.command.is_none(),
             _ => false,
@@ -306,6 +308,7 @@ fn incoming_during_open(
     conn: &Conn,
     inc: Incoming,
     on_activity: Option<&(dyn Fn() + Send + Sync)>,
+    prior_tokens: &mut Option<(u64, u64, u64, u64, u64)>,
 ) {
     match inc {
         Incoming::Request { id, method, .. } if method == "session/request_permission" => {
@@ -314,9 +317,15 @@ fn incoming_during_open(
         Incoming::Request { id, .. } => {
             conn.respond_error(id, -32601, "client capability is unavailable");
         }
-        Incoming::Notification { method, .. } if method == "session/update" => {
+        Incoming::Notification { method, params } if method == "session/update" => {
             if let Some(activity) = on_activity {
                 activity();
+            }
+            if let Some(update) = params.get("update")
+                && update.get("sessionUpdate").and_then(Value::as_str) == Some("usage_update")
+                && let Some(t) = Normalizer::cumulative_tokens_from_usage_update(update)
+            {
+                *prior_tokens = Some(t);
             }
         }
         _ => {}
@@ -330,6 +339,7 @@ async fn drive_open<T, E, F>(
     rx: &mut mpsc::UnboundedReceiver<Incoming>,
     opening: F,
     on_activity: Option<&(dyn Fn() + Send + Sync)>,
+    prior_tokens: &mut Option<(u64, u64, u64, u64, u64)>,
 ) -> Result<T, OneShotError>
 where
     E: std::fmt::Display,
@@ -341,12 +351,12 @@ where
             biased;
             // session/load replays history before its response. That history is neither
             // a new draft nor a tool the current attempt is executing.
-            Some(inc) = rx.recv() => incoming_during_open(conn, inc, on_activity),
+            Some(inc) = rx.recv() => incoming_during_open(conn, inc, on_activity, prior_tokens),
             result = &mut opening => break result,
         }
     };
     while let Ok(inc) = rx.try_recv() {
-        incoming_during_open(conn, inc, on_activity);
+        incoming_during_open(conn, inc, on_activity, prior_tokens);
     }
     result.map_err(failed)
 }
@@ -462,10 +472,16 @@ pub async fn run(
                     replace: req.tools_off,
                 }),
             },
-            req.cfg.session_meta_for(req.harness, req.tools_off),
+            req.cfg
+                .session_meta_with_mode(req.harness, req.tools_off, Some(req.mode)),
             &reports,
         );
-        let opened = drive_open(&conn, &mut rx, opening, req.on_activity).await?;
+        let mut prior_tokens = None;
+        let opened =
+            drive_open(&conn, &mut rx, opening, req.on_activity, &mut prior_tokens).await?;
+        if properties.usage_prompt_cumulative {
+            norm = norm.prompt_cumulative_baseline(prior_tokens.unwrap_or((0, 0, 0, 0, 0)));
+        }
         if !opened.image && req.prompt.iter().any(|p| p["type"] == "image") {
             return Err(OneShotError::Unsupported("images"));
         }
@@ -1065,9 +1081,16 @@ for line in sys.stdin:
             }
             std::task::Poll::Ready(Ok::<_, &'static str>("s1"))
         });
-        let sid = drive_open(&conn, &mut rx, opening, Some(&on_activity))
-            .await
-            .unwrap();
+        let mut prior_tokens = None;
+        let sid = drive_open(
+            &conn,
+            &mut rx,
+            opening,
+            Some(&on_activity),
+            &mut prior_tokens,
+        )
+        .await
+        .unwrap();
         assert_eq!(sid, "s1");
         assert_eq!(activity.load(Ordering::Relaxed), 1);
         assert!(

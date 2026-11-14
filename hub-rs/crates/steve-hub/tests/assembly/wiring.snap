@@ -2,6 +2,7 @@ api DELETE /accounts/x
 api DELETE /attr-defs/x
 api DELETE /attrs/x
 api DELETE /bots/x/capabilities/x/x
+api DELETE /bots/x/tool-pins/x/x
 api DELETE /capabilities/a2a-agents/x
 api DELETE /capabilities/mcp-servers/x
 api DELETE /capabilities/skills/x
@@ -32,6 +33,7 @@ api GET /accounts/x
 api GET /attr-defs
 api GET /bots/x/capabilities
 api GET /bots/x/flows
+api GET /bots/x/tools
 api GET /capabilities/a2a-agents
 api GET /capabilities/mcp-servers
 api GET /capabilities/skills
@@ -54,6 +56,16 @@ api GET /contacts
 api GET /contacts/x
 api GET /conversations
 api GET /conversations/x/messages
+api GET /deliveries/x
+api GET /digest/bot
+api GET /digest/changes
+api GET /digest/conversations/x
+api GET /digest/matters
+api GET /digest/matters/x
+api GET /digest/memories/x/index
+api GET /digest/packets
+api GET /digest/packets/x
+api GET /digest/todos
 api GET /flow-settings/allow-private
 api GET /flows
 api GET /flows/x
@@ -91,6 +103,11 @@ api GET /mail/threads
 api GET /mail/threads/x
 api GET /match-rules
 api GET /me/contact
+api GET /me/feed
+api GET /me/feed/x
+api GET /me/notification-policy
+api GET /me/notification-targets
+api GET /me/notifications
 api GET /mention-options
 api GET /merges
 api GET /orgs
@@ -151,6 +168,8 @@ api PATCH /connections/x
 api PATCH /contacts/x
 api PATCH /contacts/x/jobs/x
 api PATCH /conversations/x/preferences
+api PATCH /digest/conversations/x
+api PATCH /digest/matters/x
 api PATCH /flows/x
 api PATCH /github/repos/x
 api PATCH /kb/docs/x
@@ -160,6 +179,7 @@ api PATCH /mail/threads/x
 api PATCH /match-rules/x
 api PATCH /mems/x
 api PATCH /orgs/x
+api PATCH /people/x/output-preference
 api PATCH /personas/x
 api PATCH /schedules/x
 api PATCH /sources/x
@@ -191,6 +211,15 @@ api POST /contacts
 api POST /contacts/x/confirm
 api POST /contacts/x/jobs
 api POST /contacts/x/merge
+api POST /deliveries
+api POST /digest/changes/x/undo
+api POST /digest/conversations/x/cut
+api POST /digest/matters
+api POST /digest/matters/x/relate
+api POST /digest/memories/x/index
+api POST /digest/packets/x/retry
+api POST /digest/todos
+api POST /digest/todos/x
 api POST /flows
 api POST /flows/draft
 api POST /flows/x/dry-run
@@ -225,6 +254,8 @@ api POST /mail/threads/x/draft
 api POST /mail/threads/x/read
 api POST /mail/threads/x/to-item
 api POST /mail/threads/x/to-knowledge
+api POST /me/feed/read
+api POST /me/notifications/x/seen
 api POST /merges/x/split
 api POST /orgs
 api POST /parties/x/attrs
@@ -260,12 +291,15 @@ api POST /yolo/actions/x/now
 api POST /yolo/actions/x/undo
 api POST /yolo/resume
 api PUT /bots/x/capabilities/x/x
+api PUT /bots/x/tool-pins/x/x
 api PUT /connections/x/credential
+api PUT /digest/bot
 api PUT /flow-settings/allow-private
 api PUT /flows/x
 api PUT /kb/notes/x
 api PUT /kb/steward
 api PUT /mail/drafts/x
+api PUT /me/notification-policy
 api PUT /stats/prices
 api PUT /stats/tz
 api PUT /stewards/x/x
@@ -275,24 +309,30 @@ api PUT /yolo
 api PUT /yolo/scopes/x/x
 as_user ext_ws
 as_user feishu_user
+channel ext_ws.bot
 channel feishu_app
 decl ext_ws none 1000ms
+decl ext_ws.bot none 1000ms
 decl feishu_app platform 1ms
 decl feishu_user platform 1ms
 event_source github_app
 event_source github_pat
-jobs 15
+jobs 18
 lifecycle ext_ws
+lifecycle ext_ws.bot
 lifecycle feishu_app
 lifecycle feishu_user
 mail imap
 media ext_ws
+media ext_ws.bot
 media feishu_app
 media feishu_user
 profiles ext_ws
+profiles ext_ws.bot
 profiles feishu_app
 profiles feishu_user
 provider ext_ws {"id":"ext_ws","system":"ext_ws","name":"其他聊天工具","auth":"credential","caps":["msg.receive","msg.send_as_user"],"device":false,"fields":[{"key":"url","label":"渠道服务地址","secret":false,"required":true,"type":"text","hint":"wss://…；明文 ws:// 只允许 127.0.0.1 或 ::1"},{"key":"token","label":"访问令牌","secret":true,"required":true,"type":"password"},{"key":"pin","label":"证书指纹","secret":false,"required":false,"type":"text","hint":"自签名证书时填 sha256:<64 位十六进制>"}]}
+provider ext_ws.bot {"id":"ext_ws.bot","system":"ext_ws","name":"其他聊天工具（机器人）","auth":"credential","caps":["msg.receive","msg.send"],"device":false,"fields":[{"key":"url","label":"渠道服务地址","secret":false,"required":true,"type":"text","hint":"wss://…；明文 ws:// 只允许 127.0.0.1 或 ::1"},{"key":"token","label":"访问令牌","secret":true,"required":true,"type":"password"},{"key":"pin","label":"证书指纹","secret":false,"required":false,"type":"text","hint":"自签名证书时填 sha256:<64 位十六进制>"}]}
 provider feishu_app {"id":"feishu_app","system":"feishu_app","name":"飞书应用机器人","auth":"credential","caps":["msg.receive","msg.send","directory.read","events"],"device":false,"fields":[{"key":"app_id","label":"App ID","secret":false,"required":true,"type":"text","hint":"开发者后台 → 凭证与基础信息"},{"key":"app_secret","label":"App Secret","secret":true,"required":true,"type":"password"},{"key":"verification_token","label":"Verification Token","secret":true,"required":false,"type":"password","hint":"只有用 webhook 接收事件时需要；长连接不需要"},{"key":"encrypt_key","label":"Encrypt Key","secret":true,"required":false,"type":"password","hint":"只有用 webhook 接收事件时需要；长连接不需要"},{"key":"domain","label":"域名","secret":false,"required":true,"type":"select","default":"feishu","hint":"feishu = 飞书，lark = Lark"}]}
 provider feishu_user {"id":"feishu_user","system":"feishu","name":"飞书 · 你本人","auth":"oauth","caps":["msg.receive","msg.send_as_user"],"device":false}
 provider github_app managed

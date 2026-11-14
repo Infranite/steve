@@ -7,6 +7,7 @@ import { clockDur } from "@/i18n/format"
 import { LANGS, lang, setLang, t, useT, type Lang } from "@/i18n"
 import { cn } from "cn"
 import { itemDisplayStatus } from "@/item-workflow-relation"
+import type { RRoom } from "@/api"
 import { ChevronLeftIcon, FileTextIcon, GitForkIcon, InboxIcon, ListTodoIcon, MoonIcon, PencilIcon, SearchIcon, SquareTerminalIcon, SunIcon, TerminalIcon, ArrowUpRightIcon, CornerDownRightIcon, MonitorIcon, XIcon, CircleCheckIcon, CircleSlashIcon, ChevronDownIcon, ChevronRightIcon, CircleAlertIcon, InfoIcon, TriangleAlertIcon, FileDiffIcon, FilePlusIcon, GlobeIcon, SparklesIcon, WrenchIcon,
   CircleAlertIcon as RelFailIcon, CircleCheckIcon as RelOkIcon, MegaphoneIcon as RelRunIcon,
 } from "lucide-react"
@@ -608,8 +609,13 @@ export function useNow(on: boolean) {
 /** a session not opened on its Node yet: how long it has been starting, and past two minutes that this is long.
  * Nothing else on the page says a start stands still: there is no turn, no event and no error to show. */
 const SLOW_START_MS = 120_000
-export function StartingLine({ since }: { since?: number }) {
-  const t = useT(), now = useNow(true), waited = since ? now - since : 0, slow = waited >= SLOW_START_MS
+/** why a session's turn has not gone yet: its device runs as many as its owner set; it goes by itself once one ends */
+export const roomLine = (r: RRoom) => r.reason === "node"
+  ? t("core:runBar.nodeWait", { detail: r.detail ?? "" })
+  : t("core:runBar.room", { running: r.running, max: r.max })
+export function StartingLine({ since, room }: { since?: number; room?: RRoom | null }) {
+  const t = useT(), now = useNow(true), waited = since ? now - since : 0, slow = !room && waited >= SLOW_START_MS
+  if (room) return <div className="type-callout text-attention" data-starting="room">{roomLine(room)}{waited >= 10_000 && <span className="ml-1.5 tabular-nums text-muted-foreground">{clock(waited)}</span>}</div>
   return <div className="type-callout text-muted-foreground" data-starting={slow ? "slow" : "ok"}>
     {t("core:transcript.starting")}{waited >= 10_000 && <span className="ml-1.5 tabular-nums">{clock(waited)}</span>}
     {slow && <div className="mt-1 type-footnote text-attention" data-starting-slow>{t("core:transcript.startingSlow")}</div>}
@@ -915,16 +921,16 @@ export function sessionWork(k: string): { evs: any[]; at: number[]; items: Trail
 }
 type TP = { k: string; compact?: boolean; tail?: number; range?: [number, number]; skip?: [number, number][] }
 /* the whole app re-renders on every store change: a transcript (hundreds of steps, markdown) only when its own events or status did */
-export function Transcript(p: TP) { const s = st.S[p.k]; return <TranscriptOf {...p} ev={s?.ev} st={s?.st} loaded={s?.loaded} /> }
-const TranscriptOf = memo(TranscriptImpl, (a, b) => a.k === b.k && a.ev === b.ev && a.st === b.st && a.loaded === b.loaded && a.compact === b.compact && a.tail === b.tail && a.range?.[0] === b.range?.[0] && a.range?.[1] === b.range?.[1] && String(a.skip ?? "") === String(b.skip ?? ""))
-function TranscriptImpl({ k, tail, range, skip }: TP & { ev?: unknown; st?: string; loaded?: boolean }) {
+export function Transcript(p: TP) { const s = st.S[p.k]; return <TranscriptOf {...p} ev={s?.ev} st={s?.st} loaded={s?.loaded} room={s?.room} /> }
+const TranscriptOf = memo(TranscriptImpl, (a, b) => a.k === b.k && a.ev === b.ev && a.st === b.st && a.loaded === b.loaded && JSON.stringify(a.room) === JSON.stringify(b.room) && a.compact === b.compact && a.tail === b.tail && a.range?.[0] === b.range?.[0] && a.range?.[1] === b.range?.[1] && String(a.skip ?? "") === String(b.skip ?? ""))
+function TranscriptImpl({ k, tail, range, skip }: TP & { ev?: unknown; st?: string; loaded?: boolean; room?: RRoom | null }) {
   const t = useT()
   const s = st.S[k]
   const [full, setFull] = useState(false)
   useEffect(() => { if (s && !s.loaded) void loadEvents(k) }, [k, s?.loaded])
   if (!s) return null
   if (!s.loaded) return <div className="flex items-center gap-2 type-callout text-muted-foreground"><Spinner className="size-3.5" />{t("core:transcript.loading")}</div>
-  if (!s.ev.length && !range) return s.starting ? <StartingLine since={s.since} /> : <div className="type-callout text-muted-foreground">{t(s.st === "run" ? "core:transcript.starting" : "core:transcript.empty")}</div>
+  if (!s.ev.length && !range) return s.starting || s.room ? <StartingLine since={s.since} room={s.room} /> : <div className="type-callout text-muted-foreground">{t(s.st === "run" ? "core:transcript.starting" : "core:transcript.empty")}</div>
   const segs = segsOf(s, range, skip)
   /* the turn running now may be shown elsewhere (skipped): then its progress is there, not here */
   const last = segs[segs.length - 1], tailOpen = (!range || range[1] >= s.ev.length) && last?.t !== "away"
@@ -934,7 +940,7 @@ function TranscriptImpl({ k, tail, range, skip }: TP & { ev?: unknown; st?: stri
     <div className="flex flex-col gap-4" data-transcript={k}>
       {from > 0 && <button type="button" onClick={() => setFull(true)} className="self-start type-footnote text-muted-foreground hover:text-foreground" data-show-all>{t("core:transcript.moreSegs", { count: from })}</button>}
       {segs.map((g, n) => n < from ? null : <SegView key={k + ":" + g.idx + ":" + g.t} k={k} g={g} live={n === liveIdx} />)}
-      {s.st === "run" && liveIdx < 0 && tailOpen && <div className="flex" data-transcript-pending><ThinkingLoader variant="plain" size="sm" phases={[t(last?.t === "a" ? "core:transcript.replying" : "core:transcript.startingShort")]} phase={0} className="[--ui-tlc-accent:var(--blue)]!" /></div>}
+      {s.st === "run" && liveIdx < 0 && tailOpen && <div className="flex" data-transcript-pending><ThinkingLoader variant="plain" size="sm" phases={[s.room ? roomLine(s.room) : t(last?.t === "a" ? "core:transcript.replying" : "core:transcript.startingShort")]} phase={0} className="[--ui-tlc-accent:var(--blue)]!" /></div>}
     </div>
   )
 }
@@ -955,7 +961,7 @@ export function RunBar({ k }: { k: string }) {
   const end = turn.findLast((e) => e[0] === "end"), endAt = end ? s.ts[s.ev.lastIndexOf(end)] : 0
   const stats = workStats(turn)
   const tone = run ? "run" : s.st === "wait" ? "wait" : end?.[1] === "cancelled" ? "stop" : s.st === "ended" ? "ended" : "done"
-  const label = starting ? t("core:transcript.startingShort") : t(`core:runBar.${tone}`)
+  const label = run && s.room ? roomLine(s.room) : starting ? t("core:transcript.startingShort") : t(`core:runBar.${tone}`)
   const what = run ? null : tone === "wait" ? t("core:runBar.waitWhat") : stats.join(" · ")
   return (
     /* running, the Thinking Loader inside is the live region that speaks each step; the bar itself would say it twice */
@@ -963,7 +969,7 @@ export function RunBar({ k }: { k: string }) {
       className={cn("mb-2 flex items-center gap-2.5 rounded-xl type-callout transition-colors duration-180 ease-(--ease-out)",
         tone === "run" ? "min-h-10 bg-blue/8 px-3.5 py-2" : tone === "wait" ? "min-h-10 bg-attention/10 px-3.5 py-2" : "min-h-8 py-1")}>
       {/* running: a Thinking Loader whose label is the step under way, rolling over as the steps change */}
-      {run ? <span className="flex min-w-0 flex-1 items-center" data-doing><ThinkingLoader variant="plain" size="sm" phases={[starting ? label : doing(turn)]} phase={0} className="min-w-0 [--ui-tlc-accent:var(--blue)]! [--ui-tlc-ink:var(--foreground)]!" /></span>
+      {run ? <span className="flex min-w-0 flex-1 items-center" data-doing><ThinkingLoader variant="plain" size="sm" phases={[starting || s.room ? label : doing(turn)]} phase={0} className="min-w-0 [--ui-tlc-accent:var(--blue)]! [--ui-tlc-ink:var(--foreground)]!" /></span>
         : tone === "wait" ? <StatusDot s="wait" className="mx-1" /> : tone === "done" ? <CircleCheckIcon className="size-4 shrink-0 text-success" strokeWidth={1.75} /> : tone === "stop" ? <CircleSlashIcon className="size-4 shrink-0 text-muted-foreground" strokeWidth={1.75} /> : <StatusDot s="ended" className="mx-1" />}
       {!run && <span className={cn("shrink-0 font-medium", tone === "wait" ? "text-attention" : "text-foreground/85")}>{label}</span>}
       {/* plain text in its own box: a flex row cuts text off without the ellipsis */}
@@ -995,7 +1001,7 @@ export function SessionBlock({ k, defaultOpen, replies }: { k: string; defaultOp
         <button type="button" onClick={toggle} className="group/toggle flex min-w-0 flex-1 items-center gap-2.5 text-left" aria-expanded={open}>
           <span className="shrink-0 type-callout font-medium">{t("core:session.no", { n: s.n })}</span>
           <Status s={s.st} sess />
-          <span className="min-w-0 truncate type-footnote text-muted-foreground">{open ? `${st.devices.find((d) => d.id === s.device)?.name ?? "Hub"} · ${s.h} · ${s.m} · ${s.dur}${s.ctx ? t("core:session.context", { pct: s.ctx }) : ""}` : lastA ? plainLine(String(lastA[1])) : s.starting ? t("core:transcript.startingShort") : s.st === "run" ? t("core:runBar.run") : ""}</span>
+          <span className="min-w-0 truncate type-footnote text-muted-foreground">{open ? `${st.devices.find((d) => d.id === s.device)?.name ?? "Hub"} · ${s.h} · ${s.m} · ${s.dur}${s.ctx ? t("core:session.context", { pct: s.ctx }) : ""}` : s.room ? roomLine(s.room) : lastA ? plainLine(String(lastA[1])) : s.starting ? t("core:transcript.startingShort") : s.st === "run" ? t("core:runBar.run") : ""}</span>
           <span className="ml-auto shrink-0 type-footnote text-muted-foreground group-hover/toggle:text-foreground">{t(open ? "core:session.collapse" : "core:session.expand")}</span>
         </button>
         <Tooltip><TooltipTrigger render={<Button variant="ghost" size="icon-xs" onClick={() => go("#/sessions/" + k)} data-enter-session={k} aria-label={t("core:session.enter")} className="text-muted-foreground" />}><ArrowUpRightIcon /></TooltipTrigger><TooltipContent>{t("core:session.enter")}</TooltipContent></Tooltip>

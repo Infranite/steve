@@ -11,8 +11,8 @@
 //!
 //! Levels:
 //! - `text` (删除消息正文): message text → NULL, attachments → `[]`, `purged = now`; the raw
-//!   payload of their `ext_events` → NULL. Rows, summaries and links stay, so items and decisions
-//!   keep working.
+//!   payload of their `ext_events` → NULL; output-intent content → `{}` (fingerprints and
+//!   receipts stay). Rows, summaries and links stay, so items and decisions keep working.
 //! - `all` (删除这个接入带来的群、消息和自动识别出的联系人): the spaces and everything that only
 //!   exists for them (members, settings, bindings, messages, reply basis, route logs, signals), and
 //!   the contacts `identify` created for their people that nobody confirmed, edited or used.
@@ -540,6 +540,13 @@ fn purge_text(tx: &Connection, ids: &[String], now: i64) -> ChannelResult<()> {
           WHERE id IN (SELECT value FROM json_each(?1))",
         params![ids, now],
     )?;
+    // The intent is another copy of the outbound body, not an exemption from explicit purge.
+    // Keep its fingerprint and routing metadata so retries still find the original receipt.
+    tx.execute(
+        "UPDATE output_deliveries SET intent = json_set(intent, '$.content', json('{}'))
+          WHERE message_id IN (SELECT value FROM json_each(?1))",
+        [&ids],
+    )?;
     tx.execute(
         "UPDATE ext_events SET payload = NULL, payload_purged = ?2
           WHERE message_id IN (SELECT value FROM json_each(?1)) AND payload IS NOT NULL",
@@ -597,6 +604,24 @@ fn delete_all(tx: &Connection, p: &Plan, now: i64) -> ChannelResult<()> {
             [&msgs],
         )?;
     }
+    // Delivery history belongs to its outbound message. Replies in another retained delivery
+    // are weak receipts, not ownership: detach the FK without deleting that delivery.
+    tx.execute(
+        "DELETE FROM output_deliveries WHERE message_id IN (SELECT value FROM json_each(?1))
+          OR space_id IN (SELECT value FROM json_each(?2))",
+        params![msgs, spaces],
+    )?;
+    tx.execute(
+        "UPDATE output_deliveries SET reply_message_id = NULL
+          WHERE reply_message_id IN (SELECT value FROM json_each(?1))",
+        [&msgs],
+    )?;
+    tx.execute(
+        "UPDATE output_channel_preferences SET
+          manual_space_id = CASE WHEN manual_space_id IN (SELECT value FROM json_each(?1)) THEN NULL ELSE manual_space_id END,
+          learned_space_id = CASE WHEN learned_space_id IN (SELECT value FROM json_each(?1)) THEN NULL ELSE learned_space_id END",
+        [&spaces],
+    )?;
     tx.execute(
         "DELETE FROM chan_messages WHERE id IN (SELECT value FROM json_each(?1))",
         [&msgs],
@@ -618,6 +643,10 @@ fn delete_all(tx: &Connection, p: &Plan, now: i64) -> ChannelResult<()> {
     // the contacts identify made for them, with their accounts
     let accounts = json_ids(&p.accounts);
     let contacts = json_ids(&p.contacts);
+    tx.execute(
+        "DELETE FROM output_channel_preferences WHERE party_id IN (SELECT value FROM json_each(?1))",
+        [&contacts],
+    )?;
     tx.execute(
         "DELETE FROM space_members WHERE account_id IN (SELECT value FROM json_each(?1))",
         [&accounts],

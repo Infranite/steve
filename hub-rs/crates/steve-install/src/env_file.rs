@@ -19,10 +19,24 @@ pub(crate) struct EnvDocument {
 }
 
 fn problem(line: Option<usize>, key: Option<&str>, reason: &str) -> anyhow::Error {
-    let location = line.map_or_else(|| t!("install.env.location_update"), |n| t!("install.env.location_line", n = n));
+    let location = line.map_or_else(
+        || t!("install.env.location_update"),
+        |n| t!("install.env.location_line", n = n),
+    );
     match key {
-        Some(key) => anyhow::anyhow!("{}", t!("install.env.problem_with_key", location = location, key = key, reason = reason)),
-        None => anyhow::anyhow!("{}", t!("install.env.problem", location = location, reason = reason)),
+        Some(key) => anyhow::anyhow!(
+            "{}",
+            t!(
+                "install.env.problem_with_key",
+                location = location,
+                key = key,
+                reason = reason
+            )
+        ),
+        None => anyhow::anyhow!(
+            "{}",
+            t!("install.env.problem", location = location, reason = reason)
+        ),
     }
 }
 
@@ -64,7 +78,11 @@ fn value_end(bytes: &[u8], start: usize, line: usize, key: &str) -> Result<usize
             Some(b'"') => match byte {
                 b'"' => quote = None,
                 b'$' | b'`' => {
-                    return Err(problem(Some(line), Some(key), &t!("install.env.no_expansion")));
+                    return Err(problem(
+                        Some(line),
+                        Some(key),
+                        &t!("install.env.no_expansion"),
+                    ));
                 }
                 b'\\' => {
                     let next = bytes.get(at + 1).ok_or_else(|| {
@@ -83,7 +101,11 @@ fn value_end(bytes: &[u8], start: usize, line: usize, key: &str) -> Result<usize
                 b'\'' | b'"' => quote = Some(byte),
                 b'\\' => {
                     if bytes.get(at + 1).is_none() {
-                        return Err(problem(Some(line), Some(key), &t!("install.env.no_continuation")));
+                        return Err(problem(
+                            Some(line),
+                            Some(key),
+                            &t!("install.env.no_continuation"),
+                        ));
                     }
                     at += 1;
                 }
@@ -112,7 +134,11 @@ fn value_end(bytes: &[u8], start: usize, line: usize, key: &str) -> Result<usize
         at += 1;
     }
     if quote.is_some() {
-        return Err(problem(Some(line), Some(key), &t!("install.env.quote_open")));
+        return Err(problem(
+            Some(line),
+            Some(key),
+            &t!("install.env.quote_open"),
+        ));
     }
     Ok(at)
 }
@@ -187,7 +213,11 @@ impl EnvDocument {
             let end = value_end(bytes, start, line, key)?;
             let rest = skip_blanks(bytes, end);
             if rest != bytes.len() && bytes[rest] != b'#' {
-                return Err(problem(Some(line), Some(key), &t!("install.env.one_per_line")));
+                return Err(problem(
+                    Some(line),
+                    Some(key),
+                    &t!("install.env.one_per_line"),
+                ));
             }
             // Prefixing the word preserves an initial # as assignment data, rather than
             // letting shlex treat a valid KEY=#fragment value as a comment.
@@ -234,8 +264,13 @@ impl EnvDocument {
             if self.values.get(key) == Some(value) {
                 continue;
             }
-            let quoted = crate::common::shell_quote(value)
-                .map_err(|_| problem(assignment.map(|a| a.line), Some(key), &t!("install.env.unencodable")))?;
+            let quoted = crate::common::shell_quote(value).map_err(|_| {
+                problem(
+                    assignment.map(|a| a.line),
+                    Some(key),
+                    &t!("install.env.unencodable"),
+                )
+            })?;
             match assignment {
                 Some(assignment) => replacements.push((assignment.value.clone(), quoted)),
                 None => appended.push((key, quoted)),

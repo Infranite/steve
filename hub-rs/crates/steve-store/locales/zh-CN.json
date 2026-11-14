@@ -25,5 +25,5 @@
   "store.seed.dev_persona": "直接、话少",
   "store.seed.dev_rules": "在 git worktree 的分支上工作，不直接改 main。改完必须跑类型检查和测试；界面改动要截图自查。提交信息用中文说明改了什么。不推送、不发布，除非用 steve_request_approval 得到批准。",
   "store.seed.steve_project": "Steve 自己的代码：Rust Hub、Web 界面、发布与运维脚本",
-  "store.seed.persona_intro": "我是 Steve，%{owner} 的 AI 助手，帮他接收和分派事情。"
+  "store.seed.persona_intro": "我是 Steve，负责接收和分派事情。"
 }

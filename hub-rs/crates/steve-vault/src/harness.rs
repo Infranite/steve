@@ -1,4 +1,4 @@
-//! What an agent harness Steve launches (Claude Code, Codex) must not see of the Hub: the files that
+//! What an agent harness Steve launches must not see of the Hub: the files that
 //! unlock the vault or hold the Hub's secrets, and the environment that points at them.
 //!
 //! Agents run as the owner's user, so these files are readable to them unless the harness itself
@@ -33,14 +33,20 @@ pub const PROTECTED: [&str; 14] = [
 pub fn hub_private_env(key: &str) -> bool {
     matches!(
         key,
-        "STEVE_UPGRADE_CONTROL_TOKEN" | "STEVE_SUPERVISOR_PID" | "STEVE_UPGRADE_ID"
+        "STEVE_UPGRADE_CONTROL_TOKEN"
+            | "STEVE_SUPERVISOR_PID"
+            | "STEVE_UPGRADE_ID"
+            | "OPENVIKING_KEY_FILE"
+            | "MAIL_PASSWORD_FILE"
     ) || key.starts_with("STEVE_VAULT_")
         || key.starts_with("STEVE_OIDC_")
         || key.starts_with("STEVE_KEYHELPER")
-        || key.ends_with("_SECRET_FILE")
-        || key.ends_with("_KEY_FILE")
-        || key.ends_with("_PASSWORD_FILE")
-        || (key.starts_with("STEVE_") && (key.ends_with("_SECRET") || key.ends_with("_PASSWORD")))
+        || (key.starts_with("STEVE_")
+            && (key.ends_with("_SECRET")
+                || key.ends_with("_PASSWORD")
+                || key.ends_with("_SECRET_FILE")
+                || key.ends_with("_KEY_FILE")
+                || key.ends_with("_PASSWORD_FILE")))
 }
 
 /// The names of [`hub_private_env`] in this process's environment (to remove from a child's).
@@ -237,15 +243,56 @@ pub fn seatbelt_rules(steve_home: &Path, node_home: &Path) -> Option<String> {
     ))
 }
 
+fn probe_sandbox(prog: &str, args: &[&str]) -> bool {
+    std::process::Command::new(prog)
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
+}
+
 /// Whether this process can start a seatbelt sandbox at all: not on another platform, and not
 /// from inside one (macOS nests none), as when Steve's own tests run in a confined session.
 pub fn seatbelt_works() -> bool {
     cfg!(target_os = "macos")
-        && std::process::Command::new("/usr/bin/sandbox-exec")
-            .args(["-p", "(version 1)(allow default)", "/usr/bin/true"])
-            .stderr(std::process::Stdio::null())
-            .status()
-            .is_ok_and(|s| s.success())
+        && probe_sandbox(
+            "/usr/bin/sandbox-exec",
+            &["-p", "(version 1)(allow default)", "/usr/bin/true"],
+        )
+}
+
+/// The path to a working `bwrap` (bubblewrap) on Linux, if user namespaces allow starting it here.
+pub fn bwrap_path() -> Option<PathBuf> {
+    if !cfg!(target_os = "linux") {
+        return None;
+    }
+    ["/usr/bin/bwrap", "/bin/bwrap", "/usr/local/bin/bwrap"]
+        .into_iter()
+        .find(|p| {
+            Path::new(p).exists()
+                && probe_sandbox(
+                    p,
+                    &[
+                        "--ro-bind",
+                        "/",
+                        "/",
+                        "--dev",
+                        "/dev",
+                        "--proc",
+                        "/proc",
+                        "--",
+                        "/usr/bin/true",
+                    ],
+                )
+        })
+        .map(PathBuf::from)
+}
+
+/// Whether Linux `bwrap` is installed and usable from this process.
+pub fn bwrap_works() -> bool {
+    bwrap_path().is_some()
 }
 
 /// Where runs write under `STEVE_HOME`: the items' worktrees, the scratch directories and the

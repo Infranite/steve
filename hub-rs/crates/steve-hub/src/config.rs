@@ -163,6 +163,8 @@ pub struct Config {
     /// What the Hub's harness manifest declares about adapters beyond their command
     /// (`STEVE_HARNESS_MANIFEST`, default `<STEVE_HOME>/harness.json`; [`steve_acp::adapters`]).
     pub declared_adapters: BTreeMap<String, steve_acp::Declaration>,
+    /// Adapter ids explicitly listed in the Hub's harness manifest (`harness.json`).
+    pub manifest_adapters: std::collections::BTreeSet<String>,
     /// Where that manifest is (the runtimes page adds adapters to it).
     pub harness_manifest: PathBuf,
     pub models: Models,
@@ -267,8 +269,8 @@ pub fn js_number(s: &str) -> f64 {
 
 /// `npm root -g`, or the Homebrew default when npm is missing.
 fn npm_root() -> String {
-    // npm's global prefix is the directory above `node`'s bin unless an npmrc moves it; when the adapter
-    // is installed there, that is what `npm root -g` would print, without spawning npm at boot
+    // npm's global prefix is the directory above `node`'s bin unless an npmrc moves it; when that
+    // directory is there, that is what `npm root -g` would print, without spawning npm at boot
     let on_path = std::env::var_os("PATH")
         .into_iter()
         .flat_map(|p| std::env::split_paths(&p).collect::<Vec<_>>())
@@ -279,7 +281,7 @@ fn npm_root() -> String {
             .parent()
             .and_then(Path::parent)
             .map(|p| p.join("lib/node_modules"))
-        && root.join("@agentclientprotocol/claude-agent-acp").exists()
+        && root.is_dir()
     {
         return root.to_string_lossy().into_owned();
     }
@@ -445,41 +447,22 @@ impl Config {
             .filter(|p| !p.is_empty())
             .map(PathBuf::from)
             .unwrap_or_else(|| home.join("harness.json"));
-        let (mut commands, declared_adapters) = harness_manifest(&manifest);
-        // npm root -g only when an adapter default is actually needed
+        let (commands, declared_adapters) = harness_manifest(&manifest);
+        let manifest_adapters: std::collections::BTreeSet<String> =
+            commands.keys().cloned().collect();
+        // npm root -g only when an npm-managed adapter default is actually needed
         let mut root: Option<String> = None;
-        let mut npm = || root.get_or_insert_with(npm_root).clone();
-        let mut adapters = BTreeMap::new();
-        let vars: Vec<(&str, &str)> = steve_acp::adapters::builtin_commands(Path::new(""))
-            .map(|(id, var, _)| (id, var))
-            .collect();
-        for (id, var) in vars {
-            let declared = commands
-                .remove(id)
-                .map(|c| c.to_string_lossy().into_owned());
-            // Steve's own install (`<home>/adapters`), else a global npm one, else Steve's own
-            // path: where `steve setup` and the Node's updates put it
-            let command = get(var).or(declared).unwrap_or_else(|| {
-                let own = steve_acp::managed::command(&home, id).unwrap_or_default();
-                if own.exists() {
-                    return own.to_string_lossy().into_owned();
-                }
-                let root = npm();
-                steve_acp::adapters::builtin_commands(Path::new(&root))
-                    .find(|(b, ..)| *b == id)
-                    .map(|(.., c)| c)
-                    .filter(|c| c.exists())
-                    .unwrap_or(own)
-                    .to_string_lossy()
-                    .into_owned()
-            });
-            adapters.insert(id.to_string(), command);
-        }
-        adapters.extend(
-            commands
-                .into_iter()
-                .map(|(id, c)| (id, c.to_string_lossy().into_owned())),
-        );
+        let path_var = get("PATH");
+        let adapters: BTreeMap<String, String> = steve_acp::resolve_builtin_adapters(
+            &home,
+            &commands,
+            |var| get(var).filter(|v| !v.is_empty()).map(PathBuf::from),
+            path_var.as_deref().map(std::ffi::OsStr::new),
+            || PathBuf::from(root.get_or_insert_with(npm_root).as_str()),
+        )
+        .into_iter()
+        .map(|(id, c)| (id, c.to_string_lossy().into_owned()))
+        .collect();
 
         let split = |s: String| {
             s.split(',')
@@ -533,6 +516,7 @@ impl Config {
             }),
             adapters,
             declared_adapters,
+            manifest_adapters,
             harness_manifest: manifest,
             models: Models {
                 // none by default: every call follows the harness's own default model
@@ -540,11 +524,14 @@ impl Config {
                 smart: split(env("STEVE_MODELS_SMART", "")),
             },
             // a new agent session's model only when set; else the harness's own default
-            default_models: get(steve_acp::adapters::DEFAULT_MODEL_VAR)
-                .map(|m| m.trim().to_string())
-                .filter(|m| !m.is_empty())
-                .map(|m| (steve_acp::adapters::DEFAULT_ADAPTER.0.to_string(), m))
-                .into_iter()
+            default_models: steve_acp::adapters::builtin_commands(Path::new(""))
+                .filter_map(|(id, var, _)| {
+                    let suffix = var.strip_prefix("STEVE_ADAPTER_")?;
+                    let model = get(&format!("STEVE_DEFAULT_MODEL_{suffix}"))?
+                        .trim()
+                        .to_string();
+                    (!model.is_empty()).then(|| (id.to_string(), model))
+                })
                 .collect(),
             idle_release_ms: if idle.is_finite() && idle >= 0.0 {
                 idle as u64
@@ -607,6 +594,9 @@ mod tests {
             .or_insert("/x/claude.js".into());
         m.entry("STEVE_ADAPTER_CODEX".into())
             .or_insert("/x/codex".into());
+        for (_, var, _) in steve_acp::adapters::builtin_commands(Path::new("")) {
+            m.entry(var.into()).or_insert("/x/adapter".into());
+        }
         Config::from_vars(|k| m.get(k).cloned()).expect("config")
     }
 
@@ -667,7 +657,7 @@ mod tests {
         for any in ["0.0.0.0", "127.0.0.1,0.0.0.0", "::", "[::]"] {
             let e = Config::from_vars(|k| match k {
                 "STEVE_HOST" => Some(any.into()),
-                "STEVE_ADAPTER_CLAUDE" | "STEVE_ADAPTER_CODEX" => Some("/x".into()),
+                v if v.starts_with("STEVE_ADAPTER_") => Some("/x".into()),
                 _ => None,
             })
             .expect_err(any);
@@ -771,12 +761,14 @@ mod tests {
 
     #[test]
     fn bad_port_is_an_error() {
-        let m = HashMap::from([
-            ("STEVE_PORT".to_string(), "abc".to_string()),
-            ("STEVE_ADAPTER_CLAUDE".into(), "x".into()),
-            ("STEVE_ADAPTER_CODEX".into(), "x".into()),
-        ]);
-        assert!(Config::from_vars(|k| m.get(k).cloned()).is_err());
+        assert!(
+            Config::from_vars(|k| match k {
+                "STEVE_PORT" => Some("abc".into()),
+                v if v.starts_with("STEVE_ADAPTER_") => Some("x".into()),
+                _ => None,
+            })
+            .is_err()
+        );
     }
 
     #[test]

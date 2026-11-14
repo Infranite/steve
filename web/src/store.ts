@@ -12,14 +12,14 @@ import { cue } from "./bus"
 import { newClientId } from "./composer-draft"
 import { elapsed, pastTime, span } from "./i18n/format"
 import i18n, { t } from "./i18n"
-import type { StateUpdate, RFile, PlanStep, RHold, RQueued, RKindReview, SuggestChoice, A2uiRecord, A2uiSubmit, RAnnotation } from "./api"
+import type { StateUpdate, RFile, PlanStep, RHold, RQueued, RRoom, RKindReview, SuggestChoice, A2uiRecord, A2uiSubmit, RAnnotation } from "./api"
 import type { Cite } from "./api/knowledge"
 import { yoloApi, type RYolo, type RYoloAction } from "./api/yolo"
 import { applyLook } from "./lib/motion"
 
 /* ───────── view types (from the prototype) ───────── */
 export type Ev = any[] // ['u',text,label?] ['q',string[]] ['th',text,secs] ['tool',kind,title,meta,detail,live?,add?,del?,failed?,tool?,desc?,input?,plan?,endedAt?,steveArgs?] ['a',text] ['ho',text,toSid] ['hi',text] ['ask',text] ['sys',text] ['end',stopReason]
-export type Sess = { id: string; n: number; item: string | null; b: string | null; h?: string; harness?: string; nativeId?: string | null; cwd?: string; m?: string; reasoningEffort?: string | null; contextKnown?: boolean; /** the context in tokens, as the harness reported it: used and the window's size */ ctxUsed?: number; ctxSize?: number; st: "run" | "wait" | "idle" | "ended"; title: string; dur: string; ctx: number; src: string; up: string; /** last activity (ms) */ at?: number; ev: Ev[]; seqs: number[]; ts: number[]; from?: string | null; fork?: { s: string; at: number }; queue: RQueued[]; ro?: boolean; device: string; loaded: boolean; busy: boolean
+export type Sess = { id: string; n: number; item: string | null; b: string | null; h?: string; harness?: string; nativeId?: string | null; cwd?: string; m?: string; reasoningEffort?: string | null; contextKnown?: boolean; /** the context in tokens, as the harness reported it: used and the window's size */ ctxUsed?: number; ctxSize?: number; st: "run" | "wait" | "idle" | "ended"; title: string; dur: string; ctx: number; src: string; up: string; /** last activity (ms) */ at?: number; ev: Ev[]; seqs: number[]; ts: number[]; from?: string | null; fork?: { s: string; at: number }; queue: RQueued[]; ro?: boolean; device: string; loaded: boolean; busy: boolean; /** its next turn waits for room on its device */ room?: RRoom | null
   /** not opened on its Node yet: no turn runs, the queue waits for the start; `since` is when it was created */
   starting?: boolean; since?: number }
 export type Wait = { type: "approve" | "ask" | "accept" | "propose" | "fail" | "confirm"; subjectId?: string; q: string; draft?: string; opts?: string[]; since: string; decision: string; subject: string; session: string | null; options: string[]; by: string; busy?: boolean }
@@ -126,12 +126,27 @@ export const waitLine = (w: Wait) => t("core:wait.line", { kind: w.subject === "
 /* the name a harness's runtime reports (an adapter of one's own included), when the Hub listed it */
 export const runtimeName = (h: string): string | undefined => raw.state?.runtimes?.find((r) => r.id === h)?.name
 const harnessLabel = (h: string) => runtimeName(h) ?? h
-/** the harness adapter a new bot runs on unless one is chosen: the first that is ready */
-export const defaultHarness = (): string => { const rs = raw.state?.runtimes ?? []; return (rs.find((r) => r.ok) ?? rs[0])?.id ?? "" }
+/** the harness adapter a new bot runs on unless one is chosen: the workspace's main bot's if ready, else the first that is ready */
+export const defaultHarness = (): string => {
+  const rs = raw.state?.runtimes ?? []
+  const main = raw.state?.bots?.find((b) => b.main)?.harness
+  if (main && rs.some((r) => r.id === main && r.ok)) return main
+  return (rs.find((r) => r.ok) ?? rs[0])?.id ?? ""
+}
 /** Steve's permission mode (`plan`, `ask`, …) of a stored bot mode */
 const PERM_MODE: Record<string, string> = { plan: "plan", default: "ask", acceptEdits: "accept_edits", auto: "auto", bypassPermissions: "full_access" }
 /** the bot modes `harness` can be set to (all while the Hub does not know) */
-export const permModes = (harness: string): string[] => { const m = raw.state?.runtimes?.find((r) => r.id === harness)?.modes; return Object.keys(PERM).filter((k) => !m || m.includes(PERM_MODE[k])) }
+export const permModes = (harness: string): string[] => {
+  const m = raw.state?.runtimes?.find((r) => r.id === harness)?.modes
+  if (!m || !m.length) return Object.keys(PERM)
+  const xs = Object.keys(PERM).filter((k) => m.includes(PERM_MODE[k]))
+  return xs.length ? xs : ["default"]
+}
+/** a compatible permission mode for `harness`, in priority order */
+export const defaultPermMode = (harness: string): string => {
+  const ms = permModes(harness)
+  return (["default", "auto", "acceptEdits", "plan", "bypassPermissions"] as const).find((k) => ms.includes(k)) ?? ms[0] ?? "default"
+}
 /** the reasoning efforts `harness` takes, as its adapter reported them */
 export const harnessEfforts = (harness: string): string[] => raw.state?.runtimes?.find((r) => r.id === harness)?.efforts ?? []
 /** whether `harness` reads a Bot's skills, as its adapter declares (undefined: the Hub did not say) */
@@ -295,7 +310,7 @@ function sessOf(s: RSession, openSessions: Set<string>): Sess {
   const conv = evs ? convOf(s.id, evs, running) : { ev: [], seqs: [], ts: [] }
   return { id: s.id, n: s.no, item: s.item_id, b: s.bot_id, h: harnessLabel(s.harness), harness: s.harness, nativeId: s.harness_session_id ?? null, cwd: s.cwd, m: s.model ?? t("core:defaultModel"), st: running ? "run" : s.status === "ended" ? "ended" : openSessions.has(s.id) ? "wait" : "idle",
     title: s.title, dur: dur(s.created, s.updated), reasoningEffort: s.reasoning_effort, contextKnown: s.used != null && s.size != null && s.size > 0, ctxUsed: s.used ?? undefined, ctxSize: s.size ?? undefined, ctx: s.used && s.size ? Math.round((s.used / s.size) * 100) : 0, src: s.source, up: tm(s.updated), at: s.updated, ev: conv.ev, seqs: conv.seqs, ts: conv.ts, queue: s.queued,
-    ro: s.readonly, device: s.device_id, loaded: !!evs, busy: s.busy, starting: s.status === "starting", since: s.created }
+    ro: s.readonly, device: s.device_id, loaded: !!evs, busy: s.busy, room: running ? s.room ?? null : null, starting: s.status === "starting", since: s.created }
 }
 function waitOf(d: RDecision): Wait {
   const opts = d.kind === "ask" ? d.options : undefined
@@ -1097,7 +1112,12 @@ export async function saveBot(k: string, p: { n?: string; role?: string; pers?: 
   if (p.color !== undefined || p.round !== undefined || p.skin !== undefined) q.avatar = { color: p.color ?? b.color, round: p.round ?? b.round, skin: p.skin !== undefined ? p.skin : b.skin }
   await call(api.patchBot(k, q), msg)
 }
-export async function makeBot(n: string, role: string, harness = defaultHarness(), model: string | null = null) { const r = await call(api.newBot({ name: n, role, harness, model }), t("core:toast.botCreated")); return r?.id }
+export async function makeBot(n: string, role: string, harness = defaultHarness(), model: string | null = null) {
+  const q: Partial<RBot> & { name: string } = { name: n, role, model }
+  if (harness) { q.harness = harness; q.perm_mode = defaultPermMode(harness) }
+  const r = await call(api.newBot(q), t("core:toast.botCreated"))
+  return r?.id
+}
 export async function draftBot(desc: string) { const r = await call(api.draftBot(desc), t("core:toast.botDrafted")); return r?.id }
 export async function deleteBot(k: string, to: string, mem: "删除" | "导出") {
   const b = st.bots[k]; const r = await call(api.deleteBot(k, to, mem === "删除" ? "delete" : "export")); if (!r) return

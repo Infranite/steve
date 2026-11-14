@@ -577,7 +577,7 @@ async fn an_exhausted_node_backs_off_tells_the_session_once_and_runs_the_same_co
         assert!((want..want + 50).contains(d), "{delays:?}");
     }
     let notes: i64 =
-        h.q("SELECT COUNT(*) FROM events WHERE kind='system' AND data LIKE '%Node 存储/容量已满%'");
+        h.q("SELECT COUNT(*) FROM events WHERE kind='system' AND data LIKE '%Node 暂不接新工作%'");
     assert_eq!(notes, 1, "one note, not one per retry");
     assert_eq!(h.attempts().len(), 1, "never a new attempt");
     let state: String = h.q("SELECT state FROM node_commands WHERE method='start_turn'");
@@ -5173,5 +5173,84 @@ async fn a_new_session_gets_its_principals_own_harness_directory() {
         assert_eq!(state["import_owner"], imports, "{v}");
         let recorded: String = h.q("SELECT state_dir FROM runtime_sessions WHERE session_id='s1'");
         assert_eq!(recorded, dir);
+    }
+}
+
+#[tokio::test]
+async fn saved_capacity_queues_and_increasing_it_dispatches_the_same_turn() {
+    let h = hub();
+    h.node.follow_session_capacity();
+    h.store.transaction::<_,StoreError>(|tx| {
+        tx.execute("INSERT INTO nodes(node_id,owner,name,pubkey,fingerprint,state,max_sessions,created) VALUES ('n1','u','Node',zeroblob(32),'fp','active',1,1)", [])?;
+        tx.execute("INSERT INTO sessions(id,workspace_id,harness,cwd,status,created,updated) VALUES ('s2','default','claude-code','.','active',1,1)", [])?;
+        Ok(())
+    }).unwrap();
+    h.bind();
+    h.rt.prompt(S, "first", "user", &[]).unwrap();
+    until("first active", || {
+        h.count("start_turn") == 1 && h.phase() == "active"
+    })
+    .await;
+    h.rt.bind(&Binding {
+        session: "s2".into(),
+        resource: "item:s2".into(),
+        prepare: PrepareKind::Scratch,
+        choice: build::choice(),
+        policy: build::policy(),
+    })
+    .unwrap();
+    h.rt.prompt("s2", "second", "user", &[]).unwrap();
+    until("capacity queued", || {
+        h.q::<i64>("SELECT COUNT(*) FROM node_commands WHERE method='start_turn'") == 2
+    })
+    .await;
+    until("capacity reason projected", || {
+        h.store
+            .reader(steve_store::runtime::sessions_waiting_for_room)
+            .unwrap()
+            .len()
+            == 1
+    })
+    .await;
+    assert_eq!(h.count("start_turn"), 1);
+    let queued: String =
+        h.q("SELECT operation_id FROM node_commands WHERE method='start_turn' AND state='pending'");
+    assert_eq!(h.q::<i64>("SELECT lease_generation FROM node_commands WHERE operation_id=(SELECT operation_id FROM node_commands WHERE method='start_turn' AND state='pending')"),0,"never sent while full");
+    assert_eq!(
+        h.node.probe(false).await.unwrap().capacity.sessions,
+        1,
+        "actual limiter follows saved value"
+    );
+    h.store
+        .transaction::<_, StoreError>(|tx| {
+            assert!(steve_store::nodes::set_max_sessions(tx, "n1", "u", 2)?);
+            Ok(())
+        })
+        .unwrap();
+    until("second dispatched", || h.count("start_turn") == 2).await;
+    assert_eq!(h.node.probe(false).await.unwrap().capacity.sessions, 2);
+    assert!(
+        h.node
+            .log()
+            .iter()
+            .any(|(m, op)| *m == "start_turn" && op.as_str() == queued)
+    );
+    until("capacity wait cleared", || {
+        h.store
+            .reader(steve_store::runtime::sessions_waiting_for_room)
+            .unwrap()
+            .is_empty()
+    })
+    .await;
+    assert_eq!(
+        h.q::<i64>("SELECT COUNT(*) FROM runtime_attempts"),
+        2,
+        "no new retry attempt"
+    );
+    // Cancel remains dispatchable even though every slot is occupied.
+    assert!(h.rt.cancel("s2").unwrap());
+    until("cancel reached Node", || h.count("cancel") == 1).await;
+    for exec in h.attempts() {
+        let _ = h.node.finish(&exec, build::done()).await;
     }
 }

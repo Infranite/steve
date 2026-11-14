@@ -242,7 +242,7 @@ impl Core {
         self.store()
             .message_patch_meta(msg_id, &Value::Object(meta))?;
         th.route_outcome(&origin, "suggest_item", Some(&item.id))?;
-        let text = format!("好，建了 {}，交给{}了。", item.id, self.bot_name(&item));
+        let text = format!("好，建了 {}，交给 {} 了。", item.id, self.bot_name(&item));
         let id = self.announce(
             ws,
             &item,

@@ -52,6 +52,7 @@ struct H {
     _keys: TempDir,
     fake: FakeExtWs,
     ext: Arc<ExtWs>,
+    bot: Arc<ExtWs>,
     conns: Connections,
     ch: Channels,
     /// The Hub's clock when the test started (the fake's clock too).
@@ -62,10 +63,13 @@ async fn setup() -> H {
     let fake = FakeExtWs::start().await.expect("fake service");
     let core = Arc::new(FakeCore::default());
     let flow_setup = FlowSetup::new(core);
+    let disclosure = steve_channels::disclosure::Disclosure::with_models(Vec::new());
     let env = TestEnv::new(|r| {
         flow_setup.register(r);
         connections::register(r);
+        r.outbound_check(Box::new(disclosure.clone()));
     });
+    disclosure.bind(env.store().clone(), env.gateway.clone());
     let t0 = env.clock.now();
     fake.with(|w| w.now = Some(t0));
     env.store()
@@ -82,19 +86,28 @@ async fn setup() -> H {
     );
     vault.init(WS, ME).expect("vault init");
     let ext = Arc::new(ExtWs::with_timing(timing()));
+    let bot = Arc::new(ExtWs::bot_with_timing(timing()));
     let conns = Connections::builder(
         env.modules.clone(),
         vault,
         ConnectionsConfig::new(Vec::new(), true, |_| None),
     )
     .provider(ext.clone())
+    .provider(bot.clone())
     .build();
     let flow = flow_setup
         .connections(conns.clone())
         .build(env.modules.clone(), Arc::new(LinearExecutor));
     let ch = Channels::builder(env.modules.clone(), conns.clone(), Arc::new(flow))
         .decl(ext_ws::decl())
+        .decl(ext_ws::bot_decl())
+        .adapter(bot.clone())
+        .media(bot.clone())
+        .connector(bot.clone())
+        .history(bot.clone())
+        .profiles(bot.clone())
         .media(ext.clone())
+        .connector(ext.clone())
         .history(ext.clone())
         .profiles(ext.clone())
         .build();
@@ -103,6 +116,7 @@ async fn setup() -> H {
         _keys: keys,
         fake,
         ext,
+        bot,
         conns,
         ch,
         t0,
@@ -141,6 +155,11 @@ impl H {
                 ext_ws::ADAPTER,
                 Some(ext_ws::decl()),
                 Arc::new(ExtWsHook::new(self.ch.clone(), self.ext.clone())),
+            )
+            .hook(
+                ext_ws::BOT_ADAPTER,
+                Some(ext_ws::bot_decl()),
+                Arc::new(ExtWsHook::new(self.ch.clone(), self.bot.clone())),
             )
             .build();
         let (tx, rx) = mpsc::channel(256);
@@ -965,4 +984,846 @@ async fn history_media_and_people_are_read_through_the_service() {
     assert_eq!(a.profiles.len(), 1);
     assert_eq!(a.profiles[0].name, "Grace");
     assert_eq!(a.profiles[0].email.as_deref(), Some("grace@example.com"));
+}
+
+// Generic connector extension. Nothing in these tests contacts a real account or platform.
+fn connector_manifest() -> Value {
+    json!({"version":1,"id":"example","events":["issue.updated"],"operations":[
+        {"name":"search","capability":"search","description":"Search documents on this account",
+         "inputSchema":{"type":"object","properties":{"query":{"type":"string"}},"required":["query"],"additionalProperties":false},
+         "annotations":{"readOnlyHint":true,"steve":{"resources":["document"],"asYou":false}}},
+        {"name":"read","capability":"read","description":"Read an original by its Hub reference",
+         "inputSchema":{"type":"object","properties":{"reference":{"type":"string"}},"required":["reference"],"additionalProperties":false},
+         "annotations":{"readOnlyHint":true,"steve":{"resources":["document"],"asYou":false}},"bindings":{"reference":"reference"}},
+        {"name":"update","capability":"write","description":"Update a referenced original",
+         "inputSchema":{"type":"object","properties":{"reference":{"type":"string"},"text":{"type":"string"}},"required":["reference","text"],"additionalProperties":false},
+         "annotations":{"readOnlyHint":false,"destructiveHint":true,"steve":{"resources":["document"],"asYou":true}},"bindings":{"reference":"reference"}}
+    ]})
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn connector_discovery_explicit_read_references_and_unknown_write() {
+    let h = setup().await;
+    h.fake.with(|w| {
+        w.connector = Some(connector_manifest());
+        // Generic connectors need neither messaging history nor media support.
+        w.features = vec!["me".into(), "changes".into()];
+        w.connector_results.insert(
+            "search".into(),
+            json!({"content":[{"type":"text","text":"One document"}],"references":[{
+            "kind":"reference","external_id":"provider-document-1","conversation_id":"project-1",
+            "source_message_id":"provider-message-7","original_type":"document","title":"Design",
+            "body":"must not persist","reference_id":"forged-by-plugin"}]}),
+        );
+        w.connector_results.insert(
+            "read".into(),
+            json!({"content":[{"type":"text","text":"Original fetched on demand"}]}),
+        );
+    });
+    let conn = h.connect().await;
+    let who = caller(WS, ME);
+    let tools = h.ch.connector_tools(&who).await.unwrap();
+    assert_eq!(tools.len(), 3);
+    assert!(h.fake.calls("messages.history").is_empty());
+    assert!(h.fake.calls("connector.call").is_empty());
+    let search = &tools
+        .iter()
+        .find(|t| t.operation.name == "search")
+        .unwrap()
+        .name;
+    let read = &tools
+        .iter()
+        .find(|t| t.operation.name == "read")
+        .unwrap()
+        .name;
+    let write = &tools
+        .iter()
+        .find(|t| t.operation.name == "update")
+        .unwrap()
+        .name;
+    let result =
+        h.ch.connector_call(&who, search, json!({"query":"Design"}), "search-1")
+            .await
+            .unwrap();
+    let reference = result["references"][0]["reference_id"].as_str().unwrap();
+    assert!(reference.starts_with("ref_"));
+    assert_ne!(reference, "forged-by-plugin");
+    assert!(result["references"][0].get("external_id").is_none());
+    assert!(result["references"][0].get("body").is_none());
+    assert!(
+        h.rows("SELECT id FROM chan_messages", &[]).is_empty(),
+        "search must not import history"
+    );
+    assert!(
+        h.ch.connector_call(
+            &who,
+            read,
+            json!({"reference":"provider-document-1"}),
+            "bad-id"
+        )
+        .await
+        .is_err()
+    );
+    assert!(
+        h.ch.connector_call(
+            &who,
+            read,
+            json!({"reference":reference,"unexpected":true}),
+            "bad-schema"
+        )
+        .await
+        .is_err()
+    );
+    let original =
+        h.ch.connector_call(&who, read, json!({"reference":reference}), "read-1")
+            .await
+            .unwrap();
+    assert_eq!(original["content"][0]["text"], "Original fetched on demand");
+    assert_eq!(
+        h.fake.calls("connector.call").last().unwrap()["arguments"]["reference"],
+        "provider-document-1"
+    );
+    h.fake.with(|w| w.lose_connector_response = true);
+    let unknown =
+        h.ch.connector_call(
+            &who,
+            write,
+            json!({"reference":reference,"text":"updated"}),
+            "write-1",
+        )
+        .await
+        .unwrap();
+    assert_eq!(unknown["status"], "unknown");
+    assert_eq!(unknown["retry"], false);
+    assert_eq!(
+        h.fake.with(|w| w.writes.len()),
+        1,
+        "writes must not be replayed"
+    );
+    h.env
+        .store()
+        .transaction(|tx| {
+            tx.execute(
+                "UPDATE connector_refs SET expires=0 WHERE id=?",
+                [reference],
+            )?;
+            Ok::<_, steve_modules::ApiError>(())
+        })
+        .unwrap();
+    assert!(
+        h.ch.connector_call(&who, read, json!({"reference":reference}), "expired")
+            .await
+            .unwrap_err()
+            .contains("expired")
+    );
+    // A second personal account cannot use the first account's Hub-issued reference.
+    h.fake
+        .with(|w| w.signed_in = json!({"kind":"id","value":"u_other"}));
+    let other = h.connect().await;
+    assert_ne!(other, conn);
+    let name = steve_channels::connector::tool_name(&other, "read");
+    assert!(
+        h.ch.connector_call(&who, &name, json!({"reference":reference}), "cross-account")
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn connector_events_reconnect_dedupe_and_no_automatic_backfill() {
+    let h = setup().await;
+    h.fake.with(|w| w.connector = Some(connector_manifest()));
+    let _id = h.connect().await;
+    let (rt, _tx) = h.runtime();
+    until("subscribed", || !h.subscribes().is_empty()).await;
+    let event = json!({"type":"event","event_type":"issue.updated","event_id":"stable-1",
+        "occurred_ms": h.t0+1,"summary":"Issue updated","conversation_id":"project-1","topic_id":"issue-7",
+        "space_id":"forged-hub-space","message_id":"forged-hub-message"});
+    let seq = h.fake.push(vec![event.clone()]);
+    until("acked event", || h.fake.acked() == seq).await;
+    h.fake.drop_all();
+    until("connector reconnected", || h.subscribes().len() == 2).await;
+    assert_eq!(
+        h.subscribes()[1]["from"],
+        json!({"cursor":format!("c:{seq}")})
+    );
+    let seq = h.fake.push(vec![
+        event,
+        json!({"type":"gap","chats":["project-1"],"from_ms":h.t0-1000,"to_ms":h.t0}),
+    ]);
+    until("acked duplicate and gap", || h.fake.acked() == seq).await;
+    let rows = h.rows(
+        "SELECT id,payload FROM ext_events WHERE source='connector'",
+        &[],
+    );
+    assert_eq!(rows.len(), 1, "stable event ID deduplicates");
+    assert!(!rows[0][1].as_str().unwrap().contains("forged-hub"));
+    assert!(h.fake.calls("messages.history").is_empty());
+    rt.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn connector_rich_message_keeps_only_reference_metadata() {
+    let h = setup().await;
+    h.fake.with(|w| w.connector = Some(connector_manifest()));
+    let _conn = h.connect().await;
+    let (rt, _tx) = h.runtime();
+    until("subscribed", || !h.subscribes().is_empty()).await;
+    let mut m = msg(&h, "pr-7", "rich-1", "u_7", "Pull request description", 1);
+    m["chat_kind"] = json!("pr");
+    m["thread_id"] = json!("topic-7");
+    m["reply_to"] = json!({"id":"parent-message"});
+    m["sender"]["aliases"] = json!([{"kind":"email","value":"dev@example.org"}]);
+    m["attachments"] = json!([
+        {"type":"document","key":"original-key","title":"Design","size":42,"body":"must not persist","reference_id":"forged"},
+        {"type":"webpage","key":"page-key","url":"https://example.org/design","html":"must not persist"}
+    ]);
+    let seq = h.fake.push_message(m);
+    until("rich reference ack", || h.fake.acked() == seq).await;
+    let rows = h.rows("SELECT m.id,m.attachments,s.kind,m.thread_key,m.reply_to FROM chan_messages m JOIN spaces s ON s.id=m.space_id WHERE s.external_id='pr-7'",&[]);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0][2], "pr");
+    assert_eq!(rows[0][3], "topic-7");
+    assert_eq!(rows[0][4], "parent-message");
+    let a: Value = serde_json::from_str(rows[0][1].as_str().unwrap()).unwrap();
+    assert!(a[0]["reference_id"].as_str().unwrap().starts_with("ref_"));
+    assert!(a[0].get("body").is_none());
+    assert!(a[1].get("html").is_none());
+    let presented = h
+        .env
+        .store()
+        .reader(|c| {
+            Ok::<_, steve_modules::ApiError>(
+                steve_channels::media::present(c, rows[0][0].as_str().unwrap()).unwrap(),
+            )
+        })
+        .unwrap();
+    assert!(presented.1[0].get("key").is_none());
+    assert!(h.fake.calls("media.download").is_empty());
+    rt.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn connector_catalog_and_references_do_not_bypass_current_permissions() {
+    let h = setup().await;
+    h.fake.with(|w| {
+        w.connector = Some(connector_manifest());
+    });
+    let conn = h.connect().await;
+    let who = caller(WS, ME);
+    let name = steve_channels::connector::tool_name(&conn, "search");
+    assert_eq!(h.ch.connector_tools(&who).await.unwrap().len(), 3);
+    let unknown_user = caller(WS, "not-the-account-owner");
+    assert!(
+        h.ch.connector_tools(&unknown_user)
+            .await
+            .unwrap_or_default()
+            .is_empty()
+    );
+    h.conns
+        .patch(&who, &conn, None, Some(vec!["msg.receive".into()]))
+        .unwrap();
+    assert_eq!(
+        h.ch.connector_tools(&who).await.unwrap().len(),
+        2,
+        "disabled write cap hides write operations"
+    );
+    h.conns.patch(&who, &conn, Some(true), None).unwrap();
+    assert!(
+        h.ch.connector_call(&who, &name, json!({"query":"anything"}), "paused")
+            .await
+            .is_err()
+    );
+    assert!(h.fake.calls("connector.call").is_empty());
+    h.conns.patch(&who, &conn, Some(false), None).unwrap();
+    h.fake.with(|w| {
+        w.connector.as_mut().unwrap()["operations"] = json!([]);
+    });
+    assert!(
+        h.ch.connector_call(&who, &name, json!({"query":"anything"}), "removed")
+            .await
+            .unwrap_err()
+            .contains("no longer declared")
+    );
+    assert!(
+        h.fake.calls("connector.call").is_empty(),
+        "cached connect metadata is not a dispatch grant"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn connector_message_binding_uses_provider_id_or_connection_source_never_hub_fingerprint() {
+    let h = setup().await;
+    let mut manifest = connector_manifest();
+    manifest["operations"].as_array_mut().unwrap().push(json!({
+        "name":"read_message","capability":"read","description":"Read one known message",
+        "inputSchema":{"type":"object","properties":{"message":{"type":"string"}},"required":["message"],"additionalProperties":false},
+        "annotations":{"readOnlyHint":true},"bindings":{"message":"message"}
+    }));
+    h.fake.with(|w| w.connector = Some(manifest));
+    let conn = h.connect().await;
+    let (rt, _tx) = h.runtime();
+    until("subscribed", || !h.subscribes().is_empty()).await;
+    let mut no_id = msg(
+        &h,
+        "c_42",
+        "source-without-platform-id",
+        "u_7",
+        "No platform ID",
+        1,
+    );
+    no_id.as_object_mut().unwrap().remove("id");
+    let seq = h.fake.push_message(no_id);
+    until("stored fallback message", || h.fake.acked() == seq).await;
+    let seq = h.fake.push_message(msg(
+        &h,
+        "c_42",
+        "source-with-platform-id",
+        "u_7",
+        "Has platform ID",
+        2,
+    ));
+    until("stored platform message", || h.fake.acked() == seq).await;
+    let rows = h.rows("SELECT m.id,m.external_id,x.source_id FROM chan_messages m JOIN chan_message_seen x ON x.message_id=m.id WHERE x.connection_id=? ORDER BY m.created,m.id",&[&conn]);
+    assert_eq!(rows.len(), 2);
+    let name = steve_channels::connector::tool_name(&conn, "read_message");
+    let fallback_hub = rows
+        .iter()
+        .find(|row| row[2] == "source-without-platform-id")
+        .unwrap()[0]
+        .as_str()
+        .unwrap()
+        .to_string();
+    for row in rows {
+        let hub = row[0].as_str().unwrap();
+        let stored = row[1].as_str().unwrap();
+        let source = row[2].as_str().unwrap();
+        h.ch.connector_call(
+            &caller(WS, ME),
+            &name,
+            json!({"message":hub}),
+            "read-message",
+        )
+        .await
+        .unwrap();
+        let calls = h.fake.calls("connector.call");
+        assert!(
+            !calls.last().unwrap()["arguments"]
+                .to_string()
+                .contains("fp:"),
+            "no Hub fingerprint in any connector.call argument"
+        );
+        let remote = calls.last().unwrap()["arguments"]["message"]
+            .as_str()
+            .unwrap();
+        assert!(
+            !remote.starts_with("fp:"),
+            "Hub-only content IDs must never reach the provider"
+        );
+        assert_eq!(
+            remote,
+            if source == "source-without-platform-id" {
+                assert!(stored.starts_with("fp:"));
+                source
+            } else {
+                assert_eq!(stored, "m_source-with-platform-id");
+                stored
+            }
+        );
+    }
+    // The connection's delivery mapping is required when the platform supplied no message ID.
+    h.env
+        .store()
+        .transaction(|tx| {
+            tx.execute(
+                "DELETE FROM chan_message_seen WHERE connection_id=? AND message_id=?",
+                rusqlite::params![conn, fallback_hub],
+            )?;
+            Ok::<_, steve_modules::ApiError>(())
+        })
+        .unwrap();
+    let before = h.fake.calls("connector.call").len();
+    assert!(
+        h.ch.connector_call(
+            &caller(WS, ME),
+            &name,
+            json!({"message":fallback_hub}),
+            "missing-source"
+        )
+        .await
+        .is_err()
+    );
+    assert_eq!(
+        h.fake.calls("connector.call").len(),
+        before,
+        "missing source must be refused before dispatch"
+    );
+    rt.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn connector_participants_aliases_and_departed_conversation_cannot_reuse_references() {
+    let h = setup().await;
+    h.fake.with(|w| {
+        let mut manifest = connector_manifest();
+        manifest["operations"].as_array_mut().unwrap().push(json!({
+            "name":"message","description":"Read one message","capability":"read",
+            "inputSchema":{"type":"object","properties":{"message":{"type":"string"}},"required":["message"],"additionalProperties":false},
+            "annotations":{"readOnlyHint":true},"bindings":{"message":"message"}
+        }));
+        w.connector = Some(manifest);
+        w.connector_results.insert("search".into(), json!({"references":[{
+            "kind":"reference","external_id":"doc","conversation_id":"issue-9","original_type":"document"
+        }]}));
+    });
+    let conn = h.connect().await;
+    let (rt, _tx) = h.runtime();
+    until("subscribed", || !h.subscribes().is_empty()).await;
+    let seq = h
+        .fake
+        .push_message(msg(&h, "issue-9", "message-9", "u_7", "Issue", 1));
+    until("message ack", || h.fake.acked() == seq).await;
+    let member = json!({"id":{"kind":"id","value":"u_8"},"display":"Contributor",
+        "aliases":[{"kind":"email","value":"contributor@example.org"}],"role":"admin"});
+    let seq = h.fake.push(vec![json!({"type":"participants","conversation_id":"issue-9","change":"added","members":[member.clone()]})]);
+    until("participant ack", || h.fake.acked() == seq).await;
+    let found = h.rows("SELECT sm.role FROM space_members sm JOIN spaces s ON s.id=sm.space_id JOIN accounts a ON a.id=sm.account_id JOIN accounts alias ON alias.party_id=a.party_id WHERE s.external_id='issue-9' AND alias.handle='contributor@example.org'", &[]);
+    assert_eq!(
+        found.len(),
+        1,
+        "participant alias resolves to the member's party"
+    );
+    assert_eq!(found[0][0], "admin");
+    let seq = h.fake.push(vec![json!({"type":"participants","conversation_id":"issue-9","change":"removed","members":[member]})]);
+    until("participant removal ack", || h.fake.acked() == seq).await;
+    assert!(h.rows("SELECT sm.account_id FROM space_members sm JOIN accounts a ON a.id=sm.account_id JOIN accounts alias ON alias.party_id=a.party_id WHERE alias.handle='contributor@example.org'", &[]).is_empty());
+    let who = caller(WS, ME);
+    let search = steve_channels::connector::tool_name(&conn, "search");
+    let read = steve_channels::connector::tool_name(&conn, "read");
+    let message = steve_channels::connector::tool_name(&conn, "message");
+    let result =
+        h.ch.connector_call(&who, &search, json!({"query":"doc"}), "search")
+            .await
+            .unwrap();
+    let reference = result["references"][0]["reference_id"].as_str().unwrap();
+    h.ch.connector_call(&who, &read, json!({"reference":reference}), "before-leave")
+        .await
+        .unwrap();
+    let rows = h.rows("SELECT m.id,m.space_id FROM chan_messages m JOIN spaces s ON s.id=m.space_id WHERE s.external_id='issue-9'", &[]);
+    let (id, space) = (rows[0][0].as_str().unwrap(), rows[0][1].as_str().unwrap());
+    h.env
+        .store()
+        .transaction(|tx| {
+            tx.execute(
+                "UPDATE space_identities SET left_at=1 WHERE space_id=? AND connection_id=?",
+                rusqlite::params![space, conn],
+            )?;
+            Ok::<_, steve_modules::ApiError>(())
+        })
+        .unwrap();
+    let before = h.fake.calls("connector.call").len();
+    for (tool, args) in [
+        (&read, json!({"reference":reference})),
+        (&message, json!({"message":id})),
+    ] {
+        assert!(
+            h.ch.connector_call(&who, tool, args, "after-leave")
+                .await
+                .is_err()
+        );
+    }
+    assert_eq!(
+        h.fake.calls("connector.call").len(),
+        before,
+        "first-seen-via is not current membership"
+    );
+    assert!(h.fake.calls("messages.history").is_empty());
+    rt.shutdown().await;
+}
+
+// Explicit bot identity exercises the same credential form, lifecycle, inbound and real Outbox.
+fn bot_identity(h: &H) {
+    h.fake.with(|w| {
+        w.identity = Some("bot".into());
+        w.account_identity = Some("bot".into());
+    });
+}
+
+async fn connect_bot(h: &H) -> String {
+    h.conns
+        .create(
+            &caller(WS, ME),
+            ext_ws::BOT_ADAPTER,
+            &fields(&h.fake.url(), fake::TOKEN),
+            json!({}),
+        )
+        .await
+        .expect("bot connected")
+        .id
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn bot_connect_claims_a_bot_not_me_and_outbox_sends_as_bot_with_source_receipt() {
+    use steve_channels::deliver::{Auth, OutRequest, OutTarget, Purpose};
+    use steve_channels::outbound::{OutLink, Outbox};
+    use steve_channels::spaces;
+    use steve_store::base::Viewer;
+
+    let h = setup().await;
+    bot_identity(&h);
+    h.fake.with(|w| w.source_only = true);
+    let id = connect_bot(&h).await;
+    let account = h.rows(
+        "SELECT a.kind,p.contact_kind,p.user_id,c.caps FROM connections c
+        JOIN accounts a ON a.id=c.account_id JOIN parties p ON p.id=a.party_id WHERE c.id=?",
+        &[&id],
+    );
+    assert_eq!(account[0][0], "app_bot");
+    assert_eq!(account[0][1], "bot");
+    assert!(account[0][2].is_null(), "a bot is not me: {account:?}");
+    let caps: Vec<String> = serde_json::from_str(account[0][3].as_str().unwrap()).unwrap();
+    assert!(caps.iter().any(|c| c == "msg.send"));
+    assert!(!caps.iter().any(|c| c == "msg.send_as_user"));
+    assert!(h.conns.cx_for(WS, &id, Some("msg.send_as_user")).is_err());
+    let alias = h.rows(
+        "SELECT p.contact_kind,p.user_id FROM accounts a JOIN parties p ON p.id=a.party_id
+        WHERE a.system_id='mail' AND a.handle='ada@example.com'",
+        &[],
+    );
+    assert_eq!(alias[0][0], "bot");
+    assert!(alias[0][1].is_null());
+
+    let (rt, _tx) = h.runtime();
+    until("bot subscribed", || h.subscribes().len() == 1).await;
+    assert_eq!(
+        h.rows(
+            "SELECT mode FROM channel_settings WHERE connection_id=?",
+            &[&id]
+        )[0][0],
+        "bot"
+    );
+    let mut incoming = msg(&h, "bot_chat", "bot_in", "u_somebody", "hello bot", 1);
+    incoming["id"] = Value::Null;
+    let seq = h.fake.push_message(incoming);
+    until("bot inbound stored", || h.fake.acked() == seq).await;
+    let inbound = h.rows(
+        "SELECT m.id,m.space_id FROM chan_messages m JOIN spaces s ON s.id=m.space_id
+        WHERE s.external_id='bot_chat'",
+        &[],
+    );
+    let source = inbound[0][0].as_str().unwrap().to_string();
+    let space_id = inbound[0][1].as_str().unwrap().to_string();
+    let plan = h
+        .env
+        .store()
+        .reader(|c| steve_channels::flow_actions::plan_of(c, WS, &source))
+        .unwrap();
+    assert_eq!(plan.mode, spaces::Mode::Bot);
+    // A source-only reply keeps its real remote source_id, not the Hub's fp: id.
+    let now = h.ch.now();
+    h.env
+        .store()
+        .transaction(|tx| {
+            spaces::set_account_rules(
+                tx,
+                &Viewer::bare(WS, ME),
+                &id,
+                &json!([{"when":{"kind":"all"},"act":"reply"}]),
+                now,
+            )
+        })
+        .unwrap();
+    h.env.gateway.script(
+        steve_channels::disclosure::CHECK_HEAD,
+        r#"{"verdict":"pass","spans":[]}"#,
+    );
+    let outbox = Outbox::new(OutLink::new());
+    let (result, check) = outbox
+        .deliver_checked(
+            &h.ch,
+            &OutRequest {
+                target: OutTarget::reply(&plan),
+                text: "bot answer".into(),
+                purpose: Purpose::Reply,
+                approve: false,
+                generation: None,
+                auth: Auth::Rule {
+                    source: source.clone(),
+                    act: steve_channels::rules::Act::Reply,
+                },
+            },
+        )
+        .await
+        .unwrap();
+    let out_id = match result {
+        steve_channels::deliver::Delivered::Sent { message_id }
+        | steve_channels::deliver::Delivered::Queued { message_id } => message_id,
+        other => panic!("bot must use the real outbound path: {other:?}, disclosure: {check:?}"),
+    };
+    h.env.clock.advance(10_000);
+    outbox.send_due(&h.ch).await;
+    assert_eq!(
+        h.rows("SELECT status FROM chan_messages WHERE id=?", &[&out_id])[0][0],
+        "sent"
+    );
+    let writes = h.fake.with(|w| w.writes.clone());
+    assert_eq!(writes.len(), 1, "{writes:?}");
+    assert_eq!(writes[0].0, "messages.reply");
+    assert_eq!(writes[0].1["to"]["source_id"], "bot_in");
+    assert_eq!(
+        writes[0].1["expected_sender"],
+        json!({"kind":"id","value":fake::ME})
+    );
+    assert!(writes[0].1["idempotency_key"].as_str().is_some());
+    let receipt = h.rows(
+        "SELECT source_id FROM chan_message_seen WHERE connection_id=? AND message_id=?",
+        &[&id, &out_id],
+    );
+    assert_eq!(receipt[0][0], writes[0].2["source_id"]);
+    assert!(!space_id.is_empty());
+    assert!(writes[0].2["id"].is_null());
+    assert_eq!(writes[0].1["expected_identity"], "bot");
+    let mut echo = msg(
+        &h,
+        "bot_chat",
+        writes[0].2["source_id"].as_str().unwrap(),
+        fake::ME,
+        "bot answer",
+        2,
+    );
+    echo["id"] = Value::Null;
+    echo["is_mine"] = true.into();
+    echo["sender"]["is_bot"] = true.into();
+    let seq = h.fake.push_message(echo);
+    until("bot echo acked", || h.fake.acked() == seq).await;
+    assert_eq!(
+        h.rows(
+            "SELECT count(*) FROM chan_messages WHERE space_id=?",
+            &[&space_id]
+        )[0][0],
+        2,
+        "source receipt deduplicates the bot's source-only echo"
+    );
+    // Identity switches on a live socket, even with the same handle, must be refused remotely.
+    h.fake.with(|w| w.account_identity = Some("self".into()));
+    assert!(
+        steve_channels::channel::ChannelAdapter::send_message(
+            h.bot.as_ref(),
+            &h.cx(&id),
+            &space("bot_chat"),
+            &OutContent::text("must not become as you"),
+            &SendKey("live-flip".into())
+        )
+        .await
+        .is_err()
+    );
+    // A bot can never reach the self trait even when called directly by a mistaken caller.
+    assert!(
+        ActAsUser::send(
+            h.bot.as_ref(),
+            &h.cx(&id),
+            &space("bot_chat"),
+            &OutContent::text("not as you"),
+            &SendKey("wrong".into())
+        )
+        .await
+        .is_err()
+    );
+    assert_eq!(h.fake.with(|w| w.writes.len()), 1);
+    rt.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn bot_identity_must_be_explicit_and_match_both_hello_and_account() {
+    for (hello, account) in [
+        (None, None),
+        (Some("bot"), None),
+        (Some("self"), Some("bot")),
+        (Some("bot"), Some("self")),
+        (Some("unknown"), Some("bot")),
+    ] {
+        let h = setup().await;
+        h.fake.with(|w| {
+            w.identity = hello.map(str::to_string);
+            w.account_identity = account.map(str::to_string);
+        });
+        assert!(
+            h.conns
+                .create(
+                    &caller(WS, ME),
+                    ext_ws::BOT_ADAPTER,
+                    &fields(&h.fake.url(), fake::TOKEN),
+                    json!({})
+                )
+                .await
+                .is_err()
+        );
+        assert!(h.rows("SELECT id FROM connections", &[]).is_empty());
+        assert!(h.fake.with(|w| w.writes.is_empty()));
+    }
+    let h = setup().await;
+    bot_identity(&h);
+    assert!(
+        h.conns
+            .create(
+                &caller(WS, ME),
+                ext_ws::ADAPTER,
+                &fields(&h.fake.url(), fake::TOKEN),
+                json!({})
+            )
+            .await
+            .is_err(),
+        "self cannot accept bot identity"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_same_account_cannot_be_reused_between_bot_and_self() {
+    // Both directions retain the existing connection, owner and caps; no takeover or merge.
+    for first_bot in [false, true] {
+        let h = setup().await;
+        let id = if first_bot {
+            bot_identity(&h);
+            connect_bot(&h).await
+        } else {
+            h.connect().await
+        };
+        let before = h.rows("SELECT a.party_id,c.adapter,c.caps FROM connections c JOIN accounts a ON a.id=c.account_id WHERE c.id=?", &[&id]);
+        h.fake.with(|w| {
+            let identity = if first_bot { "self" } else { "bot" };
+            w.identity = Some(identity.into());
+            w.account_identity = Some(identity.into());
+        });
+        let other = if first_bot {
+            ext_ws::ADAPTER
+        } else {
+            ext_ws::BOT_ADAPTER
+        };
+        assert!(
+            h.conns
+                .create(
+                    &caller(WS, ME),
+                    other,
+                    &fields(&h.fake.url(), fake::TOKEN),
+                    json!({})
+                )
+                .await
+                .is_err()
+        );
+        assert_eq!(h.rows("SELECT a.party_id,c.adapter,c.caps FROM connections c JOIN accounts a ON a.id=c.account_id WHERE c.id=?", &[&id]), before);
+        assert_eq!(h.rows("SELECT count(*) FROM connections", &[])[0][0], 1);
+        // The original provider also refuses a remote identity flip, before writing.
+        let ext = if first_bot { &h.bot } else { &h.ext };
+        let result = if first_bot {
+            steve_channels::channel::ChannelAdapter::send_message(
+                ext.as_ref(),
+                &h.cx(&id),
+                &space("c"),
+                &OutContent::text("wrong identity"),
+                &SendKey("flip".into()),
+            )
+            .await
+        } else {
+            ActAsUser::send(
+                ext.as_ref(),
+                &h.cx(&id),
+                &space("c"),
+                &OutContent::text("wrong identity"),
+                &SendKey("flip".into()),
+            )
+            .await
+        };
+        assert!(result.is_err());
+        assert!(h.fake.with(|w| w.writes.is_empty()));
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn bot_connector_writes_require_bot_caps_and_never_discover_as_you_operations() {
+    let h = setup().await;
+    bot_identity(&h);
+    h.fake.with(|w| {
+        let mut manifest = connector_manifest();
+        let mut bot_write = manifest["operations"][2].clone();
+        bot_write["name"] = "update_bot".into();
+        bot_write["annotations"]["steve"]["asYou"] = false.into();
+        manifest["operations"]
+            .as_array_mut()
+            .unwrap()
+            .push(bot_write);
+        // Even a read advertised as as-you must not appear on a bot account.
+        let mut as_you_read = manifest["operations"][1].clone();
+        as_you_read["name"] = "read_as_you".into();
+        as_you_read["annotations"]["steve"]["asYou"] = true.into();
+        manifest["operations"]
+            .as_array_mut()
+            .unwrap()
+            .push(as_you_read);
+        w.connector = Some(manifest);
+        w.features = vec!["me".into(), "changes".into()];
+        w.connector_results.insert(
+            "search".into(),
+            json!({"references":[{
+                "kind":"reference","external_id":"document-1","original_type":"document"
+            }]}),
+        );
+    });
+    let conn = connect_bot(&h).await;
+    let who = caller(WS, ME);
+    let tools = h.ch.connector_tools(&who).await.unwrap();
+    let names: Vec<_> = tools.iter().map(|t| t.operation.name.as_str()).collect();
+    assert_eq!(names, ["search", "read", "update_bot"]);
+    for denied in ["update", "read_as_you"] {
+        assert!(
+            h.ch.connector_call(
+                &who,
+                &steve_channels::connector::tool_name(&conn, denied),
+                json!({"reference":"anything","text":"do not send"}),
+                "wrong-identity"
+            )
+            .await
+            .is_err()
+        );
+    }
+    let search = steve_channels::connector::tool_name(&conn, "search");
+    let found =
+        h.ch.connector_call(&who, &search, json!({"query":"document"}), "search")
+            .await
+            .unwrap();
+    let reference = found["references"][0]["reference_id"].as_str().unwrap();
+    let update = steve_channels::connector::tool_name(&conn, "update_bot");
+    h.ch.connector_call(
+        &who,
+        &update,
+        json!({"reference":reference,"text":"bot edit"}),
+        "bot-write",
+    )
+    .await
+    .unwrap();
+    let writes = h.fake.with(|w| w.writes.clone());
+    assert_eq!(writes.len(), 1);
+    assert_eq!(writes[0].1["expected_identity"], "bot");
+    assert_eq!(writes[0].1["arguments"]["reference"], "document-1");
+    h.env
+        .store()
+        .transaction(|tx| {
+            tx.execute(
+                "UPDATE connections SET caps='[\"msg.receive\"]' WHERE id=?",
+                [&conn],
+            )?;
+            Ok::<_, steve_modules::ApiError>(())
+        })
+        .unwrap();
+    assert!(
+        h.ch.connector_call(
+            &who,
+            &update,
+            json!({"reference":reference,"text":"revoked"}),
+            "revoked"
+        )
+        .await
+        .is_err()
+    );
+    assert_eq!(h.fake.with(|w| w.writes.len()), 1);
+    assert!(h.fake.calls("messages.history").is_empty());
 }

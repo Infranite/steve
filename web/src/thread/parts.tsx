@@ -4,14 +4,14 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react"
 import { itemDisplayState } from "@/item-workflow-relation"
 import { cn } from "cn"
-import { CornerDownRightIcon, FileTextIcon, LibraryIcon, RotateCcwIcon, SearchIcon, SquareIcon, XIcon, CircleCheckIcon, BanIcon, CircleAlertIcon, MessageSquareReplyIcon, CheckIcon, ChevronDownIcon, RocketIcon, TerminalIcon, PencilIcon, GlobeIcon } from "lucide-react"
+import { CornerDownRightIcon, FileTextIcon, LibraryIcon, RotateCcwIcon, SearchIcon, XIcon, CircleCheckIcon, BanIcon, CircleAlertIcon, MessageSquareReplyIcon, CheckIcon, ChevronDownIcon, RocketIcon, TerminalIcon, PencilIcon, GlobeIcon } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Spinner } from "@/components/ui/spinner"
 import { Trail, useTick, type StepState, type ToolStep, type TrailItem } from "@/components/work-trail"
 import { Markdown } from "@/components/markdown"
 import { Textarea } from "@/components/ui/textarea"
 import { clip as clipPlain } from "@/thread/topics"
-import { STEVE_TOOL, st, tm, emit, chatSend, takeOffer, chooseSuggest, cancelQueued, stopRun, clearFocus, focusItem, quoteMsg, decisionDraft, decide, acceptChoosesRelease, botName, alertClosed, closeAlerts, type Msg, type SuggestChoice, type Steps, type Update, type Item, type ItemCardState } from "@/store"
+import { STEVE_TOOL, st, tm, emit, chatSend, takeOffer, chooseSuggest, cancelQueued, clearFocus, focusItem, quoteMsg, decisionDraft, decide, acceptChoosesRelease, botName, alertClosed, closeAlerts, type Msg, type SuggestChoice, type Steps, type Update, type Item, type ItemCardState } from "@/store"
 import { ItemRef, DecisionCard, ItemNo, AlertClose, go, Pill } from "@/ui"
 import { jumpToMsg, threadMsg } from "@/thread/history"
 import { Trans } from "react-i18next"
@@ -55,7 +55,7 @@ export function researchStep(key: string, name: string, kind: string | undefined
     chip: brief ? { label: brief, mono: true, icon: researchIcon(name, kind) } : undefined, attrs: { kind: c }, ...more }
 }
 
-/** the work under way: a clock, and the calls so far on the trail, the one running now last; with a stop button */
+/** the work under way: a clock, and the calls so far on the trail, the one running now last (the composer's Stop ends it) */
 export function ResearchLive() {
   const l = st.live, now = useTick(!!l), t = useT()
   if (!l) return null
@@ -68,7 +68,6 @@ export function ResearchLive() {
         <span className="shimmer shrink-0 text-foreground">{t("core:transcript.working")}</span>
         <span className="shrink-0 tabular-nums text-tertiary">{secs(now - l.t0)}</span>
         {now - l.t0 > 90_000 && <span className="min-w-0 truncate text-muted-foreground">· {t("thread:research.slow")}</span>}
-        <Button size="xs" variant="ghost" className="ml-1 shrink-0 text-muted-foreground" onClick={() => stopRun(l.run)} data-research-stop><SquareIcon className="fill-current" />{t("thread:research.stop")}</Button>
       </div>
       {items.length > 0 ? <Trail items={items} live /> : <Trail items={[{ t: "line", key: "start", state: "run", label: <span className="shimmer">{t("thread:research.live.read")}</span> }]} live />}
     </div>
@@ -80,7 +79,7 @@ export function ResearchLive() {
 export function OfferLine({ m }: { m: Msg }) {
   const o = m.offer, [busy, setBusy] = useState(false), [open, setOpen] = useState(false), t = useT()
   if (!o) return null
-  if (o.state === "taken") return o.item ? (st.thread.some((x) => x.card?.item === o.item) ? <CardLink id={o.item} /> : <ItemRef id={o.item} />) : null
+  if (o.state === "taken") return o.item ? (st.thread.some((x) => x.card?.item === o.item) ? <CardLink id={o.item} from={m.id} /> : <ItemRef id={o.item} />) : null
   if (o.state === "dismissed") return null
   const act = async (take: boolean) => { setBusy(true); try { await takeOffer(m, take) } finally { setBusy(false) } }
   if (o.folded && !open) return <button type="button" className="mt-2 self-start type-callout text-muted-foreground hover:text-foreground" onClick={() => setOpen(true)} data-offer-folded={m.id}>{t("thread:offer.folded", { title: o.title })}</button>
@@ -105,7 +104,7 @@ export function SuggestCard({ m }: { m: Msg }) {
         : <div className="flex flex-wrap gap-2">{s.choices.map((c) => (
           <Button key={c.id} size="sm" variant={(s.choices.some((x) => x.recommended) ? c.recommended : c.id === "here") ? "default" : "outline"} className="max-w-full rounded-full" disabled={busy} onClick={() => void act(c.id)} data-suggest-choice={c.id}><span className="truncate">{c.label}</span></Button>))}
           {s.state === "expired" && <span className="self-center type-footnote text-tertiary">{t("thread:suggest.expired")}</span>}</div>}
-      {s.item && (st.thread.some((x) => x.card?.item === s.item) ? <CardLink id={s.item} /> : <ItemRef id={s.item} />)}
+      {s.item && (st.thread.some((x) => x.card?.item === s.item) ? <CardLink id={s.item} from={m.id} /> : <ItemRef id={s.item} />)}
     </div>
   )
 }
@@ -231,6 +230,7 @@ export function cardLook(i: Item, c?: ItemCardState): Look {
   if (s.kind === "unavailable") return { label: tr("views:itemState.unavailable"), dot: "fail", tone: "fail" }
   if (s.kind === "idle" && !i.rel) return { label: tr("views:itemState.idle"), dot: "pause", tone: "quiet" }
   if (i.rel?.tone === "run") return { label: tr("thread:card.status.releasing"), dot: "run", tone: "run" }
+  if (s.kind === "queued") return { label: tr("thread:card.status.queued"), dot: "run", tone: "run" }
   return { label: tr("thread:card.status.running"), dot: "run", tone: "run" }
 }
 /* tinted status pills: the status token at a low wash, the token itself as text */
@@ -309,10 +309,12 @@ function AcceptRow({ i, decision }: { i: Item; decision: string }) {
 
 /** One card per item made from the conversation: what it is doing now, its latest delivery (folded), the reply to what you
  * last sent it, and whatever it needs from you — answerable right here. Lifecycle events update it; they are not messages. */
-export function ItemCard({ c, inText = false }: { c: ItemCardState; inText?: boolean }) {
+export function ItemCard({ c }: { c: ItemCardState }) {
   const i = st.items.find((x) => x.id === c.item), t = useT()
   if (!i) return null
   const look = cardLook(i, c), w = i.waits[0]
+  /* what it is doing now, only while it does something: a stale line under a fresh status contradicts it */
+  const doing = look.tone === "run" && itemDisplayState(i).kind === "working" ? i.now : ""
   const accept = w?.type === "accept" ? w : undefined
   /* the delivery the open acceptance is about, else the latest one */
   const d = c.delivery ? { ...c.delivery, decision: accept?.decision ?? c.delivery.decision } : accept ? { text: (accept.draft ?? "").split("\n\n")[0], decision: accept.decision } : undefined
@@ -325,27 +327,36 @@ export function ItemCard({ c, inText = false }: { c: ItemCardState; inText?: boo
       <button type="button" onClick={() => go("#/items/" + i.id)} className="-m-1.5 flex min-w-0 items-start gap-2.5 rounded-lg p-1.5 text-left hover:bg-accent/70" data-item-ref={i.id}>
         <span className="flex min-w-0 flex-1 flex-col gap-0.5">
           <span className="truncate type-headline">{i.t}</span>
-          <span className="truncate type-callout text-muted-foreground"><span className="font-mono type-footnote tabular-nums">{i.id}</span> · {botName(i.b)}{look.tone === "run" && i.now ? " · " + i.now : ""}</span>
+          <span className="truncate type-callout text-muted-foreground"><span className="font-mono type-footnote tabular-nums">{i.id}</span> · {botName(i.b)}{doing ? " · " + doing : ""}</span>
         </span>
         <Pill tone={look.tone} className="mt-0.5 h-auto max-w-[45%] py-0.5 leading-4" data-card-status>{look.tone === "done" && c.released ? <RocketIcon className="size-3.5 shrink-0" /> : look.tone === "run" ? <span className="dot-running size-1.5 shrink-0 rounded-full bg-current" aria-hidden /> : null}{look.label}{look.version && <span className="hidden min-w-0 max-w-32 truncate font-mono font-normal sm:inline">{look.version}</span>}</Pill>
       </button>
-      {d && !inText && <DeliveryBlock key={d.decision ?? d.text} d={d} open={!!d.full} />}
+      {d && <DeliveryBlock key={d.decision ?? d.text} d={d} />}
       {reply && <div className="flex min-w-0 flex-col gap-1 rounded-lg bg-muted/60 px-3 py-2.5" data-card-reply>
         <div className="type-label text-tertiary">{t("thread:card.reply")}</div><div className={cn("line-clamp-4 min-w-0 break-words", FLAT)}><Markdown text={reply.text} className="type-callout" /></div></div>}
       {c.build && <div className="flex items-start gap-2 type-callout text-muted-foreground" data-card-build><CircleAlertIcon className="mt-0.5 size-4 shrink-0 text-attention" strokeWidth={1.75} />
         <span className="min-w-0 flex-1 [overflow-wrap:anywhere]"><Linked text={c.build.text.replace(new RegExp(`^${i.id}\\s+`), "")} /></span></div>}
       {failLine && <div className="flex items-start gap-2 type-callout text-muted-foreground" data-card-fail><CircleAlertIcon className="mt-0.5 size-4 shrink-0 text-destructive" strokeWidth={1.75} /><span className="min-w-0 flex-1">{failLine}</span>
         {c.decision && <AlertClose onClose={() => closeAlerts([c.decision!])} className="-my-0.5" />}</div>}
-      {accept ? <AcceptRow i={i} decision={accept.decision} /> : w ? <div className="-mx-1.5 [&_[data-decision-wrap]]:bg-muted/40 [&_[data-decision-wrap]]:shadow-none [&_[data-decision-wrap]]:ring-0">
+      {accept ? <AcceptRow i={i} decision={accept.decision} /> : w ? <div className="-mx-1.5 [&_[data-decision-wrap]]:bg-muted/40 [&_[data-decision-wrap]]:shadow-none [&_[data-decision-wrap]]:ring-0 [&_.ui-dcc\_\_badge]:hidden" data-card-decision>
         <DecisionCard i={i} w={w} showItem={false} /></div> : null}
     </div>
   )
 }
 
-/** an item whose card is elsewhere in the conversation (it moved, or this message only mentions the item): one quiet line to the card */
-export function CardLink({ id }: { id: string }) {
+/* the items a Steve message links to (its own, a taken offer's, a chosen suggestion's) */
+const linksOf = (m: Msg) => [m.item, m.offer?.state === "taken" ? m.offer.item : undefined, m.suggest?.item].filter(Boolean)
+/** whether a Steve message before `from`, since you last spoke, already links to `id`: the way to its card is said once per answer */
+function linkedAbove(from: string | undefined, id: string) {
+  const at = from ? st.thread.findIndex((m) => m.id === from) : -1
+  for (let n = at - 1; n >= 0; n--) { const m = st.thread[n]; if (m.k === "me") return false; if (m.k === "steve" && (m.card?.item === id || linksOf(m).includes(id))) return true }
+  return false
+}
+/** an item whose card is elsewhere in the conversation (it moved, or this message only mentions the item): one quiet line to the card.
+ *  `from`: the message it is under; when one just above already points to the same card, nothing */
+export function CardLink({ id, from }: { id: string; from?: string }) {
   const i = st.items.find((x) => x.id === id), at = st.thread.findLast((m) => m.card?.item === id), t = useT()
-  if (!i) return null
+  if (!i || linkedAbove(from, id)) return null
   return (
     <button type="button" onClick={() => (at?.id ? jumpTo(at.id) : go("#/items/" + id))} className="mt-2 flex max-w-full items-center gap-1.5 self-start truncate type-callout text-muted-foreground hover:text-foreground" data-card-link={id}>
       <ItemNo id={id} /><span className="truncate">{i.t}</span><span className="shrink-0">{t("thread:card.latest")}</span><CornerDownRightIcon className="size-3.5 shrink-0" />

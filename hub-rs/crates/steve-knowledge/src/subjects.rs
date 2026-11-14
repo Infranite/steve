@@ -17,7 +17,7 @@ use steve_store::base::{ObjRef, Viewer};
 
 use crate::provenance::{self, add_used, use_counts};
 use crate::repo::{self, DocFilter, DocRow, SourceRow};
-use crate::service::{doc_brief, mem_json, prepare};
+use crate::service::{doc_brief, mem_json_for, prepare};
 
 /// How many recent uses a subject shows.
 const USES_SHOWN: usize = 12;
@@ -183,7 +183,7 @@ pub fn list(m: &Modules, who: &Caller) -> ApiResult<Value> {
         for r in order {
             let t = &tally[&r];
             out.push(json!({
-                "type": r.kind, "id": r.id, "name": repo::ref_name(c, &r)?.unwrap_or_default(),
+                "type": r.kind, "id": r.id, "name": repo::ref_name_for(c, &viewer, &r)?.unwrap_or_default(),
                 "href": subject_href(&r), "mems": t.mems, "candidates": t.candidates, "docs": t.docs, "last": t.last,
             }));
         }
@@ -203,7 +203,7 @@ pub fn one(m: &Modules, who: &Caller, r: &ObjRef) -> ApiResult<Value> {
     prepare(m, who)?;
     let viewer = m.viewer(who)?;
     m.store.reader(|c| {
-        let name = repo::ref_name(c, r)?;
+        let name = repo::ref_name_for(c, &viewer, r)?;
         if name.is_none() && r.kind != "me" {
             return Err(ApiError::not_found("对象"));
         }
@@ -213,7 +213,7 @@ pub fn one(m: &Modules, who: &Caller, r: &ObjRef) -> ApiResult<Value> {
         let mut objs = Vec::new();
         let mut mems_out = Vec::new();
         for x in s.mems.iter().filter(|x| mem_subjects(x, &s).contains(r)) {
-            let mut v = mem_json(c, x);
+            let mut v = mem_json_for(c, &viewer, x);
             add_used(&mut v, &mem_uses);
             objs.push(("mem".to_string(), x.id.clone()));
             mems_out.push(v);

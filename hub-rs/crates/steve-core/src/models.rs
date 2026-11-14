@@ -108,7 +108,7 @@ pub fn harness_name(h: &str) -> String {
 /// The label of a reasoning effort, by its usual name (`high` → 高); an unknown one has none.
 pub fn effort_label(e: &str) -> Option<&'static str> {
     Some(match e {
-        "none" => "关闭",
+        "none" | "off" => "关闭",
         "minimal" => "最低",
         "low" => "低",
         "medium" => "中",
@@ -123,7 +123,7 @@ pub fn effort_label(e: &str) -> Option<&'static str> {
 /// [`effort_label`] as the UI shows it, in the request's language (the Chinese label stays what models read).
 pub fn effort_shown(e: &str) -> Option<String> {
     Some(match e {
-        "none" => steve_i18n::t!("core.effort.none"),
+        "none" | "off" => steve_i18n::t!("core.effort.none"),
         "minimal" => steve_i18n::t!("core.effort.minimal"),
         "low" => steve_i18n::t!("core.effort.low"),
         "medium" => steve_i18n::t!("core.effort.medium"),
@@ -251,22 +251,36 @@ impl Choice {
 
     /// `Claude Code · claude-haiku-5-5 → claude-sonnet-5-5`
     pub fn describe(&self) -> String {
+        self.describe_with(&[])
+    }
+
+    pub fn describe_with(&self, harnesses: &[Harness]) -> String {
         let models = if self.models.is_empty() {
             "默认模型".to_string()
         } else {
             self.models.join(" → ")
         };
-        format!("{} · {models}", harness_name(&self.harness))
+        format!(
+            "{} · {models}",
+            crate::harnesses::name_of(harnesses, &self.harness)
+        )
     }
 
     /// [`Choice::describe`] as the UI shows it, in the request's language.
     pub fn describe_shown(&self) -> String {
+        self.describe_shown_with(&[])
+    }
+
+    pub fn describe_shown_with(&self, harnesses: &[Harness]) -> String {
         let models = if self.models.is_empty() {
             steve_i18n::t!("core.models.default_model")
         } else {
             self.models.join(" → ")
         };
-        format!("{} · {models}", harness_name(&self.harness))
+        format!(
+            "{} · {models}",
+            crate::harnesses::name_of(harnesses, &self.harness)
+        )
     }
 }
 
@@ -340,9 +354,10 @@ pub struct Models {
     harnesses: Arc<std::sync::RwLock<HarnessSource>>,
 }
 
-/// A model id: what `--model` takes (`claude-opus-5-5`, `opus`, `us.anthropic.x-v1:0`, `x[1m]`, `kiro/x`).
-static MODEL_ID: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^[A-Za-z0-9][A-Za-z0-9._:/@\[\]-]{0,99}$").expect("valid regex"));
+/// A model id: what `--model` takes (`claude-opus-5-5`, `opus`, `us.anthropic.x-v1:0`, `x[1m]`, `@cf/meta/x`).
+static MODEL_ID: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^[A-Za-z0-9@][A-Za-z0-9._:/@+\[\]-]{0,255}$").expect("valid regex")
+});
 
 /// Is `m` something `--model` could take?
 pub fn valid_model(m: &str) -> bool {
@@ -371,6 +386,21 @@ impl Models {
             .unwrap_or_else(|e| e.into_inner())
             .clone();
         source()
+    }
+
+    /// Default `(harness_id, perm_mode)` for a new bot: Steve's harness when it is not proven
+    /// unavailable, else the first ready harness, else the first not proven unavailable.
+    pub fn default_bot(&self) -> (String, String) {
+        let list = self.harnesses();
+        let main = self.store.bots().main().ok().flatten().map(|b| b.harness);
+        crate::harnesses::default_bot_choice(&list, main.as_deref())
+    }
+
+    /// Default `perm_mode` for a new bot on `harness`.
+    pub fn default_perm_mode_for(&self, harness: &str) -> String {
+        self.harness(harness)
+            .map(|h| h.default_perm_mode().to_string())
+            .unwrap_or_else(|| "default".into())
     }
 
     /// Adapter `id`, if the Hub has it.
@@ -417,13 +447,13 @@ impl Models {
             ),
             None => (None, "Steve".into(), default_adapter(), None, None),
         };
-        // the bot's harness, whatever it is: a missing adapter fails its judgments (and says so)
-        // rather than moving them to another one
+        // the bot's harness, whatever it is: a missing or unavailable adapter fails its judgments
+        // (and says so) rather than moving them silently to another one
         let h = self.harness(&harness);
-        let note = h.is_none().then(|| {
+        let note = h.as_ref().is_none_or(|x| x.ready == Some(false)).then(|| {
             steve_i18n::t!(
                 "core.models.note.harness_missing",
-                harness = harness_name(&harness)
+                harness = self.harness_name(&harness)
             )
         });
         let mut models: Vec<String> = model.iter().cloned().collect();
@@ -491,7 +521,17 @@ impl Models {
             d.fast.clone()
         };
         if !models.is_empty() {
-            return Some(Choice::default_adapter(models));
+            let def = default_adapter();
+            let harness = if self.harness(&def).is_none_or(|x| x.ready == Some(false)) {
+                self.steve().runs_on
+            } else {
+                def
+            };
+            return Some(Choice {
+                harness,
+                models,
+                effort: None,
+            });
         }
         if self.named() {
             return None;
@@ -577,7 +617,12 @@ impl Models {
                     values.insert(key(p.key), serde_json::to_value(r)?);
                 }
             }
-            if !any && !self.named() {
+            if !any
+                && (!self.named()
+                    || self
+                        .harness(&default_adapter())
+                        .is_none_or(|x| x.ready == Some(false)))
+            {
                 return Ok(false);
             }
         }
@@ -1106,17 +1151,21 @@ mod tests {
         patch_bot(
             &s,
             BotPatch {
-                harness: Some("gemini".into()),
-                model: Some(Some("gemini-x".into())),
+                harness: Some("no-such-harness".into()),
+                model: Some(Some("no-such-x".into())),
                 ..BotPatch::default()
             },
         );
         let st = m.steve();
-        assert_eq!(st.runs_on, "gemini");
-        assert!(st.note.as_deref().is_some_and(|n| n.contains("gemini")));
+        assert_eq!(st.runs_on, "no-such-harness");
+        assert!(
+            st.note
+                .as_deref()
+                .is_some_and(|n| n.contains("no-such-harness"))
+        );
         assert_eq!(
             m.for_purpose("default", "chat"),
-            ch("gemini", &["gemini-x"], None)
+            ch("no-such-harness", &["no-such-x"], None)
         );
     }
 
@@ -1492,10 +1541,10 @@ mod tests {
             json!({"purposes": {"route": {"models": ["a", "b", "c", "d", "e", "f"]}}}),
             json!({"purposes": {"route": {"models": ["a"], "effort": "huge"}}}),
             json!({"purposes": {"route": {"models": ["a"], "tier": "fast"}}}),
-            json!({"purposes": {"route": {"harness": "gemini"}}}),
+            json!({"purposes": {"route": {"harness": "no-such-harness"}}}),
             // an effort only the other harness has
             json!({"purposes": {"route": {"harness": "claude-code", "effort": "ultra"}}}),
-            json!({"agents": {"gemini": "x"}}),
+            json!({"agents": {"no-such-harness": "x"}}),
             json!({"agents": {"codex": 3}}),
         ];
         let hs = crate::harnesses::builtin();

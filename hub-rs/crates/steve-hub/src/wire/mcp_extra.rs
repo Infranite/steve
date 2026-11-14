@@ -1,11 +1,8 @@
-//! The modules' MCP tools served next to steve-mcp's Steve tools without changing steve-mcp: contacts
-//! (P3), knowledge (K3/K4), the vault's secret tools (V4), GitHub (G4), mail (E5) and the flow's
-//! `steve_event_get` (S10), and one tool per remote A2A agent the session's Bot uses
-//! (`steve_modules::caps::a2a`). A client outside Steve with a user's access token is answered by
-//! [`super::outside_mcp`] instead. A tool that opened an approval marks the session as waiting, like
-//! `steve_request_approval`: `tools/list` answers get the module's
-//! definitions appended, `tools/call` for those names is answered here with the session's [`McpCx`];
-//! everything else passes through untouched.
+//! Session MCP routing and dispatch for the modules' Steve tools. Authenticated session list/call
+//! requests go through [`super::tool_service::ToolService`], as does the Node tool bridge: one
+//! registry, core plus Bot pins, and search/call for the rest. User access tokens retain the scoped
+//! [`super::outside_mcp`] catalog; research tokens retain their separate research catalog. Session
+//! tokens stay loopback-only. Module calls keep their existing approval and session context.
 
 use axum::body::{Body, Bytes};
 use axum::extract::{Request, State};
@@ -26,11 +23,13 @@ pub struct Extra {
     pub ports: Ports,
     pub kb: steve_knowledge::Knowledge,
     pub tools: super::modules::Tools,
+    /// The Hub's connections to the library's MCP servers.
+    pub library: std::sync::Arc<super::library_mcp::LibraryMcp>,
 }
 
 /// Which module answers a tool name.
 #[derive(Clone, Copy)]
-enum Owner {
+pub(crate) enum Owner {
     Devices,
     Diagnostics,
     Items,
@@ -38,6 +37,7 @@ enum Owner {
     Upgrade,
     Contacts,
     Knowledge,
+    Digest,
     Remember,
     Vault,
     Github,
@@ -132,13 +132,19 @@ fn reply_source_tool() -> Value {
         "inputSchema": {
             "$schema": "http://json-schema.org/draft-07/schema#",
             "type": "object",
-            "properties": { "text": { "type": "string", "description": "in the language of that chat" } },
-            "required": ["text"]
+            "properties": {
+                "text": { "type": "string", "description": "in the language of that chat" },
+                "key": { "type": "string", "description": "Stable identity of this update; reuse on retry, change for a new update." },
+                "space_id": { "type": "string", "description": "Explicit reachable conversation for a channel switch; omitted means the original channel." },
+                "party_id": { "type": "string", "description": "Recipient person; when supplied, their alias must belong to the target conversation." }
+            },
+            "required": ["text"],
+            "additionalProperties": false
         }
     })
 }
 
-fn owner_of(name: &str) -> Option<Owner> {
+pub(crate) fn owner_of(name: &str) -> Option<Owner> {
     if name == DEVICES {
         Some(Owner::Devices)
     } else if name == super::diagnostics::TOOL {
@@ -151,6 +157,8 @@ fn owner_of(name: &str) -> Option<Owner> {
         Some(Owner::Upgrade)
     } else if mcp::handles(name) {
         Some(Owner::Contacts)
+    } else if steve_digest::tools::handles(name) {
+        Some(Owner::Digest)
     } else if steve_knowledge::tools::handles(name) {
         Some(Owner::Knowledge)
     } else if name == steve_knowledge::candidates::REMEMBER {
@@ -174,13 +182,14 @@ fn owner_of(name: &str) -> Option<Owner> {
     }
 }
 
-/// The module tool definitions appended to `tools/list`, in this order.
+/// All built-in module definitions, before registry selection.
 fn extra_tools() -> Vec<Value> {
     let mut v: Vec<Value> = mcp::tools().to_vec();
     v.push(super::diagnostics::tool());
     v.extend(super::item_mcp::tools());
     v.push(workflow_tool());
     v.extend(steve_knowledge::tools::all_tools().iter().cloned());
+    v.extend(steve_digest::tools::tools());
     v.push(steve_knowledge::candidates::remember_tool());
     v.extend(steve_modules::vault::mcp::tools().iter().cloned());
     v.extend(steve_github::mcp::tools().iter().cloned());
@@ -259,8 +268,32 @@ fn json_rpc(id: &Value, result: Value) -> Response {
         .into_response()
 }
 
-/// The user an agent works for. The Hub is single-user for now, so that is the workspace's owner (the
-/// first owner membership); with several users this becomes the item's requester.
+/// All ordinary module tools consume the authenticated session principal, never an owner alias.
+/// Revoked members retain only workspace service access, including recorded Node sessions.
+fn session_cx(store: &Store, s: &steve_store::Session) -> Result<mcp::McpCx, String> {
+    let user = store
+        .reader(|c| {
+            let (ws, principal) = super::principal::of_session(c, &s.id)?
+                .filter(|(ws, _)| ws == &s.workspace_id)
+                .ok_or_else(|| {
+                    steve_store::StoreError::Hook("session principal not found".into())
+                })?;
+            // Even a recorded personal principal loses personal access when membership is revoked.
+            Ok::<_, steve_store::StoreError>(
+                super::principal::resolve(c, &ws, principal.user())?.key(),
+            )
+        })
+        .map_err(|e| e.to_string())?;
+    Ok(mcp::McpCx {
+        ws: s.workspace_id.clone(),
+        user,
+        bot_id: s.bot_id.clone().unwrap_or_else(|| "agent".into()),
+        item_id: s.item_id.clone(),
+        session_id: Some(s.id.clone()),
+    })
+}
+
+/// Legacy owner-facing modules. New personal tools must use the authenticated session principal.
 pub(crate) fn owner(store: &Store, ws: &str) -> Option<String> {
     store
         .with_conn(|c| {
@@ -276,7 +309,12 @@ pub(crate) fn owner(store: &Store, ws: &str) -> Option<String> {
         .flatten()
 }
 
-pub async fn layer(State(x): State<Extra>, req: Request, next: Next) -> Response {
+pub async fn layer(
+    State(service): State<std::sync::Arc<super::tool_service::ToolService>>,
+    req: Request,
+    next: Next,
+) -> Response {
+    let x = &service.extra;
     let (parts, body) = req.into_parts();
     let Ok(bytes) = axum::body::to_bytes(body, LIMIT).await else {
         return StatusCode::PAYLOAD_TOO_LARGE.into_response();
@@ -356,98 +394,76 @@ pub async fn layer(State(x): State<Extra>, req: Request, next: Next) -> Response
         }
     }
 
-    if method == "tools/call" {
-        let m = msg.clone().unwrap_or(Value::Null);
-        let name = m
-            .pointer("/params/name")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string();
-        if let Some(tool_owner) = owner_of(&name) {
-            let token = parts
-                .headers
-                .get(header::AUTHORIZATION)
-                .and_then(|v| v.to_str().ok())
-                .and_then(|v| v.strip_prefix("Bearer "))
-                .map(str::to_string);
-            let store = x.store.clone();
-            let session = match token {
-                Some(t) => tokio::task::spawn_blocking(move || {
-                    store.sessions().by_token(&t).ok().flatten()
-                })
-                .await
-                .ok()
-                .flatten(),
-                None => None,
-            };
-            let Some(s) = session else {
-                return StatusCode::UNAUTHORIZED.into_response();
-            };
-            let args = m
-                .pointer("/params/arguments")
-                .cloned()
-                .unwrap_or_else(|| json!({}));
-            let id = m.get("id").cloned().unwrap_or(Value::Null);
-            let out = call_owned(&x, s, tool_owner, &name, args).await;
-            return match out {
-                Ok(text) => json_rpc(
-                    &id,
-                    json!({ "content": [{ "type": "text", "text": text }] }),
-                ),
-                Err(text) => json_rpc(
-                    &id,
-                    json!({ "content": [{ "type": "text", "text": text }], "isError": true }),
-                ),
-            };
+    // Session tokens remain loopback-only, exactly as steve-mcp's authentication layer.
+    // Do not let intercepting tools/list or tools/call bypass that boundary.
+    if method == "tools/list" || method == "tools/call" || method == "initialize" {
+        use axum::extract::{ConnectInfo, FromRequestParts};
+        let mut auth_parts = parts.clone();
+        let peer = ConnectInfo::<std::net::SocketAddr>::from_request_parts(&mut auth_parts, &())
+            .await
+            .ok()
+            .map(|c| c.0);
+        if !peer.is_some_and(|p| p.ip().is_loopback()
+            || matches!(p.ip(), std::net::IpAddr::V6(v) if v.to_ipv4_mapped().is_some_and(|v| v.is_loopback()))) {
+            return StatusCode::FORBIDDEN.into_response();
         }
-    }
-
-    let res = next.run(rebuild(bytes)).await;
-    if method != "tools/list" || res.status() != StatusCode::OK {
-        return res;
-    }
-    let is_json = res
-        .headers()
-        .get(header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .is_some_and(|t| t.starts_with("application/json"));
-    if !is_json {
-        return res;
-    }
-    let (mut rp, rb) = res.into_parts();
-    let Ok(out) = axum::body::to_bytes(rb, LIMIT).await else {
-        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-    };
-    let Ok(mut v) = serde_json::from_slice::<Value>(&out) else {
-        return Response::from_parts(rp, Body::from(out));
-    };
-    // the remote agents of the session's Bot
-    let session_tools = match bearer {
-        Some(t) => {
-            let store = x.store.clone();
-            let session =
+        let store = x.store.clone();
+        let session = match bearer {
+            Some(t) => {
                 tokio::task::spawn_blocking(move || store.sessions().by_token(&t).ok().flatten())
                     .await
                     .ok()
-                    .flatten();
-            match session {
-                Some(s) => {
-                    let caps = x.caps.clone();
-                    tokio::task::spawn_blocking(move || caps.a2a_tools(&s.id))
-                        .await
-                        .unwrap_or_default()
-                }
-                None => vec![],
+                    .flatten()
             }
+            None => None,
+        };
+        let Some(s) = session else {
+            return StatusCode::UNAUTHORIZED.into_response();
+        };
+        if parts.method != axum::http::Method::POST {
+            return StatusCode::METHOD_NOT_ALLOWED.into_response();
         }
-        None => vec![],
-    };
-    if let Some(tools) = v.pointer_mut("/result/tools").and_then(Value::as_array_mut) {
-        tools.extend(extra_tools());
-        tools.extend(session_tools);
+        let m = msg.as_ref().unwrap();
+        let id = m.get("id").cloned().unwrap_or(Value::Null);
+        if method == "tools/list" {
+            let r = service
+                .registry(&s, super::tool_service::Reach::Listed)
+                .await;
+            let tools: Vec<Value> = r.listed_entries().iter().map(|e| e.mcp()).collect();
+            return json_rpc(&id, json!({"tools": tools}));
+        }
+        if method == "initialize" {
+            return json_rpc(
+                &id,
+                json!({
+                    "protocolVersion": m.pointer("/params/protocolVersion").cloned().unwrap_or(json!("2025-06-18")),
+                    "capabilities": {"tools": {}},
+                    "serverInfo": {"name": "steve", "version": env!("CARGO_PKG_VERSION")},
+                    "instructions": "Your list contains Steve's core tools and your Bot's pins. Find other enabled tools with steve_tools_search, then run them with steve_tool_call {name, arguments}. The tool catalog in your brief describes the available areas."
+                }),
+            );
+        }
+        let name = m
+            .pointer("/params/name")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let args = m
+            .pointer("/params/arguments")
+            .cloned()
+            .unwrap_or_else(|| json!({}));
+        let (text, failed) = match service.call(s, name, args).await {
+            Ok(t) => (t, false),
+            Err(t) => (t, true),
+        };
+        return json_rpc(
+            &id,
+            json!({
+                "content": [{"type": "text", "text": super::tool_service::bound_result(name, text)}],
+                "isError": failed,
+            }),
+        );
     }
-    rp.headers.remove(header::CONTENT_LENGTH);
-    Response::from_parts(rp, Body::from(v.to_string()))
+    next.run(rebuild(bytes)).await
 }
 
 /// A module's tool (`owner`), run for session `s`: the success text or the error text. Independent of
@@ -511,19 +527,9 @@ async fn call_owned_inner(
         return x.caps.a2a_call(&s.id, name, &args).await;
     }
     let store = x.store.clone();
-    let ws = s.workspace_id.clone();
-    let user = tokio::task::spawn_blocking(move || owner(&store, &ws))
+    let cx = tokio::task::spawn_blocking(move || session_cx(&store, &s))
         .await
-        .ok()
-        .flatten()
-        .unwrap_or_default();
-    let cx = mcp::McpCx {
-        ws: s.workspace_id,
-        user,
-        bot_id: s.bot_id.unwrap_or_else(|| "agent".into()),
-        item_id: s.item_id,
-        session_id: Some(s.id),
-    };
+        .map_err(|e| e.to_string())??;
     let out: Result<String, String> = match tool_owner {
         Owner::Diagnostics => unreachable!("diagnostics preserve the session above"),
         Owner::Items => unreachable!("item management preserves the session above"),
@@ -549,6 +555,7 @@ async fn call_owned_inner(
             }
         }
         Owner::Contacts => mcp::call(&x.modules, &x.ports, &cx, name, &args).await,
+        Owner::Digest => steve_digest::tools::call(&x.modules, &cx, name, &args).await,
         Owner::Knowledge => steve_knowledge::tools::call(&x.modules, &x.kb, &cx, name, &args).await,
         // synchronous (one write transaction): off the runtime
         Owner::Vault => {
@@ -583,12 +590,39 @@ async fn call_owned_inner(
                 }
             )),
             (Some(_), None) => Ok(steve_channels::outbound::SRC_NO_SOURCE.to_string()),
-            (Some(text), Some(item)) => x
-                .tools
-                .outbox
-                .reply_source(&x.tools.channels, &cx.ws, item, text)
-                .await
-                .map_err(|e| e.to_string()),
+            (Some(text), Some(item)) => {
+                let who = steve_modules::Caller {
+                    ws: cx.ws.clone(),
+                    me: cx.user.clone(),
+                };
+                // Old clients need no new argument: the same update from this session has the
+                // same intent identity after a tool timeout or Hub restart, not a fresh UUID.
+                let key = args["key"].as_str().map(str::to_string).unwrap_or_else(|| {
+                    format!(
+                        "source:{}:{}:{}",
+                        cx.session_id.as_deref().unwrap_or("none"),
+                        item,
+                        steve_channels::outbound::text_hash(text),
+                    )
+                });
+                x.tools
+                    .outbox
+                    .reply_source_as(
+                        &x.tools.channels,
+                        &who,
+                        item,
+                        text,
+                        &key,
+                        args["space_id"].as_str().map(str::to_string),
+                        args["party_id"].as_str().map(str::to_string),
+                    )
+                    .await
+                    .map(|d| match d {
+                        Some(d) => serde_json::to_string(&d).unwrap_or_default(),
+                        None => steve_channels::outbound::SRC_NO_SOURCE.to_string(),
+                    })
+                    .map_err(|e| e.to_string())
+            }
         },
         Owner::Remember => {
             let m = x.modules.clone();
@@ -613,15 +647,146 @@ pub(crate) async fn call_module(
     Some(call_owned(x, s, owner, name, args).await)
 }
 
-/// The modules' tool definitions (what `tools/list` adds).
+/// The modules' complete definitions for the shared registry.
 pub(crate) fn module_tools() -> Vec<Value> {
     extra_tools()
 }
 
-/// The tools only some sessions have: one per remote agent its Bot uses.
-pub(crate) async fn session_tools(x: &Extra, session: &str) -> Vec<Value> {
-    let (caps, session) = (x.caps.clone(), session.to_string());
-    tokio::task::spawn_blocking(move || caps.a2a_tools(&session))
-        .await
-        .unwrap_or_default()
+#[cfg(test)]
+mod session_identity_tests {
+    use super::*;
+    use steve_modules::testkit::{ME, OTHER, TestEnv, WS};
+    #[tokio::test]
+    async fn digest_and_knowledge_preserve_personal_and_service_session_identity() {
+        let e = TestEnv::new(|_| {});
+        e.store().with_conn(|c| {
+            c.execute("INSERT INTO bots (id,workspace_id,name,harness,updated) VALUES ('steve',?,'Digest','fixture',1)", [WS])?;
+            Ok(())
+        }).unwrap();
+        let kb = steve_knowledge::Knowledge::new(|_| {});
+        let app = steve_knowledge::routes(kb).with_state(e.modules.clone());
+        let mut docs = Vec::new();
+        for (user, visibility) in [(ME, "private"), (OTHER, "private"), (ME, "workspace")] {
+            let (status, doc) = steve_modules::testkit::call(
+                &app, Some(&steve_modules::testkit::caller(WS, user)), "POST", "/kb/notes",
+                Some(&json!({"title": "Identity boundary", "body": "source evidence", "visibility": visibility})),
+            ).await;
+            assert_eq!(status, 200, "{doc}");
+            docs.push(doc["id"].as_str().unwrap().to_string());
+        }
+        for user in [None, Some(ME), Some(OTHER)] {
+            let item = e
+                .store()
+                .items()
+                .create(
+                    WS,
+                    &steve_store::NewItem {
+                        title: "Digest fixture".into(),
+                        bot_id: "steve".into(),
+                        requested_by: user.map(str::to_string),
+                        ..Default::default()
+                    },
+                )
+                .unwrap()
+                .unwrap();
+            let session = e
+                .store()
+                .sessions()
+                .create(&steve_store::NewSession {
+                    workspace_id: WS.into(),
+                    item_id: Some(item.id),
+                    harness: "fixture".into(),
+                    ..Default::default()
+                })
+                .unwrap();
+            // Node sessions pin identity; a later requester edit cannot lend a different user's access.
+            e.store().transaction(|tx| {
+                tx.execute("INSERT INTO runtime_sessions(session_id,node_id,workspace_ref,node_session_id,config_revision,phase,updated) VALUES (?,'node','{}',?,'r','ready',1)", rusqlite::params![session.id, session.id])?;
+                super::super::principal::record_in(tx, &session.id, None)?;
+                Ok::<_, steve_store::StoreError>(())
+            }).unwrap();
+            let cx = session_cx(e.store(), &session).unwrap();
+            assert_eq!(cx.user, user.unwrap_or("svc:default"));
+            assert!(
+                mcp::call_sync(
+                    &e.modules,
+                    &Ports::default(),
+                    &cx,
+                    mcp::FIND,
+                    &json!({"query": "nobody"})
+                )
+                .is_ok()
+            );
+            if user.is_none() {
+                assert_eq!(
+                    e.store()
+                        .reader(|c| c
+                            .query_row(
+                                "SELECT COUNT(*) FROM parties WHERE workspace_id=? AND user_id=?",
+                                rusqlite::params![WS, cx.user],
+                                |r| r.get::<_, i64>(0)
+                            )
+                            .map_err(steve_store::StoreError::from))
+                        .unwrap(),
+                    0
+                );
+            }
+            assert_eq!(
+                e.store()
+                    .reader(|c| steve_knowledge::context::item_user(
+                        c,
+                        WS,
+                        cx.item_id.as_deref().unwrap()
+                    ))
+                    .unwrap()
+                    .as_deref(),
+                user
+            );
+            for (index, doc) in docs.iter().enumerate() {
+                let allowed = index == 2
+                    || (index == 0 && user == Some(ME))
+                    || (index == 1 && user == Some(OTHER));
+                assert_eq!(
+                    steve_knowledge::tools::read(&e.modules, &cx, doc, 0.0).is_ok(),
+                    allowed,
+                    "caller {user:?}, doc {index}"
+                );
+            }
+            assert_eq!(
+                steve_digest::tools::call_sync(
+                    &e.modules,
+                    &cx,
+                    steve_digest::tools::BATCH,
+                    &json!({})
+                )
+                .is_ok(),
+                user == Some(ME)
+            );
+            if user == Some(OTHER) {
+                e.store()
+                    .transaction(|tx| {
+                        tx.execute(
+                            "DELETE FROM workspace_members WHERE workspace_id = ? AND user_id = ?",
+                            rusqlite::params![WS, OTHER],
+                        )?;
+                        Ok::<_, steve_store::StoreError>(())
+                    })
+                    .unwrap();
+                let cx = session_cx(e.store(), &session).unwrap();
+                assert_eq!(cx.user, "svc:default");
+                assert!(steve_knowledge::tools::read(&e.modules, &cx, &docs[1], 0.0).is_err());
+                assert!(steve_knowledge::tools::read(&e.modules, &cx, &docs[2], 0.0).is_ok());
+                assert!(
+                    e.store()
+                        .reader(|c| steve_knowledge::context::item_user(
+                            c,
+                            WS,
+                            cx.item_id.as_deref().unwrap()
+                        ))
+                        .unwrap()
+                        .is_none()
+                );
+            }
+        }
+    }
 }

@@ -16,20 +16,22 @@ use serde_json::{Value, json};
 use steve_flow::AdapterError;
 use steve_modules::accounts::connections::{
     AccountInfo, AuthKind, CapSpec, ConnCx, ConnectionProvider, FieldDef, Health, Integration,
-    ProviderError, StartCx,
+    Owner, ProviderError, StartCx,
 };
 use tokio::time::Instant;
 use zeroize::Zeroizing;
 
 use super::endpoint::{self, Endpoint};
 use super::session::{CallError, OpenError, Session, Timing};
+use super::wire::Identity;
 use super::wire::{
     self, Handle, HandleKind, Reason, SessionStatus, WireMessage, WireSender, WritePolicy,
 };
-use super::{ADAPTER, SYSTEM};
+use super::{ADAPTER, BOT_ADAPTER, SYSTEM};
 use crate::channel::{
-    ActAsUser, ActTarget, HandleRef, InboundMessage, Mention, MessageRef, OutContent, Profile,
-    ProfileAdapter, ProfileAnswer, ProfileQuery, ReactionKind, SendKey, Sender, Sent,
+    ActAsUser, ActTarget, ChannelAdapter, ChannelFeatures, HandleRef, InboundMessage, MemberInfo,
+    Mention, MessageRef, OutContent, Profile, ProfileAdapter, ProfileAnswer, ProfileQuery,
+    ReactionKind, SendKey, SendTarget, Sender, Sent, SpaceInfo, SpaceKind,
 };
 use crate::history::HistoryRead;
 use crate::media::{MediaError, MediaFetch};
@@ -67,6 +69,7 @@ pub(crate) struct Registry {
 
 /// The external channel connection (`ext_ws`).
 pub struct ExtWs {
+    identity: Identity,
     fields: Vec<FieldDef>,
     pub(crate) timing: Timing,
     pub(crate) reg: Registry,
@@ -81,6 +84,7 @@ impl Default for ExtWs {
 /// Who `me.get` says is signed in (§4.1).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Me {
+    pub identity: Identity,
     pub realm: String,
     pub primary: Handle,
     pub display: String,
@@ -92,9 +96,38 @@ impl ExtWs {
         Self::with_timing(Timing::default())
     }
 
+    pub fn bot() -> Self {
+        Self::bot_with_timing(Timing::default())
+    }
+
+    pub fn bot_with_timing(timing: Timing) -> Self {
+        Self {
+            identity: Identity::Bot,
+            ..Self::with_timing(timing)
+        }
+    }
+
+    pub fn adapter(&self) -> &'static str {
+        match self.identity {
+            Identity::Self_ => ADAPTER,
+            Identity::Bot => BOT_ADAPTER,
+        }
+    }
+
+    fn require_identity(&self, identity: Identity) -> Result<(), ProviderError> {
+        if self.identity == identity {
+            Ok(())
+        } else {
+            Err(ProviderError::Auth(
+                "channel service identity differs from the selected connection kind".into(),
+            ))
+        }
+    }
+
     /// With other waits (tests).
     pub fn with_timing(timing: Timing) -> Self {
         Self {
+            identity: Identity::Self_,
             fields: vec![
                 FieldDef::plain(URL, "渠道服务地址")
                     .with_hint("wss://…；明文 ws:// 只允许 127.0.0.1 或 ::1"),
@@ -162,7 +195,13 @@ impl ExtWs {
             .map_err(OpenFail::Open)?;
         drop(token);
         match me(&s).await {
-            Ok(m) => Ok((s, notes, m)),
+            Ok(m) => {
+                if let Err(e) = self.require_identity(m.identity) {
+                    s.close(1000, "identity changed");
+                    return Err(OpenFail::Provider(e));
+                }
+                Ok((s, notes, m))
+            }
             Err(e) => {
                 s.close(1000, "me.get failed");
                 Err(OpenFail::Provider(call_err(e)))
@@ -237,6 +276,7 @@ impl ExtWs {
             }
         }
         params["expected_sender"] = expected_sender(cx)?;
+        params["expected_identity"] = self.identity.name().into();
         if let Some(k) = key {
             params["idempotency_key"] = k.into();
         }
@@ -469,7 +509,12 @@ pub(crate) async fn me(s: &Session) -> Result<Me, CallError> {
     if primary.kind == HandleKind::Platform {
         return Err(bad("a platform handle is never a primary handle"));
     }
+    let identity = Identity::parse(v.get("identity")).map_err(|e| bad(&e))?;
+    if identity != s.hello().identity {
+        return Err(bad("me.get identity differs from hello"));
+    }
     Ok(Me {
+        identity,
         realm,
         display: wire::text_field(user, "display", 256).unwrap_or_else(|| primary.value.clone()),
         aliases: wire::aliases(user),
@@ -491,7 +536,10 @@ fn account_handle(me: &Me) -> String {
 pub(crate) fn same_identity(config: &Value, me: &Me) -> Result<(), ProviderError> {
     let realm = config.get(REALM).and_then(Value::as_str);
     let stored = config.get(ME).and_then(|m| Handle::parse(m).ok());
-    let same = realm.is_none_or(|r| r == me.realm) && stored.is_none_or(|h| h == me.primary);
+    let identity = Identity::parse(config.get("identity")).ok();
+    let same = identity == Some(me.identity)
+        && realm.is_none_or(|r| r == me.realm)
+        && stored.is_none_or(|h| h == me.primary);
     if same {
         Ok(())
     } else {
@@ -547,7 +595,7 @@ fn hub_ref(h: &Handle, realm: &str, known: &HashSet<String>) -> Option<HandleRef
     Some(HandleRef::new(system, handle))
 }
 
-fn sender(s: &WireSender, realm: &str, known: &HashSet<String>) -> Sender {
+pub(crate) fn sender(s: &WireSender, realm: &str, known: &HashSet<String>) -> Sender {
     let primary = hub_ref(&s.id, realm, known).unwrap_or_else(|| {
         let (sys, h) = s.id.hub(realm);
         HandleRef::new(sys, h)
@@ -692,7 +740,7 @@ pub(crate) async fn read_range(
 #[async_trait]
 impl ConnectionProvider for ExtWs {
     fn id(&self) -> &str {
-        ADAPTER
+        self.adapter()
     }
 
     fn system(&self) -> &str {
@@ -700,7 +748,10 @@ impl ConnectionProvider for ExtWs {
     }
 
     fn name(&self) -> &str {
-        "其他聊天工具"
+        match self.identity {
+            Identity::Self_ => "其他聊天工具",
+            Identity::Bot => "其他聊天工具（机器人）",
+        }
     }
 
     fn localize(&self, text: &str) -> Option<String> {
@@ -708,7 +759,10 @@ impl ConnectionProvider for ExtWs {
     }
 
     fn caps(&self) -> &[&'static str] {
-        &["msg.receive", "msg.send_as_user"]
+        match self.identity {
+            Identity::Self_ => &["msg.receive", "msg.send_as_user"],
+            Identity::Bot => &["msg.receive", "msg.send"],
+        }
     }
 
     fn auth(&self) -> AuthKind {
@@ -723,13 +777,19 @@ impl ConnectionProvider for ExtWs {
         Integration {
             provider: SYSTEM.into(),
             provider_name: "其他聊天工具".into(),
-            identity: "self".into(),
-            capabilities: vec![
-                CapSpec::supported("channel", &["msg.receive"])
-                    .with_note("通过渠道服务（WebSocket 协议）接收你的消息"),
-                CapSpec::supported("send_as_you", &["msg.send_as_user"])
-                    .with_note("以你本人的身份发送、回复、撤回和表情回应"),
-            ],
+            identity: self.identity.name().into(),
+            capabilities: match self.identity {
+                Identity::Self_ => vec![
+                    CapSpec::supported("channel", &["msg.receive"])
+                        .with_note("通过渠道服务（WebSocket 协议）接收你的消息"),
+                    CapSpec::supported("send_as_you", &["msg.send_as_user"])
+                        .with_note("以你本人的身份发送、回复、撤回和表情回应"),
+                ],
+                Identity::Bot => vec![
+                    CapSpec::supported("channel", &["msg.receive", "msg.send"])
+                        .with_note("以机器人的身份接收、发送和回复消息"),
+                ],
+            },
         }
     }
 
@@ -749,7 +809,7 @@ impl ConnectionProvider for ExtWs {
 
     /// The channel service vouches for who is signed in there; the connection is yours.
     fn claims_self(&self) -> bool {
-        true
+        self.identity == Identity::Self_
     }
 
     async fn verify(&self, cx: &ConnCx) -> Result<AccountInfo, ProviderError> {
@@ -757,10 +817,16 @@ impl ConnectionProvider for ExtWs {
         s.close(1000, "verified");
         let known = known_systems(cx);
         let mut info = AccountInfo::new(account_handle(&me), me.display.clone()).config(json!({
+            "identity": me.identity.name(),
             REALM: me.realm,
             ME: me.primary.to_value(),
             "server": s.hello().server,
+            "connector": s.hello().connector,
         }));
+        info.strict_identity_owner = true;
+        if self.identity == Identity::Bot {
+            info = info.owner(Owner::Bot).kind("app_bot");
+        }
         if me.primary.kind == HandleKind::Email {
             info = info.alias("mail", &me.primary.value.to_lowercase());
         }
@@ -799,13 +865,8 @@ impl ConnectionProvider for ExtWs {
     }
 }
 
-#[async_trait]
-impl ActAsUser for ExtWs {
-    fn adapter_id(&self) -> &str {
-        ADAPTER
-    }
-
-    async fn send(
+impl ExtWs {
+    async fn send_message_inner(
         &self,
         cx: &ConnCx,
         to: &ActTarget,
@@ -861,6 +922,24 @@ impl ActAsUser for ExtWs {
         }
         Ok(sent)
     }
+}
+
+#[async_trait]
+impl ActAsUser for ExtWs {
+    fn adapter_id(&self) -> &str {
+        self.adapter()
+    }
+
+    async fn send(
+        &self,
+        cx: &ConnCx,
+        to: &ActTarget,
+        content: &OutContent,
+        key: &SendKey,
+    ) -> Result<Sent, AdapterError> {
+        self.require_identity(Identity::Self_)?;
+        self.send_message_inner(cx, to, content, key).await
+    }
 
     fn supports_reactions(&self) -> bool {
         true
@@ -876,8 +955,9 @@ impl ActAsUser for ExtWs {
         msg: &MessageRef,
         kind: ReactionKind,
     ) -> Result<String, AdapterError> {
+        self.require_identity(Identity::Self_)?;
         let params = json!({"chat_id": msg.space_ext_id, "target": target(msg)?,
-            "emoji": self.reaction_emoji(kind)});
+            "emoji": ActAsUser::reaction_emoji(self, kind)});
         let key = format!(
             "r:{}:{}",
             msg.source_id.as_deref().or(msg.id()).unwrap_or_default(),
@@ -904,6 +984,7 @@ impl ActAsUser for ExtWs {
         msg: &MessageRef,
         reaction_id: &str,
     ) -> Result<(), AdapterError> {
+        self.require_identity(Identity::Self_)?;
         let params = json!({"chat_id": msg.space_ext_id, "target": target(msg)?,
             "reaction_id": reaction_id});
         self.write(cx, "reactions.remove", "reactions", params, None)
@@ -912,6 +993,7 @@ impl ActAsUser for ExtWs {
     }
 
     async fn recall(&self, cx: &ConnCx, msg: &MessageRef) -> Result<(), AdapterError> {
+        self.require_identity(Identity::Self_)?;
         let params = json!({"chat_id": msg.space_ext_id, "target": target(msg)?});
         self.write(cx, "messages.recall", "messages.recall", params, None)
             .await?;
@@ -922,7 +1004,7 @@ impl ActAsUser for ExtWs {
 #[async_trait]
 impl MediaFetch for ExtWs {
     fn adapter_id(&self) -> &str {
-        ADAPTER
+        self.adapter()
     }
 
     /// `GET <origin>/v1/media/<key>` with the bearer, same origin only, no redirects, at most
@@ -1018,7 +1100,7 @@ impl MediaFetch for ExtWs {
 #[async_trait]
 impl HistoryRead for ExtWs {
     fn adapter_id(&self) -> &str {
-        ADAPTER
+        self.adapter()
     }
 
     async fn read(
@@ -1056,7 +1138,7 @@ impl HistoryRead for ExtWs {
 #[async_trait]
 impl ProfileAdapter for ExtWs {
     fn adapter_id(&self) -> &str {
-        ADAPTER
+        self.adapter()
     }
 
     /// `people.get` for the handles of this service (§4.5); the space's member list is not read.
@@ -1137,6 +1219,7 @@ mod tests {
     #[test]
     fn the_identity_must_stay_the_same() {
         let me = Me {
+            identity: Identity::Self_,
             realm: "acme".into(),
             primary: Handle::id("u_123"),
             display: "Ada".into(),
@@ -1158,5 +1241,146 @@ mod tests {
         };
         assert!(same_identity(&cfg, &realm).is_err());
         assert_eq!(account_handle(&me), "acme:id:u_123");
+    }
+}
+
+#[async_trait]
+impl crate::connector::ConnectorTools for ExtWs {
+    fn adapter_id(&self) -> &str {
+        self.adapter()
+    }
+
+    async fn catalog(&self, cx: &ConnCx) -> Result<Option<crate::connector::Manifest>, String> {
+        // Discovery must remain usable without waking every remote service. The live handshake
+        // wins; otherwise use connect-time metadata. Dispatch always opens/checks a real session
+        // and compares its current declaration before sending, so this cache grants no permission.
+        if let Some(s) = self.live(cx.id()) {
+            if s.status().status != SessionStatus::Ok {
+                return Err("connector session is not signed in".into());
+            }
+            return Ok(s.hello().connector.clone());
+        }
+        cx.config()
+            .get("connector")
+            .filter(|v| !v.is_null())
+            .map(crate::connector::Manifest::parse)
+            .transpose()
+    }
+
+    async fn call(
+        &self,
+        cx: &ConnCx,
+        op: &crate::connector::Operation,
+        args: Value,
+        key: &str,
+    ) -> Result<Value, String> {
+        let guard = self.session(cx).await.map_err(|e| e.to_string())?;
+        let s = &guard.s;
+        if s.status().status != SessionStatus::Ok {
+            return Err("connector session is not signed in".into());
+        }
+        if self.identity == Identity::Bot && op.as_you() {
+            return Err("a bot connection cannot act as you".into());
+        }
+        let current = s
+            .hello()
+            .connector
+            .as_ref()
+            .and_then(|m| m.operations.iter().find(|o| o.name == op.name))
+            .ok_or("connector operation no longer declared")?;
+        if current != op {
+            return Err("connector declaration changed; discover again".into());
+        }
+        let mut p = json!({"name": op.name, "arguments": args});
+        if !op.read_only() {
+            writable(s).map_err(|e| e.to_string())?;
+            if key.is_empty() {
+                return Err("write requires a request identity".into());
+            }
+            self.pace(cx.id(), s).await;
+            p["expected_sender"] = expected_sender(cx).map_err(|e| e.to_string())?;
+            p["expected_identity"] = self.identity.name().into();
+            p["idempotency_key"] = wire::idempotency_key(key).into();
+        }
+        // Deliberately not ExtWs::read/write: neither a read nor write is replayed here.
+        match s.call("connector.call", p, s.timing().call).await {
+            Ok(v) => Ok(v),
+            Err(CallError::Timeout | CallError::Closed(_)) if !op.read_only() => {
+                Ok(json!({"status": "unknown", "request_id": key, "retry": false}))
+            }
+            Err(e) => Err(format!("connector call: {e:?}")),
+        }
+    }
+}
+
+// The bot has no ActAsUser view registered. Sharing the transport does not confer self authority.
+#[async_trait]
+impl ChannelAdapter for ExtWs {
+    fn features(&self) -> ChannelFeatures {
+        super::bot_decl().features
+    }
+    fn preserves_source_ids(&self) -> bool {
+        true
+    }
+
+    // A generic service does not promise that its platform delivers every message to a bot.
+    fn receives_all(&self, _config: &Value) -> bool {
+        false
+    }
+
+    async fn space_info(&self, cx: &ConnCx, ext_id: &str) -> Result<SpaceInfo, AdapterError> {
+        let u = self.session(cx).await?;
+        let v = Self::read(
+            &u.s,
+            "chats.get",
+            json!({"chat_id": ext_id}),
+            u.s.timing().call,
+        )
+        .await
+        .map_err(call_err)?;
+        let chat = wire::Chat::parse(&v).map_err(ProviderError::Rejected)?;
+        if chat.chat_id != ext_id {
+            return Err(ProviderError::Rejected("chat identity mismatch".into()).into());
+        }
+        Ok(SpaceInfo {
+            name: chat.name.unwrap_or_else(|| ext_id.into()),
+            kind: chat.kind.unwrap_or(SpaceKind::Group),
+            member_count: chat.member_count.unwrap_or(0),
+            has_external: chat.has_external,
+        })
+    }
+
+    async fn members(&self, _cx: &ConnCx, _ext_id: &str) -> Result<Vec<MemberInfo>, AdapterError> {
+        Err(ProviderError::Unsupported.into())
+    }
+
+    fn send_dedup(&self) -> Option<Duration> {
+        Some(Duration::from_secs(24 * 3600))
+    }
+
+    async fn send_message(
+        &self,
+        cx: &ConnCx,
+        to: &ActTarget,
+        content: &OutContent,
+        key: &SendKey,
+    ) -> Result<Sent, AdapterError> {
+        self.require_identity(Identity::Bot)?;
+        self.send_message_inner(cx, to, content, key).await
+    }
+
+    // This legacy method cannot represent a source-only receipt. The Outbox calls the richer
+    // send_message override above; refusing here avoids returning a source id as a platform id.
+    async fn send(
+        &self,
+        _cx: &ConnCx,
+        _to: &SendTarget,
+        _content: &OutContent,
+    ) -> Result<String, AdapterError> {
+        Err(ProviderError::Unsupported.into())
+    }
+
+    async fn recall(&self, _cx: &ConnCx, _ext_msg_id: &str) -> Result<(), AdapterError> {
+        Err(ProviderError::Unsupported.into())
     }
 }

@@ -35,9 +35,9 @@ import { AnnRefs } from "@/annotate"
 import { OutDialog, OutList, type OutOpen } from "@/item-outputs"
 import { ItemPeopleProp } from "@/people/item-people"
 import { QueuedComment, queuedComments, queueNote, QueueStrip } from "@/queue"
-import { NativeIdLine } from "@/resume"
+import { homeTilde, NativeIdLine } from "@/resume"
 import { ItemStatsRows, SessionStats } from "@/stats/drill"
-import { ACC, accKey, closedSt, accOf, active, addDep, archive, bulk, closeRel, deleteItem, depsOpen, doFork, hm, importSessions, interrupt, it, itemThread, link, loadEvents, loadItem, loadLocalSessions, markDone, newItem, patchItem, pendingCards, memCards, reassign, rmDep, saveGoal, sessPatch, sessRemove, sessSend, setAcc, setSt, setTags, setKind, kindOf, kindTags, isKind, DOMAIN_CATS, snoozed, st, stageOf, star, supp, tag, tagCatLabel, tagDesc, tagLabel, threadFollow, tm, toast, unsnooze, WT, type Item, type PlanRound, type Reply } from "@/store"
+import { ACC, accKey, closedSt, accOf, active, addDep, archive, bulk, closeRel, deleteItem, depsOpen, doFork, hm, importSessions, interrupt, it, itemThread, link, loadEvents, loadItem, loadLocalSessions, markDone, newItem, patchItem, pendingCards, memCards, reassign, rmDep, runtimeName, saveGoal, sessPatch, sessRemove, sessSend, setAcc, setSt, setTags, setKind, kindOf, kindTags, isKind, DOMAIN_CATS, snoozed, st, stageOf, star, supp, tag, tagCatLabel, tagDesc, tagLabel, threadFollow, tm, toast, unsnooze, WT, type Item, type PlanRound, type Reply } from "@/store"
 import { BotAvatar, BotName, Chips, closeSheet, Composer, DecisionCard, Empty, go, Group, ItemNo, KindTag, Meta, openSheet, Page, RelNote, ReplyBlock, Row, RunBar, SectionLabel, Segmented, SessionBlock, Status, StatusDot, Tags, ThemeSwitch, Transcript, type ComposerHandle, Chevron, Panel, Section, Tile, PANEL_W } from "@/ui"
 import { ChoiceCards, Count, dueLabel, ItemRow, ProjectChip, Select, selected } from "@/view-shared"
 import { YoloItemModes, YoloItemSwitch, YoloMark } from "@/yolo/badges"
@@ -648,7 +648,7 @@ export function ItemView({ id }: { id: string }) {
               </div>
             </Prop>
             {dependents.length > 0 && <Prop label={t("views:item.propDependents")}><div className="flex flex-col gap-1 pt-1">{dependents.map((x) => <a key={x.id} href={"#/items/" + x.id} className="flex items-center gap-2 hover:underline"><StatusDot s={x.st} /><span className="flex min-w-0 items-baseline gap-1.5"><ItemNo id={x.id} /><span className="truncate">{x.t}</span></span></a>)}</div></Prop>}
-            {i.cwd && <Prop label={t("views:item.propCwd")}><span className="block break-all pt-1 type-code text-muted-foreground" data-cwd>{i.cwd.replace(/^\/Users\/[^/]+/, "~")}</span></Prop>}
+            {i.cwd && <Prop label={t("views:item.propCwd")}><span className="block break-all pt-1 type-code text-muted-foreground" data-cwd>{homeTilde(i.cwd)}</span></Prop>}
             {i.branch && <Prop label={t("views:item.propBranch")}><span className="block break-all pt-1 type-code" data-branch>{i.branch}</span></Prop>}
             <Prop label={t("views:item.propSource")}><span className="block pt-1">{i.parent?.item ? <a href={"#/items/" + i.parent.item} className="hover:underline">{t("views:item.forkedFrom", { id: i.parent.item })}</a> : i.src[1] === "chat" ? <a href="#/" className="hover:underline">{t("views:item.fromChat")}</a> : i.src[0]}</span>
               {itemThread(i.id) && <label className="mt-1.5 flex items-center gap-2 pl-0.5 type-footnote text-muted-foreground" data-thread-follow><Switch size="sm" checked={!itemThread(i.id)!.follow} onCheckedChange={(v) => void threadFollow(i.id, !v)} />{t("views:item.noFollow")}</label>}</Prop>
@@ -757,7 +757,7 @@ function MeRow() {
 export function MoreView() {
   const t = useT()
   const groups = [
-    { name: t("views:more.groupWork"), rows: [["projects", t("views:more.projects"), t("views:more.projectsSub", { name: st.workspace?.name }), FolderIcon], ["sessions", t("views:more.sessions"), t("views:more.sessionsSub"), SquareTerminalIcon], ["stats", t("views:more.stats"), t("views:more.statsSub"), ChartNoAxesColumnIcon]] },
+    { name: "", rows: [["projects", t("views:more.projects"), t("views:more.projectsSub", { name: st.workspace?.name }), FolderIcon], ["sessions", t("views:more.sessions"), t("views:more.sessionsSub"), SquareTerminalIcon], ["stats", t("views:more.stats"), t("views:more.statsSub"), ChartNoAxesColumnIcon]] },
     { name: t("views:more.groupLinks"), rows: [["integrations", t("views:more.integrations"), t("views:more.integrationsSub"), PlugIcon], ["channels", t("views:more.channels"), t("views:more.channelsSub"), MessagesSquareIcon], ["mail", t("views:more.mail"), t("views:more.mailSub"), MailIcon], ["contacts", t("views:more.contacts"), t("views:more.contactsSub"), ContactRoundIcon], ["knowledge", t("views:more.knowledge"), t("views:more.knowledgeSub"), BookOpenIcon]] },
     { name: t("views:more.groupAuto"), rows: [["bots", t("views:more.bots"), t("views:more.botsSub"), BotIcon], ["capabilities", t("views:more.capabilities"), t("views:more.capabilitiesSub"), BlocksIcon], ["auto", t("views:more.auto"), t("views:more.autoSub"), WorkflowIcon], ["signals", t("views:more.signals"), t("views:more.signalsSub"), RadioIcon]] },
     { name: t("views:more.groupSystem"), rows: [["devices", t("views:more.devices"), t("views:more.devicesSub"), ServerIcon], ["accounts", t("views:more.accounts"), t("views:more.accountsSub"), KeyRoundIcon], ["vault", t("views:more.vault"), t("views:more.vaultSub"), LockIcon], ["settings", t("views:more.settings"), t("views:more.settingsSub"), SettingsIcon]] },
@@ -794,11 +794,11 @@ export function ImportDialog() {
       footer={<><Button variant="outline" onClick={closeSheet}>{t("common:action.cancel")}</Button><Button disabled={!pick.length || busy} data-testid="import-go" onClick={async () => { setBusy(true); await importSessions(pick); setBusy(false); closeSheet(); go("#/sessions") }}>{busy && <Spinner className="size-3.5" />}{pick.length ? t("views:import.go", { count: pick.length }) : t("views:import.goNone")}</Button></>}>
       <div className="max-h-[60vh] overflow-y-auto">
       {left.length ? groups.map((h) => (
-        <section key={h} className="mb-4"><SectionLabel>{t("views:import.onHub", { harness: h })}</SectionLabel>
+        <section key={h} className="mb-4"><SectionLabel>{t("views:import.onHub", { harness: runtimeName(h) ?? h })}</SectionLabel>
           <Group>{left.filter((x) => x.harness === h).map((x) => (
             <label key={x.key} className="flex cursor-pointer items-center gap-3 px-4 py-2.5 hover:bg-accent" data-import-opt={x.key}>
               <Checkbox checked={pick.includes(x.key)} onCheckedChange={(v) => setPick(v ? [...pick, x.key] : pick.filter((k) => k !== x.key))} />
-              <span className="min-w-0 flex-1"><span className="block truncate type-body">{x.title}</span><span className="block truncate type-footnote text-muted-foreground"><span className="font-mono">{x.cwd.replace(/^\/Users\/[^/]+/, "~")}</span> · {num(Math.max(1, Math.round(x.size / 1024)), { useGrouping: false })} KB</span></span>
+              <span className="min-w-0 flex-1"><span className="block truncate type-body">{x.title}</span><span className="block truncate type-footnote text-muted-foreground"><span className="font-mono">{homeTilde(x.cwd)}</span> · {num(Math.max(1, Math.round(x.size / 1024)), { useGrouping: false })} KB</span></span>
               <span className="type-footnote text-muted-foreground">{tm(x.when)}</span>
             </label>))}</Group>
         </section>)) : <Empty title={st.localSessions.length ? t("views:import.allDone") : t("views:import.reading")} />}

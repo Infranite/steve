@@ -171,3 +171,111 @@ fn released_migrations_are_frozen() {
         );
     }
 }
+
+// Build the actual SQL prefix rather than relabeling today's schema as an old one.
+// The runner also completes its conditional columns when opening these older databases.
+fn sql_schema_at(version: usize) -> Connection {
+    let c = Connection::open_in_memory().unwrap();
+    for sql in db::MIGRATIONS.iter().take(version) {
+        c.execute_batch(sql).unwrap();
+    }
+    c.execute_batch(
+        "CREATE TABLE schema_version(v INTEGER NOT NULL);
+                     CREATE TABLE schema_compat(min_reader INTEGER NOT NULL);",
+    )
+    .unwrap();
+    c.execute("INSERT INTO schema_version VALUES (?)", [version as i64])
+        .unwrap();
+    c.execute("INSERT INTO schema_compat VALUES (?)", [version as i64])
+        .unwrap();
+    c
+}
+
+#[test]
+fn connector_reference_migration_is_registered_and_upgrades_v69_once() {
+    let c = sql_schema_at(69);
+    assert_eq!(
+        one(
+            &c,
+            "SELECT count(*) FROM sqlite_master WHERE name='connector_refs' AND type='table'"
+        ),
+        0
+    );
+    db::migrate(&c).unwrap();
+    assert_eq!(
+        one(
+            &c,
+            "SELECT count(*) FROM sqlite_master WHERE name='connector_refs' AND type='table'"
+        ),
+        1
+    );
+    assert_eq!(
+        one(
+            &c,
+            "SELECT count(*) FROM pragma_foreign_key_list('connector_refs')"
+        ),
+        3
+    );
+    assert_eq!(
+        one(
+            &c,
+            "SELECT count(*) FROM sqlite_master WHERE name IN ('connector_refs_connection','connector_refs_expiry')"
+        ),
+        2
+    );
+    db::migrate(&c).unwrap();
+    assert_eq!(db::compat(&c).unwrap().schema, db::SCHEMA_VERSION);
+    assert_eq!(one(&c, "SELECT count(*) FROM pragma_foreign_key_check"), 0);
+}
+
+#[test]
+fn notification_migration_upgrades_v71_and_reopens_without_changes() {
+    let c = sql_schema_at(71);
+    assert_eq!(
+        one(
+            &c,
+            "SELECT count(*) FROM sqlite_master WHERE name IN ('notification_policies','personal_notifications')"
+        ),
+        0
+    );
+    db::migrate(&c).unwrap();
+    assert_eq!(
+        one(
+            &c,
+            "SELECT count(*) FROM sqlite_master WHERE name IN ('notification_policies','personal_notifications') AND type='table'"
+        ),
+        2
+    );
+    assert_eq!(
+        one(
+            &c,
+            "SELECT count(*) FROM sqlite_master WHERE name IN ('notification_delivery_deleted','notification_delivery_purged','notification_message_purged') AND type='trigger'"
+        ),
+        3
+    );
+    assert_eq!(
+        one(
+            &c,
+            "SELECT count(*) FROM pragma_foreign_key_list('personal_notifications') WHERE \"table\"='output_deliveries' AND on_delete='SET NULL'"
+        ),
+        1
+    );
+    let schema: String = c
+        .query_row(
+            "SELECT group_concat(sql, ';') FROM (SELECT sql FROM sqlite_master ORDER BY name)",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    db::migrate(&c).unwrap();
+    let reopened: String = c
+        .query_row(
+            "SELECT group_concat(sql, ';') FROM (SELECT sql FROM sqlite_master ORDER BY name)",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(schema, reopened);
+    assert_eq!(db::compat(&c).unwrap().schema, db::SCHEMA_VERSION);
+    assert_eq!(one(&c, "SELECT count(*) FROM pragma_foreign_key_check"), 0);
+}

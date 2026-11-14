@@ -102,3 +102,25 @@ fn only_live_nodes_link_and_each_link_is_a_new_generation() {
     s.transaction::<_, StoreError>(|tx| audit(tx, Some("n1"), Some("u1"), "revoke", None, 9))
         .unwrap();
 }
+
+#[test]
+fn node_capacity_is_persistent_owner_configuration_not_registration_state() {
+    let t = fresh();
+    t.store
+        .transaction::<_, StoreError>(|tx| {
+            create_pairing(tx, "capacity", "u1", 1, 1000)?;
+            claim_pairing(tx, "capacity", &node("n1", &[5; 32], "capacity-fp"), 2)?;
+            assert_eq!(get(tx, "n1")?.unwrap().max_sessions, 32);
+            assert!(!set_max_sessions(tx, "n1", "u2", 64)?);
+            assert!(!set_max_sessions(tx, "n1", "u1", 0)?);
+            assert!(!set_max_sessions(tx, "n1", "u1", 257)?);
+            assert!(set_max_sessions(tx, "n1", "u1", 64)?);
+            assert_eq!(steve_store::runtime::session_limit(tx, "n1")?, 64);
+            assert!(set_state(tx, "n1", "u1", "pending", "active")?);
+            assert_eq!(get(tx, "n1")?.unwrap().max_sessions, 64);
+            revoke(tx, "n1", "u1", 4)?;
+            assert!(!set_max_sessions(tx, "n1", "u1", 32)?);
+            Ok(())
+        })
+        .unwrap();
+}

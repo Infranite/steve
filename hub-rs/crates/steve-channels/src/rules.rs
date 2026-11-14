@@ -1028,7 +1028,7 @@ pub fn to_flow(
             Mode::Bot => crate::spaces::default_bot_rules(),
         });
     let rules = load(set.rules.as_ref().unwrap_or(&account), mode);
-    let owner = crate::personas::owner_name(tx, ws)?;
+    let owner = crate::personas::owner_name_for_space(tx, ws, &s.id)?;
     let graph = compile(&rules, &s.id, set.muted, &owner);
     let graph = match nodes {
         Some(reg) => steve_flow::graph::validate(&graph.to_value(), reg).map_err(ApiError::rule)?,

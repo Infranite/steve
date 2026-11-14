@@ -847,3 +847,133 @@ async fn what_a_store_returns_outside_the_scope_is_dropped() {
     ids.sort();
     assert_eq!(ids, ["mine", "ok_ws"]);
 }
+
+#[tokio::test]
+async fn mail_about_uses_source_visibility_even_for_owner_and_shared_history() {
+    let e = setup();
+    e.env.store().with_conn(|c| {
+        c.execute_batch("INSERT INTO parties (id, workspace_id, type, name, user_id, created_by, created, updated)
+            VALUES ('mail_owner', 'default', 'person', 'Mail owner', 'usr_other', 'usr_other', 1, 1);
+            INSERT INTO accounts (id, workspace_id, system_id, family, party_id, kind, handle, handle_display, source, created, updated)
+            VALUES ('mail_owner_acc', 'default', 'test', 'other', 'mail_owner', 'personal', 'mail-owner', 'Mail owner', 'me', 1, 1);
+            INSERT INTO connections (id, workspace_id, account_id, adapter, auth, created_by, created, updated)
+            VALUES ('mail_conn', 'default', 'mail_owner_acc', 'fixture', 'none', 'usr_other', 1, 1);
+            INSERT INTO mail_threads (id, workspace_id, connection_id, thread_key, subject, visibility, created_by, last_at, created, updated)
+            VALUES ('private_mail', 'default', 'mail_conn', 'private', 'Secret mail subject', 'private', 'usr_other', 1, 1, 1),
+                   ('shared_mail', 'default', 'mail_conn', 'shared', 'Shared mail subject', 'workspace', 'usr_other', 1, 1, 1),
+                   ('foreign_mail', 'w2', 'mail_conn', 'foreign', 'Foreign mail subject', 'workspace', 'usr_other', 1, 1, 1);")?;
+        Ok(())
+    }).unwrap();
+    let about = json!([{"type": "mail_thread", "id": "private_mail"}]);
+    let (status, body) = e
+        .me(
+            "POST",
+            "/kb/mems",
+            Some(json!({"text": "probe", "about": about})),
+        )
+        .await;
+    assert_eq!(status, 404, "{body}");
+    let (status, body) = e.me("POST", "/kb/mems", Some(json!({"text": "foreign probe", "about": [{"type": "mail_thread", "id": "foreign_mail"}]}))).await;
+    assert_eq!(status, 404, "{body}");
+    let (status, shared) = e.me("POST", "/kb/mems", Some(json!({"text": "public fact", "about": [{"type": "mail_thread", "id": "shared_mail"}]}))).await;
+    assert_eq!(status, 200, "{shared}");
+    assert_eq!(shared["about"][0]["name"], "Shared mail subject");
+
+    // The writer can refer to their private thread, but sharing the memory must not share its subject.
+    let (status, memory) = e
+        .as_(
+            OTHER,
+            "POST",
+            "/kb/mems",
+            Some(json!({
+                "text": "historical shared fact", "visibility": "workspace", "about": about
+            })),
+        )
+        .await;
+    assert_eq!(status, 200, "{memory}");
+    assert_eq!(memory["about"][0]["name"], "Secret mail subject");
+    let id = memory["id"].as_str().unwrap();
+    let (status, listed) = e.me("GET", "/kb/mems", None).await;
+    assert_eq!(status, 200, "{listed}");
+    assert_eq!(
+        listed
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["id"] == id)
+            .unwrap()["about"][0]["name"],
+        ""
+    );
+    assert!(!listed.to_string().contains("Secret mail subject"));
+    let tool = steve_knowledge::steward::call(
+        &e.env.modules,
+        &steve_modules::contacts::mcp::McpCx {
+            ws: WS.into(),
+            user: ME.into(),
+            bot_id: "fixture".into(),
+            item_id: None,
+            session_id: None,
+        },
+        steve_knowledge::steward::LIST,
+        &json!({}),
+    )
+    .unwrap();
+    assert!(!tool.contains("Secret mail subject"));
+    let (status, subjects) = e.me("GET", "/kb/subjects", None).await;
+    assert_eq!(status, 200, "{subjects}");
+    assert!(!subjects.to_string().contains("Secret mail subject"));
+    let (status, body) = e
+        .me("GET", "/kb/subjects/mail_thread/private_mail", None)
+        .await;
+    assert_eq!(status, 404, "{body}");
+    let hits = e.search(ME, "historical shared fact").await;
+    assert!(!hits.is_empty());
+    assert!(
+        !serde_json::to_string(&hits)
+            .unwrap()
+            .contains("Secret mail subject")
+    );
+    // Shared notes' historical `about` values use the same reader-side name check.
+    let (status, note) = e.as_(OTHER, "POST", "/kb/notes", Some(json!({
+        "title": "Shared note", "body": "historical note", "visibility": "workspace", "about": about
+    }))).await;
+    assert_eq!(status, 200, "{note}");
+    assert_eq!(note["about"][0]["name"], "Secret mail subject");
+    let (status, read) = e
+        .me(
+            "GET",
+            &format!("/kb/docs/{}", note["id"].as_str().unwrap()),
+            None,
+        )
+        .await;
+    assert_eq!(status, 200, "{read}");
+    assert_eq!(read["about"][0]["name"], "");
+}
+
+#[test]
+fn mail_about_visibility_reuses_team_and_registered_source_scopes() {
+    let e = setup();
+    e.env.store().with_conn(|c| {
+        c.execute_batch("INSERT INTO parties (id, workspace_id, type, name, created_by, created, updated)
+            VALUES ('mail_party', 'default', 'person', 'Mailbox', 'usr_other', 1, 1);
+            INSERT INTO accounts (id, workspace_id, system_id, family, party_id, kind, handle, handle_display, source, created, updated)
+            VALUES ('mail_acc', 'default', 'test', 'other', 'mail_party', 'personal', 'mail', 'Mail', 'me', 1, 1);
+            INSERT INTO connections (id, workspace_id, account_id, adapter, auth, created_by, created, updated)
+            VALUES ('scoped_mail_conn', 'default', 'mail_acc', 'fixture', 'none', 'usr_other', 1, 1);
+            INSERT INTO mail_threads (id, workspace_id, connection_id, thread_key, subject, visibility, created_by, last_at, created, updated)
+            VALUES ('team_mail', 'default', 'scoped_mail_conn', 'team', 'Team subject', 'team:team1', 'usr_other', 1, 1, 1),
+                   ('space_mail', 'default', 'scoped_mail_conn', 'space', 'Space subject', 'space:s1', 'usr_other', 1, 1, 1);")?;
+        let bare = Viewer::bare(WS, ME);
+        let scoped = bare.clone().with_scopes(["team:team1".into(), "space:s1".into()]);
+        for id in ["team_mail", "space_mail"] {
+            let r = ObjRef::new("mail_thread", id);
+            assert!(!repo::ref_exists_for(c, &bare, &r)?);
+            assert!(repo::ref_exists_for(c, &scoped, &r)?);
+            assert!(repo::ref_name_for(c, &bare, &r)?.is_none());
+            assert!(repo::ref_name_for(c, &scoped, &r)?.is_some());
+            // A viewer-free persistent index must not copy source-private subjects.
+            assert!(repo::ref_name(c, &r)?.is_none());
+        }
+        Ok(())
+    }).unwrap();
+}

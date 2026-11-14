@@ -186,6 +186,7 @@ impl Replies {
                 }
             };
             let req = bot.map(|bot| ItemRequest {
+                requester: None,
                 ws: ws.clone(),
                 title,
                 goal,
@@ -197,7 +198,7 @@ impl Replies {
                 accept_auto: false,
                 run_id: String::new(),
             });
-            Ok((req, personas::owner_name(c, &ws)?))
+            Ok((req, personas::owner_name_for_space(c, &ws, &space.id)?))
         })?;
         let Some(req) = req else {
             tracing::warn!(ws, "channel item: the workspace has no Bot");

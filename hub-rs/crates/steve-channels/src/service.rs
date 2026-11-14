@@ -53,6 +53,7 @@ struct Inner {
     profiles: BTreeMap<String, Arc<dyn ProfileAdapter>>,
     media: BTreeMap<String, Arc<dyn MediaFetch>>,
     history: BTreeMap<String, Arc<dyn crate::history::HistoryRead>>,
+    connectors: BTreeMap<String, Arc<dyn crate::connector::ConnectorTools>>,
     decls: BTreeMap<String, ChannelDecl>,
     party_hooks: Vec<Arc<dyn PartyHooks>>,
     yolo: Option<Arc<dyn YoloSwitch>>,
@@ -87,12 +88,18 @@ pub struct ChannelsBuilder {
     profiles: BTreeMap<String, Arc<dyn ProfileAdapter>>,
     media: BTreeMap<String, Arc<dyn MediaFetch>>,
     history: BTreeMap<String, Arc<dyn crate::history::HistoryRead>>,
+    connectors: BTreeMap<String, Arc<dyn crate::connector::ConnectorTools>>,
     decls: BTreeMap<String, ChannelDecl>,
     party_hooks: Vec<Arc<dyn PartyHooks>>,
     yolo: Option<Arc<dyn YoloSwitch>>,
 }
 
 impl ChannelsBuilder {
+    pub fn connector(mut self, c: Arc<dyn crate::connector::ConnectorTools>) -> Self {
+        self.connectors.insert(c.adapter_id().to_string(), c);
+        self
+    }
+
     /// Registers an identity that can look people up, under the
     /// `connections.adapter` it serves: Feishu's bot and you.
     pub fn profiles(mut self, a: Arc<dyn ProfileAdapter>) -> Self {
@@ -205,6 +212,7 @@ impl ChannelsBuilder {
             profiles: self.profiles,
             media: self.media,
             history: self.history,
+            connectors: self.connectors,
             decls: self.decls,
             party_hooks: self.party_hooks,
             yolo: self.yolo,
@@ -234,6 +242,7 @@ impl Channels {
             profiles: BTreeMap::new(),
             media: BTreeMap::new(),
             history: BTreeMap::new(),
+            connectors: BTreeMap::new(),
             decls: BTreeMap::new(),
             party_hooks: vec![Arc::new(steve_modules::accounts::AccountHooks)],
             yolo: None,
@@ -346,6 +355,12 @@ impl Channels {
             }
         }
         out
+    }
+
+    pub(crate) fn connector_views(
+        &self,
+    ) -> &BTreeMap<String, Arc<dyn crate::connector::ConnectorTools>> {
+        &self.0.connectors
     }
 
     /// The history views, by `connections.adapter`.

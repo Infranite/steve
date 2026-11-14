@@ -3708,3 +3708,1227 @@ async fn untracked_or_as_you_text_to_your_own_people_is_checked_by_the_model() {
     h.outbox.deliver(&h.ch, &r).await.unwrap();
     assert_eq!(asked(&h), 3, "nothing tracked: the model looks");
 }
+
+// Output pipeline acceptance exercises the existing C6 transport, not a test-only sender.
+fn intent(plan: &Plan, key: &str) -> steve_modules::outbound::DeliveryIntent {
+    steve_modules::outbound::DeliveryIntent {
+        key: key.into(),
+        identity: steve_modules::outbound::Identity::Bot,
+        content: steve_modules::outbound::Content {
+            markdown: "进度已更新。".into(),
+            ..Default::default()
+        },
+        source_message_id: Some(plan.message_id.clone()),
+        space_id: None,
+        party_id: None,
+        reason: "progress".into(),
+        urgency: "normal".into(),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn output_pipeline_key_is_atomic_and_unknown_submission_never_resends() {
+    let h = setup().await;
+    checks_pass(&h);
+    let plan = recorded(&h, &h.pm, "C_OPS", "pi1", "ulilei", "进度").await;
+    *h.fake.lose_answer.lock().unwrap() = true;
+    let i = intent(&plan, "stable-update");
+    let who = caller(WS, ME);
+    let (a, b) = tokio::join!(
+        h.outbox.submit(&h.ch, &who, i.clone()),
+        h.outbox.submit(&h.ch, &who, i.clone())
+    );
+    let (a, b) = (a.unwrap(), b.unwrap());
+    assert_eq!(a.id, b.id);
+    assert_eq!(sent(&h).len(), 1);
+    assert_eq!(count(&h, "SELECT count(*) FROM output_deliveries", &[]), 1);
+    let again = h.outbox.submit(&h.ch, &who, i.clone()).await.unwrap();
+    assert_eq!(again.status, "unknown");
+    assert_eq!(again.attempts, 1);
+    assert_eq!(again.message_id, a.message_id);
+    assert_eq!(sent(&h).len(), 1);
+    let recreated = Outbox::new(OutLink::new());
+    let after_restart = recreated.submit(&h.ch, &who, i.clone()).await.unwrap();
+    assert_eq!(after_restart.id, a.id);
+    assert_eq!(after_restart.attempts, 1);
+    let mut changed = i;
+    changed.content.markdown = "different".into();
+    assert!(h.outbox.submit(&h.ch, &who, changed).await.is_err());
+    h.env.clock.advance(3_600_001);
+    assert_eq!(h.outbox.send_due(&h.ch).await, 0);
+    assert_eq!(status(&h, &a.message_id), "unknown");
+    assert_eq!(sent(&h).len(), 1);
+    assert!(
+        steve_channels::pipeline::get(&h.ch, &who, &a.id)
+            .unwrap()
+            .decision_id
+            .is_some()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn output_pipeline_rejects_service_and_departed_requester_including_queued_approval() {
+    let h = setup().await;
+    checks_pass(&h);
+    let plan = recorded(&h, &h.me, "C_OPS", "pi2", "ulilei", "进度").await;
+    let mut i = intent(&plan, "own-update");
+    i.identity = steve_modules::outbound::Identity::AsYou;
+    let who = caller(WS, ME);
+    assert!(
+        h.outbox
+            .submit(&h.ch, &caller(WS, &format!("svc:{WS}")), i.clone())
+            .await
+            .is_err()
+    );
+    let d = h.outbox.submit(&h.ch, &who, i.clone()).await.unwrap();
+    assert_eq!(d.status, "draft");
+    nothing_sent(&h);
+    decide(&h, d.decision_id.as_deref().unwrap(), "yes", "").unwrap();
+    exec(
+        &h,
+        &format!("DELETE FROM workspace_members WHERE workspace_id='{WS}' AND user_id='{ME}'"),
+    );
+    h.env.clock.advance(11_000);
+    h.outbox.send_due(&h.ch).await;
+    nothing_sent(&h);
+    assert!(h.outbox.submit(&h.ch, &who, i).await.is_err());
+    assert!(steve_channels::pipeline::get(&h.ch, &who, &d.id).is_err());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn output_pipeline_route_is_pinned_and_identity_cannot_be_forged() {
+    let h = setup().await;
+    checks_pass(&h);
+    let plan = recorded(&h, &h.me, "C_OPS", "pi3", "ulilei", "进度").await;
+    assert!(
+        h.outbox
+            .submit(&h.ch, &caller(WS, ME), intent(&plan, "wrong-identity"))
+            .await
+            .is_err()
+    );
+    assert_eq!(count(&h, "SELECT count(*) FROM output_deliveries", &[]), 0);
+    let mut i = intent(&plan, "pinned");
+    i.identity = steve_modules::outbound::Identity::AsYou;
+    let d = h.outbox.submit(&h.ch, &caller(WS, ME), i).await.unwrap();
+    decide(&h, d.decision_id.as_deref().unwrap(), "yes", "").unwrap();
+    // Revoking the route before the undo window ends must not send through a fallback identity.
+    exec(
+        &h,
+        &format!(
+            "UPDATE space_identities SET left_at=2 WHERE space_id='{}'",
+            plan.space_id
+        ),
+    );
+    h.env.clock.advance(11_000);
+    h.outbox.send_due(&h.ch).await;
+    nothing_sent(&h);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn output_pipeline_ledger_rolls_back_with_the_existing_message_insert() {
+    let h = setup().await;
+    checks_pass(&h);
+    let plan = recorded(&h, &h.pm, "C_OPS", "pi4", "ulilei", "进度").await;
+    exec(
+        &h,
+        "CREATE TRIGGER reject_ledger BEFORE INSERT ON output_deliveries BEGIN SELECT RAISE(ABORT,'injected ledger failure'); END;",
+    );
+    let before = count(
+        &h,
+        "SELECT count(*) FROM chan_messages WHERE direction='out'",
+        &[],
+    );
+    assert!(
+        h.outbox
+            .submit(&h.ch, &caller(WS, ME), intent(&plan, "rollback"))
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        count(
+            &h,
+            "SELECT count(*) FROM chan_messages WHERE direction='out'",
+            &[]
+        ),
+        before
+    );
+    assert_eq!(count(&h, "SELECT count(*) FROM output_deliveries", &[]), 0);
+    nothing_sent(&h);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn output_pipeline_explicit_switch_does_not_reuse_foreign_reply_id() {
+    let h = setup().await;
+    checks_pass(&h);
+    let src = recorded(&h, &h.pm, "C_OPS", "pi5", "ulilei", "进度").await;
+    let dst = recorded(&h, &h.pm, "C_REQ", "pi6", "ulilei", "另一个渠道").await;
+    let mut i = intent(&src, "switch");
+    i.space_id = Some(dst.space_id.clone());
+    let d = h.outbox.submit(&h.ch, &caller(WS, ME), i).await.unwrap();
+    assert_eq!(d.status, "sent");
+    assert_eq!(d.space_id, dst.space_id);
+    assert!(matches!(&sent(&h)[0].0,SendTarget::Space{ext_id} if ext_id=="C_REQ"));
+    assert_eq!(
+        row(
+            &h,
+            "SELECT source_message_id FROM output_deliveries WHERE id=?",
+            &[&d.id]
+        )[0],
+        src.message_id
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn output_pipeline_real_source_reply_uses_existing_outbox_and_stable_ledger() {
+    let h = setup().await;
+    checks_pass(&h);
+    let src = recorded(&h, &h.pm, "C_OPS", "pi7", "ulilei", "进度").await;
+    let item = h
+        .env
+        .store()
+        .items()
+        .create(
+            WS,
+            &steve_store::NewItem {
+                title: "update".into(),
+                bot_id: "steve".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .unwrap();
+    h.env
+        .store()
+        .transaction(|tx| -> ApiResult<_> {
+            links::add(
+                tx,
+                WS,
+                &NewLink::new(
+                    ObjRef::new("item", &item.id),
+                    "from",
+                    ObjRef::new("chan_message", &src.message_id),
+                    "test",
+                ),
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let who = caller(WS, ME);
+    let d = h
+        .outbox
+        .reply_source_as(&h.ch, &who, &item.id, "任务完成", "source-key", None, None)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(d.status, "sent");
+    assert_eq!(d.attempts, 1);
+    let cleanup = steve_channels::cleanup::routes(h.ch.clone()).with_state(h.env.modules.clone());
+    let (st, result) = call(
+        &cleanup,
+        Some(&who),
+        "POST",
+        "/channels/cleanup",
+        Some(&json!({"connection_id":h.pm,"level":"text","confirm":true})),
+    )
+    .await;
+    assert_eq!(st, 200, "{result}");
+    assert_eq!(
+        row(
+            &h,
+            "SELECT json_extract(intent,'$.content') FROM output_deliveries WHERE id=?",
+            &[&d.id]
+        )[0],
+        "{}"
+    );
+    h.env
+        .store()
+        .transaction(|tx| -> ApiResult<()> {
+            spaces::see(tx, WS, &src.space_id, &h.me, h.ch.now())?;
+            spaces::set_voice(tx, WS, &src.space_id, Some(&h.me), h.ch.now())?;
+            Ok(())
+        })
+        .unwrap();
+    let again = h
+        .outbox
+        .reply_source_as(&h.ch, &who, &item.id, "任务完成", "source-key", None, None)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(d.id, again.id);
+    assert_eq!(sent(&h).len(), 1);
+    assert!(
+        h.outbox
+            .reply_source_as(&h.ch, &who, &item.id, "改了内容", "source-key", None, None)
+            .await
+            .is_err()
+    );
+    exec(
+        &h,
+        &format!("DELETE FROM workspace_members WHERE workspace_id='{WS}' AND user_id='{ME}'"),
+    );
+    assert!(
+        h.outbox
+            .reply_source_as(&h.ch, &who, &item.id, "任务完成", "source-key", None, None)
+            .await
+            .is_err()
+    );
+}
+
+#[test]
+fn output_pipeline_structured_content_has_lossless_text_fallback() {
+    use steve_modules::outbound::Content;
+    let c = Content {
+        title: "标题".into(),
+        markdown: "原始 **正文** token-keep-verbatim".into(),
+        fields: vec![("状态".into(), "就绪".into())],
+        actions: vec![("查看".into(), "https://example.org/item/1".into())],
+        references: vec![("来源".into(), "https://example.org/source/2".into())],
+    };
+    assert_eq!(
+        c.markdown(),
+        "# 标题\n\n原始 **正文** token-keep-verbatim\n\n状态: 就绪\n\n查看: https://example.org/item/1\n\n来源: https://example.org/source/2"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn output_pipeline_manual_preference_wins_but_replies_default_to_source_and_learn() {
+    let h = setup().await;
+    checks_pass(&h);
+    h.fake
+        .space("D_LI_TWO", "", SpaceKind::Dm, false, &[("ulilei", "李雷")]);
+    let one = recorded(&h, &h.pm, "D_LI", "pref1", "ulilei", "hello").await;
+    let two = recorded(&h, &h.pm, "D_LI_TWO", "pref2", "ulilei", "hello").await;
+    exec(&h,&format!("INSERT INTO parties(id,workspace_id,type,name,created_by,created,updated) VALUES ('output-person','{WS}','contact','Recipient','{ME}',1,1);
+        UPDATE accounts SET party_id='output-person' WHERE id IN (SELECT sender_account_id FROM chan_messages WHERE id IN ('{}','{}'));
+        UPDATE chan_messages SET sender_party_id='output-person' WHERE id IN ('{}','{}');",one.message_id,two.message_id,one.message_id,two.message_id));
+    let who = caller(WS, ME);
+    steve_channels::pipeline::set_preference(&h.ch, &who, "output-person", Some(&two.space_id))
+        .unwrap();
+    exec(
+        &h,
+        &format!(
+            "UPDATE output_channel_preferences SET learned_space_id='{}'",
+            one.space_id
+        ),
+    );
+    let mut i = intent(&one, "person-pref");
+    i.source_message_id = None;
+    i.party_id = Some("output-person".into());
+    let d = h.outbox.submit(&h.ch, &who, i).await.unwrap();
+    assert_eq!(d.space_id, two.space_id);
+    assert_eq!(d.status, "sent");
+    let mut i = intent(&one, "same-channel");
+    i.party_id = Some("output-person".into());
+    let d = h.outbox.submit(&h.ch, &who, i).await.unwrap();
+    assert_eq!(d.space_id, one.space_id);
+    let external = row(
+        &h,
+        "SELECT external_id FROM chan_messages WHERE id=?",
+        &[&d.message_id],
+    )[0]
+    .as_str()
+    .unwrap()
+    .to_string();
+    let mut reply = msg("D_LI", "pref-reply", "ulilei", "got it", false);
+    reply.reply_to = Some(external);
+    push(&h, &h.pm, reply).await;
+    let receipt = steve_channels::pipeline::get(&h.ch, &who, &d.id).unwrap();
+    assert!(receipt.replied_at.is_some());
+    assert!(receipt.reply_message_id.is_some());
+    let prefs = row(
+        &h,
+        "SELECT manual_space_id,learned_space_id FROM output_channel_preferences WHERE party_id='output-person'",
+        &[],
+    );
+    assert_eq!(prefs[0], two.space_id);
+    assert_eq!(prefs[1], one.space_id);
+    // A person not in a chosen conversation is not reachable merely because the requester can see it.
+    exec(
+        &h,
+        &format!(
+            "DELETE FROM space_members WHERE space_id='{}' AND account_id IN (SELECT id FROM accounts WHERE party_id='output-person')",
+            two.space_id
+        ),
+    );
+    let mut i = intent(&one, "unreachable");
+    i.space_id = Some(two.space_id);
+    i.party_id = Some("output-person".into());
+    assert!(h.outbox.submit(&h.ch, &who, i).await.is_err());
+}
+
+// E2's first real event: use the durable dispatcher and the very same C6 fake transport as above.
+async fn notification_setup(h: &H) -> steve_channels::notifications::Policy {
+    let plan = recorded(h, &h.pm, "D_LI", "notify-source", "ulilei", "record only").await;
+    let party = row(
+        h,
+        "SELECT id FROM parties WHERE workspace_id=? AND user_id=?",
+        &[WS, ME],
+    )[0]
+    .as_str()
+    .unwrap()
+    .to_owned();
+    // A verified personal identity link, not owner guessing in the implementation.
+    h.env
+        .store()
+        .transaction(|tx| -> ApiResult<()> {
+            tx.execute(
+                "UPDATE accounts SET party_id=? WHERE handle='ulilei' AND workspace_id=?",
+                rusqlite::params![party, WS],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    steve_channels::notifications::Policy {
+        enabled: true,
+        mode: steve_channels::notifications::Mode::Now,
+        party_id: Some(party),
+        space_id: Some(plan.space_id),
+        timezone: "UTC".into(),
+        quiet_start: None,
+        quiet_end: None,
+    }
+}
+fn notification_dispatch(h: &H) -> steve_store::outbox::Dispatcher {
+    let d =
+        steve_store::outbox::Dispatcher::new(vec![Arc::new(steve_channels::notifications::Intake)]);
+    d.register(h.env.store()).unwrap();
+    d
+}
+fn notification_event(h: &H) -> steve_store::outbox::Event {
+    h.env.store().transaction(|tx|steve_store::outbox::emit(tx,WS,steve_work_api::ITEM_DONE,1,&json!({
+        "item_id":"ST-42","title":"Completed durable work","status":"done","bot_id":"steve","project_id":"proj","source":null,"cycle":2,"revision":3
+    }))).unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn notifications_dispatch_replay_restart_and_unknown_use_one_existing_delivery() {
+    use steve_channels::notifications as n;
+    let h = setup().await;
+    checks_pass(&h);
+    let p = notification_setup(&h).await;
+    assert!(!n::get_policy(&h.ch, &caller(WS, ME)).unwrap().enabled);
+    n::put_policy(&h.ch, &caller(WS, ME), &p).unwrap();
+    let d = notification_dispatch(&h);
+    let ev = notification_event(&h);
+    assert_eq!(d.pump(h.env.store(), h.ch.now()).unwrap().done, 1);
+    assert_eq!(
+        count(&h, "SELECT count(*) FROM personal_notifications", &[]),
+        1
+    );
+    *h.fake.lose_answer.lock().unwrap() = true;
+    n::pump(&h.ch, &h.outbox).await.unwrap();
+    assert_eq!(sent(&h).len(), 1);
+    assert!(sent(&h)[0].1.contains("Cycle: 2 · Revision: 3"));
+    let a = n::list(&h.ch, &caller(WS, ME)).unwrap();
+    assert!(a[0].delivery_id.is_some());
+    assert_eq!(
+        count(
+            &h,
+            "SELECT count(*) FROM output_deliveries WHERE attempts=1",
+            &[]
+        ),
+        1
+    );
+    // Re-registration and forced receipt replay keep the stable event/member tombstone.
+    exec(
+        &h,
+        &format!("DELETE FROM outbox_receipts WHERE event_seq={}", ev.seq),
+    );
+    notification_dispatch(&h)
+        .pump(h.env.store(), h.ch.now())
+        .unwrap();
+    let restart = Outbox::new(OutLink::new());
+    n::pump(&h.ch, &restart).await.unwrap();
+    assert_eq!(sent(&h).len(), 1);
+    assert_eq!(count(&h, "SELECT count(*) FROM output_deliveries", &[]), 1);
+    assert_eq!(
+        count(&h, "SELECT count(*) FROM personal_notifications", &[]),
+        1
+    );
+    assert_eq!(
+        row(
+            &h,
+            "SELECT status FROM chan_messages WHERE direction='out'",
+            &[]
+        )[0],
+        "unknown"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn notifications_receipt_and_inbox_rollback_and_e1_attachment_rollback() {
+    use steve_channels::notifications as n;
+    let h = setup().await;
+    checks_pass(&h);
+    let p = notification_setup(&h).await;
+    n::put_policy(&h.ch, &caller(WS, ME), &p).unwrap();
+    let d = notification_dispatch(&h);
+    notification_event(&h);
+    exec(
+        &h,
+        "CREATE TRIGGER reject_notification BEFORE INSERT ON personal_notifications BEGIN SELECT RAISE(ABORT,'intake failure'); END;",
+    );
+    assert_eq!(d.pump(h.env.store(), h.ch.now()).unwrap().retried, 1);
+    assert_eq!(count(&h, "SELECT count(*) FROM outbox_receipts", &[]), 0);
+    assert_eq!(
+        count(&h, "SELECT count(*) FROM personal_notifications", &[]),
+        0
+    );
+    exec(
+        &h,
+        "DROP TRIGGER reject_notification; UPDATE outbox_leases SET next_at=0;",
+    );
+    assert_eq!(d.pump(h.env.store(), h.ch.now()).unwrap().done, 1);
+    exec(
+        &h,
+        "CREATE TRIGGER reject_notification_link BEFORE UPDATE OF delivery_id ON personal_notifications BEGIN SELECT RAISE(ABORT,'link failure'); END;",
+    );
+    n::pump(&h.ch, &h.outbox).await.unwrap();
+    nothing_sent(&h);
+    assert_eq!(count(&h, "SELECT count(*) FROM output_deliveries", &[]), 0);
+    assert_eq!(
+        count(
+            &h,
+            "SELECT count(*) FROM chan_messages WHERE direction='out'",
+            &[]
+        ),
+        0
+    );
+    exec(&h, "DROP TRIGGER reject_notification_link;");
+    h.env.clock.advance(10_000);
+    n::pump(&h.ch, &h.outbox).await.unwrap();
+    assert_eq!(sent(&h).len(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn notifications_dnd_release_and_digest_log_or_manual_override_never_send() {
+    use steve_channels::notifications as n;
+    let h = setup().await;
+    checks_pass(&h);
+    let mut p = notification_setup(&h).await;
+    let minute = (h.ch.now().rem_euclid(86_400_000) / 60_000) as u16;
+    p.quiet_start = Some(minute);
+    p.quiet_end = Some((minute + 10) % 1440);
+    n::put_policy(&h.ch, &caller(WS, ME), &p).unwrap();
+    let d = notification_dispatch(&h);
+    notification_event(&h);
+    d.pump(h.env.store(), h.ch.now()).unwrap();
+    n::pump(&h.ch, &h.outbox).await.unwrap();
+    nothing_sent(&h);
+    let recreated = Outbox::new(OutLink::new());
+    h.env.clock.advance(11 * 60_000);
+    n::pump(&h.ch, &recreated).await.unwrap();
+    assert_eq!(sent(&h).len(), 1);
+    for mode in [n::Mode::Digest, n::Mode::Log] {
+        p.mode = mode;
+        n::put_policy(&h.ch, &caller(WS, ME), &p).unwrap();
+        notification_event(&h);
+        d.pump(h.env.store(), h.ch.now()).unwrap();
+        n::pump(&h.ch, &h.outbox).await.unwrap();
+    }
+    assert_eq!(sent(&h).len(), 1);
+    // A manual override before recovery parks the waiting now event permanently, not a future burst.
+    p.mode = n::Mode::Now;
+    p.quiet_start = None;
+    p.quiet_end = None;
+    n::put_policy(&h.ch, &caller(WS, ME), &p).unwrap();
+    notification_event(&h);
+    d.pump(h.env.store(), h.ch.now()).unwrap();
+    p.mode = n::Mode::Log;
+    n::put_policy(&h.ch, &caller(WS, ME), &p).unwrap();
+    p.mode = n::Mode::Now;
+    n::put_policy(&h.ch, &caller(WS, ME), &p).unwrap();
+    n::pump(&h.ch, &h.outbox).await.unwrap();
+    assert_eq!(sent(&h).len(), 1);
+    assert_eq!(
+        count(
+            &h,
+            "SELECT count(*) FROM personal_notifications WHERE state='held'",
+            &[]
+        ),
+        3
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn notifications_reject_fake_self_service_and_keep_seen_personal() {
+    use steve_channels::notifications as n;
+    let h = setup().await;
+    checks_pass(&h);
+    let mut p = notification_setup(&h).await;
+    let mine = p.party_id.clone();
+    p.party_id = Some("not-my-party".into());
+    assert!(n::put_policy(&h.ch, &caller(WS, ME), &p).is_err());
+    p.party_id = mine;
+    assert!(n::put_policy(&h.ch, &caller(WS, &format!("svc:{WS}")), &p).is_err());
+    n::put_policy(&h.ch, &caller(WS, ME), &p).unwrap();
+    exec(
+        &h,
+        "INSERT INTO users(id,workspace_id,subject,name,role,created) VALUES('notification-other','default','notification-other','Other','member',1); INSERT INTO workspace_members(workspace_id,user_id,role,created) VALUES('default','notification-other','member',1);",
+    );
+    let other = caller(WS, "notification-other");
+    let log = n::Policy {
+        enabled: true,
+        ..Default::default()
+    };
+    n::put_policy(&h.ch, &other, &log).unwrap();
+    let d = notification_dispatch(&h);
+    notification_event(&h);
+    d.pump(h.env.store(), h.ch.now()).unwrap();
+    let mine = n::list(&h.ch, &caller(WS, ME)).unwrap();
+    let theirs = n::list(&h.ch, &other).unwrap();
+    assert_eq!(mine.len(), 1);
+    assert_eq!(theirs.len(), 1);
+    assert!(n::seen(&h.ch, &other, &mine[0].id).is_err());
+    n::seen(&h.ch, &caller(WS, ME), &mine[0].id).unwrap();
+    assert!(
+        n::list(&h.ch, &caller(WS, ME)).unwrap()[0]
+            .seen_at
+            .is_some()
+    );
+    assert!(n::list(&h.ch, &other).unwrap()[0].seen_at.is_none());
+    // Old notification seen and Feed read address one fact in both directions.
+    let mine_entry = h
+        .env
+        .store()
+        .reader(|c| steve_store::feed::detail(c, WS, ME, &format!("feed_{}", mine[0].id)))
+        .unwrap();
+    assert!(mine_entry.read_at.is_some());
+    assert_eq!(mine_entry.body.unwrap().references.len(), 1);
+    h.env
+        .store()
+        .transaction(|tx| {
+            steve_store::feed::read_ids(
+                tx,
+                WS,
+                &other.me,
+                &[format!("feed_{}", theirs[0].id)],
+                h.ch.now(),
+            )
+        })
+        .unwrap();
+    assert!(n::list(&h.ch, &other).unwrap()[0].seen_at.is_some());
+    assert_eq!(
+        count(
+            &h,
+            "SELECT count(*) FROM personal_notifications WHERE seen_at IS NOT NULL",
+            &[]
+        ),
+        0
+    );
+    // Revoked consent before first send does not borrow the remaining member's authorization.
+    p.enabled = false;
+    n::put_policy(&h.ch, &caller(WS, ME), &p).unwrap();
+    n::pump(&h.ch, &h.outbox).await.unwrap();
+    nothing_sent(&h);
+}
+
+#[test]
+fn notifications_quiet_hours_cross_midnight_and_dst_timezone() {
+    use steve_channels::notifications::Policy;
+    let p = Policy {
+        timezone: "America/New_York".into(),
+        quiet_start: Some(22 * 60),
+        quiet_end: Some(7 * 60),
+        ..Default::default()
+    };
+    let at = |t: &str| {
+        chrono::DateTime::parse_from_rfc3339(t)
+            .unwrap()
+            .timestamp_millis()
+    };
+    // DST fall-back repeats 01:30: both real instants remain quiet, no guessed UTC offset.
+    assert!(p.quiet(at("2026-11-01T05:30:00Z")).unwrap());
+    assert!(p.quiet(at("2026-11-01T06:30:00Z")).unwrap());
+    assert!(!p.quiet(at("2026-11-01T12:00:00Z")).unwrap());
+    assert!(p.quiet(at("2026-11-02T03:00:00Z")).unwrap());
+    assert!(!p.quiet(at("2026-11-01T17:00:00Z")).unwrap());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn notifications_queued_dnd_is_a_hold_and_release_uses_original_c6_message() {
+    use steve_channels::notifications as n;
+    let h = setup().await;
+    checks_pass(&h);
+    let mut p = notification_setup(&h).await;
+    n::put_policy(&h.ch, &caller(WS, ME), &p).unwrap();
+    let d = notification_dispatch(&h);
+    notification_event(&h);
+    d.pump(h.env.store(), h.ch.now()).unwrap();
+    exec(
+        &h,
+        &format!("UPDATE connections SET status='paused' WHERE id='{}'", h.pm),
+    );
+    n::pump(&h.ch, &h.outbox).await.unwrap();
+    nothing_sent(&h);
+    assert_eq!(count(&h, "SELECT count(*) FROM output_deliveries", &[]), 1);
+    let minute = (h.ch.now().rem_euclid(86_400_000) / 60_000) as u16;
+    p.quiet_start = Some(minute);
+    p.quiet_end = Some((minute + 60) % 1440);
+    n::put_policy(&h.ch, &caller(WS, ME), &p).unwrap();
+    exec(
+        &h,
+        &format!("UPDATE connections SET status='ok' WHERE id='{}'", h.pm),
+    );
+    h.env.clock.advance(31_000);
+    h.outbox.send_due(&h.ch).await;
+    nothing_sent(&h);
+    assert_eq!(
+        count(
+            &h,
+            "SELECT count(*) FROM chan_messages WHERE direction='out' AND status='pending'",
+            &[]
+        ),
+        1
+    );
+    // An hour-long DND is not a stale direct reply requiring a new approval.
+    h.env.clock.advance(61 * 60_000);
+    h.outbox.send_due(&h.ch).await;
+    assert_eq!(sent(&h).len(), 1);
+    assert_eq!(count(&h, "SELECT count(*) FROM output_deliveries", &[]), 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn notifications_revalidate_disable_departure_identity_and_route_before_queued_send() {
+    use steve_channels::notifications as n;
+    for revoke in ["policy", "membership", "identity", "route"] {
+        let h = setup().await;
+        checks_pass(&h);
+        let mut p = notification_setup(&h).await;
+        n::put_policy(&h.ch, &caller(WS, ME), &p).unwrap();
+        let d = notification_dispatch(&h);
+        notification_event(&h);
+        d.pump(h.env.store(), h.ch.now()).unwrap();
+        exec(
+            &h,
+            &format!("UPDATE connections SET status='paused' WHERE id='{}'", h.pm),
+        );
+        n::pump(&h.ch, &h.outbox).await.unwrap();
+        nothing_sent(&h);
+        match revoke {
+            "policy" => {
+                p.enabled = false;
+                n::put_policy(&h.ch, &caller(WS, ME), &p).unwrap();
+            }
+            "membership" => exec(
+                &h,
+                &format!(
+                    "DELETE FROM workspace_members WHERE user_id='{ME}' AND workspace_id='{WS}'"
+                ),
+            ),
+            "identity" => exec(
+                &h,
+                &format!(
+                    "UPDATE parties SET user_id=NULL WHERE id='{}'",
+                    p.party_id.unwrap()
+                ),
+            ),
+            "route" => exec(
+                &h,
+                &format!(
+                    "UPDATE space_identities SET left_at=2 WHERE space_id='{}'",
+                    p.space_id.unwrap()
+                ),
+            ),
+            _ => unreachable!(),
+        }
+        exec(
+            &h,
+            &format!("UPDATE connections SET status='ok' WHERE id='{}'", h.pm),
+        );
+        h.env.clock.advance(31_000);
+        h.outbox.send_due(&h.ch).await;
+        nothing_sent(&h);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn notifications_manual_bot_dm_preference_and_body_cleanup_share_e1_receipts() {
+    use steve_channels::notifications as n;
+    let h = setup().await;
+    checks_pass(&h);
+    let mut p = notification_setup(&h).await;
+    h.fake
+        .space("D_MANUAL", "", SpaceKind::Dm, false, &[("ulilei", "李雷")]);
+    let manual = recorded(&h, &h.pm, "D_MANUAL", "manual-source", "ulilei", "record").await;
+    p.space_id = None;
+    steve_channels::pipeline::set_preference(
+        &h.ch,
+        &caller(WS, ME),
+        p.party_id.as_deref().unwrap(),
+        Some(&manual.space_id),
+    )
+    .unwrap();
+    n::put_policy(&h.ch, &caller(WS, ME), &p).unwrap();
+    let d = notification_dispatch(&h);
+    let ev = notification_event(&h);
+    d.pump(h.env.store(), h.ch.now()).unwrap();
+    n::pump(&h.ch, &h.outbox).await.unwrap();
+    assert_eq!(sent(&h).len(), 1);
+    assert_eq!(
+        row(&h, "SELECT space_id FROM output_deliveries", &[])[0],
+        manual.space_id
+    );
+    let cleanup = steve_channels::cleanup::routes(h.ch.clone()).with_state(h.env.modules.clone());
+    let (st, v) = call(
+        &cleanup,
+        Some(&caller(WS, ME)),
+        "POST",
+        "/channels/cleanup",
+        Some(&json!({"connection_id":h.pm,"level":"text","confirm":true})),
+    )
+    .await;
+    assert_eq!(st, 200, "{v}");
+    assert_eq!(
+        count(
+            &h,
+            "SELECT count(*) FROM personal_notifications WHERE body IS NULL AND state='purged'",
+            &[]
+        ),
+        1
+    );
+    let feed = h
+        .env
+        .store()
+        .transaction(|tx| {
+            steve_store::feed::list(
+                tx,
+                WS,
+                ME,
+                &steve_store::feed::Filter::default(),
+                None,
+                50,
+                h.ch.now(),
+            )
+        })
+        .unwrap();
+    assert_eq!(feed.entries.len(), 1);
+    assert!(
+        feed.entries[0].purged
+            && feed.entries[0].title.is_empty()
+            && feed.entries[0].excerpt.is_empty()
+    );
+    assert!(
+        h.env
+            .store()
+            .reader(|c| steve_store::feed::detail(c, WS, ME, &feed.entries[0].id))
+            .unwrap()
+            .body
+            .is_none()
+    );
+    exec(
+        &h,
+        &format!("DELETE FROM outbox_receipts WHERE event_seq={}", ev.seq),
+    );
+    notification_dispatch(&h)
+        .pump(h.env.store(), h.ch.now())
+        .unwrap();
+    n::pump(&h.ch, &h.outbox).await.unwrap();
+    assert_eq!(sent(&h).len(), 1);
+    let (st, v) = call(
+        &cleanup,
+        Some(&caller(WS, ME)),
+        "POST",
+        "/channels/cleanup",
+        Some(&json!({"connection_id":h.pm,"level":"all","confirm":true})),
+    )
+    .await;
+    assert_eq!(st, 200, "{v}");
+    assert_eq!(count(&h, "SELECT count(*) FROM output_deliveries", &[]), 0);
+    assert_eq!(
+        count(
+            &h,
+            "SELECT count(*) FROM personal_notifications WHERE delivery_id IS NULL AND body IS NULL AND state='purged'",
+            &[]
+        ),
+        1
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn notifications_recheck_pinned_dm_when_preference_moves_elsewhere() {
+    use steve_channels::notifications as n;
+    let h = setup().await;
+    checks_pass(&h);
+    let mut p = notification_setup(&h).await;
+    let pinned = p.space_id.clone().unwrap();
+    p.space_id = None;
+    let party = p.party_id.clone().unwrap();
+    steve_channels::pipeline::set_preference(&h.ch, &caller(WS, ME), &party, Some(&pinned))
+        .unwrap();
+    n::put_policy(&h.ch, &caller(WS, ME), &p).unwrap();
+    let d = notification_dispatch(&h);
+    notification_event(&h);
+    d.pump(h.env.store(), h.ch.now()).unwrap();
+    exec(
+        &h,
+        &format!("UPDATE connections SET status='paused' WHERE id='{}'", h.pm),
+    );
+    n::pump(&h.ch, &h.outbox).await.unwrap();
+    nothing_sent(&h);
+    h.fake
+        .space("D_NEW", "", SpaceKind::Dm, false, &[("ulilei", "李雷")]);
+    let safe = recorded(&h, &h.pm, "D_NEW", "safe-source", "ulilei", "record").await;
+    steve_channels::pipeline::set_preference(&h.ch, &caller(WS, ME), &party, Some(&safe.space_id))
+        .unwrap();
+    // Old pinned DM A acquires a third person after the preference has moved to safe B.
+    recorded(&h, &h.pm, "C_OPS", "third-person", "uhan", "record").await;
+    exec(
+        &h,
+        &format!(
+            "INSERT INTO space_members(space_id,workspace_id,account_id,role,joined) SELECT '{pinned}','{WS}',id,'member',1 FROM accounts WHERE handle='uhan' LIMIT 1"
+        ),
+    );
+    assert_eq!(
+        count(
+            &h,
+            "SELECT count(*) FROM space_members sm JOIN accounts a ON a.id=sm.account_id WHERE sm.space_id=? AND a.handle='uhan'",
+            &[&pinned]
+        ),
+        1
+    );
+    exec(
+        &h,
+        &format!("UPDATE connections SET status='ok' WHERE id='{}'", h.pm),
+    );
+    h.env.clock.advance(31_000);
+    h.outbox.send_due(&h.ch).await;
+    nothing_sent(&h);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn notifications_claim_then_completed_policy_put_or_dnd_prevents_actual_attempt() {
+    use steve_channels::notifications as n;
+    for change in ["disable", "party", "mode", "dnd"] {
+        let h = setup().await;
+        checks_pass(&h);
+        let mut p = notification_setup(&h).await;
+        n::put_policy(&h.ch, &caller(WS, ME), &p).unwrap();
+        let d = notification_dispatch(&h);
+        notification_event(&h);
+        d.pump(h.env.store(), h.ch.now()).unwrap();
+        let replacement = if change == "party" {
+            h.fake.space(
+                "D_RELINK_SELF",
+                "",
+                SpaceKind::Dm,
+                false,
+                &[("uhan", "New self")],
+            );
+            let plan = recorded(&h, &h.pm, "D_RELINK_SELF", "new-self", "uhan", "record").await;
+            let party = row(&h, "SELECT party_id FROM accounts WHERE handle='uhan'", &[])[0]
+                .as_str()
+                .unwrap()
+                .to_owned();
+            Some((plan.space_id, party))
+        } else {
+            None
+        };
+        let entered = Arc::new(tokio::sync::Barrier::new(2));
+        let release = Arc::new(tokio::sync::Barrier::new(2));
+        h.outbox
+            .pause_before_attempt(entered.clone(), release.clone());
+        let ch = h.ch.clone();
+        let out = h.outbox.clone();
+        let task = tokio::spawn(async move { n::pump(&ch, &out).await.unwrap() });
+        entered.wait().await;
+        assert_eq!(
+            count(
+                &h,
+                "SELECT count(*) FROM chan_messages WHERE direction='out' AND sent IS NOT NULL",
+                &[]
+            ),
+            1
+        );
+        match change {
+            "disable" => p.enabled = false,
+            "party" => {
+                let (space, party) = replacement.unwrap();
+                exec(
+                    &h,
+                    &format!(
+                        "UPDATE parties SET user_id=NULL WHERE user_id='{ME}'; UPDATE parties SET user_id='{ME}' WHERE id='{party}';"
+                    ),
+                );
+                p.party_id = Some(party);
+                p.space_id = Some(space);
+                assert_eq!(p.mode, n::Mode::Now); // Exercise live identity verification, not mode deferral.
+            }
+            "mode" => p.mode = n::Mode::Log,
+            "dnd" => {
+                let minute = (h.ch.now().rem_euclid(86_400_000) / 60_000) as u16;
+                // Enter quiet time while preparation is paused, exercising fresh rather than claim time.
+                p.quiet_start = Some((minute + 1) % 1440);
+                p.quiet_end = Some((minute + 10) % 1440);
+            }
+            _ => unreachable!(),
+        }
+        n::put_policy(&h.ch, &caller(WS, ME), &p).unwrap();
+        if change == "dnd" {
+            h.env.clock.advance(2 * 60_000);
+        }
+        release.wait().await;
+        task.await.unwrap();
+        nothing_sent(&h);
+        assert_eq!(
+            count(&h, "SELECT sum(attempts) FROM output_deliveries", &[]),
+            0
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn notifications_held_fifty_do_not_starve_ordinary_direct_message_fifty_one() {
+    use steve_channels::notifications as n;
+    let h = setup().await;
+    checks_pass(&h);
+    let mut p = notification_setup(&h).await;
+    n::put_policy(&h.ch, &caller(WS, ME), &p).unwrap();
+    let d = notification_dispatch(&h);
+    for _ in 0..50 {
+        notification_event(&h);
+    }
+    d.pump(h.env.store(), h.ch.now()).unwrap();
+    exec(
+        &h,
+        &format!("UPDATE connections SET status='paused' WHERE id='{}'", h.pm),
+    );
+    n::pump(&h.ch, &h.outbox).await.unwrap();
+    nothing_sent(&h);
+    assert_eq!(count(&h, "SELECT count(*) FROM output_deliveries", &[]), 50);
+    p.mode = n::Mode::Log;
+    n::put_policy(&h.ch, &caller(WS, ME), &p).unwrap();
+    let source = recorded(&h, &h.pm, "C_OPS", "ordinary-source", "ulilei", "record").await;
+    h.outbox
+        .submit(&h.ch, &caller(WS, ME), intent(&source, "ordinary-after-50"))
+        .await
+        .unwrap();
+    exec(
+        &h,
+        &format!("UPDATE connections SET status='ok' WHERE id='{}'", h.pm),
+    );
+    h.env.clock.advance(31_000);
+    h.outbox.send_due(&h.ch).await;
+    assert_eq!(sent(&h).len(), 1);
+    assert_eq!(
+        count(
+            &h,
+            "SELECT count(*) FROM output_deliveries d JOIN chan_messages m ON m.id=d.message_id WHERE d.idempotency_key='ordinary-after-50' AND m.status='sent'",
+            &[]
+        ),
+        1
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn notifications_opt_in_does_not_backfill_same_millisecond_or_reenable_old_work() {
+    use steve_channels::notifications as n;
+    let h = setup().await;
+    checks_pass(&h);
+    let mut p = notification_setup(&h).await;
+    let d = notification_dispatch(&h);
+    notification_event(&h); // Same clock millisecond, before personal consent.
+    n::put_policy(&h.ch, &caller(WS, ME), &p).unwrap();
+    d.pump(h.env.store(), h.ch.now()).unwrap();
+    assert_eq!(
+        count(&h, "SELECT count(*) FROM personal_notifications", &[]),
+        0
+    );
+    notification_event(&h);
+    d.pump(h.env.store(), h.ch.now()).unwrap();
+    p.enabled = false;
+    n::put_policy(&h.ch, &caller(WS, ME), &p).unwrap();
+    notification_event(&h); // While disabled, even if delivered to the consumer after re-enable.
+    p.enabled = true;
+    n::put_policy(&h.ch, &caller(WS, ME), &p).unwrap();
+    d.pump(h.env.store(), h.ch.now()).unwrap();
+    n::pump(&h.ch, &h.outbox).await.unwrap();
+    assert_eq!(
+        count(&h, "SELECT count(*) FROM personal_notifications", &[]),
+        1
+    );
+    assert_eq!(
+        count(
+            &h,
+            "SELECT count(*) FROM personal_notifications WHERE state='cancelled'",
+            &[]
+        ),
+        1
+    );
+    nothing_sent(&h);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn notification_targets_are_explicit_sorted_unique_and_read_only() {
+    use steve_channels::notifications as n;
+    let h = setup().await;
+    let p = notification_setup(&h).await;
+    h.fake.space(
+        "D_SECOND",
+        "Second DM",
+        SpaceKind::Dm,
+        false,
+        &[("ulilei", "Me")],
+    );
+    let second = recorded(&h, &h.pm, "D_SECOND", "target-second", "ulilei", "record").await;
+    // Multiple real accounts of the same self party do not duplicate a (party, DM) choice.
+    exec(
+        &h,
+        &format!(
+            "INSERT OR IGNORE INTO space_members(workspace_id,space_id,account_id,joined)
+         SELECT '{WS}','{}',id,1 FROM accounts WHERE handle='upx';
+         INSERT OR IGNORE INTO space_members(workspace_id,space_id,account_id,role,joined)
+         SELECT '{WS}','{}',account_id,'bot',1 FROM connections WHERE id='{}';
+         UPDATE spaces SET member_count=999 WHERE kind='dm';",
+            second.space_id, second.space_id, h.pm,
+        ),
+    );
+    let before = row(
+        &h,
+        "SELECT (SELECT count(*) FROM audit),(SELECT count(*) FROM notification_policies),(SELECT count(*) FROM output_deliveries),(SELECT count(*) FROM parties),(SELECT count(*) FROM chan_messages)",
+        &[],
+    );
+    let found = n::targets(&h.ch, &caller(WS, ME)).unwrap();
+    assert_eq!(found.len(), 2, "{found:?}");
+    let mut ids = vec![p.space_id.clone().unwrap(), second.space_id];
+    ids.sort();
+    assert_eq!(
+        found.iter().map(|t| t.space_id.clone()).collect::<Vec<_>>(),
+        ids
+    );
+    for t in &found {
+        assert_eq!(Some(&t.party_id), p.party_id.as_ref());
+        assert_eq!(t.channel, FakeChannel::SYSTEM);
+        assert!(!t.party_name.is_empty());
+        assert_eq!(
+            serde_json::to_value(t).unwrap().as_object().unwrap().len(),
+            5
+        );
+        // Every offered explicit choice passes the actual now-policy validator, even though
+        // enumeration itself never enables or changes that policy.
+        let policy = n::Policy {
+            space_id: Some(t.space_id.clone()),
+            ..p.clone()
+        };
+        let rollback = h.env.store().transaction(|_| -> ApiResult<()> {
+            n::put_policy(&h.ch, &caller(WS, ME), &policy)?;
+            Err(ApiError::conflict("test rollback"))
+        });
+        assert!(matches!(rollback, Err(ApiError::Conflict(_))));
+    }
+    assert_eq!(found, n::targets(&h.ch, &caller(WS, ME)).unwrap());
+    assert_eq!(
+        before,
+        row(
+            &h,
+            "SELECT (SELECT count(*) FROM audit),(SELECT count(*) FROM notification_policies),(SELECT count(*) FROM output_deliveries),(SELECT count(*) FROM parties),(SELECT count(*) FROM chan_messages)",
+            &[]
+        )
+    );
+    nothing_sent(&h);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn notification_targets_filter_live_identity_membership_visibility_and_route() {
+    use steve_channels::notifications as n;
+    use steve_modules::testkit::{OTHER, WS2};
+    let h = setup().await;
+    let p = notification_setup(&h).await;
+    recorded(&h, &h.pm, "C_OPS", "target-third", "uhan", "record").await;
+    let space = p.space_id.unwrap();
+    let party = p.party_id.unwrap();
+    let conn = &h.pm;
+    assert_eq!(n::targets(&h.ch, &caller(WS, ME)).unwrap().len(), 1);
+    assert!(n::targets(&h.ch, &caller(WS, OTHER)).unwrap().is_empty());
+    assert!(n::targets(&h.ch, &caller(WS2, ME)).unwrap().is_empty());
+    assert!(n::targets(&h.ch, &caller(WS, "svc:default")).is_err());
+    // Each mutation is visible to the real read service inside the store transaction and then
+    // rolled back, so the same known-good fixture proves every rejection independently.
+    let cases = [
+        format!("UPDATE spaces SET kind='group',member_count=1 WHERE id='{space}'"),
+        format!(
+            "INSERT INTO space_members(workspace_id,space_id,account_id,joined) SELECT '{WS}','{space}',id,1 FROM accounts WHERE handle='uhan'"
+        ),
+        format!("UPDATE parties SET user_id=NULL WHERE id='{party}'"),
+        format!("UPDATE parties SET status='deleted' WHERE id='{party}'"),
+        format!("UPDATE parties SET visibility='private',created_by='{OTHER}' WHERE id='{party}'"),
+        format!("UPDATE parties SET contact_kind='bot' WHERE id='{party}'"),
+        format!("UPDATE parties SET type='bot' WHERE id='{party}'"),
+        format!("DELETE FROM space_members WHERE space_id='{space}'"),
+        format!("UPDATE accounts SET status='disabled' WHERE handle='ulilei'"),
+        format!("UPDATE accounts SET kind='app_bot' WHERE handle='ulilei'"),
+        format!(
+            "UPDATE accounts SET status='disabled' WHERE id=(SELECT account_id FROM connections WHERE id='{conn}')"
+        ),
+        format!("UPDATE connections SET status='disabled' WHERE id='{conn}'"),
+        format!("UPDATE connections SET status='revoked' WHERE id='{conn}'"),
+        format!("UPDATE spaces SET status='left' WHERE id='{space}'"),
+        format!("UPDATE space_identities SET left_at=1 WHERE space_id='{space}'"),
+        format!(
+            "INSERT INTO space_prefs(workspace_id,space_id,attention,updated) VALUES('{WS}','{space}','blocked',1) ON CONFLICT(space_id) DO UPDATE SET attention='blocked'"
+        ),
+        format!(
+            "INSERT INTO space_settings(workspace_id,space_id,disclosure,updated) VALUES('{WS}','{space}','never',1) ON CONFLICT(space_id) DO UPDATE SET disclosure='never'"
+        ),
+        format!("UPDATE channel_settings SET mode='self' WHERE connection_id='{conn}'"),
+        format!(
+            "UPDATE accounts SET party_id='{party}' WHERE id=(SELECT account_id FROM connections WHERE id='{conn}'); UPDATE channel_settings SET mode='bot' WHERE connection_id='{conn}'"
+        ),
+        format!(
+            "UPDATE parties SET user_id='{OTHER}' WHERE id=(SELECT a.party_id FROM accounts a JOIN connections c ON c.account_id=a.id WHERE c.id='{conn}')"
+        ),
+        format!(
+            "UPDATE parties SET visibility='private',created_by='{OTHER}' WHERE id=(SELECT a.party_id FROM accounts a JOIN connections c ON c.account_id=a.id WHERE c.id='{conn}')"
+        ),
+        format!("UPDATE space_members SET workspace_id='{WS2}' WHERE space_id='{space}'"),
+        format!("UPDATE spaces SET workspace_id='{WS2}' WHERE id='{space}'"),
+    ];
+    for sql in cases {
+        let result = h.env.store().transaction(|tx| -> ApiResult<()> {
+            tx.execute_batch(&sql)?;
+            assert!(n::targets(&h.ch, &caller(WS, ME))?.is_empty(), "{sql}");
+            Err(ApiError::conflict("test rollback"))
+        });
+        assert!(
+            matches!(result, Err(ApiError::Conflict(_))),
+            "{sql}: {result:?}"
+        );
+        assert_eq!(n::targets(&h.ch, &caller(WS, ME)).unwrap().len(), 1);
+    }
+    let result = h.env.store().transaction(|tx| -> ApiResult<()> {
+        tx.execute(
+            "DELETE FROM workspace_members WHERE workspace_id=? AND user_id=?",
+            [WS, ME],
+        )?;
+        assert_eq!(
+            n::targets(&h.ch, &caller(WS, ME)),
+            Err(ApiError::Unauthenticated)
+        );
+        Err(ApiError::conflict("test rollback"))
+    });
+    assert!(matches!(result, Err(ApiError::Conflict(_))));
+    nothing_sent(&h);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn notification_thirty_day_source_sweep_cannot_leave_feed_body_or_title_copies() {
+    use steve_channels::notifications as n;
+    let h = setup().await;
+    let mut p = notification_setup(&h).await;
+    p.mode = n::Mode::Log;
+    n::put_policy(&h.ch, &caller(WS, ME), &p).unwrap();
+    let d = notification_dispatch(&h);
+    notification_event(&h);
+    d.pump(h.env.store(), h.ch.now()).unwrap();
+    let old = n::list(&h.ch, &caller(WS, ME)).unwrap();
+    assert_eq!(old.len(), 1);
+    h.env.clock.advance(31 * 24 * 3_600_000);
+    n::pump(&h.ch, &h.outbox).await.unwrap();
+    let e = h
+        .env
+        .store()
+        .reader(|c| steve_store::feed::detail(c, WS, ME, &format!("feed_{}", old[0].id)))
+        .unwrap();
+    assert!(e.purged && e.title.is_empty() && e.excerpt.is_empty() && e.body.is_none());
+    nothing_sent(&h);
+}

@@ -135,7 +135,7 @@ const ALLOW = {
   "mail/list.tsx": [["等你", "需要"], "matched in the Hub's outcome label"],
   "bot-page.tsx": [["设置", "概览", "对外身份", "能力", "系统提示词", "定时与流程", "记忆", "自己写", "自动生成"], "the Bot page's tab ids and prompt modes (manage.tsx's); every one is shown through t()"],
   "lib/motion.ts": [["标准", "大", "开", "关"], "the Hub's stored fontSize and reduceMotion values"],
-  "manage.tsx": [["全部", "启用", "停用", "项目", "类型", "交付", "领域", "客户", "主题", "设置", "删除", "导出", "概览", "对外身份", "能力", "系统提示词", "定时与流程", "记忆", "对话", "待处理", "事项", "自动开始", "提醒我开始", "关闭", "不发", "标准", "大", "开", "关", "天", "年", "永久"], "stored setting values, tag categories and tab ids; every one is shown through t()"],
+  "manage.tsx": [["全部", "启用", "停用", "项目", "类型", "交付", "领域", "客户", "主题", "设置", "删除", "导出", "概览", "对外身份", "能力", "系统提示词", "定时与流程", "记忆", "对话", "待处理", "事项", "自动开始", "提醒我开始", "标准", "大", "开", "关", "天", "年", "永久"], "stored setting values, tag categories and tab ids; every one is shown through t()"],
   "out-groups.ts": [["自查", "自测", "调试", "记录", "日志", "截图", "输出", "运行", "测试", "构建", "中间", "结果", "产物", "文件", "版本", "临时", "草稿", "过程记录", "执行记录"], "words that mark an output name as a work record (names come from Bots)"],
   "outputs.tsx": [["预览", "源码", "逐张", "连续"], "view mode ids (labels via t()); data-gallery in browser tests"],
   "vault/new-item.tsx": [["私钥", "恢复码", "内容"], "matched in the Hub's field labels"],
@@ -206,4 +206,41 @@ test("a new persona's defaults introduce it coherently in the Hub's words, whate
     const p = newPersonaDefaults()
     assert.equal(introOf(p, "你"), "我是新身份，我是 AI 助手。", l)
   })
+})
+
+const CJK1 = /[　-〿㐀-鿿＀-￯]/
+/** en values that are meant to carry Chinese: the language's own name, and the words the Hub reads in what you type */
+const EN_CJK = new Set(["common:lang.zh-CN", "knowledge:cand.footer"])
+
+test("en values are English: no Chinese outside the listed ones", () => {
+  const bad = []
+  for (const ns of i18n.NAMESPACES) for (const [k, v] of leaves(en[ns])) if (CJK1.test(v) && !EN_CJK.has(`${ns}:${k}`)) bad.push(`${ns}:${k} ${JSON.stringify(v)}`)
+  assert.deepEqual(bad, [], "translate these, or list them in EN_CJK with the reason")
+  for (const k of EN_CJK) { const [ns, path] = k.split(":"); assert.ok(CJK1.test(new Map(leaves(en[ns])).get(path) ?? ""), `${k} no longer has Chinese; remove it from EN_CJK`) }
+})
+
+test("zh-CN puts a space between Chinese and Latin letters or digits, as everywhere else", () => {
+  const bad = []
+  for (const ns of i18n.NAMESPACES) for (const [k, v] of leaves(zh[ns])) {
+    const s = v.replace(/\{\{[^}]*\}\}/g, "").replace(/<[^>]*>/g, "")
+    if (/[一-鿿][A-Za-z0-9]|[A-Za-z0-9][一-鿿]/.test(s)) bad.push(`${ns}:${k} ${JSON.stringify(v)}`)
+  }
+  assert.deepEqual(bad, [])
+})
+
+/* keys read as whole objects rather than through t(): the built-in themes' names (themes/builtin.ts) */
+const READ_AS_OBJECTS = ["manage:look.names."]
+
+test("every key is used: a redesign that drops a text drops its key", () => {
+  const code = sources(SRC).map((f) => readFileSync(f, "utf8")).join("\n")
+  /* a key built at run time, `ns:area.${x}` or "ns:area." + x, uses every key under its fixed part */
+  const built = [...code.matchAll(/[`"']([a-z]+:[\w.-]*?)\$\{/g), ...code.matchAll(/["'`]([a-z]+:[\w.-]*\.)["'`]\s*\+/g)].map((m) => m[1])
+  const prefixes = [...built, ...READ_AS_OBJECTS]
+  const unused = []
+  for (const ns of i18n.NAMESPACES) for (const k of new Set(keys(zh[ns]))) {
+    const full = `${ns}:${k}`
+    if (code.includes(`"${full}"`) || code.includes(`'${full}'`) || code.includes("`" + full + "`") || prefixes.some((p) => full.startsWith(p))) continue
+    unused.push(full)
+  }
+  assert.deepEqual(unused, [], "remove these from both languages")
 })

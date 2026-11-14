@@ -9,8 +9,9 @@ import { Meter, Panel, PanelFoot, PanelRow, Tag, type Tone } from "@/panel"
 import { Spinner } from "@/components/ui/spinner"
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { st, toast, refresh, tm } from "@/store"
-import { api, type RDevice, type RNode, type RPairing, type RRuntime } from "@/api"
+import { api, SESSIONS_MAX, type RDevice, type RNode, type RPairing, type RRuntime } from "@/api"
 import { Input } from "@/components/ui/input"
+import { NumberField } from "@/components/ui/pickers"
 import { Textarea } from "@/components/ui/textarea"
 import { go, Page, Meta, Empty, Status, closeSheet, openSheet } from "@/ui"
 import { OwnerChip } from "@/people/owner-chip"
@@ -18,7 +19,9 @@ import { VitalsSection, VitalsStrip } from "@/devices-vitals"
 import { NodeTags } from "@/devices-tags"
 import { CODE, TailcatSection } from "@/devices-tailcat"
 import { t, useT } from "@/i18n"
+import { hm } from "@/i18n/format"
 import { useHubAddress } from "@/hub-ui"
+import { homeTilde } from "@/resume"
 
 const onDevice = (id: string) => Object.keys(st.S).filter((k) => st.S[k].device === id && !st.S[k].ro)
 const stateText = (d: RDevice) => (d.status === "暂停接活" ? t("shell:devices.onlinePaused") : t("shell:devices.online"))
@@ -65,7 +68,7 @@ export function DevicesView() {
   const connection = (n: RNode) => error ? t("shell:devices.connectionUnknown") : n.linked ? t("shell:devices.linked") : t("shell:devices.disconnected")
   const registration = (n: RNode) => error ? t("shell:devices.registrationPrevious", { state: t(`shell:devices.nodeState.${n.state}`) }) : t(`shell:devices.nodeState.${n.state}`)
   const regTone = (n: RNode): Tone => error || n.state === "revoked" ? "muted" : n.state === "pending" || n.state === "paused" ? "wait" : "ok"
-  const hubSessions = hub ? onDevice(hub.id).filter((k) => st.S[k].st === "run").length : 0
+  const hubSessions = hub?.running ?? (hub ? onDevice(hub.id).filter((k) => st.S[k].st === "run" && !st.S[k].room).length : 0)
   return (
     <>
     <Page title={t("shell:devices.title")} sub={t("shell:devices.sub")} max={760}
@@ -104,6 +107,10 @@ export function DevicesView() {
         {node.last_seen != null && <PanelRow title={t("shell:devices.lastConnected")}><span className="type-callout tabular-nums text-muted-foreground">{tm(node.last_seen)}</span></PanelRow>}
         {!node.linked && node.link_error && <PanelRow title={t("shell:devices.linkError")} sub={<span className="break-all whitespace-normal text-destructive" data-node-link-error>{tm(node.link_error.at)} · {node.link_error.error}</span>} />}
       </Panel> : <p role="status">{t("shell:devices.nodeNotVisible")}</p>}
+      {node && node.max_sessions != null && <Panel k="node-sessions" icon={<SquareTerminalIcon />} title={t("shell:devices.limit")} sub={t("shell:devices.limitSub", { count: node.max_sessions })}
+        right={<RoomMeter running={node.running ?? 0} max={node.max_sessions} waiting={node.waiting ?? 0} />}>
+        <div className="py-1.5"><SessionLimit max={node.max_sessions} editable={node.state !== "revoked"} save={(n) => api.nodeLimit(node.node_id, n).then(reload)} /></div>
+      </Panel>}
       {node && <NodeTags node={node.node_id} />}
       {node && <VitalsSection node={node.node_id} />}
     </DialogContent></Dialog>}
@@ -120,7 +127,8 @@ export function DeviceView({ id }: { id: string }) {
   /* running first, then the rest by their last activity */
   const rank = (k: string) => (st.S[k].st === "run" ? 0 : st.S[k].st === "wait" ? 1 : 2)
   ss.sort((a, b) => rank(a) - rank(b))
-  const running = ss.filter((k) => st.S[k].st === "run").length
+  /* the Hub counts what runs on its own Node and what waits for room there; a page without those numbers counts the sessions it has */
+  const running = d.running ?? ss.filter((k) => st.S[k].st === "run" && !st.S[k].room).length, waiting = d.waiting ?? ss.filter((k) => st.S[k].room).length
   const shown = all ? ss : ss.slice(0, 8)
   const recheck = async () => { setBusy(true); try { await api.devices(true); await refresh(); toast(t("shell:devices.rechecked")) } catch (e) { toast((e as Error).message) } finally { setBusy(false) } }
   const pause = () => void api.patchDevice(d.id, { status: paused ? "正常" : "暂停接活" }).then(() => { toast(paused ? t("shell:devices.resumed") : t("shell:devices.paused")); return refresh() })
@@ -133,17 +141,21 @@ export function DeviceView({ id }: { id: string }) {
         {isHub ? <VitalsSection node="local" right={stateTag}>
           <PanelFoot meta={t("shell:devices.lastSeenAt", { time: tm(d.seen) })} />
         </VitalsSection> : <Panel k="state" icon={<ActivityIcon />} title={t("shell:devices.vitals.title")} sub={t("shell:devices.lastSeenAt", { time: tm(d.seen) })} right={stateTag} />}
-        <Panel k="sessions" icon={<SquareTerminalIcon />} title={t("shell:devices.sessionsHere", { count: ss.length })} sub={t("shell:devices.maxSessions", { count: d.max_sessions })}
-          right={<span className="flex flex-col items-end gap-1.5" data-running><span className="type-footnote tabular-nums text-muted-foreground">{t("shell:devices.runningOf", { n: running, max: d.max_sessions })}</span><Meter value={d.max_sessions ? running / d.max_sessions : 0} tone={d.max_sessions && running >= d.max_sessions ? "wait" : "run"} className="w-20" /></span>}>
-          {ss.length ? <div className="py-1.5">{shown.map((k) => { const s = st.S[k]; return <PanelRow key={k} title={s.title} sub={s.item ? t("shell:devices.sessionSub", { item: s.item, n: s.n, up: s.up }) : t("shell:devices.noItem")} onClick={() => go("#/sessions/" + k)}><Status s={s.st} sess /></PanelRow> })}{ss.length > shown.length && <div className="px-3 pt-1"><Button size="xs" variant="ghost" className="text-muted-foreground" onClick={() => setAll(true)} data-sessions-more>{t("shell:devices.moreSessions", { count: ss.length - shown.length })}</Button></div>}</div>
-            : <div className="px-5 py-4 type-callout text-muted-foreground">{t("shell:devices.noSessions")}</div>}
+        <Panel k="sessions" icon={<SquareTerminalIcon />} title={t("shell:devices.sessionsHere", { count: ss.length })} sub={t("shell:devices.limitSub", { count: d.max_sessions })}
+          right={<RoomMeter running={running} max={d.max_sessions} waiting={waiting} />}>
+          <div className="py-1.5">
+            <SessionLimit max={d.max_sessions} editable={isHub && st.owner} save={(n) => api.patchDevice(d.id, { max_sessions: n }).then(() => refresh())} />
+            {shown.map((k) => { const s = st.S[k]; return <PanelRow key={k} title={s.title} sub={s.item ? t("shell:devices.sessionSub", { item: s.item, n: s.n, up: s.up }) : t("shell:devices.noItem")} onClick={() => go("#/sessions/" + k)}>{s.room ? <Tag tone="wait" data-session-waiting>{t("shell:devices.waitingTag")}</Tag> : <Status s={s.st} sess />}</PanelRow> })}
+            {ss.length > shown.length && <div className="px-3 pt-1"><Button size="xs" variant="ghost" className="text-muted-foreground" onClick={() => setAll(true)} data-sessions-more>{t("shell:devices.moreSessions", { count: ss.length - shown.length })}</Button></div>}
+          </div>
+          {!ss.length && <div className="px-5 pb-4 type-callout text-muted-foreground">{t("shell:devices.noSessions")}</div>}
         </Panel>
         <Panel k="runtimes" icon={<CpuIcon />} title={t("shell:devices.runtimes")} sub={t("shell:devices.runtimesSub", { ok: st.runtimes.filter((r) => r.ok).length, count: st.runtimes.length })}
           right={<Button size="xs" variant="ghost" className="text-muted-foreground" disabled={busy} onClick={() => void recheck()}>{busy ? <Spinner className="size-3" /> : <RefreshCwIcon />}{t("shell:devices.recheck")}</Button>}>
-          {st.runtimes.length ? <div className="py-1.5">{st.runtimes.map((r) => <div key={r.id} className="relative mx-2 flex items-start gap-4 rounded-lg px-3 py-3 [&+&]:before:absolute [&+&]:before:inset-x-3 [&+&]:before:top-0 [&+&]:before:h-px [&+&]:before:bg-border/60" data-runtime={r.id}>
+          {st.runtimes.length ? <div className="py-1.5">{[...st.runtimes].sort((a, b) => Number(b.ok) - Number(a.ok)).map((r) => <div key={r.id} className="relative mx-2 flex items-start gap-4 rounded-lg px-3 py-3 [&+&]:before:absolute [&+&]:before:inset-x-3 [&+&]:before:top-0 [&+&]:before:h-px [&+&]:before:bg-border/60" data-runtime={r.id}>
             <div className="min-w-0 flex-1">
               <div className="flex flex-wrap items-center gap-2 type-body text-foreground">{r.name}<span className="font-mono type-footnote text-muted-foreground">{r.version || r.adapter_version}</span><span className="type-footnote text-tertiary">{r.custom ? t("shell:devices.harness.custom") : t("shell:devices.harness.builtin")}</span></div>
-              <div className="mt-0.5 flex flex-col gap-0.5 type-footnote text-muted-foreground"><span className="truncate">{r.note} · <span className="font-mono">{r.path.replace(/^\/Users\/[^/]+/, "~")}</span></span>{!r.ok && r.error && <span className="text-attention" data-runtime-error>{r.error}</span>}<AdapterUpdate r={r} /><RuntimeChips r={r} /></div>
+              <div className="mt-0.5 flex flex-col gap-0.5 type-footnote text-muted-foreground"><span className="truncate">{r.note}{r.path ? <>{r.note ? " · " : ""}<span className="font-mono">{homeTilde(r.path)}</span></> : null}</span>{!r.ok && r.error && <span className="text-attention" data-runtime-error>{r.error}</span>}{r.auth && r.auth.length > 0 && <span data-runtime-auth>{t("shell:devices.harness.auth", { methods: r.auth.map((a) => a.name).join(t("shell:list.sep")) })}</span>}<AdapterUpdate r={r} /><RuntimeChips r={r} /></div>
             </div>
             <Tag tone={r.ok ? "ok" : "wait"}>{r.ok ? t("shell:devices.available") : t("shell:devices.unavailable")}</Tag>
           </div>)}</div> : <div className="px-5 py-4 type-callout text-muted-foreground">{t("shell:devices.noRuntimes")}</div>}
@@ -152,7 +164,7 @@ export function DeviceView({ id }: { id: string }) {
         {isHub && <NodeTags node="local" />}
         <Panel k="projects" icon={<FolderIcon />} title={t("shell:devices.projectsTitle")} sub={t("shell:devices.projectsSub", { count: dirs.length })}
           right={<Button size="xs" variant="ghost" className="text-muted-foreground" onClick={() => go("#/projects")}>{t("shell:devices.manageProjects")}</Button>}>
-          {dirs.length ? <div className="py-1.5">{dirs.map((p) => <PanelRow key={p.id} title={p.name} sub={<span className="font-mono">{p.path.replace(/^\/Users\/[^/]+/, "~")}</span>} onClick={() => go("#/projects/" + p.id)}><ChevronRightIcon className="size-4 text-tertiary" /></PanelRow>)}</div>
+          {dirs.length ? <div className="py-1.5">{dirs.map((p) => <PanelRow key={p.id} title={p.name} sub={<span className="font-mono">{homeTilde(p.path)}</span>} onClick={() => go("#/projects/" + p.id)}><ChevronRightIcon className="size-4 text-tertiary" /></PanelRow>)}</div>
             : <div className="px-5 py-4 type-callout text-muted-foreground">{t("shell:devices.noProjects")}</div>}
         </Panel>
         {isHub && <Panel k="hub" icon={<ServerIcon />} title={t("shell:devices.hubNode")} sub={t("shell:devices.hubNodeSub")}>
@@ -166,6 +178,37 @@ export function DeviceView({ id }: { id: string }) {
       </div>
     </Page>
   )
+}
+
+/** how full a device is: running against its limit, and what waits for room */
+function RoomMeter({ running, max, waiting }: { running: number; max: number; waiting: number }) {
+  const t = useT()
+  return <span className="flex flex-col items-end gap-1.5" data-running={running} data-max={max} data-waiting={waiting}>
+    <span className="type-footnote tabular-nums text-muted-foreground">{t("shell:devices.runningOf", { n: running, max })}{waiting > 0 && <span className="text-attention"> · {t("shell:devices.waitingN", { count: waiting })}</span>}</span>
+    <Meter value={max ? running / max : 0} tone={running >= max ? "wait" : "run"} className="w-20" />
+  </span>
+}
+
+/** Saved scheduling capacity, not a permission setting. Lowering it never interrupts existing turns. */
+function SessionLimit({ max, editable, save }: { max: number; editable: boolean; save: (n: number) => Promise<unknown> }) {
+  const t = useT()
+  const [n, setN] = useState<number | null>(max), [busy, setBusy] = useState(false)
+  useEffect(() => setN(max), [max])
+  const valid = n != null && Number.isInteger(n) && n >= 1 && n <= SESSIONS_MAX, dirty = valid && n !== max
+  const submit = async () => {
+    if (!dirty || busy || n == null) return
+    setBusy(true)
+    try { await save(n); toast(t("shell:devices.limitSaved", { count: n })) } catch (e) { toast((e as Error).message) } finally { setBusy(false) }
+  }
+  return <div data-session-limit={max}>
+    <PanelRow title={t("shell:devices.limit")} sub={t("shell:devices.limitRange", { max: SESSIONS_MAX })} className="flex-wrap gap-y-2">
+      {editable ? <form className="flex shrink-0 items-center gap-2" onSubmit={(e) => { e.preventDefault(); void submit() }}>
+        <NumberField size="sm" min={1} max={SESSIONS_MAX} step={1} value={n} onValueChange={setN} error={!valid ? t("shell:devices.limitInvalid", { max: SESSIONS_MAX }) : undefined} disabled={busy} aria-label={t("shell:devices.limit")} aria-invalid={!valid} className="w-32" data-session-limit-input />
+        <Button size="xs" type="submit" variant={dirty ? "default" : "outline"} disabled={!valid || busy} data-session-limit-save>{busy ? <Spinner className="size-3" /> : null}{t("common:action.save")}</Button>
+      </form> : <span className="type-callout tabular-nums text-muted-foreground">{max}</span>}
+    </PanelRow>
+    <p className="px-5 pb-3 type-footnote text-muted-foreground" data-limit-semantics>{t("shell:devices.limitEffect")}</p>
+  </div>
 }
 
 /** what a harness adapter can do and the permission modes it offers, as its probe said */
@@ -251,7 +294,7 @@ export function PairDialog() {
         {error && <p role="alert" className="type-callout text-destructive">{error}</p>}
         <Button className="justify-self-start self-start max-sm:w-full max-sm:justify-self-stretch" disabled={busy || !!pairing && now < pairing.expires} onClick={() => void act(async () => { setPairing(await api.createPairing()) })}>{t("shell:devices.createCode")}</Button>
         {pairing && <div className="anim-in space-y-2 rounded-xl bg-muted/60 p-4 type-callout">
-          {now < pairing.expires ? <><p className="text-muted-foreground">{t("shell:devices.codeExpires", { time: new Date(pairing.expires).toLocaleTimeString() })}</p><code className={CODE}>{pairing.code}</code></> : <p className="text-muted-foreground">{t("shell:devices.codeExpired")}</p>}
+          {now < pairing.expires ? <><p className="text-muted-foreground">{t("shell:devices.codeExpires", { time: hm(pairing.expires) })}</p><code className={CODE}>{pairing.code}</code></> : <p className="text-muted-foreground">{t("shell:devices.codeExpired")}</p>}
           {pairing.pin && <><p className="text-muted-foreground">{t("shell:devices.hubPin")}</p><code className={CODE}>{pairing.pin}</code></>}
           <p className="text-muted-foreground">{t("shell:devices.setupCommand")}</p><code className={CODE} data-setup-command>steve setup node --hub {hub}{pairing.pin ? ` --pin ${pairing.pin}` : ""}</code>
           <p className="text-muted-foreground">{t("shell:devices.pairCommand")}</p><code className={CODE} data-pair-command>steve-node pair {hub}{pairing.pin ? ` --pin ${pairing.pin}` : ""}</code>

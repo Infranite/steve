@@ -198,3 +198,35 @@ pub async fn check(
         None => CheckResult::unchecked(),
     }
 }
+
+pub use steve_store::feed::Content;
+
+/// Routing never chooses an identity for a caller. `Bot` must resolve to a bot account; `AsYou`
+/// to a personal account owned by the live requester, then the existing outbound approvals apply.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Identity {
+    Bot,
+    AsYou,
+}
+
+/// One semantic send, independent of its platform representation. `source_message_id` defaults a
+/// reply to its original channel. `space_id` is an explicit channel switch, not a hint to a model.
+/// For a person, routing only considers known active DMs containing that person's platform alias.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeliveryIntent {
+    pub key: String,
+    pub identity: Identity,
+    pub content: Content,
+    #[serde(default)]
+    pub source_message_id: Option<String>,
+    #[serde(default)]
+    pub space_id: Option<String>,
+    #[serde(default)]
+    pub party_id: Option<String>,
+    #[serde(default)]
+    pub reason: String,
+    #[serde(default)]
+    pub urgency: String,
+}

@@ -201,7 +201,8 @@ pub fn list(m: &Modules, who: &Caller, p: UsesParams) -> ApiResult<Value> {
                 });
                 out.push(json!({
                     "n": h.n, "type": h.obj_type, "id": h.obj_id, "seq": h.seq, "score": h.score,
-                    "level": h.level, "title": cur.title, "label": cur.label, "href": cur.href,
+                    "level": h.level, "title": crate::sources::chat_day_shown(&cur.title),
+                    "label": crate::index::doc_label_shown(&cur.label), "href": cur.href,
                     "heading": cur.heading, "deleted": deleted,
                     "use_id": u.id, "query": u.query, "created": u.created,
                 }));

@@ -1,8 +1,9 @@
+import { useEffect, useState } from "react"
 import { createRoot } from "react-dom/client"
 import "../../src/index.css"
 import { ChatView } from "../../src/chat-view"
 import { SidebarProvider } from "../../src/components/ui/sidebar"
-import { st, emit, useStore, type Msg, type Bot, type Item } from "../../src/store"
+import { st, emit, useStore, hubSubs, type Msg, type Bot, type Item } from "../../src/store"
 
 document.documentElement.classList.toggle("dark", matchMedia("(prefers-color-scheme: dark)").matches)
 const now = Date.now()
@@ -28,14 +29,29 @@ const rich: Msg[] = [...short,
   { id: "offer", k: "steve", t: "路径 `hub-rs/crates/steve-store/migrations/../../../web/src/components/ui/message-scroller.tsx` 里没有用到。", created: now - 20000, offer: { title: "把对话页里没用到的消息滚动组件和它的样式一起删掉，顺便整理滚动条", state: "open" } as any },
 ]
 /* quoting the long reply: the quote line shows its words, not its Markdown */
+/* (a quote of the message right above is not shown: one message sits between them) */
+const between: Msg = { id: "between", k: "me", created: now + 500, t: "我先看看" }
 const quoted: Msg = { id: "quoted", k: "me", created: now + 1000, replyTo: "long", t: "好" }
-st.thread = location.search.includes("empty") ? [] : location.search.includes("long") ? [...short, long, quoted] : location.search.includes("rich") ? rich : short
+st.thread = location.search.includes("empty") ? [] : location.search.includes("long") ? [...short, long, between, quoted] : location.search.includes("rich") ? rich : short
 st.notices = []
 let replies = 0
 window.addEventListener("fixture-reply", () => { replies++; st.thread = [...st.thread, { id: "reply-" + replies, k: "steve", created: Date.now(), t: "新到的一条回复。\n\n- 第一点\n- 第二点\n- 第三点" }]; emit() })
 window.addEventListener("fixture-thinking", () => { st.thread = [...short, { k: "thinking" }]; st.thinking = true; st.phase = "answer"; emit() })
 function Fixture() {
   useStore()
-  return <SidebarProvider><main style={{ height: "100dvh", width: "100%", minWidth: 0 }}><ChatView /></main></SidebarProvider>
+  const [conv, setConv] = useState(new URLSearchParams(location.search).get("conv") ?? undefined)
+  useEffect(() => {
+    const refresh = () => hubSubs.forEach(f => f({ type: "chan_message", id: "fixture" }))
+    const switchScope = (e: Event) => {
+      st.workspace = { ...st.workspace, id: (e as CustomEvent<string>).detail } as typeof st.workspace
+      emit()
+    }
+    const switchConv = (e: Event) => setConv((e as CustomEvent<string>).detail)
+    window.addEventListener("fixture-refresh", refresh)
+    window.addEventListener("fixture-scope", switchScope)
+    window.addEventListener("fixture-conversation", switchConv)
+    return () => { window.removeEventListener("fixture-refresh", refresh); window.removeEventListener("fixture-scope", switchScope); window.removeEventListener("fixture-conversation", switchConv) }
+  }, [])
+  return <SidebarProvider><main style={{ height: "100dvh", width: "100%", minWidth: 0 }}><ChatView conv={conv} /></main></SidebarProvider>
 }
 createRoot(document.getElementById("root")!).render(<Fixture />)

@@ -24,11 +24,11 @@ import { Card as ACard, CardHeader } from "@/components/affect/card-clean"
 import { MemoryPanel, type Memory } from "@/components/affect/memory-panel"
 import { AutonomyChoice } from "@/components/affect/agent-permissions"
 import {
-  st, botName, PRO, ACC, PERM, harnessEfforts, permModes, runtimeName, defaultHarness, saveBot, makeBot, draftBot, deleteBot, dupBot, addMem, editMem, delMem, loadMemories, setBotWorkspaces, tag, tagLabel, tagDesc, tagUses, TAG_CATS, KIND_CAT, DOMAIN_CATS, isKind, kindOf, kindTags, setKind, loadKindsReview, kindsReviewed, kindsBackfill, makeTag, saveTag, deleteTag, mergeTag, setTags, it,
-  setSetting, toast, finishOnboarding, emit, closedSt,
+  st, botName, PRO, ACC, PERM, harnessEfforts, permModes, defaultPermMode, runtimeName, defaultHarness, saveBot, makeBot, draftBot, deleteBot, dupBot, addMem, editMem, delMem, loadMemories, setBotWorkspaces, tag, tagLabel, tagDesc, tagUses, TAG_CATS, KIND_CAT, DOMAIN_CATS, isKind, kindOf, kindTags, setKind, loadKindsReview, kindsReviewed, kindsBackfill, makeTag, saveTag, deleteTag, mergeTag, setTags, it,
+  setSetting, toast, emit, closedSt,
 } from "@/store"
 import { api, type RKindReview } from "@/api"
-import { go, Page, BotAvatar, ItemNo, KindTag, Row, Segmented, Meta, Empty, openSheet, closeSheet, ThemeSwitch, LanguageSwitch, useRoute, Panel, Card, Section, Lead, Notice, Pill, Tile, Chevron, Loading, LIFT, Blank, Strip, EASE } from "@/ui"
+import { go, Page, BotAvatar, ItemNo, KindTag, Row, Segmented, Meta, Empty, openSheet, closeSheet, ThemeSwitch, LanguageSwitch, useRoute, Panel, Card, Section, Lead, Pill, Tile, Chevron, Loading, LIFT, Blank, Strip, EASE } from "@/ui"
 import { PersonasSection } from "@/channels/persona"
 import { OwnerChip } from "@/people/owner-chip"
 import { Select } from "@/view-shared"
@@ -46,6 +46,8 @@ import { SetSelect, SetSwitch } from "@/settings-controls"
 import { TextField } from "@/components/ui/input"
 import { TextArea } from "@/components/affect/text-area-clean"
 import { AboutVersions } from "@/version"
+import { NotificationSettingsPane } from "@/notification-settings"
+import { currentHub } from "@/hub"
 import { flowApi, useLoad as useFlowLoad, errText } from "@/api/flow"
 import { when } from "@/auto/common"
 import { BotOverview, BotPrompt, RunsOn } from "@/bot-page"
@@ -84,7 +86,7 @@ export function BotsView() {
       {S && <Section label={t("manage:list.main")}>
         <BotCard k="steve" size={44} title={S.n} sub={S.role} meta={[S.h, S.m, t("manage:bot.running", { count: runOf("steve") })]} action={<Chevron />} />
       </Section>}
-      <Section label={<><span className="hidden sm:inline">{t("manage:list.others", { ws: st.workspace?.name, n: Object.keys(st.bots).length - 1 })}</span><span className="sm:hidden">{t("manage:list.othersShort", { n: Object.keys(st.bots).length - 1 })}</span></>} note={<Trans ns="manage" i18nKey="list.hint" components={{ code: <span className="font-mono" /> }} />}
+      <Section label={<><span className="hidden sm:inline">{t("manage:list.others", { ws: st.workspace?.name, n: Object.keys(st.bots).length - 1 })}</span><span className="sm:hidden">{t("manage:list.othersShort", { n: Object.keys(st.bots).length - 1 })}</span></>} note={<Trans t={t} i18nKey="manage:list.hint" components={{ code: <span className="font-mono" /> }} />}
         right={<Segmented size="sm" value={botFilter} onChange={(v) => { botFilter = v; r() }} options={[["全部", t("manage:list.filterAll")], ["启用", t("manage:list.filterOn")], ["停用", t("manage:list.filterOff")]] as const} />}>
         {ks.length ? <ul className="grid gap-3 sm:grid-cols-2" data-bot-cards>{ks.map((k) => { const b = st.bots[k]; return (
           <BotCard key={k} as="li" k={k} off={!b.on} title={t("manage:bot.name", { name: b.n })} sub={b.role}
@@ -167,7 +169,7 @@ export function NewBotDialog() {
       <DialogContent className="gap-4 sm:max-w-[520px]">
         <DialogHeader><DialogTitle className="type-title">{t("manage:list.newBot")}</DialogTitle><DialogDescription className="type-callout">{t("manage:newBot.desc", { ws: st.workspace?.name })}</DialogDescription></DialogHeader>
         <AutonomyChoice testId="new-bot" label={t("manage:list.newBot")} value={mode} onChange={setMode} options={[{ value: "tpl", name: t("manage:newBot.fromTpl"), text: t("manage:newBot.fromTplSub"), icon: <LayoutTemplateIcon /> }, { value: "desc", name: t("manage:newBot.fromDesc"), text: t("manage:newBot.fromDescSub"), icon: <SparklesIcon /> }, { value: "blank", name: t("manage:newBot.blank"), text: t("manage:newBot.blankSub"), icon: <FilePlusIcon /> }]} />
-        {mode === "tpl" && <Panel className="anim-in">{TEMPLATES.map((id) => { const x = tplText(t, id), h = defaultHarness(); return <Row key={id} title={x.name} sub={<span className="inline-flex min-w-0 flex-wrap items-center gap-x-1.5"><span>{x.role}</span><span aria-hidden>·</span><span className="inline-flex items-center gap-1"><HarnessMark harness={h} className="size-3.5" />{runtimeName(h) ?? h}</span></span>} onClick={() => setTpl(id)} data-tpl={id}>{tpl === id && <CheckIcon className="size-4 text-blue" />}</Row> })}</Panel>}
+        {mode === "tpl" && <Panel className="anim-in">{TEMPLATES.map((id) => { const x = tplText(t, id), h = defaultHarness(); return <Row key={id} title={x.name} sub={h ? <span className="inline-flex min-w-0 flex-wrap items-center gap-x-1.5"><span>{x.role}</span><span aria-hidden>·</span><span className="inline-flex items-center gap-1"><HarnessMark harness={h} className="size-3.5" />{runtimeName(h) ?? h}</span></span> : x.role} onClick={() => setTpl(id)} data-tpl={id}>{tpl === id && <CheckIcon className="size-4 text-blue" />}</Row> })}</Panel>}
         {mode === "desc" && <TextArea autoFocus className="anim-in" minRows={4} maxRows={10} aria-label={t("manage:newBot.fromDesc")} placeholder={t("manage:newBot.descPlaceholder")} value={desc} onChange={(e) => setDesc(e.target.value)} data-bot-desc />}
         <DialogFooter className="gap-2"><Button variant="outline" onClick={closeSheet}>{t("common:action.cancel")}</Button><Button disabled={(mode === "desc" && !desc.trim()) || busy} onClick={() => void create()} data-testid="bot-go">{busy ? <Spinner className="size-3.5" /> : mode === "desc" && <SparklesIcon />}{mode === "desc" ? t("manage:newBot.draft") : t("manage:newBot.create")}</Button></DialogFooter>
       </DialogContent>
@@ -215,7 +217,7 @@ export let botTab: "概览" | "设置" | "对外身份" | "能力" | "系统提�
 /** open a bot's 设置 tab */
 export function editBot(k: string) { botTab = "设置"; lastBot = k; go("#/bots/" + k) }
 const BOT_TABS = [["概览", "tabOverview"], ["设置", "tabSettings"], ["能力", "tabCaps"], ["系统提示词", "tabPrompt"], ["记忆", "tabMemory"], ["对外身份", "tabPersona"], ["定时与流程", "tabSchedule"]] as const
-const EFFORT_KEYS = ["none", "minimal", "low", "medium", "high", "xhigh", "max"] as const
+const EFFORT_KEYS = ["none", "off", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"] as const
 const isEffortKey = (v: string): v is (typeof EFFORT_KEYS)[number] => (EFFORT_KEYS as readonly string[]).includes(v)
 export function BotView({ k }: { k: string }) {
   const t = useT()
@@ -225,9 +227,14 @@ export function BotView({ k }: { k: string }) {
   if (lastBot !== k) { lastBot = k; if (botTab !== "设置") botTab = "概览" }
   useEffect(() => { if (b && botTab === "记忆" && !b.memLoaded) void loadMemories(k) }, [k, botTab, b?.memLoaded])
   if (!b) return <Page title="Bot" back={["#/bots", "Bot"]}><Empty title={t("manage:detail.missing")} sub={t("manage:detail.missingSub")} /></Page>
-  const fm = form && form.k === k ? form : { k, n: b.n, role: b.role, pers: b.pers, pro: PRO[b.pro], rule: b.rule, acc: b.acc, harness: b.harness, model: b.model ?? "", color: b.color, round: b.round, skin: b.skin, project: b.project ?? "none", permMode: b.permMode, ws: b.workspaces }
-  const effort = fm.reasoningEffort ?? b.reasoningEffort ?? ""
-  const set = (p: any) => setForm({ ...fm, reasoningEffort: effort, ...p })
+  const basePerm = permModes(b.harness).includes(b.permMode) ? b.permMode : defaultPermMode(b.harness)
+  const fm = form && form.k === k ? form : { k, n: b.n, role: b.role, pers: b.pers, pro: PRO[b.pro], rule: b.rule, acc: b.acc, harness: b.harness, model: b.model ?? "", color: b.color, round: b.round, skin: b.skin, project: b.project ?? "none", permMode: basePerm, ws: b.workspaces }
+  const allowedPerms = permModes(fm.harness)
+  const permMode = allowedPerms.includes(fm.permMode) ? fm.permMode : defaultPermMode(fm.harness)
+  const allowedEfforts = harnessEfforts(fm.harness)
+  const rawEffort = fm.reasoningEffort ?? b.reasoningEffort ?? ""
+  const effort = rawEffort && (!st.runtimes.some((x) => x.id === fm.harness) || allowedEfforts.includes(rawEffort)) ? rawEffort : ""
+  const set = (p: any) => setForm({ ...fm, permMode, reasoningEffort: effort, ...p })
   const tabs = BOT_TABS.map(([v, l]) => [v, t(`manage:detail.${l}`)] as const)
   return (
     <Page back={["#/bots", "Bot"]} max={720} toolbarTop toolbar={<OwnerChip objectType="bot" objectId={k} />}
@@ -260,16 +267,16 @@ export function BotView({ k }: { k: string }) {
             <F label={t("manage:form.rule")} htmlFor="bot-rule" hint={t("manage:form.ruleHint")}><TextArea id="bot-rule" minRows={3} maxRows={12} value={fm.rule} onChange={(e) => set({ rule: e.target.value })} /></F>
           </Card></Section>
           {/* affectUI's Agent / Permissions: what it may do without asking, one choice each, said in plain words */}
-          <Section label={t("manage:form.permSection")} data-bot-perms><AutonomyChoice testId="bot-perm" label={t("manage:form.permSection")} value={fm.permMode} onChange={(v) => set({ permMode: v })}
-            options={permModes(fm.harness).map((v) => ({ value: v, name: permName(t, v), text: (PERM_KEYS as readonly string[]).includes(v) ? t(`manage:form.permText.${v as (typeof PERM_KEYS)[number]}`) : permLabel(t, v), icon: PERM_ICON[v] }))}
+          <Section label={t("manage:form.permSection")} data-bot-perms><AutonomyChoice testId="bot-perm" label={t("manage:form.permSection")} value={permMode} onChange={(v) => set({ permMode: v })}
+            options={allowedPerms.map((v) => ({ value: v, name: permName(t, v), text: (PERM_KEYS as readonly string[]).includes(v) ? t(`manage:form.permText.${v as (typeof PERM_KEYS)[number]}`) : permLabel(t, v), icon: PERM_ICON[v] }))}
             means={<><ShieldAlertIcon aria-hidden />{t("manage:form.permHint")}</>} /></Section>
           <Section label={t("manage:form.acc")} data-bot-acc><AutonomyChoice testId="bot-acc" label={t("manage:form.acc")} value={fm.acc} onChange={(v) => set({ acc: v })}
             options={ACC_KEYS.map((key) => ({ value: ACC[key], name: accLabel(t, key), text: t(`manage:form.accText.${key}`), icon: ACC_ICON[key] }))} /></Section>
           <Section label={t("manage:form.run")}><Card className="flex flex-col gap-5 p-5">
             <div className="grid gap-4 sm:grid-cols-2">
-              <F label="Harness"><SetSelect wide testId="bot-harness" label="Harness" value={fm.harness} onChange={(v) => set({ harness: v, model: "", reasoningEffort: "" })} options={st.runtimes.map((x) => ({ v: x.id, l: x.ok ? x.name : t("manage:form.unavailable", { name: x.name }), icon: <HarnessMark harness={x.id} /> }))} /></F>
+              <F label="Harness"><SetSelect wide testId="bot-harness" label="Harness" value={fm.harness} onChange={(v) => set({ harness: v, model: "", reasoningEffort: "", permMode: permModes(v).includes(permMode) ? permMode : defaultPermMode(v) })} options={[...[...st.runtimes].sort((a, b) => Number(b.ok) - Number(a.ok)).map((x) => ({ v: x.id, l: x.ok ? x.name : t("manage:form.unavailable", { name: x.name }), icon: <HarnessMark harness={x.id} /> })), ...(fm.harness && !st.runtimes.some((x) => x.id === fm.harness) ? [{ v: fm.harness, l: fm.harness, icon: <HarnessMark harness={fm.harness} /> }] : [])]} /></F>
               <F label={t("manage:form.model")}><ModelPicker field harness={fm.harness} value={fm.model ?? ""} allowDefault testId="bot-model" onChange={(m) => set({ model: m })} /></F>
-              <F label={t("manage:form.effort")} hint={b.main ? t("manage:form.effortHintMain") : t("manage:form.effortHint")}><SetSelect wide testId="bot-effort" label={t("manage:form.effort")} value={effort || "default"} onChange={(v) => set({ reasoningEffort: v === "default" ? "" : v })} options={[{ v: "default", l: t("manage:effort.default") }, ...harnessEfforts(fm.harness).map((v) => ({ v, l: isEffortKey(v) ? t(`manage:effort.${v}`) : v }))]} /></F>
+              <F label={t("manage:form.effort")} hint={b.main ? t("manage:form.effortHintMain") : t("manage:form.effortHint")}><SetSelect wide testId="bot-effort" label={t("manage:form.effort")} value={effort || "default"} onChange={(v) => set({ reasoningEffort: v === "default" ? "" : v })} options={[{ v: "default", l: t("manage:effort.default") }, ...allowedEfforts.map((v) => ({ v, l: isEffortKey(v) ? t(`manage:effort.${v}`) : v })), ...(effort && !allowedEfforts.includes(effort) ? [{ v: effort, l: isEffortKey(effort) ? t(`manage:effort.${effort}`) : effort }] : [])]} /></F>
             </div>
             {b.main && <SteveJudges harness={fm.harness} model={fm.model ?? ""} />}
             <F label={t("manage:form.device")} hint={t("manage:form.deviceHint")}><SetSelect wide testId="bot-dev" label={t("manage:form.device")} value="hub" onChange={() => {}} options={st.devices.map((d) => ({ v: d.id, l: d.name }))} /></F>
@@ -278,7 +285,7 @@ export function BotView({ k }: { k: string }) {
               <div className="flex flex-col gap-1.5">{st.workspaces.map((w) => <label key={w.id} className="flex items-center gap-2 type-callout"><Checkbox checked={fm.ws.includes(w.id)} disabled={fm.ws.length === 1 && fm.ws.includes(w.id)} onCheckedChange={(v) => set({ ws: v ? [...fm.ws, w.id] : fm.ws.filter((x: string) => x !== w.id) })} />{w.name}</label>)}</div></F>}
           </Card></Section>
           <div className="flex gap-2"><Button data-save-bot onClick={async () => {
-            await saveBot(k, { n: fm.n.trim() || b.n, role: fm.role, pers: fm.pers, pro: PRO.indexOf(fm.pro), rule: fm.rule, acc: fm.acc, harness: fm.harness, model: fm.model || null, reasoningEffort: effort || null, color: fm.color, round: fm.round, skin: fm.skin, project: fm.project === "none" ? null : fm.project, permMode: fm.permMode })
+            await saveBot(k, { n: fm.n.trim() || b.n, role: fm.role, pers: fm.pers, pro: PRO.indexOf(fm.pro), rule: fm.rule, acc: fm.acc, harness: fm.harness, model: fm.model || null, reasoningEffort: effort || null, color: fm.color, round: fm.round, skin: fm.skin, project: fm.project === "none" ? null : fm.project, permMode })
             if (!b.main && JSON.stringify([...fm.ws].sort()) !== JSON.stringify([...b.workspaces].sort())) setBotWorkspaces(k, fm.ws)
             setForm(null); botTab = "概览"; r() }}>{t("common:action.save")}</Button><Button variant="ghost" onClick={() => { setForm(null); botTab = "概览"; r() }}>{t("common:action.cancel")}</Button></div>
         </FieldGroup>
@@ -345,11 +352,9 @@ const cats = (t: T): [string, string, any, string][] => [
   ["about", t("manage:settings.catAbout"), InfoIcon, t("manage:settings.catAboutSub")],
 ]
 const PH_KEYS: Record<string, "phGeneral" | "phItems" | "phTags" | "phModels" | "phNotify" | "phLook" | "phData"> = {
-  general: "phGeneral", items: "phItems", tags: "phTags", models: "phModels", notify: "phNotify", look: "phLook", data: "phData",
+  general: "phGeneral", items: "phItems", tags: "phTags", models: "phModels", look: "phLook", data: "phData",
 }
 const Sel = ({ v, o, on, testId, label }: { v: string; o: [string, string][]; on: (v: string) => void; testId?: string; label?: string }) => <SetSelect testId={testId} label={label} value={v} options={o} onChange={on} />
-/** a row title with the Later pill after it, which moves to its own line when the two do not fit (phones) */
-const Soon = ({ children }: { children: ReactNode }) => { const t = useT(); return <span className="flex flex-wrap items-center gap-x-2 gap-y-1">{children}<Pill>{t("manage:settings.later")}</Pill></span> }
 export function SettingsView() {
   const t = useT()
   const [, cat] = useRoute()
@@ -423,25 +428,27 @@ function Pane({ id }: { id: string }) {
     </Panel>
   </div>
   if (id === "items") return <div className="flex flex-col gap-8">
-    <Section label={t("manage:items.section")}><Panel>
-      <Row title={t("manage:items.accDefault")} sub={t("manage:items.accDefaultSub")}><Segmented size="sm" value={c.accDefault === "manual" ? "manual" : "auto"} onChange={(v) => setSetting({ accDefault: v })} options={[["manual", t("manage:acc.manual")], ["auto", t("manage:acc.auto")]] as const} /></Row>
-      <Row title={t("manage:items.prefix")} sub={t("manage:items.prefixSub")}><span className="font-mono type-callout">{st.prefix}-{st.noSeq + 1}</span></Row>
-      <Row title={t("manage:items.depsAfter")}><Sel label={t("manage:items.depsAfter")} testId="deps-after" v={c.depsAfter} o={[["自动开始", t("manage:items.depsAuto")], ["提醒我开始", t("manage:items.depsRemind")]]} on={(v) => setSetting({ depsAfter: v })} /></Row>
-      <Row title={t("manage:items.archDays")} sub={t("manage:items.archDaysSub")}><Sel label={t("manage:items.archDays")} testId="arch-days" v={c.archDays} o={[...[7, 30, 90].map((d): [string, string] => [String(d), t("common:dur.days", { count: d })]), ["0", t("manage:items.archNever")]]} on={(v) => setSetting({ archDays: v })} /></Row></Panel></Section>
+    {/* the pane's title already says 事项: the first group goes without a label; the number prefix lives in 工作空间 */}
+    <Panel>
+      <Row className="max-sm:flex-col max-sm:items-stretch max-sm:gap-2" title={t("manage:items.accDefault")} sub={t("manage:items.accDefaultSub")}><Segmented size="sm" value={c.accDefault === "manual" ? "manual" : "auto"} onChange={(v) => setSetting({ accDefault: v })} options={[["manual", t("manage:acc.manual")], ["auto", t("manage:acc.auto")]] as const} /></Row>
+      <Row title={t("manage:items.depsAfter")} sub={t("manage:items.depsAfterSub")}><Sel label={t("manage:items.depsAfter")} testId="deps-after" v={c.depsAfter} o={[["自动开始", t("manage:items.depsAuto")], ["提醒我开始", t("manage:items.depsRemind")]]} on={(v) => setSetting({ depsAfter: v })} /></Row>
+      <Row title={t("manage:items.archDays")} sub={t("manage:items.archDaysSub")}><Sel label={t("manage:items.archDays")} testId="arch-days" v={c.archDays} o={[...[7, 30, 90].map((d): [string, string] => [String(d), t("common:dur.days", { count: d })]), ["0", t("manage:items.archNever")]]} on={(v) => setSetting({ archDays: v })} /></Row></Panel>
     <Section label={t("manage:items.sessions")}><Panel>
       <Row title={t("manage:items.handoff")} sub={t("manage:items.handoffSub")}><Sel label={t("manage:items.handoff")} testId="handoff" v={c.handoff ?? "0"} o={[["0", t("manage:items.handoffOff")], ["70", "70%"], ["80", "80%"], ["90", "90%"]]} on={(v) => setSetting({ handoff: v })} /></Row></Panel></Section>
   </div>
-  if (id === "notify") return <NotifyPane />
+  if (id === "notify") return st.workspace ? <NotificationSettingsPane key={`${currentHub()}:${st.workspace.id}`} workspace={st.workspace.id} /> : null
   if (id === "look") return <div className="flex flex-col gap-8">
-    <Section label={t("manage:look.avatars")} note={t("manage:look.avatarsHint")}>
-      <Card className="flex flex-wrap items-start gap-2 p-3" data-avatar-preview>{Object.keys(st.bots).map((k) => <a key={k} href={"#/bots/" + k} className="flex w-20 flex-col items-center gap-1.5 rounded-lg px-1 py-2 hover:bg-accent"><Robot k={k} size={44} /><span className="max-w-full truncate type-footnote text-muted-foreground">{st.bots[k].n}</span></a>)}</Card></Section>
     <Section label={t("manage:look.ui")}><Panel>
-      <Row title={t("manage:look.theme")} sub={t("manage:look.themeSub")}><ThemeSwitch labels /></Row>
+      <Row title={t("manage:look.theme")}><ThemeSwitch labels /></Row>
       <LanguageRow />
       <Row title={t("manage:look.fontSize")}><Segmented size="sm" value={c.fontSize} onChange={(v) => setSetting({ fontSize: v })} options={[["标准", t("manage:look.fontNormal")], ["大", t("manage:look.fontLarge")]]} /></Row>
       <Row title={t("manage:look.reduceMotion")} sub={t("manage:look.reduceMotionSub")}><SetSwitch testId="reduce-motion" label={t("manage:look.reduceMotion")} checked={c.reduceMotion === "开"} onChange={(v) => setSetting({ reduceMotion: v ? "开" : "关" })} /></Row>
     </Panel></Section>
-    <AppearanceSection /></div>
+    <AppearanceSection />
+    {/* the Bots' avatars are set on each Bot: one row that shows them and leads there, not a gallery */}
+    <Panel><Row title={t("manage:look.avatars")} sub={t("manage:look.avatarsHint")} onClick={() => go("#/bots")} data-avatar-preview>
+      <span className="hidden items-center gap-1 sm:flex" aria-hidden>{Object.keys(st.bots).slice(0, 5).map((k) => <Robot key={k} k={k} size={22} />)}</span><Chevron /></Row></Panel>
+  </div>
   if (id === "data") return <div className="flex flex-col gap-8">
     <HubData />
     <WorkspaceDisk />
@@ -453,37 +460,8 @@ function Pane({ id }: { id: string }) {
     <Section label={t("manage:data.danger")} data-danger-zone><Panel className="shadow-[var(--lift),0_0_0_1px_color-mix(in_srgb,var(--destructive)_18%,transparent)]">
       <DangerRow testId="clear-mem" title={t("manage:data.clearMem")} sub={t("manage:data.clearMemSub")} label={t("manage:data.clear")} what={t("manage:data.clearWhat")} onOk={() => void api.clearMemories().then(() => toast(t("manage:data.cleared")))} /></Panel></Section>
   </div>
-  if (id === "about") return <div className="flex flex-col gap-8">
-    <AboutVersions />
-    <Section label={t("manage:about.release")}><Panel>
-    <Row title={t("manage:about.publish")} sub={t("manage:about.publishSub")} />
-    <Row title={t("manage:about.onboard")} sub={t("manage:about.onboardSub")}><Button size="sm" variant="outline" onClick={() => { finishOnboarding(); localStorage.removeItem("steve-onboarded"); st.onboard = 0; emit(); go("#/") }}>{t("manage:about.start")}</Button></Row>
-    </Panel></Section>
-  </div>
+  if (id === "about") return <AboutVersions />
   return null
-}
-/* the settings-notifications pattern of affectUI: each kind of message is a switch, and its time unfolds under it
- * while it is on. The stored values stay the Hub's (settings.rs): a time, or 不发 / 关闭 for off. */
-const DIGEST_AT = ["08:30", "09:00"], QUIET = ["23:00 – 08:00", "22:00 – 09:00"]
-function NotifyPane() {
-  const t = useT()
-  const c = st.settings
-  const digest = c.digestAt !== "不发", quiet = c.quiet !== "关闭"
-  /* turning a switch back on brings back the time it had, not the first option */
-  const last = useRef({ digestAt: digest ? c.digestAt : DIGEST_AT[0], quiet: quiet ? c.quiet : QUIET[0] })
-  if (digest) last.current.digestAt = c.digestAt
-  if (quiet) last.current.quiet = c.quiet
-  return <div className="flex flex-col gap-8">
-    <Notice>{t("manage:notify.none")}</Notice>
-    <Section label={t("manage:notify.digest")}><Panel data-notify-digest>
-      <Row title={<Soon>{t("manage:notify.digestDaily")}</Soon>} sub={t("manage:notify.digestSub")}><SetSwitch testId="digest" label={t("manage:notify.digestDaily")} checked={digest} onChange={(v) => setSetting({ digestAt: v ? last.current.digestAt : "不发" })} /></Row>
-      {digest && <Row className="anim-in" title={t("manage:notify.digestTime")}><Sel testId="digest-at" label={t("manage:notify.digestTime")} v={c.digestAt} o={DIGEST_AT.map((x): [string, string] => [x, x])} on={(v) => setSetting({ digestAt: v })} /></Row>}
-    </Panel></Section>
-    <Section label={t("manage:notify.quiet")}><Panel data-notify-quiet>
-      <Row title={<Soon>{t("manage:notify.quietOn")}</Soon>} sub={t("manage:notify.quietSub")}><SetSwitch testId="quiet" label={t("manage:notify.quietOn")} checked={quiet} onChange={(v) => setSetting({ quiet: v ? last.current.quiet : "关闭" })} /></Row>
-      {quiet && <Row className="anim-in" title={t("manage:notify.quietHours")}><Sel testId="quiet-hours" label={t("manage:notify.quietHours")} v={c.quiet} o={QUIET.map((x): [string, string] => [x, x])} on={(v) => setSetting({ quiet: v })} /></Row>}
-    </Panel></Section>
-  </div>
 }
 /* the settings-general pattern of affectUI: name and prefix as rows with their field on the right, the description as a
  * field of its own below; text saves when it loses focus, so there is no save bar */
@@ -533,9 +511,9 @@ function WorkspacePane() {
       <Row icon={<Tile I={FolderIcon} />} title={t("manage:ws.projects", { count: st.projects.length })} onClick={() => go("#/projects")}><Chevron /></Row>
       <Row icon={<Tile I={BotIcon} />} title={t("manage:ws.bots", { count: Object.keys(st.bots).length })} onClick={() => go("#/bots")}><Chevron /></Row>
       <Row icon={<Tile I={ListTodoIcon} />} title={t("manage:ws.items", { count: st.items.length })} onClick={() => go("#/items")}><Chevron /></Row></Panel></Section>
-    <Section label={t("manage:ws.all", { n: st.workspaces.length })}>
-      <Panel>{st.workspaces.map((x) => <Row key={x.id} title={x.name} sub={x.description || undefined}>{x.id === w.id ? <Pill tone="info">{t("manage:ws.current")}</Pill> : <Button size="xs" variant="ghost" className="text-muted-foreground" onClick={() => void import("@/store").then((m) => m.switchWorkspace(x.id))}>{t("manage:ws.switch")}</Button>}</Row>)}</Panel>
-      <Button size="sm" variant="outline" className="mt-3" onClick={() => openSheet("newWorkspace")}><PlusIcon />{t("manage:ws.new")}</Button></Section>
+    <Section label={st.workspaces.length > 1 ? t("manage:ws.all", { n: st.workspaces.length }) : undefined}>
+      {st.workspaces.length > 1 && <Panel>{st.workspaces.map((x) => <Row key={x.id} title={x.name} sub={x.description || undefined}>{x.id === w.id ? <Pill tone="info">{t("manage:ws.current")}</Pill> : <Button size="xs" variant="ghost" className="text-muted-foreground" onClick={() => void import("@/store").then((m) => m.switchWorkspace(x.id))}>{t("manage:ws.switch")}</Button>}</Row>)}</Panel>}
+      <Button size="sm" variant="outline" className={st.workspaces.length > 1 ? "mt-3" : undefined} onClick={() => openSheet("newWorkspace")}><PlusIcon />{t("manage:ws.new")}</Button></Section>
   </div>
 }
 /* the danger zone of affectUI's settings-general: the action in red, and confirming opens in place under the row
@@ -562,15 +540,14 @@ function DangerRow({ title, sub, label, what, onOk, testId }: { title: string; s
 /* ═════════ 标签 ═════════ */
 let tagCat = "全部"
 /* the items whose category Steve filled in unsure: switch it or confirm it, then they leave the list */
-function KindsReview() {
+function KindsReview({ xs, setXs }: { xs: RKindReview[] | null; setXs: (x: RKindReview[]) => void }) {
   const t = useT()
-  const [xs, setXs] = useState<RKindReview[] | null>(null), [busy, setBusy] = useState(false)
-  useEffect(() => { void loadKindsReview().then(setXs) }, [])
   const done = async (ids: string[]) => { const left = await kindsReviewed(ids); if (left) setXs(left) }
   const rows = (xs ?? []).filter((x) => st.items.some((i) => i.id === x.id))
-  return <Section data-kinds-review right={<Button size="xs" variant="ghost" className="text-muted-foreground" disabled={busy} onClick={async () => { setBusy(true); await kindsBackfill(); setXs(await loadKindsReview()); setBusy(false) }} data-kinds-backfill>{t("manage:kinds.backfill")}</Button>}
-    label={rows.length ? t("manage:kinds.pending", { n: rows.length }) : t("manage:kinds.fill")}>
-    {rows.length ? <>
+  /* nothing to confirm is the usual case: then there is nothing here, not a box that says so */
+  if (!rows.length) return null
+  return <Section data-kinds-review label={t("manage:kinds.pending", { n: rows.length })}>
+    <>
       <p className="mb-3 px-1 type-callout text-muted-foreground">{t("manage:kinds.intro")}</p>
       <Panel>{rows.map((x) => { const i = it(x.id); return (
         <Row key={x.id} title={<span className="inline-flex min-w-0 items-center gap-2"><ItemNo id={i.id} /><span className="truncate">{i.t}</span></span>} sub={x.why || undefined} data-kind-review={x.id}>
@@ -578,7 +555,7 @@ function KindsReview() {
           <Button size="xs" variant="ghost" className="text-muted-foreground" onClick={() => void done([x.id])} data-kind-ok={x.id}>{t("manage:kinds.ok")}</Button>
         </Row>) })}</Panel>
       {rows.length > 1 && <div className="mt-2 flex justify-end"><Button size="xs" variant="ghost" className="text-muted-foreground" onClick={() => void done(rows.map((x) => x.id))} data-kind-ok-all>{t("manage:kinds.okAll")}</Button></div>}
-    </> : <Blank>{xs ? t("manage:kinds.allSet") : t("manage:kinds.reading")}</Blank>}
+    </>
   </Section>
 }
 function TagsPane() {
@@ -588,14 +565,17 @@ function TagsPane() {
   const cats = ["全部", ...TAG_CATS.filter((c) => st.tags.some((tg) => tg.cat === c))]
   const d = del ? tag(del) : null, m = merge ? tag(merge) : null
   const domain = st.tags.filter((x) => !isKind(x))
+  const [review, setReview] = useState<RKindReview[] | null>(null), [checking, setChecking] = useState(false)
+  useEffect(() => { void loadKindsReview().then(setReview) }, [])
+  const backfill = <Button size="xs" variant="ghost" className="text-muted-foreground" disabled={checking} onClick={async () => { setChecking(true); await kindsBackfill(); const left = await loadKindsReview(); setReview(left); setChecking(false); if (!left?.length) toast(t("manage:kinds.allSet")) }} data-kinds-backfill>{checking && <Spinner className="size-3" />}{t("manage:kinds.backfill")}</Button>
   return <div className="flex flex-col gap-8" data-tags-pane>
-    <KindsReview />
+    <KindsReview xs={review} setXs={setReview} />
     <div className="flex flex-wrap items-center gap-2"><Segmented size="sm" value={cats.includes(tagCat) ? tagCat : "全部"} onChange={(v) => { tagCat = v; r() }} options={cats.map((c) => [c, catLabel(t, c)] as const)} /><span className="flex-1" /><Button size="sm" onClick={() => openSheet("tag", {})} data-new-tag-btn><PlusIcon />{t("manage:tags.new")}</Button></div>
     {!st.tags.length && <Empty title={t("manage:tags.empty")} sub={t("manage:tags.emptySub")} />}
     {TAG_CATS.filter((c) => tagCat === "全部" || c === tagCat).map((c) => { const kind = c === KIND_CAT; const xs = kind ? kindTags() : st.tags.filter((tg) => tg.cat === c); return xs.length ? (
-      <Section key={c} label={<>{kind ? t("manage:tags.kindSection") : catLabel(t, c)} <span className="tabular-nums">· {xs.length}</span></>} note={kind ? t("manage:tags.intro") : undefined}>
+      <Section key={c} label={<>{kind ? t("manage:tags.kindSection") : catLabel(t, c)} <span className="tabular-nums">· {xs.length}</span></>} right={kind ? backfill : undefined} note={kind ? t("manage:tags.intro") : undefined}>
         <Panel>{xs.map((tg) => (
-          <Row key={tg.id} title={<span className="inline-flex flex-wrap items-center gap-x-2 gap-y-0.5">{kind ? <KindTag id={tg.id} /> : <span className="font-medium">{tagLabel(tg)}</span>}<span className="type-footnote tabular-nums text-muted-foreground">{t("manage:tags.uses", { count: tagUses(tg.id) })}</span>{kind ? <Pill>{t("manage:tags.builtin")}</Pill> : tg.by === "Steve" && <span className="type-footnote text-tertiary">{t("manage:tags.bySteve", { created: tg.created })}</span>}</span>} sub={tagDesc(tg)} data-tag-row={tg.name}>
+          <Row key={tg.id} title={<span className="inline-flex flex-wrap items-center gap-x-2 gap-y-0.5">{kind ? <KindTag id={tg.id} /> : <span className="font-medium">{tagLabel(tg)}</span>}<span className="type-footnote tabular-nums text-muted-foreground">{t("manage:tags.uses", { count: tagUses(tg.id) })}</span>{!kind && tg.by === "Steve" && <span className="type-footnote text-tertiary">{t("manage:tags.bySteve", { created: tg.created })}</span>}</span>} sub={tagDesc(tg)} data-tag-row={tg.name}>
             <DropdownMenu><DropdownMenuTrigger render={<Button variant="ghost" size="icon-sm" aria-label={t("common:action.more")} className="text-muted-foreground" data-tag-menu={tg.name} />}><MoreHorizontalIcon /></DropdownMenuTrigger>
               <DropdownMenuContent align="end" className="min-w-40">
                 <DropdownMenuItem onClick={() => showTag(tg.id)} data-show-tag>{t("manage:tags.showItems")}</DropdownMenuItem>

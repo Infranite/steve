@@ -3,9 +3,10 @@
 //! runs on its own (on your machine or LAN, with its own sign-in at the messaging system); a crash
 //! or a disconnect of it never affects the Hub.
 //!
-//! A connection is yours (`Mode::Own`): you enter the service's URL, the access token it issued
-//! for this Hub and, for a self-signed certificate, its pin. The Hub reads your messages from the
-//! service's changes feed, and sends, replies, reacts and recalls as you through it.
+//! A connection is explicitly self (`ext_ws`, `Mode::Own`) or bot (`ext_ws.bot`, `Mode::Bot`).
+//! You enter the service's URL, access token and optional certificate pin. Both share the changes
+//! feed and stable delivery receipts; only self registers ActAsUser, while bot uses ChannelAdapter.
+//! The service declares the same identity in hello and me.get (protocol §15).
 //!
 //! - [`ExtWs`]: the provider and the views of the channel side;
 //! - [`ExtWsHook`]: the feed of each receiving connection;
@@ -27,6 +28,8 @@ use crate::ext::{ChannelDecl, MessageIds, Mode, Receive, StartMethod};
 
 /// `connections.adapter`.
 pub const ADAPTER: &str = "ext_ws";
+/// Explicit bot identity, never an act-as-user connection.
+pub const BOT_ADAPTER: &str = "ext_ws.bot";
 /// The handle system of the people its messages come from (`<realm>:id:<value>`).
 pub const SYSTEM: &str = "ext_ws";
 /// The system's label.
@@ -53,6 +56,21 @@ pub fn decl() -> ChannelDecl {
         .start(StartMethod::Form)
 }
 
+/// A bot through the same service protocol; selected explicitly at connect time.
+pub fn bot_decl() -> ChannelDecl {
+    ChannelDecl::new(BOT_ADAPTER)
+        .handle_system(SYSTEM)
+        .mode(Mode::Bot)
+        .features(ChannelFeatures {
+            thread_reply: true,
+            ..ChannelFeatures::default()
+        })
+        .receive(Receive::LongConnection, Some("msg.receive"))
+        .message_ids(MessageIds::None)
+        .created_precision_ms(1000)
+        .start(StartMethod::Form)
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -70,5 +88,16 @@ mod tests {
             .history(ext.clone())
             .profiles(ext);
         assert_eq!(side.check(), Ok(()));
+        let bot = Arc::new(ExtWs::bot());
+        assert_eq!(
+            ChannelSide::new(bot_decl(), bot.clone())
+                .adapter(bot.clone())
+                .media(bot.clone())
+                .connector(bot.clone())
+                .history(bot.clone())
+                .profiles(bot)
+                .check(),
+            Ok(())
+        );
     }
 }

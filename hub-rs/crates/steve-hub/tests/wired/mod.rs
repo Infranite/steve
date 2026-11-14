@@ -4,6 +4,8 @@
 //! on a temp STEVE_HOME with a file keystore; no agent and no external host is ever contacted (the
 //! test connections point their API base at a closed local port).
 
+mod connectors;
+
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -999,6 +1001,17 @@ async fn a_new_issue_becomes_a_suggestion() {
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn a_plugin_is_installed_connected_and_goes_with_its_connection() {
+    plugin_identity_roundtrip(false).await;
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_bot_plugin_selects_the_bot_provider_instead_of_as_you() {
+    plugin_identity_roundtrip(true).await;
+}
+
+#[cfg(unix)]
+async fn plugin_identity_roundtrip(bot: bool) {
     use sha2::Digest;
     use steve_channels::fake::ext_ws::FakeExtWs;
     let e = start().await;
@@ -1050,6 +1063,7 @@ async fn a_plugin_is_installed_connected_and_goes_with_its_connection() {
     let index = json!({"store": 1, "name": "Test library", "plugins": [{
         "id": "echo", "name": "Echo", "summary": "Says it back", "kind": "channel",
         "version": "0.1.0", "contract": 1, "entry": "bin/echo",
+        "identity": if bot { "bot" } else { "self" },
         "config": [{"key": "address", "label": "Address"}, {"key": "token", "label": "Token", "secret": true}],
         "artifacts": artifacts,
     }, {
@@ -1108,7 +1122,13 @@ async fn a_plugin_is_installed_connected_and_goes_with_its_connection() {
                     let fake = FakeExtWs::start_at(listen.trim().parse().expect("listen address"))
                         .await
                         .expect("fake");
-                    fake.with(|w| w.token = token);
+                    fake.with(|w| {
+                        w.token = token;
+                        if bot {
+                            w.identity = Some("bot".into());
+                            w.account_identity = Some("bot".into());
+                        }
+                    });
                     return (dir.clone(), fake);
                 }
                 tokio::time::sleep(Duration::from_millis(25)).await;
@@ -1149,7 +1169,14 @@ async fn a_plugin_is_installed_connected_and_goes_with_its_connection() {
         .or_else(|| cs["items"].as_array())
         .and_then(|l| l.iter().find(|c| c["id"] == connection.as_str()))
         .unwrap_or_else(|| panic!("the connection is listed: {cs}"));
-    assert_eq!(made["adapter"], "ext_ws", "{made}");
+    assert_eq!(
+        made["adapter"],
+        if bot { "ext_ws.bot" } else { "ext_ws" },
+        "{made}"
+    );
+    let caps = made["caps"].as_array().expect("connection capabilities");
+    assert_eq!(caps.iter().any(|c| c == "msg.send_as_user"), !bot);
+    assert_eq!(caps.iter().any(|c| c == "msg.send"), bot);
     assert!(!fake.calls("hello").is_empty());
     let (_, v) = e.call("GET", "/api/plugins", None).await;
     let echo = &v["stores"]

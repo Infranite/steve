@@ -11,9 +11,10 @@ import { errMsg } from "@/github/index"
 import { Meta, Panel, Row } from "@/ui"
 import { useEffect, useState } from "react"
 import { useT } from "@/i18n"
+import { hm } from "@/i18n/format"
 import { POLICY_FIELDS, ordered, patchOf, shown } from "@/merge-queue-model"
 
-const clock = (ms: number) => new Date(ms).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })
+const clock = (ms: number) => hm(ms)
 const mins = (ms: number | null | undefined) => (ms == null ? "–" : String(Math.round(ms / 60_000)))
 
 function BatchRow({ b, depth }: { b: RQueueBatch; depth: number }) {
