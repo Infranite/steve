@@ -343,26 +343,44 @@ impl Outbox {
         let Some(source) = source else {
             return Ok(None);
         };
-        let viewer = ch.modules().viewer(who)?;
-        let mode = ch.store().reader(|c| -> ChannelResult<_> {
-            let source_space: String = c.query_row(
-                "SELECT space_id FROM chan_messages WHERE workspace_id=? AND id=?",
-                params![who.ws, source],
+        // Identity is derived only for a NEW source reply. A timeout retry must fingerprint
+        // the original intent, not reinterpret it using a conversation's newly selected voice.
+        // Read only the scoped caller's record; submit still checks membership and the full hash.
+        let recorded_identity: Option<String> = ch.store().reader(|c| -> ChannelResult<_> {
+            require_requester(c, who)?;
+            Ok(c.query_row(
+                "SELECT json_extract(intent,'$.identity') FROM output_deliveries
+                 WHERE workspace_id=? AND requester=? AND idempotency_key=?",
+                params![who.ws, who.me, key],
                 |r| r.get(0),
-            )?;
-            let s = spaces::own(c, &viewer, space.as_deref().unwrap_or(&source_space))?;
-            Ok(bindings::connection_account(c, &who.ws, &s.connection_id)?.1)
+            )
+            .optional()?)
         })?;
+        let identity = if let Some(identity) = recorded_identity {
+            serde_json::from_value(serde_json::Value::String(identity))?
+        } else {
+            let viewer = ch.modules().viewer(who)?;
+            let mode = ch.store().reader(|c| -> ChannelResult<_> {
+                let source_space: String = c.query_row(
+                    "SELECT space_id FROM chan_messages WHERE workspace_id=? AND id=?",
+                    params![who.ws, source],
+                    |r| r.get(0),
+                )?;
+                let s = spaces::own(c, &viewer, space.as_deref().unwrap_or(&source_space))?;
+                Ok(bindings::connection_account(c, &who.ws, &s.connection_id)?.1)
+            })?;
+            if mode == Mode::Bot {
+                Identity::Bot
+            } else {
+                Identity::AsYou
+            }
+        };
         self.submit(
             ch,
             who,
             DeliveryIntent {
                 key: key.into(),
-                identity: if mode == Mode::Bot {
-                    Identity::Bot
-                } else {
-                    Identity::AsYou
-                },
+                identity,
                 content: steve_modules::outbound::Content {
                     markdown: text.into(),
                     ..Default::default()

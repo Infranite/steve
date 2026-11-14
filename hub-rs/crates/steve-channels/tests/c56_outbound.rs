@@ -3922,6 +3922,32 @@ async fn output_pipeline_real_source_reply_uses_existing_outbox_and_stable_ledge
         .unwrap();
     assert_eq!(d.status, "sent");
     assert_eq!(d.attempts, 1);
+    let cleanup = steve_channels::cleanup::routes(h.ch.clone()).with_state(h.env.modules.clone());
+    let (st, result) = call(
+        &cleanup,
+        Some(&who),
+        "POST",
+        "/channels/cleanup",
+        Some(&json!({"connection_id":h.pm,"level":"text","confirm":true})),
+    )
+    .await;
+    assert_eq!(st, 200, "{result}");
+    assert_eq!(
+        row(
+            &h,
+            "SELECT json_extract(intent,'$.content') FROM output_deliveries WHERE id=?",
+            &[&d.id]
+        )[0],
+        "{}"
+    );
+    h.env
+        .store()
+        .transaction(|tx| -> ApiResult<()> {
+            spaces::see(tx, WS, &src.space_id, &h.me, h.ch.now())?;
+            spaces::set_voice(tx, WS, &src.space_id, Some(&h.me), h.ch.now())?;
+            Ok(())
+        })
+        .unwrap();
     let again = h
         .outbox
         .reply_source_as(&h.ch, &who, &item.id, "任务完成", "source-key", None, None)
@@ -3930,6 +3956,22 @@ async fn output_pipeline_real_source_reply_uses_existing_outbox_and_stable_ledge
         .unwrap();
     assert_eq!(d.id, again.id);
     assert_eq!(sent(&h).len(), 1);
+    assert!(
+        h.outbox
+            .reply_source_as(&h.ch, &who, &item.id, "改了内容", "source-key", None, None)
+            .await
+            .is_err()
+    );
+    exec(
+        &h,
+        &format!("DELETE FROM workspace_members WHERE workspace_id='{WS}' AND user_id='{ME}'"),
+    );
+    assert!(
+        h.outbox
+            .reply_source_as(&h.ch, &who, &item.id, "任务完成", "source-key", None, None)
+            .await
+            .is_err()
+    );
 }
 
 #[test]
