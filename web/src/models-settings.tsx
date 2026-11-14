@@ -30,11 +30,11 @@ export const MODELS_CAT = Object.defineProperties(["models", "", CpuIcon, ""], {
 type Choice = { harness: string; models: string[]; effort?: string | null }
 type UsedRow = { harness: string; model: string; calls: number; failed: number; at: number }
 type Recent = { last: { harness: string; model: string; at: number } | null; used: UsedRow[] }
-type Purpose = { key: string; label: string; desc: string; value: Choice | null; follows: boolean; effective: Choice; recommended: Choice | null; recent: Recent | null }
+type Purpose = { role?: "primary" | "lightweight"; source?: "primary" | "lightweight" | "override"; key: string; label: string; desc: string; value: Choice | null; follows: boolean; effective: Choice; recommended: Choice | null; recent: Recent | null }
 type Steve = { bot_id: string | null; name: string; harness: string; model: string | null; bot_effort: string | null; runs_on: string; models: string[]; effort: string | null; note: string | null; model_note: string | null }
 type Harness = { id: string; name: string; efforts: { key: string; label: string }[]; default_models: string[] }
 type Agent = { harness: string; name: string; models: string[]; default: string | null; value: string | null }
-type View = { steve: Steve; purposes: Purpose[]; agents: Agent[]; harnesses: Harness[]; max: number }
+type View = { lightweight?: Choice | null; lightweight_effective?: Choice; steve: Steve; purposes: Purpose[]; agents: Agent[]; harnesses: Harness[]; max: number }
 
 const api = {
   get: () => modReq<View>("GET", "/settings/models"),
@@ -78,12 +78,13 @@ export function ModelsSettingsPane() {
   const [err, setErr] = useState<string | null>(null)
   const [more, setMore] = useState(() => location.hash.includes("advanced"))
   const [log, setLog] = useState(false)
+  const [allocation, setAllocation] = useState(false), [advanced, setAdvanced] = useState(false)
   const [edit, setEdit] = useState<{ key: string; own: boolean } | null>(null)
   const logRef = useRef<HTMLElement>(null)
   /* a change made elsewhere (the Bot page, a Steve draft, another tab) arrives as a settings or bot event */
   const b = st.bots.steve
-  const stamp = JSON.stringify([lang(), Object.entries(st.settings ?? {}).filter(([k]) => k.startsWith("models.")), b?.harness, b?.model, b?.reasoningEffort])
-  useEffect(() => { api.get().then((x) => { setV(x); setErr(null) }, (e) => setErr(isNotWired(e) ? "absent" : e instanceof Error ? e.message : String(e))) }, [stamp])
+  const stamp = JSON.stringify([lang(), Object.entries(st.settings ?? {}).filter(([k]) => k.startsWith("models.")), b?.harness, b?.model, b?.reasoningEffort, st.workspace?.id])
+  useEffect(() => { let active = true; api.get().then((x) => { if (active) { setV(x); setErr(null) } }, (e) => { if (active) setErr(isNotWired(e) ? "absent" : e instanceof Error ? e.message : String(e)) }); return () => { active = false } }, [stamp])
   if (err === "absent") return <Blank data-models-unwired>{t("pages:models.unwired")}</Blank>
   if (err) return <Notice tone="destructive" role="alert">{err}</Notice>
   if (!v) return <Loading />
@@ -94,13 +95,14 @@ export function ModelsSettingsPane() {
   const own = v.purposes.filter((p) => !p.follows)
   const rest = v.purposes.filter((p) => p.follows)
   const steveChoice: Choice = { harness: s.runs_on, models: s.models, effort: s.effort }
+  const lightChoice = v.lightweight_effective ?? steveChoice
   const failing = v.purposes.filter((p) => failedOf(p) > 0)
   const failed = failing.reduce((n, p) => n + failedOf(p), 0)
   const editing = edit && v.purposes.find((p) => p.key === edit.key)
   const showLog = () => { setLog(true); requestAnimationFrame(() => logRef.current?.scrollIntoView({ behavior: reducedMotion() ? "auto" : "smooth", block: "start" })) }
   return (
     <div className="flex flex-col gap-8" data-models-settings>
-      <Section data-models-default label={t("pages:models.defaultSection")} note={t("pages:models.defaultUses", { name: s.name })}>
+      <Section data-models-default label={t("pages:models.roles.primary")} note={t("pages:models.roles.primaryUses")}>
         <Card className="flex flex-col gap-3">
           <div className="flex items-center gap-3.5">
             <Robot k={s.bot_id ?? "steve"} size={40} className="shrink-0" />
@@ -108,12 +110,20 @@ export function ModelsSettingsPane() {
               <ChoiceLine c={{ ...steveChoice, effort: null }} wrap className="type-body" />
               <p className="mt-0.5 type-footnote text-muted-foreground" data-steve-effort>{t("pages:models.effortLine", { effort: effortName(s.effort) })}{s.model_note && ` · ${s.model_note}`}{s.models.length > 1 && ` · ${t("pages:models.fallbackHint")}`}</p>
             </div>
-            <SteveModelControl label={t("pages:models.change")} />
+            <SteveModelControl label={t("pages:models.roles.configure")} />
           </div>
           {s.note && <Notice tone="attention" role="note" className="py-2.5">{s.note}</Notice>}
         </Card>
       </Section>
 
+      <Section data-models-lightweight label={t("pages:models.roles.lightweight")} note={t("pages:models.roles.lightUses")}>
+        <Card><ChoiceLine c={lightChoice} wrap /><p className="mt-2 type-footnote text-muted-foreground" data-lightweight-mode>{v.lightweight ? t("pages:models.roles.lightConfigured") : t("pages:models.roles.lightFollows")}</p></Card>
+      </Section>
+      {own.length > 0 && <Notice tone="attention" data-role-exceptions>{t("pages:models.roles.exceptions", { count: own.length, purposes: listOf(own.map((p) => p.label)) })}</Notice>}
+      <div data-models-allocation><button type="button" className="flex items-center gap-2 type-callout text-muted-foreground" aria-expanded={allocation} onClick={() => setAllocation(!allocation)} data-models-allocation-toggle><Turn open={allocation} />{t("pages:models.roles.actual", { count: v.purposes.length })}</button><Reveal open={allocation}>
+        <Panel className="mt-3">{v.purposes.map((p) => <Row key={p.key} data-actual-purpose={p.key} title={p.label} sub={<Brief c={p.effective} />}><span className="shrink-0 type-footnote text-muted-foreground">{t(p.source === "override" || !p.follows ? "pages:models.roles.override" : p.source === "lightweight" ? "pages:models.roles.lightweight" : "pages:models.roles.primary")}</span></Row>)}</Panel>
+      </Reveal></div>
+      <div data-models-advanced><button type="button" className="flex items-center gap-2 type-callout text-muted-foreground" aria-expanded={advanced} onClick={() => setAdvanced(!advanced)} data-models-advanced-toggle><Turn open={advanced} />{t("pages:models.roles.advanced")}</button><Reveal open={advanced}><div className="mt-4 flex flex-col gap-5">
       <Section data-models-overrides label={t("pages:models.overrides")} right={rest.length > 0 && (
           <DropdownMenu>
             <DropdownMenuTrigger render={<Button size="xs" variant="ghost" className="text-muted-foreground" data-add-override />}><PlusIcon />{t("pages:models.addOverride")}</DropdownMenuTrigger>
@@ -154,11 +164,13 @@ export function ModelsSettingsPane() {
         ))}</Panel>
       </Section>
 
+      </div></Reveal></div>
+
       <RunLog v={v} open={log} setOpen={setLog} ref={logRef} />
 
       <Sheet open={!!editing} onOpenChange={(o) => { if (!o) setEdit(null) }}>
         <SheetContent side="right" className="w-[92vw] max-w-[420px]! gap-0 overflow-y-auto" data-models-sheet={editing?.key}>
-          {editing && <Editor key={editing.key} p={editing} v={v} steve={steveChoice} startOwn={edit!.own}
+          {editing && <Editor key={editing.key} p={editing} v={v} steve={steveChoice} roleDefault={editing.role === "lightweight" ? lightChoice : steveChoice} startOwn={edit!.own}
             onSave={async (c, ok) => { if (await save({ purposes: { [editing.key]: c } }, ok)) setEdit(null) }} onCancel={() => setEdit(null)} />}
         </SheetContent>
       </Sheet>
@@ -209,16 +221,16 @@ function RunLog({ v, open, setOpen, ref }: { v: View; open: boolean; setOpen: (o
 
 /** The side-panel editor of one purpose: follow the default, or its own harness, model and effort; the
  *  fallback models and the recommended choice sit under 高级选项. */
-function Editor({ p, v, steve, startOwn, onSave, onCancel }: { p: Purpose; v: View; steve: Choice; startOwn: boolean; onSave: (c: Choice | null, ok: string) => Promise<void>; onCancel: () => void }) {
+function Editor({ p, v, steve, roleDefault, startOwn, onSave, onCancel }: { p: Purpose; v: View; steve: Choice; roleDefault: Choice; startOwn: boolean; onSave: (c: Choice | null, ok: string) => Promise<void>; onCancel: () => void }) {
   const t = useT()
-  const initRawHarness = p.value?.harness ?? steve.harness
+  const initRawHarness = p.value?.harness ?? roleDefault.harness
   const initHarness = v.harnesses.some((x) => x.id === initRawHarness) ? initRawHarness : (v.harnesses.find((x) => x.id === steve.harness) ?? v.harnesses[0])?.id ?? initRawHarness
   const initH = v.harnesses.find((x) => x.id === initHarness)
   const initRawEffort = initHarness === initRawHarness ? (p.value?.effort ?? "") : ""
   const initEffort = initRawEffort && initH && (initH.efforts.length === 0 ? false : initH.efforts.some((e) => e.key === initRawEffort)) ? initRawEffort : ""
   const [mode, setMode] = useState<"follow" | "own">(!p.follows || startOwn ? "own" : "follow")
   const [harness, setHarness] = useState(initHarness)
-  const [list, setList] = useState<string[]>(initHarness === initRawHarness ? (p.value?.models ?? []) : [])
+  const [list, setList] = useState<string[]>(initHarness === initRawHarness ? (p.value?.models ?? (p.role === "lightweight" ? roleDefault.models : [])) : [])
   const [effort, setEffort] = useState<string>(initEffort)
   const [adv, setAdv] = useState(false)
   const [busy, setBusy] = useState(false)
@@ -247,7 +259,7 @@ function Editor({ p, v, steve, startOwn, onSave, onCancel }: { p: Purpose; v: Vi
         {mode === "follow" ? (
           <div className="rounded-xl bg-muted/60 px-4 py-3 type-callout anim-in" data-follow-preview>
             <span className="block type-footnote text-muted-foreground">{t("pages:models.editor.followPreview")}</span>
-            <ChoiceLine c={steve} wrap className="mt-0.5" />
+            <ChoiceLine c={roleDefault} wrap className="mt-0.5" />
           </div>
         ) : <>
           <Field id="Harness" label="Harness"><Select className="w-full" value={harness} testId={`harness-${p.key}`} onChange={switchHarness} options={harnessOpts} /></Field>
@@ -301,7 +313,7 @@ export function SteveJudges({ harness, model }: { harness: string; model: string
   const t = useT()
   const [v, setV] = useState<View | null>(null)
   const b = st.bots.steve
-  useEffect(() => { api.get().then(setV, () => setV(null)) }, [b?.harness, b?.model, b?.reasoningEffort])
+  useEffect(() => { api.get().then(setV, () => setV(null)) }, [b?.harness, b?.model, b?.reasoningEffort, st.workspace?.id, JSON.stringify(st.settings["models.lightweight"])])
   const changed = !!b && (harness !== b.harness || (model || null) !== (b.model ?? null))
   const own = v?.purposes.filter((p) => !p.follows) ?? []
   return (
@@ -311,8 +323,9 @@ export function SteveJudges({ harness, model }: { harness: string; model: string
         {changed ? <Trans t={t} i18nKey="pages:models.judges.afterSave" values={{ harness: harnessName(harness), model: model || defaultModel() }} components={{ h: <span className="font-medium text-foreground" />, m: <span className="type-code text-foreground/85" /> }} />
           : <>{t("pages:models.judges.now")}<ChoiceLine c={{ harness: v.steve.runs_on, models: v.steve.models, effort: v.steve.effort }} className="inline" />{v.steve.model_note && t("pages:models.judges.noteParen", { note: v.steve.model_note })}</>}
       </div>}
+      {v?.lightweight && <div className="mt-1.5 type-footnote text-muted-foreground">{t("pages:models.roles.lightweight")} · <ChoiceLine c={v.lightweight_effective ?? v.lightweight} className="inline" /></div>}
       {v && <div className="mt-1.5 type-footnote text-muted-foreground">
-        {own.length ? t("pages:models.judges.someOwn", { list: listOf(own.map((p) => p.label)) }) : t("pages:models.judges.allFollow")}
+        {own.length ? t("pages:models.judges.someOwn", { list: listOf(own.map((p) => p.label)) }) : v.lightweight ? t("pages:models.roles.judgesFollow") : t("pages:models.judges.allFollow")}
         <a href="#/settings/models" className="ml-1 text-blue hover:underline" data-goto-advanced>{t("pages:models.judges.link")}</a>
       </div>}
     </div>

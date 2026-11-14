@@ -294,7 +294,7 @@ fn overview(core: &Core, ws: &str) -> Value {
             json!({
                 "key": p["key"], "label": p["label"], "what": p["desc"],
                 "now": p["effective"],
-                "follows_steve": p["follows"],
+                "follows_steve": p["follows"], "role": p["role"], "source": p["source"],
             })
         })
         .collect();
@@ -311,6 +311,8 @@ fn overview(core: &Core, ws: &str) -> Value {
     json!({
         "steve": {"harness": view["steve"]["runs_on"], "models": view["steve"]["models"]},
         "purposes": purposes,
+        "lightweight": view["lightweight"],
+        "lightweight_effective": view["lightweight_effective"],
         "harnesses": harnesses,
         "max_models_per_purpose": view["max"],
     })

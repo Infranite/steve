@@ -450,6 +450,7 @@ async fn explicit_model_selection_switches_judgments_without_a_model_call() {
     let models = k.core.models();
     let before = models.view(WS);
     let choice = crate::models::SteveSelection {
+        lightweight: None,
         harness: "codex".into(),
         model: Some("gpt-test".into()),
         expected_revision: before["bot_revision"].as_i64().unwrap(),
@@ -477,6 +478,7 @@ async fn explicit_model_selection_can_keep_separate_purposes() {
     let models = k.core.models();
     let route = models.custom(WS, "route");
     let choice = crate::models::SteveSelection {
+        lightweight: None,
         harness: "codex".into(),
         model: None,
         expected_revision: models.view(WS)["bot_revision"].as_i64().unwrap(),
@@ -496,6 +498,7 @@ async fn failed_model_selection_rolls_back_the_bot_and_settings() {
         Ok(())
     }).unwrap();
     let choice = crate::models::SteveSelection {
+        lightweight: None,
         harness: "codex".into(),
         model: Some("gpt-test".into()),
         expected_revision: before["bot_revision"].as_i64().unwrap(),
@@ -515,10 +518,102 @@ async fn model_selection_rejects_unknown_or_native_only_harnesses_before_writing
     let before = models.view(WS);
     for harness in ["does-not-exist", "pi"] {
         let choice = crate::models::SteveSelection {
-            harness: harness.into(), model: Some("a-model".into()),
-            expected_revision: before["bot_revision"].as_i64().unwrap(), follow_purposes: true,
+            lightweight: None,
+            harness: harness.into(),
+            model: Some("a-model".into()),
+            expected_revision: before["bot_revision"].as_i64().unwrap(),
+            follow_purposes: true,
         };
-        assert!(matches!(models.select_steve(WS, &choice, "me"), Err(crate::CoreError::Status(400, _))));
+        assert!(matches!(
+            models.select_steve(WS, &choice, "me"),
+            Err(crate::CoreError::Status(400, _))
+        ));
         assert_eq!(models.view(WS)["steve"], before["steve"]);
     }
+}
+
+#[tokio::test]
+async fn primary_and_lightweight_models_cover_all_purposes_and_respect_overrides() {
+    let k = Kit::new();
+    let models = k.core.models();
+    let mut choice = crate::models::SteveSelection {
+        harness: "codex".into(),
+        model: Some("primary-model".into()),
+        expected_revision: models.view(WS)["bot_revision"].as_i64().unwrap(),
+        follow_purposes: true,
+        lightweight: Some(crate::models::Choice {
+            harness: "claude-code".into(),
+            models: vec!["small-model".into()],
+            effort: Some("low".into()),
+        }),
+    };
+    let view = models.select_steve(WS, &choice, "me").unwrap();
+    for p in view["purposes"].as_array().unwrap() {
+        let light = p["role"] == "lightweight";
+        assert_eq!(p["source"], if light { "lightweight" } else { "primary" });
+        assert_eq!(
+            p["effective"]["harness"],
+            if light { "claude-code" } else { "codex" }
+        );
+        assert_eq!(
+            p["effective"]["models"][0],
+            if light {
+                "small-model"
+            } else {
+                "primary-model"
+            }
+        );
+        assert_eq!(p["follows"], true);
+    }
+    assert_eq!(
+        models.for_call(WS, "intent", crate::Tier::Fast).models,
+        ["small-model"]
+    );
+    assert_eq!(
+        models.for_call(WS, "digest", crate::Tier::Fast).models,
+        ["primary-model"]
+    );
+    models
+        .apply(
+            WS,
+            &json!({"purposes":{"title":{"harness":"codex","models":["custom-title"]}}}),
+            "me",
+        )
+        .unwrap();
+    assert_eq!(models.for_purpose(WS, "title").models, ["custom-title"]);
+    models
+        .apply(WS, &json!({"purposes":{"title":null}}), "me")
+        .unwrap();
+    assert_eq!(models.for_purpose(WS, "title").models, ["small-model"]);
+    choice.expected_revision = view["bot_revision"].as_i64().unwrap();
+    choice.lightweight = None;
+    models.select_steve(WS, &choice, "me").unwrap();
+    for p in crate::models::PURPOSES {
+        assert_eq!(models.for_purpose(WS, p.key).models, ["primary-model"]);
+    }
+}
+
+#[tokio::test]
+async fn lightweight_adapter_default_does_not_inherit_the_primary_model_or_effort() {
+    let k = Kit::new();
+    let models = k.core.models();
+    let mut choice = crate::models::SteveSelection {
+        harness: "codex".into(),
+        model: Some("primary-model".into()),
+        expected_revision: models.view(WS)["bot_revision"].as_i64().unwrap(),
+        follow_purposes: true,
+        lightweight: Some(crate::models::Choice {
+            harness: "codex".into(),
+            models: vec![],
+            effort: None,
+        }),
+    };
+    models.select_steve(WS, &choice, "me").unwrap();
+    let route = models.for_purpose(WS, "route");
+    assert!(!route.models.contains(&"primary-model".into()));
+    assert_eq!(route.effort, None);
+    choice.expected_revision = models.view(WS)["bot_revision"].as_i64().unwrap();
+    choice.lightweight = None;
+    models.select_steve(WS, &choice, "me").unwrap();
+    assert_eq!(models.for_purpose(WS, "route").models[0], "primary-model");
 }

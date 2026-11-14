@@ -11,7 +11,9 @@ try {
     const saves=[]
     let revision=1, fail=false, delay=false, pending, markDelay
     const reachedDelay = new Promise(resolve => markDelay = resolve)
-    const view = () => ({steve:{harness:"claude-code",model:"old-model",models:["old-model"]}, bot_revision:revision, harnesses:[{id:"claude-code",name:"Claude Code",ready:true,judgments:true},{id:"codex",name:"Codex",ready:true,judgments:true},{id:"pi",name:"Pi",ready:true,judgments:false}], purposes:[{key:"route",label:lang==="en"?"Routing":"分流",follows:false,effective:{harness:"claude-code",models:["old-model"]}}]})
+    const purposes = ["route","chat","research","title","extract","disclosure","yolo","draft","flow","mail","compose"]
+    const lightKeys = ["route","title","disclosure","flow"]
+    const view = () => ({lightweight:null,steve:{harness:"claude-code",model:"old-model",models:["old-model"]}, bot_revision:revision, harnesses:[{id:"claude-code",name:"Claude Code",ready:true,judgments:true},{id:"codex",name:"Codex",ready:true,judgments:true},{id:"pi",name:"Pi",ready:true,judgments:false}], purposes:purposes.map(key=>({key,label:key,role:lightKeys.includes(key)?"lightweight":"primary",follows:!lightKeys.includes(key),effective:{harness:"claude-code",models:["old-model"]}}))})
     page.on("pageerror", e=>errors.push(e.message))
     await page.addInitScript(l=>localStorage.setItem("steve-lang",l),lang)
     await page.route("**/*", async r=>{
@@ -19,7 +21,7 @@ try {
       if(u.origin!==base){unexpected.push(u.href);return r.abort()}
       if(!u.pathname.startsWith("/api/")) return r.continue()
       if(u.pathname==="/api/settings/models" && r.request().method()==="GET") return r.fulfill({json:view()})
-      if(u.pathname==="/api/system/models") return r.fulfill({json:{harness:u.searchParams.get("harness"),name:"Codex",source:"Fixture",default:"new-model",families:["test"],models:[{id:"new-model",label:"New model",family:"test",via:null,note:null,efforts:[]}]}})
+      if(u.pathname==="/api/system/models") { const light=u.searchParams.get("harness")==="claude-code"; return r.fulfill({json:{harness:u.searchParams.get("harness"),name:"Codex",source:"Fixture",default:"new-model",families:["test"],models:[{id:light?"small-model":"new-model",label:light?"Small model":"New model",family:"test",via:null,note:null,efforts:[]}]}}) }
       if(u.pathname==="/api/settings/models/select") {
         saves.push(r.request().postDataJSON())
         if(delay) { markDelay(); await new Promise(resolve=>pending=resolve) }
@@ -43,6 +45,15 @@ try {
     assert.equal(await sheet.isVisible(), true, "Escape closes the harness menu before the parent sheet")
     await sheet.locator('.ui-mdpc__trigger').click()
     await page.getByRole("option",{name:/New model/}).click()
+    await sheet.locator('[data-lightweight-enable]').check()
+    await sheet.locator('[data-select="lightweight-harness"]').click()
+    await page.getByRole("option",{name:"Claude Code",exact:true}).click()
+    await sheet.locator('[data-model-picker="lightweight-model"]').click()
+    await page.locator('[data-model-opt="small-model"]').click()
+    await sheet.locator('[data-role-preview-toggle]').click()
+    assert.equal(await sheet.locator('[data-role-preview-purpose]').count(),11)
+    for(const key of purposes) assert.match(await sheet.locator(`[data-role-preview-purpose="${key}"]`).innerText(),lightKeys.includes(key)?/small-model/:/new-model/)
+    await sheet.locator('[data-role-preview-toggle]').click()
     assert.equal(saves.length,0,"browsing models does not save or run inference")
     assert.deepEqual(await page.evaluate(()=>window.__say),[])
     // Failure to save must not send the original message using the old provider.
@@ -60,7 +71,7 @@ try {
     assert.deepEqual(calls[0][1],["file-1"])
     assert.equal(calls[0][3].reply_to,"question")
     assert.equal(calls[0][3].item,undefined)
-    assert.deepEqual(saves.at(-1),{harness:"codex",model:"new-model",expected_revision:1,follow_purposes:true})
+    assert.deepEqual(saves.at(-1),{harness:"codex",model:"new-model",expected_revision:1,follow_purposes:true,lightweight:{harness:"claude-code",models:["small-model"]}})
     assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),"no horizontal overflow")
     // If the user changes workspace while a preference write is in flight, its eventual success
     // must never resend the old question in the new workspace.

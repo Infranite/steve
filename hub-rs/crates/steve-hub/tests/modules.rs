@@ -482,6 +482,27 @@ async fn select_default_model_without_inference() {
     );
     let (_, after) = c.call("GET", "/api/settings/models", None, None).await;
     assert_eq!(after["steve"], v["steve"]);
+    let roles = json!({"harness":"codex", "model":"primary-model", "expected_revision":after["bot_revision"], "follow_purposes":true,
+        "lightweight":{"harness":"claude-code", "models":["small-model"]}});
+    let (code, assigned) = c
+        .call("POST", "/api/settings/models/select", Some(roles), None)
+        .await;
+    assert_eq!(code, 200, "{assigned}");
+    assert_eq!(
+        assigned["lightweight_effective"]["models"][0],
+        "small-model"
+    );
+    for p in assigned["purposes"].as_array().unwrap() {
+        assert_eq!(
+            p["effective"]["models"][0],
+            if p["role"] == "lightweight" {
+                "small-model"
+            } else {
+                "primary-model"
+            }
+        );
+        assert_eq!(p["value"], Value::Null);
+    }
 }
 
 /// `GET /api/system/models`: what each harness adapter offers (with the Node off: the list its
