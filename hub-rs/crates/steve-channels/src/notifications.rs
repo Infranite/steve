@@ -171,6 +171,97 @@ fn self_dm(c: &Connection, who: &Caller, p: &str, space: &str) -> ChannelResult<
     Ok(())
 }
 
+/// A selectable explicit bot DM, not a contact/owner guess or a promise of later delivery.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct Target {
+    pub party_id: String,
+    pub space_id: String,
+    pub party_name: String,
+    pub space_name: String,
+    /// Public channel system identifier, never account handles or connection credentials.
+    pub channel: String,
+}
+
+/// Read only the caller's linked parties and their recorded DM membership. In particular, do not
+/// infer a counterpart from message history, cached member_count, ownership or a sole member.
+pub fn targets(ch: &Channels, who: &Caller) -> ChannelResult<Vec<Target>> {
+    ch.store().reader(|c| {
+        require_person(c, who)?;
+        let viewer = steve_store::base::Viewer::load(c, &who.ws, &who.me)?;
+        let mut st = c.prepare_cached(
+            "SELECT DISTINCT p.id,s.id,p.name,s.name,s.system_id
+             FROM parties p JOIN accounts a ON a.party_id=p.id AND a.workspace_id=p.workspace_id
+             JOIN space_members m ON m.account_id=a.id AND m.workspace_id=p.workspace_id
+             JOIN spaces s ON s.id=m.space_id AND s.workspace_id=p.workspace_id
+             WHERE p.workspace_id=? AND p.user_id=? AND p.status='active'
+               AND coalesce(p.contact_kind,'')<>'bot' AND p.type<>'bot'
+               AND a.status='active' AND a.kind NOT IN ('bot','app_bot') AND s.kind='dm'
+             ORDER BY p.id,s.id",
+        )?;
+        let candidates = st
+            .query_map(params![who.ws, who.me], |r| {
+                Ok(Target {
+                    party_id: r.get(0)?,
+                    space_id: r.get(1)?,
+                    party_name: r.get(2)?,
+                    space_name: r.get(3)?,
+                    channel: r.get(4)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut targets = Vec::new();
+        for target in candidates {
+            let p = Policy {
+                party_id: Some(target.party_id.clone()),
+                space_id: Some(target.space_id.clone()),
+                ..Policy::default()
+            };
+            // Pin the explicit bot route through E1's live visibility/account/identity checks.
+            // Internal failures must not masquerade as an empty picker.
+            let route = self_party(c, who, &target.party_id)
+                .and_then(|_| {
+                    crate::pipeline::route(c, &viewer, &intent(&p, "validation", "validation"))
+                })
+                .and_then(|route| {
+                    self_dm(c, who, &target.party_id, &route.space_id)?;
+                    Ok(route)
+                });
+            let route = match route {
+                Ok(route) => route,
+                Err(e @ ApiError::Internal(_)) => return Err(e),
+                Err(_) => continue,
+            };
+            // E1 selects the effective voice, which need not be spaces.connection_id. A bot-mode
+            // override cannot turn someone's self account (or a disabled account) into a bot.
+            // The sender may be implicit in a provider's roster; every recorded member must still
+            // resolve to an active, same-workspace self account or that exact sending bot account.
+            let valid: bool = c.query_row(
+                "SELECT EXISTS(SELECT 1 FROM connections cn
+                 JOIN accounts bot ON bot.id=cn.account_id AND bot.workspace_id=cn.workspace_id
+                 JOIN parties bp ON bp.id=bot.party_id AND bp.workspace_id=cn.workspace_id
+                 WHERE cn.id=?1 AND cn.workspace_id=?2 AND bot.status='active'
+                   AND bot.kind IN ('bot','app_bot') AND bp.status='active' AND bp.user_id IS NULL
+                   AND bp.id<>?3 AND NOT EXISTS(
+                     SELECT 1 FROM space_members sm LEFT JOIN accounts a ON a.id=sm.account_id
+                     WHERE sm.space_id=?4 AND (sm.workspace_id<>?2 OR a.id IS NULL
+                       OR a.workspace_id<>?2 OR a.status<>'active'
+                       OR (a.id<>bot.id AND (a.party_id<>?3 OR a.kind IN ('bot','app_bot'))))))",
+                params![
+                    route.connection_id,
+                    who.ws,
+                    target.party_id,
+                    target.space_id
+                ],
+                |r| r.get(0),
+            )?;
+            if valid {
+                targets.push(target);
+            }
+        }
+        Ok(targets)
+    })
+}
+
 pub fn get_policy(ch: &Channels, who: &Caller) -> ChannelResult<Policy> {
     ch.store().reader(|c| {
         require_person(c, who)?;

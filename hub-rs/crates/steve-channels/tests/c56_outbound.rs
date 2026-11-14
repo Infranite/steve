@@ -4699,3 +4699,155 @@ async fn notifications_opt_in_does_not_backfill_same_millisecond_or_reenable_old
     );
     nothing_sent(&h);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn notification_targets_are_explicit_sorted_unique_and_read_only() {
+    use steve_channels::notifications as n;
+    let h = setup().await;
+    let p = notification_setup(&h).await;
+    h.fake.space(
+        "D_SECOND",
+        "Second DM",
+        SpaceKind::Dm,
+        false,
+        &[("ulilei", "Me")],
+    );
+    let second = recorded(&h, &h.pm, "D_SECOND", "target-second", "ulilei", "record").await;
+    // Multiple real accounts of the same self party do not duplicate a (party, DM) choice.
+    exec(
+        &h,
+        &format!(
+            "INSERT OR IGNORE INTO space_members(workspace_id,space_id,account_id,joined)
+         SELECT '{WS}','{}',id,1 FROM accounts WHERE handle='upx';
+         INSERT OR IGNORE INTO space_members(workspace_id,space_id,account_id,role,joined)
+         SELECT '{WS}','{}',account_id,'bot',1 FROM connections WHERE id='{}';
+         UPDATE spaces SET member_count=999 WHERE kind='dm';",
+            second.space_id, second.space_id, h.pm,
+        ),
+    );
+    let before = row(
+        &h,
+        "SELECT (SELECT count(*) FROM audit),(SELECT count(*) FROM notification_policies),(SELECT count(*) FROM output_deliveries),(SELECT count(*) FROM parties),(SELECT count(*) FROM chan_messages)",
+        &[],
+    );
+    let found = n::targets(&h.ch, &caller(WS, ME)).unwrap();
+    assert_eq!(found.len(), 2, "{found:?}");
+    let mut ids = vec![p.space_id.clone().unwrap(), second.space_id];
+    ids.sort();
+    assert_eq!(
+        found.iter().map(|t| t.space_id.clone()).collect::<Vec<_>>(),
+        ids
+    );
+    for t in &found {
+        assert_eq!(Some(&t.party_id), p.party_id.as_ref());
+        assert_eq!(t.channel, FakeChannel::SYSTEM);
+        assert!(!t.party_name.is_empty());
+        assert_eq!(
+            serde_json::to_value(t).unwrap().as_object().unwrap().len(),
+            5
+        );
+        // Every offered explicit choice passes the actual now-policy validator, even though
+        // enumeration itself never enables or changes that policy.
+        let policy = n::Policy {
+            space_id: Some(t.space_id.clone()),
+            ..p.clone()
+        };
+        let rollback = h.env.store().transaction(|_| -> ApiResult<()> {
+            n::put_policy(&h.ch, &caller(WS, ME), &policy)?;
+            Err(ApiError::conflict("test rollback"))
+        });
+        assert!(matches!(rollback, Err(ApiError::Conflict(_))));
+    }
+    assert_eq!(found, n::targets(&h.ch, &caller(WS, ME)).unwrap());
+    assert_eq!(
+        before,
+        row(
+            &h,
+            "SELECT (SELECT count(*) FROM audit),(SELECT count(*) FROM notification_policies),(SELECT count(*) FROM output_deliveries),(SELECT count(*) FROM parties),(SELECT count(*) FROM chan_messages)",
+            &[]
+        )
+    );
+    nothing_sent(&h);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn notification_targets_filter_live_identity_membership_visibility_and_route() {
+    use steve_channels::notifications as n;
+    use steve_modules::testkit::{OTHER, WS2};
+    let h = setup().await;
+    let p = notification_setup(&h).await;
+    recorded(&h, &h.pm, "C_OPS", "target-third", "uhan", "record").await;
+    let space = p.space_id.unwrap();
+    let party = p.party_id.unwrap();
+    let conn = &h.pm;
+    assert_eq!(n::targets(&h.ch, &caller(WS, ME)).unwrap().len(), 1);
+    assert!(n::targets(&h.ch, &caller(WS, OTHER)).unwrap().is_empty());
+    assert!(n::targets(&h.ch, &caller(WS2, ME)).unwrap().is_empty());
+    assert!(n::targets(&h.ch, &caller(WS, "svc:default")).is_err());
+    // Each mutation is visible to the real read service inside the store transaction and then
+    // rolled back, so the same known-good fixture proves every rejection independently.
+    let cases = [
+        format!("UPDATE spaces SET kind='group',member_count=1 WHERE id='{space}'"),
+        format!(
+            "INSERT INTO space_members(workspace_id,space_id,account_id,joined) SELECT '{WS}','{space}',id,1 FROM accounts WHERE handle='uhan'"
+        ),
+        format!("UPDATE parties SET user_id=NULL WHERE id='{party}'"),
+        format!("UPDATE parties SET status='deleted' WHERE id='{party}'"),
+        format!("UPDATE parties SET visibility='private',created_by='{OTHER}' WHERE id='{party}'"),
+        format!("UPDATE parties SET contact_kind='bot' WHERE id='{party}'"),
+        format!("UPDATE parties SET type='bot' WHERE id='{party}'"),
+        format!("DELETE FROM space_members WHERE space_id='{space}'"),
+        format!("UPDATE accounts SET status='disabled' WHERE handle='ulilei'"),
+        format!("UPDATE accounts SET kind='app_bot' WHERE handle='ulilei'"),
+        format!(
+            "UPDATE accounts SET status='disabled' WHERE id=(SELECT account_id FROM connections WHERE id='{conn}')"
+        ),
+        format!("UPDATE connections SET status='disabled' WHERE id='{conn}'"),
+        format!("UPDATE connections SET status='revoked' WHERE id='{conn}'"),
+        format!("UPDATE spaces SET status='left' WHERE id='{space}'"),
+        format!("UPDATE space_identities SET left_at=1 WHERE space_id='{space}'"),
+        format!(
+            "INSERT INTO space_prefs(workspace_id,space_id,attention,updated) VALUES('{WS}','{space}','blocked',1) ON CONFLICT(space_id) DO UPDATE SET attention='blocked'"
+        ),
+        format!(
+            "INSERT INTO space_settings(workspace_id,space_id,disclosure,updated) VALUES('{WS}','{space}','never',1) ON CONFLICT(space_id) DO UPDATE SET disclosure='never'"
+        ),
+        format!("UPDATE channel_settings SET mode='self' WHERE connection_id='{conn}'"),
+        format!(
+            "UPDATE accounts SET party_id='{party}' WHERE id=(SELECT account_id FROM connections WHERE id='{conn}'); UPDATE channel_settings SET mode='bot' WHERE connection_id='{conn}'"
+        ),
+        format!(
+            "UPDATE parties SET user_id='{OTHER}' WHERE id=(SELECT a.party_id FROM accounts a JOIN connections c ON c.account_id=a.id WHERE c.id='{conn}')"
+        ),
+        format!(
+            "UPDATE parties SET visibility='private',created_by='{OTHER}' WHERE id=(SELECT a.party_id FROM accounts a JOIN connections c ON c.account_id=a.id WHERE c.id='{conn}')"
+        ),
+        format!("UPDATE space_members SET workspace_id='{WS2}' WHERE space_id='{space}'"),
+        format!("UPDATE spaces SET workspace_id='{WS2}' WHERE id='{space}'"),
+    ];
+    for sql in cases {
+        let result = h.env.store().transaction(|tx| -> ApiResult<()> {
+            tx.execute_batch(&sql)?;
+            assert!(n::targets(&h.ch, &caller(WS, ME))?.is_empty(), "{sql}");
+            Err(ApiError::conflict("test rollback"))
+        });
+        assert!(
+            matches!(result, Err(ApiError::Conflict(_))),
+            "{sql}: {result:?}"
+        );
+        assert_eq!(n::targets(&h.ch, &caller(WS, ME)).unwrap().len(), 1);
+    }
+    let result = h.env.store().transaction(|tx| -> ApiResult<()> {
+        tx.execute(
+            "DELETE FROM workspace_members WHERE workspace_id=? AND user_id=?",
+            [WS, ME],
+        )?;
+        assert_eq!(
+            n::targets(&h.ch, &caller(WS, ME)),
+            Err(ApiError::Unauthenticated)
+        );
+        Err(ApiError::conflict("test rollback"))
+    });
+    assert!(matches!(result, Err(ApiError::Conflict(_))));
+    nothing_sent(&h);
+}
