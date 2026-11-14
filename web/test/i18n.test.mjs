@@ -135,7 +135,7 @@ const ALLOW = {
   "mail/list.tsx": [["等你", "需要"], "matched in the Hub's outcome label"],
   "bot-page.tsx": [["设置", "概览", "对外身份", "能力", "系统提示词", "定时与流程", "记忆", "自己写", "自动生成"], "the Bot page's tab ids and prompt modes (manage.tsx's); every one is shown through t()"],
   "lib/motion.ts": [["标准", "大", "开", "关"], "the Hub's stored fontSize and reduceMotion values"],
-  "manage.tsx": [["全部", "启用", "停用", "项目", "类型", "交付", "领域", "客户", "主题", "设置", "删除", "导出", "概览", "对外身份", "能力", "系统提示词", "定时与流程", "记忆", "对话", "待处理", "事项", "自动开始", "提醒我开始", "关闭", "不发", "标准", "大", "开", "关", "天", "年", "永久"], "stored setting values, tag categories and tab ids; every one is shown through t()"],
+  "manage.tsx": [["全部", "启用", "停用", "项目", "类型", "交付", "领域", "客户", "主题", "设置", "删除", "导出", "概览", "对外身份", "能力", "系统提示词", "定时与流程", "记忆", "对话", "待处理", "事项", "自动开始", "提醒我开始", "标准", "大", "开", "关", "天", "年", "永久"], "stored setting values, tag categories and tab ids; every one is shown through t()"],
   "out-groups.ts": [["自查", "自测", "调试", "记录", "日志", "截图", "输出", "运行", "测试", "构建", "中间", "结果", "产物", "文件", "版本", "临时", "草稿", "过程记录", "执行记录"], "words that mark an output name as a work record (names come from Bots)"],
   "outputs.tsx": [["预览", "源码", "逐张", "连续"], "view mode ids (labels via t()); data-gallery in browser tests"],
   "vault/new-item.tsx": [["私钥", "恢复码", "内容"], "matched in the Hub's field labels"],

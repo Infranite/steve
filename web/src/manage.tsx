@@ -28,7 +28,7 @@ import {
   setSetting, toast, emit, closedSt,
 } from "@/store"
 import { api, type RKindReview } from "@/api"
-import { go, Page, BotAvatar, ItemNo, KindTag, Row, Segmented, Meta, Empty, openSheet, closeSheet, ThemeSwitch, LanguageSwitch, useRoute, Panel, Card, Section, Lead, Notice, Pill, Tile, Chevron, Loading, LIFT, Blank, Strip, EASE } from "@/ui"
+import { go, Page, BotAvatar, ItemNo, KindTag, Row, Segmented, Meta, Empty, openSheet, closeSheet, ThemeSwitch, LanguageSwitch, useRoute, Panel, Card, Section, Lead, Pill, Tile, Chevron, Loading, LIFT, Blank, Strip, EASE } from "@/ui"
 import { PersonasSection } from "@/channels/persona"
 import { OwnerChip } from "@/people/owner-chip"
 import { Select } from "@/view-shared"
@@ -46,6 +46,8 @@ import { SetSelect, SetSwitch } from "@/settings-controls"
 import { TextField } from "@/components/ui/input"
 import { TextArea } from "@/components/affect/text-area-clean"
 import { AboutVersions } from "@/version"
+import { NotificationSettingsPane } from "@/notification-settings"
+import { currentHub } from "@/hub"
 import { flowApi, useLoad as useFlowLoad, errText } from "@/api/flow"
 import { when } from "@/auto/common"
 import { BotOverview, BotPrompt, RunsOn } from "@/bot-page"
@@ -345,7 +347,7 @@ const cats = (t: T): [string, string, any, string][] => [
   ["about", t("manage:settings.catAbout"), InfoIcon, t("manage:settings.catAboutSub")],
 ]
 const PH_KEYS: Record<string, "phGeneral" | "phItems" | "phTags" | "phModels" | "phNotify" | "phLook" | "phData"> = {
-  general: "phGeneral", items: "phItems", tags: "phTags", models: "phModels", notify: "phNotify", look: "phLook", data: "phData",
+  general: "phGeneral", items: "phItems", tags: "phTags", models: "phModels", look: "phLook", data: "phData",
 }
 const Sel = ({ v, o, on, testId, label }: { v: string; o: [string, string][]; on: (v: string) => void; testId?: string; label?: string }) => <SetSelect testId={testId} label={label} value={v} options={o} onChange={on} />
 export function SettingsView() {
@@ -429,7 +431,7 @@ function Pane({ id }: { id: string }) {
     <Section label={t("manage:items.sessions")}><Panel>
       <Row title={t("manage:items.handoff")} sub={t("manage:items.handoffSub")}><Sel label={t("manage:items.handoff")} testId="handoff" v={c.handoff ?? "0"} o={[["0", t("manage:items.handoffOff")], ["70", "70%"], ["80", "80%"], ["90", "90%"]]} on={(v) => setSetting({ handoff: v })} /></Row></Panel></Section>
   </div>
-  if (id === "notify") return <NotifyPane />
+  if (id === "notify") return st.workspace ? <NotificationSettingsPane key={`${currentHub()}:${st.workspace.id}`} workspace={st.workspace.id} /> : null
   if (id === "look") return <div className="flex flex-col gap-8">
     <Section label={t("manage:look.ui")}><Panel>
       <Row title={t("manage:look.theme")}><ThemeSwitch labels /></Row>
@@ -455,30 +457,6 @@ function Pane({ id }: { id: string }) {
   </div>
   if (id === "about") return <AboutVersions />
   return null
-}
-/* the settings-notifications pattern of affectUI: each kind of message is a switch, and its time unfolds under it
- * while it is on. The stored values stay the Hub's (settings.rs): a time, or 不发 / 关闭 for off. */
-const DIGEST_AT = ["08:30", "09:00"], QUIET = ["23:00 – 08:00", "22:00 – 09:00"]
-function NotifyPane() {
-  const t = useT()
-  const c = st.settings
-  const digest = c.digestAt !== "不发", quiet = c.quiet !== "关闭"
-  /* turning a switch back on brings back the time it had, not the first option */
-  const last = useRef({ digestAt: digest ? c.digestAt : DIGEST_AT[0], quiet: quiet ? c.quiet : QUIET[0] })
-  if (digest) last.current.digestAt = c.digestAt
-  if (quiet) last.current.quiet = c.quiet
-  /* nothing is pushed yet: the notice says so once, instead of a pill on every row */
-  return <div className="flex flex-col gap-6">
-    <Notice>{t("manage:notify.none")}</Notice>
-    <Panel data-notify-digest>
-      <Row title={t("manage:notify.digestDaily")} sub={t("manage:notify.digestSub")}><SetSwitch testId="digest" label={t("manage:notify.digestDaily")} checked={digest} onChange={(v) => setSetting({ digestAt: v ? last.current.digestAt : "不发" })} /></Row>
-      {digest && <Row className="anim-in" title={t("manage:notify.digestTime")}><Sel testId="digest-at" label={t("manage:notify.digestTime")} v={c.digestAt} o={DIGEST_AT.map((x): [string, string] => [x, x])} on={(v) => setSetting({ digestAt: v })} /></Row>}
-    </Panel>
-    <Panel data-notify-quiet>
-      <Row title={t("manage:notify.quietOn")} sub={t("manage:notify.quietSub")}><SetSwitch testId="quiet" label={t("manage:notify.quietOn")} checked={quiet} onChange={(v) => setSetting({ quiet: v ? last.current.quiet : "关闭" })} /></Row>
-      {quiet && <Row className="anim-in" title={t("manage:notify.quietHours")}><Sel testId="quiet-hours" label={t("manage:notify.quietHours")} v={c.quiet} o={QUIET.map((x): [string, string] => [x, x])} on={(v) => setSetting({ quiet: v })} /></Row>}
-    </Panel>
-  </div>
 }
 /* the settings-general pattern of affectUI: name and prefix as rows with their field on the right, the description as a
  * field of its own below; text saves when it loses focus, so there is no save bar */
