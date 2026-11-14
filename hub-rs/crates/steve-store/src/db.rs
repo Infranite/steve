@@ -148,6 +148,8 @@ pub const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/070.sql"),
     // 71: durable output intents and manual/learned channel preferences.
     include_str!("../migrations/071.sql"),
+    // 72: explicit personal notification policies and inbox, linked to E1 delivery receipts.
+    include_str!("../migrations/072.sql"),
 ];
 
 /// 027's item columns and their one-time backfill (applied by `run_pending` when `items.phase` is missing).
