@@ -93,6 +93,8 @@ pub struct ModeChoice {
     pub blind: bool,
     /// `_meta` sent on `session/new|load` for this mode (`mode_meta`).
     pub meta: Option<Value>,
+    /// Native tool execution has no harness approval modes. It must be explicitly selected.
+    pub native_execution: bool,
 }
 
 impl ModeChoice {
@@ -107,6 +109,16 @@ impl ModeChoice {
     /// The id to set given the modes the adapter offers (`None`: it reports none): `Ok(None)` sets
     /// nothing; an error when the mode cannot be had.
     pub fn resolve(&self, available: Option<&[String]>) -> Result<Option<String>, String> {
+        if self.native_execution {
+            return if self.requested == "full_access" {
+                Ok(None)
+            } else {
+                Err(format!(
+                    "unsupported: permission mode {} (the adapter executes native tools without approval modes)",
+                    self.requested
+                ))
+            };
+        }
         let non_empty = |s: &str| (!s.is_empty()).then(|| s.to_owned());
         match available {
             None => {

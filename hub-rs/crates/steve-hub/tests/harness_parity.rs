@@ -26,6 +26,8 @@ const LITERALS: &[&str] = &[
     "\"claude\"",
     "\"claude-cli\"",
     "\"codex-cli\"",
+    "\"pi\"",
+    "\"openma-pi-acp\"",
     "\"gemini\"",
     "\"gemini-cli\"",
     "\"github-copilot-cli\"",

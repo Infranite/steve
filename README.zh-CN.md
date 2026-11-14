@@ -26,7 +26,7 @@
 
 编码智能体干活很快，难的是同时开好几个之后怎么管：十几个终端标签来回切，上下文在会话之间丢掉，权限确认没人回，最后到底交付了什么、检查过没过，也没有记录。
 
-Steve 架在 Claude Code、Codex、Gemini CLI、GitHub Copilot CLI、OpenCode、Cursor 等 16 种主流 ACP 编码 CLI 之上，负责把这些记下来、管起来。它是跑在你自己机器上的一个 Rust 程序，数据存在 SQLite 里，密钥放在加密保险箱里。你只需要在一个对话里交代，每条消息由它判断怎么处理：直接回答、只读查代码和文档、新建一个要跟踪的事项，或者转给正在进行的事项。事项交给 Bot 去做，每个事项都在自己的 git worktree 里跑。
+Steve 架在 Claude Code、Codex、Gemini CLI、GitHub Copilot CLI、OpenCode、Cursor 等 17 种主流 ACP 编码 CLI 之上，负责把这些记下来、管起来。它是跑在你自己机器上的一个 Rust 程序，数据存在 SQLite 里，密钥放在加密保险箱里。你只需要在一个对话里交代，每条消息由它判断怎么处理：直接回答、只读查代码和文档、新建一个要跟踪的事项，或者转给正在进行的事项。事项交给 Bot 去做，每个事项都在自己的 git worktree 里跑。
 
 | | 😵 终端里直接跑智能体 | ✨ 用 Steve |
 |---|---|---|
@@ -132,7 +132,7 @@ Steve 把密钥放进命令的环境变量、标准输入或临时文件来执�
 
 ### 🤖 Bot
 
-一个 Bot 由 harness（内置 16 种 ACP 编码 CLI，或 `harness.json` 中声明的任意自定义 ACP 适配器）、模型和思考强度、职责、人设、规范、权限模式、验收方式和默认项目组成。用一句话描述，Steve 就能起草出来。`@Bot` 把活交给它。改派事项时旧会话会停掉，最后的进展交给新 Bot。一个 Bot 可以在多个工作区里担任不同职责，但只看得到当前工作区的数据。
+一个 Bot 由 harness（内置 17 种 ACP 编码 CLI，或 `harness.json` 中声明的任意自定义 ACP 适配器）、模型和思考强度、职责、人设、规范、权限模式、验收方式和默认项目组成。用一句话描述，Steve 就能起草出来。`@Bot` 把活交给它。改派事项时旧会话会停掉，最后的进展交给新 Bot。一个 Bot 可以在多个工作区里担任不同职责，但只看得到当前工作区的数据。
 
 侧栏的「能力」是这个工作空间的能力库：MCP 服务器（本地命令，或者 HTTP / SSE 地址，带环境变量或请求头）、技能（`SKILL.md` 做事说明，写到 harness 读技能的地方）和通过 A2A 协作的远程 Agent（Bot 拿到的是一个 Steve 工具），在这里定义一次，再到每个 Bot 的「能力」里选用。哪种 harness 都一样拿到它们：MCP 服务器经 ACP 和 Steve 自己的工具并列，技能写到 harness 适配器声明的位置。机密的值存在保险箱里，只在 harness 打开时交给会话所在的 Node。Steve 自己也是一个 MCP 服务器：Claude Desktop、Cursor 或别的 Agent 可以用访问令牌连上来，查事项、交代工作、查知识库；别的 Agent 也可以照 Steve 的 Agent Card 通过 A2A 把任务交给它。见 [能力](docs/deployment.md#capabilities-mcp-servers-skills-and-remote-agents)。
 
@@ -273,7 +273,7 @@ flowchart LR
 |---|---|
 | **构建** | Git、稳定版 Rust/Cargo、Node.js 24 LTS 和 npm |
 | **运行** | Apple Silicon macOS 14+，或 glibc 2.35+ 的 Linux x86_64（Ubuntu 22.04+、Debian 12+）。不支持 Windows。 |
-| **智能体**（可选） | 在执行节点的机器上已安装并完成认证的任意内置 ACP 编码 CLI（共 16 种）或 `harness.json` 中的自定义适配器 |
+| **智能体**（可选） | 在执行节点的机器上已安装并完成认证的任意内置 ACP 编码 CLI（共 17 种）或 `harness.json` 中的自定义适配器 |
 
 ### 1. 构建
 
@@ -287,7 +287,7 @@ cargo build --locked --manifest-path hub-rs/Cargo.toml -p steve-hub
 
 ### 2. 安装适配器
 
-Steve 通过 ACP 协议调用编码 CLI。16 个内置 harness 中，12 个（`claude-code`、`codex`、`gemini`、`github-copilot-cli`、`opencode`、`qwen-code`、`goose`、`kimi-code`、`grok-build`、`kilo`、`factory-droid`、`codebuddy-code`）可由 npm 安装到数据目录下的 `adapters` 并由 Node 自动保鲜；其余 4 个（`cursor`、`kiro`、`mistral-vibe`、`qoder`）通过各自安装器装好后直接从 `PATH` 发现。`steve setup` 会默认勾选本机 `PATH` 上已检测到的 CLI；开发用的 Hub 也可按需安装：
+Steve 通过 ACP 协议调用编码 CLI。17 个内置 harness 中，13 个（`claude-code`、`codex`、`pi`、`gemini`、`github-copilot-cli`、`opencode`、`qwen-code`、`goose`、`kimi-code`、`grok-build`、`kilo`、`factory-droid`、`codebuddy-code`）可由 npm 安装到数据目录下的 `adapters` 并由 Node 自动保鲜；其余 4 个（`cursor`、`kiro`、`mistral-vibe`、`qoder`）通过各自安装器装好后直接从 `PATH` 发现。`steve setup` 会默认勾选本机 `PATH` 上已检测到的 CLI；开发用的 Hub 也可按需安装：
 
 ```sh
 STEVE_HOME="$HOME/.steve-dev" hub-rs/target/debug/steve-hub --adapters install claude-code codex

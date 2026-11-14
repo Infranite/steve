@@ -79,6 +79,7 @@ impl ModeMap {
             narrow,
             blind,
             meta,
+            native_execution: false,
         }
     }
 
@@ -325,6 +326,9 @@ pub struct AdapterProperties {
     /// Send `session/set_mode` even when `session/new|load` reports no `availableModes`, and offer
     /// modes with non-empty ids (or `mode_meta` entries) without an `availableModes` list.
     pub blind_set_mode: bool,
+    /// The adapter runs native tools without approval modes. Only an explicitly selected
+    /// FullAccess is supported; its model/thinking options are never permission modes.
+    pub native_execution: bool,
     /// Per-Steve-mode (`plan`, `ask`, `accept_edits`, `auto`, `full_access`) `_meta` sent on
     /// `session/new|load` (for adapters whose higher autonomy modes are session `_meta` flags).
     pub mode_meta: BTreeMap<String, Value>,
@@ -396,6 +400,7 @@ impl Default for AdapterProperties {
             state: None,
             modes: ModeMap::default(),
             blind_set_mode: false,
+            native_execution: false,
             mode_meta: BTreeMap::new(),
             executable_env: None,
             session_meta: SessionMeta::None,
@@ -419,12 +424,13 @@ impl Default for AdapterProperties {
 }
 
 /// The keys of [`PropertiesPatch`] (what a manifest's `properties` may hold).
-pub const PROPERTY_KEYS: [&str; 22] = [
+pub const PROPERTY_KEYS: [&str; 23] = [
     "self_read_only",
     "nested_sandbox",
     "state",
     "modes",
     "blind_set_mode",
+    "native_execution",
     "mode_meta",
     "executable_env",
     "session_meta",
@@ -458,6 +464,8 @@ pub struct PropertiesPatch {
     pub modes: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blind_set_mode: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_execution: Option<bool>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub mode_meta: BTreeMap<String, Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -522,6 +530,9 @@ impl PropertiesPatch {
         }
         if let Some(v) = self.blind_set_mode {
             p.blind_set_mode = v;
+        }
+        if let Some(v) = self.native_execution {
+            p.native_execution = v;
         }
         for (k, v) in &self.mode_meta {
             if v.is_null() {
@@ -719,6 +730,10 @@ fn default_gemini_adapter(npm_root: &Path) -> PathBuf {
     npm_entry("@google/gemini-cli", "bundle/gemini.js", npm_root)
 }
 
+fn default_pi_adapter(npm_root: &Path) -> PathBuf {
+    npm_entry("@openma/pi-acp", "dist/bin.js", npm_root)
+}
+
 fn default_copilot_adapter(npm_root: &Path) -> PathBuf {
     npm_entry("@github/copilot", "npm-loader.js", npm_root)
 }
@@ -875,6 +890,32 @@ const BUILTINS: &[Builtin] = &[
             resume_cli: Some("codex resume {id}".into()),
             fork_cli: Some("codex fork {id}".into()),
             local_transcript: true,
+            ..Default::default()
+        },
+    },
+    Builtin {
+        id: "pi",
+        name: "Pi",
+        // This SDK bridge forwards ACP MCP servers into Pi's native MCP extension.
+        // The Registry's pi-acp bridge currently accepts but does not connect them.
+        install_hint: "@openma/pi-acp",
+        npm_package: Some("@openma/pi-acp"),
+        cli_bin: "openma-pi-acp",
+        detect_bins: &["pi"],
+        args: &[],
+        env: &[("PI_ACP_QUIET_STARTUP", "1")],
+        command_var: "STEVE_ADAPTER_PI",
+        default_command: default_pi_adapter,
+        properties: || AdapterProperties {
+            native_execution: true,
+            state: Some(StateDir {
+                env: "PI_CODING_AGENT_DIR".into(),
+                default: ".pi/agent".into(),
+                import: strings(&["settings.json", "models.json"]),
+                ..Default::default()
+            }),
+            skills: Some("skills".into()),
+            resume_cli: Some("pi --resume {id}".into()),
             ..Default::default()
         },
     },
@@ -1751,12 +1792,16 @@ pub async fn probe(cfg: &crate::AcpConfig, id: &str, cwd: &Path, timeout: Durati
     match conn.request("session/new", params, Some(timeout)).await {
         Ok(r) => {
             let props = cfg.adapter_properties(id);
-            p.session = Some(SessionOffer::from_session_with(
+            let mut offer = SessionOffer::from_session_with(
                 &r,
                 &props.modes,
                 props.blind_set_mode,
                 Some(&props.mode_meta),
-            ));
+            );
+            if props.native_execution {
+                offer.modes = vec![PermissionMode::FullAccess];
+            }
+            p.session = Some(offer);
         }
         Err(e) => p.session_error = Some(e.message),
     }
@@ -1864,9 +1909,12 @@ impl crate::AcpConfig {
     /// What `session/set_mode` asks of `id`'s adapter for `mode` ([`ModeMap::choice_with`]).
     pub fn mode_choice(&self, id: &str, mode: PermissionMode) -> crate::session::ModeChoice {
         let props = self.adapter_properties(id);
-        props
-            .modes
-            .choice_with(mode, props.blind_set_mode, Some(&props.mode_meta))
+        let mut choice =
+            props
+                .modes
+                .choice_with(mode, props.blind_set_mode, Some(&props.mode_meta));
+        choice.native_execution = props.native_execution;
+        choice
     }
 
     pub(crate) fn launch_args(&self, id: &str) -> Vec<OsString> {
@@ -2143,12 +2191,12 @@ mod tests {
     }
 
     #[test]
-    fn all_sixteen_builtins_have_valid_specs_and_mode_resolutions() {
+    fn all_builtins_have_valid_specs_and_mode_resolutions() {
         let ids: Vec<&str> = builtin_ids().collect();
-        assert_eq!(ids.len(), 16);
+        assert_eq!(ids.len(), 17);
         assert_eq!(ids[0], "claude-code");
         assert_eq!(ids[1], "codex");
-        assert_eq!(builtin_packages().count(), 12);
+        assert_eq!(builtin_packages().count(), 13);
         let dir = tempfile::tempdir().unwrap();
         let mut c = cfg(dir.path());
         for id in &ids {
@@ -2198,6 +2246,40 @@ mod tests {
             c.session_meta_with_mode("grok-build", false, Some(PermissionMode::FullAccess)),
             Some(json!({"yoloMode": true}))
         );
+    }
+
+    #[test]
+    fn native_tool_execution_does_not_claim_approval_or_thinking_modes_as_permissions() {
+        let dir = tempfile::tempdir().unwrap();
+        let c = cfg(dir.path());
+        let p = c.adapter_properties("pi");
+        assert!(p.native_execution && p.nested_sandbox);
+        assert_eq!(p.state.as_ref().unwrap().env, "PI_CODING_AGENT_DIR");
+        assert_eq!(p.skills.as_deref(), Some("skills"));
+        let thinking = vec!["off".to_string(), "high".to_string()];
+        for available in [None, Some(thinking.as_slice())] {
+            assert_eq!(
+                c.mode_choice("pi", PermissionMode::FullAccess)
+                    .resolve(available),
+                Ok(None)
+            );
+            for mode in [
+                PermissionMode::Plan,
+                PermissionMode::Ask,
+                PermissionMode::AcceptEdits,
+                PermissionMode::Auto,
+            ] {
+                assert!(
+                    c.mode_choice("pi", mode).resolve(available).is_err(),
+                    "{mode:?}"
+                );
+            }
+        }
+        let mut patch = PropertiesPatch::default();
+        patch.native_execution = Some(true);
+        let mut ordinary = AdapterProperties::default();
+        patch.apply(&mut ordinary);
+        assert!(ordinary.native_execution);
     }
 
     #[tokio::test]

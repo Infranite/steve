@@ -136,7 +136,7 @@ Each task has a private, persistent `<home>/workspaces/<item>/outputs` directory
 
 ### 🤖 Bots
 
-A bot is a harness (16 built-in ACP coding CLIs, plus any custom ACP adapter in `harness.json`) plus a model and thinking effort, a role, a persona, rules, a permission mode, an acceptance mode and a default project. Describe one in a sentence and Steve drafts it. `@Bot` hands work to that bot. Reassigning an item stops the old session and passes on the last progress. A bot can serve several workspaces with a different duty in each, and only sees the data of the one it is working in.
+A bot is a harness (17 built-in ACP coding CLIs, plus any custom ACP adapter in `harness.json`) plus a model and thinking effort, a role, a persona, rules, a permission mode, an acceptance mode and a default project. Describe one in a sentence and Steve drafts it. `@Bot` hands work to that bot. Reassigning an item stops the old session and passes on the last progress. A bot can serve several workspaces with a different duty in each, and only sees the data of the one it is working in.
 
 **Capabilities** in the sidebar is the workspace's library of what bots can use, each defined once and chosen per bot on the bot's own **Capabilities** tab: MCP servers (a local command, or an HTTP or SSE endpoint, with environment variables or headers), skills (`SKILL.md` instructions written where the harness reads skills) and remote agents spoken to over A2A, each of which a bot gets as one Steve tool. Every harness reaches enabled MCP servers through the Hub's single Steve tool endpoint, never a separate plugin server per session. Sessions list eight core tools plus their Bot's pins, discover other tools with `steve_tools_search`, and run them with schema-checked `steve_tool_call`; a short catalog in the brief describes the available areas. In **Bot → Capabilities → Tool loading**, search known tools and assigned providers, manage up to 32 pins and see 30-day search/call counts. Pins change loading, not permissions. MCP connections are shared by the Hub, which resolves their vault credentials only when connecting; local commands run on the Hub host through the Node sandbox API. Skills still go where the harness adapter declares it reads them. Steve itself is an MCP server too: Claude Desktop, Cursor or another agent can connect to it with an access token and find items, hand Steve work and search your knowledge base, and other agents can hand Steve tasks over A2A by its Agent Card. See [Capabilities](docs/deployment.md#capabilities-mcp-servers-skills-and-remote-agents).
 
@@ -315,7 +315,7 @@ Homebrew verifies and installs the published native binaries; no Python runtime,
 | **Homebrew install** | Homebrew; no Python runtime dependency. Apple Silicon macOS, or Linux x86_64 with glibc 2.35+. Homebrew's own OS support policy also applies. |
 | **Source build** | Git, stable Rust/Cargo, Node.js 24 LTS with npm |
 | **Run** | Apple Silicon macOS 14+, or Linux x86_64 with glibc 2.35+ (Ubuntu 22.04+, Debian 12+). Windows isn't supported. |
-| **Agent execution** | Any of the 16 built-in ACP coding CLIs (or a custom ACP adapter in `harness.json`) and authentication on the executing Node |
+| **Agent execution** | Any of the 17 built-in ACP coding CLIs (or a custom ACP adapter in `harness.json`) and authentication on the executing Node |
 
 ### 1. Build from source *(development)*
 
@@ -329,7 +329,7 @@ cargo build --locked --manifest-path hub-rs/Cargo.toml -p steve-hub
 
 ### 2. Install the adapters
 
-Steve talks to harnesses over ACP. Twelve of the 16 built-in harnesses (`claude-code`, `codex`, `gemini`, `github-copilot-cli`, `opencode`, `qwen-code`, `goose`, `kimi-code`, `grok-build`, `kilo`, `factory-droid`, `codebuddy-code`) can be installed and kept up to date with npm under the home's `adapters` directory; four (`cursor`, `kiro`, `mistral-vibe`, `qoder`) are discovered on `PATH` from their own installers. `steve setup` offers the npm-managed ones and pre-ticks those whose CLI is already on `PATH`; for a development Hub, install the ones you use the same way:
+Steve talks to harnesses over ACP. Thirteen of the 17 built-in harnesses (`claude-code`, `codex`, `pi`, `gemini`, `github-copilot-cli`, `opencode`, `qwen-code`, `goose`, `kimi-code`, `grok-build`, `kilo`, `factory-droid`, `codebuddy-code`) can be installed and kept up to date with npm under the home's `adapters` directory; four (`cursor`, `kiro`, `mistral-vibe`, `qoder`) are discovered on `PATH` from their own installers. `steve setup` offers the npm-managed ones and pre-ticks those whose CLI is already on `PATH`; for a development Hub, install the ones you use the same way:
 
 ```sh
 STEVE_HOME="$HOME/.steve-dev" hub-rs/target/debug/steve-hub --adapters install claude-code codex

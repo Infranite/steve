@@ -58,9 +58,12 @@ impl Harness {
         .filter(|s| !s.is_empty())
         .map(str::to_owned)
         .collect();
-        let offered = p
-            .modes
-            .offered_with(Some(&ids), p.blind_set_mode, Some(&p.mode_meta));
+        let offered = if p.native_execution {
+            vec![PermissionMode::FullAccess]
+        } else {
+            p.modes
+                .offered_with(Some(&ids), p.blind_set_mode, Some(&p.mode_meta))
+        };
         Harness {
             id: id.to_string(),
             name: spec.name.clone(),

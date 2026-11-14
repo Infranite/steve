@@ -378,7 +378,14 @@ async fn model_settings() {
     assert_eq!(h_of(&v, "claude-code")["efforts"][4]["key"], "max");
     assert_eq!(h_of(&v, "codex")["id"], "codex");
     assert_eq!(h_of(&v, "gemini")["id"], "gemini");
-    assert_eq!(v["harnesses"].as_array().unwrap().len(), 16);
+    assert_eq!(v["harnesses"].as_array().unwrap().len(), 17);
+    let native = v["harnesses"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|h| h["id"] == "pi")
+        .unwrap();
+    assert_eq!(native["modes"], json!(["full_access"]));
     let (code, v) = c
         .call(
             "PATCH",
