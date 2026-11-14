@@ -906,8 +906,8 @@ impl WireMessage {
     }
 }
 
-/// One attachment as the Hub stores it: `{type: image|file, key, name?, size?, mime?}`; audio and
-/// video are files (§6).
+/// A checked attachment reference. Preserve supported rich types and metadata; never store
+/// inline media or document bodies here.
 fn attachment(v: &Value) -> Option<Value> {
     let kind = match v.get("type").and_then(Value::as_str)? {
         "image" => "image",
@@ -1090,7 +1090,7 @@ mod tests {
         let m = WireMessage::parse(&full, now, 100).expect("full");
         assert_eq!(
             m.attachments,
-            vec![json!({"type": "file", "key": "k", "size": 3})]
+            vec![json!({"type": "video", "key": "k", "size": 3})]
         );
     }
 
