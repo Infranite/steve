@@ -1,4 +1,4 @@
-//! Tool search (migration 67): what a Bot keeps loaded in every session (`bot_tool_pins`) and how often
+//! Tool search (migration 69): what a Bot keeps loaded in every session (`bot_tool_pins`) and how often
 //! each tool came up in its searches and was called (`tool_usage`). Steve's core tools are always
 //! loaded; the rest are found with `steve_tools_search` and run with `steve_tool_call`.
 

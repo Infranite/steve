@@ -1,4 +1,4 @@
-//! Tool search, a Bot's side (`steve_store::caps::tools`, migration 67). Every session lists Steve's
+//! Tool search, a Bot's side (`steve_store::caps::tools`, migration 69). Every session lists Steve's
 //! core tools ([`CORE`]) and the ones its Bot pinned; every other tool it can use is found with
 //! `steve_tools_search` and run with `steve_tool_call` (the Hub's tool registry,
 //! `steve_hub::wire::tool_registry`). A pin is a built-in tool by name (`tool`), every tool of a library
