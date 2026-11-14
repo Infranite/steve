@@ -361,7 +361,13 @@ pub fn contact_profile(
         .optional()?;
     let email = match mail {
         Some(src) => FieldState::known(!matches!(src.as_str(), "sync" | "chat" | "identify")),
-        None => why("email"),
+        None => match repo::values(c, ws, &p.id)?
+            .into_iter()
+            .find(|v| v.key == "email" && v.status == "confirmed")
+        {
+            Some(v) => FieldState::known(v.source == "me"),
+            None => why("email"),
+        },
     };
     Ok(ContactProfile {
         checked,
@@ -488,4 +494,131 @@ pub fn all_due(tx: &Tx, ws: &str, now: i64) -> ApiResult<usize> {
         "UPDATE account_profiles SET next_check = ?2, attempts = 0 WHERE workspace_id = ?1 AND gaps <> '{}'",
         params![ws, now],
     )?)
+}
+
+/// Fill only a missing email from the Hub's own user record. Connected account profiles and
+/// jobs are already synchronized by their modules; machine-local git/locale are not Hub data.
+/// Any existing value (including a rejected/stale one) suppresses automatic re-creation.
+pub fn supplement_me(tx: &Tx, ws: &str, user: &str, party: &str) -> ApiResult<()> {
+    if repo::values(tx, ws, party)?
+        .iter()
+        .any(|a| a.key == "email")
+    {
+        return Ok(());
+    }
+    let removed: bool = tx.query_row(
+        "SELECT EXISTS (SELECT 1 FROM revisions WHERE workspace_id = ?1 AND object_type = 'party' AND object_id = ?2
+         AND json_valid(patch) AND json_extract(patch, '$.before.attr.key') = 'email'
+         AND json_type(patch, '$.after.attr') = 'null')", params![ws, party], |r| r.get(0),
+    )?;
+    if removed {
+        return Ok(());
+    }
+    let email: Option<String> = tx
+        .query_row("SELECT email FROM users WHERE id = ?", [user], |r| r.get(0))
+        .optional()?
+        .flatten();
+    if let Some(email) = email.filter(|e| !e.trim().is_empty() && e.len() <= 500) {
+        let v = repo::value_insert(
+            tx,
+            ws,
+            &repo::NewValue {
+                party_id: party.into(),
+                key: "email".into(),
+                label: "邮箱".into(),
+                value: email.trim().into(),
+                source: "profile".into(),
+                source_label: "Hub 用户资料".into(),
+                source_ref: Some(user.into()),
+                level: steve_store::base::Level::Conclusion,
+                status: "confirmed".into(),
+                decision_id: None,
+            },
+        )?;
+        if let Some(p) = repo::get(tx, party)? {
+            super::service::revise(
+                tx,
+                &p,
+                &repo::PartyPatch::default(),
+                json!({"attr": null}),
+                json!({"source": "sync", "attr": {"id": v.id, "key": v.key, "source": "profile"}}),
+                user,
+            )?;
+        }
+        super::service::event(tx, ws, party);
+    }
+    Ok(())
+}
+
+/// A confirmed, usable way to address this user. `call` is exclusively internal;
+/// `call_external` is exclusively for mentioning them to other people. Scoped overrides
+/// are JSON `call_ext_scope` facts: {"kind":"persona"|"space", "id":"…", "name":"…"}.
+/// A conversation override wins over a persona override. Private/internal nicknames never
+/// become the external fallback; the contact name does.
+pub fn address(
+    c: &Connection,
+    ws: &str,
+    user: &str,
+    external: bool,
+    persona: Option<&str>,
+    space: Option<&str>,
+) -> ApiResult<Option<String>> {
+    let Some(me) = repo::me_of(c, ws, user)? else {
+        return Ok(None);
+    };
+    let mut values = repo::values(c, ws, &me.id)?;
+    values.sort_by_key(|a| a.updated);
+    let usable = |a: &&repo::AttrValue| {
+        a.status == "confirmed"
+            && a.level != steve_store::base::Level::Never
+            && (!external || a.level != steve_store::base::Level::Reasoning)
+            && !a.value.trim().is_empty()
+    };
+    if external {
+        for (kind, id) in [("space", space), ("persona", persona)] {
+            if let Some(id) = id {
+                for a in values
+                    .iter()
+                    .rev()
+                    .filter(usable)
+                    .filter(|a| a.key == "call_ext_scope")
+                {
+                    if let Ok(v) = serde_json::from_str::<Value>(&a.value) {
+                        if v["kind"] == kind && v["id"] == id {
+                            if let Some(name) = v["name"].as_str().filter(|n| !n.trim().is_empty())
+                            {
+                                return Ok(Some(name.trim().into()));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(Some(
+        values
+            .iter()
+            .rev()
+            .filter(usable)
+            .find(|a| a.key == if external { "call_external" } else { "call" })
+            .map(|a| a.value.clone())
+            .unwrap_or(me.name),
+    ))
+}
+
+/// Scope facts have a small explicit schema; arbitrary prose is never interpreted as a scope.
+pub fn valid_address_fact(key: &str, value: &str) -> bool {
+    if key != "call_ext_scope" {
+        return true;
+    }
+    let Ok(v) = serde_json::from_str::<Value>(value) else {
+        return false;
+    };
+    matches!(v["kind"].as_str(), Some("persona" | "space"))
+        && v["id"]
+            .as_str()
+            .is_some_and(|s| !s.trim().is_empty() && s.len() <= 120)
+        && v["name"]
+            .as_str()
+            .is_some_and(|s| !s.trim().is_empty() && s.chars().count() <= 80)
 }

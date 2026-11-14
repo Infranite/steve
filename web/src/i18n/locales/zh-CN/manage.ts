@@ -49,7 +49,7 @@ export default {
     writingRule: "用用户的语气写；先给提纲再成文。",
     knowledgeName: "知识管家",
     knowledgeRole: "定期整理记忆：合并重复、处理矛盾、标出过时、补全对象和来源",
-    knowledgeRule: "以用户最新的明确纠正为准；没把握的交给用户决定。不删除记忆，不改写用户的原话；每项改动写一句理由。",
+    knowledgeRule: "以用户最新的明确纠正为准；没把握的交给用户决定。不删除记忆，不改写用户的原话；每项改动写一句理由。 steve_memory_list 返回的 profile 含原始备注。角色、项目、习惯等软事实仅从有依据的备注/记忆提炼，用 steve_contacts_remember 留为待确认候选；不覆盖人工事实、不重复已有或否决候选、不把内部称呼复制为对外称呼。",
   },
   newBot: {
     blankName: "新 Bot",

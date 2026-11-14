@@ -165,32 +165,98 @@ fn role_of(intro: &str) -> String {
     s.strip_suffix('。').unwrap_or(s).to_string()
 }
 
-/// How the persona refers to the owner (`<主人称呼>`): the workspace owner's confirmed “偏好的称呼”
-/// on their own contact card, else their user name.
+/// The external owner name, never the private nickname used when talking to the owner.
 pub fn owner_name(c: &Connection, ws: &str) -> ChannelResult<String> {
-    let name: Option<String> = c
+    owner_name_in(c, ws, None, None)
+}
+
+/// External acknowledgments and handoffs use the same effective persona/space scope as drafts.
+pub fn owner_name_for_space(c: &Connection, ws: &str, space: &str) -> ChannelResult<String> {
+    let persona = crate::spaces::get(c, space)?
+        .filter(|s| s.workspace_id == ws)
+        .map(|s| bindings::effective(c, &s))
+        .transpose()?
+        .flatten();
+    owner_name_in(
+        c,
+        ws,
+        persona.as_ref().map(|e| e.persona.id.as_str()),
+        Some(space),
+    )
+}
+
+pub fn owner_name_in(
+    c: &Connection,
+    ws: &str,
+    persona: Option<&str>,
+    space: Option<&str>,
+) -> ChannelResult<String> {
+    owner_address(c, ws, true, persona, space)
+}
+
+/// Only for a conversation already verified to contain the owner alone.
+pub fn owner_internal_name(c: &Connection, ws: &str, connection: &str) -> ChannelResult<String> {
+    let user = crate::compose::owner_user(c, ws, connection)?;
+    Ok(
+        steve_modules::contacts::profile::address(c, ws, &user, false, None, None)?
+            .unwrap_or_else(|| "你".into()),
+    )
+}
+
+fn owner_address(
+    c: &Connection,
+    ws: &str,
+    external: bool,
+    persona: Option<&str>,
+    space: Option<&str>,
+) -> ChannelResult<String> {
+    let user: Option<(String, String)> = c
         .query_row(
-            "SELECT coalesce(
-                (SELECT av.value FROM parties p JOIN attr_values av ON av.party_id = p.id AND av.workspace_id = p.workspace_id
-                   WHERE p.workspace_id = ?1 AND p.user_id = u.id AND av.key = 'call' AND av.status = 'confirmed' AND av.value <> ''
-                   ORDER BY av.updated DESC LIMIT 1),
-                u.name)
-             FROM workspace_members m JOIN users u ON u.id = m.user_id
-             WHERE m.workspace_id = ?1 ORDER BY (m.role = 'owner') DESC, m.created, u.id LIMIT 1",
+            "SELECT u.id, u.name FROM workspace_members m JOIN users u ON u.id = m.user_id
+         WHERE m.workspace_id = ?1 ORDER BY (m.role = 'owner') DESC, m.created, u.id LIMIT 1",
             [ws],
-            |r| r.get(0),
+            |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .optional()?;
-    Ok(name.unwrap_or_else(|| "你".into()))
+    match user {
+        Some((id, name)) => Ok(steve_modules::contacts::profile::address(
+            c, ws, &id, external, persona, space,
+        )?
+        .unwrap_or(name)),
+        None => Ok("你".into()),
+    }
+}
+
+/// Read old, untouched default seeds without the name they captured at installation time.
+/// This is a read-time upgrade, so drafts are safe even before `ensure_default` next runs; stored
+/// text and user revisions are not rewritten. An intro edited by the user, even to the old seed's
+/// exact shape, is theirs and must not be replaced.
+fn current_seed(c: &Connection, mut p: PersonaRow) -> ChannelResult<PersonaRow> {
+    if p.is_default && seeded::is_legacy_persona_intro(&p.intro) {
+        let edited: bool = c.query_row(
+            "SELECT EXISTS (SELECT 1 FROM revisions WHERE workspace_id = ?1
+               AND object_type = 'persona' AND object_id = ?2
+               AND json_type(patch, '$.after.intro') = 'text'
+               AND json_extract(patch, '$.before.intro') IS NOT json_extract(patch, '$.after.intro'))",
+            params![p.workspace_id, p.id],
+            |r| r.get(0),
+        )?;
+        if !edited {
+            p.intro = seeded::persona_intro();
+        }
+    }
+    Ok(p)
 }
 
 pub fn get(c: &Connection, id: &str) -> ChannelResult<Option<PersonaRow>> {
-    Ok(c.query_row(
+    c.query_row(
         &format!("SELECT {COLS} FROM personas WHERE id = ?"),
         [id],
         row,
     )
-    .optional()?)
+    .optional()?
+    .map(|p| current_seed(c, p))
+    .transpose()
 }
 
 /// `own_persona(ws, id)`: a live persona of this workspace, else `404 没有这个对外身份`.
@@ -208,19 +274,21 @@ pub fn list(c: &Connection, ws: &str) -> ChannelResult<Vec<PersonaRow>> {
     let rows = st
         .query_map([ws], row)?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    Ok(rows)
+    rows.into_iter().map(|p| current_seed(c, p)).collect()
 }
 
 /// The workspace's default persona, if seeded.
 pub fn default_persona(c: &Connection, ws: &str) -> ChannelResult<Option<PersonaRow>> {
-    Ok(c.query_row(
+    c.query_row(
         &format!(
             "SELECT {COLS} FROM personas WHERE workspace_id = ? AND is_default = 1 AND deleted = 0 ORDER BY created LIMIT 1"
         ),
         [ws],
         row,
     )
-    .optional()?)
+    .optional()?
+    .map(|p| current_seed(c, p))
+    .transpose()
 }
 
 /// The Bot behind the default persona: `steve` if it is in this workspace, else the main Bot, else
@@ -244,7 +312,6 @@ pub fn ensure_default(tx: &Tx, ws: &str, now: i64) -> ChannelResult<Option<Perso
     let Some((bot, soul)) = seed_bot(tx, ws)? else {
         return Ok(None);
     };
-    let owner = owner_name(tx, ws)?;
     let id = uid("per");
     tx.execute(
         "INSERT INTO personas (id, workspace_id, name, avatar, bot_id, intro, soul, reveal, signature, is_default, created, updated)
@@ -255,7 +322,7 @@ pub fn ensure_default(tx: &Tx, ws: &str, now: i64) -> ChannelResult<Option<Perso
             DEFAULT_NAME,
             json!({"seed": DEFAULT_NAME}).to_string(),
             bot,
-            seeded::persona_intro(&owner),
+            seeded::persona_intro(),
             soul,
             serde_json::to_string(&Reveal::ALL)?,
             now,
@@ -629,7 +696,7 @@ pub(crate) fn sent(v: Option<String>, field: &str) -> Option<String> {
 }
 
 pub fn out(c: &Connection, viewer: &Viewer, p: &PersonaRow) -> ChannelResult<PersonaOut> {
-    let owner = owner_name(c, &p.workspace_id)?;
+    let owner = owner_name_in(c, &p.workspace_id, Some(&p.id), None)?;
     Ok(PersonaOut {
         id: p.id.clone(),
         name: p.name.clone(),

@@ -53,7 +53,7 @@ export default {
     writingRule: "Write in the user's voice. Outline first, then write it out.",
     knowledgeName: "Knowledge steward",
     knowledgeRole: "Tidies the memories on a schedule: merges duplicates, settles contradictions, marks what is outdated, fills in subjects and sources",
-    knowledgeRule: "The user's newest explicit correction wins; leave what you are unsure of to the user. Never delete memories or rewrite the user's own words; give each change one sentence of reason.",
+    knowledgeRule: "The user's newest explicit correction wins; leave what you are unsure of to the user. Never delete memories or rewrite the user's own words; give each change one sentence of reason. The profile from steve_memory_list includes original notes. Propose supported role, project and habit facts with steve_contacts_remember as candidates only. Do not overwrite manual facts, repeat existing or rejected candidates, or copy an internal nickname into an external name.",
   },
   newBot: {
     blankName: "New Bot",

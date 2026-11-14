@@ -45,6 +45,16 @@ export default {
     org: "Organization",
     note: "Note",
   },
+  me: {
+    otherFacts: "Other facts",
+    accountProfile: "Account profile",
+    address: "Names", addressHint: "Use separate names when talking to you and introducing you to others. Empty fields use your name.",
+    originalNote: "Original notes", noteHint: "Your words are preserved. The knowledge steward can propose facts from notes and conversations; they remain inferred until confirmed, without rewriting your profile.",
+    overrides: "Optional persona / conversation names", scope: "Scope", persona: "Persona", space: "Conversation", scopeId: "Choose a persona or conversation", noScopes: "No personas or conversations available. Connect an account to set a name for one here.", externalName: "Name used here",
+    sourcesHint: "Accounts and organizations come from connected modules. Manually entered or confirmed facts are never overwritten automatically. Without a Node source, git settings, language and timezone are not guessed. Soft facts are steward candidates awaiting confirmation.",
+    groups: { identity: "Identity", work: "Work", contact: "Contact", preferences: "Preferences" },
+    fields: { call: "Steve calls you", call_external: "Introduce you as", role: "Role", project: "Main projects", repository: "Repositories", tools: "Tools", email: "Email", phone: "Phone", website: "Website", lang: "Language", tz: "Timezone", communication: "Communication" },
+  },
   contact: {
     notFound: "Contact not found",
     loadFailed: "Couldn't load the contact",

@@ -1208,6 +1208,34 @@ async fn an_expired_approval_discards_the_draft() {
 async fn your_private_chat_with_the_bot_is_owner_only() {
     let h = setup(true).await;
     let t = h.thread.clone().unwrap();
+    h.env
+        .store()
+        .transaction(|tx| -> ApiResult<()> {
+            let me = steve_modules::contacts::service::ensure_base(tx, &caller(WS, ME))?;
+            for (key, value) in [
+                ("call", "Private nickname"),
+                ("call_external", "External name"),
+            ] {
+                steve_modules::contacts::repo::value_insert(
+                    tx,
+                    WS,
+                    &steve_modules::contacts::repo::NewValue {
+                        party_id: me.id.clone(),
+                        key: key.into(),
+                        label: key.into(),
+                        value: value.into(),
+                        source: "me".into(),
+                        source_label: "Manual".into(),
+                        source_ref: None,
+                        level: steve_store::base::Level::Public,
+                        status: "confirmed".into(),
+                        decision_id: None,
+                    },
+                )?;
+            }
+            Ok(())
+        })
+        .unwrap();
     h.fake
         .space("D_ME", "", SpaceKind::Dm, false, &[("upx", "我")]);
     push(
@@ -1219,6 +1247,20 @@ async fn your_private_chat_with_the_bot_is_owner_only() {
     let turns = t.turns.lock().unwrap().clone();
     assert_eq!(turns.len(), 1, "{turns:?}");
     assert!(turns[0].1.owner_only && turns[0].1.research);
+    let context =
+        h.ch.conv_research_context(WS, &turns[0].1.space, &turns[0].0);
+    assert!(context.contains("Private nickname"), "{context}");
+    assert!(!context.contains("External name"), "{context}");
+    h.env
+        .store()
+        .reader(|c| {
+            assert_eq!(
+                steve_channels::personas::owner_name(c, WS)?,
+                "External name"
+            );
+            Ok::<_, steve_modules::ApiError>(())
+        })
+        .unwrap();
     // a one-to-one chat whose member count the provider never gave is still complete: one person
     exec(
         &h,

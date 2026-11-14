@@ -462,6 +462,7 @@ fn attr_op(
         .or_else(|| def.as_ref().map(|d| d.label.clone()))
         .unwrap_or_else(|| key.to_string());
     let fits = KEY.is_match(key)
+        && super::profile::valid_address_fact(key, value)
         && len_ok(value, 1, 500)
         && len_ok(&label, 1, 20)
         && def.as_ref().is_none_or(|d| {
@@ -488,8 +489,11 @@ fn attr_op(
     d.ops.push(op);
     d.line(
         label,
-        show(current.map(|v| v.value).as_deref().unwrap_or("")),
-        show(value),
+        current
+            .map(|v| v.value)
+            .filter(|v| !v.is_empty())
+            .unwrap_or_else(|| show("")),
+        value,
     );
     Ok(())
 }
@@ -603,7 +607,10 @@ impl DraftTarget for ContactTarget {
             ),
         ));
         let subject = if p.is_me() {
-            format!("the user's own contact card (\"{}\")", p.name)
+            format!(
+                "the user's own contact card (\"{}\"). Prefer structured attr.set facts: role, project, repository, tools, lang, tz, communication. call is only how Steve addresses the user; call_external is only how Steve introduces the user to other people. Never copy one into the other. Keep original notes; do not put structured facts into note. Infer no facts not stated by the user.",
+                p.name
+            )
         } else if works.is_empty() {
             format!("the contact \"{}\"", p.name)
         } else {
@@ -851,11 +858,14 @@ fn set_party_field(
             if let Some(n) = text(value).filter(|n| !n.is_empty()) {
                 let n = appended(&p.note, &n);
                 if n != p.note && len_ok(&n, 0, 2000) {
-                    let added = n.strip_prefix(p.note.as_str()).unwrap_or(&n).trim();
                     d.line(
                         steve_i18n::t!("modules.contacts_draft.label.note_appended"),
-                        show(&p.note),
-                        show(added),
+                        if p.note.is_empty() {
+                            show("")
+                        } else {
+                            p.note.clone()
+                        },
+                        n.clone(),
                     );
                     fields.insert("note".into(), json!(n));
                 }
@@ -1871,6 +1881,10 @@ impl AttrSetOp {
         ck.pattern("key", &a.key, &KEY)
             .opt_len("label", a.label.as_deref().map(str::trim), 1, 20)
             .len("value", a.value.trim(), 1, 500)
+            .that(
+                "value",
+                super::profile::valid_address_fact(&a.key, &a.value),
+            )
             .that("key", def.as_ref().is_none_or(|d| d.applies_to(&p.kind)));
         if let Some(d) = def.filter(|d| d.kind == "enum" && !d.options.is_empty()) {
             ck.that("value", d.options.iter().any(|o| o == a.value.trim()));
@@ -1914,11 +1928,6 @@ impl ChangeOp for AttrSetOp {
             }
         };
         let label = label.unwrap_or(&def.label).to_string();
-        let staled: Vec<String> = repo::values(tx, cx.ws, &p.id)?
-            .into_iter()
-            .filter(|v| v.key == def.key && v.label == label && v.status == "confirmed")
-            .map(|v| v.id)
-            .collect();
         let v = repo::value_insert(
             tx,
             cx.ws,
@@ -1935,7 +1944,7 @@ impl ChangeOp for AttrSetOp {
                 decision_id: None,
             },
         )?;
-        repo::stale_others(tx, &v)?;
+        let staled = repo::stale_others_recorded(tx, &v)?;
         revise(
             tx,
             &p,

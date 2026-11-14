@@ -170,6 +170,11 @@ fn card(
         repo::values(c, &viewer.ws, &p.id)?
             .into_iter()
             .filter(|v| v.status == "confirmed" && v.level != Level::Never)
+            // Only a Hub user's own card has separate internal/external names. Ordinary
+            // contacts retain their preferred `call`; generic prompts must not lose it.
+            .filter(|v| {
+                !p.is_me() || !matches!(v.key.as_str(), "call" | "call_external" | "call_ext_scope")
+            })
             .map(|v| CardAttr {
                 label: v.label,
                 value: v.value,

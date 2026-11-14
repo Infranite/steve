@@ -1011,6 +1011,54 @@ async fn mention_options_and_search() {
 // ---------------------------------------------------------------- contact cards
 
 #[tokio::test]
+async fn cards_keep_contacts_preferred_names_but_not_users_private_address_rules() {
+    let t = env();
+    let r = app(&t);
+    let sarah = contact(&r, &me(), json!({"name":"Sarah Chen"})).await;
+    let (status, mine) = req(&r, &me(), "GET", "/me/contact", None).await;
+    assert_eq!(status, 200);
+    let mine = mine["id"].as_str().unwrap().to_string();
+    for (party, key, value) in [
+        (sarah.as_str(), "call", "Sas"),
+        (mine.as_str(), "call", "Private nickname"),
+        (mine.as_str(), "call_external", "Public name"),
+        (
+            mine.as_str(),
+            "call_ext_scope",
+            r#"{"kind":"space","id":"s1","name":"Scoped alias"}"#,
+        ),
+    ] {
+        let (status, body) = req(
+            &r,
+            &me(),
+            "POST",
+            &format!("/parties/{party}/attrs"),
+            Some(json!({"key":key,"value":value,"level":"public"})),
+        )
+        .await;
+        assert_eq!(status, 200, "{body}");
+    }
+    let viewer = t.modules.viewer(&me()).unwrap();
+    let cards = t
+        .store()
+        .reader(|c| contacts::contact_cards(c, &viewer, &[sarah.clone(), mine.clone()]))
+        .unwrap();
+    assert_eq!(cards.len(), 2);
+    let contact = cards.iter().find(|c| c.party_id == sarah).unwrap();
+    assert!(
+        contact.text.contains("Sas"),
+        "ordinary contacts still carry their preferred name"
+    );
+    let own = cards.iter().find(|c| c.party_id == mine).unwrap();
+    for name in ["Private nickname", "Public name", "Scoped alias"] {
+        assert!(
+            !own.text.contains(name),
+            "own address rules require an explicit context resolver"
+        );
+    }
+}
+
+#[tokio::test]
 async fn contact_cards_for_prompts() {
     let t = env();
     let r = app(&t);

@@ -211,8 +211,12 @@ pub fn session_context(
     } else {
         format!("{CARDS_HEAD}\n{cards_text}")
     };
+    let address = contacts::profile::address(c, ws, &viewer.user, false, None, None)?
+        .map(|name| format!("对本人说话时称呼：{name}。对外介绍须使用对外称呼，不沿用这个昵称。"))
+        .unwrap_or_default();
     let build = |hits: &[Hit]| {
         [
+            address.clone(),
             cards_block.clone(),
             render_snippets(SESSION_HEAD, SESSION_RULES, "K", hits),
             note.to_string(),
@@ -285,11 +289,21 @@ pub fn chat_context(
     q.now = now;
     let found = retrieve_all(c, &q)?;
     let hits = merge(rules, found.hits);
-    if hits.is_empty() && !found.semantic_down {
+    // This context is used by the shared workspace chat. Keep its existing workspace-only
+    // rule for multi-member workspaces: a member's private nickname must not enter it.
+    let address = if crate::repo::member_count(c, &viewer.ws)? <= 1 {
+        contacts::profile::address(c, &viewer.ws, &viewer.user, false, None, None)?
+    } else {
+        None
+    };
+    if hits.is_empty() && !found.semantic_down && address.is_none() {
         return Ok(None);
     }
     // keywords only: said even when nothing was found, so “no knowledge” is not taken as the whole
     let mut text = render_snippets(CHAT_HEAD, CHAT_RULES, "", &hits);
+    if let Some(name) = address {
+        text = format!("对本人说话时称呼：{name}。对外介绍使用对外称呼，不沿用内部昵称。\n{text}");
+    }
     if found.semantic_down {
         if !text.is_empty() {
             text.push('\n');

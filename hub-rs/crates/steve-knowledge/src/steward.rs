@@ -113,6 +113,25 @@ fn list_tool(m: &Modules, viewer: &Viewer, args: &Value) -> ApiResult<String> {
         include_never: true,
         limit: 0,
     };
+    // Workspace service callers can list shared memories, but have no personal profile.
+    let member: bool = m.store.reader(|c| {
+        Ok::<_, steve_store::StoreError>(c.query_row(
+            "SELECT EXISTS(SELECT 1 FROM workspace_members WHERE workspace_id = ? AND user_id = ?)",
+            params![viewer.ws, viewer.user],
+            |r| r.get(0),
+        )?)
+    })?;
+    let profile = if member {
+        Some(steve_modules::contacts::service::me_contact(
+            m,
+            &Caller {
+                ws: viewer.ws.clone(),
+                me: viewer.user.clone(),
+            },
+        )?)
+    } else {
+        None
+    };
     let out = m.store.reader(|c| {
         let used = provenance::use_counts(c, &viewer.ws, "mem")?;
         let list = mems::all(c, viewer, &f)?;
@@ -144,7 +163,8 @@ fn list_tool(m: &Modules, viewer: &Viewer, args: &Value) -> ApiResult<String> {
         }
         Ok::<_, steve_store::StoreError>(out)
     })?;
-    Ok(serde_json::to_string(&json!({ "memories": out })).unwrap_or_default())
+    Ok(serde_json::to_string(&json!({ "memories": out, "profile": profile,
+        "profile_guidance": "Preserve original notes verbatim. Extract soft facts about role, projects or habits only when supported by notes or memories. Use steve_contacts_remember with this profile id; it creates a candidate, never a confirmed fact. Do not re-propose existing or rejected facts. Use separate call (addressing the user) and call_external (introducing them); never infer either from the other." })).unwrap_or_default())
 }
 
 fn iso(ms: i64) -> String {
