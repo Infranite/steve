@@ -199,43 +199,7 @@ pub async fn check(
     }
 }
 
-/// Platform-neutral content. Rich cards/HTML belong to the connector adapter; all adapters can
-/// receive the lossless Markdown fallback, including actions as labelled links. No model rewrites
-/// or content masking happen here.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Content {
-    #[serde(default)]
-    pub title: String,
-    #[serde(default)]
-    pub markdown: String,
-    #[serde(default)]
-    pub fields: Vec<(String, String)>,
-    #[serde(default)]
-    pub actions: Vec<(String, String)>,
-    #[serde(default)]
-    pub references: Vec<(String, String)>,
-}
-
-impl Content {
-    pub fn markdown(&self) -> String {
-        let mut parts = Vec::new();
-        if !self.title.is_empty() {
-            parts.push(format!("# {}", self.title));
-        }
-        if !self.markdown.is_empty() {
-            parts.push(self.markdown.clone());
-        }
-        parts.extend(self.fields.iter().map(|(k, v)| format!("{k}: {v}")));
-        parts.extend(
-            self.actions
-                .iter()
-                .chain(&self.references)
-                .map(|(label, url)| format!("{label}: {url}")),
-        );
-        parts.join("\n\n")
-    }
-}
+pub use steve_store::feed::Content;
 
 /// Routing never chooses an identity for a caller. `Bot` must resolve to a bot account; `AsYou`
 /// to a personal account owned by the live requester, then the existing outbound approvals apply.

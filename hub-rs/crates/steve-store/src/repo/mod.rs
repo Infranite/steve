@@ -9,6 +9,7 @@ mod core;
 mod decisions;
 mod dependency_waits;
 mod files;
+pub mod feed;
 mod items;
 pub mod jobs;
 pub mod kinds;

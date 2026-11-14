@@ -433,14 +433,16 @@ pub struct Notification {
 pub fn list(ch: &Channels, who: &Caller) -> ChannelResult<Vec<Notification>> {
     ch.store().reader(|c| {
         require_person(c,who)?;
-        let mut st=c.prepare("SELECT id,event_id,mode,body,state,delivery_id,seen_at,created FROM personal_notifications WHERE workspace_id=? AND user_id=? ORDER BY created DESC,id DESC LIMIT 100")?;
+        let mut st=c.prepare("SELECT n.id,n.event_id,n.mode,n.body,n.state,n.delivery_id,r.read_at,n.created FROM personal_notifications n JOIN feed_entries e ON e.notification_id=n.id LEFT JOIN feed_reads r ON r.entry_id=e.id AND r.workspace_id=n.workspace_id AND r.user_id=n.user_id WHERE n.workspace_id=? AND n.user_id=? ORDER BY n.created DESC,n.id DESC LIMIT 100")?;
         Ok(st.query_map(params![who.ws,who.me],|r|Ok(Notification{id:r.get(0)?,event_id:r.get(1)?,mode:r.get(2)?,body:r.get(3)?,state:r.get(4)?,delivery_id:r.get(5)?,seen_at:r.get(6)?,created:r.get(7)?}))?.collect::<rusqlite::Result<Vec<_>>>()?)
     })
 }
 pub fn seen(ch: &Channels, who: &Caller, id: &str) -> ChannelResult<()> {
     ch.store().transaction(|tx| {
         require_person(tx,who)?;
-        if tx.execute("UPDATE personal_notifications SET seen_at=coalesce(seen_at,?) WHERE id=? AND workspace_id=? AND user_id=?",params![ch.now(),id,who.ws,who.me])? == 0 { return Err(ApiError::not_found("notification")); }
+        let entry: Option<String> = tx.query_row("SELECT id FROM feed_entries WHERE notification_id=? AND workspace_id=? AND recipient_id=?", params![id,who.ws,who.me], |r|r.get(0)).optional()?;
+        let entry = entry.ok_or_else(||ApiError::not_found("notification"))?;
+        steve_store::feed::read_ids(tx, &who.ws, &who.me, &[entry], ch.now())?;
         Ok(())
     })
 }

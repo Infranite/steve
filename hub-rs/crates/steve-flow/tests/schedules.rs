@@ -374,7 +374,7 @@ async fn boot_applies_missed_policy() {
     }
     let rs = runs_of(&e, &id);
     assert_eq!((rs.len(), rs[0].trigger_kind.as_str()), (1, "catch_up"));
-    assert_eq!(rs[0].outcome_label, "补跑（错过 2 次）汇报已发出");
+    assert_eq!(rs[0].outcome_label, "补跑（错过 2 次）已发布到信息流");
 }
 
 #[tokio::test]
@@ -834,7 +834,7 @@ async fn budget_zero_is_unlimited() {
 }
 
 #[tokio::test]
-async fn report_posts_to_main_thread_and_takes_digest() {
+async fn report_publishes_to_feed_without_chat_and_takes_digest() {
     let e = env();
     e.env.gateway.script_out(
         "你是 Steve",
@@ -860,13 +860,17 @@ async fn report_posts_to_main_thread_and_takes_digest() {
     let ids = claim_due(&e.flow).unwrap();
     drive_all(&e, &ids).await;
     let posts = e.core.posts();
-    assert_eq!(posts.len(), 1);
-    assert_eq!(posts[0].0, "昨晚 ST-1 做完了。");
+    assert!(posts.is_empty());
     let run = &runs_of(&e, &id)[0];
-    assert_eq!(posts[0].1, json!({"schedule": id, "run": run.id}));
+    let result = e
+        .env
+        .store()
+        .reader(|c| steve_store::feed::report_result(c, WS, &run.id, "a"))
+        .unwrap();
+    assert_eq!(result.unwrap()["text"], "昨晚 ST-1 做完了。");
     assert_eq!(
         (run.status.as_str(), run.outcome_label.as_str()),
-        ("done", "汇报已发出")
+        ("done", "已发布到信息流")
     );
     assert!((run.cost - 0.02).abs() < 1e-9);
     let prompt = e.env.gateway.last_prompt().unwrap();
@@ -1188,4 +1192,173 @@ async fn bot_deletion_revokes_personal_schedule_instead_of_lending_access_to_hei
     assert!(!saved.enabled);
     assert!(saved.spec.requester.is_none());
     assert_eq!(saved.spec.bot, "steve");
+}
+
+#[tokio::test]
+async fn report_retry_recovers_canonical_result_before_model_or_digest_and_nodes_do_not_collide() {
+    use steve_flow::graph::Graph;
+    use steve_flow::nodes::{
+        Effects, RunCx, action,
+        action::{Action, ActionOutcome, Report},
+    };
+    use steve_flow::{LinearExecutor, RunExecutor};
+    let e = env();
+    e.env.gateway.script("你是 Steve", "persistent report");
+    let s = create(&e, daily("report")).await;
+    e.env.clock.set(monday_8am() + 30 * MIN);
+    let ids = claim_due(&e.flow).unwrap();
+    // Drive the actual legacy executor; it must use the same node key as GraphEngine.
+    assert_eq!(
+        LinearExecutor.drive(&e.flow, &ids[0]).await.unwrap(),
+        RunStatus::Done
+    );
+    let mut run = e
+        .env
+        .store()
+        .reader(|c| runs::get(c, &ids[0]))
+        .unwrap()
+        .unwrap();
+    run.cursor = Some("a".into());
+    let original = e
+        .env
+        .store()
+        .reader(|c| steve_store::feed::report_result(c, WS, &run.id, "a"))
+        .unwrap()
+        .unwrap();
+    assert!(
+        original["feed_entry_id"]
+            .as_str()
+            .unwrap()
+            .starts_with("feed_")
+    );
+    let before = e.env.gateway.calls.lock().unwrap().len();
+    e.env
+        .store()
+        .transaction(|tx| {
+            digest::add(
+                tx,
+                WS,
+                "new material must remain pending",
+                None,
+                None,
+                e.now(),
+            )
+        })
+        .unwrap();
+    let output = action::run(
+        &e.flow,
+        &run,
+        &json!({"action":"report","what":"must not run model"}),
+    )
+    .await;
+    let ActionOutcome::Done { output, .. } = output else {
+        panic!("retry failed")
+    };
+    assert_eq!(output, original);
+    assert_eq!(e.env.gateway.calls.lock().unwrap().len(), before);
+    // The GraphEngine action receives its node explicitly, regardless of the saved run cursor.
+    let graph = Graph::from_value(
+        &json!({"nodes":[{"id":"b","kind":"action","config":{"action":"report"}}],"edges":[]}),
+    )
+    .unwrap();
+    let mut rcx = RunCx {
+        flow: &e.flow,
+        run: run.clone(),
+        graph: &graph,
+        node: &graph.nodes[0],
+        dry_run: false,
+        sender: Value::Null,
+        effects: Effects::default(),
+    };
+    Report
+        .run(
+            &mut rcx,
+            &json!({"action":"report","what":"second"}),
+            &Value::Null,
+        )
+        .await;
+    let second = e
+        .env
+        .store()
+        .reader(|c| steve_store::feed::report_result(c, WS, &run.id, "b"))
+        .unwrap()
+        .unwrap();
+    assert_ne!(second["feed_entry_id"], original["feed_entry_id"]);
+    assert_eq!(e.env.gateway.calls.lock().unwrap().len(), before + 1);
+    Report
+        .run(&mut rcx, &json!({"action":"report"}), &Value::Null)
+        .await;
+    assert_eq!(e.env.gateway.calls.lock().unwrap().len(), before + 1);
+    // A forged workspace fails before even recovering the original output.
+    run.workspace_id = WS2.into();
+    assert!(matches!(
+        action::run(&e.flow, &run, &json!({"action":"report"})).await,
+        ActionOutcome::Fail { .. }
+    ));
+    assert!(e.core.posts().is_empty());
+    assert_eq!(s["id"], run.flow_id);
+}
+
+#[tokio::test]
+async fn report_publication_and_digest_acknowledgement_roll_back_together() {
+    use steve_flow::nodes::action::{self, ActionOutcome};
+    let e = env();
+    e.env.gateway.script("你是 Steve", "report");
+    create(&e, daily("report")).await;
+    e.env
+        .store()
+        .transaction(|tx| digest::add(tx, WS, "pending", None, None, e.now()))
+        .unwrap();
+    e.env.clock.set(monday_8am() + 30 * MIN);
+    let ids = claim_due(&e.flow).unwrap();
+    let run = e
+        .env
+        .store()
+        .reader(|c| runs::get(c, &ids[0]))
+        .unwrap()
+        .unwrap();
+    e.env.store().with_conn(|c| {c.execute_batch("CREATE TRIGGER fail_digest BEFORE UPDATE ON digest_entries BEGIN SELECT RAISE(ABORT,'injected digest failure'); END;")?;Ok(())}).unwrap();
+    assert!(matches!(
+        action::run(&e.flow, &run, &json!({"action":"report"})).await,
+        ActionOutcome::Retry { .. }
+    ));
+    assert!(
+        e.env
+            .store()
+            .reader(|c| steve_store::feed::report_result(
+                c,
+                WS,
+                &run.id,
+                run.cursor.as_deref().unwrap()
+            ))
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        e.env
+            .store()
+            .reader(|c| digest::pending(c, WS, 0))
+            .unwrap()
+            .len(),
+        1
+    );
+    e.env
+        .store()
+        .with_conn(|c| {
+            c.execute_batch("DROP TRIGGER fail_digest")?;
+            Ok(())
+        })
+        .unwrap();
+    assert!(matches!(
+        action::run(&e.flow, &run, &json!({"action":"report"})).await,
+        ActionOutcome::Done { .. }
+    ));
+    assert!(
+        e.env
+            .store()
+            .reader(|c| digest::pending(c, WS, 0))
+            .unwrap()
+            .is_empty()
+    );
+    assert!(e.core.posts().is_empty());
 }

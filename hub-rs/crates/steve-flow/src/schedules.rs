@@ -42,7 +42,7 @@ pub enum Mode {
     Item,
     /// Item that starts with a proposal.
     Propose,
-    /// Steve posts a report in the main thread.
+    /// Steve publishes a report to the workspace Feed.
     Report,
 }
 
@@ -82,7 +82,7 @@ impl Mode {
             Mode::ItemAuto => "建事项，自动验收",
             Mode::Item => "建事项",
             Mode::Propose => "先给方案",
-            Mode::Report => "在对话里汇报",
+            Mode::Report => "发布到信息流，工作空间成员可见",
         }
     }
 }
@@ -128,7 +128,9 @@ impl Spec {
     /// The generated graph: `trigger(time) → action`.
     pub fn graph(&self) -> Value {
         let action = match self.mode {
-            Mode::Report => json!({ "action": "report", "what": self.what, "bot": self.bot }),
+            Mode::Report => {
+                json!({ "action": "report", "what": self.what, "bot": self.bot, "destination": "workspace_feed" })
+            }
             m => json!({
                 "action": "item.create",
                 "mode": if m == Mode::Propose { "propose" } else { "start" },

@@ -7,6 +7,7 @@ mod bots;
 pub mod dedupe;
 mod diagnostics;
 mod files;
+pub(crate) mod feed;
 mod items;
 mod misc;
 mod node_env;

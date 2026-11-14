@@ -103,6 +103,8 @@ api GET /mail/threads
 api GET /mail/threads/x
 api GET /match-rules
 api GET /me/contact
+api GET /me/feed
+api GET /me/feed/x
 api GET /me/notification-policy
 api GET /me/notification-targets
 api GET /me/notifications
@@ -252,6 +254,7 @@ api POST /mail/threads/x/draft
 api POST /mail/threads/x/read
 api POST /mail/threads/x/to-item
 api POST /mail/threads/x/to-knowledge
+api POST /me/feed/read
 api POST /me/notifications/x/seen
 api POST /merges/x/split
 api POST /orgs

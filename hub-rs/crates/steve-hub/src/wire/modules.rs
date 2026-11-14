@@ -621,6 +621,7 @@ pub fn build(env: Env<'_>) -> Result<Built, BackendError> {
         .merge(crate::plugins::api::routes(plugins.clone(), conns.clone()))
         .merge(steve_knowledge::routes(kb.clone()))
         .merge(steve_digest::routes())
+        .merge(crate::api::feed::routes())
         .merge(super::digest_bot::routes(flow.clone()))
         .merge(steve_modules::contacts::routes(ports))
         .merge(steve_modules::accounts::routes())

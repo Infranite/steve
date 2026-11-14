@@ -4287,6 +4287,35 @@ async fn notifications_reject_fake_self_service_and_keep_seen_personal() {
             .is_some()
     );
     assert!(n::list(&h.ch, &other).unwrap()[0].seen_at.is_none());
+    // Old notification seen and Feed read address one fact in both directions.
+    let mine_entry = h
+        .env
+        .store()
+        .reader(|c| steve_store::feed::detail(c, WS, ME, &format!("feed_{}", mine[0].id)))
+        .unwrap();
+    assert!(mine_entry.read_at.is_some());
+    assert_eq!(mine_entry.body.unwrap().references.len(), 1);
+    h.env
+        .store()
+        .transaction(|tx| {
+            steve_store::feed::read_ids(
+                tx,
+                WS,
+                &other.me,
+                &[format!("feed_{}", theirs[0].id)],
+                h.ch.now(),
+            )
+        })
+        .unwrap();
+    assert!(n::list(&h.ch, &other).unwrap()[0].seen_at.is_some());
+    assert_eq!(
+        count(
+            &h,
+            "SELECT count(*) FROM personal_notifications WHERE seen_at IS NOT NULL",
+            &[]
+        ),
+        0
+    );
     // Revoked consent before first send does not borrow the remaining member's authorization.
     p.enabled = false;
     n::put_policy(&h.ch, &caller(WS, ME), &p).unwrap();
@@ -4457,6 +4486,35 @@ async fn notifications_manual_bot_dm_preference_and_body_cleanup_share_e1_receip
             &[]
         ),
         1
+    );
+    let feed = h
+        .env
+        .store()
+        .transaction(|tx| {
+            steve_store::feed::list(
+                tx,
+                WS,
+                ME,
+                &steve_store::feed::Filter::default(),
+                None,
+                50,
+                h.ch.now(),
+            )
+        })
+        .unwrap();
+    assert_eq!(feed.entries.len(), 1);
+    assert!(
+        feed.entries[0].purged
+            && feed.entries[0].title.is_empty()
+            && feed.entries[0].excerpt.is_empty()
+    );
+    assert!(
+        h.env
+            .store()
+            .reader(|c| steve_store::feed::detail(c, WS, ME, &feed.entries[0].id))
+            .unwrap()
+            .body
+            .is_none()
     );
     exec(
         &h,
@@ -4849,5 +4907,28 @@ async fn notification_targets_filter_live_identity_membership_visibility_and_rou
         Err(ApiError::conflict("test rollback"))
     });
     assert!(matches!(result, Err(ApiError::Conflict(_))));
+    nothing_sent(&h);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn notification_thirty_day_source_sweep_cannot_leave_feed_body_or_title_copies() {
+    use steve_channels::notifications as n;
+    let h = setup().await;
+    let mut p = notification_setup(&h).await;
+    p.mode = n::Mode::Log;
+    n::put_policy(&h.ch, &caller(WS, ME), &p).unwrap();
+    let d = notification_dispatch(&h);
+    notification_event(&h);
+    d.pump(h.env.store(), h.ch.now()).unwrap();
+    let old = n::list(&h.ch, &caller(WS, ME)).unwrap();
+    assert_eq!(old.len(), 1);
+    h.env.clock.advance(31 * 24 * 3_600_000);
+    n::pump(&h.ch, &h.outbox).await.unwrap();
+    let e = h
+        .env
+        .store()
+        .reader(|c| steve_store::feed::detail(c, WS, ME, &format!("feed_{}", old[0].id)))
+        .unwrap();
+    assert!(e.purged && e.title.is_empty() && e.excerpt.is_empty() && e.body.is_none());
     nothing_sent(&h);
 }
