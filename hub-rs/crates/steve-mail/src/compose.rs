@@ -291,7 +291,10 @@ impl Mail {
 
             // layer 6: the sender's card, their open items, rules about them
             let mut anchors: Vec<ObjRef> = Vec::new();
-            let mut cards_text = String::new();
+            let mut cards_text =
+                steve_modules::contacts::profile::address(c, &who.ws, &who.me, true, None, None)?
+                    .map(|name| format!("向收件人介绍用户时使用：{name}。不要使用内部昵称。"))
+                    .unwrap_or_default();
             let mut items = Vec::new();
             if let Some(p) = orig
                 .from_party_id
@@ -299,7 +302,7 @@ impl Mail {
                 .filter(|_| orig.direction == "in")
             {
                 let cs = cards::contact_cards(c, &viewer, std::slice::from_ref(p))?;
-                cards_text = cards::render(&cs);
+                cards_text.push_str(&format!("\n{}", cards::render(&cs)));
                 anchors.push(ObjRef::new("party", p));
                 let links = people_repo::item_links_to(c, &who.ws, std::slice::from_ref(p), true)?;
                 let mut ids: Vec<String> = Vec::new();

@@ -1,76 +1,100 @@
-/* the 我 page and a contact's page: the picture is uploaded (PUT /contacts/:id/avatar with the raw bytes), shown and
- * removed; only PNG / JPEG / WebP are sent; the details are one list changed in place; the description folds; sections
- * with nothing in them are not there; it fits a phone */
 import assert from 'node:assert/strict'
+import { mkdir } from 'node:fs/promises'
 const { chromium } = await import(process.env.PLAYWRIGHT_MODULE || 'playwright')
 const browser = await chromium.launch({ headless: true, executablePath: process.env.PLAYWRIGHT_EXECUTABLE })
 const base = process.env.STEVE_TEST_WEB || 'http://127.0.0.1:5195'
-const page = await browser.newPage({ locale: 'zh-CN', viewport: { width: 1280, height: 900 } })
-page.setDefaultTimeout(10000)
-await page.addInitScript(() => localStorage.setItem('steve-lang', 'zh-CN'))
+const page = await browser.newPage({ locale: 'zh-CN' })
 const errors = []; page.on('pageerror', e => errors.push(e.message))
-const long = '李总是独立开发者，也是 Steve 的作者。'.repeat(14)
-let me = { id: 'ct_me', name: '李总', aliases: [], kind: 'real', rels: ['me'], important: false, org: null, tags: [], visibility: 'workspace', is_me: true, avatar: {}, updated: 1, note: long, status: 'active', merged_into: null, source: 'manual', revision: 1, created: 1, jobs: [], attrs: [], teams: [], reports_to: [], merges: [],
-  profile: { checked: null, next_check: null, source: null, fields: { name: { state: 'known' }, org: { state: 'missing', reason: 'no_source' }, title: { state: 'missing', reason: 'no_source' }, email: { state: 'missing', reason: 'no_source' } } } }
-const puts = [], attrs = []
+const puts = []
 let png
-await page.route('**/*', async route => {
-  const u = new URL(route.request().url()); if (u.origin !== base) return route.abort(); if (!u.pathname.startsWith('/api/')) return route.continue()
-  const m = route.request().method(); let data = []
-  if (u.pathname === '/api/me/contact' || u.pathname === '/api/contacts/me' || u.pathname === '/api/contacts/ct_me') data = me
-  else if (u.pathname === '/api/contacts/ct_me/avatar' && m === 'PUT') { puts.push(route.request().postDataBuffer()); me = { ...me, avatar: { file: 'fil_pic' } }; data = me }
-  else if (u.pathname === '/api/contacts/ct_me/avatar' && m === 'DELETE') { me = { ...me, avatar: {} }; data = me }
-  else if (u.pathname === '/api/files/fil_pic') return route.fulfill({ status: 200, contentType: 'image/png', body: png })
-  else if (u.pathname === '/api/parties/ct_me/attrs' && m === 'POST') { const b = route.request().postDataJSON(); attrs.push(b); me = { ...me, attrs: [...me.attrs, { id: 'a' + attrs.length, source_label: '你写的', level: 'public', status: 'confirmed', ...b }] }; data = me }
-  else if (u.pathname.endsWith('/holdings')) data = { accounts: [], responsible: [] }
-  return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(data) })
+const attr = (id, key, value, source = 'me', status = 'confirmed') => ({id, key, label:key, value, source, source_label: source === 'me' ? '你确认' : 'Hub 用户资料', status, level:'public'})
+let contact = {id:'me1', name:'Morgan', is_me:true, kind:'real', aliases:[], rels:['me'], tags:[], org:null, avatar:null, note:'Long original note remains verbatim. '.repeat(30), status:'active', visibility:'private', profile:{checked:1,next_check:null,source:null,fields:{}},jobs:[],attrs:[attr('a1','call','Morgan'),attr('a2','call_external','Morgan Smith'),attr('a3','email','morgan@example.test','profile'),attr('a4','role','Engineer','agent','candidate'),attr('a5','project','Portable tools','agent','candidate')],teams:[],merges:[],reports_to:[]}
+await page.route('**/api/**', async route => {
+ const u = new URL(route.request().url()), method = route.request().method()
+ if (!u.pathname.startsWith('/api/')) return route.continue()
+ let data = []
+ if (u.pathname === '/api/me/contact' || u.pathname === '/api/contacts/me') data=contact
+ else if (u.pathname === '/api/contacts/me1/avatar' && method === 'PUT') {
+  puts.push(route.request().postDataBuffer());contact={...contact,avatar:{file:'avatar1'}};data=contact
+ } else if (u.pathname === '/api/contacts/me1/avatar' && method === 'DELETE') {
+  contact={...contact,avatar:null};data=contact
+ } else if (u.pathname === '/api/files/avatar1') return route.fulfill({contentType:'image/png',body:png})
+ else if (u.pathname.startsWith('/api/attrs/') && method === 'PATCH') {
+  const id=u.pathname.split('/').at(-1), body=route.request().postDataJSON()
+  contact={...contact, attrs:contact.attrs.map(a=>a.id===id?{...a,...body,source:body.status==='confirmed'?'me':a.source,source_label:body.status==='confirmed'?'你确认':a.source_label}:a)};data={ok:true}
+ } else if (u.pathname === '/api/parties/me1/attrs' && method === 'POST') {
+  const body=route.request().postDataJSON();contact={...contact,attrs:[...contact.attrs,attr('scope1',body.key,body.value)]};data={ok:true}
+ } else if(u.pathname==='/api/personas') data=[{id:'persona1',name:'Project helper'}]
+ else if(u.pathname==='/api/spaces') data=[{id:'space1',name:'Project room',status:'active'}]
+ else if(u.pathname==='/api/accounts') data=[{id:'mail1', system:{id:'mail',name:'Email'},handle:'morgan@example.test',source_label:'Connected',source:'manual'}, {id:'mail2',system:{id:'mail',name:'Email'},handle:'work@example.test',source_label:'Connected',source:'manual'}]
+ else if(u.pathname.includes('/holdings')) data={accounts:[],responsible:[]}
+ return route.fulfill({contentType:'application/json',body:JSON.stringify(data)})
 })
-const fits = async () => assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true)
+const fits = async () => assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true,'no horizontal overflow')
 try {
-  await page.goto(base + '/test/fixtures/me-page.html')
-  await page.getByRole('heading', { name: '李总', exact: true }).waitFor()
-  png = Buffer.from((await page.evaluate(() => { const c = document.createElement('canvas'); c.width = c.height = 64; const g = c.getContext('2d'); g.fillStyle = '#3e63dd'; g.fillRect(0, 0, 64, 64); return c.toDataURL('image/png') })).split(',')[1], 'base64')
-
-  /* one list of what Steve knows, each empty one offering 补充; no 资料完整性 and no repeated reason */
-  await page.getByText('Steve 记得的你', { exact: true }).waitFor()
-  for (const k of ['call', 'tz', 'lang', 'org', 'title', 'email']) assert.equal(await page.locator(`[data-fact="${k}"]`).count(), 1, k)
-  assert.equal(await page.getByText('资料完整性').count(), 0)
-  assert.equal(await page.getByText('没有可用于自动查询的账号').count(), 0)
-  /* nothing linked, nothing held, nothing noted: those sections are not there at all */
-  for (const s of ['关联账号', '负责的', '所在团队', '往来', '记下的偏好与事实']) assert.equal(await page.getByText(s, { exact: false }).count(), 0, s)
-
-  /* the description folds to three lines */
-  const bio = page.locator('[data-bio]')
-  const folded = await bio.evaluate((el) => el.getBoundingClientRect().height)
-  await page.getByRole('button', { name: '展开', exact: true }).click()
-  assert.ok(await bio.evaluate((el) => el.getBoundingClientRect().height) > folded * 1.5, 'unfolds')
-  await page.getByRole('button', { name: '收起', exact: true }).click()
-
-  /* a value is filled in place: 补充 → type → Enter */
-  await page.getByRole('button', { name: '补充时区', exact: true }).click()
-  await page.getByLabel('修改 时区').fill('Asia/Shanghai'); await page.keyboard.press('Enter')
-  await page.locator('[data-attr="时区"]').getByText('Asia/Shanghai').waitFor()
-  assert.deepEqual(attrs, [{ key: 'tz', label: '时区', value: 'Asia/Shanghai' }])
-  await page.getByText('每项右侧是披露级别', { exact: false }).waitFor()
-
-  /* a GIF is refused before anything is sent */
-  const avatar = page.locator('[data-avatar-edit]')
-  let chooser = page.waitForEvent('filechooser'); await avatar.click()
-  await (await chooser).setFiles({ name: 'a.gif', mimeType: 'image/gif', buffer: Buffer.from('GIF89a') })
-  await page.waitForTimeout(200); assert.equal(puts.length, 0)
-
-  /* a PNG goes up as the raw body; the page shows it */
-  chooser = page.waitForEvent('filechooser'); await avatar.click()
-  await (await chooser).setFiles({ name: 'me.png', mimeType: 'image/png', buffer: png })
-  const img = page.locator('[data-avatar-edit] img'); await img.waitFor()
-  assert.equal(puts.length, 1); assert.ok(puts[0].equals(png), 'the bytes as they are')
-  assert.match(await img.getAttribute('src'), /\/api\/files\/fil_pic/)
-  await page.waitForFunction(() => document.querySelector('[data-avatar-edit] img')?.naturalWidth > 0)
-
-  /* with a picture the avatar is a menu: remove goes back to initials */
-  await avatar.click(); await page.getByRole('menuitem', { name: '移除头像' }).click()
-  await page.locator('[data-avatar-edit="pick"]').waitFor(); assert.equal(await page.locator('[data-avatar-edit] img').count(), 0)
-
-  await page.setViewportSize({ width: 390, height: 844 }); await page.waitForTimeout(200); await fits()
-  assert.deepEqual(errors, []); console.log('PASS: avatar upload/type check/remove, one in-place list, folded description, empty sections hidden, 390px')
-} catch (e) { console.error(await page.locator('body').innerText(), errors); throw e } finally { await browser.close() }
+ await page.goto(base+'/test/fixtures/people-management.html?me')
+ await page.locator('[data-me-facts]').waitFor()
+ await page.locator('[data-platform-account="mail1"]').waitFor()
+ assert.equal(await page.getByText('morgan@example.test',{exact:true}).count(),1,'matching account and fact share one address row')
+ assert.equal(await page.locator('[data-attr="邮箱"] [data-platform-account="mail1"]').getAttribute('href'),'#/accounts/mail1')
+ assert.match(await page.locator('[data-platform-account="mail2"]').innerText(),/work@example\.test/,'a different account address remains visible')
+ // Keep the original avatar contract covered while the profile layout changes.
+ png=Buffer.from((await page.evaluate(()=>{const c=document.createElement('canvas');c.width=c.height=64;return c.toDataURL('image/png')})).split(',')[1],'base64')
+ await page.locator('[data-avatar-input]').setInputFiles({name:'wrong.gif',mimeType:'image/gif',buffer:Buffer.from('GIF89a')})
+ await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(resolve)))
+ assert.equal(puts.length,0)
+ assert.equal(await page.locator('[data-avatar-input]').inputValue(),'')
+ await page.locator('[data-avatar-input]').setInputFiles({name:'me.png',mimeType:'image/png',buffer:png})
+ await page.locator('[data-avatar-edit] img').waitFor()
+ await page.waitForFunction(()=>document.querySelector('[data-avatar-edit] img')?.naturalWidth>0)
+ assert.equal(puts.length,1);assert.ok(puts[0].equals(png))
+ await page.locator('[data-avatar-edit]').click()
+ await page.getByRole('menuitem',{name:'移除头像',exact:true}).click()
+ await page.locator('[data-avatar-edit="pick"]').waitFor()
+ assert.equal(await page.locator('[data-avatar-edit] img').count(),0)
+ assert.equal(await page.locator('[data-fact-group]').count(),4)
+ assert.equal(await page.locator('[data-original-note]').getAttribute('open'),null)
+ await page.locator('[data-fact-source]').filter({hasText:'账号资料'}).first().waitFor()
+ await page.locator('[data-fact-source]').filter({hasText:'推断'}).first().waitFor()
+ await page.locator('[data-attr="角色"] [data-fact-confirm]').click()
+ await page.locator('[data-attr="角色"] [data-fact-source]').filter({hasText:'你确认'}).waitFor()
+ await page.locator('[data-attr="主力项目"] [data-fact-reject]').click()
+ await page.locator('[data-attr="主力项目"]').waitFor({state:'detached'})
+ await page.getByRole('button',{name:'编辑 Steve 叫你',exact:true}).click()
+ await page.getByLabel('修改 Steve 叫你').fill('Mo');await page.keyboard.press('Enter')
+ await page.locator('[data-value="Steve 叫你"]').filter({hasText:'Mo'}).waitFor()
+ await page.locator('[data-address-overrides] summary').click()
+ await page.getByLabel('选择身份或会话',{exact:true}).click()
+ await page.getByRole('option',{name:'Project helper',exact:true}).click()
+ await page.getByLabel('在这里介绍你的称呼',{exact:true}).fill('Morgan from Project')
+ await page.locator('[data-address-overrides]').getByRole('button',{name:'保存',exact:true}).click()
+ await page.locator('[data-value]').filter({hasText:'Morgan from Project'}).waitFor()
+ assert.deepEqual(JSON.parse(contact.attrs.find(a=>a.key==='call_ext_scope').value),{kind:'persona',id:'persona1',name:'Morgan from Project'})
+ await page.locator('[data-address-overrides]').evaluate(el => { el.open = false })
+ await page.emulateMedia({ reducedMotion: 'reduce' })
+ if(process.env.STEVE_TEST_SCREENSHOTS) await mkdir(process.env.STEVE_TEST_SCREENSHOTS,{recursive:true})
+ for(const theme of ['light','dark']) for(const width of [1440,1066,390]) {
+  await page.setViewportSize({width,height:1000})
+  await page.evaluate(async theme => {
+   document.documentElement.classList.toggle('dark',theme==='dark')
+   const scroll = document.querySelector('[data-page-bar]')?.nextElementSibling
+   if (scroll) scroll.scrollTop = 0
+   await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))
+  },theme)
+  await fits()
+  assert.equal(await page.locator('h1').count(),1)
+  if(process.env.STEVE_TEST_SCREENSHOTS) {
+   await page.screenshot({path:`${process.env.STEVE_TEST_SCREENSHOTS}/me-${theme}-${width}.png`,animations:'disabled'})
+   await page.locator('[data-fact-group="preferences"]').scrollIntoViewIfNeeded()
+   await page.screenshot({path:`${process.env.STEVE_TEST_SCREENSHOTS}/me-${theme}-${width}-details.png`,animations:'disabled'})
+   await page.locator('[data-address-facts]').scrollIntoViewIfNeeded()
+  }
+ }
+ await page.locator('[data-original-note] summary').click();await page.getByText(contact.note,{exact:true}).waitFor()
+ await page.goto(base+'/test/fixtures/people-management.html?proposal')
+ await page.locator('[data-change-counts]').filter({hasText:'新增 1 条 · 修改 1 条 · 移除 1 条'}).waitFor()
+ assert.equal(await page.locator('[data-word-diff]').count(),0)
+ await page.locator('[data-long-change] summary').click();await page.locator('[data-word-diff] ins').first().waitFor();await fits()
+ assert.deepEqual(errors,[])
+ console.log('PASS: avatar type rejection/raw upload/removal, grouped facts, sources, candidate confirmation/rejection, inline names, folded original notes, six layouts, lazy word diff and field counts')
+} finally { await browser.close() }

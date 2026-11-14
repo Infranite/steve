@@ -148,10 +148,7 @@ async fn default_persona_is_seeded_on_first_use() {
     assert_eq!(p["is_default"], true);
     assert_eq!(p["bot_id"], "steve");
     assert_eq!(p["avatar"], json!({"seed": "Steve"}));
-    assert_eq!(
-        p["intro"],
-        "我是 Steve，Dev 的 AI 助手，帮他接收和分派事情。"
-    );
+    assert_eq!(p["intro"], "我是 Steve，负责接收和分派事情。");
     assert_eq!(p["soul"], "沉稳、简洁，先说结论；不客套。");
     assert_eq!(
         p["reveal"],
@@ -159,7 +156,7 @@ async fn default_persona_is_seeded_on_first_use() {
     );
     assert_eq!(
         p["intro_preview"],
-        "我是Steve，Dev 的 AI 助手，帮他接收和分派事情，我是 AI 助手，由 Steve 驱动，归 Dev 管理。"
+        "我是Steve，负责接收和分派事情，我是 AI 助手，由 Steve 驱动，归 Dev 管理。"
     );
     // the bot account and its space speak as Steve (nothing bound: inherited)
     assert_eq!(
@@ -189,6 +186,144 @@ async fn default_persona_is_seeded_on_first_use() {
     let (s, v) = call(&h.api, Some(&caller(WS2, ME)), "GET", "/personas", None).await;
     assert_eq!(s, 200);
     assert_eq!(v[0]["bot_id"], "far");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn legacy_default_intro_uses_current_scoped_address_without_rewriting_custom_text() {
+    use steve_modules::contacts::{repo, service};
+
+    let h = setup();
+    let space = space_of(&h, &h.con, "G1", "legacy").await;
+    let default = h
+        .env
+        .store()
+        .reader(|c| personas::default_persona(c, WS))
+        .unwrap()
+        .unwrap();
+    h.env
+        .store()
+        .transaction(|tx| -> steve_modules::ApiResult<()> {
+            let me = service::ensure_base(tx, &caller(WS, ME))?;
+            for (key, value) in [
+                ("call", "Private nickname".to_string()),
+                ("call_external", "Current public name".to_string()),
+                (
+                    "call_ext_scope",
+                    json!({"kind": "persona", "id": default.id, "name": "Persona name"})
+                        .to_string(),
+                ),
+                (
+                    "call_ext_scope",
+                    json!({"kind": "space", "id": space, "name": "Space name"}).to_string(),
+                ),
+            ] {
+                repo::value_insert(
+                    tx,
+                    WS,
+                    &repo::NewValue {
+                        party_id: me.id.clone(),
+                        key: key.into(),
+                        label: key.into(),
+                        value,
+                        source: "me".into(),
+                        source_label: "Manual".into(),
+                        source_ref: None,
+                        level: steve_store::base::Level::Public,
+                        status: "confirmed".into(),
+                        decision_id: None,
+                    },
+                )?;
+            }
+            Ok(())
+        })
+        .unwrap();
+    let custom_id = new_persona(&h, "Custom", "ops").await;
+    for legacy in [
+        "我是 Steve，Old legal name 的 AI 助手，帮他接收和分派事情。",
+        "I'm Steve, Old legal name's AI assistant; I take in and hand out their work.",
+    ] {
+        h.env
+            .store()
+            .with_conn(|c| {
+                c.execute(
+                    "UPDATE personas SET intro = ?1 WHERE id IN (?2, ?3)",
+                    rusqlite::params![legacy, default.id, custom_id],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        h.env
+            .store()
+            .reader(|c| -> steve_modules::ApiResult<()> {
+                // Every reader used by bindings, previews and explicit persona drafts upgrades the seed.
+                let p = personas::get(c, &default.id)?.unwrap();
+                assert_eq!(p.intro, steve_store::seeded::persona_intro());
+                assert_eq!(personas::default_persona(c, WS)?.unwrap().intro, p.intro);
+                assert_eq!(personas::list(c, WS)?[0].intro, p.intro);
+                let preview = personas::out(c, &Viewer::bare(WS, ME), &p)?.intro_preview;
+                assert!(preview.contains("归 Persona name 管理"), "{preview}");
+                let owner = personas::owner_name_in(c, WS, Some(&p.id), Some(&space))?;
+                let layer = steve_channels::compose::persona_layer(&p, &owner);
+                assert!(layer.contains("归 Space name 管理"), "{layer}");
+                for text in [&preview, &layer] {
+                    assert!(
+                        !text.contains("Old legal name") && !text.contains("Private nickname"),
+                        "{text}"
+                    );
+                }
+                assert_eq!(
+                    personas::get(c, &custom_id)?.unwrap().intro,
+                    legacy,
+                    "non-default personas stay user-owned"
+                );
+                let stored: String = c.query_row(
+                    "SELECT intro FROM personas WHERE id = ?",
+                    [&default.id],
+                    |r| r.get(0),
+                )?;
+                assert_eq!(
+                    stored, legacy,
+                    "read-time upgrade does not rewrite stored text"
+                );
+                Ok(())
+            })
+            .unwrap();
+        let ensured = h
+            .env
+            .store()
+            .transaction(|tx| personas::ensure_default(tx, WS, h.ch.now()))
+            .unwrap()
+            .unwrap();
+        assert_eq!(ensured.intro, steve_store::seeded::persona_intro());
+    }
+    // A custom default intro is left alone, including one deliberately written in the old seed shape.
+    for custom in [
+        "我是 Steve，Old legal name 的 AI 助手，帮他接收和分派事情。另有自定义职责。",
+        "我是 Steve，Custom name 的 AI 助手，帮他接收和分派事情。",
+    ] {
+        h.env
+            .store()
+            .transaction(|tx| {
+                personas::patch(
+                    tx,
+                    &Viewer::bare(WS, ME),
+                    &default.id,
+                    &personas::PersonaPatch {
+                        intro: Some(custom.into()),
+                        ..Default::default()
+                    },
+                    h.ch.now(),
+                )
+            })
+            .unwrap();
+        let p = h
+            .env
+            .store()
+            .reader(|c| personas::default_persona(c, WS))
+            .unwrap()
+            .unwrap();
+        assert_eq!(p.intro, custom);
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]

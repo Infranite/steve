@@ -806,6 +806,10 @@ export default {
     uploadFailed: "Upload failed ({{status}})",
   },
   config: {
+    emptyValue: "(empty)",
+    counts: "{{added}} added · {{modified}} changed · {{removed}} removed",
+    textDiff: "Expand text changes",
+
     drafted: "Change drafted by Steve · {{title}}",
     openSettings: "Open settings",
     applied: "Applied",

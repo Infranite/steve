@@ -773,6 +773,10 @@ export default {
   },
   /* config-ui.tsx: a config change Steve drafted, and the "tell Steve" bar */
   config: {
+    emptyValue: "（空）",
+    counts: "新增 {{added}} 条 · 修改 {{modified}} 条 · 移除 {{removed}} 条",
+    textDiff: "展开文本改动",
+
     drafted: "Steve 起草的改动 · {{title}}",
     openSettings: "打开设置",
     applied: "已应用",

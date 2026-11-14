@@ -183,6 +183,8 @@ The knowledge base takes notes, files, items, chat, memories and read-only folde
 
 Steve keeps contacts, organizations and teams. Identities are matched by handle, then email, then name. A name match only *proposes* a merge, and a merge can be split back exactly. Teams can be virtual or synced from the Feishu org chart, and a team can serve as a visibility scope. *Holdings* and *stewards* record who owns which bot, mailbox or device.
 
+Your own contact page groups identity, work, contact details and preferences, showing each fact's source and keeping original notes intact. A missing email can come from your Hub user record; manual edits and rejected facts are not overwritten. **Steve calls you** and **Introduce you as** are separate names, with optional persona or conversation overrides for the latter. The knowledge steward can propose personal memories for confirmation, rather than silently rewriting your profile.
+
 ### 🔐 Vault
 
 Each workspace has a master key in the OS key store (macOS Keychain, Linux Secret Service, or a protected directory). Each item has its own data key, and fields are encrypted with XChaCha20-Poly1305. Templates cover logins, cards, API credentials, SSH keys and more, and the template, not the client, decides which fields are secret. Revealing a secret takes a passkey (Touch ID or Face ID) with a single-use challenge bound to that field.

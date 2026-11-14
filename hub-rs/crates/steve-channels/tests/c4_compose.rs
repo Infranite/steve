@@ -524,6 +524,134 @@ async fn the_prompt_has_seven_layers_in_order() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn own_draft_uses_verified_connection_user_and_external_space_address() {
+    use steve_modules::testkit::OTHER;
+
+    let h = setup().await;
+    let (conn, account) =
+        FakeChannel::seed_connection(h.env.store(), &caller(WS, OTHER), Some("uother")).unwrap();
+    h.env
+        .store()
+        .transaction(|tx| -> steve_modules::ApiResult<()> {
+            // The connector is deliberately the workspace owner, not the verified account user.
+            tx.execute(
+                "UPDATE connections SET created_by = ? WHERE id = ?",
+                rusqlite::params![ME, conn],
+            )?;
+            for (user, key, value) in [
+                (ME, "call_external", "Workspace owner public"),
+                (OTHER, "call", "Member private nickname"),
+                (OTHER, "call_external", "Member public"),
+            ] {
+                let me = contacts::service::ensure_base(tx, &caller(WS, user))?;
+                contacts::repo::value_insert(
+                    tx,
+                    WS,
+                    &contacts::repo::NewValue {
+                        party_id: me.id,
+                        key: key.into(),
+                        label: key.into(),
+                        value: value.into(),
+                        source: "me".into(),
+                        source_label: "Manual".into(),
+                        source_ref: None,
+                        level: Level::Public,
+                        status: "confirmed".into(),
+                        decision_id: None,
+                    },
+                )?;
+            }
+            Ok(())
+        })
+        .unwrap();
+    let inbound =
+        h.ch.on_inbound(
+            WS,
+            &conn,
+            msg("C_DEV", "member-draft", "ulilei", "什么时候能好？", true),
+        )
+        .await
+        .unwrap();
+    let plan = h
+        .env
+        .store()
+        .reader(|c| steve_channels::flow_actions::plan_of(c, WS, &inbound.message_id))
+        .unwrap();
+    assert_eq!(plan.mode, spaces::Mode::Own);
+    let gather = || {
+        h.env.store().reader(|c| {
+            compose::gather(
+                c,
+                h.ch.knowledge_store(),
+                &plan,
+                &Default::default(),
+                h.ch.now(),
+            )
+        })
+    };
+    let assert_address = |expected: &str| {
+        let layers = gather().unwrap();
+        assert_eq!(
+            layers.owner, expected,
+            "drafted-as-you check uses the same actor"
+        );
+        assert_eq!(layers.persona, compose::self_layer(expected));
+        assert!(!layers.persona.contains("Workspace owner public"));
+        assert!(!layers.persona.contains("Member private nickname"));
+        assert!(compose::meant_for_owner(
+            &format!("这条是发给{expected}的"),
+            &layers.owner
+        ));
+        assert!(!compose::meant_for_owner(
+            "Workspace owner public 稍后答复",
+            &layers.owner
+        ));
+    };
+    assert_address("Member public");
+    h.env.store().transaction(|tx| -> steve_modules::ApiResult<()> {
+        let me = contacts::repo::me_of(tx, WS, OTHER)?.unwrap();
+        contacts::repo::value_insert(tx, WS, &contacts::repo::NewValue {
+            party_id: me.id, key: "call_ext_scope".into(), label: "call_ext_scope".into(),
+            value: json!({"kind": "space", "id": plan.space_id, "name": "Member in this space"}).to_string(),
+            source: "me".into(), source_label: "Manual".into(), source_ref: None,
+            level: Level::Public, status: "confirmed".into(), decision_id: None,
+        })?;
+        Ok(())
+    }).unwrap();
+    assert_address("Member in this space");
+    h.env.store().with_conn(|c| {
+        // Replace the scope with a valid current fact, not guessed prose.
+        c.execute("UPDATE attr_values SET value = ? WHERE key = 'call_ext_scope' AND party_id IN (SELECT id FROM parties WHERE user_id = ?)", rusqlite::params![json!({"kind": "space", "id": plan.space_id, "name": "Member renamed here"}).to_string(), OTHER])?;
+        Ok(())
+    }).unwrap();
+    assert_address("Member renamed here");
+    h.env.store().with_conn(|c| {
+        c.execute("DELETE FROM attr_values WHERE key IN ('call_external', 'call_ext_scope') AND party_id IN (SELECT id FROM parties WHERE user_id = ?)", [OTHER])?;
+        Ok(())
+    }).unwrap();
+    assert_address("Other"); // profile::address's contact-name fallback, never the private nickname.
+    h.env
+        .store()
+        .with_conn(|c| {
+            c.execute("UPDATE accounts SET verified = 0 WHERE id = ?", [&account])?;
+            Ok(())
+        })
+        .unwrap();
+    assert!(
+        gather().is_err(),
+        "unverified accounts cannot borrow owner or connector identity"
+    );
+    h.env.store().with_conn(|c| {
+        c.execute("UPDATE accounts SET verified = 1, party_id = (SELECT id FROM parties WHERE workspace_id = ?1 AND type = 'org' LIMIT 1) WHERE id = ?2", rusqlite::params![WS, account])?;
+        Ok(())
+    }).unwrap();
+    assert!(
+        gather().is_err(),
+        "an account without a linked user cannot borrow its creator"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn your_own_account_writes_as_you_and_always_drafts() {
     let h = setup().await;
     h.env.gateway.script(
