@@ -104,6 +104,7 @@ api GET /mail/threads/x
 api GET /match-rules
 api GET /me/contact
 api GET /me/notification-policy
+api GET /me/notification-targets
 api GET /me/notifications
 api GET /mention-options
 api GET /merges
