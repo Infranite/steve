@@ -1,0 +1,1 @@
+Git worktree projects now default to completing on PR merge (`done_when: "merge"`) when created in the UI, always expose the **Done when** setting even before a custom release script exists, and accept both `release` and `done_when` updates in `PATCH /api/projects/:id`.

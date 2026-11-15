@@ -564,6 +564,7 @@ export default {
     doneWhen: "完成标准",
     doneRemote: "核对远端后自动收尾；目标要求构建通过的事项，等构建成功才结束",
     doneLocal: "验收后在本机发布上线才结束",
+    optNone: "仅本地验收",
     optLocal: "本机发布上线",
     optMerge: "PR 合并",
     optTag: "PR 合并并推送 tag",
