@@ -231,6 +231,17 @@ There are two ways to add to Steve.
 | **Webhooks** | `POST /hooks/:connection_id`, signature-checked before anything is written. |
 | **Knowledge store port** | SQLite FTS by default. [OpenViking](ops/openviking) is an optional vector backend (`STEVE_KB_STORE=openviking`). Every hit is re-checked against the Hub's own access rules. |
 
+Manage the connected Hub from **Hub menu → Manage current Hub**, **Settings → Hub**, or
+the phone's **Me** page. The instance owner can save a shared name and purpose note;
+other members see the same values. A personal display alias belongs only to that browser
+or Apple client and can be cleared without changing the connection. Devices puts open
+requests before other current work, with recent sessions, monitoring and configuration
+available below. Pausing admission or lowering concurrency affects new turns and leaves
+accepted attempts and retries running. Missing device associations, occupancy and remote
+capabilities remain unknown. See the [Hub management contract](docs/deployment.md#hub-management-and-personal-aliases)
+and [device work and monitoring](docs/deployment.md#device-work-and-monitoring) for permissions,
+conflicts, compatibility and sampling limits.
+
 ## Experimental and planned
 
 - **Sessions run on a Node.** The Hub does not start agent processes itself: every session, Steve's own judgment calls and inline research run on the local Node, which is on by default (`STEVE_NODE_MODE=off` parks it).

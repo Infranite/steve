@@ -789,6 +789,63 @@ set, or a value outside the syntax above is refused as a whole and nothing on sc
 appears among the choices of its kind; a stored choice whose theme is not registered shows the default until it is.
 
 
+### Hub management and personal aliases
+
+Open **Manage current Hub** in the desktop Hub menu, **Settings → Hub**, or **Me → Hub
+management** on a phone (`#/settings/hub`). The page manages the connected Hub; switching
+connections is a separate action. Its shared name and purpose note are visible to signed-in
+workspace members, and only the instance owner (`users.role=owner`, not a workspace
+administrator) can edit them. Connection addresses and stable identity are read-only.
+The related-device entry uses the current inventory's unique explicit `node_id=local`
+association. With no association or an ambiguous one it opens the device list and reports
+that no trusted association is available; names and Hub roles never establish identity.
+
+`GET /auth/hello` declares `capabilities.hub_metadata: 1`. Without this declaration the
+editor reports unsupported, while existing connection and pairing features remain usable;
+clients must not infer support from a software version or API generation.
+Authenticated `GET /api/hub-metadata` returns `contract: 1`,
+`capabilities.shared_metadata: 1`, `metadata`, `can_edit`, `edit_reason`, and `device_id`.
+The latter can be null; the UI can resolve the trusted inventory association described above.
+Metadata contains `hub_id`, `display_name`, `purpose_note`, `revision`, `updated_at` and
+`updated_by`. Audit times are Unix milliseconds and the editor is a stable user ID. Initial
+values are name `Hub`, empty note, revision 0 and null audit fields. Identity reuses the
+installation's persisted `node.hub_id`, independently of Node/listener availability, URL,
+client directory ID, device name or the protocol's `Hello.name` value `steve`.
+
+`PUT /api/hub-metadata` accepts only `revision`, `display_name` and `purpose_note`.
+The name is trimmed, required, single-line and 1–64 Unicode code points without control
+characters. The note can be cleared, is at most 500 code points after CRLF/CR normalization
+to LF, permits LF/tab, and renders as plain text. Invalid input returns 400 without silent
+truncation. Owner permission is re-read in the same SQLite transaction as the revision
+comparison and write: revoked permission returns 403 and a stale revision returns 409.
+Successful writes return canonical values, audit fields and a new revision. This revision
+is independent of the Hub software version; there is no force-overwrite operation.
+Shared metadata uses the existing settings table's reserved instance entry
+`default / hub.metadata.v1`; backups must retain the database, including `node.hub_id`.
+The device configuration revision uses migration 067; shared metadata needs no additional
+schema migration. Normal installations apply the bundled migrations on startup.
+
+Cancel discards a changed draft only after confirmation. Saving blocks duplicate submissions
+and navigation. Errors retain the draft; uncertain results and timeouts require a read-back
+and comparison before retrying, even if the read-back matches. A conflict shows the latest
+values and the local draft separately; loading latest does not silently overwrite someone
+else's edit. Revoked permission disables saving and keeps the draft copyable. Offline
+snapshots are per-tab `sessionStorage`, keyed by the browser connection or Apple profile,
+and show the absolute read time. Cached permissions do not authorize writes. With no
+snapshot the page reports that nothing has been read. There is no offline write queue or
+whole-site offline cache; the web client must still be available to open the page.
+
+The separate personal alias is optional, at most 64 Unicode code points, and can be cleared.
+It belongs to this browser's `localStorage` directory or this Apple client's profile store;
+it is not account synchronization. Rename/clear preserves the active connection, address,
+credentials and known version. Browser changes notify sibling tabs. Apple Bridge v2
+advertises the optional `hubs.rename` operation with `{id, alias}` and returns `alias` from
+`hubs.list` (empty string means cleared); old bridges without this capability disable alias
+editing. Existing client labels are not migrated into shared names. The connection menu
+can show “alias · shared name” and retains the address; the management title uses the
+shared name. Neither alias editing nor shared metadata requires a private service or model
+backend.
+
 ### Device work and monitoring
 
 The device page groups visible sessions by their recorded device identity. Open requests take
