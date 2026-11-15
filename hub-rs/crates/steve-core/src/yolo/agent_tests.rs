@@ -16,7 +16,7 @@ use crate::testkit::Kit;
 const BEFORE: &str = "How to work with Steve — use the steve MCP tools:
 - steve_update: call it first with a short plan, and again whenever your step or plan changes. Write `now` in Chinese.
 - steve_ask: when you need a decision from the user. Never ask questions in plain text. After calling it, end your turn.
-- steve_request_approval: before anything with outside effects (deploy, release, push, send, pay, delete). After calling it, end your turn.
+- steve_request_approval: before outside effects (deploy, release, push, send, pay, delete) that lack explicit user authorization. Follow a recorded approval within its scope without requesting it again; approval is not evidence of completion. After calling it, end your turn.
 - steve_deliver: when the goal is met, with a Chinese summary, the outputs (branch, commits, files) and the checks you actually ran. Tick off finished plan steps with steve_update first; list in `unfinished` the steps you deliberately left open; any step not ticked off is shown to the user as left open. Then end your turn.
 - steve_publish: only when the item changed code (commits on your branch), after the user has accepted the item and asked for it to go live. Commit everything on your branch first. Then end your turn. If you changed nothing (an explanation, a review, an answer), don't call it: accepting the item finishes it.
 - steve_lane_status: after steve_publish, to see where the release is: the merge-lane batch it is in (MQ-<n>), an approval it waits for and who answers it, a failure and why, the merged commit and released version, and what you should do next. Read-only. Call it instead of asking the user which batch you are in or how the release is going.
@@ -193,14 +193,14 @@ fn a_running_session_hears_of_a_switch_with_its_next_message_and_its_mode_change
     // the dev bot runs in `auto`, which YOLO leaves as it is
     assert_eq!(k.rt.st().modes, vec![(sid.clone(), "auto".to_string())]);
     assert!(k.core.yolo_sync(WS).is_empty(), "told once");
-    assert_eq!(say(&k, &sid, "继续"), format!("{}\n\n继续", agent::NOTE_ON));
+    assert!(say(&k, &sid, "继续").ends_with(&format!("{}\n\n继续", agent::NOTE_ON)));
     assert_eq!(say(&k, &sid, "再看看"), "再看看");
 
     // the item taken out: the next message says YOLO is over
     y.put_scope(WS, "me", "item", &item, &serde_json::json!({"mode": "off"}))
         .unwrap();
     k.core.yolo_sync(WS);
-    assert_eq!(say(&k, &sid, "好"), format!("{}\n\n好", agent::NOTE_OFF));
+    assert!(say(&k, &sid, "好").ends_with(&format!("{}\n\n好", agent::NOTE_OFF)));
 }
 
 /// A mode switch that fails is not lost: the next sync tries again, and the note is made once.
@@ -219,7 +219,7 @@ fn a_failed_mode_switch_is_tried_again_by_the_next_sync() {
     assert_eq!(k.core.yolo_sync(WS), vec![sid.clone()]);
     assert_eq!(k.rt.st().modes, vec![(sid.clone(), "auto".to_string())]);
     assert!(k.core.yolo_sync(WS).is_empty(), "told once");
-    assert_eq!(say(&k, &sid, "继续"), format!("{}\n\n继续", agent::NOTE_ON));
+    assert!(say(&k, &sid, "继续").ends_with(&format!("{}\n\n继续", agent::NOTE_ON)));
 }
 
 /// A failed switch, then YOLO off again before any retry: the session never heard of it, so it
@@ -256,7 +256,7 @@ fn a_retried_switch_after_its_note_was_heard_is_not_told_again() {
     switch(&y, true);
     k.rt.st().mode_error = true;
     assert!(k.core.yolo_sync(WS).is_empty(), "not switched");
-    assert_eq!(say(&k, &sid, "继续"), format!("{}\n\n继续", agent::NOTE_ON));
+    assert!(say(&k, &sid, "继续").ends_with(&format!("{}\n\n继续", agent::NOTE_ON)));
     k.rt.st().mode_error = false;
     assert_eq!(k.core.yolo_sync(WS), vec![sid.clone()]);
     assert_eq!(k.rt.st().modes, vec![(sid.clone(), "auto".to_string())]);
@@ -277,7 +277,7 @@ fn an_unsupported_mode_is_asked_once() {
     assert!(k.core.yolo_sync(WS).is_empty());
     assert!(k.core.yolo_sync(WS).is_empty());
     assert_eq!(k.rt.st().modes.len(), 1, "not asked again every tick");
-    assert_eq!(say(&k, &sid, "继续"), format!("{}\n\n继续", agent::NOTE_ON));
+    assert!(say(&k, &sid, "继续").ends_with(&format!("{}\n\n继续", agent::NOTE_ON)));
 }
 
 fn full(y: &Yolo) {
@@ -316,8 +316,8 @@ fn full_access_bypasses_prompts_and_says_what_still_holds() {
         assert!(p.contains(&l), "{l}\n{p}");
     }
     assert!(p.contains("never use pkill or killall"));
-    assert!(p.contains("do not push to any remote and do not change GitHub with gh"));
-    assert!(p.contains(&format!("do not touch {}", y.env().steve_home.display())));
+    assert!(p.contains("do not independently repeat a push, PR, merge or tag that Steve owns"));
+    assert!(p.contains(&format!("do not modify {}", y.env().steve_home.display())));
     // plain YOLO: no full-access lines, no bypass
     let k = Kit::new();
     let y = yolo(&k);
@@ -348,19 +348,13 @@ fn switching_full_access_mid_run_changes_the_mode_in_place_and_off_restores_the_
         k.rt.st().modes,
         vec![(sid.clone(), agent::BYPASS.to_string())]
     );
-    assert_eq!(
-        say(&k, &sid, "继续"),
-        format!("{}\n\n继续", agent::NOTE_FULL)
-    );
+    assert!(say(&k, &sid, "继续").ends_with(&format!("{}\n\n继续", agent::NOTE_FULL)));
     // the item steps down to plain YOLO: the dev bot's own `auto` again
     y.put_scope(WS, "me", "item", &item, &serde_json::json!({"mode": "on"}))
         .unwrap();
     k.core.yolo_sync(WS);
     assert_eq!(k.rt.st().modes.last().unwrap().1, "auto");
-    assert_eq!(
-        say(&k, &sid, "好"),
-        format!("{}\n\n好", agent::NOTE_FULL_OFF)
-    );
+    assert!(say(&k, &sid, "好").ends_with(&format!("{}\n\n好", agent::NOTE_FULL_OFF)));
     // the item asks for full access on its own, then everything goes off
     y.put_scope(
         WS,
@@ -376,7 +370,7 @@ fn switching_full_access_mid_run_changes_the_mode_in_place_and_off_restores_the_
         .unwrap();
     k.core.yolo_sync(WS);
     assert_eq!(k.rt.st().modes.last().unwrap().1, "auto", "the bot's mode");
-    assert_eq!(say(&k, &sid, "停"), format!("{}\n\n停", agent::NOTE_OFF));
+    assert!(say(&k, &sid, "停").ends_with(&format!("{}\n\n停", agent::NOTE_OFF)));
 }
 
 /// #38: an item with its own worktree edits without a card per file whether or not YOLO is on; an

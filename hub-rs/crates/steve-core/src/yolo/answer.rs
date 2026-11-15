@@ -112,7 +112,7 @@ pub fn prompt(cx: &Context) -> String {
     let mut out = vec![
         cx.main_bot.clone(),
         "用户不在，开着 YOLO 模式：希望尽量少被打扰。一个替用户干活的 Agent 用 steve_ask 问了用户一个问题。判断你能不能替用户回答。".to_string(),
-        "只在答案能从下面的材料里合理推出、换成用户本人大概率也会这么选时才回答；涉及花钱、以用户名义对外说话、推送或发布、删除工作区以外的数据，或者材料不够、几种答案都说得通时，act 写 ask_user。".to_string(),
+        "推荐选项不是事实证据；运行版本、测试结果、部署完成等必须有实际回执，缺失时保持 ask_user，不能假定已经成功。只在答案能从下面的材料里合理推出、换成用户本人大概率也会这么选时才回答；涉及花钱、以用户名义对外说话、推送或发布、删除工作区以外的数据，或者材料不够、几种答案都说得通时，act 写 ask_user。".to_string(),
         format!("事项目标：{}", cx.goal),
         format!("计划：\n{}", list(&cx.plan)),
         format!("项目：{}", if cx.project.is_empty() { "（没有项目）" } else { &cx.project }),

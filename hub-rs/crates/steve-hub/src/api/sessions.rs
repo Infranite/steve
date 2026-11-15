@@ -98,13 +98,20 @@ pub async fn events(
 /// A system event the Hub wrote itself in zh-CN (a message parked for a Node that is not enabled
 /// here), its `text` in the request's language.
 fn system_shown(kind: &str, data: &mut Value) -> bool {
-    if kind != "system" || data.get("parked") != Some(&Value::Bool(true)) {
+    if kind != "system" {
         return false;
     }
+    let keys: &[&str] = if data.get("parked") == Some(&Value::Bool(true)) {
+        &["hub.session.node_parked"]
+    } else if data.get("steve_protocol_hash").is_some() {
+        &["hub.session.protocol_updated"]
+    } else {
+        return false;
+    };
     let Some(t) = data
         .get("text")
         .and_then(Value::as_str)
-        .and_then(|t| steve_i18n::reword!(t, &["hub.session.node_parked"]))
+        .and_then(|t| steve_i18n::reword!(t, keys))
     else {
         return false;
     };
@@ -143,7 +150,8 @@ impl EventsBody {
             "{{\"seq\":{seq},\"ts\":{ts},\"kind\":{},\"data\":",
             serde_json::to_string(&kind).unwrap_or_default()
         );
-        let parked = kind == "system" && data.contains("\"parked\"");
+        let parked = kind == "system"
+            && (data.contains("\"parked\"") || data.contains("\"steve_protocol_hash\""));
         if clean && !parked {
             out.push_str(&data);
         } else if parked {
@@ -610,10 +618,21 @@ pub async fn import(
 
 #[cfg(test)]
 mod tests {
-    use super::{EventsBody, after_bound, has_integer_keys};
+    use super::{EventsBody, after_bound, has_integer_keys, system_shown};
     use http_body_util::BodyExt;
+    use serde_json::json;
 
     /// The parked-session notice reads in the request's language; zh-CN as stored.
+    #[test]
+    fn protocol_sync_notice_reads_in_the_request_language() {
+        let mut data = json!({"text": "已同步当前 Steve 工作协议", "steve_protocol_hash": "h"});
+        assert!(steve_i18n::with(steve_i18n::EN, || system_shown(
+            "system", &mut data
+        )));
+        assert_eq!(data["text"], "Synced the current Steve working protocol");
+        assert_eq!(data["steve_protocol_hash"], "h");
+    }
+
     #[tokio::test]
     async fn the_parked_notice_by_language() {
         let stored = steve_i18n::stored(|| steve_i18n::t!("hub.session.node_parked"));
