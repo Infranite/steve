@@ -1,5 +1,25 @@
 /* zh-CN strings for the "pages" namespace: the source text, byte-identical to the UI. Conventions: web/src/i18n/index.ts */
 export default {
+  delivery: {
+    title: "文件交付", sharedTitle: "授权分享的文件", fromItem: "来自事项 {{item}}",
+    download: "下载原文件", open: "打开交付页", copyLink: "复制链接", copied: "已复制",
+    copyFailed: "无法复制，请从浏览器地址栏或分享链接手动复制。",
+    loginRequired: "此交付默认需要登录。其他人只能通过你主动创建的到期分享访问。",
+    loopback: "这个链接使用本机地址，其他设备无法访问。请在安装的访问配置中设置可达地址后重新获取链接。",
+    invalidUrl: "交付地址无效，请检查此安装的访问地址配置。",
+    noPreview: "暂时无法预览", downloadHint: "可以下载原文件后查看。",
+    isolatedHtml: "HTML 在隔离预览中打开，可访问包内资源及页面。", resetPreview: "返回入口页",
+    staticHtml: "登录预览禁用脚本，可查看包内资源和页面。如需脚本交互，请主动创建到期分享后打开。",
+    contentError: "内容加载失败，请检查网络、登录或分享是否仍然有效，也可重新打开此页。",
+    loadError: "无法打开交付", loadErrorHint: "请检查网络和登录权限。文件可能不存在或服务暂时不可用。",
+    unreachable: "无法连接分享服务，请检查网络及此安装的访问地址后重试。",
+    shareUnavailable: "分享不可用", shareUnavailableHint: "链接可能已到期、被撤销或不存在。请向文件所有者获取新的分享。",
+    sharing: "对外分享", shareHint: "分享链接持有者可查看和下载此文件。选择有效期后主动创建，可随时撤销。",
+    validFor: "有效期", oneHour: "1 小时", oneDay: "1 天", oneWeek: "7 天", createShare: "创建分享",
+    noShares: "尚未创建分享。", shareLoadError: "无法读取分享列表。", revoke: "撤销分享", revoked: "已撤销",
+    expiresAt: "到期：{{time}}", expiredAt: "已到期：{{time}}",
+    legacy: "旧产出尚无稳定交付链接；预览依赖原工作区，无法作为远程文件链接分享。",
+  },
   /* separator between the names in a short inline list: "对话回答、研究" */
   listSep: "、",
   /* Settings · 访问与客户端 (access-settings.tsx) */

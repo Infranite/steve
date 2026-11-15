@@ -3,7 +3,7 @@
  * An output delivered again (same kind and location, or title) is a new version of it. Pure, so it is tested alone. */
 
 /** kind, title, location, artifact id, delivered at, role: the `Out` of store.ts */
-export type OutRow = [string, string, string | null, string, number?, ("record" | "result")?]
+export type OutRow = [string, string, string | null, string, number?, ("record" | "result")?, (string | null)?]
 export type OutV<O extends OutRow = OutRow> = { o: O; v: number; vs: number; delivery: number; record: boolean; old: boolean }
 export type OutGroups<O extends OutRow = OutRow> = { final: OutV<O>[]; records: { delivery: number; at: number; outs: OutV<O>[] }[] }
 

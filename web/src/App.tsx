@@ -66,6 +66,7 @@ import { HoldBanner } from "@/queue"
 import { YoloDialog } from "@/yolo/switch"
 const YoloDigestView = lazyView(() => import("@/yolo/digest").then((m) => ({ default: m.YoloDigestView })))
 const StatsRoute = lazyView(() => import("@/stats/page").then((m) => ({ default: m.StatsRoute })))
+const DeliveryPage = lazyView(() => import("@/delivery-page").then((m) => ({ default: m.DeliveryPage })))
 
 
 /** an old route (#/auto/acc, #/auto/space, #/personas): replaced in history by its new place under #/channels */
@@ -106,7 +107,7 @@ function Splash({ children }: { children: React.ReactNode }) {
   return <div className="flex h-[100dvh] flex-col items-center justify-center gap-4 bg-background px-6 text-center text-foreground">{children}</div>
 }
 
-export default function App() {
+export default function App({ deliveryId }: { deliveryId?: string }) {
   useStore()
   const t = useT()
   /* whether this page has a Hub to talk to: the one that served it, or the one it was pointed at */
@@ -169,7 +170,7 @@ export default function App() {
     <Splash>{title(t("shell:app.signInToContinue"))}<HubLine className="-mt-2" />
       {list ? <><HubChooser className="max-w-xs" /><Button variant="ghost" size="sm" onClick={() => { setOthers(false); setIntent("") }} data-login-back>{t("common:action.back")}</Button></> : <>
         {signIn.token && <TokenSignIn />}
-        {(signIn.link || !signIn.token) && !(signIn.refused && signIn.token) && <Button variant={signIn.token ? "ghost" : "default"} onClick={() => { location.href = hubUrl(signIn.link ?? st.login ?? "/auth/login") + "?back=" + encodeURIComponent(hubBase() ? location.href : location.pathname + location.hash) }} data-login>{signIn.token ? t("shell:app.signInWithBrowser") : t("shell:app.signIn")}</Button>}
+        {(signIn.link || !signIn.token) && !(signIn.refused && signIn.token) && <Button variant={signIn.token ? "ghost" : "default"} onClick={() => { location.href = hubUrl(signIn.link ?? st.login ?? "/auth/login") + "?back=" + encodeURIComponent(hubBase() ? location.href : location.pathname + location.search + location.hash) }} data-login>{signIn.token ? t("shell:app.signInWithBrowser") : t("shell:app.signIn")}</Button>}
         <ScanButton />
         <Button variant="ghost" size="sm" onClick={() => setOthers(true)} data-login-change-hub>{t("shell:hub.other")}</Button></>}
       <HubsOffer className="max-w-xs" /></Splash>
@@ -177,6 +178,7 @@ export default function App() {
   if (!st.ready) return <Splash>{st.error ? <><div className="type-headline">{t("shell:app.cantConnect")}</div><HubLine className="-mt-2" /><div className="type-callout text-muted-foreground">{st.error}</div>
     {list ? <HubChooser down className="max-w-xs" /> : <div className="flex gap-2"><Button variant="outline" onClick={() => location.reload()}>{t("common:action.retry")}</Button><Button variant="ghost" onClick={() => setOthers(true)} data-error-change-hub>{t("shell:hub.other")}</Button></div>}
     <HubsOffer className="max-w-xs" /></> : <Spinner className="size-5 text-muted-foreground" />}</Splash>
+  if (deliveryId) return <DeliveryPage id={deliveryId} />
   const view =
     a.split("?")[0] === "feed" ? <FeedView workspace={st.workspace!.id} filter={new URLSearchParams(a.split("?")[1]).get("kind") ?? ""} /> :
     a === "inbox" ? <InboxView /> :

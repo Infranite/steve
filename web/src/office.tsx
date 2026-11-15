@@ -254,15 +254,15 @@ function Slides({ slides }: { slides: Slide[] }) {
 }
 
 /** fetches the file and renders it; failures say what went wrong and leave the download */
-export function OfficeView({ url, name, fallback }: { url: string; name: string; fallback: (reason: string) => ReactNode }) {
+export function OfficeView({ url, name, fallback, credentials = "include" }: { url: string; name: string; fallback: (reason: string) => ReactNode; credentials?: RequestCredentials }) {
   const [doc, setDoc] = useState<OfficeDoc | null>(null), [err, setErr] = useState(""), t = useT()
   useEffect(() => {
     let live = true; const px = pics()
     setDoc(null); setErr("")
-    fetch(url, { credentials: "include" }).then((r) => { if (!r.ok) throw new Error(t("shell:office.fetchFailed", { status: r.status })); return r.arrayBuffer() })
+    fetch(url, { credentials, signal: AbortSignal.timeout(30_000) }).then((r) => { if (!r.ok) throw new Error(t("shell:office.fetchFailed", { status: r.status })); return r.arrayBuffer() })
       .then((b) => readOffice(b, name, px)).then((d) => live && setDoc(d), (e: Error) => live && setErr(e.message || t("shell:office.parseFailed")))
     return () => { live = false; px.urls.forEach((u) => URL.revokeObjectURL(u)) }
-  }, [url, name])
+  }, [url, name, credentials])
   if (err) return <>{fallback(t("shell:office.cantOpen", { name, error: err }))}</>
   if (!doc) return <div className="py-16 text-center type-footnote text-muted-foreground">{t("shell:office.loading", { name })}</div>
   return (

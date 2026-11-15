@@ -32,8 +32,8 @@ export type Done = { id: string; type: Wait["type"]; q: string; choice: string; 
 export type Rel = { tone: "run" | "fail" | "ok"; text: string; /** the Hub's outcome, for deciding (text is a translated label) */ outcome?: "releasing" | "not_released" | "failed" | "released"; /** the release decision it comes from */ key?: string }
 /** an earlier plan: replaced (its open steps abandoned) or done (a new round followed) */
 /** an output the bot delivered: kind, title, location, artifact id, when it was delivered, and whether the bot said it is
- * a record of the work (`record`) or the result (`result`); unsaid, its title decides */
-export type Out = [string, string, string | null, string, number?, ("record" | "result")?]
+ * a record of the work (`record`) or the result (`result`); unsaid, its title decides. Last: an optional Hub delivery id. */
+export type Out = [string, string, string | null, string, number?, ("record" | "result")?, (string | null)?]
 export type PlanRound = { n: number; steps: [string, number][]; end: "done" | "replaced"; at: string }
 export type Item = {
   id: string; t: string; b: string; st: "prop" | "run" | "wait" | "pause" | "done" | "drop" | "block" | "fail"; phase?: "ready" | "active" | "closing" | "closed"; cycle?: number; deps?: string[]; src: [string, string]; ws: string; project: string | null; up: string; star?: boolean; acc: string
@@ -482,7 +482,7 @@ function itemOf(i: RItem): Item {
     rounds: (det?.planRounds ?? []).map((r) => ({ n: r.round, steps: steps(r.steps), end: r.end, at: tm(r.created) })),
     workflow: det?.workflow,
     dependencyWait: det?.dependency_wait,
-    wait: open.length ? waitOf(open[0]) : undefined, waits: open.map(waitOf), ss: i.sessionIds, tl, outs: det ? det.artifacts.map((a): Out => [a.kind, a.title, a.location, a.id, a.created, det.artifactRoles?.[a.id] as Out[5]]) : [], anns: det?.annotations ?? [],
+    wait: open.length ? waitOf(open[0]) : undefined, waits: open.map(waitOf), ss: i.sessionIds, tl, outs: det ? det.artifacts.map((a): Out => [a.kind, a.title, a.location, a.id, a.created, det.artifactRoles?.[a.id] as Out[5], a.delivery_id]) : [], anns: det?.annotations ?? [],
     q: act?.queued ?? [], qs: act?.id ?? null,
     parent: i.parent?.item || i.parent?.session ? { item: i.parent.item ?? undefined, s: i.parent.session ?? undefined, at: i.parent.at ?? undefined } : null, due: i.due ?? undefined, pri: (i.priority as Item["pri"]) ?? "中", arch: i.archived, snooze: snoozed, snoozeUntil: snoozed ? i.snooze!.until : undefined, tags: i.tags,
     /* the hub clears cwd when the project changes; a session still running then is in the old directory */
