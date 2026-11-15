@@ -1181,8 +1181,8 @@ impl Tx<'_> {
         if p.kind != "git" || !p.worktree || !git::is_git(path) {
             return Ok((p.path.clone(), None));
         }
-        let branch = format!("steve/{}", item.id.to_lowercase());
         let wt: PathBuf = self.cfg().worktrees.join(&item.id);
+        let branch = crate::worktrees::worktree_branch(item, path, &wt);
         /* a new item waits for disk space; one that had a worktree gets its sources back (megabytes) */
         if !wt.exists() && item.cwd.as_deref().is_none_or(str::is_empty) {
             self.c.disk_floor()?;

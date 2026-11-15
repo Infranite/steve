@@ -349,3 +349,49 @@ fn a_worktree_the_core_could_not_make_is_not_left_named_and_a_retry_still_waits_
     assert!(k.core.tx().start_session(&id, None, None).is_err());
     assert!(!wt.exists());
 }
+
+#[test]
+fn a_workspace_binding_conflict_retires_the_session_before_continue() {
+    let k = kit(true);
+    let (_, p) = project(&k);
+    let i = create(&k, &p);
+    let old = k.db().sessions_of_item(&i.id).unwrap().pop().unwrap();
+    k.core
+        .workspace_binding_failed(&old.id, "workspace changed; continue in a new session")
+        .unwrap();
+    assert_eq!(k.db().session(&old.id).unwrap().unwrap().status, "ended");
+    let d = k
+        .db()
+        .decisions_of_item(&i.id)
+        .unwrap()
+        .into_iter()
+        .find(|d| d.kind == "fail" && d.status == "open")
+        .unwrap();
+    k.core.resolve(&d.id, "continue", "", "me").unwrap();
+    let sessions = k.db().sessions_of_item(&i.id).unwrap();
+    assert_eq!(sessions.len(), 2);
+    assert_ne!(sessions.last().unwrap().id, old.id);
+    k.core
+        .workspace_binding_failed(&old.id, "late conflict")
+        .unwrap();
+    assert!(!k.open_kinds(&i.id).contains(&"fail".into()));
+}
+
+#[test]
+fn separate_installations_never_take_another_worktrees_branch() {
+    let k = kit(true);
+    let (repo, p) = project(&k);
+    let i = create(&k, &p);
+    let other = k.home().join("another-installation-worktree");
+    let old_branch = format!("steve/{}", i.id.to_lowercase());
+    node_makes(&repo, &other, &old_branch);
+    std::fs::write(other.join("uncommitted.txt"), "keep this work").unwrap();
+    let plan = k.core.tx().planned_worktree(&i).unwrap().unwrap();
+    assert_ne!(plan.1, old_branch);
+    assert_eq!(plan.1, k.core.tx().planned_worktree(&i).unwrap().unwrap().1);
+    assert_eq!(
+        std::fs::read_to_string(other.join("uncommitted.txt")).unwrap(),
+        "keep this work"
+    );
+    assert_eq!(g(&other, &["branch", "--show-current"]), old_branch);
+}

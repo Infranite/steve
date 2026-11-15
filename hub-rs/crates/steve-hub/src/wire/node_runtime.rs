@@ -94,8 +94,14 @@ const ACCEPT_WINDOW_MS: i64 = 10 * 60_000;
 pub(crate) fn said(e: &ApiError) -> String {
     steve_i18n::stored(|| match NodeStop::of(e) {
         Some(stop) => stop_text(stop),
+        None if workspace_binding_conflict(e) => steve_i18n::t!("hub.node.workspace_conflict"),
         None => e.safe_detail.clone(),
     })
+}
+
+/// Only the Node's own immutable-workspace conflict; a harness's arbitrary conflict stays intact.
+pub(crate) fn workspace_binding_conflict(e: &ApiError) -> bool {
+    e.code == ErrorCode::Conflict && e.safe_detail == "this resource's workspace was prepared otherwise"
 }
 
 fn stop_text(stop: NodeStop) -> String {

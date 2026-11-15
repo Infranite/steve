@@ -270,13 +270,26 @@ impl super::node_runtime::NodeDomain for HubHost {
                     let path = dir.unwrap_or_default();
                     core.workspace_ready(&session, &path.to_string_lossy(), view.branch.as_deref())
                 }
-                WorkspaceFact::PrepareFailed { session, error } => core.workspace_failed(
-                    &session,
-                    error
+                WorkspaceFact::PrepareFailed { session, error } => {
+                    let detail = error
                         .as_ref()
-                        .is_some_and(|e| e.code == steve_node_api::ErrorCode::Exhausted),
-                    error.as_ref().map_or("", |e| e.safe_detail.as_str()),
-                ),
+                        .map(super::node_runtime::said)
+                        .unwrap_or_default();
+                    if error
+                        .as_ref()
+                        .is_some_and(super::node_runtime::workspace_binding_conflict)
+                    {
+                        core.workspace_binding_failed(&session, &detail)
+                    } else {
+                        core.workspace_failed(
+                            &session,
+                            error
+                                .as_ref()
+                                .is_some_and(|e| e.code == steve_node_api::ErrorCode::Exhausted),
+                            &detail,
+                        )
+                    }
+                }
                 WorkspaceFact::Tidied { item, removed, .. } => {
                     core.workspace_tidied(&item, removed)
                 }
@@ -931,15 +944,7 @@ impl steve_core::AgentRuntime for RoutedRuntime {
         let Some(n) = &self.node else {
             return Ok(false);
         };
-        let Some(item) = self
-            .store
-            .sessions()
-            .get(session_id)?
-            .and_then(|s| s.item_id)
-        else {
-            return Ok(false);
-        };
-        Ok(n.tidy_workspace(&item, keep_branch)?)
+        Ok(n.tidy_session_workspace(session_id, keep_branch)?)
     }
     /// A new session is bound to the remote Node named by `STEVE_NODE_BIND` when it can run there;
     /// otherwise, with the local Node enabled here, to it when its binding can be planned.

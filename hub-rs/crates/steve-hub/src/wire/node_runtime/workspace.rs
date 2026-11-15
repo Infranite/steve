@@ -44,15 +44,40 @@ struct LastPrepare {
     view: Option<WorkspaceView>,
 }
 
-/// The resource of the workspace `session` works in (`item:<id>`, as the binding names it).
-fn resource_in(tx: &rusqlite::Connection, session: &str) -> Result<Option<String>, StoreError> {
-    Ok(tx
-        .query_row("SELECT item_id FROM sessions WHERE id=?", [session], |r| {
-            r.get::<_, Option<String>>(0)
-        })
-        .optional()?
-        .flatten()
-        .map(|i| format!("item:{i}")))
+/// Resolve from this session's recorded binding, never from the item's current project.
+/// The initial prepare survives retries; old bindings without that command may use the legacy ID.
+fn resource_in(
+    tx: &rusqlite::Connection,
+    session: &str,
+    node: &str,
+) -> Result<Option<String>, StoreError> {
+    let bound: Option<(String, String, Option<String>)> = tx.query_row(
+        "SELECT r.node_id,r.workspace_ref,s.item_id FROM runtime_sessions r JOIN sessions s ON s.id=r.session_id WHERE r.session_id=? AND r.node_id=?",
+        [session, node], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?)),
+    ).optional()?;
+    let Some((node, reference, item)) = bound else {
+        return Ok(None);
+    };
+    let reference: WorkspaceRef = serde_json::from_str(&reference)?;
+    if reference.node.as_str() != node {
+        return Ok(None);
+    }
+    let request: Option<String> = tx.query_row(
+        "SELECT request FROM node_commands WHERE operation_id=? AND node_id=? AND method='prepare_workspace'",
+        rusqlite::params![format!("op_prep_{session}"),node], |r| r.get(0),
+    ).optional()?;
+    if let Some(request) = request {
+        let resource = serde_json::from_str::<Command<Prepare>>(&request)?
+            .body
+            .resource;
+        if reference.id.as_str() == workspace_id(&resource) {
+            return Ok(Some(resource));
+        }
+        return Ok(None);
+    }
+    Ok(item
+        .map(|i| format!("item:{i}"))
+        .filter(|r| reference.id.as_str() == workspace_id(r)))
 }
 
 fn last_prepare_in(
@@ -153,7 +178,7 @@ impl NodeRuntime {
             if !bound {
                 return Ok(false);
             }
-            let Some(resource) = resource_in(tx, session)? else {
+            let Some(resource) = resource_in(tx, session, node)? else {
                 return Ok(false);
             };
             Ok(last_prepare_in(tx, node, &resource)?
@@ -170,7 +195,7 @@ impl NodeRuntime {
         session: &str,
     ) -> Result<Option<String>, StoreError> {
         let node = self.node_id.as_str();
-        let Some(resource) = resource_in(tx, session)? else {
+        let Some(resource) = resource_in(tx, session, node)? else {
             return Ok(None);
         };
         let Some(last) = last_prepare_in(tx, node, &resource)? else {
@@ -214,8 +239,36 @@ impl NodeRuntime {
     /// the item now (none made, or given back already): nothing was done.
     pub fn tidy_workspace(&self, item: &str, keep_branch: bool) -> Result<bool, StoreError> {
         self.running()?;
+        let session: Option<String> = self.store.reader(|tx| {
+            tx.query_row("SELECT s.id FROM sessions s JOIN runtime_sessions r ON r.session_id=s.id WHERE s.item_id=? AND r.node_id=? ORDER BY s.created DESC,s.no DESC LIMIT 1",
+                [item, self.node_id.as_str()], |r| r.get(0)).optional().map_err(StoreError::from)
+        })?;
+        let Some(session) = session else {
+            return Ok(false);
+        };
+        self.tidy_session_workspace(&session, keep_branch)
+    }
+
+    /// Tidy exactly the workspace this session used; earlier project generations are retained.
+    pub fn tidy_session_workspace(
+        &self,
+        session: &str,
+        keep_branch: bool,
+    ) -> Result<bool, StoreError> {
+        self.running()?;
         let node = self.node_id.as_str();
-        let resource = format!("item:{item}");
+        let selected = self.store.reader(|tx| {
+            let item: Option<String> = tx
+                .query_row("SELECT item_id FROM sessions WHERE id=?", [session], |r| {
+                    r.get(0)
+                })
+                .optional()?
+                .flatten();
+            Ok::<_, StoreError>(item.zip(resource_in(tx, session, node)?))
+        })?;
+        let Some((item, resource)) = selected else {
+            return Ok(false);
+        };
         let wid = workspace_id(&resource);
         let plan = self.store.reader(|tx| -> Result<_, StoreError> {
             let Some(last) = last_prepare_in(tx, node, &resource)? else {

@@ -167,6 +167,7 @@ pub fn plan(
         item.cwd.as_deref().filter(|p| !p.is_empty())
     };
     let resource = format!("item:{}", item.id);
+    let original = prepared_as(store, &resource).map_err(|_| Unreadable)?;
     let prepare = if let Some(cwd) = cwd {
         // Never replace a legacy workspace containing user changes with a fresh worktree.
         let path = Path::new(cwd);
@@ -182,7 +183,7 @@ pub fn plan(
         };
         let existing = PrepareKind::Existing { dir };
         match worktrees.and_then(|w| item_worktree(store, &item, &s.workspace_id, path, w)) {
-            Some(wt) if prepared_as(store, &resource).is_none_or(|k| k != existing) => wt,
+            Some(wt) if original.as_ref().is_none_or(|k| *k != existing) => wt,
             _ => existing,
         }
     } else if let Some(pid) = &item.project_id {
@@ -228,6 +229,10 @@ pub fn plan(
         }
         PrepareKind::Scratch => {}
     }
+    // A resource is immutable on the Node. A project/directory change gets a deterministic
+    // identity of its own; retries use the same identity and never rewrite the old workspace.
+    let resource =
+        workspace_resource(&resource, original.as_ref(), &prepare).map_err(|_| Unreadable)?;
     Ok(Binding {
         session: s.id,
         resource,
@@ -282,25 +287,39 @@ fn item_worktree(
     })
 }
 
-/// How the local Node last prepared `resource`, as the Hub asked it (`None`: never).
-fn prepared_as(store: &Store, resource: &str) -> Option<PrepareKind> {
-    let request: String = store
-        .reader(|c| {
+/// The first specification sent for the legacy resource. Later failed or pending requests
+/// must not redefine that immutable identity (including failures from older Hubs).
+fn prepared_as(store: &Store, resource: &str) -> Result<Option<PrepareKind>, StoreError> {
+    let request: Option<String> =
+        store.reader(|c| {
             use rusqlite::OptionalExtension;
-            Ok::<_, StoreError>(
-                c.query_row(
-                    "SELECT request FROM node_commands WHERE node_id='local' AND method='prepare_workspace'
-                      AND json_extract(request,'$.body.resource')=? ORDER BY rowid DESC LIMIT 1",
-                    [resource],
-                    |r| r.get(0),
-                )
-                .optional()?,
-            )
+            c.query_row(
+            "SELECT request FROM node_commands WHERE node_id='local' AND method='prepare_workspace'
+             AND json_extract(request,'$.body.resource')=? ORDER BY rowid ASC LIMIT 1",
+            [resource], |r| r.get(0),
+        ).optional().map_err(StoreError::from)
+        })?;
+    request
+        .map(|r| {
+            serde_json::from_str::<Command<Prepare>>(&r)
+                .map(|c| c.body.kind)
+                .map_err(Into::into)
         })
-        .ok()??;
-    serde_json::from_str::<Command<Prepare>>(&request)
-        .ok()
-        .map(|c| c.body.kind)
+        .transpose()
+}
+
+fn workspace_resource(
+    legacy: &str,
+    original: Option<&PrepareKind>,
+    desired: &PrepareKind,
+) -> ApiResult<String> {
+    if original.is_none_or(|kind| kind == desired) {
+        return Ok(legacy.to_string());
+    }
+    Ok(format!(
+        "{legacy}:workspace:{}",
+        digest_of(desired)?.as_str()
+    ))
 }
 
 /// The binding of a new session to the paired remote Node `node` (`STEVE_NODE_BIND`), or `None`
@@ -475,6 +494,73 @@ pub(crate) fn roots(store: &Store, extra: &[PathBuf]) -> Result<Vec<steve_node::
 mod tests {
     use super::super::node_tools::tests::fixture;
     use super::*;
+    #[test]
+    fn changed_workspace_specs_get_stable_distinct_resources() {
+        let old = PrepareKind::Scratch;
+        let next = PrepareKind::Existing {
+            dir: at("/project").unwrap(),
+        };
+        assert_eq!(
+            workspace_resource("item:i1", None, &old).unwrap(),
+            "item:i1"
+        );
+        assert_eq!(
+            workspace_resource("item:i1", Some(&old), &old).unwrap(),
+            "item:i1"
+        );
+        let resource = workspace_resource("item:i1", Some(&old), &next).unwrap();
+        assert_ne!(resource, "item:i1");
+        assert_eq!(
+            resource,
+            workspace_resource("item:i1", Some(&old), &next).unwrap()
+        );
+        assert_ne!(
+            resource,
+            workspace_resource(
+                "item:i1",
+                Some(&old),
+                &PrepareKind::Existing {
+                    dir: at("/other").unwrap()
+                }
+            )
+            .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_later_spec_never_redefines_a_legacy_resource() {
+        let h = fixture(vec![]).await;
+        for (n, kind) in [
+            (1, PrepareKind::Scratch),
+            (
+                2,
+                PrepareKind::Existing {
+                    dir: at("/project").unwrap(),
+                },
+            ),
+        ] {
+            let req = serde_json::to_string(&Command {
+                id: OperationId::new(format!("prep{n}")).unwrap(),
+                issued_at: Timestamp(1),
+                accept_before: Timestamp(2),
+                grant: GrantId::new("hub").unwrap(),
+                body: Prepare {
+                    resource: "item:i1".into(),
+                    kind,
+                },
+            })
+            .unwrap();
+            h.store.transaction::<_,StoreError>(|tx| {
+                tx.execute("INSERT INTO node_commands(operation_id,node_id,method,request,digest,state,created,updated) VALUES(?,'local','prepare_workspace',?,'d','rejected',1,1)",rusqlite::params![format!("prep{n}"),req])?;
+                Ok(())
+            }).unwrap();
+        }
+        assert_eq!(
+            prepared_as(&h.store, "item:i1").unwrap(),
+            Some(PrepareKind::Scratch)
+        );
+    }
+
     #[tokio::test]
     async fn planning_is_pure_and_preserves_cwd() {
         let h = fixture(vec![]).await;
@@ -556,6 +642,9 @@ mod tests {
         };
         let req = serde_json::to_string(&c).unwrap();
         h.store.transaction::<_,StoreError>(|tx|{
+            // This fixture normally prepares Scratch. Model the migrated Existing binding
+            // from its first command, rather than appending a contradictory legacy request.
+            tx.execute("UPDATE node_commands SET request=json_set(request,'$.body.kind',json(?)) WHERE node_id='local' AND method='prepare_workspace' AND json_extract(request,'$.body.resource')='item:i1'",[serde_json::to_string(&existing).unwrap()])?;
             tx.execute("INSERT INTO node_commands(operation_id,node_id,method,request,digest,state,created,updated) VALUES('op_prep_s0','local','prepare_workspace',?,'d','finished',1,1)",[req])?;
             Ok(())
         }).unwrap();
@@ -1169,7 +1258,19 @@ mod host_tests {
             )?;
             Ok(())
         }).unwrap();
-        store.bots().seed("test", false, &steve_store::NewBot { name: "test".into(), harness: "unused-acp".into(), ..Default::default() }, "default").unwrap();
+        store
+            .bots()
+            .seed(
+                "test",
+                false,
+                &steve_store::NewBot {
+                    name: "test".into(),
+                    harness: "unused-acp".into(),
+                    ..Default::default()
+                },
+                "default",
+            )
+            .unwrap();
         store.with_conn(|c| Ok(c.execute_batch("UPDATE items SET bot_id='test' WHERE id='child'; UPDATE sessions SET bot_id='test' WHERE id='work'" )?)).unwrap();
         let host = Arc::new(super::super::core::HubHost {
             store: store.clone(),
