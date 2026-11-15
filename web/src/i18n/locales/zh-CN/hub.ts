@@ -35,6 +35,7 @@ export default {
   "identityHint": "修改共享信息和个人别名均不会改变地址或 Hub 身份。",
   "devices": "关联设备",
   "deviceLink": "查看设备与当前工作",
+  "linkedDevice": "Hub 所在设备 · 查看当前工作、接活与监控",
   "unlinked": "尚无可信的 Hub—设备身份关联；不按名称推断。",
   "alias": "仅此客户端的显示别名",
   "aliasHint": "仅影响此浏览器或 Apple 客户端的连接目录，不按账号跨端同步，也不改变共享名称。",

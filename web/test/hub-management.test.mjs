@@ -1,7 +1,16 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { hubDirectory, rememberHub, savedHubs, normalizeAlias, setSharedHubName } from '../src/hub.ts'
-import { hubDraftErrors, normalizeHubDraft, parseHubInfo, parseHubSnapshot, UnsupportedHubMetadata } from '../src/hub-management-model.ts'
+import { hubDraftErrors, linkedHubDevice, normalizeHubDraft, parseHubInfo, parseHubSnapshot, UnsupportedHubMetadata } from '../src/hub-management-model.ts'
+
+test('Hub device link requires a unique explicit inventory binding, never a name or role', () => {
+  const named = { id: 'inventory-hub', name: 'Same name', roles: ['Hub'], node_id: null }
+  const local = { id: 'inventory-local', name: 'A renamed device', node_id: 'local' }
+  assert.equal(linkedHubDevice([named]), undefined)
+  assert.equal(linkedHubDevice([{ id: 'legacy', name: 'Hub' }]), undefined)
+  assert.equal(linkedHubDevice([named, local]), local)
+  assert.equal(linkedHubDevice([local, { id: 'other', name: 'Other', node_id: 'local' }]), undefined)
+})
 
 test('Unicode scalar limits, newline normalization and plain text', () => {
   assert.deepEqual(hubDraftErrors({display_name:'😀'.repeat(64),purpose_note:'😀'.repeat(500)}),{name:false,note:false})

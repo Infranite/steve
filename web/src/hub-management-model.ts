@@ -1,6 +1,12 @@
 export type HubMetadata = { hub_id: string; display_name: string; purpose_note: string; revision: number; updated_at: number | null; updated_by: string | null }
 export type HubInfo = { contract: 1; capabilities: { shared_metadata: 1 }; metadata: HubMetadata; can_edit: boolean; edit_reason: string | null; device_id: string | null }
 export type HubDraft = Pick<HubMetadata, "display_name" | "purpose_note">
+/** The inventory explicitly declares the local binding; a Hub role or name is not an identity join.
+ * Ambiguous bindings stay unknown rather than linking to an arbitrary device. */
+export function linkedHubDevice(devices: readonly { id: string; name: string; node_id?: string | null }[]) {
+  const local = devices.filter(device => device.node_id === "local")
+  return local.length === 1 ? local[0] : undefined
+}
 export class UnsupportedHubMetadata extends Error {}
 export function normalizeHubDraft(d: HubDraft): HubDraft {
   return { display_name: d.display_name.trim(), purpose_note: d.purpose_note.replace(/\r\n?/g, "\n") }

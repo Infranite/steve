@@ -13,7 +13,7 @@ import { st } from "@/store"
 import { HubError } from "@/api"
 import { currentHub, setHubNavigationGuard } from "@/hub"
 import { HubChooser, useHubs, useHubAddress } from "@/hub-ui"
-import { hubDraftErrors, parseHubSnapshot, normalizeHubDraft, readHubInfo, writeHubInfo, UnsupportedHubMetadata, type HubDraft, type HubInfo, type HubMetadata, type HubSnapshot } from "@/hub-management-api"
+import { hubDraftErrors, linkedHubDevice, parseHubSnapshot, normalizeHubDraft, readHubInfo, writeHubInfo, UnsupportedHubMetadata, type HubDraft, type HubInfo, type HubMetadata, type HubSnapshot } from "@/hub-management-api"
 
 const draftOf = (m: HubMetadata): HubDraft => ({ display_name: m.display_name, purpose_note: m.purpose_note })
 const equal = (a: HubDraft, b: HubDraft) => JSON.stringify(normalizeHubDraft(a)) === JSON.stringify(normalizeHubDraft(b))
@@ -27,6 +27,7 @@ export function HubOfflinePage() {
 export function HubSettingsPane({ readOnly = false }: { readOnly?: boolean }) {
   const t = useT(), { dir, hubs, reload } = useHubs(), address = useHubAddress()
   const current = hubs?.find(h => h.current)
+  const device = linkedHubDevice(st.devices)
   const key = `steve.hub.snapshot:${dir.native ? current?.id ?? "pending" : currentHub()}`
   const [snapshot, setSnapshot] = useState<HubSnapshot | null>(() => {
     try { return parseHubSnapshot(JSON.parse(sessionStorage.getItem(key) ?? "null")) } catch { return null }
@@ -159,7 +160,7 @@ export function HubSettingsPane({ readOnly = false }: { readOnly?: boolean }) {
       <dl className="space-y-3"><div><dt className="text-muted-foreground">{t("hub:address")}</dt><dd className="font-mono">{address || currentHub()}</dd></div><div><dt className="text-muted-foreground">{t("hub:id")}</dt><dd className="font-mono" data-hub-id>{latest?.hub_id ?? t("hub:unread")}</dd></div><div><dt className="text-muted-foreground">{t("hub:version")}</dt><dd>{st.version || current?.version || t("hub:unread")}</dd></div></dl>
       <p className="type-footnote text-muted-foreground">{t("hub:identityHint")}</p>
     </div></Panel></Section>
-    <Section label={t("hub:devices")}><Panel><Row title={t("hub:deviceLink")} sub={t("hub:unlinked")} onClick={() => { location.hash = "#/devices" }} /></Panel></Section>
+    <Section label={t("hub:devices")}><Panel><div data-hub-device={device?.id ?? ""}><Row title={device?.name ?? t("hub:deviceLink")} sub={t(device ? "hub:linkedDevice" : "hub:unlinked")} onClick={() => { location.hash = device ? `#/devices/${encodeURIComponent(device.id)}` : "#/devices" }} /></div></Panel></Section>
     <Section label={t("hub:alias")}><Panel><div className="space-y-3 p-4">
       <p className="type-callout text-muted-foreground">{t("hub:aliasHint")}</p>
       {aliasEditing ? <><FormField label={t("hub:alias")} hint={t("hub:aliasLimit")}><Input id="hub-alias" value={alias} disabled={busy} onChange={e => setAlias(e.target.value)} /></FormField><div className="flex flex-wrap gap-2"><Button disabled={busy || alias === aliasBase} onClick={() => void saveAlias()} data-hub-alias-save>{t("common:action.save")}</Button><Button variant="outline" disabled={busy} onClick={() => setAlias("")} data-hub-alias-clear>{t("hub:clearAlias")}</Button><Button variant="ghost" disabled={busy} onClick={() => { if (guard.current()) setAliasEditing(false) }}>{t("common:action.cancel")}</Button></div></> : <><p data-hub-alias-value>{current?.alias || t(dir.rename ? "hub:noAlias" : "hub:oldBridge")}</p><Button variant="outline" disabled={!dir.rename || !current || busy || editing} onClick={() => { setAlias(current?.alias ?? ""); setAliasBase(current?.alias ?? ""); setAliasEditing(true); setMessage("") }} data-hub-alias-edit>{t("hub:editAlias")}</Button></>}

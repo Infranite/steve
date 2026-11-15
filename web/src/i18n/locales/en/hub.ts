@@ -35,6 +35,7 @@ export default {
   "identityHint": "Shared information and personal aliases do not change the address or Hub identity.",
   "devices": "Related devices",
   "deviceLink": "View devices and current work",
+  "linkedDevice": "Hub device · Current work, availability and monitoring",
   "unlinked": "No trusted Hub–device identity mapping is available; names are not used to infer one.",
   "alias": "Display alias on this client only",
   "aliasHint": "Applies only to this browser or Apple client’s connection directory. It does not sync across clients or change the shared name.",
