@@ -2,7 +2,7 @@
  * via itemDisplayState) sorted as the items page sorts it (item-lanes.ts), so the pill's "N 进行中 · M 等你" is the
  * page's. ui.tsx shows it in the sidebar and a phone's page header, so this imports nothing from ui.tsx. */
 import { RunningNow, type RunningTask } from "@/components/affect/running-now"
-import { itemDisplayState, workflowRelation, workflowRelationText } from "@/item-workflow-relation"
+import { isAttachedWorkflowChild, itemDisplayState, workflowRelation, workflowRelationText } from "@/item-workflow-relation"
 import { planProgress, resumable, RUN_ORDER, runStateOf, type RunState } from "@/item-lanes"
 import { permissionQuestion } from "@/permission-question"
 import { setSt, st, type Item } from "@/store"
@@ -21,7 +21,7 @@ export function stepOf(i: Item, said: string): string {
 export function runningTasks(t: ReturnType<typeof useT>): RunningTask[] {
   const rows: (RunningTask & { order: number })[] = []
   for (const i of st.items) {
-    if (i.arch) continue
+    if (i.arch || isAttachedWorkflowChild(i, st.items)) continue
     const s = itemDisplayState(i), state: RunState | null = runStateOf(s)
     if (!state) continue
     const prog = planProgress(i.plan)

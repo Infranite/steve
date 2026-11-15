@@ -206,6 +206,7 @@ impl Fixture {
                     name: "Fixture operation".into(),
                     passed: true,
                     operated: true,
+                    scope: None,
                 }],
                 &[],
             )

@@ -136,7 +136,7 @@ pub(crate) enum Msg {
 /// waits for room on the data queue ([`enqueue`]), so the harness blocks on its stdout instead.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Ingress {
-    /// One message over the 1 MiB frame cap.
+    /// One message over the 16 MiB frame cap.
     Frame,
     /// More bytes than the attempt's output budget.
     Output,
@@ -2352,19 +2352,19 @@ async fn open_harness(
             log_tag: format!("[node {session}]"),
             clean_env: fresh.is_some(),
         },
-        1 << 20,
+        HARNESS_MAX_FRAME_BYTES,
         move |bytes| {
             let token = admission_gate.0.load(Ordering::SeqCst);
             if token == 0 {
                 let total = counter
                     .fetch_add(bytes as u64, Ordering::SeqCst)
                     .saturating_add(bytes as u64);
-                return bytes <= 1 << 20 && total <= 8 << 20;
+                return bytes <= HARNESS_MAX_FRAME_BYTES && total <= 32 << 20;
             }
             let total = counter
                 .fetch_add(bytes as u64, Ordering::SeqCst)
                 .saturating_add(bytes as u64);
-            let why = if bytes > 1 << 20 {
+            let why = if bytes > HARNESS_MAX_FRAME_BYTES {
                 Some(Ingress::Frame)
             } else if total > admission_gate.1.load(Ordering::SeqCst) {
                 Some(Ingress::Output)

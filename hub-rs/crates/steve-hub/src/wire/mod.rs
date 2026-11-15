@@ -137,6 +137,10 @@ fn core_config(cfg: &Config, vars: &Vars) -> steve_core::CoreConfig {
     c.disk = cfg.disk;
     c.version = cfg.version.clone();
     c.mq = steve_core::config::mq_from_env();
+    c.max_workflow_parallel = vars("STEVE_WORKFLOW_MAX_PARALLEL")
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(4);
     c.commit = crate::build_identity().map(|(_, commit)| commit.to_owned());
     if let Some(n) = cfg.takeover_continues {
         c.takeover_continues = n;

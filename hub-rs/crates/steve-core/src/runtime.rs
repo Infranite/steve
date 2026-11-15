@@ -305,11 +305,28 @@ pub struct Output {
 }
 
 /// A check reported by `steve_deliver`.
-#[derive(Debug, Clone, serde::Deserialize, serde::Serialize, PartialEq)]
+#[derive(Debug, Clone, Default, serde::Deserialize, serde::Serialize, PartialEq)]
 pub struct Check {
     pub name: String,
     pub passed: bool,
     /// Something the agent actually did on the running thing, not a build or a test ([`crate::proof`]).
     #[serde(default)]
     pub operated: bool,
+    /// `unit` (default), `baseline` (pre-existing unrelated failure), or `external` (upstream service outage).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
+}
+
+impl Check {
+    pub fn effective_scope(&self) -> &str {
+        self.scope.as_deref().unwrap_or("unit")
+    }
+
+    pub fn valid_scope(&self) -> bool {
+        matches!(self.effective_scope(), "unit" | "baseline" | "external")
+    }
+
+    pub fn is_unit_scope(&self) -> bool {
+        self.effective_scope() == "unit"
+    }
 }

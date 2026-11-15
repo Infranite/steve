@@ -128,9 +128,15 @@ pub fn needs(text: &str) -> Needs {
 
 /// A check as the delivery and its evidence show it; an actual operation says so.
 pub fn check_line(c: &Check) -> String {
+    let scope_tag = match c.effective_scope() {
+        "baseline" => "[基线] ",
+        "external" => "[外部] ",
+        _ => "",
+    };
     format!(
-        "{} {}{}",
+        "{} {}{}{}",
         if c.passed { "✓" } else { "✗" },
+        scope_tag,
         if c.operated { "实际操作：" } else { "" },
         c.name
     )
@@ -475,6 +481,7 @@ mod tests {
             name: "设置·关于点检查更新".into(),
             passed: true,
             operated,
+            scope: None,
         };
         assert_eq!(check_line(&c(false)), "✓ 设置·关于点检查更新");
         assert_eq!(check_line(&c(true)), "✓ 实际操作：设置·关于点检查更新");
@@ -486,6 +493,7 @@ mod tests {
             name: name.into(),
             passed: true,
             operated: false,
+            scope: None,
         };
         for yes in [
             "构建通过",

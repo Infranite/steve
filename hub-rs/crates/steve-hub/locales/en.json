@@ -164,7 +164,7 @@
   "hub.node.stop.job_deadline": "The job went past its time limit; the Node stopped it",
   "hub.node.stop.hub_unreachable": "The Node could not reach the Hub past the lease and stopped the run",
   "hub.node.stop.output_limit": "The output went past this run's limit; the Node stopped it",
-  "hub.node.stop.frame_too_large": "The harness sent a message larger than 1 MiB; the Node stopped the run",
+  "hub.node.stop.frame_too_large": "The harness sent a message larger than 16 MiB; the Node stopped the run",
   "hub.node.stop.ingress_stalled": "The Node took none of the harness's output for %{secs} s (its journal or disk is stuck) and interrupted the run",
   "hub.node.stop.journal_budget": "The Node's journal reached its data budget; the run was stopped",
   "hub.node.stop.journal_fails": "The Node's journal failed to write; the run was stopped",

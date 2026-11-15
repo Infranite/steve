@@ -693,6 +693,7 @@ export default {
     sessions_other: "{{count}} 个会话",
     queued_other: "{{count}} 条补充排队",
     forked: "派生",
+    supersededTry: "旧尝试",
     waitingFor: "等待 {{ids}}",
     pausedFailed: "协作已暂停 · {{ids}} 失败",
     pausedWorkflow: "协作已暂停，等待继续",

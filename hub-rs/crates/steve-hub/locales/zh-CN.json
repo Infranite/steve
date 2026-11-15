@@ -164,7 +164,7 @@
   "hub.node.stop.job_deadline": "作业超过了时限，Node 已停止它",
   "hub.node.stop.hub_unreachable": "Node 超过租约时间仍连不上 Hub，已停止这次运行",
   "hub.node.stop.output_limit": "输出超过了这次运行的上限，Node 已停止它",
-  "hub.node.stop.frame_too_large": "harness 发来一条超过 1 MiB 的消息，Node 已停止这次运行",
+  "hub.node.stop.frame_too_large": "harness 发来一条超过 16 MiB 的消息，Node 已停止这次运行",
   "hub.node.stop.ingress_stalled": "Node 连续 %{secs} 秒没能接收 harness 的输出（它的本地运行记录或磁盘卡住了），已中断这次运行",
   "hub.node.stop.journal_budget": "Node 的本地运行记录达到了数据上限，已停止这次运行",
   "hub.node.stop.journal_fails": "Node 的本地运行记录写入失败，已停止这次运行",

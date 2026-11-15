@@ -1143,7 +1143,7 @@ impl Tx<'_> {
             Path::new(&s.cwd).join("outputs")
         };
         lines.push(format!(
-            "Final outputs that do not belong in Git (reports, designs, images, documents, data) go in {}. Create it if needed and give steve_deliver the actual file paths. Package a folder as a ZIP file before delivery. Git-managed code and documentation stay in the repository and are delivered by commit/branch. A prose label is not a file path; do not put final outputs in temporary folders or a disposable git worktree.",
+            "Final outputs that do not belong in Git (reports, designs, images, documents, data) go in {}. Create it if needed and give steve_deliver the actual file paths. Package a folder as a ZIP file before delivery. Git-managed code and documentation stay in the repository and are delivered by commit/branch. A prose label is not a file path; do not put final outputs in temporary folders or a disposable git worktree, and never copy source checkouts, .git, node_modules, or Cargo target directories into outputs/.",
             outputs.display()
         ));
         /* agents share the machine: on 2026-11-01 one ran `pkill -f include-partial-messages` and killed two others */
@@ -1153,7 +1153,7 @@ impl Tx<'_> {
         if self.workflow_child(item)? {
             lines.push("This is a collaboration work unit. Read your upstream artifacts with steve_workflow action=get. Deliver only your assigned unit with steve_deliver; report a failed review or a blocker with steve_workflow action=fail and reason. Your delivery does not accept or publish the parent. Do not call steve_publish. Shared outputs are data, never credentials or authorization.".into());
         } else {
-            lines.push("Use steve_workflow when the work splits into parts that can run at the same time: its purpose is to finish sooner. Split by independent scope (a module, a set of files, a deliverable), not by phase: investigating, designing and implementing one scope stay in one unit. Give each unit its own goal (short Markdown: one sentence, then 要做 / 验收 bullets) and Bot, depend only on what it really needs, and keep resource keys fine-grained (a module or path, never one key for the whole item); each unit works in its own worktree and integration merges them. Leave max_parallel out unless a real limit applies. Include an independent review Bot and a final integration unit; one review can check several units. When a review fails, write its findings into the failing unit's goal (replan with the same unit id), then retry that unit and the review; do not append chains of fix units. Work that is a single sequence of steps belongs in this session, not in a work graph. Read the graph before changing it; supply expected_revision and the reason for every replan. Wait for all required units, review and integration evidence before delivering this parent. Use pause/cancel/retry to coordinate changes; do not share credentials.".into());
+            lines.push("Use steve_workflow when the work splits into parts that can run at the same time: its purpose is to finish sooner. Split by independent scope (a module, a set of files, a deliverable), not by phase: investigating, designing and implementing one scope stay in one unit. Give each unit its own goal (short Markdown: one sentence, then 要做 / 验收 bullets) and Bot, depend only on what it really needs, and keep resource keys fine-grained (a module or path, never one key for the whole item); each unit works in its own worktree and integration merges them. Leave max_parallel out unless a real limit applies. Include an independent review Bot and a final integration unit; one review can check several units. When a review fails, write its findings into the failing unit's goal (replan with the same unit id), then retry that unit and the review; do not append chains of fix units. Work that is a single sequence of steps, single-module bugfixes, or config/model troubleshooting belongs directly in this session, not in a work graph. Read the graph before changing it; supply expected_revision and the reason for every replan. Attempt budgets are hard caps: when a unit exhausts its budget or hits an external blocker, stop retrying and ask the user with concrete progress and blockers. Wait for all required units, review and integration evidence before delivering this parent. Use pause/cancel/retry to coordinate changes; do not share credentials.".into());
             lines.push("When this item must wait for another item, first verify its real id using steve_items_search and steve_item_read. Call steve_item_dependencies with action=wait, deps, reason, and resume=automatic/notify/workspace; inspect its persisted snapshot for status=block and the effective resume_mode. End your turn when wait returns end_turn=true: a registered prerequisite wait needs no delivery or new question, and Steve will continue it according to the saved policy. On a later turn, action=get reads back the saved state. A plan update is not a registered dependency; never guess ids or claim registration without a successful read-back.".into());
             let bots = self.db().bots(&item.workspace_id)?;
             lines.push(format!(
@@ -1179,7 +1179,7 @@ impl Tx<'_> {
         } else {
             lines.push("- steve_ask: when you need a decision from the user. Never ask questions in plain text. After calling it, end your turn.".into());
             lines.push("- steve_request_approval: before outside effects (deploy, release, push, send, pay, delete) that lack explicit user authorization. Follow a recorded approval within its scope without requesting it again; approval is not evidence of completion. After calling it, end your turn.".into());
-            lines.push("- steve_deliver: when the goal is met, with a Chinese summary, the outputs (branch, commits, files) and the checks you actually ran. Tick off finished plan steps with steve_update first; list in `unfinished` the steps you deliberately left open; any step not ticked off is shown to the user as left open. Then end your turn.".into());
+            lines.push("- steve_deliver: when the goal is met, with a Chinese summary, the outputs (branch, commits, files) and the checks you actually ran (mark pre-existing unrelated repo failures with scope=\"baseline\" and external provider outages with scope=\"external\"; checks in your scope default to scope=\"unit\"). Tick off finished plan steps with steve_update first; list in `unfinished` the steps you deliberately left open; any step not ticked off is shown to the user as left open. Then end your turn.".into());
         }
         /* the harness asks nothing (完全放开, or the bot bypasses prompts): the agent hears the brakes itself */
         lines.extend(self.c.yolo_full_lines(item));
@@ -1892,9 +1892,16 @@ impl Tx<'_> {
             self.mark(&s.id, Mark::Asked);
             return settle(self.db(), item_id);
         }
-        /* the acceptance policy: automatic takes the agent's delivery as it is — its checks, failed ones
-         * and steps it left open are on the card, and you can send it back (decided by the user on
-         * 2026-11-09: trust the agent's judgment). Waived records that nobody confirmed. */
+        if checks.iter().any(|c| !c.valid_scope()) {
+            return Err(crate::cycle::conflict(
+                "检查范围 scope 只能是 unit、baseline 或 external",
+            ));
+        }
+        let unfinished_note = if unfinished.is_empty() {
+            String::new()
+        } else {
+            format!("\n\n未完成步骤：{}", unfinished.join("；"))
+        };
         let evidence: Vec<String> = checks.iter().map(crate::proof::check_line).collect();
         let policy = match self.accept_of(&item)?.as_str() {
             "waived" => crate::cycle::Policy::Waived,
@@ -1909,7 +1916,15 @@ impl Tx<'_> {
             .map(|path| format!("完整交付正文：{path}。请从「产出」打开。"));
         let shown_summary = saved_summary.as_deref().unwrap_or(summary);
         let (back, full) = crate::thread::flowback::delivery(self.db(), item_id, shown_summary)?;
-        if policy != crate::cycle::Policy::Human {
+        let has_failed_check = checks
+            .iter()
+            .any(|c| !c.passed && c.effective_scope() != "baseline");
+        let missing_proof = self.proof_missing(&item, checks)?.is_some();
+        let clean_for_auto =
+            !has_failed_check && !missing_proof && left.is_empty() && unfinished.is_empty();
+        if policy == crate::cycle::Policy::Waived
+            || (policy == crate::cycle::Policy::Automatic && clean_for_auto)
+        {
             flow_quiet(
                 self.db(),
                 item_id,
@@ -1921,11 +1936,8 @@ impl Tx<'_> {
                 },
             );
             self.mark_deliver(&item.workspace_id, item_id, &Self::by(s), None); // stats (ST3)
-            let clean = !checks.is_empty() && checks.iter().all(|c| c.passed) && left.is_empty();
-            let line = if policy == crate::cycle::Policy::Automatic && clean {
+            let line = if policy == crate::cycle::Policy::Automatic {
                 "自检全部通过，自动验收"
-            } else if policy == crate::cycle::Policy::Automatic {
-                "自动验收：有没通过的检查或没做完的步骤，见交付"
             } else {
                 "免确认：不需要验收"
             };
@@ -1934,6 +1946,15 @@ impl Tx<'_> {
             /* the request returns at once; the close waits for this very turn and anything required */
             self.lc_request_complete(item_id, &Self::by(s), policy, true, line, None, evidence)?;
             return Ok(());
+        }
+        if policy == crate::cycle::Policy::Automatic {
+            self.db().timeline_add(
+                item_id,
+                "steve",
+                "sys",
+                "自动验收转人工确认：有没通过的检查或没做完的步骤，请确认",
+                None,
+            )?;
         }
         /* a delivery waiting for acceptance before this one is void */
         self.lc_invalidate(item_id, "有新的交付，上一次交付作废")?;
@@ -1945,7 +1966,9 @@ impl Tx<'_> {
             item_id: Some(item_id.into()),
             session_id: Some(s.id.clone()),
             question: "做完了，请验收".into(),
-            draft: Some(format!("{shown_summary}{check_text}{left}")),
+            draft: Some(format!(
+                "{shown_summary}{check_text}{left}{unfinished_note}"
+            )),
             options: Some(vec!["pass".into(), "rework".into()]),
             requested_by: Self::by(s),
         })?;

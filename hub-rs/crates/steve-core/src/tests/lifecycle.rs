@@ -239,6 +239,7 @@ fn a_no_to_the_release_holds_for_every_later_result_of_the_cycle() {
                         name: "tests".into(),
                         passed: true,
                         operated: false,
+                        scope: None,
                     }],
                     &[],
                 )
@@ -469,6 +470,7 @@ fn auto_accepted_with_a_release_pending_is_not_done_either() {
                 name: "tests".into(),
                 passed: true,
                 operated: false,
+                scope: None,
             }],
             &[],
         )
@@ -478,10 +480,10 @@ fn auto_accepted_with_a_release_pending_is_not_done_either() {
     assert_eq!(now, "等待发布");
 }
 
-/// 2026-11-09: automatic acceptance takes the agent's delivery as it is. A failed check or no checks
-/// at all is on the card and the timeline, not a reason to stop for you.
+/// Automatic acceptance closes clean deliveries (including reported unrelated baseline failures),
+/// while holding deliveries with failed unit/external checks or unfinished steps for user confirmation.
 #[test]
-fn auto_accept_takes_the_delivery_as_it_is() {
+fn auto_accept_holds_failed_or_unfinished_delivery_and_closes_clean_or_baseline() {
     let k = Kit::new();
     let x = k.delivered(false);
     k.db()
@@ -498,24 +500,53 @@ fn auto_accept_takes_the_delivery_as_it_is() {
     k.core
         .tool_deliver(
             &s,
-            "ok",
+            "still failing",
             &[],
             &[Check {
                 name: "tests".into(),
                 passed: false,
                 operated: false,
+                scope: None,
             }],
+            &["待恢复外部上游".into()],
+        )
+        .unwrap();
+    assert_eq!(k.status(&x.id).0, "wait");
+    assert_eq!(k.open_kinds(&x.id), vec!["accept"]);
+    assert!(
+        k.timeline_texts(&x.id)
+            .contains(&"自动验收转人工确认：有没通过的检查或没做完的步骤，请确认".to_string())
+    );
+
+    k.core
+        .tool_deliver(
+            &s,
+            "all unit checks green",
+            &[],
+            &[
+                Check {
+                    name: "unit tests".into(),
+                    passed: true,
+                    operated: false,
+                    scope: None,
+                },
+                Check {
+                    name: "repo-wide fmt".into(),
+                    passed: false,
+                    operated: false,
+                    scope: Some("baseline".into()),
+                },
+            ],
             &[],
         )
         .unwrap();
-    assert!(k.open_kinds(&x.id).is_empty(), "nothing waits for you");
+    assert!(
+        k.open_kinds(&x.id).is_empty(),
+        "clean delivery closes automatically"
+    );
     assert_eq!(k.status(&x.id).0, "done");
     let i = k.db().item(&x.id).unwrap().unwrap();
     assert_eq!(i.acceptance.as_deref(), Some("automatic"));
-    assert!(
-        k.timeline_texts(&x.id)
-            .contains(&"自动验收：有没通过的检查或没做完的步骤，见交付".to_string())
-    );
 }
 
 #[test]

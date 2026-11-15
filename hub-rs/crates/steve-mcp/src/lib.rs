@@ -73,13 +73,16 @@ pub struct AskHint {
 }
 
 /// A check the agent ran (`steve_deliver`).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Check {
     pub name: String,
     pub passed: bool,
     /// The agent actually operated the running thing (not a build or a test).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub operated: bool,
+    /// `unit` (default), `baseline` (unrelated pre-existing failure), or `external` (outside service outage).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
 }
 
 /// What the MCP server needs from the Hub. `Session` is the session row as of the request.

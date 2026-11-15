@@ -2219,6 +2219,7 @@ impl steve_mcp::Backend for CoreMcp {
                 name: x.name,
                 passed: x.passed,
                 operated: x.operated,
+                scope: x.scope,
             })
             .collect();
         let unfinished = unfinished.unwrap_or_default();
