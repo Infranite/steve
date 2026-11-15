@@ -105,12 +105,35 @@ pub(crate) fn read(grant: &Grant, q: &ArtifactRead) -> ApiResult<ReadChunk> {
         return Err(denied());
     }
     let base = Path::new(&grant.dir);
-    let mut dir = anchor(base)?;
+    let dir = anchor(base)?;
     let meta = dir.metadata().map_err(io_error)?;
     if (meta.dev(), meta.ino()) != (grant.device, grant.inode) {
         return Err(denied());
     }
-    let mut parts = Path::new(q.location.as_str()).components().peekable();
+    Ok(read_open(base, dir, &q.location, q.expected.as_ref(), q.offset, q.max)?.chunk)
+}
+
+/// Used by the local-off compatibility path too: the caller authorizes the root, this Node
+/// implementation walks descriptors without following links and checks the revision twice.
+pub fn read_delivery_file(
+    base: &Path,
+    location: &RelPath,
+    expected: Option<&Revision>,
+    offset: u64,
+    max: u32,
+) -> ApiResult<DeliveryChunk> {
+    read_open(base, anchor(base)?, location, expected, offset, max)
+}
+
+fn read_open(
+    base: &Path,
+    mut dir: File,
+    location: &RelPath,
+    expected: Option<&Revision>,
+    offset: u64,
+    max: u32,
+) -> ApiResult<DeliveryChunk> {
+    let mut parts = Path::new(location.as_str()).components().peekable();
     let mut file = None;
     while let Some(c) = parts.next() {
         let Component::Normal(name) = c else {
@@ -131,19 +154,19 @@ pub(crate) fn read(grant: &Grant, q: &ArtifactRead) -> ApiResult<ReadChunk> {
     }
     // A directory can be renamed after openat. Check the descriptor's actual path before and
     // after reading, never re-resolve an untrusted pathname.
-    let path = base.join(q.location.as_str());
+    let path = base.join(location.as_str());
     if crate::scan::opened_path(&file).map_err(io_error)? != path {
         return Err(denied());
     }
     let version = crate::scan::version(&path, &before);
-    if q.expected.as_ref().is_some_and(|v| *v != version) {
+    if expected.is_some_and(|v| *v != version) {
         return Err(ApiError::new(ErrorCode::Conflict, "the artifact changed"));
     }
-    let offset = q.offset.min(before.len());
+    let offset = offset.min(before.len());
     file.seek(SeekFrom::Start(offset)).map_err(io_error)?;
     let mut bytes = Vec::new();
     (&mut file)
-        .take(u64::from(q.max.min(crate::scan::MAX_READ)))
+        .take(u64::from(max.min(crate::scan::MAX_READ)))
         .read_to_end(&mut bytes)
         .map_err(io_error)?;
     let after = file.metadata().map_err(io_error)?;
@@ -153,10 +176,14 @@ pub(crate) fn read(grant: &Grant, q: &ArtifactRead) -> ApiResult<ReadChunk> {
     if crate::scan::version(&path, &after) != version {
         return Err(ApiError::new(ErrorCode::Conflict, "the artifact changed"));
     }
-    Ok(ReadChunk {
-        offset,
-        eof: offset + bytes.len() as u64 >= after.len(),
-        bytes,
+    Ok(DeliveryChunk {
+        size: before.len(),
+        version,
+        chunk: ReadChunk {
+            offset,
+            eof: offset + bytes.len() as u64 >= after.len(),
+            bytes,
+        },
     })
 }
 

@@ -1809,7 +1809,7 @@ impl Tx<'_> {
                     .flatten()
                 })
                 .ok_or_else(|| crate::cycle::conflict("设计确认前需交付可打开的方案文件"))?;
-            verify_design_file(&self.cfg().home, item_id, report)?;
+            verify_design_file(self.db().store(), &self.cfg().home, item_id, report)?;
             let goal_version = self
                 .db()
                 .goals(item_id)?
@@ -2944,7 +2944,7 @@ impl Tx<'_> {
                         "设计或目标已经变化，请重新交付并确认",
                     ));
                 }
-                verify_design_file(&self.cfg().home, &i, location)?;
+                verify_design_file(self.db().store(), &self.cfg().home, &i, location)?;
                 self.db().decision_resolve(
                     id,
                     json!({"answer": choice, "text": text}),
@@ -4810,28 +4810,52 @@ fn design_confirmation_required(goal: &str) -> bool {
 }
 
 /// A decision authorizes the exact content-addressed report that was shown for this goal.
-fn verify_design_file(home: &Path, item: &str, location: &str) -> Result<()> {
-    let root = home.join("workspaces").join(item).join("outputs");
-    let path = Path::new(location);
-    let expected = path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .and_then(|s| s.strip_prefix("output-"))
-        .filter(|s| s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit()))
-        .ok_or_else(|| crate::cycle::conflict("设计文件缺少内容校验"))?;
+fn verify_design_file(
+    store: &steve_store::Store,
+    home: &Path,
+    item: &str,
+    location: &str,
+) -> Result<()> {
+    let (root, path, expected) = if location.starts_with("https://")
+        || location.starts_with("http://")
+    {
+        use rusqlite::OptionalExtension;
+        // Match the exact URL that the receiver recorded, never an arbitrary host with a
+        // similar-looking path. The item and current workspace must still own this version.
+        let hash = store.reader::<_,steve_store::StoreError>(|c| Ok(c.query_row(
+            "SELECT d.sha256 FROM deliveries d JOIN items i ON i.id=d.item_id AND i.workspace_id=d.workspace_id WHERE d.item_id=? AND d.url=?",
+            rusqlite::params![item,location],|r|r.get::<_,String>(0)).optional()?))?
+            .ok_or_else(||crate::cycle::conflict("设计文件没有已接收的交付记录"))?;
+        let root = home.join("deliveries").join("objects");
+        let path = root.join(&hash);
+        (root, path, hash)
+    } else {
+        let root = home.join("workspaces").join(item).join("outputs");
+        let path = Path::new(location).to_path_buf();
+        let expected = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .and_then(|s| s.strip_prefix("output-"))
+            .ok_or_else(|| crate::cycle::conflict("设计文件缺少内容校验"))?
+            .to_string();
+        (root, path, expected)
+    };
+    if expected.len() != 64 || !expected.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(crate::cycle::conflict("设计文件缺少内容校验"));
+    }
     if !path.starts_with(&root)
         || [
             root.parent().unwrap().parent().unwrap(),
             root.parent().unwrap(),
             root.as_path(),
-            path,
+            path.as_path(),
         ]
         .iter()
         .any(|part| !std::fs::symlink_metadata(part).is_ok_and(|m| !m.file_type().is_symlink()))
     {
         return Err(crate::cycle::conflict("设计文件不在事项持久目录中"));
     }
-    let bytes = std::fs::read(path).map_err(|_| crate::cycle::conflict("设计文件无法读取"))?;
+    let bytes = std::fs::read(&path).map_err(|_| crate::cycle::conflict("设计文件无法读取"))?;
     let actual = Sha256::digest(&bytes)
         .iter()
         .map(|b| format!("{b:02x}"))

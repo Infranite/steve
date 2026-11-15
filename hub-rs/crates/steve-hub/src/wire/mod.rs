@@ -902,6 +902,7 @@ pub fn wire_assembly(
     }
     let tool_service = Arc::new(tool_service::ToolService {
         mcp: Arc::new(core::CoreMcp {
+            public_url: cfg.public_url.clone(),
             store: db.clone(),
             core: core.clone(),
             home: cfg.home.clone(),
@@ -947,6 +948,7 @@ pub fn wire_assembly(
             .map_err(|e| BackendError::msg(e.to_string()))?;
     }
     let mcp = steve_mcp::router(Arc::new(core::CoreMcp {
+        public_url: cfg.public_url.clone(),
         store: db.clone(),
         core: core.clone(),
         home: cfg.home.clone(),

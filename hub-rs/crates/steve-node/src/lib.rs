@@ -56,6 +56,7 @@ use tokio::sync::mpsc;
 use actor::{Actor, Msg};
 use journal::{Journal, Op, SessionRow, Tx, WorkspaceRow, internal};
 pub use workspace::Root;
+pub use artifact::read_delivery_file;
 
 /// The OS sandbox a Node with these homes and this `STEVE_CONFINE` would give its runs
 /// (`seatbelt`, `bubblewrap`), or why none: what `steve-hub --check-config` reports before a switch.
@@ -3719,6 +3720,30 @@ impl WorkspaceExecutor for LocalNode {
                 ),
             };
             scan::read(&base, &real, q.expected.as_ref(), q.offset, q.max)
+        })
+        .await
+    }
+
+    async fn read_delivery(&self, q: FileRead) -> ApiResult<DeliveryChunk> {
+        let (base, rel) = match &q.path {
+            FileAddress::Workspace(p) => {
+                self.mine(&p.workspace)?;
+                (workspace_dir(&self.0, &p.workspace)?, p.rel.clone())
+            }
+            FileAddress::Root(at) => {
+                let roots = self.0.roots();
+                let root = roots
+                    .iter()
+                    .find(|r| r.id == at.root)
+                    .ok_or_else(|| ApiError::new(ErrorCode::Denied, "not an allowed root"))?;
+                (
+                    root.path.canonicalize().map_err(not_listed)?,
+                    at.rel.clone(),
+                )
+            }
+        };
+        blocking(move || {
+            artifact::read_delivery_file(&base, &rel, q.expected.as_ref(), q.offset, q.max)
         })
         .await
     }

@@ -17,6 +17,7 @@ pub const UPDATE: &str = "steve_update";
 pub const ASK: &str = "steve_ask";
 pub const REQUEST_APPROVAL: &str = "steve_request_approval";
 pub const DELIVER: &str = "steve_deliver";
+pub const DELIVER_FILE: &str = "steve_deliver_file";
 pub const PUBLISH: &str = "steve_publish";
 pub const LANE_STATUS: &str = "steve_lane_status";
 
@@ -169,11 +170,19 @@ mod tests {
     }
 
     #[test]
-    fn lists_the_tools_in_ts_order_then_lane_status() {
+    fn lists_the_core_tools_in_order() {
         let names: Vec<_> = list().into_iter().map(|t| t.name.to_string()).collect();
         assert_eq!(
             names,
-            [UPDATE, ASK, REQUEST_APPROVAL, DELIVER, PUBLISH, LANE_STATUS]
+            [
+                UPDATE,
+                ASK,
+                REQUEST_APPROVAL,
+                DELIVER_FILE,
+                DELIVER,
+                PUBLISH,
+                LANE_STATUS
+            ]
         );
         assert_eq!(validate(LANE_STATUS, &JsonObject::new()), Ok(()));
     }

@@ -6,7 +6,7 @@
 //! - `daily-YYYYMMDD-files.tar`: what the database alone cannot bring back, readable by the owner
 //!   only: attachments (`data/files`), the signing identity (`signing`, without the keychain's
 //!   password: a copy in a file would unlock the identity for anyone who reads the backup), the
-//!   secret files (`secrets`), item deliverables (`workspaces`) and the configuration
+//!   secret files (`secrets`), item deliverables (`workspaces`, `deliveries`) and the configuration
 //!   (`steve.env`), as far as they are in the home.
 //!
 //! Same disk, no restore drill: a copy against mistakes and a corrupt database, not disaster
@@ -35,11 +35,12 @@ const FIRST: Duration = Duration::from_secs(300);
 /// After a copy that failed (a full disk): not before this many ticks.
 const RETRY_TICKS: u32 = 6;
 /// What the tar takes of the home, where it is there.
-const PARTS: [&str; 5] = [
+const PARTS: [&str; 6] = [
     "data/files",
     "signing",
     "secrets",
     "workspaces",
+    "deliveries",
     "steve.env",
 ];
 /// How often the files are tried for a day's copy.
@@ -379,6 +380,8 @@ mod tests {
         fs::write(h.join("signing").join(NOT_COPIED), "p").unwrap();
         fs::create_dir_all(h.join("workspaces/ST-8/outputs")).unwrap();
         fs::write(h.join("workspaces/ST-8/outputs/report.md"), "design").unwrap();
+        fs::create_dir_all(h.join("deliveries/objects")).unwrap();
+        fs::write(h.join("deliveries/objects/digest"), "immutable delivery").unwrap();
 
         let m = make(h, &db, "20260102").unwrap();
         assert_eq!(m.database, h.join("backups/daily-20260102.sqlite3"));
@@ -394,6 +397,9 @@ mod tests {
                 "data/files",
                 "data/files/a",
                 "data/files/a/note.txt",
+                "deliveries",
+                "deliveries/objects",
+                "deliveries/objects/digest",
                 "secrets",
                 "secrets/owner.token",
                 "signing/keys",

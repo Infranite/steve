@@ -164,6 +164,8 @@ pub const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/079.sql"),
     include_str!("../migrations/080.sql"),
     include_str!("../migrations/081.sql"),
+    // 82: immutable Hub-owned file deliveries and user-authorized expiring shares.
+    include_str!("../migrations/082.sql"),
 ];
 
 /// 027's item columns and their one-time backfill (applied by `run_pending` when `items.phase` is missing).

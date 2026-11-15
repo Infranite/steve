@@ -91,6 +91,29 @@
     }
   },
   {
+    "name": "steve_deliver_file",
+    "description": "Receive an immutable file version into Hub storage and return stable authenticated URLs after the full transfer succeeds. Does not end the turn or publish a share. Use a file inside this session directory or the item outputs directory; ZIP folders first. For HTML ZIPs, entrypoint optionally selects a package HTML path. Reference the returned url in steve_deliver outputs to associate the delivery card.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string",
+          "description": "Actual file path on this session Node."
+        },
+        "title": {
+          "type": "string"
+        },
+        "entrypoint": {
+          "type": "string",
+          "description": "HTML entry path inside a ZIP, e.g. design/index.html."
+        }
+      },
+      "required": [
+        "path"
+      ]
+    }
+  },
+  {
     "name": "steve_deliver",
     "description": "Deliver the finished work for the user's acceptance. Include what you produced and the checks you ran. Then end your turn.",
     "inputSchema": {

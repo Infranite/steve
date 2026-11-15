@@ -65,6 +65,15 @@ pub struct Output {
     pub role: Option<String>,
 }
 
+/// Receive a file into immutable Hub storage without ending the turn. Public sharing is never
+/// part of this operation; the user authorizes it separately in the logged-in UI.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct FileDeliveryArgs {
+    pub path: String,
+    pub title: Option<String>,
+    pub entrypoint: Option<String>,
+}
+
 /// What the agent leans towards on a `steve_ask` (both optional; YOLO may pick `recommended`).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct AskHint {
@@ -91,6 +100,14 @@ pub trait Backend: Send + Sync + 'static {
 
     /// The session whose `token_hash` is `sha256hex(token)`, if any.
     fn session_by_token(&self, token: &str) -> impl Future<Output = Option<Self::Session>> + Send;
+
+    fn deliver_file(
+        &self,
+        _s: &Self::Session,
+        _args: FileDeliveryArgs,
+    ) -> impl Future<Output = Result<serde_json::Value, ToolError>> + Send {
+        async { Err("file delivery is not wired into this Hub".into()) }
+    }
 
     fn update(
         &self,
@@ -299,6 +316,10 @@ pub async fn run<B: Backend>(
             b.deliver(s, a.summary, a.outputs, a.checks, a.unfinished)
                 .await
                 .map(|_| format!("Delivered for acceptance. {END}"))
+        }
+        tools::DELIVER_FILE => {
+            let a: FileDeliveryArgs = parse(args)?;
+            b.deliver_file(s, a).await.map(|v| v.to_string())
         }
         tools::PUBLISH => {
             let a: PublishArgs = parse(args)?;
