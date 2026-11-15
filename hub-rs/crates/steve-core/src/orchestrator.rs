@@ -1179,7 +1179,7 @@ impl Tx<'_> {
         } else {
             lines.push("- steve_ask: when you need a decision from the user. Never ask questions in plain text. After calling it, end your turn.".into());
             lines.push("- steve_request_approval: before outside effects (deploy, release, push, send, pay, delete) that lack explicit user authorization. Follow a recorded approval within its scope without requesting it again; approval is not evidence of completion. After calling it, end your turn.".into());
-            lines.push("- steve_deliver: when the goal is met, with a Chinese summary, the outputs (branch, commits, files) and the checks you actually ran (mark pre-existing unrelated repo failures with scope=\"baseline\" and external provider outages with scope=\"external\"; checks in your scope default to scope=\"unit\"). Tick off finished plan steps with steve_update first; list in `unfinished` the steps you deliberately left open; any step not ticked off is shown to the user as left open. Then end your turn.".into());
+            lines.push("- steve_deliver: when the goal is met, with a Chinese summary, the outputs (branch, commits, files) and the checks you actually ran. Tick off finished plan steps with steve_update first; list in `unfinished` the steps you deliberately left open; any step not ticked off is shown to the user as left open. Then end your turn.".into());
         }
         /* the harness asks nothing (完全放开, or the bot bypasses prompts): the agent hears the brakes itself */
         lines.extend(self.c.yolo_full_lines(item));
