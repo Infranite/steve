@@ -1,0 +1,4 @@
+- **Items hierarchy**: Workflow subtasks now group directly beneath their parent item with visual tree connectors and collapsible settled/historical attempts, keeping the top-level list, board, and running counts focused on main items.
+- **Workflow convergence & budgets**: Bots can no longer raise `max_attempts` or loop replans endlessly; global concurrent workflow units are bounded per Hub (`STEVE_WORKFLOW_MAX_PARALLEL`, default 4) with automatic slot wakeup.
+- **Scoped checks & safer auto-acceptance**: `steve_deliver` checks accept `scope` (`unit`, `baseline`, `external`) so unrelated baseline failures can be reported without blocking unit handoff, while parent `auto` acceptance holds deliveries with failed non-baseline checks or `unfinished` steps for user confirmation.
+- **Harness ingress & output guards**: The stdio ACP frame limit is raised to 16 MiB and `outputs/` rejects embedded checkouts, `node_modules`, `.git`, and build directories.

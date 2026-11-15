@@ -32,10 +32,51 @@ impl Core {
         steve_i18n::stored(|| self.tx().workspace_failed(session, disk_low, detail))
     }
 
+    /// Retire an invalid immutable binding before raising the recovery card. Continue will
+    /// create a new session; the previous directory and transcript remain available.
+    pub fn workspace_binding_failed(&self, session: &str, detail: &str) -> Result<()> {
+        steve_i18n::stored(|| {
+            let mut tx = self.tx();
+            let Some((s, i)) = tx.current(session)? else {
+                return Ok(());
+            };
+            if i.is_settled() {
+                return Ok(());
+            }
+            tx.end_session(&s.id)?;
+            tx.fail(&i.id, &format!("开不了会话：{detail}"))
+        })
+    }
+
     /// The item's worktree was given back by its backend (`removed`), or kept.
     pub fn workspace_tidied(&self, item: &str, removed: bool) -> Result<()> {
         self.tx().workspace_tidied(item, removed)
     }
+}
+
+/// Preserve the familiar branch unless another worktree already owns it. Separate installations
+/// can share a repository and item numbers: never steal that other installation's branch.
+pub(crate) fn worktree_branch(item: &Item, repo: &Path, target: &Path) -> String {
+    let branch = item
+        .branch
+        .clone()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| format!("steve/{}", item.id.to_lowercase()));
+    // Branch names cannot contain newlines. Avoid parsing porcelain paths: older Git lacks -z,
+    // and its C quoting of Unicode/control characters does not name the literal directory.
+    let listing = git::git(repo, &["worktree", "list", "--porcelain"]).unwrap_or_default();
+    let occupied = listing
+        .lines()
+        .any(|l| l.strip_prefix("branch refs/heads/") == Some(branch.as_str()));
+    let same_worktree = occupied
+        && git::git(target, &["rev-parse", "--show-toplevel"])
+            .is_ok_and(|root| same_dir(&root, &target.to_string_lossy()))
+        && git::git(target, &["symbolic-ref", "--short", "HEAD"]).is_ok_and(|head| head == branch);
+    if !occupied || same_worktree {
+        return branch;
+    }
+    let namespace = crate::util::sha(&target.parent().unwrap_or(target).to_string_lossy());
+    format!("steve/{}-{}", &namespace[..12], item.id.to_lowercase())
 }
 
 /// Two spellings of the same directory (a symlinked temp dir, say).
@@ -69,7 +110,7 @@ impl Tx<'_> {
         }
         Ok(Some((
             self.cfg().worktrees.join(&item.id).to_string_lossy().into(),
-            format!("steve/{}", item.id.to_lowercase()),
+            worktree_branch(item, path, &self.cfg().worktrees.join(&item.id)),
         )))
     }
 

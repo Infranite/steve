@@ -74,6 +74,12 @@ pub struct AdapterInfo {
     /// the npm registry found. `None` for one installed otherwise, or a Node that is older.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub update: Option<AdapterUpdate>,
+    /// Shell template (`{id}` replaced with the session id) to resume a session in the CLI.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resume_command: Option<String>,
+    /// Shell template (`{id}` replaced with the session id) to fork a session in the CLI.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fork_command: Option<String>,
 }
 
 /// The update state of an adapter Steve keeps up to date ([`AdapterInfo::update`]).
@@ -166,6 +172,14 @@ pub struct Capacity {
     pub sessions: u32,
     pub jobs: u32,
     pub execs: u32,
+}
+
+impl Capacity {
+    /// Concurrent turns on a newly started session-capable Node, before the Hub synchronizes its
+    /// saved per-device setting. Idle sessions, jobs and execs do not consume these slots.
+    pub const SESSIONS_DEFAULT: u32 = 32;
+    /// Largest configurable concurrent-turn count.
+    pub const SESSIONS_MAX: u32 = 256;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

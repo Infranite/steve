@@ -411,10 +411,39 @@ impl Status {
     }
 }
 
+/// The identity served by one credential. Missing declarations retain the original self contract.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Identity {
+    #[default]
+    #[serde(rename = "self")]
+    Self_,
+    Bot,
+}
+
+impl Identity {
+    pub fn parse(v: Option<&Value>) -> Result<Self, String> {
+        match v {
+            None => Ok(Self::Self_),
+            Some(Value::String(s)) if s == "self" => Ok(Self::Self_),
+            Some(Value::String(s)) if s == "bot" => Ok(Self::Bot),
+            _ => Err("identity must be self or bot".into()),
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Self_ => "self",
+            Self::Bot => "bot",
+        }
+    }
+}
+
 /// A checked hello result.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Hello {
     pub protocol: u32,
+    pub identity: Identity,
     pub realm: String,
     pub server: String,
     pub time_precision_ms: i64,
@@ -424,6 +453,8 @@ pub struct Hello {
     pub session: Status,
     /// `ok` | `degraded` | `down`.
     pub upstream: String,
+    /// Generic connector extension, independent of messaging v1.
+    pub connector: Option<crate::connector::Manifest>,
 }
 
 /// Why a hello result is refused.
@@ -463,7 +494,18 @@ impl Hello {
                     .collect()
             })
             .unwrap_or_default();
-        let missing: Vec<String> = REQUIRED_FEATURES
+        let connector = v
+            .get("connector")
+            .filter(|v| !v.is_null())
+            .map(crate::connector::Manifest::parse)
+            .transpose()
+            .map_err(HelloError::Malformed)?;
+        let required: &[&str] = if connector.is_some() {
+            &["me", "changes"]
+        } else {
+            &REQUIRED_FEATURES
+        };
+        let missing: Vec<String> = required
             .iter()
             .filter(|f| !features.contains(**f))
             .map(|f| f.to_string())
@@ -503,6 +545,7 @@ impl Hello {
             _ => "ok".to_string(),
         };
         Ok(Hello {
+            identity: Identity::parse(v.get("identity")).map_err(HelloError::Malformed)?,
             protocol,
             realm,
             server,
@@ -512,6 +555,7 @@ impl Hello {
             limits: Limits::from_hello(v.get("limits").unwrap_or(&Value::Null)),
             session,
             upstream,
+            connector,
         })
     }
 
@@ -758,13 +802,7 @@ impl WireSender {
 
 /// `dm` | `group` | `channel` | `thread`.
 pub fn chat_kind(s: Option<&str>) -> Option<crate::channel::SpaceKind> {
-    use crate::channel::SpaceKind;
-    match s? {
-        "dm" => Some(SpaceKind::Dm),
-        "group" => Some(SpaceKind::Group),
-        "channel" | "thread" => Some(SpaceKind::Channel),
-        _ => None,
-    }
+    crate::channel::SpaceKind::parse(s?)
 }
 
 /// A checked `Chat` (§6).
@@ -898,12 +936,13 @@ impl WireMessage {
     }
 }
 
-/// One attachment as the Hub stores it: `{type: image|file, key, name?, size?, mime?}`; audio and
-/// video are files (§6).
+/// A checked attachment reference. Preserve supported rich types and metadata; never store
+/// inline media or document bodies here.
 fn attachment(v: &Value) -> Option<Value> {
     let kind = match v.get("type").and_then(Value::as_str)? {
         "image" => "image",
-        "file" | "audio" | "video" => "file",
+        "file" => "file",
+        k @ ("audio" | "video" | "document" | "webpage" | "commit" | "log") => k,
         _ => return None,
     };
     let key = v
@@ -913,6 +952,18 @@ fn attachment(v: &Value) -> Option<Value> {
     let mut o = json!({"type": kind, "key": key});
     if let Some(n) = text_field(v, "name", 256) {
         o["name"] = n.into();
+    }
+    if let Some(title) = text_field(v, "title", 512) {
+        o["title"] = title.into();
+    }
+    if let Some(url) = text_field(v, "url", 2048).filter(|u| {
+        url::Url::parse(u).is_ok_and(|u| {
+            matches!(u.scheme(), "http" | "https")
+                && u.username().is_empty()
+                && u.password().is_none()
+        })
+    }) {
+        o["url"] = url.into();
     }
     if let Some(s) = v.get("size").and_then(Value::as_u64) {
         o["size"] = s.into();
@@ -1069,7 +1120,7 @@ mod tests {
         let m = WireMessage::parse(&full, now, 100).expect("full");
         assert_eq!(
             m.attachments,
-            vec![json!({"type": "file", "key": "k", "size": 3})]
+            vec![json!({"type": "video", "key": "k", "size": 3})]
         );
     }
 

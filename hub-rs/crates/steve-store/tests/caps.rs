@@ -196,3 +196,72 @@ fn the_per_bot_rows_of_62_and_63_move_into_the_library() {
         .unwrap();
     assert_eq!(old, 0);
 }
+
+/// Migration 67: a Bot's pins, gone with the entry or when the entry is taken off the Bot; usage
+/// summed per tool over the last days, old rows dropped.
+#[test]
+fn pins_follow_their_entries_and_usage_sums_by_tool() {
+    use caps::tools;
+    let t = setup();
+    t.store
+        .transaction(|tx| {
+            mcp::insert(tx, &server("bmcp_a", "files", "stdio"))?;
+            caps::set(tx, "dev", "mcp", "bmcp_a", true, 1)?;
+            assert!(tools::set_pin(tx, "dev", "mcp", "bmcp_a", true, 2)?);
+            assert!(
+                !tools::set_pin(tx, "dev", "mcp", "bmcp_a", true, 3)?,
+                "once"
+            );
+            assert!(tools::set_pin(
+                tx,
+                "dev",
+                "tool",
+                "steve_workflow",
+                true,
+                4
+            )?);
+            assert!(tools::set_pin(tx, "doc", "mcp", "bmcp_a", true, 5)?);
+            let kinds: Vec<String> = tools::pins(tx, "dev")?
+                .into_iter()
+                .map(|p| p.kind)
+                .collect();
+            assert_eq!(kinds, ["mcp", "tool"]);
+            caps::remove(tx, "dev", "mcp", "bmcp_a")?;
+            assert_eq!(
+                tools::pins(tx, "dev")?.len(),
+                1,
+                "taken off the Bot: unpinned"
+            );
+            mcp::delete(tx, "bmcp_a")?;
+            assert!(tools::pins(tx, "doc")?.is_empty(), "the entry is gone");
+
+            let today = tools::day_of(1_700_000_000_000);
+            tools::record(tx, "dev", today - 100, &["old"], 1, 0)?;
+            tools::record(
+                tx,
+                "dev",
+                today - 3,
+                &["steve_workflow", "files__read"],
+                1,
+                0,
+            )?;
+            tools::record(tx, "dev", today, &["steve_workflow"], 0, 1)?;
+            tools::record(tx, "dev", today, &["steve_workflow"], 0, 1)?;
+            tools::record(tx, "doc", today, &["steve_workflow"], 0, 1)?;
+            let u = tools::usage(tx, "dev", today, 30)?;
+            assert_eq!(
+                u.iter()
+                    .map(|x| (x.tool.as_str(), x.searched, x.called))
+                    .collect::<Vec<_>>(),
+                [("steve_workflow", 1, 2), ("files__read", 1, 0)]
+            );
+            let old: i64 = tx.query_row(
+                "SELECT COUNT(*) FROM tool_usage WHERE tool = 'old'",
+                [],
+                |r| r.get(0),
+            )?;
+            assert_eq!(old, 0, "older than 90 days: dropped");
+            Ok::<_, steve_store::StoreError>(())
+        })
+        .unwrap();
+}

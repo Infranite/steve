@@ -381,6 +381,78 @@ async fn unknown_and_ambiguous_names_are_not_guessed() {
 // ---------------------------------------------------------------- contact fields, attributes, accounts
 
 #[tokio::test]
+async fn address_changes_undo_restores_values_with_different_labels() {
+    let t = env();
+    let r = app(&t);
+    let mine = id(&ok(&r, "GET", "/me/contact", Value::Null).await);
+    for (key, previous, next) in [
+        (
+            "call",
+            "Private nickname".to_string(),
+            "New nickname".to_string(),
+        ),
+        (
+            "call_external",
+            "Public name".to_string(),
+            "New public name".to_string(),
+        ),
+        (
+            "call_ext_scope",
+            json!({"kind":"space","id":"space1","name":"Scoped name"}).to_string(),
+            json!({"kind":"space","id":"space1","name":"New scoped name"}).to_string(),
+        ),
+    ] {
+        ok(
+            &r,
+            "POST",
+            &format!("/parties/{mine}/attrs"),
+            json!({"key":key,"label":"Old label","value":previous}),
+        )
+        .await;
+        if key == "call_ext_scope" {
+            ok(&r, "POST", &format!("/parties/{mine}/attrs"), json!({"key":key,"label":"Other scope","value":json!({"kind":"persona","id":"space1","name":"Other alias"}).to_string()})).await;
+        }
+        let before = state(&t);
+        let p = draft(
+            &t,
+            "contact",
+            Some(&mine),
+            "Update my name",
+            json!([{"op":"attr.set","key":key,"label":"New label","value":next}]),
+        )
+        .await;
+        apply(&t, &p.id).unwrap();
+        let current = ok(&r, "GET", &format!("/contacts/{mine}"), Value::Null).await;
+        let attrs = current["attrs"].as_array().unwrap();
+        assert!(
+            attrs
+                .iter()
+                .any(|a| a["value"] == previous && a["status"] == "stale"),
+            "{key}: old label is superseded"
+        );
+        assert!(
+            attrs
+                .iter()
+                .any(|a| a["value"] == next && a["status"] == "confirmed")
+        );
+        if key == "call_ext_scope" {
+            assert!(
+                attrs
+                    .iter()
+                    .any(|a| a["label"] == "Other scope" && a["status"] == "confirmed"),
+                "another kind with the same id is not superseded"
+            );
+        }
+        undo(&t, &p.id);
+        assert_eq!(
+            state(&t),
+            before,
+            "{key}: undo restores the exact prior values and statuses"
+        );
+    }
+}
+
+#[tokio::test]
 async fn contact_fields_attributes_and_append() {
     let t = env();
     let r = app(&t);
@@ -425,7 +497,7 @@ async fn contact_fields_attributes_and_append() {
         vec![
             line("和你的关系", "客户", "朋友、客户"),
             line("重要", "否", "是"),
-            line("备注（追加）", "老客户", "喜欢周五开会"),
+            line("备注（追加）", "老客户", "老客户\n喜欢周五开会"),
             line("电话", "+1 111", "+1 222"),
             line("偏好的称呼", "（空）", "Sas"),
             line("爱好", "（空）", "攀岩"),

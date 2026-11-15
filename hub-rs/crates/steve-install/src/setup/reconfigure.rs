@@ -39,7 +39,9 @@ impl Guard {
         let meta = fs::symlink_metadata(path)?;
         ensure!(
             meta.uid() == unsafe { libc::getuid() },
-            "{}", t!("install.reconfigure.dep.not_owned", path = path.display()));
+            "{}",
+            t!("install.reconfigure.dep.not_owned", path = path.display())
+        );
         let mode = meta.permissions().mode() & 0o777;
         if meta.file_type().is_symlink() {
             return Ok(Self::Link {
@@ -49,7 +51,12 @@ impl Guard {
         }
         ensure!(
             mode & 0o022 == 0,
-            "{}", t!("install.reconfigure.dep.writable_by_others", path = path.display()));
+            "{}",
+            t!(
+                "install.reconfigure.dep.writable_by_others",
+                path = path.display()
+            )
+        );
         if meta.is_file() {
             Ok(Self::File {
                 sha256: digest(path)?,
@@ -62,7 +69,10 @@ impl Guard {
                 uid: meta.uid(),
             })
         } else {
-            bail!("{}", t!("install.reconfigure.dep.not_regular", path = path.display()))
+            bail!(
+                "{}",
+                t!("install.reconfigure.dep.not_regular", path = path.display())
+            )
         }
     }
 }
@@ -70,7 +80,11 @@ impl Guard {
 fn guard(guards: &mut BTreeMap<PathBuf, Guard>, path: &Path) -> Result<()> {
     let value = Guard::read(path)?;
     if let Some(previous) = guards.insert(path.into(), value.clone()) {
-        ensure!(previous == value, "{}", t!("install.reconfigure.state_changed_reading"));
+        ensure!(
+            previous == value,
+            "{}",
+            t!("install.reconfigure.state_changed_reading")
+        );
     }
     Ok(())
 }
@@ -79,7 +93,12 @@ fn verify_guards(guards: &BTreeMap<PathBuf, Guard>) -> Result<()> {
     for (path, expected) in guards {
         ensure!(
             Guard::read(path)? == *expected,
-            "{}", t!("install.reconfigure.changed_elsewhere", path = path.display()));
+            "{}",
+            t!(
+                "install.reconfigure.changed_elsewhere",
+                path = path.display()
+            )
+        );
     }
     Ok(())
 }
@@ -95,16 +114,27 @@ fn private_bytes(path: &Path) -> Result<Vec<u8>> {
         metadata.is_file()
             && metadata.uid() == unsafe { libc::getuid() }
             && metadata.permissions().mode() & 0o777 == 0o600,
-        "{}", t!("install.reconfigure.file_mode", path = path.display()));
-    ensure!(metadata.len() <= 1024 * 1024, "{}", t!("install.reconfigure.file_too_large"));
+        "{}",
+        t!("install.reconfigure.file_mode", path = path.display())
+    );
+    ensure!(
+        metadata.len() <= 1024 * 1024,
+        "{}",
+        t!("install.reconfigure.file_too_large")
+    );
     let mut data = Vec::new();
     file.take(1024 * 1024 + 1).read_to_end(&mut data)?;
-    ensure!(data.len() <= 1024 * 1024, "{}", t!("install.reconfigure.file_too_large"));
+    ensure!(
+        data.len() <= 1024 * 1024,
+        "{}",
+        t!("install.reconfigure.file_too_large")
+    );
     Ok(data)
 }
 
 fn receipt(bytes: &[u8], home: &Path) -> Result<Value> {
-    let record: Value = serde_json::from_slice(bytes).context(t!("install.reconfigure.receipt.not_json"))?;
+    let record: Value =
+        serde_json::from_slice(bytes).context(t!("install.reconfigure.receipt.not_json"))?;
     ensure!(
         record["format"] == 1
             && record["component"] == "hub"
@@ -114,10 +144,16 @@ fn receipt(bytes: &[u8], home: &Path) -> Result<Value> {
             && record["steps"]
                 .as_array()
                 .is_some_and(|steps| steps.iter().any(|step| step == "installed")),
-        "{}", t!("install.reconfigure.receipt.not_managed_hub"));
-    let version = record["version"].as_str().context(t!("install.reconfigure.receipt.version_missing"))?;
+        "{}",
+        t!("install.reconfigure.receipt.not_managed_hub")
+    );
+    let version = record["version"]
+        .as_str()
+        .context(t!("install.reconfigure.receipt.version_missing"))?;
     let parsed = semver::Version::parse(version)?;
-    let commit = record["commit"].as_str().context(t!("install.reconfigure.receipt.commit_missing"))?;
+    let commit = record["commit"]
+        .as_str()
+        .context(t!("install.reconfigure.receipt.commit_missing"))?;
     ensure!(
         parsed.to_string() == version
             && parsed.pre.is_empty()
@@ -126,17 +162,23 @@ fn receipt(bytes: &[u8], home: &Path) -> Result<Value> {
             && commit
                 .bytes()
                 .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
-        "{}", t!("install.reconfigure.receipt.identity_invalid"));
+        "{}",
+        t!("install.reconfigure.receipt.identity_invalid")
+    );
     ensure!(
         record["files"]["steve.env"].is_string(),
-        "{}", t!("install.reconfigure.receipt.env_not_owned"));
+        "{}",
+        t!("install.reconfigure.receipt.env_not_owned")
+    );
     for digest in record["files"].as_object().unwrap().values() {
         ensure!(
             digest.as_str().is_some_and(|value| value.len() == 64
                 && value
                     .bytes()
                     .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))),
-            "{}", t!("install.reconfigure.receipt.file_digest_invalid"));
+            "{}",
+            t!("install.reconfigure.receipt.file_digest_invalid")
+        );
     }
     Ok(record)
 }
@@ -152,7 +194,9 @@ fn inspect(home: &Path) -> Result<Runtime> {
     let current = fs::canonicalize(home.join("current"))?;
     ensure!(
         current.parent() == Some(releases.as_path()),
-        "{}", t!("install.reconfigure.current_outside"));
+        "{}",
+        t!("install.reconfigure.current_outside")
+    );
     let mut guards = BTreeMap::new();
     // Validate the managed path and pin its files before the service API executes --build-info.
     for path in [
@@ -165,7 +209,9 @@ fn inspect(home: &Path) -> Result<Runtime> {
     let context = crate::service::Service::new("hub", home, None)?.reconfiguration_context()?;
     ensure!(
         context.release == current,
-        "{}", t!("install.reconfigure.current_changed_reading"));
+        "{}",
+        t!("install.reconfigure.current_changed_reading")
+    );
     for path in [
         home.to_path_buf(),
         home.join("current"),
@@ -214,7 +260,9 @@ impl Snapshot {
         let document = EnvDocument::parse(&env)?;
         ensure!(
             !document.values().contains_key("STEVE_OIDC_CLIENT_SECRET"),
-            "{}", t!("install.reconfigure.oidc.inline_secret"));
+            "{}",
+            t!("install.reconfigure.oidc.inline_secret")
+        );
         let mut runtime = inspect(home)?;
         for (name, expected) in record["files"].as_object().unwrap() {
             ensure!(
@@ -222,40 +270,59 @@ impl Snapshot {
                     && Path::new(name)
                         .components()
                         .all(|p| matches!(p, Component::Normal(_))),
-                "{}", t!("install.reconfigure.receipt.path_invalid"));
+                "{}",
+                t!("install.reconfigure.receipt.path_invalid")
+            );
             if name == "steve.env" {
                 continue;
             }
             let path = home.join(name);
             owned(&path, false)?;
             ensure!(
-                digest(&path)? == expected.as_str().context(t!("install.reconfigure.receipt.file_digest_invalid"))?,
-                "{}", t!("install.reconfigure.protected_file_modified", name = name));
+                digest(&path)?
+                    == expected
+                        .as_str()
+                        .context(t!("install.reconfigure.receipt.file_digest_invalid"))?,
+                "{}",
+                t!("install.reconfigure.protected_file_modified", name = name)
+            );
             guard(&mut runtime.guards, &path)?;
         }
         let values = document.values();
         if let Some(configured_home) = values.get("STEVE_HOME") {
             ensure!(
                 Path::new(configured_home) == home,
-                "{}", t!("install.reconfigure.other_home"));
+                "{}",
+                t!("install.reconfigure.other_home")
+            );
         }
         /* OIDC is optional since 2026-11-09 (a Hub set up without it signs in with access tokens):
          * when it is configured, it is kept whole and maintained as before */
-        let oidc = ["STEVE_OIDC_ISSUER", "STEVE_OIDC_CLIENT_ID", "STEVE_OIDC_CLIENT_SECRET_FILE"]
-            .iter()
-            .any(|k| values.get(*k).is_some_and(|v| !v.is_empty()));
+        let oidc = [
+            "STEVE_OIDC_ISSUER",
+            "STEVE_OIDC_CLIENT_ID",
+            "STEVE_OIDC_CLIENT_SECRET_FILE",
+        ]
+        .iter()
+        .any(|k| values.get(*k).is_some_and(|v| !v.is_empty()));
         if oidc {
             for name in ["STEVE_OIDC_ISSUER", "STEVE_OIDC_CLIENT_ID"] {
                 ensure!(
                     values.get(name).is_some_and(|v| !v.is_empty()),
-                    "{}", t!("install.reconfigure.oidc.field_missing", name = name));
+                    "{}",
+                    t!("install.reconfigure.oidc.field_missing", name = name)
+                );
             }
             let secret = Path::new(
                 values
                     .get("STEVE_OIDC_CLIENT_SECRET_FILE")
                     .context(t!("install.reconfigure.oidc.secret_by_file"))?,
             );
-            ensure!(secret.is_absolute(), "{}", t!("install.reconfigure.oidc.secret_path_relative"));
+            ensure!(
+                secret.is_absolute(),
+                "{}",
+                t!("install.reconfigure.oidc.secret_path_relative")
+            );
             owned(secret, false)?;
             guard(&mut runtime.guards, secret)?;
         }
@@ -266,12 +333,18 @@ impl Snapshot {
                         .get("STEVE_VAULT_KEY_DIR")
                         .context(t!("install.reconfigure.vault.dir_unset"))?,
                 );
-                ensure!(keys.is_absolute(), "{}", t!("install.reconfigure.vault.dir_relative"));
+                ensure!(
+                    keys.is_absolute(),
+                    "{}",
+                    t!("install.reconfigure.vault.dir_relative")
+                );
                 owned(keys, true).context(t!("install.reconfigure.vault.dir_missing"))?;
                 let resolved = fs::canonicalize(keys)?;
                 ensure!(
                     !resolved.starts_with(home) && !home.starts_with(&resolved),
-                    "{}", t!("install.reconfigure.vault.dir_inside_home"));
+                    "{}",
+                    t!("install.reconfigure.vault.dir_inside_home")
+                );
                 guard(&mut runtime.guards, keys)?;
             }
             Some("file") => {
@@ -280,8 +353,7 @@ impl Snapshot {
                 guard(&mut runtime.guards, &keys)?;
             }
             Some("keychain") if cfg!(target_os = "macos") => {}
-            _ => bail!(
-                "{}", t!("install.reconfigure.vault.backend_unsupported")),
+            _ => bail!("{}", t!("install.reconfigure.vault.backend_unsupported")),
         }
         let snapshot = Self {
             home: home.into(),
@@ -300,7 +372,9 @@ impl Snapshot {
         ensure!(
             private_bytes(&self.home.join("steve.env"))? == self.env
                 && private_bytes(&self.home.join("setup.json"))? == self.receipt,
-            "{}", t!("install.reconfigure.changed_while_asking"));
+            "{}",
+            t!("install.reconfigure.changed_while_asking")
+        );
         Ok(())
     }
 }
@@ -318,7 +392,9 @@ fn listening(value: &str) -> Result<Listening> {
     for part in value.split(',') {
         let part = part.trim();
         let (host, port) = if let Some(port) = part.strip_prefix("localhost:") {
-            let port: u16 = port.parse().context(t!("install.reconfigure.listen.localhost_port"))?;
+            let port: u16 = port
+                .parse()
+                .context(t!("install.reconfigure.listen.localhost_port"))?;
             ensure!(port != 0, "{}", t!("install.reconfigure.listen.port_zero"));
             ("localhost".to_owned(), port)
         } else {
@@ -328,7 +404,9 @@ fn listening(value: &str) -> Result<Listening> {
         };
         ensure!(
             selected_port.is_none_or(|p| p == port),
-            "{}", t!("install.reconfigure.listen.one_port"));
+            "{}",
+            t!("install.reconfigure.listen.one_port")
+        );
         selected_port = Some(port);
         if !hosts.contains(&host) {
             hosts.push(host);
@@ -336,7 +414,9 @@ fn listening(value: &str) -> Result<Listening> {
     }
     Ok(Listening {
         hosts: hosts.join(","),
-        port: selected_port.context(t!("install.reconfigure.listen.empty"))?.to_string(),
+        port: selected_port
+            .context(t!("install.reconfigure.listen.empty"))?
+            .to_string(),
         any,
     })
 }
@@ -463,7 +543,9 @@ fn updated_receipt(original: &Value, candidate: &[u8]) -> Result<Value> {
     let document = EnvDocument::parse(candidate)?;
     ensure!(
         !document.values().contains_key("STEVE_OIDC_CLIENT_SECRET"),
-        "{}", t!("install.reconfigure.oidc.inline_secret_receipt"));
+        "{}",
+        t!("install.reconfigure.oidc.inline_secret_receipt")
+    );
     let mut next = original.clone();
     next["environment"] = serde_json::to_value(document.values())?;
     next["files"]["steve.env"] = bytes_digest(candidate).into();
@@ -500,9 +582,7 @@ fn locks(home: &Path) -> Result<(File, File)> {
         .mode(0o600)
         .custom_flags(libc::O_NOFOLLOW)
         .open(&path)?;
-    setup
-        .try_lock()
-        .context(t!("install.reconfigure.busy"))?;
+    setup.try_lock().context(t!("install.reconfigure.busy"))?;
     owned(&path, false)?;
     Ok((setup, crate::release::lock_release(home)?))
 }
@@ -525,11 +605,13 @@ fn check(runtime: &Runtime, home: &Path, values: &BTreeMap<String, String>) -> R
     }
     command.env("STEVE_HOME", home);
     let output = crate::signing::output(&mut command, Duration::from_secs(30))?;
-    let report: Value =
-        serde_json::from_slice(&output.stdout).context(t!("install.reconfigure.check.no_result"))?;
+    let report: Value = serde_json::from_slice(&output.stdout)
+        .context(t!("install.reconfigure.check.no_result"))?;
     ensure!(
         output.status.success() && report["ok"] == true,
-        "{}", t!("install.reconfigure.check.rejected"));
+        "{}",
+        t!("install.reconfigure.check.rejected")
+    );
     if report["warnings"]
         .as_array()
         .is_some_and(|warnings| !warnings.is_empty())
@@ -577,13 +659,17 @@ fn verify_transition(
     for key in before.values().keys().chain(after.values().keys()) {
         ensure!(
             EDITABLE.contains(&key.as_str()) || before.values().get(key) == after.values().get(key),
-            "{}", t!("install.reconfigure.txn.unsupported_field"));
+            "{}",
+            t!("install.reconfigure.txn.unsupported_field")
+        );
     }
     let original = receipt(before_receipt, home)?;
     let candidate = receipt(after_receipt, home)?;
     ensure!(
         updated_receipt(&original, after_env)? == candidate,
-        "{}", t!("install.reconfigure.txn.identity_changed"));
+        "{}",
+        t!("install.reconfigure.txn.identity_changed")
+    );
     Ok(())
 }
 
@@ -601,7 +687,9 @@ impl Pending {
         private_dir(&base)?;
         ensure!(
             !exists(&pending_path(&snapshot.home)),
-            "{}", t!("install.reconfigure.txn.pending"));
+            "{}",
+            t!("install.reconfigure.txn.pending")
+        );
         let id = uuid::Uuid::new_v4().to_string();
         let staging = base.join(format!(".prepare-{id}"));
         private_dir(&staging)?;
@@ -649,7 +737,9 @@ impl Pending {
                     journal.phase.as_str(),
                     "prepared" | "committed" | "rolled_back"
                 ),
-            "{}", t!("install.reconfigure.txn.record_invalid"));
+            "{}",
+            t!("install.reconfigure.txn.record_invalid")
+        );
         let before_env = private_bytes(&directory.join("before.env"))?;
         let after_env = private_bytes(&directory.join("after.env"))?;
         let before_receipt = private_bytes(&directory.join("before-setup.json"))?;
@@ -659,7 +749,9 @@ impl Pending {
                 && bytes_digest(&after_env) == journal.after_env
                 && bytes_digest(&before_receipt) == journal.before_receipt
                 && bytes_digest(&after_receipt) == journal.after_receipt,
-            "{}", t!("install.reconfigure.txn.backup_modified"));
+            "{}",
+            t!("install.reconfigure.txn.backup_modified")
+        );
         verify_transition(
             home,
             &before_env,
@@ -684,12 +776,19 @@ impl Pending {
             &serde_json::to_vec_pretty(&self.journal)?,
         )?;
         let archive = self.directory.parent().unwrap().join(&self.journal.id);
-        ensure!(!exists(&archive), "{}", t!("install.reconfigure.txn.archive_exists"));
+        ensure!(
+            !exists(&archive),
+            "{}",
+            t!("install.reconfigure.txn.archive_exists")
+        );
         fs::rename(&self.directory, &archive)?;
         File::open(archive.parent().unwrap())?
             .sync_all()
             .with_context(|| {
-                t!("install.reconfigure.txn.archive_sync_failed", archive = archive.display())
+                t!(
+                    "install.reconfigure.txn.archive_sync_failed",
+                    archive = archive.display()
+                )
             })?;
         Ok(archive)
     }
@@ -701,13 +800,23 @@ fn replace_if(path: &Path, expected: &[u8], candidate: &[u8]) -> Result<()> {
     // writers, so this is intentionally not described as a filesystem-wide atomic CAS.
     ensure!(
         private_bytes(path)? == expected,
-        "{}", t!("install.reconfigure.txn.file_changed", path = path.display()));
+        "{}",
+        t!(
+            "install.reconfigure.txn.file_changed",
+            path = path.display()
+        )
+    );
     if expected != candidate {
         atomic(path, candidate)?;
     }
     ensure!(
         private_bytes(path)? == candidate,
-        "{}", t!("install.reconfigure.txn.readback_mismatch", path = path.display()));
+        "{}",
+        t!(
+            "install.reconfigure.txn.readback_mismatch",
+            path = path.display()
+        )
+    );
     Ok(())
 }
 
@@ -716,7 +825,9 @@ fn apply(pending: Pending, after_write: impl Fn(&str) -> Result<()>) -> Result<P
     verify_guards(&pending.journal.guards)?;
     ensure!(
         private_bytes(&home.join("setup.json"))? == pending.before_receipt,
-        "{}", t!("install.reconfigure.txn.receipt_changed"));
+        "{}",
+        t!("install.reconfigure.txn.receipt_changed")
+    );
     replace_if(
         &home.join("steve.env"),
         &pending.before_env,
@@ -726,7 +837,9 @@ fn apply(pending: Pending, after_write: impl Fn(&str) -> Result<()>) -> Result<P
     verify_guards(&pending.journal.guards)?;
     ensure!(
         private_bytes(&home.join("steve.env"))? == pending.after_env,
-        "{}", t!("install.reconfigure.txn.env_changed"));
+        "{}",
+        t!("install.reconfigure.txn.env_changed")
+    );
     replace_if(
         &home.join("setup.json"),
         &pending.before_receipt,
@@ -737,7 +850,9 @@ fn apply(pending: Pending, after_write: impl Fn(&str) -> Result<()>) -> Result<P
     ensure!(
         private_bytes(&home.join("steve.env"))? == pending.after_env
             && private_bytes(&home.join("setup.json"))? == pending.after_receipt,
-        "{}", t!("install.reconfigure.txn.changed_during_commit"));
+        "{}",
+        t!("install.reconfigure.txn.changed_during_commit")
+    );
     pending.archive("committed")
 }
 
@@ -751,18 +866,24 @@ fn recover(home: &Path) -> Result<(PathBuf, bool)> {
     if pending.journal.phase == "committed" {
         ensure!(
             env == pending.after_env && receipt == pending.after_receipt,
-            "{}", t!("install.reconfigure.txn.committed_changed"));
+            "{}",
+            t!("install.reconfigure.txn.committed_changed")
+        );
         return Ok((pending.archive("committed")?, true));
     }
     ensure!(
         (env == pending.before_env || env == pending.after_env)
             && (receipt == pending.before_receipt || receipt == pending.after_receipt),
-        "{}", t!("install.reconfigure.txn.external_edit"));
+        "{}",
+        t!("install.reconfigure.txn.external_edit")
+    );
     replace_if(&env_path, &env, &pending.before_env)?;
     verify_guards(&pending.journal.guards)?;
     ensure!(
         private_bytes(&env_path)? == pending.before_env,
-        "{}", t!("install.reconfigure.txn.env_changed_recovering"));
+        "{}",
+        t!("install.reconfigure.txn.env_changed_recovering")
+    );
     replace_if(&receipt_path, &receipt, &pending.before_receipt)?;
     verify_guards(&pending.journal.guards)?;
     Ok((pending.archive("rolled_back")?, false))
@@ -785,12 +906,17 @@ fn run_with(
         options.role.as_deref().is_none_or(|role| role == "hub")
             && options.hub.is_none()
             && options.pin.is_none(),
-        "{}", t!("install.reconfigure.hub_only"));
+        "{}",
+        t!("install.reconfigure.hub_only")
+    );
     let home = canonical(&options.home.clone().unwrap_or(user_home()?.join(".steve")))?;
     owned(&home, true).context(t!("install.reconfigure.no_home"))?;
     if exists(&pending_path(&home)) {
         let pending = Pending::load(&home)?;
-        crate::ui::info(&t!("install.reconfigure.pending_found", pending = pending.directory.display()));
+        crate::ui::info(&t!(
+            "install.reconfigure.pending_found",
+            pending = pending.directory.display()
+        ));
         if !confirm(input, &t!("install.reconfigure.recover_question"))? {
             crate::ui::info(&t!("install.reconfigure.recover_cancelled"));
             return Ok(());
@@ -799,11 +925,15 @@ fn run_with(
         // Also recheck the actual installation, rather than trusting paths in a journal alone.
         inspect(&home)?;
         let (archive, committed) = recover(&home)?;
-        crate::ui::info(&t!("install.reconfigure.recovered", outcome = if committed {
+        crate::ui::info(&t!(
+            "install.reconfigure.recovered",
+            outcome = if committed {
                 t!("install.reconfigure.recovered_committed")
             } else {
                 t!("install.reconfigure.recovered_reverted")
-            }, archive = archive.display()));
+            },
+            archive = archive.display()
+        ));
         return Ok(());
     }
     let snapshot = Snapshot::read(&home, &inspect)?;
@@ -846,7 +976,9 @@ fn run_with(
                 .guards
                 .get(path)
                 == Some(guard)),
-        "{}", t!("install.reconfigure.state_changed_asking"));
+        "{}",
+        t!("install.reconfigure.state_changed_asking")
+    );
     let values = EnvDocument::parse(&candidate)?;
     check(&snapshot.runtime, &home, values.values())?;
     snapshot.verify()?;
@@ -855,14 +987,34 @@ fn run_with(
         Ok(archive) => archive,
         Err(error) => {
             return match recover(&home) {
-                Ok((archive, false)) => Err(error.context(t!("install.reconfigure.save_reverted", archive = archive.display()))),
-                Ok((archive, true)) => Err(error.context(t!("install.reconfigure.committed_archived", archive = archive.display()))),
-                Err(recovery) => Err(error.context(t!("install.reconfigure.write_unfinished", pending = pending_path(&home).display(), recovery = format!("{:#}", recovery)))),
+                Ok((archive, false)) => Err(error.context(t!(
+                    "install.reconfigure.save_reverted",
+                    archive = archive.display()
+                ))),
+                Ok((archive, true)) => Err(error.context(t!(
+                    "install.reconfigure.committed_archived",
+                    archive = archive.display()
+                ))),
+                Err(recovery) => Err(error.context(t!(
+                    "install.reconfigure.write_unfinished",
+                    pending = pending_path(&home).display(),
+                    recovery = format!("{:#}", recovery)
+                ))),
             };
         }
     };
-    crate::ui::info(&t!("install.reconfigure.saved", archive = archive.display()));
-    crate::ui::info(&t!("install.reconfigure.restart_hint", home = shell_quote(home.to_str().context(t!("install.reconfigure.path_not_utf8"))?)?, label = shell_quote(&snapshot.runtime.label)?));
+    crate::ui::info(&t!(
+        "install.reconfigure.saved",
+        archive = archive.display()
+    ));
+    crate::ui::info(&t!(
+        "install.reconfigure.restart_hint",
+        home = shell_quote(
+            home.to_str()
+                .context(t!("install.reconfigure.path_not_utf8"))?
+        )?,
+        label = shell_quote(&snapshot.runtime.label)?
+    ));
     crate::ui::info(&t!("install.reconfigure.verify_later"));
     Ok(())
 }

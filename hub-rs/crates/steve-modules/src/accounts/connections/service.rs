@@ -1330,6 +1330,19 @@ impl Connections {
             Some(id) => {
                 let a = arepo::get(tx, &id)?.ok_or_else(|| ApiError::not_found("账号"))?;
                 let party = current_party(tx, &a.party_id)?;
+                // Opt-in strict bot/self contracts never adopt a known account of the other
+                // kind. Other providers retain their existing account-adoption behavior.
+                let bot = party
+                    .as_ref()
+                    .is_some_and(|p| p.contact_kind.as_deref() == Some("bot"));
+                if u.info.strict_identity_owner
+                    && ((u.info.owner == Owner::Bot && !bot) || (u.info.owner == Owner::Me && bot))
+                {
+                    return Err(ApiError::rule(
+                        "account identity kind differs from the verified credential",
+                    )
+                    .into());
+                }
                 if !party.as_ref().is_some_and(may_connect) {
                     return Err(asvc::taken(tx, viewer, &a.id)?.into());
                 }

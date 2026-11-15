@@ -106,6 +106,8 @@ pub struct ItemExtras {
     pub workflow_paused: Option<bool>,
     pub workflow_cycle: Option<i64>,
     pub workflow_failed: Vec<String>,
+    pub workflow_attempt: Option<i64>,
+    pub workflow_superseded: bool,
 }
 
 /// Per-bot extras of `botOut` and `allBots` for one workspace.
@@ -142,6 +144,11 @@ pub trait Repo {
     }
     fn bot_extras(&self, ws: &str) -> BResult<Option<BotExtras>> {
         Ok(None)
+    }
+    /// The sessions whose next turn waits because its device is full, keyed by session id, each
+    /// with its device's room (`{running, max, waiting}`).
+    fn waiting_for_room(&self) -> BResult<std::collections::HashMap<String, Value>> {
+        Ok(Default::default())
     }
     /// `events_after` with `data` as the stored JSON text, row by row: `(seq, ts, kind, data)`.
     /// `false` = not supported here (the caller uses `events_after`). Rows are handed over one at
@@ -287,6 +294,18 @@ pub trait Repo {
     /// `bots.patch` with the allowed keys present in `patch`; missing bot → `没有这个 Bot` (500).
     fn bot_patch(&self, id: &str, patch: &Obj, author: &str) -> BResult<Obj> {
         todo_backend!("bot_patch")
+    }
+    /// REST selection edits: read the current Bot, validate the merged selection with
+    /// `steve_core::models::validate_bot_patch`, and patch in one write transaction. The catalogue
+    /// is already read; no network or probing belongs inside this transaction.
+    fn bot_patch_checked(
+        &self,
+        id: &str,
+        patch: &Obj,
+        author: &str,
+        harnesses: &[steve_core::harnesses::Harness],
+    ) -> BResult<Obj> {
+        todo_backend!("bot_patch_checked")
     }
     fn bot_restore(&self, id: &str) -> BResult<()> {
         todo_backend!("bot_restore")
@@ -1051,6 +1070,16 @@ pub trait Domain: Send + Sync + 'static {
     }
 
     // ── first meeting ──
+    /// Explicit model choice from setup or chat; independent of model availability.
+    async fn models_select(
+        &self,
+        ws: &str,
+        choice: &steve_core::models::SteveSelection,
+        actor: &str,
+    ) -> BResult<Value> {
+        todo_backend!("models_select")
+    }
+
     /// Begins the first meeting (`steve_core::thread::onboard`): the id of its welcome message.
     async fn onboard_start(&self, ws: &str, actor: &str) -> BResult<String> {
         todo_backend!("onboard_start")

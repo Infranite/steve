@@ -111,6 +111,7 @@ pub struct Attr {
     pub label: String,
     pub value: String,
     pub source_label: String,
+    pub source: String,
     pub level: Level,
     pub status: String,
 }
@@ -123,6 +124,7 @@ impl From<&AttrValue> for Attr {
             label: v.label.clone(),
             value: v.value.clone(),
             source_label: crate::shown::source_label(&v.source_label),
+            source: v.source.clone(),
             level: v.level,
             status: v.status.clone(),
         }
@@ -596,6 +598,10 @@ pub fn list_contacts(
 /// `GET /contacts/:id` (`me` = “我”).
 pub fn get_contact(m: &Modules, who: &Caller, id: &str) -> ApiResult<Contact> {
     let (viewer, me) = start(m, who)?;
+    if id == "me" || id == me.id {
+        m.store
+            .transaction(|tx| super::profile::supplement_me(tx, &who.ws, &who.me, &me.id))?;
+    }
     contact_by_id(m, &viewer, resolve(id, &me))
 }
 
@@ -1249,8 +1255,9 @@ fn own_contact_or_org(c: &rusqlite::Connection, viewer: &Viewer, id: &str) -> Ap
 }
 
 /// Value checks shared by add and edit: length, and `enum` definitions take one of their options.
-fn check_value(ck: &mut Check, def: Option<&AttrDef>, value: &str) {
+fn check_value(ck: &mut Check, key: &str, def: Option<&AttrDef>, value: &str) {
     ck.len("value", value.trim(), 1, 500);
+    ck.that("value", super::profile::valid_address_fact(key, value));
     if let Some(d) = def.filter(|d| d.kind == "enum" && !d.options.is_empty()) {
         ck.that("value", d.options.iter().any(|o| o == value.trim()));
     }
@@ -1268,7 +1275,7 @@ pub fn add_attr(m: &Modules, who: &Caller, id: &str, b: NewAttr) -> ApiResult<Pa
         ck.pattern("key", &b.key, &KEY)
             .opt_len("label", b.label.as_deref().map(str::trim), 1, 20)
             .that("key", def.as_ref().is_none_or(|d| d.applies_to(&p.kind)));
-        check_value(&mut ck, def.as_ref(), &b.value);
+        check_value(&mut ck, &b.key, def.as_ref(), &b.value);
         ck.done()?;
         let def = match def {
             Some(d) => d,
@@ -1374,7 +1381,7 @@ pub fn patch_attr(m: &Modules, who: &Caller, id: &str, b: AttrPatch) -> ApiResul
         let (v, p) = own_attr(tx, &viewer, id)?;
         let mut ck = Check::new();
         if let Some(val) = &b.value {
-            check_value(&mut ck, repo::def_by_key(tx, &who.ws, &v.key)?.as_ref(), val);
+            check_value(&mut ck, &v.key, repo::def_by_key(tx, &who.ws, &v.key)?.as_ref(), val);
         }
         if let Some(s) = &b.status {
             ck.one_of("status", s, &["confirmed", "stale"]);
@@ -1382,6 +1389,13 @@ pub fn patch_attr(m: &Modules, who: &Caller, id: &str, b: AttrPatch) -> ApiResul
         ck.done()?;
         let value = b.value.as_deref().map(str::trim);
         repo::value_update(tx, &v.id, value, b.level, b.status.as_deref())?;
+        if b.value.is_some() || b.status.as_deref() == Some("confirmed") {
+            // Keep the original provenance in the label, but record that a person now stands
+            // behind the value. Automatic supplementation must never replace it.
+            let label = if b.value.is_some() { "你填的".to_string() }
+                else { format!("你确认 · {}", v.source_label) };
+            tx.execute("UPDATE attr_values SET source = 'me', source_label = ? WHERE id = ?", rusqlite::params![label, v.id])?;
+        }
         let after = repo::value_get(tx, &v.id)?.ok_or_else(|| ApiError::not_found("属性"))?;
         if after.status == "confirmed" && (b.status.is_some() || b.value.is_some()) {
             repo::stale_others(tx, &after)?;

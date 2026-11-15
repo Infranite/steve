@@ -200,6 +200,18 @@ impl Repo for StoreBackend {
                 m.entry(r.get(0)?).or_default().workflow_failed.push(r.get(1)?);
                 Ok(())
             })?;
+            each(c, &format!("SELECT u.item_id, u.attempt FROM workflow_units u WHERE u.item_id IS NOT NULL AND u.item_id IN ({ITEMS})"), ws, |r| {
+                m.entry(r.get(0)?).or_default().workflow_attempt = Some(r.get(1)?);
+                Ok(())
+            })?;
+            each(c, &format!("SELECT a.item_id, json_extract(a.snapshot, '$.attempt') FROM workflow_attempts a WHERE a.item_id IN ({ITEMS}) AND NOT EXISTS (SELECT 1 FROM workflow_units u WHERE u.item_id = a.item_id)"), ws, |r| {
+                let x = m.entry(r.get(0)?).or_default();
+                x.workflow_superseded = true;
+                if x.workflow_attempt.is_none() {
+                    x.workflow_attempt = r.get(1)?;
+                }
+                Ok(())
+            })?;
             for x in m.values_mut() {
                 if let Some((sid, _)) = x.sessions.iter().rev().find(|(_, st)| st != "ended") {
                     x.queued = counts.get(sid).copied().unwrap_or(0);
@@ -492,6 +504,29 @@ impl Repo for StoreBackend {
             .map_err(err)?
             .map(obj)
             .unwrap_or_else(|| Err(gone("bot")))
+    }
+    fn bot_patch_checked(
+        &self,
+        id: &str,
+        p: &Obj,
+        author: &str,
+        harnesses: &[steve_core::harnesses::Harness],
+    ) -> BResult<Obj> {
+        self.0
+            .atomic(|| -> anyhow::Result<Obj> {
+                let b = self.bot_get(id)?.ok_or_else(|| gone("bot"))?;
+                steve_core::models::validate_bot_patch(Some(&b), p, harnesses).map_err(
+                    |message| BackendError {
+                        status: 400,
+                        message,
+                    },
+                )?;
+                Ok(self.bot_patch(id, p, author)?)
+            })
+            .map_err(|e| match e.downcast::<BackendError>() {
+                Ok(e) => e,
+                Err(e) => BackendError::msg(e.to_string()),
+            })
     }
     fn bot_restore(&self, id: &str) -> BResult<()> {
         self.0.bots().restore(id).map_err(err)
@@ -897,7 +932,32 @@ impl Repo for StoreBackend {
             .map_err(err)
     }
     fn devices_list(&self) -> BResult<Vec<Obj>> {
-        objs(self.0.devices().list().map_err(err)?)
+        use steve_store::runtime::{HUB_DEVICE, HUB_NODE, session_room};
+        let mut out = objs(self.0.devices().list().map_err(err)?)?;
+        // the Hub's machine runs the Hub's own Node: how many of its turns run and wait, against
+        // the limit on this row
+        let room = self.0.reader(|c| session_room(c, HUB_NODE)).map_err(err)?;
+        for d in out
+            .iter_mut()
+            .filter(|d| d.get("id").and_then(Value::as_str) == Some(HUB_DEVICE))
+        {
+            d.insert("running".into(), serde_json::json!(room.running));
+            d.insert("waiting".into(), serde_json::json!(room.waiting));
+        }
+        Ok(out)
+    }
+    fn waiting_for_room(&self) -> BResult<HashMap<String, Value>> {
+        let rows = self
+            .0
+            .reader(steve_store::runtime::sessions_waiting_for_room)
+            .map_err(err)?;
+        rows.into_iter()
+            .map(|(s, r)| {
+                serde_json::to_value(r)
+                    .map(|v| (s, v))
+                    .map_err(|e| BackendError::msg(e.to_string()))
+            })
+            .collect()
     }
     fn device_upsert(
         &self,

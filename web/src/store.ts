@@ -12,14 +12,14 @@ import { cue } from "./bus"
 import { newClientId } from "./composer-draft"
 import { elapsed, pastTime, span } from "./i18n/format"
 import i18n, { t } from "./i18n"
-import type { StateUpdate, RFile, PlanStep, RHold, RQueued, RKindReview, SuggestChoice, A2uiRecord, A2uiSubmit, RAnnotation } from "./api"
+import type { StateUpdate, RFile, PlanStep, RHold, RQueued, RRoom, RKindReview, SuggestChoice, A2uiRecord, A2uiSubmit, RAnnotation } from "./api"
 import type { Cite } from "./api/knowledge"
 import { yoloApi, type RYolo, type RYoloAction } from "./api/yolo"
 import { applyLook } from "./lib/motion"
 
 /* ───────── view types (from the prototype) ───────── */
 export type Ev = any[] // ['u',text,label?] ['q',string[]] ['th',text,secs] ['tool',kind,title,meta,detail,live?,add?,del?,failed?,tool?,desc?,input?,plan?,endedAt?,steveArgs?] ['a',text] ['ho',text,toSid] ['hi',text] ['ask',text] ['sys',text] ['end',stopReason]
-export type Sess = { id: string; n: number; item: string | null; b: string | null; h?: string; harness?: string; nativeId?: string | null; cwd?: string; m?: string; reasoningEffort?: string | null; contextKnown?: boolean; /** the context in tokens, as the harness reported it: used and the window's size */ ctxUsed?: number; ctxSize?: number; st: "run" | "wait" | "idle" | "ended"; title: string; dur: string; ctx: number; src: string; up: string; /** status updated (ms), not execution activity */ at?: number; ev: Ev[]; seqs: number[]; ts: number[]; from?: string | null; fork?: { s: string; at: number }; queue: RQueued[]; ro?: boolean; device: string; loaded: boolean; busy: boolean
+export type Sess = { id: string; n: number; item: string | null; b: string | null; h?: string; harness?: string; nativeId?: string | null; cwd?: string; m?: string; reasoningEffort?: string | null; contextKnown?: boolean; /** the context in tokens, as the harness reported it: used and the window's size */ ctxUsed?: number; ctxSize?: number; st: "run" | "wait" | "idle" | "ended"; title: string; dur: string; ctx: number; src: string; up: string; /** status updated (ms), not execution activity */ at?: number; ev: Ev[]; seqs: number[]; ts: number[]; from?: string | null; fork?: { s: string; at: number }; queue: RQueued[]; ro?: boolean; device: string; loaded: boolean; busy: boolean; /** its next turn waits for room on its device */ room?: RRoom | null
   /** not opened on its Node yet: no turn runs, the queue waits for the start; `since` is when it was created */
   starting?: boolean; since?: number }
 export type Wait = { type: "approve" | "ask" | "accept" | "propose" | "fail" | "confirm"; subjectId?: string; q: string; draft?: string; opts?: string[]; since: string; decision: string; subject: string; session: string | null; options: string[]; by: string; busy?: boolean }
@@ -44,6 +44,8 @@ export type Item = {
   workflowPaused?: boolean
   workflowCycle?: number
   workflowFailed?: string[]
+  workflowAttempt?: number
+  workflowSuperseded?: boolean
   workflow?: RItemDetail["workflow"]
   dependencyWait?: RItemDetail["dependency_wait"]
 }
@@ -126,12 +128,27 @@ export const waitLine = (w: Wait) => t("core:wait.line", { kind: w.subject === "
 /* the name a harness's runtime reports (an adapter of one's own included), when the Hub listed it */
 export const runtimeName = (h: string): string | undefined => raw.state?.runtimes?.find((r) => r.id === h)?.name
 const harnessLabel = (h: string) => runtimeName(h) ?? h
-/** the harness adapter a new bot runs on unless one is chosen: the first that is ready */
-export const defaultHarness = (): string => { const rs = raw.state?.runtimes ?? []; return (rs.find((r) => r.ok) ?? rs[0])?.id ?? "" }
+/** the harness adapter a new bot runs on unless one is chosen: the workspace's main bot's if ready, else the first that is ready */
+export const defaultHarness = (): string => {
+  const rs = raw.state?.runtimes ?? []
+  const main = raw.state?.bots?.find((b) => b.main)?.harness
+  if (main && rs.some((r) => r.id === main && r.ok)) return main
+  return (rs.find((r) => r.ok) ?? rs[0])?.id ?? ""
+}
 /** Steve's permission mode (`plan`, `ask`, …) of a stored bot mode */
 const PERM_MODE: Record<string, string> = { plan: "plan", default: "ask", acceptEdits: "accept_edits", auto: "auto", bypassPermissions: "full_access" }
 /** the bot modes `harness` can be set to (all while the Hub does not know) */
-export const permModes = (harness: string): string[] => { const m = raw.state?.runtimes?.find((r) => r.id === harness)?.modes; return Object.keys(PERM).filter((k) => !m || m.includes(PERM_MODE[k])) }
+export const permModes = (harness: string): string[] => {
+  const m = raw.state?.runtimes?.find((r) => r.id === harness)?.modes
+  if (!m || !m.length) return Object.keys(PERM)
+  const xs = Object.keys(PERM).filter((k) => m.includes(PERM_MODE[k]))
+  return xs.length ? xs : ["default"]
+}
+/** a compatible permission mode for `harness`, in priority order */
+export const defaultPermMode = (harness: string): string => {
+  const ms = permModes(harness)
+  return (["default", "auto", "acceptEdits", "plan", "bypassPermissions"] as const).find((k) => ms.includes(k)) ?? ms[0] ?? "default"
+}
 /** the reasoning efforts `harness` takes, as its adapter reported them */
 export const harnessEfforts = (harness: string): string[] => raw.state?.runtimes?.find((r) => r.id === harness)?.efforts ?? []
 /** whether `harness` reads a Bot's skills, as its adapter declares (undefined: the Hub did not say) */
@@ -222,7 +239,7 @@ export function briefHead(text: string): string {
   return !line ? t("core:brief.plain") : line.length > 120 ? line.slice(0, 120) + "…" : line
 }
 /** what Steve's own tools are called; one Steve has no word for goes by its name */
-export const STEVE_TOOL: Record<string, string> = live(["steve_update", "steve_ask", "steve_request_approval", "steve_deliver", "steve_publish", "steve_lane_status", "steve_workflow", "steve_item_read", "steve_items_search", "steve_item_dependencies", "steve_knowledge_search", "steve_knowledge_read", "steve_knowledge_get", "steve_debug", "steve_devices", "steve_reply_source", "steve_event_get", "steve_sessions_list", "steve_remember", "steve_memory_list", "steve_memory_tidy", "steve_note", "steve_whois", "steve_contacts_find", "steve_contacts_search", "steve_contact_get", "steve_contacts_remember", "steve_im_read", "steve_mail_thread", "steve_mail_attachment", "steve_mail_draft", "steve_mail_send", "steve_github_status", "steve_github_ci_log", "steve_github_comment", "steve_github_open_pr", "steve_secret_list", "steve_secret_use", "steve_steward_propose", "steve_upgrade"] as const, (k) => t(`core:steveTool.${k}`))
+export const STEVE_TOOL: Record<string, string> = live(["steve_contacts","steve_github_read","steve_mail_read","steve_matters","steve_tools_search","steve_tool_call","steve_person_holdings","steve_digest_batch","steve_digest_read","steve_digest_chunk","steve_digest_finish","steve_digest_control","steve_digest_report","steve_matters_search","steve_matter_read", "steve_update", "steve_ask", "steve_request_approval", "steve_deliver", "steve_publish", "steve_lane_status", "steve_workflow", "steve_item_read", "steve_items_search", "steve_item_dependencies", "steve_knowledge_search", "steve_knowledge_read", "steve_knowledge_get", "steve_debug", "steve_devices", "steve_reply_source", "steve_event_get", "steve_sessions_list", "steve_remember", "steve_memory_list", "steve_memory_tidy", "steve_note", "steve_whois", "steve_contacts_find", "steve_contacts_search", "steve_contact_get", "steve_contacts_remember", "steve_im_read", "steve_mail_thread", "steve_mail_attachment", "steve_mail_draft", "steve_mail_send", "steve_github_status", "steve_github_ci_log", "steve_github_comment", "steve_github_open_pr", "steve_secret_list", "steve_secret_use", "steve_steward_propose", "steve_upgrade"] as const, (k) => t(`core:steveTool.${k}`))
 const KIND: Record<string, string> = { read: "read", edit: "edit", search: "search", exec: "run", fetch: "search", think: "read", delete: "edit", move: "edit" }
 const unfence = (t: string) => t.replace(/^```[a-z]*\n?/, "").replace(/\n?```\s*$/, "")
 const diffText = (d: any) => [...String(d.old ?? "").split("\n").filter((l, _i, a) => a.length > 1 || l).map((l) => "- " + l), ...String(d.new ?? "").split("\n").map((l) => "+ " + l)].join("\n")
@@ -303,7 +320,7 @@ function sessOf(s: RSession, openSessions: Set<string>): Sess {
   const conv = evs ? convOf(s.id, evs, running) : { ev: [], seqs: [], ts: [] }
   return { id: s.id, n: s.no, item: s.item_id, b: s.bot_id, h: harnessLabel(s.harness), harness: s.harness, nativeId: s.harness_session_id ?? null, cwd: s.cwd, m: s.model ?? t("core:defaultModel"), st: running ? "run" : s.status === "ended" ? "ended" : openSessions.has(s.id) ? "wait" : "idle",
     title: s.title, dur: dur(s.created, s.updated), reasoningEffort: s.reasoning_effort, contextKnown: s.used != null && s.size != null && s.size > 0, ctxUsed: s.used ?? undefined, ctxSize: s.size ?? undefined, ctx: s.used && s.size ? Math.round((s.used / s.size) * 100) : 0, src: s.source, up: tm(s.updated), at: s.updated, ev: conv.ev, seqs: conv.seqs, ts: conv.ts, queue: s.queued,
-    ro: s.readonly, device: s.device_id, loaded: !!evs, busy: s.busy, starting: s.status === "starting", since: s.created }
+    ro: s.readonly, device: s.device_id, loaded: !!evs, busy: s.busy, room: running ? s.room ?? null : null, starting: s.status === "starting", since: s.created }
 }
 function waitOf(d: RDecision): Wait {
   const opts = d.kind === "ask" ? d.options : undefined
@@ -460,7 +477,7 @@ function itemOf(i: RItem): Item {
   })
   return {
     id: i.id, t: i.title, b: i.bot_id ?? "steve", st: i.status, phase: i.phase, cycle: i.cycle, deps: i.deps, src: i.source, ws: proj?.name ?? "—", project: i.project_id, up: tm(i.updated), star: i.star, acc: ACC[i.accept_mode ?? "inherit"] ?? ACC.inherit,
-    workflowPaused: i.workflow_paused, workflowCycle: i.workflow_cycle, workflowFailed: i.workflow_failed,
+    workflowPaused: i.workflow_paused, workflowCycle: i.workflow_cycle, workflowFailed: i.workflow_failed, workflowAttempt: i.workflow_attempt, workflowSuperseded: i.workflow_superseded,
     goals: det ? det.goalsList.map((g) => g.text) : [i.goal], now: i.status === "block" && i.now === "等前置事项完成后自动开始" ? t("views:dependencyWait.waiting") : i.now || "", plan: i.plan.length ? steps(i.plan) : undefined,
     rounds: (det?.planRounds ?? []).map((r) => ({ n: r.round, steps: steps(r.steps), end: r.end, at: tm(r.created) })),
     workflow: det?.workflow,
@@ -1105,7 +1122,12 @@ export async function saveBot(k: string, p: { n?: string; role?: string; pers?: 
   if (p.color !== undefined || p.round !== undefined || p.skin !== undefined) q.avatar = { color: p.color ?? b.color, round: p.round ?? b.round, skin: p.skin !== undefined ? p.skin : b.skin }
   await call(api.patchBot(k, q), msg)
 }
-export async function makeBot(n: string, role: string, harness = defaultHarness(), model: string | null = null) { const r = await call(api.newBot({ name: n, role, harness, model }), t("core:toast.botCreated")); return r?.id }
+export async function makeBot(n: string, role: string, harness = defaultHarness(), model: string | null = null) {
+  const q: Partial<RBot> & { name: string } = { name: n, role, model }
+  if (harness) { q.harness = harness; q.perm_mode = defaultPermMode(harness) }
+  const r = await call(api.newBot(q), t("core:toast.botCreated"))
+  return r?.id
+}
 export async function draftBot(desc: string) { const r = await call(api.draftBot(desc), t("core:toast.botDrafted")); return r?.id }
 export async function deleteBot(k: string, to: string, mem: "删除" | "导出") {
   const b = st.bots[k]; const r = await call(api.deleteBot(k, to, mem === "删除" ? "delete" : "export")); if (!r) return
@@ -1123,8 +1145,8 @@ export async function switchWorkspace(id: string) {
   try { await api.switchWs(id); setPageWorkspace(id); scopeEpoch++; replayFrom.clear(); painted.clear(); raw.loadingItem.clear(); raw.loadingEv.clear(); reloadAgain.clear(); missedEv.clear(); raw.details.clear(); raw.events.clear(); convs.clear(); openItems.clear(); dirty.clear(); watermark = null; st.thinking = false; st.draft = null; closeStream(); await refresh(); connect(); location.hash = "#/"; toast(t("core:toast.switchedWorkspace", { name: st.workspace?.name ?? "" })) } catch (e) { fail(e) }
 }
 export async function newWorkspace(name: string, description: string, item_prefix?: string) { const w = await call(api.newWs({ name, description, item_prefix })); if (w) await switchWorkspace(w.id) }
-export async function newProject(p: { name: string; path: string; description?: string; worktree?: boolean; default_bot?: string | null; node?: string }) { const r = await call(api.newProject(p), t("core:toast.projectAdded", { name: p.name })); return r?.id }
-export function patchProject(id: string, p: Partial<RProject>, msg = t("common:state.saved")) { void call(api.patchProject(id, p), msg) }
+export async function newProject(p: { name: string; path: string; description?: string; worktree?: boolean; default_bot?: string | null; done_when?: "merge" | "tag" | null; node?: string }) { const r = await call(api.newProject(p), t("core:toast.projectAdded", { name: p.name })); return r?.id }
+export function patchProject(id: string, p: Partial<RProject> & { done_when?: "merge" | "tag" | null }, msg = t("common:state.saved")) { void call(api.patchProject(id, p), msg) }
 
 /* ───────── tags ───────── */
 export const tag = (id: string) => st.tags.find((t) => t.id === id)

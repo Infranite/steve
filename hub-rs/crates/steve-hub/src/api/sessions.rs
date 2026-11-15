@@ -98,13 +98,20 @@ pub async fn events(
 /// A system event the Hub wrote itself in zh-CN (a message parked for a Node that is not enabled
 /// here), its `text` in the request's language.
 fn system_shown(kind: &str, data: &mut Value) -> bool {
-    if kind != "system" || data.get("parked") != Some(&Value::Bool(true)) {
+    if kind != "system" {
         return false;
     }
+    let keys: &[&str] = if data.get("parked") == Some(&Value::Bool(true)) {
+        &["hub.session.node_parked"]
+    } else if data.get("steve_protocol_hash").is_some() {
+        &["hub.session.protocol_updated"]
+    } else {
+        return false;
+    };
     let Some(t) = data
         .get("text")
         .and_then(Value::as_str)
-        .and_then(|t| steve_i18n::reword!(t, &["hub.session.node_parked"]))
+        .and_then(|t| steve_i18n::reword!(t, keys))
     else {
         return false;
     };
@@ -143,7 +150,8 @@ impl EventsBody {
             "{{\"seq\":{seq},\"ts\":{ts},\"kind\":{},\"data\":",
             serde_json::to_string(&kind).unwrap_or_default()
         );
-        let parked = kind == "system" && data.contains("\"parked\"");
+        let parked = kind == "system"
+            && (data.contains("\"parked\"") || data.contains("\"steve_protocol_hash\""));
         if clean && !parked {
             out.push_str(&data);
         } else if parked {
@@ -406,11 +414,50 @@ pub async fn resume(
 ) -> ApiResult {
     let s = own_session(&st, &c.ws, &id).await?;
     let homes = crate::resume::Homes::of(&st.cfg);
-    // the local Node on: it finds the transcript, the Hub reads no harness files
+    let is_owner = c.user.get("role").and_then(Value::as_str) == Some("owner");
+    let session_state = if let Some(store) = st.modules.as_ref().map(|m| m.store.clone()) {
+        let sid = id.clone();
+        let data_dir = st.cfg.data_dir.clone();
+        blocking(move || {
+            use rusqlite::OptionalExtension;
+            let row = store
+                .reader::<_, steve_store::StoreError>(|conn| {
+                    Ok(conn
+                        .query_row(
+                            "SELECT node_id, state_dir FROM runtime_sessions WHERE session_id = ?1",
+                            [&sid],
+                            |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?)),
+                        )
+                        .optional()?)
+                })
+                .ok()
+                .flatten();
+            Ok(match row {
+                Some((node_id, _)) if node_id != "local" && node_id != "local-jobs" => {
+                    crate::resume::SessionState::RemoteNode
+                }
+                Some((_, Some(dir))) if !dir.trim().is_empty() => {
+                    crate::resume::SessionState::IsolatedLocal {
+                        harness_dir: data_dir
+                            .join("node")
+                            .join("state")
+                            .join(dir)
+                            .join("harness"),
+                        expose_path: is_owner,
+                    }
+                }
+                _ => crate::resume::SessionState::AmbientLocal,
+            })
+        })
+        .await?
+    } else {
+        crate::resume::SessionState::AmbientLocal
+    };
+    // the local Node on: it finds ambient transcripts, the Hub reads no ambient harness files
     if let Some(node) = st.node.as_ref().map(|n| n.node()) {
-        return ok(crate::resume::info_on(&homes, &s, node.as_ref()).await);
+        return ok(crate::resume::info_on_state(&homes, &s, node.as_ref(), &session_state).await);
     }
-    let v = blocking(move || Ok(crate::resume::info(&homes, &s))).await?;
+    let v = blocking(move || Ok(crate::resume::info_for_state(&homes, &s, &session_state))).await?;
     ok(v)
 }
 
@@ -571,10 +618,21 @@ pub async fn import(
 
 #[cfg(test)]
 mod tests {
-    use super::{EventsBody, after_bound, has_integer_keys};
+    use super::{EventsBody, after_bound, has_integer_keys, system_shown};
     use http_body_util::BodyExt;
+    use serde_json::json;
 
     /// The parked-session notice reads in the request's language; zh-CN as stored.
+    #[test]
+    fn protocol_sync_notice_reads_in_the_request_language() {
+        let mut data = json!({"text": "已同步当前 Steve 工作协议", "steve_protocol_hash": "h"});
+        assert!(steve_i18n::with(steve_i18n::EN, || system_shown(
+            "system", &mut data
+        )));
+        assert_eq!(data["text"], "Synced the current Steve working protocol");
+        assert_eq!(data["steve_protocol_hash"], "h");
+    }
+
     #[tokio::test]
     async fn the_parked_notice_by_language() {
         let stored = steve_i18n::stored(|| steve_i18n::t!("hub.session.node_parked"));

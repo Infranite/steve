@@ -1084,12 +1084,21 @@ async fn the_first_meeting_writes_through_its_own_tools() {
     )
     .await;
     assert!(failed && said.contains("longer than 40"), "{said}");
+    // Validate the entire batch before creating anything, including adapter-specific effort.
+    for effort in [json!("turbo"), json!(42)] {
+        let (said, failed) = tool(
+            "meet-token-1", "steve_onboard_bots",
+            json!({"bots": [{"name": "must not be created"}, {"name": "invalid effort", "reasoning_effort": effort}]}),
+        ).await;
+        assert!(failed, "{said}");
+        assert_eq!(bots().await.len(), before);
+    }
     let (said, failed) = tool(
         "meet-token-1",
         "steve_onboard_bots",
         json!({"bots": [
-            {"name": "代码审查", "role": "审查每个改动", "rules": "先读 diff，再读测试。", "model": fast},
-            {"name": "写文档", "role": "写和改文档", "persona": "简洁"},
+            {"name": "代码审查", "role": "审查每个改动", "rules": "先读 diff，再读测试。", "model": fast, "reasoning_effort": "high"},
+            {"name": "写文档", "role": "写和改文档", "persona": "简洁", "reasoning_effort": null},
         ]}),
     )
     .await;
@@ -1099,6 +1108,36 @@ async fn the_first_meeting_writes_through_its_own_tools() {
     );
     let now = bots().await;
     assert_eq!(now.len(), before + 2, "{now:?}");
+    let (said, failed) = tool("meet-token-1", "steve_onboard_bots", json!({})).await;
+    assert!(!failed, "{said}");
+    let listed: Value = serde_json::from_str(&said).unwrap();
+    let review = listed["bots"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|b| b["name"] == "代码审查")
+        .unwrap();
+    assert_eq!(review["reasoning_effort"], "high");
+    assert_eq!(review["model"], fast);
+    let docs = listed["bots"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|b| b["name"] == "写文档")
+        .unwrap();
+    assert!(docs["reasoning_effort"].is_null());
+    assert_eq!(
+        store
+            .bots()
+            .list(Some("default"))
+            .unwrap()
+            .iter()
+            .find(|b| b.name == "代码审查")
+            .unwrap()
+            .reasoning_effort
+            .as_deref(),
+        Some("high")
+    );
     let (said, failed) = tool(
         "meet-token-1",
         "steve_onboard_bots",

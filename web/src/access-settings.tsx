@@ -9,7 +9,7 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { TextField } from "@/components/ui/input"
 import { Spinner } from "@/components/ui/spinner"
 import { api, modReq } from "@/api"
-import { HubChooser, useHubAddress } from "@/hub-ui"
+import { HubChooser } from "@/hub-ui"
 import { encodeQr, qrSvgPath } from "@/qr"
 import { toast } from "@/store"
 import { closeSheet, Row, Panel, Section, Card, Notice, Pill, Loading, Tile, Chevron, FieldRow } from "@/ui"
@@ -234,7 +234,7 @@ function OidcSection() {
   const [o, setO] = useState<Oidc | null>(null)
   const [denied, setDenied] = useState(false)
   const [f, setF] = useState({ issuer: "", client_id: "", secret: "" })
-  const [busy, setBusy] = useState(false)
+  const [busy, setBusy] = useState(false), [open, setOpen] = useState(false)
   useEffect(() => { access.oidc().then((x) => { setO(x); setF({ issuer: x.issuer ?? "", client_id: x.client_id ?? "", secret: "" }) }, () => setDenied(true)) }, [])
   if (denied || !o) return null
   const save = async () => {
@@ -247,14 +247,18 @@ function OidcSection() {
   /* a field with its label on the left (stacked on a phone), as a row of the panel */
   const field = (label: string, input: ReactNode) => <label className="grid gap-1.5 px-3 py-2.5 sm:grid-cols-[9rem_minmax(0,1fr)] sm:items-center sm:gap-3">
     <span className="type-callout text-muted-foreground">{label}</span>{input}</label>
+  /* single sign-on is optional and rare: while nothing is set it is one row; the form opens on demand */
+  if (o.source === "none" && !open) return <Section data-oidc label={t("pages:access.oidc")}>
+    <Panel><Row title={t("pages:access.oidcNone")} sub={t("pages:access.oidcSub")}><Button size="sm" variant="outline" onClick={() => setOpen(true)} data-oidc-open>{t("pages:access.oidcSetUp")}</Button></Row></Panel>
+  </Section>
   return <Section data-oidc label={t("pages:access.oidc")} note={t("pages:access.oidcSub")}>
-    <Panel>
+    <Panel className={open ? "anim-in" : undefined}>
       <Row title={t("pages:access.oidcCallback")} sub={<span className="type-code break-all">{o.callback}</span>} />
       {o.source === "env" ? <Row title={o.issuer ?? ""} sub={t("pages:access.oidcFromEnv")} /> : <>
         {field("Issuer", <TextField size="sm" value={f.issuer} onChange={(e) => setF({ ...f, issuer: e.target.value })} placeholder="https://id.example.com/application/o/steve/" data-oidc-issuer />)}
         {field(t("pages:access.oidcClient"), <TextField size="sm" value={f.client_id} onChange={(e) => setF({ ...f, client_id: e.target.value })} placeholder={t("pages:access.oidcClient")} data-oidc-client />)}
         {field(t("pages:access.oidcSecret"), <TextField size="sm" type="password" value={f.secret} onChange={(e) => setF({ ...f, secret: e.target.value })} placeholder={o.has_secret ? t("pages:access.oidcSecretKept") : t("pages:access.oidcSecret")} autoComplete="new-password" data-oidc-secret />)}
-        <div className="flex justify-end gap-2 px-3 py-2.5">{o.source === "settings" && <Button size="sm" variant="ghost" className="text-muted-foreground" onClick={() => void off()} data-oidc-off>{t("pages:access.oidcOff")}</Button>}
+        <div className="flex justify-end gap-2 px-3 py-2.5">{o.source === "none" && <Button size="sm" variant="ghost" className="text-muted-foreground" onClick={() => setOpen(false)}>{t("common:action.cancel")}</Button>}{o.source === "settings" && <Button size="sm" variant="ghost" className="text-muted-foreground" onClick={() => void off()} data-oidc-off>{t("pages:access.oidcOff")}</Button>}
           <Button size="sm" variant="outline" onClick={() => void save()} disabled={busy || !f.issuer.trim() || !f.client_id.trim()} data-oidc-save>{busy ? <Spinner className="size-4" /> : t("pages:access.oidcSave")}</Button></div>
       </>}
     </Panel>
@@ -271,7 +275,6 @@ const routeText = (t: ReturnType<typeof useT>, r: string | null) => {
 
 export function AccessSettingsPane() {
   const t = useT()
-  const hub = useHubAddress()
   const [v, setV] = useState<View | null>(null)
   const [error, setError] = useState("")
   const [name, setName] = useState("")
@@ -290,16 +293,14 @@ export function AccessSettingsPane() {
   if (error) return <Notice tone="destructive">{error}</Notice>
   if (!v) return <Loading />
   const live = (x: { revoked: number | null }) => !x.revoked
+  /* what this page is opened for, first: the Hub you are on (and signing this client out), then signing in another
+   * device; the address and version of the Hub are in its row of the list, not repeated above it */
   return <div className="flex flex-col gap-8" data-access-pane>
-    <Section label={t("pages:access.here")}><Panel>
-      <Row title={t("pages:access.hub")} sub={[hub, v.hub.version].filter(Boolean).join(" · ")} data-access-hub />
-      <Row title={t("pages:access.thisClient")} sub={v.current ? routeText(t, v.route) : t("pages:access.browserSession")}>
-        <Button size="sm" variant="outline" onClick={async () => { await api.logout().catch(() => {}); location.reload() }} data-sign-out>{t("pages:access.signOut")}</Button>
-      </Row>
-    </Panel></Section>
-
-    <Section data-hub-switcher label={t("pages:access.hubs")} note={t("pages:access.hubsSub")}>
+    <Section data-hub-switcher label={t("pages:access.hubs")}>
       <HubChooser manage bare />
+      <Panel className="mt-3"><Row title={t("pages:access.thisClient")} sub={v.current ? routeText(t, v.route) : t("pages:access.browserSession")} data-access-hub>
+        <Button size="sm" variant="outline" onClick={async () => { await api.logout().catch(() => {}); location.reload() }} data-sign-out>{t("pages:access.signOut")}</Button>
+      </Row></Panel>
     </Section>
 
     <Section data-pair-device-section label={t("pages:access.pairTitle")} note={showPair ? undefined : t("pages:access.pairSub")}>
@@ -326,13 +327,29 @@ export function AccessSettingsPane() {
       </Panel>
     </Section>
 
-    <OidcSection />
+    <Clients v={v} onRevoke={(ids) => void revoke(() => Promise.all(ids.map((id) => access.revokeClient(id))))} />
 
-    <Section label={t("pages:access.clients")}><Panel>
-      {v.clients.filter(live).map((c) => <Row key={c.id} className="group/client" title={<span className="flex items-center gap-2">{c.name}<span className="type-footnote text-muted-foreground">{c.kind}{c.platform ? ` · ${c.platform}` : ""}</span>{c.id === v.current && <Pill tone="info">{t("pages:access.current")}</Pill>}</span>}
-        sub={`${routeText(t, c.last_route)}${c.last_ip ? ` · ${c.last_ip}` : ""} · ${c.last_seen ? ago(c.last_seen) : t("pages:access.never")}`}>
-        {c.id !== v.current && <Button size="sm" variant="ghost" className="text-muted-foreground opacity-0 group-hover/client:opacity-100 group-focus-within/client:opacity-100 focus-visible:opacity-100 pointer-coarse:opacity-100" onClick={() => void revoke(() => access.revokeClient(c.id))} data-revoke-client={c.id}>{t("pages:access.signOutClient")}</Button>}</Row>)}
-      {!v.clients.some(live) && <Row title={t("pages:access.noClients")} />}
-    </Panel></Section>
+    <OidcSection />
   </div>
+}
+
+const CLIENTS_SHOWN = 5
+/** the signed-in clients, newest first: one row per client (name, kind, platform and route alike), saying how many
+ *  sign-ins it stands for; this client always on its own row. Signing a row out signs out all it stands for. */
+function Clients({ v, onRevoke }: { v: View; onRevoke: (ids: string[]) => void }) {
+  const t = useT()
+  const [all, setAll] = useState(false)
+  const groups = new Map<string, Client[]>()
+  for (const c of [...v.clients].filter((c) => !c.revoked).sort((a, b) => (b.last_seen ?? b.created) - (a.last_seen ?? a.created))) {
+    const key = c.id === v.current ? c.id : [c.name, c.kind, c.platform, c.last_route].join("\u0000")
+    groups.set(key, [...(groups.get(key) ?? []), c])
+  }
+  const rows = [...groups.values()], shown = all ? rows : rows.slice(0, CLIENTS_SHOWN)
+  return <Section data-access-clients label={t("pages:access.clients")}><Panel>
+    {shown.map((g) => { const c = g[0]; return <Row key={c.id} className="group/client" data-client={c.id} title={<span className="flex min-w-0 items-center gap-2"><span className="truncate">{c.name}</span>{g.length > 1 && <span className="shrink-0 type-footnote tabular-nums text-muted-foreground" data-client-count={g.length}>×{g.length}</span>}{c.id === v.current && <Pill tone="info">{t("pages:access.current")}</Pill>}</span>}
+      sub={[c.platform || c.kind, routeText(t, c.last_route), c.last_seen ? ago(c.last_seen) : t("pages:access.never")].join(" · ")}>
+      {c.id !== v.current && <Button size="sm" variant="ghost" className="text-muted-foreground opacity-0 group-hover/client:opacity-100 group-focus-within/client:opacity-100 focus-visible:opacity-100 pointer-coarse:opacity-100" onClick={() => onRevoke(g.map((x) => x.id))} data-revoke-client={c.id}>{t("pages:access.signOutClient")}</Button>}</Row> })}
+    {!rows.length && <Row title={t("pages:access.noClients")} />}
+    {rows.length > CLIENTS_SHOWN && <button type="button" className="w-full px-3 py-2.5 text-left type-callout text-muted-foreground hover:text-foreground" onClick={() => setAll(!all)} aria-expanded={all} data-clients-more>{all ? t("pages:access.clientsLess") : t("pages:access.clientsMore", { count: rows.length - CLIENTS_SHOWN })}</button>}
+  </Panel></Section>
 }

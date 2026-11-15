@@ -116,6 +116,14 @@ pub struct Normalizer {
     tools: HashMap<String, ToolFact>,
     /// See [`Normalizer::input_includes_cache`].
     input_includes_cache: bool,
+    /// Cumulative session token baseline subtracted from `PromptResponse.usage` when
+    /// `usage_prompt_cumulative` is set (`(raw_input, output, cache_read, cache_write, reasoning)`).
+    prior_prompt_tokens: Option<(u64, u64, u64, u64, u64)>,
+    /// Updated session cumulative token totals observed in `PromptResponse.usage`.
+    last_prompt_tokens: Option<(u64, u64, u64, u64, u64)>,
+    /// Per-turn streaming token deltas already emitted from `agent_*_chunk._meta.usage` during the
+    /// current turn, subtracted from any repeating final `PromptResponse.usage` summary.
+    streamed_turn_tokens: (u64, u64, u64, u64, u64),
 }
 
 impl Normalizer {
@@ -129,6 +137,9 @@ impl Normalizer {
             open: None,
             tools: HashMap::new(),
             input_includes_cache: false,
+            prior_prompt_tokens: None,
+            last_prompt_tokens: None,
+            streamed_turn_tokens: (0, 0, 0, 0, 0),
         }
     }
 
@@ -137,6 +148,76 @@ impl Normalizer {
     pub fn input_includes_cache(mut self, yes: bool) -> Self {
         self.input_includes_cache = yes;
         self
+    }
+
+    /// The adapter reports cumulative session token totals in `PromptResponse.usage`
+    /// (`usage_prompt_cumulative`): subtract `prior` (`(raw_input, output, cache_read, cache_write,
+    /// reasoning)`) to emit per-turn deltas.
+    pub fn prompt_cumulative_baseline(mut self, prior: (u64, u64, u64, u64, u64)) -> Self {
+        self.set_prompt_cumulative_baseline(prior);
+        self
+    }
+
+    /// Updates the cumulative session token baseline in place, preserving `root`, `prefix`,
+    /// `meter`, and `input_includes_cache`.
+    pub fn set_prompt_cumulative_baseline(&mut self, prior: (u64, u64, u64, u64, u64)) {
+        self.prior_prompt_tokens = Some(prior);
+        self.last_prompt_tokens = Some(prior);
+    }
+
+    /// The updated cumulative session token high-water mark after [`Self::prompt_response`].
+    pub fn cumulative_prompt_tokens(&self) -> Option<(u64, u64, u64, u64, u64)> {
+        self.last_prompt_tokens
+    }
+
+    /// Extracts cumulative session token counters from a `usage_update` notification (used when
+    /// seeding a resumed session's baseline on `session/load`).
+    pub fn cumulative_tokens_from_usage_update(u: &Value) -> Option<(u64, u64, u64, u64, u64)> {
+        let meta = u.get("_meta")?;
+        let prompt = meta
+            .get("promptTokens")
+            .or_else(|| meta.get("inputTokens"))
+            .or_else(|| meta.get("prompt_tokens"))
+            .or_else(|| meta.get("input_tokens"))
+            .and_then(Value::as_u64);
+        let completion = meta
+            .get("completionTokens")
+            .or_else(|| meta.get("outputTokens"))
+            .or_else(|| meta.get("completion_tokens"))
+            .or_else(|| meta.get("output_tokens"))
+            .and_then(Value::as_u64);
+        if prompt.is_none() && completion.is_none() {
+            return None;
+        }
+        let cached = meta
+            .get("cachedTokens")
+            .or_else(|| meta.get("cachedReadTokens"))
+            .or_else(|| meta.get("cachedInputTokens"))
+            .or_else(|| meta.get("cached_tokens"))
+            .or_else(|| meta.get("cached_read_tokens"))
+            .or_else(|| meta.get("cache_read_input_tokens"))
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        let cached_write = meta
+            .get("cachedWriteTokens")
+            .or_else(|| meta.get("cached_write_tokens"))
+            .or_else(|| meta.get("cache_creation_input_tokens"))
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        let reasoning = meta
+            .get("reasoningTokens")
+            .or_else(|| meta.get("thoughtTokens"))
+            .or_else(|| meta.get("reasoning_tokens"))
+            .or_else(|| meta.get("thought_tokens"))
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        Some((
+            prompt.unwrap_or(0),
+            completion.unwrap_or(0),
+            cached,
+            cached_write,
+            reasoning,
+        ))
     }
 
     /// The events and facts of one `session/update` (the `update` object).
@@ -174,7 +255,7 @@ impl Normalizer {
             })],
             "config_option_update" => {
                 let mut out = vec![];
-                if let Some(m) = config_value(u, |o| o["id"] == "model") {
+                if let Some(m) = config_value(u, crate::session::is_model_option) {
                     out.push(Fact::Model(m));
                 }
                 if let Some(e) = config_value(u, is_effort) {
@@ -205,30 +286,141 @@ impl Normalizer {
     /// Final token accounting from `session/prompt`, distinct from usage_update's context meter.
     pub fn prompt_response(&mut self, response: &Value) -> Vec<Fact> {
         let cached_inside = self.input_includes_cache;
-        let tokens = |u: &Value| Tokens {
-            input: u.get("inputTokens").and_then(Value::as_u64).map(|i| {
-                let cached = u
-                    .get("cachedReadTokens")
-                    .or_else(|| u.get("cachedInputTokens"))
-                    .and_then(Value::as_u64)
-                    .unwrap_or(0);
+        let tokens = |u: &Value| {
+            let input_raw = u
+                .get("inputTokens")
+                .or_else(|| u.get("input_tokens"))
+                .and_then(Value::as_u64);
+            let output = u
+                .get("outputTokens")
+                .or_else(|| u.get("output_tokens"))
+                .and_then(Value::as_u64);
+            let cache_read = u
+                .get("cachedReadTokens")
+                .or_else(|| u.get("cachedInputTokens"))
+                .or_else(|| u.get("cached_read_tokens"))
+                .or_else(|| u.get("cache_read_input_tokens"))
+                .and_then(Value::as_u64);
+            let cache_write = u
+                .get("cachedWriteTokens")
+                .or_else(|| u.get("cached_write_tokens"))
+                .or_else(|| u.get("cache_creation_input_tokens"))
+                .and_then(Value::as_u64);
+            let reasoning = u
+                .get("reasoningTokens")
+                .or_else(|| u.get("thoughtTokens"))
+                .or_else(|| u.get("reasoning_tokens"))
+                .or_else(|| u.get("thought_tokens"))
+                .and_then(Value::as_u64);
+            let input = input_raw.map(|i| {
+                let cached = cache_read.unwrap_or(0);
                 if cached_inside && cached <= i {
                     i - cached
                 } else {
                     i
                 }
-            }),
-            output: u.get("outputTokens").and_then(Value::as_u64),
-            cache_read: u
-                .get("cachedReadTokens")
-                .or_else(|| u.get("cachedInputTokens"))
-                .and_then(Value::as_u64),
-            cache_write: u.get("cachedWriteTokens").and_then(Value::as_u64),
-            reasoning: u.get("reasoningTokens").and_then(Value::as_u64),
+            });
+            Tokens {
+                input,
+                output,
+                cache_read,
+                cache_write,
+                reasoning,
+            }
         };
         let mut rows = vec![];
-        if let Some(u) = response.get("usage").filter(|u| u.is_object()) {
-            rows.push((None, UsageScope::Main, tokens(u)));
+        if let Some(u) = response.get("usage").filter(|u| u.is_object()).or_else(|| {
+            response.get("_meta").filter(|m| {
+                m.get("inputTokens").is_some()
+                    || m.get("outputTokens").is_some()
+                    || m.get("input_tokens").is_some()
+                    || m.get("output_tokens").is_some()
+            })
+        }) {
+            let t = if let Some((pi, po, pcr, pcw, pr)) = self.prior_prompt_tokens {
+                let raw_in = u
+                    .get("inputTokens")
+                    .or_else(|| u.get("input_tokens"))
+                    .and_then(Value::as_u64);
+                let raw_out = u
+                    .get("outputTokens")
+                    .or_else(|| u.get("output_tokens"))
+                    .and_then(Value::as_u64);
+                let raw_cr = u
+                    .get("cachedReadTokens")
+                    .or_else(|| u.get("cachedInputTokens"))
+                    .or_else(|| u.get("cached_read_tokens"))
+                    .or_else(|| u.get("cache_read_input_tokens"))
+                    .and_then(Value::as_u64);
+                let raw_cw = u
+                    .get("cachedWriteTokens")
+                    .or_else(|| u.get("cached_write_tokens"))
+                    .or_else(|| u.get("cache_creation_input_tokens"))
+                    .and_then(Value::as_u64);
+                let raw_r = u
+                    .get("reasoningTokens")
+                    .or_else(|| u.get("thoughtTokens"))
+                    .or_else(|| u.get("reasoning_tokens"))
+                    .or_else(|| u.get("thought_tokens"))
+                    .and_then(Value::as_u64);
+                let next = (
+                    raw_in.unwrap_or(pi).max(pi),
+                    raw_out.unwrap_or(po).max(po),
+                    raw_cr.unwrap_or(pcr).max(pcr),
+                    raw_cw.unwrap_or(pcw).max(pcw),
+                    raw_r.unwrap_or(pr).max(pr),
+                );
+                self.prior_prompt_tokens = Some(next);
+                self.last_prompt_tokens = Some(next);
+                let d_cr = raw_cr.map(|v| v.saturating_sub(pcr));
+                let d_in_raw = raw_in.map(|v| v.saturating_sub(pi));
+                let d_in = d_in_raw.map(|i| {
+                    let c = d_cr.unwrap_or(0);
+                    if cached_inside && c <= i { i - c } else { i }
+                });
+                let mut t = Tokens {
+                    input: d_in,
+                    output: raw_out.map(|v| v.saturating_sub(po)),
+                    cache_read: d_cr,
+                    cache_write: raw_cw.map(|v| v.saturating_sub(pcw)),
+                    reasoning: raw_r.map(|v| v.saturating_sub(pr)),
+                };
+                let (si, so, scr, scw, sr) = self.streamed_turn_tokens;
+                if (si | so | scr | scw | sr) != 0 {
+                    t.input = t.input.map(|v| v.saturating_sub(si));
+                    t.output = t.output.map(|v| v.saturating_sub(so));
+                    t.cache_read = t.cache_read.map(|v| v.saturating_sub(scr));
+                    t.cache_write = t.cache_write.map(|v| v.saturating_sub(scw));
+                    t.reasoning = t.reasoning.map(|v| v.saturating_sub(sr));
+                }
+                t
+            } else {
+                let mut t = tokens(u);
+                let (si, so, scr, scw, sr) = self.streamed_turn_tokens;
+                if (si | so | scr | scw | sr) != 0 {
+                    t.input = t.input.map(|v| v.saturating_sub(si));
+                    t.output = t.output.map(|v| v.saturating_sub(so));
+                    t.cache_read = t.cache_read.map(|v| v.saturating_sub(scr));
+                    t.cache_write = t.cache_write.map(|v| v.saturating_sub(scw));
+                    t.reasoning = t.reasoning.map(|v| v.saturating_sub(sr));
+                }
+                t
+            };
+            self.streamed_turn_tokens = (0, 0, 0, 0, 0);
+            if t.input.is_some_and(|v| v > 0)
+                || t.output.is_some_and(|v| v > 0)
+                || t.cache_read.is_some_and(|v| v > 0)
+                || t.cache_write.is_some_and(|v| v > 0)
+                || t.reasoning.is_some_and(|v| v > 0)
+                || (self.prior_prompt_tokens.is_none()
+                    && (t.input.is_some()
+                        || t.output.is_some()
+                        || t.cache_read.is_some()
+                        || t.cache_write.is_some()
+                        || t.reasoning.is_some()))
+            {
+                rows.push((None, UsageScope::Main, t));
+            }
         }
         if let Some(models) = response
             .pointer("/_meta/quota/model_usage")
@@ -280,12 +472,35 @@ impl Normalizer {
                 "message content is not text",
             )];
         }
+        let mut meta_usage = vec![];
+        if let Some(mu) = u.pointer("/_meta/usage").filter(|v| v.is_object()) {
+            let saved_prior = self.prior_prompt_tokens.take();
+            let saved_streamed = std::mem::replace(&mut self.streamed_turn_tokens, (0, 0, 0, 0, 0));
+            let synthetic = serde_json::json!({"usage": mu});
+            meta_usage = self.prompt_response(&synthetic);
+            self.prior_prompt_tokens = saved_prior;
+            let mut acc = saved_streamed;
+            for f in &meta_usage {
+                if let Fact::Event(EventBody::Usage { report }) = f {
+                    acc.0 = acc.0.saturating_add(report.tokens.input.unwrap_or(0));
+                    acc.1 = acc.1.saturating_add(report.tokens.output.unwrap_or(0));
+                    acc.2 = acc.2.saturating_add(report.tokens.cache_read.unwrap_or(0));
+                    acc.3 = acc.3.saturating_add(report.tokens.cache_write.unwrap_or(0));
+                    acc.4 = acc.4.saturating_add(report.tokens.reasoning.unwrap_or(0));
+                }
+            }
+            self.streamed_turn_tokens = acc;
+        }
         let t = u
             .pointer("/content/text")
             .and_then(Value::as_str)
             .unwrap_or("");
         if t.is_empty() {
-            return vec![Fact::Nothing];
+            return if meta_usage.is_empty() {
+                vec![Fact::Nothing]
+            } else {
+                meta_usage
+            };
         }
         let id = u.get("messageId").and_then(Value::as_str).map(String::from);
         let mut out = vec![];
@@ -321,6 +536,7 @@ impl Normalizer {
             text: t.to_string(),
         }));
         o.offset += t.len() as u64;
+        out.extend(meta_usage);
         out
     }
 
@@ -355,13 +571,19 @@ impl Normalizer {
             cost: u
                 .pointer("/cost/amount")
                 .and_then(Value::as_f64)
-                .map(|a| Money {
-                    decimal: decimal(a),
-                    currency: u
-                        .pointer("/cost/currency")
-                        .and_then(Value::as_str)
-                        .unwrap_or("USD")
-                        .to_string(),
+                .and_then(|a| {
+                    let currency = match u.pointer("/cost") {
+                        Some(c) => match c.get("currency") {
+                            None => "USD",
+                            Some(Value::String(s)) if s.trim().eq_ignore_ascii_case("USD") => "USD",
+                            Some(_) => return None,
+                        },
+                        None => return None,
+                    };
+                    Some(Money {
+                        decimal: decimal(a),
+                        currency: currency.to_string(),
+                    })
                 }),
         }
     }
@@ -429,6 +651,7 @@ fn tool_name(u: &Value) -> String {
             u.pointer("/_meta/claudeCode/toolName")
                 .and_then(Value::as_str)
         })
+        .or_else(|| u.pointer("/_meta/tool_name").and_then(Value::as_str))
         .or_else(|| u.pointer("/rawInput/tool_name").and_then(Value::as_str))
         .map(str::to_owned)
         .or_else(|| mcp_invocation(u).map(|(server, tool, _)| format!("mcp__{server}__{tool}")))
@@ -442,6 +665,9 @@ fn tool_name(u: &Value) -> String {
 fn mcp_invocation(u: &Value) -> Option<(&str, &str, &Value)> {
     if u.get("name").and_then(Value::as_str).is_some()
         || u.pointer("/_meta/claudeCode/toolName")
+            .and_then(Value::as_str)
+            .is_some()
+        || u.pointer("/_meta/tool_name")
             .and_then(Value::as_str)
             .is_some()
         || u.pointer("/rawInput/tool_name")
@@ -473,8 +699,10 @@ fn category(kind: &str) -> ToolCategory {
 fn is_effort(o: &Value) -> bool {
     o.get("id")
         .and_then(Value::as_str)
-        .is_some_and(|id| ["thought_level", "reasoning_effort", "effort"].contains(&id))
-        || o.get("category").and_then(Value::as_str) == Some("thought_level")
+        .is_some_and(|id| ["thought_level", "reasoning_effort", "effort", "thinking"].contains(&id))
+        || o.get("category")
+            .and_then(Value::as_str)
+            .is_some_and(|cat| ["thought_level", "thinking"].contains(&cat))
 }
 
 fn config_value(u: &Value, which: impl Fn(&Value) -> bool) -> Option<String> {
@@ -786,14 +1014,21 @@ fn tool_fact(raw_id: &str, raw: Value, root: &Path) -> (ToolFact, Vec<Fact>) {
         "new_path",
         "source",
         "destination",
+        "dir_path",
+        "directory",
+        "root",
+        "target_directory",
+        "file",
     ] {
         if let Some(p) = input.get(key).and_then(Value::as_str) {
             add_path(p);
         }
     }
-    if let Some(ps) = input.get("paths").and_then(Value::as_array) {
-        for p in ps.iter().filter_map(Value::as_str) {
-            add_path(p);
+    for key in ["paths", "files"] {
+        if let Some(ps) = input.get(key).and_then(Value::as_array) {
+            for p in ps.iter().filter_map(Value::as_str) {
+                add_path(p);
+            }
         }
     }
     if let Some(content) = raw.get("content").and_then(Value::as_array) {
@@ -1125,6 +1360,42 @@ mod tests {
             c,
             vec![Fact::Model("opus".into()), Fact::Effort("high".into())]
         );
+        // non-USD and empty-currency cost reports are stripped so USD-only session cost stays exact
+        let cny = events(n.update(
+            &json!({"sessionUpdate": "usage_update", "used": 100, "size": 1000,
+            "cost": {"amount": 3.5, "currency": "CNY"}}),
+        ));
+        assert!(matches!(&cny[0], EventBody::Usage { report } if report.cost.is_none()));
+        let blank = events(n.update(
+            &json!({"sessionUpdate": "usage_update", "used": 100, "size": 1000,
+            "cost": {"amount": 1.0, "currency": ""}}),
+        ));
+        assert!(matches!(&blank[0], EventBody::Usage { report } if report.cost.is_none()));
+        // empty-text chunk carrying _meta.usage still emits Final usage
+        let meta_chunk = events(n.update(&json!({"sessionUpdate": "agent_message_chunk",
+            "content": {"type": "text", "text": ""},
+            "_meta": {"usage": {"inputTokens": 40, "outputTokens": 12, "thoughtTokens": 5}}})));
+        assert!(matches!(&meta_chunk[0], EventBody::Usage { report }
+            if report.measurement == Measurement::Final
+                && report.tokens.input == Some(40)
+                && report.tokens.output == Some(12)
+                && report.tokens.reasoning == Some(5)));
+        // cumulative PromptResponse.usage emits exact per-turn deltas
+        let mut cum = Normalizer::new(
+            "/work/proj",
+            "a_2",
+            steve_node_api::Epoch::new("g2").unwrap(),
+        )
+        .input_includes_cache(true)
+        .prompt_cumulative_baseline((100, 30, 60, 0, 0));
+        let delta = events(cum.prompt_response(&json!({
+            "usage": {"inputTokens": 250, "outputTokens": 75, "cachedReadTokens": 160}
+        })));
+        assert!(matches!(&delta[0], EventBody::Usage { report }
+            if report.tokens.input == Some(50)
+                && report.tokens.output == Some(45)
+                && report.tokens.cache_read == Some(100)));
+        assert_eq!(cum.cumulative_prompt_tokens(), Some((250, 75, 160, 0, 0)));
     }
 
     #[test]

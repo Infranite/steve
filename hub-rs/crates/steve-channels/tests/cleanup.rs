@@ -733,3 +733,67 @@ async fn scheduled_yolo_action_and_new_execution_after_preview_are_protected() {
     );
     assert_eq!(h.n("SELECT count(*) FROM decisions WHERE id='d1'"), 1);
 }
+
+fn seed_output_records(h: &H, con: &str) {
+    h.exec(&format!(r#"
+        INSERT INTO output_deliveries(id,workspace_id,requester,idempotency_key,fingerprint,intent,connection_id,space_id,message_id,replied_at,reply_message_id,created) VALUES
+        ('output-delete','default','usr_dev','delete-key','original-hash','{{"identity":"bot","content":{{"title":"private-title","markdown":"private-body","fields":[["private-field","value"]],"actions":[["private-action","https://example.org/private"]],"references":[["private-source","https://example.org/source"]]}}}}','{con}','sp_a','m2',7,'m1',1),
+        ('output-keep','default','usr_dev','keep-key','keep-hash','{{"identity":"bot","content":{{"markdown":"retained"}}}}','{con}','sp_b','m3',7,'m1',1);
+        INSERT INTO output_channel_preferences(workspace_id,user_id,party_id,manual_space_id,learned_space_id,updated) VALUES
+        ('default','usr_dev','ann','sp_a','sp_b',1),
+        ('default','usr_dev','bob','sp_b','sp_a',1);
+    "#));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn output_intents_follow_text_purge_without_losing_fingerprints_or_receipts() {
+    let (h, con, _) = setup().await;
+    h.seed("", &con, "");
+    seed_output_records(&h, &con);
+    let (st, result) = h
+        .call(
+            "POST",
+            "/channels/cleanup",
+            Some(json!({"connection_id":con,"level":"text","confirm":true})),
+        )
+        .await;
+    assert_eq!(st, 200, "{result}");
+    assert_eq!(h.one("SELECT json_extract(intent,'$.content') FROM output_deliveries WHERE id='output-delete'"), "{}");
+    assert_eq!(
+        h.one("SELECT fingerprint FROM output_deliveries WHERE id='output-delete'"),
+        "original-hash"
+    );
+    assert_eq!(h.n("SELECT count(*) FROM output_deliveries WHERE id='output-delete' AND replied_at=7 AND reply_message_id='m1'"), 1);
+    assert_eq!(h.one("SELECT json_extract(intent,'$.content.markdown') FROM output_deliveries WHERE id='output-keep'"), "retained", "referenced messages remain protected");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn output_foreign_keys_follow_full_cleanup_and_rollback() {
+    let (h, con, _) = setup().await;
+    h.seed("", &con, "");
+    seed_output_records(&h, &con);
+    let req = json!({"connection_id":con,"level":"all","confirm":true});
+    h.exec("CREATE TRIGGER fail_output_cleanup BEFORE DELETE ON spaces BEGIN SELECT RAISE(ABORT,'rollback'); END;");
+    assert_ne!(
+        h.call("POST", "/channels/cleanup", Some(req.clone()))
+            .await
+            .0,
+        200
+    );
+    assert_eq!(h.n("SELECT count(*) FROM output_deliveries"), 2);
+    assert_eq!(h.n("SELECT count(*) FROM output_channel_preferences WHERE manual_space_id='sp_a' OR learned_space_id='sp_a'"), 2);
+    h.exec("DROP TRIGGER fail_output_cleanup;");
+    let (st, result) = h.call("POST", "/channels/cleanup", Some(req)).await;
+    assert_eq!(st, 200, "{result}");
+    assert_eq!(
+        h.n("SELECT count(*) FROM output_deliveries WHERE id='output-delete'"),
+        0
+    );
+    assert_eq!(h.n("SELECT count(*) FROM output_deliveries WHERE id='output-keep' AND reply_message_id IS NULL AND replied_at=7"), 1);
+    assert_eq!(
+        h.n("SELECT count(*) FROM output_channel_preferences WHERE party_id='ann'"),
+        0
+    );
+    assert_eq!(h.n("SELECT count(*) FROM output_channel_preferences WHERE party_id='bob' AND manual_space_id='sp_b' AND learned_space_id IS NULL"), 1);
+    assert_eq!(h.n("SELECT count(*) FROM pragma_foreign_key_check"), 0);
+}

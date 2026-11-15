@@ -1,8 +1,7 @@
-// Vite-only fixture: 设置 · 工作空间 / 数据 / 通知 (the affectUI fields, switches and danger zone). All /api calls are
+// Vite-only fixture: 设置 · 工作空间 / 数据 (the affectUI fields, switches and danger zone). All /api calls are
 // answered here. Checks that a refresh after saving one workspace field never replaces text typed in another, that
 // Escape puts a field back, that the irreversible "clear all memories" confirm opens on Cancel (Enter right after
-// opening clears nothing) and hands the focus back on Escape, that a notify switch turned back on restores the time
-// it had, that the settings selects carry data-select on the combobox, and that a phone stacks a select under its row.
+// opening clears nothing) and hands the focus back on Escape, that the settings selects carry data-select on the combobox, and that a phone stacks a select under its row.
 import assert from "node:assert/strict"
 import { mkdir } from "node:fs/promises"
 const { chromium } = await import(process.env.PLAYWRIGHT_MODULE || "playwright")
@@ -84,21 +83,6 @@ try {
     await page.locator("[data-danger-confirm]").click()
     await page.waitForTimeout(100)
     assert.deepEqual(calls.filter((c) => c.method === "DELETE").map((c) => c.path), ["/api/memories"])
-    await page.close()
-  }
-
-  /* 通知: turning the summary back on restores the time it had; the selects carry data-select on the combobox */
-  {
-    const { page, calls } = await open("notify")
-    const at = page.locator('[data-select="digest-at"]')
-    assert.equal(await at.getAttribute("role"), "combobox")
-    assert.match(await at.innerText(), /09:00/)
-    await page.locator('[data-switch="digest"]').click()
-    await page.evaluate(() => window.__land({ settings: { digestAt: "不发" } }))
-    await at.waitFor({ state: "detached" })
-    await page.locator('[data-switch="digest"]').click()
-    const sets = calls.filter((c) => c.path === "/api/settings").map((c) => c.body)
-    assert.deepEqual(sets, [{ digestAt: "不发" }, { digestAt: "09:00" }])
     await page.close()
   }
 

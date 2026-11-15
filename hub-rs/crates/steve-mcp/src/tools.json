@@ -108,7 +108,7 @@
             "properties": {
               "kind": {
                 "type": "string",
-                "description": "e.g. 分支, 提交, PR, 文件, 文档"
+                "description": "e.g. branch, commit, PR, file, document"
               },
               "title": {
                 "type": "string"
@@ -146,6 +146,15 @@
               "operated": {
                 "type": "boolean",
                 "description": "true when you actually used the running thing yourself (opened the page and clicked through, ran the upgrade, called the live API), not a build or a test; name the check with what you saw"
+              },
+              "scope": {
+                "type": "string",
+                "enum": [
+                  "unit",
+                  "baseline",
+                  "external"
+                ],
+                "description": "unit (default): check for your changed scope that must pass. baseline: pre-existing unrelated check failure already present on the base commit. external: live third-party/provider outage outside repository control"
               }
             },
             "required": [

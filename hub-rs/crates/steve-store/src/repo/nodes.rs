@@ -22,9 +22,11 @@ pub struct NodeRow {
     pub last_seen: Option<i64>,
     pub revoked_at: Option<i64>,
     pub revoked_by: Option<String>,
+    /// How many sessions it runs at once, as its owner set it ([`crate::runtime::session_room`]).
+    pub max_sessions: i64,
 }
 
-const COLS: &str = "node_id,owner,name,pubkey,fingerprint,state,generation,incarnation,local,created,last_seen,revoked_at,revoked_by";
+const COLS: &str = "node_id,owner,name,pubkey,fingerprint,state,generation,incarnation,local,created,last_seen,revoked_at,revoked_by,max_sessions";
 
 fn row(r: &rusqlite::Row<'_>) -> rusqlite::Result<NodeRow> {
     Ok(NodeRow {
@@ -41,6 +43,7 @@ fn row(r: &rusqlite::Row<'_>) -> rusqlite::Result<NodeRow> {
         last_seen: r.get(10)?,
         revoked_at: r.get(11)?,
         revoked_by: r.get(12)?,
+        max_sessions: r.get(13)?,
     })
 }
 
@@ -128,6 +131,18 @@ pub fn rename(tx: &Tx<'_>, node_id: &str, owner: &str, name: &str) -> Result<boo
     Ok(tx.execute(
         "UPDATE nodes SET name=?3 WHERE node_id=?1 AND owner=?2",
         params![node_id, owner, name],
+    )? == 1)
+}
+
+/// The owner sets how many sessions their Node runs at once (1 to
+/// [`crate::runtime::SESSIONS_MAX`]). False: not theirs, or out of range.
+pub fn set_max_sessions(tx: &Tx<'_>, node_id: &str, owner: &str, n: i64) -> Result<bool> {
+    if !(1..=crate::runtime::SESSIONS_MAX).contains(&n) {
+        return Ok(false);
+    }
+    Ok(tx.execute(
+        "UPDATE nodes SET max_sessions=?3 WHERE node_id=?1 AND owner=?2 AND local=0 AND state!='revoked'",
+        params![node_id, owner, n],
     )? == 1)
 }
 

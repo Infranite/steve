@@ -50,6 +50,16 @@ export default {
     org: "组织",
     note: "备注",
   },
+  me: {
+    otherFacts: "其他事实",
+    accountProfile: "账号资料",
+    address: "称呼", addressHint: "对你说话和向别人介绍你，分别使用下面的称呼。留空时使用你的名字。",
+    originalNote: "原始备注", noteHint: "保留你的原话。知识管家可从备注和会话提出事实候选，确认前仍是推断，不会直接改写资料。",
+    overrides: "对外身份 / 会话的可选称呼", scope: "适用范围", persona: "对外身份", space: "会话", scopeId: "选择身份或会话", noScopes: "暂无可选择的身份或会话。接入账号后，可在这里单独设置称呼。", externalName: "在这里介绍你的称呼",
+    sourcesHint: "账号与组织来自已接入模块；人工填写和确认的资料不会被自动覆盖。没有 Node 提供的来源时，不猜测 git、语言或时区。软事实由知识管家提出待确认候选。",
+    groups: { identity: "身份", work: "工作", contact: "联系", preferences: "偏好" },
+    fields: { call: "Steve 叫你", call_external: "向别人介绍你", role: "角色", project: "主力项目", repository: "常用仓库", tools: "常用工具", email: "邮箱", phone: "电话", website: "网站", lang: "语言", tz: "时区", communication: "沟通习惯" },
+  },
   contact: {
     notFound: "联系人不存在",
     loadFailed: "联系人载入失败",
@@ -269,6 +279,8 @@ export default {
     noteAria: "组织备注",
   },
   owner: {
+    loadFailed: "负责人载入失败",
+    unavailable: "负责人信息暂不可用",
     undo: "撤销",
     undone: "已撤销",
     proposed: "{{name}}？",

@@ -69,7 +69,7 @@ static TOOLS: LazyLock<Vec<Value>> = LazyLock::new(|| {
             "name": CI_LOG,
             "description": "Read the log of a failed CI job on this item's pull request.",
             "inputSchema": schema(
-                json!({"job": {"type": "string", "description": "a check name or job id from steve_github_status"}}),
+                json!({"job": {"type": "string", "description": "a check name or job ID from the status action of steve_github_read"}}),
                 &["job"],
             )
         }),
@@ -427,7 +427,7 @@ pub fn excerpt(log: &str) -> String {
 /// `steve_github_ci_log`: the job's log, cut to what matters.
 async fn ci_log(gh: &GitHub, cx: &McpCx, l: &Linked, job: &str) -> Result<String, String> {
     if job.trim().is_empty() {
-        return Err("Give a check name or job id from steve_github_status.".into());
+        return Err("Give a check name or job ID from the status action of steve_github_read.".into());
     }
     let Some((r, p, k)) = find_check(gh, l, job)? else {
         return Err(format!(

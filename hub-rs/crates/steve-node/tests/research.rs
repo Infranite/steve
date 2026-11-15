@@ -942,6 +942,7 @@ impl HubTools for Tools {
                 description: "Search the knowledge base.".into(),
                 input_schema: json!({"type": "object", "properties": {"query": {"type": "string"}}}),
                 read_only: true,
+                annotations: serde_json::Value::Null,
             }],
         })
     }
@@ -1106,7 +1107,9 @@ async fn a_full_access_job_acts_with_the_users_own_access() {
     assert_eq!(c.job.as_ref().unwrap().end, JobEnd::Done, "{c:?}");
     assert!(made.exists(), "no read-only sandbox around it");
     assert!(
-        c.result.iter().any(|p| matches!(p, Part::Text { text } if text.contains("做完了"))),
+        c.result
+            .iter()
+            .any(|p| matches!(p, Part::Text { text } if text.contains("做完了"))),
         "{c:?}"
     );
     // it starts where a terminal would: the user's home
@@ -1125,7 +1128,11 @@ async fn a_full_access_job_acts_with_the_users_own_access() {
     n.enable_research(t.research());
     let mut spec = scripted("a_1", "m", "q\n@msg m1\n@say 好");
     n.start_job(now_cmd("op_p", spec.clone())).await.unwrap();
-    assert_eq!(t.end_of(&n, "op_p").await.outcome, Outcome::Succeeded, "it still researches");
+    assert_eq!(
+        t.end_of(&n, "op_p").await.outcome,
+        Outcome::Succeeded,
+        "it still researches"
+    );
     spec.run.attempt = AttemptId::new("a_2").unwrap();
     spec.run.policy.permissions = PermissionMode::FullAccess;
     let e = n.start_job(now_cmd("op_f", spec)).await.unwrap_err();

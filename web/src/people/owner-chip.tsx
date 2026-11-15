@@ -8,7 +8,8 @@ import { Button } from "@/components/ui/button"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList, CommandSeparator } from "@/components/ui/command"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
-import { toast } from "@/store"
+import { toast, st } from "@/store"
+import { hubBase } from "@/hub"
 import { people, type ContactBrief } from "@/api/people"
 import { ownership, type Changed, type ObjectType, type Steward } from "@/api/ownership"
 import { act, joinList, useLoad, usePeopleOn } from "@/people/common"
@@ -24,13 +25,19 @@ export function changedToast(r: Changed | undefined, text: string) {
 
 const ownersOf = (xs: Steward[]) => xs.filter((s) => s.role === "owner")
 
-export function OwnerChip({ objectType, objectId, className, bare = false }: { objectType: ObjectType; objectId: string; className?: string; bare?: boolean }) {
-  const on = usePeopleOn()
-  if (!on) return null
-  return <Chip objectType={objectType} objectId={objectId} className={className} bare={bare} />
+export function OwnerChip({ objectType, objectId, className, bare = false, showStatus = false }: { objectType: ObjectType; objectId: string; className?: string; bare?: boolean; showStatus?: boolean }) {
+  const on = usePeopleOn(), t = useT()
+  // Standalone labelled rows need a status; compact chips elsewhere can still disappear when unavailable.
+  if (!on) {
+    if (!showStatus) return null
+    return on === null
+      ? <Skeleton className={cn("inline-flex h-6 w-20 rounded-full", className)} aria-label={t("common:a11y.loading")} />
+      : <span className={cn("type-callout text-muted-foreground", className)} role="status">{t("people:owner.unavailable")}</span>
+  }
+  return <Chip key={JSON.stringify([hubBase(), st.workspace?.id, objectType, objectId])} objectType={objectType} objectId={objectId} className={className} bare={bare} showStatus={showStatus} />
 }
 
-function Chip({ objectType, objectId, className, bare }: { objectType: ObjectType; objectId: string; className?: string; bare: boolean }) {
+function Chip({ objectType, objectId, className, bare, showStatus }: { objectType: ObjectType; objectId: string; className?: string; bare: boolean; showStatus: boolean }) {
   const t = useT()
   const L = useLoad(() => ownership.of(objectType, objectId), [objectType, objectId], ["party", "decision"])
   const [open, setOpen] = useState(false), [q, setQ] = useState(""), [busy, setBusy] = useState(false)
@@ -41,7 +48,8 @@ function Chip({ objectType, objectId, className, bare }: { objectType: ObjectTyp
     const h = setTimeout(() => { people.contacts({ q: q.trim() || undefined, limit: 30 }).then((xs) => { if (live) setFound(xs) }, () => { if (live) setFound([]) }) }, q ? 150 : 0)
     return () => { live = false; clearTimeout(h) }
   }, [open, q])
-  if (L.err || !L.data) return L.err ? null : <Skeleton className={cn("inline-flex h-6 w-20 rounded-full", className)} aria-hidden />
+  if (L.err) return !showStatus ? null : <span className={cn("flex flex-wrap items-center justify-end gap-2 type-callout", className)} role="alert" data-owner-error><span className="text-destructive">{t("people:owner.loadFailed")}</span><Button size="xs" variant="outline" onClick={() => L.reload()}>{t("common:action.retry")}</Button></span>
+  if (!L.data) return <Skeleton className={cn("inline-flex h-6 w-20 rounded-full", className)} aria-hidden />
   const { object, stewards } = L.data
   const owners = ownersOf(stewards), confirmed = owners.filter((s) => s.status === "confirmed"), proposed = owners.filter((s) => s.status !== "confirmed")
   const label = confirmed.length ? joinList(confirmed.map((s) => (s.is_me ? t("people:rel.me") : s.person_name))) : proposed.length ? t("people:owner.proposed", { name: proposed[0].person_name }) : t("people:owner.none")

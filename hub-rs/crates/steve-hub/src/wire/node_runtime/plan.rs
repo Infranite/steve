@@ -782,26 +782,16 @@ pub(super) fn cancelled_start_in(
         .optional()?)
 }
 
-/// Inventory limits apply only to the explicitly local coordinator. Count reserved attempts,
-/// not UI running flags. No existing execution is cancelled when the limit is lowered.
+/// Manual pause gates new logical turns on the local coordinator. Capacity belongs to
+/// runtime::lease_command_in/session_room: counting active_attempt here would also count
+/// never-sent turns, hiding authoritative room waits and imposing a second limit.
 fn local_admission(tx: &Tx) -> Result<bool, StoreError> {
-    let config: Option<(String, i64)> = tx
-        .query_row(
-            "SELECT status, max_sessions FROM devices WHERE id='hub'",
-            [],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )
+    let status: Option<String> = tx
+        .query_row("SELECT status FROM devices WHERE id='hub'", [], |r| {
+            r.get(0)
+        })
         .optional()?;
-    let Some((status, limit)) = config else {
-        return Ok(true);
-    };
-    if status == "暂停接活" {
-        return Ok(false);
-    }
-    let reserved: i64 = tx.query_row(
-        "SELECT COUNT(*) FROM runtime_sessions WHERE node_id='local' AND active_attempt IS NOT NULL", [], |r| r.get(0),
-    )?;
-    Ok(reserved < limit)
+    Ok(status.as_deref() != Some("暂停接活"))
 }
 
 #[cfg(test)]
@@ -887,7 +877,7 @@ mod admission_tests {
             .unwrap();
     }
     #[test]
-    fn paused_and_lowered_limits_preserve_reserved_attempts() {
+    fn pause_preserves_reservations_without_a_duplicate_capacity_gate() {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(dir.path().join("test.db"), steve_store::NoPublisher).unwrap();
         store.ensure_workspace().unwrap();
@@ -903,7 +893,8 @@ mod admission_tests {
             tx.execute_batch("INSERT INTO sessions(id,workspace_id,harness,cwd,status,created,updated) VALUES ('s1','default','fixture','.','running',1,1);
                 INSERT INTO runtime_sessions(session_id,node_id,workspace_ref,node_session_id,config_revision,phase,active_attempt,updated) VALUES ('s1','local','{}','s1','r1','ready','already-running',1);
                 UPDATE devices SET max_sessions=1 WHERE id='hub';")?;
-            assert!(!local_admission(tx)?);
+            assert!(local_admission(tx)?, "capacity is enforced from command receipts, not active_attempt");
+            assert_eq!(rt::session_room(tx, "local")?.running, 0, "an unsent reservation is not running");
             tx.execute("UPDATE devices SET max_sessions=2 WHERE id='hub'", [])?;
             assert!(local_admission(tx)?);
             tx.execute("UPDATE devices SET status='暂停接活' WHERE id='hub'", [])?;
@@ -914,7 +905,7 @@ mod admission_tests {
         }).unwrap();
     }
     #[test]
-    fn admission_obeys_32_and_256_without_clamping_and_keeps_existing_reservations() {
+    fn manual_pause_does_not_count_unsent_reservations_as_capacity() {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(dir.path().join("test.db"), steve_store::NoPublisher).unwrap();
         store.ensure_workspace().unwrap();
@@ -947,7 +938,9 @@ mod admission_tests {
                     tx.execute("INSERT INTO sessions(id,workspace_id,harness,cwd,status,created,updated) VALUES (?,'default','fixture','.','running',1,1)",[&sid])?;
                     tx.execute("INSERT INTO runtime_sessions(session_id,node_id,workspace_ref,node_session_id,config_revision,phase,active_attempt,updated) VALUES (?,'local','{}',?,'r1','active',?,1)",[&sid,&sid,&format!("a{i}")])?;
                 }
-                assert!(!local_admission(tx)?);
+                assert!(local_admission(tx)?, "unsent attempts must reach the canonical command queue");
+                assert_eq!(rt::session_room(tx, "local")?.max, limit);
+                assert_eq!(rt::session_room(tx, "local")?.running, 0);
                 tx.execute("UPDATE devices SET max_sessions=1,status='暂停接活' WHERE id='hub'", [])?;
                 assert!(!local_admission(tx)?);
                 let active:i64=tx.query_row("SELECT COUNT(*) FROM runtime_sessions WHERE node_id='local' AND active_attempt IS NOT NULL",[],|r|r.get(0))?;

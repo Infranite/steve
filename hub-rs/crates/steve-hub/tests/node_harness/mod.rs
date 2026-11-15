@@ -54,6 +54,7 @@ impl Service for FakeService {
             description: "Update the item.".into(),
             input_schema: json!({"type": "object", "properties": {"now": {"type": "string"}}}),
             read_only: false,
+            annotations: serde_json::Value::Null,
         }]
     }
     async fn call(&self, session: Session, name: &str, args: Value) -> Result<String, String> {

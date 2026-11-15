@@ -100,7 +100,6 @@ export default {
       noMatch: "No matching signals",
       today: "No signals yet today",
       week: "No signals in the last 7 days",
-      sub: "Connect mail, calendar and other accounts, and incoming events and how they were handled will show up here.",
       todaySub: "Events received today and how the bots handled them show up here.",
       seeWeek: "See the last 7 days",
       connectTitle: "Nothing can send signals yet",

@@ -34,7 +34,7 @@
   "flow.schedule.mode_item_auto": "建事项，自动验收",
   "flow.schedule.mode_item": "建事项",
   "flow.schedule.mode_propose": "先给方案",
-  "flow.schedule.mode_report": "在对话里汇报",
+  "flow.schedule.mode_report": "发布到信息流，工作空间成员可见",
   "flow.draft.missed_catch_up_once": "补一次",
   "flow.draft.missed_skip": "跳过",
   "flow.draft.overlap_skip": "跳过",

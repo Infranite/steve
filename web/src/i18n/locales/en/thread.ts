@@ -1,5 +1,13 @@
 /* English strings for the "thread" namespace: the same keys as ../zh-CN/thread.ts. Conventions: web/src/i18n/index.ts */
 export default {
+  thinking: {
+    reasoning: "Reasoning",
+    working: "Working",
+    done: "Completed",
+    failed: "Failed",
+    stopped: "Stopped",
+    callFailures_other: "{{count}} failed calls",
+  },
   who: {
     me: "You",
     someone: "Someone",
@@ -59,8 +67,6 @@ export default {
       fetch: "Fetching",
       meet: "Saving",
     },
-    slow: "still reading…",
-    stop: "Stop",
   },
   offer: {
     folded: "Suggested earlier: {{title}}",
@@ -106,6 +112,7 @@ export default {
       blocked: "Waiting on another item",
       paused: "Paused",
       releasing: "Releasing",
+      queued: "Queued",
       running: "In progress",
     },
     delivery: "Delivery summary",

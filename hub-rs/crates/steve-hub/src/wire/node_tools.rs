@@ -202,6 +202,11 @@ impl Caller {
 #[async_trait]
 pub trait Service: Send + Sync {
     fn catalog(&self) -> Vec<ToolDescriptor>;
+    /// The production registry authorizes tools even when their schemas are not currently listed.
+    fn allows_unlisted(&self) -> bool {
+        false
+    }
+
     /// What a session's turn sees: [`Self::catalog`], and the tools only its Bot has (one per remote
     /// agent it uses).
     async fn session_catalog(&self, session: &Session) -> Vec<ToolDescriptor> {
@@ -233,6 +238,9 @@ pub trait Service: Send + Sync {
 }
 #[async_trait]
 impl Service for ToolService {
+    fn allows_unlisted(&self) -> bool {
+        true
+    }
     fn catalog(&self) -> Vec<ToolDescriptor> {
         self.catalog()
     }
@@ -460,7 +468,9 @@ impl HubTools for NodeTools {
         if catalog.revision != q.catalog {
             return Err(ApiError::new(ErrorCode::Stale, "tool catalog changed"));
         }
-        if !catalog.tools.iter().any(|t| t.name == q.name) {
+        if !catalog.tools.iter().any(|t| t.name == q.name)
+            && !(matches!(session, Caller::Session(_)) && service.allows_unlisted())
+        {
             return Err(ApiError::new(ErrorCode::Denied, "tool outside catalog"));
         }
         if !q.args.is_object() {
@@ -775,6 +785,7 @@ pub(crate) mod tests {
                 description: "test".into(),
                 input_schema: json!({"type":"object"}),
                 read_only: false,
+                annotations: serde_json::Value::Null,
             }]
         }
         async fn call(&self, _: Session, _: &str, _: serde_json::Value) -> Result<String, String> {
@@ -875,6 +886,7 @@ pub(crate) mod tests {
                 description: "test".into(),
                 input_schema: json!({"type":"object"}),
                 read_only: false,
+                annotations: serde_json::Value::Null,
             }]
         }
         async fn call(&self, _: Session, _: &str, _: serde_json::Value) -> Result<String, String> {
@@ -1076,6 +1088,7 @@ pub(crate) mod tests {
                         description: "test".into(),
                         input_schema: json!({"type":"object"}),
                         read_only: false,
+                        annotations: serde_json::Value::Null,
                     })
                     .collect()
             }
@@ -1477,13 +1490,15 @@ pub(crate) mod tests {
         let names: Vec<&str> = catalog.tools.iter().map(|t| t.name.as_str()).collect();
         let mcp: Vec<String> = w
             .tool_service
-            .catalog()
+            .session_catalog(&store.sessions().get("s1").unwrap().unwrap())
+            .await
             .into_iter()
             .map(|t| t.name)
             .collect();
         assert_eq!(names, mcp, "the same tools as the MCP endpoint");
         assert!(names.contains(&steve_mcp::tools::UPDATE));
-        assert!(names.contains(&super::super::mcp_extra::REPLY_SOURCE));
+        assert_eq!(names.len(), steve_modules::caps::tools::CORE.len());
+        assert!(!names.contains(&super::super::mcp_extra::REPLY_SOURCE));
         let unique: std::collections::HashSet<_> = names.iter().copied().collect();
         assert_eq!(
             unique.len(),
@@ -1493,6 +1508,56 @@ pub(crate) mod tests {
         for descriptor in &catalog.tools {
             assert!(descriptor.input_schema.is_object(), "{}", descriptor.name);
         }
+        w.tool_service
+            .mcp
+            .store
+            .diagnostics()
+            .capture("default", "i1", "test-owner", Some(1))
+            .unwrap();
+        // Exercise the real Hub port: search returns an unpinned definition and generic call
+        // invokes it without changing the Bot's pins or granting a research/management caller.
+        let found = tools
+            .call(ToolCall {
+                id: CallId::new("discover_unpinned").unwrap(),
+                execution: host.exec.clone(),
+                catalog: catalog.revision.clone(),
+                name: steve_modules::caps::tools::SEARCH.into(),
+                args: json!({"query":"steve_item_read"}),
+                deadline: Timestamp(steve_store::now() + 60_000),
+            })
+            .await
+            .unwrap();
+        let ToolResult::Completed { parts, .. } = found else {
+            panic!("{found:?}")
+        };
+        let Part::Text { text } = &parts[0] else {
+            panic!("missing text")
+        };
+        let discovered: serde_json::Value = serde_json::from_str(text).unwrap();
+        assert_eq!(discovered["tools"][0]["name"], "steve_item_read");
+        assert_eq!(
+            discovered["tools"][0]["annotations"]["steve"]["source"],
+            "steve"
+        );
+        let called = tools
+            .call(ToolCall {
+                id: CallId::new("invoke_unpinned").unwrap(),
+                execution: host.exec.clone(),
+                catalog: catalog.revision.clone(),
+                name: steve_modules::caps::tools::CALL.into(),
+                args: json!({"name":"steve_item_read", "arguments":{"id":"i1"}}),
+                deadline: Timestamp(steve_store::now() + 60_000),
+            })
+            .await
+            .unwrap();
+        assert!(matches!(called, ToolResult::Completed { .. }), "{called:?}");
+        assert!(
+            store
+                .reader(|c| steve_store::caps::tools::pins(c, "management_bot"))
+                .unwrap()
+                .is_empty()
+        );
+        let complete = w.tool_service.catalog();
         for name in [
             "steve_items_search",
             "steve_item_read",
@@ -1500,29 +1565,17 @@ pub(crate) mod tests {
             "steve_debug",
         ] {
             assert!(
-                catalog
-                    .tools
-                    .iter()
-                    .find(|t| t.name == name)
-                    .unwrap()
-                    .read_only,
+                complete.iter().find(|t| t.name == name).unwrap().read_only,
                 "{name}"
             );
         }
         assert!(
-            !catalog
-                .tools
+            !complete
                 .iter()
                 .find(|t| t.name == "steve_item_dependencies")
                 .unwrap()
                 .read_only
         );
-        w.tool_service
-            .mcp
-            .store
-            .diagnostics()
-            .capture("default", "i1", "test-owner", Some(1))
-            .unwrap();
         for (name, args) in [
             ("steve_items_search", json!({"query": "test"})),
             ("steve_item_read", json!({"id": "i1"})),
@@ -1530,7 +1583,7 @@ pub(crate) mod tests {
             ("steve_workflow", json!({"action": "get"})),
             ("steve_debug", json!({"action":"explain","item_id":"i1"})),
         ] {
-            assert!(names.contains(&name), "{name}");
+            // Non-core built-ins named in the brief remain callable through the registry.
             let result = tools
                 .call(ToolCall {
                     id: CallId::new(format!("management_{name}")).unwrap(),
@@ -1579,7 +1632,7 @@ pub(crate) mod tests {
         let calls = observed["events"].as_array().unwrap();
         assert_eq!(
             calls.len(),
-            4,
+            6,
             "one observation per actual non-debug invocation: {observed}"
         );
         assert!(

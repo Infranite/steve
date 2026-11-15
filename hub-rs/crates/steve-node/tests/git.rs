@@ -569,7 +569,8 @@ async fn a_push_whose_preconditions_do_not_hold_is_refused_before_it_is_taken() 
         ))
         .await;
     assert!(
-        r.as_ref().map_or_else(|e| e.code != ErrorCode::Unsupported, |_| true),
+        r.as_ref()
+            .map_or_else(|e| e.code != ErrorCode::Unsupported, |_| true),
         "{r:?}"
     );
     n.shutdown().await;

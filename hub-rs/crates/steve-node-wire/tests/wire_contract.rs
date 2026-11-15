@@ -214,3 +214,24 @@ async fn remote_capacity_for_jobs_and_execs_is_zero() {
     let c = w.remote.probe(false).await.unwrap();
     assert_eq!((c.capacity.jobs, c.capacity.execs), (0, 0));
 }
+
+#[tokio::test]
+async fn live_capacity_round_trips_and_reports_the_executor_value() {
+    let fake = FakeNode::new("n1");
+    fake.follow_session_capacity();
+    let w = wire(fake.clone(), 1);
+    for limit in [32, 64, 1, 256] {
+        w.remote.set_session_capacity(limit).await.unwrap();
+        w.remote.set_session_capacity(limit).await.unwrap(); // idempotent retry
+        assert_eq!(fake.probe(false).await.unwrap().capacity.sessions, limit);
+        assert_eq!(
+            w.remote.probe(false).await.unwrap().capacity.sessions,
+            limit
+        );
+    }
+    assert_eq!(
+        w.remote.set_session_capacity(0).await.unwrap_err().code,
+        ErrorCode::Invalid
+    );
+    assert_eq!(w.remote.probe(false).await.unwrap().capacity.sessions, 256);
+}

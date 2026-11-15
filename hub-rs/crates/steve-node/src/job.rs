@@ -273,36 +273,49 @@ async fn acp_think(
     let mut prompt = vec![json!({"type": "text", "text": message})];
     prompt.extend(images.iter().map(Image::block));
     let properties = inner.cfg.acp.adapter_properties(&spec.run.choice.harness);
+    let state_dirs = properties
+        .state
+        .as_ref()
+        .map(|st| st.ambient_dirs(&inner.cfg.acp.user_home))
+        .unwrap_or_default();
+    let writable: Vec<PathBuf> = std::iter::once(dir.to_path_buf())
+        .chain(state_dirs)
+        .flat_map(|p| {
+            let real = steve_research::guard::resolve(&p);
+            if real == p { vec![p] } else { vec![p, real] }
+        })
+        .collect();
+    if let Err(e) = std::fs::create_dir_all(dir.join("tmp")) {
+        return failed(OneShotError::Io(e));
+    }
     // Keep the existing Auto sandbox policy: use the adapter's own read-only sandbox where
     // declared, otherwise apply the host's read-only wrapper when the platform provides it.
     let sandbox = if !properties.self_read_only
         && properties.nested_sandbox
         && steve_research::sandbox::available()
     {
-        // the job's own directory, and the harness's own state where it declares one
-        let state = properties.state.as_ref().map(|st| {
-            std::env::var_os(&st.env)
-                .map(PathBuf::from)
-                .unwrap_or_else(|| inner.cfg.acp.user_home.join(&st.default))
-        });
-        let writable: Vec<PathBuf> = std::iter::once(dir.to_path_buf()).chain(state).collect();
-        let Some(profile) = steve_research::sandbox::profile(&writable) else {
-            return failed(OneShotError::Failed(
-                "invalid read-only sandbox paths".into(),
-            ));
-        };
-        // and the control plane out of reach, after the profile's own allows ([`crate::confine`])
-        let profile = format!(
-            "{profile}{}",
-            inner.confine.seatbelt_rules().unwrap_or_default()
-        );
-        let path = dir.join("readonly.sb");
-        if let Err(e) =
-            std::fs::create_dir_all(dir.join("tmp")).and_then(|_| std::fs::write(&path, profile))
-        {
-            return failed(OneShotError::Io(e));
+        if cfg!(target_os = "macos") {
+            let Some(profile) = steve_research::sandbox::profile(&writable) else {
+                return failed(OneShotError::Failed(
+                    "invalid read-only sandbox paths".into(),
+                ));
+            };
+            // and the control plane out of reach, after the profile's own allows ([`crate::confine`])
+            let profile = format!(
+                "{profile}{}",
+                inner.confine.seatbelt_rules().unwrap_or_default()
+            );
+            let path = dir.join("readonly.sb");
+            if let Err(e) = std::fs::write(&path, profile) {
+                return failed(OneShotError::Io(e));
+            }
+            Some(crate::acp_job::ReadonlySandbox::Seatbelt(path))
+        } else {
+            Some(crate::acp_job::ReadonlySandbox::Bwrap {
+                dir: dir.to_path_buf(),
+                writable: writable.clone(),
+            })
         }
-        Some(path)
     } else {
         None
     };
@@ -331,9 +344,11 @@ async fn acp_think(
         }
     };
     let wrap = crate::acp_job::wrap(
-        sandbox.as_deref(),
+        sandbox.as_ref(),
         properties.nested_sandbox.then_some(&inner.confine),
         Some(dir),
+        &inner.cfg.acp.user_home,
+        &properties.outer_sandbox_args,
     );
     let req = crate::acp_job::Request {
         cfg: &inner.cfg.acp,

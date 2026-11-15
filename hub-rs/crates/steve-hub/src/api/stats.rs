@@ -28,6 +28,7 @@ const SOURCES: &[&str] = &["agent", "gateway"];
 const GROUPS: &[&str] = &[
     "none",
     "model",
+    "harness",
     "bot",
     "project",
     "source",
@@ -44,6 +45,8 @@ struct Inner {
     bus: Bus,
     /// The Models.dev catalog URL, `None` when the sync is turned off.
     price_url: Option<String>,
+    /// Live harness adapter list (`id` → `name`) for stats labels (including runtime-discovered titles).
+    harnesses: Option<steve_core::harnesses::HarnessSource>,
     /// key → (stats generation, computed at, answer)
     cache: Mutex<HashMap<String, (u64, Instant, Value)>>,
 }
@@ -54,8 +57,27 @@ impl StatsApi {
             store,
             bus,
             price_url,
+            harnesses: None,
             cache: Mutex::default(),
         }))
+    }
+
+    pub fn with_harness_source(self, harnesses: steve_core::harnesses::HarnessSource) -> Self {
+        StatsApi(Arc::new(Inner {
+            store: self.0.store.clone(),
+            bus: self.0.bus.clone(),
+            price_url: self.0.price_url.clone(),
+            harnesses: Some(harnesses),
+            cache: Mutex::default(),
+        }))
+    }
+
+    fn harness_names(&self) -> HashMap<String, String> {
+        self.0
+            .harnesses
+            .as_ref()
+            .map(|src| src().into_iter().map(|h| (h.id, h.name)).collect())
+            .unwrap_or_default()
     }
 
     async fn read<R: Send + 'static>(
@@ -289,6 +311,7 @@ async fn series(
         Some(_) => return Err(invalid("bucket")),
     };
     let k = key(&c.ws, "series", &p);
+    let harnesses = api.harness_names();
     api.cached(k, move |db| {
         let q = query(db, &c.ws, &p)?;
         // hours: only a one-day range (今天, or one picked day)
@@ -300,7 +323,8 @@ async fn series(
         } else {
             Bucket::Day
         };
-        let s = views::series(db, &q, metric, &group, bucket).map_err(serr)?;
+        let s = views::series_with_harnesses(db, &q, metric, &group, bucket, &harnesses)
+            .map_err(serr)?;
         let mut v = serde_json::to_value(s).map_err(|e| ApiError::internal(e.to_string()))?;
         if let Some(o) = v.as_object_mut() {
             o.insert("tz".into(), json!(zone_name(db, &c.ws)?));
@@ -321,12 +345,15 @@ async fn breakdown(
         return Err(invalid("by"));
     }
     let k = key(&c.ws, "breakdown", &p);
+    let harnesses = api.harness_names();
     api.cached(k, move |db| {
         let q = query(db, &c.ws, &p)?;
         let hour = hour_of(&p, &q)?;
         let rows = match tokens {
             Some(b) => {
-                let names = views::Names::load(db, &c.ws).map_err(serr)?;
+                let names = views::Names::load(db, &c.ws)
+                    .map_err(serr)?
+                    .with_harnesses(harnesses);
                 let prices = metrics::book_of(db, &c.ws).map_err(serr)?;
                 let daily = match hour {
                     // one hour of the day: the hourly cells of that bucket, as the hourly series has them

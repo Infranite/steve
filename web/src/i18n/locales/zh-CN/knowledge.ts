@@ -218,7 +218,6 @@ export default {
     removed: "已移除来源",
     addFolder: "添加文件夹",
     failed: "来源打不开",
-    error: "出错",
     levelChanged: "默认级别已改，已有内容跟着变",
     resumed: "已恢复",
     paused: "已暂停：不同步，也不参与检索",

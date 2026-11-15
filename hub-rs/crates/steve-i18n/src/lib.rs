@@ -40,6 +40,11 @@
 //! - Work off the async runtime loses the task-local: wrap the closure with [`carry`] before `spawn_blocking`,
 //!   and a spawned future with [`bind`], when they build text for the response.
 //!
+//! # Model contracts and stored text
+//!
+//! Built-in tool descriptions (including parameter descriptions) are always English. The UI has
+//! separate localized labels and summaries; do not localize the model contract based on a request.
+//!
 //! # What stays Chinese (never through `t!`)
 //!
 //! Prompts and anything else a model reads (tool results included: `/mcp` always runs in zh-CN), text sent to

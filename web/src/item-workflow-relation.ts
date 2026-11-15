@@ -1,5 +1,6 @@
 import { st, type Item } from "@/store"
 import { itemState, type StateKind } from "@/item-state"
+import { laneOf } from "@/item-lanes"
 import type { Workflow } from "@/workflow"
 import { t } from "@/i18n"
 
@@ -37,4 +38,51 @@ export function workflowRelation(item: Item, items: Item[]): WorkflowRelation | 
   if (item.workflowPaused) return { kind: "paused", failed: item.workflowFailed ?? [] }
   const children = items.filter((other) => other.src[1] === "workflow" && other.parent?.item === item.id && !other.arch && (other.phase === "ready" || other.phase === "active" || other.phase === "closing")).map((other) => other.id)
   return children.length ? { kind: "parent", children } : null
+}
+
+export function isWorkflowChild(item: Item): boolean {
+  return item.src[1] === "workflow" && !!item.parent?.item
+}
+
+/** True when `item` is a workflow child whose parent exists in `pool`, unless `item` holds an open user decision while its parent does not. */
+export function isAttachedWorkflowChild(item: Item, pool: Item[]): boolean {
+  if (!isWorkflowChild(item)) return false
+  const parent = pool.find((p) => p.id === item.parent!.item && !p.arch)
+  if (!parent) return false
+  if (laneOf(itemDisplayState(item)) === "needs" && laneOf(itemDisplayState(parent)) !== "needs") return false
+  return true
+}
+
+export type SubtaskBuckets = {
+  live: Item[]
+  doneCount: number
+  retiredCount: number
+  settled: Item[]
+  total: number
+}
+
+const LIVE_RANK: Record<string, number> = { wait: 0, prop: 1, run: 2, fail: 3, pause: 4, block: 5, done: 6, drop: 7 }
+const itemNum = (id: string) => Number(id.split("-")[1]) || 0
+
+export function partitionSubtasks(parent: Item, children: Item[]): SubtaskBuckets {
+  const parentClosed = parent.st === "done" || parent.st === "drop" || parent.st === "fail"
+  const live: Item[] = []
+  const settled: Item[] = []
+  let doneCount = 0
+  let retiredCount = 0
+  for (const c of children) {
+    const st = itemDisplayStatus(c)
+    const closed = st === "done" || st === "drop" || st === "fail"
+    const failedCurrentOnOpenParent = !parentClosed && st === "fail" && !c.workflowSuperseded
+    if (!parentClosed && (!closed || failedCurrentOnOpenParent)) {
+      live.push(c)
+    } else {
+      settled.push(c)
+      if (!c.workflowSuperseded && st === "done") doneCount += 1
+      else retiredCount += 1
+    }
+  }
+  live.sort((a, b) => (LIVE_RANK[itemDisplayStatus(a)] ?? 9) - (LIVE_RANK[itemDisplayStatus(b)] ?? 9) || itemNum(a.id) - itemNum(b.id))
+  settled.sort((a, b) => Number(!!a.workflowSuperseded) - Number(!!b.workflowSuperseded) || itemNum(b.id) - itemNum(a.id))
+  return { live, doneCount, retiredCount, settled, total: children.length }
 }

@@ -1,5 +1,13 @@
 /* zh-CN strings for the "thread" namespace: the source text, byte-identical to the UI. Conventions: web/src/i18n/index.ts */
 export default {
+  thinking: {
+    reasoning: "思考过程",
+    working: "正在处理",
+    done: "处理完成",
+    failed: "处理失败",
+    stopped: "已停止",
+    callFailures_other: "{{count}} 次调用失败",
+  },
   /* who said a message */
   who: {
     me: "你",
@@ -54,8 +62,6 @@ export default {
       fetch: "正在获取",
       meet: "正在保存",
     },
-    slow: "还在读…",
-    stop: "停",
   },
   offer: {
     folded: "之前提议过：{{title}}",
@@ -104,6 +110,7 @@ export default {
       blocked: "等前置事项",
       paused: "已暂停",
       releasing: "正在发布",
+      queued: "排队中",
       running: "进行中",
     },
     delivery: "交付摘要",
@@ -111,7 +118,7 @@ export default {
     collapse: "收起",
     reply: "它的回复",
     latest: "· 看最新进展",
-    reworkPlaceholder: "哪里不对？写给{{bot}}",
+    reworkPlaceholder: "哪里不对？写给 {{bot}}",
     sendRework: "发回返工",
     rework: "返工…",
     pass: "验收通过",

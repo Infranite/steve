@@ -1021,6 +1021,7 @@ fn a_goal_that_asks_for_an_actual_operation_is_noted_when_the_delivery_lacks_one
         name: name.into(),
         passed: true,
         operated,
+        scope: None,
     };
     /* 2026-11-09: not refused; the card tells you what the goal asked for and is missing */
     k.core
@@ -1118,6 +1119,7 @@ fn a_goal_that_asks_for_the_build_to_pass_is_noted_when_the_delivery_lacks_a_bui
         name: name.into(),
         passed,
         operated: false,
+        scope: None,
     };
     for checks in [
         vec![],

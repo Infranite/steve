@@ -751,13 +751,38 @@ pub fn value_update(
     Ok(())
 }
 
-/// Marks the other confirmed values with the same `key + label` stale (a newer confirmed value replaces
-/// them; a second phone with another label stays). Returns how many.
+/// Replaces confirmed values of the same fact and returns exactly which rows changed, so
+/// changeset undo uses the same identity rules as ordinary writes. Names ignore the UI label;
+/// scoped names match only that persona/space. Other facts still match `key + label`.
+pub fn stale_others_recorded(tx: &Tx, v: &AttrValue) -> Result<Vec<String>> {
+    let mut st = tx.prepare_cached(
+        "SELECT id FROM attr_values WHERE workspace_id = ?1 AND party_id = ?2 AND key = ?3
+         AND status = 'confirmed' AND id != ?4 AND CASE
+           WHEN key IN ('call', 'call_external') THEN 1
+           WHEN key = 'call_ext_scope' THEN CASE WHEN json_valid(value) AND json_valid(?6)
+             THEN json_extract(value, '$.kind') = json_extract(?6, '$.kind')
+              AND json_extract(value, '$.id') = json_extract(?6, '$.id') ELSE 0 END
+           ELSE label = ?5 END",
+    )?;
+    let ids = st
+        .query_map(
+            params![v.workspace_id, v.party_id, v.key, v.id, v.label, v.value],
+            |r| r.get::<_, String>(0),
+        )?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let t = now();
+    for id in &ids {
+        tx.run(
+            "UPDATE attr_values SET status = 'stale', updated = ? WHERE id = ?",
+            params![t, id],
+        )?;
+    }
+    Ok(ids)
+}
+
+/// Marks other confirmed values of the same fact stale. Returns how many.
 pub fn stale_others(tx: &Tx, v: &AttrValue) -> Result<usize> {
-    Ok(tx.run(
-        "UPDATE attr_values SET status = 'stale', updated = ? WHERE workspace_id = ? AND party_id = ? AND key = ? AND label = ? AND status = 'confirmed' AND id != ?",
-        params![now(), v.workspace_id, v.party_id, v.key, v.label, v.id],
-    )?)
+    Ok(stale_others_recorded(tx, v)?.len())
 }
 
 pub fn value_delete(tx: &Tx, id: &str) -> Result<bool> {

@@ -295,8 +295,14 @@ pub async fn create(
         Some(Some(b)) => Some(b),
         _ => None,
     };
+    let done_when = k.opt_nullable_str("done_when", Str::ANY);
     let node = k.opt_str("node", Str::ANY);
     k.finish()?;
+    if let Some(Some(ref dw)) = done_when
+        && ![steve_store::DONE_MERGE, steve_store::DONE_TAG].contains(&dw.as_str())
+    {
+        return Err(ApiError::Invalid(vec!["done_when".into()]));
+    }
     on_builtin_node(node.as_deref())?;
     if let Some(bot) = default_bot.clone().filter(|b| !b.is_empty()) {
         let ws = c.ws.clone();
@@ -334,7 +340,16 @@ pub async fn create(
                 kind: if git { "git" } else { "dir" }.into(),
                 worktree: git && worktree.unwrap_or(true),
                 default_bot,
-                release: None,
+                release: match done_when {
+                    Some(Some(dw)) if git && worktree.unwrap_or(true) => {
+                        Some(json!(steve_store::Release {
+                            kind: "script".into(),
+                            cmd: String::new(),
+                            done_when: Some(dw),
+                        }))
+                    }
+                    _ => None,
+                },
             },
         )?;
         let id = x
@@ -382,9 +397,37 @@ pub async fn patch_one(
     if let Some(x) = k.opt_bool("archived") {
         p.insert("archived".into(), json!(x));
     }
-    // what counts as finished for an accepted result (`merge` | `tag` | none: a release by the
-    // project's own command). Only this part of the release settings: the command stays as set up
+    // Completion rule (`done_when` or full `release` object from the project settings UI).
     let done_when = k.opt_nullable_str("done_when", Str::ANY);
+    let release_in = match k.raw("release") {
+        None => None,
+        Some(Value::Null) => Some(None),
+        Some(_) => {
+            let Some(mut rk) = k.sub("release", false) else {
+                return Err(ApiError::Invalid(vec!["release".into()]));
+            };
+            let kind = rk.str("kind", Str::len(1, 32));
+            let cmd = rk.str("cmd", Str::max(2000));
+            let dw = match rk.opt_nullable_str("done_when", Str::ANY) {
+                Some(Some(s)) => Some(s),
+                _ => None,
+            };
+            k.absorb(rk);
+            if kind != "script" {
+                return Err(ApiError::Invalid(vec!["release".into()]));
+            }
+            if let Some(ref d) = dw
+                && ![steve_store::DONE_MERGE, steve_store::DONE_TAG].contains(&d.as_str())
+            {
+                return Err(ApiError::Invalid(vec!["done_when".into()]));
+            }
+            Some(Some(steve_store::Release {
+                kind,
+                cmd,
+                done_when: dw,
+            }))
+        }
+    };
     k.finish()?;
     if let Some(Some(v)) = &done_when
         && ![steve_store::DONE_MERGE, steve_store::DONE_TAG].contains(&v.as_str())
@@ -397,15 +440,67 @@ pub async fn patch_one(
         {
             own_bot(r, bot, &c.ws)?;
         }
-        if let Some(dw) = done_when {
-            let mut release: steve_store::Release = r
-                .project_get(&id)?
+        let cur_proj = r.project_get(&id)?;
+        let is_git = cur_proj
+            .as_ref()
+            .and_then(|o| o.get("kind"))
+            .and_then(Value::as_str)
+            == Some("git");
+        if let Some(rel_opt) = release_in {
+            match rel_opt {
+                None => {
+                    p.insert("release".into(), Value::Null);
+                }
+                Some(rel) => {
+                    if rel.done_when.is_some() && !is_git {
+                        return Err(ApiError::bad_request(steve_i18n::t!(
+                            "hub.project.no_release"
+                        )));
+                    }
+                    if rel.cmd.trim().is_empty() && rel.done_when.is_none() {
+                        p.insert("release".into(), Value::Null);
+                    } else {
+                        p.insert("release".into(), json!(rel));
+                    }
+                }
+            }
+        } else if let Some(dw) = done_when {
+            let existing: Option<steve_store::Release> = cur_proj
                 .and_then(|o| o.get("release").cloned())
                 .filter(|v| !v.is_null())
-                .and_then(|v| serde_json::from_value(v).ok())
-                .ok_or_else(|| ApiError::bad_request(steve_i18n::t!("hub.project.no_release")))?;
-            release.done_when = dw;
-            p.insert("release".into(), json!(release));
+                .and_then(|v| serde_json::from_value(v).ok());
+            match (existing, dw) {
+                (Some(mut rel), Some(d)) => {
+                    rel.done_when = Some(d);
+                    p.insert("release".into(), json!(rel));
+                }
+                (Some(mut rel), None) => {
+                    rel.done_when = None;
+                    if rel.cmd.trim().is_empty() {
+                        p.insert("release".into(), Value::Null);
+                    } else {
+                        p.insert("release".into(), json!(rel));
+                    }
+                }
+                (None, Some(d)) if is_git => {
+                    p.insert(
+                        "release".into(),
+                        json!(steve_store::Release {
+                            kind: "script".into(),
+                            cmd: String::new(),
+                            done_when: Some(d),
+                        }),
+                    );
+                }
+                (None, None) if is_git => {
+                    p.insert("release".into(), Value::Null);
+                }
+                (None, _) => {
+                    return Err(ApiError::bad_request(steve_i18n::t!(
+                        "hub.project.no_release"
+                    )));
+                }
+            }
         }
         ok(Value::Object(r.project_patch(&id, &p, &c.me)?))
     })

@@ -28,6 +28,17 @@ test('ended requests remain actionable and errors persist until explicit closure
   assert.equal(g.current[0].session.id, 'unresolved'); assert.equal(g.recent[0].session.id, 'closed')
   assert.equal(groupDeviceWork('x', rows, []).current.length, 0)
 })
+test('authoritative room waits stay current without inflating execution or losing Node reasons', () => {
+  const room = { running: 32, max: 32, waiting: 2, reason: 'capacity', detail: null }
+  const refused = { running: 1, max: 32, waiting: 1, reason: 'node', detail: 'workspace storage unavailable' }
+  const rows = [s('running', 'running'), s('capacity', 'running', { room }), s('node', 'idle', { room: refused }), s('needs', 'running', { room })]
+  const g = groupDeviceWork('d1', rows, [d('request', 'needs')])
+  assert.equal(g.running, 1)
+  assert.equal(g.waiting, 2)
+  assert.deepEqual(g.attention.map(r => r.session.id), ['needs'])
+  assert.equal(g.current.find(r => r.session.id === 'node').session.room.detail, 'workspace storage unavailable')
+  assert.equal(g.recentTotal, 0)
+})
 test('GiB, load per CPU and distinct roots retain evidence; no invented unknown zero', () => {
   const v = { latest: { at: 1000, cpus: 4, load: [8, 4, 2], mem_total: 8 * 2**30, mem_available: 2 * 2**30, roots: [{root:'a', free:12*2**30, total:1024*2**30},{root:'b',free:12*2**30,total:1024*2**30}] }, series: [] }
   const f = vitalsFacts(v)

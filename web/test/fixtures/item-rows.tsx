@@ -32,6 +32,7 @@ st.items = [
   /* closed as failed: a finished row in its own group, not lost from the list */
   item("ST-43", "独立审查回归覆盖", { st: "fail", phase: "closed", now: "失败：评审不通过" }),
   item("ST-29", "已结束的旧单元", { st: "done", phase: "closed", src: ["协作工作", "workflow"], parent: { item: "ST-27" }, now: "已完成" }),
+  item("ST-30", "已完成的独立事项", { st: "done", phase: "closed", now: "已完成归档前展示" }),
 ]
 st.items[3].waits = [st.items[3].wait!]
 function Fixture() {

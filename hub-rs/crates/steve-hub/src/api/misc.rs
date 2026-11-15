@@ -935,6 +935,19 @@ pub async fn models_patch(
     ok(st.domain.models_view(&c.ws).await?)
 }
 
+/// Save a default without needing a working model. Steve is shared across workspaces, so only
+/// the instance owner can make this change; purpose overrides reset only in the current workspace.
+pub async fn models_select(
+    State(st): State<AppState>,
+    Extension(c): Extension<Ctx>,
+    b: Bytes,
+) -> ApiResult {
+    owner_or(&c, || steve_i18n::t!("hub.onboard.owner_only"))?;
+    let choice: steve_core::models::SteveSelection = serde_json::from_value(body(&b)?)
+        .map_err(|_| ApiError::bad_request(steve_i18n::t!("hub.models.invalid_selection")))?;
+    ok(st.domain.models_select(&c.ws, &choice, &c.me).await?)
+}
+
 /// `POST /api/onboard/start`: Steve opens the first meeting in the main conversation (the tour's
 /// last step, and "meet again" in the settings). Answers `{message}`, the welcome; one that is on
 /// already is left alone. The instance's owner only: the meeting acts on this machine.
@@ -1396,10 +1409,16 @@ pub async fn device_patch(
         Num {
             int: true,
             min: Some(1.0),
-            max: Some(256.0),
+            max: Some(steve_store::runtime::SESSIONS_MAX as f64),
             gt: None,
         },
     ) {
+        if id != steve_store::runtime::HUB_DEVICE {
+            return Err(ApiError::bad_request(steve_i18n::t!(
+                "hub.devices.limit_node_api"
+            )));
+        }
+        owner_or(&c, || steve_i18n::t!("hub.devices.limit_owner_only"))?;
         p.insert("max_sessions".into(), js_num(m));
     }
     k.finish()?;
@@ -1438,10 +1457,13 @@ pub async fn device_patch(
                 .find(|d| d.id == id)
                 .ok_or_else(|| ApiError::not_found("device_not_found"))?;
             let d = serde_json::to_value(d).map_err(steve_store::StoreError::from)?;
-            let d = d
+            let mut d = d
                 .as_object()
                 .cloned()
                 .ok_or_else(|| ApiError::internal("invalid device"))?;
+            let room = steve_store::runtime::session_room(tx, steve_store::runtime::HUB_NODE)?;
+            d.insert("running".into(), json!(room.running));
+            d.insert("waiting".into(), json!(room.waiting));
             ok(json!({"device": device_facts(vec![d], owner, true, connected).remove(0)}))
         })
     })

@@ -18,7 +18,7 @@ pub const DEV_ROLE: &str = "store.seed.dev_role";
 pub const DEV_PERSONA: &str = "store.seed.dev_persona";
 pub const DEV_RULES: &str = "store.seed.dev_rules";
 pub const STEVE_PROJECT: &str = "store.seed.steve_project";
-/// `%{owner}`: the workspace owner's name.
+/// The default persona's role, without a person's name (addresses are resolved per audience).
 pub const PERSONA_INTRO: &str = "store.seed.persona_intro";
 
 /// The seeded texts of each field, by the object they are in.
@@ -41,8 +41,27 @@ pub fn text(key: &str) -> String {
 }
 
 /// The default persona's introduction as it is stored.
-pub fn persona_intro(owner: &str) -> String {
-    rust_i18n::t!(PERSONA_INTRO, locale = steve_i18n::ZH_CN, owner = owner).into_owned()
+pub fn persona_intro() -> String {
+    text(PERSONA_INTRO)
+}
+
+/// Exact historical default templates. The captured name may be stale; never compare it to the
+/// current profile, and never replace names in arbitrary user-written introductions.
+pub fn is_legacy_persona_intro(intro: &str) -> bool {
+    [
+        ("我是 Steve，", " 的 AI 助手，帮他接收和分派事情。"),
+        (
+            "I'm Steve, ",
+            "'s AI assistant; I take in and hand out their work.",
+        ),
+    ]
+    .into_iter()
+    .any(|(prefix, suffix)| {
+        intro
+            .strip_prefix(prefix)
+            .and_then(|rest| rest.strip_suffix(suffix))
+            .is_some_and(|owner| !owner.is_empty())
+    })
 }
 
 /// A stored value that is still one of `keys`' seeds, in the request's language; `None` in zh-CN or for
@@ -119,20 +138,36 @@ mod tests {
     }
 
     #[test]
-    fn the_persona_intro_keeps_the_owner() {
-        let zh = persona_intro("Alice");
-        assert_eq!(zh, "我是 Steve，Alice 的 AI 助手，帮他接收和分派事情。");
+    fn the_persona_intro_does_not_freeze_a_persons_name() {
+        let zh = persona_intro();
+        assert_eq!(zh, "我是 Steve，负责接收和分派事情。");
         let e = en(|| shown(&zh, &[PERSONA_INTRO])).unwrap();
-        assert!(e.contains("Alice") && e.is_ascii(), "{e}");
+        assert_eq!(e, "I'm Steve; I take in and hand out work.");
         assert_eq!(
             en(|| stored(&e, &[PERSONA_INTRO])).as_deref(),
             Some(zh.as_str())
         );
         assert_eq!(
-            en(|| persona_intro("Alice")),
+            en(persona_intro),
             zh,
             "stored in zh-CN whatever the request"
         );
+    }
+
+    #[test]
+    fn only_exact_historical_persona_templates_match() {
+        for legacy in [
+            "我是 Steve，Old name 的 AI 助手，帮他接收和分派事情。",
+            "I'm Steve, Old name's AI assistant; I take in and hand out their work.",
+        ] {
+            assert!(is_legacy_persona_intro(legacy));
+            assert!(!is_legacy_persona_intro(&format!("{legacy} Custom role.")));
+            assert!(!is_legacy_persona_intro(&format!("Custom. {legacy}")));
+        }
+        assert!(!is_legacy_persona_intro(&persona_intro()));
+        assert!(!is_legacy_persona_intro(
+            "我是 Steve， 的 AI 助手，帮他接收和分派事情。"
+        ));
     }
 
     #[test]

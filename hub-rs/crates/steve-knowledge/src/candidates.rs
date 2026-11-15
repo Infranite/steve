@@ -24,7 +24,7 @@ use steve_store::base::{self, Level, ObjRef, Viewer, Visibility};
 use steve_store::{Decision, Tx};
 
 use crate::extract::Names;
-use crate::service::{mem_json, prepare};
+use crate::service::{mem_json_for, prepare};
 use crate::sync;
 
 /// `subject_type` of memory confirm decisions.
@@ -556,12 +556,12 @@ fn candidates_of(c: &Connection, viewer: &Viewer) -> ApiResult<Vec<Value>> {
             continue;
         };
         let supersedes = match sup {
-            Some(s) => mems::visible(c, viewer, &s)?.map(|o| mem_json(c, &o)),
+            Some(s) => mems::visible(c, viewer, &s)?.map(|o| mem_json_for(c, viewer, &o)),
             None => None,
         };
         let (why, scope) = reasons(c, mem.decision_id.as_deref())?;
         out.push(json!({
-            "mem": mem_json(c, &mem),
+            "mem": mem_json_for(c, viewer, &mem),
             "record": match record_name(&mem.kind) {
                 "长期记忆" => steve_i18n::t!("knowledge.record.memory"),
                 _ => steve_i18n::t!("knowledge.record.entry"),
@@ -667,7 +667,7 @@ pub fn expired(m: &Modules, who: &Caller) -> ApiResult<Value> {
             let (Some(mem), Some((_, label, evidence, _))) = (mems::get(c, &id)?, candidate_row(c, &id)?) else {
                 continue;
             };
-            out.push(json!({ "mem": mem_json(c, &mem), "origin_label": crate::sources::label_shown(&label), "evidence": evidence, "expired": at }));
+            out.push(json!({ "mem": mem_json_for(c, &viewer, &mem), "origin_label": crate::sources::label_shown(&label), "evidence": evidence, "expired": at }));
         }
         Ok(Value::Array(out))
     })
@@ -763,7 +763,7 @@ const TOOL_KINDS: [&str; 3] = ["fact", "preference", "rule"];
 pub fn remember_tool() -> Value {
     json!({
         "name": REMEMBER,
-        "description": "Save something that will matter beyond this task: a rule or preference the user said holds from now on (\"以后…\", \"每次…\"), or a verified fact reusable in other work. Not this task's requirements, progress, decisions or results — those stay in the item. It becomes a candidate the user confirms.",
+        "description": "Save something that will matter beyond this task: a rule or preference the user explicitly says applies from now on, or a verified fact reusable in other work. Task requirements, progress, decisions and results stay in the item. It becomes a candidate the user confirms.",
         "inputSchema": {
             "$schema": "http://json-schema.org/draft-07/schema#",
             "type": "object",

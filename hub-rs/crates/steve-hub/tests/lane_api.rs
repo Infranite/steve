@@ -348,7 +348,10 @@ async fn the_owner_browses_the_machine_for_a_new_projects_directory() {
         .collect();
     assert_eq!(dirs, [("notes", true), ("photos", false)]);
     assert!(
-        v["dirs"][0]["path"].as_str().unwrap().ends_with("/private/notes"),
+        v["dirs"][0]["path"]
+            .as_str()
+            .unwrap()
+            .ends_with("/private/notes"),
         "{v}"
     );
     let (s, v) = e.call("GET", &format!("{url}/pho"), None).await;
@@ -358,7 +361,10 @@ async fn the_owner_browses_the_machine_for_a_new_projects_directory() {
     /* another Node is named, not browsed and not built on */
     let (s, v) = e.call("GET", &format!("{url}&node=nod_laptop"), None).await;
     assert_eq!(s, 400, "{v}");
-    assert!(v["error"].as_str().unwrap().contains("Hub 内置的 Node"), "{v}");
+    assert!(
+        v["error"].as_str().unwrap().contains("Hub 内置的 Node"),
+        "{v}"
+    );
     let notes = format!("{private}/notes");
     let (s, v) = e
         .call(
@@ -368,7 +374,10 @@ async fn the_owner_browses_the_machine_for_a_new_projects_directory() {
         )
         .await;
     assert_eq!(s, 400, "{v}");
-    assert!(v["error"].as_str().unwrap().contains("Hub 内置的 Node"), "{v}");
+    assert!(
+        v["error"].as_str().unwrap().contains("Hub 内置的 Node"),
+        "{v}"
+    );
     let (s, v) = e
         .call(
             "POST",
@@ -377,7 +386,10 @@ async fn the_owner_browses_the_machine_for_a_new_projects_directory() {
         )
         .await;
     assert_eq!(s, 200, "{v}");
-    assert_eq!((&v["kind"], &v["device_id"]), (&json!("git"), &json!("hub")));
+    assert_eq!(
+        (&v["kind"], &v["device_id"]),
+        (&json!("git"), &json!("hub"))
+    );
 
     /* what is on the disk is the owner's to see */
     let store = steve_store::Store::open(&e.db, steve_store::NoPublisher).unwrap();
@@ -677,5 +689,11 @@ async fn with_remote_nodes_off_the_node_list_says_so() {
     assert_eq!((s, v), (200, json!({"nodes": [], "off": true})));
     let (s, v) = e.call("POST", "/api/nodes/pairings", Some(json!({}))).await;
     assert_eq!(s, 409, "{v}");
-    assert!(v["error"].as_str().unwrap_or_default().contains("STEVE_NODE_LISTEN"), "{v}");
+    assert!(
+        v["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("STEVE_NODE_LISTEN"),
+        "{v}"
+    );
 }

@@ -141,7 +141,7 @@ function StepDetail({ r }: { r?: Ref }) {
       [t("stats:cost.started"), time(tn.started)],
       [t("stats:cost.duration"), tn.ended ? fmtMs(tn.ended - tn.started) : t("stats:word.running")],
       [t("stats:cost.stop"), tn.transient ? t("stats:drill.gatewayDown") : stop[tn.stop_reason ?? ""] ?? tn.stop_reason ?? "—"],
-      [t("stats:cost.tools"), tn.tool_errors ? t("stats:cost.toolsFailed", { n: tn.tools, failed: tn.tool_errors }) : t("stats:cost.toolsN", { n: tn.tools })],
+      [t("stats:cost.tools"), tn.tool_errors ? t("stats:cost.toolsFailed", { count: tn.tools, n: fmtN(tn.tools), failed: fmtN(tn.tool_errors) }) : t("stats:cost.toolsN", { count: tn.tools, n: fmtN(tn.tools) })],
       ["tokens", tokenLine(tn.usage)],
       [t("stats:cost.hit"), fmtPct(tn.usage.hit_rate)],
       [t("stats:cost.est"), usd(tn.usage)],

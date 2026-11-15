@@ -18,14 +18,23 @@ fn visible(text: &str) -> String {
 }
 
 fn line(out: &mut String, label: &str, value: &str) {
-    let _ = writeln!(out, "{label}{}{}", t!("install.status.label_separator"), visible(value));
+    let _ = writeln!(
+        out,
+        "{label}{}{}",
+        t!("install.status.label_separator"),
+        visible(value)
+    );
 }
 
 fn build(value: &Value) -> Option<String> {
     let version = value["version"].as_str().filter(|s| !s.is_empty())?;
     let commit = value["commit"].as_str().filter(|s| !s.is_empty());
     Some(match commit {
-        Some(commit) => t!("install.status.build", version = version, commit = commit.chars().take(12).collect::<String>()),
+        Some(commit) => t!(
+            "install.status.build",
+            version = version,
+            commit = commit.chars().take(12).collect::<String>()
+        ),
         None => version.to_owned(),
     })
 }
@@ -89,10 +98,18 @@ pub fn service(
             },
         );
         if report["home_preserved"] == true {
-            line(&mut out, &t!("install.status.label.data"), &t!("install.status.home_kept"));
+            line(
+                &mut out,
+                &t!("install.status.label.data"),
+                &t!("install.status.home_kept"),
+            );
         }
         if let Some(archive) = report["archive"].as_str() {
-            line(&mut out, &t!("install.status.label.service_backup"), archive);
+            line(
+                &mut out,
+                &t!("install.status.label.service_backup"),
+                archive,
+            );
         }
     } else if matches!(action, "install" | "update") {
         line(
@@ -105,7 +122,11 @@ pub fn service(
             },
         );
         if report["started"] == false {
-            line(&mut out, &t!("install.status.start"), &t!("install.status.not_started"));
+            line(
+                &mut out,
+                &t!("install.status.start"),
+                &t!("install.status.not_started"),
+            );
         }
     } else {
         let running = match state["running"].as_bool() {
@@ -142,7 +163,9 @@ pub fn service(
         line(
             &mut out,
             &t!("install.status.label.configured_build"),
-            &configured.and_then(build).unwrap_or_else(|| t!("install.status.unknown")),
+            &configured
+                .and_then(build)
+                .unwrap_or_else(|| t!("install.status.unknown")),
         );
         line(
             &mut out,
@@ -179,7 +202,11 @@ pub fn service(
             line(&mut out, &t!("install.status.label.candidate"), &candidate);
         }
     }
-    line(&mut out, &t!("install.status.label.home"), &home.to_string_lossy());
+    line(
+        &mut out,
+        &t!("install.status.label.home"),
+        &home.to_string_lossy(),
+    );
     if let Some(label) = label {
         line(&mut out, &t!("install.status.label.service_name"), label);
     }
@@ -191,16 +218,26 @@ pub fn service(
             &t!("install.status.check_scope"),
         );
         match report["diagnostics"].as_array() {
-            Some(issues) if issues.is_empty() => {
-                line(&mut out, &t!("install.status.label.check_result"), &t!("install.status.no_issues"))
-            }
+            Some(issues) if issues.is_empty() => line(
+                &mut out,
+                &t!("install.status.label.check_result"),
+                &t!("install.status.no_issues"),
+            ),
             Some(issues) => {
-                let _ = writeln!(out, "{}", t!("install.status.issues_heading", count = issues.len()));
+                let _ = writeln!(
+                    out,
+                    "{}",
+                    t!("install.status.issues_heading", count = issues.len())
+                );
                 for issue in issues.iter().filter_map(Value::as_str) {
                     let _ = writeln!(out, "  - {}", visible(&diagnostic(issue)));
                 }
             }
-            None => line(&mut out, &t!("install.status.label.check_result"), &t!("install.status.no_diagnostics")),
+            None => line(
+                &mut out,
+                &t!("install.status.label.check_result"),
+                &t!("install.status.no_diagnostics"),
+            ),
         }
     }
 

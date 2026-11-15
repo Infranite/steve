@@ -2,7 +2,7 @@
  * objects one after another, or one array). They are applied in order into surfaces — a flat component list by id and a
  * data model — that the renderer draws. Nothing here touches the DOM: the parser, bindings and functions are plain data
  * so they can be tested on their own. Everything an agent can get wrong becomes a `Problem` with a JSON Pointer, never a throw. */
-import { t } from "../i18n/index.ts"
+import { lang, t } from "../i18n/index.ts"
 import { date } from "../i18n/format.ts"
 
 export const BASIC = "https://a2ui.org/specification/v0_9/catalogs/basic/catalog.json"
@@ -142,17 +142,17 @@ export function call(name: string, raw: Record<string, unknown>, s: Scope): unkn
     case "numeric": { const n = num(a("value")), lo = num(a("min")), hi = num(a("max")); return Number.isFinite(n) && !(n < lo) && !(n > hi) }
     case "email": return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(str(a("value")))
     case "formatString": return formatString(str(raw.value), s)
-    case "formatNumber": { const n = num(a("value")); if (!Number.isFinite(n)) return ""; const d = num(a("decimals")); return n.toLocaleString("zh-CN", { useGrouping: a("grouping") !== false, ...(Number.isFinite(d) ? { minimumFractionDigits: d, maximumFractionDigits: d } : {}) }) }
+    case "formatNumber": { const n = num(a("value")); if (!Number.isFinite(n)) return ""; const d = num(a("decimals")); return n.toLocaleString(lang(), { useGrouping: a("grouping") !== false, ...(Number.isFinite(d) ? { minimumFractionDigits: d, maximumFractionDigits: d } : {}) }) }
     case "formatCurrency": {
       const n = num(a("value")); if (!Number.isFinite(n)) return ""
       const d = num(a("decimals"))
-      try { return n.toLocaleString("zh-CN", { style: "currency", currency: str(a("currency")) || "CNY", useGrouping: a("grouping") !== false, ...(Number.isFinite(d) ? { minimumFractionDigits: d, maximumFractionDigits: d } : {}) }) } catch { return String(n) }
+      try { return n.toLocaleString(lang(), { style: "currency", currency: str(a("currency")) || "CNY", useGrouping: a("grouping") !== false, ...(Number.isFinite(d) ? { minimumFractionDigits: d, maximumFractionDigits: d } : {}) }) } catch { return String(n) }
     }
     case "formatDate": return formatDate(a("value"), str(a("format")))
     case "pluralize": {
       const n = num(a("value"))
       let cat: string
-      try { cat = new Intl.PluralRules("zh-CN").select(n) } catch { cat = "other" }
+      try { cat = new Intl.PluralRules(lang()).select(n) } catch { cat = "other" }
       const pick = (n === 0 && raw.zero !== undefined ? a("zero") : raw[cat] !== undefined ? a(cat) : a("other"))
       return str(pick).replace(/#/g, String(n))
     }

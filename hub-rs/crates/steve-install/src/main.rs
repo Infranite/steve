@@ -72,7 +72,9 @@ fn main() {
 fn run(mut args: Vec<String>) -> Result<i32> {
     /* the language of everything printed: --lang, else STEVE_LANG, the locale, the system's */
     let lang = match option(&mut args, "--lang")? {
-        Some(tag) => steve_i18n::match_tag(&tag).with_context(|| format!("--lang {tag}: zh-CN or en"))?,
+        Some(tag) => {
+            steve_i18n::match_tag(&tag).with_context(|| format!("--lang {tag}: zh-CN or en"))?
+        }
         None => steve_i18n::from_env(),
     };
     steve_i18n::set_process(lang);
@@ -171,8 +173,9 @@ fn run(mut args: Vec<String>) -> Result<i32> {
                     && report["service"]["running"] == true
                     && report["running_build"].is_null()
                 {
-                    let health = setup::hub_urls(&home)
-                        .and_then(|(api, _)| setup::hub_ready(&api, std::time::Duration::from_secs(2)));
+                    let health = setup::hub_urls(&home).and_then(|(api, _)| {
+                        setup::hub_ready(&api, std::time::Duration::from_secs(2))
+                    });
                     if let Some(health) = health {
                         report["running_build"] = serde_json::json!({
                             "version": health["version"], "commit": health["build_commit"]});
@@ -180,7 +183,13 @@ fn run(mut args: Vec<String>) -> Result<i32> {
                 }
                 print!(
                     "{}",
-                    ui::summary(&output::service(&command, &action, &home, label.as_deref(), &report))
+                    ui::summary(&output::service(
+                        &command,
+                        &action,
+                        &home,
+                        label.as_deref(),
+                        &report
+                    ))
                 );
                 /* the service manager has the job; say when the Hub itself answers */
                 let started = command == "hub"
@@ -191,7 +200,11 @@ fn run(mut args: Vec<String>) -> Result<i32> {
                     match setup::hub_ready(&api, std::time::Duration::from_secs(45)) {
                         Some(health) => spinner.done(
                             &t!("install.cli.hub_ready"),
-                            &t!("install.cli.hub_ready_detail", version = health["version"].as_str().unwrap_or("?"), web = web),
+                            &t!(
+                                "install.cli.hub_ready_detail",
+                                version = health["version"].as_str().unwrap_or("?"),
+                                web = web
+                            ),
                         ),
                         None => spinner.warn(&t!("install.cli.hub_silent")),
                     }
@@ -201,19 +214,23 @@ fn run(mut args: Vec<String>) -> Result<i32> {
         }
         "adapters" => {
             let selected = option(&mut args, "--home")?;
-            let action = if args.first().is_some_and(|a| !matches!(a.as_str(), "hub" | "node")) {
+            let action = if args
+                .first()
+                .is_some_and(|a| !matches!(a.as_str(), "hub" | "node"))
+            {
                 args.remove(0)
             } else {
                 "status".into()
             };
-            let action = if action == "upgrade" { "install".to_string() } else { action };
-            if !matches!(action.as_str(), "status" | "install") {
+            if !matches!(action.as_str(), "status" | "install" | "upgrade") {
                 bail!("{}", t!("install.cli.adapters_action_missing"));
             }
             /* install <id>…: those adapters, added to what this home keeps */
             let mut ids = Vec::new();
             while action == "install"
-                && args.first().is_some_and(|a| !matches!(a.as_str(), "hub" | "node") && !a.starts_with("--"))
+                && args
+                    .first()
+                    .is_some_and(|a| !matches!(a.as_str(), "hub" | "node") && !a.starts_with("--"))
             {
                 ids.push(args.remove(0));
             }
@@ -237,7 +254,11 @@ fn run(mut args: Vec<String>) -> Result<i32> {
                 .join("current")
                 .canonicalize()
                 .with_context(|| t!("install.cli.role_not_set_up", role = role))?;
-            let mut passed = vec![action.as_str()];
+            let mut passed = vec![if action == "upgrade" {
+                "install"
+            } else {
+                action.as_str()
+            }];
             passed.extend(ids.iter().map(String::as_str));
             setup::adapters(&role, &home, &current, &passed)
         }
@@ -260,8 +281,7 @@ fn run(mut args: Vec<String>) -> Result<i32> {
             let info: serde_json::Value = serde_json::from_slice(&output.stdout)
                 .context(t!("install.cli.upgrade_capability_unknown"))?;
             if !output.status.success() || info["upgrade_runner"]["native"] != true {
-                bail!(
-                    "{}", t!("install.cli.upgrade_unsupported"));
+                bail!("{}", t!("install.cli.upgrade_unsupported"));
             }
             let status = common::clean_command(&current.join("bin/steve-hub"), Some(&home))
                 .arg("--upgrade-cli")

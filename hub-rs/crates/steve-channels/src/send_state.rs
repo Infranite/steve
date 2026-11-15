@@ -41,6 +41,10 @@ pub fn attempt(
     now: i64,
 ) -> ChannelResult<(String, Vec<String>)> {
     keep(tx, message, auth)?;
+    tx.execute(
+        "UPDATE output_deliveries SET attempts=attempts+1,last_attempt_at=? WHERE message_id=?",
+        params![now, message],
+    )?;
     let kept: Option<(Option<String>, Option<String>)> = tx
         .prepare_cached("SELECT text, at FROM chan_send_state WHERE message_id = ?")?
         .query_row([message], |r| Ok((r.get(0)?, r.get(1)?)))
@@ -66,6 +70,10 @@ pub fn attempt(
 }
 
 pub fn error(tx: &Tx, message: &str, e: &str) -> ChannelResult<()> {
+    tx.execute(
+        "UPDATE output_deliveries SET last_error=? WHERE message_id=?",
+        params![e, message],
+    )?;
     tx.prepare_cached("UPDATE chan_send_state SET last_error = ? WHERE message_id = ?")?
         .execute(params![e, message])?;
     Ok(())

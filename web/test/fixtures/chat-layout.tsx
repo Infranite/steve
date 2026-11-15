@@ -1,8 +1,9 @@
+import { useEffect, useState } from "react"
 import { createRoot } from "react-dom/client"
 import "../../src/index.css"
 import { ChatView } from "../../src/chat-view"
 import { SidebarProvider } from "../../src/components/ui/sidebar"
-import { st, emit, useStore, type Msg, type Bot, type Item } from "../../src/store"
+import { st, emit, useStore, hubSubs, type Msg, type Bot, type Item } from "../../src/store"
 
 document.documentElement.classList.toggle("dark", matchMedia("(prefers-color-scheme: dark)").matches)
 const now = Date.now()
@@ -28,14 +29,54 @@ const rich: Msg[] = [...short,
   { id: "offer", k: "steve", t: "路径 `hub-rs/crates/steve-store/migrations/../../../web/src/components/ui/message-scroller.tsx` 里没有用到。", created: now - 20000, offer: { title: "把对话页里没用到的消息滚动组件和它的样式一起删掉，顺便整理滚动条", state: "open" } as any },
 ]
 /* quoting the long reply: the quote line shows its words, not its Markdown */
+/* (a quote of the message right above is not shown: one message sits between them) */
+const between: Msg = { id: "between", k: "me", created: now + 500, t: "我先看看" }
 const quoted: Msg = { id: "quoted", k: "me", created: now + 1000, replyTo: "long", t: "好" }
-st.thread = location.search.includes("empty") ? [] : location.search.includes("long") ? [...short, long, quoted] : location.search.includes("rich") ? rich : short
+st.thread = location.search.includes("empty") ? [] : location.search.includes("long") ? [...short, long, between, quoted] : location.search.includes("rich") ? rich : short
 st.notices = []
 let replies = 0
 window.addEventListener("fixture-reply", () => { replies++; st.thread = [...st.thread, { id: "reply-" + replies, k: "steve", created: Date.now(), t: "新到的一条回复。\n\n- 第一点\n- 第二点\n- 第三点" }]; emit() })
 window.addEventListener("fixture-thinking", () => { st.thread = [...short, { k: "thinking" }]; st.thinking = true; st.phase = "answer"; emit() })
 function Fixture() {
   useStore()
-  return <SidebarProvider><main style={{ height: "100dvh", width: "100%", minWidth: 0 }}><ChatView /></main></SidebarProvider>
+  const [conv, setConv] = useState(new URLSearchParams(location.search).get("conv") ?? undefined)
+  useEffect(() => {
+    const refresh = () => hubSubs.forEach(f => f({ type: "chan_message", id: "fixture" }))
+    const switchScope = (e: Event) => {
+      st.workspace = { ...st.workspace, id: (e as CustomEvent<string>).detail } as typeof st.workspace
+      emit()
+    }
+    const switchConv = (e: Event) => setConv((e as CustomEvent<string>).detail)
+    window.addEventListener("fixture-refresh", refresh)
+    window.addEventListener("fixture-scope", switchScope)
+    window.addEventListener("fixture-conversation", switchConv)
+    return () => { window.removeEventListener("fixture-refresh", refresh); window.removeEventListener("fixture-scope", switchScope); window.removeEventListener("fixture-conversation", switchConv) }
+  }, [])
+  return <SidebarProvider><main style={{ height: "100dvh", width: "100%", minWidth: 0 }}><ChatView conv={conv} /></main></SidebarProvider>
 }
 createRoot(document.getElementById("root")!).render(<Fixture />)
+
+/* Authoritative chat phases for Thinking State regression. No model request is made by these events. */
+window.addEventListener("fixture-thinking-stage", (event) => {
+  const stage = (event as CustomEvent<string>).detail
+  const t0 = Date.now() - 5000
+  st.live = null; st.draft = null; st.thinking = true; st.phase = "route"
+  st.thread = [...short.slice(0,3), { k: "thinking" }]
+  const reasoning = Array.from({length:12}, (_,i) => `第 ${i+1} 步：核对实际模型与工具事件，保留来源、失败和已执行的步骤。`).join("\n\n")
+  if (stage === "thought") st.draft = { mid:"request",text:"",thought:reasoning,t0 }
+  if (stage === "research" || stage === "research-update") {
+    st.phase = "research"
+    st.live = { mid:"request",run:"fixture-research",t0,tools:[{name:"Read",brief:"src/app.ts",kind:"read",ok:true},{name:"Read",brief:"src/config.ts",kind:"read",ok:true}],now:{name:"Grep",brief:"model settings",kind:"search"} }
+    if (stage === "research-update") { st.live.tools.push({name:"Grep",brief:"model settings",kind:"search",ok:true}); st.live.now={name:"Bash",brief:"npm run check",kind:"exec"} }
+  }
+  if (stage === "reply") { st.phase="answer"; st.draft={mid:"request",thought:reasoning,text:"核对完成，正在生成回答。",t0} }
+  if (["complete","failure","stopped"].includes(stage)) {
+    st.thinking=false
+    st.thread=[...short.slice(0,3), {id:"thinking-result",k:"steve",origin:"request",created:Date.now(),t:stage==="failure"?"模型服务暂时不可用。":"已核对。",stopped:stage==="stopped"||undefined,
+      ...(stage==="stopped"?{}:{steps:{route:{kind:"research",title:"",bot:"steve",project:null,tags:[],newTags:[],why:"核对模型配置",model:"fixture-model",fallback:false,ms:200},
+        answer:{thought:reasoning,model:"fixture-model",ms:5000,failed:stage==="failure"},
+        research:{run:"fixture-research",model:"fixture-model",ms:28000,turns:2,tools:3,stopped:stage==="failure"?"failed":undefined},
+        tools:[{name:"Read",kind:"read",args:{brief:"src/app.ts"},status:"ok",ms:20},{name:"Read",kind:"read",args:{brief:"src/config.ts"},status:"ok",ms:20},{name:"Bash",kind:"exec",args:{brief:"npm run check"},status:"failed",error:"transport",ms:500}]}}) }]
+  }
+  emit()
+})

@@ -17,22 +17,8 @@ import { capsApi, type SteveServer, type SteveTool } from "@/api/caps"
 import { errText, useList } from "./common"
 import { CLIENTS, FILE, LANGUAGE, mcpUrl, snippet, type ClientKind } from "./snippets"
 
-/* what each Steve tool does for the user, in a line; a tool added later shows the Hub's first sentence until it is
- * named here */
-const DESC = {
-  steve_update: "update", steve_ask: "ask", steve_request_approval: "approval", steve_deliver: "deliver", steve_publish: "publish", steve_lane_status: "laneStatus",
-  steve_items_search: "itemsSearch", steve_item_read: "itemRead", steve_item_dependencies: "itemDependencies", steve_sessions_list: "sessionsList",
-  steve_item_create: "itemCreate", steve_item_supplement: "itemSupplement",
-  steve_workflow: "workflow", steve_debug: "debug", steve_upgrade: "upgrade", steve_devices: "devices", steve_reply_source: "replySource",
-  steve_event_get: "eventGet", steve_im_read: "imRead", steve_knowledge_search: "knowledgeSearch", steve_knowledge_read: "knowledgeRead",
-  steve_remember: "remember", steve_memory_list: "memoryList", steve_memory_tidy: "memoryTidy", steve_contacts_find: "contactsFind", steve_contacts_remember: "contactsRemember", steve_whois: "whois",
-  steve_person_holdings: "personHoldings", steve_steward_propose: "stewardPropose", steve_secret_list: "secretList", steve_secret_use: "secretUse",
-  steve_github_status: "githubStatus", steve_github_ci_log: "githubCiLog", steve_github_comment: "githubComment", steve_github_open_pr: "githubOpenPr",
-  steve_mail_thread: "mailThread", steve_mail_attachment: "mailAttachment", steve_mail_draft: "mailDraft",
-  steve_onboard_profile: "onboardProfile", steve_onboard_models: "onboardModels", steve_onboard_bots: "onboardBots", steve_onboard_done: "onboardDone",
-} as const
-type DescKey = (typeof DESC)[keyof typeof DESC]
-export const toolDescKey = (name: string): DescKey | undefined => (DESC as Record<string, DescKey | undefined>)[name]
+import { toolDescKey, toolCount } from "./tool-catalog"
+export { toolDescKey } from "./tool-catalog"
 
 /** the tools in a fold: name, what it is for, and (on a Bot) how often it was called in 30 days */
 function ToolList({ tools, counts }: { tools: SteveTool[]; counts?: Map<string, number> }) {
@@ -40,7 +26,7 @@ function ToolList({ tools, counts }: { tools: SteveTool[]; counts?: Map<string, 
   return (
     <ul className="flex flex-col divide-y divide-border/60" data-steve-tools>
       {tools.map((x) => {
-        const k = toolDescKey(x.name), n = counts?.get(x.name)
+        const k = toolDescKey(x.name), n = counts && toolCount(x, counts)
         return (
           <li key={x.name} className="flex min-w-0 flex-wrap items-baseline gap-x-3 gap-y-0.5 py-2 sm:flex-nowrap" data-steve-tool={x.name}>
             <span className="min-w-0 shrink-0 truncate font-mono type-footnote max-sm:basis-full sm:w-52" title={x.name}>{x.name}</span>

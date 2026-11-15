@@ -9,7 +9,7 @@ import { SetSelect } from "@/settings-controls"
 import { Spinner } from "@/components/ui/spinner"
 import { stats, type Price, type Prices, type Quote } from "@/api/stats"
 import { toast } from "@/store"
-import { Group, Row, SectionLabel } from "@/ui"
+import { Group, Notice, Row, SectionLabel } from "@/ui"
 import { t, useT } from "@/i18n"
 import { num } from "@/i18n/format"
 import { fmtN, time, useStats } from "@/stats/format"
@@ -104,13 +104,15 @@ export function StatsSettingsPane() {
   const inTable = (m: string) => list.some((r) => r.match.trim() === m)
   return (
     <div className="flex flex-col gap-10" data-stats-settings>
+      {/* models without a price are what this page is opened to fix: said first, once; each has 加价格 in the table */}
+      {v.unpriced.length > 0 && <Notice tone="attention" className="-mb-4" data-unpriced>{t("stats:prices.unpricedNotice", { count: v.unpriced.length, models: v.unpriced.slice(0, 3).map((u) => u.model || t("stats:word.unknownModel")).join(t("shell:list.sep")) + (v.unpriced.length > 3 ? t("stats:prices.andMore") : ""), n: fmtN(v.unpriced.reduce((n, u) => n + u.tokens, 0)) })}</Notice>}
       {v.models.length > 0 && (
         <section data-price-models>
           <SectionLabel right={<span className="type-footnote">{t("stats:prices.perMillion")}</span>}>{t("stats:prices.models")}</SectionLabel>
           <p className="mb-3 type-callout text-muted-foreground">{t("stats:prices.modelsIntro")}</p>
           <div className="-mx-4 overflow-x-auto px-4 sm:mx-0 sm:px-0">
             <table className="w-full min-w-[620px] type-callout" aria-label={t("stats:prices.modelsAria")}>
-              <thead className="border-b text-left type-footnote text-muted-foreground"><tr><th className="py-2 font-medium">{t("stats:col.model")}</th><th className="py-2 pl-2 font-medium">{t("stats:col.source")}</th>{cols.map(([, l]) => <th key={l} className="whitespace-nowrap py-2 pl-3 text-right font-medium">{l}</th>)}<th className="whitespace-nowrap py-2 pl-3 text-right font-medium">tokens</th><th className="w-16" /></tr></thead>
+              <thead className="border-b text-left type-footnote text-muted-foreground"><tr><th className="py-2 font-medium">{t("stats:col.model")}</th><th className="py-2 pl-2 font-medium">{t("stats:col.source")}</th>{cols.map(([, l]) => <th key={l} className="whitespace-nowrap py-2 pl-3 text-right font-medium">{l}</th>)}<th className="whitespace-nowrap py-2 pl-3 text-right font-medium">{t("stats:col.tokens")}</th><th className="w-16" /></tr></thead>
               <tbody>{v.models.map((m) => {
                 const q = m.price
                 return (
@@ -119,7 +121,7 @@ export function StatsSettingsPane() {
                     <td className="min-w-40 max-w-64 py-2 pl-2" title={q?.note || undefined}>
                       {q ? <span className={q.source === "models_dev" ? "text-foreground" : "text-muted-foreground"}>{q.source === "models_dev" ? "Models.dev" : t("stats:prices.table")}</span> : <span className="text-attention">{t("stats:word.unpriced")}</span>}
                       {q?.via && <span className="ml-1 type-footnote text-muted-foreground">{t("stats:prices.estBy", { match: q.match })}</span>}
-                      {q?.note && <div className="type-footnote text-muted-foreground">{q.note}</div>}
+                      {q?.note && <div className="line-clamp-1 type-footnote text-muted-foreground">{q.note}</div>}
                     </td>
                     {cols.map(([k]) => <td key={k} className="py-2 pl-3 text-right tabular-nums">{q ? money(q[k] as number) : "—"}</td>)}
                     <td className="py-2 pl-3 text-right tabular-nums text-muted-foreground">{fmtN(m.tokens)}</td>
@@ -156,17 +158,6 @@ export function StatsSettingsPane() {
           <Button size="sm" disabled={busy || !dirty} onClick={submit} data-price-save>{busy && <Spinner />}{t("common:action.save")}</Button>
         </div>
       </section>
-      {v.unpriced.length > 0 && (
-        <section data-unpriced>
-          <SectionLabel>{t("stats:prices.unpriced")}</SectionLabel>
-          <p className="mb-2 type-callout text-muted-foreground">{t("stats:prices.unpricedIntro")}</p>
-          <Group>{v.unpriced.map((u) => (
-            <Row key={u.model} title={<span className="type-code">{u.model || t("stats:word.unknownModel")}</span>} sub={t("stats:prices.unpricedTokens", { n: fmtN(u.tokens) })}>
-              {u.model && <Button size="xs" variant="ghost" className="text-blue" onClick={() => add(u.model)} disabled={inTable(u.model)}>{t("stats:prices.addPrice")}</Button>}
-            </Row>
-          ))}</Group>
-        </section>
-      )}
       <section>
         <SectionLabel>{t("stats:prices.tzSection")}</SectionLabel>
         <Group>

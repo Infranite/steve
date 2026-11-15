@@ -16,7 +16,8 @@ import { t as tr, useT } from "@/i18n"
 import { date } from "@/i18n/format"
 import { go, Page, Row, Meta, Empty, Tags, ItemNo, Status, Panel } from "@/ui"
 import { AskSteve, type Ctx } from "@/config-ui"
-import { nameOf, people, type Attr, type Contact, type Level, type Mem, type ProfileField } from "@/api/people"
+import { nameOf, people, type AccountBrief, type Attr, type Contact, type Level, type Mem, type ProfileField } from "@/api/people"
+import { channelsApi } from "@/api/channels"
 import { ContactAvatar, LevelSel, Loading, PeopleGate, Section, act, codes, day, joinList, label, relLabel, useLoad, visLabel } from "@/people/common"
 import { orgLine } from "@/people/contacts"
 import { MergeDialog } from "@/people/pending"
@@ -100,14 +101,14 @@ function ContactBody({ c, reload }: { c: Contact; reload: () => void }) {
           <Button size="sm" onClick={() => void act(people.confirm(c.id), t("people:contact.confirmedNew"))} data-confirm-contact>{t("people:contact.confirmNew")}</Button></div>}
         {/* the description, then the tags and (for others) the relation, under the title block */}
         <div className="-mt-4 flex flex-col gap-2">
-          <Bio text={c.note} empty={c.is_me ? t("people:contact.bioEmptyMe") : t("people:contact.noNote")} onEdit={() => setEdit(true)} />
+          {!c.is_me && <Bio text={c.note} empty={t("people:contact.noNote")} onEdit={() => setEdit(true)} />}
           {(c.tags.length > 0 || !c.is_me) && <div className="flex flex-wrap items-center gap-2"><Tags ids={c.tags} />
             {!c.is_me && <DropdownMenu><DropdownMenuTrigger render={<button type="button" className="type-footnote text-muted-foreground hover:text-foreground" data-rel-menu />}>{rels.length ? t("people:contact.changeRel") : t("people:contact.addRel")}</DropdownMenuTrigger>
               <DropdownMenuContent align="start" className="min-w-36">{codes("rel").filter((x) => x !== "me").map((x) => <DropdownMenuItem key={x} onClick={() => setRels(x)} data-rel-opt={x}>{c.rels.includes(x) ? <CheckIcon /> : <span className="size-4" />}{label("rel", x)}</DropdownMenuItem>)}</DropdownMenuContent></DropdownMenu>}</div>}
         </div>
-        <Facts c={c} emails={accts.data?.filter((a) => a.system.id === "mail").map((a) => a.handle) ?? null} onJob={() => setJob(true)} reload={() => { reload(); accts.reload() }} />
+        <Facts c={c} accounts={accts.data} emails={accts.data?.filter((a) => a.system.id === "mail").map((a) => a.handle) ?? null} onJob={() => setJob(true)} reload={() => { reload(); accts.reload() }} />
         <AskSteve key={c.id} ctx={ctxOf("contact", c.id)} placeholder={c.is_me ? t("people:contact.askMe") : t("people:contact.askOther", { name: first(c.name) })} className="-mt-4" />
-        {!!accts.data?.length && <Section label={t("people:contact.linked")} data-linked><Panel>{accts.data.map((a) => <Row key={a.id} title={<span className="break-all">{a.handle}</span>} sub={t("people:contact.accountSub", { system: a.system.name, source: a.source_label })} onClick={() => go("#/accounts/" + a.id)} data-linked-acct={a.handle}><ChevronRightIcon className="size-4 text-tertiary" /></Row>)}</Panel></Section>}
+        {!c.is_me && !!accts.data?.length && <Section label={t("people:contact.linked")} data-linked><Panel>{accts.data.map((a) => <Row key={a.id} title={<span className="break-all">{a.handle}</span>} sub={t("people:contact.accountSub", { system: a.system.name, source: a.source_label })} onClick={() => go("#/accounts/" + a.id)} data-linked-acct={a.handle}><ChevronRightIcon className="size-4 text-tertiary" /></Row>)}</Panel></Section>}
         {c.kind === "bot" ? <HoldingsSection person={c.id} name={first(c.name)} isMe={c.is_me} isBot /> : <ResponsibleSection person={c.id} name={first(c.name)} isMe={c.is_me} />}
         {c.teams.length > 0 && <Section label={t("people:contact.teams", { n: c.teams.length })}><Panel>{c.teams.map((g) => <Row key={g.id} icon={<ContactAvatar name={g.name} type="team" size={28} />} title={g.name} sub={`${label("teamKind", g.kind)} · ${label("role", g.role)}`} onClick={() => go("#/teams/" + g.id)} data-contact-team={g.name}><ChevronRightIcon className="size-4 text-tertiary" /></Row>)}</Panel></Section>}
         {!!items.data?.length && <Section label={t("people:shared.relatedItems", { n: items.data.length })}>
@@ -119,6 +120,12 @@ function ContactBody({ c, reload }: { c: Contact; reload: () => void }) {
             <button key={n} type="button" disabled={!x.href} onClick={() => x.href && go(x.href)} className="flex items-start gap-3 rounded-lg px-2 py-2 text-left transition-colors enabled:hover:bg-accent">
               <I className="mt-0.5 size-4 shrink-0 text-muted-foreground" strokeWidth={1.5} aria-hidden /><span className="min-w-0 flex-1 type-callout">{x.text}</span><span className="shrink-0 type-footnote tabular-nums text-muted-foreground">{label("touch", x.kind)} · {tm(x.ts)}</span></button>) })}</div>
         </Section>}
+        {c.is_me && !!c.note.trim() && <details className="rounded-xl bg-card px-4 py-3 shadow-[var(--lift)]" data-original-note>
+          <summary className="cursor-pointer type-callout text-muted-foreground">{t("people:me.originalNote")}</summary>
+          <p className="mt-3 whitespace-pre-wrap break-words type-body">{c.note}</p>
+          <p className="mt-2 type-footnote text-muted-foreground">{t("people:me.noteHint")}</p>
+          <Button size="xs" variant="ghost" onClick={() => setEdit(true)}>{t("people:contact.editInfo")}</Button>
+        </details>}
         <MemSection party={c.id} mems={mems.data} label={c.is_me ? t("people:contact.notedMe") : t("people:contact.notedOther", { name: first(c.name) })} hideEmpty fold={MEM_FOLD} />
         {c.merges.length > 0 && <Section label={t("people:contact.merges")}><Panel>{c.merges.map((m) => (
           <Row key={m.id} title={t("people:contact.mergedFrom", { name: m.from_name })} sub={m.splittable ? t("people:contact.mergeSplittable", { day: day(m.created) }) : day(m.created)} data-merge-rec={m.id}>
@@ -154,9 +161,10 @@ function Bio({ text, empty, onEdit }: { text: string; empty: string; onEdit: () 
 /** “Steve 记得的你”: one list of label and value. Every value changes in place (a job opens its dialog: it needs an
  *  organization), an empty one says 补充, and a detail carries its disclosure level beside it. Why an empty field could
  *  not be filled in automatically is said once under the list, not on every row. */
-function Facts({ c, emails, onJob, reload }: { c: Contact; emails: string[] | null; onJob: () => void; reload: () => void }) {
+function Facts({ c, accounts, emails, onJob, reload }: { c: Contact; accounts: AccountBrief[] | null; emails: string[] | null; onJob: () => void; reload: () => void }) {
   const t = useT()
   const [adding, setAdding] = useState(false)
+  if (c.is_me) return <MeFacts c={c} accounts={accounts} onJob={onJob} reload={reload} />
   const fixed: readonly string[] = c.is_me ? ME_KEYS : OTHER_KEYS
   const now = c.jobs.filter((j) => !j.to), past = c.jobs.filter((j) => j.to)
   const orgs = joinList(now.map((j) => j.org_name)), titles = joinList(now.map((j) => [j.dept, j.title].filter(Boolean).join(" · ")).filter(Boolean))
@@ -194,12 +202,80 @@ function Facts({ c, emails, onJob, reload }: { c: Contact; emails: string[] | nu
   )
 }
 
+/** Structured facts, not a heuristic parser of a person's prose. Unknown custom facts stay visible.
+ * Accounts/jobs are read from their owning modules; the Hub never probes the browser host or git. */
+function MeFacts({ c, accounts, onJob, reload }: { c: Contact; accounts: AccountBrief[] | null; onJob: () => void; reload: () => void }) {
+  const t = useT()
+  const [adding, setAdding] = useState<string | null>(null)
+  const [scope, setScope] = useState("persona"), [scopeId, setScopeId] = useState(""), [scopeName, setScopeName] = useState("")
+  const targets = useLoad(async () => {
+    const [personas, spaces] = await Promise.all([channelsApi.personas(), channelsApi.spaces()])
+    return { persona: personas.map(p => ({ v: p.id, l: p.name })), space: spaces.filter(s => s.status === "active").map(s => ({ v: s.id, l: s.title || s.name })) }
+  }, [])
+  const options = targets.data?.[scope as "persona" | "space"] ?? []
+  const groups = [
+    { id: "identity", keys: ["role"] },
+    { id: "work", keys: ["project", "repository", "tools"] },
+    { id: "contact", keys: ["email", "phone", "website"] },
+    { id: "preferences", keys: ["lang", "tz", "communication"] },
+  ]
+  const allKeys = groups.flatMap(g => g.keys).concat(["call", "call_external", "call_ext_scope"])
+  const attrs = c.attrs.filter(a => a.status !== "stale")
+  const matchesAccount = (a: Attr, account: AccountBrief) => a.key === "email" && a.status === "confirmed" && account.system.id === "mail" && a.value.trim().toLowerCase() === account.handle.trim().toLowerCase()
+  const field = (key: string) => {
+    const name = t(`people:me.fields.${key as "role"}`), found = attrs.filter(a => a.key === key)
+    return found.length ? found.map(a => <AttrFact key={a.id} a={{ ...a, label: name }} accounts={accounts?.filter(account => matchesAccount(a, account))} onChanged={reload} />)
+      : <Fact key={key} label={name} data-fact={key}><Value label={name} onSave={async value => {
+          const ok = await act(people.addAttr(c.id, { key, label: name, value })); if (ok) reload(); return !!ok
+        }} /></Fact>
+  }
+  const source = (value: string) => <Badge size="sm" variant="secondary">{value}</Badge>
+  const jobs = c.jobs.filter(j => !j.to)
+  return <div className="flex flex-col gap-6" data-me-facts>
+    <Section label={t("people:me.address")} note={t("people:me.addressHint")} data-address-facts><Panel>
+      {field("call")}{field("call_external")}
+      {attrs.filter(a => a.key === "call_ext_scope").map(a => {
+        let scopeLabel: string | undefined
+        try {
+          const v = JSON.parse(a.value)
+          scopeLabel = targets.data?.[v.kind as "persona" | "space"]?.find(o => o.v === v.id)?.l
+        } catch { /* historical malformed facts remain readable */ }
+        return <AttrFact key={a.id} a={a} scopeLabel={scopeLabel} onChanged={reload} />
+      })}
+      <details className="px-3 py-2" data-address-overrides><summary className="cursor-pointer type-callout text-muted-foreground">{t("people:me.overrides")}</summary>
+        <div className="mt-3 flex flex-wrap gap-2">
+          <Select label={t("people:me.scope")} value={scope} onChange={value => { setScope(value); setScopeId("") }} options={[{ v: "persona", l: t("people:me.persona") }, { v: "space", l: t("people:me.space") }]} />
+          <Select className="min-w-40 flex-1" label={t("people:me.scopeId")} placeholder={t("people:me.scopeId")} value={scopeId} onChange={setScopeId} options={options} disabled={!options.length} />
+          <Input className="min-w-40 flex-1" aria-label={t("people:me.externalName")} placeholder={t("people:me.externalName")} maxLength={80} value={scopeName} onChange={e => setScopeName(e.target.value)} />
+          <Button size="sm" disabled={!scopeId.trim() || !scopeName.trim()} onClick={async () => {
+            if (await act(people.addAttr(c.id, { key: "call_ext_scope", label: `${scope}:${keyFor(scopeId.trim())}`, value: JSON.stringify({ kind: scope, id: scopeId.trim(), name: scopeName.trim() }), level: "public" }))) { setScopeId(""); setScopeName(""); reload() }
+          }}>{t("common:action.save")}</Button>
+        </div>
+        {targets.err && <p role="alert" className="mt-2 type-footnote text-destructive">{targets.err.message}</p>}
+        {targets.data && !options.length && <p className="mt-2 type-footnote text-muted-foreground">{t("people:me.noScopes")}</p>}
+      </details>
+    </Panel></Section>
+    {groups.map(g => <Section key={g.id} label={t(`people:me.groups.${g.id as "identity"}`)} data-fact-group={g.id}><Panel>
+      {g.id === "identity" && <>
+        <Fact label={t("people:contact.field.org")} extra={jobs.length ? source(jobs.some(j => j.source !== "manual") ? t("people:me.accountProfile") : t("people:source.manual")) : undefined}><Value label={t("people:contact.field.org")} value={joinList(jobs.map(j => j.org_name))} onOpen={onJob} /></Fact>
+        <Fact label={t("people:contact.field.title")} extra={jobs.length ? source(jobs.some(j => j.source !== "manual") ? t("people:me.accountProfile") : t("people:source.manual")) : undefined}><Value label={t("people:contact.field.title")} value={joinList(jobs.map(j => j.title ?? "").filter(Boolean))} onOpen={onJob} /></Fact>
+      </>}
+      {g.keys.flatMap(field)}
+      {g.id === "contact" && accounts?.filter(account => !attrs.some(a => matchesAccount(a, account))).map(a => <Fact key={a.id} label={a.system.name} extra={source(t("people:me.accountProfile"))} data-platform-account={a.id}><a className="break-all type-body hover:underline" href={"#/accounts/" + a.id}>{a.handle}</a></Fact>)}
+      {adding === g.id ? <NewAttr party={c.id} init={{ label: "" }} onDone={() => { setAdding(null); reload() }} /> : null}
+    </Panel></Section>)}
+    {attrs.some(a => !allKeys.includes(a.key)) && <Section label={t("people:me.otherFacts")}><Panel>{attrs.filter(a => !allKeys.includes(a.key)).map(a => <AttrFact key={a.id} a={a} onChanged={reload} />)}</Panel></Section>}
+    <Button variant="ghost" className="self-start text-muted-foreground" onClick={() => setAdding("preferences")} data-add-attr><PlusIcon />{t("people:contact.addFact")}</Button>
+    <p className="-mt-3 type-footnote text-muted-foreground">{t("people:me.sourcesHint")}</p>
+  </div>
+}
+
 /** one line of the list: the label, the value, and its level and removal on the right. On a phone a line with a level
  *  puts the value under the label, so the level never squeezes it; a line without one stays a single line */
 function Fact({ label: name, extra, sub, level, onDelete, deleteLabel, children, ...rest }: { label: ReactNode; extra?: ReactNode; sub?: ReactNode; level?: ReactNode; onDelete?: () => void; deleteLabel?: string; children: ReactNode; [k: `data-${string}`]: unknown }) {
   const side = !!(level || onDelete)
   return (
-    <div role="listitem" className={cn("group/fact grid min-h-11 items-start gap-x-3 px-3 py-2 sm:grid-cols-[7.5rem_minmax(0,1fr)_auto]", side ? "grid-cols-[minmax(0,1fr)_auto]" : "grid-cols-[5.5rem_minmax(0,1fr)]")} {...rest}>
+    <div role="listitem" className={cn("group/fact grid min-h-11 items-start gap-x-3 px-3 py-2 sm:grid-cols-[9rem_minmax(0,1fr)_auto]", side ? "grid-cols-[minmax(0,1fr)_auto]" : "grid-cols-[5.5rem_minmax(0,1fr)]")} {...rest}>
       <div className="flex min-h-7 min-w-0 flex-wrap items-center gap-1.5 type-callout text-muted-foreground">{name}{extra}</div>
       <div className={cn("flex min-h-7 min-w-0 flex-col justify-center", side && "max-sm:col-span-2 max-sm:row-start-2")}>{children}{sub && <div className="mt-0.5 type-footnote text-muted-foreground">{sub}</div>}</div>
       {side && <div className="flex min-h-7 items-center justify-end gap-0.5 max-sm:col-start-2 max-sm:row-start-1">{level}
@@ -234,13 +310,21 @@ function Value({ label: name, value, onSave, onOpen, type }: { label: string; va
 }
 
 /** a detail of the contact in the list: its value, its level, and removing it */
-function AttrFact({ a, onChanged }: { a: Attr; onChanged: () => void }) {
+function AttrFact({ a, scopeLabel, accounts, onChanged }: { a: Attr; scopeLabel?: string; accounts?: AccountBrief[]; onChanged: () => void }) {
   const t = useT()
+  let scoped: { kind?: string; id?: string; name?: string } | null = null
+  if (a.key === "call_ext_scope") { try { scoped = JSON.parse(a.value) } catch { /* malformed historical facts stay readable */ } }
+  const shown = scoped?.name ?? a.value
   return (
-    <Fact label={a.label} data-attr={a.label} onDelete={() => void act(people.deleteAttr(a.id))} deleteLabel={t("people:attr.del", { label: a.label })}
-      extra={<>{a.status === "candidate" && <Badge variant="secondary" className="bg-attention/12 text-attention">{t("people:shared.pending")}</Badge>}{a.status === "stale" && <Badge variant="secondary" className="text-muted-foreground">{t("people:shared.stale")}</Badge>}</>}
+    <Fact label={scoped ? t("people:me.fields.call_external") : a.label} sub={scoped?.id ? `${scoped.kind === "space" ? t("people:me.space") : t("people:me.persona")} · ${scopeLabel ?? scoped.id}` : accounts?.length ? <span className="flex flex-wrap gap-2">{accounts.map(account => <a key={account.id} className="hover:underline" href={"#/accounts/" + account.id} data-platform-account={account.id}>{t("people:contact.linked")} · {account.system.name}</a>)}</span> : undefined} data-attr={a.label} onDelete={async () => { if (await act(people.deleteAttr(a.id))) onChanged() }} deleteLabel={t("people:attr.del", { label: a.label })}
+      extra={<><Badge variant="secondary" size="sm" data-fact-source>{a.status === "candidate" ? t("people:shared.inferred") : a.source === "profile" ? t("people:me.accountProfile") : a.source_label}</Badge>{a.status === "candidate" && <Badge variant="secondary" className="bg-attention/12 text-attention">{t("people:shared.pending")}</Badge>}{a.status === "stale" && <Badge variant="secondary" className="text-muted-foreground">{t("people:shared.stale")}</Badge>}</>}
       level={<LevelSel v={a.level} on={(l) => void act(people.patchAttr(a.id, { level: l }))} testId={"level-" + a.key} />}>
-      <Value label={a.label} value={a.value} onSave={async (v) => { const r = await act(people.patchAttr(a.id, { value: v })); if (r) onChanged(); return !!r }} />
+      {a.status === "candidate" && <div className="mb-1 flex flex-wrap items-center gap-1">
+        <span className="type-footnote text-attention">{t("people:shared.inferred")}</span>
+        <Button size="xs" variant="outline" onClick={async () => { if (await act(people.patchAttr(a.id, { status: "confirmed" }))) onChanged() }} data-fact-confirm>{t("common:action.confirm")}</Button>
+        <Button size="xs" variant="ghost" onClick={async () => { if (await act(people.patchAttr(a.id, { status: "stale" }))) onChanged() }} data-fact-reject>{t("people:shared.wrong")}</Button>
+      </div>}
+      <Value label={a.label} value={shown} onSave={async (v) => { const r = await act(people.patchAttr(a.id, { value: scoped ? JSON.stringify({ ...scoped, name: v }) : v })); if (r) onChanged(); return !!r }} />
     </Fact>
   )
 }

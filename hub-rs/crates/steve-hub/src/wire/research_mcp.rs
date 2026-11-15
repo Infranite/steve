@@ -449,6 +449,7 @@ pub fn descriptors() -> Vec<steve_node_api::ToolDescriptor> {
             description: t["description"].as_str().unwrap_or_default().to_string(),
             input_schema: t["inputSchema"].clone(),
             read_only: true,
+            annotations: serde_json::Value::Null,
         })
         .collect()
 }

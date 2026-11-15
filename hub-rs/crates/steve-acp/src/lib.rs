@@ -29,7 +29,10 @@ mod util;
 pub use adapters::{
     AdapterEntry, AdapterProperties, AdapterSpec, Declaration, ModeMap, StateDir, UsageFallback,
 };
-pub use config::{AcpConfig, default_claude_adapter, default_codex_adapter, npm_root};
+pub use config::{
+    AcpConfig, default_claude_adapter, default_claude_executable, default_codex_adapter,
+    is_executable_file, is_node_script, npm_root, resolve_builtin_adapters, which_in,
+};
 pub use errors::{is_dead_agent, is_transient};
 pub use oneshot::{Image, OneShotError};
 pub use rollout::find as codex_rollout;

@@ -104,7 +104,7 @@ impl ResearchConfig {
     /// The line to log at startup when the platform has no system sandbox.
     pub fn startup_note(&self) -> Option<&'static str> {
         (self.sandbox != SandboxMode::Off && !sandbox::available()).then_some(
-            "research: sandbox-exec not available; read-only relies on the adapter's mode and the guard",
+            "research: system sandbox not available; read-only relies on the adapter's mode and the guard",
         )
     }
 }

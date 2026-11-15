@@ -4,7 +4,6 @@ export default {
     save: "Save",
     cancel: "Cancel",
     delete: "Delete",
-    ok: "OK",
     close: "Close",
     retry: "Retry",
     edit: "Edit",
@@ -36,12 +35,9 @@ export default {
   },
   state: {
     loading: "Loading…",
-    error: "Error",
-    loadFailed: "Failed to load",
     saved: "Saved",
     empty: "Nothing yet",
     none: "None",
-    on: "On",
     off: "Off",
   },
   settings: {
@@ -55,8 +51,6 @@ export default {
   time: {
     justNow: "just now",
     justStarted: "just started",
-    secondsAgo_one: "{{count}} second ago",
-    secondsAgo_other: "{{count}} seconds ago",
     minutesAgo_one: "{{count}} minute ago",
     minutesAgo_other: "{{count}} minutes ago",
     hoursAgo_one: "{{count}} hour ago",

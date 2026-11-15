@@ -1163,7 +1163,7 @@ fn every_row_of_the_table() {
         (
             "ask low, recommended",
             ask(Some(ans("answer", 0.5, false)), Some("B"), false),
-            "B",
+            "ask.unsure",
         ),
         (
             "ask objected",
@@ -1173,7 +1173,7 @@ fn every_row_of_the_table() {
         (
             "ask lacks info, recommended",
             ask(Some(ans("ask_user", 0.2, true)), Some("B"), false),
-            "B",
+            "ask.unsure",
         ),
         (
             "ask nothing",

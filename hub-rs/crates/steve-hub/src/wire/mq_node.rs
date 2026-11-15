@@ -295,11 +295,7 @@ impl MqNode for MqNodes {
     }
 
     async fn reset(&self, s: &Staging, op: &str, to: &str) -> Step<String> {
-        let keep = s
-            .keep
-            .iter()
-            .filter_map(|k| RelPath::new(k).ok())
-            .collect();
+        let keep = s.keep.iter().filter_map(|k| RelPath::new(k).ok()).collect();
         match self
             .apply(
                 s,
@@ -1098,13 +1094,20 @@ mod tests {
         assert_eq!(t.remote(), tip);
         // a commit fed on its own branch (a host's merge queue, a batch's pull request)
         let st = t.staging();
-        assert_eq!(t.mq.reset(&st, "op_mqt_reset", &h4).await, Step::Done(h4.clone()));
         assert_eq!(
-            t.mq.push_branch(&st, "op_mqt_push", &h4, "steve/mq/main/MQ-9").await,
+            t.mq.reset(&st, "op_mqt_reset", &h4).await,
+            Step::Done(h4.clone())
+        );
+        assert_eq!(
+            t.mq.push_branch(&st, "op_mqt_push", &h4, "steve/mq/main/MQ-9")
+                .await,
             Pushed::Done
         );
         assert_eq!(
-            sh(&t.root.join("remotes/r.git"), &["rev-parse", "steve/mq/main/MQ-9"]),
+            sh(
+                &t.root.join("remotes/r.git"),
+                &["rev-parse", "steve/mq/main/MQ-9"]
+            ),
             h4
         );
         assert_eq!(t.remote(), tip, "main untouched");

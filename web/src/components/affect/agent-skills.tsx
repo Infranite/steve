@@ -9,10 +9,10 @@ import { useState, type KeyboardEvent, type ReactNode } from "react";
  * what it does, a chip for where it comes from and how often it ran.
  * Keyboard: ← / → move from filter to filter.
  *
- * Steve: the tile grid of affectUI's Agent / Skills screen, without its App Shell. Steve's Bots have tools, not
- * installable skills, and no per-tool switch: Discover, Install, New skill, the switch and the side panel (its two weeks
- * of runs, triggers and steps) have no data behind them in Steve and are left out. Colours come from Steve's tokens
- * (--aui-*, styles/affectui-theme.css); icons are passed in by the caller (lucide).
+ * Steve: the tile grid of affectUI's Agent / Skills screen, without its App Shell. Read-only tool
+ * catalogs omit Install, New skill and the detail panel; callers may supply a real per-tool action
+ * when an API supports it (for example a Bot's tool pin). Colours follow Steve's --aui-* tokens.
+ * Icons and action controls are supplied by the caller.
  */
 
 export type Skill = {
@@ -33,6 +33,8 @@ export type Skill = {
   uses?: string;
   /** Shown faded: the agent can use it but hasn't */
   idle?: boolean;
+  /** A real capability action, such as pinning a tool; absent on read-only cards. */
+  action?: ReactNode;
 };
 
 export type SkillLabels = { all: string; categories: string; empty: string };
@@ -113,7 +115,7 @@ function SkillMark({ skill, size = 20 }: { skill: Skill; size?: number }) {
 /** One skill as a calm card: icon and name, what it does, where it comes from and how often it ran */
 function SkillTile({ skill: s }: { skill: Skill }) {
   return (
-    <li className="ui-agk-card" data-off={s.idle || undefined}>
+    <li className="ui-agk-card" data-off={s.idle || undefined} data-action={s.action ? true : undefined}>
       <div className="ui-agk-card__main" data-skill={s.id}>
         <span className="ui-agk-card__top">
           <SkillMark skill={s} />
@@ -133,6 +135,7 @@ function SkillTile({ skill: s }: { skill: Skill }) {
           {s.uses && <span className="ui-agk-card__count ui-agk-num">{s.uses}</span>}
         </span>
       </div>
+      {s.action && <div className="ui-agk-card__action">{s.action}</div>}
     </li>
   );
 }
@@ -187,6 +190,8 @@ const css = /* css */ `
 
 /* Cards – calm: a hairline, small icon and name, two quiet lines, one chip */
 .ui-agk-card { position: relative; display: flex; min-width: 0; border-radius: var(--aui-radius-lg, 10px); background: var(--agk-card); box-shadow: var(--aui-shadow-card, inset 0 0 0 0.5px var(--agk-edge)); transition: box-shadow 180ms ease, background-color 180ms ease; }
+.ui-agk-card[data-action] { flex-direction: column; }
+.ui-agk-card__action { display: flex; justify-content: flex-end; padding: 0 12px 10px; }
 .ui-agk-card__main { display: grid; flex: 1; align-content: start; gap: 6px; min-width: 0; padding: 12px 14px; border-radius: inherit; text-align: left; }
 .ui-agk-card__main:focus-visible { outline-offset: -2px; }
 .ui-agk-card__top { display: flex; align-items: center; gap: 8px; min-width: 0; height: 24px; }

@@ -21,6 +21,7 @@ export function WorkCounts({ id }: { id: string }) {
     <Badge tone="warning">{t("device:attention")} {g.attention.length}</Badge>
     <Badge tone="info">{t("device:running", { n: g.running })}</Badge>
     <Badge tone="neutral">{t("device:starting", { n: g.starting })}</Badge>
+    {g.waiting > 0 && <Badge tone="warning">{t("shell:devices.waitingN", { count: g.waiting })}</Badge>}
     <span>{t("device:queue", { messages: g.queueMessages, sessions: g.queueSessions })}</span>
   </div>
 }
@@ -33,10 +34,11 @@ function WorkRow({ row }: { row: DeviceWork }) {
     <h3>{title}</h3>
     <div className="device-counts"><span>{t("device:bot", { name: s.bot_id ? st.bots[s.bot_id]?.n || s.bot_id : t("device:unknown") })}</span>
       {s.item_id && <span>{t("device:item", { id: s.item_id })}</span>}<span>{t("device:session", { id: s.id })}</span>
-      <Badge tone={s.status === "error" ? "danger" : s.status === "running" ? "info" : "neutral"}>{t(`device:state.${s.status}`)}</Badge>
+      <Badge tone={s.room ? "warning" : s.status === "error" ? "danger" : s.status === "running" ? "info" : "neutral"}>{s.room ? t("shell:devices.waitingTag") : t(`device:state.${s.status}`)}</Badge>
       {s.readonly && <span>{t("device:readonly")}</span>}
     </div>
     {item?.now && <p>{item.now}</p>}
+    {s.room && <p data-device-room={s.id}>{s.room.reason === "capacity" ? t("device:roomCapacity", { running: s.room.running, max: s.room.max }) : t("device:roomNode", { detail: s.room.detail || t("device:unknown") })}</p>}
     {row.decisions.map(d => <p key={d.id}>{d.question}</p>)}
     {s.busy && s.status !== "running" && <p>{t("device:busy")}</p>}
     {s.status === "error" && <p>{t("device:errorEvidence")}</p>}

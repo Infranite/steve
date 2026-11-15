@@ -150,7 +150,11 @@ fn executable(path: &Path, content: &str) {
 /// returns its `steve`.
 fn installer(root: &Path) -> PathBuf {
     let package = root.join("installer");
-    for path in [package.join("bin"), package.join("ops"), package.join("web/dist")] {
+    for path in [
+        package.join("bin"),
+        package.join("ops"),
+        package.join("web/dist"),
+    ] {
         fs::create_dir_all(path).unwrap();
     }
     let cli = package.join("bin/steve");
@@ -217,7 +221,9 @@ fn manager(bin: &Path, calls: &Path, running: bool) {
     let output = if running { present } else { absent };
     executable(
         &bin.join(name),
-        &format!("#!/bin/sh\n{permitted} || {{ printf 'changed\\n' >> {calls}; exit 97; }}\nprintf 'read\\n' >> {calls}\n{output}\n"),
+        &format!(
+            "#!/bin/sh\n{permitted} || {{ printf 'changed\\n' >> {calls}; exit 97; }}\nprintf 'read\\n' >> {calls}\n{output}\n"
+        ),
     );
 }
 
@@ -256,16 +262,36 @@ fn actual_setup_cancelled_at_a_prompt_persists_nothing() {
     pty.wait_prompt(&mut process.0, "监听地址 [0.0.0.0:8440]: ");
     pty.master.write_all(&[4]).unwrap();
     let status = pty.wait_exit(&mut process.0);
-    assert_eq!(status.code(), Some(1), "end of input is handled as cancellation");
+    assert_eq!(
+        status.code(),
+        Some(1),
+        "end of input is handled as cancellation"
+    );
     let after = pty.attributes();
-    assert_eq!(after.c_lflag, before.c_lflag, "terminal flags are unchanged");
-    assert_eq!(after.c_cc, before.c_cc, "terminal input controls are unchanged");
+    assert_eq!(
+        after.c_lflag, before.c_lflag,
+        "terminal flags are unchanged"
+    );
+    assert_eq!(
+        after.c_cc, before.c_cc,
+        "terminal input controls are unchanged"
+    );
     let output = String::from_utf8_lossy(&pty.output);
-    assert_eq!(output.matches("监听地址 [0.0.0.0:8440]: ").count(), 2, "{output}");
+    assert_eq!(
+        output.matches("监听地址 [0.0.0.0:8440]: ").count(),
+        2,
+        "{output}"
+    );
     assert!(output.contains("初始化已中断"), "{output}");
     assert!(!output.contains("OIDC"), "setup asks for no OIDC: {output}");
-    assert!(!output.contains("浏览器访问地址"), "setup asks for no browser address: {output}");
-    assert!(!output.contains('\x1b'), "plain output has no escape sequence: {output:?}");
+    assert!(
+        !output.contains("浏览器访问地址"),
+        "setup asks for no browser address: {output}"
+    );
+    assert!(
+        !output.contains('\x1b'),
+        "plain output has no escape sequence: {output:?}"
+    );
 
     let receipt_bytes = fs::read(install.join("setup.json")).unwrap();
     let receipt: Value = serde_json::from_slice(&receipt_bytes).unwrap();
@@ -325,29 +351,62 @@ fn actual_setup_cancelled_at_a_widget_exits_as_interrupted_and_restores_the_term
     // the first question is a list; one step down redraws it, then Ctrl-C, which the widget reads
     // as a key (no signal is sent while it has the terminal)
     pty.wait_prompt(&mut process.0, "↑↓ 选择 · 回车确认");
-    assert_eq!(pty.attributes().c_lflag & (libc::ICANON | libc::ECHO | libc::ISIG), 0);
+    assert_eq!(
+        pty.attributes().c_lflag & (libc::ICANON | libc::ECHO | libc::ISIG),
+        0
+    );
     pty.master.write_all(b"\x1b[B").unwrap();
     pty.wait_prompt(&mut process.0, "↑↓ 选择 · 回车确认");
     pty.master.write_all(&[3]).unwrap();
     let status = pty.wait_exit(&mut process.0);
-    assert_eq!(status.code(), Some(130), "{}", String::from_utf8_lossy(&pty.output));
+    assert_eq!(
+        status.code(),
+        Some(130),
+        "{}",
+        String::from_utf8_lossy(&pty.output)
+    );
     let after = pty.attributes();
     // PENDIN is the kernel's own note that input waits to be read again after canonical mode came back
     let flags = |attributes: &libc::termios| attributes.c_lflag & !libc::PENDIN;
-    assert_eq!(flags(&after), flags(&before), "terminal flags are unchanged");
-    assert_eq!(after.c_cc, before.c_cc, "terminal input controls are unchanged");
+    assert_eq!(
+        flags(&after),
+        flags(&before),
+        "terminal flags are unchanged"
+    );
+    assert_eq!(
+        after.c_cc, before.c_cc,
+        "terminal input controls are unchanged"
+    );
     let output = String::from_utf8_lossy(&pty.output);
     assert!(output.contains("谁可以连接这台 Hub？"), "{output}");
     assert!(output.contains("已取消"), "{output}");
-    assert!(!output.contains("steve:"), "the widget already said it: {output}");
-    let (hidden, shown) = (output.rfind("\x1b[?25l").unwrap(), output.rfind("\x1b[?25h").unwrap());
+    assert!(
+        !output.contains("steve:"),
+        "the widget already said it: {output}"
+    );
+    let (hidden, shown) = (
+        output.rfind("\x1b[?25l").unwrap(),
+        output.rfind("\x1b[?25h").unwrap(),
+    );
     assert!(hidden < shown, "the cursor is shown again: {output:?}");
 
-    let receipt: Value = serde_json::from_slice(&fs::read(install.join("setup.json")).unwrap()).unwrap();
+    let receipt: Value =
+        serde_json::from_slice(&fs::read(install.join("setup.json")).unwrap()).unwrap();
     assert_eq!(receipt["steps"], json!([]));
     assert!(receipt["environment"].is_null());
-    for relative in ["secrets", "steve.env", "signing", "services", "current", "data", "bin"] {
-        assert!(!install.join(relative).exists(), "cancelled setup wrote {relative}");
+    for relative in [
+        "secrets",
+        "steve.env",
+        "signing",
+        "services",
+        "current",
+        "data",
+        "bin",
+    ] {
+        assert!(
+            !install.join(relative).exists(),
+            "cancelled setup wrote {relative}"
+        );
     }
 }
 
@@ -456,13 +515,21 @@ fn health_server(body: &'static str) -> u16 {
 fn hub_status_names_the_version_the_running_hub_reports() {
     let temporary = tempfile::tempdir().unwrap();
     let root = temporary.path().canonicalize().unwrap();
-    let (account, bin, home) = (root.join("account"), root.join("bin"), root.join("account/.steve"));
+    let (account, bin, home) = (
+        root.join("account"),
+        root.join("bin"),
+        root.join("account/.steve"),
+    );
     for path in [&bin, &home] {
         fs::create_dir_all(path).unwrap();
     }
     manager(&bin, &root.join("manager-calls"), true);
     let port = health_server(r#"{"ok":true,"version":"9.8.7","build_commit":"c0ffee0123456789"}"#);
-    let silent = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    let silent = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
     let address = |port: u16| {
         private_fixture_file(
             &home.join("steve.env"),
@@ -471,7 +538,11 @@ fn hub_status_names_the_version_the_running_hub_reports() {
     };
     let command = |args: &[&str]| {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_steve"));
-        cmd.args(args).env_clear().env("STEVE_LANG", "zh-CN").env("HOME", &account).env("PATH", &bin);
+        cmd.args(args)
+            .env_clear()
+            .env("STEVE_LANG", "zh-CN")
+            .env("HOME", &account)
+            .env("PATH", &bin);
         cmd
     };
     address(port);
@@ -488,7 +559,10 @@ fn hub_status_names_the_version_the_running_hub_reports() {
     let report: Value = serde_json::from_str(&json).unwrap();
     assert_eq!(report["service"]["running"], true);
     assert!(report["running_build"].is_null());
-    assert_eq!(command(&["hub", "status"]).output().unwrap().stdout, json.as_bytes());
+    assert_eq!(
+        command(&["hub", "status"]).output().unwrap().stdout,
+        json.as_bytes()
+    );
     // a process that does not answer is not given the configured version
     address(silent);
     let (status, human) = terminal_output(&mut command(&["hub", "status"]));
@@ -503,7 +577,11 @@ fn hub_status_names_the_version_the_running_hub_reports() {
 fn another_versions_installation_is_refused_until_fresh_sets_it_aside() {
     let temporary = tempfile::tempdir().unwrap();
     let root = temporary.path().canonicalize().unwrap();
-    let (account, bin, home) = (root.join("account"), root.join("bin"), root.join("account/.steve"));
+    let (account, bin, home) = (
+        root.join("account"),
+        root.join("bin"),
+        root.join("account/.steve"),
+    );
     for directory in [&account, &bin, &home, &home.join("data")] {
         fs::create_dir_all(directory).unwrap();
         fs::set_permissions(directory, fs::Permissions::from_mode(0o700)).unwrap();
@@ -522,7 +600,10 @@ fn another_versions_installation_is_refused_until_fresh_sets_it_aside() {
     }))
     .unwrap();
     private_fixture_file(&home.join("setup.json"), &receipt);
-    private_fixture_file(&home.join("data/steve.sqlite3"), b"the database of the installation in use");
+    private_fixture_file(
+        &home.join("data/steve.sqlite3"),
+        b"the database of the installation in use",
+    );
     let before = installation_tree(&account);
     let setup = |args: &[&str]| {
         Command::new(&cli)
@@ -539,21 +620,39 @@ fn another_versions_installation_is_refused_until_fresh_sets_it_aside() {
             .unwrap()
     };
     let home_text = home.to_str().unwrap();
-    for args in [&["hub"][..], &["hub", "--listen", "127.0.0.1:8440"], &["node", "--home", home_text]] {
+    for args in [
+        &["hub"][..],
+        &["hub", "--listen", "127.0.0.1:8440"],
+        &["node", "--home", home_text],
+    ] {
         let refused = setup(args);
         let said = String::from_utf8_lossy(&refused.stderr);
         assert_eq!(refused.status.code(), Some(1), "{args:?}: {said}");
-        assert!(said.contains("Hub 1.2.2 · bbbbbbbb；不会覆盖"), "{args:?}: {said}");
+        assert!(
+            said.contains("Hub 1.2.2 · bbbbbbbb；不会覆盖"),
+            "{args:?}: {said}"
+        );
         assert!(said.contains("steve setup --fresh"), "{args:?}: {said}");
-        assert_eq!(installation_tree(&account), before, "{args:?} changed the installation");
+        assert_eq!(
+            installation_tree(&account),
+            before,
+            "{args:?} changed the installation"
+        );
         assert!(keys.join("vault.key").is_file(), "{args:?} moved the keys");
     }
-    assert!(!root.join("manager-calls").exists(), "a refusal asks the service manager nothing");
+    assert!(
+        !root.join("manager-calls").exists(),
+        "a refusal asks the service manager nothing"
+    );
 
     // --fresh: the directory is kept whole under another name, then setup starts over (and here
     // ends at its first question, with no one to answer)
     let fresh = setup(&["hub", "--fresh"]);
-    let said = format!("{}{}", String::from_utf8_lossy(&fresh.stdout), String::from_utf8_lossy(&fresh.stderr));
+    let said = format!(
+        "{}{}",
+        String::from_utf8_lossy(&fresh.stdout),
+        String::from_utf8_lossy(&fresh.stderr)
+    );
     assert_eq!(fresh.status.code(), Some(1), "{said}");
     assert!(said.contains("初始化已中断"), "{said}");
     let aside: Vec<PathBuf> = fs::read_dir(&account)
@@ -563,8 +662,14 @@ fn another_versions_installation_is_refused_until_fresh_sets_it_aside() {
         .collect();
     assert_eq!(aside.len(), 1, "{aside:?}");
     let name = aside[0].file_name().unwrap().to_str().unwrap();
-    assert!(name.starts_with(".steve.bak-2") && name.len() == ".steve.bak-".len() + 15, "{name}");
-    assert!(said.contains(aside[0].to_str().unwrap()), "setup says where the installation went: {said}");
+    assert!(
+        name.starts_with(".steve.bak-2") && name.len() == ".steve.bak-".len() + 15,
+        "{name}"
+    );
+    assert!(
+        said.contains(aside[0].to_str().unwrap()),
+        "setup says where the installation went: {said}"
+    );
     assert_eq!(fs::read(aside[0].join("setup.json")).unwrap(), receipt);
     let mut kept = installation_tree(&aside[0]);
     kept.remove(Path::new(".setup.lock"));
@@ -576,17 +681,33 @@ fn another_versions_installation_is_refused_until_fresh_sets_it_aside() {
     assert_eq!(kept, was, "nothing in the installation set aside changed");
     // its keys went with it under the same stamp, so the same key directory can be given again:
     // the next installation starts with an empty one, and the old data keeps the keys that open it
-    let keys_aside = root.join(format!("vault keys{}", name.strip_prefix(".steve").unwrap()));
-    assert_eq!(fs::read(keys_aside.join("vault.key")).unwrap(), b"the key that opens that database");
-    assert!(!keys.exists(), "the old keys are out of the new installation's way");
-    assert!(said.contains(keys_aside.to_str().unwrap()), "setup says where the keys went: {said}");
-    let started: Value = serde_json::from_slice(&fs::read(home.join("setup.json")).unwrap()).unwrap();
+    let keys_aside = root.join(format!(
+        "vault keys{}",
+        name.strip_prefix(".steve").unwrap()
+    ));
+    assert_eq!(
+        fs::read(keys_aside.join("vault.key")).unwrap(),
+        b"the key that opens that database"
+    );
+    assert!(
+        !keys.exists(),
+        "the old keys are out of the new installation's way"
+    );
+    assert!(
+        said.contains(keys_aside.to_str().unwrap()),
+        "setup says where the keys went: {said}"
+    );
+    let started: Value =
+        serde_json::from_slice(&fs::read(home.join("setup.json")).unwrap()).unwrap();
     assert_eq!(started["version"], "1.2.3");
     assert_eq!(started["steps"], json!([]));
     assert!(!home.join("data").exists());
     // the service was asked whether it runs; nothing was there to stop or remove
     let calls = fs::read_to_string(root.join("manager-calls")).unwrap();
-    assert!(!calls.is_empty() && calls.lines().all(|call| call == "read"), "{calls}");
+    assert!(
+        !calls.is_empty() && calls.lines().all(|call| call == "read"),
+        "{calls}"
+    );
 }
 
 #[derive(Debug, PartialEq, Eq)]

@@ -1,4 +1,7 @@
 export default {
+  "nodeOccupancy": "Node occupied/reserved: {{running}} / limit {{max}}; {{waiting}} waiting to start",
+  "roomCapacity": "Waiting for capacity: node occupied/reserved {{running}} / limit {{max}}",
+  "roomNode": "Waiting for Node: {{detail}}",
   "factsFailed": "Device facts could not be refreshed. Last snapshot retained; configuration disabled: {{error}}",
   "connection": "Connection",
   "accepting": "New work",

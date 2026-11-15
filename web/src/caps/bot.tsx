@@ -18,6 +18,7 @@ import { McpServerCard, McpServerDialog } from "./mcp"
 import { ImportDialog, SkillCard, SkillDialog, type Editing } from "./skills"
 import { AgentCardView, AgentDialog } from "./a2a"
 import { SteveServerCard } from "./steve"
+import { BotToolPins } from "./tool-pins"
 
 type Entry = { id: string; name: string; enabled?: boolean }
 
@@ -61,6 +62,7 @@ export function BotCaps({ k, permName, permSub, onPerm }: { k: string; permName:
   return (
     <div className="flex flex-col gap-8 anim-in" data-caps>
       <Section label={t("caps:steve.section")} note={t("caps:bot.steveNote")}><SteveServerCard counts={counts} /></Section>
+      <BotToolPins key={k} bot={k} caps={v} />
 
       <Section label={t("caps:mcp.section")} note={t("caps:bot.mcpNote")} data-mcp
         right={v && v.mcp.length > 0 ? <AddMenu kind="mcp" mine={v.mcp} onTake={(x) => void take("mcp", x)} onNew={() => setMcpEdit("new")} /> : undefined}>

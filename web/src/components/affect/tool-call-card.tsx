@@ -297,7 +297,7 @@ export function ToolCallGroup({
           <span className={running ? "ui-tclc-group__label ui-tclc__shine" : "ui-tclc-group__label"} data-text={title}>
             {title}
           </span>
-          {!running && failed > 0 && <span className="ui-tclc-group__failed">· {failed} failed</span>}
+          {!running && failed > 0 && <span className="ui-tclc-group__failed">· {t("core:transcript.stats.failed", { count: failed })}</span>}
           {ms != null && <span className="ui-tclc-group__time">· {formatMs(ms, running)}</span>}
         </span>
         <Chevron />

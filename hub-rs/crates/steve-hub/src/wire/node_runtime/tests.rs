@@ -41,6 +41,10 @@ async fn a_nodes_stop_reason_is_said_in_chinese() {
         // the very words, but another code: not ours to rephrase
         let other = ApiError::new(ErrorCode::Stale, NodeStop::HarnessGone.detail());
         assert_eq!(said(&other), "the harness is gone");
+        let changed = ApiError::new(ErrorCode::Conflict, "this resource's workspace was prepared otherwise");
+        assert!(workspace_binding_conflict(&changed));
+        assert_eq!(said(&changed), steve_i18n::with(steve_i18n::ZH_CN, || steve_i18n::t!("hub.node.workspace_conflict")));
+        assert!(!workspace_binding_conflict(&ApiError::new(ErrorCode::Internal, changed.safe_detail.clone())));
         let harness = ApiError::new(ErrorCode::Internal, "rate limited, try later");
         assert_eq!(said(&harness), "rate limited, try later");
     })

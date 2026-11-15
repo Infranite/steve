@@ -33,22 +33,16 @@ try {
     await settle(page)
     assert.match(await task.locator(".ui-tclc__body").innerText(), /参数[\s\S]*品牌研究员：扫描瑞典竞品品牌/)
 
-    /* the conversation: research folded open, merged lines with their briefs as chips, the failed call marked, a check at the end */
-    const steps = page.locator("[data-fixture-steps] [data-trail]")
-    await steps.waitFor()
-    const done = await lines(steps)
-    const want = [/^分诊就地研究/, /^读取了 3 个文件/, /^搜索了 2 次/, /^执行git log/, /^查知识库/, /^完成/]
-    assert.equal(done.length, want.length, JSON.stringify(done))
-    want.forEach((w, n) => assert.match(done[n], w, JSON.stringify(done)))
-    assert.equal(await steps.locator('[data-step-group="read"] [data-trail-chips] > span').count(), 3)
-    assert.equal(await steps.locator('[data-trail-marker="fail"]').count(), 1)
-    assert.equal(await steps.locator('[data-trail-end="end"]').count(), 1)
-    /* a merged line opens to each call */
-    await steps.locator('[data-step-group="read"] button').first().click()
-    assert.equal(await steps.locator('[data-step-group="read"] ol > li').count(), 3)
-
-    /* research under way and thinking streaming: present tense, a clock */
-    assert.match(await page.locator("[data-research-live]").textContent(), /正在工作.*正在搜索 · 第 2 次/)
+    /* Chat uses affectUI Thinking State; the agent transcript above still uses the detailed trail. */
+    const steps = page.locator("[data-fixture-steps] .ui-thinkc")
+    await steps.locator('[data-step-route]').waitFor()
+    assert.equal(await steps.getAttribute('data-status'), 'done')
+    assert.equal(await steps.locator('[data-step-group="read"] .ui-thinkc__source').count(), 3)
+    assert.equal(await steps.locator('[data-step-group="search"] .ui-thinkc__source').count(), 2)
+    assert.equal(await steps.locator('[data-step-status="error"]').count(), 1)
+    assert.equal(await steps.locator('[data-outcome="done"]').count(), 1)
+    assert.match(await steps.innerText(), /npm|git log/)
+    assert.match(await page.locator('[data-research-live]').innerText(), /正在处理[\s\S]*正在搜索/)
     assert.match(await page.locator("[data-fixture-think] [data-thinking]").textContent(), /正在思考\d+ 秒/)
 
     /* finished: thinking folds to its time, the trail closes with a check */

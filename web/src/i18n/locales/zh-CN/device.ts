@@ -1,4 +1,7 @@
 export default {
+  "nodeOccupancy": "节点占用/保留 {{running}} / 上限 {{max}}；等待开始 {{waiting}}",
+  "roomCapacity": "等待并发位置：节点占用/保留 {{running}} / 上限 {{max}}",
+  "roomNode": "等待节点：{{detail}}",
   "factsFailed": "设备事实读取失败；保留上次快照并禁用配置：{{error}}",
   "connection": "连接",
   "accepting": "接活",

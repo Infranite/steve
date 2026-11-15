@@ -118,6 +118,8 @@ pub(crate) fn info(cfg: &AcpConfig, id: &str, p: &Probe) -> AdapterInfo {
         }),
         session_error: p.session_error.clone(),
         update: None,
+        resume_command: spec.properties.resume_cli,
+        fork_command: spec.properties.fork_cli,
     }
 }
 

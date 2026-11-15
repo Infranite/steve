@@ -2,15 +2,16 @@
  * Pairing remains the owner Node API’s responsibility. */
 import { useEffect, useState } from "react"
 import { cn } from "cn"
-import { ChevronRightIcon, CpuIcon, FolderIcon, LinkIcon, MonitorSmartphoneIcon, PlusIcon, RefreshCwIcon, ServerIcon } from "lucide-react"
+import { ChevronRightIcon, CpuIcon, FolderIcon, LinkIcon, MonitorSmartphoneIcon, PlusIcon, RefreshCwIcon, ServerIcon, SquareTerminalIcon } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
-import { Panel, PanelFoot, PanelRow, Tag, type Tone } from "@/panel"
+import { Meter, Panel, PanelFoot, PanelRow, Tag, type Tone } from "@/panel"
 import { Spinner } from "@/components/ui/spinner"
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { st, toast, refresh, tm } from "@/store"
-import { api, type RDevice, type RNode, type RPairing, type RRuntime } from "@/api"
+import { api, SESSIONS_MAX, type RDevice, type RNode, type RPairing, type RRuntime } from "@/api"
 import { Input } from "@/components/ui/input"
+import { NumberField } from "@/components/ui/pickers"
 import { Textarea } from "@/components/ui/textarea"
 import { go, Page, Meta, Empty, closeSheet, openSheet } from "@/ui"
 import { OwnerChip } from "@/people/owner-chip"
@@ -18,7 +19,9 @@ import { VitalsSection, VitalsStrip } from "@/devices-vitals"
 import { NodeTags } from "@/devices-tags"
 import { CODE, TailcatSection } from "@/devices-tailcat"
 import { t, useT } from "@/i18n"
+import { hm } from "@/i18n/format"
 import { useHubAddress } from "@/hub-ui"
+import { homeTilde } from "@/resume"
 
 import { WorkCounts, DeviceWorkSection } from "@/devices-work"
 import { DeviceConfiguration } from "@/devices-config"
@@ -94,7 +97,7 @@ export function DevicesView() {
           title={<span className="inline-flex items-center gap-2">{hub.name}<Tag className="h-5 px-1.5">Hub</Tag></span>}
           sub={<span className="break-all">{hub.id} · {hub.node_id || t("device:unmapped")}</span>}
           right={<><Badge tone="neutral" data-hub-state>{hub.connected === false ? t("device:offline") : hub.node_id ? stateText(hub) : t("device:unknown")}</Badge><OwnerChip objectType="device" objectId={hub.id} bare /></>}>
-          <WorkCounts id={hub.id} />{hub.node_id && <VitalsStrip node={hub.node_id} />}
+          <WorkCounts id={hub.id} />{hub.running != null && hub.waiting != null && <RoomMeter running={hub.running} max={hub.max_sessions} waiting={hub.waiting} />}{hub.node_id && <VitalsStrip node={hub.node_id} />}
           <PanelFoot meta={<>{hub.node_id ? t("device:unknownEligibility") : t("device:unmapped")}</>}>
             <Button size="sm" variant="outline" onClick={() => go("#/devices/" + hub.id)} data-device-open>{t("shell:devices.details")}<ChevronRightIcon /></Button>
           </PanelFoot>
@@ -123,6 +126,10 @@ export function DevicesView() {
         {node.last_seen != null && <PanelRow title={t("shell:devices.lastConnected")}><span className="type-callout tabular-nums text-muted-foreground">{tm(node.last_seen)}</span></PanelRow>}
         {!node.linked && node.link_error && <PanelRow title={t("shell:devices.linkError")} sub={<span className="break-all whitespace-normal text-destructive" data-node-link-error>{tm(node.link_error.at)} · {node.link_error.error}</span>} />}
       </Panel> : <p role="status">{t("shell:devices.nodeNotVisible")}</p>}
+      {node && node.max_sessions != null && <Panel k="node-sessions" icon={<SquareTerminalIcon />} title={t("shell:devices.limit")} sub={t("shell:devices.limitSub", { count: node.max_sessions })}
+        right={<RoomMeter running={node.running} max={node.max_sessions} waiting={node.waiting} />}>
+        <div className="py-1.5"><SessionLimit max={node.max_sessions} editable={node.state !== "revoked"} save={(n) => api.nodeLimit(node.node_id, n).then(reload)} /></div>
+      </Panel>}
       {node && <NodeTags node={node.node_id} />}
       {node && <><p>{t("device:unknownEligibility")}</p><p>{t("device:unknownCapacity")}</p><VitalsSection node={node.node_id} /></>}
     </DialogContent></Dialog>}
@@ -142,7 +149,7 @@ export function DeviceView({ id }: { id: string }) {
     <div className="flex min-w-0 flex-col gap-4">
       {inventory.error && <p role="alert">{t("device:factsFailed", { error: inventory.error })}</p>}
       <Panel k="device-state" title={t("device:connection")} sub={inventory.error ? t("device:unknown") : st.down ? t("device:offline") : d.connected === true ? t("shell:devices.linked") : d.connected === false ? t("device:offline") : t("device:unmapped")}>
-        <div className="p-5"><p>{t("device:accepting")} · {d.can_configure ? stateText(d) : t("device:unknown")}</p><p>{t("device:unknownEligibility")}</p><WorkCounts id={d.id} /><p className="mt-3 text-muted-foreground">{t("device:unknownCapacity")}</p></div>
+        <div className="p-5"><p>{t("device:accepting")} · {d.can_configure ? stateText(d) : t("device:unknown")}</p><p>{t("device:unknownEligibility")}</p><WorkCounts id={d.id} /><p className="mt-3 text-muted-foreground" data-node-room>{d.running != null && d.waiting != null ? t("device:nodeOccupancy", { running: d.running, max: d.max_sessions, waiting: d.waiting }) : t("device:unknownCapacity")}</p></div>
       </Panel>
       <div className="device-layout"><DeviceWorkSection id={d.id} />{d.node_id ? <VitalsSection node={d.node_id} identity={`${d.name} · ${d.id}`} /> : <Panel title={t("device:monitor")} sub={t("device:unmapped")} />}</div>
       <details className="device-capabilities" data-capabilities><summary>{t("device:configuration")}</summary>
@@ -150,10 +157,10 @@ export function DeviceView({ id }: { id: string }) {
         {local ? <>
         <Panel k="runtimes" icon={<CpuIcon />} title={t("shell:devices.runtimes")} sub={t("shell:devices.runtimesSub", { ok: st.runtimes.filter((r) => r.ok).length, count: st.runtimes.length })}
           right={<Button size="xs" variant="ghost" className="text-muted-foreground" disabled={busy} onClick={() => void recheck()}>{busy ? <Spinner className="size-3" /> : <RefreshCwIcon />}{t("shell:devices.recheck")}</Button>}>
-          {st.runtimes.length ? <div className="py-1.5">{st.runtimes.map((r) => <div key={r.id} className="relative mx-2 flex items-start gap-4 rounded-lg px-3 py-3 [&+&]:before:absolute [&+&]:before:inset-x-3 [&+&]:before:top-0 [&+&]:before:h-px [&+&]:before:bg-border/60" data-runtime={r.id}>
+          {st.runtimes.length ? <div className="py-1.5">{[...st.runtimes].sort((a, b) => Number(b.ok) - Number(a.ok)).map((r) => <div key={r.id} className="relative mx-2 flex items-start gap-4 rounded-lg px-3 py-3 [&+&]:before:absolute [&+&]:before:inset-x-3 [&+&]:before:top-0 [&+&]:before:h-px [&+&]:before:bg-border/60" data-runtime={r.id}>
             <div className="min-w-0 flex-1">
               <div className="flex flex-wrap items-center gap-2 type-body text-foreground">{r.name}<span className="font-mono type-footnote text-muted-foreground">{r.version || r.adapter_version}</span><span className="type-footnote text-tertiary">{r.custom ? t("shell:devices.harness.custom") : t("shell:devices.harness.builtin")}</span></div>
-              <div className="mt-0.5 flex flex-col gap-0.5 type-footnote text-muted-foreground"><span className="truncate">{r.note} · <span className="font-mono">{r.path.replace(/^\/Users\/[^/]+/, "~")}</span></span>{!r.ok && r.error && <span className="text-attention" data-runtime-error>{r.error}</span>}<AdapterUpdate r={r} /><RuntimeChips r={r} /></div>
+              <div className="mt-0.5 flex flex-col gap-0.5 type-footnote text-muted-foreground"><span className="truncate">{r.note}{r.path ? <>{r.note ? " · " : ""}<span className="font-mono">{homeTilde(r.path)}</span></> : null}</span>{!r.ok && r.error && <span className="text-attention" data-runtime-error>{r.error}</span>}{r.auth && r.auth.length > 0 && <span data-runtime-auth>{t("shell:devices.harness.auth", { methods: r.auth.map((a) => a.name).join(t("shell:list.sep")) })}</span>}<AdapterUpdate r={r} /><RuntimeChips r={r} /></div>
             </div>
             <Tag tone={r.ok ? "ok" : "wait"}>{r.ok ? t("shell:devices.available") : t("shell:devices.unavailable")}</Tag>
           </div>)}</div> : <div className="px-5 py-4 type-callout text-muted-foreground">{t("shell:devices.noRuntimes")}</div>}
@@ -163,7 +170,7 @@ export function DeviceView({ id }: { id: string }) {
           <NodeTags node="local" />
         </> : <p>{t("device:unsupported")}</p>}
         <Panel k="projects" icon={<FolderIcon />} title={t("shell:devices.projectsTitle")}>
-          {dirs.map(p => <PanelRow key={p.id} title={p.name} sub={<span className="break-all font-mono">{p.path}</span>} onClick={() => go("#/projects/" + p.id)} />)}
+          {dirs.length ? dirs.map(p => <PanelRow key={p.id} title={p.name} sub={<span className="break-all font-mono">{homeTilde(p.path)}</span>} onClick={() => go("#/projects/" + p.id)} />) : <p className="p-5 text-muted-foreground">{t("shell:devices.noProjects")}</p>}
         </Panel>
         <p className="p-5">{d.os} · {d.version}</p>
         <Panel k="connection" icon={<LinkIcon />} title={t("shell:devices.connection")} sub={t("shell:devices.ownerSub")} right={<OwnerChip objectType="device" objectId={d.id} bare />} />
@@ -171,6 +178,38 @@ export function DeviceView({ id }: { id: string }) {
       <a className="underline" href="#/settings/hub">{t("device:hub")}</a>
     </div>
   </Page></div>
+}
+
+/** how full a device is: running against its limit, and what waits for room */
+function RoomMeter({ running, max, waiting }: { running?: number; max: number; waiting?: number }) {
+  const t = useT()
+  if (running == null || waiting == null) return <span>{t("device:unknownCapacity")}</span>
+  return <span className="flex flex-col items-end gap-1.5" data-running={running} data-max={max} data-waiting={waiting}>
+    <span className="type-footnote tabular-nums text-muted-foreground">{t("shell:devices.runningOf", { n: running, max })}{waiting > 0 && <span className="text-attention"> · {t("shell:devices.waitingN", { count: waiting })}</span>}</span>
+    <Meter value={max ? running / max : 0} tone={running >= max ? "wait" : "run"} className="w-20" />
+  </span>
+}
+
+/** Saved scheduling capacity, not a permission setting. Lowering it never interrupts existing turns. */
+function SessionLimit({ max, editable, save }: { max: number; editable: boolean; save: (n: number) => Promise<unknown> }) {
+  const t = useT()
+  const [n, setN] = useState<number | null>(max), [busy, setBusy] = useState(false)
+  useEffect(() => setN(max), [max])
+  const valid = n != null && Number.isInteger(n) && n >= 1 && n <= SESSIONS_MAX, dirty = valid && n !== max
+  const submit = async () => {
+    if (!dirty || busy || n == null) return
+    setBusy(true)
+    try { await save(n); toast(t("shell:devices.limitSaved", { count: n })) } catch (e) { toast((e as Error).message) } finally { setBusy(false) }
+  }
+  return <div data-session-limit={max}>
+    <PanelRow title={t("shell:devices.limit")} sub={t("shell:devices.limitRange", { max: SESSIONS_MAX })} className="flex-wrap gap-y-2">
+      {editable ? <form className="flex shrink-0 items-center gap-2" onSubmit={(e) => { e.preventDefault(); void submit() }}>
+        <NumberField size="sm" min={1} max={SESSIONS_MAX} step={1} value={n} onValueChange={setN} error={!valid ? t("shell:devices.limitInvalid", { max: SESSIONS_MAX }) : undefined} disabled={busy} aria-label={t("shell:devices.limit")} aria-invalid={!valid} className="w-32" data-session-limit-input />
+        <Button size="xs" type="submit" variant={dirty ? "default" : "outline"} disabled={!valid || busy} data-session-limit-save>{busy ? <Spinner className="size-3" /> : null}{t("common:action.save")}</Button>
+      </form> : <span className="type-callout tabular-nums text-muted-foreground">{max}</span>}
+    </PanelRow>
+    <p className="px-5 pb-3 type-footnote text-muted-foreground" data-limit-semantics>{t("shell:devices.limitEffect")}</p>
+  </div>
 }
 
 /** what a harness adapter can do and the permission modes it offers, as its probe said */
@@ -256,7 +295,7 @@ export function PairDialog() {
         {error && <p role="alert" className="type-callout text-destructive">{error}</p>}
         <Button className="justify-self-start self-start max-sm:w-full max-sm:justify-self-stretch" disabled={busy || !!pairing && now < pairing.expires} onClick={() => void act(async () => { setPairing(await api.createPairing()) })}>{t("shell:devices.createCode")}</Button>
         {pairing && <div className="anim-in space-y-2 rounded-xl bg-muted/60 p-4 type-callout">
-          {now < pairing.expires ? <><p className="text-muted-foreground">{t("shell:devices.codeExpires", { time: new Date(pairing.expires).toLocaleTimeString() })}</p><code className={CODE}>{pairing.code}</code></> : <p className="text-muted-foreground">{t("shell:devices.codeExpired")}</p>}
+          {now < pairing.expires ? <><p className="text-muted-foreground">{t("shell:devices.codeExpires", { time: hm(pairing.expires) })}</p><code className={CODE}>{pairing.code}</code></> : <p className="text-muted-foreground">{t("shell:devices.codeExpired")}</p>}
           {pairing.pin && <><p className="text-muted-foreground">{t("shell:devices.hubPin")}</p><code className={CODE}>{pairing.pin}</code></>}
           <p className="text-muted-foreground">{t("shell:devices.setupCommand")}</p><code className={CODE} data-setup-command>steve setup node --hub {hub}{pairing.pin ? ` --pin ${pairing.pin}` : ""}</code>
           <p className="text-muted-foreground">{t("shell:devices.pairCommand")}</p><code className={CODE} data-pair-command>steve-node pair {hub}{pairing.pin ? ` --pin ${pairing.pin}` : ""}</code>

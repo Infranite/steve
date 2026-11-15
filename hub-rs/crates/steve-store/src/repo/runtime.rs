@@ -351,6 +351,141 @@ pub struct CommandLease {
     /// An earlier send may have reached the Node (`maybe_sent` before this lease set it).
     pub maybe_sent: bool,
 }
+/// The Hub's own Node: how many sessions it runs at once is the Hub's `devices` row (`hub`); every
+/// other Node's is its own `nodes` row.
+pub const HUB_NODE: &str = "local";
+/// The device row of the Hub's machine.
+pub const HUB_DEVICE: &str = "hub";
+/// How many sessions a device runs at once unless its owner says otherwise.
+pub const SESSIONS_DEFAULT: i64 = 32;
+/// The most its owner may set (the least is 1).
+pub const SESSIONS_MAX: i64 = 256;
+
+/// A Node's room for turns, as the Hub enforces it: `running`, the turns it has sent the Node that
+/// have not finished (or may have reached it), against its owner's `max`; `waiting`, the turns
+/// waiting for room, never sent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub struct SessionRoom {
+    pub running: i64,
+    pub max: i64,
+    pub waiting: i64,
+}
+
+impl SessionRoom {
+    pub fn full(&self) -> bool {
+        self.running >= self.max
+    }
+}
+
+/// The owner's limit for `node`: [`HUB_NODE`] from the Hub's device row, any other from its Node
+/// row; [`SESSIONS_DEFAULT`] for one with no row (a Node not paired through the store, in tests).
+pub fn session_limit(c: &rusqlite::Connection, node: &str) -> Result<i64> {
+    let v: Option<i64> = if node == HUB_NODE {
+        c.query_row(
+            "SELECT max_sessions FROM devices WHERE id=?",
+            [HUB_DEVICE],
+            |r| r.get(0),
+        )
+        .optional()?
+    } else {
+        c.query_row(
+            "SELECT max_sessions FROM nodes WHERE node_id=?",
+            [node],
+            |r| r.get(0),
+        )
+        .optional()?
+    };
+    Ok(v.unwrap_or(SESSIONS_DEFAULT).clamp(1, SESSIONS_MAX))
+}
+
+/// A `start_turn` that occupies its Node: sent and not over, or maybe sent (an earlier send was
+/// uncertain, or it is leased now). One refused every time it went, or never sent, does not.
+const OCCUPYING: &str = "c.method='start_turn' AND (c.state IN ('accepted','active','unknown') OR (c.state='pending' AND c.maybe_sent=1))";
+/// A `start_turn` waiting for room: never sent (or refused before acceptance every time).
+const WAITING: &str = "c.method='start_turn' AND c.state='pending' AND c.maybe_sent=0 AND (c.dependency_operation IS NULL OR EXISTS(SELECT 1 FROM node_commands d WHERE d.operation_id=c.dependency_operation AND d.state='finished' AND json_extract(d.receipt,'$.success')=1))";
+
+/// `node`'s [`SessionRoom`].
+pub fn session_room(c: &rusqlite::Connection, node: &str) -> Result<SessionRoom> {
+    let max = session_limit(c, node)?;
+    let (running, waiting): (i64, i64) = c.query_row(
+        &format!("SELECT COALESCE(SUM({OCCUPYING}),0), COALESCE(SUM({WAITING}),0) FROM node_commands c WHERE c.node_id=? AND c.method='start_turn' AND c.state IN ('pending','accepted','active','unknown')"),
+        [node],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    Ok(SessionRoom {
+        running,
+        max,
+        waiting,
+    })
+}
+
+/// The live reason a never-sent turn waits. A Node refusal is kept verbatim, not guessed to be
+/// capacity: storage exhaustion, an offline link and a busy workspace are different resources.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SessionWait {
+    #[serde(flatten)]
+    pub room: SessionRoom,
+    pub reason: &'static str,
+    pub detail: Option<String>,
+}
+
+/// Sessions awaiting device room or retrying a definite Node refusal. Dependencies not yet ready
+/// are not mislabeled as capacity waits; uncertain sends remain occupying, never "queued".
+pub fn sessions_waiting_for_room(c: &rusqlite::Connection) -> Result<Vec<(String, SessionWait)>> {
+    let rows: Vec<(String, String, Option<String>)> = all(
+        c,
+        &format!(
+            "SELECT json_extract(c.request,'$.body.session'), c.node_id, json_extract(c.receipt,'$.last_error.safe_detail') FROM node_commands c WHERE {WAITING} ORDER BY c.created, c.rowid"
+        ),
+        [],
+        |r| {
+            Ok((
+                r.get::<_, Option<String>>(0)?.unwrap_or_default(),
+                r.get(1)?,
+                r.get(2)?,
+            ))
+        },
+    )?;
+    let mut rooms = std::collections::HashMap::<String, SessionRoom>::new();
+    let mut out = Vec::new();
+    for (session, node, detail) in rows {
+        let room = match rooms.get(&node) {
+            Some(r) => *r,
+            None => {
+                let r = session_room(c, &node)?;
+                rooms.insert(node.clone(), r);
+                r
+            }
+        };
+        if !session.is_empty() && (room.full() || detail.is_some()) {
+            out.push((
+                session,
+                SessionWait {
+                    room,
+                    reason: if room.full() { "capacity" } else { "node" },
+                    detail,
+                },
+            ));
+        }
+    }
+    Ok(out)
+}
+
+/// Commands actually awaiting device room, excluding turns whose preparation/open has not finished.
+pub fn waiting_commands(
+    c: &rusqlite::Connection,
+    node: &str,
+) -> Result<Vec<(String, Option<String>)>> {
+    all(
+        c,
+        &format!(
+            "SELECT c.operation_id, json_extract(c.request,'$.body.session') FROM node_commands c WHERE c.node_id=? AND {WAITING} AND json_extract(c.receipt,'$.waiting') IS NULL"
+        ),
+        [node],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )
+}
+
 /// Leases are worker fences, not execution identities. Only pending commands are sent. Accepted or
 /// unknown commands require operation lookup/reconciliation, not a fresh execution. A dependency
 /// must have a successful final receipt; the caller explicitly sets success via merge_receipt_in.
@@ -365,9 +500,12 @@ pub fn lease_command_in(
     if owner.is_empty() || until <= now {
         return Err(conflict("invalid lease"));
     }
+    // a turn never sent goes only while the Node has room by its owner's limit ([`session_room`]):
+    // the rest wait here, in order, and every other command passes them
+    let full = session_room(tx, node)?.full();
     let row: Option<(String,String,String,String,String,i64,bool)>=tx.query_row(
-        "SELECT c.operation_id,c.node_id,c.method,c.request,c.digest,c.lease_generation,c.maybe_sent FROM node_commands c WHERE c.node_id=? AND c.state='pending' AND c.retry_at<=? AND (c.lease_until IS NULL OR c.lease_until<=?) AND (c.dependency_operation IS NULL OR EXISTS(SELECT 1 FROM node_commands d WHERE d.operation_id=c.dependency_operation AND d.state='finished' AND json_extract(d.receipt,'$.success')=1)) ORDER BY c.created,c.rowid LIMIT 1",
-        params![node,now,now],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?))).optional()?;
+        &format!("SELECT c.operation_id,c.node_id,c.method,c.request,c.digest,c.lease_generation,c.maybe_sent FROM node_commands c WHERE c.node_id=? AND c.state='pending' AND c.retry_at<=? AND (c.lease_until IS NULL OR c.lease_until<=?) AND (c.dependency_operation IS NULL OR EXISTS(SELECT 1 FROM node_commands d WHERE d.operation_id=c.dependency_operation AND d.state='finished' AND json_extract(d.receipt,'$.success')=1)) AND NOT (?4 AND {WAITING}) ORDER BY c.created,c.rowid LIMIT 1"),
+        params![node,now,now,full],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?))).optional()?;
     let Some((operation, node, method, request, digest, generation, maybe_sent)) = row else {
         return Ok(None);
     };

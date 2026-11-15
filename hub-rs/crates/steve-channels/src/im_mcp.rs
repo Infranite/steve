@@ -6,8 +6,8 @@
 //! It is context only: nothing is stored, no rule, flow or action runs. It does not end the turn.
 //!
 //! Serving it is the Hub's (`mcp_extra`), like the other modules' tools: list [`tools`] and route
-//! names for which [`handles`] is true to [`call`]. The description and the errors go through
-//! `t!` (the tool endpoint runs in zh-CN); the messages are as they were written.
+//! names for which [`handles`] is true to [`call`]. Tool descriptions are always English; errors follow the request language and messages
+//! remain as they were written.
 
 use chrono::TimeZone;
 use serde_json::{Value, json};
@@ -25,24 +25,26 @@ pub const LINE_MAX: usize = 2_000;
 /// Candidates named when a space name is ambiguous or unknown.
 const CANDIDATES: usize = 5;
 
-/// The tool definitions, `[{name, description, inputSchema}]` (built in the request's language).
+/// Model-facing definitions stay English, independent of the user interface language.
 pub fn tools() -> Vec<Value> {
-    vec![json!({
-        "name": READ,
-        "description": steve_i18n::t!("channels.im_read.description"),
-        "inputSchema": {
-            "$schema": "http://json-schema.org/draft-07/schema#",
-            "type": "object",
-            "properties": {
-                "space": { "type": "string", "description": steve_i18n::t!("channels.im_read.arg.space") },
-                "from": { "type": ["string", "number"], "description": steve_i18n::t!("channels.im_read.arg.from") },
-                "to": { "type": ["string", "number"], "description": steve_i18n::t!("channels.im_read.arg.to") },
-                "limit": { "type": "number", "description": steve_i18n::t!("channels.im_read.arg.limit", max = history::MAX_LIMIT, n = history::DEFAULT_LIMIT) }
+    steve_i18n::with(steve_i18n::EN, || {
+        vec![json!({
+            "name": READ,
+            "description": steve_i18n::t!("channels.im_read.description"),
+            "inputSchema": {
+                "$schema": "http://json-schema.org/draft-07/schema#",
+                "type": "object",
+                "properties": {
+                    "space": { "type": "string", "description": steve_i18n::t!("channels.im_read.arg.space") },
+                    "from": { "type": ["string", "number"], "description": steve_i18n::t!("channels.im_read.arg.from") },
+                    "to": { "type": ["string", "number"], "description": steve_i18n::t!("channels.im_read.arg.to") },
+                    "limit": { "type": "number", "description": steve_i18n::t!("channels.im_read.arg.limit", max = history::MAX_LIMIT, n = history::DEFAULT_LIMIT) }
+                },
+                "required": ["space"]
             },
-            "required": ["space"]
-        },
-        "annotations": { "readOnlyHint": true, "destructiveHint": false, "openWorldHint": true }
-    })]
+            "annotations": { "readOnlyHint": true, "destructiveHint": false, "openWorldHint": true }
+        })]
+    })
 }
 
 /// Is `name` this module's tool?

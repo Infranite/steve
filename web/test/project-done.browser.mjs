@@ -35,6 +35,19 @@ try {
       await page.getByRole("option", { name: "本机发布上线" }).click()
       await page.waitForFunction(() => document.querySelector("[data-proj-done]")?.textContent?.includes("本机发布上线"))
       assert.deepEqual((await page.evaluate(() => window.__calls)).at(-1).body, { release: { kind: "script", cmd: "/Users/example/.steve/current/ops/release.sh" } })
+      // A git worktree project with release=null still exposes Done When so it is never trapped in local-only mode
+      await page.evaluate(async () => {
+        const { st } = await import("/src/store.ts")
+        st.projects = [{ ...st.projects[0], release: null, updated: Date.now() }]
+      })
+      await page.locator('[data-seg="overview"]').click()
+      await page.locator('[data-seg="settings"]').click()
+      await row.waitFor()
+      assert.match(await row.innerText(), /没有配置发布动作/)
+      await row.locator('[data-select="proj-done"]').click()
+      await page.getByRole("option", { name: "PR 合并", exact: true }).click()
+      await page.waitForFunction(() => document.querySelector("[data-proj-done]")?.textContent?.includes("核对远端后自动收尾"))
+      assert.deepEqual((await page.evaluate(() => window.__calls)).at(-1).body, { release: { kind: "script", cmd: "", done_when: "merge" } })
     }
     await page.close()
   }

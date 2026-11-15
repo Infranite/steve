@@ -1,7 +1,6 @@
 //! MCP tools of the knowledge module for agents in a session:
 //! `steve_knowledge_search` and `steve_knowledge_read`. Results are filtered for the session's
-//! workspace and the user its item was raised by ([`crate::context::item_viewer`], the same viewer as
-//! the opening prompt); `never` is never returned. (`steve_remember` belongs to K3.)
+//! workspace and authenticated session principal (the integrator supplies [`McpCx::user`]); `never` is never returned. (`steve_remember` belongs to K3.)
 //!
 //! Serving them is steve-mcp's (integrator), like the contacts tools: list [`tools`] after the Steve
 //! tools and route names for which [`handles`] is true to [`call`] with the session's [`McpCx`].
@@ -15,7 +14,7 @@ use steve_modules::contacts::mcp::McpCx;
 use steve_modules::{ApiError, ApiResult, Modules};
 use steve_store::base::{Level, Viewer};
 
-use crate::context::{item_viewer, query_text};
+use crate::context::query_text;
 use crate::retrieve::{Hit, Purpose, Query, SEMANTIC_DOWN_NOTE, record_use, retrieve_all};
 use crate::service::own_doc;
 use crate::state::Knowledge;
@@ -178,14 +177,10 @@ fn validate(tool: &str, args: &Value, fields: &[(&str, bool, &str)]) -> Result<(
     }
 }
 
-/// The session's viewer: the user of its item (as for the opening prompt); without an item the user
-/// steve-mcp resolved; without either, only what the whole workspace may see.
+/// The session principal resolved by the integrator, not a guess from the item's audit. Service
+/// callers see workspace objects; personal callers keep only their own and their authorized scopes.
 pub fn session_viewer(m: &Modules, cx: &McpCx) -> ApiResult<Viewer> {
-    m.store.reader(|c| match cx.item_id.as_deref() {
-        Some(item) => item_viewer(c, &cx.ws, item),
-        None if !cx.user.is_empty() => Ok(Viewer::load(c, &cx.ws, &cx.user)?),
-        None => Ok(Viewer::bare(&cx.ws, "")),
-    })
+    m.store.reader(|c| Ok(Viewer::load(c, &cx.ws, &cx.user)?))
 }
 
 /// One search result: `[K<n>] <title> · <label> · level: <code>`, the document id when there

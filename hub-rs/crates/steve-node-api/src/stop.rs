@@ -40,8 +40,12 @@ pub enum NodeStop {
     ResearchBudget,
 }
 
+/// Maximum single NDJSON message size accepted from a harness adapter on stdio.
+pub const HARNESS_MAX_FRAME_BYTES: usize = 16 << 20;
+
 const STALLED_HEAD: &str = "the node took none of the harness's output for ";
 const STALLED_TAIL: &str = " s (its journal or disk is stuck)";
+const LEGACY_FRAME_TOO_LARGE: &str = "the harness sent a message larger than 1 MiB";
 
 impl NodeStop {
     pub fn code(self) -> ErrorCode {
@@ -63,7 +67,7 @@ impl NodeStop {
             JobDeadline => "past the job's deadline",
             HubUnreachable => "the Hub was unreachable past the lease",
             OutputLimit => "the output limit was reached",
-            FrameTooLarge => "the harness sent a message larger than 1 MiB",
+            FrameTooLarge => "the harness sent a message larger than 16 MiB",
             IngressStalled { secs } => return format!("{STALLED_HEAD}{secs}{STALLED_TAIL}"),
             JournalBudget => "journal data budget reached",
             JournalFails => "the node's journal fails",
@@ -92,6 +96,8 @@ impl NodeStop {
             IngressStalled {
                 secs: secs.parse().ok()?,
             }
+        } else if d == LEGACY_FRAME_TOO_LARGE {
+            FrameTooLarge
         } else {
             [
                 Deadline,
@@ -157,6 +163,13 @@ mod tests {
                 "the node took none of the harness's output for 60 s (its journal or disk is stuck)"
             )),
             Some(NodeStop::IngressStalled { secs: 60 })
+        );
+        assert_eq!(
+            NodeStop::of(&ApiError::new(
+                ErrorCode::Exhausted,
+                "the harness sent a message larger than 1 MiB"
+            )),
+            Some(NodeStop::FrameTooLarge)
         );
         assert_eq!(
             NodeStop::of(&ApiError::new(ErrorCode::Internal, "boom")),

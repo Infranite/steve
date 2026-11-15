@@ -1,7 +1,7 @@
 import { AgentDetailPanel, hasAgentTree, History, Notices, ROOT_STATUS, TeamSteps, useAgentTree, useSelectedNode, WorkflowButtons } from "@/agent-tree-view"
 import { itemState, type ItemState } from "@/item-state"
 import { clip } from "@/thread/topics"
-import { itemDisplayState, itemDisplayStatus } from "@/item-workflow-relation"
+import { isAttachedWorkflowChild, isWorkflowChild, itemDisplayState, itemDisplayStatus, partitionSubtasks } from "@/item-workflow-relation"
 import { laneOf } from "@/item-lanes"
 import { DependencyWaitPanel } from "@/dependency-wait-panel"
 import { ItemDebugDialog } from "@/debug-panel"
@@ -35,9 +35,9 @@ import { AnnRefs } from "@/annotate"
 import { OutDialog, OutList, type OutOpen } from "@/item-outputs"
 import { ItemPeopleProp } from "@/people/item-people"
 import { QueuedComment, queuedComments, queueNote, QueueStrip } from "@/queue"
-import { NativeIdLine } from "@/resume"
+import { homeTilde, NativeIdLine } from "@/resume"
 import { ItemStatsRows, SessionStats } from "@/stats/drill"
-import { ACC, accKey, closedSt, accOf, active, addDep, archive, bulk, closeRel, deleteItem, depsOpen, doFork, hm, importSessions, interrupt, it, itemThread, link, loadEvents, loadItem, loadLocalSessions, markDone, newItem, patchItem, pendingCards, memCards, reassign, rmDep, saveGoal, sessPatch, sessRemove, sessSend, setAcc, setSt, setTags, setKind, kindOf, kindTags, isKind, DOMAIN_CATS, snoozed, st, stageOf, star, supp, tag, tagCatLabel, tagDesc, tagLabel, threadFollow, tm, toast, unsnooze, WT, type Item, type PlanRound, type Reply } from "@/store"
+import { ACC, accKey, closedSt, accOf, active, addDep, archive, bulk, closeRel, deleteItem, depsOpen, doFork, hm, importSessions, interrupt, it, itemThread, link, loadEvents, loadItem, loadLocalSessions, markDone, newItem, patchItem, pendingCards, memCards, reassign, rmDep, runtimeName, saveGoal, sessPatch, sessRemove, sessSend, setAcc, setSt, setTags, setKind, kindOf, kindTags, isKind, DOMAIN_CATS, snoozed, st, stageOf, star, supp, tag, tagCatLabel, tagDesc, tagLabel, threadFollow, tm, toast, unsnooze, WT, type Item, type PlanRound, type Reply } from "@/store"
 import { BotAvatar, BotName, Chips, closeSheet, Composer, DecisionCard, Empty, go, Group, ItemNo, KindTag, Meta, openSheet, Page, RelNote, ReplyBlock, Row, RunBar, SectionLabel, Segmented, SessionBlock, Status, StatusDot, Tags, ThemeSwitch, Transcript, type ComposerHandle, Chevron, Panel, Section, Tile, PANEL_W } from "@/ui"
 import { ChoiceCards, Count, dueLabel, ItemRow, ProjectChip, Select, selected } from "@/view-shared"
 import { YoloItemModes, YoloItemSwitch, YoloMark } from "@/yolo/badges"
@@ -47,7 +47,7 @@ import { cn } from "cn"
 import { lang, t as tr, useT } from "@/i18n"
 import { dayHeading, hm as clock, nearTime, num } from "@/i18n/format"
 import { ArchiveIcon, BanIcon, BookOpenIcon, BotIcon, CalendarIcon, ChartNoAxesColumnIcon, CheckIcon, ChevronRightIcon, CircleAlertIcon, CircleCheckIcon, CircleDashedIcon, CircleHelpIcon, ContactRoundIcon, CopyIcon, DownloadIcon, FolderIcon, GitPullRequestIcon, HourglassIcon, KeyRoundIcon, LinkIcon, ListIcon, LoaderCircleIcon, LockIcon, MailIcon, MessageSquareIcon, MessagesSquareIcon, MinusIcon, MoreHorizontalIcon, PanelRightIcon, PauseIcon, PencilIcon, PlayIcon, PlugIcon, PlusIcon, RadioIcon, RotateCcwIcon, SearchIcon, ServerIcon, SettingsIcon, SquareIcon, SquareTerminalIcon, StarIcon, TrashIcon, UserRoundIcon, WorkflowIcon, XIcon, ZapIcon, BlocksIcon } from "lucide-react"
-import { Fragment, lazy, Suspense, useEffect, useRef, useState, type ReactNode } from "react"
+import { Fragment, lazy, Suspense, useEffect, useRef, useState, type MouseEvent, type ReactNode } from "react"
 export { ChoiceCards,ItemRowExport,Select } from "@/view-shared"
 let selecting = false
 const RelationGraph = lazyView(() => import("@/graph").then((m) => ({ default: m.RelationGraph })))
@@ -117,7 +117,7 @@ const sortLabel = (k: ItemsSort) => tr(({ updated: "views:items.sortUpdated", du
 /** finished and dropped items shown before “显示全部”; the rest are a click away */
 const CLOSED_SHOWN = 8
 /** a filter select in the toolbar: compact, and muted until it narrows the list */
-const FILTER = (set: boolean) => cn("h-7 px-2 type-callout [&_.ui-selc__chevron]:opacity-60", set ? "bg-accent font-medium! text-foreground" : "text-muted-foreground"); const openGroups = new Set<string>()
+const FILTER = (set: boolean) => cn("h-7 px-2 type-callout [&_.ui-selc__chevron]:opacity-60", set ? "bg-accent font-medium! text-foreground" : "text-muted-foreground"); const openGroups = new Set<string>(), collapsedTrees = new Set<string>(), expandedSettled = new Set<string>()
 /** the list, filtered: the stats page's drill-downs land here (“在事项页查看”) */
 export const showItems = (f: "全部" | "等你" | "进行中", project?: string, bot?: string) => { filt = f === "等你" ? "wait" : f === "进行中" ? "run" : "all"; projF = project ?? "all"; botF = bot ?? "all"; tagF = "all"; kindF = "all"; q = ""; itemsView = "list"; go("#/items") }
 export const showTag = (id: string) => { if (isKind(tag(id))) kindF = id; else tagF = id; filt = "all"; itemsView = "list"; go("#/items") }
@@ -127,27 +127,110 @@ export function ItemsView() {
   const [, f] = useState(0); const r = () => f((x) => x + 1)
   const [confirmDel, setConfirmDel] = useState<string | null>(null)
   const arch = filt === "arch"
-  /* the counts above, the 等你 / 进行中 filters, the board's columns and the running-status pill sort items one way (item-lanes.ts) */
-  const open = st.items.filter((i) => !i.arch).map((i) => laneOf(itemDisplayState(i)))
+  /* the counts above, the 等你 / 进行中 filters, the board's columns and the running-status pill sort root items one way (item-lanes.ts), while nesting workflow children under their parent */
+  const unarchived = st.items.filter((i) => !i.arch)
+  const open = unarchived.filter((i) => !isAttachedWorkflowChild(i, unarchived)).map((i) => laneOf(itemDisplayState(i)))
+  const subRunning = unarchived.filter((i) => isAttachedWorkflowChild(i, unarchived) && laneOf(itemDisplayState(i)) === "running").length
+  const childrenByParent = new Map<string, Item[]>()
+  for (const c of st.items) {
+    if ((arch ? c.arch : !c.arch) && isWorkflowChild(c)) {
+      const pid = c.parent!.item!
+      const arr = childrenByParent.get(pid) ?? []
+      arr.push(c)
+      childrenByParent.set(pid, arr)
+    }
+  }
+  const effectiveUpdated = (i: Item) => {
+    const kids = childrenByParent.get(i.id)
+    if (!kids?.length) return i.updated
+    let max = i.updated
+    for (const c of kids) if (c.updated > max) max = c.updated
+    return max
+  }
   let xs = st.items.filter((i) => (arch ? i.arch : !i.arch) && (arch || filt === "all" || (filt === "wait" && laneOf(itemDisplayState(i)) === "needs") || (filt === "run" && laneOf(itemDisplayState(i)) === "running") || (filt === "star" && i.star))
     && (botF === "all" || i.b === botF) && (tagF === "all" || !!i.tags?.includes(tagF)) && (kindF === "all" || !!i.tags?.includes(kindF)) && (projF === "all" || (projF === "none" ? !i.project : i.project === projF)) && (!q || i.t.includes(q) || i.id.toLowerCase().includes(q.toLowerCase())))
-  if (sortBy === "due") xs = [...xs].sort((a, b) => (a.due ? 0 : 1) - (b.due ? 0 : 1))
-  if (sortBy === "pri") xs = [...xs].sort((a, b) => PRI_ORDER[a.pri ?? "中"] - PRI_ORDER[b.pri ?? "中"])
-  if (sortBy === "no") xs = [...xs].sort((a, b) => +b.id.split("-")[1] - +a.id.split("-")[1])
+  const narrowed = !!q || botF !== "all" || tagF !== "all" || kindF !== "all" || projF !== "all" || filt === "star"
+  const attachPool = arch ? st.items.filter((i) => i.arch) : narrowed ? xs : unarchived
+  let listRoots = xs.filter((i) => !isAttachedWorkflowChild(i, attachPool))
+  if (sortBy === "updated") listRoots = [...listRoots].sort((a, b) => effectiveUpdated(b) - effectiveUpdated(a))
+  if (sortBy === "due") listRoots = [...listRoots].sort((a, b) => (a.due ? 0 : 1) - (b.due ? 0 : 1))
+  if (sortBy === "pri") listRoots = [...listRoots].sort((a, b) => PRI_ORDER[a.pri ?? "中"] - PRI_ORDER[b.pri ?? "中"])
+  if (sortBy === "no") listRoots = [...listRoots].sort((a, b) => +b.id.split("-")[1] - +a.id.split("-")[1])
   const groups: [Item["st"], string][] = [["wait", t("views:items.groupWait")], ["prop", t("views:items.groupProp")], ["run", t("views:items.groupRun")], ["block", t("views:items.groupBlock")], ["pause", t("views:items.groupPause")], ["done", t("views:items.groupDone")], ["fail", t("views:items.groupFail")], ["drop", t("views:items.groupDrop")]]
   const seg = <Segmented value={itemsView} onChange={(v) => { itemsView = v; selecting = false; selected.clear(); r() }} options={[["list", t("views:items.viewList")], ["board", t("views:items.viewBoard")], ["collab", t("views:items.viewCollab")]] as const} />
   const pick = selecting ? (id: string) => () => { selected.has(id) ? selected.delete(id) : selected.add(id); r() } : () => undefined
   const ids = [...selected]
   const done = () => { selected.clear(); selecting = false; r() }
   /* the project and bot columns only when the visible items differ in them */
-  const multiProj = new Set(xs.map((i) => i.project).filter(Boolean)).size > 1, multiBot = new Set(xs.map((i) => i.b).filter(Boolean)).size > 1
-  const rowOf = (i: Item) => arch
-    ? <div key={i.id} className="flex items-center"><div className="min-w-0 flex-1"><ItemRow i={i} proj={multiProj} bot={multiBot} /></div>
+  const multiProj = new Set(listRoots.map((i) => i.project).filter(Boolean)).size > 1, multiBot = new Set(listRoots.map((i) => i.b).filter(Boolean)).size > 1
+  const rowOf = (i: Item) => {
+    if (arch) {
+      return <div key={i.id} className="flex items-center"><div className="min-w-0 flex-1"><ItemRow i={i} proj={multiProj} bot={multiBot} /></div>
         <Button size="xs" variant="ghost" className="text-muted-foreground" onClick={() => archive([i.id], false)} data-unarchive={i.id}>{t("views:items.restore")}</Button>
         <Button size="xs" variant="ghost" className="text-destructive" onClick={() => setConfirmDel(i.id)} data-delete-item={i.id}>{t("common:action.delete")}</Button></div>
-    : <ItemRow key={i.id} i={i} pick={pick(i.id)} proj={multiProj} bot={multiBot} />
+    }
+    const kids = childrenByParent.get(i.id)
+    if (!kids?.length) return <ItemRow key={i.id} i={i} pick={pick(i.id)} proj={multiProj} bot={multiBot} />
+    const sub = partitionSubtasks(i, kids)
+    const parentClosed = closedSt(i.st)
+    const treeOpen = parentClosed ? expandedSettled.has(i.id) : !collapsedTrees.has(i.id)
+    const settledOpen = expandedSettled.has(i.id)
+    const failLive = sub.live.filter((c) => itemDisplayStatus(c) === "fail").length
+    const runLive = sub.live.length - failLive
+    const badgeLabel = failLive > 0 && runLive === 0
+      ? (sub.doneCount > 0 ? t("views:items.subtasksFailedDone", { failed: failLive, done: sub.doneCount }) : t("views:items.subtasksFailed", { count: failLive }))
+      : sub.live.length > 0
+        ? (sub.doneCount > 0 ? t("views:items.subtasksLive", { live: sub.live.length, done: sub.doneCount }) : t("views:items.subtasksRunning", { count: sub.live.length }))
+        : t("views:items.subtasksDone", { count: sub.doneCount || sub.total })
+    const toggleTree = (e: MouseEvent) => {
+      e.stopPropagation()
+      if (parentClosed) {
+        expandedSettled.has(i.id) ? expandedSettled.delete(i.id) : expandedSettled.add(i.id)
+      } else {
+        collapsedTrees.has(i.id) ? collapsedTrees.delete(i.id) : collapsedTrees.add(i.id)
+      }
+      r()
+    }
+    const badge = (
+      <button type="button" onClick={toggleTree} data-subtasks-toggle={i.id}
+        className={cn("inline-flex shrink-0 items-center gap-1 rounded-md px-1.5 py-0.5 type-footnote font-normal tabular-nums transition-colors", failLive > 0 ? "bg-destructive/12 text-destructive hover:bg-destructive/18" : "bg-muted/70 text-muted-foreground hover:bg-muted hover:text-foreground")}>
+        <WorkflowIcon className="size-3 shrink-0 opacity-75" />
+        <span className="max-w-36 truncate">{badgeLabel}</span>
+        <ChevronRightIcon className={cn("size-3 shrink-0 transition-transform duration-150", treeOpen && "rotate-90")} />
+      </button>
+    )
+    const showTreeBody = treeOpen && (sub.live.length > 0 || sub.settled.length > 0)
+    const settledText = sub.doneCount > 0 && sub.retiredCount > 0
+      ? t("views:items.settledMixed", { done: sub.doneCount, tries: sub.retiredCount })
+      : sub.doneCount > 0
+        ? t("views:items.settledDone", { count: sub.doneCount })
+        : t("views:items.settledTries", { count: sub.retiredCount })
+    return (
+      <div key={i.id} data-item-tree={i.id} className="flex flex-col">
+        <ItemRow i={i} pick={pick(i.id)} proj={multiProj} bot={multiBot} badge={badge} />
+        {showTreeBody && (
+          <div data-subtasks-of={i.id} className="ml-5 mb-1.5 flex flex-col gap-0.5 border-l border-border/75 pl-2.5">
+            {sub.live.map((c) => <ItemRow key={c.id} i={c} pick={pick(c.id)} proj={false} bot={true} nested />)}
+            {!parentClosed && sub.settled.length > 0 && (
+              <div className="flex flex-col">
+                <button type="button" onClick={(e) => { e.stopPropagation(); settledOpen ? expandedSettled.delete(i.id) : expandedSettled.add(i.id); r() }} data-subtasks-more={i.id}
+                  className="relative flex max-w-full self-start items-center gap-1 rounded-md px-2 py-1 text-left type-footnote text-muted-foreground transition-colors hover:bg-accent hover:text-foreground before:pointer-events-none before:absolute before:-left-2.5 before:top-1/2 before:w-2.5 before:border-t before:border-border/75">
+                  <ChevronRightIcon className={cn("size-3 shrink-0 transition-transform duration-150", settledOpen && "rotate-90")} />
+                  <span className="truncate">{settledOpen ? t("views:items.hideSettled") : settledText}</span>
+                </button>
+                {settledOpen && sub.settled.map((c) => <ItemRow key={c.id} i={c} pick={pick(c.id)} proj={false} bot={true} nested />)}
+              </div>
+            )}
+            {parentClosed && sub.settled.map((c) => <ItemRow key={c.id} i={c} pick={pick(c.id)} proj={false} bot={true} nested />)}
+          </div>
+        )}
+      </div>
+    )
+  }
+  const runCount = open.filter((l) => l === "running").length, waitCount = open.filter((l) => l === "needs").length
+  const subText = arch ? t("views:items.subArch") : subRunning > 0 ? t("views:items.subWithChildren", { run: runCount, wait: waitCount, count: subRunning }) : t("views:items.sub", { run: runCount, wait: waitCount })
   return (
-    <Page title={t("views:items.title")} sub={arch ? t("views:items.subArch") : t("views:items.sub", { run: open.filter((l) => l === "running").length, wait: open.filter((l) => l === "needs").length })} max={1080}
+    <Page title={t("views:items.title")} sub={subText} max={1080}
       actions={<>{itemsView === "list" && !arch && <Button size="sm" variant="ghost" className="text-muted-foreground" onClick={() => { selecting = !selecting; selected.clear(); r() }} data-select-mode>{selecting ? t("views:items.selectDone") : t("views:items.select")}</Button>}<Button size="sm" onClick={() => openSheet("newItem")} data-new-item><PlusIcon />{t("views:items.newItem")}</Button></>}
       toolbar={<span className="hidden sm:block">{seg}</span>}>
       <AlertDialog open={!!confirmDel} onOpenChange={(o) => !o && setConfirmDel(null)}>
@@ -170,16 +253,16 @@ export function ItemsView() {
       {selecting && (
         <div className="anim-in sticky top-2 z-10 mb-6 flex flex-wrap items-center gap-2 rounded-xl bg-popover/95 px-3 py-2 shadow-md backdrop-blur-xl" data-bulk-bar>
           <span className="type-callout font-medium tabular-nums">{t("views:items.selected", { count: ids.length })}</span>
-          <Button size="xs" variant="ghost" className="text-muted-foreground" onClick={() => { xs.forEach((i) => selected.add(i.id)); r() }}>{t("views:items.selectAll")}</Button>
+          <Button size="xs" variant="ghost" className="text-muted-foreground" onClick={() => { listRoots.forEach((i) => selected.add(i.id)); r() }}>{t("views:items.selectAll")}</Button>
           <span className="flex-1" />
           {([["pause", t("views:items.bulkPause")], ["run", t("views:items.bulkRun")], ["arch", t("views:items.bulkArch")], ["drop", t("views:items.bulkDrop")]] as const).map(([op, l]) => <Button key={op} size="sm" variant={op === "drop" ? "ghost" : "outline"} className={cn(op === "drop" && "text-destructive")} disabled={!ids.length} onClick={() => { bulk(ids, op); done() }} data-bulk={op}>{l}</Button>)}
         </div>
       )}
       <div key={itemsView} className="anim-in">
-      {itemsView === "list" && (xs.length ? (arch || sortBy !== "updated"
-        ? <Group>{xs.map(rowOf)}</Group>
+      {itemsView === "list" && (listRoots.length ? (arch || sortBy !== "updated"
+        ? <Group>{listRoots.map(rowOf)}</Group>
         : <div className="flex flex-col gap-8">{groups.map(([s, l]) => {
-            const g = xs.filter((i) => itemDisplayStatus(i) === s), fold = closedSt(s) && !openGroups.has(s) && g.length > CLOSED_SHOWN + 2
+            const g = listRoots.filter((i) => itemDisplayStatus(i) === s), fold = closedSt(s) && !openGroups.has(s) && g.length > CLOSED_SHOWN + 2
             return g.length ? (
               <section key={s} data-items-group={s}>
                 <SectionLabel className="mb-1 text-tertiary" right={fold || openGroups.has(s) ? <Button size="xs" variant="ghost" className="text-muted-foreground" onClick={() => { openGroups.has(s) ? openGroups.delete(s) : openGroups.add(s); r() }} data-group-more={s}>{fold ? t("views:items.showAll", { count: g.length }) : t("views:items.collapse")}</Button> : undefined}>
@@ -188,7 +271,7 @@ export function ItemsView() {
                 <Group>{(fold ? g.slice(0, CLOSED_SHOWN) : g).map(rowOf)}</Group>
               </section>) : null })}</div>)
         : <Empty title={arch ? t("views:items.emptyArch") : st.items.length ? t("views:items.emptyFiltered") : t("views:items.emptyNone")} sub={arch ? (st.cfg.archDays === "0" ? t("views:items.archManual") : t("views:items.archAuto", { count: Number(st.cfg.archDays) })) : st.items.length ? undefined : t("views:items.emptyNoneSub")} />)}
-      {itemsView === "board" && <ItemsBoard xs={xs} cap={CLOSED_SHOWN} />}
+      {itemsView === "board" && <ItemsBoard xs={listRoots} cap={CLOSED_SHOWN} />}
       {itemsView === "collab" && <Suspense fallback={<div className="flex justify-center py-16"><Spinner className="size-4" /></div>}><ItemsFleet xs={xs} /></Suspense>}
       </div>
     </Page>
@@ -648,7 +731,7 @@ export function ItemView({ id }: { id: string }) {
               </div>
             </Prop>
             {dependents.length > 0 && <Prop label={t("views:item.propDependents")}><div className="flex flex-col gap-1 pt-1">{dependents.map((x) => <a key={x.id} href={"#/items/" + x.id} className="flex items-center gap-2 hover:underline"><StatusDot s={x.st} /><span className="flex min-w-0 items-baseline gap-1.5"><ItemNo id={x.id} /><span className="truncate">{x.t}</span></span></a>)}</div></Prop>}
-            {i.cwd && <Prop label={t("views:item.propCwd")}><span className="block break-all pt-1 type-code text-muted-foreground" data-cwd>{i.cwd.replace(/^\/Users\/[^/]+/, "~")}</span></Prop>}
+            {i.cwd && <Prop label={t("views:item.propCwd")}><span className="block break-all pt-1 type-code text-muted-foreground" data-cwd>{homeTilde(i.cwd)}</span></Prop>}
             {i.branch && <Prop label={t("views:item.propBranch")}><span className="block break-all pt-1 type-code" data-branch>{i.branch}</span></Prop>}
             <Prop label={t("views:item.propSource")}><span className="block pt-1">{i.parent?.item ? <a href={"#/items/" + i.parent.item} className="hover:underline">{t("views:item.forkedFrom", { id: i.parent.item })}</a> : i.src[1] === "chat" ? <a href="#/" className="hover:underline">{t("views:item.fromChat")}</a> : i.src[0]}</span>
               {itemThread(i.id) && <label className="mt-1.5 flex items-center gap-2 pl-0.5 type-footnote text-muted-foreground" data-thread-follow><Switch size="sm" checked={!itemThread(i.id)!.follow} onCheckedChange={(v) => void threadFollow(i.id, !v)} />{t("views:item.noFollow")}</label>}</Prop>
@@ -757,7 +840,7 @@ function MeRow() {
 export function MoreView() {
   const t = useT()
   const groups = [
-    { name: t("views:more.groupWork"), rows: [["projects", t("views:more.projects"), t("views:more.projectsSub", { name: st.workspace?.name }), FolderIcon], ["sessions", t("views:more.sessions"), t("views:more.sessionsSub"), SquareTerminalIcon], ["stats", t("views:more.stats"), t("views:more.statsSub"), ChartNoAxesColumnIcon]] },
+    { name: "", rows: [["projects", t("views:more.projects"), t("views:more.projectsSub", { name: st.workspace?.name }), FolderIcon], ["sessions", t("views:more.sessions"), t("views:more.sessionsSub"), SquareTerminalIcon], ["stats", t("views:more.stats"), t("views:more.statsSub"), ChartNoAxesColumnIcon]] },
     { name: t("views:more.groupLinks"), rows: [["integrations", t("views:more.integrations"), t("views:more.integrationsSub"), PlugIcon], ["channels", t("views:more.channels"), t("views:more.channelsSub"), MessagesSquareIcon], ["mail", t("views:more.mail"), t("views:more.mailSub"), MailIcon], ["contacts", t("views:more.contacts"), t("views:more.contactsSub"), ContactRoundIcon], ["knowledge", t("views:more.knowledge"), t("views:more.knowledgeSub"), BookOpenIcon]] },
     { name: t("views:more.groupAuto"), rows: [["bots", t("views:more.bots"), t("views:more.botsSub"), BotIcon], ["capabilities", t("views:more.capabilities"), t("views:more.capabilitiesSub"), BlocksIcon], ["auto", t("views:more.auto"), t("views:more.autoSub"), WorkflowIcon], ["signals", t("views:more.signals"), t("views:more.signalsSub"), RadioIcon]] },
     { name: t("views:more.groupSystem"), rows: [["devices", t("views:more.devices"), t("views:more.devicesSub"), ServerIcon], ["accounts", t("views:more.accounts"), t("views:more.accountsSub"), KeyRoundIcon], ["vault", t("views:more.vault"), t("views:more.vaultSub"), LockIcon], ["settings", t("views:more.settings"), t("views:more.settingsSub"), SettingsIcon]] },
@@ -794,11 +877,11 @@ export function ImportDialog() {
       footer={<><Button variant="outline" onClick={closeSheet}>{t("common:action.cancel")}</Button><Button disabled={!pick.length || busy} data-testid="import-go" onClick={async () => { setBusy(true); await importSessions(pick); setBusy(false); closeSheet(); go("#/sessions") }}>{busy && <Spinner className="size-3.5" />}{pick.length ? t("views:import.go", { count: pick.length }) : t("views:import.goNone")}</Button></>}>
       <div className="max-h-[60vh] overflow-y-auto">
       {left.length ? groups.map((h) => (
-        <section key={h} className="mb-4"><SectionLabel>{t("views:import.onHub", { harness: h })}</SectionLabel>
+        <section key={h} className="mb-4"><SectionLabel>{t("views:import.onHub", { harness: runtimeName(h) ?? h })}</SectionLabel>
           <Group>{left.filter((x) => x.harness === h).map((x) => (
             <label key={x.key} className="flex cursor-pointer items-center gap-3 px-4 py-2.5 hover:bg-accent" data-import-opt={x.key}>
               <Checkbox checked={pick.includes(x.key)} onCheckedChange={(v) => setPick(v ? [...pick, x.key] : pick.filter((k) => k !== x.key))} />
-              <span className="min-w-0 flex-1"><span className="block truncate type-body">{x.title}</span><span className="block truncate type-footnote text-muted-foreground"><span className="font-mono">{x.cwd.replace(/^\/Users\/[^/]+/, "~")}</span> · {num(Math.max(1, Math.round(x.size / 1024)), { useGrouping: false })} KB</span></span>
+              <span className="min-w-0 flex-1"><span className="block truncate type-body">{x.title}</span><span className="block truncate type-footnote text-muted-foreground"><span className="font-mono">{homeTilde(x.cwd)}</span> · {num(Math.max(1, Math.round(x.size / 1024)), { useGrouping: false })} KB</span></span>
               <span className="type-footnote text-muted-foreground">{tm(x.when)}</span>
             </label>))}</Group>
         </section>)) : <Empty title={st.localSessions.length ? t("views:import.allDone") : t("views:import.reading")} />}

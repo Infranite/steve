@@ -11,6 +11,8 @@ use serde_json::Value;
 /// An item a schedule creates (steve-core `CreateItem`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct ItemRequest {
+    /// Explicit requester of a personal schedule; None retains workspace service semantics.
+    pub requester: Option<String>,
     pub ws: String,
     pub title: String,
     pub goal: String,

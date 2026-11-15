@@ -63,6 +63,11 @@ try {
     assert.equal(await grouped.locator('[data-items-group="run"] [data-item-row="ST-44"]').count(), 1)
     assert.equal(await grouped.locator('[data-items-group="run"] [data-item-row="ST-10"]').count(), 0)
     assert.equal(await grouped.locator('[data-items-group="fail"] [data-item-row="ST-43"]').count(), 1, "failed items have their own group")
+    // workflow children nest directly under their parent instead of scattering as top-level peer rows
+    assert.equal(await grouped.locator('[data-subtasks-of="ST-5"] [data-item-row="ST-26"]').count(), 1, "active workflow child hangs under its parent")
+    assert.equal(await grouped.locator('[data-items-group="done"] [data-item-row="ST-29"]').count(), 0, "finished workflow child does not pollute top-level Recently Done")
+    await grouped.locator('[data-subtasks-more="ST-27"]').click()
+    assert.equal(await grouped.locator('[data-subtasks-of="ST-27"] [data-item-row="ST-29"]').count(), 1, "finished workflow child expands under its parent")
     // the page's 等你 / 进行中 counts are what its filters and its board show
     const sub = await grouped.locator("h1 + div").first().innerText()
     const [, subRun, subWait] = sub.match(/(\d+) 件进行中 · (\d+) 件等你/) ?? []
@@ -91,7 +96,8 @@ try {
     // every card keeps its state in words, however slim the column
     const words = await board.evaluate((el) => [...el.querySelectorAll("[data-kanban-card]")].map((c) => { const w = c.querySelector("[data-state-word]"); return [c.dataset.kanbanCard, !!w && w.getBoundingClientRect().width > 8 && getComputedStyle(w).display !== "none"] }).filter(([, ok]) => !ok))
     assert.deepEqual(words, [], `a card lost its state word at ${width}px`)
-    assert.equal(laneOfCard("ST-29"), "done")
+    assert.equal(laneOfCard("ST-30"), "done")
+    assert.equal(laneOfCard("ST-29"), undefined, "a workflow child stays under its parent rather than duplicating onto the board")
     assert.equal(laneOfCard("ST-43"), undefined, "a failed item is closed and not on the board, as before")
     // side by side on a laptop, one after another on a phone
     const tops = lanes.map((l) => Math.round(l.box.top)), lefts = lanes.map((l) => Math.round(l.box.left))

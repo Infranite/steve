@@ -206,6 +206,7 @@ impl Fixture {
                     name: "Fixture operation".into(),
                     passed: true,
                     operated: true,
+                    scope: None,
                 }],
                 &[],
             )
@@ -361,7 +362,16 @@ async fn restart_adopts_unbound_session_and_retry_does_not_duplicate_children_or
         )
         .unwrap();
     again.node.finish(&execution, build::done()).await.unwrap();
-    until(|| !again.routed.is_busy(&session.id)).await;
+    // Turn completion briefly leaves the runtime ready before Core closes the failed child and
+    // queues its release. Wait for that release, not the transient idle gap before it starts.
+    until(|| {
+        again
+            .store
+            .reader(|c| steve_store::runtime::released_idle(c, &session.id))
+            .unwrap()
+            && !again.routed.uncertain(&session.id)
+    })
+    .await;
     let revision = again
         .store
         .workflows()

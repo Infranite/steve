@@ -14,6 +14,19 @@ use steve_modules::{ApiError, ApiResult, Caller, Modules};
 
 pub fn routes(ch: Channels, outbox: Arc<Outbox>) -> Router<Modules> {
     Router::new()
+        .route(
+            "/me/notification-policy",
+            get(notification_policy).put(set_notification_policy),
+        )
+        .route("/me/notification-targets", get(notification_targets))
+        .route("/me/notifications", get(personal_notifications))
+        .route("/me/notifications/{id}/seen", post(notification_seen))
+        .route("/deliveries", post(submit_delivery))
+        .route("/deliveries/{id}", get(delivery))
+        .route(
+            "/people/{party}/output-preference",
+            patch(output_preference),
+        )
         .route("/chan-messages/{id}/recall", post(recall))
         .route("/chan-messages/{id}/basis", get(basis))
         .route("/conversations", get(conversations))
@@ -207,4 +220,97 @@ impl steve_core::yolo::undo::Recall for ChanRecall {
         h.block_on(self.outbox.recall(&self.ch, ws, actor, message_id))?;
         Ok(())
     }
+}
+
+/// Same pipeline used by the existing source-reply tool; keys belong to the authenticated user.
+async fn submit_delivery(
+    Extension(ch): Extension<Channels>,
+    Extension(outbox): Extension<Arc<Outbox>>,
+    who: Caller,
+    Json(intent): Json<steve_modules::outbound::DeliveryIntent>,
+) -> ApiResult<Json<Value>> {
+    Ok(Json(serde_json::to_value(
+        outbox.submit(&ch, &who, intent).await?,
+    )?))
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OutputPreference {
+    space_id: Option<String>,
+}
+
+async fn output_preference(
+    Extension(ch): Extension<Channels>,
+    who: Caller,
+    Path(party): Path<String>,
+    Json(pref): Json<OutputPreference>,
+) -> ApiResult<Json<Value>> {
+    let c2 = ch.clone();
+    ch.modules()
+        .blocking(move |_| {
+            steve_channels::pipeline::set_preference(&c2, &who, &party, pref.space_id.as_deref())?;
+            Ok(Json(json!({"ok":true})))
+        })
+        .await
+}
+
+async fn delivery(
+    Extension(ch): Extension<Channels>,
+    who: Caller,
+    Path(id): Path<String>,
+) -> ApiResult<Json<Value>> {
+    let c2 = ch.clone();
+    ch.modules()
+        .blocking(move |_| {
+            Ok(Json(serde_json::to_value(steve_channels::pipeline::get(
+                &c2, &who, &id,
+            )?)?))
+        })
+        .await
+}
+
+async fn notification_policy(
+    Extension(ch): Extension<Channels>,
+    who: Caller,
+) -> ApiResult<Json<Value>> {
+    Ok(Json(serde_json::to_value(
+        steve_channels::notifications::get_policy(&ch, &who)?,
+    )?))
+}
+
+async fn set_notification_policy(
+    Extension(ch): Extension<Channels>,
+    who: Caller,
+    Json(policy): Json<steve_channels::notifications::Policy>,
+) -> ApiResult<Json<Value>> {
+    steve_channels::notifications::put_policy(&ch, &who, &policy)?;
+    Ok(Json(json!({"ok":true})))
+}
+
+async fn notification_targets(
+    Extension(ch): Extension<Channels>,
+    who: Caller,
+) -> ApiResult<Json<Value>> {
+    Ok(Json(
+        json!({"targets": steve_channels::notifications::targets(&ch, &who)?}),
+    ))
+}
+
+async fn personal_notifications(
+    Extension(ch): Extension<Channels>,
+    who: Caller,
+) -> ApiResult<Json<Value>> {
+    Ok(Json(serde_json::to_value(
+        steve_channels::notifications::list(&ch, &who)?,
+    )?))
+}
+
+async fn notification_seen(
+    Extension(ch): Extension<Channels>,
+    who: Caller,
+    Path(id): Path<String>,
+) -> ApiResult<Json<Value>> {
+    steve_channels::notifications::seen(&ch, &who, &id)?;
+    Ok(Json(json!({"ok":true})))
 }

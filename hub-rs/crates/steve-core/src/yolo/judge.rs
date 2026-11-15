@@ -1117,33 +1117,20 @@ fn ask(a: &Ask, p: &Policy) -> Verdict {
             .undo(Undo::Reanswer)
             .checks(checks);
     }
-    // the model said nothing against the agent's pick: only “answer” with low confidence, or “ask the
-    // user” for lack of information, counts as no objection
-    let objected = !(ans.act == "answer" || ans.act == "ask_user" && ans.only_lacks_info);
-    match &a.recommended {
-        Some(rec)
-            if !objected
-                && !rec.trim().is_empty()
-                && limits::money_or_outside_words(rec, a.full).is_none() =>
-        {
-            let why = a.why.clone().unwrap_or_else(|| "Agent 的推荐".into());
-            auto(rec, "ask.recommended", format!("选了 Agent 推荐的：{why}"))
-                .text(answer_text(rec, &why))
-                .undo(Undo::Reanswer)
-                .checks(checks)
-        }
-        _ => decline(
-            "ask.unsure",
-            format!(
-                "YOLO 没替你答：{}",
-                if ans.reason.trim().is_empty() {
-                    "拿不准"
-                } else {
-                    ans.reason.trim()
-                }
-            ),
+    // A recommendation is a preference, never evidence. In particular, ask_user because
+    // information is missing must not become an assertion that an operation succeeded.
+    decline(
+        "ask.unsure",
+        format!(
+            "YOLO 没替你答：{}",
+            if ans.reason.trim().is_empty() {
+                "拿不准"
+            } else {
+                ans.reason.trim()
+            }
         ),
-    }
+    )
+    .checks(checks)
 }
 
 fn outbound(o: &Outbound, p: &Policy, what: &str) -> Verdict {

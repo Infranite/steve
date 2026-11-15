@@ -455,7 +455,6 @@ export default {
     collabSub: "Lets it respond to other bots' messages. Turn off to avoid bots triggering each other",
     collabOn: "Collaboration on",
     collabOff: "Collaboration off",
-    members: "Members",
     membersUnknown: "Member count unknown",
     externalSub: "Has external members, treated as a customer group by default",
     internalSub: "All from your company",
