@@ -1096,6 +1096,7 @@ mod tests {
         let _ = stream.write_all(message.as_bytes());
     }
     fn request(stream: &mut TcpStream) -> String {
+        stream.set_nonblocking(false).unwrap();
         stream
             .set_read_timeout(Some(Duration::from_secs(2)))
             .unwrap();

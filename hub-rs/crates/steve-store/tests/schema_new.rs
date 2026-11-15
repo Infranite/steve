@@ -67,6 +67,40 @@ fn at_version(v: usize) -> (tempfile::TempDir, std::path::PathBuf) {
 }
 
 #[test]
+fn realtime_upgrade_preserves_baselines_and_repairs_backwards_stop_boundaries() {
+    let (_dir, path) = at_version(74);
+    let c = Connection::open(&path).unwrap();
+    c.execute_batch("INSERT INTO sessions(id,workspace_id,harness,cwd,status,created,updated) VALUES ('s','default','custom','.','ended',1,100);
+        INSERT INTO runtime_sessions(session_id,node_id,workspace_ref,node_session_id,config_revision,phase,updated) VALUES ('s','n','{}','s','r','idle',100);
+        INSERT INTO runtime_turns(turn_id,session_id,state,created,updated) VALUES ('t','s','finished',1,100);
+        INSERT INTO runtime_attempts(attempt_id,turn_id,ordinal,node_id,operation_id,execution,spec,digest,state,created,updated) VALUES ('a','t',0,'n','o','{}','{}','d','finished',1,100);
+        INSERT INTO realtime_output_attempts(attempt_id,session_id,workspace_id,node_id,started,ended) VALUES ('a','s','default','n',1,20);
+        INSERT INTO realtime_output_samples VALUES ('n','st','e',1,'text','a',99,99,100,'text',400);
+        INSERT INTO realtime_output_samples VALUES ('n','st','e',2,'stop','a',100,20,100,'gap',0);").unwrap();
+    db::migrate(&c).unwrap();
+    db::migrate(&c).unwrap(); // the repair is migration-once, subsequent opens keep the same record
+    assert_eq!(
+        c.query_row(
+            "SELECT baseline,ended FROM realtime_output_attempts",
+            [],
+            |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?))
+        )
+        .unwrap(),
+        (1, 100)
+    );
+    assert_eq!(
+        c.query_row(
+            "SELECT source_at FROM realtime_output_samples WHERE event_id='stop'",
+            [],
+            |r| r.get::<_, i64>(0)
+        )
+        .unwrap(),
+        20
+    );
+    assert_eq!(count(&c, "SELECT COUNT(*) FROM realtime_output_samples"), 2);
+}
+
+#[test]
 fn reasoning_migration_accepts_columns_previously_added_by_ts_hub() {
     for v in [12, 16] {
         let (_dir, path) = at_version(v);

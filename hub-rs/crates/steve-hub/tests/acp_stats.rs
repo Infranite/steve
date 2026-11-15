@@ -168,6 +168,10 @@ async fn item(e: &Env, goal: &str) -> String {
         .and_then(|b| b["id"].as_str())
         .expect("a claude-code bot")
         .to_string();
+    item_on(e, goal, &bot).await
+}
+
+async fn item_on(e: &Env, goal: &str, bot: &str) -> String {
     let (s, i) = e
         .call(
             "POST",
@@ -294,4 +298,64 @@ async fn turns_and_tokens_land_in_the_stats_tables() {
         "SELECT count(*) FROM item_stats WHERE dirty = 1 OR updated >= (SELECT max(ended) FROM agent_turns)",
     );
     assert_eq!(flagged, 1);
+
+    // Real collection through the scripted ACP process, the Node's journal and the Hub's inbox.
+    // Deliberately huge final usage must not replace or spike the live text estimate.
+    // The earlier no-text, positive billing attempts are correctly unavailable coverage for
+    // ten seconds. Give the stream its own Bot and exercise that real filter as well.
+    e.db().execute_batch("INSERT INTO bots(id,workspace_id,name,harness,enabled,updated) VALUES ('realtime-bot','default','stream','claude-code',1,1);
+        INSERT INTO bot_workspaces(bot_id,workspace_id,created) VALUES ('realtime-bot','default',1);").unwrap();
+    let streaming = item_on(
+        &e,
+        "@drip 20 200 @tally 1 900000 0 0 @sleep 1000",
+        "realtime-bot",
+    )
+    .await;
+    assert!(
+        until(10, || async {
+            let (s, v) = e
+                .call("GET", "/api/stats/realtime?bot=realtime-bot", None)
+                .await;
+            s == 200
+                && v["state"] == "estimated"
+                && v["output_sessions"] == 1
+                && e.session(&streaming).await["busy"] == true
+        })
+        .await,
+        "streamed text is visible while the attempt is running"
+    );
+    assert!(
+        until(10, || async {
+            e.session(&streaming).await["busy"] == false
+        })
+        .await
+    );
+    assert!(
+        until(5, || async {
+            e.count("SELECT COUNT(*) FROM realtime_output_samples WHERE kind='end'") == 3
+        })
+        .await
+    );
+    let (status, realtime) = e
+        .call(
+            "GET",
+            "/api/stats/realtime?bot=realtime-bot&range=custom&from=bad&to=bad",
+            None,
+        )
+        .await;
+    assert_eq!(status, 200, "{realtime}");
+    let at = realtime["at"].as_i64().unwrap();
+    let units: i64 = e
+        .db()
+        .query_row(
+            "SELECT COALESCE(SUM(units),0) FROM realtime_output_samples WHERE at>? AND at<=?",
+            [at - 10_000, at],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(units, 70, "20 streamed text pieces have 70 ASCII scalars");
+    assert_eq!(realtime["tps"], json!(units as f64 / 40.0));
+    assert_eq!(realtime["state"], "estimated");
+    assert_eq!(realtime["coverage"]["measured"], 0);
+    assert_eq!(realtime["series"].as_array().unwrap().len(), 60);
 }

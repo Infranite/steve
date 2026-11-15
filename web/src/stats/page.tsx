@@ -2,7 +2,7 @@
  * 拿不到（TS Hub）时显示“还没有接入”，不显示示例数据。费用处处标“估”。
  * stats v2 按用途从上到下：筛选（时间、项目、Bot）→ 一行“现在”（进行中 · 等你 · 失败，YOLO 状态）→ 关键数字（和上一段比）
  * → 每天的产出（完成数和费用）→ 钱和时间花在哪（构成 + 最贵的事项，点进费用去向）→ Bot 对比 → harness · 模型对比
- * → 事件浏览器（默认收起）。一节一个标题，卡片只用来装图和表。时间范围、项目、Bot 只在页头选一次，下面所有数字跟着变。 */
+ * → 事件浏览器（默认收起）。历史数字跟随时间范围、项目与 Bot；实时输出只跟随项目与 Bot。 */
 import { useEffect, useState } from "react"
 import { CalendarIcon } from "lucide-react"
 import { Tag } from "@/panel"
@@ -13,7 +13,6 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover
 import { st } from "@/store"
 import { Page, Segmented, Empty } from "@/ui"
 import { Select } from "@/view-shared"
-import { Unwired } from "@/unwired"
 import { stats, statsSeed, type Filter, type RangeKind, type Summary } from "@/api/stats"
 import { KeyNumbers } from "@/stats/kpi"
 import { Section } from "@/stats/tables"
@@ -24,6 +23,7 @@ import { BotCompare, ModelCompare } from "@/stats/compare"
 import { RunState } from "@/yolo/status"
 import { StatsItemView } from "@/stats/drill"
 import { EventsSection } from "@/stats/events"
+import { RealtimeStats } from "@/stats/realtime"
 import { Trans } from "react-i18next"
 import { t, useT } from "@/i18n"
 import { fmtN, fmtRange, fmtUsd, hhmm, oneDay, time, zoneName, useStats } from "@/stats/format"
@@ -83,7 +83,7 @@ export function StatsView() {
   }, [ticking, tick])
   const fkey = JSON.stringify(f) + (ticking ? "#" + tick : "")
   const [s] = useStats(() => stats.summary(f), [fkey], live)
-  if (s.s === "absent") return <Unwired id="stats" />
+  const nowDrill = drill && !drill.startsWith("day:") ? drill : null
   const bots = Object.keys(st.bots)
   const toolbar = (
     <div className="flex flex-wrap items-center gap-2" data-stats-toolbar>
@@ -96,9 +96,22 @@ export function StatsView() {
   )
   return (
     <Page title={t("stats:page.title")} sub={s.s === "ok" ? (oneDay(f) ? t("stats:page.subHourly", { name: NAME(f.range), range: fmtRange(s.v.range.from, s.v.range.to), zone: zoneName(s.v.range.tz) }) : t("stats:page.sub", { name: NAME(f.range), range: fmtRange(s.v.range.from, s.v.range.to) })) : t("stats:page.estNote")} max={1280} toolbar={toolbar}>
-      {s.s === "loading" ? <div className="flex justify-center py-24" role="status" aria-label={t("stats:word.loading")}><Spinner className="size-5 text-muted-foreground" /></div>
-        : s.s === "error" ? <Empty title={t("stats:page.loadFailed")} sub={s.msg} />
-        : <StatsBody s={s.v} f={f} setF={setF} fkey={fkey} live={live} drill={drill} setDrill={setDrill} />}
+      <div className="@container/stats flex flex-col gap-8" data-stats>
+        <div className="flex flex-col gap-3" data-overview>
+          <div className="flex flex-col gap-1">
+            <NowLine f={f} drill={drill} setDrill={setDrill}>
+              {live ? <Tag tone="ok" data-live><span className="size-1.5 dot-running rounded-full bg-current" />{t("stats:panel.live")}</Tag> : <Tag>{t("stats:panel.past")}</Tag>}
+            </NowLine>
+            <RunState className="px-2" />
+          </div>
+          <RealtimeStats key={JSON.stringify([f.project ?? null, f.bot ?? null])} project={f.project} bot={f.bot} />
+          {nowDrill && <DrillPanel key={nowDrill} d={nowDrill} f={f} fkey={fkey} live={live} rangeName={NAME(f.range)} close={() => setDrill(null)} />}
+        </div>
+        {s.s === "absent" ? <Empty title={t("stats:realtime.historyMissing")} sub={t("stats:realtime.historyMissingSub")} />
+          : s.s === "loading" ? <div className="flex justify-center py-24" role="status" aria-label={t("stats:word.loading")}><Spinner className="size-5 text-muted-foreground" /></div>
+          : s.s === "error" ? <Empty title={t("stats:page.loadFailed")} sub={s.msg} />
+          : <StatsBody s={s.v} f={f} setF={setF} fkey={fkey} live={live} drill={drill} setDrill={setDrill} />}
+      </div>
     </Page>
   )
 }
@@ -108,20 +121,9 @@ function StatsBody({ s, f, setF, fkey, live, drill, setDrill }: { s: Summary; f:
   const nothing = s.usage.total === 0 && s.usage.reported === 0 && s.usage.turns === 0 && s.throughput.created === 0 && s.throughput.done === 0 && s.human.decisions === 0 && s.throughput.wip === 0
   const since = s.since.tokens
   const rangeName = NAME(f.range), prevName = PREV(f.range)
-  /* the “现在” drill-downs open under the status line; a day's opens under its chart */
-  const nowDrill = drill && !drill.startsWith("day:") ? drill : null
   return (
-    <div className="@container/stats flex flex-col gap-10" data-stats>
-      <div className="flex flex-col gap-3" data-overview>
-        <div className="flex flex-col gap-1">
-        <NowLine f={f} drill={drill} setDrill={setDrill}>
-          {live ? <Tag tone="ok" data-live><span className="size-1.5 dot-running rounded-full bg-current" />{t("stats:panel.live")}</Tag> : <Tag>{t("stats:panel.past")}</Tag>}
-        </NowLine>
-        <RunState className="px-2" />
-        </div>
-        {nowDrill && <DrillPanel key={nowDrill} d={nowDrill} f={f} fkey={fkey} live={live} rangeName={rangeName} close={() => setDrill(null)} />}
-        <KeyNumbers s={s} prevName={prevName} />
-      </div>
+    <div className="flex flex-col gap-10">
+      <KeyNumbers s={s} prevName={prevName} />
       {nothing ? <Empty title={t("stats:page.nothing")} sub={t("stats:page.nothingSub")} /> : <>
         <Section k="daily" title={t("stats:v2.daily.section")} sub={t("stats:v2.daily.sectionSub")}>
           <DailyChart s={s} f={f} fkey={fkey} live={live} drill={drill} setDrill={setDrill} rangeName={rangeName} />

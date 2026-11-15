@@ -20,6 +20,7 @@ pub mod items;
 pub mod metrics;
 pub mod normalize;
 pub mod prices;
+pub mod realtime;
 pub mod refresh;
 pub mod views;
 

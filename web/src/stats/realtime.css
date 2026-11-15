@@ -1,0 +1,24 @@
+.stats-realtime .ui-kpic {
+  max-width: none;
+  min-width: 0;
+  --ui-kpic-grid: var(--border);
+  --ui-kpic-guide: var(--border);
+}
+.stats-realtime .ui-kpic__title,
+.stats-realtime .ui-kpic__footer {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.stats-realtime .ui-kpic__headline {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 12px;
+}
+.stats-realtime .ui-kpic__title { font-size: inherit; line-height: 20px; }
+.stats-realtime .ui-kpic__chart { grid-template-rows: 100px 16px; }
+.stats-realtime .ui-kpic__lines { animation: none; }
+.stats-realtime th, .stats-realtime td { padding: 4px 8px 4px 0; }
+@media (prefers-reduced-motion: reduce) {
+  .stats-realtime details::details-content { transition: none; }
+}
+html.reduce-motion .stats-realtime details::details-content { transition: none; }

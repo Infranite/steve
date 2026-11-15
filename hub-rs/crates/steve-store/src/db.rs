@@ -151,8 +151,14 @@ pub const MIGRATIONS: &[&str] = &[
     // 72: explicit personal notification policies and inbox, linked to E1 delivery receipts.
     include_str!("../migrations/072.sql"),
     include_str!("../migrations/073.sql"),
-    // 74: device configuration compare-and-swap revision.
+    // 74: persistent realtime output estimates and replay-safe block offsets.
     include_str!("../migrations/074.sql"),
+    // 75: uncollected baselines, indexed coverage gaps and safe persisted stop boundaries.
+    include_str!("../migrations/075.sql"),
+    // 76: bound uncollected upgrade attempts with durable Node stop / unsent evidence.
+    include_str!("../migrations/076.sql"),
+    // 77: device configuration compare-and-swap revision.
+    include_str!("../migrations/077.sql"),
 ];
 
 /// 027's item columns and their one-time backfill (applied by `run_pending` when `items.phase` is missing).
