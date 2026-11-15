@@ -293,6 +293,18 @@ pub trait Repo {
     fn bot_patch(&self, id: &str, patch: &Obj, author: &str) -> BResult<Obj> {
         todo_backend!("bot_patch")
     }
+    /// REST selection edits: read the current Bot, validate the merged selection with
+    /// `steve_core::models::validate_bot_patch`, and patch in one write transaction. The catalogue
+    /// is already read; no network or probing belongs inside this transaction.
+    fn bot_patch_checked(
+        &self,
+        id: &str,
+        patch: &Obj,
+        author: &str,
+        harnesses: &[steve_core::harnesses::Harness],
+    ) -> BResult<Obj> {
+        todo_backend!("bot_patch_checked")
+    }
     fn bot_restore(&self, id: &str) -> BResult<()> {
         todo_backend!("bot_restore")
     }

@@ -14,6 +14,118 @@ fn target(kind: &str, id: Option<&str>) -> Target {
     }
 }
 
+fn bot_catalogue(k: &Kit, models: &[&str], efforts: &[&str]) {
+    let mut h = crate::harnesses::Harness::declared("claude-code", None);
+    h.ready = Some(true);
+    h.models = models
+        .iter()
+        .map(|id| crate::harnesses::HarnessModel {
+            id: id.to_string(),
+            name: None,
+            description: None,
+        })
+        .collect();
+    h.efforts = efforts.iter().map(|s| s.to_string()).collect();
+    k.core
+        .models()
+        .set_harnesses(std::sync::Arc::new(move || vec![h.clone()]));
+}
+
+#[tokio::test]
+async fn bot_card_apply_rechecks_current_catalogue_and_keeps_rejected_draft_retryable() {
+    let k = Kit::new();
+    bot_catalogue(&k, &["next-model"], &["high"]);
+    k.gw.set(|_, _| Ok(r#"{"changes":[{"key":"model","value":"next-model"},{"key":"role","value":"changed"}]}"#.into()));
+    let p = k
+        .core
+        .draft(WS, target("bot", Some("dev")), "换模型和职责")
+        .await
+        .unwrap();
+    let before = serde_json::to_value(k.db().bot("dev").unwrap()).unwrap();
+    // A previously valid draft can become unsupported before Apply.
+    bot_catalogue(&k, &["other-model"], &["high"]);
+    assert!(
+        k.core
+            .apply(&p.id, "me", WS)
+            .unwrap_err()
+            .to_string()
+            .contains("model")
+    );
+    assert_eq!(
+        serde_json::to_value(k.db().bot("dev").unwrap()).unwrap(),
+        before
+    );
+    bot_catalogue(&k, &["next-model"], &["high"]);
+    k.core.apply(&p.id, "me", WS).unwrap();
+    assert_eq!(
+        k.db().bot("dev").unwrap().unwrap().model.as_deref(),
+        Some("next-model")
+    );
+    k.core.undo(&p.id, "me", WS).unwrap();
+    assert!(k.db().bot("dev").unwrap().unwrap().model.is_none());
+}
+
+#[tokio::test]
+async fn new_bot_card_cannot_create_an_unsupported_model() {
+    let k = Kit::new();
+    bot_catalogue(&k, &["allowed-model"], &["high"]);
+    k.gw.set(|_, _| Ok(r#"{"changes":[{"key":"model","value":"not-offered"}]}"#.into()));
+    let p = k
+        .core
+        .draft(WS, target("bot", Some("new:Selection")), "创建 Bot")
+        .await
+        .unwrap();
+    let before = k.db().bots(WS).unwrap().len();
+    assert!(k.core.apply(&p.id, "me", WS).is_err());
+    assert_eq!(k.db().bots(WS).unwrap().len(), before);
+}
+
+#[tokio::test]
+async fn bot_card_apply_checks_effort_but_notes_do_not_revalidate_legacy_selection() {
+    let k = Kit::new();
+    bot_catalogue(&k, &["allowed-model"], &["low", "high"]);
+    k.gw.set(|_, _| Ok(r#"{"changes":[{"key":"reasoning_effort","value":"high"}]}"#.into()));
+    let p = k
+        .core
+        .draft(WS, target("bot", Some("dev")), "提高强度")
+        .await
+        .unwrap();
+    bot_catalogue(&k, &["allowed-model"], &["low"]);
+    assert!(
+        k.core
+            .apply(&p.id, "me", WS)
+            .unwrap_err()
+            .to_string()
+            .contains("reasoning_effort")
+    );
+    assert!(
+        k.db()
+            .bot("dev")
+            .unwrap()
+            .unwrap()
+            .reasoning_effort
+            .is_none()
+    );
+    k.db()
+        .bot_patch(
+            "dev",
+            &crate::patch![model: "legacy-model", reasoning_effort: "legacy-effort"],
+            "me",
+        )
+        .unwrap();
+    k.gw.set(|_, _| Ok(r#"{"changes":[{"key":"role","value":"a note"}]}"#.into()));
+    let note = k
+        .core
+        .draft(WS, target("bot", Some("dev")), "改备注")
+        .await
+        .unwrap();
+    k.core.apply(&note.id, "me", WS).unwrap();
+    let b = k.db().bot("dev").unwrap().unwrap();
+    assert_eq!(b.model.as_deref(), Some("legacy-model"));
+    assert_eq!(b.reasoning_effort.as_deref(), Some("legacy-effort"));
+    assert_eq!(b.role, "a note");
+}
+
 #[tokio::test]
 async fn a_bot_draft_encodes_labels_and_undo_restores() {
     let k = Kit::new();

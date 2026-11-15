@@ -121,6 +121,14 @@ The main conversation also has a model control above its composer, and failed an
 
 The role allocation is one atomic save. Clearing an individual override returns its purpose to the relevant role, so a later role change applies automatically. Disabling the lightweight role returns its four purposes to the primary model, while any explicitly preserved overrides continue to win.
 
+### Bot model validation
+
+Bot creation, model/effort edits and configuration-card applies use the selected harness's last successful model and reasoning-effort report. Use its exact model ID, including any provider or route prefix; a display name or conversational abbreviation is not an ID. Reasoning efforts come from the report too, so a newly offered value does not require a Steve release. A successful empty report offers no explicit choices: reset the field to default instead.
+
+For `POST /api/bots` and `PATCH /api/bots/<id>`, `model: null` selects the workspace's agent default for that harness, or the harness's own default when no workspace default is set; `reasoning_effort: null` leaves effort to the harness. An omitted patch field keeps its stored value. A harness change checks the model and effort it would keep, and rejects an incompatible selection before saving any part of the patch. Supply supported values or explicit `null`s in that same patch; Steve does not silently rewrite them. An unrelated edit (such as `role` or `rules`) leaves old selections alone, and repairing just one selection field does not rewrite another.
+
+The catalogue is a cached Node probe, not a model-call health check. Before a successful report, or when the adapter cannot report its choices, support remains unknown: model IDs must still satisfy Steve's ID syntax, and effort must be nonempty text of at most 100 bytes. Saving in this state does not certify availability. A failed Node refresh retains the previous report; a failed adapter probe does not prove that a model was removed. Check **Devices → runtimes** and refresh the model list to inspect current evidence. On session open, the ACP layer still checks whether the requested model took effect and whether that session offers and applies the effort. That session check can fail after a valid save, for example after an adapter update or an authentication failure. The catalogue does not describe effort support for every individual model.
+
 ## Reconfiguring an installed Hub
 
 Run the interactive maintenance wizard as the OS user who owns the Hub:
