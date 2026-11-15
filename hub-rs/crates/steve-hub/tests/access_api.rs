@@ -463,7 +463,7 @@ async fn single_sign_on_is_set_up_in_the_settings_without_a_restart() {
         .call("PUT", "/api/access/oidc", Some(&cred), Some(json!({"issuer": "https://id.example/o/steve/", "client_id": "steve", "secret": "s3cret"})))
         .await;
     assert_eq!(s, 200, "{v}");
-    assert_eq!(v["issuer"], "https://id.example/o/steve");
+    assert_eq!(v["issuer"], "https://id.example/o/steve/");
     assert_eq!(
         (v["has_secret"].as_bool(), v["enabled"].as_bool()),
         (Some(true), Some(true))
