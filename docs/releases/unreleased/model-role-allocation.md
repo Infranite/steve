@@ -1,3 +1,0 @@
-Steve’s model configuration now has a primary model for conversations, research, memory, drafting and other complex work, plus an optional lightweight model shared by routing, titles, disclosure checks and flow Bot judgments. Each can use a different harness. Leaving the lightweight model unset makes those judgments follow the primary model.
-
-Settings shows both roles, their purpose coverage and the actual assignment for every purpose. Individual overrides are advanced settings with a visible exception notice. An explicit role allocation can replace them together in one atomic save; installation discovery no longer creates four fixed lightweight overrides on its own. Existing choices are preserved until you save a new allocation.

@@ -1,3 +1,0 @@
-The main conversation now uses affectUI Thinking State throughout waiting, streamed reasoning, research tools and completed summaries. The panel shows real incoming steps and Hub durations, supports folding, and retains grouped file/search subjects and tool failures. It never invents steps or finishes because a demonstration timer elapsed.
-
-Failed and stopped replies have distinct outcomes without a success check. Live updates respect a manually folded panel, and keyboard navigation, light/dark themes and reduced-motion preferences are supported. Agent session transcripts retain their detailed tool timeline.
