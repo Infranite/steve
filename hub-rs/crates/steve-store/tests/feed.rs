@@ -341,14 +341,27 @@ fn publication_is_idempotent_by_run_and_node_and_transaction_failure_rolls_back(
 }
 #[test]
 fn migration_imports_only_existing_notifications_and_moves_seen_to_feed_reads() {
-    let t = env();
-    let path = t.store.path().to_path_buf();
-    t.store.transaction(|tx|->Result<()> {
-        tx.execute_batch("DROP TRIGGER notification_feed_insert; DROP TABLE feed_reads; DROP TABLE feed_windows; DROP TABLE feed_entries;")?;
-        tx.execute("INSERT INTO personal_notifications(id,workspace_id,user_id,event_id,delivery_key,mode,body,state,seen_at,created) VALUES('old',?,'alice','event','key','log','original','held',42,10)",[WS])?;
-        tx.execute("UPDATE schema_version SET v=72",[])?;Ok(())
-    }).unwrap();
-    drop(t.store);
+    // Build the actual pre-feed schema. Rewinding only schema_version on a current
+    // Store would rerun every later migration against tables that already exist.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("feed-upgrade.sqlite3");
+    let c = rusqlite::Connection::open(&path).unwrap();
+    c.execute_batch("CREATE TABLE schema_version(v INTEGER NOT NULL);")
+        .unwrap();
+    for sql in &steve_store::db::MIGRATIONS[..72] {
+        c.execute_batch(sql).unwrap();
+    }
+    c.execute_batch("INSERT INTO schema_version VALUES(72);")
+        .unwrap();
+    c.execute(
+        "INSERT INTO workspaces(id,name,created) VALUES(?1,'test',0)",
+        [WS],
+    )
+    .unwrap();
+    c.execute("INSERT INTO users(id,workspace_id,subject,name,role,created) VALUES('alice',?1,'alice','Alice','member',0)",[WS]).unwrap();
+    c.execute("INSERT INTO workspace_members(workspace_id,user_id,role,created) VALUES(?1,'alice','member',0)",[WS]).unwrap();
+    c.execute("INSERT INTO personal_notifications(id,workspace_id,user_id,event_id,delivery_key,mode,body,state,seen_at,created) VALUES('old',?,'alice','event','key','log','original','held',42,10)",[WS]).unwrap();
+    drop(c);
     let s = Store::open(path, NoPublisher).unwrap();
     let e = s
         .reader(|c| feed::detail(c, WS, "alice", "feed_old"))

@@ -128,6 +128,7 @@ impl StatsApi {
 /// The routes, behind `require_user` (merged with the module routes).
 pub fn routes(api: StatsApi) -> Router {
     Router::new()
+        .route("/stats/realtime", get(realtime))
         .route("/stats/summary", get(summary))
         .route("/stats/series", get(series))
         .route("/stats/breakdown", get(breakdown))
@@ -157,12 +158,9 @@ fn serr(e: StoreError) -> ApiError {
     ApiError::internal(e.to_string())
 }
 
-/// The common parameters: range, then the filters, each reference checked against the workspace.
-fn query(c: &Connection, ws: &str, p: &Params) -> Result<StatsQuery, ApiError> {
+/// References have the same workspace boundary as historical statistics, without parsing dates.
+fn check_scope(c: &Connection, ws: &str, p: &Params) -> Result<(), ApiError> {
     let get = |k: &str| p.get(k).map(String::as_str).filter(|v| !v.is_empty());
-    let today = views::today(c, ws, now()).map_err(serr)?;
-    let (from, to) = views::range(get("range").unwrap_or("7d"), get("from"), get("to"), &today)
-        .map_err(invalid)?;
     if let Some(id) = get("project") {
         let w: Option<String> = c
             .query_row(
@@ -188,6 +186,49 @@ fn query(c: &Connection, ws: &str, p: &Params) -> Result<StatsQuery, ApiError> {
             return Err(ApiError::not_found(Noun::Bot.missing()));
         }
     }
+    Ok(())
+}
+
+/// GET /stats/realtime: poll once per second; no historical cache or date range is consulted.
+async fn realtime(
+    State(api): State<StatsApi>,
+    Extension(c): Extension<Ctx>,
+    Query(p): Query<Params>,
+) -> ApiResult {
+    let value = api
+        .read(move |db| {
+            check_scope(db, &c.ws, &p)?;
+            let value = steve_stats::realtime::read(
+                db,
+                steve_stats::realtime::Scope {
+                    workspace: &c.ws,
+                    project: p
+                        .get("project")
+                        .map(String::as_str)
+                        .filter(|s| !s.is_empty()),
+                    bot: p.get("bot").map(String::as_str).filter(|s| !s.is_empty()),
+                },
+                now(),
+            )
+            .map_err(serr)?;
+            serde_json::to_value(value).map_err(|e| ApiError::internal(e.to_string()))
+        })
+        .await?;
+    let mut response = json_response(200, &value);
+    response.headers_mut().insert(
+        axum::http::header::CACHE_CONTROL,
+        axum::http::HeaderValue::from_static("no-store"),
+    );
+    Ok(response)
+}
+
+/// The common parameters: range, then the filters, each reference checked against the workspace.
+fn query(c: &Connection, ws: &str, p: &Params) -> Result<StatsQuery, ApiError> {
+    let get = |k: &str| p.get(k).map(String::as_str).filter(|v| !v.is_empty());
+    let today = views::today(c, ws, now()).map_err(serr)?;
+    let (from, to) = views::range(get("range").unwrap_or("7d"), get("from"), get("to"), &today)
+        .map_err(invalid)?;
+    check_scope(c, ws, p)?;
     if let Some(s) = get("source")
         && !SOURCES.contains(&s)
     {

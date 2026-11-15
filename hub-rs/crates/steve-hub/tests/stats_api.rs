@@ -143,6 +143,112 @@ fn prices(input: f64) -> Value {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn realtime_auth_filters_and_dates_are_independent() {
+    let e = start().await;
+    let (status, empty) = e.call("GET", "/api/stats/realtime", None).await;
+    assert_eq!(status, 200, "{empty}");
+    assert_eq!(
+        (empty["tps"].clone(), empty["state"].clone()),
+        (json!(0.0), json!("idle"))
+    );
+    let at = steve_store::now().div_euclid(1000) * 1000;
+    {
+        let c = e.db();
+        c.execute(
+            "INSERT INTO workspaces(id,name,created) VALUES ('private','private',?)",
+            [at],
+        )
+        .unwrap();
+        for (id, ws) in [("p1", "default"), ("p2", "default"), ("px", "private")] {
+            c.execute("INSERT INTO projects(id,workspace_id,name,path,created,updated) VALUES (?,?,?,'.',?4,?4)",rusqlite::params![id,ws,id,at]).unwrap();
+        }
+        for (id, ws) in [("b1", "default"), ("b2", "default"), ("bx", "private")] {
+            c.execute(
+                "INSERT INTO bots(id,workspace_id,name,harness,updated) VALUES (?,?,?,'fixture',?)",
+                rusqlite::params![id, ws, id, at],
+            )
+            .unwrap();
+            c.execute(
+                "INSERT INTO bot_workspaces(bot_id,workspace_id,created) VALUES (?,?,?)",
+                rusqlite::params![id, ws, at],
+            )
+            .unwrap();
+        }
+        for (id, ws, project, bot, units) in [
+            ("a", "default", "p1", "b1", 40),
+            ("b", "default", "p1", "b2", 80),
+            ("c", "default", "p2", "b1", 120),
+            ("x", "private", "px", "bx", 400000),
+        ] {
+            c.execute("INSERT INTO sessions(id,workspace_id,bot_id,harness,cwd,status,created,updated) VALUES (?,?,?,'fixture','.','idle',?4,?4)",rusqlite::params![id,ws,bot,at-2_000]).unwrap();
+            c.execute("INSERT INTO runtime_sessions(session_id,node_id,workspace_ref,node_session_id,config_revision,phase,updated) VALUES (?,'fixture','{}',?1,'r','ready',?)",rusqlite::params![id,at]).unwrap();
+            c.execute("INSERT INTO runtime_turns(turn_id,session_id,state,created,updated) VALUES (?,?1,'finished',?2,?2)",rusqlite::params![id,at-2_000]).unwrap();
+            c.execute("INSERT INTO runtime_attempts(attempt_id,turn_id,ordinal,node_id,operation_id,execution,spec,digest,state,created,updated) VALUES (?,?1,0,'fixture',?1,'{}','{}','d','finished',?2,?3)",rusqlite::params![id,at-2_000,at-1_000]).unwrap();
+            c.execute("INSERT INTO realtime_output_attempts(attempt_id,session_id,workspace_id,project_id,bot_id,node_id,started,ended) VALUES (?,?1,?,?,?,'fixture',?,?)",rusqlite::params![id,ws,project,bot,at-2_000,at-1_000]).unwrap();
+            c.execute("INSERT INTO realtime_output_samples(node_id,stream,epoch,seq,event_id,attempt_id,at,source_at,received_at,kind,units) VALUES ('fixture',?,'e',1,?1,?1,?2,?2,?2,'text',?3)",rusqlite::params![id,at-1_000,units]).unwrap();
+        }
+    }
+    for (query, tps, output) in [
+        ("", 6.0, 3),
+        ("project=p1", 3.0, 2),
+        ("bot=b1", 4.0, 2),
+        ("project=p1&bot=b1", 1.0, 1),
+        (
+            "range=broken&from=invalid&to=invalid&hour=99&model=other&source=other&workspace=private",
+            6.0,
+            3,
+        ),
+    ] {
+        let (status, v) = e
+            .call("GET", &format!("/api/stats/realtime?{query}"), None)
+            .await;
+        assert_eq!(status, 200, "{v}");
+        assert_eq!(
+            (v["tps"].clone(), v["output_sessions"].clone()),
+            (json!(tps), json!(output)),
+            "{query}: {v}"
+        );
+        assert_eq!(v["window_ms"], 10000);
+        assert_eq!(v["step_ms"], 1000);
+        assert_eq!(v["coverage"]["estimated"], output);
+        assert_eq!(v["series"].as_array().unwrap().len(), 60);
+        assert_eq!(v["at"].as_i64().unwrap() % 1000, 0);
+    }
+    for query in ["project=px", "bot=bx", "project=missing", "bot=missing"] {
+        assert_eq!(
+            e.call("GET", &format!("/api/stats/realtime?{query}"), None)
+                .await
+                .0,
+            404
+        );
+    }
+    let unauth = e
+        .http
+        .get(format!("{}/api/stats/realtime", e.base))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(unauth.status().as_u16(), 401);
+    let forbidden = e
+        .http
+        .get(format!("{}/api/stats/realtime", e.base))
+        .header("cookie", &e.cookie)
+        .header("x-steve-ws", "private")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(forbidden.status().as_u16(), 409); // existing workspace-gone middleware contract
+    let normal = e
+        .http
+        .get(format!("{}/api/stats/realtime", e.base))
+        .header("cookie", &e.cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(normal.headers()["cache-control"], "no-store");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn stats_routes() {
     let e = start().await;
     let today = steve_stats::day(steve_store::now(), None);

@@ -610,8 +610,37 @@ pub fn merge_receipt_in(
         return Ok(false);
     }
     tx.execute("UPDATE node_commands SET state=?,receipt=?,revision=revision+1,lease_owner=NULL,lease_until=NULL,updated=? WHERE operation_id=?",params![next,encoded,now,operation])?;
+    // Persist independently of the billing/lifecycle projection and inbox retention.
+    // Only a typed terminal Node receipt or a provably unsent refusal can close unknown output.
+    tx.execute(REALTIME_STOP_RECEIPT_SQL, [operation])?;
     Ok(true)
 }
+
+const REALTIME_STOP_RECEIPT_SQL: &str = r#"INSERT OR IGNORE INTO realtime_output_attempts
+ (attempt_id,session_id,workspace_id,project_id,bot_id,node_id,started,ended,baseline,stop_evidence,not_started)
+ SELECT a.attempt_id,s.id,s.workspace_id,i.project_id,s.bot_id,a.node_id,a.created,
+        MAX(a.created,c.updated),0,
+        CASE WHEN c.state='rejected' THEN 'unsent' ELSE 'node_receipt' END,
+        c.state='rejected'
+ FROM runtime_attempts a JOIN runtime_turns t USING(turn_id)
+ JOIN sessions s ON s.id=t.session_id
+ LEFT JOIN items i ON i.id=s.item_id AND i.workspace_id=s.workspace_id
+ JOIN node_commands c ON c.operation_id=a.operation_id AND c.node_id=a.node_id
+  AND c.target_attempt=a.attempt_id AND c.method='start_turn'
+ WHERE c.operation_id=?1 AND s.readonly=0 AND c.updated>0 AND (
+  (c.state='finished' AND json_extract(c.receipt,'$.payload.operation')=c.operation_id
+   AND json_extract(c.receipt,'$.payload.state.state')='finished'
+   AND json_extract(c.receipt,'$.payload.state.outcome') IN ('succeeded','failed','cancelled','interrupted'))
+  OR (c.state='rejected' AND c.maybe_sent=0 AND
+   (json_extract(c.receipt,'$.payload.reason')='cancelled before it was sent'
+    OR (json_type(c.receipt,'$.payload.code')='text' AND json_type(c.receipt,'$.payload.retry')='text'))))
+ ON CONFLICT(attempt_id) DO UPDATE SET
+  ended=MAX(excluded.ended,COALESCE((SELECT MAX(at) FROM realtime_output_samples
+                                  WHERE attempt_id=excluded.attempt_id),excluded.ended)),
+  stop_evidence=excluded.stop_evidence
+ WHERE realtime_output_attempts.baseline=0 AND realtime_output_attempts.ended IS NULL
+   AND excluded.not_started=0;
+"#;
 
 #[derive(Debug, Clone, Copy)]
 pub struct StreamKey<'a> {
