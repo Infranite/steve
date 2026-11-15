@@ -395,3 +395,14 @@ fn separate_installations_never_take_another_worktrees_branch() {
     );
     assert_eq!(g(&other, &["branch", "--show-current"]), old_branch);
 }
+
+#[test]
+fn a_worktree_in_a_unicode_directory_keeps_its_own_branch() {
+    let k = kit(true);
+    let (r, p) = project(&k);
+    let i = create(&k, &p);
+    let target = k.home().join("workspaces with spaces/任务").join(&i.id);
+    let branch = i.branch.clone().unwrap();
+    node_makes(&r, &target, &branch);
+    assert_eq!(crate::worktrees::worktree_branch(&i, &r, &target), branch);
+}

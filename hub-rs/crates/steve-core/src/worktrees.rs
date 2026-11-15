@@ -62,11 +62,11 @@ pub(crate) fn worktree_branch(item: &Item, repo: &Path, target: &Path) -> String
         .clone()
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| format!("steve/{}", item.id.to_lowercase()));
-    let listing = git::git(repo, &["worktree", "list", "--porcelain"]).unwrap_or_default();
-    let occupied_elsewhere = listing.split("\n\n").any(|block| {
-        let path = block.lines().find_map(|l| l.strip_prefix("worktree "));
+    let listing = git::git(repo, &["worktree", "list", "--porcelain", "-z"]).unwrap_or_default();
+    let occupied_elsewhere = listing.split("\0\0").any(|block| {
+        let path = block.split('\0').find_map(|l| l.strip_prefix("worktree "));
         let name = block
-            .lines()
+            .split('\0')
             .find_map(|l| l.strip_prefix("branch refs/heads/"));
         name == Some(branch.as_str())
             && path.is_some_and(|p| !same_dir(p, &target.to_string_lossy()))
