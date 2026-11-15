@@ -2,6 +2,7 @@
 
 Read the "Development checks" and "Changes and releases" sections of `CONTRIBUTING.md`. For an agent, they come down to:
 
+- Start every piece of work with a GitHub issue, including bug fixes, features, documentation, refactoring and maintenance. Reuse an existing issue only when it already covers the same work. Handle the issue in a dedicated pull request that links to it, and keep unrelated work in separate issues and pull requests.
 - Never choose a version. Do not write `docs/releases/X.Y.Z.md`, bump a version, or create a tag by hand.
 - Describe your change for the user in `docs/releases/unreleased/<item>.md` (for example `ST-38.md`), with no version and no title. Run `python3 ops/cut-release.py lint` before delivering.
 - When the change should be released and is on `main`, run `python3 ops/cut-release.py cut`. It picks the version, writes the release notes and pushes `main` with the tag in one step. If it says origin moved, it has already tried again; if it still refuses, report why instead of tagging yourself.
