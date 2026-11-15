@@ -221,7 +221,7 @@ public final class SteveClientCoordinator: ObservableObject {
     // MARK: - Native Bridge v2 (`window.__STEVE_NATIVE__`)
 
     public static func bridgeCapabilities(for platform: String) -> [String] {
-        var caps = ["hubs.list", "hubs.switch", "hubs.add", "hubs.forget", "pair.claim"]
+        var caps = ["hubs.list", "hubs.switch", "hubs.add", "hubs.forget", "hubs.rename", "pair.claim"]
         if platform == "ios" {
             caps.append("pair.scan")
         }
@@ -262,13 +262,14 @@ public final class SteveClientCoordinator: ObservableObject {
             let version = (isCurrent ? summary.hubVersion : nil) ?? profile.lastKnownVersion
             return NativeHubBridgeItem(
                 id: profile.id,
-                name: profile.name,
+                name: profile.name.isEmpty ? (URL(string: address)?.host ?? address) : profile.name,
                 address: address,
                 current: isCurrent,
                 signedIn: signedIn,
                 route: route,
                 version: version,
-                removable: !profile.isLocalDefault
+                removable: !profile.isLocalDefault,
+                alias: profile.name
             )
         }
     }
@@ -330,6 +331,13 @@ public final class SteveClientCoordinator: ObservableObject {
             _ = hubStore.upsertProfile(verified, makeActive: true)
             purgePendingWebCookies()
             await activateCurrentHub(forceReloadWeb: true)
+            return [:]
+
+        case "hubs.rename":
+            guard let id = args["id"] as? String, let alias = args["alias"] as? String else {
+                throw BridgeCallError.invalidArgument(L10n.tr("需要 Hub 标识与别名", "Hub ID and alias are required"))
+            }
+            try hubStore.renameHub(id: id, alias: alias)
             return [:]
 
         case "hubs.forget":

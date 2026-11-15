@@ -9,7 +9,7 @@ import { Button } from "@/components/ui/button"
 import { Spinner } from "@/components/ui/spinner"
 import { Input } from "@/components/ui/input"
 import { api, signIn } from "@/api"
-import { API, currentHub, hello, hubBase, HubError, hubUrl, nativeBridge, openUrl, rememberHub, setHub } from "@/hub"
+import { hubNavigationAllowed, API, currentHub, hello, hubBase, HubError, hubUrl, nativeBridge, openUrl, rememberHub, setHub } from "@/hub"
 import { HubChooser, hubErrorText, HubLine, HubLostBanner, HubsDialog, HubsOffer, HubsOfferDialog, PairClaim, ScanButton, usePairRequest } from "@/hub-ui"
 import { CommandPalette } from "@/command-palette"
 import { st, useStore, start } from "@/store"
@@ -34,6 +34,7 @@ const CapabilitiesView = lazyView(() => import("@/caps/page").then((m) => ({ def
 const BotView = lazyView(() => import("@/manage").then((m) => ({ default: m.BotView })))
 const NewBotDialog = lazyView(() => import("@/manage").then((m) => ({ default: m.NewBotDialog })))
 const DeleteBotDialog = lazyView(() => import("@/manage").then((m) => ({ default: m.DeleteBotDialog })))
+const HubOfflinePage = lazyView(() => import("@/hub-settings").then(m => ({ default: m.HubOfflinePage })))
 const SettingsView = lazyView(() => import("@/manage").then((m) => ({ default: m.SettingsView })))
 const TagDialog = lazyView(() => import("@/manage").then((m) => ({ default: m.TagDialog })))
 const DevicesView = lazyView(() => import("@/devices").then((m) => ({ default: m.DevicesView })))
@@ -125,6 +126,15 @@ export default function App() {
     })
   }, [])
   useEffect(() => { if (hub === "ok") return start() }, [hub])
+  useEffect(() => {
+    let previousHash = location.hash
+    const route = (e: HashChangeEvent) => {
+      if (!hubNavigationAllowed()) { e.stopImmediatePropagation(); history.replaceState(null, "", previousHash); return }
+      previousHash = location.hash
+    }
+    window.addEventListener("hashchange", route, true)
+    return () => { window.removeEventListener("hashchange", route, true) }
+  }, [])
   const [a = "", b, c] = useRoute()
   /* an “撤销” toast belongs to the page it was raised on */
   useEffect(() => { notify.dismiss() }, [a, b, c])
@@ -150,6 +160,7 @@ export default function App() {
   const title = (sub: string) => <><Robot k="steve" size={72} /><div><div className="type-title">Steve</div><div className="mt-1 type-callout text-muted-foreground">{sub}</div></div></>
   const list = others || intent === "add"
   if (pairing) return <Splash><PairClaim /></Splash>
+  if (a === "settings" && b === "hub" && !st.login && (hub === "missing" || (!st.ready && !!st.error))) return <HubOfflinePage />
   if (hub === "missing") return (
     <Splash>{title(t("shell:app.connectTitle"))}<HubsOffer className="max-w-xs" /><HubChooser down className="max-w-xs" /></Splash>
   )

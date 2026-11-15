@@ -195,9 +195,9 @@ private struct HubCommands: Commands {
                     coordinator.switchToHub(id: profile.id)
                 } label: {
                     if profile.id == hubStore.activeHubID {
-                        Label(profile.name, systemImage: "checkmark")
+                        Label(profile.displayName, systemImage: "checkmark")
                     } else {
-                        Text(profile.name)
+                        Text(profile.displayName)
                     }
                 }
             }

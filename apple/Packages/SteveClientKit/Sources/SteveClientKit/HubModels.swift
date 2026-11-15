@@ -263,6 +263,9 @@ public struct HubProfile: Identifiable, Codable, Sendable, Equatable {
         return result
     }
 
+    /// Native menus keep an address visible when the personal alias was explicitly cleared.
+    public var displayName: String { name.isEmpty ? primaryDisplayAddress : name }
+
     public var primaryDisplayAddress: String {
         if let pub = publicURL {
             return URLNormalizer.canonicalOrigin(pub)
@@ -295,6 +298,7 @@ public struct NativeHubBridgeItem: Codable, Sendable, Equatable {
     public var route: String?
     public var version: String?
     public var removable: Bool
+    public var alias: String?
 
     public init(
         id: String,
@@ -304,7 +308,8 @@ public struct NativeHubBridgeItem: Codable, Sendable, Equatable {
         signedIn: Bool,
         route: String? = nil,
         version: String? = nil,
-        removable: Bool
+        removable: Bool,
+        alias: String? = nil
     ) {
         self.id = id
         self.name = name
@@ -314,6 +319,7 @@ public struct NativeHubBridgeItem: Codable, Sendable, Equatable {
         self.route = route
         self.version = version
         self.removable = removable
+        self.alias = alias
     }
 
     public func asBridgeDictionary() -> [String: Any] {
@@ -325,6 +331,7 @@ public struct NativeHubBridgeItem: Codable, Sendable, Equatable {
             "signedIn": signedIn,
             "removable": removable,
         ]
+        if let alias { dict["alias"] = alias }
         if let route, !route.isEmpty {
             dict["route"] = route
         }

@@ -1,3 +1,4 @@
+import { readHubInfo } from "@/hub-management-api"
 /* Hubs and pairing, the same in a browser and inside the apps: the switcher in the sidebar, the list with its add
  * field (on the no-Hub, signed-out and cannot-connect screens, in a dialog, and in 设置 · 访问与客户端), the answer
  * to a pairing link, and the offer of the Hubs another page sent along. The list itself is `hubDirectory()`. */
@@ -36,6 +37,12 @@ export function useHubs() {
   const [error, setError] = useState("")
   const reload = useCallback(() => dir.list().then((xs) => { setHubs(xs); setError("") }, (e) => { setHubs([]); setError(hubErrorText(e)) }), [dir])
   useEffect(() => { void reload(); return onArrival(() => void reload()) }, [reload])
+  useEffect(() => {
+    if (!st.ready || st.login) return
+    const read = () => { void readHubInfo().catch(() => {}) }
+    read(); const timer = window.setInterval(read, 30000)
+    return () => clearInterval(timer)
+  }, [])
   return { dir, hubs, error, reload }
 }
 
@@ -91,6 +98,7 @@ export function HubSwitcher() {
               </DropdownMenuItem>))}
           </DropdownMenuGroup>
           <DropdownMenuSeparator />
+          <DropdownMenuItem onClick={() => go("#/settings/hub")} data-hub-manage><ServerIcon />{t("hub:title")}</DropdownMenuItem>
           <DropdownMenuItem onClick={() => openSheet("hubs", { add: true })} data-hub-add><PlusIcon />{t("shell:hub.add")}</DropdownMenuItem>
           <DropdownMenuItem onClick={() => openSheet("pairClient")} data-hub-pair><QrCodeIcon />{t("shell:hub.pairDevice")}</DropdownMenuItem>
           <DropdownMenuItem onClick={() => go("#/settings/access")}><KeyRoundIcon />{t("shell:hub.access")}</DropdownMenuItem>
@@ -106,6 +114,7 @@ export function HubMore() {
   const cur = hubs?.find((h) => h.current)
   return (
     <Section label="Hub" data-more-hub><Panel>
+      <Row icon={<Tile I={ServerIcon} />} title={t("hub:title")} sub={t("hub:subtitle")} onClick={() => go("#/settings/hub")} data-more-hub-manage><Chevron /></Row>
       <Row icon={<Tile I={ServerIcon} />} title={cur?.name ?? t("shell:hub.rowHubs")} sub={cur ? [hubSub(cur), t("shell:hub.rowHubs")].filter(Boolean).join(" · ") : undefined} onClick={() => openSheet("hubs")} data-more-hubs><Chevron /></Row>
       <Row icon={<Tile I={QrCodeIcon} />} title={t("shell:hub.rowPair")} sub={t("shell:hub.rowPairSub")} onClick={() => openSheet("pairClient")} data-more-pair><Chevron /></Row>
       <Row icon={<Tile I={KeyRoundIcon} />} title={t("shell:hub.rowAccess")} sub={t("shell:hub.rowAccessSub")} onClick={() => go("#/settings/access")} data-more-access><Chevron /></Row>

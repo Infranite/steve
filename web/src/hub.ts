@@ -36,6 +36,7 @@ export type PairLink = {
 export type NativeHub = {
   id: string
   name: string
+  alias?: string
   /** the endpoint in use, else the first known */
   address: string
   current: boolean
@@ -86,7 +87,7 @@ export const hubUrl = (path: string): string => (path.startsWith("/") && !path.s
 export const currentHub = (): string => hubBase() || (typeof location !== "undefined" ? location.origin : "")
 
 /** what the Hub says of itself (`GET /auth/hello`) */
-export type Hello = { name: string; version: string; api: number; login: { token: boolean; oidc: boolean } }
+export type Hello = { name: string; version: string; api: number; capabilities?: { hub_metadata?: number }; login: { token: boolean; oidc: boolean } }
 
 /** the API generation this page speaks */
 export const API = 1
@@ -429,6 +430,7 @@ function arrive() {
 if (typeof window !== "undefined" && typeof location !== "undefined" && typeof history !== "undefined") {
   arrive()
   window.addEventListener("hashchange", arrive)
+  window.addEventListener("storage", e => { if (e.key === HUBS_KEY) tell() })
 }
 
 /* ───────── the list of Hubs, wherever the page runs ───────── */
@@ -437,6 +439,8 @@ if (typeof window !== "undefined" && typeof location !== "undefined" && typeof h
 export type HubEntry = {
   id: string
   name: string
+  /** Personal alias only, never the shared name. */
+  alias?: string
   address: string
   current: boolean
   /** known inside a shell only: a credential is kept for it */
@@ -454,6 +458,8 @@ export type HubDirectory = {
   switchTo(h: HubEntry): Promise<void>
   /** an address, or a pairing link; the Hub becomes the one in use */
   add(input: string, name?: string): Promise<void>
+  /** Absent on older shells; never emulate with add (which switches and can replace credentials). */
+  rename?: (h: HubEntry, alias: string) => Promise<void>
   forget(h: HubEntry): Promise<void>
   /** the shell's camera, where it has one: a scanned pairing link is confirmed and claimed by the shell */
   scan?: () => Promise<void>
@@ -467,7 +473,7 @@ export function browserEntries(): HubEntry[] {
   const saved = savedHubs()
   const all: SavedHub[] = !cur || saved.some((h) => h.url === cur) ? saved : [{ url: cur, lastUsed: 0 }, ...saved]
   return all
-    .map((h) => ({ id: h.url, name: h.name || hostOf(h.url), address: h.url, current: h.url === cur, ...(h.version ? { version: h.version } : {}), removable: h.url !== cur }))
+    .map((h) => ({ id: h.url, name: hubDisplayName(h.name, h.url), alias: h.name, address: h.url, current: h.url === cur, ...(h.version ? { version: h.version } : {}), removable: h.url !== cur }))
     .sort((a, b) => a.name.localeCompare(b.name) || a.address.localeCompare(b.address))
 }
 
@@ -501,6 +507,23 @@ function browserDirectory(): HubDirectory {
       if (!base) throw new HubError("bad-address")
       await go(base, name?.trim() || undefined)
     },
+    rename: async (h, alias) => {
+      const name = normalizeAlias(alias)
+      const url = normalize(h.address)
+      if (!url) throw new Error("bad-address")
+      const raw = localStorage.getItem(HUBS_KEY)
+      if (raw !== null && !Array.isArray(JSON.parse(raw))) throw new Error("invalid-directory")
+      const all = savedHubs()
+      const known = all.find((x) => x.url === url)
+      if (!known && url !== currentHub()) throw new Error("unknown-hub")
+      const prev = known ?? { url, lastUsed: 0 }
+      const { name: _old, ...rest } = prev
+      const next = all.filter((x) => x.url !== url)
+      next.push({ ...rest, ...(name ? { name } : {}) })
+      // Unlike rememberHub, failure must be returned to the editor. Never change selection.
+      localStorage.setItem(HUBS_KEY, JSON.stringify(next))
+      tell()
+    },
     forget: async (h) => { forgetHub(h.address) },
   }
 }
@@ -508,7 +531,7 @@ function browserDirectory(): HubDirectory {
 function nativeDirectory(b: NativeBridge): HubDirectory {
   return {
     native: true,
-    list: async () => (((await b.call("hubs.list"))?.hubs ?? []) as NativeHub[]).map((h) => ({ ...h })),
+    list: async () => (((await b.call("hubs.list"))?.hubs ?? []) as NativeHub[]).map((h) => ({ ...h, name: hubDisplayName(h.alias ?? (h.alias === undefined ? h.name : ""), h.address, h.current) })),
     switchTo: async (h) => { await b.call("hubs.switch", { id: h.id }) },
     add: async (input, name) => {
       if (parsePairLink(input)) { await b.call("pair.claim", { link: input.trim() }); return }
@@ -516,6 +539,9 @@ function nativeDirectory(b: NativeBridge): HubDirectory {
       if (!address) throw new HubError("bad-address")
       await b.call("hubs.add", { address, ...(name?.trim() ? { name: name.trim() } : {}) })
     },
+    ...(b.can.includes("hubs.rename") ? { rename: async (h: HubEntry, alias: string) => {
+      await b.call("hubs.rename", { id: h.id, alias: normalizeAlias(alias) }); tell()
+    } } : {}),
     forget: async (h) => { await b.call("hubs.forget", { id: h.id }) },
     ...(b.can.includes("pair.scan") ? { scan: async () => { await b.call("pair.scan") } } : {}),
   }
@@ -524,5 +550,29 @@ function nativeDirectory(b: NativeBridge): HubDirectory {
 /** the Hubs of where this page runs: a browser's own list, or the native shell's */
 export function hubDirectory(): HubDirectory {
   const b = nativeBridge()
-  return b ? nativeDirectory(b) : browserDirectory()
+  const dir = b ? nativeDirectory(b) : browserDirectory()
+  const switchTo = dir.switchTo, add = dir.add
+  return { ...dir, switchTo: async h => { if (hubNavigationAllowed()) await switchTo(h) }, add: async (input, name) => { if (hubNavigationAllowed()) await add(input, name) } }
 }
+
+/** Same Unicode scalar limit as shared names; empty explicitly clears only this client's alias. */
+export function normalizeAlias(raw: string): string {
+  const value = raw.trim()
+  if ([...value].length > 64 || /[\p{Cc}\u2028\u2029]/u.test(value)) throw new Error("invalid-alias")
+  return value
+}
+const sharedNames = new Map<string, { name: string; hub_id?: string; revision?: number }>()
+export function setSharedHubName(name: string, identity?: { hub_id: string; revision: number }) {
+  const old = sharedNames.get(currentHub())
+  if (identity && old?.hub_id === identity.hub_id && (old.revision ?? -1) > identity.revision) return
+  sharedNames.set(currentHub(), { name, ...identity })
+  if (old?.name !== name) tell()
+}
+function hubDisplayName(alias: string | undefined, address: string, current = address === currentHub()): string {
+  const shared = current ? sharedNames.get(currentHub())?.name : undefined
+  return alias ? shared && shared !== alias ? `${alias} · ${shared}` : alias : shared || hostOf(address)
+}
+
+let navigationGuard: (() => boolean) | null = null
+export function setHubNavigationGuard(guard: (() => boolean) | null) { navigationGuard = guard }
+export function hubNavigationAllowed() { return navigationGuard?.() ?? true }
