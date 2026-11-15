@@ -23,7 +23,7 @@
 .device-chart svg { display: block; width: 100%; height: 10rem; min-height: 8lh; overflow: visible; }
 .device-chart-times { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 1rem; }
 .device-chart-times time { max-width: 100%; }
-.device-page h1, .device-page h2, .device-work-row h3, .device-work-row p, .device-counts > *, .device-actions > *, .device-vitals p, .device-vitals h3, .device-vitals summary, .device-config p, .device-config label, .device-config button, .device-evidence p { line-height: 1.5; }
+.device-page h1, .device-page h2, .device-page p, .device-work-row h3, .device-work-row p, .device-counts > *, .device-actions > *, .device-vitals p, .device-vitals h3, .device-vitals summary, .device-config p, .device-config label, .device-config button, .device-evidence p { line-height: 1.5; }
 .device-config button { white-space: normal; height: auto; min-height: 2.25rem; padding-block: .5rem; }
 
 .device-chart-times time, .device-chart figcaption, .device-evidence [data-slot=dialog-description], .device-evidence [data-slot=dialog-title] { line-height: 1.5; }
