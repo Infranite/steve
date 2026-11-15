@@ -39,12 +39,14 @@ pub use workspace::*;
 
 /// Major.minor of this contract. A major change refuses the connection; a minor one only adds, and
 /// the Hub sends what a minor added only to a Node whose hello says that minor (see [`AUTO_MODE`]).
-pub const PROTOCOL: (u16, u16) = (0, 3);
+pub const PROTOCOL: (u16, u16) = (0, 4);
 /// The first protocol with [`PermissionMode::Auto`]: an older Node cannot decode it, so the Hub
 /// never opens or configures a session in `auto` on one.
 pub const AUTO_MODE: (u16, u16) = (0, 2);
 /// The first protocol with [`Discovery::vitals`] (B3): an older Node is not asked.
 pub const VITALS: (u16, u16) = (0, 3);
+/// The first protocol with live per-device turn capacity ([`Discovery::set_session_capacity`]).
+pub const SESSION_CAPACITY: (u16, u16) = (0, 4);
 /// Why an execution a Node held is `unknown` after the Node restarted (its process, the harness
 /// with it, is gone): what the Hub gives up and continues on its own (B6), unlike other unknowns.
 pub const RESTARTED: &str = "the node restarted while it ran";

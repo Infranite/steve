@@ -95,5 +95,9 @@
   "knowledge.use.draft": "An email draft",
   "knowledge.use.flow": "An automation run",
   "knowledge.change.not_undoable": "This change was already undone, or has nothing to undo",
-  "knowledge.change.answered": "This conflict was already answered"
+  "knowledge.change.answered": "This conflict was already answered",
+  "knowledge.doc_prefix.notes": "Note",
+  "knowledge.doc_prefix.files": "File",
+  "knowledge.doc_prefix.items": "Item record",
+  "knowledge.doc_prefix.chat": "Conversation record"
 }

@@ -1,0 +1,3 @@
+The first-run tour asks which harness and model to use before the first meeting. Choosing and saving a model works without inference; installed models are not presented as proof of available quota. The tour can still be skipped.
+
+Owners can change Steve’s default above the main-conversation composer and beside failed answers. By default the choice also clears the current workspace’s separate purpose settings, preventing routing and other judgments from continuing to call the previous provider; those settings can explicitly be kept. Saving is atomic and rejects stale edits. An explicit retry resends the original message with its attachments, and warns that completed operations may run again.

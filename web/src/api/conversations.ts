@@ -1,7 +1,7 @@
 import type { ChanMessage } from "@/api/channels"
 /* IM conversations (channels-personas.md §2.12): every space where Steve answers has one conversation,
- * `messages.space = "chan:<space>"`, routed like the web's. The Rust Hub's /api/conversations; the TS Hub has none
- * (`undefined`: the 对话 page then shows only your own conversation). Read-only here. */
+ * `messages.space = "chan:<space>"`, routed like the web's. The optional list tolerates a Hub without this module;
+ * opening a specific conversation keeps request failures distinct so the page can offer a retry. */
 import { modReq, isNotWired, type RMessage } from "@/api"
 
 /** where a conversation lives: provider, space, group or DM */
@@ -19,5 +19,5 @@ export const conversationsApi = {
   page: (q: string, state: "open" | "closed" | "all", offset = 0) => modReq<ConvPage>("GET", `/conversations?q=${e(q)}&state=${state}&offset=${offset}&limit=50`),
   preference: (space: string, closed: boolean) => modReq("PATCH", `/conversations/${e(space)}/preferences`, { closed }),
   list: () => optional(modReq<{ conversations: ConvRow[] }>("GET", "/conversations")).then((r) => r?.conversations),
-  messages: (space: string) => optional(modReq<{ conversation: ConvBadge; messages: ConvMessage[] }>("GET", `/conversations/${e(space)}/messages`)),
+  messages: (space: string) => modReq<{ conversation: ConvBadge; messages: ConvMessage[] }>("GET", `/conversations/${e(space)}/messages`),
 }

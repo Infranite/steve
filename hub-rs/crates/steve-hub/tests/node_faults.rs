@@ -198,6 +198,7 @@ fn update_catalog() -> Vec<ToolDescriptor> {
         description: "Update the item.".into(),
         input_schema: serde_json::json!({"type": "object"}),
         read_only: false,
+        annotations: serde_json::Value::Null,
     }]
 }
 

@@ -12,6 +12,112 @@ use steve_node_api::*;
 use steve_node_wire::{Identity, RemoteSink, identity};
 use steve_store::StoreError;
 
+/// Capacity routes use the real router without binding a listener or running a Node.
+#[tokio::test]
+async fn capacity_api_saves_only_valid_owner_limits_and_lists_live_room() {
+    use axum::body::{Body, to_bytes};
+    use axum::http::Request;
+    use steve_hub::nodes::{NodeFleet, NodeService, api_router};
+    use tower::ServiceExt;
+
+    async fn call(
+        app: &axum::Router,
+        user: &str,
+        body: Option<serde_json::Value>,
+    ) -> (u16, serde_json::Value) {
+        let req = Request::builder()
+            .method(if body.is_some() { "POST" } else { "GET" })
+            .uri(if body.is_some() {
+                "/nodes/n1/limit"
+            } else {
+                "/nodes"
+            })
+            .header("content-type", "application/json")
+            .extension(steve_modules::Caller {
+                ws: "default".into(),
+                me: user.into(),
+            })
+            .body(
+                body.map(|v| Body::from(v.to_string()))
+                    .unwrap_or_else(Body::empty),
+            )
+            .unwrap();
+        let response = app.clone().oneshot(req).await.unwrap();
+        let status = response.status().as_u16();
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        (
+            status,
+            serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null),
+        )
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let store = store_at(dir.path());
+    store.transaction::<_, StoreError>(|tx| {
+        tx.execute("INSERT INTO nodes(node_id,owner,name,pubkey,fingerprint,state,created) VALUES ('n1','u1','Node',zeroblob(32),'fp','active',1)", [])?;
+        Ok(())
+    }).unwrap();
+    let fleet = NodeFleet::new(store.clone(), dir.path().join("data"), None, None);
+    let svc = NodeService::new(store.clone(), fleet, None).unwrap();
+    let app = api_router(svc);
+    let (_, listed) = call(&app, "u1", None).await;
+    assert_eq!(listed["nodes"][0]["max_sessions"], 32);
+    assert_eq!(listed["nodes"][0]["running"], 0);
+    assert_eq!(listed["nodes"][0]["waiting"], 0);
+    assert_eq!(call(&app, "u2", None).await.1["nodes"], json!([]));
+    assert_eq!(
+        call(&app, "u2", Some(json!({"max_sessions": 64}))).await.0,
+        409
+    );
+    for invalid in [
+        json!({}),
+        json!({"max_sessions": 0}),
+        json!({"max_sessions": 257}),
+        json!({"max_sessions": 1.5}),
+        json!({"max_sessions": "64"}),
+    ] {
+        assert_ne!(call(&app, "u1", Some(invalid)).await.0, 200);
+    }
+    assert_eq!(
+        call(&app, "u1", None).await.1["nodes"][0]["max_sessions"],
+        32
+    );
+    for limit in [1, 64, 256] {
+        assert_eq!(
+            call(&app, "u1", Some(json!({"max_sessions": limit})))
+                .await
+                .0,
+            200
+        );
+        assert_eq!(
+            call(&app, "u1", None).await.1["nodes"][0]["max_sessions"],
+            limit
+        );
+    }
+    assert_eq!(
+        store
+            .reader(|c| c
+                .query_row(
+                    "SELECT COUNT(*) FROM node_audit WHERE what='limit'",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )
+                .map_err(StoreError::from))
+            .unwrap(),
+        3
+    );
+    store
+        .transaction::<_, StoreError>(|tx| {
+            tx.execute("UPDATE nodes SET state='revoked' WHERE node_id='n1'", [])?;
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(
+        call(&app, "u1", Some(json!({"max_sessions": 32}))).await.0,
+        409
+    );
+}
+
 /// Every text and blob in the Node tables, to look for secrets.
 fn everything(h: &Hub) -> Vec<String> {
     h.store

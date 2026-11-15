@@ -897,7 +897,32 @@ impl Repo for StoreBackend {
             .map_err(err)
     }
     fn devices_list(&self) -> BResult<Vec<Obj>> {
-        objs(self.0.devices().list().map_err(err)?)
+        use steve_store::runtime::{HUB_DEVICE, HUB_NODE, session_room};
+        let mut out = objs(self.0.devices().list().map_err(err)?)?;
+        // the Hub's machine runs the Hub's own Node: how many of its turns run and wait, against
+        // the limit on this row
+        let room = self.0.reader(|c| session_room(c, HUB_NODE)).map_err(err)?;
+        for d in out
+            .iter_mut()
+            .filter(|d| d.get("id").and_then(Value::as_str) == Some(HUB_DEVICE))
+        {
+            d.insert("running".into(), serde_json::json!(room.running));
+            d.insert("waiting".into(), serde_json::json!(room.waiting));
+        }
+        Ok(out)
+    }
+    fn waiting_for_room(&self) -> BResult<HashMap<String, Value>> {
+        let rows = self
+            .0
+            .reader(steve_store::runtime::sessions_waiting_for_room)
+            .map_err(err)?;
+        rows.into_iter()
+            .map(|(s, r)| {
+                serde_json::to_value(r)
+                    .map(|v| (s, v))
+                    .map_err(|e| BackendError::msg(e.to_string()))
+            })
+            .collect()
     }
     fn device_upsert(
         &self,

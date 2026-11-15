@@ -101,6 +101,10 @@ pub const PAUSED_BY_AGENT: &str = "agent";
 pub const PAUSED_BY_USER: &str = "user";
 pub const PAUSED_BY_ITEM: &str = "item";
 
+/// The history notes the store writes itself (zh-CN; steve-core words them for the reader).
+pub const NOTE_CLAIMED: &str = "调度就绪工作";
+pub const NOTE_SESSION_BOUND: &str = "工作会话已绑定";
+
 impl Workflow {
     /// Who paused the graph and why, while it is paused: [`PAUSED_BY_AGENT`] (its coordinator or
     /// another Bot, with the tool), [`PAUSED_BY_USER`] or [`PAUSED_BY_ITEM`] (the item itself was
@@ -890,7 +894,7 @@ impl Workflows<'_> {
                 to_v:Some("run".into()),..Default::default()
             })?;
             tx.publish(ChangeEvent::Item { id: child.clone() });
-            record(tx,parent,"claim","调度就绪工作",Some(id),&json!({"child":child,"attempt":unit.attempt+1}))?;
+            record(tx,parent,"claim",NOTE_CLAIMED,Some(id),&json!({"child":child,"attempt":unit.attempt+1}))?;
             Ok(must_unit(&must_graph(tx,parent)?,id)?.clone())
         })
     }
@@ -933,7 +937,7 @@ impl Workflows<'_> {
                 "UPDATE workflow_units SET status='running',session_id=? WHERE workflow_id=? AND id=?",
                 params![session,parent,id],
             )?;
-            record(tx,parent,"start","工作会话已绑定",Some(id),&json!({"session":session,"child":child}))?;
+            record(tx,parent,"start",NOTE_SESSION_BOUND,Some(id),&json!({"session":session,"child":child}))?;
             Ok(must_unit(&must_graph(tx,parent)?,id)?.clone())
         })
     }

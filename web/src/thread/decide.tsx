@@ -77,7 +77,8 @@ function Detail({ w, extra }: { w: Wait; extra?: ReactNode }) {
   const t = useT()
   return <>
     {w.subject === "chan_message" && (w.type === "approve" || w.type === "fail") && <OutContext id={w.subjectId} />}
-    {w.draft && !isToolCall(w) && <div className="max-h-72 overflow-auto break-words text-muted-foreground"><Markdown text={w.draft} /></div>}
+    {/* the draft's headings are text: a "## 交付" never outranks the question above it */}
+    {w.draft && !isToolCall(w) && <div className="max-h-72 overflow-auto break-words text-muted-foreground [&_:is(h1,h2,h3,h4,h5,h6)]:mt-0! [&_:is(h1,h2,h3,h4,h5,h6)]:mb-1! [&_:is(h1,h2,h3,h4,h5,h6)]:[font:inherit]! [&_:is(h1,h2,h3,h4,h5,h6)]:font-medium! [&_:is(h1,h2,h3,h4,h5,h6)]:text-foreground"><Markdown text={w.draft} /></div>}
     {extra}
     <YoloBadge decision={w.decision} subject={w.subject} />
     {w.busy && <div role="status" className="flex items-center gap-1.5 type-footnote text-muted-foreground" data-agent-busy><span className="size-1.5 rounded-full bg-blue dot-running" aria-hidden />{t("core:card.agentBusy")}</div>}

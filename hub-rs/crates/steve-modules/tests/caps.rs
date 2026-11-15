@@ -559,3 +559,131 @@ async fn a_remote_agent_is_added_by_its_card_and_sent_a_task() {
     assert!(h.svc.a2a_tools("s_dev").is_empty());
     nowhere_on_disk(&h, &["agent-KEY"]);
 }
+
+#[tokio::test]
+async fn bot_tool_pins_are_scoped_bounded_and_follow_enabled_capabilities() {
+    let h = setup();
+    let path = "/bots/dev/tool-pins/tool/steve_workflow";
+    assert_eq!(req(&h, "PUT", path, None).await.0, 200);
+    assert_eq!(req(&h, "PUT", path, None).await.0, 200, "idempotent");
+    assert_eq!(
+        req(&h, "PUT", "/bots/dev/tool-pins/tool/steve_update", None)
+            .await
+            .0,
+        200
+    );
+    let (code, value) = req(&h, "GET", "/bots/dev/tools", None).await;
+    assert_eq!(code, 200, "{value}");
+    assert_eq!(value["core"].as_array().unwrap().len(), 8);
+    assert_eq!(
+        value["pins"],
+        json!([{"kind":"tool", "target":"steve_workflow"}])
+    );
+    assert_eq!(value["days"], 30);
+    assert_eq!(
+        req(&h, "GET", "/bots/doc/tools", None).await.1["pins"],
+        json!([])
+    );
+    let (code, _) = call(
+        &h.api,
+        Some(&caller(WS2, ME)),
+        "GET",
+        "/bots/dev/tools",
+        None,
+    )
+    .await;
+    assert_eq!(code, 404, "another workspace cannot read pins");
+    let (code, _) = call(&h.api, Some(&caller(WS2, ME)), "PUT", path, None).await;
+    assert_eq!(code, 404, "another workspace cannot change pins");
+    assert_eq!(
+        req(&h, "PUT", "/bots/dev/tool-pins/skill/x", None).await.0,
+        400
+    );
+
+    let (code, server) = req(
+        &h,
+        "POST",
+        "/capabilities/mcp-servers",
+        Some(json!({
+            "name":"pinned", "transport":"http", "url":"https://example.com/mcp", "bot":"dev"
+        })),
+    )
+    .await;
+    assert_eq!(code, 200, "{server}");
+    let id = server["id"].as_str().unwrap();
+    let remote_pin = format!("/bots/dev/tool-pins/mcp/{id}");
+    assert_eq!(req(&h, "PUT", &remote_pin, None).await.0, 200);
+    assert_eq!(
+        req(&h, "PUT", &format!("/bots/doc/tool-pins/mcp/{id}"), None)
+            .await
+            .0,
+        404
+    );
+    req(&h, "DELETE", &remote_pin, None).await;
+    req(
+        &h,
+        "PUT",
+        &format!("/bots/dev/capabilities/mcp/{id}"),
+        Some(json!({"enabled":false})),
+    )
+    .await;
+    assert_eq!(
+        req(&h, "PUT", &remote_pin, None).await.0,
+        404,
+        "a disabled server cannot be pinned"
+    );
+    req(
+        &h,
+        "PUT",
+        &format!("/bots/dev/capabilities/mcp/{id}"),
+        Some(json!({"enabled":true})),
+    )
+    .await;
+    assert_eq!(req(&h, "PUT", &remote_pin, None).await.0, 200);
+    req(
+        &h,
+        "DELETE",
+        &format!("/bots/dev/capabilities/mcp/{id}"),
+        None,
+    )
+    .await;
+    assert_eq!(
+        req(&h, "GET", "/bots/dev/tools", None).await.1["pins"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    for i in 0..31 {
+        assert_eq!(
+            req(
+                &h,
+                "PUT",
+                &format!("/bots/dev/tool-pins/tool/tool_{i}"),
+                None
+            )
+            .await
+            .0,
+            200
+        );
+    }
+    assert_eq!(
+        req(&h, "PUT", "/bots/dev/tool-pins/tool/overflow", None)
+            .await
+            .0,
+        400
+    );
+    assert_eq!(
+        req(&h, "PUT", path, None).await.0,
+        200,
+        "an existing pin still fits"
+    );
+    assert_eq!(req(&h, "DELETE", path, None).await.0, 200);
+    assert_eq!(
+        q::<i64>(
+            &h,
+            "SELECT COUNT(*) FROM audit WHERE action = 'bot_tool.pin' AND target = 'steve_workflow'"
+        ),
+        1
+    );
+}

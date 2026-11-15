@@ -222,7 +222,10 @@ impl Tx<'_> {
         if p.device_id != crate::release::HUB_DEVICE {
             return Ok(false);
         }
-        Ok(crate::config::is_steve_project(&p.path, &self.cfg().steve_repo))
+        Ok(crate::config::is_steve_project(
+            &p.path,
+            &self.cfg().steve_repo,
+        ))
     }
 
     /// Steve checks that the result runs here: Steve's own project with a completion rule.

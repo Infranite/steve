@@ -9,7 +9,8 @@ import { homeTilde } from "@/resume"
 import { useT } from "@/i18n"
 import { cn } from "cn"
 import { ArrowUpRightIcon } from "lucide-react"
-import type { ReactNode } from "react"
+import { useEffect, useState, type ReactNode } from "react"
+import { SteveModelForm } from "@/steve-model"
 import type pages from "@/i18n/locales/zh-CN/pages"
 
 type V = Record<string, never>
@@ -42,6 +43,8 @@ const List = ({ children }: { children: ReactNode }) => <ul className="flex flex
 export function Onboarding() {
   useStore()
   const t = useT()
+  const [modelChosen, setModelChosen] = useState(false)
+  useEffect(() => setModelChosen(false), [st.workspace?.id])
   if (st.onboard < 0) return null
   const k = (s: K, o?: Record<string, unknown>) => String(t(`pages:chat.onboard.${s}`, o as never))
   const rts = st.runtimes, ok = rts.filter((r) => r.ok).map((r) => r.name)
@@ -53,7 +56,10 @@ export function Onboarding() {
       render: () => null,
     },
     { id: "runtime", title: k("runtime"), heading: k("runtimeHead"), description: ok.length ? k("runtimes", { first: ok[0] }) : k("noRuntime"),
-      render: () => <div className="flex flex-col gap-3">
+      validate: () => st.owner && !modelChosen ? { model: t("pages:models.setup.required") } : null,
+      render: ({ errors }) => <div className="flex flex-col gap-3">
+        {st.owner && <SteveModelForm key={st.workspace?.id} first onSaved={() => setModelChosen(true)} onDirty={() => setModelChosen(false)} />}
+        {errors.model && <p role="alert" className="type-callout text-destructive" data-onboard-model-required>{errors.model}</p>}
         {rts.length > 0 && <List>{rts.map((r) => <Row key={r.id} ok={r.ok} name={r.name} data={{ "data-onboard-runtime": r.id }}
           sub={r.ok ? (r.models.length ? k("models", { count: r.models.length }) : r.note) : (r.error || r.install_hint || k("unavailable"))} />)}</List>}
         <Out to="#/devices" id="devices">{k("devices")}</Out>
@@ -91,7 +97,7 @@ export function Onboarding() {
         submitLabel={st.owner ? k("meetGo") : k("finish")}
         submittingLabel={st.owner ? k("meetGo") : k("finish")}
         aside={<Button type="button" size="sm" variant="ghost" className="text-muted-foreground" onClick={skipOnboarding} data-onboard-skip>{last && st.owner ? k("later") : k("skip")}</Button>}
-        onComplete={async () => { if (st.owner) await meet(); else { finishOnboarding(); toast(k("done")) } }}
+        onComplete={async () => { if (st.owner && !modelChosen) throw new Error(t("pages:models.setup.required")); if (st.owner) await meet(); else { finishOnboarding(); toast(k("done")) } }}
         success={() => <StepperSuccess title={k("done")} />}
       />
     </div>

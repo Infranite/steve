@@ -148,7 +148,7 @@ function Identity({ kind, c, p, chan, app, appConn, onLeave }: { kind: "steve" |
           <span className="type-callout text-muted-foreground">{chan.persona.name}</span><ChevronRightIcon className="size-4 text-tertiary" /></Row>}
         <Row title={feishu ? t("integrations:inst.perGroup") : t("integrations:inst.settings")} sub={feishu ? t("integrations:inst.perGroupSub") : undefined} onClick={() => go(channelHref)} data-identity-settings>
           <ChevronRightIcon className="size-4 text-tertiary" /></Row>
-        <Row title={t("integrations:inst.owner")} data-conn-owner><OwnerChip objectType="connection" objectId={c.id} /></Row>
+        <Row title={t("integrations:inst.owner")} data-conn-owner><OwnerChip objectType="connection" objectId={c.id} showStatus /></Row>
       </Group>
       <Capabilities c={c} kind={kind} feishu={feishu} planned={planned.map((a) => areaLabel(a.area))} />
       {feishu && c.installed !== false && (kind === "steve" ? <BotPermissions c={c} app={app} /> : <UserPermissions c={c} app={app} appConn={appConn} side={selfSideOf(p.adapters) as IAdapter | null} />)}

@@ -40,6 +40,7 @@ tracing = "=0.1.44"
 steve-modules = { path = "../steve-modules" }
 # F6: the transaction type of identify / merge.
 steve-store = { path = "../steve-store" }
+steve-work-api = { path = "../steve-work-api" }
 async-trait = "=0.1.92"
 url = "=2.5.8"
 zeroize = "=1.9.1"
@@ -57,6 +58,8 @@ chrono = { version = "=0.4.45", default-features = false, features = ["std"] }
 chrono-tz = "=0.10.4"
 # C5: the rule check's patterns (same version as steve-modules).
 regex = "=1.13.1"
+# Local-only validation; no HTTP/file schema retrieval.
+jsonschema = { version = "=0.60.2", default-features = false }
 # API errors and draft cards in the request's language.
 steve-i18n = { path = "../steve-i18n" }
 rust-i18n = "=4.2.4"

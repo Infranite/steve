@@ -60,6 +60,8 @@ fn nullable<'de, D: Deserializer<'de>, T: Deserialize<'de>>(
 /// Body of `POST /schedules` and `PATCH /schedules/:id`.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct ScheduleBody {
+    #[serde(default, deserialize_with = "nullable")]
+    pub requester: Option<Option<String>>,
     pub name: Option<String>,
     pub when: Option<String>,
     pub cron: Option<String>,
@@ -197,6 +199,7 @@ async fn create(
     let (when, expr) = resolve_time(&cx, b.when.as_deref(), b.cron.as_deref(), tz).await?;
     let mode = b.mode.unwrap_or(Mode::ItemAuto);
     let spec = Spec {
+        requester: b.requester.clone().flatten(),
         when,
         cron: expr.as_str().into(),
         tz: tz.name().into(),
@@ -233,6 +236,9 @@ async fn create(
 /// The new spec of a patched schedule (`None` fields keep their value).
 pub async fn patched_spec(cx: &FlowCx, old: &Spec, b: &ScheduleBody) -> ApiResult<Spec> {
     let mut spec = old.clone();
+    if let Some(v) = &b.requester {
+        spec.requester = v.clone();
+    }
     if let Some(t) = &b.tz {
         spec.tz = zone(t)?.name().into();
     }
@@ -288,6 +294,11 @@ async fn patch(
     cx.store().transaction(|tx| -> ApiResult<_> {
         // Re-read: the row may have changed while the model was thinking.
         let cur = schedules::own(tx, &who.ws, &id)?;
+        if cur.updated != old.updated {
+            return Err(ApiError::Conflict(
+                "Schedule changed; reread before editing".into(),
+            ));
+        }
         schedules::check_refs(tx, &who.ws, &spec)?;
         let name = b
             .name

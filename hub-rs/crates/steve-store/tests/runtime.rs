@@ -775,3 +775,207 @@ fn desired_config_round_trip_leaves_the_revision_and_configuring_is_a_phase() {
         })
         .unwrap();
 }
+
+/// Minimal command fixture: scheduling counts actual turn operations, never the UI's status rows.
+fn room_command(
+    tx: &steve_store::Tx<'_>,
+    op: &str,
+    node: &str,
+    method: &str,
+    dep: Option<&str>,
+) -> Result<()> {
+    assert!(insert_command_in(
+        tx,
+        &NewCommand {
+            operation: op,
+            node,
+            method,
+            request: &json!({"body":{"session":op}}),
+            digest: "digest",
+            target_attempt: None,
+            dependency: dep,
+        },
+        1
+    )?);
+    Ok(())
+}
+
+#[test]
+fn capacity_defaults_to_32_and_only_unsent_turns_queue_in_order() {
+    let t = fresh();
+    t.store
+        .transaction::<_, StoreError>(|tx| {
+            assert_eq!(session_limit(tx, HUB_NODE)?, 32);
+            assert_eq!(session_limit(tx, "n")?, 32);
+            for i in 0..33 {
+                room_command(tx, &format!("turn_{i}"), "n", "start_turn", None)?;
+            }
+            for i in 0..32 {
+                let l = lease_command_in(tx, "n", "w", 2, 100)?.unwrap();
+                assert_eq!(l.operation, format!("turn_{i}"));
+                merge_receipt_in(tx, &l.operation, ReceiptState::Active, false, &json!({}), 2)?;
+            }
+            assert_eq!(
+                session_room(tx, "n")?,
+                SessionRoom {
+                    running: 32,
+                    max: 32,
+                    waiting: 1
+                }
+            );
+            assert!(lease_command_in(tx, "n", "w", 2, 100)?.is_none());
+            assert_eq!(sessions_waiting_for_room(tx)?[0].0, "turn_32");
+            // Commands that can free room or answer a running harness must pass the waiting turn.
+            for method in [
+                "cancel",
+                "resolve_permission",
+                "release_session",
+                "start_job",
+                "exec",
+            ] {
+                room_command(tx, method, "n", method, None)?;
+                assert_eq!(
+                    lease_command_in(tx, "n", "w", 2, 100)?.unwrap().operation,
+                    method
+                );
+            }
+            // Other Nodes have their own room.
+            room_command(tx, "other", "other", "start_turn", None)?;
+            assert_eq!(
+                lease_command_in(tx, "other", "w", 2, 100)?
+                    .unwrap()
+                    .operation,
+                "other"
+            );
+            merge_receipt_in(tx, "turn_0", ReceiptState::Finished, true, &json!({}), 3)?;
+            let l = lease_command_in(tx, "n", "w", 3, 100)?.unwrap();
+            assert_eq!(l.operation, "turn_32");
+            assert_eq!(
+                l.digest, "digest",
+                "waiting never rewrites the execution identity"
+            );
+            assert!(sessions_waiting_for_room(tx)?.is_empty());
+            Ok(())
+        })
+        .unwrap();
+}
+
+#[test]
+fn capacity_changes_apply_at_dispatch_without_interrupting_current_turns() {
+    let t = fresh();
+    t.store.transaction::<_, StoreError>(|tx| {
+        tx.execute("INSERT INTO devices(id,name,roles,max_sessions,seen,created) VALUES ('hub','Hub','[]',1,1,1)", [])?;
+        for op in ["first", "second", "third"] { room_command(tx, op, HUB_NODE, "start_turn", None)?; }
+        let first = lease_command_in(tx, HUB_NODE, "w", 2, 100)?.unwrap();
+        // An in-flight/uncertain send occupies a slot; a definitive refusal releases it.
+        assert_eq!(session_room(tx, HUB_NODE)?.running, 1);
+        assert!(lease_command_in(tx, HUB_NODE, "w", 2, 100)?.is_none());
+        assert!(retry_command_in(tx, &first, 2, 2, false)?);
+        let again = lease_command_in(tx, HUB_NODE, "w", 2, 100)?.unwrap();
+        assert_eq!(again.operation, first.operation);
+        assert!(retry_command_in(tx, &again, 2, 2, true)?);
+        // An unknown send may be looked up/resent under the same id, even while full.
+        let known = lease_command_in(tx, HUB_NODE, "w", 2, 100)?.unwrap();
+        assert!(known.maybe_sent);
+        merge_receipt_in(tx, &known.operation, ReceiptState::Unknown, false, &json!({}), 2)?;
+        assert!(lease_command_in(tx, HUB_NODE, "w", 2, 100)?.is_none());
+        tx.execute("UPDATE devices SET max_sessions=2 WHERE id='hub'", [])?;
+        let second = lease_command_in(tx, HUB_NODE, "w", 3, 100)?.unwrap();
+        assert_eq!(second.operation, "second");
+        merge_receipt_in(tx, "second", ReceiptState::Active, false, &json!({}), 3)?;
+        tx.execute("UPDATE devices SET max_sessions=1 WHERE id='hub'", [])?;
+        assert_eq!(session_room(tx, HUB_NODE)?.running, 2, "lowering does not end work");
+        assert!(lease_command_in(tx, HUB_NODE, "w", 3, 100)?.is_none());
+        merge_receipt_in(tx, "first", ReceiptState::Finished, true, &json!({}), 4)?;
+        assert!(lease_command_in(tx, HUB_NODE, "w", 4, 100)?.is_none());
+        merge_receipt_in(tx, "second", ReceiptState::Finished, true, &json!({}), 5)?;
+        assert_eq!(lease_command_in(tx, HUB_NODE, "w", 5, 100)?.unwrap().operation, "third");
+        Ok(())
+    }).unwrap();
+}
+
+#[test]
+fn capacity_wait_reasons_exclude_unready_dependencies_and_preserve_node_refusals() {
+    let t = fresh();
+    t.store
+        .transaction::<_, StoreError>(|tx| {
+            room_command(tx, "prepare", "n", "prepare_workspace", None)?;
+            room_command(tx, "unready", "n", "start_turn", Some("prepare"))?;
+            room_command(tx, "storage", "n", "start_turn", None)?;
+            tx.execute(
+                "UPDATE node_commands SET receipt=? WHERE operation_id='storage'",
+                [json!({"last_error":{"safe_detail":"journal storage full"}}).to_string()],
+            )?;
+            let waits = sessions_waiting_for_room(tx)?;
+            assert_eq!(waits.len(), 1);
+            assert_eq!(waits[0].0, "storage");
+            assert_eq!(waits[0].1.reason, "node");
+            assert_eq!(waits[0].1.detail.as_deref(), Some("journal storage full"));
+            assert_eq!(
+                session_room(tx, "n")?.waiting,
+                1,
+                "preparation is not a capacity wait"
+            );
+            merge_receipt_in(tx, "storage", ReceiptState::Active, false, &json!({}), 2)?;
+            assert!(
+                sessions_waiting_for_room(tx)?.is_empty(),
+                "accepted work loses the old retry reason"
+            );
+            Ok(())
+        })
+        .unwrap();
+}
+
+#[test]
+fn concurrent_capacity_leases_have_only_32_winners_and_survive_reopen() {
+    let t = fresh();
+    t.store
+        .transaction::<_, StoreError>(|tx| {
+            for i in 0..34 {
+                room_command(tx, &format!("turn_{i}"), "n", "start_turn", None)?;
+            }
+            Ok(())
+        })
+        .unwrap();
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+    let joins: Vec<_> = (0..2)
+        .map(|worker| {
+            let s = t.store.clone();
+            let b = barrier.clone();
+            std::thread::spawn(move || {
+                b.wait();
+                let mut won = 0;
+                for _ in 0..34 {
+                    if s.transaction::<_, StoreError>(|tx| {
+                        lease_command_in(tx, "n", &format!("w{worker}"), 2, 100)
+                    })
+                    .unwrap()
+                    .is_some()
+                    {
+                        won += 1;
+                    }
+                }
+                won
+            })
+        })
+        .collect();
+    assert_eq!(
+        joins.into_iter().map(|j| j.join().unwrap()).sum::<i32>(),
+        32
+    );
+    let reopened = steve_store::Store::open(t.store.path(), steve_store::NoPublisher).unwrap();
+    reopened
+        .transaction::<_, StoreError>(|tx| {
+            assert_eq!(
+                session_room(tx, "n")?,
+                SessionRoom {
+                    running: 32,
+                    max: 32,
+                    waiting: 2
+                }
+            );
+            assert!(lease_command_in(tx, "n", "restarted", 3, 100)?.is_none());
+            Ok(())
+        })
+        .unwrap();
+}

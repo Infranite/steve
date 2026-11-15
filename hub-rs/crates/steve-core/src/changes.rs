@@ -204,8 +204,108 @@ fn text_field(key: &str, label: &str, current: &str) -> BotField {
     }
 }
 
-/// `efforts`: what the bot's harness adapter takes.
-fn bot_fields(b: &Bot, projects: &[crate::repo::Project], efforts: &[String]) -> Vec<BotField> {
+fn perm_mode_of_key(k: &str) -> Option<steve_node_api::PermissionMode> {
+    use steve_node_api::PermissionMode as P;
+    Some(match k {
+        "plan" => P::Plan,
+        "default" => P::Ask,
+        "acceptEdits" => P::AcceptEdits,
+        "auto" => P::Auto,
+        "bypassPermissions" => P::FullAccess,
+        _ => return None,
+    })
+}
+
+const STANDARD_EFFORTS: &[&str] = &[
+    "none", "off", "minimal", "low", "medium", "high", "xhigh", "max", "ultra",
+];
+
+fn encode_effort_value(s: &str, offered: &[(String, String)]) -> Option<String> {
+    let s = s.trim();
+    if s.is_empty() || s == "默认" {
+        return None;
+    }
+    if let Some((k, _)) = offered.iter().find(|(k, l)| l == s || k == s) {
+        return Some(k.clone());
+    }
+    if let Some(&k) = STANDARD_EFFORTS
+        .iter()
+        .find(|&&k| crate::models::effort_label(k) == Some(s) || k == s)
+    {
+        return Some(k.to_string());
+    }
+    // Never persist localized CJK labels into `bots.reasoning_effort`.
+    s.chars()
+        .all(|c| c.is_ascii_alphanumeric() || "_.:-".contains(c))
+        .then(|| s.to_string())
+}
+
+fn sanitize_bot_for_harness(
+    patch: &mut Map<String, Value>,
+    cur: Option<&Bot>,
+    harnesses: &[crate::harnesses::Harness],
+) -> Vec<String> {
+    let mut dropped = Vec::new();
+    let target_id = patch
+        .get("harness")
+        .and_then(Value::as_str)
+        .or_else(|| cur.map(|b| b.harness.as_str()))
+        .unwrap_or_default();
+    let Some(target) = harnesses.iter().find(|h| h.id == target_id) else {
+        return dropped;
+    };
+    let switched = patch
+        .get("harness")
+        .and_then(Value::as_str)
+        .is_some_and(|next_id| cur.is_none_or(|b| b.harness.as_str() != next_id));
+
+    if let Some(pm) = patch.get("perm_mode").and_then(Value::as_str) {
+        if perm_mode_of_key(pm).is_some_and(|m| !target.offers_mode(m)) {
+            if switched {
+                patch.insert("perm_mode".into(), json!(target.default_perm_mode()));
+            } else {
+                patch.remove("perm_mode");
+                dropped.push("perm_mode".into());
+            }
+        }
+    } else if switched
+        && let Some(b) = cur
+        && perm_mode_of_key(&b.perm_mode).is_some_and(|m| !target.offers_mode(m))
+    {
+        patch.insert("perm_mode".into(), json!(target.default_perm_mode()));
+    }
+
+    if let Some(val) = patch.get("reasoning_effort") {
+        if let Some(eff) = val.as_str()
+            && !target.takes_effort(eff)
+        {
+            if switched && cur.and_then(|b| b.reasoning_effort.as_ref()).is_some() {
+                patch.insert("reasoning_effort".into(), Value::Null);
+            } else {
+                patch.remove("reasoning_effort");
+                dropped.push("reasoning_effort".into());
+            }
+        }
+    } else if switched
+        && let Some(eff) = cur.and_then(|b| b.reasoning_effort.as_deref())
+        && !target.takes_effort(eff)
+    {
+        patch.insert("reasoning_effort".into(), Value::Null);
+    }
+
+    if switched && !patch.contains_key("model") && cur.and_then(|b| b.model.as_ref()).is_some() {
+        patch.insert("model".into(), Value::Null);
+    }
+    dropped
+}
+
+/// `harnesses`: the Hub's adapters, so `harness`, `reasoning_effort` and `perm_mode` reflect what
+/// the Hub's adapters offer even when the same draft switches `harness`.
+fn bot_fields(
+    b: &Bot,
+    projects: &[crate::repo::Project],
+    harnesses: &[crate::harnesses::Harness],
+) -> Vec<BotField> {
     let pro_at = |v: &Value| {
         v.as_i64()
             .and_then(|i| usize::try_from(i).ok())
@@ -219,9 +319,88 @@ fn bot_fields(b: &Bot, projects: &[crate::repo::Project], efforts: &[String]) ->
         .collect();
     let ps2 = ps.clone();
     let ps3 = ps.clone();
+    let cur_h = harnesses.iter().find(|h| h.id == b.harness);
+    let mut efforts: Vec<(String, String)> = Vec::new();
+    for h in cur_h.into_iter().chain(harnesses.iter()) {
+        for e in &h.efforts {
+            let lbl = crate::models::effort_label(e)
+                .map(str::to_string)
+                .unwrap_or_else(|| e.clone());
+            if !efforts.iter().any(|(k, l)| k == e || l == &lbl) {
+                efforts.push((e.clone(), lbl));
+            }
+        }
+    }
+    let efforts_enc = efforts.clone();
+    let efforts_dec = efforts.clone();
+    let cur_effort = b.reasoning_effort.as_deref().map_or_else(
+        || "默认".to_string(),
+        |e| {
+            efforts
+                .iter()
+                .find(|(k, _)| k == e)
+                .map(|(_, l)| l.clone())
+                .or_else(|| crate::models::effort_label(e).map(str::to_string))
+                .unwrap_or_else(|| e.to_string())
+        },
+    );
+    let perms: Vec<(&'static str, &'static str)> = PERM
+        .iter()
+        .copied()
+        .filter(|(k, _)| {
+            *k == b.perm_mode
+                || harnesses.is_empty()
+                || harnesses
+                    .iter()
+                    .any(|h| perm_mode_of_key(k).is_none_or(|m| h.offers_mode(m)))
+        })
+        .collect();
+    let perms_enc = perms.clone();
     let perm_keep = b.perm_mode.clone();
+    let hs: Vec<(String, String)> = harnesses
+        .iter()
+        .map(|h| (h.id.clone(), h.name.clone()))
+        .collect();
+    let hs_enc = hs.clone();
+    let hs_dec = hs.clone();
+    let harness_keep = b.harness.clone();
+    let cur_harness_name = crate::harnesses::name_of(harnesses, &b.harness);
     let mut fs = vec![
         text_field("name", "名字", &b.name),
+        BotField {
+            spec: FieldSpec {
+                key: "harness".into(),
+                label: "Harness".into(),
+                ty: "enum",
+                values: Some(
+                    hs.iter()
+                        .map(|(_, n)| n.clone())
+                        .chain(
+                            (!hs.iter().any(|(id, _)| id == &b.harness))
+                                .then(|| cur_harness_name.clone()),
+                        )
+                        .collect(),
+                ),
+                current: json!(cur_harness_name),
+            },
+            enc: Some(Box::new(move |v| {
+                let s = jstr(v);
+                let s = s.trim();
+                hs_enc
+                    .iter()
+                    .find(|(id, n)| n == s || id == s)
+                    .map(|(id, _)| json!(id))
+                    .unwrap_or_else(|| json!(harness_keep))
+            })),
+            dec: Some(Box::new(move |v| {
+                let s = v.as_str().unwrap_or("");
+                hs_dec
+                    .iter()
+                    .find(|(id, _)| id == s)
+                    .map(|(_, n)| json!(n))
+                    .unwrap_or_else(|| json!(crate::models::harness_name(s)))
+            })),
+        },
         text_field("role", "职责", &b.role),
         text_field("persona", "说话方式", &b.persona),
         BotField {
@@ -245,23 +424,29 @@ fn bot_fields(b: &Bot, projects: &[crate::repo::Project], efforts: &[String]) ->
                 ty: "enum",
                 values: Some(
                     std::iter::once("默认".to_string())
-                        .chain(efforts.iter().cloned())
+                        .chain(efforts.iter().map(|(_, l)| l.clone()))
                         .collect(),
                 ),
-                current: json!(b.reasoning_effort.as_deref().unwrap_or("默认")),
+                current: json!(cur_effort),
             },
-            enc: Some(Box::new(|v| {
-                if jstr(v) == "默认" {
-                    Value::Null
-                } else {
-                    v.clone()
+            enc: Some(Box::new(move |v| {
+                let s = jstr(v);
+                match encode_effort_value(&s, &efforts_enc) {
+                    Some(k) => json!(k),
+                    None => Value::Null,
                 }
             })),
-            dec: Some(Box::new(|v| {
+            dec: Some(Box::new(move |v| {
                 if v.is_null() {
                     json!("默认")
                 } else {
-                    v.clone()
+                    let s = v.as_str().unwrap_or("");
+                    efforts_dec
+                        .iter()
+                        .find(|(k, _)| k == s)
+                        .map(|(_, l)| json!(l))
+                        .or_else(|| crate::models::effort_label(s).map(|l| json!(l)))
+                        .unwrap_or_else(|| v.clone())
                 }
             })),
         },
@@ -281,7 +466,7 @@ fn bot_fields(b: &Bot, projects: &[crate::repo::Project], efforts: &[String]) ->
         BotField {
             spec: FieldSpec {
                 key: "model".into(),
-                label: "模型（opus、sonnet、haiku，留空为默认）".into(),
+                label: "模型（留空为默认）".into(),
                 ty: "text",
                 values: None,
                 current: json!(b.model.clone().unwrap_or_default()),
@@ -300,11 +485,11 @@ fn bot_fields(b: &Bot, projects: &[crate::repo::Project], efforts: &[String]) ->
                 key: "perm_mode".into(),
                 label: "权限".into(),
                 ty: "enum",
-                values: Some(PERM.iter().map(|(_, l)| l.to_string()).collect()),
+                values: Some(perms.iter().map(|(_, l)| l.to_string()).collect()),
                 current: label_of(&PERM, &b.perm_mode),
             },
             enc: Some(Box::new(move |v| {
-                json!(key_of(&PERM, v).unwrap_or_else(|| perm_keep.clone()))
+                json!(key_of(&perms_enc, v).unwrap_or_else(|| perm_keep.clone()))
             })),
             dec: Some(Box::new(|v| label_of(&PERM, v.as_str().unwrap_or("")))),
         },
@@ -374,19 +559,21 @@ fn new_bot_name(id: &str) -> Option<&str> {
     }
 }
 
-/// A bot that does not exist yet, with the seed defaults: the draft of a new bot starts from it.
-fn blank_bot(ws: &str, name: &str) -> Bot {
+/// A bot that does not exist yet, with the workspace's default harness and permission mode: the
+/// draft of a new bot starts from it.
+fn blank_bot(ws: &str, name: &str, m: &crate::models::Models) -> Bot {
+    let (harness, perm_mode) = m.default_bot();
     Bot {
         id: String::new(),
         workspace_id: ws.into(),
         name: name.into(),
         role: String::new(),
         main: false,
-        harness: steve_acp::adapters::DEFAULT_ADAPTER.0.into(),
+        harness,
         model: None,
         rules: String::new(),
         accept_mode: "inherit".into(),
-        perm_mode: "default".into(),
+        perm_mode,
         enabled: true,
         revision: 0,
         updated: 0,
@@ -403,7 +590,13 @@ fn blank_bot(ws: &str, name: &str) -> Bot {
 /// A field's label as a card shows it, in the request's language. The Chinese labels of the fields are what the
 /// model reads; `full` is the label with its note (“模型（opus、sonnet…）”), else the name only. `fallback` is
 /// the model's label for a field without a key of its own.
-fn field_shown(kind: &str, key: &str, full: bool, fallback: &str) -> String {
+fn field_shown(
+    kind: &str,
+    key: &str,
+    full: bool,
+    fallback: &str,
+    harnesses: &[crate::harnesses::Harness],
+) -> String {
     let shown = match (kind, key) {
         ("bot", "model") if full => Some(steve_i18n::t!("core.draft.bot.model_hint")),
         ("bot", k) => bot_field_shown(k),
@@ -413,7 +606,7 @@ fn field_shown(kind: &str, key: &str, full: bool, fallback: &str) -> String {
         }
         ("settings", "item_prefix") => Some(steve_i18n::t!("core.draft.setting.item_prefix")),
         ("settings", k) => setting_label_shown(k),
-        ("models", k) => models_field_shown(k),
+        ("models", k) => models_field_shown(k, harnesses),
         _ => None,
     };
     shown.unwrap_or_else(|| fallback.to_string())
@@ -422,6 +615,7 @@ fn field_shown(kind: &str, key: &str, full: bool, fallback: &str) -> String {
 fn bot_field_shown(key: &str) -> Option<String> {
     Some(match key {
         "name" => steve_i18n::t!("core.draft.bot.name"),
+        "harness" => steve_i18n::t!("core.draft.bot.harness"),
         "role" => steve_i18n::t!("core.draft.bot.role"),
         "persona" => steve_i18n::t!("core.draft.bot.persona"),
         "proactive" => steve_i18n::t!("core.draft.bot.proactive"),
@@ -471,12 +665,12 @@ fn setting_label_shown(key: &str) -> Option<String> {
 }
 
 /// The `models` target's field names as a card lists them.
-fn models_field_shown(key: &str) -> Option<String> {
+fn models_field_shown(key: &str, harnesses: &[crate::harnesses::Harness]) -> Option<String> {
     use crate::models::{PURPOSES, purpose_label};
     if let Some(h) = key.strip_prefix("agent.") {
         return Some(steve_i18n::t!(
             "core.draft.models.agent_default_listed",
-            harness = crate::models::harness_name(h)
+            harness = crate::harnesses::name_of(harnesses, h)
         ));
     }
     if let Some(p) = key.strip_suffix(".effort") {
@@ -549,6 +743,9 @@ fn choice_shown(s: String) -> String {
         "可以改文件、运行命令；对外操作仍需你批准" => {
             steve_i18n::t!("core.draft.value.perm_auto")
         }
+        "不再询问：工具直接运行，由系统沙箱兜底" => {
+            steve_i18n::t!("core.draft.value.perm_bypass")
+        }
         "跟随 Steve" => steve_i18n::t!("core.draft.value.follow"),
         "对话" => steve_i18n::t!("core.draft.value.home_chat"),
         "待处理" => steve_i18n::t!("core.draft.value.home_inbox"),
@@ -570,6 +767,7 @@ fn choice_shown(s: String) -> String {
         "高" => steve_i18n::t!("core.draft.value.effort_high"),
         "很高" => steve_i18n::t!("core.draft.value.effort_xhigh"),
         "最高" => steve_i18n::t!("core.draft.value.effort_max"),
+        "极致" => steve_i18n::t!("core.draft.value.effort_ultra"),
         _ => s,
     }
 }
@@ -627,7 +825,7 @@ fn model_fields(m: &crate::models::Models, ws: &str) -> Vec<FieldSpec> {
                     models: steve.models.clone(),
                     effort: None,
                 }
-                .describe()
+                .describe_with(&harnesses)
             ),
             ty: "enum",
             values: Some(
@@ -692,14 +890,25 @@ fn model_patch(
         let hk = format!("{}.harness", p.key);
         let ek = format!("{}.effort", p.key);
         // who runs it: unchanged, back to Steve, or a harness by name or id
-        let harness: Option<String> = match get(&hk).map(jstr) {
-            None => stored.as_ref().map(|c| c.harness.clone()),
-            Some(h) if h.trim().is_empty() || h.trim() == FOLLOW => None,
-            Some(h) => harnesses
-                .iter()
-                .find(|x| x.id == h.trim() || x.name == h.trim())
-                .map(|x| x.id.clone()),
+        let (harness, explicit_follow) = match get(&hk).map(jstr) {
+            None => (stored.as_ref().map(|c| c.harness.clone()), false),
+            Some(h) if h.trim().is_empty() || h.trim() == FOLLOW => (None, true),
+            Some(h) => {
+                let Some(found) = harnesses
+                    .iter()
+                    .find(|x| x.id == h.trim() || x.name == h.trim())
+                    .map(|x| x.id.clone())
+                else {
+                    continue;
+                };
+                (Some(found), false)
+            }
         };
+        let switched_harness = harness.as_ref().is_some_and(|next_id| {
+            stored
+                .as_ref()
+                .is_none_or(|c| c.harness.as_str() != next_id)
+        });
         let models: Vec<String> = match get(p.key) {
             Some(v) => jstr(v)
                 .split([',', '，', '、'])
@@ -707,23 +916,32 @@ fn model_patch(
                 .filter(|x| !x.is_empty())
                 .map(String::from)
                 .collect(),
+            None if explicit_follow || switched_harness => Vec::new(),
             None => cur.models.clone(),
         };
-        let h = harness
-            .clone()
-            .unwrap_or_else(|| steve_acp::adapters::DEFAULT_ADAPTER.0.into());
+        let h = harness.clone().unwrap_or_else(|| m.steve().runs_on);
+        let target_h = harnesses.iter().find(|x| x.id == h);
         let effort = match get(&ek) {
-            Some(v) => harnesses
-                .iter()
-                .find(|x| x.id == h)
-                .and_then(|x| {
-                    x.efforts.iter().find(|e| {
-                        crate::models::effort_label(e).unwrap_or(e.as_str()) == jstr(v)
-                            || **e == jstr(v)
-                    })
-                })
-                .cloned(),
-            None => cur.effort.clone(),
+            Some(v) => {
+                let s = jstr(v);
+                if s.trim().is_empty() || s == "默认" {
+                    None
+                } else {
+                    target_h
+                        .and_then(|x| {
+                            x.efforts.iter().find(|e| {
+                                crate::models::effort_label(e).unwrap_or(e.as_str()) == s
+                                    || **e == s
+                            })
+                        })
+                        .cloned()
+                }
+            }
+            None if explicit_follow => None,
+            None => cur
+                .effort
+                .clone()
+                .filter(|e| target_h.is_none_or(|x| x.takes_effort(e))),
         };
         let follows = harness.is_none() && models.is_empty() && effort.is_none();
         let was = stored.is_none();
@@ -745,14 +963,19 @@ fn model_patch(
         };
         let show_choice = |c: Option<&crate::models::Choice>| match c {
             None => steve_i18n::t!("core.draft.value.follow"),
-            Some(c) => match c.effort.as_deref().and_then(crate::models::effort_shown) {
-                Some(e) => steve_i18n::t!(
-                    "core.draft.models.choice_effort",
-                    choice = c.describe_shown(),
-                    effort = e
-                ),
-                None => c.describe_shown(),
-            },
+            Some(c) => {
+                let desc = c.describe_shown_with(&harnesses);
+                match c
+                    .effort
+                    .as_deref()
+                    .map(|e| crate::models::effort_shown(e).unwrap_or_else(|| e.to_string()))
+                {
+                    Some(e) => {
+                        steve_i18n::t!("core.draft.models.choice_effort", choice = desc, effort = e)
+                    }
+                    None => desc,
+                }
+            }
         };
         let to = (!follows).then(|| crate::models::Choice {
             harness: h.clone(),
@@ -960,14 +1183,6 @@ const CORE_OPTIONS: [&str; 7] = [
 ];
 
 impl Core {
-    /// The reasoning efforts adapter `harness` takes (none for an adapter the Hub does not have).
-    fn harness_efforts(&self, harness: &str) -> Vec<String> {
-        self.models()
-            .harness(harness)
-            .map(|h| h.efforts)
-            .unwrap_or_default()
-    }
-
     /// Draft a change of `target` from a request in plain words (`kind: global` lets the model pick the target).
     pub async fn draft(&self, ws: &str, target: Target, request: &str) -> Result<Proposal> {
         crate::stats::tagged("draft", ws, self.draft_untagged(ws, target, request)).await
@@ -1025,12 +1240,13 @@ impl Core {
     /// How a core `target` is set now, without a model call: its card title, link and current values.
     pub fn describe(&self, ws: &str, target: &Target) -> Result<(String, String, Vec<Current>)> {
         let db = self.store();
+        let harnesses = self.models().harnesses();
         let tid = target.id.clone().unwrap_or_default();
         let listed = |kind: &str, fs: &[FieldSpec]| -> Vec<Current> {
             fs.iter()
                 .map(|f| {
                     (
-                        field_shown(kind, &f.key, false, &short_label(&f.label)),
+                        field_shown(kind, &f.key, false, &short_label(&f.label), &harnesses),
                         value_shown(kind, &f.key, show(&f.current)),
                     )
                 })
@@ -1047,11 +1263,10 @@ impl Core {
                     Some(b) if db.bot_in_workspace(&b.id, ws)? => b,
                     _ => return Err(msg(steve_i18n::t!("core.bot.not_found"))),
                 };
-                let fs: Vec<FieldSpec> =
-                    bot_fields(&b, &db.projects(ws)?, &self.harness_efforts(&b.harness))
-                        .into_iter()
-                        .map(|f| f.spec)
-                        .collect();
+                let fs: Vec<FieldSpec> = bot_fields(&b, &db.projects(ws)?, &harnesses)
+                    .into_iter()
+                    .map(|f| f.spec)
+                    .collect();
                 (
                     steve_i18n::t!("core.draft.title.bot", bot = b.display()),
                     format!("#/bots/{}", b.id),
@@ -1077,7 +1292,13 @@ impl Core {
                     .iter()
                     .map(|f| {
                         (
-                            field_shown("settings", &f.key, false, &short_label(&f.label)),
+                            field_shown(
+                                "settings",
+                                &f.key,
+                                false,
+                                &short_label(&f.label),
+                                &harnesses,
+                            ),
                             value_shown(
                                 "settings",
                                 &f.key,
@@ -1159,8 +1380,16 @@ impl Core {
             let what = format!(
                 "the bot \"{}\" (role: {}; way of speaking: {})",
                 b.name,
-                if b.role.trim().is_empty() { "-" } else { b.role.trim() },
-                if b.persona.trim().is_empty() { "-" } else { b.persona.trim() },
+                if b.role.trim().is_empty() {
+                    "-"
+                } else {
+                    b.role.trim()
+                },
+                if b.persona.trim().is_empty() {
+                    "-"
+                } else {
+                    b.persona.trim()
+                },
             );
             let said = draft_fields(self.gw(), &what, std::slice::from_ref(&spec), request).await?;
             let new = said
@@ -1171,7 +1400,7 @@ impl Core {
             let (mut changes, mut patch) = (vec![], Map::new());
             if !new.is_empty() && new != cur.trim() {
                 changes.push(Change {
-                    label: field_shown("bot", field, true, label),
+                    label: field_shown("bot", field, true, label, &[]),
                     from: value_shown("bot", field, show(&json!(cur))),
                     to: value_shown("bot", field, show(&json!(new))),
                 });
@@ -1215,18 +1444,19 @@ impl Core {
         let (title, href, current) = self.describe(ws, &target)?;
         let db = self.store();
         let gw = self.gw();
+        let harnesses = self.models().harnesses();
         let (mut changes, mut patch) = (vec![], Map::new());
         match target.kind.as_str() {
             "bot" => {
                 let id = target.id.clone().unwrap_or_default();
                 let fresh = new_bot_name(&id);
                 let b = match fresh {
-                    Some(n) => blank_bot(ws, n),
+                    Some(n) => blank_bot(ws, n, self.models()),
                     None => db
                         .bot(&id)?
                         .ok_or_else(|| msg(steve_i18n::t!("core.bot.not_found")))?,
                 };
-                let mut fs = bot_fields(&b, &db.projects(ws)?, &self.harness_efforts(&b.harness));
+                let mut fs = bot_fields(&b, &db.projects(ws)?, &harnesses);
                 /* a new bot starts enabled */
                 if fresh.is_some() {
                     fs.retain(|f| f.spec.key != "enabled");
@@ -1238,6 +1468,7 @@ impl Core {
                     Some(n) => format!("a new bot \"{n}\" (it does not exist yet; fill in only what the request says about this one bot)"),
                     None => format!("the bot \"{}\"", b.name),
                 };
+                let mut raw_patch = Map::new();
                 for (k, value) in draft_fields(gw, &what, &specs, request).await? {
                     let Some(f) = fs.iter().find(|f| f.spec.key == k) else {
                         continue;
@@ -1246,9 +1477,20 @@ impl Core {
                     if bv.get(&k).unwrap_or(&Value::Null) == &v {
                         continue;
                     }
+                    raw_patch.insert(k, v);
+                }
+                sanitize_bot_for_harness(&mut raw_patch, fresh.is_none().then_some(&b), &harnesses);
+                for (k, v) in raw_patch {
+                    if bv.get(&k).unwrap_or(&Value::Null) == &v {
+                        continue;
+                    }
+                    let Some(f) = fs.iter().find(|f| f.spec.key == k) else {
+                        patch.insert(k, v);
+                        continue;
+                    };
                     let to = f.dec.as_ref().map(|d| d(&v)).unwrap_or_else(|| v.clone());
                     changes.push(Change {
-                        label: field_shown("bot", &k, true, &f.spec.label),
+                        label: field_shown("bot", &k, true, &f.spec.label, &harnesses),
                         from: if fresh.is_some() {
                             "—".into()
                         } else {
@@ -1276,7 +1518,7 @@ impl Core {
                         changes.insert(
                             0,
                             Change {
-                                label: field_shown("bot", "name", true, "名字"),
+                                label: field_shown("bot", "name", true, "名字", &harnesses),
                                 from: "—".into(),
                                 to: name.clone(),
                             },
@@ -1317,7 +1559,13 @@ impl Core {
                         continue;
                     }
                     changes.push(Change {
-                        label: field_shown("project", &k, false, &short_label(&f.label)),
+                        label: field_shown(
+                            "project",
+                            &k,
+                            false,
+                            &short_label(&f.label),
+                            &harnesses,
+                        ),
                         from: value_shown("project", &k, show(&f.current)),
                         to: value_shown("project", &k, show(&value)),
                     });
@@ -1350,7 +1598,13 @@ impl Core {
                         continue;
                     }
                     changes.push(Change {
-                        label: field_shown("settings", &k, true, &plain_label(&f.label)),
+                        label: field_shown(
+                            "settings",
+                            &k,
+                            true,
+                            &plain_label(&f.label),
+                            &harnesses,
+                        ),
                         from: value_shown(
                             "settings",
                             &k,
@@ -1904,25 +2158,45 @@ impl Core {
                 match p.target.kind.as_str() {
                     "bot" if new_bot_name(&tid).is_some() => {
                         let mut nb = p.patch.clone();
-                        nb.insert(
-                            "harness".into(),
-                            json!(steve_acp::adapters::DEFAULT_ADAPTER.0),
-                        );
+                        let hs = self.models().harnesses();
+                        let (def_harness, def_perm) = self.models().default_bot();
+                        let h = nb
+                            .get("harness")
+                            .and_then(Value::as_str)
+                            .filter(|s| !s.is_empty())
+                            .map(str::to_string)
+                            .unwrap_or(def_harness);
+                        nb.insert("harness".into(), json!(h));
+                        if !nb.contains_key("perm_mode") {
+                            let pm = if h == self.models().default_bot().0 {
+                                def_perm
+                            } else {
+                                self.models().default_perm_mode_for(&h)
+                            };
+                            nb.insert("perm_mode".into(), json!(pm));
+                        }
+                        sanitize_bot_for_harness(&mut nb, None, &hs);
                         let b = db.bot_create(&p.ws, Value::Object(nb), actor)?;
                         before.insert("created".into(), json!(b.id));
                     }
                     "bot" => {
-                        let b = serde_json::to_value(
-                            db.bot(&tid)?
-                                .ok_or_else(|| msg(steve_i18n::t!("core.bot.not_found")))?,
-                        )?;
-                        for k in p.patch.keys() {
+                        let cur_bot = db
+                            .bot(&tid)?
+                            .ok_or_else(|| msg(steve_i18n::t!("core.bot.not_found")))?;
+                        let mut bp = p.patch.clone();
+                        sanitize_bot_for_harness(
+                            &mut bp,
+                            Some(&cur_bot),
+                            &self.models().harnesses(),
+                        );
+                        let b = serde_json::to_value(&cur_bot)?;
+                        for k in bp.keys() {
                             before.insert(k.clone(), b.get(k).cloned().unwrap_or(Value::Null));
                         }
-                        db.bot_patch(&tid, &p.patch, actor)?;
+                        db.bot_patch(&tid, &bp, actor)?;
                         if let Some(b) = db.bot(&tid)? {
                             let b = serde_json::to_value(b)?;
-                            for k in p.patch.keys() {
+                            for k in bp.keys() {
                                 after.insert(k.clone(), b.get(k).cloned().unwrap_or(Value::Null));
                             }
                         }
@@ -2187,9 +2461,10 @@ impl Core {
         let mut r = json!({"ok": true});
         if !kept.is_empty() {
             /* named as the user sees them, in their language: these were changed again since */
+            let harnesses = self.models().harnesses();
             r["kept"] = json!(
                 kept.iter()
-                    .map(|k| field_shown(&a.target.kind, k, false, k))
+                    .map(|k| field_shown(&a.target.kind, k, false, k, &harnesses))
                     .collect::<Vec<_>>()
             );
         }

@@ -114,14 +114,29 @@ pub(crate) fn local_node_warnings(cfg: &Config, vars: &crate::wire::Vars) -> Vec
             std::env::split_paths(&path).any(|d| usable(&d.join(p)))
         }
     };
+    let path_only_bins: std::collections::HashMap<&str, (&str, &str)> =
+        steve_acp::adapters::builtin_bins()
+            .zip(steve_acp::adapters::builtin_commands(std::path::Path::new(
+                "",
+            )))
+            .filter(|((id, ..), _)| !steve_acp::adapters::is_npm_managed(id))
+            .map(|((id, bin, _), (_, var, _))| (id, (bin, var)))
+            .collect();
     for (harness, adapter) in &cfg.adapters {
-        let js = std::path::Path::new(adapter)
-            .extension()
-            .is_some_and(|e| e == "js");
+        let js = steve_acp::is_node_script(std::path::Path::new(adapter));
         if !available(adapter, !js) {
             /* an adapter the user left out at setup (steve_acp::managed) is not a problem to report */
             if steve_acp::managed::home_of(std::path::Path::new(adapter))
                 .is_some_and(|home| !steve_acp::managed::wanted(&home, harness))
+            {
+                continue;
+            }
+            /* a PATH-only built-in CLI the operator never explicitly pointed at a command is optional */
+            if let Some((bin, var)) = path_only_bins.get(harness.as_str())
+                && adapter == bin
+                && vars(var).is_none_or(|v| v.is_empty())
+                && !cfg.manifest_adapters.contains(harness)
+                && !cfg.declared_adapters.contains_key(harness)
             {
                 continue;
             }
@@ -190,12 +205,15 @@ mod tests {
         for (k, v) in [
             ("STEVE_HOME", home.as_str()),
             ("HOME", home.as_str()),
-            ("STEVE_ADAPTER_CLAUDE", "/usr/bin/false"),
-            ("STEVE_ADAPTER_CODEX", "/usr/bin/false"),
             ("STEVE_VAULT_KEYSTORE", "file"),
         ] {
             if !kv.iter().any(|(x, _)| x == k) {
                 kv.push((k.into(), v.into()));
+            }
+        }
+        for (id, var, _) in steve_acp::adapters::builtin_commands(std::path::Path::new("")) {
+            if steve_acp::adapters::is_npm_managed(id) && !kv.iter().any(|(x, _)| x == var) {
+                kv.push((var.into(), "/usr/bin/false".into()));
             }
         }
         let r = steve_i18n::with(steve_i18n::EN, || {
@@ -216,7 +234,7 @@ mod tests {
         let cfg = Config::from_vars(|k| match k {
             "STEVE_HOME" => Some("/nonexistent/steve-test/home".into()),
             "STEVE_ADAPTER_CODEX" => Some("/nonexistent/steve-test/codex-acp".into()),
-            "STEVE_ADAPTER_CLAUDE" => Some("/usr/bin/false".into()),
+            v if v.starts_with("STEVE_ADAPTER_") => Some("/usr/bin/false".into()),
             _ => None,
         })
         .expect("config");
@@ -236,7 +254,8 @@ mod tests {
         );
         assert!(
             en.iter().any(|w| w.starts_with("STEVE_PRINCIPAL_STATE=on")
-                && w.contains("Codex login is not copied")),
+                && w.contains("Harness CLI logins")
+                && w.contains("not copied")),
             "{en:?}"
         );
     }
@@ -300,7 +319,7 @@ mod tests {
         assert!(
             r.warnings
                 .iter()
-                .any(|w| w.contains("Codex login is not copied") && w.contains("harness-setup"))
+                .any(|w| w.contains("Harness CLI logins") && w.contains("harness-setup"))
         );
         let r = run(&[("STEVE_PRINCIPAL_STATE", "off")]);
         assert!(
@@ -320,8 +339,16 @@ mod tests {
         let own = steve_acp::managed::command(tmp.path(), "codex").expect("built in");
         let own = own.to_string_lossy().into_owned();
         let missing = |r: &Report| r.warnings.iter().any(|w| w.contains("ACP adapter codex"));
-        let own_install = || run(&[("STEVE_HOME", home.as_str()), ("STEVE_ADAPTER_CODEX", own.as_str())]);
-        assert!(missing(&own_install()), "nothing was ever chosen: all of them are expected");
+        let own_install = || {
+            run(&[
+                ("STEVE_HOME", home.as_str()),
+                ("STEVE_ADAPTER_CODEX", own.as_str()),
+            ])
+        };
+        assert!(
+            missing(&own_install()),
+            "nothing was ever chosen: all of them are expected"
+        );
         let chosen = steve_acp::managed::dir(tmp.path()).join("selected.json");
         std::fs::create_dir_all(chosen.parent().expect("dir")).expect("dir");
         std::fs::write(&chosen, r#"["codex"]"#).expect("choice");
@@ -335,6 +362,17 @@ mod tests {
             ("STEVE_ADAPTER_CODEX", "/nonexistent/steve-test/codex-acp"),
         ]);
         assert!(missing(&r), "{r:?}");
+        // a PATH-only adapter left unconfigured stays quiet, unless declared in harness.json
+        let missing_cursor =
+            |r: &Report| r.warnings.iter().any(|w| w.contains("ACP adapter cursor"));
+        assert!(!missing_cursor(&r), "{r:?}");
+        std::fs::write(
+            tmp.path().join("harness.json"),
+            r#"{"adapters": {"cursor": "agent"}}"#,
+        )
+        .expect("manifest");
+        let r = run(&[("STEVE_HOME", home.as_str()), ("PATH", "/nonexistent")]);
+        assert!(missing_cursor(&r), "{r:?}");
     }
 
     #[test]

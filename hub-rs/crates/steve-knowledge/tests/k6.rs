@@ -48,6 +48,28 @@ fn cx() -> McpCx {
     }
 }
 
+#[test]
+fn memory_listing_only_attaches_a_live_members_personal_profile() {
+    let e = setup();
+    let listed: Value =
+        serde_json::from_str(&steward::call(&e.env.modules, &cx(), LIST, &json!({})).unwrap())
+            .unwrap();
+    assert_eq!(listed["profile"]["is_me"], true);
+    let mut service = cx();
+    service.user = format!("svc:{WS}");
+    let listed: Value =
+        serde_json::from_str(&steward::call(&e.env.modules, &service, LIST, &json!({})).unwrap())
+            .unwrap();
+    assert!(listed["profile"].is_null());
+    assert!(
+        e.env
+            .store()
+            .reader(|c| { steve_modules::contacts::repo::me_of(c, WS, &service.user) })
+            .unwrap()
+            .is_none()
+    );
+}
+
 impl Env {
     async fn me(&self, method: &str, path: &str, body: Option<Value>) -> (u16, Value) {
         call(
@@ -180,7 +202,10 @@ async fn a_merge_waits_for_you_and_replaces_all_it_names() {
     let c = e.add("先说结论", None).await;
 
     let listed = steward::call(&e.env.modules, &cx(), LIST, &json!({})).unwrap();
-    assert!(listed.contains(&a) && listed.contains("written by the user"), "{listed}");
+    assert!(
+        listed.contains(&a) && listed.contains("written by the user"),
+        "{listed}"
+    );
 
     let out = e
         .tidy(json!({"op": "merge", "ids": [a, b], "text": "提交信息用中文写", "reason": "两条说的是同一件事"}))
@@ -361,7 +386,9 @@ async fn the_page_remembers_which_schedule_is_the_steward() {
     let e = setup();
     let (_, v) = e.me("GET", "/kb/steward", None).await;
     assert_eq!(v, json!({"schedule_id": null}));
-    let (s, _) = e.me("PUT", "/kb/steward", Some(json!({"schedule_id": "fl_1"}))).await;
+    let (s, _) = e
+        .me("PUT", "/kb/steward", Some(json!({"schedule_id": "fl_1"})))
+        .await;
     assert_eq!(s, 200);
     let (_, v) = e.me("GET", "/kb/steward", None).await;
     assert_eq!(v["schedule_id"], "fl_1");

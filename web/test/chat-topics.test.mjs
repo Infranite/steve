@@ -27,6 +27,17 @@ test("a pause or a new day starts a topic, named by the first thing you said", (
   ])
 })
 
+test("a topic where only Steve spoke is named by the item his card is about", () => {
+  const titles = { "ST-2": "机密过滤不再误拦链接" }
+  const ts = topicsOf([
+    { id: "a", k: "steve", t: "ST-2", created: at(9), card: { item: "ST-2", state: "done" }, cardOnly: true },
+    { id: "b", k: "steve", t: "结论：已修复", created: at(9, 1) },
+    { id: "c", k: "steve", t: "早上好", created: at(11) },
+    { id: "d", k: "steve", t: "还有一件", created: at(11, 1) },
+  ], (id) => titles[id])
+  assert.deepEqual(ts.map((t) => t.title), ["早上好", "ST-2 机密过滤不再误拦链接"])
+})
+
 test("a snippet keeps the match in view and marks it", () => {
   const long = "前面有很多很多很多很多很多很多很多很多很多很多很多很多很多很多很多的话，这里讨论定位目标的细节，后面也还有不少内容要说一说说一说说一说"
   const s = snippet(long, "定位目标", 30)

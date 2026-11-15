@@ -1,5 +1,5 @@
 /* #/contacts — 联系人、团队、组织、待确认 (prototype people.tsx ContactsView, NewContactDialog) */
-import { useEffect, useState } from "react"
+import { useEffect, useState, type ReactNode } from "react"
 import { ChevronRightIcon, PlusIcon, StarIcon, UserRoundIcon } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
@@ -42,9 +42,8 @@ function Contacts() {
       <AskSteve className="mb-6" ctx={{ kind: "global" }} placeholder={t("people:contacts.ask")} />
       <div key={tab} className="anim-in" data-contacts-tab={tab}>
       {tab === "contacts" && <>
-        <div className="mb-5 flex flex-wrap items-center gap-2"><Chips value={filterLabel(rel)} onChange={(v) => { const f = FILTER_KEYS.find((k) => filterLabel(k) === v) ?? "all"; crel = f; setRel(f) }} options={FILTER_KEYS.map(filterLabel)} className="flex-wrap" /><span className="flex-1" />
-          <SearchField size="sm" className="w-full sm:w-60" aria-label={t("people:shared.searchContacts")} placeholder={t("people:shared.searchContactsPh")} value={q} onChange={(e) => { cq = e.target.value; setQ(e.target.value) }} data-contact-search /></div>
-        <ContactList q={dq} f={FILTERS[rel] ?? {}} />
+        <ContactList q={dq} f={FILTERS[rel] ?? {}} toolbar={<div className="mb-5 flex flex-wrap items-center gap-2"><Chips value={filterLabel(rel)} onChange={(v) => { const f = FILTER_KEYS.find((k) => filterLabel(k) === v) ?? "all"; crel = f; setRel(f) }} options={FILTER_KEYS.map(filterLabel)} className="flex-wrap" /><span className="flex-1" />
+          <SearchField size="sm" className="w-full sm:w-60" aria-label={t("people:shared.searchContacts")} placeholder={t("people:shared.searchContactsPh")} value={q} onChange={(e) => { cq = e.target.value; setQ(e.target.value) }} data-contact-search /></div>} />
         {!dq && rel === "all" && <UnownedSection />}
       </>}
       {tab === "teams" && <TeamsTab />}
@@ -58,20 +57,22 @@ function Contacts() {
 /** a filter chip's text: the chips show their labels, so the filter code is mapped to and from it */
 const filterLabel = (f: Filter) => (f === "all" ? tr("people:contacts.all") : f === "virtual" ? label("kind", f) : label("rel", f))
 
-function ContactList({ q, f }: { q: string; f: { rel?: string; kind?: string } }) {
+/** who someone is in a few words: their title at their organization (the department path is on their page) */
+const whoLine = (c: ContactBrief) => [c.org?.title, c.org?.name].filter(Boolean).join(" · ")
+function ContactList({ q, f, toolbar }: { q: string; f: { rel?: string; kind?: string }; toolbar: ReactNode }) {
   const t = useT()
   const { data, err } = useLoad(() => people.contacts({ q, ...f }), [q, f.rel, f.kind])
   if (err) return <Empty title={t("people:contact.loadFailed")} sub={err.message} />
   if (!data) return <Loading />
-  const xs = data.filter((c) => !c.is_me)
-  if (!xs.length) return <Empty title={q || f.rel || f.kind ? t("people:shared.noMatch") : t("people:shared.noContacts")} sub={q || f.rel || f.kind ? undefined : t("people:contacts.emptySub")} />
-  return (
+  const xs = data.filter((c) => !c.is_me), filtered = !!(q || f.rel || f.kind)
+  /* nobody yet: no filters and no search over an empty list, only how people get here */
+  if (!xs.length && !filtered) return <Empty title={t("people:shared.noContacts")} sub={t("people:contacts.emptySub")} />
+  return <>{toolbar}{!xs.length ? <Empty title={t("people:shared.noMatch")} /> : (
     <Group>{xs.map((c) => (
       <Row key={c.id} icon={<ContactAvatar name={nameOf(c)} avatar={c.avatar} size={36} />} onClick={() => go("#/contacts/" + c.id)} data-contact-row={c.name}
         title={<span className="inline-flex items-center gap-1.5">{nameOf(c)}{c.important && <StarIcon className="size-3.5 fill-current text-tertiary" aria-label={t("people:contacts.important")} />}{c.kind === "virtual" && <Badge variant="secondary" className="text-muted-foreground">{label("kind", "virtual")}</Badge>}{c.kind === "bot" && <Badge variant="secondary" className="text-muted-foreground">{label("kind", "bot")}</Badge>}</span>}
-        sub={<Meta inline>{orgLine(c) && <span>{orgLine(c)}</span>}{c.rels.filter((r) => r !== "me").length > 0 && <span>{joinList(c.rels.filter((r) => r !== "me").map(relLabel))}</span>}<span>{t("people:contacts.accounts", { count: c.accounts })}</span>{c.items > 0 && <span>{t("people:contacts.items", { count: c.items })}</span>}</Meta>}>
-        <Tags ids={c.tags} max={2} /><ChevronRightIcon className="size-4 text-tertiary" /></Row>))}</Group>
-  )
+        sub={<Meta inline>{whoLine(c) && <span className="truncate">{whoLine(c)}</span>}{c.rels.filter((r) => r !== "me").length > 0 && <span>{joinList(c.rels.filter((r) => r !== "me").map(relLabel))}</span>}{!whoLine(c) && !c.rels.some((r) => r !== "me") && <span>{t("people:contacts.accounts", { count: c.accounts })}</span>}</Meta>}>
+        <Tags ids={c.tags} max={2} />{c.items > 0 && <span className="hidden shrink-0 type-footnote tabular-nums text-muted-foreground sm:inline" data-contact-items>{t("people:contacts.items", { count: c.items })}</span>}<ChevronRightIcon className="size-4 text-tertiary" /></Row>))}</Group>)}</>
 }
 
 function OrgList() {

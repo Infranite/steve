@@ -48,7 +48,7 @@ pub(super) fn sandbox_mode(
             if r::sandbox::available() {
                 Ok(r::SandboxMode::Required)
             } else {
-                unsupported("no sandbox-exec on this node")
+                unsupported("no read-only system sandbox on this node")
             }
         }
         SandboxRequirement::AllowFallback {
@@ -275,7 +275,7 @@ struct Prepared {
     cwd: PathBuf,
     scope: r::Scope,
     prompt: Vec<Value>,
-    profile: Option<PathBuf>,
+    sandbox: Option<acp_job::ReadonlySandbox>,
 }
 
 async fn prepare(
@@ -283,7 +283,7 @@ async fn prepare(
     req: &r::ResearchRequest,
     plan: &r::AttemptPlan,
     run_id: &str,
-    adapter_state: Option<&Path>,
+    adapter_state: &[PathBuf],
     confine: Option<&str>,
 ) -> std::io::Result<Prepared> {
     let dir = cfg.scratch.join(run_id);
@@ -298,19 +298,26 @@ async fn prepare(
     let scope = r::Scope::new(&cwd, &readable, &cfg.home);
     let sandboxed = r::sandbox::decide(cfg.sandbox)
         .ok_or_else(|| std::io::Error::other("research requires an unavailable system sandbox"))?;
-    let profile = if sandboxed {
+    let sandbox = if sandboxed {
         // The run's directory and the harness's own state. Project and attachment paths never
         // become writable simply because an adapter chose to run a command.
         let writable: Vec<PathBuf> = std::iter::once(dir.clone())
-            .chain(adapter_state.map(r::guard::resolve))
+            .chain(adapter_state.iter().map(|p| r::guard::resolve(p)))
             .collect();
-        let sb = r::sandbox::profile(&writable)
-            .ok_or_else(|| std::io::Error::other("unusable research sandbox path"))?;
-        // and the control plane out of reach, after the profile's own allows ([`crate::confine`])
-        let sb = format!("{sb}{}", confine.unwrap_or_default());
-        let path = dir.join("sandbox.sb");
-        tokio::fs::write(&path, sb).await?;
-        Some(path)
+        if cfg!(target_os = "macos") {
+            let sb = r::sandbox::profile(&writable)
+                .ok_or_else(|| std::io::Error::other("unusable research sandbox path"))?;
+            // and the control plane out of reach, after the profile's own allows ([`crate::confine`])
+            let sb = format!("{sb}{}", confine.unwrap_or_default());
+            let path = dir.join("sandbox.sb");
+            tokio::fs::write(&path, sb).await?;
+            Some(acp_job::ReadonlySandbox::Seatbelt(path))
+        } else {
+            Some(acp_job::ReadonlySandbox::Bwrap {
+                dir: dir.clone(),
+                writable,
+            })
+        }
     } else {
         None
     };
@@ -327,7 +334,7 @@ async fn prepare(
         cwd,
         scope,
         prompt,
-        profile,
+        sandbox,
     })
 }
 
@@ -365,23 +372,20 @@ impl LocalNode {
         let run_id = workspace::dir_name(exec.attempt().as_str());
         let mut out = outcome(run_id.clone(), plan.model.clone(), r::RunStatus::Done);
         // the harness's own state, where it declares one (its configuration, logins, history)
-        let state_dir = self
+        let state_dirs = self
             .0
             .cfg
             .acp
             .adapter_properties(&req.harness)
             .state
-            .map(|st| {
-                std::env::var_os(&st.env)
-                    .map(PathBuf::from)
-                    .unwrap_or_else(|| self.0.cfg.acp.user_home.join(&st.default))
-            });
+            .map(|st| st.ambient_dirs(&self.0.cfg.acp.user_home))
+            .unwrap_or_default();
         let prepared = match prepare(
             cfg,
             req,
             plan,
             &run_id,
-            state_dir.as_deref(),
+            &state_dirs,
             self.0.confine.seatbelt_rules(),
         )
         .await
@@ -393,7 +397,7 @@ impl LocalNode {
                 return (out, None, vec![]);
             }
         };
-        out.sandboxed = prepared.profile.is_some()
+        out.sandboxed = prepared.sandbox.is_some()
             || self
                 .0
                 .cfg
@@ -439,9 +443,11 @@ impl LocalNode {
         );
         let properties = self.0.cfg.acp.adapter_properties(&req.harness);
         let wrap = acp_job::wrap(
-            prepared.profile.as_deref(),
+            prepared.sandbox.as_ref(),
             properties.nested_sandbox.then_some(&self.0.confine),
-            (!full).then_some(prepared.cwd.as_path()),
+            None,
+            &self.0.cfg.acp.user_home,
+            &properties.outer_sandbox_args,
         );
         let mut run = Box::pin(acp_job::run(
             acp_job::Request {

@@ -24,9 +24,59 @@ const PERM: &[&str] = &[
     "bypassPermissions",
 ];
 
-/// `BotPatch` (or the create variant: `name` required, `harness` defaulting to the default adapter),
-/// as the parsed object with only the present keys, in schema order. `harnesses`: the adapter ids
-/// the Hub knows ([`crate::config::Config::harness_ids`]).
+fn perm_mode_of_key(k: &str) -> Option<steve_node_api::PermissionMode> {
+    use steve_node_api::PermissionMode as P;
+    Some(match k {
+        "plan" => P::Plan,
+        "default" => P::Ask,
+        "acceptEdits" => P::AcceptEdits,
+        "auto" => P::Auto,
+        "bypassPermissions" => P::FullAccess,
+        _ => return None,
+    })
+}
+
+fn known_harness_ids(
+    cfg: &crate::config::Config,
+    harnesses: &[steve_core::harnesses::Harness],
+) -> Vec<String> {
+    let mut ids = cfg.harness_ids();
+    for h in harnesses {
+        if !ids.contains(&h.id) {
+            ids.push(h.id.clone());
+        }
+    }
+    ids
+}
+
+fn check_bot_harness_caps(
+    p: &Obj,
+    target_id: &str,
+    harnesses: &[steve_core::harnesses::Harness],
+) -> Result<(), ApiError> {
+    let Some(target) = harnesses.iter().find(|h| h.id == target_id) else {
+        return Ok(());
+    };
+    let mut bad = Vec::new();
+    if let Some(eff) = p.get("reasoning_effort").and_then(Value::as_str)
+        && !target.takes_effort(eff)
+    {
+        bad.push("reasoning_effort".into());
+    }
+    if let Some(pm) = p.get("perm_mode").and_then(Value::as_str)
+        && perm_mode_of_key(pm).is_some_and(|m| !target.offers_mode(m))
+    {
+        bad.push("perm_mode".into());
+    }
+    if bad.is_empty() {
+        Ok(())
+    } else {
+        Err(ApiError::Invalid(bad))
+    }
+}
+
+/// `BotPatch` (or the create variant: `name` required), as the parsed object with only the present
+/// keys, in schema order. `harnesses`: the adapter ids the Hub knows ([`crate::config::Config::harness_ids`]).
 fn bot_in(v: &Value, create: bool, harnesses: &[String]) -> Result<Obj, ApiError> {
     let mut c = Check::object(v);
     let mut p = Obj::new();
@@ -44,27 +94,15 @@ fn bot_in(v: &Value, create: bool, harnesses: &[String]) -> Result<Obj, ApiError
     put("role", c.opt_str("role", Str::max(200)).map(Value::from));
     let allowed: Vec<&str> = harnesses.iter().map(String::as_str).collect();
     let harness = c.opt_enum("harness", &allowed);
-    put(
-        "harness",
-        if create {
-            Some(json!(harness.unwrap_or_else(|| {
-                steve_acp::adapters::DEFAULT_ADAPTER.0.into()
-            })))
-        } else {
-            harness.map(Value::from)
-        },
-    );
+    put("harness", harness.map(Value::from));
     put(
         "model",
         c.opt_nullable_str("model", Str::ANY).map(|m| json!(m)),
     );
     put(
         "reasoning_effort",
-        c.opt_nullable_str(
-            "reasoning_effort",
-            Str::pattern("^(none|minimal|low|medium|high|xhigh|max)$"),
-        )
-        .map(|m| json!(m)),
+        c.opt_nullable_str("reasoning_effort", Str::pattern("^[A-Za-z0-9_.:-]{1,64}$"))
+            .map(|m| json!(m)),
     );
     put("rules", c.opt_str("rules", Str::max(8000)).map(Value::from));
     put(
@@ -156,15 +194,62 @@ pub async fn prompt(
     .await
 }
 
+/// Picks `(harness, perm_mode)` for a newly created bot when omitted: prefers `ws`'s main bot's
+/// harness if ready/unknown, else the first ready harness, and picks a compatible `perm_mode`.
+fn fill_new_bot_defaults(
+    r: &dyn crate::backend::Repo,
+    ws: &str,
+    harnesses: &[steve_core::harnesses::Harness],
+    p: &mut Obj,
+) {
+    let preferred = r
+        .bots_list(Some(ws))
+        .ok()
+        .and_then(|bs| {
+            bs.into_iter().find(|b| {
+                b.get("main").and_then(Value::as_bool) == Some(true)
+                    || b.get("main").and_then(Value::as_i64) == Some(1)
+            })
+        })
+        .and_then(|b| b.get("harness").and_then(Value::as_str).map(str::to_string));
+    let (def_harness, def_perm) =
+        steve_core::harnesses::default_bot_choice(harnesses, preferred.as_deref());
+    let h = p
+        .get("harness")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            p.insert("harness".into(), json!(def_harness));
+            def_harness
+        });
+    if !p.contains_key("perm_mode") {
+        let pm = harnesses
+            .iter()
+            .find(|x| x.id == h)
+            .map(|x| x.default_perm_mode().to_string())
+            .unwrap_or(def_perm);
+        p.insert("perm_mode".into(), json!(pm));
+    }
+}
+
 pub async fn create(
     State(st): State<AppState>,
     Extension(c): Extension<Ctx>,
     b: Bytes,
 ) -> ApiResult {
-    let p = bot_in(&body(&b)?, true, &st.cfg.harness_ids())?;
+    let harnesses = st.domain.harnesses(false).await?;
+    let allowed = known_harness_ids(&st.cfg, &harnesses);
+    let mut p = bot_in(&body(&b)?, true, &allowed)?;
+    if let Some(h) = p.get("harness").and_then(Value::as_str) {
+        check_bot_harness_caps(&p, h, &harnesses)?;
+    }
     let (ws, me) = (c.ws.clone(), c.me.clone());
     let (out, id) = st
         .write(move |r| {
+            fill_new_bot_defaults(r, &c.ws, &harnesses, &mut p);
+            let target_id = p.get("harness").and_then(Value::as_str).unwrap_or_default();
+            check_bot_harness_caps(&p, target_id, &harnesses)?;
             let b = r.bot_create(&c.ws, &p, &c.me)?;
             let out = bot_out(r, b, &c.ws)?;
             let id = out.get("id").and_then(Value::as_str).map(str::to_string);
@@ -196,8 +281,36 @@ pub async fn draft(
     let mut k = Check::object(&v);
     let desc = k.str("desc", Str::len(2, 2000));
     k.finish()?;
+    let harnesses = st.domain.harnesses(false).await?;
+    let ws_pref = c.ws.clone();
+    let preferred = st
+        .read(move |r| {
+            Ok(r.bots_list(Some(&ws_pref))?
+                .into_iter()
+                .find(|b| {
+                    b.get("main").and_then(Value::as_bool) == Some(true)
+                        || b.get("main").and_then(Value::as_i64) == Some(1)
+                })
+                .and_then(|b| b.get("harness").and_then(Value::as_str).map(str::to_string)))
+        })
+        .await?;
+    let (harness_id, perm_mode) =
+        steve_core::harnesses::default_bot_choice(&harnesses, preferred.as_deref());
+    let offered: Vec<String> = harnesses
+        .iter()
+        .find(|h| h.id == harness_id)
+        .map(|h| h.model_ids())
+        .unwrap_or_default();
+    let model_hint = if offered.is_empty() {
+        "null".to_string()
+    } else {
+        format!(
+            "one of {} or null",
+            serde_json::to_string(&offered).unwrap_or_else(|_| "[]".into())
+        )
+    };
     let prompt = format!(
-        "Draft a bot for Steve (a personal assistant app) from this description. Reply in Chinese, ONLY JSON: {{\"name\":\"<= 6 chars\",\"role\":\"one line\",\"persona\":\"how it talks\",\"rules\":\"working rules, a few lines\",\"model\":\"opus|sonnet|haiku\"}}\nDescription: {}",
+        "Draft a bot for Steve (a personal assistant app) from this description. Reply in Chinese, ONLY JSON: {{\"name\":\"<= 6 chars\",\"role\":\"one line\",\"persona\":\"how it talks\",\"rules\":\"working rules, a few lines\",\"model\":{model_hint}}}\nDescription: {}",
         serde_json::to_string(&desc).unwrap_or_default()
     );
     let reply = st
@@ -211,10 +324,8 @@ pub async fn draft(
     } else {
         steve_i18n::t!("hub.bot.draft_name")
     };
-    let model = match get("model").map(js::string).as_deref() {
-        Some("opus") => json!("claude-opus-5-5"),
-        Some("sonnet") => json!("claude-sonnet-5-5"),
-        Some("haiku") => json!("claude-haiku-5-5"),
+    let model = match get("model").map(js::string) {
+        Some(m) if !m.is_empty() && offered.contains(&m) => json!(m),
         _ => Value::Null,
     };
     let mut f = Obj::new();
@@ -236,11 +347,8 @@ pub async fn draft(
         json!(get("rules").map(js::string).unwrap_or_else(|| desc.clone())),
     );
     f.insert("model".into(), model);
-    f.insert(
-        "harness".into(),
-        json!(steve_acp::adapters::DEFAULT_ADAPTER.0),
-    );
-    f.insert("perm_mode".into(), json!("default"));
+    f.insert("harness".into(), json!(harness_id));
+    f.insert("perm_mode".into(), json!(perm_mode));
     st.write(move |w| {
         let b = w.bot_create(&c.ws, &f, &c.me)?;
         ok(Value::Object(bot_out(w, b, &c.ws)?))
@@ -255,8 +363,37 @@ pub async fn patch_one(
     b: Bytes,
 ) -> ApiResult {
     check_bot(&st, &c.ws, &id).await?;
-    let p = bot_in(&body(&b)?, false, &st.cfg.harness_ids())?;
+    let harnesses = st.domain.harnesses(false).await?;
+    let allowed = known_harness_ids(&st.cfg, &harnesses);
+    let mut p = bot_in(&body(&b)?, false, &allowed)?;
     st.write(move |r| {
+        let Some(cur) = r.bot_get(&id)? else {
+            return Err(ApiError::not_found(Noun::Bot.missing()));
+        };
+        let cur_h = str_of(&cur, "harness");
+        let switched_to = p
+            .get("harness")
+            .and_then(Value::as_str)
+            .filter(|h| !h.is_empty() && *h != cur_h.as_str())
+            .map(str::to_string);
+        let target_id = switched_to.as_deref().unwrap_or(&cur_h);
+        check_bot_harness_caps(&p, target_id, &harnesses)?;
+        if let Some(target_id) = &switched_to
+            && let Some(target) = harnesses.iter().find(|h| h.id == *target_id)
+        {
+            if !p.contains_key("perm_mode") {
+                let cur_pm = str_of(&cur, "perm_mode");
+                if perm_mode_of_key(&cur_pm).is_some_and(|m| !target.offers_mode(m)) {
+                    p.insert("perm_mode".into(), json!(target.default_perm_mode()));
+                }
+            }
+            if !p.contains_key("reasoning_effort")
+                && let Some(eff) = cur.get("reasoning_effort").and_then(Value::as_str)
+                && !target.takes_effort(eff)
+            {
+                p.insert("reasoning_effort".into(), Value::Null);
+            }
+        }
         if let Some(Value::String(dp)) = p.get("default_project")
             && !dp.is_empty()
         {
@@ -464,9 +601,10 @@ mod tests {
     #[test]
     fn bot_patch_validation() {
         assert!(bot_in(&json!({"reasoning_effort": "high"}), false, &ids()).is_ok());
+        assert!(bot_in(&json!({"reasoning_effort": "turbo"}), false, &ids()).is_ok());
         assert!(bot_in(&json!({"reasoning_effort": null}), false, &ids()).is_ok());
         assert_eq!(
-            bot_in(&json!({"reasoning_effort": "turbo"}), false, &ids()).unwrap_err(),
+            bot_in(&json!({"reasoning_effort": "bad effort!"}), false, &ids()).unwrap_err(),
             ApiError::Invalid(vec!["reasoning_effort".into()])
         );
         let e = bot_in(&json!({"name": "", "proactive": 3, "avatar": {"color": "red", "skin": "12", "round": 101}}), false, &ids()).unwrap_err();
@@ -488,7 +626,7 @@ mod tests {
         .expect("ok");
         assert_eq!(
             serde_json::to_string(&p).unwrap_or_default(),
-            r#"{"name":"A","harness":"claude-code","model":null,"avatar":{"round":70}}"#
+            r#"{"name":"A","model":null,"avatar":{"round":70}}"#
         );
         assert_eq!(
             bot_in(&json!({}), true, &ids()).unwrap_err(),

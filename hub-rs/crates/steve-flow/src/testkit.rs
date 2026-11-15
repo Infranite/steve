@@ -103,7 +103,7 @@ impl Core for FakeCore {
                 let id = format!("ST-{no}");
                 let now = steve_store::now();
                 c.execute(
-                    "INSERT INTO items (id, workspace_id, no, title, status, stage, bot_id, accept_mode, project_id, source, created, updated) VALUES (?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?, ?)",
+                    "INSERT INTO items (id, workspace_id, no, title, status, stage, bot_id, accept_mode, project_id, source, requested_by, created, updated) VALUES (?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?, ?, ?)",
                     params![
                         id,
                         req.ws,
@@ -114,6 +114,7 @@ impl Core for FakeCore {
                         if req.accept_auto { Some("auto") } else { None },
                         req.project,
                         json!([req.source.0, req.source.1]).to_string(),
+                        req.requester,
                         now,
                         now
                     ],

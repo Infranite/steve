@@ -14,6 +14,8 @@ pub const STORE_FORMAT: u32 = 1;
 /// The run contract of a channel plugin this Hub speaks ([`super`]).
 pub const CHANNEL_CONTRACT: u32 = 1;
 pub const KIND_CHANNEL: &str = "channel";
+/// An ext_ws service declaring the generic connector v1 extension.
+pub const KIND_CONNECTOR: &str = "connector";
 /// A skin for the web client: the archive carries a theme manifest, nothing runs ([`super`]).
 pub const KIND_THEME: &str = "theme";
 /// The theme contract this Hub speaks: `entry` is a theme manifest in the web client's format.
@@ -253,6 +255,9 @@ pub struct Plugin {
     pub version: String,
     /// The version of its kind's run contract it was built for.
     pub contract: u32,
+    /// Explicit connection identity. Missing retains the original self contract.
+    #[serde(default)]
+    pub identity: steve_channels::adapters::ext_ws::wire::Identity,
     /// The executable, relative to the root of the unpacked archive.
     pub entry: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -268,7 +273,7 @@ impl Plugin {
     /// Why this Hub cannot run it, when it cannot: a kind or a contract from a newer Steve.
     pub fn unsupported(&self) -> Option<&'static str> {
         let contract = match self.kind.as_str() {
-            KIND_CHANNEL => CHANNEL_CONTRACT,
+            KIND_CHANNEL | KIND_CONNECTOR => CHANNEL_CONTRACT,
             KIND_THEME => THEME_CONTRACT,
             _ => return Some("kind"),
         };
@@ -277,7 +282,7 @@ impl Plugin {
 
     /// Whether it is a process the Hub runs (a channel), not data the web client reads (a theme).
     pub fn runs(&self) -> bool {
-        self.kind == KIND_CHANNEL
+        matches!(self.kind.as_str(), KIND_CHANNEL | KIND_CONNECTOR)
     }
 
     /// The archive for a Hub built for `target`: its own, else one for [`ANY_TARGET`].
@@ -414,6 +419,26 @@ mod tests {
                 "artifacts": {"aarch64-apple-darwin": {"url": "echo.tar.gz", "sha256": "0".repeat(64)}}
             }]
         })
+    }
+
+    #[test]
+    fn connection_identity_defaults_to_self_and_bot_is_explicit() {
+        use steve_channels::adapters::ext_ws::wire::Identity;
+        let mut v = sample();
+        assert_eq!(parsed(&v).unwrap().plugins[0].identity, Identity::Self_);
+        v["plugins"][0]["identity"] = "bot".into();
+        assert_eq!(parsed(&v).unwrap().plugins[0].identity, Identity::Bot);
+        v["plugins"][0]["identity"] = "unknown".into();
+        assert!(parsed(&v).is_err());
+    }
+
+    #[test]
+    fn connector_is_a_supervised_executable_contract() {
+        let mut v = sample();
+        v["plugins"][0]["kind"] = "connector".into();
+        let p = parsed(&v).unwrap().plugins.remove(0);
+        assert!(p.runs());
+        assert_eq!(p.unsupported(), None);
     }
 
     fn parsed(v: &serde_json::Value) -> Result<Index> {

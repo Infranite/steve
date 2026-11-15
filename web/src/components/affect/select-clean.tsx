@@ -241,6 +241,7 @@ export function Select({
         break;
       case "Escape":
         e.preventDefault();
+        e.stopPropagation(); // Close this menu before an enclosing dialog or sheet.
         hide();
         break;
       case "Tab":

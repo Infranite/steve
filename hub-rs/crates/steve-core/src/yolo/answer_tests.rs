@@ -100,32 +100,33 @@ fn an_objection_or_low_confidence_without_recommendation_stays_with_you() {
     assert_eq!(a.outcome, "declined");
     assert_eq!(a.reason, "YOLO 没替你答：猜的");
 
-    // lack of information only: the agent's recommendation is taken
+    // Even a recommendation cannot supply a missing verification receipt.
     let (item, sid, _) = t.item();
-    let r = reply("ask_user", "", None, 0.2, "信息不足：没写偏好");
+    let r = reply(
+        "ask_user",
+        "",
+        None,
+        0.99,
+        "信息不足：没有实际运行提交和验证回执",
+    );
     t.kit.gw.set(move |_, _| Ok(r.clone()));
     let d = t.card(
         &item,
         &sid,
         "ask",
         "question",
-        "先做哪个？",
-        "推荐：B\n理由：依赖少",
-        &OPTS,
+        "核验结果是什么？",
+        "推荐：核验通过\n理由：只有取得真实回执后才能继续",
+        &["核验通过", "尚未核验"],
     );
+    let before = t.kit.rt.prompts_of(&sid).len();
     let a = t.engine.consider(&d).unwrap().unwrap();
     assert_eq!(
-        (a.outcome.as_str(), a.rule.as_str(), a.choice.as_deref()),
-        ("decided", "ask.recommended", Some("B"))
+        (a.outcome.as_str(), a.rule.as_str()),
+        ("declined", "ask.unsure")
     );
-    assert!(
-        t.kit
-            .rt
-            .prompts_of(&sid)
-            .last()
-            .unwrap()
-            .starts_with("（YOLO：Steve 代你回答）B。依据：依赖少。")
-    );
+    assert_eq!(t.decision(&d).status, "open");
+    assert_eq!(t.kit.rt.prompts_of(&sid).len(), before);
 
     // no usable reply: ambiguous, stays with you even with a recommendation
     let (item, sid, _) = t.item();

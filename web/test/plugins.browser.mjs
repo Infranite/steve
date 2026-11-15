@@ -24,6 +24,7 @@ function view(owner) {
           config: [{ key: "address", label: "Gateway", required: true, secret: false }, { key: "token", label: "Token", required: true, secret: true }],
           installed: { version: "0.1.0", installed: 1, config: [{ key: "address", label: "Gateway", required: true, secret: false }, { key: "token", label: "Token", required: true, secret: true }] },
           connections: [{ instance: "i1", connection: "c1", status: { state: "waiting", error: "dial tcp 127.0.0.1:443: connection refused" } }] }),
+        plugin({ id: "calendar", name: "Team Calendar", summary: text("Calendar search and events", "搜索日历与事件"), kind: "connector", version: "1.0.0", installed: { version: "1.0.0", installed: 1, config: [{ key: "token", label: "Token", required: true, secret: true }] } }),
         plugin({ id: "ocean", name: text("Ocean", "海洋"), summary: text("A blue accent", "一种蓝色强调色"), kind: "theme", version: "1.0.0", installed: { version: "1.0.0", installed: 1, config: [] } }),
         plugin({ id: "broken", name: "Broken", summary: "A theme with a bad token", kind: "theme", version: "1.0.0", installed: { version: "1.0.0", installed: 1, config: [] } }),
         plugin({ id: "dusk", name: text("Dusk", "黄昏"), summary: text("A whole evening look", "一整套傍晚的外观"), kind: "theme", version: "0.3.0" }),
@@ -45,11 +46,13 @@ const open = async ({ width = 1440, theme = "light", owner = true } = {}) => {
   await page.addInitScript(() => localStorage.setItem("steve-lang", "zh-CN"))
   await page.route((u) => u.pathname.startsWith("/api/"), async (route) => {
     const r = route.request(), u = new URL(r.url())
-    calls.push({ method: r.method(), path: u.pathname })
+    calls.push({ method: r.method(), path: u.pathname, ...(r.method() === "POST" ? { body: r.postDataJSON() } : {}) })
     const json = (body) => route.fulfill({ contentType: "application/json", body: JSON.stringify(body) })
     if (u.pathname === "/api/state") return
     if (u.pathname === "/api/plugins") return json(view(owner))
     if (u.pathname === "/api/plugins/themes") return json(themes)
+    if (u.pathname === "/api/vault/status") return json({ initialized: true, keychain: "ok", kek_version: 1, passkeys: 0, rotating: false })
+    if (u.pathname === "/api/plugins/installed/local/calendar/connect" && r.method() === "POST") return json({ instance: "calendar-instance", connection: "calendar-connection" })
     if (u.pathname === "/api/accounts") return json([{ id: "a1", system: { id: "lark", name: "Lark", kind: "im" }, party: { id: "me", name: "Lee", type: "person", is_me: true }, kind: "user", handle: "lee", display_name: "Lee · Lark", verified: true, confidence: 1, source: "", source_label: "", connection: { id: "c1" }, vault_items: [], revision: 1 }])
     if (u.pathname.endsWith("/refresh")) return json({ id: "infranite-steve-extensions", checked: Date.now(), error: null })
     if (r.method() === "POST" && u.pathname.startsWith("/api/plugins/installed/")) return json({ version: "0.3.0", installed: Date.now() })
@@ -74,6 +77,21 @@ try {
     assert.match(await lark.locator("[data-connection-error]").innerText(), /connection refused/)
     assert.match(await lark.locator("[data-plugin-update-row]").innerText(), /0\.2\.0/)
     assert.equal(await lark.locator("[data-plugin-update-row] [data-plugin-install]").count(), 1)
+    /* connector plugins use the same real connection form, not an unsupported-kind fallback */
+    const calendar = page.locator('[data-plugins-installed] [data-plugin="calendar"]')
+    await calendar.getByText("连接器", { exact: true }).waitFor()
+    await calendar.locator("[data-plugin-connect]").click()
+    const connect = page.locator('[data-plugin-connect-dialog="calendar"]')
+    await connect.waitFor()
+    assert.equal(await connect.locator("[data-plugin-connect-go]").isDisabled(), true)
+    const token = connect.locator('[data-plugin-field="token"]')
+    assert.equal(await token.getAttribute("type"), "password")
+    await token.fill("fixture-token")
+    await connect.locator("[data-plugin-connect-go]").click()
+    await page.locator("[data-plugin-connected]").waitFor()
+    assert.deepEqual(calls.find(c => c.path === "/api/plugins/installed/local/calendar/connect"), { method: "POST", path: "/api/plugins/installed/local/calendar/connect", body: { config: { token: "fixture-token" } } })
+    await page.locator("[data-plugin-connected]").getByRole("button", { name: "好了", exact: true }).click()
+    await page.locator("[data-plugin-connected]").waitFor({ state: "detached" })
     /* the themes were read on opening: one registered, one refused with the reason */
     await page.locator('[data-plugin="ocean"] [data-plugin-theme="ocean"]').waitFor()
     assert.match(await page.locator('[data-plugin="broken"] [data-plugin-theme="refused"]').innerText(), /primary/)
@@ -108,6 +126,7 @@ try {
     const { page } = await open({ owner: false })
     assert.equal(await page.locator("[data-plugin-install], [data-plugin-more], [data-plugin-add], [data-store-refresh], [data-store-remove], [data-store-read]").count(), 0)
     assert.equal(await page.locator('[data-plugin="openlark"] [data-plugin-connect]').count(), 1, "connecting is anyone's")
+    assert.equal(await page.locator('[data-plugin="calendar"] [data-plugin-connect]').count(), 1, "a member can connect a connector too")
     assert.equal(await page.locator("[data-store-address]").count(), 0, "addresses are the owner's")
     await page.close()
   }

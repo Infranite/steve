@@ -418,8 +418,12 @@ pub fn object_info(
             .optional()?
             .map(|(name, roles)| {
                 let mut o = ObjectInfo::new("device", id, name);
+                // the Hub's own device is seeded with the roles `Hub` and `执行节点` (crates/steve-hub/src/system.rs)
                 o.detail = serde_json::from_str::<Vec<String>>(&roles)
                     .unwrap_or_default()
+                    .into_iter()
+                    .map(|r| if r == "执行节点" { steve_i18n::t!("modules.stewards.device_runner") } else { r })
+                    .collect::<Vec<_>>()
                     .join(&steve_i18n::t!("modules.error.list_sep"));
                 o
             }),
@@ -432,7 +436,7 @@ pub fn object_info(
             .optional()?
             .map(|(name, role)| {
                 let mut o = ObjectInfo::new("bot", id, name);
-                o.detail = role;
+                o.detail = steve_store::seeded::shown(&role, steve_store::seeded::BOT[0].1).unwrap_or(role);
                 o
             }),
         "persona" => c
@@ -443,6 +447,7 @@ pub fn object_info(
             .optional()?
             .map(|(name, intro)| {
                 let mut o = ObjectInfo::new("persona", id, name);
+                let intro = steve_store::seeded::shown(&intro, steve_store::seeded::PERSONA[0].1).unwrap_or(intro);
                 o.detail = intro.chars().take(60).collect();
                 o
             }),

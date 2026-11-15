@@ -5,7 +5,6 @@ export default {
     save: "保存",
     cancel: "取消",
     delete: "删除",
-    ok: "确定",
     close: "关闭",
     retry: "重试",
     edit: "编辑",
@@ -36,12 +35,9 @@ export default {
   },
   state: {
     loading: "加载中…",
-    error: "错误",
-    loadFailed: "加载失败",
     saved: "已保存",
     empty: "暂无",
     none: "无",
-    on: "开",
     off: "关",
   },
   settings: {
@@ -56,7 +52,6 @@ export default {
   time: {
     justNow: "刚刚",
     justStarted: "刚开始",
-    secondsAgo_other: "{{count}} 秒前",
     minutesAgo_other: "{{count}} 分钟前",
     hoursAgo_other: "{{count}} 小时前",
     daysAgo_other: "{{count}} 天前",

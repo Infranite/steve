@@ -270,13 +270,26 @@ impl super::node_runtime::NodeDomain for HubHost {
                     let path = dir.unwrap_or_default();
                     core.workspace_ready(&session, &path.to_string_lossy(), view.branch.as_deref())
                 }
-                WorkspaceFact::PrepareFailed { session, error } => core.workspace_failed(
-                    &session,
-                    error
+                WorkspaceFact::PrepareFailed { session, error } => {
+                    let detail = error
                         .as_ref()
-                        .is_some_and(|e| e.code == steve_node_api::ErrorCode::Exhausted),
-                    error.as_ref().map_or("", |e| e.safe_detail.as_str()),
-                ),
+                        .map(super::node_runtime::said)
+                        .unwrap_or_default();
+                    if error
+                        .as_ref()
+                        .is_some_and(super::node_runtime::workspace_binding_conflict)
+                    {
+                        core.workspace_binding_failed(&session, &detail)
+                    } else {
+                        core.workspace_failed(
+                            &session,
+                            error
+                                .as_ref()
+                                .is_some_and(|e| e.code == steve_node_api::ErrorCode::Exhausted),
+                            &detail,
+                        )
+                    }
+                }
                 WorkspaceFact::Tidied { item, removed, .. } => {
                     core.workspace_tidied(&item, removed)
                 }
@@ -876,9 +889,9 @@ impl steve_core::AgentRuntime for RoutedRuntime {
                 && let Some(node) = node_of_strict(&self.store, &session.id)?
                 && !eligible(&node)?
             {
-                return Err(CoreError::Msg(
-                    "协作会话绑定的 Node 不可用或不再获授权。".into(),
-                ));
+                return Err(CoreError::Msg(steve_i18n::t!(
+                    "hub.workflow.node_unavailable"
+                )));
             }
         }
         if eligible("local")? {
@@ -931,15 +944,7 @@ impl steve_core::AgentRuntime for RoutedRuntime {
         let Some(n) = &self.node else {
             return Ok(false);
         };
-        let Some(item) = self
-            .store
-            .sessions()
-            .get(session_id)?
-            .and_then(|s| s.item_id)
-        else {
-            return Ok(false);
-        };
-        Ok(n.tidy_workspace(&item, keep_branch)?)
+        Ok(n.tidy_session_workspace(session_id, keep_branch)?)
     }
     /// A new session is bound to the remote Node named by `STEVE_NODE_BIND` when it can run there;
     /// otherwise, with the local Node enabled here, to it when its binding can be planned.
@@ -1297,6 +1302,8 @@ pub struct CoreDomain {
     /// The local Node (`STEVE_NODE_MODE=local`): stopped with the Hub, its harnesses
     /// with it.
     pub node: Option<Arc<steve_node::LocalNode>>,
+    /// Remote Nodes linked to this Hub, when the Node listener is enabled.
+    pub nodes: Option<Arc<crate::nodes::NodeService>>,
     /// The connections' runs (long connections, pollers): stopped with the Hub.
     pub lifecycle: Option<steve_channels::lifecycle::ConnectionRuntime>,
 }
@@ -1983,8 +1990,14 @@ impl Domain for CoreDomain {
     }
 
     async fn harnesses(&self, fresh: bool) -> BResult<Vec<steve_core::harnesses::Harness>> {
-        if fresh && let Some(n) = &self.node {
-            self.harnesses.refresh(n.as_ref(), true).await;
+        if fresh {
+            let local = self
+                .node
+                .as_ref()
+                .map(|n| n.as_ref() as &dyn steve_node_api::Node);
+            self.harnesses
+                .refresh_all(local, self.nodes.as_deref(), true)
+                .await;
         }
         Ok(self.core.models().harnesses())
     }
@@ -2009,6 +2022,20 @@ impl Domain for CoreDomain {
             actor.to_string(),
         );
         blocking(move || Ok(c.models().write(&ws, &values, &actor, "settings.models")?)).await
+    }
+    async fn models_select(
+        &self,
+        ws: &str,
+        choice: &steve_core::models::SteveSelection,
+        actor: &str,
+    ) -> BResult<Value> {
+        let (c, ws, choice, actor) = (
+            self.core.clone(),
+            ws.to_string(),
+            choice.clone(),
+            actor.to_string(),
+        );
+        blocking(move || c.models().select_steve(&ws, &choice, &actor)).await
     }
     async fn onboard_start(&self, ws: &str, actor: &str) -> BResult<String> {
         let (c, ws, actor) = (self.core.clone(), ws.to_string(), actor.to_string());

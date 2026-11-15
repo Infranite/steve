@@ -26,7 +26,7 @@ export default {
   harnessModel: "{{harness}} · {{model}}",
   projectByItem: "Inferred from the item",
   brief: { titled: "Task brief · {{title}}", plain: "Task brief" },
-  steveTool: { steve_update: "Update plan", steve_ask: "Ask you", steve_request_approval: "Request approval", steve_deliver: "Deliver", steve_publish: "Request release", steve_lane_status: "Check release progress", steve_workflow: "Workflow", steve_item_read: "Read item", steve_items_search: "Search items", steve_item_dependencies: "Item dependencies", steve_knowledge_search: "Search knowledge", steve_knowledge_read: "Read knowledge", steve_knowledge_get: "Read knowledge", steve_debug: "Diagnose", steve_devices: "List devices", steve_reply_source: "Find reply source", steve_event_get: "Read event", steve_sessions_list: "List sessions", steve_remember: "Remember", steve_memory_list: "List memories", steve_memory_tidy: "Tidy memories", steve_note: "Take a note", steve_whois: "Look up who", steve_contacts_find: "Find contacts", steve_contacts_search: "Search contacts", steve_contact_get: "Read contact", steve_contacts_remember: "Remember contact", steve_im_read: "Read messages", steve_mail_thread: "Read mail thread", steve_mail_attachment: "Read attachment", steve_mail_draft: "Draft email", steve_mail_send: "Send email", steve_github_status: "GitHub status", steve_github_ci_log: "Read CI log", steve_github_comment: "Comment on GitHub", steve_github_open_pr: "Open pull request", steve_secret_list: "List secrets", steve_secret_use: "Use secret", steve_steward_propose: "Propose", steve_upgrade: "Upgrade" },
+  steveTool: { steve_contacts: "Look up contacts and ownership", steve_github_read: "Read GitHub status and logs", steve_mail_read: "Read email and attachments", steve_matters: "Look up matters", steve_tools_search: "Find tools", steve_tool_call: "Run a tool", steve_person_holdings: "Read responsibilities", steve_digest_batch: "Lease digest batch", steve_digest_read: "Read digest packet", steve_digest_chunk: "Save digest chunk", steve_digest_finish: "Finish digest", steve_digest_control: "Manage digest lease", steve_digest_report: "Read digest changes", steve_matters_search: "Search matters", steve_matter_read: "Read matter",  steve_update: "Update plan", steve_ask: "Ask you", steve_request_approval: "Request approval", steve_deliver: "Deliver", steve_publish: "Request release", steve_lane_status: "Check release progress", steve_workflow: "Workflow", steve_item_read: "Read item", steve_items_search: "Search items", steve_item_dependencies: "Item dependencies", steve_knowledge_search: "Search knowledge", steve_knowledge_read: "Read knowledge", steve_knowledge_get: "Read knowledge", steve_debug: "Diagnose", steve_devices: "List devices", steve_reply_source: "Find reply source", steve_event_get: "Read event", steve_sessions_list: "List sessions", steve_remember: "Remember", steve_memory_list: "List memories", steve_memory_tidy: "Tidy memories", steve_note: "Take a note", steve_whois: "Look up who", steve_contacts_find: "Find contacts", steve_contacts_search: "Search contacts", steve_contact_get: "Read contact", steve_contacts_remember: "Remember contact", steve_im_read: "Read messages", steve_mail_thread: "Read mail thread", steve_mail_attachment: "Read attachment", steve_mail_draft: "Draft email", steve_mail_send: "Send email", steve_github_status: "GitHub status", steve_github_ci_log: "Read CI log", steve_github_comment: "Comment on GitHub", steve_github_open_pr: "Open pull request", steve_secret_list: "List secrets", steve_secret_use: "Use secret", steve_steward_propose: "Propose", steve_upgrade: "Upgrade" },
   tool: { fallback: "Tool", permission: "Tool call" },
   queueLine: {
     queued: "Queued: {{text}}",
@@ -212,6 +212,7 @@ export default {
     remove: "Remove tag {{name}}",
   },
   nav: {
+    feed: "Feed",
     chat: "Chat",
     inbox: "Inbox",
     items: "Items",
@@ -233,8 +234,11 @@ export default {
     settings: "Settings",
     mine: "Me",
   },
-  navGroup: { work: "Work", connect: "Connections & data", automate: "Automation" },
+  navGroup: { connect: "Connections & data", automate: "Automation" },
   sidebar: {
+    toggle: "Toggle sidebar",
+    sheetTitle: "Sidebar",
+    sheetDesc: "Navigation and workspaces",
     searchTip: "Search ⌘K",
     appearance: "Appearance",
     webUpdate: "Web update available · View",
@@ -319,7 +323,6 @@ export default {
       failed_other: "{{count}} failures",
     },
     thinking: "Thinking",
-    thought: "Thought",
     failed: "Failed",
     preparing: "Preparing",
     replying: "Replying",
@@ -353,11 +356,10 @@ export default {
     thinking: "Thinking",
     thought: "Thought",
     thoughtFor: "Thought for {{time}}",
-    worked: "Worked",
     finished: "Finished",
     more_one: "+{{count}} more",
     more_other: "+{{count}} more",
-    live: { read: "Reading", write: "Writing", edit: "Editing", search: "Searching", webSearch: "Searching the web", run: "Running", fetch: "Fetching", delegate: "Delegating to" },
+    live: { read: "Reading", write: "Writing", edit: "Editing", search: "Searching", webSearch: "Searching the web", run: "Running", delegate: "Delegating to" },
     delegated: "Delegated to",
     group: {
       read_one: "Read {{count}} file",
@@ -409,12 +411,11 @@ export default {
   },
   /* defaults inside the affectUI components (web/src/components/affect); callers may still pass their own words */
   affect: {
-    risk: { low: "Low", medium: "Medium", high: "High" },
+    risk: { low: "Low", medium: "Medium", high: "High", lowFull: "Low risk", mediumFull: "Medium risk", highFull: "High risk" },
     approval: {
-      always: "Always allow this action", approve: "Approve", deny: "Deny", edit: "Edit",
+      always: "Always allow this action", alwaysShort: "Always allowed", approve: "Approve", deny: "Deny", edit: "Edit",
       approved: "Approved", denied: "Denied", expired: "Expired",
       expiresIn: "Expires in {{time}}", expiresSr: "Expires in {{time}} unless approved. The timer pauses while the card is hovered or focused.",
-      justNow: "just now", minAgo: "{{n}} min ago", hAgo: "{{n}} h ago", dAgo: "{{n}} d ago",
     },
     tools: { retry: "Retry", using: "Using tools…", used_one: "Used {{count}} tool", used_other: "Used {{count}} tools" },
     thinking: { think: "Thinking", search: "Searching the web", read: "Reading sources", write: "Writing response", done: "Thought for {{time}}" },
@@ -423,7 +424,7 @@ export default {
       thanks: "Thanks for the feedback", finished: "Finished reading", reading: "Reading aloud", stopped: "Stopped reading",
       writing: "Writing…", regenerate: "Regenerate", regenerateLabel: "Regenerate response", prev: "Previous version", next: "Next version",
       thanksTip: "Thanks!", good: "Good response", bad: "Bad response", stop: "Stop", readAloud: "Read aloud", stopReading: "Stop reading", send: "Send",
-      version: "Version {{i}} of {{n}}", markedBad: "Marked as bad response. Tell us what went wrong below", tellMore: "Tell us more (optional)", versions: "Versions", closeFeedback: "Close feedback", whatWrong: "What went wrong, in your words",
+      version: "Version {{i}} of {{n}}", markedBad: "Marked as bad response. Tell us what went wrong below", tellMore: "Tell us more (optional)", versions: "Versions", askWrong: "What went wrong?", closeFeedback: "Close feedback", whatWrong: "What went wrong, in your words",
       notAccurate: "Not accurate", tooLong: "Too long", ignored: "Didn't follow instructions", other: "Other",
     },
     inbox: {
@@ -459,15 +460,6 @@ export default {
       category: "Category", all: "All", search: "Search memories", closeSearch: "Close search",
       none: "Nothing remembered yet", noneFor: "No memory mentions “{{q}}”", noneHere: "No memories here",
       newMemory: "New memory", newPlaceholder: "Something the assistant should remember…", newCategory: "Category of the new memory", general: "General",
-    },
-    monitor: {
-      state: { idle: "Idle", running: "Running", waiting: "Needs you", paused: "Paused", finished: "Finished", failed: "Failed", cancelled: "Cancelled" },
-      kind: { read: "Read", search: "Search", edit: "Edit", run: "Terminal", think: "Thinking", web: "Web" },
-      failed: "Failed", done: "Done", waitingOnYou: "Waiting on you", finishedIn: "Finished in {{time}}", files_one: "{{count}} file", files_other: "{{count}} files",
-      wentWrong: "Something went wrong", cancelledAfter: "Cancelled after {{time}}", noTask: "No task yet", openAria: "{{what}} – open",
-      costSoFar: "Cost so far {{usd}}", fold: "Fold away", runningFor: "Running for {{time}}", finishedSteps: "Finished steps", details: "{{what}} – details",
-      started: "Started", took: "Took", share: "Share", stateWord: "State", decline: "Decline", allow: "Allow", retry: "Try again",
-      pause: "Pause", resume: "Resume", cancel: "Stop", log: "Log",
     },
     ctxWin: {
       title: "Context window", nothing: "Nothing attached", tokensExact: "{{n}} tokens", remove: "Remove {{what}}", compacting: "Compacting…",
@@ -507,6 +499,8 @@ export default {
     done: "Turn complete",
     waitWhat: "A card is waiting for your decision at the end of the conversation",
     took: "Took {{dur}}",
+    nodeWait: "Queued: {{detail}} — retries automatically",
+    room: "Queued: the device is at its limit, {{running}}/{{max}}",
   },
   session: {
     no: "Conversation #{{n}}",

@@ -17,10 +17,28 @@ fn excerpt(s: &str, limit: usize) -> String {
     if s.chars().count() <= limit {
         return s.to_string();
     }
-    format!(
-        "{}…（内容已截断，请打开工作单元事项查看完整产出）",
-        s.chars().take(limit).collect::<String>()
+    steve_i18n::t!(
+        "core.workflow.truncated",
+        head = s.chars().take(limit).collect::<String>()
     )
+}
+
+/// The fixed notes and errors a workflow keeps (zh-CN, as stored), the more specific first.
+const STORED_NOTES: &[&str] = &[
+    "core.workflow.error.policy",
+    "core.workflow.error.invalid",
+    "core.workflow.error.interrupted",
+    "core.workflow.error.undelivered",
+    "core.workflow.note.claimed",
+    "core.workflow.note.session_bound",
+    "core.workflow.note.item_paused",
+    "core.workflow.note.item_cancelled",
+];
+
+/// A stored note or reason of a workflow in the request's language; anything else (an agent's own
+/// words) as written.
+fn note_shown(stored: &str) -> String {
+    steve_i18n::reword!(stored, STORED_NOTES).unwrap_or_else(|| stored.to_owned())
 }
 
 fn permanent_provider_failure(reason: &str) -> bool {
@@ -30,22 +48,20 @@ fn permanent_provider_failure(reason: &str) -> bool {
 }
 
 pub(crate) fn workflow_error(error: &str) -> String {
+    // already explained (stored in zh-CN): in the current language
+    if let Some(shown) = steve_i18n::reword!(error, STORED_NOTES) {
+        return shown;
+    }
     if error.starts_with("上游使用策略拒绝了请求") || error.starts_with("模型服务拒绝了本次请求")
     {
         return error.to_string();
     }
     let lower = error.to_ascii_lowercase();
     if lower.contains("blocked by upstream usage policy") {
-        return format!(
-            "上游使用策略拒绝了请求；已完成成果保留。需处理上游策略后由用户决定是否重试评审。原始错误：{}",
-            excerpt(error, 300)
-        );
+        return steve_i18n::t!("core.workflow.error.policy", error = excerpt(error, 300));
     }
     if lower.contains("400 the request was rejected as invalid") {
-        return format!(
-            "模型服务拒绝了本次请求（API 400）；本次没有评审结论。请检查请求、模型和适配器配置后由用户决定是否重试。原始错误：{}",
-            excerpt(error, 300)
-        );
+        return steve_i18n::t!("core.workflow.error.invalid", error = excerpt(error, 300));
     }
     error.to_string()
 }
@@ -193,29 +209,53 @@ impl Tx<'_> {
         if complete {
             let deps = crate::lifecycle::deps_open(self.db(), item)?;
             if !deps.is_empty() {
-                out.push(format!("前置事项尚未完成：{}", deps.join("、")));
+                out.push(steve_i18n::t!(
+                    "core.workflow.blocker.deps_open",
+                    deps = deps.join(&steve_i18n::t!("core.now.list_sep"))
+                ));
             }
             if self.dependency_waiting(item)? {
-                out.push("事项仍在等待前置完成后续跑".into());
+                out.push(steve_i18n::t!("core.workflow.blocker.dep_wait"));
             }
         }
         let Some(g) = self.db().store().workflows().get(item)? else {
             return Ok(out);
         };
         if complete && !self.workflow_current(&g)? {
-            out.push("主事项目标或周期已变化，请重规划并重新验证旧成果".into());
+            out.push(steve_i18n::t!("core.workflow.blocker.stale"));
         }
         if complete && g.paused && !g.single_session() {
-            out.push("协作已暂停".into());
+            out.push(steve_i18n::t!("core.workflow.blocker.paused"));
         }
         for u in &g.units {
             if self.workflow_busy(u)? {
-                out.push(format!("{}：执行或取消仍未确认结束", u.spec.title));
+                out.push(steve_i18n::t!(
+                    "core.workflow.blocker.unsettled",
+                    title = u.spec.title
+                ));
             } else if matches!(u.status.as_str(), "running" | "dispatching") {
-                out.push(format!("{}：工作单元尚未结束", u.spec.title));
+                out.push(steve_i18n::t!(
+                    "core.workflow.blocker.running",
+                    title = u.spec.title
+                ));
             } else if complete && !g.single_session() && u.spec.required && u.status != "succeeded"
             {
-                out.push(format!("{}：{}", u.spec.title, u.status));
+                out.push(match u.status.as_str() {
+                    "failed" => {
+                        steve_i18n::t!("core.workflow.blocker.failed", title = u.spec.title)
+                    }
+                    "cancelled" => {
+                        steve_i18n::t!("core.workflow.blocker.cancelled", title = u.spec.title)
+                    }
+                    "pending" => {
+                        steve_i18n::t!("core.workflow.blocker.pending", title = u.spec.title)
+                    }
+                    other => steve_i18n::t!(
+                        "core.workflow.blocker.status",
+                        title = u.spec.title,
+                        status = other
+                    ),
+                });
             } else if complete
                 && !g.single_session()
                 && u.status == "succeeded"
@@ -225,7 +265,10 @@ impl Tx<'_> {
                     .item(child)?
                     .is_none_or(|i| i.phase != CLOSED || i.outcome.as_deref() != Some("completed"))
             {
-                out.push(format!("{}：交付仍未冻结完成", u.spec.title));
+                out.push(steve_i18n::t!(
+                    "core.workflow.blocker.unfrozen",
+                    title = u.spec.title
+                ));
             }
         }
         Ok(out)
@@ -251,7 +294,7 @@ impl Tx<'_> {
                     &if unit.status == "failed" {
                         workflow_error(reason)
                     } else {
-                        reason.clone()
+                        note_shown(reason)
                     },
                     VIEW_TEXT,
                 ));
@@ -266,7 +309,7 @@ impl Tx<'_> {
             .collect();
         visible.history.reverse();
         for entry in &mut visible.history {
-            entry.reason = excerpt(&entry.reason, VIEW_TEXT);
+            entry.reason = excerpt(&note_shown(&entry.reason), VIEW_TEXT);
             entry.detail = Value::Null;
         }
         let mut out = serde_json::to_value(&visible)?;
@@ -441,9 +484,9 @@ impl Tx<'_> {
                 }
                 for u in &g.units {
                     if self.workflow_busy(u)? {
-                        return Err(conflict(format!(
-                            "{}：执行或取消仍未确认结束",
-                            u.spec.title
+                        return Err(conflict(steve_i18n::t!(
+                            "core.workflow.blocker.unsettled",
+                            title = u.spec.title
                         )));
                     }
                 }
@@ -494,9 +537,9 @@ impl Tx<'_> {
                             // A durable cancellation is an intent, not proof that its Node has
                             // stopped. Keep the unit and its resource/close reservation until the
                             // execution and queued input are confirmed settled.
-                            return Err(conflict(format!(
-                                "{}：执行或取消仍未确认结束，暂不能修改或移除工作单元",
-                                unit.spec.title
+                            return Err(conflict(steve_i18n::t!(
+                                "core.workflow.blocker.unsettled_change",
+                                title = unit.spec.title
                             )));
                         }
                     }
@@ -652,7 +695,7 @@ impl Tx<'_> {
                 self.db().store().workflows().pause_by(
                     item,
                     true,
-                    "主事项暂停或取消",
+                    &steve_i18n::stored(|| steve_i18n::t!("core.workflow.note.item_paused")),
                     steve_store::PAUSED_BY_ITEM,
                 )?;
                 self.workflow_stop_units(item)?;
@@ -662,10 +705,13 @@ impl Tx<'_> {
                         .iter()
                         .filter(|u| !matches!(u.status.as_str(), "succeeded" | "cancelled"))
                     {
-                        self.db()
-                            .store()
-                            .workflows()
-                            .cancel(item, &u.spec.id, "主事项取消")?;
+                        self.db().store().workflows().cancel(
+                            item,
+                            &u.spec.id,
+                            &steve_i18n::stored(|| {
+                                steve_i18n::t!("core.workflow.note.item_cancelled")
+                            }),
+                        )?;
                         if let Some(child) = &u.item_id {
                             self.workflow_cancel_child(child)?;
                         }
@@ -1168,15 +1214,15 @@ impl Tx<'_> {
                     .iter()
                     .any(|d| d.status == "open")
             {
-                let reason = end
-                    .error
-                    .as_deref()
-                    .unwrap_or(if end.stop_reason == "cancelled" {
-                        "工作单元已中断，请核对结果后重试"
-                    } else {
-                        "工作单元停止但未交付，请核对进度后重试"
-                    });
-                self.workflow_report(s, &workflow_error(reason), &[], &[], false)?;
+                // stored: what every member reads, worded again at read time
+                let reason = steve_i18n::stored(|| match end.error.as_deref() {
+                    Some(e) => workflow_error(e),
+                    None if end.stop_reason == "cancelled" => {
+                        steve_i18n::t!("core.workflow.error.interrupted")
+                    }
+                    None => steve_i18n::t!("core.workflow.error.undelivered"),
+                });
+                self.workflow_report(s, &reason, &[], &[], false)?;
             }
             if item.phase != CLOSED
                 && let Some((_, settled)) = self.db().store().workflows().by_child(child)?
@@ -1288,5 +1334,44 @@ fn unit_end(u: &WorkUnit) -> (&'static str, String) {
         (CANCEL, said.unwrap_or("工作单元已取消").into())
     } else {
         (FAIL, said.unwrap_or("工作单元未通过").into())
+    }
+}
+
+#[cfg(test)]
+mod shown_tests {
+    use super::*;
+    use steve_i18n::{EN, ZH_CN, with};
+
+    #[test]
+    fn the_notes_the_store_writes_are_the_keys_zh_cn_text() {
+        with(ZH_CN, || {
+            assert_eq!(
+                steve_i18n::t!("core.workflow.note.claimed"),
+                steve_store::NOTE_CLAIMED
+            );
+            assert_eq!(
+                steve_i18n::t!("core.workflow.note.session_bound"),
+                steve_store::NOTE_SESSION_BOUND
+            );
+        });
+    }
+
+    #[test]
+    fn stored_notes_and_errors_read_in_the_requests_language() {
+        assert_eq!(
+            with(EN, || note_shown(steve_store::NOTE_CLAIMED)),
+            "Ready work scheduled"
+        );
+        assert_eq!(with(ZH_CN, || note_shown("主事项取消")), "主事项取消");
+        assert_eq!(with(EN, || note_shown("改用另一个方案")), "改用另一个方案");
+        let stored =
+            steve_i18n::stored(|| workflow_error("API Error: blocked by upstream usage policy"));
+        assert!(stored.starts_with("上游使用策略拒绝了请求"), "{stored}");
+        let shown = with(EN, || workflow_error(&stored));
+        assert!(
+            shown.starts_with("The upstream usage policy refused the request")
+                && shown.ends_with("Original error: API Error: blocked by upstream usage policy"),
+            "{shown}"
+        );
     }
 }

@@ -304,7 +304,11 @@ impl Core {
             by: by.map(String::from),
         })?;
         th.route_override(origin, "to_item", Some(&item.id))?;
-        let text = format!("好，做成事项 {} 交给{}了。", item.id, self.bot_name(&item));
+        let text = format!(
+            "好，做成事项 {} 交给 {} 了。",
+            item.id,
+            self.bot_name(&item)
+        );
         let id = self.announce(ws, &item, origin, &text, Default::default())?;
         Ok(Handled {
             message_id: id,

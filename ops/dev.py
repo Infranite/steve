@@ -154,6 +154,8 @@ def snapshot(src_home):
 
 
 def seed_harness():
+    # Pi's SDK bridge must not discover the operator's normal login or session store.
+    (HARNESS / "pi").mkdir(parents=True, exist_ok=True)
     for name, own, files in (
         ("claude", HOME / ".claude", ["settings.json"]),
         ("codex", Path(os.environ.get("CODEX_HOME") or HOME / ".codex"), ["config.toml"]),
@@ -191,8 +193,9 @@ def client_origins(mode):
     # pages on this machine that may call the development Hub directly (a Hub switched to it, a web client on its
     # own port): the development web server, the installed Hub's pages (its own steve.env says where they are, the
     # snapshot's source when there is one), Vite's default port, and `STEVE_DEV_CLIENT_ORIGINS`
-    src = Path(mode.split(" ", 1)[1]) if mode.startswith("snapshot ") else HOME / ".steve"
-    inst = env_file(src / "steve.env")
+    # A fresh development installation does not inspect an installed Hub's configuration.
+    # Its extra clients are explicit in STEVE_DEV_CLIENT_ORIGINS. A snapshot keeps the source's origins.
+    inst = env_file(Path(mode.split(" ", 1)[1]) / "steve.env") if mode.startswith("snapshot ") else {}
     ports = {str(WEB_PORT), inst.get("STEVE_PORT") or "8440", "8441", "5174"}
     out = [f"http://{h}:{p}" for p in sorted(ports) for h in ("127.0.0.1", "localhost")]
     for u in ",".join([inst.get("STEVE_PUBLIC_URL", ""), inst.get("STEVE_PUBLIC_URLS", ""), os.environ.get("STEVE_DEV_CLIENT_ORIGINS", "")]).split(","):
@@ -221,6 +224,7 @@ def hub_env(mode):
         STEVE_VERSION=f"dev-{sha.strip() or 'unknown'}",
         CLAUDE_CONFIG_DIR=str(HARNESS / "claude"),
         CODEX_HOME=str(HARNESS / "codex"),
+        PI_CODING_AGENT_DIR=str(HARNESS / "pi"),
         NO_COLOR="1",
     )
     if shutil.which("node"):
@@ -232,12 +236,13 @@ def hub_env(mode):
     return env
 
 
-def link_adapters():
-    # the installed Hub's ACP adapters, when there are any: a development Hub runs the same harnesses
+def ensure_adapters():
+    # A live development Node may update managed adapters. Keep its prefix independent so
+    # accepting a change cannot upgrade the installed Hub's packages through a shared symlink.
     own = DEV / "adapters"
-    installed = HOME / ".steve/adapters"
-    if not own.exists() and not own.is_symlink() and installed.is_dir():
-        own.symlink_to(installed)
+    if own.is_symlink():
+        die(f"{own} is shared: preserve it and install adapters into an independent development prefix")
+    own.mkdir(parents=True, exist_ok=True)
 
 
 def start_hub():
@@ -248,7 +253,7 @@ def start_hub():
     mode = MODE.read_text().strip() if MODE.is_file() else "fresh"
     RUN.mkdir(parents=True, exist_ok=True)
     seed_harness()
-    link_adapters()
+    ensure_adapters()
     log = open(DEV / "hub.log", "ab")
     p = subprocess.Popen(
         [str(HUB_BIN)], cwd=DEV, env=hub_env(mode), stdout=log, stderr=log, stdin=subprocess.DEVNULL,

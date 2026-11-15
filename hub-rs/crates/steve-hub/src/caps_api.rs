@@ -19,18 +19,28 @@ fn first_sentence(d: &str) -> String {
     d[..end].trim().to_string()
 }
 
-/// Every Steve tool a session can have, by name, with its first sentence.
+/// Every Steve tool a session can have, by name, with its first sentence, whether it reads or writes
+/// and whether every session lists it (`core`); the core first, in its order.
 pub fn session_tools() -> Vec<Value> {
-    let mut out: Vec<Value> = steve_mcp::tools::list()
+    use crate::wire::tool_registry as reg;
+    use steve_modules::caps::tools::CORE;
+    let mut all = crate::wire::tool_service::builtin_catalog();
+    all.push(reg::search_tool());
+    all.push(reg::call_tool());
+    let pos = |n: &str| CORE.iter().position(|c| *c == n).unwrap_or(CORE.len());
+    all.sort_by_key(|t| pos(&t.name));
+    reg::steve_entries(all)
         .into_iter()
-        .map(|t| {
-            json!({"name": t.name, "description": first_sentence(t.description.as_deref().unwrap_or(""))})
+        .map(|e| {
+            let mut v = e.mcp();
+            v["description"] = json!(first_sentence(&e.description));
+            v["core"] = json!(CORE.contains(&e.name.as_str()));
+            v["resources"] = json!(e.resources);
+            v["as_you"] = json!(e.as_you);
+            v["aliases"] = json!(crate::wire::tool_families::aliases(&e.name));
+            v
         })
-        .collect();
-    out.extend(crate::wire::mcp_extra::module_tools().into_iter().map(|t| {
-        json!({"name": t["name"], "description": first_sentence(t["description"].as_str().unwrap_or(""))})
-    }));
-    out
+        .collect()
 }
 
 pub async fn steve_h(State(st): State<AppState>, headers: HeaderMap) -> Json<Value> {
@@ -52,7 +62,9 @@ pub async fn steve_h(State(st): State<AppState>, headers: HeaderMap) -> Json<Val
         .collect();
     Json(json!({
         "tools": session_tools(),
+        "core": steve_modules::caps::tools::CORE,
         "outside": outside,
+        "outside_core": crate::wire::outside_mcp::CORE,
         "endpoints": urls,
         "agent_card": format!("{base}{}", crate::a2a_server::CARD_PATHS[0]),
         "a2a": format!("{base}{}", crate::a2a_server::PATH),
@@ -62,6 +74,48 @@ pub async fn steve_h(State(st): State<AppState>, headers: HeaderMap) -> Json<Val
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn builtin_model_descriptions_are_english_and_locale_independent() {
+        fn definitions() -> Value {
+            json!({
+                "session": crate::wire::tool_service::builtin_catalog().iter().map(|t| json!({"description":t.description,"schema":t.input_schema})).collect::<Vec<_>>(),
+                "research": crate::wire::research_mcp::tools(),
+                "outside": crate::wire::outside_mcp::tools(),
+                "onboard": crate::wire::onboard_mcp::tools(),
+            })
+        }
+        let zh = steve_i18n::with(steve_i18n::ZH_CN, definitions);
+        let en = steve_i18n::with(steve_i18n::EN, definitions);
+        assert_eq!(zh, en, "model contracts never follow the UI locale");
+        fn walk(v: &Value) {
+            match v {
+                Value::Object(obj) => {
+                    for (k, v) in obj {
+                        if k == "description" {
+                            let text = v.as_str().unwrap();
+                            assert!(!text.is_empty());
+                            assert!(
+                                !text.chars().any(|c| ('\u{3400}'..='\u{9fff}').contains(&c)),
+                                "non-English model description: {text}"
+                            );
+                        }
+                        walk(v);
+                    }
+                }
+                Value::Array(xs) => {
+                    for x in xs {
+                        walk(x);
+                    }
+                }
+                _ => {}
+            }
+        }
+        walk(&zh);
+        let tools = session_tools();
+        assert_eq!(tools.len(), 40);
+        assert_eq!(tools.iter().filter(|t| t["core"] == true).count(), 8);
+    }
 
     #[test]
     fn a_description_is_cut_at_its_first_sentence() {

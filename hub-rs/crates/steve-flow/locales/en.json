@@ -34,7 +34,7 @@
   "flow.schedule.mode_item_auto": "Create an item, accept automatically",
   "flow.schedule.mode_item": "Create an item",
   "flow.schedule.mode_propose": "Propose a plan first",
-  "flow.schedule.mode_report": "Report in the conversation",
+  "flow.schedule.mode_report": "Publish to Feed, visible to workspace members",
   "flow.draft.missed_catch_up_once": "Run once to catch up",
   "flow.draft.missed_skip": "Skip",
   "flow.draft.overlap_skip": "Skip",

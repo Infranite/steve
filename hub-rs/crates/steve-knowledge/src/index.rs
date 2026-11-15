@@ -191,15 +191,33 @@ pub fn rescope_source(tx: &Tx, source: &SourceRow) -> Result<usize> {
 
 /// `"<prefix> · <title>"`, the citation label of a document (“笔记 · Acme 合同说明”); an item's
 /// document is its 事项记录, a day of the main thread its 会话记录 (ST-41).
+/// The label is stored (and read by models) in zh-CN; [`doc_label_shown`] words it for a person.
 pub fn doc_label(source: &SourceRow, title: &str) -> String {
-    let prefix = match source.kind.as_str() {
-        "notes" => "笔记",
-        "files" => "文件",
-        "items" => "事项记录",
-        "chat" => "会话记录",
-        _ => source.name.as_str(),
-    };
+    let prefix = steve_i18n::stored(|| match source.kind.as_str() {
+        "notes" => steve_i18n::t!("knowledge.doc_prefix.notes"),
+        "files" => steve_i18n::t!("knowledge.doc_prefix.files"),
+        "items" => steve_i18n::t!("knowledge.doc_prefix.items"),
+        "chat" => steve_i18n::t!("knowledge.doc_prefix.chat"),
+        _ => source.name.clone(),
+    });
     format!("{prefix} · {title}")
+}
+
+const DOC_PREFIXES: &[&str] = &[
+    "knowledge.doc_prefix.notes",
+    "knowledge.doc_prefix.files",
+    "knowledge.doc_prefix.items",
+    "knowledge.doc_prefix.chat",
+];
+
+/// A stored [`doc_label`] in the request's language: its fixed prefix, and a day of the main thread as
+/// its title; a source's own name and a document's own title as written.
+pub fn doc_label_shown(stored: &str) -> String {
+    let Some((prefix, title)) = stored.split_once(" · ") else {
+        return stored.to_owned();
+    };
+    let prefix = steve_i18n::reword!(prefix, DOC_PREFIXES).unwrap_or_else(|| prefix.to_owned());
+    format!("{prefix} · {}", crate::sources::chat_day_shown(title))
 }
 
 /// Indexes a document from its extracted text: hashed, chunked, written.

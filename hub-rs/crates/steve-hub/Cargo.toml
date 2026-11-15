@@ -23,6 +23,7 @@ steve-acp = { path = "../steve-acp" }
 steve-modules = { path = "../steve-modules" }
 steve-flow = { path = "../steve-flow" }
 steve-knowledge = { path = "../steve-knowledge" }
+steve-digest = { path = "../steve-digest" }
 steve-github = { path = "../steve-github" }
 steve-channels = { path = "../steve-channels" }
 steve-mail = { path = "../steve-mail" }
@@ -47,6 +48,8 @@ reqwest = { version = "=0.12.28", default-features = false, features = ["json", 
 rusqlite = { version = "=0.40.2", features = ["bundled", "backup"] }
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = { version = "=1.0.154", features = ["preserve_order"] }
+# Validate plugin tool schemas locally; never retrieve schema references over HTTP or from files.
+jsonschema = { version = "=0.60.2", default-features = false }
 sha2 = "=0.11.1"
 hex = "=0.4.3"
 # contacts' pictures: decode PNG / JPEG / WebP, cut to a 256px square, store as JPEG or PNG

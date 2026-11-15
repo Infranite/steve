@@ -112,6 +112,14 @@ impl Meter {
         let Some(m) = &report.cost else {
             return Ok(None);
         };
+        if !m.currency.trim().eq_ignore_ascii_case("USD") {
+            tracing::warn!(
+                report = report.report_id,
+                currency = m.currency.chars().take(16).collect::<String>(),
+                "node usage: cost refused, currency is not USD"
+            );
+            return Ok(None);
+        }
         let Some(c) = money(&m.decimal) else {
             tracing::warn!(
                 report = report.report_id,
@@ -176,7 +184,7 @@ pub(crate) fn earlier_cost_in(
     epoch: &Epoch,
 ) -> Result<Option<f64>, StoreError> {
     let mut st = tx.prepare_cached(
-        "SELECT json_extract(payload,'$.body.report.cost.decimal') FROM node_event_inbox
+        "SELECT json_extract(payload,'$.body.report.cost.decimal'), json_extract(payload,'$.body.report.cost.currency') FROM node_event_inbox
            WHERE node_id=? AND stream=? AND epoch=? AND seq<? AND json_extract(payload,'$.body.type')='usage'
              AND json_extract(payload,'$.body.report.meter_epoch')=? AND json_extract(payload,'$.body.report.cost') IS NOT NULL
              AND json_extract(payload,'$.body.report.measurement')='cumulative'",
@@ -189,11 +197,24 @@ pub(crate) fn earlier_cost_in(
             ev.cursor.seq as i64,
             epoch.as_str()
         ],
-        |r| r.get::<_, Option<String>>(0),
+        |r| {
+            Ok((
+                r.get::<_, Option<String>>(0)?,
+                r.get::<_, Option<String>>(1)?,
+            ))
+        },
     )?;
     let mut high: Option<f64> = None;
-    for d in rows {
-        if let Some(v) = d?.as_deref().and_then(money) {
+    for row in rows {
+        let (d, cur) = row?;
+        if !cur
+            .as_deref()
+            .map(str::trim)
+            .is_some_and(|c| c.eq_ignore_ascii_case("USD"))
+        {
+            continue;
+        }
+        if let Some(v) = d.as_deref().and_then(money) {
             high = Some(high.map_or(v, |h| h.max(v)));
         }
     }
@@ -262,6 +283,14 @@ mod tests {
         assert_eq!(add(&mut m, &report(Measurement::Delta, "NaN", "e")), None);
         assert_eq!(add(&mut m, &report(Measurement::Delta, "-1000", "e")), None);
         assert_eq!(add(&mut m, &report(Measurement::Delta, "inf", "e")), None);
+        let mut eur = report(Measurement::Delta, "1.25", "e");
+        eur.cost.as_mut().unwrap().currency = "EUR".into();
+        assert_eq!(add(&mut m, &eur), None);
+        for blank in ["", "   "] {
+            let mut no_cur = report(Measurement::Delta, "1.25", "e");
+            no_cur.cost.as_mut().unwrap().currency = blank.into();
+            assert_eq!(add(&mut m, &no_cur), None, "currency {blank:?}");
+        }
         assert_eq!(
             add(&mut m, &report(Measurement::Delta, "0.5", "e")),
             Some(0.5)

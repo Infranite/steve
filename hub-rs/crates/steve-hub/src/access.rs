@@ -1945,7 +1945,8 @@ pub async fn oidc_put(
             steve_i18n::t!("hub.access.oidc_env"),
         ));
     }
-    let issuer = b.issuer.trim().trim_end_matches('/').to_string();
+    // OIDC issuers are exact identifiers; a trailing slash is part of discovery and token validation.
+    let issuer = b.issuer.trim().to_string();
     let client_id = b.client_id.trim().to_string();
     let ok_issuer = reqwest::Url::parse(&issuer).is_ok_and(|u| {
         u.scheme() == "https"

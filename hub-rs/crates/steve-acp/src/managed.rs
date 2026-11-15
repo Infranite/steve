@@ -11,9 +11,9 @@
 //!   one.
 
 use std::path::{Path, PathBuf};
-use steve_i18n::t;
 use std::process::{Command, Stdio};
 use std::time::Duration;
+use steve_i18n::t;
 
 /// The directory under a Steve home (a Hub's or a Node's) the adapters are installed in.
 pub fn dir(home: &Path) -> PathBuf {
@@ -25,8 +25,11 @@ pub fn root(home: &Path) -> PathBuf {
     dir(home).join("node_modules")
 }
 
-/// The command of built-in `id` in `home`'s adapters, whether it is installed or not.
+/// The command of npm-managed built-in `id` in `home`'s adapters, whether it is installed or not.
 pub fn command(home: &Path, id: &str) -> Option<PathBuf> {
+    if !crate::adapters::is_npm_managed(id) {
+        return None;
+    }
     crate::adapters::builtin_commands(&root(home))
         .find(|(b, ..)| *b == id)
         .map(|(.., c)| c)
@@ -70,12 +73,19 @@ fn select(home: &Path, ids: &[&str]) -> Result<(), String> {
     std::fs::write(&file, text + "\n").map_err(|e| format!("{}: {e}", file.display()))
 }
 
-/// Whether Steve keeps built-in `id` in `home`: it is installed there, was chosen, or nothing was
-/// ever chosen. An adapter its user left out is neither installed by the daily check nor reported
-/// as missing.
+/// Whether Steve keeps npm-managed built-in `id` in `home`: it is installed there, was chosen, or
+/// nothing was ever chosen and `id` is in [`crate::adapters::DEFAULT_MANAGED_ADAPTERS`]. An adapter
+/// its user left out (or one not distributed on npm) is neither installed by the daily check nor
+/// reported as missing.
 pub fn wanted(home: &Path, id: &str) -> bool {
-    package(id).is_some_and(|p| installed(home, p).is_some())
-        || selection(home).is_none_or(|chosen| chosen.iter().any(|c| c == id))
+    let Some(pkg) = package(id) else {
+        return false;
+    };
+    installed(home, pkg).is_some()
+        || match selection(home) {
+            Some(chosen) => chosen.iter().any(|c| c == id),
+            None => crate::adapters::DEFAULT_MANAGED_ADAPTERS.contains(&id),
+        }
 }
 
 /// The version of `package` installed in `home`'s adapters.
@@ -90,26 +100,29 @@ pub fn npm(node: Option<&Path>) -> Option<PathBuf> {
     let beside = node
         .and_then(|n| n.parent())
         .map(|d| d.join("npm"))
-        .filter(|p| p.is_file());
-    beside.or_else(|| {
-        std::env::split_paths(&std::env::var_os("PATH")?)
-            .map(|d| d.join("npm"))
-            .find(|p| p.is_file())
-    })
+        .filter(|p| crate::config::is_executable_file(p));
+    beside.or_else(|| crate::config::which_in("npm", std::env::var_os("PATH").as_deref()))
 }
 
 /// How long one npm call may take (an install downloads a few hundred MB).
 const VIEW_TIMEOUT: Duration = Duration::from_secs(60);
 const INSTALL_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 
-fn run(npm: &Path, args: &[&str], timeout: Duration) -> Result<String, String> {
-    let mut child = Command::new(npm)
-        .args(args)
+fn run(
+    npm: &Path,
+    args: &[&str],
+    env: &[(&str, &Path)],
+    timeout: Duration,
+) -> Result<String, String> {
+    let mut cmd = Command::new(npm);
+    cmd.args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("{}: {e}", npm.display()))?;
+        .stderr(Stdio::piped());
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
+    let mut child = cmd.spawn().map_err(|e| format!("{}: {e}", npm.display()))?;
     let (out, err) = (child.stdout.take(), child.stderr.take());
     let read = |r: Option<std::process::ChildStdout>| {
         std::thread::spawn(move || {
@@ -136,22 +149,37 @@ fn run(npm: &Path, args: &[&str], timeout: Duration) -> Result<String, String> {
         if std::time::Instant::now() >= until {
             let _ = child.kill();
             let _ = child.wait();
-            return Err(format!("npm {} took longer than {timeout:?}", args.join(" ")));
+            return Err(format!(
+                "npm {} took longer than {timeout:?}",
+                args.join(" ")
+            ));
         }
         std::thread::sleep(Duration::from_millis(100));
     };
-    let (out, err) = (out.join().unwrap_or_default(), err.join().unwrap_or_default());
+    let (out, err) = (
+        out.join().unwrap_or_default(),
+        err.join().unwrap_or_default(),
+    );
     if status.success() {
         Ok(out)
     } else {
-        let last = err.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("");
+        let last = err
+            .lines()
+            .rev()
+            .find(|l| !l.trim().is_empty())
+            .unwrap_or("");
         Err(format!("npm {}: {status}: {last}", args.join(" ")))
     }
 }
 
 /// The latest release of `package` on the registry npm is configured with.
 pub fn latest(npm: &Path, package: &str) -> Result<String, String> {
-    let out = run(npm, &["view", package, "version", "--json"], VIEW_TIMEOUT)?;
+    let out = run(
+        npm,
+        &["view", package, "version", "--json"],
+        &[],
+        VIEW_TIMEOUT,
+    )?;
     serde_json::from_str::<String>(out.trim()).map_err(|_| format!("npm view {package}: {out}"))
 }
 
@@ -159,11 +187,18 @@ pub fn latest(npm: &Path, package: &str) -> Result<String, String> {
 pub fn install(npm: &Path, home: &Path, packages: &[&str]) -> Result<(), String> {
     let dir = dir(home);
     std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let grok_install = dir.join(".grok-install");
     let prefix = dir.to_string_lossy().into_owned();
     let specs: Vec<String> = packages.iter().map(|p| format!("{p}@latest")).collect();
     let mut args = vec!["install", "--prefix", &prefix, "--no-audit", "--no-fund"];
     args.extend(specs.iter().map(String::as_str));
-    run(npm, &args, INSTALL_TIMEOUT).map(|_| ())
+    run(
+        npm,
+        &args,
+        &[("GROK_HOME", grok_install.as_path())],
+        INSTALL_TIMEOUT,
+    )
+    .map(|_| ())
 }
 
 /// One built-in adapter as `home` has it.
@@ -184,11 +219,14 @@ impl Status {
     }
 }
 
-/// Each built-in adapter in `home`, with the latest release when `npm` is given.
+/// Each built-in adapter in `home`, with the latest release when `npm` is given and the adapter is
+/// wanted in `home` (installed or selected).
 pub fn status(home: &Path, npm: Option<&Path>) -> Vec<Status> {
     crate::adapters::builtin_packages()
         .map(|(id, package)| {
-            let (latest, error) = match npm.map(|n| latest(n, package)) {
+            let inst = installed(home, package);
+            let query = npm.filter(|_| inst.is_some() || wanted(home, id));
+            let (latest, error) = match query.map(|n| latest(n, package)) {
                 Some(Ok(v)) => (Some(v), None),
                 Some(Err(e)) => (None, Some(e)),
                 None => (None, None),
@@ -196,7 +234,7 @@ pub fn status(home: &Path, npm: Option<&Path>) -> Vec<Status> {
             Status {
                 id,
                 package,
-                installed: installed(home, package),
+                installed: inst,
                 latest,
                 error,
             }
@@ -204,21 +242,56 @@ pub fn status(home: &Path, npm: Option<&Path>) -> Vec<Status> {
         .collect()
 }
 
-/// Whether version `a` is after `b` (`major.minor.patch`, a pre-release before its release).
+/// Whether version `a` is after `b` (`major.minor.patch`, SemVer 2.0 §11 pre-release ordering,
+/// `+build` metadata ignored).
 pub fn newer(a: &str, b: &str) -> bool {
-    fn parts(v: &str) -> (Vec<u64>, bool) {
-        let (core, pre) = match v.trim().trim_start_matches('v').split_once('-') {
-            Some((c, _)) => (c, true),
-            None => (v.trim().trim_start_matches('v'), false),
+    fn parts(v: &str) -> (Vec<u64>, Option<&str>) {
+        let no_build = v
+            .trim()
+            .trim_start_matches('v')
+            .split('+')
+            .next()
+            .unwrap_or("");
+        let (core, pre) = match no_build.split_once('-') {
+            Some((c, p)) if !p.is_empty() => (c, Some(p)),
+            Some((c, _)) => (c, None),
+            None => (no_build, None),
         };
         (
             core.split('.').map(|n| n.parse().unwrap_or(0)).collect(),
             pre,
         )
     }
+    fn cmp_pre(a: &str, b: &str) -> std::cmp::Ordering {
+        let mut ai = a.split('.');
+        let mut bi = b.split('.');
+        loop {
+            match (ai.next(), bi.next()) {
+                (None, None) => return std::cmp::Ordering::Equal,
+                (None, Some(_)) => return std::cmp::Ordering::Less,
+                (Some(_), None) => return std::cmp::Ordering::Greater,
+                (Some(x), Some(y)) => {
+                    let ord = match (x.parse::<u64>(), y.parse::<u64>()) {
+                        (Ok(nx), Ok(ny)) => nx.cmp(&ny),
+                        (Ok(_), Err(_)) => std::cmp::Ordering::Less,
+                        (Err(_), Ok(_)) => std::cmp::Ordering::Greater,
+                        (Err(_), Err(_)) => x.cmp(y),
+                    };
+                    if ord != std::cmp::Ordering::Equal {
+                        return ord;
+                    }
+                }
+            }
+        }
+    }
     let ((a, a_pre), (b, b_pre)) = (parts(a), parts(b));
     match a.cmp(&b) {
-        std::cmp::Ordering::Equal => b_pre && !a_pre,
+        std::cmp::Ordering::Equal => match (a_pre, b_pre) {
+            (None, None) => false,
+            (None, Some(_)) => true,
+            (Some(_), None) => false,
+            (Some(ap), Some(bp)) => cmp_pre(ap, bp) == std::cmp::Ordering::Greater,
+        },
         o => o == std::cmp::Ordering::Greater,
     }
 }
@@ -237,7 +310,10 @@ pub enum UpdatePolicy {
 
 impl UpdatePolicy {
     pub fn from_env() -> UpdatePolicy {
-        match std::env::var("STEVE_ADAPTER_UPDATES").as_deref().map(str::trim) {
+        match std::env::var("STEVE_ADAPTER_UPDATES")
+            .as_deref()
+            .map(str::trim)
+        {
             Ok("check") => UpdatePolicy::Check,
             Ok("off") | Ok("0") => UpdatePolicy::Off,
             _ => UpdatePolicy::Auto,
@@ -264,10 +340,17 @@ pub fn cli(home: &Path, node: Option<&Path>, args: &[String]) -> i32 {
                 for s in &list {
                     let state = match (&s.installed, &s.latest, &s.error) {
                         (None, _, _) if !wanted(home, s.id) => t!("acp.managed.not_selected"),
+                        (None, None, Some(e)) => {
+                            t!("acp.managed.not_installed_error", error = e)
+                        }
                         (None, _, _) => t!("acp.managed.not_installed"),
-                        (Some(i), Some(l), _) if newer(l, i) => t!("acp.managed.upgradable", installed = i, latest = l),
+                        (Some(i), Some(l), _) if newer(l, i) => {
+                            t!("acp.managed.upgradable", installed = i, latest = l)
+                        }
                         (Some(i), Some(_), _) => t!("acp.managed.up_to_date", installed = i),
-                        (Some(i), None, Some(e)) => t!("acp.managed.latest_unknown", installed = i, error = e),
+                        (Some(i), None, Some(e)) => {
+                            t!("acp.managed.latest_unknown", installed = i, error = e)
+                        }
                         (Some(i), None, None) => i.clone(),
                     };
                     println!("{} ({}): {state}", s.id, s.package);
@@ -279,6 +362,7 @@ pub fn cli(home: &Path, node: Option<&Path>, args: &[String]) -> i32 {
             0
         }
         Some("list") => {
+            let path_env = std::env::var_os("PATH");
             let adapters: Vec<serde_json::Value> = crate::adapters::builtin_packages()
                 .map(|(id, package)| {
                     serde_json::json!({
@@ -287,45 +371,74 @@ pub fn cli(home: &Path, node: Option<&Path>, args: &[String]) -> i32 {
                         "package": package,
                         "installed": installed(home, package),
                         "selected": wanted(home, id),
+                        "detected": crate::adapters::is_cli_detected(id, path_env.as_deref()),
                     })
                 })
                 .collect();
+            let path_only: Vec<&str> = crate::adapters::builtin_ids()
+                .filter(|id| !crate::adapters::is_npm_managed(id))
+                .collect();
+            let detected_path_only: Vec<&str> = path_only
+                .iter()
+                .copied()
+                .filter(|id| crate::adapters::is_cli_detected(id, path_env.as_deref()))
+                .collect();
             println!(
                 "{}",
-                serde_json::json!({"npm": npm.is_some(), "chosen": selection(home).is_some(), "adapters": adapters})
+                serde_json::json!({
+                    "npm": npm.is_some(),
+                    "chosen": selection(home).is_some(),
+                    "adapters": adapters,
+                    "path_only": path_only,
+                    "detected_path_only": detected_path_only,
+                })
             );
             0
         }
-        Some("install") | Some("upgrade") => {
+        Some(cmd @ ("install" | "upgrade")) => {
+            let is_upgrade = cmd == "upgrade";
             let ids: Vec<&str> = args[1..]
                 .iter()
                 .map(String::as_str)
                 .filter(|a| !a.starts_with("--"))
                 .collect();
+            if is_upgrade && !ids.is_empty() {
+                eprintln!("{}", t!("acp.managed.usage"));
+                return 2;
+            }
             if let Some(unknown) = ids.iter().find(|id| package(id).is_none()) {
-                let known: Vec<&str> = crate::adapters::builtin_ids().collect();
-                eprintln!("{}", t!("acp.managed.unknown_adapter", unknown = unknown, known = known.join(&t!("acp.managed.list_separator"))));
+                let spec = crate::adapters::spec(unknown, None);
+                if spec.builtin {
+                    let hint = spec.install_hint.unwrap_or_default();
+                    eprintln!(
+                        "{}",
+                        t!("acp.managed.not_npm_managed", id = unknown, hint = hint)
+                    );
+                } else {
+                    let known: Vec<&str> = crate::adapters::builtin_packages()
+                        .map(|(id, _)| id)
+                        .collect();
+                    eprintln!(
+                        "{}",
+                        t!(
+                            "acp.managed.unknown_adapter",
+                            unknown = unknown,
+                            known = known.join(&t!("acp.managed.list_separator"))
+                        )
+                    );
+                }
                 return 2;
             }
             /* --only: exactly these are chosen (none, without ids); otherwise named ids join an
-             * earlier choice, and without ids what is wanted is brought up to date */
-            let only = args.iter().any(|a| a == "--only");
-            let recorded = match (only, selection(home)) {
-                (true, _) => Some(ids.clone()),
-                (false, Some(before)) if !ids.is_empty() => Some(
-                    crate::adapters::builtin_ids()
-                        .filter(|id| ids.contains(id) || before.iter().any(|b| b == id))
-                        .collect(),
-                ),
-                _ => None,
-            };
-            if let Some(chosen) = recorded {
-                if let Err(e) = select(home, &chosen) {
-                    eprintln!("{e}");
-                    return 1;
-                }
+             * earlier choice after they install, and without ids what is wanted is brought up to date */
+            let only = !is_upgrade && args.iter().any(|a| a == "--only");
+            let before = selection(home);
+            if only && let Err(e) = select(home, &ids) {
+                eprintln!("{e}");
+                return 1;
             }
-            let targets: Vec<&str> = crate::adapters::builtin_ids()
+            let targets: Vec<&str> = crate::adapters::builtin_packages()
+                .map(|(id, _)| id)
                 .filter(|id| match only || !ids.is_empty() {
                     true => ids.contains(id),
                     false => wanted(home, id),
@@ -340,24 +453,66 @@ pub fn cli(home: &Path, node: Option<&Path>, args: &[String]) -> i32 {
                 return 2;
             };
             let packages: Vec<&str> = targets.iter().filter_map(|id| package(id)).collect();
-            println!("{}", t!("acp.managed.installing", dir = dir(home).display(), packages = packages.join(&t!("acp.managed.list_separator"))));
+            println!(
+                "{}",
+                t!(
+                    "acp.managed.installing",
+                    dir = dir(home).display(),
+                    packages = packages.join(&t!("acp.managed.list_separator"))
+                )
+            );
+            let mut installed_ids: Vec<&str> = Vec::new();
+            let mut failed = false;
             match install(&npm, home, &packages) {
-                Ok(()) => {
-                    for s in status(home, None).iter().filter(|s| targets.contains(&s.id)) {
-                        println!(
-                            "{} ({}): {}",
-                            s.id,
-                            s.package,
-                            s.installed.as_deref().unwrap_or(&t!("acp.managed.not_installed"))
-                        );
-                    }
-                    0
-                }
-                Err(e) => {
+                Ok(()) => installed_ids.extend_from_slice(&targets),
+                Err(e) if packages.len() <= 1 => {
                     eprintln!("{}", t!("acp.managed.install_failed", error = e));
-                    1
+                    failed = true;
+                }
+                Err(_) => {
+                    for &id in &targets {
+                        if let Some(pkg) = package(id) {
+                            match install(&npm, home, &[pkg]) {
+                                Ok(()) => installed_ids.push(id),
+                                Err(e) => {
+                                    eprintln!("{}", t!("acp.managed.install_failed", error = e));
+                                    failed = true;
+                                }
+                            }
+                        }
+                    }
                 }
             }
+            if !only
+                && !is_upgrade
+                && !installed_ids.is_empty()
+                && let Some(prev) = before.as_ref()
+            {
+                let merged: Vec<&str> = crate::adapters::builtin_packages()
+                    .map(|(id, _)| id)
+                    .filter(|id| installed_ids.contains(&id) || prev.iter().any(|b| b == id))
+                    .collect();
+                if let Err(e) = select(home, &merged) {
+                    eprintln!("{e}");
+                    return 1;
+                }
+            }
+            if !installed_ids.is_empty() {
+                for s in status(home, None)
+                    .iter()
+                    .filter(|s| installed_ids.contains(&s.id))
+                {
+                    println!(
+                        "{} ({}): {}",
+                        s.id,
+                        s.package,
+                        s.installed
+                            .as_deref()
+                            .unwrap_or(&t!("acp.managed.not_installed"))
+                    );
+                }
+            }
+            if failed { 1 } else { 0 }
         }
         _ => {
             eprintln!("{}", t!("acp.managed.usage"));
@@ -402,7 +557,7 @@ mod tests {
             Some("0.102.0")
         );
         let s = status(home.path(), None);
-        assert_eq!(s.len(), 2);
+        assert_eq!(s.len(), crate::adapters::builtin_packages().count());
         assert!(!s[0].outdated(), "nothing asked: not outdated");
         assert!(s[1].outdated(), "not installed: to install");
     }
@@ -410,18 +565,25 @@ mod tests {
     fn add(home: &Path, id: &str, version: &str) {
         let pkg = root(home).join(package(id).unwrap());
         std::fs::create_dir_all(&pkg).unwrap();
-        std::fs::write(pkg.join("package.json"), format!(r#"{{"version": "{version}"}}"#)).unwrap();
+        std::fs::write(
+            pkg.join("package.json"),
+            format!(r#"{{"version": "{version}"}}"#),
+        )
+        .unwrap();
     }
 
     #[test]
     fn what_setup_chose_is_what_a_home_keeps() {
         let temp = tempfile::tempdir().unwrap();
         let home = temp.path();
-        let ids: Vec<&str> = crate::adapters::builtin_ids().collect();
-        let (first, second) = (ids[0], ids[1]);
-        // nothing was ever chosen: all of them
+        let ids: Vec<&str> = crate::adapters::builtin_packages()
+            .map(|(id, _)| id)
+            .collect();
+        let (first, second, third) = (ids[0], ids[1], ids[2]);
+        // nothing was ever chosen: only DEFAULT_MANAGED_ADAPTERS are wanted by default; PATH-only ones are never npm-wanted
         assert_eq!(selection(home), None);
-        assert!(ids.iter().all(|id| wanted(home, id)));
+        assert!(wanted(home, first) && wanted(home, second) && !wanted(home, third));
+        assert!(!wanted(home, "cursor"));
         select(home, &[first]).unwrap();
         assert_eq!(selection(home), Some(vec![first.to_string()]));
         assert!(wanted(home, first) && !wanted(home, second));
@@ -441,12 +603,16 @@ mod tests {
     #[test]
     fn the_home_of_an_adapter_is_the_one_it_is_installed_in() {
         let home = Path::new("/u/.steve");
-        for id in crate::adapters::builtin_ids() {
+        for (id, _) in crate::adapters::builtin_packages() {
             assert_eq!(home_of(&command(home, id).unwrap()).as_deref(), Some(home));
         }
+        assert_eq!(command(home, "cursor"), None);
         assert_eq!(home_of(&root(home)).as_deref(), Some(home));
         // a global install, a bare command, and an `adapters` that is not a prefix
-        assert_eq!(home_of(Path::new("/opt/homebrew/lib/node_modules/x/dist/index.js")), None);
+        assert_eq!(
+            home_of(Path::new("/opt/homebrew/lib/node_modules/x/dist/index.js")),
+            None
+        );
         assert_eq!(home_of(Path::new("some-acp")), None);
         assert_eq!(home_of(Path::new("/u/.steve/adapters/x/index.js")), None);
     }
@@ -482,7 +648,9 @@ esac
         let temp = tempfile::tempdir().unwrap();
         let home = temp.path().join("home");
         let (node, log) = fake_npm(temp.path());
-        let ids: Vec<&str> = crate::adapters::builtin_ids().collect();
+        let ids: Vec<&str> = crate::adapters::builtin_packages()
+            .map(|(id, _)| id)
+            .collect();
         let (first, second) = (ids[0], ids[1]);
         let run = |args: &[&str]| {
             let args: Vec<String> = args.iter().map(|a| a.to_string()).collect();
@@ -491,15 +659,19 @@ esac
         let asked = || std::fs::read_to_string(&log).unwrap_or_default();
         let version = |id: &str| installed(&home, package(id).unwrap());
 
-        // an unknown id changes nothing
+        // an unknown or PATH-only id changes nothing
         assert_eq!(run(&["install", "no-such-adapter"]), 2);
+        assert_eq!(run(&["install", "cursor"]), 2);
         assert_eq!(run(&["frobnicate"]), 2);
         assert!(!home.exists() && asked().is_empty());
 
         // --only: exactly these are the choice (what setup runs)
         assert_eq!(run(&["install", "--only", second]), 0);
         assert_eq!(selection(&home), Some(vec![second.to_string()]));
-        assert_eq!((version(first), version(second)), (None, Some("9.9.9".into())));
+        assert_eq!(
+            (version(first), version(second)),
+            (None, Some("9.9.9".into()))
+        );
         assert_eq!(asked().lines().count(), 1, "{}", asked());
         assert!(asked().contains(&format!("{}@latest", package(second).unwrap())));
         assert!(!asked().contains(package(first).unwrap()));
@@ -510,7 +682,10 @@ esac
 
         // a named id joins the choice, in the built-in order
         assert_eq!(run(&["install", first]), 0);
-        assert_eq!(selection(&home), Some(vec![first.to_string(), second.to_string()]));
+        assert_eq!(
+            selection(&home),
+            Some(vec![first.to_string(), second.to_string()])
+        );
         assert_eq!(version(first).as_deref(), Some("9.9.9"));
 
         // --only without ids: none, and npm is not asked
@@ -522,17 +697,109 @@ esac
         assert_eq!(asked(), before);
         assert!(!root(&none).exists());
 
-        // a home where nothing was chosen gets all of them, and still records no choice
+        // a home where nothing was chosen gets the default managed adapters, and still records no choice
         let all = temp.path().join("all");
         assert_eq!(cli(&all, Some(&node), &["install".to_string()]), 0);
         assert_eq!(selection(&all), None);
-        assert!(ids.iter().all(|id| installed(&all, package(id).unwrap()).is_some()));
+        for id in &ids {
+            assert_eq!(
+                installed(&all, package(id).unwrap()).is_some(),
+                crate::adapters::DEFAULT_MANAGED_ADAPTERS.contains(id),
+                "{id}"
+            );
+        }
 
-        // status and list ask the registry or nothing, and change nothing
+        // status only queries npm for wanted adapters in `home`, and list asks nothing
         let before = asked();
         assert_eq!(run(&["status", "--json"]), 0);
         assert_eq!(run(&["list", "--json"]), 0);
-        assert_eq!(asked().lines().count(), before.lines().count() + ids.len(), "status asks for each latest");
+        assert_eq!(
+            asked().lines().count(),
+            before.lines().count() + 2,
+            "status asks for each wanted adapter in home"
+        );
         assert!(!asked()[before.len()..].contains("install"));
+    }
+
+    #[test]
+    fn semver_prereleases_and_build_metadata_compare_in_order() {
+        assert!(newer("1.0.0-alpha.2", "1.0.0-alpha.1"));
+        assert!(newer("1.0.0-alpha.10", "1.0.0-alpha.2"));
+        assert!(newer("1.0.0-beta.1", "1.0.0-alpha.9"));
+        assert!(newer("1.0.0", "1.0.0-rc.1"));
+        assert!(!newer("1.0.0-rc.1", "1.0.0"));
+        assert!(!newer("1.2.3+build.9", "1.2.3+build.1"));
+        assert!(newer("1.2.4+build.1", "1.2.3+build.9"));
+    }
+
+    #[test]
+    fn partial_batch_failure_installs_healthy_adapters_and_only_selects_succeeded_ids() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        let npm = temp.path().join("npm");
+        let node = temp.path().join("node");
+        let ids: Vec<&str> = crate::adapters::builtin_packages()
+            .map(|(id, _)| id)
+            .collect();
+        let (first, second, third) = (ids[0], ids[1], ids[2]);
+        let bad_pkg = package(third).unwrap();
+        let script = format!(
+            r#"#!/bin/sh
+case "$1" in
+  install)
+    for a in "$@"; do
+      case "$a" in "{bad}@latest") exit 1 ;; esac
+    done
+    for a in "$@"; do
+      case "$a" in *@latest)
+        p="$3/node_modules/${{a%@latest}}"; mkdir -p "$p"; echo '{{"version": "1.2.3"}}' > "$p/package.json" ;;
+      esac
+    done ;;
+  *) exit 64 ;;
+esac
+"#,
+            bad = bad_pkg
+        );
+        std::fs::write(&npm, script).unwrap();
+        std::fs::set_permissions(&npm, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        // upgrade rejects positional adapter IDs without touching selection
+        assert_eq!(
+            cli(&home, Some(&node), &["upgrade".into(), first.into()]),
+            2
+        );
+        assert_eq!(selection(&home), None);
+
+        // start with `first` selected
+        assert_eq!(
+            cli(
+                &home,
+                Some(&node),
+                &["install".into(), "--only".into(), first.into()]
+            ),
+            0
+        );
+        assert_eq!(selection(&home), Some(vec![first.to_string()]));
+
+        // installing `second` + failing `third` falls back per package: `second` installs and joins
+        // `selected.json`, while `third` does not, and exit code is 1
+        assert_eq!(
+            cli(
+                &home,
+                Some(&node),
+                &["install".into(), second.into(), third.into()]
+            ),
+            1
+        );
+        assert_eq!(
+            installed(&home, package(second).unwrap()).as_deref(),
+            Some("1.2.3")
+        );
+        assert_eq!(installed(&home, bad_pkg), None);
+        assert_eq!(
+            selection(&home),
+            Some(vec![first.to_string(), second.to_string()])
+        );
     }
 }

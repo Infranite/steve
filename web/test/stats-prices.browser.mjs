@@ -56,7 +56,7 @@ try {
     assert.match(gpt, /Models\.dev.*没列缓存写入价.*1\.25 10 0\.125 1\.25/)
     assert.match(await page.locator('[data-price-model="kiro/claude-opus-5-5"]').innerText(), /按 claude-opus-5-5 估/)
     assert.match(await page.locator('[data-price-model="mystery-1"]').innerText(), /未定价/)
-    assert.match(await page.locator("[data-unpriced]").innerText(), /不计入估算费用[\s\S]*500 tokens 未计入/)
+    assert.match(await page.locator("[data-unpriced]").innerText(), /1 个模型没有价格（mystery-1），500 tokens 不计入估算费用/)
 
     /* a failed sync keeps the last prices */
     assert.match(await page.locator("[data-catalog-status]").innerText(), /上次同步 .*，收录 8,536 个模型；每天自动更新/)

@@ -61,6 +61,14 @@ const run = async ({ width, height, scheme, flow }) => {
   const sheet = page.locator('[data-slot="sheet-content"]')
   try {
     await page.goto(base + '/test/fixtures/models-settings.html'); await page.locator('[data-models-default]').waitFor()
+    await page.locator('[data-models-lightweight]').waitFor()
+    assert.match(await page.locator('[data-lightweight-mode]').innerText(), /跟随主力模型/)
+    await page.locator('[data-models-allocation-toggle]').click()
+    assert.equal(await page.locator('[data-actual-purpose]').count(),11)
+    await page.locator('[data-models-allocation-toggle]').click()
+    assert.equal(await page.locator('[data-models-advanced-toggle]').getAttribute('aria-expanded'), 'false')
+    await shot('models-role-overview')
+    await page.locator('[data-models-advanced-toggle]').click()
     // 默认配置 + 4 exceptions; the 7 followers folded; history not in the config list
     assert.match(await page.locator('[data-models-default]').innerText(), /Codex · gpt-6-astra/)
     assert.equal(await page.locator('[data-models-overrides] [data-custom]').count(), 4)
@@ -98,7 +106,7 @@ const run = async ({ width, height, scheme, flow }) => {
     assert.equal(await page.locator('[data-follows-toggle]').innerText(), '其余 6 项跟随默认')
 
     // change the default: followers and the model-less override move with it, explicit overrides do not
-    steve.model = 'gpt-7'; steve.models = ['gpt-7']; await page.reload(); await page.locator('[data-models-default]').waitFor()
+    steve.model = 'gpt-7'; steve.models = ['gpt-7']; await page.reload(); await page.locator('[data-models-default]').waitFor(); await page.locator('[data-models-advanced-toggle]').click()
     assert.match(await page.locator('[data-models-default]').innerText(), /Codex · gpt-7/)
     assert.equal(await page.locator('[data-purpose=chat] [data-brief]').innerText(), 'Codex · gpt-7 · 思考高')
     assert.equal(await page.locator('[data-purpose=route] [data-brief]').innerText(), 'Claude Code · haiku-5-5')

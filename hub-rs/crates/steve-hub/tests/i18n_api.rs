@@ -318,17 +318,14 @@ async fn seeded_defaults_follow_the_language_until_edited() {
     // the default persona
     let personas = get("/api/personas", "en").await;
     let intro = personas[0]["intro"].as_str().unwrap().to_string();
-    assert!(
-        intro.starts_with("I'm Steve, ") && intro.contains("AI assistant"),
-        "{intro}"
-    );
+    assert_eq!(intro, "I'm Steve; I take in and hand out work.");
     assert_eq!(
         personas[0]["soul"],
         "Calm and concise; conclusion first; no pleasantries"
     );
     let personas_zh = get("/api/personas", "zh-CN").await;
     let intro_zh = personas_zh[0]["intro"].as_str().unwrap().to_string();
-    assert!(intro_zh.starts_with("我是 Steve，"), "{intro_zh}");
+    assert_eq!(intro_zh, "我是 Steve，负责接收和分派事情。");
     let pid = personas[0]["id"].as_str().unwrap().to_string();
 
     // the English page saves the whole form back unchanged: the seeds stay the seeds

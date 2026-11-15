@@ -68,7 +68,7 @@ static TOOLS: LazyLock<Vec<Value>> = LazyLock::new(|| {
         }),
         json!({
             "name": WHOIS,
-            "description": "Who is behind an account handle, bot, device, persona, connection or group, and who is responsible for it (负责人). Use it for questions like \"谁负责 X\" or \"这个机器人是谁的\".",
+            "description": "Identify who owns or maintains an account handle, Bot, device, persona, connection or group.",
             "inputSchema": {
                 "$schema": "http://json-schema.org/draft-07/schema#",
                 "type": "object",
@@ -85,19 +85,19 @@ static TOOLS: LazyLock<Vec<Value>> = LazyLock::new(|| {
                 "$schema": "http://json-schema.org/draft-07/schema#",
                 "type": "object",
                 "properties": {
-                    "person": { "type": "string", "description": "id or exact name; \"我\" is the user" }
+                    "person": { "type": "string", "description": "person ID or exact name; accepts the current user alias in their language" }
                 },
                 "required": ["person"]
             }
         }),
         json!({
             "name": STEWARD_PROPOSE,
-            "description": "Record who is responsible for a bot, account, device, connection, persona or group when the conversation says so (\"这是张三的机器人\"). It is recorded at once; the user can undo it.",
+            "description": "Record who is responsible for a Bot, account, device, connection, persona or group when the conversation explicitly states it. It is recorded at once; the user can undo it.",
             "inputSchema": {
                 "$schema": "http://json-schema.org/draft-07/schema#",
                 "type": "object",
                 "properties": {
-                    "object": { "type": "string", "description": "the object's id, handle or exact name (as steve_whois finds it)" },
+                    "object": { "type": "string", "description": "the object's id, handle or exact name (as steve_contacts with action whois finds it)" },
                     "person": { "type": "string", "description": "id or exact name of the responsible person" },
                     "role": { "type": "string", "enum": STEWARD_ROLES },
                     "basis": { "type": "string", "description": "what in the conversation says so" }
@@ -124,7 +124,8 @@ pub fn handles(name: &str) -> bool {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct McpCx {
     pub ws: String,
-    /// The user the agent works for (the item's user): visibility is theirs, candidates are theirs.
+    /// Authenticated execution principal: a live member id, or `svc:<workspace>` for service work.
+    /// Visibility and candidates belong to this caller, never an inferred workspace owner.
     pub user: String,
     /// The session's bot (`writer` and `requested_by` of what it saves).
     pub bot_id: String,
@@ -247,12 +248,16 @@ fn validate(
     }
 }
 
-/// The viewer of the session's user, creating “我” and the own organization like any contacts call.
+/// Personal callers initialize “我”; a service has no person to initialize and sees only workspace
+/// objects and scopes explicitly granted to its principal, never the workspace owner's profile.
 pub(crate) fn viewer(m: &Modules, cx: &McpCx) -> ApiResult<Viewer> {
     let who = Caller {
         ws: cx.ws.clone(),
         me: cx.user.clone(),
     };
+    if cx.user == format!("svc:{}", cx.ws) {
+        return m.viewer(&who);
+    }
     super::service::start(m, &who).map(|(v, _)| v)
 }
 

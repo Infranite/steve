@@ -71,7 +71,7 @@ function HistoryBody() {
     return () => { clearTimeout(timer); ac.abort() }
   }, [q])
   const list = mainThread(st.thread)
-  const topics = useMemo(() => topicsOf(list), [list, lang()])
+  const topics = useMemo(() => topicsOf(list, (id) => st.items.find((i) => i.id === id)?.t), [list, lang()])
   const { more, ended, loading } = historyState()
   const open = (id: string, created?: number) => { setAt(id); jumpToMsg(id, created); if (!wide()) setHistory(false) }
   return (
@@ -117,10 +117,12 @@ function Hit({ m, q, on, onClick }: { m: Msg; q: string; on: boolean; onClick: (
 
 function TopicRow({ t: topic, on, onClick }: { t: Topic; on: boolean; onClick: () => void }) {
   const t = useT()
+  /* an item the title already starts with is not said again under it */
+  const items = topic.items.filter((id) => !topic.title.startsWith(id + " "))
   return (
     <Row on={on} onClick={onClick} test={{ "data-history-topic": topic.id }}>
       <span className="flex min-w-0 items-baseline gap-2"><span className="min-w-0 flex-1 truncate type-callout text-foreground">{topic.title}</span><span className="shrink-0 type-footnote tabular-nums text-tertiary">{hm(topic.at)}</span></span>
-      <span className="truncate type-footnote text-tertiary">{topic.items.length ? t("thread:topic.countItems", { count: topic.count, items: topic.items.slice(0, 3).join(" ") }) : t("thread:topic.count", { count: topic.count })}</span>
+      <span className="truncate type-footnote text-tertiary">{items.length ? t("thread:topic.countItems", { count: topic.count, items: items.slice(0, 3).join(" ") }) : t("thread:topic.count", { count: topic.count })}</span>
     </Row>
   )
 }

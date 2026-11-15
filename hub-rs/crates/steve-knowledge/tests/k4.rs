@@ -65,7 +65,7 @@ impl Env {
         v["id"].as_str().unwrap().to_string()
     }
 
-    /// An item (with goal, and `item.create` by `by` when given) and its first session.
+    /// An item with an explicit requester (and matching audit), goal and first session.
     fn item(
         &self,
         ws: &str,
@@ -79,8 +79,8 @@ impl Env {
             .store()
             .with_conn(|c| {
                 c.execute(
-                    "INSERT INTO items (id, workspace_id, no, kind, title, status, stage, created, updated) VALUES (?, ?, (SELECT COUNT(*) + 1 FROM items), 'task', ?, 'run', '执行', 1, 1)",
-                    rusqlite::params![id, ws, title],
+                    "INSERT INTO items (id, workspace_id, no, kind, title, status, stage, created, updated, requested_by) VALUES (?, ?, (SELECT COUNT(*) + 1 FROM items), 'task', ?, 'run', '执行', 1, 1, ?)",
+                    rusqlite::params![id, ws, title, by],
                 )?;
                 c.execute(
                     "INSERT INTO item_goals (item_id, version, text, created) VALUES (?, 1, ?, 1)",
@@ -199,7 +199,13 @@ async fn session_context_has_the_snippet_format_and_stays_under_6000() {
             "private",
         )
         .await;
-    let (item, sid) = e.item(WS2, "W2-2", "部署脚本改造", "让部署脚本可以重复执行", None);
+    let (item, sid) = e.item(
+        WS2,
+        "W2-2",
+        "部署脚本改造",
+        "让部署脚本可以重复执行",
+        Some(ME),
+    );
     let text = e.session_text(&item);
     let lines: Vec<&str> = text.lines().collect();
     assert_eq!(lines[0], SESSION_HEAD, "{text}");
@@ -485,7 +491,7 @@ async fn search_numbers_continue_after_the_opening_and_read_pages() {
         "private",
     )
     .await;
-    let (item, sid) = e.item(WS2, "W2-3", "部署脚本", "改部署脚本", None);
+    let (item, sid) = e.item(WS2, "W2-3", "部署脚本", "改部署脚本", Some(ME));
     let opening = e.session_text(&item);
     let given = knowledge_lines(&opening).len();
     assert!(given >= 1);
@@ -563,7 +569,7 @@ async fn uses_endpoint_checks_params_and_ownership_and_marks_deleted_hits() {
             "private",
         )
         .await;
-    let (item, sid) = e.item(WS2, "W2-4", "部署脚本", "改部署脚本", None);
+    let (item, sid) = e.item(WS2, "W2-4", "部署脚本", "改部署脚本", Some(ME));
     assert!(!e.session_text(&item).is_empty());
 
     let (s, v) = e
@@ -650,4 +656,31 @@ fn chat_finish_without_citations_still_reports_an_empty_list() {
     let d = context::chat_finish("没用到 [5]", &cx);
     assert_eq!(d.text, "没用到");
     assert_eq!(d.meta.unwrap()["cites"], json!([]));
+}
+
+#[tokio::test]
+async fn service_opening_never_borrows_the_only_member_or_audit_actor() {
+    let e = setup();
+    e.note(WS2, ME, "部署脚本", "部署脚本的私人凭据位置。", "private")
+        .await;
+    let (service, _) = e.item(WS2, "W2-service", "部署脚本", "改部署脚本", None);
+    // Even a matching owner audit is not a grant of personal access.
+    e.env.store().with_conn(|c| {
+        c.execute("INSERT INTO audit (workspace_id, ts, actor, action, target) VALUES (?, 1, ?, 'item.create', ?)", rusqlite::params![WS2, ME, service.id])?;
+        Ok(())
+    }).unwrap();
+    assert!(e.session_text(&service).is_empty());
+    let (personal, _) = e.item(WS2, "W2-personal", "部署脚本", "改部署脚本", Some(ME));
+    assert!(!e.session_text(&personal).is_empty());
+    e.env
+        .store()
+        .with_conn(|c| {
+            c.execute(
+                "DELETE FROM workspace_members WHERE workspace_id=? AND user_id=?",
+                rusqlite::params![WS2, ME],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    assert!(e.session_text(&personal).is_empty());
 }

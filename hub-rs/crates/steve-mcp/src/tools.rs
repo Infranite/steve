@@ -1,7 +1,7 @@
-//! Tool definitions and argument checks, kept byte-compatible with the TypeScript Hub.
+//! Tool definitions and argument checks. Model-facing descriptions are English.
 //!
 //! `tools.json` is the `tools/list` result captured from the TS server (zod → JSON Schema),
-//! so descriptions and schemas are exactly what the agents saw before. The validator walks
+//! with English descriptions and the same argument contracts. The validator walks
 //! those same schemas and reports problems with zod v4's wording, because agents read the
 //! error text to fix their call.
 
@@ -189,7 +189,7 @@ mod tests {
         );
         let kind =
             &schema(DELIVER).unwrap()["properties"]["outputs"]["items"]["properties"]["kind"];
-        assert_eq!(kind["description"], "e.g. 分支, 提交, PR, 文件, 文档");
+        assert_eq!(kind["description"], "e.g. branch, commit, PR, file, document");
     }
 
     // Expected strings below were captured from the TS server (MCP SDK 1.32.2, zod 4.6.7).

@@ -12,6 +12,7 @@ import {
   type RefObject,
 } from "react";
 import { t, useT } from "@/i18n";
+import { monthDay } from "@/i18n/format";
 import { reducedMotion } from "@/lib/motion";
 
 /*
@@ -140,8 +141,7 @@ const ease = (t: number) => 1 - Math.pow(1 - t, 4);
 const reduced = () => reducedMotion();
 const wait = (ms: number) =>
   new Promise<void>((resolve) => window.setTimeout(resolve, ms));
-const today = () =>
-  new Date().toLocaleDateString("en-US", { month: "short", day: "numeric" });
+const today = () => monthDay(Date.now());
 /** Counts with separators, e.g. 1,284 */
 const num = new Intl.NumberFormat("en");
 const newId = () => `m-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;

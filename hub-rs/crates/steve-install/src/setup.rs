@@ -49,7 +49,12 @@ trait Prompts {
         typed_select(self, title, choices, initial)
     }
     /// Any of `choices`; typed, the answer is keys separated by commas, `all` or `none`.
-    fn multiselect(&mut self, title: &str, choices: &[Choice], ticked: &[bool]) -> Result<Vec<bool>> {
+    fn multiselect(
+        &mut self,
+        title: &str,
+        choices: &[Choice],
+        ticked: &[bool],
+    ) -> Result<Vec<bool>> {
         typed_multiselect(self, title, choices, ticked)
     }
     fn confirm(&mut self, title: &str, initial: bool) -> Result<bool> {
@@ -57,41 +62,90 @@ trait Prompts {
     }
 }
 
-fn typed_select<P: Prompts + ?Sized>(input: &mut P, title: &str, choices: &[Choice], initial: usize) -> Result<usize> {
+fn typed_select<P: Prompts + ?Sized>(
+    input: &mut P,
+    title: &str,
+    choices: &[Choice],
+    initial: usize,
+) -> Result<usize> {
     let keys: Vec<&str> = choices.iter().map(|c| c.key.as_str()).collect();
-    let title = t!("install.setup.typed.select_title", title = title, keys = keys.join(" / "));
+    let title = t!(
+        "install.setup.typed.select_title",
+        title = title,
+        keys = keys.join(" / ")
+    );
     loop {
-        let answer = input.line(&title, Some(keys[initial]), false)?.trim().to_lowercase();
+        let answer = input
+            .line(&title, Some(keys[initial]), false)?
+            .trim()
+            .to_lowercase();
         match keys.iter().position(|k| *k == answer) {
             Some(at) => return Ok(at),
-            None if input.interactive() => ui::warn(&t!("install.setup.typed.choose_one", keys = keys.join(" / "))),
-            None => bail!("{}", t!("install.setup.typed.choose_one", keys = keys.join(" / "))),
+            None if input.interactive() => ui::warn(&t!(
+                "install.setup.typed.choose_one",
+                keys = keys.join(" / ")
+            )),
+            None => bail!(
+                "{}",
+                t!("install.setup.typed.choose_one", keys = keys.join(" / "))
+            ),
         }
     }
 }
 
 /// `all`, `none`, or keys separated by commas, as ticks over `choices`.
 fn ticks(answer: &str, choices: &[Choice]) -> Result<Vec<bool>> {
+    ticks_allowing(answer, choices, &[])
+}
+
+fn ticks_allowing(answer: &str, choices: &[Choice], allowed_noop: &[String]) -> Result<Vec<bool>> {
     let answer = answer.trim().to_lowercase();
     if matches!(answer.as_str(), "all" | "none") {
         return Ok(vec![answer == "all"; choices.len()]);
     }
-    let wanted: Vec<&str> = answer.split(',').map(str::trim).filter(|k| !k.is_empty()).collect();
-    if let Some(unknown) = wanted.iter().find(|k| !choices.iter().any(|c| c.key == **k)) {
-        let keys: Vec<&str> = choices.iter().map(|c| c.key.as_str()).collect();
-        bail!("{}", t!("install.setup.typed.unknown_choice", unknown = unknown, keys = keys.join(&t!("install.setup.list_separator"))));
+    let wanted: Vec<&str> = answer
+        .split(',')
+        .map(str::trim)
+        .filter(|k| !k.is_empty())
+        .collect();
+    if let Some(unknown) = wanted
+        .iter()
+        .find(|k| !choices.iter().any(|c| c.key == **k) && !allowed_noop.iter().any(|a| a == **k))
+    {
+        let mut keys: Vec<&str> = choices.iter().map(|c| c.key.as_str()).collect();
+        keys.extend(allowed_noop.iter().map(String::as_str));
+        bail!(
+            "{}",
+            t!(
+                "install.setup.typed.unknown_choice",
+                unknown = unknown,
+                keys = keys.join(&t!("install.setup.list_separator"))
+            )
+        );
     }
-    Ok(choices.iter().map(|c| wanted.contains(&c.key.as_str())).collect())
+    Ok(choices
+        .iter()
+        .map(|c| wanted.contains(&c.key.as_str()))
+        .collect())
 }
 
-fn typed_multiselect<P: Prompts + ?Sized>(input: &mut P, title: &str, choices: &[Choice], ticked: &[bool]) -> Result<Vec<bool>> {
+fn typed_multiselect<P: Prompts + ?Sized>(
+    input: &mut P,
+    title: &str,
+    choices: &[Choice],
+    ticked: &[bool],
+) -> Result<Vec<bool>> {
     let default: Vec<&str> = choices
         .iter()
         .zip(ticked)
         .filter(|(_, on)| **on)
         .map(|(c, _)| c.key.as_str())
         .collect();
-    let default = if default.is_empty() { "none".to_owned() } else { default.join(",") };
+    let default = if default.is_empty() {
+        "none".to_owned()
+    } else {
+        default.join(",")
+    };
     let title = t!("install.setup.typed.multiselect_title", title = title);
     loop {
         let answer = input.line(&title, Some(&default), false)?;
@@ -105,7 +159,11 @@ fn typed_multiselect<P: Prompts + ?Sized>(input: &mut P, title: &str, choices: &
 
 fn typed_confirm<P: Prompts + ?Sized>(input: &mut P, title: &str, initial: bool) -> Result<bool> {
     loop {
-        let answer = input.line(&format!("{title} [y/n]"), Some(if initial { "y" } else { "n" }), false)?;
+        let answer = input.line(
+            &format!("{title} [y/n]"),
+            Some(if initial { "y" } else { "n" }),
+            false,
+        )?;
         match answer.trim().to_lowercase().as_str() {
             "y" | "yes" | "是" => return Ok(true),
             "n" | "no" | "否" => return Ok(false),
@@ -126,15 +184,32 @@ impl Prompts for Terminal {
     }
 
     fn select(&mut self, title: &str, choices: &[Choice], initial: usize) -> Result<usize> {
-        if ui::fancy() { ui::select(title, choices, initial) } else { typed_select(self, title, choices, initial) }
+        if ui::fancy() {
+            ui::select(title, choices, initial)
+        } else {
+            typed_select(self, title, choices, initial)
+        }
     }
 
-    fn multiselect(&mut self, title: &str, choices: &[Choice], ticked: &[bool]) -> Result<Vec<bool>> {
-        if ui::fancy() { ui::multiselect(title, choices, ticked) } else { typed_multiselect(self, title, choices, ticked) }
+    fn multiselect(
+        &mut self,
+        title: &str,
+        choices: &[Choice],
+        ticked: &[bool],
+    ) -> Result<Vec<bool>> {
+        if ui::fancy() {
+            ui::multiselect(title, choices, ticked)
+        } else {
+            typed_multiselect(self, title, choices, ticked)
+        }
     }
 
     fn confirm(&mut self, title: &str, initial: bool) -> Result<bool> {
-        if ui::fancy() { ui::confirm(title, initial) } else { typed_confirm(self, title, initial) }
+        if ui::fancy() {
+            ui::confirm(title, initial)
+        } else {
+            typed_confirm(self, title, initial)
+        }
     }
 
     fn line(&mut self, title: &str, default: Option<&str>, optional: bool) -> Result<String> {
@@ -211,7 +286,9 @@ fn tailcat_hub(value: &str) -> Option<String> {
     let (addr, port) = value.trim().strip_prefix("tailcat:")?.rsplit_once(':')?;
     let ok = addr.starts_with("tc")
         && addr.len() >= 8
-        && addr.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+        && addr
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
         && port.parse::<u16>().is_ok_and(|p| p != 0);
     ok.then(|| format!("tailcat:{addr}:{port}"))
 }
@@ -265,12 +342,18 @@ fn validate_options(options: &Options) -> Result<()> {
         node_hub_url(hub)?;
     }
     if let Some(label) = &options.label {
-        anyhow::ensure!(crate::signing::valid_identity(label), "{}", t!("install.setup.option.label_chars"));
+        anyhow::ensure!(
+            crate::signing::valid_identity(label),
+            "{}",
+            t!("install.setup.option.label_chars")
+        );
     }
     // one pin, or several comma-separated while the Hub's certificate is being changed
     if options.pin.as_ref().is_some_and(|v| {
         v.split(',').any(|p| {
-            !p.starts_with("sha256:") || p.len() != 71 || !p[7..].bytes().all(|b| b.is_ascii_hexdigit())
+            !p.starts_with("sha256:")
+                || p.len() != 71
+                || !p[7..].bytes().all(|b| b.is_ascii_hexdigit())
         })
     }) {
         bail!("{}", t!("install.setup.option.pin_format"));
@@ -279,8 +362,7 @@ fn validate_options(options: &Options) -> Result<()> {
 }
 
 fn modified_setup_file(name: &str) -> anyhow::Error {
-    anyhow::anyhow!(
-        "{}", t!("install.setup.receipt.file_modified", name = name))
+    anyhow::anyhow!("{}", t!("install.setup.receipt.file_modified", name = name))
 }
 
 /// Where setup keeps the owner's first access token (`user=…`, `token=…`; mode 0600).
@@ -290,7 +372,31 @@ const OWNER_TOKEN: &str = "secrets/owner.token";
 /// not on the PATH), told which installation it is.
 fn token_command(home: &Path) -> Result<String> {
     let quoted = |p: &Path| shell_quote(p.to_str().context(t!("install.setup.home_not_utf8"))?);
-    Ok(format!("STEVE_HOME={} {} --access token create", quoted(home)?, quoted(&home.join("current/bin/steve-hub"))?))
+    Ok(format!(
+        "STEVE_HOME={} {} --access token create",
+        quoted(home)?,
+        quoted(&home.join("current/bin/steve-hub"))?
+    ))
+}
+
+/// Parses a `STEVE_HOST` value (one or more comma-separated IPs or `localhost`) into host tokens.
+fn parse_host_entries(raw: &str) -> Option<Vec<std::net::IpAddr>> {
+    let mut out = Vec::new();
+    for part in raw.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+        let bare = part
+            .strip_prefix('[')
+            .and_then(|s| s.strip_suffix(']'))
+            .unwrap_or(part);
+        let ip = if bare.eq_ignore_ascii_case("localhost") {
+            std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
+        } else {
+            bare.parse::<std::net::IpAddr>().ok()?
+        };
+        if !out.contains(&ip) {
+            out.push(ip);
+        }
+    }
+    (!out.is_empty()).then_some(out)
 }
 
 fn completion_lines(
@@ -301,24 +407,41 @@ fn completion_lines(
     paired: bool,
 ) -> Result<Vec<String>> {
     /* what selects this installation in a command: its home always, its label when it has its own */
-    let mut selected = format!("--home {}", shell_quote(home.to_str().context(t!("install.setup.home_not_utf8"))?)?);
+    let mut selected = format!(
+        "--home {}",
+        shell_quote(home.to_str().context(t!("install.setup.home_not_utf8"))?)?
+    );
     if let Some(label) = label {
         selected.push_str(&format!(" --label {}", shell_quote(label)?));
     }
-    let mut lines = vec![t!("install.setup.plain.configured", role = role, home = home.display())];
+    let mut lines = vec![t!(
+        "install.setup.plain.configured",
+        role = role,
+        home = home.display()
+    )];
     if role == "hub" {
-        let host = environment["STEVE_HOST"]
+        let host_raw = environment["STEVE_HOST"]
             .as_str()
-            .context(t!("install.setup.listen_host_missing"))?
-            .parse()?;
-        let port = environment["STEVE_PORT"]
+            .context(t!("install.setup.listen_host_missing"))?;
+        let hosts =
+            parse_host_entries(host_raw).with_context(|| t!("install.setup.listen.format"))?;
+        let port: u16 = environment["STEVE_PORT"]
             .as_str()
             .context(t!("install.setup.listen_port_missing"))?
             .parse()?;
-        lines.push(t!("install.setup.plain.listen", address = SocketAddr::new(host, port)));
+        let address_display = hosts
+            .iter()
+            .map(|&ip| SocketAddr::new(ip, port).to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        lines.push(t!("install.setup.plain.listen", address = address_display));
         if let Some(web) = environment["STEVE_WEB_PORT"].as_str() {
             /* the address to type: the one it listens on, or this machine's when it listens on all */
-            let ip: std::net::IpAddr = host;
+            let ip = hosts
+                .iter()
+                .copied()
+                .find(|ip| !ip.is_unspecified())
+                .unwrap_or(hosts[0]);
             let hub = if ip.is_unspecified() {
                 format!("http://{}:{port}", t!("install.setup.plain.this_machine"))
             } else {
@@ -326,11 +449,12 @@ fn completion_lines(
             };
             lines.push(t!("install.setup.plain.web_port", web = web, hub = hub));
         }
-        lines.push(t!("install.setup.plain.browser_address", url = environment["STEVE_PUBLIC_URL"].as_str().unwrap_or("")));
+        lines.push(t!(
+            "install.setup.plain.browser_address",
+            url = environment["STEVE_PUBLIC_URL"].as_str().unwrap_or("")
+        ));
     } else if paired {
-        lines.push(
-            t!("install.setup.plain.node_paired"),
-        );
+        lines.push(t!("install.setup.plain.node_paired"));
     } else {
         lines.push(t!("install.setup.plain.node_unpaired"));
         lines.push(format!("steve setup node {selected}"));
@@ -355,12 +479,20 @@ fn completion_lines(
                         .to_string()
                 };
                 lines.push(t!("install.setup.plain.sign_in_user", user = field("user")));
-                lines.push(t!("install.setup.plain.access_token", token = field("token")));
-                lines.push(t!("install.setup.plain.token_saved", path = home.join(OWNER_TOKEN).display(), command = token_command(&home)?));
+                lines.push(t!(
+                    "install.setup.plain.access_token",
+                    token = field("token")
+                ));
+                lines.push(t!(
+                    "install.setup.plain.token_saved",
+                    path = home.join(OWNER_TOKEN).display(),
+                    command = token_command(&home)?
+                ));
             }
-            Err(_) => lines.push(
-                t!("install.setup.plain.token_missing", command = token_command(&home)?),
-            ),
+            Err(_) => lines.push(t!(
+                "install.setup.plain.token_missing",
+                command = token_command(&home)?
+            )),
         }
         lines.push(t!("install.setup.plain.next_hub"));
     } else {
@@ -381,8 +513,11 @@ fn oidc_issuer_url(value: &str) -> Result<String> {
 
 fn http_url(value: &str, label: &str) -> Result<String> {
     let value = value.trim();
-    let url = url::Url::parse(value).with_context(|| t!("install.setup.url.full_required", label = label))?;
-    let host = url.host_str().context(t!("install.setup.url.host_missing"))?;
+    let url = url::Url::parse(value)
+        .with_context(|| t!("install.setup.url.full_required", label = label))?;
+    let host = url
+        .host_str()
+        .context(t!("install.setup.url.host_missing"))?;
     if !matches!(url.scheme(), "http" | "https")
         || !url.username().is_empty()
         || url.password().is_some()
@@ -393,7 +528,10 @@ fn http_url(value: &str, label: &str) -> Result<String> {
         bail!("{}", t!("install.setup.url.plain_only", label = label));
     }
     if matches!(host, "0.0.0.0" | "::" | "[::]") {
-        bail!("{}", t!("install.setup.url.unspecified_host", label = label));
+        bail!(
+            "{}",
+            t!("install.setup.url.unspecified_host", label = label)
+        );
     }
     if url.scheme() != "https" && !matches!(host, "localhost" | "127.0.0.1" | "[::1]" | "::1") {
         bail!("{}", t!("install.setup.url.https_required", label = label));
@@ -403,9 +541,13 @@ fn http_url(value: &str, label: &str) -> Result<String> {
 
 fn manifest(root: &Path) -> Result<Value> {
     let value = read_json(&root.join("release.json"))?;
-    let version = value["version"].as_str().context(t!("install.setup.bundle.version_missing"))?;
+    let version = value["version"]
+        .as_str()
+        .context(t!("install.setup.bundle.version_missing"))?;
     let parsed = semver::Version::parse(version)?;
-    let commit = value["commit"].as_str().context(t!("install.setup.bundle.commit_missing"))?;
+    let commit = value["commit"]
+        .as_str()
+        .context(t!("install.setup.bundle.commit_missing"))?;
     if value["format_version"] != 1
         || parsed.to_string() != version
         || !parsed.pre.is_empty()
@@ -440,7 +582,12 @@ fn captured(
     command.args(args);
     if let Some(env) = environment.and_then(Value::as_object) {
         for (key, value) in env {
-            command.env(key, value.as_str().context(t!("install.setup.env_value_not_string"))?);
+            command.env(
+                key,
+                value
+                    .as_str()
+                    .context(t!("install.setup.env_value_not_string"))?,
+            );
         }
     }
     let output = command
@@ -448,7 +595,9 @@ fn captured(
         .with_context(|| t!("install.setup.run_failed", path = program.display()))?;
     if !output.status.success() {
         bail!(
-            "{}", t!("install.setup.command_failed", status = output.status));
+            "{}",
+            t!("install.setup.command_failed", status = output.status)
+        );
     }
     serde_json::from_slice(&output.stdout).context(t!("install.setup.command_no_json"))
 }
@@ -457,16 +606,26 @@ fn captured(
 /// found the configuration wrong (exit 2, `ok: false`, the reasons under `errors`).
 fn config_report(program: &Path, home: &Path, environment: &Value) -> Result<Value> {
     let mut command = clean_command(program, Some(home));
-    command.arg("--check-config").stdin(std::process::Stdio::null());
+    command
+        .arg("--check-config")
+        .stdin(std::process::Stdio::null());
     for (key, value) in environment.as_object().into_iter().flatten() {
-        command.env(key, value.as_str().context(t!("install.setup.env_value_not_string"))?);
+        command.env(
+            key,
+            value
+                .as_str()
+                .context(t!("install.setup.env_value_not_string"))?,
+        );
     }
     let output = command
         .output()
         .with_context(|| t!("install.setup.run_failed", path = program.display()))?;
     match serde_json::from_slice::<Value>(&output.stdout) {
         Ok(report) if report["ok"].is_boolean() => Ok(report),
-        _ if !output.status.success() => bail!("{}", t!("install.setup.command_failed", status = output.status)),
+        _ if !output.status.success() => bail!(
+            "{}",
+            t!("install.setup.command_failed", status = output.status)
+        ),
         _ => bail!("{}", t!("install.setup.command_no_json")),
     }
 }
@@ -496,7 +655,10 @@ fn verify_bundle(root: &Path, expected: &Value, home: &Path) -> Result<()> {
             || info["target"] != env!("STEVE_BUILD_TARGET")
             || (role == "hub" && info["schema"] != disk["schema"]["target"])
         {
-            bail!("{}", t!("install.setup.bundle.binary_mismatch", role = role));
+            bail!(
+                "{}",
+                t!("install.setup.bundle.binary_mismatch", role = role)
+            );
         }
     }
     let html = fs::read_to_string(root.join("web/dist/index.html"))?;
@@ -571,9 +733,13 @@ impl<'a> Wizard<'a> {
         {
             bail!("{}", t!("install.setup.receipt.not_owned"));
         }
-        let old_version = record["version"].as_str().context(t!("install.setup.receipt.version_missing"))?;
+        let old_version = record["version"]
+            .as_str()
+            .context(t!("install.setup.receipt.version_missing"))?;
         let parsed = semver::Version::parse(old_version)?;
-        let old_commit = record["commit"].as_str().context(t!("install.setup.receipt.commit_missing"))?;
+        let old_commit = record["commit"]
+            .as_str()
+            .context(t!("install.setup.receipt.commit_missing"))?;
         if parsed.to_string() != old_version
             || !parsed.pre.is_empty()
             || !parsed.build.is_empty()
@@ -603,7 +769,11 @@ impl<'a> Wizard<'a> {
             let path = home.join(relative);
             if exists(&path) {
                 owned(&path, false)?;
-                if digest(&path)? != value.as_str().context(t!("install.setup.receipt.digest_invalid"))? {
+                if digest(&path)?
+                    != value
+                        .as_str()
+                        .context(t!("install.setup.receipt.digest_invalid"))?
+                {
                     return Err(modified_setup_file(name));
                 }
             }
@@ -614,8 +784,7 @@ impl<'a> Wizard<'a> {
             // A user may have interrupted the previous setup at its first prompt before upgrading
             // the package. Only that unsigned, unpaired, unregistered setup may change versions.
             if underway(&wizard.record, home) {
-                bail!(
-                    "{}", t!("install.setup.receipt.other_version"));
+                bail!("{}", t!("install.setup.receipt.other_version"));
             }
             wizard.verify_copy()?;
             let backups = home.join("setup-backups");
@@ -649,7 +818,10 @@ impl<'a> Wizard<'a> {
         let path = self.home.join(name);
         if self.record["files"].get(name).is_none() {
             if exists(&path) {
-                bail!("{}", t!("install.setup.receipt.foreign_file", path = path.display()));
+                bail!(
+                    "{}",
+                    t!("install.setup.receipt.foreign_file", path = path.display())
+                );
             }
             let bytes = data.context(t!("install.setup.receipt.file_missing"))?;
             self.record["files"][name] = bytes_digest(bytes).into();
@@ -678,10 +850,11 @@ impl<'a> Wizard<'a> {
         if self.record["copy_planned"] != true {
             return Ok(());
         }
-        let candidate = self
-            .home
-            .join("releases")
-            .join(self.record["version"].as_str().context(t!("install.setup.release.version_missing"))?);
+        let candidate = self.home.join("releases").join(
+            self.record["version"]
+                .as_str()
+                .context(t!("install.setup.release.version_missing"))?,
+        );
         if !exists(&candidate) {
             return Ok(());
         }
@@ -801,24 +974,35 @@ impl<'a> Wizard<'a> {
             let env = self.record["environment"].clone();
             if let Some(listen) = listen {
                 let selected = listen_address(listen)?;
-                let saved_ip: std::net::IpAddr = env["STEVE_HOST"]
+                let saved_raw = env["STEVE_HOST"]
                     .as_str()
-                    .context(t!("install.setup.listen_host_missing"))?
-                    .parse()?;
+                    .context(t!("install.setup.listen_host_missing"))?;
+                let saved_ips = parse_host_entries(saved_raw)
+                    .with_context(|| t!("install.setup.listen.format"))?;
                 let saved_port: u16 = env["STEVE_PORT"]
                     .as_str()
                     .context(t!("install.setup.listen_port_missing"))?
                     .parse()?;
-                if selected != SocketAddr::new(saved_ip, saved_port) {
+                if saved_ips.len() != 1 || selected != SocketAddr::new(saved_ips[0], saved_port) {
                     bail!("{}", t!("install.setup.config.listen_differs"));
                 }
             }
             if let Some(public) = public {
-                if env["STEVE_PUBLIC_URL"].as_str() != Some(browser_url(public, &t!("install.setup.label.access_address"))?.as_str()) {
+                if env["STEVE_PUBLIC_URL"].as_str()
+                    != Some(
+                        browser_url(public, &t!("install.setup.label.access_address"))?.as_str(),
+                    )
+                {
                     bail!("{}", t!("install.setup.config.public_url_differs"));
                 }
             }
-            self.owned_file("steve.env", Some(&env_bytes(env.as_object().unwrap())?))?;
+            if exists(&self.home.join("steve.env"))
+                && self.record["files"].get("steve.env").is_some()
+            {
+                self.owned_file("steve.env", None)?;
+            } else {
+                self.owned_file("steve.env", Some(&env_bytes(env.as_object().unwrap())?))?;
+            }
             /* a setup before 2026-11-09 asked for OIDC and keeps its secret */
             if self.record["files"]
                 .get("secrets/oidc-client-secret")
@@ -829,17 +1013,38 @@ impl<'a> Wizard<'a> {
             return Ok(env);
         }
         let custom = |input: &mut dyn Prompts| {
-            ask_value(input, &t!("install.setup.label.listen_address"), Some("0.0.0.0:8440"), false, listen_address)
+            ask_value(
+                input,
+                &t!("install.setup.label.listen_address"),
+                Some("0.0.0.0:8440"),
+                false,
+                listen_address,
+            )
         };
         let bind = match listen {
             Some(value) => listen_address(value)?,
             None if self.input.rich() => {
                 let choices = [
-                    Choice::new("lan", &t!("install.setup.network.lan"), &t!("install.setup.network.lan_hint")),
-                    Choice::new("local", &t!("install.setup.network.local"), &t!("install.setup.network.local_hint")),
-                    Choice::new("custom", &t!("install.setup.network.custom"), &t!("install.setup.network.custom_hint")),
+                    Choice::new(
+                        "lan",
+                        &t!("install.setup.network.lan"),
+                        &t!("install.setup.network.lan_hint"),
+                    ),
+                    Choice::new(
+                        "local",
+                        &t!("install.setup.network.local"),
+                        &t!("install.setup.network.local_hint"),
+                    ),
+                    Choice::new(
+                        "custom",
+                        &t!("install.setup.network.custom"),
+                        &t!("install.setup.network.custom_hint"),
+                    ),
                 ];
-                match self.input.select(&t!("install.setup.network.question"), &choices, 0)? {
+                match self
+                    .input
+                    .select(&t!("install.setup.network.question"), &choices, 0)?
+                {
                     0 => SocketAddr::from(([0, 0, 0, 0], 8440)),
                     1 => SocketAddr::from(([127, 0, 0, 1], 8440)),
                     _ => custom(&mut *self.input)?,
@@ -848,7 +1053,10 @@ impl<'a> Wizard<'a> {
             None => custom(&mut *self.input)?,
         };
         /* the web client has a port of its own (A3): the Hub's port answers the API only */
-        let web_port = bind.port().checked_add(1).context(t!("install.setup.network.port_too_high"))?;
+        let web_port = bind
+            .port()
+            .checked_add(1)
+            .context(t!("install.setup.network.port_too_high"))?;
         let default_url = if bind.ip().is_unspecified() || bind.ip().is_loopback() {
             Some(format!(
                 "http://{}:{web_port}",
@@ -865,9 +1073,13 @@ impl<'a> Wizard<'a> {
             (None, Some(url)) => url,
             (None, None) => {
                 ui::info(&t!("install.setup.network.no_web_address"));
-                ask_value(self.input, &t!("install.setup.label.browser_address"), None, false, |value| {
-                    browser_url(value, &t!("install.setup.label.access_address"))
-                })?
+                ask_value(
+                    self.input,
+                    &t!("install.setup.label.browser_address"),
+                    None,
+                    false,
+                    |value| browser_url(value, &t!("install.setup.label.access_address")),
+                )?
             }
         };
         /* no OIDC here (2026-11-09): sign-in is a user's name and an access token, issued below;
@@ -914,7 +1126,9 @@ impl<'a> Wizard<'a> {
 /// Whether a setup recorded in `record` got as far as making something a later version must not
 /// take over: a step done, an identity, a database, a service.
 fn underway(record: &Value, home: &Path) -> bool {
-    record["steps"].as_array().is_some_and(|steps| !steps.is_empty())
+    record["steps"]
+        .as_array()
+        .is_some_and(|steps| !steps.is_empty())
         || record["keychain_started"] == true
         || record["pair_started"] == true
         || [
@@ -944,10 +1158,19 @@ fn other_install(home: &Path, role: &str, expected: &Value) -> Option<Value> {
 
 /// `Hub 0.2.97 · a74c8da9`, from a receipt.
 fn install_name(record: &Value) -> String {
-    let commit: String = record["commit"].as_str().unwrap_or_default().chars().take(8).collect();
+    let commit: String = record["commit"]
+        .as_str()
+        .unwrap_or_default()
+        .chars()
+        .take(8)
+        .collect();
     format!(
         "{} {} · {commit}",
-        if record["component"] == "node" { "Node" } else { "Hub" },
+        if record["component"] == "node" {
+            "Node"
+        } else {
+            "Hub"
+        },
         record["version"].as_str().unwrap_or("?")
     )
 }
@@ -1005,10 +1228,16 @@ fn set_aside(home: &Path) -> Result<(PathBuf, Option<PathBuf>)> {
     }
     let stamp = stamp();
     let beside = |dir: &Path| -> Result<PathBuf> {
-        let name = dir.file_name().and_then(|n| n.to_str()).context(t!("install.setup.home_not_utf8"))?;
+        let name = dir
+            .file_name()
+            .and_then(|n| n.to_str())
+            .context(t!("install.setup.home_not_utf8"))?;
         let aside = dir.with_file_name(format!("{name}.bak-{stamp}"));
         if exists(&aside) {
-            bail!("{}", t!("install.setup.aside.target_exists", aside = aside.display()));
+            bail!(
+                "{}",
+                t!("install.setup.aside.target_exists", aside = aside.display())
+            );
         }
         Ok(aside)
     };
@@ -1017,13 +1246,23 @@ fn set_aside(home: &Path) -> Result<(PathBuf, Option<PathBuf>)> {
     let keys = record["key_directory"]
         .as_str()
         .map(PathBuf::from)
-        .filter(|keys| keys.is_absolute() && !keys.starts_with(home) && !home.starts_with(keys) && owned(keys, true).is_ok());
+        .filter(|keys| {
+            keys.is_absolute()
+                && !keys.starts_with(home)
+                && !home.starts_with(keys)
+                && owned(keys, true).is_ok()
+        });
     let keys_aside = keys.as_deref().map(beside).transpose()?;
     drop(lock);
     fs::rename(home, &aside)?;
     if let (Some(keys), Some(keys_aside)) = (&keys, &keys_aside) {
-        fs::rename(keys, keys_aside)
-            .with_context(|| t!("install.setup.aside.keys_left", keys = keys.display(), aside = aside.display()))?;
+        fs::rename(keys, keys_aside).with_context(|| {
+            t!(
+                "install.setup.aside.keys_left",
+                keys = keys.display(),
+                aside = aside.display()
+            )
+        })?;
     }
     Ok((aside, keys_aside))
 }
@@ -1034,7 +1273,12 @@ pub fn reconfigure_existing(options: Options) -> Result<()> {
 }
 
 /// `bin/steve-hub --adapters …` or `bin/steve-node adapters …` of `release`, for the home.
-fn adapter_command(role: &str, home: &Path, release: &Path, args: &[&str]) -> std::process::Command {
+fn adapter_command(
+    role: &str,
+    home: &Path,
+    release: &Path,
+    args: &[&str],
+) -> std::process::Command {
     let (program, first) = if role == "hub" {
         (release.join("bin/steve-hub"), "--adapters")
     } else {
@@ -1048,7 +1292,9 @@ fn adapter_command(role: &str, home: &Path, release: &Path, args: &[&str]) -> st
 /// What the release can install (`adapters list --json`): whether npm is there, whether this home
 /// already has a choice, and each built-in adapter.
 fn adapter_listing(role: &str, home: &Path, release: &Path) -> Option<Value> {
-    let output = adapter_command(role, home, release, &["list", "--json"]).output().ok()?;
+    let output = adapter_command(role, home, release, &["list", "--json"])
+        .output()
+        .ok()?;
     let listing: Value = serde_json::from_slice(&output.stdout).ok()?;
     (output.status.success() && listing["adapters"].is_array()).then_some(listing)
 }
@@ -1062,28 +1308,96 @@ fn adapter_choice(
     release: &Path,
     flag: Option<&str>,
 ) -> Result<Option<Vec<String>>> {
-    if let Some(saved) = wizard.record["adapters"].as_array() {
-        return Ok(Some(saved.iter().filter_map(|v| v.as_str().map(str::to_owned)).collect()));
-    }
     let Some(listing) = adapter_listing(role, &wizard.home, release) else {
-        anyhow::ensure!(flag.is_none(), "{}", t!("install.setup.adapters.unsupported"));
+        if flag.is_none()
+            && let Some(saved) = wizard.record["adapters"].as_array()
+        {
+            return Ok(Some(
+                saved
+                    .iter()
+                    .filter_map(|v| v.as_str().map(str::to_owned))
+                    .collect(),
+            ));
+        }
+        anyhow::ensure!(
+            flag.is_none(),
+            "{}",
+            t!("install.setup.adapters.unsupported")
+        );
         return Ok(None);
     };
-    let text = |v: &Value, key: &str| v[key].as_str().unwrap_or_default().to_owned();
-    let choices: Vec<Choice> = listing["adapters"]
+    let already_chosen = listing["chosen"] == true;
+    let finished = wizard.record["steps"]
         .as_array()
-        .unwrap()
+        .is_some_and(|s| s.iter().any(|v| v == "installed"));
+    if flag.is_none() && (already_chosen || finished) {
+        return Ok(None);
+    }
+    if flag.is_none()
+        && let Some(saved) = wizard.record["adapters"].as_array()
+    {
+        return Ok(Some(
+            saved
+                .iter()
+                .filter_map(|v| v.as_str().map(str::to_owned))
+                .collect(),
+        ));
+    }
+    let text = |v: &Value, key: &str| v[key].as_str().unwrap_or_default().to_owned();
+    let entries = listing["adapters"].as_array().unwrap();
+    let path_only: Vec<String> = listing["path_only"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|v| v.as_str().map(str::to_owned))
+        .collect();
+    let any_path_only_detected = listing["detected_path_only"]
+        .as_array()
+        .is_some_and(|a| !a.is_empty());
+    let choices: Vec<Choice> = entries
         .iter()
         .map(|a| Choice::new(&text(a, "id"), &text(a, "name"), &text(a, "package")))
         .collect();
-    let on = match flag {
-        Some(flag) => ticks(flag, &choices).context("--adapters")?,
-        /* without npm nothing can be installed now: the install step says what to do */
-        None if listing["npm"] != true || listing["chosen"] == true => return Ok(None),
-        None if !wizard.input.rich() => return Ok(None),
-        None => wizard.input.multiselect(&t!("install.setup.adapters.question"), &choices, &vec![true; choices.len()])?,
+    let default_ticks = || -> Vec<bool> {
+        let detected: Vec<bool> = entries
+            .iter()
+            .map(|a| a["detected"].as_bool().unwrap_or(false))
+            .collect();
+        if detected.iter().any(|&b| b) {
+            detected
+        } else if any_path_only_detected {
+            vec![false; entries.len()]
+        } else {
+            entries
+                .iter()
+                .map(|a| a["selected"].as_bool().unwrap_or(false))
+                .collect()
+        }
     };
-    let chosen: Vec<String> = choices.iter().zip(on).filter(|(_, on)| *on).map(|(c, _)| c.key.clone()).collect();
+    let on = match flag {
+        Some(flag) => ticks_allowing(flag, &choices, &path_only).context("--adapters")?,
+        None if listing["npm"] != true => {
+            let defaults = default_ticks();
+            if defaults.iter().all(|&b| !b) {
+                defaults
+            } else {
+                /* without npm nothing can be installed now: the install step says what to do */
+                return Ok(None);
+            }
+        }
+        None if !wizard.input.rich() => default_ticks(),
+        None => wizard.input.multiselect(
+            &t!("install.setup.adapters.question"),
+            &choices,
+            &default_ticks(),
+        )?,
+    };
+    let chosen: Vec<String> = choices
+        .iter()
+        .zip(on)
+        .filter(|(_, on)| *on)
+        .map(|(c, _)| c.key.clone())
+        .collect();
     wizard.record["adapters"] = json!(chosen);
     wizard.save()?;
     Ok(Some(chosen))
@@ -1108,33 +1422,53 @@ fn install_adapters(
         .map_err(|_| later.to_owned())?;
     if !output.status.success() {
         let said = String::from_utf8_lossy(&output.stderr);
-        let last = said.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or(later);
+        let last = said
+            .lines()
+            .rev()
+            .find(|l| !l.trim().is_empty())
+            .unwrap_or(later);
         return Err(last.trim().to_owned());
     }
     let installed: Vec<String> = adapter_listing(role, home, release)
         .and_then(|l| l["adapters"].as_array().cloned())
         .unwrap_or_default()
         .iter()
-        .filter_map(|a| Some(format!("{} {}", a["name"].as_str()?, a["installed"].as_str()?)))
+        .filter_map(|a| {
+            Some(format!(
+                "{} {}",
+                a["name"].as_str()?,
+                a["installed"].as_str()?
+            ))
+        })
         .collect();
     Ok(installed.join(" · "))
 }
 
 /// Where a Hub with this environment answers on its own machine, and where its web client is.
 fn hub_addresses(value: impl Fn(&str) -> Option<String>) -> Option<(String, String)> {
-    let ip: std::net::IpAddr = value("STEVE_HOST")?.parse().ok()?;
+    let hosts = parse_host_entries(&value("STEVE_HOST")?)?;
     let port: u16 = value("STEVE_PORT")?.parse().ok()?;
-    let ip = match ip {
+    let chosen = hosts
+        .iter()
+        .copied()
+        .find(|ip| ip.is_loopback())
+        .or_else(|| hosts.iter().copied().find(|ip| ip.is_unspecified()))
+        .unwrap_or(hosts[0]);
+    let ip = match chosen {
         ip if !ip.is_unspecified() => ip,
         std::net::IpAddr::V4(_) => std::net::Ipv4Addr::LOCALHOST.into(),
         std::net::IpAddr::V6(_) => std::net::Ipv6Addr::LOCALHOST.into(),
     };
-    Some((format!("http://{}", SocketAddr::new(ip, port)), value("STEVE_PUBLIC_URL")?))
+    Some((
+        format!("http://{}", SocketAddr::new(ip, port)),
+        value("STEVE_PUBLIC_URL")?,
+    ))
 }
 
 /// The same for the Hub installed in `home` (its `steve.env`): (the Hub, the web client).
 pub fn hub_urls(home: &Path) -> Option<(String, String)> {
-    let document = crate::env_file::EnvDocument::parse(&fs::read(home.join("steve.env")).ok()?).ok()?;
+    let document =
+        crate::env_file::EnvDocument::parse(&fs::read(home.join("steve.env")).ok()?).ok()?;
     hub_addresses(|key| document.values().get(key).cloned())
 }
 
@@ -1165,7 +1499,11 @@ pub fn hub_ready(api: &str, wait: Duration) -> Option<Value> {
 
 /// The program that opens a URL in the user's browser, where there is one.
 fn opener() -> Option<PathBuf> {
-    let name = if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
+    let name = if cfg!(target_os = "macos") {
+        "open"
+    } else {
+        "xdg-open"
+    };
     std::env::split_paths(&std::env::var_os("PATH")?)
         .map(|d| d.join(name))
         .find(|p| p.is_file())
@@ -1198,11 +1536,18 @@ fn finish_hub(
         ("Token", field("token")),
         (&t!("install.setup.finish.home"), home.display().to_string()),
     ]);
-    ui::info(&t!("install.setup.finish.token_saved", path = home.join(OWNER_TOKEN).display()));
+    ui::info(&t!(
+        "install.setup.finish.token_saved",
+        path = home.join(OWNER_TOKEN).display()
+    ));
     ui::gap();
     let how = &t!("install.setup.finish.first_visit");
     if !input.confirm(&t!("install.setup.finish.start_now"), true)? {
-        ui::outro(&t!("install.setup.finish.start_later", flags = flags, how = how));
+        ui::outro(&t!(
+            "install.setup.finish.start_later",
+            flags = flags,
+            how = how
+        ));
         return Ok(());
     }
     let spinner = ui::Spinner::start(&t!("install.setup.finish.starting"));
@@ -1255,7 +1600,9 @@ pub fn run(source: &Path, options: Options) -> Result<()> {
                 Choice::new("hub", "Hub", &t!("install.setup.role.hub_hint")),
                 Choice::new("node", "Node", &t!("install.setup.role.node_hint")),
             ];
-            choices[input.select(&t!("install.setup.role.question"), &choices, 0)?].key.clone()
+            choices[input.select(&t!("install.setup.role.question"), &choices, 0)?]
+                .key
+                .clone()
         }
         None => ask_value(
             &mut input,
@@ -1266,15 +1613,23 @@ pub fn run(source: &Path, options: Options) -> Result<()> {
         )?,
     };
     let default_home = options.home.is_none();
-    let home = canonical(&options.home.clone().unwrap_or(user_home()?.join(if role == "hub" {
-        ".steve"
-    } else {
-        ".steve-node"
-    })))?;
+    let home = canonical(
+        &options
+            .home
+            .clone()
+            .unwrap_or(user_home()?.join(if role == "hub" {
+                ".steve"
+            } else {
+                ".steve-node"
+            })),
+    )?;
     /* how the commands setup names reach this installation */
     let mut flags = String::new();
     if !default_home {
-        flags.push_str(&format!(" --home {}", shell_quote(home.to_str().context(t!("install.setup.home_not_utf8"))?)?));
+        flags.push_str(&format!(
+            " --home {}",
+            shell_quote(home.to_str().context(t!("install.setup.home_not_utf8"))?)?
+        ));
     }
     if let Some(label) = &options.label {
         flags.push_str(&format!(" --label {}", shell_quote(label)?));
@@ -1285,28 +1640,60 @@ pub fn run(source: &Path, options: Options) -> Result<()> {
         let fresh = if options.fresh {
             true
         } else if rich {
-            let finished = found["steps"].as_array().is_some_and(|s| s.iter().any(|v| v == "installed"));
+            let finished = found["steps"]
+                .as_array()
+                .is_some_and(|s| s.iter().any(|v| v == "installed"));
             let choices = [
-                Choice::new("fresh", &t!("install.setup.existing.fresh"), &t!("install.setup.existing.fresh_hint")),
-                Choice::new("keep", &t!("install.setup.existing.keep"), &t!("install.setup.existing.keep_hint")),
+                Choice::new(
+                    "fresh",
+                    &t!("install.setup.existing.fresh"),
+                    &t!("install.setup.existing.fresh_hint"),
+                ),
+                Choice::new(
+                    "keep",
+                    &t!("install.setup.existing.keep"),
+                    &t!("install.setup.existing.keep_hint"),
+                ),
             ];
-            let title = t!("install.setup.existing.question", home = home.display(), install = install_name(&found));
+            let title = t!(
+                "install.setup.existing.question",
+                home = home.display(),
+                install = install_name(&found)
+            );
             /* a finished installation may be in use: leaving it alone is the answer to a stray Enter */
             input.select(&title, &choices, usize::from(finished))? == 0
         } else {
             bail!(
-                "{}", t!("install.setup.existing.refused", home = home.display(), install = install_name(&found)));
+                "{}",
+                t!(
+                    "install.setup.existing.refused",
+                    home = home.display(),
+                    install = install_name(&found)
+                )
+            );
         };
         if !fresh {
-            ui::outro(&t!("install.setup.existing.kept", role = found["component"].as_str().unwrap_or(&role), flags = flags));
+            ui::outro(&t!(
+                "install.setup.existing.kept",
+                role = found["component"].as_str().unwrap_or(&role),
+                flags = flags
+            ));
             return Ok(());
         }
         let aside = ui::step(
             &t!("install.setup.existing.moving"),
             || set_aside(&home),
             |(aside, keys)| {
-                let keys = keys.as_ref().map(|k| format!(" · {}", t!("install.setup.existing.moved_keys", keys = k.display())));
-                (t!("install.setup.existing.moved"), format!("{}{}", aside.display(), keys.unwrap_or_default()))
+                let keys = keys.as_ref().map(|k| {
+                    format!(
+                        " · {}",
+                        t!("install.setup.existing.moved_keys", keys = k.display())
+                    )
+                });
+                (
+                    t!("install.setup.existing.moved"),
+                    format!("{}{}", aside.display(), keys.unwrap_or_default()),
+                )
             },
         )?;
         let _ = aside;
@@ -1315,8 +1702,16 @@ pub fn run(source: &Path, options: Options) -> Result<()> {
         &t!("install.setup.step.verifying"),
         || verify_bundle(source, &expected, &home),
         |_| {
-            let commit: String = expected["commit"].as_str().unwrap_or_default().chars().take(8).collect();
-            (t!("install.setup.step.verified"), format!("{version} · {commit}"))
+            let commit: String = expected["commit"]
+                .as_str()
+                .unwrap_or_default()
+                .chars()
+                .take(8)
+                .collect();
+            (
+                t!("install.setup.step.verified"),
+                format!("{version} · {commit}"),
+            )
         },
     )?;
     let mut wizard = Wizard::claim(source, &home, &role, &expected, &mut input)?;
@@ -1366,7 +1761,12 @@ pub fn run(source: &Path, options: Options) -> Result<()> {
     let candidate = ui::step(
         &t!("install.setup.step.preparing"),
         || wizard.copy_bundle(&expected),
-        |candidate| (t!("install.setup.step.prepared"), candidate.display().to_string()),
+        |candidate| {
+            (
+                t!("install.setup.step.prepared"),
+                candidate.display().to_string(),
+            )
+        },
     )?;
     if role == "hub" {
         if cfg!(target_os = "macos") {
@@ -1378,11 +1778,19 @@ pub fn run(source: &Path, options: Options) -> Result<()> {
             {
                 wizard.record["keychain_started"] = true.into();
                 wizard.save()?;
-                let label = options.label.as_deref().unwrap_or("io.github.infranite.steve.hub");
+                let label = options
+                    .label
+                    .as_deref()
+                    .unwrap_or("io.github.infranite.steve.hub");
                 ui::step(
                     &t!("install.setup.step.signing"),
                     || crate::signing::setup_keychain(&home, &candidate, label),
-                    |_| (t!("install.setup.step.signed"), t!("install.setup.step.signed_detail")),
+                    |_| {
+                        (
+                            t!("install.setup.step.signed"),
+                            t!("install.setup.step.signed_detail"),
+                        )
+                    },
                 )?;
                 wizard.record["signed_hub_sha256"] =
                     digest(&candidate.join("bin/steve-hub"))?.into();
@@ -1400,7 +1808,9 @@ pub fn run(source: &Path, options: Options) -> Result<()> {
                 ("signing/identity.json", "identity_sha256"),
             ] {
                 if digest(&home.join(path))?
-                    != wizard.record[key].as_str().context(t!("install.setup.signing.digest_missing"))?
+                    != wizard.record[key]
+                        .as_str()
+                        .context(t!("install.setup.signing.digest_missing"))?
                 {
                     bail!("{}", t!("install.setup.signing.changed"));
                 }
@@ -1411,11 +1821,7 @@ pub fn run(source: &Path, options: Options) -> Result<()> {
             bail!("{}", t!("install.setup.node.pairing_foreign"));
         }
         let paired = read_json(&pairing)?;
-        let requested_hub = options
-            .hub
-            .as_ref()
-            .map(|v| node_hub_url(v))
-            .transpose()?;
+        let requested_hub = options.hub.as_ref().map(|v| node_hub_url(v)).transpose()?;
         if paired["hub_url"] != wizard.record["hub_url"]
             || requested_hub
                 .as_ref()
@@ -1469,7 +1875,10 @@ pub fn run(source: &Path, options: Options) -> Result<()> {
      * configuration check, so that it does not report them missing. */
     if chosen.as_ref().is_some_and(|c| c.is_empty()) {
         let _ = install_adapters(&role, &home, &candidate, chosen.as_deref());
-        ui::done(&t!("install.setup.adapters.none"), &t!("install.setup.adapters.none_hint"));
+        ui::done(
+            &t!("install.setup.adapters.none"),
+            &t!("install.setup.adapters.none_hint"),
+        );
     } else {
         let spinner = ui::Spinner::start(&t!("install.setup.adapters.installing"));
         match install_adapters(&role, &home, &candidate, chosen.as_deref()) {
@@ -1485,7 +1894,12 @@ pub fn run(source: &Path, options: Options) -> Result<()> {
                 if check["ok"] != true {
                     /* and why, in the Hub's words: without them the user is sent to look elsewhere */
                     let mut said = t!("install.setup.step.check_failed");
-                    for reason in check["errors"].as_array().into_iter().flatten().filter_map(Value::as_str) {
+                    for reason in check["errors"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(Value::as_str)
+                    {
                         said.push_str("\n  ");
                         said.push_str(reason);
                     }
@@ -1497,7 +1911,11 @@ pub fn run(source: &Path, options: Options) -> Result<()> {
         )?;
         if let Some(warnings) = check["warnings"].as_array() {
             for warning in warnings {
-                ui::info(warning.as_str().unwrap_or(&t!("install.setup.step.config_warning")));
+                ui::info(
+                    warning
+                        .as_str()
+                        .unwrap_or(&t!("install.setup.step.config_warning")),
+                );
             }
         }
         /* the owner's first access token, once: the Hub makes this account's user its owner */
@@ -1509,14 +1927,24 @@ pub fn run(source: &Path, options: Options) -> Result<()> {
             let issued = captured(
                 &candidate.join("bin/steve-hub"),
                 &home,
-                &["--access", "token", "create", "--user", &user, "--name", "setup", "--json"],
+                &[
+                    "--access", "token", "create", "--user", &user, "--name", "setup", "--json",
+                ],
                 Some(env),
             )?;
-            let token = issued["token"].as_str().context(t!("install.setup.token.none"))?;
-            let body = format!("user={}\ntoken={token}\n", issued["user"].as_str().unwrap_or(&user));
+            let token = issued["token"]
+                .as_str()
+                .context(t!("install.setup.token.none"))?;
+            let body = format!(
+                "user={}\ntoken={token}\n",
+                issued["user"].as_str().unwrap_or(&user)
+            );
             wizard.owned_file(OWNER_TOKEN, Some(body.as_bytes()))?;
             if rich {
-                ui::done(&t!("install.setup.token.issued"), issued["user"].as_str().unwrap_or(&user));
+                ui::done(
+                    &t!("install.setup.token.issued"),
+                    issued["user"].as_str().unwrap_or(&user),
+                );
             }
         }
     }
@@ -1525,7 +1953,10 @@ pub fn run(source: &Path, options: Options) -> Result<()> {
         &t!("install.setup.step.registering", role = role),
         || service.dispatch("install", Some(&candidate), 30),
         |report| {
-            (t!("install.setup.step.registered"), report["label"].as_str().unwrap_or_default().to_owned())
+            (
+                t!("install.setup.step.registered"),
+                report["label"].as_str().unwrap_or_default().to_owned(),
+            )
         },
     )?;
     if !wizard.record["steps"]
@@ -1586,7 +2017,14 @@ mod tests {
             true
         }
         fn select(&mut self, title: &str, choices: &[Choice], _: usize) -> Result<usize> {
-            self.asked.push(format!("{title} {}", choices.iter().map(|c| c.key.as_str()).collect::<Vec<_>>().join("/")));
+            self.asked.push(format!(
+                "{title} {}",
+                choices
+                    .iter()
+                    .map(|c| c.key.as_str())
+                    .collect::<Vec<_>>()
+                    .join("/")
+            ));
             Ok(self.picks.remove(0))
         }
         fn line(&mut self, title: &str, _: Option<&str>, _: bool) -> Result<String> {
@@ -1630,7 +2068,11 @@ mod tests {
             node_hub_url(" tailcat:tcAbC_-123456:8442 ").unwrap(),
             "tailcat:tcAbC_-123456:8442"
         );
-        for bad in ["tailcat:tcAbC_-123456", "tailcat:tc;rm -rf /:1", "tailcat:xyz12345678:1"] {
+        for bad in [
+            "tailcat:tcAbC_-123456",
+            "tailcat:tc;rm -rf /:1",
+            "tailcat:xyz12345678:1",
+        ] {
             assert!(node_hub_url(bad).is_err(), "{bad}");
         }
         let mut input = Answers(vec!["not-a-url".into()]);
@@ -1779,12 +2221,20 @@ mod tests {
                     r"steve hub {action} --home '/tmp/steve user'\''s data'"
                 )));
             }
-            assert!(lines.iter().any(|line| line.contains("用用户名和 token 登录")));
+            assert!(
+                lines
+                    .iter()
+                    .any(|line| line.contains("用用户名和 token 登录"))
+            );
         }
         // an installation with a label of its own is named by it in every command, and the Hub
         // address to type is the one it listens on (this machine's only when it listens on all)
         let label = Some("io.example.trial.hub");
-        for (host, hub) in [("127.0.0.1", "http://127.0.0.1:18440"), ("::1", "http://[::1]:18440"), ("0.0.0.0", "http://<这台机器的地址>:18440")] {
+        for (host, hub) in [
+            ("127.0.0.1", "http://127.0.0.1:18440"),
+            ("::1", "http://[::1]:18440"),
+            ("0.0.0.0", "http://<这台机器的地址>:18440"),
+        ] {
             let env = json!({"STEVE_HOST":host,"STEVE_PORT":"18440","STEVE_WEB_PORT":"18441","STEVE_PUBLIC_URL":"http://127.0.0.1:18441"});
             let lines = completion_lines("hub", home, label, &env, false).unwrap();
             for action in ["start", "status", "doctor"] {
@@ -1793,9 +2243,16 @@ mod tests {
                     "{lines:?}"
                 );
             }
-            assert!(lines.contains(&format!("网页端口：18441。第一次打开网页时，输入 Hub 地址 {hub}")), "{lines:?}");
+            assert!(
+                lines.contains(&format!(
+                    "网页端口：18441。第一次打开网页时，输入 Hub 地址 {hub}"
+                )),
+                "{lines:?}"
+            );
         }
-        let lines = completion_lines("node", home, label, &Value::Null, false).unwrap().join("\n");
+        let lines = completion_lines("node", home, label, &Value::Null, false)
+            .unwrap()
+            .join("\n");
         assert!(lines.contains("steve setup node --home '/tmp/steve user'\\''s data' --label 'io.example.trial.hub'"), "{lines}");
         let lines = completion_lines("node", home, None, &Value::Null, false)
             .unwrap()
@@ -1894,7 +2351,10 @@ mod tests {
         assert_eq!(env["STEVE_HOST"], "0.0.0.0");
         assert_eq!(env["STEVE_ALLOW_ANY_HOST"], "1");
         assert_eq!(env["STEVE_PUBLIC_URL"], "http://127.0.0.1:8441");
-        assert_eq!(env["STEVE_WEB_PORT"], "8441", "the web client on a port of its own");
+        assert_eq!(
+            env["STEVE_WEB_PORT"], "8441",
+            "the web client on a port of its own"
+        );
         assert!(env.get("STEVE_OIDC_ISSUER").is_none());
         let bytes = fs::read_to_string(home.join("steve.env")).unwrap();
         assert!(!bytes.contains("OIDC"));
@@ -1905,10 +2365,21 @@ mod tests {
         let mut wizard = Wizard::claim(&source, &home, "hub", &meta("1.0.0"), &mut input).unwrap();
         assert_eq!(wizard.hub_config(None).unwrap(), env);
         // the same options again are the saved configuration; other ones are never written over it
-        assert_eq!(wizard.hub_config_with(Some("0.0.0.0:8440"), Some("http://127.0.0.1:8441/"), None).unwrap(), env);
+        assert_eq!(
+            wizard
+                .hub_config_with(Some("0.0.0.0:8440"), Some("http://127.0.0.1:8441/"), None)
+                .unwrap(),
+            env
+        );
         let differs = |error: anyhow::Error| error.to_string().contains("已有初始化配置不同");
-        assert!(differs(wizard.hub_config_with(None, Some("https://hub.example"), None).unwrap_err()));
-        assert!(differs(wizard.hub_config(Some("127.0.0.1:8440")).unwrap_err()));
+        assert!(differs(
+            wizard
+                .hub_config_with(None, Some("https://hub.example"), None)
+                .unwrap_err()
+        ));
+        assert!(differs(
+            wizard.hub_config(Some("127.0.0.1:8440")).unwrap_err()
+        ));
     }
 
     /// One new Hub configuration in a home of its own: (the environment, what was asked).
@@ -1926,7 +2397,11 @@ mod tests {
         let lines: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
         match picks {
             Some(picks) => {
-                let mut input = Widgets { picks, lines, asked: vec![] };
+                let mut input = Widgets {
+                    picks,
+                    lines,
+                    asked: vec![],
+                };
                 let env = Wizard::claim(&source, &home, "hub", &meta("1.0.0"), &mut input)?
                     .hub_config_with(listen, public, Some(&keys))?;
                 Ok((env, input.asked))
@@ -1944,7 +2419,10 @@ mod tests {
     fn the_wizard_asks_who_can_reach_the_hub_and_derives_the_browser_address() {
         // other devices too: every interface
         let (env, asked) = configured(Some(vec![0]), &[], None, None).unwrap();
-        assert_eq!((env["STEVE_HOST"].as_str(), env["STEVE_PORT"].as_str()), (Some("0.0.0.0"), Some("8440")));
+        assert_eq!(
+            (env["STEVE_HOST"].as_str(), env["STEVE_PORT"].as_str()),
+            (Some("0.0.0.0"), Some("8440"))
+        );
         assert_eq!(env["STEVE_ALLOW_ANY_HOST"], "1");
         assert_eq!(env["STEVE_PUBLIC_URL"], "http://127.0.0.1:8441");
         assert_eq!(asked, ["谁可以连接这台 Hub？ lan/local/custom"]);
@@ -1956,7 +2434,10 @@ mod tests {
         assert_eq!(asked.len(), 1);
         // an address of one's own: IPv6 loopback has a browser address too
         let (env, asked) = configured(Some(vec![2]), &["[::1]:9000"], None, None).unwrap();
-        assert_eq!((env["STEVE_HOST"].as_str(), env["STEVE_PORT"].as_str()), (Some("::1"), Some("9000")));
+        assert_eq!(
+            (env["STEVE_HOST"].as_str(), env["STEVE_PORT"].as_str()),
+            (Some("::1"), Some("9000"))
+        );
         assert_eq!(env["STEVE_PUBLIC_URL"], "http://[::1]:9001");
         assert_eq!(env["STEVE_WEB_PORT"], "9001");
         assert_eq!(asked[1..], ["监听地址"]);
@@ -1965,11 +2446,23 @@ mod tests {
         assert_eq!(env["STEVE_PUBLIC_URL"], "http://127.0.0.1:18441");
         assert!(asked.is_empty());
         // --public-url names another browser address
-        let (env, asked) = configured(Some(vec![]), &[], Some("0.0.0.0:8440"), Some("https://hub.example/")).unwrap();
+        let (env, asked) = configured(
+            Some(vec![]),
+            &[],
+            Some("0.0.0.0:8440"),
+            Some("https://hub.example/"),
+        )
+        .unwrap();
         assert_eq!(env["STEVE_PUBLIC_URL"], "https://hub.example");
         assert!(asked.is_empty());
         // one specific address of another network: no browser address follows, so it is asked
-        let (env, asked) = configured(Some(vec![]), &["https://hub.example/"], Some("192.0.2.20:8440"), None).unwrap();
+        let (env, asked) = configured(
+            Some(vec![]),
+            &["https://hub.example/"],
+            Some("192.0.2.20:8440"),
+            None,
+        )
+        .unwrap();
         assert_eq!(env["STEVE_PUBLIC_URL"], "https://hub.example");
         assert_eq!(asked, ["浏览器访问地址"]);
         // typed, off a terminal with widgets: the listen address itself is asked
@@ -1982,17 +2475,28 @@ mod tests {
 
     #[test]
     fn typed_choices_take_keys_and_ask_again_on_a_terminal() {
-        let choices = [Choice::new("hub", "Hub", ""), Choice::new("node", "Node", "")];
+        let choices = [
+            Choice::new("hub", "Hub", ""),
+            Choice::new("node", "Node", ""),
+        ];
         let mut input = Answers(vec!["both".into(), " NODE ".into()]);
         assert_eq!(typed_select(&mut input, "role", &choices, 0).unwrap(), 1);
         let mut input = Answers(vec!["codex".into(), "all".into()]);
-        assert_eq!(typed_multiselect(&mut input, "which", &choices, &[true, false]).unwrap(), [true, true]);
+        assert_eq!(
+            typed_multiselect(&mut input, "which", &choices, &[true, false]).unwrap(),
+            [true, true]
+        );
         assert!(input.0.is_empty());
         assert_eq!(ticks("all", &choices).unwrap(), [true, true]);
         assert_eq!(ticks("none", &choices).unwrap(), [false, false]);
         assert_eq!(ticks(" Node ", &choices).unwrap(), [false, true]);
         assert_eq!(ticks("node,hub", &choices).unwrap(), [true, true]);
-        assert!(ticks("codex", &choices).unwrap_err().to_string().contains("没有 codex"));
+        assert!(
+            ticks("codex", &choices)
+                .unwrap_err()
+                .to_string()
+                .contains("没有 codex")
+        );
         let mut input = Answers(vec!["maybe".into(), "是".into(), "N".into()]);
         assert!(typed_confirm(&mut input, "start", false).unwrap());
         assert!(!typed_confirm(&mut input, "start", true).unwrap());
@@ -2009,7 +2513,15 @@ mod tests {
         let mut input = Piped(vec!["both".into(), "node".into()]);
         assert!(typed_select(&mut input, "role", &choices, 0).is_err());
         assert_eq!(input.0, ["node"]);
-        assert!(typed_multiselect(&mut Piped(vec!["codex".into()]), "which", &choices, &[true, true]).is_err());
+        assert!(
+            typed_multiselect(
+                &mut Piped(vec!["codex".into()]),
+                "which",
+                &choices,
+                &[true, true]
+            )
+            .is_err()
+        );
         assert!(typed_confirm(&mut Piped(vec!["maybe".into()]), "start", true).is_err());
     }
 
@@ -2021,9 +2533,18 @@ mod tests {
         };
         let web = "https://hub.example".to_string();
         // every interface is reached on loopback
-        assert_eq!(of("0.0.0.0", "8440"), Some(("http://127.0.0.1:8440".into(), web.clone())));
-        assert_eq!(of("::", "8440"), Some(("http://[::1]:8440".into(), web.clone())));
-        assert_eq!(of("192.0.2.20", "9000"), Some(("http://192.0.2.20:9000".into(), web)));
+        assert_eq!(
+            of("0.0.0.0", "8440"),
+            Some(("http://127.0.0.1:8440".into(), web.clone()))
+        );
+        assert_eq!(
+            of("::", "8440"),
+            Some(("http://[::1]:8440".into(), web.clone()))
+        );
+        assert_eq!(
+            of("192.0.2.20", "9000"),
+            Some(("http://192.0.2.20:9000".into(), web))
+        );
         assert_eq!(of("hub.example", "8440"), None);
         assert_eq!(hub_addresses(|_| None), None);
         // the installed Hub's own file
@@ -2036,7 +2557,10 @@ mod tests {
         .unwrap();
         assert_eq!(
             hub_urls(temp.path()),
-            Some(("http://127.0.0.1:18440".into(), "http://127.0.0.1:18441".into()))
+            Some((
+                "http://127.0.0.1:18440".into(),
+                "http://127.0.0.1:18441".into()
+            ))
         );
     }
 
@@ -2062,7 +2586,10 @@ mod tests {
         // another version under way: a step done, an identity, a database, a service
         receipt("1.0.0", "hub", json!(["installed"]));
         let found = other_install(&home, "hub", &meta("1.0.1")).unwrap();
-        assert_eq!(install_name(&found), format!("Hub 1.0.0 · {}", "a".repeat(8)));
+        assert_eq!(
+            install_name(&found),
+            format!("Hub 1.0.0 · {}", "a".repeat(8))
+        );
         receipt("1.0.0", "hub", json!([]));
         private_dir(&home.join("data")).unwrap();
         assert!(other_install(&home, "hub", &meta("1.0.1")).is_none());
@@ -2085,7 +2612,13 @@ mod tests {
         // what a directory set aside is named after: 20261111-011243
         let stamp = stamp();
         assert!(stamp.len() == 15 && stamp.as_bytes()[8] == b'-', "{stamp}");
-        assert!(stamp.bytes().enumerate().all(|(at, b)| at == 8 || b.is_ascii_digit()), "{stamp}");
+        assert!(
+            stamp
+                .bytes()
+                .enumerate()
+                .all(|(at, b)| at == 8 || b.is_ascii_digit()),
+            "{stamp}"
+        );
     }
 
     /// The Hub's check answers with a report also when it refuses the configuration (exit 2): setup
@@ -2109,8 +2642,14 @@ exit 2"#,
         );
         let report = config_report(&refused, temp.path(), &env).unwrap();
         assert_eq!(report["ok"], false);
-        assert_eq!(report["errors"], json!(["STEVE_HOST: cannot listen on 192.0.2.9"]));
-        let passed = hub("passed", r#"echo "{\"ok\":true,\"warnings\":[\"$STEVE_LANG $STEVE_PORT $STEVE_HOME\"]}""#);
+        assert_eq!(
+            report["errors"],
+            json!(["STEVE_HOST: cannot listen on 192.0.2.9"])
+        );
+        let passed = hub(
+            "passed",
+            r#"echo "{\"ok\":true,\"warnings\":[\"$STEVE_LANG $STEVE_PORT $STEVE_HOME\"]}""#,
+        );
         let report = config_report(&passed, temp.path(), &env).unwrap();
         assert_eq!(
             report["warnings"][0],
@@ -2132,13 +2671,140 @@ exit 2"#,
         let env = json!({"STEVE_HOST":"127.0.0.1","STEVE_PORT":"8440","STEVE_PUBLIC_URL":"http://127.0.0.1:8440"});
         let lines = completion_lines("hub", home, None, &env, false).unwrap();
         assert!(lines.contains(&"登录用户名：lee".to_string()), "{lines:?}");
-        assert!(lines.contains(&"访问 token：stt_abc".to_string()), "{lines:?}");
+        assert!(
+            lines.contains(&"访问 token：stt_abc".to_string()),
+            "{lines:?}"
+        );
         // more tokens: the installation's own binary by its path (it is not on the PATH), told its home
         let h = home.to_str().unwrap();
-        let command = format!("运行 STEVE_HOME='{h}' '{h}/current/bin/steve-hub' --access token create");
-        assert!(lines.iter().any(|line| line.contains(&command)), "{lines:?}");
+        let command =
+            format!("运行 STEVE_HOME='{h}' '{h}/current/bin/steve-hub' --access token create");
+        assert!(
+            lines.iter().any(|line| line.contains(&command)),
+            "{lines:?}"
+        );
         fs::remove_file(home.join(OWNER_TOKEN)).unwrap();
         let lines = completion_lines("hub", home, None, &env, false).unwrap();
-        assert!(lines.iter().any(|line| line.starts_with("没有找到 owner token") && line.contains(&command)), "{lines:?}");
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.starts_with("没有找到 owner token") && line.contains(&command)),
+            "{lines:?}"
+        );
+    }
+
+    #[test]
+    fn multihost_steve_host_resolves_local_probe_and_completion_without_regenerating_custom_env() {
+        let of = |host: &str, port: &str| {
+            let env = json!({"STEVE_HOST":host,"STEVE_PORT":port,"STEVE_PUBLIC_URL":"https://hub.example"});
+            hub_addresses(|key| env[key].as_str().map(str::to_owned))
+        };
+        let web = "https://hub.example".to_string();
+        assert_eq!(
+            of("198.51.100.10,127.0.0.1", "8440"),
+            Some(("http://127.0.0.1:8440".into(), web.clone()))
+        );
+        assert_eq!(
+            of("0.0.0.0,::", "8440"),
+            Some(("http://127.0.0.1:8440".into(), web))
+        );
+        let env = json!({
+            "STEVE_HOST": "127.0.0.1,198.51.100.10",
+            "STEVE_PORT": "8440",
+            "STEVE_WEB_PORT": "8441",
+            "STEVE_PUBLIC_URL": "https://hub.example"
+        });
+        let lines =
+            completion_lines("hub", Path::new("/tmp/steve-test"), None, &env, false).unwrap();
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("127.0.0.1:8440, 198.51.100.10:8440")),
+            "{lines:?}"
+        );
+
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("package");
+        private_dir(&source).unwrap();
+        let home = temp.path().join("home");
+        let mut input = Answers(vec![]);
+        let mut wizard = Wizard::claim(&source, &home, "hub", &meta("1.0.0"), &mut input).unwrap();
+        let raw_env = b"STEVE_HOST=127.0.0.1,198.51.100.10\nSTEVE_PORT=8440\nSTEVE_PUBLIC_URL=https://hub.example\nCODEX_HOME=/custom/codex\n";
+        private_file(&home.join("steve.env"), raw_env).unwrap();
+        wizard.record["environment"] = json!({
+            "STEVE_HOST": "127.0.0.1,198.51.100.10",
+            "STEVE_PORT": "8440",
+            "STEVE_PUBLIC_URL": "https://hub.example",
+            "CODEX_HOME": "/custom/codex"
+        });
+        wizard.record["files"]["steve.env"] = bytes_digest(raw_env).into();
+        wizard.save().unwrap();
+        let got = wizard.hub_config(None).unwrap();
+        assert_eq!(got["STEVE_HOST"], "127.0.0.1,198.51.100.10");
+        assert!(wizard.hub_config(Some("127.0.0.1:8440")).is_err());
+    }
+
+    #[test]
+    fn adapter_choice_handles_path_only_detection_and_preserves_existing_selection_on_rerun() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let release = temp.path().join("release");
+        fs::create_dir_all(release.join("bin")).unwrap();
+        let listing_file = temp.path().join("listing.json");
+        let bin = release.join("bin/steve-hub");
+        fs::write(
+            &bin,
+            format!(
+                "#!/bin/sh\n[ \"$1\" = --adapters ] && [ \"$2\" = list ] && cat '{}'\n",
+                listing_file.display()
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&bin, fs::Permissions::from_mode(0o700)).unwrap();
+
+        // 1) PATH-only CLI detected, npm absent: defaults to [] and persists empty selection
+        fs::write(
+            &listing_file,
+            r#"{"npm":false,"chosen":false,"path_only":["cursor","kiro"],"detected_path_only":["cursor"],"adapters":[{"id":"claude-code","name":"Claude Code","package":"@agentclientprotocol/claude-agent-acp","installed":null,"selected":true,"detected":false},{"id":"codex","name":"Codex","package":"@zed-industries/codex-acp","installed":null,"selected":true,"detected":false}]}"#,
+        )
+        .unwrap();
+        let home1 = temp.path().join("home1");
+        let mut input = Answers(vec![]);
+        let mut w1 = Wizard::claim(&release, &home1, "hub", &meta("1.0.0"), &mut input).unwrap();
+        assert_eq!(
+            adapter_choice(&mut w1, "hub", &release, None).unwrap(),
+            Some(vec![])
+        );
+        // --adapters cursor accepts PATH-only built-in ID as valid 0-npm selection
+        let home2 = temp.path().join("home2");
+        let mut w2 = Wizard::claim(&release, &home2, "hub", &meta("1.0.0"), &mut input).unwrap();
+        assert_eq!(
+            adapter_choice(&mut w2, "hub", &release, Some("cursor")).unwrap(),
+            Some(vec![])
+        );
+        assert_eq!(
+            adapter_choice(&mut w2, "hub", &release, Some("cursor,codex")).unwrap(),
+            Some(vec!["codex".to_string()])
+        );
+
+        // 2) Re-running setup on a home where `chosen == true` returns None instead of stale saved `record["adapters"]`
+        fs::write(
+            &listing_file,
+            r#"{"npm":true,"chosen":true,"path_only":["cursor"],"detected_path_only":[],"adapters":[{"id":"claude-code","name":"Claude Code","package":"@agentclientprotocol/claude-agent-acp","installed":"1.0.0","selected":true,"detected":false}]}"#,
+        )
+        .unwrap();
+        let home3 = temp.path().join("home3");
+        let mut w3 = Wizard::claim(&release, &home3, "hub", &meta("1.0.0"), &mut input).unwrap();
+        w3.record["adapters"] = json!(["claude-code"]);
+        w3.save().unwrap();
+        assert_eq!(
+            adapter_choice(&mut w3, "hub", &release, None).unwrap(),
+            None
+        );
+        // Explicit `--adapters` still overrides when passed
+        assert_eq!(
+            adapter_choice(&mut w3, "hub", &release, Some("none")).unwrap(),
+            Some(vec![])
+        );
     }
 }

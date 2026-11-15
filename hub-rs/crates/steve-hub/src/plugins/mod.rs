@@ -58,7 +58,7 @@
 //! runs its program as the Hub's user. Only the owner adds libraries and installs; what is
 //! installed is exactly the archive the index named.
 //!
-//! # Running a channel plugin (`kind: "channel"`, contract 1)
+//! # Running a channel or connector plugin (`kind: "channel" | "connector"`, contract 1)
 //!
 //! A channel plugin is a channel service of the external channel protocol
 //! ([`steve_channels::adapters::ext_ws::protocol`]): it signs in to a messaging system as one
@@ -119,8 +119,6 @@ use self::run::{Runner, Spec, Status};
 pub const OFFICIAL_LIBRARY: &str = "https://github.com/Infranite/steve-extensions";
 /// Another first library, or `off` for none. Read only until the owner changes the list.
 pub const LIBRARY_VAR: &str = "STEVE_PLUGIN_LIBRARY";
-/// The adapter a channel plugin's connection is made with.
-const CHANNEL_ADAPTER: &str = steve_channels::adapters::ext_ws::ADAPTER;
 /// How long a plugin gets to start listening when it is connected.
 const READY_WITHIN: Duration = Duration::from_secs(20);
 /// An instance left without a connection for this long was a connect that never finished.
@@ -632,7 +630,15 @@ impl Plugins {
             ),
         ]
         .into();
-        let conn = match conns.create(who, CHANNEL_ADAPTER, &fields, json!({})).await {
+        let adapter = match done.plugin.identity {
+            steve_channels::adapters::ext_ws::wire::Identity::Self_ => {
+                steve_channels::adapters::ext_ws::ADAPTER
+            }
+            steve_channels::adapters::ext_ws::wire::Identity::Bot => {
+                steve_channels::adapters::ext_ws::BOT_ADAPTER
+            }
+        };
+        let conn = match conns.create(who, adapter, &fields, json!({})).await {
             Ok(c) => c,
             Err(e) => {
                 self.drop_instance(&inst.id).await;

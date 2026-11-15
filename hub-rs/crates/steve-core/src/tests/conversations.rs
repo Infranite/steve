@@ -365,7 +365,9 @@ async fn only_the_owner_alone_gets_a_run_with_their_own_access() {
     /* what the router was told when it routed `text` (a plain question is not routed at all) */
     let told = |text: &str| {
         let ps = prompts.lock().unwrap();
-        ps.iter().rfind(|p| p.contains(text)).map(|p| p.contains(MACHINE))
+        ps.iter()
+            .rfind(|p| p.contains(text))
+            .map(|p| p.contains(MACHINE))
     };
     let mine = || Conv {
         owner_only: true,
@@ -375,14 +377,22 @@ async fn only_the_owner_alone_gets_a_run_with_their_own_access() {
 
     /* an instance with one user: whoever writes in Steve's own conversation is the owner */
     assert!(k.db().store().users().count().unwrap() <= 1);
-    k.core.say(WS, "把下载目录里的截图归到一个文件夹", &[]).unwrap();
+    k.core
+        .say(WS, "把下载目录里的截图归到一个文件夹", &[])
+        .unwrap();
     settle(&k, MAIN, 2).await;
     assert!(full(0));
     assert_eq!(told("归到一个文件夹"), Some(true));
-    k.core.say_in(WS, mine(), "把桌面上的截图也归进去", &private).unwrap();
+    k.core
+        .say_in(WS, mine(), "把桌面上的截图也归进去", &private)
+        .unwrap();
     settle(&k, SPACE, 2).await;
     assert!(full(1), "the owner's private chat");
-    assert_ne!(told("也归进去"), Some(true), "a chat is not Steve's own conversation");
+    assert_ne!(
+        told("也归进去"),
+        Some(true),
+        "a chat is not Steve's own conversation"
+    );
     turn(&k, "把服务器上的日志清一下", guest(true, true));
     settle(&k, SPACE, 4).await;
     assert!(!full(2), "a shared chat stays read-only");
@@ -402,7 +412,11 @@ async fn only_the_owner_alone_gets_a_run_with_their_own_access() {
         .unwrap();
     settle(&k, MAIN, 6).await;
     assert!(!full(4), "a member reads, as before");
-    assert_eq!(told("装一下 fd"), Some(true), "the conversation is the same; the run is not");
+    assert_eq!(
+        told("装一下 fd"),
+        Some(true),
+        "the conversation is the same; the run is not"
+    );
     k.core.say(WS, "装一下 jq", &[]).unwrap();
     settle(&k, MAIN, 8).await;
     assert!(!full(5), "nobody in particular is not the owner");

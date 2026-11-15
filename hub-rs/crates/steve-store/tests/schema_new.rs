@@ -543,3 +543,70 @@ fn migration_48_adds_the_model_of_a_turn() {
         db::SCHEMA_VERSION
     );
 }
+
+#[test]
+fn capacity_migration_updates_old_display_defaults_preserves_custom_values_and_reopens() {
+    // Locate by contract, not merge-time migration number (other branches also add migrations).
+    let before = db::MIGRATIONS
+        .iter()
+        .position(|sql| sql.contains("CREATE INDEX node_commands_session_room"))
+        .unwrap();
+    let (_dir, path) = at_version(before);
+    let c = Connection::open(&path).unwrap();
+    c.execute_batch("INSERT INTO devices(id,name,roles,max_sessions,seen,created) VALUES ('hub','Hub','[]',4,1,1),('custom','Custom','[]',8,1,1);
+        INSERT INTO nodes(node_id,owner,name,pubkey,fingerprint,state,created) VALUES ('n','u','Node',zeroblob(32),'fp','active',1);") .unwrap();
+    db::migrate(&c).unwrap();
+    db::migrate(&c).unwrap();
+    assert_eq!(
+        count(&c, "SELECT max_sessions FROM devices WHERE id='hub'"),
+        32
+    );
+    assert_eq!(
+        count(&c, "SELECT max_sessions FROM devices WHERE id='custom'"),
+        8
+    );
+    assert_eq!(
+        count(&c, "SELECT max_sessions FROM nodes WHERE node_id='n'"),
+        32
+    );
+    c.execute(
+        "INSERT INTO devices(id,name,roles,seen,created) VALUES ('new','New','[]',2,2)",
+        [],
+    )
+    .unwrap();
+    assert_eq!(
+        count(&c, "SELECT max_sessions FROM devices WHERE id='new'"),
+        32
+    );
+    for invalid in [0, 257] {
+        assert!(
+            c.execute(
+                "UPDATE devices SET max_sessions=? WHERE id='new'",
+                [invalid]
+            )
+            .is_err()
+        );
+        assert!(
+            c.execute(
+                "UPDATE nodes SET max_sessions=? WHERE node_id='n'",
+                [invalid]
+            )
+            .is_err()
+        );
+    }
+    assert_eq!(
+        count(&c, "SELECT count(*) FROM pragma_foreign_key_check"),
+        0
+    );
+    drop(c);
+    let reopened = Store::open(&path, NoPublisher).unwrap();
+    assert_eq!(
+        reopened
+            .reader(|c| Ok::<_, steve_store::StoreError>(count(
+                c,
+                "SELECT max_sessions FROM devices WHERE id='hub'"
+            )))
+            .unwrap(),
+        32
+    );
+}

@@ -38,6 +38,7 @@ impl Service for Tools {
             description: "write".into(),
             input_schema: json!({"type": "object"}),
             read_only: false,
+            annotations: serde_json::Value::Null,
         }]
     }
     async fn call(&self, _: steve_store::Session, _: &str, _: Value) -> Result<String, String> {
@@ -226,7 +227,14 @@ struct Hub {
 
 impl Hub {
     async fn new(w: &World, name: &str, on_node: bool, max_global: usize) -> Hub {
-        Hub::with(w, name, on_node, max_global, steve_research::SandboxMode::Off).await
+        Hub::with(
+            w,
+            name,
+            on_node,
+            max_global,
+            steve_research::SandboxMode::Off,
+        )
+        .await
     }
 
     /// [`Hub::new`] whose research asks the Node for `sandbox`.
@@ -602,7 +610,11 @@ async fn the_owners_own_run_acts_on_the_machine() {
     assert!(tool_rows(&seen).is_empty());
     assert!(made.exists(), "outside the project, and written");
     let new: Value = serde_json::from_str(&w.read("new")).unwrap();
-    assert_eq!(new["cwd"], w.proj.to_str().unwrap(), "the project it is about");
+    assert_eq!(
+        new["cwd"],
+        w.proj.to_str().unwrap(),
+        "the project it is about"
+    );
     assert_eq!(
         q::<i64>(
             &node.store,
@@ -612,7 +624,12 @@ async fn the_owners_own_run_acts_on_the_machine() {
     );
 
     w.reset();
-    let mut req = request(&w, "tr_h", "default", "磁盘还剩多少\n@msg m1\n@say 还有一半");
+    let mut req = request(
+        &w,
+        "tr_h",
+        "default",
+        "磁盘还剩多少\n@msg m1\n@say 还有一半",
+    );
     req.full = true;
     req.project = None;
     req.readable = vec![];

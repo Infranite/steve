@@ -57,6 +57,30 @@ test("stream paint preserves unrelated sessions, bots, items and thread referenc
   assert.equal(s.st.S.b, before.b); assert.equal(s.st.bots, before.bots); assert.equal(s.st.items, before.items); assert.equal(s.st.thread, before.thread)
 })
 
+test("capacity-only refreshes update wait counts and actual Node reasons without new transcript events", async () => {
+  const h = harness(), s = h.store, row = h.state.sessions[0]
+  row.room = { running: 32, max: 32, waiting: 2, reason: "capacity" }
+  s.start(); await flush(); await s.loadEvents("a")
+  const events = s.st.S.a.ev
+  assert.equal(s.st.S.a.room.running, 32)
+  row.room = { running: 33, max: 16, waiting: 3, reason: "capacity" }
+  await s.refresh()
+  assert.equal(s.st.S.a.room.max, 16)
+  assert.equal(s.st.S.a.room.waiting, 3)
+  assert.equal(s.st.S.a.ev, events)
+  row.room = { running: 0, max: 64, waiting: 1, reason: "node", detail: "journal storage full" }
+  await s.refresh()
+  assert.equal(s.st.S.a.room.reason, "node")
+  assert.equal(s.st.S.a.room.detail, "journal storage full")
+  row.room = null
+  await s.refresh()
+  assert.equal(s.st.S.a.room, null)
+  assert.equal(s.st.S.a.ev, events)
+  row.status = "ended"; row.room = { running: 32, max: 32, waiting: 1, reason: "capacity" }
+  await s.refresh()
+  assert.equal(s.st.S.a.room, null, "settled sessions cannot retain a stale wait")
+})
+
 test("each state refresh applies the Hub's type size and reduced-motion settings to the page", async () => {
   const h = harness(), s = h.store
   h.state.settings = { fontSize: "大", reduceMotion: "开" }
@@ -437,4 +461,48 @@ test("the Hub remembers the owner's answer for every browser; anyone else's tour
   assert.equal(m.store.st.onboard, 0); assert.equal(m.store.st.owner, false)
   m.store.skipOnboarding(); await flush()
   assert.deepEqual(calls, ["skip"]); assert.equal(m.store.st.onboard, -1); assert.equal(theirs.kept.get("steve-onboarded"), "1")
+})
+
+test("defaultHarness, permModes, defaultPermMode and makeBot adapt across heterogeneous runtimes", async () => {
+  const h = harness(), s = h.store, created = []
+  h.api.newBot = async (p) => { created.push(p); return { id: "bot-2" } }
+  h.state.runtimes = [
+    { id: "claude-code", name: "Claude Code", ok: false, modes: ["plan", "ask", "accept_edits", "auto", "full_access"] },
+    { id: "cursor", name: "Cursor", ok: true, modes: ["plan", "ask"] },
+    { id: "opencode", name: "OpenCode", ok: true, modes: ["plan", "auto"] },
+    { id: "custom-empty", name: "Custom Empty", ok: true, modes: [] },
+    { id: "custom-exotic", name: "Custom Exotic", ok: true, modes: ["weird_mode"] },
+  ]
+  h.state.bots = [{ id: "main", name: "Steve", role: "main", main: true, harness: "opencode", perm_mode: "auto", accept_mode: "inherit", proactivity: 1, workspaces: ["ws"] }]
+  s.start(); await flush()
+
+  // Main bot's harness is ready -> defaultHarness picks main bot's harness ("opencode")
+  assert.equal(s.defaultHarness(), "opencode")
+
+  // If main bot's harness is unavailable -> falls back to first ready runtime ("cursor")
+  h.state.bots[0].harness = "claude-code"
+  await s.refresh()
+  assert.equal(s.defaultHarness(), "cursor")
+
+  // permModes maps Hub mode names to store keys and never returns empty
+  assert.deepEqual([...s.permModes("cursor")], ["plan", "default"])
+  assert.deepEqual([...s.permModes("opencode")], ["plan", "auto"])
+  assert.equal(s.permModes("custom-empty").length, 5)
+  assert.deepEqual([...s.permModes("custom-exotic")], ["default"])
+
+  // defaultPermMode picks a compatible mode in priority order (default -> auto -> acceptEdits -> plan -> bypassPermissions)
+  assert.equal(s.defaultPermMode("cursor"), "default")
+  assert.equal(s.defaultPermMode("opencode"), "auto")
+  assert.equal(s.defaultPermMode("custom-exotic"), "default")
+
+  // makeBot sends a compatible perm_mode for the selected harness
+  const id1 = await s.makeBot("Worker A", "coder", "opencode")
+  assert.equal(id1, "bot-2")
+  assert.equal(created[0].harness, "opencode")
+  assert.equal(created[0].perm_mode, "auto")
+
+  const id2 = await s.makeBot("Worker B", "coder")
+  assert.equal(id2, "bot-2")
+  assert.equal(created[1].harness, "cursor")
+  assert.equal(created[1].perm_mode, "default")
 })
