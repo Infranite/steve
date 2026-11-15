@@ -62,16 +62,17 @@ pub(crate) fn worktree_branch(item: &Item, repo: &Path, target: &Path) -> String
         .clone()
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| format!("steve/{}", item.id.to_lowercase()));
-    let listing = git::git(repo, &["worktree", "list", "--porcelain", "-z"]).unwrap_or_default();
-    let occupied_elsewhere = listing.split("\0\0").any(|block| {
-        let path = block.split('\0').find_map(|l| l.strip_prefix("worktree "));
-        let name = block
-            .split('\0')
-            .find_map(|l| l.strip_prefix("branch refs/heads/"));
-        name == Some(branch.as_str())
-            && path.is_some_and(|p| !same_dir(p, &target.to_string_lossy()))
-    });
-    if !occupied_elsewhere {
+    // Branch names cannot contain newlines. Avoid parsing porcelain paths: older Git lacks -z,
+    // and its C quoting of Unicode/control characters does not name the literal directory.
+    let listing = git::git(repo, &["worktree", "list", "--porcelain"]).unwrap_or_default();
+    let occupied = listing
+        .lines()
+        .any(|l| l.strip_prefix("branch refs/heads/") == Some(branch.as_str()));
+    let same_worktree = occupied
+        && git::git(target, &["rev-parse", "--show-toplevel"])
+            .is_ok_and(|root| same_dir(&root, &target.to_string_lossy()))
+        && git::git(target, &["symbolic-ref", "--short", "HEAD"]).is_ok_and(|head| head == branch);
+    if !occupied || same_worktree {
         return branch;
     }
     let namespace = crate::util::sha(&target.parent().unwrap_or(target).to_string_lossy());
