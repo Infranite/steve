@@ -209,7 +209,7 @@ export default function App() {
         <SidebarInset className="relative min-w-0 overflow-hidden [view-transition-name:page]" key={currentHub() + "/" + (st.workspace?.id ?? "") + "/" + a + "/" + (b ?? "") + "/" + (c ?? "")}><HubLostBanner /><HoldBanner /><div className="min-h-0 flex-1">{view}</div></SidebarInset>
         <MobileTabs route={a} />
         {sh?.kind === "fork" && <ForkDialog k={sh.payload.k} at={sh.payload.at} />}
-        {sh?.kind === "newItem" && <NewItemDialog project={sh.payload?.project} />}
+        {sh?.kind === "newItem" && <NewItemDialog project={sh.payload?.project} bot={sh.payload?.bot} />}
         {sh?.kind === "newBot" && <NewBotDialog />}
         {sh?.kind === "graph" && <GraphDialog k={sh.payload.k} />}
         {sh?.kind === "link" && <LinkDialog k={sh.payload.k} />}

@@ -673,6 +673,7 @@ pub async fn run(asm: Assembly) -> anyhow::Result<()> {
         .with_nodes(w.nodes)
         .with_node(w.node)
         .with_workspaces(Some(w.workspaces));
+    st.runtimes.set_harnesses(w.harnesses);
     crate::app::boot(&st).await?;
 
     for job in w.jobs {

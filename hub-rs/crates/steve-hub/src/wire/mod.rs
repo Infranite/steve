@@ -86,6 +86,7 @@ pub struct Wired {
     pub node: Option<Arc<node_runtime::NodeRuntime>>,
     /// Where projects', items', sessions' and knowledge folders' files are (which Node).
     pub workspaces: Arc<workspaces::Workspaces>,
+    pub harnesses: Arc<crate::harnesses::HubHarnesses>,
     /// What runs for each connection of an adapter with a connection hook (stopped by the
     /// domain's shutdown).
     pub lifecycle: Option<steve_channels::lifecycle::ConnectionRuntime>,
@@ -1007,6 +1008,7 @@ pub fn wire_assembly(
         nodes,
         node: local_runtime,
         workspaces,
+        harnesses,
         lifecycle: built.lifecycle,
         #[cfg(test)]
         tool_service,

@@ -704,6 +704,10 @@ pub fn router(st: AppState, modules: Router) -> Router {
         .route("/system/models", get(misc::system_models))
         .route("/system/harnesses", post(misc::system_harness_add))
         .route(
+            "/system/harnesses/{id}/install",
+            post(misc::system_harness_install),
+        )
+        .route(
             "/system/harnesses/{id}",
             delete(misc::system_harness_remove),
         )

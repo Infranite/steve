@@ -676,6 +676,22 @@ async fn an_older_peer_is_never_sent_what_it_would_ignore() {
     assert_eq!(hub.peer_minor(), 1);
     let remote = steve_node_wire::RemoteNode::new(NodeId::new("n1").unwrap());
     remote.attach(hub.clone(), false);
+    remote.set_colocated(true);
+    let error = remote
+        .install_harness(cmd(
+            "install_old",
+            InstallHarness {
+                harness: "pi".into(),
+            },
+        ))
+        .await
+        .unwrap_err();
+    assert_eq!(
+        error.code,
+        ErrorCode::Unsupported,
+        "an old Node is never sent the additive installation method"
+    );
+    remote.set_colocated(false);
 
     // what such a peer does with a field it does not know: drops it and answers without it
     let q = |reads| GitQuery {

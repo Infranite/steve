@@ -25,7 +25,7 @@ import { Card as ACard, CardHeader } from "@/components/affect/card-clean"
 import { MemoryPanel, type Memory } from "@/components/affect/memory-panel"
 import { AutonomyChoice } from "@/components/affect/agent-permissions"
 import {
-  st, botName, PRO, ACC, PERM, harnessEfforts, permModes, defaultPermMode, runtimeName, defaultHarness, saveBot, makeBot, draftBot, deleteBot, dupBot, addMem, editMem, delMem, loadMemories, setBotWorkspaces, tag, tagLabel, tagDesc, tagUses, TAG_CATS, KIND_CAT, DOMAIN_CATS, isKind, kindOf, kindTags, setKind, loadKindsReview, kindsReviewed, kindsBackfill, makeTag, saveTag, deleteTag, mergeTag, setTags, it,
+  st, botName, PRO, ACC, PERM, harnessEfforts, permModes, runtimeName, defaultHarness, saveBot, makeBot, draftBot, deleteBot, dupBot, addMem, editMem, delMem, loadMemories, setBotWorkspaces, tag, tagLabel, tagDesc, tagUses, TAG_CATS, KIND_CAT, DOMAIN_CATS, isKind, kindOf, kindTags, setKind, loadKindsReview, kindsReviewed, kindsBackfill, makeTag, saveTag, deleteTag, mergeTag, setTags, it,
   setSetting, toast, emit, closedSt,
 } from "@/store"
 import { api, type RKindReview } from "@/api"
@@ -53,6 +53,8 @@ import { flowApi, useLoad as useFlowLoad, errText } from "@/api/flow"
 import { when } from "@/auto/common"
 import { BotOverview, BotPrompt, RunsOn } from "@/bot-page"
 import { HarnessMark } from "@/components/harness-mark"
+import { RuntimeAvailability, RuntimePermissionNotice, RuntimeSelect, RuntimeSetupLink } from "@/runtime-access"
+import { canConfigurePermission } from "@/runtime-status"
 
 /* ═════════ Bot 列表 ═════════ */
 let botFilter: "全部" | "启用" | "停用" = "全部"
@@ -158,10 +160,13 @@ const tplText = (t: T, id: TplId) => ({ name: t(`manage:tpl.${id}Name`), role: t
 export function NewBotDialog() {
   const t = useT()
   const [mode, setMode] = useState<"tpl" | "desc" | "blank">("tpl"), [tpl, setTpl] = useState<TplId>(TEMPLATES[0]), [desc, setDesc] = useState(""), [busy, setBusy] = useState(false)
+  const [harness, setHarness] = useState(defaultHarness), [perm, setPerm] = useState("default")
+  const runtime = st.runtimes.find(r => r.id === harness)
+  const ready = !!harness && canConfigurePermission(runtime, perm)
   const create = async () => {
     setBusy(true); let k: string | undefined
-    if (mode === "tpl") { const x = tplText(t, tpl); k = await makeBot(x.name, x.role); if (k) await saveBot(k, { rule: x.rule }, "") }
-    else if (mode === "blank") k = await makeBot(t("manage:newBot.blankName"), "")
+    if (mode === "tpl") { const x = tplText(t, tpl); k = await makeBot(x.name, x.role, harness, null, perm); if (k) await saveBot(k, { rule: x.rule }, "") }
+    else if (mode === "blank") k = await makeBot(t("manage:newBot.blankName"), "", harness, null, perm)
     else k = await draftBot(desc.trim())
     setBusy(false); if (k) { closeSheet(); botTab = "设置"; go("#/bots/" + k) }
   }
@@ -170,9 +175,15 @@ export function NewBotDialog() {
       <DialogContent className="gap-4 sm:max-w-[520px]">
         <DialogHeader><DialogTitle className="type-title">{t("manage:list.newBot")}</DialogTitle><DialogDescription className="type-callout">{t("manage:newBot.desc", { ws: st.workspace?.name })}</DialogDescription></DialogHeader>
         <AutonomyChoice testId="new-bot" label={t("manage:list.newBot")} value={mode} onChange={setMode} options={[{ value: "tpl", name: t("manage:newBot.fromTpl"), text: t("manage:newBot.fromTplSub"), icon: <LayoutTemplateIcon /> }, { value: "desc", name: t("manage:newBot.fromDesc"), text: t("manage:newBot.fromDescSub"), icon: <SparklesIcon /> }, { value: "blank", name: t("manage:newBot.blank"), text: t("manage:newBot.blankSub"), icon: <FilePlusIcon /> }]} />
-        {mode === "tpl" && <Panel className="anim-in">{TEMPLATES.map((id) => { const x = tplText(t, id), h = defaultHarness(); return <Row key={id} title={x.name} sub={h ? <span className="inline-flex min-w-0 flex-wrap items-center gap-x-1.5"><span>{x.role}</span><span aria-hidden>·</span><span className="inline-flex items-center gap-1"><HarnessMark harness={h} className="size-3.5" />{runtimeName(h) ?? h}</span></span> : x.role} onClick={() => setTpl(id)} data-tpl={id}>{tpl === id && <CheckIcon className="size-4 text-blue" />}</Row> })}</Panel>}
+        {mode === "tpl" && <Panel className="anim-in">{TEMPLATES.map((id) => { const x = tplText(t, id); return <Row key={id} title={x.name} sub={<span className="inline-flex min-w-0 flex-wrap items-center gap-x-1.5"><span>{x.role}</span><span aria-hidden>·</span><span className="inline-flex items-center gap-1"><HarnessMark harness={harness} className="size-3.5" />{runtimeName(harness) ?? harness}</span></span>} onClick={() => setTpl(id)} data-tpl={id}>{tpl === id && <CheckIcon className="size-4 text-blue" />}</Row> })}</Panel>}
         {mode === "desc" && <TextArea autoFocus className="anim-in" minRows={4} maxRows={10} aria-label={t("manage:newBot.fromDesc")} placeholder={t("manage:newBot.descPlaceholder")} value={desc} onChange={(e) => setDesc(e.target.value)} data-bot-desc />}
-        <DialogFooter className="gap-2"><Button variant="outline" onClick={closeSheet}>{t("common:action.cancel")}</Button><Button disabled={(mode === "desc" && !desc.trim()) || busy} onClick={() => void create()} data-testid="bot-go">{busy ? <Spinner className="size-3.5" /> : mode === "desc" && <SparklesIcon />}{mode === "desc" ? t("manage:newBot.draft") : t("manage:newBot.create")}</Button></DialogFooter>
+        {mode !== "desc" && <div className="flex flex-col gap-3"><RuntimeSelect testId="new-bot-harness" value={harness} onChange={setHarness} />
+          <RuntimeAvailability harness={harness} />
+          <RuntimePermissionNotice harness={harness} mode={perm} />
+          <SetSelect wide testId="new-bot-perm" label={t("manage:form.permSection")} value={perm} onChange={setPerm} options={permModes(harness).map(v => ({ v, l: permName(t, v) }))} />
+        </div>}
+        <RuntimeSetupLink />
+        <DialogFooter className="gap-2"><Button variant="outline" onClick={closeSheet}>{t("common:action.cancel")}</Button><Button disabled={(mode === "desc" ? !desc.trim() : !ready) || busy} onClick={() => void create()} data-testid="bot-go">{busy ? <Spinner className="size-3.5" /> : mode === "desc" && <SparklesIcon />}{mode === "desc" ? t("manage:newBot.draft") : t("manage:newBot.create")}</Button></DialogFooter>
       </DialogContent>
     </Dialog>
   )
@@ -228,14 +239,13 @@ export function BotView({ k }: { k: string }) {
   if (lastBot !== k) { lastBot = k; if (botTab !== "设置") botTab = "概览" }
   useEffect(() => { if (b && botTab === "记忆" && !b.memLoaded) void loadMemories(k) }, [k, botTab, b?.memLoaded])
   if (!b) return <Page title="Bot" back={["#/bots", "Bot"]}><Empty title={t("manage:detail.missing")} sub={t("manage:detail.missingSub")} /></Page>
-  const basePerm = permModes(b.harness).includes(b.permMode) ? b.permMode : defaultPermMode(b.harness)
-  const fm = form && form.k === k ? form : { k, n: b.n, role: b.role, pers: b.pers, pro: PRO[b.pro], rule: b.rule, acc: b.acc, harness: b.harness, model: b.model ?? "", color: b.color, round: b.round, skin: b.skin, project: b.project ?? "none", permMode: basePerm, ws: b.workspaces }
-  const allowedPerms = permModes(fm.harness)
-  const permMode = allowedPerms.includes(fm.permMode) ? fm.permMode : defaultPermMode(fm.harness)
+  const fm = form && form.k === k ? form : { k, n: b.n, role: b.role, pers: b.pers, pro: PRO[b.pro], rule: b.rule, acc: b.acc, harness: b.harness, model: b.model ?? "", color: b.color, round: b.round, skin: b.skin, project: b.project ?? "none", permMode: b.permMode, ws: b.workspaces }
   const allowedEfforts = harnessEfforts(fm.harness)
   const rawEffort = fm.reasoningEffort ?? b.reasoningEffort ?? ""
-  const effort = rawEffort && (!st.runtimes.some((x) => x.id === fm.harness) || allowedEfforts.includes(rawEffort)) ? rawEffort : ""
-  const set = (p: any) => setForm({ ...fm, permMode, reasoningEffort: effort, ...p })
+  const effort = rawEffort && (!st.runtimes.some(x => x.id === fm.harness) || allowedEfforts.includes(rawEffort)) ? rawEffort : ""
+  const runtime = st.runtimes.find(r => r.id === fm.harness)
+  const modeSupported = (fm.permMode === b.permMode && fm.harness === b.harness) || canConfigurePermission(runtime, fm.permMode)
+  const set = (p: any) => setForm({ ...fm, reasoningEffort: effort, ...p })
   const tabs = BOT_TABS.map(([v, l]) => [v, t(`manage:detail.${l}`)] as const)
   return (
     <Page back={["#/bots", "Bot"]} max={720} toolbarTop toolbar={<OwnerChip objectType="bot" objectId={k} />}
@@ -268,25 +278,26 @@ export function BotView({ k }: { k: string }) {
             <F label={t("manage:form.rule")} htmlFor="bot-rule" hint={t("manage:form.ruleHint")}><TextArea id="bot-rule" minRows={3} maxRows={12} value={fm.rule} onChange={(e) => set({ rule: e.target.value })} /></F>
           </Card></Section>
           {/* affectUI's Agent / Permissions: what it may do without asking, one choice each, said in plain words */}
-          <Section label={t("manage:form.permSection")} data-bot-perms><AutonomyChoice testId="bot-perm" label={t("manage:form.permSection")} value={permMode} onChange={(v) => set({ permMode: v })}
-            options={allowedPerms.map((v) => ({ value: v, name: permName(t, v), text: (PERM_KEYS as readonly string[]).includes(v) ? t(`manage:form.permText.${v as (typeof PERM_KEYS)[number]}`) : permLabel(t, v), icon: PERM_ICON[v] }))}
-            means={<><ShieldAlertIcon aria-hidden />{t("manage:form.permHint")}</>} /></Section>
+          <Section label={t("manage:form.permSection")} data-bot-perms><AutonomyChoice testId="bot-perm" label={t("manage:form.permSection")} value={fm.permMode} onChange={(v) => set({ permMode: v })}
+            options={[...new Set([fm.permMode, ...permModes(fm.harness)])].map((v) => ({ value: v, name: permName(t, v), text: (PERM_KEYS as readonly string[]).includes(v) ? t(`manage:form.permText.${v as (typeof PERM_KEYS)[number]}`) : permLabel(t, v), icon: PERM_ICON[v] }))}
+            means={<><ShieldAlertIcon aria-hidden />{t("manage:form.permHint")}</>} /><RuntimePermissionNotice harness={fm.harness} mode={fm.permMode} /></Section>
           <Section label={t("manage:form.acc")} data-bot-acc><AutonomyChoice testId="bot-acc" label={t("manage:form.acc")} value={fm.acc} onChange={(v) => set({ acc: v })}
             options={ACC_KEYS.map((key) => ({ value: ACC[key], name: accLabel(t, key), text: t(`manage:form.accText.${key}`), icon: ACC_ICON[key] }))} /></Section>
           <Section label={t("manage:form.run")}><Card className="flex flex-col gap-5 p-5">
             <div className="grid gap-4 sm:grid-cols-2">
-              <F label="Harness"><SetSelect wide testId="bot-harness" label="Harness" value={fm.harness} onChange={(v) => set({ harness: v, model: "", reasoningEffort: "", permMode: permModes(v).includes(permMode) ? permMode : defaultPermMode(v) })} options={[...[...st.runtimes].sort((a, b) => Number(b.ok) - Number(a.ok)).map((x) => ({ v: x.id, l: x.ok ? x.name : t("manage:form.unavailable", { name: x.name }), icon: <HarnessMark harness={x.id} /> })), ...(fm.harness && !st.runtimes.some((x) => x.id === fm.harness) ? [{ v: fm.harness, l: fm.harness, icon: <HarnessMark harness={fm.harness} /> }] : [])]} /></F>
+              <F label="Harness"><RuntimeSelect testId="bot-harness" value={fm.harness} onChange={(v) => set({ harness: v, model: "", reasoningEffort: "" })} /><RuntimeSetupLink /></F>
               <F label={t("manage:form.model")}><ModelPicker field harness={fm.harness} value={fm.model ?? ""} allowDefault testId="bot-model" onChange={(m) => set({ model: m })} /></F>
               <F label={t("manage:form.effort")} hint={b.main ? t("manage:form.effortHintMain") : t("manage:form.effortHint")}><SetSelect wide testId="bot-effort" label={t("manage:form.effort")} value={effort || "default"} onChange={(v) => set({ reasoningEffort: v === "default" ? "" : v })} options={[{ v: "default", l: t("manage:effort.default") }, ...allowedEfforts.map((v) => ({ v, l: isEffortKey(v) ? t(`manage:effort.${v}`) : v })), ...(effort && !allowedEfforts.includes(effort) ? [{ v: effort, l: isEffortKey(effort) ? t(`manage:effort.${effort}`) : effort }] : [])]} /></F>
             </div>
+            <RuntimeAvailability harness={fm.harness} />
             {b.main && <SteveJudges harness={fm.harness} model={fm.model ?? ""} />}
             <F label={t("manage:form.device")} hint={t("manage:form.deviceHint")}><SetSelect wide testId="bot-dev" label={t("manage:form.device")} value="hub" onChange={() => {}} options={st.devices.map((d) => ({ v: d.id, l: d.name }))} /></F>
             <F label={t("manage:form.project")} hint={t("manage:form.projectHint")}><SetSelect wide testId="bot-project" label={t("manage:form.project")} value={fm.project} onChange={(v) => set({ project: v })} options={[{ v: "none", l: t("manage:form.projectInfer") }, ...st.projects.map((p) => ({ v: p.id, l: p.name }))]} /></F>
             {!b.main && <F label={t("manage:form.workspaces")} hint={t("manage:form.workspacesHint")}>
               <div className="flex flex-col gap-1.5">{st.workspaces.map((w) => <label key={w.id} className="flex items-center gap-2 type-callout"><Checkbox checked={fm.ws.includes(w.id)} disabled={fm.ws.length === 1 && fm.ws.includes(w.id)} onCheckedChange={(v) => set({ ws: v ? [...fm.ws, w.id] : fm.ws.filter((x: string) => x !== w.id) })} />{w.name}</label>)}</div></F>}
           </Card></Section>
-          <div className="flex gap-2"><Button data-save-bot onClick={async () => {
-            await saveBot(k, { n: fm.n.trim() || b.n, role: fm.role, pers: fm.pers, pro: PRO.indexOf(fm.pro), rule: fm.rule, acc: fm.acc, harness: fm.harness, model: fm.model || null, reasoningEffort: effort || null, color: fm.color, round: fm.round, skin: fm.skin, project: fm.project === "none" ? null : fm.project, permMode })
+          <div className="flex gap-2"><Button data-save-bot disabled={!modeSupported} onClick={async () => {
+            await saveBot(k, { n: fm.n.trim() || b.n, role: fm.role, pers: fm.pers, pro: PRO.indexOf(fm.pro), rule: fm.rule, acc: fm.acc, harness: fm.harness, model: fm.model || null, reasoningEffort: effort || null, color: fm.color, round: fm.round, skin: fm.skin, project: fm.project === "none" ? null : fm.project, permMode: fm.permMode })
             if (!b.main && JSON.stringify([...fm.ws].sort()) !== JSON.stringify([...b.workspaces].sort())) setBotWorkspaces(k, fm.ws)
             setForm(null); botTab = "概览"; r() }}>{t("common:action.save")}</Button><Button variant="ghost" onClick={() => { setForm(null); botTab = "概览"; r() }}>{t("common:action.cancel")}</Button></div>
         </FieldGroup>

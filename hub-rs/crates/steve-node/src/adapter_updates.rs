@@ -7,6 +7,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -55,6 +56,9 @@ impl AdapterUpdates {
 
     /// What the last check found about adapter `id`, if Steve keeps it up to date.
     pub(crate) fn get(&self, cfg: &AcpConfig, id: &str) -> Option<AdapterUpdate> {
+        if !cfg.managed_adapter(id) {
+            return None;
+        }
         let home = managed_home(cfg.adapters.get(id)?)?;
         let package = managed::package(id)?;
         let mut u = self
@@ -74,7 +78,8 @@ impl AdapterUpdates {
     /// One round: asks the registry about each adapter Steve keeps, and installs a newer release
     /// when the policy is `auto` and `idle()` says nothing runs. Returns (a newer release still
     /// waits, something was installed).
-    pub(crate) async fn check(&self, cfg: &AcpConfig, idle: impl Fn() -> bool) -> (bool, bool) {
+    pub(crate) async fn check(&self, inner: &Arc<crate::Inner>) -> (bool, bool) {
+        let cfg = &inner.cfg.acp;
         let policy = UpdatePolicy::from_env();
         if policy == UpdatePolicy::Off {
             return (false, false);
@@ -88,13 +93,43 @@ impl AdapterUpdates {
                 continue;
             };
             /* an adapter the user left out at setup is not installed behind their back */
-            if !managed::wanted(&home, id) {
+            if !cfg.managed_adapter(id) || !managed::wanted(&home, id) {
                 continue;
             }
-            let (n, p) = (npm.clone(), package.to_string());
-            let latest = tokio::task::spawn_blocking(move || managed::latest(&n, &p))
-                .await
-                .unwrap_or_else(|e| Err(e.to_string()));
+            // A partial npm write is not consent to resume a failed/interrupted explicit setup.
+            // Only the owner's explicit retry replaces that journaled outcome.
+            match inner.j.read(|t| t.installation(id)) {
+                Ok(Some(r))
+                    if !matches!(
+                        r.state,
+                        steve_node_api::Observed::Finished {
+                            outcome: steve_node_api::Outcome::Succeeded,
+                            ..
+                        }
+                    ) =>
+                {
+                    continue;
+                }
+                Err(_) => continue,
+                _ => {}
+            }
+            let (n, h, ps) = (npm.clone(), home.clone(), managed::packages(id));
+            let latest = tokio::task::spawn_blocking(move || {
+                let mut changed = false;
+                let mut primary = None;
+                for p in ps {
+                    let latest = managed::latest(&n, p)?;
+                    changed |= managed::installed(&h, p)
+                        .as_deref()
+                        .is_none_or(|i| managed::newer(&latest, i));
+                    if p == package {
+                        primary = Some(latest);
+                    }
+                }
+                Ok::<_, String>((primary.expect("adapter component"), changed))
+            })
+            .await
+            .unwrap_or_else(|e| Err(e.to_string()));
             let installed = managed::installed(&home, package);
             let mut u = AdapterUpdate {
                 policy: policy_name(policy).into(),
@@ -103,18 +138,22 @@ impl AdapterUpdates {
                 ..Default::default()
             };
             match latest {
-                Ok(l) => {
-                    let newer = installed.as_deref().is_none_or(|i| managed::newer(&l, i));
+                Ok((l, newer)) => {
                     u.latest = Some(l.clone());
                     if newer && policy == UpdatePolicy::Auto {
-                        if idle() {
-                            let (n, h, p) = (npm.clone(), home.clone(), package.to_string());
-                            match tokio::task::spawn_blocking(move || {
-                                managed::install(&n, &h, &[p.as_str()])
-                            })
-                            .await
-                            .unwrap_or_else(|e| Err(e.to_string()))
-                            {
+                        if let Some(_lease) = crate::adapter_setup::Lease::reserve(inner, id) {
+                            let _io = inner.adapter_io.write().await;
+                            let result = crate::adapter_setup::install_packages(
+                                inner.clone(),
+                                npm.clone(),
+                                managed::packages(id),
+                                _lease.prefix(),
+                            )
+                            .await;
+                            // npm may have replaced some files before failing. Never keep a
+                            // successful probe of the previous package after any install attempt.
+                            inner.adapter_probes.forget().await;
+                            match result {
                                 Ok(()) => {
                                     tracing::info!("adapter {id}: {package} {l} installed");
                                     u.installed = managed::installed(&home, package);
@@ -131,9 +170,9 @@ impl AdapterUpdates {
                         }
                     }
                 }
-                Err(e) => {
-                    tracing::warn!("adapter {id}: latest release of {package}: {e}");
-                    u.error = Some(e);
+                Err(_) => {
+                    tracing::warn!("adapter {id}: npm registry version lookup failed");
+                    u.error = Some("Cannot query the npm registry; check the Node's network and npm configuration".into());
                 }
             }
             self.state.lock().unwrap().insert(id.clone(), u);
@@ -222,11 +261,27 @@ esac
         .unwrap();
 
         let updates = AdapterUpdates::default();
+        let node = crate::LocalNode::open(crate::NodeConfig {
+            node: steve_node_api::NodeId::new("local").unwrap(),
+            home: home.join("node"),
+            acp: cfg.clone(),
+            roots: vec![],
+            capacity: steve_node_api::Capacity {
+                sessions: 1,
+                jobs: 1,
+                execs: 1,
+            },
+            storage: crate::Storage::default(),
+            ceiling: crate::PolicyCeiling::unlimited(),
+        })
+        .unwrap();
         // something runs: the newer release waits
-        assert_eq!(updates.check(&cfg, || false).await, (true, false));
+        let busy = crate::adapter_setup::Lease::reserve(&node.0, "fixture-busy").unwrap();
+        assert_eq!(updates.check(&node.0).await, (true, false));
         assert!(updates.get(&cfg, kept).unwrap().pending);
+        drop(busy);
         // idle: the chosen one is installed, the other is neither asked about nor installed
-        assert_eq!(updates.check(&cfg, || true).await, (false, true));
+        assert_eq!(updates.check(&node.0).await, (false, true));
         let package = |id: &str| managed::package(id).unwrap();
         assert_eq!(
             managed::installed(&home, package(kept)).as_deref(),
@@ -257,6 +312,7 @@ esac
             "an adapter installed otherwise is left alone"
         );
         // up to date: nothing more to install
-        assert_eq!(updates.check(&cfg, || true).await, (false, false));
+        assert_eq!(updates.check(&node.0).await, (false, false));
+        node.shutdown().await;
     }
 }

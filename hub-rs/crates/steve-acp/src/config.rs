@@ -256,8 +256,16 @@ pub fn resolve_builtin_adapters(
 }
 
 impl AcpConfig {
-    /// Reads the same environment variables as config.ts. `npm root -g` only runs when an npm
-    /// adapter path is not found in env, `<steve-home>/adapters`, `PATH`, or beside `node`.
+    /// Package reads share the same lease as the trusted installer, including the Hub's
+    /// separate session Node and jobs Node. External/global commands remain operator-managed.
+    pub fn adapter_prefix(&self, id: &str) -> Option<PathBuf> {
+        self.adapters
+            .get(id)
+            .filter(|p| p.starts_with(crate::managed::root(&self.steve_home)))
+            .map(|_| self.steve_home.clone())
+    }
+    /// Reads the same environment variables as config.ts. `npm root -g` only runs when an adapter
+    /// path is not given explicitly.
     pub fn from_env() -> Self {
         let var = |k: &str| env::var_os(k).filter(|v| !v.is_empty()).map(PathBuf::from);
         let home = home_dir();

@@ -45,6 +45,7 @@ const STATE_TTL: std::time::Duration = std::time::Duration::from_secs(2);
 /// One cached `/api/state` body per (user, workspace, language): the body carries text in the request's language.
 pub struct StateCached {
     generation: u64,
+    runtime_generation: u64,
     /// the change-log head read before the body was computed (`x-steve-cursor`)
     cursor: String,
     at: std::time::Instant,
@@ -57,6 +58,15 @@ pub type StateCache = std::sync::Mutex<
         std::sync::Arc<tokio::sync::Mutex<Option<StateCached>>>,
     >,
 >;
+
+/// Runtime discovery changes without a store event. An explicit refresh/setup must also
+/// invalidate state bodies, so the following selector read observes the same probe.
+fn invalidate_state_cache(st: &AppState) {
+    st.state_cache
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clear();
+}
 
 /// `/api/state` is the hottest endpoint and a pure function of the database (plus a few in-memory flags):
 /// computed once per (user, workspace, language) until the bus publishes anything; concurrent requests wait for the one
@@ -80,11 +90,13 @@ pub async fn state(State(st): State<AppState>, Extension(c): Extension<Ctx>) -> 
     let mut cached = slot.lock().await;
     if let Some(x) = cached.as_ref()
         && x.generation == st.bus.generation_for(&c.ws)
+        && x.runtime_generation == st.runtimes.generation()
         && x.at.elapsed() < STATE_TTL
     {
         return Ok(state_response(x.body.clone(), &x.cursor));
     }
     let generation = st.bus.generation_for(&c.ws);
+    let runtime_generation = st.runtimes.generation();
     let cursor = st.bus.cursor().to_string();
     let at = std::time::Instant::now();
     let v = compute_state(&st, c).await?;
@@ -93,6 +105,7 @@ pub async fn state(State(st): State<AppState>, Extension(c): Extension<Ctx>) -> 
     );
     *cached = Some(StateCached {
         generation,
+        runtime_generation,
         cursor: cursor.clone(),
         at,
         body: body.clone(),
@@ -1195,6 +1208,39 @@ pub async fn system_harness_add(
     ok(json!({"saved": true, "restart": true}))
 }
 
+/// Owner-only setup of a registry id on the local Node. No package, command or destination is
+/// accepted from the client. The Node journals and executes it asynchronously.
+pub async fn system_harness_install(
+    State(st): State<AppState>,
+    Extension(c): Extension<Ctx>,
+    Path(id): Path<String>,
+    b: Bytes,
+) -> ApiResult {
+    instance_owner(&c)?;
+    if !b.is_empty() && body(&b)? != json!({}) {
+        return Err(ApiError::bad_request(
+            "installation takes no package, command or destination parameters",
+        ));
+    }
+    if steve_acp::adapters::components(&id).is_empty() || !st.cfg.adapters.contains_key(&id) {
+        return Err(ApiError::bad_request(
+            "only registered built-in harness components can be installed",
+        ));
+    }
+    st.runtimes.install(id).await.map_err(|e| {
+        use steve_node_api::ErrorCode;
+        let code = match e.code {
+            ErrorCode::Denied => 403,
+            ErrorCode::Busy | ErrorCode::Conflict => 409,
+            ErrorCode::Offline | ErrorCode::OutcomeUnknown => 503,
+            _ => 400,
+        };
+        ApiError::Json(code, e.safe_detail)
+    })?;
+    invalidate_state_cache(&st);
+    ok(json!({"accepted": true, "restart": false}))
+}
+
 /// `DELETE /api/system/harnesses/:id`: removes an adapter from the Hub's manifest (the
 /// instance's owner only); in force once the Hub restarts.
 pub async fn system_harness_remove(
@@ -1368,8 +1414,10 @@ pub async fn devices(
     let local = st.node.is_some();
     let connected = device_connected(&st);
     let owner = c.user.get("role").and_then(Value::as_str) == Some("owner");
-    st.read(move |r| ok(json!({ "devices": objs(device_facts(r.devices_list()?, owner, local, connected)), "runtimes": runtimes })))
-        .await
+    if q.fresh.as_deref() == Some("1") {
+        invalidate_state_cache(&st);
+    }
+    st.read(move |r| ok(json!({ "devices": objs(device_facts(r.devices_list()?, owner, local, connected)), "runtimes": runtimes }))).await
 }
 
 pub async fn device_patch(

@@ -1,15 +1,16 @@
 /* Device work comes first; monitoring and configuration keep their own evidence and identity.
  * Pairing remains the owner Node API’s responsibility. */
+import { RuntimeSetupPanel } from "@/runtime-setup"
 import { useEffect, useState } from "react"
 import { cn } from "cn"
-import { ChevronRightIcon, CpuIcon, FolderIcon, LinkIcon, MonitorSmartphoneIcon, PlusIcon, RefreshCwIcon, ServerIcon, SquareTerminalIcon } from "lucide-react"
+import { ChevronRightIcon, FolderIcon, LinkIcon, MonitorSmartphoneIcon, PlusIcon, RefreshCwIcon, ServerIcon, SquareTerminalIcon } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import { Meter, Panel, PanelFoot, PanelRow, Tag, type Tone } from "@/panel"
 import { Spinner } from "@/components/ui/spinner"
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { st, toast, refresh, tm } from "@/store"
-import { api, SESSIONS_MAX, type RDevice, type RNode, type RPairing, type RRuntime } from "@/api"
+import { api, SESSIONS_MAX, type RDevice, type RNode, type RPairing } from "@/api"
 import { Input } from "@/components/ui/input"
 import { NumberField } from "@/components/ui/pickers"
 import { Textarea } from "@/components/ui/textarea"
@@ -138,12 +139,12 @@ export function DevicesView() {
 }
 
 export function DeviceView({ id }: { id: string }) {
-  const [busy, setBusy] = useState(false), t = useT()
+  const t = useT()
   const inventory = useDeviceInventory()
   const d = inventory.devices.find(x => x.id === id)
   if (!d) return <Page title={t("shell:devices.title")} back={["#/devices", t("shell:devices.title")]}><Empty title={t("shell:devices.notFound")} /></Page>
   const local = d.node_id === "local", dirs = st.projects.filter(p => p.device_id === d.id)
-  const recheck = async () => { setBusy(true); try { await api.devices(true); await refresh(); toast(t("shell:devices.rechecked")) } catch (e) { toast((e as Error).message) } finally { setBusy(false) } }
+
   return <div className="device-page"><Page title={d.name} back={["#/devices", t("shell:devices.title")]} max={1120}
     sub={<span className="break-all">{d.id}{d.node_id && <> · {d.node_id}</>}</span>}>
     <div className="flex min-w-0 flex-col gap-4">
@@ -155,17 +156,7 @@ export function DeviceView({ id }: { id: string }) {
       <details className="device-capabilities" data-capabilities><summary>{t("device:configuration")}</summary>
         <DeviceConfiguration key={d.id} device={d} available={!inventory.error} />
         {local ? <>
-        <Panel k="runtimes" icon={<CpuIcon />} title={t("shell:devices.runtimes")} sub={t("shell:devices.runtimesSub", { ok: st.runtimes.filter((r) => r.ok).length, count: st.runtimes.length })}
-          right={<Button size="xs" variant="ghost" className="text-muted-foreground" disabled={busy} onClick={() => void recheck()}>{busy ? <Spinner className="size-3" /> : <RefreshCwIcon />}{t("shell:devices.recheck")}</Button>}>
-          {st.runtimes.length ? <div className="py-1.5">{[...st.runtimes].sort((a, b) => Number(b.ok) - Number(a.ok)).map((r) => <div key={r.id} className="relative mx-2 flex items-start gap-4 rounded-lg px-3 py-3 [&+&]:before:absolute [&+&]:before:inset-x-3 [&+&]:before:top-0 [&+&]:before:h-px [&+&]:before:bg-border/60" data-runtime={r.id}>
-            <div className="min-w-0 flex-1">
-              <div className="flex flex-wrap items-center gap-2 type-body text-foreground">{r.name}<span className="font-mono type-footnote text-muted-foreground">{r.version || r.adapter_version}</span><span className="type-footnote text-tertiary">{r.custom ? t("shell:devices.harness.custom") : t("shell:devices.harness.builtin")}</span></div>
-              <div className="mt-0.5 flex flex-col gap-0.5 type-footnote text-muted-foreground"><span className="truncate">{r.note}{r.path ? <>{r.note ? " · " : ""}<span className="font-mono">{homeTilde(r.path)}</span></> : null}</span>{!r.ok && r.error && <span className="text-attention" data-runtime-error>{r.error}</span>}{r.auth && r.auth.length > 0 && <span data-runtime-auth>{t("shell:devices.harness.auth", { methods: r.auth.map((a) => a.name).join(t("shell:list.sep")) })}</span>}<AdapterUpdate r={r} /><RuntimeChips r={r} /></div>
-            </div>
-            <Tag tone={r.ok ? "ok" : "wait"}>{r.ok ? t("shell:devices.available") : t("shell:devices.unavailable")}</Tag>
-          </div>)}</div> : <div className="px-5 py-4 type-callout text-muted-foreground">{t("shell:devices.noRuntimes")}</div>}
-          {local && d.can_configure && !st.down && <div className="px-5 pt-3 pb-4"><AddHarness /></div>}
-        </Panel>
+        <RuntimeSetupPanel>{local && d.can_configure && !st.down && <AddHarness />}</RuntimeSetupPanel>
 
           <NodeTags node="local" />
         </> : <p>{t("device:unsupported")}</p>}
@@ -213,29 +204,6 @@ function SessionLimit({ max, editable, save }: { max: number; editable: boolean;
 }
 
 /** what a harness adapter can do and the permission modes it offers, as its probe said */
-/** an adapter Steve keeps up to date: installed and latest release, as of the Node's last check */
-function AdapterUpdate({ r }: { r: RRuntime }) {
-  const t = useT()
-  const u = r.update
-  if (!u || u.policy === "off") return null
-  const newer = !!u.latest && u.latest !== u.installed
-  const text = u.error ? t("shell:devices.harness.updateError", { error: u.error })
-    : !u.latest ? t("shell:devices.harness.updateUnchecked")
-    : !newer ? t("shell:devices.harness.upToDate", { version: u.installed ?? "", at: u.checked ? tm(u.checked) : "" })
-    : u.policy === "auto" ? t("shell:devices.harness.updatePending", { from: u.installed ?? "—", to: u.latest })
-    : t("shell:devices.harness.updateAvailable", { to: u.latest })
-  return <span className={newer || u.error ? "text-attention" : undefined} data-adapter-update>{text}</span>
-}
-
-function RuntimeChips({ r }: { r: RRuntime }) {
-  const t = useT()
-  const caps = r.caps
-  if (!caps) return null
-  const chips = ([["sessions", caps.sessions], ["judge", caps.jobs], ["images", caps.images], ["resume", caps.resume], ["history", caps.history]] as const).filter(([, on]) => on).map(([k]) => t(`shell:devices.harness.cap.${k}`))
-  const modes = (r.modes ?? []).map((m) => t(`shell:devices.harness.mode.${m}`, { defaultValue: m }))
-  return <span className="flex flex-wrap gap-1 pt-0.5" data-runtime-caps>{[...chips, ...modes].map((c) => <Badge key={c} variant="secondary" className="type-footnote">{c}</Badge>)}</span>
-}
-
 /** declares a harness adapter of one's own in the Hub's manifest: an id, a name, its command, its arguments and variables, and
  * (advanced) its declared properties as JSON. It is used once the Hub restarts. */
 function AddHarness() {

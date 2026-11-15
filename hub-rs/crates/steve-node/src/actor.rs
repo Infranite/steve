@@ -2371,6 +2371,43 @@ async fn open_harness(
             let env = sd.isolation_env_for(&dir, Some(&inner.cfg.acp.user_home), s.import_owner);
             Some((dir, env))
         }
+        (None, Some(sd)) if sd.home.is_some() => {
+            let dir = inner
+                .cfg
+                .acp
+                .declared
+                .get(&harness)
+                .and_then(|d| d.env.get(&sd.env))
+                .map(std::path::PathBuf::from)
+                .or_else(|| sd.owner_source(&inner.cfg.acp.user_home))
+                .unwrap_or_else(|| inner.cfg.acp.user_home.join(&sd.default));
+            std::fs::create_dir_all(&dir).map_err(internal)?;
+            crate::attachments::private_dir(&dir).map_err(internal)?;
+            let env = sd.isolation_env_for(&dir, Some(&inner.cfg.acp.user_home), false);
+            Some((dir, env))
+        }
+        _ => None,
+    };
+    let adapter_home = match (
+        &state,
+        declared_state.as_ref().and_then(|s| s.home.as_deref()),
+    ) {
+        (Some((root, _)), Some(sub)) => {
+            if !(HarnessState {
+                dir: sub.to_string(),
+                import_owner: false,
+            })
+            .valid()
+            {
+                return Err(ApiError::new(
+                    ErrorCode::Invalid,
+                    "adapter state HOME must be a plain relative directory",
+                ));
+            }
+            let dir = root.join(sub);
+            crate::attachments::private_dir(&dir).map_err(internal)?;
+            Some(dir)
+        }
         _ => None,
     };
     // the Bot's skills where the adapter declares it reads them, in that directory
@@ -2475,6 +2512,9 @@ async fn open_harness(
         if let Some((_, vars)) = &state {
             env.extend(vars.iter().cloned());
         }
+        if let Some(home) = &adapter_home {
+            env.push(("HOME".into(), home.clone().into_os_string()));
+        }
         // level 2: the login environment first, everything above over it
         if let Some(f) = &fresh {
             let mut all = f.clone();
@@ -2500,6 +2540,7 @@ async fn open_harness(
             env: spawn_env,
             log_tag: format!("[node {session}]"),
             clean_env: fresh.is_some(),
+            prefix: inner.cfg.acp.adapter_prefix(&harness),
         },
         HARNESS_MAX_FRAME_BYTES,
         move |bytes| {

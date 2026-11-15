@@ -1,4 +1,4 @@
-/* 模型选择器：从 harness 实际能用的模型里挑（GET /api/system/models?harness=…），按家族分组、可搜索；
+/* 模型选择器：Hub 本机 harness 的模型目录样本（GET /api/system/models?harness=…），不是目标 Node 的能力证明；
  * 列表外的模型才用「其他…」手填。Bot 编辑器、设置 · 模型、新会话默认都用这一个。 */
 import { ago as fmtAgo } from "@/i18n/format"
 import { useEffect, useState } from "react"
@@ -9,8 +9,8 @@ import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, Command
 import { Input } from "@/components/ui/input"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { modReq } from "@/api"
-import { runtimeName } from "@/store"
 import { lang, t, useT } from "@/i18n"
+import { runtimeName, st, useStore } from "@/store"
 import { HarnessMark, ModelMark, modelKind } from "@/components/harness-mark"
 
 export type Used = { calls: number; ok_at: number | null; failed_at: number | null }
@@ -34,13 +34,16 @@ export function loadCatalog(harness: string, fresh = false): Promise<Catalog> {
 export function useCatalog(harness: string | null | undefined): Catalog | null {
   useT()
   const l = lang()
+  useStore()
+  const usable = st.runtimes.find(r => r.id === harness)?.ok ?? false
   const [c, setC] = useState<Catalog | null>(null)
   useEffect(() => {
     let on = true
     setC(null)
-    if (harness) loadCatalog(harness).then((x) => on && setC(x), () => on && setC({ harness, name: harnessName(harness), source: t("shell:model.unreadable"), default: null, families: [], models: [] }))
+    if (harness && !usable) { cache.delete(harness); setC({ harness, name: harnessName(harness), source: t("shell:model.unreadable"), default: null, families: [], models: [] }) }
+    if (harness && usable) loadCatalog(harness).then((x) => on && setC(x), () => on && setC({ harness, name: harnessName(harness), source: t("shell:model.unreadable"), default: null, families: [], models: [] }))
     return () => { on = false }
-  }, [harness, l])
+  }, [harness, l, usable])
   return c
 }
 
@@ -99,6 +102,7 @@ export function ModelPicker({ harness, value, onChange, allowDefault, defaultLab
       )}
       {/* anchored under its trigger at a reading width; the list scrolls inside (CommandList's max height) */}
       <PopoverContent align="start" className="w-[min(360px,calc(100vw-16px))] gap-0 overflow-hidden rounded-xl p-0" data-model-menu={testId ?? harness}>
+        <p className="break-words border-b px-3 py-2 type-footnote text-muted-foreground" data-model-scope>{t("shell:runtimeSetup.catalogScope")}</p>
         {other ? (
           <div className="flex flex-col gap-2 p-3">
             <div className="type-footnote text-muted-foreground">{t("shell:model.otherHint", { harness: harnessName(harness) })}</div>

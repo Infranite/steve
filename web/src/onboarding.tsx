@@ -61,7 +61,7 @@ export function Onboarding() {
         {st.owner && <SteveModelForm key={st.workspace?.id} first onSaved={() => setModelChosen(true)} onDirty={() => setModelChosen(false)} />}
         {errors.model && <p role="alert" className="type-callout text-destructive" data-onboard-model-required>{errors.model}</p>}
         {rts.length > 0 && <List>{rts.map((r) => <Row key={r.id} ok={r.ok} name={r.name} data={{ "data-onboard-runtime": r.id }}
-          sub={r.ok ? (r.models.length ? k("models", { count: r.models.length }) : r.note) : (r.error || r.install_hint || k("unavailable"))} />)}</List>}
+          sub={r.ok ? (r.models.length ? k("models", { count: r.models.length }) : r.note) : (r.setup?.reason || r.setup?.error || r.error || r.setup?.help || r.install_hint || k("unavailable"))} />)}</List>}
         <Out to="#/devices" id="devices">{k("devices")}</Out>
       </div>,
     },

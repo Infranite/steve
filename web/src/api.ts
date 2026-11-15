@@ -121,6 +121,18 @@ export type RRuntime = {
   caps?: { sessions: boolean; jobs: boolean; images: boolean; resume: boolean; history: boolean; mcp_http: boolean; system_prompt: boolean; fork?: boolean } | null
   auth?: { id: string; name: string; description?: string | null }[]
   resume_command?: string | null; fork_command?: string | null
+  /** Registry-managed components and the local Node's setup result (absent on older Nodes). */
+  setup?: {
+    state: "not_installed" | "installing" | "ready" | "unavailable" | "unknown"
+    components: {
+      id: string; name: string; package: string; installed: boolean; version?: string | null; path?: string | null
+      /** Evidence for the expected component target; takes precedence over the legacy boolean. */
+      status?: "installed" | "missing" | "unknown"
+      /** Another discovered executable; does not establish that the expected target is complete. */
+      detected?: { path: string; version?: string | null } | null
+    }[]
+    can_install: boolean; reason?: string | null; help?: string | null; error?: string | null
+  }
   /** an adapter Steve installed and keeps up to date: its last check (`policy`: STEVE_ADAPTER_UPDATES) */
   update?: { policy: "auto" | "check" | "off"; installed?: string | null; latest?: string | null; checked?: number | null; error?: string | null; pending?: boolean } | null
 }
@@ -316,6 +328,8 @@ export const api = {
   /** `field` + `base` (bot targets): draft only the bot's working rules or own system prompt, from the text the editor shows */
   draft: (target: { kind: string; id?: string; field?: "rules" | "prompt"; base?: string }, text: string) => post<Proposal>("/config/draft", { target, text }), apply: (id: string) => post(`/config/${id}/apply`), undoConfig: (id: string) => post(`/config/${id}/undo`), dropConfig: (id: string) => post(`/config/${id}/drop`),
   devices: (fresh = false) => get<{ devices: RDevice[]; runtimes: RRuntime[] }>("/devices" + (fresh ? "?fresh=1" : "")),
+  /** Installs only this registry entry's declared components, on its Node. */
+  installHarness: (id: string) => post<{ accepted: boolean; restart?: boolean }>("/system/harnesses/" + encodeURIComponent(id) + "/install"),
   /** declares a harness adapter in the Hub's manifest (in force after the Hub restarts) */
   addHarness: (p: { id: string; name?: string; command: string; args?: string[]; env?: Record<string, string>; properties?: Record<string, unknown> }) => post<{ saved: boolean; restart: boolean }>("/system/harnesses", p),
   removeHarness: (id: string) => del<{ removed: boolean; restart: boolean }>("/system/harnesses/" + encodeURIComponent(id)), patchDevice: (id: string, p: { revision: number; name?: string; status?: string; max_sessions?: number }) => modReq<{ device: RDevice }>("PATCH", "/devices/" + encodeURIComponent(id), p, AbortSignal.timeout(30_000)),
