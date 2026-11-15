@@ -284,6 +284,69 @@ Declared events arrive in existing cursor/ack batches as `{type: "event", event_
 
 A write is sent once. If the response is lost or times out, its result is `status: "unknown", retry: false` with the request identity; do not automatically replay it. Reconcile against the upstream state before deliberately requesting another write. Capability removal and declaration changes take effect on the next dispatch. The full wire contract and fake-websocket regression vectors live beside the adapter, as linked above.
 
+## Realtime output statistics
+
+Poll `GET /api/stats/realtime` once per second with the same sign-in and `x-steve-ws` workspace header as other APIs. Workspace membership is checked by the API middleware; optional `project` and `bot` references must belong to that workspace, otherwise the response is 404. Together they form an intersection. Historical `range`, `from`, `to`, `hour`, time zone, model and source parameters have no effect. A workspace query parameter cannot switch the authenticated workspace. Responses use `Cache-Control: no-store` and bypass the historical statistics cache.
+
+The stable response fields are:
+
+```json
+{
+  "at": 1800000000000,
+  "window_ms": 10000,
+  "step_ms": 1000,
+  "tps": 2.5,
+  "output_sessions": 1,
+  "state": "estimated",
+  "coverage": {"measured": 0, "estimated": 1, "unavailable": 0},
+  "series": [{"at": 1800000000000, "tps": 2.5, "state": "estimated"}]
+}
+```
+
+This example shows only one series entry; an actual response has 60, oldest first, from `at - 59000` through `at`. All times are Unix milliseconds. The server rounds `at` down to a second. Each point sums output tokens in `(at - 10000, at]` and divides by ten seconds, including quiet portions of the window. `output_sessions` counts unique sessions with positive output in that same window, so it includes the tail after output stops; it is not a count of processes currently executing. Attempts and retries of the same session count once. Read-only imported sessions, background tasks, gateway calls and research jobs are outside this session-output metric. Attribution to workspace, project and Bot is captured at the first collected event, normally the attempt start; for a mid-attempt upgrade it cannot reconstruct earlier attribution.
+
+| State | Meaning |
+| --- | --- |
+| `measured` | Reserved for verified streaming output-token measurements. None of the current built-in collectors produces this state. |
+| `estimated` | Complete available session coverage using the documented text estimate, with output in the window. |
+| `idle` | Complete available coverage with no output in the window, or no relevant sessions; TPS and session count are zero. |
+| `unavailable` | Relevant execution has no usable collection evidence; TPS and session count are `null`. |
+| `partial` | Some output or covered sessions are known, but coverage is incomplete; total TPS and session count are `null`. |
+
+`coverage` counts relevant unique sessions, not samples or attempts. The three categories are disjoint: any missing attempt makes its session unavailable; otherwise a collected session is estimated. A session is relevant when its dispatched/started attempt intersects the ten-second window, including an attempt whose end is unconfirmed. The extra `estimator: "text-v1"`, `estimated_tps`, `measured_tps` and `observed_output_sessions` fields expose the known evidence separately. In a partial response, `estimated_tps` is only the observed portion, never the total; `measured_tps` is currently always `null`. Consumers must retain the state label and must not substitute the observed portion for an unknown total or silently combine measurement methods.
+
+All registered harnesses use `text-v1` when they expose compatible assistant/thought text. No adapter currently enables `measured`. Claude Code and Codex's `usage_update.used/size` describes context occupancy; their separate output counts and Codex's rollout fallback are completed response accounting. Pi's inspected ACP bridge accumulates usage at `message_end` and returns `promptUsage()` at prompt completion. The Normalizer also accepts empty or nonempty `agent_*_chunk._meta.usage` as billing `Final` facts and subtracts repeated prompt totals; attaching a bill to a chunk does not establish when its output tokens were generated. Context size, chunk count and final output usage never enter realtime token samples.
+
+The current registry contains `claude-code`, `codex`, `pi`, `gemini`, `github-copilot-cli`, `opencode`, `qwen-code`, `goose`, `kimi-code`, `grok-build`, `kilo`, `factory-droid`, `codebuddy-code`, `cursor`, `kiro`, `mistral-vibe` and `qoder`. The static usage audit covers Claude ACP 0.107.0, Codex ACP 2.6.0 and the public Pi ACP 0.1.8 source. It does not certify other versions or claim model-turn verification for any of them. Kimi's installed binary exposes no inspected adapter source; the other registered CLIs were not installed in the audit environment. Installing, discovering or registering an adapter never grants measured status. Custom manifests require their own usage audit; compatible text still uses the same explicit estimate.
+
+`text-v1` counts each ASCII Unicode scalar as 0.25 token and each other Unicode scalar as one token, without rounding per chunk. This additive estimate is independent of network chunk boundaries. It includes exposed assistant and thought text, and excludes tool arguments/results, images, hidden reasoning and unexposed provider subagents; it is not a model tokenizer or a reconstruction of billing totals.
+
+Collection runs inside the transaction that applies ordered Node events. `realtime_output_attempts` stores attribution, effective start/end boundaries and a separate `baseline` flag: `1` means collection observed the attempt start; `0` means it first saw a later event after an upgrade. A missing record also means no baseline, even when the Hub has marked the attempt finished. `ended` is written only by a Node `AttemptEnded`, independently of the baseline flag. A mid-attempt upgrade can therefore record a later Node stop without claiming to have collected the earlier output. Observed suffix text may contribute to the separately labeled estimate, while the total remains unknown until the incomplete attempt's tail leaves the window.
+
+`realtime_output_samples` stores the source event id, Node/stream/epoch/sequence, `source_at`, collection time `received_at`, effective `at`, kind and integer quarter-token `units`; `realtime_output_blocks` keeps each message/block's UTF-8 byte position. Stream watermarks and block positions prevent replay or overlap from counting twice, including after a restart. Samples survive ordinary Node inbox pruning and are retained with the session (no independent telemetry expiry or new session-cleanup command). Back up the database as usual. Each poll reads a bounded 69-second sample range for the 60 overlapping windows, plus one indexed predecessor for freshness; a partial index finds the first gap even when it is older than the trend. Pending inbox events and faulted streams have separate indexed lookups. These reads do not discard historical samples or replay cursors to achieve their bounds; storage still grows with retained events.
+
+To audit the observed estimate on a database copy, bind the response's millisecond `at` and authorized workspace to this query; use the attempt's `project_id`/`bot_id` for the same optional filters:
+
+```sql
+SELECT r.session_id, SUM(s.units) / 40.0 AS observed_tps
+FROM realtime_output_samples s
+JOIN realtime_output_attempts r USING (attempt_id)
+JOIN sessions current_session ON current_session.id = r.session_id
+ AND current_session.workspace_id = r.workspace_id AND current_session.readonly = 0
+WHERE r.workspace_id = :workspace AND s.at > :at - 10000 AND s.at <= :at
+GROUP BY r.session_id;
+```
+
+Final usage contributes zero units and cannot create an end-of-turn spike. Positive final output usage with no collected text is missing coverage, not an idle window. Valid late samples and stops retain their source time, so rereading a trend can correct earlier points without moving a backlog into the present. A nonpositive source time, a clock that moves backwards within an attempt, or one over one second ahead of receipt produces a zero-unit gap, retaining the original `source_at` for diagnosis. Its effective `at` is the later of receipt, attempt start and the last collected timestamp. An invalid Node stop uses that same effective boundary for `ended`; it cannot hide recent output or discard its own gap prematurely. An upgrade also repairs earlier persisted ends that precede collected samples, retaining their source timestamps.
+
+Missing message baselines, UTF-8 gaps, dropped-event diagnostics, faulted/pending stream prefixes and uncertain runtime attempts are unavailable coverage. Gaps remain conservative for that attempt. An open attempt with no source event in the last three seconds also becomes unavailable, even if its stored status says running; this timeout is not proof that the model stopped. Fresh non-output events can establish an idle visible-text window for a complete baseline. Once the Node confirms an end, the existing output tail ages out normally: a last sample at `t` is absent at `t + 10000`. An incomplete or gapped attempt remains unknown through its end tail and stops affecting the current point at `ended + 10000`; its last unknown trend window leaves the 60-point view at `ended + 69000` (evaluated on second-aligned points). With no other missing attempts, those points become `idle` with zero TPS and zero output sessions. Earlier unknown windows remain unknown until they leave the trend.
+
+A Hub-only settle to `finished` does not replace a trustworthy stop, including for attempts without any realtime baseline. During upgrade, applied `AttemptEnded` inbox records are matched by Node, session, turn and attempt and materialized once as `baseline=0` with `stop_evidence=node_event`. Their receipt time conservatively bounds the unknown interval, regardless of the old source clock. Matching `start_turn` terminal receipts can instead establish `stop_evidence=node_receipt`; receipt payload operation, terminal state/outcome, command Node and target attempt must agree. Their receipt timestamp bounds the interval, never a bare attempt status or `updated`. The same receipt rule handles subsequent incomplete attempts. Existing complete collection baselines continue to rely on ordered Node end samples, so an early receipt cannot discard in-flight text.
+
+A rejected `start_turn` with `maybe_sent=0` and a persisted pre-send cancellation reason or refusal records `stop_evidence=unsent,not_started=1`; it contributes no unknown execution interval. A rejection without that evidence or with a possible dispatch remains unknown. With neither stop nor unsent proof, missing coverage has no inferred expiry: another attempt or a Hub status update cannot prove that an orphaned execution stopped. A delayed Node stop can resolve the boundary. Stop evidence is stored independently of ordinary inbox pruning; polling does not rescan old inbox history to recover it.
+
+Legacy non-Node sessions have no such collector; when their persisted lifecycle becomes `ended`, its `updated` time bounds the uncollected interval conservatively. This lifecycle boundary is not a measured stop or a retroactive baseline: every overlapping historical window stays unknown, then leaves the current window and trend after the same ten/69-second tails. Read-only imports remain excluded.
+
 ## Plugins
 
 A plugin is something that is not part of Steve, installed from a plugin library: a program run beside the Hub as a process of its own, or data the web client reads. It is reached through one of Steve's documented contracts and never links into the Hub. There are three kinds: a connector plugin, a generic event/read/write service described below; a channel plugin, a [channel service](#an-external-channel-service) the Hub starts and connects for you, and a theme plugin, a skin for the web client that is only data.

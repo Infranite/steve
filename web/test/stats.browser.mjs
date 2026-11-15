@@ -1,5 +1,5 @@
 // Vite-only fixture (ST-40, stats v2): the stats page by purpose. All /api calls are answered here.
-// Checks the slim 现在 line (with the YOLO run state) and its lists, the key numbers against the range before, the daily
+// Checks the slim 现在 line (with the YOLO run state) and its lists, the realtime headline above the historical key numbers, the daily
 // output chart (done bars + cost line, day drill), the cost / time split and the most expensive items, the sortable Bot
 // and harness · model tables (a Bot row filters the page), the folded event explorer with its counts said once,
 // and that nothing overflows on a phone.
@@ -127,8 +127,11 @@ try {
     }
     await page.locator("[data-drill-close]").click()
     assert.equal(await page.locator("[data-drill]").count(), 0)
+    await page.locator("[data-now]").evaluate((el) => { for (let p = el.parentElement; p; p = p.parentElement) p.scrollTop = 0 })
     const nowBox = await page.locator("[data-now]").boundingBox(), keyBox = await page.locator("[data-key-numbers]").boundingBox()
-    assert.ok(nowBox.y < keyBox.y && keyBox.y < (width === 390 ? 844 : 1000) - 100, "the key numbers are on the first screen, under the now line")
+    const realtimeBox = await page.locator("[data-realtime]").boundingBox(), metricBox = await page.locator("[data-realtime] .ui-kpic__headline").boundingBox()
+    assert.ok(nowBox.y < realtimeBox.y && realtimeBox.y < keyBox.y, "realtime output sits between the now line and the historical key numbers")
+    assert.ok(metricBox.y + metricBox.height < (width === 390 ? 844 : 1000), "both realtime metrics are on the first screen")
 
     /* key numbers: the summary's, each against the range before */
     assert.equal(await page.locator("[data-key-numbers]").getAttribute("data-key-numbers"), "6")
@@ -167,7 +170,10 @@ try {
       assert.ok(calls.some((c) => c.includes("metric=turn_ms")))
       assert.match(await daily.locator('[data-chart-head="daily"]').innerText(), /Agent 时长 26 小时（右轴）/)
       assert.deepEqual(await daily.locator("[data-axis-right]").allTextContents(), ["0", "5 小时", "10 小时"])
-      await page.mouse.move(dx, box.y + 100)
+      // Opening/closing the day drill and scrolling a range control can move the plot.
+      await daily.locator('[data-chart="group"] svg').scrollIntoViewIfNeeded()
+      const movedBox = await daily.locator('[data-chart="group"] svg').boundingBox()
+      await page.mouse.move(movedBox.x + 48 + (movedBox.width - 104) * (5.5 / 7), movedBox.y + 100)
       await page.locator("[data-chart-tip] [data-tip-overlay]").waitFor()
       assert.match(await page.locator("[data-chart-tip]").innerText(), /Agent 时长\s*4 小时 15 分/)
       if (shots) await daily.screenshot({ path: `${shots}/stats-daily-turn-ms-${theme}.png` })
@@ -407,5 +413,5 @@ try {
   if (shots) await page.screenshot({ path: `${shots}/inbox-paused-390.png`, animations: "disabled" })
   await page.close()
   assert.deepEqual(errors, [])
-  console.log(JSON.stringify({ passed: true, scenarios: ["1440/390px × light/dark", "现在 line + YOLO run state; counts = drill lists", "key numbers vs the range before, on the first screen", "daily output: done bars + cost/turns line, day drill", "where: split by Bot/model, cost/time; top items open the cost drill", "Bot table: per-Bot summaries, sortable, row filters the page", "harness · model table: agent turns per harness × model", "event explorer folded, counts said once, window + kind + zoom", "paused alert with 恢复", "no horizontal overflow", "item drill: cost waterfall of turns and sub-items", "今天 by hour: 24 local hours, current marked, future empty, table sums = day totals, hour drill"] }))
+  console.log(JSON.stringify({ passed: true, scenarios: ["1440/390px × light/dark", "现在 line + YOLO run state; counts = drill lists", "realtime metrics on the first screen; historical key numbers vs the range before", "daily output: done bars + cost/turns line, day drill", "where: split by Bot/model, cost/time; top items open the cost drill", "Bot table: per-Bot summaries, sortable, row filters the page", "harness · model table: agent turns per harness × model", "event explorer folded, counts said once, window + kind + zoom", "paused alert with 恢复", "no horizontal overflow", "item drill: cost waterfall of turns and sub-items", "今天 by hour: 24 local hours, current marked, future empty, table sums = day totals, hour drill"] }))
 } finally { await browser.close() }

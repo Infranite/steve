@@ -47,6 +47,9 @@ mod lifecycle;
 mod node_jobs;
 mod perm;
 mod plan;
+mod realtime;
+#[cfg(test)]
+mod realtime_tests;
 mod reconcile;
 mod recover;
 mod send;
@@ -55,8 +58,8 @@ mod tests;
 mod workspace;
 
 pub use apply::AttemptFacts;
-pub use config::{ConfigChange, Configured};
 pub(crate) use config::mode_str;
+pub use config::{ConfigChange, Configured};
 pub use cost::CostCaps;
 pub(crate) use cost::tokens as usage_tokens;
 pub use heads::{
@@ -101,7 +104,8 @@ pub(crate) fn said(e: &ApiError) -> String {
 
 /// Only the Node's own immutable-workspace conflict; a harness's arbitrary conflict stays intact.
 pub(crate) fn workspace_binding_conflict(e: &ApiError) -> bool {
-    e.code == ErrorCode::Conflict && e.safe_detail == "this resource's workspace was prepared otherwise"
+    e.code == ErrorCode::Conflict
+        && e.safe_detail == "this resource's workspace was prepared otherwise"
 }
 
 fn stop_text(stop: NodeStop) -> String {

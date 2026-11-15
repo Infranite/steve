@@ -93,6 +93,7 @@ impl NodeRuntime {
                         }
                     }
                     ask.extend(self.facts_in(tx, &ev)?);
+                    self.realtime_in(tx, &ev)?;
                     let out = self.apply_in(tx, &ev)?;
                     // only the stream's flow (text, tools, plans) runs on; anything else (an
                     // attempt's end, a card, a receipt) is the last of its run
