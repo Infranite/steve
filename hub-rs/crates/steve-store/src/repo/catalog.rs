@@ -412,33 +412,43 @@ impl Devices<'_> {
     }
 
     pub fn patch(&self, id: &str, p: &DevicePatch) -> Result<()> {
-        self.0.write(|w| {
-            let current: i64 =
-                w.c.query_row("SELECT revision FROM devices WHERE id=?", [id], |r| {
-                    r.get(0)
-                })?;
-            if p.revision.is_some_and(|r| r != current) {
-                return Err(StoreError::Conflict("device_revision_conflict".into()));
-            }
-            let mut s = Sets::default();
-            s.val("revision", Some(current + 1))
-                .val("name", p.name.clone())
-                .val("status", p.status.clone())
-                .val("max_sessions", p.max_sessions);
-            if !s.is_empty() {
-                w.c.run(
-                    &format!(
-                        "UPDATE devices SET {} WHERE id = ? AND revision = ?",
-                        s.sql()
-                    ),
-                    rusqlite::params_from_iter(s.params([id.to_string().into(), current.into()])),
-                )?;
-                if w.c.changes() != 1 {
+        // Internal callers may omit revision, but may never bypass the supported range.
+        if p.max_sessions.is_some_and(|n| !(1..=256).contains(&n)) {
+            return Err(StoreError::Conflict(
+                "device_max_sessions_out_of_range_1_256".into(),
+            ));
+        }
+        self.0.atomic(|| {
+            self.0.write(|w| {
+                let current: i64 =
+                    w.c.query_row("SELECT revision FROM devices WHERE id=?", [id], |r| {
+                        r.get(0)
+                    })?;
+                if p.revision.is_some_and(|r| r != current) {
                     return Err(StoreError::Conflict("device_revision_conflict".into()));
                 }
-            }
-            w.publish(ChangeEvent::Device { id: id.into() });
-            Ok(())
+                let mut s = Sets::default();
+                s.val("revision", Some(current + 1))
+                    .val("name", p.name.clone())
+                    .val("status", p.status.clone())
+                    .val("max_sessions", p.max_sessions);
+                if !s.is_empty() {
+                    w.c.run(
+                        &format!(
+                            "UPDATE devices SET {} WHERE id = ? AND revision = ?",
+                            s.sql()
+                        ),
+                        rusqlite::params_from_iter(
+                            s.params([id.to_string().into(), current.into()]),
+                        ),
+                    )?;
+                    if w.c.changes() != 1 {
+                        return Err(StoreError::Conflict("device_revision_conflict".into()));
+                    }
+                }
+                w.publish(ChangeEvent::Device { id: id.into() });
+                Ok(())
+            })
         })
     }
 }

@@ -913,4 +913,47 @@ mod admission_tests {
             Ok(())
         }).unwrap();
     }
+    #[test]
+    fn admission_obeys_32_and_256_without_clamping_and_keeps_existing_reservations() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("test.db"), steve_store::NoPublisher).unwrap();
+        store.ensure_workspace().unwrap();
+        store
+            .devices()
+            .upsert(&steve_store::DeviceInfo {
+                id: "hub".into(),
+                name: "test".into(),
+                ..Default::default()
+            })
+            .unwrap();
+        for limit in [32, 256] {
+            store
+                .devices()
+                .patch(
+                    "hub",
+                    &steve_store::DevicePatch {
+                        status: Some("正常".into()),
+                        max_sessions: Some(limit),
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+            store.transaction::<_,StoreError>(|tx| {
+                tx.execute("DELETE FROM runtime_sessions", [])?;
+                tx.execute("DELETE FROM sessions", [])?;
+                for i in 0..limit {
+                    assert!(local_admission(tx)?, "reservation {i} below {limit}");
+                    let sid=format!("s{i}");
+                    tx.execute("INSERT INTO sessions(id,workspace_id,harness,cwd,status,created,updated) VALUES (?,'default','fixture','.','running',1,1)",[&sid])?;
+                    tx.execute("INSERT INTO runtime_sessions(session_id,node_id,workspace_ref,node_session_id,config_revision,phase,active_attempt,updated) VALUES (?,'local','{}',?,'r1','active',?,1)",[&sid,&sid,&format!("a{i}")])?;
+                }
+                assert!(!local_admission(tx)?);
+                tx.execute("UPDATE devices SET max_sessions=1,status='暂停接活' WHERE id='hub'", [])?;
+                assert!(!local_admission(tx)?);
+                let active:i64=tx.query_row("SELECT COUNT(*) FROM runtime_sessions WHERE node_id='local' AND active_attempt IS NOT NULL",[],|r|r.get(0))?;
+                assert_eq!(active,limit,"lowering/pausing never releases or migrates accepted attempts");
+                Ok(())
+            }).unwrap();
+        }
+    }
 }

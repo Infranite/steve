@@ -809,8 +809,14 @@ connection and permission facts every ten seconds; failed refreshes retain the s
 disable configuration. The backend rejects writes while the supported Node is disconnected. Device reads include
 `revision`, `node_id`, `connected`, `can_configure`, and a reason when configuration is unavailable. A
 `PATCH /api/devices/hub` includes the read `revision` alongside `status` (`正常` or `暂停接活`)
-and/or `max_sessions` (1–16). The response returns the committed `device` and incremented
-revision. A stale revision returns 409; no fields are changed. These settings gate new logical
+and/or `max_sessions` (1–256). The response returns the committed `device` and incremented
+revision. The owner role, revision comparison and write are checked in one transaction; a
+revoked owner receives 403 without changing any field or revision. A stale revision returns 409.
+A missing, negative or non-integer revision returns 400 (`device_revision_required_refresh_or_upgrade`);
+refresh the page or upgrade an older client to load and submit the current revision. Concurrency
+must be an integer from 1 through 256 in the page, API and Store. Existing values such as 32 are
+preserved when pausing or resuming; unsupported values are rejected, never silently clamped.
+These settings gate new logical
 session turns on the local Node, including queued follow-up turns. They do not stop existing
 attempts or their retries, pause orchestration, control independent background jobs, or migrate
 work. Pending turns are reconsidered every two seconds and when the runtime next plans work.

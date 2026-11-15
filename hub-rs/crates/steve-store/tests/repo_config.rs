@@ -740,3 +740,66 @@ fn device_configuration_cas_rejects_stale_revision_without_partial_writes() {
     assert_eq!(d.max_sessions, 2);
     assert_eq!(d.status, "暂停接活");
 }
+
+#[test]
+fn device_limits_cover_full_contract_without_clamping_or_partial_writes() {
+    let t = fresh();
+    let s = &t.store;
+    s.devices()
+        .upsert(&DeviceInfo {
+            id: "hub".into(),
+            name: "Device".into(),
+            ..Default::default()
+        })
+        .unwrap();
+    for limit in [32, 256] {
+        s.devices()
+            .patch(
+                "hub",
+                &DevicePatch {
+                    max_sessions: Some(limit),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let d = s.devices().list().unwrap().remove(0);
+        assert_eq!(d.max_sessions, limit);
+        for status in ["暂停接活", "正常"] {
+            s.devices()
+                .patch(
+                    "hub",
+                    &DevicePatch {
+                        revision: Some(s.devices().list().unwrap()[0].revision),
+                        status: Some(status.into()),
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+            let d = s.devices().list().unwrap().remove(0);
+            assert_eq!(d.max_sessions, limit);
+            assert_eq!(d.status, status);
+        }
+    }
+    let before = serde_json::to_value(s.devices().list().unwrap()).unwrap();
+    // Even trusted internal callers which omit revision must obey the supported range.
+    for limit in [0, 257] {
+        assert!(
+            s.devices()
+                .patch(
+                    "hub",
+                    &DevicePatch {
+                        name: Some("Invalid".into()),
+                        status: Some("暂停接活".into()),
+                        max_sessions: Some(limit),
+                        ..Default::default()
+                    }
+                )
+                .is_err()
+        );
+        assert_eq!(
+            serde_json::to_value(s.devices().list().unwrap()).unwrap(),
+            before
+        );
+    }
+    assert!(serde_json::from_value::<DevicePatch>(json!({"max_sessions":1.5})).is_err());
+}

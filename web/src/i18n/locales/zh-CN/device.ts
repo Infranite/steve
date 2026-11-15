@@ -27,7 +27,7 @@ export default {
   "offline": "未连接，进展待确认；保留最后已知状态。",
   "configuration": "能力与接活配置",
   "configHelp": "暂停只阻止新回合；不停止已有执行、不暂停编排、不迁移工作。降低并发不打断当前回合。",
-  "limit": "新回合并发上限（1–16）",
+  "limit": "新回合并发上限（1–256）",
   "receive": "接收新工作",
   "saved": "服务器已确认保存，版本 {{revision}}",
   "revision": "配置版本 {{revision}}",

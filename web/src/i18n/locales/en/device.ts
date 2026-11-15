@@ -27,7 +27,7 @@ export default {
   "offline": "Disconnected; progress unconfirmed. Last known state retained.",
   "configuration": "Capabilities and new work",
   "configHelp": "Pausing blocks new turns; existing executions continue, orchestration continues, and work is not migrated. Lowering concurrency does not interrupt a turn.",
-  "limit": "New turn concurrency limit (1–16)",
+  "limit": "New turn concurrency limit (1–256)",
   "receive": "Receive new work",
   "saved": "Server confirmed save, revision {{revision}}",
   "revision": "Configuration revision {{revision}}",

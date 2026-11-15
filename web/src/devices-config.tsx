@@ -43,14 +43,14 @@ export function DeviceConfiguration({ device, available = true }: { device: RDev
     <p>{t("device:configHelp")}</p><p>{t("device:unknownCapacity")}</p>
     {!device.can_configure && <p>{t(device.config_reason === "owner_required" ? "device:ownerOnly" : "device:unsupported")}</p>}
     <Switch label={t("device:receive")} checked={receive} onCheckedChange={setReceive} disabled={!enabled || busy} />
-    <label>{t("device:limit")}<Input type="number" min={1} max={16} value={limit} onChange={e => setLimit(e.target.value)} disabled={!enabled || busy} data-concurrency /></label>
+    <label>{t("device:limit")}<Input type="number" min={1} max={256} value={limit} onChange={e => setLimit(e.target.value)} disabled={!enabled || busy} data-concurrency /></label>
     <p>{base.revision != null ? t("device:revision", { revision: base.revision }) : t("device:unknown")}</p>
     {(!enabled || st.down) && <p>{t("device:offlineConfig")}</p>}
     {dirty && <p>{t("device:draft")}</p>}
     {error && <p role="alert">{error}</p>}
     {latest && <p data-config-latest>{t("device:latest", { status: latest.status === "暂停接活" ? t("device:paused") : t("device:configured"), limit: latest.max_sessions, revision: latest.revision })}</p>}
     {receipt != null && <p role="status" data-config-receipt>{t("device:saved", { revision: receipt })}</p>}
-    <div className="device-actions"><Button onClick={() => void save()} disabled={!enabled || !dirty || busy || review || !/^\d+$/.test(limit) || Number(limit) < 1 || Number(limit) > 16} data-config-save>{t("common:action.save")}</Button>
+    <div className="device-actions"><Button onClick={() => void save()} disabled={!enabled || !dirty || busy || review || !/^\d+$/.test(limit) || Number(limit) < 1 || Number(limit) > 256} data-config-save>{t("common:action.save")}</Button>
       <Button variant="outline" onClick={cancel} disabled={busy} data-config-cancel>{t("common:action.cancel")}</Button>
       <Button variant="ghost" onClick={() => void readBack()} disabled={busy || st.down || !online} data-config-read>{t("device:readLatest")}</Button>
     </div>
