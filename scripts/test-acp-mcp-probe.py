@@ -3,20 +3,26 @@ import argparse
 import asyncio
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
+import os
 from pathlib import Path
 import runpy
+import signal
 import stat
 import subprocess
 import sys
 import tempfile
 import threading
+import time
 import tomllib
 import unittest
+from unittest import mock
 import urllib.request
 
 ROOT = Path(__file__).resolve().parent / "diagnostics"
 PROBE = runpy.run_path(str(ROOT / "probe-codex-mcp.py"))
 OBSERVER = runpy.run_path(str(ROOT / "responses-tool-observer.py"))
+PROCESSES = runpy.run_path(str(ROOT / "owned-processes.py"))
+PROBE_SCRIPT = ROOT / "probe-codex-mcp.py"
 
 
 class DiagnosticTests(unittest.TestCase):
@@ -215,6 +221,276 @@ args = ["owner-only"]
             observer.server_close()
             upstream.shutdown()
             upstream.server_close()
+
+
+class CleanupTests(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.root = Path(self.directory.name)
+        self.owned = []
+        self.addCleanup(self.stop_new_processes)
+
+    def remember(self, info):
+        self.assertIsNotNone(info)
+        self.owned.append(info)
+        return info
+
+    def stop_new_processes(self):
+        # Test fallback also refuses a recycled or unverifiable PID. Never use
+        # a PID from a previous run, a name, or a process group.
+        signals = []
+        for expected in reversed(self.owned):
+            info = PROCESSES["process_info"](expected["pid"])
+            if info and info["state"] == "alive":
+                self.assertEqual(info["birth"], expected["birth"])
+                os.kill(info["pid"], signal.SIGKILL)
+                signals.append({"pid": info["pid"], "signal": "SIGKILL", "verified": info})
+        readbacks = []
+        for expected in self.owned:
+            deadline = time.monotonic() + 3
+            while time.monotonic() < deadline:
+                info = PROCESSES["process_info"](expected["pid"])
+                if not info or info["state"] == "zombie":
+                    break
+                self.assertEqual(info["birth"], expected["birth"])
+                time.sleep(.02)
+            else:
+                self.fail("test-owned process remained alive after fallback")
+            readbacks.append({"expected": expected, "final": info,
+                              "passed": info is None or info["state"] == "zombie"})
+        self.fallbacks = getattr(self, "fallbacks", []) + [{"signals": signals, "readbacks": readbacks}]
+        self.save("fallback-" + self._testMethodName, self.fallbacks)
+
+    def save(self, name, value):
+        if directory := os.environ.get("STEVE_DIAGNOSTIC_EVIDENCE"):
+            destination = Path(directory)
+            destination.mkdir(parents=True, exist_ok=True)
+            (destination / (name + ".json")).write_text(json.dumps(value, indent=2) + "\n")
+
+    async def family(self, grandchild=False):
+        child_code = "import signal,time; signal.signal(signal.SIGTERM,signal.SIG_IGN); print('ready',flush=True); time.sleep(300)"
+        if grandchild:
+            child_code = "\n".join(["import signal,time,subprocess,sys", "from pathlib import Path",
+                "signal.signal(signal.SIGTERM,signal.SIG_IGN)",
+                f"child=subprocess.Popen([sys.executable,'-u','-c',{child_code!r}],stdin=subprocess.DEVNULL,stdout=subprocess.PIPE)",
+                "child.stdout.readline()", f"Path({str(self.root / 'grandchild.pid')!r}).write_text(str(child.pid))",
+                "print('ready',flush=True)", "time.sleep(300)"])
+        parent_code = "\n".join([
+            "import subprocess,sys,signal",
+            f"child=subprocess.Popen([sys.executable,'-u','-c',{child_code!r}],stdin=subprocess.DEVNULL,stdout=subprocess.PIPE)",
+            "child.stdout.readline()",
+            "def stop(*args):\n child.wait(timeout=5)\n sys.exit(0)",
+            "signal.signal(signal.SIGTERM,stop)",
+            "print(child.pid,flush=True)",
+            "sys.stdin.readline()"])
+        parent = await asyncio.create_subprocess_exec(sys.executable, "-u", "-c", parent_code,
+            stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE)
+        self.remember(PROCESSES["process_info"](parent.pid))
+        manager = PROCESSES["OwnedProcesses"](parent, grace=.15, kill_timeout=1)
+        child_pid = int(await asyncio.wait_for(parent.stdout.readline(), 5))
+        child = self.remember(PROCESSES["process_info"](child_pid))
+        self.assertEqual(child["ppid"], parent.pid)
+        await manager.observe()
+        self.assertIn(child_pid, manager.records)
+        return parent, child, manager
+
+    def test_native_identity_is_stable_and_excludes_command_lines(self):
+        first = PROCESSES["process_info"](os.getpid())
+        self.assertEqual(first, PROCESSES["process_info"](os.getpid()))
+        self.assertEqual(set(first), {"pid", "ppid", "birth", "state"})
+        self.assertEqual(first["ppid"], os.getppid())
+
+    def test_sigterm_ignoring_descendant_is_killed_and_unrelated_process_is_untouched(self):
+        async def check():
+            unrelated = await asyncio.create_subprocess_exec(sys.executable, "-c", "import time;time.sleep(300)")
+            other = self.remember(PROCESSES["process_info"](unrelated.pid))
+            parent, child, manager = await self.family()
+            receipt = await manager.cleanup()
+            self.save("ignores-sigterm-and-unrelated", {"cleanup": receipt, "unrelated_before": other,
+                "unrelated_after": PROCESSES["process_info"](unrelated.pid)})
+            self.assertTrue(receipt["passed"], receipt)
+            self.assertNotIn(unrelated.pid, manager.records)
+            self.assertEqual(PROCESSES["process_info"](unrelated.pid)["birth"], other["birth"])
+            self.assertEqual(PROCESSES["process_info"](unrelated.pid)["state"], "alive")
+            events = manager.records[child["pid"]]["events"]
+            self.assertTrue(any(e.get("signal") == "SIGTERM" and e["sent"] for e in events))
+            self.assertTrue(any(e.get("stage") == "after_sigterm" and e["readback"]["state"] == "alive" for e in events))
+            self.assertTrue(any(e.get("signal") == "SIGKILL" and e["sent"] for e in events))
+            self.assertIn(parent.returncode, (0, -signal.SIGKILL))
+            # Reap this direct child after the identity-checked test cleanup.
+            self.stop_new_processes()
+            await unrelated.wait()
+        asyncio.run(check())
+
+    def test_tracked_descendant_is_cleaned_after_parent_exits_zero(self):
+        async def check():
+            parent, child, manager = await self.family()
+            parent.stdin.write(b"exit\n")
+            await parent.stdin.drain()
+            await asyncio.wait_for(parent.wait(), 3)
+            self.assertEqual(parent.returncode, 0)
+            reparented = PROCESSES["process_info"](child["pid"])
+            self.assertNotEqual(reparented["ppid"], parent.pid)
+            receipt = await manager.cleanup()
+            self.save("parent-exited-zero", {"reparented": reparented, "cleanup": receipt})
+            self.assertTrue(receipt["passed"], receipt)
+        asyncio.run(check())
+
+    def test_grandchild_is_tracked_and_reaped(self):
+        async def check():
+            parent, child, manager = await self.family(grandchild=True)
+            grandchild = self.remember(PROCESSES["process_info"](int((self.root / "grandchild.pid").read_text())))
+            self.assertEqual(grandchild["ppid"], child["pid"])
+            self.assertEqual(set(manager.records), {parent.pid, child["pid"], grandchild["pid"]})
+            receipt = await manager.cleanup()
+            self.save("grandchild", receipt)
+            self.assertTrue(receipt["passed"], receipt)
+            self.assertEqual(manager.records[grandchild["pid"]]["owner_pid"], child["pid"])
+        asyncio.run(check())
+
+    def test_discovery_failure_is_reported_even_if_known_processes_exit(self):
+        async def check():
+            parent, child, manager = await self.family()
+            with mock.patch.dict(manager.observe.__globals__, {"process_parents": mock.Mock(side_effect=PermissionError("synthetic ps denial"))}):
+                receipt = await manager.cleanup()
+            self.save("discovery-failed", receipt)
+            self.assertFalse(receipt["passed"])
+            self.assertTrue(all(r["passed"] for r in receipt["processes"]))
+            self.assertTrue(any(e["stage"] == "discovery" for e in receipt["errors"]))
+        asyncio.run(check())
+
+    def test_residual_or_unknown_identity_fails_without_signalling_other_pids(self):
+        for scenario in ("residual", "identity_unreadable", "identity_changed"):
+            with self.subTest(scenario=scenario):
+                async def check():
+                    parent, child, manager = await self.family()
+                    parent.stdin.write(b"exit\n")
+                    await parent.stdin.drain()
+                    await asyncio.wait_for(parent.wait(), 3)
+                    manager.kill_timeout = .1
+                    original = PROCESSES["process_info"]
+
+                    def inspect(pid):
+                        info = original(pid)
+                        if pid == child["pid"]:
+                            if scenario == "identity_unreadable":
+                                raise PermissionError("synthetic identity denial")
+                            if scenario == "identity_changed":
+                                return {**info, "birth": "synthetic different birth"}
+                        return info
+
+                    with mock.patch.dict(manager.inspect.__globals__, {"process_info": inspect}), \
+                            mock.patch.object(os, "kill", side_effect=PermissionError("synthetic signal denial")) as kill, \
+                            mock.patch.object(signal, "pidfd_send_signal", side_effect=PermissionError("synthetic signal denial"), create=True) as pidfd:
+                        receipt = await manager.cleanup()
+                    self.save(scenario, receipt)
+                    self.assertFalse(receipt["passed"])
+                    self.assertEqual(parent.returncode, 0)
+                    self.assertEqual(original(child["pid"])["state"], "alive")
+                    if scenario != "residual":
+                        kill.assert_not_called()
+                        pidfd.assert_not_called()
+                        self.assertEqual(manager.records[child["pid"]]["final"]["state"], "identity_unknown")
+                    else:
+                        self.assertTrue(any(e.get("error_type") == "PermissionError" for e in manager.records[child["pid"]]["events"]))
+                asyncio.run(check())
+
+    def run_adapter(self, exit_early):
+        # The ST-84 negative case: a ready child ignores SIGTERM; session/new
+        # fails. The second case exits its parent after initialize instead.
+        child_code = "process.on('SIGTERM',()=>{}); console.log('ready'); setInterval(()=>{},1000);"
+        adapter = self.root / "fake-adapter.cjs"
+        adapter.write_text("const {spawn}=require('child_process'); const readline=require('readline'); const fs=require('fs');\n" +
+            "const child=spawn(process.execPath,['-e'," + json.dumps(child_code) + "],{stdio:['ignore','pipe','ignore']});\n" +
+            "fs.writeFileSync(" + json.dumps(str(self.root / "child.pid")) + ", String(child.pid));\n" +
+            "child.stdout.once('data',()=>{const rl=readline.createInterface({input:process.stdin}); rl.on('line',line=>{ const q=JSON.parse(line); if(!q.id)return; if(q.method==='initialize') console.log(JSON.stringify({jsonrpc:'2.0',id:q.id,result:{protocolVersion:1}})); else " +
+            ("process.exit(0)" if exit_early else "console.log(JSON.stringify({jsonrpc:'2.0',id:q.id,error:{code:-32603,message:'synthetic session startup failure'}}))") + "; });});\n")
+        source = self.root / "source.toml"
+        source.write_text('model_provider="fixture"\n[model_providers.fixture]\nbase_url="http://127.0.0.1:1/v1"\nwire_api="responses"\n')
+        process = subprocess.Popen([sys.executable, str(PROBE_SCRIPT), "--root", str(self.root / "private"),
+            "--output", str(self.root / "evidence"), "--source-config", str(source), "--adapter", str(adapter),
+            "--label", "cleanup", "--model", "fixture", "--timeout", "1"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        probe = self.remember(PROCESSES["process_info"](process.pid))
+        deadline = time.monotonic() + 20
+        captured = False
+        while process.poll() is None and time.monotonic() < deadline:
+            if not captured and (pidfile := self.root / "child.pid").exists() and pidfile.read_text():
+                child = PROCESSES["process_info"](int(pidfile.read_text()))
+                if child:
+                    adapter_info = PROCESSES["process_info"](child["ppid"])
+                    if adapter_info and adapter_info["ppid"] == probe["pid"]:
+                        self.remember(adapter_info)
+                        self.remember(child)
+                        captured = True
+            time.sleep(.005)
+        stdout, stderr = process.communicate(timeout=1)
+        self.assertTrue(captured, "test must verify its own new child's ancestry before any fallback cleanup")
+        self.assertEqual(process.returncode, 1, stderr)
+        result = json.loads((self.root / "evidence/cleanup/result.json").read_text())
+        self.save("probe-parent-exit" if exit_early else "probe-review-negative", result)
+        self.assertIn(child["pid"], result["owned_pids_at_cleanup"])
+        self.assertTrue(result["cleanup"]["passed"], result)
+        self.assertFalse(result["passed"])
+        state = PROCESSES["process_info"](child["pid"])
+        self.assertTrue(state is None or state["state"] == "zombie", (stdout, stderr, state))
+        self.assertEqual(result["adapter_exit_code"], 0 if exit_early else -signal.SIGTERM)
+        if not exit_early:
+            self.assertIn("synthetic session startup failure", result["error"])
+
+    def test_review_negative_case_reaps_ignoring_child(self):
+        self.run_adapter(False)
+
+    def test_probe_cleans_tracked_child_when_adapter_exits_before_response(self):
+        self.run_adapter(True)
+
+    def test_successful_protocol_cannot_override_failed_cleanup(self):
+        async def check():
+            source = self.root / "source.toml"
+            source.write_text('model_provider="fixture"\n')
+            adapter = self.root / "idle.cjs"
+            adapter.write_text("process.stdin.resume();process.on('SIGTERM',()=>process.exit(0));")
+            probe = PROBE["Probe"](argparse.Namespace(label="cleanup-gate", model="fixture", root=self.root / "private",
+                output=self.root / "evidence", source_config=source, adapter=adapter, trace_provider=False, timeout=1))
+
+            async def request(method, params, timeout=60):
+                self.remember(PROCESSES["process_info"](probe.process.pid))
+                if method == "session/new":
+                    return {"sessionId": "fixture-session"}
+                return {"configOptions": [{"id": "mode", "currentValue": "read-only"},
+                    {"id": "model", "currentValue": "fixture"}, {"id": "reasoning_effort", "currentValue": "high"}]}
+
+            async def prompt(name, *args):
+                phase = {"passed": True, "completed": True, "reply": "fixture-marker", "tool_updates": [
+                    {"sessionUpdate": "tool_call", "toolCallId": "fixture", "rawInput": {"server": "steve", "tool": "steve_probe_read"}},
+                    {"sessionUpdate": "tool_call_update", "toolCallId": "fixture", "status": "completed",
+                     "rawOutput": {"result": {"content": [{"type": "text", "text": "fixture-marker"}]}}}]}
+                if name == "text":
+                    phase["reply"] = args[0].split("Reply exactly: ")[1]
+                    phase["tool_updates"] = []
+                else:
+                    protocol = [{"direction": "receive", "message": {"id": 1, "method": "tools/call", "params": {"name": "steve_probe_read"}}},
+                        {"direction": "send", "message": {"id": 1, "result": {"content": [{"type": "text", "text": "fixture-marker"}]}}}]
+                    (probe.out / "mcp-protocol.jsonl").write_text("\n".join(map(json.dumps, protocol)))
+                probe.result["phases"][name] = phase
+                return phase
+
+            cleanup = PROBE["OwnedProcesses"].cleanup
+
+            async def failed_cleanup(manager):
+                receipt = await cleanup(manager)
+                receipt.update(passed=False, injected_failure="synthetic incomplete cleanup receipt")
+                return receipt
+
+            probe.request, probe.prompt = request, prompt
+            with mock.patch.object(PROBE["OwnedProcesses"], "cleanup", failed_cleanup):
+                passed = await probe.run()
+            self.save("passing-protocol-failed-cleanup", probe.result)
+            self.assertEqual(set(probe.result["phases"]), {"session_start", "text", "mcp"})
+            self.assertTrue(all(p["passed"] for p in probe.result["phases"].values()))
+            self.assertFalse(passed)
+            self.assertFalse(probe.result["passed"])
+        asyncio.run(check())
 
 
 if __name__ == "__main__":

@@ -8,12 +8,14 @@ import asyncio
 import json
 import os
 from pathlib import Path
+import runpy
 import secrets
 import shutil
-import signal
 import sys
 import time
 import tomllib
+
+OwnedProcesses = runpy.run_path(str(Path(__file__).with_name("owned-processes.py")))["OwnedProcesses"]
 
 
 def dump(path, value):
@@ -116,19 +118,27 @@ class Probe:
         await self.process.stdin.drain()
 
     async def read(self):
-        async for line in self.process.stdout:
-            message = json.loads(line)
-            self.events.append({"at": time.time(), "direction": "receive", "message": message})
-            if "id" in message and "method" in message:
-                if message["method"] == "session/request_permission":
-                    answer = {"result": {"outcome": {"outcome": "cancelled"}}}
-                else:
-                    answer = {"error": {"code": -32601, "message": "diagnostic client permits no filesystem or terminal operations"}}
-                await self.send({"jsonrpc": "2.0", "id": message["id"], **answer})
-            elif message.get("id") in self.pending:
-                future = self.pending.pop(message["id"])
+        try:
+            async for line in self.process.stdout:
+                message = json.loads(line)
+                self.events.append({"at": time.time(), "direction": "receive", "message": message})
+                # Capture descendants before releasing a failure response to
+                # run(): cancellation or adapter exit may reparent them next.
+                await self.owned.observe()
+                if "id" in message and "method" in message:
+                    if message["method"] == "session/request_permission":
+                        answer = {"result": {"outcome": {"outcome": "cancelled"}}}
+                    else:
+                        answer = {"error": {"code": -32601, "message": "diagnostic client permits no filesystem or terminal operations"}}
+                    await self.send({"jsonrpc": "2.0", "id": message["id"], **answer})
+                elif message.get("id") in self.pending:
+                    future = self.pending.pop(message["id"])
+                    if not future.done():
+                        future.set_result(message)
+        finally:
+            for future in self.pending.values():
                 if not future.done():
-                    future.set_result(message)
+                    future.set_exception(RuntimeError("adapter stdout closed before ACP response"))
 
     async def request(self, method, params, timeout=60):
         self.n += 1
@@ -182,7 +192,6 @@ class Probe:
         try:
             (self.args.root / "tmp").mkdir(mode=0o700, parents=True, exist_ok=True)
             if self.args.trace_provider:
-                import runpy
                 config = tomllib.loads(self.args.source_config.read_text())
                 upstream = config["model_providers"][config["model_provider"]]["base_url"]
                 observer, observed_base = runpy.run_path(str(Path(__file__).with_name("responses-tool-observer.py")))["start_observer"](upstream, self.out / "provider-tool-protocol.jsonl")
@@ -199,6 +208,8 @@ class Probe:
             self.process = await asyncio.create_subprocess_exec("node", str(self.args.adapter), cwd=cwd, env=env,
                 stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=stderr, start_new_session=True)
             self.result["adapter_pid"] = self.process.pid
+            self.owned = OwnedProcesses(self.process)
+            self.watcher = asyncio.create_task(self.owned.watch())
             self.reader = asyncio.create_task(self.read())
             init = await self.request("initialize", {"protocolVersion": 1, "clientCapabilities": {"fs": {"readTextFile": False, "writeTextFile": False}, "terminal": False}, "clientInfo": {"name": "steve-isolated-diagnostic", "version": "1"}})
             self.result["initialize"] = init
@@ -230,36 +241,24 @@ class Probe:
             self.result["error_type"] = type(error).__name__
         finally:
             if hasattr(self, "process"):
-                if self.process.returncode is None:
-                    try:
-                        await self.send({"jsonrpc": "2.0", "method": "session/cancel", "params": {"sessionId": self.sid}})
-                    except Exception:
-                        pass
-                    # Resolve descendants before terminating; signal only explicit owned PIDs.
-                    ps = await asyncio.create_subprocess_exec("ps", "-axo", "pid=,ppid=", stdout=asyncio.subprocess.PIPE)
-                    data, _ = await ps.communicate()
-                    pairs = [tuple(map(int, line.split())) for line in data.decode().splitlines()]
-                    owned = {self.process.pid}
-                    while True:
-                        children = {pid for pid, parent in pairs if parent in owned}
-                        if children <= owned:
-                            break
-                        owned |= children
-                    self.result["owned_pids_at_cleanup"] = sorted(owned)
-                    for pid in sorted(owned - {self.process.pid}, reverse=True):
+                try:
+                    # Observe before cancel, including when the adapter has
+                    # already exited. The tracker retains reparented children.
+                    await self.owned.observe()
+                    if self.process.returncode is None and hasattr(self, "sid"):
                         try:
-                            os.kill(pid, signal.SIGTERM)
-                        except ProcessLookupError:
+                            await asyncio.wait_for(self.send({"jsonrpc": "2.0", "method": "session/cancel", "params": {"sessionId": self.sid}}), 1)
+                        except Exception:
                             pass
+                    self.watcher.cancel()
                     try:
-                        self.process.terminate()
-                    except ProcessLookupError:
+                        await self.watcher
+                    except asyncio.CancelledError:
                         pass
-                    try:
-                        await asyncio.wait_for(self.process.wait(), 8)
-                    except asyncio.TimeoutError:
-                        self.process.kill()
-                        await self.process.wait()
+                    self.result["cleanup"] = await self.owned.cleanup()
+                    self.result["owned_pids_at_cleanup"] = sorted(self.owned.records)
+                except Exception as error:
+                    self.result["cleanup"] = {"passed": False, "error_type": type(error).__name__}
                 self.reader.cancel()
                 try:
                     await self.reader
@@ -268,16 +267,21 @@ class Probe:
                 except Exception as error:
                     self.result["reader_error_type"] = type(error).__name__
                 self.result["adapter_exit_code"] = self.process.returncode
+            else:
+                self.result["cleanup"] = {"passed": True, "processes": [], "scope": "no adapter spawned"}
             if stderr:
                 stderr.close()
             if observer:
                 observer.shutdown()
                 observer.server_close()
             self.result["elapsed_seconds"] = round(time.monotonic() - self.started, 3)
+            self.result["passed"] = not self.result.get("error") and self.result["cleanup"]["passed"] and all(
+                self.result["phases"].get(p, {}).get("passed") for p in ("session_start", "text", "mcp"))
             dump(self.out / "acp-protocol.json", self.events)
             dump(self.out / "result.json", self.result)
-        print(json.dumps({"label": self.args.label, "phases": self.result["phases"], "error": self.result.get("error")}, ensure_ascii=False), flush=True)
-        return not self.result.get("error") and all(self.result["phases"].get(p, {}).get("passed") for p in ("session_start", "text", "mcp"))
+        print(json.dumps({"label": self.args.label, "phases": self.result["phases"], "error": self.result.get("error"),
+                          "cleanup_passed": self.result["cleanup"]["passed"], "passed": self.result["passed"]}, ensure_ascii=False), flush=True)
+        return self.result["passed"]
 
 
 if __name__ == "__main__":
