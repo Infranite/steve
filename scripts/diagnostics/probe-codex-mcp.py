@@ -21,15 +21,41 @@ def dump(path, value):
 
 
 def mcp_outcome(phase, protocol):
-    calls = [e["message"] for e in protocol if e["direction"] == "receive" and e["message"].get("method") == "tools/call"]
-    valid = [c for c in calls if c.get("params", {}).get("name") == "steve_probe_read"]
-    responses = [e["message"] for e in protocol if e["direction"] == "send" and any(c["id"] == e["message"].get("id") for c in valid)]
-    markers = [c["text"] for response in responses if not response.get("result", {}).get("isError", False)
-               for c in response.get("result", {}).get("content", []) if c.get("type") == "text" and c.get("text")]
-    consumed = any(m in phase["reply"] for m in markers)
+    calls = [(i, e["message"]) for i, e in enumerate(protocol)
+             if e["direction"] == "receive" and e["message"].get("method") == "tools/call"]
+    valid = [(i, c) for i, c in calls if c.get("id") is not None and c.get("params", {}).get("name") == "steve_probe_read"]
+    responses = [e["message"] for i, e in enumerate(protocol) if e["direction"] == "send"
+                 and any(i > at and c["id"] == e["message"].get("id") for at, c in valid)]
+
+    def text_results(result):
+        if not isinstance(result, dict) or result.get("isError", False):
+            return []
+        return [c["text"] for c in result.get("content", []) if c.get("type") == "text" and c.get("text")]
+
+    markers = [m for response in responses if "error" not in response for m in text_results(response.get("result"))]
+    # ACP call ids differ from the stdio MCP request id. Join the ACP start and
+    # completion by toolCallId, then match its result against the service marker.
+    # A completed tool search or an unrelated native tool is not an MCP receipt.
+    acp_calls = {}
+    for update in phase["tool_updates"]:
+        call_id = update.get("toolCallId")
+        if not call_id:
+            continue
+        raw = update.get("rawInput") or {}
+        if update.get("sessionUpdate") == "tool_call" and raw.get("server") == "steve" and raw.get("tool") == "steve_probe_read":
+            acp_calls[call_id] = update
+        elif call_id in acp_calls:
+            acp_calls[call_id] = {**acp_calls[call_id], **update}
+    acp_completed = any(u.get("status") == "completed" and not (u.get("rawOutput") or {}).get("error")
+                        and any(m in text_results((u.get("rawOutput") or {}).get("result")) for m in markers)
+                        for u in acp_calls.values())
+    # Older recordings lack final_reply; replay their ACP events to derive it
+    # when auditing consumption. New probes always record the final text too.
+    consumed = any(m in phase.get("final_reply", phase["reply"]) for m in markers)
     return {"model_initiated_mcp": bool(calls), "service_returned": bool(markers), "model_consumed": consumed,
-            "server_call_count": len(calls), "passed": phase["completed"] and len(calls) == 1 and bool(markers) and consumed
-            and any(u.get("status") == "completed" for u in phase["tool_updates"])}
+            "acp_completed": acp_completed, "server_call_count": len(calls),
+            "passed": phase["completed"] and len(calls) == 1 and len(valid) == 1 and len(responses) == 1
+            and bool(markers) and consumed and acp_completed}
 
 
 def prepare(root, source, model, observed_base=None):
@@ -137,6 +163,12 @@ class Probe:
         phase["elapsed_seconds"] = round(time.monotonic() - at, 3)
         updates = self.updates(start)
         phase["reply"] = "".join(u.get("content", {}).get("text", "") for u in updates if u.get("sessionUpdate") == "agent_message_chunk")
+        phase["final_reply"] = ""
+        for update in updates:
+            if update.get("sessionUpdate") in ("tool_call", "tool_call_update"):
+                phase["final_reply"] = ""
+            elif update.get("sessionUpdate") == "agent_message_chunk":
+                phase["final_reply"] += update.get("content", {}).get("text", "")
         phase["tool_updates"] = [u for u in updates if u.get("sessionUpdate") in ("tool_call", "tool_call_update")]
         self.result["phases"][name] = phase
         dump(self.out / "result.json", self.result)

@@ -76,8 +76,14 @@ args = ["owner-only"]
         call = {"id": 7, "method": "tools/call", "params": {"name": "steve_probe_read"}}
         response = {"id": 7, "result": {"content": [{"type": "text", "text": "random-service-marker"}]}}
         protocol = [{"direction": "receive", "message": call}, {"direction": "send", "message": response}]
-        phase = {"completed": True, "reply": "random-service-marker", "tool_updates": [{"status": "completed"}]}
+        phase = {"completed": True, "reply": "random-service-marker", "tool_updates": [
+            {"sessionUpdate": "tool_call", "toolCallId": "probe-call", "rawInput": {"server": "steve", "tool": "steve_probe_read"}},
+            {"sessionUpdate": "tool_call_update", "toolCallId": "probe-call", "status": "completed",
+             "rawOutput": {"result": {"content": [{"type": "text", "text": "random-service-marker"}]}, "error": None}}]}
         self.assertTrue(PROBE["mcp_outcome"](phase, protocol)["passed"])
+        phase["final_reply"] = ""
+        self.assertFalse(PROBE["mcp_outcome"](phase, protocol)["model_consumed"])
+        del phase["final_reply"]
         response["id"] = 8
         self.assertFalse(PROBE["mcp_outcome"](phase, protocol)["passed"])
         response["id"] = 7
@@ -87,6 +93,56 @@ args = ["owner-only"]
         phase["reply"] = "I called the tool."
         self.assertFalse(PROBE["mcp_outcome"](phase, protocol)["passed"])
         self.assertFalse(PROBE["mcp_outcome"](phase, [protocol[0]])["service_returned"])
+
+    def test_unrelated_or_failed_acp_completion_does_not_close_mcp_loop(self):
+        protocol = [
+            {"direction": "receive", "message": {"id": 7, "method": "tools/call", "params": {"name": "steve_probe_read"}}},
+            {"direction": "send", "message": {"id": 7, "result": {"content": [{"type": "text", "text": "service-marker"}]}}}]
+        start = {"sessionUpdate": "tool_call", "toolCallId": "probe-call", "rawInput": {"server": "steve", "tool": "steve_probe_read"}}
+        end = {"sessionUpdate": "tool_call_update", "toolCallId": "probe-call", "status": "completed",
+               "rawOutput": {"result": {"content": [{"type": "text", "text": "service-marker"}]}, "error": None}}
+        cases = {
+            "unrelated completion": [start, {**end, "toolCallId": "other-call"}],
+            "different tool": [{**start, "rawInput": {"server": "steve", "tool": "other"}}, end],
+            "different server": [{**start, "rawInput": {"server": "other", "tool": "steve_probe_read"}}, end],
+            "no call identity": [{"status": "completed"}],
+            "completion before call": [end, start],
+            "failed ACP result": [start, {**end, "rawOutput": {"error": "dispatch failed"}}],
+            "different ACP result": [start, {**end, "rawOutput": {"result": {"content": [{"type": "text", "text": "other-marker"}]}}}],
+            "error result with marker": [start, {**end, "rawOutput": {"result": {"isError": True, "content": [{"type": "text", "text": "service-marker"}]}}}],
+        }
+        for name, updates in cases.items():
+            with self.subTest(name=name):
+                phase = {"completed": True, "reply": "service-marker", "tool_updates": updates}
+                self.assertFalse(PROBE["mcp_outcome"](phase, protocol)["passed"])
+
+    def test_mcp_response_must_follow_call_and_be_unambiguous(self):
+        call = {"direction": "receive", "message": {"id": 7, "method": "tools/call", "params": {"name": "steve_probe_read"}}}
+        reply = {"direction": "send", "message": {"id": 7, "result": {"content": [{"type": "text", "text": "service-marker"}]}}}
+        phase = {"completed": True, "reply": "service-marker", "tool_updates": [
+            {"sessionUpdate": "tool_call", "toolCallId": "call", "rawInput": {"server": "steve", "tool": "steve_probe_read"}},
+            {"sessionUpdate": "tool_call_update", "toolCallId": "call", "status": "completed",
+             "rawOutput": {"result": {"content": [{"type": "text", "text": "service-marker"}]}}}]}
+        self.assertTrue(PROBE["mcp_outcome"](phase, [call, reply])["passed"])
+        self.assertFalse(PROBE["mcp_outcome"](phase, [reply, call])["service_returned"])
+        self.assertFalse(PROBE["mcp_outcome"](phase, [call, reply, reply])["passed"])
+
+    def test_marker_in_text_before_last_tool_is_not_consumption(self):
+        probe = PROBE["Probe"](argparse.Namespace(label="obsolete", model="fixture", output=self.root / "evidence", root=self.root / "private"))
+        probe.sid = "fixture-session"
+
+        async def request(*args):
+            for update in [
+                {"sessionUpdate": "agent_message_chunk", "content": {"text": "obsolete-marker"}},
+                {"sessionUpdate": "tool_call", "toolCallId": "call"},
+                {"sessionUpdate": "tool_call_update", "toolCallId": "call", "status": "completed"}]:
+                probe.events.append({"message": {"method": "session/update", "params": {"update": update}}})
+            return {"stopReason": "end_turn"}
+
+        probe.request = request
+        phase = asyncio.run(probe.prompt("mcp", "generated diagnostic", 1))
+        self.assertEqual(phase["reply"], "obsolete-marker")
+        self.assertEqual(phase["final_reply"], "")
 
     def test_timeout_retains_partial_events_and_original_error(self):
         probe = PROBE["Probe"](argparse.Namespace(label="partial", model="fixture", output=self.root / "evidence", root=self.root / "private"))
