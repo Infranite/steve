@@ -165,6 +165,24 @@ async fn start(node: bool) -> Env {
 }
 
 #[tokio::test]
+async fn malformed_bound_workspace_never_falls_back_to_the_hub_session_directory() {
+    for node in [false, true] {
+        let e = start(node).await;
+        let path = PathBuf::from(&e.session.cwd).join("report.md");
+        std::fs::write(&path, b"Hub placeholder is not a bound workspace").unwrap();
+        e.store.transaction(|tx| {
+            tx.execute("INSERT INTO runtime_sessions(session_id,node_id,workspace_ref,node_session_id,config_revision,phase,updated) VALUES (?1,'local','{}',?1,'r','active',0)", [&e.session.id])?;
+            Ok::<_, StoreError>(())
+        }).unwrap();
+        for input in [path.display().to_string(), "report.md".into()] {
+            let result = e.tool("steve_deliver_file", json!({"path":input})).await;
+            assert_eq!(result["result"]["isError"], true, "{result}");
+        }
+        assert!(e.store.artifacts().list("ST-1").unwrap().is_empty());
+    }
+}
+
+#[tokio::test]
 async fn mcp_receives_files_on_local_node_and_local_off_and_retains_every_version() {
     for node in [false, true] {
         let e = start(node).await;

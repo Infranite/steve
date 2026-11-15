@@ -92,6 +92,13 @@ pub trait WorkspaceExecutor: Send + Sync {
             "strict delivery reads unsupported",
         ))
     }
+    /// Current-execution delivery; old peers fail closed without a filesystem fallback.
+    async fn read_execution_delivery(&self, _q: ExecutionDeliveryRead) -> ApiResult<DeliveryChunk> {
+        Err(ApiError::new(
+            ErrorCode::Unsupported,
+            "execution-scoped delivery reads unsupported; upgrade the Node",
+        ))
+    }
     /// Strict, execution-scoped artifact read. Unsupported peers must never fall back to a
     /// general filesystem read (which can follow links and does not bind an execution view).
     async fn read_artifact(&self, _q: ArtifactRead) -> ApiResult<ReadChunk> {

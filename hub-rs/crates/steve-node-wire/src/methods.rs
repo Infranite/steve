@@ -103,6 +103,7 @@ rpc_table! {
     FS_LIST = "fs.list": HubToNode Control Read false;
     FS_LIST_ROOT = "fs.list_root": HubToNode Control Read false;
     FS_READ = "fs.read": HubToNode Bulk Blob false;
+    EXECUTION_DELIVERY_READ = "delivery.execution_read": HubToNode Bulk Blob false;
     DELIVERY_READ = "delivery.read": HubToNode Bulk Blob false;
     ARTIFACT_READ = "artifact.read": HubToNode Bulk Blob false;
     TREE_SCAN = "tree.scan": HubToNode Control Command true;

@@ -679,6 +679,214 @@ async fn a_legacy_execution_never_falls_back_to_a_general_file_read() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn execution_deliveries_resolve_actual_paths_and_reject_changed_boundaries() {
+    let t = T::new(&[]);
+    let n = t.node();
+    ready(&n, "s_delivery").await;
+    let work = t.root.join("work/proj").canonicalize().unwrap();
+    put(&work, "outputs/result.md", b"actual Node bytes");
+    put(&t.root, "other-session/result.md", b"another session");
+    std::os::unix::fs::symlink("result.md", work.join("outputs/link.md")).unwrap();
+    std::os::unix::fs::symlink(t.root.join("other-session"), work.join("linked")).unwrap();
+    std::fs::hard_link(t.root.join("other-session/result.md"), work.join("hard.md")).unwrap();
+    n.start_turn(now_cmd(
+        "op_delivery",
+        turn("s_delivery", "t_d", "a_d", "@sleep 30000"),
+    ))
+    .await
+    .unwrap();
+    t.until("delivery prompt", |t| t.sent("session/prompt") == 1)
+        .await;
+    let q = ExecutionDeliveryRead {
+        execution: ExecutionRef::Turn {
+            session: SessionId::new("s_delivery").unwrap(),
+            turn: TurnId::new("t_d").unwrap(),
+            attempt: AttemptId::new("a_d").unwrap(),
+        },
+        workspace: ws(),
+        location: work.join("outputs/result.md").to_str().unwrap().into(),
+        expected: None,
+        offset: 0,
+        max: 4,
+    };
+    let first = n.read_execution_delivery(q.clone()).await.unwrap();
+    assert_eq!(first.chunk.bytes, b"actu");
+    assert_eq!(first.size, 17);
+    assert!(!first.chunk.eof);
+    let mut relative = q.clone();
+    relative.location = "outputs/result.md".into();
+    relative.offset = 4;
+    relative.max = 100;
+    relative.expected = Some(first.version.clone());
+    assert_eq!(
+        n.read_execution_delivery(relative.clone())
+            .await
+            .unwrap()
+            .chunk
+            .bytes,
+        b"al Node bytes"
+    );
+    for path in [
+        t.root.join("other-session/result.md").display().to_string(),
+        format!("{}-sibling/result.md", work.display()),
+        work.join("../other-session/result.md")
+            .display()
+            .to_string(),
+        "../other-session/result.md".into(),
+        "outputs/../../other-session/result.md".into(),
+        "outputs/link.md".into(),
+        "linked/result.md".into(),
+        "hard.md".into(),
+    ] {
+        let mut wrong = q.clone();
+        wrong.location = path.clone();
+        assert!(n.read_execution_delivery(wrong).await.is_err(), "{path}");
+    }
+    let mut wrong = q.clone();
+    wrong.execution = ExecutionRef::Turn {
+        session: SessionId::new("another-session").unwrap(),
+        turn: TurnId::new("t_d").unwrap(),
+        attempt: AttemptId::new("a_d").unwrap(),
+    };
+    assert_eq!(
+        n.read_execution_delivery(wrong).await.unwrap_err().code,
+        ErrorCode::Denied
+    );
+    for execution in [
+        ExecutionRef::Turn {
+            session: SessionId::new("s_delivery").unwrap(),
+            turn: TurnId::new("wrong-turn").unwrap(),
+            attempt: AttemptId::new("a_d").unwrap(),
+        },
+        ExecutionRef::Turn {
+            session: SessionId::new("s_delivery").unwrap(),
+            turn: TurnId::new("t_d").unwrap(),
+            attempt: AttemptId::new("wrong-attempt").unwrap(),
+        },
+    ] {
+        let mut wrong = q.clone();
+        wrong.execution = execution;
+        assert_eq!(
+            n.read_execution_delivery(wrong).await.unwrap_err().code,
+            ErrorCode::Denied
+        );
+    }
+    let mut wrong = q.clone();
+    wrong.workspace.id = WorkspaceId::new("another-workspace").unwrap();
+    assert_eq!(
+        n.read_execution_delivery(wrong).await.unwrap_err().code,
+        ErrorCode::Denied
+    );
+    let mut wrong = q.clone();
+    wrong.workspace.node = NodeId::new("another-node").unwrap();
+    assert_eq!(
+        n.read_execution_delivery(wrong).await.unwrap_err().code,
+        ErrorCode::Denied
+    );
+    put(&work, "outputs/result.md", b"changed after first chunk");
+    assert_eq!(
+        n.read_execution_delivery(relative).await.unwrap_err().code,
+        ErrorCode::Conflict
+    );
+    n.set_roots(vec![]);
+    assert!(n.read_execution_delivery(q.clone()).await.is_err());
+    n.set_roots(t.config().roots);
+    // Even identical paths and bytes cannot replace the captured directory identity.
+    std::fs::rename(&work, t.root.join("parked")).unwrap();
+    std::fs::create_dir_all(work.join("outputs")).unwrap();
+    put(&work, "outputs/result.md", b"actual Node bytes");
+    assert_eq!(
+        n.read_execution_delivery(q.clone()).await.unwrap_err().code,
+        ErrorCode::Denied
+    );
+    std::fs::remove_dir_all(&work).unwrap();
+    std::fs::rename(t.root.join("parked"), &work).unwrap();
+    let db = rusqlite::Connection::open(t.home.join("node.sqlite3")).unwrap();
+    db.execute("UPDATE workspaces SET incarnation=incarnation+1", [])
+        .unwrap();
+    assert_eq!(
+        n.read_execution_delivery(q.clone()).await.unwrap_err().code,
+        ErrorCode::Denied
+    );
+    db.execute("UPDATE workspaces SET incarnation=incarnation-1", [])
+        .unwrap();
+    assert!(n.read_execution_delivery(q.clone()).await.is_ok());
+    n.cancel(now_cmd(
+        "op_cancel_delivery",
+        Cancel {
+            target: OperationId::new("op_delivery").unwrap(),
+            reason: "test complete".into(),
+        },
+    ))
+    .await
+    .unwrap();
+    assert!(n.read_execution_delivery(q).await.is_err());
+    n.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn execution_delivery_captures_trusted_installation_alias_once() {
+    let t = T::new(&[]);
+    std::fs::create_dir_all(&t.home).unwrap();
+    let alias = t.root.join("installation-alias");
+    std::os::unix::fs::symlink(&t.home, &alias).unwrap();
+    let mut cfg = t.config();
+    cfg.home = alias.clone();
+    let n = LocalNode::open(cfg).unwrap();
+    n.prepare_workspace(now_cmd(
+        "op_alias_prep",
+        Prepare {
+            resource: "item:x".into(),
+            kind: PrepareKind::Scratch,
+        },
+    ))
+    .await
+    .unwrap();
+    assert!(ok(&finished(&n, "op_alias_prep").await));
+    n.open_session(now_cmd("op_alias_open", open_body("s_alias")))
+        .await
+        .unwrap();
+    assert!(ok(&finished(&n, "op_alias_open").await));
+    let dir = n.local_dir(&ws()).unwrap().path;
+    put(&dir, "result.md", b"canonical workspace");
+    n.start_turn(now_cmd(
+        "op_alias_turn",
+        turn("s_alias", "t_alias", "a_alias", "@sleep 30000"),
+    ))
+    .await
+    .unwrap();
+    t.until("alias prompt", |t| t.sent("session/prompt") == 1)
+        .await;
+    let q = ExecutionDeliveryRead {
+        execution: ExecutionRef::Turn {
+            session: SessionId::new("s_alias").unwrap(),
+            turn: TurnId::new("t_alias").unwrap(),
+            attempt: AttemptId::new("a_alias").unwrap(),
+        },
+        workspace: ws(),
+        location: dir.join("result.md").to_str().unwrap().into(),
+        expected: None,
+        offset: 0,
+        max: 100,
+    };
+    assert_eq!(
+        n.read_execution_delivery(q.clone())
+            .await
+            .unwrap()
+            .chunk
+            .bytes,
+        b"canonical workspace"
+    );
+    std::fs::remove_file(&alias).unwrap();
+    std::fs::create_dir_all(t.root.join("other-installation")).unwrap();
+    std::os::unix::fs::symlink(t.root.join("other-installation"), &alias).unwrap();
+    assert!(n.read_execution_delivery(q).await.is_err());
+    std::fs::remove_file(&alias).unwrap();
+    std::os::unix::fs::symlink(&t.home, &alias).unwrap();
+    n.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_turn_runs_once_and_reports_in_steves_words() {
     let t = T::new(&[]);
     let n = t.node();

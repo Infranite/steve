@@ -304,6 +304,13 @@ impl WorkspaceExecutor for RemoteNode {
         q.max = q.max.min(crate::envelope::CHUNK_BYTES);
         self.go(ARTIFACT_READ, &q, None, false).await
     }
+    async fn read_execution_delivery(
+        &self,
+        mut q: ExecutionDeliveryRead,
+    ) -> ApiResult<DeliveryChunk> {
+        q.max = q.max.min(crate::envelope::CHUNK_BYTES);
+        self.go(EXECUTION_DELIVERY_READ, &q, None, false).await
+    }
     async fn read_delivery(&self, mut q: FileRead) -> ApiResult<DeliveryChunk> {
         q.max = q.max.min(crate::envelope::CHUNK_BYTES);
         self.go(DELIVERY_READ, &q, None, false).await

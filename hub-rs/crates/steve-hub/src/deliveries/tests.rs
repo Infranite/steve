@@ -107,6 +107,22 @@ async fn local_file_versions_survive_cleanup_and_restart() {
 }
 
 #[tokio::test]
+async fn hub_owned_outputs_remain_available_when_the_bound_node_is_unavailable() {
+    let (_home, svc, session) = fixture();
+    let ws = crate::wire::workspaces::Workspaces::new(svc.store.clone(), None, None, vec![]);
+    svc.store.transaction(|tx| {
+        tx.execute("INSERT INTO runtime_sessions(session_id,node_id,workspace_ref,node_session_id,config_revision,phase,updated) VALUES (?1,'remote','{\"node\":\"remote\",\"id\":\"w\"}',?1,'r','active',0)", [&session.id])?;
+        Ok::<_, StoreError>(())
+    }).unwrap();
+    let durable = crate::wire::output_files::directory(&svc.home, "ST-1").unwrap();
+    fs::create_dir_all(&durable).unwrap();
+    let path = durable.join("hub-report.md");
+    fs::write(&path, b"Hub owned output").unwrap();
+    let d = svc.receive(&session, path.to_str().unwrap(), None, None, &ws).await.unwrap();
+    assert_eq!(bytes(&svc, &d, None), b"Hub owned output");
+}
+
+#[tokio::test]
 async fn local_delivery_rejects_links_folders_and_paths_outside_session() {
     let (_home, svc, s) = fixture();
     let ws = crate::wire::workspaces::Workspaces::new(svc.store.clone(), None, None, vec![]);

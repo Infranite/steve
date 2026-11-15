@@ -1,6 +1,8 @@
 use std::path::{Path, PathBuf};
 
-use steve_node_api::{DeliveryChunk, FileAddress, FileRead, PathRef, RelPath, Revision, RootPath};
+use steve_node_api::{
+    DeliveryChunk, ExecutionDeliveryRead, FileAddress, FileRead, RelPath, Revision, RootPath,
+};
 use steve_store::Session;
 
 use super::{Delivery, MAX_FILE, Service};
@@ -45,11 +47,15 @@ impl Receive {
 enum Source {
     Local(PathBuf, RelPath),
     Node(std::sync::Arc<dyn steve_node_api::Node>, FileAddress),
+    Execution(
+        std::sync::Arc<dyn steve_node_api::Node>,
+        ExecutionDeliveryRead,
+    ),
 }
 
 impl Service {
-    /// Bot input is scoped to its own session directory or its item's Hub-owned outputs. The
-    /// Node placement is taken from the current binding, never from a Bot-supplied node id.
+    /// Bot input is scoped to its current execution workspace (legacy: session directory) or
+    /// its item's Hub-owned outputs. The Node placement is taken from the current binding, never from a Bot-supplied node id.
     pub async fn receive(
         &self,
         session: &Session,
@@ -89,41 +95,84 @@ impl Service {
                 .map_err(|e| e.to_string())?;
             Source::Local(self.home.canonicalize().map_err(|e| e.to_string())?, rel)
         } else {
-            let rel = source.strip_prefix(cwd).map_err(
-                |_| "delivery must be inside the session directory; package folders as ZIP",
-            )?;
-            let rel = RelPath::new(rel.to_str().ok_or("delivery path must be UTF-8")?)
-                .map_err(|e| e.to_string())?;
-            // A newly created session can add a more specific root before the asynchronous
-            // project/session observer reaches the Node. Refresh before choosing its root id.
+            // Bound workspace paths belong to the Node, not sessions.cwd (which may be a
+            // Hub scratch placeholder). Only the authenticated current execution can name them.
             workspaces.refresh_roots().map_err(|e| e.to_string())?;
+            let bound = self
+                .store
+                .reader(|c| steve_store::runtime::workspace_ref_of(c, &session.id))
+                .map_err(|e| e.to_string())?
+                .is_some();
             match workspaces.placement_of(Subject::Session(&session.id)) {
-                Ok(p) => {
-                    let address = match p.at {
-                        At::Workspace(workspace) => {
-                            FileAddress::Workspace(PathRef { workspace, rel })
+                Ok(p) => match p.at {
+                    At::Workspace(workspace) => {
+                        let (node, execution) = crate::wire::node_tools::delivery_execution()
+                            .ok_or("workspace delivery requires a scoped Node execution")?;
+                        if node != p.node_id || workspace.node != node {
+                            return Err("delivery execution belongs to another Node".into());
                         }
-                        At::Root(base) => FileAddress::Root(RootPath {
-                            root: base.root,
-                            rel: RelPath::new(if base.rel.as_str().is_empty() {
-                                rel.as_str().into()
-                            } else {
-                                format!("{}/{}", base.rel.as_str(), rel.as_str())
-                            })
-                            .map_err(|e| e.to_string())?,
-                        }),
-                    };
-                    Source::Node(p.node, address)
-                }
-                Err(PlacementError::LocalOff) => {
-                    Source::Local(cwd.canonicalize().map_err(|e| e.to_string())?, rel)
-                }
+                        let (current, _) = crate::wire::node_tools::authorize(
+                            &self.store,
+                            &node,
+                            &execution,
+                            true,
+                        )
+                        .map_err(|e| e.safe_detail)?;
+                        if current.id != session.id {
+                            return Err("delivery execution belongs to another session".into());
+                        }
+                        Source::Execution(
+                            p.node,
+                            ExecutionDeliveryRead {
+                                execution,
+                                workspace,
+                                location: path.to_string(),
+                                expected: None,
+                                offset: 0,
+                                max: CHUNK,
+                            },
+                        )
+                    }
+                    At::Root(base) => {
+                        if bound {
+                            return Err("bound delivery has no valid Node workspace".into());
+                        }
+                        let rel = session_relative(cwd, &source)?;
+                        let rel = RelPath::new(if base.rel.as_str().is_empty() {
+                            rel.as_str().into()
+                        } else {
+                            format!("{}/{}", base.rel.as_str(), rel.as_str())
+                        })
+                        .map_err(|e| e.to_string())?;
+                        Source::Node(
+                            p.node,
+                            FileAddress::Root(RootPath {
+                                root: base.root,
+                                rel,
+                            }),
+                        )
+                    }
+                },
+                Err(PlacementError::LocalOff) if !bound => Source::Local(
+                    cwd.canonicalize().map_err(|e| e.to_string())?,
+                    session_relative(cwd, &source)?,
+                ),
                 Err(e) => return Err(format!("delivery Node unavailable: {e}")),
             }
         };
-        let bytes = tokio::time::timeout(std::time::Duration::from_secs(300), read_source(src))
+        let bytes = tokio::time::timeout(std::time::Duration::from_secs(300), read_source(&src))
             .await
             .map_err(|_| "delivery transfer timed out before complete receipt")??;
+        if let Source::Execution(_, q) = &src {
+            crate::wire::node_tools::authorize(&self.store, &q.workspace.node, &q.execution, true)
+                .map_err(|e| e.safe_detail)?;
+            let current = workspaces
+                .placement_of(Subject::Session(&session.id))
+                .map_err(|e| e.to_string())?;
+            if current.at != At::Workspace(q.workspace.clone()) {
+                return Err("delivery workspace binding changed during transfer".into());
+            }
+        }
         let (service, session, title, entrypoint) = (
             self.clone(),
             session.clone(),
@@ -161,12 +210,27 @@ impl Service {
     }
 }
 
-async fn read_source(src: Source) -> Result<Vec<u8>, String> {
+fn session_relative(cwd: &Path, source: &Path) -> Result<RelPath, String> {
+    let rel = source
+        .strip_prefix(cwd)
+        .map_err(|_| "delivery must be inside the session directory; package folders as ZIP")?;
+    RelPath::new(rel.to_str().ok_or("delivery path must be UTF-8")?).map_err(|e| e.to_string())
+}
+
+async fn read_source(src: &Source) -> Result<Vec<u8>, String> {
     let mut recv = Receive::default();
     loop {
         let offset = recv.bytes.len() as u64;
         let expected = recv.version.clone();
-        let chunk = match &src {
+        let chunk = match src {
+            Source::Execution(node, query) => {
+                let mut q = query.clone();
+                q.expected = expected;
+                q.offset = offset;
+                node.read_execution_delivery(q)
+                    .await
+                    .map_err(|e| format!("Node execution delivery refused: {}", e.safe_detail))?
+            }
             Source::Node(node, path) => node
                 .read_delivery(FileRead {
                     path: path.clone(),
@@ -208,6 +272,17 @@ mod tests {
     #[async_trait::async_trait]
     impl Handler for Peer {
         async fn handle(&self, method: &str, p: serde_json::Value) -> ApiResult<serde_json::Value> {
+            if self.mode == 5 {
+                assert_eq!(
+                    method,
+                    steve_node_wire::methods::EXECUTION_DELIVERY_READ,
+                    "old Node must not fall back to workspace or general fs.read"
+                );
+                return Err(ApiError::new(
+                    ErrorCode::Unsupported,
+                    "old Node lacks execution deliveries",
+                ));
+            }
             assert_eq!(
                 method,
                 steve_node_wire::methods::DELIVERY_READ,
@@ -269,14 +344,35 @@ mod tests {
         );
         let remote = RemoteNode::new(NodeId::new("remote").unwrap());
         remote.attach(hub, false);
-        let result = read_source(Source::Node(
-            remote.clone(),
-            FileAddress::Root(RootPath {
-                root: RootId::new("outputs").unwrap(),
-                rel: RelPath::new("report.md").unwrap(),
-            }),
-        ))
-        .await;
+        let source = if mode == 5 {
+            Source::Execution(
+                remote.clone(),
+                ExecutionDeliveryRead {
+                    execution: ExecutionRef::Turn {
+                        session: SessionId::new("s").unwrap(),
+                        turn: TurnId::new("t").unwrap(),
+                        attempt: AttemptId::new("a").unwrap(),
+                    },
+                    workspace: WorkspaceRef {
+                        node: remote.id().clone(),
+                        id: WorkspaceId::new("w").unwrap(),
+                    },
+                    location: "/actual/node/workspace/report.md".into(),
+                    expected: None,
+                    offset: 0,
+                    max: CHUNK,
+                },
+            )
+        } else {
+            Source::Node(
+                remote.clone(),
+                FileAddress::Root(RootPath {
+                    root: RootId::new("outputs").unwrap(),
+                    rel: RelPath::new("report.md").unwrap(),
+                }),
+            )
+        };
+        let result = read_source(&source).await;
         node.close(None, 1000, "test complete");
         remote.detach(1);
         result
@@ -294,7 +390,7 @@ mod tests {
         let delivery = svc
             .accept(&session, "Remote report", "report.md", &received, None)
             .unwrap();
-        for mode in 1..=4 {
+        for mode in 1..=5 {
             assert!(transfer(root.clone(), mode).await.is_err(), "mode={mode}");
         }
         std::fs::remove_file(root.join("report.md")).unwrap();

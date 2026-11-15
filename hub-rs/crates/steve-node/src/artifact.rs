@@ -18,10 +18,13 @@ use crate::journal::WorkspaceRow;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct Grant {
     pub execution: ExecutionRef,
-    pub view_digest: Digest,
+    pub view_digest: Option<Digest>,
     pub workspace: WorkspaceRef,
     pub incarnation: u64,
     pub dir: String,
+    // Older grants recorded an already canonical row.path directly in dir.
+    #[serde(default)]
+    pub recorded_dir: Option<String>,
     pub device: u64,
     pub inode: u64,
 }
@@ -80,20 +83,29 @@ fn anchor(path: &Path) -> ApiResult<File> {
 }
 
 impl Grant {
+    pub fn recorded_dir(&self) -> &str {
+        self.recorded_dir.as_deref().unwrap_or(&self.dir)
+    }
+
     pub fn capture(
         execution: ExecutionRef,
-        view_digest: Digest,
+        view_digest: Option<Digest>,
         workspace: WorkspaceRef,
         row: &WorkspaceRow,
     ) -> ApiResult<Self> {
-        let dir = anchor(Path::new(&row.path))?;
+        // This is the Node's trusted workspace at turn acceptance, not a tool's file input.
+        // Resolve installation aliases (e.g. a system temporary-directory alias) once; every
+        // later read anchors the captured real directory without following any links.
+        let real = Path::new(&row.path).canonicalize().map_err(io_error)?;
+        let dir = anchor(&real)?;
         let meta = dir.metadata().map_err(io_error)?;
         Ok(Self {
             execution,
             view_digest,
             workspace,
             incarnation: row.incarnation,
-            dir: row.path.clone(),
+            dir: real.to_str().ok_or_else(denied)?.to_string(),
+            recorded_dir: Some(row.path.clone()),
             device: meta.dev(),
             inode: meta.ino(),
         })
@@ -101,7 +113,7 @@ impl Grant {
 }
 
 pub(crate) fn read(grant: &Grant, q: &ArtifactRead) -> ApiResult<ReadChunk> {
-    if grant.execution != q.execution || grant.view_digest != q.view_digest {
+    if grant.execution != q.execution || grant.view_digest.as_ref() != Some(&q.view_digest) {
         return Err(denied());
     }
     let base = Path::new(&grant.dir);
@@ -111,6 +123,28 @@ pub(crate) fn read(grant: &Grant, q: &ArtifactRead) -> ApiResult<ReadChunk> {
         return Err(denied());
     }
     Ok(read_open(base, dir, &q.location, q.expected.as_ref(), q.offset, q.max)?.chunk)
+}
+
+/// Resolve only against the grant captured when this execution was accepted. Prefix comparison
+/// uses path components, then RelPath rejects traversal before any descriptor is opened.
+pub(crate) fn read_delivery(grant: &Grant, q: &ExecutionDeliveryRead) -> ApiResult<DeliveryChunk> {
+    if grant.execution != q.execution || grant.workspace != q.workspace {
+        return Err(denied());
+    }
+    let base = Path::new(&grant.dir);
+    let input = Path::new(&q.location);
+    let rel = if input.is_absolute() {
+        input.strip_prefix(base).map_err(|_| denied())?
+    } else {
+        input
+    };
+    let rel = RelPath::new(rel.to_str().ok_or_else(denied)?).map_err(|_| denied())?;
+    let dir = anchor(base)?;
+    let meta = dir.metadata().map_err(io_error)?;
+    if (meta.dev(), meta.ino()) != (grant.device, grant.inode) {
+        return Err(denied());
+    }
+    read_open(base, dir, &rel, q.expected.as_ref(), q.offset, q.max)
 }
 
 /// Used by the local-off compatibility path too: the caller authorizes the root, this Node
@@ -202,13 +236,14 @@ mod tests {
                 turn: TurnId::new("t").unwrap(),
                 attempt: AttemptId::new("a").unwrap(),
             },
-            view_digest: Digest::sha256(b"view"),
+            view_digest: Some(Digest::sha256(b"view")),
             workspace: WorkspaceRef {
                 node: NodeId::new("n").unwrap(),
                 id: WorkspaceId::new("w").unwrap(),
             },
             incarnation: 1,
             dir: dir.to_str().unwrap().into(),
+            recorded_dir: None,
             device: meta.dev(),
             inode: meta.ino(),
         }
@@ -217,7 +252,7 @@ mod tests {
     fn query(g: &Grant, location: &str) -> ArtifactRead {
         ArtifactRead {
             execution: g.execution.clone(),
-            view_digest: g.view_digest.clone(),
+            view_digest: g.view_digest.clone().unwrap(),
             location: RelPath::new(location).unwrap(),
             expected: None,
             offset: 0,
