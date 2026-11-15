@@ -721,3 +721,43 @@ async fn a_projects_completion_rule_is_set_through_the_api() {
         .unwrap();
     assert_eq!((rel.cmd.as_str(), rel.done_when), ("/bin/true", None));
 }
+
+#[tokio::test]
+async fn git_project_without_script_can_configure_done_when_on_create_and_patch() {
+    let e = start().await;
+    let dir = e._home.path().join("git-done-when");
+    std::fs::create_dir_all(dir.join(".git")).unwrap();
+    let (s, p) = e
+        .call(
+            "POST",
+            "/api/projects",
+            Some(json!({"name": "git-rel", "path": dir, "done_when": "merge"})),
+        )
+        .await;
+    assert_eq!(s, 200, "{p}");
+    assert_eq!(p["release"]["done_when"], "merge");
+    let pid = p["id"].as_str().unwrap().to_string();
+    let path = format!("/api/projects/{pid}");
+
+    // Clearing done_when when cmd is empty resets release to null (local acceptance only).
+    let (s, v) = e.call("PATCH", &path, Some(json!({"release": null}))).await;
+    assert_eq!(s, 200, "{v}");
+    assert!(v["release"].is_null(), "{v}");
+
+    // Setting done_when via either `release` object or `done_when` works even when release was null.
+    let (s, v) = e
+        .call(
+            "PATCH",
+            &path,
+            Some(json!({"release": {"kind": "script", "cmd": "", "done_when": "tag"}})),
+        )
+        .await;
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(v["release"]["done_when"], "tag");
+
+    let (s, v) = e
+        .call("PATCH", &path, Some(json!({"done_when": null})))
+        .await;
+    assert_eq!(s, 200, "{v}");
+    assert!(v["release"].is_null(), "{v}");
+}

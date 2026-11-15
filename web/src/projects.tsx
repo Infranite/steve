@@ -156,7 +156,7 @@ function Where({ p, lane, gh, onSettings }: Omit<Parts, "onLane"> & { onSettings
   const git = p.kind === "git", v = lane.s === "ok" ? lane.v : null
   const device = st.devices.find((x) => x.id === p.device_id)?.name ?? "Hub"
   const repo = gh ? projectRepo(gh, p.id) : undefined
-  const done = p.release && git && p.worktree ? (p.release.done_when === "tag" ? t("pages:projects.optTag") : p.release.done_when === "merge" ? t("pages:projects.optMerge") : t("pages:projects.optLocal")) : null
+  const done = git && p.worktree ? (p.release ? (p.release.done_when === "tag" ? t("pages:projects.optTag") : p.release.done_when === "merge" ? t("pages:projects.optMerge") : t("pages:projects.optLocal")) : t("pages:projects.optNone")) : null
   const code = "font-mono text-[13px] break-all"
   const cmd = p.release?.cmd ? <span className={cn("mt-0.5 block text-muted-foreground", code)}>{home(p.release.cmd)}</span> : null
   const facts = [
@@ -209,11 +209,21 @@ function Settings({ p, lane, onLane, gh, onGh }: Parts & { onGh: (v: GhOverview)
           <Row title={t("pages:projects.defaultBot")} sub={t("pages:projects.defaultBotSub")}><Select align="end" testId="proj-bot" value={p.default_bot ?? "none"} onChange={(v) => patchProject(p.id, { default_bot: v === "none" ? null : v })} options={[{ v: "none", l: t("pages:projects.bySteve") }, ...Object.keys(st.bots).filter((k) => st.bots[k].on).map((k) => ({ v: k, l: <BotName k={k} /> }))]} /></Row>
           {p.kind === "git" && <Row title={t("pages:projects.worktree")} sub={t("pages:projects.worktreeSub")}><Switch checked={p.worktree} onCheckedChange={(v) => patchProject(p.id, { worktree: v })} data-proj-worktree /></Row>}
           {st.yolo && <Row title={t("pages:projects.yolo")} sub={p.kind === "git" && p.worktree ? t("pages:projects.yoloSubWorktree") : t("pages:projects.yoloSubReal")} data-proj-yolo><YoloProjectSelect id={p.id} realDir={p.kind !== "git" || !p.worktree} /></Row>}
-          {p.release && p.kind === "git" && p.worktree && <Row title={t("pages:projects.doneWhen")} data-proj-done
-            sub={p.release.done_when ? t("pages:projects.doneRemote") : t("pages:projects.doneLocal")}>
-            <Select align="end" testId="proj-done" value={p.release.done_when ?? "local"}
-              onChange={(v) => { const r = p.release!; patchProject(p.id, { release: v === "local" ? { kind: r.kind, cmd: r.cmd } : { ...r, done_when: v as "merge" | "tag" } }) }}
-              options={[{ v: "local", l: t("pages:projects.optLocal") }, { v: "merge", l: t("pages:projects.optMerge") }, { v: "tag", l: t("pages:projects.optTag") }]} /></Row>}
+          {p.kind === "git" && p.worktree && <Row title={t("pages:projects.doneWhen")} data-proj-done
+            sub={p.release?.done_when ? t("pages:projects.doneRemote") : p.release?.cmd ? t("pages:projects.doneLocal") : t("pages:projects.releaseNone")}>
+            <Select align="end" testId="proj-done" value={p.release?.done_when ?? (p.release?.cmd ? "local" : "none")}
+              onChange={(v) => {
+                const cmd = p.release?.cmd ?? ""
+                const kind = p.release?.kind ?? "script"
+                if (v === "none") patchProject(p.id, { release: null })
+                else if (v === "local") patchProject(p.id, { release: { kind, cmd } })
+                else patchProject(p.id, { release: { kind, cmd, done_when: v as "merge" | "tag" } })
+              }}
+              options={[
+                ...(p.release?.cmd ? [{ v: "local", l: t("pages:projects.optLocal") }] : [{ v: "none", l: t("pages:projects.optNone") }]),
+                { v: "merge", l: t("pages:projects.optMerge") },
+                { v: "tag", l: t("pages:projects.optTag") },
+              ]} /></Row>}
         </Panel>
       </Section>
       {lane.s === "ok" && p.kind === "git" && <Section label={lane.v.queue ? t("shell:mergeQueue.title") : t("shell:lane.title")} data-lane><LaneSettings project={p.id} lane={lane.v} onLane={onLane} /></Section>}
@@ -269,7 +279,7 @@ function DirBrowser({ path, node, onPick, onSeen }: { path: string; node: string
 
 export function NewProjectDialog() {
   const t = useT()
-  const [path, setPath] = useState(""), [n, setN] = useState(""), [d, setD] = useState(""), [bot, setBot] = useState("none"), [git, setGit] = useState<boolean | null>(null), [wt, setWt] = useState(true)
+  const [path, setPath] = useState(""), [n, setN] = useState(""), [d, setD] = useState(""), [bot, setBot] = useState("none"), [git, setGit] = useState<boolean | null>(null), [wt, setWt] = useState(true), [doneWhen, setDoneWhen] = useState<"merge" | "tag" | "none">("merge")
   const [named, setNamed] = useState(false), [busy, setBusy] = useState(false), [nodes, setNodes] = useState<RNode[]>([])
   // the Nodes are the owner's to list: anyone else is offered the Hub's own
   useEffect(() => { api.nodes().then((r) => setNodes(r.nodes)).catch(() => {}) }, [])
@@ -303,9 +313,10 @@ export function NewProjectDialog() {
           <Field orientation="horizontal" className="justify-between"><FieldLabel>{t("pages:projects.defaultBot")}</FieldLabel>
             <Select align="end" value={bot} onChange={setBot} options={[{ v: "none", l: t("pages:projects.bySteve") }, ...Object.keys(st.bots).filter((k) => st.bots[k].on).map((k) => ({ v: k, l: <BotName k={k} /> }))]} /></Field>
           {git && <Field orientation="horizontal" className="justify-between"><div><FieldLabel>{t("pages:projects.worktree")}</FieldLabel><FieldDescription className="type-footnote">{t("pages:projects.gitDetected")}</FieldDescription></div><Switch checked={wt} onCheckedChange={setWt} /></Field>}
+          {git && wt && <Field orientation="horizontal" className="justify-between"><div><FieldLabel>{t("pages:projects.doneWhen")}</FieldLabel><FieldDescription className="type-footnote">{doneWhen === "none" ? t("pages:projects.releaseNone") : t("pages:projects.doneRemote")}</FieldDescription></div><Select align="end" testId="new-proj-done" value={doneWhen} onChange={(v) => setDoneWhen(v as "merge" | "tag" | "none")} options={[{ v: "merge", l: t("pages:projects.optMerge") }, { v: "tag", l: t("pages:projects.optTag") }, { v: "none", l: t("pages:projects.optNone") }]} /></Field>}
         </FieldGroup>
         <DialogFooter className="gap-2"><Button variant="outline" onClick={closeSheet}>{t("common:action.cancel")}</Button>
-          <Button disabled={!path.trim() || !n.trim()} className={cn()} data-testid="project-go" onClick={async () => { const id = await newProject({ name: n.trim(), path: path.trim(), description: d.trim(), worktree: wt, default_bot: bot === "none" ? null : bot, node: "hub" }); if (id) { closeSheet(); go("#/projects/" + id) } }}>{t("pages:projects.create")}</Button></DialogFooter>
+          <Button disabled={!path.trim() || !n.trim()} className={cn()} data-testid="project-go" onClick={async () => { const id = await newProject({ name: n.trim(), path: path.trim(), description: d.trim(), worktree: wt, default_bot: bot === "none" ? null : bot, done_when: git && wt && doneWhen !== "none" ? doneWhen : undefined, node: "hub" }); if (id) { closeSheet(); go("#/projects/" + id) } }}>{t("pages:projects.create")}</Button></DialogFooter>
       </DialogContent>
     </Dialog>
   )
