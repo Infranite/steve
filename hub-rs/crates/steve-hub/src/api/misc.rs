@@ -118,6 +118,8 @@ async fn compute_state(st: &AppState, c: Ctx) -> Result<Value, ApiError> {
     let version = st.cfg.version.clone();
     let web_version = crate::web::web_version(&st.cfg);
     let update = crate::upgrades::available(&st.cfg);
+    let local = st.node.is_some();
+    let connected = device_connected(&st);
     let domain = st.domain.clone();
     let hold = domain.hold_status().await?;
     let lifecycles = domain.lifecycle_views(&c.ws).await?;
@@ -201,7 +203,10 @@ async fn compute_state(st: &AppState, c: Ctx) -> Result<Value, ApiError> {
         );
         let t_sessions = t0.elapsed();
         out.insert("hold".into(), hold);
-        out.insert("devices".into(), objs(r.devices_list()?));
+        out.insert(
+            "devices".into(),
+            objs(device_facts(r.devices_list()?, owner, local, connected)),
+        );
         out.insert("runtimes".into(), runtimes);
         tracing::debug!(
             "state: items {:?}, through sessions {:?}, all {:?}",
@@ -1297,20 +1302,88 @@ pub struct Fresh {
     fresh: Option<String>,
 }
 
-pub async fn devices(State(st): State<AppState>, Query(q): Query<Fresh>) -> ApiResult {
+fn device_connected(st: &AppState) -> bool {
+    st.node.as_ref().is_some_and(|node| {
+        node.connection_ready(
+            st.nodes
+                .as_ref()
+                .is_some_and(|s| s.registry.current("local").is_some()),
+        )
+    })
+}
+
+/// The stable `hub` inventory identity is registered by system::register_hub, never inferred
+/// from a role/name. Remote inventory identities have no established binding contract yet.
+fn device_facts(mut devices: Vec<Obj>, owner: bool, local: bool, connected: bool) -> Vec<Obj> {
+    for d in &mut devices {
+        let bound = str_of(d, "id") == crate::wire::workspaces::HUB_DEVICE && local;
+        d.insert(
+            "node_id".into(),
+            if bound { json!("local") } else { Value::Null },
+        );
+        d.insert(
+            "connected".into(),
+            if bound { json!(connected) } else { Value::Null },
+        );
+        d.insert("can_configure".into(), json!(owner && bound));
+        d.insert(
+            "config_reason".into(),
+            json!(if !owner {
+                "owner_required"
+            } else if !bound {
+                "unmapped"
+            } else {
+                ""
+            }),
+        );
+        d.insert(
+            "eligibility".into(),
+            json!({"state": "unknown", "reason": "workspace_checks_required"}),
+        );
+        d.insert("occupancy".into(), Value::Null);
+    }
+    devices
+}
+
+pub async fn devices(
+    State(st): State<AppState>,
+    Extension(c): Extension<Ctx>,
+    Query(q): Query<Fresh>,
+) -> ApiResult {
     let runtimes = st.runtimes.get(q.fresh.as_deref() == Some("1")).await;
-    st.read(move |r| ok(json!({ "devices": objs(r.devices_list()?), "runtimes": runtimes })))
+    let local = st.node.is_some();
+    let connected = device_connected(&st);
+    let owner = c.user.get("role").and_then(Value::as_str) == Some("owner");
+    st.read(move |r| ok(json!({ "devices": objs(device_facts(r.devices_list()?, owner, local, connected)), "runtimes": runtimes })))
         .await
 }
 
 pub async fn device_patch(
     State(st): State<AppState>,
+    Extension(c): Extension<Ctx>,
     Path(id): Path<String>,
     b: Bytes,
 ) -> ApiResult {
+    owner_or(&c, || "device_owner_required".into())?;
+    if id != crate::wire::workspaces::HUB_DEVICE || st.node.is_none() {
+        return Err(ApiError::Json(
+            409,
+            "device_configuration_unsupported".into(),
+        ));
+    }
+    let connected = device_connected(&st);
+    if !connected {
+        return Err(ApiError::Json(409, "device_node_disconnected".into()));
+    }
     let v = body(&b)?;
+    let revision = v
+        .get("revision")
+        .and_then(Value::as_i64)
+        .filter(|r| *r >= 0)
+        .ok_or_else(|| ApiError::Invalid(vec!["revision".into()]))?;
     let mut k = Check::object(&v);
     let mut p = Obj::new();
+    p.insert("revision".into(), json!(revision));
     if let Some(n) = k.opt_str("name", Str::len(1, 60)) {
         p.insert("name".into(), json!(n));
     }
@@ -1331,7 +1404,12 @@ pub async fn device_patch(
     k.finish()?;
     st.write(move |r| {
         r.device_patch(&id, &p)?;
-        ok_true()
+        let d = r
+            .devices_list()?
+            .into_iter()
+            .find(|d| str_of(d, "id") == id)
+            .ok_or_else(|| ApiError::not_found("device_not_found"))?;
+        ok(json!({"device": device_facts(vec![d], true, true, connected).remove(0)}))
     })
     .await
 }

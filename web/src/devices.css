@@ -1,0 +1,33 @@
+.device-page { height: 100%; width: 100%; min-width: 0; overflow-wrap: anywhere; }
+.device-page h1, .device-page h2 { white-space: normal; overflow: visible; text-overflow: clip; }
+.device-page [data-meta-part] { white-space: normal; overflow-wrap: anywhere; }
+.device-counts, .device-actions { display: flex; flex-wrap: wrap; gap: .6rem; align-items: center; }
+.device-counts { font-size: var(--text-sm, .875rem); }
+.device-counts > *, .device-actions > * { max-width: 100%; white-space: normal; height: auto; min-height: 2rem; overflow-wrap: anywhere; }
+.device-layout { display: grid; gap: 1rem; grid-template-columns: minmax(0, 1fr); align-items: start; }
+@media (min-width: 1100px) { .device-layout { grid-template-columns: minmax(0, 1.6fr) minmax(0, 1fr); } }
+.device-work-groups { display: flex; min-width: 0; flex-direction: column; gap: 1rem; }
+.device-work-row { min-width: 0; padding: 1.25rem; display: flex; flex-direction: column; gap: .65rem; overflow-wrap: anywhere; }
+.device-work-row + .device-work-row { border-top: 1px solid var(--border); }
+.device-work-row h3 { font-weight: 600; }
+.device-work-row p, .device-config p, .device-vitals p { color: var(--muted-foreground); }
+.device-work-row summary, .device-recent summary, .device-vitals summary, .device-capabilities > summary { cursor: pointer; padding: .6rem 0; }
+.device-recent, .device-capabilities { padding: 1rem; border-radius: .75rem; background: var(--card); }
+.device-config { display: flex; flex-direction: column; gap: 1rem; padding: 1rem; min-width: 0; }
+.device-config input[type=number] { max-width: 12rem; }
+.device-evidence { overflow-wrap: anywhere; }
+.device-vitals { min-width: 0; padding: 1.25rem; display: flex; flex-direction: column; gap: 1rem; background: var(--card); border-radius: .75rem; overflow-wrap: anywhere; }
+.device-chart { display: flex; flex-direction: column; gap: .6rem; margin-top: 1.2rem; }
+.device-chart-plot { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: .75rem; }
+.device-chart-axis { display: flex; flex-direction: column; justify-content: space-between; line-height: 1.5; font-variant-numeric: tabular-nums; }
+.device-chart svg { display: block; width: 100%; height: 10rem; min-height: 8lh; overflow: visible; }
+.device-chart-times { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 1rem; }
+.device-chart-times time { max-width: 100%; }
+.device-page h1, .device-page h2, .device-work-row h3, .device-work-row p, .device-counts > *, .device-actions > *, .device-vitals p, .device-vitals h3, .device-vitals summary, .device-config p, .device-config label, .device-config button, .device-evidence p { line-height: 1.5; }
+.device-config button { white-space: normal; height: auto; min-height: 2.25rem; padding-block: .5rem; }
+
+.device-chart-times time, .device-chart figcaption, .device-evidence [data-slot=dialog-description], .device-evidence [data-slot=dialog-title] { line-height: 1.5; }
+.device-chart { line-height: 1.5; }
+.device-chart-plot { margin-block: .75lh; }
+.device-chart-axis > :first-child { transform: translateY(-50%); }
+.device-chart-axis > :last-child { transform: translateY(50%); }

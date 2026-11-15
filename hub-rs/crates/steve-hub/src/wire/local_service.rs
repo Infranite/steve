@@ -129,6 +129,7 @@ pub(crate) fn host(
     );
     let tools = NodeTools::open(store.clone(), node_id.clone(), &home).map_err(|e| err(&e))?;
     let runtime = NodeRuntime::new(store.clone(), remote, domain);
+    runtime.require_transport_link();
     runtime.set_configured_roots(super::workspaces::configured(cfg));
     runtime.set_principal_state(super::principal_state(vars));
     runtime.set_idle_release(cfg.idle_release_ms as i64);

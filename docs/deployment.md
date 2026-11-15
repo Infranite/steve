@@ -787,3 +787,41 @@ A [theme plugin](#plugins) installed on the Hub is registered this way for every
 returns `{ ok: true }` or `{ ok: false, errors }`: a manifest with an unknown field or token, a token its kind may not
 set, or a value outside the syntax above is refused as a whole and nothing on screen changes. A registered theme
 appears among the choices of its kind; a stored choice whose theme is not registered shows the default until it is.
+
+
+### Device work and monitoring
+
+The device page groups visible sessions by their recorded device identity. Open requests take
+precedence over execution state; a running session with a request is counted once under “Needs
+you”. Read-only imports do not count as execution load. Queued messages retain their own session
+and message identities; unassigned queues are not attributed to the local machine. “Status
+updated” is not proof of execution activity. A disconnected device retains its last known work;
+Steve does not automatically move that work elsewhere.
+
+The built-in `hub` inventory identity is registered by the installation and is associated with
+`local` only while the local Node coordinator is configured. Names and roles do not establish
+this association. Remote inventory association, exact occupancy and workspace eligibility remain
+unknown where the backend has no supporting contract. Local harness discovery is displayed only
+for this explicitly associated local device.
+
+Only the instance owner can change supported local device configuration. The page refreshes
+connection and permission facts every ten seconds; failed refreshes retain the snapshot and
+disable configuration. The backend rejects writes while the supported Node is disconnected. Device reads include
+`revision`, `node_id`, `connected`, `can_configure`, and a reason when configuration is unavailable. A
+`PATCH /api/devices/hub` includes the read `revision` alongside `status` (`正常` or `暂停接活`)
+and/or `max_sessions` (1–16). The response returns the committed `device` and incremented
+revision. A stale revision returns 409; no fields are changed. These settings gate new logical
+session turns on the local Node, including queued follow-up turns. They do not stop existing
+attempts or their retries, pause orchestration, control independent background jobs, or migrate
+work. Pending turns are reconsidered every two seconds and when the runtime next plans work.
+Lowering concurrency never interrupts an accepted attempt. The editor preserves drafts after
+errors and requires a read-back before retrying an uncertain save or conflict.
+
+Node vitals are sampled every 60 seconds with a 15-second response timeout. Samples older than
+135 seconds (two intervals plus the timeout) are stale. Each result carries this policy, the
+Node's sample time, the Hub receipt time, and gaps between received samples. Missing samples
+remain gaps. Load history is the one-minute load divided by the reported logical CPU count;
+it is not CPU utilization. Memory and disk capacities use GiB (2³⁰ bytes). Disk roots retain
+their identities even when their capacities match. Disks have no historical series, and the
+local in-process Node has no remote round-trip time. Monitoring read errors, no samples, gaps
+and stale snapshots are displayed separately.

@@ -656,6 +656,7 @@ impl Link {
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Device {
+    pub revision: i64,
     pub id: String,
     pub name: String,
     pub roles: Vec<String>,
@@ -670,6 +671,7 @@ pub struct Device {
 impl Device {
     pub(crate) fn from_row(r: &Row) -> rusqlite::Result<Self> {
         Ok(Self {
+            revision: r.get("revision")?,
             id: r.get("id")?,
             name: r.get("name")?,
             roles: json_col(r, "roles", Vec::new())?,

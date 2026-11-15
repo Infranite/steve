@@ -1,3 +1,4 @@
+import device from "./device.ts"
 /* every namespace in zh-CN, registered in ../../index.ts (NAMESPACES). A new namespace goes in both languages and in NAMESPACES. */
 import hub from "./hub.ts"
 import accounts from "./accounts.ts"
@@ -22,4 +23,4 @@ import yolo from "./yolo.ts"
 import misc from "./misc.ts"
 import common from "./common.ts"
 
-export default { hub, accounts, api, views, manage, core, pages, shell, auto, channels, github, integrations, knowledge, caps, mail, people, stats, thread, vault, yolo, misc, common }
+export default { hub, device, accounts, api, views, manage, core, pages, shell, auto, channels, github, integrations, knowledge, caps, mail, people, stats, thread, vault, yolo, misc, common }

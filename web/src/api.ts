@@ -95,13 +95,13 @@ export type RTag = { id: string; name: string; cat: string; description: string;
 export type RKindReview = { id: string; kind: string; why: string }
 export type RKindBackfill = { checked: number; kept: number; dry: boolean; filled: { id: string; title: string; kind: string; by: "model" | "rule"; confidence: number; uncertain: boolean; why: string; had?: string[] }[] }
 export type RMessage = { id: string; author: "me" | "steve"; text: string; item_id: string | null; meta: any; created: number }
-export type RDevice = { id: string; name: string; roles: string[]; os: string; version: string; status: string; max_sessions: number; seen: number; created: number }
+export type RDevice = { id: string; name: string; roles: string[]; os: string; version: string; status: string; max_sessions: number; seen: number; created: number; revision?: number; node_id?: string | null; can_configure?: boolean; connected?: boolean | null; config_reason?: string; eligibility?: { state: "eligible" | "ineligible" | "unknown"; reason: string }; occupancy?: number | null }
 /** one directory of a Node's machine, for choosing a project's directory: `path` and `parent` show the home directory as `~`;
  *  `denied`: it exists but the Hub is not allowed to read it */
 export type RBrowse = { path: string; parent: string | null; exists: boolean; denied: boolean; git: boolean; dirs: { name: string; path: string; git: boolean }[]; more: boolean }
 export type RNode = { node_id: string; name: string; fingerprint: string; state: "pending" | "active" | "paused" | "revoked"; linked: boolean; local: boolean; last_seen?: number | null; link_error?: { at: number; error: string } }
 /** a Node machine's day (B3): the latest sample, and load per CPU, memory in use (0..1) and round trip over time */
-export type RVitals = { latest: { at: number; cpus?: number; load?: [number, number, number]; mem_total?: number; mem_available?: number; roots?: { root: string; display?: string; free: number; total: number; inodes_free?: number }[]; sessions?: number; rtt_ms?: number | null }; series: { at: number; load: number | null; mem: number | null; rtt: number | null }[] }
+export type RVitals = { sampling?: { interval_ms: number; stale_after_ms: number; now: number }; gaps?: { from: number; to: number }[]; latest: { at: number; sampled_at?: number; cpus?: number; load?: [number, number, number]; mem_total?: number; mem_available?: number; roots?: { root: string; display?: string; free: number; total: number; inodes_free?: number }[]; sessions?: number; rtt_ms?: number | null }; series: { at: number; load: number | null; mem: number | null; rtt: number | null }[] }
 export type RPairing = { code: string; expires: number; pin: string | null; hub_id: string }
 /** remote Nodes over tailcat (A6): `hub_url` is `tailcat:<address>:<port>` once it runs */
 /** a remote install over tailcat's SSH (A6b): the command for the target, then its steps */
@@ -310,7 +310,7 @@ export const api = {
   devices: (fresh = false) => get<{ devices: RDevice[]; runtimes: RRuntime[] }>("/devices" + (fresh ? "?fresh=1" : "")),
   /** declares a harness adapter in the Hub's manifest (in force after the Hub restarts) */
   addHarness: (p: { id: string; name?: string; command: string; args?: string[]; env?: Record<string, string>; properties?: Record<string, unknown> }) => post<{ saved: boolean; restart: boolean }>("/system/harnesses", p),
-  removeHarness: (id: string) => del<{ removed: boolean; restart: boolean }>("/system/harnesses/" + encodeURIComponent(id)), patchDevice: (id: string, p: { name?: string; status?: string; max_sessions?: number }) => patch("/devices/" + id, p),
+  removeHarness: (id: string) => del<{ removed: boolean; restart: boolean }>("/system/harnesses/" + encodeURIComponent(id)), patchDevice: (id: string, p: { revision: number; name?: string; status?: string; max_sessions?: number }) => modReq<{ device: RDevice }>("PATCH", "/devices/" + encodeURIComponent(id), p, AbortSignal.timeout(30_000)),
   /** `off`: this Hub does not listen for remote Nodes (STEVE_NODE_LISTEN=0, or a read-only copy) */
   nodes: () => get<{ nodes: RNode[]; off?: boolean }>("/nodes"),
   createPairing: () => post<RPairing>("/nodes/pairings"),

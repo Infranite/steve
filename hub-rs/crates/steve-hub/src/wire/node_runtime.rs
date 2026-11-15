@@ -55,8 +55,8 @@ mod tests;
 mod workspace;
 
 pub use apply::AttemptFacts;
-pub use config::{ConfigChange, Configured};
 pub(crate) use config::mode_str;
+pub use config::{ConfigChange, Configured};
 pub use cost::CostCaps;
 pub(crate) use cost::tokens as usage_tokens;
 pub use heads::{
@@ -219,6 +219,7 @@ pub struct Binding {
 pub struct NodeRuntime {
     /// [`Self::set_principal_state`].
     principal_state: AtomicBool,
+    transport_link_required: AtomicBool,
     /// [`Self::set_configured_roots`].
     configured_roots: OnceLock<Vec<String>>,
     store: Store,
@@ -327,6 +328,7 @@ impl NodeRuntime {
         let node_id = node.id().clone();
         Arc::new(NodeRuntime {
             principal_state: AtomicBool::new(false),
+            transport_link_required: AtomicBool::new(false),
             configured_roots: OnceLock::new(),
             store,
             node,
@@ -492,6 +494,19 @@ impl NodeRuntime {
 
     /// The worker that sends commands and the one that applies events, until the runtime is dropped.
     pub fn start(self: &Arc<Self>) {
+        let admission = Arc::downgrade(self);
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                let Some(node) = admission.upgrade() else {
+                    break;
+                };
+                if node.is_reconciled() && node.running().is_ok() {
+                    let _ = tokio::task::spawn_blocking(move || node.plan_waiting()).await;
+                }
+            }
+        });
+
         // events taken in before a restart but not applied yet
         match self.store.reader(|c| {
             let mut st = c.prepare(
@@ -677,6 +692,19 @@ impl NodeRuntime {
         self.holding.load(Ordering::SeqCst)
             || self.paused.load(Ordering::SeqCst)
             || self.store.maintenance()
+    }
+
+    /// An explicitly colocated service still needs its transport; identity is not connectivity.
+    pub fn require_transport_link(&self) {
+        self.transport_link_required.store(true, Ordering::SeqCst);
+    }
+
+    pub fn connection_ready(&self, linked: bool) -> bool {
+        if self.transport_link_required.load(Ordering::SeqCst) {
+            linked
+        } else {
+            self.is_reconciled()
+        }
     }
 
     /// The Node this coordinator drives.

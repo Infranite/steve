@@ -699,3 +699,44 @@ fn devices_and_links() {
         (json!({"w": 1}), 1.0, "steve")
     );
 }
+
+#[test]
+fn device_configuration_cas_rejects_stale_revision_without_partial_writes() {
+    let t = fresh();
+    let s = &t.store;
+    s.devices()
+        .upsert(&DeviceInfo {
+            id: "hub".into(),
+            name: "Device".into(),
+            ..Default::default()
+        })
+        .unwrap();
+    let revision = s.devices().list().unwrap()[0].revision;
+    s.devices()
+        .patch(
+            "hub",
+            &DevicePatch {
+                revision: Some(revision),
+                status: Some("暂停接活".into()),
+                max_sessions: Some(2),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert!(matches!(
+        s.devices().patch(
+            "hub",
+            &DevicePatch {
+                revision: Some(revision),
+                status: Some("正常".into()),
+                max_sessions: Some(8),
+                ..Default::default()
+            }
+        ),
+        Err(steve_store::StoreError::Conflict(_))
+    ));
+    let d = &s.devices().list().unwrap()[0];
+    assert_eq!(d.revision, revision + 1);
+    assert_eq!(d.max_sessions, 2);
+    assert_eq!(d.status, "暂停接活");
+}
