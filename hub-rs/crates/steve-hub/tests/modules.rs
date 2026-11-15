@@ -800,6 +800,34 @@ async fn contacts_tools_are_served_over_mcp() {
     let (s, found) = mcp(json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": { "name": "steve_contacts_find", "arguments": { "query": "赵六" } } })).await;
     assert_eq!(s, 200, "{found}");
     assert!(found.contains("赵六"), "{found}");
+    let rpc = |name: &str, args: Value| json!({"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":name,"arguments":args}});
+    let (_, canonical) = mcp(rpc("steve_contacts", json!({"action":"find","query":"赵六"}))).await;
+    assert_eq!(serde_json::from_str::<Value>(&canonical).unwrap()["result"], serde_json::from_str::<Value>(&found).unwrap()["result"]);
+    // The consolidated endpoint works both directly and through search/call.
+    let (_, canonical) = mcp(rpc("steve_tool_call", json!({"name":"steve_contacts","arguments":{"action":"find","query":"赵六"}}))).await;
+    assert!(canonical.contains("赵六"), "{canonical}");
+    for (name, args, old, old_args) in [
+        ("steve_github_read", json!({"action":"status"}), "steve_github_status", json!({})),
+        ("steve_mail_read", json!({"action":"thread"}), "steve_mail_thread", json!({})),
+        ("steve_matters", json!({"action":"search","query":"x"}), "steve_matters_search", json!({"query":"x"})),
+    ] {
+        let (_, new) = mcp(rpc(name, args)).await;
+        let (_, old) = mcp(rpc(old, old_args)).await;
+        assert_eq!(serde_json::from_str::<Value>(&new).unwrap()["result"], serde_json::from_str::<Value>(&old).unwrap()["result"], "{name}");
+    }
+    // An old pin loads the new entry once, even alongside another alias pin.
+    for name in ["steve_contacts_find", "steve_whois"] {
+        assert_eq!(c.call("PUT", &format!("/api/bots/steve/tool-pins/tool/{name}"), None, None).await.0, 200);
+    }
+    let (_, pinned) = mcp(json!({"jsonrpc":"2.0","id":10,"method":"tools/list"})).await;
+    let pinned: Value = serde_json::from_str(&pinned).unwrap();
+    let tools = pinned["result"]["tools"].as_array().unwrap();
+    assert_eq!(tools.len(), 9);
+    assert_eq!(tools.iter().filter(|t| t["name"] == "steve_contacts").count(), 1);
+    assert!(tools.iter().all(|t| t["name"] != "steve_whois"));
+    let (_, invalid) = mcp(rpc("steve_contacts", json!({"action":"whois","query":"赵六","role":"owner"}))).await;
+    assert_eq!(serde_json::from_str::<Value>(&invalid).unwrap()["result"]["isError"], true);
+
     // without the bearer: refused like the Steve tools
     let r = c.http.post(format!("{}/mcp", c.base)).json(&json!({ "jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": { "name": "steve_contacts_find", "arguments": { "query": "x" } } })).send().await.expect("mcp");
     assert_eq!(r.status().as_u16(), 401);
@@ -1341,11 +1369,7 @@ async fn ownership_routes_and_tools() {
         "not loaded by default: {list}"
     );
     let (_, list) = mcp(json!({"jsonrpc":"2.0", "id":3, "method":"tools/call", "params":{"name":"steve_tools_search", "arguments":{"resource":"contact"}}})).await;
-    for t in [
-        "steve_whois",
-        "steve_person_holdings",
-        "steve_steward_propose",
-    ] {
+    for t in ["steve_contacts", "steve_steward_propose"] {
         assert!(list.contains(t), "{t} missing: {list}");
     }
     let (s, out) = mcp(json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": { "name": "steve_whois", "arguments": { "query": "值班" } } })).await;

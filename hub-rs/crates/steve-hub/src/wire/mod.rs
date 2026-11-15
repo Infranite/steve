@@ -40,6 +40,7 @@ pub mod research;
 pub mod research_mcp;
 pub mod signals;
 pub mod store;
+pub mod tool_families;
 pub mod tool_registry;
 pub mod tool_service;
 pub mod view;

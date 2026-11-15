@@ -108,7 +108,7 @@
             "properties": {
               "kind": {
                 "type": "string",
-                "description": "e.g. 分支, 提交, PR, 文件, 文档"
+                "description": "e.g. branch, commit, PR, file, document"
               },
               "title": {
                 "type": "string"

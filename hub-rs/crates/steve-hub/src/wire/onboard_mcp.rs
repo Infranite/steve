@@ -276,7 +276,7 @@ fn profile(x: &Extra, ws: &str, user: &str, args: &Value) -> Called {
         .then(|| json!({"fields": fields, "memories": saved, "known": skipped}));
     Ok((
         format!(
-            "Saved to the user's profile: {}. They can read and change it under 我.",
+            "Saved to the user's profile: {}. They can read and change it in their profile.",
             said.join(", ")
         ),
         wrote,

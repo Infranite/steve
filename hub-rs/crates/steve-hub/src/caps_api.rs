@@ -37,6 +37,7 @@ pub fn session_tools() -> Vec<Value> {
             v["core"] = json!(CORE.contains(&e.name.as_str()));
             v["resources"] = json!(e.resources);
             v["as_you"] = json!(e.as_you);
+            v["aliases"] = json!(crate::wire::tool_families::aliases(&e.name));
             v
         })
         .collect()
@@ -73,6 +74,48 @@ pub async fn steve_h(State(st): State<AppState>, headers: HeaderMap) -> Json<Val
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn builtin_model_descriptions_are_english_and_locale_independent() {
+        fn definitions() -> Value {
+            json!({
+                "session": crate::wire::tool_service::builtin_catalog().iter().map(|t| json!({"description":t.description,"schema":t.input_schema})).collect::<Vec<_>>(),
+                "research": crate::wire::research_mcp::tools(),
+                "outside": crate::wire::outside_mcp::tools(),
+                "onboard": crate::wire::onboard_mcp::tools(),
+            })
+        }
+        let zh = steve_i18n::with(steve_i18n::ZH_CN, definitions);
+        let en = steve_i18n::with(steve_i18n::EN, definitions);
+        assert_eq!(zh, en, "model contracts never follow the UI locale");
+        fn walk(v: &Value) {
+            match v {
+                Value::Object(obj) => {
+                    for (k, v) in obj {
+                        if k == "description" {
+                            let text = v.as_str().unwrap();
+                            assert!(!text.is_empty());
+                            assert!(
+                                !text.chars().any(|c| ('\u{3400}'..='\u{9fff}').contains(&c)),
+                                "non-English model description: {text}"
+                            );
+                        }
+                        walk(v);
+                    }
+                }
+                Value::Array(xs) => {
+                    for x in xs {
+                        walk(x);
+                    }
+                }
+                _ => {}
+            }
+        }
+        walk(&zh);
+        let tools = session_tools();
+        assert_eq!(tools.len(), 40);
+        assert_eq!(tools.iter().filter(|t| t["core"] == true).count(), 8);
+    }
 
     #[test]
     fn a_description_is_cut_at_its_first_sentence() {

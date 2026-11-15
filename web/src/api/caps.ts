@@ -44,7 +44,7 @@ export type ToolPin = { kind: "tool" | "mcp" | "a2a"; target: string }
 export type BotTools = { core: string[]; pins: ToolPin[]; usage: { tool: string; searched: number; called: number }[]; days: number }
 export type BotCaps = { mcp: McpServer[]; skills: Skill[]; a2a: A2aAgent[] }
 
-export type SteveTool = { name: string; description: string }
+export type SteveTool = { name: string; description: string; aliases?: string[] }
 export type SteveServer = {
   tools: SteveTool[]
   outside: SteveTool[]

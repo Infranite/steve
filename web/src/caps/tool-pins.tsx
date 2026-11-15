@@ -9,7 +9,7 @@ import { SkillGrid, type Skill } from "@/components/affect/agent-skills"
 import { Section, Loading, Blank, Notice, Disclosure } from "@/ui"
 import { capsApi, type BotCaps, type ToolPin } from "@/api/caps"
 import { errText, useList } from "./common"
-import { toolDescKey } from "./steve"
+import { toolDescKey, catalogPin, catalogUsage } from "./tool-catalog"
 
 type Choice = ToolPin & { name: string; description: string; category: string; enabled?: boolean }
 const key = (p: ToolPin) => `${p.kind}:${p.target}`
@@ -25,8 +25,9 @@ export function BotToolPins({ bot, caps }: { bot: string; caps: BotCaps | null }
   if (data.s === "unwired") return <Blank>{t("caps:pins.unwired")}</Blank>
   if (data.s === "error") return <Notice tone="destructive">{data.e}<Button variant="ghost" size="xs" onClick={() => void load()}>{t("caps:pins.retry")}</Button></Notice>
   const [tools, server] = data.v
-  const core = new Set(tools.core), pinned = new Set(tools.pins.map(key))
-  const usage = new Map(tools.usage.map((u) => [u.tool, u]))
+  const core = new Set(tools.core), pinned = new Set(tools.pins.map((p) => key(catalogPin(p, server.tools))))
+  const usageRows = catalogUsage(tools.usage, server.tools)
+  const usage = new Map(usageRows.map((u) => [u.tool, u]))
   const choices = new Map<string, Choice>()
   for (const x of server.tools) {
     const desc = toolDescKey(x.name)
@@ -35,12 +36,15 @@ export function BotToolPins({ bot, caps }: { bot: string; caps: BotCaps | null }
   for (const name of tools.core) if (!choices.has(`tool:${name}`)) choices.set(`tool:${name}`, { kind: "tool", target: name, name, description: t("caps:pins.coreTool"), category: t("caps:pins.builtin") })
   for (const x of caps?.mcp ?? []) choices.set(`mcp:${x.id}`, { kind: "mcp", target: x.id, name: x.name, description: t("caps:pins.wholeServer"), category: "MCP", enabled: x.enabled })
   for (const x of caps?.a2a ?? []) choices.set(`a2a:${x.id}`, { kind: "a2a", target: x.id, name: x.title, description: x.description, category: "A2A", enabled: x.enabled })
-  for (const u of tools.usage) if (!choices.has(`tool:${u.tool}`)) choices.set(`tool:${u.tool}`, { kind: "tool", target: u.tool, name: u.tool, description: t("caps:pins.observed"), category: t("caps:pins.observedSource") })
-  for (const pin of tools.pins) if (!choices.has(key(pin))) choices.set(key(pin), { ...pin, name: pin.target, description: t("caps:pins.retained"), category: t("caps:pins.pinned") })
+  for (const u of usageRows) if (!choices.has(`tool:${u.tool}`)) choices.set(`tool:${u.tool}`, { kind: "tool", target: u.tool, name: u.tool, description: t("caps:pins.observed"), category: t("caps:pins.observedSource") })
+  for (const pin of tools.pins.map((p) => catalogPin(p, server.tools))) if (!choices.has(key(pin))) choices.set(key(pin), { ...pin, name: pin.target, description: t("caps:pins.retained"), category: t("caps:pins.pinned") })
   const flip = async (p: ToolPin, on: boolean) => {
     setBusy(true); setError(null)
-    try { await capsApi.pin(bot, p, on); await load() } catch (e) { setError(errText(e)) }
-    finally { setBusy(false) }
+    try {
+      if (on) await capsApi.pin(bot, p, true)
+      else for (const original of tools.pins.filter((x) => key(catalogPin(x, server.tools)) === key(p))) await capsApi.pin(bot, original, false)
+    } catch (e) { setError(errText(e)) }
+    finally { await load(); setBusy(false) }
   }
   const needle = query.trim().toLocaleLowerCase()
   const rows: Skill[] = [...choices.values()]

@@ -380,6 +380,7 @@ impl Registry {
                 .entries
                 .iter()
                 .filter(|e| match (p.kind.as_str(), &e.source) {
+                    ("tool", Source::Steve) => e.name == super::tool_families::canonical(&p.target),
                     ("tool", _) => e.name == p.target,
                     ("mcp", Source::Mcp { id, .. }) | ("a2a", Source::A2a { id, .. }) => {
                         *id == p.target
@@ -444,10 +445,17 @@ const ALIASES: &[(&str, &str)] = &[
     ("记忆", "memory"),
     ("联系人", "contact"),
     ("同事", "person"),
+    ("归属", "contact"),
+    ("负责", "contact"),
+    ("谁的", "contact"),
     ("机密", "secret"),
     ("密钥", "secret"),
     ("凭据", "credential"),
     ("邮件", "mail"),
+    ("附件", "mail"),
+    ("日志", "github"),
+    ("整理", "digest"),
+    ("跨对话", "matter"),
     ("群", "chat"),
     ("聊天", "chat"),
     ("消息", "message"),
@@ -520,6 +528,12 @@ fn stem(w: &str) -> String {
 /// How well `e` matches `query`'s words: a word in the name counts most, then its source and
 /// resources, then its description; a word that only starts one counts less.
 fn score(e: &Entry, query: &[String], whole: &str) -> u32 {
+    if matches!(e.source, Source::Steve)
+        && super::tool_families::canonical(whole) == e.name
+        && whole != e.name
+    {
+        return 1000;
+    }
     if e.name.eq_ignore_ascii_case(whole) {
         return 1000;
     }

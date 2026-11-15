@@ -104,6 +104,11 @@ const LIST_WAIT: std::time::Duration = std::time::Duration::from_secs(20);
 const SEARCH_WAIT: std::time::Duration = std::time::Duration::from_secs(45);
 
 pub fn builtin_catalog() -> Vec<ToolDescriptor> {
+    super::tool_families::catalog(raw_builtin_catalog())
+}
+
+/// Original operation contracts retained for compatibility calls and family dispatch.
+pub(super) fn raw_builtin_catalog() -> Vec<ToolDescriptor> {
     let mut out: Vec<ToolDescriptor> = steve_mcp::tools::list()
         .into_iter()
         .map(|t| ToolDescriptor {
@@ -346,13 +351,23 @@ impl ToolService {
         args: Value,
         checked: bool,
     ) -> Result<String, String> {
-        let builtin = steve_mcp::handles(name)
-            || mcp_extra::owner_of(name).is_some_and(|o| !matches!(o, mcp_extra::Owner::A2a));
+        let resolved = if super::tool_families::aliases(name).is_empty() {
+            None
+        } else {
+            super::tool_families::resolve(name, &args, &raw_builtin_catalog())?
+        };
+        let (target, forwarded) = resolved
+            .as_ref()
+            .map(|(n, a)| (*n, a.clone()))
+            .unwrap_or((name, args.clone()));
+        let builtin = steve_mcp::handles(target)
+            || mcp_extra::owner_of(target).is_some_and(|o| !matches!(o, mcp_extra::Owner::A2a));
         let out = if builtin {
-            if checked && let Some(t) = self.catalog().into_iter().find(|t| t.name == name) {
-                check_args(name, &t.input_schema, &args)?;
+            if checked && let Some(t) = raw_builtin_catalog().into_iter().find(|t| t.name == target)
+            {
+                check_args(target, &t.input_schema, &forwarded)?;
             }
-            self.call_inner(s.clone(), name, args).await
+            self.call_inner(s.clone(), target, forwarded).await
         } else {
             let r = self.registry(&s, Reach::Tool(name)).await;
             let Some(e) = r.get(name).cloned() else {
@@ -405,7 +420,12 @@ impl ToolService {
                 _ => Err(format!("MCP error -32602: Tool {name} not found")),
             }
         };
-        self.count(&s, vec![name.to_string()], 0, 1);
+        self.count(
+            &s,
+            vec![super::tool_families::canonical(name).to_string()],
+            0,
+            1,
+        );
         out
     }
 
@@ -516,7 +536,7 @@ impl steve_modules::context::PromptContext for CatalogContext {
             shown.push((x.name.clone(), names));
         }
         for p in pins.iter().filter(|p| p.kind == "tool") {
-            listed.push(p.target.clone());
+            listed.push(super::tool_families::canonical(&p.target).to_string());
         }
         for p in pins.iter().filter(|p| p.kind == "a2a") {
             if let Ok(Some(a)) = steve_store::caps::a2a::get(c, &p.target) {

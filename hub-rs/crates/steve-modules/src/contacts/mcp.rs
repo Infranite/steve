@@ -68,7 +68,7 @@ static TOOLS: LazyLock<Vec<Value>> = LazyLock::new(|| {
         }),
         json!({
             "name": WHOIS,
-            "description": "Who is behind an account handle, bot, device, persona, connection or group, and who is responsible for it (负责人). Use it for questions like \"谁负责 X\" or \"这个机器人是谁的\".",
+            "description": "Identify who owns or maintains an account handle, Bot, device, persona, connection or group.",
             "inputSchema": {
                 "$schema": "http://json-schema.org/draft-07/schema#",
                 "type": "object",
@@ -85,19 +85,19 @@ static TOOLS: LazyLock<Vec<Value>> = LazyLock::new(|| {
                 "$schema": "http://json-schema.org/draft-07/schema#",
                 "type": "object",
                 "properties": {
-                    "person": { "type": "string", "description": "id or exact name; \"我\" is the user" }
+                    "person": { "type": "string", "description": "person ID or exact name; accepts the current user alias in their language" }
                 },
                 "required": ["person"]
             }
         }),
         json!({
             "name": STEWARD_PROPOSE,
-            "description": "Record who is responsible for a bot, account, device, connection, persona or group when the conversation says so (\"这是张三的机器人\"). It is recorded at once; the user can undo it.",
+            "description": "Record who is responsible for a Bot, account, device, connection, persona or group when the conversation explicitly states it. It is recorded at once; the user can undo it.",
             "inputSchema": {
                 "$schema": "http://json-schema.org/draft-07/schema#",
                 "type": "object",
                 "properties": {
-                    "object": { "type": "string", "description": "the object's id, handle or exact name (as steve_whois finds it)" },
+                    "object": { "type": "string", "description": "the object's id, handle or exact name (as steve_contacts with action whois finds it)" },
                     "person": { "type": "string", "description": "id or exact name of the responsible person" },
                     "role": { "type": "string", "enum": STEWARD_ROLES },
                     "basis": { "type": "string", "description": "what in the conversation says so" }

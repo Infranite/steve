@@ -95,7 +95,7 @@ pub fn tools() -> Vec<Value> {
         ),
         tool(
             MATTERS,
-            "Find existing matters (cross-conversation events) by text before associating a segment. Read a match with steve_matter_read; memory search is steve_memory_list / steve_knowledge_search.",
+            "Find existing matters (cross-conversation events) by text before associating a segment. Read a match with steve_matters action read; memory search is steve_memory_list / steve_knowledge_search.",
             json!({"query": {"type": "string", "maxLength": 200}}),
             &["query"],
         ),

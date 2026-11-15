@@ -763,7 +763,7 @@ const TOOL_KINDS: [&str; 3] = ["fact", "preference", "rule"];
 pub fn remember_tool() -> Value {
     json!({
         "name": REMEMBER,
-        "description": "Save something that will matter beyond this task: a rule or preference the user said holds from now on (\"以后…\", \"每次…\"), or a verified fact reusable in other work. Not this task's requirements, progress, decisions or results — those stay in the item. It becomes a candidate the user confirms.",
+        "description": "Save something that will matter beyond this task: a rule or preference the user explicitly says applies from now on, or a verified fact reusable in other work. Task requirements, progress, decisions and results stay in the item. It becomes a candidate the user confirms.",
         "inputSchema": {
             "$schema": "http://json-schema.org/draft-07/schema#",
             "type": "object",
