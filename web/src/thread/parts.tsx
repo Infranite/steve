@@ -327,7 +327,8 @@ function AcceptRow({ i, decision }: { i: Item; decision: string }) {
  * last sent it, and whatever it needs from you — answerable right here. Lifecycle events update it; they are not messages. */
 export function ItemCard({ c }: { c: ItemCardState }) {
   const i = st.items.find((x) => x.id === c.item), t = useT()
-  useEffect(() => { if (st.ready && (c.delivery || c.state === "deliver" || c.state === "done")) void loadItem(c.item) }, [c.item, c.delivery?.at, c.state, st.ready])
+  // A new delivery must refresh artifact associations even when this item was already opened before it finished.
+  useEffect(() => { if (st.ready && (c.delivery || c.state === "deliver" || c.state === "done")) void loadItem(c.item, true) }, [c.item, c.delivery?.at, c.state, st.ready])
   if (!i) return null
   const look = cardLook(i, c), w = i.waits[0]
   /* what it is doing now, only while it does something: a stale line under a fresh status contradicts it */

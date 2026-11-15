@@ -2,6 +2,8 @@
 export type Delivery = {
   id: string; item_id: string; title: string; name: string; mime: string; size: number; created: number
   entrypoint: string | null; url: string; download_url: string; content_url: string; access_warning: string | null
+  /** Authenticated metadata supplies the verified owner workspace; anonymous shares omit it. */
+  workspace_id?: string
   /** Optional existing preview contract, especially for server-converted documents. */
   preview?: { type: "text"; lang: string; text: string; truncated: boolean; from?: string } | null
   /** A share may additionally report its deadline, so an already-open page can retire its preview. */
@@ -9,6 +11,12 @@ export type Delivery = {
 }
 export type DeliveryShare = { token: string; url: string; expires_at: number; revoked_at?: number | null }
 export type DeliveryRoute = { id: string; shared: boolean }
+
+/** Bind a standalone page before App loads /api/state. Never substitute the browser's current workspace. */
+export function deliveryWorkspace(d: Pick<Delivery, "workspace_id">, explicit: string | null): string | null {
+  const ws = d.workspace_id
+  return typeof ws === "string" && ws.length > 0 && (explicit === null || explicit === ws) ? ws : null
+}
 
 export function deliveryRoute(path: string): DeliveryRoute | null {
   const m = /^\/(deliveries|shares)\/([^/]+)\/?$/.exec(path)

@@ -16,10 +16,10 @@ applyStoredLook()
 
 const DeliveryPage = lazyView(() => import("@/delivery-page").then((m) => ({ default: m.DeliveryPage })))
 const delivery = deliveryRoute(location.pathname)
-if (delivery) {
+const workspace = new URLSearchParams(location.search).get("ws")
+if (delivery || workspace) {
   bindPageHub("")
-  const workspace = new URLSearchParams(location.search).get("ws")
-  if (!delivery.shared && workspace) setPageWorkspace(workspace)
+  if (!delivery?.shared && workspace) setPageWorkspace(workspace)
 }
 // Share pages must not start the authenticated application, its state requests or its event stream.
 createRoot(document.getElementById("root")!).render(<StrictMode>{delivery?.shared ? <DeliveryPage id={delivery.id} shared /> : <App deliveryId={delivery?.id} />}</StrictMode>)

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict"
 import { test } from "node:test"
-import { deliveryContent, deliveryForm, deliveryRoute, loopbackUrl, outputDeliveryId, webUrl } from "../src/delivery.ts"
+import { deliveryContent, deliveryForm, deliveryRoute, deliveryWorkspace, loopbackUrl, outputDeliveryId, webUrl } from "../src/delivery.ts"
 import { DeliveryHttpError, previewText, sharedDelivery } from "../src/delivery-data.ts"
 
 test("stable paths identify deliveries and tokens without interpreting local outputs as links", () => {
@@ -11,6 +11,16 @@ test("stable paths identify deliveries and tokens without interpreting local out
   assert.equal(outputDeliveryId(["file", "report", null, "artifact-1", 1, "result", "delivery-1"]), "delivery-1")
   assert.equal(outputDeliveryId(["file", "report", "/deliveries/d%20one", "artifact-1"]), "d one")
   assert.equal(outputDeliveryId(["file", "report", "https://other.example/deliveries/foreign", "artifact-1"]), null)
+  assert.equal(outputDeliveryId(["file", "report", "https://hub.example/deliveries/old", "artifact-1"]), null)
+  assert.equal(outputDeliveryId(["file", "report", "https://hub.example/deliveries/new", "artifact-1", 1, "result", "new"]), "new")
+})
+
+test("standalone delivery ownership comes from metadata and preserves an explicit selector", () => {
+  assert.equal(deliveryWorkspace({ workspace_id: "a" }, null), "a")
+  assert.equal(deliveryWorkspace({ workspace_id: "a" }, "a"), "a")
+  assert.equal(deliveryWorkspace({ workspace_id: "a" }, "b"), null)
+  assert.equal(deliveryWorkspace({ workspace_id: "a" }, ""), null)
+  for (const workspace_id of [undefined, null, "", 42]) assert.equal(deliveryWorkspace({ workspace_id }, null), null)
 })
 
 test("bundle entrypoints retain authorization queries, nested paths and encoded filenames", () => {

@@ -28,9 +28,11 @@ function pdf() {
 }
 const text = "# Delivered report\n\nPersistent **Markdown** from a real HTTP endpoint.\n"
 export const longName = "delivery_".repeat(18) + "最终交付.md"
+// Match the Hub response, including direct navigations. Token shares do not enable active HTML.
+export const staticHtmlCsp = "sandbox allow-same-origin; default-src 'none'; script-src 'none'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; media-src 'self'; connect-src 'none'; object-src 'none'; frame-src 'none'; worker-src 'none'; base-uri 'none'; form-action 'none'"
 const design = {
-  "pages/index.html": { mime: "text/html", body: '<!doctype html><html><head><link rel="stylesheet" href="../assets/theme.css"></head><body><h1>Design entry</h1><img alt="Bundled image" src="../assets/image.png"><a href="details.html">Open details</a><script>try { parent.document.body.dataset.escaped = "yes" } catch { document.body.dataset.isolated = "yes" }</script></body></html>' },
-  "pages/details.html": { mime: "text/html", body: '<!doctype html><h1>Design details</h1><a href="index.html">Back</a>' },
+  "pages/index.html": { mime: "text/html", body: '<!doctype html><html><head><link rel="stylesheet" href="../assets/theme.css"></head><body><h1>Design entry</h1><img alt="Bundled image" src="../assets/image.png"><a href="details.html">Open details</a><button onclick="this.textContent=\'Script executed\'">Run script</button><script>document.body.dataset.executed = "yes"; parent.document.body.dataset.escaped = "yes"</script></body></html>' },
+  "pages/details.html": { mime: "text/html", body: '<!doctype html><link rel="stylesheet" href="../assets/theme.css"><h1>Design details</h1><img alt="Bundled image" src="../assets/image.png"><a href="index.html">Back</a>' },
   "assets/theme.css": { mime: "text/css", body: "h1 { color: rgb(20, 100, 180) }" },
   "assets/image.png": { mime: "image/png", body: png },
 }
@@ -44,12 +46,13 @@ const files = {
 }
 
 export async function deliveryFixture() {
-  const requests = [], shares = new Map(), streams = new Set()
+  const requests = [], shares = new Map(), streams = new Set(), memberships = new Set(["fixture", "other"])
   const created = Date.now() - 60_000
   const workspace = { id: "fixture", name: "Test workspace", description: "", item_prefix: "ST", sort: 0, created, updated: created }
+  const otherWorkspace = { ...workspace, id: "other", name: "Other workspace" }
   const item = { id: "ST-100", workspace_id: workspace.id, no: 100, title: "Delivered files", status: "done", stage: "", bot_id: null, project_id: null, cwd: null, branch: null, plan: [], now: "", accept_mode: null, priority: "", archived: false, star: false, due: null, snooze: null,
     source: ["chat", "chat"], parent: null, created, updated: created, goal: "Stable delivery", goals: 1, tags: [], deps: [], sessionIds: [], open: [], queued: 0, live: false }
-  const state = { version: "fixture", web_version: "fixture", workspace, workspaces: [workspace], items: [item], decisions: [], recent: [], bots: [], allBots: [], projects: [], tags: [], tagUses: {}, thread: [], settings: {}, sessions: [], devices: [], runtimes: [] }
+  const state = { version: "fixture", web_version: "fixture", workspace, workspaces: [workspace, otherWorkspace], items: [item], decisions: [], recent: [], bots: [], allBots: [], projects: [], tags: [], tagUses: {}, thread: [], settings: {}, sessions: [], devices: [], runtimes: [] }
   const json = (res, value, status = 200) => { res.writeHead(status, { "content-type": "application/json", "cache-control": "no-store", "x-steve-cursor": "1" }); res.end(JSON.stringify(value)) }
   const server = createServer(async (req, res) => {
     const origin = `http://${req.headers.host}`, u = new URL(req.url, origin), path = u.pathname
@@ -59,7 +62,19 @@ export async function deliveryFixture() {
     const publicPath = /^\/api\/delivery-shares\/([^/]+)(.*)$/.exec(path)
     const loggedIn = (req.headers.cookie || "").includes("fixture-auth=1")
     if (!publicPath && !loggedIn) return json(res, { error: "unauthenticated", login: "/auth/dev", token: false }, 401)
-    if (path === "/api/state") return json(res, state)
+    const selector = req.headers["x-steve-ws"] ?? u.searchParams.get("ws")
+    const cookieWorkspace = /fixture-workspace=([^;]+)/.exec(req.headers.cookie || "")?.[1] ?? "fixture"
+    const deliveryPath = /^\/api\/deliveries\//.test(path)
+    const ws = selector ?? (deliveryPath && req.method === "GET" ? "fixture" : cookieWorkspace)
+    if (!publicPath && !memberships.has(ws)) return json(res, { error: "Workspace membership required" }, 409)
+    if (deliveryPath && ws !== "fixture") return json(res, { error: "Delivery not found" }, 404)
+    const switchTo = /^\/api\/workspaces\/([^/]+)\/switch$/.exec(path)?.[1]
+    if (switchTo && req.method === "POST") {
+      if (!memberships.has(switchTo)) return json(res, { error: "Workspace membership required" }, 409)
+      res.setHeader("set-cookie", `fixture-workspace=${switchTo}; HttpOnly; SameSite=Lax; Path=/`)
+      return json(res, { ok: true })
+    }
+    if (path === "/api/state") return json(res, ws === "fixture" ? state : { ...state, workspace: otherWorkspace, items: [] })
     if (path === "/api/plugins/themes") return json(res, { themes: [] })
     if (path === "/api/yolo" || path === "/api/yolo/actions") return json(res, { windows: [], on: false, mode: "off", scopes: [], counts: {} })
     if (path === "/api/stream") { res.writeHead(200, { "content-type": "text/event-stream" }); res.write(": keepalive\n\n"); streams.add(res); req.on("close", () => streams.delete(res)); return }
@@ -67,6 +82,7 @@ export async function deliveryFixture() {
       { id: "artifact-md", kind: "file", title: longName, location: null, delivery_id: "md", created },
       { id: "artifact-html", kind: "file", title: "HTML design bundle", location: null, delivery_id: "html", created },
       { id: "artifact-old", kind: "file", title: "Older workspace report", location: "workspace/old.md", created },
+      { id: "artifact-foreign", kind: "file", title: "External file", location: "https://other.example/deliveries/md", created },
     ] })
     if (path === "/api/items/ST-100/artifacts/artifact-old/preview") return json(res, { type: "text", name: "old.md", path: "workspace/old.md", lang: "markdown", text: "# Legacy workspace report", truncated: false })
     let id, rest, token
@@ -83,7 +99,8 @@ export async function deliveryFixture() {
     if (!file) return json(res, { error: "Delivery not found" }, 404)
     const root = token ? `/api/delivery-shares/${encodeURIComponent(token)}` : `/api/deliveries/${encodeURIComponent(id)}`
     const meta = () => ({ id, item_id: item.id, title: id === "md" ? "Delivered report" : file.name, name: file.name, mime: file.mime, size: Buffer.byteLength(file.body), created, entrypoint: file.entrypoint ?? null,
-      url: origin + (token ? `/shares/${token}` : `/deliveries/${id}`), download_url: root + "/raw", content_url: root + (file.entrypoint ? "/content/" : "/content/file"), access_warning: id === "html" ? "Fixture address is reachable only in this isolated development check." : null,
+      url: origin + (token ? `/shares/${token}` : `/deliveries/${id}`), download_url: root + "/raw" + (token ? "" : "?ws=fixture"), content_url: root + (file.entrypoint ? "/content/" : "/content/file") + (token ? "" : "?ws=fixture"), access_warning: id === "html" ? "HTML is shown in a static sandbox. Scripts, forms, frames and external connections are disabled." : null,
+      ...(!token ? { workspace_id: "fixture" } : {}),
       ...(token ? { expires_at: shares.get(token).expires_at } : {}),
     })
     if (!rest) return json(res, meta())
@@ -112,10 +129,10 @@ export async function deliveryFixture() {
         if (!design[resource]) return json(res, { error: "Resource not found" }, 404)
         ;({ body, mime } = design[resource])
       }
-      res.writeHead(200, { "content-type": mime, "cache-control": "no-store", "x-content-type-options": "nosniff", ...(mime === "text/html" ? { "content-security-policy": token ? "sandbox allow-scripts" : "sandbox allow-same-origin" } : {}) }); return res.end(body)
+      res.writeHead(200, { "content-type": mime, "cache-control": "no-store", "x-content-type-options": "nosniff", ...(mime === "text/html" ? { "content-security-policy": staticHtmlCsp } : {}) }); return res.end(body)
     }
     json(res, { error: "Unknown delivery route" }, 404)
   })
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve))
-  return { url: `http://127.0.0.1:${server.address().port}`, requests, shares, close: async () => { for (const s of streams) s.end(); server.closeAllConnections(); await new Promise((r) => server.close(r)) } }
+  return { url: `http://127.0.0.1:${server.address().port}`, requests, shares, memberships, close: async () => { for (const s of streams) s.end(); server.closeAllConnections(); await new Promise((r) => server.close(r)) } }
 }

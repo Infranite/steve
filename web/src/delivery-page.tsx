@@ -43,14 +43,13 @@ function Content({ d, shared }: { d: Delivery; shared: boolean }) {
   if (error) return <div role="alert"><CannotPreview reason={error} /></div>
   if (form === "html") return <div className="flex min-w-0 flex-col gap-2">
     <div className="flex flex-wrap items-center justify-between gap-2">
-      <p className="type-footnote text-muted-foreground">{t(shared ? "pages:delivery.isolatedHtml" : "pages:delivery.staticHtml")}</p>
+      <p className="type-footnote text-muted-foreground">{t("pages:delivery.staticHtml")}</p>
       <Button size="sm" variant="ghost" onClick={() => setReset((x) => x + 1)} data-html-reset><RefreshCwIcon />{t("pages:delivery.resetPreview")}</Button>
     </div>
-    {/* Never combine scripts and same-origin. Authenticated static pages need same-origin so relative requests carry
-        SameSite=Lax session cookies; token paths need no cookie and can run scripts in an opaque origin instead.
-        Keep the real URL as the document base for assets and navigation. The Hub's direct HTML CSP must match:
-        authenticated: sandbox allow-same-origin; share: sandbox allow-scripts. No top navigation, forms or popups. */}
-    <iframe key={reset} title={d.title || d.name} src={url} sandbox={shared ? "allow-scripts" : "allow-same-origin"} referrerPolicy="no-referrer" className="block h-[70dvh] min-h-72 w-full rounded-xl bg-white ring-1 ring-border" data-delivery-html />
+    {/* Both signed-in and shared HTML are static. Same-origin preserves cookies on signed-in relative requests;
+        scripts stay disabled by this iframe AND the Hub's response CSP (sandbox allow-same-origin; script-src 'none').
+        Keep the real URL as the base for bundled assets and page jumps. No scripts, top navigation, forms or popups. */}
+    <iframe key={reset} title={d.title || d.name} src={url} sandbox="allow-same-origin" referrerPolicy="no-referrer" className="block h-[70dvh] min-h-72 w-full rounded-xl bg-white ring-1 ring-border" data-delivery-html />
   </div>
   if (form === "image") return <img src={url} alt={d.title || d.name} onError={() => setError(t("pages:delivery.contentError"))} className="mx-auto block max-h-[75dvh] max-w-full rounded-lg object-contain" referrerPolicy="no-referrer" data-delivery-image />
   if (form === "pdf") return <iframe title={d.name} src={url} referrerPolicy="no-referrer" className="block h-[75dvh] min-h-72 w-full rounded-xl ring-1 ring-border" data-delivery-pdf />
@@ -106,7 +105,7 @@ export function DeliveryView({ id, shared = false, embedded = false }: { id: str
       <h1 className="wrap-anywhere type-title">{d.title || d.name}</h1>
       <p className="wrap-anywhere type-callout text-muted-foreground" data-delivery-name>{d.name}</p>
       <p className="wrap-anywhere type-footnote text-muted-foreground">{d.mime} · {size(d.size)} · {date(d.created, { dateStyle: "medium", timeStyle: "short" })}</p>
-      {!shared && <a href={hubUrl(`/#/items/${encodeURIComponent(d.item_id)}`)} className="self-start type-callout text-blue underline underline-offset-2" data-delivery-item>{t("pages:delivery.fromItem", { item: d.item_id })}</a>}
+      {!shared && <a href={withWs("/") + `#/items/${encodeURIComponent(d.item_id)}`} className="self-start type-callout text-blue underline underline-offset-2" data-delivery-item>{t("pages:delivery.fromItem", { item: d.item_id })}</a>}
       {shared && d.expires_at != null && <p className="type-footnote text-muted-foreground">{t("pages:delivery.expiresAt", { time: date(d.expires_at, { dateStyle: "medium", timeStyle: "short" }) })}</p>}
       <div className="flex flex-wrap gap-2 pt-1">
         {download && <Button render={<a href={shared ? download : scoped(download)} download={d.name} referrerPolicy="no-referrer" />} nativeButton={false} data-delivery-download><DownloadIcon />{t("pages:delivery.download")}</Button>}
