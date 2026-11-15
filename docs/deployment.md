@@ -1010,7 +1010,7 @@ Successful writes return canonical values, audit fields and a new revision. This
 is independent of the Hub software version; there is no force-overwrite operation.
 Shared metadata uses the existing settings table's reserved instance entry
 `default / hub.metadata.v1`; backups must retain the database, including `node.hub_id`.
-The device configuration revision uses migration 067; shared metadata needs no additional
+The device configuration revision is added by its own database migration; shared metadata needs no additional
 schema migration. Normal installations apply the bundled migrations on startup.
 
 Cancel discards a changed draft only after confirmation. Saving blocks duplicate submissions
