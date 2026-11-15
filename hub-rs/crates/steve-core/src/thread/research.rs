@@ -231,34 +231,91 @@ pub(crate) struct InlineLane {
     idle: Arc<tokio::sync::Notify>,
 }
 
-/// `steve.draft` at most every [`DRAFT_EVERY`] ms, never twice the same.
+/// `steve.draft` at most every [`DRAFT_EVERY`] ms, including the trailing update:
+/// a burst's last tokens must reach the page even while the model pauses to use a tool.
 struct Drafts<'a> {
     core: &'a Core,
     ws: &'a str,
     mid: &'a str,
     stop: &'a super::Stop,
-    last: Mutex<(i64, String, String)>,
+    state: Arc<Mutex<DraftState>>,
     /// an IM conversation's answer: nothing streams to the web's conversation
     quiet: bool,
 }
 
-impl Drafts<'_> {
+#[derive(Default)]
+struct DraftState {
+    sent: i64,
+    thought: String,
+    text: String,
+    pending: bool,
+    closed: bool,
+}
+
+impl<'a> Drafts<'a> {
+    fn new(core: &'a Core, ws: &'a str, mid: &'a str, stop: &'a super::Stop, quiet: bool) -> Self {
+        Self {
+            core,
+            ws,
+            mid,
+            stop,
+            quiet,
+            state: Default::default(),
+        }
+    }
+
     fn send(&self, thought: &str, text: &str) {
-        let mut l = lock(&self.last);
-        if self.quiet
-            || self.stop.is_stopped()
-            || now() - l.0 < DRAFT_EVERY
-            || (l.1 == thought && l.2 == text)
-        {
+        let mut l = lock(&self.state);
+        if self.quiet || self.stop.is_stopped() || (l.thought == thought && l.text == text) {
             return;
         }
-        *l = (now(), thought.into(), text.into());
-        self.core.store().publish(HubEvent::SteveDraft {
-            ws: self.ws.into(),
-            mid: self.mid.into(),
-            thought: thought.into(),
-            text: text.into(),
+        l.thought = thought.into();
+        l.text = text.into();
+        let wait = DRAFT_EVERY - (now() - l.sent);
+        // Once scheduled, that task publishes the latest snapshot, not the one that scheduled it.
+        if l.pending {
+            return;
+        }
+        if wait <= 0 {
+            l.sent = now();
+            self.core.store().publish(HubEvent::SteveDraft {
+                ws: self.ws.into(),
+                mid: self.mid.into(),
+                thought: l.thought.clone(),
+                text: l.text.clone(),
+            });
+            return;
+        }
+        l.pending = true;
+        let (core, ws, mid, stop, state) = (
+            self.core.clone(),
+            self.ws.to_string(),
+            self.mid.to_string(),
+            self.stop.clone(),
+            self.state.clone(),
+        );
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(wait as u64)).await;
+            let mut l = lock(&state);
+            l.pending = false;
+            if l.closed || stop.is_stopped() {
+                return;
+            }
+            l.sent = now();
+            core.store().publish(HubEvent::SteveDraft {
+                ws,
+                mid,
+                thought: l.thought.clone(),
+                text: l.text.clone(),
+            });
         });
+    }
+}
+
+impl Drop for Drafts<'_> {
+    fn drop(&mut self) {
+        // A stored reply (or a stopped run) must never be followed by a late live draft.
+        lock(&self.state).closed = true;
     }
 }
 
@@ -797,14 +854,7 @@ impl Core {
         let a0 = now();
         let cx = self.chat_context(ws, j.user.as_deref(), &j.question);
         let extra = cx.as_ref().map(|(_, c)| c.text.as_str()).unwrap_or("");
-        let drafts = Drafts {
-            core: self,
-            ws,
-            mid: &j.origin,
-            stop: &j.stop,
-            last: Mutex::new((0, String::new(), String::new())),
-            quiet: false,
-        };
+        let drafts = Drafts::new(self, ws, &j.origin, &j.stop, false);
         let on_draft = |thought: &str, t: &str| drafts.send(thought, t);
         /* a stop ends the call right away (its harness is killed), not after the whole answer is written */
         let a = tokio::select! {
@@ -823,9 +873,10 @@ impl Core {
             ) => Some(a),
             _ = j.stop.stopped() => None,
         };
+        lock(&drafts.state).closed = true;
         let Some(a) = a.filter(|_| !j.stop.is_stopped()) else {
             /* what was written so far stays, marked as stopped */
-            let partial = lock(&drafts.last).2.trim().to_string();
+            let partial = lock(&drafts.state).text.trim().to_string();
             let text = if partial.is_empty() {
                 "好，停下了。要我换个方式就直接说。".to_string()
             } else {
@@ -1002,20 +1053,14 @@ impl Core {
             ..Default::default()
         });
         let sink = Sink {
-            drafts: Drafts {
-                core: self,
-                ws,
-                mid: &j.origin,
-                stop: &j.stop,
-                last: Mutex::new((0, String::new(), String::new())),
-                quiet: j.space != super::MAIN,
-            },
+            drafts: Drafts::new(self, ws, &j.origin, &j.stop, j.space != super::MAIN),
             run: &run,
             steps: &steps,
             t0: started,
             first_text: Mutex::new(None),
         };
         let mut out = r.research(req, &sink).await;
+        lock(&sink.drafts.state).closed = true;
         if j.stop.is_stopped() && out.end == RunEnd::Done {
             out.end = RunEnd::Stopped;
         }
@@ -1043,6 +1088,7 @@ impl Core {
             });
         }
         let first = (*lock(&sink.first_text)).or(out.first_text_ms);
+        drop(sink);
         {
             let mut s = lock(&steps);
             let mut research = json!({
@@ -1197,5 +1243,100 @@ mod mention_tests {
             ["ST-23", "ST-7"]
         );
         assert!(super::item_refs("ST- 和 ST-x", "ST").is_empty());
+    }
+}
+
+#[cfg(test)]
+mod draft_tests {
+    use super::*;
+    use crate::repo::WS;
+    use crate::testkit::Kit;
+
+    async fn drained(state: &Arc<Mutex<DraftState>>) {
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while lock(state).pending {
+                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("trailing draft task completed");
+    }
+
+    #[tokio::test]
+    async fn draft_bursts_publish_the_complete_tail_during_a_pause() {
+        let k = Kit::new();
+        let stop = super::super::Stop::default();
+        let drafts = Drafts::new(&k.core, WS, "question", &stop, false);
+        for (head, tail) in [
+            ("再交给", " Steve 开发排查。\n"),
+            ("中文", "标点。！"),
+            ("```rs\nlet n = 1;", "\n```"),
+        ] {
+            drafts.send("", head);
+            // Hold the throttle window open so this test does not depend on scheduling speed.
+            lock(&drafts.state).sent = now() + 100;
+            drafts.send("", &format!("{head}{}", tail.chars().next().unwrap()));
+            drafts.send("", &format!("{head}{tail}"));
+            assert!(lock(&drafts.state).pending);
+            drained(&drafts.state).await;
+            assert_eq!(
+                k.events.lock().unwrap().last(),
+                Some(&HubEvent::SteveDraft {
+                    ws: WS.into(),
+                    mid: "question".into(),
+                    thought: String::new(),
+                    text: format!("{head}{tail}"),
+                })
+            );
+            let n = k.events.lock().unwrap().len();
+            drafts.send("", &format!("{head}{tail}"));
+            assert_eq!(
+                k.events.lock().unwrap().len(),
+                n,
+                "unchanged snapshots are not repeated"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn pending_drafts_do_not_reappear_after_stop_or_completion() {
+        for stopped in [true, false] {
+            let k = Kit::new();
+            let stop = super::super::Stop::default();
+            let drafts = Drafts::new(&k.core, WS, "question", &stop, false);
+            lock(&drafts.state).sent = now() + 100;
+            drafts.send("", "尾字。");
+            let state = drafts.state.clone();
+            if stopped {
+                stop.stop();
+            } else {
+                drop(drafts);
+            }
+            drained(&state).await;
+            assert!(
+                !k.events
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|e| matches!(e, HubEvent::SteveDraft { .. }))
+            );
+            assert_eq!(
+                lock(&state).text,
+                "尾字。",
+                "stop keeps the latest buffered text"
+            );
+        }
+        let k = Kit::new();
+        let stop = super::super::Stop::default();
+        let drafts = Drafts::new(&k.core, WS, "im", &stop, true);
+        drafts.send("", "private reply");
+        assert!(!lock(&drafts.state).pending);
+        assert!(
+            !k.events
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|e| matches!(e, HubEvent::SteveDraft { .. }))
+        );
     }
 }

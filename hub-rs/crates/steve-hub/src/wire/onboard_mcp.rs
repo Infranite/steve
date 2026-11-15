@@ -66,7 +66,7 @@ pub fn tools() -> Vec<Value> {
         }),
         json!({
             "name": BOTS,
-            "description": "First meeting only. Without arguments: lists the Bots there are already (name, what each is responsible for, its harness); look before proposing new ones. With `bots`: creates the Bots the user agreed to. Each needs a name; `role` says what it is responsible for, `rules` how it works, `persona` how it speaks. `harness` and `model` are optional (ids from steve_onboard_models; the default is the harness Steve itself runs on with its default model). A Bot whose name exists already is skipped.",
+            "description": "First meeting only. Without arguments: lists the Bots there are already (name, what each is responsible for, its harness); look before proposing new ones. With `bots`: creates the Bots the user agreed to. Each needs a name; `role` says what it is responsible for, `rules` how it works, `persona` how it speaks. `harness` and `model` are optional (ids from steve_onboard_models; the default is the harness Steve itself runs on with its default model). `reasoning_effort` optionally sets thinking effort (one of the chosen harness’s `efforts` from steve_onboard_models); omitted or null uses its default. A Bot whose name exists already is skipped.",
             "inputSchema": schema(json!({
                 "bots": {
                     "type": "array", "minItems": 1, "maxItems": MAX_BOTS,
@@ -79,6 +79,7 @@ pub fn tools() -> Vec<Value> {
                             "persona": {"type": "string", "description": "at most 400 characters"},
                             "harness": {"type": "string"},
                             "model": {"type": "string"},
+                            "reasoning_effort": {"type": ["string", "null"], "description": "thinking effort from the chosen harness’s efforts; null uses its default"},
                         },
                         "required": ["name"],
                     },
@@ -376,7 +377,7 @@ fn bots(x: &Extra, ws: &str, user: &str, args: &Value) -> Called {
     if args.get("bots").is_none_or(Value::is_null) {
         let bots: Vec<Value> = there
             .iter()
-            .map(|b| json!({"name": b.name, "role": b.role, "harness": b.harness, "main": b.main}))
+            .map(|b| json!({"name": b.name, "role": b.role, "harness": b.harness, "model": b.model, "reasoning_effort": b.reasoning_effort, "main": b.main}))
             .collect();
         return Ok((json!({"bots": bots}).to_string(), None));
     }
@@ -398,8 +399,17 @@ fn bots(x: &Extra, ws: &str, user: &str, args: &Value) -> Called {
         too_long("persona", persona.as_deref(), 400)?;
         let harness = text(b, "harness")?.unwrap_or_else(|| steve.clone());
         let model = text(b, "model")?;
-        if core.models().harness(&harness).is_none() {
+        let Some(adapter) = core.models().harness(&harness) else {
             return Err(format!("{name}: there is no harness `{harness}` here."));
+        };
+        let reasoning_effort = text(b, "reasoning_effort")?;
+        if let Some(effort) = &reasoning_effort
+            && !adapter.efforts.contains(effort)
+        {
+            return Err(format!(
+                "{name}: `{effort}` is not a thinking effort of `{harness}`. Its efforts: {}.",
+                adapter.efforts.join(", ")
+            ));
         }
         if let Some(m) = &model {
             known_model(core, &harness, m).map_err(|e| format!("{name}: {e}"))?;
@@ -409,6 +419,7 @@ fn bots(x: &Extra, ws: &str, user: &str, args: &Value) -> Called {
             harness,
             role,
             model,
+            reasoning_effort,
             rules,
             persona,
             ..Default::default()
