@@ -20,6 +20,8 @@ use steve_store::{Store, StoreError};
 
 pub const MAX_FILE: usize = 64 * 1024 * 1024;
 const HTML_WARNING: &str = "HTML is shown in a static sandbox. Scripts, forms, frames and external connections are disabled.";
+const LOCAL_WARNING: &str = "The configured STEVE_PUBLIC_URL is a loopback or local-only address. This link cannot be used from another device; configure a browser-reachable installation address.";
+const REACHABILITY_WARNING: &str = "This URL uses the configured STEVE_PUBLIC_URL; reachability from other devices has not been verified.";
 const SESSION_SCOPE: &str = "SELECT EXISTS(SELECT 1 FROM sessions s JOIN items i ON i.id=s.item_id WHERE s.id=? AND i.id=? AND s.workspace_id=? AND i.workspace_id=s.workspace_id)";
 
 #[derive(Clone)]
@@ -50,6 +52,8 @@ pub struct Delivery {
     #[serde(skip)]
     pub workspace_id: String,
     #[serde(skip)]
+    pub(crate) registered_url: String,
+    #[serde(skip)]
     sha256: String,
     #[serde(skip)]
     manifest: BTreeMap<String, Object>,
@@ -73,8 +77,13 @@ impl Service {
         }
     }
 
-    pub fn url(&self, id: &str) -> String {
-        format!("{}/deliveries/{id}", self.base)
+    pub fn url(&self, id: &str, workspace: &str) -> String {
+        let mut url = reqwest::Url::parse(&format!("{}/deliveries/{id}", self.base))
+            .expect("configured public URL");
+        // The page must bind this selector BEFORE /api/state picks the remembered workspace.
+        // Headers or query selectors on API requests still go through normal membership checks.
+        url.query_pairs_mut().append_pair("ws", workspace);
+        url.into()
     }
 
     pub fn metadata(&self, d: &Delivery, share: Option<&str>) -> Value {
@@ -84,7 +93,7 @@ impl Service {
                 format!("{}/api/delivery-shares/{t}", self.base),
             ),
             None => (
-                self.url(&d.id),
+                self.url(&d.id, &d.workspace_id),
                 format!("{}/api/deliveries/{}", self.base, d.id),
             ),
         };
@@ -120,19 +129,22 @@ impl Service {
         } else {
             json!(content.as_str())
         };
-        v["access_warning"] =
-            if d.entrypoint.is_some() || d.mime == "text/html" || d.mime == "image/svg+xml" {
-                json!(HTML_WARNING)
-            } else {
-                Value::Null
-            };
+        let mut warnings = vec![if local_only_url(&self.base) {
+            LOCAL_WARNING
+        } else {
+            REACHABILITY_WARNING
+        }];
+        if d.entrypoint.is_some() || d.mime == "text/html" || d.mime == "image/svg+xml" {
+            warnings.push(HTML_WARNING);
+        }
+        v["access_warning"] = json!(warnings.join(" "));
         v
     }
 
     pub fn get(&self, id: &str, ws: Option<&str>) -> Result<Option<Delivery>, StoreError> {
         self.store.reader(|c| {
-            c.query_row("SELECT d.id,d.workspace_id,d.item_id,d.title,d.name,d.mime,d.size as i64,d.created,d.entrypoint,d.sha256,d.manifest,d.preview FROM deliveries d JOIN items i ON i.id=d.item_id AND i.workspace_id=d.workspace_id WHERE d.id=? AND (? IS NULL OR d.workspace_id=?)", params![id,ws,ws], |r| {
-                Ok((Delivery { id:r.get(0)?,workspace_id:r.get(1)?,item_id:r.get(2)?,title:r.get(3)?,name:r.get(4)?,mime:r.get(5)?,size:r.get::<_,i64>(6)? as u64,created:r.get(7)?,entrypoint:r.get(8)?,sha256:r.get(9)?,manifest:BTreeMap::new(),preview:Value::Null },r.get::<_,String>(10)?,r.get::<_,String>(11)?))
+            c.query_row("SELECT d.id,d.workspace_id,d.item_id,d.title,d.name,d.mime,d.size as i64,d.created,d.entrypoint,d.sha256,d.manifest,d.preview,d.url FROM deliveries d JOIN items i ON i.id=d.item_id AND i.workspace_id=d.workspace_id WHERE d.id=? AND (? IS NULL OR d.workspace_id=?)", params![id,ws,ws], |r| {
+                Ok((Delivery { id:r.get(0)?,workspace_id:r.get(1)?,item_id:r.get(2)?,title:r.get(3)?,name:r.get(4)?,mime:r.get(5)?,size:r.get::<_,i64>(6)? as u64,created:r.get(7)?,entrypoint:r.get(8)?,sha256:r.get(9)?,manifest:BTreeMap::new(),preview:Value::Null,registered_url:r.get(12)? },r.get::<_,String>(10)?,r.get::<_,String>(11)?))
             }).optional()?.map(|(mut d,m,p)| { d.manifest=serde_json::from_str(&m)?;d.preview=serde_json::from_str(&p)?;Ok(d) }).transpose()
         })
     }
@@ -207,8 +219,10 @@ impl Service {
             }
         };
         preview["path"] = json!(name);
+        let id = format!("dlv_{}", uuid::Uuid::new_v4().simple());
         let d = Delivery {
-            id: format!("dlv_{}", uuid::Uuid::new_v4().simple()),
+            registered_url: self.url(&id, &session.workspace_id),
+            id,
             workspace_id: session.workspace_id.clone(),
             item_id: item.into(),
             title: if title.is_empty() {
@@ -231,7 +245,7 @@ impl Service {
             if !t.query_row(SESSION_SCOPE,params![session.id,item,session.workspace_id],|r|r.get::<_,bool>(0))? {
                 return Err(StoreError::Conflict("delivery session/item workspace changed".into()));
             }
-            t.execute("INSERT INTO deliveries(id,url,workspace_id,item_id,session_id,title,name,mime,size,created,entrypoint,sha256,manifest,preview) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",params![d.id,self.url(&d.id),d.workspace_id,d.item_id,session.id,d.title,d.name,d.mime,d.size as i64,d.created,d.entrypoint,d.sha256,serde_json::to_string(&d.manifest)?,serde_json::to_string(&d.preview)?])?;
+            t.execute("INSERT INTO deliveries(id,url,workspace_id,item_id,session_id,title,name,mime,size,created,entrypoint,sha256,manifest,preview) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",params![d.id,d.registered_url,d.workspace_id,d.item_id,session.id,d.title,d.name,d.mime,d.size as i64,d.created,d.entrypoint,d.sha256,serde_json::to_string(&d.manifest)?,serde_json::to_string(&d.preview)?])?;
             Ok::<_,StoreError>(())
         }).map_err(|e|e.to_string())?;
         Ok(d)
@@ -391,6 +405,33 @@ impl Service {
             return Err("incomplete delivery object".into());
         }
         Ok((f, size, mime, name))
+    }
+}
+
+/// Recognize only addresses whose configured spelling is known to be local. DNS, routing,
+/// reverse proxies and firewall reachability cannot be inferred from a non-loopback hostname.
+fn local_only_url(base: &str) -> bool {
+    let Ok(url) = reqwest::Url::parse(base) else {
+        return false;
+    };
+    let host = url
+        .host_str()
+        .unwrap_or_default()
+        .trim_end_matches('.')
+        .to_ascii_lowercase();
+    if host == "localhost" || host.ends_with(".localhost") {
+        return true;
+    }
+    match host.trim_matches(['[', ']']).parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V4(ip)) => ip.is_loopback() || ip.is_unspecified(),
+        Ok(std::net::IpAddr::V6(ip)) => {
+            ip.is_loopback()
+                || ip.is_unspecified()
+                || ip
+                    .to_ipv4_mapped()
+                    .is_some_and(|ip| ip.is_loopback() || ip.is_unspecified())
+        }
+        Err(_) => false,
     }
 }
 

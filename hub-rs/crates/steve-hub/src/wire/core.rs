@@ -2248,13 +2248,13 @@ impl steve_mcp::Backend for CoreMcp {
                                 .reference(&s, location)
                                 .map_err(steve_mcp::ToolError::from)?
                             {
-                                output.location = Some(svc.url(&d.id));
+                                output.location = Some(d.registered_url);
                             } else if crate::deliveries::file_location(&output.kind, location) {
                                 let d = svc
                                     .receive(&s, location, Some(&output.title), None, &workspaces)
                                     .await
                                     .map_err(steve_mcp::ToolError::from)?;
-                                output.location = Some(svc.url(&d.id));
+                                output.location = Some(d.registered_url);
                             }
                         }
                     }
@@ -2283,7 +2283,7 @@ impl steve_mcp::Backend for CoreMcp {
                                 .map_err(|e| {
                                     CoreError::from(steve_store::StoreError::Conflict(e))
                                 })?;
-                            let location = svc.url(&report.id);
+                            let location = report.registered_url;
                             for o in &mut outputs {
                                 if super::output_files::summary_reference(o.location.as_deref())
                                     || (o.location.as_deref().is_none_or(|p| p.trim().is_empty())

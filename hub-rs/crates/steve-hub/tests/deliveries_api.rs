@@ -40,6 +40,28 @@ impl Env {
         assert_eq!(r.status(), 200);
         r.json().await.unwrap()
     }
+
+    async fn switch_workspace(&self, workspace: &str) -> String {
+        let switched = self
+            .request("POST", &format!("/api/workspaces/{workspace}/switch"), true)
+            .header("sec-fetch-site", "same-origin")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(switched.status(), 200);
+        // Use the REAL port-scoped Set-Cookie; steve_ws=foreign does not switch this Hub.
+        let ws_cookie = switched
+            .headers()
+            .get_all("set-cookie")
+            .iter()
+            .filter_map(|v| v.to_str().ok())
+            .find(|v| v.starts_with("steve_ws"))
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap();
+        format!("{}; {ws_cookie}", self.cookie)
+    }
 }
 
 async fn start(node: bool) -> Env {
@@ -155,15 +177,24 @@ async fn mcp_receives_files_on_local_node_and_local_off_and_retains_every_versio
         let meta: Value =
             serde_json::from_str(result["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
         let id = meta["id"].as_str().unwrap();
-        assert_eq!(meta["url"], format!("{}/deliveries/{id}", e.base));
+        assert_eq!(
+            meta["url"],
+            format!("{}/deliveries/{id}?ws=default", e.base)
+        );
         assert_eq!(meta["size"], 13);
         assert_eq!(meta["item_id"], "ST-1");
+        assert!(
+            meta["access_warning"]
+                .as_str()
+                .unwrap()
+                .contains("loopback or local-only")
+        );
         std::fs::write(&path, b"second").unwrap();
         let second = e
             .tool("steve_deliver_file", json!({"path":"report.md"}))
             .await;
         assert_ne!(second["result"]["isError"], true, "{second}");
-        let delivery=e.tool("steve_deliver",json!({"summary":"Files received","outputs":[{"kind":"file","title":"Report","location":meta["url"]}],"checks":[{"name":"test","passed":true}]})).await;
+        let delivery=e.tool("steve_deliver",json!({"summary":"Files received","outputs":[{"kind":"file","title":"Report","location":meta["url"]},{"kind":"file","title":"Automatic receipt","location":"report.md"},{"kind":"link","title":"External URL","location":format!("https://outside.example/deliveries/{id}?ws=default")}],"checks":[{"name":"test","passed":true}]})).await;
         assert_ne!(delivery["result"]["isError"], true, "{delivery}");
         assert!(
             e.store
@@ -171,9 +202,43 @@ async fn mcp_receives_files_on_local_node_and_local_off_and_retains_every_versio
                 .list("ST-1")
                 .unwrap()
                 .iter()
-                .any(|a| a.location.as_deref() == meta["url"].as_str()),
+                .any(|a| a.location.as_deref() == meta["url"].as_str()
+                    && a.delivery_id.as_deref() == Some(id)),
             "the item delivery/card references the exact received version"
         );
+        // Item details are the actual contract consumed by both item outputs and chat cards.
+        // Testing only fixture tuples with a synthetic delivery_id misses the production gap.
+        let detail: Value = e
+            .request("GET", "/api/items/ST-1", true)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let artifacts = detail["artifacts"].as_array().unwrap();
+        assert_eq!(artifacts.len(), 3, "{detail}");
+        assert!(
+            artifacts
+                .iter()
+                .find(|a| a["title"] == "External URL")
+                .unwrap()["delivery_id"]
+                .is_null()
+        );
+        let report = artifacts.iter().find(|a| a["title"] == "Report").unwrap();
+        assert_eq!(report["delivery_id"], id);
+        assert_eq!(report["location"], meta["url"]);
+        let automatic = artifacts
+            .iter()
+            .find(|a| a["title"] == "Automatic receipt")
+            .unwrap();
+        assert!(
+            automatic["delivery_id"]
+                .as_str()
+                .unwrap()
+                .starts_with("dlv_")
+        );
+        assert_ne!(automatic["delivery_id"], id);
         std::fs::remove_dir_all(&e.session.cwd).unwrap();
         let response = e
             .request("GET", &format!("/api/deliveries/{id}/raw"), true)
@@ -249,7 +314,7 @@ async fn mcp_receives_files_on_local_node_and_local_off_and_retains_every_versio
         // the delivery workspace; explicit selectors never silently change workspace.
         let owner = e.store.access().owner().unwrap().unwrap();
         e.store.transaction(|t|{t.execute("INSERT INTO workspace_members(workspace_id,user_id,role,created) VALUES('foreign',?,'owner',1)",[owner.id])?;Ok::<_,StoreError>(())}).unwrap();
-        let cookies = format!("{}; steve_ws=foreign", e.cookie);
+        let cookies = e.switch_workspace("foreign").await;
         for tail in ["", "/raw", "/content/report.md"] {
             assert_eq!(
                 e.request("GET", &format!("/api/deliveries/{id}{tail}"), false)
@@ -301,6 +366,247 @@ fn html_zip() -> Vec<u8> {
         w.write_all(data.as_bytes()).unwrap();
     }
     w.finish().unwrap().into_inner()
+}
+
+#[tokio::test]
+async fn artifact_contract_only_links_registered_urls_in_the_same_item_and_workspace() {
+    let e = start(false).await;
+    let d = e
+        .svc
+        .accept(&e.session, "Report", "report.md", b"report", None)
+        .unwrap();
+    let url = e.svc.url(&d.id, &d.workspace_id);
+    // Simulate a pre-fix receipt: old registered full URLs must gain the safe association too.
+    let old = e
+        .svc
+        .accept(&e.session, "Old", "old.md", b"old", None)
+        .unwrap();
+    let old_url = format!("{}/deliveries/{}", e.base, old.id);
+    e.store.transaction(|t| {
+        t.execute("UPDATE deliveries SET url=? WHERE id=?", rusqlite::params![old_url, old.id])?;
+        t.execute("INSERT INTO items(id,workspace_id,no,title,status,stage,created,updated) VALUES('ST-2','default',2,'another item','run','work',1,1)", [])?;
+        Ok::<_, StoreError>(())
+    }).unwrap();
+    for (title, location) in [
+        ("Registered", url.clone()),
+        ("Old receipt", old_url),
+        (
+            "External",
+            format!("https://outside.example/deliveries/{}?ws=default", d.id),
+        ),
+        (
+            "Wrong selector",
+            format!("{}/deliveries/{}?ws=foreign", e.base, d.id),
+        ),
+        (
+            "Foreign origin suffix",
+            format!(
+                "https://127.0.0.1.outside.example/deliveries/{}?ws=default",
+                d.id
+            ),
+        ),
+        ("Relative unregistered URL", format!("/deliveries/{}", d.id)),
+        ("Legacy file", "outputs/old-report.md".into()),
+    ] {
+        e.store
+            .artifacts()
+            .add("ST-1", "file", title, Some(&location))
+            .unwrap();
+    }
+    e.store
+        .artifacts()
+        .add("ST-2", "link", "Other item's version", Some(&url))
+        .unwrap();
+    let detail: Value = e
+        .request("GET", "/api/items/ST-1", true)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let artifacts = detail["artifacts"].as_array().unwrap();
+    assert_eq!(artifacts.len(), 7);
+    for artifact in artifacts {
+        match artifact["title"].as_str().unwrap() {
+            "Registered" => assert_eq!(artifact["delivery_id"], d.id),
+            "Old receipt" => assert_eq!(artifact["delivery_id"], old.id),
+            _ => assert!(artifact["delivery_id"].is_null(), "{artifact}"),
+        }
+    }
+    assert!(
+        e.store.artifacts().list("ST-2").unwrap()[0]
+            .delivery_id
+            .is_none()
+    );
+    // Moving the owning item must not keep a live association across workspace boundaries.
+    e.store
+        .transaction(|t| {
+            t.execute(
+                "UPDATE items SET workspace_id='foreign',no=2 WHERE id='ST-1'",
+                [],
+            )?;
+            Ok::<_, StoreError>(())
+        })
+        .unwrap();
+    assert!(
+        e.store
+            .artifacts()
+            .list("ST-1")
+            .unwrap()
+            .iter()
+            .all(|a| a.delivery_id.is_none())
+    );
+    assert_eq!(
+        e.request("GET", &format!("/api/deliveries/{}", d.id), true)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        404
+    );
+}
+
+#[tokio::test]
+async fn original_tool_page_url_binds_workspace_after_real_switch_and_still_checks_membership() {
+    let e = start(false).await;
+    std::fs::write(PathBuf::from(&e.session.cwd).join("design.zip"), html_zip()).unwrap();
+    let result = e
+        .tool("steve_deliver_file", json!({"path":"design.zip"}))
+        .await;
+    assert_ne!(result["result"]["isError"], true, "{result}");
+    let meta: Value =
+        serde_json::from_str(result["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    let warning = meta["access_warning"].as_str().unwrap();
+    assert!(warning.contains("loopback or local-only") && warning.contains("static sandbox"));
+    let page = reqwest::Url::parse(meta["url"].as_str().unwrap()).unwrap();
+    let id = meta["id"].as_str().unwrap();
+    let selector = page
+        .query_pairs()
+        .find(|(key, _)| key == "ws")
+        .unwrap()
+        .1
+        .into_owned();
+    assert_eq!(page.path(), format!("/deliveries/{id}"));
+    assert_eq!(selector, "default");
+    let owner = e.store.access().owner().unwrap().unwrap();
+    e.store.transaction(|t| {
+        t.execute("INSERT INTO workspace_members(workspace_id,user_id,role,created) VALUES('foreign',?,'owner',1)", [&owner.id])?;
+        Ok::<_, StoreError>(())
+    }).unwrap();
+    let cookies = e.switch_workspace("foreign").await;
+    let state: Value = e
+        .request("GET", "/api/state", false)
+        .header("cookie", &cookies)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(state["workspace"]["id"], "foreign");
+    // The delivery frontend binds the page's ws before bootstrap. Emulate that exact header,
+    // then assert the cookie really would select the other workspace without it.
+    let bound: Value = e
+        .request("GET", "/api/state", false)
+        .header("cookie", &cookies)
+        .header("x-steve-ws", &selector)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(bound["workspace"]["id"], "default");
+    for tail in [
+        "",
+        "/raw",
+        "/content/site/index.html",
+        "/content/site/assets/site.css",
+        "/content/site/next.html",
+    ] {
+        let path = format!("/api/deliveries/{id}{tail}");
+        assert_eq!(
+            e.request("GET", &path, false)
+                .header("cookie", &cookies)
+                .header("x-steve-ws", &selector)
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            200,
+            "{tail}"
+        );
+        // Relative resources have no selector, but retain ordinary membership enforcement.
+        assert_eq!(
+            e.request("GET", &path, false)
+                .header("cookie", &cookies)
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            200,
+            "{tail}"
+        );
+        for request in [
+            e.request("GET", &path, false)
+                .header("x-steve-ws", "foreign"),
+            e.request("GET", &format!("{path}?ws=foreign"), false),
+        ] {
+            assert_eq!(
+                request
+                    .header("cookie", &cookies)
+                    .send()
+                    .await
+                    .unwrap()
+                    .status(),
+                404,
+                "{tail}"
+            );
+        }
+        assert_eq!(
+            e.request("GET", &format!("{path}?ws=default"), false)
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            401
+        );
+    }
+    e.store
+        .transaction(|t| {
+            t.execute(
+                "DELETE FROM workspace_members WHERE workspace_id='default' AND user_id=?",
+                [&owner.id],
+            )?;
+            Ok::<_, StoreError>(())
+        })
+        .unwrap();
+    for tail in [
+        "",
+        "/raw",
+        "/content/site/index.html",
+        "/content/site/assets/site.css",
+        "/content/site/next.html",
+    ] {
+        let path = format!("/api/deliveries/{id}{tail}");
+        for request in [
+            e.request("GET", &path, false)
+                .header("x-steve-ws", &selector),
+            e.request("GET", &path, false),
+        ] {
+            assert_eq!(
+                request
+                    .header("cookie", &cookies)
+                    .send()
+                    .await
+                    .unwrap()
+                    .status(),
+                409,
+                "{tail}"
+            );
+        }
+    }
 }
 
 #[tokio::test]

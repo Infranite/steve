@@ -437,6 +437,8 @@ pub struct Artifact {
     pub title: String,
     pub location: Option<String>,
     pub created: i64,
+    /// Hub-registered immutable delivery in this artifact's item/workspace, never a URL guess.
+    pub delivery_id: Option<String>,
 }
 
 /// Sessions pass through unconverted in TS: `readonly` stays 0/1.

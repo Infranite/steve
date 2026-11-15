@@ -92,7 +92,7 @@
   },
   {
     "name": "steve_deliver_file",
-    "description": "Receive an immutable file version into Hub storage and return stable authenticated URLs after the full transfer succeeds. Does not end the turn or publish a share. Use a file inside this session directory or the item outputs directory; ZIP folders first. For HTML ZIPs, entrypoint optionally selects a package HTML path. Reference the returned url in steve_deliver outputs to associate the delivery card.",
+    "description": "Receive an immutable file version into Hub storage and return stable authenticated URLs after the full transfer succeeds. Does not end the turn or publish a share. Use a file inside this session directory or the item outputs directory; ZIP folders first. For HTML ZIPs, entrypoint optionally selects a package HTML path. Preserve the returned url including its ws query in steve_deliver outputs to associate the delivery card within this item/workspace. Check access_warning for local-only addresses and unverified reachability. HTML is always a static preview; public sharing does not enable scripts.",
     "inputSchema": {
       "type": "object",
       "properties": {

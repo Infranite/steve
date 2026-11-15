@@ -84,14 +84,26 @@ async fn local_file_versions_survive_cleanup_and_restart() {
     );
     assert!(reloaded.get(&old.id, Some("other")).unwrap().is_none());
     let meta = svc.metadata(&old, None);
-    assert_eq!(meta["url"], svc.url(&old.id));
+    assert_eq!(meta["url"], svc.url(&old.id, &old.workspace_id));
     assert!(meta["created"].as_i64().unwrap() > 1_000_000_000_000);
     assert!(meta["entrypoint"].is_null());
-    assert!(meta["access_warning"].is_null());
-    assert!(svc.reference(&s, &svc.url(&old.id)).unwrap().is_some());
+    assert!(
+        meta["access_warning"]
+            .as_str()
+            .unwrap()
+            .contains("not been verified")
+    );
+    assert!(
+        svc.reference(&s, &svc.url(&old.id, &old.workspace_id))
+            .unwrap()
+            .is_some()
+    );
     let mut other = s.clone();
     other.workspace_id = "other".into();
-    assert!(svc.reference(&other, &svc.url(&old.id)).is_err());
+    assert!(
+        svc.reference(&other, &svc.url(&old.id, &old.workspace_id))
+            .is_err()
+    );
 }
 
 #[tokio::test]
@@ -215,6 +227,89 @@ fn documents_images_pdf_and_generic_zip_have_the_existing_preview_shapes() {
     assert!(d.entrypoint.is_none());
     let meta = svc.metadata(&d, None);
     assert_eq!(meta["content_url"], meta["download_url"]);
+}
+
+#[test]
+fn warnings_use_the_configured_address_and_keep_static_html_restrictions() {
+    let (_home, svc, s) = fixture();
+    let text = svc.accept(&s, "Text", "note.md", b"note", None).unwrap();
+    let html = svc
+        .accept(&s, "HTML", "index.html", b"<p>ok</p>", None)
+        .unwrap();
+    let svg = svc.accept(&s, "SVG", "image.svg", b"<svg/>", None).unwrap();
+    let bundle = svc
+        .accept(
+            &s,
+            "Bundle",
+            "design.zip",
+            &zip(&[("index.html", b"ok")]),
+            None,
+        )
+        .unwrap();
+    for (base, local) in [
+        ("http://127.0.0.1:8440", true),
+        ("http://127.12.34.56", true),
+        ("http://localhost", true),
+        ("https://preview.localhost.", true),
+        ("http://[::1]:8440", true),
+        ("http://[::ffff:127.0.0.2]", true),
+        ("http://0.0.0.0:8440", true),
+        ("http://[::]:8440", true),
+        ("http://192.168.1.2:8440", false),
+        ("https://steve.example", false),
+        ("https://localhost.example", false),
+        ("https://127.0.0.1.example", false),
+    ] {
+        let mut configured = svc.clone();
+        configured.base = base.into();
+        for delivery in [&text, &html, &svg, &bundle] {
+            for share in [None, Some("example-token")] {
+                let meta = configured.metadata(delivery, share);
+                let warning = meta["access_warning"].as_str().unwrap();
+                assert_eq!(
+                    warning.contains("loopback or local-only"),
+                    local,
+                    "{base}: {warning}"
+                );
+                assert_eq!(
+                    warning.contains("static sandbox"),
+                    delivery.id != text.id,
+                    "{warning}"
+                );
+                if !local {
+                    assert!(warning.contains("not been verified"));
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn delivery_references_preserve_registered_urls_and_reject_forged_selectors() {
+    let (_home, svc, s) = fixture();
+    let d = svc
+        .accept(&s, "Report", "report.md", b"report", None)
+        .unwrap();
+    let legacy = format!("{}/deliveries/{}", svc.base, d.id);
+    assert_eq!(svc.reference(&s, &legacy).unwrap().unwrap().id, d.id);
+    assert_eq!(
+        svc.reference(&s, &d.registered_url).unwrap().unwrap().id,
+        d.id
+    );
+    for suffix in [
+        "?ws=wrong",
+        "?ws=default&extra=1",
+        "?ws=default&ws=foreign",
+        "#fragment",
+    ] {
+        assert!(
+            svc.reference(&s, &format!("{legacy}{suffix}")).is_err(),
+            "{suffix}"
+        );
+    }
+    let foreign = format!("https://outside.example/deliveries/{}?ws=default", d.id);
+    assert!(svc.reference(&s, &foreign).unwrap().is_none());
+    assert!(svc.reference(&s, &format!("{legacy}/raw")).is_err());
 }
 
 #[test]

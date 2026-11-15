@@ -323,10 +323,12 @@ fn row_types_follow_column_order() {
         .unwrap();
     assert_eq!(keys(&s.devices().list().unwrap()[0]), cols("devices"));
     s.artifacts().add(&item.id, "pr", "t", None).unwrap();
-    assert_eq!(
-        keys(&s.artifacts().list(&item.id).unwrap()[0]),
-        cols("artifacts")
-    );
+    // delivery_id is a derived, scope-checked association, not a second stored location.
+    let mut artifact_keys = cols("artifacts");
+    artifact_keys.push("delivery_id".into());
+    let artifacts = s.artifacts().list(&item.id).unwrap();
+    assert_eq!(keys(&artifacts[0]), artifact_keys);
+    assert!(artifacts[0].delivery_id.is_none());
     s.timeline()
         .add(&item.id, "me", "me", "x", None, &[])
         .unwrap();

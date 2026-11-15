@@ -141,15 +141,22 @@ impl Service {
     /// in this session's workspace; never interpret a foreign or malformed delivery URL as a path.
     pub fn reference(&self, session: &Session, location: &str) -> Result<Option<Delivery>, String> {
         let prefix = format!("{}/deliveries/", self.base);
-        let Some(id) = location.strip_prefix(&prefix) else {
+        let Some(tail) = location.strip_prefix(&prefix) else {
             return Ok(None);
         };
+        let id = tail.split('?').next().unwrap_or_default();
         let d = self
             .get(id, Some(&session.workspace_id))
             .map_err(|e| e.to_string())?
             .ok_or("delivery is not in this workspace")?;
+        // Accept old receipts without a selector, and the exact new page URL. Do not infer
+        // an association from a path on an arbitrary origin, or swallow a wrong selector.
+        if location != format!("{prefix}{}", d.id) && location != self.url(&d.id, &d.workspace_id) {
+            return Err("invalid delivery URL or workspace selector".into());
+        }
         // A coordinator may include an upstream child's delivery in its own outputs. Reuse
         // the exact immutable version in the same workspace; its original item_id stays intact.
+        // It remains an ordinary link: artifacts attach delivery_id only within the SAME item.
         Ok(Some(d))
     }
 }
