@@ -610,3 +610,50 @@ fn capacity_migration_updates_old_display_defaults_preserves_custom_values_and_r
         32
     );
 }
+
+#[test]
+fn device_revision_migration_preserves_existing_limits_and_reopens() {
+    let before = db::MIGRATIONS
+        .iter()
+        .position(|sql| sql.contains("ALTER TABLE devices ADD COLUMN revision"))
+        .unwrap();
+    let (_dir, path) = at_version(before);
+    let c = Connection::open(&path).unwrap();
+    assert!(!columns(&c, "devices").contains(&"revision".to_string()));
+    c.execute_batch(
+        "INSERT INTO devices(id,name,roles,status,max_sessions,seen,created)
+        VALUES ('hub','Hub','[]','暂停接活',32,1,1),('custom','Custom','[]','正常',256,1,1);",
+    )
+    .unwrap();
+    db::migrate(&c).unwrap();
+    db::migrate(&c).unwrap();
+    assert_eq!(
+        count(&c, "SELECT count(*) FROM devices WHERE revision=0"),
+        2
+    );
+    assert_eq!(
+        count(
+            &c,
+            "SELECT max_sessions FROM devices WHERE id='hub' AND status='暂停接活'"
+        ),
+        32
+    );
+    assert_eq!(
+        count(&c, "SELECT max_sessions FROM devices WHERE id='custom'"),
+        256
+    );
+    c.execute("UPDATE devices SET revision=7 WHERE id='hub'", [])
+        .unwrap();
+    drop(c);
+    let store = Store::open(path, NoPublisher).unwrap();
+    store
+        .reader(|c| -> steve_store::Result<()> {
+            assert_eq!(count(c, "SELECT revision FROM devices WHERE id='hub'"), 7);
+            assert_eq!(
+                count(c, "SELECT max_sessions FROM devices WHERE id='custom'"),
+                256
+            );
+            Ok(())
+        })
+        .unwrap();
+}

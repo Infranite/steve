@@ -66,7 +66,6 @@ export default {
   "rtt": "远程往返时间（ms）",
   "gaps": "断采：{{from}} 至 {{to}}",
   "missing": "此指标无可用样本，缺失不补零。",
-  "gib": "GiB",
   "hub": "管理 Hub",
   "state": {
     "running": "执行中",

@@ -66,7 +66,6 @@ export default {
   "rtt": "Remote round trip (ms)",
   "gaps": "Sampling gap: {{from}} to {{to}}",
   "missing": "No usable samples for this metric; missing values are not zero.",
-  "gib": "GiB",
   "hub": "Manage Hub",
   "state": {
     "running": "Running",

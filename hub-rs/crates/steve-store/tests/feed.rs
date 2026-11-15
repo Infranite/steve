@@ -346,6 +346,9 @@ fn migration_imports_only_existing_notifications_and_moves_seen_to_feed_reads() 
     t.store.transaction(|tx|->Result<()> {
         tx.execute_batch("DROP TRIGGER notification_feed_insert; DROP TABLE feed_reads; DROP TABLE feed_windows; DROP TABLE feed_entries;")?;
         tx.execute("INSERT INTO personal_notifications(id,workspace_id,user_id,event_id,delivery_key,mode,body,state,seen_at,created) VALUES('old',?,'alice','event','key','log','original','held',42,10)",[WS])?;
+        // Reconstruct the pre-073 schema, including undoing later additive columns.
+        // Otherwise reopening would replay 074 against a column already installed by env().
+        tx.execute_batch("ALTER TABLE devices DROP COLUMN revision;")?;
         tx.execute("UPDATE schema_version SET v=72",[])?;Ok(())
     }).unwrap();
     drop(t.store);
