@@ -10,7 +10,7 @@ export type RItem = {
   plan: PlanStep[]; now: string; accept_mode: string | null; priority: string; archived: boolean; star: boolean; due: string | null; snooze: { label: string; until: number } | null
   source: [string, string]; parent: { item?: string | null; session?: string | null; at?: number | null } | null; phase?: "ready" | "active" | "closing" | "closed"; cycle?: number; created: number; updated: number
   goal: string; goals: number; tags: string[]; deps: string[]; sessionIds: string[]; open: string[]; queued: number; live: boolean
-  workflow_paused?: boolean; workflow_cycle?: number; workflow_failed?: string[]
+  workflow_paused?: boolean; workflow_cycle?: number; workflow_failed?: string[]; workflow_attempt?: number; workflow_superseded?: boolean
 }
 export type DependencyWait = {
   item_id: string; status: ItemStatus; phase: string; cycle: number

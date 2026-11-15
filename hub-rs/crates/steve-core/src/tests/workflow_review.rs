@@ -79,6 +79,7 @@ fn finish(k: &Kit, parent: &str, id: &str) {
                 name: "已操作并检查".into(),
                 passed: true,
                 operated: true,
+                scope: None,
             }],
             &[],
         )

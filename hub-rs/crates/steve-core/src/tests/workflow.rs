@@ -1,5 +1,5 @@
-use serde_json::{Value, json};
 use rusqlite::params;
+use serde_json::{Value, json};
 use steve_store::{UnitSpec, WorkUnit, Workflow};
 
 use crate::testkit::Kit;
@@ -67,27 +67,152 @@ fn confirmed_workflow_activity_needs_the_current_applied_attempt_and_fresh_agent
             Ok(())
         }).unwrap();
     };
-    event(1, at - 900_000, "a_current", json!({"type":"attempt_started"}));
-    event(2, at - 599_000, "a_current", json!({"type":"message_started","message":"assistant","block":"b","role":"assistant"}));
-    assert!(store.workflows().confirmed_activity(&child, &sid, at).unwrap().is_some());
-    assert!(store.workflows().confirmed_activity(&child, &sid, at + 1_000).unwrap().is_none(), "600 seconds is stale");
-    event(3, at + 1_001, "a_current", json!({"type":"message_started","message":"user","block":"b","role":"user"}));
-    event(4, at + 1_002, "a_retired", json!({"type":"tool_changed","tool":{}}));
-    assert!(store.workflows().confirmed_activity(&child, &sid, at + 1_003).unwrap().is_none());
-    event(5, at + 1_004, "a_current", json!({"type":"tool_changed","tool":{}}));
-    assert!(store.workflows().confirmed_activity(&child, &sid, at + 1_005).unwrap().is_some());
-    store.with_conn(|c| { c.execute("UPDATE nodes SET last_seen=0 WHERE node_id='n'", [])?; Ok(()) }).unwrap();
-    assert!(store.workflows().confirmed_activity(&child, &sid, at + 1_005).unwrap().is_some(), "a connection timestamp is not a heartbeat");
-    store.with_conn(|c| { c.execute("UPDATE node_streams SET fault='gap' WHERE node_id='n'", [])?; Ok(()) }).unwrap();
-    assert!(store.workflows().confirmed_activity(&child, &sid, at + 1_005).unwrap().is_none(), "a faulted event stream cannot confirm activity");
-    store.with_conn(|c| { c.execute("UPDATE node_streams SET fault=NULL WHERE node_id='n'", [])?; Ok(()) }).unwrap();
-    store.with_conn(|c| { c.execute("UPDATE runtime_attempts SET cancel_requested=1 WHERE attempt_id='a_current'", [])?; Ok(()) }).unwrap();
-    assert!(store.workflows().confirmed_activity(&child, &sid, at + 1_005).unwrap().is_none());
-    store.with_conn(|c| { c.execute("UPDATE runtime_attempts SET cancel_requested=0 WHERE attempt_id='a_current'", [])?; Ok(()) }).unwrap();
-    event(6, at + 20_000, "a_current", json!({"type":"tool_changed","tool":{}}));
-    assert!(store.workflows().confirmed_activity(&child, &sid, at + 10_000).unwrap().is_some(), "future evidence must not replace a valid earlier event");
-    store.with_conn(|c| { c.execute("DELETE FROM node_event_inbox WHERE seq=5", [])?; Ok(()) }).unwrap();
-    assert!(store.workflows().confirmed_activity(&child, &sid, at + 10_000).unwrap().is_none(), "future evidence cannot confirm activity");
+    event(
+        1,
+        at - 900_000,
+        "a_current",
+        json!({"type":"attempt_started"}),
+    );
+    event(
+        2,
+        at - 599_000,
+        "a_current",
+        json!({"type":"message_started","message":"assistant","block":"b","role":"assistant"}),
+    );
+    assert!(
+        store
+            .workflows()
+            .confirmed_activity(&child, &sid, at)
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        store
+            .workflows()
+            .confirmed_activity(&child, &sid, at + 1_000)
+            .unwrap()
+            .is_none(),
+        "600 seconds is stale"
+    );
+    event(
+        3,
+        at + 1_001,
+        "a_current",
+        json!({"type":"message_started","message":"user","block":"b","role":"user"}),
+    );
+    event(
+        4,
+        at + 1_002,
+        "a_retired",
+        json!({"type":"tool_changed","tool":{}}),
+    );
+    assert!(
+        store
+            .workflows()
+            .confirmed_activity(&child, &sid, at + 1_003)
+            .unwrap()
+            .is_none()
+    );
+    event(
+        5,
+        at + 1_004,
+        "a_current",
+        json!({"type":"tool_changed","tool":{}}),
+    );
+    assert!(
+        store
+            .workflows()
+            .confirmed_activity(&child, &sid, at + 1_005)
+            .unwrap()
+            .is_some()
+    );
+    store
+        .with_conn(|c| {
+            c.execute("UPDATE nodes SET last_seen=0 WHERE node_id='n'", [])?;
+            Ok(())
+        })
+        .unwrap();
+    assert!(
+        store
+            .workflows()
+            .confirmed_activity(&child, &sid, at + 1_005)
+            .unwrap()
+            .is_some(),
+        "a connection timestamp is not a heartbeat"
+    );
+    store
+        .with_conn(|c| {
+            c.execute("UPDATE node_streams SET fault='gap' WHERE node_id='n'", [])?;
+            Ok(())
+        })
+        .unwrap();
+    assert!(
+        store
+            .workflows()
+            .confirmed_activity(&child, &sid, at + 1_005)
+            .unwrap()
+            .is_none(),
+        "a faulted event stream cannot confirm activity"
+    );
+    store
+        .with_conn(|c| {
+            c.execute("UPDATE node_streams SET fault=NULL WHERE node_id='n'", [])?;
+            Ok(())
+        })
+        .unwrap();
+    store
+        .with_conn(|c| {
+            c.execute(
+                "UPDATE runtime_attempts SET cancel_requested=1 WHERE attempt_id='a_current'",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    assert!(
+        store
+            .workflows()
+            .confirmed_activity(&child, &sid, at + 1_005)
+            .unwrap()
+            .is_none()
+    );
+    store
+        .with_conn(|c| {
+            c.execute(
+                "UPDATE runtime_attempts SET cancel_requested=0 WHERE attempt_id='a_current'",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    event(
+        6,
+        at + 20_000,
+        "a_current",
+        json!({"type":"tool_changed","tool":{}}),
+    );
+    assert!(
+        store
+            .workflows()
+            .confirmed_activity(&child, &sid, at + 10_000)
+            .unwrap()
+            .is_some(),
+        "future evidence must not replace a valid earlier event"
+    );
+    store
+        .with_conn(|c| {
+            c.execute("DELETE FROM node_event_inbox WHERE seq=5", [])?;
+            Ok(())
+        })
+        .unwrap();
+    assert!(
+        store
+            .workflows()
+            .confirmed_activity(&child, &sid, at + 10_000)
+            .unwrap()
+            .is_none(),
+        "future evidence cannot confirm activity"
+    );
 }
 
 #[test]
@@ -222,6 +347,7 @@ fn report(k: &Kit, parent: &str, id: &str) -> crate::Result<()> {
             name: "检查和实际操作".into(),
             passed: true,
             operated: true,
+            scope: None,
         }],
         &[],
     )
@@ -250,6 +376,7 @@ fn parent_deliver(k: &Kit, parent: &str) -> crate::Result<()> {
             name: "实际操作通过".into(),
             passed: true,
             operated: true,
+            scope: None,
         }],
         &[],
     )
@@ -455,15 +582,28 @@ fn a_new_cycle_replans_without_reusing_old_successes() {
         finish(&k, &parent, id);
     }
     let old_review = unit(&k, &parent, "review");
-    let old_session = k.db().session(old_review.session_id.as_deref().unwrap()).unwrap().unwrap();
+    let old_session = k
+        .db()
+        .session(old_review.session_id.as_deref().unwrap())
+        .unwrap()
+        .unwrap();
     change(&k, &parent, "pause", None).unwrap();
-    k.db().exec("UPDATE items SET cycle=cycle+1 WHERE id=?", &[&parent]).unwrap();
+    k.db()
+        .exec("UPDATE items SET cycle=cycle+1 WHERE id=?", &[&parent])
+        .unwrap();
 
-    let result = k.core.workflow_change(&parent, json!({
-        "action":"plan", "reason":"新周期重新验收，旧成果只留作历史",
-        "expected_revision":graph(&k,&parent).revision, "units":specs,
-        "max_parallel":2, "max_attempts":3
-    }), "me").unwrap();
+    let result = k
+        .core
+        .workflow_change(
+            &parent,
+            json!({
+                "action":"plan", "reason":"新周期重新验收，旧成果只留作历史",
+                "expected_revision":graph(&k,&parent).revision, "units":specs,
+                "max_parallel":2, "max_attempts":3
+            }),
+            "me",
+        )
+        .unwrap();
     assert_eq!(result["current_cycle"], true);
     assert_eq!(result["cycle"], 2);
     assert_eq!(result["paused"], true);
@@ -473,10 +613,22 @@ fn a_new_cycle_replans_without_reusing_old_successes() {
         assert!(u.item_id.is_none());
     }
     assert_eq!(result["history_attempts_total"], 4);
-    assert!(result["history_attempts"].as_array().unwrap().iter().any(|u|
-        u["unit_id"] == "review" && u["snapshot"]["status"] == "succeeded"));
-    assert!(k.core.tool_deliver(&old_session, "过期结果", &[], &[], &[]).is_err());
-    assert!(parent_deliver(&k, &parent).is_err(), "old successes must not accept the new cycle");
+    assert!(
+        result["history_attempts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|u| u["unit_id"] == "review" && u["snapshot"]["status"] == "succeeded")
+    );
+    assert!(
+        k.core
+            .tool_deliver(&old_session, "过期结果", &[], &[], &[])
+            .is_err()
+    );
+    assert!(
+        parent_deliver(&k, &parent).is_err(),
+        "old successes must not accept the new cycle"
+    );
     change(&k, &parent, "resume", None).unwrap();
     assert_eq!(unit(&k, &parent, "a").status, "running");
 }
@@ -758,10 +910,21 @@ fn restart_finishes_a_retired_failed_attempt_after_its_turn_ends() {
     let history = k.core.workflow_get(&parent).unwrap();
     assert_eq!(history["history_attempts_total"], 1);
     assert_eq!(history["history_attempts"][0]["item_id"], child);
-    assert_eq!(history["history_attempts"][0]["snapshot"]["session_id"], sid);
+    assert_eq!(
+        history["history_attempts"][0]["snapshot"]["session_id"],
+        sid
+    );
     // a failure is that attempt's outcome: it stays failed in the archive (ST-10)
-    assert_eq!(history["history_attempts"][0]["snapshot"]["status"], "failed");
-    assert!(history["history_attempts"][0]["snapshot"].get("outputs").is_none(), "history view stays compact");
+    assert_eq!(
+        history["history_attempts"][0]["snapshot"]["status"],
+        "failed"
+    );
+    assert!(
+        history["history_attempts"][0]["snapshot"]
+            .get("outputs")
+            .is_none(),
+        "history view stays compact"
+    );
 
     k.core.tx().workflow_tick().unwrap();
     assert_eq!(k.phase(&child), "active", "live turn still owns its child");
@@ -1171,4 +1334,179 @@ fn a_succeeded_unit_is_never_stopping_and_a_released_binding_is_idle_without_its
         })
         .unwrap();
     assert_eq!(unit_row(&k, &parent, "b")["stop_pending"], true);
+}
+
+#[test]
+fn bot_cannot_raise_max_attempts_on_replan_while_user_can() {
+    let (k, parent, specs) = setup(true);
+    let coord_sid = k.session(&parent, "idle");
+    let coord = k.db().session(&coord_sid).unwrap().unwrap();
+    k.core
+        .tool_workflow(
+            &coord,
+            json!({
+                "action": "plan",
+                "reason": "初始编排",
+                "expected_revision": 0,
+                "units": specs,
+                "max_parallel": 2,
+                "max_attempts": 2
+            }),
+        )
+        .unwrap();
+    let rev = graph(&k, &parent).revision;
+    let err = k
+        .core
+        .tool_workflow(
+            &coord,
+            json!({
+                "action": "plan",
+                "reason": "试图自行提额",
+                "expected_revision": rev,
+                "units": specs,
+                "max_parallel": 2,
+                "max_attempts": 4
+            }),
+        )
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("Bot 不能自行调高"), "{err}");
+
+    k.core
+        .workflow_change(
+            &parent,
+            json!({
+                "action": "plan",
+                "reason": "人工提高额度",
+                "expected_revision": rev,
+                "units": specs,
+                "max_parallel": 2,
+                "max_attempts": 4
+            }),
+            "me",
+        )
+        .unwrap();
+    assert_eq!(graph(&k, &parent).max_attempts, 4);
+}
+
+#[test]
+fn unit_delivery_accepts_baseline_and_external_failures_when_unit_checks_pass() {
+    let (k, parent, specs) = setup(true);
+    plan(&k, &parent, &specs);
+    let u = unit(&k, &parent, "a");
+    let sid = u.session_id.unwrap();
+    let s = k.db().session(&sid).unwrap().unwrap();
+    let err = k
+        .core
+        .tool_deliver(
+            &s,
+            "仅报备基线",
+            &[Output {
+                kind: "file".into(),
+                title: "产物".into(),
+                location: Some("a.txt".into()),
+                role: None,
+            }],
+            &[Check {
+                name: "全仓格式".into(),
+                passed: false,
+                operated: false,
+                scope: Some("baseline".into()),
+            }],
+            &[],
+        )
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("scope=unit"), "{err}");
+
+    k.core
+        .tool_deliver(
+            &s,
+            "本单元通过且如实记录基线失败",
+            &[Output {
+                kind: "file".into(),
+                title: "产物".into(),
+                location: Some("a.txt".into()),
+                role: None,
+            }],
+            &[
+                Check {
+                    name: "改动模块测试".into(),
+                    passed: true,
+                    operated: false,
+                    scope: None,
+                },
+                Check {
+                    name: "全仓未触碰文件格式".into(),
+                    passed: false,
+                    operated: false,
+                    scope: Some("baseline".into()),
+                },
+            ],
+            &[],
+        )
+        .unwrap();
+    k.rt.end_turn(&k.core, &sid, "end_turn", None);
+    let after = unit(&k, &parent, "a");
+    assert_eq!(after.status, "succeeded");
+    assert_eq!(after.checks.as_array().unwrap().len(), 2);
+}
+
+#[test]
+fn global_workflow_concurrency_caps_active_units_across_items_and_wakes_next() {
+    let k = Kit::with(|cfg| {
+        cfg.max_workflow_parallel = 1;
+    });
+    k.rt.st().workflow_execution_ready = true;
+    let specs = vec![
+        UnitSpec {
+            id: "a".into(),
+            title: "实现".into(),
+            goal: "做".into(),
+            bot_id: "dev".into(),
+            kind: "work".into(),
+            depends_on: vec![],
+            resources: vec![],
+            required: true,
+        },
+        UnitSpec {
+            id: "review".into(),
+            title: "评审".into(),
+            goal: "审".into(),
+            bot_id: "steve".into(),
+            kind: "review".into(),
+            depends_on: vec!["a".into()],
+            resources: vec![],
+            required: true,
+        },
+        UnitSpec {
+            id: "integrate".into(),
+            title: "集成".into(),
+            goal: "合".into(),
+            bot_id: "dev".into(),
+            kind: "integrate".into(),
+            depends_on: vec!["a".into(), "review".into()],
+            resources: vec![],
+            required: true,
+        },
+    ];
+    let p1 = k.item("run", "执行", None);
+    let p2 = k.item("run", "执行", None);
+    plan(&k, &p1, &specs);
+    plan(&k, &p2, &specs);
+
+    assert_eq!(unit(&k, &p1, "a").status, "running");
+    assert_eq!(
+        unit(&k, &p2, "a").status,
+        "pending",
+        "second workflow queues behind global cap=1"
+    );
+
+    finish(&k, &p1, "a");
+    let active_total = [&p1, &p2]
+        .iter()
+        .flat_map(|p| graph(&k, p).units)
+        .filter(|u| u.active())
+        .count();
+    assert_eq!(active_total, 1);
 }

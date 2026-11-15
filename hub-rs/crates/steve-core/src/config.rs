@@ -50,6 +50,8 @@ pub struct CoreConfig {
     pub disk: crate::workspace::DiskPolicy,
     /// `STEVE_MQ=1`: accepted results merge through the merge queue (`mq`) instead of the lanes.
     pub mq: bool,
+    /// `STEVE_WORKFLOW_MAX_PARALLEL`: global active workflow unit cap across all open workflows.
+    pub max_workflow_parallel: usize,
 }
 
 /// The GitHub CLI: `STEVE_GH`, else the first of the usual places that exists, else `gh` on `PATH`.
@@ -69,6 +71,15 @@ pub fn gh_cli() -> PathBuf {
 /// `STEVE_MQ=1` turns the merge queue on.
 pub fn mq_from_env() -> bool {
     std::env::var("STEVE_MQ").is_ok_and(|v| v.trim() == "1")
+}
+
+/// Global active workflow units allowed simultaneously (`STEVE_WORKFLOW_MAX_PARALLEL`, default 4).
+pub fn workflow_max_parallel_from_env() -> usize {
+    std::env::var("STEVE_WORKFLOW_MAX_PARALLEL")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(4)
 }
 
 fn list(s: &str) -> Vec<String> {
@@ -106,6 +117,7 @@ impl CoreConfig {
             commit: None,
             disk: Default::default(),
             mq: false,
+            max_workflow_parallel: 4,
         }
     }
 

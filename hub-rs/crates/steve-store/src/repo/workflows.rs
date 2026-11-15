@@ -497,14 +497,27 @@ pub fn deliver_in(
     if summary.trim().is_empty() || !outputs.is_array() || !checks.is_array() {
         return Err(conflict("工作交付需要摘要、交付物数组和检查数组"));
     }
+    fn scope_of(c: &Value) -> &str {
+        c.get("scope").and_then(Value::as_str).unwrap_or("unit")
+    }
+    if checks.as_array().is_some_and(|cs| {
+        cs.iter()
+            .any(|c| !matches!(scope_of(c), "unit" | "baseline" | "external"))
+    }) {
+        return Err(conflict("检查范围 scope 只能是 unit、baseline 或 external"));
+    }
     if passed
-        && (checks.as_array().is_none_or(Vec::is_empty)
-            || checks.as_array().is_some_and(|cs| {
-                cs.iter()
-                    .any(|c| c.get("passed") != Some(&Value::Bool(true)))
-            }))
+        && (checks.as_array().is_none_or(|cs| {
+            !cs.iter()
+                .any(|c| scope_of(c) == "unit" && c.get("passed") == Some(&Value::Bool(true)))
+        }) || checks.as_array().is_some_and(|cs| {
+            cs.iter()
+                .any(|c| scope_of(c) == "unit" && c.get("passed") != Some(&Value::Bool(true)))
+        }))
     {
-        return Err(conflict("成功交付必须包含全部通过的检查"));
+        return Err(conflict(
+            "成功交付必须包含至少一项通过的单元检查，且本单元范围内的检查必须全部通过",
+        ));
     }
     tx.execute(
         "UPDATE workflow_units SET status=?,summary=?,outputs=?,checks=?,reason=? WHERE workflow_id=? AND id=?",

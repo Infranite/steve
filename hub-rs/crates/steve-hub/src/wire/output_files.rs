@@ -189,6 +189,16 @@ pub fn recover_legacy(store: &Store, home: &Path, db_path: &Path) -> anyhow::Res
 /// A declared file inside the disposable workspace is copied before the delivery can close it.
 /// Paths already in the durable output directory stay there. Git revisions and opaque references
 /// have no file extension and are left to their normal Git viewer.
+/// Rejects paths inside dependency, build or embedded checkout trees that should never be copied into outputs/.
+pub fn polluted_output_path(path: &Path) -> bool {
+    path.components().any(|c| {
+        matches!(
+            c.as_os_str().to_str(),
+            Some(".git" | "node_modules" | "target" | "review-source" | ".next" | "dist")
+        )
+    })
+}
+
 pub async fn retain_location(
     home: &Path,
     item: &str,
@@ -203,6 +213,10 @@ pub async fn retain_location(
         Path::new(&session.cwd).join(raw)
     };
     let cwd = Path::new(&session.cwd);
+    let check_part = source.strip_prefix(cwd).unwrap_or(raw);
+    if polluted_output_path(check_part) {
+        return Err("交付文件不能位于源码仓库元数据、依赖或编译构建目录中；请交付独立报告、日志或打包后的 ZIP".into());
+    }
     let durable = directory(home, item).map_err(|e| e.to_string())?;
     if source.starts_with(&durable) {
         // The file is already in the Hub-owned persistent directory.
@@ -448,5 +462,12 @@ mod tests {
         .unwrap();
         fs::remove_dir_all(&cwd).unwrap();
         assert_eq!(fs::read_to_string(retained).unwrap(), "# 设计\n\n正文");
+        assert!(polluted_output_path(Path::new(
+            "outputs/review-source/node_modules/pkg/index.js"
+        )));
+        assert!(polluted_output_path(Path::new("target/debug/deps/out.txt")));
+        assert!(!polluted_output_path(Path::new(
+            "outputs/delivery-report.md"
+        )));
     }
 }

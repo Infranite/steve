@@ -106,6 +106,8 @@ pub struct ItemExtras {
     pub workflow_paused: Option<bool>,
     pub workflow_cycle: Option<i64>,
     pub workflow_failed: Vec<String>,
+    pub workflow_attempt: Option<i64>,
+    pub workflow_superseded: bool,
 }
 
 /// Per-bot extras of `botOut` and `allBots` for one workspace.

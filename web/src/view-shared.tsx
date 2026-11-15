@@ -53,15 +53,18 @@ export function PlanBar({ i, warn }: { i: Item; warn?: boolean }) {
 /** one item in a list. Open items take two lines: the title with what tells it apart on the right (tags, due, plan,
  *  bot, time), then what it is doing now. Finished and dropped items fold into one line, their outcome after the title.
  *  `proj` / `bot` off: the list is already about one project or bot, so the row doesn't repeat it */
-export function ItemRow({ i, pick, proj = true, bot = true }: { i: Item; pick?: () => void; proj?: boolean; bot?: boolean }) {
+export function ItemRow({ i, pick, proj = true, bot = true, nested = false, badge }: { i: Item; pick?: () => void; proj?: boolean; bot?: boolean; nested?: boolean; badge?: ReactNode }) {
   const t = useT()
   const on = selected.has(i.id), closed = closedSt(i.st), w = i.wait
-  const relation = workflowRelation(i, st.items)
+  const rawRelation = workflowRelation(i, st.items)
+  const relation = nested && rawRelation?.kind === "child" ? null : rawRelation
   const planOpen = !!i.plan?.length && i.plan.some((x) => x[1] !== 1)
   const extra = [
+    nested && (i.workflowAttempt ?? 0) > 1 && <span key="att" className="shrink-0 whitespace-nowrap rounded bg-muted px-1.5 py-0.5 type-footnote tabular-nums text-muted-foreground" data-subtask-attempt={i.workflowAttempt}>{t("views:agentTree.attempt", { n: i.workflowAttempt })}</span>,
+    nested && i.workflowSuperseded && <span key="sup" className="shrink-0 whitespace-nowrap type-footnote text-tertiary" data-subtask-superseded>{t("shell:item.supersededTry")}</span>,
     i.ss.length > 1 && <span key="ss" className="shrink-0 whitespace-nowrap">{t("shell:item.sessions", { count: i.ss.length })}</span>,
     i.q.length > 0 && <span key="q" className="shrink-0 whitespace-nowrap">{t("shell:item.queued", { count: i.q.length })}</span>,
-    i.parent && <span key="p" className="inline-flex shrink-0 items-center gap-1 whitespace-nowrap"><GitBranchIcon className="size-3" />{t("shell:item.forked")}</span>,
+    i.parent && (!nested || i.src[1] !== "workflow") && <span key="p" className="inline-flex shrink-0 items-center gap-1 whitespace-nowrap"><GitBranchIcon className="size-3" />{t("shell:item.forked")}</span>,
     /* an open item names what it is still waiting for; once nothing is in its way the relation is history and stays on the item page */
     !closed && depsOpen(i).length > 0 && <span key="d" className="shrink-0 whitespace-nowrap" title={depsOpen(i).map((d) => `${d} ${st.items.find((x) => x.id === d)?.t ?? ""}`).join("\n")} data-waits-on>{depsOpen(i).length > 1 ? t("shell:item.waitsOnMany", { id: depsOpen(i)[0], count: depsOpen(i).length }) : t("shell:item.waitsOn", { id: depsOpen(i)[0] })}</span>,
   ].filter(Boolean)
@@ -81,14 +84,16 @@ export function ItemRow({ i, pick, proj = true, bot = true }: { i: Item; pick?: 
     </span>
   )
   return (
-    <div role="button" tabIndex={0} onClick={() => (pick ? pick() : go("#/items/" + i.id))} onKeyDown={(e) => e.key === "Enter" && go("#/items/" + i.id)} data-item-row={i.id} data-item-status={itemDisplayStatus(i)} data-dense={closed || undefined}
-      className={cn("group flex cursor-pointer gap-2.5 rounded-lg px-2 transition-colors duration-120 hover:bg-accent", closed ? "items-center py-1.5" : "items-start py-2.5", pick && on && "bg-blue/10 hover:bg-blue/10")}>
+    <div role="button" tabIndex={0} onClick={() => (pick ? pick() : go("#/items/" + i.id))} onKeyDown={(e) => e.key === "Enter" && go("#/items/" + i.id)} data-item-row={i.id} data-item-status={itemDisplayStatus(i)} data-dense={closed || undefined} data-item-nested={nested || undefined}
+      className={cn("group relative flex cursor-pointer gap-2.5 rounded-lg px-2 transition-colors duration-120 hover:bg-accent", closed ? "items-center py-1.5" : nested ? "items-start py-1.5" : "items-start py-2.5", nested && "before:pointer-events-none before:absolute before:-left-2.5 before:top-3.5 before:w-2.5 before:border-t before:border-border/75", pick && on && "bg-blue/10 hover:bg-blue/10")}>
       {pick ? <Checkbox checked={on} className={cn(!closed && "mt-[3px]")} aria-label={t("shell:item.select", { id: i.id })} data-pick={i.id} /> : <StatusDot s={itemDisplayStatus(i)} className={cn(!closed && "mt-[7px]")} />}
       <div className="min-w-0 flex-1">
         <div className="flex min-w-0 items-center gap-2">
           <ItemNo id={i.id} className="w-12" />
-          <span className={cn("truncate type-body", closed ? "text-foreground/85" : "font-medium")}>{i.t}</span>
+          <span className={cn("truncate", nested ? "type-callout text-foreground/90" : "type-body", closed ? "text-foreground/85" : !nested && "font-medium", nested && !closed && "font-medium")}>{i.t}</span>
           {i.star && <StarIcon className="size-3.5 shrink-0 fill-current text-tertiary" />}
+          {badge}
+          {closed && nested && i.workflowSuperseded && <span className="shrink-0 rounded bg-muted/70 px-1.5 py-0.5 type-footnote text-tertiary" data-subtask-superseded>{t("shell:item.supersededTry")}</span>}
           {closed && i.now && <span className="hidden min-w-0 shrink-[2] truncate type-footnote text-muted-foreground sm:block" data-item-now>{i.now}</span>}
           {side}
         </div>

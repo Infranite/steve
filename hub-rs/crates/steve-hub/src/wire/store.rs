@@ -200,6 +200,18 @@ impl Repo for StoreBackend {
                 m.entry(r.get(0)?).or_default().workflow_failed.push(r.get(1)?);
                 Ok(())
             })?;
+            each(c, &format!("SELECT u.item_id, u.attempt FROM workflow_units u WHERE u.item_id IS NOT NULL AND u.item_id IN ({ITEMS})"), ws, |r| {
+                m.entry(r.get(0)?).or_default().workflow_attempt = Some(r.get(1)?);
+                Ok(())
+            })?;
+            each(c, &format!("SELECT a.item_id, json_extract(a.snapshot, '$.attempt') FROM workflow_attempts a WHERE a.item_id IN ({ITEMS}) AND NOT EXISTS (SELECT 1 FROM workflow_units u WHERE u.item_id = a.item_id)"), ws, |r| {
+                let x = m.entry(r.get(0)?).or_default();
+                x.workflow_superseded = true;
+                if x.workflow_attempt.is_none() {
+                    x.workflow_attempt = r.get(1)?;
+                }
+                Ok(())
+            })?;
             for x in m.values_mut() {
                 if let Some((sid, _)) = x.sessions.iter().rev().find(|(_, st)| st != "ended") {
                     x.queued = counts.get(sid).copied().unwrap_or(0);

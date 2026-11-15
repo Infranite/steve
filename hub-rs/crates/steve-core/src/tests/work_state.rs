@@ -791,6 +791,7 @@ fn deliver(k: &Kit, parent: &str, id: &str) {
                 name: "检查和实际操作".into(),
                 passed: true,
                 operated: true,
+                scope: None,
             }],
             &[],
         )

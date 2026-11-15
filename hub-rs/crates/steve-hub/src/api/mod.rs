@@ -828,6 +828,8 @@ pub(crate) fn extras_one(r: &dyn Repo, id: &str) -> BResult<ItemExtras> {
         workflow_paused: None,
         workflow_cycle: None,
         workflow_failed: Vec::new(),
+        workflow_attempt: None,
+        workflow_superseded: false,
     })
 }
 
@@ -863,6 +865,12 @@ pub(crate) fn summary_with(mut i: Obj, x: ItemExtras) -> Obj {
         i.insert("workflow_paused".into(), json!(paused));
         i.insert("workflow_cycle".into(), json!(x.workflow_cycle));
         i.insert("workflow_failed".into(), json!(x.workflow_failed));
+    }
+    if let Some(attempt) = x.workflow_attempt {
+        i.insert("workflow_attempt".into(), json!(attempt));
+    }
+    if x.workflow_superseded {
+        i.insert("workflow_superseded".into(), json!(true));
     }
     i
 }

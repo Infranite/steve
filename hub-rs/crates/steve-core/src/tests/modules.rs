@@ -260,6 +260,7 @@ async fn auto_acceptance_asks_the_hooks_too() {
                 name: "tests".into(),
                 passed: true,
                 operated: false,
+                scope: None,
             }],
             &[],
         )

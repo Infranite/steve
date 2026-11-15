@@ -719,6 +719,7 @@ export default {
     queued_one: "{{count}} follow-up queued",
     queued_other: "{{count}} follow-ups queued",
     forked: "Forked",
+    supersededTry: "Superseded",
     waitingFor: "Waiting for {{ids}}",
     pausedFailed: "Workflow paused · {{ids}} failed",
     pausedWorkflow: "Workflow paused; waiting to resume",

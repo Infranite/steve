@@ -3,10 +3,10 @@
  * or open card says where it stands, and its plan gives the progress. Nothing here is made up: what Steve has no data
  * for (tool and source counts, a per-task running clock) is left out. */
 import { AgentInbox, type AgentTask } from "@/components/affect/agent-inbox"
-import { itemDisplayState } from "@/item-workflow-relation"
+import { isWorkflowChild, itemDisplayState, partitionSubtasks } from "@/item-workflow-relation"
 import { besideState, laneOf, planProgress } from "@/item-lanes"
 import { stepOf } from "@/running-pill"
-import { botName, type Item } from "@/store"
+import { botName, st, type Item } from "@/store"
 import { go, Meta, Tags } from "@/ui"
 import { dueLabel, ProjectChip } from "@/view-shared"
 import { useT } from "@/i18n"
@@ -14,17 +14,21 @@ import { useT } from "@/i18n"
 /** `cap`: the Done column shows this many until you ask for all of them, as the list folds its closed groups */
 export function ItemsBoard({ xs, cap }: { xs: Item[]; cap: number }) {
   const t = useT()
+  const pool = st.items.filter((x) => !x.arch)
   const tasks: AgentTask[] = xs.flatMap((i) => {
     const s = itemDisplayState(i), lane = laneOf(s)
     if (!lane) return []
+    const kids = pool.filter((c) => isWorkflowChild(c) && c.parent?.item === i.id)
+    const sub = kids.length ? partitionSubtasks(i, kids) : null
     const said = t(`views:itemState.${s.kind}`), prog = planProgress(i.plan)
     // the line under the title: what it is on, without the state the pill beside it already says
     const desc = besideState(stepOf(i, ""), said)
     const plan = i.plan?.filter((x) => x[1] === 1).map((x) => ({ label: x[0] })) ?? []
     // the step it is on is marked with its state only while a session works on it
     const next = i.plan?.find((x) => x[1] !== 1)
-    const details = (i.project || i.due || i.tags?.length) ? (
+    const details = (i.project || i.due || i.tags?.length || sub) ? (
       <div className="flex flex-col gap-1.5">
+        {sub && <span className="type-footnote text-muted-foreground" data-board-subtasks={i.id}>{sub.live.length > 0 ? t("views:items.subtasksLive", { live: sub.live.length, done: sub.doneCount }) : t("views:items.subtasksDone", { count: sub.doneCount || sub.total })}</span>}
         {(i.project || i.due) && <Meta>{i.project && <ProjectChip id={i.project} plain />}{i.due && <span>{t("views:items.due", { due: dueLabel(i.due) })}</span>}</Meta>}
         {!!i.tags?.length && <Tags ids={i.tags} />}
       </div>

@@ -44,6 +44,8 @@ export type Item = {
   workflowPaused?: boolean
   workflowCycle?: number
   workflowFailed?: string[]
+  workflowAttempt?: number
+  workflowSuperseded?: boolean
   workflow?: RItemDetail["workflow"]
   dependencyWait?: RItemDetail["dependency_wait"]
 }
@@ -467,7 +469,7 @@ function itemOf(i: RItem): Item {
   })
   return {
     id: i.id, t: i.title, b: i.bot_id ?? "steve", st: i.status, phase: i.phase, cycle: i.cycle, deps: i.deps, src: i.source, ws: proj?.name ?? "—", project: i.project_id, up: tm(i.updated), star: i.star, acc: ACC[i.accept_mode ?? "inherit"] ?? ACC.inherit,
-    workflowPaused: i.workflow_paused, workflowCycle: i.workflow_cycle, workflowFailed: i.workflow_failed,
+    workflowPaused: i.workflow_paused, workflowCycle: i.workflow_cycle, workflowFailed: i.workflow_failed, workflowAttempt: i.workflow_attempt, workflowSuperseded: i.workflow_superseded,
     goals: det ? det.goalsList.map((g) => g.text) : [i.goal], now: i.status === "block" && i.now === "等前置事项完成后自动开始" ? t("views:dependencyWait.waiting") : i.now || "", plan: i.plan.length ? steps(i.plan) : undefined,
     rounds: (det?.planRounds ?? []).map((r) => ({ n: r.round, steps: steps(r.steps), end: r.end, at: tm(r.created) })),
     workflow: det?.workflow,
