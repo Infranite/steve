@@ -31,7 +31,7 @@ impl Domain for Catalogue {
         _: crate::backend::Tier,
         _: u64,
     ) -> BResult<String> {
-        Ok(json!({"name":"Draft", "model":"opus"}).to_string())
+        Ok(json!({"name":"Draft", "model":"claude-opus-5-5"}).to_string())
     }
 }
 

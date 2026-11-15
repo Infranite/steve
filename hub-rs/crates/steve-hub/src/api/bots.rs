@@ -49,32 +49,6 @@ fn known_harness_ids(
     ids
 }
 
-fn check_bot_harness_caps(
-    p: &Obj,
-    target_id: &str,
-    harnesses: &[steve_core::harnesses::Harness],
-) -> Result<(), ApiError> {
-    let Some(target) = harnesses.iter().find(|h| h.id == target_id) else {
-        return Ok(());
-    };
-    let mut bad = Vec::new();
-    if let Some(eff) = p.get("reasoning_effort").and_then(Value::as_str)
-        && !target.takes_effort(eff)
-    {
-        bad.push("reasoning_effort".into());
-    }
-    if let Some(pm) = p.get("perm_mode").and_then(Value::as_str)
-        && perm_mode_of_key(pm).is_some_and(|m| !target.offers_mode(m))
-    {
-        bad.push("perm_mode".into());
-    }
-    if bad.is_empty() {
-        Ok(())
-    } else {
-        Err(ApiError::Invalid(bad))
-    }
-}
-
 /// `BotPatch` (or the create variant: `name` required), as the parsed object with only the present
 /// keys, in schema order. `harnesses`: the adapter ids the Hub knows ([`crate::config::Config::harness_ids`]).
 #[cfg(test)]
@@ -332,7 +306,7 @@ pub async fn draft(
         steve_i18n::t!("hub.bot.draft_name")
     };
     let model = match get("model").map(js::string) {
-        Some(m) if !m.is_empty() && offered.contains(&m) => json!(m),
+        Some(m) if !m.is_empty() => json!(m),
         _ => Value::Null,
     };
     let mut f = Obj::new();
