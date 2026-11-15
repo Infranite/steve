@@ -5,17 +5,17 @@ import { useEffect, useState, type ReactNode } from "react"
 import { itemDisplayStatus } from "@/item-workflow-relation"
 import { cn } from "cn"
 import { ArchiveIcon, ChevronDownIcon, CircleAlertIcon, CircleCheckIcon, InfoIcon, ListPlusIcon, ListTodoIcon, MegaphoneIcon, SendIcon, SlidersHorizontalIcon, XIcon } from "lucide-react"
-import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible"
-import { Trail, type TrailItem } from "@/components/work-trail"
+import { Collapsible, CollapsibleContent } from "@/components/ui/collapsible"
+import { type TrailItem } from "@/components/work-trail"
 import { toolClass } from "@/thread/tools"
 import { Sheet, SheetContent, SheetTitle } from "@/components/ui/sheet"
 import { Button } from "@/components/ui/button"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 import { st, tm, botName, projectName, tagName, pendingCards, sessionCards, unreadNotices, readNotices, dismissNotice, closeRel, WT, type Msg, type Steps } from "@/store"
-import { ThinkingLoader } from "@/components/affect/thinking-loader"
+import { ChatThinking } from "@/thread/thinking"
 import { go, StatusDot, ItemNo, DecisionCard, SectionLabel, RelNote, SidePanel, PanelHead } from "@/ui"
 import type { RNotice } from "@/api"
-import { ResearchLive, researchSummary, researchStep } from "@/thread/parts"
+import { researchLiveItems, researchSummary, researchStep } from "@/thread/parts"
 import { t, useT } from "@/i18n"
 import { reducedMotion } from "@/lib/motion"
 
@@ -27,8 +27,6 @@ const TOOL: Record<string, [() => string, any]> = { create_item: [() => t("shell
 /* a tenth of a second only matters under ten */
 const secs = (ms?: number) => (ms == null ? "" : ms < 1000 ? t("shell:chat.ms", { n: ms }) : t("common:time.secondsN", { n: ms < 10_000 ? (ms / 1000).toFixed(1) : Math.round(ms / 1000) }))
 /* the folded line's gist, unless the reply itself starts by saying it */
-const plainStart = (x: string) => x.replace(/[*_`#>\s"\u201c\u201d\u300c\u300d]/g, "")
-const echoes = (gist: string, text?: string) => { const g = plainStart(gist).slice(0, 24); return !!text && g.length > 0 && plainStart(text).startsWith(g) }
 const firstSentence = (t: string) => t.split(/(?<=[。！？.!?])\s*/)[0]?.slice(0, 80) ?? ""
 const RESEARCH_ERROR: Record<string, () => string> = {
   permission_denied: () => t("shell:chat.researchError.permissionDenied"),
@@ -52,12 +50,12 @@ const OPEN_EV = "steve-open-steps"
 export function openSteps(id: string) { window.dispatchEvent(new CustomEvent(OPEN_EV, { detail: id })) }
 
 export function StepsBlock({ m }: { m: Msg }) {
-  const s = m.steps, [open, setOpen] = useState(false), t = useT()
+  const s = m.steps ?? (m.stopped ? { tools: [] } : undefined), [open, setOpen] = useState(false), t = useT()
   useEffect(() => {
     const h = (e: Event) => { if ((e as CustomEvent).detail !== m.id) return; setOpen(true); document.getElementById("steps-" + m.id)?.scrollIntoView({ behavior: reducedMotion() ? "auto" : "smooth", block: "center" }) }
     window.addEventListener(OPEN_EV, h); return () => window.removeEventListener(OPEN_EV, h)
   }, [m.id])
-  if (!s || (!s.route && !s.tools.length)) return null
+  if (!s || (!s.route && !s.tools.length && !s.answer && !s.research && !m.stopped)) return null
   const r = s.route
   const routeDesc = r && [kindLabel(r.kind), r.kind === "item" && botName(r.picked ?? r.bot), r.project && projectName(r.project), ...r.tags.map(tagName), ...r.newTags.map((tag) => t("shell:chat.newTag", { tag }))].filter(Boolean).join(" · ")
   const items: TrailItem[] = []
@@ -78,33 +76,25 @@ export function StepsBlock({ m }: { m: Msg }) {
       detail: <>{desc && (item ? <button type="button" className="min-w-0 truncate text-foreground/85 hover:text-foreground hover:underline" onClick={(e) => { e.stopPropagation(); go("#/items/" + item) }}>{desc}</button> : <span className="min-w-0 truncate text-foreground/85">{desc}</span>)}{extra}</> })
   })
   const took = s.research?.ms ?? s.ms
-  const summary = stepsSummary(s), gist = !s.research && echoes(summary, m.t) ? "" : summary
-  return (
-    <Collapsible open={open} onOpenChange={setOpen} id={"steps-" + m.id} className="max-w-full self-start px-1" data-steps={m.id}>
-      <CollapsibleTrigger className="group/work flex max-w-full min-w-0 items-center gap-1.5 rounded-lg py-0.5 text-left type-callout text-muted-foreground hover:text-foreground" data-steps-toggle>
-        <ChevronDownIcon className="size-4 shrink-0 -rotate-90 text-tertiary transition-transform duration-180 ease-(--ease-out) group-hover/work:text-muted-foreground group-aria-expanded/work:rotate-0" />
-        <span className="shrink-0 text-foreground/85">{s.research ? t("shell:chat.researched") : t("shell:chat.thinking")}</span>
-        {took != null && !s.research && <span className="shrink-0 tabular-nums text-tertiary">{secs(took)}</span>}
-        {gist && <span className="min-w-0 truncate">· {gist}</span>}
-      </CollapsibleTrigger>
-      <CollapsibleContent><Trail className="pt-1" items={items} live={false} end={s.tools.length ? { s: s.research?.stopped && s.research.stopped !== "budget" ? "cancel" : "end", label: s.research?.stopped ? t(`thread:research.stopped.${s.research.stopped}`) : t("core:trail.finished") } : undefined} /></CollapsibleContent>
-    </Collapsible>
-  )
+  const failed = !!s.answer?.failed || s.research?.stopped === "failed"
+  const stopped = !!m.stopped || !!s.research?.stopped && !failed
+  const status = failed ? "error" : stopped ? "stopped" : "done"
+  return <div id={"steps-" + m.id} className="w-full min-w-0 self-start px-1" data-steps={m.id} data-stopped={m.stopped || undefined}>
+    <ChatThinking items={items} status={status} durationMs={took} summary={s.research ? researchSummary(s, false) : undefined}
+      open={open} onOpenChange={setOpen} endLabel={m.stopped ? t("pages:chat.stopped") : s.research?.stopped ? t(`thread:research.stopped.${s.research.stopped}`) : undefined} headerAttrs={{ "data-steps-toggle": "" }} />
+  </div>
 }
 
 const PHASE: Record<string, () => string> = { route: () => t("shell:chat.phase.route"), answer: () => t("shell:chat.phase.answer"), research: () => t("shell:chat.phase.research"), item: () => t("shell:chat.phase.item"), config: () => t("shell:chat.phase.config"), supplement: () => t("shell:chat.phase.supplement") }
 /** while Steve works on a message: the research under way, or his reasoning streaming in (one line once the answer starts) */
 export function LiveSteps() {
-  const d = st.draft, t = useT()
-  if (st.live) return <ResearchLive />
-  if (d?.thought) return (
-    <div className="-mb-1 max-w-[88%] self-start px-1" data-live-steps="thought">
-      <Trail items={[{ t: "think", key: "thought", text: d.thought, live: !d.text, t0: d.t0, ms: d.t1 != null ? d.t1 - d.t0 : undefined }]} live={!d.text} />
-    </div>
-  )
-  if (d?.text) return null
-  /* affectUI Thinking Loader, its label the phase the Hub reports: a new phase rolls in */
-  return <div className="flex items-center self-start px-1 type-callout" data-live-steps={st.phase || "start"}><ThinkingLoader variant="plain" size="sm" phases={[PHASE[st.phase]?.() ?? t("shell:chat.phase.start")]} phase={0} /></div>
+  const d = st.draft, l = st.live, t = useT()
+  const items: TrailItem[] = l ? researchLiveItems(l) : d?.thought ? [{ t: "think", key: "thought", text: d.thought, live: !d.text, t0: d.t0 }] : []
+  const phase = l ? "research" : d?.text ? "reply" : st.phase || "start"
+  const label = l ? t("thread:thinking.working") : d?.text ? t("pages:chat.doing.reply") : PHASE[st.phase]?.() ?? t("shell:chat.phase.start")
+  return <div className="w-full min-w-0 self-start px-1" data-live-steps={phase} data-research-live={l?.run}>
+    <ChatThinking items={items} label={label} startedAt={l?.t0 ?? d?.t0} />
+  </div>
 }
 
 /** a failure notification's line in the conversation; it leaves once closed by hand or by a later release of its item */

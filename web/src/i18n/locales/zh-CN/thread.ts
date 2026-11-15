@@ -1,5 +1,13 @@
 /* zh-CN strings for the "thread" namespace: the source text, byte-identical to the UI. Conventions: web/src/i18n/index.ts */
 export default {
+  thinking: {
+    reasoning: "思考过程",
+    working: "正在处理",
+    done: "处理完成",
+    failed: "处理失败",
+    stopped: "已停止",
+    callFailures_other: "{{count}} 次调用失败",
+  },
   /* who said a message */
   who: {
     me: "你",
@@ -54,7 +62,6 @@ export default {
       fetch: "正在获取",
       meet: "正在保存",
     },
-    slow: "还在读…",
   },
   offer: {
     folded: "之前提议过：{{title}}",

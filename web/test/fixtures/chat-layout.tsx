@@ -55,3 +55,28 @@ function Fixture() {
   return <SidebarProvider><main style={{ height: "100dvh", width: "100%", minWidth: 0 }}><ChatView conv={conv} /></main></SidebarProvider>
 }
 createRoot(document.getElementById("root")!).render(<Fixture />)
+
+/* Authoritative chat phases for Thinking State regression. No model request is made by these events. */
+window.addEventListener("fixture-thinking-stage", (event) => {
+  const stage = (event as CustomEvent<string>).detail
+  const t0 = Date.now() - 5000
+  st.live = null; st.draft = null; st.thinking = true; st.phase = "route"
+  st.thread = [...short.slice(0,3), { k: "thinking" }]
+  const reasoning = Array.from({length:12}, (_,i) => `第 ${i+1} 步：核对实际模型与工具事件，保留来源、失败和已执行的步骤。`).join("\n\n")
+  if (stage === "thought") st.draft = { mid:"request",text:"",thought:reasoning,t0 }
+  if (stage === "research" || stage === "research-update") {
+    st.phase = "research"
+    st.live = { mid:"request",run:"fixture-research",t0,tools:[{name:"Read",brief:"src/app.ts",kind:"read",ok:true},{name:"Read",brief:"src/config.ts",kind:"read",ok:true}],now:{name:"Grep",brief:"model settings",kind:"search"} }
+    if (stage === "research-update") { st.live.tools.push({name:"Grep",brief:"model settings",kind:"search",ok:true}); st.live.now={name:"Bash",brief:"npm run check",kind:"exec"} }
+  }
+  if (stage === "reply") { st.phase="answer"; st.draft={mid:"request",thought:reasoning,text:"核对完成，正在生成回答。",t0} }
+  if (["complete","failure","stopped"].includes(stage)) {
+    st.thinking=false
+    st.thread=[...short.slice(0,3), {id:"thinking-result",k:"steve",origin:"request",created:Date.now(),t:stage==="failure"?"模型服务暂时不可用。":"已核对。",stopped:stage==="stopped"||undefined,
+      ...(stage==="stopped"?{}:{steps:{route:{kind:"research",title:"",bot:"steve",project:null,tags:[],newTags:[],why:"核对模型配置",model:"fixture-model",fallback:false,ms:200},
+        answer:{thought:reasoning,model:"fixture-model",ms:5000,failed:stage==="failure"},
+        research:{run:"fixture-research",model:"fixture-model",ms:28000,turns:2,tools:3,stopped:stage==="failure"?"failed":undefined},
+        tools:[{name:"Read",kind:"read",args:{brief:"src/app.ts"},status:"ok",ms:20},{name:"Read",kind:"read",args:{brief:"src/config.ts"},status:"ok",ms:20},{name:"Bash",kind:"exec",args:{brief:"npm run check"},status:"failed",error:"transport",ms:500}]}}) }]
+  }
+  emit()
+})

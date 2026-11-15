@@ -7,7 +7,8 @@ import { cn } from "cn"
 import { CornerDownRightIcon, FileTextIcon, LibraryIcon, RotateCcwIcon, SearchIcon, XIcon, CircleCheckIcon, BanIcon, CircleAlertIcon, MessageSquareReplyIcon, CheckIcon, ChevronDownIcon, RocketIcon, TerminalIcon, PencilIcon, GlobeIcon } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Spinner } from "@/components/ui/spinner"
-import { Trail, useTick, type StepState, type ToolStep, type TrailItem } from "@/components/work-trail"
+import { type StepState, type ToolStep, type TrailItem } from "@/components/work-trail"
+import { ChatThinking } from "@/thread/thinking"
 import { SteveModelControl } from "@/steve-model"
 import { api } from "@/api"
 import { newClientId } from "@/composer-draft"
@@ -15,7 +16,7 @@ import { chatBusy, refresh } from "@/store"
 import { Markdown } from "@/components/markdown"
 import { Textarea } from "@/components/ui/textarea"
 import { clip as clipPlain } from "@/thread/topics"
-import { STEVE_TOOL, st, tm, emit, chatSend, takeOffer, chooseSuggest, cancelQueued, clearFocus, focusItem, quoteMsg, decisionDraft, decide, acceptChoosesRelease, botName, alertClosed, closeAlerts, type Msg, type SuggestChoice, type Steps, type Update, type Item, type ItemCardState } from "@/store"
+import { STEVE_TOOL, st, tm, emit, chatSend, takeOffer, chooseSuggest, cancelQueued, clearFocus, focusItem, quoteMsg, decisionDraft, decide, acceptChoosesRelease, botName, alertClosed, closeAlerts, type Msg, type SuggestChoice, type Steps, type Update, type Item, type ItemCardState, type LiveRun } from "@/store"
 import { ItemRef, DecisionCard, ItemNo, AlertClose, go, Pill } from "@/ui"
 import { jumpToMsg, threadMsg } from "@/thread/history"
 import { Trans } from "react-i18next"
@@ -26,7 +27,7 @@ import { toolClass, toolCounts, toolShort, meetStep, type ToolClass } from "@/th
 /* ───────── research ───────── */
 const secs = (ms: number) => tr("common:dur.seconds", { count: Math.max(1, Math.round(ms / 1000)) })
 /** "读了 9 个文件 · 搜索 4 次 · 执行 3 条命令 · 41 秒" for a finished research run */
-export function researchSummary(s: Steps): string {
+export function researchSummary(s: Steps, includeTime = true): string {
   const ts = s.tools, r = s.research, n = toolCounts(ts)
   /* Steve's own writes of the first meeting are not "calls": they are what the answer says it saved */
   const parts = [n.files && tr("thread:research.files", { count: n.files }), n.search && tr("thread:research.searches", { count: n.search }),
@@ -36,7 +37,7 @@ export function researchSummary(s: Steps): string {
   if (!parts.length) parts.push(tr("thread:research.noFiles"))
   const failures = ts.filter((t) => t.status === "failed").length
   if (failures) parts.push(tr("thread:research.failures", { count: failures }))
-  if (r?.ms != null) parts.push(secs(r.ms))
+  if (includeTime && r?.ms != null) parts.push(secs(r.ms))
   const stop = r?.stopped ? tr(`thread:research.stopped.${r.stopped}`) : ""
   return [...parts, stop].filter(Boolean).join(" · ")
 }
@@ -59,23 +60,15 @@ export function researchStep(key: string, name: string, kind: string | undefined
     chip: brief ? { label: brief, mono: true, icon: researchIcon(name, kind) } : undefined, attrs: { kind: c }, ...more }
 }
 
-/** the work under way: a clock, and the calls so far on the trail, the one running now last (the composer's Stop ends it) */
+/** The event stream determines every step; an empty list is still a running panel. */
+export function researchLiveItems(l: LiveRun): TrailItem[] {
+  const items: TrailItem[] = l.tools.map((x,n) => researchStep(String(n),x.name,x.kind,x.brief,x.ok ? "done" : "fail"))
+  if (l.now) items.push(researchStep("now",l.now.name,l.now.kind,l.now.brief,"run"))
+  return items
+}
 export function ResearchLive() {
-  const l = st.live, now = useTick(!!l), t = useT()
-  if (!l) return null
-  const items: TrailItem[] = l.tools.map((x, n) => researchStep(String(n), x.name, x.kind, x.brief, x.ok ? "done" : "fail"))
-  if (l.now) items.push(researchStep("now", l.now.name, l.now.kind, l.now.brief, "run"))
-  return (
-    <div className="-mb-1 flex max-w-[88%] flex-col gap-1 self-start px-1" data-research-live={l.run}>
-      <div className="flex min-w-0 items-center gap-1.5 type-callout">
-        <ChevronDownIcon className="size-4 shrink-0 text-tertiary" />
-        <span className="shimmer shrink-0 text-foreground">{t("core:transcript.working")}</span>
-        <span className="shrink-0 tabular-nums text-tertiary">{secs(now - l.t0)}</span>
-        {now - l.t0 > 90_000 && <span className="min-w-0 truncate text-muted-foreground">· {t("thread:research.slow")}</span>}
-      </div>
-      {items.length > 0 ? <Trail items={items} live /> : <Trail items={[{ t: "line", key: "start", state: "run", label: <span className="shimmer">{t("thread:research.live.read")}</span> }]} live />}
-    </div>
-  )
+  const l = st.live
+  return l ? <div className="w-full min-w-0 self-start px-1" data-research-live={l.run}><ChatThinking items={researchLiveItems(l)} startedAt={l.t0} /></div> : null
 }
 
 /* ───────── offer · suggestion card · ask ───────── */

@@ -27,8 +27,6 @@ export default {
       unknown: "This lookup didn't finish, and the cause is unclear.",
     },
     newTag: "{{tag}} (new)",
-    researched: "Looked up",
-    thinking: "Thinking",
     triage: "Triage",
     picked: "You picked {{bot}} with @. ",
     guarded: " (the model chose {{model}}; a rule changed it to {{kind}})",

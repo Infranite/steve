@@ -28,8 +28,6 @@ export default {
       unknown: "这次查询未完成，未能确认具体原因。",
     },
     newTag: "{{tag}}（新建）",
-    researched: "查了",
-    thinking: "思考",
     triage: "分诊",
     picked: "你用 @ 指定了 {{bot}}。",
     guarded: "（模型判为{{model}}，按规则改成{{kind}}）",
