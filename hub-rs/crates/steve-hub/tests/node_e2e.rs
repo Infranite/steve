@@ -405,9 +405,14 @@ async fn drain(h: &Home, method: &str, token: &str) -> Value {
 }
 
 fn steve_v1(h: &Home, sid: &str, needle: &str) -> i64 {
+    // The prompt is stored before the adapter starts. Matching it would let the test kill
+    // the Hub before a service Node has even spawned the adapter, then attribute that late
+    // spawn to the no-resume copy. Wait for output, not an echo of the input or queued text.
     h.db()
         .query_row(
-            "SELECT COUNT(*) FROM events WHERE session_id=? AND format='steve.v1' AND instr(data, ?) > 0",
+            "SELECT COUNT(*) FROM events WHERE session_id=? AND format='steve.v1'
+             AND kind NOT IN ('user','queued') AND COALESCE(json_extract(data,'$.role'),'') <> 'user'
+             AND instr(data, ?) > 0",
             [sid, needle],
             |r| r.get(0),
         )
@@ -1013,11 +1018,15 @@ async fn the_node_is_the_default() {
         1,
         "bound to the local Node"
     );
-    // The user's own steve.v1 message already contains the token above. Wait for actual
+    // Wait for actual
     // completion (including bounded sampler settlement and automatic continuations) before
     // measuring the inert copy's process count; an unstarted old child can otherwise log late.
     assert!(wait(30,||h.count("SELECT COUNT(*) FROM runtime_attempts a JOIN runtime_turns t USING(turn_id) WHERE t.session_id=? AND a.state='finished'",&sid)>0
         && h.count("SELECT COUNT(*) FROM runtime_attempts a JOIN runtime_turns t USING(turn_id) WHERE t.session_id=? AND a.state<>'finished'",&sid)==0).await,"the original Node's turns settled: {}",hub_log(&h));
+    assert!(
+        h.spawns() >= 1,
+        "the initial reply came from a started adapter"
+    );
     hub.kill();
     drop(hub);
     drop(service);
