@@ -49,34 +49,11 @@ fn known_harness_ids(
     ids
 }
 
-fn check_bot_harness_caps(
-    p: &Obj,
-    target_id: &str,
-    harnesses: &[steve_core::harnesses::Harness],
-) -> Result<(), ApiError> {
-    let Some(target) = harnesses.iter().find(|h| h.id == target_id) else {
-        return Ok(());
-    };
-    let mut bad = Vec::new();
-    if let Some(eff) = p.get("reasoning_effort").and_then(Value::as_str)
-        && !target.takes_effort(eff)
-    {
-        bad.push("reasoning_effort".into());
-    }
-    if let Some(pm) = p.get("perm_mode").and_then(Value::as_str)
-        && perm_mode_of_key(pm).is_some_and(|m| !target.offers_mode(m))
-    {
-        bad.push("perm_mode".into());
-    }
-    if bad.is_empty() {
-        Ok(())
-    } else {
-        Err(ApiError::Invalid(bad))
-    }
-}
-
 /// `BotPatch` (or the create variant: `name` required), as the parsed object with only the present
 /// keys, in schema order. `harnesses`: the adapter ids the Hub knows ([`crate::config::Config::harness_ids`]).
+#[cfg(test)]
+#[path = "bot_selection_tests.rs"]
+mod selection_tests;
 fn bot_in(v: &Value, create: bool, harnesses: &[String]) -> Result<Obj, ApiError> {
     let mut c = Check::object(v);
     let mut p = Obj::new();
@@ -241,15 +218,19 @@ pub async fn create(
     let harnesses = st.domain.harnesses(false).await?;
     let allowed = known_harness_ids(&st.cfg, &harnesses);
     let mut p = bot_in(&body(&b)?, true, &allowed)?;
-    if let Some(h) = p.get("harness").and_then(Value::as_str) {
-        check_bot_harness_caps(&p, h, &harnesses)?;
-    }
     let (ws, me) = (c.ws.clone(), c.me.clone());
     let (out, id) = st
         .write(move |r| {
             fill_new_bot_defaults(r, &c.ws, &harnesses, &mut p);
             let target_id = p.get("harness").and_then(Value::as_str).unwrap_or_default();
-            check_bot_harness_caps(&p, target_id, &harnesses)?;
+            if let Some(target) = harnesses.iter().find(|h| h.id == target_id)
+                && let Some(pm) = p.get("perm_mode").and_then(Value::as_str)
+                && perm_mode_of_key(pm).is_some_and(|m| !target.offers_mode(m))
+            {
+                return Err(ApiError::Invalid(vec!["perm_mode".into()]));
+            }
+            steve_core::models::validate_bot_patch(None, &p, &harnesses)
+                .map_err(ApiError::bad_request)?;
             let b = r.bot_create(&c.ws, &p, &c.me)?;
             let out = bot_out(r, b, &c.ws)?;
             let id = out.get("id").and_then(Value::as_str).map(str::to_string);
@@ -325,7 +306,7 @@ pub async fn draft(
         steve_i18n::t!("hub.bot.draft_name")
     };
     let model = match get("model").map(js::string) {
-        Some(m) if !m.is_empty() && offered.contains(&m) => json!(m),
+        Some(m) if !m.is_empty() => json!(m),
         _ => Value::Null,
     };
     let mut f = Obj::new();
@@ -349,7 +330,10 @@ pub async fn draft(
     f.insert("model".into(), model);
     f.insert("harness".into(), json!(harness_id));
     f.insert("perm_mode".into(), json!(perm_mode));
+    let harnesses = st.domain.harnesses(false).await?;
     st.write(move |w| {
+        steve_core::models::validate_bot_patch(None, &f, &harnesses)
+            .map_err(ApiError::bad_request)?;
         let b = w.bot_create(&c.ws, &f, &c.me)?;
         ok(Value::Object(bot_out(w, b, &c.ws)?))
     })
@@ -367,6 +351,7 @@ pub async fn patch_one(
     let allowed = known_harness_ids(&st.cfg, &harnesses);
     let mut p = bot_in(&body(&b)?, false, &allowed)?;
     st.write(move |r| {
+        own_bot(r, &id, &c.ws)?;
         let Some(cur) = r.bot_get(&id)? else {
             return Err(ApiError::not_found(Noun::Bot.missing()));
         };
@@ -377,21 +362,19 @@ pub async fn patch_one(
             .filter(|h| !h.is_empty() && *h != cur_h.as_str())
             .map(str::to_string);
         let target_id = switched_to.as_deref().unwrap_or(&cur_h);
-        check_bot_harness_caps(&p, target_id, &harnesses)?;
+        if let Some(target) = harnesses.iter().find(|h| h.id == target_id)
+            && let Some(pm) = p.get("perm_mode").and_then(Value::as_str)
+            && perm_mode_of_key(pm).is_some_and(|m| !target.offers_mode(m))
+        {
+            return Err(ApiError::Invalid(vec!["perm_mode".into()]));
+        }
         if let Some(target_id) = &switched_to
             && let Some(target) = harnesses.iter().find(|h| h.id == *target_id)
+            && !p.contains_key("perm_mode")
         {
-            if !p.contains_key("perm_mode") {
-                let cur_pm = str_of(&cur, "perm_mode");
-                if perm_mode_of_key(&cur_pm).is_some_and(|m| !target.offers_mode(m)) {
-                    p.insert("perm_mode".into(), json!(target.default_perm_mode()));
-                }
-            }
-            if !p.contains_key("reasoning_effort")
-                && let Some(eff) = cur.get("reasoning_effort").and_then(Value::as_str)
-                && !target.takes_effort(eff)
-            {
-                p.insert("reasoning_effort".into(), Value::Null);
+            let cur_pm = str_of(&cur, "perm_mode");
+            if perm_mode_of_key(&cur_pm).is_some_and(|m| !target.offers_mode(m)) {
+                p.insert("perm_mode".into(), json!(target.default_perm_mode()));
             }
         }
         if let Some(Value::String(dp)) = p.get("default_project")
@@ -399,7 +382,7 @@ pub async fn patch_one(
         {
             own(r.project_get(dp)?, &c.ws, Noun::Project)?;
         }
-        let b = r.bot_patch(&id, &p, &c.me)?;
+        let b = r.bot_patch_checked(&id, &p, &c.me, &harnesses)?;
         ok(Value::Object(bot_out(r, b, &c.ws)?))
     })
     .await
@@ -438,6 +421,8 @@ pub async fn duplicate(
     Extension(c): Extension<Ctx>,
     Path(id): Path<String>,
 ) -> ApiResult {
+    check_bot(&st, &c.ws, &id).await?;
+    let harnesses = st.domain.harnesses(false).await?;
     st.write(move |r| {
         own_bot(r, &id, &c.ws)?;
         let Some(mut b) = r.bot_get(&id)? else {
@@ -447,6 +432,8 @@ pub async fn duplicate(
         b.insert("name".into(), json!(name));
         b.insert("enabled".into(), json!(false));
         b.insert("main".into(), json!(false));
+        steve_core::models::validate_bot_patch(None, &b, &harnesses)
+            .map_err(ApiError::bad_request)?;
         let n = r.bot_create(&c.ws, &b, &c.me)?;
         let nid = str_of(&n, "id");
         let mut off = Obj::new();
@@ -607,6 +594,8 @@ mod tests {
             bot_in(&json!({"reasoning_effort": "bad effort!"}), false, &ids()).unwrap_err(),
             ApiError::Invalid(vec!["reasoning_effort".into()])
         );
+        // Membership is checked against the harness at write time, not a fixed enum here.
+        assert!(bot_in(&json!({"reasoning_effort": "ultra"}), false, &ids()).is_ok());
         let e = bot_in(&json!({"name": "", "proactive": 3, "avatar": {"color": "red", "skin": "12", "round": 101}}), false, &ids()).unwrap_err();
         assert_eq!(
             e,

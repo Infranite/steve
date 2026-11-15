@@ -493,6 +493,29 @@ impl Repo for StoreBackend {
             .map(obj)
             .unwrap_or_else(|| Err(gone("bot")))
     }
+    fn bot_patch_checked(
+        &self,
+        id: &str,
+        p: &Obj,
+        author: &str,
+        harnesses: &[steve_core::harnesses::Harness],
+    ) -> BResult<Obj> {
+        self.0
+            .atomic(|| -> anyhow::Result<Obj> {
+                let b = self.bot_get(id)?.ok_or_else(|| gone("bot"))?;
+                steve_core::models::validate_bot_patch(Some(&b), p, harnesses).map_err(
+                    |message| BackendError {
+                        status: 400,
+                        message,
+                    },
+                )?;
+                Ok(self.bot_patch(id, p, author)?)
+            })
+            .map_err(|e| match e.downcast::<BackendError>() {
+                Ok(e) => e,
+                Err(e) => BackendError::msg(e.to_string()),
+            })
+    }
     fn bot_restore(&self, id: &str) -> BResult<()> {
         self.0.bots().restore(id).map_err(err)
     }

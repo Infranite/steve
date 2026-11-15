@@ -1,4 +1,6 @@
 {
+  "core.bot.invalid_selection": "Invalid Bot selection: %{field}",
+  "core.bot.unsupported_selection": "%{harness} does not offer %{field} `%{value}`. Choose a reported value or reset it to default (null).",
   "core.item.closed": "This item has ended; start a new cycle if you need to",
   "core.item.not_found": "No such item",
   "core.item.ending_no_complete": "This item is being cancelled or marked failed, so it can no longer be completed",

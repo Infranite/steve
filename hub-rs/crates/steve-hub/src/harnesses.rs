@@ -318,18 +318,18 @@ fn merge(
     h.ready = Some(adapter.status == AdapterStatus::Ready && adapter.session.is_some());
     if let Some(o) = &adapter.session {
         h.modes = Some(o.modes.clone());
-        if !o.models.is_empty() {
-            h.models = o
-                .models
-                .iter()
-                .map(|m| HarnessModel {
-                    id: m.id.clone(),
-                    name: m.name.clone(),
-                    description: m.description.clone(),
-                })
-                .collect();
-        }
+        h.models = o
+            .models
+            .iter()
+            .map(|m| HarnessModel {
+                id: m.id.clone(),
+                name: m.name.clone(),
+                description: m.description.clone(),
+            })
+            .collect();
         h.default_model = o.default_model.clone();
+        // An answered, empty list is authoritative too: fallback efforts must not make an
+        // adapter that offers no reasoning control appear to accept one.
         h.efforts = o.efforts.clone();
     }
     h
@@ -451,6 +451,16 @@ mod tests {
         assert_eq!(h.efforts, ["low"]);
         assert_eq!(h.modes.as_deref().map(|m| m.len()), Some(2));
         assert!(!h.offers_mode(PermissionMode::FullAccess));
+        let h = merge(
+            "claude-code",
+            None,
+            Some(&reported("claude-code", Some(AdapterOffer::default()))),
+        );
+        assert_eq!(h.ready, Some(true));
+        assert!(
+            h.models.is_empty() && h.efforts.is_empty(),
+            "an answered empty list is not a fallback"
+        );
         // a declared name stays; no scratch session: not ready, the declared lists kept
         let named: steve_acp::Declaration =
             serde_json::from_value(serde_json::json!({"name": "Named"})).unwrap();
@@ -470,6 +480,27 @@ mod tests {
         );
         assert_eq!(h.ready, Some(true));
         assert!(h.efforts.is_empty(), "{:?}", h.efforts);
+    }
+
+    #[tokio::test]
+    async fn failed_node_refresh_keeps_the_previous_report_and_unknown_stays_unknown() {
+        let cfg = crate::config::Config::from_vars(&|_: &str| None).unwrap();
+        let hs = HubHarnesses::of(&cfg);
+        let node = steve_node_api::testkit::FakeNode::new("probe-test");
+        node.refuse_next(
+            "probe",
+            steve_node_api::ApiError::new(steve_node_api::ErrorCode::Offline, "probe unavailable"),
+        );
+        hs.refresh(node.as_ref(), false).await;
+        assert!(hs.list().iter().all(|h| h.ready.is_none()));
+        hs.update(vec![reported("claude-code", Some(AdapterOffer::default()))]);
+        let before = hs.list();
+        node.refuse_next(
+            "probe",
+            steve_node_api::ApiError::new(steve_node_api::ErrorCode::Offline, "probe unavailable"),
+        );
+        hs.refresh(node.as_ref(), false).await;
+        assert_eq!(hs.list(), before);
     }
 
     #[test]

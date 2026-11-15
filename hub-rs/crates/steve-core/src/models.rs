@@ -378,6 +378,67 @@ pub fn valid_model(m: &str) -> bool {
     MODEL_ID.is_match(m)
 }
 
+/// Check the selection a Bot write would leave behind, using the same ID contract as model
+/// settings. A harness switch must also check the model/effort it would inherit. Other partial
+/// writes only check the fields they name: an old selection must not prevent editing a role.
+/// `None` is creation; explicit JSON null keeps the harness/workspace default, never the old value.
+/// Only a successful probe is evidence of support (including an empty list). Declared fallbacks
+/// and failed/unavailable probes are unknown: accept well-formed values without certifying them.
+pub fn validate_bot_patch(
+    current: Option<&Map<String, Value>>,
+    patch: &Map<String, Value>,
+    harnesses: &[Harness],
+) -> Result<(), String> {
+    let selection = ["harness", "model", "reasoning_effort"];
+    if current.is_some() && !selection.iter().any(|k| patch.contains_key(*k)) {
+        return Ok(());
+    }
+    let get = |key: &str| patch.get(key).or_else(|| current.and_then(|b| b.get(key)));
+    let harness = get("harness")
+        .and_then(Value::as_str)
+        .unwrap_or(steve_acp::adapters::DEFAULT_ADAPTER.0);
+    let h = harnesses
+        .iter()
+        .find(|h| h.id == harness)
+        .ok_or_else(|| steve_i18n::t!("core.models.invalid.no_harness", harness = harness))?;
+    let switched =
+        current.is_none_or(|b| b.get("harness").and_then(Value::as_str) != Some(harness));
+    for key in ["model", "reasoning_effort"] {
+        if !switched && !patch.contains_key(key) {
+            continue;
+        }
+        let Some(value) = get(key).filter(|v| !v.is_null()) else {
+            continue;
+        };
+        let Some(value) = value.as_str().filter(|v| {
+            if key == "model" {
+                valid_model(v)
+            } else {
+                !v.trim().is_empty() && v.len() <= 100
+            }
+        }) else {
+            return Err(steve_i18n::t!("core.bot.invalid_selection", field = key));
+        };
+        if h.ready != Some(true) {
+            continue;
+        }
+        let supported = if key == "model" {
+            h.models.iter().any(|m| m.id == value)
+        } else {
+            h.takes_effort(value)
+        };
+        if !supported {
+            return Err(steve_i18n::t!(
+                "core.bot.unsupported_selection",
+                harness = h.name,
+                field = key,
+                value = value
+            ));
+        }
+    }
+    Ok(())
+}
+
 impl Models {
     pub fn new(store: Store, defaults: Defaults) -> Models {
         Models {
