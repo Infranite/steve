@@ -22,7 +22,7 @@ use crate::{ChannelResult, Channels};
 /// `channel_settings.trigger` of a new account as it reads (the column default's `where: []`
 /// means everywhere).
 pub fn default_trigger() -> Value {
-    json!({"on": false, "words": ["/bot"], "where": ["*"], "mark": true})
+    json!({"on": false, "words": ["/ai", "/bot"], "where": ["*"], "who": ["me"], "reply": "thread", "mark": true})
 }
 
 /// What the account page shows of a channel provider (`GET /channels` `providers`).
@@ -366,10 +366,13 @@ fn normal_trigger(v: &Value) -> Value {
             .cloned()
             .unwrap_or_else(|| d[k].clone())
     };
+    let t = crate::rules::Trigger::from_value(v);
     json!({
         "on": pick("on", Value::is_boolean),
         "words": pick("words", Value::is_array),
-        "where": crate::rules::Trigger::from_value(v).r#where,
+        "where": t.r#where,
+        "who": t.who,
+        "reply": t.reply.code(),
         "mark": pick("mark", Value::is_boolean),
     })
 }
@@ -402,6 +405,10 @@ pub struct TriggerPatch {
     pub words: Option<Vec<String>>,
     #[serde(rename = "where")]
     pub where_: Option<Vec<String>>,
+    /// `me`, `*`, or contact ids.
+    pub who: Option<Vec<String>>,
+    /// `thread`, `quote` or `message`.
+    pub reply: Option<String>,
     pub mark: Option<bool>,
 }
 
@@ -444,6 +451,15 @@ impl ChannelPatch {
             }
             if let Some(w) = &t.where_ {
                 c.list("trigger.where", w, 200, 100);
+            }
+            if let Some(w) = &t.who {
+                c.list("trigger.who", w, 200, 100);
+            }
+            if let Some(r) = &t.reply {
+                c.that(
+                    "trigger.reply",
+                    crate::rules::ReplyStyle::parse(r).is_some(),
+                );
             }
         }
         c.done()
@@ -556,6 +572,33 @@ pub fn patch(
                 v["where"] = json!(crate::rules::normal_where(
                     out.into_iter().cloned().collect()
                 ));
+            }
+            if let Some(x) = &t.who {
+                let mut out: Vec<&String> = Vec::new();
+                for (i, w) in x.iter().enumerate() {
+                    // you, anyone, or a contact of this workspace
+                    let ok = w == crate::rules::WHO_ME
+                        || w == crate::rules::WHO_ANYONE
+                        || tx.query_row(
+                            "SELECT EXISTS (SELECT 1 FROM parties WHERE id = ? AND workspace_id = ?)",
+                            params![w, ws],
+                            |r| r.get::<_, bool>(0),
+                        )?;
+                    if !ok {
+                        return Err(ApiError::invalid(format!("trigger.who.{i}")));
+                    }
+                    if !out.contains(&w) {
+                        out.push(w);
+                    }
+                }
+                v["who"] = if out.is_empty() {
+                    json!([crate::rules::WHO_ME])
+                } else {
+                    json!(out)
+                };
+            }
+            if let Some(x) = &t.reply {
+                v["reply"] = json!(x);
             }
             if let Some(x) = t.mark {
                 v["mark"] = json!(x);
@@ -702,7 +745,7 @@ mod tests {
         assert_eq!(normal_trigger(&Value::Null), default_trigger());
         assert_eq!(
             normal_trigger(&json!({"on": true, "words": "x"})),
-            json!({"on": true, "words": ["/bot"], "where": ["*"], "mark": true})
+            json!({"on": true, "words": ["/ai", "/bot"], "where": ["*"], "who": ["me"], "reply": "thread", "mark": true})
         );
         // prod: switched on without choosing where
         assert_eq!(

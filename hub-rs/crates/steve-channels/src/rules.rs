@@ -653,7 +653,7 @@ impl IntentJudge for GatewayJudge<'_> {
 
 // ---------------------------------------------------------------- trigger words
 
-/// `channel_settings.trigger`: your own account's words that let Steve send as you.
+/// `channel_settings.trigger`: your own account's words that let Steve answer as you.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Trigger {
     pub on: bool,
@@ -661,7 +661,46 @@ pub struct Trigger {
     /// Space ids; `dm:*` = every private chat, `*` = everywhere (never empty after
     /// [`Trigger::from_value`]).
     pub r#where: Vec<String>,
+    /// Who may use the words: [`WHO_ME`] (you), [`WHO_ANYONE`] (anyone where they work), or
+    /// contact (party) ids (never empty after [`Trigger::from_value`]).
+    pub who: Vec<String>,
+    /// Where the answer goes: [`ReplyStyle`].
+    pub reply: ReplyStyle,
+    /// The answer, said as you, starts with `[AI] `.
     pub mark: bool,
+}
+
+/// `trigger.who` entry for you.
+pub const WHO_ME: &str = "me";
+/// `trigger.who` entry for anyone in a space where the words work.
+pub const WHO_ANYONE: &str = "*";
+
+/// Where the answer to a trigger word goes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ReplyStyle {
+    /// In the thread (话题) of the message, started there when it has none.
+    #[default]
+    Thread,
+    /// A reply quoting the message, in the chat.
+    Quote,
+    /// A plain new message in the chat.
+    Message,
+}
+
+impl ReplyStyle {
+    pub const ALL: [ReplyStyle; 3] = [Self::Thread, Self::Quote, Self::Message];
+
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::Thread => "thread",
+            Self::Quote => "quote",
+            Self::Message => "message",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|r| r.code() == s)
+    }
 }
 
 /// `trigger.where` entry for all private chats.
@@ -711,12 +750,29 @@ impl Trigger {
                 })
                 .unwrap_or_default()
         };
+        let who = list("who");
         Self {
             on: v["on"].as_bool().unwrap_or(false),
             words: list("words"),
             r#where: normal_where(list("where")),
+            who: if who.is_empty() {
+                vec![WHO_ME.to_string()]
+            } else {
+                who
+            },
+            reply: v["reply"]
+                .as_str()
+                .and_then(ReplyStyle::parse)
+                .unwrap_or_default(),
             mark: v["mark"].as_bool().unwrap_or(true),
         }
+    }
+
+    /// May the sender use the words? `you`: the sender is you; `party`: the sender's contact.
+    pub fn allows(&self, you: bool, party: Option<&str>) -> bool {
+        self.who
+            .iter()
+            .any(|w| w == WHO_ANYONE || (w == WHO_ME && you) || party.is_some_and(|p| p == w))
     }
 
     /// Do trigger words work in this space?

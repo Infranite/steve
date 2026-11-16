@@ -156,6 +156,31 @@ pub struct Layers {
     pub owner: String,
     /// The message this one replies to `(who, text)`.
     pub replied: Option<(String, String)>,
+    /// The date and time now, in the workspace's zone (`2026-11-17 星期二 02:25，Asia/Shanghai`).
+    pub now: String,
+}
+
+/// `now` (ms) as the prompt says it, in zone `tz`.
+pub fn now_text(now: i64, tz: &chrono_tz::Tz) -> String {
+    use chrono::{Datelike, TimeZone};
+    let Some(t) = tz.timestamp_millis_opt(now).single() else {
+        return String::new();
+    };
+    let day = [
+        "星期一",
+        "星期二",
+        "星期三",
+        "星期四",
+        "星期五",
+        "星期六",
+        "星期日",
+    ][t.weekday().num_days_from_monday() as usize];
+    format!(
+        "{} {day} {}，{}",
+        t.format("%Y-%m-%d"),
+        t.format("%H:%M"),
+        tz.name()
+    )
 }
 
 /// What to generate beyond the plan.
@@ -276,6 +301,11 @@ pub fn prompt(l: &Layers) -> String {
         p.push_str(H_TASK);
         p.push('\n');
         p.push_str(i.trim());
+        p.push_str("\n\n");
+    }
+    if !l.now.is_empty() {
+        p.push_str("【现在】\n");
+        p.push_str(&l.now);
         p.push_str("\n\n");
     }
     p.push_str(UNDERSTAND);
@@ -611,6 +641,7 @@ pub fn gather(
         sender: plan.sender_name.clone(),
         message: plan.text.clone(),
         instruction: opts.instruction.clone(),
+        now: now_text(now, &crate::im_mcp::tz_of(c, ws)),
     })
 }
 

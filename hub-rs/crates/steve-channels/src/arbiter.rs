@@ -215,27 +215,83 @@ pub fn from_owner(
     Ok(false)
 }
 
-/// Your `/bot` command in `space`: the instruction after the trigger word, when the sender is you
-/// ([`from_you`]) — on your own account or received by a bot — the trigger is on and its scope (`*`,
-/// `dm:*`, space ids) covers this space. Leading mentions are skipped (`@Steve /bot …`); what Steve
-/// itself sent as you (the proxy mark) and other assistants' automatic replies never count.
+/// A trigger word in `space` received through connection `conn`: the instruction after it (may be
+/// empty), when `conn` is your own account (a `mode=self` connection of the user whose trigger it
+/// is — what a bot receives keeps the bot's own rules), the trigger is on, its scope (`*`, `dm:*`,
+/// space ids) covers this space and its `who` allows the sender (you, anyone, or chosen contacts).
+/// Leading mentions are skipped (`@张三 /ai …`); what Steve itself sent as you (`[AI]`, the proxy
+/// mark) and other assistants' automatic replies never count. A conversation goes on without the
+/// word: stored message `msg` in the thread of an answered trigger word, or replying to one or to
+/// its answer, is one too (its whole text the instruction), under the same conditions.
+#[allow(clippy::too_many_arguments)]
 pub fn command(
     c: &Connection,
     ws: &str,
     space: &SpaceRow,
+    conn: &str,
+    msg: &str,
     sender_account: Option<&str>,
     sender_party: Option<&str>,
     text: &str,
     mention_names: &[String],
 ) -> ChannelResult<Option<String>> {
-    if looks_automated(text) || !from_you(c, ws, sender_account, sender_party)? {
+    if looks_automated(text) {
         return Ok(None);
     }
-    let Some(t) = spaces::your_trigger(c, ws)? else {
+    let Some((owner_conn, t)) = spaces::your_trigger_on(c, ws)? else {
         return Ok(None);
     };
+    // your own account: the connection the words are set on, or another self one of the same user
+    let yours: bool = c.query_row(
+        "SELECT ?1 = ?2 OR EXISTS (
+            SELECT 1 FROM channel_settings cs JOIN connections x ON x.id = cs.connection_id
+              JOIN accounts a ON a.id = x.account_id JOIN parties p ON p.id = a.party_id
+             WHERE cs.connection_id = ?1 AND cs.mode = 'self' AND p.user_id IS NOT NULL
+               AND p.user_id = (SELECT p2.user_id FROM connections x2 JOIN accounts a2 ON a2.id = x2.account_id
+                                  JOIN parties p2 ON p2.id = a2.party_id WHERE x2.id = ?2))",
+        rusqlite::params![conn, owner_conn],
+        |r| r.get(0),
+    )?;
+    if !yours {
+        return Ok(None);
+    }
+    let you = from_you(c, ws, sender_account, sender_party)?;
+    if !t.allows(you, sender_party) {
+        return Ok(None);
+    }
     let dm = space.kind == crate::channel::SpaceKind::Dm.code();
-    Ok(t.instruction(&space.id, dm, text, mention_names))
+    if let Some(i) = t.instruction(&space.id, dm, text, mention_names) {
+        return Ok(Some(i));
+    }
+    if !t.on || !t.applies(&space.id, dm) || !continues(c, &space.id, msg)? {
+        return Ok(None);
+    }
+    let said = crate::rules::strip_leading_mentions(text, mention_names).trim();
+    Ok((!said.is_empty()).then(|| said.to_string()))
+}
+
+/// Does stored message `msg` go on with a trigger word answered in `space`: in the thread of one
+/// (its root or a message in it), or replying to one or to Steve's answer to one?
+pub fn continues(c: &Connection, space: &str, msg: &str) -> ChannelResult<bool> {
+    // a message whose trigger word was taken (its conversation turn says so)
+    const ANSWERED: &str = "EXISTS (SELECT 1 FROM messages turn WHERE turn.workspace_id = t.workspace_id
+        AND json_extract(turn.meta, '$.chan.message') = t.id AND json_extract(turn.meta, '$.chan.command') = 1)";
+    Ok(c.query_row(
+        &format!(
+            "SELECT EXISTS (
+               SELECT 1 FROM chan_messages m, chan_messages t
+                WHERE m.id = ?1 AND t.space_id = ?2 AND t.id <> m.id AND t.created <= m.created
+                  AND (
+                    -- the same thread: its root, or a message in it
+                    (m.thread_key IS NOT NULL AND (t.external_id = m.thread_key OR t.thread_key = m.thread_key) AND {ANSWERED})
+                    -- replying to the trigger word, or to Steve's answer said as you
+                    OR (m.reply_to IS NOT NULL AND t.external_id = m.reply_to
+                        AND ({ANSWERED} OR (t.direction = 'out' AND t.on_behalf = 'proxy')))
+                  ))"
+        ),
+        rusqlite::params![msg, space],
+        |r| r.get(0),
+    )?)
 }
 
 /// The mode of a connection (its channel settings; bot when it has none).

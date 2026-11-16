@@ -655,7 +655,7 @@ async fn your_account_only_observes_where_the_bot_speaks() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn your_bot_command_is_answered_by_the_voice_once() {
+async fn your_command_is_answered_as_you_once_where_the_bot_speaks() {
     let h = setup(false).await;
     let (_, self_space) = both_see_ops(&h).await;
     exec(
@@ -667,7 +667,7 @@ async fn your_bot_command_is_answered_by_the_voice_once() {
             &h.me,
         ],
     );
-    // the bot's connection sees your command first (it has the group's messages)
+    // the bot's connection sees your command first (it has the group's messages): its own rules
     let b = push(
         &h,
         &h.bot.clone(),
@@ -675,13 +675,9 @@ async fn your_bot_command_is_answered_by_the_voice_once() {
     )
     .await;
     let r = b.response.unwrap();
-    assert!(matches!(r.by, steve_channels::By::Trigger { .. }), "{r:?}");
-    assert_eq!(sent(&h).len(), 1, "the bot answers your command");
-    assert!(
-        !sent(&h)[0].contains(steve_channels::outbound::PROXY_MARK),
-        "as the bot, not as you"
-    );
-    // your poller's copy: a duplicate, not a second answer
+    assert!(!matches!(r.by, steve_channels::By::Trigger { .. }), "{r:?}");
+    assert!(sent(&h).is_empty());
+    // your poller's copy: stored already, but the trigger word is yours: answered as you, once
     let s = push(
         &h,
         &h.me.clone(),
@@ -689,6 +685,21 @@ async fn your_bot_command_is_answered_by_the_voice_once() {
     )
     .await;
     assert!(s.duplicate);
+    let r = s.response.expect("answered");
+    assert!(matches!(r.by, steve_channels::By::Trigger { .. }), "{r:?}");
+    assert_eq!(sent(&h).len(), 1, "your own account answers your command");
+    assert!(
+        sent(&h)[0].starts_with("[AI] "),
+        "as you, marked: {:?}",
+        sent(&h)
+    );
+    // the same copy again is not a second answer
+    push(
+        &h,
+        &h.me.clone(),
+        msg("C_OPS", "o8", "upx", "/bot 告诉李雷先回滚", false, false),
+    )
+    .await;
     assert_eq!(sent(&h).len(), 1);
     assert_eq!(log(&h), ["+ack o8", "-r o8", "+done o8"]);
 }
@@ -977,7 +988,7 @@ async fn a_failed_answer_turns_failed_and_sends_a_short_note() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn your_command_without_a_voice_goes_to_your_web_conversation() {
+async fn your_command_is_not_answered_once_you_left_the_chat() {
     let h = setup(true).await;
     let i = push(
         &h,
@@ -1019,12 +1030,12 @@ async fn your_command_without_a_voice_goes_to_your_web_conversation() {
         "UPDATE spaces SET connection_id = NULL, status = 'left' WHERE id = ?",
         &[&i.space_id],
     );
+    let before = h.thread.as_ref().unwrap().turns.lock().unwrap().len();
     let r = h.ch.respond(WS, &h.me.clone(), &c).await.expect("respond");
-    assert_eq!(r.label, "你的指令，没有发言身份，转到网页对话");
+    // your account is not in the chat any more: nobody answers, nothing starts
+    assert!(!matches!(r.by, steve_channels::By::Trigger { .. }), "{r:?}");
     let turns = h.thread.as_ref().unwrap().turns.lock().unwrap().clone();
-    let last = turns.last().unwrap();
-    assert_eq!(last.1.space, "steve");
-    assert_eq!(last.1.text, "记一下明天给李雷回电话");
+    assert_eq!(turns.len(), before, "{turns:?}");
     assert!(sent(&h).is_empty());
 }
 
@@ -1426,7 +1437,7 @@ async fn only_the_owner_starts_work_from_a_chat() {
 /// A `/bot` command from a workspace member who is not the owner: answered in the chat like any turn,
 /// but it doesn't start work (it may become a proposal), and it never reaches your web conversation.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_members_bot_command_does_not_start_work() {
+async fn a_trigger_word_a_bot_receives_is_no_command() {
     let h = setup(true).await;
     let t = h.thread.clone().unwrap();
     let (_, self_space) = both_see_ops(&h).await;
@@ -1481,7 +1492,13 @@ async fn a_members_bot_command_does_not_start_work() {
         turns.iter().all(|(_, x)| x.space != "steve"),
         "not your web conversation: {turns:?}"
     );
-    assert!(turns.len() > before, "the command was taken: {turns:?}");
+    // what a bot receives keeps the bot's own rules: no trigger word there
+    assert!(
+        turns[before..]
+            .iter()
+            .all(|(_, x)| x.meta["chan"]["command"] != true),
+        "{turns:?}"
+    );
     assert!(turns[before..].iter().all(|(_, x)| !x.start), "{turns:?}");
 }
 

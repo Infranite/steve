@@ -105,6 +105,7 @@ pub mod channel;
 pub mod channel_accounts;
 pub mod channels_api;
 pub mod cleanup;
+pub mod command_skill;
 pub mod compose;
 pub mod connector;
 pub mod conversation_card;
@@ -143,6 +144,7 @@ pub mod send_state;
 mod service;
 pub mod space_decisions;
 pub mod spaces;
+pub mod trigger_report;
 pub mod usage;
 
 pub use channel::{

@@ -101,6 +101,9 @@ export function AccountView({ id }: { id: string }) {
 
 const SCOPE_MAX = 6
 type Scope = "all" | "dms" | "some"
+/** who may use the words: you, anyone where they work, or chosen contacts (set through the API) */
+const whoOf = (who: string[] | undefined): "me" | "anyone" | "some" =>
+  !who?.length || (who.length === 1 && who[0] === "me") ? "me" : who.includes("*") ? "anyone" : "some"
 const scopeOf = (where: string[]): Scope => !where.length || where.includes(TRIGGER_EVERYWHERE) ? "all" : where.length === 1 && where[0] === TRIGGER_ALL_DMS ? "dms" : "some"
 
 function TriggerSection({ a, onSave, busy }: { a: ChannelAccount; onSave: (t: Partial<Trigger>) => Promise<boolean>; busy: boolean }) {
@@ -148,6 +151,18 @@ function TriggerSection({ a, onSave, busy }: { a: ChannelAccount; onSave: (t: Pa
           <div className="type-footnote text-muted-foreground">{scope === "all" ? t("channels:trigger.hintAll", { word: word0 }) : t(scope === "dms" ? "channels:trigger.hintDms" : "channels:trigger.hintSome")}</div>
           {blockedHere.length > 0 && <div className="flex items-start gap-1.5 rounded-lg bg-attention/10 px-3 py-2 type-footnote anim-in" data-trigger-blocked>
             <BanIcon className="mt-px size-3.5 shrink-0 text-attention" aria-hidden /><span className="min-w-0">{blockedHere.length === 1 ? t("channels:trigger.blockedOne", { n: 1, name: spaceTitle(blockedHere[0]), word: word0 }) : t("channels:trigger.blockedMany", { count: blockedHere.length, word: word0 })}</span></div>}
+        </div>}
+        {tr.on && <div className="flex min-w-0 flex-col gap-2 px-2 py-2.5" data-trigger-who={whoOf(tr.who)}>
+          <div className="type-body">{t("channels:trigger.who")}</div>
+          <Segmented full className="w-full" size="sm" value={whoOf(tr.who)} onChange={(v) => { if (v !== "some") void onSave({ who: [v === "anyone" ? "*" : "me"] }) }}
+            options={[["me", t("channels:trigger.whoMe")], ["anyone", t("channels:trigger.whoAnyone")], ...(whoOf(tr.who) === "some" ? [["some", t("channels:trigger.whoSome", { count: tr.who.filter((x) => x !== "me").length })] as const] : [])] as any} />
+          <div className="type-footnote text-muted-foreground">{t(whoOf(tr.who) === "me" ? "channels:trigger.whoHintMe" : "channels:trigger.whoHintOthers")}</div>
+        </div>}
+        {tr.on && <div className="flex min-w-0 flex-col gap-2 px-2 py-2.5" data-trigger-reply={tr.reply ?? "thread"}>
+          <div className="type-body">{t("channels:trigger.reply")}</div>
+          <Segmented full className="w-full" size="sm" value={tr.reply ?? "thread"} onChange={(v) => void onSave({ reply: v })}
+            options={[["thread", t("channels:trigger.replyThread")], ["quote", t("channels:trigger.replyQuote")], ["message", t("channels:trigger.replyMessage")]] as const} />
+          <div className="type-footnote text-muted-foreground">{t("channels:trigger.replyHint")}</div>
         </div>}
         {tr.on && <Row title={t("channels:trigger.mark")} sub={t("channels:trigger.markSub")}><Switch aria-label={t("channels:trigger.markAria")} checked={tr.mark} disabled={busy} onCheckedChange={(v) => void onSave({ mark: v })} /></Row>}
       </Group>

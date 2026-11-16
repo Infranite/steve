@@ -66,7 +66,8 @@ export type Persona = {
 }
 export type PersonaInput = { name?: string; bot_id?: string; intro?: string; soul?: string; reveal?: Partial<Reveal>; signature?: string }
 export type SpacePatch = Partial<{ persona_id: string | null; duty: string; rules: Rule[] | null; muted: boolean; attention: Attention; voice: string | null; collab: boolean; memory_scope: "space" | "persona"; disclosure: Level; item_defaults: Space["item_defaults"] }>
-export type Trigger = { on: boolean; words: string[]; where: string[]; mark: boolean }
+/** `who`: "me", "*" (anyone where the words work) or contact ids; `reply`: where the answer goes */
+export type Trigger = { on: boolean; words: string[]; where: string[]; who: string[]; reply: "thread" | "quote" | "message"; mark: boolean }
 /** a permission row the Hub checked when it verified the bot (feishu.md §2.5) */
 export type PermissionCheck = { scope: string; purpose: string; level: "required" | "suggested" | "directory" | "optional"; status: "granted" | "missing" | "unknown" | "not_requested" }
 
