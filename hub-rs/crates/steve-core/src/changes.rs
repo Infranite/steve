@@ -763,6 +763,8 @@ fn choice_shown(s: String) -> String {
         "不汇报" => steve_i18n::t!("core.draft.value.no_report"),
         "不自动归档" => steve_i18n::t!("core.draft.value.no_archive"),
         "不换会话" => steve_i18n::t!("core.draft.value.no_handoff"),
+        "加载" => steve_i18n::t!("core.draft.value.load"),
+        "不加载" => steve_i18n::t!("core.draft.value.no_load"),
         "1 年" => steve_i18n::t!("core.draft.value.one_year"),
         "最低" => steve_i18n::t!("core.draft.value.effort_minimal"),
         "低" => steve_i18n::t!("core.draft.value.effort_low"),

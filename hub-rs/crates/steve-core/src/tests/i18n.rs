@@ -34,6 +34,7 @@ async fn describe_in_english() {
             ("When prerequisites finish", "Start automatically"),
             ("Handoff threshold", "Never"),
             ("Archive automatically after finishing", "30 days"),
+            ("Load the Node owner's personal agent config", "Load"),
             ("Item number prefix", "ST"),
         ]
         .map(|(a, b)| (a.to_string(), b.to_string()))
