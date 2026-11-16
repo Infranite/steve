@@ -208,12 +208,16 @@ pub struct Probe<'a> {
 }
 
 /// The candidates' common conditions: the same chat, a received message or a sent one, a space the
-/// connection may match in, one side without a provider id, not supplied by this connection.
+/// connection may match in (its own, or a copy that reached someone's own account,
+/// [`crate::spaces::reached_own_sql`]), one side without a provider id, not supplied by this
+/// connection.
 const CANDIDATE: &str = "FROM spaces s JOIN chan_messages m ON m.space_id = s.id
        LEFT JOIN channel_settings cs ON cs.connection_id = s.connection_id
       WHERE s.workspace_id = ?1 AND s.external_id = ?2 AND m.workspace_id = ?1
         AND (m.direction = 'in' OR m.status = 'sent')
-        AND (s.id = ?3 OR ?4 OR cs.mode = 'self')
+        AND (s.id = ?3 OR ?4 OR (CASE WHEN m.seen_by = 0 THEN coalesce(cs.mode = 'self', 0) ELSE EXISTS (
+            SELECT 1 FROM space_identities oi WHERE oi.space_id = m.space_id AND oi.ordinal IS NOT NULL
+               AND oi.owner_user IS NOT NULL AND ((m.seen_by >> oi.ordinal) & 1) = 1) END))
         AND (NOT ?5 OR m.external_id IS NULL OR m.external_id LIKE 'fp:%')
         AND coalesce(m.fallback_from, '') <> ?6
         AND NOT EXISTS (SELECT 1 FROM chan_message_seen x WHERE x.message_id = m.id AND x.connection_id = ?6)";

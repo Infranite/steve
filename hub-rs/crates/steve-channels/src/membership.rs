@@ -11,7 +11,7 @@ use rusqlite::{OptionalExtension, params};
 use steve_store::Tx;
 
 use crate::channel::{HandleRef, MemberInfo, SpaceEvent, SpaceInfo, SpaceKind};
-use crate::inbound::{ConnFacts, conn_facts, facts_system, identify_with_aliases};
+use crate::inbound::{ConnFacts, facts_system, identify_with_aliases};
 use crate::spaces::{self, Mode, NewSpace, SpaceRow};
 use crate::{ChannelResult, Channels};
 
@@ -194,8 +194,9 @@ impl Channels {
         c.len("space_ext_id", &ext, 1, 500);
         c.done()?;
         let store = self.store().clone();
-        let facts = store.reader(|c| conn_facts(c, ws, conn))?;
-        let existing = store.reader(|c| spaces::find(c, ws, conn, &ext))?;
+        let facts = self.facts(ws, conn)?;
+        let existing =
+            store.reader(|c| spaces::find_as(c, ws, conn, &ext, facts.platform.as_deref()))?;
         if existing.is_none() && !matches!(ev, SpaceEvent::Joined { .. }) {
             tracing::debug!(
                 conn,
@@ -389,6 +390,7 @@ impl Channels {
                 member_count,
                 has_external,
                 now,
+                platform: facts.platform.as_deref(),
             },
         )?;
         let mut rejoined = false;
@@ -446,7 +448,7 @@ impl Channels {
         chats: &[(String, SpaceInfo)],
     ) -> ChannelResult<usize> {
         let store = self.store().clone();
-        let facts = store.reader(|c| conn_facts(c, ws, conn))?;
+        let facts = self.facts(ws, conn)?;
         let now = self.now();
         store.transaction(|tx| {
             mode_of(tx, ws, conn, &facts, now)?;
@@ -468,6 +470,7 @@ impl Channels {
                         member_count: info.member_count,
                         has_external: info.has_external,
                         now,
+                        platform: facts.platform.as_deref(),
                     },
                 )?;
                 if created {

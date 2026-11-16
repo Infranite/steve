@@ -1768,7 +1768,7 @@ async fn what_went_out_as_you_is_recalled_as_you_whatever_the_voice_is_now() {
     h.env
         .store()
         .transaction(|tx| -> ApiResult<()> {
-            spaces::see(tx, WS, &space, &h.oncall, now)?;
+            spaces::see(tx, WS, &space, &h.oncall, None, now)?;
             spaces::set_voice(tx, WS, &space, Some(&h.oncall), now)?;
             Ok(())
         })
@@ -3943,7 +3943,7 @@ async fn output_pipeline_real_source_reply_uses_existing_outbox_and_stable_ledge
     h.env
         .store()
         .transaction(|tx| -> ApiResult<()> {
-            spaces::see(tx, WS, &src.space_id, &h.me, h.ch.now())?;
+            spaces::see(tx, WS, &src.space_id, &h.me, None, h.ch.now())?;
             spaces::set_voice(tx, WS, &src.space_id, Some(&h.me), h.ch.now())?;
             Ok(())
         })

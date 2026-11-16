@@ -11,7 +11,7 @@ use async_trait::async_trait;
 use axum::Router;
 use serde_json::{Value, json};
 use steve_channels::fake::channel::FakeChannel;
-use steve_channels::inbound::{LABEL_ELSEWHERE, LABEL_OWN};
+use steve_channels::inbound::LABEL_OWN;
 use steve_channels::respond::SUBJECT_MESSAGE;
 use steve_channels::rules::{self, Act, INTENT_START, SELF_NO_REPLY};
 use steve_channels::{
@@ -1067,11 +1067,12 @@ async fn a_message_seen_through_both_connections_is_handled_once() {
     let mut m = msg("C_OPS", "x1", "uhan", "@Alice @值班小运 看下告警", true);
     let first = push(&h, &me, m.clone()).await;
     expect(&first, Some(0), Act::Draft);
-    // then the bot's long connection: a different space of another connection, same chat and id
+    // then the bot's long connection: the same space (one space per chat of a platform), same id
     m.thread_key = Some("th_x1".into());
     let again = push(&h, &bot, m.clone()).await;
     assert!(again.duplicate, "{again:?}");
-    assert_eq!(again.next, Next::Record(LABEL_ELSEWHERE));
+    assert_eq!(again.next, Next::Record("重复的消息"));
+    assert_eq!(again.space_id, first.space_id);
     assert!(again.response.is_none(), "no rules");
     assert_eq!(again.message_id, first.message_id);
     assert_eq!(

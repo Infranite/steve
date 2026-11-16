@@ -392,10 +392,46 @@ pub fn get(c: &Connection, id: &str) -> ChannelResult<Option<SpaceRow>> {
     .optional()?)
 }
 
-/// The space of this provider chat as connection `conn` sees it: one space per (installation,
-/// external id), whichever identity saw it first — a space of this chat first seen through, or seen
-/// by, a connection of the same installation.
+/// How many identities a space numbers ([`see`]): the bits of `chan_messages.seen_by`. A space
+/// with this many takes no identity of another installation ([`find_as`]).
+pub const MAX_IDENTITIES: i64 = 62;
+
+/// The platform `conn`'s chats belong to as far as the store knows it: what its service named
+/// (`config.platform`), else the one it had in a space it sees. The pipeline knows better
+/// (`Channels::chat_platform`, from the adapter's provider) and passes it to [`find_as`].
+pub fn platform_known(c: &Connection, conn: &str) -> ChannelResult<Option<String>> {
+    Ok(c.query_row(
+        "SELECT coalesce(
+            (SELECT json_extract(config, '$.platform') FROM connections WHERE id = ?1 AND json_valid(config)),
+            (SELECT platform FROM space_identities WHERE connection_id = ?1 AND platform IS NOT NULL LIMIT 1))",
+        [conn],
+        |r| r.get::<_, Option<String>>(0),
+    )?)
+}
+
+/// The space of this provider chat as connection `conn` sees it ([`find_as`] with the platform
+/// the store knows for it).
 pub fn find(c: &Connection, ws: &str, conn: &str, ext_id: &str) -> ChannelResult<Option<SpaceRow>> {
+    let platform = platform_known(c, conn)?;
+    find_as(c, ws, conn, ext_id, platform.as_deref())
+}
+
+/// The space of this provider chat as connection `conn` sees it: one space per chat, whichever
+/// identities see it. First a space of this chat first seen through, or seen by, a connection of
+/// the same installation (one app's bot and you through it share one); else, for a connection of a
+/// known `platform`, a space of the same platform with that external id, joined as one more
+/// identity (a bot and your account through a channel service, two people's accounts): the message
+/// is stored once and each identity's audience sees what reached it (`chan_messages.seen_by`,
+/// [`seen_visible_sql`]). Two bots never share a space: each answers for itself there, and a space
+/// has one voice. So a bot joins only a space that no bot sees and no identity of a bot's app
+/// (your account authorized through an app is where that app's bot will be) sees.
+pub fn find_as(
+    c: &Connection,
+    ws: &str,
+    conn: &str,
+    ext_id: &str,
+    platform: Option<&str>,
+) -> ChannelResult<Option<SpaceRow>> {
     let inst = installation_of(c, conn)?;
     let mut st = c.prepare_cached(&format!(
         "SELECT {} FROM spaces s WHERE s.workspace_id = ?1 AND s.external_id = ?2 ORDER BY s.created, s.id",
@@ -423,16 +459,125 @@ pub fn find(c: &Connection, ws: &str, conn: &str, ext_id: &str) -> ChannelResult
             }
         }
     }
-    Ok(None)
+    let Some(platform) = platform else {
+        return Ok(None);
+    };
+    // someone's own account, not a bot
+    let personal: bool = c.query_row(
+        "SELECT EXISTS (SELECT 1 FROM connections c JOIN accounts a ON a.id = c.account_id
+           JOIN parties p ON p.id = a.party_id WHERE c.id = ? AND p.user_id IS NOT NULL)",
+        [conn],
+        |r| r.get(0),
+    )?;
+    let id: Option<String> = c
+        .query_row(
+            "SELECT s.id FROM spaces s WHERE s.workspace_id = ?1 AND s.external_id = ?3
+                AND EXISTS (SELECT 1 FROM space_identities pi WHERE pi.space_id = s.id AND pi.platform = ?2)
+                AND (SELECT count(*) FROM space_identities i WHERE i.space_id = s.id) < ?4
+                AND (?5 OR NOT EXISTS (SELECT 1 FROM space_identities i LEFT JOIN connections ic ON ic.id = i.connection_id
+                       WHERE i.space_id = s.id
+                         AND (i.owner_user IS NULL
+                              OR (json_valid(ic.config) AND coalesce(json_extract(ic.config, '$.app_connection'), '') <> ''))))
+              ORDER BY s.created, s.id LIMIT 1",
+            params![ws, platform, ext_id, MAX_IDENTITIES, personal],
+            |r| r.get(0),
+        )
+        .optional()?;
+    match id {
+        Some(id) => get(c, &id),
+        None => Ok(None),
+    }
 }
 
-/// Records that `conn` sees the space (again).
-pub fn see(tx: &Tx, ws: &str, space: &str, conn: &str, now: i64) -> ChannelResult<bool> {
+/// Records that `conn` sees the space (again): a new identity takes the next number of the space
+/// (none past [`MAX_IDENTITIES`]), and every identity keeps whose personal account it is and its
+/// `platform` current.
+pub fn see(
+    tx: &Tx,
+    ws: &str,
+    space: &str,
+    conn: &str,
+    platform: Option<&str>,
+    now: i64,
+) -> ChannelResult<bool> {
+    let owner: Option<String> = tx
+        .query_row(
+            "SELECT p.user_id FROM connections c JOIN accounts a ON a.id = c.account_id
+               JOIN parties p ON p.id = a.party_id WHERE c.id = ?",
+            [conn],
+            |r| r.get(0),
+        )
+        .optional()?
+        .flatten();
     Ok(tx.execute(
-        "INSERT INTO space_identities (space_id, connection_id, workspace_id, joined) VALUES (?1, ?2, ?3, ?4)
-           ON CONFLICT (space_id, connection_id) DO UPDATE SET left_at = NULL WHERE left_at IS NOT NULL",
-        params![space, conn, ws, now],
+        "INSERT INTO space_identities (space_id, connection_id, workspace_id, joined, ordinal, owner_user, platform)
+         VALUES (?1, ?2, ?3, ?4,
+                 (SELECT CASE WHEN count(*) < ?6 THEN coalesce(max(ordinal) + 1, 0) END
+                    FROM space_identities WHERE space_id = ?1), ?5, ?7)
+           ON CONFLICT (space_id, connection_id) DO UPDATE SET left_at = NULL, owner_user = excluded.owner_user,
+               platform = coalesce(excluded.platform, platform)
+             WHERE left_at IS NOT NULL OR owner_user IS NOT excluded.owner_user
+               OR platform IS NOT coalesce(excluded.platform, platform)",
+        params![space, conn, ws, now, owner, MAX_IDENTITIES, platform],
     )? > 0)
+}
+
+/// The bit of `conn` in space `space` (`chan_messages.seen_by`): 0 when it has no number there.
+pub fn bit(c: &Connection, space: &str, conn: &str) -> ChannelResult<i64> {
+    let ordinal: Option<i64> = c
+        .query_row(
+            "SELECT ordinal FROM space_identities WHERE space_id = ? AND connection_id = ?",
+            params![space, conn],
+            |r| r.get(0),
+        )
+        .optional()?
+        .flatten();
+    Ok(ordinal.map_or(0, |o| 1i64 << o))
+}
+
+/// Records that `conn` received (or sent) stored message `id` too: its bit joins `seen_by`.
+pub fn mark_seen(tx: &Tx, id: &str, conn: &str) -> ChannelResult<()> {
+    tx.execute(
+        "UPDATE chan_messages SET seen_by = seen_by | coalesce(
+            (SELECT 1 << i.ordinal FROM space_identities i
+              WHERE i.space_id = chan_messages.space_id AND i.connection_id = ?2), 0)
+          WHERE id = ?1",
+        params![id, conn],
+    )?;
+    Ok(())
+}
+
+/// The SQL condition “message alias `m` reached someone's own account” (`mode=self`): one of the
+/// identities in its `seen_by` is personal; a message with no identity known (`seen_by = 0`) by
+/// whether its space was first seen through one (`cs`: that connection's `channel_settings`).
+pub(crate) fn reached_own_sql(m: &str, cs: &str) -> String {
+    format!(
+        "(CASE WHEN {m}.seen_by = 0 THEN coalesce({cs}.mode = 'self', 0) ELSE EXISTS (
+            SELECT 1 FROM space_identities oi WHERE oi.space_id = {m}.space_id AND oi.ordinal IS NOT NULL
+               AND oi.owner_user IS NOT NULL AND (({m}.seen_by >> oi.ordinal) & 1) = 1) END)"
+    )
+}
+
+/// The identities of space `space` whose messages the user `me` may see, as a `seen_by` mask:
+/// workspace identities (bots) and `me`'s own.
+pub fn viewer_mask(c: &Connection, space: &str, me: &str) -> ChannelResult<i64> {
+    Ok(c.query_row(
+        "SELECT coalesce(sum(1 << ordinal), 0) FROM space_identities
+          WHERE space_id = ?1 AND ordinal IS NOT NULL AND (owner_user IS NULL OR owner_user = ?2)",
+        params![space, me],
+        |r| r.get(0),
+    )?)
+}
+
+/// The SQL condition “message alias `m` is visible to the user bound at `me`”, beside the space's
+/// own visibility ([`visible_sql`]): one of the identities that received it is not someone else's
+/// personal one ([`viewer_mask`]); `seen_by = 0` (no identity known) leaves it to the space.
+pub(crate) fn seen_visible_sql(m: &str, me: &str) -> String {
+    format!(
+        "({m}.seen_by = 0 OR ({m}.seen_by & (SELECT coalesce(sum(1 << si.ordinal), 0) FROM space_identities si
+            WHERE si.space_id = {m}.space_id AND si.ordinal IS NOT NULL
+              AND (si.owner_user IS NULL OR si.owner_user = {me}))) <> 0)"
+    )
 }
 
 /// The identities that see a space (active ones), bots first.
@@ -604,13 +749,15 @@ pub struct NewSpace<'a> {
     pub member_count: i64,
     pub has_external: bool,
     pub now: i64,
+    /// The platform of the connection's chats (`Channels::chat_platform`).
+    pub platform: Option<&'a str>,
 }
 
 /// Finds or creates the space and, when new, its settings (`configured=0`). Returns the row and
 /// whether it was created now. Two deliveries racing for the same space create it once.
 pub fn locate_or_create(tx: &Tx, n: &NewSpace) -> ChannelResult<(SpaceRow, bool)> {
-    if let Some(s) = find(tx, n.ws, n.connection_id, n.external_id)? {
-        if see(tx, n.ws, &s.id, n.connection_id, n.now)? {
+    if let Some(s) = find_as(tx, n.ws, n.connection_id, n.external_id, n.platform)? {
+        if see(tx, n.ws, &s.id, n.connection_id, n.platform, n.now)? {
             event(tx, n.ws, &s.id);
         }
         return Ok((s, false));
@@ -634,7 +781,7 @@ pub fn locate_or_create(tx: &Tx, n: &NewSpace) -> ChannelResult<(SpaceRow, bool)
         ],
     )? == 1;
     if created {
-        see(tx, n.ws, &id, n.connection_id, n.now)?;
+        see(tx, n.ws, &id, n.connection_id, n.platform, n.now)?;
         tx.execute(
             "INSERT INTO space_settings (space_id, workspace_id, disclosure, item_defaults, updated) VALUES (?, ?, ?, ?, ?)",
             params![
@@ -647,7 +794,7 @@ pub fn locate_or_create(tx: &Tx, n: &NewSpace) -> ChannelResult<(SpaceRow, bool)
         )?;
         event(tx, n.ws, &id);
     }
-    let s = find(tx, n.ws, n.connection_id, n.external_id)?
+    let s = find_as(tx, n.ws, n.connection_id, n.external_id, n.platform)?
         .ok_or_else(|| ApiError::not_found("空间"))?;
     Ok((s, created))
 }

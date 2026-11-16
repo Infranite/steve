@@ -11,7 +11,7 @@ use steve_modules::contacts::{Seen, SeenMessage, SeenSpace};
 use steve_store::base::Viewer;
 
 use crate::ChannelResult;
-use crate::spaces::visible_sql;
+use crate::spaces::{seen_visible_sql, visible_sql};
 
 /// Spaces listed per contact at most.
 const MAX_SPACES: usize = 5;
@@ -39,10 +39,11 @@ pub fn seen(
     parties: &[String],
 ) -> ChannelResult<Vec<(String, Seen)>> {
     let vis = visible_sql("?3");
+    let seen_m = seen_visible_sql("m", "?3");
     let mut spaces_q = c.prepare(&format!(
         "SELECT s.id, s.name, s.kind, MAX(x.at) AS at FROM (
-             SELECT space_id, created AS at FROM chan_messages
-              WHERE workspace_id = ?1 AND direction = 'in' AND sender_party_id = ?2
+             SELECT m.space_id, m.created AS at FROM chan_messages m
+              WHERE m.workspace_id = ?1 AND m.direction = 'in' AND m.sender_party_id = ?2 AND {seen_m}
              UNION ALL
              SELECT sm.space_id, sm.joined FROM space_members sm JOIN accounts a ON a.id = sm.account_id
               WHERE sm.workspace_id = ?1 AND a.party_id = ?2) x
@@ -60,8 +61,9 @@ pub fn seen(
                JOIN accounts a ON a.id = json_extract(j.value, '$.account_id')
                JOIN spaces s ON s.id = m.space_id
               WHERE m.workspace_id = ?1 AND a.party_id IN (SELECT value FROM json_each(?3))
-                AND s.workspace_id = ?1 AND {vis2}
-              GROUP BY a.party_id, s.id"
+                AND s.workspace_id = ?1 AND {vis2} AND {}
+              GROUP BY a.party_id, s.id",
+            seen_visible_sql("m", "?2")
         ))?;
         let ids = serde_json::to_string(parties).unwrap_or_else(|_| "[]".into());
         let rows = st.query_map(params![viewer.ws, viewer.user, ids], |r| {
@@ -78,7 +80,7 @@ pub fn seen(
     let mut last_q = c.prepare(&format!(
         "SELECT m.text, m.created, s.id, s.name FROM chan_messages m JOIN spaces s ON s.id = m.space_id
           WHERE m.workspace_id = ?1 AND m.direction = 'in' AND m.sender_party_id = ?2
-            AND m.text IS NOT NULL AND trim(m.text) <> '' AND {vis}
+            AND m.text IS NOT NULL AND trim(m.text) <> '' AND {vis} AND {seen_m}
           ORDER BY m.created DESC LIMIT 1"
     ))?;
     let mut count_q = c.prepare(
