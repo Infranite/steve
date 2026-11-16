@@ -9,9 +9,23 @@ const LEASE_MS: i64 = 60_000;
 impl NodeRuntime {
     // ── T2: sending ──
 
+    /// A transaction for the send loop, which is an async task. A write waiting for SQLite's
+    /// writer (another process holding it, a long transaction) must not hold an async worker
+    /// meanwhile, or the runtime's timers and I/O wait with it, and so may the very writer it waits
+    /// for. On a multi-thread runtime the worker hands its other tasks on while this blocks; the
+    /// transaction still runs here and now, so nothing else happens between it and the send.
+    fn send_tx<T>(&self, f: impl FnOnce(&Tx) -> Result<T, StoreError>) -> Result<T, StoreError> {
+        match tokio::runtime::Handle::try_current().map(|h| h.runtime_flavor()) {
+            Ok(tokio::runtime::RuntimeFlavor::MultiThread) => {
+                tokio::task::block_in_place(|| self.tx(f))
+            }
+            _ => self.tx(f),
+        }
+    }
+
     /// Leases one command, sends it and merges what came back. False: nothing to send.
     pub(super) async fn send_one(&self) -> bool {
-        let lease = match self.tx(|tx| {
+        let lease = match self.send_tx(|tx| {
             self.note_waiting_in(tx)?;
             match rt::lease_command_in(
                 tx,
@@ -33,7 +47,7 @@ impl NodeRuntime {
         };
         let sent = self.send(&lease).await;
         // a turn end to report, and a session whose configure was refused for a stale revision
-        let r = self.tx(|tx| match &sent {
+        let r = self.send_tx(|tx| match &sent {
             Ok(receipt) => self.receipt_in(tx, receipt).map(|end| (end, None)),
             Err(e)
                 if e.retry == RetryClass::SameOperation || e.code == ErrorCode::OutcomeUnknown =>
@@ -135,7 +149,7 @@ impl NodeRuntime {
                         Ok(sid) => self.node.session(sid).await.ok(),
                         Err(_) => None,
                     };
-                    if let Err(e) = self.tx(|tx| {
+                    if let Err(e) = self.send_tx(|tx| {
                         self.refresh_configure_in(tx, &session, &lease.operation, view.clone())
                     }) {
                         tracing::error!("refresh configure of {session}: {e}");

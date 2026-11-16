@@ -36,6 +36,12 @@ fn choice() -> HarnessChoice {
         effort: None,
     }
 }
+/// The output budget of a stop on output. Every byte the harness writes counts, its keep-alive
+/// heartbeats too (one per 50 ms while it waits for the test's control file: at most 180 kB within
+/// the 60 s deadline of [`limits`]). The budget is above all of that, so only the message the meter
+/// sends after the control file reaches it, however late the sampler's first poll comes.
+const OUTPUT_BUDGET: u64 = 256 << 10;
+
 fn limits() -> Limits {
     Limits {
         deadline: Timestamp(now() + 60_000),
@@ -790,7 +796,7 @@ impl Fixture {
         spec.run.choice = choice();
         spec.run.limits = limits();
         if action == "output" {
-            spec.run.limits.max_output_bytes = 1000;
+            spec.run.limits.max_output_bytes = OUTPUT_BUDGET;
         }
         if action == "deadline" {
             spec.run.limits.deadline = Timestamp(now() + 1100);

@@ -63,10 +63,12 @@ def prompt(msg):
             time.sleep(0.002)
         action = control.read_text()
         if action in ('output', 'turns'):
-            for message in (['one', 'two'] if action == 'turns' else ['one']):
+            # output: one message past the test's 256 KiB budget, under the 1 MiB frame limit
+            chunks = [('one', 2000), ('two', 2000)] if action == 'turns' else [('one', 270000)]
+            for message, size in chunks:
                 send({'jsonrpc': '2.0', 'method': 'session/update', 'params': {'sessionId': sid,
                       'update': {'sessionUpdate': 'agent_message_chunk', 'messageId': message,
-                                 'content': {'type': 'text', 'text': 'x' * 2000}}}})
+                                 'content': {'type': 'text', 'text': 'x' * size}}}})
         elif action in ('tools', 'policy'):
             for tool in (['first', 'second'] if action == 'tools' else ['first']):
                 send({'jsonrpc': '2.0', 'id': 'stop-permission-' + tool, 'method': 'session/request_permission', 'params': {
