@@ -261,3 +261,56 @@ fn publishing_in_a_pull_request_project_is_refused_with_how_it_lands() {
     let e = k.core.tool_publish(&s, &branch, "说明").unwrap_err();
     assert!(e.to_string().contains("不用 steve_publish"), "{e}");
 }
+
+/* ── a branch with nothing of its own (#218) ── */
+
+/// An item in a project done when merged, on GitHub, whose branch has no commit of its own.
+fn without_commits(gh: &Gh) -> (Kit, Remote) {
+    let script = gh.script.clone();
+    let k = Kit::with(|c| {
+        c.takeover_continues = 2;
+        c.gh = script.clone();
+    });
+    let x = remote_for(&k, upstream::DONE_MERGE, false, None);
+    g(&x.wt, &["reset", "-q", "--hard", "main"]);
+    (k, x)
+}
+
+#[test]
+fn without_a_commit_of_its_own_only_a_merged_pull_request_makes_it_merged() {
+    let gh = Gh::new();
+    let (k, x) = without_commits(&gh);
+    let h = head(&x.wt);
+    gh.prs(json!([{"number": 9, "state": "MERGED", "url": "https://github.com/acme/app/pull/9", "headRefOid": h}]));
+    k.core.resolve(&x.decision, "pass", "", "me").unwrap();
+    assert!(k.wait(|| {
+        look(&k);
+        k.phase(&x.item) == "closed"
+    }));
+    let t = k.timeline_texts(&x.item);
+    assert!(
+        t.iter()
+            .any(|l| l.starts_with("Steve 核对：提交已合并到 origin/main")),
+        "{t:?}"
+    );
+    assert!(gh.merges().is_empty());
+}
+
+#[test]
+fn without_a_commit_of_its_own_an_open_pull_request_is_not_merged_and_not_auto_merged() {
+    let gh = Gh::new();
+    let (k, x) = without_commits(&gh);
+    gh.prs(open_pr(&head(&x.wt), json!({})));
+    k.core.resolve(&x.decision, "pass", "", "me").unwrap();
+    assert!(k.wait(|| {
+        look(&k);
+        k.phase(&x.item) == "closed"
+    }));
+    let t = k.timeline_texts(&x.item);
+    assert!(
+        t.iter().any(|l| l.starts_with("事项分支上没有自己的提交")),
+        "{t:?}"
+    );
+    assert!(!t.iter().any(|l| l.contains("提交已合并到")), "{t:?}");
+    assert!(gh.merges().is_empty(), "nothing of its own to merge");
+}

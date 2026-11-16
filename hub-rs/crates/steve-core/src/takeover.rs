@@ -111,6 +111,14 @@ pub fn rule_text(rule: &str) -> &'static str {
     }
 }
 
+/// Whether a worktree fingerprint (`head:tree:base:patch`) holds a change of the item's own since
+/// the base its branch left; `None`: the fingerprint does not say.
+pub(crate) fn own_change_in(print: &str) -> Option<bool> {
+    crate::upstream::parse(print)
+        .own
+        .map(|(_, patch)| patch != "-")
+}
+
 fn head_of(cwd: &str) -> Option<String> {
     crate::git::git_read(Path::new(cwd), &["rev-parse", "HEAD"]).ok()
 }
@@ -537,6 +545,13 @@ impl Tx<'_> {
                 }
                 /* the goal asks for an actual operation, or for a build Steve can't follow: the remote
                  * alone is not that evidence (`proof`) */
+                /* the remote holding HEAD is no evidence of a change merged when the branch has no
+                 * commit of its own (#218): it is continued, not closed as merged */
+                let mut p = p;
+                if p.met && self.own_change_now(&i) == Some(false) {
+                    p.met = false;
+                    p.missing = vec!["分支上还没有自己的提交".into()];
+                }
                 let more = self.proof_continue(&i, rule, &p)?;
                 if p.met && more.is_none() {
                     return self.takeover_close(&i, rule, &p);
@@ -579,6 +594,29 @@ impl Tx<'_> {
             .map(|p| p.probe.clone())
     }
 
+    /// `owner/repo` of the item's project's `origin` when it is on GitHub.
+    fn github_slug_of(&self, i: &Item) -> Result<Option<String>> {
+        let Some(p) = self.db().project(i.project_id.as_deref())? else {
+            return Ok(None);
+        };
+        Ok(crate::git::git(
+            Path::new(&p.path),
+            &["config", "--get", "remote.origin.url"],
+        )
+        .ok()
+        .and_then(|u| crate::upstream::github_slug(&u)))
+    }
+
+    /// Whether the item's worktree holds a change of its own now (`None`: can't tell).
+    fn own_change_now(&self, i: &Item) -> Option<bool> {
+        if self.git_on_node(&i.id) {
+            return self.git_seen(&i.id).and_then(|s| own_change_in(&s.print));
+        }
+        crate::cycle::fingerprint(i.cwd.as_deref())
+            .as_deref()
+            .and_then(own_change_in)
+    }
+
     /// The release adapter for a project with a completion rule: the required release is the rule.
     /// Called again before each look at the gate; idempotent.
     pub(crate) fn contract_requirement(&mut self, i: &Item, rule: &str) -> Result<()> {
@@ -593,6 +631,48 @@ impl Tx<'_> {
             json!({"rule": rule}),
         )?;
         if op.status != "pending" {
+            return Ok(());
+        }
+        /* nothing of its own on the branch (as frozen when it was delivered, else as it is now), and no
+         * merged pull request of its branch says otherwise: there is no change to merge, so the rule
+         * does not apply and the acceptance alone completes it; it is never reported as merged
+         * (#218). On GitHub the branch's pull request is looked at once first (`pull`). */
+        let own = match crate::cycle::closing_of(i)
+            .and_then(|c| c.fingerprint)
+            .as_deref()
+            .and_then(own_change_in)
+        {
+            Some(o) => Some(o),
+            None => self.own_change_now(i),
+        };
+        if own == Some(false) && op.evidence["pr_merged"] != json!(true) {
+            let branch = i.branch.clone().unwrap_or_default();
+            if op.evidence["pr_none"] != json!(true)
+                && !branch.is_empty()
+                && let Some(slug) = self.github_slug_of(i)?
+            {
+                if op.evidence["own"] != json!(false) {
+                    self.follow_pr(&op.id, &slug, &branch)?;
+                    self.db().store().transaction(|tx| {
+                        steve_store::operation_set_in(tx, &op.id, "pending", &json!({"own": false}))
+                    })?;
+                }
+                return Ok(());
+            }
+            let note = "事项分支上没有自己的提交，没有要合并的改动";
+            self.db().store().transaction(|tx| {
+                steve_store::operation_set_in(tx, &op.id, "waived", &json!({"note": note}))
+            })?;
+            self.db().timeline_add(
+                &i.id,
+                "steve",
+                "sys",
+                &format!(
+                    "{note}：验收通过即完成，不按约定（{}）判定",
+                    rule_text(rule)
+                ),
+                None,
+            )?;
             return Ok(());
         }
         let Some(p) = self.fresh_probe(i) else {

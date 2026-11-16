@@ -266,6 +266,8 @@ pub(crate) struct Due {
     branch: String,
     /// The head Steve already asked the host to merge.
     merge_head: String,
+    /// Looked at only for whether it merged: the branch has nothing of its own (#218).
+    only_merged: bool,
 }
 
 impl Core {
@@ -278,7 +280,8 @@ impl Core {
             let look = look(&gh_cli, &d.slug, &d.branch);
             let merging = match &look {
                 Look::Found(pr)
-                    if pr.state == "OPEN"
+                    if !d.only_merged
+                        && pr.state == "OPEN"
                         && !pr.draft
                         && !pr.auto
                         && !pr.head.is_empty()
@@ -353,6 +356,7 @@ impl Tx<'_> {
                 slug,
                 branch,
                 merge_head: s("pr_merge_head"),
+                only_merged: o.evidence["own"] == json!(false),
             });
         }
         Ok(out)
@@ -372,6 +376,23 @@ impl Tx<'_> {
             return Ok(());
         };
         if o.status != "pending" || i.phase != CLOSING || o.revision != i.revision {
+            return Ok(());
+        }
+        /* a branch with nothing of its own (#218): only a merged pull request counts; anything else
+         * (none, open, closed, or the host can't be asked) leaves it to the acceptance alone */
+        if o.evidence["own"] == json!(false) {
+            let merged = matches!(&look, Look::Found(pr) if pr.state == "MERGED");
+            let ev = if merged {
+                json!({"pr_merged": true})
+            } else {
+                json!({"pr_none": true})
+            };
+            self.db()
+                .store()
+                .transaction(|tx| steve_store::operation_set_in(tx, &d.op, "pending", &ev))?;
+            self.forget_probe(&i.id);
+            self.st.pr_checked.remove(&d.op);
+            self.lc_try_close(&i.id)?;
             return Ok(());
         }
         let told: Vec<String> = o.evidence["pr_told"]
