@@ -8,7 +8,9 @@
 //!   automatic replies are not instructions;
 //! - every space Steve answers in has one conversation (`chan:<space>`): turns go there, Steve's
 //!   reply there goes out to the space, an item made there is linked back to the chat message, a
-//!   failure sends a short note;
+//!   failure sends a short note; a composer skip or question there is written on the message's
+//!   event once the answer is known (`recorded` with the composer's reason, or `need` with the
+//!   decision), respond()'s hand-off writes nothing before it;
 //! - once the space's connection was removed: the reaction ends here without a provider call, and
 //!   Steve's reply there is recorded as not sent (`chan_out.status = "disconnected"`).
 
@@ -206,6 +208,11 @@ fn state(h: &H, message: &str) -> Value {
 }
 
 async fn setup(with_thread: bool) -> H {
+    setup_answering(with_thread, REPLY).await
+}
+
+/// [`setup`] whose composer answers `composed` (the fake gateway keeps its first script per prefix).
+async fn setup_answering(with_thread: bool, composed: &str) -> H {
     let core = Arc::new(FakeCore::default());
     let flow_setup = FlowSetup::new(core.clone());
     let disclosure = Disclosure::with_models(Vec::new());
@@ -305,7 +312,7 @@ async fn setup(with_thread: bool) -> H {
         json!([{"when": {"kind": "mention_or_dm"}, "act": "reply"}]),
     );
     h.env.gateway.script(CHECK_HEAD, PASS);
-    h.env.gateway.script(H_SAFETY, REPLY);
+    h.env.gateway.script(H_SAFETY, composed);
     h
 }
 
@@ -2536,4 +2543,131 @@ async fn a_command_answered_in_your_web_conversation_shows_that_answer() {
     );
     // another space's command in your web conversation is not this one's
     assert_eq!(handling(&h, &a.message_id)["state"], "answered");
+}
+
+/// The event of a message answered on your own account's conversation path says what became of
+/// it once the composer read it: respond() hands it to the conversation and writes nothing (the
+/// answer is not known yet), then `conv_deliver` records a skip with the composer's reason, or a
+/// question to you as `need` with the decision it opened. Nothing goes out to the space either way.
+async fn conversation_trail(composed: &str, id: &str, text: &str) -> (H, String, Value) {
+    let h = setup_answering(true, composed).await;
+    let t = h.thread.clone().unwrap();
+    // a message on your account (the bot is not in this space): handed to the conversation
+    let a = push(
+        &h,
+        &h.me.clone(),
+        msg("C_OPS", id, "ulilei", text, true, false),
+    )
+    .await;
+    assert_eq!(a.response.as_ref().unwrap().label, "交给对话回答");
+    assert_eq!(
+        event_of(&h, &a.message_id),
+        (
+            json!("recorded"),
+            json!(steve_flow::ingest::LABEL_NO_FLOW),
+            json!(""),
+            Value::Null
+        ),
+        "respond()'s hand-off writes nothing on the event: it is as ingest left it"
+    );
+    let (turn, _) = t.turns.lock().unwrap().last().cloned().expect("a turn");
+    let said = h.ch.conv_answer(WS, &turn).await.expect("answer");
+    let reply = h
+        .env
+        .store()
+        .messages()
+        .add(
+            WS,
+            "steve",
+            &said,
+            None,
+            &json!({"origin": turn}),
+            &conversations::conv_space(&a.space_id),
+        )
+        .unwrap();
+    let d = h.ch.conv_deliver(WS, &reply).await.unwrap();
+    assert!(d.is_none(), "not delivered: {d:?}");
+    assert!(sent(&h).is_empty(), "nothing said in the space");
+    let opened = one(
+        &h,
+        "SELECT count(*) FROM decisions WHERE subject_id = ? AND kind = 'approve'",
+        &[&a.message_id],
+    );
+    assert_eq!(opened, json!(0), "no draft");
+    (h, a.message_id, json!(said))
+}
+
+/// The message's event: outcome, label, reason, decision.
+fn event_of(h: &H, message: &str) -> (Value, Value, Value, Value) {
+    let q = |col: &str| {
+        one(
+            h,
+            &format!(
+                "SELECT e.{col} FROM ext_events e JOIN chan_messages m ON m.event_id = e.id WHERE m.id = ?"
+            ),
+            &[message],
+        )
+    };
+    (
+        q("outcome"),
+        q("outcome_label"),
+        q("reason"),
+        q("decision_id"),
+    )
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_composer_skip_on_the_conversation_path_is_recorded_with_its_reason() {
+    let (h, mid, _) = conversation_trail(
+        r#"{"outcome": "skip", "text": "玩笑，不需要回", "needs_approval": false, "why": "闲聊"}"#,
+        "t1",
+        "@你 哥，你去年也是这么说的",
+    )
+    .await;
+    assert_eq!(
+        event_of(&h, &mid),
+        (
+            json!("recorded"),
+            json!(format!("{}玩笑，不需要回", conversations::NO_REPLY)),
+            json!(format!("{}：闲聊", steve_channels::respond::TRAIL_COMPOSER)),
+            Value::Null
+        )
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_question_on_the_conversation_path_marks_the_event_as_needing_you() {
+    let (h, mid, said) = conversation_trail(
+        r#"{"outcome": "ask_owner", "text": "这条要回吗？", "needs_approval": false, "why": "不确定"}"#,
+        "t2",
+        "@你 明天",
+    )
+    .await;
+    assert_eq!(said, json!("这条要回吗？"));
+    let opened = one(
+        &h,
+        "SELECT id FROM decisions WHERE subject_id = ? AND status = 'open'",
+        &[&mid],
+    );
+    assert!(opened.is_string(), "a question opened: {opened:?}");
+    assert!(
+        one(
+            &h,
+            "SELECT question FROM decisions WHERE id = ?",
+            &[opened.as_str().unwrap()]
+        )
+        .as_str()
+        .unwrap()
+        .contains("这条要回吗？"),
+        "the question carries what Steve asks"
+    );
+    assert_eq!(
+        event_of(&h, &mid),
+        (
+            json!("need"),
+            json!(steve_channels::replies::ASKED),
+            json!(""),
+            opened
+        )
+    );
 }
