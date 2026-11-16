@@ -396,7 +396,7 @@ impl Service {
     /// The deliveries `user` manages in `workspace`, newest first.
     pub fn owned(&self, workspace: &str, user: &str) -> Result<Vec<Delivery>, StoreError> {
         let ids: Vec<String> = self.store.reader(|c| {
-            let mut q = c.prepare("SELECT id FROM deliveries WHERE workspace_id=? AND owner_id=? ORDER BY created DESC, id DESC LIMIT 500")?;
+            let mut q = c.prepare("SELECT id FROM deliveries WHERE workspace_id=? AND owner_id=? ORDER BY created DESC, rowid DESC LIMIT 500")?;
             let rows = q.query_map(params![workspace, user], |r| r.get(0))?;
             Ok::<_, StoreError>(rows.collect::<Result<_, _>>()?)
         })?;
