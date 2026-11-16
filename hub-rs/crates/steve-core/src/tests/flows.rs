@@ -1688,7 +1688,7 @@ fn seed_registers_steves_own_repo_once() {
     let k = Kit::with(|c| c.steve_repo = r.clone());
     let ps = k.db().projects(WS).unwrap();
     assert_eq!(ps.len(), 1);
-    // released through the merge lane (the repository's ops/cut-release.py), never ops/release.sh here
+    // landed through pull requests and released by the repository's ops/cut-release.py, never ops/release.sh here
     let rel = ps[0].release.as_ref().unwrap();
     assert_eq!(
         (

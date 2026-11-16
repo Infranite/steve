@@ -248,7 +248,7 @@ pub struct RangeFacts {
     pub ahead: u32,
     /// Commits of `from` that `to` lacks (`to..from`).
     pub behind: u32,
-    /// Files both sides touched (for the merge lane's overlap check).
+    /// Files both sides touched.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub overlap: Vec<RelPath>,
     /// Would merging conflict, and where.
