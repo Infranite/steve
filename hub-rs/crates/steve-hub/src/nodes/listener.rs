@@ -134,15 +134,19 @@ impl Admission for Admit {
 }
 
 /// Requests of the Node: refused `stale` once this link is not the current one, then the guarded
-/// ports.
+/// ports. The Node may send as soon as the welcome reaches it, before the link is installed:
+/// those requests wait for [`install_link`] to decide, then are judged like any other.
 struct LinkHandler {
     ctx: LinkCtx,
     ports: ServeHub,
+    /// `true` once [`install_link`] decided; dropped if the link ends before that.
+    installed: tokio::sync::watch::Receiver<bool>,
 }
 
 #[async_trait]
 impl Handler for LinkHandler {
     async fn handle(&self, method: &str, p: Value) -> ApiResult<Value> {
+        let _ = self.installed.clone().wait_for(|done| *done).await;
         self.ctx.live()?;
         self.ports.handle(method, p).await
     }
@@ -193,7 +197,9 @@ async fn serve_after(
         registry: svc.registry.clone(),
         fleet: svc.fleet.clone(),
     };
+    let (installed, installed_rx) = tokio::sync::watch::channel(false);
     let handler = Arc::new(LinkHandler {
+        installed: installed_rx,
         ports: ServeHub {
             sink: Arc::new(GuardedSink(ctx.clone())),
             tools: Arc::new(GuardedTools(ctx.clone())),
@@ -222,6 +228,7 @@ async fn serve_after(
     let Some(paused) = install_link(&svc, &node, conn.clone(), restarted).await else {
         return;
     };
+    let _ = installed.send(true);
     svc.fleet.linked(&node, hello.proto);
     if paused != admitted.paused {
         // paused or resumed since the welcome went out
