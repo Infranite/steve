@@ -66,14 +66,15 @@ function Html({ text }: { text: string }) {
 }
 
 /** a text file by what it is: a document, a page, a table, a diagram, JSON or code; rendered ones can show their source */
-export function TextView({ p }: { p: Extract<ROutPreview, { type: "text" }> }) {
+/** `resolve`: relative images and links of a Markdown document (a delivered package's own files) */
+export function TextView({ p, resolve }: { p: Extract<ROutPreview, { type: "text" }>; resolve?: (ref: string) => string | null }) {
   const t = useT()
   const rendered = ["markdown", "html", "csv", "tsv", "mermaid"].includes(p.lang)
   const [tab, setTab] = useState<"预览" | "源码">("预览")
   let json = p.text
   if (p.lang === "json" && !p.truncated) try { json = JSON.stringify(JSON.parse(p.text), null, 2) } catch { /* JSON lines, or broken: as written */ }
   const body = !rendered || tab === "源码" ? <Code lang={p.lang} text={p.lang === "json" ? json : p.text} />
-    : p.lang === "markdown" ? <div className="max-h-[60vh] overflow-auto rounded-xl bg-muted/40 px-6 py-5" data-out-md><Markdown className="type-body" text={p.text} /></div>
+    : p.lang === "markdown" ? <div className="max-h-[60vh] overflow-auto rounded-xl bg-muted/40 px-6 py-5" data-out-md><Markdown className="type-body" text={p.text} resolve={resolve} /></div>
     : p.lang === "html" ? <Html text={p.text} />
     : p.lang === "mermaid" ? <Markdown text={fence("mermaid", p.text)} />
     : <Table text={p.text} sep={p.lang === "tsv" ? "\t" : ","} />

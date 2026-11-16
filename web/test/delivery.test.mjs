@@ -1,6 +1,6 @@
 import assert from "node:assert/strict"
 import { test } from "node:test"
-import { deliveryContent, deliveryForm, deliveryRoute, deliveryWorkspace, loopbackUrl, outputDeliveryId, webUrl } from "../src/delivery.ts"
+import { deliveryContent, deliveryForm, deliveryRoute, deliveryTextLang, deliveryWorkspace, loopbackUrl, outputDeliveryId, packageUrl, webUrl } from "../src/delivery.ts"
 import { DeliveryHttpError, previewText, sharedDelivery } from "../src/delivery-data.ts"
 
 test("stable paths identify deliveries and tokens without interpreting local outputs as links", () => {
@@ -66,4 +66,29 @@ test("public metadata requests use only the token route without ambient credenti
   assert.equal(calls[0][1].headers, undefined)
   globalThis.fetch = async () => Response.json({ error: "expired" }, { status: 410 })
   await assert.rejects(() => sharedDelivery("expired", new AbortController().signal), (e) => e.status === 410)
+})
+
+test("packages preview as their entry, media get players, and Markdown/code are told by extension", () => {
+  for (const [name, mime, entrypoint, form] of [
+    ["docs.zip", "application/zip", "README.md", "text"], ["paper.zip", "application/zip", "a/paper.pdf", "pdf"],
+    ["clip.mp4", "video/mp4", null, "video"], ["clip.MOV", "application/octet-stream", null, "video"],
+    ["voice.m4a", "audio/mp4", null, "audio"], ["song.flac", "application/octet-stream", null, "audio"],
+    ["DESIGN.md", "text/plain", null, "text"], ["main.rs", "application/octet-stream", null, "text"],
+    ["shots.zip", "application/zip", "img/a.png", "image"],
+  ]) assert.equal(deliveryForm({ name, mime, entrypoint }), form, name)
+  assert.equal(deliveryTextLang({ name: "DESIGN.md", mime: "text/plain" }), "markdown")
+  assert.equal(deliveryTextLang({ name: "docs.zip", mime: "application/zip", entrypoint: "guide/intro.markdown" }), "markdown")
+  assert.equal(deliveryTextLang({ name: "app.tsx", mime: "text/plain" }), "tsx")
+  assert.equal(deliveryTextLang({ name: "notes.txt", mime: "text/plain" }), "text")
+})
+
+test("Markdown images resolve inside the package only and keep the workspace selector", () => {
+  const entry = "https://hub.example/api/file-deliveries/d/content/docs/guide/README.md?ws=w"
+  assert.equal(packageUrl("img/a.png", entry, "docs/guide/README.md"), "https://hub.example/api/file-deliveries/d/content/docs/guide/img/a.png?ws=w")
+  assert.equal(packageUrl("../../top.png", entry, "docs/guide/README.md"), "https://hub.example/api/file-deliveries/d/content/top.png?ws=w")
+  for (const ref of ["../../../raw", "../../../../../state", "/api/state", "//evil.example/x.png", "https://evil.example/x.png", "javascript:alert(1)", "data:image/png;base64,AA", "#top", ""]) {
+    assert.equal(packageUrl(ref, entry, "docs/guide/README.md"), null, ref)
+  }
+  const shared = "https://hub.example/api/delivery-shares/t/content/README.md"
+  assert.equal(packageUrl("a b.png", shared, "README.md"), "https://hub.example/api/delivery-shares/t/content/a%20b.png")
 })

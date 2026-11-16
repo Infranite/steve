@@ -208,7 +208,7 @@ export function MobileTabs({ route: full }: { route: string }) {
   const route = full.split("?")[0]
   const n = pendingCards().length
   const tabs = [{ h: "", l: tr("core:nav.chat"), I: MessageCircleIcon }, { h: "feed", l: tr("core:nav.feed"), I: NewspaperIcon }, { h: "inbox", l: tr("core:nav.inbox"), I: InboxIcon, b: n }, { h: "items", l: tr("core:nav.items"), I: ListTodoIcon }, { h: "more", l: tr("core:nav.mine"), I: UserIcon, dot: !!st.update }]
-  const more = ["more", "projects", "sessions", "stats", "mail", "signals", "settings", "bots", "capabilities", "design", "auto", "personas", "contacts", "orgs", "teams", "accounts", "vault", "devices", "knowledge", "github", "yolo", "channels", "integrations"]
+  const more = ["more", "projects", "sessions", "stats", "publications", "mail", "signals", "settings", "bots", "capabilities", "design", "auto", "personas", "contacts", "orgs", "teams", "accounts", "vault", "devices", "knowledge", "github", "yolo", "channels", "integrations"]
   return (
     <nav aria-label={tr("core:sidebar.tabs")} className="fixed inset-x-0 bottom-0 z-40 flex h-15 border-t border-sidebar-border bg-sidebar/95 pb-[env(safe-area-inset-bottom)] backdrop-blur-2xl backdrop-saturate-180 md:hidden" data-mobile-tabs>
       {tabs.map((t) => {

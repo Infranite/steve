@@ -246,6 +246,9 @@ export const api = {
   workflowChange: (id: string, p: { action: "pause" | "resume" | "retry" | "cancel" | "single_session"; expected_revision: number; reason: string; unit_id?: string }) => post<Workflow>(`/items/${encodeURIComponent(id)}/workflow`, p),
   outPreview: (id: string, art: string, path?: string) => get<ROutPreview>(`/items/${encodeURIComponent(id)}/artifacts/${encodeURIComponent(art)}/preview${qs({ path })}`),
   delivery: (id: string) => get<Delivery>(`/file-deliveries/${encodeURIComponent(id)}`),
+  /** "我的发布": the deliveries this user manages in the current workspace, newest first */
+  myDeliveries: () => get<Delivery[]>("/file-deliveries"),
+  setDeliveryInteractive: (id: string, interactive: boolean) => patch<Delivery>(`/file-deliveries/${encodeURIComponent(id)}`, { interactive }),
   deliveryShares: (id: string) => get<DeliveryShare[]>(`/file-deliveries/${encodeURIComponent(id)}/shares`),
   createDeliveryShare: (id: string, expires_at: number) => post<DeliveryShare>(`/file-deliveries/${encodeURIComponent(id)}/shares`, { expires_at }),
   revokeDeliveryShare: (id: string, token: string) => del(`/file-deliveries/${encodeURIComponent(id)}/shares/${encodeURIComponent(token)}`),
