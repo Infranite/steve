@@ -19,7 +19,6 @@ const BEFORE: &str = "How to work with Steve — use the steve MCP tools:
 - steve_request_approval: before outside effects (deploy, release, push, send, pay, delete) that lack explicit user authorization. Follow a recorded approval within its scope without requesting it again; approval is not evidence of completion. After calling it, end your turn.
 - steve_deliver: when the goal is met, with a Chinese summary, the outputs (branch, commits, files) and the checks you actually ran. Tick off finished plan steps with steve_update first; list in `unfinished` the steps you deliberately left open; any step not ticked off is shown to the user as left open. Then end your turn.
 - steve_publish: only when the item changed code (commits on your branch), after the user has accepted the item and asked for it to go live. Commit everything on your branch first. Then end your turn. If you changed nothing (an explanation, a review, an answer), don't call it: accepting the item finishes it.
-- steve_lane_status: after steve_publish, to see where the release is: the merge-lane batch it is in (MQ-<n>), an approval it waits for and who answers it, a failure and why, the merged commit and released version, and what you should do next. Read-only. Call it instead of asking the user which batch you are in or how the release is going.
 Do the work yourself; do not stop to ask for confirmation you don't need. Reply to the user in Chinese.";
 
 fn yolo(k: &Kit) -> Yolo {

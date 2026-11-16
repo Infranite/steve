@@ -3425,6 +3425,108 @@ async fn a_worktree_goes_where_it_is_named_above_the_disk_floor_and_comes_back_a
     }
 }
 
+/// A new item branch starts from its remote's default branch as fetched right then, never from a
+/// local checkout that fell behind; without a remote it starts from `HEAD` as before.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_new_branch_starts_from_the_remotes_latest_default_branch() {
+    let t = T::new(&[]);
+    let seed = t.root.join("seed");
+    std::fs::create_dir_all(&seed).unwrap();
+    git(&seed, &["init", "-q", "-b", "main"]);
+    for (k, v) in [
+        ("user.email", "t@t"),
+        ("user.name", "t"),
+        ("commit.gpgsign", "false"),
+    ] {
+        git(&seed, &["config", k, v]);
+    }
+    std::fs::write(seed.join("a.txt"), "a\n").unwrap();
+    git(&seed, &["add", "."]);
+    git(&seed, &["commit", "-q", "-m", "a"]);
+    let bare = t.root.join("origin.git");
+    git(
+        &t.root,
+        &[
+            "clone",
+            "-q",
+            "--bare",
+            &seed.to_string_lossy(),
+            &bare.to_string_lossy(),
+        ],
+    );
+    let repo = t.root.join("work/repo");
+    std::fs::create_dir_all(t.root.join("work")).unwrap();
+    git(
+        &t.root,
+        &[
+            "clone",
+            "-q",
+            &bare.to_string_lossy(),
+            &repo.to_string_lossy(),
+        ],
+    );
+    let behind = git(&repo, &["rev-parse", "HEAD"]);
+    // the remote moves on; the local checkout does not know yet
+    std::fs::write(seed.join("b.txt"), "b\n").unwrap();
+    git(&seed, &["add", "."]);
+    git(&seed, &["commit", "-q", "-m", "b"]);
+    git(&seed, &["push", "-q", &bare.to_string_lossy(), "main"]);
+    let latest = git(&seed, &["rev-parse", "HEAD"]);
+    assert_ne!(behind, latest);
+
+    std::fs::create_dir_all(t.root.join("work/wt")).unwrap();
+    let n = LocalNode::open(t.config()).unwrap();
+    n.connect(t.sink.clone(), None);
+    n.prepare_workspace(now_cmd(
+        "op_f1",
+        worktree_at("item:ST-9", "steve/st-9", "wt/ST-9"),
+    ))
+    .await
+    .unwrap();
+    assert!(ok(&finished(&n, "op_f1").await));
+    let wt = t.root.join("work/wt/ST-9");
+    assert_eq!(git(&wt, &["rev-parse", "HEAD"]), latest);
+    // its own branch, tracking nothing: pushing it never targets the default branch
+    assert!(
+        std::process::Command::new("git")
+            .current_dir(&wt)
+            .args(["rev-parse", "--abbrev-ref", "@{upstream}"])
+            .output()
+            .unwrap()
+            .stdout
+            .is_empty()
+    );
+    // the local checkout itself is left as it was
+    assert_eq!(git(&repo, &["rev-parse", "HEAD"]), behind);
+
+    // no remote at all: from HEAD
+    let lone = t.root.join("work/lone");
+    std::fs::create_dir_all(&lone).unwrap();
+    git(&lone, &["init", "-q", "-b", "main"]);
+    for (k, v) in [
+        ("user.email", "t@t"),
+        ("user.name", "t"),
+        ("commit.gpgsign", "false"),
+    ] {
+        git(&lone, &["config", k, v]);
+    }
+    std::fs::write(lone.join("a.txt"), "a\n").unwrap();
+    git(&lone, &["add", "."]);
+    git(&lone, &["commit", "-q", "-m", "a"]);
+    let head = git(&lone, &["rev-parse", "HEAD"]);
+    let mut p = worktree_at("item:ST-10", "steve/st-10", "wt/ST-10");
+    if let PrepareKind::Worktree { repository, .. } = &mut p.kind {
+        repository.rel = RelPath::new("lone").unwrap();
+    }
+    n.prepare_workspace(now_cmd("op_f2", p)).await.unwrap();
+    assert!(ok(&finished(&n, "op_f2").await));
+    assert_eq!(
+        git(&t.root.join("work/wt/ST-10"), &["rev-parse", "HEAD"]),
+        head
+    );
+    n.shutdown().await;
+}
+
 // ── the files face: scans, listings, reads ──
 
 /// `t` with a read-only root `kb` at `<root>/kb` besides `work`.
