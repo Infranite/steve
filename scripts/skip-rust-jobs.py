@@ -1,17 +1,21 @@
 #!/usr/bin/env python3
-"""Decide whether a push may skip CI's Rust jobs because it only changed release notes.
+"""Decide whether a push or pull request may skip CI's Rust jobs because it only changed release notes.
 
-    python3 scripts/skip-rust-jobs.py        (in the CI workflow, on a push)
+    python3 scripts/skip-rust-jobs.py        (in the CI workflow, on a push or a pull request)
 
-Nothing the Rust jobs compile or test reads `docs/releases/`, so a push that changed only files there
-(the release notes commit `ops/cut-release.py` pushes) would repeat the Rust jobs of the commit before
-it. When this workflow's push run on that commit passed, they are skipped: the script waits for that run
-and writes `skip=true` to `$GITHUB_OUTPUT`. A passed run on that commit either ran the Rust jobs or
-skipped them for the same reason, so a passed run always stands on Rust jobs that ran on the same code.
+Nothing the Rust jobs compile or test reads `docs/releases/`, so a change of files there alone (the
+release notes `ops/cut-release.py` brings in through its release pull request, and that commit's push
+onto the branch) would repeat the Rust jobs of the commit it stands on. When this workflow's push run on
+that commit passed, they are skipped: the script waits for that run and writes `skip=true` to
+`$GITHUB_OUTPUT`. A passed run on that commit either ran the Rust jobs or skipped them for the same
+reason, so a passed run always stands on Rust jobs that ran on the same code. On a push the commit is the
+one before it; on a pull request it is the base the pull request was opened on, and the pull request must
+stand right on it (not behind the base branch).
 
 Anything else writes `skip=false` and the Rust jobs run: another file changed, the push rewrote the
-branch or is its first, that run failed, was cancelled, never appeared or is still going when `--wait`
-runs out, or GitHub did not answer. The exit code is 0 either way; the decision is the output.
+branch or is its first, the pull request is behind its base, that run failed, was cancelled, never
+appeared or is still going when `--wait` runs out, or GitHub did not answer. The exit code is 0 either
+way; the decision is the output.
 """
 import argparse
 import json
@@ -37,7 +41,7 @@ def changed(compare):
     """The paths a compare answer touches, old names of renames included; refuses anything but a plain
     step forward that fits in one answer."""
     if compare.get("status") != "ahead" or compare.get("behind_by") != 0:
-        raise Undecided(f"the push is not a plain step forward ({compare.get('status')})")
+        raise Undecided(f"the change is not a plain step forward from its base ({compare.get('status')})")
     files = compare.get("files")
     if not isinstance(files, list) or not files:
         raise Undecided("GitHub lists no changed files")
@@ -112,12 +116,17 @@ def main(argv=None, env=os.environ, get=None, **timing):
     args = ap.parse_args(argv)
     try:
         with open(env["GITHUB_EVENT_PATH"], encoding="utf-8") as f:
-            before = json.load(f).get("before")
+            event = json.load(f)
+        if pr := event.get("pull_request"):
+            # GITHUB_SHA is GitHub's trial merge here: what counts is the pull request's own head on its base
+            before, sha, branch = pr["base"]["sha"], pr["head"]["sha"], pr["base"]["ref"]
+        else:
+            before, sha, branch = event.get("before"), env["GITHUB_SHA"], env["GITHUB_REF_NAME"]
         # GITHUB_WORKFLOW_REF: owner/repo/.github/workflows/ci.yml@refs/heads/main
         workflow = env["GITHUB_WORKFLOW_REF"].split("@")[0].rsplit("/", 1)[-1]
         get = get or api(env["GITHUB_REPOSITORY"], env.get("GITHUB_TOKEN"),
                          env.get("GITHUB_API_URL", "https://api.github.com"))
-        reason = decide(get, before, env["GITHUB_SHA"], workflow, env["GITHUB_REF_NAME"], wait=args.wait, **timing)
+        reason = decide(get, before, sha, workflow, branch, wait=args.wait, **timing)
         skip = True
     except Undecided as why:
         skip, reason = False, str(why)
