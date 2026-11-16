@@ -83,7 +83,7 @@ fn for_run_with(
     if found.is_empty() {
         return none;
     }
-    let build = cwd.join(".steve/build");
+    let build = cwd.join(steve_toolchains::ITEM_BUILD_DIR);
     let at = Places {
         item: build.clone(),
         person: node_home.join("cache").join(owner[0]).join(owner[1]),

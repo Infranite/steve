@@ -2,8 +2,8 @@
 //! which no new worktree is made.
 //!
 //! A worktree is the item's sources (small; the git objects are shared with the project) plus rebuildable
-//! caches — Rust `target/`, `node_modules` — which are almost all of its size (measured on Steve's own repo:
-//! 16 MB of sources next to up to 17 GB of `target/`). So:
+//! caches — Rust `target/`, `node_modules`, the toolchains' outputs in `.steve/build` — which are almost all
+//! of its size (measured on Steve's own repo: 16 MB of sources next to up to 30 GB of `target/`). So:
 //! - a closed item gives its caches back at once, and its worktree once that loses nothing: clean, and its
 //!   work landed in main or the item is archived (the branch always stays; [`crate::git::tidy_worktree`]);
 //! - when free space falls below [`DiskPolicy::low`], idle items' caches go too (no session busy, no process
@@ -11,7 +11,8 @@
 //! - below [`DiskPolicy::floor`] no new worktree is made ([`Core::disk_floor`]);
 //! - an item without a project works in a scratch directory (`STEVE_HOME/scratch/<id>`), which has no git
 //!   to ask what is rebuildable: once the item ended, and only under pressure, its directories with a known
-//!   cache name or a `CACHEDIR.TAG` go ([`scratch_cache_dirs`]); everything else in it stays.
+//!   cache name or a `CACHEDIR.TAG` and its toolchains' outputs go ([`scratch_cache_dirs`]); everything else
+//!   in it stays.
 //!
 //! Nothing is touched while a session of the item is busy or a process runs inside the worktree. Deleting
 //! tens of GB takes a while, so it never happens under the core's lock: caches are renamed into
@@ -25,6 +26,7 @@ use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
+use steve_toolchains::ITEM_BUILD_DIR;
 
 use crate::error::Result;
 use crate::git;
@@ -152,14 +154,17 @@ pub fn cache_dirs(wt: &Path) -> Vec<PathBuf> {
 }
 
 /// The caches in an ended item's scratch directory `dir`: only directories with a known cache name or a
-/// `CACHEDIR.TAG` (there is no git to ask what else is rebuildable). Symlinks are not followed.
+/// `CACHEDIR.TAG`, and its toolchains' outputs (there is no git to ask what else is rebuildable).
+/// Symlinks are not followed.
 pub fn scratch_cache_dirs(dir: &Path) -> Vec<PathBuf> {
     marked_caches(dir)
 }
 
-/// Directories under `wt` (to [`CACHE_DEPTH`]) with a known cache name or a `CACHEDIR.TAG`, sorted;
-/// neither `.git` nor the caches themselves are looked into.
+/// Directories under `wt` (to [`CACHE_DEPTH`]) with a known cache name or a `CACHEDIR.TAG`, and each
+/// toolchain's own output directory in [`ITEM_BUILD_DIR`] (a moved `target`, say, has neither),
+/// sorted; neither `.git` nor the caches themselves are looked into.
 fn marked_caches(wt: &Path) -> Vec<PathBuf> {
+    let build = wt.join(ITEM_BUILD_DIR);
     let mut found = vec![];
     let mut todo = vec![(wt.to_path_buf(), 0)];
     while let Some((dir, depth)) = todo.pop() {
@@ -171,7 +176,8 @@ fn marked_caches(wt: &Path) -> Vec<PathBuf> {
                 continue;
             }
             let p = e.path();
-            if cache_names().iter().any(|n| e.file_name() == n.as_str())
+            if dir == build
+                || cache_names().iter().any(|n| e.file_name() == n.as_str())
                 || p.join("CACHEDIR.TAG").is_file()
             {
                 found.push(p);
