@@ -28,6 +28,7 @@ regex = "=1.13.1"
 shlex = "=2.0.1"
 wait-timeout = "=0.2.1"
 plist = "=1.8.0"
+zip = { version = "=9.2.0", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 
 [dev-dependencies]
 tempfile = "=3.27.0"

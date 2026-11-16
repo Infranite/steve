@@ -5452,6 +5452,7 @@ dependencies = [
  "uuid",
  "wait-timeout",
  "zeroize",
+ "zip",
 ]
 
 [[package]]
