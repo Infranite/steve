@@ -1,93 +1,92 @@
-/* 设备状态（B3）：负载、内存、各根目录剩余空间、往返时间，以及最近一天的走势。
- * 一张面板（panel.tsx）：每项一行，名称和说明在左，一天的走势线居中，右边等宽数字带一条用量细条；
- * 用量过高时细条变橙（≥ 75%）或变红（≥ 90%）。底下的数字条是会话数、CPU 数和内存总量。 */
 import { useEffect, useState, type ReactNode } from "react"
-import { ActivityIcon } from "lucide-react"
 import { api, type RVitals } from "@/api"
-import { MeterValue, Panel, PanelRow, PanelSection, Spark, StatStrip, type Tone } from "@/panel"
+import { Button } from "@/components/ui/button"
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { useT } from "@/i18n"
-import { tm } from "@/store"
-
-const gb = (b: number) => (b / 2 ** 30).toFixed(b >= 100 * 2 ** 30 ? 0 : 1)
-const pct = (x: number) => Math.round(x * 100) + "%"
-/** how full: orange from 75%, red from 90% */
-export const fill = (x: number | null | undefined): Tone | undefined => (x == null ? undefined : x >= 0.9 ? "bad" : x >= 0.75 ? "wait" : undefined)
-
-/** the vitals of `node` ("local" for the Hub's own machine, else a remote Node's id), reloaded every minute;
- *  `undefined` while loading, `null` when the Node has sent none */
+import { date, num } from "@/i18n/format"
+import { chartPaths, gib, sampleState, vitalsFacts } from "@/device-vitals-model"
+import "./devices.css"
+export { vitalsFacts } from "@/device-vitals-model"
+export const fill = (x: number | null | undefined) => x == null ? undefined : x >= .9 ? "bad" : x >= .75 ? "wait" : undefined
+const at = (n: number) => date(n, { dateStyle: "short", timeStyle: "medium" })
+const gb = (n: number) => num(gib(n), { maximumFractionDigits: 1 })
+const pc = (n: number) => num(n * 100, { maximumFractionDigits: 1 })
 export function useVitals(node: string) {
-  const [v, setV] = useState<RVitals | null | undefined>(undefined)
+  const [snapshot, setSnapshot] = useState<{ node: string; value: RVitals | null | undefined; error: string }>({ node, value: undefined, error: "" })
+  const [now, setNow] = useState(Date.now())
   useEffect(() => {
-    let live = true
-    const load = () => api.vitals().then(r => { if (live) setV(r.nodes[node] ?? null) }).catch(() => { if (live) setV(null) })
+    let live = true, timer: ReturnType<typeof setTimeout> | undefined
+    setSnapshot({ node, value: undefined, error: "" })
+    const load = async () => {
+      try {
+        const r = await api.vitals()
+        if (live) setSnapshot({ node, value: r.nodes[node] ?? null, error: "" })
+      } catch (e) { if (live) setSnapshot(s => ({ ...s, node, error: (e as Error).message })) }
+      finally { if (live) { setNow(Date.now()); timer = setTimeout(() => void load(), 60_000) } }
+    }
     void load()
-    const timer = setInterval(load, 60_000)
-    return () => { live = false; clearInterval(timer) }
+    const tick = setInterval(() => setNow(Date.now()), 10_000)
+    return () => { live = false; clearTimeout(timer); clearInterval(tick) }
   }, [node])
-  return v
+  const value = snapshot.node === node ? snapshot.value : undefined, error = snapshot.node === node ? snapshot.error : ""
+  return { value, error, stale: sampleState(value, false, now) === "stale", state: sampleState(value, !!error, now) }
 }
-
-/** the figures a vitals report gives: load per CPU, memory used, the disks (roots on one file system read the same: one row) */
-export function vitalsFacts(v: RVitals) {
-  const l = v.latest
-  const memUsed = l.mem_total && l.mem_available != null ? 1 - l.mem_available / l.mem_total : null
-  const loadRatio = l.load && l.cpus ? l.load[0] / l.cpus : null
-  const disks: { names: string[]; free: number; total: number }[] = []
-  for (const r of l.roots ?? []) {
-    const same = disks.find(d => d.free === r.free && d.total === r.total)
-    const name = r.display || r.root
-    if (!same) disks.push({ names: [name], free: r.free, total: r.total })
-    else if (!same.names.includes(name)) same.names.push(name)
-  }
-  const fullest = disks.reduce<number | null>((m, d) => (d.total ? Math.max(m ?? 0, 1 - d.free / d.total) : m), null)
-  return { l, memUsed, loadRatio, disks, fullest }
+function Trend({ value, metric, title }: { value: RVitals; metric: "load" | "mem" | "rtt"; title: string }) {
+  const t = useT(), chart = chartPaths(value, metric)
+  const label = (n: number) => num(metric === "mem" ? n * 100 : n, { maximumFractionDigits: 2 }) + (metric === "mem" ? "%" : "")
+  return <figure className="device-chart" data-chart={metric}>
+    <figcaption>{title}</figcaption>
+    <div className="device-chart-plot"><div className="device-chart-axis" data-axis><span>{label(chart.max)}</span><span>{label(chart.max / 2)}</span><span>{label(0)}</span></div>
+      <svg viewBox="0 0 100 100" preserveAspectRatio="none" role="img" aria-label={title}>
+        {[0, 50, 100].map(y => <path key={y} d={`M0,${y} H100`} stroke="var(--border)" vectorEffect="non-scaling-stroke" />)}
+        {chart.paths.map((p, i) => <path key={i} d={p} stroke="var(--primary)" strokeWidth="2" fill="none" vectorEffect="non-scaling-stroke" />)}
+      </svg></div>
+    {chart.start > 0 && <div className="device-chart-times"><time>{at(chart.start)}</time><time>{at(chart.end)}</time></div>}
+    {value.gaps?.map(g => <p key={g.from} data-sampling-gap>{t("device:gaps", { from: at(g.from), to: at(g.to) })}</p>)}
+    {(!value.series.length || value.series.some(p => p[metric] == null)) && <p>{t("device:missing")}</p>}
+  </figure>
 }
-
-/** 设备状态 as a panel; `right` goes in its head (a state tag), `children` after its figures (a foot with actions) */
-export function VitalsSection({ node, right, children }: { node: string; right?: ReactNode; children?: ReactNode }) {
-  const t = useT()
-  const v = useVitals(node)
-  if (v === undefined) return null
-  if (v === null) return (
-    <Panel k="vitals" data-vitals icon={<ActivityIcon />} title={t("shell:devices.vitals.title")} sub={t("shell:devices.vitals.none")} right={right}>{children}</Panel>
-  )
-  const { l, memUsed, loadRatio, disks } = vitalsFacts(v)
-  const series = v.series
-  return (
-    <Panel k="vitals" data-vitals icon={<ActivityIcon />} title={t("shell:devices.vitals.title")} sub={t("shell:devices.vitals.at", { time: tm(l.at) })} right={right}>
-      <PanelSection flush label={t("shell:devices.vitals.metric")} meta={t("shell:devices.vitals.window")}>
-        {l.load && <PanelRow title={t("shell:devices.vitals.load")} sub={t("shell:devices.vitals.loadSub", { load: l.load[0].toFixed(2), cpus: l.cpus ?? "?" })} data-vital="load">
-          <Spark values={series.map(p => p.load)} label={t("shell:devices.vitals.load")} className="max-sm:hidden" /><MeterValue value={l.load[0].toFixed(2)} ratio={loadRatio} tone={fill(loadRatio)} /></PanelRow>}
-        {memUsed != null && <PanelRow title={t("shell:devices.vitals.memory")} sub={t("shell:devices.vitals.memorySub", { used: pct(memUsed), free: gb(l.mem_available ?? 0), total: gb(l.mem_total ?? 0) })} data-vital="memory">
-          <Spark values={series.map(p => p.mem)} label={t("shell:devices.vitals.memory")} className="max-sm:hidden" /><MeterValue value={pct(memUsed)} ratio={memUsed} tone={fill(memUsed)} /></PanelRow>}
-        {disks.map(d => { const used = d.total ? 1 - d.free / d.total : 0; return (
-          <PanelRow key={d.names.join()} title={t("shell:devices.vitals.disk", { root: d.names.join(t("shell:list.sep")) })} sub={t("shell:devices.vitals.diskSub", { free: gb(d.free), total: gb(d.total) })} data-vital="disk">
-            <Spark values={[]} label="" className="max-sm:hidden" /><MeterValue value={pct(used)} ratio={used} tone={fill(used)} /></PanelRow>) })}
-        {l.rtt_ms != null && <PanelRow title={t("shell:devices.vitals.rtt")} sub={t("shell:devices.vitals.rttSub")} data-vital="rtt">
-          <Spark values={series.map(p => p.rtt == null ? null : Math.min(1, p.rtt / 1000))} label={t("shell:devices.vitals.rtt")} className="max-sm:hidden" /><MeterValue value={l.rtt_ms + " ms"} ratio={Math.min(1, l.rtt_ms / 1000)} tone={l.rtt_ms >= 500 ? "wait" : undefined} /></PanelRow>}
-      </PanelSection>
-      <StatStrip items={[
-        { k: "sessions", label: t("shell:devices.vitals.sessions"), value: String(l.sessions ?? 0) },
-        { k: "cpus", label: t("shell:devices.vitals.cpus"), value: l.cpus ?? "—" },
-        { k: "mem", label: t("shell:devices.vitals.memTotal"), value: l.mem_total ? gb(l.mem_total) + " GB" : "—" },
-      ]} />
-      {children}
-    </Panel>
-  )
+export function VitalsSection({ node, identity, right, children }: { node: string; identity?: string; right?: ReactNode; children?: ReactNode }) {
+  const t = useT(), { value: v, error, stale, state } = useVitals(node)
+  const [disk, setDisk] = useState<{ root: string; display?: string; free: number; total: number; at: number } | null>(null)
+  const facts = v ? vitalsFacts(v) : null
+  return <section className="device-vitals" data-vitals data-sample-state={state}>
+    <header><h2>{t("device:monitor")}</h2>{right}<p>{t("device:nodeIdentity", { id: node })}</p></header>
+    {error && <p role="alert">{t("device:readFailed", { error })}</p>}
+    {state === "loading" && <p>{t("device:loading")}</p>}
+    {state === "none" && <p>{t("device:noSamples")}</p>}
+    {v && facts && <>
+      <p data-sample-time>{t(stale ? "device:stale" : "device:fresh", { time: at(v.latest.sampled_at ?? v.latest.at) })}</p>
+      <p>{t("device:sampleReceived", { time: at(v.latest.at) })}</p>
+      {v.sampling ? <p>{t("device:samplePolicy", { seconds: v.sampling.interval_ms / 1000, stale: v.sampling.stale_after_ms / 1000 })}</p> : <p>{t("device:policyUnknown")}</p>}
+      <div data-vital="load"><h3>{t("device:load")}</h3><p>{v.latest.load ? t("device:loadValue", { values: v.latest.load.map(n => num(n, { maximumFractionDigits: 2 })).join(" / "), cpus: v.latest.cpus ?? t("device:unknown") }) : t("device:missing")}</p></div>
+      <div data-vital="memory"><h3>{t("device:memory")}</h3><p>{facts.memUsed != null ? t("device:memoryValue", { used: pc(facts.memUsed), free: gb(v.latest.mem_available!), total: gb(v.latest.mem_total!) }) : t("device:missing")}</p></div>
+      <div><h3>{t("device:disk")}</h3>{facts.disks.length ? facts.disks.map(d => <div key={d.root} data-vital="disk"><p>{d.display || d.root}</p>
+        <p>{t("device:diskValue", { free: gb(d.free), total: gb(d.total), used: pc(1 - d.free / d.total) })}</p>
+        <meter min={0} max={d.total} low={d.total * .75} high={d.total * .9} optimum={0} value={d.total - d.free} aria-label={d.display || d.root} className="w-full" />
+        <Button size="sm" variant="outline" onClick={() => setDisk({ ...d, at: v.latest.sampled_at ?? v.latest.at })} data-disk-evidence={d.root}>{t("device:diskEvidence")}</Button>
+      </div>) : <p>{t("device:missing")}</p>}<p>{t("device:diskNoHistory")}</p></div>
+      <details data-monitor-expanded><summary>{t("device:expandMonitor")}</summary>
+        <Trend value={v} metric="load" title={t("device:perCpu")} /><Trend value={v} metric="mem" title={t("device:memory")} />
+        {node !== "local" && <Trend value={v} metric="rtt" title={t("device:rtt")} />}
+      </details>
+    </>}
+    {children}
+    {disk && <Dialog open onOpenChange={open => !open && setDisk(null)}><DialogContent className="device-evidence"><DialogHeader>
+      <DialogTitle>{t("device:diskEvidence")}</DialogTitle><DialogDescription>{identity} · {t("device:nodeIdentity", { id: node })}</DialogDescription></DialogHeader>
+      <p>{t("device:diskRoot", { root: disk.display || disk.root })} · {disk.root}</p>
+      <p>{t("device:diskValue", { free: gb(disk.free), total: gb(disk.total), used: pc(1 - disk.free / disk.total) })}</p>
+      <p>{t("device:fresh", { time: at(disk.at) })}</p>
+      <Button variant="outline" onClick={() => setDisk(null)}>{t("common:action.close")}</Button>
+    </DialogContent></Dialog>}
+  </section>
 }
-
-/** the vitals in one strip (the Hub's card on the device list): load, memory, the fullest disk, sessions */
 export function VitalsStrip({ node }: { node: string }) {
-  const t = useT()
-  const v = useVitals(node)
-  if (!v) return null
-  const { l, memUsed, loadRatio, fullest } = vitalsFacts(v)
-  return (
-    <StatStrip items={[
-      { k: "load", label: t("shell:devices.vitals.load"), value: l.load ? l.load[0].toFixed(2) : "—", tone: fill(loadRatio), sub: l.cpus ? t("shell:devices.vitals.cpusShort", { n: l.cpus }) : undefined },
-      { k: "memory", label: t("shell:devices.vitals.memory"), value: memUsed != null ? pct(memUsed) : "—", tone: fill(memUsed) },
-      { k: "disk", label: t("shell:devices.vitals.diskShort"), value: fullest != null ? pct(fullest) : "—", tone: fill(fullest) },
-      { k: "sessions", label: t("shell:devices.vitals.sessions"), value: String(l.sessions ?? 0) },
-    ]} />
-  )
+  const t = useT(), { value: v, state, stale, error } = useVitals(node)
+  if (!v) return <p className="px-5 py-3">{t(error ? "device:readFailed" : state === "loading" ? "device:loading" : "device:noSamples", { error })}</p>
+  const f = vitalsFacts(v)
+  return <div className="px-5 py-3"><p>{t("device:load")} · {v.latest.load?.[0] ?? t("device:unknown")}</p>
+    <p>{t("device:memory")} · {f.memUsed == null ? t("device:unknown") : pc(f.memUsed) + "%"}</p>
+    <p>{t(stale ? "device:stale" : "device:fresh", { time: at(v.latest.sampled_at ?? v.latest.at) })}</p>{error && <p>{t("device:readFailed", { error })}</p>}
+  </div>
 }

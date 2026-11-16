@@ -49,7 +49,9 @@ pub async fn sample_once(
         if let Some(svc) = svc {
             for id in svc.registry.linked() {
                 if let Ok(node) = NodeId::new(id.clone()) {
-                    targets.push((id, svc.fleet.remote(&node), true));
+                    // The explicitly colocated service is still this machine, not a remote RTT.
+                    let remote = id != "local";
+                    targets.push((id, svc.fleet.remote(&node), remote));
                 }
             }
         }
@@ -153,22 +155,32 @@ pub fn day(rows: &[(i64, Option<i64>, String)]) -> Option<Value> {
     let (at, rtt, last) = parsed.last()?.clone();
     let step = parsed.len().div_ceil(POINTS).max(1);
     let series: Vec<Value> = parsed
-        .iter()
-        .step_by(step)
-        .map(|(at, rtt, v)| {
-            let cpus = v["cpus"].as_f64().filter(|c| *c > 0.0).unwrap_or(1.0);
-            let load = v["load"][0].as_f64().map(|l| l / cpus);
+        .chunks(step)
+        .map(|chunk| {
+            let (at, rtt, v) = chunk.last().unwrap();
+            let cpus = v["cpus"].as_f64().filter(|c| *c > 0.0);
+            let load = cpus.and_then(|c| v["load"][0].as_f64().map(|l| l / c));
             let mem = match (v["mem_total"].as_f64(), v["mem_available"].as_f64()) {
-                (Some(t), Some(a)) if t > 0.0 => Some(1.0 - a / t),
+                (Some(t), Some(a)) if t > 0.0 && a >= 0.0 && a <= t => Some(1.0 - a / t),
                 _ => None,
             };
             json!({ "at": at, "load": load, "mem": mem, "rtt": rtt })
         })
         .collect();
+    // Missing raw sampling intervals survive decimation. The UI breaks paths across these ranges.
+    let gaps: Vec<Value> = parsed
+        .windows(2)
+        .filter(|w| w[1].0 - w[0].0 > (EVERY + ASK).as_millis() as i64)
+        .map(|w| json!({"from": w[0].0, "to": w[1].0}))
+        .collect();
     let mut latest = last;
+    latest["sampled_at"] = latest.get("at").cloned().unwrap_or(json!(at));
     latest["at"] = json!(at);
     latest["rtt_ms"] = json!(rtt);
-    Some(json!({ "latest": latest, "series": series }))
+    Some(json!({ "latest": latest, "series": series, "gaps": gaps,
+        "sampling": {"interval_ms": EVERY.as_millis() as u64,
+            "stale_after_ms": (EVERY * 2 + ASK).as_millis() as u64,
+            "now": super::now()} }))
 }
 
 /// `GET /api/vitals`: the Hub's own Node, and the remote Nodes the caller paired.
@@ -232,5 +244,28 @@ mod tests {
         assert_eq!(d["latest"]["at"], 999);
         assert_eq!(d["latest"]["rtt_ms"], 12);
         assert!(day(&[]).is_none());
+    }
+}
+
+#[cfg(test)]
+mod evidence_tests {
+    use super::*;
+    #[test]
+    fn missing_cpu_stays_unknown_and_sampling_gaps_survive() {
+        let d = day(&[
+            (1, None, json!({"at":1,"load":[2,1,0]}).to_string()),
+            (
+                180001,
+                None,
+                json!({"at":180000,"cpus":4,"load":[8,4,2]}).to_string(),
+            ),
+        ])
+        .unwrap();
+        assert!(d["series"][0]["load"].is_null());
+        assert_eq!(d["series"][1]["load"], 2.0);
+        assert_eq!(d["gaps"][0], json!({"from":1,"to":180001}));
+        assert_eq!(d["sampling"]["stale_after_ms"], 135000);
+        assert_eq!(d["latest"]["sampled_at"], 180000);
+        assert!(d["latest"]["rtt_ms"].is_null());
     }
 }

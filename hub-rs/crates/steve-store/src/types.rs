@@ -665,6 +665,7 @@ pub struct Device {
     pub max_sessions: i64,
     pub seen: i64,
     pub created: i64,
+    pub revision: i64,
 }
 
 impl Device {
@@ -679,6 +680,7 @@ impl Device {
             max_sessions: r.get("max_sessions")?,
             seen: r.get("seen")?,
             created: r.get("created")?,
+            revision: r.get("revision")?,
         })
     }
 }

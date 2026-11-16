@@ -357,8 +357,8 @@ test("browserEntries lists the saved Hubs with the one in use among them, in a s
     hubMod.rememberHub("http://192.168.1.10:8440", { now: 100 })
     hubMod.setHub("http://192.168.1.10:8440")
     assert.deepEqual(hubMod.browserEntries(), [
-      { id: "http://192.168.1.10:8440", name: "192.168.1.10:8440", address: "http://192.168.1.10:8440", current: true, removable: false },
-      { id: "https://steve.example.com", name: "Cloud", address: "https://steve.example.com", current: false, version: "0.3.1", removable: true },
+      { id: "http://192.168.1.10:8440", name: "192.168.1.10:8440", alias: undefined, address: "http://192.168.1.10:8440", current: true, removable: false },
+      { id: "https://steve.example.com", name: "Cloud", alias: "Cloud", address: "https://steve.example.com", current: false, version: "0.3.1", removable: true },
     ])
     /* the Hub in use is listed before it was ever saved */
     hubMod.forgetHub("http://192.168.1.10:8440")

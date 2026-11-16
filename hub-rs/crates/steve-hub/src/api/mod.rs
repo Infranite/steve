@@ -8,6 +8,7 @@ pub mod dedupe;
 mod diagnostics;
 pub(crate) mod feed;
 mod files;
+mod hub_metadata;
 mod items;
 mod misc;
 mod node_env;
@@ -691,6 +692,10 @@ pub fn router(st: AppState, modules: Router) -> Router {
         .route("/config/{id}/drop", post(misc::config_drop))
         // devices
         .route("/devices", get(misc::devices))
+        .route(
+            "/hub-metadata",
+            get(hub_metadata::get).put(hub_metadata::put),
+        )
         .route("/node-tags", get(node_tags::list))
         .route("/node-tags/{node}", put(node_tags::set))
         .route("/items/{id}/node-tag", put(node_tags::set_item))

@@ -19,7 +19,7 @@ import { applyLook } from "./lib/motion"
 
 /* ───────── view types (from the prototype) ───────── */
 export type Ev = any[] // ['u',text,label?] ['q',string[]] ['th',text,secs] ['tool',kind,title,meta,detail,live?,add?,del?,failed?,tool?,desc?,input?,plan?,endedAt?,steveArgs?] ['a',text] ['ho',text,toSid] ['hi',text] ['ask',text] ['sys',text] ['end',stopReason]
-export type Sess = { id: string; n: number; item: string | null; b: string | null; h?: string; harness?: string; nativeId?: string | null; cwd?: string; m?: string; reasoningEffort?: string | null; contextKnown?: boolean; /** the context in tokens, as the harness reported it: used and the window's size */ ctxUsed?: number; ctxSize?: number; st: "run" | "wait" | "idle" | "ended"; title: string; dur: string; ctx: number; src: string; up: string; /** last activity (ms) */ at?: number; ev: Ev[]; seqs: number[]; ts: number[]; from?: string | null; fork?: { s: string; at: number }; queue: RQueued[]; ro?: boolean; device: string; loaded: boolean; busy: boolean; /** its next turn waits for room on its device */ room?: RRoom | null
+export type Sess = { id: string; n: number; item: string | null; b: string | null; h?: string; harness?: string; nativeId?: string | null; cwd?: string; m?: string; reasoningEffort?: string | null; contextKnown?: boolean; /** the context in tokens, as the harness reported it: used and the window's size */ ctxUsed?: number; ctxSize?: number; st: "run" | "wait" | "idle" | "ended"; title: string; dur: string; ctx: number; src: string; up: string; /** status updated (ms), not execution activity */ at?: number; ev: Ev[]; seqs: number[]; ts: number[]; from?: string | null; fork?: { s: string; at: number }; queue: RQueued[]; ro?: boolean; device: string; loaded: boolean; busy: boolean; /** its next turn waits for room on its device */ room?: RRoom | null
   /** not opened on its Node yet: no turn runs, the queue waits for the start; `since` is when it was created */
   starting?: boolean; since?: number }
 export type Wait = { type: "approve" | "ask" | "accept" | "propose" | "fail" | "confirm"; subjectId?: string; q: string; draft?: string; opts?: string[]; since: string; decision: string; subject: string; session: string | null; options: string[]; by: string; busy?: boolean }
@@ -306,6 +306,14 @@ const convs = new Map<string, { xs: REvent[]; n: number; running: boolean; conv:
 function convOf(sid: string, xs: REvent[], running: boolean) {
   const c = convs.get(sid); if (c && c.xs === xs && c.n === xs.length && c.running === running) return c.conv
   const conv = toEv(xs, running); convs.set(sid, { xs, n: xs.length, running, conv }); return conv
+}
+/** Unfolded device evidence; the general conversation view intentionally has coarser states. */
+export const deviceWorkEvidence = () => ({ loaded: raw.state !== null, sessions: raw.state?.sessions ?? [], decisions: raw.state?.decisions ?? [] })
+export function deviceDecision(id: string) {
+  const d = raw.state?.decisions.find(d => d.id === id && d.status === "open")
+  if (!d) return undefined
+  const i = st.items.find(i => i.id === d.item_id)
+  return { i: i ?? orphanOf(d).i, w: waitOf(d) }
 }
 function sessOf(s: RSession, openSessions: Set<string>): Sess {
   const evs = raw.events.get(s.id), running = s.status === "running" || s.status === "starting"

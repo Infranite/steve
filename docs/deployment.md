@@ -473,7 +473,7 @@ Steve runs work on Nodes. The Hub is always one of them: its own Node, `local`, 
 
 ### Concurrent sessions and capacity queues
 
-Every session-capable Node, including the Hub's own in-process or service Node, starts with **32 concurrent turns**. In **Devices → Hub details → Concurrent sessions**, the instance owner can save 1–256; for a paired Node, its owner uses **Devices → that Node's details → Concurrent sessions**. This is resource scheduling, not a new approval or harness permission. It applies to every harness through the same Node contract. Idle/open sessions do not use turn slots; model jobs and command executions keep their separate capacities.
+Every session-capable Node, including the Hub's own in-process or service Node, starts with **32 concurrent turns**. In **Devices → Hub details → Capabilities and admission configuration**, the instance owner can save 1–256 using the current configuration revision; for a paired Node, its owner uses **Devices → that Node's details → Concurrent sessions**. This is resource scheduling, not a new approval or harness permission. It applies to every harness through the same Node contract. Idle/open sessions do not use turn slots; model jobs and command executions keep their separate capacities.
 
 The setting is persisted on the Hub (`devices.max_sessions` for its `hub`/`local` machine, `nodes.max_sessions` for a paired Node). A save needs no restart: the Hub uses it on the next dispatch, normally within one second when its sender is idle. Raising it releases eligible queued turns; lowering it does not interrupt accepted/running turns and starts no more until the count drops below the new setting. The Hub reapplies the setting to the Node's actual limiter before each turn dispatch, including after a Node reconnect or restart. Offline or paused Nodes still wait for their normal link/resume; saving capacity does not connect, resume or move work.
 
@@ -976,6 +976,116 @@ returns `{ ok: true }` or `{ ok: false, errors }`: a manifest with an unknown fi
 set, or a value outside the syntax above is refused as a whole and nothing on screen changes. A registered theme
 appears among the choices of its kind; a stored choice whose theme is not registered shows the default until it is.
 
+
+### Hub management and personal aliases
+
+Open **Manage current Hub** in the desktop Hub menu, **Settings → Hub**, or **Me → Hub
+management** on a phone (`#/settings/hub`). The page manages the connected Hub; switching
+connections is a separate action. Its shared name and purpose note are visible to signed-in
+workspace members, and only the instance owner (`users.role=owner`, not a workspace
+administrator) can edit them. Connection addresses and stable identity are read-only.
+The related-device entry uses the current inventory's unique explicit `node_id=local`
+association. With no association or an ambiguous one it opens the device list and reports
+that no trusted association is available; names and Hub roles never establish identity.
+
+`GET /auth/hello` declares `capabilities.hub_metadata: 1`. Without this declaration the
+editor reports unsupported, while existing connection and pairing features remain usable;
+clients must not infer support from a software version or API generation.
+Authenticated `GET /api/hub-metadata` returns `contract: 1`,
+`capabilities.shared_metadata: 1`, `metadata`, `can_edit`, `edit_reason`, and `device_id`.
+The latter can be null; the UI can resolve the trusted inventory association described above.
+Metadata contains `hub_id`, `display_name`, `purpose_note`, `revision`, `updated_at` and
+`updated_by`. Audit times are Unix milliseconds and the editor is a stable user ID. Initial
+values are name `Hub`, empty note, revision 0 and null audit fields. Identity reuses the
+installation's persisted `node.hub_id`, independently of Node/listener availability, URL,
+client directory ID, device name or the protocol's `Hello.name` value `steve`.
+
+`PUT /api/hub-metadata` accepts only `revision`, `display_name` and `purpose_note`.
+The name is trimmed, required, single-line and 1–64 Unicode code points without control
+characters. The note can be cleared, is at most 500 code points after CRLF/CR normalization
+to LF, permits LF/tab, and renders as plain text. Invalid input returns 400 without silent
+truncation. Owner permission is re-read in the same SQLite transaction as the revision
+comparison and write: revoked permission returns 403 and a stale revision returns 409.
+Successful writes return canonical values, audit fields and a new revision. This revision
+is independent of the Hub software version; there is no force-overwrite operation.
+Shared metadata uses the existing settings table's reserved instance entry
+`default / hub.metadata.v1`; backups must retain the database, including `node.hub_id`.
+The device configuration revision is added by its own database migration; shared metadata needs no additional
+schema migration. Normal installations apply the bundled migrations on startup.
+
+Cancel discards a changed draft only after confirmation. Saving blocks duplicate submissions
+and navigation. Errors retain the draft; uncertain results and timeouts require a read-back
+and comparison before retrying, even if the read-back matches. A conflict shows the latest
+values and the local draft separately; loading latest does not silently overwrite someone
+else's edit. Revoked permission disables saving and keeps the draft copyable. Offline
+snapshots are per-tab `sessionStorage`, keyed by the browser connection or Apple profile,
+and show the absolute read time. Cached permissions do not authorize writes. With no
+snapshot the page reports that nothing has been read. There is no offline write queue or
+whole-site offline cache; the web client must still be available to open the page.
+
+The separate personal alias is optional, at most 64 Unicode code points, and can be cleared.
+It belongs to this browser's `localStorage` directory or this Apple client's profile store;
+it is not account synchronization. Rename/clear preserves the active connection, address,
+credentials and known version. Browser changes notify sibling tabs. Apple Bridge v2
+advertises the optional `hubs.rename` operation with `{id, alias}` and returns `alias` from
+`hubs.list` (empty string means cleared); old bridges without this capability disable alias
+editing. Existing client labels are not migrated into shared names. The connection menu
+can show “alias · shared name” and retains the address; the management title uses the
+shared name. Neither alias editing nor shared metadata requires a private service or model
+backend.
+
+### Device work and monitoring
+
+The device page groups visible sessions by their recorded device identity. Open requests take
+precedence over execution state; a running session with a request is counted once under “Needs
+you”. Read-only imports do not count as execution load. Queued messages retain their own session
+and message identities; unassigned queues are not attributed to the local machine. “Status
+updated” is not proof of execution activity. A disconnected device retains its last known work;
+Steve does not automatically move that work elsewhere.
+
+The built-in `hub` inventory identity is registered by the installation and is associated with
+`local` only while the local Node coordinator is configured. Names and roles do not establish
+this association. Remote inventory association, exact occupancy and workspace eligibility remain
+unknown where the backend has no supporting contract. Local harness discovery is displayed only
+for this explicitly associated local device.
+
+When the backend reports `running` and `waiting`, the page preserves those Node-wide command
+ledger counts separately from the visible workspace's work groups. Occupancy includes accepted,
+active and possibly sent operations; it is not CPU activity or a guessed free-slot count.
+A session's `room` evidence marks a capacity wait or reports the Node's actual refusal detail.
+It remains current work without inflating the executing count. Missing room data remains unknown.
+
+Only the instance owner can change supported local device configuration. The page refreshes
+connection and permission facts every ten seconds; failed refreshes retain the snapshot and
+disable configuration. The backend rejects writes while the supported Node is disconnected. Device reads include
+`revision`, `node_id`, `connected`, `can_configure`, and a reason when configuration is unavailable. A
+`PATCH /api/devices/hub` includes the read `revision` alongside `status` (`正常` or `暂停接活`)
+and/or `max_sessions` (1–256). The response returns the committed `device` and incremented
+revision. The owner role, revision comparison and write are checked in one transaction; a
+revoked owner receives 403 without changing any field or revision. A stale revision returns 409.
+A missing, negative or non-integer revision returns 400 (`device_revision_required_refresh_or_upgrade`);
+refresh the page or upgrade an older client to load and submit the current revision. Concurrency
+must be an integer from 1 through 256 in the page, API and Store. Existing values such as 32 are
+preserved when pausing or resuming; unsupported values are rejected, never silently clamped.
+These settings gate new logical
+session turns on the local Node, including queued follow-up turns. They do not stop existing
+attempts or their retries, pause orchestration, control independent background jobs, or migrate
+work. A manual pause gates new logical turns before queue claiming; it does not cancel logical
+turns already accepted by the Hub, including attempts already waiting in the Node command queue.
+Paused, unclaimed turns are reconsidered every two seconds and when the runtime next plans work.
+Capacity itself uses the canonical command-lease limiter, not a second count of session
+reservations, so waiting-room evidence and scheduling remain consistent.
+Lowering concurrency never interrupts an accepted attempt. The editor preserves drafts after
+errors and requires a read-back before retrying an uncertain save or conflict.
+
+Node vitals are sampled every 60 seconds with a 15-second response timeout. Samples older than
+135 seconds (two intervals plus the timeout) are stale. Each result carries this policy, the
+Node's sample time, the Hub receipt time, and gaps between received samples. Missing samples
+remain gaps. Load history is the one-minute load divided by the reported logical CPU count;
+it is not CPU utilization. Memory and disk capacities use GiB (2³⁰ bytes). Disk roots retain
+their identities even when their capacities match. Disks have no historical series, and the
+local in-process Node has no remote round-trip time. Monitoring read errors, no samples, gaps
+and stale snapshots are displayed separately.
 
 ## Conversation digest base
 

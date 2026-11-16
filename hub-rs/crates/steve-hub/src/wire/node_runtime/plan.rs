@@ -168,6 +168,9 @@ impl NodeRuntime {
         if p != Planned::Created {
             return Ok(p);
         }
+        if self.node_id.as_str() == "local" && !local_admission(tx)? {
+            return Ok(Planned::Held);
+        }
         // a member joined the workspace since the session was bound, say: no new turn there
         self.session_owners_work_in(tx, session)?;
         let turn = uid("t");
@@ -777,4 +780,173 @@ pub(super) fn cancelled_start_in(
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .optional()?)
+}
+
+/// Manual pause gates new logical turns on the local coordinator. Capacity belongs to
+/// runtime::lease_command_in/session_room: counting active_attempt here would also count
+/// never-sent turns, hiding authoritative room waits and imposing a second limit.
+fn local_admission(tx: &Tx) -> Result<bool, StoreError> {
+    let status: Option<String> = tx
+        .query_row("SELECT status FROM devices WHERE id='hub'", [], |r| {
+            r.get(0)
+        })
+        .optional()?;
+    Ok(status.as_deref() != Some("暂停接活"))
+}
+
+#[cfg(test)]
+mod admission_tests {
+    use super::*;
+    struct NoDomain;
+    impl NodeDomain for NoDomain {
+        fn turn_ended(&self, _: &str, _: Option<&str>, _: &str, _: Option<String>) {}
+    }
+    #[test]
+    fn connection_ready_uses_the_required_transport_instead_of_local_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("test.db"), steve_store::NoPublisher).unwrap();
+        let rt = NodeRuntime::new(
+            store,
+            steve_node_api::testkit::FakeNode::new("local"),
+            Arc::new(NoDomain),
+        );
+        rt.reconciled.store(true, Ordering::SeqCst);
+        assert!(rt.connection_ready(false), "embedded Node has reconciled");
+        rt.require_transport_link();
+        assert!(
+            !rt.connection_ready(false),
+            "service identity does not imply a link"
+        );
+        assert!(rt.connection_ready(true));
+    }
+    #[test]
+    fn paused_admission_retains_prompts_and_flush_leads_without_claiming_a_turn() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("test.db"), steve_store::NoPublisher).unwrap();
+        store.ensure_workspace().unwrap();
+        store
+            .devices()
+            .upsert(&steve_store::DeviceInfo {
+                id: "hub".into(),
+                name: "test".into(),
+                ..Default::default()
+            })
+            .unwrap();
+        store
+            .devices()
+            .patch(
+                "hub",
+                &steve_store::DevicePatch {
+                    status: Some("暂停接活".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        store.transaction::<_, StoreError>(|tx| {
+            tx.execute_batch("INSERT INTO sessions(id,workspace_id,harness,cwd,status,created,updated) VALUES ('s1','default','fixture','.','idle',1,1);
+                INSERT INTO runtime_sessions(session_id,node_id,workspace_ref,node_session_id,config_revision,phase,updated) VALUES ('s1','local','{}','s1','r1','ready',1);")?;
+            Ok(())
+        }).unwrap();
+        let rt = NodeRuntime::new(
+            store.clone(),
+            steve_node_api::testkit::FakeNode::new("local"),
+            Arc::new(NoDomain),
+        );
+        rt.reconciled.store(true, Ordering::SeqCst);
+        assert_eq!(
+            rt.prompt("s1", "first", "user", &[]).unwrap(),
+            Planned::Held
+        );
+        assert_eq!(
+            rt.flush_turn("s1", Some(("second", "user"))).unwrap().0,
+            Planned::Held
+        );
+        store
+            .reader::<_, StoreError>(|c| {
+                let n: i64 = c.query_row(
+                    "SELECT COUNT(*) FROM queued WHERE session_id='s1'",
+                    [],
+                    |r| r.get(0),
+                )?;
+                assert_eq!(n, 2);
+                let n: i64 =
+                    c.query_row("SELECT COUNT(*) FROM runtime_attempts", [], |r| r.get(0))?;
+                assert_eq!(n, 0);
+                Ok(())
+            })
+            .unwrap();
+    }
+    #[test]
+    fn pause_preserves_reservations_without_a_duplicate_capacity_gate() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("test.db"), steve_store::NoPublisher).unwrap();
+        store.ensure_workspace().unwrap();
+        store
+            .devices()
+            .upsert(&steve_store::DeviceInfo {
+                id: "hub".into(),
+                name: "test".into(),
+                ..Default::default()
+            })
+            .unwrap();
+        store.transaction::<_, StoreError>(|tx| {
+            tx.execute_batch("INSERT INTO sessions(id,workspace_id,harness,cwd,status,created,updated) VALUES ('s1','default','fixture','.','running',1,1);
+                INSERT INTO runtime_sessions(session_id,node_id,workspace_ref,node_session_id,config_revision,phase,active_attempt,updated) VALUES ('s1','local','{}','s1','r1','ready','already-running',1);
+                UPDATE devices SET max_sessions=1 WHERE id='hub';")?;
+            assert!(local_admission(tx)?, "capacity is enforced from command receipts, not active_attempt");
+            assert_eq!(rt::session_room(tx, "local")?.running, 0, "an unsent reservation is not running");
+            tx.execute("UPDATE devices SET max_sessions=2 WHERE id='hub'", [])?;
+            assert!(local_admission(tx)?);
+            tx.execute("UPDATE devices SET status='暂停接活' WHERE id='hub'", [])?;
+            assert!(!local_admission(tx)?);
+            let active: String = tx.query_row("SELECT active_attempt FROM runtime_sessions WHERE session_id='s1'", [], |r| r.get(0))?;
+            assert_eq!(active, "already-running");
+            Ok(())
+        }).unwrap();
+    }
+    #[test]
+    fn manual_pause_does_not_count_unsent_reservations_as_capacity() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("test.db"), steve_store::NoPublisher).unwrap();
+        store.ensure_workspace().unwrap();
+        store
+            .devices()
+            .upsert(&steve_store::DeviceInfo {
+                id: "hub".into(),
+                name: "test".into(),
+                ..Default::default()
+            })
+            .unwrap();
+        for limit in [32, 256] {
+            store
+                .devices()
+                .patch(
+                    "hub",
+                    &steve_store::DevicePatch {
+                        status: Some("正常".into()),
+                        max_sessions: Some(limit),
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+            store.transaction::<_,StoreError>(|tx| {
+                tx.execute("DELETE FROM runtime_sessions", [])?;
+                tx.execute("DELETE FROM sessions", [])?;
+                for i in 0..limit {
+                    assert!(local_admission(tx)?, "reservation {i} below {limit}");
+                    let sid=format!("s{i}");
+                    tx.execute("INSERT INTO sessions(id,workspace_id,harness,cwd,status,created,updated) VALUES (?,'default','fixture','.','running',1,1)",[&sid])?;
+                    tx.execute("INSERT INTO runtime_sessions(session_id,node_id,workspace_ref,node_session_id,config_revision,phase,active_attempt,updated) VALUES (?,'local','{}',?,'r1','active',?,1)",[&sid,&sid,&format!("a{i}")])?;
+                }
+                assert!(local_admission(tx)?, "unsent attempts must reach the canonical command queue");
+                assert_eq!(rt::session_room(tx, "local")?.max, limit);
+                assert_eq!(rt::session_room(tx, "local")?.running, 0);
+                tx.execute("UPDATE devices SET max_sessions=1,status='暂停接活' WHERE id='hub'", [])?;
+                assert!(!local_admission(tx)?);
+                let active:i64=tx.query_row("SELECT COUNT(*) FROM runtime_sessions WHERE node_id='local' AND active_attempt IS NOT NULL",[],|r|r.get(0))?;
+                assert_eq!(active,limit,"lowering/pausing never releases or migrates accepted attempts");
+                Ok(())
+            }).unwrap();
+        }
+    }
 }

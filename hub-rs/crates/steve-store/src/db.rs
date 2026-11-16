@@ -157,6 +157,8 @@ pub const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/075.sql"),
     // 76: bound uncollected upgrade attempts with durable Node stop / unsent evidence.
     include_str!("../migrations/076.sql"),
+    // 77: device configuration compare-and-swap revision.
+    include_str!("../migrations/077.sql"),
 ];
 
 /// 027's item columns and their one-time backfill (applied by `run_pending` when `items.phase` is missing).

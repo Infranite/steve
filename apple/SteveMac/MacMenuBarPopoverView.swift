@@ -42,7 +42,7 @@ struct MacMenuBarPopoverView: View {
 
             VStack(alignment: .leading, spacing: 3) {
                 HStack(spacing: 6) {
-                    Text(hubStore.activeProfile.name)
+                    Text(hubStore.activeProfile.displayName)
                         .font(.headline)
                         .lineLimit(1)
                     Text(statusText)
@@ -179,7 +179,7 @@ struct MacMenuBarPopoverView: View {
                         Image(systemName: profile.id == hubStore.activeHubID ? "largecircle.fill.circle" : "circle")
                             .font(.caption)
                             .foregroundStyle(profile.id == hubStore.activeHubID ? Color.accentColor : .secondary)
-                        Text(profile.name)
+                        Text(profile.displayName)
                             .font(.callout)
                             .lineLimit(1)
                         Spacer()

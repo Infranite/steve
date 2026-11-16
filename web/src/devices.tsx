@@ -1,8 +1,8 @@
-/* 设备与远程 Node 配对；身份与确认由所有者 API 校验。列表和详情都是面板（panel.tsx）：Hub 一张带设备状态数字条，其他设备一张；
- * 详情页从设备状态起，依次是会话、运行环境、标签、项目目录、中心节点和连接。 */
+/* Device work comes first; monitoring and configuration keep their own evidence and identity.
+ * Pairing remains the owner Node API’s responsibility. */
 import { useEffect, useState } from "react"
 import { cn } from "cn"
-import { ActivityIcon, ChevronRightIcon, CpuIcon, FolderIcon, LinkIcon, MonitorSmartphoneIcon, PauseIcon, PlayIcon, PlusIcon, RefreshCwIcon, ServerIcon, SquareTerminalIcon } from "lucide-react"
+import { ChevronRightIcon, CpuIcon, FolderIcon, LinkIcon, MonitorSmartphoneIcon, PlusIcon, RefreshCwIcon, ServerIcon, SquareTerminalIcon } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import { Meter, Panel, PanelFoot, PanelRow, Tag, type Tone } from "@/panel"
@@ -13,7 +13,7 @@ import { api, SESSIONS_MAX, type RDevice, type RNode, type RPairing, type RRunti
 import { Input } from "@/components/ui/input"
 import { NumberField } from "@/components/ui/pickers"
 import { Textarea } from "@/components/ui/textarea"
-import { go, Page, Meta, Empty, Status, closeSheet, openSheet } from "@/ui"
+import { go, Page, Meta, Empty, closeSheet, openSheet } from "@/ui"
 import { OwnerChip } from "@/people/owner-chip"
 import { VitalsSection, VitalsStrip } from "@/devices-vitals"
 import { NodeTags } from "@/devices-tags"
@@ -23,8 +23,26 @@ import { hm } from "@/i18n/format"
 import { useHubAddress } from "@/hub-ui"
 import { homeTilde } from "@/resume"
 
-const onDevice = (id: string) => Object.keys(st.S).filter((k) => st.S[k].device === id && !st.S[k].ro)
-const stateText = (d: RDevice) => (d.status === "暂停接活" ? t("shell:devices.onlinePaused") : t("shell:devices.online"))
+import { WorkCounts, DeviceWorkSection } from "@/devices-work"
+import { DeviceConfiguration } from "@/devices-config"
+const stateText = (d: RDevice) => d.status === "暂停接活" ? t("device:paused") : t("device:configured")
+
+/** Connection/permissions can change without a session event. Keep the last successful
+ * inventory snapshot, but failed refreshes must disable configuration until a read succeeds. */
+function useDeviceInventory() {
+  const [devices, setDevices] = useState<RDevice[] | null>(null), [error, setError] = useState("")
+  useEffect(() => {
+    let live = true, timer: ReturnType<typeof setTimeout> | undefined
+    const load = async () => {
+      try { const r = await api.devices(); if (live) { setDevices(r.devices); setError("") } }
+      catch (e) { if (live) setError((e as Error).message) }
+      finally { if (live) timer = setTimeout(() => void load(), 10_000) }
+    }
+    void load()
+    return () => { live = false; clearTimeout(timer) }
+  }, [])
+  return { devices: devices ?? st.devices, error }
+}
 
 /** Node registration is separate from the legacy device inventory. Only the owner's Node API
  * establishes its visible identities and current transport links; Hub harnesses are not Node caps. */
@@ -63,30 +81,31 @@ export function DevicesView() {
   const { nodes, off, error, loading, reload } = useRemoteNodes()
   const [selected, setSelected] = useState<string | null>(null)
   const ids = new Set(nodes?.map(n => n.node_id))
-  const ds = st.devices, hub = ds.find((d) => d.roles.includes("Hub")), rest = ds.filter((d) => d !== hub && !ids.has(d.id))
+  const inventory = useDeviceInventory()
+  const ds = inventory.devices, hub = ds.find((d) => d.roles.includes("Hub")), rest = ds.filter((d) => d !== hub && (!d.node_id || !ids.has(d.node_id)))
   const node = nodes?.find(n => n.node_id === selected)
   const connection = (n: RNode) => error ? t("shell:devices.connectionUnknown") : n.linked ? t("shell:devices.linked") : t("shell:devices.disconnected")
   const registration = (n: RNode) => error ? t("shell:devices.registrationPrevious", { state: t(`shell:devices.nodeState.${n.state}`) }) : t(`shell:devices.nodeState.${n.state}`)
   const regTone = (n: RNode): Tone => error || n.state === "revoked" ? "muted" : n.state === "pending" || n.state === "paused" ? "wait" : "ok"
-  const hubSessions = hub?.running ?? (hub ? onDevice(hub.id).filter((k) => st.S[k].st === "run" && !st.S[k].room).length : 0)
   return (
     <>
-    <Page title={t("shell:devices.title")} sub={t("shell:devices.sub")} max={760}
+    <div className="device-page"><Page title={t("shell:devices.title")} sub={t("shell:devices.sub")} max={760}
       actions={<Button size="sm" variant="outline" onClick={() => openSheet("pair")} data-pair><PlusIcon />{t("shell:devices.add")}</Button>}>
       <div className="flex flex-col gap-4">
+        {inventory.error && <p role="alert">{t("device:factsFailed", { error: inventory.error })}</p>}
         {hub && <Panel k="hub" icon={<ServerIcon />} data-device-row={hub.name}
           title={<span className="inline-flex items-center gap-2">{hub.name}<Tag className="h-5 px-1.5">Hub</Tag></span>}
-          sub={<Meta><span>{hub.roles.filter((r) => r !== "Hub").map(roleLabel).join(" · ") || "Hub"}</span>{hub.version && <span className="font-mono" data-hub-version>{hub.version}</span>}<span>{st.runtimes.filter((r) => r.ok).map((r) => r.name).join(t("shell:list.sep")) || t("shell:devices.noHarness")}</span></Meta>}
-          right={<><Tag tone={hub.status === "暂停接活" ? "wait" : "ok"} data-hub-state><span className="size-1.5 rounded-full bg-current" />{stateText(hub)}</Tag><OwnerChip objectType="device" objectId={hub.id} bare /></>}>
-          <VitalsStrip node="local" />
-          <PanelFoot meta={<>{t("shell:devices.whereSub")}{hubSessions > 0 && <> · {t("shell:devices.running", { count: hubSessions })}</>}</>}>
+          sub={<span className="break-all">{hub.id} · {hub.node_id || t("device:unmapped")}</span>}
+          right={<><Badge tone="neutral" data-hub-state>{hub.connected === false ? t("device:offline") : hub.node_id ? stateText(hub) : t("device:unknown")}</Badge><OwnerChip objectType="device" objectId={hub.id} bare /></>}>
+          <WorkCounts id={hub.id} />{hub.running != null && hub.waiting != null && <RoomMeter running={hub.running} max={hub.max_sessions} waiting={hub.waiting} />}{hub.node_id && <VitalsStrip node={hub.node_id} />}
+          <PanelFoot meta={<>{hub.node_id ? t("device:unknownEligibility") : t("device:unmapped")}</>}>
             <Button size="sm" variant="outline" onClick={() => go("#/devices/" + hub.id)} data-device-open>{t("shell:devices.details")}<ChevronRightIcon /></Button>
           </PanelFoot>
         </Panel>}
         <Panel k="others" icon={<MonitorSmartphoneIcon />} title={nodes !== null && !error ? t("shell:devices.others", { count: rest.length + nodes.length }) : t("shell:devices.othersTitle")} sub={t("shell:devices.othersSub")}
           right={<Button size="xs" variant="ghost" className="text-muted-foreground" disabled={loading} onClick={reload} aria-label={t("shell:devices.refreshNodes")} data-refresh-nodes>{loading ? <Spinner className="size-3" /> : <RefreshCwIcon />}<span className="max-sm:hidden">{t("shell:devices.refreshNodes")}</span></Button>}>
           {off && <div className="px-5 pb-3"><p className="rounded-lg bg-muted/60 px-3 py-2 type-callout text-muted-foreground" data-nodes-off>{t("shell:devices.nodesOff")}</p></div>}
-          {(rest.length > 0 || !!nodes?.length) && <div className="anim-in py-1.5">{rest.map((d) => <PanelRow key={d.id} title={d.name} sub={d.roles.map(roleLabel).join(" · ")} onClick={() => go("#/devices/" + d.id)} controls><OwnerChip objectType="device" objectId={d.id} bare /><ChevronRightIcon className="size-4 text-tertiary" /></PanelRow>)}
+          {(rest.length > 0 || !!nodes?.length) && <div className="anim-in py-1.5">{rest.map((d) => <PanelRow key={d.id} title={d.name} sub={<><span>{d.roles.map(roleLabel).join(" · ")}</span><WorkCounts id={d.id} /></>} onClick={() => go("#/devices/" + d.id)} controls><OwnerChip objectType="device" objectId={d.id} bare /><ChevronRightIcon className="size-4 text-tertiary" /></PanelRow>)}
             {nodes?.map(n => <PanelRow key={n.node_id} data-node-row={n.node_id} onClick={() => setSelected(n.node_id)}
               title={<span className="inline-flex items-center gap-2"><NodeDot node={n} stale={!!error} />{n.name}</span>}
               sub={<Meta><span>{connection(n)}</span>{!n.linked && n.link_error && <span className="line-clamp-1 text-destructive" title={n.link_error.error}>{n.link_error.error}</span>}<span className="font-mono">{n.node_id}</span></Meta>}><Tag tone={regTone(n)}>{registration(n)}</Tag><ChevronRightIcon className="size-4 text-tertiary" /></PanelRow>)}
@@ -96,8 +115,8 @@ export function DevicesView() {
           {nodes !== null && !error && !rest.length && !nodes.length && <div className="anim-in border-t-0! px-5 pt-1 pb-5" data-no-others><div className="type-body text-foreground">{t("shell:devices.noOthers")}</div><div className="mt-0.5 type-callout text-muted-foreground">{t("shell:devices.noOthersSub")}</div></div>}
         </Panel>
       </div>
-    </Page>
-    {selected && <Dialog open onOpenChange={open => !open && setSelected(null)}><DialogContent className="max-h-[85vh] overflow-y-auto rounded-2xl sm:max-w-[560px]" data-node-detail>
+    </Page></div>
+    {selected && <Dialog open onOpenChange={open => !open && setSelected(null)}><DialogContent className="device-evidence max-h-[85vh] overflow-y-auto rounded-2xl sm:max-w-[560px]" data-node-detail>
       <DialogHeader><DialogTitle>{node?.name ?? t("shell:devices.remoteNode")}</DialogTitle><DialogDescription>{t("shell:devices.nodeDetailSub")}</DialogDescription></DialogHeader>
       {node ? <Panel k="node">
         <PanelRow title={t("shell:devices.registrationState")}><Tag tone={regTone(node)}>{registration(node)}</Tag></PanelRow>
@@ -108,48 +127,34 @@ export function DevicesView() {
         {!node.linked && node.link_error && <PanelRow title={t("shell:devices.linkError")} sub={<span className="break-all whitespace-normal text-destructive" data-node-link-error>{tm(node.link_error.at)} · {node.link_error.error}</span>} />}
       </Panel> : <p role="status">{t("shell:devices.nodeNotVisible")}</p>}
       {node && node.max_sessions != null && <Panel k="node-sessions" icon={<SquareTerminalIcon />} title={t("shell:devices.limit")} sub={t("shell:devices.limitSub", { count: node.max_sessions })}
-        right={<RoomMeter running={node.running ?? 0} max={node.max_sessions} waiting={node.waiting ?? 0} />}>
+        right={<RoomMeter running={node.running} max={node.max_sessions} waiting={node.waiting} />}>
         <div className="py-1.5"><SessionLimit max={node.max_sessions} editable={node.state !== "revoked"} save={(n) => api.nodeLimit(node.node_id, n).then(reload)} /></div>
       </Panel>}
       {node && <NodeTags node={node.node_id} />}
-      {node && <VitalsSection node={node.node_id} />}
+      {node && <><p>{t("device:unknownEligibility")}</p><p>{t("device:unknownCapacity")}</p><VitalsSection node={node.node_id} /></>}
     </DialogContent></Dialog>}
     </>
   )
 }
 
 export function DeviceView({ id }: { id: string }) {
-  const [busy, setBusy] = useState(false), [all, setAll] = useState(false), t = useT()
-  const d = st.devices.find((x) => x.id === id)
+  const [busy, setBusy] = useState(false), t = useT()
+  const inventory = useDeviceInventory()
+  const d = inventory.devices.find(x => x.id === id)
   if (!d) return <Page title={t("shell:devices.title")} back={["#/devices", t("shell:devices.title")]}><Empty title={t("shell:devices.notFound")} /></Page>
-  const isHub = d.roles.includes("Hub"), ss = onDevice(d.id).filter((k) => st.S[k].st !== "ended"), dirs = st.projects.filter((p) => p.device_id === d.id)
-  const paused = d.status === "暂停接活"
-  /* running first, then the rest by their last activity */
-  const rank = (k: string) => (st.S[k].st === "run" ? 0 : st.S[k].st === "wait" ? 1 : 2)
-  ss.sort((a, b) => rank(a) - rank(b))
-  /* the Hub counts what runs on its own Node and what waits for room there; a page without those numbers counts the sessions it has */
-  const running = d.running ?? ss.filter((k) => st.S[k].st === "run" && !st.S[k].room).length, waiting = d.waiting ?? ss.filter((k) => st.S[k].room).length
-  const shown = all ? ss : ss.slice(0, 8)
+  const local = d.node_id === "local", dirs = st.projects.filter(p => p.device_id === d.id)
   const recheck = async () => { setBusy(true); try { await api.devices(true); await refresh(); toast(t("shell:devices.rechecked")) } catch (e) { toast((e as Error).message) } finally { setBusy(false) } }
-  const pause = () => void api.patchDevice(d.id, { status: paused ? "正常" : "暂停接活" }).then(() => { toast(paused ? t("shell:devices.resumed") : t("shell:devices.paused")); return refresh() })
-  const pauseButton = <Button size="sm" variant="outline" onClick={pause} data-pause-device>{paused ? <><PlayIcon />{t("shell:devices.resume")}</> : <><PauseIcon />{t("shell:devices.pause")}</>}</Button>
-  const stateTag = <Tag tone={paused ? "wait" : "ok"}><span className="size-1.5 rounded-full bg-current" />{stateText(d)}</Tag>
-  return (
-    <Page title={d.name} back={["#/devices", t("shell:devices.title")]} max={760} sub={<Meta><span>{d.roles.map(roleLabel).join(" · ")}</span><span>{d.os}</span><span className="font-mono">{d.version}</span></Meta>}
-      actions={pauseButton}>
-      <div className="flex flex-col gap-4">
-        {isHub ? <VitalsSection node="local" right={stateTag}>
-          <PanelFoot meta={t("shell:devices.lastSeenAt", { time: tm(d.seen) })} />
-        </VitalsSection> : <Panel k="state" icon={<ActivityIcon />} title={t("shell:devices.vitals.title")} sub={t("shell:devices.lastSeenAt", { time: tm(d.seen) })} right={stateTag} />}
-        <Panel k="sessions" icon={<SquareTerminalIcon />} title={t("shell:devices.sessionsHere", { count: ss.length })} sub={t("shell:devices.limitSub", { count: d.max_sessions })}
-          right={<RoomMeter running={running} max={d.max_sessions} waiting={waiting} />}>
-          <div className="py-1.5">
-            <SessionLimit max={d.max_sessions} editable={isHub && st.owner} save={(n) => api.patchDevice(d.id, { max_sessions: n }).then(() => refresh())} />
-            {shown.map((k) => { const s = st.S[k]; return <PanelRow key={k} title={s.title} sub={s.item ? t("shell:devices.sessionSub", { item: s.item, n: s.n, up: s.up }) : t("shell:devices.noItem")} onClick={() => go("#/sessions/" + k)}>{s.room ? <Tag tone="wait" data-session-waiting>{t("shell:devices.waitingTag")}</Tag> : <Status s={s.st} sess />}</PanelRow> })}
-            {ss.length > shown.length && <div className="px-3 pt-1"><Button size="xs" variant="ghost" className="text-muted-foreground" onClick={() => setAll(true)} data-sessions-more>{t("shell:devices.moreSessions", { count: ss.length - shown.length })}</Button></div>}
-          </div>
-          {!ss.length && <div className="px-5 pb-4 type-callout text-muted-foreground">{t("shell:devices.noSessions")}</div>}
-        </Panel>
+  return <div className="device-page"><Page title={d.name} back={["#/devices", t("shell:devices.title")]} max={1120}
+    sub={<span className="break-all">{d.id}{d.node_id && <> · {d.node_id}</>}</span>}>
+    <div className="flex min-w-0 flex-col gap-4">
+      {inventory.error && <p role="alert">{t("device:factsFailed", { error: inventory.error })}</p>}
+      <Panel k="device-state" title={t("device:connection")} sub={inventory.error ? t("device:unknown") : st.down ? t("device:offline") : d.connected === true ? t("shell:devices.linked") : d.connected === false ? t("device:offline") : t("device:unmapped")}>
+        <div className="p-5"><p>{t("device:accepting")} · {d.can_configure ? stateText(d) : t("device:unknown")}</p><p>{t("device:unknownEligibility")}</p><WorkCounts id={d.id} /><p className="mt-3 text-muted-foreground" data-node-room>{d.running != null && d.waiting != null ? t("device:nodeOccupancy", { running: d.running, max: d.max_sessions, waiting: d.waiting }) : t("device:unknownCapacity")}</p></div>
+      </Panel>
+      <div className="device-layout"><DeviceWorkSection id={d.id} />{d.node_id ? <VitalsSection node={d.node_id} identity={`${d.name} · ${d.id}`} /> : <Panel title={t("device:monitor")} sub={t("device:unmapped")} />}</div>
+      <details className="device-capabilities" data-capabilities><summary>{t("device:configuration")}</summary>
+        <DeviceConfiguration key={d.id} device={d} available={!inventory.error} />
+        {local ? <>
         <Panel k="runtimes" icon={<CpuIcon />} title={t("shell:devices.runtimes")} sub={t("shell:devices.runtimesSub", { ok: st.runtimes.filter((r) => r.ok).length, count: st.runtimes.length })}
           right={<Button size="xs" variant="ghost" className="text-muted-foreground" disabled={busy} onClick={() => void recheck()}>{busy ? <Spinner className="size-3" /> : <RefreshCwIcon />}{t("shell:devices.recheck")}</Button>}>
           {st.runtimes.length ? <div className="py-1.5">{[...st.runtimes].sort((a, b) => Number(b.ok) - Number(a.ok)).map((r) => <div key={r.id} className="relative mx-2 flex items-start gap-4 rounded-lg px-3 py-3 [&+&]:before:absolute [&+&]:before:inset-x-3 [&+&]:before:top-0 [&+&]:before:h-px [&+&]:before:bg-border/60" data-runtime={r.id}>
@@ -159,30 +164,26 @@ export function DeviceView({ id }: { id: string }) {
             </div>
             <Tag tone={r.ok ? "ok" : "wait"}>{r.ok ? t("shell:devices.available") : t("shell:devices.unavailable")}</Tag>
           </div>)}</div> : <div className="px-5 py-4 type-callout text-muted-foreground">{t("shell:devices.noRuntimes")}</div>}
-          {isHub && <div className="px-5 pt-3 pb-4"><AddHarness /></div>}
+          {local && d.can_configure && !st.down && <div className="px-5 pt-3 pb-4"><AddHarness /></div>}
         </Panel>
-        {isHub && <NodeTags node="local" />}
-        <Panel k="projects" icon={<FolderIcon />} title={t("shell:devices.projectsTitle")} sub={t("shell:devices.projectsSub", { count: dirs.length })}
-          right={<Button size="xs" variant="ghost" className="text-muted-foreground" onClick={() => go("#/projects")}>{t("shell:devices.manageProjects")}</Button>}>
-          {dirs.length ? <div className="py-1.5">{dirs.map((p) => <PanelRow key={p.id} title={p.name} sub={<span className="font-mono">{homeTilde(p.path)}</span>} onClick={() => go("#/projects/" + p.id)}><ChevronRightIcon className="size-4 text-tertiary" /></PanelRow>)}</div>
-            : <div className="px-5 py-4 type-callout text-muted-foreground">{t("shell:devices.noProjects")}</div>}
+
+          <NodeTags node="local" />
+        </> : <p>{t("device:unsupported")}</p>}
+        <Panel k="projects" icon={<FolderIcon />} title={t("shell:devices.projectsTitle")}>
+          {dirs.length ? dirs.map(p => <PanelRow key={p.id} title={p.name} sub={<span className="break-all font-mono">{homeTilde(p.path)}</span>} onClick={() => go("#/projects/" + p.id)} />) : <p className="p-5 text-muted-foreground">{t("shell:devices.noProjects")}</p>}
         </Panel>
-        {isHub && <Panel k="hub" icon={<ServerIcon />} title={t("shell:devices.hubNode")} sub={t("shell:devices.hubNodeSub")}>
-          <div className="py-1.5">
-            <PanelRow title={t("shell:devices.storage")} sub={t("shell:devices.storageSub")} />
-            <PanelRow title={t("shell:devices.access")} sub={t("shell:devices.accessSub")} />
-            <PanelRow title={t("shell:devices.models")} sub={t("shell:devices.modelsSub")} />
-          </div>
-        </Panel>}
+        <p className="p-5">{d.os} · {d.version}</p>
         <Panel k="connection" icon={<LinkIcon />} title={t("shell:devices.connection")} sub={t("shell:devices.ownerSub")} right={<OwnerChip objectType="device" objectId={d.id} bare />} />
-      </div>
-    </Page>
-  )
+      </details>
+      <a className="underline" href="#/settings/hub">{t("device:hub")}</a>
+    </div>
+  </Page></div>
 }
 
 /** how full a device is: running against its limit, and what waits for room */
-function RoomMeter({ running, max, waiting }: { running: number; max: number; waiting: number }) {
+function RoomMeter({ running, max, waiting }: { running?: number; max: number; waiting?: number }) {
   const t = useT()
+  if (running == null || waiting == null) return <span>{t("device:unknownCapacity")}</span>
   return <span className="flex flex-col items-end gap-1.5" data-running={running} data-max={max} data-waiting={waiting}>
     <span className="type-footnote tabular-nums text-muted-foreground">{t("shell:devices.runningOf", { n: running, max })}{waiting > 0 && <span className="text-attention"> · {t("shell:devices.waitingN", { count: waiting })}</span>}</span>
     <Meter value={max ? running / max : 0} tone={running >= max ? "wait" : "run"} className="w-20" />

@@ -102,6 +102,28 @@ public final class HubStore: ObservableObject {
         pendingCookieCleanupHubIDs.insert(hubID)
     }
 
+    /// Changes this client's alias only. Empty clears it; no activation, endpoint, auth or version writes.
+    public func renameHub(id: String, alias: String) throws {
+        guard let idx = profiles.firstIndex(where: { $0.id == id }) else {
+            throw BridgeCallError.invalidArgument(L10n.tr("未找到指定的 Hub", "Unknown Hub"))
+        }
+        let value = alias.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard value.unicodeScalars.count <= 64,
+              !value.unicodeScalars.contains(where: { $0.properties.generalCategory == .control || $0.value == 0x2028 || $0.value == 0x2029 }) else {
+            throw BridgeCallError.invalidArgument(L10n.tr("别名最多 64 个 Unicode 字符，不能换行", "Alias must be at most 64 Unicode characters without line breaks"))
+        }
+        var next = profiles
+        next[idx].name = value
+        let data = try JSONEncoder().encode(next)
+        let old = defaults.data(forKey: profilesKey)
+        defaults.set(data, forKey: profilesKey)
+        guard defaults.data(forKey: profilesKey) == data else {
+            if let old { defaults.set(old, forKey: profilesKey) }
+            throw BridgeCallError.operationFailed(L10n.tr("别名保存失败", "Could not save alias"))
+        }
+        profiles = next
+    }
+
     public func selectHub(id: String) {
         guard profiles.contains(where: { $0.id == id }) else { return }
         activeHubID = id

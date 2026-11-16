@@ -623,3 +623,156 @@ fn exhausted_delays_double_from_two_seconds_up_to_a_minute() {
         [2_000, 4_000, 8_000, 16_000, 32_000, 60_000, 60_000, 60_000]
     );
 }
+
+
+#[tokio::test]
+async fn device_pause_keeps_existing_attempt_and_retry_then_holds_followup_until_resume() {
+    let h = super::super::node_tools::tests::fixture(vec![]).await;
+    until("first attempt reached Node", || {
+        h._node.log().iter().any(|(m, _)| *m == "start_turn")
+    })
+    .await;
+    h.store
+        .devices()
+        .upsert(&steve_store::DeviceInfo {
+            id: "hub".into(),
+            name: "test".into(),
+            ..Default::default()
+        })
+        .unwrap();
+    h.store
+        .devices()
+        .patch(
+            "hub",
+            &steve_store::DevicePatch {
+                status: Some("暂停接活".into()),
+                max_sessions: Some(1),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        h._rt.active_attempt("s1").unwrap().as_deref(),
+        Some(h.exec.attempt().as_str())
+    );
+    h._rt.prompt("s1", "followup", "user", &[]).unwrap();
+    h._node
+        .finish(
+            &h.exec,
+            Completion {
+                outcome: Outcome::Failed,
+                stop_reason: "error".into(),
+                error: None,
+                result: vec![],
+                continuation: None,
+                transient: true,
+                acted: false,
+                job: None,
+            },
+        )
+        .await
+        .unwrap();
+    until("same turn retry planned despite device pause", || {
+        h._rt
+            .active_attempt("s1")
+            .unwrap()
+            .is_some_and(|a| a != h.exec.attempt().as_str())
+    })
+    .await;
+    let retry: ExecutionRef = h
+        .store
+        .reader(|c| {
+            Ok::<_, StoreError>(serde_json::from_str(&c.query_row(
+                "SELECT execution FROM runtime_attempts WHERE ordinal=1",
+                [],
+                |r| r.get::<_, String>(0),
+            )?)?)
+        })
+        .unwrap();
+    let (
+        ExecutionRef::Turn {
+            turn: retry_turn, ..
+        },
+        ExecutionRef::Turn {
+            turn: first_turn, ..
+        },
+    ) = (&retry, &h.exec)
+    else {
+        panic!("expected turn attempts")
+    };
+    assert_eq!(retry_turn, first_turn);
+    // Production retries wait 20 seconds. Observe that real backoff rather than using
+    // the shorter generic fixture timeout or changing its persisted retry deadline.
+    tokio::time::timeout(Duration::from_secs(35), async {
+        while h
+            ._node
+            .log()
+            .iter()
+            .filter(|(m, _)| *m == "start_turn")
+            .count()
+            != 2
+        {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("retry reached Node while device paused");
+    h._node
+        .finish(
+            &retry,
+            Completion {
+                outcome: Outcome::Succeeded,
+                stop_reason: "end_turn".into(),
+                error: None,
+                result: vec![],
+                continuation: None,
+                transient: false,
+                acted: false,
+                job: None,
+            },
+        )
+        .await
+        .unwrap();
+    until("retry completed", || {
+        h._rt.active_attempt("s1").unwrap().is_none()
+    })
+    .await;
+    assert_eq!(h._rt.flush("s1", None).unwrap(), Planned::Held);
+    h.store
+        .reader::<_, StoreError>(|c| {
+            let queued: i64 = c.query_row(
+                "SELECT COUNT(*) FROM queued WHERE session_id='s1'",
+                [],
+                |r| r.get(0),
+            )?;
+            let attempts: i64 =
+                c.query_row("SELECT COUNT(*) FROM runtime_attempts", [], |r| r.get(0))?;
+            let node: String = c.query_row(
+                "SELECT node_id FROM runtime_sessions WHERE session_id='s1'",
+                [],
+                |r| r.get(0),
+            )?;
+            let status: String =
+                c.query_row("SELECT status FROM sessions WHERE id='s1'", [], |r| {
+                    r.get(0)
+                })?;
+            assert_eq!(queued, 1);
+            assert_eq!(attempts, 2);
+            assert_eq!(node, "local");
+            assert_ne!(status, "error");
+            Ok(())
+        })
+        .unwrap();
+    h.store
+        .devices()
+        .patch(
+            "hub",
+            &steve_store::DevicePatch {
+                status: Some("正常".into()),
+                max_sessions: Some(32),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(h._rt.flush("s1", None).unwrap(), Planned::Created);
+}

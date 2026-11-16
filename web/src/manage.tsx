@@ -1,3 +1,4 @@
+import { HubSettingsPane } from "@/hub-settings"
 /* Bot 菜单与设置：Bot 是独立菜单；设置是分类页。所有改动都写到 Hub，也都可以直接告诉 Steve。 */
 import { ACCESS_CAT, AccessSettingsPane } from "@/access-settings"
 import { itemDisplayStatus } from "@/item-workflow-relation"
@@ -341,6 +342,7 @@ const cats = (t: T): [string, string, any, string][] => [
   ["notify", t("manage:settings.catNotify"), BellIcon, t("manage:settings.catNotifySub")],
   ["look", t("manage:settings.catLook"), SunMoonIcon, t("manage:settings.catLookSub")],
   MODELS_CAT,
+  ["hub", t("hub:title"), SlidersHorizontalIcon, t("hub:subtitle")],
   ACCESS_CAT,
   VAULT_CAT,
   STATS_CAT,
@@ -414,6 +416,7 @@ function Pane({ id }: { id: string }) {
   if (id === "stats") return <StatsSettingsPane />
   if (id === "audit") return <AuditSettingsPane />
   if (id === "models") return <ModelsSettingsPane />
+  if (id === "hub") return <HubSettingsPane />
   if (id === "access") return <AccessSettingsPane />
   if (id === "plugins") return <PluginsSettingsPane />
   if (id === "general") return <div className="flex flex-col gap-8">
