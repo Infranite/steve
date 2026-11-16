@@ -247,6 +247,7 @@ fn open_body(session: &str) -> OpenSession {
         artifact_view: None,
         mcp_servers: vec![],
         skills: vec![],
+        model_access: None,
     }
 }
 
@@ -5141,6 +5142,112 @@ async fn each_principal_gets_a_harness_directory_of_their_own() {
     .unwrap();
     assert!(!ok(&finished(&n, "op_open_s_4").await));
     assert_eq!(std::fs::read_dir(&elsewhere).unwrap().count(), 0);
+}
+
+/// A service session (#222): its directory gets the harness's own provider file from the Hub's
+/// model access setting and the key in the harness's environment only, never the owner's files;
+/// the key the Hub does not give stops the open with one clear error; the file goes once the Hub
+/// names no provider.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_service_session_gets_the_hubs_provider_and_not_the_owners_files() {
+    let t = T::new(&[]);
+    std::fs::create_dir_all(t.root.join(".claude")).unwrap();
+    std::fs::write(
+        t.root.join(".claude/settings.json"),
+        r#"{"owner":true,"env":{"ANTHROPIC_BASE_URL":"https://owner.example.test"}}"#,
+    )
+    .unwrap();
+    std::fs::write(t.root.join(".claude/CLAUDE.md"), "owner memory").unwrap();
+    let n = t.node();
+    let secrets = Arc::new(steve_node_api::testkit::FakeSecrets::default());
+    secrets.give("model:s_svc", "claude-code", b"sk-synthetic-gateway-key");
+    n.connect_secrets(secrets.clone());
+    n.prepare_workspace(now_cmd("op_prep", prepare_proj()))
+        .await
+        .unwrap();
+    assert!(ok(&finished(&n, "op_prep").await));
+    let dir = "default/svc_default/dev/claude-code";
+    let open = |s: &str, access: Option<ModelAccess>| {
+        let mut b = open_body(s);
+        b.state = Some(HarnessState {
+            dir: dir.into(),
+            import_owner: false,
+            owner_context: true,
+        });
+        b.model_access = access;
+        b
+    };
+    let access = ModelAccess {
+        base_url: "https://gateway.example.test".into(),
+        secret: "claude-code".into(),
+    };
+    n.open_session(now_cmd(
+        "op_open_s_svc",
+        open("s_svc", Some(access.clone())),
+    ))
+    .await
+    .unwrap();
+    let r = finished(&n, "op_open_s_svc").await;
+    assert!(ok(&r), "{r:?}");
+    let state = t.home.join("state").join(dir).join("harness");
+    let settings: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(state.join("settings.json")).unwrap()).unwrap();
+    assert_eq!(
+        settings,
+        serde_json::json!({"env": {"ANTHROPIC_BASE_URL": "https://gateway.example.test"}})
+    );
+    assert!(!state.join("CLAUDE.md").exists(), "nothing of the owner's");
+    let spawn = std::fs::read_to_string(&t.log)
+        .unwrap()
+        .lines()
+        .filter_map(|l| {
+            serde_json::from_str::<serde_json::Value>(l).ok()?["spawn"]["env"]
+                .as_object()
+                .cloned()
+        })
+        .last()
+        .unwrap();
+    assert_eq!(spawn["ANTHROPIC_AUTH_TOKEN"], "sk-synthetic-gateway-key");
+    // the key is in no file of the session's, nor in the Node's own directory
+    fn holds(dir: &Path, needle: &[u8]) -> bool {
+        std::fs::read_dir(dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .any(|e| {
+                let p = e.path();
+                match std::fs::symlink_metadata(&p) {
+                    Ok(m) if m.is_dir() => holds(&p, needle),
+                    Ok(m) if m.is_file() => std::fs::read(&p)
+                        .is_ok_and(|b| b.windows(needle.len()).any(|w| w == needle)),
+                    _ => false,
+                }
+            })
+    }
+    assert!(!holds(&t.home, b"sk-synthetic-gateway-key"));
+    // the owner's file is as it was
+    assert!(
+        std::fs::read_to_string(t.root.join(".claude/settings.json"))
+            .unwrap()
+            .contains("owner.example.test")
+    );
+
+    // a key the Hub does not give: the open fails, saying why
+    n.open_session(now_cmd("op_open_s_svc2", open("s_svc2", Some(access))))
+        .await
+        .unwrap();
+    let r = finished(&n, "op_open_s_svc2").await;
+    assert!(!ok(&r));
+    assert!(format!("{r:?}").contains("model access"), "{r:?}");
+    // the Hub names no provider any more: Steve's file goes, the harness's own files stay
+    std::fs::write(state.join("history.jsonl"), "h").unwrap();
+    n.open_session(now_cmd("op_open_s_svc3", open("s_svc3", None)))
+        .await
+        .unwrap();
+    assert!(ok(&finished(&n, "op_open_s_svc3").await));
+    assert!(!state.join("settings.json").exists());
+    assert!(state.join("history.jsonl").exists());
+    n.shutdown().await;
 }
 
 /// The owner's personal harness configuration (user-level `CLAUDE.md`, skills, subagents) is in

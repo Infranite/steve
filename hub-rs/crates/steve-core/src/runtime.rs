@@ -147,6 +147,15 @@ pub trait AgentRuntime: Send + Sync {
             "协作运行器尚未实现同主体与 Node 授权检查，工作不会回退到 Hub 执行。".into(),
         ))
     }
+    /// Whether `bot` (of `harness`) could run `item_id`'s work at all, before a session is made
+    /// for it or the item is given to the Bot: its principal's model access, its harness on the
+    /// Nodes. `Err` says why and where to fix it (stored text, zh-CN); nothing is made then, and
+    /// nothing tries again by itself. Deterministic: no model, no Node is asked. The default lets
+    /// everything run.
+    fn can_run(&self, item_id: &str, bot_id: &str, harness: &str) -> Result<()> {
+        let _ = (item_id, bot_id, harness);
+        Ok(())
+    }
     /// A session was just created (before its first prompt): the runtime may fix its backend now.
     /// Only new sessions are ever bound here; existing ones keep the backend they have. `after`: it
     /// takes over from a session whose release is still on its way ([`Released::Pending`]); its

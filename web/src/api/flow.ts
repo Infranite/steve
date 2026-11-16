@@ -49,6 +49,8 @@ export type Schedule = {
   id: string; name: string; when: string; describe: string; cron: string; tz: string; what: string; bot: string; mode: ScheduleMode
   project_id: string | null; tags: string[]; missed: "catch_up_once" | "skip"; overlap: "skip" | "run"; budget_usd: number; enabled: boolean; next_at: number | null
   last: { at: number; status: string; text: string; item_id: string | null; cost_usd: number } | null; version: number; created: number; updated: number
+  /** why its items could not run right now (its model access, its harness), saying where to fix it; null: they can */
+  blocked?: string | null
 }
 export type ScheduleBody = Partial<{ name: string; when: string; cron: string; tz: string; what: string; bot: string; mode: ScheduleMode; project_id: string | null; tags: string[]; missed: Schedule["missed"]; overlap: Schedule["overlap"]; budget_usd: number; enabled: boolean }>
 export type Parsed = { cron: string; tz: string; describe: string; next: number[]; assumed?: string; notes?: string[]; by: "rule" | "model" }

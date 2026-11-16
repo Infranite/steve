@@ -171,7 +171,11 @@ pub async fn resolve_time(
 fn view(cx: &FlowCx, ws: &str, id: &str) -> ApiResult<Json<Value>> {
     cx.store().reader(|c| -> ApiResult<_> {
         let s = schedules::own(c, ws, id)?;
-        Ok(Json(serde_json::to_value(schedules::view(c, &s)?)?))
+        Ok(Json(serde_json::to_value(schedules::view_checked(
+            cx.core.as_ref(),
+            c,
+            &s,
+        )?)?))
     })
 }
 
@@ -179,7 +183,7 @@ async fn list(Extension(cx): Cx, who: Caller) -> ApiResult<Json<Value>> {
     cx.store().reader(|c| -> ApiResult<_> {
         let out = schedules::list(c, &who.ws)?
             .iter()
-            .map(|s| schedules::view(c, s))
+            .map(|s| schedules::view_checked(cx.core.as_ref(), c, s))
             .collect::<ApiResult<Vec<_>>>()?;
         Ok(Json(serde_json::to_value(out)?))
     })
@@ -216,6 +220,13 @@ async fn create(
     let now = cx.now();
     let id = cx.store().transaction(|tx| -> ApiResult<_> {
         schedules::check_refs(tx, &who.ws, &spec)?;
+        schedules::check_can_run(
+            cx.core.as_ref(),
+            tx,
+            &who.ws,
+            &spec,
+            b.enabled.unwrap_or(true),
+        )?;
         schedules::insert(
             tx,
             &who.ws,
@@ -300,6 +311,13 @@ async fn patch(
             ));
         }
         schedules::check_refs(tx, &who.ws, &spec)?;
+        schedules::check_can_run(
+            cx.core.as_ref(),
+            tx,
+            &who.ws,
+            &spec,
+            b.enabled.unwrap_or(cur.enabled),
+        )?;
         let name = b
             .name
             .as_deref()
@@ -326,7 +344,7 @@ async fn patch(
 async fn detail(Extension(cx): Cx, who: Caller, Path(id): Path<String>) -> ApiResult<Json<Value>> {
     cx.store().reader(|c| -> ApiResult<_> {
         let s = schedules::own(c, &who.ws, &id)?;
-        let mut v = serde_json::to_value(schedules::view(c, &s)?)?;
+        let mut v = serde_json::to_value(schedules::view_checked(cx.core.as_ref(), c, &s)?)?;
         let recent: Vec<RunView> = runs::page(c, &s.workspace_id, &s.id, None, 10)?
             .iter()
             .map(|r| r.view())

@@ -31,6 +31,7 @@ mod harness_context;
 pub mod history;
 mod job;
 mod journal;
+mod model_access;
 mod procs;
 pub mod reclaim;
 mod research;
@@ -2386,6 +2387,12 @@ impl SessionExecutor for LocalNode {
             self.check_harness_policy(&o.choice.harness, &o.policy)?;
             McpServer::check_all(&o.mcp_servers)?;
             Skill::check_all(&o.skills)?;
+            if o.model_access.as_ref().is_some_and(|m| !m.valid()) {
+                return Err(ApiError::new(
+                    ErrorCode::Invalid,
+                    "a model access endpoint that is not usable",
+                ));
+            }
             let w = t
                 .workspace(&o.workspace.id)?
                 .ok_or_else(|| ApiError::new(ErrorCode::Invalid, "no such workspace"))?;

@@ -500,6 +500,214 @@ async fn overlap_skip_while_previous_is_running() {
     assert_eq!(claim_due(&e.flow).unwrap().len(), 1);
 }
 
+/// The item `id` is over (its lifecycle closed it).
+fn close(e: &FlowEnv, id: &str) {
+    e.env
+        .store()
+        .with_conn(|c| {
+            c.execute(
+                "UPDATE items SET phase = 'closed', status = 'done' WHERE id = ?",
+                [id],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+}
+
+fn timeline(e: &FlowEnv, item: &str) -> Vec<String> {
+    e.env
+        .store()
+        .with_conn(|c| {
+            let mut q = c.prepare("SELECT text FROM timeline WHERE item_id = ? ORDER BY id")?;
+            let v = q
+                .query_map([item], |r| r.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(v)
+        })
+        .unwrap()
+}
+
+/// #223: one open run per schedule. While the item of the last run is open, a fire is skipped and
+/// said on that item; once it is closed, the next fire makes a new one.
+#[tokio::test]
+async fn an_open_item_skips_the_next_fire_and_a_closed_one_lets_it_go() {
+    let e = env();
+    let s = create(&e, daily("item_auto")).await;
+    let id = s["id"].as_str().unwrap().to_string();
+    e.env.clock.set(monday_8am() + 30 * MIN);
+    let ids = claim_due(&e.flow).unwrap();
+    drive_all(&e, &ids).await;
+    assert_eq!(e.core.created().len(), 1);
+    // Tuesday: ST-1 still open (stuck, say)
+    e.env.clock.set(monday_8am() + DAY + 30 * MIN);
+    assert!(claim_due(&e.flow).unwrap().is_empty());
+    assert_eq!(e.core.created().len(), 1, "no second item");
+    let rs = runs_of(&e, &id);
+    assert_eq!(rs.len(), 2, "counted in the history");
+    assert_eq!(rs[0].status, "skipped");
+    assert_eq!(
+        rs[0].outcome_label,
+        "上一次还没结束，跳过 11-03 08:30 的这一次"
+    );
+    assert_eq!(rs[0].context["open_item"], "ST-1");
+    assert!(
+        timeline(&e, "ST-1")
+            .iter()
+            .any(|t| t == "上一次还没结束，跳过 11-03 08:30 的这一次"),
+        "{:?}",
+        timeline(&e, "ST-1")
+    );
+    // the schedule's last real run is still the one that made ST-1
+    let (_, v) = call(
+        &e.router(),
+        Some(&caller(WS, ME)),
+        "GET",
+        &format!("/schedules/{id}"),
+        None,
+    )
+    .await;
+    assert_eq!(v["last"]["item_id"], "ST-1");
+    // closed: Wednesday's fire makes the next item
+    close(&e, "ST-1");
+    e.env.clock.set(monday_8am() + 2 * DAY + 30 * MIN);
+    let ids = claim_due(&e.flow).unwrap();
+    assert_eq!(ids.len(), 1);
+    drive_all(&e, &ids).await;
+    assert_eq!(e.core.created().len(), 2);
+    // overlap=run keeps the old behaviour on purpose
+    let (st, _) = call(
+        &e.router(),
+        Some(&caller(WS, ME)),
+        "PATCH",
+        &format!("/schedules/{id}"),
+        Some(&json!({"overlap": "run"})),
+    )
+    .await;
+    assert_eq!(st, 200);
+    e.env.clock.set(monday_8am() + 3 * DAY + 30 * MIN);
+    let ids = claim_due(&e.flow).unwrap();
+    drive_all(&e, &ids).await;
+    assert_eq!(e.core.created().len(), 3);
+}
+
+/// #223: a restart, and a catch-up after downtime, make at most one run while the last item is
+/// open, and none piles up for later.
+#[tokio::test]
+async fn restart_and_catch_up_create_no_duplicate() {
+    let e = env();
+    let s = create(&e, daily("item_auto")).await;
+    let id = s["id"].as_str().unwrap().to_string();
+    e.env.clock.set(monday_8am() + 30 * MIN);
+    let ids = claim_due(&e.flow).unwrap();
+    drive_all(&e, &ids).await;
+    // the Hub is down Tuesday to Thursday and boots again: recovery, then the first round
+    e.env.clock.set(monday_8am() + 3 * DAY + HOUR);
+    recover(&e.flow).unwrap();
+    assert!(claim_due(&e.flow).unwrap().is_empty());
+    // a second loop or another restart in the same minute claims nothing more
+    recover(&e.flow).unwrap();
+    assert!(claim_due(&e.flow).unwrap().is_empty());
+    assert_eq!(e.core.created().len(), 1, "no duplicate item");
+    let rs = runs_of(&e, &id);
+    assert_eq!(rs.len(), 2, "one row stands for the whole outage");
+    assert_eq!(
+        (rs[0].trigger_kind.as_str(), rs[0].status.as_str()),
+        ("catch_up", "skipped")
+    );
+    // ST-1 closes: nothing is caught up later, the next run is the next planned one
+    close(&e, "ST-1");
+    assert!(claim_due(&e.flow).unwrap().is_empty());
+    assert_eq!(next_at(&e, &id), Some(monday_8am() + 4 * DAY + 30 * MIN));
+    e.env.clock.set(monday_8am() + 4 * DAY + 30 * MIN);
+    let ids = claim_due(&e.flow).unwrap();
+    assert_eq!(ids.len(), 1);
+    drive_all(&e, &ids).await;
+    assert_eq!(e.core.created().len(), 2);
+}
+
+/// #222: a schedule whose item could not run is refused when it is made or edited (saying why and
+/// where to fix it), and at fire time no item is made, the run records the reason, and nothing is
+/// tried again by itself.
+#[tokio::test]
+async fn preflight_refuses_at_creation_and_at_fire_time() {
+    let e = env();
+    let why =
+        "定时任务的模型接入还没配置（codex）：请到「设置 · 模型 · 服务会话的模型接入」里配置。";
+    *e.core.blocked.lock().unwrap() = Some(why.into());
+    let (st, v) = call(
+        &e.router(),
+        Some(&caller(WS, ME)),
+        "POST",
+        "/schedules",
+        Some(&daily("item_auto")),
+    )
+    .await;
+    assert_eq!(st, 400, "{v}");
+    assert!(v.to_string().contains("服务会话的模型接入"), "{v}");
+    // a report makes no session, and a disabled schedule runs nothing: both are taken
+    create(&e, daily("report")).await;
+    let mut off = daily("item_auto");
+    off["enabled"] = json!(false);
+    let off = create(&e, off).await;
+    assert_eq!(off["blocked"], Value::Null);
+    // enabling it is refused while it could not run
+    let off_id = off["id"].as_str().unwrap().to_string();
+    let (st, _) = call(
+        &e.router(),
+        Some(&caller(WS, ME)),
+        "PATCH",
+        &format!("/schedules/{off_id}"),
+        Some(&json!({"enabled": true})),
+    )
+    .await;
+    assert_eq!(st, 400);
+    // made while it could run; then it cannot any more (the setting was removed)
+    *e.core.blocked.lock().unwrap() = None;
+    let s = create(&e, daily("item_auto")).await;
+    let id = s["id"].as_str().unwrap().to_string();
+    *e.core.blocked.lock().unwrap() = Some(why.into());
+    let (_, v) = call(
+        &e.router(),
+        Some(&caller(WS, ME)),
+        "GET",
+        "/schedules",
+        None,
+    )
+    .await;
+    let shown = v
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|x| x["id"] == id.as_str())
+        .unwrap()
+        .clone();
+    assert_eq!(shown["blocked"], why, "the schedule page lists it");
+    e.env.clock.set(monday_8am() + 30 * MIN);
+    let ids = claim_due(&e.flow).unwrap();
+    drive_all(&e, &ids).await;
+    assert!(
+        e.core.created().is_empty(),
+        "no item, so no session and no retry"
+    );
+    let r = &runs_of(&e, &id)[0];
+    assert_eq!(
+        (
+            r.status.as_str(),
+            r.outcome_label.as_str(),
+            r.error.as_deref()
+        ),
+        ("failed", why, Some(why))
+    );
+    assert!(
+        e.env
+            .store()
+            .reader(|c| runs::due_retries(c, i64::MAX))
+            .unwrap()
+            .is_empty(),
+        "nothing is tried again by itself"
+    );
+}
+
 #[tokio::test]
 async fn run_now_keeps_next_at() {
     let e = env();
@@ -608,7 +816,8 @@ async fn item_auto_creates_linked_auto_accept_item() {
         ),
         ("done", "建立 ST-1", Some("ST-1"))
     );
-    // the next run tells the item what happened last time
+    // the next run tells the item what happened last time (ST-1 is over by then: #223)
+    close(&e, "ST-1");
     e.env.clock.set(monday_8am() + DAY + 30 * MIN);
     let ids = claim_due(&e.flow).unwrap();
     drive_all(&e, &ids).await;

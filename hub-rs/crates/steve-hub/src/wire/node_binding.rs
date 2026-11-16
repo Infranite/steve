@@ -1162,6 +1162,7 @@ mod host_tests {
                 vec![],
             ),
             worktrees: None,
+            preflight: None,
         };
         let bound = |sid: &str| -> i64 {
             store
@@ -1292,6 +1293,7 @@ mod host_tests {
                 vec![],
             ),
             worktrees: None,
+            preflight: None,
         };
         for (change, restore, message) in [
             (

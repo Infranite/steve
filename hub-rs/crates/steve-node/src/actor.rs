@@ -2241,6 +2241,7 @@ fn harness_state(
     s: &HarnessState,
     sd: &steve_acp::StateDir,
     skills: Option<&str>,
+    provider: Option<(&steve_acp::ModelProvider, Option<&str>)>,
 ) -> ApiResult<std::path::PathBuf> {
     if !s.valid() {
         return Err(ApiError::new(
@@ -2303,6 +2304,14 @@ fn harness_state(
             crate::attachments::publish_private_if_absent(&to, &raw)
                 .map_err(|e| internal(format!("harness state: {f}: {e}")))?;
         }
+    }
+    // a principal that does not start from the owner's: the provider the Hub names for it, in the
+    // harness's own file (and none any more once the Hub names none)
+    if !s.import_owner
+        && let Some((p, url)) = provider
+    {
+        crate::model_access::place(&target, p, url)
+            .map_err(|e| internal(format!("harness state: model access: {e}")))?;
     }
     // the owner's personal instructions and extensions, linked where the harness reads them, when
     // the session is theirs and the Hub did not turn them off; otherwise any links made before go
@@ -2389,8 +2398,13 @@ async fn open_harness(
     let declared_state = inner.cfg.acp.adapter_properties(&harness).state;
     let state = match (&row.open.state, declared_state.as_ref()) {
         (Some(s), Some(sd)) => {
-            let skills = inner.cfg.acp.adapter_properties(&harness).skills;
-            let dir = harness_state(inner, s, sd, skills.as_deref())?;
+            let props = inner.cfg.acp.adapter_properties(&harness);
+            let access = row.open.model_access.as_ref();
+            let provider = props
+                .model_provider
+                .as_ref()
+                .map(|p| (p, access.map(|a| a.base_url.as_str())));
+            let dir = harness_state(inner, s, sd, props.skills.as_deref(), provider)?;
             let env = sd.isolation_env_for(&dir, Some(&inner.cfg.acp.user_home), s.import_owner);
             Some((dir, env))
         }
@@ -2483,6 +2497,44 @@ async fn open_harness(
             }
         }
     }
+    // a service session's provider key, taken from the Hub now for this process only (never
+    // journaled, never in a file); without it the harness would fall back to its own login
+    let model_key = match (
+        &row.open.state,
+        &row.open.model_access,
+        adapter_props.model_provider.as_ref(),
+    ) {
+        (Some(st), Some(access), Some(p)) if !st.import_owner => {
+            let hub = inner.secrets.lock().unwrap().clone().ok_or_else(|| {
+                ApiError::new(
+                    ErrorCode::Unsupported,
+                    "model access: no secrets from the Hub on this Node",
+                )
+            })?;
+            let bytes = hub
+                .take(model_access_op(session), access.secret.clone())
+                .await
+                .map_err(|e| {
+                    ApiError::new(
+                        e.code,
+                        format!("model access: the key was not given: {}", e.safe_detail),
+                    )
+                })?;
+            let bytes = zeroize::Zeroizing::new(bytes.expose().to_vec());
+            let text = std::str::from_utf8(&bytes)
+                .ok()
+                .map(str::trim)
+                .filter(|t| !t.is_empty() && !t.contains(['\n', '\r', '\0']))
+                .ok_or_else(|| {
+                    ApiError::new(ErrorCode::Invalid, "model access: the key is not one line")
+                })?;
+            Some((
+                std::ffi::OsString::from(&p.key_env),
+                std::ffi::OsString::from(text),
+            ))
+        }
+        _ => None,
+    };
     let hide_cli_creds = row.open.state.as_ref().is_some_and(|st| !st.import_owner);
     let (program, args) = if adapter_props.nested_sandbox {
         inner.confine.wrap_in_mode(
@@ -2535,6 +2587,9 @@ async fn open_harness(
         env.extend(inner.cfg.acp.adapter_env(&harness));
         if let Some((_, vars)) = &state {
             env.extend(vars.iter().cloned());
+        }
+        if let Some(kv) = &model_key {
+            env.push(kv.clone());
         }
         if let Some(home) = &adapter_home {
             env.push(("HOME".into(), home.clone().into_os_string()));

@@ -28,6 +28,7 @@ import { homeTilde } from "@/resume"
 
 import { WorkCounts, DeviceWorkSection } from "@/devices-work"
 import { DeviceConfiguration } from "@/devices-config"
+import { ModelAccessBlocked } from "@/model-access"
 const stateText = (d: RDevice) => d.status === "暂停接活" ? t("device:paused") : t("device:configured")
 
 /** Connection/permissions can change without a session event. Keep the last successful
@@ -96,6 +97,7 @@ export function DevicesView() {
       actions={<Button size="sm" variant="outline" onClick={() => openSheet("pair")} data-pair><PlusIcon />{t("shell:devices.add")}</Button>}>
       <div className="flex flex-col gap-4">
         {inventory.error && <p role="alert">{t("device:factsFailed", { error: inventory.error })}</p>}
+        <ModelAccessBlocked />
         {hub && <Panel k="hub" icon={<ServerIcon />} data-device-row={hub.name}
           title={<span className="inline-flex items-center gap-2">{hub.name}<Tag className="h-5 px-1.5">Hub</Tag></span>}
           sub={<span className="break-all">{hub.id} · {hub.node_id || t("device:unmapped")}</span>}

@@ -305,6 +305,107 @@ fn is_false(b: &bool) -> bool {
     !*b
 }
 
+/// How a harness is pointed at a model provider in its own configuration: what the Node writes
+/// into a service principal's directory from the Hub's model access setting (a service session
+/// never starts from the owner's files, so without it the harness falls back to its own default
+/// login). The provider's key never goes into the file: the harness reads it from `key_env`,
+/// which the Node sets for that one process from the Hub's vault.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelProvider {
+    /// The file under the harness's directory (as `StateDir::import` names them) Steve writes.
+    pub file: String,
+    pub format: ProviderFormat,
+    /// The variable the harness reads the provider's key from.
+    pub key_env: String,
+    /// A service session of it cannot reach a model without the setting (its directory holds the
+    /// only way it signs in, and a service principal's starts empty): the preflight refuses it
+    /// until the setting names a provider. Off: the setting is used when there is one, and
+    /// without it the harness keeps whatever other sign-in it has (an operating system keychain,
+    /// say).
+    #[serde(default)]
+    pub required: bool,
+}
+
+/// The shape of [`ModelProvider::file`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ProviderFormat {
+    /// A TOML file that selects `model_provider` and describes it in `[model_providers.<id>]`
+    /// (`base_url`, `env_key`, `wire_api`).
+    ModelProvidersToml {
+        /// The provider id Steve's table is written under (`[model_providers.<table>]`).
+        table: String,
+        wire_api: String,
+    },
+    /// A JSON settings file whose `env` object the harness applies to itself: `base_url_env`
+    /// carries the endpoint.
+    SettingsEnv { base_url_env: String },
+}
+
+impl ModelProvider {
+    /// A usable declaration: a plain relative file and variable names.
+    pub fn valid(&self) -> bool {
+        let name = |s: &str| {
+            !s.is_empty()
+                && s.len() <= 128
+                && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+                && !s.as_bytes()[0].is_ascii_digit()
+        };
+        let file_ok = !self.file.is_empty()
+            && !Path::new(&self.file).is_absolute()
+            && self.file.split('/').all(|p| {
+                !p.is_empty()
+                    && p != "."
+                    && p != ".."
+                    && p.chars()
+                        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+            });
+        file_ok
+            && name(&self.key_env)
+            && match &self.format {
+                ProviderFormat::ModelProvidersToml { table, wire_api } => {
+                    name(table) && name(wire_api)
+                }
+                ProviderFormat::SettingsEnv { base_url_env } => name(base_url_env),
+            }
+    }
+
+    /// The file's content for the provider at `base_url` (an `http(s)` URL of one line, checked
+    /// by the caller). Deterministic: the same setting gives the same bytes.
+    pub fn render(&self, base_url: &str) -> Vec<u8> {
+        // a JSON string is a valid TOML basic string for what a URL holds
+        let quoted = |s: &str| serde_json::to_string(s).unwrap_or_else(|_| "\"\"".into());
+        match &self.format {
+            ProviderFormat::ModelProvidersToml {
+                table: id,
+                wire_api,
+            } => format!(
+                "# Written by Steve from the Hub's model access setting for service sessions.\n\
+                 # Rewritten each time a session opens; edit the setting, not this file.\n\
+                 model_provider = {id_q}\n\n\
+                 [model_providers.{id}]\n\
+                 name = \"Steve model access\"\n\
+                 base_url = {url}\n\
+                 env_key = {key}\n\
+                 wire_api = {wire}\n",
+                id_q = quoted(id),
+                url = quoted(base_url),
+                key = quoted(&self.key_env),
+                wire = quoted(wire_api),
+            )
+            .into_bytes(),
+            ProviderFormat::SettingsEnv { base_url_env } => {
+                let mut env = serde_json::Map::new();
+                env.insert(base_url_env.clone(), Value::String(base_url.into()));
+                let v = json!({ "env": env });
+                let mut out = serde_json::to_vec_pretty(&v).unwrap_or_default();
+                out.push(b'\n');
+                out
+            }
+        }
+    }
+}
+
 /// What `session/new|load` carries in `_meta` for the adapter.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -413,6 +514,10 @@ pub struct AdapterProperties {
     /// (for example `--no-sandbox` so Copilot CLI disables its nested inner sandbox rather than
     /// aborting inside Seatbelt or Bubblewrap).
     pub outer_sandbox_args: Vec<String>,
+    /// How the harness is pointed at a model provider in its own configuration, for service
+    /// sessions given the Hub's model access setting ([`ModelProvider`]). `None`: Steve cannot
+    /// configure one for it, and its service sessions use whatever it finds on its own.
+    pub model_provider: Option<ModelProvider>,
 }
 
 /// Where a call's tokens are read when the adapter does not report them.
@@ -458,12 +563,13 @@ impl Default for AdapterProperties {
             fork_cli: None,
             local_transcript: false,
             outer_sandbox_args: vec![],
+            model_provider: None,
         }
     }
 }
 
 /// The keys of [`PropertiesPatch`] (what a manifest's `properties` may hold).
-pub const PROPERTY_KEYS: [&str; 25] = [
+pub const PROPERTY_KEYS: [&str; 26] = [
     "self_read_only",
     "nested_sandbox",
     "state",
@@ -489,6 +595,7 @@ pub const PROPERTY_KEYS: [&str; 25] = [
     "resume_cli",
     "fork_cli",
     "outer_sandbox_args",
+    "model_provider",
 ];
 
 /// Declared properties, each optional: what is given replaces the built-in (or default) value.
@@ -546,6 +653,8 @@ pub struct PropertiesPatch {
     pub fork_cli: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub outer_sandbox_args: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_provider: Option<ModelProvider>,
 }
 
 impl PropertiesPatch {
@@ -639,6 +748,13 @@ impl PropertiesPatch {
         }
         if let Some(v) = &self.outer_sandbox_args {
             p.outer_sandbox_args = v.clone();
+        }
+        if let Some(v) = &self.model_provider {
+            if v.valid() {
+                p.model_provider = Some(v.clone());
+            } else {
+                tracing::warn!("harness adapter: its declared model_provider is not usable");
+            }
         }
     }
 }
@@ -885,6 +1001,16 @@ const BUILTINS: &[Builtin] = &[
                 home_files: strings(&[".claude.json"]),
                 ..Default::default()
             }),
+            // its user settings' `env`, and the gateway's token in the process environment
+            model_provider: Some(ModelProvider {
+                file: "settings.json".into(),
+                format: ProviderFormat::SettingsEnv {
+                    base_url_env: "ANTHROPIC_BASE_URL".into(),
+                },
+                key_env: "ANTHROPIC_AUTH_TOKEN".into(),
+                // it may also sign in through the system keychain: configurable, not required
+                required: false,
+            }),
             modes: ModeMap::default(),
             executable_env: Some("CLAUDE_CODE_EXECUTABLE".into()),
             session_meta: SessionMeta::ClaudeSettings,
@@ -932,6 +1058,17 @@ const BUILTINS: &[Builtin] = &[
                 // its global instructions, skills and prompts
                 context: strings(&["AGENTS.md", "AGENTS.override.md", "skills/*", "prompts"]),
                 ..Default::default()
+            }),
+            // a provider table of its own in `config.toml`, its key read from the environment
+            model_provider: Some(ModelProvider {
+                file: "config.toml".into(),
+                format: ProviderFormat::ModelProvidersToml {
+                    table: "steve".into(),
+                    wire_api: "responses".into(),
+                },
+                key_env: "STEVE_MODEL_ACCESS_KEY".into(),
+                // its login lives in `$CODEX_HOME`: a service session has none without this
+                required: true,
             }),
             modes: ModeMap {
                 plan: "read-only".into(),
@@ -2585,6 +2722,56 @@ mod tests {
         let mut ordinary = AdapterProperties::default();
         patch.apply(&mut ordinary);
         assert!(ordinary.native_execution);
+    }
+
+    #[test]
+    fn a_declared_model_provider_renders_the_harnesses_own_config_without_the_key() {
+        let url = "https://gateway.example.test/v1";
+        for (id, file) in [("codex", "config.toml"), ("claude-code", "settings.json")] {
+            let p = spec(id, None).properties.model_provider.unwrap();
+            assert!(p.valid(), "{id}");
+            assert_eq!(p.file, file);
+            let text = String::from_utf8(p.render(url)).unwrap();
+            assert!(text.contains(url), "{text}");
+            assert_eq!(p.render(url), p.render(url), "deterministic");
+        }
+        let toml = String::from_utf8(
+            spec("codex", None)
+                .properties
+                .model_provider
+                .unwrap()
+                .render(url),
+        )
+        .unwrap();
+        assert!(toml.contains("model_provider = \"steve\""), "{toml}");
+        assert!(toml.contains("[model_providers.steve]"), "{toml}");
+        assert!(
+            toml.contains("env_key = \"STEVE_MODEL_ACCESS_KEY\""),
+            "{toml}"
+        );
+        let json: Value = serde_json::from_slice(
+            &spec("claude-code", None)
+                .properties
+                .model_provider
+                .unwrap()
+                .render(url),
+        )
+        .unwrap();
+        assert_eq!(json, json!({"env": {"ANTHROPIC_BASE_URL": url}}));
+        // an adapter nobody described gets none, and a declared one that is not plain is refused
+        assert!(AdapterProperties::default().model_provider.is_none());
+        let mut patch = PropertiesPatch::default();
+        patch.model_provider = Some(ModelProvider {
+            file: "../escape".into(),
+            format: ProviderFormat::SettingsEnv {
+                base_url_env: "URL".into(),
+            },
+            key_env: "KEY".into(),
+            required: true,
+        });
+        let mut p = AdapterProperties::default();
+        patch.apply(&mut p);
+        assert!(p.model_provider.is_none());
     }
 
     #[tokio::test]

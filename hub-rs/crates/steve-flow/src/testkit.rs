@@ -49,6 +49,8 @@ pub struct FakeCore {
     pub store: Mutex<Option<steve_store::Store>>,
     /// Make `post_steve_message` fail.
     pub fail_post: Mutex<bool>,
+    /// [`Core::can_run`] refuses every Bot with this reason (#222).
+    pub blocked: Mutex<Option<String>>,
 }
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -91,6 +93,18 @@ impl FakeCore {
 
 #[async_trait]
 impl Core for FakeCore {
+    fn can_run(
+        &self,
+        _: &rusqlite::Connection,
+        _: &str,
+        _: Option<&str>,
+        _: &str,
+    ) -> Result<(), String> {
+        match lock(&self.blocked).clone() {
+            Some(why) => Err(why),
+            None => Ok(()),
+        }
+    }
     async fn create_item(&self, req: ItemRequest) -> Result<String, String> {
         lock(&self.calls).push(CoreCall::Create(req.clone()));
         self.with_store(|s| {

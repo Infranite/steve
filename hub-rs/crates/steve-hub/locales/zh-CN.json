@@ -288,5 +288,11 @@
   "hub.plugins.not_started": "插件没有启动：%{detail}",
   "hub.models.invalid_selection": "模型选择参数不正确。",
   "hub.node.workspace_conflict": "工作区的准备方式已改变，旧目录和记录已保留。点“继续”将在当前项目创建新会话。",
-  "hub.node.workspace_conflict_question": "开不了会话：工作区的准备方式已改变，旧目录和记录已保留。点“继续”将在当前项目创建新会话。"
+  "hub.node.workspace_conflict_question": "开不了会话：工作区的准备方式已改变，旧目录和记录已保留。点“继续”将在当前项目创建新会话。",
+  "hub.model_access.harness_not_ready": "%{harness} 在设备上还没装好或没有就绪，现在不能运行：到「设备」页面查看并安装。",
+  "hub.model_access.missing": "定时任务的模型接入还没配置（%{harness}）：服务会话不使用任何人的个人账号，请到「设置 · 模型 · 服务会话的模型接入」里为 %{harness} 配置提供方地址和保险箱里的密钥。",
+  "hub.model_access.credential_missing": "服务会话的模型接入（%{harness}）找不到密钥：保险箱条目或字段已不在，请到「设置 · 模型 · 服务会话的模型接入」里重新选择。",
+  "hub.model_access.credential_not_shared": "服务会话的模型接入（%{harness}）只能用共享或系统保险箱里的条目（不能是个人条目或高敏感条目）：请把密钥放进共享保险箱，再到「设置 · 模型 · 服务会话的模型接入」里选择它。",
+  "hub.model_access.not_configurable": "Steve 还不能为 %{harness} 的服务会话配置模型接入。",
+  "hub.model_access.owner_only": "只有实例所有者能修改服务会话的模型接入。"
 }

@@ -27,16 +27,22 @@ pub mod source;
 pub const KIND: &str = "schedule";
 const MODES: [Mode; 4] = [Mode::ItemAuto, Mode::Item, Mode::Propose, Mode::Report];
 
-pub fn register(r: &mut Registry, clock: Arc<dyn Clock>, wake: Arc<Notify>) {
+pub fn register(
+    r: &mut Registry,
+    clock: Arc<dyn Clock>,
+    wake: Arc<Notify>,
+    core: Arc<dyn crate::Core>,
+) {
     r.target(KIND, Box::new(ScheduleTarget))
         .op(
             "schedule.create",
             Box::new(CreateOp {
                 clock: clock.clone(),
                 wake: wake.clone(),
+                core: core.clone(),
             }),
         )
-        .op("schedule.patch", Box::new(PatchOp { clock, wake }));
+        .op("schedule.patch", Box::new(PatchOp { clock, wake, core }));
 }
 
 fn missed_label(m: MissedPolicy) -> &'static str {
@@ -679,13 +685,15 @@ fn plan_create(
 struct CreateOp {
     clock: Arc<dyn Clock>,
     wake: Arc<Notify>,
+    core: Arc<dyn crate::Core>,
 }
 
 impl ChangeOp for CreateOp {
     fn validate(&self, c: &Connection, cx: &OpCx, op: &Value) -> ApiResult<()> {
         let spec: Spec =
             serde_json::from_value(op["spec"].clone()).map_err(|_| ApiError::invalid("spec"))?;
-        schedules::check_refs(c, cx.ws, &spec)
+        schedules::check_refs(c, cx.ws, &spec)?;
+        schedules::check_can_run(self.core.as_ref(), c, cx.ws, &spec, true)
     }
 
     fn apply(&self, tx: &Tx, cx: &OpCx, op: &Value) -> ApiResult<Value> {
@@ -723,13 +731,15 @@ impl ChangeOp for CreateOp {
 struct PatchOp {
     clock: Arc<dyn Clock>,
     wake: Arc<Notify>,
+    core: Arc<dyn crate::Core>,
 }
 
 impl ChangeOp for PatchOp {
     fn validate(&self, c: &Connection, cx: &OpCx, op: &Value) -> ApiResult<()> {
         let s = schedules::own(c, cx.ws, op["id"].as_str().unwrap_or(""))?;
-        let (_, spec, _) = apply_set(&s, &op["set"]);
-        schedules::check_refs(c, cx.ws, &spec)
+        let (_, spec, enabled) = apply_set(&s, &op["set"]);
+        schedules::check_refs(c, cx.ws, &spec)?;
+        schedules::check_can_run(self.core.as_ref(), c, cx.ws, &spec, enabled)
     }
 
     fn apply(&self, tx: &Tx, cx: &OpCx, op: &Value) -> ApiResult<Value> {

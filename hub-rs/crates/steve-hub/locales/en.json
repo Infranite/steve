@@ -288,5 +288,11 @@
   "hub.plugins.not_started": "The plugin did not start: %{detail}",
   "hub.models.invalid_selection": "Invalid model selection.",
   "hub.node.workspace_conflict": "The workspace preparation changed. The previous directory and history are retained. Choose Continue to create a new session in the current project.",
-  "hub.node.workspace_conflict_question": "Could not start the session: The workspace preparation changed. The previous directory and history are retained. Choose Continue to create a new session in the current project."
+  "hub.node.workspace_conflict_question": "Could not start the session: The workspace preparation changed. The previous directory and history are retained. Choose Continue to create a new session in the current project.",
+  "hub.model_access.harness_not_ready": "%{harness} is not installed or not ready on the devices, so it cannot run now: check and install it on the Devices page.",
+  "hub.model_access.missing": "Model access for scheduled work is not configured (%{harness}): service sessions never use anyone's personal account. Configure a provider endpoint and a key from the vault for %{harness} in Settings · Models · Model access for service sessions.",
+  "hub.model_access.credential_missing": "Model access for service sessions (%{harness}) cannot find its key: the vault item or field is gone. Choose it again in Settings · Models · Model access for service sessions.",
+  "hub.model_access.credential_not_shared": "Model access for service sessions (%{harness}) can only use an item of the shared or system vault (not a personal or high-sensitivity one): put the key in the shared vault, then choose it in Settings · Models · Model access for service sessions.",
+  "hub.model_access.not_configurable": "Steve cannot configure model access for %{harness} service sessions yet.",
+  "hub.model_access.owner_only": "Only the instance owner can change model access for service sessions."
 }

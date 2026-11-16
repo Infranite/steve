@@ -300,7 +300,7 @@ impl FlowSetup {
     /// Registers the `schedule`, `source` and `flow` draft targets, their operations
     /// (`schedule.create`, `schedule.patch`, `source.patch`, `flow.save`, `flow.patch`) and the `flow_run`, `flow_step` and `signal` decision handlers.
     pub fn register(&self, r: &mut Registry) {
-        drafts::register(r, self.clock.clone(), self.wake.clone());
+        drafts::register(r, self.clock.clone(), self.wake.clone(), self.core.clone());
         corrections::register(r, self.clock.clone());
         drafts::source::register(r, self.late.clone());
         drafts::flow::register(r, self.late.clone());
