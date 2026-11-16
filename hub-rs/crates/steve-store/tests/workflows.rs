@@ -65,8 +65,29 @@ fn plan(t: &T, parent: &str, specs: &[UnitSpec]) -> Workflow {
         .unwrap()
 }
 
+/// What the core does for a retry (#182): the unit's own child opens a new cycle (`ready`) and the
+/// unit claims it again, in one transaction.
+fn claim_retry(t: &T, parent: &str, id: &str) -> Result<WorkUnit> {
+    t.store.transaction(|tx| {
+        tx.execute(
+            "UPDATE items SET phase='ready',cycle=cycle+1
+             WHERE id=(SELECT item_id FROM workflow_units WHERE workflow_id=? AND id=?)",
+            [parent, id],
+        )?;
+        claim_in(tx, parent, id)
+    })
+}
+
 fn start(t: &T, parent: &str, id: &str) -> WorkUnit {
-    let claimed = t.store.workflows().claim(parent, id).unwrap();
+    let current = t.store.workflows().get(parent).unwrap().and_then(|g| {
+        g.units
+            .into_iter()
+            .find(|u| u.spec.id == id && u.status == "pending" && u.item_id.is_some())
+    });
+    let claimed = match current {
+        Some(_) => claim_retry(t, parent, id).unwrap(),
+        None => t.store.workflows().claim(parent, id).unwrap(),
+    };
     let session = t
         .store
         .sessions()
@@ -540,10 +561,21 @@ fn replan_is_compare_and_swap_and_keeps_completed_or_running_specs_immutable() {
     assert_eq!(changed.units[0].spec.goal, "变更目标");
     assert_eq!(changed.units[0].attempt, 1);
     assert_eq!(changed.history.last().unwrap().action, "replan");
-    let archived = t
+    let (_, holder) = t
         .store
         .workflows()
         .by_child(a.item_id.as_deref().unwrap())
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        (holder.status.as_str(), holder.item_id.as_deref()),
+        ("pending", a.item_id.as_deref()),
+        "the reset unit keeps its child for the retry"
+    );
+    let archived = t
+        .store
+        .workflows()
+        .retired_of(a.item_id.as_deref().unwrap())
         .unwrap()
         .unwrap();
     assert_eq!(archived.0, parent);
@@ -702,7 +734,13 @@ fn cancelled_required_work_blocks_acceptance_retry_preserves_budget_and_pausing_
         .workflows()
         .pause(&parent, false, "继续执行")
         .unwrap();
-    assert_eq!(t.store.workflows().claim(&parent, "a").unwrap().attempt, 2);
+    is_conflict(t.store.workflows().claim(&parent, "a"), "新周期");
+    let retried = claim_retry(&t, &parent, "a").unwrap();
+    assert_eq!(
+        (retried.attempt, retried.item_id.as_deref()),
+        (2, a.item_id.as_deref()),
+        "a retry runs in the unit's own child"
+    );
     assert_eq!(
         t.store
             .workflows()
@@ -1015,7 +1053,7 @@ fn a_retired_failed_attempt_keeps_its_failure() {
         .unwrap();
     t.store.workflows().reset(&parent, "a", "重试").unwrap();
     let child = a.item_id.as_deref().unwrap();
-    let (_, old) = t.store.workflows().by_child(child).unwrap().unwrap();
+    let (_, old) = t.store.workflows().retired_of(child).unwrap().unwrap();
     assert_eq!(
         (old.status.as_str(), old.reason.as_deref()),
         ("failed", Some("实测失败证据"))
@@ -1030,7 +1068,7 @@ fn a_retired_failed_attempt_keeps_its_failure() {
             Ok(())
         })
         .unwrap();
-    let (_, old) = t.store.workflows().by_child(child).unwrap().unwrap();
+    let (_, old) = t.store.workflows().retired_of(child).unwrap().unwrap();
     assert_eq!(
         (old.status.as_str(), old.reason.as_deref()),
         ("failed", Some("实测失败证据"))
@@ -1066,4 +1104,181 @@ fn a_turn_end_is_recorded_once_and_a_pause_mark_is_kept() {
     }
     assert!(s.turn_ended(sid, "a0", "end_turn").unwrap(), "long gone");
     assert!(!s.turn_ended(sid, "b99", "end_turn").unwrap());
+}
+
+fn fail(t: &T, unit: &WorkUnit, why: &str) {
+    t.store
+        .workflows()
+        .deliver(
+            unit.item_id.as_deref().unwrap(),
+            unit.session_id.as_deref().unwrap(),
+            why,
+            &json!([]),
+            &json!([{"name":"实测","passed":false}]),
+            false,
+        )
+        .unwrap();
+}
+
+/// #182: every retry of a unit runs in the child its first claim created: no new item number, one
+/// retired snapshot per attempt, each attempt's own failure, and the old session has no authority.
+#[test]
+fn a_retry_reuses_the_units_child_and_keeps_every_attempt() {
+    let (t, parent, specs) = setup();
+    plan(&t, &parent, &specs);
+    let items = |t: &T| {
+        t.store
+            .with_conn(|c| Ok(count(c, "SELECT count(*) FROM items")))
+            .unwrap()
+    };
+    let first = start(&t, &parent, "a");
+    let child = first.item_id.clone().unwrap();
+    fail(&t, &first, "第一次失败");
+    t.store
+        .workflows()
+        .reset(&parent, "a", "修复后重试")
+        .unwrap();
+    let before = items(&t);
+    is_conflict(t.store.workflows().claim(&parent, "a"), "新周期");
+    let second = start(&t, &parent, "a");
+    assert_eq!(second.item_id.as_deref(), Some(child.as_str()));
+    assert_eq!(second.attempt, 2);
+    assert_ne!(second.session_id, first.session_id, "a new session");
+    assert_eq!(items(&t), before, "no new item for the retry");
+    is_conflict(
+        t.store.workflows().deliver(
+            &child,
+            first.session_id.as_deref().unwrap(),
+            "旧会话迟到结果",
+            &json!([]),
+            &json!([{"passed":true}]),
+            true,
+        ),
+        "当前工作会话",
+    );
+    fail(&t, &second, "第二次失败");
+    t.store.workflows().reset(&parent, "a", "再试一次").unwrap();
+    let third = start(&t, &parent, "a");
+    assert_eq!(
+        (third.item_id.as_deref(), third.attempt),
+        (Some(child.as_str()), 3)
+    );
+    let rows: Vec<(i64, String, Option<String>)> = t
+        .store
+        .with_conn(|c| {
+            let mut q = c.prepare(
+                "SELECT attempt,json_extract(snapshot,'$.status'),json_extract(snapshot,'$.reason')
+                 FROM workflow_attempts WHERE item_id=? ORDER BY attempt",
+            )?;
+            let rows = q
+                .query_map([&child], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(rows)
+        })
+        .unwrap();
+    assert_eq!(
+        rows,
+        vec![
+            (1, "failed".into(), Some("第一次失败".into())),
+            (2, "failed".into(), Some("第二次失败".into())),
+        ]
+    );
+    let (_, last) = t.store.workflows().retired_of(&child).unwrap().unwrap();
+    assert_eq!(
+        (last.attempt, last.reason.as_deref()),
+        (2, Some("第二次失败"))
+    );
+    let (_, holder) = t.store.workflows().by_child(&child).unwrap().unwrap();
+    assert_eq!((holder.status.as_str(), holder.attempt), ("running", 3));
+    assert!(
+        t.store.workflows().retired_open().unwrap().is_empty(),
+        "a child its unit still holds is not a retired one to close"
+    );
+    let (recent, total) = t
+        .store
+        .workflows()
+        .archived_attempts_recent(&parent, 50)
+        .unwrap();
+    assert_eq!(total, 2);
+    assert_eq!(
+        recent
+            .iter()
+            .map(|a| a.snapshot.attempt)
+            .collect::<Vec<_>>(),
+        vec![2, 1]
+    );
+}
+
+/// A retry follows the unit's current spec: a replanned title, Bot or goal reaches its child.
+#[test]
+fn a_retry_takes_the_replanned_spec_into_its_child() {
+    let (t, parent, mut specs) = setup();
+    plan(&t, &parent, &specs);
+    let first = start(&t, &parent, "a");
+    let child = first.item_id.clone().unwrap();
+    fail(&t, &first, "需求理解有误");
+    let reset = t.store.workflows().reset(&parent, "a", "改目标").unwrap();
+    specs[0].goal = "按新理解完成 a".into();
+    specs[0].title = "工作 a（返工）".into();
+    t.store
+        .workflows()
+        .replace(&parent, reset.revision, "改目标", &specs, 2, 3)
+        .unwrap();
+    start(&t, &parent, "a");
+    let item = t.store.items().get(&child).unwrap().unwrap();
+    assert_eq!(item.title, "工作 a（返工）");
+    let goals: Vec<(i64, String)> = t
+        .store
+        .with_conn(|c| {
+            let mut q =
+                c.prepare("SELECT version,text FROM item_goals WHERE item_id=? ORDER BY version")?;
+            let rows = q
+                .query_map([&child], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(rows)
+        })
+        .unwrap();
+    assert_eq!(
+        goals,
+        vec![(1, "完成 a 并验证".into()), (2, "按新理解完成 a".into())]
+    );
+}
+
+/// Retired attempts written before #182 (one per item, keyed by the item alone) are kept by the
+/// migration with the attempt their snapshot recorded, and still read as they were.
+#[test]
+fn migration_keys_earlier_retired_attempts_by_their_recorded_attempt() {
+    let c = rusqlite::Connection::open_in_memory().unwrap();
+    c.execute_batch(
+        "CREATE TABLE schema_version(v INTEGER NOT NULL); INSERT INTO schema_version VALUES(0);",
+    )
+    .unwrap();
+    db::migrate(&c).unwrap();
+    // back to the table as 082 left it, with rows an older Hub wrote
+    c.execute_batch(
+        "PRAGMA foreign_keys=OFF;
+         DROP TABLE workflow_attempts;
+         CREATE TABLE workflow_attempts (
+          item_id TEXT PRIMARY KEY REFERENCES items(id),
+          workflow_id TEXT NOT NULL REFERENCES workflows(item_id) ON DELETE CASCADE,
+          unit_id TEXT NOT NULL, snapshot TEXT NOT NULL, created INTEGER NOT NULL);
+         INSERT INTO workflow_attempts VALUES
+          ('ST-2','ST-1','api','{\"attempt\":1,\"status\":\"failed\"}',1),
+          ('ST-3','ST-1','api','{\"attempt\":2,\"status\":\"cancelled\"}',2),
+          ('ST-4','ST-1','old','{\"status\":\"cancelled\"}',3);",
+    )
+    .unwrap();
+    c.execute_batch(db::MIGRATIONS[82]).unwrap();
+    let rows: Vec<(String, i64)> = c
+        .prepare("SELECT item_id,attempt FROM workflow_attempts ORDER BY item_id")
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    assert_eq!(
+        rows,
+        vec![("ST-2".into(), 1), ("ST-3".into(), 2), ("ST-4".into(), 0)]
+    );
+    assert!(columns(&c, "workflow_attempts").contains(&"attempt".to_string()));
 }

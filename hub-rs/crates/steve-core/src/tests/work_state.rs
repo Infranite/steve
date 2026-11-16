@@ -1199,9 +1199,9 @@ fn a_cancelled_units_child_is_closed_after_its_turn_and_after_a_restart() {
     );
 }
 
-/// ST-25 #7: after a retry the unit runs again in a new child. The old attempt's turn end, coming
-/// late, finishes only the old child: the new attempt keeps running and the coordinator is not told
-/// of an update that is old.
+/// ST-25 #7, #182: after a retry the unit runs again in the same child, in a new cycle and session.
+/// The old attempt's turn end, coming late, finishes nothing: the new attempt keeps running and the
+/// coordinator is not told of an update that is old.
 #[test]
 fn a_late_end_of_an_old_attempt_does_not_finish_the_new_one() {
     let k = kit(2);
@@ -1216,7 +1216,13 @@ fn a_late_end_of_an_old_attempt_does_not_finish_the_new_one() {
     let new = unit(&k, &parent, "a");
     assert_eq!(new.status, "running");
     let new_child = new.item_id.clone().unwrap();
-    assert_ne!(new_child, old_child);
+    assert_eq!(new_child, old_child, "the retry reuses the unit's child");
+    assert_ne!(
+        new.session_id.as_deref(),
+        Some(old_sid.as_str()),
+        "in a new session"
+    );
+    assert_eq!(k.db().item(&new_child).unwrap().unwrap().cycle, 2);
     let told = k.rt.prompts_of(&coord).len();
     // the old attempt's end again, late (a redelivery after a restart)
     let core = restarted(&k);
@@ -1485,11 +1491,12 @@ fn after_a_quick_resume_your_stop_of_the_next_turn_fails_the_unit() {
     assert_eq!(unit(&k, &parent, "a").status, "failed");
 }
 
-/// ST-37 #5: unit a reports its failure itself; its turn is over on the runtime but the end is held
-/// up; a is retried (the failed attempt retired) and the old end comes late. The old child closes
-/// as failed with the failure's own reason, never as cancelled by the reset; the new attempt keeps
-/// running and the coordinator hears nothing old. A snapshot archived as cancelled (rows retired
-/// before this fix) reads as failed from the graph's history too.
+/// ST-37 #5, #182: unit a reports its failure itself; its turn is over on the runtime but the end is
+/// held up; a is retried and the old end comes late. The failed attempt's cycle of the child closes as
+/// failed with the failure's own reason, never as cancelled by the reset, before the retry opens the
+/// next cycle of the same child; the late end changes nothing, the new attempt keeps running and the
+/// coordinator hears nothing old. A snapshot archived as cancelled (rows retired before this fix)
+/// reads as failed from the graph's history too.
 #[test]
 fn late_failed_end_before_retired_tidy_preserves_failed_outcome() {
     for legacy in [false, true] {
@@ -1508,6 +1515,7 @@ fn late_failed_end_before_retired_tidy_preserves_failed_outcome() {
         change(&k, &parent, "retry", Some("a"));
         let new = unit(&k, &parent, "a");
         assert_eq!((new.status.as_str(), new.attempt), ("running", 2));
+        assert_eq!(new.item_id.as_deref(), Some(old_child.as_str()));
         if legacy {
             k.db()
                 .store()
@@ -1524,7 +1532,7 @@ fn late_failed_end_before_retired_tidy_preserves_failed_outcome() {
             .db()
             .store()
             .workflows()
-            .by_child(&old_child)
+            .retired_of(&old_child)
             .unwrap()
             .unwrap();
         assert_eq!(
@@ -1535,11 +1543,14 @@ fn late_failed_end_before_retired_tidy_preserves_failed_outcome() {
         let told = k.rt.prompts_of(&coord).len();
 
         end_of(&k.core, &old_sid, &attempt, "end_turn");
-        let i = k.db().item(&old_child).unwrap().unwrap();
+        let cycles = k.db().store().items().cycles(&old_child).unwrap();
         assert_eq!(
-            (i.phase.as_str(), i.outcome.as_deref()),
-            ("closed", Some("failed")),
-            "legacy {legacy}: {i:?}"
+            cycles
+                .iter()
+                .map(|c| (c.cycle, c.outcome.as_str(), c.reason.as_deref()))
+                .collect::<Vec<_>>(),
+            vec![(1, "failed", Some("实测失败证据"))],
+            "legacy {legacy}"
         );
         let new = unit(&k, &parent, "a");
         assert_eq!((new.status.as_str(), new.attempt), ("running", 2));
@@ -1549,8 +1560,9 @@ fn late_failed_end_before_retired_tidy_preserves_failed_outcome() {
     }
 }
 
-/// ST-37 #5 contrast: the old end never comes; after a restart the tidy closes the retired failed
-/// attempt as failed with its reason, and leaves the new attempt running.
+/// ST-37 #5 contrast, #182: the old end never comes. The retry closes the failed attempt's cycle as
+/// failed with its reason before it opens the next one of the same child; a restart and the tidy
+/// leave the new attempt running.
 #[test]
 fn a_retired_failed_attempt_is_closed_failed_after_a_restart() {
     let k = kit(2);
@@ -1567,13 +1579,20 @@ fn a_retired_failed_attempt_is_closed_failed_after_a_restart() {
     let core = k.reopened();
     core.recover().unwrap();
     core.tx().workflow_tick().unwrap();
-    let i = k.db().item(&old_child).unwrap().unwrap();
+    let cycles = k.db().store().items().cycles(&old_child).unwrap();
     assert_eq!(
-        (i.phase.as_str(), i.outcome.as_deref()),
-        ("closed", Some("failed")),
-        "{i:?}"
+        cycles
+            .iter()
+            .map(|c| (c.outcome.as_str(), c.reason.as_deref()))
+            .collect::<Vec<_>>(),
+        vec![("failed", Some("实测失败证据"))]
     );
-    assert_eq!(unit(&k, &parent, "a").status, "running");
+    let now = unit(&k, &parent, "a");
+    assert_eq!(
+        (now.status.as_str(), now.attempt, now.item_id.as_deref()),
+        ("running", 2, Some(old_child.as_str()))
+    );
+    assert_eq!(k.phase(&old_child), "active");
 }
 
 /// ST-37 #6: the agent asked you to scan, then a tool call made that moot (a local substitute, no

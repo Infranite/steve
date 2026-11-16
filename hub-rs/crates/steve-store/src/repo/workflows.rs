@@ -426,7 +426,8 @@ fn record(
     Ok(())
 }
 
-/// Keeps a retired attempt's snapshot, cancelled by the reset or replan (a success is invalidated
+/// Keeps a retired attempt's snapshot (one row per child item and attempt: a retry reuses the
+/// unit's child), cancelled by the reset or replan (a success is invalidated
 /// with it). A failure stays failed with its own reason: it is the authoritative outcome of that
 /// attempt, and a turn end that comes late closes its child as failed, never as cancelled.
 fn archive_attempt(tx: &Tx<'_>, parent: &str, unit: &WorkUnit, reason: &str) -> Result<()> {
@@ -437,9 +438,9 @@ fn archive_attempt(tx: &Tx<'_>, parent: &str, unit: &WorkUnit, reason: &str) -> 
             old.reason = Some(format!("尝试已失效：{reason}"));
         }
         tx.execute(
-            "INSERT OR IGNORE INTO workflow_attempts(item_id,workflow_id,unit_id,snapshot,created)
-             VALUES (?,?,?,?,?)",
-            params![child, parent, unit.spec.id, to_json(&old)?, now()],
+            "INSERT OR IGNORE INTO workflow_attempts(item_id,attempt,workflow_id,unit_id,snapshot,created)
+             VALUES (?,?,?,?,?,?)",
+            params![child, unit.attempt, parent, unit.spec.id, to_json(&old)?, now()],
         )?;
     }
     Ok(())
@@ -450,12 +451,223 @@ fn archive_attempt(tx: &Tx<'_>, parent: &str, unit: &WorkUnit, reason: &str) -> 
 fn archive_cycle_unit(tx: &Tx<'_>, parent: &str, unit: &WorkUnit) -> Result<()> {
     if let Some(child) = &unit.item_id {
         tx.execute(
-            "INSERT OR IGNORE INTO workflow_attempts(item_id,workflow_id,unit_id,snapshot,created)
-             VALUES (?,?,?,?,?)",
-            params![child, parent, unit.spec.id, to_json(unit)?, now()],
+            "INSERT OR IGNORE INTO workflow_attempts(item_id,attempt,workflow_id,unit_id,snapshot,created)
+             VALUES (?,?,?,?,?,?)",
+            params![child, unit.attempt, parent, unit.spec.id, to_json(unit)?, now()],
         )?;
     }
     Ok(())
+}
+
+/// Claims exactly one ready unit inside the caller's write transaction. Its first claim creates the
+/// unit's child item; a retry reuses that child (#182), whose new cycle the caller opened in the same
+/// transaction (`ready`): the item keeps its number, branch and worktree, and the attempt gets a new
+/// session. Retrying an already claimed unit returns the same child; a process restart never creates
+/// a second attempt.
+pub fn claim_in(tx: &Tx<'_>, parent: &str, id: &str) -> Result<WorkUnit> {
+    let item = open_parent(tx, parent)?;
+    if item.phase == "closing" {
+        return Err(conflict("事项正在关闭，需要先恢复执行才能调度工作"));
+    }
+    let graph = must_graph(tx, parent)?;
+    let goal_version: i64 = tx.query_row(
+        "SELECT coalesce(max(version),0) FROM item_goals WHERE item_id=?",
+        [parent],
+        |r| r.get(0),
+    )?;
+    if graph.cycle != item.cycle || graph.goal_version != goal_version {
+        return Err(conflict(
+            "主事项目标或执行周期已变化，需要重新规划后才能调度",
+        ));
+    }
+    let unit = must_unit(&graph, id)?;
+    if unit.active() {
+        return Ok(unit.clone());
+    }
+    if graph.paused || graph.single_session() {
+        return Err(conflict("协作工作已暂停"));
+    }
+    if unit.status != "pending" {
+        return Err(conflict("工作单元需要先重置，才能再次调度"));
+    }
+    if unit.attempt >= graph.max_attempts {
+        return Err(conflict("工作单元已达到尝试预算"));
+    }
+    if graph.units.iter().filter(|u| u.active()).count() >= graph.max_parallel {
+        return Err(conflict("已达到工作图并发上限"));
+    }
+    for dep in &unit.spec.depends_on {
+        if must_unit(&graph, dep)?.status != "succeeded" {
+            return Err(conflict(format!("前置工作 {dep} 尚未成功")));
+        }
+    }
+    if graph.units.iter().filter(|u| u.active()).any(|u| {
+        unit.spec
+            .resources
+            .iter()
+            .any(|r| u.spec.resources.contains(r))
+    }) {
+        return Err(conflict("工作资源仍被另一单元使用"));
+    }
+    bot_available(tx, &item.workspace_id, &unit.spec.bot_id)?;
+    if let Some(project) = &item.project_id {
+        let isolated: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM projects WHERE id=? AND workspace_id=? AND worktree=1 AND kind='git' AND archived=0)",
+                params![project,item.workspace_id],|r|r.get(0)
+            )?;
+        if !isolated {
+            return Err(conflict(
+                "协作项目需要启用独立 Git worktree，才能隔离工作目录",
+            ));
+        }
+    }
+    if let Some(child) = unit.item_id.as_deref() {
+        return reclaim_in(tx, &item, unit, child);
+    }
+    let prefix: String = tx.query_row(
+        "SELECT item_prefix FROM workspaces WHERE id=?",
+        [&item.workspace_id],
+        |r| r.get(0),
+    )?;
+    let no = next_counter(tx, &format!("item:{prefix}"))?;
+    let child = format!("{prefix}-{no}");
+    let t = now();
+    let link = Parent {
+        item: Some(Some(parent.into())),
+        ..Parent::default()
+    };
+    // Splitting work preserves who asked for it, not the assigned Bot's or Node's owner.
+    // Membership is resolved when the child's Node session is bound, just as for its parent.
+    tx.execute(
+            "INSERT INTO items(id,workspace_id,no,kind,title,status,stage,bot_id,project_id,source,parent,created,updated,requested_by)
+             VALUES (?,?,?,'task',?,'run','执行',?,?,?,?,?,?,(SELECT requested_by FROM items WHERE id=?))",
+            params![child,item.workspace_id,no,unit.spec.title,unit.spec.bot_id,item.project_id,
+                to_json(&("协作工作", "workflow"))?,to_json(&link)?,t,t,parent],
+        )?;
+    tx.execute(
+        "INSERT INTO item_tags(item_id,tag_id) SELECT ?,tag_id FROM item_tags WHERE item_id=?",
+        params![child, parent],
+    )?;
+    tx.execute(
+        "INSERT INTO item_goals(item_id,version,text,created) VALUES (?,1,?,?)",
+        params![child, unit.spec.goal, t],
+    )?;
+    tx.capture_created(&item.workspace_id, &child, t);
+    tx.execute(
+        "UPDATE workflow_units SET status='dispatching',item_id=?,session_id=NULL,
+             attempt=attempt+1,reason=NULL WHERE workflow_id=? AND id=?",
+        params![child, parent, id],
+    )?;
+    super::stats::mark_in(
+        tx,
+        &crate::NewMark {
+            workspace_id: item.workspace_id,
+            item_id: child.clone(),
+            ts: t,
+            kind: "status".into(),
+            to_v: Some("run".into()),
+            ..Default::default()
+        },
+    )?;
+    tx.publish(ChangeEvent::Item { id: child.clone() });
+    record(
+        tx,
+        parent,
+        "claim",
+        NOTE_CLAIMED,
+        Some(id),
+        &json!({"child":child,"attempt":unit.attempt+1}),
+    )?;
+    Ok(must_unit(&must_graph(tx, parent)?, id)?.clone())
+}
+
+/// The retry of `unit` on its own `child`: the child must belong to this parent and be at the start
+/// of a new cycle (the core opens it with the lifecycle's write, in this transaction). Title, Bot and
+/// goal follow the unit's current spec.
+fn reclaim_in(tx: &Tx<'_>, item: &Item, unit: &WorkUnit, child: &str) -> Result<WorkUnit> {
+    let parent = item.id.as_str();
+    let row: Option<(String, String, Option<String>)> = tx
+        .query_row(
+            "SELECT workspace_id,phase,json_extract(parent,'$.item') FROM items WHERE id=?",
+            [child],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()?;
+    let Some((ws, phase, owner)) = row else {
+        return Err(conflict("工作单元的执行事项已不存在"));
+    };
+    if ws != item.workspace_id || owner.as_deref() != Some(parent) {
+        return Err(conflict("工作单元的执行事项不属于这个主事项"));
+    }
+    if phase != "ready" {
+        return Err(conflict(
+            "上一次尝试的执行事项还没有开始新周期，不能再次调度",
+        ));
+    }
+    let latest: Option<(i64, String)> = tx
+        .query_row(
+            "SELECT version,text FROM item_goals WHERE item_id=? ORDER BY version DESC LIMIT 1",
+            [child],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    let t = now();
+    if latest
+        .as_ref()
+        .is_none_or(|(_, text)| *text != unit.spec.goal)
+    {
+        tx.execute(
+            "INSERT INTO item_goals(item_id,version,text,created) VALUES (?,?,?,?)",
+            params![child, latest.map_or(1, |(v, _)| v + 1), unit.spec.goal, t],
+        )?;
+    }
+    tx.execute(
+        "UPDATE items SET title=?,bot_id=?,updated=? WHERE id=?",
+        params![unit.spec.title, unit.spec.bot_id, t, child],
+    )?;
+    tx.execute(
+        "UPDATE workflow_units SET status='dispatching',session_id=NULL,
+         attempt=attempt+1,reason=NULL WHERE workflow_id=? AND id=?",
+        params![parent, unit.spec.id],
+    )?;
+    tx.publish(ChangeEvent::Item { id: child.into() });
+    record(
+        tx,
+        parent,
+        "claim",
+        NOTE_CLAIMED,
+        Some(&unit.spec.id),
+        &json!({"child":child,"attempt":unit.attempt+1,"reused":true}),
+    )?;
+    Ok(must_unit(&must_graph(tx, parent)?, &unit.spec.id)?.clone())
+}
+
+/// The latest retired attempt of `child`: an authoritative failure in the append-only history (the
+/// same child and session) stands over a snapshot archived as cancelled (rows archived before failed
+/// snapshots were kept).
+fn retired(c: &Connection, child: &str) -> Result<Option<(String, WorkUnit)>> {
+    one(
+        c,
+        "SELECT a.workflow_id,a.snapshot,
+                (SELECT h.reason FROM workflow_history h
+                 WHERE h.workflow_id=a.workflow_id AND h.action='deliver'
+                   AND json_extract(h.detail,'$.child')=a.item_id
+                   AND json_extract(h.detail,'$.session') IS json_extract(a.snapshot,'$.session_id')
+                   AND json_extract(h.detail,'$.status')='failed'
+                 ORDER BY h.revision DESC LIMIT 1) AS failed
+         FROM workflow_attempts a WHERE a.item_id=? ORDER BY a.attempt DESC LIMIT 1",
+        [child],
+        |r| {
+            let mut u: WorkUnit = decode(r, "snapshot")?;
+            if let Some(why) = r.get::<_, Option<String>>("failed")?
+                && u.status != "failed"
+            {
+                u.status = "failed".into();
+                u.reason = Some(why);
+            }
+            Ok((r.get("workflow_id")?, u))
+        },
+    )
 }
 
 /// Records a unit's evidence inside the caller's write transaction. The core uses this with the
@@ -608,7 +820,7 @@ impl Workflows<'_> {
         self.0.read(|c| crate::read_snapshot(c, |c| {
             let total: i64 = c.query_row("SELECT COUNT(*) FROM workflow_attempts WHERE workflow_id=?", [parent], |r| r.get(0))?;
             let rows = all(c,
-                "SELECT item_id,unit_id,snapshot,created FROM workflow_attempts WHERE workflow_id=? ORDER BY created DESC,item_id DESC LIMIT ?",
+                "SELECT item_id,unit_id,snapshot,created FROM workflow_attempts WHERE workflow_id=? ORDER BY created DESC,item_id DESC,attempt DESC LIMIT ?",
                 params![parent, limit],
                 |r| Ok(ArchivedWorkflowAttempt {
                     item_id: r.get("item_id")?,
@@ -629,6 +841,8 @@ impl Workflows<'_> {
         })
     }
 
+    /// The unit `child` belongs to: the graph's current one (a retried unit keeps its child, so this
+    /// is also the unit between two of its attempts), else the child's latest retired attempt.
     pub fn by_child(&self, child: &str) -> Result<Option<(String, WorkUnit)>> {
         self.0.read(|c| {
             let current = one(
@@ -640,34 +854,18 @@ impl Workflows<'_> {
             if current.is_some() {
                 return Ok(current);
             }
-            // a retired attempt: an authoritative failure in the append-only history stands over a
-            // snapshot archived as cancelled (rows archived before failed snapshots were kept)
-            one(
-                c,
-                "SELECT a.workflow_id,a.snapshot,
-                        (SELECT h.reason FROM workflow_history h
-                         WHERE h.workflow_id=a.workflow_id AND h.action='deliver'
-                           AND json_extract(h.detail,'$.child')=a.item_id
-                           AND json_extract(h.detail,'$.status')='failed'
-                         ORDER BY h.revision DESC LIMIT 1) AS failed
-                 FROM workflow_attempts a WHERE a.item_id=?",
-                [child],
-                |r| {
-                    let mut u: WorkUnit = decode(r, "snapshot")?;
-                    if let Some(why) = r.get::<_, Option<String>>("failed")?
-                        && u.status != "failed"
-                    {
-                        u.status = "failed".into();
-                        u.reason = Some(why);
-                    }
-                    Ok((r.get("workflow_id")?, u))
-                },
-            )
+            retired(c, child)
         })
     }
 
-    /// Retired attempts whose child item was left active. A failed delivery is identified from the
-    /// append-only history (older rows archived a failed attempt's snapshot as cancelled).
+    /// The latest retired attempt of `child`, whether or not its unit still holds the child.
+    pub fn retired_of(&self, child: &str) -> Result<Option<(String, WorkUnit)>> {
+        self.0.read(|c| retired(c, child))
+    }
+
+    /// Retired attempts whose child item was left active, once per child (its latest attempt). A child
+    /// its unit still holds is the graph's to settle (a retry reuses it). A failed delivery is identified
+    /// from the append-only history (older rows archived a failed attempt's snapshot as cancelled).
     pub fn retired_open(&self) -> Result<Vec<(WorkUnit, bool)>> {
         self.0.read(|c| {
             all(
@@ -676,9 +874,13 @@ impl Workflows<'_> {
                         EXISTS(SELECT 1 FROM workflow_history h
                                WHERE h.workflow_id=a.workflow_id AND h.action='deliver'
                                  AND json_extract(h.detail,'$.child')=a.item_id
+                                 AND json_extract(h.detail,'$.session') IS json_extract(a.snapshot,'$.session_id')
                                  AND json_extract(h.detail,'$.status')='failed') AS failed
                  FROM workflow_attempts a JOIN items i ON i.id=a.item_id
-                 WHERE i.phase='active' ORDER BY a.created,a.item_id",
+                 WHERE i.phase='active'
+                   AND a.attempt=(SELECT max(b.attempt) FROM workflow_attempts b WHERE b.item_id=a.item_id)
+                   AND NOT EXISTS(SELECT 1 FROM workflow_units u WHERE u.item_id=a.item_id)
+                 ORDER BY a.created,a.item_id",
                 [],
                 |r| Ok((decode(r, "snapshot")?, r.get::<_, i64>("failed")? != 0)),
             )
@@ -819,97 +1021,9 @@ impl Workflows<'_> {
         })
     }
 
-    /// Claims exactly one ready unit and creates its child item atomically. Retrying an already
-    /// claimed unit returns the same child; a process restart never creates a second attempt.
+    /// Claims exactly one ready unit and creates its child item atomically ([`claim_in`]).
     pub fn claim(&self, parent: &str, id: &str) -> Result<WorkUnit> {
-        self.0.transaction(|tx| {
-            let item = open_parent(tx, parent)?;
-            if item.phase == "closing" {
-                return Err(conflict("事项正在关闭，需要先恢复执行才能调度工作"));
-            }
-            let graph = must_graph(tx, parent)?;
-            let goal_version: i64 = tx.query_row(
-                "SELECT coalesce(max(version),0) FROM item_goals WHERE item_id=?",
-                [parent], |r|r.get(0)
-            )?;
-            if graph.cycle != item.cycle || graph.goal_version != goal_version {
-                return Err(conflict("主事项目标或执行周期已变化，需要重新规划后才能调度"));
-            }
-            let unit = must_unit(&graph, id)?;
-            if unit.active() {
-                return Ok(unit.clone());
-            }
-            if graph.paused || graph.single_session() {
-                return Err(conflict("协作工作已暂停"));
-            }
-            if unit.status != "pending" {
-                return Err(conflict("工作单元需要先重置，才能再次调度"));
-            }
-            if unit.attempt >= graph.max_attempts {
-                return Err(conflict("工作单元已达到尝试预算"));
-            }
-            if graph.units.iter().filter(|u| u.active()).count() >= graph.max_parallel {
-                return Err(conflict("已达到工作图并发上限"));
-            }
-            for dep in &unit.spec.depends_on {
-                if must_unit(&graph, dep)?.status != "succeeded" {
-                    return Err(conflict(format!("前置工作 {dep} 尚未成功")));
-                }
-            }
-            if graph.units.iter().filter(|u| u.active()).any(|u| {
-                unit.spec.resources.iter().any(|r| u.spec.resources.contains(r))
-            }) {
-                return Err(conflict("工作资源仍被另一单元使用"));
-            }
-            bot_available(tx, &item.workspace_id, &unit.spec.bot_id)?;
-            if let Some(project) = &item.project_id {
-                let isolated: bool = tx.query_row(
-                    "SELECT EXISTS(SELECT 1 FROM projects WHERE id=? AND workspace_id=? AND worktree=1 AND kind='git' AND archived=0)",
-                    params![project,item.workspace_id],|r|r.get(0)
-                )?;
-                if !isolated {
-                    return Err(conflict("协作项目需要启用独立 Git worktree，才能隔离工作目录"));
-                }
-            }
-            let prefix: String = tx.query_row(
-                "SELECT item_prefix FROM workspaces WHERE id=?",
-                [&item.workspace_id],
-                |r| r.get(0),
-            )?;
-            let no = next_counter(tx, &format!("item:{prefix}"))?;
-            let child = format!("{prefix}-{no}");
-            let t = now();
-            let link = Parent { item: Some(Some(parent.into())), ..Parent::default() };
-            // Splitting work preserves who asked for it, not the assigned Bot's or Node's owner.
-            // Membership is resolved when the child's Node session is bound, just as for its parent.
-            tx.execute(
-                "INSERT INTO items(id,workspace_id,no,kind,title,status,stage,bot_id,project_id,source,parent,created,updated,requested_by)
-                 VALUES (?,?,?,'task',?,'run','执行',?,?,?,?,?,?,(SELECT requested_by FROM items WHERE id=?))",
-                params![child,item.workspace_id,no,unit.spec.title,unit.spec.bot_id,item.project_id,
-                    to_json(&("协作工作", "workflow"))?,to_json(&link)?,t,t,parent],
-            )?;
-            tx.execute(
-                "INSERT INTO item_tags(item_id,tag_id) SELECT ?,tag_id FROM item_tags WHERE item_id=?",
-                params![child,parent],
-            )?;
-            tx.execute(
-                "INSERT INTO item_goals(item_id,version,text,created) VALUES (?,1,?,?)",
-                params![child,unit.spec.goal,t],
-            )?;
-            tx.capture_created(&item.workspace_id, &child, t);
-            tx.execute(
-                "UPDATE workflow_units SET status='dispatching',item_id=?,session_id=NULL,
-                 attempt=attempt+1,reason=NULL WHERE workflow_id=? AND id=?",
-                params![child,parent,id],
-            )?;
-            super::stats::mark_in(tx, &crate::NewMark {
-                workspace_id:item.workspace_id, item_id:child.clone(),ts:t,kind:"status".into(),
-                to_v:Some("run".into()),..Default::default()
-            })?;
-            tx.publish(ChangeEvent::Item { id: child.clone() });
-            record(tx,parent,"claim",NOTE_CLAIMED,Some(id),&json!({"child":child,"attempt":unit.attempt+1}))?;
-            Ok(must_unit(&must_graph(tx,parent)?,id)?.clone())
-        })
+        self.0.transaction(|tx| claim_in(tx, parent, id))
     }
 
     pub fn bind_session(
@@ -976,36 +1090,51 @@ impl Workflows<'_> {
             return Err(conflict("重置必须说明原因"));
         }
         self.0.transaction(|tx| {
-            open_parent(tx,parent)?;
-            let graph=must_graph(tx,parent)?;
-            must_unit(&graph,id)?;
-            let mut affected=HashSet::from([id.to_string()]);
+            open_parent(tx, parent)?;
+            let graph = must_graph(tx, parent)?;
+            must_unit(&graph, id)?;
+            let mut affected = HashSet::from([id.to_string()]);
             loop {
-                let old=affected.len();
+                let old = affected.len();
                 for u in &graph.units {
-                    if u.spec.depends_on.iter().any(|d|affected.contains(d)) {
+                    if u.spec.depends_on.iter().any(|d| affected.contains(d)) {
                         affected.insert(u.spec.id.clone());
                     }
                 }
-                if affected.len()==old { break; }
+                if affected.len() == old {
+                    break;
+                }
             }
-            let before:Vec<_>=graph.units.iter().filter(|u|affected.contains(&u.spec.id)).collect();
-            if before.iter().any(|u|u.active()) {
+            let before: Vec<_> = graph
+                .units
+                .iter()
+                .filter(|u| affected.contains(&u.spec.id))
+                .collect();
+            if before.iter().any(|u| u.active()) {
                 return Err(conflict("当前工作或下游仍在运行，请先取消并停止其会话"));
             }
-            if before.iter().any(|u|u.attempt >= graph.max_attempts) {
+            if before.iter().any(|u| u.attempt >= graph.max_attempts) {
                 return Err(conflict("当前工作或下游已达到尝试预算，请先提高预算再重置"));
             }
+            // The unit keeps its child item: the retry is a new cycle and session of the same item
+            // (its number, branch and worktree), not a new item. The retired attempt's snapshot is kept.
             for u in &before {
-                archive_attempt(tx,parent,u,reason)?;
+                archive_attempt(tx, parent, u, reason)?;
                 tx.execute(
-                    "UPDATE workflow_units SET status='pending',item_id=NULL,session_id=NULL,summary='',
+                    "UPDATE workflow_units SET status='pending',session_id=NULL,summary='',
                      outputs='[]',checks='[]',reason=? WHERE workflow_id=? AND id=?",
-                    params![reason,parent,u.spec.id],
+                    params![reason, parent, u.spec.id],
                 )?;
             }
-            record(tx,parent,"reset",reason,Some(id),&json!({"invalidated":before}))?;
-            must_graph(tx,parent)
+            record(
+                tx,
+                parent,
+                "reset",
+                reason,
+                Some(id),
+                &json!({"invalidated":before}),
+            )?;
+            must_graph(tx, parent)
         })
     }
 

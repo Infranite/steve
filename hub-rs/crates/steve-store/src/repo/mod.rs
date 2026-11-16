@@ -38,7 +38,7 @@ pub use self::stats::*;
 pub use self::thread::*;
 pub use self::workflows::{
     NOTE_CLAIMED, NOTE_SESSION_BOUND, PAUSED_BY_AGENT, PAUSED_BY_ITEM, PAUSED_BY_USER, UnitSpec,
-    WorkUnit, Workflow, WorkflowHistory, Workflows,
+    WorkUnit, Workflow, WorkflowHistory, Workflows, claim_in,
 };
 
 use rusqlite::types::Value as Sql;

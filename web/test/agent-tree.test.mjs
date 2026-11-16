@@ -28,6 +28,23 @@ test("units hang under the coordinator in dependency order, earlier attempts rig
   assert.equal(findNode(tree, "ST-4").title, "title ST-4")
 })
 
+test("a retry in the unit's own child (#182): earlier attempts hang before the unit without taking its item", () => {
+  const wf = workflow([unit("api", "running", { item_id: "ST-2", attempt: 3, activity: { state: "confirmed" } })], { history_attempts: [
+    { item_id: "ST-2", unit_id: "api", created: 2, snapshot: { title: "api", status: "failed", attempt: 2, reason: "second" } },
+    { item_id: "ST-2", unit_id: "api", created: 1, snapshot: { title: "api", status: "failed", attempt: 1, reason: "first" } },
+  ] })
+  const items = [item("ST-1"), item("ST-2", { src: ["Steve", "workflow"], parent: { item: "ST-1" } }), item("ST-3", { parent: { item: "ST-2", s: "s", at: 4 } })]
+  const tree = buildAgentTree("ST-1", items, wf)
+  assert.deepEqual(tree.children.map((n) => [n.key, n.kind, n.item, n.attempt, n.reason ?? null]), [
+    ["ST-2#1", "attempt", undefined, 1, "first"], ["ST-2#2", "attempt", undefined, 2, "second"], ["unit:api", "unit", "ST-2", 3, null],
+  ])
+  assert.deepEqual(tree.children[2].children.map((n) => n.key), ["ST-3"], "the child's forks hang under the unit, once")
+  const stat = (id, ms) => ({ item_id: id, parent_id: "ST-1", depth: 1, tokens: 1, est: 0, reported: 0, agent_ms: ms, first_turn: 1_700_000_000, done_at: null, dropped_at: null })
+  const rows = teamRows(tree, [stat("ST-2", 90_000)], 1_700_000_900_000)
+  assert.deepEqual(rows.map((r) => [r.node.key, r.tries.length, r.segments.length, r.ms]), [["unit:api", 2, 1, 90_000], ["ST-3", 0, 0, 0]],
+    "one row for the step; the child's time is counted once")
+})
+
 test("unit status: paused and unavailable graphs say so; activity decides running", () => {
   const wf = workflow([unit("a", "running")])
   assert.equal(unitStatus(wf.units[0], wf), "unconfirmed")

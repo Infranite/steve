@@ -985,6 +985,11 @@ impl Tx<'_> {
 
     /// Why a closed item's worktree stays.
     fn why_kept(&self, item: &str, wt: &Path) -> String {
+        if let Ok(Some(i)) = self.db().item(item)
+            && self.workflow_retry_keeps(&i).unwrap_or(false)
+        {
+            return "工作单元还会重试，保留工作区和构建缓存给下一次尝试".into();
+        }
         let dirty = git::git_read(wt, &["status", "--porcelain"]).map(|s| !s.is_empty());
         let archived = self
             .db()

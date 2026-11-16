@@ -890,8 +890,10 @@ fn restart_finishes_a_failed_child_after_its_turn_has_ended() {
     assert_eq!(k.phase(&child), "closed");
 }
 
+/// #182: a reset unit keeps its child. Its failed attempt's cycle closes once its turn is over (a
+/// queued input does not keep it), then the retry runs in a new cycle and session of the same child.
 #[test]
-fn restart_finishes_a_retired_failed_attempt_after_its_turn_ends() {
+fn a_reset_units_failed_attempt_closes_after_its_turn_and_the_retry_reuses_the_child() {
     let (k, parent, specs) = setup(true);
     plan(&k, &parent, &specs);
     let work = unit(&k, &parent, "a");
@@ -906,7 +908,10 @@ fn restart_finishes_a_retired_failed_attempt_after_its_turn_ends() {
         .workflows()
         .reset(&parent, "a", "重试旧结果")
         .unwrap();
-    assert!(unit(&k, &parent, "a").item_id.is_none());
+    assert_eq!(
+        unit(&k, &parent, "a").item_id.as_deref(),
+        Some(child.as_str())
+    );
     let history = k.core.workflow_get(&parent).unwrap();
     assert_eq!(history["history_attempts_total"], 1);
     assert_eq!(history["history_attempts"][0]["item_id"], child);
@@ -928,6 +933,11 @@ fn restart_finishes_a_retired_failed_attempt_after_its_turn_ends() {
 
     k.core.tx().workflow_tick().unwrap();
     assert_eq!(k.phase(&child), "active", "live turn still owns its child");
+    assert_eq!(
+        unit(&k, &parent, "a").status,
+        "pending",
+        "the retry waits for it"
+    );
     k.rt.st().turning.remove(&sid);
     k.db()
         .session_patch(&sid, crate::patch![status: "idle"])
@@ -936,18 +946,38 @@ fn restart_finishes_a_retired_failed_attempt_after_its_turn_ends() {
         .queue_add(&sid, "失败前排队的输入", "me", &[])
         .unwrap();
     k.core.tx().workflow_tick().unwrap();
-    assert_eq!(k.phase(&child), "closed");
-    assert_eq!(k.status(&child).0, "fail");
+    let cycles = k.db().store().items().cycles(&child).unwrap();
     assert_eq!(
-        k.db().item(&child).unwrap().unwrap().outcome.as_deref(),
-        Some("failed")
+        cycles
+            .iter()
+            .map(|c| (c.cycle, c.outcome.as_str()))
+            .collect::<Vec<_>>(),
+        vec![(1, "failed")]
     );
+    let retry = unit(&k, &parent, "a");
+    assert_eq!(
+        (
+            retry.status.as_str(),
+            retry.attempt,
+            retry.item_id.as_deref()
+        ),
+        ("running", 2, Some(child.as_str()))
+    );
+    assert_ne!(retry.session_id.as_deref(), Some(sid.as_str()));
+    assert_eq!(
+        k.db().session(&sid).unwrap().unwrap().status,
+        "ended",
+        "the earlier attempt's session is over"
+    );
+    let i = k.db().item(&child).unwrap().unwrap();
+    assert_eq!((i.phase.as_str(), i.cycle), ("active", 2));
     k.core.tx().workflow_tick().unwrap();
-    assert_eq!(k.phase(&child), "closed");
+    assert_eq!(unit(&k, &parent, "a").attempt, 2, "one retry, not more");
 }
 
+/// #182: a cancelled attempt of a reset unit closes as cancelled, and the retry reuses its child.
 #[test]
-fn restart_cancels_a_retired_attempt_without_a_failed_delivery() {
+fn a_reset_units_cancelled_attempt_closes_cancelled_and_the_retry_reuses_the_child() {
     let (k, parent, specs) = setup(true);
     plan(&k, &parent, &specs);
     let work = unit(&k, &parent, "b");
@@ -968,11 +998,47 @@ fn restart_cancels_a_retired_attempt_without_a_failed_delivery() {
         .session_patch(&sid, crate::patch![status: "idle"])
         .unwrap();
     k.core.tx().workflow_tick().unwrap();
-    assert_eq!(k.phase(&child), "closed");
-    assert_eq!(k.status(&child).0, "drop");
+    let cycles = k.db().store().items().cycles(&child).unwrap();
     assert_eq!(
-        k.db().item(&child).unwrap().unwrap().outcome.as_deref(),
-        Some("cancelled")
+        cycles
+            .iter()
+            .map(|c| c.outcome.as_str())
+            .collect::<Vec<_>>(),
+        vec!["cancelled"]
+    );
+    let retry = unit(&k, &parent, "b");
+    assert_eq!(
+        (retry.attempt, retry.item_id.as_deref()),
+        (2, Some(child.as_str()))
+    );
+}
+
+/// #182: a child a retry will run in keeps its worktree while the unit may run again; a unit that
+/// succeeded, ran out of attempts or whose graph is no longer current lets it be tidied.
+#[test]
+fn a_child_awaiting_its_retry_is_kept_for_it() {
+    let (k, parent, specs) = setup(true);
+    plan(&k, &parent, &specs);
+    let work = unit(&k, &parent, "a");
+    let child = work.item_id.clone().unwrap();
+    let sid = work.session_id.unwrap();
+    k.rt.end_turn(&k.core, &sid, "error", Some("检查失败"));
+    assert_eq!(k.phase(&child), "closed");
+    let i = k.db().item(&child).unwrap().unwrap();
+    assert_eq!(unit(&k, &parent, "a").status, "failed");
+    assert!(
+        k.core.tx().workflow_retry_keeps(&i).unwrap(),
+        "attempts left"
+    );
+    let g = graph(&k, &parent);
+    k.db()
+        .store()
+        .workflows()
+        .replace(&parent, g.revision, "收紧预算", &specs, 2, 1)
+        .unwrap();
+    assert!(
+        !k.core.tx().workflow_retry_keeps(&i).unwrap(),
+        "no attempt left: tidied as any closed item"
     );
 }
 
