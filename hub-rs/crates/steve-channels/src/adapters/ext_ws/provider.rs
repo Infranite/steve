@@ -87,7 +87,10 @@ pub struct Me {
     pub identity: Identity,
     pub realm: String,
     pub primary: Handle,
+    /// The name `me.get` gave, else the primary handle's value.
     pub display: String,
+    /// `me.get` gave a name (`display` is not the handle's value).
+    pub named: bool,
     pub aliases: Vec<Handle>,
 }
 
@@ -513,10 +516,12 @@ pub(crate) async fn me(s: &Session) -> Result<Me, CallError> {
     if identity != s.hello().identity {
         return Err(bad("me.get identity differs from hello"));
     }
+    let display = wire::text_field(user, "display", 256);
     Ok(Me {
         identity,
         realm,
-        display: wire::text_field(user, "display", 256).unwrap_or_else(|| primary.value.clone()),
+        named: display.is_some(),
+        display: display.unwrap_or_else(|| primary.value.clone()),
         aliases: wire::aliases(user),
         primary,
     })
@@ -1223,6 +1228,7 @@ mod tests {
             realm: "acme".into(),
             primary: Handle::id("u_123"),
             display: "Ada".into(),
+            named: true,
             aliases: Vec::new(),
         };
         let cfg = json!({REALM: "acme", ME: {"kind": "id", "value": "u_123"}});
