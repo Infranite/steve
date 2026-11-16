@@ -247,6 +247,8 @@ pub struct Line {
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Series {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub coverage: Option<Vec<crate::coverage::Coverage>>,
     /// `day` (`YYYY-MM-DD`) or `hour` (`YYYY-MM-DDTHH:00`, the local hours of a one-day range).
     pub bucket: &'static str,
     pub buckets: Vec<String>,
@@ -381,6 +383,7 @@ pub fn series_with_harnesses(
         Some(h) => h.iter().map(|x| x.0.clone()).collect(),
         None => days(&q.from, &q.to),
     };
+    let mut coverage = vec![crate::coverage::Coverage::default(); buckets.len()];
     let mut series = lines(
         c,
         q,
@@ -390,6 +393,7 @@ pub fn series_with_harnesses(
         spans.as_deref(),
         tz,
         harnesses,
+        &mut coverage,
     )?;
     let mut current = None;
     if let (Bucket::Hour { now }, Some(h)) = (bucket, &spans) {
@@ -404,6 +408,7 @@ pub fn series_with_harnesses(
         }
     }
     Ok(Series {
+        coverage: matches!(metric, Metric::Tokens | Metric::Cost).then_some(coverage),
         bucket: if spans.is_some() { "hour" } else { "day" },
         buckets,
         series,
@@ -423,6 +428,7 @@ fn lines(
     spans: Option<&[(String, i64, i64)]>,
     tz: Option<chrono_tz::Tz>,
     harnesses: &HashMap<String, String>,
+    coverage: &mut [crate::coverage::Coverage],
 ) -> Result<Vec<Line>> {
     let n = buckets.len();
     let index: HashMap<&str, usize> = buckets
@@ -439,6 +445,7 @@ fn lines(
     };
     let names = Names::load(c, &q.workspace_id)?.with_harnesses(harnesses.clone());
     let mut acc = Acc::default();
+    let mut observed: Option<std::collections::HashSet<(String, usize)>> = None;
     let total_label = |m: Metric| match m {
         Metric::Tokens => steve_i18n::t!("stats.total.tokens"),
         Metric::Cost => steve_i18n::t!("stats.total.cost"),
@@ -463,11 +470,37 @@ fn lines(
             } else {
                 metrics::daily(c, q)?
             };
+            if matches!(metric, Metric::Tokens | Metric::Cost) {
+                observed = Some(Default::default());
+            }
             for d in rows {
                 let Some(&i) = index.get(d.day.as_str()) else {
                     continue;
                 };
                 let key = group_key(&d, group);
+                coverage[i].add(&d.coverage);
+                if let Some(seen) = &mut observed {
+                    if group == "token_type" {
+                        let fields = [
+                            d.coverage.input,
+                            d.coverage.output,
+                            d.coverage.cache_read,
+                            d.coverage.cache_write,
+                        ];
+                        for (field, value) in TOKEN_TYPES.iter().zip(fields) {
+                            if value.is_some()
+                                && (metric == Metric::Tokens
+                                    || prices.quote(&d.model, &d.day).is_some())
+                            {
+                                seen.insert((field.to_string(), i));
+                            }
+                        }
+                    } else if d.coverage.total.is_some()
+                        && (metric == Metric::Tokens || prices.quote(&d.model, &d.day).is_some())
+                    {
+                        seen.insert((key.to_string(), i));
+                    }
+                }
                 match metric {
                     Metric::Tokens if group == "token_type" => {
                         for (t, v) in TOKEN_TYPES.iter().zip(token_parts(&d)) {
@@ -709,6 +742,21 @@ fn lines(
             l.label = total_label(metric);
         }
     }
+    if let Some(seen) = observed {
+        let retained: std::collections::HashSet<_> = series.iter().map(|l| l.key.clone()).collect();
+        for line in &mut series {
+            for (i, value) in line.values.iter_mut().enumerate() {
+                let known = if line.key == "other" {
+                    seen.iter().any(|(k, j)| *j == i && !retained.contains(k))
+                } else {
+                    seen.contains(&(line.key.clone(), i))
+                };
+                if !known {
+                    *value = None;
+                }
+            }
+        }
+    }
     Ok(series)
 }
 
@@ -717,6 +765,7 @@ fn lines(
 /// A row of `GET /stats/items`.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ItemRow {
+    pub coverage: crate::coverage::Coverage,
     pub item_id: String,
     pub no: i64,
     pub title: String,
@@ -794,6 +843,7 @@ pub fn items(
             let done_at: Option<i64> = r.get(7)?;
             let as_of = done_at.map_or_else(|| prices.today().to_string(), |t| day(t, tz));
             Ok(ItemRow {
+                coverage:Default::default(),
                 item_id: r.get(0)?,
                 no: r.get(1)?,
                 title: r.get(2)?,
@@ -816,6 +866,16 @@ pub fn items(
             })
         })?
         .collect::<rusqlite::Result<_>>()?;
+    // Live token/cost values come from the same projection as the session and drill-down, without
+    // waiting for the background lifecycle/time refresher.
+    for row in &mut rows {
+        let u = item_usage(c, &row.item_id, &prices)?;
+        row.tokens = u.total;
+        row.est = u.est;
+        row.reported = u.reported;
+        row.unpriced_tokens = u.unpriced_tokens;
+        row.coverage = u.coverage;
+    }
     let key = |r: &ItemRow| -> Option<f64> {
         match sort {
             "tokens" => Some(r.tokens as f64),
@@ -854,6 +914,7 @@ pub const TREE_MAX: usize = 200;
 /// cost by itself. A parent's own row does not include its children; the client sums the subtree.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct TreeNode {
+    pub coverage: crate::coverage::Coverage,
     pub item_id: String,
     pub parent_id: Option<String>,
     pub depth: i64,
@@ -909,6 +970,7 @@ pub fn tree(c: &Connection, root: &str) -> Result<Option<(String, Tree)>> {
             let done_at: Option<i64> = r.get(8)?;
             let as_of = done_at.map_or_else(|| prices.today().to_string(), |t| day(t, tz));
             Ok(TreeNode {
+                coverage:Default::default(),
                 item_id: r.get(0)?,
                 parent_id: r.get(1)?,
                 depth: r.get(2)?,
@@ -931,6 +993,14 @@ pub fn tree(c: &Connection, root: &str) -> Result<Option<(String, Tree)>> {
             _ => true,
         })
         .collect::<rusqlite::Result<_>>()?;
+    for row in &mut nodes {
+        let u = item_usage(c, &row.item_id, &prices)?;
+        row.tokens = u.total;
+        row.est = u.est;
+        row.reported = u.reported;
+        row.unpriced_tokens = u.unpriced_tokens;
+        row.coverage = u.coverage;
+    }
     let truncated = deeper || nodes.len() > TREE_MAX;
     nodes.truncate(TREE_MAX);
     Ok(Some((ws, Tree { nodes, truncated })))
@@ -948,6 +1018,7 @@ pub fn window(q: &Query, hour: Option<u32>, tz: Option<chrono_tz::Tz>) -> Option
 /// Token figures with their estimate.
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct Usage {
+    pub coverage: crate::coverage::Coverage,
     pub input: i64,
     pub output: i64,
     pub cache_read: i64,
@@ -1085,6 +1156,18 @@ fn item_tokens(c: &Connection, item_id: &str) -> Result<Vec<(String, TokenRow)>>
     .collect::<rusqlite::Result<_>>()?)
 }
 
+fn item_usage(c: &Connection, id: &str, prices: &PriceBook) -> Result<Usage> {
+    let mut u = Usage::default();
+    let mut base = 0;
+    for (_, (model, day, t, hb, rep)) in item_tokens(c, id)? {
+        u.add(&model, &day, &t, rep, prices);
+        base += hb;
+    }
+    u.hit_rate = (base > 0).then(|| u.cache_read as f64 / base as f64);
+    u.coverage = crate::coverage::entity(c, "item", id)?;
+    Ok(u)
+}
+
 /// The drill-down of one item, its facts computed now (not the possibly stale `item_stats` row);
 /// `brief` leaves out the turns, marks, decisions and models. `None` if the item does not exist.
 pub fn item_detail(
@@ -1126,6 +1209,7 @@ pub fn item_detail(
     }
     let rate = |u: &mut Usage, b: i64| u.hit_rate = (b > 0).then(|| u.cache_read as f64 / b as f64);
     rate(&mut usage, base);
+    usage.coverage = crate::coverage::entity(c, "item", item_id)?;
     let end = facts.done_at.or(facts.dropped_at).unwrap_or(now);
     let mut d = ItemDetail {
         item_id: item_id.into(),
@@ -1164,14 +1248,15 @@ pub fn item_detail(
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?
         .into_iter()
-        .map(|mut t| {
+        .map(|mut t| -> Result<_> {
             if let Some((mut u, b)) = per_turn.remove(&t.id) {
                 rate(&mut u, b);
                 t.usage = u;
             }
-            t
+            t.usage.coverage=crate::coverage::entity(c,"turn",&t.id)?;
+            Ok(t)
         })
-        .collect();
+        .collect::<Result<_>>()?;
     let marks: Vec<MarkOut> = c
         .prepare_cached(
             "SELECT ts, kind, from_v, to_v, actor, ref FROM item_marks WHERE item_id = ? ORDER BY ts, id",
@@ -1215,6 +1300,9 @@ pub fn item_detail(
             }
         })
         .collect();
+    for m in &mut by_model {
+        m.usage.coverage = crate::coverage::model(c, "item", item_id, &m.model)?;
+    }
     by_model.sort_by(|a, b| {
         b.usage
             .est
@@ -1274,6 +1362,7 @@ pub fn session(c: &Connection, session_id: &str) -> Result<Option<(String, Sessi
         base += hb;
     }
     usage.hit_rate = (base > 0).then(|| usage.cache_read as f64 / base as f64);
+    usage.coverage = crate::coverage::entity(c, "session", session_id)?;
     let turns: i64 = c.query_row(
         "SELECT COUNT(*) FROM agent_turns WHERE session_id = ? AND attempt = 0",
         [session_id],

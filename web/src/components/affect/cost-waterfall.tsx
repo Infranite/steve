@@ -35,6 +35,11 @@ export type CostStep = {
   detail?: string;
   /** A small mark, e.g. the model maker's or the tool's logo – defaults to a swatch in the kind's color */
   icon?: ReactNode;
+  /** Steve: accounting labels preserve unknown fields and partial sums independently of bar geometry. */
+  tokensInText?: string;
+  tokensOutText?: string;
+  tokensText?: string;
+  costText?: string;
   /** Its own tokens and cost – a sub-agent's children are added on top, so don't pre-sum */
   tokensIn?: number;
   tokensOut?: number;
@@ -75,6 +80,8 @@ export type CostWaterfallProps = {
   onOpenChange?: (id: string | null, step?: CostStep) => void;
   /** Formats every cost – defaults to dollars, e.g. "$0.042" */
   formatCost?: (amount: number) => string;
+  summaryCost?: (amount: number) => ReactNode;
+  summaryTokens?: (amount: number) => ReactNode;
   /** Long runs: the rows scroll past this height (px) – the totals, the switch and the column heads stay */
   maxHeight?: number;
   title?: string;
@@ -220,6 +227,8 @@ export function CostWaterfall({
   defaultOpenId = null,
   onOpenChange,
   formatCost = dollars,
+  summaryCost,
+  summaryTokens,
   maxHeight,
   title,
   className,
@@ -535,7 +544,7 @@ export function CostWaterfall({
           <dt>{t("stats:cwf.totalCost")}</dt>
           <dd>
             <span className="ui-cwfc__amount" data-live={live ? "" : undefined}>
-              {formatCost(totalCost)}
+              {summaryCost ? summaryCost(totalCost) : formatCost(totalCost)}
             </span>
             {unpricedAll > 0 && <span className="ui-cwfc__sub ui-cwfc__sub--unpriced" data-unpriced-total="">{t("stats:cwf.unpricedTotal", { n: tokens(unpricedAll) })}</span>}
           </dd>
@@ -544,11 +553,11 @@ export function CostWaterfall({
           <dt>{t("stats:cwf.totalTokens")}</dt>
           <dd>
             <span className="ui-cwfc__amount" data-live={live ? "" : undefined}>
-              {tokens(tin + tout + tx)}
+              {summaryTokens ? summaryTokens(tin + tout + tx) : tokens(tin + tout + tx)}
             </span>
-            <span className="ui-cwfc__sub">
+            {!summaryTokens && <span className="ui-cwfc__sub">
               {t("stats:cwf.inOut", { in: tokens(tin), out: tokens(tout) })}
-            </span>
+            </span>}
           </dd>
         </div>
         <div className="ui-cwfc__stat">
@@ -731,24 +740,24 @@ export function CostWaterfall({
                     </div>
                     <span className="ui-cwfc__num" data-col="in">
                       <span className="ui-cwfc__amount" data-live={anyRunning && i > 0 ? "" : undefined}>
-                        {i > 0 ? tokens(i) : "–"}
+                        {s.tokensInText ?? (i > 0 ? tokens(i) : "–")}
                       </span>
                     </span>
                     <span className="ui-cwfc__num" data-col="out">
                       <span className="ui-cwfc__amount" data-live={anyRunning && o > 0 ? "" : undefined}>
-                        {o > 0 ? tokens(o) : "–"}
+                        {s.tokensOutText ?? (o > 0 ? tokens(o) : "–")}
                       </span>
                     </span>
                     <span className="ui-cwfc__num" data-col="cost">
                       <span className="ui-cwfc__amount" data-live={anyRunning && cost !== undefined ? "" : undefined}>
                         {unpricedMark(unpriced)}
-                        {cost !== undefined ? formatCost(cost) : "–"}
+                        {s.costText ?? (cost !== undefined ? formatCost(cost) : "–")}
                       </span>
                     </span>
                     {/* Narrow screens have no room for In and Out – in the tokens view this one takes the cost's place */}
                     <span className="ui-cwfc__num" data-col="tok">
                       <span className="ui-cwfc__amount" data-live={anyRunning && i + o + x > 0 ? "" : undefined}>
-                        {i + o + x > 0 ? tokens(i + o + x) : "–"}
+                        {s.tokensText ?? (i + o + x > 0 ? tokens(i + o + x) : "–")}
                       </span>
                     </span>
                     <span className="ui-cwfc__num" data-col="time">

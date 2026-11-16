@@ -432,6 +432,82 @@ The plugin has 20 seconds to start listening when it is first connected. One tha
 - `installed/<library>/<plugin>/`: `installed.json` beside the unpacked version;
 - `instances/<id>/`: `instance.json`, the settings (`config.json`) and `token`, both readable by the Hub's user only, the plugin's `data/`, and `plugin.log` with what it wrote to standard output and error (started again once it passes 1 MiB). Look there first when a plugin does not start.
 
+## Usage accounting and recovery
+
+The session panel, an item's usage rows and the statistics views read the same `usage_records`
+projection. Node attempt reports are durably deduplicated in `usage_reports` by `(turn_id, report_id)`;
+`usage_meters` keeps the current head of each `(turn_id, meter_epoch, model, scope)`, including accounting finalization and invalid-amount state. The durable ledger and local/Node one-shot calls use the same `steve-node-api::usage` reducer. Applying a Node
+report, replacing its accounting projection, updating the daily cube, invalidating the item cache
+and advancing the applied event watermark share one transaction. Statistics write failure leaves
+the event unapplied for retry. This does not require a source checkout, model connection, or an
+operator's private infrastructure.
+
+The existing `UsageReport` contract is used throughout:
+
+- `delta` adds the report's known fields once. `cumulative` is the snapshot of this attempt's meter,
+  replacing earlier known values. `final` replaces the running figure and prevents later non-final
+  reports from increasing that meter. A missing field stays unknown unless an earlier report of
+  that meter already supplied it; it is never manufactured as zero.
+- A new harness generation uses a new `meter_epoch`. Models and attempts have independent meter
+  heads. For the same epoch and model, `all` supplies each known field and `main`
+  supplies missing fields; a main-only dollar quote is retained when `all` has no quote. A cost/context-only `all` report does not
+  replace known tokens with zero. `reasoning` is already part of `output` and is not added again.
+- Live attempt usage is assigned to the attempt's start time and that day's workspace `stats.tz`.
+  Finalization leaves that attribution in place. Turn durations and completion counters are still
+  booked on the completion day. A time-zone rebuild recalculates both from their timestamps.
+- Cancellation or interruption closes the turn and retains its known usage. It does not mean the
+  provider reported a complete final bill. A duplicate finish cannot append another charge.
+  A late final can repair a settled attempt without counting its completion again.
+- One-shot gateway calls use the same report reducer before recording their model rows. Explicit
+  zero reports are retained as row or detail evidence, without adding requests for unused models.
+  A single attempt's zero-model evidence contributes to coverage, including model filters; retry
+  zeros cannot stand in for the answering model's missing usage. This path does not estimate a live rate:
+  cumulative or final billing figures must never be divided into a recent TPS window. Older
+  context-only ACP process-cost meters are rebased to admitted attempt increments at the Hub
+  boundary; their context figures are not token-usage reports.
+
+All/Main selection is per epoch and reported model, field by field: an All output does not
+remove a Main input that All omitted, and an All for model B does not cover model A. Background
+reports are outside the attempt. An anonymous Main from the adapter's prompt response can use the
+epoch's single All model as its canonical owner; requested aliases are only display fallbacks,
+not fuzzy matches between two explicitly reported names. If several All models exist, only uncovered anonymous
+Main field residuals are retained, with no guessed canonical model. Different actual epochs remain independent;
+collectors must give live and final observations of one meter the same epoch. A context-only Final
+cannot finalize accounting. A valid accounting Final retains prior missing fields and ignores late
+non-Final accounting. Invalid or mixed-currency delta amounts remain unknown until a valid snapshot;
+foreign currencies are never silently booked as USD. Remote session cost admission still applies
+its configured caps separately from the accounting projection.
+
+New gateway records carry `detail.call_id`; turn records use their stable turn ID. A legacy Main
+cost-only row with a matching All token row and stable turn/call ownership is a cost companion,
+not another missing-token call. A same-millisecond peer without stable ownership is only a
+candidate: `coverage.uncertain` counts it and the UI says historical cost ownership is uncertain.
+It does not increment `unavailable` or certify complete coverage. An independent cost-only call,
+including one for a different model, still has unavailable token usage. Rebuild preserves this
+classification; it does not manufacture call IDs for historical rows.
+
+`GET /api/stats/sessions/:id`, `/api/stats/items/:id`, `/api/stats/summary` and usage breakdowns
+include `coverage`. Its `state` is `not_reported`, `unavailable`, `partial` or `complete`:
+an open attempt with no token report is not reported yet; a closed attempt without tokens is
+unavailable; any incomplete field or uncovered attempt makes a known sum partial. Complete means
+all four accounting token fields were reported, not that a run has ended or every provider feature
+is observable. `coverage.total` and the per-field values are `null` when unknown and `0` only for an
+observed zero. For compatibility the original numeric fields remain additive sums of known values;
+consumers must use coverage before presenting those sums as totals. Coverage counts meter/model
+rows and attempts with no rows, not user prompts. Reads of an accounting response use one database
+snapshot. Estimates still depend on the configured price table; coverage is separate from pricing.
+
+After an ordinary disconnect or Hub restart, reconnect the existing Node. Its durable event replay
+uses the same report identities; retained meter heads and usage rows remain available while the
+model is offline. Never start a replacement attempt just to recover statistics. A completed attempt
+whose old usage is still in the Node inbox is repaired when its finish reports are processed.
+Owner-only `POST /api/stats/rebuild` reconstructs daily and item summaries from persisted usage and
+turn rows (also after a statistics time-zone change); it does not contact a provider or recreate
+reports that were never collected. Keep normal database backups. Historical missing usage whose
+source records were never emitted or have already been discarded remains unavailable; neither text
+length nor a bill for another attempt is a valid substitute. Collector-specific import/backfill is
+a separate integration and must provide stable report identities and attempt attribution.
+
 ## Diagnostic capture and queries
 
 New items, including ordinary conversation items and workflow child items, automatically start one 30-minute window of detailed capture. The deadline is persisted when the item is created; queries, restarts and continuing the item never extend it. Older items are not enabled retroactively. Once a window expires or the owner stops it, it stays stopped until the instance owner explicitly starts another 1–60 minute window in **Debug**. There is no new environment switch.
@@ -537,6 +613,42 @@ When a device stays offline for `STEVE_NODE_HANDOFF_MIN` minutes (default 30; `0
 Any ACP adapter can be a harness. Besides the 17 built-in entries ([Harness setup](#harness-setup)), an entry can declare an adapter of its own: `{"my-agent": {"command": "/absolute/path/to/agent", "name": "My Agent", "args": [], "env": {}, "properties": {}}}`. Only `command` is required; sessions use plain ACP. `properties` declares what plain ACP cannot discover, for example `modes` (Steve's `plan`, `ask`, `accept_edits`, `auto` and `full_access` mapped to the adapter's mode ids; by default `plan`, `default`, `acceptEdits`, `auto` and `bypassPermissions`), `blind_set_mode`, `mode_meta` and `native_execution` (native tools without harness approvals, FullAccess only), `nested_sandbox: false` for an adapter that sandboxes itself and must not run inside the Node's sandbox, `self_read_only`, and `skills` (where under its state directory it reads `<name>/SKILL.md`; see [Skills](#skills)). The Node asks each such adapter `initialize` (at most every five minutes; `probe_initialize: false` turns this off) and reports its version, capabilities and sign-in methods, or why it could not start. The Hub reads the same format from `$STEVE_HOME/harness.json` (or `STEVE_HARNESS_MANIFEST`) for its own Node; an adapter listed there is offered as a bot's harness. `STEVE_ADAPTER_*` variables still take precedence for the built-in entries, and a manifest that does not parse is logged and ignored.
 
 Registration alone does not move existing projects or change scheduling. Do not set `STEVE_NODE_BIND` merely to register a Node. The current remote Node configuration advertises session capacity; jobs and execs have zero capacity.
+
+### Durable one-shot bills
+
+Think calls and research jobs allocate a durable `gateway_calls.call_id` before dispatch. Each fallback allocates its own `gateway_attempts.attempt_id`, ordinal and `previous_attempt`, even when it retries the same model. Workspace, item, purpose, bot and project are captured before work starts; model and harness are captured before each attempt. Research retains every attempt's consumption. A non-model Node operation does not allocate a model bill.
+
+Node jobs remain `ExecutionRef::Job`. Their dispatch transaction links the Job attempt to the billing attempt in `gateway_job_accounts`; it does not create an agent turn. Applying Usage writes `gateway_usage_reports` (deduplication key: attempt/report), shared-reducer meter heads, the replaceable `usage_records` projection and `stat_daily`, and the inbox applied cursor in one transaction. Report identities and the source node/job binding survive normal Job/inbox pruning, so a retained late Final still repairs the original bill after its runtime Job row is gone. This is a Hub storage contract: the existing `JobSpec`, `UsageReport` and old Node messages remain readable without new mandatory protocol fields. Older jobs without this persisted ownership cannot be assigned an item retrospectively from a timestamp.
+
+LocalAcp first durably captures reports in `gateway_local_inbox`. Applying one report atomically commits its report identity, meter, bill/cube and applied flag; a projection fault leaves the captured report pending. The Hub apply worker and startup recovery retry it without a caller, in attempt order; a failed cumulative report cannot be overtaken by a later delta, and unrelated calls continue. Caller results are durable facts with a projection-dirty flag, so an unavailable projection cannot erase a timeout/cancel result.
+
+Finish and cancel share a separate persistent FIFO of dirty call results. Each worker pass selects at most 128 results and commits their rotation to the tail before attempting projections. Projection rollback does not undo rotation; successful projection atomically clears dirty state and its queue entry. Ticket ordering survives restart, and new results join behind existing entries. Concurrent workers serialize selection/rotation; overlapping projections are idempotent and need no lease. For a queued call with N entries up to and including it, at most ceil(N/128) committed scheduling batches select it for an attempt, even when earlier calls keep failing or new calls arrive. This bounds scheduling work, not elapsed time or success while storage remains unavailable. Failed passes are logged and the idle worker retries without new Usage. Finished bill detail explicitly records `pending: false`; result recovery keeps the same call, consumption and failure outcome.
+
+Core records the caller result and fallback metadata on the same call; it does not append a second bill. A timeout returns promptly, while Node cancellation and bounded sampler settlement continue. Dropping the future removes its text waiter, not its accounting owner. LocalAcp runs the same bounded settlement in an owned task and persists each report. Later Final reports replace that attempt's known cumulative values and may correct a failed call's consumption; they never turn the failed result into success. Attempts, duration and failure evidence stay on the first accounting row, and zero-consumption retries remain evidence without an extra request row.
+
+A live Hub persists interrupted callers as failed before admitting work and attempts projection recovery, then reconciles Node jobs and applies retained inbox/journal events without running the models again. A projection outage is logged without preventing Hub startup, so the periodic worker can continue bounded retries. A failure to persist the interrupted caller results still prevents startup. An inert `STEVE_NO_RESUME=1` snapshot does not do this recovery. An already received Final is recoverable after process restart even when the original caller no longer exists. Node report event times (`NodeEvent.at`) are retained separately; LocalAcp has no event timestamp in `EventBody`, so it records the observation time, not an inferred original token timestamp. Billing uses the captured call start and workspace statistics day. Rebuild keeps that day in sync with timezone changes. Neither cumulative bills nor late or historical finals add current TPS units.
+
+Think and Research stop through an awaitable one-shot cancellation path. User cancellation, deadline/offline/output limits and Research idle, tool, turn or policy stops cancel execution before awaiting source settlement. The adapter receives TERM, with at most 500 ms for its leader to exit, then KILL for its remaining owned group and at most two seconds to reap. No further prompt or tool permission is driven after cancellation; only shutdown and bounded source reads continue. After settlement, Node cleanup rechecks the recorded process birth identity; an uncertain or reused identity is not signalled and remains unknown. The same attempt/session/meter is sampled, including source bytes persisted before cancellation but not yet polled. Final is journaled on the original Job before AttemptEnded; a failed streaming Final is retried with the terminal transaction. Existing report identities make replay idempotent and retain the caller's failed/cancelled result. Source loss preserves observed consumption as a lower bound with a diagnostic, not a made-up zero or a presumed complete tail.
+
+Rust callers that need an accounting receipt on stop use `steve_acp::oneshot::run_cancellable` and await its result. The existing `run` interface remains compatible for request deadlines. Dropping a raw ACP future is emergency process cleanup, not an awaited accounting receipt. Node-owned Think/Research lifecycles keep driving settlement when their Hub waiter disappears; shutdown still has its bounded emergency abort path, so abrupt process loss can preserve only reports already journaled.
+
+This cannot recover usage a producer never flushed, a local source never observed before process loss, or events already pruned before ownership was recorded. Missing historic ownership, missing source bytes and ambiguous old meter boundaries remain unknown; do not infer zero, merge distinct epochs or add a supplier call to fill the gap. Use retained sources and trustworthy attempt boundaries for an explicit audit instead.
+
+### Harness usage accounting
+
+Persistent sessions and one-shot calls use the same token normalizer and attempt sampler. Native `session/prompt` usage and `_meta.quota.model_usage` are preferred for final accounting. Main-loop and all-model scopes overlap and must not be added together. ACP `usage_update.used` and `size` describe context occupancy, not tokens consumed; its reported cost can be a process cumulative meter independently of tokens. No token figures are estimated from message text. A missing report means unreported, a final report with absent token fields means unavailable, and an explicitly reported `0` is real zero. Some fields can be known while others remain unavailable.
+
+Adapters declare `usage_input_includes_cache` and `usage_fallback` in `harness.json` properties. The built-in Codex adapter follows codex-acp 2.x: native input already excludes cached reads and writes; `thoughtTokens` in prompt usage and `reasoningOutputTokens` in quota are subsets of output. A legacy or custom adapter whose native input includes cache reads must declare `usage_input_includes_cache: true`. Claude's native input is exclusive of cache reads and writes; its live context/cost updates do not contain consumed token counts. An adapter with no native token accounting and no declared fallback reports unknown fields, including on errors.
+
+`usage_fallback: "codex_rollout"` enables a read-only meter of the adapter's effective `CODEX_HOME/sessions` directory. The configured home is passed to the child; manifest, wrapper and principal state overrides are honored. Raw rollout input includes cached reads and cache creation when reported; both are split out once. Explicit `cache_write_input_tokens: 0` stays zero, a positive value stays separate, and an omitted field stays unknown. A baseline is taken before each prompt, then new `token_count` rows are sampled every 500 ms. Cumulative reports contain only this attempt's consumption, even when the session has older history. Native and sampled reports for the same attempt share a token meter; different meters are never relabelled to hide a discrepancy. Native final fields take precedence; sampling fills missing fields. Report ids derive from their content and attempt, so replay does not create another booking. A lower counter needs per-response `last_token_usage` where a trustworthy total difference cannot be obtained. Missing or inconsistent cache splits stay unknown; reasoning is never added to output again.
+
+`usage_fallback: "claude_transcript"` (the built-in Claude adapter's default) reads assistant `message.usage` under the child process's effective `CLAUDE_CONFIG_DIR/projects`, or its `HOME/.claude/projects` when unset. This is a source capability, also available to a custom adapter under any name. Both ordinary and one-shot calls prime before prompting, exclude older timestamps and baseline message IDs, and deduplicate repeated content-block records by `message.id`. Session filenames and record session IDs must match; duplicate root files are ambiguous. Settlement accepts late disk writes only when their source timestamps precede the end fence, so padding after the attempt is not attributed. A new top-level user prompt bounds the previous attempt. Main-chain usage is reported by source model; session-bound files under `<session-id>/subagents/agent-*.jsonl` contribute to All without being added to Main. Input, cache reads and cache creation are already separate in this source. Synthetic assistant messages are ignored, and an all-zero native cancellation response cannot erase persisted consumption. Errors still settle the transcript when there is no native final response. This supports observed claude-agent-acp 0.99.x and 0.107.x source shapes; the actual adapter command and package determine which implementation runs. Their context/cost notifications alone do not establish consumed tokens, and a cancellation without a result can report synthetic zero.
+
+Final collection allows three seconds for asynchronous tail writes after success, cancellation or error, plus at most 200 ms for its last read. The session stays occupied until settlement, and one-shot usage is journaled while the call runs. A recent earlier count is not proof that the final response was flushed. Reads stay bounded: at most 4 MiB to establish a baseline, 512 KiB per incremental read and 256 KiB per line. Codex discovery visits at most 16,384 entries; transcript discovery visits at most 4,096 projects and 128 files, with 65,536 message IDs per attempt. An unread or incomplete tail produces a diagnostic; previously observed consumption remains an observed lower bound, rather than being erased by a synthetic zero. Missing files and incomplete historical baselines never imply zero. Separate homes and session ids have separate cursors.
+
+On Node shutdown, persistent-session actors abort and join their sampling coroutine, RPC continuations and retry/kill timers instead of leaving background work behind. Node-owned Think and Research jobs await their bounded stop and source settlement before shutdown returns. Each sampler permits only one blocking source read, and its async caller stops waiting after 200 ms; snapshots never wait for the reader's lock. An operating-system read on a stalled filesystem cannot be forcibly cancelled: that one worker can outlive shutdown until the OS returns, but holds no Node handle, home lock or event sender, and cannot schedule another read. Shutdown does not promise to flush an unobserved provider response. Cancelling a one-shot call stops its producer, so only already-persisted records and tails flushed before it stopped can be recovered.
+
+This collection does not rewrite historical statistics. Existing Node journal reports can be replayed while retained. Historical rollout recovery requires the original configured home, exact session identity and trustworthy attempt boundaries or before/after totals; session lifetime totals or context meters alone cannot reconstruct a turn. Files deleted before collection, unflushed usage, writes beyond the bounded tail window, or resets without enough per-response evidence remain unknown. Abrupt Node loss may preserve only the last journaled cumulative report; it cannot prove an unflushed final count. Keep those limitations visible when auditing or repairing older data.
 
 ### Verify and recover a Node
 
@@ -731,6 +843,14 @@ The Hub's own Node, which runs every session on the Hub's machine, runs as `stev
 - Going back to `local` is an ordinary restart with `STEVE_NODE_MODE=local`. Stop it first with `steve hub stop` (or `kill $(cat <data>/node/service.pid)` for a Hub not set up by `steve setup`) so that two Nodes never use one home.
 
 ## Harness setup
+
+A local Node holds its home exclusively until its last handle is dropped after shutdown. The
+lock is released explicitly, so an unrelated command between `fork` and `exec` cannot prolong
+that ownership through an inherited descriptor. After an adapter exits, its stdin task ends
+and its stdout and stderr drain for at most 500 ms before their tasks are cancelled and joined.
+Session shutdown also waits for this transport cleanup; an unconfirmed cleanup keeps its process
+record for reconciliation. This does not claim termination of unrelated processes that retain a
+pipe. Runtime-wide task counts alone do not identify a Node's sampler or prove process ownership.
 
 ### The ACP adapters
 

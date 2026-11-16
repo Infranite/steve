@@ -334,7 +334,7 @@ where
 }
 
 /// The exclusive hold on a Node's home: one Node per journal.
-struct HomeLock(#[allow(dead_code)] std::fs::File);
+struct HomeLock(std::fs::File);
 
 impl HomeLock {
     fn take(home: &Path) -> ApiResult<HomeLock> {
@@ -352,6 +352,17 @@ impl HomeLock {
             ));
         }
         Ok(HomeLock(f))
+    }
+}
+
+impl Drop for HomeLock {
+    fn drop(&mut self) {
+        use std::os::fd::AsRawFd;
+        // CLOEXEC prevents inheritance after exec, but another thread may currently be
+        // between fork and exec. Closing only our descriptor would leave that child holding
+        // the same flock. The last Node owner has quiesced: release its lock explicitly,
+        // independently of when an unrelated child closes its inherited descriptor.
+        unsafe { libc::flock(self.0.as_raw_fd(), libc::LOCK_UN) };
     }
 }
 

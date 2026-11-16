@@ -2,8 +2,11 @@
 //! and the `stat_daily` cube, through `steve_store::Stats`. Token figures are brought to one convention
 //! with `steve_stats::normalize`; days are cut in the workspace's `stats.tz`.
 
+#[cfg(test)]
 use serde_json::json;
-use steve_store::{ModelUsage, Session, Store, Tokens};
+#[cfg(test)]
+use steve_store::{ModelUsage, Tokens};
+use steve_store::{Session, Store};
 
 /// Session attribution of a turn: workspace, item, bot, project, and the fallback model.
 struct Owner {
@@ -12,28 +15,30 @@ struct Owner {
     bot_model: Option<String>,
 }
 
-fn owner(store: &Store, session_id: &str) -> Option<Owner> {
-    let s = store.sessions().get(session_id).ok().flatten()?;
-    // imported read-only sessions are not Agent work
+fn owner(store: &Store, session_id: &str) -> steve_store::Result<Option<Owner>> {
+    let Some(s) = store.sessions().get(session_id)? else {
+        return Ok(None);
+    };
     if s.readonly != 0 {
-        return None;
+        return Ok(None);
     }
-    let project = s
-        .item_id
-        .as_deref()
-        .and_then(|i| store.items().get(i).ok().flatten())
-        .and_then(|i| i.project_id);
-    let bot_model = s
-        .bot_id
-        .as_deref()
-        .and_then(|b| store.bots().get(b).ok().flatten())
-        .and_then(|b| b.model)
-        .filter(|m| !m.is_empty());
-    Some(Owner {
+    let project = match s.item_id.as_deref() {
+        Some(id) => store.items().get(id)?.and_then(|i| i.project_id),
+        None => None,
+    };
+    let bot_model = match s.bot_id.as_deref() {
+        Some(id) => store
+            .bots()
+            .get(id)?
+            .and_then(|b| b.model)
+            .filter(|m| !m.is_empty()),
+        None => None,
+    };
+    Ok(Some(Owner {
         s,
         project,
         bot_model,
-    })
+    }))
 }
 
 impl Owner {
@@ -76,32 +81,86 @@ pub fn node_attempt_started(
     user_seq: Option<i64>,
     at: i64,
 ) {
-    let Some(o) = owner(store, session) else {
-        return;
-    };
-    let r = store.stats().turn_begin(&steve_store::TurnBegin {
-        workspace_id: o.s.workspace_id.clone(),
-        session_id: o.s.id.clone(),
-        item_id: o.s.item_id.clone(),
-        bot_id: o.s.bot_id.clone(),
-        project_id: o.project.clone(),
-        harness: o.s.harness.clone(),
-        user_seq,
-        attempt: ordinal,
-        started: at,
-    });
-    let linked = r.and_then(|id| {
-        store.with_conn(|c| {
-            c.execute(
-                "UPDATE agent_turns SET node_attempt_id = ? WHERE id = ?",
-                rusqlite::params![attempt, id],
-            )?;
-            Ok(())
-        })
-    });
-    if let Err(e) = linked {
+    if let Err(e) = try_node_attempt_started(store, session, attempt, ordinal, user_seq, at) {
         tracing::error!("stats attempt begin {session}: {e}");
     }
+}
+
+pub(crate) fn try_node_attempt_started(
+    store: &Store,
+    session: &str,
+    attempt: &str,
+    ordinal: i64,
+    user_seq: Option<i64>,
+    at: i64,
+) -> steve_store::Result<()> {
+    let Some(o) = owner(store, session)? else {
+        return Ok(());
+    };
+    store.stats().node_turn_begin(
+        &steve_store::TurnBegin {
+            workspace_id: o.s.workspace_id,
+            session_id: o.s.id,
+            item_id: o.s.item_id,
+            bot_id: o.s.bot_id,
+            project_id: o.project,
+            harness: o.s.harness,
+            user_seq,
+            attempt: ordinal,
+            started: at,
+        },
+        attempt,
+    )?;
+    Ok(())
+}
+
+fn ensure_node_turn(store: &Store, session: &str, attempt: &str) -> steve_store::Result<()> {
+    let missing: Option<(i64,i64)> = store.reader(|db| {
+        use rusqlite::OptionalExtension;
+        Ok::<_,steve_store::StoreError>(db.query_row(
+            "SELECT a.ordinal,a.created FROM runtime_attempts a JOIN runtime_turns t USING(turn_id) WHERE a.attempt_id=?1 AND t.session_id=?2 AND NOT EXISTS(SELECT 1 FROM agent_turns WHERE node_attempt_id=?1)",
+            [attempt,session], |r|Ok((r.get(0)?,r.get(1)?))).optional()?)
+    })?;
+    if let Some((ordinal, started)) = missing {
+        try_node_attempt_started(store, session, attempt, ordinal, None, started)?;
+    }
+    Ok(())
+}
+
+/// Persist one report before its Node event is marked applied. Used in the coordinator's write
+/// transaction; replays and the eventual finish use the same report identity.
+pub(crate) fn node_usage(
+    store: &Store,
+    session: &str,
+    attempt: &str,
+    report: &steve_node_api::UsageReport,
+) -> steve_store::Result<()> {
+    let Some(o) = owner(store, session)? else {
+        return Ok(());
+    };
+    ensure_node_turn(store, session, attempt)?;
+    let turn: Option<(String, i64)> = store.reader(|c| {
+        use rusqlite::OptionalExtension;
+        Ok::<_, steve_store::StoreError>(
+            c.query_row(
+                "SELECT id,started FROM agent_turns WHERE node_attempt_id=?",
+                [attempt],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?,
+        )
+    })?;
+    if let Some((id, started)) = turn {
+        // Admission already rebased legacy context counters. Keep refusal/currency evidence
+        // for the shared reducer; filtering it here would hide an unknown monetary sum.
+        store.stats().usage_report(
+            &id,
+            report,
+            &o.model(None),
+            &day(store, &o.s.workspace_id, started),
+        )?;
+    }
+    Ok(())
 }
 
 /// A Node attempt ended: its row gets what it did and what it cost.
@@ -113,85 +172,44 @@ pub fn node_attempt_finished(
     f: &super::node_runtime::AttemptFacts,
     at: i64,
 ) {
-    let Some(o) = owner(store, session) else {
-        return;
+    if let Err(e) = try_node_attempt_finished(store, session, attempt, c, f, at) {
+        tracing::error!("stats attempt finish {session}: {e}");
+    }
+}
+
+pub(crate) fn try_node_attempt_finished(
+    store: &Store,
+    session: &str,
+    attempt: &str,
+    c: &steve_node_api::Completion,
+    f: &super::node_runtime::AttemptFacts,
+    at: i64,
+) -> steve_store::Result<()> {
+    let Some(o) = owner(store, session)? else {
+        return Ok(());
     };
-    let turn: Option<String> = store
-        .with_conn(|c| {
-            Ok(c.query_row(
-                "SELECT id FROM agent_turns WHERE node_attempt_id = ?",
+    // Also repairs reports retained in the inbox before live accounting was installed. Normal
+    // live reports are already booked, and deduplicate here. No second final-only accumulator.
+    for report in &f.usage {
+        node_usage(store, session, attempt, report)?;
+    }
+    let turn: Option<String> = store.reader(|db| {
+        use rusqlite::OptionalExtension;
+        Ok::<_, steve_store::StoreError>(
+            db.query_row(
+                "SELECT id FROM agent_turns WHERE node_attempt_id=?",
                 [attempt],
                 |r| r.get(0),
             )
-            .ok())
-        })
-        .ok()
-        .flatten();
+            .optional()?,
+        )
+    })?;
     let Some(turn_id) = turn else {
-        return;
+        return Ok(());
     };
     let ws = &o.s.workspace_id;
-    // a final figure replaces the attempt's deltas; deltas add up
-    let tokens_of = |t: &steve_node_api::Tokens| Tokens {
-        input: t.input.and_then(super::node_runtime::usage_tokens),
-        output: t.output.and_then(super::node_runtime::usage_tokens),
-        cache_read: t.cache_read.and_then(super::node_runtime::usage_tokens),
-        cache_write: t.cache_write.and_then(super::node_runtime::usage_tokens),
-        reasoning: None,
-    };
-    // the per-model figures for everything (scope `all`) when there are any, else the main
-    // loop's: `all` already holds `main`, the two never add up
-    let scoped = |m: steve_node_api::Measurement| -> Vec<&steve_node_api::UsageReport> {
-        let of: Vec<_> = f.usage.iter().filter(|u| u.measurement == m).collect();
-        if of
-            .iter()
-            .any(|u| u.scope == steve_node_api::UsageScope::All)
-        {
-            of.into_iter()
-                .filter(|u| u.scope == steve_node_api::UsageScope::All)
-                .collect()
-        } else {
-            of
-        }
-    };
-    let finals = scoped(steve_node_api::Measurement::Final);
-    let mut usage: Vec<ModelUsage> = if finals.is_empty() {
-        scoped(steve_node_api::Measurement::Delta)
-            .into_iter()
-            .map(|u| ModelUsage {
-                model: o.model(u.model.as_deref().or(f.model.as_deref())),
-                tokens: tokens_of(&u.tokens),
-                cost_reported: None,
-                detail: json!({ "scope": u.scope }),
-            })
-            .collect()
-    } else {
-        finals
-            .iter()
-            .map(|u| ModelUsage {
-                model: o.model(u.model.as_deref().or(f.model.as_deref())),
-                tokens: tokens_of(&u.tokens),
-                cost_reported: None,
-                detail: json!({ "scope": u.scope }),
-            })
-            .collect()
-    };
-    if let Some(cost) = f.cost.filter(|c| *c > 0.0) {
-        if usage.is_empty() {
-            usage.push(ModelUsage {
-                model: o.model(f.model.as_deref()),
-                tokens: Tokens::default(),
-                cost_reported: None,
-                detail: json!({ "scope": "main" }),
-            });
-        }
-        usage[0].cost_reported = Some(cost);
-    }
-    let model = usage
-        .first()
-        .map(|u| u.model.clone())
-        .unwrap_or_else(|| o.model(f.model.as_deref()));
-    let r = store.stats().turn_finish(&steve_store::TurnFinish {
+    let model = o.model(f.model.as_deref());
+    store.stats().turn_finish(&steve_store::TurnFinish {
         turn_id,
         ended: at,
         day: day(store, ws, at),
@@ -203,11 +221,9 @@ pub fn node_attempt_finished(
         tool_errors: f.tool_errors,
         tool_kinds: f.tool_kinds.clone(),
         permissions: f.permissions,
-        usage,
-    });
-    if let Err(e) = r {
-        tracing::error!("stats attempt finish {session}: {e}");
-    }
+        usage: vec![],
+    })?;
+    Ok(())
 }
 
 #[cfg(test)]

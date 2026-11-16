@@ -11,7 +11,7 @@ import type { TreeStat } from "@/agent-tree"
 import { CostWaterfall, type CostMode, type CostStep, type CostStepStatus } from "@/components/affect/cost-waterfall"
 import { STOP } from "@/stats/drill"
 import { t, useT } from "@/i18n"
-import { fmtMs, fmtN, fmtPct, fmtUsd, hhmm, time } from "@/stats/format"
+import { fmtMs, fmtN, fmtUsage, fmtUsageCost, fmtPct, fmtUsd, hhmm, time } from "@/stats/format"
 
 type Turn = NonNullable<ItemDetail["turns"]>[number]
 /** what a step stands for, so its details can say more than the waterfall's row */
@@ -30,9 +30,17 @@ async function pooled<X, Y>(xs: X[], n: number, f: (x: X) => Promise<Y>): Promis
 }
 
 /** a usage's cost: the estimate; with no tokens counted, the adapter's own quote (a lower bound) */
-const costOf = (u: Usage) => (u.total > 0 ? u.est : u.reported > 0 ? u.reported : undefined)
+const costOf = (u: Usage) => (u.coverage?.total === null ? u.coverage.cost_reported ?? undefined : u.total > 0 || u.coverage?.state === "complete" ? u.est : u.reported > 0 ? u.reported : undefined)
 /** the waterfall's "In": everything read, cached or not (its column head says so; the details split it) */
 const inOf = (u: Usage) => u.input + u.cache_read + u.cache_write
+
+/** Keep numeric lower bounds for bars, but pass truthful labels to every cell. */
+function usageText(u:Usage) {
+  const c=u.coverage
+  const inputKnown=c && [c.input,c.cache_read,c.cache_write].some((v)=>v!=null)
+  const input={...u,total:inOf(u),coverage:c ? {...c,total:inputKnown?inOf(u):null} : undefined}
+  return {tokensInText:fmtUsage(input),tokensOutText:fmtUsage(u,"output"),tokensText:fmtUsage(u),costText:fmtUsageCost(u)}
+}
 
 /** a turn; `owner` is the sub-item it belongs to, named with it where the turn shows out of its group (the most expensive step) */
 function turnStep(tn: Turn, refs: Map<string, Ref>, owner?: string): CostStep {
@@ -46,7 +54,7 @@ function turnStep(tn: Turn, refs: Map<string, Ref>, owner?: string): CostStep {
     name: t("stats:cost.turn", { time: hhmm(tn.started) }),
     fullName: owner ? t("stats:cost.turnOf", { item: owner, time: hhmm(tn.started) }) : undefined,
     detail: [tn.attempt > 0 ? t("stats:drill.retry", { n: tn.attempt }) : "", reason ?? "", tn.usage.total === 0 && tn.usage.reported > 0 ? t("stats:cost.quote") : ""].filter(Boolean).join(" · ") || undefined,
-    tokensIn: inOf(tn.usage), tokensOut: tn.usage.output, cost: costOf(tn.usage), unpriced: tn.usage.unpriced_tokens,
+    ...usageText(tn.usage), tokensIn: inOf(tn.usage), tokensOut: tn.usage.output, cost: costOf(tn.usage), unpriced: tn.usage.unpriced_tokens,
     duration: (tn.ended ?? Date.now()) - tn.started,
     error: failed ? reason : undefined,
   }
@@ -63,8 +71,9 @@ function stepsOf(id: string, detail: ItemDetail | undefined, tree: TreeStat[], d
     if (all - inTurns >= 0.005 || u.total - tokens > 0) {
       const sid = "other:" + id
       const rest: Usage = { ...u, input: Math.max(0, u.input - turns.reduce((a, tn) => a + tn.usage.input, 0)), output: Math.max(0, u.output - turns.reduce((a, tn) => a + tn.usage.output, 0)), cache_read: Math.max(0, u.cache_read - turns.reduce((a, tn) => a + tn.usage.cache_read, 0)), cache_write: Math.max(0, u.cache_write - turns.reduce((a, tn) => a + tn.usage.cache_write, 0)), total: Math.max(0, u.total - tokens), est: Math.max(0, all - inTurns), unpriced_tokens: Math.max(0, u.unpriced_tokens - turns.reduce((a, tn) => a + tn.usage.unpriced_tokens, 0)), hit_rate: null }
+      if (rest.coverage) rest.coverage={...rest.coverage,total:rest.coverage.total==null?null:rest.total,input:rest.coverage.input==null?null:rest.input,output:rest.coverage.output==null?null:rest.output,cache_read:rest.coverage.cache_read==null?null:rest.cache_read,cache_write:rest.coverage.cache_write==null?null:rest.cache_write}
       refs.set(sid, { other: rest })
-      own.push([Number.MAX_SAFE_INTEGER, { id: sid, kind: "tool", status: "done", name: t("stats:cost.other"), detail: t("stats:cost.otherDetail"), tokensIn: inOf(rest), tokensOut: rest.output, cost: rest.est, unpriced: rest.unpriced_tokens }])
+      own.push([Number.MAX_SAFE_INTEGER, { id: sid, kind: "tool", status: "done", name: t("stats:cost.other"), detail: t("stats:cost.otherDetail"), ...usageText(rest), tokensIn: inOf(rest), tokensOut: rest.output, cost: costOf(rest), unpriced: rest.unpriced_tokens }])
     }
   }
   for (const n of tree.filter((x) => x.parent_id === id)) {
@@ -77,7 +86,7 @@ function stepsOf(id: string, detail: ItemDetail | undefined, tree: TreeStat[], d
       id: sid, kind: "agent", status, name: `${n.item_id} ${d?.title ?? item?.t ?? ""}`.trim(), model: [item?.b ? st.bots[item.b]?.n ?? item.b : "", (d ? d.usage.total === 0 && d.usage.reported > 0 : n.tokens === 0 && n.reported > 0) ? t("stats:cost.quote") : ""].filter(Boolean).join(" · ") || undefined,
       duration: n.agent_ms ?? undefined, children,
       /* its figures come from its turns; without them (not loaded) its own total from the tree, which has no in/out split */
-      ...(d ? {} : { cost: n.tokens > 0 ? n.est : n.reported > 0 ? n.reported : undefined, tokens: n.tokens, unpriced: n.unpriced_tokens }),
+      ...(d ? {} : { costText:n.coverage?.total===null?fmtUsage({total:n.tokens,coverage:n.coverage}):undefined, tokensText:fmtUsage({total:n.tokens,coverage:n.coverage}), cost: n.tokens > 0 ? n.est : n.reported > 0 ? n.reported : undefined, tokens: n.tokens, unpriced: n.unpriced_tokens }),
     }])
   }
   return own.sort((a, b) => a[0] - b[0]).map(([, s]) => s)
@@ -104,10 +113,15 @@ export function CostPanel({ d }: { d: ItemDetail }) {
   const steps = stepsOf(d.item_id, d, tree?.nodes ?? [], tree?.details ?? new Map(), refs)
   const kids = tree ? tree.nodes.filter((n) => n.depth > 0).length : 0
   const open = d.facts.done_at == null && d.facts.dropped_at == null
+  const coverages=[d.usage.coverage,...(tree?.nodes.filter((n)=>n.depth>0).map((n)=>tree.details.get(n.item_id)?.usage.coverage??n.coverage)??[])]
+  const incomplete=coverages.some((c)=>!c || c.state!=="complete")
+  const anyKnown=coverages.some((c)=>c?.total!=null) || (!d.usage.coverage && d.usage.total>0)
+  const state=anyKnown ? incomplete?"partial":"complete" : coverages.some((c)=>c?.state==="not_reported")?"not_reported":"unavailable"
+  const summary=(total:number,est:number):Usage=>({...d.usage,total,est,coverage:d.usage.coverage?{...d.usage.coverage,state,total:anyKnown?total:null}:undefined})
   return (
     <Panel k="cost" icon={<CoinsIcon />} title={t("stats:cwf.title")} sub={<>{kids ? t("stats:cost.subTree", { count: kids }) : t("stats:cost.sub")}{tree?.truncated && <> · {t("stats:cost.truncated")}</>}</>}
       right={<Segmented size="sm" value={mode} onChange={setMode} options={[["cost", t("stats:cwf.cost")], ["tokens", t("stats:cwf.tokens")]]} />} data-cost-waterfall>
-      <CostWaterfall bare steps={steps} mode={mode} onModeChange={setMode} status={open ? undefined : "done"} maxHeight={640}
+      <CostWaterfall bare steps={steps} summaryCost={(n)=>fmtUsageCost(summary(steps.reduce((sum,s)=>sum+(s.tokens??0)+(s.tokensIn??0)+(s.tokensOut??0),0),n))} summaryTokens={(n)=>fmtUsage(summary(n,0))} mode={mode} onModeChange={setMode} status={open ? undefined : "done"} maxHeight={640}
         collapsed={collapsed ?? [...refs.keys()].filter((k) => k.startsWith("item:"))} onCollapsedChange={setCollapsed} formatCost={(n) => fmtUsd(n)} formatTokens={(n) => fmtN(n)} formatDuration={(ms) => fmtMs(ms)}
         rowProps={(s) => s.id.startsWith("turn:") ? { "data-turn": s.id.slice(5) } : s.id.startsWith("item:") ? { "data-cost-item": s.id.slice(5) } : {}}
         renderDetail={(s) => <StepDetail r={refs.get(s.id)} />} />
@@ -127,10 +141,10 @@ function Facts({ rows, foot }: { rows: [string, ReactNode][]; foot?: ReactNode }
 }
 const link = "text-blue hover:underline"
 
-const usd = (u: Usage) => u.total > 0 ? (u.unpriced_tokens ? t("stats:cost.unpriced", { usd: fmtUsd(u.est), n: fmtN(u.unpriced_tokens) }) : fmtUsd(u.est)) : u.reported > 0 ? t("stats:word.adapterQuoteFloor", { usd: fmtUsd(u.reported) }) : "—"
+const usd = (u: Usage) => fmtUsageCost(u)
 /** the adapter's own quote beside an estimate that leaves tokens out: what the unpriced part may have cost */
 const quoteRow = (u: Usage): [string, ReactNode][] => (u.total > 0 && u.unpriced_tokens > 0 && u.reported > 0 ? [[t("stats:cost.quoteRow"), fmtUsd(u.reported)]] : [])
-const tokenLine = (u: Usage) => t("stats:cost.tokens", { input: fmtN(u.input), output: fmtN(u.output), read: fmtN(u.cache_read), write: fmtN(u.cache_write) })
+const tokenLine = (u: Usage) => t("stats:cost.tokens", { input: fmtUsage(u,"input"), output: fmtUsage(u,"output"), read: fmtUsage(u,"cache_read"), write: fmtUsage(u,"cache_write") })
 
 function StepDetail({ r }: { r?: Ref }) {
   const t = useT()

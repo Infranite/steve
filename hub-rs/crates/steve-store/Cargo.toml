@@ -5,6 +5,7 @@ version.workspace = true
 publish.workspace = true
 
 [dependencies]
+steve-node-api = { path = "../steve-node-api" }
 steve-i18n = { path = "../steve-i18n" }
 rust-i18n = "=4.2.4"
 r2d2 = "=0.8.10"

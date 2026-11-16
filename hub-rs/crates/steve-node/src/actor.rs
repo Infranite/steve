@@ -27,6 +27,7 @@ use steve_acp::normalize::{Fact, Normalizer};
 use steve_acp::permission::{self, Asked};
 use steve_acp::rpc::{Conn, ExitReport, Incoming, RpcError, Spawn};
 use steve_acp::session::{self as acp_session, OpenConfig, Reports};
+use steve_acp::usage::{POLL_INTERVAL, SETTLE_WAIT, Sampler};
 use steve_node_api::*;
 use tokio::sync::{mpsc, oneshot, watch};
 
@@ -91,6 +92,14 @@ pub(crate) enum Msg {
     Prompted {
         token: u64,
         result: Result<Value, RpcError>,
+    },
+    Usage {
+        token: u64,
+        facts: Vec<Fact>,
+    },
+    UsageSettled {
+        token: u64,
+        facts: Vec<Fact>,
     },
     /// Still running after its grace: its group is stopped.
     Kill {
@@ -244,6 +253,7 @@ pub(crate) struct LiveNew {
     retire: Arc<watch::Sender<bool>>,
     generation: u64,
     acp_id: String,
+    usage_home: Option<steve_acp::usage::Source>,
     image: bool,
     pgid: i64,
     started: Option<u64>,
@@ -257,6 +267,7 @@ struct Live {
     retire: Arc<watch::Sender<bool>>,
     generation: u64,
     acp_id: String,
+    usage_home: Option<steve_acp::usage::Source>,
     image: bool,
     pgid: i64,
     started: Option<u64>,
@@ -276,6 +287,7 @@ impl From<LiveNew> for Live {
             retire: l.retire,
             generation: l.generation,
             acp_id: l.acp_id,
+            usage_home: l.usage_home,
             image: l.image,
             pgid: l.pgid,
             started: l.started,
@@ -293,6 +305,14 @@ enum Phase {
     Prompting,
 }
 
+/// Dropping an actor/run also stops its sampler; sender loss never starts a tail read.
+struct UsageTask(tokio::task::JoinHandle<()>);
+impl Drop for UsageTask {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 struct Run {
     token: u64,
     exec: ExecutionRef,
@@ -308,6 +328,9 @@ struct Run {
     ending: Option<Completion>,
     closing: Option<Vec<EventBody>>,
     final_usage: Vec<(Subject, EventBody)>,
+    usage_stop: Option<oneshot::Sender<Vec<Fact>>>,
+    usage_task: Option<UsageTask>,
+    usage_pending: bool,
     unknown: Option<String>,
 }
 
@@ -364,6 +387,8 @@ pub(crate) struct Actor {
     waits: HashMap<PermissionId, (Value, Asked)>,
     tokens: u64,
     retry_armed: bool,
+    /// RPC continuations and retry/kill timers belong to this actor, including at shutdown.
+    children: tokio::task::JoinSet<()>,
     pending: Vec<Msg>,
     sending: usize,
     deferred_prompt: Option<Result<Value, RpcError>>,
@@ -393,6 +418,7 @@ impl Actor {
             waits: HashMap::new(),
             tokens: 0,
             retry_armed: false,
+            children: tokio::task::JoinSet::new(),
             pending: vec![],
             sending: 0,
             deferred_prompt: None,
@@ -426,6 +452,13 @@ impl Actor {
                         if let Some(cancel) = self.stage_cancel.take() { let _ = cancel.send(true); }
                         if let Some(task) = self.stage_task.take() { let _ = task.await; }
                         self.stop_process().await;
+                        if let Some(run) = self.run.as_mut() && let Some(mut task) = run.usage_task.take() {
+                            task.0.abort();
+                            let _ = (&mut task.0).await;
+                        }
+                        // A completed process can still leave an RPC waiter or retry timer.
+                        // Abort and join these owned continuations before acknowledging shutdown.
+                        self.children.shutdown().await;
                         drop(self);
                         let _ = done.send(());
                         return;
@@ -439,6 +472,7 @@ impl Actor {
                 _ = tick.tick() => self.check_limits(),
                 Some(message) = self.data_rx.recv() => self.handle(message).await,
             }
+            while self.children.try_join_next().is_some() {}
             self.held_refused();
         }
     }
@@ -581,7 +615,7 @@ impl Actor {
         }
         self.retry_armed = true;
         let tx = self.tx.clone();
-        tokio::spawn(async move {
+        self.children.spawn(async move {
             tokio::time::sleep(Duration::from_secs(1)).await;
             let _ = tx.send(Msg::Retry);
         });
@@ -706,6 +740,48 @@ impl Actor {
                     }
                 }
             }
+            Msg::Usage { token, facts } => {
+                if let Some(run) = self.run.as_ref().filter(|r| r.token == token) {
+                    let events: Vec<_> = facts
+                        .into_iter()
+                        .filter_map(|f| match f {
+                            Fact::Event(e) => Some((Subject::Execution(run.exec.clone()), e)),
+                            _ => None,
+                        })
+                        .collect();
+                    if self
+                        .tx(|t| crate::emit_all(&self.inner, t, events.clone()))
+                        .is_err()
+                    {
+                        self.later(Msg::Facts { events });
+                    }
+                }
+            }
+            Msg::UsageSettled { token, facts } => {
+                if let Some(run) = self.run.as_mut().filter(|r| r.token == token) {
+                    let mut diagnostics = vec![];
+                    run.final_usage = facts
+                        .into_iter()
+                        .filter_map(|f| match f {
+                            Fact::Event(e @ EventBody::Usage { .. }) => {
+                                Some((Subject::Execution(run.exec.clone()), e))
+                            }
+                            Fact::Event(e) => {
+                                diagnostics.push((Subject::Execution(run.exec.clone()), e));
+                                None
+                            }
+                            _ => None,
+                        })
+                        .collect();
+                    run.usage_pending = false;
+                    // Diagnostics use the data budget. A full disk/journal must still admit the
+                    // final Usage (unknown fields included) and the attempt's terminal state.
+                    if !diagnostics.is_empty() {
+                        let _ = self.tx(|t| crate::emit_all(&self.inner, t, diagnostics));
+                    }
+                    self.commit_end();
+                }
+            }
             Msg::Kill { token } => {
                 if self
                     .run
@@ -780,7 +856,9 @@ impl Actor {
     async fn stop_process(&mut self) -> Stopped {
         self.gate.0.store(0, Ordering::SeqCst);
         crate::revoke_tools(&self.inner, &self.session);
-        let (pgid, started) = match self.live.take() {
+        let live = self.live.take();
+        let conn = live.as_ref().map(|l| l.conn.clone());
+        let (pgid, started) = match live {
             Some(l) => (l.pgid, l.started),
             None => match self.inner.j.read(|t| t.proc_of(&self.session)) {
                 Ok(Some(p)) => (p.pgid, p.started),
@@ -798,6 +876,16 @@ impl Actor {
             },
         };
         let s = procs::stop(pgid, started).await;
+        if s.gone()
+            && let Some(conn) = conn
+            && tokio::time::timeout(Duration::from_secs(1), conn.wait_exit())
+                .await
+                .is_err()
+        {
+            // The OS says the group is gone, but its transport has not confirmed cleanup.
+            // Keep the process record for explicit reconciliation rather than claim success.
+            return Stopped::Uncertain;
+        }
         if s.gone() && self.tx(|t| t.drop_proc(&self.session, pgid)).is_err() {
             return Stopped::Uncertain;
         }
@@ -1110,7 +1198,7 @@ impl Actor {
     async fn start(&mut self, op: OperationId, spec: Box<TurnSpec>, exec: ExecutionRef) {
         let root = self.root();
         let token = self.next_token();
-        let meter = Epoch::new(derived_id("m", &format!("{}.{token}", spec.run.attempt)))
+        let meter = Epoch::new(derived_id("m", spec.run.attempt.as_str()))
             .unwrap_or_else(|_| Epoch::new("m").expect("valid"));
         let props = self
             .inner
@@ -1141,6 +1229,9 @@ impl Actor {
             ending: None,
             closing: None,
             final_usage: vec![],
+            usage_stop: None,
+            usage_task: None,
+            usage_pending: false,
             unknown: None,
         });
         self.inner.reset_output(&self.session);
@@ -1249,8 +1340,37 @@ impl Actor {
                 false,
             ));
         };
-        let (conn, acp_id) = (l.conn.clone(), l.acp_id.clone());
+        let (conn, acp_id, home) = (l.conn.clone(), l.acp_id.clone(), l.usage_home.clone());
+        let r = self.run.as_ref().expect("run");
+        let prefix = r.spec.run.attempt.as_str().to_owned();
+        let meter = Epoch::new(derived_id("m", &prefix)).expect("derived epoch");
+        let mut sampler = Sampler::start_source(home, &acp_id, &prefix, meter).await;
+        if self.persisted_cancel() {
+            return self.end(cancelled());
+        }
+        let (stop, mut stopped) = oneshot::channel();
+        self.run.as_mut().expect("run").usage_stop = Some(stop);
+        let tx = self.tx.clone();
+        let usage_task = tokio::spawn(async move {
+            let mut tick = tokio::time::interval(POLL_INTERVAL);
+            loop {
+                tokio::select! {
+                    biased;
+                    native = &mut stopped => {
+                        let Ok(native) = native else { return; };
+                        let facts = sampler.finish(native, SETTLE_WAIT).await;
+                        let _ = tx.send(Msg::UsageSettled { token, facts });
+                        return;
+                    }
+                    _ = tick.tick() => {
+                        let facts = sampler.poll().await;
+                        if !facts.is_empty() && tx.send(Msg::Usage { token, facts }).is_err() { return; }
+                    }
+                }
+            }
+        });
         if let Some(r) = self.run.as_mut() {
+            r.usage_task = Some(UsageTask(usage_task));
             r.phase = Phase::Prompting;
         }
         // from here the adapter's messages are this attempt's
@@ -1285,7 +1405,7 @@ impl Actor {
         })
         .await;
         let tx = self.tx.clone();
-        tokio::spawn(async move {
+        self.children.spawn(async move {
             let result = match early {
                 Some(r) => r,
                 None => req.await,
@@ -1427,9 +1547,9 @@ impl Actor {
             for (_, b) in evs.iter_mut() {
                 if let EventBody::Usage { report } = b
                     && report.measurement == Measurement::Cumulative
-                    && let Some((meter, n)) = t.next_report(&session)?
+                    && let Some((meter, _)) = t.next_report(&session)?
                 {
-                    report.report_id = derived_id("u", &format!("{meter}.{n}"));
+                    report.report_id = derived_id("u", &format!("{meter}.{}", report.report_id));
                     report.meter_epoch = Epoch::new(derived_id("m", &meter)).map_err(internal)?;
                 }
             }
@@ -1497,7 +1617,7 @@ impl Actor {
         );
         let context = crate::permission_context(&self.inner, &self.session);
         let tx = self.tx.clone();
-        tokio::spawn(async move {
+        self.children.spawn(async move {
             let copy = asked.clone();
             let rpc = rpc_id.clone();
             let result = match context {
@@ -1621,7 +1741,7 @@ impl Actor {
         let tx = self.tx.clone();
         let pre = req.preconditions.clone();
         let check = res.decision == PermissionDecision::AllowOnce;
-        tokio::spawn(async move {
+        self.children.spawn(async move {
             let result = if check {
                 match tokio::time::timeout(
                     Duration::from_secs(10),
@@ -1712,7 +1832,7 @@ impl Actor {
                     conn.respond_tracked(rpc_id, permission::answer(&asked, Some(res.decision)));
                 self.sending += 1;
                 let tx = self.tx.clone();
-                tokio::spawn(async move {
+                self.children.spawn(async move {
                     let result = match sent {
                         Ok(rx) => match tokio::time::timeout(Duration::from_secs(10), rx).await {
                             Ok(Ok(Ok(()))) => Ok(()),
@@ -1770,7 +1890,15 @@ impl Actor {
                     .unwrap_or("end_turn")
                     .to_string();
                 if let Some(run) = self.run.as_mut() {
-                    run.final_usage = final_usage(run, &resp);
+                    run.final_usage = run
+                        .norm
+                        .prompt_response(&resp)
+                        .into_iter()
+                        .filter_map(|f| match f {
+                            Fact::Event(e) => Some((Subject::Execution(run.exec.clone()), e)),
+                            _ => None,
+                        })
+                        .collect();
                     if let Some(cum) = run.norm.cumulative_prompt_tokens()
                         && let Some(live) = self.live.as_mut()
                     {
@@ -1840,6 +1968,14 @@ impl Actor {
         let Some(run) = self.run.as_mut() else { return };
         if run.ending.is_none() {
             run.ending = Some(completion);
+            if let Some(stop) = run.usage_stop.take() {
+                let native = run
+                    .final_usage
+                    .iter()
+                    .map(|(_, e)| Fact::Event(e.clone()))
+                    .collect();
+                run.usage_pending = stop.send(native).is_ok();
+            }
         }
         self.commit_end();
     }
@@ -1850,6 +1986,9 @@ impl Actor {
             return;
         }
         let Some(run) = self.run.as_mut() else { return };
+        if run.usage_pending {
+            return;
+        }
         let Some(completion) = run.ending.clone() else {
             return;
         };
@@ -1981,7 +2120,7 @@ impl Actor {
             return;
         }
         let tx = self.tx.clone();
-        tokio::spawn(async move {
+        self.children.spawn(async move {
             tokio::time::sleep(Duration::from_secs(10)).await;
             let _ = tx.send(Msg::Kill { token });
         });
@@ -2324,31 +2463,41 @@ async fn open_harness(
     let seen_tokens: Arc<std::sync::Mutex<Option<SeenTokens>>> =
         Arc::new(std::sync::Mutex::new(None));
     let seen_tokens_reader = seen_tokens.clone();
+    let spawn_env = {
+        let base_path = fresh
+            .as_ref()
+            .and_then(|f| f.iter().find(|(k, _)| k == "PATH").map(|(_, v)| v.clone()));
+        let mut env = harness_env(&row.open.env, base_path.as_deref());
+        // the toolchains', then Steve's own for the adapter last: nothing before overrides
+        // them
+        env.extend(tools.env);
+        env.extend(inner.cfg.acp.adapter_env(&harness));
+        if let Some((_, vars)) = &state {
+            env.extend(vars.iter().cloned());
+        }
+        // level 2: the login environment first, everything above over it
+        if let Some(f) = &fresh {
+            let mut all = f.clone();
+            all.extend(env);
+            env = all;
+        }
+        env
+    };
+    let usage_home = steve_acp::usage::source_for_spawn(
+        &inner.cfg.acp,
+        &harness,
+        &spawn_env,
+        std::path::Path::new(&cwd),
+        fresh.is_none(),
+    );
+    let active_acp_id = Arc::new(std::sync::Mutex::new(None::<String>));
+    let incoming_acp_id = active_acp_id.clone();
     let conn = Conn::spawn_registered_observed(
         Spawn {
             program,
             args,
             cwd: cwd.clone().into(),
-            env: {
-                let base_path = fresh
-                    .as_ref()
-                    .and_then(|f| f.iter().find(|(k, _)| k == "PATH").map(|(_, v)| v.clone()));
-                let mut env = harness_env(&row.open.env, base_path.as_deref());
-                // the toolchains', then Steve's own for the adapter last: nothing before overrides
-                // them
-                env.extend(tools.env);
-                env.extend(inner.cfg.acp.adapter_env(&harness));
-                if let Some((_, vars)) = &state {
-                    env.extend(vars.iter().cloned());
-                }
-                // level 2: the login environment first, everything above over it
-                if let Some(f) = &fresh {
-                    let mut all = f.clone();
-                    all.extend(env);
-                    env = all;
-                }
-                env
-            },
+            env: spawn_env,
             log_tag: format!("[node {session}]"),
             clean_env: fresh.is_some(),
         },
@@ -2405,6 +2554,16 @@ async fn open_harness(
             let token = gate.0.load(Ordering::SeqCst);
             match inc {
                 Incoming::Notification { method, params } if method == "session/update" => {
+                    if incoming_acp_id
+                        .lock()
+                        .unwrap()
+                        .as_deref()
+                        .is_some_and(|sid| {
+                            params.get("sessionId").and_then(Value::as_str) != Some(sid)
+                        })
+                    {
+                        return None;
+                    }
                     // counted as it arrives (admission): a flood is stopped before it is all kept
                     let u = params.get("update")?;
                     if token == 0
@@ -2518,6 +2677,7 @@ async fn open_harness(
             return Err(ApiError::new(ErrorCode::Unsupported, e.message));
         }
     };
+    *active_acp_id.lock().unwrap() = Some(opened.acp_id.clone());
     let (new_id, model, effort) = seen.0.into_inner().unwrap();
     // Tasks return candidates only. The actor commits them against its operation/attempt fence.
     let mut view = row.view;
@@ -2550,40 +2710,13 @@ async fn open_harness(
         retire,
         generation,
         acp_id: opened.acp_id,
+        usage_home,
         image: opened.image,
         pgid,
         started,
         view,
         cumulative_prompt_tokens,
     })
-}
-
-/// The token figures of the prompt's answer: normalized through [`Normalizer::prompt_response`] so
-/// alternate ACP field shapes, `usage_input_includes_cache`, and `usage_prompt_cumulative` apply
-/// uniformly across sessions and one-shot calls.
-fn final_usage(run: &mut Run, resp: &Value) -> Vec<(Subject, EventBody)> {
-    let exec = run.exec.clone();
-    let attempt = exec.attempt().clone();
-    let Ok(meter) = Epoch::new(derived_id("f", attempt.as_str())) else {
-        return vec![];
-    };
-    run.norm
-        .prompt_response(resp)
-        .into_iter()
-        .filter_map(|f| match f {
-            Fact::Event(EventBody::Usage { report }) => Some(report),
-            _ => None,
-        })
-        .enumerate()
-        .map(|(i, mut report)| {
-            report.report_id = derived_id("f", &format!("{attempt}.{i}"));
-            report.meter_epoch = meter.clone();
-            (
-                Subject::Execution(exec.clone()),
-                EventBody::Usage { report },
-            )
-        })
-        .collect()
 }
 
 fn op_changed(op: &OperationId, state: Observed) -> (Subject, EventBody) {

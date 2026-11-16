@@ -24,6 +24,8 @@ pub mod permission;
 mod rollout;
 pub mod rpc;
 pub mod session;
+mod transcript;
+pub mod usage;
 mod util;
 
 pub use adapters::{

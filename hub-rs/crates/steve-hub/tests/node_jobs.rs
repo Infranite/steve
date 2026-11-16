@@ -443,7 +443,31 @@ async fn a_busy_model_falls_back_and_books_what_the_in_process_gateway_books() {
         b.result.as_ref().unwrap().cost_usd,
         a.result.as_ref().unwrap().cost_usd
     );
-    assert_eq!(rows(&h.store), legacy_rows);
+    let mut node_rows = rows(&h.store);
+    let mut legacy_rows = legacy_rows;
+    let mut ids = std::collections::HashSet::new();
+    for group in [&mut node_rows, &mut legacy_rows] {
+        let mut call = None;
+        for row in group.iter_mut() {
+            let mut detail: Value = serde_json::from_str(row[13].as_str().unwrap()).unwrap();
+            let id = detail["call_id"]
+                .as_str()
+                .expect("durable call identity")
+                .to_string();
+            if let Some(first) = &call {
+                assert_eq!(first, &id, "all models belong to the same call");
+            } else {
+                assert!(
+                    ids.insert(id.clone()),
+                    "independent calls have unique identities"
+                );
+                call = Some(id);
+            }
+            detail.as_object_mut().unwrap().remove("call_id");
+            row[13] = json!(serde_json::to_string(&detail).unwrap());
+        }
+    }
+    assert_eq!(node_rows, legacy_rows);
     assert_eq!(
         q::<i64>(
             &h.store,

@@ -120,6 +120,12 @@ pub fn current_tag() -> CallTag {
     TAG.try_with(Clone::clone).unwrap_or_default()
 }
 
+/// Hands an already captured logical-call tag to another task. Unlike a nested edit, this also
+/// clears an unrelated inherited item when the captured owner has none.
+pub async fn with_call_tag<F: Future>(tag: CallTag, f: F) -> F::Output {
+    TAG.scope(tag, f).await
+}
+
 /// Runs `f` with the outer tag changed by `edit` (inner scopes inherit what they do not set).
 async fn with_tag<F: Future>(edit: impl FnOnce(&mut CallTag), f: F) -> F::Output {
     let mut t = current_tag();

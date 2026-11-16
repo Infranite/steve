@@ -593,6 +593,9 @@ pub fn wire_assembly(
     let db = steve_store::Store::open(cfg.db_path(), store::BusPublisher(bus.clone()))
         .map_err(|e| BackendError::msg(format!("open {}: {e}", cfg.db_path().display())))?;
     if !cfg.no_resume {
+        db.stats()
+            .gateway_recover()
+            .map_err(|e| BackendError::msg(format!("recover gateway accounting: {e}")))?;
         if let Err(error) = output_files::recover_legacy(&db, &cfg.home, &cfg.db_path()) {
             tracing::warn!(%error, "legacy delivery output recovery failed; will retry on next start");
         }

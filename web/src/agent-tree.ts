@@ -11,6 +11,7 @@ export type TreeItem = {
 }
 /** one row of `GET /stats/tree/{id}`: an item's own figures, not its children's */
 export type TreeStat = {
+  coverage?: import("./api/stats").UsageCoverage
   item_id: string; parent_id: string | null; depth: number; tokens: number; est: number; unpriced_tokens?: number; reported: number
   agent_ms: number | null; first_turn: number | null; done_at: number | null; dropped_at: number | null
 }

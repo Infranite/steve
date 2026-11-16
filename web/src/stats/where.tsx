@@ -15,7 +15,7 @@ import { CompactBreakdown } from "@/components/affect/compact-breakdown"
 import { OTHER, SERIES } from "@/stats/chart"
 import { splitParts } from "@/stats/split"
 import { Est } from "@/stats/kpi"
-import { fmtEst, fmtMs, fmtN, fmtUsd, useStats } from "@/stats/format"
+import { fmtEst, fmtMs, fmtN, fmtUsage, fmtUsd, useStats } from "@/stats/format"
 import { harnessName } from "@/model-picker"
 import { t, useT } from "@/i18n"
 
@@ -112,7 +112,7 @@ function TopRow({ r, max }: { r: ItemRow; max: number }) {
         {bot && <span className="hidden shrink-0 type-footnote text-muted-foreground @xl/stats:inline">{bot}</span>}
       </span>
       <span className="hidden text-right type-callout tabular-nums text-muted-foreground @3xl/stats:block">{fmtMs(r.agent_ms)}</span>
-      <span className="hidden text-right type-callout tabular-nums text-muted-foreground @3xl/stats:block">{fmtN(r.tokens)}</span>
+      <span className="hidden text-right type-callout tabular-nums text-muted-foreground @3xl/stats:block">{fmtUsage({total:r.tokens,coverage:r.coverage})}</span>
       <span className="flex items-center justify-end gap-2">
         <span className="relative hidden h-1.5 w-12 overflow-hidden rounded-full bg-muted @md/stats:block" aria-hidden>
           {max > 0 && r.est > 0 && <span className="absolute inset-y-0 left-0 rounded-full bg-[var(--series-1)]" style={{ width: `${Math.max(4, (r.est / max) * 100)}%` }} />}

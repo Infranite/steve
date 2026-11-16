@@ -722,7 +722,28 @@ impl steve_core::thread::Researcher for ResearchAdapter {
     }
     async fn research(&self, q: ResearchRequest, sink: &dyn ResearchSink) -> ResearchOutcome {
         match &self.node {
-            Some(node) => self.on_local_node(node, &q, sink).await,
+            Some(node) => {
+                let mut tag = steve_core::stats::current_tag();
+                tag.purpose = "research";
+                tag.workspace_id = q.ws.clone();
+                match steve_core::stats::CallAccount::begin_owned(
+                    self.db.store(),
+                    &tag,
+                    Some(q.main.id.clone()),
+                    q.project.as_ref().map(|p| p.id.clone()),
+                ) {
+                    Ok(account) => {
+                        account
+                            .tracked_scope(self.on_local_node(node, &q, sink))
+                            .await
+                    }
+                    Err(e) => ResearchOutcome {
+                        end: RunEnd::Failed,
+                        error: Some(format!("usage ownership: {e}")),
+                        ..Default::default()
+                    },
+                }
+            }
             None => ResearchOutcome {
                 end: RunEnd::Failed,
                 error: Some("研究在本机 Node 上运行，本机 Node 现在没有开启".into()),

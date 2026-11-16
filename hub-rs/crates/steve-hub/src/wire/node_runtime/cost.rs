@@ -11,12 +11,6 @@ use std::collections::HashMap;
 use steve_node_api::{Epoch, Measurement, NodeEvent, NodeId, UsageReport, UsageScope};
 use steve_store::StoreError;
 
-/// The largest figure a report may carry at all (a harness process's running total included).
-const ABSURD: f64 = 1e9;
-
-/// The largest token count of one report the statistics take.
-const MAX_TOKENS: u64 = 1_000_000_000_000;
-
 /// How much one usage report, and one attempt in all, may add to a session's cost (the harness's
 /// own currency, dollars for the ones Steve runs). `STEVE_NODE_COST_REPORT_MAX` and
 /// `STEVE_NODE_COST_ATTEMPT_MAX`.
@@ -50,33 +44,17 @@ impl CostCaps {
 /// A money figure from a Node: a plain decimal (`12`, `0.034`), finite, non-negative and not
 /// absurd. `None`: anything else (a sign, an exponent, `NaN`, `inf`, spaces, an empty part).
 pub(crate) fn money(d: &str) -> Option<f64> {
-    if d.is_empty() || d.len() > 40 {
-        return None;
-    }
-    let (int, frac) = match d.split_once('.') {
-        Some((i, f)) => (i, Some(f)),
-        None => (d, None),
-    };
-    let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
-    if !digits(int) || frac.is_some_and(|f| !digits(f)) {
-        return None;
-    }
-    let v: f64 = d.parse().ok()?;
-    (v.is_finite() && (0.0..=ABSURD).contains(&v)).then_some(v)
+    steve_node_api::usage::decimal_amount(d)
 }
 
-/// A token count from a Node, as the statistics store it. `None`: past any real report.
-pub(crate) fn tokens(x: u64) -> Option<i64> {
-    if x > MAX_TOKENS {
-        tracing::warn!(tokens = x, "node usage: token count refused");
-        return None;
-    }
-    i64::try_from(x).ok()
-}
+#[cfg(test)]
+use steve_node_api::usage::token_count as tokens;
 
 /// A context size from a Node (`context_used`, `context_limit`). `None`: past any real one.
 pub(crate) fn context(x: u64) -> Option<i64> {
-    i64::try_from(x).ok().filter(|_| x <= MAX_TOKENS)
+    i64::try_from(x)
+        .ok()
+        .filter(|_| steve_node_api::usage::token_count(x).is_some())
 }
 
 /// The costs of a sequence of usage reports, in order: those of one attempt (its caps hold across
@@ -173,6 +151,30 @@ impl Meter {
         self.added += delta;
         Ok(Some(delta))
     }
+}
+
+/// Compatibility at the Hub boundary for older context-only ACP meters: their cost was the
+/// process total, not an attempt snapshot. Rebase using the existing admitted increment. Token
+/// snapshots and final billing reports retain the UsageReport attempt contract unchanged.
+pub(super) fn accounting_report(report: &UsageReport, admitted: Option<f64>) -> UsageReport {
+    let mut out = report.clone();
+    let context_meter = report.measurement == Measurement::Cumulative
+        && report.tokens == steve_node_api::Tokens::default()
+        && (report.context_used.is_some() || report.context_limit.is_some());
+    if context_meter {
+        out.measurement = Measurement::Delta;
+        out.cost = admitted.map(|value| steve_node_api::Money {
+            decimal: value.to_string(),
+            currency: "USD".into(),
+        });
+    } else if admitted.is_none() {
+        // Refusal is unknown accounting evidence. Dropping an invalid delta would let a
+        // prior amount survive as though the whole sum were known. Session cost is unchanged.
+        if let Some(cost) = &mut out.cost {
+            cost.decimal = "unavailable".into();
+        }
+    }
+    out
 }
 
 /// The highest valid running total the same harness process (`epoch`, the report's meter epoch)

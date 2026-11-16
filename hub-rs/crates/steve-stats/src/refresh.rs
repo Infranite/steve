@@ -270,6 +270,18 @@ pub fn rebuild_in(c: &Connection, ws: &str) -> Result<usize> {
             params![day, id],
         )?;
     }
+    // Calls are allocated before dispatch; even one without a projection yet must use the new
+    // timezone if its first report or a late Final arrives after this rebuild.
+    let calls = c
+        .prepare("SELECT call_id,started FROM gateway_calls WHERE workspace_id=?")?
+        .query_map([ws], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    for (call, started) in calls {
+        c.execute(
+            "UPDATE gateway_calls SET day=? WHERE call_id=?",
+            params![crate::day::day(started, tz), call],
+        )?;
+    }
     c.execute("DELETE FROM stat_daily WHERE workspace_id = ?", [ws])?;
     let mut ins = c.prepare(
         "INSERT INTO stat_daily (workspace_id, day, source, purpose, harness, model, bot_id, project_id, input, output, cache_read,

@@ -276,19 +276,19 @@ impl Conn {
             exited,
         });
 
-        tokio::spawn(async move {
+        let writer = tokio::spawn(async move {
             write_frames(&mut stdin, &mut out_rx).await;
         });
 
         // what the adapter says on its own (timings, progress, its own warnings): kept, not a warning
         // of Steve's. A request that fails says so where it is awaited.
         let tag = sp.log_tag.clone();
-        tokio::spawn(stderr_lines(stderr, move |t| tracing::info!("{tag} {t}")));
+        let mut stderr = tokio::spawn(stderr_lines(stderr, move |t| tracing::info!("{tag} {t}")));
 
         let weak = Arc::downgrade(&conn);
         let read_error = Arc::new(AtomicBool::new(false));
         let read_error_in = read_error.clone();
-        let reader = tokio::spawn(async move {
+        let mut reader = tokio::spawn(async move {
             let mut rd = BufReader::new(stdout);
             let mut line = Vec::new();
             loop {
@@ -331,15 +331,36 @@ impl Conn {
         let observed = Arc::downgrade(&conn);
         tokio::spawn(async move {
             let status = child.wait().await;
-            // let the reader drain what the process wrote before exiting (bounded: a grandchild may hold stdout open)
-            let drain = tokio::time::timeout(Duration::from_millis(500), reader).await;
+            // No more stdin can reach the exited child. A retained Conn or a full pipe must
+            // not keep its writer alive. Drain both output streams within one shared window:
+            // a descendant or a concurrent fork can still hold a pipe's write end open.
+            writer.abort();
+            let _ = writer.await;
+            let (mut reader_done, mut stderr_done, mut reader_error) = (false, false, false);
+            let drain = tokio::time::timeout(Duration::from_millis(500), async {
+                reader_error = (&mut reader).await.is_err();
+                reader_done = true;
+                let _ = (&mut stderr).await;
+                stderr_done = true;
+            })
+            .await;
+            // Dropping a JoinHandle detaches it. Cancel and join instead, including a reader
+            // waiting for consumer backpressure. Never poll a completed handle twice.
+            if !reader_done {
+                reader.abort();
+                let _ = reader.await;
+            }
+            if !stderr_done {
+                stderr.abort();
+                let _ = stderr.await;
+            }
             let c = observed.upgrade();
             let report = ExitReport {
                 exit_code: status.as_ref().ok().and_then(|s| s.code()),
                 signal: status.as_ref().ok().and_then(|s| s.signal()),
                 wait_error: status.is_err(),
                 reader_failed: read_error.load(Ordering::Relaxed)
-                    || matches!(drain, Ok(Err(_)))
+                    || reader_error
                     || c.as_ref()
                         .is_some_and(|c| c.reader_failed.load(Ordering::Relaxed)),
                 drain_timed_out: drain.is_err(),
@@ -515,7 +536,8 @@ impl Conn {
         self.signal(libc::SIGTERM);
     }
 
-    /// Waits until the direct child has exited.
+    /// Waits until the direct child has exited and its stdio tasks have been joined. Output
+    /// drain is bounded even when another process retains a pipe or a consumer stops reading.
     pub async fn wait_exit(&self) {
         let mut rx = self.exited.clone();
         let _ = rx.wait_for(|e| *e).await;
@@ -594,6 +616,130 @@ mod stderr_tests {
 #[cfg(test)]
 mod control_tests {
     use super::*;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn exit_joins_all_stdio_even_with_a_retained_conn_and_foreign_pipe_holder() {
+        let dir = tempfile::tempdir().unwrap();
+        let gate = dir.path().join("gate");
+        let listener = tokio::net::UnixListener::bind(&gate).unwrap();
+        let conn = Conn::spawn(
+            Spawn {
+                program: "python3".into(),
+                args: vec![
+                    "-c".into(),
+                    r#"
+import os, socket, sys
+gate = socket.socket(socket.AF_UNIX)
+gate.connect(sys.argv[1])
+if os.fork() == 0:
+    os.close(0)
+    gate.settimeout(10)
+    gate.sendall(b'ready')
+    try: gate.recv(1)
+    finally: os._exit(0)
+gate.close()
+sys.stdin.readline()
+"#
+                    .into(),
+                    gate.into_os_string(),
+                ],
+                cwd: dir.path().into(),
+                env: vec![],
+                log_tag: "retained-pipe-exit".into(),
+                clean_env: false,
+            },
+            |_, _| {},
+            || {},
+        )
+        .unwrap();
+        let (mut gate, _) = tokio::time::timeout(Duration::from_secs(3), listener.accept())
+            .await
+            .unwrap()
+            .unwrap();
+        let mut ready = [0; 5];
+        tokio::time::timeout(Duration::from_secs(3), gate.read_exact(&mut ready))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(&ready, b"ready");
+        // Both real output pipes stay open behind an explicit gate after the adapter exits.
+        // Retain Conn too: the stdin writer must end without waiting for its senders to drop.
+        conn.notify("release", json!({}));
+        tokio::time::timeout(Duration::from_secs(2), conn.wait_exit())
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let tasks = tokio::runtime::Handle::current()
+            .metrics()
+            .num_alive_tasks();
+        let writer_closed = conn.out.is_closed();
+        gate.write_all(&[1]).await.unwrap();
+        // EOF proves that the holder closed its descriptors; no process is signalled by PID/name.
+        tokio::time::timeout(Duration::from_secs(3), gate.read(&mut [0]))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            tasks, 0,
+            "stdio tasks must end before releasing the foreign pipe holder"
+        );
+        assert!(
+            writer_closed,
+            "an exited adapter cannot accept more queued writes"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn exit_joins_a_reader_blocked_by_backpressure_without_detaching_its_owner() {
+        let dir = tempfile::tempdir().unwrap();
+        let owner = Arc::new(());
+        let weak = Arc::downgrade(&owner);
+        let (seen, received) = oneshot::channel();
+        let seen = Mutex::new(Some(seen));
+        let (exit, exited) = oneshot::channel();
+        let conn = Conn::spawn_bounded_observed(
+            Spawn {
+                program: "/bin/sh".into(),
+                args: vec![
+                    "-c".into(),
+                    "printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"method\":\"notice\"}'; read release; exit 0".into(),
+                ],
+                cwd: dir.path().into(),
+                env: vec![],
+                log_tag: "bounded-reader-exit".into(),
+                clean_env: false,
+            },
+            1024,
+            |_| true,
+            move |_, _| {
+                let held = owner.clone();
+                if let Some(seen) = seen.lock().unwrap().take() {
+                    let _ = seen.send(());
+                }
+                Some(Box::pin(async move {
+                    let _held = held;
+                    std::future::pending().await
+                }))
+            },
+            move |report| { let _ = exit.send(report); },
+        ).unwrap();
+        tokio::time::timeout(Duration::from_secs(3), received)
+            .await
+            .unwrap()
+            .unwrap();
+        // Exit while the reader is known to be inside the consumer's backpressure future.
+        conn.notify("release", json!({}));
+        let report = tokio::time::timeout(Duration::from_secs(2), exited)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(report.exit_code, Some(0));
+        assert!(report.drain_timed_out);
+        assert!(
+            weak.upgrade().is_none(),
+            "exit must abort and join the timed-out reader, including its consumer owner"
+        );
+    }
 
     #[tokio::test]
     async fn observed_exits_keep_rpc_failure_semantics_and_distinguish_signal_from_exit_code() {

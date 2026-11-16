@@ -189,7 +189,10 @@ mod tests {
         );
         let kind =
             &schema(DELIVER).unwrap()["properties"]["outputs"]["items"]["properties"]["kind"];
-        assert_eq!(kind["description"], "e.g. branch, commit, PR, file, document");
+        assert_eq!(
+            kind["description"],
+            "e.g. branch, commit, PR, file, document"
+        );
     }
 
     // Expected strings below were captured from the TS server (MCP SDK 1.32.2, zod 4.6.7).

@@ -108,6 +108,7 @@ fn ratio(a: i64, b: i64) -> Option<f64> {
 /// A `stat_daily` row.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Daily {
+    pub coverage: crate::coverage::Coverage,
     pub day: String,
     pub source: String,
     pub purpose: String,
@@ -152,7 +153,7 @@ impl Daily {
 
 /// The cube rows of the query's days and filters.
 pub fn daily(c: &Connection, q: &Query) -> Result<Vec<Daily>> {
-    Ok(c
+    let mut rows = c
         .prepare_cached(
             "SELECT day, source, purpose, harness, model, bot_id, project_id, input, output, cache_read, cache_write, reasoning,
                     hit_base, cost_reported, calls, failed_calls, turns, turn_ms, turn_errors, retries, interrupted, tools,
@@ -165,6 +166,7 @@ pub fn daily(c: &Connection, q: &Query) -> Result<Vec<Daily>> {
             params![q.workspace_id, q.from, q.to, q.project, q.bot, q.model, q.source],
             |r| {
                 Ok(Daily {
+                    coverage: Default::default(),
                     day: r.get(0)?,
                     source: r.get(1)?,
                     purpose: r.get(2)?,
@@ -192,7 +194,40 @@ pub fn daily(c: &Connection, q: &Query) -> Result<Vec<Daily>> {
                 })
             },
         )?
-        .collect::<rusqlite::Result<_>>()?)
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    attach_coverage(&mut rows, crate::coverage::cells(c, q)?);
+    Ok(rows)
+}
+
+fn attach_coverage(
+    rows: &mut Vec<Daily>,
+    mut cells: BTreeMap<crate::coverage::Key, crate::coverage::Coverage>,
+) {
+    for d in rows.iter_mut() {
+        let key = (
+            d.day.clone(),
+            d.source.clone(),
+            d.purpose.clone(),
+            d.harness.clone(),
+            d.model.clone(),
+            d.bot_id.clone(),
+            d.project_id.clone(),
+        );
+        d.coverage = cells.remove(&key).unwrap_or_default();
+    }
+    for ((day, source, purpose, harness, model, bot_id, project_id), coverage) in cells {
+        rows.push(Daily {
+            day,
+            source,
+            purpose,
+            harness,
+            model,
+            bot_id,
+            project_id,
+            coverage,
+            ..Daily::default()
+        });
+    }
 }
 
 /// The cube rows of a one-day query (`from == to`) cut by local hour (ST-43): the same measures, read from
@@ -307,12 +342,15 @@ pub fn hourly(c: &Connection, q: &Query) -> Result<Vec<Daily>> {
             *d.tool_kinds.entry(k).or_default() += n;
         }
     }
-    Ok(cells.into_values().collect())
+    let mut rows = cells.into_values().collect();
+    attach_coverage(&mut rows, crate::coverage::hourly_cells(c, q)?);
+    Ok(rows)
 }
 
 /// Token and spend totals of a set of cube rows.
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct UsageTotals {
+    pub coverage: crate::coverage::Coverage,
     pub input: i64,
     pub output: i64,
     pub cache_read: i64,
@@ -344,6 +382,7 @@ pub struct UsageTotals {
 
 impl UsageTotals {
     fn add(&mut self, d: &Daily, prices: &PriceBook) {
+        self.coverage.add(&d.coverage);
         self.input += d.input;
         self.output += d.output;
         self.cache_read += d.cache_read;

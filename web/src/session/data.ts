@@ -5,7 +5,7 @@
 type Ev = any[]
 
 /** a turn's tokens and estimated cost, as the Hub's per-turn stats (`/stats/items/:id` turns) report them */
-export type TurnUsage = { input: number; output: number; cache_read: number; cache_write: number; total: number; est: number; reported: number; unpriced_tokens: number }
+export type TurnUsage = { coverage?: import("../api/stats").UsageCoverage; input: number; output: number; cache_read: number; cache_write: number; total: number; est: number; reported: number; unpriced_tokens: number }
 /** one turn of a session: from the prompt that opened it to the end the harness reported */
 export type Turn = {
   /** 1-based, in order */ n: number

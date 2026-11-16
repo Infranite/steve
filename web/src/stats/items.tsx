@@ -11,7 +11,7 @@ import { Select } from "@/view-shared"
 import { Est } from "@/stats/kpi"
 import { Table, num, th } from "@/stats/tables"
 import { t, useT } from "@/i18n"
-import { fmtEst, fmtMs, fmtN, fmtUsd, useStats } from "@/stats/format"
+import { fmtEst, fmtMs, fmtN, fmtUsage, fmtUsd, useStats } from "@/stats/format"
 
 const SORTS = (): [ItemSort, string][] => [["est", t("stats:items.sort.est")], ["tokens", t("stats:items.sort.tokens")], ["lead", t("stats:items.sort.lead")], ["wait", t("stats:items.sort.wait")], ["reworks", t("stats:items.sort.reworks")], ["done_at", t("stats:items.sort.doneAt")]]
 
@@ -38,7 +38,7 @@ export function ItemsTable({ f, fkey, live, only, sort0 = "est", panel }: { f: F
                 <td className="whitespace-nowrap py-2.5 pr-3"><ItemNo id={r.item_id} /></td>
                 <td className="max-w-72 py-2.5"><span className="flex min-w-0 items-center gap-2"><StatusDot s={r.status} /><span className="truncate text-foreground">{r.title}</span></span></td>
                 <td className={num}>{fmtMs(r.lead_ms)}</td><td className={num}>{fmtMs(r.agent_ms)}</td><td className={num}>{fmtMs(r.wait_ms)}</td>
-                <td className={num}>{r.reworks}</td><td className={num}>{fmtN(r.tokens)}</td><td className={num}>{r.tokens ? <span title={r.unpriced_tokens ? t("stats:word.estUnpricedTitle", { n: fmtN(r.unpriced_tokens) }) : undefined} data-unpriced={r.unpriced_tokens || undefined}>{fmtEst(r.est, r.unpriced_tokens)}</span> : r.reported ? <span title={t("stats:word.sessionQuoteLowerBound")}>≥{fmtUsd(r.reported)}</span> : "—"}</td>
+                <td className={num}>{r.reworks}</td><td className={num}>{fmtUsage({total:r.tokens,coverage:r.coverage})}</td><td className={num}>{r.tokens ? <span title={r.unpriced_tokens ? t("stats:word.estUnpricedTitle", { n: fmtN(r.unpriced_tokens) }) : undefined} data-unpriced={r.unpriced_tokens || undefined}>{fmtEst(r.est, r.unpriced_tokens)}</span> : r.reported ? <span title={t("stats:word.sessionQuoteLowerBound")}>≥{fmtUsd(r.reported)}</span> : "—"}</td>
               </tr>
             ))}
           </Table>

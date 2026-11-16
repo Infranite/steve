@@ -114,12 +114,18 @@ mod tests {
 
     #[tokio::test]
     async fn workspace_recovery_card_follows_the_readers_language() {
-        let text = steve_i18n::with(steve_i18n::ZH_CN, || steve_i18n::t!("hub.node.workspace_conflict_question"));
+        let text = steve_i18n::with(steve_i18n::ZH_CN, || {
+            steve_i18n::t!("hub.node.workspace_conflict_question")
+        });
         steve_i18n::scope(steve_i18n::EN, async {
             let mut d = Obj::new();
             d.insert("question".into(), Value::String(text));
-            assert_eq!(shown(d)["question"], steve_i18n::t!("hub.node.workspace_conflict_question"));
-        }).await;
+            assert_eq!(
+                shown(d)["question"],
+                steve_i18n::t!("hub.node.workspace_conflict_question")
+            );
+        })
+        .await;
     }
 
     #[test]

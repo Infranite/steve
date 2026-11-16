@@ -159,6 +159,11 @@ pub const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/076.sql"),
     // 77: device configuration compare-and-swap revision.
     include_str!("../migrations/077.sql"),
+    // 78–81: live attempt bills, durable gateway ownership/inbox and fair result recovery.
+    include_str!("../migrations/078.sql"),
+    include_str!("../migrations/079.sql"),
+    include_str!("../migrations/080.sql"),
+    include_str!("../migrations/081.sql"),
 ];
 
 /// 027's item columns and their one-time backfill (applied by `run_pending` when `items.phase` is missing).

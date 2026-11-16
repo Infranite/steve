@@ -388,6 +388,8 @@ pub enum UsageFallback {
     None,
     /// Codex's rollout file of the session (`$CODEX_HOME/sessions`).
     CodexRollout,
+    /// Claude assistant message usage in `$CLAUDE_CONFIG_DIR/projects`.
+    ClaudeTranscript,
 }
 
 /// What an adapter nobody described gets: assume the worst (it reads the disk itself, so it runs
@@ -820,7 +822,7 @@ const BUILTINS: &[Builtin] = &[
             // claude-agent-acp: `claudeCode.options.tools` is the list of built-in tools
             tools_off_meta: Some(json!({"claudeCode": {"options": {"tools": []}}})),
             usage_input_includes_cache: false,
-            usage_fallback: UsageFallback::None,
+            usage_fallback: UsageFallback::ClaudeTranscript,
             fallback_models: strings(&["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"]),
             fallback_efforts: strings(&["low", "medium", "high", "xhigh", "max"]),
             model_fallback: true,
@@ -874,9 +876,10 @@ const BUILTINS: &[Builtin] = &[
             launch_extra: LaunchExtra::None,
             probe_initialize: true,
             tools_off_meta: None,
-            // codex-acp reports a turn's tokens (OpenAI's way: input includes the cached part);
-            // its rollout file stands in when a turn's report is missing
-            usage_input_includes_cache: true,
+            // codex-acp 2.x splits cache reads/writes out of inputTokens in its prompt
+            // response and quota. Raw rollout input is inclusive; its reader splits it once.
+            // Older/custom adapters can declare their own convention in harness.json.
+            usage_input_includes_cache: false,
             usage_fallback: UsageFallback::CodexRollout,
             // what a Codex probe lists, so its bots can pick a model before (or without) a probe,
             // as Claude Code's can
@@ -1834,6 +1837,12 @@ impl crate::AcpConfig {
         if let Some(b) = BUILTINS.iter().find(|b| b.id == id) {
             env.extend(b.env.iter().map(|(k, v)| ((*k).into(), (*v).into())));
         }
+        if spec.properties.usage_fallback == UsageFallback::CodexRollout {
+            env.push((
+                "CODEX_HOME".into(),
+                self.codex_home.clone().into_os_string(),
+            ));
+        }
         if let Some(var) = &spec.properties.executable_env
             && var == "CLAUDE_CODE_EXECUTABLE"
             && !self.claude_executable.as_os_str().is_empty()
@@ -1966,6 +1975,46 @@ mod tests {
     }
 
     #[test]
+    fn usage_sources_follow_capabilities_and_the_final_spawn_environment() {
+        let d = tempfile::tempdir().unwrap();
+        let mut c = cfg(d.path());
+        c.declared.insert(
+            "other-name".into(),
+            serde_json::from_value(json!({"properties":{"usage_fallback":"claude_transcript"}}))
+                .unwrap(),
+        );
+        let cwd = d.path().join("work");
+        let env = vec![
+            ("CLAUDE_CONFIG_DIR".into(), "first".into()),
+            ("CLAUDE_CONFIG_DIR".into(), "principal".into()),
+        ];
+        let source = crate::usage::source_for_spawn(&c, "other-name", &env, &cwd, false).unwrap();
+        assert_eq!(source.home, cwd.join("principal"));
+        assert_eq!(source.format, UsageFallback::ClaudeTranscript);
+        let env = vec![
+            ("HOME".into(), d.path().join("child-home").into_os_string()),
+            ("CLAUDE_CONFIG_DIR".into(), "".into()),
+        ];
+        assert_eq!(
+            crate::usage::source_for_spawn(&c, "other-name", &env, &cwd, false)
+                .unwrap()
+                .home,
+            d.path().join("child-home/.claude")
+        );
+        assert_eq!(
+            crate::usage::source_for_spawn(&c, "other-name", &[], &cwd, false)
+                .unwrap()
+                .home,
+            c.user_home.join(".claude")
+        );
+        assert!(crate::usage::source_for_spawn(&c, "undeclared", &env, &cwd, false).is_none());
+        assert_eq!(
+            c.adapter_properties("claude-code").usage_fallback,
+            UsageFallback::ClaudeTranscript
+        );
+    }
+
+    #[test]
     fn a_manifest_takes_commands_and_declarations() {
         let m: HashMap<String, AdapterEntry> = serde_json::from_value(json!({
             "claude-code": "/a/claude.js",
@@ -2029,7 +2078,14 @@ mod tests {
                 OsString::from("/bin/claude-x")
             )]
         );
-        assert!(c.adapter_env("codex").is_empty());
+        assert_eq!(
+            c.adapter_env("codex"),
+            vec![(
+                OsString::from("CODEX_HOME"),
+                c.codex_home.clone().into_os_string()
+            )]
+        );
+        assert!(!c.adapter_properties("codex").usage_input_includes_cache);
         assert!(c.session_meta("claude-code").is_some());
         // a call without tools has the built-in tools off where the adapter says how
         let off = c.session_meta_for("claude-code", true).unwrap();

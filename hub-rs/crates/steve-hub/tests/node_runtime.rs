@@ -886,6 +886,101 @@ async fn usage_and_tools_reach_the_session_and_the_attempts_statistics() {
     assert!((f.cost.unwrap() - 0.8).abs() < 1e-9);
 }
 
+#[tokio::test]
+async fn live_usage_survives_restart_report_replay_final_and_cancel() {
+    let mut h = hub();
+    h.bind();
+    h.rt.prompt(S, "live usage", "user", &[]).unwrap();
+    until("started", || h.methods().contains(&"start_turn")).await;
+    let exec = h.attempts()[0].clone();
+    let live = |id: &str, measurement: Measurement, n: u64| {
+        let EventBody::Usage { mut report } = usage(id, "0") else {
+            unreachable!()
+        };
+        report.cost = None;
+        report.measurement = measurement;
+        report.tokens = Tokens {
+            input: Some(n),
+            output: Some(0),
+            cache_read: Some(0),
+            cache_write: Some(0),
+            reasoning: None,
+        };
+        EventBody::Usage { report }
+    };
+    h.node
+        .emit(
+            Subject::Execution(exec.clone()),
+            live("first", Measurement::Delta, 100),
+        )
+        .await
+        .unwrap();
+    until("live booked before end", || {
+        h.q::<i64>("SELECT COALESCE(SUM(input),0) FROM usage_records") == 100
+    })
+    .await;
+    assert_eq!(
+        h.q::<i64>("SELECT COUNT(*) FROM agent_turns WHERE ended IS NULL"),
+        1
+    );
+    h.restart_hub().await;
+    h.node
+        .emit(
+            Subject::Execution(exec.clone()),
+            live("first", Measurement::Delta, 100),
+        )
+        .await
+        .unwrap();
+    h.node
+        .emit(
+            Subject::Execution(exec.clone()),
+            live("snapshot", Measurement::Cumulative, 120),
+        )
+        .await
+        .unwrap();
+    until("snapshot replaces delta", || {
+        h.q::<i64>("SELECT SUM(input) FROM usage_records") == 120
+    })
+    .await;
+    h.node
+        .emit(
+            Subject::Execution(exec.clone()),
+            live("final", Measurement::Final, 140),
+        )
+        .await
+        .unwrap();
+    until("final replaces snapshot", || {
+        h.q::<i64>("SELECT SUM(input) FROM usage_records") == 140
+    })
+    .await;
+    h.node
+        .emit(
+            Subject::Execution(exec.clone()),
+            live("late-delta", Measurement::Delta, 900),
+        )
+        .await
+        .unwrap();
+    until("late report applied", || {
+        h.q::<i64>("SELECT COUNT(*) FROM usage_reports") == 4
+    })
+    .await;
+    assert!(h.rt.cancel(S).unwrap());
+    until("cancel sent", || h.methods().contains(&"cancel")).await;
+    let mut completion = build::done();
+    completion.outcome = Outcome::Cancelled;
+    completion.stop_reason = "cancelled".into();
+    h.node.finish(&exec, completion).await.unwrap();
+    until("cancelled", || !h.ends().is_empty()).await;
+    let replay = h.seen.seen.lock().unwrap().clone();
+    Sink(Arc::downgrade(&h.rt))
+        .commit(EventBatch { events: replay })
+        .await
+        .unwrap();
+    assert_eq!(h.q::<i64>("SELECT SUM(input) FROM usage_records"), 140);
+    assert_eq!(h.q::<i64>("SELECT SUM(input) FROM stat_daily"), 140);
+    assert_eq!(h.q::<i64>("SELECT SUM(turns) FROM stat_daily"), 1);
+}
+
 /// M3: what a Node reports as cost is checked before it reaches the session. NaN, inf, negative
 /// and non-decimal figures add nothing (they could clear or lower the cost), a running total that
 /// went down adds nothing, a jump past the per-report cap or past the attempt's cap is refused,
@@ -5252,5 +5347,78 @@ async fn saved_capacity_queues_and_increasing_it_dispatches_the_same_turn() {
     until("cancel reached Node", || h.count("cancel") == 1).await;
     for exec in h.attempts() {
         let _ = h.node.finish(&exec, build::done()).await;
+    }
+}
+
+#[tokio::test]
+async fn accounting_vectors_cross_node_admission_and_the_shared_gateway_boundary() {
+    #[derive(serde::Deserialize)]
+    struct Case {
+        name: String,
+        fallback_model: String,
+        reports: Vec<UsageReport>,
+        tokens: Tokens,
+        cost_usd: Option<f64>,
+    }
+    let cases: Vec<Case> = serde_json::from_str(include_str!(
+        "../../steve-node-api/tests/fixtures/accounting.json"
+    ))
+    .unwrap();
+    for c in cases {
+        let h = hub();
+        h.bind();
+        h.rt.prompt(S, "accounting vector", "user", &[]).unwrap();
+        until("started", || h.methods().contains(&"start_turn")).await;
+        let exec = h.attempts()[0].clone();
+        let mut seen = std::collections::HashSet::new();
+        for r in &c.reports {
+            h.node
+                .emit(
+                    Subject::Execution(exec.clone()),
+                    EventBody::Usage { report: r.clone() },
+                )
+                .await
+                .unwrap();
+            if r.scope != UsageScope::Background {
+                seen.insert(r.report_id.clone());
+            }
+            until("durable report", || {
+                h.q::<i64>("SELECT COUNT(*) FROM usage_reports") == seen.len() as i64
+            })
+            .await;
+        }
+        let tried = steve_core::gateway::Tried::of(
+            Ok(("ok".into(), None)),
+            steve_core::gateway::merged_usage(c.reports, &c.fallback_model),
+        );
+        for (column, want) in [
+            ("input", c.tokens.input),
+            ("output", c.tokens.output),
+            ("cache_read", c.tokens.cache_read),
+            ("cache_write", c.tokens.cache_write),
+        ] {
+            let got = h.q::<Option<i64>>(&format!("SELECT SUM({column}) FROM usage_records"));
+            assert_eq!(got, want.map(|v| v as i64), "{} {column}", c.name);
+        }
+        let cost = h.q::<Option<f64>>("SELECT SUM(cost_reported) FROM usage_records");
+        assert_eq!(cost, c.cost_usd, "{} ledger cost", c.name);
+        assert_eq!(
+            cost,
+            tried
+                .usage
+                .iter()
+                .filter_map(|u| u.cost_reported)
+                .reduce(|a, b| a + b),
+            "{} gateway cost",
+            c.name
+        );
+        h.node.finish(&exec, build::done()).await.unwrap();
+        until("settled", || !h.ends().is_empty()).await;
+        assert_eq!(
+            h.q::<Option<f64>>("SELECT SUM(cost_reported) FROM usage_records"),
+            cost,
+            "{} end replay",
+            c.name
+        );
     }
 }

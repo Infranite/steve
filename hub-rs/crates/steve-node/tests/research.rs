@@ -1425,14 +1425,38 @@ async fn a_job_stops_when_the_hub_is_unreachable_past_its_lease() {
     let n = LocalNode::open(t.scripted_config(1)).unwrap();
     n.enable_research(t.research());
     let mut spec = holding(&t, "a_1");
-    spec.run.limits.offline_until = Timestamp(wall() + 1_500);
+    // The lease includes process startup. With other adapters starting in parallel, 1.5 s
+    // can legitimately expire before @hold ever creates a child; that is a different case.
+    spec.run.limits.offline_until = Timestamp(wall() + 8_000);
     n.start_job(now_cmd("op_j", spec)).await.unwrap();
+    until("the leased job has a child to stop", || {
+        !t.read("pid").is_empty()
+    })
+    .await;
     let c = finished(&n, "op_j").await;
     assert_eq!(c.outcome, Outcome::TimedOut, "{c:?}");
     assert_eq!(c.stop_reason, "offline");
     assert_eq!(c.error.unwrap().code, ErrorCode::Offline);
     assert!(c.job.unwrap().end.fits(Outcome::TimedOut));
     assert!(!alive(pid_of(&t.log("pid"))));
+    n.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_offline_lease_can_expire_before_the_adapter_creates_a_child() {
+    let t = T::new();
+    let n = LocalNode::open(t.scripted_config(1)).unwrap();
+    n.enable_research(t.research());
+    let mut spec = scripted("a_1", "m", "q\n@sleep 2000\n@child\n@wait");
+    spec.run.limits.offline_until = Timestamp(wall() + 200);
+    n.start_job(now_cmd("op_j", spec)).await.unwrap();
+    let c = finished(&n, "op_j").await;
+    assert_eq!(c.outcome, Outcome::TimedOut, "{c:?}");
+    assert_eq!(c.stop_reason, "offline");
+    assert!(
+        t.read("pid").is_empty(),
+        "no child was created before expiry"
+    );
     n.shutdown().await;
 }
 

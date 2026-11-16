@@ -24,7 +24,7 @@ import { OutDialog, type OutOpen } from "@/item-outputs"
 import { itemDisplayStatus } from "@/item-workflow-relation"
 import { SessionKnowledge } from "@/knowledge/parts"
 import { ResumeCard } from "@/resume"
-import { fmtEst, fmtN, fmtPct, fmtUsd, useStats } from "@/stats/format"
+import { fmtN, fmtUsage, fmtUsageCost, fmtPct, fmtUsd, useStats } from "@/stats/format"
 import { briefHead, st, type Item, type Out, type Sess } from "@/store"
 import { BotName, DiscChevron, ItemNo, openSheet, SectionLabel, Status, StatusDot, useNow } from "@/ui"
 import { filesOf, outputsOf, turnsOf, workedMs, type Turn } from "./data"
@@ -92,7 +92,7 @@ function Figures({ s, turns, tot }: { s: Sess; turns: Turn[]; tot?: SessionTotal
   const worked = workedMs(turns, now), done = turns.filter((x) => x.end)
   const avg = done.length ? done.reduce((n, x) => n + (x.end! - x.start), 0) / done.length : 0
   const end = run ? now : (s.at ?? now)
-  const est = u && u.total > 0 && u.est > 0 ? u.est : null, reported = u && u.reported > 0 ? u.reported : null
+  const est = u && (u.est > 0 || (u.coverage?.state === "complete" && u.total === 0)) ? u.est : null, reported = u && u.reported > 0 ? u.reported : null
   const pct = Math.min(100, Math.max(0, s.ctx))
   return (
     <Rows>
@@ -115,7 +115,7 @@ function Figures({ s, turns, tot }: { s: Sess; turns: Turn[]; tot?: SessionTotal
       ) : null}
       {(est != null || reported != null) && (
         <Row k={t("views:sessionPanel.row.cost")} data-session-cost>
-          {est != null ? <><span className="tabular-nums">{fmtEst(est, u!.unpriced_tokens)}</span>{reported != null && Math.abs(reported - est) >= 0.01 && <span className="ml-2 text-muted-foreground tabular-nums">{t("views:sessionPanel.costByHarness", { usd: fmtUsd(reported) })}</span>}</>
+          {est != null ? <><span className="tabular-nums">{fmtUsageCost(u!)}</span>{reported != null && Math.abs(reported - est) >= 0.01 && <span className="ml-2 text-muted-foreground tabular-nums">{t("views:sessionPanel.costByHarness", { usd: fmtUsd(reported) })}</span>}</>
             : <><span className="tabular-nums">{fmtUsd(reported)}</span><span className="ml-2 text-muted-foreground">{t("views:sessionPanel.costHarnessOnly")}</span></>}
         </Row>
       )}
@@ -132,11 +132,11 @@ function Figures({ s, turns, tot }: { s: Sess; turns: Turn[]; tot?: SessionTotal
           <Quiet parts={[t("views:sessionPanel.since", { time: nearTime(s.since, now) }), s.at && !run ? t("views:sessionPanel.lastAt", { time: pastTime(s.at, now) }) : null]} />
         </Row> : null}
       </>}
-      {u && u.total > 0 && <Row k={t("views:sessionPanel.row.tokens")} data-session-usage={u.total}>
+      {u && <Row k={t("views:sessionPanel.row.tokens")} data-session-usage={u.total}>
         <div className="flex min-w-0 items-start gap-2"><span className="min-w-0 flex-1">
-        <span className="tabular-nums">{fmtN(u.total)}</span>
+        <span className="tabular-nums">{fmtUsage(u)}</span>
         <Quiet parts={[u.cache_read > 0 ? t("views:sessionPanel.cacheShare", { pct: fmtPct(u.cache_read / u.total) }) : null, u.input > 0 ? t("views:sessionPanel.tokIn", { n: fmtN(u.input) }) : null, u.output > 0 ? t("views:sessionPanel.tokOut", { n: fmtN(u.output) }) : null]} />
-        </span><Breakdown tot={tot!} /></div>
+        </span>{u.total > 0 && <Breakdown tot={tot!} />}</div>
       </Row>}
     </Rows>
   )
@@ -148,7 +148,7 @@ function Breakdown({ tot }: { tot: SessionTotals }) {
   const u = tot.usage
   const items = ([["input", u.input], ["cache_read", u.cache_read], ["cache_write", u.cache_write], ["output", u.output]] as const)
     .filter(([, v]) => v > 0).map(([id, value]) => ({ id, label: t(`views:sessionPanel.tok.${id}`), value }))
-  const parts = [t("views:sessionPanel.est", { usd: fmtEst(u.est, u.unpriced_tokens) }), u.hit_rate != null ? t("views:sessionPanel.hit", { pct: fmtPct(u.hit_rate) }) : null,
+  const parts = [t("views:sessionPanel.est", { usd: fmtUsageCost(u) }), u.hit_rate != null ? t("views:sessionPanel.hit", { pct: fmtPct(u.hit_rate) }) : null,
     u.reported > 0 && Math.abs(u.reported - u.est) >= 0.01 ? t("views:sessionPanel.reported", { usd: fmtUsd(u.reported) }) : null].filter(Boolean) as string[]
   return (
     <Popover>

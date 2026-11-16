@@ -329,7 +329,8 @@ pub struct ToolView {
 pub enum Measurement {
     /// Add it.
     Delta,
-    /// The running total of `meter_epoch`; replaces the previous figure of the same epoch.
+    /// This attempt's running snapshot, isolated by meter epoch, model and scope.
+    /// Replaces the previous known fields; a process-wide counter must be rebased by its collector.
     Cumulative,
     /// The attempt's final figure; replaces its deltas, never added to them.
     Final,

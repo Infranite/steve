@@ -88,6 +88,21 @@ impl StatsApi {
         blocking(move || s.reader(|c| Ok::<_, StoreError>(f(c))).map_err(serr)?).await
     }
 
+    /// Accounting views read totals and coverage from the same commit. Keep `read` available for
+    /// independently transactional readers such as realtime telemetry.
+    async fn snapshot<R: Send + 'static>(
+        &self,
+        f: impl FnOnce(&Connection) -> Result<R, ApiError> + Send + 'static,
+    ) -> Result<R, ApiError> {
+        self.read(move |c| {
+            let tx = c.unchecked_transaction().map_err(sql)?;
+            let value = f(&tx);
+            tx.commit().map_err(sql)?;
+            value
+        })
+        .await
+    }
+
     /// `f`'s answer for `key`, from the cache while no statistics changed and it is under 5 s old.
     async fn cached(
         &self,
@@ -104,7 +119,7 @@ impl StatsApi {
                 return ok(v.clone());
             }
         }
-        let v = self.read(f).await?;
+        let v = self.snapshot(f).await?;
         let mut c = self.0.cache.lock().unwrap_or_else(|e| e.into_inner());
         if c.len() >= CACHE_MAX {
             c.retain(|_, (g, at, _)| *g == generation && at.elapsed() < FRESH);
@@ -562,7 +577,7 @@ async fn item(
     Query(p): Query<Params>,
 ) -> ApiResult {
     let brief = p.get("brief").is_some_and(|v| v == "1" || v == "true");
-    api.read(
+    api.snapshot(
         move |db| match views::item_detail(db, &id, now(), brief).map_err(serr)? {
             Some((ws, d)) if ws == c.ws => {
                 ok(serde_json::to_value(d).map_err(|e| ApiError::internal(e.to_string()))?)
@@ -579,7 +594,7 @@ async fn tree(
     Extension(c): Extension<Ctx>,
     Path(id): Path<String>,
 ) -> ApiResult {
-    api.read(move |db| match views::tree(db, &id).map_err(serr)? {
+    api.snapshot(move |db| match views::tree(db, &id).map_err(serr)? {
         Some((ws, t)) if ws == c.ws => {
             ok(serde_json::to_value(t).map_err(|e| ApiError::internal(e.to_string()))?)
         }
@@ -593,7 +608,7 @@ async fn session(
     Extension(c): Extension<Ctx>,
     Path(id): Path<String>,
 ) -> ApiResult {
-    api.read(move |db| match views::session(db, &id).map_err(serr)? {
+    api.snapshot(move |db| match views::session(db, &id).map_err(serr)? {
         Some((ws, s)) if ws == c.ws => {
             ok(serde_json::to_value(s).map_err(|e| ApiError::internal(e.to_string()))?)
         }

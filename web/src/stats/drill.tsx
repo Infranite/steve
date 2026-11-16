@@ -13,7 +13,7 @@ import { Kpi, Est, kpiRow } from "@/stats/kpi"
 import { Table, num, th } from "@/stats/tables"
 import { CostPanel } from "@/stats/cost"
 import { t, useT } from "@/i18n"
-import { fmtEst, fmtMs, fmtN, fmtPct, fmtUsd, tickLabel, time, timeTicks, useStats } from "@/stats/format"
+import { fmtMs, fmtN, fmtUsage, fmtUsageCost, fmtPct, fmtUsd, tickLabel, time, timeTicks, useStats } from "@/stats/format"
 
 /* labels for the Hub's values, built at render so they follow the language */
 export const STOP = (): Record<string, string> => ({ end_turn: t("stats:drill.stop.endTurn"), cancelled: t("stats:drill.stop.cancelled"), max_tokens: t("stats:drill.stop.maxTokens"), refusal: t("stats:drill.stop.refusal"), error: t("stats:drill.stop.error"), interrupted: t("stats:drill.stop.interrupted") })
@@ -46,8 +46,8 @@ function Drill({ d }: { d: ItemDetail }) {
         right={open ? <Tag tone="run"><span className="size-1.5 dot-running rounded-full bg-current" />{t("stats:word.running")}</Tag> : f.done_at ? <Tag tone="ok">{t("stats:drill.doneMark")}</Tag> : <Tag>{t("stats:drill.dropMark")}</Tag>}>
         <Timeline d={d} />
         <div className={kpiRow(6)}>
-          <Kpi k="tokens" label={t("stats:col.tokens")} value={fmtN(u.total)} foot={u.hit_rate != null ? t("stats:drill.hit", { pct: fmtPct(u.hit_rate) }) : ""} def={t("stats:drill.tokensDef")} />
-          <Kpi k="est" label={t("stats:col.cost")} badge={<Est />} value={u.total ? (u.unpriced_tokens ? (u.est >= 0.01 ? "≥" + fmtUsd(u.est) : "—") : fmtUsd(u.est)) : u.reported ? "≥" + fmtUsd(u.reported) : "—"} foot={u.unpriced_tokens ? t("stats:drill.incomplete", { n: fmtN(u.unpriced_tokens) }) : u.reported ? t("stats:word.adapterQuote", { usd: fmtUsd(u.reported) }) : ""} def={t("stats:drill.estDef")} />
+          <Kpi k="tokens" label={t("stats:col.tokens")} value={fmtUsage(u)} foot={u.hit_rate != null ? t("stats:drill.hit", { pct: fmtPct(u.hit_rate) }) : ""} def={t("stats:drill.tokensDef")} />
+          <Kpi k="est" label={t("stats:col.cost")} badge={<Est />} value={fmtUsageCost(u)} foot={u.unpriced_tokens ? t("stats:drill.incomplete", { n: fmtN(u.unpriced_tokens) }) : u.reported ? t("stats:word.adapterQuote", { usd: fmtUsd(u.reported) }) : ""} def={t("stats:drill.estDef")} />
           <Kpi k="lead" label={t("stats:drill.lead")} value={fmtMs(f.lead_ms ?? d.age_ms)} foot={f.lead_ms != null ? t("stats:drill.leadDone") : t("stats:drill.leadOpen")} def={t("stats:drill.leadDef")} />
           <Kpi k="agent" label={t("stats:drill.agent")} value={fmtMs(f.agent_ms)} foot={t("stats:drill.turns", { count: f.turns })} def={t("stats:drill.agentDef")} />
           <Kpi k="wait" label={t("stats:drill.wait")} value={fmtMs(f.wait_ms)} tone={f.wait_ms && f.agent_ms && f.wait_ms > f.agent_ms ? "wait" : undefined} foot={t("stats:drill.decisions", { count: f.decisions })} def={t("stats:drill.waitDef")} />
@@ -59,7 +59,7 @@ function Drill({ d }: { d: ItemDetail }) {
         <Panel k="by-model" icon={<CpuIcon />} title={t("stats:drill.byModel")} sub={t("stats:drill.byModelSub")}>
           <div className="pb-2"><Table label={t("stats:drill.byModel")} min={640} head={<tr><th className={th}>{t("stats:col.model")}</th><th className={cn(th, "pl-4 text-right")}>{t("stats:col.input")}</th><th className={cn(th, "pl-4 text-right")}>{t("stats:col.output")}</th><th className={cn(th, "pl-4 text-right")}>{t("stats:col.cacheRead")}</th><th className={cn(th, "pl-4 text-right")}>{t("stats:col.cacheWrite")}</th><th className={cn(th, "pl-4 text-right")}>{t("stats:col.hitRate")}</th><th className={cn(th, "pl-4 text-right")}><span className="inline-flex items-center gap-1">{t("stats:col.cost")}<Est /></span></th></tr>}>
             {d.by_model.map((m) => (
-              <tr key={m.model} data-model={m.model}><td className="py-2.5">{m.label}</td><td className={num}>{fmtN(m.input)}</td><td className={num}>{fmtN(m.output)}</td><td className={num}>{fmtN(m.cache_read)}</td><td className={num}>{fmtN(m.cache_write)}</td><td className={num}>{fmtPct(m.hit_rate)}</td>
+              <tr key={m.model} data-model={m.model}><td className="py-2.5">{m.label}</td><td className={num}>{fmtUsage(m,"input")}</td><td className={num}>{fmtUsage(m,"output")}</td><td className={num}>{fmtUsage(m,"cache_read")}</td><td className={num}>{fmtUsage(m,"cache_write")}</td><td className={num}>{fmtPct(m.hit_rate)}</td>
                 <td className={num}>{m.total ? (m.unpriced_tokens ? <a href="#/settings/stats" className="text-blue hover:underline">{t("stats:word.unpriced")}</a> : fmtUsd(m.est)) : m.reported ? <span title={t("stats:word.adapterQuoteLowerBound")}>≥{fmtUsd(m.reported)}</span> : "—"}</td></tr>
             ))}
           </Table></div>
@@ -112,7 +112,7 @@ function Timeline({ d }: { d: ItemDetail }) {
           <g>{turns.map((tn) => {
             const a = x(tn.started), b = x(tn.ended ?? now), bad = tn.stop_reason === "error" || tn.transient
             return <rect key={tn.id} x={a} y={Y.turns - 6} width={Math.max(3, b - a)} height={12} rx={4} className={cn("cursor-default transition-[fill] duration-120", bad ? "fill-destructive/80" : tn.ended ? "fill-blue/70 hover:fill-blue" : "fill-blue")}
-              onMouseEnter={() => show(tn.started, Y.turns, t("stats:drill.turnTip", { time: time(tn.started), dur: tn.ended ? fmtMs(tn.ended - tn.started) : t("stats:word.running"), tokens: fmtN(tn.usage.total), tools: tn.tools }))} />
+              onMouseEnter={() => show(tn.started, Y.turns, t("stats:drill.turnTip", { time: time(tn.started), dur: tn.ended ? fmtMs(tn.ended - tn.started) : t("stats:word.running"), tokens: fmtUsage(tn.usage), tools: tn.tools }))} />
           })}</g>
           <g>{decs.map((c) => {
             const cx = x(c.created), cy = Y.decs, waiting = c.status === "open"
@@ -150,7 +150,7 @@ export function ItemStatsRows({ id, render }: { id: string; render: (usage: stri
   const [d] = useStats(() => stats.item(id, true), [id, st.items.find((i) => i.id === id)?.updated])
   if (d.s !== "ok") return null
   const u = d.v.usage, f = d.v.facts
-  const usage = u.total ? (u.hit_rate != null ? t("stats:drill.usageHit", { tokens: fmtN(u.total), pct: fmtPct(u.hit_rate), usd: fmtEst(u.est, u.unpriced_tokens) }) : t("stats:drill.usage", { tokens: fmtN(u.total), usd: fmtEst(u.est, u.unpriced_tokens) })) : u.reported ? t("stats:word.adapterQuoteFloor", { usd: fmtUsd(u.reported) }) : t("stats:drill.noUsage")
+  const usage = u.coverage?.total === null ? fmtUsage(u) : u.total || u.coverage?.state === "complete" ? (u.hit_rate != null ? t("stats:drill.usageHit", { tokens: fmtUsage(u), pct: fmtPct(u.hit_rate), usd: fmtUsageCost(u) }) : t("stats:drill.usage", { tokens: fmtUsage(u), usd: fmtUsageCost(u) })) : u.reported ? t("stats:word.adapterQuoteFloor", { usd: fmtUsd(u.reported) }) : fmtUsage(u)
   const tm = t(f.done_at ? "stats:drill.timeDone" : "stats:drill.timeOpen", { agent: fmtMs(f.agent_ms ?? 0), wait: fmtMs(f.wait_ms ?? 0), age: fmtMs(d.v.age_ms) })
   return <>{render(usage, tm, "#/stats/items/" + id)}</>
 }
@@ -162,9 +162,9 @@ export function SessionStats({ id, ctx }: { id: string; /** the context in use, 
   const ctxTag = ctx != null && <span className={cn("hidden whitespace-nowrap px-1 type-footnote tabular-nums md:inline", ctx >= 80 ? "text-attention" : "text-muted-foreground")} data-session-ctx-head={ctx}>{t("views:sessionPanel.ctxShort", { pct: ctx })}</span>
   if (d.s !== "ok" || (!d.v.turns && !d.v.usage.total && !d.v.usage.reported)) return ctxTag || null
   const u = d.v.usage
-  const est = u.total ? t("stats:word.estShort", { usd: fmtUsd(u.est) }) : u.reported ? t("stats:word.quoteFloor", { usd: fmtUsd(u.reported) }) : ""
+  const est = u.coverage?.total === null ? fmtUsage(u) : u.total || u.coverage?.state === "complete" ? t("stats:word.estShort", { usd: fmtUsageCost(u) }) : u.reported ? t("stats:word.quoteFloor", { usd: fmtUsd(u.reported) }) : ""
   return (<>{ctxTag}
-    <span className="hidden whitespace-nowrap px-1 type-footnote tabular-nums text-muted-foreground md:inline" title={u.hit_rate != null ? t("stats:drill.sessionTitleHit", { tokens: fmtN(u.total), pct: fmtPct(u.hit_rate) }) : t("stats:drill.sessionTitle", { tokens: fmtN(u.total) })} data-session-stats>
+    <span className="hidden whitespace-nowrap px-1 type-footnote tabular-nums text-muted-foreground md:inline" title={u.hit_rate != null ? t("stats:drill.sessionTitleHit", { tokens: fmtUsage(u), pct: fmtPct(u.hit_rate) }) : t("stats:drill.sessionTitle", { tokens: fmtUsage(u) })} data-session-stats>
       {est ? t("stats:drill.sessionLine", { est, count: d.v.turns }) : t("stats:drill.sessionLineNoEst", { count: d.v.turns })}
     </span></>
   )

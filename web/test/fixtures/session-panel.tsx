@@ -6,6 +6,7 @@ import { kb } from "../../src/api/knowledge"
 import { SidebarProvider } from "../../src/components/ui/sidebar"
 import { TooltipProvider } from "../../src/components/ui/tooltip"
 import { refresh, useStore } from "../../src/store"
+import { ItemStatsRows, StatsItemView } from "../../src/stats/drill"
 import { SessionView } from "../../src/views"
 
 /* The session page of an item's session (ST-2, a collaboration unit of ST-1) that ran two turns on Claude Code, with
@@ -48,9 +49,23 @@ kb.uses = (async () => ({ hits: codex ? [] : [
   { n: 1, type: "chunk", id: "kd_1", seq: 0, level: "conclusion", title: "设备页方案", label: "事项记录 · 设备页方案", href: "#/knowledge/doc/kd_1", deleted: false, use_id: "u1", query: "协作区 数据契约", created: s(10) },
   { n: 2, type: "chunk", id: "kd_1", seq: 3, level: "conclusion", title: "设备页方案", label: "事项记录 · 设备页方案", href: "#/knowledge/doc/kd_1", deleted: false, use_id: "u1", query: "协作区 数据契约", created: s(10) },
 ] })) as any
+// Accounting states: three existing surfaces consume exactly the same API usage shape.
+const coverageState = q.get("coverage") as "not_reported" | "unavailable" | "partial" | "complete" | null
+if (coverageState) {
+  const total = coverageState === "partial" ? 12 : coverageState === "complete" ? 0 : null
+  const u = { ...usage(total ?? 0, 0, 0, 0), hit_rate: null, coverage: {
+    state: coverageState, expected: 1, reported: total == null ? 0 : 1, complete: coverageState === "complete" ? 1 : 0,
+    pending: coverageState === "not_reported" ? 1 : 0, unavailable: coverageState === "unavailable" ? 1 : 0, uncertain: q.has("uncertain") ? 1 : 0,
+    total, input: total, output: coverageState === "complete" ? 0 : null, cache_read: coverageState === "complete" ? 0 : null, cache_write: coverageState === "complete" ? 0 : null, cost_reported: null,
+  } }
+  stats.session = async () => ({ session_id: "s1", turns: 1, usage: u })
+  stats.item = (async () => ({ item_id: "ST-2", no: 2, title: "用量账本", status: "run", usage: u, age_ms: 1000,
+    facts: { created: T, first_turn: T, done_at: null, dropped_at: null, lead_ms: null, cycle_ms: null, wait_ms: null, agent_ms: 1000, turns: 1, reworks: 0, decisions: 0, first_pass: null }, turns: [], marks: [], decisions: [], by_model: [] })) as any
+  stats.tree = async () => ({ nodes: [], truncated: false })
+}
 void refresh()
 function Fixture() {
   useStore()
-  return <TooltipProvider><SidebarProvider><div className="h-dvh w-full"><SessionView k="s1" /></div></SidebarProvider></TooltipProvider>
+  return <TooltipProvider><SidebarProvider><div className="h-dvh w-full"><SessionView k="s1" />{coverageState && <div className="p-6"><ItemStatsRows id="ST-2" render={(u) => <p data-item-usage-text>{u}</p>} /><StatsItemView id="ST-2" /></div>}</div></SidebarProvider></TooltipProvider>
 }
 createRoot(document.getElementById("root")!).render(<Fixture />)

@@ -91,6 +91,8 @@ pub(super) struct Think {
     purpose: &'static str,
     /// The call's workspace; empty: the default one.
     workspace: String,
+    account: steve_core::stats::AttemptAccount,
+    standalone: bool,
     head: Option<String>,
     message: String,
     tools: ThinkTools,
@@ -270,7 +272,11 @@ impl NodeRuntime {
                     digest: &digest,
                 },
                 now(),
-            )
+            )?;
+            self.store
+                .stats()
+                .gateway_link_job(&attempt, &t.account.id, t.standalone)?;
+            Ok(())
         })?;
         if !self.jobs.has(&attempt) {
             self.stop_job(&attempt);
@@ -289,15 +295,54 @@ impl NodeRuntime {
         attempt: &str,
     ) -> Result<(), StoreError> {
         let Some(row) = jobs::attempt_in(tx, attempt)? else {
+            // A retained journal Final can outlive the runtime Job's retention. Billing keeps its
+            // own source binding, so it still repairs the original call after Job/inbox pruning.
+            if let EventBody::Usage { report } = &ev.body {
+                if let Some((node, job)) = self.store.stats().gateway_job_owner(attempt)? {
+                    if node == self.node_id.as_str()
+                        && matches!(&ev.subject,Subject::Execution(ExecutionRef::Job {job:source_job,attempt:source}) if source_job.as_str()==job && source.as_str()==attempt)
+                    {
+                        self.store
+                            .stats()
+                            .gateway_job_report(attempt, report, ev.at.0)?;
+                        self.staged_job_events
+                            .lock()
+                            .unwrap()
+                            .push((attempt.to_string(), ev.body.clone()));
+                    }
+                }
+            }
             return Ok(());
         };
-        if row.node != self.node_id.as_str() {
+        if row.node != self.node_id.as_str()
+            || !matches!(&ev.subject,Subject::Execution(ExecutionRef::Job {job,attempt:source}) if job.as_str()==row.job && source.as_str()==attempt)
+        {
             return Ok(());
         }
         match &ev.body {
             EventBody::AttemptStarted => {
                 jobs::apply_attempt_in(tx, attempt, AttemptState::Running, None, None, now())?;
             }
+            EventBody::Usage { report } => {
+                self.store
+                    .stats()
+                    .gateway_job_report(attempt, report, ev.at.0)?;
+            }
+            EventBody::AttemptEnded { completion } => self.job_ended_in(tx, attempt, completion)?,
+            _ => {}
+        }
+        if !matches!(&ev.body, EventBody::AttemptEnded { .. }) {
+            self.staged_job_events
+                .lock()
+                .unwrap()
+                .push((attempt.to_string(), ev.body.clone()));
+        }
+        Ok(())
+    }
+
+    /// Called only after the inbox/runtime transaction committed, in its original event order.
+    pub(super) fn notify_job(&self, attempt: &str, body: &EventBody) {
+        match body {
             EventBody::MessageStarted { message, .. } => self.jobs.tell(attempt, |w| {
                 w.message = Some(message.clone());
                 w.text.clear();
@@ -327,10 +372,11 @@ impl NodeRuntime {
             EventBody::Usage { report } => self
                 .jobs
                 .tell(attempt, |_| Some(News::Usage(report.clone()))),
-            EventBody::AttemptEnded { completion } => self.job_ended_in(tx, attempt, completion)?,
+            EventBody::AttemptEnded { completion } => self
+                .jobs
+                .tell(attempt, |_| Some(News::End(completion.clone()))),
             _ => {}
         }
-        Ok(())
     }
 
     /// Job `attempt` is over: its row, its job and its `start_job` take the end (the first end
@@ -352,6 +398,12 @@ impl NodeRuntime {
             now(),
         )?;
         jobs::finish_job_in(tx, &row.job, now())?;
+        self.store.stats().gateway_job_end(
+            attempt,
+            c.outcome == Outcome::Succeeded,
+            c.error.as_ref().map(|e| e.safe_detail.as_str()),
+            now(),
+        )?;
         let terminal: bool = tx.query_row(
             "SELECT state IN ('finished','rejected') FROM node_commands WHERE operation_id=?",
             [&row.operation],
@@ -376,7 +428,12 @@ impl NodeRuntime {
                 now(),
             )?;
         }
-        self.jobs.tell(attempt, |_| Some(News::End(c.clone())));
+        self.staged_job_events.lock().unwrap().push((
+            attempt.to_string(),
+            EventBody::AttemptEnded {
+                completion: c.clone(),
+            },
+        ));
         Ok(())
     }
 
@@ -607,6 +664,7 @@ impl NodeRuntime {
                     continue;
                 }
                 n += 1;
+                self.store.stats().gateway_job_cancel(&a.id,"Hub restart: caller unavailable")?;
                 jobs::cancel_attempt_in(tx, &a.id, now())?;
                 let (op, state, _) = start_of(tx, &a.id)?;
                 match state.as_str() {
@@ -706,9 +764,15 @@ impl Drop for Waiting {
         let (rt, attempt) = (self.runtime.clone(), std::mem::take(&mut self.attempt));
         match tokio::runtime::Handle::try_current() {
             Ok(h) => {
-                h.spawn_blocking(move || rt.stop_job(&attempt));
+                h.spawn_blocking(move || {
+                    let _ = rt.store.stats().gateway_job_detach(&attempt);
+                    rt.stop_job(&attempt)
+                });
             }
-            Err(_) => rt.stop_job(&attempt),
+            Err(_) => {
+                let _ = rt.store.stats().gateway_job_detach(&attempt);
+                rt.stop_job(&attempt)
+            }
         }
     }
 }
@@ -758,6 +822,16 @@ impl OneModel for NodePrint {
         // the gateway's errors are stored with the answer: zh-CN, as core's own
         let fail = |e: String| Tried::failed(steve_core::CoreError::Msg(e));
         let tag = steve_core::stats::current_tag();
+        let standalone = steve_core::stats::current_attempt().is_none();
+        let account = match steve_core::stats::current_attempt() {
+            Some(a) => a,
+            None => match steve_core::stats::CallAccount::begin(&self.runtime.store, &tag)
+                .and_then(|c| c.attempt(call.harness, model))
+            {
+                Ok(a) => a,
+                Err(e) => return fail(format!("usage ownership: {e}")),
+            },
+        };
         let (head, message) = split_static(call.prompt);
         let attempt = uid("ja");
         let mut news = self.runtime.jobs.add(&attempt);
@@ -769,7 +843,13 @@ impl OneModel for NodePrint {
         let t = Think {
             attempt,
             purpose: tag.purpose,
-            workspace: tag.workspace_id,
+            workspace: if tag.workspace_id.is_empty() {
+                account.call.workspace.clone()
+            } else {
+                tag.workspace_id
+            },
+            account,
+            standalone,
             head: head.map(String::from),
             message: message.to_string(),
             tools: call.tools.clone(),
@@ -983,7 +1063,13 @@ impl NodeRuntime {
     /// Commits a research job (one attempt, `a.model` only) with its `start_job`. As with a think
     /// job, the caller's waiter is registered first, and a caller gone before the commit has its job
     /// stopped right away.
-    fn start_research_in(&self, attempt: &str, a: &ResearchAttempt) -> Result<(), StoreError> {
+    fn start_research_in(
+        &self,
+        attempt: &str,
+        a: &ResearchAttempt,
+        account: &steve_core::stats::AttemptAccount,
+        standalone: bool,
+    ) -> Result<(), StoreError> {
         self.running()?;
         self.store
             .reader(|c| self.owners_work_in(c, &a.workspace))?;
@@ -1092,7 +1178,11 @@ impl NodeRuntime {
                     digest: &digest,
                 },
                 now(),
-            )
+            )?;
+            self.store
+                .stats()
+                .gateway_link_job(attempt, &account.id, standalone)?;
+            Ok(())
         })?;
         if !self.jobs.has(attempt) {
             self.stop_job(attempt);
@@ -1107,6 +1197,22 @@ impl NodeRuntime {
         self: &Arc<Self>,
         a: ResearchAttempt,
     ) -> Result<ResearchJobRun, String> {
+        let standalone = steve_core::stats::current_call().is_none();
+        let call = match steve_core::stats::current_call() {
+            Some(c) => c,
+            None => steve_core::stats::CallAccount::begin(
+                &self.store,
+                &steve_core::stats::CallTag {
+                    purpose: "research",
+                    workspace_id: a.workspace.clone(),
+                    item_id: steve_core::stats::current_tag().item_id,
+                },
+            )
+            .map_err(|e| e.to_string())?,
+        };
+        let account = call
+            .attempt(&a.harness, &a.model)
+            .map_err(|e| e.to_string())?;
         let attempt = uid("ja");
         let news = self.jobs.add(&attempt);
         let mut waiting = Waiting {
@@ -1115,7 +1221,11 @@ impl NodeRuntime {
             armed: true,
         };
         let (rt, at) = (self.clone(), attempt);
-        match tokio::task::spawn_blocking(move || rt.start_research_in(&at, &a)).await {
+        match tokio::task::spawn_blocking(move || {
+            rt.start_research_in(&at, &a, &account, standalone)
+        })
+        .await
+        {
             Ok(Ok(())) => Ok(ResearchJobRun {
                 news,
                 waiting,
