@@ -297,6 +297,29 @@ pub fn check_refs(c: &Connection, ws: &str, s: &Spec) -> FlowResult<()> {
     Ok(())
 }
 
+/// The preflight of an enabled schedule that makes items (#222): its principal and Bot can run
+/// ([`crate::Core::can_run`]). A report makes no session; a disabled schedule runs nothing.
+pub fn can_run(core: &dyn crate::Core, c: &Connection, ws: &str, s: &Spec) -> Result<(), String> {
+    if s.mode == Mode::Report {
+        return Ok(());
+    }
+    core.can_run(c, ws, s.requester.as_deref(), &s.bot)
+}
+
+/// [`can_run`] as the API's refusal: `400` with the reason and where to fix it.
+pub fn check_can_run(
+    core: &dyn crate::Core,
+    c: &Connection,
+    ws: &str,
+    s: &Spec,
+    enabled: bool,
+) -> FlowResult<()> {
+    if !enabled {
+        return Ok(());
+    }
+    can_run(core, c, ws, s).map_err(ApiError::rule)
+}
+
 fn first_run(s: &Spec, now: i64) -> FlowResult<Option<i64>> {
     Ok(s.expr()?.next_after_ms(s.zone(), now))
 }
@@ -506,9 +529,24 @@ pub struct ScheduleView {
     pub enabled: bool,
     pub next_at: Option<i64>,
     pub last: Option<Last>,
+    /// Why its items could not run now ([`can_run`]), filled by the API; `None`: they can.
+    pub blocked: Option<String>,
     pub version: i64,
     pub created: i64,
     pub updated: i64,
+}
+
+/// [`view`] with [`ScheduleView::blocked`] filled (enabled schedules only).
+pub fn view_checked(
+    core: &dyn crate::Core,
+    c: &Connection,
+    s: &Schedule,
+) -> FlowResult<ScheduleView> {
+    let mut v = view(c, s)?;
+    if s.enabled {
+        v.blocked = can_run(core, c, &s.workspace_id, &s.spec).err();
+    }
+    Ok(v)
 }
 
 pub fn view(c: &Connection, s: &Schedule) -> FlowResult<ScheduleView> {
@@ -543,6 +581,7 @@ pub fn view(c: &Connection, s: &Schedule) -> FlowResult<ScheduleView> {
         enabled: s.enabled,
         next_at: s.next_at,
         last,
+        blocked: None,
         version: s.version,
         created: s.created,
         updated: s.updated,

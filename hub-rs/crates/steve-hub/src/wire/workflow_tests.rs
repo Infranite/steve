@@ -69,6 +69,7 @@ impl Fixture {
             host: host.clone(),
             workspaces,
             worktrees: Some(cfg.worktrees.clone()),
+            preflight: None,
         });
         let core = Core::new(
             steve_core::repo::Db::new(store.clone()),

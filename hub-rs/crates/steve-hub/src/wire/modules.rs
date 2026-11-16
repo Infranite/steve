@@ -21,6 +21,8 @@ pub type Job = Pin<Box<dyn Future<Output = ()> + Send>>;
 /// What schedules need from steve-core.
 pub struct FlowCore {
     pub core: Core,
+    /// [`steve_flow::Core::can_run`]: `None` lets everything run.
+    pub preflight: Option<Arc<super::model_access::Preflight>>,
 }
 
 async fn blocking<T: Send + 'static>(
@@ -33,6 +35,20 @@ async fn blocking<T: Send + 'static>(
 
 #[async_trait]
 impl steve_flow::Core for FlowCore {
+    fn can_run(
+        &self,
+        c: &rusqlite::Connection,
+        ws: &str,
+        requester: Option<&str>,
+        bot: &str,
+    ) -> Result<(), String> {
+        match &self.preflight {
+            Some(p) => p
+                .can_run_schedule(c, ws, requester, bot)
+                .map_err(|b| b.reason),
+            None => Ok(()),
+        }
+    }
     async fn create_item(&self, req: steve_flow::ItemRequest) -> Result<String, String> {
         let c = self.core.clone();
         blocking(move || {
@@ -145,6 +161,8 @@ impl steve_flow::Core for FlowCore {
 /// The modules, their `/api` routes (still needing the `Caller` layer) and their background jobs.
 pub struct Built {
     pub modules: Modules,
+    /// The vault (service sessions' model access keys are read from it).
+    pub vault: steve_modules::vault::Vault,
     pub flow: Arc<steve_flow::FlowCx>,
     /// The knowledge module's state, for its MCP tools.
     pub kb: steve_knowledge::Knowledge,
@@ -242,6 +260,9 @@ pub struct Env<'a> {
     /// Where GitHub reads and pushes an item's branch when it is on a Node (`None`: the Hub's own
     /// git, as before).
     pub git_nodes: Option<Arc<dyn steve_github::push::GitNodes>>,
+    /// Whether a schedule's principal and Bot can run ([`super::model_access::Preflight`]);
+    /// `None`: not asked.
+    pub preflight: Option<Arc<super::model_access::Preflight>>,
 }
 
 /// Registers every module, builds [`Modules`] and the flow context, and collects the routes.
@@ -262,6 +283,7 @@ pub fn build(env: Env<'_>) -> Result<Built, BackendError> {
         cmd_node,
         use_nodes,
         git_nodes,
+        preflight,
     } = env;
     use super::ports as hp;
     let mut registry = Registry::new();
@@ -270,7 +292,10 @@ pub fn build(env: Env<'_>) -> Result<Built, BackendError> {
     steve_modules::accounts::register(&mut registry);
     steve_modules::contacts::changes::register(&mut registry, &ports);
     steve_modules::contacts::merge::register(&mut registry, &ports);
-    let setup = steve_flow::FlowSetup::new(Arc::new(FlowCore { core: core.clone() }));
+    let setup = steve_flow::FlowSetup::new(Arc::new(FlowCore {
+        core: core.clone(),
+        preflight: preflight.clone(),
+    }));
     setup.register(&mut registry);
     // A2: the `connection` decision (re-authorize)
     steve_modules::accounts::connections::register(&mut registry);
@@ -656,7 +681,7 @@ pub fn build(env: Env<'_>) -> Result<Built, BackendError> {
         .with_state(modules.clone())
         .merge(steve_modules::caps::routes(caps.clone()))
         .merge(steve_modules::vault::routes(vault.clone()))
-        .merge(steve_modules::vault::use_api::routes(vault))
+        .merge(steve_modules::vault::use_api::routes(vault.clone()))
         .merge(vault_items)
         .merge(steve_modules::vault::webauthn::routes(passkeys));
     // at the root: the OAuth callback (session read, not required) and the webhooks (no session)
@@ -802,5 +827,6 @@ pub fn build(env: Env<'_>) -> Result<Built, BackendError> {
         lifecycle,
         caps,
         library,
+        vault,
     })
 }

@@ -426,6 +426,9 @@ pub struct RoutedRuntime {
     /// Steve's worktrees directory, where the local Node makes the items' worktrees (set with the
     /// local Node; unset, the core makes them).
     pub worktrees: Option<std::path::PathBuf>,
+    /// Whether a principal's Bot can run at all ([`super::model_access::Preflight`]), asked before
+    /// a session is made or a message opens one. `None`: not asked.
+    pub preflight: Option<Arc<super::model_access::Preflight>>,
 }
 
 /// Whether boot recovery leaves `session` to the Node it is bound to (enabled here or not: a
@@ -773,7 +776,36 @@ impl RoutedRuntime {
     }
 }
 
+impl RoutedRuntime {
+    /// [`super::model_access::Preflight`]'s answer, as stored text (zh-CN).
+    fn preflight(
+        &self,
+        f: impl FnOnce(
+            &super::model_access::Preflight,
+            &rusqlite::Connection,
+        ) -> Result<(), super::model_access::Blocked>,
+    ) -> Result<(), String> {
+        let Some(p) = &self.preflight else {
+            return Ok(());
+        };
+        let r = self.store.reader(|c| {
+            Ok::<_, steve_store::StoreError>(steve_i18n::stored(|| f(p, c).map_err(|b| b.reason)))
+        });
+        match r {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::error!("preflight: {e}");
+                Ok(())
+            }
+        }
+    }
+}
+
 impl steve_core::AgentRuntime for RoutedRuntime {
+    fn can_run(&self, item_id: &str, bot_id: &str, harness: &str) -> steve_core::Result<()> {
+        self.preflight(|p, c| p.can_run_item(c, item_id, bot_id, harness))
+            .map_err(CoreError::Msg)
+    }
     fn check_workflow_execution(&self, item_id: &str) -> steve_core::Result<()> {
         if let Some(why) = self
             .store
@@ -1002,6 +1034,18 @@ impl steve_core::AgentRuntime for RoutedRuntime {
         files: &[steve_core::repo::FileRef],
     ) -> steve_core::Result<steve_core::Prompted> {
         self.check_workflow_session(session_id)?;
+        // a service session its model access no longer covers: refused, said once in it, rather
+        // than an open that fails on the Node and is tried again with every message (#222)
+        if let Err(why) = self.preflight(|p, c| p.can_run_session(c, session_id)) {
+            if let Err(e) = self.store.events().add(
+                session_id,
+                "system",
+                json!({ "text": why, "refused": true }),
+            ) {
+                tracing::error!("refusal of {session_id}: {e}");
+            }
+            return Err(CoreError::Msg(why));
+        }
         let n = match self.route(session_id) {
             Backend::Node(n) => Some(n),
             Backend::Parked => None,
@@ -2337,6 +2381,7 @@ mod routed_tests {
             ),
             store,
             worktrees: None,
+            preflight: None,
         }
     }
 

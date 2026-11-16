@@ -466,6 +466,8 @@ export default {
     next: "Next {{time}}",
     onPlan: "Scheduled",
     lastFailed: "Last run failed",
+    blocked: "Cannot run now",
+    blockedFix: "Configure",
     started: "Started {{name}}",
     runNow: "Run now",
     disabledToast: "Turned off, it won't trigger again",

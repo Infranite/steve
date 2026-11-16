@@ -1355,6 +1355,19 @@ impl Tx<'_> {
         if self.workflow_child(&self.item(item_id)?)? {
             self.rt().check_workflow_execution(item_id)?;
         }
+        /* a Bot that could not run this item at all (its model access, its harness): said once on
+         * the item before anything is made, no session, nothing tried again by itself */
+        {
+            let want = match bot_override {
+                Some(b) => Some(b.to_string()),
+                None => self.item(item_id)?.bot_id,
+            };
+            let bot = match self.db().bot(want.as_deref().unwrap_or("steve"))? {
+                Some(b) => b,
+                None => self.db().main_bot()?,
+            };
+            self.rt().can_run(item_id, &bot.id, &bot.harness)?;
+        }
         /* taken first: a start that fails leaves nothing behind for a later one */
         let after = self.st.handoffs.remove(item_id);
         self.lc_guard_open(item_id)?;
@@ -4033,6 +4046,8 @@ impl Tx<'_> {
             Some(b) if self.db().bot_in_workspace(bot_id, &i.workspace_id)? => b,
             _ => return Err(msg(steve_i18n::t!("core.bot.not_in_workspace"))),
         };
+        /* refused before the old session is stopped: a Bot that could not run it does not take it */
+        self.rt().can_run(id, &b.id, &b.harness)?;
         let s = self.active_session(id)?;
         let handoff = match &s {
             Some(s) => js_head(&self.last_agent_text(&s.id)?, 800).to_string(),

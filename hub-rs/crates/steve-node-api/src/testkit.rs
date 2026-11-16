@@ -2527,6 +2527,7 @@ pub mod build {
             artifact_view: None,
             mcp_servers: vec![],
             skills: vec![],
+            model_access: None,
         }
     }
 

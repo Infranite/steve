@@ -44,6 +44,21 @@ pub trait Core: Send + Sync {
     async fn post_steve_message(&self, ws: &str, text: &str, meta: Value) -> Result<(), String>;
     /// The `/汇报` text (`digestText`).
     async fn digest_text(&self, ws: &str) -> Result<String, String>;
+    /// Whether a schedule's item could run at all: its principal (`requester` while a member,
+    /// else the workspace's service principal) with `bot` (its harness ready, its model access
+    /// configured). Synchronous, on the caller's connection (inside its transaction, too), and
+    /// deterministic: it reads the database and what the Nodes last said, nothing else. `Err` is
+    /// the reason, saying where it is fixed. The default lets everything run.
+    fn can_run(
+        &self,
+        c: &rusqlite::Connection,
+        ws: &str,
+        requester: Option<&str>,
+        bot: &str,
+    ) -> Result<(), String> {
+        let _ = (c, ws, requester, bot);
+        Ok(())
+    }
     /// `supplement(item, text, mode)` (`mode`: `auto`), for `item.link`. The default refuses, so an
     /// unwired Hub reports the step as failed instead of dropping the supplement silently.
     async fn supplement(

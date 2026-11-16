@@ -120,6 +120,15 @@ async fn item_create(cx: &FlowCx, run: &RunRow, cfg: &Value) -> FlowResult<Actio
     // Recheck membership at execution, not just when the schedule was configured.
     cx.store()
         .reader(|c| schedules::check_refs(c, &ws, &s.spec))?;
+    // and that its item could run at all (#222): otherwise no item is made, the run records why
+    // and nothing tries again by itself
+    let mut spec = s.spec.clone();
+    spec.bot = bot.clone();
+    if let Err(why) = cx.store().reader(|c| {
+        Ok::<_, steve_modules::ApiError>(schedules::can_run(cx.core.as_ref(), c, &ws, &spec))
+    })? {
+        return Ok(fail(why));
+    }
     let req = ItemRequest {
         requester,
         ws: ws.clone(),

@@ -60,6 +60,8 @@ pub struct FakeState {
     pub recovers_itself: HashSet<String>,
     /// Why new sessions cannot run ([`AgentRuntime::refusal`]); `None`: they run.
     pub refuse: Option<String>,
+    /// Why no Bot can run an item now ([`AgentRuntime::can_run`], the preflight); `None`: they can.
+    pub cannot_run: Option<String>,
     /// Every session's Node has no link, for this reason.
     pub node_offline: Option<String>,
     /// `flush` takes nothing and answers false (a session still opening, say).
@@ -188,6 +190,12 @@ impl FakeRuntime {
 }
 
 impl AgentRuntime for FakeRuntime {
+    fn can_run(&self, _item: &str, _bot: &str, _harness: &str) -> Result<()> {
+        match self.st().cannot_run.clone() {
+            Some(why) => Err(msg(why)),
+            None => Ok(()),
+        }
+    }
     fn check_workflow_execution(&self, _item: &str) -> Result<()> {
         if self.st().workflow_execution_ready {
             Ok(())

@@ -21,6 +21,7 @@ pub mod library_mcp;
 pub mod local_service;
 pub mod mcp;
 pub mod mcp_extra;
+pub mod model_access;
 pub mod modules;
 pub mod node_binding;
 pub mod node_env;
@@ -742,6 +743,22 @@ pub fn wire_assembly(
             workspaces.clone().follow(bus.tap(&["project", "kb"])),
         ));
     }
+    // whether a principal's Bot can run at all: the adapters' declarations, what the Nodes said
+    // of them last, and per-principal state (#222)
+    let preflight = {
+        let h = harnesses.clone();
+        let readiness: model_access::Readiness = Arc::new(move || {
+            h.list()
+                .into_iter()
+                .map(|x| (x.id, x.name, x.ready))
+                .collect()
+        });
+        model_access::Preflight::new(
+            cfg.declared_adapters.clone(),
+            Some(readiness),
+            principal_state(&vars),
+        )
+    };
     let routed = Arc::new(core::RoutedRuntime {
         node: node_host.as_ref().map(|h| h.runtime.clone()),
         fleet: fleet.clone(),
@@ -753,6 +770,7 @@ pub fn wire_assembly(
         host: host.clone(),
         workspaces: workspaces.clone(),
         worktrees: node_host.as_ref().map(|_| cfg.worktrees.clone()),
+        preflight: Some(preflight.clone()),
     });
     let core = steve_core::Core::new(
         steve_core::repo::Db::new(db.clone()),
@@ -849,7 +867,13 @@ pub fn wire_assembly(
             git_push::GitPush::new(workspaces.clone(), secrets.clone())
                 as Arc<dyn steve_github::push::GitNodes>
         }),
+        preflight: Some(preflight.clone()),
     })?;
+    // service sessions' model access keys, from the vault, for the Nodes that run them (#222)
+    secrets.set_model_access(Arc::new(model_access::ModelSecrets {
+        store: db.clone(),
+        vault: built.vault.clone(),
+    }));
     let _ = host.flow.set(built.flow.clone());
     let yolo = steve_core::yolo::Yolo::new(
         steve_core::repo::Db::new(db.clone()),
@@ -978,7 +1002,8 @@ pub fn wire_assembly(
             crate::api::stats::StatsApi::new(db.clone(), bus.clone(), price_url)
                 .with_harness_source(harnesses.source()),
         ))
-        .merge(crate::api::yolo::routes(engine.clone()));
+        .merge(crate::api::yolo::routes(engine.clone()))
+        .merge(model_access::routes(db.clone(), preflight.clone()));
     Ok(Wired {
         backend,
         #[cfg(test)]

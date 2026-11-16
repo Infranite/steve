@@ -37,6 +37,8 @@ struct FlowInfo {
     graph: Value,
     overlap: OverlapPolicy,
     budget_usd: f64,
+    /// A schedule's time zone (the skip line on its open item says the planned time in it).
+    tz: Option<String>,
 }
 
 fn flow_info(c: &Connection, flow_id: &str) -> FlowResult<Option<FlowInfo>> {
@@ -60,7 +62,40 @@ fn flow_info(c: &Connection, flow_id: &str) -> FlowResult<Option<FlowInfo>> {
         graph: serde_json::from_str(&graph)?,
         overlap: OverlapPolicy::from_db(schedule["overlap"].as_str()),
         budget_usd: schedule["budget_usd"].as_f64().unwrap_or(0.0),
+        tz: schedule["tz"].as_str().map(String::from),
     }))
+}
+
+/// The item a run of `flow_id` made that is not closed yet, newest first (#223): one open run per
+/// schedule. Found by the run's own record or by the `from` link its item carries, so it holds
+/// across restarts; an archived or removed item counts as over.
+fn open_item(c: &Connection, ws: &str, flow_id: &str) -> FlowResult<Option<String>> {
+    Ok(c.query_row(
+        "SELECT x.item FROM (
+             SELECT r.work_item_id AS item, r.started AS at FROM flow_runs r
+              WHERE r.workspace_id = ?1 AND r.flow_id = ?2 AND r.work_item_id IS NOT NULL AND r.dry_run = 0
+             UNION ALL
+             SELECT l.subject_id, r.started FROM links l JOIN flow_runs r ON r.id = l.object_id
+              WHERE l.workspace_id = ?1 AND l.subject_type = 'item' AND l.predicate = 'from'
+                AND l.object_type = 'flow_run' AND r.flow_id = ?2 AND r.dry_run = 0
+         ) x JOIN items i ON i.id = x.item AND i.workspace_id = ?1
+          WHERE coalesce(i.phase, '') <> 'closed' AND i.archived = 0
+          ORDER BY x.at DESC LIMIT 1",
+        params![ws, flow_id],
+        |r| r.get(0),
+    )
+    .optional()?)
+}
+
+/// `上一次还没结束，跳过 <time> 的这一次`: the open item's timeline line and the skipped run's label.
+pub fn open_item_skip_label(at: i64, tz: Option<&str>) -> String {
+    let tz = tz
+        .and_then(|t| parse_tz(t).ok())
+        .unwrap_or(chrono_tz::Asia::Taipei);
+    format!(
+        "{OVERLAP_SKIP_LABEL} {} 的这一次",
+        crate::schedules::local(at, tz, "%m-%d %H:%M")
+    )
 }
 
 /// The node after the trigger (`flow_runs.cursor` of a new run).
@@ -90,6 +125,31 @@ fn start(tx: &Tx, f: &FlowInfo, s: &Start, now: i64) -> FlowResult<(String, bool
         json!({ "at": s.at, "trigger": s.kind.as_str(), "budget_limit": f.budget_usd });
     if let (Some(ctx), Some(extra)) = (context.as_object_mut(), s.extra.as_object()) {
         ctx.extend(extra.clone());
+    }
+    // the item the last run made is still open (#223): this one is skipped, said on that item
+    if f.overlap == OverlapPolicy::Skip
+        && let Some(item) = open_item(tx, &f.ws, &f.id)?
+    {
+        let label = open_item_skip_label(s.at, f.tz.as_deref());
+        if let Some(ctx) = context.as_object_mut() {
+            ctx.insert("open_item".into(), json!(item));
+        }
+        let id = runs::insert(
+            tx,
+            &NewRun {
+                ws: &f.ws,
+                flow_id: &f.id,
+                flow_version: f.version,
+                trigger_kind: s.kind.as_str(),
+                status: "skipped",
+                outcome_label: &label,
+                cursor: None,
+                context: &context,
+                now,
+            },
+        )?;
+        steve_store::timeline_add_in(tx, &item, "steve", "sys", &label, None)?;
+        return Ok((id, false));
     }
     let active = runs::active_exists(tx, &f.ws, &f.id)?;
     if overlap_blocks(f.overlap, active.then_some("running")) {
