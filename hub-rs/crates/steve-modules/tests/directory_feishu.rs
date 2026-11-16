@@ -236,7 +236,7 @@ async fn feishu_departments_and_users_become_the_org_chart() {
     assert_eq!(chart, vec![("研发部", 0), ("平台组", 1), ("销售部", 0)]);
     assert_eq!(
         members(ids::DEPT_ENG),
-        vec![("李鹏翔".into(), "lead".into())]
+        vec![("林知远".into(), "lead".into())]
     );
     assert_eq!(
         members(ids::DEPT_PLATFORM),
@@ -263,7 +263,7 @@ async fn feishu_departments_and_users_become_the_org_chart() {
     );
     let (_, c) = call(&r, Some(&who), "GET", &format!("/contacts/{alice}"), None).await;
     assert_eq!(c["org"]["title"], "后端工程师");
-    assert_eq!(c["reports_to"][0]["name"], "李鹏翔");
+    assert_eq!(c["reports_to"][0]["name"], "林知远");
     let dept_reqs = fake.requests_to(Endpoint::DepartmentChildren);
     assert!(
         dept_reqs[0].query.contains("fetch_child=true"),
@@ -304,7 +304,7 @@ async fn feishu_departments_and_users_become_the_org_chart() {
     assert_eq!(
         members(ids::DEPT_ENG),
         vec![
-            ("李鹏翔".into(), "lead".into()),
+            ("林知远".into(), "lead".into()),
             ("张伟".into(), "member".into())
         ]
     );

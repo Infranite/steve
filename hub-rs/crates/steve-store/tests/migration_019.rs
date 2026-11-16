@@ -13,10 +13,10 @@ const SEED: &str = "
 INSERT INTO workspaces (id, name, created) VALUES ('default', '个人', 1);
 INSERT INTO systems (id, workspace_id, name, kind, family, created) VALUES ('feishu_app', '*', '飞书', 'comm', 'feishu', 1), ('feishu', '*', '飞书', 'comm', 'feishu', 1);
 INSERT INTO parties (id, workspace_id, type, name, created_by, created, updated) VALUES
-  ('ct_me', 'default', 'contact', '李鹏翔', 'u', 1, 1), ('org', 'default', 'org', '公司', 'u', 1, 1), ('ct_a', 'default', 'contact', '张三', 'u', 1, 1);
+  ('ct_me', 'default', 'contact', '林知远', 'u', 1, 1), ('org', 'default', 'org', '公司', 'u', 1, 1), ('ct_a', 'default', 'contact', '张三', 'u', 1, 1);
 INSERT INTO accounts (id, workspace_id, system_id, family, party_id, kind, handle, handle_display, source, created, updated) VALUES
   ('acc_bot', 'default', 'feishu_app', 'feishu', 'org', 'app_bot', 'ou_bot', 'Steve', 'connect', 1, 1),
-  ('acc_me', 'default', 'feishu', 'feishu', 'ct_me', 'personal', 'ou_me', '李鹏翔', 'connect', 1, 1),
+  ('acc_me', 'default', 'feishu', 'feishu', 'ct_me', 'personal', 'ou_me', '林知远', 'connect', 1, 1),
   ('acc_a', 'default', 'feishu', 'feishu', 'ct_a', 'personal', 'ou_a', '张三', 'channel', 1, 1);
 INSERT INTO connections (id, workspace_id, account_id, adapter, auth, config, created_by, created, updated) VALUES
   ('con_bot', 'default', 'acc_bot', 'feishu_app', 'credential', '{}', 'u', 1, 1),
@@ -29,7 +29,7 @@ INSERT INTO spaces (id, workspace_id, system_id, connection_id, kind, external_i
   ('spc_g3b', 'default', 'feishu_app', 'con_bot', 'group', 'oc_g3', '', 13, 13, NULL),
   ('spc_g3m', 'default', 'feishu', 'con_me', 'group', 'oc_g3', '产品群', 14, 14, 70),
   ('spc_dmb', 'default', 'feishu_app', 'con_bot', 'dm', 'oc_dm_bot', '私聊', 15, 15, 80),
-  ('spc_self', 'default', 'feishu', 'con_me', 'dm', 'oc_self', '李鹏翔', 16, 16, 90),
+  ('spc_self', 'default', 'feishu', 'con_me', 'dm', 'oc_self', '林知远', 16, 16, 90),
   ('spc_g4m', 'default', 'feishu', 'con_me', 'group', 'oc_g4', '只有我', 17, 17, 30),
   ('spc_g5b', 'default', 'feishu_app', 'con_bot', 'group', 'oc_g5', '只有机器人', 18, 18, 20);
 INSERT INTO space_settings (space_id, workspace_id, disclosure, updated, configured, muted)
