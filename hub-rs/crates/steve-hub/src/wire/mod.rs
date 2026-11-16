@@ -509,8 +509,19 @@ fn remote_nodes(
             &cfg.version,
             &cfg.public_url,
         ));
+        let up = crate::nodes::upgrade::Upgrades::new(
+            store.clone(),
+            cfg.data_dir.clone(),
+            Arc::new(crate::nodes::upgrade::LiveFleet {
+                fleet: svc.fleet.clone(),
+                registry: svc.registry.clone(),
+            }),
+            crate::nodes::upgrade::Timing::from_vars(|k| vars(k)),
+        );
+        let _ = svc.upgrades.set(up.clone());
         if let Ok(rt) = tokio::runtime::Handle::try_current() {
             rt.spawn(crate::nodes::tailcat::restore(t, store.clone()));
+            rt.spawn(up.follow());
         }
     }
     let bind = match bind.map(|v| steve_node_api::NodeId::new(v.trim())) {

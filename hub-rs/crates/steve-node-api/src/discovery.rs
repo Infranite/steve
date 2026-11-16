@@ -262,6 +262,20 @@ pub struct Capabilities {
     /// Optional abilities, by name ([`FEATURE_SECRET_FILE`]).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub features: Vec<String>,
+    /// The build this Node runs, when its host knows it (a released `steve-node`): what the Hub
+    /// compares with its own before offering an upgrade ([`FEATURE_NODE_UPGRADE`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub build: Option<BuildIdentity>,
+}
+
+/// A binary's release identity, as `--build-info` reports it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BuildIdentity {
+    pub version: String,
+    /// The full Git commit.
+    pub commit: String,
+    /// The Rust target triple (`aarch64-apple-darwin`).
+    pub target: String,
 }
 
 /// How a Node's machine is doing now (B3): what the Hub samples to show on the devices page and,
@@ -306,6 +320,67 @@ pub struct RootVitals {
 pub const FEATURE_SECRET_FILE: &str = "secret-file";
 /// Strict artifact reads bound to an accepted execution and its recorded view.
 pub const FEATURE_ARTIFACT_READ: &str = "artifact-read-v1";
+/// The Node can stage, switch to and roll back from another release the Hub offers
+/// ([`Discovery::upgrade_stage`]). Only a Node installed as a service from a release bundle says
+/// so: one run by hand, or the Hub's own, has no service to switch.
+pub const FEATURE_NODE_UPGRADE: &str = "node-upgrade-v1";
+
+/// Stage a release on the Node (H→N `node.upgrade`), under `operation`: the Node pulls the archive
+/// `artifact` from the Hub over its link (`blob.fetch`, [`crate::FileAccess::Operation`]), checks
+/// its size and SHA256 and the build identity of what it unpacks, and keeps it next to its current
+/// release. Nothing switches yet ([`Discovery::upgrade_switch`]). The same operation again answers
+/// its state; another while one is unfinished is `busy`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NodeUpgrade {
+    pub operation: OperationId,
+    /// What the unpacked binaries must report: the Hub's own version and commit, for this Node's
+    /// target.
+    pub build: BuildIdentity,
+    pub artifact: ArtifactId,
+    pub size: u64,
+    /// Lowercase hex.
+    pub sha256: String,
+    /// How long the new release has to link to the Hub before the Node goes back (seconds).
+    pub health_secs: u32,
+}
+
+/// Switch to the staged release, or give it up (`abandon`). A switch refuses (`busy`) while
+/// the Node still runs work unless `force`: then running turns end with the Node's restart and the
+/// Hub continues them as after any restart.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UpgradeSwitch {
+    pub operation: OperationId,
+    #[serde(default)]
+    pub abandon: bool,
+    #[serde(default)]
+    pub force: bool,
+}
+
+/// Where a Node upgrade is. Terminal: `succeeded`, `failed` (nothing switched), `rolled_back`
+/// (switched, then back on the previous release), `abandoned`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NodeUpgradeState {
+    pub operation: OperationId,
+    /// `staging` | `staged` | `switching` | `linked` | `succeeded` | `failed` | `rolled_back` |
+    /// `abandoned`.
+    pub phase: String,
+    pub version: String,
+    /// The release the Node ran before, once known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// When it last changed (ms).
+    pub updated: Timestamp,
+}
+
+impl NodeUpgradeState {
+    pub const TERMINAL: &'static [&'static str] =
+        &["succeeded", "failed", "rolled_back", "abandoned"];
+    pub fn is_terminal(&self) -> bool {
+        Self::TERMINAL.contains(&self.phase.as_str())
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HistoryRef {

@@ -124,6 +124,27 @@ pub trait Discovery: Send + Sync {
         ))
     }
     async fn probe(&self, fresh: bool) -> ApiResult<Capabilities>;
+    /// Stage the Hub's release on this Node ([`NodeUpgrade`]). Only a Node that advertises
+    /// [`FEATURE_NODE_UPGRADE`] does.
+    async fn upgrade_stage(&self, _u: NodeUpgrade) -> ApiResult<NodeUpgradeState> {
+        Err(ApiError::new(
+            ErrorCode::Unsupported,
+            "this node is upgraded by its operator",
+        ))
+    }
+    async fn upgrade_switch(&self, _s: UpgradeSwitch) -> ApiResult<NodeUpgradeState> {
+        Err(ApiError::new(
+            ErrorCode::Unsupported,
+            "this node is upgraded by its operator",
+        ))
+    }
+    /// The state of an upgrade this Node knows (`invalid` for one it does not).
+    async fn upgrade_status(&self, _operation: OperationId) -> ApiResult<NodeUpgradeState> {
+        Err(ApiError::new(
+            ErrorCode::Unsupported,
+            "this node is upgraded by its operator",
+        ))
+    }
     /// Asynchronous, journaled setup. Retrying the same command reads its receipt. Only an
     /// authenticated, colocated Hub owner may request it; remote Nodes remain operator-managed.
     async fn install_harness(&self, _c: Command<InstallHarness>) -> ApiResult<Receipt> {

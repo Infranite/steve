@@ -297,6 +297,7 @@ const ALLOWED: &[Entry] = &[
     e(Fs, "steve-hub/src/plugins/install.rs", 14, Hub, "a plugin archive checked against its library's sha256 and unpacked under <home>/plugins"),
     e(Fs, "steve-hub/src/plugins/run.rs", 3, Hub, "a running plugin's own files, data directory and bounded log under <home>/plugins"),
     e(Fs, "steve-hub/src/nodes/install.rs", 7, Hub, "the install's own SSH key, and a local release directory"),
+    e(Fs, "steve-hub/src/nodes/upgrade.rs", 7, Hub, "a Node upgrade's archive under <data>/node-upgrades, built from the Hub's own release, and its tests' fixtures"),
     e(Spawn, "steve-hub/src/upgrades/runner.rs", 6, Hub, "the upgrader and explicit legacy source-maintenance path; published bundles prepare and deploy in native Rust"),
     e(Spawn, "steve-hub/src/upgrades/cli.rs", 1, Hub, "OS-owner upgrade CLI queries the signed Hub's service and code identity, never a task harness"),
     e(Dir, "steve-hub/src/upgrades/cli.rs", 1, Hub, "OS-owner upgrade CLI lists this installation's operation journals only"),

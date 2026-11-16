@@ -1,4 +1,43 @@
 export default {
+  "upgrade": {
+    "title": "Version",
+    "nodeBuild": "This Node runs",
+    "hubBuild": "The Hub runs",
+    "policyTitle": "Upgrade policy",
+    "policySub": "What the Hub does when this Node runs another build",
+    "followDefault": "Hub default ({{policy}})",
+    "defaultTitle": "Hub default for all Nodes",
+    "defaultSub": "Applies to every Node without a policy of its own",
+    "policy": {
+      "auto": "Upgrade with the Hub",
+      "notify": "Only show it",
+      "off": "Off"
+    },
+    "reason": {
+      "outdated": "Runs another build than the Hub; it can be upgraded from here",
+      "current": "Runs the Hub's build",
+      "manual": "This Node is upgraded on its own machine (not installed as a service from a release, or too old to say)",
+      "unknown": "Its build is not known yet (offline, or not asked yet)",
+      "hub_dev_build": "The Hub is a development build: nothing to upgrade to"
+    },
+    "last": "Last upgrade",
+    "phase": {
+      "preparing": "Preparing",
+      "staging": "Downloading",
+      "staged": "Downloaded",
+      "draining": "Waiting for running work",
+      "switching": "Switching",
+      "succeeded": "Upgraded",
+      "failed": "Failed, nothing switched",
+      "rolled_back": "Rolled back",
+      "abandoned": "Given up",
+      "unknown": "Outcome unknown"
+    },
+    "start": "Upgrade to the Hub's version",
+    "force": "Upgrade now, cutting running work",
+    "started": "Upgrade started",
+    "how": "The Node downloads the Hub's release over its own link and checks it; new work waits while its running turns finish, then it restarts on the new release and goes back to the previous one if it does not reconnect in time."
+  },
   "nodeOccupancy": "Node occupied/reserved: {{running}} / limit {{max}}; {{waiting}} waiting to start",
   "roomCapacity": "Waiting for capacity: node occupied/reserved {{running}} / limit {{max}}",
   "roomNode": "Waiting for Node: {{detail}}",

@@ -60,6 +60,17 @@ pub use artifact::read_delivery_file;
 use journal::{Journal, Op, SessionRow, Tx, WorkspaceRow, internal};
 pub use workspace::Root;
 
+/// What stages and switches a Node's release when the Hub asks ([`Discovery::upgrade_stage`]):
+/// the host that installed the Node as a service (`steve-node`), never the Node library itself.
+#[async_trait]
+pub trait Upgrader: Send + Sync {
+    /// The build this process runs.
+    fn build(&self) -> BuildIdentity;
+    async fn stage(&self, node: &LocalNode, u: NodeUpgrade) -> ApiResult<NodeUpgradeState>;
+    async fn switch(&self, node: &LocalNode, s: UpgradeSwitch) -> ApiResult<NodeUpgradeState>;
+    fn status(&self, operation: &OperationId) -> ApiResult<NodeUpgradeState>;
+}
+
 /// The OS sandbox a Node with these homes and this `STEVE_CONFINE` would give its runs
 /// (`seatbelt`, `bubblewrap`), or why none: what `steve-hub --check-config` reports before a switch.
 pub fn confinement(
@@ -441,6 +452,9 @@ pub(crate) struct Inner {
     files: Mutex<Option<Arc<dyn HubFiles>>>,
     /// Where a command's secrets come from (the Hub).
     secrets: Mutex<Option<Arc<dyn HubSecrets>>>,
+    /// Who stages and switches releases for the Hub ([`LocalNode::set_upgrader`]); none: this Node
+    /// is upgraded by its operator.
+    upgrader: std::sync::OnceLock<Arc<dyn Upgrader>>,
     wake: tokio::sync::Notify,
     delivering: AtomicBool,
     closed: AtomicBool,
@@ -1486,6 +1500,7 @@ impl LocalNode {
             sink: Mutex::new(None),
             files: Mutex::new(None),
             secrets: Mutex::new(None),
+            upgrader: std::sync::OnceLock::new(),
             wake: tokio::sync::Notify::new(),
             delivering: AtomicBool::new(false),
             closed: AtomicBool::new(false),
@@ -1533,6 +1548,30 @@ impl LocalNode {
     /// that needs one fails without running.
     pub fn connect_secrets(&self, secrets: Arc<dyn HubSecrets>) {
         *self.0.secrets.lock().unwrap() = Some(secrets);
+    }
+
+    /// Lets the Hub upgrade this Node through `upgrader` (the host that installed it as a
+    /// service): probes then say [`FEATURE_NODE_UPGRADE`] and the build. Set once.
+    pub fn set_upgrader(&self, upgrader: Arc<dyn Upgrader>) {
+        let _ = self.0.upgrader.set(upgrader);
+    }
+
+    /// Turns, jobs and commands this Node runs now: what an upgrade waits for.
+    pub fn running_work(&self) -> ApiResult<usize> {
+        let ops = self.0.j.read(|t| t.ops())?;
+        let running = ops
+            .into_iter()
+            .filter(|(_, o)| {
+                matches!(o.method.as_str(), "start_turn" | "start_job")
+                    && !o.receipt.state.is_finished()
+            })
+            .count();
+        Ok(running + self.0.execs.load(Ordering::SeqCst))
+    }
+
+    /// The Hub's files as this Node's link reaches them, once connected.
+    pub fn hub_files(&self) -> Option<Arc<dyn HubFiles>> {
+        self.0.files.lock().unwrap().clone()
     }
 
     /// Serve Steve's tools to this Node's harnesses, answered by `hub`. Sessions started after this
@@ -4308,8 +4347,33 @@ impl Discovery for LocalNode {
                 ..self.0.cfg.capacity.clone()
             },
             // a command's secret as a temp file on this machine
-            features: vec![FEATURE_SECRET_FILE.into(), FEATURE_ARTIFACT_READ.into()],
+            features: {
+                let mut f = vec![FEATURE_SECRET_FILE.into(), FEATURE_ARTIFACT_READ.into()];
+                if self.0.upgrader.get().is_some() {
+                    f.push(FEATURE_NODE_UPGRADE.into());
+                }
+                f
+            },
+            build: self.0.upgrader.get().map(|u| u.build()),
         })
+    }
+    async fn upgrade_stage(&self, u: NodeUpgrade) -> ApiResult<NodeUpgradeState> {
+        match self.0.upgrader.get().cloned() {
+            Some(up) => up.stage(self, u).await,
+            None => unsupported("this node is upgraded by its operator"),
+        }
+    }
+    async fn upgrade_switch(&self, s: UpgradeSwitch) -> ApiResult<NodeUpgradeState> {
+        match self.0.upgrader.get().cloned() {
+            Some(up) => up.switch(self, s).await,
+            None => unsupported("this node is upgraded by its operator"),
+        }
+    }
+    async fn upgrade_status(&self, operation: OperationId) -> ApiResult<NodeUpgradeState> {
+        match self.0.upgrader.get().cloned() {
+            Some(up) => up.status(&operation),
+            None => unsupported("this node is upgraded by its operator"),
+        }
     }
     /// Newest first; the cursor is the position in that order.
     async fn history(&self, p: PageRequest) -> ApiResult<Page<HistoryEntry>> {

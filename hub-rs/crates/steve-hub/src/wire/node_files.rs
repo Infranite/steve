@@ -178,6 +178,25 @@ impl HubFiles for NodeFiles {
                 "nonzero read size required",
             ));
         }
+        // an upgrade's archive: granted to its operation, not to an execution
+        if let FileAccess::Operation { operation } = &access
+            && id
+                .as_str()
+                .starts_with(crate::nodes::upgrade::ARTIFACT_PREFIX)
+        {
+            let (store, dir, node, op, id) = (
+                self.store.clone(),
+                self.data_dir.clone(),
+                self.node.clone(),
+                operation.clone(),
+                id.clone(),
+            );
+            return tokio::task::spawn_blocking(move || {
+                crate::nodes::upgrade::read_chunk(&store, &dir, &node, &op, &id, offset, max)
+            })
+            .await
+            .map_err(internal)?;
+        }
         let exec = self.execution(access)?;
         let (workspace, prompt) = self.grant(&exec)?;
         let artifact = prompt
