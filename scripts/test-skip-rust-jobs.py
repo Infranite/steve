@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""A push skips CI's Rust jobs only when it changed nothing but release notes and CI passed on the commit
-before it; everything unclear runs them."""
+"""A push or pull request skips CI's Rust jobs only when it changed nothing but release notes and CI passed
+on the commit it stands on; everything unclear runs them."""
 import contextlib
 import importlib.util
 import io
@@ -179,6 +179,22 @@ class MainTests(unittest.TestCase):
         hub = Hub(compare(NOTES), [run()])
         self.main(hub, dict(self.env, GITHUB_WORKFLOW_REF="o/r/.github/workflows/checks.yml@refs/heads/main"))
         self.assertTrue(hub.asked[1].startswith("actions/workflows/checks.yml/runs?"))
+
+    def test_a_pull_request_is_judged_on_its_head_against_its_base(self):
+        event = self.dir / "pr.json"
+        event.write_text(json.dumps({"pull_request": {"base": {"sha": BEFORE, "ref": "main"},
+                                                      "head": {"sha": SHA, "ref": "release/v0.2.97"}}}))
+        env = dict(self.env, GITHUB_EVENT_PATH=str(event), GITHUB_SHA="c" * 40, GITHUB_REF_NAME="9/merge")
+        hub = Hub(compare(NOTES), [run()])
+        code, said = self.main(hub, env)
+        self.assertEqual((code, self.out.read_text()), (0, "skip=true\n"))
+        self.assertEqual(hub.asked[0], f"compare/{BEFORE}...{SHA}")
+        self.assertIn(f"head_sha={BEFORE}&event=push&branch=main&", hub.asked[1])
+        self.out.unlink()
+        # behind its base (the branch moved on after it was opened): the Rust jobs run
+        code, said = self.main(Hub(compare(NOTES, status="diverged", behind=1), [run()]), env)
+        self.assertEqual((code, self.out.read_text()), (0, "skip=false\n"))
+        self.assertIn("not a plain step forward", said)
 
     def test_a_broken_environment_or_api_runs_them(self):
         class Down(Hub):

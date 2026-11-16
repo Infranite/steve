@@ -3,11 +3,13 @@ name: CI
 # Every job has a time limit of two to several times its longest run, so one that hangs is stopped
 # there instead of holding a runner for GitHub's six hours.
 # cut-release.py accepts only this entire workflow's successful run: the push run on the release head, or the
-# run of the pull request that head was merged from when it tested the same tree.
+# run of the pull request that head was merged from when it tested the same tree. Branch rules on main
+# require the `CI gate` check, by that name. `merge_group` lets GitHub's own merge queue run it too.
 on:
   pull_request:
   push:
     branches: [main]
+  merge_group:
 permissions:
   contents: read
 concurrency:
@@ -65,11 +67,11 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run check && npm run test:web && npm run build:web
-  # A push that changed only release notes (the commit cut-release.py pushes) repeats the Rust jobs of the
-  # commit before it. This job waits for CI on that commit and, when it passed, lets them be skipped.
-  # Pull requests do not run it, and always run the Rust jobs.
+  # A push or pull request that changed only release notes (cut-release.py's release pull request, and its
+  # commit on main) repeats the Rust jobs of the commit it stands on. This job waits for CI on that commit
+  # and, when it passed, lets them be skipped. Merge queue runs do not run it, and always run the Rust jobs.
   changes:
-    if: ${{ github.event_name == 'push' }}
+    if: ${{ github.event_name == 'push' || github.event_name == 'pull_request' }}
     runs-on: ubuntu-22.04
     timeout-minutes: 45 # the script itself stops waiting after 40
     permissions:
@@ -79,7 +81,7 @@ jobs:
       skip: ${{ steps.decide.outputs.skip }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - name: Skip the Rust jobs when only release notes changed and CI passed on the commit before
+      - name: Skip the Rust jobs when only release notes changed and CI passed on the commit it stands on
         id: decide
         env:
           GITHUB_TOKEN: ${{ github.token }}

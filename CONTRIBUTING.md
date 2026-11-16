@@ -2,6 +2,17 @@
 
 Thanks for helping. Build and run Steve locally as described in the [README](README.md#quick-start), then use the checks and release rules below.
 
+## How a change gets in
+
+`main` takes changes only through pull requests; nobody pushes to it, and its branch rules require the `CI gate` check of the CI workflow to pass first.
+
+1. Open a GitHub issue for the work, a bug fix included, unless one already covers it.
+2. Make a branch from the latest `main`: `git fetch origin && git switch -c <branch> origin/main`.
+3. Commit the change with its release-note fragment (below), push the branch and open a pull request into `main` that says `Closes #<issue>`.
+4. CI runs on the pull request. When it passed, the pull request is merged (rebase merge). If `main` moved meanwhile and the pull request conflicts, rebase it onto the new `main` and push again.
+
+The full test suite runs in CI, not on your machine: locally, run the checks of what you changed.
+
 ## Development checks
 
 ```sh
@@ -32,7 +43,7 @@ CI (`.github/workflows/ci.yml`) runs on every pull request and push to `main`, o
 
 After the tests, the job compares the complete test inventory with the run's JUnit execution report (`scripts/nextest-partitions.py`): each ordinary test must have run exactly once and passed on its first try; opt-in ignored tests remain ignored. The job uploads the inventory, the report and Cargo's build timings (`cargo-timing.html`: how long each crate and test binary took to compile), and `scripts/nextest-summary.py` writes the test verdicts to the job summary. Automatic retries are disabled (`--retries 0`): a flaky first attempt fails CI and must be investigated. The final `CI gate` requires every job on both platforms to succeed. Every job in both workflows has a time limit (`timeout-minutes`) of two to several times its longest observed run: a job that hangs fails there instead of holding a runner for GitHub's default of six hours.
 
-A push to `main` that changed only `docs/releases/` (the release notes commit `cut` pushes) does not repeat the Rust jobs or the Apple job: nothing they build or test reads that directory. `scripts/skip-rust-jobs.py` waits for this workflow's run on the commit before the push and skips them when that run passed, so a passed run always stands on Rust jobs that ran on the same code. They run when that run did not pass, when any other file changed, or when GitHub could not say; pull requests always run them. The other jobs and the gate run on every push.
+A push to `main` or a pull request that changed only `docs/releases/` (the release pull request `cut` opens, and its commit on `main`) does not repeat the Rust jobs or the Apple job: nothing they build or test reads that directory. `scripts/skip-rust-jobs.py` waits for this workflow's push run on the commit the change stands on (the commit before the push; the pull request's base, which it must not be behind) and skips them when that run passed, so a passed run always stands on Rust jobs that ran on the same code. They run when that run did not pass, when any other file changed, when the pull request is behind its base, or when GitHub could not say. The other jobs and the gate always run. The workflow also runs on `merge_group`, for GitHub's own merge queue, where the Rust jobs always run.
 
 `cut` accepts only the **entire workflow's** completed successful run, never an individual successful job: the push run on the exact main commit, or the run of the pull request that commit was merged from when it tested the same tree (see "Only a tested `main` is tagged" below).
 
@@ -45,6 +56,6 @@ Official GitHub cache actions restore Rust dependencies under a key made of the 
 A version is chosen when it is released, never ahead on a branch:
 
 - **Release notes are fragments.** A change adds `docs/releases/unreleased/<item>.md` (its item, such as `ST-38.md`, or its branch name): what changes for the user, in a few sentences or bullets, with no version and no title. Do not write `docs/releases/X.Y.Z.md` on a branch; `python3 ops/cut-release.py lint` checks this.
-- **Releasing:** after the change is on `main`, run `python3 ops/cut-release.py cut`. It takes `main` as it is on `origin`, gives it the next free version (one more than the highest `vX.Y.Z` tag), joins the fragments into `docs/releases/X.Y.Z.md`, and pushes the commit and the annotated tag together. If someone else releases first, it starts again with the next number. `--dry-run` shows the notes without releasing; `--minor` bumps the minor version.
+- **Releasing:** after the change is on `main`, run `python3 ops/cut-release.py cut`. It takes `main` as it is on `origin`, gives it the next free version (one more than the highest `vX.Y.Z` tag), and joins the fragments into `docs/releases/X.Y.Z.md`. Because `main` takes nothing but pull requests, that commit goes in as one: `cut` pushes it to `release/vX.Y.Z`, opens a pull request, waits for its CI run (the Rust and Apple jobs are skipped for it, as above), rebase-merges it, and pushes the annotated tag `vX.Y.Z` on the commit it became; the tag starts the Release workflow. If `main` moved before the merge or someone else released first, it closes that pull request and starts again. A release whose pull request merged but whose tag did not land is finished by the next `cut`. `--dry-run` shows the notes without releasing; `--minor` bumps the minor version. Releasing needs `gh` logged in with the right to open and merge pull requests and to push tags.
 - **Only a tested `main` is tagged.** `cut` asks GitHub (with `gh`) for the CI run on the commit it is about to release, waits while it runs (`--ci-wait`, 45 minutes by default), and refuses when it failed or there is none. Until that run has finished, the pull request's own run counts when it tested exactly what is being released: the pull request was up to date with `main` and rebase-merged, so `main` now ends in the same commits with the same trees, one for one. `cut` checks this itself, and then releases without waiting for the second run; a pull request that was behind `main`, was squashed, or whose run did not pass still waits for the run on `main`. Investigate test failures before releasing; a rerun is appropriate for a resolved runner or service failure, not a substitute for fixing a flaky test. `--skip-ci` releases without the check, on purpose. If the Release build on the tag fails on a flake, rerun it the same way on the same tag; nothing is published until every target is built.
 - **Database migrations** take their number when they are merged: the next free one in `hub-rs/crates/steve-store/migrations`, with a line appended to `LOCK`.
