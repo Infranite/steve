@@ -1,0 +1,1 @@
+A Node that sends a request right after it links (catching up, a receipt) is no longer refused with "this connection no longer speaks for the node": requests that arrive before the Hub has installed the link wait for that, then are handled like any other. If the link is refused at that point (revoked, or replaced by a newer one), they are refused as before.

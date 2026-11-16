@@ -138,6 +138,13 @@ pub fn hub_id(store: &Store) -> Result<String, StoreError> {
 }
 
 impl NodeService {
+    /// Holds off installing any link while the guard lives, for tests of what a Node sends between
+    /// its welcome and its install.
+    #[doc(hidden)]
+    pub async fn hold_installs(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.links.lock().await
+    }
+
     pub fn new(
         store: Store,
         fleet: Arc<NodeFleet>,

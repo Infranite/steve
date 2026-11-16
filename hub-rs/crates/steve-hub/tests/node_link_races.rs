@@ -9,7 +9,7 @@ use std::time::Duration;
 use node_harness::*;
 use serde_json::json;
 use steve_hub::nodes::listener::install_link;
-use steve_node_api::NodeId;
+use steve_node_api::{EventSink, NodeId};
 use steve_node_wire::testkit::pair;
 use steve_node_wire::{Conn, ConnOptions, Handler, close};
 use steve_store::StoreError;
@@ -89,6 +89,131 @@ async fn a_pause_between_the_handshake_and_the_install_is_what_counts() {
         "paused, as the store says, not as the welcome said"
     );
     assert_eq!(h.svc.registry.current(node.as_str()), Some(generation));
+}
+
+/// An event batch about work this Node does not hold: refused `denied` once the link is installed.
+fn foreign_batch() -> steve_node_api::EventBatch {
+    use steve_node_api::*;
+    EventBatch {
+        events: vec![NodeEvent {
+            schema: 1,
+            id: EventId::new("early_1").unwrap(),
+            at: Timestamp(1),
+            cursor: Watermark {
+                stream: StreamId::new("st_early").unwrap(),
+                epoch: Epoch::new("e1").unwrap(),
+                seq: 1,
+            },
+            subject: Subject::Session {
+                session: SessionId::new("s_not_here").unwrap(),
+            },
+            body: EventBody::TextDelta {
+                message: "m".into(),
+                block: "b".into(),
+                utf8_offset: 0,
+                text: "early".into(),
+            },
+        }],
+    }
+}
+
+/// A Node may send as soon as its welcome arrives, before the Hub has installed its link: the
+/// request waits for the install instead of being refused `stale`. While installs are held it
+/// cannot be answered at all, so the check below cannot fail by timing; without the wait it was
+/// answered `stale` at once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_request_sent_before_the_install_waits_for_it() {
+    let h = Hub::start().await;
+    let (id, node) = h.paired("u1").await;
+    let held = h.svc.hold_installs().await;
+    let l = dial(
+        &h,
+        &id,
+        &node,
+        steve_node_api::testkit::FakeNode::new(node.as_str()),
+        1,
+    )
+    .await
+    .expect("welcomed");
+    let link = l.link.clone();
+    let mut sent = tokio::spawn(async move {
+        steve_node_wire::RemoteSink(link)
+            .commit(foreign_batch())
+            .await
+    });
+    assert!(
+        tokio::time::timeout(Duration::from_millis(300), &mut sent)
+            .await
+            .is_err(),
+        "answered before the link was installed"
+    );
+    drop(held);
+    let r = sent.await.unwrap();
+    assert!(
+        matches!(&r, Err(e) if e.code == steve_node_api::ErrorCode::Denied),
+        "judged as the installed link: {r:?}"
+    );
+    assert_eq!(h.svc.registry.current(node.as_str()), Some(l.generation));
+}
+
+/// A link that is never installed (revoked between the handshake and the install) does not leave
+/// a request it sent early waiting: it is answered `stale`, or the link closes under it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_request_sent_before_a_refused_install_does_not_hang() {
+    let h = Hub::start().await;
+    let (id, node) = h.paired("u1").await;
+    let held = h.svc.hold_installs().await;
+    let l = dial(
+        &h,
+        &id,
+        &node,
+        steve_node_api::testkit::FakeNode::new(node.as_str()),
+        1,
+    )
+    .await
+    .expect("welcomed");
+    let link = l.link.clone();
+    let mut sent = tokio::spawn(async move {
+        steve_node_wire::RemoteSink(link)
+            .commit(foreign_batch())
+            .await
+    });
+    assert!(
+        tokio::time::timeout(Duration::from_millis(300), &mut sent)
+            .await
+            .is_err(),
+        "answered before the install was decided"
+    );
+    // the revoke commits, then waits for the install lock this test holds: release it once the
+    // store says revoked, which is what the held install will read
+    let url = format!("{}/api/nodes/{node}/revoke", h.url());
+    let revoke = tokio::spawn(async move {
+        reqwest::Client::new()
+            .post(url)
+            .header("x-test-user", "u1")
+            .json(&json!({}))
+            .send()
+            .await
+            .unwrap()
+            .status()
+            .as_u16()
+    });
+    let state = format!("SELECT state FROM nodes WHERE node_id='{node}'");
+    until("revoked in the store", 10, || {
+        h.q::<String>(&state) == "revoked"
+    })
+    .await;
+    drop(held);
+    assert_eq!(revoke.await.unwrap(), 200);
+    let r = tokio::time::timeout(Duration::from_secs(10), sent)
+        .await
+        .expect("answered once the install was refused")
+        .unwrap();
+    assert!(
+        matches!(&r, Err(e) if e.code != steve_node_api::ErrorCode::Denied),
+        "{r:?}"
+    );
+    assert_eq!(h.svc.registry.current(node.as_str()), None);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
