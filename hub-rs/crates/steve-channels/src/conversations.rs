@@ -93,6 +93,9 @@ pub struct Turn {
     /// The sender is the workspace's owner: what they ask for may start. Anyone else's request
     /// becomes a proposal the owner says yes to first.
     pub start: bool,
+    /// The workspace user who asks (the owner on their own trigger word): an item the turn makes
+    /// is requested by them and runs as them. `None`: someone who is not a workspace user.
+    pub user: Option<String>,
 }
 
 /// The sender (`party`) is the workspace's owner: a contact linked to the user who owns it. A sender
@@ -214,10 +217,27 @@ impl Channels {
         let mut meta = json!({ "chan": chan_meta(self, plan, command)? });
         meta["chan"]["owner_only"] = json!(owner_only);
         meta["chan"]["start"] = json!(start);
+        // a trigger word: what is routed is the instruction alone (the reply skill reaches the
+        // composer and research as context, never the routing)
         let text = match (&plan.trigger, command) {
-            // a trigger word: the reply skill with the instruction
-            (Some(i), true) => crate::command_skill::turn(plan, i),
+            (Some(i), true) if !i.trim().is_empty() => i.clone(),
             _ => plan.text.clone(),
+        };
+        // the owner's own command: what it starts is theirs
+        let user = if command && start {
+            self.store().reader(|c| -> ChannelResult<Option<String>> {
+                Ok(match plan.sender_party_id.as_deref() {
+                    Some(p) => c
+                        .query_row("SELECT user_id FROM parties WHERE id = ?", [p], |r| {
+                            r.get(0)
+                        })
+                        .optional()?
+                        .flatten(),
+                    None => None,
+                })
+            })?
+        } else {
+            None
         };
         let text = if text.trim().is_empty() {
             "[消息]".to_string()
@@ -232,6 +252,7 @@ impl Channels {
             items: open,
             owner_only,
             start,
+            user,
         };
         let ws = plan.ws.clone();
         let id = tokio::task::spawn_blocking(move || thread.say(&ws, turn))
@@ -274,6 +295,7 @@ impl Channels {
             items: true,
             owner_only: false,
             start: true, // only the owner's command gets here (above)
+            user: None,
         };
         let ws = plan.ws.clone();
         let id = tokio::task::spawn_blocking(move || thread.say(&ws, turn))
@@ -324,9 +346,14 @@ impl Channels {
             .responder()
             .composer()
             .ok_or_else(|| "没有回复生成器".to_string())?;
+        // a trigger word: the reply skill around its instruction
+        let instruction = match &plan.trigger {
+            Some(i) if plan.mode == Mode::Own => Some(crate::command_skill::turn(&plan, i)),
+            other => other.clone().filter(|i| !i.trim().is_empty()),
+        };
         let opts = crate::compose::ComposeOpts {
             persona_id: None,
-            instruction: plan.trigger.clone().filter(|i| !i.trim().is_empty()),
+            instruction,
             history: None,
         };
         let r = replies
@@ -371,9 +398,15 @@ impl Channels {
                 own,
             )?
             .render();
+            // a trigger word: what research may do with it
+            let note = if chan.is_some_and(|m| m["command"] == true) {
+                format!("\n\n{}", crate::command_skill::RESEARCH_NOTE)
+            } else {
+                String::new()
+            };
             if own {
                 return Ok(format!(
-                    "{card}\n\n这次的问题来自你和 {} 的私聊（{}），只有你本人能看到，回答会发回那里。需要时直接查事项、会话、知识和代码，照实回答。",
+                    "{card}\n\n这次的问题来自你和 {} 的私聊（{}），只有你本人能看到，回答会发回那里。需要时直接查事项、会话、知识和代码，照实回答。{note}",
                     personas::owner_internal_name(c, ws, &space.connection_id)?,
                     crate::respond::space_label(&space),
                 ));
@@ -384,7 +417,7 @@ impl Channels {
                  只说结论，不提其他群、其他客户、内部事项编号、文件路径和代码细节；对方这次自己提到的事项编号或说法可以照着提、用来澄清，但它不代表能说这件事的内容，内容仍只按能说的部分说；拿不准能不能说的，就当不知道，或者说会请 {owner} 来看。查不到、查询失败或没有权限时，笼统地说明即可，不说是什么权限、哪里报错。",
                 crate::respond::space_label(&space),
                 if space.has_external { "，有外部成员" } else { "" },
-            ))
+            ) + &note)
         });
         r.unwrap_or_default()
     }

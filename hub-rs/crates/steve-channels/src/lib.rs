@@ -144,6 +144,7 @@ pub mod send_state;
 mod service;
 pub mod space_decisions;
 pub mod spaces;
+pub mod trigger_report;
 pub mod usage;
 
 pub use channel::{

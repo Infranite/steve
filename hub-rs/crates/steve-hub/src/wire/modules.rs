@@ -706,6 +706,11 @@ pub fn build(env: Env<'_>) -> Result<Built, BackendError> {
             channels.clone(),
             outbox.clone(),
         )),
+        // an item handed off from your trigger word reports back to its message
+        Box::pin(steve_channels::trigger_report::run(
+            channels.clone(),
+            outbox.clone(),
+        )),
         Box::pin(steve_flow::Scheduler::new(flow.clone()).run()),
         Box::pin(super::digest_bot::run(modules.clone(), flow.clone())),
         Box::pin(steve_flow::Poller::new(flow.clone()).run()),

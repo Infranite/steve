@@ -35,6 +35,7 @@ impl Channels {
                 ws,
                 &space,
                 conn,
+                &inbound.message_id,
                 inbound.sender_account_id.as_deref(),
                 inbound.sender_party_id.as_deref(),
                 &m.text,
@@ -45,6 +46,12 @@ impl Channels {
             };
             // once per message; and only while your account is still in the chat
             if answered(c, ws, &inbound.message_id)? || !present(c, &space.id, conn)? {
+                return Ok(None);
+            }
+            // the thread of an item handed off: what is said there goes to that item
+            if crate::messages::thread_item(c, ws, &inbound.message_id, inbound.from_owner)?
+                .is_some()
+            {
                 return Ok(None);
             }
             let set = spaces::settings(c, &space.id)?;
@@ -321,8 +328,9 @@ pub(crate) fn target(ch: &Channels, plan: &Plan) -> ChannelResult<OutTarget> {
     Ok(t)
 }
 
-/// The conversation turn for a trigger word with instruction `instruction` (empty: work it out
-/// from the chat).
+/// What the composer is told for a trigger word with instruction `instruction` (empty: work it out
+/// from the chat). Only the instruction itself is routed (`converse`): this text never decides
+/// whether the turn becomes work, and holds none of the words that would.
 pub fn turn(plan: &Plan, instruction: &str) -> String {
     let who = if plan.sender_name.trim().is_empty() {
         "有人".to_string()
@@ -344,14 +352,18 @@ pub fn turn(plan: &Plan, instruction: &str) -> String {
          指令：{ask}\n\n\
          怎么做：\n\
          1. 先看这个群聊或私聊的上下文（话题里的就看整个话题），弄清在说什么、要什么、对谁说。\n\
-         2. 能直接回答的，就给出要发回聊天的回复正文：简短、直接、口语，回答对方真正问的；回复{as_whom}。只写正文，不加任何前缀、标记或署名。\n\
-         3. 需要动手做、要花时间、要查代码或文档、要跟进的，就建一个事项把任务下发出去，回复里说清已经接手、接下来做什么；不要在聊天里贴过程。\
-         事项说明里写明：执行中的关键进展（开始做了、遇到阻塞、需要对方确认什么）用 steve_reply_source 简短同步给对方；完成时系统会自动回完成说明。\n\
-         4. 拿不准、缺信息时，在回复里问清楚一个最关键的问题，而不是猜。\n\
-         5. 只回复这一条消息，不替别人表态，不说没被问到的内部信息。",
+         2. 给出要发回聊天的回复正文：简短、直接、口语，回答对方真正问的；回复{as_whom}。只写正文，不加任何前缀、标记或署名。\n\
+         3. 拿不准、缺信息时，在回复里问清楚一个最关键的问题，而不是猜。\n\
+         4. 只回复这一条消息，不替别人表态，不说没被问到的内部信息。",
         space = plan.space_name,
     )
 }
+
+/// What research is told about a trigger word's turn: it may answer, or hand the work on as a
+/// background task whose key progress and end go back to the message.
+pub const RESEARCH_NOTE: &str = "这次是聊天里的触发词指令：能直接回答的就回答；确实需要动手做、要花时间跟进的，\
+交给后台去做，回复里说清已经接手、接下来做什么。后台工作执行中的关键进展（开始做了、遇到阻塞、需要对方确认什么）\
+用 steve_reply_source 简短同步给对方；结束时不用再说，原消息的表情会变成完成。";
 
 #[cfg(test)]
 mod tests {
@@ -385,7 +397,7 @@ mod tests {
         assert!(t.contains("指令：看下告警\n"));
         assert!(t.contains("以你本人的账号发出"));
         assert!(!t.contains("[AI]"), "marking is the send path's");
-        assert!(t.contains("建一个事项"));
+        assert!(!t.contains("事项"), "nothing that would route it as work");
         let t = turn(&plan(Mode::Bot), "");
         assert!(t.contains("没有附加说明"));
         assert!(t.contains("以这里的发言身份发出"));

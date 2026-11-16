@@ -931,9 +931,13 @@ pub fn verify(
                         .flatten();
                     let you = sender == account
                         || crate::arbiter::from_you(c, &row.ws, Some(&sender), party.as_deref())?;
+                    // the word itself, or a conversation it started going on
                     !blocked
                         && t.allows(you, party.as_deref())
-                        && t.instruction(&space.id, dm, &text, &names).is_some()
+                        && (t.instruction(&space.id, dm, &text, &names).is_some()
+                            || (t.on
+                                && t.applies(&space.id, dm)
+                                && crate::arbiter::continues(c, &space.id, source)?))
                 }
                 _ => false,
             }
@@ -2105,22 +2109,16 @@ impl Outbox {
         let Some((plan, summary, mine)) = found else {
             return Ok(None);
         };
-        // an answer to your trigger word: its end is said as you, where the answer went
-        let as_trigger = ch.store().reader(|c| {
-            crate::command_skill::trigger_plan(c, &item.workspace_id, &plan.message_id)
-        })?;
-        if let Some(tp) = as_trigger {
-            let req = OutRequest {
-                target: crate::command_skill::target(ch, &tp)?,
-                text: done_text(&item.id, &summary),
-                purpose: Purpose::Done,
-                approve: false,
-                generation: None,
-                auth: Auth::Trigger {
-                    source: tp.message_id.clone(),
-                },
-            };
-            return Ok(Some(self.deliver_checked(ch, &req).await?.0));
+        // handed off from your trigger word: its end says nothing, the message's reaction turns to
+        // done (`react_item_ended`) — progress and failures were said on the way (trigger_report)
+        if ch
+            .store()
+            .reader(|c| {
+                crate::command_skill::trigger_plan(c, &item.workspace_id, &plan.message_id)
+            })?
+            .is_some()
+        {
+            return Ok(None);
         }
         // in the owner's private chat with the bot it is Steve reporting to them: sent like a reply there (the
         // reply rule still has to allow it), not held as a draft; anywhere else it waits for the owner

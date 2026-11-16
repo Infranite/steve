@@ -964,6 +964,56 @@ fn triggers(h: &H, v: Value) {
     );
 }
 
+/// A conversation goes on without the word: in the thread of an answered trigger word (or replying
+/// to its answer) your next message is taken too, answered in the same thread; someone else's there
+/// is not, unless `who` lets them.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_trigger_word_starts_a_conversation_that_goes_on_in_its_thread() {
+    let h = setup().await;
+    checks_pass(&h);
+    h.env.gateway.script(
+        H_SAFETY,
+        r#"{"text": "好的。", "needs_approval": false, "why": "你让我回"}"#,
+    );
+    let me = h.me.clone();
+    push(&h, &me, msg("C_OPS", "t0", "ulilei", "大家好", false)).await;
+    triggers(
+        &h,
+        json!({"on": true, "words": ["/ai"], "where": ["*"], "who": ["me"], "reply": "thread", "mark": true}),
+    );
+    let first = push(&h, &me, msg("C_OPS", "t1", "upx", "/ai 帮我看下", false)).await;
+    assert!(matches!(first.response.unwrap().by, By::Trigger { .. }));
+    let n = sent(&h).len();
+    // your follow-up in its thread: no word needed, answered in the thread
+    let mut f = msg("C_OPS", "t2", "upx", "再详细一点", false);
+    f.thread_key = Some("t1".into());
+    let r = push(&h, &me, f).await.response.expect("response");
+    assert!(
+        matches!(r.by, By::Trigger { ref instruction } if instruction == "再详细一点"),
+        "{r:?}"
+    );
+    assert_eq!(sent(&h).len(), n + 1);
+    assert!(matches!(
+        sent(&h).last().unwrap().0,
+        SendTarget::Reply {
+            in_thread: true,
+            ..
+        }
+    ));
+    // someone else in the thread: not taken (only you)
+    let mut o = msg("C_OPS", "t3", "ulilei", "我也想问", false);
+    o.thread_key = Some("t1".into());
+    let r = push(&h, &me, o).await.response.expect("response");
+    assert!(!matches!(r.by, By::Trigger { .. }), "{r:?}");
+    assert_eq!(sent(&h).len(), n + 1);
+    // a message outside any trigger thread: not taken
+    let r = push(&h, &me, msg("C_OPS", "t4", "upx", "随便说一句", false))
+        .await
+        .response
+        .expect("response");
+    assert!(!matches!(r.by, By::Trigger { .. }), "{r:?}");
+}
+
 /// Someone else may use the words (`who`), but what they ask is checked first: a try for what is
 /// yours to keep (your personal information, the deployment, Steve's prompts) gets a fixed polite
 /// refusal said as you and a notification for you; one that cannot be judged waits for you. Your

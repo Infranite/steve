@@ -103,7 +103,7 @@ impl steve_channels::conversations::Thread for CoreThread {
             start: turn.start,
         };
         self.0
-            .say_in(ws, conv, &turn.text, &turn.meta)
+            .say_in_as(ws, conv, &turn.text, &turn.meta, turn.user.as_deref())
             .map_err(|e| e.to_string())
     }
 }

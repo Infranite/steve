@@ -412,6 +412,19 @@ impl Core {
     /// A turn in conversation `conv` from someone who is not a workspace user (an IM space's
     /// sender): stored with `meta`, routed on the workspace lane like web chat. Needs a tokio runtime.
     pub fn say_in(&self, ws: &str, conv: Conv, text: &str, meta: &Value) -> Result<String> {
+        self.say_in_as(ws, conv, text, meta, None)
+    }
+
+    /// [`Thread::say_in`] for a workspace user (`user`: the owner on their own trigger word in a
+    /// chat): an item the turn makes is requested by them and runs as them.
+    pub fn say_in_as(
+        &self,
+        ws: &str,
+        conv: Conv,
+        text: &str,
+        meta: &Value,
+        user: Option<&str>,
+    ) -> Result<String> {
         let mid = self
             .store()
             .message_add_in(ws, &conv.space, "me", text, None, meta)?;
@@ -421,7 +434,7 @@ impl Core {
                 mid: mid.clone(),
                 text: text.to_string(),
                 files: vec![],
-                user: None,
+                user: user.map(str::to_string),
                 mentions: vec![],
                 to: SayTo::default(),
                 conv,
