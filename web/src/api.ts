@@ -39,7 +39,9 @@ export type SuggestChoice = "here" | "item" | "new"
 export type SendNowResult = { result: "interrupted" | "sent" | "waiting"; reason?: string }
 export type RDecision = { id: string; kind: "accept" | "ask" | "approve" | "fail" | "propose" | "confirm"; subject_type: string; subject_id: string; item_id: string | null; session_id: string | null; question: string; draft: string; options: string[]; status: "open" | "resolved" | "expired"; result: any; requested_by: string; created: number; resolved: number | null; undo: any
   /** opened from inside a turn that is still going: the answer reaches the agent once it stops */
-  agent_busy?: boolean }
+  agent_busy?: boolean
+  /** a decision about a chat message: opens it (or its chat) in the platform's own client (newer Hubs) */
+  open_url?: string }
 export type RBot = { id: string; name: string; role: string; main: boolean; harness: string; model: string | null; reasoning_effort?: string | null; rules: string; persona: string; proactive: number; accept_mode: string; perm_mode: string; avatar: { color?: string; skin?: string | null; round?: number }; default_project: string | null; prompt: string | null; device: string | null; enabled: boolean; revision: number; updated: number; workspaces: string[]; memories: number }
 /** GET /sessions/:id/resume: the harness's own session, how to resume it there, and whether its transcript is on the Hub's machine */
 export type RResume = { harness: string; id: string | null; cwd: string; cwd_exists: boolean; command: string | null; fork_command?: string | null; transcript_checked?: boolean; transcript: { path: string; updated: number | null; id: string | null; cwd: string | null; matches: boolean } | null }

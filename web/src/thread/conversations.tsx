@@ -14,6 +14,8 @@ import { Dialog, DialogContent, DialogTitle, DialogDescription } from "@/compone
 import { t as tr, useT } from "@/i18n"
 import { HubError } from "@/api"
 import { hubBase } from "@/hub"
+import { MessageActions } from "@/components/affect/message-actions"
+import { OpenInFeishu, openable, openInApp, openInFeishuLabel } from "@/channels/open-in-app"
 
 /** one IM conversation, its messages as the chat renders them plus what only IM turns have */
 export function useConversation(space: string | undefined) {
@@ -124,6 +126,7 @@ export function ConvSwitcher({ current, badge }: { current?: string; badge?: Con
         <span className="truncate type-callout font-medium" title={badge?.name}>{badge?.name || t("thread:conv.current")}</span>
         <Button variant="ghost" size="icon-sm" className="shrink-0 text-muted-foreground" aria-label={t("thread:conv.closeCurrent")} disabled={busy !== null} onClick={() => void change(current, true)}><XIcon /></Button>
       </div>
+      <OpenInFeishu url={badge?.open_url} compact />
       <Button variant="ghost" size="sm" className="ml-auto shrink-0 text-muted-foreground" onClick={() => setOpen(true)}><ListIcon />{t("thread:conv.list")}</Button>
     </nav>}
     {!open && error && <p role="alert" className="mx-auto px-4 type-callout text-destructive">{error}</p>}
@@ -228,6 +231,21 @@ export function ImReadOnly({ b }: { b: ConvBadge }) {
       <Button size="sm" variant="outline" className="shrink-0 self-start sm:self-auto" onClick={() => go("#/channels/space/" + b.space_id)} data-open-space>
         <ExternalLinkIcon />{t(b.dm ? "thread:conv.openDm" : "thread:conv.openGroup")}
       </Button>
+    </div>
+  )
+}
+
+/** the actions under a turn of an IM conversation (affectUI Message Actions): open it in its platform's client. `side`:
+ *  where the turn sits (someone in the chat on the right, Steve on the left); on a touch screen only the latest shows */
+export function ImMsgActions({ url, side, last }: { url?: string | null; side: "start" | "end"; last?: boolean }) {
+  const t = useT()
+  const href = openable(url)
+  if (!href) return null
+  return (
+    <div className={cn("pointer-events-none absolute -bottom-8 left-0 right-0 opacity-0 transition-opacity [&_button]:pointer-events-auto focus-within:opacity-100",
+      side === "end" ? "group-hover/me:opacity-100 group-focus-within/me:opacity-100" : "group-hover/sm:opacity-100 group-focus-within/sm:opacity-100",
+      last && "[@media(hover:none)]:opacity-100")} data-im-msg-actions>
+      <MessageActions actions={[]} align={side} quiet={false} label={t("pages:chat.msgActions")} more={[{ key: "open-in-app", label: openInFeishuLabel(), icon: <ExternalLinkIcon strokeWidth={1.75} />, onClick: () => openInApp(href), attrs: { "data-open-in-app": "" } }]} />
     </div>
   )
 }

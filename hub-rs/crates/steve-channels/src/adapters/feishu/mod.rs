@@ -28,6 +28,7 @@ pub mod decl;
 pub mod directory;
 pub mod hooks;
 pub mod inbound;
+pub mod links;
 pub mod pbbp2;
 pub mod profiles;
 pub mod ratelimit;

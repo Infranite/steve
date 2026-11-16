@@ -1,4 +1,5 @@
 import { ChannelMessageBody } from "@/channels/message-body"
+import { OpenInFeishu } from "@/channels/open-in-app"
 /* 群和私聊 (channels-personas.md §2.2–§2.6, §8; prototype channels.tsx SpaceView): who speaks here, the duty, when to
  * respond, how far its content may travel, collaboration, members and the recent messages with their basis.
  * Route #/channels/space/:id. Changing settings never sends anything to the chat. */
@@ -60,7 +61,7 @@ export function SpaceView({ id }: { id: string }) {
   const shownMsgs = allMsgs ? recent : recent.slice(0, MSG_PREVIEW)
   const personaOwn = !!s.persona && !s.persona.inherited
   return (
-    <Page title={title} back={acc ? ["#/channels/acc/" + acc.connection.id, accName] : home} max={720}
+    <Page title={title} back={acc ? ["#/channels/acc/" + acc.connection.id, accName] : home} max={720} actions={<OpenInFeishu url={s.open_url} />}
       sub={<span className="flex min-w-0 items-center gap-2"><SpaceAvatar s={s} size={22} /><Meta>{s.counterpart && s.counterpart.name !== title && <span>{s.counterpart.name}</span>}<span>{kind}</span>{s.has_external && <span>{t("channels:word.externalMembers")}</span>}<span>{acc ? t("channels:space.viaProvider", { name: accName, provider: acc.provider.name }) : accName}</span>{s.status !== "active" && <span>{t(s.status === "left" ? "channels:space.left" : "channels:space.archived")}</span>}</Meta></span>}>
       <div className="flex flex-col gap-8" data-space={s.id}>
         {(!s.configured || waiting.length > 0) && <div className="flex flex-col gap-2">

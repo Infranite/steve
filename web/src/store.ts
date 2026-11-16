@@ -23,7 +23,9 @@ export type Ev = any[] // ['u',text,label?] ['q',string[]] ['th',text,secs] ['to
 export type Sess = { id: string; n: number; item: string | null; b: string | null; h?: string; harness?: string; nativeId?: string | null; cwd?: string; m?: string; reasoningEffort?: string | null; contextKnown?: boolean; /** the context in tokens, as the harness reported it: used and the window's size */ ctxUsed?: number; ctxSize?: number; st: "run" | "wait" | "idle" | "ended"; title: string; dur: string; ctx: number; src: string; up: string; /** status updated (ms), not execution activity */ at?: number; ev: Ev[]; seqs: number[]; ts: number[]; from?: string | null; fork?: { s: string; at: number }; queue: RQueued[]; ro?: boolean; device: string; loaded: boolean; busy: boolean; /** its next turn waits for room on its device */ room?: RRoom | null
   /** not opened on its Node yet: no turn runs, the queue waits for the start; `since` is when it was created */
   starting?: boolean; since?: number }
-export type Wait = { type: "approve" | "ask" | "accept" | "propose" | "fail" | "confirm"; subjectId?: string; q: string; draft?: string; opts?: string[]; since: string; decision: string; subject: string; session: string | null; options: string[]; by: string; busy?: boolean }
+export type Wait = { type: "approve" | "ask" | "accept" | "propose" | "fail" | "confirm"; subjectId?: string; q: string; draft?: string; opts?: string[]; since: string; decision: string; subject: string; session: string | null; options: string[]; by: string; busy?: boolean
+  /** a chat message's decision: the link that opens it in the platform's own client */
+  openUrl?: string }
 export type Done = { id: string; type: Wait["type"]; q: string; choice: string; tm: string; at: number; decision: string; canUndo: boolean; undone?: boolean; how: "chose" | "dismissed" | "expired"; rel?: Rel
   /** answered by YOLO: its reason (modules/yolo.md §3.3 `decided_by: "yolo"`) */
   yolo?: string
@@ -322,7 +324,7 @@ function sessOf(s: RSession, openSessions: Set<string>): Sess {
 }
 function waitOf(d: RDecision): Wait {
   const opts = d.kind === "ask" ? d.options : undefined
-  return { type: d.kind, q: d.question, draft: d.draft, opts, since: since(d.created), decision: d.id, subject: d.subject_type, subjectId: d.subject_id, session: d.session_id, options: d.options, by: d.requested_by, busy: !!d.agent_busy }
+  return { type: d.kind, q: d.question, draft: d.draft, opts, since: since(d.created), decision: d.id, subject: d.subject_type, subjectId: d.subject_id, session: d.session_id, options: d.options, by: d.requested_by, busy: !!d.agent_busy, openUrl: d.open_url }
 }
 /** Both pending and recent resolved decisions are returned by state, including orphan sessions. */
 export function permissionDecision(id?: string) {

@@ -13,6 +13,8 @@ export default {
     editPersona: "编辑身份",
     saveRules: "保存规则",
     rulesSaved: "已保存规则",
+    /* opens the chat (or message) in the Feishu client: desktop on a computer, the app on a phone */
+    openInFeishu: "在飞书中打开",
   },
   /* 群聊与私聊: the list of groups and DMs, the channel accounts */
   list: {

@@ -12,6 +12,7 @@ export default {
     editPersona: "Edit persona",
     saveRules: "Save rules",
     rulesSaved: "Rules saved",
+    openInFeishu: "Open in Feishu",
   },
   list: {
     title: "Chats",
