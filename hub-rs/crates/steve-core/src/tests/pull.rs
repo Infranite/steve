@@ -201,9 +201,10 @@ fn a_conflict_or_a_failed_check_goes_back_to_the_agent_once_per_head() {
     k.rt.end_turn(&k.core, &x.session, "end_turn", None);
     assert!(k.wait(|| k.core.tx().st.probing.is_empty()));
     // rebased onto main (the same change): a new head, and a failed check on it
+    // a new message, not only a new date: an amend within the same second would keep the hash
     g(
         &x.wt,
-        &["commit", "-q", "--amend", "--no-edit", "--date", "now"],
+        &["commit", "-q", "--amend", "-m", "the same change, rebased onto main"],
     );
     let h2 = head(&x.wt);
     assert_ne!(h, h2);
