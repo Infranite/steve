@@ -1,7 +1,7 @@
 // The comm pages lead with what needs you, against a fake Hub: 群聊与私聊 puts a broken account and an unset new
 // group in one notice and says per row what Steve does there; a group's page says how many replies wait for you,
 // shows the latest five messages and folds the rarely changed settings; an account's trigger words are one switch
-// until they are on; 连接 with a handful of services shows them without search or categories. 1280 and 390 px.
+// until they are on, and its spaces come grouped, new ones first; 连接 with a handful of services shows them without search or categories. 1280 and 390 px.
 import assert from "node:assert/strict"
 import { mkdirSync } from "node:fs"
 const { chromium } = await import(process.env.PLAYWRIGHT_MODULE || "playwright")
@@ -58,8 +58,8 @@ const run = async ({ width, scheme }) => {
     assert.equal(await page.locator('[data-attention-account="conn_ext"]').count(), 1)
     assert.match(await page.locator("[data-attention-new]").innerText(), /周会/)
     assert.equal(await page.locator('[data-space-row="告警推送"]').count(), 0)
-    assert.equal(await page.locator('[data-space-item="sp_ops"] [data-space-doing]').innerText(), "小运 直接回复 · 值班机器人")
-    assert.equal(await page.locator('[data-space-item="sp_ext"] [data-space-doing]').innerText(), "替你起草，等你批准 · 夜班桥")
+    assert.equal(await page.locator('[data-space-item="sp_ops"] [data-space-doing]').innerText(), "@ 时小运回复，其余只记录 · 值班机器人")
+    assert.equal(await page.locator('[data-space-item="sp_ext"] [data-space-doing]').innerText(), "@你时替你起草，其余只记录 · 夜班桥")
     await fits(); await shot("chats")
     // a group: the reply waiting for you, the latest five messages, the settings you rarely change folded
     await page.goto(base + "/test/fixtures/comm-pages.html?view=space" + q); await page.locator("[data-space-waiting]").waitFor()
@@ -75,6 +75,13 @@ const run = async ({ width, scheme }) => {
     await page.goto(base + "/test/fixtures/comm-pages.html?view=account" + q); await page.locator("[data-trigger-on]").waitFor()
     assert.equal(await page.locator("[data-trigger-scope]").count(), 0)
     await fits(); await shot("account")
+    // the bot's account: its spaces grouped, the new one first with one action for all new ones, the blocked one folded
+    await page.goto(base + "/test/fixtures/comm-pages.html?view=account&id=conn_bot" + q); await page.locator("[data-grouped-spaces]").waitFor()
+    assert.equal(await page.locator('[data-spaces-group="new"] [data-space-row="周会"]').count(), 1)
+    assert.equal(await page.locator("[data-spaces-batch] [data-batch]").count(), 3)
+    assert.equal(await page.locator('[data-spaces-group="recent"] [data-space-row="值班群"]').count(), 1)
+    assert.equal(await page.locator('[data-space-row="告警推送"]').count(), 0)
+    await fits(); await shot("account-spaces")
     // 连接 with two services: no search or categories, and the one with missing permissions in the notice
     await page.goto(base + "/test/fixtures/comm-pages.html?view=integrations" + q); await page.locator("[data-integrations-attention]").waitFor()
     assert.equal(await page.locator("[data-adc-search]").count(), 0)
