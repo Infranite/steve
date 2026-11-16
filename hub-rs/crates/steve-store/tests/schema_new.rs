@@ -266,6 +266,12 @@ fn rerunning_the_module_migrations_changes_nothing() {
     for m in db::MIGRATIONS[3..33].iter().chain(&db::MIGRATIONS[34..36]) {
         c.execute_batch(m).unwrap();
     }
+    // 031 made the merge lane's tables, which a later migration dropped: replayed, they go again
+    let dropped = db::MIGRATIONS
+        .iter()
+        .find(|m| m.contains("DROP TABLE IF EXISTS lanes;"))
+        .unwrap();
+    c.execute_batch(dropped).unwrap();
     drop(c);
     assert_eq!(schema_of(&path), before);
     db::migrate(&Connection::open(&path).unwrap()).unwrap();

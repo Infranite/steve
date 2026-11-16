@@ -799,42 +799,6 @@ pub trait Domain: Send + Sync + 'static {
     async fn lifecycle_tick(&self) -> BResult<usize> {
         Ok(0)
     }
-    /// The merge lane of (`upstream`, `branch`) as the project page shows it (`None`: nothing went
-    /// into it yet).
-    async fn lane_view(&self, upstream: &str, branch: &str) -> BResult<Option<Value>> {
-        Ok(None)
-    }
-    /// Your limits for that lane (`None`: the default); the lane as shown after.
-    async fn lane_policy(
-        &self,
-        upstream: &str,
-        branch: &str,
-        window_ms: Option<i64>,
-        max_members: Option<i64>,
-    ) -> BResult<Option<Value>> {
-        todo_backend!("lane_policy")
-    }
-    /// "Merge and release now": the lane's collecting batch closes. `false`: none was collecting.
-    async fn lane_now(&self, upstream: &str, branch: &str) -> BResult<bool> {
-        todo_backend!("lane_now")
-    }
-    /// The merge queue of (`upstream`, `branch`) as workspace `ws` sees it (`None`: the queue is
-    /// off).
-    async fn mq_view(&self, upstream: &str, branch: &str, ws: &str) -> BResult<Option<Value>> {
-        Ok(None)
-    }
-    /// What you did on that queue (`{policy}`, `{allow}`, `{release_now}`, `{once}`); the queue as
-    /// shown after.
-    async fn mq_act(
-        &self,
-        upstream: &str,
-        branch: &str,
-        ws: &str,
-        act: Value,
-        actor: &str,
-    ) -> BResult<Option<Value>> {
-        todo_backend!("mq_act")
-    }
     async fn revise_goal(&self, id: &str, text: &str) -> BResult<()> {
         todo_backend!("revise_goal")
     }

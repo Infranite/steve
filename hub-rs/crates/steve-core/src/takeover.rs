@@ -2,14 +2,13 @@
 //! void after it was frozen, is not handed to you straight away.
 //!
 //! 1. The agent's last words are a question → the card, as before (YOLO may answer it).
-//! 2. An active persisted merge-lane request owns the wait → no automatic nudge.
-//! 3. The project has a completion rule (`Release::done_when`: merged, or merged and tagged) and the item
+//! 2. The project has a completion rule (`Release::done_when`: merged, or merged and tagged) and the item
 //!    was delivered in this cycle → Steve checks the remote (off the lock, [`upstream::probe`]); when the
 //!    rule holds, the item completes on that evidence, nobody asked.
-//! 4. Otherwise Steve continues the agent with what it found — at most `takeover_continues` times in a
+//! 3. Otherwise Steve continues the agent with what it found — at most `takeover_continues` times in a
 //!    row; anything you do on the item starts the count again. A continue never runs twice for one stop:
 //!    a turn already running or a message already queued is the continue.
-//! 5. Out of continues, or nothing to continue (no session) → one card for you, saying so. A card that
+//! 4. Out of continues, or nothing to continue (no session) → one card for you, saying so. A card that
 //!    is already open for the same thing is not opened again.
 //!
 //! A required release of a project with a completion rule is the rule itself: met when the remote shows
@@ -159,9 +158,6 @@ impl Tx<'_> {
         if crate::yolo::limits::own_action(&self.db().final_reply(sid)?).is_some() {
             return Ok(Some(stop.why().into()));
         }
-        if self.waiting_on_lane(item_id)? {
-            return Ok(None);
-        }
         /* the graph is not done: no completion rule can hold, the coordinator has to act */
         if let Stop::Workflow { why } = &stop {
             let text = format!(
@@ -235,11 +231,7 @@ impl Tx<'_> {
             .decisions_of_item(item_id)?
             .iter()
             .any(|d| d.status == "open" && matches!(d.kind.as_str(), "approve" | "ask"));
-        if waiting
-            || self.waiting_on_lane(item_id)?
-            || self.busy(&s.id)
-            || !self.db().queued(&s.id)?.is_empty()
-        {
+        if waiting || self.busy(&s.id) || !self.db().queued(&s.id)?.is_empty() {
             self.c.steve_note(&s.id, &text);
             return Ok(());
         }
@@ -247,22 +239,6 @@ impl Tx<'_> {
             self.fail(item_id, &why)?;
         }
         Ok(())
-    }
-
-    /// A persisted lane request explains an idle agent, including after a restart.
-    /// The lane owns approval/release failure cards. Once it releases or returns the request,
-    /// normal completion checks resume. This never suppresses explicit user messages.
-    pub(crate) fn waiting_on_lane(&self, item_id: &str) -> Result<bool> {
-        Ok(self
-            .db()
-            .store()
-            .reader(|c| steve_store::lanes::request_of_item(c, item_id))?
-            .is_some_and(|r| {
-                matches!(
-                    r.state.as_str(),
-                    "queued" | "collecting" | "merging" | "merged"
-                )
-            }))
     }
 
     /// Steve's continues since you last did something on the item.
@@ -549,7 +525,6 @@ impl Tx<'_> {
                     || i.is_settled()
                     || i.status == "block"
                     || self.dependency_waiting(item_id)?
-                    || self.waiting_on_lane(item_id)?
                     || self.busy(&session)
                     || !self.db().queued(&session)?.is_empty()
                     || self

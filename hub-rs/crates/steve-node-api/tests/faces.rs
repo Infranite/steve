@@ -264,19 +264,6 @@ fn the_new_types_survive_the_wire() {
         },
     };
     roundtrip(&cmd("op_p", push(w.clone(), &f, Some(header))));
-    roundtrip(&cmd(
-        "op_m",
-        GitApply {
-            workspace: w.clone(),
-            expected: f.revision.clone(),
-            expected_head: f.head.clone(),
-            action: GitAction::Merge {
-                commit: "def".into(),
-                message: Some("合并 ST-1".into()),
-                back_out_on_conflict: false,
-            },
-        },
-    ));
     let mut e = exec_in(w, "make check");
     e.secrets = vec![SecretRef {
         id: "v1".into(),
@@ -361,15 +348,6 @@ fn what_an_older_peer_sends_still_decodes() {
         serde_json::from_str(r#"{"root":{"root":"notes","rel":""},"include":[],"exclude":[]}"#)
             .unwrap();
     assert_eq!(s.limits, ScanLimits::default());
-    let m: GitAction = serde_json::from_str(r#"{"type":"merge","commit":"abc"}"#).unwrap();
-    assert_eq!(
-        m,
-        GitAction::Merge {
-            commit: "abc".into(),
-            message: None,
-            back_out_on_conflict: true,
-        }
-    );
     let c: Capabilities = serde_json::from_value(serde_json::json!({
         "node": "n1", "os": "x", "version": "0", "harnesses": [], "roots": [],
         "capacity": {"sessions": 1, "jobs": 0, "execs": 0}

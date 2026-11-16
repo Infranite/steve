@@ -139,7 +139,7 @@ fn steve_meta(name: &str) -> (&'static [&'static str], bool) {
     let n = name.strip_prefix("steve_").unwrap_or(name);
     let res: &'static [&'static str] = match n {
         "update" | "ask" | "request_approval" | "deliver" => &["item", "turn"],
-        "publish" | "lane_status" => &["item", "release", "git"],
+        "publish" => &["item", "release", "git"],
         "workflow" => &["workflow", "item"],
         "sessions_list" => &["session"],
         "devices" => &["device"],

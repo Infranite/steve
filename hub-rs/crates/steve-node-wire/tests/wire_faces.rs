@@ -569,15 +569,6 @@ async fn every_new_kind_crosses_the_wire_unchanged() {
         )
         .await;
     }
-    crosses(
-        &c,
-        GitAction::Merge {
-            commit: "c".into(),
-            message: Some("m".into()),
-            back_out_on_conflict: false,
-        },
-    )
-    .await;
     crosses(&c, RootAccess::ReadOnly).await;
     crosses(&c, RootAccess::ReadWrite).await;
     crosses(&c, SecretBytes::new(vec![1, 2, 3])).await;
@@ -727,17 +718,6 @@ async fn an_older_peer_is_never_sent_what_it_would_ignore() {
     );
     refused(remote.locate(history_ref("cc:abc")).await.unwrap_err());
     let f = facts();
-    let merge = GitApply {
-        workspace: ws.clone(),
-        expected: f.revision.clone(),
-        expected_head: f.head.clone(),
-        action: GitAction::Merge {
-            commit: "def".into(),
-            message: Some("合并 ST-1".into()),
-            back_out_on_conflict: true,
-        },
-    };
-    refused(remote.git_apply(cmd("op_m", merge)).await.unwrap_err());
     let push = GitApply {
         workspace: ws.clone(),
         expected: f.revision.clone(),

@@ -24,7 +24,6 @@ const READ_ONLY: &[&str] = &[
     super::diagnostics::TOOL,
     "steve_items_search",
     "steve_item_read",
-    steve_mcp::tools::LANE_STATUS,
     "steve_event_get",
     "steve_knowledge_search",
     "steve_knowledge_read",
