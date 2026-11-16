@@ -744,14 +744,17 @@ pub fn wire_assembly(
         ));
     }
     // whether a principal's Bot can run at all: the adapters' declarations, what the Nodes said
-    // of them last, and per-principal state (#222)
+    // of them last, and per-principal state (#222); a Node linked but not heard from yet leaves
+    // its harnesses unknown, never refused (#234)
     let preflight = {
         let h = harnesses.clone();
+        let svc = nodes.clone();
         let readiness: model_access::Readiness = Arc::new(move || {
-            h.list()
-                .into_iter()
-                .map(|x| (x.id, x.name, x.ready))
-                .collect()
+            let linked = svc
+                .as_ref()
+                .map(|s| s.registry.linked())
+                .unwrap_or_default();
+            h.readiness(&linked)
         });
         model_access::Preflight::new(
             cfg.declared_adapters.clone(),

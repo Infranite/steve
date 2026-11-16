@@ -197,7 +197,8 @@ impl Runtimes {
             return false;
         }
         if let Some(observed) = observed {
-            if !observed.update_if_current(observed_generation, result.2.clone()) {
+            let caps = result.1.then(|| result.2.clone());
+            if !observed.update_if_current(observed_generation, caps) {
                 return false;
             }
         }
