@@ -16,7 +16,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use rusqlite::params;
+use rusqlite::{OptionalExtension, params};
 use serde_json::{Value, json};
 use steve_flow::AdapterError;
 use steve_modules::ApiError;
@@ -145,6 +145,36 @@ impl ConnectionHook for ExtWsHook {
 }
 
 impl ExtWsHook {
+    /// The connection's account takes the name `me.get` gives while it has none of its own (it
+    /// was made with the handle's value when the service gave no name then); a name you set stays.
+    fn name_account(&self, run: &ConnRun, me: &provider::Me) {
+        if !me.named {
+            return;
+        }
+        let (ws, conn) = (&run.state.ws, &run.state.id);
+        let e = steve_modules::accounts::Enrichment {
+            name: Some(me.display.clone()),
+            ..Default::default()
+        };
+        let hooks = self.channels.party_hooks();
+        let r = self.channels.store().transaction(|tx| {
+            let owner: Option<(String, String)> = tx
+                .query_row(
+                    "SELECT account_id, created_by FROM connections WHERE id = ? AND workspace_id = ? AND account_id IS NOT NULL",
+                    params![conn, ws],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .optional()?;
+            match owner {
+                Some((account, actor)) => steve_modules::accounts::enrich(tx, hooks, ws, &actor, &account, &e).map(Some),
+                None => Ok(None),
+            }
+        });
+        if let Err(e) = r {
+            tracing::warn!(conn = %conn, "ext_ws: the account's name was not updated: {e}");
+        }
+    }
+
     /// One session: open, check, follow the feed until it ends.
     async fn once(&self, run: &ConnRun) -> End {
         let (s, notes, me) = match self.ext.open(&run.cx).await {
@@ -172,6 +202,7 @@ impl ExtWsHook {
             s.close(1000, "account changed");
             return End::Auth(e);
         }
+        self.name_account(run, &me);
         self.ext.set_live(&run.state.id, Some(s.clone()));
         let known = provider::known_systems(&run.cx);
         let mut feed = Feed {
@@ -303,6 +334,7 @@ impl Feed<'_> {
                             self.s.close(1000, "account changed");
                             return Err(End::Auth(e));
                         }
+                        self.hook.name_account(self.run, &me);
                     }
                     self.subscribe().await?;
                     cx.report(Health::Ok).await;

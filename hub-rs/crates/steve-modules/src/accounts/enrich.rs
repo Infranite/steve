@@ -95,14 +95,18 @@ fn clip(s: &str, n: usize) -> String {
     s.trim().chars().take(n).collect()
 }
 
-/// A name equal to one of the account's handles is a raw handle too.
+/// A name equal to one of the account's handles, or to a handle's value (what follows its last
+/// `:` in a qualified handle such as `realm:id:value`), is a raw handle too.
 fn is_raw(c: &rusqlite::Connection, name: &str, account: &str) -> ApiResult<bool> {
     if looks_like_handle(name) {
         return Ok(true);
     }
-    Ok(repo::handles_of(c, account)?
-        .iter()
-        .any(|(h, _)| h.eq_ignore_ascii_case(name.trim())))
+    let name = name.trim();
+    Ok(repo::handles_of(c, account)?.iter().any(|(h, _)| {
+        h.eq_ignore_ascii_case(name)
+            || h.rsplit_once(':')
+                .is_some_and(|(_, v)| v.eq_ignore_ascii_case(name))
+    }))
 }
 
 /// Revises a person with `"source": "sync"` in the change log.

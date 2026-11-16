@@ -460,6 +460,38 @@ async fn v6_a_reconnect_resumes_from_the_saved_cursor() {
     rt.shutdown().await;
 }
 
+/// A service that gave no name at connect time names the account on a later connect; a name you
+/// set yourself is never replaced.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_account_takes_the_name_the_service_gives_later_unless_you_named_it() {
+    let h = setup().await;
+    h.fake.with(|w| w.me_display = String::new());
+    let id = h.connect().await;
+    let name = |h: &H| {
+        h.rows(
+            "SELECT a.display_name FROM connections c JOIN accounts a ON a.id = c.account_id WHERE c.id = ?",
+            &[&id],
+        )[0][0]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    assert_eq!(name(&h), fake::ME, "no name yet: the handle's value");
+    h.fake.with(|w| w.me_display = "Ada".into());
+    let (rt, _tx) = h.runtime();
+    until("named", || name(&h) == "Ada").await;
+    // renamed by you: a later connect keeps your name
+    h.env
+        .store()
+        .transaction(|tx| -> steve_modules::ApiResult<usize> { Ok(tx.execute("UPDATE accounts SET display_name = 'Ada (work)' WHERE id = (SELECT account_id FROM connections WHERE id = ?)", [&id])?) })
+        .unwrap();
+    until("subscribed", || h.subscribes().len() == 1).await;
+    h.fake.drop_all();
+    until("resubscribed", || h.subscribes().len() == 2).await;
+    assert_eq!(name(&h), "Ada (work)");
+    rt.shutdown().await;
+}
+
 /// V7: a cursor the service discarded → subscribe at now, and the time since the cursor was
 /// saved is read back from history for every chat, only recorded.
 #[tokio::test(flavor = "multi_thread")]
