@@ -314,7 +314,36 @@ async fn pages(cfg: &Config, req: Request) -> Response {
     if path.starts_with("/assets/") {
         return not_found();
     }
-    index(cfg, head).await
+    let mut res = index(cfg, head).await;
+    if let Some(csp) = delivery_page_policy(cfg, path) {
+        res.headers_mut()
+            .insert(header::CONTENT_SECURITY_POLICY, csp);
+    }
+    res
+}
+
+/// A delivery or share page may embed an interactive frame. Its frames may load only from this
+/// installation's own addresses, so a frame's script cannot navigate it to another site to carry
+/// anything away (the frame's own CSP already forbids every connection).
+fn delivery_page_policy(cfg: &Config, path: &str) -> Option<header::HeaderValue> {
+    let page = ["/deliveries/", "/shares/"]
+        .iter()
+        .any(|p| path.strip_prefix(p).is_some_and(|rest| !rest.is_empty()));
+    if !page {
+        return None;
+    }
+    let mut sources = vec!["'self'".to_string()];
+    for url in std::iter::once(&cfg.public_url).chain(&cfg.public_urls) {
+        if let Ok(u) = reqwest::Url::parse(url)
+            && matches!(u.scheme(), "http" | "https")
+        {
+            let o = u.origin().ascii_serialization();
+            if !sources.contains(&o) {
+                sources.push(o);
+            }
+        }
+    }
+    header::HeaderValue::from_str(&format!("frame-src {}", sources.join(" "))).ok()
 }
 
 async fn index(cfg: &Config, head: bool) -> Response {
@@ -346,6 +375,26 @@ async fn index(cfg: &Config, head: bool) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn delivery_pages_frame_only_this_installation() {
+        let vars = |k: &str| match k {
+            "STEVE_PUBLIC_URL" => Some("https://steve.example/".to_string()),
+            "STEVE_PUBLIC_URLS" => Some("https://steve.example,http://192.168.1.2:8440".into()),
+            "STEVE_HOME" => Some("/nonexistent-steve-home".into()),
+            _ => None,
+        };
+        let cfg = Config::from_vars(&vars).expect("config");
+        let csp = delivery_page_policy(&cfg, "/deliveries/dlv_1").expect("policy");
+        assert_eq!(
+            csp.to_str().unwrap(),
+            "frame-src 'self' https://steve.example http://192.168.1.2:8440"
+        );
+        assert!(delivery_page_policy(&cfg, "/shares/abc").is_some());
+        for other in ["/", "/deliveries/", "/items/ST-1", "/sharesx/a"] {
+            assert!(delivery_page_policy(&cfg, other).is_none(), "{other}");
+        }
+    }
 
     #[test]
     fn mime_and_paths() {

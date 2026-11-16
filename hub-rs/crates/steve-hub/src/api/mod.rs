@@ -112,6 +112,14 @@ impl AppState {
                         inner.cfg.home.clone(),
                         inner.cfg.public_url.clone(),
                     )
+                    .with_ancestors(
+                        inner
+                            .cfg
+                            .public_urls
+                            .iter()
+                            .chain(&inner.cfg.client_origins)
+                            .map(String::as_str),
+                    )
                 });
                 inner.modules = modules;
                 AppState(Arc::new(inner))
@@ -529,7 +537,16 @@ const BODY_MAX: usize = 16 * 1024 * 1024;
 /// The `/api` router with every route of api.ts, in declaration order.
 pub fn router(st: AppState, modules: Router) -> Router {
     Router::new()
-        .route("/file-deliveries/{id}", get(deliveries::metadata))
+        .route(
+            "/file-deliveries",
+            get(deliveries::list)
+                .post(deliveries::upload)
+                .layer(axum::extract::DefaultBodyLimit::disable()),
+        )
+        .route(
+            "/file-deliveries/{id}",
+            get(deliveries::metadata).patch(deliveries::patch),
+        )
         .route("/file-deliveries/{id}/raw", get(deliveries::raw))
         .route(
             "/file-deliveries/{id}/content/{*path}",

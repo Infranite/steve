@@ -2074,11 +2074,12 @@ impl steve_mcp::Backend for CoreMcp {
                     self.public_url.clone(),
                 );
                 let d = svc
-                    .receive(
+                    .receive_as(
                         s,
                         &args.path,
                         args.title.as_deref(),
                         args.entrypoint.as_deref(),
+                        args.interactive.unwrap_or(false),
                         &self.workspaces,
                     )
                     .await

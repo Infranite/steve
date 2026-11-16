@@ -775,7 +775,7 @@ async fn share_authorization_is_independent_expires_and_revokes_every_resource()
             .send()
             .await
             .unwrap();
-        assert_eq!(css.headers()["content-type"], "text/css");
+        assert_eq!(css.headers()["content-type"], "text/css; charset=utf-8");
         assert_eq!(css.text().await.unwrap(), "body{color:red}");
         assert_eq!(
             e.request("GET", &format!("{prefix}/content/site/next.html"), login)
@@ -863,4 +863,205 @@ async fn share_authorization_is_independent_expires_and_revokes_every_resource()
             404
         );
     }
+}
+
+/// #205: a signed-in user publishes without an item (CLI: an access client), lists "我的发布",
+/// switches the interactive preview, and the frame is served only through its own capability with
+/// the isolating CSP, for the signed-in page and a share alike.
+#[tokio::test]
+async fn users_publish_and_interactive_frames_are_isolated_capabilities() {
+    let e = start(false).await;
+    let owner = e.store.access().owner().unwrap().unwrap();
+    let (_, token) = e
+        .store
+        .access()
+        .token_create(&owner.id, "cli", None)
+        .unwrap();
+    let signed: Value = e
+        .request("POST", "/auth/token", false)
+        .json(&json!({"user": owner.name, "token": token, "client": {"kind": "cli", "name": "steve publish"}}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let bearer = format!("Bearer {}", signed["credential"].as_str().unwrap());
+    let upload = |auth: Option<&str>, ws: Option<&str>, query: &str| {
+        let mut r = e
+            .request("POST", &format!("/api/file-deliveries?{query}"), false)
+            .header("content-type", "application/octet-stream")
+            .body(html_zip());
+        if let Some(a) = auth {
+            r = r.header("authorization", a);
+        }
+        if let Some(ws) = ws {
+            r = r.header("x-steve-ws", ws);
+        }
+        r
+    };
+    // Bot session tokens and anonymous callers cannot upload; a user must name the workspace.
+    for (auth, ws, status) in [
+        (Some("Bearer delivery-bot"), Some("default"), 401),
+        (None, Some("default"), 401),
+        (Some(bearer.as_str()), None, 403),
+        (Some(bearer.as_str()), Some("foreign"), 409),
+    ] {
+        let r = upload(auth, ws, "name=site.zip").send().await.unwrap();
+        assert_eq!(r.status(), status, "{auth:?} {ws:?}");
+    }
+    let r = upload(
+        Some(&bearer),
+        Some("default"),
+        "name=site.zip&title=Prototype&entrypoint=site/index.html",
+    )
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(r.status(), 200);
+    let d: Value = r.json().await.unwrap();
+    let id = d["id"].as_str().unwrap().to_string();
+    assert!(d["item_id"].is_null());
+    assert_eq!(d["title"], "Prototype");
+    assert_eq!(d["interactive"], false);
+    assert_eq!(d["can_manage"], true);
+    assert_eq!(d["scripts"], true, "the static page needs scripts");
+    assert!(d["frame_url"].is_null());
+    assert_eq!(d["reachability"], "local");
+    let list: Value = e
+        .request("GET", "/api/file-deliveries", true)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(list[0]["id"], id.as_str(), "{list}");
+    // Bots cannot switch it; the managing user can.
+    let set = |on: bool, login: bool| {
+        let mut r = e
+            .request("PATCH", &format!("/api/file-deliveries/{id}"), login)
+            .json(&json!({"interactive": on}));
+        if !login {
+            r = r.header("authorization", "Bearer delivery-bot");
+        }
+        r
+    };
+    assert_eq!(set(true, false).send().await.unwrap().status(), 401);
+    let on: Value = set(true, true).send().await.unwrap().json().await.unwrap();
+    assert_eq!(on["interactive"], true);
+    let frame = on["frame_url"].as_str().unwrap().to_string();
+    assert!(
+        frame.starts_with(&format!("{}/api/delivery-frames/", e.base)),
+        "{frame}"
+    );
+    // The frame is served with no cookie at all, with the isolating policy; the static content URL
+    // keeps scripts off whatever the switch says.
+    let anonymous = reqwest::Client::new();
+    let r = anonymous.get(&frame).send().await.unwrap();
+    assert_eq!(r.status(), 200);
+    let csp = r.headers()["content-security-policy"]
+        .to_str()
+        .unwrap()
+        .to_string();
+    for part in [
+        "sandbox allow-scripts;",
+        "connect-src 'none'",
+        "form-action 'none'",
+        "frame-ancestors 'self' ",
+    ] {
+        assert!(csp.contains(part), "{part}: {csp}");
+    }
+    assert!(!csp.contains("allow-same-origin"));
+    let css = frame.replace("index.html", "assets/site.css");
+    assert_eq!(anonymous.get(&css).send().await.unwrap().status(), 200);
+    let content = on["content_url"].as_str().unwrap();
+    let r = e
+        .request("GET", content.strip_prefix(&e.base).unwrap(), true)
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        r.headers()["content-security-policy"]
+            .to_str()
+            .unwrap()
+            .contains("script-src 'none'")
+    );
+    // A share honours the same switch, rechecked on every request.
+    let share: Value = e
+        .request("POST", &format!("/api/file-deliveries/{id}/shares"), true)
+        .json(&json!({"expires_at": steve_store::now() + 60_000}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let t = share["token"].as_str().unwrap();
+    let public: Value = anonymous
+        .get(format!("{}/api/delivery-shares/{t}", e.base))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let shared_frame = public["frame_url"].as_str().unwrap().to_string();
+    assert!(shared_frame.contains(&format!("/api/delivery-shares/{t}/frame/")));
+    assert!(public.get("can_manage").is_none() && public.get("workspace_id").is_none());
+    assert_eq!(
+        anonymous.get(&shared_frame).send().await.unwrap().status(),
+        200
+    );
+    assert_eq!(set(false, true).send().await.unwrap().status(), 200);
+    assert_eq!(
+        anonymous.get(&shared_frame).send().await.unwrap().status(),
+        404
+    );
+    assert_eq!(anonymous.get(&frame).send().await.unwrap().status(), 404);
+}
+
+/// #205: steve_deliver_file works in a session outside an item, inside its own directory.
+#[tokio::test]
+async fn sessions_without_an_item_deliver_files() {
+    let e = start(false).await;
+    let cwd = PathBuf::from(&e.session.cwd).parent().unwrap().join("chat");
+    std::fs::create_dir_all(&cwd).unwrap();
+    std::fs::write(cwd.join("notes.md"), "# Notes").unwrap();
+    e.store
+        .sessions()
+        .create(&steve_store::NewSession {
+            workspace_id: "default".into(),
+            item_id: None,
+            cwd: cwd.display().to_string(),
+            harness: "test".into(),
+            title: "chat".into(),
+            token: "chat-bot".into(),
+            ..Default::default()
+        })
+        .unwrap();
+    let call = |path: &str| {
+        e.request("POST", "/mcp", false)
+            .header("authorization", "Bearer chat-bot")
+            .header("accept", "application/json, text/event-stream")
+            .header("mcp-protocol-version", "2025-06-18")
+            .json(&json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"steve_deliver_file","arguments":{"path":path,"interactive":true}}}))
+    };
+    let r: Value = call("notes.md").send().await.unwrap().json().await.unwrap();
+    assert_ne!(r["result"]["isError"], true, "{r}");
+    let meta: Value =
+        serde_json::from_str(r["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert!(meta["item_id"].is_null());
+    assert_eq!(meta["mime"], "text/markdown");
+    let r: Value = call("../ST-1/x.md")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        r["result"]["isError"], true,
+        "the session directory still bounds it: {r}"
+    );
 }

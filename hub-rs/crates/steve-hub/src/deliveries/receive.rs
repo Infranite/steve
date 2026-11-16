@@ -54,8 +54,7 @@ enum Source {
 }
 
 impl Service {
-    /// Bot input is scoped to its current execution workspace (legacy: session directory) or
-    /// its item's Hub-owned outputs. The Node placement is taken from the current binding, never from a Bot-supplied node id.
+    /// A static delivery (see [`Self::receive_as`]).
     pub async fn receive(
         &self,
         session: &Session,
@@ -64,10 +63,26 @@ impl Service {
         entrypoint: Option<&str>,
         workspaces: &Workspaces,
     ) -> Result<Delivery, String> {
-        let item = session
-            .item_id
-            .as_deref()
-            .ok_or("file delivery requires an item session")?;
+        self.receive_as(session, path, title, entrypoint, false, workspaces)
+            .await
+    }
+
+    /// Bot input is scoped to its current execution workspace (legacy: session directory) or, in an
+    /// item session, its item's Hub-owned outputs. Any session with a known working directory may
+    /// deliver: chats, conversations and scheduled runs as well as items. The Node placement is
+    /// taken from the current binding, never from a Bot-supplied node id.
+    pub async fn receive_as(
+        &self,
+        session: &Session,
+        path: &str,
+        title: Option<&str>,
+        entrypoint: Option<&str>,
+        interactive: bool,
+        workspaces: &Workspaces,
+    ) -> Result<Delivery, String> {
+        if session.cwd.trim().is_empty() {
+            return Err("file delivery needs a session with a working directory".into());
+        }
         let cwd = Path::new(&session.cwd);
         let source = if Path::new(path).is_absolute() {
             PathBuf::from(path)
@@ -83,9 +98,14 @@ impl Service {
             .and_then(|s| s.to_str())
             .ok_or("invalid delivery filename")?
             .to_string();
-        let durable =
-            crate::wire::output_files::directory(&self.home, item).map_err(|e| e.to_string())?;
-        let src = if source.starts_with(&durable) {
+        let durable = match session.item_id.as_deref() {
+            Some(item) => Some(
+                crate::wire::output_files::directory(&self.home, item)
+                    .map_err(|e| e.to_string())?,
+            ),
+            None => None,
+        };
+        let src = if durable.as_ref().is_some_and(|d| source.starts_with(d)) {
             // This is explicitly Hub-owned, not a similarly named path on another Node.
             // Anchor at the trusted installation home: workspaces/item/outputs are ALL walked
             // without following links. Canonicalizing the outputs directory itself would erase
@@ -180,7 +200,14 @@ impl Service {
             entrypoint.map(str::to_string),
         );
         tokio::task::spawn_blocking(move || {
-            service.accept(&session, &title, &name, &bytes, entrypoint.as_deref())
+            service.publish(
+                super::Publisher::Session(&session),
+                &title,
+                &name,
+                &bytes,
+                entrypoint.as_deref(),
+                interactive,
+            )
         })
         .await
         .map_err(|e| e.to_string())?

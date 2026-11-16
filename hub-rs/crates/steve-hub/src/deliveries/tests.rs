@@ -213,7 +213,7 @@ fn zip_resources_are_complete_and_immutable() {
 fn documents_images_pdf_and_generic_zip_have_the_existing_preview_shapes() {
     let (_home, svc, s) = fixture();
     for (name, mime, form, data) in [
-        ("note.md", "text/plain", "text", b"# Note".as_slice()),
+        ("note.md", "text/markdown", "text", b"# Note".as_slice()),
         (
             "picture.png",
             "image/png",
@@ -418,4 +418,278 @@ fn malicious_or_incomplete_zip_never_creates_a_delivery() {
             .unwrap(),
         0
     );
+}
+
+fn user(svc: &Service, name: &str, role: Option<&str>) -> String {
+    let id = svc
+        .store
+        .users()
+        .create(
+            &format!("local:{name}"),
+            name,
+            None,
+            role.unwrap_or("member"),
+        )
+        .unwrap();
+    if role.is_none() {
+        svc.store
+            .transaction(|t| {
+                t.execute("DELETE FROM workspace_members WHERE user_id=?", [&id])?;
+                Ok::<_, StoreError>(())
+            })
+            .unwrap();
+    }
+    id
+}
+
+#[test]
+fn users_publish_without_an_item_and_manage_only_their_own() {
+    let (_home, svc, _s) = fixture();
+    let me = user(&svc, "me", Some("member"));
+    let other = user(&svc, "other", Some("member"));
+    let outsider = user(&svc, "outsider", None);
+    let publish = |id: &str, name: &str, interactive| {
+        svc.publish(
+            Publisher::User {
+                id,
+                workspace: "default",
+            },
+            "",
+            name,
+            b"<p>hi</p>",
+            None,
+            interactive,
+        )
+    };
+    assert!(publish(&outsider, "a.html", false).is_err(), "members only");
+    let first = publish(&me, "first.html", false).unwrap();
+    let second = publish(&me, "second.html", true).unwrap();
+    publish(&other, "theirs.html", false).unwrap();
+    assert_eq!(first.item_id, None);
+    assert!(!first.interactive && second.interactive);
+    let mine: Vec<_> = svc
+        .owned("default", &me)
+        .unwrap()
+        .into_iter()
+        .map(|d| d.id)
+        .collect();
+    assert_eq!(
+        mine,
+        [second.id.clone(), first.id.clone()],
+        "newest first, own only"
+    );
+    let got = svc.get(&first.id, Some("default")).unwrap().unwrap();
+    assert!(svc.can_manage(&got, &me).unwrap());
+    assert!(!svc.can_manage(&got, &other).unwrap());
+    let meta = svc.metadata(&got, None);
+    assert!(meta["item_id"].is_null());
+    assert_eq!(meta["interactive"], false);
+    assert!(svc.frame_url(&got, &me).is_none(), "static has no frame");
+    svc.set_interactive(&got, true).unwrap();
+    let got = svc.get(&first.id, Some("default")).unwrap().unwrap();
+    assert!(got.interactive);
+    assert!(
+        meta["access_warning"]
+            .as_str()
+            .unwrap()
+            .contains("static sandbox")
+    );
+    assert!(
+        svc.metadata(&got, None)["access_warning"]
+            .as_str()
+            .unwrap()
+            .contains("interactive preview")
+    );
+}
+
+#[test]
+fn item_deliveries_are_managed_by_the_requester_or_a_workspace_owner() {
+    let (_home, svc, s) = fixture();
+    let owner = user(&svc, "boss", Some("owner"));
+    let asker = user(&svc, "asker", Some("member"));
+    let member = user(&svc, "member", Some("member"));
+    svc.store
+        .transaction(|t| {
+            t.execute("UPDATE items SET requested_by=? WHERE id='ST-1'", [&asker])?;
+            Ok::<_, StoreError>(())
+        })
+        .unwrap();
+    let d = svc.accept(&s, "", "page.html", b"<p>x</p>", None).unwrap();
+    assert_eq!(d.owner_id, None);
+    assert!(svc.can_manage(&d, &owner).unwrap());
+    assert!(svc.can_manage(&d, &asker).unwrap());
+    assert!(!svc.can_manage(&d, &member).unwrap());
+    assert!(
+        svc.owned("default", &owner).unwrap().is_empty(),
+        "item deliveries stay with the item"
+    );
+}
+
+#[tokio::test]
+async fn sessions_outside_items_deliver_from_their_directory_to_their_principal() {
+    let (_home, svc, item_session) = fixture();
+    let owner = user(&svc, "boss", Some("owner"));
+    let asker = user(&svc, "asker", Some("member"));
+    let ws = crate::wire::workspaces::Workspaces::new(svc.store.clone(), None, None, vec![]);
+    let chat = svc
+        .store
+        .sessions()
+        .create(&steve_store::NewSession {
+            workspace_id: "default".into(),
+            item_id: None,
+            cwd: item_session.cwd.clone(),
+            harness: "test".into(),
+            title: "chat".into(),
+            token: "chat-token".into(),
+            ..Default::default()
+        })
+        .unwrap();
+    fs::write(Path::new(&chat.cwd).join("notes.md"), b"# Notes").unwrap();
+    let d = svc
+        .receive_as(&chat, "notes.md", Some("Notes"), None, false, &ws)
+        .await
+        .unwrap();
+    assert_eq!(d.item_id, None);
+    assert_eq!(
+        d.owner_id.as_deref(),
+        Some(owner.as_str()),
+        "nobody known asked: the workspace owner"
+    );
+    assert_eq!(d.mime, "text/markdown");
+    assert_eq!(d.preview["lang"], "markdown");
+    assert!(
+        svc.receive_as(&chat, "../outside.md", None, None, false, &ws)
+            .await
+            .is_err(),
+        "the same directory boundary as item sessions"
+    );
+    // A session run for a member delivers to that member.
+    svc.store.transaction(|t| {
+        t.execute("INSERT INTO runtime_sessions(session_id,node_id,workspace_ref,node_session_id,config_revision,phase,updated,principal) VALUES (?1,'local','{}',?1,'r','active',0,?2)", params![chat.id, asker])?;
+        Ok::<_, StoreError>(())
+    }).unwrap();
+    let d = svc
+        .publish(Publisher::Session(&chat), "", "x.txt", b"x", None, false)
+        .unwrap();
+    assert_eq!(d.owner_id.as_deref(), Some(asker.as_str()));
+    let mut empty = chat.clone();
+    empty.cwd = String::new();
+    assert!(
+        svc.receive_as(&empty, "notes.md", None, None, false, &ws)
+            .await
+            .is_err()
+    );
+}
+
+#[test]
+fn frame_grants_are_per_user_live_and_never_outlast_membership_or_the_switch() {
+    let (_home, svc, _s) = fixture();
+    let svc = svc.with_ancestors(["https://phone.example/", "not a url"]);
+    let me = user(&svc, "me", Some("member"));
+    let d = svc
+        .publish(
+            Publisher::User {
+                id: &me,
+                workspace: "default",
+            },
+            "",
+            "app.zip",
+            &zip(&[("index.html", b"<script>1</script>"), ("app.js", b"1")]),
+            None,
+            true,
+        )
+        .unwrap();
+    let url = svc.frame_url(&d, &me).unwrap();
+    assert!(
+        url.starts_with("https://steve.example/api/delivery-frames/"),
+        "{url}"
+    );
+    assert!(url.ends_with("/index.html"));
+    let token = url.split('/').nth(5).unwrap().to_string();
+    assert_eq!(token.len(), 64);
+    assert_eq!(svc.framed(&token).unwrap().unwrap().id, d.id);
+    assert!(svc.framed("unknown").unwrap().is_none());
+    assert_eq!(svc.metadata(&d, None)["scripts"], true);
+    let policy = svc.frame_policy("https://steve.example/api/delivery-frames/t/");
+    for part in [
+        "sandbox allow-scripts;",
+        "default-src 'none'",
+        "connect-src 'none'",
+        "form-action 'none'",
+        "frame-src 'none'",
+        "worker-src 'none'",
+        "base-uri 'none'",
+        "script-src 'unsafe-inline' 'unsafe-eval' https://steve.example/api/delivery-frames/t/;",
+        "frame-ancestors 'self' https://steve.example https://phone.example",
+    ] {
+        assert!(policy.contains(part), "{part}: {policy}");
+    }
+    assert!(!policy.contains("allow-same-origin") && !policy.contains("not a url"));
+    svc.set_interactive(&d, false).unwrap();
+    assert!(
+        svc.framed(&token).unwrap().is_none(),
+        "the switch is checked on every request"
+    );
+    svc.set_interactive(&d, true).unwrap();
+    assert!(svc.framed(&token).unwrap().is_some());
+    svc.store
+        .transaction(|t| {
+            t.execute("DELETE FROM workspace_members WHERE user_id=?", [&me])?;
+            Ok::<_, StoreError>(())
+        })
+        .unwrap();
+    assert!(
+        svc.framed(&token).unwrap().is_none(),
+        "membership is checked on every request"
+    );
+}
+
+#[test]
+fn packages_open_to_their_document_and_scripts_are_noticed() {
+    let (_home, svc, s) = fixture();
+    let docs = svc
+        .accept(
+            &s,
+            "",
+            "docs.zip",
+            &zip(&[
+                ("img/a.png", b"\x89PNG"),
+                ("README.md", b"# Read ![a](img/a.png)"),
+            ]),
+            None,
+        )
+        .unwrap();
+    assert_eq!(docs.entrypoint.as_deref(), Some("README.md"));
+    assert_eq!(docs.preview["lang"], "markdown");
+    assert_eq!(svc.metadata(&docs, None)["scripts"], false);
+    let pdf = svc
+        .accept(
+            &s,
+            "",
+            "paper.zip",
+            &zip(&[("a/paper.pdf", b"%PDF-1.4"), ("index.html", b"<p>")]),
+            Some("a/paper.pdf"),
+        )
+        .unwrap();
+    assert_eq!(pdf.preview["type"], "pdf");
+    assert!(
+        svc.accept(
+            &s,
+            "",
+            "x.zip",
+            &zip(&[("index.html", b"<p>")]),
+            Some("missing.md")
+        )
+        .is_err()
+    );
+    for (html, scripts) in [
+        ("<p>static</p>", false),
+        ("<p>someone = here</p>", false),
+        ("<SCRIPT src=app.js></SCRIPT>", true),
+        ("<button onclick=\"go()\">", true),
+        ("<div\n onload = x>", true),
+    ] {
+        let d = svc.accept(&s, "", "p.html", html.as_bytes(), None).unwrap();
+        assert_eq!(svc.metadata(&d, None)["scripts"], scripts, "{html}");
+    }
 }
