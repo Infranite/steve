@@ -1,1 +1,0 @@
-The Hub no longer stalls its other work while sending a command to a Node waits for the database: when another process held SQLite's writer (a backup, a maintenance tool), the send loop could hold a runtime worker for the whole wait, so timers and requests elsewhere in the Hub paused with it and a request could fail with "database is locked" after five seconds.
