@@ -4968,6 +4968,7 @@ async fn each_principal_gets_a_harness_directory_of_their_own() {
         b.state = Some(HarnessState {
             dir: dir.into(),
             import_owner: owner,
+            owner_context: true,
         });
         b
     };
@@ -5040,6 +5041,90 @@ async fn each_principal_gets_a_harness_directory_of_their_own() {
     assert_eq!(std::fs::read_dir(&elsewhere).unwrap().count(), 0);
 }
 
+/// The owner's personal harness configuration (user-level `CLAUDE.md`, skills, subagents) is in
+/// their session's directory as it is in theirs, unless the Hub turned it off; another principal
+/// never gets it, and turning it off takes the links away at the next open.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_owners_personal_config_follows_the_hubs_choice() {
+    let t = T::new(&[]);
+    let own = t.root.join(".claude");
+    std::fs::create_dir_all(own.join("skills/house-style")).unwrap();
+    std::fs::create_dir_all(own.join("agents")).unwrap();
+    std::fs::write(own.join("CLAUDE.md"), "owner memory").unwrap();
+    std::fs::write(own.join("skills/house-style/SKILL.md"), "style").unwrap();
+    std::fs::write(own.join("agents/reviewer.md"), "reviewer").unwrap();
+    let n = t.node();
+    n.prepare_workspace(now_cmd("op_prep", prepare_proj()))
+        .await
+        .unwrap();
+    assert!(ok(&finished(&n, "op_prep").await));
+    let open = |s: &str, dir: &str, owner: bool, context: bool| {
+        let mut b = open_body(s);
+        b.state = Some(HarnessState {
+            dir: dir.into(),
+            import_owner: owner,
+            owner_context: context,
+        });
+        b
+    };
+    let state = |dir: &str| t.home.join("state").join(dir).join("harness");
+    for (s, dir, owner, context) in [
+        ("s_on", "default/owner/dev/claude-code", true, true),
+        ("s_off", "default/owner/ops/claude-code", true, false),
+        ("s_other", "default/other/dev/claude-code", false, true),
+    ] {
+        let op = format!("op_open_{s}");
+        n.open_session(now_cmd(&op, open(s, dir, owner, context)))
+            .await
+            .unwrap();
+        assert!(ok(&finished(&n, &op).await), "{s}");
+    }
+    let on = state("default/owner/dev/claude-code");
+    assert_eq!(
+        std::fs::read_to_string(on.join("CLAUDE.md")).unwrap(),
+        "owner memory"
+    );
+    assert_eq!(
+        std::fs::read_to_string(on.join("skills/house-style/SKILL.md")).unwrap(),
+        "style"
+    );
+    assert_eq!(
+        std::fs::read_to_string(on.join("agents/reviewer.md")).unwrap(),
+        "reviewer"
+    );
+    for dir in [
+        "default/owner/ops/claude-code",
+        "default/other/dev/claude-code",
+    ] {
+        let d = state(dir);
+        assert!(!d.join("CLAUDE.md").exists(), "{dir}");
+        assert!(!d.join("skills/house-style").exists(), "{dir}");
+        assert!(!d.join("agents").exists(), "{dir}");
+    }
+    // the owner edits it: the next session reads the edit
+    std::fs::write(own.join("CLAUDE.md"), "edited").unwrap();
+    assert_eq!(
+        std::fs::read_to_string(on.join("CLAUDE.md")).unwrap(),
+        "edited"
+    );
+    // turned off for the same directory: gone at the next open, the owner's files untouched
+    n.open_session(now_cmd(
+        "op_open_s_on_off",
+        open("s_on_off", "default/owner/dev/claude-code", true, false),
+    ))
+    .await
+    .unwrap();
+    assert!(ok(&finished(&n, "op_open_s_on_off").await));
+    assert!(std::fs::symlink_metadata(on.join("CLAUDE.md")).is_err());
+    assert!(std::fs::symlink_metadata(on.join("skills/house-style")).is_err());
+    assert_eq!(
+        std::fs::read_to_string(own.join("CLAUDE.md")).unwrap(),
+        "edited"
+    );
+    assert!(own.join("skills/house-style/SKILL.md").exists());
+    n.shutdown().await;
+}
+
 #[tokio::test]
 async fn an_adapter_with_home_state_keeps_its_session_map_inside_each_principal() {
     let t = T::new(&[]);
@@ -5087,6 +5172,7 @@ async fn an_adapter_with_home_state_keeps_its_session_map_inside_each_principal(
         b.state = dir.map(|dir| HarnessState {
             dir: dir.into(),
             import_owner: false,
+            owner_context: true,
         });
         let op = format!("open_{session}");
         n.open_session(now_cmd(&op, b)).await.unwrap();
@@ -5295,6 +5381,7 @@ async fn a_bots_skills_are_in_its_harness_directory_before_the_session_opens() {
         b.state = Some(HarnessState {
             dir: "default/owner/dev/claude-code".into(),
             import_owner: false,
+            owner_context: true,
         });
         b.skills = skills;
         b

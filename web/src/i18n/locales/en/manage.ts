@@ -334,6 +334,8 @@ export default {
     handoffOff: "Never",
     archDays: "Auto-archive after done",
     archDaysSub: "Done or dropped items move to “Archived” after this long",
+    ownerContext: "Load the device owner's personal agent config",
+    ownerContextSub: "By default agents load the personal global config of the device's owner, as they do on their own (user-level AGENTS.md / CLAUDE.md, skills, subagents, commands). Off, they load only the project's files and what Steve adds, so every device behaves the same. A device can differ on the Devices page; applies to new conversations",
     archNever: "Never",
   },
   notify: {

@@ -227,7 +227,12 @@ pub fn harness_state_in(
         "UPDATE runtime_sessions SET state_dir=? WHERE session_id=?",
         rusqlite::params![dir, session],
     )?;
-    Ok(Some(steve_node_api::HarnessState { dir, import_owner }))
+    let owner_context = import_owner && steve_store::nodes::owner_context(c, node, &ws)?;
+    Ok(Some(steve_node_api::HarnessState {
+        dir,
+        import_owner,
+        owner_context,
+    }))
 }
 
 #[cfg(test)]

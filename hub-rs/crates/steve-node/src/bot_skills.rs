@@ -7,7 +7,9 @@
 //! the harness opens, makes that directory's Steve-made skills exactly the session's: new and
 //! changed ones written whole, removed or disabled ones taken away. A skill the harness or a person
 //! put there is left alone; of a removed skill only its `SKILL.md` goes, and its directory only
-//! when nothing else is in it.
+//! when nothing else is in it. A name the owner's own skill already has (a link
+//! [`crate::harness_context`] made) is theirs: the Bot's skill of that name is not written, and
+//! nothing is ever removed through a link.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -38,6 +40,9 @@ pub(crate) fn place(state: &Path, sub: &str, skills: &[Skill]) -> Result<(), Str
         .filter(|n| Skill::name_ok(n) && !skills.iter().any(|s| &s.name == *n))
     {
         let d = dir.join(gone);
+        if is_link(&d) {
+            continue;
+        }
         let f = d.join("SKILL.md");
         if fs::symlink_metadata(&f).is_ok_and(|m| m.file_type().is_file()) {
             fs::remove_file(&f).map_err(|e| format!("{}: {e}", f.display()))?;
@@ -45,11 +50,17 @@ pub(crate) fn place(state: &Path, sub: &str, skills: &[Skill]) -> Result<(), Str
         // only when nothing else is in it
         let _ = fs::remove_dir(&d);
     }
+    let mut names: Vec<&str> = Vec::new();
     for s in skills {
         if !Skill::name_ok(&s.name) {
             continue;
         }
         let d = dir.join(&s.name);
+        // the owner's own skill of that name
+        if is_link(&d) {
+            continue;
+        }
+        names.push(&s.name);
         private_dir(&d)?;
         let f = d.join("SKILL.md");
         let text = s.markdown();
@@ -59,9 +70,22 @@ pub(crate) fn place(state: &Path, sub: &str, skills: &[Skill]) -> Result<(), Str
             publish(&f, text.as_bytes())?;
         }
     }
-    let names: Vec<&str> = skills.iter().map(|s| s.name.as_str()).collect();
     let list = serde_json::to_vec(&names).map_err(|e| e.to_string())?;
     publish(&dir.join(MANIFEST), &list)
+}
+
+/// `name` in the skills directory `dir` is one Steve wrote for a Bot (and still only its
+/// `SKILL.md`), which an owner's skill of that name may take the place of.
+pub(crate) fn steve_made(dir: &Path, name: &str) -> bool {
+    let d = dir.join(name);
+    written(dir).iter().any(|n| n == name)
+        && !is_link(&d)
+        && fs::read_dir(&d)
+            .is_ok_and(|mut e| e.all(|e| e.is_ok_and(|e| e.file_name() == "SKILL.md")))
+}
+
+fn is_link(p: &Path) -> bool {
+    fs::symlink_metadata(p).is_ok_and(|m| m.file_type().is_symlink())
 }
 
 /// `state`/`sub`; `sub` must be a plain relative path.

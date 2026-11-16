@@ -132,6 +132,16 @@ pub struct StateDir {
     /// never anyone else's; a login only where a copy cannot sign the original out).
     #[serde(default)]
     pub import: Vec<String>,
+    /// The owner's own instructions and extensions the harness reads from its directory (its
+    /// user-level `AGENTS.md` / `CLAUDE.md`, skills, subagents, commands): each time a session of
+    /// the owner opens, these are linked into its directory, beside `import`, so the harness finds
+    /// them where it would without Steve and an edit the owner makes is seen by the next session.
+    /// An entry ending in `/*` links each child of that directory on its own (one Steve also
+    /// writes into, like the skills directory); names starting with `.` are the harness's own and
+    /// are skipped. What the harness or a person put there is left alone; a Bot skill of the same
+    /// name gives way to the owner's. A session of another principal gets none of it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub context: Vec<String>,
     /// True when `env` sets a virtual `$HOME` rather than the dot-directory itself: `env` receives
     /// the per-principal state directory, while files from `default` are imported into
     /// `<state>/<default>/` (e.g. `GEMINI_CLI_HOME` -> `<state>/.gemini/`, `FACTORY_HOME_OVERRIDE`
@@ -864,6 +874,14 @@ const BUILTINS: &[Builtin] = &[
                 env: "CLAUDE_CONFIG_DIR".into(),
                 default: ".claude".into(),
                 import: vec!["settings.json".into()],
+                // its user memory, skills, subagents, commands and output styles
+                context: strings(&[
+                    "CLAUDE.md",
+                    "skills/*",
+                    "agents",
+                    "commands",
+                    "output-styles",
+                ]),
                 home_files: strings(&[".claude.json"]),
                 ..Default::default()
             }),
@@ -911,6 +929,8 @@ const BUILTINS: &[Builtin] = &[
                 default: ".codex".into(),
                 // not its login: copies refreshing on their own would sign the owner's out
                 import: vec!["config.toml".into()],
+                // its global instructions, skills and prompts
+                context: strings(&["AGENTS.md", "AGENTS.override.md", "skills/*", "prompts"]),
                 ..Default::default()
             }),
             modes: ModeMap {
@@ -970,6 +990,8 @@ const BUILTINS: &[Builtin] = &[
                 env: "PI_CODING_AGENT_DIR".into(),
                 default: ".pi/agent".into(),
                 import: strings(&["settings.json", "models.json"]),
+                // its global instructions, skills and prompt templates
+                context: strings(&["AGENTS.md", "skills/*", "prompts"]),
                 ..Default::default()
             }),
             skills: Some("skills".into()),
@@ -996,6 +1018,8 @@ const BUILTINS: &[Builtin] = &[
                 env: "GEMINI_CLI_HOME".into(),
                 default: ".gemini".into(),
                 import: vec!["settings.json".into()],
+                // its global context file and custom commands
+                context: strings(&["GEMINI.md", "commands"]),
                 home_override: true,
                 ..Default::default()
             }),
@@ -1104,6 +1128,8 @@ const BUILTINS: &[Builtin] = &[
                 env: "QWEN_HOME".into(),
                 default: ".qwen".into(),
                 import: vec!["settings.json".into()],
+                // its global context file and custom commands
+                context: strings(&["QWEN.md", "commands"]),
                 ..Default::default()
             }),
             modes: ModeMap {

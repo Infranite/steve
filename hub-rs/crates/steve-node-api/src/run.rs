@@ -405,6 +405,20 @@ pub struct HarnessState {
     /// their own directory on this machine (their settings and login). Anyone else's starts empty.
     #[serde(default)]
     pub import_owner: bool,
+    /// With [`Self::import_owner`]: the owner's personal harness configuration on this machine
+    /// (their user-level instructions, skills, subagents, commands; the adapter's
+    /// `StateDir::context`) is linked into the state as well. Off, only what the project and Steve
+    /// give is loaded. A Hub that does not say means on, the harness's own behavior.
+    #[serde(default = "on", skip_serializing_if = "is_on")]
+    pub owner_context: bool,
+}
+
+fn on() -> bool {
+    true
+}
+
+fn is_on(v: &bool) -> bool {
+    *v
 }
 
 impl HarnessState {

@@ -27,6 +27,7 @@ pub mod disk_observation;
 pub mod disk_usage;
 mod exec;
 pub mod git;
+mod harness_context;
 pub mod history;
 mod job;
 mod journal;
@@ -55,9 +56,9 @@ use steve_node_api::*;
 use tokio::sync::mpsc;
 
 use actor::{Actor, Msg};
+pub use artifact::read_delivery_file;
 use journal::{Journal, Op, SessionRow, Tx, WorkspaceRow, internal};
 pub use workspace::Root;
-pub use artifact::read_delivery_file;
 
 /// The OS sandbox a Node with these homes and this `STEVE_CONFINE` would give its runs
 /// (`seatbelt`, `bubblewrap`), or why none: what `steve-hub --check-config` reports before a switch.

@@ -603,6 +603,7 @@ async fn describe_shows_settings_as_the_user_sees_them() {
             ("前置完成后", "自动开始"),
             ("交接阈值", "不换会话"),
             ("完成后自动归档", "30 天"),
+            ("加载本机个人配置", "加载"),
             ("事项编号前缀", "ST"),
         ]
         .map(|(a, b)| (a.to_string(), b.to_string()))
