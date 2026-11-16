@@ -1304,7 +1304,6 @@ pub(crate) struct Stored {
     pub(crate) thread_key: Option<String>,
     pub(crate) text: String,
     pub(crate) sender_name: String,
-    event_id: Option<String>,
     /// The names of the people mentioned (leading mentions are not part of trigger words).
     pub(crate) mention_names: Vec<String>,
     /// `chan_messages.attachments` as stored.
@@ -1313,7 +1312,7 @@ pub(crate) struct Stored {
 
 pub(crate) fn stored(c: &rusqlite::Connection, id: &str) -> ChannelResult<Stored> {
     c.query_row(
-        "SELECT m.external_id, m.thread_key, coalesce(m.text, ''), coalesce(nullif(a.display_name, ''), a.handle_display, p.name, ''), m.event_id, m.mentions, m.attachments
+        "SELECT m.external_id, m.thread_key, coalesce(m.text, ''), coalesce(nullif(a.display_name, ''), a.handle_display, p.name, ''), m.mentions, m.attachments
            FROM chan_messages m LEFT JOIN accounts a ON a.id = m.sender_account_id LEFT JOIN parties p ON p.id = m.sender_party_id
           WHERE m.id = ?",
         [id],
@@ -1323,16 +1322,15 @@ pub(crate) fn stored(c: &rusqlite::Connection, id: &str) -> ChannelResult<Stored
                 thread_key: r.get(1)?,
                 text: r.get(2)?,
                 sender_name: r.get(3)?,
-                event_id: r.get(4)?,
                 mention_names: r
-                    .get::<_, Option<String>>(5)?
+                    .get::<_, Option<String>>(4)?
                     .and_then(|s| serde_json::from_str::<Vec<Value>>(&s).ok())
                     .unwrap_or_default()
                     .iter()
                     .filter_map(|m| m["name"].as_str().map(String::from))
                     .collect(),
                 attachments: r
-                    .get::<_, Option<String>>(6)?
+                    .get::<_, Option<String>>(5)?
                     .and_then(|s| serde_json::from_str(&s).ok())
                     .unwrap_or(Value::Null),
             })
@@ -1378,8 +1376,22 @@ impl Channels {
     /// ([`crate::arbiter`]): whichever identity received the message, only the
     /// voice's mode and rules count and the voice answers; your `/bot` goes to the voice, or, with no
     /// voice, to your web conversation. Precedence 屏蔽 (stopped in step 1) > `/bot` > 不提醒 > role
-    /// rules.
+    /// rules. Whatever it decides is written on the message's event, a message let go without an
+    /// answer too ([`respond::mark_event`]).
     pub async fn respond(
+        &self,
+        ws: &str,
+        conn: &str,
+        inbound: &Inbound,
+    ) -> ChannelResult<Response> {
+        let r = self.respond_unmarked(ws, conn, inbound).await?;
+        let mid = inbound.message_id.clone();
+        self.store()
+            .transaction(|tx| respond::mark_message_event(tx, &mid, &r))?;
+        Ok(r)
+    }
+
+    async fn respond_unmarked(
         &self,
         ws: &str,
         conn: &str,
@@ -1535,9 +1547,6 @@ impl Channels {
         // 7. carry it out (never sends: C6 does, after approval)
         let mut r = self.execute(&plan).await?;
         r.muted = verdict.muted;
-        if let Some(e) = &m.event_id {
-            store.transaction(|tx| respond::mark_event(tx, e, &r))?;
-        }
         tracing::debug!(space = space.id, act = r.act.code(), rule = ?r.rule, "channel rules");
         Ok(r)
     }

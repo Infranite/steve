@@ -854,7 +854,7 @@ mod tests {
         let m = parse("message_post_rich");
         assert_eq!(
             m.text,
-            "上线检查\n@值班小运 请按这份清单过一遍：\n发布清单 (https://wiki.example.com/release-checklist)，有问题 @李鹏翔"
+            "上线检查\n@值班小运 请按这份清单过一遍：\n发布清单 (https://wiki.example.com/release-checklist)，有问题 @林知远"
         );
         assert!(m.mentions[0].is_connection);
         assert_eq!(

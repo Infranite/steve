@@ -1,0 +1,12 @@
+{"case_id": "fx-01-joke-on-own-line", "correct_outcome": "skip", "failures": [], "labelled_by": "fixture", "owner_confirmed": false}
+{"case_id": "fx-02-dm-burst-owner-live", "correct_outcome": "skip", "failures": [], "labelled_by": "fixture", "owner_confirmed": false}
+{"case_id": "fx-03-owner-replied-after", "correct_outcome": "skip", "failures": [], "labelled_by": "fixture", "owner_confirmed": false}
+{"case_id": "fx-04-router-ask-bypass", "correct_outcome": "skip", "failures": [], "labelled_by": "fixture", "owner_confirmed": false}
+{"case_id": "fx-05-queue-full-leak", "correct_outcome": "skip", "failures": [], "labelled_by": "fixture", "owner_confirmed": false}
+{"case_id": "fx-06-alert-bot", "correct_outcome": "skip", "failures": [], "labelled_by": "fixture", "owner_confirmed": false}
+{"case_id": "fx-07-remediation-notice", "correct_outcome": "to_item", "failures": [], "labelled_by": "fixture", "owner_confirmed": false}
+{"case_id": "fx-08-long-analysis", "correct_outcome": "ask_owner", "failures": [], "labelled_by": "fixture", "owner_confirmed": false}
+{"case_id": "fx-09-forwarded-card", "correct_outcome": "skip", "failures": [], "labelled_by": "fixture", "owner_confirmed": false}
+{"case_id": "fx-10-schedule", "correct_outcome": "ask_owner", "failures": [], "labelled_by": "fixture", "owner_confirmed": false}
+{"case_id": "fx-11-incident-note", "correct_outcome": "reply", "failures": [], "labelled_by": "fixture", "owner_confirmed": false}
+{"case_id": "fx-12-numeric-owner-name", "correct_outcome": "skip", "failures": [], "labelled_by": "fixture", "owner_confirmed": false}

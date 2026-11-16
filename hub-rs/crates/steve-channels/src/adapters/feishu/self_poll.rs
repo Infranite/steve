@@ -1250,10 +1250,10 @@ mod tests {
             "chat_id": "oc_1", "thread_id": "omt_1",
             "sender": {"id": "ou_bob", "id_type": "open_id", "sender_type": "user", "tenant_key": "tk"},
             "body": {"content": "{\"text\":\"@_user_1 在吗\"}"},
-            "mentions": [{"key": "@_user_1", "id": "ou_me", "id_type": "open_id", "name": "李鹏翔", "tenant_key": "tk"}],
+            "mentions": [{"key": "@_user_1", "id": "ou_me", "id_type": "open_id", "name": "林知远", "tenant_key": "tk"}],
         });
         let x = map_message(&m, &chat, &ids);
-        assert_eq!(x.text, "@李鹏翔 在吗");
+        assert_eq!(x.text, "@林知远 在吗");
         assert_eq!(x.sender.handle, HandleRef::new(USER_SYSTEM, "ou_bob"));
         assert_eq!(x.sender.display_name.as_deref(), Some("张伟"));
         assert!(x.mentions_connection());

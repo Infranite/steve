@@ -11,7 +11,7 @@
 //! - trigger words: recorded, nothing sent.
 
 use async_trait::async_trait;
-use rusqlite::params;
+use rusqlite::{OptionalExtension, params};
 use steve_store::base::{self, DecisionKind};
 use steve_store::{NewDecision, Tx, uid};
 
@@ -60,6 +60,8 @@ pub struct Response {
     /// The outbound message made (a draft; a reply the responder sent).
     pub out_message_id: Option<String>,
     pub item_id: Option<String>,
+    /// The composer read the message and chose not to answer it: its reason.
+    pub composer_skip: Option<String>,
 }
 
 impl Response {
@@ -73,6 +75,7 @@ impl Response {
             decision_id: None,
             out_message_id: None,
             item_id: None,
+            composer_skip: None,
         }
     }
 }
@@ -109,6 +112,8 @@ pub struct Acted {
     pub decision_id: Option<String>,
     pub out_message_id: Option<String>,
     pub item_id: Option<String>,
+    /// The composer chose not to answer: its reason ([`Response::composer_skip`]).
+    pub composer_skip: Option<String>,
 }
 
 /// Carries out the rules' decision (C4 composes and creates items, C6 checks and sends).
@@ -326,6 +331,7 @@ impl Channels {
             decision_id: None,
             out_message_id: None,
             item_id: None,
+            composer_skip: None,
         };
         if plan.act == Act::Record {
             return Ok(r);
@@ -414,6 +420,7 @@ impl Channels {
                 r.decision_id = a.decision_id;
                 r.out_message_id = a.out_message_id;
                 r.item_id = a.item_id;
+                r.composer_skip = a.composer_skip;
                 return Ok(r);
             }
             Ok(None) => {}
@@ -479,31 +486,105 @@ impl Channels {
     }
 }
 
+/// Who let a message go without an answer, at the head of its event's `reason` ([`mark_event`]):
+/// the rules (the pipeline's own checks included), or the composer after reading it.
+pub const TRAIL_RULES: &str = "规则";
+pub const TRAIL_COMPOSER: &str = "起草器";
+
 /// Records on the message's event what the rules did, when no flow took it (the signals page shows
-/// “等你确认回复” instead of “没有流程，只记录”).
+/// “等你确认回复” instead of “没有流程，只记录”). A message let go without an answer keeps the
+/// outcome `recorded` (nothing for you to do) and says why: the label, and in `reason` who decided
+/// ([`TRAIL_RULES`] with the rule, or [`TRAIL_COMPOSER`] with its reason), so a skip can be told
+/// apart from a message nobody looked at.
 pub(crate) fn mark_event(tx: &Tx, event_id: &str, r: &Response) -> ChannelResult<()> {
-    let outcome = match (&r.by, r.act) {
-        (By::Thread { .. }, _) => "item",
-        (By::Skipped | By::Flow { .. }, _) | (_, Act::Record) => return Ok(()),
-        (_, Act::CreateItem(_)) if r.item_id.is_some() => "item",
-        _ if r.decision_id.is_some() => "need",
+    let rule = match r.rule {
+        Some(i) => format!("响应规则第 {} 条", i + 1),
+        None => String::new(),
+    };
+    let (outcome, reason) = match (&r.by, r.act) {
+        (By::Flow { .. }, _) => return Ok(()),
+        (By::Thread { .. }, _) => ("item", rule),
+        _ if r.composer_skip.is_some() => (
+            "recorded",
+            trail(
+                TRAIL_COMPOSER,
+                r.composer_skip.as_deref().unwrap_or_default(),
+            ),
+        ),
+        (By::Skipped, _) | (_, Act::Record) => ("recorded", trail(TRAIL_RULES, &rule)),
+        (_, Act::CreateItem(_)) if r.item_id.is_some() => ("item", rule),
+        _ if r.decision_id.is_some() => ("need", rule),
         _ => return Ok(()),
     };
+    note_event(
+        tx,
+        event_id,
+        outcome,
+        &r.label,
+        &reason,
+        r.decision_id.as_deref(),
+        r.item_id.as_deref(),
+    )
+}
+
+/// [`mark_event`] on the event of inbound message `message`, when it has one.
+pub(crate) fn mark_message_event(tx: &Tx, message: &str, r: &Response) -> ChannelResult<()> {
+    match event_of(tx, message)? {
+        Some(e) => mark_event(tx, &e, r),
+        None => Ok(()),
+    }
+}
+
+fn event_of(tx: &Tx, message: &str) -> ChannelResult<Option<String>> {
+    Ok(tx
+        .query_row(
+            "SELECT event_id FROM chan_messages WHERE id = ?",
+            [message],
+            |r| r.get::<_, Option<String>>(0),
+        )
+        .optional()?
+        .flatten())
+}
+
+/// `who：why`, or `who` alone.
+pub(crate) fn trail(who: &str, why: &str) -> String {
+    match why.trim() {
+        "" => who.to_string(),
+        w => format!("{who}：{w}"),
+    }
+}
+
+/// Writes what happened to a message on its event, while nothing else (a flow, a run, an earlier
+/// outcome than `recorded`) has.
+pub(crate) fn note_event(
+    tx: &Tx,
+    event_id: &str,
+    outcome: &str,
+    label: &str,
+    reason: &str,
+    decision: Option<&str>,
+    item: Option<&str>,
+) -> ChannelResult<()> {
     tx.execute(
         "UPDATE ext_events SET outcome = ?, outcome_label = ?, decision_id = coalesce(?, decision_id),
             work_item_id = coalesce(?, work_item_id), reason = ?
           WHERE id = ? AND outcome = 'recorded' AND flow_id IS NULL AND run_id IS NULL",
-        params![
-            outcome,
-            r.label,
-            r.decision_id,
-            r.item_id,
-            match r.rule {
-                Some(i) => format!("响应规则第 {} 条", i + 1),
-                None => String::new(),
-            },
-            event_id
-        ],
+        params![outcome, label, decision, item, reason, event_id],
     )?;
     Ok(())
+}
+
+/// [`note_event`] for the event of inbound message `message`, when it has one.
+pub(crate) fn note_message_event(
+    tx: &Tx,
+    message: &str,
+    outcome: &str,
+    label: &str,
+    reason: &str,
+    decision: Option<&str>,
+) -> ChannelResult<()> {
+    match event_of(tx, message)? {
+        Some(e) => note_event(tx, &e, outcome, label, reason, decision, None),
+        None => Ok(()),
+    }
 }

@@ -2207,7 +2207,7 @@ fn has_conflict(v: &Value, key: &str, level: &str, text: &str) -> bool {
     })
 }
 
-/// Prod: `{"on":true,"where":[],"mark":false}` on your own account and `@李鹏翔 /bot 你好` in your
+/// Prod: `{"on":true,"where":[],"mark":false}` on your own account and `@林知远 /bot 你好` in your
 /// chat with yourself did nothing. Now: nothing chosen = everywhere, a leading mention is not part
 /// of the command, the chat with yourself is a `self_dm` named 你自己, and what Steve sent coming
 /// back (same provider id, or the same text before the id was written back) is not a new message.
@@ -2225,10 +2225,10 @@ async fn prod_trigger_in_your_chat_with_yourself_after_a_mention() {
         json!({"on": true, "words": ["/bot"], "where": [], "mark": false}),
     );
     let me = h.me.clone();
-    let mut m = msg("D_SELF", "s1", "upx", "@李鹏翔 /bot 你好", false);
+    let mut m = msg("D_SELF", "s1", "upx", "@林知远 /bot 你好", false);
     m.mentions.push(Mention {
         handle: None,
-        name: "李鹏翔".into(),
+        name: "林知远".into(),
         is_connection: true,
     });
     let i = push(&h, &me, m).await;
@@ -2556,6 +2556,20 @@ async fn banter_on_your_account_is_not_drafted() {
         &[],
     );
     assert_eq!(drafts[0], json!(0));
+    // the skip leaves its trail on the message's event: nothing for you, and who decided why
+    let e = row(
+        &h,
+        "SELECT e.outcome, e.outcome_label, e.reason FROM ext_events e JOIN chan_messages m ON m.event_id = e.id WHERE m.id = ?",
+        &[&i.message_id],
+    );
+    assert_eq!(
+        e,
+        vec![
+            json!("recorded"),
+            json!("不需要回复：玩笑，不需要回"),
+            json!(format!("{}：闲聊", steve_channels::respond::TRAIL_COMPOSER))
+        ]
+    );
 }
 
 /// Prod 2026-11-02, case B: a half sentence @'ing you, and a "reply" that is really a question to

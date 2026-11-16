@@ -346,6 +346,21 @@ fn expect(i: &Inbound, rule: Option<usize>, act: Act) -> steve_channels::Respons
 fn unaddressed(h: &H, i: &Inbound, calls_before: usize) {
     let r = expect(i, None, Act::Record);
     assert_eq!(r.label, steve_channels::rules::LABEL_UNADDRESSED, "{r:?}");
+    // its trail: recorded by the rules, with the gate's label
+    let e = rows(
+        h,
+        "SELECT e.outcome, e.outcome_label, e.reason FROM ext_events e JOIN chan_messages m ON m.event_id = e.id WHERE m.id = ?",
+        &[&i.message_id],
+    )
+    .remove(0);
+    assert_eq!(
+        e,
+        vec![
+            json!("recorded"),
+            json!(steve_channels::rules::LABEL_UNADDRESSED),
+            json!(steve_channels::respond::TRAIL_RULES)
+        ]
+    );
     assert!(
         r.decision_id.is_none() && r.out_message_id.is_none(),
         "{r:?}"

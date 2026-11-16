@@ -62,7 +62,7 @@ pub fn space_of_conv(conv: &str) -> Option<&str> {
 
 /// The short note an IM space gets when Steve could not answer (the details are in the conversation).
 pub fn failure_note(owner: &str) -> String {
-    format!("抱歉，这次没能答上来，我请 {owner} 来看。")
+    FAILURE_NOTE.replacen("{}", owner, 1)
 }
 
 /// What your own trigger word gets in its thread when Steve could not answer it: why, and what to
@@ -87,6 +87,13 @@ fn turn_text(plan: &Plan, command: bool) -> String {
         text
     }
 }
+
+/// [`failure_note`], `{}` for your name.
+pub const FAILURE_NOTE: &str = "抱歉，这次没能答上来，我请 {} 来看。";
+/// The composer's reason for not answering, as the conversation keeps it (ahead of the reason).
+pub const NO_REPLY: &str = "不需要回复：";
+/// Ahead of a question's options when they are said in the space ([`said_text`]).
+pub const OPTIONS_HEAD: &str = "（可以回复：";
 
 /// Only the user whose view connection `conn` speaks with reads `space`: their private chat with Steve.
 pub fn owner_only(
@@ -389,7 +396,7 @@ impl Channels {
         let text = match r.generation.outcome {
             Outcome::Reply => r.text.clone(),
             Outcome::AskOwner => r.text.clone(),
-            Outcome::Skip => format!("不需要回复：{}", r.text.trim()),
+            Outcome::Skip => format!("{NO_REPLY}{}", r.text.trim()),
             Outcome::NeedContext => r.text.clone(),
         };
         self.generations().put(origin, r.generation);
@@ -493,11 +500,26 @@ impl Channels {
         // only a reply is said in the space: a question to you goes to your inbox, a skip nowhere
         if let Some(g) = generation.as_ref().filter(|g| g.outcome != Outcome::Reply) {
             self.react_finish(&plan.message_id, Finish::Clear).await;
-            if g.outcome == Outcome::AskOwner {
-                let q = m.text.clone();
-                self.store()
-                    .transaction(|tx| crate::respond::open_handoff_asking(tx, &plan, Some(&q)))?;
-            }
+            // the message's event says what became of it (the rules' mark ran before the answer)
+            let (q, why) = (m.text.clone(), g.why.clone());
+            self.store().transaction(|tx| -> ChannelResult<()> {
+                use crate::respond::{TRAIL_COMPOSER, note_message_event, trail};
+                if g.outcome == Outcome::AskOwner {
+                    let d = crate::respond::open_handoff_asking(tx, &plan, Some(&q))?;
+                    note_message_event(
+                        tx,
+                        &plan.message_id,
+                        "need",
+                        crate::replies::ASKED,
+                        "",
+                        Some(&d),
+                    )
+                } else {
+                    let said = q.trim().strip_prefix(NO_REPLY).unwrap_or(q.trim());
+                    let reason = trail(TRAIL_COMPOSER, &crate::replies::skip_reason(said, &why));
+                    note_message_event(tx, &plan.message_id, "recorded", q.trim(), &reason, None)
+                }
+            })?;
             return Ok(None);
         }
         if m.meta.get("stopped").is_some_and(|v| v == true) {
@@ -1163,12 +1185,12 @@ fn said_text(text: &str, meta: &Value) -> String {
     if let Some(cs) = meta["suggest"]["choices"].as_array() {
         let labels: Vec<&str> = cs.iter().filter_map(|c| c["label"].as_str()).collect();
         if !labels.is_empty() {
-            t.push_str(&format!("\n（可以回复：{}）", labels.join(" / ")));
+            t.push_str(&format!("\n{OPTIONS_HEAD}{}）", labels.join(" / ")));
         }
     } else if let Some(os) = meta["ask"]["options"].as_array() {
         let opts: Vec<&str> = os.iter().filter_map(Value::as_str).collect();
         if !opts.is_empty() {
-            t.push_str(&format!("\n（可以回复：{}）", opts.join(" / ")));
+            t.push_str(&format!("\n{OPTIONS_HEAD}{}）", opts.join(" / ")));
         }
     }
     t

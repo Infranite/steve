@@ -1303,7 +1303,7 @@ mod tests {
     }
 
     fn m() -> Vec<(String, String)> {
-        vec![("@_user_1".into(), "李鹏翔".into())]
+        vec![("@_user_1".into(), "林知远".into())]
     }
 
     /// The flattened shape: what the receive event and the message API give
@@ -1344,7 +1344,7 @@ mod tests {
         assert!(b[0]["items"][0].get("url").is_none());
         assert_eq!(
             b[1]["text"],
-            "[飞书](https://www.feishu.cn)整合，@李鹏翔更高效。"
+            "[飞书](https://www.feishu.cn)整合，@林知远更高效。"
         );
         assert_eq!(b[5]["text"], "[图片] 备注信息");
         assert_eq!(
@@ -1425,7 +1425,7 @@ mod tests {
         let b = blocks(&c);
         assert_eq!(
             b[0]["text"],
-            "**请 **@李鹏翔[看文档](https://open.feishu.cn/doc)`x=1`"
+            "**请 **@林知远[看文档](https://open.feishu.cn/doc)`x=1`"
         );
         assert_eq!(b[1], json!({"t": "image", "alt": "架构图"}));
         assert!(
@@ -1473,7 +1473,7 @@ mod tests {
             ]
         );
         let b = blocks(&c);
-        assert_eq!(b[0]["text"], "@李鹏翔 请看 紧急 @所有人");
+        assert_eq!(b[0]["text"], "@林知远 请看 紧急 @所有人");
         let items = b[1]["items"].as_array().unwrap();
         assert_eq!(items.len(), 2, "a row of button columns is one button row");
         assert_eq!(items[0]["callback"], true);
@@ -1491,7 +1491,7 @@ mod tests {
         assert_eq!(b[5]["text"], "");
         assert!(b[6]["items"][0].get("url").is_none(), "lark:// dropped");
         assert!(c.text.contains("[不支持的卡片内容]"));
-        assert!(c.text.starts_with("发布审批\nv0.2.3\n@李鹏翔"));
+        assert!(c.text.starts_with("发布审批\nv0.2.3\n@林知远"));
     }
 
     /// user DSL 1.0: `i18n_header`, root `elements`, div fields, action buttons with `multi_url`.

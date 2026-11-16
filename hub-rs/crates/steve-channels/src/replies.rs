@@ -61,12 +61,17 @@ pub fn item_goal(text: &str, context: &[(String, String)], from_owner: bool) -> 
 
 /// “收到，已记为 <编号>。”
 pub fn item_ack(item_id: &str) -> String {
-    format!("收到，已记为 {item_id}。")
+    ITEM_ACK.replacen("{}", item_id, 1)
 }
+
+/// [`item_ack`], `{}` for the item.
+pub const ITEM_ACK: &str = "收到，已记为 {}。";
+/// [`propose_ack`], `{}` for your name.
+pub const PROPOSE_ACK: &str = "收到，我整理成了一条需求，已经提给 {}。";
 
 /// “收到，我整理成了一条需求，已经提给 <主人称呼>。”
 pub fn propose_ack(owner: &str) -> String {
-    format!("收到，我整理成了一条需求，已经提给 {owner}。")
+    PROPOSE_ACK.replacen("{}", owner, 1)
 }
 
 /// C4's responder. Cheap to clone; share one between the builder and the flow actions.
@@ -403,18 +408,28 @@ fn not_a_reply(
                 .store()
                 .transaction(|tx| crate::respond::open_handoff_asking(tx, plan, Some(&r.text)))?;
             Ok(Some(Acted {
-                label: "先问你，没有起草".into(),
+                label: ASKED.into(),
                 decision_id: Some(d),
-                out_message_id: None,
-                item_id: None,
+                ..Acted::default()
             }))
         }
         Outcome::Skip => Ok(Some(Acted {
-            label: format!("不需要回复：{}", r.text.trim()),
-            decision_id: None,
-            out_message_id: None,
-            item_id: None,
+            label: format!("{}{}", crate::conversations::NO_REPLY, r.text.trim()),
+            composer_skip: Some(skip_reason(&r.text, &r.generation.why)),
+            ..Acted::default()
         })),
+    }
+}
+
+/// What a message the composer turned into a question to you says on its event.
+pub const ASKED: &str = "先问你，没有起草";
+
+/// The composer's reason for a skip, for the message's trail: its `why`, else its text.
+pub(crate) fn skip_reason(text: &str, why: &str) -> String {
+    if why.trim().is_empty() {
+        text.trim().to_string()
+    } else {
+        why.trim().to_string()
     }
 }
 
@@ -431,6 +446,7 @@ fn acted(d: &Delivered, item: Option<String>, label: Option<String>) -> Acted {
         decision_id: d.decision_id().map(String::from),
         out_message_id: d.message_id().map(String::from),
         item_id: item,
+        composer_skip: None,
     }
 }
 
