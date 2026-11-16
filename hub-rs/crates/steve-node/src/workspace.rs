@@ -519,8 +519,69 @@ pub(crate) struct Ran {
     pub stderr: String,
 }
 
-/// A worktree of `repo` at `path` on `branch` (created from `base`, else HEAD, when new). One that
-/// is there already is adopted only if it is a worktree of that very repository on that branch.
+/// How long fetching the remote a new branch starts from may take.
+const FETCH_DEADLINE: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// Where a new branch starts when the caller names no base: the remote's default branch as it is
+/// now, fetched right before (a local checkout may be far behind it, and work branched from there
+/// collides with what the remote already has). The remote is `origin`, else the only one there is.
+/// `HEAD` when the repository has no remote, it cannot be reached, or its default branch is not
+/// known: the work starts where it always did.
+pub(crate) fn fresh_base(commands: &Commands, repo: &Path) -> String {
+    let remotes = commands.git(repo, &["remote"]).unwrap_or_default();
+    let names: Vec<&str> = remotes
+        .lines()
+        .map(str::trim)
+        .filter(|r| !r.is_empty())
+        .collect();
+    let remote = match names.as_slice() {
+        [] => return "HEAD".into(),
+        [one] => *one,
+        many if many.contains(&"origin") => "origin",
+        _ => return "HEAD".into(),
+    };
+    let fetched = commands
+        .write_with(repo, &["fetch", "--quiet", remote], &[], FETCH_DEADLINE)
+        .is_ok_and(|r| r.code == Some(0));
+    if !fetched {
+        return "HEAD".into();
+    }
+    let has = |r: &str| {
+        commands
+            .git(
+                repo,
+                &[
+                    "rev-parse",
+                    "--verify",
+                    "--quiet",
+                    &format!("{r}^{{commit}}"),
+                ],
+            )
+            .is_ok()
+    };
+    let head = format!("refs/remotes/{remote}/HEAD");
+    /* a clone knows its remote's default branch; a remote added by hand learns it once */
+    if !has(&head) {
+        let _ = commands.write_with(
+            repo,
+            &["remote", "set-head", remote, "--auto"],
+            &[],
+            FETCH_DEADLINE,
+        );
+    }
+    [
+        head,
+        format!("refs/remotes/{remote}/main"),
+        format!("refs/remotes/{remote}/master"),
+    ]
+    .into_iter()
+    .find(|r| has(r))
+    .unwrap_or_else(|| "HEAD".into())
+}
+
+/// A worktree of `repo` at `path` on `branch` (created from `base`, else from [`fresh_base`], when
+/// new). One that is there already is adopted only if it is a worktree of that very repository on
+/// that branch.
 pub(crate) fn add_worktree(
     commands: &Commands,
     repo: &Path,
@@ -543,10 +604,15 @@ pub(crate) fn add_worktree(
             .git(repo, &["worktree", "add", &p, branch])
             .map(|_| ())
     } else {
+        let base = match base {
+            Some(b) => b.to_string(),
+            None => fresh_base(commands, repo),
+        };
+        /* `--no-track`: the item's branch is its own, not a copy of the remote's default one */
         commands
             .git(
                 repo,
-                &["worktree", "add", "-b", branch, &p, base.unwrap_or("HEAD")],
+                &["worktree", "add", "--no-track", "-b", branch, &p, &base],
             )
             .map(|_| ())
     }

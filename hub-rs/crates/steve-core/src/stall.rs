@@ -50,6 +50,13 @@ impl Core {
                 Err(e) => tracing::warn!("build check task {e}"),
                 Ok(Ok(_)) => {}
             }
+            /* the pull requests of accepted items (network calls, outside the lock) */
+            let c = self.clone();
+            match tokio::task::spawn_blocking(move || c.check_prs()).await {
+                Ok(Err(e)) => tracing::warn!("pull request check {e}"),
+                Err(e) => tracing::warn!("pull request check task {e}"),
+                Ok(Ok(_)) => {}
+            }
         }
     }
 }

@@ -645,10 +645,8 @@ impl Tx<'_> {
             self.track_build(i, &p, required)?;
             return Ok(());
         }
-        /* not there yet: with the merge queue on, an accepted result goes into it by itself (the
-         * acceptance is the consent); what it lands, the next look finds */
-        let queued = self.mq_applies(i)? && self.mq_requirement(i)?;
-        /* not there yet: the agent hears once what is missing; Steve keeps looking while it waits */
+        /* not there yet: the agent hears once what is missing; Steve keeps looking while it waits and,
+         * on GitHub, follows the branch's pull request (`pull`: auto-merge, CI, conflicts) */
         if op.evidence.get("asked").is_none() {
             self.db().store().transaction(|tx| {
                 steve_store::operation_set_in(tx, &op.id, "pending", &json!({"asked": true}))
@@ -657,16 +655,11 @@ impl Tx<'_> {
                 &i.id,
                 patch![stage: "收尾", now: format!("等{}", rule_text(rule))],
             )?;
-            /* the queue merges it: no round of the agent's for that, its session only notes it */
-            if queued {
-                if let Some(s) = self.active_session(&i.id)? {
-                    self.db().event_add(
-                        &s.id,
-                        "system",
-                        json!({"text": "验收通过，已进入合并队列：Steve 会把它和同一目标的其他改动一起合入并按约定发布，不用推送、开 PR 或打 tag。想知道进展用 steve_lane_status。"}),
-                    )?;
-                }
-                return Ok(());
+            let branch = i.branch.clone().unwrap_or_default();
+            if let Some(slug) = p.slug.as_deref()
+                && !branch.is_empty()
+            {
+                self.follow_pr(&op.id, slug, &branch)?;
             }
             let to = match self.active_session(&i.id)? {
                 Some(s) => To::Session(s.id),
@@ -677,16 +670,10 @@ impl Tx<'_> {
             };
             let build =
                 build_text(crate::proof::build_followed(rule, &p) && self.build_required(i)?);
-            let lane = self
-                .db()
-                .project(i.project_id.as_deref())?
-                .is_some_and(|p| crate::orchestrator::lane_releases(&p));
-            let how = if lane && !self.c.mq_on() {
-                /* the lane merges, checks and tags: the agent only hands the branch over */
-                crate::orchestrator::publish_text(true, i.branch.as_deref().unwrap_or_default())
+            let how = if p.slug.is_some() {
+                crate::pull::follow_text(&branch)
             } else {
-                "推送、开 PR、合并、打 tag 是对外动作，先用 steve_request_approval 请求批准；"
-                    .into()
+                "推送这个分支，在代码托管上开到默认分支的合并请求（PR/MR；修 bug 先建 issue 并关联）；合并按托管方的流程完成，不要推送默认分支、不要手工打 tag。".into()
             };
             self.send(
                 &to,

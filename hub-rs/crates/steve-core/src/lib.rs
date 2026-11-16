@@ -38,6 +38,7 @@ mod occupancy;
 mod orchestrator;
 pub mod outbox_work;
 pub mod proof;
+pub mod pull;
 mod quota;
 pub mod release;
 pub mod repo;
@@ -153,6 +154,8 @@ pub(crate) struct State {
     probed: HashMap<String, takeover::Probed>,
     /// Followed builds: when each was last looked at.
     build_checked: HashMap<String, i64>,
+    /// When each followed pull request was last looked at (`pull`), by its operation.
+    pr_checked: HashMap<String, i64>,
     /// Why new turns wait now (`occupancy`).
     holds: std::collections::BTreeSet<occupancy::Hold>,
     /// Items handing over to a new session while the old one's release is on its way: the

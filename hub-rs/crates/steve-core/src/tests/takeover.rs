@@ -327,7 +327,7 @@ pub(super) struct Remote {
     pub(super) item: String,
     pub(super) session: String,
     pub(super) decision: String,
-    wt: PathBuf,
+    pub(super) wt: PathBuf,
 }
 
 /// A project whose completion rule is `rule`, an `origin` it pushes to (a bare repo that answers as
