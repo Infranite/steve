@@ -1313,3 +1313,97 @@ fn a_session_on_a_long_offline_device_moves_to_a_new_one() {
         "{p}"
     );
 }
+
+/* ── a branch with no commit of its own is not a merged change (#218) ── */
+
+/// [`remote`] whose branch is back on `main`: nothing of the item's own on it.
+fn remote_without_commits(k: &Kit, rule: &str) -> Remote {
+    let x = remote(k, rule, false);
+    g(&x.wt, &["reset", "-q", "--hard", "main"]);
+    x
+}
+
+#[test]
+fn accepted_without_a_commit_of_its_own_completes_on_the_acceptance_not_as_merged() {
+    for rule in [upstream::DONE_MERGE, upstream::DONE_TAG] {
+        let k = kit(2);
+        let x = remote_without_commits(&k, rule);
+        k.core.resolve(&x.decision, "pass", "", "me").unwrap();
+        // on GitHub its pull request is looked at once (here `gh` can't be asked: no merged PR)
+        settle_pr(&k);
+        assert!(
+            k.wait(|| k.phase(&x.item) == "closed"),
+            "{rule}: {:?} {:?}",
+            k.status(&x.item),
+            blockers(&k, &x.item)
+        );
+        let i = k.db().item(&x.item).unwrap().unwrap();
+        assert_eq!(i.outcome.as_deref(), Some("completed"), "{rule}");
+        assert_eq!(
+            op_states(&k, &x.item),
+            vec![(OP_RELEASE.to_string(), "waived".to_string())],
+            "{rule}"
+        );
+        let t = k.timeline_texts(&x.item);
+        assert!(
+            t.iter().any(|l| l.starts_with("事项分支上没有自己的提交")),
+            "{rule}: {t:?}"
+        );
+        assert!(
+            !t.iter().any(|l| l.contains("提交已合并到")),
+            "{rule}: never reported as merged: {t:?}"
+        );
+        assert!(
+            !k.rt
+                .prompts_of(&x.session)
+                .iter()
+                .any(|p| p.contains("按这个项目的约定")),
+            "{rule}: nothing to push or merge is asked for"
+        );
+    }
+}
+
+#[test]
+fn a_commit_that_landed_before_a_reset_onto_main_is_not_merged_without_its_pull_request() {
+    let k = kit(2);
+    // the branch's commit landed (a rebase merge) and the worktree was reset onto main since
+    let x = remote(&k, upstream::DONE_MERGE, false);
+    merge_and_tag(&x, None);
+    g(&x.wt, &["reset", "-q", "--hard", "main"]);
+    k.core.resolve(&x.decision, "pass", "", "me").unwrap();
+    settle_pr(&k);
+    // without a merged pull request's word, nothing of its own is there to call merged
+    assert!(k.wait(|| k.phase(&x.item) == "closed"));
+    assert!(
+        !k.timeline_texts(&x.item)
+            .iter()
+            .any(|l| l.contains("提交已合并到"))
+    );
+}
+
+/// The pull request looks `pull` would make once the acceptance asked for one.
+pub(super) fn settle_pr(k: &Kit) {
+    assert!(k.wait(|| {
+        k.core.tx().st.pr_checked.clear();
+        k.core.check_prs().unwrap() > 0
+    }));
+}
+
+#[test]
+fn stopped_without_a_commit_of_its_own_is_continued_not_closed_as_merged() {
+    let k = kit(2);
+    let x = remote_without_commits(&k, upstream::DONE_MERGE);
+    k.rt.end_turn(&k.core, &x.session, "end_turn", None);
+    k.core.tx().lc_invalidate(&x.item, "有新的交付").unwrap();
+    let before = k.rt.prompts_of(&x.session).len();
+    stop(&k, &x.session, "看了一下，好像没什么要改的。");
+    assert!(k.wait(|| k.rt.prompts_of(&x.session).len() > before));
+    assert_ne!(k.phase(&x.item), "closed");
+    let p = k.rt.prompts_of(&x.session).pop().unwrap();
+    assert!(p.contains("分支上还没有自己的提交"), "{p}");
+    assert!(
+        !k.timeline_texts(&x.item)
+            .iter()
+            .any(|l| l.contains("判定完成"))
+    );
+}
