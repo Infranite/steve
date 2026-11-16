@@ -1,0 +1,1 @@
+- Pull requests run the Linux CI jobs only, and build the Apple apps only when they touch them, the web client or the CI workflow; macOS runners were the queue every pull request waited in. The push to `main` still runs Linux and macOS, and `ops/cut-release.py` now releases only a head whose own push run passed, so nothing is released untested on macOS.

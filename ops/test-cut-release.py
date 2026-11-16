@@ -465,13 +465,14 @@ def main():
         refused("has no push run on", none=True, pull=dict(pull, base="other"))
         refused(f"failure on {merged[:7]}", conclusion="failure", pull=pull)
         ok("a pull request's run that did not pass, another merge or target, or a red run on the head: no release")
-        set_ci(status="in_progress", pull=pull)
+        refused("still in_progress", status="in_progress", conclusion=None, pull=pull)
+        ok("an up-to-date pull request's green run does not stand for the head's own push run")
+        set_ci(conclusion="success", pull=pull)
         r = cut(a, "cut", "--ci-wait", "0")
         assert r.returncode == 0 and "released v0.2.33" in r.stdout, r
-        assert f"CI passed on pull request #8 ({head[:7]}), merged as {merged[:7]}" in r.stderr and "runs/77" in r.stderr, r.stderr
+        assert f"CI passed on {merged[:7]}" in r.stderr, r.stderr
         assert git(origin, "rev-parse", "v0.2.33^{commit}^") == merged
-        set_ci(conclusion="success")
-        ok("an up-to-date pull request, rebase-merged: its green run releases the head without a second run")
+        ok("once the head's own push run passed, it releases")
 
         def fragment(name):
             subprocess.run(["git", "-C", str(b), "checkout", "-q", "-B", "main", "origin/main"], check=True, env=ENV)
