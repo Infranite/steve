@@ -147,13 +147,6 @@ pub trait Backend: Send + Sync + 'static {
         branch: String,
         summary: String,
     ) -> impl Future<Output = Result<(), ToolError>> + Send;
-
-    /// Read-only: where the session's item's release request is (`steve_lane_status`); the text the
-    /// agent reads.
-    fn lane_status(
-        &self,
-        s: &Self::Session,
-    ) -> impl Future<Output = Result<String, ToolError>> + Send;
 }
 
 /// The authenticated session, carried from the auth middleware to the tool handler through
@@ -327,7 +320,6 @@ pub async fn run<B: Backend>(
                 .await
                 .map(|_| format!("Release requested. {PUBLISHED} {END}"))
         }
-        tools::LANE_STATUS => b.lane_status(s).await,
         _ => return Err(format!("MCP error -32602: Tool {name} not found")),
     };
     done.map_err(|e| {

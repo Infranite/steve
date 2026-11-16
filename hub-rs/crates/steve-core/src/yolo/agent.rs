@@ -30,7 +30,7 @@ pub fn full_lines(steve_home: &str) -> Vec<String> {
     vec![
         "- Full access is on: your tools run without permission prompts. You act as the user on this machine, so stay careful:".into(),
         format!("  - do not modify {steve_home} (Steve's data, releases, web, backups), the running Hub or system services outside the user-approved scope; read-only inspection is allowed. A recorded approval authorizes only its stated action and scope; use managed tools where required;"),
-        "  - for projects with a merge lane, use Steve tools to hand over your branch; do not independently repeat a push, PR, merge or tag that Steve owns;".into(),
+        "  - in a project that lands changes through pull requests, push only your own branch and never merge, push the default branch or tag by hand;".into(),
         "  - do not send messages or mail as the user (lark-cli, sendmail, mail, osascript…); use Steve's tools for that;".into(),
         "  - stop only processes you started yourself, by PID; never use pkill or killall.".into(),
     ]
@@ -41,7 +41,7 @@ pub const NOTE_ON: &str = "（YOLO 已开启：用户不在，希望尽量少被
 /// …and when it goes off.
 pub const NOTE_OFF: &str = "（YOLO 已结束：回到平常的工作方式，需要决定时用 steve_ask）";
 /// …when full access comes on (on top of the YOLO note when it came from off).
-pub const NOTE_FULL: &str = "（完全放开已开启：你的工具调用不再请求权限。仍然：不要超出用户已批准的具体范围修改 STEVE_HOME、运行中的 Hub 或系统服务；只读检查可做，已有批准不重复申请，要求托管接口的操作仍走托管接口；合并通道负责的推送、PR、合并和 tag 交给 Steve 工具，不独立重复执行；不要以用户的名义发消息或邮件（lark-cli、sendmail、mail、osascript 等）；只按 PID 停你自己启动的进程，不用 pkill/killall。）";
+pub const NOTE_FULL: &str = "（完全放开已开启：你的工具调用不再请求权限。仍然：不要超出用户已批准的具体范围修改 STEVE_HOME、运行中的 Hub 或系统服务；只读检查可做，已有批准不重复申请，要求托管接口的操作仍走托管接口；按 PR 合并的项目只推送自己的分支，不自己合并、不推送默认分支、不手工打 tag；不要以用户的名义发消息或邮件（lark-cli、sendmail、mail、osascript 等）；只按 PID 停你自己启动的进程，不用 pkill/killall。）";
 /// …when full access ends but YOLO stays on.
 pub const NOTE_FULL_OFF: &str = "（完全放开已结束：工具调用重新会请求权限，YOLO 仍开着）";
 

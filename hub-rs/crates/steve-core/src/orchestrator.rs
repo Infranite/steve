@@ -32,9 +32,6 @@ const INTERRUPTED: &str = "Hub 重启时这个会话正在运行，这一回合�
 /// The `text` of an acceptance's `pass` that also starts the release (验收并发布); `no-release`
 /// accepts it without one (验收，先不发布).
 pub const ACCEPT_AND_RELEASE: &str = "release";
-/// The `text` of an acceptance's `pass` that keeps the result out of the merge queue for now
-/// (验收，先不合并); `steve_publish` puts it in later.
-pub const NO_MERGE: &str = "no-merge";
 
 /// An interruption older than this is not continued by itself (it is reported, the intent dropped).
 pub const RESUME_MAX_AGE_MS: i64 = 24 * 3_600_000;
@@ -728,13 +725,6 @@ impl Core {
             t.workflow_tick()?;
             n
         };
-        /* the merge lanes' windows close on time too (outside the core's lock); with the merge
-         * queue on, its queues instead */
-        if self.mq_on() {
-            self.mq_tick();
-        } else if let Err(e) = self.lane_tick() {
-            tracing::warn!("lane tick: {e}");
-        }
         Ok(n)
     }
     /// The lifecycle projection of an item.
@@ -817,15 +807,6 @@ impl Core {
         /* closings that were waiting when the Hub stopped: resumed turns still hold them */
         if let Err(e) = self.lifecycle_tick() {
             tracing::warn!("closing check after boot: {e}");
-        }
-        /* merges and releases a restart cut off; with the merge queue on, the lanes become its
-         * queues first */
-        if !self.store().store().maintenance() {
-            if self.mq_on() {
-                self.mq_boot();
-            } else {
-                self.lane_recover();
-            }
         }
     }
     /// Hold new turns for an upgrade drain, or stop holding for it (a release's hold stays).
@@ -2963,7 +2944,6 @@ impl Tx<'_> {
                      * 验收并发布: the release starts here, without a round of the agent. A project
                      * done by its rule (merged, tagged) has no release to choose: that rule is the
                      * completion, never waived or started from an acceptance */
-                    let raw_text = text;
                     let text = if self.done_rule(&before)?.is_some() {
                         ""
                     } else {
@@ -2971,13 +2951,6 @@ impl Tx<'_> {
                     };
                     if text == ACCEPT_AND_RELEASE {
                         self.st.release_with_accept = Some((i.clone(), actor.to_string()));
-                    }
-                    /* 验收，先不合并: the merge queue leaves it out until steve_publish asks */
-                    if raw_text == NO_MERGE {
-                        self.db()
-                            .store()
-                            .decisions()
-                            .merge_result(id, &json!({"merge": "held"}))?;
                     }
                     let accepted =
                         self.lc_accept(&i, crate::cycle::Policy::Human, Some("你验收通过"));
@@ -3412,48 +3385,14 @@ impl Tx<'_> {
             }
         };
         match (d.kind.as_str(), d.subject_type.as_str()) {
-            (
-                _,
-                crate::mq::drive::SUBJECT_TARGET
-                | crate::mq::drive::SUBJECT_BATCH
-                | crate::mq::drive::SUBJECT_TRAIN,
-            ) => {
-                db.decision_resolve(id, json!({"choice": choice}), "resolved", None)?;
-                let (c, st, sub, choice, actor) = (
-                    self.c.clone(),
-                    d.subject_type.clone(),
-                    d.subject_id.clone(),
-                    choice.to_string(),
-                    actor.to_string(),
-                );
-                crate::detach(move || c.mq_answered(&st, &sub, &choice, &actor));
-            }
-            ("approve", "delivery_batch")
-                if crate::lane::drive::parse_subject(&d.subject_id).is_some() =>
-            {
-                let (lane, unit) =
-                    crate::lane::drive::parse_subject(&d.subject_id).expect("checked");
-                let yes = choice == "yes";
-                /* only an answer that took: a card a newer one replaced (a request joined) is not acted on */
-                let took = db
-                    .decision_resolve(id, json!({"approved": yes}), "resolved", None)?
-                    .is_some_and(|d| d.status == "resolved");
-                if !took {
-                    return Err(msg(steve_i18n::t!("core.decision.handled")));
-                }
-                /* git and checks run off the lock; the answer is the batch's, not one item's */
-                let c = self.c.clone();
-                crate::detach(move || c.lane_answered(&lane, unit, yes));
-            }
-            ("fail", "delivery_batch")
-                if crate::lane::drive::parse_subject(&d.subject_id).is_some() =>
-            {
-                let (lane, unit) =
-                    crate::lane::drive::parse_subject(&d.subject_id).expect("checked");
-                let retry = choice == "retry";
-                db.decision_resolve(id, json!({"choice": choice}), "resolved", None)?;
-                let c = self.c.clone();
-                crate::detach(move || c.lane_release_answered(&lane, unit, retry));
+            /* a card of the merge lane or the merge queue, both gone: answering it does nothing more */
+            (_, "delivery_batch" | "mq_target" | "mq_batch" | "mq_train") => {
+                db.decision_resolve(
+                    id,
+                    json!({"choice": choice, "obsolete": true}),
+                    "expired",
+                    None,
+                )?;
             }
             ("approve", "tool_call") => {
                 let opt = (choice != "deny").then_some(choice);

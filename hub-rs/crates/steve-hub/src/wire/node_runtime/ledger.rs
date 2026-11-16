@@ -22,15 +22,7 @@ pub(super) const LEDGER_METHODS: [&str; 3] = ["exec", "git_apply", "tidy_workspa
 pub(crate) const PUSH_DEADLINE: i64 = 5 * 60 * 1000;
 
 /// What a ledger operation may be for (`release:<item>`: the rebase before an item's release).
-const SUBJECTS: [&str; 7] = [
-    "flow_run:",
-    "vault_use:",
-    "push:",
-    "lane:",
-    "mq:",
-    "tidy:",
-    "release:",
-];
+const SUBJECTS: [&str; 5] = ["flow_run:", "vault_use:", "push:", "tidy:", "release:"];
 
 fn valid_subject(s: &str) -> bool {
     SUBJECTS
@@ -262,7 +254,6 @@ mod tests {
             "flow_run:r1",
             "vault_use:u1",
             "push:i1",
-            "lane:l1:u2",
             "tidy:i1",
             "release:i1",
         ] {

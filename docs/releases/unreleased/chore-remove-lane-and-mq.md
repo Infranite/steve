@@ -1,0 +1,1 @@
+- The merge lane and the merge queue are removed: their project-page sections, the `steve_lane_status` tool, the `/projects/:id/lane` and `/projects/:id/queue` API, the `STEVE_MQ` setting and the Node's merge-queue staging. Changes of git projects land through their own pull requests. The upgrade drops their tables, and lane or queue cards still open are closed.

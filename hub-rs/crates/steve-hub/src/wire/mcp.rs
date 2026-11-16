@@ -65,7 +65,4 @@ impl steve_mcp::Backend for McpBackend {
     ) -> Result<(), ToolError> {
         not_wired("steve_publish")
     }
-    async fn lane_status(&self, _s: &Session) -> Result<String, ToolError> {
-        not_wired("steve_lane_status").map(|_| String::new())
-    }
 }

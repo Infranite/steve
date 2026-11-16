@@ -5,7 +5,7 @@
 //!   in-process runner any more (B7): a session no Node takes is refused, never run on the Hub.
 //! - [`CoreDomain`]: the HTTP layer's [`Domain`] over [`Core`]. The core's mutating calls are synchronous (and
 //!   may run git under its lock), so they run on the blocking pool.
-//! - [`CoreMcp`]: steve-mcp's backend, the Steve tools → `core.tool_*` (and `core.lane_status`).
+//! - [`CoreMcp`]: steve-mcp's backend, the Steve tools → `core.tool_*`.
 
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
@@ -1557,50 +1557,6 @@ impl Domain for CoreDomain {
         let c = self.core.clone();
         blocking(move || c.lifecycle_tick()).await
     }
-    async fn lane_view(&self, upstream: &str, branch: &str) -> BResult<Option<Value>> {
-        let (c, u, b) = (self.core.clone(), upstream.to_string(), branch.to_string());
-        blocking(move || c.lane_view(&u, &b)).await
-    }
-    async fn lane_policy(
-        &self,
-        upstream: &str,
-        branch: &str,
-        window_ms: Option<i64>,
-        max_members: Option<i64>,
-    ) -> BResult<Option<Value>> {
-        let (c, u, b) = (self.core.clone(), upstream.to_string(), branch.to_string());
-        blocking(move || c.lane_policy(&u, &b, window_ms, max_members)).await
-    }
-    async fn lane_now(&self, upstream: &str, branch: &str) -> BResult<bool> {
-        let (c, u, b) = (self.core.clone(), upstream.to_string(), branch.to_string());
-        blocking(move || c.lane_now(&u, &b)).await
-    }
-    async fn mq_view(&self, upstream: &str, branch: &str, ws: &str) -> BResult<Option<Value>> {
-        let (c, u, b, w) = (
-            self.core.clone(),
-            upstream.to_string(),
-            branch.to_string(),
-            ws.to_string(),
-        );
-        blocking(move || c.mq_view(&u, &b, &w)).await
-    }
-    async fn mq_act(
-        &self,
-        upstream: &str,
-        branch: &str,
-        ws: &str,
-        act: Value,
-        actor: &str,
-    ) -> BResult<Option<Value>> {
-        let (c, u, b, w, a) = (
-            self.core.clone(),
-            upstream.to_string(),
-            branch.to_string(),
-            ws.to_string(),
-            actor.to_string(),
-        );
-        blocking(move || c.mq_act(&u, &b, &w, &act, &a)).await
-    }
     async fn revise_goal(&self, id: &str, text: &str) -> BResult<()> {
         let (c, id, text) = (self.core.clone(), id.to_string(), text.to_string());
         blocking(move || c.revise_goal(&id, &text)).await
@@ -2323,21 +2279,6 @@ impl steve_mcp::Backend for CoreMcp {
         let (c, s) = (self.core.clone(), s.clone());
         observation
             .run(tool(move || c.tool_publish(&s, &branch, &summary)))
-            .await
-    }
-    async fn lane_status(&self, s: &steve_store::Session) -> Result<String, steve_mcp::ToolError> {
-        let observation =
-            super::diagnostics::ToolObservation::new(&self.store, s, "steve_lane_status");
-        let (c, s) = (self.core.clone(), s.clone());
-        observation
-            .run(async {
-                match tokio::task::spawn_blocking(move || c.lane_status(&s).map(|st| st.render()))
-                    .await
-                {
-                    Ok(r) => r.map_err(|e| e.to_string().into()),
-                    Err(e) => Err(e.to_string().into()),
-                }
-            })
             .await
     }
 }

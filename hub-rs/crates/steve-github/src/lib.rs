@@ -94,7 +94,6 @@ pub mod issues;
 pub mod link;
 pub mod manifest;
 pub mod mcp;
-pub mod mq;
 pub mod panel;
 pub mod poll;
 pub mod push;

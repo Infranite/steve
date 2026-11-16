@@ -24,7 +24,6 @@ pub(crate) enum Work {
     /// A turn runs, or its end is not confirmed yet: the item's own or a work unit's.
     Running(String),
     /// Input or work waits its turn: queued messages, units waiting for a slot, a start or a resume.
-    /// (A request in the merge lane is not: it silences Steve's continues, not your own stop.)
     Queued(String),
     /// An open card of the item or of one of its units waits for you.
     User(String),

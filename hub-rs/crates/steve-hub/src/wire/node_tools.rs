@@ -1573,12 +1573,7 @@ pub(crate) mod tests {
                 .is_empty()
         );
         let complete = w.tool_service.catalog();
-        for name in [
-            "steve_items_search",
-            "steve_item_read",
-            "steve_lane_status",
-            "steve_debug",
-        ] {
+        for name in ["steve_items_search", "steve_item_read", "steve_debug"] {
             assert!(
                 complete.iter().find(|t| t.name == name).unwrap().read_only,
                 "{name}"

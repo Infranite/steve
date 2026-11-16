@@ -31,12 +31,11 @@ impl Core {
                     "last_stop": {"why": stopped, "yours": yours}}),
             )
         };
-        let lane = self.lane_status_of_item(item_id)?;
         let current = self.store().item(item_id)?;
         let changed = current.is_none_or(|i| i.cycle != cycle || i.revision != revision);
         Ok(json!({
             "observed_at":observed_at,"item_id":item_id,"cycle":cycle,"revision":revision,
-            "lifecycle":lifecycle,"dependencies":dependencies,"work":work,"lane":lane,
+            "lifecycle":lifecycle,"dependencies":dependencies,"work":work,
             "sampled_until":steve_store::now(),"changed_during_read":changed
         }))
     }
