@@ -340,7 +340,6 @@ impl Engine {
             ("approve", "release") => {
                 match (&item, project.as_ref().and_then(|p| p.release.clone())) {
                     (Some(i), Some(r)) => Subject::Release(Release {
-                        batch: false,
                         release_kind: r.kind,
                         cmd: r.cmd,
                         branch_ok: i.branch.as_deref() == Some(d.subject_id.as_str()),
@@ -370,7 +369,6 @@ impl Engine {
                     from_chat: item.as_ref().is_some_and(|i| i.source.1 == "chat"),
                 }
             }
-            ("fail", crate::mq::drive::SUBJECT_BATCH) => self.queue_batch(d)?,
             ("approve", "secret_use") => self.secret_use(d)?,
             (_, "chan_message") => self.chan(d)?,
             (_, "mail_draft") => self.mail(d)?,
@@ -379,28 +377,6 @@ impl Engine {
         let mut facts = judge::facts_of(d, subject);
         facts.present = present;
         Ok(Gathered { facts, progress })
-    }
-
-    /// A merge-queue batch's card: whether its checks gave no result, and how often they ran again.
-    fn queue_batch(&self, d: &crate::repo::Decision) -> ApiResult<Subject> {
-        let Some((target, no)) = crate::mq::drive::parse_batch(&d.subject_id) else {
-            return Ok(Subject::Unverified("看不懂这一批".into()));
-        };
-        let s = self.core().store().store();
-        let batch = s
-            .reader(|c| steve_store::mq::batch_get(c, &target, no as i64))
-            .map_err(|e| ApiError::Internal(e.to_string()))?;
-        let t = s
-            .reader(|c| steve_store::mq::target_get(c, &target))
-            .map_err(|e| ApiError::Internal(e.to_string()))?;
-        let (Some(b), Some(t)) = (batch, t) else {
-            return Ok(Subject::Unverified("这一批不在了".into()));
-        };
-        Ok(Subject::QueueBatch {
-            no_result: d.options.iter().any(|o| o == "skip"),
-            reruns: b.reruns.max(0) as u32,
-            limit: crate::mq::policy::Policy::of(&t.policy, None).yolo_reruns,
-        })
     }
 
     /// The item's session that is not ended, newest.

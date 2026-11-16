@@ -134,12 +134,6 @@ const CASES: &[(&str, &str, &str)] = &[
     ),
     // ---------------------------------------------------------------- decisions
     (
-        "decisions_subject",
-        "steve-store repo/lanes.rs batch_card",
-        "SELECT status, coalesce(result, 'null') FROM decisions
-          WHERE subject_type = 'delivery_batch' AND subject_id = ? AND kind = ? ORDER BY created DESC LIMIT 1",
-    ),
-    (
         "decisions_created_item",
         "steve-store repo/stats.rs refresh_pending",
         "SELECT EXISTS(SELECT 1 FROM item_stats WHERE dirty = 1) OR (?1 > 0 AND (

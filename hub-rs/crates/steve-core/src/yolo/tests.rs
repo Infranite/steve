@@ -860,7 +860,6 @@ fn accept_facts(
 fn release_facts(pl: &Place, cmd: &str) -> Release {
     let _ = pl;
     Release {
-        batch: false,
         release_kind: "script".into(),
         cmd: cmd.into(),
         branch_ok: true,
@@ -1024,66 +1023,6 @@ fn every_row_of_the_table() {
             "release 4th rebase",
             facts("approve", "release", &yes_no, Subject::Release(rebased)),
             "release.rebase",
-        ),
-        (
-            "batch own",
-            facts(
-                "approve",
-                "delivery_batch",
-                &yes_no,
-                Subject::Release(Release {
-                    batch: true,
-                    ..release_facts(&pl, &own)
-                }),
-            ),
-            "yes",
-        ),
-        (
-            "batch failed",
-            facts("fail", "delivery_batch", &["look"], Subject::BatchFailed),
-            "batch.failed",
-        ),
-        (
-            "queue batch no result",
-            facts(
-                "fail",
-                "mq_batch",
-                &["rerun", "return", "skip"],
-                Subject::QueueBatch {
-                    no_result: true,
-                    reruns: 0,
-                    limit: 1,
-                },
-            ),
-            "rerun",
-        ),
-        (
-            "queue batch rerun used",
-            facts(
-                "fail",
-                "mq_batch",
-                &["rerun", "return", "skip"],
-                Subject::QueueBatch {
-                    no_result: true,
-                    reruns: 1,
-                    limit: 1,
-                },
-            ),
-            "mq.rerun_used",
-        ),
-        (
-            "queue batch over its limit",
-            facts(
-                "fail",
-                "mq_batch",
-                &["return", "rerun"],
-                Subject::QueueBatch {
-                    no_result: false,
-                    reruns: 0,
-                    limit: 1,
-                },
-            ),
-            "mq.limit",
         ),
         ("stall", stall(StallCause::Stopped, 0), "continue"),
         (
@@ -2097,19 +2036,6 @@ fn limited_subjects(pl: &Place) -> Vec<(&'static str, Facts, u8)> {
                         pl,
                         &format!("{}/current/ops/release.sh", pl.env.steve_home.display()),
                     )
-                }),
-            ),
-            5,
-        ),
-        (
-            "batch elsewhere",
-            facts(
-                "approve",
-                "delivery_batch",
-                &yes,
-                Subject::Release(Release {
-                    batch: true,
-                    ..release_facts(pl, "relative/release.sh")
                 }),
             ),
             5,

@@ -220,9 +220,7 @@ pub fn plan(
         PrepareKind::Scratch
     };
     match &prepare {
-        PrepareKind::Existing { dir: at }
-        | PrepareKind::Worktree { repository: at, .. }
-        | PrepareKind::Staging { source: at, .. } => {
+        PrepareKind::Existing { dir: at } | PrepareKind::Worktree { repository: at, .. } => {
             if !allows(at) {
                 return Err(OutsideRoots);
             }

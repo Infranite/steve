@@ -36,7 +36,6 @@ pub mod reclaim;
 mod research;
 mod scan;
 mod secrets;
-mod staging;
 mod toolchain;
 mod tools;
 mod vitals;
@@ -3201,13 +3200,6 @@ impl WorkspaceExecutor for LocalNode {
                         workspace::target(&self.0.roots(), at)?;
                     }
                 }
-                PrepareKind::Staging { source, branch } => {
-                    // only read: the staging and its mirror are the Node's own
-                    workspace::resolve(&self.0.roots(), source, false)?;
-                    if !git::branch_ok(branch) {
-                        return Err(ApiError::new(ErrorCode::Invalid, "not a branch name"));
-                    }
-                }
                 PrepareKind::Scratch => {}
             }
             t.reserve(&c.body.resource, &c.id)?;
@@ -3269,30 +3261,6 @@ impl WorkspaceExecutor for LocalNode {
                             .map(|_| (p, Some(repo), Some(branch.clone())))
                         }
                         (Err(e), _) | (_, Err(e)) => Err(e),
-                    }
-                }
-                PrepareKind::Staging { source, branch } => {
-                    match workspace::resolve(&me.0.roots(), source, false) {
-                        Ok(src) => {
-                            let mirror = staging::mirror_of(&home, &src);
-                            let p = staging::place_of(&home, &name);
-                            let lock = me.repo_lock(&mirror);
-                            let _g = lock.lock().await;
-                            let commands = workspace::Commands {
-                                inner: me.0.clone(),
-                                op: op.clone(),
-                            };
-                            let (m2, p2, b2) = (mirror.clone(), p.clone(), branch.clone());
-                            tokio::task::spawn_blocking(move || {
-                                staging::refresh(&commands, &m2, &src)?;
-                                staging::add(&commands, &m2, &p2, &b2)
-                            })
-                            .await
-                            .map_err(|e| ApiError::new(ErrorCode::Internal, e.to_string()))
-                            .and_then(|r| r)
-                            .map(|_| (p, Some(mirror), Some(branch.clone())))
-                        }
-                        Err(e) => Err(e),
                     }
                 }
             };
@@ -3610,48 +3578,9 @@ impl WorkspaceExecutor for LocalNode {
                 op: op.clone(),
             };
             let d = dir.clone();
-            let source = match &row.kind {
-                PrepareKind::Staging { source, .. } => {
-                    Some(workspace::resolve(&me.0.roots(), source, false))
-                }
-                _ => None,
-            };
-            let (mirror, branch) = (row.repo.clone(), row.view.branch.clone());
             let done = tokio::task::spawn_blocking(move || match action {
                 GitAction::Rebase { onto } => {
                     git::rebase(&commands, &d, &onto, &expected, &expected_head)
-                }
-                GitAction::Merge {
-                    commit,
-                    message,
-                    back_out_on_conflict,
-                } => staging::merge(
-                    &commands,
-                    &d,
-                    &commit,
-                    message.as_deref(),
-                    back_out_on_conflict,
-                    &expected,
-                    &expected_head,
-                ),
-                GitAction::Reset { to, keep } => {
-                    let (Some(src), Some(mirror), Some(branch)) = (source, mirror, branch) else {
-                        return Err(ApiError::new(
-                            ErrorCode::Invalid,
-                            "a reset is for a merge-queue staging only",
-                        ));
-                    };
-                    staging::reset(
-                        &commands,
-                        &d,
-                        Path::new(&mirror),
-                        &src?,
-                        &branch,
-                        &to,
-                        &keep,
-                        &expected,
-                        &expected_head,
-                    )
                 }
                 GitAction::Push { .. } => Err(ApiError::new(ErrorCode::Internal, "push")),
             })

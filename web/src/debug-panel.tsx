@@ -189,7 +189,7 @@ export function ItemDebugPanel({ item, session }: { item: string; session?: stri
 
 function CurrentBlockers({ snapshot }: { snapshot: DebugSnapshot }) {
   const t = useT()
-  const state = snapshot.state, blockers = state?.lifecycle?.blockers, deps = state?.dependencies, lane = state?.lane
+  const state = snapshot.state, blockers = state?.lifecycle?.blockers, deps = state?.dependencies
   // The domain view is an evidence projection; missing data must never become "healthy".
   return <div className="space-y-2 border-t border-foreground/6 pt-3" data-debug-blockers>
     <h4 className="type-label text-tertiary">{t("views:debug.blockers")}</h4>
@@ -197,7 +197,6 @@ function CurrentBlockers({ snapshot }: { snapshot: DebugSnapshot }) {
     {!!deps?.open_dependencies?.length && <p className="type-footnote">{t("views:debug.dependencies", { items: deps.open_dependencies.join(" · ") })}</p>}
     {deps?.resume_mode && <p className="type-footnote text-muted-foreground">{t("views:debug.resumeMode", { mode: deps.resume_mode === "automatic" ? t("views:debug.resumeAutomatic") : deps.resume_mode === "notify" ? t("views:debug.resumeNotify") : deps.resume_mode, source: deps.resume_source ?? t("views:debug.unknown") })}</p>}
     {deps?.resume_blocker && <p className="break-words type-footnote text-attention">{deps.resume_blocker}</p>}
-    {lane?.summary && <p className="break-words type-footnote">{lane.summary}</p>}
     {state?.changed_during_read && <p role="status" className="type-footnote text-attention">{t("views:debug.stateChanged")}</p>}
     {state && <details><summary className="cursor-pointer type-footnote text-muted-foreground">{t("views:debug.snapshotDetails")}</summary><pre className="mt-2 max-h-72 overflow-y-auto whitespace-pre-wrap break-all type-footnote font-mono text-muted-foreground">{json(state)}</pre></details>}
   </div>

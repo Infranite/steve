@@ -167,7 +167,7 @@ async fn maybe_sent_with_no_record_on_the_node_is_unknown_and_never_sent() {
     first
         .submit(
             "op_x3",
-            "lane:l1:u1",
+            "tidy:i1",
             "exec",
             spec("python3 ops/cut-release.py cut"),
         )

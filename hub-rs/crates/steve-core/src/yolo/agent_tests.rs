@@ -315,7 +315,9 @@ fn full_access_bypasses_prompts_and_says_what_still_holds() {
         assert!(p.contains(&l), "{l}\n{p}");
     }
     assert!(p.contains("never use pkill or killall"));
-    assert!(p.contains("do not independently repeat a push, PR, merge or tag that Steve owns"));
+    assert!(p.contains(
+        "push only your own branch and never merge, push the default branch or tag by hand"
+    ));
     assert!(p.contains(&format!("do not modify {}", y.env().steve_home.display())));
     // plain YOLO: no full-access lines, no bypass
     let k = Kit::new();

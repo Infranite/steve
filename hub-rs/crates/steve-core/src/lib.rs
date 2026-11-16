@@ -24,12 +24,10 @@ pub mod git;
 pub mod harnesses;
 pub mod housekeeping;
 pub mod kinds;
-pub mod lane;
 pub mod lifecycle;
 mod marks;
 pub mod models;
 mod modules;
-pub mod mq;
 pub mod node_git;
 pub mod notice_line;
 pub mod notify;
@@ -99,10 +97,6 @@ pub(crate) struct Inner {
     reclaiming: std::sync::atomic::AtomicBool,
     /// The way to items' Nodes, once wired (`node_git`); unset: the Hub's own git everywhere.
     node_git: OnceLock<Arc<dyn node_git::NodeGit>>,
-    /// The Node the merge queue's staging is on, once wired (`mq::drive`).
-    mq_node: OnceLock<Arc<dyn mq::exec::MqNode>>,
-    /// The host of targets that take changes through pull requests, once wired (`mq::host`).
-    mq_host: OnceLock<Arc<dyn mq::host::MqHost>>,
 }
 
 /// What a session's last Steve tool call left behind, consumed at its turn end.
@@ -204,8 +198,6 @@ impl Core {
             steve_notes: Default::default(),
             reclaiming: Default::default(),
             node_git: OnceLock::new(),
-            mq_node: OnceLock::new(),
-            mq_host: OnceLock::new(),
         }))
     }
 

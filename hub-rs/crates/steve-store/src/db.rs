@@ -171,6 +171,8 @@ pub const MIGRATIONS: &[&str] = &[
     // 84: a Node's choice whether its owner's sessions load the owner's personal harness config.
     include_str!("../migrations/084.sql"),
     include_str!("../migrations/085.sql"),
+    // 86: the merge lane and the merge queue go (pull requests land changes); their open cards expire.
+    include_str!("../migrations/086.sql"),
 ];
 
 /// 027's item columns and their one-time backfill (applied by `run_pending` when `items.phase` is missing).

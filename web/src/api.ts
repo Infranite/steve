@@ -43,52 +43,6 @@ export type RDecision = { id: string; kind: "accept" | "ask" | "approve" | "fail
 export type RBot = { id: string; name: string; role: string; main: boolean; harness: string; model: string | null; reasoning_effort?: string | null; rules: string; persona: string; proactive: number; accept_mode: string; perm_mode: string; avatar: { color?: string; skin?: string | null; round?: number }; default_project: string | null; prompt: string | null; device: string | null; enabled: boolean; revision: number; updated: number; workspaces: string[]; memories: number }
 /** GET /sessions/:id/resume: the harness's own session, how to resume it there, and whether its transcript is on the Hub's machine */
 export type RResume = { harness: string; id: string | null; cwd: string; cwd_exists: boolean; command: string | null; fork_command?: string | null; transcript_checked?: boolean; transcript: { path: string; updated: number | null; id: string | null; cwd: string | null; matches: boolean } | null }
-/** `GET /projects/:id/lane`: the target's profile, each fact with where it came from */
-export type RLaneFact<T> = { value: T; how: { state: "found" } | { state: "default" } | { state: "unknown"; why: string }; evidence: string[] }
-export type RLane = {
-  target: { upstream: string; branch: string }; reads: string; fetch_error: string | null
-  merge: RLaneFact<"host_queue" | "host_pr" | "push">
-  checks: RLaneFact<{ name: string; from: "required" | "workflow" | "suggested"; on?: string[] }[]>
-  ship: RLaneFact<"tag" | "script" | "merge">
-  numbered: { kind: "version" | "notes" | "migrations" | "lockfile"; path: string; evidence: string; handling: string }[]
-  pace: { days: number; landed: number; releases: number; authors: number }
-  /** the lane itself; `null` until a request first went into it or you set its limits */
-  lane: RLaneState | null
-  /** the merge queue (STEVE_MQ=1), which takes over from the lane; `null` while it is off */
-  queue?: RQueue | null
-}
-/** the merge queue's numbers for one target (every one settable; `set` holds the ones you set) */
-export type RQueuePolicy = {
-  max_batch: number; settle_s: number; checks: string[]; check_deadline_s: number; host_deadline_s: number; host_poll_s: number
-  release_window_s: number; release_max: number; release_idle_s: number | null; node_wait_s: number; speculate: number
-  yolo_reruns: number; paused: boolean; node: string | null; moved_retries: number; cut_ci_wait_s: number; cut_deadline_s: number
-}
-export type RQueueName = { id: string; label: string }
-export type RQueueEntry = { id: string; item_id: string | null; label: string; state: string; head: string; batch: number | null; train: number | null; pr: number | null; reason: string | null; arrived: number; landed_at: number | null; release_now: boolean }
-export type RQueueBatch = { no: number; parent: number | null; root: number; state: string; step: string | null; members: RQueueName[]; others: number; outcome: string | null; reruns: number; base: string | null; tip: string | null; opened: number; ended: number | null }
-export type RQueueTrain = { no: number; state: string; now: boolean; version: string | null; tag: string | null; members: RQueueName[]; others: number; opened: number; last: number; closes_at: number | null; ended: number | null }
-export type RQueueStats = {
-  since: number; batches: number; avg_members: number | null; avg_batch_ms: number | null; landed: number; failed: number; no_result: number
-  bisections: number; returned_conflict: number; returned_failed: number; reruns: number; fed: number
-  trains: number; avg_train_size: number | null; avg_train_ms: number | null; avg_wait_to_land_ms: number | null
-  cards: number; cards_answered: number; cards_by_yolo: number; avg_answer_ms: number | null
-}
-export type RQueue = {
-  on: boolean
-  target: { id: string; upstream: string; branch: string; mode: "push" | "host_pr" | "host_queue" | null; granted: boolean; refused: boolean; migrated: boolean; node: string | null } | null
-  policy: RQueuePolicy; set: Partial<RQueuePolicy>; defaults: RQueuePolicy
-  queued?: RQueueEntry[]; queued_others?: number; recent?: RQueueEntry[]
-  batches?: RQueueBatch[]; trains?: RQueueTrain[]; stats?: RQueueStats
-}
-export type RQueueAct = { policy: Partial<{ [K in keyof RQueuePolicy]: RQueuePolicy[K] | null }> } | { allow: boolean } | { release_now: true } | { once: true }
-export type RLaneMember = { id: string; item_id: string | null; branch: string; label: string }
-/** a batch: `approved` false while its card waits for you (what arrives then joins it) */
-export type RLaneUnit = { no: number; members: RLaneMember[]; deferred: RLaneMember[]; opened_at: number; closed: boolean; merged: boolean; approved: boolean }
-export type RLaneLimits = { window_ms: number; max_members: number }
-export type RLaneState = {
-  id: string; policy: RLaneLimits; set: { window_ms: number | null; max_members: number | null }; defaults: RLaneLimits
-  running: RLaneUnit | null; collecting: (RLaneUnit & { closes_at: number }) | null; queued: RLaneMember[]
-}
 export type RProject = { id: string; workspace_id: string; name: string; description: string; device_id: string; path: string; kind: "git" | "dir"; worktree: boolean; default_bot: string | null; release: { kind: string; cmd: string; done_when?: "merge" | "tag" } | null; archived: boolean; created: number; updated: number }
 export type RWorkspace = { id: string; name: string; description: string; item_prefix: string; sort: number; created: number; role?: string }
 export type RTag = { id: string; name: string; cat: string; description: string; created_by: string; created: number }
@@ -326,10 +280,6 @@ export const api = {
   botPrompt: (id: string) => get<{ generated: string; custom: string | null }>(`/bots/${id}/prompt`), memories: (id: string) => get<{ id: string; text: string; source: string; created: number }[]>(`/bots/${id}/memories`),
   addMemory: (id: string, text: string) => post(`/bots/${id}/memories`, { text }), editMemory: (id: string, text: string) => patch(`/memories/${id}`, { text }), deleteMemory: (id: string) => del(`/memories/${id}`), clearMemories: () => del("/memories"),
   newProject: (p: { name: string; path: string; description?: string; worktree?: boolean; default_bot?: string | null; done_when?: "merge" | "tag" | null; node?: string }) => post<RProject>("/projects", p), patchProject: (id: string, p: Partial<RProject> & { done_when?: "merge" | "tag" | null }) => patch<RProject>("/projects/" + id, p),
-  lane: (id: string) => get<RLane>(`/projects/${encodeURIComponent(id)}/lane`),
-  lanePolicy: (id: string, p: { window_min: number | null; max_members: number | null }) => patch<{ lane: RLaneState | null }>(`/projects/${encodeURIComponent(id)}/lane`, p),
-  laneNow: (id: string) => post<{ closed: boolean; lane: RLaneState | null }>(`/projects/${encodeURIComponent(id)}/lane/now`),
-  queueAct: (id: string, act: RQueueAct) => post<{ queue: RQueue | null }>(`/projects/${encodeURIComponent(id)}/queue`, act),
   describeProject: (path: string) => post<{ name: string; description: string; git: boolean }>("/projects/describe", { path }),
   browse: (path: string, node = "hub") => get<RBrowse>(`/fs/browse?path=${encodeURIComponent(path)}&node=${encodeURIComponent(node)}`),
   newTag: (p: { name: string; cat: string; description: string }) => post<RTag>("/tags", p), patchTag: (id: string, p: Partial<RTag>) => patch("/tags/" + id, p), deleteTag: (id: string) => del("/tags/" + id), mergeTag: (id: string, into: string) => post(`/tags/${id}/merge`, { into }),

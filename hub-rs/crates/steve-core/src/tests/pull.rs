@@ -204,7 +204,13 @@ fn a_conflict_or_a_failed_check_goes_back_to_the_agent_once_per_head() {
     // a new message, not only a new date: an amend within the same second would keep the hash
     g(
         &x.wt,
-        &["commit", "-q", "--amend", "-m", "the same change, rebased onto main"],
+        &[
+            "commit",
+            "-q",
+            "--amend",
+            "-m",
+            "the same change, rebased onto main",
+        ],
     );
     let h2 = head(&x.wt);
     assert_ne!(h, h2);

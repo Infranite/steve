@@ -19,7 +19,6 @@ pub const REQUEST_APPROVAL: &str = "steve_request_approval";
 pub const DELIVER: &str = "steve_deliver";
 pub const DELIVER_FILE: &str = "steve_deliver_file";
 pub const PUBLISH: &str = "steve_publish";
-pub const LANE_STATUS: &str = "steve_lane_status";
 
 /// Added to the `steve_publish` result: where to look for its progress instead of asking the user.
 pub const PUBLISHED: &str = "Its progress and result arrive on the item; don't ask the user.";
@@ -180,11 +179,9 @@ mod tests {
                 REQUEST_APPROVAL,
                 DELIVER_FILE,
                 DELIVER,
-                PUBLISH,
-                LANE_STATUS
+                PUBLISH
             ]
         );
-        assert_eq!(validate(LANE_STATUS, &JsonObject::new()), Ok(()));
     }
 
     #[test]

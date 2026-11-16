@@ -113,7 +113,7 @@ mod tests {
         }
         walk(&zh);
         let tools = session_tools();
-        assert_eq!(tools.len(), 41);
+        assert_eq!(tools.len(), 40);
         assert_eq!(tools.iter().filter(|t| t["core"] == true).count(), 8);
     }
 

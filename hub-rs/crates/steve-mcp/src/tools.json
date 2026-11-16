@@ -223,14 +223,5 @@
         "summary"
       ]
     }
-  },
-  {
-    "name": "steve_lane_status",
-    "description": "Read-only: where this item's release request is now. Says whether steve_publish was called, the merge-lane batch it is in (MQ-<n>, its batch branch, your position and the other items), the batch's state (queued, collecting, checking, waiting_for_approval, merging, merged_waiting_release, releasing, release_failed, left, released), the approval card it waits for and who answers it, the failure reason and where to read more, the merged commit and released version, and what you should do next (wait, fix, publish or nothing). Changes nothing; call it instead of asking the user which batch you are in or how the release is going.",
-    "inputSchema": {
-      "$schema": "http://json-schema.org/draft-07/schema#",
-      "type": "object",
-      "properties": {}
-    }
   }
 ]

@@ -1,13 +1,12 @@
 //! The places that deal with builds and disks know no tool by name (path model §6.5.1): the
 //! toolchains' directory names, lockfiles and variables are data, so none of them may be a string
-//! literal in the item worktree's disk keeping, the merge lane, or the Node's workspace code.
+//! literal in the item worktree's disk keeping or the Node's workspace code.
 //! Tests (`#[cfg(test)]` modules) may name them.
 
 use std::path::Path;
 
 const WATCHED: &[&str] = &[
     "../steve-core/src/workspace.rs",
-    "../steve-core/src/lane",
     "../steve-node/src/workspace.rs",
     "../steve-node/src/toolchain.rs",
 ];
@@ -46,7 +45,7 @@ fn no_tool_is_named_where_builds_and_disks_are_handled() {
     for w in WATCHED {
         sources(&root.join(w), &mut files);
     }
-    assert!(files.len() >= 4, "{files:?}");
+    assert!(files.len() >= 3, "{files:?}");
     let mut found = vec![];
     for f in &files {
         let text = std::fs::read_to_string(f).unwrap();

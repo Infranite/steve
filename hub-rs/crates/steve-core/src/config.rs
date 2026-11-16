@@ -48,8 +48,6 @@ pub struct CoreConfig {
     pub commit: Option<String>,
     /// Disk thresholds for the worktrees' volume (`workspace`).
     pub disk: crate::workspace::DiskPolicy,
-    /// `STEVE_MQ=1`: accepted results merge through the merge queue (`mq`) instead of the lanes.
-    pub mq: bool,
     /// `STEVE_WORKFLOW_MAX_PARALLEL`: global active workflow unit cap across all open workflows.
     pub max_workflow_parallel: usize,
 }
@@ -66,11 +64,6 @@ pub fn gh_cli() -> PathBuf {
         .map(PathBuf::from)
         .find(|p| p.exists())
         .unwrap_or_else(|| "gh".into())
-}
-
-/// `STEVE_MQ=1` turns the merge queue on.
-pub fn mq_from_env() -> bool {
-    std::env::var("STEVE_MQ").is_ok_and(|v| v.trim() == "1")
 }
 
 /// Global active workflow units allowed simultaneously (`STEVE_WORKFLOW_MAX_PARALLEL`, default 4).
@@ -116,7 +109,6 @@ impl CoreConfig {
             version: "dev".into(),
             commit: None,
             disk: Default::default(),
-            mq: false,
             max_workflow_parallel: 4,
         }
     }
