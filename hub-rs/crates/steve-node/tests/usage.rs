@@ -150,6 +150,7 @@ impl Fixture {
                     state: own_home.then(|| HarnessState {
                         dir: format!("principals/{sid}"),
                         import_owner: false,
+                        owner_context: true,
                     }),
                     artifact_view: None,
                     mcp_servers: vec![],

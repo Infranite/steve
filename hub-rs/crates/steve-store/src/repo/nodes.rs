@@ -24,9 +24,12 @@ pub struct NodeRow {
     pub revoked_by: Option<String>,
     /// How many sessions it runs at once, as its owner set it ([`crate::runtime::session_room`]).
     pub max_sessions: i64,
+    /// Whether its owner's sessions load the owner's personal harness configuration on this
+    /// machine ([`set_owner_context`]); `None` follows the workspace's `ownerContext` setting.
+    pub owner_context: Option<bool>,
 }
 
-const COLS: &str = "node_id,owner,name,pubkey,fingerprint,state,generation,incarnation,local,created,last_seen,revoked_at,revoked_by,max_sessions";
+const COLS: &str = "node_id,owner,name,pubkey,fingerprint,state,generation,incarnation,local,created,last_seen,revoked_at,revoked_by,max_sessions,owner_context";
 
 fn row(r: &rusqlite::Row<'_>) -> rusqlite::Result<NodeRow> {
     Ok(NodeRow {
@@ -44,6 +47,7 @@ fn row(r: &rusqlite::Row<'_>) -> rusqlite::Result<NodeRow> {
         revoked_at: r.get(11)?,
         revoked_by: r.get(12)?,
         max_sessions: r.get(13)?,
+        owner_context: r.get::<_, Option<i64>>(14)?.map(|v| v != 0),
     })
 }
 
@@ -144,6 +148,47 @@ pub fn set_max_sessions(tx: &Tx<'_>, node_id: &str, owner: &str, n: i64) -> Resu
         "UPDATE nodes SET max_sessions=?3 WHERE node_id=?1 AND owner=?2 AND local=0 AND state!='revoked'",
         params![node_id, owner, n],
     )? == 1)
+}
+
+/// The owner chooses whether their sessions on their Node load their personal harness
+/// configuration there (`None`: as the workspace's setting says). Any of their Nodes, the Hub's own
+/// included. False: not theirs, or revoked.
+pub fn set_owner_context(
+    tx: &Tx<'_>,
+    node_id: &str,
+    owner: &str,
+    on: Option<bool>,
+) -> Result<bool> {
+    Ok(tx.execute(
+        "UPDATE nodes SET owner_context=?3 WHERE node_id=?1 AND owner=?2 AND state!='revoked'",
+        params![node_id, owner, on],
+    )? == 1)
+}
+
+/// Whether a session of `node`'s owner there loads the owner's personal harness configuration:
+/// the Node's own choice, else the workspace's `ownerContext` setting (on unless it is `off`).
+pub fn owner_context(c: &Connection, node: &str, ws: &str) -> Result<bool> {
+    let own: Option<Option<i64>> = c
+        .query_row(
+            "SELECT owner_context FROM nodes WHERE node_id=?",
+            [node],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if let Some(Some(v)) = own {
+        return Ok(v != 0);
+    }
+    let set: Option<String> = c
+        .query_row(
+            "SELECT value FROM settings WHERE workspace_id=? AND key='ownerContext'",
+            [ws],
+            |r| r.get(0),
+        )
+        .optional()?;
+    Ok(set
+        .and_then(|v| serde_json::from_str::<String>(&v).ok())
+        .as_deref()
+        != Some("off"))
 }
 
 /// A new link of an active or paused Node: the next generation, the incarnation it reported, and

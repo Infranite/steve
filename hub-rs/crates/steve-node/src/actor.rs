@@ -2240,6 +2240,7 @@ fn harness_state(
     inner: &Inner,
     s: &HarnessState,
     sd: &steve_acp::StateDir,
+    skills: Option<&str>,
 ) -> ApiResult<std::path::PathBuf> {
     if !s.valid() {
         return Err(ApiError::new(
@@ -2302,6 +2303,27 @@ fn harness_state(
             crate::attachments::publish_private_if_absent(&to, &raw)
                 .map_err(|e| internal(format!("harness state: {f}: {e}")))?;
         }
+    }
+    // the owner's personal instructions and extensions, linked where the harness reads them, when
+    // the session is theirs and the Hub did not turn them off; otherwise any links made before go
+    let own = s
+        .import_owner
+        .then(|| sd.owner_source(&inner.cfg.acp.user_home))
+        .flatten();
+    let specs: &[String] = match &own {
+        Some(_) if s.owner_context => &sd.context,
+        _ => &[],
+    };
+    let source = own.as_deref().unwrap_or(&target);
+    // the Bot's skills go under the state root itself ([`crate::bot_skills::place`])
+    let skills = skills.filter(|_| target == dir);
+    match crate::harness_context::link(source, &target, specs, skills) {
+        Ok(left) => {
+            for why in left {
+                tracing::info!("harness state: owner context: {why}");
+            }
+        }
+        Err(why) => tracing::warn!("harness state: the owner's context was not linked: {why}"),
     }
     Ok(dir)
 }
@@ -2367,7 +2389,8 @@ async fn open_harness(
     let declared_state = inner.cfg.acp.adapter_properties(&harness).state;
     let state = match (&row.open.state, declared_state.as_ref()) {
         (Some(s), Some(sd)) => {
-            let dir = harness_state(inner, s, sd)?;
+            let skills = inner.cfg.acp.adapter_properties(&harness).skills;
+            let dir = harness_state(inner, s, sd, skills.as_deref())?;
             let env = sd.isolation_env_for(&dir, Some(&inner.cfg.acp.user_home), s.import_owner);
             Some((dir, env))
         }
@@ -2396,6 +2419,7 @@ async fn open_harness(
             if !(HarnessState {
                 dir: sub.to_string(),
                 import_owner: false,
+                owner_context: true,
             })
             .valid()
             {

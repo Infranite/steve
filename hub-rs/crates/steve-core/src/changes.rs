@@ -26,6 +26,8 @@ pub static SETTINGS: LazyLock<Value> = LazyLock::new(|| {
         { "key": "depsAfter", "label": "前置完成后", "values": ["自动开始", "提醒我开始"], "def": "自动开始", "live": true },
         { "key": "handoff", "label": "交接阈值", "values": ["0", "70", "80", "90"], "def": "0", "live": true, "labels": { "0": "不换会话", "70": "70%", "80": "80%", "90": "90%" } },
         { "key": "archDays", "label": "完成后自动归档", "values": ["7", "30", "90", "0"], "def": "30", "live": true, "labels": { "7": "7 天", "30": "30 天", "90": "90 天", "0": "不自动归档" } },
+        // whether agents load the Node owner's personal harness config (steve-store `nodes::owner_context`)
+        { "key": "ownerContext", "label": "加载本机个人配置", "values": ["on", "off"], "def": "on", "live": true, "labels": { "on": "加载", "off": "不加载" } },
       ],
       "notify": [
         { "key": "quiet", "label": "免打扰", "values": ["23:00 – 08:00", "22:00 – 09:00", "关闭"], "def": "23:00 – 08:00", "live": false },
@@ -653,6 +655,7 @@ fn setting_label_shown(key: &str) -> Option<String> {
         "depsAfter" => steve_i18n::t!("core.draft.setting.depsAfter"),
         "handoff" => steve_i18n::t!("core.draft.setting.handoff"),
         "archDays" => steve_i18n::t!("core.draft.setting.archDays"),
+        "ownerContext" => steve_i18n::t!("core.draft.setting.ownerContext"),
         "quiet" => steve_i18n::t!("core.draft.setting.quiet"),
         "digestAt" => steve_i18n::t!("core.draft.setting.digestAt"),
         "fontSize" => steve_i18n::t!("core.draft.setting.fontSize"),
@@ -2491,7 +2494,8 @@ mod tests {
         let d = setting_defaults();
         assert_eq!(d["accDefault"], "auto");
         assert_eq!(d["archDays"], "30");
-        assert_eq!(d.len(), 15);
+        assert_eq!(d["ownerContext"], "on");
+        assert_eq!(d.len(), 16);
         assert_eq!(d["tz"], "Asia/Taipei");
         assert!(setting_allowed("tz", "UTC") && !setting_allowed("tz", "Mars/Base"));
         assert!(

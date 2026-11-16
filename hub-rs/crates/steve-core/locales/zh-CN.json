@@ -170,6 +170,7 @@
   "core.draft.setting.depsAfter": "前置完成后",
   "core.draft.setting.handoff": "交接阈值",
   "core.draft.setting.archDays": "完成后自动归档",
+  "core.draft.setting.ownerContext": "加载本机个人配置",
   "core.draft.setting.quiet": "免打扰",
   "core.draft.setting.digestAt": "每天汇报",
   "core.draft.setting.fontSize": "字号",

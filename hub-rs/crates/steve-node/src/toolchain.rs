@@ -183,6 +183,7 @@ mod tests {
         HarnessState {
             dir: "ws/user/bot/adapter".into(),
             import_owner: false,
+            owner_context: true,
         }
     }
 
@@ -288,6 +289,7 @@ dirs = [
         let state = HarnessState {
             dir: "ws-1/u1-2/dev-3/claude-code-4".into(),
             import_owner: false,
+            owner_context: true,
         };
         let defs = Toolchains::builtin();
         let barrier = std::sync::Barrier::new(12);
@@ -318,6 +320,7 @@ dirs = [
         let state = HarnessState {
             dir: "ws-1/u1-2/dev-3/claude-code-4".into(),
             import_owner: false,
+            owner_context: true,
         };
         let run = for_run_with(&Toolchains::builtin(), &home, &work, Some(&state));
         assert_eq!(run.person, Some(home.join("cache/ws-1/u1-2")));
@@ -352,6 +355,7 @@ dirs = [
         let planted = HarnessState {
             dir: "ws-1/x/dev/claude-code".into(),
             import_owner: false,
+            owner_context: true,
         };
         assert!(
             for_run_with(&Toolchains::builtin(), &home, &go, Some(&planted))

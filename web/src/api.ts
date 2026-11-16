@@ -104,7 +104,7 @@ export type RDevice = { id: string; name: string; roles: string[]; os: string; v
 /** one directory of a Node's machine, for choosing a project's directory: `path` and `parent` show the home directory as `~`;
  *  `denied`: it exists but the Hub is not allowed to read it */
 export type RBrowse = { path: string; parent: string | null; exists: boolean; denied: boolean; git: boolean; dirs: { name: string; path: string; git: boolean }[]; more: boolean }
-export type RNode = { node_id: string; name: string; fingerprint: string; state: "pending" | "active" | "paused" | "revoked"; linked: boolean; local: boolean; last_seen?: number | null; link_error?: { at: number; error: string }; max_sessions?: number; running?: number; waiting?: number }
+export type RNode = { node_id: string; name: string; fingerprint: string; state: "pending" | "active" | "paused" | "revoked"; linked: boolean; local: boolean; last_seen?: number | null; link_error?: { at: number; error: string }; max_sessions?: number; running?: number; waiting?: number; owner_context?: boolean | null }
 /** a Node machine's day (B3): the latest sample, and load per CPU, memory in use (0..1) and round trip over time */
 export type RVitals = { sampling?: { interval_ms: number; stale_after_ms: number; now: number }; gaps?: { from: number; to: number }[]; latest: { at: number; sampled_at?: number; cpus?: number; load?: [number, number, number]; mem_total?: number; mem_available?: number; roots?: { root: string; display?: string; free: number; total: number; inodes_free?: number }[]; sessions?: number; rtt_ms?: number | null }; series: { at: number; load: number | null; mem: number | null; rtt: number | null }[] }
 export type RPairing = { code: string; expires: number; pin: string | null; hub_id: string }
@@ -352,6 +352,7 @@ export const api = {
   runInstall: (id: string, address: string) => post<RInstall>(`/nodes/installs/${encodeURIComponent(id)}/run`, { address }),
   confirmNode: (id: string) => post<{ ok: boolean }>(`/nodes/${encodeURIComponent(id)}/confirm`),
   nodeLimit: (id: string, max_sessions: number) => post<{ ok: boolean }>(`/nodes/${encodeURIComponent(id)}/limit`, { max_sessions }),
+  nodeOwnerContext: (id: string, owner_context: "inherit" | "on" | "off") => post<{ ok: boolean }>(`/nodes/${encodeURIComponent(id)}/context`, { owner_context }),
   /* the raw bytes as the body; the Hub decides the type from the content */
   upload: async (f: Blob, name: string): Promise<RFile> => {
     const r = await fetch(hubUrl("/api/files?name=" + encodeURIComponent(name)), { method: "POST", body: f, headers: wsHeaders({ "content-type": "application/octet-stream" }), credentials: "include" })

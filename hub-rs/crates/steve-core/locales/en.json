@@ -170,6 +170,7 @@
   "core.draft.setting.depsAfter": "When prerequisites finish",
   "core.draft.setting.handoff": "Handoff threshold",
   "core.draft.setting.archDays": "Archive automatically after finishing",
+  "core.draft.setting.ownerContext": "Load the Node owner's personal agent config",
   "core.draft.setting.quiet": "Do not disturb",
   "core.draft.setting.digestAt": "Daily report",
   "core.draft.setting.fontSize": "Font size",

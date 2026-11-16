@@ -18,6 +18,7 @@ import { go, Page, Meta, Empty, closeSheet, openSheet } from "@/ui"
 import { OwnerChip } from "@/people/owner-chip"
 import { VitalsSection, VitalsStrip } from "@/devices-vitals"
 import { NodeTags } from "@/devices-tags"
+import { NodeContext } from "@/devices-context"
 import { CODE, TailcatSection } from "@/devices-tailcat"
 import { t, useT } from "@/i18n"
 import { hm } from "@/i18n/format"
@@ -132,6 +133,7 @@ export function DevicesView() {
         <div className="py-1.5"><SessionLimit max={node.max_sessions} editable={node.state !== "revoked"} save={(n) => api.nodeLimit(node.node_id, n).then(reload)} /></div>
       </Panel>}
       {node && <NodeTags node={node.node_id} />}
+      {node && node.state !== "revoked" && <NodeContext node={node.node_id} value={node.owner_context ?? null} />}
       {node && <><p>{t("device:unknownEligibility")}</p><p>{t("device:unknownCapacity")}</p><VitalsSection node={node.node_id} /></>}
     </DialogContent></Dialog>}
     </>
@@ -159,6 +161,7 @@ export function DeviceView({ id }: { id: string }) {
         <RuntimeSetupPanel>{local && d.can_configure && !st.down && <AddHarness />}</RuntimeSetupPanel>
 
           <NodeTags node="local" />
+          <NodeContext node="local" />
         </> : <p>{t("device:unsupported")}</p>}
         <Panel k="projects" icon={<FolderIcon />} title={t("shell:devices.projectsTitle")}>
           {dirs.length ? dirs.map(p => <PanelRow key={p.id} title={p.name} sub={<span className="break-all font-mono">{homeTilde(p.path)}</span>} onClick={() => go("#/projects/" + p.id)} />) : <p className="p-5 text-muted-foreground">{t("shell:devices.noProjects")}</p>}

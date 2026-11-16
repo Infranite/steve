@@ -6,7 +6,7 @@
 //!   (`sig` over `"steve-pair-v1" ‖ sha256(code) ‖ pubkey`); the claim is one atomic update. Wrong,
 //!   used and expired codes all get the same `denied`, and claims are rate-limited per code (see [`Limiter`]).
 //!   The Node is `pending` until its owner confirms the fingerprint the CLI printed.
-//! - `GET /api/nodes`, `POST /api/nodes/{id}/confirm|pause|resume|rename|revoke|limit`: the owner's only.
+//! - `GET /api/nodes`, `POST /api/nodes/{id}/confirm|pause|resume|rename|revoke|limit|context`: the owner's only.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -421,6 +421,10 @@ pub struct RenameBody {
     /// `limit`: how many sessions the Node runs at once (1–256).
     #[serde(default)]
     max_sessions: Option<i64>,
+    /// `context`: whether the owner's sessions on the Node load the owner's personal harness
+    /// configuration there: `on`, `off`, or `inherit` (the workspace's setting).
+    #[serde(default)]
+    owner_context: Option<String>,
 }
 
 pub async fn act(
@@ -430,8 +434,8 @@ pub async fn act(
     body: Option<Json<RenameBody>>,
 ) -> Response {
     let (store, me, node) = (svc.store.clone(), caller.me.clone(), id.clone());
-    let (name, max_sessions) = body
-        .map(|b| (b.0.name, b.0.max_sessions))
+    let (name, max_sessions, choice) = body
+        .map(|b| (b.0.name, b.0.max_sessions, b.0.owner_context))
         .unwrap_or_default();
     let action2 = action.clone();
     let done = blocking(move || {
@@ -446,6 +450,12 @@ pub async fn act(
                     Some(n) => set_max_sessions(tx, &node, &me, n)?,
                     None => false,
                 },
+                "context" => match choice.as_deref() {
+                    Some("on") => set_owner_context(tx, &node, &me, Some(true))?,
+                    Some("off") => set_owner_context(tx, &node, &me, Some(false))?,
+                    Some("inherit") => set_owner_context(tx, &node, &me, None)?,
+                    _ => false,
+                },
                 "rename" => {
                     let n: String = name.chars().filter(|c| !c.is_control()).take(64).collect();
                     !n.trim().is_empty() && rename(tx, &node, &me, &n)?
@@ -453,9 +463,11 @@ pub async fn act(
                 _ => return Ok(None),
             };
             if ok {
-                let detail = (action2 == "limit")
-                    .then(|| max_sessions.map(|n| n.to_string()))
-                    .flatten();
+                let detail = match action2.as_str() {
+                    "limit" => max_sessions.map(|n| n.to_string()),
+                    "context" => choice.clone(),
+                    _ => None,
+                };
                 audit(
                     tx,
                     Some(&node),
