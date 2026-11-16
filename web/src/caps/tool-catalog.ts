@@ -3,7 +3,7 @@ import type { SteveTool, ToolPin, BotTools } from "@/api/caps"
 /* what each Steve tool does for the user, in a line; a tool added later shows the Hub's first sentence until it is
  * named here */
 const DESC = {
-  steve_update: "update", steve_ask: "ask", steve_request_approval: "approval", steve_deliver: "deliver", steve_publish: "publish", steve_lane_status: "laneStatus",
+  steve_update: "update", steve_ask: "ask", steve_request_approval: "approval", steve_deliver: "deliver", steve_deliver_file: "deliverFile", steve_publish: "publish", steve_lane_status: "laneStatus",
   steve_items_search: "itemsSearch", steve_item_read: "itemRead", steve_item_dependencies: "itemDependencies", steve_sessions_list: "sessionsList",
   steve_item_create: "itemCreate", steve_item_supplement: "itemSupplement",
   steve_workflow: "workflow", steve_debug: "debug", steve_upgrade: "upgrade", steve_devices: "devices", steve_reply_source: "replySource",

@@ -24,8 +24,8 @@ test("standalone delivery ownership comes from metadata and preserves an explici
 })
 
 test("bundle entrypoints retain authorization queries, nested paths and encoded filenames", () => {
-  const d = { content_url: "/api/deliveries/a/content?ws=w", entrypoint: "pages/a b/首页.html" }
-  assert.equal(deliveryContent(d, "https://hub.example"), "https://hub.example/api/deliveries/a/content/pages/a%20b/%E9%A6%96%E9%A1%B5.html?ws=w")
+  const d = { content_url: "/api/file-deliveries/a/content?ws=w", entrypoint: "pages/a b/首页.html" }
+  assert.equal(deliveryContent(d, "https://hub.example"), "https://hub.example/api/file-deliveries/a/content/pages/a%20b/%E9%A6%96%E9%A1%B5.html?ws=w")
   assert.equal(deliveryContent({ ...d, content_url: "/api/delivery-shares/t/content/pages/index.html" }, "https://hub.example"), "https://hub.example/api/delivery-shares/t/content/pages/index.html")
   for (const entrypoint of ["../index.html", "/index.html", "a/./b.html", "a\\b.html", "a?x.html", "a#x.html"]) {
     assert.equal(deliveryContent({ ...d, entrypoint }, "https://hub.example"), null)

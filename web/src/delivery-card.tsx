@@ -23,7 +23,7 @@ export function DeliveryCards({ item, outs, anns }: { item: string; outs: Out[];
           <div className="flex flex-wrap gap-2">
             {id && <Button size="sm" variant="outline" render={<a href={withWs(`/deliveries/${encodeURIComponent(id)}`)} target="_blank" rel="noreferrer" />} nativeButton={false} data-delivery-open><ExternalLinkIcon />{t("pages:delivery.open")}</Button>}
             <Button size="sm" variant="outline" onClick={() => setView({ o })} data-delivery-preview><FileTextIcon />{t("pages:outputs.preview")}</Button>
-            {id && <Button size="sm" variant="ghost" render={<a href={withWs(`/api/deliveries/${encodeURIComponent(id)}/raw`)} download />} nativeButton={false} data-delivery-download><DownloadIcon />{t("pages:delivery.download")}</Button>}
+            {id && <Button size="sm" variant="ghost" render={<a href={withWs(`/api/file-deliveries/${encodeURIComponent(id)}/raw`)} download />} nativeButton={false} data-delivery-download><DownloadIcon />{t("pages:delivery.download")}</Button>}
           </div>
           {!id && <p className="type-footnote text-muted-foreground" data-legacy-delivery>{t("pages:delivery.legacy")}</p>}
         </CardContent>

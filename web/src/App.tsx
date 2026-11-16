@@ -134,9 +134,9 @@ export default function App({ deliveryId }: { deliveryId?: string }) {
     if (hub !== "ok") return
     if (!deliveryId) return start()
     let live = true, stop: (() => void) | undefined
-    // A tool URL has no workspace selector. The Hub derives its owner and checks membership on this GET;
-    // /api/state must wait, otherwise its current-workspace cookie would bind this page to another workspace.
-    // main.tsx preserves an explicit ?ws= selector, which the Hub must still reject when it is wrong.
+    // Resolve the delivery owner and check membership before /api/state can bind this page to the
+    // current-workspace cookie. main.tsx preserves an explicit ?ws= selector; the Hub still rejects
+    // a wrong selector and derives the owner when a legacy link has none.
     void api.delivery(deliveryId).then((d) => {
       if (!live) return
       const ws = deliveryWorkspace(d, new URLSearchParams(location.search).get("ws"))

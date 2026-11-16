@@ -64,7 +64,7 @@ export async function deliveryFixture() {
     if (!publicPath && !loggedIn) return json(res, { error: "unauthenticated", login: "/auth/dev", token: false }, 401)
     const selector = req.headers["x-steve-ws"] ?? u.searchParams.get("ws")
     const cookieWorkspace = /fixture-workspace=([^;]+)/.exec(req.headers.cookie || "")?.[1] ?? "fixture"
-    const deliveryPath = /^\/api\/deliveries\//.test(path)
+    const deliveryPath = /^\/api\/file-deliveries\//.test(path)
     const ws = selector ?? (deliveryPath && req.method === "GET" ? "fixture" : cookieWorkspace)
     if (!publicPath && !memberships.has(ws)) return json(res, { error: "Workspace membership required" }, 409)
     if (deliveryPath && ws !== "fixture") return json(res, { error: "Delivery not found" }, 404)
@@ -91,13 +91,13 @@ export async function deliveryFixture() {
       if (!s || s.revoked_at || s.expires_at <= Date.now()) return json(res, { error: "Share unavailable" }, 410)
       id = s.id; rest = publicPath[2]
     } else {
-      const m = /^\/api\/deliveries\/([^/]+)(.*)$/.exec(path)
+      const m = /^\/api\/file-deliveries\/([^/]+)(.*)$/.exec(path)
       if (!m) return json(res, { error: "Unknown fixture route: " + path }, 404)
       id = decodeURIComponent(m[1]); rest = m[2]
     }
     const file = files[id]
     if (!file) return json(res, { error: "Delivery not found" }, 404)
-    const root = token ? `/api/delivery-shares/${encodeURIComponent(token)}` : `/api/deliveries/${encodeURIComponent(id)}`
+    const root = token ? `/api/delivery-shares/${encodeURIComponent(token)}` : `/api/file-deliveries/${encodeURIComponent(id)}`
     const meta = () => ({ id, item_id: item.id, title: id === "md" ? "Delivered report" : file.name, name: file.name, mime: file.mime, size: Buffer.byteLength(file.body), created, entrypoint: file.entrypoint ?? null,
       url: origin + (token ? `/shares/${token}` : `/deliveries/${id}`), download_url: root + "/raw" + (token ? "" : "?ws=fixture"), content_url: root + (file.entrypoint ? "/content/" : "/content/file") + (token ? "" : "?ws=fixture"), access_warning: id === "html" ? "HTML is shown in a static sandbox. Scripts, forms, frames and external connections are disabled." : null,
       ...(!token ? { workspace_id: "fixture" } : {}),

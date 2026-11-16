@@ -94,7 +94,7 @@ impl Service {
             ),
             None => (
                 self.url(&d.id, &d.workspace_id),
-                format!("{}/api/deliveries/{}", self.base, d.id),
+                format!("{}/api/file-deliveries/{}", self.base, d.id),
             ),
         };
         let path = d.entrypoint.as_deref().unwrap_or(&d.name);

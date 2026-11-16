@@ -97,7 +97,7 @@ try {
     p.on("pageerror", (e) => evidence.pageErrors.push(e.message))
     p.on("response", async (r) => {
       const u = new URL(r.url())
-      if (!/^\/api\/(deliver|state|items)/.test(u.pathname)) return
+      if (!/^\/api\/(file-deliver|deliver|state|items)/.test(u.pathname)) return
       const h = await r.request().allHeaders().catch(() => ({}))
       evidence.requests.push({ path: u.pathname.replace(/(delivery-shares\/)[^/]+/, "$1<token>"), query: u.search, status: r.status(), workspace: h["x-steve-ws"] ?? null, cookie_present: !!h.cookie, csp: r.headers()["content-security-policy"] ?? null })
     })
@@ -153,7 +153,7 @@ try {
       await page.goto(url)
       await staticPreview(page, "default", true)
       const calls = evidence.requests.slice(at)
-      const meta = calls.find((r) => r.path === `/api/deliveries/${receipts.html.id}`)
+      const meta = calls.find((r) => r.path === `/api/file-deliveries/${receipts.html.id}`)
       assert.ok(meta)
       if (!new URL(url).searchParams.has("ws")) { assert.equal(meta.workspace, null); assert.equal(meta.query, "") }
       assert.ok(calls.some((r) => r.path === "/api/state" && r.workspace === "default"))
@@ -226,7 +226,7 @@ try {
   })
   await check("显式错误工作区404、移除真实membership后409，不显示交付内容", async () => {
     const wrong = new URL(receipts.html.url); wrong.searchParams.set("ws", "delivery-b")
-    assert.equal((await owner.request.get(base + `/api/deliveries/${receipts.html.id}`, { headers: { "x-steve-ws": "delivery-b" } })).status(), 404)
+    assert.equal((await owner.request.get(base + `/api/file-deliveries/${receipts.html.id}`, { headers: { "x-steve-ws": "delivery-b" } })).status(), 404)
     await page.goto(wrong.href)
     await page.locator("[data-delivery-error]").waitFor()
     assert.equal(await page.locator("[data-delivery-html]").count(), 0)
@@ -241,7 +241,7 @@ try {
   })
   await check("到期分享的真实metadata、原文件及相对资源立即拒绝", async () => {
     const expires = Date.now() + 3000
-    const r = await owner.request.post(base + `/api/deliveries/${receipts.html.id}/shares`, { headers: { "x-steve-ws": "default" }, data: { expires_at: expires } })
+    const r = await owner.request.post(base + `/api/file-deliveries/${receipts.html.id}/shares`, { headers: { "x-steve-ws": "default" }, data: { expires_at: expires } })
     assert.equal(r.status(), 200)
     const share = await r.json(), c = await browser.newContext(), p = await c.newPage()
     assert.equal(share.expires_at, expires)

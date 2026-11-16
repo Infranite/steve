@@ -273,6 +273,7 @@ export default {
     ask: "Ask you a question",
     approval: "Ask your approval before external actions",
     deliver: "Deliver for your acceptance",
+    deliverFile: "Save a file or HTML ZIP on the Hub and return its stable sign-in-protected delivery link",
     publish: "Request a release after acceptance (only in projects with releases set up)",
     laneStatus: "Check its own release progress: which batch, whose approval it waits for, why it failed, the released version (read-only)",
     itemsSearch: "Find items by number or words",

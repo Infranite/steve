@@ -292,16 +292,16 @@ For ZIP HTML packages, `entrypoint` selects an existing package HTML file. If om
 
 HTML and SVG content is served with a response-level static sandbox, including on direct navigation and subsequent package pages: scripts, forms, workers, frames, plugins and network connections are disabled. CSS, images, fonts and media can load only from the same origin (and image/font data URLs). The browser preview must also keep scripts disabled; do not remove the server CSP in a reverse proxy. Authenticated and anonymous share previews have the same static behavior. Sharing does not enable JavaScript interactions or external CDN assets, and clients must not invite public sharing to enable interactivity. `access_warning` explains this restriction. Other documents use the existing preview shapes, exposed as the optional `preview` field of REST metadata.
 
-The REST contract is:
+The file-delivery REST contract uses `/api/file-deliveries`; `/api/deliveries` remains the separate channel-message delivery ledger. The user-facing page stays at `/deliveries/:id`.
 
 | Method and path | Result |
 | --- | --- |
-| `GET /api/deliveries/:id` | Authenticated metadata: `id,item_id,workspace_id,title,name,mime,size,created,entrypoint,url,download_url,content_url,access_warning,preview`. `entrypoint` and `access_warning` may be null. |
-| `GET /api/deliveries/:id/raw` | Original bytes as an attachment; single byte ranges supported. |
-| `GET /api/deliveries/:id/content/*path` | Inline original document (its filename), or a validated package member, with sandbox CSP. |
-| `POST /api/deliveries/:id/shares` | Independent user action with `{expires_at: Unix milliseconds}` strictly in the future; returns `{token,url,expires_at}`. |
-| `GET /api/deliveries/:id/shares` | Array of `{token,url,expires_at,created,revoked_at}`; includes revoked and expired grants for management. |
-| `DELETE /api/deliveries/:id/shares/:token` | Revoke immediately; returns `{ok:true}`. Repeating a revocation is safe. |
+| `GET /api/file-deliveries/:id` | Authenticated metadata: `id,item_id,workspace_id,title,name,mime,size,created,entrypoint,url,download_url,content_url,access_warning,preview`. `entrypoint` and `access_warning` may be null. |
+| `GET /api/file-deliveries/:id/raw` | Original bytes as an attachment; single byte ranges supported. |
+| `GET /api/file-deliveries/:id/content/*path` | Inline original document (its filename), or a validated package member, with sandbox CSP. |
+| `POST /api/file-deliveries/:id/shares` | Independent user action with `{expires_at: Unix milliseconds}` strictly in the future; returns `{token,url,expires_at}`. |
+| `GET /api/file-deliveries/:id/shares` | Array of `{token,url,expires_at,created,revoked_at}`; includes revoked and expired grants for management. |
+| `DELETE /api/file-deliveries/:id/shares/:token` | Revoke immediately; returns `{ok:true}`. Repeating a revocation is safe. |
 | `GET /api/delivery-shares/:token` | Anonymous metadata using share-specific `/shares/:token`, download and content URLs; no workspace identifier. |
 | `GET /api/delivery-shares/:token/raw` and `/content/*path` | Anonymous original or resources, checked against the live grant on every request. |
 

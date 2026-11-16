@@ -259,7 +259,7 @@ async fn mcp_receives_files_on_local_node_and_local_off_and_retains_every_versio
         assert_ne!(automatic["delivery_id"], id);
         std::fs::remove_dir_all(&e.session.cwd).unwrap();
         let response = e
-            .request("GET", &format!("/api/deliveries/{id}/raw"), true)
+            .request("GET", &format!("/api/file-deliveries/{id}/raw"), true)
             .send()
             .await
             .unwrap();
@@ -267,7 +267,7 @@ async fn mcp_receives_files_on_local_node_and_local_off_and_retains_every_versio
         assert_eq!(response.headers()["cache-control"], "no-store");
         assert_eq!(response.bytes().await.unwrap().as_ref(), b"first version");
         assert_eq!(
-            e.request("GET", &format!("/api/deliveries/{id}"), false)
+            e.request("GET", &format!("/api/file-deliveries/{id}"), false)
                 .send()
                 .await
                 .unwrap()
@@ -275,7 +275,7 @@ async fn mcp_receives_files_on_local_node_and_local_off_and_retains_every_versio
             401
         );
         assert_eq!(
-            e.request("GET", &format!("/api/deliveries/{id}/raw"), false)
+            e.request("GET", &format!("/api/file-deliveries/{id}/raw"), false)
                 .header("authorization", "Bearer delivery-bot")
                 .send()
                 .await
@@ -284,7 +284,7 @@ async fn mcp_receives_files_on_local_node_and_local_off_and_retains_every_versio
             401
         );
         assert_eq!(
-            e.request("POST", &format!("/api/deliveries/{id}/shares"), false)
+            e.request("POST", &format!("/api/file-deliveries/{id}/shares"), false)
                 .header("authorization", "Bearer delivery-bot")
                 .json(&json!({"expires_at":steve_store::now()+60000}))
                 .send()
@@ -294,7 +294,7 @@ async fn mcp_receives_files_on_local_node_and_local_off_and_retains_every_versio
             401
         );
         assert_eq!(
-            e.request("GET", &format!("/api/deliveries/{id}"), false)
+            e.request("GET", &format!("/api/file-deliveries/{id}"), false)
                 .header("cookie", &e.cookie)
                 .header("x-steve-ws", "foreign")
                 .send()
@@ -321,7 +321,7 @@ async fn mcp_receives_files_on_local_node_and_local_off_and_retains_every_versio
             .accept(&other, "foreign", "secret.md", b"secret", None)
             .unwrap();
         assert_eq!(
-            e.request("GET", &format!("/api/deliveries/{}", foreign.id), true)
+            e.request("GET", &format!("/api/file-deliveries/{}", foreign.id), true)
                 .send()
                 .await
                 .unwrap()
@@ -335,7 +335,7 @@ async fn mcp_receives_files_on_local_node_and_local_off_and_retains_every_versio
         let cookies = e.switch_workspace("foreign").await;
         for tail in ["", "/raw", "/content/report.md"] {
             assert_eq!(
-                e.request("GET", &format!("/api/deliveries/{id}{tail}"), false)
+                e.request("GET", &format!("/api/file-deliveries/{id}{tail}"), false)
                     .header("cookie", &cookies)
                     .send()
                     .await
@@ -345,16 +345,20 @@ async fn mcp_receives_files_on_local_node_and_local_off_and_retains_every_versio
             );
         }
         assert_eq!(
-            e.request("GET", &format!("/api/deliveries/{id}?ws=foreign"), false)
-                .header("cookie", &cookies)
-                .send()
-                .await
-                .unwrap()
-                .status(),
+            e.request(
+                "GET",
+                &format!("/api/file-deliveries/{id}?ws=foreign"),
+                false
+            )
+            .header("cookie", &cookies)
+            .send()
+            .await
+            .unwrap()
+            .status(),
             404
         );
         assert_eq!(
-            e.request("GET", &format!("/api/deliveries/{id}/raw"), true)
+            e.request("GET", &format!("/api/file-deliveries/{id}/raw"), true)
                 .header("range", "bytes=1-3")
                 .send()
                 .await
@@ -476,7 +480,7 @@ async fn artifact_contract_only_links_registered_urls_in_the_same_item_and_works
             .all(|a| a.delivery_id.is_none())
     );
     assert_eq!(
-        e.request("GET", &format!("/api/deliveries/{}", d.id), true)
+        e.request("GET", &format!("/api/file-deliveries/{}", d.id), true)
             .send()
             .await
             .unwrap()
@@ -543,7 +547,7 @@ async fn original_tool_page_url_binds_workspace_after_real_switch_and_still_chec
         "/content/site/assets/site.css",
         "/content/site/next.html",
     ] {
-        let path = format!("/api/deliveries/{id}{tail}");
+        let path = format!("/api/file-deliveries/{id}{tail}");
         assert_eq!(
             e.request("GET", &path, false)
                 .header("cookie", &cookies)
@@ -607,7 +611,7 @@ async fn original_tool_page_url_binds_workspace_after_real_switch_and_still_chec
         "/content/site/assets/site.css",
         "/content/site/next.html",
     ] {
-        let path = format!("/api/deliveries/{id}{tail}");
+        let path = format!("/api/file-deliveries/{id}{tail}");
         for request in [
             e.request("GET", &path, false)
                 .header("x-steve-ws", &selector),
@@ -628,6 +632,49 @@ async fn original_tool_page_url_binds_workspace_after_real_switch_and_still_chec
 }
 
 #[tokio::test]
+async fn both_delivery_tools_reject_dependency_build_and_checkout_paths() {
+    let e = start(false).await;
+    let cwd = PathBuf::from(&e.session.cwd);
+    for relative in [
+        "outputs/node_modules/package/report.md",
+        "outputs/review-source/report.md",
+        "target/debug/report.md",
+        ".git/report.md",
+        "dist/report.md",
+    ] {
+        let path = cwd.join(relative);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "not an independent deliverable").unwrap();
+        for (tool, args) in [
+            ("steve_deliver_file", json!({"path":path})),
+            (
+                "steve_deliver",
+                json!({"summary":"blocked output", "outputs":[{"kind":"file","title":"report","location":path}], "checks":[], "unfinished":[]}),
+            ),
+        ] {
+            let response = e.tool(tool, args).await;
+            assert_eq!(response["result"]["isError"], true, "{tool}: {response}");
+            assert!(
+                response["result"]["content"][0]["text"]
+                    .as_str()
+                    .unwrap()
+                    .contains("repository metadata, dependencies or build outputs"),
+                "{response}"
+            );
+        }
+    }
+    let count = e
+        .store
+        .reader::<_, StoreError>(|c| {
+            Ok(c.query_row("SELECT count(*) FROM deliveries", [], |r| {
+                r.get::<_, i64>(0)
+            })?)
+        })
+        .unwrap();
+    assert_eq!(count, 0, "neither tool may publish rejected paths");
+}
+
+#[tokio::test]
 async fn share_authorization_is_independent_expires_and_revokes_every_resource() {
     let e = start(false).await;
     let d = e
@@ -640,7 +687,7 @@ async fn share_authorization_is_independent_expires_and_revokes_every_resource()
             Some("site/index.html"),
         )
         .unwrap();
-    let path = format!("/api/deliveries/{}/shares", d.id);
+    let path = format!("/api/file-deliveries/{}/shares", d.id);
     assert_eq!(
         e.request("POST", &path, false)
             .json(&json!({"expires_at":steve_store::now()+60000}))
@@ -702,7 +749,7 @@ async fn share_authorization_is_independent_expires_and_revokes_every_resource()
     assert_eq!(meta["entrypoint"], "site/index.html");
     assert!(meta["download_url"].as_str().unwrap().contains(&anon));
     for (prefix, login) in [
-        (format!("/api/deliveries/{}", d.id), true),
+        (format!("/api/file-deliveries/{}", d.id), true),
         (anon.clone(), false),
     ] {
         let r = e
@@ -777,7 +824,7 @@ async fn share_authorization_is_independent_expires_and_revokes_every_resource()
         );
     }
     assert_eq!(
-        e.request("GET", &format!("/api/deliveries/{}", d.id), true)
+        e.request("GET", &format!("/api/file-deliveries/{}", d.id), true)
             .send()
             .await
             .unwrap()

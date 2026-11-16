@@ -457,13 +457,15 @@ async fn require_user(State(st): State<AppState>, mut req: Request, next: Next) 
     // Relative HTML/CSS/image navigations cannot inherit a query string or set a workspace
     // header. Derive only their workspace selector from the immutable delivery, then run the
     // ordinary user membership check below. An explicit selector still wins (and can fail).
-    if matches!(*req.method(), axum::http::Method::GET | axum::http::Method::HEAD)
-        && !req.headers().contains_key("x-steve-ws")
+    if matches!(
+        *req.method(),
+        axum::http::Method::GET | axum::http::Method::HEAD
+    ) && !req.headers().contains_key("x-steve-ws")
         && query_param(req.uri().query(), "ws").is_none()
         && let Some(id) = req
             .uri()
             .path()
-            .strip_prefix("/deliveries/")
+            .strip_prefix("/file-deliveries/")
             .and_then(|p| p.split('/').next())
         && let Some(svc) = st.deliveries.clone()
     {
@@ -527,15 +529,18 @@ const BODY_MAX: usize = 16 * 1024 * 1024;
 /// The `/api` router with every route of api.ts, in declaration order.
 pub fn router(st: AppState, modules: Router) -> Router {
     Router::new()
-        .route("/deliveries/{id}", get(deliveries::metadata))
-        .route("/deliveries/{id}/raw", get(deliveries::raw))
-        .route("/deliveries/{id}/content/{*path}", get(deliveries::content))
+        .route("/file-deliveries/{id}", get(deliveries::metadata))
+        .route("/file-deliveries/{id}/raw", get(deliveries::raw))
         .route(
-            "/deliveries/{id}/shares",
+            "/file-deliveries/{id}/content/{*path}",
+            get(deliveries::content),
+        )
+        .route(
+            "/file-deliveries/{id}/shares",
             get(deliveries::shares).post(deliveries::create_share),
         )
         .route(
-            "/deliveries/{id}/shares/{token}",
+            "/file-deliveries/{id}/shares/{token}",
             delete(deliveries::revoke),
         )
         .route("/updates", get(updates::status).post(updates::request))

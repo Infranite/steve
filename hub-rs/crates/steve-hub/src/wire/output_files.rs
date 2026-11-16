@@ -190,7 +190,6 @@ pub fn polluted_output_path(path: &Path) -> bool {
     })
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -118,7 +118,10 @@ async fn hub_owned_outputs_remain_available_when_the_bound_node_is_unavailable()
     fs::create_dir_all(&durable).unwrap();
     let path = durable.join("hub-report.md");
     fs::write(&path, b"Hub owned output").unwrap();
-    let d = svc.receive(&session, path.to_str().unwrap(), None, None, &ws).await.unwrap();
+    let d = svc
+        .receive(&session, path.to_str().unwrap(), None, None, &ws)
+        .await
+        .unwrap();
     assert_eq!(bytes(&svc, &d, None), b"Hub owned output");
 }
 
