@@ -197,6 +197,9 @@ pub(crate) struct ConnFacts {
     pub enabled_at: i64,
     /// How late a message may arrive and still be acted on (`channel_settings.late_ms`).
     pub late_ms: i64,
+    /// The platform its chats belong to ([`Channels::chat_platform`]); `None` from [`conn_facts`]
+    /// alone until the pipeline fills it.
+    pub platform: Option<String>,
 }
 
 pub(crate) fn conn_facts(
@@ -206,7 +209,8 @@ pub(crate) fn conn_facts(
 ) -> ChannelResult<ConnFacts> {
     c.query_row(
         "SELECT c.adapter, c.account_id, c.created_by, coalesce(nullif(a.display_name, ''), a.handle_display), p.user_id,
-                coalesce(c.enabled_at, c.created), cs.late_ms
+                coalesce(c.enabled_at, c.created), cs.late_ms,
+                CASE WHEN json_valid(c.config) THEN json_extract(c.config, '$.platform') END
            FROM connections c JOIN accounts a ON a.id = c.account_id LEFT JOIN parties p ON p.id = a.party_id
            LEFT JOIN channel_settings cs ON cs.connection_id = c.id
           WHERE c.id = ? AND c.workspace_id = ?",
@@ -223,11 +227,32 @@ pub(crate) fn conn_facts(
                     .get::<_, Option<i64>>(6)?
                     .filter(|l| LATE_MS.contains(l))
                     .unwrap_or(DEFAULT_LATE_MS),
+                platform: r.get(7)?,
             })
         },
     )
     .optional()?
     .ok_or_else(|| ApiError::not_found("连接"))
+}
+
+impl Channels {
+    /// The platform connection `adapter`'s chats belong to: what its service named
+    /// (`config.platform`, `declared`), else its adapter's provider. A generic channel service
+    /// that named none has none: its chat ids are only its own.
+    pub(crate) fn chat_platform(&self, adapter: &str, declared: Option<String>) -> Option<String> {
+        declared.or_else(|| {
+            let p = self.connections().provider(adapter)?;
+            let provider = p.integration().provider;
+            (provider != crate::adapters::ext_ws::SYSTEM).then_some(provider)
+        })
+    }
+
+    /// [`conn_facts`] with the platform filled in.
+    pub(crate) fn facts(&self, ws: &str, conn: &str) -> ChannelResult<ConnFacts> {
+        let mut f = self.store().reader(|c| conn_facts(c, ws, conn))?;
+        f.platform = self.chat_platform(&f.adapter, f.platform.take());
+        Ok(f)
+    }
 }
 
 /// Identifies a handle in a savepoint: a failure leaves no half-created contact and does not stop
@@ -390,7 +415,7 @@ impl Channels {
         msg: InboundMessage,
     ) -> ChannelResult<Inbound> {
         let store = self.store().clone();
-        let facts = store.reader(|c| conn_facts(c, ws, conn))?;
+        let facts = self.facts(ws, conn)?;
         // a message without a provider id only from a side that has none; the Hub's own ids
         // (`fp:`) are never an adapter's
         let without_ids = self
@@ -413,7 +438,7 @@ impl Channels {
         }
         let (existing, known) = store.reader(|c| -> ChannelResult<_> {
             Ok((
-                spaces::find(c, ws, conn, &msg.space_ext_id)?,
+                spaces::find_as(c, ws, conn, &msg.space_ext_id, facts.platform.as_deref())?,
                 handle_known(c, ws, &msg.sender)?,
             ))
         })?;
@@ -666,6 +691,7 @@ impl Channels {
                 member_count: info.member_count,
                 has_external: info.has_external,
                 now,
+                platform: facts.platform.as_deref(),
             },
         )?;
         let label = if space.name.is_empty() {
@@ -923,6 +949,8 @@ impl Channels {
         };
         if let Some((id, _, _)) = &first {
             fallback::supplied(tx, id, conn, source, !has_id)?;
+            // one message, one more identity that received it
+            spaces::mark_seen(tx, id, conn)?;
         }
         if let Some((id, space_id, label)) = first {
             return Ok(Written {
@@ -973,6 +1001,7 @@ impl Channels {
                 content_key: Some(&key),
                 fallback_from: (!has_id).then_some(conn),
                 history: history.map(History::code),
+                seen_by: spaces::bit(tx, &space.id, conn)?,
             },
         )?
         else {

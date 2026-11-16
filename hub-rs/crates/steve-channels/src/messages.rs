@@ -44,6 +44,8 @@ pub struct NewInbound<'a> {
     pub fallback_from: Option<&'a str>,
     /// Only history ([`crate::inbound::History::code`]); `None`: a live message.
     pub history: Option<&'a str>,
+    /// The identities that received it ([`crate::spaces::bit`]).
+    pub seen_by: i64,
 }
 
 /// Stores an inbound message; `None` when `(space, external_id)` is already there (the unique index
@@ -52,8 +54,8 @@ pub fn insert_inbound(tx: &Tx, n: &NewInbound) -> ChannelResult<Option<String>> 
     let id = uid("cm");
     let added = tx.execute(
         "INSERT OR IGNORE INTO chan_messages (id, workspace_id, space_id, external_id, thread_key, reply_to, direction,
-            sender_account_id, sender_party_id, text, attachments, mentions, status, created, content_key, fallback_from, history)
-         VALUES (?, ?, ?, ?, ?, ?, 'in', ?, ?, ?, ?, ?, 'received', ?, ?, ?, ?)",
+            sender_account_id, sender_party_id, text, attachments, mentions, status, created, content_key, fallback_from, history, seen_by)
+         VALUES (?, ?, ?, ?, ?, ?, 'in', ?, ?, ?, ?, ?, 'received', ?, ?, ?, ?, ?)",
         params![
             id,
             n.ws,
@@ -69,7 +71,8 @@ pub fn insert_inbound(tx: &Tx, n: &NewInbound) -> ChannelResult<Option<String>> 
             n.created,
             n.content_key,
             n.fallback_from,
-            n.history
+            n.history,
+            n.seen_by
         ],
     )?;
     if added == 0 {
@@ -165,12 +168,14 @@ pub fn seen_elsewhere(
     space_ext: &str,
     ext: &str,
 ) -> ChannelResult<Option<(String, String)>> {
+    // which copy reached your own account: by the identities that received it (`seen_by`)
+    let own_copy = crate::spaces::reached_own_sql("m", "cs");
     Ok(c.query_row(
-        "SELECT m.id, m.space_id FROM chan_messages m JOIN spaces s ON s.id = m.space_id
+        &format!("SELECT m.id, m.space_id FROM chan_messages m JOIN spaces s ON s.id = m.space_id
            LEFT JOIN channel_settings cs ON cs.connection_id = s.connection_id
           WHERE s.workspace_id = ?1 AND s.connection_id <> ?2 AND s.external_id = ?3 AND m.external_id = ?4
-            AND m.direction = 'in' AND (?5 OR cs.mode = 'self')
-          ORDER BY m.created, m.id LIMIT 1",
+            AND m.direction = 'in' AND (?5 OR {own_copy})
+          ORDER BY m.created, m.id LIMIT 1"),
         params![ws, conn, space_ext, ext, own],
         |r| Ok((r.get(0)?, r.get(1)?)),
     )
@@ -441,18 +446,23 @@ fn with_basis(c: &Connection, m: &mut ChanMessage) -> ChannelResult<()> {
 }
 
 /// Messages of a space older than `before` (all when `None`), newest first.
+/// A page of space `space` as user `me` sees it: the messages one of the identities `me` may see
+/// received ([`crate::spaces::viewer_mask`]; the caller checked the space itself).
 pub fn page(
     c: &Connection,
     space: &str,
+    me: &str,
     before: Option<i64>,
     limit: usize,
 ) -> ChannelResult<Vec<ChanMessage>> {
+    let mask = crate::spaces::viewer_mask(c, space, me)?;
     let mut st = c.prepare_cached(&format!(
         "SELECT {MSG_COLS} {MSG_FROM} WHERE m.space_id = ?1 AND (?2 IS NULL OR m.created < ?2)
+            AND (m.seen_by = 0 OR (m.seen_by & ?4) <> 0)
           ORDER BY m.created DESC, m.id DESC LIMIT ?3"
     ))?;
     let mut rows = st
-        .query_map(params![space, before, limit as i64], msg_row)?
+        .query_map(params![space, before, limit as i64, mask], msg_row)?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     for m in &mut rows {
         with_basis(c, m)?;
@@ -553,9 +563,10 @@ impl TimelineSource for MessageTimeline {
              SELECT m.space_id, s.name, m.text, m.created FROM chan_messages m JOIN spaces s ON s.id = m.space_id
               WHERE m.workspace_id = ?2 AND m.direction = 'in' AND m.sender_party_id IN (SELECT id FROM ids)
                 AND (?3 IS NULL OR m.created < ?3)
-                AND {}
+                AND {} AND {}
               ORDER BY m.created DESC, m.id DESC LIMIT ?4",
-            crate::spaces::visible_sql("?5")
+            crate::spaces::visible_sql("?5"),
+            crate::spaces::seen_visible_sql("m", "?5")
         );
         let ps = vec![
             Sql::Text(party.into()),

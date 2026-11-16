@@ -269,7 +269,15 @@ async fn a_batch_of_day_old_messages_arriving_now_runs_nothing() {
     let page = h
         .env
         .store()
-        .reader(|c| steve_channels::messages::page(c, space.as_str().unwrap(), None, 50))
+        .reader(|c| {
+            steve_channels::messages::page(
+                c,
+                space.as_str().unwrap(),
+                steve_modules::testkit::ME,
+                None,
+                50,
+            )
+        })
         .expect("page");
     assert!(page.iter().all(|m| m.history.as_deref() == Some("late")));
     assert!(

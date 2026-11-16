@@ -73,7 +73,7 @@ fn space_json(ch: &Channels, v: &Viewer, id: &str, recent: bool) -> ApiResult<Va
         let mut out = serde_json::to_value(spaces::out(c, &s)?)?;
         if recent {
             out["recent"] =
-                serde_json::to_value(messages::page(c, &s.id, None, messages::RECENT)?)?;
+                serde_json::to_value(messages::page(c, &s.id, &v.user, None, messages::RECENT)?)?;
         }
         Ok(out)
     })
@@ -150,7 +150,7 @@ async fn page(
     let v = viewer(&ch, &who)?;
     let rows = ch.store().reader(|c| -> ApiResult<_> {
         let s = spaces::own(c, &v, &id)?;
-        messages::page(c, &s.id, before, limit)
+        messages::page(c, &s.id, &v.user, before, limit)
     })?;
     Ok(Json(json!(rows)))
 }

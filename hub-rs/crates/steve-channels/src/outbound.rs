@@ -389,9 +389,10 @@ fn insert_out(tx: &Tx, n: &NewOut, now: i64) -> ChannelResult<String> {
         "none"
     };
     tx.execute(
+        // seen by the identity it goes out as (`seen_by`, migration 88)
         "INSERT INTO chan_messages (id, workspace_id, space_id, thread_key, reply_to, direction, sender_account_id,
-            persona_id, on_behalf, text, status, created)
-         VALUES (?, ?, ?, ?, ?, 'out', ?, ?, ?, ?, ?, ?)",
+            persona_id, on_behalf, text, status, created, seen_by)
+         VALUES (?1, ?2, ?3, ?4, ?5, 'out', ?6, ?7, ?8, ?9, ?10, ?11, coalesce((SELECT sum(1 << i.ordinal) FROM space_identities i JOIN connections c ON c.id = i.connection_id WHERE i.space_id = ?3 AND c.account_id = ?6 AND i.ordinal IS NOT NULL), 0))",
         params![
             id,
             n.t.ws,

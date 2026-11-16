@@ -242,9 +242,10 @@ pub fn open_draft_to(
     };
     let id = uid("cm");
     tx.execute(
+        // seen by the identity it goes out as (`seen_by`, migration 88)
         "INSERT INTO chan_messages (id, workspace_id, space_id, thread_key, reply_to, direction, sender_account_id,
-            persona_id, on_behalf, text, status, created)
-         VALUES (?, ?, ?, ?, ?, 'out', ?, ?, ?, ?, 'draft', ?)",
+            persona_id, on_behalf, text, status, created, seen_by)
+         VALUES (?1, ?2, ?3, ?4, ?5, 'out', ?6, ?7, ?8, ?9, 'draft', ?10, coalesce((SELECT sum(1 << i.ordinal) FROM space_identities i JOIN connections c ON c.id = i.connection_id WHERE i.space_id = ?3 AND c.account_id = ?6 AND i.ordinal IS NOT NULL), 0))",
         params![
             id,
             t.ws,
