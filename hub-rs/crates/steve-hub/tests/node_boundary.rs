@@ -307,6 +307,8 @@ const ALLOWED: &[Entry] = &[
     e(Fs, "steve-install/src/setup/reconfigure.rs", 7, Hub, "operator configuration maintenance reads private configuration and locks, syncs and archives its own recoverable transaction"),
     e(Spawn, "steve-install/src/service.rs", 1, Hub, "operator service manager invokes fixed launchctl/systemctl and verified installation identity commands"),
     e(Fs, "steve-install/src/service.rs", 22, Hub, "operator service manager validates ownership, reads existing registration without following links, archives only this installation's registration, and reads its own Hub's env and local Node pid file to stop that Node"),
+    e(Dir, "steve-install/src/publish.rs", 1, Hub, "steve publish packs exactly the folder the operator names, refusing links and special files instead of following them"),
+    e(Fs, "steve-install/src/publish.rs", 7, Hub, "steve login keeps its own client credential (0600, atomic replace); steve publish reads the file or folder the operator names to upload it"),
     e(Spawn, "steve-install/src/signing.rs", 8, Hub, "first-install signer and trusted Hub updater invoke system Keychain/codesign and verified Hub build identity"),
     e(Dir, "steve-install/src/signing.rs", 2, Hub, "signer validates only this release's regular-file tree and refuses preexisting Hub data"),
     e(Fs, "steve-install/src/signing.rs", 16, Hub, "signer preserves the installation identity and immutable helper using private receipts and exclusive creation"),

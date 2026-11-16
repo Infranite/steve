@@ -24,6 +24,7 @@ const ItemView = lazyView(() => import("@/views").then((m) => ({ default: m.Item
 const SessionsView = lazyView(() => import("@/sessions-list").then((m) => ({ default: m.SessionsView })))
 const SessionView = lazyView(() => import("@/views").then((m) => ({ default: m.SessionView })))
 const MoreView = lazyView(() => import("@/views").then((m) => ({ default: m.MoreView })))
+const MyDeliveriesView = lazyView(() => import("@/my-deliveries").then((m) => ({ default: m.MyDeliveriesView })))
 const DesignView = lazyView(() => import("@/views").then((m) => ({ default: m.DesignView })))
 const DesignShowroom = lazyView(() => import("@/design-showroom").then((m) => ({ default: m.DesignShowroom })))
 const ForkDialog = lazyView(() => import("@/views").then((m) => ({ default: m.ForkDialog })))
@@ -241,6 +242,7 @@ export default function App({ deliveryId }: { deliveryId?: string }) {
     a === "yolo" ? <YoloDigestView window={b} /> :
     a === "stats" ? <StatsRoute b={b} c={c} /> :
     a === "contacts" ? (b === "me" ? <MeView /> : b ? <ContactView key={b} id={b} /> : <ContactsView />) : a === "orgs" ? (b ? <OrgView key={b} id={b} /> : <ContactsView />) : a === "teams" ? (b ? <TeamView key={b} id={b} /> : <ContactsView />) :
+    a === "publications" ? <MyDeliveriesView /> :
     a === "more" ? <MoreView /> : a === "c" && b ? <ChatView key={b} conv={decodeURIComponent(b)} /> : <ChatView />
   const sh = getSheet()
   return (

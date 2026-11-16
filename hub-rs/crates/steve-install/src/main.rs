@@ -290,6 +290,97 @@ fn run(mut args: Vec<String>) -> Result<i32> {
                 .status()?;
             Ok(status.code().unwrap_or(1))
         }
+        "login" => {
+            use steve_install::publish;
+            let file = publish::login_file()?;
+            let saved = publish::saved_login(&file)?;
+            let hub = option(&mut args, "--hub")?
+                .or_else(|| std::env::var("STEVE_HUB_URL").ok())
+                .or_else(|| saved.as_ref().map(|l| l.hub.clone()))
+                .or_else(|| {
+                    role_home("hub", None)
+                        .ok()
+                        .and_then(|h| setup::hub_urls(&h))
+                        .map(|(api, _)| api)
+                })
+                .context(t!("install.cli.login_hub_missing"))?;
+            let user = option(&mut args, "--user")?
+                .or_else(|| std::env::var("USER").ok())
+                .context(t!("install.cli.login_user_missing"))?;
+            if !args.is_empty() {
+                bail!("unknown login arguments; use steve --help");
+            }
+            let token = match std::env::var("STEVE_ACCESS_TOKEN") {
+                Ok(t) if !t.trim().is_empty() => t.trim().to_string(),
+                _ => publish::read_secret(&t!("install.cli.login_token_prompt"))?,
+            };
+            let login = publish::login(&hub, &user, &token)?;
+            publish::save_login(&file, &login)?;
+            println!(
+                "{}",
+                t!(
+                    "install.cli.login_done",
+                    user = login.user,
+                    hub = login.hub,
+                    file = file.display()
+                )
+            );
+            Ok(0)
+        }
+        "publish" => {
+            use steve_install::publish;
+            let title = option(&mut args, "--title")?;
+            let entry = option(&mut args, "--entry")?;
+            let workspace = option(&mut args, "--workspace")?;
+            let hub = option(&mut args, "--hub")?;
+            let interactive = flag(&mut args, "--interactive")?;
+            let json = flag(&mut args, "--json")?;
+            if args.len() != 1 || args[0].starts_with("--") {
+                bail!("{}", t!("install.cli.publish_usage"));
+            }
+            let path = PathBuf::from(args.remove(0));
+            let mut login = match std::env::var("STEVE_CLIENT_CREDENTIAL") {
+                Ok(c) if !c.trim().is_empty() => publish::Login {
+                    hub: std::env::var("STEVE_HUB_URL").unwrap_or_default(),
+                    user: String::new(),
+                    credential: c.trim().to_string(),
+                },
+                _ => publish::saved_login(&publish::login_file()?)?
+                    .context(t!("install.cli.publish_login_missing"))?,
+            };
+            // The saved credential belongs to the Hub it signed in to; never send it elsewhere.
+            if let Some(h) = hub {
+                let h = publish::normalize_hub(&h)?;
+                if !login.hub.is_empty() && login.hub != h {
+                    bail!("{}", t!("install.cli.publish_other_hub", hub = login.hub));
+                }
+                login.hub = h;
+            }
+            login.hub = publish::normalize_hub(&login.hub)
+                .context(t!("install.cli.publish_login_missing"))?;
+            let d = publish::publish(
+                &login,
+                &publish::Publish {
+                    path: &path,
+                    title: title.as_deref(),
+                    entry: entry.as_deref(),
+                    interactive,
+                    workspace: workspace.as_deref(),
+                },
+            )?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&d)?);
+            } else {
+                println!("{}", d["url"].as_str().unwrap_or_default());
+                if d["reachability"] == "local" {
+                    eprintln!("{}", t!("install.cli.publish_local"));
+                }
+                if d["scripts"] == true && d["interactive"] != true {
+                    eprintln!("{}", t!("install.cli.publish_static_scripts"));
+                }
+            }
+            Ok(0)
+        }
         _ => bail!("unknown command; use steve --help"),
     }
 }

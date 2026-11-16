@@ -72,6 +72,9 @@ pub struct FileDeliveryArgs {
     pub path: String,
     pub title: Option<String>,
     pub entrypoint: Option<String>,
+    /// Opt in to the interactive HTML preview (scripts in an isolated sandbox); static otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interactive: Option<bool>,
 }
 
 /// What the agent leans towards on a `steve_ask` (both optional; YOLO may pick `recommended`).

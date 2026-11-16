@@ -92,7 +92,7 @@
   },
   {
     "name": "steve_deliver_file",
-    "description": "Receive an immutable file version into Hub storage and return stable authenticated URLs after the full transfer succeeds. Does not end the turn or publish a share. Use a file inside this session directory or the item outputs directory; ZIP folders first. For HTML ZIPs, entrypoint optionally selects a package HTML path. Preserve the returned url including its ws query in steve_deliver outputs to associate the delivery card within this item/workspace. Check access_warning for local-only addresses and unverified reachability. HTML is always a static preview; public sharing does not enable scripts.",
+    "description": "Publish an immutable file version into Hub storage and return a stable preview link (url) after the full transfer succeeds, for the user to open on any device, including a phone through the Hub's public address. Works in any session with a working directory: items, chats, conversations and scheduled runs. Does not end the turn or create a public share. Use a file inside this session directory (or, in an item, its outputs directory); ZIP a folder first. entrypoint optionally selects the file a ZIP opens to (an HTML page, a Markdown document, a PDF...). The page previews HTML, Markdown with relative package images, PDF, images, audio, video and text/code. HTML is static (scripts off) unless interactive is true: then the page runs the package's scripts in an isolated sandbox with no access to Steve, cookies or storage and no network beyond package files; inline and package scripts and styles work, external CDNs and fetch do not, so bundle every asset. In an item, preserve the returned url including its ws query in steve_deliver outputs to associate the delivery card. Check access_warning for local-only addresses and unverified reachability.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -105,7 +105,11 @@
         },
         "entrypoint": {
           "type": "string",
-          "description": "HTML entry path inside a ZIP, e.g. design/index.html."
+          "description": "File a ZIP opens to, e.g. design/index.html or docs/README.md."
+        },
+        "interactive": {
+          "type": "boolean",
+          "description": "Run the HTML's scripts in the isolated interactive preview (prototypes with tabs, state switchers, theme toggles). Default false: static."
         }
       },
       "required": [

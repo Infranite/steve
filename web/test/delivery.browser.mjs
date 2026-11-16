@@ -129,7 +129,7 @@ try {
   assert.equal(await sharedFrame.locator("body").getAttribute("data-executed"), null)
   await sharedFrame.getByRole("button", { name: "Run script" }).click()
   assert.equal(await sharedFrame.getByRole("button").innerText(), "Run script", "sharing grants no script capability")
-  assert.match(await publicPage.locator("[data-delivery]").innerText(), /静态 HTML/)
+  assert.match(await publicPage.locator("[data-delivery]").innerText(), /静态预览/)
   assert.equal(await sharedFrame.locator("h1").evaluate((el) => getComputedStyle(el).color), "rgb(20, 100, 180)")
   assert.equal(await sharedFrame.locator("img").evaluate((el) => el.naturalWidth), 1)
   await sharedFrame.getByRole("link", { name: "Open details" }).click()

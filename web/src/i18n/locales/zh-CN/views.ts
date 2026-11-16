@@ -510,6 +510,8 @@ export default {
     groupLinks: "连接与资料",
     groupAuto: "自动化",
     groupSystem: "系统",
+    publications: "我的发布",
+    publicationsSub: "你发布的文件和预览链接",
     projects: "项目",
     projectsSub: "「{{name}}」的项目和目录",
     sessions: "会话",

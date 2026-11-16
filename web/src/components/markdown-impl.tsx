@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useRef, useState, type ComponentProps, type ReactNode } from "react"
+import { lazy, Suspense, useEffect, useMemo, useRef, useState, type ComponentProps, type ReactNode } from "react"
 import { Streamdown, defaultComponents, defaultRehypePlugins, defaultRemarkPlugins, useIsCodeFenceIncomplete, type Components, type DefaultComponents, type DiagramPlugin } from "streamdown"
 import { cjk } from "@streamdown/cjk"
 import { code } from "@streamdown/code"
@@ -139,9 +139,22 @@ const remarkPlugins = [...Object.values(defaultRemarkPlugins), remarkBreaks, rem
 const rehypePlugins = [defaultRehypePlugins.sanitize, defaultRehypePlugins.harden]
 
 /** `streaming`: the text is still being written (unclosed markdown is completed, a caret follows the end) */
-export default function MarkdownImpl({ text, className, streaming }: { text: string; className?: string; streaming?: boolean }) {
+/* a document of a delivered package: its relative images and links point into the package; an absolute URL stays */
+const ABSOLUTE = /^([a-z][a-z0-9+.-]*:|\/\/|#)/i
+function remarkRebase(resolve: (ref: string) => string | null) {
+  return () => {
+    const walk = (n: MdNode) => {
+      if ((n.type === "image" || n.type === "link" || n.type === "definition") && n.url && !ABSOLUTE.test(n.url)) n.url = resolve(n.url) ?? ""
+      for (const c of n.children ?? []) walk(c)
+    }
+    return (tree: MdNode) => walk(tree)
+  }
+}
+
+export default function MarkdownImpl({ text, className, streaming, resolve }: { text: string; className?: string; streaming?: boolean; resolve?: (ref: string) => string | null }) {
+  const remark = useMemo(() => resolve ? [...remarkPlugins, remarkRebase(resolve)] : remarkPlugins, [resolve])
   return (
-    <Streamdown className={cn("md", className)} plugins={plugins} components={components} remarkPlugins={remarkPlugins} rehypePlugins={rehypePlugins}
+    <Streamdown className={cn("md", className)} plugins={plugins} components={components} remarkPlugins={remark} rehypePlugins={rehypePlugins}
       shikiTheme={["github-light", "github-dark"]} controls={{ mermaid: { panZoom: false }, table: false }} tableMaxHeight="none"
       isAnimating={!!streaming} caret={streaming ? "circle" : undefined}>{String(text ?? "")}</Streamdown>
   )

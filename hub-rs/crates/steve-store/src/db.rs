@@ -173,6 +173,8 @@ pub const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/085.sql"),
     // 86: the merge lane and the merge queue go (pull requests land changes); their open cards expire.
     include_str!("../migrations/086.sql"),
+    // 87: deliveries without an item, their managing user and the interactive HTML switch.
+    include_str!("../migrations/087.sql"),
 ];
 
 /// 027's item columns and their one-time backfill (applied by `run_pending` when `items.phase` is missing).

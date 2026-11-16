@@ -1,8 +1,11 @@
-import { useEffect, useState } from "react"
+import { useCallback, useEffect, useState } from "react"
+import { cn } from "cn"
 import { CopyIcon, DownloadIcon, ExternalLinkIcon, FileTextIcon, RefreshCwIcon } from "lucide-react"
 import { api, Unauthenticated, withWs } from "@/api"
 import { size } from "@/attach"
+import { Badge } from "@/components/affect/badge-clean"
 import { Card, CardContent, CardHeader } from "@/components/affect/card-clean"
+import { Switch } from "@/components/affect/switch-clean"
 import { Button } from "@/components/ui/button"
 import { Empty } from "@/components/ui/empty"
 import { Spinner } from "@/components/ui/spinner"
@@ -11,7 +14,7 @@ import { useT } from "@/i18n"
 import { date } from "@/i18n/format"
 import { OfficeView } from "@/office"
 import { TextView } from "@/outputs"
-import { deliveryContent, deliveryForm, deliveryTextLang, loopbackUrl, webUrl, type Delivery } from "@/delivery"
+import { deliveryContent, deliveryForm, deliveryTextLang, loopbackUrl, packageUrl, webUrl, type Delivery } from "@/delivery"
 import { DeliveryHttpError, previewText, sharedDelivery } from "@/delivery-data"
 import { DeliveryShares } from "@/delivery-shares"
 
@@ -23,16 +26,63 @@ function CannotPreview({ reason }: { reason?: string }) {
   return <Empty title={t("pages:delivery.noPreview")} text={reason || t("pages:delivery.downloadHint")} data-delivery-no-preview />
 }
 
-function Content({ d, shared }: { d: Delivery; shared: boolean }) {
+/** The owner's switch between the static and the isolated interactive preview of an HTML delivery. */
+function InteractiveSwitch({ d, onChange }: { d: Delivery; onChange: (d: Delivery) => void }) {
+  const t = useT(), [busy, setBusy] = useState(false), [error, setError] = useState("")
+  const toggle = async (on: boolean) => {
+    setBusy(true); setError("")
+    try { onChange(await api.setDeliveryInteractive(d.id, on)) } catch { setError(t("pages:delivery.interactiveError")) } finally { setBusy(false) }
+  }
+  return <div className="flex flex-col gap-1">
+    <Switch size="sm" checked={!!d.interactive} disabled={busy} onChange={(e) => void toggle(e.currentTarget.checked)} label={t("pages:delivery.interactiveSwitch")} description={t("pages:delivery.interactiveSwitchHint")} data-interactive-switch />
+    {error && <p role="alert" className="type-footnote text-destructive">{error}</p>}
+  </div>
+}
+
+function HtmlPreview({ d, url, shared, onChange }: { d: Delivery; url: string; shared: boolean; onChange: (d: Delivery) => void }) {
+  const t = useT(), [reset, setReset] = useState(0), [empty, setEmpty] = useState(false)
+  const frame = d.interactive && d.frame_url ? webUrl(d.frame_url, shared ? location.origin : currentHub()) : null
+  const manage = !shared && d.can_manage
+  /* A static page built by its scripts renders nothing. When the frame is readable (same origin), an empty one is
+     folded away so the notice above it is what shows. */
+  const loaded = (e: React.SyntheticEvent<HTMLIFrameElement>) => {
+    try {
+      const doc = e.currentTarget.contentDocument
+      setEmpty(!!doc?.body && !doc.body.innerText.trim() && !doc.body.querySelector("img,svg,canvas,video,picture,object"))
+    } catch { setEmpty(false) }
+  }
+  return <div className="flex min-w-0 flex-col gap-3">
+    <div className="flex flex-wrap items-start justify-between gap-3">
+      <div className="flex min-w-0 flex-col gap-1">
+        <Badge className="self-start" tone={frame ? "info" : "neutral"} dot data-delivery-mode={frame ? "interactive" : "static"}>{t(frame ? "pages:delivery.interactive" : "pages:delivery.static")}</Badge>
+        <p className="type-footnote text-muted-foreground">{t(frame ? "pages:delivery.interactiveHtml" : "pages:delivery.staticHtml")}</p>
+      </div>
+      <Button size="sm" variant="ghost" onClick={() => setReset((x) => x + 1)} data-html-reset><RefreshCwIcon />{t("pages:delivery.resetPreview")}</Button>
+    </div>
+    {manage && <InteractiveSwitch d={d} onChange={onChange} />}
+    {!frame && d.scripts && <p className="rounded-xl bg-muted/50 p-4 type-callout" role="note" data-needs-scripts={empty ? "empty" : "scripts"}>{t(empty ? (manage ? "pages:delivery.needsScripts" : "pages:delivery.needsScriptsAsk") : (manage ? "pages:delivery.hasScripts" : "pages:delivery.hasScriptsAsk"))}</p>}
+    {frame
+      /* Interactive: an opaque origin (allow-scripts WITHOUT allow-same-origin), served from its own capability URL
+         with a CSP of connect-src 'none', form-action 'none' and frame-ancestors this installation. No cookies,
+         storage, forms, popups or top navigation; the Hub never reads a cookie on that path. */
+      ? <iframe key={"i" + reset} title={d.title || d.name} src={frame} sandbox="allow-scripts" referrerPolicy="no-referrer" className="block h-[75dvh] min-h-72 w-full rounded-xl bg-white ring-1 ring-border" data-delivery-html data-delivery-interactive />
+      /* Static: both signed-in and shared. Same-origin preserves cookies on signed-in relative requests; scripts stay
+         disabled by this iframe AND the Hub's response CSP (sandbox allow-same-origin; script-src 'none'). */
+      : <iframe key={"s" + reset} title={d.title || d.name} src={url} sandbox="allow-same-origin" referrerPolicy="no-referrer" onLoad={loaded} className={cn("block h-[70dvh] min-h-72 w-full rounded-xl bg-white ring-1 ring-border", empty && d.scripts && "hidden")} data-delivery-html data-static-empty={empty || undefined} />}
+  </div>
+}
+
+function Content({ d, shared, onChange }: { d: Delivery; shared: boolean; onChange: (d: Delivery) => void }) {
   const t = useT(), base = shared ? location.origin : currentHub()
   const content = deliveryContent(d, base), url = content && (shared ? content : scoped(content))
   const form = d.preview?.type === "text" && deliveryForm(d) !== "html" ? "text" : deliveryForm(d)
-  const [text, setText] = useState<Delivery["preview"]>(null), [error, setError] = useState(""), [reset, setReset] = useState(0)
+  const [text, setText] = useState<Delivery["preview"]>(null), [error, setError] = useState("")
+  const resolve = useCallback((ref: string) => url ? packageUrl(ref, url, d.entrypoint) : null, [url, d.entrypoint])
   useEffect(() => {
     const controller = new AbortController()
     setError(""); setText(null)
     if (form !== "text" || !url) return () => controller.abort()
-    if (d.preview?.type === "text") { setText(d.preview); return () => controller.abort() }
+    if (d.preview?.type === "text") { setText({ ...d.preview, lang: d.preview.lang === "text" ? deliveryTextLang(d) : d.preview.lang }); return () => controller.abort() }
     fetch(url, { credentials: shared ? "omit" : "include", signal: AbortSignal.any([controller.signal, AbortSignal.timeout(30_000)]), cache: "no-store" })
       .then((r) => previewText(r)).then((p) => { if (!controller.signal.aborted) setText({ type: "text", lang: deliveryTextLang(d), ...p }) }, () => {
         if (!controller.signal.aborted) setError(t("pages:delivery.contentError"))
@@ -41,20 +91,14 @@ function Content({ d, shared }: { d: Delivery; shared: boolean }) {
   }, [d, url, form, shared, t])
   if (!url) return <CannotPreview reason={t("pages:delivery.invalidUrl")} />
   if (error) return <div role="alert"><CannotPreview reason={error} /></div>
-  if (form === "html") return <div className="flex min-w-0 flex-col gap-2">
-    <div className="flex flex-wrap items-center justify-between gap-2">
-      <p className="type-footnote text-muted-foreground">{t("pages:delivery.staticHtml")}</p>
-      <Button size="sm" variant="ghost" onClick={() => setReset((x) => x + 1)} data-html-reset><RefreshCwIcon />{t("pages:delivery.resetPreview")}</Button>
-    </div>
-    {/* Both signed-in and shared HTML are static. Same-origin preserves cookies on signed-in relative requests;
-        scripts stay disabled by this iframe AND the Hub's response CSP (sandbox allow-same-origin; script-src 'none').
-        Keep the real URL as the base for bundled assets and page jumps. No scripts, top navigation, forms or popups. */}
-    <iframe key={reset} title={d.title || d.name} src={url} sandbox="allow-same-origin" referrerPolicy="no-referrer" className="block h-[70dvh] min-h-72 w-full rounded-xl bg-white ring-1 ring-border" data-delivery-html />
-  </div>
+  if (form === "html") return <HtmlPreview d={d} url={url} shared={shared} onChange={onChange} />
   if (form === "image") return <img src={url} alt={d.title || d.name} onError={() => setError(t("pages:delivery.contentError"))} className="mx-auto block max-h-[75dvh] max-w-full rounded-lg object-contain" referrerPolicy="no-referrer" data-delivery-image />
   if (form === "pdf") return <iframe title={d.name} src={url} referrerPolicy="no-referrer" className="block h-[75dvh] min-h-72 w-full rounded-xl ring-1 ring-border" data-delivery-pdf />
+  /* the Hub answers byte ranges, so players seek and Safari plays */
+  if (form === "video") return <video src={url} controls playsInline preload="metadata" onError={() => setError(t("pages:delivery.contentError"))} className="mx-auto block max-h-[75dvh] w-full rounded-xl bg-black" data-delivery-video />
+  if (form === "audio") return <audio src={url} controls preload="metadata" onError={() => setError(t("pages:delivery.contentError"))} className="block w-full" data-delivery-audio />
   if (form === "office") return <OfficeView url={url} name={d.name} credentials={shared ? "omit" : "include"} fallback={(reason) => <CannotPreview reason={reason} />} />
-  if (form === "text") return text ? <TextView p={{ ...text, type: "text", name: d.name, path: "", size: d.size }} /> : <div role="status" className="py-8"><Spinner className="mx-auto size-5" /></div>
+  if (form === "text") return text ? <TextView p={{ ...text, type: "text", name: d.entrypoint ?? d.name, path: "", size: d.size }} resolve={resolve} /> : <div role="status" className="py-8"><Spinner className="mx-auto size-5" /></div>
   return <CannotPreview />
 }
 
@@ -105,7 +149,8 @@ export function DeliveryView({ id, shared = false, embedded = false }: { id: str
       <h1 className="wrap-anywhere type-title">{d.title || d.name}</h1>
       <p className="wrap-anywhere type-callout text-muted-foreground" data-delivery-name>{d.name}</p>
       <p className="wrap-anywhere type-footnote text-muted-foreground">{d.mime} · {size(d.size)} · {date(d.created, { dateStyle: "medium", timeStyle: "short" })}</p>
-      {!shared && <a href={withWs("/") + `#/items/${encodeURIComponent(d.item_id)}`} className="self-start type-callout text-blue underline underline-offset-2" data-delivery-item>{t("pages:delivery.fromItem", { item: d.item_id })}</a>}
+      {!shared && (d.item_id ? <a href={withWs("/") + `#/items/${encodeURIComponent(d.item_id)}`} className="self-start type-callout text-blue underline underline-offset-2" data-delivery-item>{t("pages:delivery.fromItem", { item: d.item_id })}</a>
+        : <p className="type-callout text-muted-foreground" data-delivery-no-item>{t("pages:delivery.noItem")}{d.can_manage && <> · <a href={withWs("/") + "#/publications"} className="text-blue underline underline-offset-2" data-delivery-mine>{t("pages:delivery.mine")}</a></>}</p>)}
       {shared && d.expires_at != null && <p className="type-footnote text-muted-foreground">{t("pages:delivery.expiresAt", { time: date(d.expires_at, { dateStyle: "medium", timeStyle: "short" }) })}</p>}
       <div className="flex flex-wrap gap-2 pt-1">
         {download && <Button render={<a href={shared ? download : scoped(download)} download={d.name} referrerPolicy="no-referrer" />} nativeButton={false} data-delivery-download><DownloadIcon />{t("pages:delivery.download")}</Button>}
@@ -114,11 +159,11 @@ export function DeliveryView({ id, shared = false, embedded = false }: { id: str
       </div>
       {copyError && <p className="type-footnote text-destructive" role="alert">{t("pages:delivery.copyFailed")}</p>}
       {(!url || !download) && <p role="alert" className="type-callout text-attention">{t("pages:delivery.invalidUrl")}</p>}
-      {url && loopbackUrl(url) && <p className="type-callout text-attention" data-loopback-warning>{t("pages:delivery.loopback")}</p>}
-      {d.access_warning && <p className="wrap-anywhere type-callout text-attention" role="note" data-access-warning>{d.access_warning}</p>}
+      {/* access_warning is the agents' English summary; the page says the same in the reader's language */}
+      {url && (loopbackUrl(url) || d.reachability === "local") && <p className="type-callout text-attention" data-loopback-warning>{t("pages:delivery.localOnly")}</p>}
       {!shared && <p className="type-footnote text-muted-foreground">{t("pages:delivery.loginRequired")}</p>}
     </header>
-    <Card as="section"><CardHeader title={t("pages:outputs.preview")} titleAs="h2" icon={<FileTextIcon />} /><CardContent className="min-w-0"><Content key={id} d={d} shared={shared} /></CardContent></Card>
+    <Card as="section"><CardHeader title={t("pages:outputs.preview")} titleAs="h2" icon={<FileTextIcon />} /><CardContent className="min-w-0"><Content key={id} d={d} shared={shared} onChange={setDelivery} /></CardContent></Card>
     {!shared && !embedded && <DeliveryShares key={id} id={id} />}
   </article>
 }

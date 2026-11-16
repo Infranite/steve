@@ -730,6 +730,75 @@ fn delivery_url_design_approval_checks_the_exact_record_and_bytes() {
     }
 }
 
+/// #205: a design delivered with steve_deliver_file and listed as an ordinary `file` output (no
+/// design kind, no role) is the design file when it opens in the browser; an archive without an
+/// entry, or a URL this item did not receive, is not.
+#[test]
+fn a_received_openable_file_delivery_counts_as_the_design_file() {
+    for (name, mime, entry, accepted) in [
+        ("design.html", "text/html", None, true),
+        ("DESIGN.md", "text/markdown", None, true),
+        (
+            "prototype.zip",
+            "application/zip",
+            Some("pages/index.html"),
+            true,
+        ),
+        ("bundle.zip", "application/zip", None, false),
+    ] {
+        let k = Kit::new();
+        let item = k.item("run", "执行", None);
+        k.db()
+            .add_goal(&item, "先出设计，设计通过后再实现")
+            .unwrap();
+        let sid = k.session(&item, "idle");
+        let session = k.db().session(&sid).unwrap().unwrap();
+        let body = format!("design {name}");
+        let hash = sha2::Sha256::digest(body.as_bytes())
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>();
+        let objects = k.home().join("deliveries/objects");
+        std::fs::create_dir_all(&objects).unwrap();
+        std::fs::write(objects.join(&hash), &body).unwrap();
+        let url = format!(
+            "https://steve.example/deliveries/dlv_x?ws={}",
+            session.workspace_id
+        );
+        k.db().store().transaction(|t|{
+            t.execute("INSERT INTO deliveries(id,url,workspace_id,item_id,session_id,title,name,mime,size,created,entrypoint,sha256,manifest,preview) VALUES('dlv_x',?,?,?,?,'Design',?,?,?,1,?,?,'{}','{}')",rusqlite::params![url,session.workspace_id,item,sid,name,mime,body.len() as i64,entry,hash])?;
+            Ok::<_,steve_store::StoreError>(())
+        }).unwrap();
+        let output = |location: &str| Output {
+            kind: "file".into(),
+            title: name.into(),
+            location: Some(location.into()),
+            role: None,
+        };
+        let foreign = output(&url.replace("steve.example", "other.example"));
+        assert!(
+            k.core
+                .tool_deliver(&session, "design", &[foreign], &[], &[])
+                .is_err(),
+            "a URL this item did not receive is no design file"
+        );
+        let result = k
+            .core
+            .tool_deliver(&session, "design", &[output(&url)], &[], &[]);
+        assert_eq!(result.is_ok(), accepted, "{name}: {result:?}");
+        if accepted {
+            assert!(
+                k.db()
+                    .decisions_of_item(&item)
+                    .unwrap()
+                    .iter()
+                    .any(|d| d.status == "open" && d.subject_type == "design_implementation"),
+                "{name}"
+            );
+        }
+    }
+}
+
 fn step(s: &str, done: bool) -> PlanStep {
     PlanStep {
         step: s.into(),

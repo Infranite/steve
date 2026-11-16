@@ -1759,17 +1759,26 @@ impl Tx<'_> {
         }
         let summary = &format!("{summary}{notes}");
         let design_report = if design_confirmation_required(&self.db().goal(item_id)?) {
-            let report = outputs
-                .iter()
-                .find_map(|o| {
-                    (o.role.as_deref() == Some("result")
-                        && ["方案", "设计", "报告"]
-                            .iter()
-                            .any(|word| o.kind.contains(word)))
-                    .then(|| o.location.as_deref())
-                    .flatten()
-                })
-                .ok_or_else(|| crate::cycle::conflict("设计确认前需交付可打开的方案文件"))?;
+            let named = outputs.iter().find_map(|o| {
+                (o.role.as_deref() == Some("result")
+                    && ["方案", "设计", "报告"]
+                        .iter()
+                        .any(|word| o.kind.contains(word)))
+                .then(|| o.location.as_deref())
+                .flatten()
+            });
+            // A file the Bot published with steve_deliver_file and listed as a result (any kind:
+            // `file`, `文件`…) is the design file too, when this item received it and it opens in
+            // the browser (#205).
+            let report = match named {
+                Some(r) => Some(r),
+                None => outputs
+                    .iter()
+                    .filter(|o| o.role.as_deref() != Some("record"))
+                    .filter_map(|o| o.location.as_deref())
+                    .find(|l| openable_delivery(self.db().store(), item_id, l).unwrap_or(false)),
+            }
+            .ok_or_else(|| crate::cycle::conflict("设计确认前需交付可打开的方案文件"))?;
             verify_design_file(self.db().store(), &self.cfg().home, item_id, report)?;
             let goal_version = self
                 .db()
@@ -4710,6 +4719,46 @@ fn design_confirmation_required(goal: &str) -> bool {
 }
 
 /// A decision authorizes the exact content-addressed report that was shown for this goal.
+/// Whether `location` is the exact URL of a file delivery this item received, of a kind the
+/// delivery page opens: HTML, Markdown or text, PDF, an image, or a ZIP with an entry.
+fn openable_delivery(store: &steve_store::Store, item: &str, location: &str) -> Result<bool> {
+    use rusqlite::OptionalExtension;
+    if !(location.starts_with("https://") || location.starts_with("http://")) {
+        return Ok(false);
+    }
+    let row = store.reader::<_, steve_store::StoreError>(|c| {
+        Ok(c.query_row(
+            "SELECT d.name,d.mime,d.entrypoint FROM deliveries d JOIN items i ON i.id=d.item_id AND i.workspace_id=d.workspace_id WHERE d.item_id=? AND d.url=?",
+            rusqlite::params![item, location],
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, Option<String>>(2)?)),
+        )
+        .optional()?)
+    })?;
+    let Some((name, mime, entry)) = row else {
+        return Ok(false);
+    };
+    let shown = entry.as_deref().unwrap_or(&name).to_ascii_lowercase();
+    let ext = shown.rsplit_once('.').map(|(_, e)| e).unwrap_or_default();
+    Ok(mime.starts_with("text/")
+        || mime.starts_with("image/")
+        || mime == "application/pdf"
+        || matches!(
+            ext,
+            "html"
+                | "htm"
+                | "md"
+                | "markdown"
+                | "txt"
+                | "pdf"
+                | "png"
+                | "jpg"
+                | "jpeg"
+                | "gif"
+                | "webp"
+                | "svg"
+        ))
+}
+
 fn verify_design_file(
     store: &steve_store::Store,
     home: &Path,

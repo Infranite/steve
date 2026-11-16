@@ -528,6 +528,8 @@ export default {
     groupLinks: "Connections and data",
     groupAuto: "Automation",
     groupSystem: "System",
+    publications: "My publications",
+    publicationsSub: "Files you published and their preview links",
     projects: "Projects",
     projectsSub: "Projects and folders in “{{name}}”",
     sessions: "Conversations",

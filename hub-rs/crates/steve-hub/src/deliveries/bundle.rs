@@ -108,11 +108,25 @@ pub(super) fn unpack(bytes: &[u8], entrypoint: Option<&str>) -> Result<Bundle, S
     let html = |p: &str| {
         p.to_ascii_lowercase().ends_with(".html") || p.to_ascii_lowercase().ends_with(".htm")
     };
+    let markdown = |p: &str| {
+        p.to_ascii_lowercase().ends_with(".md") || p.to_ascii_lowercase().ends_with(".markdown")
+    };
+    // An explicit entry may be any file of the package (an HTML page, a Markdown document, a PDF…);
+    // without one a page is preferred, then a README or index document.
     let entrypoint = match entrypoint {
-        Some(p) if plain(p) && html(p) && files.contains_key(p) => Some(p.to_string()),
-        Some(_) => return Err("entrypoint must name an HTML file in the ZIP".into()),
+        Some(p) if plain(p) && files.contains_key(p) => Some(p.to_string()),
+        Some(_) => return Err("entrypoint must name a file in the ZIP".into()),
         None if files.contains_key("index.html") => Some("index.html".into()),
-        None => files.keys().find(|p| html(p)).cloned(),
+        None => files
+            .keys()
+            .find(|p| html(p))
+            .or_else(|| {
+                ["README.md", "readme.md", "index.md"]
+                    .iter()
+                    .find_map(|n| files.get_key_value(*n).map(|(k, _)| k))
+            })
+            .or_else(|| files.keys().find(|p| markdown(p)))
+            .cloned(),
     };
     Ok(Bundle { entrypoint, files })
 }
