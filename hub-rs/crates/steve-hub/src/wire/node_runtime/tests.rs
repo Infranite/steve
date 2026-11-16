@@ -647,7 +647,6 @@ fn exhausted_delays_double_from_two_seconds_up_to_a_minute() {
     );
 }
 
-
 #[tokio::test]
 async fn device_pause_keeps_existing_attempt_and_retry_then_holds_followup_until_resume() {
     let h = super::super::node_tools::tests::fixture(vec![]).await;

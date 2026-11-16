@@ -66,6 +66,99 @@ fn at_version(v: usize) -> (tempfile::TempDir, std::path::PathBuf) {
     (dir, path)
 }
 
+// Use the contract boundary so a merge-time renumber cannot silently skip a published migration.
+fn before_usage_ledger() -> usize {
+    db::MIGRATIONS
+        .iter()
+        .position(|sql| sql.contains("CREATE TABLE usage_reports"))
+        .unwrap()
+}
+
+fn seed_pre_usage_ledger(c: &Connection) {
+    c.execute_batch(
+        "INSERT INTO devices(id,name,roles,max_sessions,revision,seen,created)
+         VALUES ('ledger-device','Device','[]',32,9,1,1);
+         INSERT INTO usage_records(workspace_id,ts,day,source,purpose,harness,model,
+             input,output,cache_read,cache_write,reasoning,cost_reported,detail)
+         VALUES ('default',1,'2026-01-01','gateway','legacy','custom','model',
+             40,20,60,7,5,0.25,'{\"scope\":\"all\"}');",
+    )
+    .unwrap();
+}
+
+fn assert_pre_usage_ledger_facts(c: &Connection) {
+    assert_eq!(
+        count(c, "SELECT revision FROM devices WHERE id='ledger-device'"),
+        9
+    );
+    assert_eq!(
+        count(
+            c,
+            "SELECT max_sessions FROM devices WHERE id='ledger-device'"
+        ),
+        32
+    );
+    assert_eq!(count(c, "SELECT count(*) FROM usage_records"), 1);
+    assert_eq!(
+        count(
+            c,
+            "SELECT count(*) FROM usage_records WHERE input=40 AND output=20
+             AND cache_read=60 AND cache_write=7 AND reasoning=5 AND cost_reported=0.25
+             AND detail='{\"scope\":\"all\"}'",
+        ),
+        1
+    );
+    assert_eq!(count(c, "SELECT count(*) FROM pragma_foreign_key_check"), 0);
+}
+
+#[test]
+fn usage_ledger_upgrade_preserves_published_device_revision_and_legacy_bill() {
+    let (_dir, path) = at_version(before_usage_ledger());
+    let c = Connection::open(&path).unwrap();
+    seed_pre_usage_ledger(&c);
+    db::migrate(&c).unwrap();
+    db::migrate(&c).unwrap();
+    assert_pre_usage_ledger_facts(&c);
+    assert_eq!(
+        count(&c, "SELECT v FROM schema_version"),
+        db::SCHEMA_VERSION
+    );
+    assert_eq!(count(&c, "SELECT count(*) FROM usage_reports"), 0);
+    assert_eq!(count(&c, "SELECT count(*) FROM gateway_result_ready"), 0);
+    drop(c);
+    let store = Store::open(&path, NoPublisher).unwrap();
+    store
+        .reader(|c| {
+            assert_pre_usage_ledger_facts(c);
+            Ok::<_, steve_store::StoreError>(())
+        })
+        .unwrap();
+}
+
+#[test]
+fn usage_ledger_upgrade_rolls_back_all_pending_migrations_then_retries() {
+    let before = before_usage_ledger();
+    let (_dir, path) = at_version(before);
+    let c = Connection::open(&path).unwrap();
+    seed_pre_usage_ledger(&c);
+    // Fail the last migration after the earlier pending migrations have run in the transaction.
+    c.execute_batch("CREATE TABLE gateway_result_ready(collision INTEGER)")
+        .unwrap();
+    assert!(db::migrate(&c).is_err());
+    assert_eq!(count(&c, "SELECT v FROM schema_version"), before as i64);
+    assert!(!has_table(&c, "usage_reports"));
+    assert!(!has_table(&c, "gateway_calls"));
+    assert!(!columns(&c, "usage_records").contains(&"live_turn_id".to_string()));
+    assert_pre_usage_ledger_facts(&c);
+    c.execute_batch("DROP TABLE gateway_result_ready").unwrap();
+    db::migrate(&c).unwrap();
+    assert_eq!(
+        count(&c, "SELECT v FROM schema_version"),
+        db::SCHEMA_VERSION
+    );
+    assert_pre_usage_ledger_facts(&c);
+}
+
 #[test]
 fn realtime_upgrade_preserves_baselines_and_repairs_backwards_stop_boundaries() {
     let (_dir, path) = at_version(74);
