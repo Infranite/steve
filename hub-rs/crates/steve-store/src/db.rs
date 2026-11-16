@@ -166,6 +166,8 @@ pub const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/081.sql"),
     // 82: immutable Hub-owned file deliveries and user-authorized expiring shares.
     include_str!("../migrations/082.sql"),
+    // 83: a work unit's retries keep its child item; retired attempts are keyed by (item, attempt).
+    include_str!("../migrations/083.sql"),
 ];
 
 /// 027's item columns and their one-time backfill (applied by `run_pending` when `items.phase` is missing).

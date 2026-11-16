@@ -829,18 +829,7 @@ impl Tx<'_> {
                 .map_err(steve_store::StoreError::from)?;
             Ok(())
         })?;
-        /* the plan was the cycle before's: it is kept as an earlier round, the new cycle starts without one */
-        if !i.plan.is_empty() {
-            let end = if i.plan.iter().all(|p| p.done) {
-                "done"
-            } else {
-                "replaced"
-            };
-            self.db()
-                .plan_round_add(&i.workspace_id, item_id, &i.plan, end, by)?;
-            self.db()
-                .item_patch(item_id, crate::patch![plan: Vec::<PlanStep>::new()])?;
-        }
+        self.lc_plan_to_round(&i, by)?;
         self.db().timeline_add(
             item_id,
             by,
@@ -860,6 +849,62 @@ impl Tx<'_> {
                 self.start_or_fail(item_id, Some(g), None)?;
             }
         }
+        self.item(item_id)
+    }
+
+    /// The plan was the cycle before's: it is kept as an earlier round, the new cycle starts without one.
+    fn lc_plan_to_round(&self, i: &Item, by: &str) -> Result<()> {
+        if !i.plan.is_empty() {
+            let end = if i.plan.iter().all(|p| p.done) {
+                "done"
+            } else {
+                "replaced"
+            };
+            self.db()
+                .plan_round_add(&i.workspace_id, &i.id, &i.plan, end, by)?;
+            self.db()
+                .item_patch(&i.id, crate::patch![plan: Vec::<PlanStep>::new()])?;
+        }
+        Ok(())
+    }
+
+    /// A work unit's retry on its own closed child (#182): a new cycle as [`Self::lc_new_cycle`] makes
+    /// one (`cycle + 1`, revision 0, `ready`, the plan kept as an earlier round; the cycle before stays
+    /// as it closed), with the unit's claim of it in the same transaction (`claim`): the cycle never
+    /// opens without its attempt, nor the attempt without its cycle. It runs at once (`run`).
+    pub(crate) fn lc_new_attempt(
+        &mut self,
+        item_id: &str,
+        attempt: i64,
+        claim: impl FnOnce(&steve_store::Tx) -> Result<()>,
+    ) -> Result<Item> {
+        let i = self.item(item_id)?;
+        if i.phase != CLOSED {
+            return Err(conflict(steve_i18n::t!("core.item.new_cycle_needs_closed")));
+        }
+        let w = LifecycleWrite {
+            phase: READY.into(),
+            cycle: i.cycle + 1,
+            revision: 0,
+            status: Some("run".into()),
+            stage: Some("执行".into()),
+            now: Some(format!("第 {attempt} 次尝试，准备开始")),
+            ..Default::default()
+        };
+        let reason = format!("协作工作第 {attempt} 次尝试");
+        self.lc_write(&i, w, "cycle_created", &reason, |tx, _| {
+            tx.execute("UPDATE items SET archived = 0 WHERE id = ?", [item_id])
+                .map_err(steve_store::StoreError::from)?;
+            claim(tx)
+        })?;
+        self.lc_plan_to_round(&i, "steve")?;
+        self.db().timeline_add(
+            item_id,
+            "steve",
+            "sys",
+            &format!("开始第 {} 个周期：协作工作第 {attempt} 次尝试", i.cycle + 1),
+            None,
+        )?;
         self.item(item_id)
     }
 

@@ -85,13 +85,17 @@ export function buildAgentTree(rootId: string, items: TreeItem[], workflow?: Wor
   const children: AgentNode[] = []
   if (workflow) {
     for (const unit of orderedUnits(workflow.units)) {
-      const old = (workflow.history_attempts ?? []).filter((a) => a.unit_id === unit.id && a.item_id !== unit.item_id && !placed.has(a.item_id))
+      /* a retry runs in the unit's own child (one item for all its attempts); attempts from before that kept
+       * an item each. An earlier attempt in the unit's child is drawn without the item: the unit's node is the
+       * item, its time and cost already cover every attempt */
+      const old = (workflow.history_attempts ?? []).filter((a) => a.unit_id === unit.id && (a.item_id === unit.item_id || !placed.has(a.item_id)))
         .sort((a, b) => a.snapshot.attempt - b.snapshot.attempt || a.created - b.created)
       for (const a of old) {
-        placed.add(a.item_id)
-        const item = byId.get(a.item_id)
+        const own = a.item_id === unit.item_id
+        if (!own) placed.add(a.item_id)
+        const item = own ? undefined : byId.get(a.item_id)
         children.push({
-          key: a.item_id, kind: "attempt", item: a.item_id, unitId: unit.id, attempt: a.snapshot.attempt, reason: a.snapshot.reason,
+          key: own ? `${a.item_id}#${a.snapshot.attempt}` : a.item_id, kind: "attempt", item: own ? undefined : a.item_id, unitId: unit.id, attempt: a.snapshot.attempt, reason: a.snapshot.reason,
           session: a.snapshot.session_id ?? null, title: a.snapshot.title || unit.title, bot: item?.b || unit.bot_id,
           status: SNAPSHOT_STATUS[a.snapshot.status] ?? "stopped", waitingOn: [], decisions: 0, children: item ? forks(item.id, 1) : [],
         })

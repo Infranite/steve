@@ -204,7 +204,7 @@ impl Repo for StoreBackend {
                 m.entry(r.get(0)?).or_default().workflow_attempt = Some(r.get(1)?);
                 Ok(())
             })?;
-            each(c, &format!("SELECT a.item_id, json_extract(a.snapshot, '$.attempt') FROM workflow_attempts a WHERE a.item_id IN ({ITEMS}) AND NOT EXISTS (SELECT 1 FROM workflow_units u WHERE u.item_id = a.item_id)"), ws, |r| {
+            each(c, &format!("SELECT a.item_id, max(a.attempt) FROM workflow_attempts a WHERE a.item_id IN ({ITEMS}) AND NOT EXISTS (SELECT 1 FROM workflow_units u WHERE u.item_id = a.item_id) GROUP BY a.item_id"), ws, |r| {
                 let x = m.entry(r.get(0)?).or_default();
                 x.workflow_superseded = true;
                 if x.workflow_attempt.is_none() {

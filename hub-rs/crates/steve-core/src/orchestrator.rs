@@ -2643,6 +2643,10 @@ impl Tx<'_> {
         if !i.is_finished() || !cwd.starts_with(&prefix) || !git::is_git(Path::new(&p.path)) {
             return Ok(true);
         }
+        /* a work unit that runs again in this child keeps its worktree and caches for that attempt */
+        if self.workflow_retry_keeps(&i)? {
+            return Ok(true);
+        }
         /* only once no harness can be in the worktree any more: a release on its way (a Node's) is
          * asked about again later */
         let ss = self.db().sessions_of_item(item_id)?;

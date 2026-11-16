@@ -381,7 +381,11 @@ async fn restart_adopts_unbound_session_and_retry_does_not_duplicate_children_or
         .revision;
     again.core.workflow_change(&parent,json!({"action":"retry","expected_revision":revision,"unit_id":"work","reason":"Apply review"}),"requester").unwrap();
     let next = again.unit(&parent, "work");
-    assert_ne!(next.item_id, claimed.item_id);
+    assert_eq!(
+        next.item_id, claimed.item_id,
+        "the retry runs in the unit's own child"
+    );
+    assert_ne!(next.session_id.as_deref(), Some(session.id.as_str()));
     assert_eq!(next.attempt, 2);
     again.execution(&parent, "work").await;
     for _ in 0..3 {
