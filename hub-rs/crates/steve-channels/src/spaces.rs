@@ -854,6 +854,9 @@ pub struct SpaceOut {
     /// Settings that are on but do not apply here, and why (屏蔽 > `/bot` >
     /// 不提醒 > role rules), so the page shows it next to the setting.
     pub conflicts: Vec<Conflict>,
+    /// The link that opens the chat in its platform's own client (“在飞书中打开”); `null` when its
+    /// platform has none ([`crate::open_link`]).
+    pub open_url: Option<String>,
 }
 
 /// [`SpaceOut::voice`].
@@ -1223,6 +1226,7 @@ pub fn out_with(
         self_chat,
         suggest_quiet,
         conflicts,
+        open_url: crate::open_link::space_url(c, s)?,
     })
 }
 

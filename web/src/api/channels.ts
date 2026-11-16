@@ -44,6 +44,8 @@ export type Space = {
   attention?: Attention; role?: Role; voice?: (SpaceIdentity & { chosen: boolean }) | null; identities?: SpaceIdentity[]
   title?: string; counterpart?: { account_id: string; party_id: string | null; name: string; is_bot: boolean } | null; self_chat?: boolean
   suggest_quiet?: string | null; conflicts?: Conflict[]
+  /** opens the chat in its platform's own client (“在飞书中打开”); null when it has none (newer Hubs) */
+  open_url?: string | null
 }
 export type BasisEntry = { source_type: string; source_id: string; source_label: string; level: Level; effective: Level; used: string; out: "verbatim" | "conclusion" | "reasoning" | "blocked" }
 export type Basis = { verdict: "pass" | "rewritten" | "drafted"; entries: BasisEntry[]; rewrites: { from: string; to: string; reason: string }[] }
@@ -53,6 +55,8 @@ export type ChanMessage = {
   text: string | null; status: "received" | "draft" | "pending" | "sent" | "failed" | "unknown" | "recalled"; work_item_id: string | null; decision_id: string | null; created: number; sent: number | null; purged: number | null; basis: Basis | null
   /** only recorded as history when it came in: written before the connection was on, or arrived too late (newer Hubs) */
   history?: "before" | "late" | "backfill" | null
+  /** opens it, or its chat where the platform has no link to one message, in the platform's own client (newer Hubs) */
+  open_url?: string | null
 }
 export type SpaceDetail = Space & { recent: ChanMessage[] }
 export type Reveal = { name: boolean; role: boolean; ai: boolean; steve: boolean; owner: boolean }

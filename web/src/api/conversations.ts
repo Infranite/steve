@@ -5,7 +5,9 @@ import type { ChanMessage } from "@/api/channels"
 import { modReq, isNotWired, type RMessage } from "@/api"
 
 /** where a conversation lives: provider, space, group or DM */
-export type ConvBadge = { space: string; space_id: string; name: string; kind: string; dm: boolean; system: string; provider: string; has_external: boolean; member_count: number; mode: "bot" | "self" }
+export type ConvBadge = { space: string; space_id: string; name: string; kind: string; dm: boolean; system: string; provider: string; has_external: boolean; member_count: number; mode: "bot" | "self"
+  /** opens the chat in its platform's own client (“在飞书中打开”); null when it has none (newer Hubs) */
+  open_url?: string | null }
 export type ConvRow = ConvBadge & { count: number; last: number; last_text: string; last_author: "me" | "steve"; closed: boolean }
 /** the “收到 → 完成” state of an inbound turn's chat message (§2.11) */
 export type Reaction = { state: "ack" | "done" | "failed" | "cleared"; emoji: string | null; as_user: boolean; error: string | null; updated: number }

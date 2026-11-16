@@ -325,6 +325,9 @@ pub struct ChanMessage {
     /// An inbound message only recorded as history: `before` (written before the connection was on)
     /// or `late` (arrived too late); `null` for everything else.
     pub history: Option<String>,
+    /// The link that opens it (or, where its platform has no link to one message, its chat) in its
+    /// platform's own client ([`crate::open_link`]); `null` when there is none.
+    pub open_url: Option<String>,
 }
 
 const MSG_COLS: &str = "m.id, m.space_id, m.direction, coalesce(a.display_name, a.handle_display, p.name, ''), m.sender_party_id,
@@ -365,6 +368,7 @@ fn msg_row(r: &rusqlite::Row) -> rusqlite::Result<ChanMessage> {
         purged: r.get(19)?,
         basis: Value::Null,
         history: r.get(20)?,
+        open_url: None,
     })
 }
 
@@ -423,8 +427,9 @@ pub(crate) fn message_ref(
 
 /// The outbound message's basis (C5), for the interfaces only you see; attachments in their public
 /// form (no provider keys; `url` or `unavailable`) and an old card / post read again from its raw
-/// event ([`crate::media::present`]).
+/// event ([`crate::media::present`]); its link into the platform's client ([`ChanMessage::open_url`]).
 fn with_basis(c: &Connection, m: &mut ChanMessage) -> ChannelResult<()> {
+    m.open_url = crate::open_link::message_url(c, &m.id)?;
     if m.direction == "out" {
         m.basis = crate::basis::summary_of(c, &m.id)?;
     }

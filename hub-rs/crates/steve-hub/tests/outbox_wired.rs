@@ -458,6 +458,56 @@ async fn dismissing_a_draft_reply_discards_it() {
     assert_eq!(status(), "draft");
 }
 
+/// A decision about a chat message carries `open_url`, the AppLink that opens its chat in the
+/// Feishu client (“在飞书中打开”), on the brand of the connection; other decisions carry none.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_chat_message_decision_opens_its_chat_in_the_feishu_client() {
+    use steve_channels::fake::channel::FakeChannel;
+    let e = start().await;
+    let user = e.one_text("SELECT id FROM users WHERE subject='dev:local'");
+    let who = steve_modules::Caller {
+        ws: "default".into(),
+        me: user,
+    };
+    let (conn, _) = FakeChannel::seed_connection(&e.store, &who, None).unwrap();
+    e.exec(
+        "UPDATE connections SET adapter = 'feishu_app', config = '{\"domain\":\"lark\"}' WHERE id = ?",
+        &[&conn],
+    );
+    e.exec(
+        "INSERT INTO spaces (id, workspace_id, system_id, connection_id, kind, external_id, name, member_count, has_external, created, updated)
+         VALUES ('sp_open', 'default', 'feishu', ?1, 'group', 'oc_0000test0002', '测试群', 2, 0, 1, 1)",
+        &[&conn],
+    );
+    let c = rusqlite::Connection::open(&e.db).expect("db");
+    c.busy_timeout(Duration::from_secs(5)).expect("timeout");
+    c.execute_batch(
+        "INSERT INTO chan_messages (id, workspace_id, space_id, external_id, direction, text, status, decision_id, created)
+         VALUES ('cm_open', 'default', 'sp_open', 'om_0000test0002', 'in', '看一下', 'received', 'dc_open', 1);
+         INSERT INTO decisions (id, workspace_id, kind, subject_type, subject_id, question, options, status, requested_by, created)
+         VALUES ('dc_open', 'default', 'ask', 'chan_message', 'cm_open', '「测试群」里 有人 找你：看一下', '[\"reply\",\"ignore\"]', 'open', 'steve', 1),
+                ('dc_other', 'default', 'ask', 'space', 'sp_open', '新群', '[\"open\"]', 'open', 'steve', 1);",
+    )
+    .expect("rows");
+    drop(c);
+    let (s, state) = e.call("GET", "/api/state", None).await;
+    assert_eq!(s, 200, "{state}");
+    let d = |id: &str| {
+        state["decisions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|d| d["id"] == id)
+            .cloned()
+            .unwrap_or_else(|| panic!("{id} in {state}"))
+    };
+    assert_eq!(
+        d("dc_open")["open_url"],
+        "https://applink.larksuite.com/client/chat/open?openChatId=oc_0000test0002"
+    );
+    assert!(d("dc_other").get("open_url").is_none());
+}
+
 /// Audit #5: the dead deliveries are listed for the instance owner, grouped by consumer, and revived.
 #[tokio::test(flavor = "multi_thread")]
 async fn dead_deliveries_are_listed_by_consumer_and_revived() {

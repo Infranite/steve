@@ -10,6 +10,7 @@ import { PermissionDetails } from "@/components/permission"
 import { Button } from "@/components/ui/button"
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuRadioGroup, DropdownMenuRadioItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
 import { OutContext } from "@/channels/out-context"
+import { OpenInFeishu } from "@/channels/open-in-app"
 import { t as tr, useT } from "@/i18n"
 import { FLOW_SUBJECTS } from "@/auto/decision"
 import { MODULE_CARDS } from "@/vault/decisions"
@@ -77,6 +78,7 @@ function Detail({ w, extra }: { w: Wait; extra?: ReactNode }) {
   const t = useT()
   return <>
     {w.subject === "chan_message" && (w.type === "approve" || w.type === "fail") && <OutContext id={w.subjectId} />}
+    {w.subject === "chan_message" && <OpenInFeishu url={w.openUrl} className="-ml-2 self-start" />}
     {/* the draft's headings are text: a "## 交付" never outranks the question above it */}
     {w.draft && !isToolCall(w) && <div className="max-h-72 overflow-auto break-words text-muted-foreground [&_:is(h1,h2,h3,h4,h5,h6)]:mt-0! [&_:is(h1,h2,h3,h4,h5,h6)]:mb-1! [&_:is(h1,h2,h3,h4,h5,h6)]:[font:inherit]! [&_:is(h1,h2,h3,h4,h5,h6)]:font-medium! [&_:is(h1,h2,h3,h4,h5,h6)]:text-foreground"><Markdown text={w.draft} /></div>}
     {extra}

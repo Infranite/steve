@@ -58,6 +58,8 @@ export type MessageActionsProps = {
   copyLabels?: { copy: string; copied: string };
   /** Steve: more actions after the built-in ones, drawn the same way */
   more?: MessageMoreAction[];
+  /** Steve: "end" for a message on the right: the bar ends at its edge and the last tooltip opens leftwards */
+  align?: "start" | "end";
   className?: string;
 };
 /** Steve: an action of your own in the bar – an icon button with its tooltip */
@@ -179,6 +181,7 @@ export function MessageActions({
   label = t("core:affect.actions.label"),
   copyLabels = { copy: t("core:affect.actions.copy"), copied: t("core:affect.actions.copied") },
   more = [],
+  align = "start",
   className,
 }: MessageActionsProps) {
   useT(); // Steve: the default words follow a change of language
@@ -481,6 +484,7 @@ export function MessageActions({
       className={["ui-mac", className].filter(Boolean).join(" ")}
       data-quiet={quiet ? "" : undefined}
       data-active={active ? "" : undefined}
+      data-align={align === "end" ? "end" : undefined}
     >
       <style href="ui-message-actions-clean" precedence="default">
         {css}
@@ -669,6 +673,10 @@ const css = /* css */ `
 /* Steve: the bar starts at the message's edge, so the first tooltip opens to the right instead of off the screen */
 .ui-mac__bar > .ui-mac__item:first-child .ui-mac__tip { left: 0; transform: translate(0, 3px); }
 .ui-mac__bar > .ui-mac__item:first-child:is(:hover, [data-flash], :has(:focus-visible)) .ui-mac__tip { transform: translate(0, 0); }
+/* Steve: a bar at the right edge ends there, and its last tooltip opens to the left */
+.ui-mac[data-align="end"] .ui-mac__bar { justify-content: flex-end; }
+.ui-mac[data-align="end"] .ui-mac__bar > .ui-mac__item:last-child .ui-mac__tip { left: auto; right: 0; transform: translate(0, 3px); }
+.ui-mac[data-align="end"] .ui-mac__bar > .ui-mac__item:last-child:is(:hover, [data-flash], :has(:focus-visible)) .ui-mac__tip { transform: translate(0, 0); }
 .ui-mac__btn:focus-visible + .ui-mac__tip,
 .ui-mac__item[data-flash] .ui-mac__tip { opacity: 1; transform: translate(-50%, 0); transition-delay: 0ms; }
 @media (hover: hover) {

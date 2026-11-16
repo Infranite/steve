@@ -686,6 +686,8 @@ fn badge(c: &rusqlite::Connection, space: &crate::spaces::SpaceRow) -> ChannelRe
         "has_external": space.has_external,
         "member_count": space.member_count,
         "mode": mode.code(),
+        // opens the chat in its platform's client (“在飞书中打开”); `null` without one
+        "open_url": crate::open_link::space_url(c, space)?,
     }))
 }
 

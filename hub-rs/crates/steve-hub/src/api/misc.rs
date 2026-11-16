@@ -141,96 +141,152 @@ async fn compute_state(st: &AppState, c: Ctx) -> Result<Value, ApiError> {
     // the read cursor is written on the first look, so it goes through the writer first
     let ws = c.ws.clone();
     let seen = st.write(move |r| Ok(crate::notify::seen(r, &ws)?)).await?;
-    st.read(move |r| {
-        let w = c.ws.as_str();
-        let mut out = Map::new();
-        out.insert("version".into(), json!(version));
-        out.insert("web_version".into(), json!(web_version));
-        // the instance's owner: who the first meeting is offered to
-        let owner = c.user.get("role").and_then(Value::as_str) == Some("owner");
-        out.insert("owner".into(), json!(owner));
-        // a newer release the last version check found: the page's update notice
-        if let Some(version) = update {
+    let (ws, me) = (c.ws.clone(), c.me.clone());
+    let mut v = st
+        .read(move |r| {
+            let w = c.ws.as_str();
+            let mut out = Map::new();
+            out.insert("version".into(), json!(version));
+            out.insert("web_version".into(), json!(web_version));
+            // the instance's owner: who the first meeting is offered to
+            let owner = c.user.get("role").and_then(Value::as_str) == Some("owner");
+            out.insert("owner".into(), json!(owner));
+            // a newer release the last version check found: the page's update notice
+            if let Some(version) = update {
+                out.insert(
+                    "update".into(),
+                    json!({ "version": version, "owner": owner }),
+                );
+            }
+            // `workspace: undefined` drops the key
+            if let Some(mut x) = r.workspace_get(w)? {
+                steve_store::seeded::show(&mut x, steve_store::seeded::WORKSPACE);
+                out.insert("workspace".into(), Value::Object(x));
+            }
             out.insert(
-                "update".into(),
-                json!({ "version": version, "owner": owner }),
+                "workspaces".into(),
+                objs(super::workspaces_out(r.workspaces_of_user(&c.me)?)),
             );
-        }
-        // `workspace: undefined` drops the key
-        if let Some(mut x) = r.workspace_get(w)? {
-            steve_store::seeded::show(&mut x, steve_store::seeded::WORKSPACE);
-            out.insert("workspace".into(), Value::Object(x));
-        }
-        out.insert(
-            "workspaces".into(),
-            objs(super::workspaces_out(r.workspaces_of_user(&c.me)?)),
-        );
-        let t0 = std::time::Instant::now();
-        let mut items = super::summaries(r, w)?;
-        for i in &mut items {
-            if let Some(l) = i
-                .get("id")
+            let t0 = std::time::Instant::now();
+            let mut items = super::summaries(r, w)?;
+            for i in &mut items {
+                if let Some(l) = i
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .and_then(|id| lifecycles.get(id))
+                {
+                    i.insert("lifecycle".into(), l.clone());
+                }
+            }
+            out.insert("items".into(), objs(items));
+            let t_items = t0.elapsed();
+            out.insert(
+                "decisions".into(),
+                objs(crate::decision_text::all(agent_busy(
+                    r,
+                    r.decisions_open(w)?,
+                )?)),
+            );
+            out.insert(
+                "recent".into(),
+                objs(crate::decision_text::all(
+                    r.decisions_recent(w, now_ms() - 7 * 24 * 3_600_000)?,
+                )),
+            );
+            let (bots, all) = super::bots_out(r, w)?;
+            out.insert("bots".into(), objs(bots));
+            out.insert("allBots".into(), Value::Array(all));
+            let mut projects = r.projects_list(w)?;
+            for p in &mut projects {
+                steve_store::seeded::show(p, steve_store::seeded::PROJECT);
+            }
+            out.insert("projects".into(), objs(projects));
+            out.insert("tags".into(), objs(r.tags_list(w)?));
+            out.insert("tagUses".into(), Value::Object(r.tag_uses(w)?));
+            out.insert("thread".into(), objs(crate::notify::thread(r, w)?));
+            out.insert("thinking".into(), json!(thinking));
+            out.insert(
+                "notifications".into(),
+                Value::Array(crate::notify::list(r, w, 100)?),
+            );
+            out.insert("notifySeen".into(), seen);
+            let mut settings = crate::settings::defaults();
+            settings.extend(r.settings_all(w)?);
+            out.insert("settings".into(), Value::Object(settings));
+            out.insert(
+                "sessions".into(),
+                objs(super::sessions_out(r, domain.as_ref(), w)?),
+            );
+            let t_sessions = t0.elapsed();
+            out.insert("hold".into(), hold);
+            out.insert(
+                "devices".into(),
+                objs(device_facts(r.devices_list()?, owner, local, connected)),
+            );
+            out.insert("runtimes".into(), runtimes);
+            tracing::debug!(
+                "state: items {:?}, through sessions {:?}, all {:?}",
+                t_items,
+                t_sessions,
+                t0.elapsed()
+            );
+            Ok(Value::Object(out))
+        })
+        .await?;
+    chan_message_links(st, &ws, &me, &mut v).await;
+    Ok(v)
+}
+
+/// A decision about a chat message (`chan_message`) gets `open_url`: the link that opens it, or its
+/// chat, in the platform's own client (“在飞书中打开”), when the viewer sees its space. Best effort:
+/// without the channel modules, or when reading fails, the cards go without it.
+async fn chan_message_links(st: &AppState, ws: &str, me: &str, v: &mut Value) {
+    let Some(m) = st.modules.clone() else { return };
+    let subject = steve_channels::respond::SUBJECT_MESSAGE;
+    let ids: Vec<String> = ["decisions", "recent"]
+        .iter()
+        .filter_map(|k| v.get(*k).and_then(Value::as_array))
+        .flatten()
+        .filter(|d| d.get("subject_type").and_then(Value::as_str) == Some(subject))
+        .filter_map(|d| {
+            d.get("subject_id")
                 .and_then(Value::as_str)
-                .and_then(|id| lifecycles.get(id))
-            {
-                i.insert("lifecycle".into(), l.clone());
+                .map(str::to_string)
+        })
+        .collect();
+    if ids.is_empty() {
+        return;
+    }
+    let viewer = steve_store::base::Viewer::bare(ws, me);
+    let links = tokio::task::spawn_blocking(move || {
+        m.store
+            .reader(|c| steve_channels::open_link::message_urls(c, &viewer, &ids))
+    })
+    .await;
+    let links = match links {
+        Ok(Ok(l)) => l,
+        Ok(Err(e)) => {
+            tracing::warn!(error = %e, "state: chat message links");
+            return;
+        }
+        Err(_) => return,
+    };
+    for k in ["decisions", "recent"] {
+        let Some(ds) = v.get_mut(k).and_then(Value::as_array_mut) else {
+            continue;
+        };
+        for d in ds {
+            let url = d
+                .get("subject_id")
+                .and_then(Value::as_str)
+                .filter(|_| d.get("subject_type").and_then(Value::as_str) == Some(subject))
+                .and_then(|id| links.get(id))
+                .cloned();
+            if let (Some(url), Some(o)) = (url, d.as_object_mut()) {
+                o.insert("open_url".into(), json!(url));
             }
         }
-        out.insert("items".into(), objs(items));
-        let t_items = t0.elapsed();
-        out.insert(
-            "decisions".into(),
-            objs(crate::decision_text::all(agent_busy(
-                r,
-                r.decisions_open(w)?,
-            )?)),
-        );
-        out.insert(
-            "recent".into(),
-            objs(crate::decision_text::all(
-                r.decisions_recent(w, now_ms() - 7 * 24 * 3_600_000)?,
-            )),
-        );
-        let (bots, all) = super::bots_out(r, w)?;
-        out.insert("bots".into(), objs(bots));
-        out.insert("allBots".into(), Value::Array(all));
-        let mut projects = r.projects_list(w)?;
-        for p in &mut projects {
-            steve_store::seeded::show(p, steve_store::seeded::PROJECT);
-        }
-        out.insert("projects".into(), objs(projects));
-        out.insert("tags".into(), objs(r.tags_list(w)?));
-        out.insert("tagUses".into(), Value::Object(r.tag_uses(w)?));
-        out.insert("thread".into(), objs(crate::notify::thread(r, w)?));
-        out.insert("thinking".into(), json!(thinking));
-        out.insert(
-            "notifications".into(),
-            Value::Array(crate::notify::list(r, w, 100)?),
-        );
-        out.insert("notifySeen".into(), seen);
-        let mut settings = crate::settings::defaults();
-        settings.extend(r.settings_all(w)?);
-        out.insert("settings".into(), Value::Object(settings));
-        out.insert(
-            "sessions".into(),
-            objs(super::sessions_out(r, domain.as_ref(), w)?),
-        );
-        let t_sessions = t0.elapsed();
-        out.insert("hold".into(), hold);
-        out.insert(
-            "devices".into(),
-            objs(device_facts(r.devices_list()?, owner, local, connected)),
-        );
-        out.insert("runtimes".into(), runtimes);
-        tracing::debug!(
-            "state: items {:?}, through sessions {:?}, all {:?}",
-            t_items,
-            t_sessions,
-            t0.elapsed()
-        );
-        Ok(Value::Object(out))
-    })
-    .await
+    }
 }
 
 /// Open cards an agent opened from inside its turn (a question, an approval, a delivery) get

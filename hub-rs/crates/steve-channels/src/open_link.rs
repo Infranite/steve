@@ -1,0 +1,240 @@
+//! Links that open a chat, or one of its messages, in its platform's own client (“在飞书中打开”):
+//! `open_url` on spaces, conversations, chat messages and the decisions about a chat message.
+//!
+//! A platform declares its links once ([`PlatformLinks`], listed in [`PLATFORMS`]); the Hub asks
+//! for them per space through the connections that see it, so another platform adds its own here
+//! without touching the callers. Which platform a connection reaches: the platform whose own adapter
+//! it is, else the one its channel service named (`config.platform`, ext_ws protocol §16). The
+//! connections are asked native ones first (they know the tenant's brand), then the space's voice,
+//! the connection it was first seen through and every other identity that sees it.
+//!
+//! A message gets its platform's link to that one message when it carries a provider id and the
+//! platform has such a link ([`PlatformLinks::message`]); otherwise its chat's link. Messages stored
+//! without a provider id (`fp:…`, [`crate::fallback`]) always link to the chat.
+
+use std::collections::HashMap;
+
+use rusqlite::{Connection, OptionalExtension, params};
+use serde_json::Value;
+use steve_store::base::Viewer;
+
+use crate::ChannelResult;
+use crate::spaces::{self, SpaceRow};
+
+/// `connections.config` key a channel service's platform is stored under (ext_ws protocol §16).
+pub const PLATFORM_KEY: &str = "platform";
+
+/// A messaging platform's links into its own client.
+pub trait PlatformLinks: Sync {
+    /// The platform: a provider id (`feishu`), as a channel service names it.
+    fn id(&self) -> &'static str;
+    /// Whether `adapter` (`connections.adapter`) is one of the platform's own adapters.
+    fn native(&self, adapter: &str) -> bool;
+    /// The link that opens chat `chat_id` (the space's external id) in the client, for a connection
+    /// with this `config`; `None` when the id is not one the client opens.
+    fn chat(&self, config: &Value, chat_id: &str) -> Option<String>;
+    /// The link to message `message_id` (a provider id) in chat `chat_id`; `None` when the platform
+    /// has no link to one message (the chat's link is used instead).
+    fn message(&self, _config: &Value, _chat_id: &str, _message_id: &str) -> Option<String> {
+        None
+    }
+}
+
+/// Every platform with links.
+pub static PLATFORMS: &[&dyn PlatformLinks] = &[&crate::adapters::feishu::links::FEISHU];
+
+/// The platform of a connection: the one whose adapter it is, else the one its service named.
+pub fn platform_of(adapter: &str, config: &Value) -> Option<&'static dyn PlatformLinks> {
+    PLATFORMS
+        .iter()
+        .find(|p| p.native(adapter))
+        .or_else(|| {
+            let named = config.get(PLATFORM_KEY).and_then(Value::as_str)?;
+            PLATFORMS.iter().find(|p| p.id() == named)
+        })
+        .copied()
+}
+
+/// How a space's links are made: its platform and the connection config that decides them.
+pub struct Route {
+    pub links: &'static dyn PlatformLinks,
+    pub config: Value,
+    pub chat_id: String,
+}
+
+impl Route {
+    pub fn chat(&self) -> Option<String> {
+        self.links.chat(&self.config, &self.chat_id)
+    }
+
+    /// The link to a message with provider id `ext` (`None` or a Hub-made id: the chat's link).
+    pub fn message(&self, ext: Option<&str>) -> Option<String> {
+        crate::fallback::platform(ext.map(str::to_string))
+            .and_then(|id| self.links.message(&self.config, &self.chat_id, &id))
+            .or_else(|| self.chat())
+    }
+}
+
+/// The route of a space, `None` when no connection that sees it reaches a platform with links.
+pub fn route(c: &Connection, s: &SpaceRow) -> ChannelResult<Option<Route>> {
+    if s.external_id.trim().is_empty() {
+        return Ok(None);
+    }
+    let mut st = c.prepare_cached(
+        "SELECT cn.adapter, cn.config FROM connections cn
+          WHERE cn.workspace_id = ?4 AND cn.id IN (
+            SELECT ?2 UNION SELECT ?3
+            UNION SELECT connection_id FROM space_identities WHERE space_id = ?1 AND left_at IS NULL)
+          ORDER BY cn.id = ?2 DESC, cn.id = ?3 DESC, cn.id",
+    )?;
+    let rows = st
+        .query_map(params![s.id, s.connection_id, s.via, s.workspace_id], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut found: Vec<(bool, &'static dyn PlatformLinks, Value)> = Vec::new();
+    for (adapter, config) in rows {
+        let config: Value = config
+            .and_then(|x| serde_json::from_str(&x).ok())
+            .unwrap_or(Value::Null);
+        if let Some(p) = platform_of(&adapter, &config) {
+            found.push((p.native(&adapter), p, config));
+        }
+    }
+    // a native connection first: it knows its tenant's brand; else in the order above
+    found.sort_by_key(|(native, ..)| !native);
+    Ok(found.into_iter().next().map(|(_, links, config)| Route {
+        links,
+        config,
+        chat_id: s.external_id.clone(),
+    }))
+}
+
+/// The link that opens space `s` in its platform's client.
+pub fn space_url(c: &Connection, s: &SpaceRow) -> ChannelResult<Option<String>> {
+    Ok(route(c, s)?.and_then(|r| r.chat()))
+}
+
+/// The link of chat message `id` (its own where the platform has one, else its chat's).
+pub fn message_url(c: &Connection, id: &str) -> ChannelResult<Option<String>> {
+    let m: Option<(String, Option<String>)> = c
+        .query_row(
+            "SELECT space_id, external_id FROM chan_messages WHERE id = ?",
+            [id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    let Some((space, ext)) = m else {
+        return Ok(None);
+    };
+    let Some(s) = spaces::get(c, &space)? else {
+        return Ok(None);
+    };
+    Ok(route(c, &s)?.and_then(|r| r.message(ext.as_deref())))
+}
+
+/// The links of chat messages `ids` (the subjects of `chan_message` decisions) whose spaces
+/// `viewer` sees, by message id; messages without a link are absent.
+pub fn message_urls(
+    c: &Connection,
+    viewer: &Viewer,
+    ids: &[String],
+) -> ChannelResult<HashMap<String, String>> {
+    let mut routes: HashMap<String, Option<Route>> = HashMap::new();
+    let mut out = HashMap::new();
+    for id in ids {
+        let m: Option<(String, Option<String>)> = c
+            .query_row(
+                "SELECT space_id, external_id FROM chan_messages WHERE id = ? AND workspace_id = ?",
+                params![id, viewer.ws],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        let Some((space, ext)) = m else { continue };
+        if !routes.contains_key(&space) {
+            let r = match spaces::get(c, &space)? {
+                Some(s) if spaces::visible(c, viewer, &space)? => route(c, &s)?,
+                _ => None,
+            };
+            routes.insert(space.clone(), r);
+        }
+        if let Some(url) = routes[&space]
+            .as_ref()
+            .and_then(|r| r.message(ext.as_deref()))
+        {
+            out.insert(id.clone(), url);
+        }
+    }
+    Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    /// A platform with links to single messages, to see that a message gets its own.
+    struct Threads;
+    impl PlatformLinks for Threads {
+        fn id(&self) -> &'static str {
+            "threads"
+        }
+        fn native(&self, _: &str) -> bool {
+            false
+        }
+        fn chat(&self, _: &Value, chat: &str) -> Option<String> {
+            Some(format!("threads://chat/{chat}"))
+        }
+        fn message(&self, _: &Value, chat: &str, msg: &str) -> Option<String> {
+            Some(format!("threads://chat/{chat}/{msg}"))
+        }
+    }
+    static THREADS: Threads = Threads;
+
+    #[test]
+    fn a_connection_reaches_its_adapters_platform_or_the_one_its_service_names() {
+        let id = |a: &str, c: Value| platform_of(a, &c).map(|p| p.id());
+        assert_eq!(id("feishu_app", json!({})), Some("feishu"));
+        assert_eq!(id("feishu_user", Value::Null), Some("feishu"));
+        assert_eq!(id("ext_ws", json!({"platform": "feishu"})), Some("feishu"));
+        assert_eq!(
+            id("ext_ws.bot", json!({"platform": "feishu"})),
+            Some("feishu")
+        );
+        assert_eq!(id("ext_ws", json!({})), None);
+        assert_eq!(id("ext_ws", json!({"platform": "slack"})), None);
+        assert_eq!(id("ext_ws", json!({"platform": 3})), None);
+        assert_eq!(id("mail", json!({})), None);
+    }
+
+    #[test]
+    fn a_message_links_to_itself_where_it_can_else_to_its_chat() {
+        let feishu = Route {
+            links: &crate::adapters::feishu::links::FEISHU,
+            config: json!({"domain": "lark"}),
+            chat_id: "oc_1".into(),
+        };
+        let chat = "https://applink.larksuite.com/client/chat/open?openChatId=oc_1";
+        assert_eq!(feishu.message(Some("om_1")).as_deref(), Some(chat));
+        assert_eq!(feishu.message(None).as_deref(), Some(chat));
+        let threads = Route {
+            links: &THREADS,
+            config: Value::Null,
+            chat_id: "c".into(),
+        };
+        assert_eq!(
+            threads.message(Some("m")).as_deref(),
+            Some("threads://chat/c/m")
+        );
+        // a Hub-made id never leaves the Hub
+        assert_eq!(
+            threads.message(Some("fp:v1:x:1:0")).as_deref(),
+            Some("threads://chat/c")
+        );
+        assert_eq!(
+            threads.message(Some("")).as_deref(),
+            Some("threads://chat/c")
+        );
+    }
+}
