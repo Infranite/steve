@@ -3,7 +3,7 @@
 //! an existing item. The count of corrections is the router's error rate (`route_log.override`).
 
 use super::offer::{Handled, ThreadItem, not_found};
-use super::research::{Inline, InlineJob, QUEUE_FULL};
+use super::research::{Inline, InlineJob, QUEUE_FULL, SYSTEM};
 use super::{Promotion, lock, meta_of, route_step};
 use crate::Core;
 use crate::error::{CoreError, Result};
@@ -226,7 +226,7 @@ impl Core {
                 &om.space,
                 QUEUE_FULL,
                 None,
-                Some(&json!({"origin": om.id, "reply_to": reply_to})),
+                Some(&json!({"origin": om.id, "reply_to": reply_to, SYSTEM: true})),
             )?;
             return Ok(Handled {
                 message_id: id,

@@ -12,9 +12,14 @@
 //! - the inline answer is composed by the channel composer (persona, safety rules, knowledge by
 //!   disclosure level: [`Channels::conv_answer`]), research gets the same frame
 //!   ([`Channels::conv_research_context`]);
-//! - in a space with outside members (or for your own account, which only drafts) research and items
-//!   are off: Steve answers in place, and what would have been an item is offered to you in the
-//!   conversation instead;
+//! - in a space with outside members research and items are off: Steve answers in place, and what
+//!   would have been an item is offered to you in the conversation instead;
+//! - on your own account only the composer speaks as you. A message there never reaches the router
+//!   (C4's composer decides reply, skip or ask); only your own `/bot` does, and of what the
+//!   conversation says about it only the composer's answer to that turn goes back to the space —
+//!   kept on the turn (`meta.chan_gen`, [`Composed`]), said exactly as written, always as a draft
+//!   for your approval. The router's questions and suggestions, research, receipts and the thread's
+//!   own state (queue full, stop, error: [`system_text`]) stay in the conversation;
 //! - configuration changes, `#ST-n`, “送到事项” and `/汇报` never come from a chat (steve-core treats
 //!   a `chan:` conversation as a guest's).
 //!
@@ -22,10 +27,6 @@
 //! sent by hand through the same outbound checks); the suggestion cards and offers in them are yours
 //! to click. The list ([`list_page`]) has every space with something to show, a turn or a channel
 //! message the viewer may see; the chat's whole record is [`crate::conv_record`]'s.
-
-use std::collections::HashMap;
-use std::sync::Mutex;
-use std::time::{Duration, Instant};
 
 use rusqlite::{OptionalExtension, params};
 use serde_json::{Map, Value, json};
@@ -94,6 +95,8 @@ pub const FAILURE_NOTE: &str = "抱歉，这次没能答上来，我请 {} 来�
 pub const NO_REPLY: &str = "不需要回复：";
 /// Ahead of a question's options when they are said in the space ([`said_text`]).
 pub const OPTIONS_HEAD: &str = "（可以回复：";
+/// What a message whose answer was only the thread's own state (its queue full) says on its event.
+pub const NOT_ANSWERED: &str = "没有回答，转给你";
 
 /// Only the user whose view connection `conn` speaks with reads `space`: their private chat with Steve.
 pub fn owner_only(
@@ -161,45 +164,42 @@ pub trait Thread: Send + Sync {
     fn say(&self, ws: &str, turn: Turn) -> Result<String, String>;
 }
 
-/// How long a generated reply waits for its delivery before it is forgotten.
-const GENERATION_TTL: Duration = Duration::from_secs(30 * 60);
-/// At most this many are kept; the oldest go first.
-const GENERATIONS_MAX: usize = 500;
+/// `meta` key of a conversation turn that keeps the composer's answer to it ([`Composed`]).
+pub const CHAN_GEN: &str = "chan_gen";
 
-/// Generated replies waiting to be delivered, by the conversation message they answer.
-#[derive(Default)]
-pub struct Generations(Mutex<HashMap<String, (Instant, Generation)>>);
+/// What the composer answered a conversation turn with, kept on the turn (`meta.chan_gen`, written by
+/// [`Channels::conv_answer`]) until what Steve says back is delivered: its [`Generation`] (outcome,
+/// needs_approval, reason, model, the knowledge it used) and the exact text it handed to the
+/// conversation. A Steve message of that turn is the composer's only when it says exactly that
+/// text; anything else in the conversation (the router's questions and suggestions, research,
+/// receipts, system texts) is not, and never speaks as you ([`Channels::conv_deliver`]).
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
+pub struct Composed {
+    #[serde(flatten)]
+    pub generation: Generation,
+    pub text: String,
+}
 
-impl Generations {
-    fn put(&self, origin: &str, g: Generation) {
-        self.put_at(origin, g, Instant::now());
+impl Composed {
+    /// The composer's answer kept on turn `m`, if any.
+    pub fn of(m: &steve_store::Message) -> Option<Self> {
+        let v = m.meta.get(CHAN_GEN)?;
+        serde_json::from_value(v.clone()).ok()
     }
 
-    /// Forgets expired ones and then the oldest over the cap, never all of them at once: a
-    /// missing generation lets its reply skip the skip and approval checks.
-    fn put_at(&self, origin: &str, g: Generation, now: Instant) {
-        let mut m = self.0.lock().unwrap_or_else(|e| e.into_inner());
-        m.retain(|_, (t, _)| now.saturating_duration_since(*t) < GENERATION_TTL);
-        while m.len() >= GENERATIONS_MAX {
-            let Some(oldest) = m
-                .iter()
-                .min_by_key(|(_, (t, _))| *t)
-                .map(|(k, _)| k.clone())
-            else {
-                break;
-            };
-            m.remove(&oldest);
-        }
-        m.insert(origin.into(), (now, g));
+    /// It answered with exactly what Steve's message `text` says.
+    fn says(&self, text: &str) -> bool {
+        self.text.trim() == text.trim()
     }
+}
 
-    fn take(&self, origin: &str) -> Option<Generation> {
-        self.0
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .remove(origin)
-            .map(|(_, g)| g)
-    }
+/// A conversation message Steve's thread wrote about itself rather than as an answer: the queue
+/// being full (`meta.system`, steve-core's `QUEUE_FULL`), a stop (`stopped`), an error (`error`).
+/// Never said in the space.
+pub fn system_text(meta: &Value) -> bool {
+    ["system", "stopped", "error"]
+        .iter()
+        .any(|k| meta.get(*k).is_some_and(|v| v == true))
 }
 
 /// `meta.chan` of a turn: what the conversation and its delivery need to know about the source.
@@ -236,6 +236,12 @@ impl Channels {
         let Some(thread) = self.thread().cloned() else {
             return Ok(None);
         };
+        // drafts as you come from the composer alone (C4 decides reply, skip or ask): the router's
+        // questions, suggestions and queue never become something you say. Only your own `/bot` on
+        // your account goes to the conversation, and only the composer's answer to it is said.
+        if plan.mode == Mode::Own && !command {
+            return Ok(None);
+        }
         let has_external = self.store().reader(|c| -> ChannelResult<bool> {
             Ok(spaces::get(c, &plan.space_id)?.is_some_and(|s| s.has_external))
         })?;
@@ -338,8 +344,13 @@ impl Channels {
         Ok(Some(id))
     }
 
-    /// The source of a conversation turn: the turn's `meta.chan` and the plan for its inbound message.
-    fn turn_source(&self, ws: &str, origin: &str) -> ChannelResult<Option<(Value, Plan)>> {
+    /// The source of a conversation turn: the turn's `meta.chan`, the plan for its inbound message
+    /// and what the composer answered it with.
+    fn turn_source(
+        &self,
+        ws: &str,
+        origin: &str,
+    ) -> ChannelResult<Option<(Value, Plan, Option<Composed>)>> {
         let Some(m) = self.store().messages().get(origin)? else {
             return Ok(None);
         };
@@ -364,14 +375,14 @@ impl Channels {
                 plan.mode = Mode::Own;
             }
         }
-        Ok(Some((chan, plan)))
+        Ok(Some((chan, plan, Composed::of(&m))))
     }
 
     /// The inline answer of a conversation turn (steve-core calls it instead of its own chat
     /// answer): the channel composer, so the persona, the safety rules and the knowledge by
     /// disclosure level hold. Your `/bot` command is the instruction.
     pub async fn conv_answer(&self, ws: &str, origin: &str) -> Result<String, String> {
-        let (_, plan) = self
+        let (_, plan, _) = self
             .turn_source(ws, origin)
             .map_err(|e| e.to_string())?
             .ok_or_else(|| "这条消息不是渠道消息".to_string())?;
@@ -399,8 +410,31 @@ impl Channels {
             Outcome::Skip => format!("{NO_REPLY}{}", r.text.trim()),
             Outcome::NeedContext => r.text.clone(),
         };
-        self.generations().put(origin, r.generation);
+        self.keep_composed(
+            ws,
+            origin,
+            &Composed {
+                generation: r.generation,
+                text: text.clone(),
+            },
+        )
+        .map_err(|e| e.to_string())?;
         Ok(text)
+    }
+
+    /// Keeps the composer's answer on its turn (`meta.chan_gen`), in one statement so a concurrent
+    /// change of the turn's other meta is not lost. Fails the answer when it cannot be kept: an
+    /// answer without it would never be said.
+    fn keep_composed(&self, ws: &str, origin: &str, c: &Composed) -> ChannelResult<()> {
+        let v = serde_json::to_string(c).map_err(steve_modules::ApiError::from)?;
+        self.store().transaction(|tx| -> ChannelResult<()> {
+            tx.execute(
+                "UPDATE messages SET meta = json_set(CASE WHEN json_valid(meta) THEN meta ELSE '{}' END, '$.chan_gen', json(?))
+                  WHERE id = ? AND workspace_id = ?",
+                params![v, origin, ws],
+            )?;
+            Ok(())
+        })
     }
 
     /// What research in a conversation is told about where its answer goes.
@@ -492,19 +526,26 @@ impl Channels {
         {
             return self.conv_disconnected(&m, origin).await;
         }
-        let Some((chan, plan)) = self.turn_source(ws, origin)? else {
+        let Some((chan, plan, composed)) = self.turn_source(ws, origin)? else {
             return Ok(None);
         };
         let command = chan["command"] == true;
-        let generation = self.generations().take(origin);
+        // the composer's answer to this turn, when this message is it
+        let composed = composed.filter(|c| c.says(&m.text));
+        let system = system_text(&m.meta);
         // only a reply is said in the space: a question to you goes to your inbox, a skip nowhere
-        if let Some(g) = generation.as_ref().filter(|g| g.outcome != Outcome::Reply) {
+        if !system
+            && let Some(c) = composed
+                .as_ref()
+                .filter(|c| c.generation.outcome != Outcome::Reply)
+        {
             self.react_finish(&plan.message_id, Finish::Clear).await;
             // the message's event says what became of it (the rules' mark ran before the answer)
-            let (q, why) = (m.text.clone(), g.why.clone());
+            let (q, why) = (c.text.clone(), c.generation.why.clone());
+            let asks = c.generation.outcome == Outcome::AskOwner;
             self.store().transaction(|tx| -> ChannelResult<()> {
                 use crate::respond::{TRAIL_COMPOSER, note_message_event, trail};
-                if g.outcome == Outcome::AskOwner {
+                if asks {
                     let d = crate::respond::open_handoff_asking(tx, &plan, Some(&q))?;
                     note_message_event(
                         tx,
@@ -563,25 +604,69 @@ impl Channels {
             }
             return Ok(None);
         }
-        // an item made from the turn: linked to the message (back to the source when it ends)
-        let (text, purpose) = match &m.item_id {
-            Some(item) => {
-                self.link_item(ws, &plan, item)?;
-                (crate::replies::item_ack(item), Purpose::Item)
+        if system {
+            // the thread's own state (its queue is full): never said; a message from somebody else
+            // reaches you as a handoff instead of going unanswered
+            self.react_finish(&plan.message_id, Finish::Clear).await;
+            if !command {
+                self.store().transaction(|tx| -> ChannelResult<()> {
+                    let d = crate::respond::open_handoff(tx, &plan)?;
+                    crate::respond::note_message_event(
+                        tx,
+                        &plan.message_id,
+                        "need",
+                        NOT_ANSWERED,
+                        crate::respond::TRAIL_RULES,
+                        Some(&d),
+                    )
+                })?;
             }
-            None => (said_text(&m.text, &m.meta), Purpose::Reply),
+            return Ok(None);
+        }
+        let as_you = plan.mode == Mode::Own;
+        // an item made from the turn: linked to the message (back to the source when it ends)
+        if let Some(item) = &m.item_id {
+            self.link_item(ws, &plan, item)?;
+            if as_you {
+                // “收到，已记为 …” is Steve's receipt, never said as you; the item is yours in Steve
+                return Ok(None);
+            }
+        }
+        let (text, purpose, generation) = match (&m.item_id, as_you) {
+            (Some(item), _) => (crate::replies::item_ack(item), Purpose::Item, None),
+            // as you: only the composer's reply, exactly as it wrote it (no options spelled out)
+            (None, true) => match composed {
+                Some(c) => (
+                    c.text.trim().to_string(),
+                    if command {
+                        Purpose::Trigger
+                    } else {
+                        Purpose::Reply
+                    },
+                    Some(c.generation),
+                ),
+                None => {
+                    tracing::info!(
+                        message = m.id,
+                        space = plan.space_id,
+                        "not said as you: not the composer's reply to the turn"
+                    );
+                    self.react_finish(&plan.message_id, Finish::Clear).await;
+                    return Ok(None);
+                }
+            },
+            (None, false) => (
+                said_text(&m.text, &m.meta),
+                Purpose::Reply,
+                composed.map(|c| c.generation),
+            ),
         };
         if text.trim().is_empty() {
             return Ok(None);
         }
-        let as_you = plan.mode == Mode::Own;
-        let purpose = if command && as_you && purpose == Purpose::Reply {
-            Purpose::Trigger
-        } else {
-            purpose
-        };
-        let approve = plan.act == Act::Draft
-            || (as_you && !command)
+        // as you, it always waits for you (your `/bot` too)
+        let approve = as_you
+            || plan.act == Act::Draft
             || generation.as_ref().is_some_and(|g| g.needs_approval);
         let auth = if command && as_you {
             Auth::Trigger {
@@ -631,14 +716,21 @@ impl Channels {
         m: &steve_store::Message,
         origin: &str,
     ) -> ChannelResult<Option<Delivered>> {
-        let generation = self.generations().take(origin);
-        let said = !m.meta.get("stopped").is_some_and(|v| v == true)
-            && generation.is_none_or(|g| g.outcome == Outcome::Reply);
-        let source = self
-            .store()
-            .messages()
-            .get(origin)?
-            .and_then(|o| o.meta["chan"]["message"].as_str().map(str::to_string));
+        let turn = self.store().messages().get(origin)?;
+        let composed = turn
+            .as_ref()
+            .and_then(Composed::of)
+            .filter(|c| c.says(&m.text));
+        let as_you = turn
+            .as_ref()
+            .is_some_and(|o| o.meta["chan"]["mode"] == Mode::Own.code());
+        // what would have been said (as you: only the composer's reply)
+        let said = !system_text(&m.meta)
+            && match &composed {
+                Some(c) => c.generation.outcome == Outcome::Reply,
+                None => !as_you,
+            };
+        let source = turn.and_then(|o| o.meta["chan"]["message"].as_str().map(str::to_string));
         if let Some(cm) = &source {
             self.react_finish(cm, if said { Finish::Failed } else { Finish::Clear })
                 .await;
@@ -721,8 +813,10 @@ impl Channels {
     /// conversation port's routing) in the space's conversation, so the conversation still has it:
     /// the inbound turn and what Steve said. An item made from it flows back there like one made in
     /// web chat. Best-effort.
-    pub(crate) fn conv_note(&self, plan: &Plan, said: &str, item: Option<&str>) {
-        if let Err(e) = self.conv_note_inner(plan, said, item) {
+    /// `out`: the outbound message it became (a draft as you, a bot's reply), which the conversation
+    /// shows the state of.
+    pub(crate) fn conv_note(&self, plan: &Plan, said: &str, item: Option<&str>, out: Option<&str>) {
+        if let Err(e) = self.conv_note_inner(plan, said, item, out) {
             tracing::warn!(message = plan.message_id, "conversation note: {e}");
         }
     }
@@ -818,7 +912,13 @@ impl Channels {
         }
     }
 
-    fn conv_note_inner(&self, plan: &Plan, said: &str, item: Option<&str>) -> ChannelResult<()> {
+    fn conv_note_inner(
+        &self,
+        plan: &Plan,
+        said: &str,
+        item: Option<&str>,
+        out: Option<&str>,
+    ) -> ChannelResult<()> {
         let conv = conv_space(&plan.space_id);
         let meta = json!({ "chan": chan_meta(self, plan, plan.trigger.is_some())? });
         let msgs = self.store().messages();
@@ -831,7 +931,7 @@ impl Channels {
             "steve",
             said,
             item,
-            &json!({"origin": origin, "chan_out": {"status": "sent"}}),
+            &json!({"origin": origin, "chan_out": {"message": out, "status": "sent"}}),
             &conv,
         )?;
         if let Some(i) = item {
@@ -1116,6 +1216,12 @@ pub fn messages_of(
     ch.store().reader(|c| -> ChannelResult<()> {
         for m in msgs {
             let mut v = serde_json::to_value(&m).map_err(steve_modules::ApiError::from)?;
+            // the composer's answer as the page needs it: not the knowledge it was written with
+            if let Some(g) = v["meta"].get_mut(CHAN_GEN).and_then(Value::as_object_mut) {
+                g.retain(|k, _| {
+                    matches!(k.as_str(), "outcome" | "needs_approval" | "why" | "model")
+                });
+            }
             if let Some(cm) = m.meta["chan"]["message"].as_str() {
                 if let Some(r) = crate::reactions::get(c, cm)? {
                     v["reaction"] =
@@ -1178,8 +1284,9 @@ fn in_ws(c: &rusqlite::Connection, id: &str, ws: &str) -> bool {
     .unwrap_or(false)
 }
 
-/// What a conversation message says in the space: its text, with the choices of a suggestion card
-/// or a question spelled out (chats have no buttons).
+/// What a conversation message says in the space as a bot: its text, with the choices of a
+/// suggestion card or a question spelled out (chats have no buttons). Never as you: on your own
+/// account only the composer's text is said, as it wrote it.
 fn said_text(text: &str, meta: &Value) -> String {
     let mut t = text.trim().to_string();
     if let Some(cs) = meta["suggest"]["choices"].as_array() {
@@ -1218,37 +1325,5 @@ mod tests {
         let m = json!({"ask": {"options": ["前端", "后端"]}});
         assert_eq!(said_text("哪个？", &m), "哪个？\n（可以回复：前端 / 后端）");
         assert_eq!(said_text(" 好 ", &json!({})), "好");
-    }
-
-    #[test]
-    fn generations_expire_and_evict_the_oldest_not_all() {
-        let g = Generations::default();
-        let t0 = Instant::now();
-        let flagged = Generation {
-            needs_approval: true,
-            ..Default::default()
-        };
-        g.put_at("old", flagged.clone(), t0);
-        for i in 0..GENERATIONS_MAX {
-            g.put_at(
-                &format!("m{i}"),
-                Generation::default(),
-                t0 + Duration::from_millis(1 + i as u64),
-            );
-        }
-        // Over the cap: only the oldest went, the pending ones stayed.
-        assert_eq!(g.take("old"), None);
-        assert_eq!(g.take("m0"), Some(Generation::default()));
-        g.put_at("keep", flagged.clone(), t0 + Duration::from_secs(1));
-        assert!(g.0.lock().unwrap().len() <= GENERATIONS_MAX);
-        assert_eq!(g.take("keep"), Some(flagged.clone()));
-        // After the TTL a new put forgets the stale ones.
-        g.put_at(
-            "late",
-            flagged.clone(),
-            t0 + GENERATION_TTL + Duration::from_secs(5),
-        );
-        assert_eq!(g.take("m1"), None);
-        assert_eq!(g.take("late"), Some(flagged));
     }
 }

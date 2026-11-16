@@ -14,7 +14,7 @@ use std::collections::{HashMap, HashSet};
 
 use rusqlite::types::Value as Sql;
 use rusqlite::{Connection, params};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use steve_store::base::mems;
 use steve_store::base::{Level, ObjRef, Viewer, Visibility, bind};
@@ -91,8 +91,9 @@ impl<'a> Query<'a> {
     }
 }
 
-/// One numbered result. Serializes as the API `Hit`.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+/// One numbered result. Serializes as the API `Hit`; read back (without `about`) where a
+/// reply's knowledge is kept until it is sent (the channel module's conversation turns).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Hit {
     pub n: usize,
     #[serde(rename = "type")]

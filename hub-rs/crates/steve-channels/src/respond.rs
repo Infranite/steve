@@ -416,7 +416,12 @@ impl Channels {
                     })?,
                     None => String::new(),
                 };
-                self.conv_note(plan, &said, a.item_id.as_deref());
+                self.conv_note(
+                    plan,
+                    &said,
+                    a.item_id.as_deref(),
+                    a.out_message_id.as_deref(),
+                );
                 r.decision_id = a.decision_id;
                 r.out_message_id = a.out_message_id;
                 r.item_id = a.item_id;

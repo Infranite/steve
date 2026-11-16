@@ -608,3 +608,75 @@ async fn an_answer_that_needs_tools_in_a_bots_chat_is_not_made_an_item() {
     let log = k.db().store().thread().route_of(&mid).unwrap().unwrap();
     assert_eq!(log.item_id, None);
 }
+
+/// The router's clarifying question (with options the chat would get spelled out) is never put to a
+/// guest conversation: the host answers in its own words instead.
+#[tokio::test]
+async fn a_guest_never_gets_the_routers_question() {
+    let k = Kit::new();
+    let host = Arc::new(Host::default());
+    assert!(k.core.set_conv_host(host.clone()));
+    router(&k, Arc::new(Mutex::new(vec![])), |_| {
+        json!({"kind": "ask", "confidence": 0.9, "signals": ["question"], "title": "", "goal": "",
+               "bot": "steve", "reply": "你说的“很稳定”具体是指什么？", "options": ["产品", "服务"]})
+    });
+    let a = turn(&k, "但是真的很稳定", guest(true, true));
+    let ms = settle(&k, SPACE, 2).await;
+    assert_eq!(ms[1].text, "以值班小运的身份回答");
+    assert_eq!(ms[1].meta["origin"], json!(a));
+    assert!(ms[1].meta.get("ask").is_none(), "{:?}", ms[1].meta);
+    assert_eq!(*host.answered.lock().unwrap(), std::slice::from_ref(&a));
+}
+
+/// A host whose answers wait until released.
+#[derive(Default)]
+struct SlowHost {
+    go: tokio::sync::Notify,
+}
+
+#[async_trait::async_trait]
+impl ConvHost for SlowHost {
+    async fn answer(&self, _ws: &str, _space: &str, _origin: &str) -> Result<String, String> {
+        self.go.notified().await;
+        Ok("答".into())
+    }
+    fn research_context(&self, _ws: &str, _space: &str, _origin: &str) -> String {
+        String::new()
+    }
+    fn said(&self, _ws: &str, _space: &str, _id: &str) {}
+}
+
+/// The queue's “前面还有 3 个问题在排队…” is the thread's own state: marked as a system text, which a
+/// guest conversation's host never says in the chat.
+#[tokio::test]
+async fn a_full_queue_is_marked_as_a_system_text() {
+    let k = Kit::new();
+    let host = Arc::new(SlowHost::default());
+    assert!(k.core.set_conv_host(host.clone()));
+    router(
+        &k,
+        Arc::new(Mutex::new(vec![])),
+        |_| json!({"kind": "answer", "confidence": 0.9, "signals": ["question"], "title": "", "goal": "", "bot": "steve"}),
+    );
+    // one answering, MAX_WAITING waiting: the next turn of the conversation finds the queue full
+    for i in 0..=crate::thread::research::MAX_WAITING + 1 {
+        turn(&k, &format!("在吗 {i}"), guest(true, true));
+    }
+    let mut full = None;
+    for _ in 0..1000 {
+        full = k
+            .db()
+            .messages_in(WS, SPACE, 200)
+            .unwrap()
+            .into_iter()
+            .find(|m| m.author == "steve");
+        if full.is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let m = full.expect("the queue filled up");
+    assert_eq!(m.text, crate::thread::research::QUEUE_FULL);
+    assert_eq!(m.meta[crate::thread::research::SYSTEM], json!(true));
+    host.go.notify_waiters();
+}

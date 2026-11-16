@@ -6,9 +6,12 @@
 //! ([`Auth`]) and the outbound checks it.
 //!
 //! Trigger words: your own message starting with one of your words, where they work →
-//! the rest is the instruction; the reply is generated with the space's last 20 messages and goes
-//! out as you (`on_behalf=proxy`, “（由 Steve 代发）” when marked), unless the model says it
-//! needs approval (an outward promise, money, deleting) — then it is a draft.
+//! the rest is the instruction; the reply is generated with the space's last 20 messages and is a
+//! draft for your approval, like everything said as you (`on_behalf=proxy`, “（由 Steve 代发）”
+//! when marked, once approved).
+//!
+//! On your own account only the composer's reply speaks as you ([`crate::deliver::not_as_you`]):
+//! the item and handoff receipts are not said there.
 
 use std::sync::Arc;
 
@@ -332,7 +335,8 @@ impl Replies {
                 ch,
                 &OutRequest {
                     target,
-                    approve: r.generation.needs_approval,
+                    // as you: always your approval first
+                    approve: true,
                     text: r.text,
                     purpose: Purpose::Trigger,
                     generation: Some(r.generation),

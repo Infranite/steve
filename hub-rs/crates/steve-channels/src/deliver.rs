@@ -175,7 +175,9 @@ fn follows(s: &str, parts: &[&str]) -> bool {
 
 /// What the generator decided to do with a message (compose.rs `OUTPUT`). Only `Reply` is said in
 /// the space; `AskOwner` is a question to you in Steve's conversation, `Skip` nothing to say.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+/// Stored as its [`Outcome::code`].
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Outcome {
     #[default]
     Reply,
@@ -200,7 +202,8 @@ impl Outcome {
 }
 
 /// What the generator said about its text (empty for fixed texts).
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct Generation {
     /// Reply, ask you, or say nothing; only a reply goes out.
     pub outcome: Outcome,
@@ -279,6 +282,38 @@ impl Delivered {
     }
 }
 
+/// Why a message may not be said as you, on your own account (`None`: it may, as a draft or as its
+/// authorization allows). Only what the composer wrote as its reply to a message speaks as you: a
+/// [`Purpose::Reply`] or [`Purpose::Trigger`] needs the composer's [`Generation`] with
+/// [`Outcome::Reply`]; fixed receipts ([`Purpose::Item`], [`Purpose::HandoffAck`], [`Purpose::Done`])
+/// are never said as you (they name you in the third person and show item ids; the item and the
+/// handoff reach you in Steve). A flow's `reply_as` / `send_to_space` ([`Purpose::Flow`]) and an
+/// agent's or requester's update ([`Purpose::Source`]) are texts somebody asked for explicitly and
+/// stay drafts for your approval. Every [`Outbound`] checks this before anything else.
+pub fn not_as_you(mode: Mode, req: &OutRequest) -> Option<&'static str> {
+    if mode != Mode::Own {
+        return None;
+    }
+    match req.purpose {
+        Purpose::Item | Purpose::HandoffAck | Purpose::Done => Some(NOT_AS_YOU_RECEIPT),
+        Purpose::Reply | Purpose::Trigger => match &req.generation {
+            Some(g) if g.outcome == Outcome::Reply => None,
+            _ => Some(NOT_AS_YOU_UNCOMPOSED),
+        },
+        Purpose::Flow | Purpose::Source => None,
+    }
+}
+
+/// [`not_as_you`]: a fixed receipt.
+pub const NOT_AS_YOU_RECEIPT: &str = "本人账号不发 Steve 的固定回执";
+/// [`not_as_you`]: a text the composer did not write as its reply.
+pub const NOT_AS_YOU_UNCOMPOSED: &str = "不是起草器写的回复，不以你本人的名义发";
+
+/// On your own account a reply (and your `/bot`'s answer) always waits for your approval.
+pub fn must_approve(mode: Mode, req: &OutRequest) -> bool {
+    req.approve || (mode == Mode::Own && matches!(req.purpose, Purpose::Reply | Purpose::Trigger))
+}
+
 /// The outbound path (C6 implements it). Must authorize, check disclosure and audit before any
 /// adapter `send(`; C4 never calls an adapter itself.
 #[async_trait]
@@ -297,6 +332,10 @@ impl Outbound for DraftOnly {
         if req.purpose == Purpose::HandoffAck {
             return Ok(Delivered::Skipped);
         }
+        if let Some(why) = not_as_you(req.target.mode, req) {
+            tracing::info!(space = req.target.space_id, "not drafted: {why}");
+            return Ok(Delivered::Skipped);
+        }
         let now = ch.now();
         let (message_id, decision_id) = ch
             .store()
@@ -305,5 +344,95 @@ impl Outbound for DraftOnly {
             message_id,
             decision_id,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn req(purpose: Purpose, outcome: Option<Outcome>) -> OutRequest {
+        OutRequest {
+            target: OutTarget {
+                ws: "w".into(),
+                connection_id: "c".into(),
+                mode: Mode::Own,
+                space_id: "s".into(),
+                space_name: String::new(),
+                reply_to: None,
+                thread_key: None,
+                persona_id: None,
+                source_message_id: None,
+            },
+            text: "好".into(),
+            purpose,
+            approve: false,
+            generation: outcome.map(|outcome| Generation {
+                outcome,
+                ..Default::default()
+            }),
+            auth: Auth::None,
+        }
+    }
+
+    #[test]
+    fn only_the_composers_reply_speaks_as_you() {
+        use Purpose::*;
+        for p in [Reply, Trigger] {
+            assert_eq!(not_as_you(Mode::Own, &req(p, Some(Outcome::Reply))), None);
+            assert!(
+                must_approve(Mode::Own, &req(p, Some(Outcome::Reply))),
+                "{p:?}"
+            );
+            for o in [
+                None,
+                Some(Outcome::AskOwner),
+                Some(Outcome::Skip),
+                Some(Outcome::NeedContext),
+            ] {
+                assert_eq!(
+                    not_as_you(Mode::Own, &req(p, o.clone())),
+                    Some(NOT_AS_YOU_UNCOMPOSED),
+                    "{p:?} {o:?}"
+                );
+            }
+        }
+        for p in [Item, HandoffAck, Done] {
+            assert_eq!(
+                not_as_you(Mode::Own, &req(p, None)),
+                Some(NOT_AS_YOU_RECEIPT)
+            );
+        }
+        for p in [Flow, Source] {
+            assert_eq!(not_as_you(Mode::Own, &req(p, None)), None, "{p:?}");
+            assert!(
+                !must_approve(Mode::Own, &req(p, None)),
+                "{p:?}: the caller decides"
+            );
+        }
+        // a bot speaks for itself
+        for p in [Reply, Trigger, Item, HandoffAck, Done, Flow, Source] {
+            assert_eq!(not_as_you(Mode::Bot, &req(p, None)), None);
+            assert!(!must_approve(Mode::Bot, &req(p, None)));
+        }
+    }
+
+    #[test]
+    fn a_generation_reads_back_as_it_was_kept() {
+        let g = Generation {
+            outcome: Outcome::AskOwner,
+            needs_approval: true,
+            why: "要你定".into(),
+            model: "m".into(),
+            hits: Vec::new(),
+            anchors: vec!["mem:1".into()],
+        };
+        let v = serde_json::to_value(&g).unwrap();
+        assert_eq!(v["outcome"], "ask_owner");
+        assert_eq!(serde_json::from_value::<Generation>(v).unwrap(), g);
+        assert_eq!(
+            serde_json::from_value::<Generation>(serde_json::json!({"outcome": "reply"})).unwrap(),
+            Generation::default()
+        );
     }
 }

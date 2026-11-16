@@ -409,11 +409,12 @@ async fn reactions_are_best_effort() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_discarded_draft_takes_the_ack_off() {
     let h = setup(false).await;
-    // your own account in a DM nobody else is in: you speak, and your rules draft
+    // the bot's rules draft here
+    drafting_bot(&h);
     let i = push(
         &h,
-        &h.me.clone(),
-        msg("D_LI", "d1", "ulilei", "明天几点开会？", false, false),
+        &h.bot.clone(),
+        msg("C_OPS", "d1", "ulilei", "明天几点开会？", true, false),
     )
     .await;
     let r = i.response.unwrap();
@@ -433,6 +434,15 @@ async fn a_discarded_draft_takes_the_ack_off() {
     h.outbox.send_due(&h.ch).await;
     assert!(h.fake.reactions_on("d1").is_empty(), "{:?}", log(&h));
     assert_eq!(state(&h, &i.message_id), "cleared");
+}
+
+/// The bot's rules draft (for your approval) instead of replying.
+fn drafting_bot(h: &H) {
+    set_rules(
+        h,
+        &h.bot.clone(),
+        json!([{"when": {"kind": "mention_or_dm"}, "act": "draft"}]),
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1147,13 +1157,14 @@ fn undo(h: &H, id: &str) {
 #[tokio::test(flavor = "multi_thread")]
 async fn an_approved_draft_ends_done_or_failed_even_after_a_discard_was_undone() {
     let h = setup(false).await;
+    drafting_bot(&h);
     let draft = |id: &'static str| {
         let h = &h;
         async move {
             let i = push(
                 h,
-                &h.me.clone(),
-                msg("D_LI", id, "ulilei", "明天几点开会？", false, false),
+                &h.bot.clone(),
+                msg("C_OPS", id, "ulilei", "明天几点开会？", true, false),
             )
             .await;
             let r = i.response.clone().unwrap();
@@ -1202,10 +1213,11 @@ async fn an_approved_draft_ends_done_or_failed_even_after_a_discard_was_undone()
 #[tokio::test(flavor = "multi_thread")]
 async fn an_expired_approval_discards_the_draft() {
     let h = setup(false).await;
+    drafting_bot(&h);
     let i = push(
         &h,
-        &h.me.clone(),
-        msg("D_LI", "d1", "ulilei", "明天几点开会？", false, false),
+        &h.bot.clone(),
+        msg("C_OPS", "d1", "ulilei", "明天几点开会？", true, false),
     )
     .await;
     let r = i.response.unwrap();
@@ -2545,17 +2557,17 @@ async fn a_command_answered_in_your_web_conversation_shows_that_answer() {
     assert_eq!(handling(&h, &a.message_id)["state"], "answered");
 }
 
-/// The event of a message answered on your own account's conversation path says what became of
-/// it once the composer read it: respond() hands it to the conversation and writes nothing (the
-/// answer is not known yet), then `conv_deliver` records a skip with the composer's reason, or a
-/// question to you as `need` with the decision it opened. Nothing goes out to the space either way.
+/// The event of a message answered on the conversation path (a bot's) says what became of it once
+/// the composer read it: respond() hands it to the conversation and writes nothing (the answer is
+/// not known yet), then `conv_deliver` records a skip with the composer's reason, or a question to
+/// you as `need` with the decision it opened. Nothing goes out to the space either way.
 async fn conversation_trail(composed: &str, id: &str, text: &str) -> (H, String, Value) {
     let h = setup_answering(true, composed).await;
     let t = h.thread.clone().unwrap();
-    // a message on your account (the bot is not in this space): handed to the conversation
+    // a message to the bot: handed to the conversation
     let a = push(
         &h,
-        &h.me.clone(),
+        &h.bot.clone(),
         msg("C_OPS", id, "ulilei", text, true, false),
     )
     .await;
@@ -2669,5 +2681,291 @@ async fn a_question_on_the_conversation_path_marks_the_event_as_needing_you() {
             json!(""),
             opened
         )
+    );
+}
+
+// ---------------------------------------------------------------- owner voice: only the composer speaks as you
+
+/// `/bot` works for you everywhere on your account.
+fn bot_command_everywhere(h: &H) {
+    exec(
+        h,
+        "UPDATE channel_settings SET trigger = ? WHERE connection_id = ?",
+        &[
+            &json!({"on": true, "words": ["/bot"], "where": ["*"], "mark": true}).to_string(),
+            &h.me,
+        ],
+    );
+}
+
+/// Steve's message `text` about turn `origin` in the conversation of `space`, as steve-core's thread
+/// posts it (`meta` and the turn as its origin).
+fn steve_says(
+    h: &H,
+    space: &str,
+    origin: &str,
+    text: &str,
+    item: Option<&str>,
+    meta: Value,
+) -> String {
+    let mut meta = meta;
+    meta["origin"] = json!(origin);
+    h.env
+        .store()
+        .messages()
+        .add(
+            WS,
+            "steve",
+            text,
+            item,
+            &meta,
+            &conversations::conv_space(space),
+        )
+        .unwrap()
+}
+
+/// Everything drafted or sent in any space, oldest first.
+fn out_texts(h: &H) -> Vec<String> {
+    h.env
+        .store()
+        .with_conn(|c| {
+            let mut st = c.prepare(
+                "SELECT coalesce(text, '') FROM chan_messages WHERE direction = 'out' ORDER BY created, rowid",
+            )?;
+            let v = st
+                .query_map([], |r| r.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(v)
+        })
+        .expect("out")
+}
+
+/// On your account a message is the composer's alone: the router never sees it (no turn), the
+/// composer's reply is a draft for your approval, and nothing reacts as you on the sender's message.
+#[tokio::test(flavor = "multi_thread")]
+async fn on_your_account_a_message_never_reaches_the_router() {
+    let h = setup(true).await;
+    let t = h.thread.clone().unwrap();
+    let i = push(
+        &h,
+        &h.me.clone(),
+        msg("C_OPS", "v1", "ulilei", "@你 周四能上线吗", true, false),
+    )
+    .await;
+    let r = i.response.unwrap();
+    assert_eq!(r.label, "等你确认回复");
+    assert!(t.turns.lock().unwrap().is_empty(), "no turn for the router");
+    assert_eq!(out_texts(&h), ["先看部署日志，再按回滚手册处理。"]);
+    assert!(sent(&h).is_empty());
+    // the space's conversation still has the turn and the answer, shown as the draft it is
+    let page = conversations::messages_of(
+        &h.ch,
+        WS,
+        &Viewer::bare(WS, ME),
+        &conversations::conv_space(&i.space_id),
+    )
+    .expect("page");
+    let answer = page["messages"]
+        .as_array()
+        .unwrap()
+        .last()
+        .cloned()
+        .unwrap();
+    assert_eq!(answer["author"], json!("steve"));
+    assert_eq!(answer["meta"]["chan_out"]["status"], json!("draft"));
+    assert_eq!(answer["meta"]["chan_out"]["decision"], json!(r.decision_id));
+    h.ch.react_settled(&i.message_id).await;
+    assert!(h.fake.reactions_on("v1").is_empty(), "{:?}", log(&h));
+    assert_eq!(
+        one(
+            &h,
+            "SELECT count(*) FROM chan_reactions WHERE message_id = ?",
+            &[&i.message_id]
+        ),
+        json!(0),
+        "no reaction as you on somebody else's message"
+    );
+}
+
+/// Production drafted, as you, the router's “前面还有 3 个问题在排队…” and its clarifying question with
+/// the options spelled out (“（可以回复：A / B）”). Neither is the composer's reply to the turn, so
+/// neither becomes a draft: not the queue sentence marked as a system text, not an older one
+/// without the mark, not a question or a suggestion card, not an item's receipt. The composer's own
+/// answer to the same turn is drafted, exactly as it wrote it, and waits for you (your `/bot` too).
+#[tokio::test(flavor = "multi_thread")]
+async fn the_routers_queue_and_question_never_become_your_draft() {
+    let h = setup(true).await;
+    let t = h.thread.clone().unwrap();
+    bot_command_everywhere(&h);
+    let i = push(
+        &h,
+        &h.me.clone(),
+        msg("C_OPS", "v2", "upx", "/bot 跟他说周四可以", false, false),
+    )
+    .await;
+    assert_eq!(i.response.unwrap().label, "你的指令，交给对话回答");
+    let (turn, _) = t.turns.lock().unwrap().last().cloned().expect("a turn");
+    let space = i.space_id.clone();
+    for (text, item, meta) in [
+        (
+            steve_core::thread::research::QUEUE_FULL,
+            None,
+            json!({ steve_core::thread::research::SYSTEM: true }),
+        ),
+        (steve_core::thread::research::QUEUE_FULL, None, json!({})),
+        (
+            "你说的“很稳定”具体是指什么？",
+            None,
+            json!({"ask": {"options": ["指某个产品", "指某项服务"]}}),
+        ),
+        (
+            "要哪种？",
+            None,
+            json!({"suggest": {"choices": [{"id": "here", "label": "在这里出方案"}]}}),
+        ),
+        (
+            "好，停下了。要我换个方式就直接说。",
+            None,
+            json!({"stopped": true}),
+        ),
+        ("（出错了：超时）", None, json!({"error": true})),
+        ("建好了", Some("ST-9"), json!({})),
+    ] {
+        let id = steve_says(&h, &space, &turn, text, item, meta);
+        let d = h.ch.conv_deliver(WS, &id).await.unwrap();
+        assert_eq!(d, None, "{text}");
+    }
+    assert!(out_texts(&h).is_empty(), "{:?}", out_texts(&h));
+    assert!(sent(&h).is_empty());
+    assert_eq!(
+        one(
+            &h,
+            "SELECT work_item_id FROM chan_messages WHERE id = ?",
+            &[&i.message_id]
+        ),
+        json!("ST-9"),
+        "the item is still linked to your message"
+    );
+
+    // the composer's answer: kept on the turn, drafted as it wrote it (no options added), not sent
+    let said = h.ch.conv_answer(WS, &turn).await.expect("answer");
+    assert_eq!(
+        one(
+            &h,
+            "SELECT json_extract(meta, '$.chan_gen.outcome') FROM messages WHERE id = ?",
+            &[&turn]
+        ),
+        json!("reply")
+    );
+    let id = steve_says(
+        &h,
+        &space,
+        &turn,
+        &said,
+        None,
+        json!({"ask": {"options": ["A", "B"]}}),
+    );
+    let d = h.ch.conv_deliver(WS, &id).await.unwrap();
+    assert!(matches!(d, Some(Delivered::Drafted { .. })), "{d:?}");
+    assert_eq!(out_texts(&h), [said.clone()]);
+    assert!(!out_texts(&h)[0].contains(conversations::OPTIONS_HEAD));
+    assert!(sent(&h).is_empty(), "your /bot's answer waits for you");
+    // the page shows what the composer decided, not the knowledge it used
+    let page = conversations::messages_of(
+        &h.ch,
+        WS,
+        &Viewer::bare(WS, ME),
+        &conversations::conv_space(&space),
+    )
+    .expect("page");
+    let kept = page["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["id"] == json!(turn))
+        .map(|m| m["meta"][conversations::CHAN_GEN].clone())
+        .expect("the turn");
+    assert_eq!(kept["outcome"], json!("reply"));
+    assert!(
+        kept.get("hits").is_none() && kept.get("text").is_none(),
+        "{kept}"
+    );
+}
+
+/// On your account Steve's fixed receipts are never said as you: an item made from a message and a
+/// handoff to you say nothing in the space (they reach you in Steve).
+#[tokio::test(flavor = "multi_thread")]
+async fn on_your_account_no_receipt_is_said_as_you() {
+    let h = setup(false).await;
+    let me = h.me.clone();
+    set_rules(
+        &h,
+        &me,
+        json!([{"when": {"kind": "mention_or_dm"}, "act": "create_item", "mode": "start"}]),
+    );
+    let i = push(
+        &h,
+        &me,
+        msg(
+            "C_OPS",
+            "v3",
+            "ulilei",
+            "@你 告警脚本坏了，修一下",
+            true,
+            false,
+        ),
+    )
+    .await;
+    assert!(i.response.unwrap().item_id.is_some(), "the item is made");
+    set_rules(
+        &h,
+        &me,
+        json!([{"when": {"kind": "mention_or_dm"}, "act": "handoff"}]),
+    );
+    let j = push(
+        &h,
+        &me,
+        msg("C_OPS", "v4", "ulilei", "@你 这个你来定", true, false),
+    )
+    .await;
+    assert!(
+        j.response.unwrap().decision_id.is_some(),
+        "the handoff reaches you"
+    );
+    assert!(out_texts(&h).is_empty(), "{:?}", out_texts(&h));
+    assert!(sent(&h).is_empty());
+}
+
+/// A full queue is the thread's own state: never said, even by a bot; the message reaches you as a
+/// handoff instead of going unanswered.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_full_queue_is_never_said_and_reaches_you_instead() {
+    let h = setup(true).await;
+    let t = h.thread.clone().unwrap();
+    let i = push(
+        &h,
+        &h.bot.clone(),
+        msg("C_OPS", "q1", "ulilei", "部署挂了怎么办", true, false),
+    )
+    .await;
+    let (turn, _) = t.turns.lock().unwrap().last().cloned().expect("a turn");
+    let id = steve_says(
+        &h,
+        &i.space_id,
+        &turn,
+        steve_core::thread::research::QUEUE_FULL,
+        None,
+        json!({ steve_core::thread::research::SYSTEM: true }),
+    );
+    assert_eq!(h.ch.conv_deliver(WS, &id).await.unwrap(), None);
+    assert!(sent(&h).is_empty());
+    assert!(out_texts(&h).is_empty());
+    assert_eq!(
+        one(
+            &h,
+            "SELECT kind FROM decisions WHERE subject_id = ? AND status = 'open'",
+            &[&i.message_id]
+        ),
+        json!("ask")
     );
 }
