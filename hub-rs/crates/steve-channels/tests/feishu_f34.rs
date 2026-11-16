@@ -499,7 +499,7 @@ async fn member_and_chat_events_over_the_long_connection() {
             chat_status: "normal".into(),
         });
         for (u, n, tk) in [
-            (ids::OWNER, "李鹏翔", ids::TENANT_KEY),
+            (ids::OWNER, "林知远", ids::TENANT_KEY),
             (ids::ALICE, "王小丽", ids::TENANT_KEY),
             (ids::EXTERNAL_USER, "赵客户", ids::EXTERNAL_TENANT_KEY),
         ] {

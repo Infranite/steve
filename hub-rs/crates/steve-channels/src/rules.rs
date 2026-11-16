@@ -718,7 +718,7 @@ pub fn normal_where(list: Vec<String>) -> Vec<String> {
     }
 }
 
-/// The text after leading mentions (`@李鹏翔 /bot 测试` → `/bot 测试`). `names` are the message's
+/// The text after leading mentions (`@林知远 /bot 测试` → `/bot 测试`). `names` are the message's
 /// mention names, so a name with a space is taken whole; any other `@word` goes up to the next
 /// space.
 pub fn strip_leading_mentions<'a>(text: &'a str, names: &[String]) -> &'a str {
@@ -1035,8 +1035,11 @@ fn push_act(
 
 /// The handoff's reply.
 pub fn handoff_ack(owner: &str) -> String {
-    format!("我请 {owner} 来看。")
+    HANDOFF_ACK.replacen("{}", owner, 1)
 }
+
+/// [`handoff_ack`], `{}` for your name.
+pub const HANDOFF_ACK: &str = "我请 {} 来看。";
 
 // ---------------------------------------------------------------- to-flow (storage)
 
@@ -1341,13 +1344,13 @@ mod tests {
     #[test]
     fn trigger_after_leading_mentions() {
         let t = Trigger::from_value(&json!({"on": true, "words": ["/bot"], "where": ["*"]}));
-        let names = vec!["李鹏翔".to_string()];
+        let names = vec!["林知远".to_string()];
         assert_eq!(
-            t.instruction("s", true, "@李鹏翔 /bot 测试", &names),
+            t.instruction("s", true, "@林知远 /bot 测试", &names),
             Some("测试".into())
         );
         assert_eq!(
-            t.instruction("s", true, "@李鹏翔 /bot 测试", &[]),
+            t.instruction("s", true, "@林知远 /bot 测试", &[]),
             Some("测试".into()),
             "no mention names: up to the next space"
         );
@@ -1366,8 +1369,8 @@ mod tests {
             Some("好".into()),
             "an unreplaced mention key"
         );
-        assert_eq!(t.instruction("s", false, "@李鹏翔 请 /bot", &names), None);
-        assert_eq!(strip_leading_mentions("＠李鹏翔 /bot", &names), "/bot");
+        assert_eq!(t.instruction("s", false, "@林知远 请 /bot", &names), None);
+        assert_eq!(strip_leading_mentions("＠林知远 /bot", &names), "/bot");
         assert_eq!(strip_leading_mentions("@", &names), "");
     }
 

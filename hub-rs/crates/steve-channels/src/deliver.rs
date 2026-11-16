@@ -119,6 +119,60 @@ impl OutTarget {
     }
 }
 
+/// The fixed sentences Steve writes itself that may end up next to a reply, `{}` where a template
+/// takes a value: the composer's question when it still cannot place a message, its reason for not
+/// answering, the options added to a question, the item and hand-off acknowledgements, the failure
+/// note. None is ever the composer's reply to a message, so a reply drafted as you that contains one
+/// was not written by the composer for that message ([`system_text_in`]). The offline reply eval
+/// (`examples/reply_eval`) counts such drafts as leaks, together with the router's own sentences
+/// (`steve_core::thread::research::QUEUE_FULL`), which this crate cannot name.
+pub const SYSTEM_TEXTS: &[&str] = &[
+    crate::compose::UNCLEAR,
+    crate::conversations::NO_REPLY,
+    crate::conversations::OPTIONS_HEAD,
+    crate::conversations::FAILURE_NOTE,
+    crate::replies::ITEM_ACK,
+    crate::replies::PROPOSE_ACK,
+    crate::rules::HANDOFF_ACK,
+];
+
+/// A value in a [`SYSTEM_TEXTS`] template, in characters at most (a name, an item id).
+const TEMPLATE_VALUE_MAX: usize = 40;
+
+/// The first of `templates` that `text` contains: a fixed sentence as it is, a template with any
+/// value of up to [`TEMPLATE_VALUE_MAX`] characters (not across lines) where it has `{}`.
+pub fn system_text_in<'a>(text: &str, templates: &[&'a str]) -> Option<&'a str> {
+    templates
+        .iter()
+        .copied()
+        .find(|t| matches_template(text, t))
+}
+
+fn matches_template(text: &str, template: &str) -> bool {
+    let mut parts = template.split("{}");
+    let first = parts.next().unwrap_or_default();
+    let rest: Vec<&str> = parts.collect();
+    if rest.is_empty() {
+        return !first.is_empty() && text.contains(first);
+    }
+    text.match_indices(first)
+        .any(|(at, _)| follows(&text[at + first.len()..], &rest))
+}
+
+/// `parts` in order at the start of `s`, each after a value of at most [`TEMPLATE_VALUE_MAX`]
+/// characters on one line.
+fn follows(s: &str, parts: &[&str]) -> bool {
+    let Some((p, more)) = parts.split_first() else {
+        return true;
+    };
+    s.match_indices(p).any(|(i, _)| {
+        let value = &s[..i];
+        !value.contains('\n')
+            && value.chars().count() <= TEMPLATE_VALUE_MAX
+            && follows(&s[i + p.len()..], more)
+    })
+}
+
 /// What the generator decided to do with a message (compose.rs `OUTPUT`). Only `Reply` is said in
 /// the space; `AskOwner` is a question to you in Steve's conversation, `Skip` nothing to say.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]

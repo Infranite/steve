@@ -339,7 +339,7 @@ impl World {
             is_frozen: false,
         };
         w.users = vec![
-            user(ids::OWNER, "李鹏翔", "Owner", "负责人", &[ids::DEPT_ENG]),
+            user(ids::OWNER, "林知远", "Owner", "负责人", &[ids::DEPT_ENG]),
             User {
                 leader_open_id: Some(ids::OWNER.open_id.into()),
                 ..user(
@@ -437,7 +437,7 @@ impl World {
         };
         for c in [ids::GROUP_CHAT, ids::EXTERNAL_CHAT, ids::TOPIC_CHAT] {
             w.members
-                .push((c.into(), member(ids::OWNER, "李鹏翔", &tk)));
+                .push((c.into(), member(ids::OWNER, "林知远", &tk)));
             w.members
                 .push((c.into(), member(ids::ALICE, "王小丽", &tk)));
         }
@@ -450,9 +450,9 @@ impl World {
         w.members
             .push((ids::P2P_CHAT.into(), member(ids::ALICE, "王小丽", &tk)));
         for (c, u, n) in [
-            (ids::USER_P2P_CHAT, ids::OWNER, "李鹏翔"),
+            (ids::USER_P2P_CHAT, ids::OWNER, "林知远"),
             (ids::USER_P2P_CHAT, ids::BOB, "张伟"),
-            (ids::NO_BOT_GROUP, ids::OWNER, "李鹏翔"),
+            (ids::NO_BOT_GROUP, ids::OWNER, "林知远"),
             (ids::NO_BOT_GROUP, ids::ALICE, "王小丽"),
         ] {
             w.members.push((c.into(), member(u, n, &tk)));

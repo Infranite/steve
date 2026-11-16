@@ -7,12 +7,12 @@ const browser = await chromium.launch({ headless: true, ...(process.env.PLAYWRIG
 const base = process.env.STEVE_TEST_WEB || "http://127.0.0.1:5193"
 const shots = process.env.STEVE_TEST_SHOTS
 if (shots) mkdirSync(shots, { recursive: true })
-const badge = { space: "chan:sp1", space_id: "sp1", name: "地狱焚诀 Agent 交流群", kind: "group", dm: false, system: "feishu", provider: "飞书", has_external: false, member_count: 0, mode: "bot" }
+const badge = { space: "chan:sp1", space_id: "sp1", name: "示例 Agent 交流群", kind: "group", dm: false, system: "feishu", provider: "飞书", has_external: false, member_count: 0, mode: "bot" }
 let out = "draft", decided = [], said = [], gate = null, late = false
 const messages = () => [
-  { id: "m1", author: "me", text: "@李鹏翔 明天", item_id: null, meta: { chan: { message: "cm_in", sender: "李昊元" } }, created: Date.now() - 60000, reaction: out === "draft" ? { state: "ack", emoji: null, as_user: false, error: null, updated: 1 } : { state: "cleared", emoji: null, as_user: false, error: null, updated: 2 }, channel_message: null },
-  { id: "m2", author: "steve", text: "这条消息看起来是发给李鹏翔的，而且没写完，你是想让我帮忙处理吗？", item_id: null, created: Date.now() - 50000,
-    meta: { origin: "m1", ask: { options: ["这条是发给李鹏翔的，我不用处理", "想让我帮你处理什么？请补充完整"] }, chan_out: { message: "cm_out", status: out, decision: out === "draft" ? "dc1" : null } } },
+  { id: "m1", author: "me", text: "@林知远 明天", item_id: null, meta: { chan: { message: "cm_in", sender: "周明" } }, created: Date.now() - 60000, reaction: out === "draft" ? { state: "ack", emoji: null, as_user: false, error: null, updated: 1 } : { state: "cleared", emoji: null, as_user: false, error: null, updated: 2 }, channel_message: null },
+  { id: "m2", author: "steve", text: "这条消息看起来是发给林知远的，而且没写完，你是想让我帮忙处理吗？", item_id: null, created: Date.now() - 50000,
+    meta: { origin: "m1", ask: { options: ["这条是发给林知远的，我不用处理", "想让我帮你处理什么？请补充完整"] }, chan_out: { message: "cm_out", status: out, decision: out === "draft" ? "dc1" : null } } },
 ]
 try {
   for (const [width, theme] of [[1280, "dark"], [390, "light"]]) {
@@ -46,7 +46,7 @@ try {
     await page.locator("[data-chan-out-decision='dc1']").waitFor()
     // the question's options are what the chat can reply, not buttons that speak in your conversation
     assert.equal(await page.locator("[data-ask-opt]").count(), 0)
-    await page.locator("[data-ask-readonly]").getByText("这条是发给李鹏翔的，我不用处理", { exact: false }).waitFor()
+    await page.locator("[data-ask-readonly]").getByText("这条是发给林知远的，我不用处理", { exact: false }).waitFor()
     // sending is approved on the 待处理 card, which shows the text that would go out and any warning
     assert.equal(await page.locator("[data-chan-out-send]").count(), 0)
     await page.locator("[data-chan-out-review]").waitFor()
@@ -85,11 +85,11 @@ try {
 
     // your own conversation: one click answers once, the options are gone afterwards
     await page.goto(base + "/test/fixtures/decision-source.html?main" + (q ? "&dark" : ""))
-    const opt = page.locator("[data-ask-opt='这条是发给李鹏翔的，我不用处理']")
+    const opt = page.locator("[data-ask-opt='这条是发给林知远的，我不用处理']")
     await opt.waitFor()
     await opt.dblclick()
     await page.waitForFunction(() => !document.querySelector("[data-ask-opt]"))
-    assert.deepEqual(said, ["这条是发给李鹏翔的，我不用处理"], "sent once")
+    assert.deepEqual(said, ["这条是发给林知远的，我不用处理"], "sent once")
     if (shots) await page.screenshot({ path: `${shots}/main-answered-${width}-${theme}.png` })
     assert.deepEqual(errors, [])
     await page.close()

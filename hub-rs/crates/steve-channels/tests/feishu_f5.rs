@@ -238,7 +238,7 @@ async fn sample_tree_becomes_the_snapshot_and_the_org_chart() {
     let r = h.sync().await.expect("sync");
     assert_eq!((r.teams, r.contacts), (3, 3), "{r:?}");
     assert_eq!(h.members(ids::DEPT_PLATFORM), s(&["王小丽"]));
-    assert_eq!(h.members(ids::DEPT_ENG), s(&["李鹏翔"]));
+    assert_eq!(h.members(ids::DEPT_ENG), s(&["林知远"]));
     assert_eq!(h.members(ids::DEPT_SALES), s(&["张伟"]));
     assert!(!h.contact_exists("陈静"));
     assert_eq!(

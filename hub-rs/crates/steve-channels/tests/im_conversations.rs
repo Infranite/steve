@@ -1726,7 +1726,7 @@ async fn a_drafted_answer_is_closed_in_its_own_conversation() {
             let a = push(
                 h,
                 &h.bot.clone(),
-                msg("C_OPS", id, "ulilei", "@李鹏翔 明天", true, false),
+                msg("C_OPS", id, "ulilei", "@林知远 明天", true, false),
             )
             .await;
             let ops = conversations::conv_space(&a.space_id);
@@ -1738,7 +1738,7 @@ async fn a_drafted_answer_is_closed_in_its_own_conversation() {
                 .add(
                     WS,
                     "steve",
-                    "这条看起来是发给李鹏翔的，要我处理吗？",
+                    "这条看起来是发给林知远的，要我处理吗？",
                     None,
                     &json!({"origin": turn, "ask": {"options": ["不用处理", "请补充完整"]}}),
                     &ops,

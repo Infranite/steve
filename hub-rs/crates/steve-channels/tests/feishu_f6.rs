@@ -212,7 +212,7 @@ fn owner_ids() -> FeishuIds {
 fn bot_sees(h: &H, bot: &str, ids: &FeishuIds) -> steve_modules::accounts::Identified {
     h.env
         .store()
-        .transaction(|tx| identify_sender(tx, WS, ME, ids, Some(bot), Some("李鹏翔")))
+        .transaction(|tx| identify_sender(tx, WS, ME, ids, Some(bot), Some("林知远")))
         .expect("identify")
 }
 
@@ -334,7 +334,7 @@ async fn a_contact_the_names_run_made_real_is_still_merged_but_not_one_you_confi
                 ME,
                 &first.account_id,
                 &steve_modules::accounts::Enrichment {
-                    name: Some("李鹏翔".into()),
+                    name: Some("林知远".into()),
                     ..Default::default()
                 },
             )

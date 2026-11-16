@@ -96,7 +96,7 @@ async fn setup() -> H {
             ME_BOT_CHAT.into(),
             Member {
                 ids: ids::OWNER.into(),
-                name: "李鹏翔".into(),
+                name: "林知远".into(),
                 tenant_key: tk,
             },
         ));
