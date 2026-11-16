@@ -451,6 +451,8 @@ export default {
     role: "Role",
     roleOff: "You set it to “{{attention}}”: response rules here are paused",
     mutedSub: "Doesn't speak or draft; hand-offs still go to your inbox (silent)",
+    replyAsYou: "Reply for you",
+    replyAsYouSaved: "Saved: reply for you is {{level}}",
     mutedOn: "Record only, won't speak",
     mutedOff: "Back to following the rules",
     voice: "Identity speaking for Steve",

@@ -135,6 +135,23 @@ impl Replies {
                 composer_skip: None,
             }));
         }
+        // on your own account one sender's run of messages is one turn: answered together, and the
+        // earlier ones' drafts and cards close once it is (crate::presence::burst)
+        let turn = if plan.mode == Mode::Own {
+            ch.store()
+                .reader(|c| crate::presence::owner_burst(c, &plan.ws, &plan.message_id))?
+        } else {
+            Vec::new()
+        };
+        let mut whole = plan.clone();
+        if turn.len() > 1 {
+            whole.text = turn
+                .iter()
+                .map(|(_, t)| t.as_str())
+                .collect::<Vec<_>>()
+                .join("\n");
+        }
+        let plan = &whole;
         let r = match self
             .composer
             .generate(ch, plan, &ComposeOpts::default())
@@ -147,6 +164,36 @@ impl Replies {
                 return Ok(None);
             }
         };
+        let earlier: Vec<String> = turn
+            .iter()
+            .map(|(id, _)| id.clone())
+            .filter(|id| *id != plan.message_id)
+            .collect();
+        if !earlier.is_empty() {
+            ch.store().transaction(|tx| {
+                crate::presence::supersede(
+                    tx,
+                    &plan.ws,
+                    &plan.space_id,
+                    crate::presence::Answering::Messages(&earlier),
+                    crate::presence::BY_LATER,
+                    &plan.message_id,
+                )
+            })?;
+        }
+        // drafting took a while: you may have answered meanwhile (crate::presence, gate 2)
+        if let Some(e) = ch.owner_engaged(plan)? {
+            tracing::info!(
+                space = plan.space_id,
+                reason = e.reason(),
+                "draft dropped: you are there"
+            );
+            return Ok(Some(Acted {
+                label: e.label().into(),
+                composer_skip: Some(format!("{}（{}）", e.label(), e.reason())),
+                ..Acted::default()
+            }));
+        }
         if let Some(a) = not_a_reply(ch, plan, &r)? {
             return Ok(Some(a));
         }

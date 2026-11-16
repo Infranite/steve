@@ -61,6 +61,100 @@ impl Attention {
     }
 }
 
+/// Whether Steve replies for you in a space where your own account speaks (migration 087
+/// `space_prefs.reply_as_you`). Checked in code before any model reads the message
+/// ([`crate::inbound`]); it changes nothing where a bot speaks. Precedence: 屏蔽 > your `/bot` >
+/// 不提醒 > this > 只记录 (`muted`) > the rules.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ReplyAsYou {
+    /// 起草: the rules decide; what is said as you waits for your approval (as before 087).
+    #[default]
+    Draft,
+    /// 只记录: nothing is drafted, asked or answered for you here and the rules do not run (no model
+    /// reads the message); replies in an item's thread still reach the item.
+    Record,
+    /// 不处理: Steve leaves the space alone on your account. Messages are stored (history, and
+    /// whether you are there, still see them); no rule, flow, item or card acts on them. Your `/bot`
+    /// still works.
+    Off,
+}
+
+impl ReplyAsYou {
+    pub const ALL: [ReplyAsYou; 3] = [Self::Draft, Self::Record, Self::Off];
+
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::Draft => "draft",
+            Self::Record => "record",
+            Self::Off => "off",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|a| a.code() == s)
+    }
+
+    /// The level as the page names it.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Draft => "替你起草",
+            Self::Record => "只记录",
+            Self::Off => "不处理",
+        }
+    }
+}
+
+/// Writes whether Steve replies for you in a space (no revision: the callers write theirs).
+pub fn write_reply_as_you(
+    tx: &Tx,
+    ws: &str,
+    space: &str,
+    v: ReplyAsYou,
+    now: i64,
+) -> ChannelResult<()> {
+    tx.execute(
+        "INSERT INTO space_prefs (space_id, workspace_id, reply_as_you, updated) VALUES (?1, ?2, ?3, ?4)
+           ON CONFLICT (space_id) DO UPDATE SET reply_as_you = excluded.reply_as_you, updated = excluded.updated",
+        params![space, ws, v.code(), now],
+    )?;
+    Ok(())
+}
+
+/// Whether Steve replies for you in a space (`draft` when nothing was set). Other modules read it
+/// only here.
+pub fn reply_as_you(c: &Connection, space: &str) -> ChannelResult<ReplyAsYou> {
+    let v: Option<String> = c
+        .query_row(
+            "SELECT reply_as_you FROM space_prefs WHERE space_id = ?",
+            [space],
+            |r| r.get(0),
+        )
+        .optional()?;
+    Ok(v.as_deref().and_then(ReplyAsYou::parse).unwrap_or_default())
+}
+
+/// [`reply_as_you`] where it applies: the space's voice (else `conn`, the identity that received the
+/// message) is your own account; `draft` anywhere else.
+pub fn reply_as_you_here(
+    c: &Connection,
+    ws: &str,
+    space: &str,
+    conn: &str,
+) -> ChannelResult<ReplyAsYou> {
+    let v = reply_as_you(c, space)?;
+    if v == ReplyAsYou::Draft {
+        return Ok(v);
+    }
+    let acting = voice(c, space)?.unwrap_or_else(|| conn.to_string());
+    let (_, mode) = crate::bindings::connection_account(c, ws, &acting)?;
+    Ok(if mode == Mode::Own {
+        v
+    } else {
+        ReplyAsYou::Draft
+    })
+}
+
 /// Steve's role in a space, derived: what the voice identity's effective
 /// rules do, `record` when muted (静默), `observe` for an identity that is not the voice.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -889,11 +983,14 @@ pub struct SpaceSettings {
     pub revision: i64,
     /// Your attention (019), independent of `muted` (Steve's role 只记录).
     pub attention: Attention,
+    /// Whether Steve replies for you here on your own account (087).
+    pub reply_as_you: ReplyAsYou,
 }
 
 pub fn settings(c: &Connection, space: &str) -> ChannelResult<SpaceSettings> {
     c.query_row(
-        "SELECT s.duty, s.rules, s.flow_id, s.muted, s.collab, s.memory_scope, s.disclosure, s.item_defaults, s.configured, s.revision, a.attention
+        "SELECT s.duty, s.rules, s.flow_id, s.muted, s.collab, s.memory_scope, s.disclosure, s.item_defaults, s.configured, s.revision, a.attention,
+                a.reply_as_you
            FROM space_settings s LEFT JOIN space_prefs a ON a.space_id = s.space_id WHERE s.space_id = ?",
         [space],
         |r| {
@@ -916,6 +1013,11 @@ pub fn settings(c: &Connection, space: &str) -> ChannelResult<SpaceSettings> {
                     .as_deref()
                     .and_then(Attention::parse)
                     .unwrap_or(Attention::Realtime),
+                reply_as_you: r
+                    .get::<_, Option<String>>(11)?
+                    .as_deref()
+                    .and_then(ReplyAsYou::parse)
+                    .unwrap_or_default(),
             })
         },
     )
@@ -943,6 +1045,7 @@ pub fn settings_or_defaults(c: &Connection, s: &SpaceRow) -> ChannelResult<Space
             configured: true,
             revision: 0,
             attention: Attention::Realtime,
+            reply_as_you: ReplyAsYou::Draft,
         }),
         r => r,
     }
@@ -983,6 +1086,8 @@ pub struct SpaceOut {
     pub last_message: Option<i64>,
     /// Your attention: `realtime|quiet|blocked` (实时 / 不提醒 / 屏蔽).
     pub attention: Attention,
+    /// Whether Steve replies for you here on your own account: `draft|record|off`.
+    pub reply_as_you: ReplyAsYou,
     /// Steve's role here (derived from the voice's rules and `muted`).
     pub role: Role,
     /// The identity that speaks for Steve here, `null` when none sees it any more.
@@ -1037,7 +1142,8 @@ fn acts(rules: &Value) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// Steve's role from the voice's effective rules (`muted`, 不提醒 and 屏蔽 = 只记录).
+/// Steve's role from the voice's effective rules (`muted`, 不提醒 and 屏蔽 = 只记录; on your own
+/// account also `reply_as_you` other than `draft`).
 pub fn role_of(set: &SpaceSettings, rules: &Value, voice: Option<Mode>) -> Role {
     let acts = acts(rules);
     let has = |a: &str| acts.iter().any(|x| x == a);
@@ -1045,6 +1151,7 @@ pub fn role_of(set: &SpaceSettings, rules: &Value, voice: Option<Mode>) -> Role 
         None => Role::Observe,
         // 只记录, and under 不提醒 / 屏蔽 the rules do not apply either
         Some(_) if set.muted || set.attention >= Attention::Quiet => Role::Record,
+        Some(Mode::Own) if set.reply_as_you != ReplyAsYou::Draft => Role::Record,
         Some(Mode::Bot) if has("reply") => Role::Answer,
         Some(_) if has("reply") || has("draft") || has("create_item") || has("handoff") => {
             Role::Draft
@@ -1083,6 +1190,43 @@ pub fn your_trigger(c: &Connection, ws: &str) -> ChannelResult<Option<crate::rul
         .optional()?;
     Ok(v.and_then(|s| serde_json::from_str::<Value>(&s).ok())
         .map(|v| crate::rules::Trigger::from_value(&v)))
+}
+
+/// What [`SpaceOut::conflicts`] says about `reply_as_you` (`key` `reply_as_you`, and `rules` for
+/// the rules it stops): it applies only where your own account speaks, and 不提醒 / 屏蔽 already
+/// stop everything it would.
+pub fn reply_as_you_conflicts(set: &SpaceSettings, voice: Option<Mode>) -> Vec<Conflict> {
+    let c = |key, level, text: &str| Conflict {
+        key,
+        level,
+        text: text.into(),
+    };
+    match (set.reply_as_you, voice) {
+        (ReplyAsYou::Draft, _) => vec![],
+        (_, Some(Mode::Bot) | None) => vec![c(
+            "reply_as_you",
+            "conflict",
+            "这里不是你本人的账号在发言：“替你回复”的设置不生效",
+        )],
+        (_, Some(Mode::Own)) if set.attention >= Attention::Quiet => vec![c(
+            "reply_as_you",
+            "info",
+            "已设为不提醒或屏蔽：这里本来就不替你起草",
+        )],
+        (ReplyAsYou::Record, Some(Mode::Own)) => vec![c(
+            "rules",
+            "conflict",
+            "只记录：这里不替你起草、回复或转给你，响应规则不生效；事项话题里的回复仍送到事项",
+        )],
+        (ReplyAsYou::Off, Some(Mode::Own)) => vec![
+            c(
+                "rules",
+                "conflict",
+                "不处理：这里的消息只保存，响应规则不生效",
+            ),
+            c("flow", "conflict", "不处理：这里的消息不会触发流程"),
+        ],
+    }
 }
 
 /// What [`SpaceOut::conflicts`] says for a space with these settings.
@@ -1314,6 +1458,7 @@ pub fn out_with(
             text: "没有“以你本人身份发送”的授权：这里不替你起草或回复，只记录".into(),
         });
     }
+    conflicts.extend(reply_as_you_conflicts(&set, voice.as_ref().map(|v| v.mode)));
     let mut st = c.prepare_cached(
         "SELECT party_id FROM team_details WHERE workspace_id = ? AND space_id = ? ORDER BY party_id",
     )?;
@@ -1384,6 +1529,7 @@ pub fn out_with(
         revision: set.revision,
         last_message: s.last_message,
         attention: set.attention,
+        reply_as_you: set.reply_as_you,
         role,
         voice,
         identities: ids,
@@ -1410,6 +1556,8 @@ pub struct SpacePatch {
     pub muted: Option<bool>,
     /// `realtime|quiet|blocked` (your attention; independent of `muted`, Steve's role 只记录).
     pub attention: Option<String>,
+    /// `draft|record|off`: whether Steve replies for you here on your own account.
+    pub reply_as_you: Option<String>,
     /// Absent = unchanged; `null` = automatic; a connection id = that identity speaks here (it must
     /// see the space, else `400`).
     #[serde(default, deserialize_with = "some_nullable")]
@@ -1463,6 +1611,9 @@ impl SpacePatch {
         }
         if let Some(a) = &self.attention {
             c.that("attention", Attention::parse(a).is_some());
+        }
+        if let Some(a) = &self.reply_as_you {
+            c.that("reply_as_you", ReplyAsYou::parse(a).is_some());
         }
         if let Some(d) = &self.item_defaults {
             c.that("item_defaults.tags", d.tags.len() <= 20);
@@ -1550,6 +1701,9 @@ pub fn patch(
     if let Some(a) = p.attention.as_deref().and_then(Attention::parse) {
         after.attention = a;
     }
+    if let Some(a) = p.reply_as_you.as_deref().and_then(ReplyAsYou::parse) {
+        after.reply_as_you = a;
+    }
     if let Some(v) = p.collab {
         after.collab = v;
     }
@@ -1598,10 +1752,13 @@ pub fn patch(
             )?;
         }
     }
+    if after.reply_as_you != before.reply_as_you {
+        write_reply_as_you(tx, ws, id, after.reply_as_you, now)?;
+    }
     let voice_after = chosen_voice(tx, id)?;
     let snap = |x: &SpaceSettings, persona: &Option<String>, voice: &Option<String>| {
         json!({
-            "persona_id": persona, "duty": x.duty, "rules": x.rules, "muted": x.muted, "attention": x.attention.code(), "voice": voice, "collab": x.collab, "memory_scope": x.memory_scope,
+            "persona_id": persona, "duty": x.duty, "rules": x.rules, "muted": x.muted, "attention": x.attention.code(), "reply_as_you": x.reply_as_you.code(), "voice": voice, "collab": x.collab, "memory_scope": x.memory_scope,
             "disclosure": x.disclosure, "item_defaults": item_defaults(&x.item_defaults),
         })
     };
@@ -1634,6 +1791,7 @@ fn patched_fields(p: &SpacePatch) -> Vec<&'static str> {
         ("rules", p.rules.is_some()),
         ("muted", p.muted.is_some()),
         ("attention", p.attention.is_some()),
+        ("reply_as_you", p.reply_as_you.is_some()),
         ("voice", p.voice.is_some()),
         ("collab", p.collab.is_some()),
         ("memory_scope", p.memory_scope.is_some()),

@@ -15,7 +15,7 @@ import { Select } from "@/view-shared"
 import { Unwired } from "@/unwired"
 import { botName, st, tm } from "@/store"
 import { useLoad, useBusy, report } from "@/accounts/load"
-import { channelsApi, ATTENTION, LEVEL, MSG_STATUS, ROLE, attentionOf, spaceTitle, type Attention, type ChanMessage, type Level, type Rule, type SpacePatch } from "@/api/channels"
+import { channelsApi, ATTENTION, LEVEL, MSG_STATUS, REPLY_AS_YOU, ROLE, attentionOf, spaceTitle, type Attention, type ChanMessage, type Level, type ReplyAsYou, type Rule, type SpacePatch } from "@/api/channels"
 import { Conflicts, SpaceAvatar, kindLine } from "@/channels/space-bits"
 import { Rules, ruleText, ruleOk } from "@/channels/rules"
 import { BasisView, PersonaAvatar } from "@/channels/basis"
@@ -73,6 +73,8 @@ export function SpaceView({ id }: { id: string }) {
             {s.attention !== undefined && <Row title={t("channels:bits.disturb")} sub={ATTENTION[att][1]} data-attention>
               <Segmented size="sm" value={att} onChange={(v) => v !== att && setAttention(v)} options={(Object.keys(ATTENTION) as Attention[]).map((a) => [a, ATTENTION[a][0]] as const)} /></Row>}
             {s.role && <Row title={t("channels:space.role")} sub={att !== "realtime" ? t("channels:space.roleOff", { attention: ATTENTION[att][0] }) : ROLE[s.role]?.[1]}><span className="type-callout text-muted-foreground" data-role-value={s.role}>{ROLE[s.role]?.[0] ?? s.role}</span></Row>}
+            {s.reply_as_you !== undefined && s.voice?.mode === "self" && <Row title={t("channels:space.replyAsYou")} sub={REPLY_AS_YOU[s.reply_as_you][1]} data-reply-as-you>
+              <Segmented size="sm" value={s.reply_as_you} onChange={(v: ReplyAsYou) => v !== s.reply_as_you && void save({ reply_as_you: v }, t("channels:space.replyAsYouSaved", { level: REPLY_AS_YOU[v][0] }))} options={(Object.keys(REPLY_AS_YOU) as ReplyAsYou[]).map((a) => [a, REPLY_AS_YOU[a][0]] as const)} /></Row>}
             <Row title={t("channels:word.recordOnly")} sub={t("channels:space.mutedSub")}><Switch checked={s.muted} disabled={busy} onCheckedChange={(v) => void save({ muted: v }, t(v ? "channels:space.mutedOn" : "channels:space.mutedOff"))} aria-label={t("channels:word.recordOnly")} data-space-on /></Row>
             {me ? <Row icon={<PersonaAvatar bot={null} size={32} />} title={t("channels:word.you")} sub={t("channels:space.selfSub")} data-space-persona-row />
               : <Row icon={<PersonaAvatar bot={persona?.bot_id} size={32} />} controls onClick={persona ? () => go("#/channels/personas/" + persona.id) : undefined} data-space-persona-row
@@ -84,7 +86,7 @@ export function SpaceView({ id }: { id: string }) {
               <Select align="end" testId="space-voice" value={s.voice?.chosen ? s.voice.connection_id : "__auto"} onChange={(v) => void save({ voice: v === "__auto" ? null : v }, t("channels:space.voiceChanged"))}
                 options={[{ v: "__auto", l: s.voice && !s.voice.chosen ? t("channels:space.autoNamed", { name: s.voice.name }) : t("channels:space.auto") }, ...ids.map((i) => ({ v: i.connection_id, l: t(i.mode === "self" ? "channels:space.voiceSelf" : "channels:space.voiceBot", { name: i.name }) }))]} /></Row>}
           </Panel>
-          <Conflicts items={s.conflicts} keys={["trigger", "voice"]} />
+          <Conflicts items={s.conflicts} keys={["trigger", "voice", "reply_as_you"]} />
           {!me && s.has_external && persona?.reveal.steve && <Note>{t("channels:space.revealsSteve", { name: persona.name })}</Note>}
         </Section>
         <section><SectionLabel right={recent.length > MSG_PREVIEW && !allMsgs && <Button size="xs" variant="ghost" className="text-muted-foreground" onClick={() => setAllMsgs(true)} data-all-msgs>{t("channels:space.allMessages", { count: recent.length })}</Button>}>{t("channels:space.recent")}</SectionLabel>

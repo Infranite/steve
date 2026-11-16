@@ -489,9 +489,11 @@ impl Engine {
             answering it does (only errors before anything was answered wait for a repeat) */
             Ok(after) => {
                 let settled = if after.status == "expired" {
-                    self.yolo()
-                        .finish(&a.id, "cancelled", Some("权限请求已经失效"))
-                        .map(drop)
+                    // the handler closed the card instead (e.g. you already answered the chat yourself)
+                    let why = after.result["superseded"]
+                        .as_str()
+                        .unwrap_or("权限请求已经失效");
+                    self.yolo().finish(&a.id, "cancelled", Some(why)).map(drop)
                 } else {
                     self.record_answer(&after, &a)
                         .and_then(|()| self.yolo().finish(&a.id, "decided", None).map(drop))

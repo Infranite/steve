@@ -28,6 +28,26 @@ pub const DRAFT_OPTIONS: [&str; 2] = ["yes", "no"];
 /// The handoff question's summary of the message, in characters.
 const SUMMARY_MAX: usize = 60;
 
+impl Channels {
+    /// [`crate::presence::owner_engaged`] for a plan that would draft or ask in your name about
+    /// someone else's message (`reply`, `draft`, `handoff` on your own account, not your `/bot`);
+    /// `None` for any other plan.
+    pub(crate) fn owner_engaged(
+        &self,
+        plan: &Plan,
+    ) -> ChannelResult<Option<crate::presence::Engaged>> {
+        if plan.mode != Mode::Own
+            || plan.trigger.is_some()
+            || !matches!(plan.act, Act::Reply | Act::Draft | Act::Handoff)
+        {
+            return Ok(None);
+        }
+        let now = self.now();
+        self.store()
+            .reader(|c| crate::presence::owner_engaged(c, &plan.ws, &plan.message_id, now))
+    }
+}
+
 /// Who decided what happens to a message.
 #[derive(Debug, Clone, PartialEq)]
 pub enum By {
@@ -361,6 +381,17 @@ impl Channels {
                     }
                 }
             }
+            return Ok(r);
+        }
+        // you are there yourself: nothing is drafted or asked in your name (crate::presence, gate 1)
+        if let Some(e) = self.owner_engaged(plan)? {
+            tracing::info!(
+                space = plan.space_id,
+                reason = e.reason(),
+                "not drafted: you are there"
+            );
+            r.act = Act::Record;
+            r.label = e.label().into();
             return Ok(r);
         }
         let now = self.now();

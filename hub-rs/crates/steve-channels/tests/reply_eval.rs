@@ -390,3 +390,39 @@ fn the_judges_prompt_is_blind_and_parsed() {
     .unwrap();
     assert_eq!((j.understanding, j.voice), (Some(false), Some(2.0)));
 }
+
+#[test]
+fn the_presence_gate_replayed_skips_where_you_were_there_and_keeps_what_needs_you() {
+    let (cs, ls) = (cases(), labels());
+    let styles = re::owner_styles(&corpus(), &names());
+    let then: Vec<Output> = cs.iter().map(re::recorded_output).collect();
+    let (gated, what) = re::apply_gates(&cs, &then, &re::GateParams::default());
+    let gate_of = |id: &str| {
+        what.iter()
+            .find(|g| g.case_id == id)
+            .and_then(|g| g.gate.clone())
+    };
+    // you had answered by the time the draft came, or were chatting right before
+    assert_eq!(
+        gate_of("fx-03-owner-replied-after").as_deref(),
+        Some("owner_replied")
+    );
+    assert_eq!(
+        gate_of("fx-02-dm-burst-owner-live").as_deref(),
+        Some("owner_live")
+    );
+    // what needed you and you answered only later still reached you (and your answer closed it)
+    for id in ["fx-08-long-analysis", "fx-10-schedule"] {
+        let g = what.iter().find(|g| g.case_id == id).unwrap();
+        assert_eq!(g.gate, None, "{id}");
+        assert!(g.closed_later, "{id}");
+    }
+    let m = re::metrics(&re::rows(&cs, &ls, &gated, &styles, &params()));
+    let before = re::metrics(&re::rows(&cs, &ls, &then, &styles, &params()));
+    assert_eq!(m.presence_skip_recall, Some(1.0), "{m:?}");
+    assert!(m.decision_accuracy > before.decision_accuracy);
+    assert!(
+        m.act_recall >= Some(0.5),
+        "the gate does not skip everything: {m:?}"
+    );
+}

@@ -73,6 +73,14 @@ export default {
     blocked: "屏蔽",
     blockedSub: "不处理，也不保存新消息；列表里默认隐藏",
   },
+  replyAsYou: {
+    draft: "起草",
+    draftSub: "按规则替你起草，等你批准；你已亲自回复的不再起草",
+    record: "只记录",
+    recordSub: "这里不替你起草、回复或转给你，不让模型读它的消息",
+    off: "不处理",
+    offSub: "这个聊天在你的账号上不处理：消息只保存，你的 /bot 仍然有效",
+  },
   role: {
     answer: "回答",
     answerSub: "按规则直接回复",

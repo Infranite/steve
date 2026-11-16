@@ -1463,6 +1463,14 @@ impl Outbox {
                 messages::event(tx, &row.ws, &row.space_id, &row.id);
                 return Ok(Err(SendOutcome::Skipped));
             }
+            // you answered yourself since: what YOLO or a rule let out is dropped; what you approved
+            // yourself goes (crate::presence, gate 4)
+            if !approved_by_you(tx, auth)?
+                && let Some(e) = you_are_there(tx, &row.ws, &row.id, now)?
+            {
+                drop_for_you(tx, &row, &["pending", "unknown"], None, &e)?;
+                return Ok(Err(SendOutcome::Skipped));
+            }
             if let Err(why) = verify(tx, &row, auth, now)? {
                 // tried before and may be out: not a draft to approve again (a new text under the
                 // same dedupe key would be dropped), it stays unknown and you are asked
@@ -2539,6 +2547,62 @@ impl ItemHooks for ReturnToSource {
     }
 }
 
+// ---------------------------------------------------------------- you answered yourself
+
+/// Gates 3 and 4 of [`crate::presence`]: a message in your name answering someone else's, whose
+/// author you are there for by `now`. `None` for anything else.
+fn you_are_there(
+    c: &Connection,
+    ws: &str,
+    out: &str,
+    now: i64,
+) -> ChannelResult<Option<crate::presence::Engaged>> {
+    match crate::presence::answered_message(c, ws, out)? {
+        Some(src) => crate::presence::owner_engaged(c, ws, &src, now),
+        None => Ok(None),
+    }
+}
+
+/// Drops a message in your name because you are there: discarded from `from`, its open card (and
+/// `decision` when given, the one being answered) superseded, audit `chan_message.superseded`.
+fn drop_for_you(
+    tx: &Tx,
+    row: &OutRow,
+    from: &[&str],
+    decision: Option<&str>,
+    e: &crate::presence::Engaged,
+) -> ChannelResult<()> {
+    set_status(tx, &row.id, from, DISCARDED)?;
+    send_state::forget(tx, &row.id)?;
+    if let Some(d) = decision {
+        crate::presence::settle(tx, d, crate::presence::BY_YOU)?;
+    }
+    if let Some(d) = base::decisions::open_for(tx, &row.ws, SUBJECT_MESSAGE, &row.id)? {
+        crate::presence::settle(tx, &d.id, crate::presence::BY_YOU)?;
+    }
+    base::audit(
+        tx,
+        &row.ws,
+        "steve",
+        "chan_message.superseded",
+        &row.id,
+        &json!({"why": crate::presence::BY_YOU, "reason": e.reason()}),
+    )?;
+    messages::event(tx, &row.ws, &row.space_id, &row.id);
+    Ok(())
+}
+
+/// The authorization is your own approval (a decision a person answered, not YOLO): what you
+/// approved goes out even after you spoke, it is yours.
+fn approved_by_you(c: &Connection, auth: &Auth) -> ChannelResult<bool> {
+    let Auth::Decision { id } = auth else {
+        return Ok(false);
+    };
+    Ok(base::decisions::get(c, id)?.is_some_and(|d| {
+        d.status == "resolved" && d.result["decided_by"].as_str() != Some(b1::YOLO_ACTOR)
+    }))
+}
+
 // ---------------------------------------------------------------- decisions
 
 /// The `chan_message` decision handler: a draft's approval (`yes` sends the possibly edited text
@@ -2554,6 +2618,18 @@ impl MessageDecisions {
             return Err(ApiError::conflict(steve_i18n::t!("channels.error.handled")));
         }
         let mut result = choice_result(cx);
+        // YOLO never approves what you already answered yourself (crate::presence, gate 3)
+        if cx.choice == "yes"
+            && cx.actor == b1::YOLO_ACTOR
+            && let Some(e) = you_are_there(tx, cx.ws, &row.id, now)?
+        {
+            drop_for_you(tx, &row, &["draft"], Some(&d.id), &e)?;
+            self.0.push(After::Discarded {
+                message_id: row.id.clone(),
+            });
+            result["superseded"] = json!(crate::presence::BY_YOU);
+            return Ok(result);
+        }
         match cx.choice {
             "yes" => {
                 let edited = !cx.text.trim().is_empty();
@@ -2631,6 +2707,15 @@ impl MessageDecisions {
             return Err(ApiError::conflict(steve_i18n::t!("channels.error.handled")));
         }
         let mut result = choice_result(cx);
+        // nor retries it (gate 3)
+        if cx.choice == "retry"
+            && cx.actor == b1::YOLO_ACTOR
+            && let Some(e) = you_are_there(tx, cx.ws, &row.id, now)?
+        {
+            drop_for_you(tx, &row, &["failed", "unknown"], Some(&d.id), &e)?;
+            result["superseded"] = json!(crate::presence::BY_YOU);
+            return Ok(result);
+        }
         match (cx.choice, row.status.as_str()) {
             ("retry", "failed") => {
                 tx.execute(

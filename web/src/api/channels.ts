@@ -30,6 +30,8 @@ export type Rule = { when: When; act: Act; mode?: "start" | "propose" }
 export type Level = "public" | "conclusion" | "reasoning" | "never"
 /** your attention to a space (domain-model.md §1.4): 实时 · 不提醒 · 屏蔽 */
 export type Attention = "realtime" | "quiet" | "blocked"
+/** whether Steve replies for you in a space where your own account speaks: 起草 · 只记录 · 不处理 */
+export type ReplyAsYou = "draft" | "record" | "off"
 /** Steve's role there, from the voice identity's rules (`muted` = 只记录) */
 export type Role = "answer" | "draft" | "record" | "observe"
 export type SpaceIdentity = { connection_id: string; mode: "bot" | "self"; name: string; account_id: string }
@@ -41,7 +43,7 @@ export type Space = {
   persona: PersonaRef | null; duty: string; rules: Rule[] | null; effective_rules: Rule[]; flow_id: string | null; muted: boolean; collab: boolean; memory_scope: "space" | "persona"; disclosure: Level
   item_defaults: { tags: string[]; project_id: string | null; bot_id: string | null }; configured: boolean; teams: string[]; revision: number; last_message: number | null
   /* newer Hubs (019); older ones leave them out */
-  attention?: Attention; role?: Role; voice?: (SpaceIdentity & { chosen: boolean }) | null; identities?: SpaceIdentity[]
+  attention?: Attention; reply_as_you?: ReplyAsYou; role?: Role; voice?: (SpaceIdentity & { chosen: boolean }) | null; identities?: SpaceIdentity[]
   title?: string; counterpart?: { account_id: string; party_id: string | null; name: string; is_bot: boolean } | null; self_chat?: boolean
   suggest_quiet?: string | null; conflicts?: Conflict[]
   /** opens the chat in its platform's own client (“在飞书中打开”); null when it has none (newer Hubs) */
@@ -65,7 +67,7 @@ export type Persona = {
   used_by: { accounts: { account_id: string; name: string }[]; spaces: { id: string; name: string; own: boolean }[] }; revision: number
 }
 export type PersonaInput = { name?: string; bot_id?: string; intro?: string; soul?: string; reveal?: Partial<Reveal>; signature?: string }
-export type SpacePatch = Partial<{ persona_id: string | null; duty: string; rules: Rule[] | null; muted: boolean; attention: Attention; voice: string | null; collab: boolean; memory_scope: "space" | "persona"; disclosure: Level; item_defaults: Space["item_defaults"] }>
+export type SpacePatch = Partial<{ persona_id: string | null; duty: string; rules: Rule[] | null; muted: boolean; attention: Attention; reply_as_you: ReplyAsYou; voice: string | null; collab: boolean; memory_scope: "space" | "persona"; disclosure: Level; item_defaults: Space["item_defaults"] }>
 /** `who`: "me", "*" (anyone where the words work) or contact ids; `reply`: where the answer goes */
 export type Trigger = { on: boolean; words: string[]; where: string[]; who: string[]; reply: "thread" | "quote" | "message"; mark: boolean }
 /** a permission row the Hub checked when it verified the bot (feishu.md §2.5) */
@@ -193,6 +195,12 @@ export const ATTENTION: Record<Attention, [string, string]> = lazy({
   realtime: () => [t("api:attention.realtime"), t("api:attention.realtimeSub")],
   quiet: () => [t("api:attention.quiet"), t("api:attention.quietSub")],
   blocked: () => [t("api:attention.blocked"), t("api:attention.blockedSub")],
+})
+/** 起草 · 只记录 · 不处理, with what each means */
+export const REPLY_AS_YOU: Record<ReplyAsYou, [string, string]> = lazy({
+  draft: () => [t("api:replyAsYou.draft"), t("api:replyAsYou.draftSub")],
+  record: () => [t("api:replyAsYou.record"), t("api:replyAsYou.recordSub")],
+  off: () => [t("api:replyAsYou.off"), t("api:replyAsYou.offSub")],
 })
 export const ROLE: Record<Role, [string, string]> = lazy({
   answer: () => [t("api:role.answer"), t("api:role.answerSub")], draft: () => [t("api:role.draft"), t("api:role.draftSub")],
