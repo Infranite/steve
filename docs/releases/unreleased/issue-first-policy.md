@@ -1,1 +1,0 @@
-Repository work now starts with a GitHub issue and is handled through a dedicated pull request linked to that issue, including documentation and maintenance changes. Unrelated work belongs in separate issues and pull requests.
