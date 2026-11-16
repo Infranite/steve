@@ -256,6 +256,18 @@ impl Confine {
                 for (r, ops) in opened {
                     let real = std::fs::canonicalize(r).unwrap_or_else(|_| r.clone());
                     for r in [r, &real] {
+                        // realpath() walks each ancestor. A principal can inspect metadata on
+                        // the way to its explicitly opened directory, without listing or reading
+                        // the hidden state/cache roots or another principal's files. Otherwise
+                        // provider/config loaders that canonicalize their own directory fail.
+                        for parent in r.ancestors().skip(1) {
+                            let parent = parent.to_string_lossy();
+                            if !parent.is_empty() && !parent.contains(['"', '\\']) {
+                                profile.push_str(&format!(
+                                    "(allow file-read-metadata (literal \"{parent}\"))\n"
+                                ));
+                            }
+                        }
                         let r = r.to_string_lossy();
                         if !r.contains(['"', '\\']) {
                             profile.push_str(&format!("(allow {ops} (subpath \"{r}\"))\n"));

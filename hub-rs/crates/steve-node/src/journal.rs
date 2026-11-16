@@ -47,6 +47,7 @@ CREATE TABLE IF NOT EXISTS procs (
   started INTEGER);
 CREATE TABLE IF NOT EXISTS reservations (key TEXT PRIMARY KEY, op TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS command_specs (op TEXT PRIMARY KEY, body TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS harness_setups (harness TEXT PRIMARY KEY, op TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS artifact_grants (
   attempt TEXT PRIMARY KEY, workspace TEXT NOT NULL, body TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS artifact_grants_workspace ON artifact_grants(workspace);
@@ -448,6 +449,31 @@ impl Tx<'_> {
         rows.into_iter()
             .map(|(id, o)| Ok((OperationId::new(id).map_err(internal)?, o)))
             .collect()
+    }
+
+    /// The latest explicit setup survives spec/event retention, including failure and an
+    /// interrupted installation. An interrupted operation is observed, never replayed on boot.
+    pub fn installation(&self, harness: &str) -> ApiResult<Option<Receipt>> {
+        let op: Option<String> = self
+            .c()
+            .query_row(
+                "SELECT op FROM harness_setups WHERE harness=?1",
+                [harness],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(internal)?;
+        match op {
+            Some(op) => Ok(self
+                .op(&OperationId::new(op).map_err(internal)?)?
+                .map(|o| o.receipt)),
+            None => Ok(None),
+        }
+    }
+
+    pub fn set_installation(&self, harness: &str, op: &OperationId) -> ApiResult<()> {
+        self.c().execute("INSERT INTO harness_setups(harness,op) VALUES (?1,?2) ON CONFLICT(harness) DO UPDATE SET op=excluded.op", params![harness, op.as_str()]).map_err(internal)?;
+        Ok(())
     }
 
     /// Every unfinished session operation, including open/configure/release and unknown.

@@ -144,6 +144,7 @@ struct State {
     /// files and scans always need one.
     roots: Vec<RootInfo>,
     features: Vec<String>,
+    harnesses: Option<Vec<HarnessCapability>>,
     /// The files under the roots, as on disk.
     files: BTreeMap<(RootId, RelPath), FakeFile>,
     /// Issues every scan of a root reports (an unreadable directory, a held link).
@@ -252,6 +253,11 @@ impl FakeNode {
     /// The allowed roots (what `probe` reports and what files, scans and prepares check).
     pub fn set_roots(&self, roots: Vec<RootInfo>) {
         self.st().roots = roots;
+    }
+
+    /// Harnesses a discovery probe reports; without an override it keeps the default fixture.
+    pub fn set_harnesses(&self, harnesses: Vec<HarnessCapability>) {
+        self.st().harnesses = Some(harnesses);
     }
 
     pub fn set_features(&self, features: Vec<String>) {
@@ -2216,19 +2222,22 @@ impl Discovery for FakeNode {
             node: self.node.clone(),
             os: "fake".into(),
             version: "0".into(),
-            harnesses: vec![HarnessCapability {
-                name: HARNESS.into(),
-                version: "0".into(),
-                sessions: true,
-                jobs: true,
-                models: vec![],
-                resume: true,
-                cancel: true,
-                permissions: true,
-                images: true,
-                enforcement: vec![],
-                adapter: None,
-            }],
+            harnesses: st.harnesses.clone().unwrap_or_else(|| {
+                vec![HarnessCapability {
+                    name: HARNESS.into(),
+                    version: "0".into(),
+                    sessions: true,
+                    jobs: true,
+                    models: vec![],
+                    resume: true,
+                    cancel: true,
+                    permissions: true,
+                    images: true,
+                    enforcement: vec![],
+                    adapter: None,
+                    setup: None,
+                }]
+            }),
             roots: st.roots.clone(),
             capacity,
             features: st.features.clone(),

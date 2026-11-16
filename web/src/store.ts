@@ -16,6 +16,7 @@ import type { StateUpdate, RFile, PlanStep, RHold, RQueued, RRoom, RKindReview, 
 import type { Cite } from "./api/knowledge"
 import { yoloApi, type RYolo, type RYoloAction } from "./api/yolo"
 import { applyLook } from "./lib/motion"
+import { permissionModes, canConfigurePermission } from "./runtime-status"
 
 /* ───────── view types (from the prototype) ───────── */
 export type Ev = any[] // ['u',text,label?] ['q',string[]] ['th',text,secs] ['tool',kind,title,meta,detail,live?,add?,del?,failed?,tool?,desc?,input?,plan?,endedAt?,steveArgs?] ['a',text] ['ho',text,toSid] ['hi',text] ['ask',text] ['sys',text] ['end',stopReason]
@@ -135,14 +136,11 @@ export const defaultHarness = (): string => {
   if (main && rs.some((r) => r.id === main && r.ok)) return main
   return (rs.find((r) => r.ok) ?? rs[0])?.id ?? ""
 }
-/** Steve's permission mode (`plan`, `ask`, …) of a stored bot mode */
-const PERM_MODE: Record<string, string> = { plan: "plan", default: "ask", acceptEdits: "accept_edits", auto: "auto", bypassPermissions: "full_access" }
 /** the bot modes `harness` can be set to (all while the Hub does not know) */
 export const permModes = (harness: string): string[] => {
-  const m = raw.state?.runtimes?.find((r) => r.id === harness)?.modes
-  if (!m || !m.length) return Object.keys(PERM)
-  const xs = Object.keys(PERM).filter((k) => m.includes(PERM_MODE[k]))
-  return xs.length ? xs : ["default"]
+  const r = raw.state?.runtimes?.find(r => r.id === harness)
+  const offered = Object.keys(permissionModes).filter(k => canConfigurePermission(r, k))
+  return offered.length ? offered : r?.modes?.length ? ["default"] : Object.keys(permissionModes)
 }
 /** a compatible permission mode for `harness`, in priority order */
 export const defaultPermMode = (harness: string): string => {
@@ -1122,9 +1120,9 @@ export async function saveBot(k: string, p: { n?: string; role?: string; pers?: 
   if (p.color !== undefined || p.round !== undefined || p.skin !== undefined) q.avatar = { color: p.color ?? b.color, round: p.round ?? b.round, skin: p.skin !== undefined ? p.skin : b.skin }
   await call(api.patchBot(k, q), msg)
 }
-export async function makeBot(n: string, role: string, harness = defaultHarness(), model: string | null = null) {
+export async function makeBot(n: string, role: string, harness = defaultHarness(), model: string | null = null, permMode?: string) {
   const q: Partial<RBot> & { name: string } = { name: n, role, model }
-  if (harness) { q.harness = harness; q.perm_mode = defaultPermMode(harness) }
+  if (harness) { q.harness = harness; q.perm_mode = permMode ?? defaultPermMode(harness) }
   const r = await call(api.newBot(q), t("core:toast.botCreated"))
   return r?.id
 }

@@ -19,6 +19,7 @@ import { Robot } from "@/robot"
 import { ModelPicker, harnessName } from "@/model-picker"
 import { HarnessMark } from "@/components/harness-mark"
 import { SteveModelControl } from "@/steve-model"
+import { RuntimeAvailability, RuntimeSelect, RuntimeSetupLink } from "@/runtime-access"
 import { reducedMotion } from "@/lib/motion"
 
 /* the label and description are read when the settings list renders, so they follow the UI language */
@@ -83,7 +84,7 @@ export function ModelsSettingsPane() {
   const logRef = useRef<HTMLElement>(null)
   /* a change made elsewhere (the Bot page, a Steve draft, another tab) arrives as a settings or bot event */
   const b = st.bots.steve
-  const stamp = JSON.stringify([lang(), Object.entries(st.settings ?? {}).filter(([k]) => k.startsWith("models.")), b?.harness, b?.model, b?.reasoningEffort, st.workspace?.id])
+  const stamp = JSON.stringify([lang(), Object.entries(st.settings ?? {}).filter(([k]) => k.startsWith("models.")), b?.harness, b?.model, b?.reasoningEffort, st.workspace?.id, st.runtimes.map(r => [r.id, r.ok, r.version, r.adapter_version])])
   useEffect(() => { let active = true; api.get().then((x) => { if (active) { setV(x); setErr(null) } }, (e) => { if (active) setErr(isNotWired(e) ? "absent" : e instanceof Error ? e.message : String(e)) }); return () => { active = false } }, [stamp])
   if (err === "absent") return <Blank data-models-unwired>{t("pages:models.unwired")}</Blank>
   if (err) return <Notice tone="destructive" role="alert">{err}</Notice>
@@ -162,6 +163,7 @@ export function ModelsSettingsPane() {
             </Row>
           </div>
         ))}</Panel>
+        <div className="mt-3 flex flex-col gap-3">{st.runtimes.filter(r => !r.ok && !v.agents.some(a => a.harness === r.id)).map(r => <RuntimeAvailability key={r.id} harness={r.id} />)}<span className="self-start"><RuntimeSetupLink /></span></div>
       </Section>
 
       </div></Reveal></div>
@@ -245,8 +247,8 @@ function Editor({ p, v, steve, roleDefault, startOwn, onSave, onCancel }: { p: P
   const dirty = mode === "follow" ? !p.follows : p.follows || !same(next, p.value)
   const run = async (c: Choice | null, ok: string) => { setBusy(true); await onSave(c, ok); setBusy(false) }
   const inherited = onSteve ? t("pages:models.editor.inheritSteve", { model: steve.models[0] ?? defaultModel() }) : t("pages:models.editor.inheritHarness", { harness: harnessName(harness), model: h?.default_models[0] ?? t("pages:models.editor.itsOwn") })
-  const harnessOpt = (id: string, name: string) => ({ v: id, l: <span className="inline-flex min-w-0 items-center gap-2"><HarnessMark harness={id} /><span className="truncate">{name}</span></span> })
-  const harnessOpts = [...v.harnesses.map((x) => harnessOpt(x.id, x.name)), ...(harness && !h ? [harnessOpt(harness, harnessName(harness))] : [])]
+
+
   const effortOpts = [{ v: "default", l: onSteve && steve.effort ? t("pages:models.editor.followDefaultEffort", { effort: effortName(steve.effort) }) : t("pages:models.followModel") }, ...(h?.efforts ?? []).map((e) => ({ v: e.key, l: e.label })), ...(effort && !(h?.efforts ?? []).some((e) => e.key === effort) ? [{ v: effort, l: effortName(effort) }] : [])]
   return (
     <div className="flex min-h-full flex-col" data-models-editor={p.key}>
@@ -262,7 +264,8 @@ function Editor({ p, v, steve, roleDefault, startOwn, onSave, onCancel }: { p: P
             <ChoiceLine c={roleDefault} wrap className="mt-0.5" />
           </div>
         ) : <>
-          <Field id="Harness" label="Harness"><Select className="w-full" value={harness} testId={`harness-${p.key}`} onChange={switchHarness} options={harnessOpts} /></Field>
+          <Field id="Harness" label="Harness"><RuntimeSelect value={harness} testId={`harness-${p.key}`} onChange={switchHarness} eligible={v.harnesses.map(x => x.id)} /><RuntimeSetupLink /></Field>
+          <RuntimeAvailability harness={harness} />
           <Field id="model" label={t("pages:models.editor.model")}><ModelPicker harness={harness} value={primary} allowDefault defaultLabel={inherited} testId={`model-${p.key}`} onChange={setPrimary} /></Field>
           <Field id="effort" label={t("pages:models.editor.effort")}><Select className="w-full" value={effort || "default"} testId={`effort-${p.key}`} onChange={(x) => setEffort(x === "default" ? "" : x)}
             options={effortOpts} /></Field>
@@ -298,7 +301,7 @@ function Editor({ p, v, steve, roleDefault, startOwn, onSave, onCancel }: { p: P
       </div>
       <SheetFooter className="mt-auto flex-row justify-end gap-2 border-t px-5 py-3">
         <Button size="sm" variant="ghost" onClick={onCancel}>{t("common:action.cancel")}</Button>
-        <Button size="sm" disabled={busy || !dirty || (mode === "own" && !harness)} onClick={() => void run(next, next ? t("pages:models.editor.saved", { label: p.label }) : t("pages:models.editor.reverted", { label: p.label }))} data-models-save>{busy && <Spinner />}{t("common:action.save")}</Button>
+        <Button size="sm" disabled={busy || !dirty || (mode === "own" && !v.harnesses.some(h => h.id === harness))} onClick={() => void run(next, next ? t("pages:models.editor.saved", { label: p.label }) : t("pages:models.editor.reverted", { label: p.label }))} data-models-save>{busy && <Spinner />}{t("common:action.save")}</Button>
       </SheetFooter>
     </div>
   )

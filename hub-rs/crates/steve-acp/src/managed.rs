@@ -10,6 +10,7 @@
 //! - `steve adapters status|upgrade` does the same by hand, and `steve adapters install <id>` adds
 //!   one.
 
+use std::os::fd::{AsRawFd, RawFd};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
@@ -56,6 +57,47 @@ pub fn home_of(command: &Path) -> Option<PathBuf> {
     None
 }
 
+/// A prefix lease shared by every Node process and the CLI. Adapter processes inherit a shared
+/// lease; npm inherits an exclusive one, so even an abruptly stopped parent cannot admit a
+/// second mutation while its child still holds the prefix. The file must never be unlinked.
+pub struct PrefixLock(std::fs::File);
+
+impl PrefixLock {
+    pub fn fd(&self) -> RawFd {
+        self.0.as_raw_fd()
+    }
+}
+
+pub fn prefix_lock(home: &Path, exclusive: bool) -> Result<PrefixLock, String> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let dir = dir(home);
+    std::fs::create_dir_all(&dir)
+        .map_err(|_| "cannot create the managed adapter prefix".to_string())?;
+    if dir.is_symlink() || root(home).is_symlink() {
+        return Err(
+            "managed adapter prefix and node_modules must be real directories, not symlinks".into(),
+        );
+    }
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(dir.join(".prefix.lock"))
+        .map_err(|_| "cannot open the managed adapter prefix lock".to_string())?;
+    let mode = if exclusive {
+        libc::LOCK_EX
+    } else {
+        libc::LOCK_SH
+    };
+    if unsafe { libc::flock(file.as_raw_fd(), mode | libc::LOCK_NB) } != 0 {
+        return Err("the adapter prefix is in use by another session, job, probe or installer; wait for it to finish".into());
+    }
+    Ok(PrefixLock(file))
+}
+
 fn selection_file(home: &Path) -> PathBuf {
     dir(home).join("selected.json")
 }
@@ -88,6 +130,29 @@ pub fn wanted(home: &Path, id: &str) -> bool {
         }
 }
 
+/// Records an explicit successful installation without changing the other choices.
+pub fn add_selection(home: &Path, id: &str) -> Result<(), String> {
+    let before = selection(home);
+    let ids: Vec<&str> = crate::adapters::builtin_ids()
+        .filter(|b| {
+            *b == id
+                || before.as_ref().map_or_else(
+                    || crate::adapters::implicit_selection(b),
+                    |v| v.iter().any(|c| c == b),
+                )
+        })
+        .collect();
+    select(home, &ids)
+}
+
+/// Every trusted component of one built-in adapter, including its separate harness executable.
+pub fn packages(id: &str) -> Vec<&'static str> {
+    crate::adapters::components(id)
+        .iter()
+        .map(|c| c.package)
+        .collect()
+}
+
 /// The version of `package` installed in `home`'s adapters.
 pub fn installed(home: &Path, package: &str) -> Option<String> {
     let manifest = root(home).join(package).join("package.json");
@@ -113,16 +178,39 @@ fn run(
     args: &[&str],
     env: &[(&str, &Path)],
     timeout: Duration,
+    lease: Option<&PrefixLock>,
+    on_spawn: impl FnOnce(u32) -> Result<(), String>,
 ) -> Result<String, String> {
-    let mut cmd = Command::new(npm);
-    cmd.args(args)
+    use std::os::unix::process::CommandExt;
+    let mut command = Command::new(npm);
+    if let Some(lease) = lease {
+        let fd = lease.fd();
+        // Only the forked child loses CLOEXEC, never another concurrently spawning thread.
+        unsafe {
+            command.pre_exec(move || {
+                if libc::fcntl(fd, libc::F_SETFD, 0) == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+    }
+    for (k, v) in env {
+        command.env(k, v);
+    }
+    let mut child = command
+        .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    for (k, v) in env {
-        cmd.env(k, v);
+        .stderr(Stdio::piped())
+        .process_group(0)
+        .spawn()
+        .map_err(|e| format!("{}: {e}", npm.display()))?;
+    if let Err(e) = on_spawn(child.id()) {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(e);
     }
-    let mut child = cmd.spawn().map_err(|e| format!("{}: {e}", npm.display()))?;
     let (out, err) = (child.stdout.take(), child.stderr.take());
     let read = |r: Option<std::process::ChildStdout>| {
         std::thread::spawn(move || {
@@ -147,6 +235,10 @@ fn run(
             break s;
         }
         if std::time::Instant::now() >= until {
+            // npm's lifecycle scripts share its group. The leader is still our child here.
+            unsafe {
+                libc::kill(-(child.id() as libc::pid_t), libc::SIGKILL);
+            }
             let _ = child.kill();
             let _ = child.wait();
             return Err(format!(
@@ -179,24 +271,48 @@ pub fn latest(npm: &Path, package: &str) -> Result<String, String> {
         &["view", package, "version", "--json"],
         &[],
         VIEW_TIMEOUT,
+        None,
+        |_| Ok(()),
     )?;
     serde_json::from_str::<String>(out.trim()).map_err(|_| format!("npm view {package}: {out}"))
 }
 
 /// Installs (or upgrades to) the latest release of each of `packages` into `home`'s adapters.
 pub fn install(npm: &Path, home: &Path, packages: &[&str]) -> Result<(), String> {
+    let lease = prefix_lock(home, true)?;
+    install_observed(npm, home, packages, &lease, |_| Ok(()))
+}
+
+/// As [`install`], with durable process registration by the Node before waiting for npm.
+pub fn install_observed(
+    npm: &Path,
+    home: &Path,
+    packages: &[&str],
+    lease: &PrefixLock,
+    on_spawn: impl FnOnce(u32) -> Result<(), String>,
+) -> Result<(), String> {
     let dir = dir(home);
     std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     let grok_install = dir.join(".grok-install");
     let prefix = dir.to_string_lossy().into_owned();
     let specs: Vec<String> = packages.iter().map(|p| format!("{p}@latest")).collect();
-    let mut args = vec!["install", "--prefix", &prefix, "--no-audit", "--no-fund"];
+    let mut args = vec![
+        "install",
+        "--prefix",
+        &prefix,
+        "--global=false",
+        "--no-audit",
+        "--no-fund",
+        "--engine-strict",
+    ];
     args.extend(specs.iter().map(String::as_str));
     run(
         npm,
         &args,
         &[("GROK_HOME", grok_install.as_path())],
         INSTALL_TIMEOUT,
+        Some(lease),
+        on_spawn,
     )
     .map(|_| ())
 }
@@ -452,7 +568,7 @@ pub fn cli(home: &Path, node: Option<&Path>, args: &[String]) -> i32 {
                 eprintln!("{}", no_npm());
                 return 2;
             };
-            let packages: Vec<&str> = targets.iter().filter_map(|id| package(id)).collect();
+            let packages: Vec<&str> = targets.iter().flat_map(|id| packages(id)).collect();
             println!(
                 "{}",
                 t!(
@@ -471,8 +587,8 @@ pub fn cli(home: &Path, node: Option<&Path>, args: &[String]) -> i32 {
                 }
                 Err(_) => {
                     for &id in &targets {
-                        if let Some(pkg) = package(id) {
-                            match install(&npm, home, &[pkg]) {
+                        if package(id).is_some() {
+                            match install(&npm, home, &self::packages(id)) {
                                 Ok(()) => installed_ids.push(id),
                                 Err(e) => {
                                     eprintln!("{}", t!("acp.managed.install_failed", error = e));

@@ -97,6 +97,8 @@ pub struct Spawn {
     pub log_tag: String,
     /// Start from an empty environment: `env` is all of it (the sandbox's level 2).
     pub clean_env: bool,
+    /// The managed prefix whose code the process reads. A shared lease lasts with the handle.
+    pub prefix: Option<PathBuf>,
 }
 
 type Pending = Arc<Mutex<HashMap<u64, oneshot::Sender<Result<Value, RpcError>>>>>;
@@ -114,6 +116,7 @@ pub struct ExitReport {
 
 /// A live adapter process.
 pub struct Conn {
+    _prefix: Option<crate::managed::PrefixLock>,
     pid: u32,
     reader_failed: AtomicBool,
     parse_errors: AtomicU64,
@@ -226,7 +229,24 @@ impl Conn {
         on_incoming: impl Fn(&Conn, Incoming) -> Option<Backpressure> + Send + Sync + 'static,
         on_exit: impl FnOnce(ExitReport) + Send + 'static,
     ) -> Result<Arc<Conn>, RpcError> {
+        let prefix = sp
+            .prefix
+            .as_ref()
+            .map(|home| crate::managed::prefix_lock(home, false))
+            .transpose()
+            .map_err(RpcError::msg)?;
         let mut cmd = Command::new(&sp.program);
+        if let Some(lease) = &prefix {
+            let fd = lease.fd();
+            unsafe {
+                cmd.pre_exec(move || {
+                    if libc::fcntl(fd, libc::F_SETFD, 0) == -1 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    Ok(())
+                });
+            }
+        }
         if sp.clean_env {
             cmd.env_clear();
         }
@@ -267,6 +287,7 @@ impl Conn {
         let (out, mut out_rx) = mpsc::unbounded_channel::<Outbound>();
         let (exit_tx, exited) = watch::channel(false);
         let conn = Arc::new(Conn {
+            _prefix: prefix,
             pid,
             reader_failed: AtomicBool::new(false),
             parse_errors: AtomicU64::new(0),
@@ -647,6 +668,7 @@ sys.stdin.readline()
                 env: vec![],
                 log_tag: "retained-pipe-exit".into(),
                 clean_env: false,
+                prefix: None,
             },
             |_, _| {},
             || {},
@@ -708,6 +730,7 @@ sys.stdin.readline()
                 env: vec![],
                 log_tag: "bounded-reader-exit".into(),
                 clean_env: false,
+                prefix: None,
             },
             1024,
             |_| true,
@@ -758,6 +781,7 @@ sys.stdin.readline()
                     env: vec![],
                     log_tag: "exit-observation-test".into(),
                     clean_env: false,
+                    prefix: None,
                 },
                 1024,
                 |_| true,
@@ -794,6 +818,7 @@ sys.stdin.readline()
             env: ["STEVE_UPGRADE_CONTROL_TOKEN", "STEVE_SUPERVISOR_PID", "STEVE_UPGRADE_ID"].into_iter().map(|k|(k.into(), "synthetic".into())).collect(),
             log_tag: "test".into(),
             clean_env: false,
+            prefix: None,
         };
         let conn = Conn::spawn(sp, |_, _| {}, || {}).unwrap();
         tokio::time::timeout(Duration::from_secs(2), conn.wait_exit())
@@ -823,6 +848,7 @@ sys.stdin.readline()
             .collect(),
             log_tag: "test".into(),
             clean_env: false,
+            prefix: None,
         };
         let conn = Conn::spawn(sp, |_, _| {}, || {}).unwrap();
         tokio::time::timeout(Duration::from_secs(2), conn.wait_exit())
@@ -852,6 +878,7 @@ mod backpressure_tests {
             env: vec![],
             log_tag: "test".into(),
             clean_env: false,
+            prefix: None,
         };
         let seen = Arc::new(AtomicU64::new(0));
         let room = Arc::new(tokio::sync::Semaphore::new(0));

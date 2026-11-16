@@ -235,3 +235,59 @@ async fn live_capacity_round_trips_and_reports_the_executor_value() {
     );
     assert_eq!(w.remote.probe(false).await.unwrap().capacity.sessions, 256);
 }
+
+#[tokio::test]
+async fn controlled_install_requires_a_colocated_current_node_and_serves_the_new_face() {
+    let fake = FakeNode::new("n1");
+    let w = wire(fake, 1);
+    let command = cmd(
+        "install_pi",
+        InstallHarness {
+            harness: "pi".into(),
+        },
+    );
+    assert_eq!(
+        w.remote
+            .install_harness(command.clone())
+            .await
+            .unwrap_err()
+            .code,
+        ErrorCode::Denied
+    );
+    w.remote.set_colocated(true);
+    // An up-to-date transport reaches the fake Node's default Unsupported face, rather than
+    // sending arbitrary npm arguments or falling back to filesystem operations on the Hub.
+    let error = w.remote.install_harness(command).await.unwrap_err();
+    assert_eq!(error.code, ErrorCode::Unsupported);
+    assert!(
+        error
+            .safe_detail
+            .contains("controlled harness installation unsupported")
+    );
+}
+
+#[tokio::test]
+async fn component_integrity_and_other_installation_evidence_survive_the_wire() {
+    let fake = FakeNode::new("n1");
+    let mut harnesses = fake.probe(false).await.unwrap().harnesses;
+    let component: HarnessComponent = serde_json::from_value(json!({
+        "id":"adapter", "name":"ACP", "package":"example", "installed":false,
+        "status":"unknown", "detected":{"path":"/opt/example/bin/agent","version":"1.2.3"}
+    }))
+    .unwrap();
+    harnesses[0].setup = Some(HarnessSetup {
+        state: SetupState::Ready,
+        components: vec![component.clone()],
+        can_install: false,
+        reason: None,
+        help: None,
+        error: None,
+    });
+    fake.set_harnesses(harnesses);
+    let w = wire(fake, 1);
+    let result = w.remote.probe(false).await.unwrap();
+    assert_eq!(
+        result.harnesses[0].setup.as_ref().unwrap().components,
+        vec![component]
+    );
+}

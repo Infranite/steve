@@ -110,6 +110,14 @@ pub trait Discovery: Send + Sync {
         ))
     }
     async fn probe(&self, fresh: bool) -> ApiResult<Capabilities>;
+    /// Asynchronous, journaled setup. Retrying the same command reads its receipt. Only an
+    /// authenticated, colocated Hub owner may request it; remote Nodes remain operator-managed.
+    async fn install_harness(&self, _c: Command<InstallHarness>) -> ApiResult<Receipt> {
+        Err(ApiError::new(
+            ErrorCode::Unsupported,
+            "controlled harness installation unsupported",
+        ))
+    }
     async fn history(&self, page: PageRequest) -> ApiResult<Page<HistoryEntry>>;
     async fn import_history(&self, c: Command<HistoryImport>) -> ApiResult<Receipt>;
     async fn import_page(&self, import: OperationId, page: PageRequest) -> ApiResult<ImportedPage>;

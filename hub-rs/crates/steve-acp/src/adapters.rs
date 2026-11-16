@@ -154,6 +154,9 @@ pub struct StateDir {
     /// Claude Code's `.claude.json`: written in ambient mode, hidden from non-owner principals.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub home_files: Vec<String>,
+    /// Optional auxiliary HOME for legacy external bridges.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub home: Option<String>,
 }
 
 fn absolutize_env_path(p: PathBuf, user_home: &Path) -> PathBuf {
@@ -311,6 +314,26 @@ pub enum LaunchExtra {
     None,
 }
 
+/// Some ACP adapters use `modes` for reasoning, and do not enforce tool permissions at all.
+/// Such an adapter must never silently stand in for a narrower Steve permission mode.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PermissionPolicy {
+    #[default]
+    Acp,
+    FullAccessOnly,
+}
+
+impl PermissionPolicy {
+    pub fn check(self, mode: PermissionMode) -> Result<(), String> {
+        if self == Self::FullAccessOnly && mode != PermissionMode::FullAccess {
+            Err("unsupported: this adapter only supports full_access; its ACP modes are thinking levels, not tool permissions".into())
+        } else {
+            Ok(())
+        }
+    }
+}
+
 /// Host integration properties of an adapter. Callers select policy by these, never by a harness
 /// name. `self_read_only` applies only after selecting its ACP read-only mode.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -329,6 +352,8 @@ pub struct AdapterProperties {
     /// The adapter runs native tools without approval modes. Only an explicitly selected
     /// FullAccess is supported; its model/thinking options are never permission modes.
     pub native_execution: bool,
+    pub permission_policy: PermissionPolicy,
+    pub require_mcp_http: bool,
     /// Per-Steve-mode (`plan`, `ask`, `accept_edits`, `auto`, `full_access`) `_meta` sent on
     /// `session/new|load` (for adapters whose higher autonomy modes are session `_meta` flags).
     pub mode_meta: BTreeMap<String, Value>,
@@ -403,6 +428,8 @@ impl Default for AdapterProperties {
             modes: ModeMap::default(),
             blind_set_mode: false,
             native_execution: false,
+            permission_policy: PermissionPolicy::Acp,
+            require_mcp_http: false,
             mode_meta: BTreeMap::new(),
             executable_env: None,
             session_meta: SessionMeta::None,
@@ -426,13 +453,15 @@ impl Default for AdapterProperties {
 }
 
 /// The keys of [`PropertiesPatch`] (what a manifest's `properties` may hold).
-pub const PROPERTY_KEYS: [&str; 23] = [
+pub const PROPERTY_KEYS: [&str; 25] = [
     "self_read_only",
     "nested_sandbox",
     "state",
     "modes",
     "blind_set_mode",
     "native_execution",
+    "permission_policy",
+    "require_mcp_http",
     "mode_meta",
     "executable_env",
     "session_meta",
@@ -468,6 +497,10 @@ pub struct PropertiesPatch {
     pub blind_set_mode: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub native_execution: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permission_policy: Option<PermissionPolicy>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub require_mcp_http: Option<bool>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub mode_meta: BTreeMap<String, Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -532,6 +565,12 @@ impl PropertiesPatch {
         }
         if let Some(v) = self.blind_set_mode {
             p.blind_set_mode = v;
+        }
+        if let Some(v) = self.permission_policy {
+            p.permission_policy = v;
+        }
+        if let Some(v) = self.require_mcp_http {
+            p.require_mcp_http = v;
         }
         if let Some(v) = self.native_execution {
             p.native_execution = v;
@@ -792,6 +831,20 @@ fn path_qoder_adapter(_: &Path) -> PathBuf {
     PathBuf::from("qodercli")
 }
 
+/// The trusted packages and entry points needed by a built-in adapter. Installation requests
+/// select an adapter id, never a package, version, script or destination supplied by a client.
+pub struct Component {
+    pub id: &'static str,
+    pub name: &'static str,
+    pub package: &'static str,
+    /// Entry point relative to `node_modules` (`.bin` is npm's stable CLI link).
+    pub entry: &'static str,
+    pub node_min: (u64, u64, u64),
+    pub executable_env: Option<&'static str>,
+    pub required: &'static [&'static str],
+    pub minimum: Option<&'static str>,
+}
+
 const BUILTINS: &[Builtin] = &[
     Builtin {
         id: "claude-code",
@@ -911,6 +964,8 @@ const BUILTINS: &[Builtin] = &[
         default_command: default_pi_adapter,
         properties: || AdapterProperties {
             native_execution: true,
+            permission_policy: PermissionPolicy::FullAccessOnly,
+            require_mcp_http: true,
             state: Some(StateDir {
                 env: "PI_CODING_AGENT_DIR".into(),
                 default: ".pi/agent".into(),
@@ -1420,6 +1475,66 @@ const BUILTINS: &[Builtin] = &[
     },
 ];
 
+pub fn components(id: &str) -> &'static [Component] {
+    use std::sync::OnceLock;
+    static ENTRIES: OnceLock<HashMap<&'static str, Vec<Component>>> = OnceLock::new();
+    ENTRIES
+        .get_or_init(|| {
+            BUILTINS
+                .iter()
+                .filter_map(|b| {
+                    let package = b.npm_package?;
+                    let mut components = Vec::new();
+                    if b.id == "pi" {
+                        components.push(Component {
+                            id: "pi",
+                            name: "Pi SDK",
+                            package: "@earendil-works/pi-coding-agent",
+                            entry: "@earendil-works/pi-coding-agent/dist/bundle/cli.js",
+                            node_min: (22, 19, 0),
+                            executable_env: None,
+                            minimum: Some("1.1.0"),
+                            required: &[],
+                        });
+                    }
+                    components.push(Component {
+                        id: "adapter",
+                        name: b.name,
+                        package,
+                        entry: adapter_entry(b.id),
+                        node_min: if b.id == "pi" {
+                            (22, 19, 0)
+                        } else {
+                            (20, 0, 0)
+                        },
+                        executable_env: None,
+                        minimum: None,
+                        required: &[],
+                    });
+                    Some((b.id, components))
+                })
+                .collect()
+        })
+        .get(id)
+        .map(Vec::as_slice)
+        .unwrap_or(&[])
+}
+
+// Entry points here describe npm package layout. Actual execution still uses the registry's
+// resolver (including Codex native binaries, PATH-only tools and operator overrides).
+fn adapter_entry(id: &str) -> &'static str {
+    match id {
+        "pi" => "@openma/pi-acp/dist/bin.js",
+        "claude-code" => "@agentclientprotocol/claude-agent-acp/dist/index.js",
+        "codex" => "@agentclientprotocol/codex-acp/dist/index.js",
+        _ => "",
+    }
+}
+
+pub fn implicit_selection(id: &str) -> bool {
+    DEFAULT_MANAGED_ADAPTERS.contains(&id)
+}
+
 fn strings(v: &[&str]) -> Vec<String> {
     v.iter().map(|s| s.to_string()).collect()
 }
@@ -1732,6 +1847,14 @@ impl Probe {
 /// Starts `id`'s adapter in `cwd`, asks `initialize` and opens a scratch session (each within
 /// `timeout`, no prompt: no model is asked anything) and stops it again.
 pub async fn probe(cfg: &crate::AcpConfig, id: &str, cwd: &Path, timeout: Duration) -> Probe {
+    let _prefix = match cfg
+        .adapter_prefix(id)
+        .map(|h| crate::managed::prefix_lock(&h, false))
+        .transpose()
+    {
+        Ok(p) => p,
+        Err(e) => return Probe::failed(ProbeStatus::InitializeFailed, e),
+    };
     let (program, args) = match cfg.adapter_command(id) {
         Ok(c) => c,
         Err(e) => return Probe::failed(ProbeStatus::AdapterMissing, e),
@@ -1753,6 +1876,7 @@ pub async fn probe(cfg: &crate::AcpConfig, id: &str, cwd: &Path, timeout: Durati
     };
     let conn: Arc<Conn> = match Conn::spawn(
         Spawn {
+            prefix: cfg.adapter_prefix(id),
             program,
             args,
             cwd: cwd.clone(),
@@ -1788,6 +1912,13 @@ pub async fn probe(cfg: &crate::AcpConfig, id: &str, cwd: &Path, timeout: Durati
             return Probe::failed(ProbeStatus::InitializeFailed, e.message);
         }
     };
+    if cfg.adapter_properties(id).require_mcp_http && !p.mcp_http {
+        conn.kill();
+        return Probe::failed(
+            ProbeStatus::InitializeFailed,
+            "adapter does not support HTTP MCP required by this registry entry",
+        );
+    }
     let mut params = json!({ "cwd": cwd, "mcpServers": [] });
     if let Some(meta) = cfg.session_meta(id) {
         params["_meta"] = meta;
@@ -1801,7 +1932,8 @@ pub async fn probe(cfg: &crate::AcpConfig, id: &str, cwd: &Path, timeout: Durati
                 props.blind_set_mode,
                 Some(&props.mode_meta),
             );
-            if props.native_execution {
+            if props.native_execution || props.permission_policy == PermissionPolicy::FullAccessOnly
+            {
                 offer.modes = vec![PermissionMode::FullAccess];
             }
             p.session = Some(offer);
@@ -1922,8 +2054,99 @@ impl crate::AcpConfig {
             props
                 .modes
                 .choice_with(mode, props.blind_set_mode, Some(&props.mode_meta));
-        choice.native_execution = props.native_execution;
+        choice.native_execution =
+            props.native_execution || props.permission_policy == PermissionPolicy::FullAccessOnly;
         choice
+    }
+
+    /// The package root of a built-in command, including a global install. Custom commands are
+    /// never inferred from the adapter id alone.
+    pub fn component_root(&self, id: &str) -> Option<PathBuf> {
+        let command = self.adapters.get(id)?;
+        command
+            .ancestors()
+            .find(|root| {
+                crate::adapters::builtin_commands(root).any(|(b, _, c)| b == id && &c == command)
+            })
+            .map(Path::to_path_buf)
+    }
+
+    /// The executable discovery and launch agree on. npm's managed prefix has `.bin/<cli>`;
+    /// global npm installs put that CLI on PATH instead of under `npm root -g/.bin`.
+    pub fn component_command(&self, id: &str, component: &Component) -> Option<PathBuf> {
+        self.component_command_with(id, component, |key| std::env::var_os(key))
+    }
+
+    fn component_command_with(
+        &self,
+        id: &str,
+        component: &Component,
+        get: impl Fn(&str) -> Option<OsString>,
+    ) -> Option<PathBuf> {
+        if component.id == "adapter" {
+            return self.adapters.get(id).cloned();
+        }
+        if let Some(var) = component.executable_env {
+            if let Some(command) = self.declared.get(id).and_then(|d| d.env.get(var)) {
+                return Some(command.into());
+            }
+            if let Some(command) = get(var) {
+                return Some(command.into());
+            }
+        }
+        if let Some(root) = self.component_root(id) {
+            let candidate = root.join(component.entry);
+            // An incomplete managed install stays incomplete even if a global CLI exists.
+            if root == crate::managed::root(&self.steve_home) || candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+        let name = component
+            .entry
+            .strip_prefix(".bin/")
+            .or_else(|| (component.id == "pi").then_some("pi"))?;
+        Self::component_on_path(name, get("PATH")?)
+    }
+
+    /// Separate discovery evidence. Never use this to substitute for a missing managed CLI:
+    /// discovery and session launch must keep using `component_command` from the same source.
+    pub fn detected_component(&self, id: &str, component: &Component) -> Option<PathBuf> {
+        self.detected_component_with(id, component, |key| std::env::var_os(key))
+    }
+
+    fn detected_component_with(
+        &self,
+        id: &str,
+        component: &Component,
+        get: impl Fn(&str) -> Option<OsString>,
+    ) -> Option<PathBuf> {
+        let name = component
+            .entry
+            .strip_prefix(".bin/")
+            .or_else(|| (component.id == "pi").then_some("pi"))?;
+        let found = Self::component_on_path(name, get("PATH")?)?;
+        (self.component_command_with(id, component, get).as_ref() != Some(&found)).then_some(found)
+    }
+
+    fn component_on_path(name: &str, path: OsString) -> Option<PathBuf> {
+        use std::os::unix::fs::PermissionsExt;
+        std::env::split_paths(&path)
+            .map(|p| p.join(name))
+            .find(|p| {
+                p.metadata()
+                    .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+            })
+    }
+
+    /// Only the Node's own prefix with no manifest override can be changed by an API request or
+    /// background upgrade. Neither a path from the request nor a different Steve home is used.
+    pub fn managed_adapter(&self, id: &str) -> bool {
+        !self.declared.contains_key(id)
+            && !components(id).iter().any(|c| {
+                c.executable_env
+                    .is_some_and(|var| std::env::var_os(var).is_some())
+            })
+            && crate::managed::command(&self.steve_home, id).as_ref() == self.adapters.get(id)
     }
 
     pub(crate) fn launch_args(&self, id: &str) -> Vec<OsString> {

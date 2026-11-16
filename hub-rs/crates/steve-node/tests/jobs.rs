@@ -603,15 +603,21 @@ async fn a_job_past_its_deadline_times_out() {
     let mut j = think("a_1", FAKE, "@hang");
     j.run.limits.deadline = Timestamp(wall() + 1_000);
     n.start_job(now_cmd("op_j", j)).await.unwrap();
-    t.until("the harness", |t| !t.read("pid").is_empty()).await;
-    let pid: i64 = t.read("pid").trim().parse().unwrap();
     let c = completion(finished(&n, "op_j").await);
     assert_eq!(
         (c.outcome, c.stop_reason.as_str()),
         (Outcome::TimedOut, "timeout")
     );
     assert_eq!(c.error.map(|e| e.code), Some(ErrorCode::Expired));
-    assert!(gone(pid));
+    // The deadline may expire during ACP startup on a loaded runner, before @hang writes
+    // its prompt marker. Every adapter records its PID at startup, so check cleanup from
+    // that log rather than requiring the prompt to beat a one-second deadline.
+    for pid in t.read("spawns").lines() {
+        assert!(
+            gone(pid.parse().unwrap()),
+            "a timed-out adapter is still running"
+        );
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

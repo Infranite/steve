@@ -462,6 +462,7 @@ pub async fn run_cancellable(
                     env,
                     log_tag: format!("[job {}]", req.prefix),
                     clean_env: false,
+                    prefix: req.cfg.adapter_prefix(req.harness),
                 },
                 1 << 20,
                 move |n| {
@@ -1025,6 +1026,7 @@ for line in sys.stdin:
                 env: vec![],
                 log_tag: "[test]".into(),
                 clean_env: false,
+                prefix: None,
             },
             1 << 20,
             |_| true,
@@ -1104,6 +1106,7 @@ for line in sys.stdin:
                 env: vec![],
                 log_tag: "[test]".into(),
                 clean_env: false,
+                prefix: None,
             },
             1 << 20,
             |_| true,

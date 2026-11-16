@@ -325,7 +325,16 @@ impl Discovery for RemoteNode {
         self.needs(steve_node_api::SESSION_CAPACITY.1, NODE_SESSION_CAPACITY)?;
         self.go(NODE_SESSION_CAPACITY, &sessions, None, false).await
     }
-
+    async fn install_harness(&self, c: Command<InstallHarness>) -> ApiResult<Receipt> {
+        self.needs(steve_node_api::CONTROLLED_INSTALL.1, "harness.install")?;
+        if !self.is_colocated() {
+            return Err(ApiError::new(
+                ErrorCode::Denied,
+                "install harnesses on a separate Node with its operator CLI",
+            ));
+        }
+        self.cmd(HARNESS_INSTALL, &c, false).await
+    }
     /// A remote Node runs no jobs and no execs in N2 (their sandboxing is local-only so far): its
     /// capacity for them is reported as zero whatever it says.
     async fn probe(&self, fresh: bool) -> ApiResult<Capabilities> {

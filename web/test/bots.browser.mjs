@@ -33,7 +33,9 @@ const run = async ({ width, height, scheme }) => {
   const errors = []; page.on('pageerror', (e) => errors.push(e.message))
   let statsBot = null
   await page.route('**/*', async (route) => {
-    const u = new URL(route.request().url()); if (u.origin !== base) return route.abort(); if (!u.pathname.startsWith('/api/')) return route.continue()
+    const u = new URL(route.request().url()); if (u.origin !== base) return route.abort()
+    if (u.pathname === '/auth/hello') return route.fulfill({ json: { name: 'steve', version: 'fixture', api: 1, login: { token: false, oidc: false } } })
+    if (!u.pathname.startsWith('/api/')) return route.continue()
     const method = route.request().method(), p = u.pathname
     let data = {}
     if (await hub.handle(route, method, p)) return
@@ -70,7 +72,8 @@ const run = async ({ width, height, scheme }) => {
 
   /* 能力: Steve · 内置 always, its tools folded inside with this Bot's calls; then the servers the Bot uses */
   await page.locator('[data-slot=tabs-trigger]:has-text("能力")').click()
-  await page.locator('[data-caps] [data-steve-server]').waitFor()
+  // The card renders before its separate capabilities request finishes; wait for the loaded inventory.
+  await page.locator('[data-caps] [data-steve-server]').filter({ hasText: /6 个工具/ }).waitFor()
   assert.equal(statsBot, 'dev')
   assert.match(await page.locator('[data-steve-server]').innerText(), /Steve · 内置[^]*总是启用[^]*6 个工具/)
   await page.locator('[data-steve-fold] button').first().click()

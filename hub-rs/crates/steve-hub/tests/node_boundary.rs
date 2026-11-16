@@ -232,7 +232,7 @@ const ALLOWED: &[Entry] = &[
     e(Dir, "steve-toolchains/src/lib.rs", 4, Library, "project marker listings for Node detection and per-project discovery; Hub callers use only the data definitions"),
     e(Dir, "steve-knowledge/src/scan.rs", 1, Library, "the folder walk the Node's scan reuses"),
     e(Spawn, "steve-acp/src/managed.rs", 1, Library, "npm, to install and check the adapters Steve keeps (the Node's daily check, steve setup)"),
-    e(Fs, "steve-acp/src/managed.rs", 5, Library, "the installed adapters' package.json and their own directory, and the file that records which adapters setup chose"),
+    e(Fs, "steve-acp/src/managed.rs", 7, Library, "the installed adapters' package.json, selected ids, and own prefix directory/lease shared by Node execution and the operator CLI; never a workspace or client-chosen destination"),
     e(Dir, "steve-acp/src/rollout.rs", 1, Library, "Codex rollout files: the Node's history, the stats repair"),
     e(Fs, "steve-acp/src/rollout.rs", 1, Library, "Codex rollout files: the Node's history, the stats repair"),
     e(Dir, "steve-acp/src/transcript.rs", 2, Library, "the shared ACP sampler reads the Node adapter's configured home: exact session transcript and its subagent files, with bounded discovery"),

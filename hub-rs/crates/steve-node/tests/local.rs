@@ -4832,6 +4832,84 @@ async fn each_principal_gets_a_harness_directory_of_their_own() {
     assert_eq!(std::fs::read_dir(&elsewhere).unwrap().count(), 0);
 }
 
+#[tokio::test]
+async fn an_adapter_with_home_state_keeps_its_session_map_inside_each_principal() {
+    let t = T::new(&[]);
+    let original = std::fs::read_to_string(&t.adapter).unwrap();
+    std::fs::write(&t.adapter,original.replace("exec node", "mkdir -p \"$HOME/.pi/pi-acp\" || exit 21\necho map > \"$HOME/.pi/pi-acp/session-map.json\" || exit 22\nexec node")).unwrap();
+    let mut cfg = t.config();
+    cfg.acp.adapters = HashMap::from([("pi".into(), t.adapter.clone())]);
+    // Keep the shared-state case in this fixture even when the developer's process has a Pi
+    // configuration. A real process startup gets this value from its operator configuration.
+    cfg.acp.declared.insert(
+        "pi".into(),
+        steve_acp::Declaration {
+            properties: steve_acp::adapters::PropertiesPatch {
+                state: Some(steve_acp::adapters::StateDir {
+                    env: "PI_CODING_AGENT_DIR".into(),
+                    default: ".pi/agent".into(),
+                    home: Some("adapter-home".into()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            env: std::collections::BTreeMap::from([(
+                "PI_CODING_AGENT_DIR".into(),
+                t.root.join("shared-pi").display().to_string(),
+            )]),
+            ..Default::default()
+        },
+    );
+    let n = LocalNode::open(cfg).unwrap();
+    n.connect(t.sink.clone(), None);
+    n.prepare_workspace(now_cmd("op_prep_home", prepare_proj()))
+        .await
+        .unwrap();
+    assert!(ok(&finished(&n, "op_prep_home").await));
+    let mut expected = vec![];
+    for (session, dir) in [
+        ("pi_a", Some("default/a/pi")),
+        ("pi_b", Some("default/b/pi")),
+        ("pi_shared", None),
+    ] {
+        let mut b = open_body(session);
+        b.choice.harness = "pi".into();
+        b.choice.model = None;
+        b.policy.permissions = PermissionMode::FullAccess;
+        b.state = dir.map(|dir| HarnessState {
+            dir: dir.into(),
+            import_owner: false,
+        });
+        let op = format!("open_{session}");
+        n.open_session(now_cmd(&op, b)).await.unwrap();
+        let receipt = finished(&n, &op).await;
+        assert!(ok(&receipt), "{session}: {receipt:?}");
+        let home = dir
+            .map(|dir| t.home.join("state").join(dir).join("harness/adapter-home"))
+            .unwrap_or_else(|| t.root.join("shared-pi/adapter-home"));
+        assert_eq!(
+            std::fs::read_to_string(home.join(".pi/pi-acp/session-map.json")).unwrap(),
+            "map\n"
+        );
+        expected.push(home.display().to_string());
+    }
+    let homes: Vec<String> = std::fs::read_to_string(&t.log)
+        .unwrap()
+        .lines()
+        .filter_map(|l| {
+            serde_json::from_str::<serde_json::Value>(l).ok()?["spawn"]["env"]["HOME"]
+                .as_str()
+                .map(String::from)
+        })
+        .collect();
+    assert_eq!(homes, expected);
+    assert!(
+        !t.root.join(".pi/pi-acp/session-map.json").exists(),
+        "the operator HOME is not used by the bridge"
+    );
+    n.shutdown().await;
+}
+
 /// Harness parity S1: an adapter of one's own, declared with nothing but a command and a name,
 /// is in discovery with what its `initialize` and a scratch session said; one that cannot start is
 /// reported, not refused.

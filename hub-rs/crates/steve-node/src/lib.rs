@@ -14,6 +14,7 @@
 mod acp_job;
 mod actor;
 mod adapter_probe;
+mod adapter_setup;
 mod adapter_updates;
 mod artifact;
 mod attachments;
@@ -338,6 +339,17 @@ struct HomeLock(std::fs::File);
 
 impl HomeLock {
     fn take(home: &Path) -> ApiResult<HomeLock> {
+        let until = std::time::Instant::now() + Duration::from_millis(200);
+        Self::take_retry(home, || {
+            if std::time::Instant::now() >= until {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+            true
+        })
+    }
+
+    fn take_retry(home: &Path, mut again: impl FnMut() -> bool) -> ApiResult<HomeLock> {
         use std::os::fd::AsRawFd;
         let f = std::fs::OpenOptions::new()
             .create(true)
@@ -345,11 +357,19 @@ impl HomeLock {
             .write(true)
             .open(home.join("node.lock"))
             .map_err(|e| ApiError::new(ErrorCode::Internal, format!("node lock: {e}")))?;
-        if unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
-            return Err(ApiError::new(
-                ErrorCode::Conflict,
-                "another node runs on this home",
-            ));
+        // A concurrent fork briefly inherits even a CLOEXEC descriptor until exec. After the
+        // old Node closes, that small window must not turn an otherwise clean restart into a
+        // spurious second-Node conflict. A real holder still refuses this bounded acquisition.
+        loop {
+            if unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+                break;
+            }
+            if !again() {
+                return Err(ApiError::new(
+                    ErrorCode::Conflict,
+                    "another node runs on this home",
+                ));
+            }
         }
         Ok(HomeLock(f))
     }
@@ -363,6 +383,41 @@ impl Drop for HomeLock {
         // the same flock. The last Node owner has quiesced: release its lock explicitly,
         // independently of when an unrelated child closes its inherited descriptor.
         unsafe { libc::flock(self.0.as_raw_fd(), libc::LOCK_UN) };
+    }
+}
+
+#[cfg(test)]
+mod home_lock_tests {
+    use super::*;
+
+    #[test]
+    fn a_live_holder_is_refused_and_a_short_inherited_descriptor_does_not_break_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let lease = HomeLock::take(dir.path()).unwrap();
+        assert!(matches!(
+            HomeLock::take(dir.path()),
+            Err(ApiError {
+                code: ErrorCode::Conflict,
+                ..
+            })
+        ));
+        // dup holds the same open-file description as fork would. Close it at the retry
+        // boundary (exec's CLOEXEC), without relying on a child being scheduled within 200 ms.
+        let mut inherited = Some(lease.0.try_clone().unwrap());
+        drop(lease);
+        let until = std::time::Instant::now() + Duration::from_secs(5);
+        let next = HomeLock::take_retry(dir.path(), || {
+            drop(inherited.take());
+            // Other parallel tests can themselves be between fork and exec. Their CLOEXEC
+            // copies are not this test's clock; production still uses the 200 ms bound above.
+            std::thread::yield_now();
+            std::time::Instant::now() < until
+        });
+        assert!(
+            next.is_ok(),
+            "a short inherited descriptor must clear within acquisition: {}",
+            next.err().map(|e| e.safe_detail).unwrap_or_default()
+        );
     }
 }
 
@@ -419,6 +474,10 @@ pub(crate) struct Inner {
     adapter_probes: adapter_probe::AdapterProbes,
     /// The adapters Steve installed, kept up to date ([`adapter_updates`]).
     adapter_updates: adapter_updates::AdapterUpdates,
+    /// Admission for prefix mutations and new execution, shared by explicit installs and the
+    /// daily updater. Held only while inspecting/reserving work, never across an await.
+    adapter_maintenance: Mutex<Option<String>>,
+    adapter_io: tokio::sync::RwLock<()>,
     imports: history::Imports,
     research: research::Research,
     /// The OS sandbox around what this Node starts for runs ([`confine`]).
@@ -1412,6 +1471,8 @@ impl LocalNode {
             probes: Default::default(),
             adapter_probes: Default::default(),
             adapter_updates: Default::default(),
+            adapter_maintenance: Mutex::new(None),
+            adapter_io: tokio::sync::RwLock::new(()),
             imports: Default::default(),
             session_capacity: AtomicUsize::new(cfg.capacity.sessions as usize),
             cfg,
@@ -1525,11 +1586,7 @@ impl LocalNode {
                 if inner.closed.load(Ordering::SeqCst) {
                     return;
                 }
-                let idle = || {
-                    inner.actors.lock().unwrap().is_empty()
-                        && inner.job_stops.lock().unwrap().is_empty()
-                };
-                let (waiting, installed) = inner.adapter_updates.check(&inner.cfg.acp, idle).await;
+                let (waiting, installed) = inner.adapter_updates.check(&inner).await;
                 if installed {
                     // the next probe asks the new release
                     inner.adapter_probes.forget().await;
@@ -1666,6 +1723,7 @@ impl LocalNode {
     ) -> ApiResult<(Receipt, bool)> {
         c.check_window()?;
         let digest = c.digest(method)?;
+        let mut maintenance = self.0.adapter_maintenance.lock().unwrap();
         let r = self.0.j.tx(|t| {
             if let Some(op) = t.op(&c.id)? {
                 return if op.digest == digest && op.method == method {
@@ -1698,6 +1756,25 @@ impl LocalNode {
                 method,
                 "cancel" | "abandon" | "recover" | "release_session" | "resolve_permission"
             );
+            if maintenance.is_some() && !control {
+                // Different HTTP requests during the same setup observe its one operation.
+                if method == "install_harness"
+                    && let Some(harness) =
+                        serde_json::to_value(&c.body).map_err(internal)?["harness"].as_str()
+                    && let Some(prior) = t.installation(harness)?
+                    && !prior.state.is_finished()
+                    && !matches!(prior.state, Observed::Unknown { .. })
+                {
+                    return Ok((prior, false));
+                }
+                return Err(ApiError::new(
+                    ErrorCode::Busy,
+                    "adapter installation or upgrade is in progress; retry after it finishes",
+                ));
+            }
+            if !control {
+                adapter_setup::no_orphan_installer(t)?;
+            }
             let bytes = serde_json::to_vec(&c.body).map_err(internal)?.len() as u64;
             let (used, limit) = (t.payload_bytes()?, self.0.journal_limit(t)?);
             let taken = if control {
@@ -1734,6 +1811,14 @@ impl LocalNode {
             )?;
             t.save_spec(&c.id, &c.body)?;
             emit_all(&self.0, t, d.events)?;
+            if method == "install_harness" {
+                *maintenance = Some(
+                    serde_json::to_value(&c.body).map_err(internal)?["harness"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_string(),
+                );
+            }
             Ok((receipt, true))
         })?;
         self.0.wake.notify_one();
@@ -1766,6 +1851,17 @@ impl LocalNode {
             ));
         }
         Ok(())
+    }
+
+    fn check_harness_policy(&self, harness: &str, p: &ExecutionPolicy) -> ApiResult<()> {
+        self.check_policy(p)?;
+        self.0
+            .cfg
+            .acp
+            .adapter_properties(harness)
+            .permission_policy
+            .check(p.permissions)
+            .map_err(|e| ApiError::new(ErrorCode::Unsupported, e))
     }
 
     fn check_limits(l: &Limits) -> ApiResult<()> {
@@ -2247,7 +2343,7 @@ impl SessionExecutor for LocalNode {
         let (r, fresh) = self.accept("open_session", &c, |t| {
             let o = &c.body;
             self.check_harness(&o.choice.harness)?;
-            self.check_policy(&o.policy)?;
+            self.check_harness_policy(&o.choice.harness, &o.policy)?;
             McpServer::check_all(&o.mcp_servers)?;
             Skill::check_all(&o.skills)?;
             let w = t
@@ -2333,7 +2429,7 @@ impl SessionExecutor for LocalNode {
                     "another harness needs another session",
                 ));
             }
-            self.check_policy(&b.policy)?;
+            self.check_harness_policy(&b.choice.harness, &b.policy)?;
             row.open.choice = b.choice.clone();
             row.open.policy = b.policy.clone();
             row.view.phase = SessionPhase::Opening;
@@ -2382,7 +2478,7 @@ impl SessionExecutor for LocalNode {
                 ));
             }
             Self::workspace_free(t, &w.resource)?;
-            self.check_policy(&tu.run.policy)?;
+            self.check_harness_policy(&tu.run.choice.harness, &tu.run.policy)?;
             Self::check_limits(&tu.run.limits)?;
             Self::idle(t, &tu.session)?;
             if t.unacked_bytes()? > self.0.cfg.storage.quota {
@@ -2484,6 +2580,15 @@ impl JobExecutor for LocalNode {
     /// ends with its answer; a research job is [`Self::start_research`]'s.
     async fn start_job(&self, c: Command<JobSpec>) -> ApiResult<Receipt> {
         self.0.cfg.ceiling.check_jobs()?;
+        // Research has its own sandbox guarantees (including a harness's own read-only
+        // sandbox), so only the adapter's declared permission policy is common admission.
+        self.0
+            .cfg
+            .acp
+            .adapter_properties(&c.body.run.choice.harness)
+            .permission_policy
+            .check(c.body.run.policy.permissions)
+            .map_err(|e| ApiError::new(ErrorCode::Unsupported, e))?;
         if let JobWork::Research(_) = &c.body.work {
             return self.start_research(c).await;
         }
@@ -2506,7 +2611,7 @@ impl JobExecutor for LocalNode {
                     format!("no harness {} runs jobs on this node", j.run.choice.harness),
                 ));
             }
-            self.check_policy(&j.run.policy)?;
+            self.check_harness_policy(&j.run.choice.harness, &j.run.policy)?;
             Self::check_limits(&j.run.limits)?;
             if t.unacked_bytes()? > self.0.cfg.storage.quota {
                 return Err(ApiError::new(
@@ -3904,7 +4009,104 @@ impl Discovery for LocalNode {
             Ok(())
         })
     }
-
+    async fn install_harness(&self, c: Command<InstallHarness>) -> ApiResult<Receipt> {
+        self.0.cfg.ceiling.check_exec()?;
+        let harness = c.body.harness.clone();
+        let cfg = &self.0.cfg.acp;
+        // Same operation must keep returning its receipt (or a content conflict), even if its
+        // prerequisites no longer match the current installation.
+        if self.0.j.read(|t| t.op(&c.id))?.is_some() {
+            return self
+                .accept("install_harness", &c, |_| unreachable!())
+                .map(|(r, _)| r);
+        }
+        if !cfg.managed_adapter(&harness) || steve_acp::adapters::components(&harness).is_empty() {
+            return Err(ApiError::new(
+                ErrorCode::Unsupported,
+                "only built-in components in this Node's configured managed prefix may be installed; custom commands are left untouched",
+            ));
+        }
+        // A lost HTTP response may be retried after npm already finished. Installation is
+        // idempotent then too; an explicit upgrade remains the updater/operator CLI's job.
+        if let Some(prior) = self.0.j.read(|t| t.installation(&harness))?
+            && matches!(
+                prior.state,
+                Observed::Finished {
+                    outcome: Outcome::Succeeded,
+                    ..
+                }
+            )
+            && adapter_setup::complete(cfg, &harness).is_ok()
+        {
+            return Ok(prior);
+        }
+        let req = adapter_setup::requirements(cfg, &harness).await;
+        if let Some(e) = req.node_error.or(req.npm_error) {
+            return Err(ApiError::new(ErrorCode::Unsupported, e));
+        }
+        let mut prefix = None;
+        let (r, fresh) = self.accept("install_harness", &c, |t| {
+            adapter_setup::idle(t)?;
+            prefix = Some(
+                steve_acp::managed::prefix_lock(&cfg.steve_home, true)
+                    .map_err(|e| ApiError::new(ErrorCode::Busy, e))?,
+            );
+            t.set_installation(&harness, &c.id)?;
+            let mut d = Decided::accepted();
+            d.state = Observed::Running;
+            Ok(d)
+        })?;
+        if fresh {
+            let inner = self.0.clone();
+            let op = c.id.clone();
+            let npm = req.npm.expect("checked");
+            let lease = adapter_setup::Lease::held(inner.clone(), prefix.expect("reserved"));
+            let started = self.spawn_owned(async move {
+                let _lease = lease;
+                let io = inner.adapter_io.write().await;
+                let result = adapter_setup::install_packages(
+                    inner.clone(),
+                    npm,
+                    steve_acp::managed::packages(&harness),
+                    _lease.prefix(),
+                )
+                .await
+                .and_then(|()| adapter_setup::complete(&inner.cfg.acp, &harness))
+                .and_then(|()| {
+                    steve_acp::managed::add_selection(&inner.cfg.acp.steve_home, &harness)
+                });
+                let state = match result {
+                    Ok(()) => Observed::Finished {
+                        outcome: Outcome::Succeeded,
+                        result: Some(OperationResult::Unit),
+                        error: None,
+                    },
+                    Err(e) => Observed::Finished {
+                        outcome: Outcome::Failed,
+                        result: None,
+                        error: Some(ApiError::new(ErrorCode::Internal, e)),
+                    },
+                };
+                if inner.j.tx(|t| t.set_state(&op, &state)).is_err() {
+                    inner.fault();
+                }
+                inner.adapter_probes.forget().await;
+                drop(io);
+                inner.wake.notify_one();
+            });
+            if !started {
+                self.0.j.tx(|t| {
+                    t.set_state(
+                        &c.id,
+                        &Observed::Unknown {
+                            reason: "Node shut down before installation started".into(),
+                        },
+                    )
+                })?;
+            }
+        }
+        Ok(r)
+    }
     async fn vitals(&self) -> ApiResult<NodeVitals> {
         let roots = self.0.roots();
         let sessions = self.0.actors.lock().unwrap().len() as u32;
@@ -3921,18 +4123,37 @@ impl Discovery for LocalNode {
                 Err(_) => Default::default(),
             }
         };
-        let adapters = self
-            .0
-            .adapter_probes
-            .get(&self.0.cfg.acp, &self.0.cfg.home, fresh);
+        let adapters = async {
+            if self.0.adapter_maintenance.lock().unwrap().is_some() {
+                return self.0.adapter_probes.cached().await;
+            }
+            let _io = self.0.adapter_io.read().await;
+            if self.0.adapter_maintenance.lock().unwrap().is_some() {
+                self.0.adapter_probes.cached().await
+            } else {
+                self.0
+                    .adapter_probes
+                    .get(&self.0.cfg.acp, &self.0.cfg.home, fresh)
+                    .await
+            }
+        };
         let (probed, adapters) = tokio::join!(binaries, adapters);
+        let mut requirements = HashMap::new();
+        for id in self.0.cfg.acp.adapters.keys() {
+            if !steve_acp::adapters::components(id).is_empty() {
+                requirements.insert(
+                    id.clone(),
+                    adapter_setup::requirements(&self.0.cfg.acp, id).await,
+                );
+            }
+        }
         let mut harnesses: Vec<HarnessCapability> = self
             .0
             .cfg
             .acp
             .adapters
             .keys()
-            .map(|h| {
+            .map(|h| -> ApiResult<HarnessCapability> {
                 let p = probed.get(h).cloned().unwrap_or_default();
                 // For `probe_initialize: false` adapters (`adapters.get(h)` is `None`), check
                 // whether the binary is actually present so `c.sessions` reflects reality;
@@ -3964,18 +4185,31 @@ impl Discovery for LocalNode {
                     models: p.models,
                     resume: true,
                     cancel: true,
-                    permissions: true,
+                    permissions: self.0.cfg.acp.adapter_properties(h).permission_policy
+                        == steve_acp::adapters::PermissionPolicy::Acp,
                     images: true,
                     enforcement: vec![],
                     adapter: None,
+                    setup: None,
                 };
                 adapter_probe::apply(&self.0.cfg.acp, &mut c, adapters.get(h));
                 if let Some(a) = c.adapter.as_mut() {
                     a.update = self.0.adapter_updates.get(&self.0.cfg.acp, h);
                 }
-                c
+                if let Some(req) = requirements.get(h) {
+                    c.setup = adapter_setup::setup(&self.0, h, adapters.get(h), req)?;
+                    if let Some(version) = c
+                        .setup
+                        .as_ref()
+                        .and_then(|s| s.components.iter().find(|c| c.id != "adapter"))
+                        .and_then(|c| c.version.clone())
+                    {
+                        c.version = version;
+                    }
+                }
+                Ok(c)
             })
-            .collect();
+            .collect::<ApiResult<_>>()?;
         harnesses.sort_by(|a, b| a.name.cmp(&b.name));
         Ok(Capabilities {
             node: self.0.cfg.node.clone(),

@@ -26,6 +26,74 @@ pub struct HarnessCapability {
     /// Nodes send none: their two built-in harnesses as they always were.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub adapter: Option<AdapterInfo>,
+    /// Component discovery and controlled setup. Absent on older Nodes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub setup: Option<HarnessSetup>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SetupState {
+    NotInstalled,
+    Installing,
+    Ready,
+    Unavailable,
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HarnessComponent {
+    pub id: String,
+    pub name: String,
+    pub package: String,
+    pub installed: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    /// Evidence for this expected component's integrity, independent of session readiness.
+    /// Older Nodes omit it; `installed` remains the compatibility fallback.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<ComponentStatus>,
+    /// Another executable discovered on the Node. Read-only evidence: it does not replace
+    /// `path`, complete a managed installation, or change the command used for sessions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detected: Option<DetectedComponent>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ComponentStatus {
+    Installed,
+    Missing,
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DetectedComponent {
+    pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HarnessSetup {
+    pub state: SetupState,
+    pub components: Vec<HarnessComponent>,
+    pub can_install: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub help: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// Install only the trusted components of a built-in id into the Node's configured prefix.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InstallHarness {
+    pub harness: String,
 }
 
 /// A harness adapter as its Node knows it (harness parity S1).
@@ -292,4 +360,26 @@ pub struct ImportedPage {
     pub events: Vec<NodeEvent>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next: Option<Cursor>,
+}
+
+#[cfg(test)]
+mod component_tests {
+    use super::*;
+
+    #[test]
+    fn optional_component_evidence_accepts_old_peers_and_preserves_new_fields() {
+        let old =
+            serde_json::json!({"id":"adapter","name":"ACP","package":"pkg","installed":false});
+        let c: HarnessComponent = serde_json::from_value(old.clone()).unwrap();
+        assert_eq!(c.status, None);
+        assert_eq!(c.detected, None);
+        assert_eq!(serde_json::to_value(c).unwrap(), old);
+        let mut new = old;
+        new["status"] = serde_json::json!("unknown");
+        new["detected"] = serde_json::json!({"path":"/opt/example/bin/agent","version":"1.2.3"});
+        let c: HarnessComponent = serde_json::from_value(new.clone()).unwrap();
+        assert_eq!(c.status, Some(ComponentStatus::Unknown));
+        assert!(!c.installed);
+        assert_eq!(serde_json::to_value(c).unwrap(), new);
+    }
 }

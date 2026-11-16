@@ -26,6 +26,7 @@ import { GitHubMoreRow } from "@/github/index"
 import { HubMore } from "@/hub-ui"
 import { lazyView } from "@/lazy"
 import { HarnessMark } from "@/components/harness-mark"
+import { RuntimeAvailability, RuntimePermissionNotice, RuntimeSetupLink } from "@/runtime-access"
 import { Sheet, SheetContent, SheetTitle } from "@/components/ui/sheet"
 import { useIsMobile } from "@/hooks/use-mobile"
 import { SessionPanel } from "@/session/panel"
@@ -308,9 +309,13 @@ export function ForkDialog({ k, at }: { k: string; at: number }) {
     </Modal>
   )
 }
-export function NewItemDialog({ project: pre }: { project?: string } = {}) {
+export function NewItemDialog({ project: pre, bot: preBot }: { project?: string; bot?: string } = {}) {
   const t = useT()
-  const [g, setG] = useState(""), [mode, setMode] = useState<"start" | "propose">("start"), [bot, setBot] = useState("auto"), [proj, setProj] = useState(pre ?? "auto"), [busy, setBusy] = useState(false)
+  const [g, setG] = useState(""), [mode, setMode] = useState<"start" | "propose">("start"), [bot, setBot] = useState(preBot ?? "auto"), [proj, setProj] = useState(pre ?? "auto"), [busy, setBusy] = useState(false)
+  const selected = st.bots[bot]
+  // The execution target is resolved by the backend. Hub-local probes cannot admit or reject it.
+  // A proposal creates a decision, without opening a session.
+  const canSubmit = mode === "propose" || bot === "auto" || !!selected?.on
   /* one send idempotency key while the form stays the same: a retry after a lost answer makes no second item */
   const sendKey = useRef<{ form: string; id: string } | null>(null)
   const clientId = () => {
@@ -320,15 +325,17 @@ export function NewItemDialog({ project: pre }: { project?: string } = {}) {
   }
   return (
     <Modal open title={t("views:newItem.title")} desc={t("views:newItem.desc")}
-      footer={<><Button variant="outline" onClick={closeSheet}>{t("common:action.cancel")}</Button><Button data-testid="new-go" disabled={!g.trim() || busy} onClick={async () => {
+      footer={<><Button variant="outline" onClick={closeSheet}>{t("common:action.cancel")}</Button><Button data-testid="new-go" disabled={!g.trim() || busy || !canSubmit} onClick={async () => {
         setBusy(true); const id = await newItem(g.trim(), bot === "auto" ? undefined : bot, proj === "auto" ? undefined : proj === "none" ? null : proj, mode, clientId())
         setBusy(false); if (id) { closeSheet(); go("#/items/" + id) } }}>{busy && <Spinner className="size-3.5" />}{t("views:newItem.create")}</Button></>}>
       <FieldGroup className="gap-4">
         <Field><FieldLabel htmlFor="new-goal">{t("views:newItem.goal")}</FieldLabel><Textarea id="new-goal" autoFocus className="min-h-24 rounded-lg" placeholder={t("views:newItem.goalPlaceholder")} value={g} onChange={(e) => setG(e.target.value)} /></Field>
         <div className="grid grid-cols-2 gap-3">
-          <Field><FieldLabel>{t("views:newItem.bot")}</FieldLabel><Select testId="new-bot" value={bot} onChange={setBot} options={[{ v: "auto", l: t("views:newItem.auto") }, ...Object.keys(st.bots).filter((k) => st.bots[k].on).map((k) => ({ v: k, l: <BotName k={k} /> }))]} /></Field>
+          <Field><FieldLabel>{t("views:newItem.bot")}</FieldLabel><Select testId="new-bot" value={bot} onChange={setBot} options={[{ v: "auto", l: t("views:newItem.auto") }, ...Object.keys(st.bots).filter((k) => st.bots[k].on).map((k) => ({ v: k, l: <span><BotName k={k} /> · {runtimeName(st.bots[k].harness) ?? st.bots[k].harness}</span> }))]} /></Field>
           <Field><FieldLabel>{t("views:newItem.project")}</FieldLabel><Select testId="new-project" value={proj} onChange={setProj} options={[{ v: "auto", l: t("views:newItem.auto") }, ...st.projects.map((p) => ({ v: p.id, l: p.name })), { v: "none", l: t("views:newItem.noProject") }]} /></Field>
         </div>
+        {selected && <><RuntimeAvailability harness={selected.harness} /><RuntimePermissionNotice harness={selected.harness} mode={selected.permMode} /></>}
+        {!selected && <div className="type-footnote text-muted-foreground"><p>{t("shell:runtimeSetup.chooseBot")} · {t("shell:runtimeSetup.targetPending")}</p><RuntimeSetupLink /></div>}
         <Field><FieldLabel>{t("views:newItem.mode")}</FieldLabel><ChoiceCards value={mode} onChange={setMode} options={[{ v: "start", t: t("views:newItem.start"), d: t("views:newItem.startDesc") }, { v: "propose", t: t("views:newItem.propose"), d: t("views:newItem.proposeDesc") }]} /></Field>
       </FieldGroup>
     </Modal>
