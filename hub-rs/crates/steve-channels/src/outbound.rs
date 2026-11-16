@@ -826,6 +826,31 @@ fn source_in(c: &Connection, row: &OutRow, source: &str) -> ChannelResult<Option
     .optional()?)
 }
 
+/// The space as outbound `row` goes out: through the identity of its sender's account there (your
+/// own account answering a trigger word, also where a bot is the voice), else through the space's
+/// voice. `None` for an answer to a trigger word whose account is no longer in the chat: it goes
+/// out as you or not at all.
+pub(crate) fn sending_space(c: &Connection, row: &OutRow) -> ChannelResult<Option<SpaceRow>> {
+    let mut space = spaces::get(c, &row.space_id)?.ok_or_else(|| ApiError::not_found("空间"))?;
+    let conn: Option<String> = match &row.sender_account_id {
+        Some(acc) => c
+            .query_row(
+                "SELECT i.connection_id FROM space_identities i JOIN connections cn ON cn.id = i.connection_id
+                  WHERE i.space_id = ? AND cn.account_id = ? AND i.left_at IS NULL ORDER BY i.joined LIMIT 1",
+                params![row.space_id, acc],
+                |r| r.get(0),
+            )
+            .optional()?,
+        None => None,
+    };
+    match conn {
+        Some(conn) => space.connection_id = conn,
+        None if row.on_behalf == "proxy" => return Ok(None),
+        None => {}
+    }
+    Ok(Some(space))
+}
+
 /// Checks the authorization of `row` against the store. `Err` carries the reason for the audit.
 pub fn verify(
     c: &Connection,
@@ -833,7 +858,9 @@ pub fn verify(
     auth: &Auth,
     now: i64,
 ) -> ChannelResult<Result<(), String>> {
-    let space = spaces::get(c, &row.space_id)?.ok_or_else(|| ApiError::not_found("空间"))?;
+    let Some(space) = sending_space(c, row)? else {
+        return Ok(Err("not in the chat".into()));
+    };
     let (account, mode) = bindings::connection_account(c, &row.ws, &space.connection_id)?;
     if row.sender_account_id.as_deref() != Some(account.as_str()) {
         return Ok(Err("sender".into()));
@@ -893,8 +920,19 @@ pub fn verify(
             let names = mention_names(c, source)?;
             match (t, source_in(c, row, source)?) {
                 (Some(t), Some((_, Some(sender), text))) => {
+                    // the sender as the trigger's `who` sees them: you, or a chosen contact
+                    let party: Option<String> = c
+                        .query_row(
+                            "SELECT sender_party_id FROM chan_messages WHERE id = ?",
+                            [source],
+                            |r| r.get(0),
+                        )
+                        .optional()?
+                        .flatten();
+                    let you = sender == account
+                        || crate::arbiter::from_you(c, &row.ws, Some(&sender), party.as_deref())?;
                     !blocked
-                        && sender == account
+                        && t.allows(you, party.as_deref())
                         && t.instruction(&space.id, dm, &text, &names).is_some()
                 }
                 _ => false,
@@ -1147,7 +1185,8 @@ impl Outbox {
             }
         }
         let now = ch.now();
-        let proxy = req.purpose == Purpose::Trigger;
+        // said as you on your trigger word (its answer, its item's ack, progress and end)
+        let proxy = req.purpose == Purpose::Trigger || matches!(req.auth, Auth::Trigger { .. });
         // 2. authorization
         let leak = res.verdict != Verdict::Pass;
         let direct = !leak && !req.approve && direct_ok(p.mode, &req.auth);
@@ -1259,16 +1298,11 @@ impl Outbox {
     }
 
     /// The final text: the persona's signature, or “（由 Steve 代发）” after your trigger words.
-    fn final_text(c: &Connection, row: &OutRow, conn: &str) -> ChannelResult<String> {
+    fn final_text(c: &Connection, row: &OutRow) -> ChannelResult<String> {
         let mut text = row.text.trim_end().to_string();
-        if row.on_behalf == "proxy" {
-            let mark = spaces::channel_settings(c, &row.ws, conn)?
-                .map(|s| Trigger::from_value(&s.trigger).mark)
-                .unwrap_or(true);
-            if mark && !text.ends_with(PROXY_MARK) {
-                text.push_str(PROXY_MARK);
-            }
-        } else if let Some(pid) = &row.persona_id
+        // a trigger word's answer is marked `[AI] ` where it goes out (`send_as`), not here
+        if row.on_behalf != "proxy"
+            && let Some(pid) = &row.persona_id
             && let Some(p) = personas::get(c, pid)?
         {
             let sig = p.signature.trim();
@@ -1421,14 +1455,22 @@ impl Outbox {
 
         // what goes out, and whether it may
         let prep = ch.store().reader(|c| -> ChannelResult<_> {
-            let space = spaces::get(c, &row.space_id)?.ok_or_else(|| ApiError::not_found("空间"))?;
+            // as the account it was written for, or not at all (your answer, you no longer there)
+            let space = sending_space(c, &row)?
+                .ok_or_else(|| ApiError::rule("你的账号已经不在这个聊天里，不再回复"))?;
             let (account, mode) = bindings::connection_account(c, &row.ws, &space.connection_id)?;
+            // the answer to a trigger word: `[AI] `-marked and placed as its settings say
+            let trigger = (row.on_behalf == "proxy")
+                .then(|| spaces::channel_settings(c, &row.ws, &space.connection_id))
+                .transpose()?
+                .flatten()
+                .map(|s| Trigger::from_value(&s.trigger));
             let adapter: String = c.query_row(
                 "SELECT adapter FROM connections WHERE id = ?",
                 [&space.connection_id],
                 |r| r.get(0),
             )?;
-            let text = Self::final_text(c, &row, &space.connection_id)?;
+            let text = Self::final_text(c, &row)?;
             // `[AI] ` only on what YOLO approved in your name (your account, or your trigger words);
             // anything else loses a mark it brought along, so the mark cannot be faked
             let by_yolo = match auth {
@@ -1436,12 +1478,18 @@ impl Outbox {
                     .is_some_and(|d| b1::decided_by_yolo(&d.result)),
                 _ => false,
             };
-            let text = if by_yolo && (mode == Mode::Own || row.on_behalf == "proxy") {
+            let marked = trigger.as_ref().is_some_and(|t| t.mark);
+            let text = if marked || (by_yolo && (mode == Mode::Own || row.on_behalf == "proxy")) {
                 b1::with_ai_prefix(&text)
             } else {
                 b1::strip_ai_prefix(&text).to_string()
             };
             let kind = SpaceKind::parse(&space.kind).unwrap_or(SpaceKind::Group);
+            // a private chat has no threads to speak of: a quoting reply there
+            let in_thread = match &trigger {
+                Some(t) => t.reply == crate::rules::ReplyStyle::Thread && kind != SpaceKind::Dm,
+                None => reply_in_thread(kind, row.thread_key.as_deref()),
+            };
             // @ the person replied to in a group (bot accounts)
             let mut at = Vec::new();
             if mode == Mode::Bot && kind.is_group()
@@ -1461,9 +1509,9 @@ impl Outbox {
                     at.push(h);
                 }
             }
-            Ok((space, mode, adapter, text, kind, at))
+            Ok((space, mode, adapter, text, at, in_thread))
         });
-        let (space, mode, adapter, text, kind, at) = match prep {
+        let (space, mode, adapter, text, at, in_thread) = match prep {
             Ok(x) => x,
             Err(e) => return self.failed(ch, &row, &e.to_string(), claim),
         };
@@ -1521,7 +1569,6 @@ impl Outbox {
         let Some((text, at)) = attempted else {
             return Ok(SendOutcome::Skipped);
         };
-        let in_thread = reply_in_thread(kind, row.thread_key.as_deref());
         let sent: Result<Sent, ProviderError> = match (mode, self.as_user.get(&adapter)) {
             (Mode::Own, Some(u)) => {
                 let to = match &row.reply_to {
@@ -2058,6 +2105,23 @@ impl Outbox {
         let Some((plan, summary, mine)) = found else {
             return Ok(None);
         };
+        // an answer to your trigger word: its end is said as you, where the answer went
+        let as_trigger = ch.store().reader(|c| {
+            crate::command_skill::trigger_plan(c, &item.workspace_id, &plan.message_id)
+        })?;
+        if let Some(tp) = as_trigger {
+            let req = OutRequest {
+                target: crate::command_skill::target(ch, &tp)?,
+                text: done_text(&item.id, &summary),
+                purpose: Purpose::Done,
+                approve: false,
+                generation: None,
+                auth: Auth::Trigger {
+                    source: tp.message_id.clone(),
+                },
+            };
+            return Ok(Some(self.deliver_checked(ch, &req).await?.0));
+        }
         // in the owner's private chat with the bot it is Steve reporting to them: sent like a reply there (the
         // reply rule still has to allow it), not held as a draft; anywhere else it waits for the owner
         let req = OutRequest {
@@ -2097,16 +2161,41 @@ impl Outbox {
         let Some(plan) = plan else {
             return Ok(SRC_NO_SOURCE.into());
         };
-        let req = OutRequest {
-            target: OutTarget::reply(&plan),
-            text: text.into(),
-            purpose: Purpose::Source,
-            approve: plan.mode == Mode::Own,
-            generation: None,
-            auth: Auth::Rule {
-                source: plan.message_id.clone(),
-                act: Act::Reply,
-            },
+        // progress on an answer to your trigger word: said as you, where the answer went
+        let as_trigger = ch
+            .store()
+            .reader(|c| crate::command_skill::trigger_plan(c, ws, &plan.message_id))?;
+        let (plan, req) = match as_trigger {
+            Some(tp) => {
+                let req = OutRequest {
+                    target: crate::command_skill::target(ch, &tp)?,
+                    text: text.into(),
+                    // progress: the reaction stays until the item ends
+                    purpose: Purpose::Source,
+                    approve: false,
+                    generation: None,
+                    auth: Auth::Trigger {
+                        source: tp.message_id.clone(),
+                    },
+                };
+                (tp, Some(req))
+            }
+            None => (plan, None),
+        };
+        let req = if let Some(r) = req {
+            r
+        } else {
+            OutRequest {
+                target: OutTarget::reply(&plan),
+                text: text.into(),
+                purpose: Purpose::Source,
+                approve: plan.mode == Mode::Own,
+                generation: None,
+                auth: Auth::Rule {
+                    source: plan.message_id.clone(),
+                    act: Act::Reply,
+                },
+            }
         };
         let (d, r) = self.deliver_checked(ch, &req).await?;
         Ok(match d {

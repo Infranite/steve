@@ -1299,19 +1299,19 @@ fn rule_facts(
 }
 
 /// The inbound message as steps 4–7 need it.
-struct Stored {
-    external_id: String,
-    thread_key: Option<String>,
-    text: String,
-    sender_name: String,
+pub(crate) struct Stored {
+    pub(crate) external_id: String,
+    pub(crate) thread_key: Option<String>,
+    pub(crate) text: String,
+    pub(crate) sender_name: String,
     event_id: Option<String>,
     /// The names of the people mentioned (leading mentions are not part of trigger words).
-    mention_names: Vec<String>,
+    pub(crate) mention_names: Vec<String>,
     /// `chan_messages.attachments` as stored.
-    attachments: Value,
+    pub(crate) attachments: Value,
 }
 
-fn stored(c: &rusqlite::Connection, id: &str) -> ChannelResult<Stored> {
+pub(crate) fn stored(c: &rusqlite::Connection, id: &str) -> ChannelResult<Stored> {
     c.query_row(
         "SELECT m.external_id, m.thread_key, coalesce(m.text, ''), coalesce(nullif(a.display_name, ''), a.handle_display, p.name, ''), m.event_id, m.mentions, m.attachments
            FROM chan_messages m LEFT JOIN accounts a ON a.id = m.sender_account_id LEFT JOIN parties p ON p.id = m.sender_party_id
@@ -1359,6 +1359,14 @@ impl Channels {
     ) -> ChannelResult<Inbound> {
         let mut inbound = self.on_inbound(ws, conn, msg).await?;
         if inbound.duplicate {
+            // another identity stored it first (a bot of the same chat): a trigger word on your own
+            // account is still yours to answer, once
+            if !inbound.blocked
+                && !inbound.message_id.is_empty()
+                && inbound.next != Next::Record(LABEL_ECHO)
+            {
+                inbound.response = self.on_command(ws, conn, &inbound).await?;
+            }
             return Ok(inbound);
         }
         let r = self.respond(ws, conn, &inbound).await?;
@@ -1387,36 +1395,29 @@ impl Channels {
         {
             return Ok(Response::skipped(l));
         }
+        // 4. a trigger word on your own account: answered there, as you
+        if let Some(r) = self.on_command(ws, conn, inbound).await? {
+            return Ok(r);
+        }
         let store = self.store().clone();
-        let (cs, space, set, m, voice, cmd, voice_account) =
-            store.reader(|c| -> ChannelResult<_> {
-                let space = spaces::get(c, &inbound.space_id)?
-                    .ok_or_else(|| ApiError::not_found("空间"))?;
-                let voice = spaces::voice(c, &space.id)?;
-                let acting = voice.as_deref().unwrap_or(conn);
-                let (account, mode) = crate::bindings::connection_account(c, ws, acting)?;
-                let cs = spaces::channel_settings(c, ws, acting)?;
-                let set = spaces::settings(c, &space.id)?;
-                let m = stored(c, &inbound.message_id)?;
-                let cmd = crate::arbiter::command(
-                    c,
-                    ws,
-                    &space,
-                    inbound.sender_account_id.as_deref(),
-                    inbound.sender_party_id.as_deref(),
-                    &m.text,
-                    &m.mention_names,
-                )?;
-                Ok((
-                    cs.map(|s| (s.mode, s.rules)).unwrap_or((mode, json!([]))),
-                    space,
-                    set,
-                    m,
-                    voice,
-                    cmd,
-                    account,
-                ))
-            })?;
+        let (cs, space, set, m, voice, voice_account) = store.reader(|c| -> ChannelResult<_> {
+            let space =
+                spaces::get(c, &inbound.space_id)?.ok_or_else(|| ApiError::not_found("空间"))?;
+            let voice = spaces::voice(c, &space.id)?;
+            let acting = voice.as_deref().unwrap_or(conn);
+            let (account, mode) = crate::bindings::connection_account(c, ws, acting)?;
+            let cs = spaces::channel_settings(c, ws, acting)?;
+            let set = spaces::settings(c, &space.id)?;
+            let m = stored(c, &inbound.message_id)?;
+            Ok((
+                cs.map(|s| (s.mode, s.rules)).unwrap_or((mode, json!([]))),
+                space,
+                set,
+                m,
+                voice,
+                account,
+            ))
+        })?;
         let (mode, account_rules) = cs;
         let mut facts = inbound.facts.clone().unwrap_or_default();
         let mut plan = Plan {
@@ -1439,22 +1440,6 @@ impl Channels {
             trigger: None,
         };
 
-        // 4. your `/bot`, wherever it came in: the voice answers, else your web conversation
-        if let Some(instruction) = cmd {
-            if voice.is_none() {
-                let mut r = Response::skipped("你的指令，没有发言身份，转到网页对话");
-                r.by = respond::By::Trigger {
-                    instruction: instruction.clone(),
-                };
-                if let Err(e) = self.converse_web(&plan, &instruction).await {
-                    tracing::warn!(space = space.id, "command to the web conversation: {e}");
-                }
-                return Ok(r);
-            }
-            plan.act = rules::Act::Reply;
-            plan.trigger = Some(instruction);
-            return self.execute(&plan).await;
-        }
         // a reply in the thread an item came from, by whoever raised it or you: straight to that item,
         // past the gate and the rules — the thread is that item's conversation (decided by the user on
         // 2026-11-09). Anyone else's reply, and a closed item's, take the usual way below.

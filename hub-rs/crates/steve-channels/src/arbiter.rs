@@ -215,25 +215,47 @@ pub fn from_owner(
     Ok(false)
 }
 
-/// Your `/bot` command in `space`: the instruction after the trigger word, when the sender is you
-/// ([`from_you`]) — on your own account or received by a bot — the trigger is on and its scope (`*`,
-/// `dm:*`, space ids) covers this space. Leading mentions are skipped (`@Steve /bot …`); what Steve
-/// itself sent as you (the proxy mark) and other assistants' automatic replies never count.
+/// A trigger word in `space` received through connection `conn`: the instruction after it (may be
+/// empty), when `conn` is your own account (a `mode=self` connection of the user whose trigger it
+/// is — what a bot receives keeps the bot's own rules), the trigger is on, its scope (`*`, `dm:*`,
+/// space ids) covers this space and its `who` allows the sender (you, anyone, or chosen contacts).
+/// Leading mentions are skipped (`@张三 /ai …`); what Steve itself sent as you (`[AI]`, the proxy
+/// mark) and other assistants' automatic replies never count.
+#[allow(clippy::too_many_arguments)]
 pub fn command(
     c: &Connection,
     ws: &str,
     space: &SpaceRow,
+    conn: &str,
     sender_account: Option<&str>,
     sender_party: Option<&str>,
     text: &str,
     mention_names: &[String],
 ) -> ChannelResult<Option<String>> {
-    if looks_automated(text) || !from_you(c, ws, sender_account, sender_party)? {
+    if looks_automated(text) {
         return Ok(None);
     }
-    let Some(t) = spaces::your_trigger(c, ws)? else {
+    let Some((owner_conn, t)) = spaces::your_trigger_on(c, ws)? else {
         return Ok(None);
     };
+    // your own account: the connection the words are set on, or another self one of the same user
+    let yours: bool = c.query_row(
+        "SELECT ?1 = ?2 OR EXISTS (
+            SELECT 1 FROM channel_settings cs JOIN connections x ON x.id = cs.connection_id
+              JOIN accounts a ON a.id = x.account_id JOIN parties p ON p.id = a.party_id
+             WHERE cs.connection_id = ?1 AND cs.mode = 'self' AND p.user_id IS NOT NULL
+               AND p.user_id = (SELECT p2.user_id FROM connections x2 JOIN accounts a2 ON a2.id = x2.account_id
+                                  JOIN parties p2 ON p2.id = a2.party_id WHERE x2.id = ?2))",
+        rusqlite::params![conn, owner_conn],
+        |r| r.get(0),
+    )?;
+    if !yours {
+        return Ok(None);
+    }
+    let you = from_you(c, ws, sender_account, sender_party)?;
+    if !t.allows(you, sender_party) {
+        return Ok(None);
+    }
     let dm = space.kind == crate::channel::SpaceKind::Dm.code();
     Ok(t.instruction(&space.id, dm, text, mention_names))
 }

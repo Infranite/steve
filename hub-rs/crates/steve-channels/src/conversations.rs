@@ -215,7 +215,8 @@ impl Channels {
         meta["chan"]["owner_only"] = json!(owner_only);
         meta["chan"]["start"] = json!(start);
         let text = match (&plan.trigger, command) {
-            (Some(i), true) if !i.trim().is_empty() => i.clone(),
+            // a trigger word: the reply skill with the instruction
+            (Some(i), true) => crate::command_skill::turn(plan, i),
             _ => plan.text.clone(),
         };
         let text = if text.trim().is_empty() {
@@ -300,6 +301,13 @@ impl Channels {
         }
         if chan["command"] == true {
             plan.trigger = Some(m.text.clone());
+            // a trigger word is answered by the identity that took it (your own account there)
+            if chan["mode"] == "self"
+                && let Some(conn) = chan["connection"].as_str()
+            {
+                plan.connection_id = conn.to_string();
+                plan.mode = Mode::Own;
+            }
         }
         Ok(Some((chan, plan)))
     }
@@ -500,11 +508,12 @@ impl Channels {
         } else {
             Auth::None
         };
-        let mut target = OutTarget::reply(&plan);
-        if command && as_you {
-            // said as you in the chat, not as a reply to your own command
-            target.reply_to = None;
-        }
+        // the answer to a trigger word goes where its settings say (thread, quote or message)
+        let target = if command && as_you {
+            crate::command_skill::target(self, &plan)?
+        } else {
+            OutTarget::reply(&plan)
+        };
         let d = out
             .deliver(
                 self,

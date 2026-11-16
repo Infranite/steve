@@ -305,9 +305,8 @@ impl Replies {
         if let Some(a) = not_a_reply(ch, plan, &r)? {
             return Ok(Some(a));
         }
-        let mut target = OutTarget::reply(plan);
-        // said as you in the conversation, not as a reply to your own command
-        target.reply_to = None;
+        // where its settings say: the message's thread, a quoting reply, or a plain message
+        let target = crate::command_skill::target(ch, plan)?;
         let d = self
             .outbound
             .deliver(

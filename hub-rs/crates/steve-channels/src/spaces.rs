@@ -1053,6 +1053,25 @@ pub fn role_of(set: &SpaceSettings, rules: &Value, voice: Option<Mode>) -> Role 
     }
 }
 
+/// Your trigger settings with the connection of yours they were set on.
+pub fn your_trigger_on(
+    c: &Connection,
+    ws: &str,
+) -> ChannelResult<Option<(String, crate::rules::Trigger)>> {
+    let v: Option<(String, String)> = c
+        .query_row(
+            "SELECT connection_id, trigger FROM channel_settings WHERE workspace_id = ? AND mode = 'self' ORDER BY updated DESC LIMIT 1",
+            [ws],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    Ok(v.and_then(|(conn, s)| {
+        serde_json::from_str::<Value>(&s)
+            .ok()
+            .map(|v| (conn, crate::rules::Trigger::from_value(&v)))
+    }))
+}
+
 /// Your `/bot` settings (your own account's trigger words), wherever they were set.
 pub fn your_trigger(c: &Connection, ws: &str) -> ChannelResult<Option<crate::rules::Trigger>> {
     let v: Option<String> = c

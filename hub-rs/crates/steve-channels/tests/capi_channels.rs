@@ -434,7 +434,7 @@ async fn your_own_account_has_a_trigger_and_no_persona() {
     assert_eq!(a["persona"], Value::Null);
     assert_eq!(
         a["trigger"],
-        json!({"on": false, "words": ["/bot"], "where": ["*"], "mark": true}),
+        json!({"on": false, "words": ["/ai", "/bot"], "where": ["*"], "who": ["me"], "reply": "thread", "mark": true}),
         "nothing chosen reads as everywhere"
     );
     assert!(s(&a["platform_name"]).ends_with("（你本人）"));
@@ -479,7 +479,7 @@ async fn your_own_account_has_a_trigger_and_no_persona() {
     assert_eq!(st, 200, "{v}");
     assert_eq!(
         v["trigger"],
-        json!({"on": true, "words": ["/bot"], "where": ["dm:*"], "mark": true})
+        json!({"on": true, "words": ["/bot"], "where": ["dm:*"], "who": ["me"], "reply": "thread", "mark": true})
     );
     let (st, v) = h
         .call(
@@ -491,7 +491,7 @@ async fn your_own_account_has_a_trigger_and_no_persona() {
     assert_eq!(st, 200, "{v}");
     assert_eq!(
         v["trigger"],
-        json!({"on": true, "words": ["/bot", "/steve"], "where": ["dm:*"], "mark": false})
+        json!({"on": true, "words": ["/bot", "/steve"], "where": ["dm:*"], "who": ["me"], "reply": "thread", "mark": false})
     );
     assert_eq!(
         h.n(
