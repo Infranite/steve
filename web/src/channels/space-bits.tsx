@@ -83,6 +83,15 @@ export function doingLine(s: Space, a: ChannelAccount | null) {
   if (s.role === "observe") return t("channels:list.doing.observe")
   const self = (s.voice?.mode ?? a?.mode) === "self"
   const who = s.persona?.name ?? a?.persona?.name ?? t("channels:word.defaultPersona")
-  if (self) return t("channels:list.doing.draftSelf")
+  // in a group, rules that only act when you are @-mentioned (or in a private chat) record the rest
+  const onMention = s.kind !== "dm" && onlyOnMention(s.effective_rules)
+  if (self) return t(onMention ? "channels:list.doing.draftSelfMention" : "channels:list.doing.draftSelf")
+  if (onMention) return t(s.role === "draft" ? "channels:list.doing.draftMention" : "channels:list.doing.answerMention", { who })
   return t(s.role === "draft" ? "channels:list.doing.draft" : "channels:list.doing.answer", { who })
+}
+
+/** every rule that speaks (reply / draft / item / handoff) is for a mention or a private chat only */
+export function onlyOnMention(rules: { when: { kind: string }; act: string }[] | null | undefined) {
+  const speaking = (rules ?? []).filter((r) => r.act !== "record")
+  return speaking.length > 0 && speaking.every((r) => ["mention", "mention_or_dm", "dm", "reply_to_me"].includes(r.when.kind))
 }

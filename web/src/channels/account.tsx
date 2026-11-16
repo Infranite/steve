@@ -10,7 +10,7 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Switch } from "@/components/ui/switch"
 import { Spinner } from "@/components/ui/spinner"
-import { go, Page, Group, Row, SectionLabel, Segmented, Meta, Empty, StatusDot, Notice, Note, Pill, Blank } from "@/ui"
+import { go, Page, Group, Row, SectionLabel, Segmented, Meta, Empty, StatusDot, Notice, Note, Blank } from "@/ui"
 import { Clamp } from "@/auto/common"
 import { Select } from "@/view-shared"
 import { Unwired } from "@/unwired"
@@ -18,7 +18,8 @@ import { tm, toast } from "@/store"
 import { useLoad, useBusy } from "@/accounts/load"
 import { accountsApi, CONN_STATUS } from "@/api/accounts"
 import { channelsApi, TRIGGER_ALL_DMS, TRIGGER_EVERYWHERE, attentionOf, isDm, spaceTitle, type ChannelAccount, type Rule, type Space, type Trigger } from "@/api/channels"
-import { Name, SpaceAvatar, doingLine, kindLine } from "@/channels/space-bits"
+import { SpaceAvatar, kindLine } from "@/channels/space-bits"
+import { GroupedSpaces } from "@/channels/space-groups"
 import { Rules, ruleText, ruleOk } from "@/channels/rules"
 import { PersonaAvatar } from "@/channels/basis"
 import { PermissionList, SelfButtons } from "@/integrations/feishu"
@@ -69,11 +70,7 @@ export function AccountView({ id }: { id: string }) {
           <div className="type-footnote text-muted-foreground">{[c.health.last_error ? <Clamp key="e" text={c.health.last_error} lines={2} /> : null, c.health.last_ok ? t("channels:account.lastOk", { time: tm(c.health.last_ok) }) : ""].filter(Boolean).map((x, n) => <div key={n}>{x}</div>)}</div>
         </Notice>}
         <section><SectionLabel>{t("channels:account.spacesLabel", { n: a.spaces.length })}</SectionLabel>
-          {a.spaces.length ? <Group>{a.spaces.map((s) => (
-            <Row key={s.id} icon={<SpaceAvatar s={s} size={28} />} onClick={() => go("#/channels/space/" + s.id)} data-space-row={spaceTitle(s)}
-              title={<span className="flex min-w-0 items-center gap-1.5"><Name className={cn(attentionOf(s) !== "realtime" && "text-muted-foreground")}>{spaceTitle(s)}</Name>{s.has_external && <Pill className="font-normal">{t("channels:word.external")}</Pill>}{!s.configured && <Pill tone="attention">{t("channels:word.new")}</Pill>}</span>}
-              sub={<span className="block truncate">{[doingLine(s, a), s.duty].filter(Boolean).join(" · ")}</span>}><ChevronRightIcon className="size-4 text-tertiary" /></Row>))}</Group>
-            : <Blank>{t(me ? "channels:account.noSessions" : "channels:account.noGroups")}</Blank>}
+          <GroupedSpaces a={a} empty={t(me ? "channels:account.noSessions" : "channels:account.noGroups")} onChanged={() => void L.reload()} />
         </section>
         <section><SectionLabel>{t("channels:account.defaultRules")}</SectionLabel>
           {!me && <Group className="mb-2"><Row icon={<PersonaAvatar bot={a.personaBot} size={32} />} title={t("channels:account.defaultPersona", { name: a.persona?.name ?? "—" })} sub={a.editable ? t("channels:account.defaultPersonaSub") : t("channels:account.personaReadonly")} onClick={!a.editable && a.persona ? () => go("#/channels/personas/" + a.persona!.id) : undefined}>
