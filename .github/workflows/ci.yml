@@ -2,9 +2,11 @@ name: CI
 # One Rust job per platform compiles the workspace's tests and runs all of them on that runner.
 # Every job has a time limit of two to several times its longest run, so one that hangs is stopped
 # there instead of holding a runner for GitHub's six hours.
-# cut-release.py accepts only this entire workflow's successful run: the push run on the release head, or the
-# run of the pull request that head was merged from when it tested the same tree. Branch rules on main
-# require the `CI gate` check, by that name. `merge_group` lets GitHub's own merge queue run it too.
+# A pull request runs the Linux jobs (and the Apple job only when it touches the apps, the web client they
+# bundle or this workflow); macOS runners are scarce and were the queue every PR waited in. A push to main
+# and a merge queue run cover both platforms. cut-release.py releases only a head whose own push run passed,
+# so nothing reaches a release untested on macOS. Branch rules on main require the `CI gate` check, by that
+# name. `merge_group` lets GitHub's own merge queue run it too.
 on:
   pull_request:
   push:
@@ -20,7 +22,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        runner: [ubuntu-22.04, macos-15]
+        runner: ${{ fromJSON(github.event_name == 'pull_request' && '["ubuntu-22.04"]' || '["ubuntu-22.04", "macos-15"]') }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 10
     steps:
@@ -56,7 +58,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        runner: [ubuntu-22.04, macos-15]
+        runner: ${{ fromJSON(github.event_name == 'pull_request' && '["ubuntu-22.04"]' || '["ubuntu-22.04", "macos-15"]') }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 15
     steps:
@@ -77,10 +79,24 @@ jobs:
     permissions:
       actions: read
       contents: read
+      pull-requests: read
     outputs:
       skip: ${{ steps.decide.outputs.skip }}
+      apple: ${{ steps.apple.outputs.apple }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Whether the Apple apps need building (always outside pull requests)
+        id: apple
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          if [ "${{ github.event_name }}" != "pull_request" ]; then echo "apple=true" >> "$GITHUB_OUTPUT"; exit 0; fi
+          if gh api "repos/${{ github.repository }}/pulls/$PR/files" --paginate --jq '.[].filename' > files.txt; then
+            if grep -qE '^(apple/|web/|package(-lock)?\.json$|scripts/build-apple-client\.sh$|\.github/workflows/ci\.yml$)' files.txt; then echo "apple=true"; else echo "apple=false"; fi >> "$GITHUB_OUTPUT"
+          else
+            echo "apple=true" >> "$GITHUB_OUTPUT"
+          fi
       - name: Skip the Rust jobs when only release notes changed and CI passed on the commit it stands on
         id: decide
         env:
@@ -93,7 +109,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        runner: [ubuntu-22.04, macos-15]
+        runner: ${{ fromJSON(github.event_name == 'pull_request' && '["ubuntu-22.04"]' || '["ubuntu-22.04", "macos-15"]') }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
     env:
@@ -180,7 +196,7 @@ jobs:
   # Skipped with the Rust jobs when only release notes changed.
   apple:
     needs: changes
-    if: ${{ !cancelled() && needs.changes.outputs.skip != 'true' }}
+    if: ${{ !cancelled() && needs.changes.outputs.skip != 'true' && needs.changes.outputs.apple != 'false' }}
     runs-on: macos-15
     timeout-minutes: 30
     steps:
@@ -219,5 +235,8 @@ jobs:
           if changes['result'] == 'success' and changes['outputs'].get('skip') == 'true':
               for job in ('rust', 'apple'):
                   assert results.pop(job)['result'] in ('success', 'skipped'), results
+          # A pull request that does not touch the apps skips the Apple job, on the word of `changes` only.
+          elif changes['result'] == 'success' and changes['outputs'].get('apple') == 'false':
+              assert results.pop('apple')['result'] in ('success', 'skipped'), results
           assert all(job['result'] == 'success' for job in results.values()), results
           PY
