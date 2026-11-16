@@ -103,7 +103,8 @@ function Overview({ x }: { x: Integrations }) {
 
 /** “Steve 机器人 · 代你处理” and “缺 N 项权限”: who Steve works as in this installation, and its state (`bad`: what to fix) */
 export function installationLine(i: IInstallation, p: IProvider): { who: string; state: string; bad: boolean } {
-  const feishu = p.id === "feishu", has = (k: string) => i.identities.some((y) => y.kind === k)
+  // a channel service's installation has no bot to miss
+  const feishu = p.id === "feishu" && !i.identities.some((y) => !p.adapters.some((a) => a.id === y.connection.adapter)), has = (k: string) => i.identities.some((y) => y.kind === k)
   const offers = (k: string) => p.adapters.some((a) => (a.identity === "bot" || a.identity === "app" ? "steve" : "you") === k)
   const parts: string[] = []
   if (has("steve")) parts.push(feishu ? tr("integrations:line.steveBot") : tr("integrations:line.steveSelf"))

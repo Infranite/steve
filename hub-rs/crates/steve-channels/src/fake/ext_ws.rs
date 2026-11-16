@@ -48,6 +48,8 @@ pub struct World {
     pub versions: Vec<u32>,
     pub features: Vec<String>,
     pub connector: Option<Value>,
+    /// hello `platform` (§16); `None`: not said.
+    pub platform: Option<String>,
     pub connector_results: HashMap<String, Value>,
     /// Execute one connector write, then close before its response (unknown outcome).
     pub lose_connector_response: bool,
@@ -175,6 +177,7 @@ impl FakeExtWs {
             .map(|s| s.to_string())
             .collect(),
             connector: None,
+            platform: None,
             connector_results: HashMap::new(),
             lose_connector_response: false,
             limits: json!({"max_frame_bytes": 1_048_576, "max_text_bytes": 153_600,
@@ -511,6 +514,9 @@ fn answer(
                         "write_policy": w.write_policy, "connector": w.connector});
                     if let Some(identity) = &w.identity {
                         result["identity"] = identity.clone().into();
+                    }
+                    if let Some(platform) = &w.platform {
+                        result["platform"] = platform.clone().into();
                     }
                     Ok(result)
                 }

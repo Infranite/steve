@@ -774,3 +774,21 @@
 //!
 //! This is only a generic identity/transport prerequisite: no built-in platform is migrated or
 //! removed, and no notification defaults or existing platform adoption workflow changes.
+//!
+//! ## 16. Platform (2026-11-16)
+//!
+//! The hello result MAY add a top-level `platform`: the messaging platform the service reaches,
+//! named by a provider id of the Hub (`"feishu"` for 飞书 / Lark), `[a-z0-9._-]`, 1–64 bytes. A
+//! service that reaches a platform the Hub also connects natively says so, and its connection is
+//! listed under that platform on the 接入 page as one more identity there (a self service: you,
+//! through the service), beside and independent of any bot the platform has. Nothing else changes:
+//! the connection keeps its own adapter, account system (`ext_ws`, `realm:kind:value` handles),
+//! capabilities and write rules.
+//!
+//! - Absent, malformed, or a provider no adapter of this Hub presents: listed under 其他聊天工具,
+//!   as before.
+//! - The Hub stores it in the connection's `config` (`platform`) when connecting and keeps it current
+//!   on every connect, so a service that starts or stops saying it is regrouped without a new
+//!   connection. It is not part of the identity: a change is never `account_changed`.
+//! - The service, not the Hub, is in control of the connection: the user starts it, then registers
+//!   its address and token in the Hub (or the plugin store does both); the Hub dials it.

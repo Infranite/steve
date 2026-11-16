@@ -52,7 +52,8 @@ pub use cx::{AccessToken, ConnCx, StartCx};
 pub use decision::ConnectionDecision;
 pub use fake::FakeProvider;
 pub use integration::{
-    CapSpec, CapState, Integration, IntegrationsOut, ScopeSpec, installation_key,
+    CapSpec, CapState, Integration, IntegrationsOut, PLATFORM_KEY, ScopeSpec, installation_key,
+    listed_under,
 };
 pub use oauth::{ClientAuth, OAuthClient, OAuthSpec, TokenSet, TokenStyle};
 pub use pending::{PendingStates, STATE_TTL_MS};

@@ -492,6 +492,30 @@ async fn the_account_takes_the_name_the_service_gives_later_unless_you_named_it(
     rt.shutdown().await;
 }
 
+/// §16: the platform a service names is stored at connect and follows the service on every
+/// connect; it is not part of the identity.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_platform_a_service_names_is_kept_current_and_never_an_account_change() {
+    let h = setup().await;
+    h.fake.with(|w| w.platform = Some("feishu".into()));
+    let id = h.connect().await;
+    let platform = |h: &H| {
+        let r = h.rows("SELECT config FROM connections WHERE id = ?", &[&id]);
+        let c: Value = serde_json::from_str(r[0][0].as_str().unwrap()).unwrap();
+        c["platform"].clone()
+    };
+    assert_eq!(platform(&h), json!("feishu"));
+    let (rt, _tx) = h.runtime();
+    until("subscribed", || h.subscribes().len() == 1).await;
+    // the service stops saying it: regrouped on the next connect, the connection stays
+    h.fake.with(|w| w.platform = None);
+    h.fake.drop_all();
+    until("resubscribed", || h.subscribes().len() == 2).await;
+    until("platform cleared", || platform(&h).is_null()).await;
+    assert_eq!(h.status(&id), "ok");
+    rt.shutdown().await;
+}
+
 /// V7: a cursor the service discarded → subscribe at now, and the time since the cursor was
 /// saved is read back from history for every chat, only recorded.
 #[tokio::test(flavor = "multi_thread")]

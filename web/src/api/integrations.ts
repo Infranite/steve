@@ -62,6 +62,10 @@ export function providerByAdapter(x: Integrations): Record<string, { id: string;
   return out
 }
 
+/** a connection listed under `p` though its adapter is not one of `p`'s: a channel service that names this platform
+ * (hello `platform`), on its own, beside and independent of the provider's bot */
+export const viaService = (c: { adapter: string }, p: { adapters: { id: string }[] }) => !p.adapters.some((a) => a.id === c.adapter)
+
 /** the installations of a provider; on a Hub without `installations`, one per connection (Feishu: you join your app) */
 export function installationsOf(x: Integrations, provider: string): IInstallation[] {
   if (x.installations) return x.installations.filter((i) => i.provider === provider)

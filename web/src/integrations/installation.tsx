@@ -18,7 +18,7 @@ import { useBusy } from "@/accounts/load"
 import { accountsApi, CONN_STATUS, connStatusOf } from "@/api/accounts"
 import { selfSideOf } from "@/integrations/sides"
 import { channelsApi, type ChannelAccount, type Rule, type Space } from "@/api/channels"
-import { areaLabel, feishuGrantUrl, type FeishuAppDetail, type FeishuUserDetail, type IAdapter, type IConnection, type IInstallation, type IProvider, type MissingRow } from "@/api/integrations"
+import { areaLabel, feishuGrantUrl, viaService, type FeishuAppDetail, type FeishuUserDetail, type IAdapter, type IConnection, type IInstallation, type IProvider, type MissingRow } from "@/api/integrations"
 import { ProviderGlyph } from "@/integrations/index"
 import { IntegrationSection, IntegrationSettings } from "@/components/affect/integration-settings-clean"
 import { FeishuConnectDialog, SelfButtons } from "@/integrations/feishu"
@@ -65,7 +65,9 @@ export function InstallationCard({ inst, p, chans, onChange }: { inst: IInstalla
   const steve = inst.identities.find((i) => i.kind === "steve")?.connection, you = inst.identities.find((i) => i.kind === "you")?.connection
   const app = appOf(steve), [s, dot] = CONN_STATUS[inst.status] ?? [inst.status, "idle"]
   const feishu = isFeishu(p.id)
-  const hasAdapter = (k: "steve" | "you") => p.adapters.some((a) => (a.identity === "bot" || a.identity === "app" ? "steve" : "you") === k)
+  // served by a channel service: an installation of its own, with no bot to turn on
+  const service = inst.identities.some((i) => viaService(i.connection, p))
+  const hasAdapter = (k: "steve" | "you") => !service && p.adapters.some((a) => (a.identity === "bot" || a.identity === "app" ? "steve" : "you") === k)
   const [leave, setLeave] = useState<{ title: string; leaving: Leaving[] } | null>(null)
   const label = (k: "steve" | "you") => (k === "steve" ? (feishu ? t("integrations:inst.steveBot") : t("integrations:inst.steveSelf")) : t("integrations:inst.you"))
   const stops = (k: "steve" | "you") => (k === "steve" ? t("integrations:inst.stopsSteve") : t("integrations:inst.stopsYou"))
@@ -76,7 +78,7 @@ export function InstallationCard({ inst, p, chans, onChange }: { inst: IInstalla
       badge={inst.missing > 0 ? <Badge variant="secondary" className="bg-attention/12 text-attention" data-missing-badge>{t("integrations:inst.missingBadge", { count: inst.missing })}</Badge> : undefined}
       meta={<span className="inline-flex flex-wrap items-center gap-x-1.5" data-installation-name={inst.name}>
         <span className="inline-flex items-center gap-1"><StatusDot s={dot} />{s}</span>
-        <span className="text-tertiary">·</span><span>{feishu ? (app?.domain === "lark" ? t("integrations:inst.larkApp") : t("integrations:inst.feishuApp")) : p.name}</span>
+        <span className="text-tertiary">·</span><span>{service ? t("integrations:inst.viaService") : feishu ? (app?.domain === "lark" ? t("integrations:inst.larkApp") : t("integrations:inst.feishuApp")) : p.name}</span>
         {app && <><span className="text-tertiary">·</span><span className="font-mono">{app.app_id}</span></>}</span>}
       aside={app && <a className="hidden shrink-0 items-center gap-1 rounded-md type-callout text-blue hover:underline sm:inline-flex" href={app.console_url} target="_blank" rel="noreferrer noopener">{t("integrations:inst.console")}<ExternalLinkIcon className="size-3" /></a>}
       footer={<div className="flex w-full flex-wrap items-center justify-between gap-2 px-1">
@@ -85,7 +87,7 @@ export function InstallationCard({ inst, p, chans, onChange }: { inst: IInstalla
       </div>}>
       {leave && <DisconnectDialog title={leave.title} name={inst.name} leaving={leave.leaving} onClose={() => setLeave(null)} onDone={() => { setLeave(null); onChange() }}
         keptNote={feishu ? t("integrations:inst.keptNoteFeishu") : undefined} />}
-      {feishu && <IntegrationSection data-who-works><div className="type-callout text-muted-foreground">{t("integrations:inst.whoWorks")}</div></IntegrationSection>}
+      {feishu && !service && <IntegrationSection data-who-works><div className="type-callout text-muted-foreground">{t("integrations:inst.whoWorks")}</div></IntegrationSection>}
       {(["steve", "you"] as const).map((k) => {
         const c = k === "steve" ? steve : you
         if (c) return <IntegrationSection key={k}><Identity kind={k} c={c} p={p} chan={chanOf(c)} app={app} appConn={steve} onLeave={() => setLeave({ title: t("integrations:inst.disconnectWhat", { what: label(k) }), leaving: [{ id: c.id, label: label(k), stops: stops(k) }] })} /></IntegrationSection>
@@ -121,11 +123,14 @@ function Enable({ kind, p, inst }: { kind: "steve" | "you"; p: IProvider; inst: 
 function Identity({ kind, c, p, chan, app, appConn, onLeave }: { kind: "steve" | "you"; c: IConnection; p: IProvider; chan: ChannelAccount | null; app?: FeishuAppDetail; appConn?: IConnection; onLeave: () => void }) {
   const t = useT()
   const feishu = isFeishu(p.id), [s, dot] = connStatusOf(c), [clean, setClean] = useState(false)
+  // the provider's own permissions and app apply only to its own adapters
+  const service = viaService(c, p), native = feishu && !service
   const name = c.name || c.handle
   const live = c.capabilities.filter((a) => a.state !== "planned"), planned = c.capabilities.filter((a) => a.state === "planned")
   const channelHref = live.some((a) => a.area === "channel") ? "#/channels/acc/" + c.id : "#/accounts/" + c.account_id
   const title = kind === "steve" ? (feishu ? t("integrations:inst.titleSteveBot") : t("integrations:inst.titleSteve")) : feishu ? t("integrations:inst.titleYouFeishu") : t("integrations:inst.titleYou")
-  const what = feishu
+  const what = service ? t("integrations:inst.whatYouService", { name })
+    : feishu
     ? kind === "steve"
       ? t("integrations:inst.whatSteveFeishu", { name })
       : <Trans t={t} i18nKey="integrations:inst.whatYouFeishu" values={{ name }} components={{ code: <code className="font-mono" /> }} />
@@ -151,8 +156,8 @@ function Identity({ kind, c, p, chan, app, appConn, onLeave }: { kind: "steve" |
         <Row title={t("integrations:inst.owner")} data-conn-owner><OwnerChip objectType="connection" objectId={c.id} showStatus /></Row>
       </Group>
       <Capabilities c={c} kind={kind} feishu={feishu} planned={planned.map((a) => areaLabel(a.area))} />
-      {feishu && c.installed !== false && (kind === "steve" ? <BotPermissions c={c} app={app} /> : <UserPermissions c={c} app={app} appConn={appConn} side={selfSideOf(p.adapters) as IAdapter | null} />)}
-      {!feishu && missingOf(c).length > 0 && <Blocked>{t("integrations:inst.missingScopes", { list: join(missingOf(c).map((m) => m.scope)) })}</Blocked>}
+      {native && c.installed !== false && (kind === "steve" ? <BotPermissions c={c} app={app} /> : <UserPermissions c={c} app={app} appConn={appConn} side={selfSideOf(p.adapters) as IAdapter | null} />)}
+      {!native && missingOf(c).length > 0 && <Blocked>{t("integrations:inst.missingScopes", { list: join(missingOf(c).map((m) => m.scope)) })}</Blocked>}
       {c.warning && <Blocked data-blocked="warning">{c.warning}</Blocked>}
       {clean && <CleanupDialog target={{ connection_id: c.id }} name={name} onClose={() => setClean(false)} onDone={() => setClean(false)} />}
       <div className="flex flex-wrap gap-1">
