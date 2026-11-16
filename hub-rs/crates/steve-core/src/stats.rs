@@ -9,124 +9,172 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use rusqlite::OptionalExtension;
+#[cfg(test)]
 use serde_json::{Value, json};
-use steve_store::{ModelUsage, NewUsage, Store};
+#[cfg(test)]
+use steve_store::ModelUsage;
+use steve_store::Store;
 
 use crate::error::Result;
 use crate::gateway::{Attempt, ModelGateway, OnText, Printed, ThinkTools, Tier};
 
 pub use steve_modules::gateway::{CallTag, current_tag, for_item, purpose, tagged};
 
-/// A [`ModelGateway`] that writes one usage row per model for every call, failed ones included (`ok=0`).
+/// One logical call, persisted before dispatch and carried through every fallback.
+#[derive(Clone)]
+pub struct CallAccount {
+    pub store: Store,
+    pub id: String,
+    pub workspace: String,
+    tag: CallTag,
+}
+#[derive(Clone)]
+pub struct AttemptAccount {
+    pub call: CallAccount,
+    pub id: String,
+}
+tokio::task_local! {
+    static CALL: CallAccount;
+    static ATTEMPT: AttemptAccount;
+}
+pub fn current_call() -> Option<CallAccount> {
+    CALL.try_with(Clone::clone).ok()
+}
+pub fn current_attempt() -> Option<AttemptAccount> {
+    ATTEMPT.try_with(Clone::clone).ok()
+}
+impl CallAccount {
+    pub fn begin(store: &Store, tag: &CallTag) -> steve_store::Result<Self> {
+        Self::begin_owned(store, tag, None, None)
+    }
+    pub fn begin_owned(
+        store: &Store,
+        tag: &CallTag,
+        bot: Option<String>,
+        project: Option<String>,
+    ) -> steve_store::Result<Self> {
+        if let Err(e) = store.stats().gateway_apply_local(128) {
+            tracing::warn!("stats: pending local usage: {e}");
+        }
+        let workspace = if tag.workspace_id.is_empty() {
+            match tag.item_id.as_deref() {
+                Some(item) => store
+                    .items()
+                    .get(item)?
+                    .map(|i| i.workspace_id)
+                    .unwrap_or_default(),
+                None => String::new(),
+            }
+        } else {
+            tag.workspace_id.clone()
+        };
+        let ts = steve_store::now();
+        let tz: Option<String> = store.settings().get(&workspace, "stats.tz", None)?;
+        let id = uuid::Uuid::new_v4().to_string();
+        store
+            .stats()
+            .gateway_begin(&steve_store::gateway_ledger::CallBegin {
+                id: id.clone(),
+                workspace: workspace.clone(),
+                item: tag.item_id.clone(),
+                bot,
+                project,
+                purpose: tag.purpose.into(),
+                started: ts,
+                day: steve_stats::day(ts, steve_stats::tz(tz.as_deref())),
+            })?;
+        let mut captured = tag.clone();
+        captured.workspace_id = workspace.clone();
+        Ok(Self {
+            store: store.clone(),
+            id,
+            workspace,
+            tag: captured,
+        })
+    }
+    pub async fn scope<F: std::future::Future>(&self, f: F) -> F::Output {
+        // Model selection, dispatch and the bill use the captured owner even after the caller's
+        // task-local tag is gone. Nested purpose/item scopes inside f still work normally.
+        steve_modules::gateway::with_call_tag(self.tag.clone(), CALL.scope(self.clone(), f)).await
+    }
+    pub async fn tracked_scope<F: std::future::Future>(&self, f: F) -> F::Output {
+        let _guard = CallGuard(Some(self.clone()));
+        self.scope(f).await
+    }
+    pub fn attempt(&self, harness: &str, model: &str) -> steve_store::Result<AttemptAccount> {
+        let id = uuid::Uuid::new_v4().to_string();
+        self.store
+            .stats()
+            .gateway_attempt(&self.id, &id, harness, model)?;
+        Ok(AttemptAccount {
+            call: self.clone(),
+            id,
+        })
+    }
+    pub fn finish(&self, a: &Attempt) -> steve_store::Result<()> {
+        self.store.stats().gateway_finish(
+            &self.id,
+            &steve_store::gateway_ledger::CallFinish {
+                ok: a.result.is_ok(),
+                model: a.model.clone(),
+                harness: if a.harness.is_empty() {
+                    steve_acp::adapters::DEFAULT_ADAPTER.0.into()
+                } else {
+                    a.harness.clone()
+                },
+                attempts: a.attempts,
+                duration_ms: a.duration_ms,
+                failures: a.failures.clone(),
+                usage: a.usage.clone(),
+            },
+        )
+    }
+    pub fn cancel(&self, reason: &str) -> steve_store::Result<()> {
+        self.store.stats().gateway_cancel(&self.id, reason)
+    }
+}
+impl AttemptAccount {
+    pub async fn scope<F: std::future::Future>(&self, f: F) -> F::Output {
+        ATTEMPT.scope(self.clone(), f).await
+    }
+    pub fn report(&self, r: &steve_node_api::UsageReport) -> steve_store::Result<bool> {
+        let received =
+            self.call
+                .store
+                .stats()
+                .gateway_local_receive(&self.id, r, steve_store::now())?;
+        if let Err(e) = self.call.store.stats().gateway_apply_local(128) {
+            tracing::warn!("stats: local report durably queued: {e}");
+        }
+        Ok(received)
+    }
+}
+struct CallGuard(Option<CallAccount>);
+impl Drop for CallGuard {
+    fn drop(&mut self) {
+        if let Some(c) = self.0.take() {
+            if let Err(e) = c.cancel("caller dropped") {
+                tracing::warn!("stats: cancel: {e}");
+            }
+        }
+    }
+}
+/// A gateway whose live and final bill survives its caller.
 pub struct RecordingGateway {
     inner: Arc<dyn ModelGateway>,
     store: Store,
 }
-
 impl RecordingGateway {
     pub fn new(inner: Arc<dyn ModelGateway>, store: Store) -> Self {
-        RecordingGateway { inner, store }
-    }
-
-    /// Writes the call's rows. A failure to write is logged, never passed to the caller: statistics
-    /// must not break a chat answer.
-    fn record(&self, a: &Attempt) {
-        if let Err(e) = self.try_record(a, &current_tag()) {
-            tracing::warn!("stats: gateway usage not recorded: {e}");
-        }
-    }
-
-    fn try_record(&self, a: &Attempt, tag: &CallTag) -> steve_store::Result<()> {
-        record(&self.store, a, tag)
+        Self { inner, store }
     }
 }
-
-/// Writes the usage rows of one model call made outside the gateway (an inline research run), booked
-/// under `tag` the same way the gateway books its own.
+/// Compatibility entry for a completed external call. Live runners allocate CallAccount first.
 pub fn record(store: &Store, a: &Attempt, tag: &CallTag) -> steve_store::Result<()> {
-    let ts = steve_store::now();
-    let ws = tag.workspace_id.as_str();
-    let tz: Option<String> = if ws.is_empty() {
-        None
-    } else {
-        store.settings().get(ws, "stats.tz", None)?
-    };
-    let day = steve_stats::day(ts, steve_stats::tz(tz.as_deref()));
-    let (bot_id, project_id) = match &tag.item_id {
-        Some(item) => store
-            .reader::<_, steve_store::StoreError>(|c| {
-                Ok(c.query_row(
-                    "SELECT bot_id, project_id FROM items WHERE id = ?",
-                    [item],
-                    |r| {
-                        Ok((
-                            r.get::<_, Option<String>>(0)?,
-                            r.get::<_, Option<String>>(1)?,
-                        ))
-                    },
-                )
-                .optional()?)
-            })?
-            .unwrap_or_default(),
-        None => (None, None),
-    };
-    let ok = a.result.is_ok();
-    let mut rows = a.usage.clone();
-    /* a try that spent nothing (a 503 reporting zeros) is not a call of its own */
-    rows.retain(|u| {
-        let t = &u.tokens;
-        [t.input, t.output, t.cache_read, t.cache_write, t.reasoning]
-            .iter()
-            .any(|x| x.is_some_and(|x| x != 0))
-            || u.cost_reported.is_some_and(|c| c != 0.0)
-    });
-    if rows.is_empty() {
-        /* nothing reported (a timeout, a crash): still one row, so the call and its failure count */
-        rows.push(ModelUsage {
-            model: a.model.clone(),
-            detail: json!({"scope": "none"}),
-            ..ModelUsage::default()
-        });
+    if let Some(c) = current_call() {
+        return c.finish(a);
     }
-    for (i, mut usage) in rows.into_iter().enumerate() {
-        let first = i == 0;
-        if first && !a.failures.is_empty() {
-            if let Value::Object(d) = &mut usage.detail {
-                d.insert("failures".into(), json!(a.failures));
-            } else {
-                usage.detail = json!({"failures": a.failures});
-            }
-        }
-        store.stats().usage_add(&NewUsage {
-            workspace_id: ws.to_string(),
-            ts,
-            day: day.clone(),
-            source: "gateway".into(),
-            purpose: tag.purpose.into(),
-            // the adapter the call ran on; a call that never chose one, Steve's default adapter's
-            harness: if a.harness.is_empty() {
-                steve_acp::adapters::DEFAULT_ADAPTER.0.to_string()
-            } else {
-                a.harness.clone()
-            },
-            turn_id: None,
-            session_id: None,
-            item_id: tag.item_id.clone(),
-            bot_id: bot_id.clone(),
-            project_id: project_id.clone(),
-            usage,
-            /* the call's time and fallbacks once, on its first row */
-            duration_ms: first.then(|| i64::try_from(a.duration_ms).unwrap_or(i64::MAX)),
-            ok,
-            attempts: if first {
-                i64::from(a.attempts.max(1))
-            } else {
-                1
-            },
-        })?;
-    }
-    Ok(())
+    CallAccount::begin(store, tag)?.finish(a)
 }
 
 #[async_trait]
@@ -166,11 +214,28 @@ impl ModelGateway for RecordingGateway {
         // permit across every fallback so maintenance cannot seal between model attempts;
         // an already-admitted conversation may still finish its nested calls.
         let _activity = self.store.activity("model").await;
-        let a = self
-            .inner
-            .attempt(prompt, tier, timeout, tools, on_text)
+        let account = match CallAccount::begin(&self.store, &current_tag()) {
+            Ok(c) => c,
+            Err(e) => {
+                return Attempt {
+                    result: Err(crate::error::msg(format!("usage ownership: {e}"))),
+                    attempts: 0,
+                    duration_ms: 0,
+                    usage: vec![],
+                    model: String::new(),
+                    failures: vec![],
+                    harness: String::new(),
+                };
+            }
+        };
+        let mut guard = CallGuard(Some(account.clone()));
+        let a = account
+            .scope(self.inner.attempt(prompt, tier, timeout, tools, on_text))
             .await;
-        self.record(&a);
+        match account.finish(&a) {
+            Ok(()) => guard.0 = None,
+            Err(e) => tracing::warn!("stats: gateway result not recorded: {e}"),
+        }
         a
     }
 }
@@ -217,6 +282,7 @@ mod tests {
         cost: Option<f64>,
         ok: bool,
         attempts: i64,
+        duration_ms: Option<i64>,
         item: Option<String>,
         detail: Value,
     }
@@ -244,6 +310,7 @@ mod tests {
                         cost: r.get(8)?,
                         ok: r.get(9)?,
                         attempts: r.get(10)?,
+                        duration_ms: r.get(15)?,
                         item: r.get(11)?,
                         detail: serde_json::from_str(&r.get::<_, String>(12)?).unwrap(),
                     })
@@ -252,6 +319,57 @@ mod tests {
             Ok(v)
         })
         .unwrap()
+    }
+
+    #[tokio::test]
+    async fn an_item_supplies_missing_workspace_before_dispatch() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path());
+        s.ensure_workspace().unwrap();
+        s.bots()
+            .seed(
+                "owner",
+                false,
+                &steve_store::NewBot {
+                    name: "Owner".into(),
+                    harness: "test".into(),
+                    ..Default::default()
+                },
+                steve_store::WS,
+            )
+            .unwrap();
+        let item = s
+            .items()
+            .create(
+                steve_store::WS,
+                &steve_store::NewItem {
+                    title: "bill".into(),
+                    goal: "bill".into(),
+                    bot_id: "owner".into(),
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+            .unwrap();
+        let item_id = item.id.clone();
+        let c = CallAccount::begin(
+            &s,
+            &CallTag {
+                item_id: Some(item.id),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(c.workspace, steve_store::WS);
+        c.scope(async {
+            assert_eq!(current_tag().workspace_id, steve_store::WS);
+            assert_eq!(current_tag().item_id, Some(item_id));
+        })
+        .await;
+        s.reader::<_,steve_store::StoreError>(|db| {
+            let row:(String,Option<String>,i64)=db.query_row("SELECT workspace_id,bot_id,(SELECT COUNT(*) FROM gateway_attempts) FROM gateway_calls WHERE call_id=?",[&c.id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?)))?;
+            assert_eq!(row,(steve_store::WS.into(),Some("owner".into()),0));Ok(())
+        }).unwrap();
     }
 
     #[tokio::test]
@@ -288,7 +406,7 @@ mod tests {
         assert_eq!((r[0].tokens, r[0].cost), (haiku(), Some(0.000829045)));
         assert_eq!(
             r[0].detail,
-            json!({"scope": "main", "failures": ["busy: API Error: 503 upstream unavailable"]})
+            json!({"scope": "main", "failures": ["busy: API Error: 503 upstream unavailable"], "call_id": r[0].detail["call_id"], "pending": false, "accounting_tokens": true})
         );
         /* the daily cube agrees */
         let (calls, input, hit_base): (i64, i64, i64) = s
@@ -337,7 +455,7 @@ mod tests {
         );
         assert_eq!(
             r[0].detail,
-            json!({"scope": "none", "failures": ["slow: [timeout] Command timed out after 1500 ms"]})
+            json!({"scope": "none", "failures": ["slow: [timeout] Command timed out after 1500 ms"], "call_id": r[0].detail["call_id"], "pending": false, "accounting_tokens": true})
         );
         let failed: i64 = s
             .with_conn(
@@ -537,5 +655,332 @@ mod tests {
 
     fn tries(f: &crate::gateway::Fallback<Scripted>) -> Vec<Try> {
         f.one.tries.lock().unwrap().clone()
+    }
+
+    fn zero(model: &str) -> ModelUsage {
+        ModelUsage {
+            model: model.into(),
+            tokens: Tokens {
+                input: Some(0),
+                output: Some(0),
+                cache_read: Some(0),
+                cache_write: Some(0),
+                reasoning: Some(0),
+            },
+            cost_reported: Some(0.0),
+            detail: json!({"scope": "main"}),
+        }
+    }
+
+    fn measured(usage: Vec<ModelUsage>, ok: bool) -> Attempt {
+        Attempt {
+            result: if ok {
+                Ok(Printed::default())
+            } else {
+                Err(crate::error::msg("cancelled"))
+            },
+            attempts: 2,
+            duration_ms: 123,
+            usage,
+            model: "answer".into(),
+            failures: vec!["failed: unavailable".into()],
+            harness: cc(),
+        }
+    }
+
+    fn counts(s: &Store) -> (i64, i64, i64, i64) {
+        s.with_conn(|c| Ok(c.query_row(
+            "SELECT SUM(calls), SUM(failed_calls), SUM(output), SUM(reasoning) FROM stat_daily WHERE source = 'gateway'",
+            [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )?)).unwrap()
+    }
+
+    #[test]
+    fn reported_zero_and_missing_usage_stay_distinct_on_success_and_failure() {
+        for ok in [true, false] {
+            for reported in [true, false] {
+                let dir = tempfile::tempdir().unwrap();
+                let s = store(dir.path());
+                let usage = if reported {
+                    vec![zero("answer")]
+                } else {
+                    vec![]
+                };
+                record(&s, &measured(usage, ok), &CallTag::default()).unwrap();
+                let r = rows(&s);
+                assert_eq!(r.len(), 1);
+                assert_eq!(
+                    r[0].tokens,
+                    if reported {
+                        zero("answer").tokens
+                    } else {
+                        Tokens::default()
+                    }
+                );
+                assert_eq!(r[0].cost, reported.then_some(0.0));
+                assert_eq!(r[0].model, "answer");
+                assert_eq!(
+                    (r[0].attempts, r[0].duration_ms, r[0].ok),
+                    (2, Some(123), ok)
+                );
+                assert_eq!(r[0].detail["scope"], if reported { "main" } else { "none" });
+                assert_eq!(counts(&s), (1, i64::from(!ok), 0, 0));
+            }
+        }
+    }
+
+    #[test]
+    fn zero_cost_only_is_reported_without_inventing_zero_tokens() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path());
+        let mut cost_only = zero("answer");
+        cost_only.tokens = Tokens::default();
+        record(&s, &measured(vec![cost_only], true), &CallTag::default()).unwrap();
+        let r = rows(&s);
+        assert_eq!(r[0].tokens, Tokens::default());
+        assert_eq!(r[0].cost, Some(0.0));
+    }
+
+    #[test]
+    fn unspent_retry_keeps_zero_evidence_without_an_extra_call_or_attempts() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path());
+        let paid = ModelUsage {
+            model: "answer".into(),
+            tokens: haiku(),
+            cost_reported: Some(0.1),
+            detail: json!({"scope":"main"}),
+        };
+        record(
+            &s,
+            &measured(vec![zero("failed"), paid], true),
+            &CallTag::default(),
+        )
+        .unwrap();
+        let r = rows(&s);
+        assert_eq!(r.len(), 1);
+        assert_eq!(
+            (
+                r[0].model.as_str(),
+                r[0].tokens,
+                r[0].attempts,
+                r[0].duration_ms
+            ),
+            ("answer", haiku(), 2, Some(123))
+        );
+        assert_eq!(counts(&s), (1, 0, 4, 0));
+        assert_eq!(
+            r[0].detail["unspent_usage"],
+            json!([{
+                "model":"failed", "tokens":{"input":0,"output":0,"cache_read":0,"cache_write":0,"reasoning":0},
+                "cost_reported":0.0, "detail":{"scope":"main"}
+            }])
+        );
+    }
+
+    #[test]
+    fn all_zero_retries_book_the_answering_model_once_and_keep_partial_unknowns() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path());
+        let mut failed = zero("failed");
+        failed.tokens.reasoning = None;
+        failed.cost_reported = None;
+        record(
+            &s,
+            &measured(vec![failed, zero("answer")], true),
+            &CallTag::default(),
+        )
+        .unwrap();
+        let r = rows(&s);
+        assert_eq!(r.len(), 1);
+        assert_eq!(
+            (r[0].model.as_str(), r[0].tokens),
+            ("answer", zero("answer").tokens)
+        );
+        assert_eq!(
+            r[0].detail["unspent_usage"][0]["tokens"]["reasoning"],
+            Value::Null
+        );
+        assert_eq!(
+            r[0].detail["unspent_usage"][0]["cost_reported"],
+            Value::Null
+        );
+        assert_eq!(counts(&s), (1, 0, 0, 0));
+    }
+
+    #[test]
+    fn a_failed_models_zero_cannot_replace_the_answering_models_missing_usage() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path());
+        record(
+            &s,
+            &measured(vec![zero("failed")], true),
+            &CallTag::default(),
+        )
+        .unwrap();
+        let r = rows(&s);
+        assert_eq!(r.len(), 1);
+        assert_eq!(
+            (r[0].model.as_str(), r[0].tokens, r[0].cost),
+            ("answer", Tokens::default(), None)
+        );
+        assert_eq!(r[0].detail["unspent_usage"][0]["tokens"]["output"], 0);
+        assert_eq!(counts(&s), (1, 0, 0, 0));
+    }
+
+    #[test]
+    fn a_single_zero_report_preserves_the_adapters_canonical_model_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path());
+        let mut a = measured(vec![zero("canonical")], true);
+        a.attempts = 1;
+        record(&s, &a, &CallTag::default()).unwrap();
+        assert_eq!(
+            (rows(&s)[0].model.as_str(), rows(&s)[0].tokens),
+            ("canonical", zero("canonical").tokens)
+        );
+    }
+
+    struct Metered;
+
+    #[async_trait]
+    impl crate::gateway::OneModel for Metered {
+        async fn once(
+            &self,
+            _: &crate::gateway::OneCall<'_>,
+            model: &str,
+            _: Option<&str>,
+            _: Option<OnText<'_>>,
+        ) -> crate::gateway::Tried {
+            use steve_node_api::{Epoch, Measurement, Money, Tokens, UsageReport, UsageScope};
+            let end = if model == "failed" { 6 } else { 12 };
+            let report = |measurement, output| UsageReport {
+                report_id: format!("{measurement:?}"),
+                model: Some(model.into()),
+                meter_epoch: Epoch::new("meter").unwrap(),
+                scope: UsageScope::Main,
+                measurement,
+                tokens: Tokens {
+                    output: Some(output),
+                    reasoning: Some(output / 2),
+                    ..Tokens::default()
+                },
+                cost: Some(Money {
+                    decimal: (output as f64 / 100.0).to_string(),
+                    currency: "USD".into(),
+                }),
+                context_used: None,
+                context_limit: None,
+            };
+            let final_report = report(Measurement::Final, end);
+            crate::gateway::Tried::of(
+                if model == "failed" {
+                    Err(crate::gateway::OneShotError::Failed("unavailable".into()))
+                } else {
+                    Ok(("ok".into(), None))
+                },
+                vec![
+                    report(Measurement::Cumulative, end - 2),
+                    final_report.clone(),
+                    final_report,
+                ],
+            )
+        }
+    }
+
+    #[tokio::test]
+    async fn consumed_failure_and_retry_keep_usage_and_count_metadata_on_the_first_model() {
+        let gateway = crate::gateway::Fallback {
+            one: Metered,
+            fast: vec!["failed".into(), "answer".into()],
+            smart: vec![],
+            models: None,
+        };
+        let a = gateway
+            .attempt(
+                "hi",
+                Tier::Fast,
+                Duration::from_secs(1),
+                &ThinkTools::None,
+                None,
+            )
+            .await;
+        assert!(a.result.is_ok());
+        assert_eq!(a.attempts, 2);
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path());
+        record(&s, &a, &CallTag::default()).unwrap();
+        let r = rows(&s);
+        assert_eq!(r.len(), 2);
+        assert_eq!(
+            (r[0].model.as_str(), r[0].tokens.output, r[0].attempts),
+            ("failed", Some(6), 2)
+        );
+        assert_eq!(
+            (r[1].model.as_str(), r[1].tokens.output, r[1].attempts),
+            ("answer", Some(12), 1)
+        );
+        assert!(r[0].duration_ms.is_some());
+        assert_eq!(r[1].duration_ms, None);
+        assert_eq!(
+            counts(&s),
+            (2, 0, 18, 9),
+            "reasoning is already part of output"
+        );
+        assert_eq!(r[0].detail["failures"].as_array().unwrap().len(), 1);
+        assert!(r[1].detail.get("failures").is_none());
+    }
+
+    #[test]
+    fn cancelled_attempt_books_consumed_usage_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path());
+        let mut usage = zero("answer");
+        usage.tokens.output = Some(12);
+        usage.tokens.reasoning = Some(4);
+        usage.cost_reported = Some(0.12);
+        record(&s, &measured(vec![usage], false), &CallTag::default()).unwrap();
+        assert_eq!(counts(&s), (1, 1, 12, 4));
+        assert_eq!(rows(&s)[0].attempts, 2);
+    }
+    #[test]
+    fn explicitly_zero_usage_is_not_replaced_by_an_unknown_gateway_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path());
+        s.ensure_workspace().unwrap();
+        let a = Attempt {
+            result: Ok(Printed::default()),
+            attempts: 1,
+            duration_ms: 1,
+            usage: vec![ModelUsage {
+                model: "zero-model".into(),
+                tokens: Tokens {
+                    input: Some(0),
+                    output: Some(0),
+                    cache_read: Some(0),
+                    cache_write: Some(0),
+                    reasoning: None,
+                },
+                cost_reported: Some(0.0),
+                ..Default::default()
+            }],
+            model: "zero-model".into(),
+            failures: vec![],
+            harness: "claude-code".into(),
+        };
+        record(
+            &s,
+            &a,
+            &CallTag {
+                workspace_id: steve_store::WS.into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let r = rows(&s);
+        assert_eq!(r.len(), 1);
+        assert_eq!(r[0].tokens.input, Some(0));
+        assert_eq!(r[0].tokens.output, Some(0));
+        assert_eq!(r[0].cost, Some(0.0));
     }
 }

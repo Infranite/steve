@@ -47,10 +47,19 @@ impl NodeRuntime {
     /// The observer runs after an empty inbox observation releases the commit lock. Tests receive
     /// another event at that exact boundary; ordinary workers use the no-op observer above.
     pub(super) fn apply_some_observed(&self, mut empty_observed: impl FnMut()) -> bool {
+        // LocalAcp uses a durable inbox too. Recovery never depends on its waiter/worker and
+        // continues while the Node is disconnected or no Node stream currently has events.
+        let local_applied = match self.store.stats().gateway_apply_local(APPLY_RUN) {
+            Ok(n) => n > 0,
+            Err(e) => {
+                tracing::warn!("apply local gateway usage: {e}");
+                false
+            }
+        };
         let mut streams: std::collections::VecDeque<(String, String)> =
             self.dirty.lock().unwrap().iter().cloned().collect();
         let node = self.node_id.to_string();
-        let mut any = false;
+        let mut any = local_applied;
         let mut one_by_one: HashSet<(String, String)> = HashSet::new();
         while let Some((stream, epoch)) = streams.pop_front() {
             let k = StreamKey {
@@ -275,6 +284,15 @@ impl NodeRuntime {
         match &ev.body {
             EventBody::Usage { report } if report.scope != UsageScope::Background => {
                 let delta = self.cost_in(tx, ev, report)?;
+                if let Subject::Execution(x) = &ev.subject {
+                    let accepted = cost::accounting_report(report, delta);
+                    super::super::acp_stats::node_usage(
+                        &self.store,
+                        &session,
+                        x.attempt().as_str(),
+                        &accepted,
+                    )?;
+                }
                 tx.execute(
                     "UPDATE sessions SET used = COALESCE(?, used), size = COALESCE(?, size), cost = CASE WHEN ? IS NULL THEN cost ELSE COALESCE(cost, 0) + ? END, updated = ? WHERE id = ?",
                     rusqlite::params![
@@ -366,6 +384,14 @@ impl NodeRuntime {
                         [&session],
                         |r| r.get(0),
                     )?;
+                    super::super::acp_stats::try_node_attempt_started(
+                        &self.store,
+                        &session,
+                        x.attempt().as_str(),
+                        ordinal,
+                        user_seq.filter(|_| ordinal == 0),
+                        ev.at.0,
+                    )?;
                     out.push(After::Started {
                         session,
                         attempt: x.attempt().to_string(),
@@ -380,6 +406,15 @@ impl NodeRuntime {
                     && let Some((_, state)) = attempt_row(tx, x.attempt().as_str())?
                     && state != "finished"
                 {
+                    let facts = self.attempt_facts_on(tx, &session, x.attempt().as_str())?;
+                    super::super::acp_stats::try_node_attempt_finished(
+                        &self.store,
+                        &session,
+                        x.attempt().as_str(),
+                        completion,
+                        &facts,
+                        ev.at.0,
+                    )?;
                     out.push(After::Finished {
                         session,
                         attempt: x.attempt().to_string(),
@@ -451,7 +486,7 @@ impl NodeRuntime {
             })
     }
 
-    fn attempt_facts_on(
+    pub(super) fn attempt_facts_on(
         &self,
         conn: &rusqlite::Connection,
         session: &str,
@@ -459,7 +494,7 @@ impl NodeRuntime {
     ) -> Result<AttemptFacts, StoreError> {
         let rows: Vec<String> = {
             let mut st = conn.prepare(
-                "SELECT payload FROM node_event_inbox WHERE node_id=? AND json_extract(payload,'$.subject.attempt')=? AND json_extract(payload,'$.subject.session')=? ORDER BY stream, seq",
+                "SELECT payload FROM node_event_inbox WHERE node_id=? AND json_extract(payload,'$.subject.attempt')=? AND json_extract(payload,'$.subject.session')=? AND (applied=1 OR json_extract(payload,'$.body.type')<>'usage') ORDER BY stream, seq",
             )?;
             st.query_map(
                 rusqlite::params![self.node_id.as_str(), attempt, session],
@@ -474,11 +509,14 @@ impl NodeRuntime {
             let Ok(ev) = serde_json::from_str::<NodeEvent>(&r) else {
                 continue;
             };
-            if let EventBody::Usage { report } = &ev.body
-                && let Some(delta) = meter.add(report, || {
+            let admitted = if let EventBody::Usage { report } = &ev.body {
+                meter.add(report, || {
                     cost::earlier_cost_in(conn, &self.node_id, &ev, &report.meter_epoch)
                 })?
-            {
+            } else {
+                None
+            };
+            if let Some(delta) = admitted {
                 f.cost = Some(f.cost.unwrap_or(0.0) + delta);
             }
             match ev.body {
@@ -490,7 +528,7 @@ impl NodeRuntime {
                     if report.model.is_some() {
                         f.model = report.model.clone();
                     }
-                    f.usage.push(report);
+                    f.usage.push(cost::accounting_report(&report, admitted));
                 }
                 _ => {}
             }

@@ -196,6 +196,15 @@ fn at(pairs: &[(usize, f64)]) -> Vec<f64> {
     v
 }
 
+// Token/cost buckets with no report are unknown, while counts of lifecycle events remain zero.
+fn known_at(points: &[(usize, f64)]) -> Vec<f64> {
+    let mut v = vec![-1.0; 24];
+    for (i, n) in points {
+        v[*i] = *n;
+    }
+    v
+}
+
 fn sum(s: &Series) -> f64 {
     s.series
         .iter()
@@ -258,7 +267,7 @@ fn hours_add_up_to_the_day() {
     // 00: the gateway call at midnight (1000 + 3000) and the turn that ended at 00:10 (50 + 20)
     assert_eq!(
         vals(&tokens, 0),
-        at(&[(0, 4_070.0), (9, 220.0), (13, 500.0), (23, 7.0)])
+        known_at(&[(0, 4_070.0), (9, 220.0), (13, 500.0), (23, 7.0)])
     );
     assert_eq!(sum(&tokens), sm.usage.total as f64);
 
@@ -339,7 +348,7 @@ fn hours_not_yet_come_are_empty() {
     assert_eq!(spans[13], [lo + 13 * HOUR, lo + 14 * HOUR]);
     // up to now as it stands, the current hour so far, nothing after it (not 0)
     assert_eq!(tokens.series[0].values[13], Some(500.0));
-    assert_eq!(tokens.series[0].values[12], Some(0.0));
+    assert_eq!(tokens.series[0].values[12], None);
     assert!(tokens.series[0].values[14..].iter().all(Option::is_none));
     let wip = hourly(&s, DAY, Metric::Wip, "none", now);
     assert!(wip.series[0].values[..=13].iter().all(Option::is_some));
@@ -356,11 +365,11 @@ fn the_edges_of_the_day_stay_on_their_side() {
     let (_, hi) = edges();
     let later = hi + 2 * 86_400_000;
     let y = hourly(&s, "2026-11-04", Metric::Tokens, "none", later);
-    assert_eq!(vals(&y, 0), at(&[(23, 100.0)]));
+    assert_eq!(vals(&y, 0), known_at(&[(23, 100.0)]));
     let y = hourly(&s, "2026-11-04", Metric::Created, "none", later);
     assert_eq!(vals(&y, 0), at(&[(23, 1.0)]));
     let t = hourly(&s, "2026-11-06", Metric::Tokens, "none", later);
-    assert_eq!(vals(&t, 0), at(&[(0, 9.0)]));
+    assert_eq!(vals(&t, 0), known_at(&[(0, 9.0)]));
     let t = hourly(&s, "2026-11-06", Metric::Done, "none", later);
     assert_eq!(vals(&t, 0), at(&[(0, 1.0)]));
 

@@ -355,7 +355,9 @@ async fn a_scratch_or_existing_workspace_is_not_one_the_node_makes_or_tidies() {
 #[tokio::test]
 async fn attaching_a_project_preserves_the_old_workspace_and_reopens_the_new_one() {
     let h = hub();
-    h.bind(PrepareKind::Existing { dir: root("scratch", ITEM) });
+    h.bind(PrepareKind::Existing {
+        dir: root("scratch", ITEM),
+    });
     until("scratch session ready", || h.phase() == "ready").await;
     assert!(!h.rt.makes_workspace(S).unwrap());
     h.rt.release(S).unwrap();
@@ -364,22 +366,39 @@ async fn attaching_a_project_preserves_the_old_workspace_and_reopens_the_new_one
         INSERT INTO projects(id,workspace_id,name,path,kind,worktree,created,updated) VALUES('p1','default','project','/project','git',1,1,1);
         UPDATE items SET project_id='p1',branch='steve/i1' WHERE id='i1';
         INSERT INTO sessions(id,workspace_id,item_id,no,harness,cwd,status,created,updated) VALUES('s2','default','i1',2,'claude-code','','starting',2,2);");
-    let plan = steve_hub::wire::node_binding::binding_with(&h.store, "s2", None, &|_| true, Some(std::path::Path::new("/worktrees"))).unwrap();
+    let plan = steve_hub::wire::node_binding::binding_with(
+        &h.store,
+        "s2",
+        None,
+        &|_| true,
+        Some(std::path::Path::new("/worktrees")),
+    )
+    .unwrap();
     let resource = plan.resource.clone();
     assert_ne!(resource, "item:i1");
     h.rt.bind(&plan).unwrap();
-    until("project session ready", || h.q::<String>("SELECT phase FROM runtime_sessions WHERE session_id='s2'") == "ready").await;
+    until("project session ready", || {
+        h.q::<String>("SELECT phase FROM runtime_sessions WHERE session_id='s2'") == "ready"
+    })
+    .await;
     assert!(h.rt.makes_workspace("s2").unwrap());
     assert!(!h.rt.makes_workspace(S).unwrap());
-    assert_ne!(h.q::<String>("SELECT workspace_ref FROM runtime_sessions WHERE session_id='s1'"),h.q::<String>("SELECT workspace_ref FROM runtime_sessions WHERE session_id='s2'"));
+    assert_ne!(
+        h.q::<String>("SELECT workspace_ref FROM runtime_sessions WHERE session_id='s1'"),
+        h.q::<String>("SELECT workspace_ref FROM runtime_sessions WHERE session_id='s2'")
+    );
     assert!(!h.rt.tidy_session_workspace(S, true).unwrap());
     h.rt.release("s2").unwrap();
-    until("project session released", || h.q::<String>("SELECT phase FROM runtime_sessions WHERE session_id='s2'") == "released").await;
+    until("project session released", || {
+        h.q::<String>("SELECT phase FROM runtime_sessions WHERE session_id='s2'") == "released"
+    })
+    .await;
     assert!(h.rt.tidy_session_workspace("s2", true).unwrap());
     until("new workspace tidied", || h.count("tidy_workspace") == 1 && h.q::<i64>("SELECT count(*) FROM node_commands WHERE method='tidy_workspace' AND state='finished'") == 1).await;
     let target: String = h.q("SELECT json_extract(request,'$.body.workspace.id') FROM node_commands WHERE method='tidy_workspace'");
     assert_eq!(target, derived_id("w", &resource));
-    h.rt.prompt("s2", "continue in the project", "user", &[]).unwrap();
+    h.rt.prompt("s2", "continue in the project", "user", &[])
+        .unwrap();
     until("project session reopened", || h.count("start_turn") == 1).await;
     assert_eq!(h.count("prepare_workspace"), 3);
     let last: String = h.q("SELECT json_extract(request,'$.body.resource') FROM node_commands WHERE method='prepare_workspace' ORDER BY rowid DESC LIMIT 1");

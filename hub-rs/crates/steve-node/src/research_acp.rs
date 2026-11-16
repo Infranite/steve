@@ -449,7 +449,8 @@ impl LocalNode {
             &self.0.cfg.acp.user_home,
             &properties.outer_sandbox_args,
         );
-        let mut run = Box::pin(acp_job::run(
+        let cancel = tokio::sync::Notify::new();
+        let mut run = Box::pin(acp_job::run_cancellable(
             acp_job::Request {
                 cfg: &self.0.cfg.acp,
                 harness: &req.harness,
@@ -472,10 +473,12 @@ impl LocalNode {
             },
             spawned,
             &event,
+            cancel.notified(),
         ));
         let mut tick = tokio::time::interval(POLL);
         let mut why = None;
         let mut open_message = None;
+        let mut pending_final = vec![];
         let mut receive = |body: EventBody| -> ApiResult<()> {
             let evs = vec![(Subject::Execution(exec.clone()), body.clone())];
             {
@@ -492,12 +495,28 @@ impl LocalNode {
                 }
                 _ => {}
             }
-            self.emit(evs)
+            let final_usage = matches!(&body, EventBody::Usage { report } if report.measurement == Measurement::Final);
+            let result = self.emit(evs.clone());
+            if final_usage && result.is_err() {
+                pending_final.extend(evs);
+            }
+            result
         };
         let mut failure = None;
         let result = loop {
             tokio::select! {
                 biased;
+                _ = tick.tick() => {
+                    let state = state.lock().unwrap();
+                    if let Some(stop) = self.stop_now(op, &spec.run.limits, state.output) {
+                        why = Some(stop);
+                        break None;
+                    }
+                    if state.last_event.unwrap_or(started).elapsed() >= budget.idle {
+                        failure = Some(r::RunStatus::Budget(r::BudgetHit::Idle));
+                        break None;
+                    }
+                }
                 Some(body) = rx.recv() => {
                     if let Err(e) = receive(body) {
                         failure = Some(r::RunStatus::Failed(e.to_string()));
@@ -512,20 +531,15 @@ impl LocalNode {
                     }
                 }
                 result = &mut run => break Some(result),
-                _ = tick.tick() => {
-                    let state = state.lock().unwrap();
-                    if let Some(stop) = self.stop_now(op, &spec.run.limits, state.output) {
-                        why = Some(stop);
-                        break None;
-                    }
-                    if state.last_event.unwrap_or(started).elapsed() >= budget.idle {
-                        failure = Some(r::RunStatus::Budget(r::BudgetHit::Idle));
-                        break None;
-                    }
-                }
             }
         };
-        // All updates preceding the prompt response belong to this attempt.
+        // Stopping execution must not drop the sampler. Signal once and await the same
+        // attempt's bounded cleanup; this drives no new tool or model work after the signal.
+        if result.is_none() {
+            cancel.notify_one();
+            let _ = (&mut run).await;
+        }
+        // Includes the Final produced during cancellation, before AttemptEnded is journaled.
         while let Ok(body) = rx.try_recv() {
             let _ = receive(body);
         }
@@ -567,15 +581,17 @@ impl LocalNode {
             }
         };
         out.ms = started.elapsed().as_millis() as u64;
-        let tail = open_message
-            .map(|message| {
-                (
-                    Subject::Execution(exec.clone()),
-                    EventBody::MessageCompleted { message },
-                )
-            })
-            .into_iter()
-            .collect();
+        let mut tail = pending_final;
+        tail.extend(
+            open_message
+                .map(|message| {
+                    (
+                        Subject::Execution(exec.clone()),
+                        EventBody::MessageCompleted { message },
+                    )
+                })
+                .into_iter(),
+        );
         (out, why, tail)
     }
 }

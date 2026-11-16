@@ -5,7 +5,8 @@
 //! answered by the caller's tool policy, and the usage it reported.
 //!
 //! The caller owns the process (its journal, its sandbox through [`Request::wrap`]) and the job's
-//! deadline and cancellation policy; dropping the run stops its adapter.
+//! deadline and cancellation policy. Use [`run_cancellable`] and await its result to settle usage
+//! after stopping; dropping either future is emergency process cleanup without a usage receipt.
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -18,19 +19,14 @@ use crate::normalize::{Fact, Normalizer, ToolFact};
 use crate::permission;
 use crate::rpc::{Conn, Incoming, RpcError, Spawn};
 use crate::session::{self, OpenConfig, Reports};
+use crate::usage::{POLL_INTERVAL, SETTLE_WAIT, Sampler};
 use serde_json::{Value, json};
+
 use steve_node_api::{
     Epoch, EventBody, PermissionDecision, PermissionMode, Role, ToolCategory, ToolOrigin,
     ToolPhase, UsageReport,
 };
 use tokio::sync::mpsc;
-
-fn now_ms() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0)
-}
 
 /// Why a one-shot call failed. The words a user sees are the caller's.
 #[derive(Debug, thiserror::Error)]
@@ -164,11 +160,13 @@ pub struct Outcome {
 }
 
 /// A dropped job must stop its adapter even when dropped during initialize/session/new.
-struct Owned(Arc<Conn>);
+struct Owned(Arc<Conn>, bool);
 
 impl Drop for Owned {
     fn drop(&mut self) {
-        self.0.kill();
+        if !self.1 {
+            self.0.kill();
+        }
     }
 }
 
@@ -183,6 +181,7 @@ impl Reports for SessionReports<'_> {
 
 #[derive(Default)]
 struct Output {
+    session: Option<String>,
     message: Option<String>,
     assistant: std::collections::HashSet<String>,
     text: String,
@@ -264,6 +263,13 @@ fn incoming(
 ) -> Result<(), OneShotError> {
     match inc {
         Incoming::Notification { method, params } if method == "session/update" => {
+            if out
+                .session
+                .as_deref()
+                .is_some_and(|sid| params.get("sessionId").and_then(Value::as_str) != Some(sid))
+            {
+                return Ok(());
+            }
             if let Some(activity) = req.on_activity {
                 activity();
             }
@@ -364,32 +370,41 @@ where
 /// Streams updates until `prompting` resolves, then drains any updates already queued on `rx`
 /// and seals `norm` before inspecting `Ok` vs `Err`—so usage/cost updates emitted right before
 /// a JSON-RPC error response are never dropped when `prompting` wins a `select!` poll.
-async fn drive_prompt<F>(
+async fn drive_prompt<F, C>(
     conn: &Conn,
     rx: &mut mpsc::UnboundedReceiver<Incoming>,
     prompting: F,
     norm: &mut Normalizer,
     out: &mut Output,
+    sampler: &mut Sampler,
     req: &Request<'_>,
     on_event: &(dyn Fn(EventBody) + Send + Sync),
+    mut cancel: std::pin::Pin<&mut C>,
 ) -> Result<Value, OneShotError>
 where
     F: std::future::Future<Output = Result<Value, RpcError>>,
+    C: std::future::Future<Output = ()>,
 {
     tokio::pin!(prompting);
+    let mut tick = tokio::time::interval(POLL_INTERVAL);
     let result = loop {
         tokio::select! {
             biased;
+            _ = &mut cancel => return Err(failed("cancelled")),
             Some(inc) = rx.recv() => incoming(conn, inc, norm, out, req, on_event)?,
             result = &mut prompting => break result,
+            _ = tick.tick() => out.events(sampler.poll().await, on_event),
         }
     };
     while let Ok(inc) = rx.try_recv() {
-        incoming(conn, inc, norm, out, req, on_event)?;
+        tokio::select! {
+            biased;
+            _ = &mut cancel => return Err(failed("cancelled")),
+            _ = std::future::ready(()) => incoming(conn, inc, norm, out, req, on_event)?,
+        }
     }
     out.events(norm.finish(), on_event);
     let end = result.map_err(OneShotError::harness)?;
-    out.events(norm.prompt_response(&end), on_event);
     Ok(end)
 }
 
@@ -398,167 +413,197 @@ pub async fn run(
     on_spawn: &(dyn Fn(u32) -> bool + Send + Sync),
     on_event: &(dyn Fn(EventBody) + Send + Sync),
 ) -> Result<Outcome, OneShotError> {
+    run_cancellable(req, on_spawn, on_event, std::future::pending()).await
+}
+
+/// Stop execution when `cancel` resolves, then settle this attempt's source usage before returning.
+/// Cancellation must be awaited: no further handshake, prompt or tool permission is driven after
+/// the signal. Only process shutdown and bounded source sampling continue. The caller retains its
+/// cancellation/budget reason; this driver returns `Failed("cancelled")` for an external stop.
+/// `run` remains the compatible entry point for callers with only a request timeout.
+pub async fn run_cancellable(
+    req: Request<'_>,
+    on_spawn: &(dyn Fn(u32) -> bool + Send + Sync),
+    on_event: &(dyn Fn(EventBody) + Send + Sync),
+    cancel: impl std::future::Future<Output = ()>,
+) -> Result<Outcome, OneShotError> {
+    tokio::pin!(cancel);
     let timeout = req.timeout;
+    let properties = req.cfg.adapter_properties(req.harness);
+    let meter = Epoch::new(format!("{}.acp", req.prefix)).map_err(failed)?;
+    let mut norm = Normalizer::new(req.cwd, req.prefix, meter.clone())
+        .input_includes_cache(properties.usage_input_includes_cache);
+    let mut out = Output::default();
+    let mut sampler = None;
+    let mut owned = None;
     let limit_hit = Arc::new(AtomicBool::new(false));
     let admitted_limit = limit_hit.clone();
-    let work = async {
-        let (mut program, mut args) = req.cfg.adapter_command(req.harness).map_err(failed)?;
-        let mut env = req.cfg.adapter_env(req.harness);
-        if let Some(wrap) = req.wrap {
-            (program, args) = wrap((program, args), &mut env);
-        }
-        let (tx, mut rx) = mpsc::unbounded_channel();
-        let bytes = AtomicU64::new(0);
-        let max_output_bytes = req.max_output_bytes;
-        let conn = Conn::spawn_registered(
-            Spawn {
-                program,
-                args,
-                cwd: req.cwd.into(),
-                env,
-                log_tag: format!("[job {}]", req.prefix),
-                clean_env: false,
-            },
-            1 << 20,
-            move |n| {
-                let allowed = bytes
-                    .fetch_add(n as u64, Ordering::Relaxed)
-                    .saturating_add(n as u64)
-                    <= max_output_bytes;
-                if !allowed {
-                    admitted_limit.store(true, Ordering::Relaxed);
-                }
-                allowed
-            },
-            |pid| {
-                if on_spawn(pid) {
-                    Ok(())
-                } else {
-                    Err(RpcError {
-                        message: "job process registration failed".into(),
-                        data: None,
-                    })
-                }
-            },
-            move |_, inc| {
-                let _ = tx.send(inc);
-                None
-            },
-            || {},
-        )
-        .map_err(failed)?;
-        let owned = Owned(conn.clone());
-        let properties = req.cfg.adapter_properties(req.harness);
-        let meter = Epoch::new(format!("{}.acp", req.prefix)).map_err(failed)?;
-        let mut norm = Normalizer::new(req.cwd, req.prefix, meter.clone())
-            .input_includes_cache(properties.usage_input_includes_cache);
-        let mut out = Output::default();
-        let cwd = req.cwd.to_string_lossy();
-        let reports = SessionReports(req.on_session);
-        // the caller's mode as the adapter spells it (a call that only reads: Plan, asking before
-        // anything else where it has none), never what the adapter would do by default
-        let opening = session::open(
-            &conn,
-            OpenConfig {
-                client_version: &req.cfg.version,
-                cwd: &cwd,
-                resume: req.resume,
-                mcp_servers: req.mcp_servers.clone(),
-                mode: Some(req.cfg.mode_choice(req.harness, req.mode)),
-                model: req.model,
-                effort: req.effort,
-                system_prompt: req.head.map(|text| session::SystemPrompt {
-                    text,
-                    replace: req.tools_off,
-                }),
-            },
-            req.cfg
-                .session_meta_with_mode(req.harness, req.tools_off, Some(req.mode)),
-            &reports,
-        );
-        let mut prior_tokens = None;
-        let opened =
-            drive_open(&conn, &mut rx, opening, req.on_activity, &mut prior_tokens).await?;
-        if properties.usage_prompt_cumulative {
-            norm = norm.prompt_cumulative_baseline(prior_tokens.unwrap_or((0, 0, 0, 0, 0)));
-        }
-        if !opened.image && req.prompt.iter().any(|p| p["type"] == "image") {
-            return Err(OneShotError::Unsupported("images"));
-        }
-        let mut prompt = req.prompt.clone();
-        if let Some(head) = req.head.filter(|_| !opened.system_prompt) {
-            prompt.insert(0, json!({"type": "text", "text": head}));
-        }
-        let started = now_ms();
-        let prompting = conn.request(
-            "session/prompt",
-            json!({"sessionId": opened.acp_id, "prompt": prompt}),
-            None,
-        );
-        let end = drive_prompt(
-            &conn, &mut rx, prompting, &mut norm, &mut out, &req, on_event,
-        )
-        .await?;
-        let reported = out
-            .usage
-            .iter()
-            .any(|u| u.measurement == steve_node_api::Measurement::Final);
-        if !reported
-            && properties.usage_fallback == crate::UsageFallback::CodexRollout
-            && let Some(raw) = crate::rollout::turn_usage(
-                &req.cfg.codex_home,
-                &opened.acp_id,
-                started,
-                now_ms(),
-                Duration::from_secs(3),
-            )
-            .await
-        {
-            let n = |k: &str| raw.get(k).and_then(Value::as_u64);
-            let cached = n("cached_input_tokens");
-            let report = UsageReport {
-                report_id: format!("{}.rollout", req.prefix),
-                model: None,
-                meter_epoch: meter,
-                scope: steve_node_api::UsageScope::Main,
-                measurement: steve_node_api::Measurement::Final,
-                tokens: steve_node_api::Tokens {
-                    // the rollout counts the cache reads inside the input
-                    input: n("input_tokens").map(|i| i.saturating_sub(cached.unwrap_or(0))),
-                    output: n("output_tokens"),
-                    cache_read: cached,
-                    cache_write: None,
-                    reasoning: n("reasoning_output_tokens"),
+    // Keep the sampler and process owner outside the timed future: a timeout must still stop
+    // the producer, settle usage and call on_event before returning its error.
+    let result = {
+        let work = async {
+            // Ready cancellation must not even spawn. Repeat the checkpoint before prompting,
+            // because on_session can request a stop while the opening future is resolving.
+            tokio::select! { biased; _ = &mut cancel => return Err(failed("cancelled")), _ = std::future::ready(()) => {} }
+            let (mut program, mut args) = req.cfg.adapter_command(req.harness).map_err(failed)?;
+            let mut env = req.cfg.adapter_env(req.harness);
+            if let Some(wrap) = req.wrap {
+                (program, args) = wrap((program, args), &mut env);
+            }
+            let home = crate::usage::source(req.cfg, req.harness, &env, req.cwd);
+            let (tx, mut rx) = mpsc::unbounded_channel();
+            let bytes = AtomicU64::new(0);
+            let max_output_bytes = req.max_output_bytes;
+            let conn = Conn::spawn_registered(
+                Spawn {
+                    program,
+                    args,
+                    cwd: req.cwd.into(),
+                    env,
+                    log_tag: format!("[job {}]", req.prefix),
+                    clean_env: false,
                 },
-                context_used: None,
-                context_limit: None,
-                cost: None,
+                1 << 20,
+                move |n| {
+                    let allowed = bytes
+                        .fetch_add(n as u64, Ordering::Relaxed)
+                        .saturating_add(n as u64)
+                        <= max_output_bytes;
+                    if !allowed {
+                        admitted_limit.store(true, Ordering::Relaxed);
+                    }
+                    allowed
+                },
+                |pid| {
+                    if on_spawn(pid) {
+                        Ok(())
+                    } else {
+                        Err(RpcError {
+                            message: "job process registration failed".into(),
+                            data: None,
+                        })
+                    }
+                },
+                move |_, inc| {
+                    let _ = tx.send(inc);
+                    None
+                },
+                || {},
+            )
+            .map_err(failed)?;
+            owned = Some(Owned(conn.clone(), false));
+            let cwd = req.cwd.to_string_lossy();
+            let reports = SessionReports(req.on_session);
+            let opening = session::open(
+                &conn,
+                OpenConfig {
+                    client_version: &req.cfg.version,
+                    cwd: &cwd,
+                    resume: req.resume,
+                    mcp_servers: req.mcp_servers.clone(),
+                    mode: Some(req.cfg.mode_choice(req.harness, req.mode)),
+                    model: req.model,
+                    effort: req.effort,
+                    system_prompt: req.head.map(|text| session::SystemPrompt {
+                        text,
+                        replace: req.tools_off,
+                    }),
+                },
+                req.cfg
+                    .session_meta_with_mode(req.harness, req.tools_off, Some(req.mode)),
+                &reports,
+            );
+            let mut prior_tokens = None;
+            let opened = tokio::select! {
+                biased;
+                _ = &mut cancel => return Err(failed("cancelled")),
+                result = drive_open(&conn, &mut rx, opening, req.on_activity, &mut prior_tokens) => result?,
             };
-            out.events(vec![Fact::Event(EventBody::Usage { report })], on_event);
-        }
-        owned.0.kill();
-        if tokio::time::timeout(Duration::from_millis(500), conn.wait_exit())
+            if properties.usage_prompt_cumulative {
+                norm.set_prompt_cumulative_baseline(prior_tokens.unwrap_or((0, 0, 0, 0, 0)));
+            }
+            if !opened.image && req.prompt.iter().any(|p| p["type"] == "image") {
+                return Err(OneShotError::Unsupported("images"));
+            }
+            let mut prompt = req.prompt.clone();
+            if let Some(head) = req.head.filter(|_| !opened.system_prompt) {
+                prompt.insert(0, json!({"type": "text", "text": head}));
+            }
+            out.session = Some(opened.acp_id.clone());
+            sampler = Some(tokio::select! {
+                biased;
+                _ = &mut cancel => return Err(failed("cancelled")),
+                source = Sampler::start_source(home, &opened.acp_id, req.prefix, meter) => source,
+            });
+            tokio::select! { biased; _ = &mut cancel => return Err(failed("cancelled")), _ = std::future::ready(()) => {} }
+            let prompting = conn.request(
+                "session/prompt",
+                json!({"sessionId": opened.acp_id, "prompt": prompt}),
+                None,
+            );
+            let end = drive_prompt(
+                &conn,
+                &mut rx,
+                prompting,
+                &mut norm,
+                &mut out,
+                sampler.as_mut().expect("started"),
+                &req,
+                on_event,
+                cancel.as_mut(),
+            )
+            .await?;
+            Ok((opened.acp_id, end))
+        };
+        tokio::time::timeout(timeout, work)
             .await
-            .is_err()
-        {
-            conn.signal(libc::SIGKILL);
-            let _ = tokio::time::timeout(Duration::from_secs(2), conn.wait_exit()).await;
-        }
-        Ok(Outcome {
-            text: out.text,
-            usage: out.usage,
-            session: opened.acp_id,
-            stop_reason: end["stopReason"].as_str().unwrap_or("end_turn").into(),
-        })
+            .unwrap_or_else(|_| Err(OneShotError::Timeout(timeout)))
     };
-    let result = tokio::time::timeout(timeout, work)
-        .await
-        .map_err(|_| OneShotError::Timeout(timeout))?;
-    if limit_hit.load(Ordering::Relaxed) {
-        Err(OneShotError::OutputLimit)
-    } else {
-        result
+    if (matches!(
+        result,
+        Err(OneShotError::Timeout(_) | OneShotError::OutputLimit | OneShotError::Failed(_))
+    ) || limit_hit.load(Ordering::Relaxed))
+        && let Some(owned) = &mut owned
+    {
+        // Do not leave execution running during the sampling window, even when the adapter
+        // ignores TERM. This handle addresses only the process group created for this call.
+        stop_adapter(owned).await;
     }
+    if let Some(sampler) = &mut sampler {
+        let native = result
+            .as_ref()
+            .ok()
+            .map(|(_, end)| norm.prompt_response(end))
+            .unwrap_or_default();
+        out.events(norm.finish(), on_event);
+        out.events(sampler.finish(native, SETTLE_WAIT).await, on_event);
+    }
+    if let Some(owned) = &mut owned {
+        stop_adapter(owned).await;
+    }
+    if limit_hit.load(Ordering::Relaxed) {
+        return Err(OneShotError::OutputLimit);
+    }
+    let (session, end) = result?;
+    Ok(Outcome {
+        text: out.text,
+        usage: out.usage,
+        session,
+        stop_reason: end["stopReason"].as_str().unwrap_or("end_turn").into(),
+    })
+}
+
+/// Bound process shutdown separately from the sampler's three-second tail window. KILL the
+/// remaining group even if its leader exited on TERM: a descendant must not keep doing work.
+async fn stop_adapter(owned: &mut Owned) {
+    if owned.1 {
+        return;
+    }
+    owned.0.kill();
+    let _ = tokio::time::timeout(Duration::from_millis(500), owned.0.wait_exit()).await;
+    owned.0.signal(libc::SIGKILL);
+    owned.1 = true;
+    let _ = tokio::time::timeout(Duration::from_secs(2), owned.0.wait_exit()).await;
 }
 
 #[cfg(test)]
@@ -988,7 +1033,7 @@ for line in sys.stdin:
             || {},
         )
         .unwrap();
-        let _owned = Owned(conn.clone());
+        let _owned = Owned(conn.clone(), false);
         let (tx, mut rx) = mpsc::unbounded_channel();
         let meter = Epoch::new("attempt_test.acp").unwrap();
         let mut norm = Normalizer::new(temp.path(), "attempt_test", meter);
@@ -1025,8 +1070,17 @@ for line in sys.stdin:
                 data: None,
             }))
         });
+        let mut sampler = Sampler::start(None, "s1", "test", Epoch::new("test").unwrap()).await;
         let err = drive_prompt(
-            &conn, &mut rx, prompting, &mut norm, &mut out, &req, &on_event,
+            &conn,
+            &mut rx,
+            prompting,
+            &mut norm,
+            &mut out,
+            &mut sampler,
+            &req,
+            &on_event,
+            std::pin::pin!(std::future::pending()).as_mut(),
         )
         .await
         .expect_err("prompt failed with 503");
@@ -1058,7 +1112,7 @@ for line in sys.stdin:
             || {},
         )
         .unwrap();
-        let _owned = Owned(conn.clone());
+        let _owned = Owned(conn.clone(), false);
         let (tx, mut rx) = mpsc::unbounded_channel();
         let activity = AtomicU64::new(0);
         let on_activity = || {
@@ -1119,7 +1173,11 @@ for line in sys.stdin:
         .err()
         .expect("503 error");
         assert!(err.transient(), "{err:?}");
-        assert_eq!(usage.lock().unwrap().len(), 1);
+        let usage = usage.lock().unwrap();
+        assert_eq!(usage.len(), 2);
+        assert_eq!(usage[0].cost.as_ref().unwrap().decimal, "0.01");
+        assert_eq!(usage[1].measurement, steve_node_api::Measurement::Final);
+        assert_eq!(usage[1].tokens, steve_node_api::Tokens::default());
     }
 
     #[tokio::test]
@@ -1145,5 +1203,119 @@ for line in sys.stdin:
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
         panic!("owned adapter did not stop after its job was dropped");
+    }
+
+    #[tokio::test]
+    async fn ready_cancel_never_spawns_and_session_stop_never_prompts() {
+        let temp = tempfile::tempdir().unwrap();
+        let cfg = adapter(temp.path(), "        chunk(\"must not run\")", true);
+        let spawn_count = AtomicU64::new(0);
+        let spawned = |_: u32| {
+            spawn_count.fetch_add(1, Ordering::SeqCst);
+            true
+        };
+        let allow = |_: &ToolFact| -> bool { panic!("stopped work must not authorize tools") };
+        let event = |_: EventBody| {};
+        let result = run_cancellable(
+            request(&cfg, temp.path(), &allow),
+            &spawned,
+            &event,
+            std::future::ready(()),
+        )
+        .await;
+        assert!(matches!(result, Err(OneShotError::Failed(_))));
+        assert_eq!(spawn_count.load(Ordering::SeqCst), 0);
+
+        let stop = tokio::sync::Notify::new();
+        let session = |_: &str| stop.notify_one();
+        let mut req = request(&cfg, temp.path(), &allow);
+        req.on_session = Some(&session);
+        let text = Mutex::new(String::new());
+        let on = |body: EventBody| {
+            if let EventBody::TextDelta { text: delta, .. } = body {
+                text.lock().unwrap().push_str(&delta);
+            }
+        };
+        let result = run_cancellable(req, &spawned, &on, stop.notified()).await;
+        assert!(matches!(result, Err(OneShotError::Failed(_))));
+        assert_eq!(spawn_count.load(Ordering::SeqCst), 1);
+        assert!(
+            text.lock().unwrap().is_empty(),
+            "cancellation during open must prevent session/prompt"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancellation_is_checked_before_each_queued_permission() {
+        let temp = tempfile::tempdir().unwrap();
+        let cfg = adapter(
+            temp.path(),
+            r#"        for n in range(100):
+            send({"jsonrpc":"2.0","id":n+1000,"method":"session/request_permission","params":{
+                "toolCall":{"toolCallId":str(n),"kind":"read","status":"pending","rawInput":{"file_path":"file.txt"}},
+                "options":[{"optionId":"yes","kind":"allow_once","name":"Allow"}]}})
+        time.sleep(60)"#,
+            true,
+        );
+        let stop = tokio::sync::Notify::new();
+        let permissions = AtomicU64::new(0);
+        let allow = |_: &ToolFact| {
+            permissions.fetch_add(1, Ordering::SeqCst);
+            stop.notify_one();
+            true
+        };
+        let result = run_cancellable(
+            request(&cfg, temp.path(), &allow),
+            &|_| true,
+            &|_| {},
+            stop.notified(),
+        )
+        .await;
+        assert!(matches!(result, Err(OneShotError::Failed(_))));
+        assert_eq!(
+            permissions.load(Ordering::SeqCst),
+            1,
+            "only the permission preceding the stop can run"
+        );
+    }
+
+    #[tokio::test]
+    async fn output_admission_stop_reaps_producer_before_final_callback() {
+        let temp = tempfile::tempdir().unwrap();
+        let cfg = adapter(
+            temp.path(),
+            r#"        import signal
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        chunk("x" * 8000)
+        time.sleep(60)"#,
+            true,
+        );
+        let pid = AtomicU64::new(0);
+        let spawned = |p: u32| {
+            pid.store(p as u64, Ordering::SeqCst);
+            true
+        };
+        let final_seen = AtomicBool::new(false);
+        let event = |event: EventBody| {
+            if matches!(event, EventBody::Usage { report } if report.measurement == steve_node_api::Measurement::Final)
+            {
+                let p = pid.load(Ordering::SeqCst) as i32;
+                assert!(p > 0);
+                assert_eq!(
+                    unsafe { libc::kill(p, 0) },
+                    -1,
+                    "a budget stop must reap execution before emitting Final"
+                );
+                final_seen.store(true, Ordering::SeqCst);
+            }
+        };
+        let allow = |_: &ToolFact| true;
+        let mut req = request(&cfg, temp.path(), &allow);
+        req.max_output_bytes = 4000;
+        assert!(matches!(
+            run(req, &spawned, &event).await,
+            Err(OneShotError::OutputLimit)
+        ));
+        assert!(final_seen.load(Ordering::SeqCst));
     }
 }

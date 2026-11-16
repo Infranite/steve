@@ -6,7 +6,7 @@
 //! The harness leads its own process group, recorded in the journal before it runs on ([`procs`]),
 //! so a cancel, a deadline or the Hub's abandon after a restart stops the whole group and proves it
 //! gone. The draft streams as `message_started`/`text_delta` (a new message replaces the draft), the
-//! usage the harness reported comes once at the end, and the answer is the completion's text.
+//! usage is journaled as collected (including during cancellation), and the answer is the completion's text.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -77,6 +77,9 @@ pub(crate) async fn run(inner: Arc<Inner>, op: OperationId, spec: JobSpec, cance
     let output = AtomicU64::new(0);
     let broken = AtomicBool::new(false);
     let draft = Mutex::new(Draft::default());
+    // Final reports survive a failed streaming write and the dropping of a cancelled call's
+    // return value. They join the retryable terminal transaction if still uncommitted.
+    let pending_usage = Mutex::new(Vec::<UsageReport>::new());
     let lim = spec.run.limits.clone();
 
     let spawned = |pid: u32| {
@@ -124,8 +127,14 @@ pub(crate) async fn run(inner: Arc<Inner>, op: OperationId, spec: JobSpec, cance
         }
         inner.wake.notify_one();
     };
+    let stop_execution = Notify::new();
     let work = async {
-        let (images, message) = match prepare(&inner, &exec, &spec, &dir).await {
+        let prepared = tokio::select! {
+            biased;
+            _ = stop_execution.notified() => return Err(ApiError::new(ErrorCode::Internal, "cancelled during preparation")),
+            result = prepare(&inner, &exec, &spec, &dir) => result,
+        };
+        let (images, message) = match prepared {
             Ok(x) => x,
             Err(e) => return Err(e),
         };
@@ -137,6 +146,8 @@ pub(crate) async fn run(inner: Arc<Inner>, op: OperationId, spec: JobSpec, cance
             &images,
             &spawned,
             &on_message,
+            &pending_usage,
+            &stop_execution,
         )
         .await)
     };
@@ -158,35 +169,30 @@ pub(crate) async fn run(inner: Arc<Inner>, op: OperationId, spec: JobSpec, cance
         s = stop => Err(s),
         r = &mut work => Ok(r),
     };
-    // Whatever ended it, the group goes first. A run still going is signalled (TERM, then KILL)
-    // and goes on being polled, so its leader is reaped as it dies; what is left of the group after
-    // that is stopped too, and only a group proven gone frees the attempt.
+    // Do not drop a stopped ACP run: it owns source settlement and the Final callback.
+    // Preparation has the same stop signal, so cancellation cannot start a new adapter later.
+    if ended.is_err() {
+        stop_execution.notify_one();
+        let _ = (&mut work).await;
+    }
     let recorded = *group.lock().unwrap();
     let stopped = match recorded {
         None => Stopped::Gone,
+        // Settlement may have taken seconds since the leader exited. Recheck the recorded
+        // birth identity; a bare PGID is no longer proof that a newly appearing group is ours.
         Some((pgid, started)) => {
-            let mut reaped = ended.is_ok();
-            if !reaped {
-                for sig in [libc::SIGTERM, libc::SIGKILL] {
-                    procs::signal(pgid, started, sig);
-                    if tokio::time::timeout(Duration::from_secs(3), &mut work)
-                        .await
-                        .is_ok()
-                    {
-                        reaped = true;
-                        break;
-                    }
-                }
+            let mut state = procs::stop(pgid, started).await;
+            let until = tokio::time::Instant::now() + procs::GONE_WAIT;
+            while !state.gone() && tokio::time::Instant::now() < until {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                state = procs::state(pgid, started);
             }
-            if reaped {
-                procs::stop_reaped(pgid).await
-            } else {
-                procs::state(pgid, started)
-            }
+            state
         }
     };
     drop(work);
     let _ = std::fs::remove_dir_all(&dir);
+    let pending_usage = pending_usage.lock().unwrap().clone();
     let gone = stopped.gone();
     let completion = match ended {
         Err(Stop::Shutdown) => {
@@ -211,9 +217,16 @@ pub(crate) async fn run(inner: Arc<Inner>, op: OperationId, spec: JobSpec, cance
             error: Some(e),
             ..ended_with(Outcome::Failed, "error")
         },
-        Ok(Ok(ran)) => return end(&inner, &op, &exec, &key, recorded, ran).await,
+        Ok(Ok(mut ran)) => {
+            ran.usage.extend(pending_usage);
+            return end(&inner, &op, &exec, &key, recorded, ran).await;
+        }
     };
-    end_with(&inner, &op, &exec, &key, recorded, completion, vec![]).await;
+    let before = pending_usage
+        .into_iter()
+        .map(|report| EventBody::Usage { report })
+        .collect();
+    end_with(&inner, &op, &exec, &key, recorded, completion, before).await;
 }
 
 /// What the adapter ended the call with: its answer or error, how it stopped (ACP's
@@ -235,6 +248,8 @@ async fn acp_think(
     images: &[Image],
     spawned: &(dyn Fn(u32) -> bool + Send + Sync),
     on_message: &(dyn Fn(u32, &str) + Send + Sync),
+    pending_usage: &Mutex<Vec<UsageReport>>,
+    stop_execution: &Notify,
 ) -> Ran {
     use crate::acp_job::OneShotError;
     use serde_json::json;
@@ -320,7 +335,6 @@ async fn acp_think(
         None
     };
     let state = Mutex::new((None::<String>, 0u32, String::new()));
-    let usage = Mutex::new(vec![]);
     let event = |ev: EventBody| {
         let mut state = state.lock().unwrap();
         match ev {
@@ -339,7 +353,47 @@ async fn acp_think(
                 state.2.push_str(&text);
                 on_message(state.1, &state.2);
             }
-            EventBody::Usage { report } => usage.lock().unwrap().push(report),
+            diagnostic @ EventBody::Diagnostic { .. } => {
+                let exec = ExecutionRef::Job {
+                    job: spec.job.clone(),
+                    attempt: spec.run.attempt.clone(),
+                };
+                if inner
+                    .j
+                    .tx(|t| emit_all(inner, t, vec![(Subject::Execution(exec), diagnostic)]))
+                    .is_err()
+                {
+                    inner.fault();
+                }
+                inner.wake.notify_one();
+            }
+            EventBody::Usage { report } => {
+                let final_id =
+                    (report.measurement == Measurement::Final).then(|| report.report_id.clone());
+                if final_id.is_some() {
+                    pending_usage.lock().unwrap().push(report.clone());
+                }
+                let exec = ExecutionRef::Job {
+                    job: spec.job.clone(),
+                    attempt: spec.run.attempt.clone(),
+                };
+                if inner
+                    .j
+                    .tx(|t| {
+                        emit_all(
+                            inner,
+                            t,
+                            vec![(Subject::Execution(exec), EventBody::Usage { report })],
+                        )
+                    })
+                    .is_err()
+                {
+                    inner.fault();
+                } else if let Some(id) = final_id {
+                    pending_usage.lock().unwrap().retain(|r| r.report_id != id);
+                }
+                inner.wake.notify_one();
+            }
             _ => {}
         }
     };
@@ -370,16 +424,16 @@ async fn acp_think(
         on_activity: None,
         allow_tool: &allow,
     };
-    match crate::acp_job::run(req, spawned, &event).await {
+    match crate::acp_job::run_cancellable(req, spawned, &event, stop_execution.notified()).await {
         Ok(out) => Ran {
             reply: Ok(out.text),
             stop_reason: out.stop_reason,
-            usage: out.usage,
+            usage: vec![],
         },
         Err(e) => Ran {
             reply: Err(e),
             stop_reason: "error".into(),
-            usage: usage.lock().unwrap().clone(),
+            usage: vec![],
         },
     }
 }

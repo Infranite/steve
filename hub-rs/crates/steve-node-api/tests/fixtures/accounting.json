@@ -1,0 +1,1551 @@
+[
+  {
+    "name": "r3_explicit_different_models",
+    "fallback_model": "",
+    "reports": [
+      {
+        "report_id": "a",
+        "model": "A",
+        "meter_epoch": "e",
+        "scope": "main",
+        "measurement": "final",
+        "tokens": {
+          "input": 10,
+          "output": 5,
+          "cache_read": 0,
+          "cache_write": 0
+        }
+      },
+      {
+        "report_id": "b",
+        "model": "B",
+        "meter_epoch": "e",
+        "scope": "all",
+        "measurement": "final",
+        "tokens": {
+          "input": 20,
+          "output": 7,
+          "cache_read": 0,
+          "cache_write": 0
+        }
+      }
+    ],
+    "tokens": {
+      "input": 30,
+      "output": 12,
+      "cache_read": 0,
+      "cache_write": 0
+    },
+    "cost_usd": null,
+    "models": [
+      "A",
+      "B"
+    ]
+  },
+  {
+    "name": "r3_partial_all",
+    "fallback_model": "",
+    "reports": [
+      {
+        "report_id": "a",
+        "model": "A",
+        "meter_epoch": "e",
+        "scope": "main",
+        "measurement": "final",
+        "tokens": {
+          "input": 10,
+          "output": 5,
+          "cache_read": 0,
+          "cache_write": 0
+        }
+      },
+      {
+        "report_id": "b",
+        "model": "A",
+        "meter_epoch": "e",
+        "scope": "all",
+        "measurement": "final",
+        "tokens": {
+          "output": 7
+        }
+      }
+    ],
+    "tokens": {
+      "input": 10,
+      "output": 7,
+      "cache_read": 0,
+      "cache_write": 0
+    },
+    "cost_usd": null,
+    "models": [
+      "A"
+    ]
+  },
+  {
+    "name": "r4_context_final",
+    "fallback_model": "",
+    "reports": [
+      {
+        "report_id": "a",
+        "model": "A",
+        "meter_epoch": "e",
+        "scope": "main",
+        "measurement": "delta",
+        "tokens": {
+          "input": 10
+        }
+      },
+      {
+        "report_id": "b",
+        "model": "A",
+        "meter_epoch": "e",
+        "scope": "main",
+        "measurement": "final",
+        "tokens": {},
+        "context_used": 100
+      },
+      {
+        "report_id": "c",
+        "model": "A",
+        "meter_epoch": "e",
+        "scope": "main",
+        "measurement": "delta",
+        "tokens": {
+          "input": 5
+        }
+      }
+    ],
+    "tokens": {
+      "input": 15
+    },
+    "cost_usd": null
+  },
+  {
+    "name": "background",
+    "fallback_model": "",
+    "reports": [
+      {
+        "report_id": "a",
+        "model": "A",
+        "meter_epoch": "e",
+        "scope": "main",
+        "measurement": "final",
+        "tokens": {
+          "input": 10,
+          "output": 5,
+          "cache_read": 0,
+          "cache_write": 0
+        }
+      },
+      {
+        "report_id": "b",
+        "model": "B",
+        "meter_epoch": "e",
+        "scope": "background",
+        "measurement": "final",
+        "tokens": {
+          "input": 20,
+          "output": 7,
+          "cache_read": 0,
+          "cache_write": 0
+        }
+      }
+    ],
+    "tokens": {
+      "input": 10,
+      "output": 5,
+      "cache_read": 0,
+      "cache_write": 0
+    },
+    "cost_usd": null,
+    "models": [
+      "A"
+    ]
+  },
+  {
+    "name": "default_main_canonical_all_empty",
+    "fallback_model": "",
+    "reports": [
+      {
+        "report_id": "a",
+        "model": null,
+        "meter_epoch": "e",
+        "scope": "main",
+        "measurement": "final",
+        "tokens": {
+          "input": 10,
+          "output": 5,
+          "cache_read": 0,
+          "cache_write": 0
+        }
+      },
+      {
+        "report_id": "b",
+        "model": "canonical",
+        "meter_epoch": "e",
+        "scope": "all",
+        "measurement": "final",
+        "tokens": {
+          "input": 10,
+          "output": 5,
+          "cache_read": 0,
+          "cache_write": 0
+        }
+      }
+    ],
+    "tokens": {
+      "input": 10,
+      "output": 5,
+      "cache_read": 0,
+      "cache_write": 0
+    },
+    "cost_usd": null,
+    "models": [
+      "canonical"
+    ]
+  },
+  {
+    "name": "anonymous_partial_all_empty",
+    "fallback_model": "",
+    "reports": [
+      {
+        "report_id": "a",
+        "model": null,
+        "meter_epoch": "e",
+        "scope": "main",
+        "measurement": "final",
+        "tokens": {
+          "input": 10,
+          "output": 5,
+          "cache_read": 0,
+          "cache_write": 0
+        }
+      },
+      {
+        "report_id": "b",
+        "model": "canonical",
+        "meter_epoch": "e",
+        "scope": "all",
+        "measurement": "final",
+        "tokens": {
+          "output": 7
+        }
+      }
+    ],
+    "tokens": {
+      "input": 10,
+      "output": 7,
+      "cache_read": 0,
+      "cache_write": 0
+    },
+    "cost_usd": null,
+    "models": [
+      "canonical"
+    ]
+  },
+  {
+    "name": "anonymous_cost_all_empty",
+    "fallback_model": "",
+    "reports": [
+      {
+        "report_id": "a",
+        "model": null,
+        "meter_epoch": "e",
+        "scope": "main",
+        "measurement": "final",
+        "tokens": {
+          "input": 10,
+          "output": 5,
+          "cache_read": 0,
+          "cache_write": 0
+        }
+      },
+      {
+        "report_id": "b",
+        "model": "canonical",
+        "meter_epoch": "e",
+        "scope": "all",
+        "measurement": "final",
+        "tokens": {},
+        "cost": {
+          "currency": "USD",
+          "decimal": "0.1"
+        }
+      }
+    ],
+    "tokens": {
+      "input": 10,
+      "output": 5,
+      "cache_read": 0,
+      "cache_write": 0
+    },
+    "cost_usd": 0.1,
+    "models": [
+      "canonical"
+    ]
+  },
+  {
+    "name": "default_main_canonical_all_requested-alias",
+    "fallback_model": "requested-alias",
+    "reports": [
+      {
+        "report_id": "a",
+        "model": null,
+        "meter_epoch": "e",
+        "scope": "main",
+        "measurement": "final",
+        "tokens": {
+          "input": 10,
+          "output": 5,
+          "cache_read": 0,
+          "cache_write": 0
+        }
+      },
+      {
+        "report_id": "b",
+        "model": "canonical",
+        "meter_epoch": "e",
+        "scope": "all",
+        "measurement": "final",
+        "tokens": {
+          "input": 10,
+          "output": 5,
+          "cache_read": 0,
+          "cache_write": 0
+        }
+      }
+    ],
+    "tokens": {
+      "input": 10,
+      "output": 5,
+      "cache_read": 0,
+      "cache_write": 0
+    },
+    "cost_usd": null,
+    "models": [
+      "canonical"
+    ]
+  },
+  {
+    "name": "anonymous_partial_all_requested-alias",
+    "fallback_model": "requested-alias",
+    "reports": [
+      {
+        "report_id": "a",
+        "model": null,
+        "meter_epoch": "e",
+        "scope": "main",
+        "measurement": "final",
+        "tokens": {
+          "input": 10,
+          "output": 5,
+          "cache_read": 0,
+          "cache_write": 0
+        }
+      },
+      {
+        "report_id": "b",
+        "model": "canonical",
+        "meter_epoch": "e",
+        "scope": "all",
+        "measurement": "final",
+        "tokens": {
+          "output": 7
+        }
+      }
+    ],
+    "tokens": {
+      "input": 10,
+      "output": 7,
+      "cache_read": 0,
+      "cache_write": 0
+    },
+    "cost_usd": null,
+    "models": [
+      "canonical"
+    ]
+  },
+  {
+    "name": "anonymous_cost_all_requested-alias",
+    "fallback_model": "requested-alias",
+    "reports": [
+      {
+        "report_id": "a",
+        "model": null,
+        "meter_epoch": "e",
+        "scope": "main",
+        "measurement": "final",
+        "tokens": {
+          "input": 10,
+          "output": 5,
+          "cache_read": 0,
+          "cache_write": 0
+        }
+      },
+      {
+        "report_id": "b",
+        "model": "canonical",
+        "meter_epoch": "e",
+        "scope": "all",
+        "measurement": "final",
+        "tokens": {},
+        "cost": {
+          "currency": "USD",
+          "decimal": "0.1"
+        }
+      }
+    ],
+    "tokens": {
+      "input": 10,
+      "output": 5,
+      "cache_read": 0,
+      "cache_write": 0
+    },
+    "cost_usd": 0.1,
+    "models": [
+      "canonical"
+    ]
+  },
+  {
+    "name": "named_equal_counts_are_not_alias_evidence",
+    "fallback_model": "alias",
+    "reports": [
+      {
+        "report_id": "a",
+        "model": "alias",
+        "meter_epoch": "e",
+        "scope": "main",
+        "measurement": "final",
+        "tokens": {
+          "input": 10,
+          "output": 5,
+          "cache_read": 0,
+          "cache_write": 0
+        }
+      },
+      {
+        "report_id": "b",
+        "model": "canonical",
+        "meter_epoch": "e",
+        "scope": "all",
+        "measurement": "final",
+        "tokens": {
+          "input": 10,
+          "output": 5,
+          "cache_read": 0,
+          "cache_write": 0
+        }
+      }
+    ],
+    "tokens": {
+      "input": 20,
+      "output": 10,
+      "cache_read": 0,
+      "cache_write": 0
+    },
+    "cost_usd": null,
+    "models": [
+      "alias",
+      "canonical"
+    ]
+  },
+  {
+    "name": "zero",
+    "fallback_model": "",
+    "reports": [
+      {
+        "report_id": "a",
+        "model": "A",
+        "meter_epoch": "e",
+        "scope": "main",
+        "measurement": "final",
+        "tokens": {
+          "input": 0,
+          "output": 0,
+          "cache_read": 0,
+          "cache_write": 0
+        },
+        "cost": {
+          "currency": "USD",
+          "decimal": "0"
+        }
+      }
+    ],
+    "tokens": {
+      "input": 0,
+      "output": 0,
+      "cache_read": 0,
+      "cache_write": 0
+    },
+    "cost_usd": 0
+  },
+  {
+    "name": "unknown_context",
+    "fallback_model": "",
+    "reports": [
+      {
+        "report_id": "a",
+        "model": "A",
+        "meter_epoch": "e",
+        "scope": "main",
+        "measurement": "final",
+        "tokens": {},
+        "context_used": 100
+      }
+    ],
+    "tokens": {},
+    "cost_usd": null
+  },
+  {
+    "name": "cost_only",
+    "fallback_model": "",
+    "reports": [
+      {
+        "report_id": "a",
+        "model": "A",
+        "meter_epoch": "e",
+        "scope": "main",
+        "measurement": "final",
+        "tokens": {},
+        "cost": {
+          "currency": "USD",
+          "decimal": "0.1"
+        }
+      }
+    ],
+    "tokens": {},
+    "cost_usd": 0.1
+  },
+  {
+    "name": "cost_final_seals_accounting",
+    "fallback_model": "",
+    "reports": [
+      {
+        "report_id": "a",
+        "model": "A",
+        "meter_epoch": "e",
+        "scope": "main",
+        "measurement": "delta",
+        "tokens": {
+          "input": 10
+        }
+      },
+      {
+        "report_id": "b",
+        "model": "A",
+        "meter_epoch": "e",
+        "scope": "main",
+        "measurement": "final",
+        "tokens": {},
+        "cost": {
+          "currency": "USD",
+          "decimal": "0.1"
+        }
+      },
+      {
+        "report_id": "c",
+        "model": "A",
+        "meter_epoch": "e",
+        "scope": "main",
+        "measurement": "delta",
+        "tokens": {
+          "input": 5
+        }
+      }
+    ],
+    "tokens": {
+      "input": 10
+    },
+    "cost_usd": 0.1
+  },
+  {
+    "name": "tokens_final_rejects_late_cost",
+    "fallback_model": "",
+    "reports": [
+      {
+        "report_id": "a",
+        "model": "A",
+        "meter_epoch": "e",
+        "scope": "main",
+        "measurement": "final",
+        "tokens": {
+          "input": 10
+        }
+      },
+      {
+        "report_id": "b",
+        "model": "A",
+        "meter_epoch": "e",
+        "scope": "main",
+        "measurement": "delta",
+        "tokens": {},
+        "cost": {
+          "currency": "USD",
+          "decimal": "0.1"
+        }
+      },
+      {
+        "report_id": "c",
+        "model": "A",
+        "meter_epoch": "e",
+        "scope": "main",
+        "measurement": "delta",
+        "tokens": {},
+        "cost": {
+          "currency": "USD",
+          "decimal": "0.2"
+        }
+      }
+    ],
+    "tokens": {
+      "input": 10
+    },
+    "cost_usd": null
+  },
+  {
+    "name": "partial_final_rejects_late_delta",
+    "fallback_model": "",
+    "reports": [
+      {
+        "report_id": "a",
+        "model": "A",
+        "meter_epoch": "e",
+        "scope": "main",
+        "measurement": "delta",
+        "tokens": {
+          "input": 10,
+          "output": 3
+        }
+      },
+      {
+        "report_id": "b",
+        "model": "A",
+        "meter_epoch": "e",
+        "scope": "main",
+        "measurement": "final",
+        "tokens": {
+          "output": 5
+        }
+      },
+      {
+        "report_id": "c",
+        "model": "A",
+        "meter_epoch": "e",
+        "scope": "main",
+        "measurement": "delta",
+        "tokens": {
+          "input": 5,
+          "output": 9
+        }
+      }
+    ],
+    "tokens": {
+      "input": 10,
+      "output": 5
+    },
+    "cost_usd": null
+  },
+  {
+    "name": "late_delta_and_cumulative",
+    "fallback_model": "",
+    "reports": [
+      {
+        "report_id": "a",
+        "model": "A",
+        "meter_epoch": "e",
+        "scope": "main",
+        "measurement": "final",
+        "tokens": {
+          "input": 10,
+          "output": 5,
+          "cache_read": 0,
+          "cache_write": 0
+        }
+      },
+      {
+        "report_id": "b",
+        "model": "A",
+        "meter_epoch": "e",
+        "scope": "main",
+        "measurement": "delta",
+        "tokens": {
+          "input": 900,
+          "output": 900,
+          "cache_read": 0,
+          "cache_write": 0
+        }
+      },
+      {
+        "report_id": "c",
+        "model": "A",
+        "meter_epoch": "e",
+        "scope": "main",
+        "measurement": "cumulative",
+        "tokens": {
+          "input": 800,
+          "output": 800,
+          "cache_read": 0,
+          "cache_write": 0
+        }
+      }
+    ],
+    "tokens": {
+      "input": 10,
+      "output": 5,
+      "cache_read": 0,
+      "cache_write": 0
+    },
+    "cost_usd": null
+  },
+  {
+    "name": "replay",
+    "fallback_model": "",
+    "reports": [
+      {
+        "report_id": "a",
+        "model": "A",
+        "meter_epoch": "e",
+        "scope": "main",
+        "measurement": "delta",
+        "tokens": {
+          "output": 10
+        }
+      },
+      {
+        "report_id": "a",
+        "model": "A",
+        "meter_epoch": "e",
+        "scope": "main",
+        "measurement": "delta",
+        "tokens": {
+          "output": 10
+        }
+      },
+      {
+        "report_id": "b",
+        "model": "A",
+        "meter_epoch": "e",
+        "scope": "main",
+        "measurement": "cumulative",
+        "tokens": {
+          "output": 15
+        }
+      },
+      {
+        "report_id": "c",
+        "model": "A",
+        "meter_epoch": "e",
+        "scope": "main",
+        "measurement": "final",
+        "tokens": {
+          "output": 17
+        }
+      }
+    ],
+    "tokens": {
+      "output": 17
+    },
+    "cost_usd": null
+  },
+  {
+    "name": "context_cumulative_cannot_reset_delta",
+    "fallback_model": "",
+    "reports": [
+      {
+        "report_id": "a",
+        "model": "A",
+        "meter_epoch": "e",
+        "scope": "main",
+        "measurement": "delta",
+        "tokens": {
+          "output": 10
+        }
+      },
+      {
+        "report_id": "b",
+        "model": "A",
+        "meter_epoch": "e",
+        "scope": "main",
+        "measurement": "cumulative",
+        "tokens": {},
+        "context_used": 200
+      },
+      {
+        "report_id": "c",
+        "model": "A",
+        "meter_epoch": "e",
+        "scope": "main",
+        "measurement": "delta",
+        "tokens": {
+          "output": 5
+        }
+      }
+    ],
+    "tokens": {
+      "output": 15
+    },
+    "cost_usd": null
+  },
+  {
+    "name": "epochs_are_independent",
+    "fallback_model": "",
+    "reports": [
+      {
+        "report_id": "a",
+        "model": "A",
+        "meter_epoch": "e",
+        "scope": "main",
+        "measurement": "final",
+        "tokens": {
+          "input": 10,
+          "output": 5,
+          "cache_read": 0,
+          "cache_write": 0
+        }
+      },
+      {
+        "report_id": "b",
+        "model": "A",
+        "meter_epoch": "e2",
+        "scope": "all",
+        "measurement": "final",
+        "tokens": {
+          "input": 20,
+          "output": 7,
+          "cache_read": 0,
+          "cache_write": 0
+        }
+      }
+    ],
+    "tokens": {
+      "input": 30,
+      "output": 12,
+      "cache_read": 0,
+      "cache_write": 0
+    },
+    "cost_usd": null
+  },
+  {
+    "name": "invalid_cost_invalid",
+    "fallback_model": "",
+    "reports": [
+      {
+        "report_id": "a",
+        "model": "A",
+        "meter_epoch": "e",
+        "scope": "main",
+        "measurement": "delta",
+        "tokens": {
+          "input": 0
+        },
+        "cost": {
+          "currency": "USD",
+          "decimal": "invalid"
+        }
+      },
+      {
+        "report_id": "b",
+        "model": "A",
+        "meter_epoch": "e",
+        "scope": "main",
+        "measurement": "delta",
+        "tokens": {},
+        "cost": {
+          "currency": "USD",
+          "decimal": "0"
+        }
+      }
+    ],
+    "tokens": {
+      "input": 0
+    },
+    "cost_usd": null
+  },
+  {
+    "name": "invalid_cost_NaN",
+    "fallback_model": "",
+    "reports": [
+      {
+        "report_id": "a",
+        "model": "A",
+        "meter_epoch": "e",
+        "scope": "main",
+        "measurement": "delta",
+        "tokens": {
+          "input": 0
+        },
+        "cost": {
+          "currency": "USD",
+          "decimal": "NaN"
+        }
+      },
+      {
+        "report_id": "b",
+        "model": "A",
+        "meter_epoch": "e",
+        "scope": "main",
+        "measurement": "delta",
+        "tokens": {},
+        "cost": {
+          "currency": "USD",
+          "decimal": "0"
+        }
+      }
+    ],
+    "tokens": {
+      "input": 0
+    },
+    "cost_usd": null
+  },
+  {
+    "name": "invalid_cost_inf",
+    "fallback_model": "",
+    "reports": [
+      {
+        "report_id": "a",
+        "model": "A",
+        "meter_epoch": "e",
+        "scope": "main",
+        "measurement": "delta",
+        "tokens": {
+          "input": 0
+        },
+        "cost": {
+          "currency": "USD",
+          "decimal": "inf"
+        }
+      },
+      {
+        "report_id": "b",
+        "model": "A",
+        "meter_epoch": "e",
+        "scope": "main",
+        "measurement": "delta",
+        "tokens": {},
+        "cost": {
+          "currency": "USD",
+          "decimal": "0"
+        }
+      }
+    ],
+    "tokens": {
+      "input": 0
+    },
+    "cost_usd": null
+  },
+  {
+    "name": "invalid_cost_-0.2",
+    "fallback_model": "",
+    "reports": [
+      {
+        "report_id": "a",
+        "model": "A",
+        "meter_epoch": "e",
+        "scope": "main",
+        "measurement": "delta",
+        "tokens": {
+          "input": 0
+        },
+        "cost": {
+          "currency": "USD",
+          "decimal": "-0.2"
+        }
+      },
+      {
+        "report_id": "b",
+        "model": "A",
+        "meter_epoch": "e",
+        "scope": "main",
+        "measurement": "delta",
+        "tokens": {},
+        "cost": {
+          "currency": "USD",
+          "decimal": "0"
+        }
+      }
+    ],
+    "tokens": {
+      "input": 0
+    },
+    "cost_usd": null
+  },
+  {
+    "name": "mixed_currency_sticky_unknown",
+    "fallback_model": "",
+    "reports": [
+      {
+        "report_id": "a",
+        "model": "A",
+        "meter_epoch": "e",
+        "scope": "main",
+        "measurement": "delta",
+        "tokens": {
+          "output": 4
+        },
+        "cost": {
+          "currency": "USD",
+          "decimal": "0.1"
+        }
+      },
+      {
+        "report_id": "b",
+        "model": "A",
+        "meter_epoch": "e",
+        "scope": "main",
+        "measurement": "delta",
+        "tokens": {
+          "output": 2
+        },
+        "cost": {
+          "currency": "EUR",
+          "decimal": "0.2"
+        }
+      },
+      {
+        "report_id": "c",
+        "model": "A",
+        "meter_epoch": "e",
+        "scope": "main",
+        "measurement": "delta",
+        "tokens": {
+          "output": 3
+        },
+        "cost": {
+          "currency": "USD",
+          "decimal": "0"
+        }
+      }
+    ],
+    "tokens": {
+      "output": 9
+    },
+    "cost_usd": null
+  },
+  {
+    "name": "valid_final_repairs_cost",
+    "fallback_model": "",
+    "reports": [
+      {
+        "report_id": "a",
+        "model": "A",
+        "meter_epoch": "e",
+        "scope": "main",
+        "measurement": "delta",
+        "tokens": {
+          "output": 4
+        },
+        "cost": {
+          "currency": "USD",
+          "decimal": "invalid"
+        }
+      },
+      {
+        "report_id": "b",
+        "model": "A",
+        "meter_epoch": "e",
+        "scope": "main",
+        "measurement": "final",
+        "tokens": {
+          "output": 5
+        },
+        "cost": {
+          "currency": "USD",
+          "decimal": "0.4"
+        }
+      }
+    ],
+    "tokens": {
+      "output": 5
+    },
+    "cost_usd": 0.4
+  },
+  {
+    "name": "non_usd_not_dollars",
+    "fallback_model": "",
+    "reports": [
+      {
+        "report_id": "b",
+        "model": "A",
+        "meter_epoch": "e",
+        "scope": "main",
+        "measurement": "delta",
+        "tokens": {
+          "output": 2
+        },
+        "cost": {
+          "currency": "EUR",
+          "decimal": "0.2"
+        }
+      }
+    ],
+    "tokens": {
+      "output": 2
+    },
+    "cost_usd": null
+  },
+  {
+    "name": "all_zero_overrides_main",
+    "fallback_model": "",
+    "reports": [
+      {
+        "report_id": "a",
+        "model": "A",
+        "meter_epoch": "e",
+        "scope": "main",
+        "measurement": "final",
+        "tokens": {
+          "input": 10,
+          "output": 5,
+          "cache_read": 0,
+          "cache_write": 0
+        },
+        "cost": {
+          "currency": "USD",
+          "decimal": "0.1"
+        }
+      },
+      {
+        "report_id": "b",
+        "model": "A",
+        "meter_epoch": "e",
+        "scope": "all",
+        "measurement": "final",
+        "tokens": {
+          "input": 0,
+          "output": 0,
+          "cache_read": 0,
+          "cache_write": 0
+        },
+        "cost": {
+          "currency": "USD",
+          "decimal": "0"
+        }
+      }
+    ],
+    "tokens": {
+      "input": 0,
+      "output": 0,
+      "cache_read": 0,
+      "cache_write": 0
+    },
+    "cost_usd": 0
+  },
+  {
+    "name": "all_and_main_cost_choose_all",
+    "fallback_model": "",
+    "reports": [
+      {
+        "report_id": "a",
+        "model": "A",
+        "meter_epoch": "e",
+        "scope": "main",
+        "measurement": "final",
+        "tokens": {
+          "input": 10,
+          "output": 5,
+          "cache_read": 0,
+          "cache_write": 0
+        },
+        "cost": {
+          "currency": "USD",
+          "decimal": "0.1"
+        }
+      },
+      {
+        "report_id": "b",
+        "model": "A",
+        "meter_epoch": "e",
+        "scope": "all",
+        "measurement": "final",
+        "tokens": {
+          "output": 7
+        },
+        "cost": {
+          "currency": "USD",
+          "decimal": "0.2"
+        }
+      }
+    ],
+    "tokens": {
+      "input": 10,
+      "output": 7,
+      "cache_read": 0,
+      "cache_write": 0
+    },
+    "cost_usd": 0.2
+  },
+  {
+    "name": "interleaved_models_preserve_first_owner",
+    "fallback_model": "",
+    "reports": [
+      {
+        "report_id": "a",
+        "model": "A",
+        "meter_epoch": "e",
+        "scope": "main",
+        "measurement": "final",
+        "tokens": {
+          "input": 10,
+          "output": 5,
+          "cache_read": 0,
+          "cache_write": 0
+        }
+      },
+      {
+        "report_id": "b",
+        "model": "B",
+        "meter_epoch": "e",
+        "scope": "main",
+        "measurement": "final",
+        "tokens": {
+          "input": 20,
+          "output": 7,
+          "cache_read": 0,
+          "cache_write": 0
+        }
+      },
+      {
+        "report_id": "c",
+        "model": "A",
+        "meter_epoch": "e",
+        "scope": "all",
+        "measurement": "final",
+        "tokens": {
+          "output": 9
+        }
+      }
+    ],
+    "tokens": {
+      "input": 30,
+      "output": 16,
+      "cache_read": 0,
+      "cache_write": 0
+    },
+    "cost_usd": null,
+    "models": [
+      "A",
+      "B"
+    ]
+  },
+  {
+    "name": "anonymous_main_multiple_canonical_all",
+    "fallback_model": "alias",
+    "reports": [
+      {
+        "report_id": "a",
+        "model": null,
+        "scope": "main",
+        "meter_epoch": "e",
+        "measurement": "final",
+        "tokens": {
+          "input": 1,
+          "output": 2,
+          "cache_read": 0,
+          "cache_write": 0
+        }
+      },
+      {
+        "report_id": "b",
+        "model": "A",
+        "scope": "all",
+        "meter_epoch": "e",
+        "measurement": "final",
+        "tokens": {
+          "input": 10,
+          "output": 20,
+          "cache_read": 0,
+          "cache_write": 0
+        }
+      },
+      {
+        "report_id": "c",
+        "model": "B",
+        "scope": "all",
+        "meter_epoch": "e",
+        "measurement": "final",
+        "tokens": {
+          "input": 1,
+          "output": 2,
+          "cache_read": 0,
+          "cache_write": 0
+        }
+      }
+    ],
+    "tokens": {
+      "input": 11,
+      "output": 22,
+      "cache_read": 0,
+      "cache_write": 0
+    },
+    "cost_usd": null
+  },
+  {
+    "name": "anonymous_partial_all_retains_unassigned_field_residual",
+    "fallback_model": "alias",
+    "reports": [
+      {
+        "report_id": "a",
+        "model": null,
+        "scope": "main",
+        "meter_epoch": "e",
+        "measurement": "final",
+        "tokens": {
+          "input": 20,
+          "output": 5,
+          "cache_read": 0,
+          "cache_write": 0
+        }
+      },
+      {
+        "report_id": "b",
+        "model": "A",
+        "scope": "all",
+        "meter_epoch": "e",
+        "measurement": "final",
+        "tokens": {
+          "input": 10,
+          "output": 4,
+          "cache_read": 0,
+          "cache_write": 0
+        }
+      },
+      {
+        "report_id": "c",
+        "model": "B",
+        "scope": "all",
+        "meter_epoch": "e",
+        "measurement": "final",
+        "tokens": {
+          "input": 5
+        }
+      }
+    ],
+    "tokens": {
+      "input": 20,
+      "output": 5,
+      "cache_read": 0,
+      "cache_write": 0
+    },
+    "cost_usd": null
+  },
+  {
+    "name": "anonymous_main_quote_multiple_canonical_all",
+    "fallback_model": "alias",
+    "reports": [
+      {
+        "report_id": "a",
+        "model": null,
+        "scope": "main",
+        "meter_epoch": "e",
+        "measurement": "final",
+        "tokens": {
+          "input": 1,
+          "output": 2,
+          "cache_read": 0,
+          "cache_write": 0
+        },
+        "cost": {
+          "decimal": "0.1",
+          "currency": "USD"
+        }
+      },
+      {
+        "report_id": "b",
+        "model": "A",
+        "scope": "all",
+        "meter_epoch": "e",
+        "measurement": "final",
+        "tokens": {
+          "input": 10,
+          "output": 20,
+          "cache_read": 0,
+          "cache_write": 0
+        }
+      },
+      {
+        "report_id": "c",
+        "model": "B",
+        "scope": "all",
+        "meter_epoch": "e",
+        "measurement": "final",
+        "tokens": {
+          "input": 1,
+          "output": 2,
+          "cache_read": 0,
+          "cache_write": 0
+        }
+      }
+    ],
+    "tokens": {
+      "input": 11,
+      "output": 22,
+      "cache_read": 0,
+      "cache_write": 0
+    },
+    "cost_usd": 0.1
+  },
+  {
+    "name": "anonymous_quote_covered_by_all_quotes",
+    "fallback_model": "alias",
+    "reports": [
+      {
+        "report_id": "a",
+        "model": null,
+        "scope": "main",
+        "meter_epoch": "e",
+        "measurement": "final",
+        "tokens": {
+          "input": 1,
+          "output": 2,
+          "cache_read": 0,
+          "cache_write": 0
+        },
+        "cost": {
+          "decimal": "0.1",
+          "currency": "USD"
+        }
+      },
+      {
+        "report_id": "b",
+        "model": "A",
+        "scope": "all",
+        "meter_epoch": "e",
+        "measurement": "final",
+        "tokens": {
+          "input": 10,
+          "output": 20,
+          "cache_read": 0,
+          "cache_write": 0
+        },
+        "cost": {
+          "decimal": "0.2",
+          "currency": "USD"
+        }
+      },
+      {
+        "report_id": "c",
+        "model": "B",
+        "scope": "all",
+        "meter_epoch": "e",
+        "measurement": "final",
+        "tokens": {
+          "input": 1,
+          "output": 2,
+          "cache_read": 0,
+          "cache_write": 0
+        },
+        "cost": {
+          "decimal": "0.3",
+          "currency": "USD"
+        }
+      }
+    ],
+    "tokens": {
+      "input": 11,
+      "output": 22,
+      "cache_read": 0,
+      "cache_write": 0
+    },
+    "cost_usd": 0.5
+  },
+  {
+    "name": "independent_zero_and_cost_only_model",
+    "fallback_model": "",
+    "reports": [
+      {
+        "report_id": "a",
+        "model": "A",
+        "meter_epoch": "e",
+        "scope": "main",
+        "measurement": "final",
+        "tokens": {
+          "input": 0,
+          "output": 0,
+          "cache_read": 0,
+          "cache_write": 0
+        }
+      },
+      {
+        "report_id": "b",
+        "model": "B",
+        "meter_epoch": "e",
+        "scope": "all",
+        "measurement": "final",
+        "tokens": {},
+        "cost": {
+          "decimal": "0.1",
+          "currency": "USD"
+        }
+      }
+    ],
+    "tokens": {
+      "input": 0,
+      "output": 0,
+      "cache_read": 0,
+      "cache_write": 0
+    },
+    "cost_usd": 0.1,
+    "models": [
+      "A",
+      "B"
+    ]
+  },
+  {
+    "name": "named_main_complements_before_anonymous_aggregate",
+    "fallback_model": "alias",
+    "reports": [
+      {
+        "report_id": "a",
+        "model": null,
+        "scope": "main",
+        "meter_epoch": "e",
+        "measurement": "final",
+        "tokens": {
+          "input": 20,
+          "output": 5,
+          "cache_read": 0,
+          "cache_write": 0
+        }
+      },
+      {
+        "report_id": "named-main",
+        "model": "A",
+        "scope": "main",
+        "meter_epoch": "e",
+        "measurement": "final",
+        "tokens": {
+          "input": 10
+        }
+      },
+      {
+        "report_id": "b",
+        "model": "A",
+        "scope": "all",
+        "meter_epoch": "e",
+        "measurement": "final",
+        "tokens": {
+          "output": 4,
+          "cache_read": 0,
+          "cache_write": 0
+        }
+      },
+      {
+        "report_id": "c",
+        "model": "B",
+        "scope": "all",
+        "meter_epoch": "e",
+        "measurement": "final",
+        "tokens": {
+          "input": 5
+        }
+      }
+    ],
+    "tokens": {
+      "input": 20,
+      "output": 5,
+      "cache_read": 0,
+      "cache_write": 0
+    },
+    "cost_usd": null
+  }
+]

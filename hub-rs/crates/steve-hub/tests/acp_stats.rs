@@ -269,21 +269,39 @@ async fn turns_and_tokens_land_in_the_stats_tables() {
         .unwrap()
         .map(Result::unwrap)
         .collect();
-    assert_eq!(rows.len(), 3, "{rows:?}");
-    assert_eq!(rows[0].0, "claude-opus-5-5");
+    // Billing tokens and context-meter dollars keep their independent epoch attribution. The
+    // context counter is rebased from process .5 -> .8 to attempt increments .5 and .3.
+    let token_rows: Vec<_> = rows
+        .iter()
+        .filter(|r| r.1.is_some() || r.2.is_some())
+        .collect();
+    assert_eq!(token_rows.len(), 3, "{rows:?}");
+    let opus = token_rows
+        .iter()
+        .find(|r| r.0 == "claude-opus-5-5")
+        .unwrap();
     assert_eq!(
-        (rows[0].1, rows[0].2, rows[0].3, rows[0].4),
+        (opus.1, opus.2, opus.3, opus.4),
         (Some(10), Some(20), Some(30), Some(40))
     );
-    assert!((rows[0].5.unwrap() - 0.5).abs() < 1e-9);
-    assert_eq!(rows[0].6, r#"{"scope":"all"}"#);
-    assert_eq!((rows[1].0.as_str(), rows[1].5), ("claude-haiku-5-5", None));
-    // the follow-up has no model_usage: main loop, last model seen in the session
     assert_eq!(
-        (rows[2].1, rows[2].3, rows[2].6.as_str()),
-        (Some(5), Some(7), r#"{"scope":"main"}"#)
+        serde_json::from_str::<Value>(&opus.6).unwrap()["scope"],
+        "all"
     );
-    assert!((rows[2].5.unwrap() - 0.3).abs() < 1e-9);
+    assert!(token_rows.iter().any(|r| r.0 == "claude-haiku-5-5"));
+    let main = token_rows
+        .iter()
+        .find(|r| serde_json::from_str::<Value>(&r.6).unwrap()["scope"] == "main")
+        .unwrap();
+    assert_eq!((main.1, main.3), (Some(5), Some(7)));
+    let mut dollars: Vec<f64> = rows.iter().filter_map(|r| r.5).collect();
+    dollars.sort_by(f64::total_cmp);
+    assert_eq!(dollars.len(), 2, "{rows:?}");
+    assert!(
+        (dollars[0] - 0.3).abs() < 1e-9 && (dollars[1] - 0.5).abs() < 1e-9,
+        "{dollars:?}"
+    );
+    assert!((dollars.iter().sum::<f64>() - 0.8).abs() < 1e-9);
     // the cube equals the details
     let (tin, tcr, turns_n): (i64, i64, i64) = c
         .query_row(
@@ -336,6 +354,30 @@ async fn turns_and_tokens_land_in_the_stats_tables() {
         })
         .await
     );
+    // The API's clock is rounded down to the current second. Settlement can leave >3s
+    // since the final text: a read point just before the durable end is correctly partial.
+    // Wait for that same clock to include the end; do not change source times or TPS units.
+    let ended: i64 = e
+        .db()
+        .query_row(
+            "SELECT MAX(at) FROM realtime_output_samples WHERE kind='end'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let (_, before) = e
+        .call("GET", "/api/stats/realtime?bot=realtime-bot", None)
+        .await;
+    assert!(
+        until(2, || async {
+            let (s, v) = e
+                .call("GET", "/api/stats/realtime?bot=realtime-bot", None)
+                .await;
+            s == 200 && v["at"].as_i64().is_some_and(|at| at >= ended)
+        })
+        .await,
+        "the rounded read clock must include the persisted stop"
+    );
     let (status, realtime) = e
         .call(
             "GET",
@@ -343,6 +385,15 @@ async fn turns_and_tokens_land_in_the_stats_tables() {
             None,
         )
         .await;
+    let receipt = json!({"persisted_end_at":ended,"before":before,"after":realtime});
+    eprintln!("SETTLEMENT_CLOCK_RECEIPT={receipt}");
+    if let Ok(out) = std::env::var("ST117_OUTPUTS") {
+        std::fs::write(
+            PathBuf::from(out).join("settlement-clock-receipt.json"),
+            serde_json::to_vec_pretty(&receipt).unwrap(),
+        )
+        .unwrap();
+    }
     assert_eq!(status, 200, "{realtime}");
     let at = realtime["at"].as_i64().unwrap();
     let units: i64 = e
@@ -354,7 +405,7 @@ async fn turns_and_tokens_land_in_the_stats_tables() {
         )
         .unwrap();
     assert_eq!(units, 70, "20 streamed text pieces have 70 ASCII scalars");
-    assert_eq!(realtime["tps"], json!(units as f64 / 40.0));
+    assert_eq!(realtime["tps"], json!(units as f64 / 40.0), "{realtime}");
     assert_eq!(realtime["state"], "estimated");
     assert_eq!(realtime["coverage"]["measured"], 0);
     assert_eq!(realtime["series"].as_array().unwrap().len(), 60);

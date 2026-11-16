@@ -40,6 +40,7 @@ export default {
       partial: "Realtime collection is incomplete. TPS and output session totals cannot be confirmed. Silence does not mean the model has stopped.",
     },
   },
+  coverage: { uncertain: "Historical cost ownership uncertain", not_reported: "Not reported yet", unavailable: "Usage unavailable", partial: "Partial coverage" },
   word: {
     est: "Est.",
     estShort: "est. {{usd}}",
@@ -398,7 +399,6 @@ export default {
     markTip: "{{label}} {{time}}",
     usage: "{{tokens}} tokens · est. {{usd}}",
     usageHit: "{{tokens}} tokens · hit {{pct}} · est. {{usd}}",
-    noUsage: "No usage yet",
     timeDone: "Agent {{agent}} · waiting on you {{wait}} · took {{age}}",
     timeOpen: "Agent {{agent}} · waiting on you {{wait}} · {{age}} so far",
     sessionTitle: "This conversation: {{tokens}} tokens; cost is an estimate",

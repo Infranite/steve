@@ -54,7 +54,11 @@ pub async fn read_snapshot(node: &dyn Node, limit: u32) -> ApiResult<NodeSnapsho
                 // Zero on the first page asks a new Node to paginate stream heads too. An
                 // older Node treats it as one entry and still sends its complete heads; later
                 // pages use the usual limit and duplicate heads are folded by stream id.
-                limit: if cursor.is_none() && paged_heads { 0 } else { limit },
+                limit: if cursor.is_none() && paged_heads {
+                    0
+                } else {
+                    limit
+                },
             })
             .await
         {
@@ -70,10 +74,7 @@ pub async fn read_snapshot(node: &dyn Node, limit: u32) -> ApiResult<NodeSnapsho
                     None => {
                         let mut heads: Vec<_> = heads.into_values().collect();
                         heads.sort_by(|a, b| a.stream.as_str().cmp(b.stream.as_str()));
-                        return Ok(NodeSnapshot {
-                            entries,
-                            heads,
-                        });
+                        return Ok(NodeSnapshot { entries, heads });
                     }
                 }
             }

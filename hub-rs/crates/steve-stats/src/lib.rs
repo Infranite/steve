@@ -14,6 +14,7 @@
 steve_i18n::init!();
 
 pub mod catalog;
+pub mod coverage;
 pub mod day;
 pub mod events;
 pub mod items;

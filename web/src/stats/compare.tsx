@@ -13,7 +13,7 @@ import { st } from "@/store"
 import { stats, type Filter, type Summary, type UsageRow } from "@/api/stats"
 import { Est } from "@/stats/kpi"
 import { Table, th } from "@/stats/tables"
-import { fmtMs, fmtN, fmtPct, fmtUsd, useStats } from "@/stats/format"
+import { fmtMs, fmtN, fmtUsage, fmtUsageCost, fmtPct, fmtUsd, useStats } from "@/stats/format"
 import { harnessName } from "@/model-picker"
 import { t, useT } from "@/i18n"
 
@@ -96,11 +96,11 @@ export function BotCompare({ f, fkey, live, onBot }: { f: Filter; fkey: string; 
       cell: (r) => (r.s.quality.turn_error_rate == null ? dash : <Two a={fmtPct(r.s.quality.turn_error_rate, 1)} b={t("stats:v2.bots.ofTurns", { count: r.s.usage.turns, n: fmtN(r.s.usage.turns) })} />) },
     { k: "agent_per_item", label: t("stats:v2.bots.agentPerItem"), def: t("stats:v2.bots.agentPerItemDef"), v: (r) => r.s.time.agent.avg, fmt: fmtMs },
     { k: "cost_per_item", label: t("stats:v2.bots.costPerItem"), est: true, def: t("stats:v2.bots.costPerItemDef"), v: (r) => (r.usage.unpriced_tokens && (r.s.per_item.est_avg ?? 0) < 0.01 ? null : r.s.per_item.est_avg),
-      cell: (r) => (r.s.per_item.est_avg == null ? dash : <span title={r.usage.unpriced_tokens ? t("stats:word.estUnpricedTitle", { n: fmtN(r.usage.unpriced_tokens) }) : undefined}>{r.usage.unpriced_tokens && r.s.per_item.est_avg < 0.01 ? t("stats:word.unpriced") : (r.usage.unpriced_tokens ? "≥" : "") + fmtUsd(r.s.per_item.est_avg)}</span>) },
+      cell: (r) => (r.usage.coverage?.total === null ? fmtUsageCost(r.usage) : r.s.per_item.est_avg == null ? dash : <span title={r.usage.unpriced_tokens ? t("stats:word.estUnpricedTitle", { n: fmtN(r.usage.unpriced_tokens) }) : undefined}>{r.usage.unpriced_tokens && r.s.per_item.est_avg < 0.01 ? t("stats:word.unpriced") : (r.usage.unpriced_tokens ? "≥" : "") + fmtUsd(r.s.per_item.est_avg)}</span>) },
     { k: "hit", label: t("stats:v2.bots.hit"), def: t("stats:v2.bots.hitDef"), v: (r) => r.usage.hit_rate, fmt: (v) => fmtPct(v) },
     { k: "tokens_per_item", label: t("stats:v2.bots.tokensPerItem"), def: t("stats:v2.bots.tokensPerItemDef"), v: (r) => r.s.per_item.tokens.avg },
     { k: "cost", label: t("stats:v2.bots.cost"), est: true, def: t("stats:v2.bots.costDef"), v: (r) => (r.usage.unpriced_tokens && r.usage.est < 0.01 ? null : r.usage.est),
-      cell: (r) => <span title={r.usage.unpriced_tokens ? t("stats:word.estUnpricedTitle", { n: fmtN(r.usage.unpriced_tokens) }) : undefined}>{r.usage.unpriced_tokens && r.usage.est < 0.01 ? t("stats:word.unpriced") : (r.usage.unpriced_tokens ? "≥" : "") + fmtUsd(r.usage.est)}</span> },
+      cell: (r) => r.usage.coverage?.total === null ? fmtUsageCost(r.usage) : <span title={r.usage.unpriced_tokens ? t("stats:word.estUnpricedTitle", { n: fmtN(r.usage.unpriced_tokens) }) : undefined}>{r.usage.unpriced_tokens && r.usage.est < 0.01 ? t("stats:word.unpriced") : (r.usage.unpriced_tokens ? "≥" : "") + fmtUsd(r.usage.est)}</span> },
   ]
   return (
     <Panel k="bots" data-bots>
@@ -136,11 +136,11 @@ export function ModelCompare({ f, fkey, live }: { f: Filter; fkey: string; live:
     { k: "retries", label: t("stats:v2.models.retries"), def: t("stats:v2.models.retriesDef"), v: (r) => (r.turns ? r.retries : null) },
     { k: "avg_turn", label: t("stats:v2.models.avgTurn"), def: t("stats:v2.models.avgTurnDef"), v: (r) => per(r.turn_ms, r.turns), fmt: fmtMs },
     { k: "cost_per_turn", label: t("stats:v2.models.costPerTurn"), est: true, def: t("stats:v2.models.costPerTurnDef"), v: (r) => (r.unpriced_tokens && r.est < 0.01 ? null : per(r.est, r.turns)),
-      cell: (r) => { const v = per(r.est, r.turns); return v == null ? dash : r.unpriced_tokens && r.est < 0.01 ? <a href="#/settings/stats" className="text-blue hover:underline" onClick={(e) => e.stopPropagation()}>{t("stats:word.unpriced")}</a> : <>{r.unpriced_tokens ? "≥" : ""}{fmtUsd(v)}</> } },
+      cell: (r) => { if (r.coverage?.total === null) return fmtUsageCost(r); const v = per(r.est, r.turns); return v == null ? dash : r.unpriced_tokens && r.est < 0.01 ? <a href="#/settings/stats" className="text-blue hover:underline" onClick={(e) => e.stopPropagation()}>{t("stats:word.unpriced")}</a> : <>{r.unpriced_tokens ? "≥" : ""}{fmtUsd(v)}</> } },
     { k: "cost", label: t("stats:v2.models.cost"), est: true, def: t("stats:v2.models.costDef"), v: (r) => (r.unpriced_tokens && r.est < 0.01 ? null : r.est),
-      cell: (r) => (r.unpriced_tokens && r.est < 0.01 ? <a href="#/settings/stats" className="text-blue hover:underline">{t("stats:word.unpriced")}</a> : <>{r.unpriced_tokens ? "≥" : ""}{fmtUsd(r.est)}</>) },
+      cell: (r) => (r.coverage?.total === null ? fmtUsageCost(r) : r.unpriced_tokens && r.est < 0.01 ? <a href="#/settings/stats" className="text-blue hover:underline">{t("stats:word.unpriced")}</a> : <>{r.unpriced_tokens ? "≥" : ""}{fmtUsd(r.est)}</>) },
     { k: "hit", label: t("stats:v2.models.hit"), def: t("stats:v2.models.hitDef"), v: (r) => r.hit_rate, fmt: (v) => fmtPct(v) },
-    { k: "tokens", label: "tokens", def: t("stats:v2.models.tokensDef"), v: (r) => r.total },
+    { k: "tokens", label: "tokens", def: t("stats:v2.models.tokensDef"), v: (r) => r.coverage ? r.coverage.total : r.total, cell: (r) => fmtUsage(r) },
     { k: "tokens_per_turn", label: t("stats:v2.models.tokensPerTurn"), def: t("stats:v2.models.tokensPerTurnDef"), v: (r) => per(r.total, r.turns) },
   ]
   return (

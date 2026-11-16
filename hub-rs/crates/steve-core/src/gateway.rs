@@ -154,16 +154,54 @@ impl Tried {
     }
 
     /// A one-shot run in the gateway's terms: its error in Steve's words, its usage as rows. A run
-    /// elsewhere (a Node job) is put back into these terms too.
+    /// elsewhere (a Node job) is put back into these terms too. Runners that know the selected
+    /// model resolve missing report names with `merged_usage` before calling this boundary.
     pub fn of(
         reply: std::result::Result<(String, Option<f64>), OneShotError>,
         usage: Vec<UsageReport>,
     ) -> Tried {
         let timed_out = matches!(reply, Err(OneShotError::Timeout(_)));
+        // Local calls and Node jobs may hand us raw events or materialized snapshots. Both
+        // must cross the same replay/replacement boundary before becoming accounting rows.
+        let reports = merged_usage(usage, "");
+        let costs: Vec<_> = reports
+            .iter()
+            .filter_map(|r| {
+                r.cost
+                    .as_ref()
+                    .filter(|m| m.currency == "USD")
+                    .and_then(cost_f64)
+            })
+            .collect();
+        let cost = (!costs.is_empty())
+            .then(|| costs.iter().sum::<f64>())
+            .filter(|n| n.is_finite());
+        let mut usage = vec![];
+        merge_usage(
+            &mut usage,
+            reports.iter().cloned().map(model_usage).collect(),
+        );
+        for u in &mut usage {
+            if u.tokens == steve_store::Tokens::default()
+                && reports
+                    .iter()
+                    .filter(|r| r.model.as_deref().unwrap_or_default() == u.model)
+                    .all(|r| !steve_node_api::usage::accounting_tokens(r, &reports))
+            {
+                u.detail["accounting_tokens"] = json!(false);
+            }
+        }
         Tried {
             timed_out,
-            reply: reply.map_err(call_error),
-            usage: usage.into_iter().map(model_usage).collect(),
+            reply: reply
+                .map(|(text, reported)| {
+                    (
+                        text,
+                        cost.or(reported.filter(|n| n.is_finite() && *n >= 0.0)),
+                    )
+                })
+                .map_err(call_error),
+            usage,
         }
     }
 }
@@ -182,124 +220,14 @@ fn call_error(e: OneShotError) -> CoreError {
 
 /// Dollars as reported (`Money.decimal`), read back.
 pub fn cost_f64(m: &steve_node_api::Money) -> Option<f64> {
-    m.decimal.parse().ok()
+    steve_node_api::usage::amount(m)
 }
 
-/// Convert one attempt's meter reports into accounting rows. A cumulative snapshot replaces
-/// earlier figures, and a final figure replaces deltas field by field (missing is unknown,
-/// not zero). Report ids remain the replay boundary.
-pub fn merged_usage(
-    reports: impl IntoIterator<Item = UsageReport>,
-    fallback_model: &str,
-) -> Vec<UsageReport> {
-    fn add(a: Option<u64>, b: Option<u64>) -> Option<u64> {
-        match (a, b) {
-            (Some(a), Some(b)) => Some(a.saturating_add(b)),
-            (a, b) => a.or(b),
-        }
-    }
-    let mut seen = std::collections::HashSet::new();
-    let mut totals: Vec<UsageReport> = vec![];
-    for mut report in reports {
-        if !seen.insert(report.report_id.clone()) {
-            continue;
-        }
-        if report.model.as_deref().is_none_or(str::is_empty) {
-            report.model = Some(fallback_model.to_string());
-        }
-        let Some(total) = totals.iter_mut().find(|t| {
-            t.meter_epoch == report.meter_epoch
-                && t.model == report.model
-                && t.scope == report.scope
-        }) else {
-            totals.push(report);
-            continue;
-        };
-        if total.measurement == steve_node_api::Measurement::Final
-            && report.measurement != steve_node_api::Measurement::Final
-        {
-            continue;
-        }
-        let delta = report.measurement == steve_node_api::Measurement::Delta;
-        let merge = |a, b| if delta { add(a, b) } else { b.or(a) };
-        total.tokens = steve_node_api::Tokens {
-            input: merge(total.tokens.input, report.tokens.input),
-            output: merge(total.tokens.output, report.tokens.output),
-            cache_read: merge(total.tokens.cache_read, report.tokens.cache_read),
-            cache_write: merge(total.tokens.cache_write, report.tokens.cache_write),
-            reasoning: merge(total.tokens.reasoning, report.tokens.reasoning),
-        };
-        if let Some(cost) = report.cost {
-            total.cost = Some(if delta {
-                match total
-                    .cost
-                    .as_ref()
-                    .filter(|old| old.currency == cost.currency)
-                {
-                    Some(old) => steve_node_api::Money {
-                        decimal: (cost_f64(old).unwrap_or(0.0) + cost_f64(&cost).unwrap_or(0.0))
-                            .to_string(),
-                        currency: cost.currency,
-                    },
-                    None => cost,
-                }
-            } else {
-                cost
-            });
-        }
-        total.context_used = report.context_used.or(total.context_used);
-        total.context_limit = report.context_limit.or(total.context_limit);
-        total.measurement = report.measurement;
-        total.report_id = report.report_id;
-    }
-    // `all` already includes the main loop. Keep a main-only dollar figure if no all figure
-    // reported dollars, but never count the main tokens twice.
-    let all_epochs: std::collections::HashSet<_> = totals
-        .iter()
-        .filter(|r| r.scope == steve_node_api::UsageScope::All)
-        .map(|r| r.meter_epoch.clone())
-        .collect();
-    let priced_epochs: std::collections::HashSet<_> = totals
-        .iter()
-        .filter(|r| r.scope == steve_node_api::UsageScope::All && r.cost.is_some())
-        .map(|r| r.meter_epoch.clone())
-        .collect();
-    totals.retain_mut(|r| {
-        if r.scope == steve_node_api::UsageScope::Main && all_epochs.contains(&r.meter_epoch) {
-            r.tokens = Default::default();
-            if priced_epochs.contains(&r.meter_epoch) {
-                r.cost = None;
-            }
-            r.cost.is_some()
-        } else {
-            true
-        }
-    });
-    totals
-}
+// The durable ledger and both one-shot paths call this exact accounting primitive.
+pub use steve_node_api::merged_usage;
 
 /// A usage report as the statistics' row (its dollars back to the same `f64`).
-pub fn model_usage(r: UsageReport) -> ModelUsage {
-    use steve_node_api::UsageScope;
-    let n = |x: Option<u64>| x.and_then(|x| i64::try_from(x).ok());
-    let scope = match r.scope {
-        UsageScope::All => "all",
-        UsageScope::Main => "main",
-        UsageScope::Background => "background",
-    };
-    ModelUsage {
-        model: r.model.unwrap_or_default(),
-        tokens: steve_store::Tokens {
-            input: n(r.tokens.input),
-            output: n(r.tokens.output),
-            cache_read: n(r.tokens.cache_read),
-            cache_write: n(r.tokens.cache_write),
-            reasoning: n(r.tokens.reasoning),
-        },
-        cost_reported: r.cost.as_ref().and_then(cost_f64),
-        detail: json!({"scope": scope}),
-    }
-}
+pub use steve_store::gateway_ledger::model_usage;
 
 /// One think call as [`Fallback`] hands it to each model in turn: everything but the model and effort,
 /// which the fallback chooses.
@@ -336,17 +264,131 @@ pub struct LocalAcp {
     pub cwd: PathBuf,
 }
 
+// The worker owns the adapter until bounded sampler settlement, even if the caller times out or
+// drops its future. Only its registered process group is signalled; no global process search.
+struct LocalWaiting {
+    pid: std::sync::Arc<std::sync::Mutex<Option<i32>>>,
+    cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    armed: bool,
+}
+impl Drop for LocalWaiting {
+    fn drop(&mut self) {
+        if self.armed {
+            self.cancelled
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            if let Some(pid) = *self.pid.lock().unwrap() {
+                // oneshot registers its own process group before opening the session.
+                unsafe {
+                    libc::kill(-pid, libc::SIGTERM);
+                }
+            }
+        }
+    }
+}
 #[async_trait]
 impl OneModel for LocalAcp {
-    /// One run of `model` on the call's adapter. Without tools the prompt's stable head (or
-    /// [`GATEWAY_SYSTEM`]) is the system prompt, in place of the harness's own where the adapter
-    /// takes one; with tools it only reads the call's attachments.
     async fn once(
         &self,
         call: &OneCall<'_>,
         model: &str,
         effort: Option<&str>,
         on_text: Option<OnText<'_>>,
+    ) -> Tried {
+        let one = LocalAcp {
+            acp: self.acp.clone(),
+            cwd: self.cwd.clone(),
+        };
+        let (prompt, tools, harness, images, model, effort) = (
+            call.prompt.to_string(),
+            call.tools.clone(),
+            call.harness.to_string(),
+            call.images.to_vec(),
+            model.to_string(),
+            effort.map(String::from),
+        );
+        let timeout = call.timeout;
+        let account = crate::stats::current_attempt();
+        let reports = std::sync::Arc::new(std::sync::Mutex::new(Vec::<UsageReport>::new()));
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let pid = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mut waiting = LocalWaiting {
+            pid: pid.clone(),
+            cancelled: cancelled.clone(),
+            armed: true,
+        };
+        let (worker_pid, worker_reports, requested_model) =
+            (pid.clone(), reports.clone(), model.clone());
+        let mut worker = tokio::spawn(async move {
+            let call = OneCall {
+                prompt: &prompt,
+                timeout,
+                tools: &tools,
+                harness: &harness,
+                images: &images,
+            };
+            let on = |t: &str| {
+                let _ = tx.send(t.to_string());
+            };
+            let spawned = |p: u32| {
+                let mut pid = worker_pid.lock().unwrap();
+                if cancelled.load(std::sync::atomic::Ordering::SeqCst) {
+                    return false;
+                }
+                *pid = Some(p as i32);
+                true
+            };
+            let result = one
+                .run_once(
+                    &call,
+                    &model,
+                    effort.as_deref(),
+                    Some(&on),
+                    &spawned,
+                    account.as_ref(),
+                    &worker_reports,
+                )
+                .await;
+            *worker_pid.lock().unwrap() = None;
+            if let Some(a) = account {
+                let error = result.reply.as_ref().err().map(ToString::to_string);
+                if let Err(e) = a.call.store.stats().gateway_attempt_end(
+                    &a.id,
+                    result.reply.is_ok(),
+                    error.as_deref(),
+                    steve_store::now(),
+                ) {
+                    tracing::warn!("stats: local completion: {e}");
+                }
+            }
+            result
+        });
+        let timer = tokio::time::sleep(timeout);
+        tokio::pin!(timer);
+        loop {
+            tokio::select! {
+                r=&mut worker=>{
+                    waiting.armed=false;
+                    while let Ok(t)=rx.try_recv() {if let Some(on)=on_text {on(&t);}}
+                    return r.unwrap_or_else(|e|Tried::failed(msg(e.to_string())));
+                },
+                Some(t)=rx.recv()=>{if let Some(on)=on_text {on(&t);}},
+                _=&mut timer=>return Tried::of(Err(OneShotError::Timeout(timeout)),merged_usage(reports.lock().unwrap().clone(),&requested_model)),
+            }
+        }
+    }
+}
+impl LocalAcp {
+    #[allow(clippy::too_many_arguments)]
+    async fn run_once(
+        &self,
+        call: &OneCall<'_>,
+        model: &str,
+        effort: Option<&str>,
+        on_text: Option<OnText<'_>>,
+        on_spawn: &(dyn Fn(u32) -> bool + Send + Sync),
+        account: Option<&crate::stats::AttemptAccount>,
+        reports: &std::sync::Mutex<Vec<UsageReport>>,
     ) -> Tried {
         use steve_node_api::{EventBody, Role};
         let (head, message) = split_static(call.prompt);
@@ -361,6 +403,23 @@ impl OneModel for LocalAcp {
         let allow = |f: &steve_acp::normalize::ToolFact| reads_only(f, &self.cwd, &readable);
         let text = std::sync::Mutex::new((None::<String>, String::new()));
         let usage = std::sync::Mutex::new(vec![]);
+        let uncommitted = std::sync::Mutex::new(Vec::<UsageReport>::new());
+        let flush = || {
+            if let Some(account) = account {
+                let mut pending = uncommitted.lock().unwrap();
+                while let Some(report) = pending.first() {
+                    match account.report(report) {
+                        Ok(_) => {
+                            pending.remove(0);
+                        }
+                        Err(e) => {
+                            tracing::warn!("stats: local usage pending: {e}");
+                            break;
+                        }
+                    }
+                }
+            }
+        };
         let event = |ev: EventBody| match ev {
             EventBody::MessageStarted {
                 message,
@@ -381,7 +440,12 @@ impl OneModel for LocalAcp {
                     }
                 }
             }
-            EventBody::Usage { report } => usage.lock().unwrap().push(report),
+            EventBody::Usage { report } => {
+                uncommitted.lock().unwrap().push(report.clone());
+                flush();
+                reports.lock().unwrap().push(report.clone());
+                usage.lock().unwrap().push(report);
+            }
             _ => {}
         };
         if let Err(e) = std::fs::create_dir_all(&self.cwd) {
@@ -407,17 +471,11 @@ impl OneModel for LocalAcp {
             on_activity: None,
             allow_tool: &allow,
         };
-        let out = steve_acp::oneshot::run(req, &|_| true, &event).await;
+        let out = steve_acp::oneshot::run(req, on_spawn, &event).await;
+        flush();
         let usage = merged_usage(usage.into_inner().unwrap(), model);
-        let cost = |u: &[UsageReport]| {
-            let c: Vec<f64> = u
-                .iter()
-                .filter_map(|r| r.cost.as_ref().and_then(cost_f64))
-                .collect();
-            (!c.is_empty()).then(|| c.iter().sum::<f64>())
-        };
         let reply = match out {
-            Ok(o) if o.stop_reason == "end_turn" => Ok((o.text, cost(&usage))),
+            Ok(o) if o.stop_reason == "end_turn" => Ok((o.text, None)),
             Ok(o) => Err(OneShotError::Harness {
                 text: format!("the harness stopped: {}", o.stop_reason),
                 code: None,
@@ -569,32 +627,9 @@ pub fn answer_tools(files: &ChatFiles) -> ThinkTools {
 /// The system prompt of a call without tools whose prompt has no stable head of its own.
 pub const GATEWAY_SYSTEM: &str = "You are a component of Steve, a personal assistant app. Follow the instructions in the user message exactly and reply with only what they ask for.";
 
-/// Adds `more` to `into`, summing rows of the same model and scope (a model tried twice).
-fn merge_usage(into: &mut Vec<ModelUsage>, more: Vec<ModelUsage>) {
-    fn add<T: std::ops::Add<Output = T>>(a: Option<T>, b: Option<T>) -> Option<T> {
-        match (a, b) {
-            (Some(a), Some(b)) => Some(a + b),
-            (a, b) => a.or(b),
-        }
-    }
-    for m in more {
-        match into
-            .iter_mut()
-            .find(|r| r.model == m.model && r.detail == m.detail)
-        {
-            Some(r) => {
-                let (a, b) = (&mut r.tokens, m.tokens);
-                a.input = add(a.input, b.input);
-                a.output = add(a.output, b.output);
-                a.cache_read = add(a.cache_read, b.cache_read);
-                a.cache_write = add(a.cache_write, b.cache_write);
-                a.reasoning = add(a.reasoning, b.reasoning);
-                r.cost_reported = add(r.cost_reported, m.cost_reported);
-            }
-            None => into.push(m),
-        }
-    }
-}
+/// Adds settled attempts/epochs to `into`, summing rows of the same accounting model. Overlapping
+/// main/all reports must have been selected by `merged_usage` before reaching this point.
+use steve_store::gateway_ledger::merge_usage;
 
 impl<M: OneModel> Fallback<M> {
     /// The models (and effort) of this call: its purpose and workspace come from the caller's
@@ -651,10 +686,32 @@ impl<M: OneModel> Fallback<M> {
             images: &images,
         };
         for m in models {
-            let r = self
-                .one
-                .once(&call, m, choice.effort.as_deref(), on_text)
-                .await;
+            let account = match crate::stats::current_call() {
+                Some(c) => match c.attempt(&choice.harness, m) {
+                    Ok(a) => Some(a),
+                    Err(e) => {
+                        a.result = Err(msg(format!("usage ownership: {e}")));
+                        break;
+                    }
+                },
+                None => None,
+            };
+            let run = self.one.once(&call, m, choice.effort.as_deref(), on_text);
+            let r = match &account {
+                Some(a) => a.scope(run).await,
+                None => run.await,
+            };
+            if let Some(account) = account {
+                let error = r.reply.as_ref().err().map(ToString::to_string);
+                if let Err(e) = account.call.store.stats().gateway_attempt_end(
+                    &account.id,
+                    r.reply.is_ok(),
+                    error.as_deref(),
+                    steve_store::now(),
+                ) {
+                    tracing::warn!("stats: attempt end: {e}");
+                }
+            }
             a.attempts += 1;
             a.model = m.clone();
             merge_usage(&mut a.usage, r.usage);
@@ -1699,6 +1756,408 @@ pub async fn draft_fields(
             })
         })
         .collect())
+}
+
+#[cfg(test)]
+mod usage_tests {
+    use super::*;
+    use steve_node_api::{Epoch, Measurement, Money, Tokens, UsageScope};
+
+    fn report(
+        id: &str,
+        measurement: Measurement,
+        output: Option<u64>,
+        cost: Option<&str>,
+    ) -> UsageReport {
+        UsageReport {
+            report_id: id.into(),
+            model: Some("model".into()),
+            meter_epoch: Epoch::new("meter").unwrap(),
+            scope: UsageScope::Main,
+            measurement,
+            tokens: Tokens {
+                output,
+                ..Tokens::default()
+            },
+            cost: cost.map(|decimal| Money {
+                decimal: decimal.into(),
+                currency: "USD".into(),
+            }),
+            context_used: None,
+            context_limit: None,
+        }
+    }
+
+    #[test]
+    fn tried_accepts_raw_reports_and_already_normalized_reports_equally() {
+        let mut restart = report("restart", Measurement::Delta, Some(3), Some("0.03"));
+        restart.meter_epoch = Epoch::new("next").unwrap();
+        let reports = vec![
+            report("delta", Measurement::Delta, Some(4), Some("0.1")),
+            report("live", Measurement::Cumulative, Some(9), Some("0.2")),
+            report("end", Measurement::Final, Some(12), Some("0.25")),
+            report("end", Measurement::Final, Some(12), Some("0.25")),
+            report("stale", Measurement::Cumulative, Some(2), Some("0.01")),
+            restart,
+        ];
+        let raw = Tried::of(Ok(("ok".into(), None)), reports.clone());
+        let normalized = Tried::of(Ok(("ok".into(), None)), merged_usage(reports, "model"));
+        assert_eq!(raw.usage, normalized.usage);
+        assert_eq!(
+            raw.usage.len(),
+            1,
+            "epochs of one model are one accounting row"
+        );
+        assert_eq!(raw.usage[0].tokens.output, Some(15));
+        assert_eq!(raw.usage[0].cost_reported, Some(0.28));
+        assert_eq!(raw.reply.unwrap().1, Some(0.28));
+    }
+
+    #[test]
+    fn cumulative_and_final_replace_deltas_field_by_field_and_ignore_replays() {
+        let mut delta = report("d1", Measurement::Delta, Some(4), Some("0.1"));
+        delta.tokens.input = Some(8);
+        delta.tokens.cache_read = Some(2);
+        let mut live = report("live", Measurement::Cumulative, Some(9), Some("0.2"));
+        live.tokens.input = Some(10);
+        let mut end = report("end", Measurement::Final, Some(0), None);
+        end.tokens.reasoning = Some(0);
+        let rows = merged_usage(
+            [
+                delta.clone(),
+                delta,
+                live.clone(),
+                live,
+                end.clone(),
+                end,
+                report("late", Measurement::Delta, Some(10), Some("1")),
+            ],
+            "model",
+        );
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].tokens,
+            Tokens {
+                input: Some(10),
+                output: Some(0),
+                cache_read: Some(2),
+                cache_write: None,
+                reasoning: Some(0),
+            }
+        );
+        assert_eq!(rows[0].cost.as_ref().unwrap().decimal, "0.2");
+    }
+
+    #[test]
+    fn context_only_and_cost_only_reports_do_not_reset_token_counts_or_finalize_them() {
+        let mut context = report("context", Measurement::Final, None, None);
+        context.context_used = Some(100);
+        let rows = merged_usage(
+            [
+                report("d1", Measurement::Delta, Some(4), None),
+                context,
+                report("cost", Measurement::Cumulative, None, Some("0.2")),
+                report("d2", Measurement::Delta, Some(6), None),
+                report("end", Measurement::Final, Some(12), None),
+            ],
+            "model",
+        );
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].tokens.output, Some(12));
+        assert_eq!(rows[0].tokens.input, None);
+        assert_eq!(rows[0].context_used, Some(100));
+        assert_eq!(rows[0].cost.as_ref().unwrap().decimal, "0.2");
+    }
+
+    #[test]
+    fn all_is_selected_per_model_and_epoch_with_main_as_a_field_fallback() {
+        let mut main = report("main", Measurement::Final, Some(20), Some("0.2"));
+        main.tokens.input = Some(10);
+        let mut all = report("all", Measurement::Final, Some(25), None);
+        all.scope = UsageScope::All;
+        let mut other_model = report("other-model", Measurement::Final, Some(7), Some("0.07"));
+        other_model.model = Some("other".into());
+        let mut other_epoch = report("other-epoch", Measurement::Final, Some(3), Some("0.03"));
+        other_epoch.meter_epoch = Epoch::new("next").unwrap();
+        let rows = merged_usage([main, all, other_model, other_epoch], "model");
+        assert_eq!(
+            rows.len(),
+            3,
+            "main/all of one model and epoch share one bill"
+        );
+        let all = rows.iter().find(|r| r.scope == UsageScope::All).unwrap();
+        assert_eq!((all.tokens.input, all.tokens.output), (Some(10), Some(25)));
+        assert_eq!(all.cost.as_ref().unwrap().decimal, "0.2");
+        assert!(
+            rows.iter()
+                .any(|r| r.model.as_deref() == Some("other") && r.tokens.output == Some(7))
+        );
+        assert!(
+            rows.iter()
+                .any(|r| r.meter_epoch.as_str() == "next" && r.tokens.output == Some(3))
+        );
+        assert_eq!(
+            merged_usage(rows.clone(), "model"),
+            rows,
+            "normalization is idempotent"
+        );
+    }
+
+    #[test]
+    fn switching_scopes_across_epochs_does_not_create_an_extra_model_call() {
+        let mut all = report("all", Measurement::Final, Some(25), None);
+        all.scope = UsageScope::All;
+        let mut restart = report("restart", Measurement::Final, Some(3), Some("0.03"));
+        restart.meter_epoch = Epoch::new("next").unwrap();
+        let tried = Tried::of(
+            Ok(("ok".into(), None)),
+            vec![
+                report("main", Measurement::Final, Some(20), Some("0.2")),
+                all,
+                restart,
+            ],
+        );
+        assert_eq!(tried.usage.len(), 1);
+        assert_eq!(tried.usage[0].tokens.output, Some(28));
+        assert_eq!(tried.usage[0].cost_reported, Some(0.23));
+        assert_eq!(tried.usage[0].detail, json!({"scope": "all"}));
+    }
+
+    #[test]
+    fn choosing_all_preserves_the_first_model_for_call_metadata() {
+        let mut other = report("other", Measurement::Final, Some(7), None);
+        other.model = Some("other".into());
+        let mut all = report("all", Measurement::Final, Some(25), None);
+        all.scope = UsageScope::All;
+        let tried = Tried::of(
+            Ok(("ok".into(), None)),
+            vec![
+                report("main", Measurement::Final, Some(20), None),
+                other,
+                all,
+            ],
+        );
+        assert_eq!(
+            tried
+                .usage
+                .iter()
+                .map(|u| (u.model.as_str(), u.tokens.output))
+                .collect::<Vec<_>>(),
+            [("model", Some(25)), ("other", Some(7)),]
+        );
+    }
+
+    #[test]
+    fn empty_or_cost_only_all_does_not_erase_main_tokens_and_background_is_not_this_attempt() {
+        for (output, cost, want_output, want_cost) in [
+            (None, None, Some(20), "0.2"),
+            (None, Some("0.3"), Some(20), "0.3"),
+            (Some(0), Some("0"), Some(0), "0"),
+        ] {
+            let mut all = report("all", Measurement::Final, output, cost);
+            all.scope = UsageScope::All;
+            let mut background = report("background", Measurement::Final, Some(99), Some("9"));
+            background.scope = UsageScope::Background;
+            let rows = merged_usage(
+                [
+                    report("main", Measurement::Final, Some(20), Some("0.2")),
+                    all,
+                    background,
+                ],
+                "model",
+            );
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].tokens.output, want_output);
+            assert_eq!(rows[0].cost.as_ref().unwrap().decimal, want_cost);
+        }
+    }
+
+    #[test]
+    fn missing_models_are_filled_before_selecting_scopes() {
+        let mut main = report("main", Measurement::Final, Some(20), None);
+        main.model = None;
+        let mut all = report("all", Measurement::Final, Some(25), None);
+        all.scope = UsageScope::All;
+        let rows = merged_usage([main, all], "model");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].tokens.output, Some(25));
+    }
+
+    #[test]
+    fn invalid_delta_cost_does_not_become_a_reported_zero() {
+        let rows = merged_usage(
+            [
+                report("d1", Measurement::Delta, Some(0), Some("invalid")),
+                report("d2", Measurement::Delta, None, Some("0")),
+            ],
+            "model",
+        );
+        assert_eq!(model_usage(rows[0].clone()).cost_reported, None);
+        for decimal in ["NaN", "inf", "-inf"] {
+            assert_eq!(
+                cost_f64(&Money {
+                    decimal: decimal.into(),
+                    currency: "USD".into()
+                }),
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn delta_snapshots_are_idempotent_even_with_context_and_cost_only_updates() {
+        let reports = vec![
+            report("d1", Measurement::Delta, Some(4), None),
+            report("context", Measurement::Cumulative, None, None),
+            report("d2", Measurement::Delta, Some(6), None),
+            report("cost", Measurement::Cumulative, None, Some("0.1")),
+        ];
+        let rows = merged_usage(reports.clone(), "model");
+        assert_eq!(rows[0].tokens.output, Some(10));
+        assert_eq!(rows[0].tokens.input, None);
+        assert_eq!(rows[0].measurement, Measurement::Cumulative);
+        assert_eq!(merged_usage(rows.clone(), "model"), rows);
+        assert_eq!(
+            Tried::of(Ok(("ok".into(), None)), reports).usage,
+            Tried::of(Ok(("ok".into(), None)), rows).usage,
+        );
+        let unknown_cost = vec![report("bad", Measurement::Delta, None, Some("invalid"))];
+        let rows = merged_usage(unknown_cost.clone(), "model");
+        assert!(rows.is_empty());
+        assert_eq!(
+            Tried::of(Ok(("ok".into(), None)), unknown_cost).usage,
+            Tried::of(Ok(("ok".into(), None)), rows).usage,
+        );
+    }
+
+    #[test]
+    fn invalid_or_mixed_currency_deltas_stay_unknown_until_a_valid_snapshot() {
+        let mut foreign = report("foreign", Measurement::Delta, Some(2), Some("0.2"));
+        foreign.cost.as_mut().unwrap().currency = "EUR".into();
+        let reports = vec![
+            report("d1", Measurement::Delta, Some(4), Some("0.1")),
+            foreign,
+            report("d2", Measurement::Delta, Some(3), Some("0")),
+        ];
+        let rows = merged_usage(reports.clone(), "model");
+        assert_eq!(rows[0].tokens.output, Some(9));
+        assert_eq!(rows[0].cost, None);
+        let rows = merged_usage(
+            reports
+                .into_iter()
+                .chain([report("end", Measurement::Final, Some(10), Some("0.4"))]),
+            "model",
+        );
+        assert_eq!(rows[0].cost.as_ref().unwrap().decimal, "0.4");
+    }
+
+    #[test]
+    fn failed_retries_of_the_same_model_are_added_after_each_attempt_is_settled() {
+        let mut total = vec![];
+        for _ in 0..2 {
+            let tried = Tried::of(
+                Err(OneShotError::Failed("failed".into())),
+                vec![
+                    report("live", Measurement::Cumulative, Some(4), Some("0.04")),
+                    report("end", Measurement::Final, Some(6), Some("0.06")),
+                ],
+            );
+            merge_usage(&mut total, tried.usage);
+        }
+        assert_eq!(total.len(), 1);
+        assert_eq!(total[0].tokens.output, Some(12));
+        assert_eq!(total[0].tokens.input, None);
+        assert_eq!(total[0].cost_reported, Some(0.12));
+    }
+
+    #[test]
+    fn cancellation_and_timeout_keep_consumed_usage_without_a_successful_reply() {
+        for error in [
+            OneShotError::Timeout(Duration::from_secs(1)),
+            OneShotError::Harness {
+                text: "cancelled".into(),
+                code: None,
+                transient: false,
+            },
+        ] {
+            let timed_out = matches!(error, OneShotError::Timeout(_));
+            let tried = Tried::of(
+                Err(error),
+                vec![
+                    report("live", Measurement::Cumulative, Some(10), Some("0.1")),
+                    report("end", Measurement::Final, Some(12), Some("0.12")),
+                ],
+            );
+            assert!(tried.reply.is_err());
+            assert_eq!(tried.timed_out, timed_out);
+            assert_eq!(tried.usage.len(), 1);
+            assert_eq!(tried.usage[0].tokens.output, Some(12));
+            assert_eq!(tried.usage[0].cost_reported, Some(0.12));
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn local_acp_and_node_report_consumption_match() {
+        for stop_reason in ["end_turn", "cancelled"] {
+            local_and_node(stop_reason).await;
+        }
+    }
+
+    #[cfg(unix)]
+    async fn local_and_node(stop_reason: &str) {
+        let dir = tempfile::tempdir().unwrap();
+        let acp = crate::testkit::FakeAcp::new(dir.path(), "ok");
+        let adapter = &acp.acp.adapters[steve_acp::adapters::DEFAULT_ADAPTER.0];
+        let script = std::fs::read_to_string(adapter).unwrap();
+        // Exercise the real local ACP event path with more than one live cost snapshot.
+        // The cancelled completion still reports what the model consumed before stopping.
+        std::fs::write(adapter, script.replace(
+            "        update(sid, {\"sessionUpdate\": \"usage_update\"",
+            "        update(sid, {\"sessionUpdate\": \"usage_update\", \"used\": 1, \"size\": 2, \"cost\": {\"amount\": 0.0004, \"currency\": \"USD\"}})\n        update(sid, {\"sessionUpdate\": \"usage_update\"",
+        ).replace("\"stopReason\": \"end_turn\"", &format!("\"stopReason\": \"{stop_reason}\""))).unwrap();
+        let tried = acp
+            .one()
+            .once(
+                &OneCall {
+                    prompt: "hi",
+                    timeout: Duration::from_secs(10),
+                    tools: &ThinkTools::None,
+                    harness: steve_acp::adapters::DEFAULT_ADAPTER.0,
+                    images: &[],
+                },
+                "model",
+                None,
+                None,
+            )
+            .await;
+        let mut end = report("end", Measurement::Final, Some(4), None);
+        end.tokens.input = Some(2);
+        end.tokens.cache_read = Some(11_097);
+        end.tokens.cache_write = Some(5_727);
+        let node = Tried::of(
+            if stop_reason == "end_turn" {
+                Ok(("ok".into(), None))
+            } else {
+                Err(OneShotError::Harness {
+                    text: format!("the harness stopped: {stop_reason}"),
+                    code: None,
+                    transient: false,
+                })
+            },
+            vec![
+                report("first", Measurement::Cumulative, None, Some("0.0004")),
+                report("live", Measurement::Cumulative, None, Some("0.000829045")),
+                end,
+            ],
+        );
+        assert_eq!(tried.usage, node.usage);
+        match (tried.reply, node.reply) {
+            (Ok(local), Ok(node)) => assert_eq!(local, node),
+            (Err(local), Err(node)) => assert_eq!(local.to_string(), node.to_string()),
+            (local, node) => panic!("local/Node result mismatch: {local:?} {node:?}"),
+        }
+    }
 }
 
 #[cfg(test)]

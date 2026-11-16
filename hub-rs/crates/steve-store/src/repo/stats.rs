@@ -18,11 +18,11 @@ impl Store {
     }
 }
 
-pub struct Stats<'a>(&'a Store);
+pub struct Stats<'a>(pub(super) &'a Store);
 
 /// Token counts in the Anthropic sense (`input` excludes cache, `output` includes thinking).
 /// `None` = not reported, which is not the same as 0 (it keeps the row out of the hit-rate base).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Tokens {
     pub input: Option<i64>,
     pub output: Option<i64>,
@@ -43,7 +43,7 @@ impl Tokens {
 }
 
 /// One model's share of a turn.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ModelUsage {
     /// The model that answered; `""` when unknown.
     pub model: String,
@@ -330,7 +330,8 @@ fn finish_in(c: &Connection, f: &TurnFinish) -> Result<Option<String>> {
         &key,
         &Delta {
             turns: i64::from(t.attempt == 0),
-            turn_ms: (f.ended - t.started).max(0),
+            // Invalid source times remain audit evidence; they must not panic accounting.
+            turn_ms: f.ended.saturating_sub(t.started).max(0),
             turn_errors: i64::from(reason == Some("error") && !f.transient),
             retries: i64::from(f.transient),
             interrupted: i64::from(reason == Some("interrupted")),
@@ -340,7 +341,14 @@ fn finish_in(c: &Connection, f: &TurnFinish) -> Result<Option<String>> {
             ..Delta::default()
         },
     )?;
-    for u in &f.usage {
+    // A live turn already owns its replaceable projection. Finishing books the turn's counters,
+    // never appends the same token total again (including cancelled/interrupted turns).
+    let live: bool = c.query_row(
+        "SELECT EXISTS(SELECT 1 FROM usage_meters WHERE turn_id=?)",
+        [&f.turn_id],
+        |r| r.get(0),
+    )?;
+    for u in f.usage.iter().filter(|_| !live) {
         usage_in(
             c,
             &NewUsage {
@@ -368,7 +376,7 @@ fn finish_in(c: &Connection, f: &TurnFinish) -> Result<Option<String>> {
     Ok(Some(t.ws))
 }
 
-fn usage_in(c: &Connection, u: &NewUsage) -> Result<i64> {
+pub(super) fn usage_in(c: &Connection, u: &NewUsage) -> Result<i64> {
     let k = &u.usage.tokens;
     c.run(
         "INSERT INTO usage_records (workspace_id, ts, day, source, purpose, harness, model, turn_id, session_id, item_id, bot_id, project_id, input, output, cache_read, cache_write, reasoning, cost_reported, duration_ms, ok, attempts, detail) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -409,6 +417,57 @@ fn usage_in(c: &Connection, u: &NewUsage) -> Result<i64> {
         dirty_in(c, item)?;
     }
     Ok(id)
+}
+
+/// Undo a turn's previous token projection before replacing it, including its original day/model
+/// cells. Turn/tool counters live separately and are never subtracted here.
+pub(super) fn remove_turn_usage_in(c: &Connection, turn: &str) -> Result<()> {
+    remove_usage_in(c, "turn_id", turn)
+}
+
+/// Removes a replaceable projection and reverses its daily cells in the same transaction.
+pub(super) fn remove_usage_in(c: &Connection, column: &str, owner: &str) -> Result<()> {
+    debug_assert!(matches!(column, "turn_id" | "live_call_id"));
+    let rows = c.prepare_cached(&format!(
+        "SELECT workspace_id, day, source, purpose, harness, model, COALESCE(bot_id,''), COALESCE(project_id,''),
+         input, output, cache_read, cache_write, reasoning, cost_reported, ok FROM usage_records WHERE {column}=?"
+    ))?.query_map([owner], |r| Ok((
+        (r.get::<_,String>(0)?, r.get::<_,String>(1)?, r.get::<_,String>(2)?, r.get::<_,String>(3)?, r.get::<_,String>(4)?, r.get::<_,String>(5)?, r.get::<_,String>(6)?, r.get::<_,String>(7)?),
+        Tokens { input:r.get(8)?, output:r.get(9)?, cache_read:r.get(10)?, cache_write:r.get(11)?, reasoning:r.get(12)? },
+        r.get::<_,Option<f64>>(13)?, r.get::<_,bool>(14)?
+    )))?.collect::<rusqlite::Result<Vec<_>>>()?;
+    for ((ws, day, source, purpose, harness, model, bot, project), t, cost, ok) in rows {
+        upsert_daily(
+            c,
+            &Key {
+                ws: &ws,
+                day: &day,
+                source: &source,
+                purpose: &purpose,
+                harness: &harness,
+                model: &model,
+                bot: &bot,
+                project: &project,
+            },
+            &Delta {
+                input: -t.input.unwrap_or(0),
+                output: -t.output.unwrap_or(0),
+                cache_read: -t.cache_read.unwrap_or(0),
+                cache_write: -t.cache_write.unwrap_or(0),
+                reasoning: -t.reasoning.unwrap_or(0),
+                hit_base: -t.hit_base(),
+                cost_reported: -cost.unwrap_or(0.0),
+                calls: -1,
+                failed_calls: -i64::from(!ok),
+                ..Delta::default()
+            },
+        )?;
+    }
+    c.execute(
+        &format!("DELETE FROM usage_records WHERE {column}=?"),
+        [owner],
+    )?;
+    Ok(())
 }
 
 /// The `stat_daily` primary key.

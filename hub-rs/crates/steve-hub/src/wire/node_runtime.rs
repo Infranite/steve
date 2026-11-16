@@ -61,7 +61,7 @@ pub use apply::AttemptFacts;
 pub(crate) use config::mode_str;
 pub use config::{ConfigChange, Configured};
 pub use cost::CostCaps;
-pub(crate) use cost::tokens as usage_tokens;
+
 pub use heads::{
     CaughtUp, NodeSnapshot, Pull, Receive, ReplayCheck, catch_up_streams, read_snapshot,
 };
@@ -271,6 +271,8 @@ pub struct NodeRuntime {
     staged: Mutex<(Vec<After>, Vec<End>)>,
     /// The workspace facts the open transaction found, told once it committed.
     staged_workspace: Mutex<Vec<WorkspaceFact>>,
+    /// Job waiters hear only committed events, never a rolled-back Usage or completion.
+    staged_job_events: Mutex<Vec<(String, EventBody)>>,
     /// Held across [`Self::tx`]'s transaction and the move of what it settled, so a transaction
     /// that starts after another committed finds that one's settles already queued (turn ends are
     /// told in commit order).
@@ -360,6 +362,7 @@ impl NodeRuntime {
             settled_later: Mutex::new(vec![]),
             staged: Mutex::new((vec![], vec![])),
             staged_workspace: Mutex::new(vec![]),
+            staged_job_events: Mutex::new(vec![]),
             commit: Mutex::new(()),
             dirty: Mutex::new(HashSet::new()),
             stopped: Mutex::new(None),
@@ -628,16 +631,43 @@ impl NodeRuntime {
     fn tx<T>(&self, f: impl FnOnce(&Tx) -> Result<T, StoreError>) -> Result<T, StoreError> {
         // transactions are serial (one writer), so what is staged while one is open is its own
         let commit = self.commit.lock().unwrap();
-        let (out, (settled, ended), facts) = self.store.transaction(|tx| {
+        let (out, (settled, ended), facts, job_events) = self.store.transaction(|tx| {
             let take = || std::mem::take(&mut *self.staged.lock().unwrap());
             let take_ws = || std::mem::take(&mut *self.staged_workspace.lock().unwrap());
+            let take_jobs = || std::mem::take(&mut *self.staged_job_events.lock().unwrap());
             take();
             take_ws();
+            take_jobs();
             match f(tx) {
-                Ok(out) => Ok((out, take(), take_ws())),
+                Ok(out) => {
+                    let staged = take();
+                    // Local cancellation/settlement may end an attempt without a Node end event.
+                    // Its statistics must commit with the runtime state too, before inbox pruning.
+                    for after in &staged.0 {
+                        if let After::Finished {
+                            session,
+                            attempt,
+                            completion,
+                            at,
+                        } = after
+                        {
+                            let facts = self.attempt_facts_on(tx, session, attempt)?;
+                            super::acp_stats::try_node_attempt_finished(
+                                &self.store,
+                                session,
+                                attempt,
+                                completion,
+                                &facts,
+                                *at,
+                            )?;
+                        }
+                    }
+                    Ok((out, staged, take_ws(), take_jobs()))
+                }
                 Err(e) => {
                     take();
                     take_ws();
+                    take_jobs();
                     Err(e)
                 }
             }
@@ -647,6 +677,10 @@ impl NodeRuntime {
             self.settled_later.lock().unwrap().extend(settled);
             self.ended_later.lock().unwrap().extend(ended);
             self.wake_apply.notify_one();
+        }
+        // Keep this commit's waiter notifications ahead of the next transaction's events.
+        for (attempt, body) in job_events {
+            self.notify_job(&attempt, &body);
         }
         drop(commit);
         for f in facts {

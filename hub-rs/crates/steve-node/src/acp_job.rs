@@ -4,7 +4,7 @@
 use std::path::{Path, PathBuf};
 
 use steve_acp::oneshot::{Command, Env};
-pub(crate) use steve_acp::oneshot::{OneShotError, Request, run};
+pub(crate) use steve_acp::oneshot::{OneShotError, Request, run_cancellable};
 
 /// Read-only OS sandbox configuration for a one-shot ACP job (`acp_think` or `research`).
 #[derive(Debug, Clone)]

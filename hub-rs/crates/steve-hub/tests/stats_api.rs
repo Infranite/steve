@@ -52,6 +52,129 @@ async fn start() -> Env {
     start_with(&[]).await
 }
 
+#[tokio::test]
+async fn live_accounting_is_the_same_on_session_item_and_summary_http_apis() {
+    use steve_node_api::{Epoch, Measurement, Tokens, UsageReport, UsageScope};
+    use steve_store::{NewItem, NewSession, NoPublisher, Store, TurnBegin, TurnFinish, WS};
+    let e = start().await;
+    let s = Store::open(&e.db, NoPublisher).unwrap();
+    let item = s
+        .items()
+        .create(
+            WS,
+            &NewItem {
+                title: "live accounting".into(),
+                goal: "g".into(),
+                bot_id: "steve".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .unwrap()
+        .id;
+    let sid = s
+        .sessions()
+        .create(&NewSession {
+            workspace_id: WS.into(),
+            item_id: Some(item.clone()),
+            bot_id: Some("steve".into()),
+            harness: "test".into(),
+            model: Some("test-model".into()),
+            reasoning_effort: None,
+            cwd: ".".into(),
+            title: "stats".into(),
+            token: "test".into(),
+        })
+        .unwrap()
+        .id;
+    let at = steve_store::now();
+    let day = steve_stats::day(at, None);
+    let turn = s
+        .stats()
+        .turn_begin(&TurnBegin {
+            workspace_id: WS.into(),
+            session_id: sid.clone(),
+            item_id: Some(item.clone()),
+            harness: "test".into(),
+            started: at,
+            ..Default::default()
+        })
+        .unwrap();
+    for (phase, measurement, n) in [
+        (0, Measurement::Delta, None),
+        (1, Measurement::Delta, Some(10)),
+        (2, Measurement::Cumulative, Some(20)),
+        (3, Measurement::Final, Some(25)),
+    ] {
+        if let Some(n) = n {
+            let r = UsageReport {
+                report_id: format!("report-{phase}"),
+                model: Some("test-model".into()),
+                meter_epoch: Epoch::new("test-epoch").unwrap(),
+                scope: UsageScope::Main,
+                measurement,
+                tokens: Tokens {
+                    input: Some(n),
+                    output: Some(0),
+                    cache_read: Some(0),
+                    cache_write: Some(0),
+                    reasoning: None,
+                },
+                cost: None,
+                context_used: None,
+                context_limit: None,
+            };
+            assert!(
+                s.stats()
+                    .usage_report(&turn, &r, "test-model", &day)
+                    .unwrap()
+            );
+            assert!(
+                !s.stats()
+                    .usage_report(&turn, &r, "test-model", &day)
+                    .unwrap()
+            );
+        }
+        for path in [
+            format!("/api/stats/sessions/{sid}"),
+            format!("/api/stats/items/{item}"),
+            format!("/api/stats/summary?range=custom&from={day}&to={day}&phase={phase}"),
+        ] {
+            let (status, v) = e.call("GET", &path, None).await;
+            assert_eq!(status, 200, "{path}: {v}");
+            assert_eq!(v["usage"]["total"], json!(n.unwrap_or(0)), "{path}");
+            assert_eq!(
+                v["usage"]["coverage"]["total"],
+                n.map_or(Value::Null, |n| json!(n)),
+                "{path}"
+            );
+            assert_eq!(
+                v["usage"]["coverage"]["state"],
+                if n.is_some() {
+                    "complete"
+                } else {
+                    "not_reported"
+                },
+                "{path}"
+            );
+        }
+    }
+    let finish = TurnFinish {
+        turn_id: turn,
+        ended: at + 10,
+        day: day.clone(),
+        stop_reason: Some("cancelled".into()),
+        ..Default::default()
+    };
+    assert!(s.stats().turn_finish(&finish).unwrap());
+    assert!(!s.stats().turn_finish(&finish).unwrap());
+    let (status, v) = e
+        .call("GET", &format!("/api/stats/sessions/{sid}"), None)
+        .await;
+    assert_eq!(status, 200);
+    assert_eq!(v["usage"]["total"], 25);
+}
+
 async fn start_with(extra: &[(&str, String)]) -> Env {
     steve_modules::net::forbid_in_this_process();
     let home = tempfile::tempdir().expect("tmp");
@@ -259,9 +382,11 @@ async fn stats_routes() {
             "INSERT INTO stat_daily (workspace_id, day, source, purpose, harness, model, input, output, cache_read, cache_write, hit_base, calls, turns, turn_ms, tools, tool_kinds)
              VALUES ('default', '{today}', 'agent', 'turn', 'claude-code', 'claude-opus-5-5', 1000000, 0, 3000000, 0, 4000000, 1, 2, 60000, 3, '{{\"execute\":2,\"mcp:steve_deliver\":1,\"tool:Bash\":2}}'),
                     ('default', '{today}', 'gateway', 'route', 'claude-cli', 'gpt-9', 100, 10, 0, 0, 0, 1, 0, 0, 0, '{{}}');
+             INSERT INTO usage_records (workspace_id,ts,day,source,purpose,harness,model,input,output,cache_read,cache_write)
+             VALUES ('default', {at}, '{today}', 'agent', 'turn', 'claude-code', 'claude-opus-5-5', 1000000, 0, 3000000, 0),
+                    ('default', {at}, '{today}', 'gateway', 'route', 'claude-cli', 'gpt-9', 100, 10, 0, 0);
              INSERT INTO workspaces (id, name, created) VALUES ('elsewhere', '别处', 1);
-             INSERT INTO projects (id, workspace_id, name, path, created, updated) VALUES ('prj_other', 'elsewhere', '别处', '/nonexistent', 1, 1);"
-        ))
+             INSERT INTO projects (id, workspace_id, name, path, created, updated) VALUES ('prj_other', 'elsewhere', '别处', '/nonexistent', 1, 1);", at=steve_store::now()))
         .expect("seed");
     }
 

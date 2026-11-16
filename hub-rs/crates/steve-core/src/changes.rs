@@ -2175,8 +2175,7 @@ impl Core {
                             };
                             nb.insert("perm_mode".into(), json!(pm));
                         }
-                        crate::models::validate_bot_patch(None, &nb, &hs)
-                            .map_err(msg)?;
+                        crate::models::validate_bot_patch(None, &nb, &hs).map_err(msg)?;
                         let b = db.bot_create(&p.ws, Value::Object(nb), actor)?;
                         before.insert("created".into(), json!(b.id));
                     }
@@ -2186,18 +2185,15 @@ impl Core {
                             .ok_or_else(|| msg(steve_i18n::t!("core.bot.not_found")))?;
                         let b = serde_json::to_value(&cur_bot)?;
                         let hs = self.models().harnesses();
-                        crate::models::validate_bot_patch(
-                            b.as_object(),
-                            &p.patch,
-                            &hs,
-                        )
-                        .map_err(msg)?;
+                        crate::models::validate_bot_patch(b.as_object(), &p.patch, &hs)
+                            .map_err(msg)?;
                         let mut bp = p.patch.clone();
                         if let Some(next_id) = bp.get("harness").and_then(Value::as_str)
                             && next_id != cur_bot.harness.as_str()
                             && !bp.contains_key("perm_mode")
                             && let Some(target) = hs.iter().find(|h| h.id == next_id)
-                            && perm_mode_of_key(&cur_bot.perm_mode).is_some_and(|m| !target.offers_mode(m))
+                            && perm_mode_of_key(&cur_bot.perm_mode)
+                                .is_some_and(|m| !target.offers_mode(m))
                         {
                             bp.insert("perm_mode".into(), json!(target.default_perm_mode()));
                         }

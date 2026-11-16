@@ -310,19 +310,11 @@ impl super::node_runtime::NodeDomain for HubHost {
     fn attempt_started(
         &self,
         session: &str,
-        attempt: &str,
-        ordinal: i64,
-        user_seq: Option<i64>,
-        at: i64,
+        _attempt: &str,
+        _ordinal: i64,
+        _user_seq: Option<i64>,
+        _at: i64,
     ) {
-        super::acp_stats::node_attempt_started(
-            &self.store,
-            session,
-            attempt,
-            ordinal,
-            user_seq,
-            at,
-        );
         // the coordinator set the session running: a “它停下了” card of its item no longer
         // applies
         if let Some(core) = self.core.get().cloned()
@@ -335,23 +327,6 @@ impl super::node_runtime::NodeDomain for HubHost {
                 }
             });
         }
-    }
-    fn attempt_finished(
-        &self,
-        session: &str,
-        attempt: &str,
-        completion: &steve_node_api::Completion,
-        facts: &super::node_runtime::AttemptFacts,
-        at: i64,
-    ) {
-        super::acp_stats::node_attempt_finished(
-            &self.store,
-            session,
-            attempt,
-            completion,
-            facts,
-            at,
-        );
     }
     fn cost_changed(&self, session: &str) {
         if let Some(flow) = self.flow.get().cloned()

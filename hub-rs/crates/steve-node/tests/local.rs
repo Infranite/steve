@@ -1747,6 +1747,112 @@ async fn shutdown_frees_the_home() {
     assert!(again.incarnation() >= 2);
 }
 
+/// Models the fork-to-exec window of another concurrently spawned command. CLOEXEC closes
+/// descriptors at exec, but cannot prevent their temporary inheritance at fork. In the child
+/// use only async-signal-safe syscalls: this test runs alongside other threads and runtimes.
+struct ForkHold {
+    pid: libc::pid_t,
+    gate: std::os::unix::net::UnixStream,
+}
+
+impl ForkHold {
+    fn new() -> Self {
+        use std::io::Read;
+        use std::os::fd::AsRawFd;
+        let (mut gate, child) = std::os::unix::net::UnixStream::pair().unwrap();
+        gate.set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        let parent_fd = gate.as_raw_fd();
+        let child_fd = child.as_raw_fd();
+        let pid = unsafe { libc::fork() };
+        assert!(pid >= 0);
+        if pid == 0 {
+            unsafe {
+                libc::close(parent_fd);
+                let mut byte = 1_u8;
+                libc::write(child_fd, (&byte as *const u8).cast(), 1);
+                let mut poll = libc::pollfd {
+                    fd: child_fd,
+                    events: libc::POLLIN,
+                    revents: 0,
+                };
+                if libc::poll(&mut poll, 1, 10_000) > 0 {
+                    libc::read(child_fd, (&mut byte as *mut u8).cast(), 1);
+                }
+                libc::_exit(0);
+            }
+        }
+        drop(child);
+        gate.read_exact(&mut [0]).unwrap();
+        Self { pid, gate }
+    }
+}
+
+impl Drop for ForkHold {
+    fn drop(&mut self) {
+        use std::io::Write;
+        let _ = self.gate.write_all(&[1]);
+        let mut status = 0;
+        while unsafe { libc::waitpid(self.pid, &mut status, 0) } < 0
+            && std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted
+        {}
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn shutdown_releases_home_during_an_unrelated_fork_before_exec() {
+    let t = T::new(&[]);
+    let n = t.node();
+    ready(&n, "fork").await;
+    assert_eq!(
+        LocalNode::open(t.config()).err().unwrap().code,
+        ErrorCode::Conflict,
+        "a live Node must still exclude a second owner"
+    );
+    let child = ForkHold::new();
+    n.shutdown().await;
+    drop(n);
+    // The child is still behind the pipe barrier, holding every inherited FD. Reopening
+    // must not depend on when an unrelated command gets scheduled to exec or exit.
+    let reopened = LocalNode::open(t.config());
+    if reopened.is_err() {
+        eprintln!(
+            "fork barrier child={} parent={} home={}",
+            child.pid,
+            std::process::id(),
+            t.home.display()
+        );
+        if let Ok(output) = std::process::Command::new("lsof")
+            .args(["-nP", "-FpcfDint", "--"])
+            .arg(t.home.join("node.lock"))
+            .output()
+        {
+            eprintln!("LOCK_FDS {}", String::from_utf8_lossy(&output.stdout));
+        }
+        if let Ok(output) = std::process::Command::new("ps")
+            .args([
+                "-p",
+                &child.pid.to_string(),
+                "-o",
+                "pid=,ppid=,lstart=,command=",
+            ])
+            .output()
+        {
+            eprintln!("LOCK_HOLDER {}", String::from_utf8_lossy(&output.stdout));
+        }
+    }
+    // Keep the assertion result from before releasing the child, including in the red test.
+    drop(child);
+    let again = reopened.expect("shutdown and last Node drop release the lock before exec");
+    assert_eq!(
+        LocalNode::open(t.config()).err().unwrap().code,
+        ErrorCode::Conflict
+    );
+    again.shutdown().await;
+    drop(again);
+    LocalNode::open(t.config()).unwrap().shutdown().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn reads_that_cannot_be_confined_are_refused() {
     let t = T::new(&[]);

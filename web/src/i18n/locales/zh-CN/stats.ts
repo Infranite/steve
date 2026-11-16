@@ -39,6 +39,7 @@ export default {
       partial: "实时采集不完整，当前 TPS 和输出会话总数暂无法确认；静默不代表模型已停止。",
     },
   },
+  coverage: { uncertain: "历史费用归属不确定", not_reported: "尚未上报", unavailable: "用量不可用", partial: "部分覆盖" },
   /* words several stats views share */
   word: {
     est: "估",
@@ -386,7 +387,6 @@ export default {
     markTip: "{{label}} {{time}}",
     usage: "{{tokens}} tokens · 估 {{usd}}",
     usageHit: "{{tokens}} tokens · 命中 {{pct}} · 估 {{usd}}",
-    noUsage: "还没有用量",
     timeDone: "Agent {{agent}} · 等你 {{wait}} · 用了 {{age}}",
     timeOpen: "Agent {{agent}} · 等你 {{wait}} · 已 {{age}}",
     sessionTitle: "本会话 {{tokens}} tokens；费用是估算",

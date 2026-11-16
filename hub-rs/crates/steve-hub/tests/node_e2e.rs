@@ -986,6 +986,9 @@ async fn an_idle_node_session_is_let_go_and_the_next_message_resumes_it() {
 #[tokio::test(flavor = "multi_thread")]
 async fn the_node_is_the_default() {
     let h = Home::new();
+    // The default is a service Node. Stop this test's own service before reusing its home as
+    // an inert copy, otherwise a queued continuation from the first Hub can spawn an adapter.
+    let service = ServiceNodeGuard(h.steve().join("data/node/service.pid"));
     let mut hub = spawn_mode(&h, None, &[]);
     serving(&h).await;
     let c = Client::login(&h).await;
@@ -1010,8 +1013,14 @@ async fn the_node_is_the_default() {
         1,
         "bound to the local Node"
     );
+    // The user's own steve.v1 message already contains the token above. Wait for actual
+    // completion (including bounded sampler settlement and automatic continuations) before
+    // measuring the inert copy's process count; an unstarted old child can otherwise log late.
+    assert!(wait(30,||h.count("SELECT COUNT(*) FROM runtime_attempts a JOIN runtime_turns t USING(turn_id) WHERE t.session_id=? AND a.state='finished'",&sid)>0
+        && h.count("SELECT COUNT(*) FROM runtime_attempts a JOIN runtime_turns t USING(turn_id) WHERE t.session_id=? AND a.state<>'finished'",&sid)==0).await,"the original Node's turns settled: {}",hub_log(&h));
     hub.kill();
     drop(hub);
+    drop(service);
 
     // a STEVE_NO_RESUME copy: an explicit local is a boot error
     let mut refused = spawn_mode(&h, Some("local"), &[("STEVE_NO_RESUME", "1")]);
@@ -1596,7 +1605,9 @@ async fn a_service_node_turn_outlives_the_hub() {
     };
     // the item's turns so far are done
     assert!(
-        wait(10, || attempts(&h, &sid, "finished") >= 1
+        // Collection permits a bounded three-second tail for each automatic continuation.
+        // Keep the original finished-state assertion and leave room for all those settlements.
+        wait(30, || attempts(&h, &sid, "finished") >= 1
             && states(&h).split(',').all(|s| s == "finished"))
         .await,
         "states {}; {}",

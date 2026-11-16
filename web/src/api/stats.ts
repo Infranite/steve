@@ -17,7 +17,14 @@ export type Realtime = RealtimePoint & {
   series: RealtimePoint[]
 }
 export type P = { p50: number | null; p85: number | null; avg: number | null; sum: number; n: number }
+/** Accounting coverage; numeric legacy totals remain sums of known fields. */
+export type UsageCoverage = {
+  state: "not_reported" | "unavailable" | "partial" | "complete"
+  expected: number; reported: number; complete: number; pending: number; unavailable: number; uncertain?: number
+  total: number | null; input: number | null; output: number | null; cache_read: number | null; cache_write: number | null; cost_reported: number | null
+}
 export type UsageTotals = {
+  coverage?: UsageCoverage
   input: number; output: number; cache_read: number; cache_write: number; reasoning: number; total: number; hit_rate: number | null
   est: number; reported: number; unpriced_tokens: number; saved_by_cache: number; calls: number; failed_calls: number
   turns: number; turn_ms: number; turn_errors: number; retries: number; interrupted: number; tools: number; tool_errors: number
@@ -46,12 +53,13 @@ export type Series = { bucket?: "day" | "hour"; buckets: string[]; series: { key
 export type UsageRow = UsageTotals & { key: string; label: string; priced?: boolean; price_source?: PriceSource | null; models?: { harness?: string; model: string; calls: number }[] }
 export type CountRow = { key: string; label: string; count: number; dim?: "kind" | "tool" | "mcp"; response?: P; subjects?: Record<string, number> }
 export type ItemRow = {
+  coverage?: UsageCoverage
   item_id: string; no: number; title: string; status: string; bot_id: string | null; project_id: string | null; created: number; done_at: number | null
   lead_ms: number | null; cycle_ms: number | null; wait_ms: number | null; agent_ms: number | null; turns: number; reworks: number; first_pass: boolean | null; tokens: number; est: number; unpriced_tokens: number; reported: number
 }
 export type ItemSort = "est" | "tokens" | "lead" | "wait" | "reworks" | "done_at"
 export type ItemOnly = "done" | "created"
-export type Usage = { input: number; output: number; cache_read: number; cache_write: number; total: number; hit_rate: number | null; est: number; reported: number; unpriced_tokens: number; rough: boolean }
+export type Usage = { coverage?: UsageCoverage; input: number; output: number; cache_read: number; cache_write: number; total: number; hit_rate: number | null; est: number; reported: number; unpriced_tokens: number; rough: boolean }
 export type ItemFacts = {
   created: number; first_turn: number | null; first_deliver: number | null; last_deliver: number | null; accepted: number | null; done_at: number | null; dropped_at: number | null
   lead_ms: number | null; cycle_ms: number | null; wait_ms: number | null; agent_ms: number | null; turns: number; delivers: number; reworks: number; first_pass: boolean | null

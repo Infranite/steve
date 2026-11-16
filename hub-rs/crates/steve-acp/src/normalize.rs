@@ -111,7 +111,6 @@ pub struct Normalizer {
     /// The harness process generation: a restarted adapter counts its cost from zero again.
     meter: steve_node_api::Epoch,
     messages: u64,
-    reports: u64,
     open: Option<Open>,
     tools: HashMap<String, ToolFact>,
     /// See [`Normalizer::input_includes_cache`].
@@ -133,7 +132,6 @@ impl Normalizer {
             prefix: prefix.to_string(),
             meter,
             messages: 0,
-            reports: 0,
             open: None,
             tools: HashMap::new(),
             input_includes_cache: false,
@@ -303,21 +301,23 @@ impl Normalizer {
                 .and_then(Value::as_u64);
             let cache_write = u
                 .get("cachedWriteTokens")
+                .or_else(|| u.get("cacheWriteInputTokens"))
                 .or_else(|| u.get("cached_write_tokens"))
                 .or_else(|| u.get("cache_creation_input_tokens"))
                 .and_then(Value::as_u64);
             let reasoning = u
                 .get("reasoningTokens")
                 .or_else(|| u.get("thoughtTokens"))
+                .or_else(|| u.get("reasoningOutputTokens"))
                 .or_else(|| u.get("reasoning_tokens"))
                 .or_else(|| u.get("thought_tokens"))
-                .and_then(Value::as_u64);
-            let input = input_raw.map(|i| {
-                let cached = cache_read.unwrap_or(0);
-                if cached_inside && cached <= i {
-                    i - cached
+                .and_then(Value::as_u64)
+                .filter(|r| output.is_none_or(|o| *r <= o));
+            let input = input_raw.and_then(|i| {
+                if cached_inside {
+                    cache_read.and_then(|cached| i.checked_sub(cached))
                 } else {
-                    i
+                    Some(i)
                 }
             });
             Tokens {
@@ -354,12 +354,14 @@ impl Normalizer {
                     .and_then(Value::as_u64);
                 let raw_cw = u
                     .get("cachedWriteTokens")
+                    .or_else(|| u.get("cacheWriteInputTokens"))
                     .or_else(|| u.get("cached_write_tokens"))
                     .or_else(|| u.get("cache_creation_input_tokens"))
                     .and_then(Value::as_u64);
                 let raw_r = u
                     .get("reasoningTokens")
                     .or_else(|| u.get("thoughtTokens"))
+                    .or_else(|| u.get("reasoningOutputTokens"))
                     .or_else(|| u.get("reasoning_tokens"))
                     .or_else(|| u.get("thought_tokens"))
                     .and_then(Value::as_u64);
@@ -374,9 +376,12 @@ impl Normalizer {
                 self.last_prompt_tokens = Some(next);
                 let d_cr = raw_cr.map(|v| v.saturating_sub(pcr));
                 let d_in_raw = raw_in.map(|v| v.saturating_sub(pi));
-                let d_in = d_in_raw.map(|i| {
-                    let c = d_cr.unwrap_or(0);
-                    if cached_inside && c <= i { i - c } else { i }
+                let d_in = d_in_raw.and_then(|i| {
+                    if cached_inside {
+                        d_cr.and_then(|c| i.checked_sub(c))
+                    } else {
+                        Some(i)
+                    }
                 });
                 let mut t = Tokens {
                     input: d_in,
@@ -412,12 +417,7 @@ impl Normalizer {
                 || t.cache_read.is_some_and(|v| v > 0)
                 || t.cache_write.is_some_and(|v| v > 0)
                 || t.reasoning.is_some_and(|v| v > 0)
-                || (self.prior_prompt_tokens.is_none()
-                    && (t.input.is_some()
-                        || t.output.is_some()
-                        || t.cache_read.is_some()
-                        || t.cache_write.is_some()
-                        || t.reasoning.is_some()))
+                || self.prior_prompt_tokens.is_none()
             {
                 rows.push((None, UsageScope::Main, t));
             }
@@ -438,20 +438,19 @@ impl Normalizer {
         }
         rows.into_iter()
             .map(|(model, scope, tokens)| {
-                self.reports += 1;
-                Fact::Event(EventBody::Usage {
-                    report: UsageReport {
-                        report_id: format!("{}.u{}", self.prefix, self.reports),
-                        model,
-                        meter_epoch: self.meter.clone(),
-                        scope,
-                        measurement: Measurement::Final,
-                        tokens,
-                        context_used: None,
-                        context_limit: None,
-                        cost: None,
-                    },
-                })
+                let mut report = UsageReport {
+                    report_id: String::new(),
+                    model,
+                    meter_epoch: self.meter.clone(),
+                    scope,
+                    measurement: Measurement::Final,
+                    tokens,
+                    context_used: None,
+                    context_limit: None,
+                    cost: None,
+                };
+                crate::usage::identify(&self.prefix, &mut report);
+                Fact::Event(EventBody::Usage { report })
             })
             .collect()
     }
@@ -541,17 +540,13 @@ impl Normalizer {
     }
 
     fn usage(&mut self, u: &Value) -> UsageReport {
-        self.reports += 1;
-        let int = |k: &str| {
-            u.get(k)
-                .and_then(|v| v.as_u64().or_else(|| v.as_f64().map(|f| f as u64)))
-        };
+        let int = |k: &str| u.get(k).and_then(Value::as_u64);
         let origin = u
             .pointer("/_meta/_claude~1origin")
-            .and_then(Value::as_str)
-            .is_some();
-        UsageReport {
-            report_id: format!("{}.u{}", self.prefix, self.reports),
+            .and_then(|o| o.as_str().or_else(|| o.get("kind").and_then(Value::as_str)))
+            .is_some_and(|kind| !kind.is_empty());
+        let mut report = UsageReport {
+            report_id: String::new(),
             model: u
                 .pointer("/_meta/_claude~1model")
                 .and_then(Value::as_str)
@@ -563,7 +558,7 @@ impl Normalizer {
             } else {
                 UsageScope::Main
             },
-            // the adapter reports the process's running total
+            // Only cost is process cumulative. used/size describe context, never consumption.
             measurement: Measurement::Cumulative,
             tokens: Tokens::default(),
             context_used: int("used"),
@@ -585,7 +580,9 @@ impl Normalizer {
                         currency: currency.to_string(),
                     })
                 }),
-        }
+        };
+        crate::usage::identify(&self.prefix, &mut report);
+        report
     }
 
     /// The current lossless driver facts of a tool, including updates received in permissions.
@@ -1352,7 +1349,14 @@ mod tests {
         let bg = events(n.update(&json!({"sessionUpdate": "usage_update", "used": 1, "size": 2,
             "cost": {"amount": 0.5, "currency": "USD"}, "_meta": {"_claude/origin": "task-notification"}})));
         assert!(
-            matches!(&bg[0], EventBody::Usage { report } if report.scope == UsageScope::Background && report.report_id == "a_1.u2")
+            matches!(&bg[0], EventBody::Usage { report } if report.scope == UsageScope::Background && report.report_id.starts_with("usage:"))
+        );
+        let object = events(
+            n.update(&json!({"sessionUpdate":"usage_update","used":1,"size":2,
+            "_meta":{"_claude/origin":{"kind":"task-notification"}}})),
+        );
+        assert!(
+            matches!(&object[0], EventBody::Usage{report} if report.scope == UsageScope::Background)
         );
         let c = n.update(&json!({"sessionUpdate": "config_option_update", "configOptions": [
             {"id": "model", "currentValue": "opus"}, {"id": "reasoning_effort", "currentValue": "high"}]}));

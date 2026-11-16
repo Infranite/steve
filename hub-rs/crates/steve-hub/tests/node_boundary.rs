@@ -235,10 +235,12 @@ const ALLOWED: &[Entry] = &[
     e(Fs, "steve-acp/src/managed.rs", 5, Library, "the installed adapters' package.json and their own directory, and the file that records which adapters setup chose"),
     e(Dir, "steve-acp/src/rollout.rs", 1, Library, "Codex rollout files: the Node's history, the stats repair"),
     e(Fs, "steve-acp/src/rollout.rs", 1, Library, "Codex rollout files: the Node's history, the stats repair"),
+    e(Dir, "steve-acp/src/transcript.rs", 2, Library, "the shared ACP sampler reads the Node adapter's configured home: exact session transcript and its subagent files, with bounded discovery"),
+    e(Fs, "steve-acp/src/transcript.rs", 1, Library, "read-only assistant usage for that Node attempt, shared by sessions and one-shot calls; no Hub/project filesystem effects"),
     e(Fs, "steve-research/src/attach.rs", 4, Library, "attachments in a research run's dir"),
     /* harness entry points outside the Node */
     e(Harness, "steve-hub/src/wire/mod.rs", 1, N0d, "LocalAcp: the in-process think gateway"),
-    e(Harness, "steve-core/src/gateway.rs", 4, N0d, "LocalAcp and its one-shot ACP call"),
+    e(Harness, "steve-core/src/gateway.rs", 6, N0d, "LocalAcp and its owned one-shot settlement worker; the same legacy process path until Node-only calls"),
     e(Fs, "steve-core/src/gateway.rs", 1, N0d, "LocalAcp's scratch directory"),
     e(Harness, "steve-hub/src/wire/research.rs", 1, Hub,
         "the steve_research import: the run's policy (its attempts, its answer); the runs are Node jobs"),
