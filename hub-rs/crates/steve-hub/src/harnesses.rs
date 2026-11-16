@@ -3,7 +3,7 @@
 //! model catalogue, the bot pages and the runtimes list choose from. Refreshed in the background
 //! from the Node (whose probe caches its adapters' answers); read without waiting.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
@@ -54,6 +54,11 @@ struct Probed {
     generation: u64,
     caps: Vec<HarnessCapability>,
     remote: Vec<HarnessCapability>,
+    /// The Hub's own Node did not answer its last probe (or an installation revoked the answer):
+    /// what it can run is not known.
+    local_unknown: bool,
+    /// The remote Nodes whose answers `remote` holds.
+    reported: BTreeSet<String>,
 }
 
 pub struct HubHarnesses {
@@ -99,9 +104,34 @@ impl HubHarnesses {
         out
     }
 
+    /// [`Self::list`] as the preflight decides on it (#234): `ready` is `Some(false)` only when no
+    /// Node could take the harness, that is when the Hub's own Node (if it has one) and every
+    /// remote Node in `linked` have answered and none has it ready. A linked Node that has not
+    /// answered yet (it linked after the last poll, or its probe failed) leaves it unknown.
+    pub fn readiness(&self, linked: &[String]) -> Vec<(String, String, Option<bool>)> {
+        let pending = {
+            let probed = self.probed.read().unwrap_or_else(|e| e.into_inner());
+            probed.local_unknown
+                || linked
+                    .iter()
+                    .any(|n| n != "local" && !probed.reported.contains(n))
+        };
+        self.list()
+            .into_iter()
+            .map(|h| {
+                let ready = match h.ready {
+                    Some(false) if pending => None,
+                    r => r,
+                };
+                (h.id, h.name, ready)
+            })
+            .collect()
+    }
+
+    /// The local Node's answer.
     pub fn update(&self, caps: Vec<HarnessCapability>) {
         let generation = self.generation();
-        self.update_if_current(generation, caps);
+        self.update_if_current(generation, Some(caps));
     }
 
     pub(crate) fn generation(&self) -> u64 {
@@ -116,10 +146,16 @@ impl HubHarnesses {
         let mut probed = self.probed.write().unwrap_or_else(|e| e.into_inner());
         probed.generation += 1;
         probed.caps.clear();
+        probed.local_unknown = true;
     }
 
-    /// Publish only if no result or installation has superseded this probe's evidence.
-    pub(crate) fn update_if_current(&self, generation: u64, caps: Vec<HarnessCapability>) -> bool {
+    /// Publish only if no result or installation has superseded this probe's evidence. `caps`:
+    /// the local Node's answer, `None` when it could not be asked (nothing it runs is known).
+    pub(crate) fn update_if_current(
+        &self,
+        generation: u64,
+        caps: Option<Vec<HarnessCapability>>,
+    ) -> bool {
         let mut probed = self.probed.write().unwrap_or_else(|e| e.into_inner());
         if probed.generation != generation {
             return false;
@@ -128,7 +164,8 @@ impl HubHarnesses {
         // probes and failures alike. Revoke older in-flight snapshots atomically with the
         // replacement; otherwise a held ready follower can resurrect models after disconnect.
         probed.generation += 1;
-        probed.caps = caps;
+        probed.local_unknown = caps.is_none();
+        probed.caps = caps.unwrap_or_default();
         drop(probed);
         if let Some(f) = self.updated.get() {
             f();
@@ -151,10 +188,10 @@ impl HubHarnesses {
     pub async fn refresh(&self, node: &dyn steve_node_api::Node, fresh: bool) {
         let generation = self.generation();
         let caps = match node.probe(fresh).await {
-            Ok(c) => c.harnesses,
+            Ok(c) => Some(c.harnesses),
             Err(e) => {
                 tracing::warn!("harnesses: local probe: {e}");
-                vec![]
+                None
             }
         };
         self.update_if_current(generation, caps);
@@ -170,15 +207,16 @@ impl HubHarnesses {
     ) {
         let generation = self.generation();
         let mut remote_caps = Vec::new();
-        let mut answered = false;
+        let mut reported = BTreeSet::new();
+        let mut local_unknown = false;
         let mut combined: Vec<HarnessCapability> = Vec::new();
         if let Some(node) = local {
             match node.probe(fresh).await {
-                Ok(c) => {
-                    answered = true;
-                    combined = merge_cap_lists(combined, c.harnesses);
+                Ok(c) => combined = merge_cap_lists(combined, c.harnesses),
+                Err(e) => {
+                    local_unknown = true;
+                    tracing::warn!("harnesses: probe of the local Node: {e}");
                 }
-                Err(e) => tracing::warn!("harnesses: probe of the local Node: {e}"),
             }
         }
         if let Some(svc) = svc {
@@ -199,8 +237,8 @@ impl HubHarnesses {
             for (id, res) in futures::future::join_all(asks).await {
                 match res {
                     Ok(Ok(c)) => {
-                        answered = true;
                         remote_caps = merge_cap_lists(remote_caps, c.harnesses);
+                        reported.insert(id);
                     }
                     Ok(Err(e)) => {
                         tracing::debug!(node = %id, "harnesses: remote probe: {}", e.safe_detail);
@@ -218,11 +256,12 @@ impl HubHarnesses {
         probed.generation += 1;
         probed.caps = combined;
         probed.remote = remote_caps;
+        probed.local_unknown = local_unknown;
+        probed.reported = reported;
         drop(probed);
         if let Some(f) = self.updated.get() {
             f();
         }
-        let _ = answered;
     }
 
     /// Keeps the list fresh from `node` while the Hub runs.
@@ -603,6 +642,58 @@ mod tests {
                 .ready,
             Some(true)
         );
+    }
+
+    /// #234: the Hub's own Node says a harness is not ready; a remote Node that linked but has not
+    /// answered yet may have it, so it is unknown (not refused) until every linked Node answered.
+    #[tokio::test]
+    async fn a_linked_node_not_heard_from_leaves_a_harness_unknown() {
+        let cfg = crate::config::Config::from_vars(&|_: &str| None).unwrap();
+        let hs = HubHarnesses::of(&cfg);
+        let ready_of = |linked: &[String], id: &str| {
+            hs.readiness(linked)
+                .into_iter()
+                .find(|(h, _, _)| h == id)
+                .and_then(|(_, _, r)| r)
+        };
+        let n2 = vec!["n_second".to_string()];
+        // the local Node answered: installed, no session (not ready); no remote Node linked
+        hs.update(vec![reported("claude-code", None)]);
+        assert_eq!(ready_of(&[], "claude-code"), Some(false));
+        // a second Node linked after that poll: not heard from, so unknown
+        assert_eq!(ready_of(&n2, "claude-code"), None);
+        // the local Node's own entry in the links is the local probe, not a pending remote
+        assert_eq!(ready_of(&["local".to_string()], "claude-code"), Some(false));
+        // every Node answered and none has it ready: refused
+        {
+            let mut p = hs.probed.write().unwrap();
+            p.remote = vec![reported("claude-code", None)];
+            p.reported = n2.iter().cloned().collect();
+        }
+        assert_eq!(ready_of(&n2, "claude-code"), Some(false));
+        // the second Node has it ready: ready
+        {
+            let mut p = hs.probed.write().unwrap();
+            p.remote = vec![reported("claude-code", Some(AdapterOffer::default()))];
+        }
+        assert_eq!(ready_of(&n2, "claude-code"), Some(true));
+        // the remote said not ready, but the local Node could not be asked: unknown
+        {
+            let mut p = hs.probed.write().unwrap();
+            p.remote = vec![reported("claude-code", None)];
+        }
+        let node = steve_node_api::testkit::FakeNode::new("probe-test");
+        node.refuse_next(
+            "probe",
+            steve_node_api::ApiError::new(steve_node_api::ErrorCode::Offline, "probe unavailable"),
+        );
+        hs.refresh(node.as_ref(), false).await;
+        assert_eq!(ready_of(&n2, "claude-code"), None);
+        // an installation revokes the local answer too
+        hs.update(vec![reported("claude-code", None)]);
+        assert_eq!(ready_of(&n2, "claude-code"), Some(false));
+        hs.invalidate();
+        assert_eq!(ready_of(&n2, "claude-code"), None);
     }
 
     #[test]

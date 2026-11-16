@@ -341,3 +341,42 @@ fn only_the_owner_edits_and_only_a_usable_entry_is_kept() {
     let v = write(&api, "owner", "codex", None).unwrap();
     assert_eq!(v["blocked"].as_array().unwrap().len(), 1);
 }
+
+/// #234: the Hub's own Node says Claude Code is not ready, and a second Node linked but has not
+/// answered yet. The second Node may well have it, so the Bot is not refused; once every linked
+/// Node has answered and none has it ready, it is.
+#[test]
+fn a_node_that_linked_but_has_not_answered_is_not_a_refusal() {
+    let (_d, s) = store();
+    let cfg = crate::config::Config::from_vars(&|_: &str| None).unwrap();
+    let hs = crate::harnesses::HubHarnesses::of(&cfg);
+    hs.update(vec![steve_node_api::HarnessCapability {
+        name: "claude-code".into(),
+        version: String::new(),
+        sessions: false,
+        jobs: false,
+        models: vec![],
+        resume: false,
+        cancel: false,
+        permissions: false,
+        images: false,
+        enforcement: vec![],
+        setup: None,
+        adapter: None,
+    }]);
+    let linked = Arc::new(std::sync::Mutex::new(vec!["n_second".to_string()]));
+    let readiness: Readiness = {
+        let (hs, linked) = (hs.clone(), linked.clone());
+        Arc::new(move || hs.readiness(&linked.lock().unwrap()))
+    };
+    let p = Preflight::new(BTreeMap::new(), Some(readiness), true);
+    let me = Principal::User("owner".into());
+    s.reader::<_, StoreError>(|c| {
+        assert_eq!(code(p.can_run(c, &me, "writer")), None);
+        // the second Node went away without answering: only the Hub's own Node is left
+        linked.lock().unwrap().clear();
+        assert_eq!(code(p.can_run(c, &me, "writer")), Some("harness_not_ready"));
+        Ok(())
+    })
+    .unwrap();
+}

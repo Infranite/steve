@@ -128,7 +128,9 @@ pub struct Blocked {
     pub fix: &'static str,
 }
 
-/// The harness ids the Hub knows, with what the Nodes said of them last (`ready`) and their names.
+/// The harness ids the Hub knows, with their names and whether a Node could take them (`ready`):
+/// `Some(false)` only when every Node has answered and none has it ready, `None` while unknown
+/// ([`crate::harnesses::HubHarnesses::readiness`]).
 pub type Readiness = Arc<dyn Fn() -> Vec<(String, String, Option<bool>)> + Send + Sync>;
 
 /// What [`Preflight::can_run`] decides on: the adapters' declared properties, the Nodes' last
