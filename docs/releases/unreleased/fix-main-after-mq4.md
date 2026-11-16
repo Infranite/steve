@@ -1,0 +1,1 @@
+- Devices and the runtime list now say "Not reported by the Node yet" in your language when the local Node has not answered, instead of showing the raw word "unknown".

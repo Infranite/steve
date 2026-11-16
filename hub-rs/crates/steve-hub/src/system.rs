@@ -285,6 +285,7 @@ fn shown(mut list: Value) -> Value {
             },
             "initialize_failed" => steve_i18n::t!("hub.runtime.initialize_failed"),
             "session_failed" => steve_i18n::t!("hub.runtime.session_failed"),
+            "unknown" => steve_i18n::t!("hub.runtime.unknown"),
             code => code.to_string(),
         };
         r["note"] = json!(note);

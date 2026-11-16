@@ -234,9 +234,10 @@ async fn hub_texts_follow_accept_language() {
                 .to_string()
         }
     };
-    assert_eq!(state("zh-CN").await, "通过 ACP 适配器运行");
-    assert_eq!(state("en").await, "Runs through the ACP adapter");
-    assert_eq!(state("zh-CN").await, "通过 ACP 适配器运行");
+    // no local Node answers in this Hub, so every runtime is "not reported yet", in each language
+    assert_eq!(state("zh-CN").await, "Node 还没有报告（未连接或尚未探测）");
+    assert_eq!(state("en").await, "Not reported by the Node yet (not connected or not probed)");
+    assert_eq!(state("zh-CN").await, "Node 还没有报告（未连接或尚未探测）");
 }
 
 /// What the installation seeded (the workspace's name, the main Bot's role, speaking style and rules, the

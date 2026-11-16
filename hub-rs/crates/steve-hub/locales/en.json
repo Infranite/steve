@@ -121,6 +121,7 @@
   "hub.runtime.adapter_missing": "The adapter could not be started",
   "hub.runtime.initialize_failed": "The adapter did not answer initialize",
   "hub.runtime.path_missing": "Not found",
+  "hub.runtime.unknown": "Not reported by the Node yet (not connected or not probed)",
   "hub.import.gone": "The local record no longer exists",
   "hub.import.already": "Already imported",
   "hub.import.unreadable": "Can't read this conversation",
