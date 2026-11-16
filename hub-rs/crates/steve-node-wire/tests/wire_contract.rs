@@ -291,3 +291,52 @@ async fn component_integrity_and_other_installation_evidence_survive_the_wire() 
         vec![component]
     );
 }
+
+#[tokio::test]
+async fn an_upgrade_is_staged_switched_and_asked_about_over_the_link() {
+    let fake = FakeNode::new("n1");
+    let w = wire(fake.clone(), 1);
+    let op = OperationId::new("nup_1").unwrap();
+    // a node that does not say it can is told so, nothing staged
+    let ask = NodeUpgrade {
+        operation: op.clone(),
+        build: BuildIdentity {
+            version: "2.0.0".into(),
+            commit: "b".repeat(40),
+            target: "aarch64-apple-darwin".into(),
+        },
+        artifact: ArtifactId::new("node-upgrade.nup_1").unwrap(),
+        size: 10,
+        sha256: "0".repeat(64),
+        health_secs: 60,
+    };
+    assert_eq!(
+        w.remote.upgrade_stage(ask.clone()).await.unwrap_err().code,
+        ErrorCode::Unsupported
+    );
+    fake.set_features(vec![FEATURE_NODE_UPGRADE.into()]);
+    assert_eq!(
+        w.remote.upgrade_stage(ask.clone()).await.unwrap().phase,
+        "staged"
+    );
+    // the same operation again answers its state
+    assert_eq!(w.remote.upgrade_stage(ask).await.unwrap().phase, "staged");
+    let s = w
+        .remote
+        .upgrade_switch(UpgradeSwitch {
+            operation: op.clone(),
+            abandon: false,
+            force: false,
+        })
+        .await
+        .unwrap();
+    assert_eq!(s.phase, "succeeded");
+    assert_eq!(
+        w.remote.upgrade_status(op).await.unwrap().phase,
+        "succeeded"
+    );
+    assert_eq!(
+        w.remote.probe(false).await.unwrap().build.unwrap().version,
+        "2.0.0"
+    );
+}

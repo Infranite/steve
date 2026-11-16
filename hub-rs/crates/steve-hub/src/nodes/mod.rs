@@ -14,6 +14,7 @@ pub mod listener;
 pub mod pairing;
 pub mod registry;
 pub mod tailcat;
+pub mod upgrade;
 pub mod vitals;
 pub use ingress::Ingress;
 
@@ -89,6 +90,8 @@ pub struct NodeService {
     pub tailcat: std::sync::OnceLock<Arc<tailcat::Tailcat>>,
     /// Installing Nodes on other machines over tailcat's SSH (set once at boot).
     pub installs: std::sync::OnceLock<Arc<install::Installs>>,
+    /// Upgrading paired Nodes to the Hub's release (set once at boot).
+    pub upgrades: std::sync::OnceLock<Arc<upgrade::Upgrades>>,
 }
 
 const HUB_ID_KEY: &str = "node.hub_id";
@@ -173,6 +176,7 @@ impl NodeService {
             handshakes: Arc::new(tokio::sync::Semaphore::new(MAX_UNPROVEN)),
             tailcat: std::sync::OnceLock::new(),
             installs: std::sync::OnceLock::new(),
+            upgrades: std::sync::OnceLock::new(),
         }))
     }
 }
@@ -222,6 +226,11 @@ pub fn api_router(svc: Arc<NodeService>) -> Router {
         .route("/nodes/installs", post(install::create))
         .route("/nodes/installs/{id}", get(install::get))
         .route("/nodes/installs/{id}/run", post(install::run))
+        .route(
+            "/nodes/upgrade-default",
+            get(upgrade::get_default).put(upgrade::put_default),
+        )
+        .route("/nodes/{id}/upgrade", post(upgrade::start))
         .route("/nodes/{id}/{action}", post(pairing::act))
         .with_state(svc)
 }

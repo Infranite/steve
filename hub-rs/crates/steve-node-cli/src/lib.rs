@@ -3,3 +3,4 @@
 pub mod config;
 pub mod dial;
 pub mod tunnel;
+pub mod upgrade;

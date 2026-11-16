@@ -1,4 +1,43 @@
 export default {
+  "upgrade": {
+    "title": "版本",
+    "nodeBuild": "此 Node 运行",
+    "hubBuild": "Hub 运行",
+    "policyTitle": "升级策略",
+    "policySub": "此 Node 与 Hub 版本不同时 Hub 怎么做",
+    "followDefault": "跟随 Hub 默认（{{policy}}）",
+    "defaultTitle": "所有 Node 的 Hub 默认",
+    "defaultSub": "用于没有单独设置策略的 Node",
+    "policy": {
+      "auto": "跟随 Hub 自动升级",
+      "notify": "仅提示",
+      "off": "关闭"
+    },
+    "reason": {
+      "outdated": "与 Hub 版本不同，可以在这里升级",
+      "current": "与 Hub 版本一致",
+      "manual": "此 Node 需在本机手动升级（不是从发布包装成服务，或版本太旧无法上报）",
+      "unknown": "暂不知道它的版本（离线或尚未询问）",
+      "hub_dev_build": "Hub 是开发构建，没有可升级到的版本"
+    },
+    "last": "上次升级",
+    "phase": {
+      "preparing": "准备中",
+      "staging": "下载中",
+      "staged": "已下载",
+      "draining": "等待运行中的工作",
+      "switching": "切换中",
+      "succeeded": "已升级",
+      "failed": "失败，未切换",
+      "rolled_back": "已回滚",
+      "abandoned": "已放弃",
+      "unknown": "结果未知"
+    },
+    "start": "升级到 Hub 版本",
+    "force": "立即升级（中断运行中的工作）",
+    "started": "已开始升级",
+    "how": "Node 经自己的连接下载 Hub 的发布包并校验；运行中的会话结束前不接新工作，随后切到新版本重启，若未按时重新连上则自动回到上一版本。"
+  },
   "nodeOccupancy": "节点占用/保留 {{running}} / 上限 {{max}}；等待开始 {{waiting}}",
   "roomCapacity": "等待并发位置：节点占用/保留 {{running}} / 上限 {{max}}",
   "roomNode": "等待节点：{{detail}}",

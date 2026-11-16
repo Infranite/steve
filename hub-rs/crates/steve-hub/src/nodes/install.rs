@@ -429,7 +429,7 @@ impl Ssh {
 }
 
 /// The installer archive of `version` for `target`, checked against the release's manifest.
-async fn installer(version: &str, target: &str) -> anyhow::Result<Vec<u8>> {
+pub(crate) async fn installer(version: &str, target: &str) -> anyhow::Result<Vec<u8>> {
     use anyhow::Context;
     let v = semver::Version::parse(version)
         .ok()

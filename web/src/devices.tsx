@@ -19,6 +19,7 @@ import { OwnerChip } from "@/people/owner-chip"
 import { VitalsSection, VitalsStrip } from "@/devices-vitals"
 import { NodeTags } from "@/devices-tags"
 import { NodeContext } from "@/devices-context"
+import { NodeUpgradePanel } from "@/devices-upgrade"
 import { CODE, TailcatSection } from "@/devices-tailcat"
 import { t, useT } from "@/i18n"
 import { hm } from "@/i18n/format"
@@ -132,6 +133,7 @@ export function DevicesView() {
         right={<RoomMeter running={node.running} max={node.max_sessions} waiting={node.waiting} />}>
         <div className="py-1.5"><SessionLimit max={node.max_sessions} editable={node.state !== "revoked"} save={(n) => api.nodeLimit(node.node_id, n).then(reload)} /></div>
       </Panel>}
+      {node && <NodeUpgradePanel node={node} reload={reload} />}
       {node && <NodeTags node={node.node_id} />}
       {node && node.state !== "revoked" && <NodeContext node={node.node_id} value={node.owner_context ?? null} />}
       {node && <><p>{t("device:unknownEligibility")}</p><p>{t("device:unknownCapacity")}</p><VitalsSection node={node.node_id} /></>}

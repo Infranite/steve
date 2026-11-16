@@ -380,10 +380,19 @@ pub async fn list(State(svc): State<Arc<NodeService>>, caller: Caller) -> Respon
     // each with how many of its turns run and wait, against its `max_sessions`
     let rows = match blocking(move || {
         store.reader(|c| {
-            steve_store::nodes::list_for_owner(c, &caller.me)?
+            let default = steve_store::nodes::upgrade_default(c)?;
+            let rows = steve_store::nodes::list_for_owner(c, &caller.me)?
                 .into_iter()
-                .map(|n| Ok((steve_store::runtime::session_room(c, &n.node_id)?, n)))
-                .collect::<steve_store::Result<Vec<_>>>()
+                .map(|n| {
+                    let latest = steve_store::nodes::upgrade_latest(c, &n.node_id)?;
+                    Ok((
+                        steve_store::runtime::session_room(c, &n.node_id)?,
+                        n,
+                        latest,
+                    ))
+                })
+                .collect::<steve_store::Result<Vec<_>>>()?;
+            Ok((default, rows))
         })
     })
     .await
@@ -391,9 +400,11 @@ pub async fn list(State(svc): State<Arc<NodeService>>, caller: Caller) -> Respon
         Ok(r) => r,
         Err(r) => return *r,
     };
+    let (default, rows) = rows;
+    let up = svc.upgrades.get().cloned();
     let items: Vec<Value> = rows
         .into_iter()
-        .map(|(room, n)| {
+        .map(|(room, n, latest)| {
             let linked = svc.registry.current(&n.node_id).is_some();
             let mut v = serde_json::to_value(&n).unwrap_or(Value::Null);
             v["linked"] = json!(linked);
@@ -408,10 +419,27 @@ pub async fn list(State(svc): State<Arc<NodeService>>, caller: Caller) -> Respon
             if let Ok(k) = <[u8; 32]>::try_from(n.pubkey.as_slice()) {
                 v["fingerprint"] = json!(identity::fingerprint(&k));
             }
+            if let Some(up) = &up {
+                v["upgrade"] = up.view(&n, &default, latest.as_ref());
+                // asked in the background: the next list shows it
+                if linked && !n.local && up.seen(&n.node_id).is_none() {
+                    let (up, id) = (up.clone(), n.node_id.clone());
+                    tokio::spawn(async move {
+                        up.look(&id).await;
+                    });
+                }
+            }
             v
         })
         .collect();
-    json_response(200, &json!({ "nodes": items }))
+    json_response(
+        200,
+        &json!({
+            "nodes": items,
+            "upgrade_default": default,
+            "hub_build": up.as_ref().and_then(|u| u.hub().cloned()),
+        }),
+    )
 }
 
 #[derive(Deserialize, Default)]
@@ -425,6 +453,9 @@ pub struct RenameBody {
     /// configuration there: `on`, `off`, or `inherit` (the workspace's setting).
     #[serde(default)]
     owner_context: Option<String>,
+    /// `upgrade_policy`: `auto` | `notify` | `off`, or empty for the Hub's default.
+    #[serde(default)]
+    policy: Option<String>,
 }
 
 pub async fn act(
@@ -434,9 +465,11 @@ pub async fn act(
     body: Option<Json<RenameBody>>,
 ) -> Response {
     let (store, me, node) = (svc.store.clone(), caller.me.clone(), id.clone());
-    let (name, max_sessions, choice) = body
-        .map(|b| (b.0.name, b.0.max_sessions, b.0.owner_context))
+    let (name, max_sessions, choice, policy) = body
+        .map(|b| (b.0.name, b.0.max_sessions, b.0.owner_context, b.0.policy))
         .unwrap_or_default();
+    let policy = policy.filter(|p| !p.is_empty());
+    let detail_policy = policy.clone();
     let action2 = action.clone();
     let done = blocking(move || {
         store.transaction(|tx| {
@@ -456,6 +489,7 @@ pub async fn act(
                     Some("inherit") => set_owner_context(tx, &node, &me, None)?,
                     _ => false,
                 },
+                "upgrade_policy" => set_upgrade_policy(tx, &node, &me, policy.as_deref())?,
                 "rename" => {
                     let n: String = name.chars().filter(|c| !c.is_control()).take(64).collect();
                     !n.trim().is_empty() && rename(tx, &node, &me, &n)?
@@ -466,6 +500,7 @@ pub async fn act(
                 let detail = match action2.as_str() {
                     "limit" => max_sessions.map(|n| n.to_string()),
                     "context" => choice.clone(),
+                    "upgrade_policy" => Some(detail_policy.clone().unwrap_or_else(|| "default".into())),
                     _ => None,
                 };
                 audit(

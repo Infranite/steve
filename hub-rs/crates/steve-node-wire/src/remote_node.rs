@@ -336,6 +336,20 @@ impl Discovery for RemoteNode {
         self.needs(steve_node_api::SESSION_CAPACITY.1, NODE_SESSION_CAPACITY)?;
         self.go(NODE_SESSION_CAPACITY, &sessions, None, false).await
     }
+    async fn upgrade_stage(&self, u: NodeUpgrade) -> ApiResult<NodeUpgradeState> {
+        self.needs(steve_node_api::NODE_UPGRADES.1, NODE_UPGRADE)?;
+        let op = u.operation.clone();
+        self.go(NODE_UPGRADE, &u, Some(&op), false).await
+    }
+    async fn upgrade_switch(&self, s: UpgradeSwitch) -> ApiResult<NodeUpgradeState> {
+        self.needs(steve_node_api::NODE_UPGRADES.1, NODE_UPGRADE_SWITCH)?;
+        let op = s.operation.clone();
+        self.go(NODE_UPGRADE_SWITCH, &s, Some(&op), false).await
+    }
+    async fn upgrade_status(&self, operation: OperationId) -> ApiResult<NodeUpgradeState> {
+        self.needs(steve_node_api::NODE_UPGRADES.1, NODE_UPGRADE_STATUS)?;
+        self.go(NODE_UPGRADE_STATUS, &operation, None, false).await
+    }
     async fn install_harness(&self, c: Command<InstallHarness>) -> ApiResult<Receipt> {
         self.needs(steve_node_api::CONTROLLED_INSTALL.1, "harness.install")?;
         if !self.is_colocated() {

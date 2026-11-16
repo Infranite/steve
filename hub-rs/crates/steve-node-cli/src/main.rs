@@ -66,6 +66,18 @@ async fn main() -> Result<()> {
     }
     let home = Home::from_env()?;
     match args.first().map(String::as_str) {
+        // the switch helper a Hub-asked upgrade starts, outside the service (see `upgrade`)
+        Some("upgrade-switch") => {
+            let Some(op) = args.get(1) else { usage() };
+            let mut svc = steve_node_cli::upgrade::InstalledService::open(&home.0)?;
+            let s = steve_node_cli::upgrade::run_switch(
+                &home.0,
+                op,
+                &mut svc,
+                std::time::Duration::from_millis(500),
+            )?;
+            println!("{}", serde_json::to_string(&s)?);
+        }
         Some("pair") => {
             let Some(url) = args.get(1) else { usage() };
             let mut pin = None;

@@ -144,6 +144,14 @@ struct State {
     /// files and scans always need one.
     roots: Vec<RootInfo>,
     features: Vec<String>,
+    /// The build a probe reports ([`FakeNode::set_build`]).
+    build: Option<BuildIdentity>,
+    /// Upgrades this Node was asked for, by operation ([`FakeNode::set_upgrade_outcome`]).
+    upgrades: BTreeMap<OperationId, NodeUpgradeState>,
+    /// What a switch ends in: `succeeded` (the build becomes the staged one) or a failure phase.
+    upgrade_outcome: Option<(String, Option<String>)>,
+    /// Upgrades staged, with what was asked.
+    staged: Vec<NodeUpgrade>,
     harnesses: Option<Vec<HarnessCapability>>,
     /// The files under the roots, as on disk.
     files: BTreeMap<(RootId, RelPath), FakeFile>,
@@ -264,6 +272,22 @@ impl FakeNode {
         self.st().features = features;
     }
 
+    /// The build a probe reports.
+    pub fn set_build(&self, build: Option<BuildIdentity>) {
+        self.st().build = build;
+    }
+
+    /// How the next upgrade switches end: `succeeded`, or a failure phase (`rolled_back`) with its
+    /// error. Without it a switch succeeds.
+    pub fn set_upgrade_outcome(&self, phase: &str, error: Option<&str>) {
+        self.st().upgrade_outcome = Some((phase.into(), error.map(Into::into)));
+    }
+
+    /// The upgrades staged so far, in order.
+    pub fn staged_upgrades(&self) -> Vec<NodeUpgrade> {
+        self.st().staged.clone()
+    }
+
     /// Writes a file under a root (a new version every time).
     pub fn put_file(&self, root: &str, rel: &str, bytes: &[u8]) {
         let mut st = self.st();
@@ -359,6 +383,10 @@ impl FakeNode {
             // the machine's own: roots, files and harness history outlive the journal
             roots: old.roots,
             features: old.features,
+            build: old.build,
+            upgrades: old.upgrades,
+            upgrade_outcome: old.upgrade_outcome,
+            staged: old.staged,
             files: old.files,
             scan_issues: old.scan_issues,
             history: old.history,
@@ -2241,7 +2269,75 @@ impl Discovery for FakeNode {
             roots: st.roots.clone(),
             capacity,
             features: st.features.clone(),
+            build: st.build.clone(),
         })
+    }
+    async fn upgrade_stage(&self, u: NodeUpgrade) -> ApiResult<NodeUpgradeState> {
+        let mut st = self.st();
+        if !st.features.iter().any(|f| f == FEATURE_NODE_UPGRADE) {
+            return unsupported("node upgrade");
+        }
+        if let Some(s) = st.upgrades.get(&u.operation) {
+            return Ok(s.clone());
+        }
+        if st.upgrades.values().any(|s| !s.is_terminal()) {
+            return Err(ApiError::new(
+                ErrorCode::Busy,
+                "another upgrade is unfinished",
+            ));
+        }
+        let state = NodeUpgradeState {
+            operation: u.operation.clone(),
+            phase: "staged".into(),
+            version: u.build.version.clone(),
+            previous: st.build.as_ref().map(|b| b.version.clone()),
+            error: None,
+            updated: Timestamp(st.now),
+        };
+        st.upgrades.insert(u.operation.clone(), state.clone());
+        st.staged.push(u);
+        Ok(state)
+    }
+    async fn upgrade_switch(&self, s: UpgradeSwitch) -> ApiResult<NodeUpgradeState> {
+        let mut st = self.st();
+        let now = Timestamp(st.now);
+        let outcome = st.upgrade_outcome.clone();
+        let busy = !st.active.is_empty();
+        let staged = st
+            .staged
+            .iter()
+            .find(|u| u.operation == s.operation)
+            .map(|u| u.build.clone());
+        let Some(state) = st.upgrades.get_mut(&s.operation) else {
+            return Err(ApiError::new(ErrorCode::Invalid, "no such upgrade"));
+        };
+        if state.is_terminal() || state.phase != "staged" {
+            return Ok(state.clone());
+        }
+        if s.abandon {
+            state.phase = "abandoned".into();
+            state.updated = now;
+            return Ok(state.clone());
+        }
+        if busy && !s.force {
+            return Err(ApiError::new(ErrorCode::Busy, "the node still runs work"));
+        }
+        let (phase, error) = outcome.unwrap_or(("succeeded".into(), None));
+        state.phase = phase;
+        state.error = error;
+        state.updated = now;
+        let state = state.clone();
+        if state.phase == "succeeded" {
+            st.build = staged;
+        }
+        Ok(state)
+    }
+    async fn upgrade_status(&self, operation: OperationId) -> ApiResult<NodeUpgradeState> {
+        self.st()
+            .upgrades
+            .get(&operation)
+            .cloned()
+            .ok_or_else(|| ApiError::new(ErrorCode::Invalid, "no such upgrade"))
     }
     async fn history(&self, p: PageRequest) -> ApiResult<Page<HistoryEntry>> {
         let all: Vec<HistoryEntry> = self.st().history.iter().map(|(e, _)| e.clone()).collect();

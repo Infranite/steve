@@ -27,9 +27,12 @@ pub struct NodeRow {
     /// Whether its owner's sessions load the owner's personal harness configuration on this
     /// machine ([`set_owner_context`]); `None` follows the workspace's `ownerContext` setting.
     pub owner_context: Option<bool>,
+    /// `auto` | `notify` | `off`, as its owner set it; `None`: the Hub's default
+    /// ([`upgrade_default`]).
+    pub upgrade_policy: Option<String>,
 }
 
-const COLS: &str = "node_id,owner,name,pubkey,fingerprint,state,generation,incarnation,local,created,last_seen,revoked_at,revoked_by,max_sessions,owner_context";
+const COLS: &str = "node_id,owner,name,pubkey,fingerprint,state,generation,incarnation,local,created,last_seen,revoked_at,revoked_by,max_sessions,owner_context,upgrade_policy";
 
 fn row(r: &rusqlite::Row<'_>) -> rusqlite::Result<NodeRow> {
     Ok(NodeRow {
@@ -48,6 +51,7 @@ fn row(r: &rusqlite::Row<'_>) -> rusqlite::Result<NodeRow> {
         revoked_by: r.get(12)?,
         max_sessions: r.get(13)?,
         owner_context: r.get::<_, Option<i64>>(14)?.map(|v| v != 0),
+        upgrade_policy: r.get(15)?,
     })
 }
 
@@ -189,6 +193,202 @@ pub fn owner_context(c: &Connection, node: &str, ws: &str) -> Result<bool> {
         .and_then(|v| serde_json::from_str::<String>(&v).ok())
         .as_deref()
         != Some("off"))
+}
+
+/// What the Hub does when a Node runs another build than the Hub: upgrade it (`auto`), say so
+/// (`notify`) or nothing (`off`).
+pub const UPGRADE_POLICIES: &[&str] = &["auto", "notify", "off"];
+/// The setting that holds the Hub's default policy.
+const UPGRADE_DEFAULT_KEY: &str = "node.upgrade_policy";
+/// Without a setting: say so, upgrade only when the owner asks.
+pub const UPGRADE_DEFAULT: &str = "notify";
+
+/// `policy` `None`: back to the Hub's default.
+pub fn set_upgrade_policy(
+    tx: &Tx<'_>,
+    node_id: &str,
+    owner: &str,
+    policy: Option<&str>,
+) -> Result<bool> {
+    if policy.is_some_and(|p| !UPGRADE_POLICIES.contains(&p)) {
+        return Ok(false);
+    }
+    Ok(tx.execute(
+        "UPDATE nodes SET upgrade_policy=?3 WHERE node_id=?1 AND owner=?2 AND local=0 AND state!='revoked'",
+        params![node_id, owner, policy],
+    )? == 1)
+}
+
+/// The Hub's default policy for Nodes without their own.
+pub fn upgrade_default(c: &Connection) -> Result<String> {
+    let v: Option<String> = c
+        .query_row(
+            "SELECT value FROM settings WHERE workspace_id='default' AND key=?",
+            [UPGRADE_DEFAULT_KEY],
+            |r| r.get(0),
+        )
+        .optional()?;
+    Ok(v.filter(|p| UPGRADE_POLICIES.contains(&p.as_str()))
+        .unwrap_or_else(|| UPGRADE_DEFAULT.into()))
+}
+
+pub fn set_upgrade_default(tx: &Tx<'_>, policy: &str, now: i64) -> Result<bool> {
+    if !UPGRADE_POLICIES.contains(&policy) {
+        return Ok(false);
+    }
+    tx.execute(
+        "INSERT INTO settings(workspace_id,key,value,updated) VALUES ('default',?1,?2,?3)
+         ON CONFLICT(workspace_id,key) DO UPDATE SET value=excluded.value, updated=excluded.updated",
+        params![UPGRADE_DEFAULT_KEY, policy, now],
+    )?;
+    Ok(true)
+}
+
+/// One upgrade of a Node the Hub ran (`node_upgrades`).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct UpgradeRow {
+    pub operation_id: String,
+    pub node_id: String,
+    pub version: String,
+    pub commit_sha: String,
+    pub target: String,
+    pub from_version: Option<String>,
+    /// The artifact id the Node fetches it by.
+    pub artifact: String,
+    /// The archive on the Hub's disk.
+    #[serde(skip)]
+    pub file: String,
+    pub sha256: String,
+    pub size: i64,
+    pub requested_by: String,
+    pub force: bool,
+    /// `preparing` | `staging` | `staged` | `draining` | `switching` | `succeeded` | `failed` |
+    /// `rolled_back` | `abandoned` | `unknown`.
+    pub phase: String,
+    pub error: Option<String>,
+    pub created: i64,
+    pub updated: i64,
+}
+
+/// Phases after which nothing more happens to an upgrade.
+pub const UPGRADE_DONE: &[&str] = &["succeeded", "failed", "rolled_back", "abandoned", "unknown"];
+
+const UCOLS: &str = "operation_id,node_id,version,commit_sha,target,from_version,artifact,file,sha256,size,requested_by,force,phase,error,created,updated";
+
+fn upgrade_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<UpgradeRow> {
+    Ok(UpgradeRow {
+        operation_id: r.get(0)?,
+        node_id: r.get(1)?,
+        version: r.get(2)?,
+        commit_sha: r.get(3)?,
+        target: r.get(4)?,
+        from_version: r.get(5)?,
+        artifact: r.get(6)?,
+        file: r.get(7)?,
+        sha256: r.get(8)?,
+        size: r.get(9)?,
+        requested_by: r.get(10)?,
+        force: r.get::<_, i64>(11)? != 0,
+        phase: r.get(12)?,
+        error: r.get(13)?,
+        created: r.get(14)?,
+        updated: r.get(15)?,
+    })
+}
+
+/// A new upgrade, unless the Node has one unfinished (`false`).
+pub fn upgrade_insert(tx: &Tx<'_>, u: &UpgradeRow) -> Result<bool> {
+    let open: i64 = tx.query_row(
+        &format!(
+            "SELECT count(*) FROM node_upgrades WHERE node_id=? AND phase NOT IN ({})",
+            UPGRADE_DONE
+                .iter()
+                .map(|p| format!("'{p}'"))
+                .collect::<Vec<_>>()
+                .join(",")
+        ),
+        [&u.node_id],
+        |r| r.get(0),
+    )?;
+    if open > 0 {
+        return Ok(false);
+    }
+    tx.execute(
+        &format!("INSERT INTO node_upgrades ({UCOLS}) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)"),
+        params![
+            u.operation_id,
+            u.node_id,
+            u.version,
+            u.commit_sha,
+            u.target,
+            u.from_version,
+            u.artifact,
+            u.file,
+            u.sha256,
+            u.size,
+            u.requested_by,
+            u.force as i64,
+            u.phase,
+            u.error,
+            u.created,
+            u.updated
+        ],
+    )?;
+    Ok(true)
+}
+
+/// Moves an unfinished upgrade on; a finished one stays as it ended (`false`).
+pub fn upgrade_phase(
+    tx: &Tx<'_>,
+    operation_id: &str,
+    phase: &str,
+    error: Option<&str>,
+    now: i64,
+) -> Result<bool> {
+    Ok(tx.execute(
+        &format!(
+            "UPDATE node_upgrades SET phase=?2, error=?3, updated=?4 WHERE operation_id=?1 AND phase NOT IN ({})",
+            UPGRADE_DONE.iter().map(|p| format!("'{p}'")).collect::<Vec<_>>().join(",")
+        ),
+        params![operation_id, phase, error, now],
+    )? == 1)
+}
+
+pub fn upgrade_get(c: &Connection, operation_id: &str) -> Result<Option<UpgradeRow>> {
+    Ok(c.query_row(
+        &format!("SELECT {UCOLS} FROM node_upgrades WHERE operation_id=?"),
+        [operation_id],
+        upgrade_row,
+    )
+    .optional()?)
+}
+
+/// The Node's latest upgrade.
+pub fn upgrade_latest(c: &Connection, node_id: &str) -> Result<Option<UpgradeRow>> {
+    Ok(c.query_row(
+        &format!(
+            "SELECT {UCOLS} FROM node_upgrades WHERE node_id=? ORDER BY created DESC, rowid DESC LIMIT 1"
+        ),
+        [node_id],
+        upgrade_row,
+    )
+    .optional()?)
+}
+
+/// Upgrades not finished (after a Hub restart: to settle, never to run again).
+pub fn upgrades_open(c: &Connection) -> Result<Vec<UpgradeRow>> {
+    let mut st = c.prepare(&format!(
+        "SELECT {UCOLS} FROM node_upgrades WHERE phase NOT IN ({}) ORDER BY created",
+        UPGRADE_DONE
+            .iter()
+            .map(|p| format!("'{p}'"))
+            .collect::<Vec<_>>()
+            .join(",")
+    ))?;
+    let v = st
+        .query_map([], upgrade_row)?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(v)
 }
 
 /// A new link of an active or paused Node: the next generation, the incarnation it reported, and
