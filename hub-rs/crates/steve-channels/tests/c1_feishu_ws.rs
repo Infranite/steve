@@ -165,6 +165,19 @@ async fn start(h: &H) -> LongConnection {
 }
 
 /// Inbound messages (the rules may add pending drafts, `direction=out`).
+/// The first row `sql` finds for `p`, once there is one. A message is stored before it is linked to
+/// its event and its outcome is written after that, so a query joining them waits for both.
+async fn row(h: &H, sql: &str, p: &str) -> Vec<Value> {
+    let t0 = std::time::Instant::now();
+    loop {
+        if let Some(r) = q(h, sql, p).into_iter().next() {
+            return r;
+        }
+        assert!(t0.elapsed() < T, "{sql}: no row for {p}");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
 const MSGS: &str = "SELECT count(*) FROM chan_messages WHERE ?1 = ?1 AND direction = 'in'";
 const EVENTS: &str = "SELECT count(*) FROM ext_events WHERE ?1 = ?1";
 
@@ -331,11 +344,12 @@ async fn dm_external_bots_and_own_messages() {
     h.fake
         .ws_push_envelope(fixture("message_from_bot").unwrap());
     until(&h, MSGS, 3).await;
-    let e = &q(
+    let e = &row(
         &h,
-        "SELECT e.outcome_label FROM ext_events e JOIN chan_messages m ON m.event_id = e.id WHERE m.external_id = ?",
+        "SELECT e.outcome_label FROM ext_events e JOIN chan_messages m ON m.event_id = e.id WHERE m.external_id = ? AND e.outcome_label IS NOT NULL",
         "om_otherbot0000000000000000000001",
-    )[0];
+    )
+    .await;
     assert_eq!(e[0], json!(LABEL_BOT));
 
     // the bot itself (its open_id): identified as our own account, not processed
@@ -345,11 +359,12 @@ async fn dm_external_bots_and_own_messages() {
     env["event"]["message"]["message_id"] = json!("om_own00000000000000000000000001");
     h.fake.ws_push_envelope(env);
     until(&h, MSGS, 4).await;
-    let r = &q(
+    let r = &row(
         &h,
-        "SELECT m.sender_account_id, e.outcome_label FROM chan_messages m JOIN ext_events e ON e.id = m.event_id WHERE m.external_id = ?",
+        "SELECT m.sender_account_id, e.outcome_label FROM chan_messages m JOIN ext_events e ON e.id = m.event_id WHERE m.external_id = ? AND e.outcome_label IS NOT NULL",
         "om_own00000000000000000000000001",
-    )[0];
+    )
+    .await;
     assert_eq!(r, &vec![json!(h.bot_acc), json!(LABEL_OWN)]);
     lc.stop().await.unwrap();
 }
