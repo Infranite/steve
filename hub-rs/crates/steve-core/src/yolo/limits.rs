@@ -6,7 +6,8 @@
 //! 3. speaking as the user, unless the outbound path marks the message `[AI] ` and the disclosure check passed
 //!    (a program that sends as the user from the agent's shell — `lark-cli`, `sendmail`, `osascript`… — never is);
 //! 4. deleting, moving or writing outside the item's own directory; touching `STEVE_HOME`, port 8440, launchd;
-//! 5. pushing to a remote or publishing (only the user's own Steve deployment is exempt);
+//! 5. pushing to a remote or publishing (only the user's own Steve deployment is exempt, and the item's
+//!    agent pushing its own branch to `origin` and opening its pull request or an issue: [`super::push`]);
 //! 6. outbound content the disclosure check judged Leak or Blocked;
 //! 7. what only the user can do in person (sign in, scan a code, type a one-time code, confirm on a
 //!    device, plug something in), or a claim that they did: a question about it, or an agent that
@@ -25,6 +26,7 @@ use serde_json::Value;
 
 use super::exec::{self, Body, Feed};
 use super::judge::{Disclosure, Env, Facts, Identity, Outbound, OutboundStage, Subject, Tool};
+use super::push::{self, Own};
 use super::shell::{self, Argv, Parsed, Simple};
 
 pub use steve_modules::outbound::{AI_PREFIX, strip_ai_prefix, with_ai_prefix};
@@ -765,7 +767,7 @@ fn tool(t: &Tool, env: &Env) -> Option<Limit> {
         "execute" => command(
             &tool_command(t).unwrap_or_default(),
             &pl,
-            t.branch.as_deref(),
+            Own::new(t.branch.as_deref(), t.checkout.as_ref()),
         ),
         "fetch" => {
             let method = t.raw.get("method").and_then(Value::as_str).unwrap_or("GET");
@@ -834,7 +836,7 @@ fn steve_named(t: &str, pl: &Places) -> Option<Limit> {
 }
 
 /// The limits a shell command line hits.
-pub(crate) fn command(cmd: &str, pl: &Places, branch: Option<&str>) -> Option<Limit> {
+pub(crate) fn command(cmd: &str, pl: &Places, own: Own<'_>) -> Option<Limit> {
     if let Some(w) = money(cmd) {
         return Some(Limit::new(1, format!("涉及付款（{w}）")));
     }
@@ -842,7 +844,7 @@ pub(crate) fn command(cmd: &str, pl: &Places, branch: Option<&str>) -> Option<Li
         return Some(l);
     }
     match shell::parse(cmd) {
-        Ok(p) => parsed(&p, pl, branch, 0),
+        Ok(p) => parsed(&p, pl, own.line(&p), 0),
         // the guard never lets an unreadable command through; nothing more to see here
         Err(_) => None,
     }
@@ -850,14 +852,14 @@ pub(crate) fn command(cmd: &str, pl: &Places, branch: Option<&str>) -> Option<Li
 
 const MAX_DEPTH: u8 = 4;
 
-fn parsed(p: &Parsed, pl: &Places, branch: Option<&str>, depth: u8) -> Option<Limit> {
+fn parsed(p: &Parsed, pl: &Places, own: Own<'_>, depth: u8) -> Option<Limit> {
     if depth > MAX_DEPTH {
         return Some(Limit::new(4, "命令嵌套太深，看不清"));
     }
     let mut pl = pl.clone();
     for c in &p.cmds {
         // a `cd` into Steve's data, or by a glob that may reach it, is judged like any word
-        if let Some(l) = simple(c, &pl, branch, depth) {
+        if let Some(l) = simple(c, &pl, own, depth) {
             return Some(l);
         }
         pl.cd(&c.words);
@@ -868,7 +870,7 @@ fn parsed(p: &Parsed, pl: &Places, branch: Option<&str>, depth: u8) -> Option<Li
 /// The limits one simple command hits where `pl` says it runs: its redirections, the paths it
 /// names, and its program with what that runs as far as this module follows it. Full access judges
 /// every command a line runs with this ([`super::full_guard`]), not only the line's own.
-pub(crate) fn simple(c: &Simple, pl: &Places, branch: Option<&str>, depth: u8) -> Option<Limit> {
+pub(crate) fn simple(c: &Simple, pl: &Places, own: Own<'_>, depth: u8) -> Option<Limit> {
     for w in &c.writes {
         if pl.may_glob_steve(w) {
             return Some(Limit::new(4, format!("可能碰到 STEVE_HOME：{w}")));
@@ -897,19 +899,19 @@ pub(crate) fn simple(c: &Simple, pl: &Places, branch: Option<&str>, depth: u8) -
     {
         match shell::parse(body) {
             Ok(n) => {
-                if let Some(l) = parsed(&n, pl, branch, depth + 1) {
+                if let Some(l) = parsed(&n, pl, own.nested(), depth + 1) {
                     return Some(l);
                 }
             }
             Err(_) => return Some(Limit::new(4, "喂给 shell 的 here-document 看不清")),
         }
     }
-    if let Some(l) = program(&a, c.expands, pl, branch, depth) {
+    if let Some(l) = program(&a, c.expands, pl, own.at(c), depth) {
         return Some(l);
     }
     // quoted arguments that are command lines of their own (`sh -c`, `ssh host '…'`, `-x '…'`)
     for n in shell::nested(&a.args) {
-        if let Some(l) = parsed(&n, pl, branch, depth + 1) {
+        if let Some(l) = parsed(&n, pl, own.nested(), depth + 1) {
             return Some(l);
         }
     }
@@ -922,7 +924,7 @@ pub(crate) fn simple(c: &Simple, pl: &Places, branch: Option<&str>, depth: u8) -
         let hit = match b {
             Body::Line(s, _) | Body::Maybe(s) => shell::parse(&s)
                 .ok()
-                .and_then(|n| parsed(&n, pl, branch, depth + 1)),
+                .and_then(|n| parsed(&n, pl, own.nested(), depth + 1)),
             Body::Argv(words, _) => {
                 if depth >= MAX_DEPTH {
                     return Some(Limit::new(4, "命令嵌套太深，看不清"));
@@ -932,7 +934,7 @@ pub(crate) fn simple(c: &Simple, pl: &Places, branch: Option<&str>, depth: u8) -
                     words,
                     ..Default::default()
                 };
-                simple(&c, pl, branch, depth + 1)
+                simple(&c, pl, own.nested(), depth + 1)
             }
             // not a hard limit's to say: the guard and full access leave it to the user
             Body::Code(..) | Body::Unseen(_) => None,
@@ -952,12 +954,12 @@ fn words_of(a: &Argv, from: usize) -> Vec<String> {
 }
 
 /// Runs `argv` as a command of its own (`npx X`, `python -m X`, `find -exec X`).
-fn sub_argv(words: Vec<String>, pl: &Places, branch: Option<&str>, depth: u8) -> Option<Limit> {
+fn sub_argv(words: Vec<String>, pl: &Places, own: Own<'_>, depth: u8) -> Option<Limit> {
     if depth > MAX_DEPTH {
         return Some(Limit::new(4, "命令嵌套太深，看不清"));
     }
     let a = shell::argv(&words)?;
-    program(&a, false, pl, branch, depth + 1)
+    program(&a, false, pl, own.nested(), depth + 1)
 }
 
 /// Non-option arguments (`--` ends the options).
@@ -1049,7 +1051,7 @@ fn as_user(p: &str) -> Option<Limit> {
         .then(|| Limit::new(3, format!("{p} 会以你本人的身份发消息或邮件")))
 }
 
-fn program(a: &Argv, expands: bool, pl: &Places, branch: Option<&str>, depth: u8) -> Option<Limit> {
+fn program(a: &Argv, expands: bool, pl: &Places, own: Own<'_>, depth: u8) -> Option<Limit> {
     let p = a.program.as_str();
     let args = &a.args;
     let first = args.first().map(String::as_str).unwrap_or("");
@@ -1078,8 +1080,8 @@ fn program(a: &Argv, expands: bool, pl: &Places, branch: Option<&str>, depth: u8
         return push("部署或云端工具会改远端");
     }
     match p {
-        "git" => return git(args, pl, branch, depth),
-        "gh" => return gh(args),
+        "git" => return git(args, pl, own, depth),
+        "gh" => return gh(args, pl, own),
         "curl" => return curl(args),
         "wget" => {
             if args.iter().any(|x| {
@@ -1155,7 +1157,7 @@ fn program(a: &Argv, expands: bool, pl: &Places, branch: Option<&str>, depth: u8
                     .skip(1)
                     .map(|s| s.to_string())
                     .collect();
-                return sub_argv(rest, pl, branch, depth);
+                return sub_argv(rest, pl, own, depth);
             }
         }
         "npx" | "bunx" | "pnpx" | "uvx" | "pipx" => {
@@ -1164,7 +1166,7 @@ fn program(a: &Argv, expands: bool, pl: &Places, branch: Option<&str>, depth: u8
                 .skip(usize::from(p == "pipx" && first == "run"))
                 .map(|s| s.to_string())
                 .collect();
-            return sub_argv(rest, pl, branch, depth);
+            return sub_argv(rest, pl, own, depth);
         }
         "cargo" => {
             if matches!(
@@ -1197,17 +1199,17 @@ fn program(a: &Argv, expands: bool, pl: &Places, branch: Option<&str>, depth: u8
         }
         "python" | "python3" | "py" => {
             if first == "-m" {
-                return sub_argv(words_of(a, 1), pl, branch, depth);
+                return sub_argv(words_of(a, 1), pl, own, depth);
             }
         }
         "eval" | "source" | "." => {
             let joined = args.join(" ");
             return match shell::parse(&joined) {
-                Ok(n) => parsed(&n, pl, branch, depth + 1),
+                Ok(n) => parsed(&n, pl, own.nested(), depth + 1),
                 Err(_) => Some(Limit::new(4, "eval 的内容看不清")),
             };
         }
-        "find" => return find(args, pl, branch, depth),
+        "find" => return find(args, pl, own, depth),
         "mv" => {
             if let Some(l) = unknown_targets() {
                 return Some(l);
@@ -1303,7 +1305,7 @@ fn program(a: &Argv, expands: bool, pl: &Places, branch: Option<&str>, depth: u8
         if let Some(i) = args.iter().position(|x| shell::is_dash_c(x)) {
             let body = args.get(i + 1).cloned().unwrap_or_default();
             return match shell::parse(&body) {
-                Ok(n) => parsed(&n, pl, branch, depth + 1),
+                Ok(n) => parsed(&n, pl, own.nested(), depth + 1),
                 Err(_) => Some(Limit::new(4, "sh -c 的内容看不清")),
             };
         }
@@ -1660,7 +1662,7 @@ fn curl(args: &[String]) -> Option<Limit> {
     None
 }
 
-fn gh(args: &[String]) -> Option<Limit> {
+fn gh(args: &[String], pl: &Places, own: Own<'_>) -> Option<Limit> {
     let ops = operands(args);
     let a = ops.first().map(|s| s.as_str()).unwrap_or("");
     let b = ops.get(1).map(|s| s.as_str()).unwrap_or("");
@@ -1682,7 +1684,8 @@ fn gh(args: &[String]) -> Option<Limit> {
         }
         _ => false,
     };
-    if read {
+    // the own branch's pull request, an issue (#219, [`push`])
+    if read || push::gh(args, pl, own).is_ok() {
         None
     } else {
         Some(Limit::new(5, format!("gh {a} {b} 会改 GitHub")))
@@ -1772,7 +1775,8 @@ const GIT_KNOWN: &[&str] = &[
     "difftool",
 ];
 
-fn git(args: &[String], pl: &Places, branch: Option<&str>, depth: u8) -> Option<Limit> {
+fn git(args: &[String], pl: &Places, own: Own<'_>, depth: u8) -> Option<Limit> {
+    let branch = own.branch;
     let mut i = 0;
     let mut dir: Option<&str> = None;
     while let Some(x) = args.get(i) {
@@ -1834,6 +1838,8 @@ fn git(args: &[String], pl: &Places, branch: Option<&str>, depth: u8) -> Option<
         ));
     }
     match sub {
+        // the item's own branch to `origin` (#219, [`push`])
+        "push" if push::git_push(args, pl, own).is_ok() => None,
         "push" | "send-email" => Some(Limit::new(5, format!("git {sub}"))),
         "svn" if rest.first().is_some_and(|r| r == "dcommit") => {
             Some(Limit::new(5, "git svn dcommit"))
@@ -1854,7 +1860,7 @@ fn git(args: &[String], pl: &Places, branch: Option<&str>, depth: u8) -> Option<
                 .cloned()
                 .collect(),
             pl,
-            branch,
+            own,
             depth,
         ),
         "branch" => {
@@ -1942,7 +1948,7 @@ fn risky_git_config(k: &str) -> bool {
         || key.starts_with("mergetool.") && key.ends_with(".cmd")
 }
 
-fn find(args: &[String], pl: &Places, branch: Option<&str>, depth: u8) -> Option<Limit> {
+fn find(args: &[String], pl: &Places, own: Own<'_>, depth: u8) -> Option<Limit> {
     let roots: Vec<&String> = args
         .iter()
         .take_while(|x| !x.starts_with('-') && !matches!(x.as_str(), "(" | "!" | "\\("))
@@ -1970,7 +1976,7 @@ fn find(args: &[String], pl: &Places, branch: Option<&str>, depth: u8) -> Option
         }
     }
     for e in execs {
-        if let Some(l) = sub_argv(e, pl, branch, depth) {
+        if let Some(l) = sub_argv(e, pl, own, depth) {
             return Some(l);
         }
     }

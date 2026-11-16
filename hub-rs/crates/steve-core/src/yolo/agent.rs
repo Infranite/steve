@@ -19,7 +19,7 @@ use crate::repo::{Item, Project};
 pub const UPDATE: &str = "- steve_update: call it first with a short plan, and again whenever your step or plan changes. Write `now` in Chinese.";
 pub const ON: &str = "- YOLO mode is on: the user is away and wants as little interruption as possible. Decide yourself whenever a reasonable choice exists; write the assumptions you made into steve_update and into the delivery summary.";
 pub const ASK: &str = "- steve_ask: only when you are blocked by something only the user knows. For a preference, give options and recommend one only when justified. For a missing fact, verification receipt or external prerequisite, do not recommend a successful outcome; leave the question open until real evidence arrives. Steve may answer preferences for the user, but cannot invent evidence. After calling it, end your turn.";
-pub const APPROVAL: &str = "- Work inside your working directory freely; do not ask for approval for that. Push, publish, deploy, send, pay or delete outside your working directory only within explicit user authorization. If the requested action already has a recorded approval, follow its scope without asking again; otherwise use steve_request_approval and end your turn. Approval is not evidence that the action succeeded.";
+pub const APPROVAL: &str = "- Work inside your working directory freely; do not ask for approval for that. Pushing your own item branch to origin (no force push), creating, editing or commenting on its pull request, and opening an issue need no approval. Any other push (a force push, another branch, a tag, another remote), merging, publishing, deploying, sending, paying or deleting outside your working directory only within explicit user authorization. If the requested action already has a recorded approval, follow its scope without asking again; otherwise use steve_request_approval and end your turn. Approval is not evidence that the action succeeded.";
 pub const DELIVER: &str = "- steve_deliver: when the goal is met and your checks pass. Run the real checks (build, type check, tests) and list them, failed ones too: they are shown to the user with your delivery. Tick off finished plan steps with steve_update first; list in `unfinished` the steps you deliberately left open. Then end your turn.";
 /// Appended to the `steve_publish` line for the user's own Steve deployment.
 pub const PUBLISH: &str = " In YOLO mode Steve approves releases of this project by itself and rolls back if the health check fails.";
@@ -37,7 +37,7 @@ pub fn full_lines(steve_home: &str) -> Vec<String> {
 }
 
 /// Put in front of the next message when YOLO comes on for a running session.
-pub const NOTE_ON: &str = "（YOLO 已开启：用户不在，希望尽量少被打扰。有合理的选择就自己决定，把做的假设写进 steve_update 和交付摘要；steve_ask 只用于只有用户知道的事；偏好选择有依据时才给 recommended 和 why，事实或验证回执缺失时保持待答，不推荐“已通过”，Steve 不能代造证据；工作目录里的事不用请求批准；推送、发布、部署、发消息或邮件、付款、删除工作目录以外的东西必须有具体授权；已有批准按原范围执行，不重复申请。交付前跑真实的检查并列出来。）";
+pub const NOTE_ON: &str = "（YOLO 已开启：用户不在，希望尽量少被打扰。有合理的选择就自己决定，把做的假设写进 steve_update 和交付摘要；steve_ask 只用于只有用户知道的事；偏好选择有依据时才给 recommended 和 why，事实或验证回执缺失时保持待答，不推荐“已通过”，Steve 不能代造证据；工作目录里的事不用请求批准；把自己事项的分支推到 origin（不强推）、给它开 PR、改 PR、在 PR 上评论、开 issue 也不用批准；其他推送（强推、别的分支、tag、别的远端）、合并、发布、部署、发消息或邮件、付款、删除工作目录以外的东西必须有具体授权；已有批准按原范围执行，不重复申请。交付前跑真实的检查并列出来。）";
 /// …and when it goes off.
 pub const NOTE_OFF: &str = "（YOLO 已结束：回到平常的工作方式，需要决定时用 steve_ask）";
 /// …when full access comes on (on top of the YOLO note when it came from off).

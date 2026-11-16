@@ -70,7 +70,7 @@ Agent tools send and end the turn, so nothing waits in memory. External effects 
 
 #### 🛑 Autonomy has hard limits
 
-YOLO only decides things that stay on your machine and can be undone. Money, high-sensitivity secrets, pushing, publishing and speaking as you are out of reach whatever the settings say. Breakers pause it when things go wrong.
+YOLO only decides things that stay on your machine and can be undone. Money, high-sensitivity secrets, pushing, publishing and speaking as you are out of reach whatever the settings say; the one exception is an item's agent pushing its own branch to `origin` and opening its pull request. Breakers pause it when things go wrong.
 
 </td>
 </tr>
@@ -160,7 +160,7 @@ Steve stays out of your harness settings. It answers a permission prompt for tha
 
 With YOLO on, Steve decides tool permissions inside the item's own directory, local approvals, acceptance by checks, whether to continue a stalled agent, answers to agents' questions (only when confident), starting items whose dependencies are done, and releases of your own Steve (rate-limited).
 
-No setting can widen these limits, and they are property-tested: money, high-sensitivity vault items, speaking as you without an `[AI]` mark, anything outside the item's directory, pushing or publishing, and anything the disclosure check flagged.
+No setting can widen these limits, and they are property-tested: money, high-sensitivity vault items, speaking as you without an `[AI]` mark, anything outside the item's directory, pushing or publishing, and anything the disclosure check flagged. The item's own agent may push the item's own branch (`steve/…`, as Steve recorded it) to `origin` without force, create, edit or comment on that branch's pull request with `gh`, and open an issue; another branch, remote or refspec destination, a force push, deleting, tags, `gh pr merge`, repository settings and releases still wait for you, and branch protection on the default branch stays the backstop.
 
 - **Shell guard.** Default deny, with its own POSIX shell parser. `eval`, `sh -c`, `sudo` and command substitution are refused, and `kill` only works on processes the agent started.
 - **Countdowns and breakers.** While you're active, YOLO waits and shows *Now* and *I'll decide* buttons. It pauses the workspace after repeated failures, repeated undos, or a release it approved that went wrong.
