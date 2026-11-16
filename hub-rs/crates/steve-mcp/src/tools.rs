@@ -22,7 +22,7 @@ pub const PUBLISH: &str = "steve_publish";
 pub const LANE_STATUS: &str = "steve_lane_status";
 
 /// Added to the `steve_publish` result: where to look for its progress instead of asking the user.
-pub const PUBLISHED: &str = "To see its progress (the merge-lane batch, an approval it waits for, a failure and why, the released version), call steve_lane_status; don't ask the user.";
+pub const PUBLISHED: &str = "Its progress and result arrive on the item; don't ask the user.";
 
 struct Def {
     name: String,

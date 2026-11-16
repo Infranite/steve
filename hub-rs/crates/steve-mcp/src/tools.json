@@ -204,7 +204,7 @@
   },
   {
     "name": "steve_publish",
-    "description": "Ask the user to release a new version of Steve from your branch, after the item was accepted. Steve rebases the branch onto main (a conflict comes back to you), fast-forwards main to it, waits for other running work to finish, builds, restarts itself and rolls back if the health check fails. Then end your turn; the result arrives later. To see where the release is (its merge-lane batch, an approval it waits for, a failure and why, the merged version), call steve_lane_status instead of asking the user.",
+    "description": "Ask the user to run the project's release action from your branch, after the item was accepted. Only for a project with a release action of its own; in a project finished when its pull request merges, do not call it: push your branch and open the pull request before steve_deliver, and Steve follows the pull request after the acceptance. Then end your turn; the result arrives later.",
     "inputSchema": {
       "$schema": "http://json-schema.org/draft-07/schema#",
       "type": "object",

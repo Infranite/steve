@@ -587,6 +587,7 @@ impl Tx<'_> {
     /// frozen (a plain rebase: the same own change): frozen again on it, the acceptance kept. What
     /// the merge queue does when a result it sent back comes in rebased, so that what it then lands
     /// is compared with what it landed. `false`: nothing to freeze, or not the same result.
+    #[allow(dead_code)]
     pub(crate) fn lc_refreeze(&mut self, item_id: &str) -> Result<bool> {
         let i = self.item(item_id)?;
         let Some(mut c) = closing_of(&i).filter(|c| i.phase == CLOSING && c.kind == COMPLETE)

@@ -1447,6 +1447,9 @@ impl Core {
     }
 }
 
+/* nothing routes an item into the queue any more (pull requests land changes, `pull`); the queue
+ * itself goes in its own change */
+#[allow(dead_code)]
 impl Tx<'_> {
     /// The `land` operation of the item's current cycle and revision, set to `status`.
     pub(crate) fn mq_land_op(&mut self, i: &Item, status: &str, evidence: Value) -> Result<()> {
@@ -1477,7 +1480,7 @@ impl Tx<'_> {
         let Some(p) = self.db().project(i.project_id.as_deref())? else {
             return Ok(false);
         };
-        if !crate::orchestrator::lane_releases(&p) {
+        if !crate::orchestrator::pr_flow(&p) {
             return Ok(false);
         }
         let held = crate::cycle::closing_of(i)
@@ -1629,7 +1632,7 @@ impl Tx<'_> {
                 && self
                     .db()
                     .project(i.project_id.as_deref())?
-                    .is_some_and(|p| crate::orchestrator::lane_releases(&p)))
+                    .is_some_and(|p| crate::orchestrator::pr_flow(&p)))
         {
             return Ok(None);
         }

@@ -168,8 +168,6 @@ async fn initialize_list_and_call() {
         v["result"]["content"][0]["text"],
         format!("Release requested. {PUBLISHED} {END}")
     );
-    let t = v["result"]["content"][0]["text"].as_str().unwrap();
-    assert!(t.contains("steve_lane_status"), "{t}");
     // read-only, no arguments: the text is the backend's, the turn goes on
     let (_, v) = post(
         &app,

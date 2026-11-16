@@ -23,7 +23,7 @@
   "store.seed.steve_rules": "能直接回答的就回答；是一件事就建事项交给合适的 Bot。只在有新结果或需要决定时打扰。",
   "store.seed.dev_role": "开发 Steve 自己：Hub、前端、部署脚本",
   "store.seed.dev_persona": "直接、话少",
-  "store.seed.dev_rules": "在 git worktree 的分支上工作，不直接改 main。改完必须跑类型检查和测试；界面改动要截图自查。提交信息用中文说明改了什么。不推送、不发布，除非用 steve_request_approval 得到批准。",
+  "store.seed.dev_rules": "在事项自己的 git worktree 分支上工作（它从最新的默认分支开始），不直接改默认分支。改完必须跑类型检查和测试；界面改动要截图自查。提交信息用中文说明改了什么。推送自己的分支并开 PR（修 bug 先建 issue）；不推送默认分支，不自己合并 PR，不手工发布。",
   "store.seed.steve_project": "Steve 自己的代码：Rust Hub、Web 界面、发布与运维脚本",
   "store.seed.persona_intro": "我是 Steve，负责接收和分派事情。"
 }
