@@ -8,7 +8,8 @@ import { SidebarInset, SidebarProvider } from "@/components/ui/sidebar"
 import { Button } from "@/components/ui/button"
 import { Spinner } from "@/components/ui/spinner"
 import { Input } from "@/components/ui/input"
-import { api, signIn } from "@/api"
+import { api, setPageWorkspace, signIn, Unauthenticated } from "@/api"
+import { deliveryWorkspace } from "@/delivery"
 import { hubNavigationAllowed, API, currentHub, hello, hubBase, HubError, hubUrl, nativeBridge, openUrl, rememberHub, setHub } from "@/hub"
 import { HubChooser, hubErrorText, HubLine, HubLostBanner, HubsDialog, HubsOffer, HubsOfferDialog, PairClaim, ScanButton, usePairRequest } from "@/hub-ui"
 import { CommandPalette } from "@/command-palette"
@@ -66,6 +67,7 @@ import { HoldBanner } from "@/queue"
 import { YoloDialog } from "@/yolo/switch"
 const YoloDigestView = lazyView(() => import("@/yolo/digest").then((m) => ({ default: m.YoloDigestView })))
 const StatsRoute = lazyView(() => import("@/stats/page").then((m) => ({ default: m.StatsRoute })))
+const DeliveryPage = lazyView(() => import("@/delivery-page").then((m) => ({ default: m.DeliveryPage })))
 
 
 /** an old route (#/auto/acc, #/auto/space, #/personas): replaced in history by its new place under #/channels */
@@ -106,7 +108,7 @@ function Splash({ children }: { children: React.ReactNode }) {
   return <div className="flex h-[100dvh] flex-col items-center justify-center gap-4 bg-background px-6 text-center text-foreground">{children}</div>
 }
 
-export default function App() {
+export default function App({ deliveryId }: { deliveryId?: string }) {
   useStore()
   const t = useT()
   /* whether this page has a Hub to talk to: the one that served it, or the one it was pointed at */
@@ -126,7 +128,38 @@ export default function App() {
       setHubState("missing")
     })
   }, [])
-  useEffect(() => { if (hub === "ok") return start() }, [hub])
+  const [deliveryPending, setDeliveryPending] = useState(!!deliveryId)
+  const [deliveryError, setDeliveryError] = useState<unknown>(null)
+  useEffect(() => {
+    if (hub !== "ok") return
+    if (!deliveryId) return start()
+    let live = true, stop: (() => void) | undefined
+    // Resolve the delivery owner and check membership before /api/state can bind this page to the
+    // current-workspace cookie. main.tsx preserves an explicit ?ws= selector; the Hub still rejects
+    // a wrong selector and derives the owner when a legacy link has none.
+    void api.delivery(deliveryId).then((d) => {
+      if (!live) return
+      const ws = deliveryWorkspace(d, new URLSearchParams(location.search).get("ws"))
+      if (!ws) throw new Error(t("pages:delivery.workspaceMissing"))
+      setPageWorkspace(ws)
+      setDeliveryPending(false)
+      stop = start()
+    }).catch((e) => { if (live) { setDeliveryError(e); setDeliveryPending(false) } })
+    return () => { live = false; stop?.() }
+  }, [hub, deliveryId, t])
+  const login = deliveryError instanceof Unauthenticated ? deliveryError.login ?? "/auth/login" : st.login
+  const browserSignIn = async () => {
+    const link = signIn.link ?? login ?? "/auth/login"
+    // The loopback development login always redirects to /. Set its cookie on the user's click, then
+    // reload this standalone URL; OIDC keeps its normal browser redirect and server-validated back target.
+    if (deliveryId && link === "/auth/dev" && !hubBase()) {
+      try {
+        const r = await fetch(hubUrl(link), { credentials: "include" })
+        if (r.ok) { location.reload(); return }
+      } catch { /* the normal login route below can show its own error */ }
+    }
+    location.href = hubUrl(link) + "?back=" + encodeURIComponent(hubBase() ? location.href : location.pathname + location.search + location.hash)
+  }
   useEffect(() => {
     let previousHash = location.hash
     const route = (e: HashChangeEvent) => {
@@ -143,7 +176,7 @@ export default function App() {
    * signed in, "add" is the list on the screen that is shown instead */
   const [intent, setIntent] = useState<"" | "add" | "pair">("")
   const [others, setOthers] = useState(false)
-  const up = hub === "ok" && st.ready && !st.login
+  const up = hub === "ok" && !deliveryPending && !deliveryError && st.ready && !login
   /* theme plugins installed on the Hub become choices in 外观 (plugin-themes.ts) once signed in */
   useEffect(() => { if (up) void syncPluginThemes() }, [up])
   useEffect(() => {
@@ -165,18 +198,26 @@ export default function App() {
   if (hub === "missing") return (
     <Splash>{title(t("shell:app.connectTitle"))}<HubsOffer className="max-w-xs" /><HubChooser down className="max-w-xs" /></Splash>
   )
-  if (st.login) return (
+  if (login) return (
     <Splash>{title(t("shell:app.signInToContinue"))}<HubLine className="-mt-2" />
       {list ? <><HubChooser className="max-w-xs" /><Button variant="ghost" size="sm" onClick={() => { setOthers(false); setIntent("") }} data-login-back>{t("common:action.back")}</Button></> : <>
         {signIn.token && <TokenSignIn />}
-        {(signIn.link || !signIn.token) && !(signIn.refused && signIn.token) && <Button variant={signIn.token ? "ghost" : "default"} onClick={() => { location.href = hubUrl(signIn.link ?? st.login ?? "/auth/login") + "?back=" + encodeURIComponent(hubBase() ? location.href : location.pathname + location.hash) }} data-login>{signIn.token ? t("shell:app.signInWithBrowser") : t("shell:app.signIn")}</Button>}
+        {(signIn.link || !signIn.token) && !(signIn.refused && signIn.token) && <Button variant={signIn.token ? "ghost" : "default"} onClick={() => void browserSignIn()} data-login>{signIn.token ? t("shell:app.signInWithBrowser") : t("shell:app.signIn")}</Button>}
         <ScanButton />
         <Button variant="ghost" size="sm" onClick={() => setOthers(true)} data-login-change-hub>{t("shell:hub.other")}</Button></>}
       <HubsOffer className="max-w-xs" /></Splash>
   )
+  if (deliveryError) return <Splash><div className="flex max-w-xl flex-col gap-3" role="alert" data-delivery-error>
+    <h1 className="type-title">{t("pages:delivery.loadError")}</h1>
+    <p className="type-callout text-muted-foreground">{t("pages:delivery.loadErrorHint")}</p>
+    {deliveryError instanceof Error && <p className="wrap-anywhere type-footnote text-muted-foreground">{deliveryError.message}</p>}
+    <Button className="self-center" variant="outline" onClick={() => location.reload()} data-delivery-retry>{t("common:action.retry")}</Button>
+  </div></Splash>
+  if (deliveryPending) return <Splash><Spinner className="size-5 text-muted-foreground" /></Splash>
   if (!st.ready) return <Splash>{st.error ? <><div className="type-headline">{t("shell:app.cantConnect")}</div><HubLine className="-mt-2" /><div className="type-callout text-muted-foreground">{st.error}</div>
     {list ? <HubChooser down className="max-w-xs" /> : <div className="flex gap-2"><Button variant="outline" onClick={() => location.reload()}>{t("common:action.retry")}</Button><Button variant="ghost" onClick={() => setOthers(true)} data-error-change-hub>{t("shell:hub.other")}</Button></div>}
     <HubsOffer className="max-w-xs" /></> : <Spinner className="size-5 text-muted-foreground" />}</Splash>
+  if (deliveryId) return <DeliveryPage id={deliveryId} />
   const view =
     a.split("?")[0] === "feed" ? <FeedView workspace={st.workspace!.id} filter={new URLSearchParams(a.split("?")[1]).get("kind") ?? ""} /> :
     a === "inbox" ? <InboxView /> :

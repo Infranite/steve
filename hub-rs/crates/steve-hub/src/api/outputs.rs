@@ -278,7 +278,7 @@ pub(super) async fn stream_file(
 }
 
 /// `bytes=a-b`, `bytes=a-` or `bytes=-n` within `total`.
-fn byte_range(v: &str, total: usize) -> Option<(usize, usize)> {
+pub(super) fn byte_range(v: &str, total: usize) -> Option<(usize, usize)> {
     let (a, b) = v.strip_prefix("bytes=")?.split_once('-')?;
     if total == 0 || a.contains(',') || b.contains(',') {
         return None;
@@ -595,7 +595,7 @@ fn file(p: &FsPath, shown: &str) -> Value {
 }
 
 /// Text when it reads as text (cut to `TEXT_MAX` at a character), else `binary`.
-fn text_value(name: &str, b: &[u8]) -> Value {
+pub(crate) fn text_value(name: &str, b: &[u8]) -> Value {
     let cut = b.len() > TEXT_MAX;
     let b = &b[..b.len().min(TEXT_MAX)];
     if b[..b.len().min(8000)].contains(&0) {

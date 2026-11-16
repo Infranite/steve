@@ -5,6 +5,7 @@ mod annotations;
 mod avatar;
 mod bots;
 pub mod dedupe;
+mod deliveries;
 mod diagnostics;
 pub(crate) mod feed;
 mod files;
@@ -13,7 +14,7 @@ mod items;
 mod misc;
 mod node_env;
 mod node_tags;
-mod outputs;
+pub(crate) mod outputs;
 mod projects;
 mod sessions;
 pub mod slim;
@@ -45,6 +46,7 @@ pub struct AppState(pub Arc<Inner>);
 
 pub struct Inner {
     pub cfg: Arc<Config>,
+    pub deliveries: Option<crate::deliveries::Service>,
     pub backend: Arc<dyn Backend>,
     pub domain: Arc<dyn Domain>,
     pub bus: Bus,
@@ -84,6 +86,7 @@ impl AppState {
         let catalog = crate::catalog::Catalog::of(&cfg);
         AppState(Arc::new(Inner {
             catalog,
+            deliveries: None,
             cfg,
             backend,
             domain,
@@ -103,7 +106,24 @@ impl AppState {
     pub fn with_modules(self, modules: Option<steve_modules::Modules>) -> Self {
         match Arc::try_unwrap(self.0) {
             Ok(mut inner) => {
+                inner.deliveries = modules.as_ref().map(|m| {
+                    crate::deliveries::Service::new(
+                        m.store.clone(),
+                        inner.cfg.home.clone(),
+                        inner.cfg.public_url.clone(),
+                    )
+                });
                 inner.modules = modules;
+                AppState(Arc::new(inner))
+            }
+            Err(shared) => AppState(shared),
+        }
+    }
+
+    pub fn with_deliveries(self, service: crate::deliveries::Service) -> Self {
+        match Arc::try_unwrap(self.0) {
+            Ok(mut inner) => {
+                inner.deliveries = Some(service);
                 AppState(Arc::new(inner))
             }
             Err(shared) => AppState(shared),
@@ -434,6 +454,32 @@ pub async fn optional_user(State(st): State<AppState>, mut req: Request, next: N
 
 /// `requireUser` + the workspace middleware: 401 without a live session (except [`session_optional`]).
 async fn require_user(State(st): State<AppState>, mut req: Request, next: Next) -> Response {
+    // Relative HTML/CSS/image navigations cannot inherit a query string or set a workspace
+    // header. Derive only their workspace selector from the immutable delivery, then run the
+    // ordinary user membership check below. An explicit selector still wins (and can fail).
+    if matches!(
+        *req.method(),
+        axum::http::Method::GET | axum::http::Method::HEAD
+    ) && !req.headers().contains_key("x-steve-ws")
+        && query_param(req.uri().query(), "ws").is_none()
+        && let Some(id) = req
+            .uri()
+            .path()
+            .strip_prefix("/file-deliveries/")
+            .and_then(|p| p.split('/').next())
+        && let Some(svc) = st.deliveries.clone()
+    {
+        let id = id.to_string();
+        if let Ok(Some(d)) = blocking(move || {
+            svc.get(&id, None)
+                .map_err(|e| ApiError::internal(e.to_string()))
+        })
+        .await
+            && let Ok(ws) = axum::http::HeaderValue::from_str(&d.workspace_id)
+        {
+            req.headers_mut().insert("x-steve-ws", ws);
+        }
+    }
     match lookup_user(
         &st,
         req.headers(),
@@ -483,6 +529,20 @@ const BODY_MAX: usize = 16 * 1024 * 1024;
 /// The `/api` router with every route of api.ts, in declaration order.
 pub fn router(st: AppState, modules: Router) -> Router {
     Router::new()
+        .route("/file-deliveries/{id}", get(deliveries::metadata))
+        .route("/file-deliveries/{id}/raw", get(deliveries::raw))
+        .route(
+            "/file-deliveries/{id}/content/{*path}",
+            get(deliveries::content),
+        )
+        .route(
+            "/file-deliveries/{id}/shares",
+            get(deliveries::shares).post(deliveries::create_share),
+        )
+        .route(
+            "/file-deliveries/{id}/shares/{token}",
+            delete(deliveries::revoke),
+        )
         .route("/updates", get(updates::status).post(updates::request))
         .route("/updates/check", post(updates::check))
         .route("/updates/{id}", get(updates::get))
@@ -728,7 +788,8 @@ pub fn router(st: AppState, modules: Router) -> Router {
         .merge(modules)
         // Hono reads bodies without a limit; every JSON body here (the modules' too) is far below this
         .layer(axum::extract::DefaultBodyLimit::max(BODY_MAX))
-        .layer(middleware::from_fn_with_state(st, require_user))
+        .layer(middleware::from_fn_with_state(st.clone(), require_user))
+        .merge(deliveries::public_router(st))
 }
 
 // ── helpers shared by the route modules ──

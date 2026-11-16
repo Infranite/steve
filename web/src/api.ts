@@ -3,6 +3,7 @@ import { lang, t } from "@/i18n"
 import { resumableStream } from "./stream-cursor"
 import { clientInfo, hello, hubBase, hubUrl, signedIn } from "./hub"
 import type { Workflow } from "./workflow"
+import type { Delivery, DeliveryShare } from "./delivery"
 export type ItemStatus = "prop" | "run" | "wait" | "pause" | "done" | "drop" | "fail" | "block"
 export type PlanStep = { step: string; done: boolean; left?: boolean }
 export type RItem = {
@@ -21,7 +22,7 @@ export type DependencyWait = {
   waiting: boolean; wait_state: string | null; reason: string | null; active_turn: boolean
   can_register: boolean; register_blocker: string | null
 }
-export type RItemDetail = RItem & { goalsList: { version: number; text: string; created: number }[]; planRounds?: { round: number; steps: PlanStep[]; end: "done" | "replaced"; created: number }[]; timeline: { id: number; ts: number; actor: string; kind: string; text: string; session_id: string | null; files?: RFile[]; via?: string }[]; artifacts: { id: string; kind: string; title: string; location: string | null; created: number }[]; decisions: RDecision[]; dependents: string[]
+export type RItemDetail = RItem & { goalsList: { version: number; text: string; created: number }[]; planRounds?: { round: number; steps: PlanStep[]; end: "done" | "replaced"; created: number }[]; timeline: { id: number; ts: number; actor: string; kind: string; text: string; session_id: string | null; files?: RFile[]; via?: string }[]; artifacts: { id: string; kind: string; title: string; location: string | null; created: number; delivery_id?: string | null }[]; decisions: RDecision[]; dependents: string[]
   workflow?: Workflow | null
   dependency_wait?: DependencyWait | null
   /** outputs delivered as records of the work (self-check screenshots, logs): `{artifact id: "record"}` */
@@ -284,6 +285,10 @@ export const api = {
   workflow: (id: string) => get<Workflow | null>(`/items/${encodeURIComponent(id)}/workflow`),
   workflowChange: (id: string, p: { action: "pause" | "resume" | "retry" | "cancel" | "single_session"; expected_revision: number; reason: string; unit_id?: string }) => post<Workflow>(`/items/${encodeURIComponent(id)}/workflow`, p),
   outPreview: (id: string, art: string, path?: string) => get<ROutPreview>(`/items/${encodeURIComponent(id)}/artifacts/${encodeURIComponent(art)}/preview${qs({ path })}`),
+  delivery: (id: string) => get<Delivery>(`/file-deliveries/${encodeURIComponent(id)}`),
+  deliveryShares: (id: string) => get<DeliveryShare[]>(`/file-deliveries/${encodeURIComponent(id)}/shares`),
+  createDeliveryShare: (id: string, expires_at: number) => post<DeliveryShare>(`/file-deliveries/${encodeURIComponent(id)}/shares`, { expires_at }),
+  revokeDeliveryShare: (id: string, token: string) => del(`/file-deliveries/${encodeURIComponent(id)}/shares/${encodeURIComponent(token)}`),
   annAdd: (id: string, p: { art: string; path?: string; anchor: RAnchor; note: string }) => post<RAnnotation>(`/items/${encodeURIComponent(id)}/annotations`, p),
   annEdit: (id: string, ann: string, note: string) => patch<RAnnotation>(`/items/${encodeURIComponent(id)}/annotations/${encodeURIComponent(ann)}`, { note }),
   annRemove: (id: string, ann: string) => del<{ ok: boolean }>(`/items/${encodeURIComponent(id)}/annotations/${encodeURIComponent(ann)}`),

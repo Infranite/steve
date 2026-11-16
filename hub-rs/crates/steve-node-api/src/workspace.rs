@@ -466,6 +466,29 @@ pub struct FileRead {
     pub max: u32,
 }
 
+/// Strict delivery snapshot chunk. Every chunk names the same size and revision; callers must
+/// pin `FileRead::expected` after the first chunk and require exact offsets, length and EOF.
+/// Unlike `read_file`, no symlink or multiply-linked file is accepted.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeliveryChunk {
+    pub size: u64,
+    pub version: Revision,
+    pub chunk: crate::blob::ReadChunk,
+}
+
+/// A delivery from the current accepted turn. The Node resolves absolute or relative input
+/// against its captured workspace, never a Hub path or a caller-selected root.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExecutionDeliveryRead {
+    pub execution: crate::common::ExecutionRef,
+    pub workspace: WorkspaceRef,
+    pub location: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected: Option<Revision>,
+    pub offset: u64,
+    pub max: u32,
+}
+
 /// A file produced by one accepted execution. Unlike a general [`FileRead`], this cannot name
 /// an arbitrary root: the Node takes the directory from the execution's durable artifact grant.
 /// The Hub authorizes the reader before calling this face. A digest is a scope binding, not a

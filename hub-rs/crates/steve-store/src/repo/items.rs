@@ -495,7 +495,10 @@ impl Artifacts<'_> {
         self.0.read(|c| {
             all(
                 c,
-                "SELECT * FROM artifacts WHERE item_id = ? ORDER BY created, rowid",
+                // Only an exact URL registered by this Hub can associate an artifact. Checking
+                // both item and its current workspace also invalidates stale associations after
+                // an item move. Old paths and external URLs remain ordinary legacy artifacts.
+                "SELECT a.*, (SELECT d.id FROM deliveries d JOIN items i ON i.id=a.item_id AND i.workspace_id=d.workspace_id WHERE d.url=a.location AND d.item_id=a.item_id) AS delivery_id FROM artifacts a WHERE a.item_id = ? ORDER BY a.created, a.rowid",
                 [item_id],
                 |r| {
                     Ok(Artifact {
@@ -504,6 +507,7 @@ impl Artifacts<'_> {
                         kind: r.get("kind")?,
                         title: r.get("title")?,
                         location: r.get("location")?,
+                        delivery_id: r.get("delivery_id")?,
                         created: r.get("created")?,
                     })
                 },

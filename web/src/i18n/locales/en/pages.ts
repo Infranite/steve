@@ -1,5 +1,26 @@
 /* English strings for the "pages" namespace: the same keys as ../zh-CN/pages.ts. Conventions: web/src/i18n/index.ts */
 export default {
+  delivery: {
+    title: "File delivery", sharedTitle: "Shared file", fromItem: "From item {{item}}",
+    download: "Download original", open: "Open delivery", copyLink: "Copy link", copied: "Copied",
+    copyFailed: "Could not copy. Copy the browser address or the share link manually.",
+    loginRequired: "Sign-in is required by default. Others can only access this file through an expiring share you create.",
+    loopback: "This link uses a loopback address and cannot be reached from another device. Configure a reachable address for this installation, then obtain a new link.",
+    invalidUrl: "Invalid delivery address. Check this installation's access address configuration.",
+    noPreview: "Preview unavailable", downloadHint: "Download the original file to view it.",
+    resetPreview: "Back to entry page",
+    staticHtml: "Signed-in and shared HTML previews are static: scripts are disabled; bundled styles, images and page links work.",
+    workspaceMissing: "The service did not identify this delivery's workspace. Update the Hub to support standalone delivery links.",
+    contentError: "Content could not load. Check the network, sign-in or share validity, or reopen this page.",
+    loadError: "Cannot open delivery", loadErrorHint: "Check the network and sign-in permissions. The file may not exist or the service may be unavailable.",
+    unreachable: "Cannot reach the sharing service. Check the network and this installation's access address, then retry.",
+    shareUnavailable: "Share unavailable", shareUnavailableHint: "This link may have expired, been revoked or not exist. Ask the file owner for a new share.",
+    sharing: "External sharing", shareHint: "Anyone holding a share link can view and download this file. Choose an expiry and create a share. You can revoke it at any time.",
+    validFor: "Valid for", oneHour: "1 hour", oneDay: "1 day", oneWeek: "7 days", createShare: "Create share",
+    noShares: "No shares created.", shareLoadError: "Could not load shares.", revoke: "Revoke share", revoked: "Revoked",
+    expiresAt: "Expires: {{time}}", expiredAt: "Expired: {{time}}",
+    legacy: "This older output has no stable delivery link. Its preview depends on the original workspace and cannot be shared as a remote file link.",
+  },
   listSep: ", ",
   access: {
     cat: { title: "Access & clients", desc: "Hubs, pairing a device, tokens and signed-in clients" },

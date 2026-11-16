@@ -23,6 +23,8 @@ import { Trans } from "react-i18next"
 import { flushSync } from "react-dom"
 import { t as tr, useT } from "@/i18n"
 import { toolClass, toolCounts, toolShort, meetStep, type ToolClass } from "@/thread/tools"
+import { DeliveryCards } from "@/delivery-card"
+import { loadItem } from "@/store"
 
 /* ───────── research ───────── */
 const secs = (ms: number) => tr("common:dur.seconds", { count: Math.max(1, Math.round(ms / 1000)) })
@@ -325,6 +327,8 @@ function AcceptRow({ i, decision }: { i: Item; decision: string }) {
  * last sent it, and whatever it needs from you — answerable right here. Lifecycle events update it; they are not messages. */
 export function ItemCard({ c }: { c: ItemCardState }) {
   const i = st.items.find((x) => x.id === c.item), t = useT()
+  // A new delivery must refresh artifact associations even when this item was already opened before it finished.
+  useEffect(() => { if (st.ready && (c.delivery || c.state === "deliver" || c.state === "done")) void loadItem(c.item, true) }, [c.item, c.delivery?.at, c.state, st.ready])
   if (!i) return null
   const look = cardLook(i, c), w = i.waits[0]
   /* what it is doing now, only while it does something: a stale line under a fresh status contradicts it */
@@ -346,6 +350,7 @@ export function ItemCard({ c }: { c: ItemCardState }) {
         <Pill tone={look.tone} className="mt-0.5 h-auto max-w-[45%] py-0.5 leading-4" data-card-status>{look.tone === "done" && c.released ? <RocketIcon className="size-3.5 shrink-0" /> : look.tone === "run" ? <span className="dot-running size-1.5 shrink-0 rounded-full bg-current" aria-hidden /> : null}{look.label}{look.version && <span className="hidden min-w-0 max-w-32 truncate font-mono font-normal sm:inline">{look.version}</span>}</Pill>
       </button>
       {d && <DeliveryBlock key={d.decision ?? d.text} d={d} />}
+      {i.outs.length > 0 && <DeliveryCards item={i.id} outs={i.outs} anns={i.anns} />}
       {reply && <div className="flex min-w-0 flex-col gap-1 rounded-lg bg-muted/60 px-3 py-2.5" data-card-reply>
         <div className="type-label text-tertiary">{t("thread:card.reply")}</div><div className={cn("line-clamp-4 min-w-0 break-words", FLAT)}><Markdown text={reply.text} className="type-callout" /></div></div>}
       {c.build && <div className="flex items-start gap-2 type-callout text-muted-foreground" data-card-build><CircleAlertIcon className="mt-0.5 size-4 shrink-0 text-attention" strokeWidth={1.75} />

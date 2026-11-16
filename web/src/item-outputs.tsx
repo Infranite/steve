@@ -9,6 +9,10 @@ import { Empty, Group, Row } from "@/ui"
 import { cn } from "cn"
 import { ChevronRightIcon, HistoryIcon } from "lucide-react"
 import { useT } from "@/i18n"
+import { outputDeliveryId } from "@/delivery"
+import { lazyView } from "@/lazy"
+
+const DeliveryView = lazyView(() => import("@/delivery-page").then((m) => ({ default: m.DeliveryView })))
 
 /* the 产出 tab of an item: what the latest delivery handed over; the work record keeps the records of the work and what
  * earlier deliveries handed over, by delivery, each still openable. And the dialog an output opens in. */
@@ -69,7 +73,7 @@ export function OutDialog({ item, outs, anns, view, setView, onReview, reviewLab
         <DialogHeader className="gap-3 sm:flex-row sm:items-start sm:pr-10"><div className="flex min-w-0 flex-1 flex-col gap-1"><DialogTitle className="type-title break-words max-sm:pr-6">{view?.o[1]}</DialogTitle>
           <DialogDescription className="type-callout text-muted-foreground">{view?.o[0]} · {t("shell:outs.from", { item })}{x && x.vs > 1 && <span className={cn(x.v < x.vs && "text-attention")} data-preview-ver> · {x.v < x.vs ? t("shell:outs.versionOfOld", { v: x.v, count: x.vs }) : t("shell:outs.versionOf", { v: x.v, count: x.vs })}</span>}{x?.record && " · " + t("shell:outs.record")}</DialogDescription></div>
           {onReview && <Button size="sm" className="shrink-0 self-start" onClick={onReview} title={reviewLabel ?? t("views:item.messageBot")} data-output-review>{!reviewLabel || reviewLabel === t("views:item.messageBot") ? t("shell:outs.toBot") : reviewLabel}</Button>}</DialogHeader>
-        {view && <OutPreview key={view.o[3]} o={view.o} item={item} anns={anns} focus={view.focus} siblings={siblings} outs={outs} onOpen={(o, focus) => setView({ o, focus })} />}
+        {view && (outputDeliveryId(view.o) ? <div className="min-h-0 overflow-y-auto"><DeliveryView key={view.o[3]} id={outputDeliveryId(view.o)!} embedded /></div> : <OutPreview key={view.o[3]} o={view.o} item={item} anns={anns} focus={view.focus} siblings={siblings} outs={outs} onOpen={(o, focus) => setView({ o, focus })} />)}
       </DialogContent>
     </Dialog>
   )

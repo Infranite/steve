@@ -76,7 +76,11 @@ export const nativeBridge = (): NativeBridge | null => {
 }
 
 /** the Hub's origin, or "" for the one that served this page */
+let pageHub: string | undefined
+/** Stable file links belong to their issuing installation, even if another Hub was last selected in localStorage. */
+export const bindPageHub = (base: string) => { pageHub = base }
 export const hubBase = (): string => {
+  if (pageHub !== undefined) return pageHub
   try { return localStorage.getItem(KEY) ?? "" } catch { return "" }
 }
 
@@ -204,6 +208,7 @@ export function forgetHub(url: string): SavedHub[] {
 
 /** keeps `base` as this page's Hub ("" or null: the one that served it), and remembers non-empty origins */
 export const setHub = (base: string | null, meta?: { name?: string; version?: string }) => {
+  if (pageHub !== undefined) pageHub = base ?? ""
   try {
     if (base) {
       localStorage.setItem(KEY, base)

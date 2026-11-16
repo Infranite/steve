@@ -264,6 +264,7 @@ export default {
     ask: "向你提问",
     approval: "对外操作前请你批准",
     deliver: "交付，请你验收",
+    deliverFile: "把文件或 HTML ZIP 保存到 Hub，返回需登录查看的稳定交付链接",
     publish: "验收后申请发布（只在配置了发布的项目里）",
     laneStatus: "查看自己的发布进度：在哪一批、等谁批准、失败原因、发布的版本（只读）",
     itemsSearch: "按编号或关键词查找事项",

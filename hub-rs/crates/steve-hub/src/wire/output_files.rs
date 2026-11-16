@@ -8,13 +8,7 @@ use std::path::{Component, Path, PathBuf};
 
 use rusqlite::OptionalExtension;
 use sha2::{Digest, Sha256};
-use steve_node_api::{FileAddress, FileRead, GitAnswer, GitQuery, GitRead, PathRef, RelPath};
-use steve_store::Session;
 use steve_store::{Store, StoreError};
-
-use super::workspaces::{At, Subject, Workspaces};
-
-const MAX_FILE: usize = 64 * 1024 * 1024;
 
 fn item_component(item: &str) -> io::Result<&str> {
     let mut parts = Path::new(item).components();
@@ -186,9 +180,6 @@ pub fn recover_legacy(store: &Store, home: &Path, db_path: &Path) -> anyhow::Res
     Ok(paths.len())
 }
 
-/// A declared file inside the disposable workspace is copied before the delivery can close it.
-/// Paths already in the durable output directory stay there. Git revisions and opaque references
-/// have no file extension and are left to their normal Git viewer.
 /// Rejects paths inside dependency, build or embedded checkout trees that should never be copied into outputs/.
 pub fn polluted_output_path(path: &Path) -> bool {
     path.components().any(|c| {
@@ -197,125 +188,6 @@ pub fn polluted_output_path(path: &Path) -> bool {
             Some(".git" | "node_modules" | "target" | "review-source" | ".next" | "dist")
         )
     })
-}
-
-pub async fn retain_location(
-    home: &Path,
-    item: &str,
-    session: &Session,
-    location: &str,
-    workspaces: &Workspaces,
-) -> Result<String, String> {
-    let raw = Path::new(location);
-    let source = if raw.is_absolute() {
-        raw.to_path_buf()
-    } else {
-        Path::new(&session.cwd).join(raw)
-    };
-    let cwd = Path::new(&session.cwd);
-    let check_part = source.strip_prefix(cwd).unwrap_or(raw);
-    if polluted_output_path(check_part) {
-        return Err("交付文件不能位于源码仓库元数据、依赖或编译构建目录中；请交付独立报告、日志或打包后的 ZIP".into());
-    }
-    let durable = directory(home, item).map_err(|e| e.to_string())?;
-    if source.starts_with(&durable) {
-        // The file is already in the Hub-owned persistent directory.
-        let actual = fs::canonicalize(&source).map_err(|e| e.to_string())?;
-        if !actual.starts_with(fs::canonicalize(&durable).map_err(|e| e.to_string())?)
-            || !actual.is_file()
-        {
-            return Err("交付文件不在事项 outputs 目录中".into());
-        }
-        return Ok(actual.to_string_lossy().into_owned());
-    }
-    if !source.starts_with(cwd)
-        || (source.extension().is_none() && !source.starts_with(cwd.join("outputs")))
-    {
-        return Ok(location.into());
-    }
-    let relative = source.strip_prefix(cwd).map_err(|e| e.to_string())?;
-    let name = source
-        .file_name()
-        .and_then(|s| s.to_str())
-        .ok_or("交付文件名无效")?;
-    let data = match workspaces.placement_of(Subject::Session(&session.id)) {
-        Ok(p) if !workspaces.is_local_placement(&p) => {
-            let At::Workspace(workspace) = p.at else {
-                return Err("远程事项没有可读取的工作区".into());
-            };
-            let rel = RelPath::new(relative.to_string_lossy().replace('\\', "/"))
-                .map_err(|e| e.to_string())?;
-            if p.node
-                .git_facts(GitQuery {
-                    workspace: workspace.clone(),
-                    refs: vec![],
-                    ranges: vec![],
-                    fetch: false,
-                    reads: vec![GitRead::TrackedIgnored { rel: rel.clone() }],
-                    heads_only: true,
-                })
-                .await
-                .ok()
-                .and_then(|facts| facts.reads.into_iter().next())
-                .is_some_and(|fact| {
-                    matches!(fact.answer, GitAnswer::TrackedIgnored { tracked: true, .. })
-                })
-            {
-                return Ok(location.into());
-            }
-            let path = FileAddress::Workspace(PathRef { workspace, rel });
-            let mut data = Vec::new();
-            loop {
-                let chunk = p
-                    .node
-                    .read_file(FileRead {
-                        path: path.clone(),
-                        expected: None,
-                        offset: data.len() as u64,
-                        max: 128 * 1024,
-                    })
-                    .await
-                    .map_err(|e| format!("读取 Node 交付文件失败：{}", e.safe_detail))?;
-                if chunk.offset != data.len() as u64 || data.len() + chunk.bytes.len() > MAX_FILE {
-                    return Err("交付文件超过 64 MiB 或读取位置变化".into());
-                }
-                let empty = chunk.bytes.is_empty();
-                data.extend(chunk.bytes);
-                if chunk.eof {
-                    break;
-                }
-                if empty {
-                    return Err("Node 交付文件读取中断".into());
-                }
-            }
-            data
-        }
-        Ok(_) | Err(super::workspaces::PlacementError::LocalOff) => {
-            if steve_core::git::is_git(cwd) {
-                let rel = relative.to_string_lossy();
-                if steve_core::git::git_test(cwd, &["ls-files", "--error-unmatch", "--", &rel])
-                    .unwrap_or(false)
-                {
-                    return Ok(location.into());
-                }
-            }
-            let actual = fs::canonicalize(&source).map_err(|e| e.to_string())?;
-            let allowed = fs::canonicalize(cwd).map_err(|e| e.to_string())?;
-            if !actual.starts_with(&allowed) || !actual.is_file() {
-                return Err(
-                    "交付文件不存在、超出事项工作目录或是文件夹；文件夹请先打包成 ZIP".into(),
-                );
-            }
-            let data = fs::read(actual).map_err(|e| e.to_string())?;
-            if data.len() > MAX_FILE {
-                return Err("交付文件超过 64 MiB".into());
-            }
-            data
-        }
-        Err(e) => return Err(format!("交付文件所在 Node 不可用：{e}")),
-    };
-    let saved = save_bytes(home, item, name, &data).map_err(|e| e.to_string())?;
-    Ok(saved.to_string_lossy().into_owned())
 }
 
 #[cfg(test)]
@@ -427,47 +299,5 @@ mod tests {
             .unwrap();
         assert_eq!(old, "本次交付摘要");
         assert_eq!(fs::read_dir(elsewhere.path()).unwrap().count(), 0);
-    }
-
-    #[tokio::test]
-    async fn a_local_output_survives_workspace_cleanup() {
-        let home = tempfile::tempdir().unwrap();
-        let cwd = home.path().join("worktrees/ST-8");
-        fs::create_dir_all(cwd.join("outputs")).unwrap();
-        fs::write(cwd.join("outputs/design.md"), "# 设计\n\n正文").unwrap();
-        let store =
-            steve_store::Store::open(home.path().join("test.sqlite3"), steve_store::NoPublisher)
-                .unwrap();
-        store.ensure_workspace().unwrap();
-        let session = store
-            .sessions()
-            .create(&steve_store::NewSession {
-                workspace_id: "default".into(),
-                cwd: cwd.to_string_lossy().into_owned(),
-                harness: "test".into(),
-                title: "test".into(),
-                token: "token".into(),
-                ..Default::default()
-            })
-            .unwrap();
-        let workspaces = Workspaces::new(store, None, None, vec![]);
-        let retained = retain_location(
-            home.path(),
-            "ST-8",
-            &session,
-            "outputs/design.md",
-            &workspaces,
-        )
-        .await
-        .unwrap();
-        fs::remove_dir_all(&cwd).unwrap();
-        assert_eq!(fs::read_to_string(retained).unwrap(), "# 设计\n\n正文");
-        assert!(polluted_output_path(Path::new(
-            "outputs/review-source/node_modules/pkg/index.js"
-        )));
-        assert!(polluted_output_path(Path::new("target/debug/deps/out.txt")));
-        assert!(!polluted_output_path(Path::new(
-            "outputs/delivery-report.md"
-        )));
     }
 }

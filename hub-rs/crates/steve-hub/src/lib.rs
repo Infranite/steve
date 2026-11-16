@@ -19,6 +19,7 @@ pub mod check;
 pub mod config;
 pub mod daily_backup;
 pub mod decision_text;
+pub mod deliveries;
 pub mod error;
 pub mod extension;
 pub mod files;

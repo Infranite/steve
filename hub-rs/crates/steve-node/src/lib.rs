@@ -57,6 +57,7 @@ use tokio::sync::mpsc;
 use actor::{Actor, Msg};
 use journal::{Journal, Op, SessionRow, Tx, WorkspaceRow, internal};
 pub use workspace::Root;
+pub use artifact::read_delivery_file;
 
 /// The OS sandbox a Node with these homes and this `STEVE_CONFINE` would give its runs
 /// (`seatbelt`, `bubblewrap`), or why none: what `steve-hub --check-config` reports before a switch.
@@ -2504,14 +2505,14 @@ impl SessionExecutor for LocalNode {
                 ));
             }
             t.take_attempt(&exec, &c.id)?;
-            if let Some(digest) = &row.open.artifact_view {
-                t.put_artifact_grant(&artifact::Grant::capture(
-                    exec.clone(),
-                    digest.clone(),
-                    row.open.workspace.clone(),
-                    &w,
-                )?)?;
-            }
+            // Every turn captures a delivery boundary. An explicit artifact view additionally
+            // permits historical artifact reads; deliveries require the turn still active.
+            t.put_artifact_grant(&artifact::Grant::capture(
+                exec.clone(),
+                row.open.artifact_view.clone(),
+                row.open.workspace.clone(),
+                &w,
+            )?)?;
             row.view.phase = SessionPhase::Active;
             row.view.active = Some(exec.clone());
             t.put_session(&row)?;
@@ -3828,18 +3829,93 @@ impl WorkspaceExecutor for LocalNode {
         .await
     }
 
+    async fn read_delivery(&self, q: FileRead) -> ApiResult<DeliveryChunk> {
+        let (base, rel) = match &q.path {
+            FileAddress::Workspace(p) => {
+                self.mine(&p.workspace)?;
+                (workspace_dir(&self.0, &p.workspace)?, p.rel.clone())
+            }
+            FileAddress::Root(at) => {
+                let roots = self.0.roots();
+                let root = roots
+                    .iter()
+                    .find(|r| r.id == at.root)
+                    .ok_or_else(|| ApiError::new(ErrorCode::Denied, "not an allowed root"))?;
+                (
+                    root.path.canonicalize().map_err(not_listed)?,
+                    at.rel.clone(),
+                )
+            }
+        };
+        blocking(move || {
+            artifact::read_delivery_file(&base, &rel, q.expected.as_ref(), q.offset, q.max)
+        })
+        .await
+    }
+
+    async fn read_execution_delivery(&self, q: ExecutionDeliveryRead) -> ApiResult<DeliveryChunk> {
+        self.mine(&q.workspace)?;
+        let grant = self.0.j.read(|t| {
+            let denied = || {
+                ApiError::new(
+                    ErrorCode::Denied,
+                    "delivery outside current execution workspace",
+                )
+            };
+            let ExecutionRef::Turn { session, .. } = &q.execution else {
+                return Err(denied());
+            };
+            let row = t.session(session)?.ok_or_else(denied)?;
+            if row.view.active.as_ref() != Some(&q.execution) || row.open.workspace != q.workspace {
+                return Err(denied());
+            }
+            let (_, operation) = t.attempt(q.execution.attempt())?.ok_or_else(denied)?;
+            let operation = t.op(&operation)?.ok_or_else(denied)?;
+            if operation.cancel || operation.receipt.state.is_finished() {
+                return Err(denied());
+            }
+            let grant = t.artifact_grant(q.execution.attempt())?.ok_or_else(|| {
+                ApiError::new(
+                    ErrorCode::Unsupported,
+                    "execution has no delivery boundary; start a new turn",
+                )
+            })?;
+            let current = t.workspace(&q.workspace.id)?.ok_or_else(denied)?;
+            if grant.execution != q.execution
+                || grant.workspace != q.workspace
+                || current.incarnation != grant.incarnation
+                || current.path != grant.recorded_dir()
+            {
+                return Err(denied());
+            }
+            Ok(grant)
+        })?;
+        // Configured roots may have been revoked since this execution started.
+        if workspace_dir(&self.0, &q.workspace)? != Path::new(&grant.dir) {
+            return Err(ApiError::new(ErrorCode::Denied, "delivery workspace moved"));
+        }
+        blocking(move || artifact::read_delivery(&grant, &q)).await
+    }
+
     async fn read_artifact(&self, q: ArtifactRead) -> ApiResult<ReadChunk> {
         let grant = self.0.j.read(|t| {
             let grant = t.artifact_grant(q.execution.attempt())?.ok_or_else(|| {
                 ApiError::new(ErrorCode::Unsupported, "execution has no artifact view")
             })?;
-            if grant.execution != q.execution || grant.view_digest != q.view_digest {
+            if grant.view_digest.is_none() {
+                return Err(ApiError::new(
+                    ErrorCode::Unsupported,
+                    "execution has no artifact view",
+                ));
+            }
+            if grant.execution != q.execution || grant.view_digest.as_ref() != Some(&q.view_digest)
+            {
                 return Err(ApiError::new(ErrorCode::Denied, "another execution view"));
             }
             let current = t.workspace(&grant.workspace.id)?.ok_or_else(|| {
                 ApiError::new(ErrorCode::Denied, "artifact workspace no longer available")
             })?;
-            if current.incarnation != grant.incarnation || current.path != grant.dir {
+            if current.incarnation != grant.incarnation || current.path != grant.recorded_dir() {
                 return Err(ApiError::new(
                     ErrorCode::Denied,
                     "artifact workspace replaced",

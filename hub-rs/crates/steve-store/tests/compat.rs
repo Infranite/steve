@@ -192,6 +192,63 @@ fn sql_schema_at(version: usize) -> Connection {
 }
 
 #[test]
+fn delivery_migration_preserves_the_existing_main_schema_and_device_revision() {
+    // Find the contract, not a merge-time migration number: another branch may take the slot.
+    let before = db::MIGRATIONS
+        .iter()
+        .position(|sql| sql.contains("CREATE TABLE deliveries ("))
+        .unwrap();
+    let c = sql_schema_at(before);
+    c.execute_batch(
+        "INSERT INTO workspaces(id,name,created) VALUES('default','Existing workspace',1);
+         INSERT INTO devices(id,name,roles,max_sessions,revision,seen,created)
+             VALUES('delivery-upgrade-device','Existing device','[]',64,17,1,1);",
+    )
+    .unwrap();
+    db::migrate(&c).unwrap();
+    assert_eq!(one(&c, "SELECT v FROM schema_version"), db::SCHEMA_VERSION);
+    assert_eq!(
+        one(
+            &c,
+            "SELECT revision FROM devices WHERE id='delivery-upgrade-device'"
+        ),
+        17
+    );
+    assert_eq!(
+        one(
+            &c,
+            "SELECT max_sessions FROM devices WHERE id='delivery-upgrade-device'"
+        ),
+        64
+    );
+    let name: String = c
+        .query_row("SELECT name FROM workspaces WHERE id='default'", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(name, "Existing workspace");
+    for table in ["deliveries", "delivery_shares"] {
+        let exists: bool = c
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?)",
+                [table],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(exists, "{table} created by the delivery migration");
+    }
+    // Reopening the same version must not rebuild or overwrite the existing device.
+    db::migrate(&c).unwrap();
+    assert_eq!(
+        one(
+            &c,
+            "SELECT revision FROM devices WHERE id='delivery-upgrade-device'"
+        ),
+        17
+    );
+}
+
+#[test]
 fn connector_reference_migration_is_registered_and_upgrades_v69_once() {
     let c = sql_schema_at(69);
     assert_eq!(

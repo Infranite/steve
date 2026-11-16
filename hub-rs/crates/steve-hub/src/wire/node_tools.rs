@@ -12,6 +12,15 @@ use steve_store::{Session, Store, StoreError, ThreadRun};
 
 use super::node_runtime::RESEARCH_GRANT;
 
+tokio::task_local! {
+    // Only NodeTools installs this context, after checking the authenticated Node and ledger.
+    static DELIVERY_EXECUTION: (NodeId, ExecutionRef);
+}
+
+pub(crate) fn delivery_execution() -> Option<(NodeId, ExecutionRef)> {
+    DELIVERY_EXECUTION.try_with(Clone::clone).ok()
+}
+
 pub(crate) fn internal(e: impl std::fmt::Display) -> ApiError {
     tracing::error!("node host: {e}");
     ApiError::new(ErrorCode::Internal, "Node host storage unavailable")
@@ -525,6 +534,7 @@ impl HubTools for NodeTools {
         let node = self.node.clone();
         let wait_ms = (q.deadline.0 - steve_store::now()).clamp(0, 60_000) as u64;
         let op = operation.clone();
+        let delivery_node = node.clone();
         let task = tokio::spawn(async move {
             let _permit = permit;
             // A cancel that landed between the fence and here wins: nothing has run yet, so the
@@ -575,7 +585,12 @@ impl HubTools for NodeTools {
                     async {
                         match session {
                             Caller::Session(s) | Caller::DependencyManagement(s) => {
-                                service.call(s, &q.name, q.args).await
+                                DELIVERY_EXECUTION
+                                    .scope(
+                                        (delivery_node, q.execution.clone()),
+                                        service.call(s, &q.name, q.args),
+                                    )
+                                    .await
                             }
                             Caller::Research(r) => service.research_call(r, &q.name, q.args).await,
                         }

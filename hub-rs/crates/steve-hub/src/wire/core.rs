@@ -2087,6 +2087,7 @@ pub struct CoreMcp {
     pub store: Store,
     pub core: Core,
     pub home: PathBuf,
+    pub public_url: String,
     pub workspaces: Arc<super::workspaces::Workspaces>,
 }
 
@@ -2101,6 +2102,40 @@ async fn tool(f: impl FnOnce() -> Result<(), CoreError> + Send + 'static) -> Too
 
 impl steve_mcp::Backend for CoreMcp {
     type Session = steve_store::Session;
+
+    async fn deliver_file(
+        &self,
+        s: &steve_store::Session,
+        args: steve_mcp::FileDeliveryArgs,
+    ) -> Result<Value, steve_mcp::ToolError> {
+        let observation =
+            super::diagnostics::ToolObservation::new(&self.store, s, "steve_deliver_file");
+        observation
+            .run(async {
+                let svc = crate::deliveries::Service::new(
+                    self.store.clone(),
+                    self.home.clone(),
+                    self.public_url.clone(),
+                );
+                let d = svc
+                    .receive(
+                        s,
+                        &args.path,
+                        args.title.as_deref(),
+                        args.entrypoint.as_deref(),
+                        &self.workspaces,
+                    )
+                    .await
+                    .map_err(steve_mcp::ToolError::from)?;
+                let mut metadata = svc.metadata(&d, None);
+                metadata
+                    .as_object_mut()
+                    .expect("metadata object")
+                    .remove("preview");
+                Ok(metadata)
+            })
+            .await
+    }
 
     async fn session_by_token(&self, token: &str) -> Option<steve_store::Session> {
         let (store, token) = (self.store.clone(), token.to_string());
@@ -2172,11 +2207,15 @@ impl steve_mcp::Backend for CoreMcp {
         unfinished: Option<Vec<String>>,
     ) -> ToolResult {
         let observation = super::diagnostics::ToolObservation::new(&self.store, s, "steve_deliver");
-        let (c, s, store, home, workspaces) = (
+        let svc = crate::deliveries::Service::new(
+            self.store.clone(),
+            self.home.clone(),
+            self.public_url.clone(),
+        );
+        let (c, s, store, workspaces) = (
             self.core.clone(),
             s.clone(),
             self.store.clone(),
-            self.home.clone(),
             self.workspaces.clone(),
         );
         let mut outputs: Vec<steve_core::Output> = outputs
@@ -2200,22 +2239,23 @@ impl steve_mcp::Backend for CoreMcp {
         let unfinished = unfinished.unwrap_or_default();
         observation
             .run(async move {
-                if let Some(item) = s.item_id.as_deref() {
+                if s.item_id.is_some() {
                     for output in &mut outputs {
                         if let Some(location) = output.location.as_deref()
                             && !super::output_files::summary_reference(Some(location))
                         {
-                            output.location = Some(
-                                super::output_files::retain_location(
-                                    &home,
-                                    item,
-                                    &s,
-                                    location,
-                                    &workspaces,
-                                )
-                                .await
-                                .map_err(steve_mcp::ToolError::from)?,
-                            );
+                            if let Some(d) = svc
+                                .reference(&s, location)
+                                .map_err(steve_mcp::ToolError::from)?
+                            {
+                                output.location = Some(d.registered_url);
+                            } else if crate::deliveries::file_location(&output.kind, location) {
+                                let d = svc
+                                    .receive(&s, location, Some(&output.title), None, &workspaces)
+                                    .await
+                                    .map_err(steve_mcp::ToolError::from)?;
+                                output.location = Some(d.registered_url);
+                            }
                         }
                     }
                 }
@@ -2238,8 +2278,12 @@ impl steve_mcp::Backend for CoreMcp {
                             || goal.contains("分析")
                             || goal.contains("调研");
                         if referenced || text_result || report_goal || summary.len() > 2000 {
-                            let report = super::output_files::save_report(&home, item, &summary)?;
-                            let location = report.to_string_lossy().into_owned();
+                            let report = svc
+                                .accept(&s, "交付正文", "report.md", summary.as_bytes(), None)
+                                .map_err(|e| {
+                                    CoreError::from(steve_store::StoreError::Conflict(e))
+                                })?;
+                            let location = report.registered_url;
                             for o in &mut outputs {
                                 if super::output_files::summary_reference(o.location.as_deref())
                                     || (o.location.as_deref().is_none_or(|p| p.trim().is_empty())

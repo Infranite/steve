@@ -675,6 +675,61 @@ fn changed_design_file_cannot_reuse_the_old_approval() {
     assert_eq!(k.status(&item).0, "wait");
 }
 
+#[test]
+fn delivery_url_design_approval_checks_the_exact_record_and_bytes() {
+    for tamper in [false, true] {
+        let k = Kit::new();
+        let item = k.item("run", "执行", None);
+        k.db()
+            .add_goal(&item, "先出设计，设计通过后再实现")
+            .unwrap();
+        let sid = k.session(&item, "idle");
+        let session = k.db().session(&sid).unwrap().unwrap();
+        let body = b"immutable design";
+        let hash = sha2::Sha256::digest(body)
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>();
+        let objects = k.home().join("deliveries/objects");
+        std::fs::create_dir_all(&objects).unwrap();
+        let path = objects.join(&hash);
+        std::fs::write(&path, body).unwrap();
+        let url = "https://steve.example/deliveries/dlv_design";
+        k.db().store().transaction(|t|{
+            t.execute("INSERT INTO deliveries(id,url,workspace_id,item_id,session_id,title,name,mime,size,created,sha256,manifest,preview) VALUES('dlv_design',?,?,?,?, 'Design','design.md','text/plain',?,1,?,'{}','{}')",rusqlite::params![url,session.workspace_id,item,sid,body.len() as i64,hash])?;
+            Ok::<_,steve_store::StoreError>(())
+        }).unwrap();
+        let mut report = Output {
+            kind: "方案".into(),
+            title: "设计方案".into(),
+            location: Some(url.replace("steve.example", "other.example")),
+            role: Some("result".into()),
+        };
+        assert!(
+            k.core
+                .tool_deliver(&session, "design", &[report.clone()], &[], &[])
+                .is_err(),
+            "an unrecorded host is not a received delivery"
+        );
+        report.location = Some(url.into());
+        k.core
+            .tool_deliver(&session, "design", &[report], &[], &[])
+            .unwrap();
+        let decision = k
+            .db()
+            .decisions_of_item(&item)
+            .unwrap()
+            .into_iter()
+            .find(|d| d.status == "open" && d.subject_type == "design_implementation")
+            .unwrap();
+        if tamper {
+            std::fs::write(&path, b"modified design").unwrap();
+        }
+        let result = k.core.resolve(&decision.id, "按方案实现", "", "me");
+        assert_eq!(result.is_ok(), !tamper, "{result:?}");
+    }
+}
+
 fn step(s: &str, done: bool) -> PlanStep {
     PlanStep {
         step: s.into(),

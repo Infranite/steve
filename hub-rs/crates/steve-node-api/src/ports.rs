@@ -85,6 +85,20 @@ pub trait WorkspaceExecutor: Send + Sync {
     /// Browse an allowed root (choosing a project directory).
     async fn list_root(&self, at: RootPath, page: PageRequest) -> ApiResult<Page<FileInfo>>;
     async fn read_file(&self, q: FileRead) -> ApiResult<ReadChunk>;
+    /// Immutable delivery transfer. Old peers fail closed, never fall back to `read_file`.
+    async fn read_delivery(&self, _q: FileRead) -> ApiResult<DeliveryChunk> {
+        Err(ApiError::new(
+            ErrorCode::Unsupported,
+            "strict delivery reads unsupported",
+        ))
+    }
+    /// Current-execution delivery; old peers fail closed without a filesystem fallback.
+    async fn read_execution_delivery(&self, _q: ExecutionDeliveryRead) -> ApiResult<DeliveryChunk> {
+        Err(ApiError::new(
+            ErrorCode::Unsupported,
+            "execution-scoped delivery reads unsupported; upgrade the Node",
+        ))
+    }
     /// Strict, execution-scoped artifact read. Unsupported peers must never fall back to a
     /// general filesystem read (which can follow links and does not bind an execution view).
     async fn read_artifact(&self, _q: ArtifactRead) -> ApiResult<ReadChunk> {

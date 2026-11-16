@@ -67,6 +67,7 @@ uuid = { version = "=1.29.0", features = ["v4"] }
 
 semver = "=1.0.28"
 flate2 = "=1.1.10"
+zip = { version = "=9.2.0", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 tar = "0.4"
 libc = "0.2"
 

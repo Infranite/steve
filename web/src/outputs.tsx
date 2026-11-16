@@ -66,7 +66,7 @@ function Html({ text }: { text: string }) {
 }
 
 /** a text file by what it is: a document, a page, a table, a diagram, JSON or code; rendered ones can show their source */
-function TextView({ p }: { p: Extract<ROutPreview, { type: "text" }> }) {
+export function TextView({ p }: { p: Extract<ROutPreview, { type: "text" }> }) {
   const t = useT()
   const rendered = ["markdown", "html", "csv", "tsv", "mermaid"].includes(p.lang)
   const [tab, setTab] = useState<"预览" | "源码">("预览")
