@@ -14,6 +14,10 @@ use serde::Deserialize;
 
 const BUILTIN: &str = include_str!("builtin.toml");
 
+/// Where, relative to an item's working directory, its toolchains' own outputs go: one directory
+/// per toolchain (`.steve/build/<id>`), ignored by git. Only what a build makes again is in it.
+pub const ITEM_BUILD_DIR: &str = ".steve/build";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Scope {

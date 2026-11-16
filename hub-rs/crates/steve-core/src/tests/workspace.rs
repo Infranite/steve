@@ -149,6 +149,58 @@ fn a_closed_item_gives_back_its_caches_and_a_landed_worktree_keeps_its_branch() 
     assert!(wt.join("x.txt").exists());
 }
 
+/// #180: a toolchain's output moved into the item's `.steve/build` (cargo's `target` through
+/// `CARGO_TARGET_DIR`) has neither a known cache name nor a `CACHEDIR.TAG`. A closed item gives it
+/// back even while its worktree stays (unmerged work); its sources, its commit and the build
+/// directory's own `.gitignore` stay. An open item keeps it.
+#[test]
+fn a_closed_item_gives_back_its_toolchain_outputs_even_when_its_worktree_stays() {
+    let k = Kit::new();
+    let (r, p) = project(&k);
+    let build = |wt: &Path| {
+        let target = wt
+            .join(steve_toolchains::ITEM_BUILD_DIR)
+            .join("cargo/target/debug");
+        fs::create_dir_all(&target).unwrap();
+        fs::write(target.join("big"), vec![7u8; 1 << 20]).unwrap();
+        fs::write(
+            wt.join(steve_toolchains::ITEM_BUILD_DIR).join(".gitignore"),
+            "*\n",
+        )
+        .unwrap();
+    };
+    let (done, branch, wt) = item_with_caches(&k, &r, &p, "done");
+    let (open, _, open_wt) = item_with_caches(&k, &r, &p, "run");
+    build(&wt);
+    build(&open_wt);
+    let built = |wt: &Path| {
+        wt.join(steve_toolchains::ITEM_BUILD_DIR)
+            .join("cargo/target/debug/big")
+            .exists()
+    };
+
+    let res = k.core.reclaim_workspaces().unwrap();
+    assert!(freed_of(&res, &done) >= 3 << 20, "{res:?}");
+    assert!(
+        wt.join("x.txt").exists(),
+        "unmerged work keeps its worktree"
+    );
+    assert!(!built(&wt), "{res:?}");
+    assert!(
+        wt.join(steve_toolchains::ITEM_BUILD_DIR)
+            .join(".gitignore")
+            .is_file()
+    );
+    g(&r, &["rev-parse", "--verify", &branch]);
+    assert!(built(&open_wt), "an open item keeps its build");
+    assert_eq!(freed_of(&res, &open), 0);
+    let tl = k.timeline_texts(&done);
+    assert!(
+        tl.iter().any(|t| t.contains(".steve/build/cargo")),
+        "{tl:?}"
+    );
+}
+
 #[test]
 fn unmerged_work_keeps_its_worktree_until_archived_and_dirty_work_stays() {
     let k = Kit::new();
