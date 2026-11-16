@@ -360,13 +360,18 @@ fn migration_seeds_old_dirty_calls_and_preserves_fifo_across_reopen() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("b.sqlite");
     let c = rusqlite::Connection::open(&path).unwrap();
-    for m in &db::MIGRATIONS[..79] {
+    // Other branches can publish migrations before this one is merged.
+    let before = db::MIGRATIONS
+        .iter()
+        .position(|sql| sql.contains("CREATE TABLE gateway_result_ready"))
+        .unwrap();
+    for m in &db::MIGRATIONS[..before] {
         c.execute_batch(m).unwrap();
     }
-    c.execute_batch(
-        "CREATE TABLE schema_version(v INTEGER NOT NULL); INSERT INTO schema_version VALUES(79)",
-    )
-    .unwrap();
+    c.execute_batch("CREATE TABLE schema_version(v INTEGER NOT NULL)")
+        .unwrap();
+    c.execute("INSERT INTO schema_version VALUES(?)", [before as i64])
+        .unwrap();
     for (id, dirty) in [("old-finish", 1), ("old-clean", 0), ("old-cancel", 1)] {
         c.execute("INSERT INTO gateway_calls(call_id,workspace_id,purpose,started,day,ended,ok,projection_dirty) VALUES(?,'default','test',?,'2026-11-01',?,0,?)",params![id,AT,AT+1,dirty]).unwrap();
     }
