@@ -1,1 +1,0 @@
-A channel service connection (其他聊天工具, or a channel plugin) now takes the account name the service gives whenever it reconnects. Before, the name was read only when the connection was made, and a service that gave none then left the account named by its numeric handle for good. A name you gave the account yourself is kept.
