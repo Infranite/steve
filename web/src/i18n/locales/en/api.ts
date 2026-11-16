@@ -73,7 +73,7 @@ export default {
     draft: "Draft",
     draftSub: "As your rules say: replies in your name are drafted for your approval, never once you answered yourself",
     record: "Record only",
-    recordSub: "Nothing is drafted, asked or answered for you here; no model reads its messages",
+    recordSub: "Nothing is drafted, asked or answered for you here and no rule or flow runs; replies in an item's thread still reach that item",
     off: "Off",
     offSub: "Steve leaves this chat alone on your account: messages are only saved; your /bot still works",
   },

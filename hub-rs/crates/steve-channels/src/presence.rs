@@ -1,25 +1,34 @@
 //! Whether you are there yourself: on your own account (`Mode::Own`) a reply drafted in your name is
 //! wrong once you answered yourself, however well it is written. One function decides it,
-//! [`engaged`] (over the store: [`owner_engaged`]), and every step that would say something as you
-//! asks it again, because drafting takes minutes and you may answer meanwhile:
+//! [`engaged`] (over the store: [`owner_engaged`]; with the turn a message was merged into,
+//! [`stop`]), and every step that would say something as you asks it again, because drafting takes
+//! minutes and you may answer meanwhile:
 //!
 //! 1. before drafting ([`crate::respond`]: no composer runs, no card opens);
 //! 2. after the composer answered, before its draft or question opens ([`crate::replies`]);
 //! 3. before YOLO approves the draft or retries it ([`crate::outbound`]'s decision handler);
 //! 4. before it is sent, unless you approved it yourself ([`crate::outbound`]'s send).
 //!
-//! And when your own message comes in, every draft and card about an older message in that space
-//! closes as superseded ([`supersede`], “你已亲自回复”).
+//! Gates 3 and 4 also hold what the space's `reply_as_you` no longer allows (a draft made before you
+//! changed it). And when your own message comes in, every draft and card about an older message in
+//! that space that you are now there for closes as superseded ([`supersede`], “你已亲自回复”).
 //!
-//! You are engaged in a space when you said something there after the message (`Replied`), or
-//! shortly before it ([`OWNER_LIVE_MS`]) and the message goes on with that conversation (`Live`): in
-//! a private chat always; in a group when it answers or @-mentions you, is in the reply chain of one
-//! of your messages, or nobody spoke between you and it. Spaces are judged by time, not by thread:
-//! most messages are alone in their thread, and a private chat gives every message its own.
+//! You are engaged for a message when you said something after it (`Replied`) — in a private chat
+//! anything; in a group only what is about it: an answer to it or to its sender, in its reply chain,
+//! @-mentioning its sender, or within [`OWNER_LIVE_MS`] of it (the same stretch of talk) — or when you
+//! said something shortly before it ([`OWNER_LIVE_MS`]) and it goes on with that conversation
+//! (`Live`): in a private chat always; in a group when it answers or @-mentions you, is in the reply
+//! chain of one of your messages, or nobody spoke between you and it. Spaces are judged by time, the
+//! thread only adds a reply-chain signal: most messages are alone in their thread, and a private chat
+//! gives every message its own. Only your own words count: what another assistant posted on your
+//! account by itself ([`crate::arbiter::looks_automated`]) does not, nor what Steve sent as you.
 //!
 //! Consecutive messages of one sender are one turn ([`burst`]) only while nobody else (you included)
-//! speaks between them and each follows the one before within [`BURST_GAP_MS`]: the composer answers
-//! them together, and the drafts and cards of the earlier ones close as merged.
+//! speaks between them, each follows the one before within [`BURST_GAP_MS`], and none of them has a
+//! reply in your name approved or sent already (that one was answered: it ends the turn and stays
+//! out). The composer answers the turn together; the earlier messages are marked as taken by it
+//! (`chan_messages.turn_of`), so their own drafts and cards close and are never opened, approved by
+//! YOLO or sent, whichever composer finishes first.
 //!
 //! The window lengths were swept with the offline reply eval (`examples/reply_eval.rs sweep`) on the
 //! operator's cases; see the constants. They are provisional: one day of cases.
@@ -32,12 +41,14 @@ use steve_store::base;
 
 use crate::ChannelResult;
 use crate::respond::SUBJECT_MESSAGE;
+use crate::spaces::ReplyAsYou;
 
 /// You said something in the space this long before the message, and it goes on with that
-/// conversation: you are there. In the eval sweep (`examples/reply_eval.rs sweep`, 44 cases of one
-/// day) every window from 100 s to 9 min gave the same decisions; shorter ones missed you chatting a
-/// minute and a half earlier, 10 min and more also silenced a message that needed you nine minutes
-/// after you last spoke. 3 min sits inside, away from both ends. Revisit with more cases.
+/// conversation: you are there. In a group, what you said this long after a message counts as
+/// about it. In the eval sweep (`examples/reply_eval.rs sweep`, 44 cases of one day) every window
+/// from 100 s to 9 min gave the same decisions; shorter ones missed you chatting a minute and a half
+/// earlier, 10 min and more also silenced a message that needed you nine minutes after you last
+/// spoke. 3 min sits inside, away from both ends. Revisit with more cases.
 pub const OWNER_LIVE_MS: i64 = 180_000;
 /// Two messages of one sender are one turn when the second follows within this (and nobody spoke
 /// between). In the same sweep every gap from 10 s to 90 s gave the same decisions; from 100 s two
@@ -53,12 +64,19 @@ const AROUND_MAX: usize = 400;
 pub const BY_YOU: &str = "你已亲自回复";
 /// `result.superseded` of a card closed because the sender went on and the turn was answered as one.
 pub const BY_LATER: &str = "对方接着发了消息，已合在一起处理";
+/// `result.superseded` of a card closed because the space is set not to reply for you any more.
+pub const BY_SETTING: &str = "这里已设为不替你回复";
 /// What a message you were there for says on its event.
 pub const LABEL_REPLIED: &str = "你已亲自回复，不替你起草";
 pub const LABEL_LIVE: &str = "你正在这里聊，不替你起草";
 /// The reason codes (logs, the eval, audit).
 pub const REASON_REPLIED: &str = "owner_replied";
 pub const REASON_LIVE: &str = "owner_live";
+pub const REASON_MERGED: &str = "merged";
+pub const REASON_SETTING: &str = "reply_as_you";
+/// The reply statuses that mean a message was answered in your name: approved and waiting, out, out
+/// or not (unknown), taken back after it went out.
+const ANSWERED: &str = "('pending', 'sent', 'unknown', 'recalled')";
 
 /// One message of a space, as the presence rules see it.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
@@ -66,23 +84,30 @@ pub struct Said {
     pub id: String,
     /// When it was written (ms).
     pub at: i64,
-    /// You wrote it yourself (not Steve in your name).
+    /// You wrote it yourself: from your account or contact, and not an automatic reply another
+    /// assistant posted there ([`crate::arbiter::looks_automated`]).
     pub owner: bool,
     /// Who wrote it: equal for one sender.
     pub sender: String,
+    /// The account that wrote it (what an @-mention names).
+    pub sender_account: Option<String>,
     pub thread_key: Option<String>,
     /// Its provider id, and the provider id of the message it answers.
     pub external_id: Option<String>,
     pub reply_to: Option<String>,
     /// It @-mentions you.
     pub mentions_owner: bool,
+    /// The accounts it @-mentions.
+    pub mentions: Vec<String>,
+    /// A reply to it in your name is approved or out already: it was answered.
+    pub answered: bool,
 }
 
 /// You are there for a message.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Engaged {
-    /// You said something in the space after it: your latest such message.
+    /// You said something about it after it: your latest such message.
     Replied { message_id: String, at: i64 },
     /// You said something shortly before it and it goes on with that: your latest such message.
     Live { message_id: String, at: i64 },
@@ -111,6 +136,62 @@ impl Engaged {
     }
 }
 
+/// Why nothing is said in your name about a message any more (the gates).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Stop {
+    /// You are there yourself.
+    You { engaged: Engaged },
+    /// The sender went on: the message is answered with their later one, `into`.
+    Merged { into: String },
+    /// The space no longer lets Steve reply for you (gates 3 and 4).
+    Setting { reply_as_you: ReplyAsYou },
+}
+
+impl Stop {
+    pub fn reason(&self) -> &'static str {
+        match self {
+            Self::You { engaged } => engaged.reason(),
+            Self::Merged { .. } => REASON_MERGED,
+            Self::Setting { .. } => REASON_SETTING,
+        }
+    }
+
+    /// What the message's event says.
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::You { engaged } => engaged.label(),
+            Self::Merged { .. } => BY_LATER,
+            Self::Setting { .. } => BY_SETTING,
+        }
+    }
+
+    /// `result.superseded` of the card it closes.
+    pub fn why(&self) -> &'static str {
+        match self {
+            Self::You { .. } => BY_YOU,
+            Self::Merged { .. } => BY_LATER,
+            Self::Setting { .. } => BY_SETTING,
+        }
+    }
+}
+
+/// Is what you said in `o`, after `target`, about it? In a group: an answer to it or to another
+/// message of its sender, in its reply chain, @-mentioning its sender, or within `live_ms` of it.
+fn about(target: &Said, o: &Said, around: &[&Said], live_ms: i64) -> bool {
+    let answers = |id: &Option<String>| id.is_some() && o.reply_to == *id;
+    answers(&target.external_id)
+        || (target.thread_key.is_some() && o.thread_key == target.thread_key)
+        || around
+            .iter()
+            .any(|s| s.sender == target.sender && answers(&s.external_id))
+        || target
+            .sender_account
+            .as_ref()
+            .is_some_and(|a| o.mentions.contains(a))
+        || o.at - target.at <= live_ms
+}
+
 /// Are you there for `target` at `now`? `around`: the space's other messages from `live_ms` before
 /// it up to `now` (any order; the target itself is ignored). `dm`: a private chat.
 pub fn engaged(
@@ -121,10 +202,11 @@ pub fn engaged(
     live_ms: i64,
 ) -> Option<Engaged> {
     let others: Vec<&Said> = around.iter().filter(|s| s.id != target.id).collect();
-    // after it: whatever you said, in any thread (you saw it)
+    // after it: in a private chat whatever you said (you saw it); in a group what is about it
     if let Some(r) = others
         .iter()
         .filter(|s| s.owner && s.at > target.at && s.at <= now)
+        .filter(|s| dm || about(target, s, &others, live_ms))
         .max_by_key(|s| s.at)
     {
         return Some(Engaged::Replied {
@@ -162,8 +244,9 @@ pub fn engaged(
 }
 
 /// The ids of the turn `target` ends, oldest first: it and the messages right before it from the same
-/// sender, while nobody else spoke between and each follows the last within `gap_ms` (at most
-/// [`BURST_MAX`]). `before`: the space's messages before it, any order.
+/// sender, while nobody else spoke between, each follows the last within `gap_ms` and none was
+/// answered in your name already (at most [`BURST_MAX`]). `before`: the space's messages before it,
+/// any order.
 pub fn burst(target: &Said, before: &[Said], gap_ms: i64) -> Vec<String> {
     let mut earlier: Vec<&Said> = before
         .iter()
@@ -173,7 +256,12 @@ pub fn burst(target: &Said, before: &[Said], gap_ms: i64) -> Vec<String> {
     let mut out = vec![target.id.clone()];
     let mut next = target.at;
     for s in earlier {
-        if out.len() >= BURST_MAX || s.owner || s.sender != target.sender || next - s.at > gap_ms {
+        if out.len() >= BURST_MAX
+            || s.owner
+            || s.answered
+            || s.sender != target.sender
+            || next - s.at > gap_ms
+        {
             break;
         }
         out.push(s.id.clone());
@@ -198,38 +286,49 @@ const MINE: &str = "WITH RECURSIVE mine(id) AS (
        UNION SELECT p.id FROM parties p JOIN mine ON p.merged_into = mine.id
      ), my_accounts(id) AS (SELECT a.id FROM accounts a WHERE a.party_id IN (SELECT id FROM mine))";
 
-/// `owner` of a stored inbound message, as an SQL expression over `m` with [`MINE`] in scope.
+/// A stored inbound message from your account or contact, as an SQL expression over `m` with
+/// [`MINE`] in scope (who sent it only: [`said_of`] also leaves out automatic replies).
 const IS_MINE: &str = "(m.sender_party_id IN (SELECT id FROM mine)
        OR m.sender_account_id IN (SELECT id FROM my_accounts))";
 
 fn said_of(r: &rusqlite::Row<'_>, my: &[String]) -> rusqlite::Result<Said> {
     let mentions: Option<String> = r.get(7)?;
-    let mentions_owner = mentions
+    let mentions: Vec<String> = mentions
         .and_then(|s| serde_json::from_str::<Vec<Value>>(&s).ok())
         .unwrap_or_default()
         .iter()
-        .any(|m| {
-            m["account_id"]
-                .as_str()
-                .is_some_and(|a| my.iter().any(|x| x == a))
-        });
+        .filter_map(|m| m["account_id"].as_str().map(String::from))
+        .collect();
+    let from_you: bool = r.get(2)?;
+    let text: String = r.get(9)?;
     Ok(Said {
         id: r.get(0)?,
         at: r.get(1)?,
-        owner: r.get(2)?,
+        // another assistant's automatic reply on your account is not you (as `inbound` records it)
+        owner: from_you && !crate::arbiter::looks_automated(&text),
         sender: r.get(3)?,
+        sender_account: r.get(8)?,
         thread_key: r.get(4)?,
         external_id: r.get(5)?,
         reply_to: r.get(6)?,
-        mentions_owner,
+        mentions_owner: mentions.iter().any(|a| my.contains(a)),
+        mentions,
+        answered: r.get(10)?,
     })
 }
 
 const SAID_COLUMNS: &str = "m.id, m.created, {IS_MINE},
-       coalesce(m.sender_party_id, m.sender_account_id, ''), m.thread_key, m.external_id, m.reply_to, m.mentions";
+       coalesce(m.sender_party_id, m.sender_account_id, ''), m.thread_key, m.external_id, m.reply_to, m.mentions,
+       m.sender_account_id, coalesce(m.text, ''),
+       EXISTS (SELECT 1 FROM chan_messages o WHERE o.space_id = m.space_id AND o.direction = 'out'
+                  AND o.reply_to = m.external_id AND o.status IN {ANSWERED}
+                  AND o.on_behalf = 'none' AND o.persona_id IS NULL
+                  AND o.sender_account_id IN (SELECT id FROM my_accounts))";
 
 fn columns() -> String {
-    SAID_COLUMNS.replace("{IS_MINE}", IS_MINE)
+    SAID_COLUMNS
+        .replace("{IS_MINE}", IS_MINE)
+        .replace("{ANSWERED}", ANSWERED)
 }
 
 fn my_accounts(c: &Connection, ws: &str, space: &str) -> ChannelResult<Vec<String>> {
@@ -240,8 +339,8 @@ fn my_accounts(c: &Connection, ws: &str, space: &str) -> ChannelResult<Vec<Strin
     Ok(v)
 }
 
-/// An inbound message as [`Said`], with whether its space is a private chat; `None` when it is not
-/// an inbound message of `ws`.
+/// An inbound message as [`Said`], with its space and whether that is a private chat; `None` when it
+/// is not an inbound message of `ws`.
 pub fn said(c: &Connection, ws: &str, id: &str) -> ChannelResult<Option<(Said, String, bool)>> {
     let space: Option<(String, String)> = c
         .query_row(
@@ -308,23 +407,51 @@ pub fn owner_engaged(
     Ok(engaged(dm, &t, &around, now, OWNER_LIVE_MS))
 }
 
-/// [`burst`] for stored inbound message `target`: the ids and what each says (with the note on what
-/// Steve cannot read of its attachments), oldest first.
-pub fn owner_burst(c: &Connection, ws: &str, target: &str) -> ChannelResult<Vec<(String, String)>> {
-    let Some((t, space, _)) = said(c, ws, target)? else {
+/// The later message whose turn took inbound message `id` ([`take_turn`]), if one did.
+pub fn merged_into(c: &Connection, id: &str) -> ChannelResult<Option<String>> {
+    Ok(c.query_row(
+        "SELECT turn_of FROM chan_messages WHERE id = ? AND direction = 'in'",
+        [id],
+        |r| r.get::<_, Option<String>>(0),
+    )
+    .optional()?
+    .flatten())
+}
+
+/// Gates 1 to 4 for stored inbound message `target` at `now`: taken by a later message's turn, or
+/// you are there ([`owner_engaged`]).
+pub fn stop(c: &Connection, ws: &str, target: &str, now: i64) -> ChannelResult<Option<Stop>> {
+    if let Some(into) = merged_into(c, target)? {
+        return Ok(Some(Stop::Merged { into }));
+    }
+    Ok(owner_engaged(c, ws, target, now)?.map(|engaged| Stop::You { engaged }))
+}
+
+/// The turn stored inbound message `target` ends ([`burst`]): the ids and what each says (with the
+/// note on what Steve cannot read of its attachments), oldest first. The earlier messages are marked
+/// as taken by it (`turn_of`) in the same transaction, so from now on no reply of their own is
+/// opened, approved by YOLO or sent ([`stop`]); [`release_turn`] undoes it.
+pub fn take_turn(tx: &Tx, ws: &str, target: &str) -> ChannelResult<Vec<(String, String)>> {
+    let Some((t, space, _)) = said(tx, ws, target)? else {
         return Ok(Vec::new());
     };
-    let my = my_accounts(c, ws, &space)?;
+    let my = my_accounts(tx, ws, &space)?;
     let from = t.at - BURST_GAP_MS * BURST_MAX as i64;
-    let before = lines(c, ws, &space, from, t.at, &my)?;
+    let before = lines(tx, ws, &space, from, t.at, &my)?;
     let ids = burst(&t, &before, BURST_GAP_MS);
     let mut out = Vec::new();
     for id in ids {
-        let (text, att): (String, Option<String>) = c.query_row(
+        let (text, att): (String, Option<String>) = tx.query_row(
             "SELECT coalesce(text, ''), attachments FROM chan_messages WHERE id = ?",
             [&id],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )?;
+        if id != target {
+            tx.execute(
+                "UPDATE chan_messages SET turn_of = ? WHERE id = ?",
+                params![target, id],
+            )?;
+        }
         let att: Value = att
             .and_then(|s| serde_json::from_str(&s).ok())
             .unwrap_or(Value::Null);
@@ -333,16 +460,31 @@ pub fn owner_burst(c: &Connection, ws: &str, target: &str) -> ChannelResult<Vec<
     Ok(out)
 }
 
-/// What [`supersede`] closes: the answers to messages written before a time, or to these messages.
+/// Undoes [`take_turn`] for `target` (its composer gave no answer): the earlier messages are their
+/// own again.
+pub fn release_turn(tx: &Tx, target: &str) -> ChannelResult<()> {
+    tx.execute(
+        "UPDATE chan_messages SET turn_of = NULL WHERE turn_of = ?",
+        [target],
+    )?;
+    Ok(())
+}
+
+/// What [`supersede`] closes.
 pub enum Answering<'a> {
-    Before(i64),
+    /// The answers to messages written before `before` that you are there for at `now`
+    /// ([`owner_engaged`]): after your own message.
+    YouThere { before: i64, now: i64 },
+    /// The answers to these messages (a turn answered as one).
     Messages(&'a [String]),
+    /// Every answer in the space (it no longer lets Steve reply for you).
+    All,
 }
 
 /// Closes in `space` the drafts in your name (not your `/bot`'s) still waiting for you, the failed
 /// ones waiting for a retry, and the hand-off cards about the messages `what` names that someone
 /// else wrote: the draft is discarded, its card expires with `result.superseded = why`, `by` (your
-/// message, or the later one) goes to the audit. Returns how many cards closed.
+/// message, the later one, the setting) goes to the audit. Returns how many cards closed.
 pub fn supersede(
     tx: &Tx,
     ws: &str,
@@ -351,22 +493,18 @@ pub fn supersede(
     why: &str,
     by: &str,
 ) -> ChannelResult<usize> {
-    let (cond, arg) = match what {
-        Answering::Before(at) => ("src.created < ?3", json!(at)),
+    let (cond, arg): (&str, rusqlite::types::Value) = match &what {
+        Answering::YouThere { before, .. } => ("src.created < ?3", (*before).into()),
         Answering::Messages(ids) => (
             "src.id IN (SELECT value FROM json_each(?3))",
-            json!(serde_json::to_string(ids)?),
+            serde_json::to_string(ids)?.into(),
         ),
-    };
-    let arg: rusqlite::types::Value = match arg {
-        Value::Number(n) => rusqlite::types::Value::Integer(n.as_i64().unwrap_or(0)),
-        Value::String(s) => rusqlite::types::Value::Text(s),
-        _ => rusqlite::types::Value::Null,
+        Answering::All => ("?3 IS NOT NULL", 1i64.into()),
     };
     // the drafts: in your name, answering someone else's message
-    let drafts: Vec<(String, String)> = {
+    let drafts: Vec<(String, String, String)> = {
         let mut st = tx.prepare(&format!(
-            "{MINE} SELECT o.id, o.status FROM chan_messages o
+            "{MINE} SELECT o.id, o.status, src.id FROM chan_messages o
                JOIN chan_messages src ON src.space_id = o.space_id AND src.direction = 'in'
                     AND src.external_id = o.reply_to
                JOIN chan_messages m ON m.id = src.id
@@ -375,11 +513,41 @@ pub fn supersede(
                 AND o.sender_account_id IN (SELECT id FROM my_accounts)
                 AND NOT {IS_MINE} AND {cond}"
         ))?;
+        st.query_map(params![ws, space, arg], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    // the hand-offs: “X 找你” about someone else's message
+    let asks: Vec<(String, String)> = {
+        let mut st = tx.prepare(&format!(
+            "{MINE} SELECT d.id, src.id FROM decisions d
+               JOIN chan_messages src ON src.id = d.subject_id AND src.direction = 'in'
+               JOIN chan_messages m ON m.id = src.id
+              WHERE d.workspace_id = ?1 AND d.subject_type = '{SUBJECT_MESSAGE}' AND d.kind = 'ask'
+                AND d.status = 'open' AND src.space_id = ?2 AND NOT {IS_MINE} AND {cond}"
+        ))?;
         st.query_map(params![ws, space, arg], |r| Ok((r.get(0)?, r.get(1)?)))?
             .collect::<rusqlite::Result<Vec<_>>>()?
     };
+    // after your message: only what you are there for now (in a group, what you said is about it)
+    let mut there = std::collections::HashMap::new();
+    let mut closes = |src: &str| -> ChannelResult<bool> {
+        let Answering::YouThere { now, .. } = &what else {
+            return Ok(true);
+        };
+        if let Some(v) = there.get(src) {
+            return Ok(*v);
+        }
+        let v = owner_engaged(tx, ws, src, *now)?.is_some();
+        there.insert(src.to_string(), v);
+        Ok(v)
+    };
     let mut closed = 0;
-    for (id, status) in &drafts {
+    for (id, status, src) in &drafts {
+        if !closes(src)? {
+            continue;
+        }
         tx.execute(
             "UPDATE chan_messages SET status = 'discarded' WHERE id = ? AND status = ?",
             params![id, status],
@@ -397,20 +565,8 @@ pub fn supersede(
         )?;
         crate::messages::event(tx, ws, space, id);
     }
-    // the hand-offs: “X 找你” about someone else's message
-    let asks: Vec<(String, String)> = {
-        let mut st = tx.prepare(&format!(
-            "{MINE} SELECT d.id, src.id FROM decisions d
-               JOIN chan_messages src ON src.id = d.subject_id AND src.direction = 'in'
-               JOIN chan_messages m ON m.id = src.id
-              WHERE d.workspace_id = ?1 AND d.subject_type = '{SUBJECT_MESSAGE}' AND d.kind = 'ask'
-                AND d.status = 'open' AND src.space_id = ?2 AND NOT {IS_MINE} AND {cond}"
-        ))?;
-        st.query_map(params![ws, space, arg], |r| Ok((r.get(0)?, r.get(1)?)))?
-            .collect::<rusqlite::Result<Vec<_>>>()?
-    };
     for (d, src) in &asks {
-        if settle(tx, d, why)? {
+        if closes(src)? && settle(tx, d, why)? {
             closed += 1;
             base::audit(
                 tx,
@@ -472,6 +628,25 @@ pub fn answered_message(c: &Connection, ws: &str, out: &str) -> ChannelResult<Op
         )
         .optional()?;
     Ok(src.filter(|(_, mine)| !mine).map(|(id, _)| id))
+}
+
+/// Gates 3 and 4 for outbound message `out` in your name answering someone else's message: the
+/// space's `reply_as_you` (a reply in your name is your own account speaking), then [`stop`]. `None`
+/// for anything else.
+pub fn stop_out(c: &Connection, ws: &str, out: &str, now: i64) -> ChannelResult<Option<Stop>> {
+    let Some(src) = answered_message(c, ws, out)? else {
+        return Ok(None);
+    };
+    let space: String = c.query_row(
+        "SELECT space_id FROM chan_messages WHERE id = ?",
+        [out],
+        |r| r.get(0),
+    )?;
+    let set = crate::spaces::reply_as_you(c, &space)?;
+    if set != ReplyAsYou::Draft {
+        return Ok(Some(Stop::Setting { reply_as_you: set }));
+    }
+    stop(c, ws, &src, now)
 }
 
 #[cfg(test)]
@@ -546,6 +721,42 @@ mod tests {
     }
 
     #[test]
+    fn in_a_group_only_what_you_said_about_it_counts_as_an_answer() {
+        let mut t = s("t", 1_000_000, false, "a");
+        t.sender_account = Some("acc_a".into());
+        let later = 1_000_000 + W + 60_000;
+        let mut o = s("o", later, true, "me");
+        // later than the stretch of talk, to someone else: not about it
+        assert_eq!(engaged(false, &t, std::slice::from_ref(&o), later, W), None);
+        // in a private chat whatever you said counts
+        assert!(engaged(true, &t, std::slice::from_ref(&o), later, W).is_some());
+        // within the stretch of talk it does
+        let mut soon = o.clone();
+        soon.at = 1_000_000 + W;
+        assert!(engaged(false, &t, &[soon], later, W).is_some());
+        // an answer to it
+        o.reply_to = t.external_id.clone();
+        assert!(engaged(false, &t, std::slice::from_ref(&o), later, W).is_some());
+        // in its reply chain
+        o.reply_to = None;
+        o.thread_key = t.thread_key.clone();
+        assert!(engaged(false, &t, std::slice::from_ref(&o), later, W).is_some());
+        // @-mentioning its sender
+        o.thread_key = None;
+        o.mentions = vec!["acc_a".into()];
+        assert!(engaged(false, &t, std::slice::from_ref(&o), later, W).is_some());
+        // an answer to another message of its sender
+        o.mentions.clear();
+        let a2 = s("a2", 1_000_000 + 30_000, false, "a");
+        o.reply_to = a2.external_id.clone();
+        assert!(engaged(false, &t, &[a2.clone(), o.clone()], later, W).is_some());
+        // … not to someone else's
+        let b = s("b", 1_000_000 + 30_000, false, "b");
+        o.reply_to = b.external_id.clone();
+        assert_eq!(engaged(false, &t, &[b, o], later, W), None);
+    }
+
+    #[test]
     fn a_turn_is_one_sender_without_interruption() {
         let t = s("t", 1_000_000, false, "a");
         let before = [
@@ -564,6 +775,11 @@ mod tests {
         assert_eq!(burst(&t, &before, BURST_GAP_MS), ["a1", "t"]);
         // so does a long pause
         let before = [s("a0", 1_000_000 - BURST_GAP_MS - 1, false, "a")];
+        assert_eq!(burst(&t, &before, BURST_GAP_MS), ["t"]);
+        // and a message already answered in your name: it ends the turn and stays out
+        let mut a1 = s("a1", 1_000_000 - 20_000, false, "a");
+        a1.answered = true;
+        let before = [a1, s("a0", 1_000_000 - 40_000, false, "a")];
         assert_eq!(burst(&t, &before, BURST_GAP_MS), ["t"]);
     }
 }

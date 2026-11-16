@@ -135,11 +135,12 @@ impl Replies {
                 composer_skip: None,
             }));
         }
-        // on your own account one sender's run of messages is one turn: answered together, and the
-        // earlier ones' drafts and cards close once it is (crate::presence::burst)
-        let turn = if plan.mode == Mode::Own {
+        // on your own account one sender's run of messages is one turn: answered together. The
+        // earlier ones are marked as taken by it now, so whichever composer finishes first, no reply
+        // of theirs opens, is approved by YOLO or is sent (crate::presence::take_turn)
+        let turn = if plan.mode == Mode::Own && plan.trigger.is_none() {
             ch.store()
-                .reader(|c| crate::presence::owner_burst(c, &plan.ws, &plan.message_id))?
+                .transaction(|tx| crate::presence::take_turn(tx, &plan.ws, &plan.message_id))?
         } else {
             Vec::new()
         };
@@ -159,8 +160,13 @@ impl Replies {
         {
             Ok(r) => r,
             Err(e) => {
-                // C3's fallback opens an empty draft: the message still reaches you
+                // C3's fallback opens an empty draft: the message still reaches you, and the earlier
+                // messages of the turn are their own again
                 tracing::warn!(space = plan.space_id, "channel reply not generated: {e}");
+                if turn.len() > 1 {
+                    ch.store()
+                        .transaction(|tx| crate::presence::release_turn(tx, &plan.message_id))?;
+                }
                 return Ok(None);
             }
         };
@@ -181,12 +187,13 @@ impl Replies {
                 )
             })?;
         }
-        // drafting took a while: you may have answered meanwhile (crate::presence, gate 2)
-        if let Some(e) = ch.owner_engaged(plan)? {
+        // drafting took a while: you may have answered meanwhile, or the sender went on and a later
+        // turn took this one (crate::presence, gate 2)
+        if let Some(e) = ch.owner_stop(plan)? {
             tracing::info!(
                 space = plan.space_id,
                 reason = e.reason(),
-                "draft dropped: you are there"
+                "draft dropped: not said in your name"
             );
             return Ok(Some(Acted {
                 label: e.label().into(),

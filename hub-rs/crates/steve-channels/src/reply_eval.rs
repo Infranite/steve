@@ -29,10 +29,11 @@ pub const STYLE_MAX: usize = 8;
 pub const STYLE_CROSS_SPACE_MAX: usize = 20;
 /// A style sample, in characters.
 pub const STYLE_LINE_MAX: usize = 80;
-/// You are present when you said something in the space this long before the message (seconds): the
-/// presence metric uses the gate's own window ([`crate::presence::OWNER_LIVE_MS`]); `sweep` varies the
-/// gate's.
-pub const LIVE_WINDOW_SECS: i64 = crate::presence::OWNER_LIVE_MS / 1000;
+/// You are present when you said something in the space this long before the message (seconds).
+/// A parameter of the presence metric, swept in the eval rather than trusted. It is the metric's own,
+/// deliberately not the gate's ([`crate::presence::OWNER_LIVE_MS`]): a gate change must not move what
+/// it is measured against.
+pub const LIVE_WINDOW_SECS: i64 = 180;
 /// The fewest of your messages a situation needs for its own statistics; with fewer it uses the
 /// broader situation's ([`Situation::broader`]).
 pub const MIN_SUPPORT: usize = 5;
@@ -612,9 +613,8 @@ pub fn said_lines(case: &Case) -> (crate::presence::Said, Vec<crate::presence::S
             l.sender.clone()
         },
         thread_key: l.thread_key.clone(),
-        external_id: None,
-        reply_to: None,
         mentions_owner: l.mentions_owner,
+        ..Default::default()
     };
     let target = line(&case.message);
     let mut around: Vec<Said> = case.previous_space_messages.iter().map(line).collect();
@@ -664,7 +664,8 @@ pub struct Gated {
     /// `merged` (the sender went on; answered with the later message).
     pub gate: Option<String>,
     pub merged_into: Option<String>,
-    /// It still opened, and your own message closed it later (within the hour of the case).
+    /// It still opened, and your own message closed it later (within the hour of the case; in a
+    /// group only what you said about it).
     pub closed_later: bool,
 }
 
@@ -752,9 +753,12 @@ pub fn apply_gates(
             out.text = later.text.clone();
             gate = Some("merged".into());
         }
+        // closed later as your own message closes it (crate::presence::supersede): you are there
+        // for it by the end of the hour (in a group, what you said is about it)
         let (t, around) = said_lines(case);
+        let dm = situation(case) == Situation::Dm;
         let closed_later = matches!(out.outcome.as_str(), "reply" | "ask_owner")
-            && around.iter().any(|s| s.owner && s.at > t.at);
+            && crate::presence::engaged(dm, &t, &around, t.at + 3_600_000, p.live_ms).is_some();
         gated.push(Gated {
             case_id: o.case_id.clone(),
             sample: o.sample,
@@ -885,7 +889,10 @@ pub struct Metrics {
     pub act_recall: Option<f64>,
     /// … and that did exactly what it should.
     pub act_exact: Option<f64>,
-    /// Of the answers to cases where you were there or had answered, the share that skipped.
+    /// Of the answers to cases where you were there or had answered ([`presence`], from what you
+    /// actually said: no labels), the share that skipped. With the gate on it is agreement with a
+    /// rule close to the gate's, not accuracy: judge the gate by `decision_accuracy` and
+    /// `act_recall`, which come from the labels.
     pub presence_skip_recall: Option<f64>,
     pub drafts: usize,
     pub length_ratio_median: Option<f64>,

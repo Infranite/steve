@@ -60,7 +60,7 @@ pub const LABEL_BOT_ANSWERED: &str = "已经回应过这个机器人，等有人
 pub const LABEL_ELSEWHERE: &str = "已从另一个连接收到";
 /// `outcome_label` of Steve's own outbound message read back in.
 pub const LABEL_ECHO: &str = "Steve 发出的消息";
-/// The space is set not to reply for you (`reply_as_you = record`): recorded, no rule runs.
+/// The space is set not to reply for you (`reply_as_you = record`): recorded, no rule or flow runs.
 pub const LABEL_REPLY_RECORD: &str = "这里设为只记录：不替你回复";
 /// … `off`: stored only.
 pub const LABEL_REPLY_OFF: &str = "这里设为不处理：只保存";
@@ -559,25 +559,30 @@ impl Channels {
         if inbound.duplicate {
             return Ok(inbound);
         }
-        // your own words in the space: what Steve still has waiting to say for you about anything
-        // older is stale (crate::presence::supersede); another assistant's automatic reply is not you
-        if (inbound.from_owner || inbound.next == Next::Own)
+        // your own words in a space where your own account speaks: what Steve still has waiting to
+        // say for you about an older message you are now there for is stale
+        // (crate::presence::supersede). Not where a bot speaks (its hand-offs stay), not a bot
+        // account's own words, not another assistant's automatic reply on your account.
+        let yours = inbound.from_owner
+            || (inbound.next == Next::Own
+                && store
+                    .reader(|c| spaces::channel_settings(c, ws, conn))?
+                    .is_some_and(|s| s.mode == Mode::Own));
+        if yours
             && inbound.next != Next::Record(crate::arbiter::LABEL_AUTOMATED)
+            && store.reader(|c| spaces::speaks_as_you(c, ws, &inbound.space_id, Some(conn)))?
         {
-            let (sid, mid, at) = (
+            let (sid, mid, before) = (
                 inbound.space_id.clone(),
                 inbound.message_id.clone(),
                 msg.created,
             );
+            let what = crate::presence::Answering::YouThere {
+                before,
+                now: now.max(before),
+            };
             match store.transaction(|tx| {
-                crate::presence::supersede(
-                    tx,
-                    ws,
-                    &sid,
-                    crate::presence::Answering::Before(at),
-                    crate::presence::BY_YOU,
-                    &mid,
-                )
+                crate::presence::supersede(tx, ws, &sid, what, crate::presence::BY_YOU, &mid)
             }) {
                 Ok(0) => {}
                 Ok(n) => tracing::info!(space = sid, closed = n, "you answered: cards superseded"),
@@ -632,17 +637,23 @@ impl Channels {
         let addressed = store
             .reader(|c| addressed(c, ws, conn, &inbound.space_id, &inbound.message_id, &rf))?;
         inbound.facts = Some(rf);
-        // `reply_as_you = off` on your own account: nothing acts on someone else's message here,
-        // flows included (decided in code, before anything reads it)
-        let off = inbound.next == Next::Handle
-            && store.reader(|c| spaces::reply_as_you_here(c, ws, &inbound.space_id, conn))?
-                == spaces::ReplyAsYou::Off;
+        // `reply_as_you` other than `draft` on your own account: no flow starts or wakes on someone
+        // else's message here (decided in code, before anything reads it); under `off` nothing else
+        // acts on it either, under `record` only an item's thread still takes it (crate::respond)
+        let reply_as_you = if inbound.next == Next::Handle {
+            store.reader(|c| spaces::reply_as_you_here(c, ws, &inbound.space_id, conn))?
+        } else {
+            spaces::ReplyAsYou::Draft
+        };
         // a bot the loop guard stopped drives no flow on either, and history wakes nothing
         ev.wake = !matches!(inbound.next, Next::Record(LABEL_BOT | LABEL_BOT_ANSWERED))
             && inbound.history.is_none()
-            && !off;
+            && reply_as_you == spaces::ReplyAsYou::Draft;
         ev.record_only = match &inbound.next {
-            Next::Handle if off => Some(LABEL_REPLY_OFF.into()),
+            Next::Handle if reply_as_you == spaces::ReplyAsYou::Off => Some(LABEL_REPLY_OFF.into()),
+            Next::Handle if reply_as_you == spaces::ReplyAsYou::Record => {
+                Some(LABEL_REPLY_RECORD.into())
+            }
             Next::Handle if !addressed => Some(rules::LABEL_UNADDRESSED.into()),
             Next::Handle => None,
             Next::Own => Some(LABEL_OWN.into()),

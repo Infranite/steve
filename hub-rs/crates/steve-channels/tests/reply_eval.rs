@@ -417,12 +417,24 @@ fn the_presence_gate_replayed_skips_where_you_were_there_and_keeps_what_needs_yo
         assert_eq!(g.gate, None, "{id}");
         assert!(g.closed_later, "{id}");
     }
+    // judged by the labels, never by the presence metric (a rule close to the gate's own)
     let m = re::metrics(&re::rows(&cs, &ls, &gated, &styles, &params()));
     let before = re::metrics(&re::rows(&cs, &ls, &then, &styles, &params()));
-    assert_eq!(m.presence_skip_recall, Some(1.0), "{m:?}");
-    assert!(m.decision_accuracy > before.decision_accuracy);
-    assert!(
-        m.act_recall >= Some(0.5),
-        "the gate does not skip everything: {m:?}"
-    );
+    assert!(m.decision_accuracy > before.decision_accuracy, "{m:?}");
+    assert!(m.act_precision > before.act_precision, "{m:?}");
+    // every case the labels say needs Steve and Steve acted on then, it still acts on
+    let rows = re::rows(&cs, &ls, &gated, &styles, &params());
+    let then_rows = re::rows(&cs, &ls, &then, &styles, &params());
+    for r in then_rows
+        .iter()
+        .filter(|r| r.should_act && r.outcome != "skip")
+    {
+        let now = rows.iter().find(|x| x.case_id == r.case_id).unwrap();
+        assert_ne!(
+            now.outcome, "skip",
+            "{} needs you and is skipped",
+            r.case_id
+        );
+    }
+    assert_eq!(m.act_recall, before.act_recall, "{m:?}");
 }

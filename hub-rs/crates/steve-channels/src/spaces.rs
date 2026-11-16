@@ -71,12 +71,14 @@ pub enum ReplyAsYou {
     /// 起草: the rules decide; what is said as you waits for your approval (as before 087).
     #[default]
     Draft,
-    /// 只记录: nothing is drafted, asked or answered for you here and the rules do not run (no model
-    /// reads the message); replies in an item's thread still reach the item.
+    /// 只记录: nothing is drafted, asked or answered for you here, and no rule or flow runs on someone
+    /// else's message; a reply in an item's thread still reaches that item (and its agent reads it).
+    /// Drafts and cards still open here close when it is set, and what is left is never approved by
+    /// YOLO or sent unless you approve it yourself.
     Record,
     /// 不处理: Steve leaves the space alone on your account. Messages are stored (history, and
     /// whether you are there, still see them); no rule, flow, item or card acts on them. Your `/bot`
-    /// still works.
+    /// still works. Open drafts and cards close as for `Record`.
     Off,
 }
 
@@ -134,8 +136,23 @@ pub fn reply_as_you(c: &Connection, space: &str) -> ChannelResult<ReplyAsYou> {
     Ok(v.as_deref().and_then(ReplyAsYou::parse).unwrap_or_default())
 }
 
-/// [`reply_as_you`] where it applies: the space's voice (else `conn`, the identity that received the
-/// message) is your own account; `draft` anywhere else.
+/// Does your own account speak in the space: its voice (else `conn`, the identity that received the
+/// message) is a personal connection (`Mode::Own`)?
+pub fn speaks_as_you(
+    c: &Connection,
+    ws: &str,
+    space: &str,
+    conn: Option<&str>,
+) -> ChannelResult<bool> {
+    let Some(acting) = voice(c, space)?.or_else(|| conn.map(String::from)) else {
+        return Ok(false);
+    };
+    let (_, mode) = crate::bindings::connection_account(c, ws, &acting)?;
+    Ok(mode == Mode::Own)
+}
+
+/// [`reply_as_you`] where it applies: your own account speaks in the space ([`speaks_as_you`]);
+/// `draft` anywhere else.
 pub fn reply_as_you_here(
     c: &Connection,
     ws: &str,
@@ -143,16 +160,10 @@ pub fn reply_as_you_here(
     conn: &str,
 ) -> ChannelResult<ReplyAsYou> {
     let v = reply_as_you(c, space)?;
-    if v == ReplyAsYou::Draft {
+    if v == ReplyAsYou::Draft || speaks_as_you(c, ws, space, Some(conn))? {
         return Ok(v);
     }
-    let acting = voice(c, space)?.unwrap_or_else(|| conn.to_string());
-    let (_, mode) = crate::bindings::connection_account(c, ws, &acting)?;
-    Ok(if mode == Mode::Own {
-        v
-    } else {
-        ReplyAsYou::Draft
-    })
+    Ok(ReplyAsYou::Draft)
 }
 
 /// Steve's role in a space, derived: what the voice identity's effective
@@ -1213,11 +1224,14 @@ pub fn reply_as_you_conflicts(set: &SpaceSettings, voice: Option<Mode>) -> Vec<C
             "info",
             "已设为不提醒或屏蔽：这里本来就不替你起草",
         )],
-        (ReplyAsYou::Record, Some(Mode::Own)) => vec![c(
-            "rules",
-            "conflict",
-            "只记录：这里不替你起草、回复或转给你，响应规则不生效；事项话题里的回复仍送到事项",
-        )],
+        (ReplyAsYou::Record, Some(Mode::Own)) => vec![
+            c(
+                "rules",
+                "conflict",
+                "只记录：这里不替你起草、回复或转给你，响应规则不生效；事项话题里的回复仍送到事项",
+            ),
+            c("flow", "conflict", "只记录：别人在这里的消息不会触发流程"),
+        ],
         (ReplyAsYou::Off, Some(Mode::Own)) => vec![
             c(
                 "rules",
@@ -1754,6 +1768,17 @@ pub fn patch(
     }
     if after.reply_as_you != before.reply_as_you {
         write_reply_as_you(tx, ws, id, after.reply_as_you, now)?;
+        // no longer replying for you here: what is still waiting to be said as you closes
+        if before.reply_as_you == ReplyAsYou::Draft && speaks_as_you(tx, ws, id, None)? {
+            crate::presence::supersede(
+                tx,
+                ws,
+                id,
+                crate::presence::Answering::All,
+                crate::presence::BY_SETTING,
+                after.reply_as_you.code(),
+            )?;
+        }
     }
     let voice_after = chosen_voice(tx, id)?;
     let snap = |x: &SpaceSettings, persona: &Option<String>, voice: &Option<String>| {

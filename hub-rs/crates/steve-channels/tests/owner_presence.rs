@@ -18,8 +18,9 @@ use steve_channels::outbound::{OutLink, Outbox};
 use steve_channels::presence::{self, BY_LATER, BY_YOU, LABEL_LIVE, LABEL_REPLIED};
 use steve_channels::respond::SUBJECT_MESSAGE;
 use steve_channels::{Channels, Inbound, InboundMessage, Mention, Replies, SpaceKind, api, spaces};
+use steve_flow::nodes::action::Action;
 use steve_flow::testkit::FakeCore;
-use steve_flow::{FlowSetup, LinearExecutor};
+use steve_flow::{FlowSetup, LinearExecutor, NodeOutcome, RunCx};
 use steve_modules::accounts::connections::{self, Connections, ConnectionsConfig};
 use steve_modules::outbound::YOLO_ACTOR;
 use steve_modules::testkit::{ME, TestEnv, WS, call, caller};
@@ -32,12 +33,16 @@ use tempfile::TempDir;
 const PASS: &str = r#"{"verdict": "pass", "spans": []}"#;
 const REPLY: &str = r#"{"text": "好 我晚点看", "needs_approval": false, "why": "对方在等"}"#;
 
-/// The composer's model: answers [`REPLY`], keeps the prompts, and lets `advance` ms pass while it
-/// “thinks” (drafting takes minutes in real life).
+/// What happens elsewhere while the composer “thinks”.
+type During = Box<dyn FnOnce() + Send>;
+
+/// The composer's model: answers [`REPLY`], keeps the prompts, lets `advance` ms pass while it
+/// “thinks” (drafting takes minutes in real life) and runs `during` (once) meanwhile.
 struct Slow {
     clock: Arc<FakeClock>,
     advance: AtomicI64,
     prompts: Mutex<Vec<String>>,
+    during: Mutex<Option<During>>,
 }
 
 #[async_trait]
@@ -59,10 +64,33 @@ impl compose::PinnedModel for Slow {
     ) -> Result<GatewayOut, String> {
         self.prompts.lock().unwrap().push(prompt.into());
         self.clock.advance(self.advance.load(Ordering::SeqCst));
+        let during = self.during.lock().unwrap().take();
+        if let Some(f) = during {
+            f();
+        }
         Ok(GatewayOut {
             text: REPLY.into(),
             ..Default::default()
         })
+    }
+}
+
+/// C4's `reply_as`, so a space's rules turned into a flow validate (it never sends here).
+struct StubReplyAs;
+
+#[async_trait]
+impl Action for StubReplyAs {
+    fn name(&self) -> &'static str {
+        "reply_as"
+    }
+    fn effectful(&self, _: &Value) -> bool {
+        true
+    }
+    fn validate(&self, _: &Value) -> Result<(), String> {
+        Ok(())
+    }
+    async fn run(&self, _: &mut RunCx<'_>, _: &Value, _: &Value) -> NodeOutcome {
+        NodeOutcome::Fail("stub".into())
     }
 }
 
@@ -122,6 +150,7 @@ async fn setup() -> H {
         clock: env.clock.clone(),
         advance: AtomicI64::new(0),
         prompts: Mutex::new(Vec::new()),
+        during: Mutex::new(None),
     });
     let replies = Arc::new(
         Replies::new()
@@ -130,6 +159,7 @@ async fn setup() -> H {
     );
     let flow = flow_setup
         .connections(conns.clone())
+        .action(Arc::new(StubReplyAs))
         .build(env.modules.clone(), Arc::new(LinearExecutor));
     let ch = Channels::builder(env.modules.clone(), conns, Arc::new(flow.clone()))
         .adapter(fake.clone())
@@ -654,6 +684,43 @@ async fn record_only_drafts_nothing_and_reads_nothing() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn record_only_starts_no_flow_on_someone_elses_message() {
+    let h = setup().await;
+    let me = h.me.clone();
+    let space = push(&h, &me, msg(&h, "D_LI", "y1", "upx", "嗯", -3600))
+        .await
+        .space_id;
+    let (s, v) = call(
+        &h.api,
+        Some(&caller(WS, ME)),
+        "POST",
+        &format!("/spaces/{space}/rules/to-flow"),
+        None,
+    )
+    .await;
+    assert_eq!(s, 200, "{v}");
+    let runs = |id: &str| {
+        count(
+            &h,
+            "SELECT count(*) FROM flow_runs r JOIN chan_messages m ON m.event_id = r.event_id WHERE m.id = ?",
+            &[id],
+        )
+    };
+    let i = push(&h, &me, msg(&h, "D_LI", "l0", "ulilei", "早", -60)).await;
+    assert_eq!(runs(&i.message_id), 1, "the space's flow takes a message");
+    assert_eq!(set_reply(&h, &space, "record").await.0, 200);
+    let i = push(&h, &me, msg(&h, "D_LI", "l1", "ulilei", "帮我看下", 0)).await;
+    assert_eq!(runs(&i.message_id), 0, "under 只记录 it does not");
+    let ev = i.event.as_ref().and_then(|e| e.id()).expect("event");
+    let r = row(
+        &h,
+        "SELECT outcome, outcome_label FROM ext_events WHERE id = ?",
+        &[ev],
+    );
+    assert_eq!(r, [json!("recorded"), json!(LABEL_REPLY_RECORD)]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn off_leaves_the_space_alone_on_your_account() {
     let h = setup().await;
     let me = h.me.clone();
@@ -715,4 +782,289 @@ async fn the_setting_does_not_apply_where_a_bot_speaks() {
     .unwrap();
     assert_ne!(r.label, LABEL_REPLY_OFF);
     assert!(r.out_message_id.is_some(), "{r:?}");
+}
+
+// ---------------------------------------------------------------- only your own words, only your own account
+
+/// A message stored as if another way in delivered it (nothing reacts to it): written `secs` after
+/// the message `like` (external id) by its sender. Returns its id.
+fn stored_in(store: &steve_store::Store, like: &str, ext: &str, secs: i64) -> String {
+    let id = steve_store::uid("cm");
+    let (like, ext, idc) = (like.to_string(), ext.to_string(), id.clone());
+    store
+        .with_conn(move |c| {
+            c.execute(
+                "INSERT INTO chan_messages (id, workspace_id, space_id, external_id, direction, sender_account_id,
+                    sender_party_id, text, status, created)
+                 SELECT ?, workspace_id, space_id, ?, 'in', sender_account_id, sender_party_id, '还有个事', 'received',
+                        created + ?
+                   FROM chan_messages WHERE external_id = ? AND direction = 'in'",
+                rusqlite::params![idc, ext, secs * 1000, like],
+            )?;
+            Ok(())
+        })
+        .expect("stored");
+    id
+}
+
+fn handoff_here(h: &H, space: &str) {
+    let now = h.ch.now();
+    h.env
+        .store()
+        .transaction(|tx| {
+            spaces::patch(
+                tx,
+                &Viewer::bare(WS, ME),
+                space,
+                &spaces::SpacePatch {
+                    rules: Some(Some(
+                        json!([{"when": {"kind": "mention_or_dm"}, "act": "handoff"}]),
+                    )),
+                    ..Default::default()
+                },
+                now,
+            )
+        })
+        .expect("rules");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_automatic_reply_on_your_account_is_not_you() {
+    let h = setup().await;
+    let me = h.me.clone();
+    // another assistant answers on your account while you are away
+    let auto = "[AI] 自动回复：我在开会，稍后回复";
+    push(&h, &me, msg(&h, "D_LI", "y1", "upx", auto, -10)).await;
+    let r = push(&h, &me, msg(&h, "D_LI", "l1", "ulilei", "在吗 有个事", 0))
+        .await
+        .response
+        .unwrap();
+    assert!(r.out_message_id.is_some(), "{r:?}");
+    let card = r.decision_id.expect("card");
+    // nor does it close the draft when it comes after it
+    h.env.clock.advance(5_000);
+    push(&h, &me, msg(&h, "D_LI", "y2", "upx", auto, 0)).await;
+    assert_eq!(decision(&h, &card).0, "open");
+    h.env.clock.advance(5_000);
+    assert_eq!(yolo(&h, &card, "yes").expect("answered").status, "resolved");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn where_a_bot_speaks_your_message_leaves_its_hand_offs_open() {
+    let h = setup().await;
+    let oncall = h.oncall.clone();
+    let space = push(&h, &oncall, msg(&h, "C_BOT", "b0", "uhan", "早", -3600))
+        .await
+        .space_id;
+    handoff_here(&h, &space);
+    let ask = push(
+        &h,
+        &oncall,
+        at_you(msg(&h, "C_BOT", "b1", "uhan", "这个谁负责", 0)),
+    )
+    .await
+    .response
+    .unwrap()
+    .decision_id
+    .expect("hand-off");
+    h.env.clock.advance(10_000);
+    // you write in the group (the bot receives it), and the bot's own account speaks
+    let i = push(&h, &oncall, msg(&h, "C_BOT", "y1", "upx", "午饭吃啥", 0)).await;
+    assert!(i.from_owner, "you, as the bot sees you");
+    push(
+        &h,
+        &oncall,
+        msg(&h, "C_BOT", "k1", FakeChannel::BOT, "收到", 0),
+    )
+    .await;
+    assert_eq!(decision(&h, &ask).0, "open");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn in_a_group_what_you_say_to_someone_else_leaves_another_persons_card_open() {
+    let h = setup().await;
+    let me = h.me.clone();
+    let space = push(&h, &me, msg(&h, "C_DEV", "h0", "uhan", "早", -3600))
+        .await
+        .space_id;
+    handoff_here(&h, &space);
+    let ask = push(
+        &h,
+        &me,
+        at_you(msg(&h, "C_DEV", "h1", "uhan", "这个谁负责", 0)),
+    )
+    .await
+    .response
+    .unwrap()
+    .decision_id
+    .expect("hand-off");
+    // well after it, you answer someone else there
+    h.env.clock.advance(presence::OWNER_LIVE_MS + 60_000);
+    push(&h, &me, msg(&h, "C_DEV", "l1", "ulilei", "午饭吃啥", 0)).await;
+    let mut to_li = msg(&h, "C_DEV", "y1", "upx", "都行", 0);
+    to_li.reply_to = Some("l1".into());
+    push(&h, &me, to_li).await;
+    assert_eq!(decision(&h, &ask).0, "open");
+    // your answer to it closes it
+    h.env.clock.advance(10_000);
+    let mut answer = msg(&h, "C_DEV", "y2", "upx", "我负责", 0);
+    answer.reply_to = Some("h1".into());
+    push(&h, &me, answer).await;
+    let (st, res) = decision(&h, &ask);
+    assert_eq!(
+        (st.as_str(), res["superseded"].as_str()),
+        ("expired", Some(BY_YOU))
+    );
+}
+
+// ---------------------------------------------------------------- a turn and what was answered
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_message_already_answered_in_your_name_stays_out_of_the_next_turn() {
+    let h = setup().await;
+    let me = h.me.clone();
+    let first = push(&h, &me, msg(&h, "D_LI", "l1", "ulilei", "在吗", 0))
+        .await
+        .response
+        .unwrap();
+    let (draft1, card1) = (first.out_message_id.unwrap(), first.decision_id.unwrap());
+    assert_eq!(
+        yolo(&h, &card1, "yes").expect("approved").status,
+        "resolved"
+    );
+    h.env.clock.advance(11_000);
+    assert_eq!(h.outbox.send_due(&h.ch).await, 1);
+    assert_eq!(status(&h, &draft1), "sent");
+    h.env.clock.advance(9_000);
+    let second = push(
+        &h,
+        &me,
+        msg(&h, "D_LI", "l2", "ulilei", "想问下周五的会", 0),
+    )
+    .await
+    .response
+    .unwrap();
+    assert!(second.out_message_id.is_some());
+    let last = h.model.prompts.lock().unwrap().last().unwrap().clone();
+    assert!(!last.contains("在吗\n想问下周五的会"), "{last}");
+    assert_eq!(status(&h, &draft1), "sent");
+    assert_eq!(drafts(&h), 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn yolo_never_approves_a_draft_a_later_turn_took_while_it_drafts() {
+    let h = setup().await;
+    let me = h.me.clone();
+    // the earlier message's draft is open when the later one's composer starts…
+    let first = push(&h, &me, msg(&h, "D_LI", "l1", "ulilei", "在吗", 0))
+        .await
+        .response
+        .unwrap();
+    let (draft1, card1) = (first.out_message_id.unwrap(), first.decision_id.unwrap());
+    h.env.clock.advance(20_000);
+    // … and YOLO comes to it while that composer runs
+    let got = Arc::new(Mutex::new(None));
+    let (modules, card, g) = (h.env.modules.clone(), card1.clone(), got.clone());
+    *h.model.during.lock().unwrap() = Some(Box::new(move || {
+        let d =
+            steve_modules::decisions::dispatch(&modules, &caller(WS, YOLO_ACTOR), &card, "yes", "")
+                .expect("ours");
+        *g.lock().unwrap() = Some(d);
+    }));
+    let second = push(
+        &h,
+        &me,
+        msg(&h, "D_LI", "l2", "ulilei", "想问下周五的会", 0),
+    )
+    .await
+    .response
+    .unwrap();
+    assert!(second.out_message_id.is_some());
+    let d = got.lock().unwrap().take().expect("ran").expect("answered");
+    assert_eq!(d.status, "expired");
+    assert_eq!(d.result["superseded"], BY_LATER);
+    assert_eq!(status(&h, &draft1), "discarded");
+    assert_eq!(drafts(&h), 1);
+    h.env.clock.advance(11_000);
+    assert_eq!(h.outbox.send_due(&h.ch).await, 0);
+    assert!(h.fake.sent.lock().unwrap().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_draft_whose_message_a_later_turn_took_while_it_drafted_never_opens() {
+    let h = setup().await;
+    let me = h.me.clone();
+    // the earlier message's composer is slow; meanwhile the later message comes and its turn,
+    // answered first, takes the earlier one
+    let store = h.env.store().clone();
+    *h.model.during.lock().unwrap() = Some(Box::new(move || {
+        let later = stored_in(&store, "l1", "l2", 20);
+        store
+            .transaction(|tx| presence::take_turn(tx, WS, &later))
+            .expect("turn");
+    }));
+    let r = push(&h, &me, msg(&h, "D_LI", "l1", "ulilei", "在吗", 0))
+        .await
+        .response
+        .unwrap();
+    assert_eq!(r.out_message_id, None, "{r:?}");
+    assert_eq!(r.decision_id, None);
+    assert_eq!(r.label, BY_LATER);
+    assert_eq!(drafts(&h), 0);
+}
+
+// ---------------------------------------------------------------- reply_as_you after the message came in
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_setting_holds_drafts_made_before_it_changed() {
+    let h = setup().await;
+    let (draft1, card1) = drafted(&h, "l1").await;
+    let space: String = row(
+        &h,
+        "SELECT space_id FROM chan_messages WHERE id = ?",
+        &[&draft1],
+    )[0]
+    .as_str()
+    .unwrap()
+    .into();
+    h.env.clock.advance(120_000);
+    let (draft2, card2) = drafted(&h, "l2").await;
+    assert_eq!(
+        yolo(&h, &card2, "yes").expect("approved").status,
+        "resolved"
+    );
+    // set to 只记录 behind the page's back (nothing closed on the way): YOLO approves nothing more
+    // and what it approved is not sent
+    let now = h.ch.now();
+    h.env
+        .store()
+        .transaction(|tx| {
+            spaces::write_reply_as_you(tx, WS, &space, spaces::ReplyAsYou::Record, now)
+        })
+        .expect("set");
+    let d = yolo(&h, &card1, "yes").expect("answered");
+    assert_eq!(d.status, "expired");
+    assert_eq!(d.result["superseded"], presence::BY_SETTING);
+    assert_eq!(status(&h, &draft1), "discarded");
+    h.env.clock.advance(11_000);
+    assert_eq!(h.outbox.send_due(&h.ch).await, 0);
+    assert_eq!(status(&h, &draft2), "discarded");
+    assert!(h.fake.sent.lock().unwrap().is_empty());
+
+    // set from the page: what is still open closes at once
+    h.env
+        .store()
+        .transaction(|tx| {
+            spaces::write_reply_as_you(tx, WS, &space, spaces::ReplyAsYou::Draft, now)
+        })
+        .expect("set");
+    h.env.clock.advance(120_000);
+    let (draft3, card3) = drafted(&h, "l3").await;
+    assert_eq!(set_reply(&h, &space, "off").await.0, 200);
+    let (st, res) = decision(&h, &card3);
+    assert_eq!(
+        (st.as_str(), res["superseded"].as_str()),
+        ("expired", Some(presence::BY_SETTING))
+    );
+    assert_eq!(status(&h, &draft3), "discarded");
 }

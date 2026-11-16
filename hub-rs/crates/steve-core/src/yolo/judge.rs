@@ -794,6 +794,10 @@ pub fn reason_shown(reason: &str) -> String {
         "你已经处理了这张卡" => steve_i18n::t!("core.yolo.reason.handled_by_you"),
         "权限请求已经失效" => steve_i18n::t!("core.yolo.reason.permission_expired"),
         "你已亲自回复" => steve_i18n::t!("core.yolo.reason.answered_yourself"),
+        "对方接着发了消息，已合在一起处理" => {
+            steve_i18n::t!("core.yolo.reason.merged_into_later")
+        }
+        "这里已设为不替你回复" => steve_i18n::t!("core.yolo.reason.reply_as_you_off"),
         "没有对应的决定" => steve_i18n::t!("core.yolo.reason.no_decision"),
         "YOLO 已经不再处理这件" => steve_i18n::t!("core.yolo.reason.no_longer"),
         "你选择自己来定" => steve_i18n::t!("core.yolo.reason.user_cancel"),

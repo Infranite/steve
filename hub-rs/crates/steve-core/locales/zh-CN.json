@@ -277,6 +277,8 @@
   "core.yolo.reason.handled_by_you": "你已经处理了这张卡",
   "core.yolo.reason.permission_expired": "权限请求已经失效",
   "core.yolo.reason.answered_yourself": "你已亲自回复",
+  "core.yolo.reason.merged_into_later": "对方接着发了消息，已合在一起处理",
+  "core.yolo.reason.reply_as_you_off": "这里已设为不替你回复",
   "core.yolo.reason.no_decision": "没有对应的决定",
   "core.yolo.reason.no_longer": "YOLO 已经不再处理这件",
   "core.yolo.reason.user_cancel": "你选择自己来定",

@@ -29,13 +29,10 @@ pub const DRAFT_OPTIONS: [&str; 2] = ["yes", "no"];
 const SUMMARY_MAX: usize = 60;
 
 impl Channels {
-    /// [`crate::presence::owner_engaged`] for a plan that would draft or ask in your name about
-    /// someone else's message (`reply`, `draft`, `handoff` on your own account, not your `/bot`);
-    /// `None` for any other plan.
-    pub(crate) fn owner_engaged(
-        &self,
-        plan: &Plan,
-    ) -> ChannelResult<Option<crate::presence::Engaged>> {
+    /// [`crate::presence::stop`] for a plan that would draft or ask in your name about someone
+    /// else's message (`reply`, `draft`, `handoff` on your own account, not your `/bot`): you are
+    /// there, or a later message of the sender took it into its turn. `None` for any other plan.
+    pub(crate) fn owner_stop(&self, plan: &Plan) -> ChannelResult<Option<crate::presence::Stop>> {
         if plan.mode != Mode::Own
             || plan.trigger.is_some()
             || !matches!(plan.act, Act::Reply | Act::Draft | Act::Handoff)
@@ -44,7 +41,7 @@ impl Channels {
         }
         let now = self.now();
         self.store()
-            .reader(|c| crate::presence::owner_engaged(c, &plan.ws, &plan.message_id, now))
+            .reader(|c| crate::presence::stop(c, &plan.ws, &plan.message_id, now))
     }
 }
 
@@ -383,12 +380,13 @@ impl Channels {
             }
             return Ok(r);
         }
-        // you are there yourself: nothing is drafted or asked in your name (crate::presence, gate 1)
-        if let Some(e) = self.owner_engaged(plan)? {
+        // you are there yourself, or the sender's later message took this one into its turn: nothing
+        // is drafted or asked in your name (crate::presence, gate 1)
+        if let Some(e) = self.owner_stop(plan)? {
             tracing::info!(
                 space = plan.space_id,
                 reason = e.reason(),
-                "not drafted: you are there"
+                "not drafted in your name"
             );
             r.act = Act::Record;
             r.label = e.label().into();
