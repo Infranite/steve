@@ -197,7 +197,12 @@ fn a_conflict_or_a_failed_check_goes_back_to_the_agent_once_per_head() {
     look(&k);
     assert_eq!(prompts_with(&k, &x, "和默认分支有冲突"), 1);
     let p = k.rt.prompts_of(&x.session).pop().unwrap();
-    assert!(p.contains("git push --force-with-lease"), "{p}");
+    // a merge and a plain push of its own branch need no card; a force push after a rebase does
+    assert!(p.contains("git merge origin/"), "{p}");
+    assert!(
+        p.contains("git push --force-with-lease）仍要先用 steve_request_approval"),
+        "{p}"
+    );
     k.rt.end_turn(&k.core, &x.session, "end_turn", None);
     assert!(k.wait(|| k.core.tx().st.probing.is_empty()));
     // rebased onto main (the same change): a new head, and a failed check on it

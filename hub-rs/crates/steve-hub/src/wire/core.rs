@@ -2756,6 +2756,7 @@ mod yolo_input_tests {
             cwd: t.own_dir,
             project_dir: None,
             branch: None,
+            checkout: None,
             own_pids: t.own_pids.unwrap_or_default(),
             full: false,
         };

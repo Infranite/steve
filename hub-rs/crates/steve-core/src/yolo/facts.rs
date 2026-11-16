@@ -16,6 +16,7 @@ use super::judge::{
     Stall, StallCause, Subject, Tool,
 };
 use super::ledger::{self, Streak};
+use super::push::Checkout;
 use crate::git::git;
 use crate::node_git::{Ask, NodeGit, block_on};
 use crate::repo::{Decision, Item};
@@ -192,6 +193,51 @@ fn branch_facts(core: &crate::Core, item: &Item, state: bool) -> BranchFacts {
     }
 }
 
+/// The item's checkout for a command that may push or open a pull request (#219, [`super::push`]):
+/// the branch `HEAD` is on, asked of its Node when the workspace is on one (the branch only: its
+/// settings stay unknown), else read with the Hub's own git in `dir` with the settings. Any other
+/// command reads nothing, so no other permission answer waits for git or a Node.
+fn checkout(
+    core: &crate::Core,
+    item: &Item,
+    dir: Option<&Path>,
+    command: &Value,
+) -> Option<Checkout> {
+    static MAY_PUSH: std::sync::LazyLock<regex::Regex> =
+        std::sync::LazyLock::new(|| regex::Regex::new(r"\b(push|gh)\b").expect("valid regex"));
+    if !MAY_PUSH.is_match(&command.to_string()) {
+        return None;
+    }
+    if let Some(port) = core.node_git().filter(|p| p.on_node(&item.id)) {
+        let ask = Ask {
+            heads_only: true,
+            ..Default::default()
+        };
+        let f = block_on(async {
+            tokio::time::timeout(NODE_HEAD_DEADLINE, port.facts(&item.id, ask))
+                .await
+                .ok()
+                .and_then(Result::ok)
+        })
+        .flatten()?;
+        return Some(Checkout {
+            head: f.branch.filter(|b| !b.is_empty()),
+            config: None,
+        });
+    }
+    local_checkout(dir?)
+}
+
+/// [`checkout`] of a workspace on the Hub's own machine: `HEAD`'s branch and the settings.
+fn local_checkout(dir: &Path) -> Option<Checkout> {
+    if !dir.is_dir() {
+        return None;
+    }
+    let config = git(dir, &["config", "--list", "-z"]).ok()?;
+    let head = git(dir, &["symbolic-ref", "--short", "-q", "HEAD"]).unwrap_or_default();
+    Some(Checkout::from_git(&head, Some(&config)))
+}
+
 impl Engine {
     /// Everything [`judge::judge`] needs about `d` (open, in scope).
     pub fn gather(&self, d: &Decision, policy: &Policy) -> ApiResult<Gathered> {
@@ -244,19 +290,27 @@ impl Engine {
         };
         let subject = match (d.kind.as_str(), d.subject_type.as_str()) {
             ("approve", "tool_call") => match self.tool_input(&d.id) {
-                Some(t) => Subject::Tool(Tool {
-                    full: self.full_access(d),
-                    own_pids: t.own_pids.clone().unwrap_or_default(),
-                    kind: t.kind,
-                    title: d.question.trim_start_matches("允许执行：").to_string(),
-                    raw: t.raw,
-                    truncated: false,
-                    locations: t.locations,
-                    options: judge::tool_options(&d.options),
-                    cwd: t.own_dir.as_deref().map(super::limits::canonical).or(own),
-                    project_dir,
-                    branch,
-                }),
+                Some(t) => {
+                    let cwd = t.own_dir.as_deref().map(super::limits::canonical).or(own);
+                    let checkout = item
+                        .as_ref()
+                        .zip(t.raw.get("command"))
+                        .and_then(|(i, c)| checkout(self.core(), i, cwd.as_deref(), c));
+                    Subject::Tool(Tool {
+                        full: self.full_access(d),
+                        own_pids: t.own_pids.clone().unwrap_or_default(),
+                        kind: t.kind,
+                        title: d.question.trim_start_matches("允许执行：").to_string(),
+                        raw: t.raw,
+                        truncated: false,
+                        locations: t.locations,
+                        options: judge::tool_options(&d.options),
+                        cwd,
+                        project_dir,
+                        branch,
+                        checkout,
+                    })
+                }
                 None => judge::subject_from_row(d, own, project_dir, branch),
             },
             ("accept", "item") => match &item {
@@ -608,5 +662,58 @@ mod tests {
             ]
         );
         assert!(parse_checks("没有检查").is_empty());
+    }
+}
+
+#[cfg(test)]
+mod checkout_tests {
+    use super::*;
+
+    fn g(dir: &Path, args: &[&str]) {
+        let ok = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .output()
+            .unwrap()
+            .status
+            .success();
+        assert!(ok, "git {args:?}");
+    }
+
+    #[test]
+    fn a_local_checkout_tells_its_branch_and_settings() {
+        let t = tempfile::tempdir().unwrap();
+        let r = t.path().join("r");
+        std::fs::create_dir_all(&r).unwrap();
+        g(&r, &["init", "-q", "-b", "main"]);
+        g(&r, &["config", "user.email", "t@example.invalid"]);
+        g(&r, &["config", "user.name", "t"]);
+        g(&r, &["commit", "-q", "--allow-empty", "-m", "a"]);
+        let wt = t.path().join("wt");
+        g(
+            &r,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "steve/st-21",
+                &wt.to_string_lossy(),
+                "main",
+            ],
+        );
+        g(&r, &["config", "push.default", "matching"]);
+        let c = local_checkout(&wt).unwrap();
+        assert_eq!(c.head.as_deref(), Some("steve/st-21"));
+        let cfg = c.config.as_ref().unwrap();
+        assert!(
+            cfg.iter()
+                .any(|(k, v)| k == "push.default" && v == "matching"),
+            "{cfg:?}"
+        );
+        g(&wt, &["checkout", "-q", "--detach"]);
+        assert_eq!(local_checkout(&wt).unwrap().head, None);
+        assert_eq!(local_checkout(&t.path().join("none")), None);
     }
 }

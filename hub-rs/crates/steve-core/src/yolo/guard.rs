@@ -26,6 +26,7 @@ use serde_json::{Value, json};
 use super::exec::{Body, Feed};
 use super::judge::{Env, Tool};
 use super::limits::{Places, tool_base, tool_command, tool_kind, tool_paths, tool_targets};
+use super::push::{self, Own};
 use super::shell::{self, Argv};
 
 /// The guard's answer.
@@ -298,6 +299,7 @@ pub fn check(t: &Tool, extra: &[String], env: &Env) -> Guard {
                 project: t.project_dir.as_deref(),
                 extra,
                 pids: &t.own_pids,
+                own: Own::new(t.branch.as_deref(), t.checkout.as_ref()),
             };
             match command(&cmd, &pl, &cx) {
                 Ok(matched) => allow(json!(matched), vec![cmd]),
@@ -452,6 +454,7 @@ fn unreadable(p: &str, pl: &Places, project: Option<&Path>) -> Option<String> {
 }
 
 /// What a command is judged against besides the places.
+#[derive(Clone, Copy)]
 struct Cx<'a> {
     /// The project's main directory (readable).
     project: Option<&'a Path>,
@@ -459,6 +462,8 @@ struct Cx<'a> {
     extra: &'a [String],
     /// Processes this session's agent started (may be stopped by PID).
     pids: &'a [u32],
+    /// The item's own branch and checkout, as they reach this command ([`push`]).
+    own: Own<'a>,
 }
 
 /// The command is allowed: returns the programs it matched; or why not. Every part of a compound line
@@ -473,7 +478,12 @@ fn command(cmd: &str, pl: &Places, cx: &Cx) -> Result<Vec<String>, String> {
     }
     let mut pl = pl.clone();
     let mut matched = Vec::new();
+    let line = cx.own.line(&p);
     for c in &p.cmds {
+        let cx = &Cx {
+            own: line.at(c),
+            ..*cx
+        };
         if c.expands {
             return Err("命令里有变量展开，看不出实际的值".into());
         }
@@ -498,8 +508,16 @@ fn command(cmd: &str, pl: &Places, cx: &Cx) -> Result<Vec<String>, String> {
         // command) or load code (`LD_PRELOAD`: left to the user)
         for b in super::exec::var_bodies(&c.words) {
             match b {
+                // a line a variable carries is nobody's own push
                 Body::Line(l, _) => {
-                    command(&l, &pl, cx)?;
+                    command(
+                        &l,
+                        &pl,
+                        &Cx {
+                            own: Own::default(),
+                            ..*cx
+                        },
+                    )?;
                 }
                 Body::Unseen(why) => return Err(why),
                 _ => {}
@@ -547,6 +565,11 @@ pub(super) fn operands(args: &[String]) -> Vec<&String> {
 
 fn simple(a: &Argv, pl: &Places, cx: &Cx) -> Result<(), String> {
     let (project, extra) = (cx.project, cx.extra);
+    // what a runner or `npx` runs is not written out on the line
+    let deeper = &Cx {
+        own: cx.own.nested(),
+        ..*cx
+    };
     let p = a.program.as_str();
     let args = &a.args;
     if p == "kill" {
@@ -588,7 +611,7 @@ fn simple(a: &Argv, pl: &Places, cx: &Cx) -> Result<(), String> {
                         {
                             return Err(format!("{p} 要运行的 {} 留给你", inner.program));
                         }
-                        simple(&inner, pl, cx)?;
+                        simple(&inner, pl, deeper)?;
                     }
                     Some(_) => return Err(format!("{p} 要运行的命令留给你")),
                     None => {}
@@ -658,11 +681,11 @@ fn simple(a: &Argv, pl: &Places, cx: &Cx) -> Result<(), String> {
             if sub == "exec" {
                 // `npm exec X` runs package X like npx
                 let i = args.iter().position(|x| x == "exec").unwrap_or(0);
-                return npx(&args[i + 1..], pl, cx);
+                return npx(&args[i + 1..], pl, deeper);
             }
             Ok(())
         }
-        "npx" | "pnpx" | "bunx" => npx(args, pl, cx),
+        "npx" | "pnpx" | "bunx" => npx(args, pl, deeper),
         "ps" | "pgrep" | "lsof" => Ok(()),
         "go" => {
             if matches!(sub, "install" | "env" | "get") {
@@ -684,8 +707,14 @@ fn simple(a: &Argv, pl: &Places, cx: &Cx) -> Result<(), String> {
             if !super::exec::bodies(a, &Feed::default()).is_empty() {
                 return Err("git 会运行命令行里给的别的命令，留给你".into());
             }
-            git(args, pl, extra)
+            git(args, pl, extra, cx.own)
         }
+        // the own branch's pull request, an issue (#219): its body files are read
+        "gh" => match push::gh(args, pl, cx.own) {
+            Ok(files) => readable_all(files.iter().collect()),
+            Err(_) if extra.iter().any(|x| x == "gh") => Ok(()),
+            Err(why) => Err(why),
+        },
         "find" => {
             if args.iter().any(|x| {
                 matches!(
@@ -873,7 +902,7 @@ fn curl_local(args: &[String], pl: &Places) -> Result<(), String> {
 }
 
 /// git: the everyday local subcommands, inside the item's directory.
-fn git(args: &[String], pl: &Places, extra: &[String]) -> Result<(), String> {
+fn git(args: &[String], pl: &Places, extra: &[String], own: Own) -> Result<(), String> {
     let mut i = 0;
     while let Some(x) = args.get(i) {
         match x.as_str() {
@@ -902,6 +931,11 @@ fn git(args: &[String], pl: &Places, extra: &[String]) -> Result<(), String> {
         return Ok(());
     }
     let ok = match sub {
+        // the item's own branch to `origin` (#219)
+        "push" => {
+            push::git_push(args, pl, own)?;
+            true
+        }
         "status" | "diff" | "log" | "show" | "add" | "commit" | "checkout" | "switch" | "stash"
         | "rev-parse" | "ls-files" | "blame" | "grep" | "show-ref" | "describe" | "rev-list"
         | "merge-base" | "cat-file" | "shortlog" | "reflog" | "restore" | "mv" | "rm" => true,

@@ -32,6 +32,7 @@ use super::exec::{self, Body, Feed};
 use super::guard::{Guard, ask, kill};
 use super::judge::{Env, Tool};
 use super::limits::{self, Limit, Places, tool_base, tool_command, tool_kind, tool_paths};
+use super::push::Own;
 use super::shell::{self, Argv, Simple};
 
 /// How deep commands that run commands are followed.
@@ -71,7 +72,7 @@ pub fn full(t: &Tool, env: &Env) -> Result<Guard, Limit> {
             pl.base = base;
         }
         let walk = Walk {
-            branch: t.branch.as_deref(),
+            own: Own::new(t.branch.as_deref(), t.checkout.as_ref()),
             pids: &t.own_pids,
         };
         match walk.line(&cmd, &Feed::default(), &pl, 0, true) {
@@ -103,8 +104,9 @@ impl From<String> for Stop {
 
 /// Follows every body of a command line.
 struct Walk<'a> {
-    /// The item's own branch (deleting it is not another item's).
-    branch: Option<&'a str>,
+    /// The item's own branch (deleting it is not another item's) and checkout (pushing it is the
+    /// item's own, written out on the request's line: [`super::push`]).
+    own: Own<'a>,
     /// Processes the session's agent started.
     pids: &'a [u32],
 }
@@ -133,6 +135,11 @@ impl Walk<'_> {
             return Err(Stop::Ask(format!("命令里有 {what}，看不出实际会执行什么")));
         }
         let mut pl = pl.clone();
+        let own = if depth == 0 {
+            self.own.line(&p)
+        } else {
+            self.own.nested()
+        };
         for c in &p.cmds {
             // in text that may be a command line, words that cannot name a program (a pattern
             // such as `^TestA$`, a query such as `.a[]`) are text
@@ -141,7 +148,7 @@ impl Walk<'_> {
             }
             // a `cd` is judged too (into Steve's data, or by a glob that may reach it), then moves
             // what later relative paths mean
-            self.simple(c, &Feed::of(c, feed), &pl, depth)?;
+            self.simple(c, &Feed::of(c, feed), &pl, depth, own)?;
             pl.cd(&c.words);
         }
         Ok(())
@@ -149,8 +156,15 @@ impl Walk<'_> {
 
     /// One simple command: the hard limits as written, then what its variables, it and what it
     /// runs in turn do.
-    fn simple(&self, c: &Simple, feed: &Feed, pl: &Places, depth: u8) -> Result<(), Stop> {
-        if let Some(l) = limits::simple(c, pl, self.branch, 0) {
+    fn simple(
+        &self,
+        c: &Simple,
+        feed: &Feed,
+        pl: &Places,
+        depth: u8,
+        own: Own,
+    ) -> Result<(), Stop> {
+        if let Some(l) = limits::simple(c, pl, own, 0) {
             return Err(Stop::Limit(l));
         }
         for b in exec::var_bodies(&c.words) {
@@ -208,7 +222,7 @@ impl Walk<'_> {
                     words,
                     ..Default::default()
                 };
-                self.simple(&c, &f, pl, depth + 1)
+                self.simple(&c, &f, pl, depth + 1, self.own.nested())
             }
             Body::Code(lang, code) => match exec::code_runs(lang, &code) {
                 Some(why) => Err(Stop::Ask(why)),

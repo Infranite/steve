@@ -473,7 +473,7 @@ impl Tx<'_> {
                         tell = Some((
                             format!("conflict:{}", pr.head),
                             format!(
-                                "（Steve）PR #{} 和默认分支有冲突，合并不了：{}。在你的分支上取最新的默认分支（git fetch origin），rebase 到它上面，解决冲突、跑相关检查，然后 git push --force-with-lease 推回同一个分支。改动内容变了就重新用 steve_deliver 交付。不要合并 PR，也不要推送默认分支。",
+                                "（Steve）PR #{} 和默认分支有冲突，合并不了：{}。在你的分支上取最新的默认分支（git fetch origin），把它合并进来（git merge origin/默认分支），解决冲突、跑相关检查，然后 git push 推回同一个分支：推自己的分支不用批准。仓库自己的说明要求 rebase 时，rebase 之后的强推（git push --force-with-lease）仍要先用 steve_request_approval 请求批准。改动内容变了就重新用 steve_deliver 交付。不要合并 PR，也不要推送默认分支。",
                                 pr.number, pr.url
                             ),
                         ));
@@ -483,7 +483,7 @@ impl Tx<'_> {
                         tell = Some((
                             format!("behind:{}", pr.head),
                             format!(
-                                "（Steve）PR #{} 落后于默认分支，仓库要求合并前先跟上：{}。git fetch origin 后 rebase 到最新的默认分支，跑相关检查，然后 git push --force-with-lease 推回同一个分支。不要合并 PR，也不要推送默认分支。",
+                                "（Steve）PR #{} 落后于默认分支，仓库要求合并前先跟上：{}。git fetch origin 后把最新的默认分支合并进来（git merge origin/默认分支），跑相关检查，然后 git push 推回同一个分支：推自己的分支不用批准。仓库自己的说明要求 rebase 时，rebase 之后的强推（git push --force-with-lease）仍要先用 steve_request_approval 请求批准。不要合并 PR，也不要推送默认分支。",
                                 pr.number, pr.url
                             ),
                         ));

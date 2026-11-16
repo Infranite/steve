@@ -260,6 +260,10 @@ pub struct Tool {
     pub project_dir: Option<PathBuf>,
     /// The item's own branch (`git branch -D` of it stays inside).
     pub branch: Option<String>,
+    /// The item's checkout as read when the request came (only for a command that may push or open
+    /// a pull request): whether `HEAD` is on [`Self::branch`] and where a plain push goes
+    /// ([`super::push`]). `None`: not read.
+    pub checkout: Option<super::push::Checkout>,
     /// Processes the session's agent started (its descendants and its process group), looked up when
     /// the request came; `kill <pid>` is allowed for these only.
     pub own_pids: Vec<u32>,
@@ -1228,6 +1232,7 @@ pub fn subject_from_row(
                 cwd,
                 project_dir,
                 branch,
+                checkout: None,
                 own_pids: Vec::new(),
                 full: false,
             })

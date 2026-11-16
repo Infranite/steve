@@ -652,6 +652,7 @@ fn tool_in(pl: &Place, kind: Option<&str>, raw: Value) -> Facts {
             cwd: Some(pl.cwd.clone()),
             project_dir: Some(pl.root.join("project")),
             branch: Some("steve/st-1".into()),
+            checkout: None,
             own_pids: vec![],
             full: false,
         }),
