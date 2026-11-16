@@ -455,6 +455,9 @@ pub struct Hello {
     pub upstream: String,
     /// Generic connector extension, independent of messaging v1.
     pub connector: Option<crate::connector::Manifest>,
+    /// The messaging platform the service reaches, by a provider id of this Hub (§16); `None`
+    /// when not said or not well-formed.
+    pub platform: Option<String>,
 }
 
 /// Why a hello result is refused.
@@ -556,6 +559,11 @@ impl Hello {
             session,
             upstream,
             connector,
+            platform: v
+                .get("platform")
+                .and_then(Value::as_str)
+                .filter(|p| realm_ok(p))
+                .map(str::to_string),
         })
     }
 
@@ -1046,6 +1054,27 @@ mod tests {
             "limits": {"max_frame_bytes": 4_000_000, "max_batch_items": 100, "write_per_sec": 5,
                        "write_burst": 5},
             "session": {"status": "ok"}, "upstream": {"status": "ok"}, "write_policy": "allowed"})
+    }
+
+    #[test]
+    fn a_hello_may_name_its_platform() {
+        assert_eq!(Hello::parse(&hello()).unwrap().platform, None);
+        let mut v = hello();
+        v["platform"] = "feishu".into();
+        assert_eq!(
+            Hello::parse(&v).unwrap().platform.as_deref(),
+            Some("feishu")
+        );
+        // not well-formed: as if not said, the connection still works
+        for bad in [
+            json!("Feishu Lark"),
+            json!(""),
+            json!(7),
+            json!("x".repeat(65)),
+        ] {
+            v["platform"] = bad;
+            assert_eq!(Hello::parse(&v).unwrap().platform, None);
+        }
     }
 
     #[test]

@@ -151,6 +151,26 @@ impl Integration {
     }
 }
 
+/// `connections.config` key naming the provider a connection's service reaches when its adapter is
+/// a generic one (a channel service's hello `platform`): the connection is listed under that
+/// provider, as one more identity of it, when an adapter of this Hub presents the provider.
+pub const PLATFORM_KEY: &str = "platform";
+
+/// The provider a connection is listed under: its adapter's, or the one its `config` names
+/// ([`PLATFORM_KEY`]) when an adapter presents that provider (`known`: id → name).
+pub fn listed_under(i: &mut Integration, config: &Value, known: &[(String, String)]) {
+    let Some(p) = config.get(PLATFORM_KEY).and_then(Value::as_str) else {
+        return;
+    };
+    if p == i.provider {
+        return;
+    }
+    if let Some((id, name)) = known.iter().find(|(id, _)| id == p) {
+        i.provider = id.clone();
+        i.provider_name = name.clone();
+    }
+}
+
 /// Display order of the known providers; others follow in registration order.
 const ORDER: [&str; 3] = ["feishu", "github", "mail"];
 
@@ -490,8 +510,13 @@ impl Connections {
             });
             providers.len() - 1
         };
+        // the providers an adapter presents, for the connections that name theirs
+        let mut known: Vec<(String, String)> = Vec::new();
         for p in self.providers() {
             let i = integration_shown(p.as_ref());
+            if !known.iter().any(|(id, _)| *id == i.provider) {
+                known.push((i.provider.clone(), i.provider_name.clone()));
+            }
             let k = slot(&mut providers, &i.provider, &i.provider_name);
             providers[k].adapters.push(AdapterInfo {
                 id: p.id().into(),
@@ -521,7 +546,8 @@ impl Connections {
                 providers[k].connections.push(info);
                 continue;
             };
-            let i = integration_shown(p.as_ref());
+            let mut i = integration_shown(p.as_ref());
+            listed_under(&mut i, &r.config, &known);
             let k = slot(&mut providers, &i.provider, &i.provider_name);
             let info = self.info(p.as_ref(), &i, r, a);
             let key = installation_key(&r.id, &r.config);
@@ -741,5 +767,49 @@ mod tests {
         assert_eq!(st.state, "planned");
         assert!(st.caps.is_empty());
         assert_eq!(st.note.as_deref(), Some("读日程"));
+    }
+}
+
+#[cfg(test)]
+mod platform_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn generic() -> Integration {
+        Integration {
+            provider: "ext_ws".into(),
+            provider_name: "其他聊天工具".into(),
+            identity: "self".into(),
+            capabilities: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_connection_naming_a_known_platform_is_listed_under_it() {
+        let known = vec![
+            ("feishu".to_string(), "飞书 / Lark".to_string()),
+            ("ext_ws".into(), "其他聊天工具".into()),
+        ];
+        let mut i = generic();
+        listed_under(&mut i, &json!({"platform": "feishu"}), &known);
+        assert_eq!(
+            (
+                i.provider.as_str(),
+                i.provider_name.as_str(),
+                i.identity.as_str()
+            ),
+            ("feishu", "飞书 / Lark", "self")
+        );
+        // unknown, absent or not a string: where its adapter is
+        for config in [
+            json!({"platform": "slack"}),
+            json!({}),
+            json!({"platform": 3}),
+            Value::Null,
+        ] {
+            let mut i = generic();
+            listed_under(&mut i, &config, &known);
+            assert_eq!(i.provider, "ext_ws", "{config}");
+        }
     }
 }

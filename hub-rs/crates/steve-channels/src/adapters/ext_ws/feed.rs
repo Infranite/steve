@@ -175,6 +175,28 @@ impl ExtWsHook {
         }
     }
 
+    /// The connection's `platform` follows what the service says now: a plugin that learned to say
+    /// it is listed under its platform after its next connect, with no new connection.
+    async fn keep_platform(&self, run: &ConnRun, platform: Option<String>) {
+        let now = platform.map(Value::String).unwrap_or(Value::Null);
+        if run
+            .cx
+            .config()
+            .get(provider::PLATFORM)
+            .unwrap_or(&Value::Null)
+            == &now
+        {
+            return;
+        }
+        run.cx
+            .connections()
+            .update_config(&run.state.ws, &run.state.id, move |c| {
+                c[provider::PLATFORM] = now;
+                true
+            })
+            .await;
+    }
+
     /// One session: open, check, follow the feed until it ends.
     async fn once(&self, run: &ConnRun) -> End {
         let (s, notes, me) = match self.ext.open(&run.cx).await {
@@ -203,6 +225,7 @@ impl ExtWsHook {
             return End::Auth(e);
         }
         self.name_account(run, &me);
+        self.keep_platform(run, s.hello().platform.clone()).await;
         self.ext.set_live(&run.state.id, Some(s.clone()));
         let known = provider::known_systems(&run.cx);
         let mut feed = Feed {

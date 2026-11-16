@@ -43,6 +43,9 @@ pub const PIN: &str = "pin";
 /// `config` keys `verify` stores: the realm and your primary handle as the service gave them.
 pub const REALM: &str = "realm";
 pub const ME: &str = "me";
+/// `connections.config` key: the platform the service said it reaches (hello `platform`, §16), a
+/// provider id. Kept current on every connect; the 接入 page lists the connection under it.
+pub const PLATFORM: &str = steve_modules::accounts::connections::PLATFORM_KEY;
 
 /// How many times a read or a write is tried again (§2, §7).
 const RETRIES: usize = 3;
@@ -827,6 +830,7 @@ impl ConnectionProvider for ExtWs {
             ME: me.primary.to_value(),
             "server": s.hello().server,
             "connector": s.hello().connector,
+            PLATFORM: s.hello().platform,
         }));
         info.strict_identity_owner = true;
         if self.identity == Identity::Bot {
