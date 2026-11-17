@@ -14,6 +14,7 @@ import { cn } from "@/lib/utils"
 import { st, botName, toast } from "@/store"
 import { flowApi, errText, type Load, type Parsed, type Schedule, type ScheduleBody, type ScheduleMode, type ScheduleRun } from "@/api/flow"
 import { HubError } from "@/api"
+import { runtimeSetupHref } from "@/runtime-access"
 import { Modal, Pick, Failed, Clamp, when, botOptions, mainBot, RUN_STATUS } from "@/auto/common"
 import { t, useT } from "@/i18n"
 import { num } from "@/i18n/format"
@@ -77,7 +78,7 @@ function ScheduleDetail({ s, busy, onRun, onEdit, onDelete }: { s: Schedule; bus
   ]
   return (
     <div className="flex flex-col gap-4 px-3 pb-4 sm:pl-14" data-schedule-detail={s.id}>
-      {s.enabled && s.blocked && <Notice tone="attention" data-schedule-blocked-reason action={<a href="#/devices" className="whitespace-nowrap text-blue hover:underline">{t("auto:schedule.blockedFix")}</a>}>{s.blocked}</Notice>}
+      {s.enabled && s.blocked && <Notice tone="attention" data-schedule-blocked-reason action={<a href={runtimeSetupHref()} className="whitespace-nowrap text-blue hover:underline">{t("auto:schedule.blockedFix")}</a>}>{s.blocked}</Notice>}
       {s.last?.status === "failed" && s.last.text && <Notice tone="destructive" data-schedule-error><Clamp text={s.last.text} /></Notice>}
       <div className="grid gap-x-6 gap-y-4 sm:grid-cols-2">
         <dl className="grid grid-cols-[64px_1fr] content-start gap-x-3 gap-y-2 type-callout">
