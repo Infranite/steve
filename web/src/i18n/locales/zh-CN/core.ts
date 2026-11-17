@@ -503,6 +503,16 @@ export default {
     collapseWork: "收起过程",
     expandWork: "展开过程",
   },
+  sendRecovery: {
+    retryRequested: "重试请求已提交，发送结果以渠道记录为准", rewriteRequested: "修改已提交，重新审阅后再发送",
+    submitted: "已收到处理请求，请刷新核对结果；不要重复提交。",
+    body: "拟发送正文（完整）", block: "阻塞说明", decisionSource: "来源：Hub 发送失败卡片", recordSource: "来源：渠道发送记录",
+    restore: "请按实际原因处理。若是外部渠道限制，请到该服务检查会话、机器人或账号的发送权限，或联系服务管理员；具体规则以该服务为准。恢复后手动重试，此处按钮不会授予外部权限。",
+    state: "发送状态：{{state}}", failed: "发送失败", unknown: "结果未知", pending: "等待发送", sent: "已记录为发出", draft: "等待审阅", discarded: "已放弃发送", recalled: "已撤回", unread: "尚未回读",
+    loadingBody: "正在读取完整正文…", missingBody: "未能读取拟发送正文，请刷新或打开渠道会话核对。", refresh: "刷新状态", refreshing: "正在回读…", readFailed: "状态读取失败，当前结果尚未核实。请刷新后再处理。",
+    unknownNote: "发送结果未知，请先在渠道服务核对是否已收到，避免重复发送。", sentAt: "Hub 记录的发送时间：{{at}}。", markedSent: "这条消息已记为发出，尚无确认时间。", noReceipt: "当前接口未提供外部渠道回执，请在渠道会话核对。", changed: "发送状态已变化，请以最新渠道记录为准；不要重复提交旧卡片。",
+    edit: "修改回复", review: "保存修改并重新审阅", reviewNote: "修改只会重新生成待审阅草稿，不会立即发送；确认正文后再批准。", cancelEdit: "取消修改", retry: "授权后重试",
+  },
   card: {
     sessionTitle: "会话 {{title}}",
     waited: "{{bot}} · 等了 {{since}}",

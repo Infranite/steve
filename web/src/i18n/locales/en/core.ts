@@ -519,6 +519,16 @@ export default {
     collapseWork: "Hide work",
     expandWork: "Show work",
   },
+  sendRecovery: {
+    retryRequested: "Retry requested; check the channel record for the send outcome", rewriteRequested: "Changes submitted for review; approval is still required to send",
+    submitted: "The request was accepted. Refresh to check the outcome; do not submit it again.",
+    body: "Full proposed message", block: "What blocked the send", decisionSource: "Source: Hub failed-send decision", recordSource: "Source: channel send record",
+    restore: "Address the reported cause. For an external channel restriction, check the conversation, bot or account sending permissions in that service, or contact its administrator. Its rules determine access. Retry manually after restoring access; this button does not grant external permissions.",
+    state: "Send status: {{state}}", failed: "Failed", unknown: "Outcome unknown", pending: "Waiting to send", sent: "Recorded as sent", draft: "Awaiting review", discarded: "Discarded", recalled: "Recalled", unread: "Not yet read back",
+    loadingBody: "Reading the full message…", missingBody: "Could not read the proposed message. Refresh or open the channel conversation to check.", refresh: "Refresh status", refreshing: "Reading status…", readFailed: "Could not read the current status. Refresh before proceeding.",
+    unknownNote: "The send outcome is unknown. Check the channel service before retrying to avoid a duplicate.", sentAt: "Send time recorded by the Hub: {{at}}.", markedSent: "Marked as sent; no confirmed send time is available.", noReceipt: "This API does not provide an external channel receipt. Check the channel conversation.", changed: "The send state has changed. Use the latest channel record; do not submit the old card again.",
+    edit: "Edit reply", review: "Save changes for review", reviewNote: "Editing creates a draft for review; it does not send immediately. Review the message before approving it.", cancelEdit: "Cancel editing", retry: "Retry after restoring access",
+  },
   card: {
     sessionTitle: "Conversation {{title}}",
     waited: "{{bot}} · waiting {{since}}",

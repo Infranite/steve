@@ -194,6 +194,10 @@ export const st = {
   ch: { personas: [] as any[], spaces: [] as any[], accounts: [] as any[], providers: [] as any[], notify: { acc: "" }, disclosureDefaults: [] as any[] },
   pp: { contacts: [] as any[], orgs: [] as any[], teams: [] as any[], vault: [] as any[], itemPeople: [] as any[], accounts: [] as any[] },
   pendingActions: new Set<string>(),
+  /** An accepted channel recovery must not be submitted again while state readback is stale or unavailable. */
+  submittedChannelDecisions: new Set<string>(),
+  /** The channel record says this old card can no longer recover a send (for example it is pending elsewhere). */
+  inactiveChannelDecisions: new Set<string>(),
   ver: 0,
 }
 const raw = { state: null as State | null, details: new Map<string, RItemDetail>(), events: new Map<string, REvent[]>(), loadingEv: new Set<string>(), loadingItem: new Set<string>() }
@@ -589,7 +593,14 @@ export function refresh(): Promise<void> {
     /* A stopped turn can leave no reply after a restart. Only retire the same untouched draft;
      * another turn or a chunk received during this request is newer than this state snapshot. */
     const settled = !st.thinking ? st.draft : null, epoch = scopeEpoch
-    try { const state = await api.state(); if (epoch !== scopeEpoch) return; raw.state = state; watermark = cursorOf(state) ?? watermark; setPageWorkspace(state.workspace?.id ?? ""); st.login = null; st.error = ""; build(); if (settled && st.draft === settled && !st.thinking && !state.thinking) { st.draft = null; build() } emit() }
+    try {
+      const state = await api.state(); if (epoch !== scopeEpoch) return
+      raw.state = state; watermark = cursorOf(state) ?? watermark; setPageWorkspace(state.workspace?.id ?? ""); st.login = null; st.error = ""; build()
+      for (const locked of [st.submittedChannelDecisions, st.inactiveChannelDecisions])
+        for (const id of locked) if (!state.decisions.some((d) => d.id === id && d.status === "open")) locked.delete(id)
+      if (settled && st.draft === settled && !st.thinking && !state.thinking) { st.draft = null; build() }
+      emit()
+    }
     catch (e) { if (epoch !== scopeEpoch) return; if (e instanceof Unauthenticated) st.login = e.login ?? "/auth/login"; else st.error = (e as Error).message; emit() }
     finally { inflight = null; if (again) { again = false; void refresh() } }
   })()
@@ -989,9 +1000,20 @@ export const acceptChoosesRelease = (i?: Item) => {
 export async function decide(id: string, c: string, text?: string, decision?: string) {
   const { i, w } = cardOf(id, decision); if (!w) return
   const key = "decision:" + w.decision
-  if (st.pendingActions.has(key)) return
+  if (st.pendingActions.has(key) || st.submittedChannelDecisions.has(w.decision) || st.inactiveChannelDecisions.has(w.decision)) return
   st.pendingActions.add(key); emit()
   try {
+    if (w.subject === "chan_message" && w.type === "fail") {
+      // Keep an accepted answer locked until the Hub has confirmed this decision is no longer open.
+      // A failed/stale state refresh must not turn an acknowledged retry into a second send request.
+      try {
+        const result = await api.decide(w.decision, c, text)
+        st.submittedChannelDecisions.add(w.decision); emit()
+        toast(c === "retry" ? t("core:sendRecovery.retryRequested") : c === "rewrite" ? t("core:sendRecovery.rewriteRequested") : decidedText(w, c, i?.b ?? null))
+        await refresh()
+        return result
+      } catch (e) { fail(e); return }
+    }
     if (w.subject === "release" && c === "yes") {
       /* the answer already says whether the release started; "已发布" only comes with the result */
       const d = await call(api.decide(w.decision, c, text))

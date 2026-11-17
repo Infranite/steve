@@ -3,18 +3,36 @@ import "../../src/index.css"
 import { Toaster } from "@/components/ui/toaster"
 import { api } from "../../src/api"
 import i18n from "../../src/i18n"
-import { st, useStore, type Item, type Wait } from "../../src/store"
+import { st, useStore, hubSubs, type Item, type Wait } from "../../src/store"
 import { DecisionCard } from "../../src/ui"
-/* a message handed over to you (the `chan_message` ask); `?fail` / `?unknown` / `?blocked`: a reply that didn't go out; `?en` */
+/* Mocked API fixture, not live send acceptance. `?blocked-legacy` also covers an older Hub without a decision draft. */
 if (location.search.includes("en")) void i18n.changeLanguage("en")
 const q = location.search
+const body = "第一段：这是拟发送的完整正文。\n第二行保持换行。\n\n" + Array.from({ length: 18 }, (_, n) => `${n + 1}. 逐项审阅发送内容，修改不会立即发出。\nhttps://example.invalid/` + "long-segment".repeat(15)).join("\n\n") + "\n\n最后一行：完整正文结束。\n<script>window.__injected = true</script>"
+const fixture = window as any
+fixture.__body = body
 const w: Wait = q.includes("fail") || q.includes("unknown") || q.includes("blocked")
-  ? { type: "fail", subjectId: "cm_out", q: "发到「运维群」的消息没有发出去：超时", draft: "好的", since: "刚刚", decision: "dec_f", subject: "chan_message", session: null, options: q.includes("unknown") ? ["sent", "retry", "discard"] : q.includes("blocked") ? ["discard"] : ["retry", "discard"], by: "steve" }
+  ? { type: "fail", subjectId: "cm_out", q: q.includes("blocked") ? "渠道服务不允许在这个会话里发送（target_forbidden, -32016）" : "发到「运维群」的消息没有发出去：超时", draft: q.includes("legacy") ? undefined : body, since: "刚刚", decision: "dec_f", subject: "chan_message", session: null, options: q.includes("unknown") ? ["sent", "retry", "discard"] : q.includes("legacy") ? ["discard"] : q.includes("blocked") ? ["retry", "rewrite", "discard"] : ["retry", "discard"], by: "steve" }
+  : q.includes("approve") ? { type: "approve", subjectId: "cm_out", q: "拟发送到「运维群」", draft: "请审阅这条草稿", since: "刚刚", decision: "dec_a", subject: "chan_message", session: null, options: ["yes", "no", "rewrite"], by: "steve" }
   : { type: "ask", subjectId: "cm_in", q: "「运维群」里 李雷 找你：老板在吗", draft: "", opts: ["draft_reply", "to_item", "done"], since: "刚刚", decision: "dec_h", subject: "chan_message", session: null, options: ["draft_reply", "to_item", "done"], by: "steve" }
 const i = { id: "", t: "消息", b: "steve", st: "wait", src: ["", ""], ws: "default", project: "", up: "", acc: "inherit", goals: [], now: "", rounds: [], wait: w, waits: [w], ss: [], tl: [], outs: [], anns: [], q: [], qs: null, branch: "", cwd: "/x", detail: false, dependents: [], created: 0, updated: 0 } as unknown as Item
 st.ready = true
 st.orphans = [{ i, w }] as typeof st.orphans
-const calls: unknown[] = ((window as any).__calls = [])
-api.decide = async (id, choice, text) => { calls.push({ id, choice, text }); return { id, status: "resolved", result: { choice } } as any }
-function App() { useStore(); return <main className="mx-auto max-w-[640px] px-4 py-6"><DecisionCard i={i} showItem={false} /><Toaster /></main> }
+const calls: unknown[] = (fixture.__calls = [])
+let resolved = false
+api.decide = async (id, choice, text) => {
+  calls.push({ id, choice, text })
+  if (q.includes("hold")) await new Promise<void>((r) => { fixture.__release = r })
+  if (fixture.__decisionError) throw new Error("没有完成修改，请重试")
+  resolved = true
+  return { id, status: "resolved", result: { choice } } as any
+}
+api.state = async () => {
+  if (fixture.__stateError) throw new Error("fixture state unavailable")
+  return { version: "fixture", web_version: "fixture", workspace: { id: "default", name: "默认" }, workspaces: [], items: [],
+    decisions: !resolved || fixture.__stateStale ? [{ id: w.decision, kind: w.type, subject_type: w.subject, subject_id: w.subjectId, item_id: null, session_id: null, question: w.q, draft: w.draft, options: w.options, status: "open", requested_by: "steve", created: Date.now(), undo: null }] : [],
+    recent: [], bots: [], allBots: [], projects: [], tags: [], tagUses: {}, thread: [], settings: {}, sessions: [], devices: [], runtimes: [] } as any
+}
+fixture.__reload = () => hubSubs.forEach((f) => f({ type: "chan_message", id: "cm_out", space_id: "sp1" }))
+function App() { useStore(); const current = st.orphans[0]; return <main className="mx-auto max-w-[640px] px-4 py-6">{current ? <DecisionCard i={current.i} showItem={false} /> : <p data-closed>这条处理已关闭</p>}<Toaster /></main> }
 createRoot(document.getElementById("root")!).render(<App />)
