@@ -9,10 +9,14 @@ use std::path::PathBuf;
 use steve_node_api::*;
 use steve_store::{Store, StoreError};
 
+#[path = "node_uploads.rs"]
+mod uploads;
+
 pub struct NodeFiles {
     store: Store,
     node: NodeId,
     data_dir: PathBuf,
+    uploads: std::sync::Arc<std::sync::Mutex<uploads::Uploads>>,
 }
 impl NodeFiles {
     pub fn new(store: Store, node: NodeId, data_dir: PathBuf) -> Self {
@@ -20,6 +24,7 @@ impl NodeFiles {
             store,
             node,
             data_dir,
+            uploads: Default::default(),
         }
     }
     fn execution(&self, access: FileAccess) -> ApiResult<ExecutionRef> {
@@ -75,7 +80,7 @@ impl NodeFiles {
 /// Keeps an image that has no file of its own (a module's or a channel's base64 block) as a
 /// job-input artifact of `workspace`, so a job's prompt can name it: content-addressed (the same
 /// bytes in the same workspace are one file) and stored like any attachment, under the same
-/// retention.
+/// retention. Node output images use the same content-addressed attachment storage.
 pub fn job_input(
     store: &Store,
     data_dir: &std::path::Path,
@@ -107,25 +112,15 @@ pub fn job_input(
         .join(&id);
     let row = store.files().get(&id).map_err(internal)?;
     if let Some(row) = &row
-        && (row.workspace_id != workspace || row.sha256 != sha)
+        && (row.workspace_id != workspace
+            || row.sha256 != sha
+            || row.size != bytes.len() as i64
+            || row.mime != mime)
     {
         return Err(internal("job input id taken by another file"));
     }
-    if std::fs::metadata(&path).map(|m| m.len()).ok() != Some(bytes.len() as u64) {
-        use std::io::Write;
-        use std::os::unix::fs::OpenOptionsExt;
-        let dir = path.parent().expect("a file under data/files");
-        std::fs::create_dir_all(dir).map_err(internal)?;
-        let tmp = dir.join(format!(".{id}.{}.tmp", uuid::Uuid::new_v4().simple()));
-        let mut f = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&tmp)
-            .map_err(internal)?;
-        f.write_all(bytes).map_err(internal)?;
-        f.sync_all().map_err(internal)?;
-        std::fs::rename(&tmp, &path).map_err(internal)?;
+    if !crate::files::blob_matches(&path, bytes) {
+        crate::files::write_blob(&path, bytes).map_err(internal)?;
     }
     match row {
         Some(row) => artifact(row.mime),
@@ -153,12 +148,6 @@ pub fn job_input(
 }
 fn denied() -> ApiError {
     ApiError::new(ErrorCode::Denied, "artifact not granted to this execution")
-}
-fn unsupported<T>() -> ApiResult<T> {
-    Err(ApiError::new(
-        ErrorCode::Unsupported,
-        "Node artifact upload is not enabled",
-    ))
 }
 fn component(s: &str) -> bool {
     !s.is_empty() && s != "." && s != ".." && !s.contains(['/', '\\', '\0'])
@@ -277,20 +266,28 @@ impl HubFiles for NodeFiles {
         .await
         .map_err(internal)?
     }
-    async fn begin_upload(&self, _: BeginUpload) -> ApiResult<Transfer> {
-        unsupported()
+    async fn begin_upload(&self, b: BeginUpload) -> ApiResult<Transfer> {
+        self.begin_image(b)
     }
-    async fn upload(&self, _: BlobChunk) -> ApiResult<Transfer> {
-        unsupported()
+    async fn upload(&self, b: BlobChunk) -> ApiResult<Transfer> {
+        self.image_chunk(b)
     }
-    async fn upload_status(&self, _: TransferId) -> ApiResult<TransferState> {
-        unsupported()
+    async fn upload_status(&self, id: TransferId) -> ApiResult<TransferState> {
+        self.image_status(id)
     }
-    async fn finish_upload(&self, _: TransferId) -> ApiResult<ArtifactRef> {
-        unsupported()
+    async fn finish_upload(&self, id: TransferId) -> ApiResult<ArtifactRef> {
+        let this = Self {
+            store: self.store.clone(),
+            node: self.node.clone(),
+            data_dir: self.data_dir.clone(),
+            uploads: self.uploads.clone(),
+        };
+        tokio::task::spawn_blocking(move || this.finish_image(id))
+            .await
+            .map_err(internal)?
     }
-    async fn abort_upload(&self, _: TransferId) -> ApiResult<TransferState> {
-        unsupported()
+    async fn abort_upload(&self, id: TransferId) -> ApiResult<TransferState> {
+        self.abort_image(id)
     }
 }
 

@@ -21,9 +21,10 @@
 //   @failon <model> <message>  the same, only on that model
 //   @stop <reason>       the turn ends with that stopReason
 // A session/load answers as the session it loads.
-import { appendFileSync, copyFileSync, existsSync, readdirSync, renameSync, writeFileSync } from "node:fs"
+import { appendFileSync, copyFileSync, existsSync, mkdtempSync, readdirSync, renameSync, writeFileSync } from "node:fs"
 import { spawn } from "node:child_process"
 import { join } from "node:path"
+import { tmpdir } from "node:os"
 import readline from "node:readline"
 
 const log = process.env.FAKE_RESEARCH_LOG
@@ -71,6 +72,12 @@ async function run(id, prompt) {
     else if (cmd === "asking") tool(a[0], a.slice(1).join(" "), false)
     else if (cmd === "sleep") await sleep(Number(a[0]))
     else if (cmd === "touch") writeFileSync(a[0], "")
+    else if (cmd === "image" || cmd === "imagecwd") {
+      const source = join(mkdtempSync(join(cmd === "image" ? tmpdir() : process.cwd(), "inline-image-")), "qr.png")
+      writeFileSync(source, Buffer.from(rest, "base64"))
+      put("image", source)
+      say(`![授权二维码](${source}) ![重复二维码](${source})`)
+    }
     else if (cmd === "cat") {
       for (const d of readdirSync(a[0])) {
         const f = readdirSync(join(a[0], d)).find((n) => n.endsWith(".txt"))

@@ -1338,6 +1338,137 @@ fn sha256_hex(b: &[u8]) -> String {
     hex::encode(sha2::Sha256::digest(b))
 }
 
+/// A service Node crosses the real authenticated blob RPC link. The browser reads only a Hub
+/// attachment, after the ordinary session's local source has gone, with the original image alt.
+#[tokio::test(flavor = "multi_thread")]
+async fn inline_images_from_service_node_are_authenticated_durable_attachments() {
+    use base64::Engine as _;
+    let h = Home::new();
+    let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../steve-node/tests/research-script.mjs");
+    let log = h.dir.path().join("inline-fixture");
+    let _hub = spawn_mode(
+        &h,
+        Some("service"),
+        &[
+            ("STEVE_ADAPTER_CLAUDE", script.to_str().unwrap()),
+            ("FAKE_RESEARCH_LOG", log.to_str().unwrap()),
+        ],
+    );
+    serving(&h).await;
+    let c = Client::login(&h).await;
+    let health = node_health_until(&h, 30, |n| n["reconciled"] == true).await;
+    assert_eq!(health["reconciled"], true, "{health}; {}", hub_log(&h));
+    let bytes = png([21, 42, 63]);
+    let sid = c
+        .item(
+            &h,
+            &format!(
+                "图片持久验收\n@msg image\n@imagecwd {}",
+                base64::engine::general_purpose::STANDARD.encode(&bytes)
+            ),
+        )
+        .await;
+    assert!(
+        wait(30, || steve_v1(&h, &sid, "/api/files/") > 0).await,
+        "Hub: {}\nNode: {}\nEvents: {:?}\nSource: {:?}",
+        hub_log(&h),
+        std::fs::read_to_string(h.steve().join("data/node/logs/local-node.log")).unwrap_or_default(),
+        h.one("SELECT group_concat(kind||':'||data,char(10)) FROM events WHERE session_id=? AND kind IN ('text','turn_end','system','error')", &sid),
+        std::fs::read_to_string(format!("{}.image", log.display()))
+    );
+    let text = h.one("SELECT json_extract(data,'$.text') FROM events WHERE session_id=? AND kind='text' AND instr(data,'/api/files/')>0 ORDER BY rowid DESC LIMIT 1", &sid).unwrap();
+    assert!(text.starts_with("![授权二维码](/api/files/"), "{text}");
+    assert!(text.contains("?ws=default) ![重复二维码](/api/files/"));
+    let source = std::fs::read_to_string(format!("{}.image", log.display())).unwrap();
+    std::fs::remove_file(&source).unwrap();
+    assert!(!std::path::Path::new(&source).exists());
+    let path = text.split_once("](").unwrap().1.split(')').next().unwrap();
+    let response = c
+        .http
+        .get(format!("{}{path}", c.base))
+        .header("cookie", &c.cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status().as_u16(), 200);
+    assert_eq!(response.headers()["content-type"], "image/png");
+    assert_eq!(response.bytes().await.unwrap().as_ref(), bytes);
+    let unauth = c
+        .http
+        .get(format!("{}{path}", c.base))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(unauth.status().as_u16(), 401);
+    let (st, other) = c
+        .call(
+            "POST",
+            "/api/workspaces",
+            Some(json!({"name": "Other image workspace"})),
+        )
+        .await;
+    assert_eq!(st, 200, "{other}");
+    let other = other["id"].as_str().unwrap();
+    let wrong = c
+        .http
+        .get(format!(
+            "{}{}",
+            c.base,
+            path.replace("ws=default", &format!("ws={other}"))
+        ))
+        .header("cookie", &c.cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(wrong.status().as_u16(), 404);
+    assert_eq!(
+        h.count("SELECT count(*) FROM files WHERE workspace_id=?", "default"),
+        1
+    );
+    // Exercise multiple bulk frames too; a tiny QR alone cannot detect overlarge hex frames.
+    let mut state = 42u32;
+    let pixels = (0..160 * 160 * 3)
+        .map(|_| {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            state as u8
+        })
+        .collect();
+    let image = image::RgbImage::from_raw(160, 160, pixels).unwrap();
+    let mut encoded = std::io::Cursor::new(vec![]);
+    image::DynamicImage::ImageRgb8(image)
+        .write_to(&mut encoded, image::ImageFormat::Png)
+        .unwrap();
+    let large = encoded.into_inner();
+    assert!(large.len() > steve_node_wire::envelope::BULK_FRAME);
+    let large_source = std::path::Path::new(&source).with_file_name("large.png");
+    std::fs::write(&large_source, &large).unwrap();
+    c.say(
+        &sid,
+        &format!("@msg large\n@say ![多块图片]({})", large_source.display()),
+    )
+    .await;
+    let mut text = None;
+    assert!(wait(30, || {
+        text = h.one("SELECT json_extract(data,'$.text') FROM events WHERE session_id=? AND kind='text' AND instr(data,'多块图片')>0 AND instr(data,'/api/files/')>0 ORDER BY rowid DESC LIMIT 1", &sid);
+        text.is_some()
+    }).await, "{}", hub_log(&h));
+    std::fs::remove_file(large_source).unwrap();
+    let text = text.unwrap();
+    let path = text.split_once("](").unwrap().1.split(')').next().unwrap();
+    let r = c
+        .http
+        .get(format!("{}{path}", c.base))
+        .header("cookie", &c.cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 200);
+    assert_eq!(r.bytes().await.unwrap().as_ref(), large);
+}
+
 impl Client {
     async fn upload(&self, name: &str, bytes: Vec<u8>) -> String {
         let r = self

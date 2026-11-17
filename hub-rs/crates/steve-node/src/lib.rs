@@ -31,6 +31,7 @@ mod harness_context;
 mod harness_login;
 pub mod history;
 mod host;
+mod inline_images;
 mod job;
 mod journal;
 mod procs;
