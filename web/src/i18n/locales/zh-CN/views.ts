@@ -536,8 +536,6 @@ export default {
     autoSub: "流程、定时任务和事件源",
     signals: "信号",
     signalsSub: "外部信息，以及 Bot 怎么处理的",
-    devices: "设备",
-    devicesSub: "Hub、运行环境、正在跑的会话",
     accounts: "账号",
     accountsSub: "我的账号、接入 Steve 的连接",
     vault: "保险箱",

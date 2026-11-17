@@ -554,8 +554,6 @@ export default {
     autoSub: "Flows, schedules and event sources",
     signals: "Signals",
     signalsSub: "Outside information, and how bots handled it",
-    devices: "Devices",
-    devicesSub: "Hub, runtimes, running conversations",
     accounts: "Accounts",
     accountsSub: "My accounts and the connections into Steve",
     vault: "Vault",

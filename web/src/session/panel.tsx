@@ -286,7 +286,7 @@ function Runtime({ s }: { s: Sess }) {
           <Row k={t("views:sessionPanel.row.harness")}><span className="inline-flex min-w-0 items-center gap-1.5"><HarnessMark harness={s.harness ?? s.h} className="size-3.5" /><span className="truncate">{s.h ?? t("core:unknownHarness")}</span></span></Row>
           {s.m && <Row k={t("views:sessionPanel.row.model")}><span className="inline-flex min-w-0 items-center gap-1.5"><ModelMark model={s.m} className="size-3.5" /><span className="truncate font-mono type-footnote">{s.m}</span></span></Row>}
           <Row k={t("views:sessionPanel.row.effort")}>{s.reasoningEffort ?? t("views:session.effortInherit")}</Row>
-          <Row k={t("views:sessionPanel.row.device")}><a href={"#/devices/" + s.device} className="hover:underline">{device}</a></Row>
+          <Row k={t("views:sessionPanel.row.device")}><a href={"#/devices/nodes/" + encodeURIComponent(s.device)} className="hover:underline">{device}</a></Row>
           <Row k={t("views:sessionPanel.row.source")}>{s.src}</Row>
           {s.cwd && <Row k={t("views:sessionPanel.row.cwd")}><span className="break-all font-mono type-footnote text-muted-foreground">{s.cwd.replace(/^\/Users\/[^/]+/, "~")}</span></Row>}
         </Rows>

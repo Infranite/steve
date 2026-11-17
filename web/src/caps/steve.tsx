@@ -108,7 +108,7 @@ export function OutsideConnect() {
               <TextField className="min-w-0 flex-1" aria-label={t("caps:outside.tokenName")} value={name} onChange={(e) => setName(e.target.value)} maxLength={60} autoComplete="off" data-outside-token-name />
               <Button type="submit" variant="outline" disabled={busy} data-outside-token-create><KeyRoundIcon />{t("caps:outside.create")}</Button>
             </FieldRow>}
-          {!token && <span className="type-footnote text-muted-foreground">{t("caps:outside.noToken")} <a className="text-primary hover:underline" href="#/settings/access" data-outside-manage>{t("caps:outside.manage")}</a></span>}
+          {!token && <span className="type-footnote text-muted-foreground">{t("caps:outside.noToken")} <a className="text-primary hover:underline" href="#/devices/clients" data-outside-manage>{t("caps:outside.manage")}</a></span>}
         </div>
         <div className="flex min-w-0 flex-col gap-2">
           <div className="flex flex-wrap items-center justify-between gap-2"><span className="type-label text-muted-foreground">{t("caps:outside.client")}</span>

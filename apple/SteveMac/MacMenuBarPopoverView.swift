@@ -219,8 +219,8 @@ struct MacMenuBarPopoverView: View {
             }
 
             HStack {
-                Button(L10n.tr("设置 · 访问与客户端", "Settings · Access")) {
-                    activateMainWindow(route: "#/settings/access")
+                Button(L10n.tr("设备 · 客户端与令牌", "Devices · Clients and tokens")) {
+                    activateMainWindow(route: "#/devices/clients")
                 }
                 .buttonStyle(.borderless)
                 .font(.caption)

@@ -1,58 +1,16 @@
-/* 设置 · 访问与客户端 (A4): this page's Hub and client, the list of Hubs, pairing another device, access tokens, and
- * every signed-in client of yours with the route it last came by. A token's text is shown once, when it is made. */
-import { ago } from "@/i18n/format"
-import { t as tr, useT } from "@/i18n"
-import { useEffect, useMemo, useState, type ReactNode } from "react"
-import { CheckCircle2Icon, KeyRoundIcon, QrCodeIcon, RefreshCwIcon } from "lucide-react"
+/* Signing another device in to this Hub: the QR code of a pairing link, and the link itself (A4). Opened from Add
+ * device, the Clients page, ⌘K and `#/hub/pair`. */
+import { useT } from "@/i18n"
+import { useEffect, useMemo, useState } from "react"
+import { CheckCircle2Icon, RefreshCwIcon } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
-import { TextField } from "@/components/ui/input"
 import { Spinner } from "@/components/ui/spinner"
-import { api, modReq } from "@/api"
-import { HubChooser } from "@/hub-ui"
+import { access, type ClientPairing, type PairingStatus } from "@/access-api"
 import { encodeQr, qrSvgPath } from "@/qr"
 import { toast } from "@/store"
-import { closeSheet, Row, Panel, Section, Card, Notice, Pill, Loading, Tile, Chevron, FieldRow } from "@/ui"
+import { closeSheet, Pill } from "@/ui"
 import { cn } from "cn"
-
-export const ACCESS_CAT = Object.defineProperties(["access", "", KeyRoundIcon, ""], {
-  1: { get: () => tr("pages:access.cat.title"), enumerable: true },
-  3: { get: () => tr("pages:access.cat.desc"), enumerable: true },
-}) as [string, string, any, string]
-
-type Token = { id: string; name: string; created: number; expires: number | null; last_used: number | null; revoked: number | null }
-type Client = { id: string; kind: string; name: string; platform: string; version: string; origin: string | null; created: number; last_seen: number | null; last_route: string | null; last_ip: string | null; revoked: number | null }
-type View = { tokens: Token[]; clients: Client[]; current: string | null; route: string | null; hub: { version: string } }
-type Oidc = { source: "env" | "settings" | "none"; issuer: string | null; client_id: string | null; has_secret: boolean; callback: string; enabled: boolean }
-export type ClientPairing = {
-  id: string
-  code: string
-  name: string
-  expires: number
-  public_url: string | null
-  lan_urls: string[]
-  loopback_only: boolean
-  /** one pairing link per address of the Hub, the public one first */
-  links: { url: string; kind: "public" | "lan"; link: string }[]
-}
-type PairingStatus = {
-  id: string
-  status: "pending" | "claimed" | "expired"
-  expires: number
-  client: { id: string; name: string; kind: string; platform: string } | null
-}
-
-const access = {
-  get: () => modReq<View>("GET", "/access"),
-  create: (name: string) => modReq<{ token: string; item: Token }>("POST", "/access/tokens", { name }),
-  revokeToken: (id: string) => modReq("DELETE", `/access/tokens/${encodeURIComponent(id)}`),
-  revokeClient: (id: string) => modReq("DELETE", `/access/clients/${encodeURIComponent(id)}`),
-  createPairing: () => modReq<ClientPairing>("POST", "/access/pairings", {}),
-  pairingStatus: (id: string) => modReq<PairingStatus>("GET", `/access/pairings/${encodeURIComponent(id)}`),
-  oidc: () => modReq<Oidc>("GET", "/access/oidc"),
-  saveOidc: (b: { issuer: string; client_id: string; secret?: string }) => modReq<Oidc>("PUT", "/access/oidc", b),
-  dropOidc: () => modReq<Oidc>("DELETE", "/access/oidc"),
-}
 
 function QrSvg({ text, size = 216 }: { text: string; size?: number }) {
   const rendered = useMemo(() => {
@@ -74,8 +32,8 @@ function QrSvg({ text, size = 216 }: { text: string; size?: number }) {
 }
 
 /** The pairing of another device: the QR code of a pairing link, and the link itself. A phone's camera opens the
- * link in a browser, the Steve app reads the same code. Used in 设置 · 访问与客户端 and in `PairDeviceDialog`. */
-function PairContent({ onClaimed, ask = false }: { onClaimed?: () => void; ask?: boolean }) {
+ * link in a browser, the Steve app reads the same code. */
+export function PairContent({ onClaimed, ask = false }: { onClaimed?: () => void; ask?: boolean }) {
   const t = useT()
   const [pair, setPair] = useState<ClientPairing | null>(null)
   /* the address the code is drawn for: a device that cannot reach the first is given another */
@@ -208,7 +166,7 @@ function PairContent({ onClaimed, ask = false }: { onClaimed?: () => void; ask?:
   )
 }
 
-/** the pairing in a dialog: `openSheet("pairClient")`, from the sidebar's Hub switcher, ⌘K, 我的, and `#/hub/pair`
+/** the pairing in a dialog: `openSheet("pairClient")`, from Add device, the Clients page, ⌘K and `#/hub/pair`
  * (`ask`: opened by an address, so the code is made on a click) */
 export function PairDeviceDialog({ ask }: { ask?: boolean }) {
   const t = useT()
@@ -226,130 +184,4 @@ export function PairDeviceDialog({ ask }: { ask?: boolean }) {
       </DialogContent>
     </Dialog>
   )
-}
-
-/** single sign-on (owner only): from the environment it is shown, from the settings it can be set and turned off */
-function OidcSection() {
-  const t = useT()
-  const [o, setO] = useState<Oidc | null>(null)
-  const [denied, setDenied] = useState(false)
-  const [f, setF] = useState({ issuer: "", client_id: "", secret: "" })
-  const [busy, setBusy] = useState(false), [open, setOpen] = useState(false)
-  useEffect(() => { access.oidc().then((x) => { setO(x); setF({ issuer: x.issuer ?? "", client_id: x.client_id ?? "", secret: "" }) }, () => setDenied(true)) }, [])
-  if (denied || !o) return null
-  const save = async () => {
-    setBusy(true)
-    try { const x = await access.saveOidc({ issuer: f.issuer.trim(), client_id: f.client_id.trim(), ...(f.secret.trim() ? { secret: f.secret.trim() } : {}) }); setO(x); setF((v) => ({ ...v, secret: "" })); toast(t("pages:access.oidcSaved")) }
-    catch (e) { toast((e as Error).message) }
-    setBusy(false)
-  }
-  const off = async () => { try { const x = await access.dropOidc(); setO(x); setF({ issuer: "", client_id: "", secret: "" }) } catch (e) { toast((e as Error).message) } }
-  /* a field with its label on the left (stacked on a phone), as a row of the panel */
-  const field = (label: string, input: ReactNode) => <label className="grid gap-1.5 px-3 py-2.5 sm:grid-cols-[9rem_minmax(0,1fr)] sm:items-center sm:gap-3">
-    <span className="type-callout text-muted-foreground">{label}</span>{input}</label>
-  /* single sign-on is optional and rare: while nothing is set it is one row; the form opens on demand */
-  if (o.source === "none" && !open) return <Section data-oidc label={t("pages:access.oidc")}>
-    <Panel><Row title={t("pages:access.oidcNone")} sub={t("pages:access.oidcSub")}><Button size="sm" variant="outline" onClick={() => setOpen(true)} data-oidc-open>{t("pages:access.oidcSetUp")}</Button></Row></Panel>
-  </Section>
-  return <Section data-oidc label={t("pages:access.oidc")} note={t("pages:access.oidcSub")}>
-    <Panel className={open ? "anim-in" : undefined}>
-      <Row title={t("pages:access.oidcCallback")} sub={<span className="type-code break-all">{o.callback}</span>} />
-      {o.source === "env" ? <Row title={o.issuer ?? ""} sub={t("pages:access.oidcFromEnv")} /> : <>
-        {field("Issuer", <TextField size="sm" value={f.issuer} onChange={(e) => setF({ ...f, issuer: e.target.value })} placeholder="https://id.example.com/application/o/steve/" data-oidc-issuer />)}
-        {field(t("pages:access.oidcClient"), <TextField size="sm" value={f.client_id} onChange={(e) => setF({ ...f, client_id: e.target.value })} placeholder={t("pages:access.oidcClient")} data-oidc-client />)}
-        {field(t("pages:access.oidcSecret"), <TextField size="sm" type="password" value={f.secret} onChange={(e) => setF({ ...f, secret: e.target.value })} placeholder={o.has_secret ? t("pages:access.oidcSecretKept") : t("pages:access.oidcSecret")} autoComplete="new-password" data-oidc-secret />)}
-        <div className="flex justify-end gap-2 px-3 py-2.5">{o.source === "none" && <Button size="sm" variant="ghost" className="text-muted-foreground" onClick={() => setOpen(false)}>{t("common:action.cancel")}</Button>}{o.source === "settings" && <Button size="sm" variant="ghost" className="text-muted-foreground" onClick={() => void off()} data-oidc-off>{t("pages:access.oidcOff")}</Button>}
-          <Button size="sm" variant="outline" onClick={() => void save()} disabled={busy || !f.issuer.trim() || !f.client_id.trim()} data-oidc-save>{busy ? <Spinner className="size-4" /> : t("pages:access.oidcSave")}</Button></div>
-      </>}
-    </Panel>
-  </Section>
-}
-
-/** a route as words: “局域网 · TLS” */
-const routeText = (t: ReturnType<typeof useT>, r: string | null) => {
-  if (!r) return t("pages:access.route.unknown")
-  const [base, tls] = r.split("+")
-  const known = ["loopback", "lan", "tailnet", "proxy", "public"].includes(base)
-  return (known ? t(`pages:access.route.${base as "lan"}`) : base) + (tls ? " · TLS" : "")
-}
-
-export function AccessSettingsPane() {
-  const t = useT()
-  const [v, setV] = useState<View | null>(null)
-  const [error, setError] = useState("")
-  const [name, setName] = useState("")
-  const [fresh, setFresh] = useState<string | null>(null)
-  const [showPair, setShowPair] = useState(false)
-  const [busy, setBusy] = useState(false)
-  const load = () => access.get().then(setV, (e: Error) => setError(e.message))
-  useEffect(() => { void load() }, [])
-  const create = async () => {
-    setBusy(true)
-    try { const r = await access.create(name.trim()); setFresh(r.token); setName(""); await load() }
-    catch (e) { toast((e as Error).message) }
-    setBusy(false)
-  }
-  const revoke = async (f: () => Promise<unknown>) => { try { await f(); await load() } catch (e) { toast((e as Error).message) } }
-  if (error) return <Notice tone="destructive">{error}</Notice>
-  if (!v) return <Loading />
-  const live = (x: { revoked: number | null }) => !x.revoked
-  /* what this page is opened for, first: the Hub you are on (and signing this client out), then signing in another
-   * device; the address and version of the Hub are in its row of the list, not repeated above it */
-  return <div className="flex flex-col gap-8" data-access-pane>
-    <Section data-hub-switcher label={t("pages:access.hubs")}>
-      <HubChooser manage bare />
-      <Panel className="mt-3"><Row title={t("pages:access.thisClient")} sub={v.current ? routeText(t, v.route) : t("pages:access.browserSession")} data-access-hub>
-        <Button size="sm" variant="outline" onClick={async () => { await api.logout().catch(() => {}); location.reload() }} data-sign-out>{t("pages:access.signOut")}</Button>
-      </Row></Panel>
-    </Section>
-
-    <Section data-pair-device-section label={t("pages:access.pairTitle")} note={showPair ? undefined : t("pages:access.pairSub")}>
-      {showPair ? (
-        <Card className="p-5 anim-in">
-          <PairContent onClaimed={() => void load()} />
-        </Card>
-      ) : (
-        <Panel><Row icon={<Tile I={QrCodeIcon} />} title={t("pages:access.pairButton")} onClick={() => setShowPair(true)} data-open-pair-qr><Chevron /></Row></Panel>
-      )}
-    </Section>
-
-    <Section label={t("pages:access.tokens")} note={t("pages:access.tokensSub")}>
-      {fresh && <div className="mb-3 rounded-xl bg-success/10 px-4 py-3 anim-in" data-fresh-token>
-        <div className="type-footnote text-muted-foreground">{t("pages:access.shownOnce")}</div>
-        <code className="mt-1 block break-all type-code text-foreground">{fresh}</code>
-        <div className="mt-2 flex gap-2"><Button size="sm" variant="outline" onClick={() => { void navigator.clipboard?.writeText(fresh); toast(t("pages:access.copied")) }}>{t("pages:access.copy")}</Button><Button size="sm" variant="ghost" onClick={() => setFresh(null)}>{t("pages:access.done")}</Button></div>
-      </div>}
-      <Panel>
-        {v.tokens.filter(live).map((x) => <Row key={x.id} title={x.name} sub={t("pages:access.tokenSub", { made: ago(x.created), used: x.last_used ? ago(x.last_used) : t("pages:access.never") })}>
-          <Button size="sm" variant="ghost" onClick={() => void revoke(() => access.revokeToken(x.id))} data-revoke-token={x.id}>{t("pages:access.revoke")}</Button></Row>)}
-        <FieldRow onSubmit={(e) => { e.preventDefault(); void create() }}><TextField size="sm" className="min-w-0 flex-1" value={name} onChange={(e) => setName(e.target.value)} placeholder={t("pages:access.tokenName")} aria-label={t("pages:access.tokenName")} data-token-name />
-          <Button size="sm" variant="outline" type="submit" disabled={busy} data-new-token>{busy ? <Spinner className="size-4" /> : t("pages:access.newToken")}</Button></FieldRow>
-      </Panel>
-    </Section>
-
-    <Clients v={v} onRevoke={(ids) => void revoke(() => Promise.all(ids.map((id) => access.revokeClient(id))))} />
-
-    <OidcSection />
-  </div>
-}
-
-const CLIENTS_SHOWN = 5
-/** the signed-in clients, newest first: one row per client (name, kind, platform and route alike), saying how many
- *  sign-ins it stands for; this client always on its own row. Signing a row out signs out all it stands for. */
-function Clients({ v, onRevoke }: { v: View; onRevoke: (ids: string[]) => void }) {
-  const t = useT()
-  const [all, setAll] = useState(false)
-  const groups = new Map<string, Client[]>()
-  for (const c of [...v.clients].filter((c) => !c.revoked).sort((a, b) => (b.last_seen ?? b.created) - (a.last_seen ?? a.created))) {
-    const key = c.id === v.current ? c.id : [c.name, c.kind, c.platform, c.last_route].join("\u0000")
-    groups.set(key, [...(groups.get(key) ?? []), c])
-  }
-  const rows = [...groups.values()], shown = all ? rows : rows.slice(0, CLIENTS_SHOWN)
-  return <Section data-access-clients label={t("pages:access.clients")}><Panel>
-    {shown.map((g) => { const c = g[0]; return <Row key={c.id} className="group/client" data-client={c.id} title={<span className="flex min-w-0 items-center gap-2"><span className="truncate">{c.name}</span>{g.length > 1 && <span className="shrink-0 type-footnote tabular-nums text-muted-foreground" data-client-count={g.length}>×{g.length}</span>}{c.id === v.current && <Pill tone="info">{t("pages:access.current")}</Pill>}</span>}
-      sub={[c.platform || c.kind, routeText(t, c.last_route), c.last_seen ? ago(c.last_seen) : t("pages:access.never")].join(" · ")}>
-      {c.id !== v.current && <Button size="sm" variant="ghost" className="text-muted-foreground opacity-0 group-hover/client:opacity-100 group-focus-within/client:opacity-100 focus-visible:opacity-100 pointer-coarse:opacity-100" onClick={() => onRevoke(g.map((x) => x.id))} data-revoke-client={c.id}>{t("pages:access.signOutClient")}</Button>}</Row> })}
-    {!rows.length && <Row title={t("pages:access.noClients")} />}
-    {rows.length > CLIENTS_SHOWN && <button type="button" className="w-full px-3 py-2.5 text-left type-callout text-muted-foreground hover:text-foreground" onClick={() => setAll(!all)} aria-expanded={all} data-clients-more>{all ? t("pages:access.clientsLess") : t("pages:access.clientsMore", { count: rows.length - CLIENTS_SHOWN })}</button>}
-  </Panel></Section>
 }

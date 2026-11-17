@@ -37,12 +37,12 @@ const CapabilitiesView = lazyView(() => import("@/caps/page").then((m) => ({ def
 const BotView = lazyView(() => import("@/manage").then((m) => ({ default: m.BotView })))
 const NewBotDialog = lazyView(() => import("@/manage").then((m) => ({ default: m.NewBotDialog })))
 const DeleteBotDialog = lazyView(() => import("@/manage").then((m) => ({ default: m.DeleteBotDialog })))
-const HubOfflinePage = lazyView(() => import("@/hub-settings").then(m => ({ default: m.HubOfflinePage })))
+const HubOfflinePage = lazyView(() => import("@/devices-hub").then(m => ({ default: m.HubOfflinePage })))
 const SettingsView = lazyView(() => import("@/manage").then((m) => ({ default: m.SettingsView })))
 const TagDialog = lazyView(() => import("@/manage").then((m) => ({ default: m.TagDialog })))
-const DevicesView = lazyView(() => import("@/devices").then((m) => ({ default: m.DevicesView })))
-const DeviceView = lazyView(() => import("@/devices").then((m) => ({ default: m.DeviceView })))
-const PairDialog = lazyView(() => import("@/devices").then((m) => ({ default: m.PairDialog })))
+const DevicesRoute = lazyView(() => import("@/devices").then((m) => ({ default: m.DevicesRoute })))
+const PairDialog = lazyView(() => import("@/devices-add").then((m) => ({ default: m.PairDialog })))
+const AddDeviceDialog = lazyView(() => import("@/devices-add").then((m) => ({ default: m.AddDeviceDialog })))
 const PairDeviceDialog = lazyView(() => import("@/access-settings").then((m) => ({ default: m.PairDeviceDialog })))
 const ProjectsView = lazyView(() => import("@/projects").then((m) => ({ default: m.ProjectsView })))
 const ProjectView = lazyView(() => import("@/projects").then((m) => ({ default: m.ProjectView })))
@@ -195,7 +195,7 @@ export default function App({ deliveryId }: { deliveryId?: string }) {
   const title = (sub: string) => <><Robot k="steve" size={72} /><div><div className="type-title">Steve</div><div className="mt-1 type-callout text-muted-foreground">{sub}</div></div></>
   const list = others || intent === "add"
   if (pairing) return <Splash><PairClaim /></Splash>
-  if (a === "settings" && b === "hub" && !st.login && (hub === "missing" || (!st.ready && !!st.error))) return <HubOfflinePage />
+  if ((a === "settings" || a === "devices") && b === "hub" && !st.login && (hub === "missing" || (!st.ready && !!st.error))) return <HubOfflinePage />
   if (hub === "missing") return (
     <Splash>{title(t("shell:app.connectTitle"))}<HubsOffer className="max-w-xs" /><HubChooser down className="max-w-xs" /></Splash>
   )
@@ -225,12 +225,14 @@ export default function App({ deliveryId }: { deliveryId?: string }) {
     a === "items" ? (b ? <ItemView key={b} id={b} /> : <ItemsView />) :
     a === "projects" ? (b ? <ProjectView key={b} id={b} /> : <ProjectsView />) :
     a === "sessions" ? (b ? <SessionView key={b} k={b} /> : <SessionsView />) :
+    /* Hub management and access moved to the devices pages */
+    a === "settings" && (b === "hub" || b === "access") ? <Redirect to={b === "hub" ? "#/devices/hub" : "#/devices/clients"} /> :
     a === "settings" ? <SettingsView /> :
     a === "bots" ? (b ? <BotView key={b} k={b} /> : <BotsView />) :
     a === "capabilities" ? <CapabilitiesView tab={b} /> :
     a === "design" ? (b === "components" ? <DesignShowroom /> : <DesignView />) :
     a.split("?")[0] === "knowledge" ? <KnowledgeView sub={b} id={c} /> :
-    a === "devices" ? (b ? <DeviceView key={b} id={b} /> : <DevicesView />) :
+    a === "devices" ? <DevicesRoute b={b} c={c} /> :
     a.split("?")[0] === "github" ? <GitHubView repo={b?.split("?")[0]} /> :
     a === "integrations" ? <IntegrationsRoute id={b} /> :
     a === "channels" ? <ChannelsRoute b={b} id={c} /> :
@@ -258,6 +260,7 @@ export default function App({ deliveryId }: { deliveryId?: string }) {
         {sh?.kind === "link" && <LinkDialog k={sh.payload.k} />}
         {sh?.kind === "import" && <ImportDialog />}
         {sh?.kind === "deleteBot" && <DeleteBotDialog k={sh.payload.k} />}
+        {sh?.kind === "addDevice" && <AddDeviceDialog />}
         {sh?.kind === "pair" && <PairDialog />}
         {sh?.kind === "pairClient" && <PairDeviceDialog ask={sh.payload?.ask === true} />}
         {sh?.kind === "hubs" && <HubsDialog add={sh.payload?.add} />}

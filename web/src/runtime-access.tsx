@@ -11,7 +11,7 @@ import { permissionModes, runtimeReason, runtimeState, supportsPermission } from
 
 export const runtimeSetupHref = () => {
   const hub = linkedHubDevice(st.devices)
-  return hub ? "#/devices/" + encodeURIComponent(hub.id) : "#/devices"
+  return hub ? "#/devices/nodes/local" : "#/devices/nodes"
 }
 
 export function RuntimeSetupLink() {

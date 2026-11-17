@@ -13,7 +13,7 @@ const goto=async(hash)=>{await page.goto(base+'/#'+hash);await page.reload();awa
 const scale=async(root='body')=>page.locator(root).evaluate(el=>{const els=[el,...el.querySelectorAll('*')].filter(e=>e instanceof HTMLElement); const sizes=els.map(e=>parseFloat(getComputedStyle(e).fontSize));els.forEach((e,i)=>e.style.fontSize=sizes[i]*2+'px')})
 try {
  await page.goto(base+'/auth/dev')
- await goto('/devices/hub')
+ await goto('/devices/nodes/local')
  const state=await (await page.request.get(base+'/api/state')).json()
  await fs.writeFile(out+'/api-evidence.json',JSON.stringify({devices:state.devices,sessions:state.sessions.filter(s=>s.id.startsWith('case-')).map(s=>({id:s.id,item_id:s.item_id,status:s.status,device_id:s.device_id,readonly:s.readonly,busy:s.busy,queue:s.queued.map(q=>q.id)})),decisions:state.decisions.map(d=>({id:d.id,session_id:d.session_id,item_id:d.item_id,status:d.status}))},null,2))
  await check('real state retains idle/running requests, busy, startup, error and readonly evidence',()=>{
@@ -29,7 +29,7 @@ try {
   assert.equal(await page.locator('[data-work-session=case-unassigned]').count(),0)
  })
  for(const width of [1440,390,320]) for(const percent of [100,200]) {
-  await page.setViewportSize({width,height:1000});await goto('/devices/hub')
+  await page.setViewportSize({width,height:1000});await goto('/devices/nodes/local')
   await page.locator('[data-monitor-expanded] > summary').click()
   if(percent===200) await scale()
   for(const [request,sid,status,item] of [['case-request-running','case-running','running','TEST-1'],['case-request-idle','case-idle-request','idle','TEST-2']]) {
@@ -66,7 +66,7 @@ try {
    await page.setViewportSize({width,height:1000})
   })
  }
- await page.setViewportSize({width:1440,height:1000});await goto('/devices/hub')
+ await page.setViewportSize({width:1440,height:1000});await goto('/devices/nodes/local')
  await page.locator('[data-session-queue=case-queued] > summary').click()
  await page.locator('[data-queue-id=queue-1]').waitFor();await page.locator('[data-queue-id=queue-2]').waitFor()
  await page.locator('.device-recent > summary').click();await page.locator('[data-work-session=case-readonly]').waitFor();await page.locator('[data-work-session=case-ended]').waitFor()

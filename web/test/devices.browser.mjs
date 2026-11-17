@@ -1,4 +1,4 @@
-// Real DevicesView with an isolated owner API. Run against Vite, with external Playwright.
+// The real devices pages with an isolated owner API. Run against Vite, with external Playwright.
 import assert from "node:assert/strict"
 import { mkdir } from "node:fs/promises"
 const { chromium } = await import(process.env.PLAYWRIGHT_MODULE || "playwright")
@@ -7,11 +7,12 @@ const base = process.env.STEVE_TEST_WEB || "http://127.0.0.1:5198"
 const page = await browser.newPage({ locale: "zh-CN", viewport: { width: 1360, height: 980 } })
 const errors = [], writes = []
 page.on("pageerror", e => errors.push(e.message))
-const remote = { node_id: "fixture-remote", name: "Remote laptop", fingerprint: "fixture-fingerprint", state: "active", linked: true, local: false, max_sessions: 32, running: 32, waiting: 2, last_seen: Date.now() - 60_000 }
+const remote = { node_id: "fixture-remote", name: "Remote laptop", fingerprint: "9e3f5a07c21b84d60f9a77e3b10c4d52", state: "active", linked: true, local: false, max_sessions: 32, running: 32, waiting: 2, last_seen: Date.now() - 60_000 }
 let nodes = [{ ...remote }, { ...remote }, { ...remote, node_id: "fixture-local", local: true }]
 let status = 200, release, reads = 0
 const held = new Promise(resolve => { release = resolve })
 let hold = true
+const json = (route, body, code = 200) => route.fulfill({ status: code, contentType: "application/json", body: JSON.stringify(body) })
 await page.route("**/*", async route => {
   const request = route.request(), url = new URL(request.url())
   if (url.origin !== base) return route.abort("blockedbyclient")
@@ -21,78 +22,48 @@ await page.route("**/*", async route => {
     const { max_sessions } = request.postDataJSON()
     assert.ok(Number.isInteger(max_sessions) && max_sessions >= 1 && max_sessions <= 256)
     nodes = nodes.map(n => n.node_id === remote.node_id ? { ...n, max_sessions } : n)
-    return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ ok: true }) })
+    return json(route, { ok: true })
+  }
+  if (url.pathname === "/api/nodes/fixture-remote/pause" && request.method() === "POST") {
+    nodes = nodes.map(n => n.node_id === remote.node_id ? { ...n, state: "paused" } : n)
+    return json(route, { ok: true })
   }
   if (url.pathname === "/api/nodes") {
     reads++
     assert.equal(request.headers()["x-steve-ws"], "fixture-workspace")
     if (hold) await held
-    return route.fulfill({ status, contentType: "application/json", body: JSON.stringify(status === 200 ? { nodes } : { error: "fixture: node list unavailable" }) })
+    return json(route, status === 200 ? { nodes } : { error: "fixture: node list unavailable" }, status)
   }
-  // OwnerChip's optional contacts probe is deliberately not wired in this fixture.
-  return route.fulfill({ status: 404, contentType: "application/json", body: "{}" })
+  if (url.pathname === "/api/access") return json(route, { tokens: [], clients: [{ id: "c1", kind: "web", name: "This browser", platform: "macOS", version: "x", origin: null, created: 0, last_seen: Date.now(), last_route: "lan", last_ip: null, revoked: null }], current: "c1", route: "lan", hub: { version: "0.2.112" } })
+  // OwnerChip's contacts probe, vitals and the device rows are deliberately not wired in this fixture.
+  return json(route, {}, 404)
 })
 const row = () => page.locator('[data-node-row="fixture-remote"]')
-const refresh = () => page.locator("[data-refresh-nodes]").click()
+/* the page reads again at once when it becomes visible, instead of waiting for its 10-second poll */
+const reread = () => page.evaluate(() => document.dispatchEvent(new Event("visibilitychange")))
 try {
-  await page.goto(base + "/test/fixtures/devices.html?legacy")
-  await page.locator("[data-nodes-loading]").waitFor()
-  assert.equal(await page.getByText("还没有其他设备", { exact: true }).count(), 0, "loading is not an empty inventory")
+  await page.goto(base + "/test/fixtures/devices.html?legacy#/devices/nodes")
+  await page.locator("[data-nodes]").waitFor()
+  assert.equal(await page.locator("[data-node-row]").count(), 0, "loading is not an empty inventory")
   hold = false; release()
   await row().waitFor()
-  assert.equal(await page.locator("[data-node-row]").count(), 1, "local Node and duplicate identities are not extra devices")
+  assert.deepEqual(await page.locator("[data-node-row]").evaluateAll(xs => xs.map(x => x.getAttribute("data-node-row"))), ["local", "fixture-remote"], "the Hub's own Node first; duplicate identities are not extra Nodes")
   assert.equal(await page.getByText("Legacy duplicate", { exact: true }).count(), 0, "exact legacy identity is deduplicated")
-  await page.getByText("其他设备 · 1", { exact: true }).waitFor()
-  await row().getByText("已启用", { exact: true }).waitFor()
-  await row().getByText("已连接", { exact: true }).waitFor()
+  await page.locator('[data-seg="nodes"] .ui-segc__count').getByText("2", { exact: true }).waitFor()
+  await page.locator('[data-seg="nodes"][data-warn]').waitFor()
+  await row().locator("[data-node-status=queued]").getByText("排队 2", { exact: true }).waitFor()
   assert.equal(await page.getByText("全部在 Hub", { exact: true }).count(), 0)
+
   await row().click()
+  await page.waitForFunction(() => location.hash === "#/devices/nodes/fixture-remote")
   const detail = page.locator("[data-node-detail]")
-  await detail.getByText(remote.fingerprint, { exact: true }).waitFor()
+  await detail.locator(`[data-node-fingerprint="${remote.fingerprint}"]`).getByText("9e3f 5a07 c21b 84d6 0f9a 77e3 b10c 4d52", { exact: true }).waitFor()
   await detail.getByText("最近连接", { exact: true }).waitFor()
   assert.equal(await detail.getByText("Hub-only harness", { exact: true }).count(), 0)
   assert.equal(await detail.locator("[data-owner-chip]").count(), 0)
-  await page.keyboard.press("Escape")
-
-  nodes = [{ ...remote, linked: false }]
-  await refresh()
-  await row().getByText("未连接", { exact: true }).waitFor()
-  await row().getByText("已启用", { exact: true }).waitFor()
-  for (const state of ["pending", "paused", "revoked"]) {
-    nodes = [{ ...remote, state }]
-    await refresh()
-    await row().getByText({ pending: "等待确认", paused: "已暂停", revoked: "已撤销" }[state], { exact: true }).waitFor()
-  }
-  status = 503
-  await refresh()
-  await page.locator("[data-node-error]").waitFor()
-  await row().getByText("连接状态待刷新", { exact: true }).waitFor()
-  await row().getByText("已撤销 · 上次读取", { exact: true }).waitFor()
-  assert.equal(await page.getByText("还没有其他设备", { exact: true }).count(), 0)
-  await page.reload()
-  await page.locator("[data-node-error]").waitFor()
-  assert.equal(await page.getByText("还没有其他设备", { exact: true }).count(), 0, "initial failure is not empty")
-  status = 200; nodes = []
-  await page.goto(base + "/test/fixtures/devices.html")
-  await page.getByText("还没有其他设备", { exact: true }).waitFor()
-  nodes = [{ ...remote }]
-  const beforePoll = reads
-  await row().waitFor({ timeout: 13_000 })
-  assert.ok(reads > beforePoll, "visible inventory refreshes without a page reload")
-  await page.getByText("其他设备 · 1", { exact: true }).waitFor()
-
-  if (process.env.STEVE_TEST_SHOTS) {
-    await mkdir(process.env.STEVE_TEST_SHOTS, { recursive: true })
-    await page.screenshot({ path: process.env.STEVE_TEST_SHOTS + "/devices-desktop.png", fullPage: true, animations: "disabled" })
-  }
-  await page.setViewportSize({ width: 390, height: 844 })
-  assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), "mobile has no horizontal overflow")
-  await row().click(); await detail.getByText(remote.fingerprint, { exact: true }).waitFor()
-  if (process.env.STEVE_TEST_SHOTS) await page.screenshot({ path: process.env.STEVE_TEST_SHOTS + "/devices-mobile.png", fullPage: true, animations: "disabled" })
   assert.deepEqual(writes, [], "inventory and identity inspection never mutate pairing or permissions")
   // Capacity changes are explicit saves, not new pairing or execution approvals.
   const capacity = detail.locator("[data-session-limit-input]")
-  await capacity.waitFor()
   assert.equal(await capacity.getAttribute("aria-valuenow"), "32")
   assert.match(await detail.locator("[data-limit-semantics]").textContent(), /无需重启.*不打断/)
   await capacity.fill("64"); await capacity.blur()
@@ -102,15 +73,46 @@ try {
   assert.deepEqual(writes, ["POST /api/nodes/fixture-remote/limit"])
   assert.equal(await detail.locator("[data-running]").getAttribute("data-running"), "32")
   assert.equal(await detail.locator("[data-running]").getAttribute("data-waiting"), "2")
-  for (const width of [1440, 1066, 390]) {
+  for (const width of [1440, 390]) {
     for (const dark of [false, true]) {
       await page.setViewportSize({ width, height: 980 })
       await page.evaluate(dark => document.documentElement.classList.toggle("dark", dark), dark)
-      assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), "capacity controls do not overflow")
-      assert.ok(await detail.evaluate(el => el.scrollWidth <= el.clientWidth), "capacity panel fits the dialog")
-      if (process.env.STEVE_TEST_SHOTS) await page.screenshot({ path: `${process.env.STEVE_TEST_SHOTS}/capacity-${width}-${dark ? "dark" : "light"}.png`, fullPage: true, animations: "disabled" })
+      assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), "the Node's page does not overflow")
+      if (process.env.STEVE_TEST_SHOTS) { await mkdir(process.env.STEVE_TEST_SHOTS, { recursive: true }); await page.screenshot({ path: `${process.env.STEVE_TEST_SHOTS}/node-${width}-${dark ? "dark" : "light"}.png`, fullPage: true, animations: "disabled" }) }
     }
   }
+  await page.setViewportSize({ width: 1360, height: 980 }); await page.evaluate(() => document.documentElement.classList.remove("dark"))
+  await page.locator("[data-node-pause=active]").click()
+  await page.locator("[data-node-pause=paused]").waitFor()
+  assert.deepEqual(writes.slice(-1), ["POST /api/nodes/fixture-remote/pause"], "stopping new work is the owner's explicit action")
+  await page.locator("[data-back]").click()
+  await page.waitForFunction(() => location.hash === "#/devices/nodes")
+  await row().locator("[data-node-status=paused]").getByText("已暂停接收", { exact: true }).waitFor()
+
+  for (const [change, kind, words] of [[{ state: "active", linked: false }, "offline", "离线 · 1 分钟前"], [{ state: "pending" }, "pending", "待确认指纹"], [{ state: "active", waiting: 0, linked: true }, "online", "在线"]]) {
+    nodes = nodes.map(n => n.node_id === remote.node_id ? { ...n, ...change } : n)
+    await reread()
+    await row().locator(`[data-node-status=${kind}]`).getByText(words, { exact: true }).waitFor()
+  }
+  nodes = nodes.map(n => n.node_id === remote.node_id ? { ...n, state: "revoked" } : n)
+  await reread()
+  await page.locator("[data-nodes-revoked] summary").getByText("已撤销配对 · 1", { exact: true }).waitFor()
+  status = 503
+  await reread()
+  await page.locator("[data-node-error]").waitFor()
+  assert.equal(await page.locator("[data-node-row=local]").count(), 1, "a failed read keeps what was read last")
+  status = 200; nodes = [{ ...remote }, { ...remote, node_id: "fixture-local", local: true }]
+  const beforePoll = reads
+  await page.locator("[data-node-error]").waitFor({ state: "detached", timeout: 13_000 })
+  assert.ok(reads > beforePoll, "visible inventory refreshes without a page reload")
+
+  await page.goto(base + "/test/fixtures/devices.html#/devices")
+  await page.locator("[data-devices-overview]").waitFor()
+  await page.locator('[data-attention-row="offline"], [data-stat="nodes"]').first().waitFor()
+  await page.locator('[data-stat="sessions"]').getByText("4 个在排队", { exact: true }).waitFor()
+  await page.setViewportSize({ width: 390, height: 844 })
+  assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), "mobile has no horizontal overflow")
+  if (process.env.STEVE_TEST_SHOTS) await page.screenshot({ path: process.env.STEVE_TEST_SHOTS + "/devices-mobile.png", fullPage: true, animations: "disabled" })
   assert.deepEqual(errors, [])
-  process.stdout.write("Device inventory: visible owner Nodes, states, loading/failure/empty, refresh, deduplication, details and mobile passed\n")
+  process.stdout.write("Devices: Node list, one status per Node, loading/failure, refresh, deduplication, the Node's page, its limit and pause, overview and mobile passed\n")
 } finally { await browser.close() }

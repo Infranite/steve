@@ -25,11 +25,18 @@ const put = async (draft, context = b) => {
   const r = await context.request.put(base + "/api/hub-metadata", { headers: { "x-steve-ws": "default" }, data: { revision: info.metadata.revision, ...draft } })
   assert.equal(r.status(),200,await r.text()); return r.json()
 }
+/* the Hub card offers 重试 only while the metadata cannot be read; otherwise it reads again when the window gains focus */
+const retry = async (p = page) => {
+  const b = p.getByRole("button",{name:"重试",exact:true})
+  /* the button leaves as soon as a read succeeds (going back online reads by itself) */
+  if (await b.count()) { try { await b.first().click({ timeout: 2000 }); return } catch { /* read already */ } }
+  await p.evaluate(() => window.dispatchEvent(new Event("focus")))
+}
 const waitReady = async p => { await p.locator("[data-hub-edit]").waitFor(); await p.waitForFunction(() => !document.querySelector("[data-hub-edit]")?.disabled) }
 try {
   for (const p of [page, other]) {
     await p.goto(base + "/auth/dev")
-    await p.goto(base + "/#/settings/hub")
+    await p.goto(base + "/#/devices/hub")
     await waitReady(p)
   }
   const initial = await read()
@@ -58,7 +65,7 @@ try {
   assert.equal((await page.locator("#hub-note").inputValue()).length,1002)
   page.once("dialog", d=>d.accept()); await page.locator("[data-hub-cancel]").click()
   check("Validation counts Unicode scalars, keeps all overlong input and focuses the invalid field")
-  const sibling = await a.newPage(); await sibling.goto(base+"/#/settings/hub"); await waitReady(sibling)
+  const sibling = await a.newPage(); await sibling.goto(base+"/#/devices/hub"); await waitReady(sibling)
   await page.locator("[data-hub-alias-edit]").click(); await page.locator("#hub-alias").fill("My private alias")
   await page.locator("[data-hub-alias-save]").click(); await page.getByText("已更新此客户端的个人别名",{exact:true}).waitFor()
   assert.equal(await page.locator("[data-hub-alias-value]").innerText(),"My private alias")
@@ -100,8 +107,8 @@ try {
   assert.equal(await page.locator("[data-hub-save]").isDisabled(),true)
   assert.equal(await page.locator("[data-hub-cancel]").isDisabled(),true)
   await page.locator("[data-hub-save]").evaluate(el=>el.click())
-  await page.evaluate(()=>{location.hash="#/settings/access"})
-  await page.waitForFunction(()=>location.hash==="#/settings/hub")
+  await page.evaluate(()=>{location.hash="#/devices/clients"})
+  await page.waitForFunction(()=>location.hash==="#/devices/hub")
   await page.getByText("读回的最新值与本次草稿一致。请核对更新记录；未将超时当作保存成功。",{exact:true}).waitFor()
   const afterTimeout=await read()
   assert.equal(afterTimeout.metadata.purpose_note,"Committed but receipt lost")
@@ -111,18 +118,18 @@ try {
   check("Actual timeout after a real commit blocks duplicate submission and route changes, then reads back matching values without inventing a save receipt")
   // Keep the real server for all other routes; only the old capability contract is simulated here.
   await page.route("**/api/hub-metadata", r=>r.fulfill({status:200,contentType:"application/json",body:'{"contract":0}'}))
-  await page.getByRole("button",{name:"重试",exact:true}).click()
+  await retry()
   await page.getByText("此 Hub 暂不支持共享信息",{exact:true}).waitFor()
   assert.equal(await page.locator("[data-hub-edit]").isDisabled(),true)
   await page.unroute("**/api/hub-metadata")
-  await page.getByRole("button",{name:"重试",exact:true}).click(); await waitReady(page)
+  await retry(); await waitReady(page)
   check("Missing capability is unsupported and cannot silently succeed")
   await a.setOffline(true)
-  await page.getByRole("button",{name:"重试",exact:true}).click()
+  await retry()
   await page.getByText("Hub 未连接 · 上次已知快照",{exact:true}).first().waitFor()
   assert.equal(await page.locator("[data-hub-edit]").isDisabled(),true)
   assert.match(await page.locator("[data-hub-id]").innerText(),/^hub_/)
-  await a.setOffline(false); await page.getByRole("button",{name:"重试",exact:true}).click(); await waitReady(page)
+  await a.setOffline(false); await retry(); await waitReady(page)
   check("Offline view retains an explicitly timed snapshot and stable ID, with editing disabled")
   if (process.env.STEVE_TEST_DB) {
     const me=await (await a.request.get(base+"/api/me")).json()
@@ -134,33 +141,33 @@ try {
       assert.equal(await page.locator("#hub-note").inputValue(),"Draft retained after real permission revocation")
       assert.equal(await page.locator("[data-hub-save]").isDisabled(),true)
     } finally { role("owner") }
-    await page.getByRole("button",{name:"重试",exact:true}).click()
+    await retry()
     page.once("dialog",d=>d.accept()); await page.locator("[data-hub-cancel]").click()
     check("Actual instance role revocation returns HTTP 403, disables writes and preserves the copyable browser draft")
   }
   const liveHello=await (await a.request.get(base+"/auth/hello")).json()
   const {capabilities:_declared,...legacyHello}=liveHello
   await page.route("**/auth/hello",r=>r.fulfill({status:200,contentType:"application/json",body:JSON.stringify(legacyHello)}))
-  await page.getByRole("button",{name:"重试",exact:true}).click()
+  await retry()
   await page.getByText("此 Hub 暂不支持共享信息",{exact:true}).waitFor()
   await page.unroute("**/auth/hello")
-  await page.getByRole("button",{name:"重试",exact:true}).click(); await waitReady(page)
+  await retry(); await waitReady(page)
   check("A legacy Hello without capability declaration is unsupported without guessing a software version")
   await edit(); await page.locator("#hub-name").fill("Navigation draft")
-  page.once("dialog",d=>d.dismiss()); await page.evaluate(()=>{location.hash="#/settings/access"})
-  await page.waitForFunction(()=>location.hash==="#/settings/hub")
+  page.once("dialog",d=>d.dismiss()); await page.evaluate(()=>{location.hash="#/devices/clients"})
+  await page.waitForFunction(()=>location.hash==="#/devices/hub")
   assert.equal(await page.locator("#hub-name").inputValue(),"Navigation draft")
-  page.once("dialog",d=>d.accept()); await page.evaluate(()=>{location.hash="#/settings/access"})
-  await page.locator('[data-settings-pane="access"]').waitFor()
-  await page.goto(base+"/#/settings/hub"); await waitReady(page)
-  check("Dirty route navigation can be declined without losing the editor, or accepted to open the real access page")
+  page.once("dialog",d=>d.accept()); await page.evaluate(()=>{location.hash="#/devices/clients"})
+  await page.locator('[data-access-pane]').waitFor()
+  await page.goto(base+"/#/devices/hub"); await waitReady(page)
+  check("Dirty route navigation can be declined without losing the editor, or accepted to open the real clients page")
   await put({display_name:"很长的共享Hub名称😀".repeat(5),purpose_note:"多段用途备注\n".repeat(20)})
   await page.reload(); await waitReady(page)
   for (const width of [1440,320]) {
     await page.setViewportSize({width,height:1000})
     await page.goto(base+"/#/more")
-    if(width===320) { await page.locator("[data-more-hub-manage]").click(); await waitReady(page) }
-    else { await page.goto(base+"/#/settings/hub"); await waitReady(page) }
+    if(width===320) { await page.locator("[data-more-devices]").click(); await page.locator('[data-seg="hub"]').click(); await waitReady(page) }
+    else { await page.goto(base+"/#/devices/hub"); await waitReady(page) }
     await edit()
     await page.locator("#hub-name").fill("长名称😀".repeat(10))
     await page.locator("#hub-note").fill("长段落 plain text ".repeat(20))
@@ -185,7 +192,7 @@ try {
   }
   const english = await browser.newContext({locale:"en-US",viewport:{width:320,height:1000}})
   const enPage = await english.newPage(); enPage.on("pageerror",e=>errors.push(e.message))
-  await enPage.goto(base+"/auth/dev"); await enPage.goto(base+"/#/settings/hub"); await waitReady(enPage)
+  await enPage.goto(base+"/auth/dev"); await enPage.goto(base+"/#/devices/hub"); await waitReady(enPage)
   await enPage.getByRole("button",{name:"Edit shared information",exact:true}).click()
   await enPage.evaluate(()=>{const sizes=[...document.querySelectorAll("[data-hub-management], [data-hub-management] *")].map(el=>[el,parseFloat(getComputedStyle(el).fontSize)]);for(const [el,size]of sizes)el.style.fontSize=(size*2)+"px"})
   assert.equal(await enPage.locator("[data-hub-management]").evaluate(el=>el.scrollWidth<=el.clientWidth+1),true)

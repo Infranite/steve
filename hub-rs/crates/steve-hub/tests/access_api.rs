@@ -425,6 +425,112 @@ async fn the_settings_list_and_revoke_your_own_tokens_and_clients() {
     assert_eq!(s, 401);
 }
 
+/// The instance owner sees every member's clients (with the members' names) and can sign any of them out; a member
+/// asking for all still gets only their own and cannot sign out someone else's.
+#[tokio::test]
+async fn the_owner_lists_and_signs_out_every_members_clients() {
+    let e = start().await;
+    let st = e.store();
+    let owner = st.access().owner().unwrap().expect("owner");
+    let sign_in = |user: String, token: String, name: &'static str| {
+        let e = &e;
+        async move {
+            let (s, v) = e
+                .call("POST", "/auth/token", None, Some(json!({"user": user, "token": token, "client": {"kind": "cli", "name": name}})))
+                .await;
+            assert_eq!(s, 200, "{v}");
+            (
+                v["credential"].as_str().unwrap().to_string(),
+                v["client_id"].as_str().unwrap().to_string(),
+            )
+        }
+    };
+    let (_, ot) = st.access().token_create(&owner.id, "owner", None).unwrap();
+    let (owner_cred, _) = sign_in(owner.name.clone(), ot, "Owner laptop").await;
+    let member = st
+        .users()
+        .create("local:member", "Member", None, "member")
+        .unwrap();
+    let (_, mt) = st.access().token_create(&member, "member", None).unwrap();
+    let (member_cred, member_client) = sign_in("Member".into(), mt, "Member phone").await;
+
+    // without asking, and for a member asking, only one's own
+    let (_, v) = e.call("GET", "/api/access", Some(&owner_cred), None).await;
+    assert!(
+        v["clients"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|c| c["user_id"] == owner.id.as_str()),
+        "{v}"
+    );
+    assert_eq!(v["all"], false);
+    let (_, v) = e
+        .call("GET", "/api/access?all=1", Some(&member_cred), None)
+        .await;
+    assert_eq!(v["all"], false);
+    assert!(
+        v["clients"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|c| c["user_id"] == member.as_str()),
+        "{v}"
+    );
+
+    // the owner asking for all: everyone's, named
+    let (s, v) = e
+        .call("GET", "/api/access?all=1", Some(&owner_cred), None)
+        .await;
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(v["all"], true);
+    assert_eq!(v["me"], owner.id.as_str());
+    let theirs = v["clients"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["id"] == member_client.as_str())
+        .expect("member's client listed");
+    assert!(
+        theirs["token_id"].is_string(),
+        "the token a client signed in with is listed"
+    );
+    assert_eq!(v["users"][member.as_str()], "Member");
+
+    // a member cannot sign out the owner's clients
+    let own = st.access().clients(Some(&owner.id)).unwrap();
+    let (s, _) = e
+        .call(
+            "DELETE",
+            &format!("/api/access/clients/{}", own[0].id),
+            Some(&member_cred),
+            None,
+        )
+        .await;
+    assert_eq!(s, 404);
+    assert!(
+        st.access()
+            .client(&own[0].id)
+            .unwrap()
+            .unwrap()
+            .revoked
+            .is_none()
+    );
+
+    // the owner can sign out the member's
+    let (s, _) = e
+        .call(
+            "DELETE",
+            &format!("/api/access/clients/{member_client}"),
+            Some(&owner_cred),
+            None,
+        )
+        .await;
+    assert_eq!(s, 200);
+    let (s, _) = e.call("GET", "/api/access", Some(&member_cred), None).await;
+    assert_eq!(s, 401, "the member's client is signed out");
+}
+
 /// A4b: single sign-on set up in the settings takes effect at once and can be turned off; only the owner.
 #[tokio::test]
 async fn single_sign_on_is_set_up_in_the_settings_without_a_restart() {
