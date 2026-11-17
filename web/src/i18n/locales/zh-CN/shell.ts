@@ -407,7 +407,6 @@ export default {
     signInWithBrowser: "用单点登录",
     userName: "用户名",
     accessToken: "访问 token",
-    tokenHint: "token 由 Hub 签发：第一个在安装时由 <c>steve setup</c> 显示，并保存在安装目录（默认 <c>~/.steve</c>）的 <c>secrets/owner.token</c> 里；需要更多时，在 Hub 所在的机器上运行 <c>~/.steve/current/bin/steve-hub --access token create</c>。",
     cantConnect: "连不上 Steve",
     connectTitle: "连接到你的 Hub",
   },

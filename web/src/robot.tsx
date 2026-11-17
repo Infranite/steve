@@ -1,7 +1,7 @@
 /* Bot faces — Agent Robot Avatar (agent-robot-avatar, MIT). Each bot sets its own colour, skin and head shape.
  * Small faces are static: one hidden live instance renders each look once, its shadow DOM is snapshotted, and every avatar
  * on the page is a plain shadow root with that snapshot — no animation loop, no pointer tracking.
- * `live` faces (the hero) are the real component: they follow the pointer and react to the cue bus. */
+ * `live` faces (the chat hero, the sign-in page) are the real component: they follow the pointer and react to the cue bus. */
 import { useEffect, useRef } from "react"
 import { cn } from "cn"
 import { st, defaultColor } from "@/store"
