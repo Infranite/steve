@@ -1,7 +1,7 @@
 /* 统计页（stats.md §6）：#/stats 与下钻 #/stats/items/:id。只有 Rust Hub 有这些接口；
  * 拿不到（TS Hub）时显示“还没有接入”，不显示示例数据。费用处处标“估”。
  * stats v2 按用途从上到下：筛选（时间、项目、Bot）→ 一行“现在”（进行中 · 等你 · 失败，YOLO 状态）→ 关键数字（和上一段比）
- * → 每天的产出（完成数和费用）→ 钱和时间花在哪（构成 + 最贵的事项，点进费用去向）→ Bot 对比 → harness · 模型对比
+ * → 每天的产出（完成数和费用）→ 钱和时间花在哪（构成 + 最贵的事项，点进费用去向）→ 工作流 → Bot 对比 → harness · 模型对比
  * → 事件浏览器（默认收起）。历史数字跟随时间范围、项目与 Bot；实时输出只跟随项目与 Bot。 */
 import { useEffect, useState } from "react"
 import { CalendarIcon } from "lucide-react"
@@ -20,6 +20,7 @@ import { DrillPanel, NowLine, type Drill } from "@/stats/overview"
 import { DailyChart } from "@/stats/daily"
 import { WhereSection } from "@/stats/where"
 import { BotCompare, ModelCompare } from "@/stats/compare"
+import { WorkflowSection } from "@/stats/workflow"
 import { RunState } from "@/yolo/status"
 import { StatsItemView } from "@/stats/drill"
 import { EventsSection } from "@/stats/events"
@@ -133,6 +134,9 @@ function StatsBody({ s, f, setF, fkey, live, drill, setDrill }: { s: Summary; f:
           <WhereSection s={s} f={f} fkey={fkey} live={live} />
           <PriceNote spend={s.spend} />
         </Section>
+        {s.workflow && <Section k="workflow" title={t("stats:v2.workflow.section")} sub={t("stats:v2.workflow.sectionSub")}>
+          <WorkflowSection s={s} />
+        </Section>}
         <Section k="bots" title={t("stats:v2.bots.title")} sub={f.bot ? t("stats:v2.bots.subOne") : t("stats:v2.bots.sub")}
           right={f.bot ? <Button size="xs" variant="ghost" className="text-blue" onClick={() => setF({ ...f, bot: undefined })} data-bots-all>{t("stats:v2.bots.showAll")}</Button> : undefined}>
           <BotCompare f={f} fkey={fkey} live={live} onBot={(bot) => { setDrill(null); setF({ ...f, bot }) }} />

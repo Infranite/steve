@@ -1091,6 +1091,7 @@ pub fn add_event_in(
     }
     let seq = tx.last_insert_rowid();
     crate::event_payload::save(tx, session, seq, &payloads)?;
+    super::stats::first_tool_in(tx, session, kind, now)?;
     tx.publish(crate::ChangeEvent::Event {
         session_id: session.into(),
         seq,

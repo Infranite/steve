@@ -29,6 +29,17 @@ export type UsageTotals = {
   est: number; reported: number; unpriced_tokens: number; saved_by_cache: number; calls: number; failed_calls: number
   turns: number; turn_ms: number; turn_errors: number; retries: number; interrupted: number; tools: number; tool_errors: number
 }
+/** a unit kind's first attempts: how many delivered and passed */
+export type FirstTry = { delivered: number; passed: number; rate: number | null }
+/** the summary's work graph section (steve-stats `workflow`): counts in the range; `wakes`, `invalidations` and `rejects` by reason */
+export type WorkflowStats = {
+  graphs: number; units: number; attempts: number; retries: number; retry_rate: number | null; attempts_per_unit: P; resets: number; unit_deliveries: number
+  first_try: Record<string, FirstTry>; sessions_per_item: P
+  coordinator_tokens: number; unit_tokens: number; coordinator_share: number | null; coordinator_turn_ms: P; coordinator_long_turns: number; long_turn_ms: number
+  wakes: Record<string, number>; invalidations: Record<string, number>; merged: number; accept_to_merge: P
+  rejected: number; rejects: Record<string, number>; delivered: number; reject_rate: number | null
+  reply_latency: P; first_tool: P; no_tool: number
+}
 export type Summary = {
   range: { from: string; to: string; tz: string }
   usage: UsageTotals
@@ -36,10 +47,12 @@ export type Summary = {
   spend: { est: number; reported: number; unpriced_tokens: number; unpriced: Record<string, number>; saved_by_cache: number; by_source: Record<string, number>; gateway_by_purpose: Record<string, number>; priced_by?: Partial<Record<PriceSource, number>>; catalog?: SyncState }
   throughput: { created: number; created_by_source: Record<string, number>; done: number; dropped: number; drop_rate: number | null; wip: number; delivered: number; delivered_auto: number; delivered_manual: number; net: number }
   time: { lead: P; cycle: P; first_deliver: P; wait: P; agent: P; other: P; releases: number; released: number; release_success_rate: number | null; not_released: number; accept_to_release: P }
-  quality: { first_pass: number | null; first_pass_n: number; reworks: number; reworks_per_done: number | null; fails: Record<string, number>; stalled_then_done: number | null; rollbacks: number; release_unknown: number; turn_error_rate: number | null; reopened: number }
+  quality: { first_pass: number | null; first_pass_n: number; reworks: number; reworks_per_done: number | null; unit_retries?: number; fails: Record<string, number>; stalled_then_done: number | null; rollbacks: number; release_unknown: number; turn_error_rate: number | null; reopened: number }
   human: { decisions: number; by_kind: Record<string, number>; response: P; response_by_kind: Record<string, P>; expired: number; yolo: { decided: number; declined: number; undone: number; rate: number | null } | null; messages: number; per_done: number | null }
   agents: { turns: number; turn_ms: P; tools: number; tool_error_rate: number | null; tool_kinds: Record<string, number>; retries: number; retry_success: number | null; gateway_fallbacks: number; gateway_failed: number; permissions: number; interrupted: number; cancelled: number; tokens_per_turn: number | null; tools_per_turn: number | null }
   per_item: { tokens: P; est_p50: number | null; est_avg: number | null; est_top: [string, number][] }
+  /** work graphs, deliveries and replies (absent on older Hubs) */
+  workflow?: WorkflowStats
   context_over_80: number
   since: { tokens: string | null; gateway: string | null }
   prev: Omit<Summary, "prev"> | null

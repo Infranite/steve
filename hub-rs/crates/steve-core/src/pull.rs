@@ -1010,8 +1010,9 @@ impl Tx<'_> {
     }
 
     /// The `pr` mark of a pull request that merged (`by`: `steve`, or `elsewhere` when it was merged on
-    /// the host), with the review the change had.
+    /// the host), with the review the change had, and its `merge` mark for the workflow statistics.
     fn mark_merged(&self, i: &Item, pr: &Pr, review: &str, by: &str) {
+        self.mark_merge(&i.workspace_id, &i.id, &pr.url, pr.number); // stats: accepted → merged
         self.mark_pr(
             &i.workspace_id,
             &i.id,

@@ -781,7 +781,11 @@ impl Tx<'_> {
             }
             _ => return Err(conflict("未知工作图操作")),
         }
-        self.lc_invalidate(item, "工作图已调整，需要按最新结果统一验收")?;
+        self.lc_invalidate(
+            item,
+            crate::cycle::void::GRAPH,
+            "工作图已调整，需要按最新结果统一验收",
+        )?;
         self.db().timeline_add(
             item,
             actor,
@@ -1395,7 +1399,7 @@ impl Tx<'_> {
                 &format!("{} 未通过，需要调整或重试\n{summary}", unit.spec.title),
                 Some(&s.id),
             )?;
-            self.lc_invalidate(&parent, "工作单元未通过")?;
+            self.lc_invalidate(&parent, crate::cycle::void::UNIT_FAILED, "工作单元未通过")?;
             self.db().item_patch(child, patch![now: summary])?;
             // its questions and stop cards are moot now: the coordinator decides what comes next
             if let Some((_, failed)) = self.db().store().workflows().by_child(child)? {
@@ -1529,6 +1533,14 @@ impl Tx<'_> {
             let msg = wake_message(settled, &latest_graph);
             self.rt()
                 .prompt(&coordinator.id, &msg, "workflow.progress", &[])?;
+            self.mark_wake(
+                &item.workspace_id,
+                &parent,
+                &coordinator.id,
+                &settled.spec.id,
+                &settled.status,
+                settled.attempt,
+            ); // stats
         }
         Ok(true)
     }

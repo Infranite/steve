@@ -25,6 +25,20 @@ pub(crate) fn release_value(outcome: &str, result: &Map<String, Value>) -> Optio
     }
 }
 
+/// Why Steve refused a delivery: the reason code of its `reject` mark.
+pub mod reject {
+    /// A work unit still has open steps.
+    pub const UNIT_UNFINISHED: &str = "unit_unfinished";
+    /// A work unit's report did not meet the graph's evidence rules.
+    pub const UNIT_EVIDENCE: &str = "unit_evidence";
+    /// The item's work graph has units that still block it.
+    pub const WORKFLOW_OPEN: &str = "workflow_open";
+    /// The design confirmation needs a design file that opens and was received.
+    pub const DESIGN_FILE: &str = "design_file";
+    /// A check names a scope that does not exist.
+    pub const SCOPE: &str = "scope";
+}
+
 impl Tx<'_> {
     fn stats_mark(&self, ws: &str, item_id: &str, m: NewMark) {
         let m = NewMark {
@@ -86,6 +100,77 @@ impl Tx<'_> {
                 to_v: Some(to.into()),
                 actor: "steve".into(),
                 detail,
+                ..Default::default()
+            },
+        );
+    }
+
+    /// `invalidate`: a closing was void; the reason code ([`crate::cycle::void`]), its text in `detail.why`.
+    pub(crate) fn mark_invalidate(&self, ws: &str, item_id: &str, code: &str, why: &str) {
+        self.stats_mark(
+            ws,
+            item_id,
+            NewMark {
+                kind: "invalidate".into(),
+                to_v: Some(code.into()),
+                actor: "steve".into(),
+                detail: json!({ "why": why }),
+                ..Default::default()
+            },
+        );
+    }
+
+    /// `reject`: Steve refused a delivery; the reason code ([`reject`]), the refusal in `detail.why`.
+    pub(crate) fn mark_reject(&self, ws: &str, item_id: &str, actor: &str, code: &str, why: &str) {
+        self.stats_mark(
+            ws,
+            item_id,
+            NewMark {
+                kind: "reject".into(),
+                to_v: Some(code.into()),
+                actor: actor.into(),
+                detail: json!({ "why": why }),
+                ..Default::default()
+            },
+        );
+    }
+
+    /// `merge`: the item's pull request was seen merged (its address in `ref`).
+    pub(crate) fn mark_merge(&self, ws: &str, item_id: &str, url: &str, number: u64) {
+        self.stats_mark(
+            ws,
+            item_id,
+            NewMark {
+                kind: "merge".into(),
+                to_v: Some("merged".into()),
+                actor: "steve".into(),
+                r#ref: Some(url.into()),
+                detail: json!({ "pr": number }),
+                ..Default::default()
+            },
+        );
+    }
+
+    /// `wake`: Steve woke a work graph's coordinator (`workflow.progress`) about `unit`, which ended
+    /// `status` on `attempt`; on the graph's item, the coordinator's session in `ref`.
+    pub(crate) fn mark_wake(
+        &self,
+        ws: &str,
+        parent: &str,
+        session: &str,
+        unit: &str,
+        status: &str,
+        attempt: i64,
+    ) {
+        self.stats_mark(
+            ws,
+            parent,
+            NewMark {
+                kind: "wake".into(),
+                to_v: Some(status.into()),
+                actor: "steve".into(),
+                r#ref: Some(session.into()),
+                detail: json!({ "unit_id": unit, "status": status, "attempt": attempt }),
                 ..Default::default()
             },
         );

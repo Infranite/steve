@@ -260,3 +260,129 @@ fn a_reported_release_marks_released_without_finishing_the_item() {
         Some("done")
     );
 }
+
+#[test]
+fn a_void_closing_is_marked_with_its_reason() {
+    let k = Kit::new();
+    k.manual_acceptance();
+    let x = k.delivered(false);
+    assert_eq!(k.phase(&x.id), "closing");
+    let s = k.db().session(&x.session).unwrap().unwrap();
+    k.core.tool_deliver(&s, "again", &[], &[], &[]).unwrap();
+    assert_eq!(
+        of_kind(&k, &x.id, "invalidate"),
+        [(Some(crate::cycle::void::REDELIVER.into()), None)]
+    );
+}
+
+#[test]
+fn a_refused_delivery_is_marked_with_its_reason() {
+    let k = Kit::new();
+    let x = k.delivered(false);
+    k.db()
+        .decision_resolve(&x.decision, json!({"choice": "skip"}), "resolved", None)
+        .unwrap();
+    let s = k.db().session(&x.session).unwrap().unwrap();
+    let odd = Check {
+        name: "tests".into(),
+        passed: true,
+        operated: false,
+        scope: Some("galaxy".into()),
+    };
+    assert!(k.core.tool_deliver(&s, "ok", &[], &[odd], &[]).is_err());
+    assert_eq!(
+        of_kind(&k, &x.id, "reject"),
+        [(Some(crate::marks::reject::SCOPE.into()), None)]
+    );
+}
+
+#[test]
+fn waking_the_coordinator_marks_the_unit_its_status_and_attempt() {
+    use crate::Output;
+    use steve_store::UnitSpec;
+    let k = Kit::new();
+    k.rt.st().workflow_execution_ready = true;
+    let parent = k.item("run", "执行", None);
+    let coordinator = k.session(&parent, "idle");
+    let spec = |id: &str, bot: &str, kind: &str, deps: &[&str]| UnitSpec {
+        id: id.into(),
+        title: id.into(),
+        goal: format!("验证 {id}"),
+        bot_id: bot.into(),
+        kind: kind.into(),
+        depends_on: deps.iter().map(|s| (*s).into()).collect(),
+        resources: vec![],
+        required: true,
+    };
+    let units = vec![
+        spec("work", "dev", "work", &[]),
+        spec("review", "steve", "review", &["work"]),
+        spec("integrate", "dev", "integrate", &["review"]),
+    ];
+    k.core
+        .workflow_change(
+            &parent,
+            json!({"action":"plan","reason":"统计","expected_revision":0,
+                "units":units,"max_parallel":2,"max_attempts":3}),
+            "me",
+        )
+        .unwrap();
+    let work = k
+        .db()
+        .store()
+        .workflows()
+        .get(&parent)
+        .unwrap()
+        .unwrap()
+        .units
+        .into_iter()
+        .find(|u| u.spec.id == "work")
+        .unwrap();
+    let sid = work.session_id.unwrap();
+    let s = k.db().session(&sid).unwrap().unwrap();
+    k.core
+        .tool_deliver(
+            &s,
+            "已验证",
+            &[Output {
+                kind: "文件".into(),
+                title: "work".into(),
+                location: Some("work.txt".into()),
+                role: None,
+            }],
+            &[Check {
+                name: "已操作并检查".into(),
+                passed: true,
+                operated: true,
+                scope: None,
+            }],
+            &[],
+        )
+        .unwrap();
+    k.rt.end_turn(&k.core, &sid, "end_turn", None);
+    let wakes: Vec<(Option<String>, Option<String>, Value)> = k
+        .db()
+        .store()
+        .with_conn(|c| {
+            Ok(c.prepare(
+                "SELECT to_v, ref, detail FROM item_marks WHERE item_id = ? AND kind = 'wake' ORDER BY id",
+            )?
+            .query_map([&parent], |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    serde_json::from_str(&r.get::<_, String>(2)?).unwrap(),
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?)
+        })
+        .unwrap();
+    assert_eq!(
+        wakes,
+        [(
+            Some("succeeded".into()),
+            Some(coordinator),
+            json!({"unit_id": "work", "status": "succeeded", "attempt": 1})
+        )]
+    );
+}

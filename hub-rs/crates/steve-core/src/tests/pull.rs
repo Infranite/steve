@@ -291,6 +291,20 @@ fn pr_marks(k: &Kit, x: &Remote) -> Vec<(String, Value)> {
 }
 
 /// The release operation the pull request is followed on.
+/// The `merge` marks of the item (the workflow statistics' accepted → merged time): `(to_v, ref)`.
+fn merge_marks(k: &Kit, x: &Remote) -> Vec<(String, String)> {
+    k.db()
+        .store()
+        .with_conn(|c| {
+            Ok(
+                c.prepare("SELECT to_v, ref FROM item_marks WHERE item_id = ? AND kind = 'merge'")?
+                    .query_map([&x.item], |r| Ok((r.get(0)?, r.get(1)?)))?
+                    .collect::<rusqlite::Result<Vec<_>>>()?,
+            )
+        })
+        .unwrap()
+}
+
 fn release_op(k: &Kit, x: &Remote) -> steve_store::ItemOperation {
     let i = k.db().item(&x.item).unwrap().unwrap();
     k.db()
@@ -365,6 +379,10 @@ fn a_reviewed_change_is_merged_by_steve_at_the_accepted_head_once_every_check_pa
     assert_eq!(m[0].0, "merged");
     assert_eq!(m[0].1["review"], "graph");
     assert_eq!(m[0].1["by"], "steve");
+    assert_eq!(
+        merge_marks(&k, &x),
+        [("merged".into(), "https://github.com/acme/app/pull/7".into())]
+    );
 }
 
 #[test]
@@ -519,6 +537,12 @@ fn an_unreviewed_change_you_merged_yourself_completes_the_item() {
     assert_eq!(
         (m[1].0.as_str(), &m[1].1["review"], &m[1].1["by"]),
         ("merged", &json!("none"), &json!("elsewhere"))
+    );
+    assert!(k.open_fails(&x.item).is_empty());
+    // the statistics' accepted → merged time ends at this mark
+    assert_eq!(
+        merge_marks(&k, &x),
+        [("merged".into(), "https://github.com/acme/app/pull/7".into())]
     );
 }
 
