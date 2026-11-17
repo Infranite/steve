@@ -162,7 +162,6 @@ export default {
       step2: "2. 把它输出的 tc… 地址粘贴到这里，其余由 Hub 完成（下载并校验安装包、安装、配对、启动；这样装的 Node 不需要再核对指纹）：",
       run: "开始安装",
       retry: "重试",
-      another: "再装一台",
       done: "完成：Node {{id}} 已配对并启动。为它设置项目目录后即可使用。",
       progress: "安装进度",
       working: "进行中",

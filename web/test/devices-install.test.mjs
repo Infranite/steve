@@ -73,16 +73,16 @@ test("a failure says at which step, after how long and why", () => {
   assert.ok(said.includes("x") && said.includes("1:14"), said)
 })
 
-test("a page opened later picks the running install, else the newest one", () => {
+test("the dialog picks up the running install, else the newest unfinished one", () => {
   assert.equal(resumable([op({ id: "a", state: "failed" }), op({ id: "b" })]).id, "b")
   assert.equal(resumable([op({ id: "a", state: "failed" }), op({ id: "b", state: "done" })]).id, "a")
-  assert.equal(resumable([op({ id: "a", state: "done" })]).id, "a", "a finished one still shows its result")
+  assert.equal(resumable([op({ id: "a", state: "done" })]), null, "a finished one is not picked up again")
   assert.equal(resumable([]), null)
 })
 
 test("every install string is there in both languages", () => {
   for (const lang of ["zh-CN", "en"]) {
-    for (const key of ["progress", "working", "failed", "finished", "pending", "of", "failedAt", "joined", "retry", "another",
+    for (const key of ["progress", "working", "failed", "finished", "pending", "of", "failedAt", "joined", "retry",
       "kind.probe", "kind.fetch", "kind.send", "kind.setup",
       "phase.download", "phase.verify", "phase.verifying", "phase.cached", "phase.install", "phase.pair", "phase.adapters", "phase.start"])
       assert.ok(i18n.exists(`shell:devices.install.${key}`, { lng: lang }), `${lang} ${key}`)

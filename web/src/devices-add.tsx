@@ -28,6 +28,9 @@ import { st, toast } from "@/store"
 import { useT } from "@/i18n"
 import { fpCheck, fpGroups, fpSpread, FP_GROUP, hostLine, hostOf, linkRoute, nodeViews } from "@/device-model"
 import { useHubAddress, useHubs } from "@/hub-ui"
+import { AgentTrail } from "@/components/affect/agent-trail-clean"
+import { Progress } from "@/components/ui/progress"
+import { failureOf, installTrail, resumable } from "@/devices-install"
 import { cn } from "cn"
 
 type Kind = "node" | "client"
@@ -278,36 +281,62 @@ function TailcatSwitch({ s, onChange }: { s: RTailcat | null; onChange: (s: RTai
 }
 
 /* A remote install over tailcat (A6b): a line to run on the target machine, its address pasted back, the rest done by
- * the Hub (download and verify, install, pair, start). A Node installed so needs no fingerprint compared by hand. */
+ * the Hub (download and verify, install, pair, start). A Node installed so needs no fingerprint compared by hand.
+ * Each step shows how far it is (bytes and speed while fetching and sending, the setup's phase on the target) and how
+ * long it took, all kept by the Hub: the dialog opened again picks up the install that runs (or the last one that
+ * failed, to retry it). A failure says at which step and why. */
 function RemoteInstall({ op, onChange }: { op: RInstall | null; onChange: (op: RInstall) => void }) {
   const t = useT()
   const [address, setAddress] = useState("")
+  const [joined, setJoined] = useState(false)
   const [busy, setBusy] = useState(false), [error, setError] = useState("")
+  /* when the shown copy came from the Hub, on this browser's clock: a running step's clock counts from it */
+  const [receivedAt, setReceivedAt] = useState(() => Date.now())
+  const show = (v: RInstall) => { setReceivedAt(Date.now()); if (v.address) setAddress((a) => a || v.address || ""); onChange(v) }
   const act = async (f: () => Promise<void>) => {
     setBusy(true); setError("")
     try { await f() } catch (e) { setError((e as Error).message) } finally { setBusy(false) }
   }
-  useEffect(() => { if (!op) void act(async () => { onChange(await api.createInstall()) }) }, [])
+  useEffect(() => {
+    if (!op) void act(async () => { show(resumable((await api.installs()).installs) ?? await api.createInstall()) })
+  }, [])
   useEffect(() => {
     if (op?.state !== "running") return
-    const timer = setInterval(() => { void api.install(op.id).then(onChange).catch(() => {}) }, 1000)
+    const timer = setInterval(() => { void api.install(op.id).then(show).catch(() => {}) }, 1000)
     return () => clearInterval(timer)
   }, [op?.id, op?.state])
   if (!op) return error ? <p role="alert" className="type-callout text-destructive">{error}</p> : <Spinner className="size-4" />
+  /* the trail's keys are built from the step and phase names */
+  const tk = (key: string, o?: Record<string, unknown>) => String(t(key as never, o as never))
+  const trail = installTrail(op, receivedAt, tk)
+  const current = trail.find((s) => s.state === "running")
+  const failure = failureOf(op, tk)
+  const run = () => void act(async () => {
+    const v = await api.runInstall(op.id, address)
+    setJoined(v.id !== op.id)
+    show(v)
+  })
   return (
     <div className="flex flex-col gap-3 type-callout" data-remote-install>
+      {joined && op.state === "running" && <p className="text-muted-foreground" data-install-joined>{t("shell:devices.install.joined")}</p>}
+      {op.state !== "waiting" && <div className="flex flex-col gap-2" data-install-steps>
+        <AgentTrail steps={trail} labels={{ title: t("shell:devices.install.progress"), running: t("shell:devices.install.working"), failed: t("shell:devices.install.failed"), done: t("shell:devices.install.finished"), pending: t("shell:devices.install.pending") }} />
+        {current?.percent !== undefined && <Progress value={current.percent} aria-label={current.title} data-install-percent />}
+      </div>}
+      {failure && <div role="alert" className="flex flex-col gap-1 text-destructive" data-install-failed>
+        <p className="font-medium">{t("shell:devices.install.failedAt", { step: failure.step, elapsed: failure.elapsed })}</p>
+        <p className="whitespace-pre-wrap">{failure.error}</p>
+      </div>}
       {(op.state === "waiting" || op.state === "failed") && <>
         <p className="text-foreground">{t("shell:devices.install.step1")}</p>
         <CodeBlock compact wrap code={op.command} language="bash" data-install-command />
         <label className="text-foreground" htmlFor="install-address">{t("shell:devices.install.step2")}</label>
         <div className="flex gap-2">
           <Input id="install-address" className="font-mono" value={address} onChange={(e) => setAddress(e.target.value)} placeholder="tc…" autoComplete="off" spellCheck={false} data-install-address />
-          <Button type="button" disabled={busy || !address.trim()} onClick={() => void act(async () => { onChange(await api.runInstall(op.id, address)) })} data-install-run>{op.state === "failed" ? t("shell:devices.install.retry") : t("shell:devices.install.run")}</Button>
+          <Button type="button" disabled={busy || !address.trim()} onClick={run} data-install-run>{op.state === "failed" ? t("shell:devices.install.retry") : t("shell:devices.install.run")}</Button>
         </div>
       </>}
-      {op.steps.length > 0 && <ol className="flex list-decimal flex-col gap-1 pl-5" data-install-steps>{op.steps.map((s, i) => <li key={i} className={i === op.steps.length - 1 && op.state === "running" ? "font-medium text-foreground" : "text-muted-foreground"}>{s.text}</li>)}</ol>}
       {op.state === "done" && <p className="inline-flex items-center gap-1.5 text-success" data-install-done><CheckCircle2Icon className="size-4" aria-hidden />{t("shell:devices.install.done", { id: op.node_id ?? "" })}</p>}
-      {op.state === "failed" && op.error && <p role="alert" className="whitespace-pre-wrap text-destructive">{op.error}</p>}
       {error && <p role="alert" className="text-destructive">{error}</p>}
     </div>
   )

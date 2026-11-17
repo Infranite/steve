@@ -124,8 +124,8 @@ export function failureOf(op: RInstall, t: T): { step: string; elapsed: string; 
   }
 }
 
-/** the install a page opened later shows: one that runs, else the newest one, finished or not (the Hub forgets
- * an install an hour after it was started) */
+/** the install the dialog picks up when it opens again: one that runs, else the newest one not finished (a failed
+ * one keeps its key, which the target's `tailcat serve` may still accept, for a retry) */
 export function resumable(ops: RInstall[]): RInstall | null {
-  return ops.find(o => o.state === "running") ?? ops[0] ?? null
+  return ops.find(o => o.state === "running") ?? (ops[0] && ops[0].state !== "done" ? ops[0] : null)
 }
