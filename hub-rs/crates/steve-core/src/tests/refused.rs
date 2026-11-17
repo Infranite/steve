@@ -43,7 +43,7 @@ fn a_new_session_no_backend_takes_is_refused_visibly() {
     assert!(fails[0].contains("本机 Node 已关闭"), "{fails:?}");
 }
 
-/// #222: a Bot whose item could not run at all (its principal's model access is not configured) is
+/// #222: a Bot whose item could not run at all (its harness is not signed in on any Node) is
 /// stopped before anything is made: no session, one clear error on the item, and nothing tries
 /// again by itself; giving the item to such a Bot is refused and leaves it as it was.
 #[test]

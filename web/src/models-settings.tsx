@@ -21,7 +21,6 @@ import { HarnessMark } from "@/components/harness-mark"
 import { SteveModelControl } from "@/steve-model"
 import { RuntimeAvailability, RuntimeSelect, RuntimeSetupLink } from "@/runtime-access"
 import { reducedMotion } from "@/lib/motion"
-import { ModelAccessSection } from "@/model-access"
 
 /* the label and description are read when the settings list renders, so they follow the UI language */
 export const MODELS_CAT = Object.defineProperties(["models", "", CpuIcon, ""], {
@@ -121,7 +120,6 @@ export function ModelsSettingsPane() {
       <Section data-models-lightweight label={t("pages:models.roles.lightweight")} note={t("pages:models.roles.lightUses")}>
         <Card><ChoiceLine c={lightChoice} wrap /><p className="mt-2 type-footnote text-muted-foreground" data-lightweight-mode>{v.lightweight ? t("pages:models.roles.lightConfigured") : t("pages:models.roles.lightFollows")}</p></Card>
       </Section>
-      <ModelAccessSection />
       {own.length > 0 && <Notice tone="attention" data-role-exceptions>{t("pages:models.roles.exceptions", { count: own.length, purposes: listOf(own.map((p) => p.label)) })}</Notice>}
       <div data-models-allocation><button type="button" className="flex items-center gap-2 type-callout text-muted-foreground" aria-expanded={allocation} onClick={() => setAllocation(!allocation)} data-models-allocation-toggle><Turn open={allocation} />{t("pages:models.roles.actual", { count: v.purposes.length })}</button><Reveal open={allocation}>
         <Panel className="mt-3">{v.purposes.map((p) => <Row key={p.key} data-actual-purpose={p.key} title={p.label} sub={<Brief c={p.effective} />}><span className="shrink-0 type-footnote text-muted-foreground">{t(p.source === "override" || !p.follows ? "pages:models.roles.override" : p.source === "lightweight" ? "pages:models.roles.lightweight" : "pages:models.roles.primary")}</span></Row>)}</Panel>

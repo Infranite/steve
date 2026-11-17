@@ -467,7 +467,7 @@ export default {
     onPlan: "Scheduled",
     lastFailed: "Last run failed",
     blocked: "Cannot run now",
-    blockedFix: "Configure",
+    blockedFix: "Open Devices",
     started: "Started {{name}}",
     runNow: "Run now",
     disabledToast: "Turned off, it won't trigger again",

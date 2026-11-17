@@ -17,7 +17,6 @@ api DELETE /kb/docs/x
 api DELETE /kb/sources/x
 api DELETE /mail/drafts/x
 api DELETE /mems/x
-api DELETE /model-access/x
 api DELETE /orgs/x
 api DELETE /passkeys/x
 api DELETE /personas/x
@@ -111,7 +110,6 @@ api GET /me/notification-targets
 api GET /me/notifications
 api GET /mention-options
 api GET /merges
-api GET /model-access
 api GET /orgs
 api GET /orgs/x
 api GET /parties/search
@@ -303,7 +301,6 @@ api PUT /kb/notes/x
 api PUT /kb/steward
 api PUT /mail/drafts/x
 api PUT /me/notification-policy
-api PUT /model-access/x
 api PUT /stats/prices
 api PUT /stats/tz
 api PUT /stewards/x/x

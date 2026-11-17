@@ -2241,7 +2241,6 @@ fn harness_state(
     s: &HarnessState,
     sd: &steve_acp::StateDir,
     skills: Option<&str>,
-    provider: Option<(&steve_acp::ModelProvider, Option<&str>)>,
 ) -> ApiResult<std::path::PathBuf> {
     if !s.valid() {
         return Err(ApiError::new(
@@ -2305,13 +2304,20 @@ fn harness_state(
                 .map_err(|e| internal(format!("harness state: {f}: {e}")))?;
         }
     }
-    // a principal that does not start from the owner's: the provider the Hub names for it, in the
-    // harness's own file (and none any more once the Hub names none)
-    if !s.import_owner
-        && let Some((p, url)) = provider
-    {
-        crate::model_access::place(&target, p, url)
-            .map_err(|e| internal(format!("harness state: model access: {e}")))?;
+    // the harness's sign-in on this Node, for every principal: its credentials linked (never
+    // copied) and the sign-in entries of its settings the Node's own (after the owner's import,
+    // whose file they go into)
+    if let Some(node) = sd.owner_source(&inner.cfg.acp.user_home) {
+        match crate::harness_login::place(&node, &target, &sd.login) {
+            Ok(left) => {
+                for why in left {
+                    tracing::info!("harness state: sign-in: {why}");
+                }
+            }
+            Err(why) => {
+                return Err(internal(format!("harness state: sign-in: {why}")));
+            }
+        }
     }
     // the owner's personal instructions and extensions, linked where the harness reads them, when
     // the session is theirs and the Hub did not turn them off; otherwise any links made before go
@@ -2335,6 +2341,47 @@ fn harness_state(
         Err(why) => tracing::warn!("harness state: the owner's context was not linked: {why}"),
     }
     Ok(dir)
+}
+
+/// The Node's own value of `name` for `harness`: what the adapter is configured with, else the
+/// Node's environment.
+fn node_var(inner: &Inner, harness: &str, name: &str) -> Option<std::ffi::OsString> {
+    inner
+        .cfg
+        .acp
+        .adapter_env(harness)
+        .into_iter()
+        .find(|(k, _)| k == name)
+        .map(|(_, v)| v)
+        .or_else(|| std::env::var_os(name))
+}
+
+/// [`steve_acp::StateDir::node_store`] on this Node.
+fn node_store(
+    inner: &Inner,
+    harness: &str,
+    sd: &steve_acp::StateDir,
+) -> Option<(std::ffi::OsString, std::ffi::OsString, std::path::PathBuf)> {
+    sd.node_store(&inner.cfg.acp.user_home, |n| node_var(inner, harness, n))
+}
+
+/// The Node's credential store of `harness` ([`steve_acp::Login`]): in the directory its store
+/// variable names when it has one, else in its own directory; `None` when it declares no name
+/// there or the Node has no such directory.
+fn node_login_store(
+    inner: &Inner,
+    harness: &str,
+    sd: &steve_acp::StateDir,
+) -> Option<crate::confine::LoginStore> {
+    let names = sd.login.store_names();
+    if names.is_empty() {
+        return None;
+    }
+    let dir = match node_store(inner, harness, sd) {
+        Some((_, _, dir)) => dir,
+        None => sd.owner_source(&inner.cfg.acp.user_home)?,
+    };
+    Some(crate::confine::LoginStore { dir, names })
 }
 
 /// The environment a session's harness gets over the Node's: the principal's own variables
@@ -2399,13 +2446,13 @@ async fn open_harness(
     let state = match (&row.open.state, declared_state.as_ref()) {
         (Some(s), Some(sd)) => {
             let props = inner.cfg.acp.adapter_properties(&harness);
-            let access = row.open.model_access.as_ref();
-            let provider = props
-                .model_provider
-                .as_ref()
-                .map(|p| (p, access.map(|a| a.base_url.as_str())));
-            let dir = harness_state(inner, s, sd, props.skills.as_deref(), provider)?;
-            let env = sd.isolation_env_for(&dir, Some(&inner.cfg.acp.user_home), s.import_owner);
+            let dir = harness_state(inner, s, sd, props.skills.as_deref())?;
+            let mut env =
+                sd.isolation_env_for(&dir, Some(&inner.cfg.acp.user_home), s.import_owner);
+            // its credential store where the Node's harness keeps it, apart from the directory
+            if let Some((var, value, _)) = node_store(inner, &harness, sd) {
+                env.push((var, value));
+            }
             Some((dir, env))
         }
         (None, Some(sd)) if sd.home.is_some() => {
@@ -2497,45 +2544,13 @@ async fn open_harness(
             }
         }
     }
-    // a service session's provider key, taken from the Hub now for this process only (never
-    // journaled, never in a file); without it the harness would fall back to its own login
-    let model_key = match (
-        &row.open.state,
-        &row.open.model_access,
-        adapter_props.model_provider.as_ref(),
-    ) {
-        (Some(st), Some(access), Some(p)) if !st.import_owner => {
-            let hub = inner.secrets.lock().unwrap().clone().ok_or_else(|| {
-                ApiError::new(
-                    ErrorCode::Unsupported,
-                    "model access: no secrets from the Hub on this Node",
-                )
-            })?;
-            let bytes = hub
-                .take(model_access_op(session), access.secret.clone())
-                .await
-                .map_err(|e| {
-                    ApiError::new(
-                        e.code,
-                        format!("model access: the key was not given: {}", e.safe_detail),
-                    )
-                })?;
-            let bytes = zeroize::Zeroizing::new(bytes.expose().to_vec());
-            let text = std::str::from_utf8(&bytes)
-                .ok()
-                .map(str::trim)
-                .filter(|t| !t.is_empty() && !t.contains(['\n', '\r', '\0']))
-                .ok_or_else(|| {
-                    ApiError::new(ErrorCode::Invalid, "model access: the key is not one line")
-                })?;
-            Some((
-                std::ffi::OsString::from(&p.key_env),
-                std::ffi::OsString::from(text),
-            ))
-        }
+    let hide_cli_creds = row.open.state.as_ref().is_some_and(|st| !st.import_owner);
+    // the owner's harness homes are hidden from anyone else's session, but for the Node's sign-in
+    // it uses: its credential files where they are, and what renewing it makes beside them
+    let login_store = match (&state, &declared_state) {
+        (Some(_), Some(sd)) if hide_cli_creds => node_login_store(inner, &harness, sd),
         _ => None,
     };
-    let hide_cli_creds = row.open.state.as_ref().is_some_and(|st| !st.import_owner);
     let (program, args) = if adapter_props.nested_sandbox {
         inner.confine.wrap_in_mode(
             program,
@@ -2550,6 +2565,7 @@ async fn open_harness(
             state.is_some(),
             hide_cli_creds,
             Some(&inner.cfg.acp.user_home),
+            login_store.as_ref(),
         )
     } else {
         (program, args)
@@ -2587,9 +2603,6 @@ async fn open_harness(
         env.extend(inner.cfg.acp.adapter_env(&harness));
         if let Some((_, vars)) = &state {
             env.extend(vars.iter().cloned());
-        }
-        if let Some(kv) = &model_key {
-            env.push(kv.clone());
         }
         if let Some(home) = &adapter_home {
             env.push(("HOME".into(), home.clone().into_os_string()));

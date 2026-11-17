@@ -22,7 +22,7 @@ pub type Job = Pin<Box<dyn Future<Output = ()> + Send>>;
 pub struct FlowCore {
     pub core: Core,
     /// [`steve_flow::Core::can_run`]: `None` lets everything run.
-    pub preflight: Option<Arc<super::model_access::Preflight>>,
+    pub preflight: Option<Arc<super::preflight::Preflight>>,
 }
 
 async fn blocking<T: Send + 'static>(
@@ -161,8 +161,6 @@ impl steve_flow::Core for FlowCore {
 /// The modules, their `/api` routes (still needing the `Caller` layer) and their background jobs.
 pub struct Built {
     pub modules: Modules,
-    /// The vault (service sessions' model access keys are read from it).
-    pub vault: steve_modules::vault::Vault,
     pub flow: Arc<steve_flow::FlowCx>,
     /// The knowledge module's state, for its MCP tools.
     pub kb: steve_knowledge::Knowledge,
@@ -260,9 +258,9 @@ pub struct Env<'a> {
     /// Where GitHub reads and pushes an item's branch when it is on a Node (`None`: the Hub's own
     /// git, as before).
     pub git_nodes: Option<Arc<dyn steve_github::push::GitNodes>>,
-    /// Whether a schedule's principal and Bot can run ([`super::model_access::Preflight`]);
+    /// Whether a schedule's principal and Bot can run ([`super::preflight::Preflight`]);
     /// `None`: not asked.
-    pub preflight: Option<Arc<super::model_access::Preflight>>,
+    pub preflight: Option<Arc<super::preflight::Preflight>>,
 }
 
 /// Registers every module, builds [`Modules`] and the flow context, and collects the routes.
@@ -681,7 +679,7 @@ pub fn build(env: Env<'_>) -> Result<Built, BackendError> {
         .with_state(modules.clone())
         .merge(steve_modules::caps::routes(caps.clone()))
         .merge(steve_modules::vault::routes(vault.clone()))
-        .merge(steve_modules::vault::use_api::routes(vault.clone()))
+        .merge(steve_modules::vault::use_api::routes(vault))
         .merge(vault_items)
         .merge(steve_modules::vault::webauthn::routes(passkeys));
     // at the root: the OAuth callback (session read, not required) and the webhooks (no session)
@@ -832,6 +830,5 @@ pub fn build(env: Env<'_>) -> Result<Built, BackendError> {
         lifecycle,
         caps,
         library,
-        vault,
     })
 }

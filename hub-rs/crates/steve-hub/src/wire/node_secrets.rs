@@ -64,9 +64,6 @@ pub trait SessionSecrets: Send + Sync {
 pub struct NodeSecrets {
     /// The sessions' own values (set once at boot; without it they are `denied`).
     sessions: std::sync::OnceLock<Arc<dyn SessionSecrets>>,
-    /// The model access keys of service sessions, under [`MODEL_ACCESS_OP`]`<session>`
-    /// ([`super::model_access::ModelSecrets`]; without it they are `denied`).
-    model: std::sync::OnceLock<Arc<dyn SessionSecrets>>,
     held: Mutex<HashMap<String, Held>>,
     ended: Mutex<VecDeque<String>>,
     /// Push grants being observed; one observer per operation.
@@ -81,11 +78,6 @@ impl NodeSecrets {
     /// Where the sessions' own values come from (once).
     pub fn set_sessions(&self, s: Arc<dyn SessionSecrets>) {
         let _ = self.sessions.set(s);
-    }
-
-    /// Where service sessions' model access keys come from (once).
-    pub fn set_model_access(&self, s: Arc<dyn SessionSecrets>) {
-        let _ = self.model.set(s);
     }
 
     /// The channel of one Node: it takes only what was given to it.
@@ -273,22 +265,6 @@ struct Bound {
 impl HubSecrets for Bound {
     async fn take(&self, operation: OperationId, id: String) -> ApiResult<SecretBytes> {
         let err = |code, m: &str| Err(ApiError::new(code, m.to_string()).on(&operation));
-        if let Some(session) = operation.as_str().strip_prefix(MODEL_ACCESS_OP) {
-            let Some(s) = self.all.model.get().cloned() else {
-                return err(ErrorCode::Denied, "no model access on this Hub");
-            };
-            let (node, session) = (self.node.to_string(), session.to_string());
-            let v = tokio::task::spawn_blocking(move || s.value(&node, &session, &id))
-                .await
-                .map_err(|e| ApiError::new(ErrorCode::Internal, e.to_string()))?;
-            return match v {
-                Some(v) => Ok(SecretBytes::new(v.to_vec())),
-                None => err(
-                    ErrorCode::Denied,
-                    "no model access key for this session (see the Hub's model access setting)",
-                ),
-            };
-        }
         if let Some(session) = operation.as_str().strip_prefix(MCP_SECRETS_OP) {
             let Some(s) = self.all.sessions.get().cloned() else {
                 return err(ErrorCode::Denied, "no secret for this session");

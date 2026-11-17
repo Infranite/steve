@@ -215,7 +215,7 @@
   "hub.onboard.owner_only": "Only the instance owner can start or skip the first meeting",
   "hub.check.adapter_missing": "ACP adapter %{harness} is unavailable at %{adapter}; install its ACP adapter and configure its registry entry with an absolute path before starting %{harness} tasks (docs/deployment.md#harness-setup)",
   "hub.check.node_missing": "STEVE_NODE: Node.js executable is unavailable at %{node}; install Node.js or set its absolute path before starting %{harness} tasks",
-  "hub.check.principal_state": "STEVE_PRINCIPAL_STATE=on (default): new sessions use a separate harness directory; existing sessions keep their recorded state. Harness CLI logins (such as Codex, Gemini, Copilot, Kimi, or Cursor) are not copied. Authenticate each principal in the Node's state/<runtime_sessions.state_dir>/harness directory before continuing their tasks; see docs/deployment.md#harness-setup. STEVE_PRINCIPAL_STATE=off restores shared state for new sessions only.",
+  "hub.check.principal_state": "STEVE_PRINCIPAL_STATE=on (default): new sessions use a separate harness directory; existing sessions keep their recorded state. Every principal's session uses the harness's own sign-in on its Node (never a copy), so sign each harness in on the Node itself; Steve never configures a model provider or key. See docs/deployment.md#harness-setup. STEVE_PRINCIPAL_STATE=off restores shared state for new sessions only.",
   "hub.check.unconfined": "STEVE_CONFINE: runs will not be sandboxed: %{why}",
   "hub.audit.owner_only": "Only the instance owner can read the activity log",
   "hub.github_type.check_failed": "Checks failed",
@@ -290,10 +290,5 @@
   "hub.models.invalid_selection": "Invalid model selection.",
   "hub.node.workspace_conflict": "The workspace preparation changed. The previous directory and history are retained. Choose Continue to create a new session in the current project.",
   "hub.node.workspace_conflict_question": "Could not start the session: The workspace preparation changed. The previous directory and history are retained. Choose Continue to create a new session in the current project.",
-  "hub.model_access.harness_not_ready": "%{harness} is not installed or not ready on the devices, so it cannot run now: check and install it on the Devices page.",
-  "hub.model_access.missing": "Model access for scheduled work is not configured (%{harness}): service sessions never use anyone's personal account. Configure a provider endpoint and a key from the vault for %{harness} in Settings · Models · Model access for service sessions.",
-  "hub.model_access.credential_missing": "Model access for service sessions (%{harness}) cannot find its key: the vault item or field is gone. Choose it again in Settings · Models · Model access for service sessions.",
-  "hub.model_access.credential_not_shared": "Model access for service sessions (%{harness}) can only use an item of the shared or system vault (not a personal or high-sensitivity one): put the key in the shared vault, then choose it in Settings · Models · Model access for service sessions.",
-  "hub.model_access.not_configurable": "Steve cannot configure model access for %{harness} service sessions yet.",
-  "hub.model_access.owner_only": "Only the instance owner can change model access for service sessions."
+  "hub.preflight.harness_not_ready": "%{harness} is not installed, not ready or not signed in on any device, so it cannot run now. Install it or sign it in on the device itself (Steve uses the harness's own sign-in there), then check the Devices page."
 }

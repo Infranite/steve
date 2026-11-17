@@ -41,7 +41,7 @@ if (process.env.FAKE_ACP_STDOUT_CLOSED) process.stdout.on("error", (error) => {
   process.exit(1)
 })
 log({ spawn: { argv: process.argv.slice(2), cwd: process.cwd(), claude: process.env.CLAUDE_CODE_EXECUTABLE ?? null, pid: process.pid,
-  env: { NPM_TOKEN: process.env.NPM_TOKEN ?? null, ANTHROPIC_AUTH_TOKEN: process.env.ANTHROPIC_AUTH_TOKEN ?? null, CLAUDE_CONFIG_DIR: process.env.CLAUDE_CONFIG_DIR ?? null, HOME: process.env.HOME ?? null, PATH0: (process.env.PATH ?? "").split(":")[0] } } })
+  env: { NPM_TOKEN: process.env.NPM_TOKEN ?? null, CLAUDE_CONFIG_DIR: process.env.CLAUDE_CONFIG_DIR ?? null, CLAUDE_SECURESTORAGE_CONFIG_DIR: process.env.CLAUDE_SECURESTORAGE_CONFIG_DIR ?? null, CODEX_HOME: process.env.CODEX_HOME ?? null, HOME: process.env.HOME ?? null, PATH0: (process.env.PATH ?? "").split(":")[0] } } })
 if (process.env.FAKE_ACP_GRANDCHILD && !probing) {
   const c = spawn("sleep", ["300"], { stdio: "ignore" })
   writeFileSync(process.env.FAKE_ACP_GRANDCHILD, String(c.pid))

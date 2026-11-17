@@ -21,7 +21,6 @@ pub mod library_mcp;
 pub mod local_service;
 pub mod mcp;
 pub mod mcp_extra;
-pub mod model_access;
 pub mod modules;
 pub mod node_binding;
 pub mod node_env;
@@ -34,6 +33,7 @@ pub mod outbox;
 pub mod output_files;
 pub mod outside_mcp;
 pub mod ports;
+pub mod preflight;
 pub mod principal;
 pub mod research;
 pub mod research_mcp;
@@ -746,24 +746,20 @@ pub fn wire_assembly(
             workspaces.clone().follow(bus.tap(&["project", "kb"])),
         ));
     }
-    // whether a principal's Bot can run at all: the adapters' declarations, what the Nodes said
-    // of them last, and per-principal state (#222); a Node linked but not heard from yet leaves
-    // its harnesses unknown, never refused (#234)
+    // whether a principal's Bot can run at all: what the Nodes said of its harness last (installed,
+    // ready, signed in); a Node linked but not heard from yet leaves its harnesses unknown, never
+    // refused (#234)
     let preflight = {
         let h = harnesses.clone();
         let svc = nodes.clone();
-        let readiness: model_access::Readiness = Arc::new(move || {
+        let readiness: preflight::Readiness = Arc::new(move || {
             let linked = svc
                 .as_ref()
                 .map(|s| s.registry.linked())
                 .unwrap_or_default();
             h.readiness(&linked)
         });
-        model_access::Preflight::new(
-            cfg.declared_adapters.clone(),
-            Some(readiness),
-            principal_state(&vars),
-        )
+        preflight::Preflight::new(Some(readiness))
     };
     let routed = Arc::new(core::RoutedRuntime {
         node: node_host.as_ref().map(|h| h.runtime.clone()),
@@ -875,11 +871,6 @@ pub fn wire_assembly(
         }),
         preflight: Some(preflight.clone()),
     })?;
-    // service sessions' model access keys, from the vault, for the Nodes that run them (#222)
-    secrets.set_model_access(Arc::new(model_access::ModelSecrets {
-        store: db.clone(),
-        vault: built.vault.clone(),
-    }));
     let _ = host.flow.set(built.flow.clone());
     let yolo = steve_core::yolo::Yolo::new(
         steve_core::repo::Db::new(db.clone()),
@@ -1008,8 +999,7 @@ pub fn wire_assembly(
             crate::api::stats::StatsApi::new(db.clone(), bus.clone(), price_url)
                 .with_harness_source(harnesses.source()),
         ))
-        .merge(crate::api::yolo::routes(engine.clone()))
-        .merge(model_access::routes(db.clone(), preflight.clone()));
+        .merge(crate::api::yolo::routes(engine.clone()));
     Ok(Wired {
         backend,
         #[cfg(test)]

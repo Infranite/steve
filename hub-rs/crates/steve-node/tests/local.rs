@@ -247,7 +247,6 @@ fn open_body(session: &str) -> OpenSession {
         artifact_view: None,
         mcp_servers: vec![],
         skills: vec![],
-        model_access: None,
     }
 }
 
@@ -5144,60 +5143,84 @@ async fn each_principal_gets_a_harness_directory_of_their_own() {
     assert_eq!(std::fs::read_dir(&elsewhere).unwrap().count(), 0);
 }
 
-/// A service session (#222): its directory gets the harness's own provider file from the Hub's
-/// model access setting and the key in the harness's environment only, never the owner's files;
-/// the key the Hub does not give stops the open with one clear error; the file goes once the Hub
-/// names no provider.
+/// A service session uses the harness's own sign-in on the Node, with no Hub setting: Codex's login
+/// file is a link to the Node's (never a copy, so a refresh the harness writes lands in the Node's
+/// one login), Claude Code's credential store is the Node's (named by its variable, nothing
+/// copied), and of the Node's settings it gets the sign-in entries only, never the owner's
+/// instructions, skills or other settings.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_service_session_gets_the_hubs_provider_and_not_the_owners_files() {
+async fn a_service_session_uses_the_nodes_sign_in_and_nothing_personal() {
     let t = T::new(&[]);
-    std::fs::create_dir_all(t.root.join(".claude")).unwrap();
+    // the harnesses as their owner set them up on this machine
+    let claude = t.root.join(".claude");
+    let codex = t.root.join(".codex");
+    std::fs::create_dir_all(claude.join("skills/house-style")).unwrap();
+    std::fs::create_dir_all(codex.join("skills/house-style")).unwrap();
     std::fs::write(
-        t.root.join(".claude/settings.json"),
-        r#"{"owner":true,"env":{"ANTHROPIC_BASE_URL":"https://owner.example.test"}}"#,
+        claude.join("settings.json"),
+        r#"{"apiKeyHelper":"/bin/echo synthetic","model":"owner-pick","permissions":{"allow":["Bash"]},
+            "env":{"ANTHROPIC_BASE_URL":"https://gateway.example.test","GITHUB_TOKEN":"owner-only"}}"#,
     )
     .unwrap();
-    std::fs::write(t.root.join(".claude/CLAUDE.md"), "owner memory").unwrap();
-    let n = t.node();
-    let secrets = Arc::new(steve_node_api::testkit::FakeSecrets::default());
-    secrets.give("model:s_svc", "claude-code", b"sk-synthetic-gateway-key");
-    n.connect_secrets(secrets.clone());
+    std::fs::write(claude.join(".credentials.json"), r#"{"claudeAiOauth":1}"#).unwrap();
+    std::fs::write(claude.join("CLAUDE.md"), "owner memory").unwrap();
+    std::fs::write(claude.join("skills/house-style/SKILL.md"), "style").unwrap();
+    std::fs::write(
+        codex.join("config.toml"),
+        "model_provider = \"gw\"\nnotify = [\"owner-hook\"]\n[model_providers.gw]\nbase_url = \"https://gateway.example.test/v1\"\n",
+    )
+    .unwrap();
+    std::fs::write(codex.join("auth.json"), r#"{"tokens":"generation-1"}"#).unwrap();
+    std::fs::write(codex.join("AGENTS.md"), "owner instructions").unwrap();
+    std::fs::write(codex.join("skills/house-style/SKILL.md"), "style").unwrap();
+    // the fake adapter in Codex's shape for the codex harness
+    let codex_adapter = t.root.join("adapter-codex.sh");
+    std::fs::write(
+        &codex_adapter,
+        format!(
+            "#!/bin/sh\nexport FAKE_ACP_CODEX=1\nexec '{}' \"$@\"\n",
+            t.adapter.display()
+        ),
+    )
+    .unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&codex_adapter, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let mut cfg = t.config();
+    cfg.acp.adapters.insert("codex".to_string(), codex_adapter);
+    let n = LocalNode::open(cfg).unwrap();
+    n.connect(t.sink.clone(), None);
     n.prepare_workspace(now_cmd("op_prep", prepare_proj()))
         .await
         .unwrap();
     assert!(ok(&finished(&n, "op_prep").await));
-    let dir = "default/svc_default/dev/claude-code";
-    let open = |s: &str, access: Option<ModelAccess>| {
+    let open = |s: &str, harness: &str| {
         let mut b = open_body(s);
+        b.choice.harness = harness.into();
         b.state = Some(HarnessState {
-            dir: dir.into(),
+            dir: format!("default/svc_default/dev/{harness}"),
             import_owner: false,
+            // the switch says on, and a service session still gets nothing personal
             owner_context: true,
         });
-        b.model_access = access;
         b
     };
-    let access = ModelAccess {
-        base_url: "https://gateway.example.test".into(),
-        secret: "claude-code".into(),
+    for (s, harness) in [("s_claude", "claude-code"), ("s_codex", "codex")] {
+        let op = format!("op_open_{s}");
+        n.open_session(now_cmd(&op, open(s, harness)))
+            .await
+            .unwrap();
+        let r = finished(&n, &op).await;
+        assert!(ok(&r), "{harness}: {r:?}");
+    }
+    let state = |h: &str| {
+        t.home
+            .join("state/default/svc_default/dev")
+            .join(h)
+            .join("harness")
     };
-    n.open_session(now_cmd(
-        "op_open_s_svc",
-        open("s_svc", Some(access.clone())),
-    ))
-    .await
-    .unwrap();
-    let r = finished(&n, "op_open_s_svc").await;
-    assert!(ok(&r), "{r:?}");
-    let state = t.home.join("state").join(dir).join("harness");
-    let settings: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(state.join("settings.json")).unwrap()).unwrap();
-    assert_eq!(
-        settings,
-        serde_json::json!({"env": {"ANTHROPIC_BASE_URL": "https://gateway.example.test"}})
-    );
-    assert!(!state.join("CLAUDE.md").exists(), "nothing of the owner's");
-    let spawn = std::fs::read_to_string(&t.log)
+    let spawns: Vec<serde_json::Map<String, serde_json::Value>> = std::fs::read_to_string(&t.log)
         .unwrap()
         .lines()
         .filter_map(|l| {
@@ -5205,48 +5228,112 @@ async fn a_service_session_gets_the_hubs_provider_and_not_the_owners_files() {
                 .as_object()
                 .cloned()
         })
-        .last()
-        .unwrap();
-    assert_eq!(spawn["ANTHROPIC_AUTH_TOKEN"], "sk-synthetic-gateway-key");
-    // the key is in no file of the session's, nor in the Node's own directory
-    fn holds(dir: &Path, needle: &[u8]) -> bool {
-        std::fs::read_dir(dir)
-            .into_iter()
-            .flatten()
-            .flatten()
-            .any(|e| {
-                let p = e.path();
-                match std::fs::symlink_metadata(&p) {
-                    Ok(m) if m.is_dir() => holds(&p, needle),
-                    Ok(m) if m.is_file() => std::fs::read(&p)
-                        .is_ok_and(|b| b.windows(needle.len()).any(|w| w == needle)),
-                    _ => false,
-                }
-            })
+        .collect();
+
+    // Claude Code: its credential store is the Node's, by its variable; nothing of it copied
+    let node_store = std::env::var("CLAUDE_SECURESTORAGE_CONFIG_DIR")
+        .or_else(|_| std::env::var("CLAUDE_CONFIG_DIR"))
+        .unwrap_or_default();
+    let spawn = spawns
+        .iter()
+        .find(|e| {
+            e["CLAUDE_CONFIG_DIR"].as_str() == Some(&state("claude-code").display().to_string())
+        })
+        .expect("the Claude Code session in its own directory");
+    assert_eq!(
+        spawn["CLAUDE_SECURESTORAGE_CONFIG_DIR"],
+        node_store.as_str()
+    );
+    let dir = state("claude-code");
+    assert!(std::fs::symlink_metadata(dir.join(".credentials.json")).is_err());
+    let settings: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(dir.join("settings.json")).unwrap()).unwrap();
+    assert_eq!(
+        settings,
+        serde_json::json!({"apiKeyHelper": "/bin/echo synthetic",
+            "env": {"ANTHROPIC_BASE_URL": "https://gateway.example.test"}})
+    );
+    for personal in ["CLAUDE.md", "skills/house-style"] {
+        assert!(
+            std::fs::symlink_metadata(dir.join(personal)).is_err(),
+            "{personal}"
+        );
     }
-    assert!(!holds(&t.home, b"sk-synthetic-gateway-key"));
-    // the owner's file is as it was
+
+    // Codex: its login file is a link to the Node's, never a copy
+    let dir = state("codex");
+    let spawn = spawns
+        .iter()
+        .find(|e| e["CODEX_HOME"].as_str() == Some(&dir.display().to_string()))
+        .expect("the Codex session in its own directory");
+    assert!(spawn.get("STEVE_MODEL_ACCESS_KEY").is_none());
+    let auth = dir.join("auth.json");
     assert!(
-        std::fs::read_to_string(t.root.join(".claude/settings.json"))
+        std::fs::symlink_metadata(&auth)
             .unwrap()
-            .contains("owner.example.test")
+            .file_type()
+            .is_symlink()
+    );
+    assert_eq!(std::fs::read_link(&auth).unwrap(), codex.join("auth.json"));
+    let config = std::fs::read_to_string(dir.join("config.toml")).unwrap();
+    assert!(config.contains("model_provider = \"gw\""), "{config}");
+    assert!(config.contains("gateway.example.test"), "{config}");
+    assert!(!config.contains("owner-hook"), "{config}");
+    for personal in ["AGENTS.md", "skills/house-style"] {
+        assert!(
+            std::fs::symlink_metadata(dir.join(personal)).is_err(),
+            "{personal}"
+        );
+    }
+    // a refresh the harness writes (resolve the link, rename a new file over its target) lands in
+    // the Node's one login, and the next open keeps the link
+    let target = std::fs::canonicalize(&auth).unwrap();
+    std::fs::write(
+        target.with_file_name(".auth-new"),
+        r#"{"tokens":"generation-2"}"#,
+    )
+    .unwrap();
+    std::fs::rename(target.with_file_name(".auth-new"), &target).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(codex.join("auth.json")).unwrap(),
+        r#"{"tokens":"generation-2"}"#
+    );
+    n.open_session(now_cmd("op_open_s_codex2", open("s_codex2", "codex")))
+        .await
+        .unwrap();
+    assert!(ok(&finished(&n, "op_open_s_codex2").await));
+    assert!(
+        std::fs::symlink_metadata(&auth)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    assert_eq!(
+        std::fs::read_to_string(&auth).unwrap(),
+        r#"{"tokens":"generation-2"}"#
     );
 
-    // a key the Hub does not give: the open fails, saying why
-    n.open_session(now_cmd("op_open_s_svc2", open("s_svc2", Some(access))))
-        .await
-        .unwrap();
-    let r = finished(&n, "op_open_s_svc2").await;
-    assert!(!ok(&r));
-    assert!(format!("{r:?}").contains("model access"), "{r:?}");
-    // the Hub names no provider any more: Steve's file goes, the harness's own files stay
-    std::fs::write(state.join("history.jsonl"), "h").unwrap();
-    n.open_session(now_cmd("op_open_s_svc3", open("s_svc3", None)))
-        .await
-        .unwrap();
-    assert!(ok(&finished(&n, "op_open_s_svc3").await));
-    assert!(!state.join("settings.json").exists());
-    assert!(state.join("history.jsonl").exists());
+    // no copy of a credential anywhere under the Node's home
+    fn copies(dir: &Path, needle: &[u8]) -> Vec<std::path::PathBuf> {
+        let mut out = vec![];
+        for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+            let p = e.path();
+            match std::fs::symlink_metadata(&p) {
+                Ok(m) if m.is_dir() => out.extend(copies(&p, needle)),
+                Ok(m) if m.is_file() => {
+                    if std::fs::read(&p).is_ok_and(|b| b.windows(needle.len()).any(|w| w == needle))
+                    {
+                        out.push(p)
+                    }
+                }
+                _ => {}
+            }
+        }
+        out
+    }
+    for needle in [&b"generation-"[..], b"claudeAiOauth", b"owner-only"] {
+        assert_eq!(copies(&t.home, needle), Vec::<std::path::PathBuf>::new());
+    }
     n.shutdown().await;
 }
 
@@ -5301,6 +5388,22 @@ async fn the_owners_personal_config_follows_the_hubs_choice() {
         std::fs::read_to_string(on.join("agents/reviewer.md")).unwrap(),
         "reviewer"
     );
+    // the switch is about personal context only: every one of them uses the Node's sign-in
+    let spawns: Vec<serde_json::Value> = std::fs::read_to_string(&t.log)
+        .unwrap()
+        .lines()
+        .filter_map(|l| {
+            serde_json::from_str::<serde_json::Value>(l)
+                .ok()?
+                .pointer("/spawn/env")
+                .cloned()
+        })
+        .filter(|e| e["CLAUDE_CONFIG_DIR"].is_string())
+        .collect();
+    assert_eq!(spawns.len(), 3, "{spawns:?}");
+    for e in &spawns {
+        assert!(e["CLAUDE_SECURESTORAGE_CONFIG_DIR"].is_string(), "{e}");
+    }
     for dir in [
         "default/owner/ops/claude-code",
         "default/other/dev/claude-code",

@@ -164,6 +164,31 @@ pub(crate) fn publish(dst: &Path, bytes: &[u8]) -> Result<(), String> {
     })
 }
 
+/// [`publish`] for a file only its owner may read (mode `0600`).
+pub(crate) fn publish_private(dst: &Path, bytes: &[u8]) -> Result<(), String> {
+    use std::os::unix::fs::OpenOptionsExt as _;
+    let dir = dst.parent().ok_or("no directory")?;
+    let tmp = dir.join(format!(
+        ".{}.{}.tmp",
+        dst.file_name().unwrap_or_default().to_string_lossy(),
+        uuid::Uuid::new_v4().simple()
+    ));
+    let write = || -> std::io::Result<()> {
+        let mut f = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&tmp)?;
+        f.write_all(bytes)?;
+        f.sync_all()?;
+        fs::rename(&tmp, dst)
+    };
+    write().map_err(|e| {
+        let _ = fs::remove_file(&tmp);
+        format!("{}: {e}", dst.display())
+    })
+}
+
 /// Puts `files` into `<cwd>/.steve/attachments` and says where they are. Blocking.
 ///
 /// The directory gets a `.gitignore` of `*` (the same one the legacy runner wrote), so nothing

@@ -29,8 +29,8 @@ pub mod usage;
 mod util;
 
 pub use adapters::{
-    AdapterEntry, AdapterProperties, AdapterSpec, Declaration, ModeMap, ModelProvider,
-    ProviderFormat, StateDir, UsageFallback,
+    AdapterEntry, AdapterProperties, AdapterSpec, Declaration, Login, ModeMap, StateDir,
+    UsageFallback,
 };
 pub use config::{
     AcpConfig, default_claude_adapter, default_claude_executable, default_codex_adapter,

@@ -426,9 +426,9 @@ pub struct RoutedRuntime {
     /// Steve's worktrees directory, where the local Node makes the items' worktrees (set with the
     /// local Node; unset, the core makes them).
     pub worktrees: Option<std::path::PathBuf>,
-    /// Whether a principal's Bot can run at all ([`super::model_access::Preflight`]), asked before
+    /// Whether a principal's Bot can run at all ([`super::preflight::Preflight`]), asked before
     /// a session is made or a message opens one. `None`: not asked.
-    pub preflight: Option<Arc<super::model_access::Preflight>>,
+    pub preflight: Option<Arc<super::preflight::Preflight>>,
 }
 
 /// Whether boot recovery leaves `session` to the Node it is bound to (enabled here or not: a
@@ -777,13 +777,13 @@ impl RoutedRuntime {
 }
 
 impl RoutedRuntime {
-    /// [`super::model_access::Preflight`]'s answer, as stored text (zh-CN).
+    /// [`super::preflight::Preflight`]'s answer, as stored text (zh-CN).
     fn preflight(
         &self,
         f: impl FnOnce(
-            &super::model_access::Preflight,
+            &super::preflight::Preflight,
             &rusqlite::Connection,
-        ) -> Result<(), super::model_access::Blocked>,
+        ) -> Result<(), super::preflight::Blocked>,
     ) -> Result<(), String> {
         let Some(p) = &self.preflight else {
             return Ok(());
@@ -1034,18 +1034,6 @@ impl steve_core::AgentRuntime for RoutedRuntime {
         files: &[steve_core::repo::FileRef],
     ) -> steve_core::Result<steve_core::Prompted> {
         self.check_workflow_session(session_id)?;
-        // a service session its model access no longer covers: refused, said once in it, rather
-        // than an open that fails on the Node and is tried again with every message (#222)
-        if let Err(why) = self.preflight(|p, c| p.can_run_session(c, session_id)) {
-            if let Err(e) = self.store.events().add(
-                session_id,
-                "system",
-                json!({ "text": why, "refused": true }),
-            ) {
-                tracing::error!("refusal of {session_id}: {e}");
-            }
-            return Err(CoreError::Msg(why));
-        }
         let n = match self.route(session_id) {
             Backend::Node(n) => Some(n),
             Backend::Parked => None,

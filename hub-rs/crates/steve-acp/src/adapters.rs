@@ -142,6 +142,10 @@ pub struct StateDir {
     /// name gives way to the owner's. A session of another principal gets none of it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub context: Vec<String>,
+    /// The harness's sign-in on the Node, apart from the owner's settings and personal context
+    /// above: every principal's session on the Node uses the Node's one sign-in ([`Login`]).
+    #[serde(default, skip_serializing_if = "Login::is_empty")]
+    pub login: Login,
     /// True when `env` sets a virtual `$HOME` rather than the dot-directory itself: `env` receives
     /// the per-principal state directory, while files from `default` are imported into
     /// `<state>/<default>/` (e.g. `GEMINI_CLI_HOME` -> `<state>/.gemini/`, `FACTORY_HOME_OVERRIDE`
@@ -169,6 +173,119 @@ pub struct StateDir {
     pub home: Option<String>,
 }
 
+/// How a session uses the harness's sign-in on its Node. The harness signs in by itself there (its
+/// own login command, its own settings, set up by whoever installed it on that machine); Steve
+/// never configures a model provider and never handles a provider key. Every principal's session on
+/// the Node, the Node owner's and anyone else's (a schedule's service principal too), uses that one
+/// sign-in, and never a copy of it: a copy that renewed its tokens on its own would sign the
+/// original out. What stays per principal is the rest of the harness's directory (history,
+/// sessions) and, for the Node's owner only, their settings and personal context
+/// ([`StateDir::import`], [`StateDir::context`]).
+///
+/// Two ways to reach the one sign-in, chosen by what the harness supports:
+///
+/// - [`Self::store_env`]: a variable that moves only the harness's credential store. The session
+///   gets the Node's own value of it and the harness uses the Node's store in place; nothing is
+///   linked or written (Claude Code).
+/// - Without it, each of [`Self::files`] is a link in the session's directory to the Node's own
+///   file. Only for a harness that, when it renews its sign-in, writes through a link or replaces
+///   the file the link leads to (never the link itself), so the link and the Node's file stay one
+///   (Codex resolves the link and renames over its target, under a lock beside the target; Pi
+///   writes through it, locked at the target).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Login {
+    /// The harness's credential files, relative to its credential store (its directory, or the
+    /// one [`Self::store_env`] names): linked into the session's directory without `store_env`
+    /// (even before the Node signs in, so a later sign-in is seen); with it, what a confined
+    /// session may read and write there.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub files: Vec<String>,
+    /// What else the harness makes in its credential store while it renews its sign-in, beside
+    /// [`Self::files`]: its lock and its temporary file, by name (a trailing `*` matches any rest
+    /// of it). A session that may not see the Node's harness directory may still write these
+    /// there, so a renewal is never made and then lost (the old sign-in would be spent).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub renew: Vec<String>,
+    /// A variable that moves only the harness's credential store, apart from [`StateDir::env`]
+    /// (Claude Code's `CLAUDE_SECURESTORAGE_CONFIG_DIR`: its keychain entry and its
+    /// `.credentials.json`). A session gets the Node's own ([`StateDir::node_store`]).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub store_env: String,
+    /// The harness's settings file (relative to its directory, `.toml` or `.json`) that may hold
+    /// its sign-in as well: which provider or gateway it uses and how it gets its key.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub settings: String,
+    /// The sign-in entries of [`Self::settings`]: a top-level `key`, or `key.SUB` for one entry of
+    /// a table; a trailing `*` matches any rest of the last name. In every session's file these
+    /// entries are the Node's own, as they are there when the harness opens; everything else in
+    /// it stays the session's (the owner's starts from their whole file, [`StateDir::import`]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub entries: Vec<String>,
+}
+
+impl Login {
+    pub fn is_empty(&self) -> bool {
+        self.files.is_empty()
+            && self.renew.is_empty()
+            && self.store_env.is_empty()
+            && self.settings.is_empty()
+            && self.entries.is_empty()
+    }
+
+    /// Whether `rel` is a plain relative path of names (no `.`, `..`, empty or absolute parts).
+    pub fn plain(rel: &str) -> bool {
+        !rel.is_empty()
+            && rel.len() <= 256
+            && !Path::new(rel).is_absolute()
+            && rel.split('/').all(|p| {
+                !p.is_empty()
+                    && p != "."
+                    && p != ".."
+                    && p.chars()
+                        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+            })
+    }
+
+    /// Whether `name` of [`Self::renew`] is usable: one plain name, `*` only at its end.
+    pub fn renew_ok(name: &str) -> bool {
+        let base = name.strip_suffix('*').unwrap_or(name);
+        !base.is_empty() && !base.contains(['/', '*']) && Self::plain(base) && base != "."
+    }
+
+    /// Whether `entry` of [`Self::entries`] is usable: one or two names, `*` only at the end.
+    pub fn entry_ok(entry: &str) -> bool {
+        let parts: Vec<&str> = entry.split('.').collect();
+        (1..=2).contains(&parts.len())
+            && parts.iter().enumerate().all(|(i, p)| {
+                let name = p.strip_suffix('*').unwrap_or(p);
+                (i + 1 == parts.len() || !p.ends_with('*'))
+                    && (!name.is_empty() || p.ends_with('*'))
+                    && name
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-'))
+            })
+    }
+
+    /// Whether `name` is a usable variable name.
+    pub fn var_ok(name: &str) -> bool {
+        !name.is_empty()
+            && name.len() <= 128
+            && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+            && !name.as_bytes()[0].is_ascii_digit()
+    }
+
+    /// The names in the credential store a confined session may read and write: the credential
+    /// files that are one plain name, and [`Self::renew`]'s.
+    pub fn store_names(&self) -> Vec<String> {
+        self.files
+            .iter()
+            .filter(|f| Self::plain(f) && !f.contains('/'))
+            .chain(self.renew.iter().filter(|n| Self::renew_ok(n)))
+            .cloned()
+            .collect()
+    }
+}
+
 fn absolutize_env_path(p: PathBuf, user_home: &Path) -> PathBuf {
     if p.is_absolute() {
         p
@@ -194,6 +311,36 @@ impl StateDir {
             });
         }
         (!self.default.is_empty()).then(|| user_home.join(&self.default))
+    }
+
+    /// The Node's own credential store for [`Login::store_env`]: the variable, the value a session
+    /// gets (the Node's own value of it; else the directory the Node's harness uses when `env`
+    /// moves it there; else empty, the harness's default place) and that store's directory.
+    /// `node_var` reads the Node's environment for the harness. `None` without `store_env`.
+    pub fn node_store(
+        &self,
+        user_home: &Path,
+        node_var: impl Fn(&str) -> Option<OsString>,
+    ) -> Option<(OsString, OsString, PathBuf)> {
+        let var = self.login.store_env.as_str();
+        if !Login::var_ok(var) {
+            return None;
+        }
+        let set = |name: &str| node_var(name).filter(|v| !v.is_empty());
+        let value = match node_var(var) {
+            Some(v) => v,
+            // as the Node's harness has it: the harness names its store after this text
+            None => (!self.env.is_empty())
+                .then(|| set(&self.env))
+                .flatten()
+                .unwrap_or_default(),
+        };
+        let dir = if value.is_empty() {
+            user_home.join(&self.default)
+        } else {
+            absolutize_env_path(PathBuf::from(&value), user_home)
+        };
+        Some((var.into(), value, dir))
     }
 
     /// Directories the harness writes in ambient (non-isolated) mode—used by read-only sandboxes
@@ -305,107 +452,6 @@ fn is_false(b: &bool) -> bool {
     !*b
 }
 
-/// How a harness is pointed at a model provider in its own configuration: what the Node writes
-/// into a service principal's directory from the Hub's model access setting (a service session
-/// never starts from the owner's files, so without it the harness falls back to its own default
-/// login). The provider's key never goes into the file: the harness reads it from `key_env`,
-/// which the Node sets for that one process from the Hub's vault.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ModelProvider {
-    /// The file under the harness's directory (as `StateDir::import` names them) Steve writes.
-    pub file: String,
-    pub format: ProviderFormat,
-    /// The variable the harness reads the provider's key from.
-    pub key_env: String,
-    /// A service session of it cannot reach a model without the setting (its directory holds the
-    /// only way it signs in, and a service principal's starts empty): the preflight refuses it
-    /// until the setting names a provider. Off: the setting is used when there is one, and
-    /// without it the harness keeps whatever other sign-in it has (an operating system keychain,
-    /// say).
-    #[serde(default)]
-    pub required: bool,
-}
-
-/// The shape of [`ModelProvider::file`].
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum ProviderFormat {
-    /// A TOML file that selects `model_provider` and describes it in `[model_providers.<id>]`
-    /// (`base_url`, `env_key`, `wire_api`).
-    ModelProvidersToml {
-        /// The provider id Steve's table is written under (`[model_providers.<table>]`).
-        table: String,
-        wire_api: String,
-    },
-    /// A JSON settings file whose `env` object the harness applies to itself: `base_url_env`
-    /// carries the endpoint.
-    SettingsEnv { base_url_env: String },
-}
-
-impl ModelProvider {
-    /// A usable declaration: a plain relative file and variable names.
-    pub fn valid(&self) -> bool {
-        let name = |s: &str| {
-            !s.is_empty()
-                && s.len() <= 128
-                && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
-                && !s.as_bytes()[0].is_ascii_digit()
-        };
-        let file_ok = !self.file.is_empty()
-            && !Path::new(&self.file).is_absolute()
-            && self.file.split('/').all(|p| {
-                !p.is_empty()
-                    && p != "."
-                    && p != ".."
-                    && p.chars()
-                        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
-            });
-        file_ok
-            && name(&self.key_env)
-            && match &self.format {
-                ProviderFormat::ModelProvidersToml { table, wire_api } => {
-                    name(table) && name(wire_api)
-                }
-                ProviderFormat::SettingsEnv { base_url_env } => name(base_url_env),
-            }
-    }
-
-    /// The file's content for the provider at `base_url` (an `http(s)` URL of one line, checked
-    /// by the caller). Deterministic: the same setting gives the same bytes.
-    pub fn render(&self, base_url: &str) -> Vec<u8> {
-        // a JSON string is a valid TOML basic string for what a URL holds
-        let quoted = |s: &str| serde_json::to_string(s).unwrap_or_else(|_| "\"\"".into());
-        match &self.format {
-            ProviderFormat::ModelProvidersToml {
-                table: id,
-                wire_api,
-            } => format!(
-                "# Written by Steve from the Hub's model access setting for service sessions.\n\
-                 # Rewritten each time a session opens; edit the setting, not this file.\n\
-                 model_provider = {id_q}\n\n\
-                 [model_providers.{id}]\n\
-                 name = \"Steve model access\"\n\
-                 base_url = {url}\n\
-                 env_key = {key}\n\
-                 wire_api = {wire}\n",
-                id_q = quoted(id),
-                url = quoted(base_url),
-                key = quoted(&self.key_env),
-                wire = quoted(wire_api),
-            )
-            .into_bytes(),
-            ProviderFormat::SettingsEnv { base_url_env } => {
-                let mut env = serde_json::Map::new();
-                env.insert(base_url_env.clone(), Value::String(base_url.into()));
-                let v = json!({ "env": env });
-                let mut out = serde_json::to_vec_pretty(&v).unwrap_or_default();
-                out.push(b'\n');
-                out
-            }
-        }
-    }
-}
-
 /// What `session/new|load` carries in `_meta` for the adapter.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -514,10 +560,6 @@ pub struct AdapterProperties {
     /// (for example `--no-sandbox` so Copilot CLI disables its nested inner sandbox rather than
     /// aborting inside Seatbelt or Bubblewrap).
     pub outer_sandbox_args: Vec<String>,
-    /// How the harness is pointed at a model provider in its own configuration, for service
-    /// sessions given the Hub's model access setting ([`ModelProvider`]). `None`: Steve cannot
-    /// configure one for it, and its service sessions use whatever it finds on its own.
-    pub model_provider: Option<ModelProvider>,
 }
 
 /// Where a call's tokens are read when the adapter does not report them.
@@ -563,13 +605,12 @@ impl Default for AdapterProperties {
             fork_cli: None,
             local_transcript: false,
             outer_sandbox_args: vec![],
-            model_provider: None,
         }
     }
 }
 
 /// The keys of [`PropertiesPatch`] (what a manifest's `properties` may hold).
-pub const PROPERTY_KEYS: [&str; 26] = [
+pub const PROPERTY_KEYS: [&str; 25] = [
     "self_read_only",
     "nested_sandbox",
     "state",
@@ -595,7 +636,6 @@ pub const PROPERTY_KEYS: [&str; 26] = [
     "resume_cli",
     "fork_cli",
     "outer_sandbox_args",
-    "model_provider",
 ];
 
 /// Declared properties, each optional: what is given replaces the built-in (or default) value.
@@ -653,8 +693,6 @@ pub struct PropertiesPatch {
     pub fork_cli: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub outer_sandbox_args: Option<Vec<String>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model_provider: Option<ModelProvider>,
 }
 
 impl PropertiesPatch {
@@ -748,13 +786,6 @@ impl PropertiesPatch {
         }
         if let Some(v) = &self.outer_sandbox_args {
             p.outer_sandbox_args = v.clone();
-        }
-        if let Some(v) = &self.model_provider {
-            if v.valid() {
-                p.model_provider = Some(v.clone());
-            } else {
-                tracing::warn!("harness adapter: its declared model_provider is not usable");
-            }
         }
     }
 }
@@ -998,18 +1029,31 @@ const BUILTINS: &[Builtin] = &[
                     "commands",
                     "output-styles",
                 ]),
+                // its keychain entry (macOS) and `.credentials.json` follow this variable apart
+                // from `CLAUDE_CONFIG_DIR` (empty: the default place, `~/.claude` and the entry
+                // without a suffix), so a session uses the Node's one sign-in in place; it refuses
+                // a linked credentials file. It renews under `.storage-write.lock` there, through
+                // `.credentials.json.tmp.<hex>`. And a gateway or key helper its settings name
+                login: Login {
+                    files: strings(&[".credentials.json"]),
+                    renew: strings(&[".storage-write.lock", ".credentials.json.tmp.*"]),
+                    store_env: "CLAUDE_SECURESTORAGE_CONFIG_DIR".into(),
+                    settings: "settings.json".into(),
+                    entries: strings(&[
+                        "apiKeyHelper",
+                        "awsAuthRefresh",
+                        "awsCredentialExport",
+                        "forceLoginMethod",
+                        "forceLoginOrgUUID",
+                        "env.ANTHROPIC_*",
+                        "env.CLAUDE_CODE_USE_*",
+                        "env.AWS_*",
+                        "env.CLOUD_ML_REGION",
+                        "env.VERTEX_REGION_*",
+                    ]),
+                },
                 home_files: strings(&[".claude.json"]),
                 ..Default::default()
-            }),
-            // its user settings' `env`, and the gateway's token in the process environment
-            model_provider: Some(ModelProvider {
-                file: "settings.json".into(),
-                format: ProviderFormat::SettingsEnv {
-                    base_url_env: "ANTHROPIC_BASE_URL".into(),
-                },
-                key_env: "ANTHROPIC_AUTH_TOKEN".into(),
-                // it may also sign in through the system keychain: configurable, not required
-                required: false,
             }),
             modes: ModeMap::default(),
             executable_env: Some("CLAUDE_CODE_EXECUTABLE".into()),
@@ -1053,22 +1097,28 @@ const BUILTINS: &[Builtin] = &[
             state: Some(StateDir {
                 env: "CODEX_HOME".into(),
                 default: ".codex".into(),
-                // not its login: copies refreshing on their own would sign the owner's out
                 import: vec!["config.toml".into()],
                 // its global instructions, skills and prompts
                 context: strings(&["AGENTS.md", "AGENTS.override.md", "skills/*", "prompts"]),
-                ..Default::default()
-            }),
-            // a provider table of its own in `config.toml`, its key read from the environment
-            model_provider: Some(ModelProvider {
-                file: "config.toml".into(),
-                format: ProviderFormat::ModelProvidersToml {
-                    table: "steve".into(),
-                    wire_api: "responses".into(),
+                // its file login (the default `cli_auth_credentials_store`): renewing, it resolves
+                // a linked `auth.json` and renames `.auth-<random>` over the target, under
+                // `auth.json.lock` beside it (older versions write through the link), so every
+                // session shares the Node's one file; and the provider its `config.toml` names
+                login: Login {
+                    files: strings(&["auth.json"]),
+                    renew: strings(&["auth.json.lock", ".auth-*"]),
+                    settings: "config.toml".into(),
+                    entries: strings(&[
+                        "model_provider",
+                        "model_providers",
+                        "forced_login_method",
+                        "forced_chatgpt_workspace_id",
+                        "chatgpt_base_url",
+                        "openai_base_url",
+                    ]),
+                    ..Default::default()
                 },
-                key_env: "STEVE_MODEL_ACCESS_KEY".into(),
-                // its login lives in `$CODEX_HOME`: a service session has none without this
-                required: true,
+                ..Default::default()
             }),
             modes: ModeMap {
                 plan: "read-only".into(),
@@ -1126,9 +1176,18 @@ const BUILTINS: &[Builtin] = &[
             state: Some(StateDir {
                 env: "PI_CODING_AGENT_DIR".into(),
                 default: ".pi/agent".into(),
-                import: strings(&["settings.json", "models.json"]),
+                import: vec!["settings.json".into()],
                 // its global instructions, skills and prompt templates
                 context: strings(&["AGENTS.md", "skills/*", "prompts"]),
+                // its login (written through a link, locked with `auth.json.lock` at the link's
+                // target) and its providers; and which of them its settings choose
+                login: Login {
+                    files: strings(&["auth.json", "models.json"]),
+                    renew: strings(&["auth.json.lock"]),
+                    settings: "settings.json".into(),
+                    entries: strings(&["defaultProvider"]),
+                    ..Default::default()
+                },
                 ..Default::default()
             }),
             skills: Some("skills".into()),
@@ -2722,56 +2781,6 @@ mod tests {
         let mut ordinary = AdapterProperties::default();
         patch.apply(&mut ordinary);
         assert!(ordinary.native_execution);
-    }
-
-    #[test]
-    fn a_declared_model_provider_renders_the_harnesses_own_config_without_the_key() {
-        let url = "https://gateway.example.test/v1";
-        for (id, file) in [("codex", "config.toml"), ("claude-code", "settings.json")] {
-            let p = spec(id, None).properties.model_provider.unwrap();
-            assert!(p.valid(), "{id}");
-            assert_eq!(p.file, file);
-            let text = String::from_utf8(p.render(url)).unwrap();
-            assert!(text.contains(url), "{text}");
-            assert_eq!(p.render(url), p.render(url), "deterministic");
-        }
-        let toml = String::from_utf8(
-            spec("codex", None)
-                .properties
-                .model_provider
-                .unwrap()
-                .render(url),
-        )
-        .unwrap();
-        assert!(toml.contains("model_provider = \"steve\""), "{toml}");
-        assert!(toml.contains("[model_providers.steve]"), "{toml}");
-        assert!(
-            toml.contains("env_key = \"STEVE_MODEL_ACCESS_KEY\""),
-            "{toml}"
-        );
-        let json: Value = serde_json::from_slice(
-            &spec("claude-code", None)
-                .properties
-                .model_provider
-                .unwrap()
-                .render(url),
-        )
-        .unwrap();
-        assert_eq!(json, json!({"env": {"ANTHROPIC_BASE_URL": url}}));
-        // an adapter nobody described gets none, and a declared one that is not plain is refused
-        assert!(AdapterProperties::default().model_provider.is_none());
-        let mut patch = PropertiesPatch::default();
-        patch.model_provider = Some(ModelProvider {
-            file: "../escape".into(),
-            format: ProviderFormat::SettingsEnv {
-                base_url_env: "URL".into(),
-            },
-            key_env: "KEY".into(),
-            required: true,
-        });
-        let mut p = AdapterProperties::default();
-        patch.apply(&mut p);
-        assert!(p.model_provider.is_none());
     }
 
     #[tokio::test]

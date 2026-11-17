@@ -45,8 +45,8 @@ pub trait Core: Send + Sync {
     /// The `/汇报` text (`digestText`).
     async fn digest_text(&self, ws: &str) -> Result<String, String>;
     /// Whether a schedule's item could run at all: its principal (`requester` while a member,
-    /// else the workspace's service principal) with `bot` (its harness ready, its model access
-    /// configured). Synchronous, on the caller's connection (inside its transaction, too), and
+    /// else the workspace's service principal) with `bot` (its harness installed, ready and
+    /// signed in on a Node). Synchronous, on the caller's connection (inside its transaction, too), and
     /// deterministic: it reads the database and what the Nodes last said, nothing else. `Err` is
     /// the reason, saying where it is fixed. The default lets everything run.
     fn can_run(
