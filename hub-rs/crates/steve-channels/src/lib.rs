@@ -149,6 +149,7 @@ pub mod send_state;
 mod service;
 pub mod space_decisions;
 pub mod spaces;
+pub mod starred;
 pub mod trigger_report;
 pub mod unsendable;
 pub mod usage;

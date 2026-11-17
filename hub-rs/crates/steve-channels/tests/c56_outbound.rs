@@ -4505,6 +4505,7 @@ async fn notification_setup(h: &H) -> steve_channels::notifications::Policy {
         timezone: "UTC".into(),
         quiet_start: None,
         quiet_end: None,
+        starred_in_quiet: false,
     }
 }
 fn notification_dispatch(h: &H) -> steve_store::outbox::Dispatcher {

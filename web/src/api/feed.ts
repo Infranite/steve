@@ -1,9 +1,10 @@
-/* The personal reading API: workspace reports and explicitly opted-in completion notifications.
+/* The personal reading API: workspace reports and explicitly opted-in personal notifications
+ * (work-item completions, starred contacts' messages to you).
  * Capture the Hub and workspace once; never let a mounted reader follow a global scope switch. */
 import { modReq, qs } from "@/api"
 import { currentHub } from "@/hub"
 
-export type FeedKind = "report" | "completion"
+export type FeedKind = "report" | "completion" | "starred"
 export type FeedSource = "flow" | "notification"
 export type FeedContent = { title: string; markdown: string; fields: [string, string][]; actions: [string, string][]; references: [string, string][] }
 export type FeedEntry = {

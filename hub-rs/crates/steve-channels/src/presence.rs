@@ -477,6 +477,39 @@ pub fn owner_engaged(
     Ok(engaged(dm, &t, &around, now, OWNER_LIVE_MS))
 }
 
+/// [`owner_engaged`] over the whole chat of inbound message `target`: the spaces every connection of
+/// `ws` keeps for it (your own account's and a bot's see one chat as two spaces, each message stored
+/// once, in whichever came first). What a starred contact's notification asks
+/// ([`crate::starred`]): you may have answered through the other copy.
+pub fn owner_engaged_chat(
+    c: &Connection,
+    ws: &str,
+    target: &str,
+    now: i64,
+) -> ChannelResult<Option<Engaged>> {
+    let Some((mut t, space, dm)) = said(c, ws, target)? else {
+        return Ok(None);
+    };
+    if t.owner {
+        return Ok(None);
+    }
+    let mut st = c.prepare_cached(
+        "SELECT o.id FROM spaces s JOIN spaces o ON o.workspace_id = s.workspace_id AND o.external_id = s.external_id
+          WHERE s.id = ?1 AND s.workspace_id = ?2 AND o.id <> ?1 ORDER BY o.id",
+    )?;
+    let others = st
+        .query_map(params![space, ws], |r| r.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let (mut around, mut mine) = (Vec::new(), Vec::new());
+    for sp in std::iter::once(space).chain(others) {
+        let my = my_accounts(c, ws, &sp)?;
+        around.extend(lines(c, ws, &sp, t.at - OWNER_LIVE_MS, now.max(t.at), &my)?);
+        mine.extend(my);
+    }
+    t.mentions_owner |= t.mentions.iter().any(|a| mine.contains(a));
+    Ok(engaged(dm, &t, &around, now, OWNER_LIVE_MS))
+}
+
 /// The later message whose turn took inbound message `id` ([`take_turn`]), if one did.
 pub fn merged_into(c: &Connection, id: &str) -> ChannelResult<Option<String>> {
     Ok(c.query_row(

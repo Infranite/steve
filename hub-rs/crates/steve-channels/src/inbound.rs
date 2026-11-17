@@ -557,6 +557,13 @@ impl Channels {
         })?;
         let mut inbound = written.inbound;
         if inbound.duplicate {
+            // another identity's copy of a message stored first from a bot's (or your own account's
+            // copy, again): only your own account's copy says whether it is meant for you
+            // (crate::starred; once per message and user)
+            if inbound.next != Next::Record(LABEL_ECHO) && history.is_none() {
+                let copy = crate::starred::OwnCopy::of(&msg, msg.space_kind.unwrap_or(info.kind));
+                self.starred_elsewhere(ws, conn, &inbound, copy);
+            }
             return Ok(inbound);
         }
         // your own words in a space where your own account speaks: what Steve still has waiting to
@@ -1441,7 +1448,13 @@ impl Channels {
         conn: &str,
         inbound: &Inbound,
     ) -> ChannelResult<Response> {
-        let r = self.respond_unmarked(ws, conn, inbound).await?;
+        // a starred contact's message to you: told to you first, whatever the rules then do
+        // (crate::starred)
+        let alert = self.starred_alert(ws, conn, inbound);
+        let mut r = self.respond_unmarked(ws, conn, inbound).await?;
+        if let Some(a) = &alert {
+            r.label = format!("{} · {}", r.label, a.label());
+        }
         let mid = inbound.message_id.clone();
         self.store()
             .transaction(|tx| respond::mark_message_event(tx, &mid, &r))?;

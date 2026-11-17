@@ -208,6 +208,10 @@ pub const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/099.sql"),
     // 100: the calendar read cache: calendars per connection and person, events, attendees, meetings.
     include_str!("../migrations/100.sql"),
+    // 101: a starred contact's message to you becomes a personal notification (`personal_notifications.kind`,
+    // `message_id`; `notification_policies.starred_in_quiet`), and the feed reads it as its own kind (`feed_entries`
+    // rebuilt to allow `starred`; 098's triggers on it created again).
+    include_str!("../migrations/101.sql"),
 ];
 
 /// 027's item columns and their one-time backfill (applied by `run_pending` when `items.phase` is missing).
