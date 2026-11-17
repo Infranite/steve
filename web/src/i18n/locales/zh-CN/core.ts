@@ -272,6 +272,7 @@ export default {
     tabs: "主导航",
     /* the gray count beside 待办: never a reminder badge */
     todoCount_other: "{{count}} 条今天到期或逾期",
+    nextMeeting: "下一场会 {{time}} {{title}}",
   },
   /* the composer's slash commands: the zh-CN name is also the token the Hub reads ("/汇报") */
   cmd: {

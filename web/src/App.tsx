@@ -68,7 +68,7 @@ const YoloDigestView = lazyView(() => import("@/yolo/digest").then((m) => ({ def
 const StatsRoute = lazyView(() => import("@/stats/page").then((m) => ({ default: m.StatsRoute })))
 const TodosView = lazyView(() => import("@/todos/page").then((m) => ({ default: m.TodosView })))
 const TodoRoute = lazyView(() => import("@/todos/page").then((m) => ({ default: m.TodoRoute })))
-const CalendarView = lazyView(() => import("@/todos/calendar").then((m) => ({ default: m.CalendarView })))
+const CalendarView = lazyView(() => import("@/calendar/page").then((m) => ({ default: m.CalendarView })))
 const DeliveryPage = lazyView(() => import("@/delivery-page").then((m) => ({ default: m.DeliveryPage })))
 
 
@@ -237,7 +237,7 @@ export default function App({ deliveryId }: { deliveryId?: string }) {
     a.split("?")[0] === "feed" ? <FeedView workspace={st.workspace!.id} filter={new URLSearchParams(a.split("?")[1]).get("kind") ?? ""} /> :
     a === "inbox" ? <InboxView /> :
     a.split("?")[0] === "todos" ? (b ? <TodoRoute key={b} id={b} /> : <TodosView query={a.split("?")[1]} />) :
-    a.split("?")[0] === "calendar" ? <CalendarView /> :
+    a.split("?")[0] === "calendar" ? <CalendarView query={(b === "e" ? c ?? "" : a).split("?")[1]} event={b === "e" && c ? decodeURIComponent(c.split("?")[0]) : undefined} /> :
     a === "items" ? (b ? <ItemView key={b} id={b} /> : <ItemsView />) :
     a === "projects" ? (b ? <ProjectView key={b} id={b} /> : <ProjectsView />) :
     a === "sessions" ? (b ? <SessionView key={b} k={b} /> : <SessionsView />) :

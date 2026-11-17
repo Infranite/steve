@@ -264,6 +264,7 @@ export default {
     tabs: "Main navigation",
     todoCount_one: "{{count}} due today or overdue",
     todoCount_other: "{{count}} due today or overdue",
+    nextMeeting: "Next meeting at {{time}}: {{title}}",
   },
   cmd: {
     newItem: "New item",

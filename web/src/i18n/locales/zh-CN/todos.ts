@@ -1,4 +1,4 @@
-/* zh-CN strings for the "todos" namespace: 待办 (todos and goals) and the 日历 page before a calendar is connected.
+/* zh-CN strings for the "todos" namespace: 待办 (todos and goals).
  * The source text. Conventions: web/src/i18n/index.ts */
 export default {
   title: "待办",
@@ -133,35 +133,5 @@ export default {
     link: "关联事项",
     linkSearch: "按编号或标题找事项",
     linkNone: "没有可以关联的事项",
-  },
-  calendar: {
-    title: "日历",
-    sub: "你的日程，从你接入的日历同步过来",
-    none: "还没有接入日历",
-    noneSub: "日历和飞书一样是一种数据源，在「连接」里启用。接入后，这里按天、按周和议程显示你的日程，会前提醒和准备也从这里来。日历同步还在开发中。",
-    connect: "接入日历",
-    deadlines_other: "接下来 {{count}} 天的截止",
-    allTodos: "全部待办",
-    noDeadlines_other: "接下来 {{count}} 天没有截止的待办。",
-    sourcesHead: "可以接入的日历",
-    planned: "计划中",
-    sourcesNote: "每本日历都属于一个人，你的挂在你名下。别人的日程默认只看忙闲，对方共享了才看内容。",
-    source: {
-      feishu: { name: "飞书日历", how: "用你托管的飞书账号读写，变更实时推送" },
-      invites: { name: "邮件里的邀请", how: "从收到的 .ics 邀请生成只读日历，回复走邮件" },
-      caldav: { name: "iCloud 等 CalDAV", how: "iPhone 和 Mac 上的 iCloud 日历，用 App 专用密码" },
-      dingtalk: { name: "钉钉日历", how: "需要组织管理员开通日程权限" },
-      exchange: { name: "Exchange / Outlook", how: "通过 Microsoft 账号授权" },
-      google: { name: "Google 日历", how: "通过 Google 账号授权" },
-      mac: { name: "Mac 本机日历", how: "在常驻的 Mac 上作为接入插件运行，读本机的日历" },
-    },
-    willHead: "接入后这里会有",
-    will: {
-      views: { title: "日、周和议程", sub: "按来源着色，冲突和待回复的邀请一眼看到" },
-      briefing: { title: "晨报", sub: "每天早上：今天的会、到期的待办、等你拍板的事" },
-      prep: { title: "会前准备与提醒", sub: "重要的会提前备好参会人、上次纪要和相关事项" },
-      invites: { title: "邀请与改期", sub: "会通知别人的改动先出审批卡，只影响你的直接改" },
-      others: { title: "别人的忙闲", sub: "找共同空档、约会议时用" },
-    },
   },
 }

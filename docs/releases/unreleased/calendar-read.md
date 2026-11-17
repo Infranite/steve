@@ -2,4 +2,4 @@ Calendars are now data sources. Under **Connections**, connect an **ICS calendar
 
 Agents can read your calendar: `steve_calendar_agenda` (a day or a range, conflicts marked), `steve_calendar_search`, `steve_calendar_get` (one event, current from the source) and `steve_calendar_find_time` (free times for you and other people, by rule). They change nothing in a calendar.
 
-Connector plugins can declare the `calendar.v1` profile (connector declaration version 2) to bring other calendars in the same way. The calendar page, reminders, and changing events come later.
+Connector plugins can declare the `calendar.v1` profile (connector declaration version 2) to bring other calendars in the same way. Reminders and changing events come later.

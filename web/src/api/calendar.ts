@@ -1,7 +1,9 @@
 /* Calendars as data sources (the Rust Hub's steve-calendar, `/api/calendar/*`): the caller's calendar sources with
  * their calendars — whose each is, how much Steve keeps, on or off, how fresh — sync now, an .ics file for an ICS
- * source. Hubs without it answer 404 and the 接入 page shows no calendar section. */
-import { modReq } from "@/api"
+ * source; and what is cached of them: the agenda over a range, one event with everyone in it, free time. Hubs without
+ * it answer 404: the 接入 page shows no calendar section and the 日历 page its connect prompt. */
+import { modReq, qs } from "@/api"
+import type { Agenda, EventDetail, FreeTime } from "@/calendar/model"
 
 export type CalSyncState = "new" | "ok" | "error"
 export type CalCalendar = {
@@ -29,4 +31,8 @@ export const calendarApi = {
   sync: (conn: string) => modReq<CalSource>("POST", `/calendar/sources/${enc(conn)}/sync`),
   upload: (conn: string, name: string, text: string) => modReq<CalSource>("PUT", `/calendar/sources/${enc(conn)}/ics`, { name, text }),
   edit: (id: string, e: CalEdit) => modReq<CalCalendar>("PATCH", `/calendar/calendars/${enc(id)}`, e),
+  /** the caller's own meetings over whole local days (`to` a date: the end of that day); none given: today */
+  events: (q: { from?: string; to?: string } = {}) => modReq<Agenda>("GET", "/calendar/events" + qs(q)),
+  event: (id: string) => modReq<EventDetail>("GET", `/calendar/events/${enc(id)}`),
+  findTime: (b: { duration_min: number; people?: string[]; from?: string; to?: string }) => modReq<FreeTime>("POST", "/calendar/find-time", b),
 }
