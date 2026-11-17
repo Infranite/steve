@@ -710,6 +710,109 @@ fn another_versions_installation_is_refused_until_fresh_sets_it_aside() {
     );
 }
 
+/// A Hub's remote install runs, on the target, `IFS= read -r STEVE_PAIR_CODE && export
+/// STEVE_PAIR_CODE && steve setup node --hub …` with the code on stdin: the `read` has used up
+/// stdin, so `steve-node pair` gets the code only if setup passes the variable on. With
+/// `STEVE_SETUP_PROGRESS` set, setup names each phase as it begins, for the Hub to show.
+#[test]
+fn setup_node_passes_the_pairing_code_it_was_given_to_the_pairing() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().canonicalize().unwrap();
+    let (account, bin) = (root.join("account"), root.join("bin"));
+    for directory in [&account, &bin] {
+        fs::create_dir_all(directory).unwrap();
+    }
+    let cli = installer(&root);
+    manager(&bin, &root.join("manager-calls"), false);
+    let info = json!({
+        "version":"1.2.3", "commit":"a".repeat(40), "schema":54,
+        "target":steve_install::build_info()["target"]
+    });
+    let seen = steve_install::common::shell_quote(root.join("seen").to_str().unwrap()).unwrap();
+    // records what pairing was given and pairs as the real one would: its file names the Hub
+    executable(
+        &root.join("installer/bin/steve-node"),
+        &format!(
+            "#!/bin/sh\ncase \"$1\" in\n --build-info) printf '%s\\n' '{info}' ;;\n \
+             pair) printf 'env=%s\\n' \"$STEVE_PAIR_CODE\" > {seen}; printf 'stdin=%s\\n' \"$(/bin/cat)\" >> {seen}; \
+             /bin/mkdir -p \"$STEVE_HOME/node\" && printf '{{\"hub_url\":\"%s\"}}' \"$2\" > \"$STEVE_HOME/node/node.json\" ;;\n \
+             status) exit 0 ;;\n *) exit 95 ;;\nesac\n"
+        ),
+    );
+    let mut child = Command::new("/bin/sh")
+        .args([
+            "-c",
+            "IFS= read -r STEVE_PAIR_CODE && export STEVE_PAIR_CODE && STEVE_SETUP_PROGRESS=1 \"$0\" setup node --hub https://hub.example",
+        ])
+        .arg(&cli)
+        .env_clear()
+        .env("STEVE_LANG", "en")
+        .env("HOME", &account)
+        .env("PATH", &bin)
+        .env("TMPDIR", &root)
+        .current_dir(&root)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"stv1-the-code\n")
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    let said = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(root.join("seen")).unwrap_or_default(),
+        "env=stv1-the-code\nstdin=\n",
+        "{said}"
+    );
+    assert!(
+        !said.contains("no pairing code") && said.contains("https://hub.example"),
+        "{said}"
+    );
+    // the phases in order; this fixture's service manager then refuses to register the service
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let phases: Vec<&str> = stdout
+        .lines()
+        .filter_map(|l| l.strip_prefix("steve-setup-progress "))
+        .collect();
+    assert_eq!(phases, ["install", "pair", "adapters", "start"], "{said}");
+    // the code is never in an argument list or the setup record
+    let record = fs::read_to_string(account.join(".steve-node/setup.json")).unwrap();
+    assert!(!record.contains("stv1-the-code"), "{record}");
+
+    // without STEVE_SETUP_PROGRESS, setup says nothing of phases
+    fs::remove_dir_all(account.join(".steve-node")).unwrap();
+    let plain = Command::new(&cli)
+        .args(["setup", "node", "--hub", "https://hub.example"])
+        .env_clear()
+        .env("STEVE_LANG", "en")
+        .env("STEVE_PAIR_CODE", "stv1-the-code")
+        .env("HOME", &account)
+        .env("PATH", &bin)
+        .env("TMPDIR", &root)
+        .current_dir(&root)
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(
+        !String::from_utf8_lossy(&plain.stdout).contains("steve-setup-progress"),
+        "{plain:?}"
+    );
+    assert!(
+        fs::read_to_string(root.join("seen"))
+            .unwrap()
+            .starts_with("env=stv1-the-code\n")
+    );
+}
+
 #[derive(Debug, PartialEq, Eq)]
 enum TreeEntry {
     Directory(u32),

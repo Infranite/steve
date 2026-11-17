@@ -16,22 +16,31 @@
 //! The Hub runs the system `ssh` with `tailcat <address> 22` as its proxy (what `tailcat ssh` does,
 //! with this install's own key). The key exists for this install only and is deleted when it ends.
 //! The target authenticates the Hub by that key; the Hub reaches the target by the address, which
-//! names the target's tunnel key, so no host key is checked. Neither address nor key is kept.
+//! names the target's tunnel key, so no host key is checked. Address and key are kept in memory, for
+//! a retry, until the install succeeds or is forgotten; neither is ever written to the database.
+//!
+//! Each step says how far it is (bytes fetched or sent and how fast, the phase of the setup on the
+//! target), at most twice a second, in the install itself: a page opened later shows the same. A
+//! step that moves no data for [`Limits::stall`] (setup: prints nothing for [`Limits::quiet`]) fails
+//! and says so. An archive fetched once is kept (the last [`CACHE_KEEP`]) and, checked against the
+//! release's manifest again, serves the next install of the same version and platform. A second
+//! install to an address one is already installing to joins that one.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant, SystemTime};
 
 use axum::Json;
 use axum::extract::{Path as UrlPath, State};
 use axum::response::Response;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+use steve_install::setup::{PROGRESS, PROGRESS_LINE};
 use steve_modules::Caller;
 use steve_node_wire::tailcat;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 
 use super::{NodeService, now};
 use crate::error::json_response;
@@ -42,12 +51,40 @@ const KEEP_MS: i64 = 60 * 60 * 1000;
 const ARCHIVE_MAX: u64 = 256 * 1024 * 1024;
 /// Where on the target the archive is unpacked; `steve setup` copies what it keeps out of it.
 const REMOTE_DIR: &str = "$HOME/.steve-node-install";
+/// How often at most a step's progress is written into the install.
+const TICK: Duration = Duration::from_millis(500);
+/// Installer archives kept for the next install, the most recently used ones.
+pub const CACHE_KEEP: usize = 2;
+/// The phases `steve setup node` names on the target, in order.
+const SETUP_PHASES: [&str; 4] = ["install", "pair", "adapters", "start"];
+
+/// When a step that moves nothing has stalled.
+#[derive(Clone, Copy, Debug)]
+pub struct Limits {
+    /// No byte fetched, sent or answered for this long.
+    pub stall: Duration,
+    /// Nothing printed by the setup on the target for this long (it installs adapters with npm,
+    /// quietly).
+    pub quiet: Duration,
+}
+
+impl Default for Limits {
+    fn default() -> Self {
+        Limits {
+            stall: Duration::from_secs(60),
+            quiet: Duration::from_secs(10 * 60),
+        }
+    }
+}
 
 pub struct Installs {
     dir: PathBuf,
+    /// Installer archives fetched before, by platform and SHA256.
+    cache: PathBuf,
     version: String,
     /// The Hub's HTTPS address, for a Node when tailcat is off.
     public_url: String,
+    limits: Limits,
     ops: Mutex<HashMap<String, Arc<Mutex<Op>>>>,
 }
 
@@ -58,30 +95,82 @@ struct Op {
     created: i64,
     pubkey: String,
     state: &'static str,
-    steps: Vec<Value>,
+    steps: Vec<Step>,
     node_id: Option<String>,
     error: Option<String>,
+    /// The kind of the step that failed.
+    failed_step: Option<&'static str>,
+    /// The target's tailcat address, from the run until the install succeeds (for a retry).
+    address: Option<String>,
+}
+
+#[derive(Clone, Serialize)]
+struct Step {
+    /// probe, fetch, send, setup or done
+    kind: &'static str,
+    text: String,
+    at: i64,
+    ended: Option<i64>,
+    progress: Option<Progress>,
+}
+
+/// How far a step is.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct Progress {
+    /// fetch: download, cached (a copy fetched before) or verify; send: send; setup: one of
+    /// [`SETUP_PHASES`]
+    pub phase: &'static str,
+    /// Bytes so far.
+    pub done: u64,
+    pub total: Option<u64>,
+    /// Bytes per second since the phase began.
+    pub rate: Option<u64>,
 }
 
 impl Op {
     fn view(&self) -> Value {
+        let t = now();
+        let steps: Vec<Value> = self
+            .steps
+            .iter()
+            .map(|s| {
+                let mut v = serde_json::to_value(s).unwrap_or_default();
+                v["elapsed_ms"] = json!((s.ended.unwrap_or(t) - s.at).max(0));
+                v
+            })
+            .collect();
         json!({
             "id": self.id,
             "state": self.state,
             "command": format!("tailcat serve --ssh-authorized-keys='{}' ssh", self.pubkey),
-            "steps": self.steps,
+            "steps": steps,
             "node_id": self.node_id,
             "error": self.error,
+            "failed_step": self.failed_step,
+            "address": self.address,
+            "created": self.created,
         })
     }
 }
 
 impl Installs {
     pub fn new(home: &Path, version: &str, public_url: &str) -> Arc<Installs> {
+        Self::with_limits(home, version, public_url, Limits::default())
+    }
+
+    pub fn with_limits(
+        home: &Path,
+        version: &str,
+        public_url: &str,
+        limits: Limits,
+    ) -> Arc<Installs> {
+        let dir = home.join("tailcat/installs");
         Arc::new(Installs {
-            dir: home.join("tailcat/installs"),
+            cache: dir.join("cache"),
+            dir,
             version: version.to_string(),
             public_url: public_url.to_string(),
+            limits,
             ops: Mutex::new(HashMap::new()),
         })
     }
@@ -109,12 +198,70 @@ fn err(status: u16, e: impl Into<String>) -> Response {
     json_response(status, &json!({ "error": e.into() }))
 }
 
-fn step(op: &Arc<Mutex<Op>>, text: &str) {
+/// The next step begins; the one before has ended.
+fn step(op: &Arc<Mutex<Op>>, kind: &'static str, text: &str) {
     tracing::info!("node install: {text}");
-    op.lock()
-        .unwrap()
-        .steps
-        .push(json!({ "at": now(), "text": text }));
+    let t = now();
+    let mut o = op.lock().unwrap();
+    if let Some(last) = o.steps.last_mut() {
+        last.ended.get_or_insert(t);
+    }
+    o.steps.push(Step {
+        kind,
+        text: text.to_string(),
+        at: t,
+        ended: None,
+        progress: None,
+    });
+}
+
+/// Writes a step's progress into the install, at most every [`TICK`] unless its phase changes.
+struct Meter {
+    op: Arc<Mutex<Op>>,
+    phase: &'static str,
+    total: Option<u64>,
+    since: Instant,
+    last: Option<Instant>,
+}
+
+impl Meter {
+    fn new(op: &Arc<Mutex<Op>>) -> Meter {
+        Meter {
+            op: op.clone(),
+            phase: "",
+            total: None,
+            since: Instant::now(),
+            last: None,
+        }
+    }
+
+    fn update(&mut self, phase: &'static str, done: u64, total: Option<u64>) {
+        if phase != self.phase {
+            self.phase = phase;
+            self.since = Instant::now();
+            self.last = None;
+        }
+        self.total = total;
+        if self.last.is_some_and(|l| l.elapsed() < TICK) {
+            return;
+        }
+        self.put(done);
+    }
+
+    /// Now, whatever the time since the last write.
+    fn put(&mut self, done: u64) {
+        self.last = Some(Instant::now());
+        let secs = self.since.elapsed().as_secs_f64();
+        let progress = Progress {
+            phase: self.phase,
+            done,
+            total: self.total,
+            rate: (secs >= 1.0 && done > 0).then(|| (done as f64 / secs) as u64),
+        };
+        if let Some(s) = self.op.lock().unwrap().steps.last_mut() {
+            s.progress = Some(progress);
+        }
+    }
 }
 
 pub async fn create(State(svc): State<Arc<NodeService>>, caller: Caller) -> Response {
@@ -173,6 +320,8 @@ pub async fn create(State(svc): State<Arc<NodeService>>, caller: Caller) -> Resp
         steps: vec![],
         node_id: None,
         error: None,
+        failed_step: None,
+        address: None,
     };
     let view = op.view();
     installs
@@ -188,6 +337,25 @@ fn find(svc: &NodeService, id: &str, me: &str) -> Option<(Arc<Installs>, Arc<Mut
     let op = installs.ops.lock().unwrap().get(id).cloned()?;
     let mine = op.lock().unwrap().owner == me;
     mine.then_some((installs, op))
+}
+
+/// The caller's installs, the newest first: what a page opened later picks up.
+pub async fn list(State(svc): State<Arc<NodeService>>, caller: Caller) -> Response {
+    let Some(installs) = svc.installs.get().cloned() else {
+        return json_response(200, &json!({ "installs": [] }));
+    };
+    installs.sweep();
+    let mut mine: Vec<Op> = installs
+        .ops
+        .lock()
+        .unwrap()
+        .values()
+        .map(|op| op.lock().unwrap().clone())
+        .filter(|op| op.owner == caller.me)
+        .collect();
+    mine.sort_by(|a, b| b.created.cmp(&a.created).then(b.id.cmp(&a.id)));
+    let views: Vec<Value> = mine.iter().map(Op::view).collect();
+    json_response(200, &json!({ "installs": views }))
 }
 
 pub async fn get(
@@ -223,12 +391,27 @@ pub async fn run(
         return err(409, e.to_string());
     }
     {
+        // one install at a time to an address: a second one joins the running one. Checked and
+        // marked under the list's lock, so two at once cannot both start.
+        let ops = installs.ops.lock().unwrap();
+        for (other_id, other) in ops.iter().filter(|(k, _)| **k != id) {
+            let other = other.lock().unwrap();
+            if other.state == "running" && other.address.as_deref() == Some(address.as_str()) {
+                if other.owner == caller.me {
+                    return json_response(200, &other.view());
+                }
+                tracing::info!("node install: {other_id} already installs to this address");
+                return err(409, steve_i18n::t!("hub.nodes.install_busy"));
+            }
+        }
         let mut o = op.lock().unwrap();
         if o.state == "running" || o.state == "done" {
             return json_response(200, &o.view());
         }
         o.state = "running";
         o.error = None;
+        o.failed_step = None;
+        o.address = Some(address.clone());
         o.steps.clear();
     }
     let (svc2, op2) = (svc.clone(), op.clone());
@@ -237,15 +420,21 @@ pub async fn run(
     tokio::spawn(steve_i18n::scope(lang, async move {
         let r = install(&svc2, &installs, &op2, &address).await;
         let mut o = op2.lock().unwrap();
+        let t = now();
+        if let Some(last) = o.steps.last_mut() {
+            last.ended.get_or_insert(t);
+        }
         match r {
             Ok(node) => {
                 o.state = "done";
                 o.node_id = Some(node);
+                o.address = None;
                 let _ = std::fs::remove_dir_all(installs.key_dir(&o.id));
             }
             Err(e) => {
                 tracing::warn!("node install: {e:#}");
                 o.state = "failed";
+                o.failed_step = o.steps.last().map(|s| s.kind);
                 o.error = Some(format!("{e:#}"));
             }
         }
@@ -269,6 +458,24 @@ fn hub_for_node(svc: &NodeService, installs: &Installs) -> anyhow::Result<String
     anyhow::bail!(steve_i18n::t!("hub.nodes.install_no_route"))
 }
 
+/// What runs on the target to set the Node up, the pairing code on its stdin: the code goes into
+/// `STEVE_PAIR_CODE`, which `steve setup node` hands to the pairing. In `sh`, whatever the login
+/// shell; the Node is named after the machine.
+fn setup_command(hub: &str) -> String {
+    sh(&format!(
+        "IFS= read -r STEVE_PAIR_CODE && export STEVE_PAIR_CODE && d=\"{REMOTE_DIR}\" && \
+         HOSTNAME=\"${{HOSTNAME:-$(uname -n)}}\" && export HOSTNAME && \
+         {PROGRESS}=1 \"$d/bin/steve\" setup node --hub {} && unset STEVE_PAIR_CODE && \
+         \"$d/bin/steve\" node start && rm -rf \"$d\"",
+        sh_quote(hub)
+    ))
+}
+
+/// `script` run by `sh`, whatever the target's login shell is.
+fn sh(script: &str) -> String {
+    format!("exec /bin/sh -c {}", sh_quote(script))
+}
+
 async fn install(
     svc: &Arc<NodeService>,
     installs: &Installs,
@@ -283,41 +490,81 @@ async fn install(
         (o.id.clone(), o.owner.clone())
     };
     let ssh = Ssh {
+        program: std::env::var_os("STEVE_SSH").unwrap_or("ssh".into()),
         key: installs.key_dir(&id).join("key"),
         proxy: format!("{} {address} 22", sh_quote(&program.to_string_lossy())),
     };
+    let Limits { stall, quiet } = installs.limits;
+    let secs = |d: Duration| d.as_secs().max(1);
 
-    step(op, &steve_i18n::t!("hub.nodes.install_step_probe"));
-    let uname = ssh.run("uname -sm", None).await?;
+    step(op, "probe", &steve_i18n::t!("hub.nodes.install_step_probe"));
+    let uname = ssh
+        .exec(
+            "uname -sm",
+            b"",
+            stall,
+            steve_i18n::t!("hub.nodes.install_stalled_probe", secs = secs(stall)),
+            &mut |_| {},
+            &mut |_| {},
+        )
+        .await?;
     let target = target_of(&uname).with_context(|| {
         steve_i18n::t!("hub.nodes.install_unsupported", platform = uname.trim())
     })?;
 
     step(
         op,
+        "fetch",
         &steve_i18n::t!("hub.nodes.install_step_fetch", target = target),
     );
-    let archive = installer(&installs.version, target).await?;
-
-    step(op, &steve_i18n::t!("hub.nodes.install_step_send"));
-    ssh.run(
-        &format!(
-            "umask 077; d=\"{REMOTE_DIR}\"; rm -rf \"$d\" && mkdir -p \"$d\" && tar xzf - -C \"$d\""
-        ),
-        Some(&archive),
+    let mut meter = Meter::new(op);
+    let archive = fetch_installer(
+        &installs.version,
+        target,
+        Some(&installs.cache),
+        stall,
+        &mut |phase, done, total| meter.update(phase, done, total),
     )
     .await?;
+    meter.put(archive.len() as u64);
 
-    step(op, &steve_i18n::t!("hub.nodes.install_step_setup"));
+    step(op, "send", &steve_i18n::t!("hub.nodes.install_step_send"));
+    let total = archive.len() as u64;
+    let mut meter = Meter::new(op);
+    meter.update("send", 0, Some(total));
+    ssh.exec(
+        &sh(&format!(
+            "umask 077; d=\"{REMOTE_DIR}\"; rm -rf \"$d\" && mkdir -p \"$d\" && tar xzf - -C \"$d\""
+        )),
+        &archive,
+        stall,
+        steve_i18n::t!("hub.nodes.install_stalled_send", secs = secs(stall)),
+        &mut |n| meter.update("send", n, Some(total)),
+        &mut |_| {},
+    )
+    .await?;
+    meter.put(total);
+
+    step(op, "setup", &steve_i18n::t!("hub.nodes.install_step_setup"));
     let code = super::pairing::new_code(&svc.store, &owner, true).await?;
+    let mut meter = Meter::new(op);
+    meter.update(SETUP_PHASES[0], 0, None);
+    let marker = format!("{PROGRESS_LINE} ");
     let out = ssh
-        .run(
-            &format!(
-                "IFS= read -r STEVE_PAIR_CODE && export STEVE_PAIR_CODE && d=\"{REMOTE_DIR}\" && \
-                 \"$d/bin/steve\" setup node --hub {} && \"$d/bin/steve\" node start && rm -rf \"$d\"",
-                sh_quote(&hub)
-            ),
-            Some(format!("{code}\n").as_bytes()),
+        .exec(
+            &setup_command(&hub),
+            format!("{code}\n").as_bytes(),
+            quiet,
+            steve_i18n::t!("hub.nodes.install_stalled_setup", secs = secs(quiet)),
+            &mut |_| {},
+            &mut |line| {
+                if let Some(phase) = line
+                    .strip_prefix(&marker)
+                    .and_then(|p| SETUP_PHASES.iter().find(|x| **x == p.trim()))
+                {
+                    meter.update(phase, 0, None);
+                }
+            },
         )
         .await?;
     tracing::debug!("node install: {out}");
@@ -338,7 +585,7 @@ async fn install(
     })
     .await??
     .context(steve_i18n::t!("hub.nodes.install_not_paired"))?;
-    step(op, &steve_i18n::t!("hub.nodes.install_step_done"));
+    step(op, "done", &steve_i18n::t!("hub.nodes.install_step_done"));
     Ok(node)
 }
 
@@ -356,80 +603,273 @@ fn sh_quote(s: &str) -> String {
 }
 
 struct Ssh {
+    /// `ssh`, or another OpenSSH-compatible client in `STEVE_SSH` (tests stand one in)
+    program: std::ffi::OsString,
     key: PathBuf,
     proxy: String,
 }
 
+/// The last lines of what a command said, for its error.
+fn tail_of(text: &str) -> String {
+    let tail: Vec<char> = text.chars().rev().take(800).collect();
+    tail.into_iter().rev().collect()
+}
+
 impl Ssh {
-    /// `cmd` on the target with `input` on its stdin; its stdout, or why it failed.
-    async fn run(&self, cmd: &str, input: Option<&[u8]>) -> anyhow::Result<String> {
-        // STEVE_SSH: another OpenSSH-compatible client (tests stand one in)
-        let mut child =
-            tokio::process::Command::new(std::env::var_os("STEVE_SSH").unwrap_or("ssh".into()))
-                .arg("-i")
-                .arg(&self.key)
-                .args([
-                    "-o",
-                    "IdentitiesOnly=yes",
-                    "-o",
-                    "BatchMode=yes",
-                    "-o",
-                    "StrictHostKeyChecking=no",
-                    "-o",
-                    "UserKnownHostsFile=/dev/null",
-                    "-o",
-                    "LogLevel=ERROR",
-                    "-o",
-                    "ConnectTimeout=60",
-                ])
-                .arg("-o")
-                .arg(format!("ProxyCommand={}", self.proxy))
-                .args(["-T", "steve-install", "--", cmd])
-                .stdin(std::process::Stdio::piped())
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::piped())
-                .kill_on_drop(true)
-                .spawn()
-                .map_err(|e| anyhow::anyhow!("ssh: {e}"))?;
+    fn command(&self, cmd: &str) -> tokio::process::Command {
+        let mut c = tokio::process::Command::new(&self.program);
+        c.arg("-i")
+            .arg(&self.key)
+            .args([
+                "-o",
+                "IdentitiesOnly=yes",
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "StrictHostKeyChecking=no",
+                "-o",
+                "UserKnownHostsFile=/dev/null",
+                "-o",
+                "LogLevel=ERROR",
+                "-o",
+                "ConnectTimeout=60",
+                "-o",
+                "ServerAliveInterval=15",
+            ])
+            .arg("-o")
+            .arg(format!("ProxyCommand={}", self.proxy))
+            .args(["-T", "steve-install", "--", cmd])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true);
+        c
+    }
+
+    /// `cmd` on the target with `input` on its stdin; its stdout, or why it failed. `sent` hears
+    /// how many bytes of `input` went out, `line` each line of stdout. Nothing written or read for
+    /// `limit`: it has stalled, and fails with `stalled`.
+    async fn exec(
+        &self,
+        cmd: &str,
+        input: &[u8],
+        limit: Duration,
+        stalled: String,
+        sent: &mut (dyn FnMut(u64) + Send),
+        line: &mut (dyn FnMut(&str) + Send),
+    ) -> anyhow::Result<String> {
+        let mut child = self
+            .command(cmd)
+            .spawn()
+            .map_err(|e| anyhow::anyhow!("ssh: {e}"))?;
         let mut stdin = child.stdin.take().expect("piped");
-        let input = input.map(<[u8]>::to_vec);
-        let writer = tokio::spawn(async move {
-            if let Some(b) = input {
-                let _ = stdin.write_all(&b).await;
+        let stdout = child.stdout.take().expect("piped");
+        let stderr = child.stderr.take().expect("piped");
+        let last = Mutex::new(Instant::now());
+        let touch = || *last.lock().unwrap() = Instant::now();
+        let write = async {
+            let mut n = 0u64;
+            for chunk in input.chunks(64 * 1024) {
+                // the target stopped reading: its exit status says why
+                if stdin.write_all(chunk).await.is_err() {
+                    break;
+                }
+                n += chunk.len() as u64;
+                touch();
+                sent(n);
             }
             drop(stdin);
-        });
-        let out = tokio::time::timeout(Duration::from_secs(15 * 60), child.wait_with_output())
-            .await
-            .map_err(|_| anyhow::anyhow!("ssh: no answer within 15 minutes"))??;
-        let _ = writer.await;
-        if !out.status.success() {
-            let tail: String = String::from_utf8_lossy(&out.stderr)
+        };
+        let read_out = async {
+            let mut r = tokio::io::BufReader::new(stdout);
+            let (mut all, mut buf) = (Vec::new(), Vec::new());
+            loop {
+                buf.clear();
+                match r.read_until(b'\n', &mut buf).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {
+                        touch();
+                        let text = String::from_utf8_lossy(&buf);
+                        let text = text.trim_end();
+                        line(text);
+                        if !text.starts_with(PROGRESS_LINE) {
+                            all.extend_from_slice(&buf);
+                        }
+                    }
+                }
+            }
+            all
+        };
+        let read_err = async {
+            let mut r = tokio::io::BufReader::new(stderr);
+            let (mut all, mut buf) = (Vec::new(), Vec::new());
+            while let Ok(n) = r.read_until(b'\n', &mut buf).await {
+                if n == 0 {
+                    break;
+                }
+                touch();
+                all.append(&mut buf);
+            }
+            all
+        };
+        let work = async {
+            let ((), out, err) = tokio::join!(write, read_out, read_err);
+            (out, err, child.wait().await)
+        };
+        let watch = async {
+            let every = (limit / 4).min(Duration::from_secs(1));
+            loop {
+                tokio::time::sleep(every).await;
+                if last.lock().unwrap().elapsed() >= limit {
+                    return;
+                }
+            }
+        };
+        let (out, err, status) = tokio::select! {
+            r = work => r,
+            () = watch => anyhow::bail!(stalled),
+        };
+        let status = status?;
+        if !status.success() {
+            let said: String = String::from_utf8_lossy(&err)
                 .lines()
-                .chain(String::from_utf8_lossy(&out.stdout).lines())
+                .chain(String::from_utf8_lossy(&out).lines())
                 .filter(|l| !l.trim().is_empty())
                 .collect::<Vec<_>>()
                 .join("\n");
-            let tail: String = tail
-                .chars()
-                .rev()
-                .take(800)
-                .collect::<Vec<_>>()
-                .into_iter()
-                .rev()
-                .collect();
-            anyhow::bail!(
-                "{} ({}): {tail}",
-                cmd.split_whitespace().next().unwrap_or("ssh"),
-                out.status
-            );
+            anyhow::bail!(steve_i18n::t!(
+                "hub.nodes.install_remote_failed",
+                status = status.to_string(),
+                output = tail_of(&said)
+            ));
         }
-        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+        Ok(String::from_utf8_lossy(&out).into_owned())
     }
 }
 
+/// Hears a fetch's phase (download, cached, verify), its bytes so far and their total.
+type OnFetch<'a> = &'a mut (dyn FnMut(&'static str, u64, Option<u64>) + Send);
+
 /// The installer archive of `version` for `target`, checked against the release's manifest.
 pub(crate) async fn installer(version: &str, target: &str) -> anyhow::Result<Vec<u8>> {
+    fetch_installer(
+        version,
+        target,
+        None,
+        Limits::default().stall,
+        &mut |_, _, _| {},
+    )
+    .await
+}
+
+/// Where release files come from: the release repository, or a directory holding the same files.
+enum Source {
+    Local(PathBuf),
+    Remote(String, reqwest::Client),
+}
+
+impl Source {
+    fn remote(base: String, stall: Duration) -> anyhow::Result<Source> {
+        Ok(Source::Remote(
+            base,
+            reqwest::Client::builder().connect_timeout(stall).build()?,
+        ))
+    }
+
+    /// The file `name`, at most `limit` bytes; `on` hears the bytes so far. No byte for `stall`:
+    /// it has stalled.
+    async fn get(
+        &self,
+        name: &str,
+        limit: u64,
+        stall: Duration,
+        on: &mut (dyn FnMut(u64, Option<u64>) + Send),
+    ) -> anyhow::Result<Vec<u8>> {
+        use anyhow::Context;
+        let stalled = || {
+            anyhow::anyhow!(steve_i18n::t!(
+                "hub.nodes.install_stalled_fetch",
+                secs = stall.as_secs().max(1)
+            ))
+        };
+        match self {
+            Source::Local(dir) => {
+                let p = dir.join(name);
+                let b = tokio::fs::read(&p)
+                    .await
+                    .with_context(|| p.display().to_string())?;
+                anyhow::ensure!(b.len() as u64 <= limit, "{name}: too large");
+                on(b.len() as u64, Some(b.len() as u64));
+                Ok(b)
+            }
+            Source::Remote(base, client) => {
+                let mut r =
+                    tokio::time::timeout(stall, client.get(format!("{base}/{name}")).send())
+                        .await
+                        .map_err(|_| stalled())??
+                        .error_for_status()?;
+                let total = r.content_length();
+                anyhow::ensure!(total.is_none_or(|n| n <= limit), "{name}: too large");
+                let mut b = Vec::with_capacity(total.unwrap_or(0) as usize);
+                on(0, total);
+                while let Some(chunk) = tokio::time::timeout(stall, r.chunk())
+                    .await
+                    .map_err(|_| stalled())??
+                {
+                    b.extend_from_slice(&chunk);
+                    anyhow::ensure!(b.len() as u64 <= limit, "{name}: too large");
+                    on(b.len() as u64, total);
+                }
+                Ok(b)
+            }
+        }
+    }
+}
+
+/// `bytes` with its SHA256, worked out off the runtime's threads.
+async fn digest(bytes: Vec<u8>) -> anyhow::Result<(Vec<u8>, String)> {
+    Ok(tokio::task::spawn_blocking(move || {
+        let sha = hex::encode(Sha256::digest(&bytes));
+        (bytes, sha)
+    })
+    .await?)
+}
+
+/// Keeps `bytes` as `path` in the cache, which then holds the [`CACHE_KEEP`] most recent.
+async fn cache_put(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let dir = path.parent().expect("in the cache");
+    tokio::fs::create_dir_all(dir).await?;
+    let tmp = path.with_extension("tmp");
+    tokio::fs::write(&tmp, bytes).await?;
+    tokio::fs::rename(&tmp, path).await?;
+    cache_prune(dir).await
+}
+
+async fn cache_prune(dir: &Path) -> std::io::Result<()> {
+    let mut files = Vec::new();
+    let mut entries = tokio::fs::read_dir(dir).await?;
+    while let Some(e) = entries.next_entry().await? {
+        let m = e.metadata().await?;
+        if m.is_file() {
+            files.push((m.modified().unwrap_or(SystemTime::UNIX_EPOCH), e.path()));
+        }
+    }
+    files.sort_by_key(|f| std::cmp::Reverse(f.0));
+    for (_, p) in files.into_iter().skip(CACHE_KEEP) {
+        let _ = tokio::fs::remove_file(p).await;
+    }
+    Ok(())
+}
+
+/// [`installer`], with an archive cache (`cache`, for a download from the release repository)
+/// and its progress for `on`.
+async fn fetch_installer(
+    version: &str,
+    target: &str,
+    cache: Option<&Path>,
+    stall: Duration,
+    on: OnFetch<'_>,
+) -> anyhow::Result<Vec<u8>> {
     use anyhow::Context;
     let v = semver::Version::parse(version)
         .ok()
@@ -437,46 +877,34 @@ pub(crate) async fn installer(version: &str, target: &str) -> anyhow::Result<Vec
             "hub.nodes.install_dev_build",
             version = version
         ))?;
-    let local = std::env::var_os("STEVE_NODE_INSTALLERS").map(PathBuf::from);
-    let base = match &local {
-        Some(_) => String::new(),
-        None => format!(
-            "https://github.com/{}/releases/download/v{v}",
-            crate::upgrades::repository()?
-        ),
+    let source = match std::env::var_os("STEVE_NODE_INSTALLERS").map(PathBuf::from) {
+        Some(dir) => Source::Local(dir),
+        None => Source::remote(
+            format!(
+                "https://github.com/{}/releases/download/v{v}",
+                crate::upgrades::repository()?
+            ),
+            stall,
+        )?,
     };
-    let fetch = |name: String, limit: u64| {
-        let (local, base) = (local.clone(), base.clone());
-        async move {
-            match local {
-                Some(dir) => {
-                    let p = dir.join(&name);
-                    let b = tokio::fs::read(&p)
-                        .await
-                        .with_context(|| p.display().to_string())?;
-                    anyhow::ensure!(b.len() as u64 <= limit, "{name}: too large");
-                    Ok::<_, anyhow::Error>(b)
-                }
-                None => {
-                    let r = reqwest::Client::builder()
-                        .timeout(Duration::from_secs(600))
-                        .build()?
-                        .get(format!("{base}/{name}"))
-                        .send()
-                        .await?
-                        .error_for_status()?;
-                    anyhow::ensure!(
-                        r.content_length().is_none_or(|n| n <= limit),
-                        "{name}: too large"
-                    );
-                    Ok(r.bytes().await?.to_vec())
-                }
-            }
-        }
-    };
-    let manifest: Value =
-        serde_json::from_slice(&fetch("steve-installer.json".into(), 1 << 20).await?)
-            .context("steve-installer.json")?;
+    fetch_from(&source, &v, target, cache, stall, on).await
+}
+
+async fn fetch_from(
+    source: &Source,
+    v: &semver::Version,
+    target: &str,
+    cache: Option<&Path>,
+    stall: Duration,
+    on: OnFetch<'_>,
+) -> anyhow::Result<Vec<u8>> {
+    use anyhow::Context;
+    let manifest: Value = serde_json::from_slice(
+        &source
+            .get("steve-installer.json", 1 << 20, stall, &mut |_, _| {})
+            .await?,
+    )
+    .context("steve-installer.json")?;
     anyhow::ensure!(
         manifest["version"] == v.to_string(),
         "steve-installer.json is for {}, not {v}",
@@ -492,14 +920,56 @@ pub(crate) async fn installer(version: &str, target: &str) -> anyhow::Result<Vec
         "bad asset name {name}"
     );
     let sha = asset["sha256"].as_str().context("asset sha256")?;
+    anyhow::ensure!(
+        sha.len() == 64 && sha.bytes().all(|b| b.is_ascii_hexdigit()),
+        "{name}: bad sha256 in the manifest"
+    );
     let size = asset["size"].as_u64().context("asset size")?;
-    let bytes = fetch(name.to_string(), size.min(ARCHIVE_MAX)).await?;
+    // a copy fetched before, checked again as if it had just come
+    let cached = match source {
+        Source::Remote(..) => {
+            cache.map(|d| d.join(format!("{target}-{}.tar.gz", sha.to_lowercase())))
+        }
+        Source::Local(_) => None,
+    };
+    if let Some(path) = &cached
+        && let Ok(bytes) = tokio::fs::read(path).await
+    {
+        on("cached", bytes.len() as u64, Some(size));
+        let (bytes, got) = digest(bytes).await?;
+        if bytes.len() as u64 == size && got.eq_ignore_ascii_case(sha) {
+            // the most recently used is kept longest
+            if let Ok(f) = std::fs::File::options().write(true).open(path) {
+                let _ = f.set_modified(SystemTime::now());
+            }
+            return Ok(bytes);
+        }
+        tracing::warn!(
+            "node install: cached {} differs from the manifest",
+            path.display()
+        );
+        let _ = tokio::fs::remove_file(path).await;
+    }
+    let bytes = source
+        .get(name, size.min(ARCHIVE_MAX), stall, &mut |done, _| {
+            on("download", done, Some(size))
+        })
+        .await?;
+    on("verify", bytes.len() as u64, Some(size));
     anyhow::ensure!(
         bytes.len() as u64 == size,
         "{name}: size differs from the manifest"
     );
-    let got = hex::encode(Sha256::digest(&bytes));
-    anyhow::ensure!(got == sha, "{name}: SHA256 differs from the manifest");
+    let (bytes, got) = digest(bytes).await?;
+    anyhow::ensure!(
+        got.eq_ignore_ascii_case(sha),
+        "{name}: SHA256 differs from the manifest"
+    );
+    if let Some(path) = &cached
+        && let Err(e) = cache_put(path, &bytes).await
+    {
+        tracing::warn!("node install: keeping the installer for next time: {e}");
+    }
     Ok(bytes)
 }
 
@@ -513,5 +983,339 @@ mod tests {
         assert_eq!(target_of("Linux x86_64"), Some("x86_64-unknown-linux-gnu"));
         assert_eq!(target_of("Linux aarch64"), None);
         assert_eq!(sh_quote("a'b"), "'a'\\''b'");
+    }
+
+    type Events = Arc<Mutex<Vec<(&'static str, u64, Option<u64>)>>>;
+
+    /// An HTTP server for release files: `name` → body, sent in 16 KiB pieces a little apart;
+    /// `stall` sends its headers and half its body, then nothing. Counts the requests per file.
+    async fn releases(
+        files: HashMap<String, Vec<u8>>,
+    ) -> (String, Arc<Mutex<HashMap<String, usize>>>) {
+        use tokio::io::AsyncReadExt;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let asked = Arc::new(Mutex::new(HashMap::new()));
+        let (files, counts) = (Arc::new(files), asked.clone());
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut c, _)) = listener.accept().await else {
+                    return;
+                };
+                let (files, counts) = (files.clone(), counts.clone());
+                tokio::spawn(async move {
+                    let mut req = Vec::new();
+                    let mut buf = [0u8; 1024];
+                    while !req.windows(4).any(|w| w == b"\r\n\r\n") {
+                        match c.read(&mut buf).await {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => req.extend_from_slice(&buf[..n]),
+                        }
+                    }
+                    let path = String::from_utf8_lossy(&req)
+                        .split_whitespace()
+                        .nth(1)
+                        .unwrap_or("/")
+                        .trim_start_matches('/')
+                        .to_string();
+                    *counts.lock().unwrap().entry(path.clone()).or_insert(0) += 1;
+                    let Some(body) = files.get(&path) else {
+                        let _ = c
+                            .write_all(b"HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
+                            .await;
+                        return;
+                    };
+                    let head = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                        body.len()
+                    );
+                    let _ = c.write_all(head.as_bytes()).await;
+                    if path == "stall" {
+                        let _ = c.write_all(&body[..body.len() / 2]).await;
+                        tokio::time::sleep(Duration::from_secs(30)).await;
+                        return;
+                    }
+                    for piece in body.chunks(16 * 1024) {
+                        if c.write_all(piece).await.is_err() {
+                            return;
+                        }
+                        let _ = c.flush().await;
+                        tokio::time::sleep(Duration::from_millis(5)).await;
+                    }
+                });
+            }
+        });
+        (base, asked)
+    }
+
+    fn release_files(archives: &[(&str, Vec<u8>)]) -> HashMap<String, Vec<u8>> {
+        let assets: Vec<Value> = archives
+            .iter()
+            .map(|(target, b)| {
+                json!({"target": target, "name": format!("steve-9.9.9-{target}.tar.gz"),
+                       "sha256": hex::encode(Sha256::digest(b)), "size": b.len()})
+            })
+            .collect();
+        let mut files: HashMap<String, Vec<u8>> = archives
+            .iter()
+            .map(|(target, b)| (format!("steve-9.9.9-{target}.tar.gz"), b.clone()))
+            .collect();
+        files.insert(
+            "steve-installer.json".into(),
+            json!({"version": "9.9.9", "assets": assets})
+                .to_string()
+                .into_bytes(),
+        );
+        files
+    }
+
+    async fn fetch(
+        base: &str,
+        target: &str,
+        cache: &Path,
+        events: &Events,
+    ) -> anyhow::Result<Vec<u8>> {
+        let source = Source::remote(base.to_string(), Duration::from_secs(5)).unwrap();
+        let v = semver::Version::parse("9.9.9").unwrap();
+        let ev = events.clone();
+        fetch_from(
+            &source,
+            &v,
+            target,
+            Some(cache),
+            Duration::from_secs(5),
+            &mut |phase, done, total| ev.lock().unwrap().push((phase, done, total)),
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn fetching_reports_its_progress_and_reuses_a_bounded_cache() {
+        let a: Vec<u8> = (0..300_000u32).map(|i| (i * 7 % 251) as u8).collect();
+        let b = vec![1u8; 70_000];
+        let c = vec![2u8; 50_000];
+        let (base, asked) = releases(release_files(&[
+            ("x86_64-unknown-linux-gnu", a.clone()),
+            ("aarch64-apple-darwin", b.clone()),
+            ("riscv64", c.clone()),
+        ]))
+        .await;
+        let cache = tempfile::tempdir().unwrap();
+        let events: Events = Default::default();
+        let size = a.len() as u64;
+
+        // the first time: downloaded piece by piece, then checked
+        let got = fetch(&base, "x86_64-unknown-linux-gnu", cache.path(), &events)
+            .await
+            .unwrap();
+        assert_eq!(got, a);
+        let seen = std::mem::take(&mut *events.lock().unwrap());
+        let downloads: Vec<u64> = seen
+            .iter()
+            .filter(|e| e.0 == "download")
+            .map(|e| e.1)
+            .collect();
+        assert!(downloads.len() > 5, "{seen:?}");
+        assert!(downloads.windows(2).all(|w| w[0] <= w[1]), "{seen:?}");
+        assert_eq!(downloads.last(), Some(&size));
+        assert!(seen.iter().all(|e| e.0 == "verify" || e.2 == Some(size)));
+        assert_eq!(seen.last(), Some(&("verify", size, Some(size))));
+        let archive = "steve-9.9.9-x86_64-unknown-linux-gnu.tar.gz";
+        assert_eq!(asked.lock().unwrap()[archive], 1);
+
+        // again: the copy, checked again, and no download
+        let got = fetch(&base, "x86_64-unknown-linux-gnu", cache.path(), &events)
+            .await
+            .unwrap();
+        assert_eq!(got, a);
+        let seen = std::mem::take(&mut *events.lock().unwrap());
+        assert_eq!(seen, [("cached", size, Some(size))]);
+        assert_eq!(asked.lock().unwrap()[archive], 1);
+        assert_eq!(
+            asked.lock().unwrap()["steve-installer.json"],
+            2,
+            "the manifest is always fetched"
+        );
+
+        // a copy that changed is not used, but fetched again
+        let kept = std::fs::read_dir(cache.path())
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        std::fs::write(&kept, b"not the archive").unwrap();
+        let got = fetch(&base, "x86_64-unknown-linux-gnu", cache.path(), &events)
+            .await
+            .unwrap();
+        assert_eq!(got, a);
+        assert_eq!(asked.lock().unwrap()[archive], 2);
+        assert_eq!(std::fs::read(&kept).unwrap(), a);
+
+        // the cache keeps the most recent few
+        for target in ["aarch64-apple-darwin", "riscv64"] {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            fetch(&base, target, cache.path(), &events).await.unwrap();
+        }
+        let mut left: Vec<String> = std::fs::read_dir(cache.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        left.sort();
+        assert_eq!(left.len(), CACHE_KEEP, "{left:?}");
+        assert!(left.iter().all(|f| !f.starts_with("x86_64")), "{left:?}");
+    }
+
+    #[tokio::test]
+    async fn a_download_with_no_data_fails_as_stalled() {
+        let mut files = HashMap::new();
+        files.insert("stall".to_string(), vec![0u8; 100_000]);
+        let (base, _) = releases(files).await;
+        let source = Source::remote(base, Duration::from_secs(5)).unwrap();
+        let started = Instant::now();
+        let e = source
+            .get("stall", 1 << 20, Duration::from_millis(300), &mut |_, _| {})
+            .await
+            .unwrap_err();
+        assert!(started.elapsed() < Duration::from_secs(10));
+        assert_eq!(
+            e.to_string(),
+            steve_i18n::t!("hub.nodes.install_stalled_fetch", secs = 1)
+        );
+    }
+
+    /// An `ssh` that runs the command it is given here.
+    fn local_ssh(dir: &Path) -> Ssh {
+        let program = dir.join("ssh");
+        std::fs::write(
+            &program,
+            "#!/bin/sh\nfor a; do cmd=\"$a\"; done\nexec sh -c \"$cmd\"\n",
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        Ssh {
+            program: program.into(),
+            key: dir.join("key"),
+            proxy: "true".into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn sending_reports_bytes_and_a_target_that_takes_none_has_stalled() {
+        let dir = tempfile::tempdir().unwrap();
+        let ssh = local_ssh(dir.path());
+        let input: Vec<u8> = (0..1_000_000u32).map(|i| i as u8).collect();
+        let out = dir.path().join("out");
+        let mut sent = Vec::new();
+        ssh.exec(
+            &sh(&format!("cat > {}", sh_quote(&out.to_string_lossy()))),
+            &input,
+            Duration::from_secs(10),
+            "stalled".into(),
+            &mut |n| sent.push(n),
+            &mut |_| {},
+        )
+        .await
+        .unwrap();
+        assert_eq!(std::fs::read(&out).unwrap(), input);
+        assert!(sent.len() > 10 && sent.windows(2).all(|w| w[0] < w[1]));
+        assert_eq!(sent.last(), Some(&(input.len() as u64)));
+
+        // it reads nothing: once the pipe is full no byte moves, and it is stopped
+        let started = Instant::now();
+        let e = ssh
+            .exec(
+                "sleep 30",
+                &vec![0u8; 8 << 20],
+                Duration::from_millis(500),
+                "the target took nothing".into(),
+                &mut |_| {},
+                &mut |_| {},
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(e.to_string(), "the target took nothing");
+        assert!(started.elapsed() < Duration::from_secs(10));
+
+        // its lines as they come, without setup's progress in what it said
+        let mut lines = Vec::new();
+        let said = ssh
+            .exec(
+                &format!("echo '{PROGRESS_LINE} pair'; echo hi"),
+                b"",
+                Duration::from_secs(10),
+                "stalled".into(),
+                &mut |_| {},
+                &mut |l| lines.push(l.to_string()),
+            )
+            .await
+            .unwrap();
+        assert_eq!(lines, [format!("{PROGRESS_LINE} pair"), "hi".into()]);
+        assert_eq!(said, "hi\n");
+
+        // a failure says how it ended and what the target said
+        let e = ssh
+            .exec(
+                "echo boom >&2; exit 3",
+                b"",
+                Duration::from_secs(10),
+                "stalled".into(),
+                &mut |_| {},
+                &mut |_| {},
+            )
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("boom") && e.contains('3'), "{e}");
+    }
+
+    #[test]
+    fn progress_is_written_at_most_every_tick_unless_its_phase_changes() {
+        let op = Arc::new(Mutex::new(Op {
+            id: "ni_x".into(),
+            owner: "u".into(),
+            created: 0,
+            pubkey: String::new(),
+            state: "running",
+            steps: vec![],
+            node_id: None,
+            error: None,
+            failed_step: None,
+            address: None,
+        }));
+        step(&op, "fetch", "fetching");
+        let mut m = Meter::new(&op);
+        for n in 0..100 {
+            m.update("download", n, Some(100));
+        }
+        let seen = |op: &Arc<Mutex<Op>>| op.lock().unwrap().steps[0].progress.clone().unwrap();
+        assert_eq!((seen(&op).phase, seen(&op).done), ("download", 0));
+        m.update("verify", 100, Some(100));
+        assert_eq!((seen(&op).phase, seen(&op).done), ("verify", 100));
+        step(&op, "send", "sending");
+        let v = op.lock().unwrap().view();
+        assert!(
+            v["steps"][0]["ended"].is_i64() && v["steps"][1]["ended"].is_null(),
+            "{v}"
+        );
+        assert!(v["steps"][1]["elapsed_ms"].as_i64().unwrap() >= 0);
+    }
+
+    #[test]
+    fn the_setup_command_reads_the_code_from_stdin_into_the_environment() {
+        let cmd = setup_command("https://hub.example");
+        assert!(cmd.starts_with("exec /bin/sh -c '"), "{cmd}");
+        for part in [
+            "IFS= read -r STEVE_PAIR_CODE && export STEVE_PAIR_CODE",
+            "STEVE_SETUP_PROGRESS=1",
+            "setup node --hub '\\''https://hub.example'\\''",
+            "node start",
+        ] {
+            assert!(cmd.contains(part), "{part}: {cmd}");
+        }
     }
 }

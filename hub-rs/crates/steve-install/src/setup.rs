@@ -1579,6 +1579,28 @@ fn finish_hub(
     Ok(())
 }
 
+/// The pairing code `steve-node pair` reads, when it is not typed.
+const PAIR_CODE: &str = "STEVE_PAIR_CODE";
+/// Set (to anything) by a program that runs setup and follows its phases: a Hub's remote install.
+pub const PROGRESS: &str = "STEVE_SETUP_PROGRESS";
+/// The line before each phase on stdout, with `PROGRESS` set: `steve-setup-progress <phase>`.
+pub const PROGRESS_LINE: &str = "steve-setup-progress";
+
+fn pairing_code() -> Option<String> {
+    std::env::var(PAIR_CODE)
+        .ok()
+        .map(|c| c.trim().to_owned())
+        .filter(|c| !c.is_empty())
+}
+
+/// Says that `phase` (install, pair, adapters, start) begins, to the program that asked.
+fn progress(phase: &str) {
+    if std::env::var_os(PROGRESS).is_some() {
+        println!("{PROGRESS_LINE} {phase}");
+        let _ = io::stdout().flush();
+    }
+}
+
 pub fn run(source: &Path, options: Options) -> Result<()> {
     if options.reconfigure {
         return reconfigure_existing(options);
@@ -1698,6 +1720,7 @@ pub fn run(source: &Path, options: Options) -> Result<()> {
         )?;
         let _ = aside;
     }
+    progress("install");
     ui::step(
         &t!("install.setup.step.verifying"),
         || verify_bundle(source, &expected, &home),
@@ -1856,9 +1879,15 @@ pub fn run(source: &Path, options: Options) -> Result<()> {
         wizard.record["hub_url"] = hub.clone().into();
         wizard.record["pin"] = json!(pin);
         wizard.save()?;
+        progress("pair");
         ui::info(&t!("install.setup.node.code_question"));
         let mut command = clean_command(&candidate.join("bin/steve-node"), Some(&home));
         command.args(["pair", &hub]);
+        /* the code given to setup (as a Hub's remote install gives it) is the pairing's own:
+         * `clean_command` leaves out the rest of `STEVE_*`, and stdin may be used up already */
+        if let Some(code) = pairing_code() {
+            command.env(PAIR_CODE, code);
+        }
         if let Some(pin) = pin {
             command.args(["--pin", &pin]);
         }
@@ -1873,6 +1902,7 @@ pub fn run(source: &Path, options: Options) -> Result<()> {
     /* the ACP adapters are Steve's dependencies: the chosen ones are installed now and kept up to
      * date by the Node; without npm, setup goes on and says how to add them. Before the
      * configuration check, so that it does not report them missing. */
+    progress("adapters");
     if chosen.as_ref().is_some_and(|c| c.is_empty()) {
         let _ = install_adapters(&role, &home, &candidate, chosen.as_deref());
         ui::done(
@@ -1949,6 +1979,7 @@ pub fn run(source: &Path, options: Options) -> Result<()> {
         }
     }
     let mut service = crate::service::Service::new(&role, &home, options.label.as_deref())?;
+    progress("start");
     ui::step(
         &t!("install.setup.step.registering", role = role),
         || service.dispatch("install", Some(&candidate), 30),
