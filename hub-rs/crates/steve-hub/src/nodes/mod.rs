@@ -244,7 +244,7 @@ pub fn api_router(svc: Arc<NodeService>) -> Router {
         .route("/nodes", get(pairing::list))
         .route("/nodes/pairings", post(pairing::create))
         .route("/nodes/tailcat", get(tailcat::get).put(tailcat::put))
-        .route("/nodes/installs", post(install::create))
+        .route("/nodes/installs", post(install::create).get(install::list))
         .route("/nodes/installs/{id}", get(install::get))
         .route("/nodes/installs/{id}/run", post(install::run))
         .route(

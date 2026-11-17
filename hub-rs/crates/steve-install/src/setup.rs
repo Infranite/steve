@@ -1125,12 +1125,14 @@ impl<'a> Wizard<'a> {
 
 /// Whether a setup recorded in `record` got as far as making something a later version must not
 /// take over: a step done, an identity, a database, a service.
+/// Whether `home` holds something of an installation's own. A pairing that never made the Node's
+/// key (`node/identity.key`, saved before anything is sent) sent nothing: a home left by it, as a
+/// failed remote install leaves one, is taken over by the next setup, of any version or Hub.
 fn underway(record: &Value, home: &Path) -> bool {
     record["steps"]
         .as_array()
         .is_some_and(|steps| !steps.is_empty())
         || record["keychain_started"] == true
-        || record["pair_started"] == true
         || [
             "current",
             "signing/identity.json",
@@ -1579,6 +1581,28 @@ fn finish_hub(
     Ok(())
 }
 
+/// The pairing code `steve-node pair` reads, when it is not typed.
+const PAIR_CODE: &str = "STEVE_PAIR_CODE";
+/// Set (to anything) by a program that runs setup and follows its phases: a Hub's remote install.
+pub const PROGRESS: &str = "STEVE_SETUP_PROGRESS";
+/// The line before each phase on stdout, with `PROGRESS` set: `steve-setup-progress <phase>`.
+pub const PROGRESS_LINE: &str = "steve-setup-progress";
+
+fn pairing_code() -> Option<String> {
+    std::env::var(PAIR_CODE)
+        .ok()
+        .map(|c| c.trim().to_owned())
+        .filter(|c| !c.is_empty())
+}
+
+/// Says that `phase` (install, pair, adapters, start) begins, to the program that asked.
+fn progress(phase: &str) {
+    if std::env::var_os(PROGRESS).is_some() {
+        println!("{PROGRESS_LINE} {phase}");
+        let _ = io::stdout().flush();
+    }
+}
+
 pub fn run(source: &Path, options: Options) -> Result<()> {
     if options.reconfigure {
         return reconfigure_existing(options);
@@ -1698,6 +1722,7 @@ pub fn run(source: &Path, options: Options) -> Result<()> {
         )?;
         let _ = aside;
     }
+    progress("install");
     ui::step(
         &t!("install.setup.step.verifying"),
         || verify_bundle(source, &expected, &home),
@@ -1844,21 +1869,35 @@ pub fn run(source: &Path, options: Options) -> Result<()> {
         if wizard.record["pair_started"] != true && exists(&home.join("node/identity.key")) {
             bail!("{}", t!("install.setup.node.identity_foreign"));
         }
-        if wizard.record["pair_started"] == true && wizard.record["hub_url"] != hub {
+        if wizard.record["pair_started"] == true
+            && wizard.record["hub_url"] != hub
+            && exists(&home.join("node/identity.key"))
+        {
             bail!("{}", t!("install.setup.node.pairing_sent_elsewhere"));
         }
         let pin = options
             .pin
             .as_ref()
             .map(|p| p.to_lowercase())
-            .or_else(|| wizard.record["pin"].as_str().map(str::to_string));
+            /* a pin recorded for another Hub is that Hub's */
+            .or_else(|| {
+                (wizard.record["hub_url"] == hub)
+                    .then(|| wizard.record["pin"].as_str().map(str::to_string))
+                    .flatten()
+            });
         wizard.record["pair_started"] = true.into();
         wizard.record["hub_url"] = hub.clone().into();
         wizard.record["pin"] = json!(pin);
         wizard.save()?;
+        progress("pair");
         ui::info(&t!("install.setup.node.code_question"));
         let mut command = clean_command(&candidate.join("bin/steve-node"), Some(&home));
         command.args(["pair", &hub]);
+        /* the code given to setup (as a Hub's remote install gives it) is the pairing's own:
+         * `clean_command` leaves out the rest of `STEVE_*`, and stdin may be used up already */
+        if let Some(code) = pairing_code() {
+            command.env(PAIR_CODE, code);
+        }
         if let Some(pin) = pin {
             command.args(["--pin", &pin]);
         }
@@ -1873,6 +1912,7 @@ pub fn run(source: &Path, options: Options) -> Result<()> {
     /* the ACP adapters are Steve's dependencies: the chosen ones are installed now and kept up to
      * date by the Node; without npm, setup goes on and says how to add them. Before the
      * configuration check, so that it does not report them missing. */
+    progress("adapters");
     if chosen.as_ref().is_some_and(|c| c.is_empty()) {
         let _ = install_adapters(&role, &home, &candidate, chosen.as_deref());
         ui::done(
@@ -1949,6 +1989,7 @@ pub fn run(source: &Path, options: Options) -> Result<()> {
         }
     }
     let mut service = crate::service::Service::new(&role, &home, options.label.as_deref())?;
+    progress("start");
     ui::step(
         &t!("install.setup.step.registering", role = role),
         || service.dispatch("install", Some(&candidate), 30),
@@ -2034,6 +2075,19 @@ mod tests {
             }
             Ok(self.lines.remove(0))
         }
+    }
+    #[test]
+    fn a_pairing_that_made_no_key_is_not_under_way() {
+        let home = tempfile::tempdir().unwrap();
+        let record = json!({"steps": [], "pair_started": true, "hub_url": "https://old.example"});
+        assert!(!underway(&record, home.path()));
+        fs::create_dir_all(home.path().join("node")).unwrap();
+        fs::write(home.path().join("node/identity.key"), b"key").unwrap();
+        assert!(underway(&record, home.path()), "a key may have been sent");
+        assert!(underway(
+            &json!({"steps": ["installed"]}),
+            tempfile::tempdir().unwrap().path()
+        ));
     }
     fn meta(version: &str) -> Value {
         json!({"version":version,"commit":"a".repeat(40)})
