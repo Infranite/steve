@@ -183,6 +183,8 @@ pub const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/089.sql"),
     // 90: the design gate is a switch on the item, off by default; only the owner turns it on.
     include_str!("../migrations/090.sql"),
+    // 91: the model access setting for service sessions goes (harnesses use their own sign-in).
+    include_str!("../migrations/091.sql"),
 ];
 
 /// 027's item columns and their one-time backfill (applied by `run_pending` when `items.phase` is missing).
