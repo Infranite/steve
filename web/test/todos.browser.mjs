@@ -1,4 +1,4 @@
-// The menu, the todo and goal pages and the calendar placeholder: the full app with isolated, synthetic API fixtures,
+// The menu, the todo and goal pages and the calendar page without a calendar: the full app with isolated, synthetic API fixtures,
 // never a real Hub. STEVE_TEST_WEB: the web dev server; STEVE_TEST_SHOTS: a directory for screenshots.
 import assert from "node:assert/strict"
 import { mkdir } from "node:fs/promises"
@@ -71,6 +71,9 @@ async function open({ theme = "light", width = 1440, hash = "/#/todos", lang = "
       if (!m.made.has(body.client_id)) m.made.set(body.client_id, item(500 + m.made.size, body.goal, "run"))
       return json(m.made.get(body.client_id))
     }
+    /* no calendar connected: the calendar page is its connect prompt */
+    if (path === "/api/calendar/sources") return json([])
+    if (path === "/api/calendar/events") return json({ range: { from: "", to: "", tz: "UTC", from_ms: 0, to_ms: 0 }, events: [], calendars: [] })
     if (path === "/api/digest/todos" && method === "GET") return json({ todos: m.todos.map((x) => view(m, x)) })
     if (path === "/api/digest/todos" && method === "POST") {
       const x = todo(body.text, { kind: body.kind ?? "todo", due: body.due ?? null, due_date: body.due_date ?? null, pri: body.pri ?? 0, target_date: body.target_date ?? null, parent: body.parent ? { id: body.parent, text: m.todos.find((y) => y.id === body.parent)?.text } : null })
@@ -197,7 +200,7 @@ try {
     await page.getByText("No calendar connected yet").waitFor()
     assert.equal(await page.locator("[data-calendar-connect]").innerText(), "Connect a calendar")
     await page.locator("[data-calendar-connect]").click()
-    await page.waitForURL(/#\/integrations$/)
+    await page.waitForURL(/#\/integrations\/ics$/)
     await page.close()
   }
   assert.deepEqual(errors, [])

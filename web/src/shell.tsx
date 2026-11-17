@@ -17,6 +17,7 @@ import { LOADED_WEB_VERSION, pendingCards, st } from "@/store"
 import { Initials, useMe } from "@/mine"
 import { useMinute, useTodos } from "@/todos/data"
 import { dueCount } from "@/todos/model"
+import { useNextMeetingAt } from "@/calendar/data"
 import { getTheme, go, openSheet, setTheme, useScrollMore, type ThemePref } from "@/ui"
 import { shortVersion } from "@/updates"
 import { WorkspaceSwitcher } from "@/workspace-switcher"
@@ -120,7 +121,7 @@ function Account({ route, meOn }: { route: string; meOn: boolean }) {
 export function Sidebar({ route: full }: { route: string }) {
   const t = useT()
   const route = full.split("?")[0] // #/knowledge?mem=… still highlights 知识
-  const n = pendingCards().length, now = useMinute(), todos = useTodos().todos
+  const n = pendingCards().length, now = useMinute(), todos = useTodos().todos, next = useNextMeetingAt(now)
   const meOn = route === "contacts" && location.hash.startsWith("#/contacts/me")
   /* what is in progress is the running-status pill's, under the header; the inbox keeps its count of open cards, in
    * the reminder color; 待办 a gray count of what is due today or overdue, which is never pushed */
@@ -141,6 +142,7 @@ export function Sidebar({ route: full }: { route: string }) {
       {!!cnt[h] && (h === "inbox"
         ? <SidebarMenuBadge className="h-4.5 min-w-4.5 rounded-full bg-attention px-1.5 type-label font-semibold tabular-nums text-white! peer-hover/menu-button:text-white!">{cnt[h]}</SidebarMenuBadge>
         : <SidebarMenuBadge className="type-footnote tabular-nums text-muted-foreground" title={h === "todos" ? t("core:sidebar.todoCount", { count: cnt[h] }) : undefined} data-nav-count={h}>{cnt[h]}</SidebarMenuBadge>)}
+      {h === "calendar" && next && <SidebarMenuBadge className="type-footnote tabular-nums text-muted-foreground" title={t("core:sidebar.nextMeeting", { time: next.at, title: next.title ?? "" })} data-nav-next>{next.at}</SidebarMenuBadge>}
     </SidebarMenuItem>
   )
   return (

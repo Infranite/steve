@@ -1,4 +1,4 @@
-/* en strings for the "todos" namespace: todos and goals, and the Calendar page before a calendar is connected.
+/* en strings for the "todos" namespace: todos and goals.
  * Same keys as zh-CN/todos.ts. Conventions: web/src/i18n/index.ts */
 export default {
   title: "Todos",
@@ -138,37 +138,5 @@ export default {
     link: "Link item",
     linkSearch: "Find an item by number or title",
     linkNone: "No item to link",
-  },
-  calendar: {
-    title: "Calendar",
-    sub: "Your schedule, synced from the calendars you connect",
-    none: "No calendar connected yet",
-    noneSub: "A calendar is a data source like Feishu: you turn it on under Connections. Then this page shows your schedule by day, by week and as an agenda, and meeting reminders and preparation start here. Calendar sync is still being built.",
-    connect: "Connect a calendar",
-    deadlines_one: "Due in the next {{count}} day",
-    deadlines_other: "Due in the next {{count}} days",
-    allTodos: "All todos",
-    noDeadlines_one: "No todo is due in the next {{count}} day.",
-    noDeadlines_other: "No todo is due in the next {{count}} days.",
-    sourcesHead: "Calendars you can connect",
-    planned: "Planned",
-    sourcesNote: "Every calendar belongs to a person; yours are under your name. Other people's calendars show free/busy only, and their details when they share them.",
-    source: {
-      feishu: { name: "Feishu Calendar", how: "Read and written with your managed Feishu account; changes are pushed" },
-      invites: { name: "Invitations in mail", how: "A read-only calendar from the .ics invitations you receive; replies go by mail" },
-      caldav: { name: "iCloud and other CalDAV", how: "The iCloud calendars of your iPhone and Mac, with an app-specific password" },
-      dingtalk: { name: "DingTalk Calendar", how: "Your organization's administrator must allow calendar access" },
-      exchange: { name: "Exchange / Outlook", how: "Authorized with a Microsoft account" },
-      google: { name: "Google Calendar", how: "Authorized with a Google account" },
-      mac: { name: "Calendars on a Mac", how: "Runs as a connector on an always-on Mac and reads its calendars" },
-    },
-    willHead: "Once connected",
-    will: {
-      views: { title: "Day, week and agenda", sub: "Colored by source; conflicts and invitations to answer stand out" },
-      briefing: { title: "Morning briefing", sub: "Every morning: today's meetings, todos due, what waits for your decision" },
-      prep: { title: "Meeting preparation and reminders", sub: "Important meetings get their attendees, last notes and related work ready" },
-      invites: { title: "Invitations and rescheduling", sub: "A change others are told about asks for approval first; one only you see is made at once" },
-      others: { title: "Other people's free/busy", sub: "For finding a common free slot and setting up a meeting" },
-    },
   },
 }
