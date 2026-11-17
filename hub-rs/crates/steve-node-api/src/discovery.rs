@@ -303,6 +303,32 @@ pub struct NodeVitals {
     pub sessions: u32,
 }
 
+/// What the Node's machine is (H→N `node.host`, [`crate::HOST_INFO`]): fixed while the Node runs,
+/// so the Hub asks once per link and keeps the answer for when the Node is away. Every field is
+/// what the platform says of itself; one it cannot give is left out rather than guessed.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostInfo {
+    /// The machine's name as its owner sees it (macOS: the computer name; elsewhere the host name).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hostname: Option<String>,
+    /// The operating system family, as Rust names it: `macos`, `linux`, `windows`, …
+    pub os: String,
+    /// The system's own name for itself: `macOS`, `Ubuntu`, `Debian GNU/Linux`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub os_name: Option<String>,
+    /// Its version: `26.1`, `24.04`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub os_version: Option<String>,
+    /// The processor architecture, as Rust names it: `aarch64`, `x86_64`.
+    pub arch: String,
+    /// Logical CPUs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpus: Option<u32>,
+    /// Bytes of memory.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mem_total: Option<u64>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RootVitals {
     pub root: RootId,

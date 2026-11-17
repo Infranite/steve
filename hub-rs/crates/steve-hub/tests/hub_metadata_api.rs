@@ -142,6 +142,13 @@ async fn shared_info_http_permissions_cas_validation_and_node_off() {
     assert_eq!(s, 200, "{first}");
     assert_eq!(first["capabilities"]["shared_metadata"], 1);
     assert_eq!(first["can_edit"], true);
+    // G12: where the Hub is reached (here: this machine only), on reads and on saves
+    assert_eq!(first["capabilities"]["addresses"], 1);
+    let port = e.base.rsplit(':').next().unwrap().to_string();
+    assert_eq!(
+        first["addresses"],
+        json!([{"url": format!("http://127.0.0.1:{port}"), "page": format!("http://127.0.0.1:{port}"), "kind": "loopback"}])
+    );
     let id = first["metadata"]["hub_id"].clone();
     assert_eq!(id, steve_hub::nodes::hub_id(&store).unwrap());
     let change = json!({"revision":0,"display_name":"  Shared 😀  ","purpose_note":"one\r\ntwo"});
@@ -153,6 +160,7 @@ async fn shared_info_http_permissions_cas_validation_and_node_off() {
     assert_eq!(saved["metadata"]["purpose_note"], "one\ntwo");
     assert_eq!(saved["metadata"]["revision"], 1);
     assert_eq!(saved["metadata"]["hub_id"], id);
+    assert_eq!(saved["addresses"], first["addresses"]);
     assert_eq!(
         e.call("PUT", "/api/hub-metadata", Some(cred), Some(change))
             .await

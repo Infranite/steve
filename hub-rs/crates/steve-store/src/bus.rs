@@ -91,6 +91,15 @@ pub enum ChangeEvent {
     Settings { id: String },
     #[serde(rename = "device")]
     Device { id: String },
+    /// A paired Node changed (G5): its link came up or went down, its state, limit or settings, an
+    /// upgrade's phase, what its machine is. `user`: its owner; the stream sends it to them (and
+    /// the Hub's owners) only.
+    #[serde(rename = "node")]
+    Node { id: String, user: String },
+    /// A signed-in client of `user` connected to the live stream, left it, or was signed out
+    /// (G6). Sent to that user (and the Hub's owners) only.
+    #[serde(rename = "client")]
+    Client { id: String, user: String },
 
     // The new modules. Every one carries `ws`: the stream
     // sends them only to subscribers of that workspace. Payloads are ids only; the web refetches.

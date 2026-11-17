@@ -382,6 +382,11 @@ impl Discovery for RemoteNode {
         self.go(NODE_VITALS, &serde_json::json!({}), None, false)
             .await
     }
+    async fn host(&self) -> ApiResult<HostInfo> {
+        self.needs(steve_node_api::HOST_INFO.1, NODE_HOST)?;
+        self.go(NODE_HOST, &serde_json::json!({}), None, false)
+            .await
+    }
 }
 
 impl Node for RemoteNode {

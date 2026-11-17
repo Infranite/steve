@@ -2230,6 +2230,19 @@ impl Discovery for FakeNode {
             sessions: 0,
         })
     }
+    /// A fixed machine: `Studio Mac`, macOS 26.1 on aarch64 with the CPUs and memory of
+    /// [`Discovery::vitals`].
+    async fn host(&self) -> ApiResult<HostInfo> {
+        Ok(HostInfo {
+            hostname: Some("Studio Mac".into()),
+            os: "macos".into(),
+            os_name: Some("macOS".into()),
+            os_version: Some("26.1".into()),
+            arch: "aarch64".into(),
+            cpus: Some(8),
+            mem_total: Some(16 << 30),
+        })
+    }
     async fn probe(&self, _fresh: bool) -> ApiResult<Capabilities> {
         let mut st = self.st();
         // `refuse_next("probe", ..)`: a Node that cannot answer (offline)

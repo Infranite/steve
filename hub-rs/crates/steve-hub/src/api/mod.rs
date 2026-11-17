@@ -66,6 +66,8 @@ pub struct Inner {
     pub workspaces: Option<Arc<crate::wire::workspaces::Workspaces>>,
     /// Single sign-on as configured now (A4b): set up or changed in the settings without a restart.
     pub oidc: Option<Arc<dyn crate::access::OidcSwitch>>,
+    /// Which signed-in clients hold the live stream open now (G6).
+    pub presence: Arc<crate::presence::Presence>,
 }
 
 impl std::ops::Deref for AppState {
@@ -99,6 +101,7 @@ impl AppState {
             node: None,
             workspaces: None,
             oidc: None,
+            presence: Default::default(),
         }))
     }
 

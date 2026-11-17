@@ -62,6 +62,10 @@ pub async fn sample_once(
             (id, r, rtt)
         });
         for (id, r, rtt) in futures::future::join_all(asks).await {
+            // the link's latency, for the devices page, whatever the Node answered
+            if let (Some(ms), Some(svc), Ok(Ok(_))) = (rtt, svc, &r) {
+                svc.registry.set_rtt(&id, ms, super::now());
+            }
             let v = match r {
                 Ok(Ok(v)) => v,
                 Ok(Err(e)) => {

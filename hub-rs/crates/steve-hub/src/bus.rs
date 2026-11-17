@@ -69,6 +69,13 @@ pub enum HubEvent {
     Settings { id: String },
     #[serde(rename = "device")]
     Device { id: String },
+    /// A paired Node changed; sent to its owner `user` (and the Hub's owners) only.
+    #[serde(rename = "node")]
+    Node { id: String, user: String },
+    /// A signed-in client of `user` came onto the live stream, left it, or was signed in or out;
+    /// sent to that user (and the Hub's owners) only.
+    #[serde(rename = "client")]
+    Client { id: String, user: String },
 }
 
 /// `Option<Option<T>>` that tells "absent" from `null`.
@@ -92,14 +99,46 @@ mod double_option {
     }
 }
 
-/// Who may see a frame: every subscriber, the subscribers of one workspace, or nobody (a session event of a
-/// session that doesn't exist; TS compared `undefined` with the workspace id).
+/// Who may see a frame: every subscriber, the subscribers of one workspace, one user (and the Hub's owners,
+/// who manage every device), or nobody (a session event of a session that doesn't exist; TS compared
+/// `undefined` with the workspace id).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Scope {
     All,
     Ws(String),
+    User(String),
     Nobody,
 }
+
+/// Who a stream is for: the workspace it shows, and who is signed in.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Viewer {
+    pub ws: String,
+    /// `users.id`; empty for none.
+    pub user: String,
+    /// The Hub's owner (`users.role`): sees what concerns any user's devices.
+    pub owner: bool,
+}
+
+impl From<&str> for Viewer {
+    /// Nobody signed in, in workspace `ws`.
+    fn from(ws: &str) -> Viewer {
+        Viewer {
+            ws: ws.into(),
+            ..Default::default()
+        }
+    }
+}
+
+impl From<String> for Viewer {
+    fn from(ws: String) -> Viewer {
+        Viewer::from(ws.as_str())
+    }
+}
+
+/// Events about one person's devices (their Nodes, their signed-in clients), shaped `{type, id, user}`: they
+/// go to that user and to the Hub's owners, never to a whole workspace.
+const PERSONAL: &[&str] = &["node", "client"];
 
 /// One event as it goes out on every SSE stream: serialized (and slimmed) once, with its audience.
 #[derive(Debug)]
@@ -113,10 +152,16 @@ pub struct Frame {
 }
 
 impl Frame {
+    /// Visible to a subscriber of workspace `ws` with nobody signed in.
     pub fn visible_to(&self, ws: &str) -> bool {
+        self.visible(&Viewer::from(ws))
+    }
+
+    pub fn visible(&self, v: &Viewer) -> bool {
         match &self.scope {
             Scope::All => true,
-            Scope::Ws(w) => w == ws,
+            Scope::Ws(w) => *w == v.ws,
+            Scope::User(u) => v.owner || (!u.is_empty() && *u == v.user),
             Scope::Nobody => false,
         }
     }
@@ -125,7 +170,8 @@ impl Frame {
 /// Events that change nothing `/api/state` reads, so they leave [`Bus::generation`] alone: transcript chunks
 /// (stored only in `events`; a turn's end publishes `session`), a chat answer being written and its research
 /// tool calls (the stored reply publishes `message`), and statistics (counted by their own generation).
-const STATELESS: &[&str] = &["event", "steve.draft", "steve.tool", "stats"];
+/// A client coming and going (`client`) is not in `/api/state` either.
+const STATELESS: &[&str] = &["event", "steve.draft", "steve.tool", "stats", "client"];
 
 /// Frames the change log doesn't keep: transcript chunks (the per-session events API is their cursor) and a
 /// chat answer being written (each one carries the full text so far).
@@ -523,6 +569,10 @@ impl Bus {
                     }
                 }
                 Some(_) => {}
+                // a Node's link is in `/api/state` (the Hub's own Node), for every workspace
+                None if ty.is_some_and(|t| PERSONAL.contains(&t)) => {
+                    self.0.global_generation.fetch_add(1, Ordering::SeqCst);
+                }
                 None if steve_modules::sse::requires_workspace(ty.unwrap_or_default()) => {}
                 None => {
                     self.0.global_generation.fetch_add(1, Ordering::SeqCst);
@@ -696,6 +746,14 @@ fn dispatch(
                 *d = crate::api::slim::ev_out(d.take());
             }
             ws.map(Scope::Ws).unwrap_or(Scope::Nobody)
+        } else if PERSONAL.contains(&ty.as_str()) {
+            // only for the user they concern (and the Hub's owners); without one, the owners only
+            Scope::User(
+                v.get("user")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+            )
         } else {
             // Explicit workspace metadata is authoritative, including newly registered event
             // types. Known private types with missing/malformed metadata fail closed.
@@ -915,6 +973,61 @@ mod tests {
         bus.publish_value(json!({"type": "session", "id": "s"}));
         bus.publish_value(json!({"type": "message", "id": "m"}));
         assert_eq!(bus.generation(), g + 2);
+    }
+
+    /// G5/G6: a Node's and a client's changes reach the user they belong to and the Hub's owners, in any
+    /// workspace, and nobody else; a client coming and going leaves `/api/state` alone, a Node's link does not.
+    #[tokio::test]
+    async fn device_events_go_to_their_user_and_the_owners() {
+        let bus = Bus::new();
+        let mut rx = bus.subscribe();
+        let g = bus.generation_for("w1");
+        bus.publish(HubEvent::Client {
+            id: "cli_1".into(),
+            user: "u1".into(),
+        });
+        assert_eq!(bus.generation_for("w1"), g, "a client is not in the state");
+        bus.publish(HubEvent::Node {
+            id: "n1".into(),
+            user: "u1".into(),
+        });
+        assert_eq!(
+            bus.generation_for("w2"),
+            g + 1,
+            "a Node's link is, everywhere"
+        );
+        bus.publish_value(json!({"type": "node", "id": "n2"}));
+        let viewer = |user: &str, owner| Viewer {
+            ws: "w1".into(),
+            user: user.into(),
+            owner,
+        };
+        for (want, scope) in [
+            ("client", Scope::User("u1".into())),
+            ("node", Scope::User("u1".into())),
+            ("node", Scope::User(String::new())),
+        ] {
+            let f = rx.recv().await.unwrap();
+            assert!(std::str::from_utf8(&f.bytes).unwrap().contains(want));
+            assert_eq!(f.scope, scope);
+            assert!(f.id.is_some(), "kept for a resume");
+            assert!(!f.visible_to("w1"), "not to a whole workspace");
+            assert!(f.visible(&viewer("owner", true)));
+            assert!(!f.visible(&viewer("u2", false)));
+            assert!(!f.visible(&viewer("", false)));
+            assert_eq!(
+                f.visible(&viewer("u1", false)),
+                scope == Scope::User("u1".into())
+            );
+        }
+        assert_eq!(
+            serde_json::to_value(HubEvent::Node {
+                id: "n1".into(),
+                user: "u1".into()
+            })
+            .unwrap(),
+            json!({"type": "node", "id": "n1", "user": "u1"})
+        );
     }
 
     #[tokio::test]

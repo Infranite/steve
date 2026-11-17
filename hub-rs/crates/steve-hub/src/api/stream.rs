@@ -33,7 +33,8 @@ use tokio::sync::broadcast::{
 use tokio::time::{Instant, Interval, interval_at};
 
 use super::{AppState, Ctx};
-use crate::bus::{Bus, Cursor, Frame, HubEvent, Replay};
+use crate::bus::{Bus, Cursor, Frame, HubEvent, Replay, Viewer};
+use crate::presence::Here;
 
 pub const PING_EVERY: Duration = Duration::from_secs(25);
 
@@ -52,13 +53,24 @@ struct Resume {
 }
 
 struct Sub {
-    ws: String,
+    /// who the stream is for: its workspace, and who is signed in
+    ws: Viewer,
     rx: Receiver<Arc<Frame>>,
     ping: Interval,
     /// `None`: a legacy subscriber (no cursor), served exactly as before
     resume: Option<Resume>,
     /// what to write before anything else (a replay)
     pending: Pending,
+    /// the signed-in client this stream keeps online; the stream ends when it is signed out
+    here: Option<Here>,
+}
+
+/// Resolves once the stream's client was signed out; never for a stream without one.
+async fn kicked(here: &mut Option<Here>) {
+    match here {
+        Some(h) => h.kicked().await,
+        None => std::future::pending().await,
+    }
 }
 
 /// One queued piece of a replay.
@@ -123,15 +135,16 @@ fn reset_frame(epoch: &str, head: u64) -> Vec<u8> {
 impl Sub {
     /// A subscriber that continues after `after` (as sent on the wire). Subscribes before reading the log, so
     /// a frame sent in between arrives on the broadcast too and is dropped there as already replayed.
-    fn resumed(bus: &Bus, ws: String, after: &str) -> Sub {
+    fn resumed(bus: &Bus, ws: Viewer, after: &str) -> Sub {
         Sub::resumed_on(bus, ws, bus.subscribe(), after)
     }
 
     /// [`Sub::resumed`] on a receiver subscribed before this call.
-    fn resumed_on(bus: &Bus, ws: String, rx: Receiver<Arc<Frame>>, after: &str) -> Sub {
+    fn resumed_on(bus: &Bus, ws: Viewer, rx: Receiver<Arc<Frame>>, after: &str) -> Sub {
         let replay = bus.replay_from(after);
         let mut sub = Sub {
             ws,
+            here: None,
             rx,
             ping: interval_at(Instant::now() + PING_EVERY, PING_EVERY),
             resume: Some(Resume {
@@ -157,7 +170,7 @@ impl Sub {
                 // only the Arcs are kept here; bytes are copied chunk by chunk in `Pending::pop_front`
                 for f in frames {
                     let Some(id) = f.id else { continue };
-                    if id <= r.last || !f.visible_to(&self.ws) {
+                    if id <= r.last || !f.visible(&self.ws) {
                         continue;
                     }
                     self.pending.push(Part::Frame(f, id));
@@ -192,7 +205,7 @@ impl Sub {
     /// The bytes `f` goes out as on this stream, or `None` when it is not for this subscriber or was
     /// already written.
     fn take(&mut self, f: &Frame) -> Option<Bytes> {
-        let visible = f.visible_to(&self.ws);
+        let visible = f.visible(&self.ws);
         match (self.resume.as_mut(), f.id) {
             (Some(r), Some(id)) => {
                 if id <= r.last {
@@ -239,7 +252,7 @@ impl Sub {
 
     fn resync_frame(&self) -> Bytes {
         let json = serde_json::to_string(&HubEvent::Workspace {
-            id: self.ws.clone(),
+            id: self.ws.ws.clone(),
         })
         .expect("workspace event serializes");
         Bytes::from(format!("data: {json}\n\n"))
@@ -251,6 +264,8 @@ impl Sub {
                 return Some((Ok(b), self));
             }
             tokio::select! {
+                // signed out: the stream ends, and the page's reconnect is refused
+                _ = kicked(&mut self.here) => return None,
                 _ = self.ping.tick() => return Some((Ok(ping_frame()), self)),
                 got = self.rx.recv() => match got {
                     Ok(f) => {
@@ -276,10 +291,11 @@ impl Sub {
 /// the legacy stream).
 pub fn events(
     st: &AppState,
-    ws: String,
+    ws: Viewer,
+    here: Option<Here>,
     after: Option<String>,
 ) -> impl Stream<Item = Result<Bytes, Infallible>> + Send + use<> {
-    let sub = match after {
+    let mut sub = match after {
         Some(a) => Sub::resumed(&st.bus, ws, &a),
         None => Sub {
             rx: st.bus.subscribe(),
@@ -287,8 +303,10 @@ pub fn events(
             ping: interval_at(Instant::now() + PING_EVERY, PING_EVERY),
             resume: None,
             pending: Pending::default(),
+            here: None,
         },
     };
+    sub.here = here;
     stream::unfold(sub, Sub::next)
 }
 
@@ -316,7 +334,19 @@ pub async fn stream(
     headers: HeaderMap,
 ) -> Response {
     let after = cursor_of(&q, &headers);
-    let mut res = Response::new(Body::from_stream(events(&st, c.ws, after)));
+    let owner = c.user.get("role").and_then(serde_json::Value::as_str) == Some("owner");
+    // a signed-in client is online while this stream is open (G6)
+    let store = st.modules.as_ref().map(|m| &m.store);
+    let here = c
+        .client
+        .as_ref()
+        .map(|cl| st.presence.enter(store, &cl.id, &c.me));
+    let viewer = Viewer {
+        ws: c.ws,
+        user: c.me,
+        owner,
+    };
+    let mut res = Response::new(Body::from_stream(events(&st, viewer, here, after)));
     let h = res.headers_mut();
     h.insert(
         header::CONTENT_TYPE,
@@ -350,6 +380,7 @@ mod tests {
         };
         let mut sub = Sub {
             ws: "private-a".into(),
+            here: None,
             rx,
             ping: interval_at(Instant::now() + PING_EVERY, PING_EVERY),
             resume: None,
@@ -377,6 +408,7 @@ mod tests {
         });
         let mut sub = Sub {
             ws: "a".into(),
+            here: None,
             rx,
             ping: interval_at(Instant::now() + PING_EVERY, PING_EVERY),
             resume: None,
@@ -449,6 +481,7 @@ mod tests {
             let bus = Bus::new();
             let mut sub = Sub {
                 ws: "a".into(),
+                here: None,
                 rx: bus.subscribe(),
                 ping: interval_at(Instant::now() + PING_EVERY, PING_EVERY),
                 resume: None,
@@ -574,6 +607,7 @@ mod tests {
             }
             let mut sub = Sub {
                 ws: "a".into(),
+                here: None,
                 rx,
                 ping: interval_at(Instant::now() + PING_EVERY, PING_EVERY),
                 resume: Some(Resume {

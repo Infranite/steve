@@ -20,18 +20,21 @@ use steve_node_wire::{Conn, ConnOptions, Handler, ServeHub, close};
 use steve_store::StoreError;
 
 use super::guard::{GuardedFiles, GuardedSink, GuardedTools, LinkCtx};
+use super::link::{Arrival, Door};
 use super::{NodeService, Peer, now};
 use crate::wire::node_runtime::{catch_up_streams, read_snapshot};
 
 pub async fn upgrade(
     State(svc): State<Arc<NodeService>>,
     Peer(peer): Peer,
+    door: Option<axum::Extension<Door>>,
     headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Response {
     if !svc.ingress.allows(peer, &headers) {
         return axum::http::StatusCode::FORBIDDEN.into_response();
     }
+    let arrival = super::link::arrival(door.map(|d| d.0).unwrap_or_default(), peer, &headers);
     // links not yet through the handshake are bounded (M5): many half-sent hellos cost memory
     // and the store's blocking pool, and a Node that is turned away dials again shortly
     let Ok(unproven) = svc.handshakes.clone().try_acquire_owned() else {
@@ -41,7 +44,7 @@ pub async fn upgrade(
         .max_frame_size(MAX_FRAME)
         .on_upgrade(move |socket| async move {
             let (sink, stream) = split(socket);
-            serve_after(svc, sink, stream, Some(unproven)).await;
+            serve_after(svc, sink, stream, Some(unproven), arrival).await;
         })
 }
 
@@ -75,6 +78,8 @@ pub fn split(ws: WebSocket) -> (FrameSink, FrameStream) {
 /// The store's side of a handshake, for one connection.
 struct Admit {
     svc: Arc<NodeService>,
+    /// How this link reached the Hub, kept with the Node when it is admitted.
+    arrival: Arrival,
     /// The incarnation before this link (a change: the Node restarted).
     previous: Mutex<Option<Option<i64>>>,
 }
@@ -100,10 +105,12 @@ impl Admission for Admit {
             hello.node_id.to_string(),
             hello.incarnation as i64,
         );
+        let arrival = serde_json::to_string(&self.arrival).map_err(|e| e.to_string())?;
         let link = tokio::task::spawn_blocking(move || {
             store.transaction::<_, StoreError>(|tx| {
                 let l = steve_store::nodes::begin_link(tx, &node, inc, now())?;
                 if let Some(l) = &l {
+                    steve_store::nodes::set_link(tx, &node, &arrival)?;
                     steve_store::nodes::audit(
                         tx,
                         Some(&node),
@@ -130,6 +137,7 @@ impl Admission for Admit {
     async fn reported(&self, node: &NodeId, error: &str) {
         tracing::warn!(node = %node, "node could not link: {error}");
         self.svc.fleet.link_failed(node, now(), error);
+        super::tell(&self.svc.store, node.as_str()).await;
     }
 }
 
@@ -154,7 +162,7 @@ impl Handler for LinkHandler {
 
 /// Runs one link from the handshake to its close.
 pub async fn serve(svc: Arc<NodeService>, sink: FrameSink, stream: FrameStream) {
-    serve_after(svc, sink, stream, None).await
+    serve_after(svc, sink, stream, None, Arrival::unknown()).await
 }
 
 /// `unproven`: this link's place among those still in the handshake, given back once it is done.
@@ -163,9 +171,14 @@ async fn serve_after(
     mut sink: FrameSink,
     mut stream: FrameStream,
     unproven: Option<tokio::sync::OwnedSemaphorePermit>,
+    mut arrival: Arrival,
 ) {
+    if arrival.since == 0 {
+        arrival.since = now();
+    }
     let admit = Admit {
         svc: svc.clone(),
+        arrival,
         previous: Mutex::new(None),
     };
     let hub = svc.identity.get().map(|k| k.as_ref());
@@ -230,6 +243,9 @@ async fn serve_after(
     };
     let _ = installed.send(true);
     svc.fleet.linked(&node, hello.proto);
+    // its owner's pages show it linked; what its machine is, asked once per link (G2)
+    super::tell(&svc.store, node.as_str()).await;
+    tokio::spawn(learn_host(svc.clone(), node.clone(), conn.clone()));
     if paused != admitted.paused {
         // paused or resumed since the welcome went out
         conn.notify("paused", serde_json::json!({ "paused": paused }));
@@ -251,6 +267,45 @@ async fn serve_after(
     })
     .await;
     remote.detach(generation);
+}
+
+/// How long the Hub waits for a Node to say what machine it is.
+const HOST_ASK: Duration = Duration::from_secs(15);
+
+/// Asks the Node over `conn` what machine it is ([`Discovery::host`]) and keeps the answer with it, for
+/// while it is away too. A Node of an earlier protocol is not asked; one that does not answer keeps
+/// what it said before.
+async fn learn_host(svc: Arc<NodeService>, node: NodeId, conn: Arc<Conn>) {
+    if conn.peer_minor() < HOST_INFO.1 {
+        return;
+    }
+    let remote = svc.fleet.remote(&node);
+    let host = match tokio::time::timeout(HOST_ASK, remote.host()).await {
+        Ok(Ok(h)) => h,
+        Ok(Err(e)) => {
+            tracing::debug!(node = %node, "host: {}", e.safe_detail);
+            return;
+        }
+        Err(_) => {
+            tracing::debug!(node = %node, "host: no answer");
+            return;
+        }
+    };
+    // a link already gone or replaced has nothing more to say
+    if conn.is_closed() {
+        return;
+    }
+    let Ok(text) = serde_json::to_string(&host) else {
+        return;
+    };
+    let (store, id) = (svc.store.clone(), node.to_string());
+    let r = tokio::task::spawn_blocking(move || {
+        store.transaction(|tx| steve_store::nodes::set_host(tx, &id, &text))
+    })
+    .await;
+    if !matches!(r, Ok(Ok(_))) {
+        tracing::warn!(node = %node, "keeping what machine it is: {r:?}");
+    }
 }
 
 /// Installs an admitted link, under [`NodeService::links`]: the store must still say this

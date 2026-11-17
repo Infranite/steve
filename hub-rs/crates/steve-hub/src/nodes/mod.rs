@@ -10,6 +10,7 @@ pub mod guard;
 pub mod handover;
 mod ingress;
 pub mod install;
+pub mod link;
 pub mod listener;
 pub mod pairing;
 pub mod registry;
@@ -113,6 +114,19 @@ pub fn identity_at(home: &std::path::Path) -> std::io::Result<steve_node_wire::I
     }
 }
 
+/// Tells the Node's owner that it changed, for a change that is not a store write (its link came
+/// up, it said why it could not link). Store writes tell by themselves ([`steve_store::nodes::changed`]).
+pub(crate) async fn tell(store: &Store, node: &str) {
+    let (store, node) = (store.clone(), node.to_string());
+    let r = tokio::task::spawn_blocking(move || {
+        store.transaction(|tx| steve_store::nodes::changed(tx, &node))
+    })
+    .await;
+    if !matches!(r, Ok(Ok(()))) {
+        tracing::debug!("telling a node's change: {r:?}");
+    }
+}
+
 /// How many Node links may be in the handshake at once (M5); more are answered 503 before upgrading.
 pub const MAX_UNPROVEN: usize = 64;
 
@@ -208,12 +222,19 @@ pub fn from_vars(
     }
 }
 
-/// `/node/pair` and `/node/ws`: no login, the code or the signature is the credential.
+/// `/node/pair` and `/node/ws` on the Hub's own port: no login, the code or the signature is the
+/// credential.
 pub fn node_router(svc: Arc<NodeService>) -> Router {
+    node_router_at(svc, link::Door::Hub)
+}
+
+/// [`node_router`] behind another listener (`door`), which the links it takes say they came in by.
+pub fn node_router_at(svc: Arc<NodeService>, door: link::Door) -> Router {
     Router::new()
         .route("/node/pair", post(pairing::claim))
         .route("/node/rotate", post(pairing::rotate))
         .route("/node/ws", get(listener::upgrade))
+        .layer(axum::Extension(door))
         .with_state(svc)
 }
 

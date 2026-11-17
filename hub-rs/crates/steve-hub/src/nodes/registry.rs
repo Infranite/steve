@@ -12,6 +12,8 @@ use steve_node_wire::{Conn, close};
 struct Slot {
     generation: u64,
     conn: Arc<Conn>,
+    /// The latest round trip of a call over this link (ms) and when it was measured (ms).
+    rtt: Option<(i64, i64)>,
 }
 
 #[derive(Default)]
@@ -59,7 +61,14 @@ impl NodeRegistry {
                 "fenced",
             );
         }
-        slots.insert(node.to_string(), Slot { generation, conn });
+        slots.insert(
+            node.to_string(),
+            Slot {
+                generation,
+                conn,
+                rtt: None,
+            },
+        );
         true
     }
 
@@ -98,6 +107,24 @@ impl NodeRegistry {
 
     pub fn conn(&self, node: &str) -> Option<Arc<Conn>> {
         self.slots.lock().unwrap().get(node).map(|s| s.conn.clone())
+    }
+
+    /// A call over the Node's live link took `ms` (measured at `at`): its latency now (G1).
+    pub fn set_rtt(&self, node: &str, ms: i64, at: i64) {
+        if let Some(s) = self.slots.lock().unwrap().get_mut(node) {
+            s.rtt = Some((ms, at));
+        }
+    }
+
+    /// The latest round trip over the Node's live link (ms) and when it was measured; `None` while
+    /// it has none or is down.
+    pub fn rtt(&self, node: &str) -> Option<(i64, i64)> {
+        self.slots
+            .lock()
+            .unwrap()
+            .get(node)
+            .filter(|s| !s.conn.is_closed())
+            .and_then(|s| s.rtt)
     }
 
     /// Forget the link of `generation` once it is down (a newer one stays).

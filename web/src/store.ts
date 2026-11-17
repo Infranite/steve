@@ -719,6 +719,8 @@ function onHub(e: HubEvent | ModuleEvent) {
   if (e.type === "stream.gap") { freezeCursors(); void bounded([...new Set([...raw.events.keys(), ...raw.loadingEv])], catchUp); yoloSoon(); return }
   hubSubs.forEach((f) => f(e))
   if (e.type === "yolo" || e.type === "yolo_action") { yoloSoon(); return }
+  /* a client coming onto the stream or leaving it is not in /api/state: only the pages that list clients refetch */
+  if (e.type === "client") return
   if (moduleTypes.has(e.type)) return
   e = e as HubEvent
   if (e.type === "workspace") { void resync(); return }

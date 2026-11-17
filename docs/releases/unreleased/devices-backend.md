@@ -1,0 +1,6 @@
+- Devices backend: `GET /api/nodes` now says how each Node's link reached the Hub (`link`: local network, tailnet, internet or this machine, over TLS, a reverse proxy or tailcat, since when, and the latest round trip) and what machine it is (`host`: name, system and version, processor, cores and memory, reported by the Node itself). Both stay visible while a Node is away.
+- The live event stream now tells a Node's owner whenever the Node changes (`node` events: linked or gone, paused, renamed, limit, upgrade phase…), so pages no longer need to poll.
+- `GET /api/access` now marks each signed-in client `online` while it holds the live stream, with how many streams and since when, and names the access token it signed in with. The client's user is told when it comes and goes (`client` events).
+- Signing a client out, or revoking the token it signed in with, now ends its open live stream at once; one revoked from the command line while the Hub runs loses it within 30 seconds.
+- `GET /api/hub-metadata` lists the Hub's addresses (public, local network, tailnet, this machine).
+- Nodes and the Hub speak protocol 0.7 (`node.host`); Nodes and Hubs of the previous release keep working together, without the machine description.

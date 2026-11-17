@@ -39,8 +39,10 @@ pub use workspace::*;
 
 /// Major.minor of this contract. A major change refuses the connection; a minor one only adds, and
 /// the Hub sends what a minor added only to a Node whose hello says that minor (see [`AUTO_MODE`]).
-pub const PROTOCOL: (u16, u16) = (0, 6);
+pub const PROTOCOL: (u16, u16) = (0, 7);
 
+/// The first protocol with [`Discovery::host`] (what machine a Node is): an older Node is not asked.
+pub const HOST_INFO: (u16, u16) = (0, 7);
 /// The first protocol with Hub-managed Node upgrades ([`Discovery::upgrade_stage`]).
 pub const NODE_UPGRADES: (u16, u16) = (0, 6);
 /// The first protocol with the optional controlled harness installation face.
