@@ -453,8 +453,9 @@ async fn feishu_self_wires_without_feishu_bot() {
     );
     let rt = w.lifecycle.as_ref().expect("a connection runtime");
     assert_eq!(rt.adapters(), ["ext_ws", "ext_ws.bot", "feishu_user"]);
-    // the base 18 (including MCP idle cleanup, the digest queue, personal notifications, trigger reports and calendar sync) and connection runtime
-    assert_eq!(w.jobs.len(), 19);
+    // the base 19 (including MCP idle cleanup, the digest queue, personal notifications, trigger reports, calendar sync
+    // and the alarm clock) and connection runtime
+    assert_eq!(w.jobs.len(), 20);
     // without both, the rest still wires
     let h = home();
     let asm = Assembly::builtin()
@@ -545,8 +546,9 @@ async fn an_extension_runs_its_own_connection_hook() {
         steve_hub::wire::wire_assembly(&h.cfg, &Bus::new(), h.vars.clone(), &asm).expect("wire");
     let rt = w.lifecycle.as_ref().expect("a connection runtime");
     assert_eq!(rt.adapters(), ["github_pat"]);
-    // the base 18 (including MCP idle cleanup, the digest queue, personal notifications, trigger reports and calendar sync) and connection runtime
-    assert_eq!(w.jobs.len(), 19);
+    // the base 19 (including MCP idle cleanup, the digest queue, personal notifications, trigger reports, calendar sync
+    // and the alarm clock) and connection runtime
+    assert_eq!(w.jobs.len(), 20);
 }
 
 #[tokio::test]
@@ -579,8 +581,9 @@ async fn an_assembly_registers_only_its_extensions() {
         ["ext_ws", "ext_ws.bot", "feishu_app"]
     );
     assert_eq!(w.tools.outbox.as_user_ids(), ["ext_ws"]);
-    // the built-in 20 (including MCP idle cleanup, the digest queue, personal notifications, trigger reports and calendar sync) and the probe's
-    assert_eq!(w.jobs.len(), 21);
+    // the built-in 21 (including MCP idle cleanup, the digest queue, personal notifications, trigger reports, calendar
+    // sync and the alarm clock) and the probe's
+    assert_eq!(w.jobs.len(), 22);
     // the device flow and the OAuth start of you on Feishu went with it; the bot's stayed, and
     // another extension's routes are under its own prefix
     let paths: BTreeSet<String> = [
@@ -613,9 +616,9 @@ async fn an_empty_assembly_still_wires_the_hub() {
     assert!(w.tools.mail.adapter_ids().is_empty());
     assert!(w.seams.flow.events.all().is_empty());
     // the built-in extensions' two (registrations resumed, the connection runtime) are gone;
-    // library MCP idle cleanup, the digest queue, personal notifications, trigger reports and calendar
-    // sync remain in the base wiring.
-    assert_eq!(w.jobs.len(), 18);
+    // library MCP idle cleanup, the digest queue, personal notifications, trigger reports, calendar sync and the
+    // alarm clock remain in the base wiring.
+    assert_eq!(w.jobs.len(), 19);
     assert!(w.lifecycle.is_none());
 }
 

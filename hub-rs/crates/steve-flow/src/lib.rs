@@ -64,6 +64,7 @@ macro_rules! t_in {
 }
 
 pub mod adapter;
+pub mod alarms;
 pub mod api;
 pub mod bots;
 pub mod budget;
@@ -107,6 +108,7 @@ pub use adapter::{
     ActorRef, AdapterError, Batch, DropReason, EventAdapter, EventSink, EventTypeDef, IngestMode,
     Ingested, PushRequest, RawEvent, ScopeDef,
 };
+pub use alarms::{AlarmClock, AlarmSource};
 pub use api::routes;
 pub use bots::on_bot_deleted;
 pub use budget::on_session_cost;
@@ -161,7 +163,10 @@ pub struct FlowCx {
     pub drops: ingest::DropStats,
     /// SSE `signal` coalescing.
     pub signals: signals::SignalDebounce,
+    /// Registered alarm sources ([`alarms::AlarmSource`]).
+    pub alarms: alarms::AlarmSources,
     wake: Arc<Notify>,
+    alarm_wake: Notify,
     followups: Mutex<mpsc::UnboundedReceiver<Followup>>,
     /// `true` once the scheduler's boot recovered the interrupted runs ([`Self::recovered`]).
     recovered: tokio::sync::watch::Sender<bool>,
@@ -179,6 +184,11 @@ impl FlowCx {
     /// Makes the scheduler look at its triggers now (a schedule was created or changed).
     pub fn wake(&self) {
         self.wake.notify_one();
+    }
+
+    /// Makes the alarm clock plan and claim now (a subject changed and should not wait for its round).
+    pub fn wake_alarms(&self) {
+        self.alarm_wake.notify_one();
     }
 
     pub(crate) fn notified(&self) -> &Notify {
@@ -275,6 +285,7 @@ pub struct FlowSetup {
     actions: nodes::action::Actions,
     nodes: Vec<Arc<dyn NodeKind>>,
     finders: link::ItemFinders,
+    alarms: alarms::AlarmSources,
     wake: Arc<Notify>,
     tx: mpsc::UnboundedSender<Followup>,
     rx: mpsc::UnboundedReceiver<Followup>,
@@ -291,6 +302,7 @@ impl FlowSetup {
             actions: nodes::action::Actions::default(),
             nodes: Vec::new(),
             finders: link::ItemFinders::default(),
+            alarms: alarms::AlarmSources::default(),
             wake: Arc::new(Notify::new()),
             tx,
             rx,
@@ -347,6 +359,12 @@ impl FlowSetup {
         self
     }
 
+    /// Registers the alarms of a subject family ([`alarms::AlarmSource`]); replaces one of the same family.
+    pub fn alarm_source(mut self, s: Arc<dyn alarms::AlarmSource>) -> Self {
+        self.alarms.add(s);
+        self
+    }
+
     /// Registers an event source (its `id()` is the `connections.adapter` it serves).
     pub fn event_adapter(mut self, a: Arc<dyn EventAdapter>) -> Self {
         self.events.add(a);
@@ -374,7 +392,9 @@ impl FlowSetup {
             events: self.events,
             drops: ingest::DropStats::default(),
             signals: signals::SignalDebounce::default(),
+            alarms: self.alarms,
             wake: self.wake,
+            alarm_wake: Notify::new(),
             followups: Mutex::new(self.rx),
             recovered: tokio::sync::watch::Sender::new(false),
         });

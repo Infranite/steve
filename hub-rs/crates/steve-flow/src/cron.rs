@@ -16,7 +16,7 @@ use croner::Cron;
 use croner::parser::{CronParser, Seconds, Year};
 
 /// Workspace default (`SETTINGS.tz.def`).
-pub const DEFAULT_TZ: &str = "Asia/Taipei";
+pub const DEFAULT_TZ: &str = steve_modules::zone::DEFAULT_TZ;
 
 /// Values offered by the `tz` setting (`SETTINGS.tz.values`). Tasks may still store any IANA name.
 pub const TZ_CHOICES: [&str; 7] = [

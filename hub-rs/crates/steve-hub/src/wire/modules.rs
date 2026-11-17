@@ -565,7 +565,9 @@ pub fn build(env: Env<'_>) -> Result<Built, BackendError> {
         .action(Arc::new(steve_mail::nodes::WithMailLinks(
             steve_github::flow::GhItemLink,
         )))
-        .item_finder("gh_pr", Arc::new(steve_github::flow::GhPrFinder));
+        .item_finder("gh_pr", Arc::new(steve_github::flow::GhPrFinder))
+        // a todo's reminder and snooze wake-up (`time_alarms`)
+        .alarm_source(Arc::new(steve_digest::todo_alarms::TodoAlarms));
     let flow = setup.build(modules.clone(), Arc::new(steve_flow::GraphEngine));
     mail_events.bind(&flow);
     item_events.bind(flow.clone());
@@ -710,6 +712,8 @@ pub fn build(env: Env<'_>) -> Result<Built, BackendError> {
         gh.outbox_consumer(),
         Arc::new(steve_channels::notifications::Intake),
     ];
+    // an alarm's notification (a todo's reminder, a snoozed todo back), for its owner
+    module_consumers.extend(steve_channels::notifications::AlarmIntake::all());
     let mirror = steve_knowledge::openviking::Mirror::ID;
     let mirrored_before = store
         .reader(|c| steve_store::outbox::is_registered(c, mirror))
@@ -747,6 +751,7 @@ pub fn build(env: Env<'_>) -> Result<Built, BackendError> {
             outbox.clone(),
         )),
         Box::pin(steve_flow::Scheduler::new(flow.clone()).run()),
+        Box::pin(steve_flow::AlarmClock::new(flow.clone()).run()),
         Box::pin(super::digest_bot::run(modules.clone(), flow.clone())),
         Box::pin(steve_flow::Poller::new(flow.clone()).run()),
         Box::pin(steve_flow::retention::run(flow.clone())),

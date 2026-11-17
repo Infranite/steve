@@ -274,7 +274,7 @@ pub fn call_sync(m: &Modules, cx: &McpCx, name: &str, args: &Value) -> ApiResult
     let writer = cx.bot_id.clone();
     let zone = m
         .store
-        .reader(|c| Ok::<_, StoreError>(todo::Zone::of(c, &ws, &me)))?;
+        .reader(|c| Ok::<_, StoreError>(todo::Zone::of(c, &ws, &me)?))?;
     let mine = |c: &rusqlite::Connection, id: &str| -> ApiResult<()> {
         if todo::owner_of(c, &ws, id)?.as_deref() != Some(me.as_str()) {
             return Err(ApiError::not_found(steve_i18n::t!("digest.noun.todo")));

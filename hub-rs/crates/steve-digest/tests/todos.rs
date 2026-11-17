@@ -245,7 +245,7 @@ fn goal_progress_counts_children_and_linked_items_once() {
 
 #[test]
 fn recurrence_steps_from_its_anchor_to_the_first_occurrence_not_past() {
-    let utc = todo::Zone::Tz(chrono_tz::UTC);
+    let utc = todo::Zone::new(chrono_tz::UTC);
     // monthly on the 31st: February takes its last day, March is the 31st again
     let f = todo::Fields {
         text: "pay rent".into(),
@@ -281,7 +281,7 @@ fn recurrence_steps_from_its_anchor_to_the_first_occurrence_not_past() {
 
 #[test]
 fn local_times_in_a_daylight_saving_gap_move_past_it() {
-    let ny = todo::Zone::Tz(chrono_tz::America::New_York);
+    let ny = todo::Zone::new(chrono_tz::America::New_York);
     let gap = chrono::NaiveDate::from_ymd_opt(2027, 3, 14)
         .unwrap()
         .and_hms_opt(2, 30, 0)
@@ -297,7 +297,7 @@ fn local_times_in_a_daylight_saving_gap_move_past_it() {
         ny.show(ny.instant(twice).unwrap()).unwrap(),
         "2027-11-07T01:30:00-04:00"
     );
-    // the person's notification time zone, else the Hub's
+    // the person's notification time zone, else the workspace's
     let e = env();
     e.store()
         .with_conn(|c| {
@@ -311,8 +311,12 @@ fn local_times_in_a_daylight_saving_gap_move_past_it() {
         .unwrap();
     e.store()
         .reader(|c| {
-            assert_eq!(todo::Zone::of(c, WS, ME).name(), "Asia/Shanghai");
-            assert_eq!(todo::Zone::of(c, WS, OTHER).name(), "hub-local");
+            assert_eq!(todo::Zone::of(c, WS, ME).unwrap().name(), "Asia/Shanghai");
+            // no policy: the workspace's zone (its default here)
+            assert_eq!(
+                todo::Zone::of(c, WS, OTHER).unwrap().name(),
+                steve_modules::zone::DEFAULT_TZ
+            );
             Ok::<_, StoreError>(())
         })
         .unwrap();

@@ -126,6 +126,9 @@ pub fn build(
         .collect();
     let pos_of: HashMap<&str, i64> = all.iter().map(|(p, m)| (m.id.as_str(), *p)).collect();
     let me = conv::my_party(c, ws)?;
+    // times on the clock of the person the digest is for
+    let zone = steve_modules::zone::Zone::of_owner(c, ws)?;
+    let short_time = |ms: i64| zone.format(ms, "%m-%d %H:%M");
 
     // reply chains and topics: a topic key, else the chain of the message replied to
     let mut chain_of: HashMap<&str, String> = HashMap::new();
@@ -229,7 +232,7 @@ pub fn build(
         }
 
         // the line
-        let mut head = format!("[{p}] {} {}", crate::short_time(m.at), display_name(m));
+        let mut head = format!("[{p}] {} {}", short_time(m.at), display_name(m));
         match &m.reply_to {
             Some(r) if pos_of.contains_key(r.as_str()) => {
                 head.push_str(&format!("（回复 [{}]）", pos_of[r.as_str()]))
@@ -271,7 +274,7 @@ pub fn build(
             line.push_str(&format!(
                 "\n    ↳ 转发 {}{}（原消息 {}）：{}",
                 if sender.is_empty() { "?" } else { sender },
-                at.map(|a| format!(" {}", crate::short_time(a)))
+                at.map(|a| format!(" {}", short_time(a)))
                     .unwrap_or_default(),
                 if id.is_empty() { "-" } else { id },
                 crate::cut(&normalize::tidy(t).replace('\n', " "), 400)

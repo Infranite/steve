@@ -12,7 +12,7 @@ use steve_modules::ApiError;
 use steve_store::{ChangeEvent, Tx, uid};
 
 use crate::FlowResult;
-use crate::cron::{CronExpr, DEFAULT_TZ, parse_tz};
+use crate::cron::{CronExpr, parse_tz};
 use crate::policy::{MissedPolicy, OverlapPolicy};
 use crate::runs;
 
@@ -232,18 +232,17 @@ pub fn list(c: &Connection, ws: &str) -> FlowResult<Vec<Schedule>> {
     Ok(rows)
 }
 
-/// The workspace's `tz` setting (a JSON string), else [`DEFAULT_TZ`].
+/// The workspace's `tz` setting (a JSON string), else [`crate::cron::DEFAULT_TZ`] ([`steve_modules::zone::workspace_tz`]).
 pub fn workspace_tz(c: &Connection, ws: &str) -> FlowResult<String> {
-    let v: Option<String> = c
-        .query_row(
-            "SELECT value FROM settings WHERE workspace_id = ? AND key = 'tz'",
-            [ws],
-            |r| r.get(0),
-        )
-        .optional()?;
-    Ok(v.and_then(|v| serde_json::from_str::<String>(&v).ok())
-        .filter(|t| parse_tz(t).is_ok())
-        .unwrap_or_else(|| DEFAULT_TZ.to_string()))
+    Ok(steve_modules::zone::workspace_tz(c, ws)?.name().to_string())
+}
+
+/// `user`'s time zone ([`steve_modules::zone::Zone::of`]: their notification policy's, else the
+/// workspace's): what a schedule they make without naming one runs on.
+pub fn person_tz(c: &Connection, ws: &str, user: &str) -> FlowResult<String> {
+    Ok(steve_modules::zone::Zone::of(c, ws, user)?
+        .name()
+        .to_string())
 }
 
 /// A bot usable by `ws`: exists, not deleted, member of the workspace.

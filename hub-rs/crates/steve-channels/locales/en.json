@@ -200,5 +200,11 @@
   "channels.scope.user_chats": "List your own chats",
   "channels.scope.user_send": "Send as you (needs your explicit consent)",
   "channels.scope.search": "Search messages",
-  "channels.notice.trigger_unsendable": "Your %{provider} account (%{account}) can't send messages right now: %{error}. Replies to trigger words, and why one failed, stay in this chat's conversation in Steve and aren't sent back to the chat. Allow sending for this account in Connections to resume."
+  "channels.notice.trigger_unsendable": "Your %{provider} account (%{account}) can't send messages right now: %{error}. Replies to trigger words, and why one failed, stay in this chat's conversation in Steve and aren't sent back to the chat. Allow sending for this account in Connections to resume.",
+  "channels.notify.todo_due_one": "Todo reminder: %{text}",
+  "channels.notify.todo_due_many": "Todo reminders: %{count}",
+  "channels.notify.snooze_wake_one": "A snoozed todo is back: %{text}",
+  "channels.notify.snooze_wake_many": "%{count} snoozed todos are back",
+  "channels.notify.late": "Some came due while they could not be sent (quiet hours, or the Hub was not running); here they are together.",
+  "channels.notify.open": "Open"
 }

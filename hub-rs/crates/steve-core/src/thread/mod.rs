@@ -33,7 +33,6 @@ use crate::error::Result;
 use crate::gateway::{self, FocusItem, Route, RouteCtx, Said};
 use crate::repo::{FileRef, HubEvent, ItemExt, Message};
 use crate::util::{js_head, now};
-use chrono::{Local, TimeZone};
 use regex::Regex;
 use rusqlite::OptionalExtension;
 use serde_json::{Map, Value, json};
@@ -1726,17 +1725,16 @@ impl Core {
         Ok(posted)
     }
 
-    /// `/汇报`: open decisions, running items, items finished today (local midnight).
+    /// `/汇报`: open decisions, running items, items finished today (since midnight on the workspace
+    /// owner's clock, [`steve_modules::zone`]).
     pub fn digest_text(&self, ws: &str) -> Result<String> {
         let all = self.store().items(ws)?;
         let open = self.store().decisions_open(ws)?;
         let waiting: HashSet<Option<String>> = open.into_iter().map(|d| d.item_id).collect();
-        let today = Local::now()
-            .date_naive()
-            .and_hms_opt(0, 0, 0)
-            .and_then(|t| Local.from_local_datetime(&t).earliest())
-            .map(|t| t.timestamp_millis())
-            .unwrap_or(0);
+        let zone = self.store().store().reader(|c| {
+            steve_modules::zone::Zone::of_owner(c, ws).map_err(steve_store::StoreError::from)
+        })?;
+        let today = zone.day_start(steve_store::now()).unwrap_or(0);
         let run = all.iter().filter(|i| i.status == "run").count();
         let done = all
             .iter()
