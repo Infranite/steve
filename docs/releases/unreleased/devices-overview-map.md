@@ -21,3 +21,5 @@ Then a **connection map**:
 - For a **client**, it shows the QR code as before.
 
 `steve-node pair`, `status` and `rotate` print the fingerprint in groups of four.
+
+The devices pages now update as soon as the Hub reports that a Node or a client changed, instead of waiting for the next 10-second read.
