@@ -34,7 +34,7 @@ export default {
   },
   /* separator between the names in a short inline list: "对话回答、研究" */
   listSep: "、",
-  /* Settings · 访问与客户端 (access-settings.tsx) */
+  /* access and clients: the devices pages (devices-clients.tsx, devices-client-pair.tsx, devices-hub.tsx) and the shell */
   access: {
     signOut: "退出登录",
     shownOnce: "只显示这一次，请现在复制保存：",

@@ -140,38 +140,3 @@ export function Spark({ values, label, className, color = "currentColor" }: { va
     </svg>
   )
 }
-
-/** a list row inside a panel: name and grey sub on the left, anything on the right (a spark, a figure with its meter) */
-/** a row of a panel; with `onClick` the row opens something. `controls`: its children are buttons of their own, so the row
- *  is a plain box under a full-size open button instead of one button around them (no button inside a button) */
-export function PanelRow({ title, sub, children, onClick, className, controls = false, ...rest }: { title: ReactNode; sub?: ReactNode; children?: ReactNode; onClick?: () => void; className?: string; controls?: boolean; [k: string]: unknown }) {
-  const body = <>
-    <span className="min-w-0 flex-1">
-      <span className="block truncate type-body text-foreground">{title}</span>
-      {sub != null && <span className="block truncate type-footnote text-muted-foreground">{sub}</span>}
-    </span>
-    {children}
-  </>
-  /* rows sit inset from the panel's edge, so a hover fills a rounded row rather than a stripe of the card */
-  const cls = cn("relative mx-2 flex w-[calc(100%-1rem)] min-w-0 items-center gap-4 rounded-lg px-3 py-2.5 text-left [&+&]:before:absolute [&+&]:before:inset-x-3 [&+&]:before:top-0 [&+&]:before:h-px [&+&]:before:bg-border/60", onClick && "cursor-pointer hover:bg-muted/60 hover:before:opacity-0 [&:hover+&]:before:opacity-0 focus-visible:bg-muted/60 focus-visible:outline-none", className)
-  if (onClick && controls) return (
-    <div className={cn(cls, "has-[[data-row-cover]:focus-visible]:bg-muted/60")} {...rest}>
-      <button type="button" onClick={onClick} aria-label={typeof title === "string" ? title : undefined} className="absolute inset-0 cursor-pointer rounded-lg outline-none" data-row-cover />
-      <span className="pointer-events-none relative min-w-0 flex-1">
-        <span className="block truncate type-body text-foreground">{title}</span>
-        {sub != null && <span className="block truncate type-footnote text-muted-foreground">{sub}</span>}
-      </span>
-      <span className="relative flex shrink-0 items-center gap-4">{children}</span>
-    </div>)
-  return onClick ? <button type="button" onClick={onClick} className={cls} {...rest}>{body}</button> : <div className={cls} {...rest}>{body}</div>
-}
-
-/** a figure with its meter under it, right-aligned (the “FP rate” column) */
-export function MeterValue({ value, ratio, tone, className }: { value: ReactNode; ratio: number | null | undefined; tone?: Tone; className?: string }) {
-  return (
-    <span className={cn("flex w-16 shrink-0 flex-col items-end gap-1.5", className)}>
-      <span className="type-callout font-medium tabular-nums text-foreground">{value}</span>
-      <Meter value={ratio} tone={tone} className="w-12" />
-    </span>
-  )
-}

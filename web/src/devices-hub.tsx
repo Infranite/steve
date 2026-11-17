@@ -2,7 +2,7 @@
  * and ID, the alias this client shows it by; the computer it runs on and its own Node; how remote Nodes reach it; and
  * how clients sign in. The shared name is written with its revision: a conflict, a failed or timed-out save is read
  * back and compared, never taken for success, and a draft is kept until it is saved or discarded. */
-import "./hub-settings.css"
+import "./devices.css"
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react"
 import { KeyRoundIcon, MonitorIcon, NetworkIcon, ServerIcon, SlidersHorizontalIcon, SquareTerminalIcon } from "lucide-react"
 import { useT } from "@/i18n"
@@ -188,7 +188,10 @@ export function HubCard({ readOnly = false, route = null }: { readOnly?: boolean
         <dl className="grid gap-x-6 gap-y-2.5 sm:grid-cols-[9rem_minmax(0,1fr)]">
           <Fact label={t("devices:hub.version")}><span className="tabular-nums" data-hub-version>{version || t("hub:unread")}</span>
             {st.update && <> · <a className="text-blue hover:underline" href="#/settings/about" data-hub-update>{t("devices:hub.updateAvailable", { version: st.update.version })}</a></>}</Fact>
-          <Fact label={t("devices:hub.address")}><span className="inline-flex flex-wrap items-center gap-2"><span className="type-code" data-hub-address>{address || currentHub()}</span>{route && <Chip>{routeLabel(route)}</Chip>}</span></Fact>
+          <Fact label={t("devices:hub.address")}>{info?.addresses?.length
+            /* every address the Hub answers on, as it reports them (public first); an older Hub: the one this client uses */
+            ? <span className="flex flex-col gap-1.5">{info.addresses.map(a => <span key={a.url} className="inline-flex flex-wrap items-center gap-2" data-hub-addresses={a.kind}><span className="type-code">{a.url}</span><Chip>{routeLabel(a.kind)}</Chip></span>)}</span>
+            : <span className="inline-flex flex-wrap items-center gap-2"><span className="type-code" data-hub-address>{address || currentHub()}</span>{route && <Chip>{routeLabel(route)}</Chip>}</span>}</Fact>
           <Fact label={t("devices:hub.id")}><span className="type-code" data-hub-id>{latest?.hub_id ?? t("hub:unread")}</span></Fact>
           <Fact label={t("devices:hub.alias")}>{aliasEditing ? <div className="flex flex-col gap-2">
             <FormField label={t("hub:alias")} hint={t("hub:aliasLimit")}><Input id="hub-alias" value={alias} disabled={busy} onChange={e => setAlias(e.target.value)} /></FormField>

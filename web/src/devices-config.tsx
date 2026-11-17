@@ -4,13 +4,14 @@
  * said in place with "use the latest", never written over. Pausing holds only new sessions; a lower limit never cuts a
  * running turn. Tags let flows and Bots send work to a Node that carries one. */
 import { useEffect, useState } from "react"
-import { ActivityIcon } from "lucide-react"
+import { ActivityIcon, InfoIcon } from "lucide-react"
 import { api, SESSIONS_MAX, type RDevice } from "@/api"
 import { Button } from "@/components/ui/button"
 import { Switch } from "@/components/ui/switch"
 import { Spinner } from "@/components/ui/spinner"
 import { NumberField } from "@/components/ui/pickers"
 import { TagInput } from "@/components/affect/tag-input-clean"
+import { Tooltip } from "@/components/affect/tooltip-clean"
 import { refresh, toast } from "@/store"
 import { useT } from "@/i18n"
 import type { NodeView } from "@/device-model"
@@ -58,13 +59,16 @@ export function TakeWork({ v, w }: { v: NodeView; w: ReturnType<typeof useWorkSe
           {w.busy && <Spinner className="size-3.5 text-muted-foreground" />}
           <Switch checked={!v.paused} disabled={!w.editable || w.busy} onCheckedChange={(on) => void w.setReceive(on)} aria-label={t("devices:node.receive")} data-node-receive={v.paused ? "off" : "on"} />
         </DRow>
-        {v.max != null && <DRow title={t("devices:node.limit")} sub={t("devices:node.limitSub")} className="flex-wrap" data-session-limit={v.max}>
+        {/* what a change does exactly (saved at once, a lower limit never cuts a running turn, what does not count) is in the tip */}
+        {v.max != null && <DRow title={<span className="inline-flex items-center gap-1">{t("devices:node.limit")}
+          <Tooltip content={<span data-limit-semantics>{t("shell:devices.limitEffect")}</span>}>
+            <button type="button" className="inline-flex size-5 items-center justify-center rounded-full text-tertiary outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring" aria-label={t("devices:node.limitHow")} data-limit-how><InfoIcon className="size-3.5" /></button>
+          </Tooltip></span>} sub={t("devices:node.limitSub")} className="flex-wrap" data-session-limit={v.max}>
           {w.editable ? <form className="flex shrink-0 items-center gap-2" onSubmit={(e) => { e.preventDefault(); if (dirty && n != null) void w.setLimit(n) }}>
             <NumberField size="sm" min={1} max={SESSIONS_MAX} step={1} value={n} onValueChange={setN} error={!valid ? t("shell:devices.limitInvalid", { max: SESSIONS_MAX }) : undefined} disabled={w.busy} aria-label={t("devices:node.limit")} className="w-28" data-session-limit-input />
             {dirty && <Button size="xs" type="submit" disabled={w.busy} data-session-limit-save>{t("common:action.save")}</Button>}
           </form> : <span className="type-callout tabular-nums text-muted-foreground">{v.max}</span>}
         </DRow>}
-        {v.max != null && <p className="px-5 pb-3 -mt-1 type-footnote text-muted-foreground" data-limit-semantics>{t("shell:devices.limitEffect")}</p>}
         {!v.legacy && <NodeTags node={v.id} />}
       </div>
     </DCard>

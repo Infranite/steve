@@ -19,7 +19,7 @@ import { OwnerChip } from "@/people/owner-chip"
 import { useT } from "@/i18n"
 import { date } from "@/i18n/format"
 import { homeTilde } from "@/resume"
-import { agoText, findNode, hostLine, hostOf, linkRoute, nodeStatus, type NodeView } from "@/device-model"
+import { agoText, findNode, fpGroups, hostLine, hostOf, linkRoute, nodeStatus, type NodeView } from "@/device-model"
 import { useDevices, useNodeVitals } from "@/devices-data"
 import { DCard, DRow, StatusBadge } from "@/devices-ui"
 import { NodeFigures, NodeTrends } from "@/devices-vitals"
@@ -38,9 +38,6 @@ export function NodePage({ id }: { id: string }) {
   return <NodeDetail key={v.id} v={v} />
 }
 
-/** a fingerprint in groups of four, as the Node's terminal prints it */
-export const groupsOf = (fp: string) => fp.replace(/^sha256:/, "").match(/.{1,4}/g)?.join(" ") ?? fp
-
 function NodeDetail({ v }: { v: NodeView }) {
   const t = useT(), { hubVersion, reloadNodes } = useDevices(), { value: vit } = useNodeVitals(v.id)
   useStore()
@@ -57,7 +54,7 @@ function NodeDetail({ v }: { v: NodeView }) {
   }
   return <div className="device-page"><Page max={1040} back={[BACK, t("devices:node.back")]} toolbarTop
     title={<span className="inline-flex flex-wrap items-center gap-x-3 gap-y-1">{name}<StatusBadge status={status} /></span>}
-    sub={<span className="inline-flex flex-wrap items-center gap-x-2 gap-y-0.5" data-node-sub>{[via, facts].filter(Boolean).map((p, i) => <span key={i} className="inline-flex items-center gap-2">{i > 0 && <span className="text-tertiary" aria-hidden>·</span>}{p}</span>)}</span>}
+    sub={<span className="inline-flex flex-wrap items-center gap-x-2 gap-y-0.5" data-node-sub>{[via, facts].filter(Boolean).map((p, i, all) => <span key={i} className="inline-flex items-center gap-2"><span>{p}</span>{i < all.length - 1 && <span className="text-tertiary" aria-hidden>·</span>}</span>)}</span>}
     toolbar={(w.editable || pairable) && <>
       {w.editable && v.state !== "pending" && <Button size="sm" variant="outline" disabled={w.busy} onClick={() => void w.setReceive(v.paused)} data-node-pause={v.paused ? "paused" : "active"}>
         {w.busy ? <Spinner className="size-3.5" /> : v.paused ? <PlayIcon /> : <PauseIcon />}{t(v.paused ? "devices:node.resume" : "devices:node.pause")}</Button>}
@@ -103,7 +100,7 @@ function Identity({ v }: { v: NodeView }) {
     <DCard icon={<ShieldCheckIcon />} title={t("devices:node.identity")} sub={t("devices:node.identitySub")} data-node-identity>
       <dl className="grid gap-x-6 gap-y-2.5 px-5 pb-5 sm:grid-cols-[7rem_minmax(0,1fr)]">
         {row(t("devices:node.nodeId"), <span className="type-code select-all">{v.legacy ? "—" : v.id}</span>)}
-        {v.fingerprint && <><dt className="type-callout text-muted-foreground">{t("devices:node.fingerprint")}</dt><dd className="type-code select-all [overflow-wrap:anywhere]" data-node-fingerprint={v.fingerprint}>{groupsOf(v.fingerprint)}</dd></>}
+        {v.fingerprint && <><dt className="type-callout text-muted-foreground">{t("devices:node.fingerprint")}</dt><dd className="type-code select-all [overflow-wrap:anywhere]" data-node-fingerprint={v.fingerprint}>{fpGroups(v.fingerprint).join(" ") || v.fingerprint}</dd></>}
         {/* the Hub's own machine has a person responsible for it (the people module); a paired Node is its pairer's */}
         {v.local && v.device && <><dt className="type-callout text-muted-foreground">{t("devices:node.owner")}</dt><dd className="min-w-0"><OwnerChip objectType="device" objectId={v.device.id} bare /></dd></>}
         {v.lastSeen != null && row(t("devices:node.lastSeen"), <span className="tabular-nums" title={date(v.lastSeen, { dateStyle: "medium", timeStyle: "medium" })}>{v.linked ? t("devices:node.now") : agoText(v.lastSeen)}</span>)}

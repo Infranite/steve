@@ -69,7 +69,7 @@ export function Figure({ label, value, unit, fill, sub, title, ...rest }: { labe
       <span className="type-footnote text-muted-foreground">{label}</span>
       <span className="type-title tabular-nums text-foreground">{value}{unit && <small className="ml-0.5 type-footnote font-normal text-muted-foreground">{unit}</small>}</span>
       {fill !== undefined && <Meter value={fill} tone={fillTone(fill) ?? "run"} />}
-      {sub && <span className="type-footnote tabular-nums text-muted-foreground">{sub}</span>}
+      {sub && <span className="type-footnote tabular-nums text-balance text-muted-foreground">{sub}</span>}
     </div>
   )
 }

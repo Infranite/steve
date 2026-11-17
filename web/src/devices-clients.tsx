@@ -16,7 +16,7 @@ import { access, type AccessClient, type AccessToken, type AccessView } from "@/
 import { toast } from "@/store"
 import { Loading, Notice, openSheet } from "@/ui"
 import { ageOf, agoText, clientKind, routeLabel, type ClientKind } from "@/device-model"
-import { clientKey } from "@/device-map-model"
+import { clientKey, clientOnline } from "@/device-map-model"
 import { useDevices } from "@/devices-data"
 import { Chip, DCard, DRow } from "@/devices-ui"
 import { cn } from "cn"
@@ -64,14 +64,19 @@ export function ClientsTab({ focus }: { focus?: string }) {
     {extra}
     {mine(c) && tokenName(c.token_id) && <span>{t("devices:clients.token", { name: tokenName(c.token_id) })}</span>}
   </>
+  /* online: it holds the live connection to the Hub now (newer Hubs say so; an older one only for this client) */
+  const presence = v.clients.some((c) => c.online != null)
+  const when = (c: AccessClient, on: boolean) => <span title={c.last_seen ? date(c.last_seen, { dateStyle: "medium", timeStyle: "short" }) : undefined}>{on ? t("devices:node.now") : c.last_seen ? agoText(c.last_seen, now) : t("devices:tokens.neverUsed")}</span>
+  const onBadge = <Badge tone="success" size="sm" dot className="font-normal" data-client-online>{t("devices:status.online")}</Badge>
   const row = (g: Group) => {
-    const c = g.head, age = ageOf(c.last_seen, c.created, now), Icon = ICON[clientKind(c.kind, c.platform)]
+    const c = g.head, on = g.clients.some((x) => clientOnline(x, v.current)), age = on ? "fresh" : ageOf(c.last_seen, c.created, now), Icon = ICON[clientKind(c.kind, c.platform)]
     return <DRow key={g.key} icon={<Icon />} className={cn("group/client", age !== "fresh" && "[&>span:nth-child(-n+2)]:opacity-70")} data-client={c.id}
       title={<><span className="truncate">{c.name}</span>
+        {on && onBadge}
         {g.clients.length > 1 && <span className="type-footnote tabular-nums text-muted-foreground" data-client-count={g.clients.length}>{t("devices:clients.sameN", { count: g.clients.length })}</span>}
         {!mine(c) && c.user_id && <Chip>{t("devices:clients.of", { name: v.users?.[c.user_id] ?? c.user_id })}</Chip>}
         {age === "unused" && <Badge tone="warning" size="sm" data-client-unused>{t("devices:clients.unused30")}</Badge>}</>}
-      sub={facts(c, <span title={c.last_seen ? date(c.last_seen, { dateStyle: "medium", timeStyle: "short" }) : undefined}>{c.last_seen ? agoText(c.last_seen, now) : t("devices:tokens.neverUsed")}</span>)}>
+      sub={facts(c, when(c, on))}>
       <Button size="sm" variant="ghost" className="text-destructive" onClick={() => setConfirm(g)} data-revoke-client={c.id}>{t("devices:clients.revoke")}</Button>
     </DRow>
   }
@@ -104,7 +109,7 @@ export function ClientsTab({ focus }: { focus?: string }) {
       </div>
       <div className="flex min-w-0 flex-col gap-4">
         <Tokens v={v} reload={reloadAccess} />
-        <p className="px-1 type-footnote text-muted-foreground">{t("devices:clients.note")}</p>
+        <p className="px-1 type-footnote text-muted-foreground" data-clients-note>{t(presence ? "devices:clients.onlineNote" : "devices:clients.note")}</p>
       </div>
       {confirm && <RevokeClient v={v} group={confirm} onClose={() => setConfirm(null)} onDone={reloadAccess} />}
     </div>
