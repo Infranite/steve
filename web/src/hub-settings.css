@@ -1,8 +1,0 @@
-/* The Hub card's editor (devices-hub.tsx): with enlarged text the field's footer wraps instead of clipping its
-   hint and counter. */
-[data-hub-management] .ui-fldc__foot { flex-wrap: wrap; }
-[data-hub-management] .ui-fldc__count { margin-inline-start: 0; }
-@media (max-width: 480px) {
-  [data-hub-management] .ui-fldc__foot { flex-direction: column; gap: 4px; }
-  [data-hub-management] .ui-fldc__count { align-self: flex-end; }
-}

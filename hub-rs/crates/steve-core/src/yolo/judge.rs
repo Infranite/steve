@@ -186,6 +186,11 @@ impl Env {
     }
 }
 
+/// Why YOLO does not send a text whose disclosure check did not finish.
+pub const UNCHECKED_REASON: &str = "披露检查没跑完，不自动发";
+/// Why YOLO waits on a text whose disclosure check still runs.
+pub const CHECKING_REASON: &str = "披露检查还在跑，跑完再判";
+
 /// Outcome of the disclosure check on outbound text (steve-channels `disclosure::Verdict`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -193,8 +198,12 @@ pub enum Disclosure {
     Pass,
     Rewritten,
     Leak,
-    /// Not checked (yet).
+    /// Not checked: no check, or its model gave no answer (steve-channels `reply_basis.verdict =
+    /// unchecked`). Never sent by YOLO, and never called a leak.
     Unchecked,
+    /// The check still runs after the draft was written (steve-channels `checking`): YOLO waits
+    /// for it.
+    Checking,
 }
 
 impl Disclosure {
@@ -786,6 +795,8 @@ pub fn reason_shown(reason: &str) -> String {
         "别人点名找的是你" => steve_i18n::t!("core.yolo.reason.handoff"),
         "披露检查没通过" => steve_i18n::t!("core.yolo.reason.blocked"),
         "没有通过披露检查" => steve_i18n::t!("core.yolo.reason.unchecked"),
+        UNCHECKED_REASON => steve_i18n::t!("core.yolo.reason.check_unfinished"),
+        CHECKING_REASON => steve_i18n::t!("core.yolo.reason.checking"),
         "客户群留给你" => steve_i18n::t!("core.yolo.reason.customer"),
         "设置里没有让 YOLO 代发" => steve_i18n::t!("core.yolo.reason.send_off"),
         "听众里有外部成员" => steve_i18n::t!("core.yolo.reason.external"),
@@ -823,6 +834,16 @@ pub fn reason_shown(reason: &str) -> String {
 pub fn judge(f: &Facts, p: &Policy, env: &Env) -> Verdict {
     if !f.in_scope {
         return Verdict::Off;
+    }
+    // a draft whose disclosure check still runs: judged when it is done (the card changes then)
+    if let Subject::Chan(o) = &f.subject
+        && o.disclosure == Disclosure::Checking
+    {
+        return Verdict::Wait {
+            rule: "chan.checking".into(),
+            reason: CHECKING_REASON.into(),
+            delay_s: 30,
+        };
     }
     if let Some(l) = limits::check(f, env) {
         return decline(&l.rule(), l.reason());
@@ -1183,6 +1204,9 @@ fn outbound(o: &Outbound, p: &Policy, what: &str) -> Verdict {
                     &format!("{what}.uncomposed"),
                     "不是起草器写的回复，不以你的名义发",
                 );
+            }
+            if o.disclosure == Disclosure::Unchecked {
+                return decline(&format!("{what}.unchecked"), UNCHECKED_REASON);
             }
             if !o.disclosure.passed() {
                 return decline(&format!("{what}.unchecked"), "没有通过披露检查");

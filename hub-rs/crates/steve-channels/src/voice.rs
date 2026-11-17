@@ -399,6 +399,24 @@ fn len(x: f64) -> String {
 }
 
 impl Voice {
+    /// Every text of yours the composer is shown (samples, rejected and edited drafts), each once:
+    /// what the disclosure check knows as style inputs, not content.
+    pub fn inputs(&self) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for t in self
+            .samples
+            .iter()
+            .chain(&self.rejected)
+            .chain(&self.edited)
+        {
+            let t = cut(t, LINE_MAX);
+            if !t.trim().is_empty() && !out.contains(&t) {
+                out.push(t);
+            }
+        }
+        out
+    }
+
     /// Your habits as one line, from the numbers; empty without statistics.
     pub fn habits(&self) -> String {
         let Some((from, s)) = &self.style else {

@@ -161,6 +161,10 @@ where
 
 /// What the coordinator tells the business side (the core).
 pub trait NodeDomain: Send + Sync + 'static {
+    /// New collaboration turns are opt-in; reading this must not acquire the core transaction lock.
+    fn dynamic_workflows(&self) -> bool {
+        false
+    }
     /// The session's logical turn is over and nothing follows it: the turn end of the item's
     /// lifecycle. Called once per turn, after its end is committed. `attempt`: the turn's last
     /// attempt (after gateway retries, the retry that ended it); `None` when an open failed with
@@ -409,6 +413,39 @@ impl NodeRuntime {
                 Err(StoreError::Conflict(why))
             }
         }
+    }
+
+    /// Include startup policy at durable admission too: reconciliation bypasses RoutedRuntime.
+    fn workflow_blocker_in(
+        &self,
+        c: &rusqlite::Connection,
+        session: &str,
+    ) -> Result<Option<String>, StoreError> {
+        if let Some(why) = self.disabled_workflow_in(c, session)? {
+            return Ok(Some(why));
+        }
+        steve_store::workflow_gate::session_blocker(c, session)
+    }
+
+    fn disabled_workflow_in(
+        &self,
+        c: &rusqlite::Connection,
+        session: &str,
+    ) -> Result<Option<String>, StoreError> {
+        if !self.domain.dynamic_workflows() {
+            let child: bool = c.query_row(
+                "SELECT EXISTS(SELECT 1 FROM sessions s JOIN items i ON i.id=s.item_id WHERE s.id=?
+                  AND (json_extract(i.source,'$[1]')='workflow'
+                    OR EXISTS(SELECT 1 FROM workflow_units WHERE item_id=i.id)
+                    OR EXISTS(SELECT 1 FROM workflow_attempts WHERE item_id=i.id)))",
+                [session],
+                |r| r.get(0),
+            )?;
+            if child {
+                return Ok(Some(steve_i18n::t!("hub.workflow.disabled")));
+            }
+        }
+        Ok(None)
     }
 
     /// [`Self::owners_work_in`] for the workspace of `session`.

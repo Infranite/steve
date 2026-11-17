@@ -2,10 +2,15 @@ import SteveClientKit
 import SwiftUI
 
 struct MacMainWindowView: View {
+    @ObservedObject private var language = NativeUILanguageState.shared
     @ObservedObject var coordinator: SteveClientCoordinator
+    @ObservedObject var attention: MacAttentionController
+    @State private var showAttention = false
+    @State private var showConnection = false
 
-    init(coordinator: SteveClientCoordinator) {
+    init(coordinator: SteveClientCoordinator, attention: MacAttentionController) {
         self.coordinator = coordinator
+        self.attention = attention
     }
 
     var body: some View {
@@ -38,6 +43,60 @@ struct MacMainWindowView: View {
             }
         }
         .navigationTitle(windowTitle)
+        .background(MacMainWindowIdentifier(appearance: coordinator.shellContext?.appearance))
+        .preferredColorScheme(coordinator.shellContext?.appearance.flatMap { $0.followSystem ? nil : ($0.dark ? .dark : .light) })
+        .toolbarBackground(.hidden, for: .windowToolbar)
+        .toolbar {
+            ToolbarItem(placement: .navigation) { MacHubMenu(coordinator: coordinator) }
+                .macUnsharedBackground()
+            ToolbarItem(placement: .principal) {
+                HStack(spacing: 10) {
+                    Text(MacShellContext.title(coordinator))
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(.primary)
+                    if let context = MacShellContext.confirmed(coordinator), context.workspaceID != nil {
+                        Rectangle().fill(.quaternary).frame(width: 1, height: 12)
+                        Text(MacShellContext.workspace(coordinator))
+                            .font(.system(size: 12))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .lineLimit(1)
+                .frame(maxWidth: 320)
+                .accessibilityElement(children: .combine)
+            }
+            .macUnsharedBackground()
+            ToolbarItem(placement: .primaryAction) {
+                Button { showAttention.toggle() } label: {
+                    Label(L10n.tr("提醒", "Attention"), systemImage: attention.state.hasAttention ? "bell.badge" : "bell")
+                }
+                .help(L10n.tr("分类提醒与入口", "Category attention and source pages"))
+                .popover(isPresented: $showAttention) {
+                    MacAttentionView(coordinator: coordinator, attention: attention) { route in
+                        showAttention = false
+                        coordinator.navigate(hashRoute: route)
+                    }.padding(16).frame(width: 330)
+                }
+            }
+            .macUnsharedBackground()
+            ToolbarItem(placement: .primaryAction) {
+                Button { showConnection.toggle() } label: {
+                    MacConnectionIndicator(phase: coordinator.summary.phase)
+                }
+                .help(L10n.tr("查看 Hub 连接", "View Hub connection"))
+                .popover(isPresented: $showConnection) { MacConnectionDetails(coordinator: coordinator).padding(16).frame(width: 360) }
+            }
+            .macUnsharedBackground()
+        }
+        .safeAreaInset(edge: .top, spacing: 0) {
+            if let error = coordinator.shellNavigationError {
+                HStack {
+                    Label(error, systemImage: "exclamationmark.triangle").font(.callout)
+                    Spacer()
+                    Button(L10n.tr("关闭", "Dismiss")) { coordinator.dismissShellNavigationError() }
+                }.padding(10).background(.regularMaterial)
+            }
+        }
         .alert(
             SteveClientCoordinator.pairConfirmationTitle,
             isPresented: Binding(
@@ -87,9 +146,6 @@ struct MacMainWindowView: View {
     }
 
     private var windowTitle: String {
-        if let ws = coordinator.summary.workspaceName, !ws.isEmpty {
-            return "Steve · \(ws)"
-        }
-        return "Steve"
+        MacShellContext.title(coordinator)
     }
 }

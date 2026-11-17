@@ -730,7 +730,7 @@ impl NodeRuntime {
             && c.transient
             && !c.acted
             && !cancelled
-            && steve_store::workflow_gate::session_blocker(tx, session)?.is_none()
+            && self.workflow_blocker_in(tx, session)?.is_none()
             && (ordinal as usize) < RETRY_DELAYS_MS.len();
         // a retry carries the config of its first attempt: never once a change is waiting
         let waits = retry && config::desired_in(tx, session)?.is_some();

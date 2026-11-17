@@ -180,6 +180,8 @@ export default {
     rewrites_one: "{{count}} rewrite",
     rewrites_other: "{{count}} rewrites",
     drafted: "turned into a draft",
+    unchecked: "the check did not finish",
+    checking: "the check is still running",
     levelChanged: "{{level}} (originally {{from}})",
     rewrite: "“{{from}}” changed to “{{to}}”: {{reason}}",
     onlyYou: "Only you can see the basis; people in the group only see the reply.",

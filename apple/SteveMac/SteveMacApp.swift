@@ -4,7 +4,9 @@ import SwiftUI
 
 @main
 struct SteveMacApp: App {
+    @NSApplicationDelegateAdaptor(MacApplicationDelegate.self) private var appDelegate
     @StateObject private var coordinator: SteveClientCoordinator
+    @StateObject private var attention: MacAttentionController
 
     init() {
         let env = ProcessInfo.processInfo.environment
@@ -56,10 +58,14 @@ struct SteveMacApp: App {
             hubStore: hubStore,
             webRoot: webRoot,
             preferredPortDefaults: defaults,
-            clientDescriptor: descriptor
+            clientDescriptor: descriptor,
+            nativeShellChromeEnabled: true,
+            nativeShellLanguageEnabled: true
         )
         coord.pairConfirmationVisibilityProbe = { MacPairConfirmation.isAlertOnScreen() }
         _coordinator = StateObject(wrappedValue: coord)
+        let attentionController = MacAttentionController(coordinator: coord, defaults: defaults)
+        _attention = StateObject(wrappedValue: attentionController)
         #if DEBUG
         if let portStr = env["STEVE_CLIENT_DEBUG_PORT"],
            let port = UInt16(portStr),
@@ -70,40 +76,39 @@ struct SteveMacApp: App {
                 port: port,
                 expectedToken: token,
                 snapshotDir: env["STEVE_CLIENT_DEBUG_DIR"],
-                coordinator: coord
+                coordinator: coord,
+                attention: attentionController
             )
         }
         #endif
     }
 
     var body: some Scene {
-        WindowGroup("Steve", id: "main") {
-            MacMainWindowView(coordinator: coordinator)
+        Window("Steve", id: "main") {
+            MacMainWindowView(coordinator: coordinator, attention: attention)
                 .onAppear {
                     coordinator.startIfNeeded()
+                    appDelegate.coordinator = coordinator; appDelegate.attention = attention
                 }
-                .onOpenURL { url in
-                    if url.scheme?.lowercased() == "steve" {
-                        coordinator.requestExternalPairingConfirmation(uri: url.absoluteString)
-                    }
-                }
-                // An open main window takes a `steve://` link itself. Without this the window group
-                // opens a second main window for it: two WebViews on one coordinator, two alerts.
-                .handlesExternalEvents(preferring: ["*"], allowing: ["*"])
         }
+        .windowToolbarStyle(.unifiedCompact(showsTitle: false))
         .defaultSize(width: 1240, height: 820)
         .commands {
             HubCommands(coordinator: coordinator, hubStore: coordinator.hubStore)
+            MacNavigationCommands(coordinator: coordinator)
         }
 
+        Settings { MacClientSettingsView(attention: attention) }
+
         MenuBarExtra {
-            MacMenuBarPopoverView(coordinator: coordinator)
+            MacMenuBarPopoverView(coordinator: coordinator, attention: attention)
         } label: {
-            MacMenuBarIconLabel(summary: coordinator.summary)
+            MacMenuBarIconLabel(summary: coordinator.summary, attention: attention)
                 .task {
                     coordinator.startIfNeeded()
                 }
-                .modifier(MacPairConfirmationWindowOpener(coordinator: coordinator))
+                .modifier(MacMainWindowLifecycle(coordinator: coordinator))
+                .onAppear { appDelegate.coordinator = coordinator; appDelegate.attention = attention }
         }
         .menuBarExtraStyle(.window)
     }
@@ -111,8 +116,6 @@ struct SteveMacApp: App {
 
 /// The pairing confirmation is an alert on the main window.
 enum MacPairConfirmation {
-    private static let mainWindowIDPrefix = "main"
-
     /// Is the confirmation alert on screen: a visible sheet that carries the confirmation's title.
     @MainActor
     static func isAlertOnScreen() -> Bool {
@@ -132,42 +135,17 @@ enum MacPairConfirmation {
     }
 
     @MainActor
-    static var mainWindows: [NSWindow] {
-        NSApplication.shared.windows.filter {
-            $0.identifier?.rawValue.hasPrefix(mainWindowIDPrefix) == true && !$0.isSheet
-        }
-    }
+    static var mainWindows: [NSWindow] { MacMainWindow.windows }
 
-    /// Puts a main window on screen for the confirmation; `open` makes one when none exists.
     @MainActor
-    static func bringUpMainWindow(open: () -> Void) {
-        if let window = mainWindows.first(where: { $0.isVisible || $0.isMiniaturized }) {
-            if window.isMiniaturized {
-                window.deminiaturize(nil)
-            }
-            window.makeKeyAndOrderFront(nil)
-        } else {
-            open()
-        }
-        NSApplication.shared.activate(ignoringOtherApps: true)
+    static func bringUpMainWindow(open: @escaping () -> Void) {
+        MacMainWindow.bringUpMainWindow(open: open)
     }
 }
 
-/// Lives on the menu-bar item, which exists for the whole run of the app: a pairing request that
-/// arrives with no main window to show its confirmation opens one.
-private struct MacPairConfirmationWindowOpener: ViewModifier {
-    @ObservedObject var coordinator: SteveClientCoordinator
-    @Environment(\.openWindow) private var openWindow
-
-    func body(content: Content) -> some View {
-        content.onChange(of: coordinator.pendingExternalPairConfirmation?.id) { _, pendingID in
-            guard pendingID != nil else { return }
-            MacPairConfirmation.bringUpMainWindow { openWindow(id: "main") }
-        }
-    }
-}
 
 private struct HubCommands: Commands {
+    @ObservedObject private var language = NativeUILanguageState.shared
     @ObservedObject var coordinator: SteveClientCoordinator
     @ObservedObject var hubStore: HubStore
     @Environment(\.openWindow) private var openWindow
@@ -175,16 +153,12 @@ private struct HubCommands: Commands {
     var body: some Commands {
         CommandMenu("Hub") {
             Button(L10n.tr("添加 Hub…", "Add Hub…")) {
-                openWindow(id: "main")
-                NSApplication.shared.activate(ignoringOtherApps: true)
-                coordinator.navigate(hashRoute: "#/hub/add")
+                MacMainWindow.navigate("#/hub/add", coordinator: coordinator, open: { openWindow(id: "main") })
             }
             .keyboardShortcut("H", modifiers: [.command, .shift])
 
             Button(L10n.tr("配对新设备…", "Pair Device…")) {
-                openWindow(id: "main")
-                NSApplication.shared.activate(ignoringOtherApps: true)
-                coordinator.navigate(hashRoute: "#/hub/pair")
+                MacMainWindow.navigate("#/hub/pair", coordinator: coordinator, open: { openWindow(id: "main") })
             }
             .keyboardShortcut("P", modifiers: [.command, .shift])
 
@@ -213,15 +187,13 @@ private struct HubCommands: Commands {
 }
 
 private struct MacMenuBarIconLabel: View {
+    @ObservedObject private var language = NativeUILanguageState.shared
     let summary: HubRuntimeSummary
+    @ObservedObject var attention: MacAttentionController
 
     var body: some View {
         HStack(spacing: 4) {
-            Image(systemName: symbolName)
-            if summary.openDecisions > 0 {
-                Text("\(summary.openDecisions)")
-                    .font(.caption2.monospacedDigit())
-            }
+            Image(systemName: attention.state.hasAttention ? "bell.badge" : symbolName)
         }
         .help(tooltipText)
     }
@@ -229,10 +201,7 @@ private struct MacMenuBarIconLabel: View {
     private var symbolName: String {
         switch summary.phase {
         case .connected:
-            if summary.openDecisions > 0 {
-                return "sparkles.rectangle.stack.fill"
-            }
-            return summary.steveThinking || summary.runningSessions > 0 ? "bolt.horizontal.circle.fill" : "circle.hexagongrid.fill"
+            return "circle.hexagongrid.fill"
         case .connecting:
             return "arrow.triangle.2.circlepath.circle"
         case .authRequired:
@@ -281,7 +250,8 @@ private enum MacDebugHarness {
         port: UInt16,
         expectedToken: String,
         snapshotDir: String?,
-        coordinator: SteveClientCoordinator
+        coordinator: SteveClientCoordinator,
+        attention: MacAttentionController
     ) {
         guard let nwPort = NWEndpoint.Port(rawValue: port),
               expectedToken.utf8.count >= 16 else { return }
@@ -314,7 +284,7 @@ private enum MacDebugHarness {
                 let bodyData = Data(raw[split.upperBound...].utf8)
                 let req = (try? JSONSerialization.jsonObject(with: bodyData) as? [String: Any]) ?? [:]
                 Task { @MainActor in
-                    let resp = await handle(req, snapshotDir: snapshotDir, coordinator: coordinator)
+                    let resp = await handle(req, snapshotDir: snapshotDir, coordinator: coordinator, attention: attention)
                     let payload = (try? JSONSerialization.data(withJSONObject: resp)) ?? Data("{}".utf8)
                     let head = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: \(payload.count)\r\nConnection: close\r\n\r\n"
                     conn.send(content: Data(head.utf8) + payload, completion: .contentProcessed { _ in conn.cancel() })
@@ -369,7 +339,8 @@ private enum MacDebugHarness {
     private static func handle(
         _ req: [String: Any],
         snapshotDir: String?,
-        coordinator: SteveClientCoordinator
+        coordinator: SteveClientCoordinator,
+        attention: MacAttentionController
     ) async -> [String: Any] {
         let cmd = req["cmd"] as? String ?? "status"
         switch cmd {
@@ -381,6 +352,8 @@ private enum MacDebugHarness {
                 "isSheet": $0.isSheet,
                 "identifier": $0.identifier?.rawValue ?? "",
                 "miniaturized": $0.isMiniaturized,
+                "appearance": $0.effectiveAppearance.name.rawValue,
+                "background": $0.backgroundColor.description,
                 "sheetCount": $0.sheets.count,
                 "class": String(describing: type(of: $0)),
             ] as [String: Any] }
@@ -396,6 +369,21 @@ private enum MacDebugHarness {
                 "mainWindowCount": MacPairConfirmation.mainWindows.count,
                 "pairError": coordinator.externalPairErrorMessage as Any,
                 "windows": winIDs,
+                "attentionScope": attention.state.scope.map { ["hubID": $0.hubProfileID, "userID": $0.userID, "workspaceID": $0.workspaceID] } as Any,
+                "attentionCategories": Dictionary(uniqueKeysWithValues: AttentionKind.allCases.map { kind in
+                    (kind.rawValue, ["phase": attention.state.categories[kind]?.phase.rawValue ?? "unknown",
+                                    "count": attention.state.categories[kind]?.lastSuccess?.count as Any,
+                                    "unit": kind.unit.rawValue] as [String: Any])
+                }),
+                "attentionDedup": attention.state.dedupStatus.rawValue,
+                "attentionError": attention.error as Any,
+                "shellAppearance": coordinator.shellContext?.appearance.map { ["dark": $0.dark, "background": $0.background, "followSystem": $0.followSystem] as [String: Any] } as Any,
+                "shellContext": coordinator.shellContext.map { context in
+                    ["hubID": context.hubID, "workspaceID": context.workspaceID as Any,
+                     "workspaceName": context.workspaceName as Any, "route": context.route,
+                     "title": context.title, "ready": context.ready, "authenticated": context.authenticated,
+                     "focused": context.focused, "visible": context.visible] as [String: Any]
+                } as Any,
             ]
         case "eval":
             guard let wv = SteveWebView.BridgeCoordinator.debugLastAttachedWebView,
@@ -415,6 +403,21 @@ private enum MacDebugHarness {
                 return ["ok": false, "error": "invalid or unauthorized snapshot path"]
             }
             let target = (req["target"] as? String) ?? "webview"
+            if target == "window" {
+                guard let window = MacMainWindow.windows.first(where: { $0.isVisible }),
+                      let content = window.contentView,
+                      let root = content.superview ?? window.contentView,
+                      let bitmap = root.bitmapImageRepForCachingDisplay(in: root.bounds) else {
+                    return ["ok": false, "error": "no visible main window"]
+                }
+                root.cacheDisplay(in: root.bounds, to: bitmap)
+                guard let png = bitmap.representation(using: .png, properties: [:]) else {
+                    return ["ok": false, "error": "png failed"]
+                }
+                do { try png.write(to: outURL) }
+                catch { return ["ok": false, "error": "snapshot write failed"] }
+                return ["ok": true, "windowNumber": window.windowNumber]
+            }
             if target == "alert" {
                 let candidateWindows = NSApplication.shared.windows.flatMap { [$0] + $0.sheets }
                 guard let sheetWin = candidateWindows.first(where: {
@@ -430,10 +433,21 @@ private enum MacDebugHarness {
                 try? png.write(to: outURL)
                 return ["ok": true, "windowNumber": sheetWin.windowNumber]
             }
-            if target == "menubar" {
+            if ["menubar", "settings", "attention"].contains(target) {
+                // Render production native roots without keyboard automation or permission prompts.
+                let preview: AnyView
+                switch target {
+                case "settings":
+                    preview = AnyView(MacClientSettingsView(attention: attention))
+                case "attention":
+                    preview = AnyView(MacAttentionView(coordinator: coordinator, attention: attention) { route in
+                        coordinator.navigate(hashRoute: route)
+                    }.padding(16).frame(width: 330))
+                default:
+                    preview = AnyView(MacMenuBarPopoverView(coordinator: coordinator, attention: attention))
+                }
                 let host = NSHostingView(
-                    rootView: MacMenuBarPopoverView(coordinator: coordinator)
-                        .background(Color(nsColor: .windowBackgroundColor))
+                    rootView: preview.background(Color(nsColor: .windowBackgroundColor))
                 )
                 let size = host.fittingSize
                 host.frame = NSRect(origin: .zero, size: NSSize(width: max(size.width, 320), height: max(size.height, 360)))
@@ -443,7 +457,7 @@ private enum MacDebugHarness {
                     backing: .buffered,
                     defer: false
                 )
-                win.title = "Steve MenuBar"
+                win.title = "Steve \(target)"
                 win.isOpaque = true
                 win.backgroundColor = .windowBackgroundColor
                 win.contentView = host
@@ -626,6 +640,25 @@ private enum MacDebugHarness {
             }
             delegate.application?(NSApplication.shared, open: [url])
             return ["ok": true]
+        case "setAppearance":
+            guard let dark = req["dark"] as? Bool else { return ["ok": false, "error": "missing appearance"] }
+            NSApplication.shared.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
+            return ["ok": true]
+        case "resizeMainWindow":
+            guard let width = req["width"] as? Double, let height = req["height"] as? Double,
+                  (640...2400).contains(width), (480...1800).contains(height),
+                  let window = MacMainWindow.windows.first else { return ["ok": false, "error": "invalid window size"] }
+            window.setContentSize(NSSize(width: width, height: height))
+            return ["ok": true]
+        case "restoreMainWindow":
+            MacMainWindow.bringUpMainWindow()
+            return ["ok": true]
+        case "miniaturizeMainWindow":
+            MacMainWindow.windows.first?.miniaturize(nil)
+            return ["ok": true]
+        case "attentionRefresh":
+            attention.monitor.refresh()
+            return ["ok": true]
         case "closeMainWindows":
             let mains = MacPairConfirmation.mainWindows
             mains.forEach { $0.close() }
@@ -636,10 +669,9 @@ private enum MacDebugHarness {
             }
             return ["ok": true]
         case "navigate":
-            if let route = req["route"] as? String {
-                coordinator.navigate(hashRoute: route)
-            }
-            return ["ok": true]
+            guard let route = req["route"] as? String else { return ["ok": false, "error": "missing route"] }
+            return ["ok": coordinator.navigate(route: route, workspaceID: req["workspaceID"] as? String,
+                                               targetID: req["targetID"] as? String)]
         case "switchHub":
             if let id = req["id"] as? String {
                 coordinator.switchToHub(id: id)

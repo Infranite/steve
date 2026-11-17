@@ -18,7 +18,16 @@ pub struct BlobManifest {
 pub struct Transfer {
     pub id: TransferId,
     pub next_offset: u64,
+    /// Hub-owned workspace of the execution, for stable authenticated attachment URLs.
+    /// Optional for peers predating output uploads; never selected by the Node.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<String>,
 }
+
+pub const MAX_INLINE_IMAGE: u64 = 20 * 1024 * 1024;
+pub const MAX_INLINE_IMAGES: usize = 10;
+/// Hex-encoded data plus its envelope fits the existing 48 KiB bulk frame on old peers too.
+pub const INLINE_IMAGE_CHUNK: usize = 16 * 1024;
 
 /// Starts (or, with the same key, finds again) an upload: a lost answer never leaves an orphan.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -78,5 +87,22 @@ pub(crate) mod hexbytes {
     pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<u8>, D::Error> {
         let s = String::deserialize(d)?;
         hex::decode(s).map_err(serde::de::Error::custom)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn transfer_workspace_is_an_optional_backward_compatible_receipt() {
+        let old = serde_json::json!({"id":"tr_old","next_offset":12});
+        let mut transfer: Transfer = serde_json::from_value(old.clone()).unwrap();
+        assert_eq!(transfer.workspace, None);
+        assert_eq!(serde_json::to_value(&transfer).unwrap(), old);
+        transfer.workspace = Some("workspace".into());
+        assert_eq!(
+            serde_json::to_value(transfer).unwrap()["workspace"],
+            "workspace"
+        );
     }
 }

@@ -19,6 +19,7 @@ public enum LocalHubDiscovery {
                 return HubProfile(
                     id: HubProfile.localDefaultID,
                     name: displayName,
+                    nameSource: .generatedLocalDefault,
                     publicURL: normalized,
                     lanURLs: [URL(string: "http://127.0.0.1:\(port)")!],
                     isLocalDefault: true
@@ -27,6 +28,7 @@ public enum LocalHubDiscovery {
                 return HubProfile(
                     id: HubProfile.localDefaultID,
                     name: displayName,
+                    nameSource: .generatedLocalDefault,
                     publicURL: nil,
                     lanURLs: [normalized],
                     isLocalDefault: true

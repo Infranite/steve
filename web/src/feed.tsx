@@ -18,15 +18,18 @@ export function FeedView({ workspace, filter }: { workspace: string; filter: str
   const [source, setSource] = useState<FeedSource | "">("")
   const t = useT()
   const filters: FeedFilter = { unread, ...(kind ? { kind } : {}), ...(source ? { source } : {}) }
-  return <FeedReader key={JSON.stringify(filters)} client={client} filters={filters} controls={<div className="flex min-w-0 flex-wrap items-center gap-2" data-feed-filters>
+  const target = new URLSearchParams(location.hash.split("?")[1]).get("entry") ?? ""
+  return <FeedReader key={JSON.stringify([filters, target])} client={client} filters={filters} target={target} controls={<div className="flex min-w-0 flex-wrap items-center gap-2" data-feed-filters>
     <Segmented value={unread ? "unread" : "all"} onChange={(v) => setUnread(v === "unread")} options={[["all", t("views:feed.all")], ["unread", t("views:feed.unread")]]} />
     <Select aria-label={t("views:feed.kind")} className="w-36 max-sm:flex-1" value={kind} onChange={(v) => setKind(v as FeedKind | "")} options={[{ value: "", label: t("views:feed.allKinds") }, { value: "report", label: t("views:feed.report") }, { value: "completion", label: t("views:feed.completion") }]} />
     <Select aria-label={t("views:feed.source")} className="w-40 max-sm:flex-1" value={source} onChange={(v) => setSource(v as FeedSource | "")} options={[{ value: "", label: t("views:feed.allSources") }, { value: "flow", label: t("views:feed.flow") }, { value: "notification", label: t("views:feed.notification") }]} />
   </div>} />
 }
 
-function FeedReader({ client, filters, controls }: { client: FeedClient; filters: FeedFilter; controls: React.ReactNode }) {
+function FeedReader({ client, filters, controls, target }: { client: FeedClient; filters: FeedFilter; controls: React.ReactNode; target: string }) {
   const t = useT()
+  const [targetEntry, setTargetEntry] = useState<FeedEntry>()
+  const [targetError, setTargetError] = useState<unknown>()
   const [data, setData] = useState<FeedPage>()
   const [busy, setBusy] = useState<"refresh" | "more" | "read" | null>("refresh")
   const [error, setError] = useState<{ error: unknown; retry: () => void }>()
@@ -69,12 +72,22 @@ function FeedReader({ client, filters, controls }: { client: FeedClient; filters
       const ids = "ids" in body ? new Set(body.ids) : new Set(latest.current?.entries.map((entry) => entry.id))
       const at = Date.now()
       setData((old) => old ? { ...old, unread_count: Math.max(0, old.unread_count - result.updated), entries: old.entries.map((entry) => ids.has(entry.id) && entry.read_at === null ? { ...entry, read_at: at } : entry) } : old)
+      setTargetEntry((old) => old && ids.has(old.id) && old.read_at === null ? { ...old, read_at: at } : old)
+      if (!("ids" in body) && target) void loadTarget()
       setSelected(new Set()); setConfirm(false); setStatus(t("views:feed.marked", { count: result.updated }))
     } catch (error) { if (alive.current && n === operation.current) setError({ error, retry: () => { if (error instanceof HubError && error.status === 400 && "snapshot" in body) void load(); else void mark(body) } }) }
     finally { if (alive.current && n === operation.current) { pending.current = false; setBusy(null) } }
   }
+  const loadTarget = async () => {
+    if (!target) return
+    setTargetError(undefined)
+    try {
+      const entry = await request((signal) => client.detail(target, signal))
+      if (alive.current) setTargetEntry(entry)
+    } catch (error) { if (alive.current) setTargetError(error) }
+  }
   useEffect(() => {
-    alive.current = true; void load()
+    alive.current = true; void load(); void loadTarget()
     // Private feed content is never subscribed to workspace SSE. Probe only while visible/focused;
     // keep the current snapshot and scroll position until the reader explicitly refreshes.
     let checking = false
@@ -103,6 +116,8 @@ function FeedReader({ client, filters, controls }: { client: FeedClient; filters
   return <Page title={t("core:nav.feed")} sub={t("views:feed.sub")} max={920} scrollRef={scroll} actions={<Button size="sm" variant={newContent ? "outline" : "ghost"} aria-label={t("common:action.refresh")} disabled={busy !== null} onClick={() => void load()} data-feed-refresh data-feed-new={newContent ? "" : undefined}><RefreshCwIcon className="size-4" />{newContent && <span role="status">{t("views:feed.newContent")}</span>}</Button>}>
     <div data-feed className="min-w-0">
       {controls}
+      {targetError != null && <FeedError error={targetError} retry={() => void loadTarget()} />}
+      {targetEntry && <div data-feed-target={targetEntry.id}><FeedRow key={targetEntry.id} client={client} entry={targetEntry} checked={false} disabled={busy !== null} selectionDisabled initialOpen onSelect={() => {}} onRead={() => void mark({ ids: [targetEntry.id] })} /></div>}
       <div className="mt-4 flex min-h-10 flex-wrap items-center gap-x-3 gap-y-2 border-b border-border pb-3 text-sm">
         <Checkbox aria-label={t("views:feed.selectLoaded")} checked={selectable.length > 0 && selected.size === Math.min(100, selectable.length)} indeterminate={selected.size > 0 && selected.size < Math.min(100, selectable.length)} disabled={!selectable.length || busy !== null} onChange={(e) => setSelected(e.currentTarget.checked ? new Set(selectable.slice(0, 100).map((entry) => entry.id)) : new Set())} data-feed-select-all />
         <span className="mr-auto text-muted-foreground" data-feed-count>{count === undefined ? t("common:state.loading") : t("views:feed.count", { count })}</span>
@@ -133,9 +148,9 @@ function FeedError({ error, retry, disabled }: { error: unknown; retry: () => vo
   return <div role="alert" className="my-3 flex flex-wrap items-center gap-3 rounded-lg border border-destructive/25 p-3 text-sm"><p className="min-w-0 flex-1 [overflow-wrap:anywhere]">{reset ? t("views:feed.expired") : t("views:feed.failed", { error: errText(error) })}</p><Button size="sm" variant="outline" onClick={retry} disabled={disabled}>{t(reset ? "views:feed.reset" : "common:action.retry")}</Button></div>
 }
 
-function FeedRow({ client, entry, checked, disabled, selectionDisabled, onSelect, onRead }: { client: FeedClient; entry: FeedEntry; checked: boolean; disabled: boolean; selectionDisabled: boolean; onSelect: (value: boolean) => void; onRead: () => void }) {
+function FeedRow({ client, entry, checked, disabled, selectionDisabled, onSelect, onRead, initialOpen = false }: { client: FeedClient; entry: FeedEntry; checked: boolean; disabled: boolean; selectionDisabled: boolean; onSelect: (value: boolean) => void; onRead: () => void; initialOpen?: boolean }) {
   const t = useT()
-  const [open, setOpen] = useState(false), [detail, setDetail] = useState<FeedEntry>(), [loading, setLoading] = useState(false), [error, setError] = useState<unknown>()
+  const [open, setOpen] = useState(initialOpen), [detail, setDetail] = useState<FeedEntry | undefined>(initialOpen ? entry : undefined), [loading, setLoading] = useState(false), [error, setError] = useState<unknown>()
   const seq = useRef(0), ctl = useRef<AbortController | null>(null)
   const load = async () => {
     ctl.current?.abort(); const controller = new AbortController(); ctl.current = controller
@@ -166,7 +181,7 @@ function FeedRow({ client, entry, checked, disabled, selectionDisabled, onSelect
           {!open && <p className="ml-3.5 mt-0.5 line-clamp-2 text-sm leading-5 text-muted-foreground [overflow-wrap:anywhere]">{purged ? t("views:feed.purged") : entry.excerpt}</p>}
         </button>
         <div className="ml-3.5 mt-1 flex flex-wrap gap-x-2 gap-y-1 text-xs text-muted-foreground"><span>{t(entry.kind === "report" ? "views:feed.report" : "views:feed.completion")}</span><span aria-hidden="true">·</span><span>{t(entry.source.type === "flow" ? "views:feed.flow" : "views:feed.notification")}</span><time dateTime={new Date(entry.published_at).toISOString()}>{new Date(entry.published_at).toLocaleTimeString(lang(), { hour: "2-digit", minute: "2-digit" })}</time></div>
-        {open && <div id={contentId} className="ml-3.5 mt-4 min-w-0" data-feed-body>
+        {open && <div id={contentId} className="ml-3.5 mt-4 min-w-0" data-feed-body data-feed-ready={!!detail && !loading && !error}>
           {loading && <Loading />}
           {error != null && (error instanceof HubError && error.status === 404 ? <p role="alert" className="text-sm text-muted-foreground">{t("views:feed.unavailable")}</p> : <FeedError error={error} retry={() => void load()} />)}
           {purged ? <p className="text-sm text-muted-foreground">{t("views:feed.purged")}</p> : body ? <>

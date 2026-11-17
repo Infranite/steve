@@ -2,6 +2,7 @@
 //! Every request runs in one workspace (header `x-steve-ws` or cookie `steve_ws`, checked against membership).
 
 mod annotations;
+pub(crate) mod attention;
 mod avatar;
 mod bots;
 pub mod dedupe;

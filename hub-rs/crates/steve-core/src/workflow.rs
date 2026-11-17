@@ -140,7 +140,9 @@ impl Core {
             }
             match args["action"].as_str().unwrap_or("get") {
                 "get" => {
-                    if let Some(same) = unchanged(&args, graph.revision)? {
+                    if t.cfg().dynamic_workflows
+                        && let Some(same) = unchanged(&args, graph.revision)?
+                    {
                         return Ok(same);
                     }
                     return Ok(t.workflow_context(&graph, &unit));
@@ -170,6 +172,7 @@ impl Core {
         }
         let action = args["action"].as_str().unwrap_or("get").to_owned();
         if action == "get"
+            && t.cfg().dynamic_workflows
             && let Some(g) = t.db().store().workflows().get(item)?
             && let Some(same) = unchanged(&args, g.revision)?
         {
@@ -318,6 +321,15 @@ impl Tx<'_> {
         };
         if complete && !self.workflow_current(&g)? {
             out.push(steve_i18n::t!("core.workflow.blocker.stale"));
+        }
+        if complete
+            && !self.cfg().dynamic_workflows
+            && !g.single_session()
+            && g.units
+                .iter()
+                .any(|u| u.spec.required && u.status != "succeeded")
+        {
+            out.push(steve_i18n::t!("core.workflow.blocker.disabled"));
         }
         if complete && g.paused && !g.single_session() {
             out.push(steve_i18n::t!("core.workflow.blocker.paused"));
@@ -478,6 +490,7 @@ impl Tx<'_> {
         out["current_cycle"] = json!(current_cycle);
         let mut blockers = self.workflow_blockers(item, true)?;
         if let Err(e) = &ready
+            && self.cfg().dynamic_workflows
             && !g.single_session()
         {
             blockers.push(e.to_string());
@@ -487,7 +500,8 @@ impl Tx<'_> {
         } else {
             "collaborative"
         });
-        out["execution_ready"] = json!(ready.is_ok());
+        out["enabled"] = json!(self.cfg().dynamic_workflows);
+        out["execution_ready"] = json!(self.cfg().dynamic_workflows && ready.is_ok());
         out["blockers"] = json!(blockers);
         Ok(out)
     }
@@ -518,6 +532,7 @@ impl Tx<'_> {
         // `parent_item`, not `item_id`: the key is read back as a tool argument otherwise, and no
         // tool of a unit session takes an item id it does not already know from its token.
         json!({
+            "enabled": self.cfg().dynamic_workflows,
             "parent_item": g.item_id, "revision": g.revision, "unit": unit,
             "upstream": upstream_units,
             "note": "长内容仅显示摘要；完整报告在上游单元 outputs 列出的文件里，直接打开这些文件。本会话只能读取本单元的事项，不能读取主事项或其他单元的事项。"
@@ -540,6 +555,9 @@ impl Tx<'_> {
         let action = args["action"].as_str().unwrap_or("get");
         if action == "get" {
             return self.workflow_view(item);
+        }
+        if !self.cfg().dynamic_workflows && matches!(action, "plan" | "retry" | "resume") {
+            return Err(conflict(steve_i18n::t!("core.workflow.blocker.disabled")));
         }
         self.lc_guard_open(item)?;
         let parent = self.item(item)?;
@@ -971,8 +989,54 @@ impl Tx<'_> {
         Ok(())
     }
 
+    /// Scheduling follows provenance, not dependency edges or the statistics view's depth limit.
+    pub(crate) fn workflow_root(&self, item: &Item) -> Result<(String, String)> {
+        let mut current = item.clone();
+        let mut seen = std::collections::HashSet::new();
+        loop {
+            if !seen.insert(current.id.clone()) {
+                return Err(conflict("协作事项的父级关系存在循环"));
+            }
+            let Some(parent) = current
+                .parent
+                .as_ref()
+                .and_then(|p| p.item.as_ref())
+                .and_then(|p| p.as_deref())
+            else {
+                return Ok((item.workspace_id.clone(), current.id));
+            };
+            current = self
+                .db()
+                .item(parent)?
+                .ok_or_else(|| conflict("协作事项的父级已不存在"))?;
+            if current.workspace_id != item.workspace_id {
+                return Err(conflict("协作事项与父级不属于同一工作空间"));
+            }
+        }
+    }
+
+    fn workflow_reserves(&self, graph: &Workflow, unit: &WorkUnit) -> Result<bool> {
+        // A pending retry settles its old attempt before claiming; queued follow-ups are discarded.
+        if unit.status == "pending" {
+            return Ok(false);
+        }
+        if self.workflow_busy(unit)? {
+            return Ok(true);
+        }
+        let parent = self.item(&graph.item_id)?;
+        // A stopped graph keeps its logical unit status for resuming, but a confirmed stop no
+        // longer occupies execution capacity. Uncertain stops above still hold their reservation.
+        Ok(!graph.paused
+            && !parent.archived
+            && !matches!(parent.status.as_str(), "pause" | "block")
+            && !crate::cycle::stopping(&parent)
+            && self.workflow_current(graph)?
+            && (unit.status == "dispatching"
+                || (unit.status == "running" && unit.session_id.is_none())))
+    }
+
     fn workflow_drive(&mut self, parent: &str) -> Result<()> {
-        if self.holding() || self.cfg().no_resume {
+        if !self.cfg().dynamic_workflows || self.holding() || self.cfg().no_resume {
             return Ok(());
         }
         let Some(g) = self.db().store().workflows().get(parent)? else {
@@ -992,19 +1056,29 @@ impl Tx<'_> {
         if self.rt().check_workflow_execution(parent).is_err() {
             return Ok(());
         }
-        let global_cap = self.cfg().max_workflow_parallel.max(1);
-        let mut global_active = 0usize;
-        for other in self.db().store().workflows().active()? {
+        let tree = self.workflow_root(&item)?;
+        let tree_cap = self.cfg().max_workflow_parallel.max(1);
+        let mut tree_active = 0usize;
+        let mut reserved_children = std::collections::HashSet::new();
+        for other in self.db().store().workflows().all_open()? {
             if other.item_id == g.item_id {
                 continue;
             }
+            let other_item = self.item(&other.item_id)?;
+            let other_root = match self.workflow_root(&other_item) {
+                Ok(root) => root,
+                Err(e) => {
+                    tracing::warn!(item = other.item_id, "workflow ancestry: {e}");
+                    continue;
+                }
+            };
+            if other_root != tree {
+                continue;
+            }
             for u in &other.units {
-                // a pending unit holds nothing: what its earlier attempt left settles before its retry
-                if u.status != "pending"
-                    && (self.workflow_busy(u)?
-                        || matches!(u.status.as_str(), "running" | "dispatching"))
-                {
-                    global_active += 1;
+                if self.workflow_reserves(&other, u)? {
+                    tree_active += 1;
+                    reserved_children.extend(u.item_id.clone());
                 }
             }
         }
@@ -1012,13 +1086,27 @@ impl Tx<'_> {
         let mut occupied = Vec::new();
         let mut active = 0;
         for u in &g.units {
-            if u.status != "pending"
-                && (self.workflow_busy(u)?
-                    || matches!(u.status.as_str(), "running" | "dispatching"))
-            {
+            if self.workflow_reserves(&g, u)? {
                 occupied.extend(u.spec.resources.clone());
                 active += 1;
-                global_active += 1;
+                tree_active += 1;
+                reserved_children.extend(u.item_id.clone());
+            }
+        }
+        for (retired, _) in self.db().store().workflows().retired_open()? {
+            let Some(child) = retired.item_id.as_deref() else {
+                continue;
+            };
+            if reserved_children.contains(child) || !self.unit_turn(&retired)? {
+                continue;
+            }
+            let retired_item = self.item(child)?;
+            if self
+                .workflow_root(&retired_item)
+                .is_ok_and(|root| root == tree)
+            {
+                reserved_children.insert(child.to_owned());
+                tree_active += 1;
             }
         }
         for u in &g.units {
@@ -1038,6 +1126,19 @@ impl Tx<'_> {
                         .iter()
                         .any(|d| d.status == "open")
                 {
+                    // Resuming a confirmed-idle session acquires capacity again. Logical
+                    // `running` survives a pause, but must not bypass another graph's reservation.
+                    if !self.workflow_reserves(&g, u)? {
+                        if active >= g.max_parallel
+                            || tree_active >= tree_cap
+                            || u.spec.resources.iter().any(|r| occupied.contains(r))
+                        {
+                            continue;
+                        }
+                        active += 1;
+                        tree_active += 1;
+                        occupied.extend(u.spec.resources.clone());
+                    }
                     if !self.db().queued(sid)?.is_empty() {
                         self.rt().flush(sid, None);
                     } else if !self
@@ -1074,7 +1175,7 @@ impl Tx<'_> {
                 }
             } else if u.status == "pending"
                 && active < g.max_parallel
-                && global_active < global_cap
+                && tree_active < tree_cap
                 && u.attempt < g.max_attempts
             {
                 let mut ready = true;
@@ -1107,7 +1208,7 @@ impl Tx<'_> {
                 };
                 occupied.extend(u.spec.resources.clone());
                 active += 1;
-                global_active += 1;
+                tree_active += 1;
                 self.workflow_start(&g, &claimed)?;
             }
         }

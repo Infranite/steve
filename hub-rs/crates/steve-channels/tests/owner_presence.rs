@@ -349,7 +349,8 @@ fn you_decide(h: &H, d: &str, choice: &str) -> ApiResult<steve_store::Decision> 
         .expect("ours")
 }
 
-/// A draft in your name for a private chat message, and its card.
+/// A draft in your name for a private chat message, and its card, after its disclosure check (which
+/// runs once the draft is written).
 async fn drafted(h: &H, id: &str) -> (String, String) {
     let r = push(
         h,
@@ -359,10 +360,36 @@ async fn drafted(h: &H, id: &str) -> (String, String) {
     .await
     .response
     .expect("response");
+    checked(h).await;
     (
         r.out_message_id.expect("draft"),
         r.decision_id.expect("card"),
     )
+}
+
+/// Runs the queue until no draft's disclosure check is still running.
+async fn checked(h: &H) {
+    for _ in 0..500 {
+        let waiting: i64 = h
+            .env
+            .store()
+            .reader(|c| {
+                c.query_row(
+                    "SELECT count(*) FROM chan_messages m JOIN reply_basis b ON b.id = m.basis_id
+                      WHERE m.status = 'draft' AND b.verdict = 'checking'",
+                    [],
+                    |r| r.get(0),
+                )
+                .map_err(steve_store::StoreError::from)
+            })
+            .unwrap();
+        if waiting == 0 {
+            return;
+        }
+        h.outbox.send_due(&h.ch).await;
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    panic!("a disclosure check did not finish");
 }
 
 // ---------------------------------------------------------------- gate 1: before drafting
@@ -700,7 +727,8 @@ async fn in_a_busy_group_answering_one_person_leaves_the_others_draft() {
     push(&h, &me, to_li).await;
     assert_eq!(status(&h, &li_draft), "discarded", "the one you answered");
     assert_eq!(status(&h, &han_draft), "draft", "not the other one");
-    // YOLO, judging again, still may approve it
+    // YOLO, judging again once its disclosure check is done, still may approve it
+    checked(&h).await;
     let card: String = row(
         &h,
         "SELECT decision_id FROM chan_messages WHERE id = ?",
@@ -995,6 +1023,7 @@ async fn an_automatic_reply_on_your_account_is_not_you() {
     push(&h, &me, msg(&h, "D_LI", "y2", "upx", auto, 0)).await;
     assert_eq!(decision(&h, &card).0, "open");
     h.env.clock.advance(5_000);
+    checked(&h).await;
     assert_eq!(yolo(&h, &card, "yes").expect("answered").status, "resolved");
 }
 
@@ -1077,6 +1106,7 @@ async fn a_message_already_answered_in_your_name_stays_out_of_the_next_turn() {
         .response
         .unwrap();
     let (draft1, card1) = (first.out_message_id.unwrap(), first.decision_id.unwrap());
+    checked(&h).await;
     assert_eq!(
         yolo(&h, &card1, "yes").expect("approved").status,
         "resolved"

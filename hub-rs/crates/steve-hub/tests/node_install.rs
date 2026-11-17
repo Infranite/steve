@@ -14,6 +14,8 @@ use steve_hub::nodes::install::Installs;
 use steve_node_wire::Identity;
 
 const ADDR: &str = "tcFAKEtarget0123456789_-x";
+/// An address whose setup fails as an unpaired one did.
+const FAIL: &str = "tcFAILtarget0123456789_-x";
 
 fn script(p: &Path, body: &str) {
     std::fs::write(p, format!("#!/bin/sh\n{body}")).unwrap();
@@ -25,14 +27,16 @@ fn script(p: &Path, body: &str) {
 }
 
 /// A release directory for version 9.9.9 whose installer's `steve` records its arguments and the
-/// pairing code it was given, then waits until the test has paired the Node as it would have.
+/// pairing code it was given, names its phases as setup does, then waits until the test has paired
+/// the Node as it would have.
 fn release(dir: &Path) {
     let pkg = dir.join("pkg");
     std::fs::create_dir_all(pkg.join("bin")).unwrap();
     script(
         &pkg.join("bin/steve"),
-        "case \"$1\" in\n setup) echo \"$@\" > \"$HOME/setup-args\"; echo \"$STEVE_PAIR_CODE\" > \"$HOME/code\"; \
-         for i in $(seq 1 200); do [ -f \"$HOME/paired\" ] && exit 0; sleep 0.1; done; exit 1 ;;\n \
+        "case \"$1\" in\n setup) [ -n \"$STEVE_SETUP_PROGRESS\" ] && echo 'steve-setup-progress install' && echo 'steve-setup-progress pair'; \
+         echo \"$@\" > \"$HOME/setup-args\"; echo \"$STEVE_PAIR_CODE\" > \"$HOME/code\"; \
+         for i in $(seq 1 200); do [ -f \"$HOME/paired\" ] && echo 'steve-setup-progress start' && exit 0; sleep 0.1; done; exit 1 ;;\n \
          node) echo \"$@\" > \"$HOME/started\" ;;\nesac\n",
     );
     let name = "steve-9.9.9-installer.tar.gz";
@@ -84,7 +88,9 @@ async fn the_hub_installs_a_node_that_is_active_once_paired() {
     script(
         &tools.path().join("ssh"),
         &format!(
-            "echo \"$@\" >> '{log}'\nfor a; do cmd=\"$a\"; done\nHOME='{home}' exec sh -c \"$cmd\"\n",
+            "echo \"$@\" >> '{log}'\nfor a; do cmd=\"$a\"; done\n\
+             case \"$*\" in *{FAIL}*\"setup node\"*) echo 'pairing code: Error: no pairing code' >&2; exit 1 ;; esac\n\
+             HOME='{home}' exec sh -c \"$cmd\"\n",
             log = tools.path().join("ssh.log").display(),
             home = target.path().display()
         ),
@@ -146,6 +152,44 @@ async fn the_hub_installs_a_node_that_is_active_once_paired() {
     .await;
     assert_eq!((s, v["state"].as_str()), (200, Some("running")), "{v}");
 
+    // a second install to the same address joins the running one
+    let (_, other) = call(&h, reqwest::Method::POST, "u1", "", json!({})).await;
+    let other = other["id"].as_str().unwrap().to_string();
+    let (s, joined) = call(
+        &h,
+        reqwest::Method::POST,
+        "u1",
+        &format!("/{other}/run"),
+        json!({"address": ADDR}),
+    )
+    .await;
+    assert_eq!(
+        (s, joined["id"].as_str()),
+        (200, Some(id.as_str())),
+        "{joined}"
+    );
+    let (_, v) = call(
+        &h,
+        reqwest::Method::GET,
+        "u1",
+        &format!("/{other}"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(v["state"], "waiting", "{v}");
+    // a page opened now finds the running one
+    let (_, all) = call(&h, reqwest::Method::GET, "u1", "", json!({})).await;
+    let running: Vec<&str> = all["installs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|o| o["state"] == "running")
+        .filter_map(|o| o["id"].as_str())
+        .collect();
+    assert_eq!(running, [id.as_str()], "{all}");
+    let (_, all) = call(&h, reqwest::Method::GET, "u2", "", json!({})).await;
+    assert_eq!(all["installs"], json!([]), "nobody else's");
+
     // what the Node would do with the code it was given: pair with it
     let code_file = target.path().join("code");
     for _ in 0..200 {
@@ -176,7 +220,25 @@ async fn the_hub_installs_a_node_that_is_active_once_paired() {
     // confirmed by the install: active without a fingerprint check
     let state: String = h.q(&format!("SELECT state FROM nodes WHERE node_id='{node}'"));
     assert_eq!(state, "active");
-    assert_eq!(done["steps"].as_array().unwrap().len(), 5, "{done}");
+    let steps = done["steps"].as_array().unwrap();
+    let kinds: Vec<&str> = steps.iter().filter_map(|s| s["kind"].as_str()).collect();
+    assert_eq!(kinds, ["probe", "fetch", "send", "setup", "done"], "{done}");
+    assert!(
+        steps
+            .iter()
+            .all(|s| s["ended"].is_i64() && s["elapsed_ms"].as_i64().is_some_and(|e| e >= 0)),
+        "{done}"
+    );
+    // how far each went, kept in the install
+    let size = std::fs::metadata(releases.path().join("steve-9.9.9-installer.tar.gz"))
+        .unwrap()
+        .len();
+    assert_eq!(steps[1]["progress"]["phase"], "verify", "{done}");
+    assert_eq!(steps[2]["progress"]["phase"], "send", "{done}");
+    assert_eq!(steps[2]["progress"]["done"], size, "{done}");
+    assert_eq!(steps[2]["progress"]["total"], size, "{done}");
+    assert_eq!(steps[3]["progress"]["phase"], "start", "{done}");
+    assert!(done["address"].is_null(), "not kept once installed: {done}");
 
     let args = std::fs::read_to_string(target.path().join("setup-args")).unwrap();
     assert_eq!(args.trim(), "setup node --hub https://hub.example");
@@ -199,4 +261,49 @@ async fn the_hub_installs_a_node_that_is_active_once_paired() {
     assert!(!target.path().join(".steve-node-install").exists());
     // and the install's key with it
     assert!(!h.dir.path().join("tailcat/installs").join(&id).exists());
+
+    // a failed install says at which step and why, and keeps the address for a retry
+    let (_, failing) = call(&h, reqwest::Method::POST, "u1", "", json!({})).await;
+    let failing = failing["id"].as_str().unwrap().to_string();
+    call(
+        &h,
+        reqwest::Method::POST,
+        "u1",
+        &format!("/{failing}/run"),
+        json!({"address": FAIL}),
+    )
+    .await;
+    let mut failed = Value::Null;
+    for _ in 0..200 {
+        let (_, v) = call(
+            &h,
+            reqwest::Method::GET,
+            "u1",
+            &format!("/{failing}"),
+            json!({}),
+        )
+        .await;
+        if v["state"] != "running" {
+            failed = v;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(failed["state"], "failed", "{failed}");
+    assert_eq!(failed["failed_step"], "setup", "{failed}");
+    assert_eq!(failed["address"], FAIL, "{failed}");
+    assert!(
+        failed["error"]
+            .as_str()
+            .unwrap()
+            .contains("no pairing code"),
+        "{failed}"
+    );
+    assert!(failed["steps"].as_array().unwrap().last().unwrap()["ended"].is_i64());
+    let (_, all) = call(&h, reqwest::Method::GET, "u1", "", json!({})).await;
+    assert_eq!(
+        all["installs"][0]["id"],
+        failing.as_str(),
+        "the newest first: {all}"
+    );
 }

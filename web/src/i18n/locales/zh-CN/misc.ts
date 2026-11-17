@@ -65,6 +65,8 @@ export default {
     preview: "预览",
     code: "代码",
     moreRows_other: "展开其余 {{count}} 行",
+    imageFailed: "图片加载失败，请检查网络或登录状态后重试。",
+    imageUnavailable: "图片暂不可用，请让助手重新生成或上传。",
   },
   permission: {
     request: "请求内容",

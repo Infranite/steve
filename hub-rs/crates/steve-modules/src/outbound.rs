@@ -112,6 +112,19 @@ pub struct CheckCx {
     /// people to whom every piece of it (at least one) is public, the model check is skipped. Off, the
     /// model looks whatever the knowledge.
     pub internal_skip: bool,
+    /// The conversation the audience can already read around the text (the visible messages of the
+    /// space, the one it answers included), as context for the check only, like `audience_said`:
+    /// what was said there in front of them is not news to them. It grants no level and changes no
+    /// rule. `None`: no conversation (email, comments).
+    pub audience_seen: Option<String>,
+    /// What the writer was shown of how its author talks (on your own account: your own messages
+    /// from this and other chats, your edited and rejected drafts). Inputs for the tone, not content:
+    /// text copied from them that the audience has not seen is flagged.
+    pub style_samples: Vec<String>,
+    /// Nobody waits on the answer (a draft that waits for your approval anyway, checked in the
+    /// background): the check model gets a longer time limit and, failing, one more try on a
+    /// stronger model.
+    pub patient: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -120,7 +133,9 @@ pub enum Verdict {
     Pass,
     /// Possibly reveals something (see `spans`).
     Leak,
-    /// No check is installed.
+    /// Not checked: no check is installed, or its model gave no answer (timed out, failed, answered
+    /// something unreadable; `spans` then says so and `check_model` names what was tried). Never a
+    /// pass, and never shown as a leak.
     Unchecked,
 }
 
@@ -174,8 +189,9 @@ impl CheckResult {
 #[async_trait]
 pub trait OutboundCheck: Send + Sync {
     /// Checks `text` for `audience`. Never rewrites: rewriting is the caller's choice (channels do,
-    /// email doesn't). Failures of the check model come back as `Leak` with a span saying so, so a
-    /// broken check never lets text through unchecked.
+    /// email doesn't). Failures of the check model come back as [`Verdict::Unchecked`] with a span
+    /// saying so (or `Leak` when the local checks already found something), so a broken check never
+    /// lets text through as passed, and is never mistaken for a leak.
     async fn check(
         &self,
         cx: &CheckCx,

@@ -583,6 +583,8 @@ impl Engine {
             Some("pass") => Disclosure::Pass,
             Some("rewritten") => Disclosure::Rewritten,
             Some("drafted") => Disclosure::Leak,
+            Some("checking") => Disclosure::Checking,
+            // `unchecked` (the check did not finish), and no basis at all
             _ => Disclosure::Unchecked,
         };
         let has = |o: &str| d.options.iter().any(|x| x == o);

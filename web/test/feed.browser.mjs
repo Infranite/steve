@@ -81,6 +81,18 @@ async function open(options = {}) {
 const fits = async (page) => assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), "no horizontal overflow")
 const shot = async (page, name) => { await fits(page); if (shots) await page.screenshot({ path: `${shots}/${name}.png`, fullPage: true }) }
 try {
+  {
+    const { page, calls } = await open({ hash: "/#/feed?entry=entry-1" })
+    const target = page.locator('[data-feed-target="entry-1"]')
+    await target.locator("[data-feed-body]").waitFor()
+    await target.getByText("阅读而不是待处理", { exact: true }).waitFor()
+    assert.equal(calls.filter((call) => call.method !== "GET").length, 0, "notification landing is not a read receipt")
+    assert.ok(calls.some((call) => call.path === "/api/me/feed/entry-1"))
+    assert.equal(calls.filter((call) => call.path === "/api/me/feed" && call.query.includes("cursor=")).length, 0, "direct target does not scan the whole Feed")
+    await target.locator("[data-feed-read-one]").click()
+    await target.locator('[data-feed-read="true"]').waitFor()
+    await page.close()
+  }
   for (const theme of ["light", "dark"]) for (const width of [1440, 390]) {
     const { page, calls } = await open({ theme, width })
     await page.locator('[data-feed-entry="entry-80"]').waitFor()

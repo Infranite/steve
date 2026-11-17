@@ -3,6 +3,7 @@
  * for the life of the page, so the window moving on as new messages come does not tear a gap into what you read. */
 import { useSyncExternalStore } from "react"
 import { modReq, qs, type RMessage } from "@/api"
+import { currentHub } from "@/hub"
 import { closedSt, knownMsgs as known, msgOf, st, type Msg } from "@/store"
 
 let more = true, ended = false, loading = false, ver = 0, scope = ""
@@ -13,7 +14,7 @@ export function useHistory() { return useSyncExternalStore((cb) => { ls.add(cb);
 export const historyState = () => ({ more, ended, loading })
 
 /* another workspace is another conversation */
-function sameScope() { const ws = st.workspace?.id ?? ""; if (ws !== scope) { scope = ws; known.clear(); more = true; ended = false } }
+function sameScope() { const next = JSON.stringify([currentHub(), st.workspace?.id ?? ""]); if (next !== scope) { scope = next; known.clear(); more = true; ended = false } }
 
 /** the conversation as shown: what was loaded before the window, then the window (which wins for what it holds) */
 export function mainThread(thread: Msg[]): Msg[] {
@@ -27,8 +28,10 @@ export function mainThread(thread: Msg[]): Msg[] {
 export const threadMsg = (id: string) => st.thread.find((m) => m.id === id) ?? known.get(id)
 const oldest = () => { let n = Infinity; for (const m of known.values()) n = Math.min(n, m.created!); for (const m of st.thread) if (m.created) n = Math.min(n, m.created); return n }
 
-async function page(before: number, after?: number, limit = after ? 2000 : 100) {
-  const r = await modReq<{ messages: RMessage[]; has_more: boolean }>("GET", "/thread/history" + qs({ before: Number.isFinite(before) ? before : undefined, after, limit }))
+async function page(before: number, after?: number, limit = after ? 2000 : 100, signal?: AbortSignal) {
+  const workspace = st.workspace?.id ?? "", hub = currentHub()
+  const r = await modReq<{ messages: RMessage[]; has_more: boolean }>("GET", "/thread/history" + qs({ before: Number.isFinite(before) ? before : undefined, after, limit }), undefined, signal, { workspace, hub })
+  if (st.workspace?.id !== workspace || currentHub() !== hub) throw new Error("Conversation scope changed")
   /* as the window shows them: a failure line of a finished item is history the notifications keep */
   const over = (id: string | null) => closedSt(id ? st.items.find((i) => i.id === id)?.st : undefined)
   for (const m of r.messages) if (!m.meta?.held && !(m.meta?.notice && over(m.item_id))) known.set(m.id, msgOf(m))
@@ -43,12 +46,12 @@ export async function loadOlder(): Promise<boolean> {
 }
 /** everything from the message created at `created` up to what is shown, and a little before it, so a jump lands in an
  *  unbroken conversation with the lead-up in view */
-export async function fillTo(created: number): Promise<void> {
+export async function fillTo(created: number, signal?: AbortSignal): Promise<void> {
   sameScope()
   const from = oldest()
   if (!(created < from)) return
   loading = true; bump()
-  try { if (await page(from, created)) more = await page(created, undefined, CONTEXT); else more = false } catch { /* the jump falls back to what is loaded */ } finally { loading = false; bump() }
+  try { if (await page(from, created, 2000, signal)) more = await page(created, undefined, CONTEXT, signal); else more = false } catch { /* the jump falls back to what is loaded */ } finally { loading = false; bump() }
 }
 const CONTEXT = 20
 

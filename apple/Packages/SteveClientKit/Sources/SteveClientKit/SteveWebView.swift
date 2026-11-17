@@ -46,6 +46,10 @@ public struct SteveWebView: NSViewRepresentableFallback {
         return webView
     }
 
+    public static func dismantleNSView(_ webView: WKWebView, coordinator: BridgeCoordinator) {
+        coordinator.parent.coordinator.detachShell(ownerID: coordinator.ownerID)
+    }
+
     public func updateNSView(_ webView: WKWebView, context: Context) {
         context.coordinator.parent = self
         loadIfReady(in: webView, bridge: context.coordinator)
@@ -63,6 +67,10 @@ public struct SteveWebView: NSViewRepresentableFallback {
         context.coordinator.attach(webView)
         loadIfReady(in: webView, bridge: context.coordinator)
         return webView
+    }
+
+    public static func dismantleUIView(_ webView: WKWebView, coordinator: BridgeCoordinator) {
+        coordinator.parent.coordinator.detachShell(ownerID: coordinator.ownerID)
     }
 
     public func updateUIView(_ webView: WKWebView, context: Context) {
@@ -132,6 +140,8 @@ public struct SteveWebView: NSViewRepresentableFallback {
             bridge.loadedNonce = coordinator.webReloadNonce
             bridge.loadedGateway = gateway
             bridge.isPageLoaded = false
+            bridge.loadedHubID = coordinator.hubStore.activeHubID
+            coordinator.beginShellDocument(ownerID: bridge.ownerID)
             let loadGeneration = bridge.bumpLoadGeneration()
             let token = coordinator.proxy.proxyAuthToken
             let platform = platformName
@@ -175,7 +185,7 @@ public struct SteveWebView: NSViewRepresentableFallback {
                         let ruleList = try await compiler(gatewayPort)
                         guard bridge.loadGeneration == loadGeneration else { return }
                         userContent.add(ruleList)
-                        let bootstrapJS = Self.makeBootstrapScript(platform: platform, gateway: gateway)
+                        let bootstrapJS = Self.makeBootstrapScript(platform: platform, gateway: gateway, nativeShellChromeEnabled: coordinator.nativeShellChromeEnabled)
                         userContent.addUserScript(
                             WKUserScript(
                                 source: bootstrapJS,
@@ -225,17 +235,34 @@ public struct SteveWebView: NSViewRepresentableFallback {
         }
 
         if bridge.isPageLoaded {
+            // Sign-in/out may keep the same document. Ask its metadata publisher to re-handshake;
+            // never reload the auth page just to refresh native chrome.
+            if coordinator.shellState.documentID != nil,
+               bridge.notifiedShellGeneration != coordinator.shellState.generation {
+                bridge.notifiedShellGeneration = coordinator.shellState.generation
+                webView.evaluateJavaScript("window.dispatchEvent(new Event('steve:shell-invalidated'))", completionHandler: nil)
+            }
             applyPendingHashRouteIfNeeded(in: webView)
         }
     }
 
     @MainActor
     fileprivate func applyPendingHashRouteIfNeeded(in webView: WKWebView) {
-        if let hash = coordinator.targetHashRoute {
-            coordinator.consumeTargetHashRoute()
-            let escaped = hash.replacingOccurrences(of: "\\", with: "\\\\")
-                .replacingOccurrences(of: "'", with: "\\'")
-            webView.evaluateJavaScript("window.location.hash = '\(escaped)';", completionHandler: nil)
+        // A new web client consumes scoped intents. Only an older bundled page gets hash fallback.
+        guard let intent = coordinator.shellState.intents.first,
+              intent.workspaceID == nil, intent.targetID == nil else { return }
+        let route = intent.route, id = intent.id
+        webView.evaluateJavaScript("!!window.__STEVE_SHELL_CONTEXT__") { [weak coordinator] value, error in
+            Task { @MainActor in
+                guard let coordinator, error == nil, (value as? Bool) != true,
+                      coordinator.shellContext == nil, coordinator.shellState.intents.first?.id == id else { return }
+                let encoded = (try? String(data: JSONEncoder().encode(route), encoding: .utf8)) ?? "null"
+                webView.evaluateJavaScript("window.location.hash = \(encoded)") { _, error in
+                    Task { @MainActor in
+                        if error == nil { coordinator.completeLegacyNavigation(id: id) }
+                    }
+                }
+            }
         }
     }
 
@@ -568,18 +595,20 @@ public struct SteveWebView: NSViewRepresentableFallback {
 
     // MARK: - Native Bridge v2 Bootstrap (`window.__STEVE_NATIVE__`)
 
-    internal static func makeBootstrapScript(platform: String, gateway: URL) -> String {
+    internal static func makeBootstrapScript(platform: String, gateway: URL, nativeShellChromeEnabled: Bool = false) -> String {
         let expectedOrigin = URLNormalizer.canonicalOrigin(gateway)
-        let caps = SteveClientCoordinator.bridgeCapabilities(for: platform)
+        let caps = SteveClientCoordinator.bridgeCapabilities(for: platform, nativeShellChromeEnabled: nativeShellChromeEnabled)
         let capsJSON = (try? String(data: JSONEncoder().encode(caps), encoding: .utf8)) ?? "[]"
         return """
         (function() {
           const expectedOrigin = '\(expectedOrigin)';
           if (window.location.origin !== 'null' && window.location.origin !== '' && window.location.origin !== expectedOrigin) { return; }
           try { localStorage.removeItem('steve.hub'); } catch (_) {}
+          const documentID = crypto.randomUUID();
           const can = Object.freeze(\(capsJSON));
           const bridge = Object.freeze({
             v: 2,
+            documentID: documentID,
             platform: '\(platform)',
             can: can,
             call: function(op, args) {
@@ -589,6 +618,7 @@ public struct SteveWebView: NSViewRepresentableFallback {
               const payloadArgs = (args && typeof args === 'object' && !Array.isArray(args)) ? args : {};
               return window.webkit.messageHandlers.\(BridgeCoordinator.handlerName).postMessage({
                 op: String(op || ''),
+                documentID: documentID,
                 args: payloadArgs
               });
             }
@@ -614,6 +644,9 @@ public struct SteveWebView: NSViewRepresentableFallback {
 
         var parent: SteveWebView
         weak var webView: WKWebView?
+        let ownerID = UUID()
+        var loadedHubID: String?
+        var notifiedShellGeneration: UInt64?
         var loadedNonce: UUID?
         var loadedGateway: URL?
         var loadedProxyToken: String?
@@ -628,6 +661,7 @@ public struct SteveWebView: NSViewRepresentableFallback {
 
         func attach(_ webView: WKWebView) {
             self.webView = webView
+            parent.coordinator.attachShell(ownerID: ownerID)
             #if DEBUG && os(macOS)
             Self.debugLastAttachedWebView = webView
             #endif
@@ -705,6 +739,7 @@ public struct SteveWebView: NSViewRepresentableFallback {
 
         @MainActor
         public func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
+            parent.coordinator.beginShellDocument(ownerID: ownerID)
             if navigation === unloadNavigation {
                 finishDocumentUnload(committed: true)
             }
@@ -730,6 +765,7 @@ public struct SteveWebView: NSViewRepresentableFallback {
 
         @MainActor
         public func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+            parent.coordinator.beginShellDocument(ownerID: ownerID)
             // The process is gone and so is the document it held.
             finishDocumentUnload(committed: true)
         }
@@ -755,7 +791,7 @@ public struct SteveWebView: NSViewRepresentableFallback {
             didReceive message: WKScriptMessage,
             replyHandler: @escaping @MainActor @Sendable (Any?, String?) -> Void
         ) {
-            guard message.name == Self.handlerName,
+            guard message.webView === webView, message.name == Self.handlerName,
                   isTrustedGatewayFrame(message.frameInfo),
                   let body = message.body as? [String: Any],
                   let op = body["op"] as? String,
@@ -767,6 +803,32 @@ public struct SteveWebView: NSViewRepresentableFallback {
             let platform = parent.platformName
             let coordinator = parent.coordinator
 
+            if op.hasPrefix("shell.") {
+                guard let webView, let documentID = body["documentID"] as? String,
+                      loadedNonce == coordinator.webReloadNonce, loadedGateway == coordinator.localGatewayURL,
+                      loadedHubID == coordinator.hubStore.activeHubID,
+                      loadedProxyToken == coordinator.proxy.proxyAuthToken else {
+                    replyHandler(nil, "Stale native shell owner")
+                    return
+                }
+                let generation = coordinator.shellState.generation
+                let hubID = coordinator.hubStore.activeHubID
+                let ownerID = ownerID
+                webView.evaluateJavaScript("window.__STEVE_NATIVE__?.documentID") { value, error in
+                    Task { @MainActor in
+                        guard error == nil, value as? String == documentID else {
+                            replyHandler(nil, "Stale native shell document")
+                            return
+                        }
+                        do {
+                            let result = try coordinator.handleShellBridgeCall(op: op, args: args, ownerID: ownerID,
+                                documentID: documentID, generation: generation, hubID: hubID)
+                            replyHandler(result, nil)
+                        } catch { replyHandler(nil, error.localizedDescription) }
+                    }
+                }
+                return
+            }
             Task { @MainActor in
                 do {
                     let result = try await coordinator.handleBridgeCall(op: op, args: args, platform: platform)
@@ -888,6 +950,27 @@ public struct SteveWebView: NSViewRepresentableFallback {
         }
 
         #if os(macOS)
+        @MainActor
+        public func webView(
+            _ webView: WKWebView,
+            runJavaScriptConfirmPanelWithMessage message: String,
+            initiatedByFrame frame: WKFrameInfo,
+            completionHandler: @escaping (Bool) -> Void
+        ) {
+            guard webView === self.webView, isTrustedGatewayFrame(frame), let window = webView.window else {
+                completionHandler(false)
+                return
+            }
+            let alert = NSAlert()
+            alert.messageText = "Steve"
+            alert.informativeText = message
+            alert.addButton(withTitle: L10n.tr("离开页面", "Leave Page"))
+            alert.addButton(withTitle: L10n.tr("取消", "Cancel"))
+            alert.beginSheetModal(for: window) { response in
+                completionHandler(response == .alertFirstButtonReturn)
+            }
+        }
+
         @MainActor
         public func webView(
             _ webView: WKWebView,

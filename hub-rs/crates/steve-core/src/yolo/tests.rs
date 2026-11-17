@@ -1278,6 +1278,36 @@ fn every_row_of_the_table() {
             "limit.3",
         ),
         (
+            "chan self checking",
+            facts(
+                "approve",
+                "chan_message",
+                &["yes"],
+                Subject::Chan(outbound(
+                    Identity::SelfAccount,
+                    Disclosure::Checking,
+                    true,
+                    OutboundStage::Draft,
+                )),
+            ),
+            "chan.checking",
+        ),
+        (
+            "chan bot unchecked",
+            facts(
+                "approve",
+                "chan_message",
+                &["yes"],
+                Subject::Chan(outbound(
+                    Identity::Bot,
+                    Disclosure::Unchecked,
+                    false,
+                    OutboundStage::Draft,
+                )),
+            ),
+            "chan.unchecked",
+        ),
+        (
             "chan bot internal",
             facts(
                 "approve",
@@ -2528,5 +2558,36 @@ fn a_channel_refusal_with_retry_is_not_a_disclosure_leak_or_an_automatic_retry()
         if stage == OutboundStage::Blocked {
             assert!(!reason.contains("泄露"));
         }
+    }
+}
+
+/// A check that did not finish is said as such, never as a leak; one that still runs is waited for.
+#[test]
+fn an_unfinished_check_is_named_honestly() {
+    let pl = place();
+    let p = Policy::default();
+    let judge_of = |identity, disclosure| {
+        judge(
+            &facts(
+                "approve",
+                "chan_message",
+                &["yes"],
+                Subject::Chan(outbound(identity, disclosure, true, OutboundStage::Draft)),
+            ),
+            &p,
+            &pl.env,
+        )
+    };
+    match judge_of(Identity::Bot, Disclosure::Unchecked) {
+        Verdict::Decline { reason, .. } => assert_eq!(reason, super::judge::UNCHECKED_REASON),
+        v => panic!("{v:?}"),
+    }
+    match judge_of(Identity::SelfAccount, Disclosure::Unchecked) {
+        Verdict::Decline { reason, .. } => assert!(reason.contains("披露检查没跑完"), "{reason}"),
+        v => panic!("{v:?}"),
+    }
+    match judge_of(Identity::SelfAccount, Disclosure::Checking) {
+        Verdict::Wait { reason, .. } => assert_eq!(reason, super::judge::CHECKING_REASON),
+        v => panic!("{v:?}"),
     }
 }

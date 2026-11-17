@@ -70,6 +70,7 @@ const WHAT_KEYS: &[&str] = &[
     "core.yolo.limit.disclosure_block",
     "core.yolo.limit.as_you_no_mark",
     "core.yolo.limit.as_you_no_check",
+    "core.yolo.limit.as_you_check_unfinished",
     "core.yolo.limit.port",
     "core.yolo.limit.release_script",
     "core.yolo.limit.steve_home",
@@ -322,6 +323,9 @@ fn outbound(f: &Facts, o: &Outbound) -> Option<Limit> {
                 3,
                 "以你本人的身份发出，但出站路径不会加 [AI] 标识",
             ));
+        }
+        if o.disclosure == Disclosure::Unchecked {
+            return Some(Limit::new(3, "以你本人的身份发出，但披露检查没跑完"));
         }
         if !o.disclosure.passed() {
             return Some(Limit::new(3, "以你本人的身份发出，但没有通过披露检查"));

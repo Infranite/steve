@@ -213,6 +213,13 @@ fn status(h: &H, id: &str) -> String {
         .to_string()
 }
 
+fn text_of(h: &H, id: &str) -> String {
+    row(h, "SELECT text FROM chan_messages WHERE id = ?", &[id])[0]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
 fn decision_of(h: &H, msg: &str) -> String {
     row(
         h,
@@ -384,6 +391,27 @@ fn checks_pass(h: &H) {
     h.env.gateway.script(CHECK_HEAD, PASS);
 }
 
+/// Runs the queue until no draft's disclosure check is still running (on your own account the check
+/// model runs after the draft is written).
+async fn checked(h: &H) {
+    for _ in 0..500 {
+        let waiting = row(
+            h,
+            "SELECT count(*) FROM chan_messages m JOIN reply_basis b ON b.id = m.basis_id
+              WHERE m.status = 'draft' AND b.verdict = 'checking'",
+            &[],
+        )[0]
+        .as_i64()
+        .unwrap();
+        if waiting == 0 {
+            return;
+        }
+        h.outbox.send_due(&h.ch).await;
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    panic!("a disclosure check did not finish");
+}
+
 fn nothing_sent(h: &H) {
     assert!(sent(h).is_empty(), "sent: {:?}", sent(h));
 }
@@ -505,6 +533,10 @@ async fn your_own_account_always_drafts_and_sends_the_edited_text_after_the_dela
     let d = r.decision_id.expect("decision");
     nothing_sent(&h);
     assert_eq!(status(&h, &m), "draft");
+    // the check model runs after the draft is written; the card says so meanwhile
+    let q = row(&h, "SELECT question FROM decisions WHERE id = ?", &[&d]);
+    assert_eq!(q[0], "以你本人发到「Steve 开发群」（披露检查还在跑）");
+    checked(&h).await;
     let q = row(
         &h,
         "SELECT question, draft, options FROM decisions WHERE id = ?",
@@ -660,10 +692,10 @@ fn generation(mem: &str) -> Option<Generation> {
 async fn another_groups_customer_is_flagged_and_rewritten() {
     let h = setup().await;
     checks_pass(&h);
-    h.env.gateway.script(
-        REWRITE_HEAD,
-        r#"{"text": "预算的事我这边还不清楚，确认后告诉你。"}"#,
-    );
+    // the rewrite deletes the flagged parts, nothing else
+    h.env
+        .gateway
+        .script(REWRITE_HEAD, r#"{"text": "下周开会再细聊。"}"#);
     let mem = acme(&h);
     let plan = recorded(&h, &h.oncall.clone(), "C_OPS", "o1", "ulilei", "预算多少").await;
     let d = h
@@ -672,7 +704,7 @@ async fn another_groups_customer_is_flagged_and_rewritten() {
             &h.ch,
             &out(
                 &plan,
-                "Acme 的预算有 30 万。",
+                "Acme 的预算有 30 万，下周开会再细聊。",
                 rule(&plan),
                 generation(&mem),
             ),
@@ -684,7 +716,7 @@ async fn another_groups_customer_is_flagged_and_rewritten() {
         panic!("not sent: {d:?}")
     };
     let s = sent(&h);
-    assert_eq!(s[0].1, "预算的事我这边还不清楚，确认后告诉你。");
+    assert_eq!(s[0].1, "下周开会再细聊。");
     let b = h
         .env
         .store()
@@ -692,7 +724,10 @@ async fn another_groups_customer_is_flagged_and_rewritten() {
         .unwrap()
         .unwrap();
     assert_eq!(b.verdict, "rewritten");
-    assert_eq!(b.rewrites[0]["from"], "Acme 的预算有 30 万。");
+    assert_eq!(
+        b.rewrites[0]["from"],
+        "Acme 的预算有 30 万，下周开会再细聊。"
+    );
     assert!(
         b.rewrites[0]["reason"].as_str().unwrap().contains("Acme"),
         "{:?}",
@@ -714,6 +749,7 @@ async fn another_groups_customer_is_flagged_and_rewritten() {
         .cloned()
         .unwrap();
     assert!(p.contains("「Acme」") && p.contains("「30 万」"), "{p}");
+    assert!(p.contains("只能删"), "{p}");
     // the check prompt had the knowledge with its effective level
     let c = h
         .env
@@ -790,10 +826,10 @@ async fn inside_the_sources_scope_it_counts_as_public() {
 async fn a_failed_rewrite_becomes_a_draft_even_with_a_grant() {
     let h = setup().await;
     checks_pass(&h);
-    // the rewrite keeps the number
+    // the rewrite keeps the number (it only deleted the name)
     h.env
         .gateway
-        .script(REWRITE_HEAD, r#"{"text": "那边大概 30 万。"}"#);
+        .script(REWRITE_HEAD, r#"{"text": "的预算有 30 万。"}"#);
     let mem = acme(&h);
     let plan = recorded(&h, &h.oncall.clone(), "C_OPS", "o1", "ulilei", "预算").await;
     exec(
@@ -838,7 +874,7 @@ async fn a_failed_rewrite_becomes_a_draft_even_with_a_grant() {
         &[&decision_id],
     );
     assert_eq!(q[0], "以值班小运发到「运维群」（可能泄露：「30 万」）");
-    assert_eq!(q[1], "那边大概 30 万。");
+    assert_eq!(q[1], "的预算有 30 万。");
     let b = h
         .env
         .store()
@@ -851,7 +887,7 @@ async fn a_failed_rewrite_becomes_a_draft_even_with_a_grant() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn the_check_model_sees_the_whole_reply_and_its_failure_is_a_leak() {
+async fn the_check_model_sees_the_whole_reply_and_its_failure_is_not_a_pass() {
     let h = setup().await;
     let plan = recorded(
         &h,
@@ -862,13 +898,38 @@ async fn the_check_model_sees_the_whole_reply_and_its_failure_is_a_leak() {
         "你们之前怎么说的",
     )
     .await;
-    // no answer from the check model: not a pass
+    // no answer from the check model: not a pass, and not a leak either
     let d = h
         .outbox
         .deliver(&h.ch, &out(&plan, "我们一般周四发布。", rule(&plan), None))
         .await
         .unwrap();
-    assert!(matches!(d, Delivered::Drafted { .. }), "{d:?}");
+    let Delivered::Drafted {
+        message_id,
+        decision_id,
+    } = d
+    else {
+        panic!("{d:?}")
+    };
+    let b = h
+        .env
+        .store()
+        .reader(|c| steve_channels::basis::of_message(c, WS, &message_id))
+        .unwrap()
+        .unwrap();
+    assert_eq!(b.verdict, "unchecked");
+    let q = row(
+        &h,
+        "SELECT question, options FROM decisions WHERE id = ?",
+        &[&decision_id],
+    );
+    let q0 = q[0].as_str().unwrap();
+    assert!(
+        q0.contains("（检查没跑完：检查模型的回答读不懂；试过 "),
+        "{q0}"
+    );
+    assert!(!q0.contains("可能泄露"), "{q0}");
+    assert_eq!(q[1], json!(r#"["yes","no"]"#), "nothing to rewrite");
     // the model finds a source reference
     h.env.gateway.script(
         CHECK_HEAD,
@@ -1269,6 +1330,7 @@ async fn a_trigger_reply_that_needs_approval_is_a_draft() {
     assert_eq!(r.label, "触发语：起草，等你批准");
     let m = r.out_message_id.unwrap();
     assert_eq!(status(&h, &m), "draft");
+    checked(&h).await;
     let q = row(
         &h,
         "SELECT question FROM decisions WHERE id = ?",
@@ -2243,12 +2305,13 @@ async fn yolo_approved_messages_in_your_name_carry_the_ai_mark() {
     h.env.gateway.script(H_SAFETY, REPLY);
     let me = h.me.clone();
 
-    // YOLO approves
+    // YOLO approves, once the check passed
     let r = push(&h, &me, msg("C_DEV", "d1", "ulilei", "@你 在吗", true))
         .await
         .response
         .unwrap();
     let d = r.decision_id.unwrap();
+    checked(&h).await;
     let dec =
         steve_modules::decisions::dispatch(&h.env.modules, &caller(WS, "yolo"), &d, "yes", "")
             .expect("ours")
@@ -3175,6 +3238,7 @@ async fn only_you_reading_skips_the_model_check_but_not_secrets() {
         audience_said: Some("你不是在我的设备上吗".into()),
         skip_model: false,
         internal_skip: false,
+        ..Default::default()
     };
     let you = Audience {
         scopes: vec!["space:spc_me".into(), "workspace".into(), "private".into()],
@@ -3378,10 +3442,9 @@ async fn a_template_receipt_goes_out_without_the_check_model() {
 async fn a_draft_is_not_rewritten_until_you_ask() {
     let h = setup().await;
     checks_pass(&h);
-    h.env.gateway.script(
-        REWRITE_HEAD,
-        r#"{"text": "预算的事我这边还不清楚，确认后告诉你。"}"#,
-    );
+    h.env
+        .gateway
+        .script(REWRITE_HEAD, r#"{"text": "下周开会再细聊。"}"#);
     let mem = acme(&h);
     let me = h.me.clone();
     let plan = recorded(&h, &me, "C_DEV", "d1", "ulilei", "预算多少").await;
@@ -3399,7 +3462,12 @@ async fn a_draft_is_not_rewritten_until_you_ask() {
         .outbox
         .deliver(
             &h.ch,
-            &out(&plan, "Acme 的预算有 30 万。", Auth::None, generation(&mem)),
+            &out(
+                &plan,
+                "Acme 的预算有 30 万，下周开会再细聊。",
+                Auth::None,
+                generation(&mem),
+            ),
         )
         .await
         .unwrap();
@@ -3410,13 +3478,14 @@ async fn a_draft_is_not_rewritten_until_you_ask() {
     else {
         panic!("{d:?}")
     };
+    checked(&h).await;
     assert_eq!(rewrites(), 0, "a draft is not rewritten on its own");
     let q = row(
         &h,
         "SELECT draft, options FROM decisions WHERE id = ?",
         &[&decision_id],
     );
-    assert_eq!(q[0], "Acme 的预算有 30 万。");
+    assert_eq!(q[0], "Acme 的预算有 30 万，下周开会再细聊。");
     assert_eq!(q[1], json!(r#"["yes","no","rewrite"]"#));
 
     // undone before the queue came by: the card is back, nothing is rewritten
@@ -3449,7 +3518,7 @@ async fn a_draft_is_not_rewritten_until_you_ask() {
         &[&again],
     );
     assert_eq!(q[0], "以你本人发到「Steve 开发群」（已改写）");
-    assert_eq!(q[1], "预算的事我这边还不清楚，确认后告诉你。");
+    assert_eq!(q[1], "下周开会再细聊。");
     assert_eq!(
         q[2],
         json!(r#"["yes","no"]"#),
@@ -3463,12 +3532,15 @@ async fn a_draft_is_not_rewritten_until_you_ask() {
         .unwrap()
         .unwrap();
     assert_eq!(b.verdict, "rewritten");
-    assert_eq!(b.rewrites[0]["from"], "Acme 的预算有 30 万。");
+    assert_eq!(
+        b.rewrites[0]["from"],
+        "Acme 的预算有 30 万，下周开会再细聊。"
+    );
     // approving the new card sends the rewritten text
     decide(&h, &again, "yes", "").expect("yes");
     h.env.clock.advance(11_000);
     assert_eq!(h.outbox.send_due(&h.ch).await, 1);
-    assert_eq!(sent(&h)[0].1, "预算的事我这边还不清楚，确认后告诉你。");
+    assert_eq!(sent(&h)[0].1, "下周开会再细聊。");
 }
 
 /// #14 under YOLO: it never approves a flagged text, so a draft it decides is rewritten once first, as a
@@ -3477,10 +3549,9 @@ async fn a_draft_is_not_rewritten_until_you_ask() {
 async fn under_yolo_a_flagged_draft_is_rewritten_first() {
     let h = setup_yolo(None, None, true).await;
     checks_pass(&h);
-    h.env.gateway.script(
-        REWRITE_HEAD,
-        r#"{"text": "预算的事我这边还不清楚，确认后告诉你。"}"#,
-    );
+    h.env
+        .gateway
+        .script(REWRITE_HEAD, r#"{"text": "下周开会再细聊。"}"#);
     let mem = acme(&h);
     let me = h.me.clone();
     let plan = recorded(&h, &me, "C_DEV", "d1", "ulilei", "预算多少").await;
@@ -3488,7 +3559,12 @@ async fn under_yolo_a_flagged_draft_is_rewritten_first() {
         .outbox
         .deliver(
             &h.ch,
-            &out(&plan, "Acme 的预算有 30 万。", Auth::None, generation(&mem)),
+            &out(
+                &plan,
+                "Acme 的预算有 30 万，下周开会再细聊。",
+                Auth::None,
+                generation(&mem),
+            ),
         )
         .await
         .unwrap();
@@ -3499,6 +3575,8 @@ async fn under_yolo_a_flagged_draft_is_rewritten_first() {
     else {
         panic!("{d:?}")
     };
+    // on your own account the check (and so the rewrite) runs after the draft is written
+    checked(&h).await;
     let rewrites = h
         .env
         .gateway
@@ -3508,14 +3586,16 @@ async fn under_yolo_a_flagged_draft_is_rewritten_first() {
         .iter()
         .filter(|p| p.starts_with(REWRITE_HEAD))
         .count();
-    assert_eq!(rewrites, 1, "rewritten once before the card");
+    assert_eq!(rewrites, 1, "rewritten once before YOLO looks");
     let q = row(
         &h,
-        "SELECT draft, options FROM decisions WHERE id = ?",
+        "SELECT draft, options, question FROM decisions WHERE id = ?",
         &[&decision_id],
     );
-    assert_eq!(q[0], "预算的事我这边还不清楚，确认后告诉你。");
+    assert_eq!(q[0], "下周开会再细聊。");
     assert_eq!(q[1], json!(r#"["yes","no"]"#));
+    assert_eq!(q[2], "以你本人发到「Steve 开发群」（已改写）");
+    assert_eq!(text_of(&h, &message_id), "下周开会再细聊。");
     let b = h
         .env
         .store()
@@ -3874,10 +3954,10 @@ async fn rewrite_and_wait(h: &H, message_id: &str, decision: &str) -> String {
 async fn a_rewrite_is_checked_against_the_retrieved_knowledge_too() {
     let h = setup().await;
     checks_pass(&h);
-    // the rewrite keeps what was flagged
+    // the rewrite keeps what was flagged (it only deleted the name)
     h.env
         .gateway
-        .script(REWRITE_HEAD, r#"{"text": "Acme 那边的预算大概 30 万。"}"#);
+        .script(REWRITE_HEAD, r#"{"text": "的预算有 30 万，下周再聊。"}"#);
     acme(&h);
     exec(
         &h,
@@ -3911,7 +3991,12 @@ async fn a_rewrite_is_checked_against_the_retrieved_knowledge_too() {
         .outbox
         .deliver(
             &h.ch,
-            &out(&plan, "Acme 的预算有 30 万。", Auth::None, Some(g)),
+            &out(
+                &plan,
+                "Acme 的预算有 30 万，下周再聊。",
+                Auth::None,
+                Some(g),
+            ),
         )
         .await
         .unwrap();
@@ -3922,6 +4007,7 @@ async fn a_rewrite_is_checked_against_the_retrieved_knowledge_too() {
     else {
         panic!("{d:?}")
     };
+    checked(&h).await;
     let basis = |h: &H| {
         h.env
             .store()
@@ -3948,13 +4034,14 @@ async fn a_rewrite_is_checked_against_the_retrieved_knowledge_too() {
         "SELECT question, options FROM decisions WHERE id = ?",
         &[&again],
     );
-    assert!(q[0].as_str().unwrap().contains("仍可能泄露"), "{q:?}");
+    let q0 = q[0].as_str().unwrap();
+    assert!(q0.contains("（已改写）（可能泄露："), "{q:?}");
     nothing_sent(&h);
 
     // the piece is gone from the index: the next rewrite cannot be checked against it and does not pass
     h.env
         .gateway
-        .script(REWRITE_HEAD, r#"{"text": "预算的事我确认后告诉你。"}"#);
+        .script(REWRITE_HEAD, r#"{"text": "下周再聊。"}"#);
     exec(&h, "DELETE FROM kb_chunks WHERE obj_id = 'kd_acme'");
     rewrite_and_wait(&h, &message_id, &again).await;
     let b = basis(&h);
@@ -4009,6 +4096,9 @@ async fn untracked_or_as_you_text_to_your_own_people_is_checked_by_the_model() {
     let mut r = out(&plan, "我们周四发布。", Auth::None, None);
     r.purpose = Purpose::Source;
     h.outbox.deliver(&h.ch, &r).await.unwrap();
+    // as you, the model looks after the draft is written
+    assert_eq!(asked(&h), 0);
+    checked(&h).await;
     assert_eq!(asked(&h), 1, "as you, nothing tracked: the model looks");
     // as you with tracked public knowledge: still the model
     let mem = h
@@ -4039,6 +4129,7 @@ async fn untracked_or_as_you_text_to_your_own_people_is_checked_by_the_model() {
         )
         .await
         .unwrap();
+    checked(&h).await;
     assert_eq!(asked(&h), 2, "as you: the model looks");
     // the same place on a bot: its own tracked public knowledge skips the model (so the place is the
     // workspace's own people), an agent's text with nothing tracked does not
@@ -5388,9 +5479,7 @@ async fn recovery_review_survives_edits_failed_rewrites_cooling_and_cold_restart
                     .as_str()
                     .unwrap()
                     .to_string();
-                h.env
-                    .gateway
-                    .script(REWRITE_HEAD, r#"{"text":"模型修改后的正文"}"#);
+                h.env.gateway.script(REWRITE_HEAD, r#"{"text":"完整正文"}"#);
                 if mode == "model_failure" {
                     h.env.gateway.unscript(REWRITE_HEAD);
                     h.env
@@ -5434,7 +5523,7 @@ async fn recovery_review_survives_edits_failed_rewrites_cooling_and_cold_restart
                     .unwrap();
                 let expected = match mode {
                     "manual" => edited,
-                    "model" => "模型修改后的正文",
+                    "model" => "完整正文",
                     _ => "待恢复的完整正文\n第二行",
                 };
                 assert_eq!(card.draft, expected);
@@ -5509,9 +5598,7 @@ async fn recovery_review_undo_and_a_second_rewrite_do_not_remove_the_human_gate(
         h.env.gateway.script_fail(REWRITE_HEAD, "unavailable");
         let (message, first) = recovered_draft(&h, &old, &fail, "").await;
         h.env.gateway.unscript(REWRITE_HEAD);
-        h.env
-            .gateway
-            .script(REWRITE_HEAD, r#"{"text":"第二次修改后的正文"}"#);
+        h.env.gateway.script(REWRITE_HEAD, r#"{"text":"第二行"}"#);
         decide(&h, &first, "rewrite", "").unwrap();
         cold_outbox(&h).send_due(&h.ch).await;
         let (same, review) = wait_review(&h, &message, &first).await;
@@ -5688,9 +5775,7 @@ async fn recovery_review_exception_then_another_edit_uses_a_fresh_provider_uuid(
         &h,
         &format!("UPDATE chan_messages SET basis_id='{basis}' WHERE id='{old}'"),
     );
-    h.env
-        .gateway
-        .script(REWRITE_HEAD, r#"{"text":"异常恢复后重新修改的正文"}"#);
+    h.env.gateway.script(REWRITE_HEAD, r#"{"text":"完整正文"}"#);
     decide(&h, &reopened, "rewrite", "").unwrap();
     cold_outbox(&h).send_due(&h.ch).await;
     let (next, review) = wait_review(&h, &old, &reopened).await;
@@ -6026,9 +6111,7 @@ async fn recovery_manual_edit_and_model_rewrite_require_new_review_and_new_uuid(
         let h = setup().await;
         *h.fake.block_send.lock().unwrap() = Some("external connection policy".into());
         let (m, d) = refused(&h, "rewrite-refused", "需要修改的原文").await;
-        h.env
-            .gateway
-            .script(REWRITE_HEAD, r#"{"text":"模型改写后的正文"}"#);
+        h.env.gateway.script(REWRITE_HEAD, r#"{"text":"原文"}"#);
         let edit = if manual {
             "用户修改后的正文"
         } else {
@@ -6048,14 +6131,7 @@ async fn recovery_manual_edit_and_model_rewrite_require_new_review_and_new_uuid(
             .reader(|c| base::decisions::get(c, &approve))
             .unwrap()
             .unwrap();
-        assert_eq!(
-            card.draft,
-            if manual {
-                edit
-            } else {
-                "模型改写后的正文"
-            }
-        );
+        assert_eq!(card.draft, if manual { edit } else { "原文" });
         let model_calls = h
             .env
             .gateway
@@ -6369,4 +6445,522 @@ async fn recovery_undo_of_unknown_discard_preserves_uncertainty_and_the_original
     h.outbox.send_due(&h.ch).await;
     assert_eq!(status(&h, &m), "unknown");
     assert_eq!(sent(&h).len(), 1);
+}
+
+// ---------------------------------------------------------------- the check after the draft (#4.9)
+
+fn basis_of(h: &H, message_id: &str) -> steve_channels::basis::BasisOut {
+    h.env
+        .store()
+        .reader(|c| steve_channels::basis::of_message(c, WS, message_id))
+        .unwrap()
+        .unwrap()
+}
+
+/// What the composer says of its reply, with no knowledge.
+fn composed() -> Option<Generation> {
+    Some(Generation {
+        model: "smart-1".into(),
+        ..Generation::default()
+    })
+}
+
+/// A draft in your name for `text`, written with `g`, and its card.
+async fn own_draft(
+    h: &H,
+    id: &str,
+    said: &str,
+    text: &str,
+    g: Option<Generation>,
+) -> (String, String) {
+    let me = h.me.clone();
+    let plan = recorded(h, &me, "C_DEV", id, "ulilei", said).await;
+    match h
+        .outbox
+        .deliver(&h.ch, &out(&plan, text, Auth::None, g))
+        .await
+        .unwrap()
+    {
+        Delivered::Drafted {
+            message_id,
+            decision_id,
+        } => (message_id, decision_id),
+        d => panic!("{d:?}"),
+    }
+}
+
+/// On your own account the check model runs after the draft is written. When it gives no answer —
+/// twice, the second time on the smart tier — the draft's check did not finish: `unchecked`, with
+/// both tries named, not a leak; the card says “检查没跑完”, never “可能泄露”, and offers nothing to
+/// rewrite; YOLO does not send it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_check_that_did_not_finish_is_not_a_leak() {
+    let h = setup().await;
+    let (m, d) = own_draft(&h, "d1", "周四能上线吗", "周四可以。", composed()).await;
+    assert_eq!(basis_of(&h, &m).verdict, "checking");
+    let tries = || {
+        h.env
+            .gateway
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, p)| p.starts_with(CHECK_HEAD))
+            .map(|(t, _)| *t)
+            .collect::<Vec<_>>()
+    };
+    assert!(
+        tries().is_empty(),
+        "nothing waits on the model when drafting"
+    );
+    h.env.gateway.fail("upstream timeout");
+    h.env.gateway.fail("upstream timeout");
+    checked(&h).await;
+    assert_eq!(
+        tries(),
+        vec![steve_modules::Tier::Fast, steve_modules::Tier::Smart],
+        "fast, then smart once"
+    );
+    let b = basis_of(&h, &m);
+    assert_eq!(b.verdict, "unchecked");
+    assert_eq!(b.check_model.as_deref(), Some("tier:fast → tier:smart"));
+    assert!(
+        b.spans[0]["reason"]
+            .as_str()
+            .unwrap()
+            .starts_with(steve_channels::disclosure::R_MODEL_FAILED),
+        "{:?}",
+        b.spans
+    );
+    let q = row(
+        &h,
+        "SELECT question, options, status FROM decisions WHERE id = ?",
+        &[&d],
+    );
+    assert_eq!(
+        q[0],
+        "以你本人发到「Steve 开发群」（检查没跑完：出错：upstream timeout；试过 tier:fast → tier:smart）"
+    );
+    assert_eq!(q[1], json!(r#"["yes","no"]"#));
+    assert_eq!(q[2], "open");
+    // YOLO never approves it; you can
+    let yolo =
+        steve_modules::decisions::dispatch(&h.env.modules, &caller(WS, "yolo"), &d, "yes", "")
+            .expect("ours");
+    assert!(
+        matches!(&yolo, Err(ApiError::Conflict(e)) if e.contains("披露检查")),
+        "{yolo:?}"
+    );
+    decide(&h, &d, "yes", "").expect("you approve");
+    assert_eq!(status(&h, &m), "pending");
+}
+
+/// The first try fails, the smart tier answers: the check counts, and the card is cleared.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_first_try_gets_a_second_on_the_smart_tier() {
+    let h = setup().await;
+    let (m, d) = own_draft(&h, "d1", "周四能上线吗", "周四可以。", composed()).await;
+    h.env.gateway.fail("busy");
+    h.env.gateway.reply(PASS);
+    checked(&h).await;
+    let b = basis_of(&h, &m);
+    assert_eq!(b.verdict, "pass");
+    assert_eq!(b.check_model.as_deref(), Some("tier:fast → fake"));
+    let q = row(&h, "SELECT question FROM decisions WHERE id = ?", &[&d]);
+    assert_eq!(q[0], "以你本人发到「Steve 开发群」");
+    // YOLO may approve what passed
+    steve_modules::decisions::dispatch(&h.env.modules, &caller(WS, "yolo"), &d, "yes", "")
+        .expect("ours")
+        .expect("approved");
+}
+
+/// You dealt with the draft before its check finished: its record says the check did not finish,
+/// and the check that comes back later changes nothing.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_draft_you_approved_while_it_was_checked_stays_unchecked() {
+    let h = setup().await;
+    checks_pass(&h);
+    let (m, d) = own_draft(&h, "d1", "周四能上线吗", "周四可以。", composed()).await;
+    decide(&h, &d, "yes", "").expect("approve");
+    let b = basis_of(&h, &m);
+    assert_eq!(b.verdict, "unchecked");
+    assert_eq!(
+        b.spans[0]["reason"],
+        steve_channels::outbound::R_DEALT_FIRST
+    );
+    h.outbox.send_due(&h.ch).await;
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert_eq!(basis_of(&h, &m).verdict, "unchecked");
+    // and one you said no to
+    let (m, d) = own_draft(&h, "d2", "周五呢", "周五也行。", composed()).await;
+    decide(&h, &d, "no", "").expect("no");
+    assert_eq!(basis_of(&h, &m).verdict, "unchecked");
+}
+
+/// The check sees what the audience can already read (the conversation around the message, not only
+/// the message) and the samples of how you talk the composer was shown; a sample's content copied
+/// into the reply is flagged, its tone is not.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_check_knows_the_conversation_and_flags_copied_samples() {
+    let h = setup().await;
+    checks_pass(&h);
+    let me = h.me.clone();
+    recorded(&h, &me, "C_DEV", "e1", "uhan", "灰度是从周二开始的").await;
+    let g = Generation {
+        model: "smart-1".into(),
+        style_samples: vec!["你急的话我这就点重启".into(), "稍等".into()],
+        ..Generation::default()
+    };
+    let (m, d) = own_draft(
+        &h,
+        "d1",
+        "能先停一下吗",
+        "稍等，你急的话我这就点重启",
+        Some(g),
+    )
+    .await;
+    checked(&h).await;
+    let p = h
+        .env
+        .gateway
+        .prompts
+        .lock()
+        .unwrap()
+        .iter()
+        .rev()
+        .find(|p| p.starts_with(CHECK_HEAD))
+        .cloned()
+        .unwrap();
+    let seen = p.find("<<<对话").expect("the conversation");
+    assert!(p[seen..].contains("灰度是从周二开始的"), "{p}");
+    assert!(p[seen..].contains("能先停一下吗"), "{p}");
+    assert!(
+        p.contains("<<<样本\n- 你急的话我这就点重启\n- 稍等\n>>>"),
+        "{p}"
+    );
+    let b = basis_of(&h, &m);
+    assert_eq!(b.verdict, "drafted");
+    assert_eq!(
+        b.spans[0]["reason"],
+        steve_channels::disclosure::R_STYLE_COPY
+    );
+    let q = row(&h, "SELECT question FROM decisions WHERE id = ?", &[&d]);
+    assert!(q[0].as_str().unwrap().contains("可能泄露"), "{q:?}");
+}
+
+/// Under YOLO a flagged draft is rewritten once, by deleting only: a rewrite that writes something
+/// the reply did not say is discarded (the draft stays as it was, flagged); so is one that leaves only
+/// hedges; one the model left empty means there is nothing to say: the draft is dropped and its card
+/// closes saying why. A rewrite down to a plain answer (“没有”) is an answer, not nothing.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_rewrite_may_only_delete_and_only_empty_is_nothing_to_say() {
+    let h = setup_yolo(None, None, true).await;
+    checks_pass(&h);
+    let mem = acme(&h);
+    h.env.gateway.script(
+        REWRITE_HEAD,
+        r#"{"text": "预算的事我这边还不清楚，确认后告诉你。"}"#,
+    );
+    let (m, d) = own_draft(
+        &h,
+        "d1",
+        "预算多少",
+        "Acme 的预算有 30 万。",
+        generation(&mem),
+    )
+    .await;
+    checked(&h).await;
+    let b = basis_of(&h, &m);
+    assert_eq!(b.verdict, "drafted", "the added words were discarded");
+    assert!(b.rewrites.as_array().unwrap().is_empty());
+    assert_eq!(text_of(&h, &m), "Acme 的预算有 30 万。");
+    let q = row(
+        &h,
+        "SELECT question, status FROM decisions WHERE id = ?",
+        &[&d],
+    );
+    assert!(q[0].as_str().unwrap().contains("（可能泄露："), "{q:?}");
+    assert!(
+        q[0].as_str()
+            .unwrap()
+            .contains(steve_channels::outbound::NOTE_ADDED),
+        "{q:?}"
+    );
+    assert_eq!(q[1], "open");
+
+    // a fresh setup: the rewrite deletes down to hedges — not used, the draft waits for you
+    let h = setup_yolo(None, None, true).await;
+    checks_pass(&h);
+    let mem = acme(&h);
+    h.env
+        .gateway
+        .script(REWRITE_HEAD, r#"{"text": "这个还不好说。"}"#);
+    let (m, d) = own_draft(
+        &h,
+        "d1",
+        "预算多少",
+        "这个还不好说，Acme 的预算有 30 万。",
+        generation(&mem),
+    )
+    .await;
+    checked(&h).await;
+    assert_eq!(status(&h, &m), "draft");
+    assert_eq!(text_of(&h, &m), "这个还不好说，Acme 的预算有 30 万。");
+    assert!(basis_of(&h, &m).rewrites.as_array().unwrap().is_empty());
+    let q = row(
+        &h,
+        "SELECT question, status FROM decisions WHERE id = ?",
+        &[&d],
+    );
+    assert!(
+        q[0].as_str()
+            .unwrap()
+            .contains(steve_channels::outbound::NOTE_HOLLOW),
+        "{q:?}"
+    );
+    assert_eq!(q[1], "open");
+
+    // a fresh setup: the rewrite deletes down to a plain “no” — an answer, checked again and kept
+    let h = setup_yolo(None, None, true).await;
+    checks_pass(&h);
+    let mem = acme(&h);
+    h.env.gateway.script(REWRITE_HEAD, r#"{"text": "没有"}"#);
+    let (m, _) = own_draft(
+        &h,
+        "d1",
+        "这次对 Acme 有影响吗",
+        "没有，Acme 的预算有 30 万。",
+        generation(&mem),
+    )
+    .await;
+    checked(&h).await;
+    assert_ne!(status(&h, &m), "discarded");
+    let b = basis_of(&h, &m);
+    assert_eq!(b.rewrites.as_array().unwrap().len(), 1, "{b:?}");
+    assert_eq!(text_of(&h, &m), "没有");
+
+    // a fresh setup: the model leaves nothing
+    let h = setup_yolo(None, None, true).await;
+    checks_pass(&h);
+    let mem = acme(&h);
+    h.env.gateway.script(REWRITE_HEAD, r#"{"text": ""}"#);
+    let (m, d) = own_draft(
+        &h,
+        "d1",
+        "预算多少",
+        "Acme 的预算有 30 万。",
+        generation(&mem),
+    )
+    .await;
+    checked(&h).await;
+    assert_eq!(status(&h, &m), "discarded");
+    let q = row(
+        &h,
+        "SELECT status, result FROM decisions WHERE id = ?",
+        &[&d],
+    );
+    assert_eq!(q[0], "expired");
+    assert!(
+        q[1].as_str()
+            .unwrap()
+            .contains(steve_channels::outbound::BY_NOTHING_LEFT),
+        "{q:?}"
+    );
+    nothing_sent(&h);
+}
+
+/// A bot's direct reply the rewrite left empty is not said, and the audit says so.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_direct_reply_left_empty_is_not_said_and_recorded() {
+    let h = setup().await;
+    checks_pass(&h);
+    let mem = acme(&h);
+    h.env.gateway.script(REWRITE_HEAD, r#"{"text": ""}"#);
+    let plan = recorded(&h, &h.oncall.clone(), "C_OPS", "o1", "ulilei", "预算多少").await;
+    let d = h
+        .outbox
+        .deliver(
+            &h.ch,
+            &out(
+                &plan,
+                "Acme 的预算有 30 万。",
+                rule(&plan),
+                generation(&mem),
+            ),
+        )
+        .await
+        .unwrap();
+    assert_eq!(d, Delivered::Skipped);
+    nothing_sent(&h);
+    assert_eq!(
+        row(
+            &h,
+            "SELECT count(*) FROM chan_messages WHERE direction = 'out'",
+            &[]
+        )[0],
+        0
+    );
+    // not silently: the audit names the message answered and why
+    let a = row(
+        &h,
+        "SELECT target, detail FROM audit WHERE action = 'chan_message.nothing_left'",
+        &[],
+    );
+    assert_eq!(a[0], json!(plan.message_id), "{a:?}");
+    assert!(
+        a[1].as_str()
+            .unwrap()
+            .contains(steve_channels::outbound::BY_NOTHING_LEFT),
+        "{a:?}"
+    );
+}
+
+/// A bot's direct reply the rewrite deleted down to a plain answer (“没有”, “确定”) says that answer:
+/// it is checked again and sent, never skipped.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_direct_reply_left_with_an_answer_is_said() {
+    for (asked, reply, left) in [
+        (
+            "这次对 Acme 有影响吗",
+            "没有，Acme 的预算有 30 万。",
+            "没有",
+        ),
+        ("窗口定了吗", "确定，Acme 的预算有 30 万。", "确定"),
+    ] {
+        let h = setup().await;
+        checks_pass(&h);
+        let mem = acme(&h);
+        h.env
+            .gateway
+            .script(REWRITE_HEAD, format!(r#"{{"text": "{left}"}}"#));
+        let plan = recorded(&h, &h.oncall.clone(), "C_OPS", "o1", "ulilei", asked).await;
+        let d = h
+            .outbox
+            .deliver(&h.ch, &out(&plan, reply, rule(&plan), generation(&mem)))
+            .await
+            .unwrap();
+        assert!(matches!(d, Delivered::Sent { .. }), "{left}: {d:?}");
+        assert!(sent(&h)[0].1.starts_with(left), "{:?}", sent(&h));
+    }
+}
+
+/// A bot's direct reply the rewrite deleted down to hedges only is not said in their place: the
+/// original waits for you as a draft, flagged, and nothing is dropped.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_direct_reply_left_with_hedges_waits_for_you() {
+    let h = setup().await;
+    checks_pass(&h);
+    let mem = acme(&h);
+    h.env
+        .gateway
+        .script(REWRITE_HEAD, r#"{"text": "这个还不好说。"}"#);
+    let plan = recorded(&h, &h.oncall.clone(), "C_OPS", "o1", "ulilei", "预算多少").await;
+    let d = h
+        .outbox
+        .deliver(
+            &h.ch,
+            &out(
+                &plan,
+                "这个还不好说，Acme 的预算有 30 万。",
+                rule(&plan),
+                generation(&mem),
+            ),
+        )
+        .await
+        .unwrap();
+    let Delivered::Drafted { message_id, .. } = d else {
+        panic!("not a draft: {d:?}")
+    };
+    nothing_sent(&h);
+    assert_eq!(
+        text_of(&h, &message_id),
+        "这个还不好说，Acme 的预算有 30 万。"
+    );
+}
+
+/// Conflict integration must keep both contracts: model rewrites can only delete, and every
+/// surviving recovery draft still needs human review under a fresh provider UUID.
+#[tokio::test(flavor = "multi_thread")]
+async fn recovery_model_rewrites_preserve_delete_only_and_human_review() {
+    use steve_channels::outbound::{BY_NOTHING_LEFT, NOTE_ADDED, NOTE_HOLLOW};
+    for (model_text, note) in [
+        ("新增外发承诺", Some(NOTE_ADDED)),
+        ("这个还不好说", Some(NOTE_HOLLOW)),
+        ("", None),
+    ] {
+        let h = setup_yolo(None, None, true).await;
+        *h.fake.block_target_send.lock().unwrap() = Some("target_forbidden (-32016)".into());
+        let original = "这个还不好说，完整正文。";
+        let (old, fail) = refused(&h, "merge-rewrite", original).await;
+        exec(
+            &h,
+            &format!(
+                "UPDATE chan_messages SET composed='{{\"style_samples\":[\"旧语气样本\"]}}' WHERE id='{old}'"
+            ),
+        );
+        let provenance = row(&h, "SELECT composed FROM chan_messages WHERE id=?", &[&old]);
+        h.env
+            .gateway
+            .script(REWRITE_HEAD, json!({"text":model_text}).to_string());
+        decide(&h, &fail, "rewrite", "").unwrap();
+        cold_outbox(&h).send_due(&h.ch).await;
+        if let Some(note) = note {
+            let (next, review) = wait_review(&h, &old, &fail).await;
+            assert_ne!(next, old);
+            assert_eq!(status(&h, &old), "discarded");
+            let card = h
+                .env
+                .store()
+                .reader(|c| base::decisions::get(c, &review))
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                card.draft, original,
+                "invalid model text must not replace the original"
+            );
+            assert!(card.question.contains(note), "{}", card.question);
+            assert_eq!(
+                row(
+                    &h,
+                    "SELECT composed FROM chan_messages WHERE id=?",
+                    &[&next]
+                ),
+                provenance
+            );
+            let engine = review_engine(&h);
+            recovery_yolo::enable(&engine, true);
+            assert_eq!(
+                engine.consider(&review).unwrap().unwrap().outcome,
+                "declined"
+            );
+            *h.fake.block_target_send.lock().unwrap() = None;
+            h.env.clock.advance(3_600_000);
+            cold_outbox(&h).send_due(&h.ch).await;
+            assert_eq!(status(&h, &next), "draft");
+        } else {
+            for _ in 0..200 {
+                if status(&h, &old) == "discarded" {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            assert_eq!(status(&h, &old), "discarded");
+            assert_eq!(
+                count(
+                    &h,
+                    "SELECT count(*) FROM chan_messages WHERE direction='out' AND status='draft'",
+                    &[]
+                ),
+                0
+            );
+            let d = h
+                .env
+                .store()
+                .reader(|c| base::decisions::get(c, &fail))
+                .unwrap()
+                .unwrap();
+            assert_eq!(d.result["superseded"], BY_NOTHING_LEFT);
+        }
+        nothing_sent(&h);
+    }
 }

@@ -1,7 +1,7 @@
 /* Devices · Clients (#/devices/clients, formerly 设置 · 访问与客户端): this client, the other clients signed in to the
  * Hub (the instance owner sees every member's) with the route each last came by, the signed-out ones folded away,
  * and the access tokens command lines and scripts sign in with. A token's text is shown once, when it is made. */
-import { useState, type ReactNode } from "react"
+import { useEffect, useState, type ReactNode } from "react"
 import { GlobeIcon, KeyRoundIcon, LogOutIcon, MonitorIcon, MonitorSmartphoneIcon, QrCodeIcon, SmartphoneIcon, SquareTerminalIcon } from "lucide-react"
 import { useT } from "@/i18n"
 import { date } from "@/i18n/format"
@@ -16,6 +16,7 @@ import { access, type AccessClient, type AccessToken, type AccessView } from "@/
 import { toast } from "@/store"
 import { Loading, Notice, openSheet } from "@/ui"
 import { ageOf, agoText, clientKind, routeLabel, type ClientKind } from "@/device-model"
+import { clientKey, clientOnline } from "@/device-map-model"
 import { useDevices } from "@/devices-data"
 import { Chip, DCard, DRow } from "@/devices-ui"
 import { cn } from "cn"
@@ -30,15 +31,26 @@ function groups(v: AccessView, live: boolean): Group[] {
   const m = new Map<string, AccessClient[]>()
   for (const c of [...v.clients].filter((c) => !!c.revoked !== live).sort((a, b) => (b.last_seen ?? b.created) - (a.last_seen ?? a.created))) {
     if (c.id === v.current) continue
-    const key = [c.user_id, c.name, c.kind, c.platform, c.last_route, c.token_id].join("\u0000")
+    const key = clientKey(c)
     m.set(key, [...(m.get(key) ?? []), c])
   }
   return [...m].map(([key, clients]) => ({ key, clients, head: clients[0] }))
 }
 
-export function ClientsTab() {
+/** `focus`: a client to bring into view (from the map), its row lit for a moment */
+export function ClientsTab({ focus }: { focus?: string }) {
   const t = useT(), { access: v, accessError, reloadAccess } = useDevices()
   const [confirm, setConfirm] = useState<Group | null>(null)
+  const ready = !!v
+  useEffect(() => {
+    if (!focus || !ready) return
+    const el = document.querySelector<HTMLElement>(`[data-client="${CSS.escape(focus)}"], [data-client-current="${CSS.escape(focus)}"]`)
+    if (!el) return
+    el.scrollIntoView({ block: "center", behavior: "smooth" })
+    el.setAttribute("data-client-focus", "")
+    const timer = setTimeout(() => el.removeAttribute("data-client-focus"), 1600)
+    return () => { clearTimeout(timer); el.removeAttribute("data-client-focus") }
+  }, [focus, ready])
   if (!v) return accessError ? <Notice tone="destructive">{t("devices:loadFailed", { error: accessError })}</Notice> : <Loading />
   const now = Date.now()
   const tokenName = (id?: string | null) => (id ? v.tokens.find((x) => x.id === id)?.name : undefined)
@@ -52,14 +64,19 @@ export function ClientsTab() {
     {extra}
     {mine(c) && tokenName(c.token_id) && <span>{t("devices:clients.token", { name: tokenName(c.token_id) })}</span>}
   </>
+  /* online: it holds the live connection to the Hub now (newer Hubs say so; an older one only for this client) */
+  const presence = v.clients.some((c) => c.online != null)
+  const when = (c: AccessClient, on: boolean) => <span title={c.last_seen ? date(c.last_seen, { dateStyle: "medium", timeStyle: "short" }) : undefined}>{on ? t("devices:node.now") : c.last_seen ? agoText(c.last_seen, now) : t("devices:tokens.neverUsed")}</span>
+  const onBadge = <Badge tone="success" size="sm" dot className="font-normal" data-client-online>{t("devices:status.online")}</Badge>
   const row = (g: Group) => {
-    const c = g.head, age = ageOf(c.last_seen, c.created, now), Icon = ICON[clientKind(c.kind, c.platform)]
+    const c = g.head, on = g.clients.some((x) => clientOnline(x, v.current)), age = on ? "fresh" : ageOf(c.last_seen, c.created, now), Icon = ICON[clientKind(c.kind, c.platform)]
     return <DRow key={g.key} icon={<Icon />} className={cn("group/client", age !== "fresh" && "[&>span:nth-child(-n+2)]:opacity-70")} data-client={c.id}
       title={<><span className="truncate">{c.name}</span>
+        {on && onBadge}
         {g.clients.length > 1 && <span className="type-footnote tabular-nums text-muted-foreground" data-client-count={g.clients.length}>{t("devices:clients.sameN", { count: g.clients.length })}</span>}
         {!mine(c) && c.user_id && <Chip>{t("devices:clients.of", { name: v.users?.[c.user_id] ?? c.user_id })}</Chip>}
         {age === "unused" && <Badge tone="warning" size="sm" data-client-unused>{t("devices:clients.unused30")}</Badge>}</>}
-      sub={facts(c, <span title={c.last_seen ? date(c.last_seen, { dateStyle: "medium", timeStyle: "short" }) : undefined}>{c.last_seen ? agoText(c.last_seen, now) : t("devices:tokens.neverUsed")}</span>)}>
+      sub={facts(c, when(c, on))}>
       <Button size="sm" variant="ghost" className="text-destructive" onClick={() => setConfirm(g)} data-revoke-client={c.id}>{t("devices:clients.revoke")}</Button>
     </DRow>
   }
@@ -76,7 +93,7 @@ export function ClientsTab() {
           </div>
         </DCard>
         <DCard title={t("devices:clients.others", { n: live.length })} sub={t(v.all && Object.keys(v.users ?? {}).some((id) => id !== v.me) ? "devices:clients.othersSubAll" : "devices:clients.othersSub")} data-access-clients
-          action={<Button size="sm" variant="outline" onClick={() => openSheet("pairClient")} data-open-pair-qr><QrCodeIcon />{t("devices:clients.add")}</Button>}>
+          action={<Button size="sm" variant="outline" onClick={() => openSheet("addDevice", { kind: "client" })} data-open-pair-qr><QrCodeIcon />{t("devices:clients.add")}</Button>}>
           <div className="border-t border-border/70">
             {fresh.map(row)}
             {!live.length && <p className="px-5 py-4 type-callout text-muted-foreground" data-no-clients>{t("devices:clients.none")}</p>}
@@ -92,7 +109,7 @@ export function ClientsTab() {
       </div>
       <div className="flex min-w-0 flex-col gap-4">
         <Tokens v={v} reload={reloadAccess} />
-        <p className="px-1 type-footnote text-muted-foreground">{t("devices:clients.note")}</p>
+        <p className="px-1 type-footnote text-muted-foreground" data-clients-note>{t(presence ? "devices:clients.onlineNote" : "devices:clients.note")}</p>
       </div>
       {confirm && <RevokeClient v={v} group={confirm} onClose={() => setConfirm(null)} onDone={reloadAccess} />}
     </div>
