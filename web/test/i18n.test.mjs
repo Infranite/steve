@@ -141,6 +141,7 @@ const ALLOW = {
   "outputs.tsx": [["预览", "源码", "逐张", "连续"], "view mode ids (labels via t()); data-gallery in browser tests"],
   "vault/new-item.tsx": [["私钥", "恢复码", "内容"], "matched in the Hub's field labels"],
   "version.tsx": [["拒绝"], "matched in the Hub's upgrade error"],
+  "todos/model.ts": [["一", "一二三四五六日天", "三", "上午", "下", "下个", "下午", "中午", "之前", "二", "五", "今", "今天", "今日", "今晚", "六", "分", "前", "半", "后天", "周", "四", "天", "日", "日号", "早上", "明", "明天", "明日", "明晚", "星期", "晚上", "月", "本", "点", "礼拜", "这", "："], "the date and time words the quick-add rules read in what a person types; never shown"],
   "upgrade-guide.ts": [["升级已提交"], "matched in the Hub's upgrade error"],
 }
 

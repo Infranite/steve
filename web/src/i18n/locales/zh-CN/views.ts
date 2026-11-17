@@ -508,6 +508,8 @@ export default {
   /* the 我的 page */
   more: {
     title: "我的",
+    feed: "信息流",
+    feedSub: "汇报、阅读和完成通知，不打断你",
     me: "我",
     meSub: "你自己的联系人资料：称呼、时区、语言",
     steveSub: "你的助手 · 名字、性格、头像",

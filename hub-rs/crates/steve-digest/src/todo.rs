@@ -833,6 +833,17 @@ pub fn item_linked(c: &Connection, ws: &str, goal: &str, item: &str) -> Result<b
     )?)
 }
 
+/// The items linked to goal `goal` (`part_of`), oldest link first.
+pub fn linked_items(c: &Connection, ws: &str, goal: &str) -> Result<Vec<String>> {
+    Ok(c
+        .prepare_cached(
+            "SELECT subject_id FROM links WHERE workspace_id = ? AND subject_type = 'item' AND predicate = ?
+                AND object_type = 'todo' AND object_id = ? ORDER BY created",
+        )?
+        .query_map(params![ws, PART_OF, goal], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?)
+}
+
 /// What an item's status counts as in a goal's progress.
 fn item_state(c: &Connection, ws: &str, item: &str) -> Result<Option<&'static str>> {
     let status: Option<String> = c
@@ -873,14 +884,7 @@ pub fn progress(c: &Connection, ws: &str, goal: &str) -> Result<Value> {
             _ => states.push("open"),
         }
     }
-    let linked: Vec<String> = c
-        .prepare_cached(
-            "SELECT subject_id FROM links WHERE workspace_id = ? AND subject_type = 'item' AND predicate = ?
-                AND object_type = 'todo' AND object_id = ? ORDER BY created",
-        )?
-        .query_map(params![ws, PART_OF, goal], |r| r.get(0))?
-        .collect::<rusqlite::Result<_>>()?;
-    for i in linked {
+    for i in linked_items(c, ws, goal)? {
         if items.insert(i.clone())
             && let Some(s) = item_state(c, ws, &i)?
         {

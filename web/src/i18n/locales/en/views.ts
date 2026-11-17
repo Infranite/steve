@@ -526,6 +526,8 @@ export default {
   },
   more: {
     title: "Me",
+    feed: "Feed",
+    feedSub: "Reports, readings and completion notices, without interrupting you",
     me: "Me",
     meSub: "Your own contact details: name, time zone, language",
     steveSub: "Your assistant · name, personality, avatar",

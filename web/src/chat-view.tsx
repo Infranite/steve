@@ -1,5 +1,6 @@
 import type { RFile } from "@/api"
 import { Files } from "@/attach"
+import { MineButton } from "@/mine"
 import { cue, onCue, type HeroCue } from "@/bus"
 import { ChannelMessageBody } from "@/channels/message-body"
 import { ChatRail, LiveSteps, NoticeLine, RailToggle, showNotices, StepsBlock } from "@/chat2"
@@ -306,6 +307,7 @@ export function ChatView({ conv }: { conv?: string } = {}) {
   return (
     <div className="flex h-full min-h-0 overflow-hidden text-foreground" data-chat-page data-chat-conversation={conv?.replace(/^chan:/, "")} data-chat-conversation-ready={conv ? !!im && !imLoading && !imError : undefined}><div className="relative flex min-w-0 flex-1 flex-col">
       <header className="flex h-13 shrink-0 items-center gap-2 border-b border-border/70 px-3 sm:px-5" data-chat-header>
+        {!conv && <MineButton />}
         <Hero />
         <div className="flex-1" />
         {!conv && <HistoryToggle />}

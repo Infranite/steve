@@ -98,7 +98,8 @@ try {
     await page.locator('[data-feed-entry="entry-80"]').waitFor()
     assert.equal(await page.locator("[data-feed-entry]").count(), 50)
     assert.equal(calls.filter((call) => call.method !== "GET").length, 0)
-    if (width === 390) { assert.equal(await page.locator("[data-mobile-tabs] a").count(), 5); assert.equal(await page.locator('[data-tab="feed"]').getAttribute("aria-current"), "page") }
+    /* on a phone 信息流 is the first row of 我的 (the avatar at the top left), not a tab */
+    if (width === 390) { assert.equal(await page.locator("[data-mobile-tabs] a").count(), 5); assert.equal(await page.locator('[data-mobile-tabs] [aria-current="page"]').count(), 0); await page.locator("[data-mine]").waitFor() }
     else assert.equal(await page.locator('[data-nav="feed"]').getAttribute("aria-current"), "page")
     await shot(page, `feed-${width}-${theme}`)
     await page.locator('[data-feed-entry="entry-80"] [data-feed-expand]').click()

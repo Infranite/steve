@@ -226,6 +226,8 @@ export default {
   nav: {
     feed: "信息流",
     chat: "对话",
+    calendar: "日历",
+    todos: "待办",
     inbox: "待处理",
     items: "事项",
     projects: "项目",
@@ -268,6 +270,8 @@ export default {
     crumbsMenu: "更多层级",
     breadcrumb: "所在位置",
     tabs: "主导航",
+    /* the gray count beside 待办: never a reminder badge */
+    todoCount_other: "{{count}} 条今天到期或逾期",
   },
   /* the composer's slash commands: the zh-CN name is also the token the Hub reads ("/汇报") */
   cmd: {

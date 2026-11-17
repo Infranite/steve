@@ -2,7 +2,8 @@
  * Its head is the workspace (Steve's mark, the workspace's name, its menu) with the button that folds the sidebar to a
  * rail of icons; under it the Hub, the YOLO line, the running-status pill and search as a field with ⌘K; then the nav
  * groups; at the bottom the signed-in account (affectUI Profile Menu), the theme and the versions. A phone has no
- * sidebar: the tab bar at the bottom, and 我的 for the rest. */
+ * sidebar: the tab bar at the bottom (对话 · 待处理 · 日历 · 待办 · 事项), and 我的 for the rest, behind the avatar at the
+ * top left of each top-level page (mine.tsx). */
 import { useEffect, useState } from "react"
 import { cn } from "cn"
 import { api } from "@/api"
@@ -13,6 +14,9 @@ import { HubSwitcher } from "@/hub-ui"
 import { useT } from "@/i18n"
 import { RunningNowPill } from "@/running-pill"
 import { LOADED_WEB_VERSION, pendingCards, st } from "@/store"
+import { Initials, useMe } from "@/mine"
+import { useMinute, useTodos } from "@/todos/data"
+import { dueCount } from "@/todos/model"
 import { getTheme, go, openSheet, setTheme, useScrollMore, type ThemePref } from "@/ui"
 import { shortVersion } from "@/updates"
 import { WorkspaceSwitcher } from "@/workspace-switcher"
@@ -23,29 +27,33 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover
 import { Sidebar as UISidebar, SidebarContent, SidebarFooter, SidebarGroup, SidebarGroupContent, SidebarGroupLabel, SidebarHeader, SidebarMenu, SidebarMenuBadge, SidebarMenuButton, SidebarMenuItem, SidebarRail, useSidebar } from "@/components/ui/sidebar"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 import {
-  BookOpenIcon, BotIcon, ChartNoAxesColumnIcon, ChevronsUpDownIcon, ContactRoundIcon, FolderIcon, InboxIcon, KeyRoundIcon, ListTodoIcon, LogOutIcon, MailIcon,
-  MessageCircleIcon, MessagesSquareIcon, MonitorIcon, MoonIcon, PanelLeftIcon, PlugIcon, RadioIcon, SearchIcon, ServerIcon, SettingsIcon, SquareTerminalIcon,
-  SunIcon, UserIcon, UserRoundIcon, WorkflowIcon, BlocksIcon, NewspaperIcon } from "lucide-react"
+  BookOpenIcon, BotIcon, CalendarIcon, ChartNoAxesColumnIcon, ChevronsUpDownIcon, ContactRoundIcon, FolderIcon, InboxIcon, KeyRoundIcon, ListTodoIcon, LogOutIcon, MailIcon,
+  ListChecksIcon, MessageCircleIcon, MessagesSquareIcon, MonitorIcon, MoonIcon, PanelLeftIcon, PlugIcon, RadioIcon, SearchIcon, ServerIcon, SettingsIcon, SquareTerminalIcon,
+  SunIcon, UserRoundIcon, WorkflowIcon, BlocksIcon, NewspaperIcon } from "lucide-react"
 
 type NavGroup = "primary" | "connect" | "automate"
 const NAV_GROUPS: NavGroup[] = ["primary", "connect", "automate"]
-const NAV: { h: string; l: "chat" | "feed" | "inbox" | "items" | "projects" | "sessions" | "stats" | "integrations" | "channels" | "mail" | "contacts" | "knowledge" | "bots" | "capabilities" | "auto" | "signals"; I: any; group: NavGroup }[] = [
+/* the main group stays at seven: who waits for whom (待处理 for you, 待办 your own, 事项 a Bot's) between the conversation
+ * and the projects; 会话 and 统计 are about the Bots and sit with them */
+const NAV: { h: string; l: "chat" | "feed" | "inbox" | "calendar" | "todos" | "items" | "projects" | "sessions" | "stats" | "integrations" | "channels" | "mail" | "contacts" | "knowledge" | "bots" | "capabilities" | "auto" | "signals"; I: any; group: NavGroup }[] = [
   { h: "", l: "chat", I: MessageCircleIcon, group: "primary" },
   { h: "feed", l: "feed", I: NewspaperIcon, group: "primary" },
   { h: "inbox", l: "inbox", I: InboxIcon, group: "primary" },
+  { h: "calendar", l: "calendar", I: CalendarIcon, group: "primary" },
+  { h: "todos", l: "todos", I: ListChecksIcon, group: "primary" },
   { h: "items", l: "items", I: ListTodoIcon, group: "primary" },
   { h: "projects", l: "projects", I: FolderIcon, group: "primary" },
-  { h: "sessions", l: "sessions", I: SquareTerminalIcon, group: "primary" },
-  { h: "stats", l: "stats", I: ChartNoAxesColumnIcon, group: "primary" },
   { h: "integrations", l: "integrations", I: PlugIcon, group: "connect" },
   { h: "channels", l: "channels", I: MessagesSquareIcon, group: "connect" },
   { h: "mail", l: "mail", I: MailIcon, group: "connect" },
   { h: "contacts", l: "contacts", I: ContactRoundIcon, group: "connect" },
   { h: "knowledge", l: "knowledge", I: BookOpenIcon, group: "connect" },
   { h: "bots", l: "bots", I: BotIcon, group: "automate" },
+  { h: "sessions", l: "sessions", I: SquareTerminalIcon, group: "automate" },
   { h: "capabilities", l: "capabilities", I: BlocksIcon, group: "automate" },
   { h: "auto", l: "auto", I: WorkflowIcon, group: "automate" },
   { h: "signals", l: "signals", I: RadioIcon, group: "automate" },
+  { h: "stats", l: "stats", I: ChartNoAxesColumnIcon, group: "automate" },
 ]
 /** a sidebar row, App Shell's: 30px, the name in the body colour, the open one on a quiet fill with its icon in indigo */
 const ROW = "h-[30px] gap-2 rounded-lg px-1.5! type-callout text-foreground/80 hover:text-foreground data-active:font-medium data-active:text-foreground data-active:[&>svg]:text-primary"
@@ -69,22 +77,6 @@ function ThemeCycle({ className }: { className?: string }) {
   return <Tooltip><TooltipTrigger render={<button type="button" aria-label={label} data-theme-cycle={pref} onClick={() => setTheme(order[(order.indexOf(pref) + 1) % order.length])} />}
     className={cn("flex size-8 shrink-0 items-center justify-center rounded-lg text-muted-foreground transition-colors duration-120 ease-(--ease-out) hover:bg-sidebar-accent hover:text-foreground", className)}>
     <I className="size-4" strokeWidth={1.75} /></TooltipTrigger><TooltipContent side="top">{label}</TooltipContent></Tooltip>
-}
-
-type Me = { name: string; email: string | null; role: string }
-/** who is signed in (GET /me), once per page: the name and email do not change with the workspace (the role does, and
- *  comes from the store's workspaces); a fixture or a Hub that does not answer leaves it unknown */
-function useMe() {
-  const [me, setMe] = useState<Me | null>(null)
-  useEffect(() => { let on = true; api.me().then((r) => { if (on) setMe(r.user) }, () => {}); return () => { on = false } }, [])
-  return me
-}
-const initial = (name: string) => (Array.from(name.trim())[0] ?? "").toUpperCase()
-/** your picture (uploaded on 我) or your initial */
-function Initials({ name, src, className }: { name: string; src?: string; className?: string }) {
-  const c = initial(name)
-  if (src) return <img src={src} alt="" aria-hidden className={cn("shrink-0 rounded-full object-cover", className)} data-account-avatar />
-  return <span aria-hidden className={cn("flex shrink-0 items-center justify-center rounded-full bg-primary/12 font-semibold text-primary", className)}>{c || <UserIcon className="size-3.5" strokeWidth={1.75} />}</span>
 }
 
 /** The account at the bottom of the sidebar: who is signed in, and behind it (affectUI Profile Menu) the places that are
@@ -128,10 +120,11 @@ function Account({ route, meOn }: { route: string; meOn: boolean }) {
 export function Sidebar({ route: full }: { route: string }) {
   const t = useT()
   const route = full.split("?")[0] // #/knowledge?mem=… still highlights 知识
-  const n = pendingCards().length
+  const n = pendingCards().length, now = useMinute(), todos = useTodos().todos
   const meOn = route === "contacts" && location.hash.startsWith("#/contacts/me")
-  /* what is in progress is the running-status pill's, under the header; the inbox keeps its count of open cards */
-  const cnt: Record<string, number> = { inbox: n }
+  /* what is in progress is the running-status pill's, under the header; the inbox keeps its count of open cards, in
+   * the reminder color; 待办 a gray count of what is due today or overdue, which is never pushed */
+  const cnt: Record<string, number> = { inbox: n, todos: todos ? dueCount(todos, now) : 0 }
   const [nav, more] = useScrollMore<HTMLDivElement>("y")
   /* the page you are on stays in view when the groups scroll */
   useEffect(() => {
@@ -147,7 +140,7 @@ export function Sidebar({ route: full }: { route: string }) {
       </SidebarMenuButton>
       {!!cnt[h] && (h === "inbox"
         ? <SidebarMenuBadge className="h-4.5 min-w-4.5 rounded-full bg-attention px-1.5 type-label font-semibold tabular-nums text-white! peer-hover/menu-button:text-white!">{cnt[h]}</SidebarMenuBadge>
-        : <SidebarMenuBadge className="type-footnote tabular-nums text-muted-foreground">{cnt[h]}</SidebarMenuBadge>)}
+        : <SidebarMenuBadge className="type-footnote tabular-nums text-muted-foreground" title={h === "todos" ? t("core:sidebar.todoCount", { count: cnt[h] }) : undefined} data-nav-count={h}>{cnt[h]}</SidebarMenuBadge>)}
     </SidebarMenuItem>
   )
   return (
@@ -204,22 +197,21 @@ export function HubUpdateNotice() {
     <span className="size-1.5 shrink-0 rounded-full bg-attention" aria-hidden />{t("core:sidebar.hubUpdate", { version: st.update.version })}
   </a>
 }
-/** a phone's tab bar: 对话, 待处理 with its count, 事项, and 我的 for every other place */
+/** a phone's tab bar: 对话, 待处理 with its count, 日历, 待办, 事项. 我的 (every other place) is the avatar at the top left
+ *  of a top-level page; while one of its places is open, no tab is marked */
 export function MobileTabs({ route: full }: { route: string }) {
   const tr = useT()
   const route = full.split("?")[0]
   const n = pendingCards().length
-  const tabs = [{ h: "", l: tr("core:nav.chat"), I: MessageCircleIcon }, { h: "feed", l: tr("core:nav.feed"), I: NewspaperIcon }, { h: "inbox", l: tr("core:nav.inbox"), I: InboxIcon, b: n }, { h: "items", l: tr("core:nav.items"), I: ListTodoIcon }, { h: "more", l: tr("core:nav.mine"), I: UserIcon, dot: !!st.update }]
-  const more = ["more", "projects", "sessions", "stats", "publications", "mail", "signals", "settings", "bots", "capabilities", "design", "auto", "personas", "contacts", "orgs", "teams", "accounts", "vault", "devices", "knowledge", "github", "yolo", "channels", "integrations"]
+  const tabs = [{ h: "", l: tr("core:nav.chat"), I: MessageCircleIcon }, { h: "inbox", l: tr("core:nav.inbox"), I: InboxIcon, b: n }, { h: "calendar", l: tr("core:nav.calendar"), I: CalendarIcon }, { h: "todos", l: tr("core:nav.todos"), I: ListChecksIcon }, { h: "items", l: tr("core:nav.items"), I: ListTodoIcon }]
   return (
     <nav aria-label={tr("core:sidebar.tabs")} className="fixed inset-x-0 bottom-0 z-40 flex h-15 border-t border-sidebar-border bg-sidebar/95 pb-[env(safe-area-inset-bottom)] backdrop-blur-2xl backdrop-saturate-180 md:hidden" data-mobile-tabs>
       {tabs.map((t) => {
-        const on = route === t.h || (t.h === "more" && more.includes(route))
+        const on = route === t.h
         return (
           <a key={t.h} href={"#/" + t.h} data-tab={t.h || "chat"} aria-current={on ? "page" : undefined} className={cn("relative flex flex-1 flex-col items-center justify-center gap-0.5 type-label transition-[color,transform] duration-120 active:scale-95", on ? "text-primary" : "text-muted-foreground")}>
             <t.I className="size-5.5" strokeWidth={on ? 1.9 : 1.5} />{t.l}
             {t.b ? <span className="absolute left-1/2 top-1.5 ml-2 flex h-4 min-w-4 items-center justify-center rounded-full bg-attention px-1 type-label leading-none font-semibold tabular-nums text-white ring-2 ring-sidebar">{t.b}</span> : null}
-            {"dot" in t && t.dot ? <span className="absolute left-1/2 top-2 ml-2.5 size-2 rounded-full bg-attention ring-2 ring-sidebar" data-tab-update-dot /> : null}
           </a>
         )
       })}

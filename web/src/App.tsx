@@ -67,6 +67,9 @@ import { HoldBanner } from "@/queue"
 import { YoloDialog } from "@/yolo/switch"
 const YoloDigestView = lazyView(() => import("@/yolo/digest").then((m) => ({ default: m.YoloDigestView })))
 const StatsRoute = lazyView(() => import("@/stats/page").then((m) => ({ default: m.StatsRoute })))
+const TodosView = lazyView(() => import("@/todos/page").then((m) => ({ default: m.TodosView })))
+const TodoRoute = lazyView(() => import("@/todos/page").then((m) => ({ default: m.TodoRoute })))
+const CalendarView = lazyView(() => import("@/todos/calendar").then((m) => ({ default: m.CalendarView })))
 const DeliveryPage = lazyView(() => import("@/delivery-page").then((m) => ({ default: m.DeliveryPage })))
 
 
@@ -234,6 +237,8 @@ export default function App({ deliveryId }: { deliveryId?: string }) {
   const view =
     a.split("?")[0] === "feed" ? <FeedView workspace={st.workspace!.id} filter={new URLSearchParams(a.split("?")[1]).get("kind") ?? ""} /> :
     a === "inbox" ? <InboxView /> :
+    a.split("?")[0] === "todos" ? (b ? <TodoRoute key={b} id={b} /> : <TodosView query={a.split("?")[1]} />) :
+    a.split("?")[0] === "calendar" ? <CalendarView /> :
     a === "items" ? (b ? <ItemView key={b} id={b} /> : <ItemsView />) :
     a === "projects" ? (b ? <ProjectView key={b} id={b} /> : <ProjectsView />) :
     a === "sessions" ? (b ? <SessionView key={b} k={b} /> : <SessionsView />) :

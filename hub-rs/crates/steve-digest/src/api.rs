@@ -413,6 +413,8 @@ async fn read_todo(
                     ..Default::default()
                 };
                 t["children"] = json!(todo::list_by(c, &who.ws, &who.me, &f)?);
+                // items belong to the workspace and every member reads them: the ids are enough
+                t["items"] = json!(todo::linked_items(c, &who.ws, &id)?);
             }
             Ok(Json(t))
         })
