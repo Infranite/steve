@@ -2,6 +2,7 @@
 
 [README](../README.md) describes the Homebrew installation and source-based development setup. This page covers first-time configuration, user services, managed releases and upgrades.
 
+- [Dynamic workflows](#dynamic-workflows)
 - [Homebrew installation](#homebrew-installation)
 - [The first meeting](#the-first-meeting)
 - [Reconfiguring an installed Hub](#reconfiguring-an-installed-hub)
@@ -13,6 +14,14 @@
 - [Harness setup](#harness-setup)
 - [Diagnostic capture and queries](#diagnostic-capture-and-queries)
 - [Conversation digest base](#conversation-digest-base)
+
+## Dynamic workflows
+
+Dynamic multi-Bot workflows are disabled by default. Ordinary items execute directly in their responsible Bot's session; no additional configuration is needed. To explicitly opt in for the entire Hub, set `STEVE_DYNAMIC_WORKFLOWS=1` in its startup environment and restart it. Only the exact value `1` enables the feature. This is not a workspace or Bot setting, and changing concurrency or attempt budgets does not enable it.
+
+While disabled, planning/replanning, retrying, resuming and starting new workflow turns are rejected, including cached tool calls and queued child prompts after restart. Already running attempts may settle and report results; disabling is not confirmation that they stopped. Persisted stop intents continue to reconcile. Graphs, results, history, failed reviews and acceptance requirements remain intact; re-enabling does not clear pause/cancellation state.
+
+For an existing unfinished graph, use the item's collaboration panel to pause it and wait for all child execution to be confirmed stopped. The user can then explicitly confirm single-session takeover there. This changes the graph's required independent-review/integration acceptance, is recorded in history, and cannot be approved by a Bot token. It does not repair defects found by an earlier review or turn failed/cancelled units into passes. Ordinary Git pull requests still require human review and merge authorization; single-session execution is not independent Bot review. Do not run agent-provided scripts to raise attempt budgets as a recovery step.
 
 ## Homebrew installation
 

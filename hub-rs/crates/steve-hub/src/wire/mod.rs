@@ -133,6 +133,7 @@ fn core_config(cfg: &Config, vars: &Vars) -> steve_core::CoreConfig {
     c.default_models = cfg.default_models.clone().into_iter().collect();
     c.steve_repo = cfg.steve_repo.clone();
     c.no_resume = cfg.no_resume;
+    c.dynamic_workflows = cfg.dynamic_workflows;
     c.debug_route = cfg.debug_route;
     c.disk = cfg.disk;
     c.version = cfg.version.clone();

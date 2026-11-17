@@ -110,6 +110,7 @@ try {
     await page.locator("[data-agent-graph] [data-step-node]").first().waitFor()
     assert.deepEqual((await page.locator("[data-agent-graph] [data-step-node]").evaluateAll((els) => els.map((e) => e.dataset.stepNode))).sort(), ["unit:api", "unit:integrate", "unit:review", "unit:web"], "a card per step, the coordinator none")
     assert.deepEqual((await page.locator("[data-step-graph]").getAttribute("data-step-edges")).split(" ").sort(), ["unit:api>unit:review", "unit:review>unit:integrate", "unit:web>unit:review"], "integrate's dependency on api is implied through review and not drawn")
+    await page.locator(".react-flow__edge").first().waitFor()
     assert.equal(await page.locator(".react-flow__edge").count(), 3)
     assert.equal(await page.locator("[data-step-graph]").getAttribute("data-step-graph"), width < 640 ? "down" : "right", "a phone stacks the levels top to bottom")
     const card = (k) => page.locator(`[data-agent-graph] [data-step-node="${k}"]`)

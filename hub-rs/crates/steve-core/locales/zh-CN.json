@@ -463,6 +463,7 @@
   "core.workflow.blocker.dep_wait": "事项仍在等待前置完成后续跑",
   "core.workflow.blocker.stale": "主事项目标或周期已变化，请重规划并重新验证旧成果",
   "core.workflow.blocker.paused": "协作已暂停",
+  "core.workflow.blocker.disabled": "动态工作流已关闭，不再启动新单元；已有成果和验收要求保留。请先暂停并等待执行停稳，再明确选择单会话接管。",
   "core.workflow.blocker.unsettled": "%{title}：执行或取消仍未确认结束",
   "core.workflow.blocker.unsettled_change": "%{title}：执行或取消仍未确认结束，暂不能修改或移除工作单元",
   "core.workflow.blocker.running": "%{title}：工作单元尚未结束",

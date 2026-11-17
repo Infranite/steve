@@ -38,6 +38,9 @@ struct Fixture {
 }
 impl Fixture {
     fn attach(dir: &Path, store: Store, node: Arc<FakeNode>) -> Self {
+        Self::attach_enabled(dir, store, node, true)
+    }
+    fn attach_enabled(dir: &Path, store: Store, node: Arc<FakeNode>, enabled: bool) -> Self {
         let host = Arc::new(HubHost {
             store: store.clone(),
             data_dir: dir.join("data"),
@@ -50,7 +53,8 @@ impl Fixture {
         assert!(host.local_node.set(local.clone()).is_ok());
         let runtime = NodeRuntime::new(store.clone(), node.clone(), host.clone());
         node.connect(Arc::new(Sink(Arc::downgrade(&runtime))));
-        let cfg = CoreConfig::for_home(dir);
+        let mut cfg = CoreConfig::for_home(dir);
+        cfg.dynamic_workflows = enabled;
         let workspaces = Workspaces::new(
             store.clone(),
             Some(LocalFace {
@@ -403,6 +407,50 @@ async fn restart_adopts_unbound_session_and_retry_does_not_duplicate_children_or
             .is_err()
     );
     again.routed.node.as_ref().unwrap().stop("fixture complete");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn default_off_restart_holds_durable_followups_and_preserves_results() {
+    let dir = tempfile::tempdir().unwrap();
+    let f = Fixture::new(dir.path());
+    let parent = f.parent(Some("requester"));
+    f.plan(&parent);
+    let execution = f.execution(&parent, "work").await;
+    let sid = f.unit(&parent, "work").session_id.unwrap();
+    f.routed
+        .prompt(&sid, "retained followup", "user", &[])
+        .unwrap();
+    f.routed.node.as_ref().unwrap().stop("simulate restart");
+    let off = Fixture::attach_enabled(dir.path(), f.store.clone(), f.node.clone(), false);
+    assert!(
+        off.routed
+            .prompt(&sid, "must not start", "user", &[])
+            .is_err()
+    );
+    assert!(off.routed.check_workflow_execution(&parent).is_err());
+    off.core.lifecycle_tick().unwrap();
+    off.node.finish(&execution, build::done()).await.unwrap();
+    until(|| {
+        off.routed
+            .node
+            .as_ref()
+            .unwrap()
+            .active_attempt(&sid)
+            .unwrap()
+            .is_none()
+    })
+    .await;
+    assert_eq!(
+        off.routed.node.as_ref().unwrap().flush(&sid, None).unwrap(),
+        super::node_runtime::Planned::Held
+    );
+    assert_eq!(
+        value::<i64>(&off.store, "SELECT COUNT(*) FROM runtime_turns"),
+        1
+    );
+    assert_eq!(value::<i64>(&off.store, "SELECT COUNT(*) FROM queued"), 1);
+    assert!(off.unit(&parent, "review").item_id.is_none());
+    assert_eq!(off.core.workflow_get(&parent).unwrap()["enabled"], false);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

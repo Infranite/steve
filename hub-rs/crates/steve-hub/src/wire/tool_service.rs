@@ -134,7 +134,17 @@ pub(super) fn raw_builtin_catalog() -> Vec<ToolDescriptor> {
 impl ToolService {
     /// Every built-in tool, in the order the MCP endpoint lists them.
     pub fn catalog(&self) -> Vec<ToolDescriptor> {
-        builtin_catalog()
+        let mut raw = raw_builtin_catalog();
+        if !self.mcp.core.config().dynamic_workflows {
+            for tool in &mut raw {
+                if tool.name == "steve_workflow" {
+                    tool.description = "Dynamic workflows are disabled. Read retained graphs and results with get; pause or cancel existing work, or report an existing unit's failure with fail. No planning, replanning, retrying or resuming is allowed. Existing acceptance requirements remain; only the user may explicitly choose single-session takeover after pausing and confirmed settlement. Do not ask to enable collaboration or raise attempt budgets.".into();
+                    tool.input_schema["properties"]["action"]["enum"] =
+                        json!(["get", "pause", "cancel", "fail"]);
+                }
+            }
+        }
+        super::tool_families::catalog(raw)
     }
 
     /// Use the same recorded session principal and live membership check as ordinary module tools.

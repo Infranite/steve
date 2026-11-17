@@ -484,6 +484,8 @@ impl Kit {
     pub fn with(f: impl FnOnce(&mut CoreConfig)) -> Kit {
         let dir = tempfile::tempdir().unwrap();
         let mut cfg = CoreConfig::for_home(dir.path());
+        /* Existing collaboration fixtures opt in; production defaults stay off. */
+        cfg.dynamic_workflows = true;
         /* the boot resume runs when a test says so (`core.fire_resume()`), not on a clock */
         cfg.resume_delay = Duration::from_secs(3600);
         /* a stopped agent reaches the card at once unless a test lets Steve continue it (`takeover`) */

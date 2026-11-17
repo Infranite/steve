@@ -45,6 +45,154 @@ fn graph(k: &Kit, item: &str) -> Workflow {
     k.db().store().workflows().get(item).unwrap().unwrap()
 }
 
+fn disabled_core(k: &Kit) -> crate::Core {
+    let mut cfg = k.core.config().clone();
+    cfg.dynamic_workflows = false;
+    crate::Core::new(k.db().clone(), k.rt.clone(), k.gw.clone(), cfg)
+}
+
+#[test]
+fn dynamic_workflows_default_off_and_stale_mutations_have_no_effect() {
+    assert!(!crate::CoreConfig::for_home(std::path::Path::new("/unused")).dynamic_workflows);
+    let k = Kit::with(|c| c.dynamic_workflows = false);
+    let parent = k.item("run", "执行", None);
+    for action in ["plan", "retry", "resume"] {
+        assert!(
+            k.core
+                .workflow_change(&parent, json!({"action":action}), "me")
+                .is_err()
+        );
+    }
+    assert!(k.db().store().workflows().get(&parent).unwrap().is_none());
+    assert!(k.rt.st().created.is_empty());
+    // An ordinary item still starts without a graph or independent-review claim.
+    let session = k.core.start_session(&parent, None, None, &[]).unwrap();
+    assert_eq!(session.item_id.as_deref(), Some(parent.as_str()));
+}
+
+#[test]
+fn disabling_preserves_graph_blocks_cached_actions_and_allows_explicit_takeover() {
+    let (k, parent, specs) = setup(false);
+    plan(&k, &parent, &specs);
+    k.rt.st().workflow_execution_ready = true;
+    let off = disabled_core(&k);
+    let before = graph(&k, &parent);
+    let parent_revision = k.db().item(&parent).unwrap().unwrap().revision;
+    for action in ["plan", "retry", "resume"] {
+        assert!(
+            off.workflow_change(
+                &parent,
+                json!({
+                    "action":action,"expected_revision":before.revision,"reason":"cached request",
+                    "units":specs,"unit_id":"a"
+                }),
+                "me"
+            )
+            .is_err()
+        );
+        assert_eq!(graph(&k, &parent), before);
+        assert_eq!(
+            k.db().item(&parent).unwrap().unwrap().revision,
+            parent_revision
+        );
+    }
+    off.lifecycle_tick().unwrap();
+    assert!(k.rt.st().created.is_empty());
+    let view = off.workflow_get(&parent).unwrap();
+    assert_eq!(view["enabled"], false);
+    assert_eq!(view["execution_ready"], false);
+    assert!(!view["blockers"].as_array().unwrap().is_empty());
+    assert!(off.item_action(&parent, ItemAction::Finish, "me").is_err());
+    off.workflow_change(
+        &parent,
+        json!({"action":"pause","expected_revision":before.revision,"reason":"take over"}),
+        "me",
+    )
+    .unwrap();
+    let paused = graph(&k, &parent);
+    let args = json!({"action":"single_session","expected_revision":paused.revision,"reason":"explicit review waiver"});
+    let sid = k.session(&parent, "idle");
+    let s = k.db().session(&sid).unwrap().unwrap();
+    assert!(off.tool_workflow(&s, args.clone()).is_err());
+    off.workflow_change(&parent, args, "me").unwrap();
+    assert!(graph(&k, &parent).single_session());
+    assert!(
+        off.tx()
+            .workflow_blockers(&parent, true)
+            .unwrap()
+            .is_empty()
+    );
+    assert!(k.rt.st().created.is_empty());
+}
+
+#[test]
+fn disabled_workflows_do_not_waive_unsettled_execution_or_revision_checks() {
+    let (k, parent, specs) = setup(true);
+    plan(&k, &parent, &specs);
+    let off = disabled_core(&k);
+    let rev = graph(&k, &parent).revision;
+    off.workflow_change(
+        &parent,
+        json!({"action":"pause","expected_revision":rev,"reason":"recover"}),
+        "me",
+    )
+    .unwrap();
+    let paused = graph(&k, &parent);
+    for revision in [rev, paused.revision] {
+        assert!(
+            off.workflow_change(
+                &parent,
+                json!({"action":"single_session","expected_revision":revision,"reason":"explicit"}),
+                "me"
+            )
+            .is_err()
+        );
+    }
+    assert!(!graph(&k, &parent).single_session());
+    assert!(graph(&k, &parent).paused);
+    assert!(off.item_action(&parent, ItemAction::Finish, "me").is_err());
+}
+
+#[test]
+fn disabling_allows_inflight_results_to_settle_without_starting_successors() {
+    let (k, parent, specs) = setup(true);
+    plan(&k, &parent, &specs);
+    let off = disabled_core(&k);
+    for id in ["a", "b"] {
+        let u = unit(&k, &parent, id);
+        let s = k
+            .db()
+            .session(u.session_id.as_deref().unwrap())
+            .unwrap()
+            .unwrap();
+        off.tx()
+            .workflow_report(
+                &s,
+                "retained result",
+                &[Output {
+                    kind: "文件".into(),
+                    title: "retained".into(),
+                    location: Some(format!("{id}.txt")),
+                    role: None,
+                }],
+                &[Check {
+                    name: "unit check".into(),
+                    passed: true,
+                    operated: true,
+                    scope: None,
+                }],
+                true,
+            )
+            .unwrap();
+        k.rt.end_turn(&off, &s.id, "end_turn", None);
+        assert_eq!(unit(&k, &parent, id).status, "succeeded");
+    }
+    off.lifecycle_tick().unwrap();
+    assert_eq!(unit(&k, &parent, "review").status, "pending");
+    assert_eq!(k.rt.st().created.len(), 2);
+    assert!(off.item_action(&parent, ItemAction::Finish, "me").is_err());
+}
+
 #[test]
 fn confirmed_workflow_activity_needs_the_current_applied_attempt_and_fresh_agent_event() {
     let k = Kit::new();
@@ -1166,12 +1314,7 @@ fn persisted_pause_intent_is_reconciled_after_losing_in_memory_cancels() {
         .pause(&parent, true, "模拟保存后崩溃")
         .unwrap();
     assert!(k.rt.st().cancelled.is_empty());
-    let restarted = crate::Core::new(
-        k.db().clone(),
-        k.rt.clone(),
-        k.gw.clone(),
-        k.core.config().clone(),
-    );
+    let restarted = disabled_core(&k);
     let turns: Vec<_> = graph(&k, &parent)
         .units
         .into_iter()

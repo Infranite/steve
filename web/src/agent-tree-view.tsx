@@ -62,7 +62,9 @@ export function useAgentTree(root: string, workflow?: Workflow | null, rootStatu
 
   const [busy, setBusy] = useState(false), [error, setError] = useState("")
   const [rework, setRework] = useState<string | null>(null), [confirmSingle, setConfirmSingle] = useState<number | null>(null)
+  const disabled = workflow?.enabled === false
   const change = async (action: Action, unit_id?: string, revision = workflow?.revision ?? 0, reason?: string) => {
+    if (disabled && (action === "resume" || action === "retry")) { setError(t("views:workflow.disabled")); return }
     setBusy(true); setError("")
     try {
       await api.workflowChange(root, { action, unit_id, expected_revision: revision, reason: reason ?? t(`views:workflow.reason.${action}`) })
@@ -104,7 +106,7 @@ export function useAgentTree(root: string, workflow?: Workflow | null, rootStatu
         {stoppingAffected && <p className="type-footnote text-attention">{t("views:workflow.stopPending")}</p>}
         {otherActive && !activeAffected && <p className="type-footnote text-attention">{t("views:workflow.otherActive")}</p>}
         <AlertDialogFooter><AlertDialogCancel disabled={busy}>{t("common:action.cancel")}</AlertDialogCancel>
-          <AlertDialogAction disabled={busy || stoppingAffected || otherActive && !activeAffected || old || affected.some((u) => u.attempt >= workflow.max_attempts)} onClick={() => {
+          <AlertDialogAction disabled={busy || disabled && !activeAffected || stoppingAffected || otherActive && !activeAffected || old || affected.some((u) => u.attempt >= workflow.max_attempts)} onClick={() => {
             const id = activeAffected?.id ?? rework
             if (!id) return
             void change(activeAffected ? "cancel" : "retry", id, workflow.revision, t(activeAffected ? "views:workflow.reason.cancel" : "views:workflow.reason.rework"))
@@ -121,6 +123,7 @@ export function useAgentTree(root: string, workflow?: Workflow | null, rootStatu
     total: (item?: string) => item ? totals.get(item) : undefined,
     single: workflow?.acceptance_mode === "single_session",
     unavailable: workflow?.execution_ready === false,
+    disabled,
     old,
   }
 }
@@ -170,7 +173,7 @@ export function WorkflowButtons({ at }: { at: AgentTreeState }) {
   const t = useT(), workflow = at.workflow
   if (!workflow || at.single || at.old) return null
   return <div className="flex items-center gap-1">
-    <Button size="sm" variant="outline" disabled={at.busy || workflow.paused && (at.unavailable || at.old)} onClick={() => void at.change(workflow.paused ? "resume" : "pause")} data-workflow-toggle>
+    <Button size="sm" variant="outline" disabled={at.busy || workflow.paused && (at.disabled || at.unavailable || at.old)} onClick={() => void at.change(workflow.paused ? "resume" : "pause")} data-workflow-toggle>
       {workflow.paused ? <PlayIcon /> : <PauseIcon />}{workflow.paused ? t("views:workflow.resume") : t("views:workflow.pause")}</Button>
     {workflow.paused && <DropdownMenu>
       <DropdownMenuTrigger render={<Button variant="ghost" size="icon-sm" aria-label={t("common:action.more")} className="text-muted-foreground" data-agent-more />}><MoreHorizontalIcon /></DropdownMenuTrigger>
@@ -272,7 +275,7 @@ export function TeamSteps({ at, selected, onSelect, actions }: { at: AgentTreeSt
     const n = x.node, u = n.unit, w = at.workflow
     const open = n.item && n.item !== at.root ? `#/items/${encodeURIComponent(n.item)}` : n.session ? `#/sessions/${encodeURIComponent(n.session)}` : null
     if (x.needsYou && n.item) return <Button size="xs" variant="outline" nativeButton={false} render={<a href={`#/items/${encodeURIComponent(n.item)}`} />} data-step-action="decide">{t("views:agentTree.act.decide")}</Button>
-    if (n.status === "failed" && canAct && u && !at.old && !at.unavailable && u.attempt < w!.max_attempts)
+    if (n.status === "failed" && canAct && u && !at.old && !at.disabled && !at.unavailable && u.attempt < w!.max_attempts)
       return <Button size="xs" variant="outline" disabled={at.busy} onClick={() => void at.change("retry", u.id)} data-step-action="retry" data-workflow-retry={u.id}><RotateCcwIcon />{t("views:agentTree.act.retry")}</Button>
     if (open) return <Button size="xs" variant="ghost" className="text-muted-foreground" nativeButton={false} render={<a href={open} />} data-step-action="open">{t("views:agentTree.act.open")}</Button>
     return null
@@ -313,7 +316,7 @@ export function TeamSteps({ at, selected, onSelect, actions }: { at: AgentTreeSt
               <div className="flex items-start gap-2 type-callout"><TriangleAlertIcon className="mt-0.5 size-4 shrink-0 text-destructive" /><div className="min-w-0"><div className="break-words font-medium">{x.node.title}</div>{x.node.reason && <div className="mt-0.5 break-words type-footnote text-muted-foreground">{x.node.reason}</div>}</div></div>
               <div className="flex justify-end gap-2">
                 <Button size="sm" variant="ghost" onClick={() => onSelect(x.node.key)}>{t("views:agentTree.details")}</Button>
-                {canAct && x.node.unit && <Button size="sm" disabled={at.busy || at.unavailable || at.old || x.node.unit.attempt >= at.workflow!.max_attempts} onClick={() => void at.change("retry", x.node.unit!.id)} data-workflow-retry={x.node.unit.id}><RotateCcwIcon />{t("views:workflow.retry")}</Button>}
+                {canAct && x.node.unit && <Button size="sm" disabled={at.busy || at.disabled || at.unavailable || at.old || x.node.unit.attempt >= at.workflow!.max_attempts} onClick={() => void at.change("retry", x.node.unit!.id)} data-workflow-retry={x.node.unit.id}><RotateCcwIcon />{t("views:workflow.retry")}</Button>}
               </div>
             </div>)}
           </PopoverContent>
@@ -373,9 +376,10 @@ export function Notices({ at, inline = false }: { at: AgentTreeState; inline?: b
   return <>
     {at.error && <p role="alert" className={cn("break-words type-callout text-destructive", !inline && "mb-3")}>{at.error}</p>}
     {at.single && <N mark="workflow-single-mode">{t("views:workflow.singleHint")}</N>}
-    {at.unavailable && !at.single && !(inline && at.old) && <N mark="workflow-unavailable">{t("views:workflow.unavailable")}</N>}
+    {at.disabled && !at.single && <N mark="workflow-disabled">{t("views:workflow.disabled")}</N>}
+    {at.unavailable && !at.disabled && !at.single && !(inline && at.old) && <N mark="workflow-unavailable">{t("views:workflow.unavailable")}</N>}
     {at.old && <N mark="workflow-prior-cycle">{t("views:workflow.priorCycle")}</N>}
-    {w.paused && !at.old && !at.single && !at.unavailable && <N>{t("views:workflow.pauseHint")}</N>}
+    {w.paused && !at.old && !at.single && !at.disabled && !at.unavailable && <N>{t("views:workflow.pauseHint")}</N>}
     {w.blockers.length > 0 && <details className={cn("group", inline ? "" : "mb-3 rounded-xl bg-muted/60 px-4 py-2.5")} data-workflow-blockers>
       <summary className="flex cursor-pointer list-none items-center gap-1.5 type-callout"><ChevronRightIcon className="size-3.5 transition-transform duration-180 group-open:rotate-90" />{t("views:workflow.blockers")} · {w.blockers.length}</summary>
       <ul className="mt-1.5 list-disc space-y-1 pl-6 type-callout text-muted-foreground">{w.blockers.map((text, n) => <li key={n} className="break-words">{text}</li>)}</ul>
@@ -434,8 +438,8 @@ export function AgentDetail({ at, node, onClose }: { at: AgentTreeState; node: A
       {node.item && node.item !== at.root && <Button size="sm" variant="outline" nativeButton={false} render={<a href={`#/items/${encodeURIComponent(node.item)}`} />} data-agent-open-item>{node.kind === "root" ? t("views:agentTree.openItem") : t("views:workflow.openChild")}</Button>}
       {node.session && <Button size="sm" variant="outline" nativeButton={false} render={<a href={`#/sessions/${encodeURIComponent(node.session)}`} />}>{t("views:workflow.openSession")}</Button>}
       {canAct && running && <Button size="sm" variant="outline" disabled={at.busy || at.old} onClick={() => void at.change("cancel", u!.id)} data-workflow-cancel={u!.id}><SquareIcon />{t("views:workflow.cancelUnit")}</Button>}
-      {canAct && u!.status === "succeeded" && <Button size="sm" variant="outline" disabled={at.busy || at.old || u!.attempt >= w!.max_attempts} onClick={() => at.askRework(u!.id)} data-workflow-rework={u!.id}><RotateCcwIcon />{t("views:workflow.rework")}</Button>}
-      {canAct && u!.status === "failed" && <Button size="sm" disabled={at.busy || at.unavailable || at.old || u!.attempt >= w!.max_attempts} onClick={() => void at.change("retry", u!.id)} data-workflow-retry={u!.id}><RotateCcwIcon />{t("views:workflow.retry")}</Button>}
+      {canAct && u!.status === "succeeded" && <Button size="sm" variant="outline" disabled={at.busy || at.disabled || at.old || u!.attempt >= w!.max_attempts} onClick={() => at.askRework(u!.id)} data-workflow-rework={u!.id}><RotateCcwIcon />{t("views:workflow.rework")}</Button>}
+      {canAct && u!.status === "failed" && <Button size="sm" disabled={at.busy || at.disabled || at.unavailable || at.old || u!.attempt >= w!.max_attempts} onClick={() => void at.change("retry", u!.id)} data-workflow-retry={u!.id}><RotateCcwIcon />{t("views:workflow.retry")}</Button>}
     </div>
     {u && w && <dl className="grid grid-cols-[72px_minmax(0,1fr)] gap-x-3 gap-y-1.5 type-callout" data-agent-unit={u.id}>
       <dt className="text-muted-foreground">{t("views:agentTree.kind")}</dt><dd>{t(`views:workflow.${u.kind}`)}{!u.required && ` · ${t("views:workflow.optional")}`}</dd>

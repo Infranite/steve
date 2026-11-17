@@ -463,6 +463,7 @@
   "core.workflow.blocker.dep_wait": "The item is still waiting to resume once its prerequisites are done",
   "core.workflow.blocker.stale": "The main item's goal or cycle changed; replan and verify the earlier results again",
   "core.workflow.blocker.paused": "Collaboration paused",
+  "core.workflow.blocker.disabled": "Dynamic workflows are disabled. No new units will start; existing results and acceptance requirements are retained. Pause and wait for execution to settle before explicitly choosing single-session takeover.",
   "core.workflow.blocker.unsettled": "%{title}: not yet confirmed to have finished running or cancelling",
   "core.workflow.blocker.unsettled_change": "%{title}: not yet confirmed to have finished running or cancelling, so the work unit can't be changed or removed yet",
   "core.workflow.blocker.running": "%{title}: the work unit hasn't finished",

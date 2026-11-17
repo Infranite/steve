@@ -248,6 +248,11 @@ pub(crate) fn yolo_input(
 
 /// Turn ends of Node sessions reach the core the same way the ACP runner's do.
 impl super::node_runtime::NodeDomain for HubHost {
+    fn dynamic_workflows(&self) -> bool {
+        self.core
+            .get()
+            .is_some_and(|c| c.config().dynamic_workflows)
+    }
     fn workspace_changed(&self, fact: super::node_runtime::WorkspaceFact) {
         use super::node_runtime::WorkspaceFact;
         let Some(core) = self.core.get().cloned() else {
@@ -807,6 +812,16 @@ impl steve_core::AgentRuntime for RoutedRuntime {
             .map_err(CoreError::Msg)
     }
     fn check_workflow_execution(&self, item_id: &str) -> steve_core::Result<()> {
+        if !self
+            .host
+            .core
+            .get()
+            .is_some_and(|c| c.config().dynamic_workflows)
+        {
+            return Err(CoreError::Msg(steve_i18n::t!(
+                "core.workflow.blocker.disabled"
+            )));
+        }
         if let Some(why) = self
             .store
             .reader(|c| steve_store::workflow_gate::item_blocker(c, item_id))?
