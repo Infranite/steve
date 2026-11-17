@@ -232,7 +232,7 @@ public final class SteveClientCoordinator: ObservableObject {
     // MARK: - Native Bridge v2 (`window.__STEVE_NATIVE__`)
 
     public nonisolated static func bridgeCapabilities(for platform: String, nativeShellChromeEnabled: Bool = false) -> [String] {
-        var caps = ["hubs.list", "hubs.switch", "hubs.add", "hubs.forget", "hubs.rename", "pair.claim", "shell.context", "shell.navigation.next", "shell.navigation.ack"]
+        var caps = ["hubs.list", "hubs.switch", "hubs.add", "hubs.forget", "hubs.rename", "pair.claim", "shell.context", "shell.navigation.next", "shell.navigation.ack", "shell.hub-switch.next", "shell.hub-switch.ack"]
         if platform == "macos" && nativeShellChromeEnabled { caps.append("shell.chrome.hub") }
         if platform == "ios" {
             caps.append("pair.scan")
@@ -397,6 +397,11 @@ public final class SteveClientCoordinator: ObservableObject {
     public func switchToHub(id: String) {
         guard hubStore.profiles.contains(where: { $0.id == id }) else { return }
         guard hubStore.activeHubID != id else { return }
+        requestHubSwitchApproval(id: id)
+    }
+
+    func performApprovedHubSwitch(id: String) {
+        guard hubStore.profiles.contains(where: { $0.id == id }), hubStore.activeHubID != id else { return }
         hubStore.selectHub(id: id)
         invalidateShellScope(clearNavigation: true)
         Task { [weak self] in

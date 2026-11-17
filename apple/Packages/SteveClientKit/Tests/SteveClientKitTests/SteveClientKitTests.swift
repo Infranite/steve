@@ -495,11 +495,11 @@ final class SteveClientKitTests: XCTestCase {
 
         XCTAssertEqual(
             SteveClientCoordinator.bridgeCapabilities(for: "macos"),
-            ["hubs.list", "hubs.switch", "hubs.add", "hubs.forget", "hubs.rename", "pair.claim", "shell.context", "shell.navigation.next", "shell.navigation.ack"]
+            ["hubs.list", "hubs.switch", "hubs.add", "hubs.forget", "hubs.rename", "pair.claim", "shell.context", "shell.navigation.next", "shell.navigation.ack", "shell.hub-switch.next", "shell.hub-switch.ack"]
         )
         XCTAssertEqual(
             SteveClientCoordinator.bridgeCapabilities(for: "ios"),
-            ["hubs.list", "hubs.switch", "hubs.add", "hubs.forget", "hubs.rename", "pair.claim", "shell.context", "shell.navigation.next", "shell.navigation.ack", "pair.scan"]
+            ["hubs.list", "hubs.switch", "hubs.add", "hubs.forget", "hubs.rename", "pair.claim", "shell.context", "shell.navigation.next", "shell.navigation.ack", "shell.hub-switch.next", "shell.hub-switch.ack", "pair.scan"]
         )
 
         await coordinator.activateCurrentHub(forceReloadWeb: false)

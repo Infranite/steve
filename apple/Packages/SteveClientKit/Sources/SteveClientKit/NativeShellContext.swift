@@ -58,7 +58,15 @@ public enum NativeShellRoute {
     }
 }
 
+struct NativeHubSwitchRequest {
+    let id = UUID().uuidString
+    let hubID: String
+    var issuedDocumentID: String?
+}
+
 struct NativeShellState {
+    var hubSwitch: NativeHubSwitchRequest?
+    var hubSwitchTimeout: Task<Void, Never>?
     var ownerID: UUID?
     var documentID: String?
     var generation: UInt64 = 0
@@ -75,7 +83,39 @@ extension SteveClientCoordinator {
         shellState.ownerID = ownerID
     }
 
+    func detachShell(ownerID: UUID) {
+        guard shellState.ownerID == ownerID else { return }
+        invalidateShellScope(clearNavigation: false)
+        shellState.ownerID = nil
+    }
+
+    private func cancelHubSwitchApproval() {
+        shellState.hubSwitchTimeout?.cancel()
+        shellState.hubSwitchTimeout = nil
+        shellState.hubSwitch = nil
+    }
+
+    func requestHubSwitchApproval(id: String) {
+        // An attached page must explicitly approve, even while loading/offline or missing context.
+        // Absence of a report is not evidence that no editor/write is active.
+        guard shellState.ownerID != nil else { performApprovedHubSwitch(id: id); return }
+        cancelHubSwitchApproval()
+        let request = NativeHubSwitchRequest(hubID: id)
+        shellState.hubSwitch = request
+        shellState.hubSwitchTimeout = Task { @MainActor [weak self] in
+            do { try await Task.sleep(for: .seconds(30)) } catch { return }
+            self?.expireHubSwitchApproval(id: request.id)
+        }
+    }
+
+    func expireHubSwitchApproval(id: String) {
+        guard shellState.hubSwitch?.id == id else { return }
+        cancelHubSwitchApproval()
+        shellNavigationError = L10n.tr("页面未确认切换 Hub，请重试。", "The page did not approve switching Hubs. Please try again.")
+    }
+
     func invalidateShellScope(clearNavigation: Bool, keepDocument: Bool = false) {
+        cancelHubSwitchApproval()
         shellState.generation &+= 1
         if !keepDocument { shellState.documentID = nil }
         shellContext = nil
@@ -104,6 +144,20 @@ extension SteveClientCoordinator {
         }
         shellState.documentID = documentID
         switch op {
+        case "shell.hub-switch.next":
+            guard var request = shellState.hubSwitch else { return NSNull() }
+            request.issuedDocumentID = documentID
+            shellState.hubSwitch = request
+            return ["id": request.id, "hubID": request.hubID]
+        case "shell.hub-switch.ack":
+            guard let id = args["id"] as? String, let approved = Self.shellBoolean(args["approved"]),
+                  let request = shellState.hubSwitch, request.id == id,
+                  request.issuedDocumentID == documentID else {
+                throw BridgeCallError.invalidArgument("Unknown or stale Hub switch approval")
+            }
+            cancelHubSwitchApproval()
+            if approved { performApprovedHubSwitch(id: request.hubID) }
+            return [String: Any]()
         case "shell.context":
             guard let rawRoute = args["route"] as? String, let route = NativeShellRoute.validated(rawRoute),
                   let title = args["title"] as? String, title.count <= 512,

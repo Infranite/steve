@@ -136,6 +136,57 @@ final class NativeShellTests: XCTestCase {
     }
 
     @MainActor
+    func testHubSwitchRequiresScopedApprovalBeforeMutatingHubOrProxy() throws {
+        try fixture { c, store, owner in
+            _ = store.upsertProfile(HubProfile(id: "b", name: "Other", lanURLs: [URL(string: "http://127.0.0.1:19998")!]), makeActive: false)
+            let token = c.proxy.proxyAuthToken
+            c.switchToHub(id: "b") // No context report yet must still require approval.
+            XCTAssertEqual(store.activeHubID, "a")
+            XCTAssertEqual(c.proxy.proxyAuthToken, token)
+            let request = try XCTUnwrap(try call(c, owner, "shell.hub-switch.next") as? [String: Any])
+            let id = try XCTUnwrap(request["id"] as? String)
+            XCTAssertEqual(request["hubID"] as? String, "b")
+            XCTAssertThrowsError(try call(c, owner, "shell.hub-switch.ack", ["id": "wrong", "approved": true]))
+            _ = try call(c, owner, "shell.hub-switch.ack", ["id": id, "approved": false])
+            XCTAssertEqual(store.activeHubID, "a")
+            XCTAssertEqual(c.proxy.proxyAuthToken, token)
+            XCTAssertNil(c.shellState.hubSwitch)
+
+            c.switchToHub(id: "b")
+            let approved = try XCTUnwrap(try call(c, owner, "shell.hub-switch.next") as? [String: Any])
+            _ = try call(c, owner, "shell.hub-switch.ack", ["id": approved["id"]!, "approved": true])
+            XCTAssertEqual(store.activeHubID, "b")
+        }
+    }
+
+    @MainActor
+    func testHubSwitchApprovalExpiresAndCannotCrossDocumentOrOwner() throws {
+        try fixture { c, store, owner in
+            _ = store.upsertProfile(HubProfile(id: "b", name: "Other", lanURLs: [URL(string: "http://127.0.0.1:19998")!]), makeActive: false)
+            c.switchToHub(id: "b")
+            let first = try XCTUnwrap(try call(c, owner, "shell.hub-switch.next") as? [String: Any])
+            let id = try XCTUnwrap(first["id"] as? String)
+            XCTAssertThrowsError(try call(c, UUID(), "shell.hub-switch.ack", ["id": id, "approved": true]))
+            XCTAssertThrowsError(try call(c, owner, "shell.hub-switch.ack", ["id": id, "approved": true], document: "other"))
+            c.expireHubSwitchApproval(id: id)
+            XCTAssertEqual(store.activeHubID, "a")
+            XCTAssertNotNil(c.shellNavigationError)
+            XCTAssertThrowsError(try call(c, owner, "shell.hub-switch.ack", ["id": id, "approved": true]))
+            c.switchToHub(id: "b")
+            let pending = try XCTUnwrap(try call(c, owner, "shell.hub-switch.next") as? [String: Any])
+            c.beginShellDocument(ownerID: owner)
+            XCTAssertThrowsError(try call(c, owner, "shell.hub-switch.ack", ["id": pending["id"]!, "approved": true], document: "replacement"))
+            XCTAssertEqual(store.activeHubID, "a")
+            c.detachShell(ownerID: UUID())
+            XCTAssertEqual(c.shellState.ownerID, owner)
+            c.detachShell(ownerID: owner)
+            XCTAssertNil(c.shellState.ownerID)
+            c.switchToHub(id: "b") // Truly detached windows have no active editor to approve.
+            XCTAssertEqual(store.activeHubID, "b")
+        }
+    }
+
+    @MainActor
     func testMalformedContextAndLegacyFallback() throws {
         try fixture { c, _, owner in
             var malformed = context()

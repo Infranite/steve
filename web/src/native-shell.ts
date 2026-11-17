@@ -13,6 +13,7 @@ export type ShellContext = {
 }
 export type ShellNavigation = { id: string; hubID: string; workspaceID?: string; route: string; targetID?: string }
 const OPERATIONS = ["shell.context", "shell.navigation.next", "shell.navigation.ack"]
+const HUB_SWITCH_OPERATIONS = ["shell.hub-switch.next", "shell.hub-switch.ack"]
 export const SHELL_POLL_MS = 2000
 const NAVIGATION_TIMEOUT_MS = 10000
 
@@ -92,7 +93,7 @@ export class NativeShellSession {
   private schedule() {
     if (this.timer) clearTimeout(this.timer)
     this.timer = undefined
-    if (!this.live || this.polling || !this.context?.ready) return
+    if (!this.live || this.polling || !this.context) return
     this.timer = setTimeout(() => { this.timer = undefined; void this.poll() }, SHELL_POLL_MS)
   }
 
@@ -128,12 +129,27 @@ export class NativeShellSession {
 
   /** Public for deterministic bridge tests; production uses the non-overlapping low-cadence scheduler. */
   async poll(): Promise<void> {
-    if (!this.live || this.polling || !this.context?.ready) return
+    if (!this.live || this.polling || !this.context) return
     this.polling = true
     const revision = this.revision, auth = this.authGeneration
     let intent: ShellNavigation | null = null
     try {
       await this.publish()
+      // Native menus may ask to leave while the app is loading/offline. No context/ready
+      // fallback may turn an attached editor's silence into approval.
+      if (HUB_SWITCH_OPERATIONS.every((op) => this.bridge.can.includes(op))) {
+        const request: unknown = await this.bridge.call("shell.hub-switch.next")
+        if (!this.live || revision !== this.revision) return
+        if (request != null) {
+          if (typeof request !== "object" || !("id" in request) || typeof request.id !== "string" ||
+              !("hubID" in request) || typeof request.hubID !== "string") return
+          const approved = this.port.allowed()
+          if (!this.live || revision !== this.revision) return
+          await this.bridge.call("shell.hub-switch.ack", { id: request.id, approved })
+          return
+        }
+      }
+      if (!this.context?.ready) return
       const raw: unknown = await this.bridge.call("shell.navigation.next")
       if (!this.live || revision !== this.revision) return // Late response from a different workspace/login/readiness.
       if (raw == null) return
@@ -154,6 +170,9 @@ export class NativeShellSession {
         if (!this.live || auth !== this.authGeneration || (!addingHub && !this.context?.authenticated)) throw new Error("Navigation scope changed")
       }
       if (workspace && workspace !== this.context!.workspaceID) {
+        // Selection itself clears/unmounts the current editor: ask before that side effect.
+        active()
+        if (!this.port.allowed()) throw new Error("Navigation is blocked by an active edit")
         if (!await this.port.selectWorkspace(workspace)) throw new Error("Workspace could not be selected")
         await this.waitFor(() => { active(); return this.context?.workspaceID === workspace && this.context.ready })
       }

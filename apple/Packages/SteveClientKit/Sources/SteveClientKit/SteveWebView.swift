@@ -46,6 +46,10 @@ public struct SteveWebView: NSViewRepresentableFallback {
         return webView
     }
 
+    public static func dismantleNSView(_ webView: WKWebView, coordinator: BridgeCoordinator) {
+        coordinator.parent.coordinator.detachShell(ownerID: coordinator.ownerID)
+    }
+
     public func updateNSView(_ webView: WKWebView, context: Context) {
         context.coordinator.parent = self
         loadIfReady(in: webView, bridge: context.coordinator)
@@ -63,6 +67,10 @@ public struct SteveWebView: NSViewRepresentableFallback {
         context.coordinator.attach(webView)
         loadIfReady(in: webView, bridge: context.coordinator)
         return webView
+    }
+
+    public static func dismantleUIView(_ webView: WKWebView, coordinator: BridgeCoordinator) {
+        coordinator.parent.coordinator.detachShell(ownerID: coordinator.ownerID)
     }
 
     public func updateUIView(_ webView: WKWebView, context: Context) {
@@ -942,6 +950,27 @@ public struct SteveWebView: NSViewRepresentableFallback {
         }
 
         #if os(macOS)
+        @MainActor
+        public func webView(
+            _ webView: WKWebView,
+            runJavaScriptConfirmPanelWithMessage message: String,
+            initiatedByFrame frame: WKFrameInfo,
+            completionHandler: @escaping (Bool) -> Void
+        ) {
+            guard webView === self.webView, isTrustedGatewayFrame(frame), let window = webView.window else {
+                completionHandler(false)
+                return
+            }
+            let alert = NSAlert()
+            alert.messageText = "Steve"
+            alert.informativeText = message
+            alert.addButton(withTitle: L10n.tr("离开页面", "Leave Page"))
+            alert.addButton(withTitle: L10n.tr("取消", "Cancel"))
+            alert.beginSheetModal(for: window) { response in
+                completionHandler(response == .alertFirstButtonReturn)
+            }
+        }
+
         @MainActor
         public func webView(
             _ webView: WKWebView,

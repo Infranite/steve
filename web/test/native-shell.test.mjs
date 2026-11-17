@@ -4,7 +4,7 @@ import { NativeShellSession, shellBridge, nativeHubChrome, shellRoute, shellDest
 
 const caps = ["shell.context", "shell.navigation.next", "shell.navigation.ack"]
 const context = (patch = {}) => ({ workspaceID: "first", workspaceName: "First", route: "#/", title: "Steve", ready: true, authenticated: true, focused: true, visible: true, ...patch })
-function fixture(intent, overrides = {}) {
+function fixture(intent, overrides = {}, portOverrides = {}) {
   const calls = [], navigated = [], selected = []
   let current = context(), action = false
   const bridge = { v: 2, platform: "macos", can: caps, call: async (op, args) => {
@@ -19,6 +19,7 @@ function fixture(intent, overrides = {}) {
     selectWorkspace: async (id) => { selected.push(id); current = context({ workspaceID: id, ready: false }); session.update(current); await Promise.resolve(); current = { ...current, ready: true }; session.update(current); return true },
     navigate: (route) => { navigated.push(route); action = route.startsWith("#/hub/"); current = { ...current, route: shellDestination(route) }; session.update(current) },
     actionOpen: () => action,
+    ...portOverrides,
   })
   session.update(current)
   return { session, bridge, calls, navigated, selected, update: (patch) => { current = { ...current, ...patch }; session.update(current) } }
@@ -81,6 +82,60 @@ test("unsupported target, unknown workspace and wrong Hub produce honest failure
       assert.deepEqual(f.navigated, [])
     } finally { f.session.stop() }
   }
+})
+test("edit/in-flight guard rejects cross-workspace intent before any selection or navigation", async () => {
+  const f = fixture(navigation({ workspaceID: "second" }), {}, { allowed: () => false })
+  try {
+    await f.session.poll()
+    assert.deepEqual(f.selected, [])
+    assert.deepEqual(f.navigated, [])
+    assert.equal(f.calls.at(-1)[0], "shell.navigation.ack")
+    assert.equal(f.calls.at(-1)[1].ok, false)
+    assert.match(f.calls.at(-1)[1].error, /active edit/)
+  } finally { f.session.stop() }
+})
+test("Hub switch approval uses the current guard even on a not-ready attached page", async () => {
+  for (const approved of [false, true]) {
+    const calls = [], order = []
+    const f = fixture(null, {
+      can: [...caps, "shell.hub-switch.next", "shell.hub-switch.ack"],
+      call: async (op, args) => {
+        calls.push([op, args])
+        if (op === "shell.hub-switch.next") return { id: "switch-1", hubID: "hub-b" }
+        return {}
+      },
+    }, { allowed: () => { order.push("guard"); return approved } })
+    try {
+      f.update({ ready: false })
+      await f.session.poll()
+      assert.deepEqual(order, ["guard"])
+      assert.deepEqual(calls.at(-1), ["shell.hub-switch.ack", { id: "switch-1", approved }])
+      assert.equal(calls.some(([op]) => op === "shell.navigation.next"), false)
+      assert.deepEqual(f.selected, [])
+      assert.deepEqual(f.navigated, [])
+    } finally { f.session.stop() }
+  }
+})
+test("stale Hub switch response does not ask the guard or approve for a replacement scope", async () => {
+  let resolve
+  const calls = [], guards = []
+  const f = fixture(null, {
+    can: [...caps, "shell.hub-switch.next", "shell.hub-switch.ack"],
+    call: async (op, args) => {
+      calls.push([op, args])
+      if (op === "shell.hub-switch.next") return new Promise((r) => { resolve = r })
+      return {}
+    },
+  }, { allowed: () => { guards.push(true); return true } })
+  try {
+    const pending = f.session.poll()
+    while (!resolve) await new Promise((r) => setImmediate(r))
+    f.update({ authenticated: false, workspaceID: null, workspaceName: null })
+    resolve({ id: "stale", hubID: "hub-b" })
+    await pending
+    assert.deepEqual(guards, [])
+    assert.equal(calls.some(([op]) => op === "shell.hub-switch.ack"), false)
+  } finally { f.session.stop() }
 })
 test("pending next never overlaps; logout and dispose cancel a late result without ack or route", async () => {
   for (const cancel of ["logout", "dispose", "workspace"]) {
