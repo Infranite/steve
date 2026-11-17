@@ -8,5 +8,22 @@
   "digest.change.summary_newer": "A newer conversation summary exists",
   "digest.change.todo_moved": "The todo changed since this operation",
   "digest.change.mem_answered": "The memory candidate was already handled",
-  "digest.change.target_moved": "The target changed since this operation"
+  "digest.change.target_moved": "The target changed since this operation",
+  "digest.todo.text": "A todo needs text, at most 500 characters",
+  "digest.todo.kind": "A todo is a todo or a goal",
+  "digest.todo.date": "Write dates as YYYY-MM-DD",
+  "digest.todo.due_both": "A deadline is a moment or a day, not both",
+  "digest.todo.goal_fields": "A goal has a target date, not a deadline, recurrence or parent goal",
+  "digest.todo.target_date": "Only a goal has a target date",
+  "digest.todo.parent": "The parent must be one of your own goals",
+  "digest.todo.has_children": "This goal still has todos under it, so it stays a goal",
+  "digest.todo.pri": "Priority is 0 to %{max}",
+  "digest.todo.time": "That time is not valid",
+  "digest.todo.recur": "Repeat with FREQ=DAILY, WEEKLY, MONTHLY or YEARLY and an optional INTERVAL=1 to 366",
+  "digest.todo.recur_due": "A repeating todo needs a deadline",
+  "digest.todo.goal_hand": "A goal is not handed to a Bot as a whole; split it and hand over its parts",
+  "digest.todo.matter": "No such matter",
+  "digest.todo.item": "No such item",
+  "digest.todo.not_goal": "Only a goal has items linked to it",
+  "digest.todo.not_yours": "This is not your todo"
 }

@@ -257,6 +257,10 @@ export default {
     digestReport: "查看当前整理任务已保存的改动，支持撤销",
     mattersSearch: "搜索已有的跨对话事项",
     matterRead: "读取跨对话事项的时间线和可见记忆",
+    todoList: "列出你的待办和目标，目标带进度",
+    todoAdd: "替你记一条待办或目标，可以撤销",
+    todoUpdate: "改你的一条待办或目标，可以撤销",
+    todoComplete: "把你的待办标为完成、放下或重新打开，可以撤销",
     toolsSearch: "按用途搜索当前可用的内置或外部工具",
     toolCall: "按已发现的名称和参数调用工具",
 

@@ -38,6 +38,7 @@ pub(crate) enum Owner {
     Contacts,
     Knowledge,
     Digest,
+    Todos,
     Remember,
     Vault,
     Github,
@@ -159,6 +160,8 @@ pub(crate) fn owner_of(name: &str) -> Option<Owner> {
         Some(Owner::Contacts)
     } else if steve_digest::tools::handles(name) {
         Some(Owner::Digest)
+    } else if steve_digest::todo_tools::handles(name) {
+        Some(Owner::Todos)
     } else if steve_knowledge::tools::handles(name) {
         Some(Owner::Knowledge)
     } else if name == steve_knowledge::candidates::REMEMBER {
@@ -190,6 +193,7 @@ fn extra_tools() -> Vec<Value> {
     v.push(workflow_tool());
     v.extend(steve_knowledge::tools::all_tools().iter().cloned());
     v.extend(steve_digest::tools::tools());
+    v.extend(steve_digest::todo_tools::tools());
     v.push(steve_knowledge::candidates::remember_tool());
     v.extend(steve_modules::vault::mcp::tools().iter().cloned());
     v.extend(steve_github::mcp::tools().iter().cloned());
@@ -557,6 +561,8 @@ async fn call_owned_inner(
         }
         Owner::Contacts => mcp::call(&x.modules, &x.ports, &cx, name, &args).await,
         Owner::Digest => steve_digest::tools::call(&x.modules, &cx, name, &args).await,
+        // the person's own todos: refused for a service session, applied at once and undoable
+        Owner::Todos => steve_digest::todo_tools::call(&x.modules, &cx, name, &args).await,
         Owner::Knowledge => steve_knowledge::tools::call(&x.modules, &x.kb, &cx, name, &args).await,
         // synchronous (one write transaction): off the runtime
         Owner::Vault => {

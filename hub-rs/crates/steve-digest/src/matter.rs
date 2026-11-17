@@ -880,8 +880,9 @@ pub fn get_for(
         .query_map(params![ws, id], |r| r.get(0))?
         .collect::<rusqlite::Result<_>>()?;
     let todos: Vec<Value> = c
-        .prepare_cached("SELECT id, text, state FROM todos WHERE matter_id = ? ORDER BY created DESC LIMIT 20")?
-        .query_map([&id], |r| Ok(json!({"id": r.get::<_, String>(0)?, "text": r.get::<_, String>(1)?, "state": r.get::<_, String>(2)?})))?
+        // only the viewer's own: every member's todos are theirs alone
+        .prepare_cached("SELECT id, text, state FROM todos WHERE matter_id = ? AND owner = ? ORDER BY created DESC LIMIT 20")?
+        .query_map(params![id, viewer.user], |r| Ok(json!({"id": r.get::<_, String>(0)?, "text": r.get::<_, String>(1)?, "state": r.get::<_, String>(2)?})))?
         .collect::<rusqlite::Result<_>>()?;
     let scope = viewer.sql("m");
     let mut args: Vec<rusqlite::types::Value> = vec![ws.to_string().into(), id.clone().into()];

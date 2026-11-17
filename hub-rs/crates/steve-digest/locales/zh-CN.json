@@ -8,5 +8,22 @@
   "digest.change.summary_newer": "已有较新的会话摘要，不能撤销这一版",
   "digest.change.todo_moved": "待办已更改，不能撤销旧改动",
   "digest.change.mem_answered": "记忆已处理，不能撤销候选",
-  "digest.change.target_moved": "对象已更改，不能撤销旧改动"
+  "digest.change.target_moved": "对象已更改，不能撤销旧改动",
+  "digest.todo.text": "待办要写内容，最多 500 字",
+  "digest.todo.kind": "待办只能是待办或目标",
+  "digest.todo.date": "日期要写成 YYYY-MM-DD",
+  "digest.todo.due_both": "截止只能是某个时刻或某一天，不能两个都给",
+  "digest.todo.goal_fields": "目标用目标日期，没有截止、重复或上级目标",
+  "digest.todo.target_date": "只有目标有目标日期",
+  "digest.todo.parent": "上级要是你自己的一个目标",
+  "digest.todo.has_children": "这个目标下还有待办，不能改成普通待办",
+  "digest.todo.pri": "优先级是 0 到 %{max}",
+  "digest.todo.time": "时间不对",
+  "digest.todo.recur": "重复规则写 FREQ=DAILY、WEEKLY、MONTHLY 或 YEARLY，可加 INTERVAL=1 到 366",
+  "digest.todo.recur_due": "重复的待办要有截止",
+  "digest.todo.goal_hand": "目标不能整个交给 Bot，拆开后再交其中的事",
+  "digest.todo.matter": "没有这件事",
+  "digest.todo.item": "没有这个事项",
+  "digest.todo.not_goal": "只有目标能关联事项",
+  "digest.todo.not_yours": "这不是你的待办"
 }
