@@ -1365,7 +1365,7 @@ impl Tx<'_> {
         if self.workflow_child(&self.item(item_id)?)? {
             self.rt().check_workflow_execution(item_id)?;
         }
-        /* a Bot that could not run this item at all (its model access, its harness): said once on
+        /* a Bot that could not run this item at all (its harness not installed, ready or signed in on any Node): said once on
          * the item before anything is made, no session, nothing tried again by itself */
         {
             let want = match bot_override {

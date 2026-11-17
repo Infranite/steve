@@ -215,7 +215,7 @@
   "hub.onboard.owner_only": "仅实例管理员可以开始或跳过初次见面",
   "hub.check.adapter_missing": "ACP 适配器 %{harness} 不在 %{adapter}；启动 %{harness} 任务前，先安装它的 ACP 适配器，并把它的注册项配成绝对路径（docs/deployment.md#harness-setup）",
   "hub.check.node_missing": "STEVE_NODE：Node.js 可执行文件不在 %{node}；启动 %{harness} 任务前，先安装 Node.js，或把它设成绝对路径",
-  "hub.check.principal_state": "STEVE_PRINCIPAL_STATE=on（默认）：新会话用各自独立的 harness 目录，已有会话沿用记录下来的状态。各 harness CLI（如 Codex、Gemini、Copilot、Kimi、Cursor 等）的登录不会被复制。继续某个主体的任务前，先在 Node 的 state/<runtime_sessions.state_dir>/harness 目录里为它登录，见 docs/deployment.md#harness-setup。STEVE_PRINCIPAL_STATE=off 只让新会话回到共用状态。",
+  "hub.check.principal_state": "STEVE_PRINCIPAL_STATE=on（默认）：新会话用各自独立的 harness 目录，已有会话沿用记录下来的状态。每个主体的会话都用 harness 在所在 Node 上自己的登录（不会复制），所以请在 Node 上让各 harness 自己登录；Steve 从不配置模型提供方或密钥。见 docs/deployment.md#harness-setup。STEVE_PRINCIPAL_STATE=off 只让新会话回到共用状态。",
   "hub.check.unconfined": "STEVE_CONFINE：运行不会放进沙箱：%{why}",
   "hub.audit.owner_only": "仅实例管理员可以查看操作记录",
   "hub.github_type.check_failed": "检查失败",
@@ -290,10 +290,5 @@
   "hub.models.invalid_selection": "模型选择参数不正确。",
   "hub.node.workspace_conflict": "工作区的准备方式已改变，旧目录和记录已保留。点“继续”将在当前项目创建新会话。",
   "hub.node.workspace_conflict_question": "开不了会话：工作区的准备方式已改变，旧目录和记录已保留。点“继续”将在当前项目创建新会话。",
-  "hub.model_access.harness_not_ready": "%{harness} 在设备上还没装好或没有就绪，现在不能运行：到「设备」页面查看并安装。",
-  "hub.model_access.missing": "定时任务的模型接入还没配置（%{harness}）：服务会话不使用任何人的个人账号，请到「设置 · 模型 · 服务会话的模型接入」里为 %{harness} 配置提供方地址和保险箱里的密钥。",
-  "hub.model_access.credential_missing": "服务会话的模型接入（%{harness}）找不到密钥：保险箱条目或字段已不在，请到「设置 · 模型 · 服务会话的模型接入」里重新选择。",
-  "hub.model_access.credential_not_shared": "服务会话的模型接入（%{harness}）只能用共享或系统保险箱里的条目（不能是个人条目或高敏感条目）：请把密钥放进共享保险箱，再到「设置 · 模型 · 服务会话的模型接入」里选择它。",
-  "hub.model_access.not_configurable": "Steve 还不能为 %{harness} 的服务会话配置模型接入。",
-  "hub.model_access.owner_only": "只有实例所有者能修改服务会话的模型接入。"
+  "hub.preflight.harness_not_ready": "%{harness} 在所有设备上都还没装好、没就绪或没登录，现在不能运行。请在设备上安装它，或在那台设备上让它自己登录（Steve 用的就是 harness 在那台设备上的登录），再到「设备」页面查看。"
 }

@@ -460,7 +460,7 @@ export default {
     onPlan: "按计划",
     lastFailed: "上次失败",
     blocked: "现在不能运行",
-    blockedFix: "去配置",
+    blockedFix: "去设备页",
     started: "已开始运行 {{name}}",
     runNow: "立即运行",
     disabledToast: "已停用，之后不再触发",

@@ -213,7 +213,9 @@ impl Confine {
         writable: &[PathBuf],
         cwd: Option<&Path>,
     ) -> (PathBuf, Vec<OsString>) {
-        self.wrap_in_mode(program, args, readable, writable, cwd, false, false, None)
+        self.wrap_in_mode(
+            program, args, readable, writable, cwd, false, false, None, None,
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -227,6 +229,7 @@ impl Confine {
         isolated_state: bool,
         hide_cli_creds: bool,
         user_home: Option<&Path>,
+        login: Option<&LoginStore>,
     ) -> (PathBuf, Vec<OsString>) {
         // the places a run in a workspace writes, level 1 and up
         let writes = match cwd {
@@ -273,6 +276,9 @@ impl Confine {
                             profile.push_str(&format!("(allow {ops} (subpath \"{r}\"))\n"));
                         }
                     }
+                }
+                if let Some(l) = login {
+                    profile.push_str(&seatbelt_login(l));
                 }
                 let mut a: Vec<OsString> = vec!["-p".into(), profile.into(), program.into()];
                 a.extend(args);
@@ -337,6 +343,9 @@ impl Confine {
                     a.extend(["--ro-bind".into(), "/dev/null".into(), f.into()]);
                 }
                 bwrap_hide_cli(&mut a, &hidden_cli);
+                if let Some(l) = login {
+                    bwrap_login(&mut a, l);
+                }
                 for r in readable {
                     let r = std::fs::canonicalize(r).unwrap_or_else(|_| r.clone());
                     a.extend(["--ro-bind".into(), r.clone().into(), r.into()]);
@@ -481,6 +490,95 @@ fn cli_credential_paths(user_home: &Path) -> Vec<PathBuf> {
         .chain(files.iter())
         .map(|rel| user_home.join(rel))
         .collect()
+}
+
+/// The Node's credential store of a harness a session uses although it may not see the Node's
+/// harness directory ([`steve_acp::Login`]): the directory, and the names in it the harness reads
+/// and writes, renewing its sign-in included (a trailing `*` matches any rest of a name). So a
+/// renewal is never made and then lost, which would spend the Node's sign-in.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct LoginStore {
+    pub dir: PathBuf,
+    pub names: Vec<String>,
+}
+
+impl LoginStore {
+    fn admits(&self, name: &str) -> bool {
+        self.names.iter().any(|n| match n.strip_suffix('*') {
+            Some(prefix) => name.starts_with(prefix),
+            None => n == name,
+        })
+    }
+}
+
+/// Seatbelt: those names in the store, and whatever is under them (a lock directory), readable
+/// and writable after everything that hides the directory; the way to it may be looked at.
+fn seatbelt_login(l: &LoginStore) -> String {
+    let mut s = String::new();
+    let names: Vec<String> = l
+        .names
+        .iter()
+        .map(|n| match n.strip_suffix('*') {
+            Some(prefix) => format!("{}[^/]*", regex_escape(prefix)),
+            None => regex_escape(n),
+        })
+        .collect();
+    if names.is_empty() {
+        return s;
+    }
+    let real = std::fs::canonicalize(&l.dir).unwrap_or_else(|_| l.dir.clone());
+    let mut seen = std::collections::HashSet::new();
+    for d in [&l.dir, &real] {
+        let ds = d.to_string_lossy().into_owned();
+        if ds.contains(['"', '\\']) || ds.chars().any(char::is_control) || !seen.insert(ds.clone())
+        {
+            continue;
+        }
+        for p in d.ancestors() {
+            let p = p.to_string_lossy();
+            if !p.is_empty() && !p.contains(['"', '\\']) {
+                s.push_str(&format!("(allow file-read-metadata (literal \"{p}\"))\n"));
+            }
+        }
+        s.push_str(&format!(
+            "(allow file-read* file-write* (regex #\"^{}/({})(/.*)?$\"))\n",
+            regex_escape(&ds),
+            names.join("|")
+        ));
+    }
+    s
+}
+
+/// Bubblewrap: the store's own directory (it renames into it), with everything in it but those
+/// names hidden again.
+fn bwrap_login(a: &mut Vec<OsString>, l: &LoginStore) {
+    let Ok(dir) = std::fs::canonicalize(&l.dir) else {
+        return;
+    };
+    if !dir.is_dir() || l.names.is_empty() {
+        return;
+    }
+    a.extend(["--bind".into(), dir.clone().into(), dir.clone().into()]);
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return;
+    };
+    for e in entries.flatten() {
+        if l.admits(&e.file_name().to_string_lossy()) {
+            continue;
+        }
+        // what a link in it leads to is hidden only when it is in the directory too
+        let Ok(real) = std::fs::canonicalize(e.path()) else {
+            continue;
+        };
+        if !real.starts_with(&dir) {
+            continue;
+        }
+        if real.is_dir() {
+            a.extend(["--tmpfs".into(), real.into()]);
+        } else if real.is_file() {
+            a.extend(["--ro-bind".into(), "/dev/null".into(), real.into()]);
+        }
+    }
 }
 
 fn seatbelt_hide_cli(paths: &[PathBuf]) -> String {
@@ -1042,6 +1140,7 @@ mod tests {
                 true,
                 hide,
                 Some(&fake_home),
+                None,
             );
             std::process::Command::new(p)
                 .args(a)
@@ -1065,5 +1164,113 @@ mod tests {
             format!("cat {}/ok.txt", principal_state.display()),
             true
         ));
+    }
+
+    #[test]
+    fn the_nodes_sign_in_store_opens_its_names_only() {
+        let t = tempfile::tempdir().unwrap();
+        let store = t.path().canonicalize().unwrap().join(".claude");
+        std::fs::create_dir_all(store.join("skills")).unwrap();
+        std::fs::create_dir_all(store.join(".storage-write.lock")).unwrap();
+        std::fs::write(store.join(".credentials.json"), "{}").unwrap();
+        std::fs::write(store.join("CLAUDE.md"), "own").unwrap();
+        let l = LoginStore {
+            dir: store.clone(),
+            names: vec![
+                ".credentials.json".into(),
+                ".storage-write.lock".into(),
+                ".credentials.json.tmp.*".into(),
+            ],
+        };
+        // Bubblewrap: the directory bound, everything else in it hidden again
+        let mut a = vec![];
+        bwrap_login(&mut a, &l);
+        let a: Vec<String> = a.iter().map(|x| x.to_string_lossy().into_owned()).collect();
+        let s = |p: &Path| p.to_string_lossy().into_owned();
+        assert_eq!(a[..3], ["--bind".to_string(), s(&store), s(&store)]);
+        let at = |path: String| a.iter().position(|x| *x == path).map(|i| a[i - 1].clone());
+        assert_eq!(at(s(&store.join("skills"))).as_deref(), Some("--tmpfs"));
+        assert_eq!(
+            at(s(&store.join("CLAUDE.md"))).as_deref(),
+            Some("/dev/null")
+        );
+        assert_eq!(at(s(&store.join(".credentials.json"))), None);
+        assert_eq!(at(s(&store.join(".storage-write.lock"))), None);
+        // Seatbelt: those names, and what is under them, by one rule after the hiding
+        let rules = seatbelt_login(&l);
+        assert!(
+            rules.contains(r"/(\.credentials\.json|\.storage-write\.lock|\.credentials\.json\.tmp\.[^/]*)(/.*)?$"),
+            "{rules}"
+        );
+        assert!(
+            seatbelt_login(&LoginStore {
+                dir: store,
+                names: vec![]
+            })
+            .is_empty()
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn non_owner_seatbelt_may_renew_the_nodes_sign_in_but_sees_nothing_else_there() {
+        if !steve_vault::harness::seatbelt_works() {
+            return;
+        }
+        let t = tempfile::tempdir().unwrap();
+        let root = t.path().canonicalize().unwrap();
+        let fake_home = root.join("u");
+        let ws = root.join("ws");
+        let principal_state = root.join("node/state/p1/harness");
+        let store = fake_home.join(".claude");
+        std::fs::create_dir_all(&store).unwrap();
+        std::fs::write(store.join(".credentials.json"), "old").unwrap();
+        std::fs::write(store.join("CLAUDE.md"), "the owner's own").unwrap();
+        std::fs::create_dir_all(&ws).unwrap();
+        std::fs::create_dir_all(&principal_state).unwrap();
+        let login = LoginStore {
+            dir: store.clone(),
+            names: steve_acp::adapters::spec("claude-code", None)
+                .properties
+                .state
+                .unwrap()
+                .login
+                .store_names(),
+        };
+        let c = Confine::choose(&root.join("steve"), &root.join("node"), Some("1".into()));
+        let run = |cmd: String, login: Option<&LoginStore>| {
+            let (p, a) = c.wrap_in_mode(
+                "/bin/sh".into(),
+                vec!["-c".into(), cmd.into()],
+                &[],
+                std::slice::from_ref(&principal_state),
+                Some(&ws),
+                true,
+                true,
+                Some(&fake_home),
+                login,
+            );
+            std::process::Command::new(p)
+                .args(a)
+                .output()
+                .unwrap()
+                .status
+                .success()
+        };
+        let d = store.display();
+        // renewing as Claude Code does: its lock, a temporary file renamed over the credentials
+        let renew = format!(
+            "mkdir {d}/.storage-write.lock && printf new > {d}/.credentials.json.tmp.0a1b2c3d \
+             && mv {d}/.credentials.json.tmp.0a1b2c3d {d}/.credentials.json \
+             && rmdir {d}/.storage-write.lock"
+        );
+        assert!(!run(renew.clone(), None), "hidden without the store");
+        assert!(run(renew, Some(&login)));
+        assert_eq!(
+            std::fs::read_to_string(store.join(".credentials.json")).unwrap(),
+            "new"
+        );
+        assert!(!run(format!("cat {d}/CLAUDE.md"), Some(&login)));
+        assert!(!run(format!("printf x > {d}/other"), Some(&login)));
     }
 }

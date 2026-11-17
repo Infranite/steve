@@ -72,7 +72,17 @@ pub(crate) fn wrap<'a>(
             }
             None => {
                 if let Some(c) = confine {
-                    c.wrap_in_mode(program, args, &[], &[], cwd, false, false, Some(user_home))
+                    c.wrap_in_mode(
+                        program,
+                        args,
+                        &[],
+                        &[],
+                        cwd,
+                        false,
+                        false,
+                        Some(user_home),
+                        None,
+                    )
                 } else {
                     (program, args)
                 }

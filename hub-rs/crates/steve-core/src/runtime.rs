@@ -148,7 +148,7 @@ pub trait AgentRuntime: Send + Sync {
         ))
     }
     /// Whether `bot` (of `harness`) could run `item_id`'s work at all, before a session is made
-    /// for it or the item is given to the Bot: its principal's model access, its harness on the
+    /// for it or the item is given to the Bot: its harness installed, ready and signed in on the
     /// Nodes. `Err` says why and where to fix it (stored text, zh-CN); nothing is made then, and
     /// nothing tries again by itself. Deterministic: no model, no Node is asked. The default lets
     /// everything run.

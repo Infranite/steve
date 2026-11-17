@@ -66,8 +66,6 @@ impl NodeRuntime {
             // Plugins stay at the Hub; only skills are filled from the Bot below.
             mcp_servers: vec![],
             skills: vec![],
-            // set with the state below: a service session's provider, from the Hub's setting
-            model_access: None,
         };
         let fresh = self.tx(|tx| {
             self.session_owners_work_in(tx, &b.session)?;
@@ -130,13 +128,6 @@ impl NodeRuntime {
                     &b.session,
                     self.node_id.as_str(),
                     &open.choice.harness,
-                )?;
-                // a service session's provider, from the Hub's model access setting (#222)
-                open.model_access = super::super::model_access::for_session_in(
-                    tx,
-                    &b.session,
-                    &open.choice.harness,
-                    open.state.as_ref(),
                 )?;
             }
             let (open_v, open_d) = command(&open_op, open.clone())?;
@@ -234,13 +225,6 @@ impl NodeRuntime {
         // the variables as they are now: a removed or changed one does not come back
         open.env = super::super::node_env::for_session(tx, self.node_id.as_str(), session)?;
         open.skills = super::super::bot_skills::for_session(tx, session)?;
-        // and the provider as the setting names it now: a removed one does not come back
-        open.model_access = super::super::model_access::for_session_in(
-            tx,
-            session,
-            &open.choice.harness,
-            open.state.as_ref(),
-        )?;
         let op = uid(&format!("op_open_{session}"));
         let (req, digest) = command(&op, open)?;
         rt::insert_command_in(

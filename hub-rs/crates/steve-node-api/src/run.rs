@@ -205,48 +205,6 @@ pub struct OpenSession {
     /// Node ignores them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub skills: Vec<Skill>,
-    /// The model provider a service session's harness is pointed at ([`ModelAccess`]), from the
-    /// Hub's model access setting. Only for a session with its own state directory that does not
-    /// start from the owner's ([`HarnessState::import_owner`] off). An older Node ignores it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model_access: Option<ModelAccess>,
-}
-
-/// The model provider of a service session: the Node writes the harness's own provider
-/// configuration (the adapter's `model_provider`) into the session's state directory, and takes
-/// the key from the Hub ([`crate::ports::HubSecrets`], operation [`model_access_op`]) each time the
-/// harness opens, into that process's environment only. The key is never journaled or written to
-/// a file; the endpoint is not a secret.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ModelAccess {
-    /// The provider's (or gateway's) endpoint, `http(s)://`.
-    pub base_url: String,
-    /// The id the key is taken under: a reference, never the value.
-    pub secret: String,
-}
-
-impl ModelAccess {
-    /// What a Node accepts: an `http(s)` endpoint of one line, a short secret id.
-    pub fn valid(&self) -> bool {
-        let url = self.base_url.as_str();
-        (url.starts_with("https://") || url.starts_with("http://"))
-            && url.len() <= 2048
-            && !url.chars().any(|c| c.is_control() || c.is_whitespace())
-            && !self.secret.is_empty()
-            && self.secret.len() <= 256
-            && !self.secret.chars().any(char::is_control)
-    }
-}
-
-/// The prefix of [`model_access_op`].
-pub const MODEL_ACCESS_OP: &str = "model:";
-
-/// The operation a session's model access key is taken under: `model:<session>`. The Hub answers
-/// it for the Node the session is bound to, while the session is a service session the setting
-/// still covers.
-pub fn model_access_op(session: &SessionId) -> OperationId {
-    OperationId::new(format!("{MODEL_ACCESS_OP}{}", session.as_str()))
-        .unwrap_or_else(|_| OperationId::new("model:").expect("valid"))
 }
 
 /// One skill: written as `<name>/SKILL.md`, its front matter `name` and `description`, then

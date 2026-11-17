@@ -254,8 +254,8 @@ mod tests {
         );
         assert!(
             en.iter().any(|w| w.starts_with("STEVE_PRINCIPAL_STATE=on")
-                && w.contains("Harness CLI logins")
-                && w.contains("not copied")),
+                && w.contains("own sign-in")
+                && w.contains("never a copy")),
             "{en:?}"
         );
     }
@@ -319,7 +319,7 @@ mod tests {
         assert!(
             r.warnings
                 .iter()
-                .any(|w| w.contains("Harness CLI logins") && w.contains("harness-setup"))
+                .any(|w| w.contains("own sign-in") && w.contains("harness-setup"))
         );
         let r = run(&[("STEVE_PRINCIPAL_STATE", "off")]);
         assert!(

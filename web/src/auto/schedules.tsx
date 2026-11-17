@@ -14,10 +14,10 @@ import { cn } from "@/lib/utils"
 import { st, botName, toast } from "@/store"
 import { flowApi, errText, type Load, type Parsed, type Schedule, type ScheduleBody, type ScheduleMode, type ScheduleRun } from "@/api/flow"
 import { HubError } from "@/api"
+import { runtimeSetupHref } from "@/runtime-access"
 import { Modal, Pick, Failed, Clamp, when, botOptions, mainBot, RUN_STATUS } from "@/auto/common"
 import { t, useT } from "@/i18n"
 import { num } from "@/i18n/format"
-import { ModelAccessBlocked } from "@/model-access"
 
 const MODES: ScheduleMode[] = ["item_auto", "item", "propose", "report"]
 /** how a schedule runs, in the current language */
@@ -43,7 +43,7 @@ export function Schedules({ L, onNew }: { L: Load<Schedule[]>; onNew: () => void
     </AlertDialogContent></AlertDialog>
     {edit && <NewScheduleDialog edit={edit} onClose={() => setEdit(null)} onSaved={() => void L.reload()} />}
     {!L.data.length ? <Empty title={t("auto:schedule.emptyTitle")} sub={t("auto:schedule.emptySub")} action={<Button variant="outline" onClick={onNew}><PlusIcon />{t("auto:newSchedule")}</Button>} />
-    : <><ModelAccessBlocked /><Panel>{L.data.map((s) => (
+    : <Panel>{L.data.map((s) => (
       <Collapsible key={s.id} open={open === s.id} onOpenChange={(o) => setOpen(o ? s.id : null)}>
         <div className="flex items-center gap-3 rounded-lg px-3 py-3 transition-colors hover:bg-accent">
           <Tile I={ClockIcon} className={cn(!s.enabled && "opacity-60")} />
@@ -59,7 +59,7 @@ export function Schedules({ L, onNew }: { L: Load<Schedule[]>; onNew: () => void
           {open === s.id && <ScheduleDetail s={s} busy={busy} onRun={() => void act("run" + s.id, () => flowApi.runSchedule(s.id), t("auto:schedule.started", { name: s.name }))} onEdit={() => setEdit(s)} onDelete={() => setDel(s)} />}
         </CollapsibleContent>
       </Collapsible>
-    ))}</Panel></>}
+    ))}</Panel>}
   </>)
 }
 
@@ -78,7 +78,7 @@ function ScheduleDetail({ s, busy, onRun, onEdit, onDelete }: { s: Schedule; bus
   ]
   return (
     <div className="flex flex-col gap-4 px-3 pb-4 sm:pl-14" data-schedule-detail={s.id}>
-      {s.enabled && s.blocked && <Notice tone="attention" data-schedule-blocked-reason action={<a href="#/settings/models" className="whitespace-nowrap text-blue hover:underline">{t("auto:schedule.blockedFix")}</a>}>{s.blocked}</Notice>}
+      {s.enabled && s.blocked && <Notice tone="attention" data-schedule-blocked-reason action={<a href={runtimeSetupHref()} className="whitespace-nowrap text-blue hover:underline">{t("auto:schedule.blockedFix")}</a>}>{s.blocked}</Notice>}
       {s.last?.status === "failed" && s.last.text && <Notice tone="destructive" data-schedule-error><Clamp text={s.last.text} /></Notice>}
       <div className="grid gap-x-6 gap-y-4 sm:grid-cols-2">
         <dl className="grid grid-cols-[64px_1fr] content-start gap-x-3 gap-y-2 type-callout">
