@@ -8,8 +8,11 @@
 //! - Steve merges it itself, never through the host's auto-merge (#239): on a look where the item is
 //!   still closing on the same revision, every check of the pull request passed and its head is the
 //!   accepted result, it runs `gh pr merge --match-head-commit <that head>` with the first merge method
-//!   the repository allows (`gh api repos/{slug}`). A result that was invalidated is never merged, and
-//!   nothing armed on the host has to be taken back;
+//!   the repository allows (`gh api repos/{slug}`). The accepted head is the worktree's commit only
+//!   when the whole accepted result is committed there (its tree is the worktree's): an edit not
+//!   committed goes back to the agent, never merged in part. A result that was invalidated is never
+//!   merged, and nothing armed on the host has to be taken back; one invalidated while Steve's merge
+//!   call ran is still said, marked and a card for you;
 //! - only a change an independent review passed is merged that way: the item's work graph, as accepted,
 //!   has its required reviews done. Any other change (no work graph, or a graph accepted as a single
 //!   session) waits on a "PR awaiting merge" card that only you answer, never YOLO; your yes lets Steve
@@ -20,10 +23,11 @@
 //! - merged → the completion rule ([`crate::upstream::probe`]) is looked at again and the item closes on
 //!   what the remote shows;
 //! - a conflict with the default branch, a branch behind it that the host requires up to date, a failed
-//!   check, a draft, or a head other than the accepted result → the agent is woken with what is wrong,
-//!   once per pushed head and at most [`PR_TELLS_MAX`] times a cycle (then a card for you), to fix it on
-//!   the same branch;
-//! - no pull request for the branch → the agent is asked once to push it and open one;
+//!   check, a draft, a head other than the accepted result, or an accepted result not all committed →
+//!   the agent is woken with what is wrong, once per pushed head and at most [`PR_TELLS_MAX`] times a
+//!   cycle (then a card for you), to fix it on the same branch;
+//! - no pull request for the branch, or only the one of an earlier result of the cycle that merged or
+//!   closed before this result saw it open → the agent is asked once to push it and open one;
 //! - closed without merging → a card for you.
 //!
 //! Every merge, and every change left to you, is marked for the statistics (`pr`, with what review it
@@ -67,6 +71,24 @@ pub const PR_TELLS_MAX: i64 = 8;
 pub const PR_AWAITING_MERGE: &str = "pr_awaiting_merge";
 /// The `pr_told` key of the "PR awaiting merge" card: asked once per result.
 pub(crate) const TOLD_AWAITING: &str = "awaiting";
+/// The `pr_told` keys of what the agent was told (each followed by what it was about, a head, the
+/// checks that failed); every other key is of a card for you.
+const TELL_KEYS: [&str; 8] = [
+    "no-pr",
+    "conflict:",
+    "behind:",
+    "ci:",
+    "draft:",
+    "head:",
+    "dirty:",
+    "before:",
+];
+
+/// `key` (of `pr_told`) is of something the agent was told, not of a card for you.
+pub(crate) fn is_tell_key(key: &str) -> bool {
+    TELL_KEYS.iter().any(|t| key.starts_with(t))
+}
+
 /// The statistics mark of a pull request: `awaiting` (left to you), `merged`.
 pub const MARK_PR: &str = "pr";
 
@@ -241,16 +263,18 @@ pub enum Merging {
     Failed(String),
 }
 
-/// Merges pull request `number` of `slug` at `head` and nowhere else (`--match-head-commit`: a head
-/// pushed since is refused by the host), with the first method the repository allows.
-pub fn merge(gh_cli: &Path, slug: &str, number: u64, head: &str) -> Merging {
+/// The merge method `slug` allows ([`merge_method`]), from the host.
+pub fn repo_merge_method(gh_cli: &Path, slug: &str) -> std::result::Result<&'static str, String> {
     let repo = gh(gh_cli, &["api", &format!("repos/{slug}")]).and_then(|out| {
         serde_json::from_str::<Value>(&out).map_err(|e| format!("gh api 的输出看不懂：{e}"))
-    });
-    let method = match repo.and_then(|r| merge_method(&r)) {
-        Ok(m) => m,
-        Err(e) => return Merging::Failed(e),
-    };
+    })?;
+    merge_method(&repo)
+}
+
+/// Merges pull request `number` of `slug` at `head` and nowhere else (`--match-head-commit`: a head
+/// pushed since is refused by the host) with `method` ([`repo_merge_method`]). One `gh` call only:
+/// it is what runs after the last look at whether the result still stands.
+pub fn merge(gh_cli: &Path, slug: &str, number: u64, head: &str, method: &str) -> Merging {
     let n = number.to_string();
     match gh(
         gh_cli,
@@ -297,6 +321,8 @@ pub(crate) struct Due {
     cwd: Option<String>,
     /// On a Node: the fingerprint its last facts said.
     node_print: Option<String>,
+    /// On a Node: its last facts saw changes not committed (the same facts as `node_print`).
+    node_dirty: bool,
     on_node: bool,
 }
 
@@ -306,6 +332,9 @@ pub(crate) enum Accepted {
     /// At this commit of the worktree: it still holds what was accepted (the same content, or the
     /// same change on a newer default branch).
     At(String),
+    /// The worktree still holds what was accepted, but not all of it is committed at this commit (an
+    /// edit not committed, a file not added): a pull request at it would not hold the result.
+    Uncommitted(String),
     /// The worktree holds something else now: the closing gate voids the result.
     Moved,
     /// Nothing tells: no fingerprint was frozen with the result, or the worktree can't be read.
@@ -323,12 +352,29 @@ impl Due {
         } else {
             crate::cycle::fingerprint(self.cwd.as_deref())
         };
-        match now {
+        let Some(n) = now else {
+            return Accepted::Unknown;
+        };
+        if !crate::cycle::same_result(frozen, &n) {
+            return Accepted::Moved;
+        }
+        /* the fingerprint is of the whole worktree: its commit holds the result only when nothing
+         * else is in the worktree (its tree is the commit's) */
+        let print = crate::upstream::parse(&n);
+        let head = print.head.to_string();
+        let committed = if self.on_node {
+            Some(!self.node_dirty)
+        } else {
+            self.cwd.as_deref().and_then(|cwd| {
+                crate::git::git(Path::new(cwd), &["rev-parse", &format!("{head}^{{tree}}")])
+                    .ok()
+                    .map(|t| t.trim() == print.tree)
+            })
+        };
+        match committed {
+            Some(true) => Accepted::At(head),
+            Some(false) => Accepted::Uncommitted(head),
             None => Accepted::Unknown,
-            Some(n) if crate::cycle::same_result(frozen, &n) => {
-                Accepted::At(crate::cycle::fingerprint_head(&n).to_string())
-            }
-            Some(_) => Accepted::Moved,
         }
     }
 }
@@ -350,12 +396,18 @@ impl Core {
                     if d.may_merge
                         && now() >= d.merge_after
                         && pr.mergeable_now()
-                        && &pr.head == h
-                        /* asked again under the lock right before: a result invalidated since is
-                         * never merged, and the host refuses any other head */
-                        && self.tx().pr_may_merge(&d.op)? =>
+                        && &pr.head == h =>
                 {
-                    Some(merge(&gh_cli, &d.slug, pr.number, h))
+                    /* the method is read first, so that between asking again under the lock (a
+                     * result invalidated since is never merged) and the merge there is the merge
+                     * call alone; the host refuses any other head */
+                    match repo_merge_method(&gh_cli, &d.slug) {
+                        Err(e) => Some(Merging::Failed(e)),
+                        Ok(m) if self.tx().pr_may_merge(&d.op)? => {
+                            Some(merge(&gh_cli, &d.slug, pr.number, h, m))
+                        }
+                        Ok(_) => None,
+                    }
                 }
                 _ => None,
             };
@@ -399,7 +451,8 @@ impl Tx<'_> {
     }
 
     /// The release of an earlier result of this cycle (not `op`) that found the pull request of
-    /// `branch`: the one Steve followed last.
+    /// `branch`: the one Steve followed last (`pr_state` what it saw last; `pr_merged` Steve merged it,
+    /// or saw it merged).
     pub(crate) fn pr_followed(
         &self,
         i: &Item,
@@ -516,6 +569,7 @@ impl Tx<'_> {
                 node_print: on_node
                     .then(|| self.git_seen(&i.id).map(|s| s.print.clone()))
                     .flatten(),
+                node_dirty: on_node && self.git_seen(&i.id).is_some_and(|s| s.dirty),
                 on_node,
             });
         }
@@ -538,6 +592,11 @@ impl Tx<'_> {
             return Ok(());
         };
         if o.status != "pending" || i.phase != CLOSING || o.revision != i.revision {
+            /* the result went void while Steve's merge ran (the last look before it was fine): the
+             * merge happened all the same, and is never left unsaid */
+            if let (Some(Merging::Merged), Look::Found(pr)) = (&merging, &look) {
+                self.pr_merged_void(&i, &o, pr)?;
+            }
             return Ok(());
         }
         /* a branch with nothing of its own (#218): only a merged pull request counts; anything else
@@ -595,9 +654,33 @@ impl Tx<'_> {
                     ),
                 ));
             }
+            /* the pull request an earlier result of the cycle followed, found merged or closed
+             * before this result ever saw it: it was the earlier result's, and says nothing of this
+             * one (nothing is marked merged, no card): the agent hears it needs one of its own */
+            Look::Found(pr)
+                if pr.state != "OPEN"
+                    && o.evidence["pr_before"].as_u64() == Some(pr.number)
+                    && o.evidence["pr_state"].is_null() =>
+            {
+                let how = if pr.state == "MERGED" {
+                    "合并"
+                } else {
+                    "关闭"
+                };
+                tell = Some((
+                    format!("before:{}", pr.number),
+                    format!(
+                        "（Steve）分支 {b} 的 PR #{n} 在这次验收之前就{how}了（{}），它是之前那个结果的，不算这次验收的结果。这次的改动还不在默认分支上，就推送分支 {b}，用 gh pr create 开新的 PR（或者重新打开 PR #{n}），然后结束这一回合；检查通过后 Steve 会合并它。不要自己合并，也不要推送默认分支。",
+                        pr.url,
+                        b = d.branch,
+                        n = pr.number
+                    ),
+                ));
+            }
             Look::Found(pr) => {
                 ev["pr"] = json!(pr.number);
                 ev["pr_url"] = json!(pr.url);
+                ev["pr_state"] = json!(pr.state);
                 match pr.state.as_str() {
                     "MERGED" => {
                         if o.evidence["pr_merged"] != json!(true) {
@@ -686,6 +769,17 @@ impl Tx<'_> {
                                     pr.url,
                                     d.branch,
                                     d.branch
+                                ),
+                            ));
+                        }
+                        /* the accepted result is not all committed: the pushed head can't hold it */
+                        if let Accepted::Uncommitted(h) = &accepted {
+                            ev["pr_problem"] = json!("uncommitted");
+                            tell = Some((
+                                format!("dirty:{h}"),
+                                format!(
+                                    "（Steve）验收通过的结果还有没提交的改动（工作区里有改过没提交的文件，或没加进来的新文件），PR #{} 的分支里没有它们，Steve 不会合并：{}。把改动提交（git add、git commit）并推送到分支 {}（git push origin HEAD:{}），然后结束这一回合；不该提交的文件删掉或写进 .gitignore。改动内容变了就重新用 steve_deliver 交付。不要合并 PR，也不要推送默认分支。",
+                                    pr.number, pr.url, d.branch, d.branch
                                 ),
                             ));
                         }
@@ -877,6 +971,42 @@ impl Tx<'_> {
             json!({"pr": number, "url": url, "review": "none"}),
         );
         crate::lifecycle::settle(self.db(), &i.id)
+    }
+
+    /// Steve merged the pull request of a result that went void during the merge: it is said on the
+    /// timeline, marked, kept on the release (a later result does not take it for its own) and a
+    /// card for you.
+    fn pr_merged_void(&mut self, i: &Item, o: &steve_store::ItemOperation, pr: &Pr) -> Result<()> {
+        let ev = json!({"pr": pr.number, "pr_url": pr.url, "pr_state": "MERGED",
+            "pr_merged": true, "pr_merged_by": "steve", "pr_merged_void": true});
+        self.db()
+            .store()
+            .transaction(|tx| steve_store::operation_set_in(tx, &o.id, &o.status, &ev))?;
+        let why = format!(
+            "Steve 合并了 PR #{}（{}），但合并时它的结果刚好作废了（事项又有了新的情况）：默认分支上现在有这个改动。看看要不要保留它，还是在 GitHub 上把它撤回。",
+            pr.number, pr.url
+        );
+        self.db().timeline_add(
+            &i.id,
+            "steve",
+            "sys",
+            &format!(
+                "Steve 已合并 PR #{}（{}），但它的结果在合并时作废了：{}",
+                pr.number,
+                js_head(&pr.head, 12),
+                pr.url
+            ),
+            None,
+        )?;
+        let review = self.pr_review(i, o)?;
+        self.mark_pr(
+            &i.workspace_id,
+            &i.id,
+            "merged",
+            json!({"pr": pr.number, "url": pr.url, "head": pr.head, "review": review,
+                "by": "steve", "void": true}),
+        );
+        self.fail(&i.id, &why)
     }
 
     /// The `pr` mark of a pull request that merged (`by`: `steve`, or `elsewhere` when it was merged on

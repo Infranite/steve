@@ -102,6 +102,8 @@ pub(crate) struct Seen {
     pub changes: Option<bool>,
     /// The answers to `want.contains`, in order.
     pub contains: Vec<bool>,
+    /// The worktree has changes not committed (tracked or untracked), as `print` was taken.
+    pub dirty: bool,
 }
 
 /// A gathering's result: `Ok(None)` is no git checkout there; `Err` is can't tell now (the Node
@@ -292,6 +294,7 @@ pub(crate) async fn gather(port: &dyn NodeGit, item: &str, want: Want) -> Gather
         moved,
         changes,
         contains,
+        dirty: f.dirty,
     }))
 }
 

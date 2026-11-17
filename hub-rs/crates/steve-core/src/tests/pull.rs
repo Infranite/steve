@@ -107,6 +107,12 @@ fn head(wt: &Path) -> String {
 /// with the worktree it is in (as a delivery from its worktree freezes it).
 fn accepted(gh: &Gh) -> (Kit, Remote) {
     let (k, x) = accepted_unfrozen(gh);
+    freeze(&k, &x);
+    (k, x)
+}
+
+/// The accepted result is what the worktree holds now (its fingerprint frozen with it).
+fn freeze(k: &Kit, x: &Remote) {
     let print = crate::cycle::fingerprint(Some(&x.wt.to_string_lossy())).unwrap();
     k.db()
         .store()
@@ -118,7 +124,52 @@ fn accepted(gh: &Gh) -> (Kit, Remote) {
             Ok(())
         })
         .unwrap();
-    (k, x)
+}
+
+/// The result is void (a new message) and the same change is delivered and accepted again.
+fn accepted_again(k: &Kit, x: &Remote) {
+    k.core.tx().lc_invalidate(&x.item, "收到新的消息").unwrap();
+    let s = k.db().session(&x.session).unwrap().unwrap();
+    k.core
+        .tool_deliver(
+            &s,
+            "再次交付",
+            &[],
+            &[crate::Check {
+                name: "tests".into(),
+                passed: true,
+                operated: false,
+                scope: None,
+            }],
+            &[],
+        )
+        .unwrap();
+    k.rt.end_turn(&k.core, &x.session, "end_turn", None);
+    if let Some(a) = k
+        .db()
+        .decisions_of_item(&x.item)
+        .unwrap()
+        .into_iter()
+        .find(|d| d.status == "open" && d.kind == "accept")
+    {
+        k.core.resolve(&a.id, "pass", "", "me").unwrap();
+    }
+    // the new result's release asked for what is missing (or followed the pull request on)
+    assert!(k.wait(|| {
+        let i = k.db().item(&x.item).unwrap().unwrap();
+        k.db()
+            .store()
+            .items()
+            .operations(&x.item, i.cycle)
+            .unwrap()
+            .iter()
+            .any(|o| {
+                o.kind == OP_RELEASE
+                    && o.revision == i.revision
+                    && o.evidence.get("asked").is_some()
+            })
+    }));
+    assert!(k.wait(|| k.core.tx().st.probing.is_empty()));
 }
 
 /// [`accepted`] with no fingerprint frozen with the result (`remote_for` gives the item its worktree
@@ -589,32 +640,7 @@ fn a_new_result_of_a_followed_pull_request_does_not_wake_the_agent_again() {
     let told = prompts_with(&k, &x, "按这个项目的约定");
     assert_eq!(told, 1);
     // the result is void and delivered again (the same change), and accepted again
-    k.core.tx().lc_invalidate(&x.item, "收到新的消息").unwrap();
-    let s = k.db().session(&x.session).unwrap().unwrap();
-    k.core
-        .tool_deliver(
-            &s,
-            "再次交付",
-            &[],
-            &[crate::Check {
-                name: "tests".into(),
-                passed: true,
-                operated: false,
-                scope: None,
-            }],
-            &[],
-        )
-        .unwrap();
-    k.rt.end_turn(&k.core, &x.session, "end_turn", None);
-    if let Some(a) = k
-        .db()
-        .decisions_of_item(&x.item)
-        .unwrap()
-        .into_iter()
-        .find(|d| d.status == "open" && d.kind == "accept")
-    {
-        k.core.resolve(&a.id, "pass", "", "me").unwrap();
-    }
+    accepted_again(&k, &x);
     assert!(k.wait(|| {
         k.timeline_texts(&x.item)
             .iter()
@@ -765,4 +791,156 @@ fn without_a_commit_of_its_own_an_open_pull_request_is_not_merged_and_not_auto_m
     );
     assert!(!t.iter().any(|l| l.contains("提交已合并到")), "{t:?}");
     assert!(gh.merges().is_empty(), "nothing of its own to merge");
+}
+
+/* ── what review found (#252): a result not all committed, a pull request of an earlier result, a
+ * merge that ran while its result went void ── */
+
+#[test]
+fn an_accepted_result_not_all_committed_is_never_merged_in_part() {
+    let gh = Gh::new();
+    let (k, x) = reviewed(&gh);
+    // part of the accepted change is an edit not committed: the pushed head does not hold it
+    std::fs::write(x.wt.join("feature.txt"), "the accepted change, all of it\n").unwrap();
+    g(&x.wt, &["add", "-N", "feature.txt"]);
+    freeze(&k, &x);
+    let h = head(&x.wt);
+    gh.prs(open_pr(&h, json!({})));
+    look(&k);
+    look(&k);
+    assert!(
+        gh.merges().is_empty(),
+        "the head holds only part of the result"
+    );
+    assert_eq!(prompts_with(&k, &x, "还有没提交的改动"), 1);
+    assert_eq!(release_op(&k, &x).evidence["pr_problem"], "uncommitted");
+    assert!(pr_marks(&k, &x).is_empty());
+    // committed and pushed: the head holds all of it now, the same result
+    g(&x.wt, &["add", "-A"]);
+    g(&x.wt, &["commit", "-q", "-m", "the rest of the change"]);
+    let h2 = head(&x.wt);
+    gh.prs(open_pr(&h2, json!({})));
+    look(&k);
+    assert_eq!(
+        gh.merges(),
+        [format!(
+            "pr merge 7 --repo acme/app --rebase --match-head-commit {h2}"
+        )]
+    );
+    assert_eq!(k.phase(&x.item), "closing", "still the accepted result");
+}
+
+#[test]
+fn an_untracked_file_of_the_accepted_result_is_not_merged_either() {
+    let gh = Gh::new();
+    let (k, x) = reviewed(&gh);
+    std::fs::write(x.wt.join("new-module.txt"), "never added\n").unwrap();
+    freeze(&k, &x);
+    gh.prs(open_pr(&head(&x.wt), json!({})));
+    look(&k);
+    assert!(gh.merges().is_empty());
+    assert_eq!(prompts_with(&k, &x, "还有没提交的改动"), 1);
+}
+
+#[test]
+fn a_new_result_after_its_pull_request_closed_is_woken_and_told_to_open_one() {
+    let gh = Gh::new();
+    let (k, x) = accepted(&gh);
+    gh.prs(json!([{"number": 7, "state": "CLOSED", "url": "https://github.com/acme/app/pull/7", "headRefOid": head(&x.wt)}]));
+    look(&k);
+    assert!(k.open_fails(&x.item)[0].contains("PR #7 被关闭了"));
+    let told = prompts_with(&k, &x, "按这个项目的约定");
+    accepted_again(&k, &x);
+    assert_eq!(
+        prompts_with(&k, &x, "按这个项目的约定"),
+        told + 1,
+        "a closed pull request is not followed on: the agent hears it"
+    );
+    assert!(
+        !k.timeline_texts(&x.item)
+            .iter()
+            .any(|l| l.contains("Steve 继续跟踪 PR #7"))
+    );
+    let fails = k.open_fails(&x.item).len();
+    look(&k);
+    look(&k);
+    assert_eq!(prompts_with(&k, &x, "在这次验收之前就关闭了"), 1);
+    assert_eq!(
+        k.open_fails(&x.item).len(),
+        fails,
+        "the earlier result's closed pull request is no card for this one"
+    );
+    // the agent opens a new one: followed as this result's
+    gh.prs(json!([
+        {"number": 7, "state": "CLOSED", "url": "https://github.com/acme/app/pull/7", "headRefOid": head(&x.wt)},
+        open_pr(&head(&x.wt), json!({"number": 8, "url": "https://github.com/acme/app/pull/8"}))[0],
+    ]));
+    look(&k);
+    assert_eq!(release_op(&k, &x).evidence["pr"], 8);
+    assert_eq!(merge_cards(&k, &x).len(), 1);
+}
+
+#[test]
+fn a_pull_request_merged_before_a_new_result_saw_it_is_not_that_result_merged() {
+    let gh = Gh::new();
+    let (k, x) = accepted(&gh);
+    let h = head(&x.wt);
+    gh.prs(open_pr(&h, json!({})));
+    look(&k);
+    // void, merged on the host meanwhile, and a result accepted again (not on main: the probe is
+    // not met)
+    gh.prs(json!([{"number": 7, "state": "MERGED", "url": "https://github.com/acme/app/pull/7", "headRefOid": h}]));
+    accepted_again(&k, &x);
+    look(&k);
+    look(&k);
+    let o = release_op(&k, &x);
+    assert_ne!(o.evidence["pr_merged"], true, "{o:?}");
+    assert!(
+        pr_marks(&k, &x).iter().all(|(to, _)| to != "merged"),
+        "no merge is marked for this result"
+    );
+    assert_eq!(prompts_with(&k, &x, "在这次验收之前就合并了"), 1);
+    assert_eq!(k.phase(&x.item), "closing");
+}
+
+#[test]
+fn a_merge_that_ran_while_its_result_went_void_is_said_marked_and_yours() {
+    let gh = Gh::new();
+    let (k, x) = reviewed(&gh);
+    let h = head(&x.wt);
+    gh.prs(open_pr(&h, json!({})));
+    // the look before the merge was fine; the result goes void while the merge call runs
+    let due = k.core.tx().prs_due().unwrap();
+    assert_eq!(due.len(), 1);
+    k.core.tx().lc_invalidate(&x.item, "收到新的消息").unwrap();
+    let crate::pull::Look::Found(pr) = crate::pull::read(&open_pr(&h, json!({}))) else {
+        panic!()
+    };
+    k.core
+        .tx()
+        .pr_seen(
+            &due[0],
+            crate::pull::Look::Found(pr),
+            crate::pull::Accepted::At(h.clone()),
+            Some(crate::pull::Merging::Merged),
+        )
+        .unwrap();
+    let t = k.timeline_texts(&x.item);
+    assert!(
+        t.iter().any(|l| l.contains("它的结果在合并时作废了")),
+        "{t:?}"
+    );
+    let m = pr_marks(&k, &x);
+    assert_eq!(m.len(), 1, "{m:?}");
+    assert_eq!((m[0].0.as_str(), &m[0].1["void"]), ("merged", &json!(true)));
+    let fails = k.open_fails(&x.item);
+    assert!(
+        fails.iter().any(|f| f.contains("合并时它的结果刚好作废了")),
+        "{fails:?}"
+    );
+    // the next result is not followed on that pull request: the agent hears it
+    let told = prompts_with(&k, &x, "按这个项目的约定");
+    gh.prs(json!([{"number": 7, "state": "MERGED", "url": "https://github.com/acme/app/pull/7", "headRefOid": h}]));
+    accepted_again(&k, &x);
+    assert_eq!(prompts_with(&k, &x, "按这个项目的约定"), told + 1);
 }

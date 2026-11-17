@@ -780,33 +780,40 @@ impl Tx<'_> {
             {
                 self.follow_pr(&op.id, slug, &branch)?;
                 /* a pull request of this branch Steve already followed for an earlier result of the
-                 * cycle is followed on: the agent is not woken for it again (waking it was what made
-                 * it report a plan and void the result, #239), and what it was told stays told */
+                 * cycle, still open, is followed on: the agent is not woken for it again (waking it
+                 * was what made it report a plan and void the result, #239), and what it was told
+                 * stays told (the cards about it were the earlier result's). It counts for this
+                 * result only once this result saw it open (`pr_before`): one that merged or closed
+                 * before is the earlier result's, and the agent hears it needs one of its own */
                 if let Some(prev) = self.pr_followed(i, &op.id, &branch)? {
                     let n = prev.evidence["pr"].as_u64().unwrap_or(0);
-                    /* a card for you about the earlier result (merging it) went with it */
-                    let told: Vec<Value> = prev.evidence["pr_told"]
-                        .as_array()
-                        .into_iter()
-                        .flatten()
-                        .filter(|k| k.as_str() != Some(crate::pull::TOLD_AWAITING))
-                        .cloned()
-                        .collect();
-                    let carry = json!({
-                        "pr_told": told,
-                        "pr_tells": prev.evidence["pr_tells"].as_i64().unwrap_or(0),
-                    });
+                    let open = prev.evidence["pr_state"].as_str() == Some("OPEN")
+                        && prev.evidence["pr_merged"] != json!(true);
+                    let mut carry = json!({"pr_before": n});
+                    if open {
+                        let told: Vec<Value> = prev.evidence["pr_told"]
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .filter(|k| k.as_str().is_some_and(crate::pull::is_tell_key))
+                            .cloned()
+                            .collect();
+                        carry["pr_told"] = json!(told);
+                        carry["pr_tells"] = json!(prev.evidence["pr_tells"].as_i64().unwrap_or(0));
+                    }
                     self.db().store().transaction(|tx| {
                         steve_store::operation_set_in(tx, &op.id, "pending", &carry)
                     })?;
-                    self.db().timeline_add(
-                        &i.id,
-                        "steve",
-                        "sys",
-                        &format!("验收了新的结果，Steve 继续跟踪 PR #{n}"),
-                        None,
-                    )?;
-                    return Ok(());
+                    if open {
+                        self.db().timeline_add(
+                            &i.id,
+                            "steve",
+                            "sys",
+                            &format!("验收了新的结果，Steve 继续跟踪 PR #{n}"),
+                            None,
+                        )?;
+                        return Ok(());
+                    }
                 }
             }
             let to = match self.active_session(&i.id)? {
