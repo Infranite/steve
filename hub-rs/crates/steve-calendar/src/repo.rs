@@ -1,4 +1,4 @@
-//! The calendar cache's rows (migration 98).
+//! The calendar cache's rows (migration 100).
 
 use rusqlite::{Connection, OptionalExtension, Row, params};
 use serde::Serialize;
@@ -29,12 +29,15 @@ pub struct CalRow {
     #[serde(skip)]
     pub sync_cursor: Option<String>,
     pub synced_at: Option<i64>,
+    /// The last whole-window pull that succeeded.
+    #[serde(skip)]
+    pub full_at: Option<i64>,
     pub sync_state: String,
     pub sync_error: Option<String>,
     pub gone: bool,
 }
 
-const CAL_COLS: &str = "id, workspace_id, connection_id, owner_user, ext_id, name, color, kind, role, share, party_id, party_set, detail, enabled, tz, sync_cursor, synced_at, sync_state, sync_error, gone";
+const CAL_COLS: &str = "id, workspace_id, connection_id, owner_user, ext_id, name, color, kind, role, share, party_id, party_set, detail, enabled, tz, sync_cursor, synced_at, sync_state, sync_error, gone, full_at";
 
 impl CalRow {
     fn from_row(r: &Row) -> rusqlite::Result<Self> {
@@ -59,6 +62,7 @@ impl CalRow {
             sync_state: r.get(17)?,
             sync_error: r.get(18)?,
             gone: r.get::<_, i64>(19)? != 0,
+            full_at: r.get(20)?,
         })
     }
 }
@@ -117,11 +121,18 @@ pub fn set_gone(c: &Connection, id: &str, now: i64) -> Result<()> {
     Ok(())
 }
 
-pub fn set_synced(c: &Connection, id: &str, cursor: Option<&str>, now: i64) -> Result<()> {
+/// A pull succeeded; `full`: it was the whole window.
+pub fn set_synced(
+    c: &Connection,
+    id: &str,
+    cursor: Option<&str>,
+    full: bool,
+    now: i64,
+) -> Result<()> {
     c.prepare_cached(
-        "UPDATE cal_calendars SET sync_state = 'ok', sync_error = NULL, sync_cursor = ?, synced_at = ?, updated = ? WHERE id = ?",
+        "UPDATE cal_calendars SET sync_state = 'ok', sync_error = NULL, sync_cursor = ?, synced_at = ?, full_at = CASE WHEN ? THEN ? ELSE full_at END, updated = ? WHERE id = ?",
     )?
-    .execute(params![cursor, now, now, id])?;
+    .execute(params![cursor, now, full, now, now, id])?;
     Ok(())
 }
 

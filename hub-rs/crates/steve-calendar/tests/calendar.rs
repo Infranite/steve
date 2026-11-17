@@ -687,3 +687,66 @@ async fn cursor_changes_one_meeting_in_two_calendars_settings_and_tools() {
     );
     assert_eq!(left, 0);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_cursor_source_is_pulled_whole_again_each_day_so_new_days_come_in() {
+    let h = setup().await;
+    let t0 = at("2026-11-18T08:00:00+08:00");
+    h.env.clock.set(t0);
+    *h.script.calendars.lock().unwrap() = vec![RemoteCalendar {
+        id: "team".into(),
+        name: "Team".into(),
+        role: Some("owner".into()),
+        ..Default::default()
+    }];
+    // a daily stand-up that never changes: day k starts 2 h after t0 + k days
+    *h.script.all.lock().unwrap() = (0..200)
+        .map(|k| {
+            let s = t0 + k * DAY + 2 * 3_600_000;
+            RemoteEvent {
+                id: format!("standup-{k}"),
+                series_id: Some("standup".into()),
+                title: Some("Stand-up".into()),
+                start: When::at(s),
+                end: When::at(s + 15 * 60_000),
+                ..Default::default()
+            }
+        })
+        .collect();
+    let cached = |k: i64| -> i64 {
+        h.sql(
+            "SELECT COUNT(*) FROM cal_events WHERE ext_id = ?",
+            &[&format!("standup-{k}")],
+        )
+    };
+    let conn = h.connect("cal_script", &[]).await;
+    let r = h.cal.sync_connection(WS, &conn, false).await.unwrap();
+    assert!(r.errors.is_empty(), "{r:?}");
+    assert_eq!(
+        (cached(179), cached(180)),
+        (1, 0),
+        "180 days ahead: day 180 is past the window"
+    );
+
+    // within the day the cursor is used and brings nothing
+    h.env.clock.advance(6 * 60_000);
+    h.cal.sync_connection(WS, &conn, false).await.unwrap();
+    assert_eq!(cached(180), 0);
+
+    // a day on, the whole window is pulled again: day 180 entered it without ever changing
+    h.env.clock.set(t0 + DAY + 60_000);
+    let r = h.cal.sync_connection(WS, &conn, false).await.unwrap();
+    assert!(r.errors.is_empty(), "{r:?}");
+    assert_eq!((cached(0), cached(180), cached(181)), (1, 1, 0));
+    h.env.clock.advance(6 * 60_000);
+    h.cal.sync_connection(WS, &conn, false).await.unwrap();
+    assert_eq!(
+        *h.script.cursors.lock().unwrap(),
+        [None, Some("all".into()), None, Some("all".into())]
+    );
+    assert_eq!(
+        cached(180),
+        1,
+        "the delta after it keeps what the full pull brought"
+    );
+}

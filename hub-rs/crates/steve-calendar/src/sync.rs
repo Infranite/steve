@@ -1,7 +1,9 @@
 //! The sync engine: one connection at a time, its calendars, then each enabled calendar's events.
 //!
 //! - With feature `changes` the source is asked for what changed since the stored cursor (none: the
-//!   whole window); `full: true` replaces the window. Without it the window is listed and replaces
+//!   whole window); `full: true` replaces the window. A cursor never brings what only moved into
+//!   the window, so once the last whole-window pull is [`crate::Settings::full_every_ms`] old the window
+//!   is pulled again without one. Without it the window is listed and replaces
 //!   what the cache had there.
 //! - Someone else's calendar keeps only times (`detail = busy`) unless its owner chose details:
 //!   with feature `freebusy` only busy times are asked for, otherwise what comes is stripped before
@@ -480,15 +482,19 @@ impl Calendar {
                     .await
                     .map(|b| Pulled::Full(b.iter().map(busy_event).collect(), None))
             } else if features.has(feature::CHANGES) {
-                src.changes(&cx, &cal.ext_id, cal.sync_cursor.as_deref(), w)
-                    .await
-                    .map(|c| {
-                        if c.full || cal.sync_cursor.is_none() {
-                            Pulled::Full(c.events, c.cursor)
-                        } else {
-                            Pulled::Delta(c)
-                        }
-                    })
+                // a cursor only brings what changed, so what newly enters the window never comes
+                // by it: the whole window is pulled again once it is a day old
+                let cursor = cal.sync_cursor.as_deref().filter(|_| {
+                    cal.full_at
+                        .is_some_and(|t| now - t < self.settings().full_every_ms)
+                });
+                src.changes(&cx, &cal.ext_id, cursor, w).await.map(|c| {
+                    if c.full || cursor.is_none() {
+                        Pulled::Full(c.events, c.cursor)
+                    } else {
+                        Pulled::Delta(c)
+                    }
+                })
             } else {
                 src.list(&cx, &cal.ext_id, w)
                     .await
@@ -616,6 +622,7 @@ impl Calendar {
                         .map(|z| z.name().to_string()),
                     sync_cursor: None,
                     synced_at: None,
+                    full_at: None,
                     sync_state: "new".into(),
                     sync_error: None,
                     gone: false,
@@ -748,7 +755,7 @@ impl Calendar {
                 }
             }
             repo::prune(tx, &cal.id, w.from_ms)?;
-            repo::set_synced(tx, &cal.id, cursor.as_deref(), now)?;
+            repo::set_synced(tx, &cal.id, cursor.as_deref(), full, now)?;
             // a sync that found nothing new is not news, unless the calendar was failing or never synced
             if changed + deleted > 0 || cal.sync_state != "ok" {
                 tx.publish(ChangeEvent::Calendar {

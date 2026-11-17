@@ -34,6 +34,9 @@ pub struct Scripted {
     /// `changes` answers, in order (cursor in, answer out).
     pub changes: Mutex<Vec<Changes>>,
     pub cursors: Mutex<Vec<Option<String>>>,
+    /// Once the script is used up: every event the source has. Asked without a cursor it answers
+    /// those in the window (cursor `all`); with one, that nothing changed.
+    pub all: Mutex<Vec<RemoteEvent>>,
     pub fail: Mutex<Option<SourceError>>,
     pub get: Mutex<Option<RemoteEvent>>,
 }
@@ -84,7 +87,7 @@ impl CalendarSource for ScriptedSource {
         _: &ConnCx,
         _: &str,
         cursor: Option<&str>,
-        _: Window,
+        w: Window,
     ) -> Result<Changes, SourceError> {
         self.0
             .cursors
@@ -93,8 +96,25 @@ impl CalendarSource for ScriptedSource {
             .push(cursor.map(str::to_string));
         let mut xs = self.0.changes.lock().unwrap();
         if xs.is_empty() {
+            let all = self.0.all.lock().unwrap();
+            let events = match cursor {
+                Some(_) => Vec::new(),
+                None => all
+                    .iter()
+                    .filter(|e| {
+                        e.start.ms.is_some_and(|s| s < w.to_ms)
+                            && e.end.ms.is_some_and(|e| e > w.from_ms)
+                    })
+                    .cloned()
+                    .collect(),
+            };
+            let cursor = match cursor {
+                None if !all.is_empty() => Some("all".to_string()),
+                c => c.map(str::to_string),
+            };
             return Ok(Changes {
-                cursor: cursor.map(str::to_string),
+                events,
+                cursor,
                 ..Default::default()
             });
         }

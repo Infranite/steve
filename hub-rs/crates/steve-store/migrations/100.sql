@@ -20,6 +20,7 @@ CREATE TABLE cal_calendars (
   tz TEXT,
   sync_cursor TEXT,
   synced_at INTEGER,                           -- the last sync that succeeded
+  full_at INTEGER,                             -- the last whole-window pull that succeeded; a day later the next sync pulls it again
   sync_state TEXT NOT NULL DEFAULT 'new',      -- new|ok|error
   sync_error TEXT,
   gone INTEGER NOT NULL DEFAULT 0,             -- the source no longer lists it

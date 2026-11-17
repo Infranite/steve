@@ -70,6 +70,9 @@ pub struct Settings {
     /// The cache window: days back and ahead of now.
     pub past_days: i64,
     pub future_days: i64,
+    /// A source with a cursor is pulled for the whole window again when its last whole pull is
+    /// this old (ms): the days entering the window, and what a delta missed.
+    pub full_every_ms: i64,
     /// Working hours and days for finding free time (local `HH:MM`, Monday = 1).
     pub work_start: chrono::NaiveTime,
     pub work_end: chrono::NaiveTime,
@@ -88,6 +91,7 @@ impl Default for Settings {
             manual_min_ms: 60_000,
             past_days: 30,
             future_days: 180,
+            full_every_ms: 86_400_000,
             work_start: chrono::NaiveTime::from_hms_opt(9, 0, 0).expect("time"),
             work_end: chrono::NaiveTime::from_hms_opt(18, 0, 0).expect("time"),
             work_days: vec![1, 2, 3, 4, 5],

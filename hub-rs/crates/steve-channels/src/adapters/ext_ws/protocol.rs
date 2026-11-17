@@ -820,8 +820,9 @@
 //! - `cal.calendars.list {}` → `{calendars: [{id, name, color?, kind?: primary|shared|team|subscribed,
 //!   role?: free_busy|reader|writer|owner, share?: private|busy|details, tz?, owner?: person}]}`.
 //! - `cal.events.changes {calendar, cursor|null, from_ms, to_ms}` → `{events: [event], deleted: [id],
-//!   cursor, full}` (feature `changes`). `full: true` means the cursor was not usable and `events` is the
-//!   whole window.
+//!   cursor, full}` (feature `changes`). Without a cursor, `events` is the whole window; with one, what
+//!   changed since it, whatever the window (`full: true`: the cursor was not usable and `events` is the
+//!   whole window). The Hub asks without a cursor again once a day, for the days entering the window.
 //! - `cal.events.list {calendar, from_ms, to_ms}` → `{events: [event]}`, the whole window.
 //! - `cal.events.get {calendar, event}` → `{event: event|null}`, with the body and every attendee.
 //! - `cal.freebusy {calendar, from_ms, to_ms}` → `{busy: [{start_ms, end_ms}]}` (feature `freebusy`).
