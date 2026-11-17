@@ -136,6 +136,7 @@ fn core_config(cfg: &Config, vars: &Vars) -> steve_core::CoreConfig {
     c.debug_route = cfg.debug_route;
     c.disk = cfg.disk;
     c.version = cfg.version.clone();
+    // Each root item tree has its own collaboration budget; Node capacity is separate.
     c.max_workflow_parallel = vars("STEVE_WORKFLOW_MAX_PARALLEL")
         .and_then(|v| v.trim().parse::<usize>().ok())
         .filter(|n| *n > 0)
