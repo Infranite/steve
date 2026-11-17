@@ -161,7 +161,7 @@ struct MacConnectionDetails: View {
                 LabeledContent(L10n.tr("Hub 版本", "Hub version"), value: version)
             }
             LabeledContent(L10n.tr("状态检查", "Status check")) {
-                Text(coordinator.summary.updatedAt, format: .dateTime.hour().minute().locale(Locale(identifier: language.prefersChinese ? "zh-CN" : "en")))
+                Text(coordinator.summary.updatedAt.formatted(.dateTime.hour().minute().locale(Locale(identifier: language.prefersChinese ? "zh-CN" : "en"))))
             }
             if let error = coordinator.summary.errorMessage {
                 Text(error).font(.callout).foregroundStyle(.secondary).textSelection(.enabled)
@@ -254,7 +254,7 @@ struct MacAttentionView: View {
                 }
             }
             if let updated = attention.state.updatedAt {
-                Text(updated, format: .dateTime.hour().minute().locale(Locale(identifier: language.prefersChinese ? "zh-CN" : "en"))).font(.caption2).foregroundStyle(.secondary)
+                Text(updated.formatted(.dateTime.hour().minute().locale(Locale(identifier: language.prefersChinese ? "zh-CN" : "en")))).font(.caption2).foregroundStyle(.secondary)
             }
             Button(L10n.tr("重新检查", "Check again")) { attention.retry() }
         }
