@@ -209,7 +209,7 @@ pub fn set_owner_context(
 }
 
 /// The setting that holds the Hub's default for every Node without a choice of its own (`on` |
-/// `off`); it was each workspace's `ownerContext` setting until migration 093 moved it here.
+/// `off`); it was each workspace's `ownerContext` setting until migration 095 moved it here.
 const OWNER_CONTEXT_DEFAULT_KEY: &str = "node.owner_context";
 
 /// Whether a session of `node`'s owner there loads the owner's personal harness configuration:
