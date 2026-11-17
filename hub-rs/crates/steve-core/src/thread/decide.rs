@@ -18,7 +18,8 @@ pub struct Decision {
 }
 
 /// A guest conversation (an IM space): what the turn may become there. Configuration,
-/// talking to items and corrections never come from a chat (→ an answer); research and items only
+/// talking to items, corrections and the router's own clarifying questions never come from a chat
+/// (→ an answer); research and items only
 /// when the host allows them — otherwise work is answered in place and offered to you instead
 /// (`guard = "guest"` when this changed the kind).
 pub fn for_guest(d: Decision, r: &Route, research: bool, items: bool) -> Decision {
@@ -37,6 +38,9 @@ pub fn for_guest(d: Decision, r: &Route, research: bool, items: bool) -> Decisio
     let inline = if research { "research" } else { "answer" };
     let (kind, offer) = match d.kind.as_str() {
         "config" | "supplement" | "status" | "reroute" => ("answer", d.offer.clone()),
+        // the router's clarifying question (and its options) is Steve asking the chat: the host's
+        // composer answers in its own words instead (it may still ask, as a sentence)
+        "ask" => ("answer", d.offer.clone()),
         // “追加到 ST-n？” would name an item to the chat
         "suggest" if d.for_item.is_some() => ("answer", None),
         "research" if !research => ("answer", d.offer.clone()),
@@ -603,6 +607,14 @@ mod tests {
             assert_eq!(d.kind, "answer", "{k}");
             assert_eq!(d.guard, Some("guest"));
         }
+    }
+
+    #[test]
+    fn guest_conversations_never_get_the_routers_question() {
+        let r = route("ask", 0.9, &["question"]);
+        let d = for_guest(decide(&r, "x", DecideCtx::default()), &r, true, true);
+        assert_eq!(d.kind, "answer");
+        assert_eq!(d.guard, Some("guest"));
     }
 
     #[test]

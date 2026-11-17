@@ -49,7 +49,6 @@ struct Inner {
     reactor: Arc<dyn Reactor>,
     thread: Option<Arc<dyn Thread>>,
     locks: Locks,
-    gens: crate::conversations::Generations,
     profiles: BTreeMap<String, Arc<dyn ProfileAdapter>>,
     media: BTreeMap<String, Arc<dyn MediaFetch>>,
     history: BTreeMap<String, Arc<dyn crate::history::HistoryRead>>,
@@ -208,7 +207,6 @@ impl ChannelsBuilder {
             reactor: self.reactor,
             thread: self.thread,
             locks: Locks::default(),
-            gens: Default::default(),
             profiles: self.profiles,
             media: self.media,
             history: self.history,
@@ -323,10 +321,6 @@ impl Channels {
 
     pub(crate) fn thread(&self) -> Option<&Arc<dyn Thread>> {
         self.0.thread.as_ref()
-    }
-
-    pub(crate) fn generations(&self) -> &crate::conversations::Generations {
-        &self.0.gens
     }
 
     pub(crate) fn names_state(&self) -> &Names {

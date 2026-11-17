@@ -1166,6 +1166,12 @@ impl Outbox {
             let said = audience_said(c, t)?;
             Ok((p, a, k, said))
         })?;
+        // only the composer's reply speaks as you, and it waits for you (decided before any check runs)
+        if let Some(why) = crate::deliver::not_as_you(p.mode, req) {
+            tracing::info!(space = t.space_id, purpose = ?req.purpose, "not said: {why}");
+            return Ok((Delivered::Skipped, None));
+        }
+        let approve = crate::deliver::must_approve(p.mode, req);
         let draft_model = req
             .generation
             .as_ref()
@@ -1196,7 +1202,7 @@ impl Outbox {
         // a text that waits for the owner whatever the check says is not rewritten: they see the original
         // with the parts marked, and the card offers the rewrite. Unless YOLO decides the card: it never
         // approves a flagged text, so the one rewrite comes first, as for a direct reply
-        let will_draft = req.approve || !direct_ok(p.mode, &req.auth);
+        let will_draft = approve || !direct_ok(p.mode, &req.auth);
         if res.verdict == Verdict::Leak
             && req.generation.is_some()
             && !unchecked(&res)
@@ -1237,7 +1243,7 @@ impl Outbox {
         let proxy = req.purpose == Purpose::Trigger || matches!(req.auth, Auth::Trigger { .. });
         // 2. authorization
         let leak = res.verdict != Verdict::Pass;
-        let direct = !leak && !req.approve && direct_ok(p.mode, &req.auth);
+        let direct = !leak && !approve && direct_ok(p.mode, &req.auth);
         if !direct && req.purpose == Purpose::HandoffAck {
             // the handoff's own decision already reaches you
             return Ok((Delivered::Skipped, Some(res)));

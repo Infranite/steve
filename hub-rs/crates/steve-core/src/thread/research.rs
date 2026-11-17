@@ -24,6 +24,9 @@ pub const MAX_WAITING: usize = 3;
 pub const QUEUE_FULL: &str = "前面还有 3 个问题在排队，先等等或停掉当前的";
 /// Where to look when a chat's answer could not be written.
 const FIX_MODEL: &str = "到「设置 · 模型」看看回复用的模型是否可用，或稍后再发一次";
+/// `meta` flag of a message Steve's thread writes about its own state rather than as an answer
+/// (the queue full, a stop, an error): a guest conversation's host never says it in the chat.
+pub const SYSTEM: &str = "system";
 
 /// One tool call of a research run, as the executor saw it.
 #[derive(Debug, Clone, PartialEq)]
@@ -502,7 +505,7 @@ impl Core {
                 "steve",
                 "好，停下了。要我换个方式就直接说。",
                 None,
-                Some(&json!({"stopped": true})),
+                Some(&json!({"stopped": true, SYSTEM: true})),
             )?;
         }
         if let Some(f) = routing {
@@ -715,7 +718,7 @@ impl Core {
                             &j.space,
                             &format!("（出错了：{}）", js_head(&e.to_string(), 120)),
                             None,
-                            Some(&json!({"origin": j.origin, "error": true})),
+                            Some(&json!({"origin": j.origin, "error": true, SYSTEM: true})),
                         );
                     }
                 });
@@ -905,7 +908,7 @@ impl Core {
                 &j.space,
                 &text,
                 None,
-                Some(&json!({"origin": j.origin, "stopped": true})),
+                Some(&json!({"origin": j.origin, "stopped": true, SYSTEM: true})),
             )?;
             return Ok(());
         };
@@ -956,7 +959,7 @@ impl Core {
                 &j.space,
                 "好，停下了。要我换个方式就直接说。",
                 None,
-                Some(&json!({"origin": j.origin, "stopped": true})),
+                Some(&json!({"origin": j.origin, "stopped": true, SYSTEM: true})),
             )?;
             return Ok(());
         }
@@ -983,6 +986,7 @@ impl Core {
         let mut meta = self.inline_meta(ws, j, j.offer.as_ref(), steps.json(now() - j.t0))?;
         if failed {
             meta["error"] = json!(true);
+            meta[SYSTEM] = json!(true);
         }
         self.inline_reply(ws, j, &text, &meta)?;
         Ok(())

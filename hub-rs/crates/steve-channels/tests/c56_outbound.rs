@@ -1715,10 +1715,20 @@ async fn nothing_reaches_the_adapter_without_a_valid_authorization() {
     ] {
         let d = h
             .outbox
-            .deliver(&h.ch, &out(&li, "好", a.clone(), None))
+            .deliver(
+                &h.ch,
+                &out(&li, "好", a.clone(), Some(Generation::default())),
+            )
             .await
             .unwrap();
         assert!(matches!(d, Delivered::Drafted { .. }), "{a:?}: {d:?}");
+        // and a reply the composer did not write is not even a draft as you
+        let d = h
+            .outbox
+            .deliver(&h.ch, &out(&li, "好", a.clone(), None))
+            .await
+            .unwrap();
+        assert_eq!(d, Delivered::Skipped, "{a:?}");
     }
 
     // a draft forced to pending without its approval being resolved; an approval for another text
@@ -3657,7 +3667,11 @@ async fn the_undo_window_follows_the_account() {
     // your own account: 10 s
     let me = h.me.clone();
     let mine = recorded(&h, &me, "C_DEV", "d1", "ulilei", "在吗").await;
-    let d = drafted(&h, out(&mine, "在的。", Auth::None, None)).await;
+    let d = drafted(
+        &h,
+        out(&mine, "在的。", Auth::None, Some(Generation::default())),
+    )
+    .await;
     decide(&h, &d, "yes", "").expect("approve");
     h.env.clock.advance(3_100);
     assert_eq!(h.outbox.send_due(&h.ch).await, 0);

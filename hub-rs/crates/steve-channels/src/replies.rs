@@ -7,8 +7,12 @@
 //!
 //! Trigger words: your own message starting with one of your words, where they work →
 //! the rest is the instruction; the reply is generated with the space's last 20 messages and goes
-//! out as you (`on_behalf=proxy`, “（由 Steve 代发）” when marked), unless the model says it
-//! needs approval (an outward promise, money, deleting) — then it is a draft.
+//! out as you (`on_behalf=proxy`, `[AI]`-marked when the settings say), unless the model says it
+//! needs approval (an outward promise, money, deleting) — then it is a draft. It is still the
+//! composer's reply: nothing else is said as you.
+//!
+//! On your own account only the composer's reply speaks as you ([`crate::deliver::not_as_you`]):
+//! the item and handoff receipts are not said there.
 
 use std::sync::Arc;
 
@@ -332,6 +336,7 @@ impl Replies {
                 ch,
                 &OutRequest {
                     target,
+                    // your trigger words: out as their settings say, unless the model asks you first
                     approve: r.generation.needs_approval,
                     text: r.text,
                     purpose: Purpose::Trigger,

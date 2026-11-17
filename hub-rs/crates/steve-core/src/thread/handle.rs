@@ -3,7 +3,7 @@
 
 use super::decide::{self, DecideCtx};
 use super::offer::{ThreadItem, confirms};
-use super::research::{Inline, InlineJob, QUEUE_FULL};
+use super::research::{Inline, InlineJob, QUEUE_FULL, SYSTEM};
 use super::suggest;
 use super::{AT, Job, REF, Steps, lock, route_step};
 use crate::Core;
@@ -137,7 +137,7 @@ impl Core {
             reply(
                 &format!("（出错了：{}）", js_head(&e.to_string(), 120)),
                 None,
-                Some(json!({"error": true})),
+                Some(json!({"error": true, SYSTEM: true})),
             );
         }
         lock(&self.0.thread.inflight).remove(&lane);
@@ -402,7 +402,7 @@ impl Core {
                     to_item: (conv.hands_on && conv.items).then_some(conv.start),
                 };
                 if !self.enqueue_inline(ws, job)? {
-                    reply(QUEUE_FULL, None, None);
+                    reply(QUEUE_FULL, None, Some(json!({SYSTEM: true})));
                 }
                 Logged { item: None }
             }

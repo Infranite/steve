@@ -171,6 +171,7 @@ impl Channels {
         r.by = crate::respond::By::Trigger {
             instruction: plan.trigger.clone().unwrap_or_default(),
         };
+        let mut out_id = None;
         if let Some(out) = self.responder().outbound() {
             let d = out
                 .deliver(
@@ -178,7 +179,9 @@ impl Channels {
                     &crate::deliver::OutRequest {
                         target: target(self, plan)?,
                         text: said.clone(),
-                        purpose: crate::deliver::Purpose::Trigger,
+                        // a fixed text the trigger's settings ask for (not the composer's reply):
+                        // said as configured, `[AI]`-marked (crate::deliver::not_as_you)
+                        purpose: crate::deliver::Purpose::Source,
                         approve: false,
                         generation: None,
                         auth: crate::deliver::Auth::Trigger {
@@ -190,9 +193,10 @@ impl Channels {
             if let crate::deliver::Delivered::Sent { message_id, .. } = &d {
                 r.out_message_id = Some(message_id.clone());
             }
+            out_id = d.message_id().map(str::to_string);
         }
         // the turn is recorded, so the same message is never taken again
-        self.conv_note(plan, &said, None);
+        self.conv_note(plan, &said, None, out_id.as_deref());
         Ok(r)
     }
 }

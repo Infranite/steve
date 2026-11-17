@@ -11,7 +11,8 @@
 //! Who reacts: the space's voice, the identity that answers there. A bot account reacts as the bot (its channel
 //! adapter, [`crate::ChannelAdapter::add_reaction`]); your own account (`mode=self`, voice where no bot
 //! is) reacts as you through the outbox's send-as-you path ([`Outbox`](crate::Outbox) is a
-//! [`Reactor`]), because the reply itself goes out as you and the bot may not be in that chat.
+//! [`Reactor`]), because the reply itself goes out as you and the bot may not be in that chat — and
+//! there only on your own messages (your `/bot`), never on anybody else's.
 //!
 //! State (`chan_reactions`, migration 020): `ack → done | failed | cleared`; `failed → done` when a
 //! retry gets the answer out; `cleared → done | failed` when a discarded draft is taken back (undo)
@@ -251,6 +252,27 @@ fn target(c: &Connection, message_id: &str) -> ChannelResult<Option<Target>> {
     Ok(Some(t))
 }
 
+/// The voice of the message's space is your own account and the message is not yours: a reaction
+/// there would be you reacting to somebody else's message, which nobody asked for. Steve reacts as
+/// you only to your own messages (your `/bot`).
+fn unasked_as_you(c: &Connection, message_id: &str, t: &Target) -> ChannelResult<bool> {
+    let Some((conn, _)) = &t.via else {
+        return Ok(false);
+    };
+    if crate::arbiter::mode_of(c, &t.ws, conn)? != crate::spaces::Mode::Own {
+        return Ok(false);
+    }
+    let (account, party): (Option<String>, Option<String>) = c.query_row(
+        "SELECT sender_account_id, sender_party_id FROM chan_messages WHERE id = ?",
+        [message_id],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    let (mine, _) = crate::bindings::connection_account(c, &t.ws, conn)?;
+    let own = account.as_deref() == Some(mine.as_str())
+        || crate::conversations::sender_is_owner(c, &t.ws, party.as_deref())?;
+    Ok(!own)
+}
+
 /// One lock per message, so an acknowledgement and its ending never interleave.
 #[derive(Default)]
 pub(crate) struct Locks(Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>);
@@ -315,6 +337,9 @@ impl Channels {
         let Some(t) = t.filter(|t| t.via.is_some()) else {
             return Ok(None);
         };
+        if self.store().reader(|c| unasked_as_you(c, message_id, &t))? {
+            return Ok(None);
+        }
         if row.is_some_and(|r| r.state != "cleared") {
             return Ok(None);
         }
