@@ -125,3 +125,13 @@
 .steve-add-stepper .ui-stpc__foot { padding: 0 16px; }
 /* a fingerprint group's characters keep the code face at every box size */
 [data-fp-input] .ui-otpc__box { font-family: var(--font-mono); font-size: 14px; }
+
+/* the Hub card's editor (devices-hub.tsx): with enlarged text the field's footer wraps instead of clipping its hint
+   and counter, and their lines grow with their text (the field's own line height is fixed in px) */
+[data-hub-management] .ui-fldc__foot { flex-wrap: wrap; }
+[data-hub-management] .ui-fldc__message, [data-hub-management] .ui-fldc__count { line-height: 1.34; }
+[data-hub-management] .ui-fldc__count { margin-inline-start: 0; }
+@media (max-width: 480px) {
+  [data-hub-management] .ui-fldc__foot { flex-direction: column; gap: 4px; }
+  [data-hub-management] .ui-fldc__count { align-self: flex-end; }
+}

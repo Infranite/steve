@@ -83,7 +83,16 @@ try {
   // Capacity changes are explicit saves, not new pairing or execution approvals.
   const capacity = detail.locator("[data-session-limit-input]")
   assert.equal(await capacity.getAttribute("aria-valuenow"), "32")
-  assert.match(await detail.locator("[data-limit-semantics]").textContent(), /无需重启.*不打断/)
+  /* what a change does is in the tip beside the limit's name: it opens on a click (a tap on a phone), not only on hover,
+   * closes on Escape and opens and closes again from its button */
+  const how = detail.locator("[data-limit-how]")
+  await how.click()
+  assert.match(await page.locator("[data-limit-semantics]").textContent(), /无需重启.*不打断/)
+  assert.equal(await how.getAttribute("aria-expanded"), "true")
+  await page.keyboard.press("Escape")
+  await page.locator("[data-limit-semantics]").waitFor({ state: "detached" })
+  await how.click(); await page.locator("[data-limit-semantics]").waitFor()
+  await how.click(); await page.locator("[data-limit-semantics]").waitFor({ state: "detached" })
   await capacity.fill("64"); await capacity.blur()
   assert.deepEqual(writes, [], "editing a capacity does not save until requested")
   await detail.locator("[data-session-limit-save]").click()

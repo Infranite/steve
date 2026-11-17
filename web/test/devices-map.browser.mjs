@@ -109,6 +109,12 @@ try {
   await map.locator('[data-map-card="c:c2"]').click()
   await page.waitForFunction(() => location.hash === "#/devices/clients/c2")
   await page.locator('[data-client="c2"][data-client-focus]').waitFor()
+  // the clients page says who is online now, as the map does, and the head counts them
+  await page.locator('[data-client="c2"] [data-client-online]').waitFor()
+  assert.equal(await page.locator("[data-client-online]").count(), 1, "only the client the Hub says is online")
+  assert.match(await page.locator('[data-client="c2"]').innerText(), /现在/)
+  await page.locator("[data-clients-note]").getByText(/「在线」= 此刻和 Hub 保持着实时连接/).waitFor()
+  assert.match(await page.locator("[data-devices-sub]").innerText(), /2 个客户端在线/)
   await page.goto(base + "/test/fixtures/devices.html#/devices")
 
   // "Show clients" off: two columns, remembered on this client
