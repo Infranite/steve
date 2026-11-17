@@ -7,10 +7,13 @@
 //! wired), no ACP session. The answer is `{"text","needs_approval","why"}`.
 //!
 //! 1. safety rules ([`SAFETY_RULES`], a constant);
-//! 2. the Bot behind it: its own prompt, else duty, manner and working rules;
+//! 2. the Bot behind it: its own prompt, else duty, manner and working rules — on a bot account
+//!    only. On your own account the Bot only picks the model ([`Layers::model`]): the draft is you
+//!    talking, not the Bot, so none of its name, duty, manner or rules is in the prompt;
 //! 3. the persona: soul, the answer to “你是谁” ([`crate::personas::intro_of`]) and what it does not
 //!    reveal — with “是 AI 助手” off it neither says it is an AI nor claims to be human; on your
-//!    own account: you, in your own voice;
+//!    own account: you, in your own voice, with your own messages, your habits in this situation
+//!    and your verdicts on earlier drafts ([`crate::voice`]);
 //! 4. the account's duty (`channel_settings.duty`);
 //! 5. the space's duty (`space_settings.duty`);
 //! 6. anchors: the sender's contact card (P3 `contact_cards`: confirmed attributes and memories
@@ -50,8 +53,6 @@ pub const HISTORY_WIDE: usize = 80;
 pub const ITEMS: usize = 5;
 /// The space's rules and preferences shown in layer 6 (K4 `anchor_mems`).
 pub const ANCHOR_MEMS: usize = 5;
-/// One history line, in characters.
-const LINE_MAX: usize = 500;
 /// The message replied to, in characters.
 const MESSAGE_MAX: usize = 4000;
 /// The smart tier's time limit (like a config draft).
@@ -61,8 +62,18 @@ pub const TIMEOUT: Duration = Duration::from_secs(90);
 pub const H_SAFETY: &str = "【安全规则】";
 pub const H_BOT: &str = "【背后的 Bot】";
 pub const H_PERSONA: &str = "【对外身份】";
-/// Your own earlier messages, on your own account, when the caller gives some ([`Layers::style`]).
+/// Your own earlier messages and your habits, on your own account ([`crate::voice::Voice`]).
 pub const H_STYLE: &str = "【你平时怎么说话】";
+/// Drafts you rejected (on your own account).
+pub const H_REJECTED: &str = "【我否掉的草稿】";
+/// Drafts you edited before sending (on your own account).
+pub const H_EDITED: &str = "【我改过再发的】";
+/// The rules of writing as you, before the output format ([`crate::voice::RULES`]).
+pub const H_WRITE: &str = "【怎么写】";
+/// What was wrong with the first draft, on the second try ([`crate::voice::feedback`]).
+pub const H_REVISE: &str = "【上一稿的问题】";
+/// The first draft quoted on the second try, in characters.
+pub const REVISE_DRAFT_MAX: usize = 300;
 pub const H_ACCOUNT: &str = "【账号职责】";
 pub const H_SPACE: &str = "【空间职责】";
 pub const H_ANCHORS: &str = "【相关情况】";
@@ -155,12 +166,17 @@ pub struct BotInfo {
 /// Everything a reply prompt is made of, gathered from the store.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Layers {
+    /// Layer 2: the Bot the reply speaks for (a bot account); `None` on your own account.
     pub bot: Option<BotInfo>,
+    /// The model the reply is written with: the Bot's own `model` (on your own account too).
+    pub model: Option<String>,
     /// Layer 3, rendered.
     pub persona: String,
-    /// Under layer 3 on your own account: messages you sent yourself, to learn the tone, length and
-    /// punctuation from, never the content. Empty: no such block (what [`gather`] gives today).
-    pub style: Vec<String>,
+    /// On your own account: your messages, your habits in this situation, your verdicts on earlier
+    /// drafts, and the rules of writing as you ([`crate::voice`]). `None` on a bot account.
+    pub voice: Option<crate::voice::Voice>,
+    /// On the second try: what was wrong with the first draft ([`H_REVISE`]).
+    pub revise: Option<String>,
     pub account_duty: String,
     pub space_duty: String,
     /// Layer 6, rendered.
@@ -231,6 +247,8 @@ pub struct ComposeOpts {
     /// How many earlier lines by people to give (default [`HISTORY`]). More than [`HISTORY`] is the
     /// wider pass: every stretch of talk, not only the message's and the one before.
     pub history: Option<usize>,
+    /// The second try on your own account: what was wrong with the first draft ([`H_REVISE`]).
+    pub revise: Option<String>,
 }
 
 /// A generated reply.
@@ -282,19 +300,8 @@ pub fn prompt(l: &Layers) -> String {
     p.push_str(or_none(&l.persona));
     p.push_str("\n\n");
 
-    if !l.style.is_empty() {
-        p.push_str(H_STYLE);
-        p.push('\n');
-        p.push_str(
-            "下面是这个账号的主人自己发过的几条消息，只学语气、长度和标点，不要照搬内容：\n",
-        );
-        let lines: Vec<String> = l
-            .style
-            .iter()
-            .map(|t| format!("- {}", cut(t, LINE_MAX)))
-            .collect();
-        p.push_str(&lines.join("\n"));
-        p.push_str("\n\n");
+    if let Some(v) = &l.voice {
+        p.push_str(&v.render());
     }
 
     p.push_str(H_ACCOUNT);
@@ -384,6 +391,15 @@ pub fn prompt(l: &Layers) -> String {
     if !l.now.is_empty() {
         p.push_str("【现在】\n");
         p.push_str(&l.now);
+        p.push_str("\n\n");
+    }
+    if let Some(v) = &l.voice {
+        p.push_str(&v.rules());
+    }
+    if let Some(r) = l.revise.as_deref().filter(|r| !r.trim().is_empty()) {
+        p.push_str(H_REVISE);
+        p.push('\n');
+        p.push_str(r.trim());
         p.push_str("\n\n");
     }
     p.push_str(UNDERSTAND);
@@ -607,13 +623,17 @@ pub fn gather(
         Some(b) => bot_info(c, ws, &b)?,
         None => None,
     };
+    // on your own account the Bot only picks the model: the draft is you talking
+    let model = bot.as_ref().and_then(|b| b.model.clone());
+    let bot = bot.filter(|_| plan.mode == Mode::Bot);
 
     // 4–5
     let account_duty = spaces::channel_settings(c, ws, &plan.connection_id)?
         .map(|s| s.duty)
         .unwrap_or_default();
 
-    // 6: the sender's card, the space's summary, the sender's items, the space's rules
+    // 6: the sender's card, the space's summary, the sender's items (not on your own account: an
+    // item number is Steve's business, not something you would mention), the space's rules
     let mut anchors: Vec<String> = Vec::new();
     let mut anchor_ids: Vec<String> = Vec::new();
     let mut objs = vec![ObjRef::new("space", &space.id)];
@@ -655,7 +675,11 @@ pub fn gather(
         ));
         anchor_ids.push(format!("mem:{}", m.id));
     }
-    if let Some(party) = &plan.sender_party_id {
+    if let Some(party) = plan
+        .sender_party_id
+        .as_ref()
+        .filter(|_| plan.mode == Mode::Bot)
+    {
         let items = sender_items(c, ws, party)?;
         if !items.is_empty() {
             anchors.push(format!(
@@ -690,6 +714,20 @@ pub fn gather(
     )?;
     let recent = talk.conversation.texts.clone();
 
+    // 3, on your own account: your messages and habits in this situation, your verdicts on drafts
+    let voice = match plan.mode {
+        Mode::Own => Some(crate::voice::gather(
+            c,
+            ws,
+            &plan.connection_id,
+            &space.id,
+            space.kind == "dm",
+            crate::voice::Situation::of(space.kind == "dm", talk.why),
+            talk.at,
+        )?),
+        Mode::Bot => None,
+    };
+
     // 7: retrieval as the owner, the sender and the space as anchors
     let found = reply_hits(c, store, &viewer, &plan.text, &recent, &objs, now)
         .map_err(|e| ApiError::Internal(e.to_string()))?;
@@ -709,8 +747,10 @@ pub fn gather(
         owner: owner.clone(),
         replied: talk.replied,
         bot,
+        model,
         persona: persona_text,
-        style: Vec::new(),
+        voice,
+        revise: opts.revise.clone(),
         account_duty,
         space_duty: set.duty,
         anchors: anchors.join("\n\n"),
@@ -734,6 +774,9 @@ pub fn gather(
 /// The conversation part of the layers ([`crate::context`]).
 struct Talk {
     occasion: String,
+    /// Why the message reached Steve, and when it was said.
+    why: Why,
+    at: i64,
     owner_block: String,
     conversation: context::Conversation,
     pending: Vec<String>,
@@ -795,6 +838,7 @@ fn conversation(
         None => messages::replied_to(c, &space.id, &plan.message_id)?,
     };
     let facts = context::facts_of(c, &plan.message_id)?;
+    let why = Why::of(&facts, plan.trigger.is_some());
     let occasion = context::occasion_block(
         &Occasion {
             dm: space.kind == "dm",
@@ -802,7 +846,7 @@ fn conversation(
             members: space.member_count,
             external: space.has_external,
             sender: sender.clone(),
-            why: Why::of(&facts, plan.trigger.is_some()),
+            why,
             at,
         },
         mode,
@@ -823,6 +867,8 @@ fn conversation(
         .unwrap_or(Value::Null);
     Ok(Talk {
         occasion,
+        why,
+        at,
         owner_block: context::owner_block(&names, mode),
         conversation,
         pending,
@@ -962,9 +1008,9 @@ impl Composer {
         plan: &Plan,
         opts: &ComposeOpts,
     ) -> ChannelResult<Reply> {
-        let (first, _) = self.generate_once(ch, plan, opts).await?;
-        if first.generation.outcome != Outcome::NeedContext {
-            return Ok(first);
+        let first = self.generate_once(ch, plan, opts).await?;
+        if first.reply.generation.outcome != Outcome::NeedContext {
+            return self.in_your_voice(ch, plan, opts, first).await;
         }
         // understanding needs more of the conversation: once more with every stretch of talk;
         // still not enough → never a guess ([`after_wide`])
@@ -972,20 +1018,59 @@ impl Composer {
             history: Some(HISTORY_WIDE),
             ..opts.clone()
         };
-        let (mut again, unreadable) = self.generate_once(ch, plan, &wide).await?;
-        let (o, t) = after_wide(plan.mode, again.generation.outcome, &again.text, unreadable);
-        again.generation.outcome = o;
-        again.text = t;
-        Ok(again)
+        let mut again = self.generate_once(ch, plan, &wide).await?;
+        let r = &mut again.reply;
+        let (o, t) = after_wide(
+            plan.mode,
+            r.generation.outcome.clone(),
+            &r.text,
+            again.unreadable,
+        );
+        r.generation.outcome = o;
+        r.text = t;
+        self.in_your_voice(ch, plan, &wide, again).await
     }
 
-    /// One call; with the reply, whether the message itself could not be read ([`Layers::unreadable`]).
+    /// On your own account, a reply goes through the checks of writing as you ([`voice_verdict`]):
+    /// sent back once with what was wrong, then handed to you. Not what you asked for yourself (an
+    /// instruction: your trigger words, a flow step's text, your answer in a conversation).
+    async fn in_your_voice(
+        &self,
+        ch: &Channels,
+        plan: &Plan,
+        opts: &ComposeOpts,
+        first: Once,
+    ) -> ChannelResult<Reply> {
+        let Some(feedback) = voice_verdict(
+            plan.mode,
+            instructed(opts),
+            &first.reply,
+            first.style.as_ref(),
+        ) else {
+            return Ok(first.reply);
+        };
+        let found: Vec<String> = crate::voice::problems(&first.reply.text, first.style.as_ref())
+            .iter()
+            .map(|p| p.code().to_string())
+            .collect();
+        let again = ComposeOpts {
+            revise: Some(feedback),
+            ..opts.clone()
+        };
+        let second = self.generate_once(ch, plan, &again).await?;
+        let mut r = settle_revised(&first.reply, second.reply, second.style.as_ref());
+        r.generation.revised = found;
+        Ok(r)
+    }
+
+    /// One call: the reply, whether the message itself could not be read ([`Layers::unreadable`]),
+    /// and your habits it was written against.
     async fn generate_once(
         &self,
         ch: &Channels,
         plan: &Plan,
         opts: &ComposeOpts,
-    ) -> ChannelResult<(Reply, bool)> {
+    ) -> ChannelResult<Once> {
         let now = ch.now();
         let layers = ch
             .store()
@@ -1001,8 +1086,7 @@ impl Composer {
             }
         }
 
-        let model = layers.bot.as_ref().and_then(|b| b.model.clone());
-        let out = match (&self.pinned, &model) {
+        let out = match (&self.pinned, &layers.model) {
             (Some(pm), Some(m)) => pm.run_with_images(m, &p, &media.images, TIMEOUT).await,
             _ => {
                 steve_modules::gateway::purpose(
@@ -1026,8 +1110,8 @@ impl Composer {
         {
             tracing::warn!(message = %plan.message_id, "image description not kept: {e}");
         }
-        Ok((
-            Reply {
+        Ok(Once {
+            reply: Reply {
                 text,
                 generation: Generation {
                     outcome,
@@ -1036,11 +1120,71 @@ impl Composer {
                     model: out.model,
                     hits: layers.hits,
                     anchors: layers.anchor_ids,
+                    revised: Vec::new(),
                 },
             },
-            layers.unreadable && media.images.is_empty(),
-        ))
+            unreadable: layers.unreadable && media.images.is_empty(),
+            style: layers.voice.and_then(|v| v.style).map(|(_, s)| s),
+        })
     }
+}
+
+/// One call's result ([`Composer::generate_once`]).
+struct Once {
+    reply: Reply,
+    unreadable: bool,
+    style: Option<crate::voice::Style>,
+}
+
+/// You said what to write ([`ComposeOpts::instruction`]): your trigger words, a flow step's text,
+/// your answer in a conversation. The checks of writing as you never override it.
+pub fn instructed(opts: &ComposeOpts) -> bool {
+    opts.instruction
+        .as_deref()
+        .is_some_and(|i| !i.trim().is_empty())
+}
+
+/// Whether a reply goes back for a second try, and with what: only the composer's own reply on your
+/// own account (its provenance: a Bot's reply, a question to you or a skip is never checked), not
+/// one you said what to write (`instructed`, [`instructed`]), and only when
+/// [`crate::voice::problems`] finds something against your habits (`style`).
+pub fn voice_verdict(
+    mode: Mode,
+    instructed: bool,
+    r: &Reply,
+    style: Option<&crate::voice::Style>,
+) -> Option<String> {
+    if mode != Mode::Own || instructed || r.generation.outcome != Outcome::Reply {
+        return None;
+    }
+    let found = crate::voice::problems(&r.text, style);
+    (!found.is_empty()).then(|| crate::voice::feedback(&r.text, &found))
+}
+
+/// The second try's result: a reply that passes, a question to you or a skip as the model gave it.
+/// A reply still wrong, or a second need for context, is never dropped: the composer had decided the
+/// message needs an answer, so it becomes a question to you (the hand-off card) with what was wrong
+/// as its note and its reason ([`crate::voice::gave_up`]). A wrong-sounding draft costs you a look;
+/// a dropped message costs a conversation.
+pub fn settle_revised(
+    first: &Reply,
+    mut second: Reply,
+    style: Option<&crate::voice::Style>,
+) -> Reply {
+    let still = match second.generation.outcome {
+        Outcome::Reply => crate::voice::problems(&second.text, style),
+        Outcome::AskOwner | Outcome::Skip => return second,
+        // never returned from the composer: what the first draft had stands
+        Outcome::NeedContext => crate::voice::problems(&first.text, style),
+    };
+    if still.is_empty() && second.generation.outcome == Outcome::Reply {
+        return second;
+    }
+    let why = crate::voice::gave_up(&still);
+    second.generation.outcome = Outcome::AskOwner;
+    second.generation.why = why.clone();
+    second.text = why;
+    second
 }
 
 /// `Value` helper: a JSON string list (missing = empty).
@@ -1110,6 +1254,55 @@ mod outcome_tests {
         let file = serde_json::json!([{"type": "file", "key": "k"}]);
         assert!(!crate::context::unreadable("[file]", &file, false));
         assert!(!crate::context::unreadable("你看下", &none, false));
+    }
+
+    #[test]
+    fn only_the_composers_reply_on_your_account_is_checked_for_your_voice() {
+        use super::{Mode, Reply, settle_revised, voice_verdict};
+        use crate::deliver::Generation;
+        use crate::voice::{GAVE_UP, Style};
+        let r = |o: Outcome, t: &str| Reply {
+            text: t.into(),
+            generation: Generation {
+                outcome: o,
+                ..Generation::default()
+            },
+        };
+        let style = Style {
+            n: 10,
+            median_len: 6.0,
+            p90_len: 10.0,
+            ..Style::default()
+        };
+        let s = Some(&style);
+        let options = r(Outcome::Reply, "1. 重启\n2. 回滚");
+        assert!(voice_verdict(Mode::Own, false, &options, s).is_some());
+        // a bot's reply, what you said to write, a question to you, a skip: never checked
+        assert!(voice_verdict(Mode::Bot, false, &options, s).is_none());
+        assert!(voice_verdict(Mode::Own, true, &options, s).is_none());
+        assert!(voice_verdict(Mode::Own, false, &r(Outcome::AskOwner, "1. a\n2. b"), s).is_none());
+        assert!(voice_verdict(Mode::Own, false, &r(Outcome::Reply, "先重启"), s).is_none());
+        // the second try: fine → kept; still wrong → a question to you with the reason, never a
+        // skip; a question to you or a skip the model gave → as given
+        let ok = settle_revised(&options, r(Outcome::Reply, "先重启"), s);
+        assert_eq!(
+            (ok.generation.outcome, ok.text.as_str()),
+            (Outcome::Reply, "先重启")
+        );
+        let mut wrong = r(Outcome::Reply, "收到，1. 重启\n2. 回滚");
+        wrong.generation.why = "长".into();
+        let bad = settle_revised(&options, wrong, s);
+        assert_eq!(bad.generation.outcome, Outcome::AskOwner);
+        assert!(bad.text.starts_with(GAVE_UP), "{}", bad.text);
+        assert_eq!(
+            bad.generation.why, bad.text,
+            "the reason is the give-up, not the model's"
+        );
+        let ask = settle_revised(&options, r(Outcome::AskOwner, "要重启吗"), s);
+        assert_eq!(ask.generation.outcome, Outcome::AskOwner);
+        let more = settle_revised(&options, r(Outcome::NeedContext, "缺前文"), s);
+        assert_eq!(more.generation.outcome, Outcome::AskOwner);
+        assert!(more.text.starts_with(GAVE_UP), "{}", more.text);
     }
 
     #[test]

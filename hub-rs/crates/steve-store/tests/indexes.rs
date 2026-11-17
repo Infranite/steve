@@ -98,6 +98,56 @@ const CASES: &[(&str, &str, &str)] = &[
           ORDER BY m.created DESC, m.id DESC LIMIT ?4",
     ),
     (
+        "chan_messages_sender",
+        "steve-channels voice.rs read_pool (your messages)",
+        "WITH RECURSIVE mine(id) AS (
+       SELECT p.id FROM parties p JOIN workspace_members wm
+           ON wm.user_id = p.user_id AND wm.workspace_id = ?1 AND wm.role = 'owner'
+        WHERE p.workspace_id = ?1
+       UNION SELECT a.party_id FROM spaces s JOIN connections c ON c.id = s.connection_id
+           JOIN accounts a ON a.id = c.account_id
+           JOIN channel_settings cs ON cs.connection_id = c.id AND cs.mode = 'self'
+        WHERE s.id = ?2
+       UNION SELECT p.id FROM parties p JOIN mine ON p.merged_into = mine.id
+     ), my_accounts(id) AS (SELECT a.id FROM accounts a WHERE a.party_id IN (SELECT id FROM mine))
+     SELECT m.id, m.text, p.id, e.payload
+  FROM chan_messages m JOIN spaces s ON s.id = m.space_id
+  LEFT JOIN chan_messages p ON p.id = (
+       SELECT q.id FROM chan_messages q WHERE q.space_id = m.space_id
+          AND (q.created < m.created OR (q.created = m.created AND q.id < m.id))
+        ORDER BY q.created DESC, q.id DESC LIMIT 1)
+  LEFT JOIN ext_events e ON e.id = p.event_id
+ WHERE m.workspace_id = ?1 AND m.sender_party_id IN (SELECT id FROM mine)
+   AND s.connection_id = ?3 AND m.direction = 'in' AND m.status IN ('received', 'sent')
+   AND m.created < ?4 AND m.text IS NOT NULL AND m.text <> ''
+ ORDER BY m.created DESC, m.id DESC LIMIT ?5",
+    ),
+    (
+        "chan_messages_space_created",
+        "steve-channels voice.rs read_pool (the message before each)",
+        "WITH RECURSIVE mine(id) AS (
+       SELECT p.id FROM parties p JOIN workspace_members wm
+           ON wm.user_id = p.user_id AND wm.workspace_id = ?1 AND wm.role = 'owner'
+        WHERE p.workspace_id = ?1
+       UNION SELECT a.party_id FROM spaces s JOIN connections c ON c.id = s.connection_id
+           JOIN accounts a ON a.id = c.account_id
+           JOIN channel_settings cs ON cs.connection_id = c.id AND cs.mode = 'self'
+        WHERE s.id = ?2
+       UNION SELECT p.id FROM parties p JOIN mine ON p.merged_into = mine.id
+     ), my_accounts(id) AS (SELECT a.id FROM accounts a WHERE a.party_id IN (SELECT id FROM mine))
+     SELECT m.id, m.text, p.id, e.payload
+  FROM chan_messages m JOIN spaces s ON s.id = m.space_id
+  LEFT JOIN chan_messages p ON p.id = (
+       SELECT q.id FROM chan_messages q WHERE q.space_id = m.space_id
+          AND (q.created < m.created OR (q.created = m.created AND q.id < m.id))
+        ORDER BY q.created DESC, q.id DESC LIMIT 1)
+  LEFT JOIN ext_events e ON e.id = p.event_id
+ WHERE m.workspace_id = ?1 AND m.sender_party_id IN (SELECT id FROM mine)
+   AND s.connection_id = ?3 AND m.direction = 'in' AND m.status IN ('received', 'sent')
+   AND m.created < ?4 AND m.text IS NOT NULL AND m.text <> ''
+ ORDER BY m.created DESC, m.id DESC LIMIT ?5",
+    ),
+    (
         "chan_messages_space_created",
         "steve-channels inbound.rs answered_since_people",
         "WITH people AS (

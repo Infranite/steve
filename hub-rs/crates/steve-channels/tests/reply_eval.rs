@@ -5,7 +5,9 @@
 
 use std::collections::{BTreeMap, HashSet};
 
-use steve_channels::compose::{self, H_HISTORY, H_OCCASION, H_OWNER, H_PENDING, H_STYLE, HISTORY};
+use steve_channels::compose::{
+    self, BotInfo, H_BOT, H_HISTORY, H_OCCASION, H_OWNER, H_PENDING, H_STYLE, H_WRITE, HISTORY,
+};
 use steve_channels::context::Shown;
 use steve_channels::deliver::{SYSTEM_TEXTS, system_text_in};
 use steve_channels::reply_eval::{
@@ -81,7 +83,7 @@ fn rendered(xs: &[Shown]) -> Vec<String> {
 #[test]
 fn the_layers_are_the_composers_at_the_cases_time() {
     let c = case("fx-03-owner-replied-after");
-    let l = re::layers(&c, &setting(), HISTORY, vec![]);
+    let l = re::layers(&c, &setting(), HISTORY, re::bare_voice(&c));
     assert_eq!(l.persona, compose::self_layer("主人"));
     assert_eq!(l.sender, "B");
     // the history: what was there before the message, received or sent, with its text — the
@@ -107,7 +109,7 @@ fn the_layers_are_the_composers_at_the_cases_time() {
     draft.is_owner = false;
     draft.text = Some("好。".into());
     c.previous_space_messages.push(draft);
-    let l = re::layers(&c, &setting(), HISTORY, vec![]);
+    let l = re::layers(&c, &setting(), HISTORY, re::bare_voice(&c));
     assert!(
         rendered(&l.history).iter().all(|t| !t.ends_with("好。")),
         "{:?}",
@@ -118,14 +120,19 @@ fn the_layers_are_the_composers_at_the_cases_time() {
     assert!(l.pending[0].ends_with("好。"));
     assert!(compose::prompt(&l).contains(H_PENDING));
     // only the last `history` lines by people
-    assert_eq!(re::layers(&c, &setting(), 2, vec![]).history.len(), 2);
+    assert_eq!(
+        re::layers(&c, &setting(), 2, re::bare_voice(&c))
+            .history
+            .len(),
+        2
+    );
 }
 
 #[test]
 fn an_unread_image_is_said_to_be_unread() {
     let mut c = case("fx-03-owner-replied-after");
     c.message.media = vec!["image".into()];
-    let l = re::layers(&c, &setting(), HISTORY, vec![]);
+    let l = re::layers(&c, &setting(), HISTORY, re::bare_voice(&c));
     assert!(l.message.ends_with("[图片：未读取内容]"), "{}", l.message);
     assert!(compose::prompt(&l).contains("不要猜里面是什么"));
 }
@@ -143,7 +150,7 @@ fn your_lines_read_as_you_whatever_your_display_name() {
         aliases: vec!["7300000000000000001".into(), "Lee".into()],
         ..setting()
     };
-    let l = re::layers(&c, &s, HISTORY, vec![]);
+    let l = re::layers(&c, &s, HISTORY, re::bare_voice(&c));
     let lines = rendered(&l.history);
     assert!(
         lines.iter().any(|t| t.contains("主人（我）：")),
@@ -168,12 +175,13 @@ fn style_samples_come_before_the_case_and_never_from_any_gold_answer() {
         .filter_map(|g| g.text.clone())
         .collect();
     let corpus = corpus();
+    let people = re::people(&cs, &corpus);
     let at: BTreeMap<&str, &str> = corpus
         .iter()
         .map(|o| (o.text.as_str(), o.time.as_str()))
         .collect();
     for c in &cs {
-        let s = re::style_samples(&corpus, c, &gold, re::STYLE_MAX);
+        let s = re::style_samples(&corpus, c, &gold, &people, re::STYLE_MAX);
         assert!(s.len() <= re::STYLE_MAX);
         let target = re::millis(&c.message.time).unwrap();
         for t in &s {
@@ -193,18 +201,20 @@ fn style_samples_come_before_the_case_and_never_from_any_gold_answer() {
     }
     // the last case sees every earlier message but the gold answers (several of them earlier still)
     let late = case("fx-12-numeric-owner-name");
-    let s = re::style_samples(&corpus, &late, &gold, 50);
+    let s = re::style_samples(&corpus, &late, &gold, &people, 50);
     assert!(!s.iter().any(|t| t == "两种都行" || t == "先放着"), "{s:?}");
     // another space's sample only when it is plain: no digits, no @
     assert!(!s.iter().any(|t| t.contains("8080")), "{s:?}");
     assert!(!s.iter().any(|t| t.contains('@')), "{s:?}");
     // the space's own come first
     let d2 = case("fx-02-dm-burst-owner-live");
-    let s = re::style_samples(&corpus, &d2, &gold, 3);
+    let s = re::style_samples(&corpus, &d2, &gold, &people, 3);
     assert_eq!(s[0], "8080 那个先别管", "{s:?}");
 
-    // the block appears with the samples, and only then
-    let l = re::layers(&d2, &setting(), HISTORY, s.clone());
+    // the block appears with the samples and habits, and only then
+    let v = re::voice(&corpus, &d2, &gold, &names(), &people);
+    assert_eq!(v.samples[0], "8080 那个先别管", "{:?}", v.samples);
+    let l = re::layers(&d2, &setting(), HISTORY, v);
     let p = compose::prompt(&l);
     assert!(
         p.contains(H_STYLE) && p.contains("- 8080 那个先别管"),
@@ -468,4 +478,56 @@ fn the_presence_gate_replayed_skips_where_you_were_there_and_keeps_what_needs_yo
         );
     }
     assert_eq!(m.act_recall, before.act_recall, "{m:?}");
+}
+
+/// On your own account the Bot behind it only picks the model: its name, duty, manner and rules are
+/// not in the prompt (`--bot-layer` puts them back, the ablation that measures the removal).
+#[test]
+fn your_own_account_has_no_bot_layer_but_the_bots_model() {
+    let c = case("fx-11-incident-note");
+    let s = Setting {
+        bot: Some(BotInfo {
+            id: "b".into(),
+            name: "助手".into(),
+            role: "理解需求、分派、汇报".into(),
+            persona: "沉稳".into(),
+            rules: "建事项交给合适的 Bot".into(),
+            model: Some("m1".into()),
+            ..BotInfo::default()
+        }),
+        ..setting()
+    };
+    let l = re::layers(&c, &s, HISTORY, re::bare_voice(&c));
+    assert!(l.bot.is_none());
+    assert_eq!(l.model.as_deref(), Some("m1"));
+    let p = compose::prompt(&l);
+    assert!(!p.contains("你代表 Bot") && !p.contains("分派"), "{p}");
+    assert!(p.contains(&format!("{H_BOT}\n（无）")), "{p}");
+    // the rules of writing as you, always; your habits only with your messages
+    assert!(p.contains(H_WRITE) && !p.contains(H_STYLE), "{p}");
+    let ablated = Setting {
+        bot_layer: true,
+        ..s
+    };
+    let p = compose::prompt(&re::layers(&c, &ablated, HISTORY, re::bare_voice(&c)));
+    assert!(
+        p.contains("你代表 Bot「助手」说话") && p.contains("分派"),
+        "{p}"
+    );
+}
+
+/// The replay's habits come from your messages before the case, never from any case's gold answers,
+/// per situation.
+#[test]
+fn the_replays_habits_leave_out_the_gold_answers() {
+    let cs = cases();
+    let gold = re::gold_ids(&cs);
+    let corpus = corpus();
+    let people = re::people(&cs, &corpus);
+    let late = case("fx-12-numeric-owner-name");
+    let with = re::voice(&corpus, &late, &HashSet::new(), &names(), &people);
+    let without = re::voice(&corpus, &late, &gold, &names(), &people);
+    let n = |v: &re::Voice| v.style.as_ref().map(|(_, s)| s.n).unwrap_or(0);
+    assert!(n(&without) < n(&with), "{} vs {}", n(&without), n(&with));
+    assert_eq!(without.situation, Some(re::situation(&late)));
 }

@@ -440,6 +440,21 @@ fn lines(
     Ok(v)
 }
 
+/// Whether you said something yourself in `space` from `from` to `to` (ms): your own words only,
+/// not what another assistant posted on your account by itself ([`crate::arbiter::looks_automated`])
+/// nor what Steve sent as you.
+pub fn you_spoke(c: &Connection, ws: &str, space: &str, from: i64, to: i64) -> ChannelResult<bool> {
+    let mut st = c.prepare_cached(&format!(
+        "{MINE} SELECT coalesce(m.text, '') FROM chan_messages m
+          WHERE m.space_id = ?2 AND m.direction = 'in' AND m.created >= ?3 AND m.created <= ?4
+            AND {IS_MINE}"
+    ))?;
+    let texts = st
+        .query_map(params![ws, space, from, to], |r| r.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(texts.iter().any(|t| !crate::arbiter::looks_automated(t)))
+}
+
 /// [`engaged`] for stored inbound message `target` at `now`, with [`OWNER_LIVE_MS`]. `None` also for
 /// a message that is yours or not found.
 pub fn owner_engaged(

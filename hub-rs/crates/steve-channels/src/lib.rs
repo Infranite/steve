@@ -151,6 +151,7 @@ pub mod spaces;
 pub mod trigger_report;
 pub mod unsendable;
 pub mod usage;
+pub mod voice;
 pub mod write_blocks;
 
 pub use channel::{

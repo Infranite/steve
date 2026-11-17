@@ -399,6 +399,7 @@ impl Channels {
             persona_id: None,
             instruction,
             history: None,
+            revise: None,
         };
         let r = replies
             .generate(self, &plan, &opts)
