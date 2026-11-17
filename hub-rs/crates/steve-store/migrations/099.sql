@@ -1,4 +1,4 @@
--- 98: 我的待办 become goals and dated todos, for every member. A goal (`kind = 'goal'`) has a target
+-- 99: 我的待办 become goals and dated todos, for every member. A goal (`kind = 'goal'`) has a target
 -- date and child todos one level down (`parent_id`); its progress is computed, never stored. A
 -- deadline is a moment (`due_kind = 'time'`, `due`) or a local date (`due_kind = 'date'`,
 -- `due_date`, `due` empty) so that a date-only deadline does not move a day between time zones.
