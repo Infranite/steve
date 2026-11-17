@@ -236,14 +236,15 @@ pub struct Setting {
     pub space_duty: String,
 }
 
-/// The attachments of a case line as `chan_messages.attachments` stores them, for the unread notes.
+/// The attachments of a case line as the Feishu reader stores them in `chan_messages.attachments`
+/// (an image as `image`; a sticker, a file, audio or video as a `file` of that kind), for the unread
+/// notes and the gates.
 fn attachments(media: &[String]) -> Value {
     Value::Array(
         media
             .iter()
             .map(|k| match k.as_str() {
                 "image" => json!({"type": "image"}),
-                "sticker" => json!({"type": "sticker"}),
                 other => json!({"type": "file", "kind": other}),
             })
             .collect(),

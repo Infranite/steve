@@ -2,7 +2,8 @@
 //! (synthetic chats; names A/B and made-up text): the gates before any model (nothing to answer, a
 //! nudge onto the open card, a bot's notice by its structure), the card's content and its choices
 //! (send the draft, tell it how to reply, your words as written; YOLO clicks none of them), its life
-//! (a newer card about the chat, 12 hours), starred contacts, and what a draft keeps for YOLO.
+//! (a newer card that shows it, the lifetime you set), starred contacts, and what a draft keeps for
+//! YOLO.
 
 use std::sync::Arc;
 
@@ -41,6 +42,11 @@ struct H {
 }
 
 async fn setup() -> H {
+    setup_with(PASS).await
+}
+
+/// [`setup`] with the disclosure check's answer.
+async fn setup_with(check: &str) -> H {
     let core = Arc::new(FakeCore::default());
     let flow_setup = FlowSetup::new(core.clone());
     let disclosure = Disclosure::with_models(Vec::new());
@@ -105,7 +111,7 @@ async fn setup() -> H {
         false,
         &[("ualert", "告警机器人")],
     );
-    env.gateway.script(CHECK_HEAD, PASS);
+    env.gateway.script(CHECK_HEAD, check);
     let now = env.modules.clock.now();
     let v = Viewer::bare(WS, ME);
     env.store()
@@ -288,31 +294,62 @@ fn party_of(h: &H, handle: &str) -> String {
 
 // ---------------------------------------------------------------- G4, G5: before any model
 
+/// A message of Feishu type `ty` with body `content`, as the Feishu reader stores it (its text and
+/// attachments), from A in the private chat.
+fn feishu_msg(h: &H, id: &str, ty: &str, content: &str) -> InboundMessage {
+    let mut e = steve_channels::fake::feishu::fixture("message_p2p_text").expect("fixture");
+    e["event"]["message"]["message_type"] = json!(ty);
+    e["event"]["message"]["content"] = json!(content);
+    let read = steve_channels::adapters::feishu::inbound::parse_receive(&e, "ou_bot")
+        .expect("read")
+        .expect("a message");
+    let mut m = msg(h, "D_A", id, "ua", &read.text, 0);
+    m.attachments = read.attachments;
+    m
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn nothing_to_answer_is_recorded_before_any_model() {
     let h = setup().await;
-    for (id, text) in [
-        ("s1", "[sticker]"),
-        ("s2", "👍"),
-        ("s3", "[system message]"),
-    ] {
+    let sticker = feishu_msg(&h, "s1", "sticker", r#"{"file_key":"k1"}"#);
+    assert_eq!(
+        sticker.attachments[0]["kind"], "sticker",
+        "the reader's shape"
+    );
+    let system = feishu_msg(&h, "s3", "system", r#"{"template":"x"}"#);
+    for m in [sticker, msg(&h, "D_A", "s2", "ua", "👍", 0), system] {
         h.env.clock.advance(2 * 60_000);
-        let r = push(&h, msg(&h, "D_A", id, "ua", text, 0))
-            .await
-            .response
-            .expect("response");
-        assert_eq!(r.label, LABEL_NO_CONTENT, "{text}");
+        let id = m.external_id.clone();
+        let mut m = m;
+        m.created = h.ch.now();
+        let r = push(&h, m).await.response.expect("response");
+        assert_eq!(r.label, LABEL_NO_CONTENT, "{id}");
         assert!(r.decision_id.is_none() && r.out_message_id.is_none());
     }
     assert!(compose_prompts(&h).is_empty(), "no composer ran");
+    // a forwarded chat and a task have something to read: the composer reads them
+    for (id, ty) in [("f1", "merge_forward"), ("t1", "todo")] {
+        answers(
+            &h,
+            json!({"outcome": "skip", "text": "看过了", "why": "转发"}),
+        );
+        h.env.clock.advance(40 * 60_000);
+        let n = compose_prompts(&h).len();
+        let mut m = feishu_msg(&h, id, ty, r#"{"x":"y"}"#);
+        m.created = h.ch.now();
+        let r = push(&h, m).await.response.expect("response");
+        assert_ne!(r.label, LABEL_NO_CONTENT, "{ty}");
+        assert_eq!(compose_prompts(&h).len(), n + 1, "{ty} was read");
+    }
     // a question of theirs still waiting: the sticker after it is read with it
     answers(
         &h,
         json!({"outcome": "skip", "text": "等会儿再说", "why": "闲聊"}),
     );
-    h.env.clock.advance(2 * 60_000);
+    h.env.clock.advance(40 * 60_000);
+    let n = compose_prompts(&h).len();
     push(&h, msg(&h, "D_A", "q1", "ua", "晚上吃啥？", 0)).await;
-    assert_eq!(compose_prompts(&h).len(), 1);
+    assert_eq!(compose_prompts(&h).len(), n + 1);
     h.env.clock.advance(2 * 60_000);
     answers(
         &h,
@@ -325,7 +362,7 @@ async fn nothing_to_answer_is_recorded_before_any_model() {
     assert_ne!(r.label, LABEL_NO_CONTENT);
     assert_eq!(
         compose_prompts(&h).len(),
-        2,
+        n + 2,
         "read, since the question waits"
     );
 }
@@ -417,9 +454,21 @@ async fn your_click_sends_the_draft_or_your_words_and_yolo_clicks_none() {
             "{choice}"
         );
     }
-    let r = decide_as(&h, ME, &d, "send_draft", "").expect("sent");
-    let out = r.result["draft_message"].as_str().unwrap().to_string();
+    // the card's draft is checked before it goes out; it passes: approved by your click
+    decide_as(&h, ME, &d, "send_draft", "").expect("answered");
+    let out = checked(&h, &d).await;
+    assert_eq!(card(&h, &d).4["check"], "pass");
     assert_eq!(status(&h, &out), "pending");
+    assert!(
+        h.env
+            .gateway
+            .prompts
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|p| p.starts_with(CHECK_HEAD) && p.contains("周四可以")),
+        "the check read the draft"
+    );
     h.env.clock.advance(11_000);
     assert_eq!(h.outbox.send_due(&h.ch).await, 1);
     assert_eq!(status(&h, &out), "sent");
@@ -445,6 +494,74 @@ async fn your_click_sends_the_draft_or_your_words_and_yolo_clicks_none() {
         vec![json!("周四三点吧"), json!("sent")]
     );
     assert_eq!(h.fake.sent.lock().unwrap().len(), 2);
+}
+
+/// The queue checks a card's draft answered “发这条草稿”: the message it made (`result.composed`).
+async fn checked(h: &H, d: &str) -> String {
+    for _ in 0..100 {
+        h.outbox.send_due(&h.ch).await;
+        let r = row(
+            h,
+            "SELECT coalesce(json_extract(result, '$.composed'), '') FROM decisions WHERE id = ?",
+            &[d],
+        );
+        if let Some(m) = r[0].as_str().filter(|m| !m.is_empty()) {
+            return m.to_string();
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    panic!("the card's draft was never checked");
+}
+
+/// A card's draft the check flags is not sent on your click: it becomes the usual approval with
+/// the suspicious parts marked, and waits for you again.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_cards_draft_that_may_leak_waits_for_you_again() {
+    let h = setup_with(
+        r#"{"verdict": "leak", "spans": [{"text": "周四可以", "reason": "内部排期", "basis": "internal_detail"}]}"#,
+    )
+    .await;
+    let (_, d) = asked(&h, "a1", 0).await;
+    decide_as(&h, ME, &d, "send_draft", "").expect("answered");
+    let out = checked(&h, &d).await;
+    assert_eq!(card(&h, &d).4["check"], "leak");
+    assert_eq!(status(&h, &out), "draft");
+    let approval = row(
+        &h,
+        "SELECT decision_id FROM chan_messages WHERE id = ?",
+        &[&out],
+    )[0]
+    .as_str()
+    .unwrap()
+    .to_string();
+    let (st, q, ..) = card(&h, &approval);
+    assert_eq!(st, "open");
+    assert!(q.contains("可能泄露") && q.contains("「周四可以」"), "{q}");
+    h.env.clock.advance(60_000);
+    assert_eq!(h.outbox.send_due(&h.ch).await, 0);
+    assert!(h.fake.sent.lock().unwrap().is_empty());
+    // checked once
+    let n = h
+        .env
+        .gateway
+        .prompts
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|p| p.starts_with(CHECK_HEAD))
+        .count();
+    h.outbox.send_due(&h.ch).await;
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    let again = h
+        .env
+        .gateway
+        .prompts
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|p| p.starts_with(CHECK_HEAD))
+        .count();
+    assert_eq!(again, n);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -512,57 +629,215 @@ async fn a_card_opened_before_keeps_its_reply_field() {
 
 // ---------------------------------------------------------------- the card's life
 
+/// A's card at your @ in the dev group, with the composer's question `summary` and `reason`.
+async fn card_at(h: &H, id: &str, from: &str, text: &str, reason: &str, summary: &str) -> String {
+    answers(h, ask(reason, summary, ""));
+    push(h, at_you(msg(h, "C_DEV", id, from, text, 0)))
+        .await
+        .response
+        .unwrap()
+        .decision_id
+        .expect("a card")
+}
+
 #[tokio::test(flavor = "multi_thread")]
-async fn a_newer_card_about_the_chat_closes_the_older_one() {
+async fn a_newer_card_takes_over_only_what_it_shows_of_the_same_person() {
     let h = setup().await;
-    answers(&h, ask("owner_fact", "阿甲问方案定了没", ""));
-    let a = push(&h, at_you(msg(&h, "C_DEV", "g1", "ua", "方案定了吗", 0)))
-        .await
-        .response
-        .unwrap()
-        .decision_id
-        .unwrap();
+    // the same sender, the older message on the newer card: taken over
+    let a1 = card_at(
+        &h,
+        "g1",
+        "ua",
+        "方案定了吗",
+        "owner_fact",
+        "阿甲问方案定了没",
+    )
+    .await;
     h.env.clock.advance(5 * 60_000);
-    answers(&h, ask("owner_fact", "阿乙问今晚谁值班", ""));
-    let b = push(&h, at_you(msg(&h, "C_DEV", "g2", "ub", "今晚谁值班", 0)))
-        .await
-        .response
-        .unwrap()
-        .decision_id
-        .unwrap();
-    let (st, _, _, _, result) = card(&h, &a);
+    let a2 = card_at(
+        &h,
+        "g2",
+        "ua",
+        "今晚谁值班",
+        "owner_fact",
+        "阿甲问今晚谁值班",
+    )
+    .await;
+    let (st, _, _, _, result) = card(&h, &a1);
     assert_eq!(
         (st.as_str(), result["superseded"].as_str()),
         ("expired", Some(BY_NEWER))
     );
-    let (st, q, ..) = card(&h, &b);
+    let (st, q, ..) = card(&h, &a2);
     assert_eq!(st, "open");
     assert!(
         q.contains("- 阿甲：方案定了吗"),
-        "the newer card shows the older line: {q}"
+        "the newer card shows it: {q}"
+    );
+
+    // someone else's card does not close it, though it shows A's line
+    h.env.clock.advance(5 * 60_000);
+    let b1 = card_at(&h, "g3", "ub", "日志在哪", "owner_fact", "阿乙问日志在哪").await;
+    assert_eq!(card(&h, &a2).0, "open");
+    assert!(card(&h, &b1).1.contains("- 阿甲：今晚谁值班"));
+
+    // a commitment stays until another commitment takes it over
+    h.env.clock.advance(5 * 60_000);
+    let c1 = card_at(
+        &h,
+        "g4",
+        "ub",
+        "周四能上线吗",
+        "commitment",
+        "阿乙问周四能不能上线",
+    )
+    .await;
+    h.env.clock.advance(5 * 60_000);
+    let b2 = card_at(
+        &h,
+        "g5",
+        "ub",
+        "日志找到了吗",
+        "owner_fact",
+        "阿乙问日志找到没",
+    )
+    .await;
+    assert_eq!(
+        card(&h, &c1).0,
+        "open",
+        "a commitment is not lost to a question"
+    );
+    assert_eq!(card(&h, &b1).0, "expired", "B's own question is");
+    h.env.clock.advance(5 * 60_000);
+    card_at(
+        &h,
+        "g6",
+        "ub",
+        "那周五呢",
+        "commitment",
+        "阿乙问周五能不能上线",
+    )
+    .await;
+    assert_eq!(card(&h, &c1).0, "expired");
+
+    assert_eq!(card(&h, &b2).0, "expired", "and B's question with it");
+
+    // more lines than the card shows between them: the older one stays
+    h.env.clock.advance(5 * 60_000);
+    let x = card_at(
+        &h,
+        "g7",
+        "ub",
+        "还有别的吗",
+        "owner_fact",
+        "阿乙问还有没有别的",
+    )
+    .await;
+    for i in 0..decide::EXCERPT_MAX {
+        h.env.clock.advance(30_000);
+        push(
+            &h,
+            msg(
+                &h,
+                "C_DEV",
+                &format!("x{i}"),
+                "ua",
+                &format!("第{i}条闲聊"),
+                0,
+            ),
+        )
+        .await;
+    }
+    h.env.clock.advance(60_000);
+    let y = card_at(&h, "g8", "ub", "在吗", "owner_fact", "阿乙问你在不在").await;
+    assert!(!card(&h, &y).1.contains("还有别的吗"));
+    assert_eq!(
+        card(&h, &x).0,
+        "open",
+        "B's earlier card is not on the newer one"
+    );
+}
+
+/// Your own account's card lifetime, in hours (`None`: never on time).
+fn lifetime(h: &H, hours: Option<i64>) {
+    let v = hours.map(|x| x.to_string()).unwrap_or("NULL".into());
+    exec(
+        h,
+        &format!("UPDATE channel_settings SET card_ttl_h = {v} WHERE connection_id = ?"),
+        &[&h.me],
     );
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn cards_about_your_account_close_after_twelve_hours() {
+async fn cards_close_after_the_lifetime_you_set_but_never_a_commitment_or_a_star() {
     let h = setup().await;
-    let (_, card_id) = asked(&h, "a1", 0).await;
-    // and a draft in your name in another chat
+    // a question for what you know, in A's private chat
+    answers(&h, ask("owner_fact", "阿甲问告警是不是你改的", ""));
+    let fact = push(&h, msg(&h, "D_A", "f1", "ua", "告警是你改的吗", 0))
+        .await
+        .response
+        .unwrap()
+        .decision_id
+        .expect("a card");
+    // a commitment, in the dev group
+    answers(
+        &h,
+        ask("commitment", "阿乙问周四下午能不能过方案", "周四可以"),
+    );
+    let commitment = push(
+        &h,
+        at_you(msg(&h, "C_DEV", "c1", "ub", "周四下午能过一下方案吗", 0)),
+    )
+    .await
+    .response
+    .unwrap()
+    .decision_id
+    .expect("a card");
+    // a draft in your name, and one that promises something
     answers(
         &h,
         json!({"outcome": "reply", "text": "好 我看下", "why": "回一句"}),
     );
-    let r = push(&h, at_you(msg(&h, "C_DEV", "g1", "ub", "帮忙看下日志", 0)))
+    let r = push(&h, at_you(msg(&h, "C_DEV", "g1", "ua", "帮忙看下日志", 0)))
         .await
         .response
         .unwrap();
     let (draft, approval) = (r.out_message_id.unwrap(), r.decision_id.unwrap());
-    h.env.clock.advance(decide::CARD_TTL_MS - 60_000);
+    // a starred contact's card, a while later (not one turn with B's question)
+    h.env.clock.advance(40 * 60_000);
+    exec(
+        &h,
+        "UPDATE parties SET important = 1 WHERE id = ?",
+        &[&party_of(&h, "ub")],
+    );
+    answers(
+        &h,
+        json!({"outcome": "skip", "summary": "阿乙说晚上一起吃饭", "text": "闲聊", "why": "闲聊"}),
+    );
+    let starred = push(&h, at_you(msg(&h, "C_DEV", "s1", "ub", "晚上一起吃饭", 0)))
+        .await
+        .response
+        .unwrap()
+        .decision_id
+        .expect("a card");
+    assert!(card(&h, &starred).1.starts_with(STARRED));
+
+    // no lifetime set: a day later, everything still waits for you
+    h.env.clock.advance(24 * 3_600_000);
     h.outbox.send_due(&h.ch).await;
-    assert_eq!(card(&h, &card_id).0, "open");
-    h.env.clock.advance(2 * 60_000);
+    for (n, d) in [&fact, &commitment, &approval, &starred]
+        .into_iter()
+        .enumerate()
+    {
+        assert_eq!(card(&h, d).0, "open", "{n}: {:?}", card(&h, d));
+    }
+    // a lifetime of 30 hours: not yet; past it, the question and the draft close
+    lifetime(&h, Some(30));
     h.outbox.send_due(&h.ch).await;
-    for d in [&card_id, &approval] {
+    assert_eq!(card(&h, &fact).0, "open");
+    h.env.clock.advance(7 * 3_600_000);
+    h.outbox.send_due(&h.ch).await;
+    for d in [&fact, &approval] {
         let (st, _, _, _, result) = card(&h, d);
         assert_eq!(
             (st.as_str(), result["superseded"].as_str()),
@@ -570,6 +845,69 @@ async fn cards_about_your_account_close_after_twelve_hours() {
         );
     }
     assert_eq!(status(&h, &draft), "discarded");
+    // a commitment and a starred contact's card wait for you, however long
+    for d in [&commitment, &starred] {
+        assert_eq!(card(&h, d).0, "open");
+    }
+}
+
+/// Cards the sweep never closes (a bot's account) do not hold up yours, however many there are.
+#[tokio::test(flavor = "multi_thread")]
+async fn cards_on_a_bots_account_never_hold_up_the_sweep() {
+    let h = setup().await;
+    let (bot, _) =
+        FakeChannel::seed_connection(h.env.store(), &caller(WS, ME), None).expect("a bot");
+    let m =
+        h.ch.on_message(WS, &bot, msg(&h, "C_DEV", "b0", "ua", "早", -48 * 3600))
+            .await
+            .expect("message")
+            .message_id;
+    // even with a lifetime written on it
+    exec(
+        &h,
+        "UPDATE channel_settings SET card_ttl_h = 1 WHERE connection_id = ?",
+        &[&bot],
+    );
+    let old = h.ch.now() - 48 * 3_600_000;
+    for i in 0..(steve_channels::outbound::EXPIRY_PAGE + 20) {
+        let id = format!("bm{i}");
+        exec(
+            &h,
+            "INSERT INTO chan_messages (id, workspace_id, space_id, thread_key, direction, sender_account_id,
+                 sender_party_id, text, status, created, external_id)
+             SELECT ?1, workspace_id, space_id, ?1, direction, sender_account_id, sender_party_id, text, status, created,
+                 ?1 FROM chan_messages WHERE id = ?2",
+            &[&id, &m],
+        );
+        exec(
+            &h,
+            &format!(
+                "INSERT INTO decisions (id, workspace_id, kind, subject_type, subject_id, question, status, requested_by, created)
+                 VALUES ('dbm{i}', 'default', 'ask', 'chan_message', ?, '机器人转给你', 'open', 'steve', {old})"
+            ),
+            &[&id],
+        );
+    }
+    // yours, newer than all of them
+    lifetime(&h, Some(1));
+    answers(&h, ask("owner_fact", "阿甲问告警是不是你改的", ""));
+    let fact = push(&h, msg(&h, "D_A", "f1", "ua", "告警是你改的吗", 0))
+        .await
+        .response
+        .unwrap()
+        .decision_id
+        .expect("a card");
+    h.env.clock.advance(2 * 3_600_000);
+    h.outbox.send_due(&h.ch).await;
+    assert_eq!(card(&h, &fact).0, "expired");
+    assert_eq!(
+        row(
+            &h,
+            "SELECT count(*) FROM decisions WHERE id LIKE 'dbm%' AND status = 'open'",
+            &[]
+        )[0],
+        json!(steve_channels::outbound::EXPIRY_PAGE + 20)
+    );
 }
 
 // ---------------------------------------------------------------- starred contacts

@@ -6,7 +6,7 @@
 //! | `GET /channels` | `{providers: [{system, name, features, adapter_installed}], accounts: ChannelAccount[]}` |
 //! | `GET /channels/:connection_id` | `ChannelAccount` with `spaces: Space[]` (short form) instead of the count |
 //! | `POST /channels` | a registered channel side's adapter: credential form `{adapter, fields:{…}, persona_id?, config?, app_connection?}` → `ChannelAccount`; OAuth `{adapter, app_connection?, caps?, config?}` → `{url}` |
-//! | `PATCH /channels/:connection_id` | `{duty?: ≤4000, rules?, trigger?: {on?, words?, where?, mark?}, persona_id?}` → `ChannelAccount` |
+//! | `PATCH /channels/:connection_id` | `{duty?: ≤4000, rules?, trigger?: {on?, words?, where?, mark?}, persona_id?, card_ttl_h?: 1…720 \| null (your own account)}` → `ChannelAccount` |
 //! | `GET /spaces/:id/members?offset=&limit=` | `{total, offset, limit, members: Member[]}` (limit ≤200, default 50) |
 //! | `POST /channels/cleanup/preview`, `POST /channels/cleanup`, `GET /channels/cleanup/leftovers` | see [`crate::cleanup`] |
 //!

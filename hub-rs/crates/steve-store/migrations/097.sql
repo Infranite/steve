@@ -6,7 +6,10 @@
 -- here does) or `record` (recorded only, as before). steve-channels `spaces::BotNotices` reads it.
 ALTER TABLE chan_messages ADD COLUMN composed TEXT;
 ALTER TABLE space_prefs ADD COLUMN bot_notices TEXT NOT NULL DEFAULT 'auto';
--- The channel queue's sweeps (steve-channels `Outbox::send_due`): open message cards older than 12 hours, and cards you
--- answered with how to reply that wait to be drafted.
+-- `channel_settings.card_ttl_h`: on your own account, the hours after which a card about one of its chats that nobody
+-- answered closes; NULL (the default): never on time. A starred contact's card and one asking you to commit never do.
+ALTER TABLE channel_settings ADD COLUMN card_ttl_h INTEGER;
+-- The channel queue's sweeps (steve-channels `Outbox::send_due`): open message cards past their account's lifetime, and
+-- cards you answered with how to reply that wait to be drafted.
 CREATE INDEX IF NOT EXISTS decisions_chan_open ON decisions(created) WHERE subject_type = 'chan_message' AND status = 'open';
 CREATE INDEX IF NOT EXISTS decisions_chan_answered ON decisions(resolved) WHERE subject_type = 'chan_message' AND kind = 'ask' AND status = 'resolved';

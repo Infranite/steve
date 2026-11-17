@@ -16,7 +16,7 @@
 //!   message is still open: no new card, the open one says they asked again ([`Gate::Nudge`]).
 //!
 //! **The model's answer** is `{outcome, reason, addressee, text, draft, needs_commitment, summary}`
-//! ([`crate::compose::OUTPUT`]). What it may do is checked here in code ([`settle`]): saying nothing
+//! ([`crate::compose::OUTPUT`]; a bot's account keeps [`crate::compose::OUTPUT_BOT`]). What it may do is checked here in code ([`settle`]): saying nothing
 //! is the default; a question to you only for a commitment (time, money, deleting, privacy, a
 //! relationship) or, when the message is for you, a fact only you know or a substantive message;
 //! the card never asks you what you said and never carries Steve's own confusion. After the wider
@@ -31,8 +31,10 @@
 //! [`SUMMARY_MAX`]), why you are needed, the last few lines with yours marked “我”, and a candidate
 //! draft when there is one. Its options: send the draft, tell Steve how to answer (your words go to
 //! the composer as an instruction), send your words as they are, make it an item, or leave it. It
-//! closes when you speak there ([`crate::presence::supersede`]), after [`CARD_TTL_MS`], or when a
-//! newer card about the same chat opens ([`supersede_older`]).
+//! closes when you answer it, when you speak there ([`crate::presence::supersede`]), when a newer
+//! card shows its message from the same sender or reply chain ([`supersede_older`]), or — only when
+//! you set a lifetime on the account (`card_ttl_h`, none by default) — once it is that old. A starred
+//! contact's card and one asking you to commit to something never expire.
 
 use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::{Value, json};
@@ -52,8 +54,9 @@ pub const SUMMARY_MAX: usize = 300;
 pub const EXCERPT_MAX: usize = 6;
 /// One excerpt line, in characters.
 pub const EXCERPT_LINE_MAX: usize = 80;
-/// A card about your own account still open after this long closes: the conversation has moved on.
-pub const CARD_TTL_MS: i64 = 12 * 3_600_000;
+/// The longest lifetime an account may give its cards (`channel_settings.card_ttl_h`, in hours; unset:
+/// cards do not expire on time).
+pub const CARD_TTL_MAX_H: i64 = 30 * 24;
 /// An earlier question of the sender counts as still waiting within this long before their turn
 /// (one stretch of talk, [`context::SEGMENT_GAP_MS`]).
 pub const OPEN_QUESTION_MS: i64 = context::SEGMENT_GAP_MS;
@@ -70,12 +73,15 @@ pub const LABEL_NUDGE: &str = "对方在催，加到了之前的卡片上";
 pub const LABEL_BOT_ITEM: &str = "机器人的通知，提成事项";
 /// … a bot's notice whose action link was proposed already.
 pub const LABEL_BOT_SEEN: &str = "同一条机器人通知已经提过事项，只记录";
-/// `result.superseded` of a card closed by a newer one about the same chat.
-pub const BY_NEWER: &str = "同一个聊天里有了更新的卡片";
-/// `result.superseded` of a card closed after [`CARD_TTL_MS`].
-pub const BY_EXPIRY: &str = "超过 12 小时没处理，已过期";
+/// `result.superseded` of a card closed by a newer one that shows its message
+/// ([`supersede_older`]).
+pub const BY_NEWER: &str = "同一个人或同一条回复链有了更新的卡片，这条在新卡片里";
+/// `result.superseded` of a card closed after its account's lifetime (`card_ttl_h`).
+pub const BY_EXPIRY: &str = "超过这个账号设定的时长没处理，已过期";
 /// The line a nudge adds to the open card.
 pub const NUDGED: &str = "对方又在催：";
+/// Ahead of why you are needed, on a card's second line.
+pub const WHY_HEAD: &str = "为什么要你：";
 
 // ---------------------------------------------------------------- the model's answer
 
@@ -241,9 +247,13 @@ pub fn names_you(text: &str, names: &[String]) -> bool {
 ///   or a substantive message only when the message is to you. Without a reason it may give, a
 ///   message to you is still asked about (for what you know); anything else is let go: saying
 ///   nothing is the default.
-/// - `needs_approval` (the older field) counts as a commitment.
+/// - `needs_approval` (the safety rules' field, and a bot's) and `needs_commitment` (your own
+///   account's) are one flag: either sets both, on any account, so every path that asks for
+///   approval by either name sees it.
 pub fn settle(mut a: Answer, s: &Seen) -> Answer {
-    a.needs_commitment |= a.needs_approval;
+    let commits = a.needs_commitment || a.needs_approval;
+    a.needs_commitment = commits;
+    a.needs_approval = commits;
     if !s.own || s.instructed {
         return a;
     }
@@ -308,30 +318,61 @@ fn emoji(c: char) -> bool {
         | 0xFE00..=0xFE0F | 0x200D | 0x20E3 | 0xE0020..=0xE007F)
 }
 
-/// A chat app's emoji code (`[OK]`, `[赞]`) or a provider placeholder of something without words.
+/// Placeholders the adapters and the external channel write for a message that has no words: a
+/// sticker, a system message (someone joined, a call ended), a card with nothing readable, and the
+/// external channel's text for a message it could not render at all (when its raw form could not be
+/// read either, [`crate::adapters::ext_ws`]). Never the generic `[<类型>消息]` of a type the Feishu
+/// reader does not parse ([`crate::adapters::feishu::inbound::placeholder`]): a forwarded chat, a
+/// task, a shared chat or a location carry something to read.
+pub const WORDLESS_PLACEHOLDERS: [&str; 6] = [
+    "[sticker]",
+    crate::media::STICKER_NOTE,
+    "[system message]",
+    "[系统消息]",
+    crate::adapters::feishu::card::EMPTY,
+    "[unsupported message]",
+];
+
+/// A placeholder of something without words ([`WORDLESS_PLACEHOLDERS`], the Feishu reader's
+/// wordless message types) or one of the platform's emoji names
+/// ([`crate::adapters::feishu::emoji::is_emoji`]).
 fn wordless_token(t: &str) -> bool {
-    let Some(inner) = t.strip_prefix('[').and_then(|t| t.strip_suffix(']')) else {
-        return false;
-    };
-    matches!(
-        inner,
-        "system message" | "系统消息" | "sticker" | "表情包" | "unsupported message"
-    ) || (!inner.is_empty()
-        && inner.chars().count() <= 16
-        && inner
-            .chars()
-            .all(|c| c.is_alphanumeric() || c == '_' || c == '-')
-        && !inner.chars().all(|c| c.is_ascii_digit()))
+    use crate::adapters::feishu::{emoji, inbound};
+    if WORDLESS_PLACEHOLDERS.contains(&t)
+        || inbound::WORDLESS_TYPES
+            .iter()
+            .any(|w| inbound::placeholder(w) == t)
+    {
+        return true;
+    }
+    t.strip_prefix('[')
+        .and_then(|t| t.strip_suffix(']'))
+        .is_some_and(emoji::is_emoji)
 }
 
-/// A message without words to answer: no text but emoji, emoji codes and placeholders of a system
-/// message, a sticker or a card Steve cannot read, and nothing attached but a sticker. An image, a
-/// file or a card with text has content.
+/// An attachment without words: a sticker (as the Feishu reader stores it, `{"type": "file",
+/// "kind": "sticker"}`, or `{"type": "sticker"}`), or a card with nothing readable (no blocks, not
+/// cut short).
+fn wordless_attachment(a: &Value) -> bool {
+    match a["type"].as_str() {
+        Some("sticker") => true,
+        Some("file") => a["kind"] == "sticker",
+        Some("card") => {
+            a["truncated"] != true && a["blocks"].as_array().is_none_or(|b| b.is_empty())
+        }
+        _ => false,
+    }
+}
+
+/// A message without words to answer, by its structure: nothing attached but stickers and empty
+/// cards ([`wordless_attachment`]), and no text but Unicode emoji, the platform's emoji names and the
+/// placeholders of something without words ([`wordless_token`]). An image, a file, a card with
+/// text, a forwarded chat or a task has content.
 pub fn content_free(text: &str, attachments: &Value) -> bool {
-    let media = attachments
+    if !attachments
         .as_array()
-        .is_some_and(|a| a.iter().any(|x| x["type"] != "sticker"));
-    if media {
+        .is_none_or(|a| a.iter().all(wordless_attachment))
+    {
         return false;
     }
     let mut rest = text.trim();
@@ -601,7 +642,9 @@ pub fn card_question(space: &str, who: &str, card: &Card, why: Why, excerpt: &[S
         .map(str::trim)
         .filter(|n| !n.is_empty())
         .unwrap_or(card.reason.label());
-    q.push_str(&format!("\n为什么要你：{because}"));
+    q.push('\n');
+    q.push_str(WHY_HEAD);
+    q.push_str(because);
     if let Some(t) = trigger_note(why) {
         q.push_str(&format!("（{t}）"));
     }
@@ -618,6 +661,11 @@ pub fn card_question(space: &str, who: &str, card: &Card, why: Why, excerpt: &[S
 /// The last lines of the conversation up to `plan`'s message (at most [`EXCERPT_MAX`], bots left out
 /// unless the message is a bot's), yours marked “我”, the message itself last with “→”.
 pub fn excerpt(c: &Connection, plan: &Plan) -> ChannelResult<Vec<String>> {
+    Ok(shown(c, plan)?.into_iter().map(|(_, l)| l).collect())
+}
+
+/// [`excerpt`] with the id of the message each line shows.
+fn shown(c: &Connection, plan: &Plan) -> ChannelResult<Vec<(String, String)>> {
     let mine = context::mine(c, &plan.ws, &plan.space_id)?;
     let Some((t, before, _)) =
         context::load(c, &plan.space_id, &plan.message_id, &mine, Mode::Own)?
@@ -630,18 +678,22 @@ pub fn excerpt(c: &Connection, plan: &Plan) -> ChannelResult<Vec<String>> {
         Side::Persona => format!("{}（机器人）", or_someone(&m.name)),
         Side::Other => or_someone(&m.name),
     };
-    let mut lines: Vec<String> = before
+    let mut lines: Vec<(String, String)> = before
         .iter()
         .filter(|m| !m.bot || t.bot)
         .rev()
         .take(EXCERPT_MAX - 1)
-        .map(|m| format!("- {}：{}", who(m), flat(&m.text, EXCERPT_LINE_MAX)))
+        .map(|m| {
+            (
+                m.id.clone(),
+                format!("- {}：{}", who(m), flat(&m.text, EXCERPT_LINE_MAX)),
+            )
+        })
         .collect();
     lines.reverse();
-    lines.push(format!(
-        "→ {}：{}",
-        who(&t),
-        flat(&t.text, EXCERPT_LINE_MAX)
+    lines.push((
+        t.id.clone(),
+        format!("→ {}：{}", who(&t), flat(&t.text, EXCERPT_LINE_MAX)),
     ));
     Ok(lines)
 }
@@ -658,7 +710,7 @@ fn or_someone(n: &str) -> String {
 pub use crate::respond::{HANDOFF_NO_DRAFT_OPTIONS, HANDOFF_OPTIONS};
 
 /// Opens the card about `plan`'s message (one per message: an open one is returned as it is), links it
-/// from the message, and on your own account closes older cards about the same chat
+/// from the message, and on your own account closes the older cards it takes over
 /// ([`supersede_older`]).
 pub fn open_card(tx: &Tx, plan: &Plan, card: &Card) -> ChannelResult<String> {
     if let Some(d) = base::decisions::open_for(tx, &plan.ws, SUBJECT_MESSAGE, &plan.message_id)? {
@@ -673,7 +725,8 @@ pub fn open_card(tx: &Tx, plan: &Plan, card: &Card) -> ChannelResult<String> {
         };
     }
     let why = Why::of(&context::facts_of(tx, &plan.message_id)?, false);
-    let lines = excerpt(tx, plan)?;
+    let shown = shown(tx, plan)?;
+    let lines: Vec<String> = shown.iter().map(|(_, l)| l.clone()).collect();
     let question = card_question(&plan.space_name, &plan.sender_name, &card, why, &lines);
     let draft = card.draft.trim();
     let options: Vec<String> = if draft.is_empty() {
@@ -702,7 +755,24 @@ pub fn open_card(tx: &Tx, plan: &Plan, card: &Card) -> ChannelResult<String> {
     )?;
     crate::messages::event(tx, &plan.ws, &plan.space_id, &plan.message_id);
     if plan.mode == Mode::Own {
-        supersede_older(tx, &plan.ws, &plan.space_id, &d.id, card.starred)?;
+        let (sender, thread): (String, Option<String>) = tx.query_row(
+            "SELECT coalesce(sender_party_id, sender_account_id, ''), thread_key FROM chan_messages WHERE id = ?",
+            [&plan.message_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        supersede_older(
+            tx,
+            &plan.ws,
+            &plan.space_id,
+            &d.id,
+            &Newer {
+                starred: card.starred,
+                commitment: card.reason == Reason::Commitment,
+                sender,
+                thread_key: thread.filter(|t| !t.is_empty()),
+                shown: shown.into_iter().map(|(id, _)| id).collect(),
+            },
+        )?;
     }
     Ok(d.id)
 }
@@ -712,30 +782,66 @@ pub fn is_starred_card(question: &str) -> bool {
     question.starts_with(STARRED)
 }
 
-/// Closes the other open cards about messages in `space` (`result.superseded` = [`BY_NEWER`]): the
-/// newer card's excerpt shows them. A card about a starred contact stays unless the newer one is
-/// one too.
+/// Why a card says you are needed, read back from its line [`WHY_HEAD`] (Steve's fixed words,
+/// [`Reason::label`]); `None` when it says something else (the voice check's problems, a bot's
+/// question).
+pub fn card_reason(question: &str) -> Option<Reason> {
+    let why = question.lines().find_map(|l| l.strip_prefix(WHY_HEAD))?;
+    Reason::ALL.into_iter().find(|r| why.starts_with(r.label()))
+}
+
+/// The newer card, as [`supersede_older`] weighs it.
+#[derive(Debug, Clone, Default)]
+pub struct Newer {
+    pub starred: bool,
+    /// It asks you for a commitment ([`Reason::Commitment`]).
+    pub commitment: bool,
+    /// Who sent its message (contact, else account).
+    pub sender: String,
+    /// Its message's reply chain (Feishu: thread, else root, else itself).
+    pub thread_key: Option<String>,
+    /// The messages its excerpt shows.
+    pub shown: Vec<String>,
+}
+
+/// Closes the open cards about older messages in `space` that the newer card `keep` takes over
+/// (`result.superseded` = [`BY_NEWER`]): only one about a message the newer card shows in its
+/// excerpt, from the same sender or in the same reply chain — so what they asked is still on the
+/// newer card. A starred contact's card is closed only by another starred one, and a commitment's
+/// only by another commitment: neither is lost to an unrelated question.
 pub fn supersede_older(
     tx: &Tx,
     ws: &str,
     space: &str,
     keep: &str,
-    starred: bool,
+    newer: &Newer,
 ) -> ChannelResult<usize> {
-    let open: Vec<(String, String, String)> = {
+    if newer.shown.is_empty() {
+        return Ok(0);
+    }
+    let open: Vec<(String, String, String, String, Option<String>)> = {
         let mut st = tx.prepare_cached(&format!(
-            "SELECT d.id, d.question, m.id FROM decisions d JOIN chan_messages m ON m.id = d.subject_id AND m.direction = 'in'
+            "SELECT d.id, d.question, m.id, coalesce(m.sender_party_id, m.sender_account_id, ''), m.thread_key
+               FROM decisions d JOIN chan_messages m ON m.id = d.subject_id AND m.direction = 'in'
               WHERE d.workspace_id = ?1 AND d.subject_type = '{SUBJECT_MESSAGE}' AND d.kind = 'ask' AND d.status = 'open'
                 AND m.space_id = ?2 AND d.id <> ?3"
         ))?;
         st.query_map(params![ws, space, keep], |r| {
-            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?
     };
     let mut n = 0;
-    for (d, q, m) in open {
-        if is_starred_card(&q) && !starred {
+    for (d, q, m, sender, thread) in open {
+        let same = (!sender.is_empty() && sender == newer.sender)
+            || (thread.is_some() && thread == newer.thread_key);
+        if !newer.shown.contains(&m) || !same {
+            continue;
+        }
+        if is_starred_card(&q) && !newer.starred {
+            continue;
+        }
+        if card_reason(&q) == Some(Reason::Commitment) && !newer.commitment {
             continue;
         }
         if crate::presence::settle(tx, &d, BY_NEWER)? {
@@ -944,15 +1050,27 @@ mod tests {
         let mut s = seen(false);
         s.instructed = true;
         assert_eq!(settle(ask("unsure"), &s).outcome, Outcome::AskOwner);
-        // needs_approval is a commitment
-        let a = settle(
-            Answer {
-                needs_approval: true,
-                ..Answer::default()
-            },
-            &s,
-        );
-        assert!(a.needs_commitment);
+        // needs_approval and needs_commitment are one flag, on any account
+        for own in [true, false] {
+            let mut s = seen(false);
+            s.own = own;
+            let a = settle(
+                Answer {
+                    needs_approval: true,
+                    ..Answer::default()
+                },
+                &s,
+            );
+            assert!(a.needs_commitment, "own {own}");
+            let a = settle(
+                Answer {
+                    needs_commitment: true,
+                    ..Answer::default()
+                },
+                &s,
+            );
+            assert!(a.needs_approval, "own {own}");
+        }
     }
 
     #[test]
@@ -961,32 +1079,99 @@ mod tests {
         for t in [
             "",
             "[system message]",
+            "[system消息]",
             "[sticker]",
+            "[表情包]",
             "[OK][赞]",
             "👍",
             "😂😂",
             "[unsupported message]",
             " [FullMoonFace] 👍 ",
+            "[THUMBSUP]",
         ] {
             assert!(content_free(t, &none), "{t:?}");
         }
-        for t in ["好", "[图片]吗", "ok", "👍 好的", "[123]", "看下 [OK]"] {
+        // words, and the generic placeholders of types that carry them
+        for t in [
+            "好",
+            "[图片]吗",
+            "ok",
+            "👍 好的",
+            "[123]",
+            "看下 [OK]",
+            "[TODO]",
+            "[merge_forward消息]",
+            "[todo消息]",
+            "[share_chat消息]",
+            "[share_user消息]",
+            "[location消息]",
+            "[vote消息]",
+            "[forwarded messages]",
+        ] {
             assert!(!content_free(t, &none), "{t:?}");
         }
+        // a sticker as the Feishu reader stores it, and the older shape
+        let sticker = json!([{"type": "file", "kind": "sticker", "source": "message", "key": "s", "name": null}]);
+        assert!(content_free("", &sticker));
         assert!(content_free("", &json!([{"type": "sticker", "key": "s"}])));
+        assert!(!content_free(
+            "",
+            &json!([{"type": "file", "kind": "file", "key": "f"}])
+        ));
         assert!(!content_free(
             "[image]",
             &json!([{"type": "image", "key": "i"}])
         ));
+        // a card: empty is wordless, with blocks it is not, whatever its text
+        assert!(content_free(
+            crate::adapters::feishu::card::EMPTY,
+            &json!([{"type": "card", "blocks": []}])
+        ));
         assert!(!content_free(
             "告警",
-            &json!([{"type": "card", "blocks": []}])
+            &json!([{"type": "card", "blocks": [{"t": "md", "text": "告警"}]}])
+        ));
+        assert!(!content_free(
+            crate::adapters::feishu::card::EMPTY,
+            &json!([{"type": "card", "blocks": [], "truncated": true}])
         ));
         for t in ["？", "??", "。。。", "!", "[OK]"] {
             assert!(nudge_only(t, &none), "{t:?}");
         }
         assert!(!nudge_only("在吗？", &none));
         assert!(!nudge_only("", &json!([{"type": "image"}])));
+    }
+
+    #[test]
+    fn the_feishu_readers_own_shapes() {
+        use crate::adapters::feishu::inbound::parse_receive;
+        let env = |ty: &str, content: &str| {
+            let mut e = crate::fake::feishu::fixture("message_p2p_text").expect("fixture");
+            e["event"]["message"]["message_type"] = json!(ty);
+            e["event"]["message"]["content"] = json!(content);
+            let m = parse_receive(&e, "ou_bot").unwrap().unwrap();
+            (m.text, Value::Array(m.attachments))
+        };
+        let (t, a) = env("sticker", r#"{"file_key":"x"}"#);
+        assert!(content_free(&t, &a), "a sticker: {t:?} {a}");
+        let (t, a) = env("system", r#"{"template":"x"}"#);
+        assert!(content_free(&t, &a), "a system message: {t:?}");
+        for ty in [
+            "merge_forward",
+            "todo",
+            "share_chat",
+            "share_user",
+            "location",
+            "vote",
+        ] {
+            let (t, a) = env(ty, r#"{"x":"y"}"#);
+            assert!(!content_free(&t, &a), "{ty}: {t:?}");
+        }
+        let (t, a) = env(
+            "post",
+            r#"{"zh_cn":{"title":"","content":[[{"tag":"emotion","emoji_type":"THUMBSUP"}]]}}"#,
+        );
+        assert!(content_free(&t, &a), "an emotion element alone: {t:?}");
     }
 
     #[test]

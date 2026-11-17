@@ -112,7 +112,7 @@ export default {
     mem: { yes: "已保存", no: "不保存，留在原记录里" },
     party_merge: { merge: "已合并，可以在联系人页拆回", not_same: "已记下：不是同一个人" },
     release: { no: "没有批准发布" },
-    chan_message: { yes: "已批准，稍后发出", no: "不发出，这条已关闭", rewrite: "改写好后会再给你看", send_draft: "已批准，稍后发出", instruct: "好，按你说的起草，写好后给你看", verbatim: "已批准，稍后按原文发出", draft_reply: "已起草，批准后才发出", to_item: "正在转成事项", done: "好，这条不用管", retry: "正在重新发送", discard: "不发了，这条已关闭", sent: "已记为发出" },
+    chan_message: { yes: "已批准，稍后发出", no: "不发出，这条已关闭", rewrite: "改写好后会再给你看", send_draft: "先查有没有不该说的，没问题就稍后发出；有问题会再给你看", instruct: "好，按你说的起草，写好后给你看", verbatim: "已批准，稍后按原文发出", draft_reply: "已起草，批准后才发出", to_item: "正在转成事项", done: "好，这条不用管", retry: "正在重新发送", discard: "不发了，这条已关闭", sent: "已记为发出" },
     any: { pass: "已验收，事项完成", rework: "已发回返工", yes: "已确认", no: "已处理", continue: "已让它继续", delivered: "已转成验收", look: "已暂停，等你处理", tosteve: "已交给 Steve", drop: "已放弃", deny: "已拒绝" },
     confirmYes: "已确认",
     confirmNo: "已记下：不对",

@@ -321,6 +321,15 @@ fn ms(v: &Value, k: &str) -> Option<i64> {
         .and_then(|x| x.as_i64().or_else(|| x.as_str()?.parse().ok()))
 }
 
+/// The text of a message of a type this reader does not parse: `[<类型>消息]` (it may well carry
+/// words: a forwarded chat, a task, a shared chat).
+pub fn placeholder(msg_type: &str) -> String {
+    format!("[{msg_type}消息]")
+}
+
+/// Message types without words of their own (a system message: someone joined, a call ended).
+pub const WORDLESS_TYPES: [&str; 1] = ["system"];
+
 /// Text and attachments of a message body (`content` as Feishu sends it, a JSON string): text with
 /// `@名字`; `post` flattened with its images, videos and attachment zone as attachments; image, file,
 /// folder, audio, video and sticker messages as one attachment and no text; a card as its readable
@@ -345,7 +354,7 @@ pub(crate) fn body_of(
         ),
         t => match media_attachment(t, &content) {
             Some(a) => (String::new(), vec![a]),
-            None => (format!("[{t}消息]"), Vec::new()),
+            None => (placeholder(t), Vec::new()),
         },
     }
 }

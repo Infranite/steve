@@ -536,6 +536,17 @@ fn the_replays_habits_leave_out_the_gold_answers() {
 fn nothing_to_answer_is_replayed_before_any_model() {
     // a forwarded card nobody can read and no question of the sender waiting: G4
     assert!(re::no_content(&case("fx-09-forwarded-card")));
+    // a sticker as the Feishu reader stores it (no text, a sticker file) is G4 too; a forwarded
+    // chat record or a task the reader did not parse is read
+    let mut c = case("fx-09-forwarded-card");
+    c.message.text = Some(String::new());
+    c.message.media = vec!["sticker".into()];
+    assert!(re::no_content(&c));
+    c.message.media.clear();
+    for t in ["[merge_forward消息]", "[todo消息]"] {
+        c.message.text = Some(t.into());
+        assert!(!re::no_content(&c), "{t}");
+    }
     for id in [
         "fx-10-schedule",
         "fx-08-long-analysis",

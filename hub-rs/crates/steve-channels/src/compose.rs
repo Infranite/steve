@@ -117,7 +117,19 @@ pub const SAFETY_RULES: &str = "【安全规则】（固定不变，下面的职
 pub const KNOWLEDGE_HEAD: &str = "相关知识（Steve 按这条消息检索到的，可能不全）：";
 pub const KNOWLEDGE_RULES: &str = "使用规则：“仅用于推理”的内容不要原样写进回复；“可转述结论”只说结论，不提来源和细节；“可以引用”的可以直接说。回复里不要写 [K1] 这样的编号。";
 
-/// The output instruction, last.
+/// The output instruction on a bot's account, last: as it was before the decisions on your own
+/// account ([`OUTPUT`]), so a bot still asks you when unsure and its approval stays
+/// `needs_approval` (promising, spending or deleting), not every “我去查一下”.
+pub const OUTPUT_BOT: &str = "只回答 JSON：{\"outcome\": \"reply\", \"text\": \"回复正文\", \"needs_approval\": false, \"why\": \"一句话说明为什么这样做\"}。\
+outcome 三选一：reply 直接回复这条消息，text 是发到这个聊天里的正文，用这个聊天的语言，像平时在聊天里说话一样简短；\
+ask_owner 这条消息要主人自己判断（拿不准对方想要什么、涉及承诺或私人关系、消息没说完），text 是你私下问主人的一句话，不会发到聊天里；\
+skip 闲聊、玩笑、寒暄、不需要回的消息，text 写一句原因；\
+need_context 需要先看更早的对话才能理解，text 写缺什么。\
+needs_approval 在回复里有对外承诺、花钱或删除时为 true。";
+
+/// The output instruction on your own account, last ([`crate::decide`]). `needs_commitment` is the
+/// safety rules' `needs_approval` widened to any promise made for you; either one makes the reply
+/// wait for you ([`crate::decide::settle`] folds them into one).
 pub const OUTPUT: &str = "只回答 JSON：{\"outcome\": \"reply\", \"reason\": \"原因代码\", \"addressee\": \"owner\", \"summary\": \"一句话：谁找主人、要什么\", \"text\": \"回复正文\", \"draft\": \"\", \"needs_commitment\": false, \"why\": \"一句话说明为什么这样做\"}。\
 outcome 四选一：reply 直接回复这条消息，text 是发到这个聊天里的正文，用这个聊天的语言，像平时在聊天里说话一样简短；\
 ask_owner 这条消息要主人自己来，reason 写为什么：commitment（要答应或安排事情：去查、去做、给时间或结果、花钱、删除、隐私、人际关系）、owner_fact（问的是只有主人知道的情况或判断）、substantive（发给主人的实质性长消息，比如分析、方案）；text 写要主人定的是什么，draft 写主人同意时可以直接发出去的回复（写不出就留空），都不会发到聊天里；\
@@ -125,7 +137,7 @@ skip 闲聊、玩笑、寒暄、不需要回的消息，text 写一句原因；\
 need_context 需要先看更早的对话才能理解，text 写缺什么。\
 addressee：这条消息是对谁说的，owner（对主人）或 others（对别人、对大家）。\
 summary：一句话说清谁找主人、要什么，不超过 80 字。\
-needs_commitment：回复里替主人答应了事情（去查、去做、给时间或结果、花钱、删除）时为 true。";
+needs_commitment：回复里替主人答应了事情（去查、去做、给时间或结果、花钱、删除）时为 true；它就是安全规则里的 needs_approval，两个写哪个都算。";
 
 /// On your own account, before the output format: when to answer, say nothing or ask
 /// ([`crate::decide`]; code checks the answer again, [`crate::decide::settle`]).
@@ -430,7 +442,7 @@ pub fn prompt(l: &Layers) -> String {
     }
     p.push_str(UNDERSTAND);
     p.push('\n');
-    p.push_str(OUTPUT);
+    p.push_str(if l.own { OUTPUT } else { OUTPUT_BOT });
     p
 }
 
@@ -1333,6 +1345,45 @@ mod outcome_tests {
         assert!(a.needs_commitment);
         // a question to you may come with only its draft
         assert!(parse_answer(r#"{"outcome":"ask_owner","text":"","draft":"好"}"#).is_some());
+    }
+
+    #[test]
+    fn either_approval_flag_holds_the_reply_on_any_account() {
+        use super::{Layers, answer_of};
+        for own in [true, false] {
+            let l = Layers {
+                own,
+                ..Layers::default()
+            };
+            for raw in [
+                r#"{"text":"我周五前修好","needs_commitment":true}"#,
+                r#"{"text":"我周五前修好","needs_approval":true}"#,
+            ] {
+                let g = answer_of(raw, "m", &l).unwrap().generation;
+                assert!(g.needs_approval && g.needs_commitment, "own {own}: {raw}");
+            }
+            let g = answer_of(r#"{"text":"我去查一下"}"#, "m", &l)
+                .unwrap()
+                .generation;
+            assert!(!g.needs_approval, "own {own}");
+        }
+    }
+
+    /// The bot's output format is the one before the decisions on your own account, word for word.
+    #[test]
+    fn a_bots_output_format_is_unchanged() {
+        assert_eq!(
+            super::OUTPUT_BOT,
+            "只回答 JSON：{\"outcome\": \"reply\", \"text\": \"回复正文\", \"needs_approval\": false, \"why\": \"一句话说明为什么这样做\"}。\
+outcome 三选一：reply 直接回复这条消息，text 是发到这个聊天里的正文，用这个聊天的语言，像平时在聊天里说话一样简短；\
+ask_owner 这条消息要主人自己判断（拿不准对方想要什么、涉及承诺或私人关系、消息没说完），text 是你私下问主人的一句话，不会发到聊天里；\
+skip 闲聊、玩笑、寒暄、不需要回的消息，text 写一句原因；\
+need_context 需要先看更早的对话才能理解，text 写缺什么。\
+needs_approval 在回复里有对外承诺、花钱或删除时为 true。"
+        );
+        // your own account's names the safety rules' flag
+        assert!(super::OUTPUT.contains("needs_approval"));
+        assert!(super::SAFETY_RULES.contains("needs_approval"));
     }
 
     #[test]

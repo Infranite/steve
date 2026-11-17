@@ -231,10 +231,9 @@ impl Replies {
         if let Some(a) = not_a_reply(ch, plan, &r)? {
             return Ok(Some(a));
         }
-        let approve = plan.act == Act::Draft
-            || plan.mode == Mode::Own
-            || r.generation.needs_approval
-            || r.generation.needs_commitment;
+        // needs_approval already carries needs_commitment (decide::settle)
+        let approve =
+            plan.act == Act::Draft || plan.mode == Mode::Own || r.generation.needs_approval;
         let auth = if plan.act == Act::Reply && plan.mode == Mode::Bot {
             Auth::Rule {
                 source: plan.message_id.clone(),

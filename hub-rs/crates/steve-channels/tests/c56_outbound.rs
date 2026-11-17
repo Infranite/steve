@@ -1177,6 +1177,72 @@ async fn trigger_words_only_from_you_only_where_set_and_marked() {
     assert_eq!(sent(&h).last().unwrap().1, "好的，周四见。");
 }
 
+/// A bot's account is as before the decisions on your own account: its prompt keeps the old output
+/// format (no reason codes, no `needs_commitment`, no rules of when to answer), and a reply that only
+/// says it will look into something goes out under a `reply` rule. Only the model's own approval
+/// flag holds it back — by either name, so nothing that promises slips out.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_bots_prompt_and_approval_are_as_before() {
+    let h = setup().await;
+    checks_pass(&h);
+    h.env
+        .gateway
+        .reply(r#"{"text": "我去查一下", "needs_approval": false, "why": "答复"}"#);
+    let r = push(
+        &h,
+        &h.oncall.clone(),
+        msg("C_OPS", "o1", "ulilei", "告警怎么又响了", true),
+    )
+    .await
+    .response
+    .unwrap();
+    assert_eq!(r.label, "已回复");
+    assert_eq!(sent(&h).len(), 1);
+    let p = h
+        .env
+        .gateway
+        .prompts
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|p| p.starts_with(H_SAFETY))
+        .cloned()
+        .expect("composed");
+    assert!(
+        p.trim_end().ends_with(steve_channels::compose::OUTPUT_BOT),
+        "{p}"
+    );
+    assert!(!p.contains("needs_commitment") && !p.contains(steve_channels::compose::H_DECIDE));
+
+    // the newer flag alone still waits for approval, and the card reads as a bot's
+    h.env
+        .gateway
+        .reply(r#"{"text": "我周五前给你修好", "needs_commitment": true, "why": "答应"}"#);
+    let r = push(
+        &h,
+        &h.oncall.clone(),
+        msg("C_OPS", "o2", "ulilei", "什么时候能修好", true),
+    )
+    .await
+    .response
+    .unwrap();
+    let out = r.out_message_id.expect("a draft");
+    assert_eq!(status(&h, &out), "draft");
+    assert_eq!(sent(&h).len(), 1);
+    let q = row(
+        &h,
+        "SELECT question FROM decisions WHERE id = ?",
+        &[&r.decision_id.unwrap()],
+    );
+    assert!(
+        !q[0]
+            .as_str()
+            .unwrap()
+            .contains(steve_channels::outbound::COMMITS),
+        "{q:?}"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_trigger_reply_that_needs_approval_is_a_draft() {
     let h = setup().await;
@@ -3660,6 +3726,41 @@ async fn a_tried_message_is_not_sent_again_past_its_window_by_any_path() {
 /// SEND_DELAY: a bot's draft you approve waits 3 s (it speaks as itself and can be recalled), your own
 /// account 10 s, and each account can set its own window (0–60 s, `null` back to the default). YOLO's
 /// approval came after its own cooling-off: out at once.
+/// How long a card about your own account stays open unanswered is the account's setting: none by
+/// default, 1 hour to 30 days, never on a bot's account.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_cards_lifetime_is_set_on_your_own_account_only() {
+    use steve_channels::channel_accounts::{self, ChannelPatch};
+    let h = setup().await;
+    let set = |conn: &str, v: Value| {
+        let p: ChannelPatch = serde_json::from_value(json!({ "card_ttl_h": v })).unwrap();
+        let now = h.ch.now();
+        h.env
+            .store()
+            .transaction(|tx| channel_accounts::patch(&h.ch, tx, &viewer(), conn, &p, now))
+    };
+    let ttl = |conn: &str| {
+        h.env
+            .store()
+            .reader(|c| channel_accounts::out(&h.ch, c, &viewer(), conn))
+            .unwrap()
+            .card_ttl_h
+    };
+    let me = h.me.clone();
+    assert_eq!(ttl(&me), None, "no lifetime unless you set one");
+    for bad in [0, steve_channels::decide::CARD_TTL_MAX_H + 1] {
+        assert!(set(&me, json!(bad)).is_err(), "{bad}");
+    }
+    set(&me, json!(24)).expect("a day");
+    assert_eq!(ttl(&me), Some(24));
+    set(&me, Value::Null).expect("never again");
+    assert_eq!(ttl(&me), None);
+    assert!(
+        set(&h.oncall.clone(), json!(24)).is_err(),
+        "a bot's account"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn the_undo_window_follows_the_account() {
     use steve_channels::channel_accounts::{self, ChannelPatch};

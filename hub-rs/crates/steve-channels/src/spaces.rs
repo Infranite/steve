@@ -403,6 +403,9 @@ pub struct ChannelSettings {
     /// The undo window after an approval, in seconds; `None`: the identity's default
     /// ([`crate::outbound::send_delay_ms`]).
     pub send_delay_s: Option<i64>,
+    /// On your own account: hours after which an unanswered card closes; `None`: never on time
+    /// ([`crate::outbound::Outbox`]'s sweep).
+    pub card_ttl_h: Option<i64>,
 }
 
 fn json_or(s: Option<String>, def: Value) -> Value {
@@ -416,7 +419,7 @@ pub fn channel_settings(
 ) -> ChannelResult<Option<ChannelSettings>> {
     Ok(c
         .query_row(
-            "SELECT connection_id, mode, duty, rules, trigger, revision, send_delay_s FROM channel_settings WHERE connection_id = ? AND workspace_id = ?",
+            "SELECT connection_id, mode, duty, rules, trigger, revision, send_delay_s, card_ttl_h FROM channel_settings WHERE connection_id = ? AND workspace_id = ?",
             params![conn, ws],
             |r| {
                 Ok(ChannelSettings {
@@ -427,6 +430,7 @@ pub fn channel_settings(
                     trigger: json_or(r.get(4)?, Value::Null),
                     revision: r.get(5)?,
                     send_delay_s: r.get(6)?,
+                    card_ttl_h: r.get(7)?,
                 })
             },
         )

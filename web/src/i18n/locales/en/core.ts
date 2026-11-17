@@ -96,7 +96,7 @@ export default {
     mem: { yes: "Saved", no: "Not saved, left in the original record" },
     party_merge: { merge: "Merged; you can split them again on the contact page", not_same: "Noted: not the same person" },
     release: { no: "Release not approved" },
-    chan_message: { yes: "Approved, will be sent shortly", no: "Not sent, this one is closed", rewrite: "Rewriting it; you'll see it again", send_draft: "Approved, will be sent shortly", instruct: "OK, drafting it your way; you'll see it first", verbatim: "Approved, your words go out shortly", draft_reply: "Drafted; it goes out only once you approve", to_item: "Making it an item", done: "OK, leaving this one", retry: "Sending it again", discard: "Not sent, this one is closed", sent: "Marked as sent" },
+    chan_message: { yes: "Approved, will be sent shortly", no: "Not sent, this one is closed", rewrite: "Rewriting it; you'll see it again", send_draft: "Checked first; sent shortly if nothing may leak, otherwise shown to you again", instruct: "OK, drafting it your way; you'll see it first", verbatim: "Approved, your words go out shortly", draft_reply: "Drafted; it goes out only once you approve", to_item: "Making it an item", done: "OK, leaving this one", retry: "Sending it again", discard: "Not sent, this one is closed", sent: "Marked as sent" },
     any: { pass: "Accepted, item done", rework: "Sent back for rework", yes: "Confirmed", no: "Handled", continue: "Let it continue", delivered: "Moved to review", look: "Paused, waiting for you", tosteve: "Handed to Steve", drop: "Dropped", deny: "Denied" },
     confirmYes: "Confirmed",
     confirmNo: "Noted: not right",

@@ -149,10 +149,31 @@ const CASES: &[(&str, &str, &str)] = &[
     ),
     (
         "decisions_chan_open",
-        "steve-channels outbound.rs expire_stale (088)",
-        "SELECT id, workspace_id, kind, subject_id FROM decisions INDEXED BY decisions_chan_open
-          WHERE subject_type = 'chan_message' AND status = 'open' AND kind IN ('ask', 'approve')
-            AND created < ? ORDER BY created LIMIT 100",
+        "steve-channels outbound.rs stale_cards (088)",
+        "SELECT d.id, d.workspace_id, d.kind, d.subject_id, m.space_id, d.created
+           FROM decisions d INDEXED BY decisions_chan_open
+           JOIN chan_messages m ON m.id = d.subject_id
+           JOIN spaces s ON s.id = m.space_id
+           JOIN channel_settings cs ON cs.connection_id = s.connection_id AND cs.workspace_id = d.workspace_id
+          WHERE d.subject_type = 'chan_message' AND d.status = 'open'
+            AND cs.mode = 'self' AND cs.card_ttl_h IS NOT NULL
+            AND d.created < ?1 - cs.card_ttl_h * 3600000
+            AND ((d.kind = 'ask' AND m.direction = 'in')
+              OR (d.kind = 'approve' AND m.direction = 'out' AND m.status = 'draft' AND m.reply_to IS NOT NULL
+                  AND m.on_behalf = 'none' AND m.persona_id IS NULL))
+            AND substr(d.question, 1, length(?2)) <> ?2
+            AND instr(d.question, ?3) = 0 AND instr(d.question, ?4) = 0
+            AND (d.created > ?5 OR (d.created = ?5 AND d.id > ?6))
+          ORDER BY d.created, d.id LIMIT ?7",
+    ),
+    (
+        "decisions_chan_answered",
+        "steve-channels outbound.rs drafts_chosen (088)",
+        "SELECT workspace_id, id, subject_id, draft, coalesce(json_extract(result, '$.by'), 'steve')
+           FROM decisions INDEXED BY decisions_chan_answered
+          WHERE subject_type = 'chan_message' AND kind = 'ask' AND status = 'resolved' AND resolved >= ?
+            AND json_extract(result, '$.choice') = ? AND json_extract(result, '$.composed') IS NULL
+          ORDER BY resolved LIMIT 20",
     ),
     (
         "decisions_chan_answered",
