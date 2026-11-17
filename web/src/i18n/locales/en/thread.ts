@@ -105,6 +105,7 @@ export default {
       failed: "Failed, needs you",
       accept: "Delivered, needs your review",
       release: "Needs your release approval",
+      prMerge: "PR needs your approval to merge",
       toolCall: "Needs your permission",
       approve: "Needs your approval",
       answer: "Needs your answer",

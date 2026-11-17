@@ -16,7 +16,7 @@ import { FLOW_SUBJECTS } from "@/auto/decision"
 import { hasOptionIds, WORDS_OPTION } from "@/decision-options"
 import { MODULE_CARDS } from "@/vault/decisions"
 import { isPeopleDecision } from "@/people/pending"
-import { acceptChoosesRelease, botName, decide, dismiss, FAIL_CHOICE, optionLabel, pendingCards, setSt, SNOOZE_KEYS, snooze, snoozeLabel, st, WT, type Item, type Wait } from "@/store"
+import { acceptChoosesRelease, botName, decide, dismiss, FAIL_CHOICE, optionLabel, pendingCards, PR_AWAITING_MERGE, setSt, SNOOZE_KEYS, snooze, snoozeLabel, st, WT, type Item, type Wait } from "@/store"
 import { permissionCommand } from "@/ui"
 import { YoloBadge } from "@/yolo/badges"
 import { AlarmClockIcon, BanIcon, BellOffIcon, EllipsisIcon } from "lucide-react"
@@ -33,7 +33,7 @@ const toolOptions = (w: Wait) => {
   const opts = w.options.map((o) => { const [id, name, kind] = o.split("|"); return { id, name, kind } })
   return { always: opts.find((o) => o.kind === "allow_always"), once: opts.find((o) => o.kind === "allow_once") }
 }
-const kindLabel = (w: Wait) => (w.subject === "tool_call" ? tr("core:wait.tool") : w.subject === "release" ? tr("core:wait.release") : WT[w.type])
+const kindLabel = (w: Wait) => (w.subject === "tool_call" ? tr("core:wait.tool") : w.subject === "release" ? tr("core:wait.release") : w.subject === PR_AWAITING_MERGE ? tr("core:wait.prMerge") : WT[w.type])
 export const busyOf = (w: Wait) => st.pendingActions.has("decision:" + w.decision)
 
 /** the card's labels in the UI language ("later" folds the card here; above the composer it reads Hide, next to the Hub's remind-me-later) */
@@ -130,7 +130,7 @@ export function mapDecision(i: Item, w: Wait, where: "inline" | "composer", show
     }
   }
   if (w.type === "approve") {
-    const rows = [opt("yes", tr(w.subject === "release" ? "core:card.approveRelease" : "core:card.approve"), { "data-approve": "" }),
+    const rows = [opt("yes", tr(w.subject === "release" ? "core:card.approveRelease" : w.subject === PR_AWAITING_MERGE ? "core:card.approveMerge" : "core:card.approve"), { "data-approve": "" }),
       ...(w.subject === "chan_message" && w.options.includes("rewrite") ? [opt("rewrite", tr("core:card.rewriteFirst"), { "data-rewrite": "" })] : [])]
     /* rejecting is the field: its button sends with or without a reason */
     return {

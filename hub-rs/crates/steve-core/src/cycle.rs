@@ -679,7 +679,13 @@ impl Tx<'_> {
             self.db()
                 .decision_resolve(d, json!({"superseded": why}), "expired", None)?;
         }
-        crate::lifecycle::supersede(self.db(), item_id, &["accept"], why)?;
+        /* and so does a pull request waiting for your yes to merge it: that result is not merged */
+        crate::lifecycle::supersede_where(
+            self.db(),
+            item_id,
+            |d| d.kind == "accept" || d.subject_type == crate::pull::PR_AWAITING_MERGE,
+            why,
+        )?;
         self.db()
             .timeline_add(item_id, "steve", "sys", &format!("收尾作废：{why}"), None)?;
         Ok(true)
@@ -755,7 +761,10 @@ impl Tx<'_> {
         crate::lifecycle::supersede_where(
             self.db(),
             item_id,
-            |d| matches!(d.kind.as_str(), "accept" | "ask" | "fail") && !unknown_effect_card(d),
+            |d| {
+                (matches!(d.kind.as_str(), "accept" | "ask" | "fail") && !unknown_effect_card(d))
+                    || d.subject_type == crate::pull::PR_AWAITING_MERGE
+            },
             reason,
         )?;
         for s in self.db().sessions_of_item(item_id)? {
@@ -945,11 +954,18 @@ impl Tx<'_> {
             if !c.accepted {
                 g.acceptance = true;
             }
-            /* a permission is part of a running turn; the acceptance card is the acceptance above */
+            /* a permission is part of a running turn; the acceptance card is the acceptance above; a
+             * pull request waiting for your yes to merge is the release above (merged on the host
+             * without it, the item still closes) */
             g.decision = self.db().decisions_of_item(&i.id)?.iter().any(|d| {
                 d.status == "open"
                     && d.created > c.at
-                    && (d.kind == "ask" || (d.kind == "approve" && d.subject_type != "tool_call"))
+                    && (d.kind == "ask"
+                        || (d.kind == "approve"
+                            && !matches!(
+                                d.subject_type.as_str(),
+                                "tool_call" | crate::pull::PR_AWAITING_MERGE
+                            )))
             });
             if c.frozen_revision != i.revision
                 || c.workflow_revision

@@ -1,6 +1,6 @@
 //! Statistics hooks: the structured points of an item's life that the
 //! statistics read instead of timeline text. Status changes are recorded by the store itself; the
-//! orchestrator only marks deliveries, fail cards and release outcomes, one call each.
+//! orchestrator only marks deliveries, fail cards, release outcomes and pull requests, one call each.
 //!
 //! A mark that cannot be written is logged and dropped: statistics never stop the work they describe.
 
@@ -70,6 +70,22 @@ impl Tx<'_> {
                 actor: "steve".into(),
                 r#ref: Some(decision.into()),
                 detail: json!({ "why": why }),
+                ..Default::default()
+            },
+        );
+    }
+
+    /// `pr` ([`crate::pull::MARK_PR`]): a pull request left to you to merge (`awaiting`) or merged
+    /// (`merged`), with the review its change had in `detail.review` (`graph`, `you`, `none`).
+    pub(crate) fn mark_pr(&self, ws: &str, item_id: &str, to: &str, detail: Value) {
+        self.stats_mark(
+            ws,
+            item_id,
+            NewMark {
+                kind: crate::pull::MARK_PR.into(),
+                to_v: Some(to.into()),
+                actor: "steve".into(),
+                detail,
                 ..Default::default()
             },
         );

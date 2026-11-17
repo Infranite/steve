@@ -1,0 +1,74 @@
+[
+    {
+        "autoMergeRequest": null,
+        "headRefOid": "da733e5818abccfdabc4f31394853558566291b5",
+        "isDraft": false,
+        "mergeStateStatus": "CLEAN",
+        "mergeable": "MERGEABLE",
+        "number": 229,
+        "state": "OPEN",
+        "statusCheckRollup": [
+            {
+                "__typename": "CheckRun",
+                "completedAt": "2026-11-16T20:31:17Z",
+                "conclusion": "SUCCESS",
+                "detailsUrl": "https://github.com/Infranite/steve/actions/runs/43950555847/job/133591579661",
+                "name": "scripts (ubuntu-22.04)",
+                "startedAt": "2026-11-16T20:30:57Z",
+                "status": "COMPLETED",
+                "workflowName": "CI"
+            },
+            {
+                "__typename": "CheckRun",
+                "completedAt": "2026-11-16T20:32:02Z",
+                "conclusion": "SUCCESS",
+                "detailsUrl": "https://github.com/Infranite/steve/actions/runs/43950555847/job/133591580045",
+                "name": "web (ubuntu-22.04)",
+                "startedAt": "2026-11-16T20:30:56Z",
+                "status": "COMPLETED",
+                "workflowName": "CI"
+            },
+            {
+                "__typename": "CheckRun",
+                "completedAt": "2026-11-16T20:31:04Z",
+                "conclusion": "SUCCESS",
+                "detailsUrl": "https://github.com/Infranite/steve/actions/runs/43950555847/job/133591580160",
+                "name": "changes",
+                "startedAt": "2026-11-16T20:30:57Z",
+                "status": "COMPLETED",
+                "workflowName": "CI"
+            },
+            {
+                "__typename": "CheckRun",
+                "completedAt": "2026-11-16T20:50:51Z",
+                "conclusion": "SUCCESS",
+                "detailsUrl": "https://github.com/Infranite/steve/actions/runs/43950555847/job/133591678095",
+                "name": "rust (ubuntu-22.04)",
+                "startedAt": "2026-11-16T20:31:07Z",
+                "status": "COMPLETED",
+                "workflowName": "CI"
+            },
+            {
+                "__typename": "CheckRun",
+                "completedAt": "2026-11-16T20:34:50Z",
+                "conclusion": "SUCCESS",
+                "detailsUrl": "https://github.com/Infranite/steve/actions/runs/43950555847/job/133591678280",
+                "name": "apple",
+                "startedAt": "2026-11-16T20:31:07Z",
+                "status": "COMPLETED",
+                "workflowName": "CI"
+            },
+            {
+                "__typename": "CheckRun",
+                "completedAt": "2026-11-16T20:50:57Z",
+                "conclusion": "SUCCESS",
+                "detailsUrl": "https://github.com/Infranite/steve/actions/runs/43950555847/job/133603530255",
+                "name": "CI gate",
+                "startedAt": "2026-11-16T20:50:53Z",
+                "status": "COMPLETED",
+                "workflowName": "CI"
+            }
+        ],
+        "url": "https://github.com/Infranite/steve/pull/229"
+    }
+]

@@ -9,6 +9,7 @@ export default {
   wait: {
     tool: "Permission",
     release: "Release",
+    prMerge: "PR awaiting merge",
     allowRun: "Allow running",
     other: "Pending",
     line: "{{kind}}: {{q}}",
@@ -540,6 +541,7 @@ export default {
     rewriteFirst: "Rewrite, then show me",
     replyPlaceholder: "Write the reply; it goes out only once you approve…",
     approveRelease: "Approve release",
+    approveMerge: "Approve merge",
     approve: "Approve",
     notNeeded: "Not needed",
     start: "Start",
