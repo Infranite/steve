@@ -587,8 +587,14 @@ impl Engine {
         };
         let has = |o: &str| d.options.iter().any(|x| x == o);
         let (stage, send) = match d.kind.as_str() {
+            // Disclosure and permission recovery do not replace the owner's review of an edit.
+            // This is persisted on the card, so a fresh Engine makes the same decision.
+            "approve" if d.result["recovery_review"] == true => (OutboundStage::HumanReview, None),
             "approve" if disclosure == Disclosure::Leak => (OutboundStage::LeakDraft, None),
             "approve" => (OutboundStage::Draft, has("yes").then(|| "yes".to_string())),
+            "fail" if d.result["recovery"]["requires_user_action"] == true => {
+                (OutboundStage::Blocked, None)
+            }
             "fail" if status == "failed" && has("retry") => {
                 (OutboundStage::SendFailed, Some("retry".to_string()))
             }
@@ -771,5 +777,138 @@ mod checkout_tests {
         g(&wt, &["checkout", "-q", "--detach"]);
         assert_eq!(local_checkout(&wt).unwrap().head, None);
         assert_eq!(local_checkout(&t.path().join("none")), None);
+    }
+    #[test]
+    fn channel_recovery_metadata_keeps_retry_a_human_action() {
+        let kit = crate::testkit::Kit::new();
+        kit.db().store().with_conn(|c| {
+            c.execute_batch("INSERT INTO spaces (id,workspace_id,system_id,kind,external_id,name,created,updated) VALUES ('refused-space','default','fixture','group','fixture','fixture',1,1);
+                INSERT INTO chan_messages (id,workspace_id,space_id,direction,text,status,created) VALUES ('refused-message','default','refused-space','out','full draft','failed',1);")?;
+            Ok(())
+        }).unwrap();
+        let mut d = kit
+            .db()
+            .store()
+            .transaction(|tx| {
+                steve_store::base::decisions::open(
+                    tx,
+                    &steve_store::NewDecision {
+                        workspace_id: "default".into(),
+                        kind: "fail".into(),
+                        subject_type: "chan_message".into(),
+                        subject_id: "refused-message".into(),
+                        item_id: None,
+                        session_id: None,
+                        question: "channel target refusal".into(),
+                        draft: Some("full draft".into()),
+                        options: Some(vec!["retry".into(), "rewrite".into(), "discard".into()]),
+                        requested_by: "steve".into(),
+                    },
+                )
+            })
+            .unwrap();
+        let yolo = super::super::Yolo::with_clock(
+            kit.db().clone(),
+            None,
+            kit.home(),
+            std::sync::Arc::new(steve_modules::FakeClock::new(1_000_000)),
+        );
+        let engine = Engine::new(kit.core.clone(), yolo);
+        d.result = json!({"recovery":{"kind":"channel_refusal","requires_user_action":true}});
+        let Subject::Chan(refused) = engine.chan(&d).unwrap() else {
+            panic!()
+        };
+        assert_eq!(refused.stage, OutboundStage::Blocked);
+        assert_eq!(refused.send_option, None);
+        d.result = Value::Null;
+        let Subject::Chan(ordinary) = engine.chan(&d).unwrap() else {
+            panic!()
+        };
+        assert_eq!(ordinary.stage, OutboundStage::SendFailed);
+        assert_eq!(ordinary.send_option.as_deref(), Some("retry"));
+    }
+}
+
+#[cfg(test)]
+mod recovery_review_tests {
+    use super::*;
+
+    /// Regression for the independent review: these are the actual persisted fields of a
+    /// rewritten recovery card, with a passed disclosure check in an internal bot group.
+    #[test]
+    fn recovery_review_must_remain_a_human_review() {
+        let kit = crate::testkit::Kit::new();
+        kit.db().store().with_conn(|c| {
+            c.execute_batch("INSERT INTO spaces (id,workspace_id,system_id,kind,external_id,name,created,updated) VALUES ('review-space','default','fixture','group','fixture','fixture',1,1);
+                INSERT INTO chan_messages (id,workspace_id,space_id,direction,text,status,created) VALUES ('review-message','default','review-space','out','edited body','draft',1);
+                INSERT INTO reply_basis (id,workspace_id,message_id,entries,verdict,created) VALUES ('review-basis','default','review-message','[]','rewritten',1);")?;
+            Ok(())
+        }).unwrap();
+        let d = kit
+            .db()
+            .store()
+            .transaction(|tx| -> ApiResult<Decision> {
+                let d = steve_store::base::decisions::open(
+                    tx,
+                    &steve_store::NewDecision {
+                        workspace_id: "default".into(),
+                        kind: "approve".into(),
+                        subject_type: "chan_message".into(),
+                        subject_id: "review-message".into(),
+                        item_id: None,
+                        session_id: None,
+                        question: "edited for review".into(),
+                        draft: Some("edited body".into()),
+                        options: Some(vec!["yes".into(), "no".into()]),
+                        requested_by: "steve".into(),
+                    },
+                )?;
+                tx.execute(
+                    "UPDATE decisions SET result=? WHERE id=?",
+                    params![json!({"recovery_review":true}).to_string(), d.id],
+                )?;
+                Ok(steve_store::base::decisions::get(tx, &d.id)?.unwrap())
+            })
+            .unwrap();
+        // A new core and store connection, rather than an in-memory flag surviving the rewrite.
+        let core = kit.reopened();
+        let yolo = super::super::Yolo::with_clock(
+            core.store().clone(),
+            None,
+            kit.home(),
+            std::sync::Arc::new(steve_modules::FakeClock::new(1_000_000)),
+        );
+        let engine = Engine::new(core, yolo);
+        let subject = engine.chan(&d).unwrap();
+        let mut facts = Facts {
+            decision_id: d.id.clone(),
+            kind: d.kind.clone(),
+            subject_type: d.subject_type.clone(),
+            question: d.question.clone(),
+            draft: d.draft.clone(),
+            options: d.options.clone(),
+            in_scope: true,
+            present: false,
+            subject,
+        };
+        let env = judge::Env {
+            steve_home: kit.home().into(),
+            home: kit.home().into(),
+            tmp: judge::Env::tmp_dirs(),
+        };
+        let actual = judge::judge(&facts, &Policy::default(), &env);
+        eprintln!("recovery review verdict: {actual:?}");
+        assert!(
+            !actual.is_auto(),
+            "a passed disclosure check is not human approval: {actual:?}"
+        );
+
+        let mut ordinary = d;
+        ordinary.result = Value::Null;
+        facts.subject = engine.chan(&ordinary).unwrap();
+        assert!(
+            judge::judge(&facts, &Policy::default(), &env).is_auto(),
+            "ordinary authorized internal bot drafts retain their automatic approval"
+        );
     }
 }

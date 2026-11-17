@@ -140,6 +140,7 @@ pub mod pipeline;
 pub mod presence;
 pub mod queries;
 pub mod reactions;
+pub mod recovery;
 pub mod replies;
 pub mod reply_eval;
 pub mod respond;

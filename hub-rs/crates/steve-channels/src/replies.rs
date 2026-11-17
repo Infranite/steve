@@ -123,7 +123,15 @@ impl Replies {
     async fn reply(&self, ch: &Channels, plan: &Plan) -> ChannelResult<Option<Acted>> {
         // writes are refused there for now: no reply is written that could not go out
         let now = ch.now();
-        if let Some(why) = ch
+        if !ch.store().reader(|c| {
+            write_blocks::explicit_request(
+                c,
+                &plan.ws,
+                &plan.connection_id,
+                &plan.space_id,
+                &plan.message_id,
+            )
+        })? && let Some(why) = ch
             .store()
             .reader(|c| write_blocks::active(c, &plan.connection_id, &plan.space_id, now))?
         {

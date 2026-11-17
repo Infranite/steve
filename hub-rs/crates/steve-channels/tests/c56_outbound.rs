@@ -51,6 +51,9 @@ use steve_store::base::{self, Level, ObjRef, Viewer, Visibility};
 use steve_store::{NewDecision, uid};
 use tempfile::TempDir;
 
+#[path = "../examples/support/recovery_yolo.rs"]
+mod recovery_yolo;
+
 const REPLY: &str =
     r#"{"text": "先看部署日志，再按回滚手册处理。", "needs_approval": false, "why": "按手册"}"#;
 const PASS: &str = r#"{"verdict": "pass", "spans": []}"#;
@@ -254,11 +257,14 @@ async fn setup_yolo(
     let link = OutLink::new();
     let reg_disclosure = disclosure.clone();
     let reg_link = link.clone();
+    let late = LateChannels::new();
+    let recovery_late = late.clone();
     let env = TestEnv::new(|r| {
         flow_setup.register(r);
         connections::register(r);
         r.outbound_check(Box::new(reg_disclosure.clone()));
         r.decision(SUBJECT_MESSAGE, reg_link.handler());
+        steve_channels::recovery::register(r, recovery_late);
     });
     disclosure.bind(env.store().clone(), env.gateway.clone());
     link.bind_clock(env.clock.clone());
@@ -293,7 +299,6 @@ async fn setup_yolo(
     }
     let outbox = Arc::new(outbox);
     let replies = Arc::new(Replies::new().outbound(outbox.clone()));
-    let late = LateChannels::new();
     let flow = flow_setup
         .connections(conns.clone())
         .action(Arc::new(ReplyAs::new(replies.clone(), late.clone())))
@@ -590,7 +595,7 @@ async fn a_failed_send_opens_retry_or_discard() {
             .starts_with("发到「运维群」的消息没有发出去："),
         "{q:?}"
     );
-    assert_eq!(q[2], json!(r#"["retry","discard"]"#));
+    assert_eq!(q[2], json!(r#"["retry","rewrite","discard"]"#));
     *h.fake.fail_send.lock().unwrap() = None;
     decide(&h, &d, "retry", "").expect("retry");
     assert_eq!(h.outbox.send_due(&h.ch).await, 1);
@@ -2435,6 +2440,20 @@ async fn attention_quiet_and_blocked_against_trigger_words() {
         1
     );
     let n = sent(&h).len();
+    h.env
+        .store()
+        .transaction(|tx| {
+            steve_channels::write_blocks::record(
+                tx,
+                WS,
+                &me,
+                &sp,
+                steve_modules::accounts::connections::BlockScope::Target,
+                "previous target refusal",
+                h.ch.now(),
+            )
+        })
+        .unwrap();
     let i = push(&h, &me, msg("C_OPS", "o3", "upx", "/bot 回复收到", false)).await;
     assert!(
         matches!(i.response.expect("r").by, By::Trigger { .. }),
@@ -5259,4 +5278,1095 @@ async fn notification_thirty_day_source_sweep_cannot_leave_feed_body_or_title_co
         .unwrap();
     assert!(e.purged && e.title.is_empty() && e.excerpt.is_empty() && e.body.is_none());
     nothing_sent(&h);
+}
+
+// ---------------------------------------------------------------- ST-162: recoverable refusals
+
+fn review_engine(h: &H) -> steve_core::yolo::Engine {
+    recovery_yolo::engine(&h.env.modules, h.env.dir.path(), h.env.clock.clone())
+}
+
+fn cold_outbox(h: &H) -> Outbox {
+    let link = OutLink::new();
+    link.bind_clock(h.env.clock.clone());
+    Outbox::new(link)
+}
+
+async fn review_refusal(h: &H, managed: bool) -> (String, String) {
+    if !managed {
+        *h.fake.block_target_send.lock().unwrap() = Some("ext_ws target_forbidden (-32016)".into());
+        return refused(h, "review-refused", "待恢复的完整正文\n第二行").await;
+    }
+    checks_pass(h);
+    h.env.gateway.script(H_SAFETY, REPLY);
+    let r = push(
+        h,
+        &h.me,
+        msg("C_DEV", "review-local", "ulilei", "请回答", true),
+    )
+    .await
+    .response
+    .unwrap();
+    let m = r.out_message_id.unwrap();
+    decide(
+        h,
+        &r.decision_id.unwrap(),
+        "yes",
+        "待恢复的完整正文\n第二行",
+    )
+    .unwrap();
+    exec(
+        h,
+        &format!(
+            "UPDATE connections SET caps='[\"msg.receive\"]' WHERE id='{}'",
+            h.me
+        ),
+    );
+    h.env.clock.advance(11_000);
+    h.outbox.send_due(&h.ch).await;
+    assert_eq!(status(h, &m), "failed");
+    (m.clone(), decision_of(h, &m))
+}
+
+fn restore_review_permission(h: &H, managed: bool, message: &str) {
+    if managed {
+        let p = steve_channels::recovery::propose(&h.ch, &caller(WS, ME), message).unwrap();
+        steve_modules::changes::apply(&h.env.modules, &caller(WS, ME), &p.id)
+            .unwrap()
+            .unwrap();
+    } else {
+        *h.fake.block_target_send.lock().unwrap() = None;
+    }
+    assert_eq!(
+        status(h, message),
+        "failed",
+        "restoring authorization is not a send"
+    );
+}
+
+async fn wait_review(h: &H, original: &str, previous: &str) -> (String, String) {
+    for _ in 0..200 {
+        let old = h
+            .env
+            .store()
+            .reader(|c| base::decisions::get(c, previous))
+            .unwrap()
+            .unwrap();
+        let message = old.result["draft_message"].as_str().unwrap_or(original);
+        let decision = decision_of(h, message);
+        if decision != previous {
+            let d = h
+                .env
+                .store()
+                .reader(|c| base::decisions::get(c, &decision))
+                .unwrap()
+                .unwrap();
+            assert_eq!(d.kind, "approve");
+            assert_eq!(d.status, "open");
+            assert_eq!(d.result["recovery_review"], true);
+            return (message.into(), decision);
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    panic!("rewrite did not reopen a human review");
+}
+
+/// Real Engine -> actual module handler -> Outbox -> adapter: disclosure pass and restored
+/// authorization cannot approve a recovery edit. Both ordinary and full YOLO keep this boundary.
+#[tokio::test(flavor = "multi_thread")]
+async fn recovery_review_survives_edits_failed_rewrites_cooling_and_cold_restart() {
+    for managed in [false, true] {
+        for mode in ["manual", "model", "model_failure", "missing_basis"] {
+            for full in [false, true] {
+                let h = setup_yolo(None, None, true).await;
+                let (old, fail) = review_refusal(&h, managed).await;
+                let engine = review_engine(&h);
+                recovery_yolo::enable(&engine, full);
+                assert_eq!(engine.consider(&fail).unwrap().unwrap().outcome, "declined");
+                restore_review_permission(&h, managed, &old);
+                let basis = row(&h, "SELECT basis_id FROM chan_messages WHERE id=?", &[&old])[0]
+                    .as_str()
+                    .unwrap()
+                    .to_string();
+                h.env
+                    .gateway
+                    .script(REWRITE_HEAD, r#"{"text":"模型修改后的正文"}"#);
+                if mode == "model_failure" {
+                    h.env.gateway.unscript(REWRITE_HEAD);
+                    h.env
+                        .gateway
+                        .script_fail(REWRITE_HEAD, "model is unavailable");
+                }
+                if mode == "missing_basis" {
+                    exec(
+                        &h,
+                        &format!("UPDATE chan_messages SET basis_id=NULL WHERE id='{old}'"),
+                    );
+                }
+                let edited = if mode == "manual" {
+                    "人工修改后的正文\n必须再次审阅"
+                } else {
+                    ""
+                };
+                decide(&h, &fail, "rewrite", edited).unwrap();
+                assert!(decide(&h, &fail, "rewrite", edited).is_err());
+                // The rewrite request itself is recovered by a new queue, not a retained task.
+                let queue = cold_outbox(&h);
+                queue.send_due(&h.ch).await;
+                let (message, approve) = wait_review(&h, &old, &fail).await;
+                if mode == "missing_basis" {
+                    assert_eq!(message, old, "exception path reopens unchanged original");
+                    exec(
+                        &h,
+                        &format!(
+                            "UPDATE chan_messages SET basis_id='{basis}' WHERE id='{message}'"
+                        ),
+                    );
+                } else {
+                    assert_ne!(message, old, "changed send gets a new provider UUID");
+                    assert_eq!(status(&h, &old), "discarded");
+                }
+                let card = h
+                    .env
+                    .store()
+                    .reader(|c| base::decisions::get(c, &approve))
+                    .unwrap()
+                    .unwrap();
+                let expected = match mode {
+                    "manual" => edited,
+                    "model" => "模型修改后的正文",
+                    _ => "待恢复的完整正文\n第二行",
+                };
+                assert_eq!(card.draft, expected);
+                assert_eq!(
+                    h.env
+                        .gateway
+                        .prompts
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .filter(|p| p.starts_with(REWRITE_HEAD))
+                        .count(),
+                    usize::from(mode == "model" || mode == "model_failure")
+                );
+                let attempts = h.fake.send_calls.lock().unwrap().len();
+                assert_eq!(
+                    engine.consider(&approve).unwrap().unwrap().outcome,
+                    "declined"
+                );
+                assert!(
+                    steve_modules::decisions::dispatch(
+                        &h.env.modules,
+                        &caller(WS, "yolo"),
+                        &approve,
+                        "yes",
+                        ""
+                    )
+                    .unwrap()
+                    .is_err(),
+                    "execution boundary rejects an automatic approval independently of facts"
+                );
+                h.env.clock.advance(3_600_000);
+                engine.tick();
+                queue.send_due(&h.ch).await;
+                drop(engine);
+                let restarted = review_engine(&h);
+                assert!(restarted.yolo().effective(WS, None).unwrap().on);
+                restarted.tick();
+                h.env.clock.advance(3_600_000);
+                restarted.tick();
+                let queue = cold_outbox(&h);
+                queue.send_due(&h.ch).await;
+                assert_eq!(status(&h, &message), "draft", "{managed}/{mode}/{full}");
+                assert_eq!(h.fake.send_calls.lock().unwrap().len(), attempts);
+                nothing_sent(&h);
+                let yes = decide(&h, &approve, "yes", "").unwrap();
+                assert_eq!(yes.result["recovery_review"], true);
+                assert!(yes.result.get("decided_by").is_none());
+                assert!(decide(&h, &approve, "yes", "").is_err());
+                h.env.clock.advance(11_000);
+                tokio::join!(queue.send_due(&h.ch), h.outbox.send_due(&h.ch));
+                restarted.tick();
+                queue.send_due(&h.ch).await;
+                assert_eq!(status(&h, &message), "sent");
+                assert_eq!(sent(&h).len(), 1);
+                assert_eq!(h.fake.send_calls.lock().unwrap().len(), attempts + 1);
+                assert_eq!(sent(&h)[0].2.as_deref(), Some(message.as_str()));
+            }
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn recovery_review_undo_and_a_second_rewrite_do_not_remove_the_human_gate() {
+    for managed in [false, true] {
+        let h = setup_yolo(None, None, true).await;
+        let (old, fail) = review_refusal(&h, managed).await;
+        let engine = review_engine(&h);
+        recovery_yolo::enable(&engine, false);
+        restore_review_permission(&h, managed, &old);
+        // A model failure reopens a review that still offers another rewrite.
+        h.env.gateway.script_fail(REWRITE_HEAD, "unavailable");
+        let (message, first) = recovered_draft(&h, &old, &fail, "").await;
+        h.env.gateway.unscript(REWRITE_HEAD);
+        h.env
+            .gateway
+            .script(REWRITE_HEAD, r#"{"text":"第二次修改后的正文"}"#);
+        decide(&h, &first, "rewrite", "").unwrap();
+        cold_outbox(&h).send_due(&h.ch).await;
+        let (same, review) = wait_review(&h, &message, &first).await;
+        assert_eq!(same, message, "unattempted review keeps its new UUID");
+        let yes = decide(&h, &review, "yes", "").unwrap();
+        assert_eq!(yes.result["recovery_review"], true);
+        // Exercise the real module undo; the old test helper did not clear result as production does.
+        steve_modules::decisions::undo(&h.env.modules, &review, ME, |_| true)
+            .unwrap()
+            .unwrap();
+        let reopened = h
+            .env
+            .store()
+            .reader(|c| base::decisions::get(c, &review))
+            .unwrap()
+            .unwrap();
+        assert_eq!(reopened.result, json!({"recovery_review":true}));
+        let restarted = review_engine(&h);
+        assert_eq!(
+            restarted.consider(&review).unwrap().unwrap().outcome,
+            "declined"
+        );
+        h.env.clock.advance(3_600_000);
+        restarted.tick();
+        cold_outbox(&h).send_due(&h.ch).await;
+        assert_eq!(status(&h, &message), "draft");
+        nothing_sent(&h);
+        assert!(
+            steve_modules::decisions::dispatch(
+                &h.env.modules,
+                &caller(WS, "yolo"),
+                &review,
+                "yes",
+                ""
+            )
+            .unwrap()
+            .is_err()
+        );
+        decide(&h, &review, "yes", "").unwrap();
+        h.env.clock.advance(11_000);
+        h.outbox.send_due(&h.ch).await;
+        assert_eq!(sent(&h).len(), 1);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn recovery_review_fences_legacy_auto_approval_and_preserves_send_time_rechecks() {
+    let h = setup_yolo(None, None, true).await;
+    let (old, fail) = review_refusal(&h, false).await;
+    restore_review_permission(&h, false, &old);
+    let (message, review) = recovered_draft(&h, &old, &fail, "仍需人工批准的正文").await;
+    // Simulate a pending approval persisted by a pre-fix engine; verify must fence it too.
+    let result = json!({"choice":"yes","recovery_review":true,"decided_by":"yolo",
+        "hash":steve_channels::outbound::text_hash("仍需人工批准的正文"),"send_at":h.ch.now()});
+    exec(
+        &h,
+        &format!(
+            "UPDATE decisions SET status='resolved',result='{}' WHERE id='{review}'; UPDATE chan_messages SET status='pending',sent=NULL WHERE id='{message}'",
+            result
+        ),
+    );
+    cold_outbox(&h).send_due(&h.ch).await;
+    assert_eq!(status(&h, &message), "draft");
+    let reopened = decision_of(&h, &message);
+    assert_ne!(reopened, review);
+    assert_eq!(
+        h.env
+            .store()
+            .reader(|c| base::decisions::get(c, &reopened))
+            .unwrap()
+            .unwrap()
+            .result["recovery_review"],
+        true
+    );
+    nothing_sent(&h);
+    let engine = review_engine(&h);
+    recovery_yolo::enable(&engine, false);
+    assert_eq!(
+        engine.consider(&reopened).unwrap().unwrap().outcome,
+        "declined"
+    );
+    // Human approval still does not waive the final disclosure check.
+    h.env.gateway.unscript(CHECK_HEAD);
+    h.env.gateway.script(
+        CHECK_HEAD,
+        r#"{"verdict":"leak","spans":[{"text":"正文","reason":"needs review"}]}"#,
+    );
+    decide(&h, &reopened, "yes", "").unwrap();
+    h.env.clock.advance(11_000);
+    h.outbox.send_due(&h.ch).await;
+    let disclosure = decision_of(&h, &message);
+    assert_ne!(disclosure, reopened);
+    assert_eq!(status(&h, &message), "draft");
+    assert_eq!(
+        engine.consider(&disclosure).unwrap().unwrap().outcome,
+        "declined"
+    );
+    nothing_sent(&h);
+    h.env.gateway.unscript(CHECK_HEAD);
+    checks_pass(&h);
+    decide(&h, &disclosure, "yes", "").unwrap();
+    h.env.clock.advance(11_000);
+    h.outbox.send_due(&h.ch).await;
+    assert_eq!(status(&h, &message), "sent");
+    assert_eq!(sent(&h).len(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn recovery_review_fix_keeps_ordinary_yolo_bot_approval_and_send_deduplication() {
+    let h = setup_yolo(None, None, true).await;
+    checks_pass(&h);
+    let plan = recorded(
+        &h,
+        &h.oncall,
+        "C_OPS",
+        "ordinary-review",
+        "ulilei",
+        "请回复",
+    )
+    .await;
+    let mut request = out(&plan, "普通已授权的机器人回复", rule(&plan), None);
+    request.approve = true;
+    let Delivered::Drafted {
+        message_id,
+        decision_id,
+    } = h.outbox.deliver(&h.ch, &request).await.unwrap()
+    else {
+        panic!("expected draft")
+    };
+    let engine = review_engine(&h);
+    recovery_yolo::enable(&engine, false);
+    assert_eq!(
+        engine.consider(&decision_id).unwrap().unwrap().outcome,
+        "scheduled"
+    );
+    h.env.clock.advance(61_000);
+    let restarted = review_engine(&h);
+    restarted.tick();
+    let card = h
+        .env
+        .store()
+        .reader(|c| base::decisions::get(c, &decision_id))
+        .unwrap()
+        .unwrap();
+    assert_eq!(card.result["choice"], "yes");
+    assert_eq!(card.result["decided_by"], "yolo");
+    assert_ne!(card.result["recovery_review"], true);
+    tokio::join!(h.outbox.send_due(&h.ch), h.outbox.send_due(&h.ch));
+    restarted.tick();
+    h.outbox.send_due(&h.ch).await;
+    assert_eq!(status(&h, &message_id), "sent");
+    assert_eq!(sent(&h).len(), 1);
+    assert_eq!(h.fake.send_calls.lock().unwrap().len(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn recovery_review_exception_then_another_edit_uses_a_fresh_provider_uuid() {
+    let h = setup_yolo(None, None, true).await;
+    let (old, fail) = review_refusal(&h, false).await;
+    restore_review_permission(&h, false, &old);
+    let basis = row(&h, "SELECT basis_id FROM chan_messages WHERE id=?", &[&old])[0]
+        .as_str()
+        .unwrap()
+        .to_string();
+    exec(
+        &h,
+        &format!("UPDATE chan_messages SET basis_id=NULL WHERE id='{old}'"),
+    );
+    decide(&h, &fail, "rewrite", "").unwrap();
+    cold_outbox(&h).send_due(&h.ch).await;
+    let (original, reopened) = wait_review(&h, &old, &fail).await;
+    assert_eq!(original, old);
+    exec(
+        &h,
+        &format!("UPDATE chan_messages SET basis_id='{basis}' WHERE id='{old}'"),
+    );
+    h.env
+        .gateway
+        .script(REWRITE_HEAD, r#"{"text":"异常恢复后重新修改的正文"}"#);
+    decide(&h, &reopened, "rewrite", "").unwrap();
+    cold_outbox(&h).send_due(&h.ch).await;
+    let (next, review) = wait_review(&h, &old, &reopened).await;
+    assert_ne!(
+        next, old,
+        "an earlier provider attempt cannot change payload under its UUID"
+    );
+    assert_eq!(status(&h, &old), "discarded");
+    let engine = review_engine(&h);
+    recovery_yolo::enable(&engine, false);
+    assert_eq!(
+        engine.consider(&review).unwrap().unwrap().outcome,
+        "declined"
+    );
+    nothing_sent(&h);
+    decide(&h, &review, "yes", "").unwrap();
+    h.env.clock.advance(11_000);
+    h.outbox.send_due(&h.ch).await;
+    assert_eq!(sent(&h).len(), 1);
+    assert_eq!(sent(&h)[0].2.as_deref(), Some(next.as_str()));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn recovery_review_undoing_discard_keeps_the_refusal_human_action_requirement() {
+    for managed in [false, true] {
+        let h = setup_yolo(None, None, true).await;
+        let (old, fail) = review_refusal(&h, managed).await;
+        decide(&h, &fail, "discard", "").unwrap();
+        steve_modules::decisions::undo(&h.env.modules, &fail, ME, |_| true)
+            .unwrap()
+            .unwrap();
+        assert_eq!(status(&h, &old), "failed");
+        let reopened = h
+            .env
+            .store()
+            .reader(|c| base::decisions::get(c, &fail))
+            .unwrap()
+            .unwrap();
+        assert_eq!(reopened.result["recovery"]["requires_user_action"], true);
+        assert!(reopened.result.get("choice").is_none());
+        let engine = review_engine(&h);
+        recovery_yolo::enable(&engine, false);
+        assert_eq!(engine.consider(&fail).unwrap().unwrap().outcome, "declined");
+        assert!(
+            steve_modules::decisions::dispatch(
+                &h.env.modules,
+                &caller(WS, "yolo"),
+                &fail,
+                "retry",
+                ""
+            )
+            .unwrap()
+            .is_err()
+        );
+        h.env.clock.advance(3_600_000);
+        cold_outbox(&h).send_due(&h.ch).await;
+        nothing_sent(&h);
+    }
+}
+
+async fn refused(h: &H, id: &str, text: &str) -> (String, String) {
+    checks_pass(h);
+    let plan = recorded(h, &h.oncall, "C_OPS", id, "ulilei", "请求回复").await;
+    let out = h
+        .outbox
+        .deliver(
+            &h.ch,
+            &OutRequest {
+                target: OutTarget::reply(&plan),
+                text: text.into(),
+                purpose: Purpose::Reply,
+                approve: false,
+                generation: None,
+                auth: Auth::Rule {
+                    source: plan.message_id,
+                    act: Act::Reply,
+                },
+            },
+        )
+        .await
+        .unwrap();
+    let Delivered::Failed {
+        message_id,
+        decision_id,
+    } = out
+    else {
+        panic!("{out:?}")
+    };
+    (message_id, decision_id)
+}
+
+async fn recovered_draft(h: &H, old: &str, decision: &str, edit: &str) -> (String, String) {
+    decide(h, decision, "rewrite", edit).unwrap();
+    assert!(
+        decide(h, decision, "rewrite", edit).is_err(),
+        "duplicate answer cannot create a second rewrite"
+    );
+    h.outbox.send_due(&h.ch).await;
+    for _ in 0..200 {
+        let d = h
+            .env
+            .store()
+            .reader(|c| base::decisions::get(c, decision))
+            .unwrap()
+            .unwrap();
+        if let Some(next) = d.result["draft_message"].as_str() {
+            assert_eq!(status(h, old), "discarded");
+            return (next.into(), decision_of(h, next));
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    panic!("rewrite did not produce a review card");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn recovery_target_refusal_keeps_full_body_retries_visibly_and_dedupes() {
+    let h = setup().await;
+    *h.fake.block_target_send.lock().unwrap() = Some("ext_ws target_forbidden (-32016)".into());
+    let text = "需要完整审阅的正文。\n".repeat(220);
+    let (m, d) = refused(&h, "blocked-long", &text).await;
+    let card = h
+        .env
+        .store()
+        .reader(|c| base::decisions::get(c, &d))
+        .unwrap()
+        .unwrap();
+    assert_eq!(card.draft, text.trim());
+    assert_eq!(card.options, steve_channels::outbound::BLOCKED_OPTIONS);
+    assert_eq!(card.result["recovery"]["scope"], "target");
+    assert_eq!(card.result["recovery"]["code"], "target_forbidden");
+    assert!(card.question.contains("内部具体拒绝规则尚未核实"));
+    assert!(!card.question.contains("泄露"));
+    assert!(
+        steve_channels::recovery::propose(&h.ch, &caller(WS, ME), &m).is_err(),
+        "no fake external authorization"
+    );
+    assert!(decide(&h, &d, "retry", "偷偷替换正文").is_err());
+    decide(&h, &d, "retry", "").unwrap();
+    h.outbox.send_due(&h.ch).await;
+    assert_eq!(status(&h, &m), "failed");
+    let again = decision_of(&h, &m);
+    assert_ne!(
+        again, d,
+        "manual retry failure remains visible during the 24h window"
+    );
+    assert!(decide(&h, &d, "retry", "").is_err());
+    *h.fake.block_target_send.lock().unwrap() = None;
+    decide(&h, &again, "retry", "").unwrap();
+    tokio::join!(h.outbox.send_due(&h.ch), h.outbox.send_due(&h.ch));
+    assert_eq!(status(&h, &m), "sent");
+    assert_eq!(sent(&h).len(), 1);
+    let attempts = h.fake.send_calls.lock().unwrap();
+    assert_eq!(attempts.len(), 3);
+    assert!(
+        attempts
+            .iter()
+            .all(|(_, content)| content.uuid.as_deref() == Some(&m))
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn recovery_cache_suppresses_only_automatic_replies_and_preserves_user_mute_and_block() {
+    let h = setup().await;
+    checks_pass(&h);
+    h.env.gateway.script(H_SAFETY, REPLY);
+    set_rules(
+        &h,
+        &h.oncall,
+        json!([{"when":{"kind":"all"},"act":"reply"}]),
+    );
+    *h.fake.block_send.lock().unwrap() = Some("ext_ws write_forbidden (-32006)".into());
+    refused(&h, "cache-1", "第一条自动回复").await;
+    let mut plan = recorded(&h, &h.oncall, "C_OPS", "cache-2", "ulilei", "普通消息2").await;
+    plan.act = Act::Reply;
+    let before = h.env.gateway.prompts.lock().unwrap().len();
+    let auto = steve_channels::respond::Responder::act(h.replies.as_ref(), &h.ch, &plan)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(auto.out_message_id.is_none());
+    assert!(auto.label.contains("没有起草回复"));
+    assert_eq!(h.env.gateway.prompts.lock().unwrap().len(), before);
+    let explicit = push(
+        &h,
+        &h.oncall,
+        msg("C_OPS", "cache-3", "ulilei", "请明确回答", true),
+    )
+    .await
+    .response
+    .unwrap();
+    assert!(explicit.decision_id.is_some());
+    assert_eq!(status(&h, &explicit.out_message_id.unwrap()), "failed");
+    let space = row(&h, "SELECT id FROM spaces WHERE external_id='C_OPS'", &[])[0]
+        .as_str()
+        .unwrap()
+        .to_string();
+    req(
+        &h.api,
+        "PATCH",
+        &format!("/spaces/{space}"),
+        Some(json!({"muted":true})),
+    )
+    .await;
+    let muted = push(
+        &h,
+        &h.oncall,
+        msg("C_OPS", "cache-4", "ulilei", "静默仍然生效", true),
+    )
+    .await
+    .response
+    .unwrap();
+    assert!(muted.out_message_id.is_none());
+    req(
+        &h.api,
+        "PATCH",
+        &format!("/spaces/{space}"),
+        Some(json!({"attention":"blocked"})),
+    )
+    .await;
+    let blocked = push(
+        &h,
+        &h.oncall,
+        msg("C_OPS", "cache-5", "ulilei", "屏蔽仍然生效", true),
+    )
+    .await;
+    assert!(blocked.blocked);
+    assert_eq!(h.fake.send_calls.lock().unwrap().len(), 2);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn recovery_permission_missing_is_reviewed_undoable_and_separate_from_retry() {
+    let h = setup().await;
+    checks_pass(&h);
+    h.env.gateway.script(H_SAFETY, REPLY);
+    let r = push(
+        &h,
+        &h.me,
+        msg("C_DEV", "permission-1", "ulilei", "请回答", true),
+    )
+    .await
+    .response
+    .unwrap();
+    let m = r.out_message_id.unwrap();
+    decide(&h, &r.decision_id.unwrap(), "yes", "").unwrap();
+    exec(
+        &h,
+        &format!(
+            "UPDATE connections SET caps='[\"msg.receive\"]' WHERE id='{}'",
+            h.me
+        ),
+    );
+    h.env.clock.advance(11_000);
+    h.outbox.send_due(&h.ch).await;
+    let d = decision_of(&h, &m);
+    assert_eq!(status(&h, &m), "failed");
+    let proposal = req(
+        &h.api,
+        "POST",
+        &format!("/chan-messages/{m}/authorization"),
+        Some(json!({})),
+    )
+    .await;
+    let id = proposal["id"].as_str().unwrap();
+    assert_eq!(
+        h.fake.send_calls.lock().unwrap().len(),
+        0,
+        "creating a proposal grants and sends nothing"
+    );
+    assert!(
+        steve_modules::changes::apply(&h.env.modules, &caller(WS, ME), id)
+            .unwrap()
+            .is_ok()
+    );
+    assert_eq!(status(&h, &m), "failed", "authorization does not send");
+    assert!(
+        steve_modules::changes::undo(&h.env.modules, &caller(WS, ME), id)
+            .unwrap()
+            .is_ok()
+    );
+    decide(&h, &d, "retry", "").unwrap();
+    h.outbox.send_due(&h.ch).await;
+    assert_eq!(
+        status(&h, &m),
+        "failed",
+        "undo restored the local permission boundary"
+    );
+    let d2 = decision_of(&h, &m);
+    let proposal = req(
+        &h.api,
+        "POST",
+        &format!("/chan-messages/{m}/authorization"),
+        Some(json!({})),
+    )
+    .await;
+    steve_modules::changes::apply(
+        &h.env.modules,
+        &caller(WS, ME),
+        proposal["id"].as_str().unwrap(),
+    )
+    .unwrap()
+    .unwrap();
+    decide(&h, &d2, "retry", "").unwrap();
+    h.outbox.send_due(&h.ch).await;
+    assert_eq!(status(&h, &m), "sent");
+    assert_eq!(sent(&h).len(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn recovery_platform_scope_failure_cannot_be_faked_as_local_authorization() {
+    for code in ["99991672", "99991679"] {
+        let h = setup().await;
+        *h.fake.fail_send.lock().unwrap() = Some(format!("平台 scope 缺失 {code}"));
+        let (m, d) = refused(&h, "scope-missing", "完整正文").await;
+        let card = h
+            .env
+            .store()
+            .reader(|c| base::decisions::get(c, &d))
+            .unwrap()
+            .unwrap();
+        assert_eq!(card.result["recovery"]["kind"], "missing_permission");
+        assert!(card.question.contains("重新授权"));
+        assert!(steve_channels::recovery::propose(&h.ch, &caller(WS, ME), &m).is_err());
+        *h.fake.fail_send.lock().unwrap() = None;
+        decide(&h, &d, "retry", "").unwrap();
+        h.outbox.send_due(&h.ch).await;
+        assert_eq!(status(&h, &m), "sent");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn recovery_manual_edit_and_model_rewrite_require_new_review_and_new_uuid() {
+    for manual in [true, false] {
+        let h = setup().await;
+        *h.fake.block_send.lock().unwrap() = Some("external connection policy".into());
+        let (m, d) = refused(&h, "rewrite-refused", "需要修改的原文").await;
+        h.env
+            .gateway
+            .script(REWRITE_HEAD, r#"{"text":"模型改写后的正文"}"#);
+        let edit = if manual {
+            "用户修改后的正文"
+        } else {
+            ""
+        };
+        let (next, approve) = recovered_draft(&h, &m, &d, edit).await;
+        assert_ne!(next, m);
+        assert_eq!(status(&h, &next), "draft");
+        assert_eq!(
+            h.fake.send_calls.lock().unwrap().len(),
+            1,
+            "edit is not a send"
+        );
+        let card = h
+            .env
+            .store()
+            .reader(|c| base::decisions::get(c, &approve))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            card.draft,
+            if manual {
+                edit
+            } else {
+                "模型改写后的正文"
+            }
+        );
+        let model_calls = h
+            .env
+            .gateway
+            .prompts
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|p| p.starts_with(REWRITE_HEAD))
+            .count();
+        assert_eq!(model_calls, usize::from(!manual));
+        *h.fake.block_send.lock().unwrap() = None;
+        decide(&h, &approve, "yes", "").unwrap();
+        h.env.clock.advance(11_000);
+        tokio::join!(h.outbox.send_due(&h.ch), h.outbox.send_due(&h.ch));
+        assert_eq!(status(&h, &next), "sent");
+        assert_eq!(sent(&h).len(), 1);
+        assert_eq!(sent(&h)[0].2.as_deref(), Some(next.as_str()));
+        assert_eq!(status(&h, &m), "discarded");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn recovery_discard_and_inbound_replay_never_revive_old_messages() {
+    let h = setup().await;
+    *h.fake.block_send.lock().unwrap() = Some("connection policy".into());
+    let (m, d) = refused(&h, "discarded-refused", "已经放弃的消息").await;
+    decide(&h, &d, "discard", "").unwrap();
+    *h.fake.block_send.lock().unwrap() = None;
+    h.env
+        .store()
+        .transaction(|tx| steve_channels::write_blocks::lift_connection(tx, &h.oncall, true))
+        .unwrap();
+    h.env
+        .clock
+        .advance(steve_channels::write_blocks::MEMORY_MS + 1);
+    let replay = push(
+        &h,
+        &h.oncall,
+        msg("C_OPS", "discarded-refused", "ulilei", "请求回复", false),
+    )
+    .await;
+    assert!(replay.duplicate);
+    h.outbox.send_due(&h.ch).await;
+    assert_eq!(status(&h, &m), "discarded");
+    assert!(decide(&h, &d, "retry", "").is_err());
+    nothing_sent(&h);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn recovery_retry_rechecks_changed_disclosure_before_the_adapter() {
+    let h = setup().await;
+    *h.fake.block_send.lock().unwrap() = Some("connection policy".into());
+    let (m, d) = refused(&h, "disclosure-refused", "原本可以披露的正文").await;
+    exec(
+        &h,
+        "UPDATE spaces SET has_external=1 WHERE external_id='C_OPS'",
+    );
+    h.env.gateway.unscript(CHECK_HEAD);
+    h.env.gateway.script(
+        CHECK_HEAD,
+        r#"{"verdict":"leak","spans":[{"text":"正文","reason":"当前听众不得披露"}]}"#,
+    );
+    *h.fake.block_send.lock().unwrap() = None;
+    decide(&h, &d, "retry", "").unwrap();
+    h.outbox.send_due(&h.ch).await;
+    assert_eq!(status(&h, &m), "draft");
+    assert_ne!(decision_of(&h, &m), d);
+    assert_eq!(
+        h.fake.send_calls.lock().unwrap().len(),
+        1,
+        "no adapter call after disclosure stopped the retry"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn recovery_unknown_then_refused_keeps_dedupe_evidence_and_never_offers_edit() {
+    let h = setup().await;
+    checks_pass(&h);
+    h.env.gateway.script(H_SAFETY, REPLY);
+    *h.fake.lose_answer.lock().unwrap() = true;
+    let r = push(
+        &h,
+        &h.oncall,
+        msg("C_OPS", "unknown-refused", "ulilei", "请回答", true),
+    )
+    .await
+    .response
+    .unwrap();
+    let m = r.out_message_id.unwrap();
+    *h.fake.block_send.lock().unwrap() = Some("now read-only".into());
+    h.outbox.send_due(&h.ch).await;
+    assert_eq!(status(&h, &m), "unknown");
+    assert_eq!(
+        count(
+            &h,
+            "SELECT count(*) FROM chan_send_state WHERE message_id=? AND first_at IS NOT NULL",
+            &[&m]
+        ),
+        1
+    );
+    h.env.clock.advance(steve_channels::outbound::LATE_MS + 1);
+    h.outbox.send_due(&h.ch).await;
+    let d = decision_of(&h, &m);
+    assert!(decide(&h, &d, "rewrite", "修改").is_err());
+    assert!(decide(&h, &d, "retry", "修改").is_err());
+    *h.fake.block_send.lock().unwrap() = None;
+    decide(&h, &d, "retry", "").unwrap();
+    h.outbox.send_due(&h.ch).await;
+    assert_eq!(
+        sent(&h).len(),
+        1,
+        "outside the dedupe window even manual retry cannot blindly duplicate"
+    );
+    assert_eq!(status(&h, &m), "unknown");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn recovery_late_refusal_cannot_erase_a_new_claims_unknown_send_state() {
+    let h = setup().await;
+    checks_pass(&h);
+    h.env.gateway.script(H_SAFETY, REPLY);
+    let r = push(
+        &h,
+        &h.me,
+        msg("C_DEV", "late-refusal", "ulilei", "请回答", true),
+    )
+    .await
+    .response
+    .unwrap();
+    let m = r.out_message_id.unwrap();
+    let d = r.decision_id.unwrap();
+    decide(&h, &d, "yes", "").unwrap();
+    h.env.clock.advance(11_000);
+    let entered = Arc::new(tokio::sync::Barrier::new(2));
+    let release = Arc::new(tokio::sync::Barrier::new(2));
+    *h.fake.fail_send.lock().unwrap() = Some("late definite refusal".into());
+    *h.fake.send_pause.lock().unwrap() = Some((entered.clone(), release.clone()));
+    let (out, ch, message, decision) = (h.outbox.clone(), h.ch.clone(), m.clone(), d.clone());
+    let old = tokio::spawn(async move {
+        out.send(&ch, &message, &Auth::Decision { id: decision })
+            .await
+    });
+    entered.wait().await;
+    h.env
+        .clock
+        .advance(steve_channels::outbound::CLAIM_STALE_MS + 1);
+    *h.fake.fail_send.lock().unwrap() = None;
+    *h.fake.lose_answer.lock().unwrap() = true;
+    assert!(matches!(
+        h.outbox
+            .send(&h.ch, &m, &Auth::Decision { id: d })
+            .await
+            .unwrap(),
+        SendOutcome::Unknown { .. }
+    ));
+    release.wait().await;
+    assert_eq!(old.await.unwrap().unwrap(), SendOutcome::Skipped);
+    assert_eq!(status(&h, &m), "unknown");
+    assert_eq!(
+        count(
+            &h,
+            "SELECT count(*) FROM chan_send_state WHERE message_id=? AND first_at IS NOT NULL",
+            &[&m]
+        ),
+        1
+    );
+    h.outbox.send_due(&h.ch).await;
+    assert_eq!(status(&h, &m), "sent");
+    assert_eq!(sent(&h).len(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn recovery_permission_proposal_rechecks_owner_revision_and_preserves_newer_configuration() {
+    let h = setup().await;
+    checks_pass(&h);
+    h.env.gateway.script(H_SAFETY, REPLY);
+    let r = push(
+        &h,
+        &h.me,
+        msg("C_DEV", "authorization-races", "ulilei", "请回答", true),
+    )
+    .await
+    .response
+    .unwrap();
+    let m = r.out_message_id.unwrap();
+    decide(&h, &r.decision_id.unwrap(), "yes", "").unwrap();
+    exec(
+        &h,
+        &format!(
+            "UPDATE connections SET caps='[\"msg.receive\"]' WHERE id='{}'",
+            h.me
+        ),
+    );
+    h.env.clock.advance(11_000);
+    h.outbox.send_due(&h.ch).await;
+    let proposal = steve_channels::recovery::propose(&h.ch, &caller(WS, ME), &m).unwrap();
+    assert!(
+        steve_modules::changes::apply(
+            &h.env.modules,
+            &caller(WS, steve_modules::testkit::OTHER),
+            &proposal.id
+        )
+        .unwrap()
+        .is_err()
+    );
+    exec(
+        &h,
+        &format!(
+            "UPDATE connections SET revision=revision+1 WHERE id='{}'",
+            h.me
+        ),
+    );
+    assert!(
+        steve_modules::changes::apply(&h.env.modules, &caller(WS, ME), &proposal.id)
+            .unwrap()
+            .is_err()
+    );
+    let proposal = steve_channels::recovery::propose(&h.ch, &caller(WS, ME), &m).unwrap();
+    steve_modules::changes::apply(&h.env.modules, &caller(WS, ME), &proposal.id)
+        .unwrap()
+        .unwrap();
+    exec(
+        &h,
+        &format!(
+            "UPDATE connections SET revision=revision+1 WHERE id='{}'",
+            h.me
+        ),
+    );
+    let undone = steve_modules::changes::undo(&h.env.modules, &caller(WS, ME), &proposal.id)
+        .unwrap()
+        .unwrap();
+    assert!(
+        undone["kept"].as_array().is_some_and(|v| !v.is_empty()),
+        "{undone}"
+    );
+    assert_eq!(status(&h, &m), "failed");
+    nothing_sent(&h);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn recovery_explicit_acknowledgements_are_not_swallowed_by_the_automatic_cache() {
+    let h = setup().await;
+    *h.fake.block_send.lock().unwrap() = Some("connection policy".into());
+    refused(&h, "ack-blocked-first", "first automatic reply").await;
+    h.env.gateway.script(H_SAFETY, REPLY);
+    let inbound = push(
+        &h,
+        &h.oncall,
+        msg("C_OPS", "explicit-ack", "ulilei", "请记录", true),
+    )
+    .await;
+    let plan = h
+        .env
+        .store()
+        .reader(|c| plan_of(c, WS, &inbound.message_id))
+        .unwrap();
+    let out = h
+        .outbox
+        .deliver(
+            &h.ch,
+            &OutRequest {
+                target: OutTarget::reply(&plan),
+                text: "收到，已记录。".into(),
+                purpose: Purpose::Item,
+                approve: false,
+                generation: None,
+                auth: Auth::Rule {
+                    source: plan.message_id,
+                    act: Act::Reply,
+                },
+            },
+        )
+        .await
+        .unwrap();
+    assert!(matches!(out, Delivered::Failed { .. }), "{out:?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn recovery_undo_of_unknown_discard_preserves_uncertainty_and_the_original_window() {
+    let h = setup().await;
+    checks_pass(&h);
+    h.env.gateway.script(H_SAFETY, REPLY);
+    *h.fake.lose_answer.lock().unwrap() = true;
+    let r = push(
+        &h,
+        &h.oncall,
+        msg("C_OPS", "unknown-discard-undo", "ulilei", "请回答", true),
+    )
+    .await
+    .response
+    .unwrap();
+    let m = r.out_message_id.unwrap();
+    h.env.clock.advance(steve_channels::outbound::LATE_MS + 1);
+    h.outbox.send_due(&h.ch).await;
+    let d = decision_of(&h, &m);
+    decide(&h, &d, "discard", "").unwrap();
+    assert_eq!(status(&h, &m), "discarded");
+    assert_eq!(
+        count(
+            &h,
+            "SELECT count(*) FROM chan_send_state WHERE message_id=? AND first_at IS NOT NULL",
+            &[&m]
+        ),
+        1
+    );
+    h.outbox.send_due(&h.ch).await;
+    assert_eq!(sent(&h).len(), 1);
+    undo(&h, &d).unwrap();
+    assert_eq!(status(&h, &m), "unknown");
+    decide(&h, &d, "retry", "").unwrap();
+    h.outbox.send_due(&h.ch).await;
+    assert_eq!(status(&h, &m), "unknown");
+    assert_eq!(sent(&h).len(), 1);
 }

@@ -6,10 +6,10 @@
 //!
 //! - automatic replies (a rule's reply or draft, the acknowledgements) are not drafted there
 //!   ([`active`]), so no model runs and no card appears for a message that cannot go out;
-//! - only the first refused message opens a card, the one notice saying why and how to allow
-//!   sending ([`Refusal::notice`]); later ones are kept as not sent, without a card, at most one
-//!   notice per connection or chat every [`MEMORY_MS`], even across a lift;
-//! - YOLO never retries it (the card offers only `discard`).
+//! - repeated automatic refusals share one notice ([`Refusal::notice`]); explicit requests and
+//!   manual retries always get their own recoverable failure card;
+//! - YOLO never retries a permission refusal. Human retry rechecks the actual permission; clearing
+//!   this cache grants nothing and never revives discarded messages.
 //!
 //! It is lifted early when the provider reports the connection writable again ([`lift_connection`],
 //! the channel service's session status) or a write there goes through ([`lift_after_send`]).
@@ -23,6 +23,26 @@ use crate::ChannelResult;
 
 /// How long a refusal is remembered: no automatic drafts there, no second card about it.
 pub const MEMORY_MS: i64 = 24 * 60 * 60 * 1000;
+
+/// An inbound direct request, using stored identity metadata rather than text that looks like @.
+/// This only bypasses refusal noise suppression; the inbound muted/blocked gates still apply.
+pub fn explicit_request(
+    c: &Connection,
+    ws: &str,
+    connection_id: &str,
+    space_id: &str,
+    source: &str,
+) -> ChannelResult<bool> {
+    Ok(c.query_row(
+        "SELECT EXISTS (SELECT 1 FROM chan_messages m JOIN spaces s ON s.id=m.space_id
+         JOIN connections cn ON cn.id=?3 AND cn.workspace_id=m.workspace_id
+         WHERE m.id=?1 AND m.workspace_id=?2 AND m.space_id=?4 AND m.direction='in'
+           AND m.history IS NULL AND m.purged IS NULL AND (s.kind='dm' OR EXISTS
+           (SELECT 1 FROM json_each(m.mentions) j WHERE json_extract(j.value,'$.account_id')=cn.account_id)))",
+        params![source, ws, connection_id, space_id],
+        |r| r.get(0),
+    )?)
+}
 
 /// `space_id` of a block of the whole connection.
 const EVERY_CHAT: &str = "";
@@ -91,7 +111,7 @@ pub fn active(
 
 /// The provider says `connection_id` may write again: its own block is lifted, and with
 /// `every_chat` (nothing is refused any more) its chats' too. The notice times stay, so a refusal
-/// soon after opens no second card. Returns whether anything was lifted.
+/// soon after opens no second automatic notice. Returns whether anything was lifted.
 pub fn lift_connection(
     c: &Connection,
     connection_id: &str,
