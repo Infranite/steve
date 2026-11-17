@@ -38,6 +38,9 @@ export default {
   orphan: { title: "Conversation without an item", source: "Conversation" },
   sessionStarted: "Conversation started",
   moduleChoice: { done: "Got it", to_item: "Made into an item", retry: "Retry", drop: "Drop this run", continue_once: "Double the budget and continue", stop: "Stop", once: "Approve once", grant_1h: "Allow for 1 hour", grant_8h: "Allow for 8 hours", grant_24h: "Allow for 24 hours", deny: "Deny", pause: "Pause receiving", reauth: "Re-authorize", send: "Send", no: "Don't send" },
+  option: {
+    chan_message: { draft_reply: "Draft reply", to_item: "Make it an item", done: "No reply needed", yes: "Approve and send", no: "Don't send", rewrite: "Rewrite, then show me", retry: "Send again", discard: "Don't send it", sent: "It went out" },
+  },
   rel: {
     releasing: "Approved, releasing now. You'll be notified when it's done",
     notReleased: "Approved, but not released",
@@ -92,7 +95,7 @@ export default {
     mem: { yes: "Saved", no: "Not saved, left in the original record" },
     party_merge: { merge: "Merged; you can split them again on the contact page", not_same: "Noted: not the same person" },
     release: { no: "Release not approved" },
-    chan_message: { yes: "Approved, will be sent shortly", no: "Not sent, this one is closed", rewrite: "Rewriting it; you'll see it again" },
+    chan_message: { yes: "Approved, will be sent shortly", no: "Not sent, this one is closed", rewrite: "Rewriting it; you'll see it again", draft_reply: "Drafted; it goes out only once you approve", to_item: "Making it an item", done: "OK, no reply to this one", retry: "Sending it again", discard: "Not sent, this one is closed", sent: "Marked as sent" },
     any: { pass: "Accepted, item done", rework: "Sent back for rework", yes: "Confirmed", no: "Handled", continue: "Let it continue", delivered: "Moved to review", look: "Paused, waiting for you", tosteve: "Handed to Steve", drop: "Dropped", deny: "Denied" },
     confirmYes: "Confirmed",
     confirmNo: "Noted: not right",
@@ -533,6 +536,7 @@ export default {
     rejectPlaceholder: "Why not? (optional, passed on)",
     reject: "Don't approve",
     rewriteFirst: "Rewrite, then show me",
+    replyPlaceholder: "Write the reply; it goes out only once you approve…",
     approveRelease: "Approve release",
     approve: "Approve",
     notNeeded: "Not needed",

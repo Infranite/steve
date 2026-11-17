@@ -13,9 +13,10 @@ import { OutContext } from "@/channels/out-context"
 import { OpenInFeishu } from "@/channels/open-in-app"
 import { t as tr, useT } from "@/i18n"
 import { FLOW_SUBJECTS } from "@/auto/decision"
+import { hasOptionIds, WORDS_OPTION } from "@/decision-options"
 import { MODULE_CARDS } from "@/vault/decisions"
 import { isPeopleDecision } from "@/people/pending"
-import { acceptChoosesRelease, botName, decide, dismiss, FAIL_CHOICE, pendingCards, setSt, SNOOZE_KEYS, snooze, snoozeLabel, st, WT, type Item, type Wait } from "@/store"
+import { acceptChoosesRelease, botName, decide, dismiss, FAIL_CHOICE, optionLabel, pendingCards, setSt, SNOOZE_KEYS, snooze, snoozeLabel, st, WT, type Item, type Wait } from "@/store"
 import { permissionCommand } from "@/ui"
 import { YoloBadge } from "@/yolo/badges"
 import { AlarmClockIcon, BanIcon, BellOffIcon, EllipsisIcon } from "lucide-react"
@@ -141,6 +142,11 @@ export function mapDecision(i: Item, w: Wait, where: "inline" | "composer", show
     d: { ...base, options: [opt("yes", tr("core:card.start"), { "data-propose-yes": "" }), opt("no", tr("core:card.notNeeded"))], own: false },
     answer: (a) => pick(a, { yes: () => act("yes"), no: () => act("no") }),
   }
+  if (w.type === "fail" && hasOptionIds(w.subject)) return {
+    /* a module's failure card (a reply that didn't go out): its own options, in the Hub's order, each by its label */
+    d: { ...base, options: w.options.map((o) => opt(o, optionLabel(w.subject, o), { "data-fail": o })), own: false },
+    answer: (a) => typeof a === "object" && a.option && act(a.option),
+  }
   if (w.type === "fail") {
     const os = w.options.filter((o) => FAIL_ORDER.includes(o)).sort((a, b) => FAIL_ORDER.indexOf(a) - FAIL_ORDER.indexOf(b))
     const go = os.includes("continue")
@@ -156,6 +162,16 @@ export function mapDecision(i: Item, w: Wait, where: "inline" | "composer", show
     return {
       d: { ...base, options: rows, own: revise ? { placeholder: tr("core:card.designFeedback"), send: tr("core:card.designRevise"), attrs: { "data-design-feedback": "" }, sendAttrs: { "data-design-choice": "2" } } : false },
       answer: (a) => { if (typeof a !== "object") return; if (a.option) act(a.option, a.text ?? ""); else if (revise && a.text) act(revise, a.text) },
+    }
+  }
+  if (w.type === "ask" && hasOptionIds(w.subject)) {
+    /* a module's question (a message handed over to you): the choice sent is the option's id, shown by its label; the
+     * option that takes words (the reply you write) is the field, its label on the send button */
+    const words = WORDS_OPTION[w.subject], field = !!words && w.options.includes(words)
+    return {
+      d: { ...base, options: w.options.filter((o) => o !== words).map((o) => opt(o, optionLabel(w.subject, o), { "data-option": o })),
+        own: field ? { placeholder: tr("core:card.replyPlaceholder"), send: optionLabel(w.subject, words), attrs: { "data-option-words": words }, sendAttrs: { "data-option": words } } : false },
+      answer: (a) => { if (typeof a !== "object") return; if (a.option) act(a.option); else if (field && a.text?.trim()) act(words, a.text.trim()) },
     }
   }
   if (w.type === "ask") {

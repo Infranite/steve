@@ -6,6 +6,7 @@ import ts from "typescript"
 import * as pages from "../src/event-pages.ts"
 import * as live from "../src/live-utils.ts"
 import * as notes from "../src/decision-notes.ts"
+import * as decisionOptions from "../src/decision-options.ts"
 import * as feed from "../src/feed-order.ts"
 import * as format from "../src/i18n/format.ts"
 import * as i18n from "../src/i18n/index.ts"
@@ -29,6 +30,7 @@ function harness(local = { getItem: () => "1" }) {
       if (id === "./event-pages") return pages
       if (id === "./live-utils") return live
       if (id === "./decision-notes") return notes
+      if (id === "./decision-options") return decisionOptions
       if (id === "./feed-order") return feed
       if (id === "./i18n/format") return format
       if (id === "./i18n") return { __esModule: true, ...i18n }
