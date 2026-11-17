@@ -143,6 +143,7 @@ export function mapDecision(i: Item, w: Wait, where: "inline" | "composer", show
     d: { ...base, options: [opt("yes", tr("core:card.start"), { "data-propose-yes": "" }), opt("no", tr("core:card.notNeeded"))], own: false },
     answer: (a) => pick(a, { yes: () => act("yes"), no: () => act("no") }),
   }
+  // SendRecovery owns recovery.authorization_url -> Proposal -> apply/undo; retry stays a separate decision.
   if (w.type === "fail" && w.subject === "chan_message") return {
     d: { ...base, detail: <><SendRecovery key={w.decision} i={i} w={w} /><YoloBadge decision={w.decision} subject={w.subject} /></>,
       options: w.options.filter((o) => o !== "rewrite").map((o) => opt(o, o === "retry" && w.options.includes("rewrite") ? tr("core:sendRecovery.retry") : optionLabel(w.subject, o), { "data-fail": o })), own: false },

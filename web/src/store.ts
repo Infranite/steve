@@ -18,6 +18,7 @@ import type { Cite } from "./api/knowledge"
 import { yoloApi, type RYolo, type RYoloAction } from "./api/yolo"
 import { applyLook } from "./lib/motion"
 import { permissionModes, canConfigurePermission } from "./runtime-status"
+import type { SendRecoveryInfo } from "./api/channels"
 
 /* ───────── view types (from the prototype) ───────── */
 export type Ev = any[] // ['u',text,label?] ['q',string[]] ['th',text,secs] ['tool',kind,title,meta,detail,live?,add?,del?,failed?,tool?,desc?,input?,plan?,endedAt?,steveArgs?] ['a',text] ['ho',text,toSid] ['hi',text] ['ask',text] ['sys',text] ['end',stopReason]
@@ -25,6 +26,7 @@ export type Sess = { id: string; n: number; item: string | null; b: string | nul
   /** not opened on its Node yet: no turn runs, the queue waits for the start; `since` is when it was created */
   starting?: boolean; since?: number }
 export type Wait = { type: "approve" | "ask" | "accept" | "propose" | "fail" | "confirm"; subjectId?: string; q: string; draft?: string; opts?: string[]; since: string; decision: string; subject: string; session: string | null; options: string[]; by: string; busy?: boolean
+  recovery?: SendRecoveryInfo
   /** a chat message's decision: the link that opens it in the platform's own client */
   openUrl?: string }
 export type Done = { id: string; type: Wait["type"]; q: string; choice: string; tm: string; at: number; decision: string; canUndo: boolean; undone?: boolean; how: "chose" | "dismissed" | "expired"; rel?: Rel
@@ -333,7 +335,8 @@ function sessOf(s: RSession, openSessions: Set<string>): Sess {
 }
 function waitOf(d: RDecision): Wait {
   const opts = d.kind === "ask" ? d.options : undefined
-  return { type: d.kind, q: d.question, draft: d.draft, opts, since: since(d.created), decision: d.id, subject: d.subject_type, subjectId: d.subject_id, session: d.session_id, options: d.options, by: d.requested_by, busy: !!d.agent_busy, openUrl: d.open_url }
+  return { type: d.kind, q: d.question, draft: d.draft, opts, since: since(d.created), decision: d.id, subject: d.subject_type, subjectId: d.subject_id, session: d.session_id, options: d.options, by: d.requested_by, busy: !!d.agent_busy, openUrl: d.open_url,
+    recovery: d.subject_type === "chan_message" && d.kind === "fail" ? d.result?.recovery : undefined }
 }
 /** Both pending and recent resolved decisions are returned by state, including orphan sessions. */
 export function permissionDecision(id?: string) {
@@ -1012,7 +1015,7 @@ export async function decide(id: string, c: string, text?: string, decision?: st
         toast(c === "retry" ? t("core:sendRecovery.retryRequested") : c === "rewrite" ? t("core:sendRecovery.rewriteRequested") : decidedText(w, c, i?.b ?? null))
         await refresh()
         return result
-      } catch (e) { fail(e); return }
+      } catch (e) { fail(e); await refresh(); return }
     }
     if (w.subject === "release" && c === "yes") {
       /* the answer already says whether the release started; "已发布" only comes with the result */

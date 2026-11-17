@@ -1,7 +1,7 @@
 /* A failed send stays reviewable, including on older Hubs whose discard-only decision omitted the draft.
  * Read the existing context and paginated channel record; never infer provider permissions from an error string. */
 import { useCallback, useEffect, useId, useRef, useState } from "react"
-import { outContext, type ROutContext } from "@/api/channels"
+import { outContext, sendAuthorizationUrl, type ROutContext } from "@/api/channels"
 import { conversationsApi, type ConvRecord, type RecordPage } from "@/api/conversations"
 import { Button } from "@/components/ui/button"
 import { Textarea } from "@/components/ui/textarea"
@@ -10,6 +10,7 @@ import { date } from "@/i18n/format"
 import { decide, emit, refresh, st, useHubEvents, type Item, type Wait } from "@/store"
 import { OutContext } from "./out-context"
 import { OpenInFeishu } from "./open-in-app"
+import { SendAuthorization } from "./send-authorization"
 
 export function SendRecovery({ i, w }: { i: Item; w: Wait }) {
   const t = useT(), fieldId = useId(), submitting = st.pendingActions.has("decision:" + w.decision)
@@ -18,6 +19,7 @@ export function SendRecovery({ i, w }: { i: Item; w: Wait }) {
   const [record, setRecord] = useState<ConvRecord | null>(null)
   const [loading, setLoading] = useState(false), [failed, setFailed] = useState(false)
   const [editing, setEditing] = useState(false), [text, setText] = useState("")
+  const [revision, setRevision] = useState(0)
   const generation = useRef(0)
   const load = useCallback(async () => {
     const turn = ++generation.current
@@ -64,7 +66,10 @@ export function SendRecovery({ i, w }: { i: Item; w: Wait }) {
     : status === "recalled" ? t("core:sendRecovery.recalled") : t("core:sendRecovery.unread")
   const stale = !!record && inactiveRecord(record, w.decision)
   const locked = busy || loading || stale || st.inactiveChannelDecisions.has(w.decision)
-  const reason = record?.out?.error || w.q
+  const recovery = w.recovery, reason = recovery?.error || record?.out?.error || w.q
+  const managed = recovery?.authorization_kind === "managed" && recovery.kind === "missing_permission" && !!recovery.connection_id
+    && !!w.subjectId && recovery.authorization_url === sendAuthorizationUrl(w.subjectId)
+  const settings = recovery?.settings_href?.startsWith("#/channels/acc/") ? recovery.settings_href : null
   return <div className="flex min-w-0 flex-col gap-3" data-send-recovery>
     <OutContext context={context} />
     <section className="min-w-0" aria-label={t("core:sendRecovery.body")}>
@@ -75,12 +80,19 @@ export function SendRecovery({ i, w }: { i: Item; w: Wait }) {
     <section className="min-w-0 rounded-lg bg-muted/60 p-3 [overflow-wrap:anywhere]" aria-label={t("core:sendRecovery.block")} data-send-block>
       <div className="font-medium text-foreground">{t("core:sendRecovery.block")}</div>
       <p className="whitespace-pre-wrap" data-send-reason>{reason}</p>
-      <p className="mt-1! type-footnote text-muted-foreground" data-send-source>{t(record?.out?.error ? "core:sendRecovery.recordSource" : "core:sendRecovery.decisionSource")} <code>{record?.out?.error ? w.subjectId : w.decision}</code></p>
-      <p className="mt-2!">{t("core:sendRecovery.restore")}</p>
+      <p className="mt-1! type-footnote text-muted-foreground" data-send-source>{recovery ? <>{t("core:sendRecovery.ruleSource")} <code>{recovery.source}</code></> : <>{t(record?.out?.error ? "core:sendRecovery.recordSource" : "core:sendRecovery.decisionSource")} <code>{record?.out?.error ? w.subjectId : w.decision}</code></>}</p>
+      {recovery && <dl className="mt-2! grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1 type-footnote" data-send-recovery-info>
+        {([["kind", recovery.kind], ["scope", recovery.scope], ["authorizationKind", recovery.authorization_kind], ["provider", recovery.provider], ["code", recovery.code], ["rpcCode", recovery.rpc_code], ["connection", recovery.connection_id], ["space", recovery.space_id]] as const).map(([label, value]) => value != null && <div key={label} className="contents"><dt>{t(`core:sendRecovery.fields.${label}`)}</dt><dd className="min-w-0 whitespace-pre-wrap">{String(value)}</dd></div>)}
+      </dl>}
+      {recovery?.instructions && <p className="mt-2! whitespace-pre-wrap" data-send-instructions>{recovery.instructions}</p>}
+      {!managed && <p className="mt-2!">{t("core:sendRecovery.restore")}</p>}
+      {recovery?.authorization_kind === "external" && recovery.external_policy_known === false && <p className="mt-2!">{t("core:sendRecovery.externalUnknown")}</p>}
+      {settings && <a className="mt-2 inline-block text-foreground underline" href={settings} data-send-settings>{t("core:sendRecovery.openSettings")}</a>}
     </section>
+    {managed && <SendAuthorization key={w.subjectId} w={w} locked={locked} revision={revision} />}
     <div className="flex min-w-0 flex-wrap items-center gap-2" role="status" aria-live="polite" data-send-status={status ?? "unread"}>
       <span>{t("core:sendRecovery.state", { state })}</span>
-      <Button size="xs" variant="outline" disabled={loading || submitting} onClick={() => { void load(); void refresh() }} data-send-refresh>{t(loading ? "core:sendRecovery.refreshing" : "core:sendRecovery.refresh")}</Button>
+      <Button size="xs" variant="outline" disabled={loading || submitting} onClick={() => { setRevision((n) => n + 1); void load(); void refresh() }} data-send-refresh>{t(loading ? "core:sendRecovery.refreshing" : "core:sendRecovery.refresh")}</Button>
       {busy && <p className="w-full" data-send-submitting>{t(submitted ? "core:sendRecovery.submitted" : "core:card.submitting")}</p>}
       {failed && <span className="w-full text-attention" data-send-read-error>{t("core:sendRecovery.readFailed")}</span>}
       {status === "unknown" && <p className="w-full text-attention">{t("core:sendRecovery.unknownNote")}</p>}
