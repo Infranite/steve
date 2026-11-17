@@ -185,6 +185,9 @@ pub const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/090.sql"),
     // 91: the model access setting for service sessions goes (harnesses use their own sign-in).
     include_str!("../migrations/091.sql"),
+    // 92: the workflow statistics (#242): a session's first tool call; closing invalidations and pull
+    // request merges become item marks (their timeline lines before, once).
+    include_str!("../migrations/092.sql"),
 ];
 
 /// 027's item columns and their one-time backfill (applied by `run_pending` when `items.phase` is missing).

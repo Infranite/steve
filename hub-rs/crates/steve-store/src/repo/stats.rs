@@ -120,7 +120,7 @@ pub struct NewMark {
     pub workspace_id: String,
     pub item_id: String,
     pub ts: i64,
-    /// status | deliver | fail | release
+    /// status | deliver | fail | release | invalidate | reject | merge | wake
     pub kind: String,
     pub from_v: Option<String>,
     pub to_v: Option<String>,
@@ -269,6 +269,21 @@ pub(crate) fn mark_in(c: &Connection, m: &NewMark) -> Result<i64> {
     let id = c.last_insert_rowid();
     dirty_in(c, &m.item_id)?;
     Ok(id)
+}
+
+/// The event kind of a tool call (`events.kind`), the first of which sets `sessions.first_tool_at`.
+pub const TOOL_CALL_EVENT: &str = "tool_call";
+
+/// Notes when a session made its first tool call (migration 92), with the event that records it, in
+/// the caller's transaction: how long a fresh session takes to start working. Later calls change nothing.
+pub(crate) fn first_tool_in(c: &Connection, session: &str, kind: &str, ts: i64) -> Result<()> {
+    if kind == TOOL_CALL_EVENT {
+        c.prepare_cached(
+            "UPDATE sessions SET first_tool_at = ?1 WHERE id = ?2 AND first_tool_at IS NULL",
+        )?
+        .execute(params![ts, session])?;
+    }
+    Ok(())
 }
 
 /// The `stats` change event of a workspace.

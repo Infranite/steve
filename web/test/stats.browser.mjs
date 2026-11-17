@@ -24,10 +24,19 @@ const core = {
   spend: { est: 18.4, reported: 0, unpriced_tokens: 500, unpriced: { "mystery-1": 500 }, saved_by_cache: 9.1, by_source: { agent: 16, gateway: 2.4 }, gateway_by_purpose: {}, priced_by: { table: 4_000_000, models_dev: 1_999_500 }, catalog: { synced: Date.now() - 3600000, tried: Date.now() - 600000, error: "连接 Models.dev 超时", models: 8536 } },
   throughput: { created: sum(created), created_by_source: {}, done: sum(done), dropped: 1, drop_rate: 0.14, wip: 7, delivered: 7, delivered_auto: 2, delivered_manual: 5, net: 2 },
   time: { lead: P(5 * H, 20 * H), cycle: P(3 * H, 9 * H), first_deliver: P(2 * H, 6 * H), wait: P(1.5 * H, 8 * H), agent: P(2 * H, 5 * H), other: P(1 * H, 3 * H), releases: 4, released: 3, release_success_rate: 0.75, not_released: 0, accept_to_release: P(H / 4, H) },
-  quality: { first_pass: 0.66, first_pass_n: 6, reworks: 2, reworks_per_done: 0.33, fails: { stall: 1, error: 2, restart: 0, release: 1, other: 0 }, stalled_then_done: 0, rollbacks: 0, release_unknown: 0, turn_error_rate: 0.017, reopened: 0 },
+  quality: { first_pass: 0.66, first_pass_n: 6, reworks: 2, reworks_per_done: 0.33, unit_retries: 3, fails: { stall: 1, error: 2, restart: 0, release: 1, other: 0 }, stalled_then_done: 0, rollbacks: 0, release_unknown: 0, turn_error_rate: 0.017, reopened: 0 },
   human: { decisions: 14, by_kind: {}, response: P(H / 3, 2 * H), response_by_kind: {}, expired: 1, yolo: { decided: 3, declined: 1, undone: 0, rate: 0.75 }, messages: 9, per_done: 2.3 },
   agents: { turns: 120, turn_ms: P(4 * 60000, 12 * 60000), tools: 900, tool_error_rate: 0.013, tool_kinds: {}, retries: 1, retry_success: 1, gateway_fallbacks: 0, gateway_failed: 0, permissions: 5, interrupted: 0, cancelled: 1, tokens_per_turn: 50000, tools_per_turn: 7.5 },
   per_item: { tokens: P(800000, 2_000_000), est_p50: 2, est_avg: 2.6, est_top: [] },
+  /* #242: one graph whose review failed once; the two kinds of rework side by side */
+  workflow: {
+    graphs: 1, units: 3, attempts: 5, retries: 3, retry_rate: 0.6, attempts_per_unit: { p50: 2, p85: 2, avg: 5 / 3, sum: 5, n: 3 }, resets: 1, unit_deliveries: 5,
+    first_try: { work: { delivered: 1, passed: 1, rate: 1 }, review: { delivered: 2, passed: 0, rate: 0 }, integrate: { delivered: 1, passed: 1, rate: 1 } },
+    sessions_per_item: P(3, 5, 2), coordinator_tokens: 400_000, unit_tokens: 600_000, coordinator_share: 0.4, coordinator_turn_ms: P(12 * 60000, 40 * 60000, 4), coordinator_long_turns: 1, long_turn_ms: 30 * 60000,
+    wakes: { succeeded: 2, failed: 1 }, invalidations: { plan: 3, redeliver: 1 }, merged: 1, accept_to_merge: P(8 * 60000, 8 * 60000, 1),
+    rejected: 2, rejects: { design_file: 1, unit_evidence: 1 }, delivered: 6, reject_rate: 0.25,
+    reply_latency: P(90000, 300000, 4), first_tool: P(40000, 90000, 5), no_tool: 1,
+  },
   context_over_80: 0, since: { tokens: "2026-10-20", gateway: "2026-10-20" },
 }
 const summary = { range: { from: days[0], to: days.at(-1), tz: "Asia/Shanghai" }, ...core, prev: { ...core, throughput: { ...core.throughput, done: 4 } } }
@@ -205,6 +214,18 @@ try {
     assert.match(note, /费用未完整估算：1 个模型没有价格（mystery-1），500 tokens 未计入/)
     assert.match(note, /单价来自价格表和 Models\.dev（\d+月\d+日 \d\d:\d\d 同步），最近一次同步失败，用的是上次的价格。管理价格/)
     assert.equal(await page.locator("[data-price-note] a").getAttribute("href"), "#/settings/stats")
+
+    /* 工作流 (#242): acceptance rework and unit retries side by side, then the reasons */
+    const wf = page.locator("[data-workflow]")
+    await wf.waitFor()
+    assert.equal((await wf.locator('[data-kpi="rework"]').innerText()).split("\n")[1], "2")
+    assert.match((await wf.locator('[data-kpi="unit_retries"]').innerText()).replace(/\s+/g, " "), /单元重试 3 60% · 共 5 次单元尝试/)
+    assert.match((await wf.locator('[data-kpi="first_review"]').innerText()).replace(/\s+/g, " "), /评审首轮通过 0% 2 次首轮评审/)
+    assert.match((await wf.locator('[data-kpi="coord_turn"]').innerText()).replace(/\s+/g, " "), /1 个超过 30 分/)
+    assert.match((await wf.locator('[data-kpi="reject"]').innerText()).replace(/\s+/g, " "), /25% 2 \/ 8 次交付/)
+    assert.equal(await wf.locator("[data-workflow-void]").count(), 2)
+    assert.equal(await wf.locator('[data-workflow-refuse="design_file"]').count(), 1)
+    if (shots) await wf.screenshot({ path: `${shots}/stats-workflow-${width}-${theme}.png`, animations: "disabled" })
 
     /* the Bots compared: one summary per Bot, sortable; a row filters the page by that Bot */
     const bots = page.locator('[data-compare="bots"]')

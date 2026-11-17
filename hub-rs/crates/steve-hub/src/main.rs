@@ -10,6 +10,7 @@ fn main() -> anyhow::Result<()> {
             std::path::Path::new(&args[1]),
             &args[2],
         )),
+        Some("--stats-snapshot") => Some(steve_hub::stats_snapshot::main(&args[1..])),
         Some("--build-info") => {
             println!(
                 "{}",

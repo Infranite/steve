@@ -75,7 +75,10 @@ fn an_edit_that_keeps_the_status_still_voids_the_frozen_result() {
     let (x, wt) = delivered_in_git(&k, true);
     std::fs::write(wt.join("x.txt"), "first\n").unwrap();
     // delivered again on the dirty worktree (as `steve_deliver` does it): this is the frozen result
-    k.core.tx().lc_invalidate(&x.id, "有新的交付").unwrap();
+    k.core
+        .tx()
+        .lc_invalidate(&x.id, crate::cycle::void::REDELIVER, "有新的交付")
+        .unwrap();
     let d = k.decision(
         &x.id,
         Some(&x.session),
@@ -128,7 +131,10 @@ fn the_tick_does_not_fingerprint_while_the_acceptance_is_still_open() {
     let k = Kit::new();
     let (x, wt) = delivered_in_git(&k, true);
     std::fs::write(wt.join("x.txt"), "first\n").unwrap();
-    k.core.tx().lc_invalidate(&x.id, "有新的交付").unwrap();
+    k.core
+        .tx()
+        .lc_invalidate(&x.id, crate::cycle::void::REDELIVER, "有新的交付")
+        .unwrap();
     let d = k.decision(
         &x.id,
         Some(&x.session),

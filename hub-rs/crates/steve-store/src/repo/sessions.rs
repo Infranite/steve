@@ -431,13 +431,15 @@ impl Events<'_> {
     pub fn add(&self, session_id: &str, kind: &str, data: Value) -> Result<i64> {
         let (stored, payloads) = crate::event_payload::split(kind, &data)?;
         let stored = to_json(&stored)?;
+        let ts = now();
         self.0.write(|w| {
             let tx = w.tx()?;
             tx.prepare_cached(
                 "INSERT INTO events (session_id, ts, kind, data, format) VALUES (?, ?, ?, ?, 'steve.v1')",
             )?
-            .execute(params![session_id, now(), kind, stored])?;
+            .execute(params![session_id, ts, kind, stored])?;
             let seq = tx.last_insert_rowid();
+            super::stats::first_tool_in(&tx, session_id, kind, ts)?;
             crate::event_payload::save(&tx, session_id, seq, &payloads)?;
             tx.commit()?;
             w.publish(ChangeEvent::Event {

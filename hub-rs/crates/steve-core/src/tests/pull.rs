@@ -128,7 +128,10 @@ fn freeze(k: &Kit, x: &Remote) {
 
 /// The result is void (a new message) and the same change is delivered and accepted again.
 fn accepted_again(k: &Kit, x: &Remote) {
-    k.core.tx().lc_invalidate(&x.item, "收到新的消息").unwrap();
+    k.core
+        .tx()
+        .lc_invalidate(&x.item, crate::cycle::void::MESSAGE, "收到新的消息")
+        .unwrap();
     let s = k.db().session(&x.session).unwrap().unwrap();
     k.core
         .tool_deliver(
@@ -290,6 +293,20 @@ fn pr_marks(k: &Kit, x: &Remote) -> Vec<(String, Value)> {
         .unwrap()
 }
 
+/// The `merge` marks of the item (the workflow statistics' accepted → merged time): `(to_v, ref)`.
+fn merge_marks(k: &Kit, x: &Remote) -> Vec<(String, String)> {
+    k.db()
+        .store()
+        .with_conn(|c| {
+            Ok(
+                c.prepare("SELECT to_v, ref FROM item_marks WHERE item_id = ? AND kind = 'merge'")?
+                    .query_map([&x.item], |r| Ok((r.get(0)?, r.get(1)?)))?
+                    .collect::<rusqlite::Result<Vec<_>>>()?,
+            )
+        })
+        .unwrap()
+}
+
 /// The release operation the pull request is followed on.
 fn release_op(k: &Kit, x: &Remote) -> steve_store::ItemOperation {
     let i = k.db().item(&x.item).unwrap().unwrap();
@@ -365,6 +382,10 @@ fn a_reviewed_change_is_merged_by_steve_at_the_accepted_head_once_every_check_pa
     assert_eq!(m[0].0, "merged");
     assert_eq!(m[0].1["review"], "graph");
     assert_eq!(m[0].1["by"], "steve");
+    assert_eq!(
+        merge_marks(&k, &x),
+        [("merged".into(), "https://github.com/acme/app/pull/7".into())]
+    );
 }
 
 #[test]
@@ -410,7 +431,10 @@ fn an_invalidated_result_is_never_merged() {
     let (k, x) = reviewed(&gh);
     let h = head(&x.wt);
     gh.prs(open_pr(&h, json!({})));
-    k.core.tx().lc_invalidate(&x.item, "收到新的消息").unwrap();
+    k.core
+        .tx()
+        .lc_invalidate(&x.item, crate::cycle::void::MESSAGE, "收到新的消息")
+        .unwrap();
     assert_eq!(k.phase(&x.item), "active");
     look(&k);
     look(&k);
@@ -520,6 +544,12 @@ fn an_unreviewed_change_you_merged_yourself_completes_the_item() {
         (m[1].0.as_str(), &m[1].1["review"], &m[1].1["by"]),
         ("merged", &json!("none"), &json!("elsewhere"))
     );
+    assert!(k.open_fails(&x.item).is_empty());
+    // the statistics' accepted → merged time ends at this mark
+    assert_eq!(
+        merge_marks(&k, &x),
+        [("merged".into(), "https://github.com/acme/app/pull/7".into())]
+    );
 }
 
 #[test]
@@ -544,7 +574,10 @@ fn the_merge_card_expires_with_the_result_it_was_for() {
     gh.prs(open_pr(&head(&x.wt), json!({})));
     look(&k);
     let card = merge_cards(&k, &x).pop().unwrap();
-    k.core.tx().lc_invalidate(&x.item, "收到新的消息").unwrap();
+    k.core
+        .tx()
+        .lc_invalidate(&x.item, crate::cycle::void::MESSAGE, "收到新的消息")
+        .unwrap();
     assert_eq!(k.db().decision(&card).unwrap().unwrap().status, "expired");
     assert!(k.core.resolve(&card, "yes", "", "me").is_err());
     look(&k);
@@ -912,7 +945,10 @@ fn a_merge_that_ran_while_its_result_went_void_is_said_marked_and_yours() {
     // the look before the merge was fine; the result goes void while the merge call runs
     let due = k.core.tx().prs_due().unwrap();
     assert_eq!(due.len(), 1);
-    k.core.tx().lc_invalidate(&x.item, "收到新的消息").unwrap();
+    k.core
+        .tx()
+        .lc_invalidate(&x.item, crate::cycle::void::MESSAGE, "收到新的消息")
+        .unwrap();
     let crate::pull::Look::Found(pr) = crate::pull::read(&open_pr(&h, json!({}))) else {
         panic!()
     };

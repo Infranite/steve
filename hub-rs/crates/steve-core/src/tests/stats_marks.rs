@@ -260,3 +260,229 @@ fn a_reported_release_marks_released_without_finishing_the_item() {
         Some("done")
     );
 }
+
+#[test]
+fn a_void_closing_is_marked_with_its_reason() {
+    let k = Kit::new();
+    k.manual_acceptance();
+    let x = k.delivered(false);
+    assert_eq!(k.phase(&x.id), "closing");
+    let s = k.db().session(&x.session).unwrap().unwrap();
+    k.core.tool_deliver(&s, "again", &[], &[], &[]).unwrap();
+    assert_eq!(
+        of_kind(&k, &x.id, "invalidate"),
+        [(Some(crate::cycle::void::REDELIVER.into()), None)]
+    );
+}
+
+#[test]
+fn a_refused_delivery_is_marked_with_its_reason() {
+    let k = Kit::new();
+    let x = k.delivered(false);
+    k.db()
+        .decision_resolve(&x.decision, json!({"choice": "skip"}), "resolved", None)
+        .unwrap();
+    let s = k.db().session(&x.session).unwrap().unwrap();
+    let odd = Check {
+        name: "tests".into(),
+        passed: true,
+        operated: false,
+        scope: Some("galaxy".into()),
+    };
+    assert!(k.core.tool_deliver(&s, "ok", &[], &[odd], &[]).is_err());
+    assert_eq!(
+        of_kind(&k, &x.id, "reject"),
+        [(Some(crate::marks::reject::SCOPE.into()), None)]
+    );
+}
+
+#[test]
+fn waking_the_coordinator_marks_the_unit_its_status_and_attempt() {
+    use crate::Output;
+    use steve_store::UnitSpec;
+    let k = Kit::new();
+    k.rt.st().workflow_execution_ready = true;
+    let parent = k.item("run", "执行", None);
+    let coordinator = k.session(&parent, "idle");
+    let spec = |id: &str, bot: &str, kind: &str, deps: &[&str]| UnitSpec {
+        id: id.into(),
+        title: id.into(),
+        goal: format!("验证 {id}"),
+        bot_id: bot.into(),
+        kind: kind.into(),
+        depends_on: deps.iter().map(|s| (*s).into()).collect(),
+        resources: vec![],
+        required: true,
+    };
+    let units = vec![
+        spec("work", "dev", "work", &[]),
+        spec("review", "steve", "review", &["work"]),
+        spec("integrate", "dev", "integrate", &["review"]),
+    ];
+    k.core
+        .workflow_change(
+            &parent,
+            json!({"action":"plan","reason":"统计","expected_revision":0,
+                "units":units,"max_parallel":2,"max_attempts":3}),
+            "me",
+        )
+        .unwrap();
+    let work = k
+        .db()
+        .store()
+        .workflows()
+        .get(&parent)
+        .unwrap()
+        .unwrap()
+        .units
+        .into_iter()
+        .find(|u| u.spec.id == "work")
+        .unwrap();
+    let sid = work.session_id.unwrap();
+    let s = k.db().session(&sid).unwrap().unwrap();
+    k.core
+        .tool_deliver(
+            &s,
+            "已验证",
+            &[Output {
+                kind: "文件".into(),
+                title: "work".into(),
+                location: Some("work.txt".into()),
+                role: None,
+            }],
+            &[Check {
+                name: "已操作并检查".into(),
+                passed: true,
+                operated: true,
+                scope: None,
+            }],
+            &[],
+        )
+        .unwrap();
+    k.rt.end_turn(&k.core, &sid, "end_turn", None);
+    let wakes: Vec<(Option<String>, Option<String>, Value)> = k
+        .db()
+        .store()
+        .with_conn(|c| {
+            Ok(c.prepare(
+                "SELECT to_v, ref, detail FROM item_marks WHERE item_id = ? AND kind = 'wake' ORDER BY id",
+            )?
+            .query_map([&parent], |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    serde_json::from_str(&r.get::<_, String>(2)?).unwrap(),
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?)
+        })
+        .unwrap();
+    assert_eq!(
+        wakes,
+        [(
+            Some("succeeded".into()),
+            Some(coordinator),
+            json!({"unit_id": "work", "status": "succeeded", "attempt": 1})
+        )]
+    );
+}
+
+#[test]
+fn a_refused_unit_delivery_is_marked_with_the_check_that_refused_it() {
+    use crate::Output;
+    use crate::marks::reject;
+    use steve_store::UnitSpec;
+    let k = Kit::new();
+    k.rt.st().workflow_execution_ready = true;
+    let parent = k.item("run", "执行", None);
+    k.session(&parent, "idle");
+    let spec = |id: &str, bot: &str, kind: &str, deps: &[&str]| UnitSpec {
+        id: id.into(),
+        title: id.into(),
+        goal: format!("验证 {id}"),
+        bot_id: bot.into(),
+        kind: kind.into(),
+        depends_on: deps.iter().map(|s| (*s).into()).collect(),
+        resources: vec![],
+        required: true,
+    };
+    let units = vec![
+        spec("work", "dev", "work", &[]),
+        spec("review", "steve", "review", &["work"]),
+        spec("integrate", "dev", "integrate", &["review"]),
+    ];
+    k.core
+        .workflow_change(
+            &parent,
+            json!({"action":"plan","reason":"统计","expected_revision":0,
+                "units":units,"max_parallel":2,"max_attempts":3}),
+            "me",
+        )
+        .unwrap();
+    let graph = k.db().store().workflows().get(&parent).unwrap().unwrap();
+    let work = graph
+        .units
+        .into_iter()
+        .find(|u| u.spec.id == "work")
+        .unwrap();
+    let (child, sid) = (work.item_id.unwrap(), work.session_id.unwrap());
+    let s = k.db().session(&sid).unwrap().unwrap();
+    let output = || Output {
+        kind: "文件".into(),
+        title: "work".into(),
+        location: Some("work.txt".into()),
+        role: None,
+    };
+    let check = |scope: Option<&str>| Check {
+        name: "已检查".into(),
+        passed: true,
+        operated: false,
+        scope: scope.map(Into::into),
+    };
+    let refused = |outputs: &[Output], checks: &[Check]| {
+        assert!(
+            k.core
+                .tool_deliver(&s, "已验证", outputs, checks, &[])
+                .is_err()
+        );
+        of_kind(&k, &child, "reject")
+            .last()
+            .unwrap()
+            .0
+            .clone()
+            .unwrap()
+    };
+    assert_eq!(
+        refused(&[output()], &[check(Some("galaxy"))]),
+        reject::SCOPE
+    );
+    assert_eq!(refused(&[], &[check(None)]), reject::UNIT_EVIDENCE);
+    k.db().queue_add(&sid, "还有一句", "user", &[]).unwrap();
+    assert_eq!(refused(&[output()], &[check(None)]), reject::UNIT_QUEUED);
+    let revision = k
+        .db()
+        .store()
+        .workflows()
+        .get(&parent)
+        .unwrap()
+        .unwrap()
+        .revision;
+    k.core
+        .workflow_change(
+            &parent,
+            json!({"action":"pause","reason":"停止","expected_revision":revision}),
+            "me",
+        )
+        .unwrap();
+    assert_eq!(refused(&[output()], &[check(None)]), reject::UNIT_PAUSED);
+    // a failure report is the unit's own verdict: refused, but never a refused delivery
+    let before = of_kind(&k, &child, "reject").len();
+    assert!(
+        k.core
+            .tx()
+            .workflow_report(&s, "失败", &[], &[], false)
+            .is_err()
+    );
+    assert_eq!(of_kind(&k, &child, "reject").len(), before);
+    assert_eq!(before, 4);
+}

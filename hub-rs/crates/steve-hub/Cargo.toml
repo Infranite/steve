@@ -70,12 +70,13 @@ flate2 = "=1.1.10"
 zip = { version = "=9.2.0", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 tar = "0.4"
 libc = "0.2"
+# the scratch copy of `--stats-snapshot`
+tempfile = "=3.27.0"
 
 [dev-dependencies]
 tokio = { version = "=1.54.1", features = ["test-util"] }
 steve-node-api = { path = "../steve-node-api", features = ["testkit"] }
 reqwest = { version = "=0.12.28", default-features = false, features = ["json", "stream"] }
-tempfile = "=3.27.0"
 http-body-util = "=0.1.5"
 steve-mail = { path = "../steve-mail", features = ["fake"] }
 steve-vault = { path = "../steve-vault" }

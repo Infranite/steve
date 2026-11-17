@@ -5,7 +5,8 @@
 //! convention ([`normalize`]), the price table and model matching ([`prices`]) with the prices synced
 //! from Models.dev ([`catalog`]), and which local day a
 //! timestamp belongs to ([`day`]). On top of the stored rows: the per-item facts ([`items`]), their
-//! refresh and the cube rebuild ([`refresh`]) and every metric ([`metrics`]).
+//! refresh and the cube rebuild ([`refresh`]) and every metric ([`metrics`]), the work graphs' among
+//! them ([`workflow`]).
 //!
 //! Hub wiring (slice ST5): at boot `tokio::spawn(Refresher::new().run(store))`;
 //! `POST /api/stats/rebuild` calls `refresh::rebuild`; the REST reads call `metrics::summary` /
@@ -24,6 +25,7 @@ pub mod prices;
 pub mod realtime;
 pub mod refresh;
 pub mod views;
+pub mod workflow;
 
 pub use day::{day, tz};
 pub use normalize::{RawUsage, normalize};

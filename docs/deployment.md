@@ -422,6 +422,25 @@ A rejected `start_turn` with `maybe_sent=0` and a persisted pre-send cancellatio
 
 Legacy non-Node sessions have no such collector; when their persisted lifecycle becomes `ended`, its `updated` time bounds the uncollected interval conservatively. This lifecycle boundary is not a measured stop or a retroactive baseline: every overlapping historical window stays unknown, then leaves the current window and trend after the same ten/69-second tails. Read-only imports remain excluded.
 
+## Workflow statistics and a baseline
+
+`GET /api/stats/summary` carries a `workflow` object, shown on the statistics page as **工作流**. It counts, for the range and the project and Bot filters (applied through the work graph's own item):
+
+- `attempts`, `retries` (unit attempts that were not the unit's first, also `quality.unit_retries`, shown beside the acceptance rework count `quality.reworks`), `attempts_per_unit`, `resets` and `first_try` (by unit kind: first attempts that delivered and passed; `first_try.review` is the first-round review pass rate);
+- `sessions_per_item` (sessions of an item done in the range and of its work units), `coordinator_tokens`, `unit_tokens`, `coordinator_share`, `coordinator_turn_ms` and `coordinator_long_turns` (turns longer than `long_turn_ms`);
+- `wakes` (coordinator wakes about a settled unit, by unit status), `invalidations` (closings invalidated, by reason), `merged` and `accept_to_merge`, `rejected`, `rejects` (by reason), `delivered` and `reject_rate`;
+- `reply_latency` (a channel message stored → its first reply sent; workspace only) and `first_tool` (a session's start → its first tool call; `no_tool` made none).
+
+These read item marks recorded since this release: `invalidate`, `reject`, `merge` and `wake` (its detail has `unit_id`, `status` and `attempt`), and `sessions.first_tool_at`. The upgrade turns earlier closing invalidations and pull request merges in item timelines into marks once; sessions from before take their first recorded `tool_call` event.
+
+To take a baseline without a running Hub on the data, print the same figures from a database file:
+
+```sh
+steve-hub --stats-snapshot --db <copy of the database> [--workspace <id>] [--from YYYY-MM-DD --to YYYY-MM-DD] [--scratch <dir>]
+```
+
+It prints JSON with `workspace`, `schema`, `range`, `workflow`, `quality` and `throughput`, for the last 30 days of the workspace's statistics time zone unless a range (at most a year) is given; with several workspaces, name one. The file is opened read-only and never changed. A database from an older release is copied with SQLite's online backup into a temporary directory (`--scratch`, else the system's) and the copy migrated first, so the scratch location needs room for one copy; the copy is removed afterwards. Run it on a copy made with `sqlite3 <database> ".backup <copy>"` (or a daily backup) rather than on a live installation's file, and keep the output with the release it was taken on to compare later ranges against.
+
 ## Plugins
 
 A plugin is something that is not part of Steve, installed from a plugin library: a program run beside the Hub as a process of its own, or data the web client reads. It is reached through one of Steve's documented contracts and never links into the Hub. There are three kinds: a connector plugin, a generic event/read/write service described below; a channel plugin, a [channel service](#an-external-channel-service) the Hub starts and connects for you, and a theme plugin, a skin for the web client that is only data.

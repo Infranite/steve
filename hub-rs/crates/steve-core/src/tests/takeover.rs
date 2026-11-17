@@ -538,7 +538,10 @@ fn stopped_after_merging_and_tagging_it_completes_on_steves_check() {
     let k = kit(2);
     let x = remote(&k, upstream::DONE_TAG, false);
     // delivered once, then the delivery went void (ST-25: the branch changed after the freeze)
-    k.core.tx().lc_invalidate(&x.item, "有新的交付").unwrap();
+    k.core
+        .tx()
+        .lc_invalidate(&x.item, crate::cycle::void::REDELIVER, "有新的交付")
+        .unwrap();
     merge_and_tag(&x, Some("v0.2.21"));
     // ST-25: the agent reports the merge and the tag, the build still running, and stops
     stop(
@@ -569,7 +572,10 @@ fn stopped_after_merging_and_tagging_it_completes_on_steves_check() {
 fn stopped_before_the_merge_it_is_continued_with_what_steve_found() {
     let k = kit(2);
     let x = remote(&k, upstream::DONE_MERGE, false);
-    k.core.tx().lc_invalidate(&x.item, "有新的交付").unwrap();
+    k.core
+        .tx()
+        .lc_invalidate(&x.item, crate::cycle::void::REDELIVER, "有新的交付")
+        .unwrap();
     stop(&k, &x.session, "分支推上去了。");
     // the line and the prompt are written one after the other: wait for both
     assert!(k.wait(|| {
@@ -589,7 +595,10 @@ fn an_accepted_delivery_that_moved_tells_the_agent_what_moved() {
     let k = kit(2);
     let x = remote(&k, upstream::DONE_TAG, false);
     // delivered again on the real worktree (the frozen fingerprint is the branch's)
-    k.core.tx().lc_invalidate(&x.item, "有新的交付").unwrap();
+    k.core
+        .tx()
+        .lc_invalidate(&x.item, crate::cycle::void::REDELIVER, "有新的交付")
+        .unwrap();
     let d = k.decision(
         &x.item,
         Some(&x.session),
@@ -644,7 +653,10 @@ fn an_accepted_delivery_that_moved_tells_the_agent_what_moved() {
 fn a_void_delivery_waiting_on_your_approval_is_told_with_the_answer() {
     let k = kit(2);
     let (x, wt) = super::lifecycle::delivered_in_git(&k, true);
-    k.core.tx().lc_invalidate(&x.id, "有新的交付").unwrap();
+    k.core
+        .tx()
+        .lc_invalidate(&x.id, crate::cycle::void::REDELIVER, "有新的交付")
+        .unwrap();
     let d = k.decision(
         &x.id,
         Some(&x.session),
@@ -693,7 +705,10 @@ fn a_build_is_followed_once_and_only_a_failure_is_told() {
         c.gh = script.clone();
     });
     let x = remote(&k, upstream::DONE_TAG, false);
-    k.core.tx().lc_invalidate(&x.item, "有新的交付").unwrap();
+    k.core
+        .tx()
+        .lc_invalidate(&x.item, crate::cycle::void::REDELIVER, "有新的交付")
+        .unwrap();
     merge_and_tag(&x, Some("v2.0.0"));
     stop(&k, &x.session, "合并了，tag 推了。");
     assert!(k.wait(|| k.phase(&x.item) == "closed"));
@@ -1068,7 +1083,10 @@ fn a_goal_that_asks_for_an_actual_operation_is_noted_when_the_delivery_lacks_one
     assert!(line.contains("`operated: true`"), "{line}");
     // stopped after merging and tagging: the remote alone is not that evidence, the agent goes on
     k.rt.end_turn(&k.core, &x.session, "end_turn", None);
-    k.core.tx().lc_invalidate(&x.item, "有新的交付").unwrap();
+    k.core
+        .tx()
+        .lc_invalidate(&x.item, crate::cycle::void::REDELIVER, "有新的交付")
+        .unwrap();
     merge_and_tag(&x, Some("v1.0.1"));
     stop(&k, &x.session, "合并了，tag 推了。");
     assert!(k.wait(|| !steve_lines(&k, &x.item).is_empty()));
@@ -1098,7 +1116,10 @@ fn stopped_after_merging(rule: &str, url: &str, tag: Option<&str>) -> (Kit, Remo
         url,
     );
     k.rt.end_turn(&k.core, &x.session, "end_turn", None);
-    k.core.tx().lc_invalidate(&x.item, "有新的交付").unwrap();
+    k.core
+        .tx()
+        .lc_invalidate(&x.item, crate::cycle::void::REDELIVER, "有新的交付")
+        .unwrap();
     merge_and_tag(&x, tag);
     let before = k.rt.prompts_of(&x.session).len();
     stop(&k, &x.session, "合并了。");
@@ -1394,7 +1415,10 @@ fn stopped_without_a_commit_of_its_own_is_continued_not_closed_as_merged() {
     let k = kit(2);
     let x = remote_without_commits(&k, upstream::DONE_MERGE);
     k.rt.end_turn(&k.core, &x.session, "end_turn", None);
-    k.core.tx().lc_invalidate(&x.item, "有新的交付").unwrap();
+    k.core
+        .tx()
+        .lc_invalidate(&x.item, crate::cycle::void::REDELIVER, "有新的交付")
+        .unwrap();
     let before = k.rt.prompts_of(&x.session).len();
     stop(&k, &x.session, "看了一下，好像没什么要改的。");
     assert!(k.wait(|| k.rt.prompts_of(&x.session).len() > before));

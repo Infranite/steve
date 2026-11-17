@@ -271,7 +271,8 @@ fn row_types_follow_column_order() {
             ..Default::default()
         })
         .unwrap();
-    assert_eq!(keys(&ses), cols("sessions"));
+    // when its first tool call came is read by the statistics, not with every session
+    assert_eq!(keys(&ses), without("sessions", &["first_tool_at"]));
     let dec = s
         .decisions()
         .create(&NewDecision {

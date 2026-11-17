@@ -3,6 +3,7 @@
 use crate::error::{CoreError, Result, msg};
 use crate::git;
 use crate::lifecycle::{deps_open, settle, supersede, tidy};
+use crate::marks::reject;
 use crate::modules::Point;
 use crate::patch;
 use crate::release::NOTHING_TO_RELEASE;
@@ -1771,6 +1772,14 @@ impl Tx<'_> {
         Err(refused.unwrap_or_else(|| crate::cycle::conflict("设计确认前需交付可打开的方案文件")))
     }
 
+    /// `e` as it is, recorded as a refused delivery (`reject` mark with `code`) when it is a refusal.
+    pub(crate) fn refused(&self, item: &Item, s: &Session, code: &str, e: CoreError) -> CoreError {
+        if let CoreError::Status(409, why) = &e {
+            self.mark_reject(&item.workspace_id, &item.id, &Self::by(s), code, why);
+        }
+        e
+    }
+
     pub(crate) fn tool_deliver(
         &mut self,
         s: &Session,
@@ -1792,18 +1801,27 @@ impl Tx<'_> {
         }
         if self.workflow_child(&item)? {
             if !unfinished.is_empty() || item.plan.iter().any(|p| !p.done) {
-                return Err(crate::cycle::conflict(
-                    "工作单元还有未完成步骤，不能交给下游",
+                return Err(self.refused(
+                    &item,
+                    s,
+                    reject::UNIT_UNFINISHED,
+                    crate::cycle::conflict("工作单元还有未完成步骤，不能交给下游"),
                 ));
             }
+            // its refusals are recorded where they happen, each with its reason
             return self.workflow_report(s, summary, outputs, checks, true);
         }
         let blockers = self.workflow_blockers(item_id, true)?;
         if !blockers.is_empty() {
-            return Err(crate::cycle::conflict(format!(
-                "协作尚未完成，不能交付主事项：{}",
-                blockers.join("；")
-            )));
+            return Err(self.refused(
+                &item,
+                s,
+                reject::WORKFLOW_OPEN,
+                crate::cycle::conflict(format!(
+                    "协作尚未完成，不能交付主事项：{}",
+                    blockers.join("；")
+                )),
+            ));
         }
         if self
             .db()
@@ -1823,7 +1841,9 @@ impl Tx<'_> {
          * this goal the delivery is a design that waits for the owner's decision, whatever its goal
          * says; the delivery after the approval is the implementation */
         let design_report = if design_pending(self.db().store(), &item)? {
-            let report = self.design_file(item_id, outputs)?;
+            let report = self
+                .design_file(item_id, outputs)
+                .map_err(|e| self.refused(&item, s, reject::DESIGN_FILE, e))?;
             let goal_version = self
                 .db()
                 .goals(item_id)?
@@ -1912,8 +1932,11 @@ impl Tx<'_> {
             return settle(self.db(), item_id);
         }
         if checks.iter().any(|c| !c.valid_scope()) {
-            return Err(crate::cycle::conflict(
-                "检查范围 scope 只能是 unit、baseline 或 external",
+            return Err(self.refused(
+                &item,
+                s,
+                reject::SCOPE,
+                crate::cycle::conflict("检查范围 scope 只能是 unit、baseline 或 external"),
             ));
         }
         let unfinished_note = if unfinished.is_empty() {
@@ -1976,7 +1999,11 @@ impl Tx<'_> {
             )?;
         }
         /* a delivery waiting for acceptance before this one is void */
-        self.lc_invalidate(item_id, "有新的交付，上一次交付作废")?;
+        self.lc_invalidate(
+            item_id,
+            crate::cycle::void::REDELIVER,
+            "有新的交付，上一次交付作废",
+        )?;
         let d = self.db().decision_create(NewDecision {
             workspace_id: item.workspace_id.clone(),
             kind: "accept".into(),
@@ -3041,7 +3068,7 @@ impl Tx<'_> {
                     None,
                 )?;
                 tl(self, &i, &format!("返工：{text}"))?;
-                self.lc_invalidate(&i, "验收没有通过，返工")?;
+                self.lc_invalidate(&i, crate::cycle::void::REWORK, "验收没有通过，返工")?;
                 self.db()
                     .item_patch(&i, patch![stage: "执行", now: "按你的意见返工"])?;
                 self.send(
@@ -3269,7 +3296,11 @@ impl Tx<'_> {
                         )?;
                         let draft = self.last_agent_text(sid.as_deref().unwrap_or(""))?
                             + &plan_note(&self.item(&i)?.plan);
-                        self.lc_invalidate(&i, "你说它其实做完了，重新验收")?;
+                        self.lc_invalidate(
+                            &i,
+                            crate::cycle::void::REACCEPT,
+                            "你说它其实做完了，重新验收",
+                        )?;
                         let acc = self.new_decision(NewDecision {
                             workspace_id: d.workspace_id.clone(),
                             kind: "accept".into(),
@@ -3990,7 +4021,7 @@ impl Tx<'_> {
                         ))
                     })?;
                 self.st.marked_done.remove(id);
-                self.lc_invalidate(id, "你撤销了标记完成")?;
+                self.lc_invalidate(id, crate::cycle::void::UNDONE, "你撤销了标记完成")?;
                 self.db()
                     .timeline_add(id, actor, "me", action.label(), None)?;
                 settle(self.db(), id)?;

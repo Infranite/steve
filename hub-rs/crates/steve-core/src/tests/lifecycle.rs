@@ -225,7 +225,10 @@ fn a_no_to_the_release_holds_for_every_later_result_of_the_cycle() {
             .resolve(&r, "no", "走 PR 合并，不用发布", "me")
             .unwrap();
         // the agent's follow-up (a new message to it) voids the frozen result
-        k.core.tx().lc_invalidate(&x.id, "收到新的消息").unwrap();
+        k.core
+            .tx()
+            .lc_invalidate(&x.id, crate::cycle::void::MESSAGE, "收到新的消息")
+            .unwrap();
         k.rt.end_turn(&k.core, &x.session, "end_turn", None);
         assert_eq!(k.phase(&x.id), "active");
         let before = k.rt.prompts_of(&x.session).len();
@@ -1381,7 +1384,10 @@ fn frozen_in_git(k: &Kit) -> (super::Delivered, std::path::PathBuf, String) {
         super::fake_release_script("exit 0\n"),
     )
     .unwrap();
-    k.core.tx().lc_invalidate(&x.id, "有新的交付").unwrap();
+    k.core
+        .tx()
+        .lc_invalidate(&x.id, crate::cycle::void::REDELIVER, "有新的交付")
+        .unwrap();
     let d = k.decision(
         &x.id,
         Some(&x.session),

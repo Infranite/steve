@@ -37,6 +37,30 @@ use crate::error::{CoreError, Result, msg};
 use crate::repo::{Item, PlanStep};
 use crate::thread::flowback::{Update, flow_quiet};
 
+/// Why a closing was invalidated: the reason code of its `invalidate` mark, which the statistics
+/// count by (migration 92 gave the timeline lines from before the same codes).
+pub mod void {
+    /// The agent's plan has open steps again. Only closings from before #239 (their timeline lines):
+    /// a plan reported while closing is now only noted.
+    pub const PLAN: &str = "plan";
+    /// A new delivery replaced the one waiting for acceptance.
+    pub const REDELIVER: &str = "redeliver";
+    /// A message or supplement reached the item.
+    pub const MESSAGE: &str = "message";
+    /// The frozen result changed after the freeze.
+    pub const CHANGED: &str = "changed";
+    /// The work graph was replanned or reset.
+    pub const GRAPH: &str = "graph";
+    /// A work unit did not pass.
+    pub const UNIT_FAILED: &str = "unit_failed";
+    /// The acceptance asked for rework.
+    pub const REWORK: &str = "rework";
+    /// You said it was done after all: accepted again.
+    pub const REACCEPT: &str = "reaccept";
+    /// You undid marking it done.
+    pub const UNDONE: &str = "undone";
+}
+
 pub const READY: &str = "ready";
 pub const ACTIVE: &str = "active";
 pub const CLOSING: &str = "closing";
@@ -420,7 +444,7 @@ impl Tx<'_> {
                     return Err(conflict(steve_i18n::t!("core.item.ending_no_complete")));
                 }
                 /* a new delivery replaces the one waiting: its acceptance and operations go with it */
-                self.lc_invalidate(item_id, "有新的交付，上一次交付作废")?;
+                self.lc_invalidate(item_id, void::REDELIVER, "有新的交付，上一次交付作废")?;
             }
             _ => {}
         }
@@ -660,7 +684,8 @@ impl Tx<'_> {
 
     /// The frozen result is void (rework, new input, a new result): back to `active`, the acceptance
     /// card expires. `false` when nothing was waiting to close.
-    pub(crate) fn lc_invalidate(&mut self, item_id: &str, why: &str) -> Result<bool> {
+    /// `code` is one of [`void`], recorded with `why` on the `invalidate` mark.
+    pub(crate) fn lc_invalidate(&mut self, item_id: &str, code: &str, why: &str) -> Result<bool> {
         let i = self.item(item_id)?;
         let Some(c) = closing_of(&i).filter(|c| i.phase == CLOSING && c.kind == COMPLETE) else {
             return Ok(false);
@@ -688,6 +713,7 @@ impl Tx<'_> {
         )?;
         self.db()
             .timeline_add(item_id, "steve", "sys", &format!("收尾作废：{why}"), None)?;
+        self.mark_invalidate(&i.workspace_id, item_id, code, why); // stats
         Ok(true)
     }
 
@@ -699,7 +725,7 @@ impl Tx<'_> {
             CLOSED => Err(conflict(closed_msg())),
             CLOSING => match closing_of(&i).map(|c| c.kind).as_deref() {
                 Some(COMPLETE) => {
-                    self.lc_invalidate(item_id, "收到新的消息")?;
+                    self.lc_invalidate(item_id, void::MESSAGE, "收到新的消息")?;
                     Ok(())
                 }
                 _ => Err(conflict(steve_i18n::t!("core.item.ending_no_message"))),
@@ -1082,12 +1108,12 @@ impl Tx<'_> {
                 _ => "交付的版本变了".into(),
             };
             let why = format!("冻结之后结果又变了：{what}，需要重新交付");
-            self.lc_invalidate(item_id, &why)?;
+            self.lc_invalidate(item_id, void::CHANGED, &why)?;
             self.takeover_invalidated(item_id, &why)?;
             return Ok(false);
         }
         if g.input && !g.turn {
-            self.lc_invalidate(item_id, "收到新的消息")?;
+            self.lc_invalidate(item_id, void::MESSAGE, "收到新的消息")?;
             return Ok(false);
         }
         let g = if c.kind == COMPLETE && c.accepted {
