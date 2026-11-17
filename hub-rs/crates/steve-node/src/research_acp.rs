@@ -442,13 +442,27 @@ impl LocalNode {
             },
         );
         let properties = self.0.cfg.acp.adapter_properties(&req.harness);
-        let wrap = acp_job::wrap(
+        let base_wrap = acp_job::wrap(
             prepared.sandbox.as_ref(),
             properties.nested_sandbox.then_some(&self.0.confine),
             None,
             &self.0.cfg.acp.user_home,
             &properties.outer_sandbox_args,
         );
+        // Even FullAccess jobs get their own temporary directory. A tool honoring TMPDIR creates
+        // images inside this execution's grant, rather than in a shared /tmp that cannot be scoped.
+        let temp = r::guard::resolve(&cfg.scratch.join(&run_id).join("tmp"));
+        let wrap = |command, env: &mut steve_acp::oneshot::Env| {
+            let command = base_wrap(command, env);
+            env.push(("TMPDIR".into(), temp.clone().into_os_string()));
+            command
+        };
+        let image_scope = crate::inline_images::Scope::new(
+            prepared.scope.cwd.clone(),
+            prepared.scope.readable.clone(),
+            crate::inline_images::protected(&self.0.cfg.acp.steve_home, &self.0.cfg.home),
+        );
+        let mut images = crate::inline_images::Images::default();
         let cancel = tokio::sync::Notify::new();
         let mut run = Box::pin(acp_job::run_cancellable(
             acp_job::Request {
@@ -479,12 +493,12 @@ impl LocalNode {
         let mut why = None;
         let mut open_message = None;
         let mut pending_final = vec![];
-        let mut receive = |body: EventBody| -> ApiResult<()> {
-            let evs = vec![(Subject::Execution(exec.clone()), body.clone())];
+        let mut receive = async |body: EventBody| -> ApiResult<()> {
+            let original = vec![(Subject::Execution(exec.clone()), body.clone())];
             {
                 let mut state = state.lock().unwrap();
                 state.last_event = Some(Instant::now());
-                state.output += output_bytes(&evs);
+                state.output += output_bytes(&original);
                 state.event(&body, budget);
             }
             match &body {
@@ -496,6 +510,12 @@ impl LocalNode {
                 _ => {}
             }
             let final_usage = matches!(&body, EventBody::Usage { report } if report.measurement == Measurement::Final);
+            let evs = images
+                .process(&image_scope, exec, self.hub_files(), vec![body])
+                .await
+                .into_iter()
+                .map(|body| (Subject::Execution(exec.clone()), body))
+                .collect::<Vec<_>>();
             let result = self.emit(evs.clone());
             if final_usage && result.is_err() {
                 pending_final.extend(evs);
@@ -518,7 +538,7 @@ impl LocalNode {
                     }
                 }
                 Some(body) = rx.recv() => {
-                    if let Err(e) = receive(body) {
+                    if let Err(e) = receive(body).await {
                         failure = Some(r::RunStatus::Failed(e.to_string()));
                         break None;
                     }
@@ -541,8 +561,9 @@ impl LocalNode {
         }
         // Includes the Final produced during cancellation, before AttemptEnded is journaled.
         while let Ok(body) = rx.try_recv() {
-            let _ = receive(body);
+            let _ = receive(body).await;
         }
+        drop(receive);
         drop(run);
         if why.is_none() && state.lock().unwrap().output > spec.run.limits.max_output_bytes {
             why = Some(Stop::Output);
@@ -581,7 +602,17 @@ impl LocalNode {
             }
         };
         out.ms = started.elapsed().as_millis() as u64;
+        // Capture the final open block before run_research removes scratch and attachment dirs.
+        let captured = images
+            .capture(&image_scope, exec, self.hub_files(), true)
+            .await;
+        out.raw = images.rewrite(&out.raw);
         let mut tail = pending_final;
+        tail.extend(
+            captured
+                .into_iter()
+                .map(|body| (Subject::Execution(exec.clone()), body)),
+        );
         tail.extend(
             open_message
                 .map(|message| {

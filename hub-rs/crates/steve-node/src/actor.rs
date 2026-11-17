@@ -332,6 +332,8 @@ struct Run {
     usage_task: Option<UsageTask>,
     usage_pending: bool,
     unknown: Option<String>,
+    images: crate::inline_images::Images,
+    image_scope: crate::inline_images::Scope,
 }
 
 /// What a harness start is for.
@@ -722,7 +724,7 @@ impl Actor {
                             generation,
                             token,
                             update,
-                        } => self.update(generation, token, &update),
+                        } => self.update(generation, token, &update).await,
                         Msg::Permission {
                             generation,
                             token,
@@ -823,7 +825,7 @@ impl Actor {
                 generation,
                 token,
                 update,
-            } => self.update(generation, token, &update),
+            } => self.update(generation, token, &update).await,
             Msg::Permission {
                 generation,
                 token,
@@ -1205,6 +1207,12 @@ impl Actor {
             .cfg
             .acp
             .adapter_properties(&spec.run.choice.harness);
+        let image_root = root.canonicalize().unwrap_or_else(|_| root.clone());
+        let image_scope = crate::inline_images::Scope::new(
+            image_root.clone(),
+            vec![root.clone()],
+            crate::inline_images::protected(&self.inner.cfg.acp.steve_home, &self.inner.cfg.home),
+        );
         let mut norm = Normalizer::new(root, spec.run.attempt.as_str(), meter)
             .input_includes_cache(props.usage_input_includes_cache);
         if props.usage_prompt_cumulative {
@@ -1233,6 +1241,8 @@ impl Actor {
             usage_task: None,
             usage_pending: false,
             unknown: None,
+            images: Default::default(),
+            image_scope,
         });
         self.inner.reset_output(&self.session);
         if self.persisted_cancel() {
@@ -1477,7 +1487,7 @@ impl Actor {
                 .is_some_and(|r| r.token == token && r.phase == Phase::Prompting)
     }
 
-    fn update(&mut self, generation: u64, token: u64, u: &Value) {
+    async fn update(&mut self, generation: u64, token: u64, u: &Value) {
         let session = self.session.clone();
         let mut evs: Vec<(Subject, EventBody)> = vec![];
         let mut config: Vec<Fact> = vec![];
@@ -1505,7 +1515,14 @@ impl Actor {
                         if matches!(e, EventBody::ToolChanged { .. }) {
                             run.acted = true;
                         }
-                        evs.push((Subject::Execution(run.exec.clone()), e));
+                        let files = self.inner.files.lock().unwrap().clone();
+                        for e in run
+                            .images
+                            .process(&run.image_scope, &run.exec, files, vec![e])
+                            .await
+                        {
+                            evs.push((Subject::Execution(run.exec.clone()), e));
+                        }
                     }
                     f @ (Fact::Model(_) | Fact::Effort(_)) => config.push(f),
                     Fact::Nothing => {}
@@ -1959,6 +1976,28 @@ impl Actor {
                 }
             }
         };
+        if let Some(run) = self.run.as_mut() {
+            let closing = run
+                .norm
+                .finish()
+                .into_iter()
+                .filter_map(|f| match f {
+                    Fact::Event(e) => Some(e),
+                    _ => None,
+                })
+                .collect();
+            let files = self.inner.files.lock().unwrap().clone();
+            let mut closing = run
+                .images
+                .process(&run.image_scope, &run.exec, files.clone(), closing)
+                .await;
+            let tail = run
+                .images
+                .capture(&run.image_scope, &run.exec, files, true)
+                .await;
+            closing.splice(0..0, tail);
+            run.closing = Some(closing);
+        }
         self.end(completion);
     }
 
@@ -1995,14 +2034,18 @@ impl Actor {
         let closing = run
             .closing
             .get_or_insert_with(|| {
-                run.norm
-                    .finish()
-                    .into_iter()
-                    .filter_map(|f| match f {
-                        Fact::Event(e) => Some(e),
-                        _ => None,
-                    })
-                    .collect()
+                let mut closing = run.images.drain_original();
+                closing.extend(
+                    run.norm
+                        .finish()
+                        .into_iter()
+                        .filter_map(|f| match f {
+                            Fact::Event(e) => Some(e),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>(),
+                );
+                closing
             })
             .clone();
         let usage = run.final_usage.clone();

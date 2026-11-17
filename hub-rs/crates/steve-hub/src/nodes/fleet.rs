@@ -24,6 +24,7 @@ struct Entry {
     remote: Arc<RemoteNode>,
     runtime: Option<Arc<NodeRuntime>>,
     tools: Option<Arc<dyn HubTools>>,
+    files: Option<Arc<dyn HubFiles>>,
     /// The protocol of the Node's latest link since the Hub started (`None`: not linked yet).
     proto: Option<(u16, u16)>,
     /// What a remote Node last reported it could not link with, and when (ms), since it last
@@ -169,6 +170,7 @@ impl NodeFleet {
             remote: RemoteNode::new(node.clone()),
             runtime: None,
             tools: None,
+            files: None,
             proto: None,
             link_failure: None,
         });
@@ -316,10 +318,19 @@ impl NodeFleet {
     }
 
     pub(crate) fn files_for(&self, node: &NodeId) -> Arc<dyn HubFiles> {
-        Arc::new(NodeFiles::new(
-            self.store.clone(),
-            node.clone(),
-            self.data_dir.clone(),
-        ))
+        // begin/chunk/finish are separate RPCs (and a reconnect can replay them). Keep one
+        // bounded transfer registry per authenticated Node for the lifetime of this Hub.
+        self.entry(node, |entry| {
+            entry
+                .files
+                .get_or_insert_with(|| {
+                    Arc::new(NodeFiles::new(
+                        self.store.clone(),
+                        node.clone(),
+                        self.data_dir.clone(),
+                    ))
+                })
+                .clone()
+        })
     }
 }

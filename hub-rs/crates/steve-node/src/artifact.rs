@@ -159,6 +159,42 @@ pub fn read_delivery_file(
     read_open(base, anchor(base)?, location, expected, offset, max)
 }
 
+/// A reply image's root is captured before the harness can change it. Use the same descriptor
+/// walk as delivery, pinning the root's identity on every chunk as execution grants already do.
+#[derive(Clone)]
+pub(crate) struct ImageRoot {
+    pub path: std::path::PathBuf,
+    pub recorded: std::path::PathBuf,
+    device: u64,
+    inode: u64,
+}
+impl ImageRoot {
+    pub fn capture(path: &Path) -> ApiResult<Self> {
+        let recorded = path.to_path_buf();
+        let path = path.canonicalize().map_err(io_error)?;
+        let meta = anchor(&path)?.metadata().map_err(io_error)?;
+        Ok(Self {
+            path,
+            recorded,
+            device: meta.dev(),
+            inode: meta.ino(),
+        })
+    }
+    pub fn read(
+        &self,
+        location: &RelPath,
+        expected: Option<&Revision>,
+        offset: u64,
+    ) -> ApiResult<DeliveryChunk> {
+        let dir = anchor(&self.path)?;
+        let meta = dir.metadata().map_err(io_error)?;
+        if (meta.dev(), meta.ino()) != (self.device, self.inode) {
+            return Err(denied());
+        }
+        read_open(&self.path, dir, location, expected, offset, 256 * 1024)
+    }
+}
+
 fn read_open(
     base: &Path,
     mut dir: File,

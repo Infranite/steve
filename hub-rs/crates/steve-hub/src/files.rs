@@ -239,7 +239,7 @@ pub fn store(
     let sha256 = hex::encode(Sha256::digest(b));
     if let Some(dup) = r.file_same(ws, &sha256, &name)? {
         let p = blob_path(data_dir, &dup);
-        if std::fs::metadata(&p).map(|m| m.len()).ok() != Some(b.len() as u64) {
+        if !blob_matches(&p, b) {
             write_blob(&p, b).map_err(|e| BackendError::msg(e.to_string()))?;
         }
         return Ok(dup);
@@ -268,7 +268,7 @@ pub fn store(
 
 /// Atomically: a temporary file next to it, synced, then renamed over `p`, so a crash or power loss
 /// leaves either no blob or the whole one, never a truncated one.
-fn write_blob(p: &Path, b: &[u8]) -> std::io::Result<()> {
+pub(crate) fn write_blob(p: &Path, b: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
     use std::os::unix::fs::OpenOptionsExt;
     let dir = p
@@ -296,6 +296,30 @@ fn write_blob(p: &Path, b: &[u8]) -> std::io::Result<()> {
     written?;
     // the rename itself survives a power loss once the directory is synced
     std::fs::File::open(dir).and_then(|d| d.sync_all())
+}
+
+/// Check existing content, not just length: a same-sized corrupt blob must be repaired on retry.
+pub(crate) fn blob_matches(p: &Path, b: &[u8]) -> bool {
+    use std::io::Read;
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+    let Ok(mut f) = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
+        .open(p)
+    else {
+        return false;
+    };
+    let Ok(meta) = f.metadata() else { return false };
+    if !meta.is_file() || meta.nlink() != 1 || meta.len() != b.len() as u64 {
+        return false;
+    }
+    let mut existing = Vec::new();
+    (&mut f)
+        .take(b.len() as u64 + 1)
+        .read_to_end(&mut existing)
+        .is_ok()
+        && existing.len() == b.len()
+        && Sha256::digest(&existing) == Sha256::digest(b)
 }
 
 /// `FileRef` = `{id, name, mime, size}`, the copy every other place stores.

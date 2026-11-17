@@ -639,6 +639,124 @@ async fn the_owners_own_run_acts_on_the_machine() {
     assert_eq!(new["cwd"], w.root.to_str().unwrap(), "the user's home");
 }
 
+/// The real Node's research ACP path must keep TMPDIR images before its own cleanup. A second
+/// workspace gets another immutable attachment, and restricted runs cannot capture outside scope.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn temporary_inline_images_survive_research_cleanup_and_stay_scoped() {
+    use base64::Engine as _;
+    let w = World::new();
+    let hub = Hub::new(&w, "inline", true, 3).await;
+    let mut png = std::io::Cursor::new(vec![]);
+    image::DynamicImage::new_rgb8(2, 2)
+        .write_to(&mut png, image::ImageFormat::Png)
+        .unwrap();
+    let bytes = png.into_inner();
+    let question = format!(
+        "显示授权图片\n@msg image\n@image {}",
+        base64::engine::general_purpose::STANDARD.encode(&bytes)
+    );
+    let mut req = request(&w, "tr_inline_full", "default", &question);
+    req.full = true;
+    let seen = Seen::default();
+    let result = hub.adapter.research(req, &seen).await;
+    assert_eq!(result.end, RunEnd::Done, "{result:?}");
+    let source = PathBuf::from(w.read("image"));
+    assert!(
+        !source.exists(),
+        "research has removed its temporary source"
+    );
+    assert!(
+        result.text.starts_with("![授权二维码](/api/files/"),
+        "{}",
+        result.text
+    );
+    assert!(
+        result
+            .text
+            .contains("?ws=default) ![重复二维码](/api/files/")
+    );
+    assert!(!result.text.contains(source.to_str().unwrap()));
+    assert!(
+        seen.text
+            .lock()
+            .unwrap()
+            .last()
+            .unwrap()
+            .contains("/api/files/")
+    );
+    let id = result
+        .text
+        .split("/api/files/")
+        .nth(1)
+        .unwrap()
+        .split('?')
+        .next()
+        .unwrap();
+    let row = hub.store.files().get(id).unwrap().unwrap();
+    let saved = steve_core::attachments::blob_path(&hub.data, &row);
+    assert_eq!(std::fs::read(saved).unwrap(), bytes);
+    assert_eq!(
+        q::<i64>(&hub.store, "SELECT count(*) FROM files"),
+        1,
+        "duplicate reference is one blob"
+    );
+
+    let outside = w.root.join("outside.png");
+    std::fs::write(&outside, &bytes).unwrap();
+    let denied = format!(
+        "越界图片\n@msg denied\n@say 普通文本 ![越界]({})",
+        outside.display()
+    );
+    let result = hub
+        .adapter
+        .research(
+            request(&w, "tr_inline_denied", "default", &denied),
+            &Seen::default(),
+        )
+        .await;
+    assert_eq!(result.end, RunEnd::Done, "{result:?}");
+    assert!(result.text.contains("普通文本 ![越界]"));
+    assert!(!result.text.contains("/api/files/"));
+    assert_eq!(q::<i64>(&hub.store, "SELECT count(*) FROM files"), 1);
+
+    std::fs::write(w.proj.join("bad.png"), b"\x89PNG\r\n\x1a\ntruncated").unwrap();
+    std::fs::write(w.proj.join(".env.png"), &bytes).unwrap();
+    std::os::unix::fs::symlink(&outside, w.proj.join("link.png")).unwrap();
+    let bad =
+        "异常图片\n@msg bad\n@say 普通文本 ![坏图](bad.png) ![敏感](.env.png) ![链接](link.png)";
+    let result = hub
+        .adapter
+        .research(
+            request(&w, "tr_inline_invalid", "default", bad),
+            &Seen::default(),
+        )
+        .await;
+    assert_eq!(result.end, RunEnd::Done, "{result:?}");
+    assert!(result.text.contains("普通文本 ![坏图]"));
+    assert!(!result.text.contains("/api/files/"));
+    assert_eq!(q::<i64>(&hub.store, "SELECT count(*) FROM files"), 1);
+
+    let mut req = request(&w, "tr_inline_other", "other", &question);
+    req.full = true;
+    let result = hub.adapter.research(req, &Seen::default()).await;
+    assert_eq!(result.end, RunEnd::Done, "{result:?}");
+    assert!(result.text.contains("?ws=other)"), "{}", result.text);
+    let other = result
+        .text
+        .split("/api/files/")
+        .nth(1)
+        .unwrap()
+        .split('?')
+        .next()
+        .unwrap();
+    assert_ne!(other, id);
+    assert_eq!(
+        hub.store.files().get(other).unwrap().unwrap().workspace_id,
+        "other"
+    );
+    assert!(hub.adapter.shutdown(Duration::from_secs(5)).await);
+}
+
 /// The stop button ends the job on the Node with what it wrote, its processes gone; shutdown says
 /// the processes are gone only once they are, and admits nothing after.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
