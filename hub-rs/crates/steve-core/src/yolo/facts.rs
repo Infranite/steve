@@ -511,6 +511,29 @@ impl Engine {
         })
     }
 
+    /// How many times YOLO sent `d`'s subject again after a failed send: its resolved `fail`
+    /// cards it answered `retry` (the outbound paths mark those `decided_by`).
+    fn yolo_retries(&self, d: &Decision) -> ApiResult<u32> {
+        self.yolo().store().reader(|c| {
+            Ok::<_, ApiError>(
+                c.prepare_cached(
+                    "SELECT count(*) FROM decisions WHERE subject_type = ? AND subject_id = ?
+                        AND kind = 'fail' AND status = 'resolved'
+                        AND json_extract(result, '$.choice') = 'retry'
+                        AND json_extract(result, '$.decided_by') = ?",
+                )?
+                .query_row(
+                    params![
+                        d.subject_type,
+                        d.subject_id,
+                        steve_modules::outbound::YOLO_ACTOR
+                    ],
+                    |r| r.get(0),
+                )?,
+            )
+        })
+    }
+
     /// A channel message card: who it speaks as, the space's audience, the disclosure verdict.
     fn chan(&self, d: &Decision) -> ApiResult<Subject> {
         type Row = (String, String, i64, Option<String>, Option<String>);
@@ -562,6 +585,11 @@ impl Engine {
             customer: false,
             // the outbound path (steve-channels `Outbox::send`) marks what YOLO approved in your name
             ai_prefix: matches!(identity, Identity::SelfAccount | Identity::Proxy),
+            retries: if stage == OutboundStage::SendFailed {
+                self.yolo_retries(d)?
+            } else {
+                0
+            },
             send_option: send,
             stage,
         }))
@@ -635,6 +663,11 @@ impl Engine {
             customer: false,
             // steve-mail `Sender::execute` puts `[AI] ` on the body's first line for YOLO's approvals
             ai_prefix: true,
+            retries: if stage == OutboundStage::SendFailed {
+                self.yolo_retries(d)?
+            } else {
+                0
+            },
             send_option: send,
             stage,
         }))

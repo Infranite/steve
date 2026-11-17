@@ -45,7 +45,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use steve_flow::AdapterError;
-use steve_modules::accounts::connections::{ProviderError, WriteRefusal, may_write_in};
+use steve_modules::accounts::connections::{BlockScope, ProviderError, WriteRefusal, may_write_in};
 use steve_modules::decisions::{DecisionCx, DecisionHandler, choice_result};
 use steve_modules::hooks::ItemHooks;
 use steve_modules::outbound::{self as b1, Audience, CheckCx, CheckResult, KnowledgeUse, Verdict};
@@ -64,7 +64,9 @@ use crate::personas::{self, PersonaRow};
 use crate::respond::{self, DRAFT_OPTIONS, SUBJECT_MESSAGE};
 use crate::rules::{self, Act, ItemMode, Trigger};
 use crate::spaces::{self, Mode, SpaceRow};
-use crate::{ChannelResult, Channels, bindings, compose, fallback, messages, send_state};
+use crate::{
+    ChannelResult, Channels, bindings, compose, fallback, messages, send_state, write_blocks,
+};
 
 /// How long a message you approved waits before it goes out in your name, or as a bot speaking for you
 /// (undo window).
@@ -101,6 +103,28 @@ pub fn missing_permission(error: &str) -> bool {
         .iter()
         .any(|m| error.contains(m))
 }
+
+/// The question of the one card about writes a channel refuses for good ([`write_blocks`]): what
+/// happened, what Steve does meanwhile, and how to allow sending.
+fn blocked_notice(scope: BlockScope, space: &str, error: &str) -> String {
+    let hours = write_blocks::MEMORY_MS / (60 * 60 * 1000);
+    match scope {
+        BlockScope::Connection => format!(
+            "发到「{space}」的消息没有发出去：{error}。这个连接现在不能发消息：{hours} 小时内 Steve 不在它的会话里自动起草回复，之后被拒的消息也不再逐条提醒。要让 Steve 发出，请在渠道服务里允许这个连接发送（例如给它的凭据加上发送权限），允许后自动恢复"
+        ),
+        BlockScope::Target => format!(
+            "发到「{space}」的消息没有发出去：{error}。{hours} 小时内 Steve 不在这个会话里自动起草回复，之后被拒的消息也不再逐条提醒。要在这里发出，请在渠道服务里允许这个会话"
+        ),
+    }
+}
+
+fn scope_code(scope: BlockScope) -> &'static str {
+    match scope {
+        BlockScope::Connection => "connection",
+        BlockScope::Target => "target",
+    }
+}
+
 /// Appended to messages Steve sends as you after your trigger words, verbatim.
 pub const PROXY_MARK: &str = "（由 Steve 代发）";
 /// The longest text, in characters (like `POST /spaces/:id/messages`).
@@ -976,6 +1000,14 @@ pub fn verify(
     })
 }
 
+/// Purposes said by themselves, not asked for by anyone: a rule's acknowledgements. Not drafted
+/// where writes are refused for now ([`write_blocks`]); a rule's generated reply is not even
+/// generated there ([`crate::Replies`]). Your trigger words, `/bot`, a flow and an agent's update go
+/// on and are kept as not sent.
+fn automatic(p: Purpose) -> bool {
+    matches!(p, Purpose::Item | Purpose::HandoffAck)
+}
+
 /// Purposes whose sending answers the inbound message (its reaction turns “done”): a reply, your
 /// `/bot`. An item's “收到，已记为…” does not — the item ending does.
 fn completes(p: Purpose) -> bool {
@@ -993,6 +1025,9 @@ pub enum SendOutcome {
     Drafted { decision_id: String },
     /// The provider failed: `failed`, a `fail` decision (retry / discard).
     Failed { error: String, decision_id: String },
+    /// The provider refuses writes there for now ([`ProviderError::Blocked`]) and the one notice
+    /// about it is already out: `failed`, no card ([`write_blocks`]).
+    Blocked { error: String },
     /// Sent without an answer: `unknown`, it may be out (sent again under the same dedupe key
     /// while the provider drops repeats, else you are asked).
     Unknown { error: String },
@@ -1102,6 +1137,15 @@ impl Outbox {
             return Ok((crate::pipeline::outcome(&d), None));
         }
         let t = &req.target;
+        // an automatic answer where writes are refused for now is not drafted at all ([`write_blocks`])
+        if automatic(req.purpose)
+            && let Some(why) = ch
+                .store()
+                .reader(|c| write_blocks::active(c, &t.connection_id, &t.space_id, ch.now()))?
+        {
+            tracing::info!(space = %t.space_id, purpose = ?req.purpose, "not drafted: {why}");
+            return Ok((Delivered::Skipped, None));
+        }
         let mut text = req.text.trim().to_string();
         if text.is_empty() {
             return Err(ApiError::invalid("text"));
@@ -1294,6 +1338,7 @@ impl Outbox {
                 message_id: id,
                 decision_id,
             },
+            SendOutcome::Blocked { .. } => Delivered::Blocked { message_id: id },
             SendOutcome::Unknown { .. } | SendOutcome::Skipped => {
                 Delivered::Queued { message_id: id }
             }
@@ -1517,7 +1562,7 @@ impl Outbox {
         });
         let (space, mode, adapter, text, at, in_thread) = match prep {
             Ok(x) => x,
-            Err(e) => return self.failed(ch, &row, &e.to_string(), claim),
+            Err(e) => return self.failed(ch, &row, &e.to_string(), None, claim),
         };
         // the adapter, on the connection as it is now: paused, to be authorized again or revoked, or
         // (in your name) sending as you turned off since the approval → not sent
@@ -1543,7 +1588,7 @@ impl Outbox {
             Err(e) => {
                 ch.store()
                     .transaction(|tx| send_state::forget(tx, &row.id))?;
-                return self.failed(ch, &row, &e.to_string(), claim);
+                return self.failed(ch, &row, &e.to_string(), None, claim);
             }
         };
         #[cfg(feature = "fake")]
@@ -1657,6 +1702,8 @@ impl Outbox {
                         )?;
                     }
                     send_state::forget(tx, &row.id)?;
+                    // it went through: neither the connection nor the chat refuses writes now
+                    write_blocks::lift_after_send(tx, &space.connection_id, &row.space_id)?;
                     base::audit(
                         tx,
                         &row.ws,
@@ -1682,7 +1729,14 @@ impl Outbox {
             Err(e) => {
                 ch.store()
                     .transaction(|tx| send_state::forget(tx, &row.id))?;
-                let r = self.failed(ch, &row, &e.to_string(), claim);
+                // refused for good: remembered for the connection or the chat, one notice
+                let block = match &e {
+                    ProviderError::Blocked(scope, _) => {
+                        Some((*scope, space.connection_id.as_str()))
+                    }
+                    _ => None,
+                };
+                let r = self.failed(ch, &row, &e.to_string(), block, claim);
                 ch.react_answered(&row.id, false).await;
                 r
             }
@@ -1725,16 +1779,21 @@ impl Outbox {
 
     /// The provider failed: `failed`, a `fail` decision (retry / discard). A missing permission
     /// can't be fixed by retrying (nor by YOLO): only discard, and the question says where to grant it.
+    /// `block`: the provider refuses writes on that connection (or in this chat) for good
+    /// ([`ProviderError::Blocked`]): remembered ([`write_blocks`]); only the first such message gets
+    /// a card, the notice of how to allow sending, and the others stay `failed` without one.
     fn failed(
         &self,
         ch: &Channels,
         row: &OutRow,
         error: &str,
+        block: Option<(BlockScope, &str)>,
         claim: i64,
     ) -> ChannelResult<SendOutcome> {
         let permanent = missing_permission(error);
-        tracing::info!(message = %row.id, error, "channel message not sent");
-        let d = ch.store().transaction(|tx| -> ChannelResult<Option<String>> {
+        tracing::info!(message = %row.id, error, blocked = block.is_some(), "channel message not sent");
+        let now = ch.now();
+        let d = ch.store().transaction(|tx| -> ChannelResult<Option<Option<String>>> {
             // only on our claim: a late answer of one another took over changes nothing
             if tx.execute(
                 "UPDATE chan_messages SET status = 'failed', sent = NULL WHERE id = ? AND status = 'pending' AND sent = ?",
@@ -1746,6 +1805,30 @@ impl Outbox {
             tx.execute("UPDATE output_deliveries SET last_error=? WHERE message_id=?",params![error,row.id])?;
             let space =
                 spaces::get(tx, &row.space_id)?.ok_or_else(|| ApiError::not_found("空间"))?;
+            if let Some((scope, conn)) = block {
+                let r = write_blocks::record(tx, &row.ws, conn, &row.space_id, scope, error, now)?;
+                let d = if r.notice {
+                    Some(open_fail(
+                        tx,
+                        row,
+                        blocked_notice(scope, &space_name(&space), error),
+                        &BLOCKED_OPTIONS,
+                    )?)
+                } else {
+                    None
+                };
+                base::audit(
+                    tx,
+                    &row.ws,
+                    "steve",
+                    "chan_message.send.blocked",
+                    &row.id,
+                    &json!({"space": row.space_id, "connection": conn, "scope": scope_code(scope),
+                            "notice": d}),
+                )?;
+                messages::event(tx, &row.ws, &row.space_id, &row.id);
+                return Ok(Some(d));
+            }
             let d = if permanent {
                 open_fail(
                     tx,
@@ -1773,12 +1856,15 @@ impl Outbox {
                 &json!({"space": row.space_id}),
             )?;
             messages::event(tx, &row.ws, &row.space_id, &row.id);
-            Ok(Some(d))
+            Ok(Some(Some(d)))
         })?;
         Ok(match d {
-            Some(decision_id) => SendOutcome::Failed {
+            Some(Some(decision_id)) => SendOutcome::Failed {
                 error: error.into(),
                 decision_id,
+            },
+            Some(None) => SendOutcome::Blocked {
+                error: error.into(),
             },
             None => SendOutcome::Skipped,
         })
@@ -2200,6 +2286,9 @@ impl Outbox {
             Delivered::Sent { .. } => SRC_POSTED.into(),
             Delivered::Failed { .. } => {
                 "Not posted: the chat did not accept it. The user can retry.".into()
+            }
+            Delivered::Blocked { .. } => {
+                "Not posted: this chat does not accept messages from Steve for now (read-only). The user was told how to allow sending.".into()
             }
             Delivered::Drafted { .. } => match r.filter(|r| r.verdict != Verdict::Pass) {
                 Some(r) => format!(

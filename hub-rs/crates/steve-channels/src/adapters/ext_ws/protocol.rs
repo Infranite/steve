@@ -154,12 +154,12 @@
 //! ### 3.6 Write policy
 //!
 //! - `allowed`: every write may be attempted.
-//! - `restricted`: only some targets accept writes (for example only the user's own chats). The Hub attempts writes normally. A write to a refused target fails with `target_forbidden` (-32016): that one action is `Rejected`, and the connection **stays writable**. Nothing flips to read-only. The UI shows "writes limited by the channel service". Repeated refusals for the same chat are remembered for 24 h, so the Hub doesn't draft replies there.
+//! - `restricted`: only some targets accept writes (for example only the user's own chats). The Hub attempts writes normally. A write to a refused target fails with `target_forbidden` (-32016): that one action is `Blocked` for that chat, and the connection **stays writable**. Nothing flips to read-only. The UI shows "writes limited by the channel service". Repeated refusals for the same chat are remembered for 24 h, so the Hub doesn't draft replies there.
 //! - `forbidden`: see below.
 //!
 //! If `write_policy` is `forbidden`, the connection is **read-only**. The Hub keeps receiving and
 //! shows "read-only: the channel service forbids writes". Every outbound action fails locally with
-//! `ProviderError::Rejected`, and nothing is sent. The policy can change mid-session, because
+//! `ProviderError::Blocked` for the whole connection, and nothing is sent. The policy can change mid-session, because
 //! `session.status` (§4.6) carries `write_policy`. A write that crosses the change in flight gets
 //! `write_forbidden`, and the Hub then behaves as for `forbidden`.
 //!
@@ -464,17 +464,17 @@
 //! | `session_expired` | -32003 | no | no side effect | `Auth`: shows reauth, keeps the socket, waits for `session.status ok` |
 //! | `session_locked` | -32004 | after `session.status ok` | no side effect | degraded ("the channel service is locked"); keeps the socket |
 //! | `account_changed` | -32005 | no | refused before any side effect | `Auth`: reauth, close; keeps the cursor until the user re-binds |
-//! | `write_forbidden` | -32006 | no | no side effect | read-only (§3.6); the action is `Rejected` |
+//! | `write_forbidden` | -32006 | no | no side effect | read-only (§3.6); the action is `Blocked` for the connection |
 //! | `rate_limited` | -32007 | after `data.retry_after_ms` | same key, no duplicates | backoff with jitter (§2); `Transient` once retries run out |
 //! | `not_found` | -32008 | no | n/a | `Rejected`; for media, `NotFound` (`Recalled` if `data.recalled`) |
-//! | `forbidden` | -32009 | no | n/a | `Rejected`; for media, `NoPermission`; for people, a missing permission |
+//! | `forbidden` | -32009 | no | n/a | `Rejected`; on a write, `Blocked` for the connection (its credential may not write); for media, `NoPermission`; for people, a missing permission |
 //! | `unknown_cursor` | -32010 | resubscribe | n/a | §5.7 step 3 |
 //! | `cursor_too_old` | -32011 | resubscribe | n/a | §5.7 step 3 |
 //! | `too_large` | -32012 | no | n/a | `Rejected`; for media, `TooLarge` |
 //! | `idempotency_conflict` | -32013 | no | the key was used for other params | Hub bug: `Rejected`, logged |
 //! | `upstream_unavailable` | -32014 | with backoff | key-protected | `Transient`; shown as degraded, not as an error |
 //! | `timeout` | -32015 | reads yes; writes with the same key | key-protected | `Transient` |
-//! | `target_forbidden` | -32016 | no | no side effect | the action is `Rejected`; the connection stays writable (§3.6 `restricted`) |
+//! | `target_forbidden` | -32016 | no | no side effect | the action is `Blocked` for that chat; the connection stays writable (§3.6 `restricted`) |
 //!
 //! - **Hub-side timeouts.** Hello and ping: 10 s. Reads and writes: 30 s. A history page: 60 s.
 //!   When a write times out, its outcome is unknown, so the Hub retries it only with the same
@@ -676,8 +676,12 @@
 //! - **Gaps**: `["*"]` reads every chat the connection has (the 200 most recently active). A window
 //!   that could not be read whole becomes one line in the Hub's next report, not a line on the
 //!   space (§5.5).
-//! - **`restricted`**: a refused write (`target_forbidden`) is rejected and the connection stays
-//!   writable; refusals are not yet remembered per chat to stop drafting replies there (§3.6).
+//! - **Refused writes** (§3.6): a refusal is remembered for 24 h, for the chat (`target_forbidden`)
+//!   or for the whole connection (`forbidden` policy, `write_forbidden`, `forbidden` on a write).
+//!   Meanwhile the Hub drafts no automatic replies there, and only the first refused message asks
+//!   the user (one card explaining how to allow sending); later ones are kept as not sent. A
+//!   session that reports a writable policy lifts the connection's memory at once (`allowed` also
+//!   lifts its chats'), and so does a write that goes through.
 //! - **Item types** `message_recalled`, `message_edited` and `chat` with `change: members` are
 //!   skipped and acked; `chat` `joined`, `left` and `renamed` are applied (§5.2).
 //! - **Not called by Hub v1**: `chats.list`, `chats.members`, `chats.resolve`, `messages.edit`,

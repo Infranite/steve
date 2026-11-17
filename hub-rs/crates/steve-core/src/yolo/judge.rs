@@ -58,7 +58,13 @@ pub struct Policy {
     /// nobody reads it as the user, and it can still be recalled.
     pub chan_bot_delay_s: u64,
     pub chan_retry_delay_s: u64,
+    /// How many times YOLO sends one message or mail again after its send failed; after that the
+    /// card stays for the user ([`CHAN_RETRY_MAX`]).
+    pub chan_retry_max: u32,
 }
+
+/// [`Policy::chan_retry_max`] by default: a failure that survives two retries is not a blip.
+pub const CHAN_RETRY_MAX: u32 = 2;
 
 impl Default for Policy {
     fn default() -> Self {
@@ -80,6 +86,7 @@ impl Default for Policy {
             chan_delay_s: 600,
             chan_bot_delay_s: 60,
             chan_retry_delay_s: 300,
+            chan_retry_max: CHAN_RETRY_MAX,
         }
     }
 }
@@ -105,6 +112,8 @@ impl Policy {
             chan_delay_s: 0,
             chan_bot_delay_s: 0,
             chan_retry_delay_s: 0,
+            // a bound, not a switch: even the widest policy does not retry a failing send forever
+            chan_retry_max: CHAN_RETRY_MAX,
         }
     }
 }
@@ -220,6 +229,8 @@ pub struct Outbound {
     pub ai_prefix: bool,
     /// The option that sends (`yes`, `retry`, `send`…), as on the card.
     pub send_option: Option<String>,
+    /// How many times YOLO already sent it again after a failed send.
+    pub retries: u32,
     /// draft | leak_draft | send_failed | handoff
     pub stage: OutboundStage,
 }
@@ -1121,6 +1132,12 @@ fn outbound(o: &Outbound, p: &Policy, what: &str) -> Verdict {
                 return decline(&format!("{what}.customer"), "客户群留给你");
             }
             let retry = o.stage == OutboundStage::SendFailed;
+            if retry && o.retries >= p.chan_retry_max {
+                return decline(
+                    &format!("{what}.retry_limit"),
+                    &format!("YOLO 已经重发过 {} 次，还是没发出去，留给你", o.retries),
+                );
+            }
             let (rule, delay) = match o.identity {
                 Identity::Bot => {
                     if !p.chan_bot_internal {

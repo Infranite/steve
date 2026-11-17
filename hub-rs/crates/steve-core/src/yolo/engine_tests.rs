@@ -1308,3 +1308,62 @@ fn a_permission_of_a_node_item_asks_its_node_nothing() {
     let asked = remote.asked.lock().unwrap().clone();
     assert!(asked.is_empty(), "{asked:?}");
 }
+
+/// A failed send YOLO already sent again: the facts count its earlier retries (its resolved `fail`
+/// cards answered `retry` by YOLO; yours do not count), and past [`judge::CHAN_RETRY_MAX`] the card
+/// stays for you.
+#[test]
+fn a_failed_send_counts_yolos_earlier_retries() {
+    let t = t();
+    let c = rusqlite::Connection::open(t.kit.home().join("data/steve.sqlite3")).unwrap();
+    c.execute_batch(&format!(
+        "INSERT INTO spaces(id,workspace_id,system_id,kind,external_id,name,created,updated)
+           VALUES ('sp','{WS}','slack','group','G1','g',1,1);
+         INSERT INTO chan_messages(id,workspace_id,space_id,direction,status,created)
+           VALUES ('cm','{WS}','sp','out','failed',1);"
+    ))
+    .unwrap();
+    let card = || {
+        t.kit
+            .db()
+            .decision_create(NewDecision {
+                workspace_id: WS.into(),
+                kind: "fail".into(),
+                subject_type: "chan_message".into(),
+                subject_id: "cm".into(),
+                item_id: None,
+                session_id: None,
+                question: "没有发出去".into(),
+                draft: Some("hi".into()),
+                options: Some(vec!["retry".into(), "discard".into()]),
+                requested_by: "steve".into(),
+            })
+            .unwrap()
+            .id
+    };
+    let resolve = |id: &str, result: Value| {
+        c.execute(
+            "UPDATE decisions SET status = 'resolved', result = ? WHERE id = ?",
+            rusqlite::params![result.to_string(), id],
+        )
+        .unwrap();
+    };
+    let retries = |d: &str| {
+        let g = t.engine.gather(&t.decision(d), &Policy::default()).unwrap();
+        let judge::Subject::Chan(o) = &g.facts.subject else {
+            panic!("{:?}", g.facts.subject)
+        };
+        assert_eq!(o.stage, judge::OutboundStage::SendFailed);
+        o.retries
+    };
+    let d = card();
+    assert_eq!(retries(&d), 0);
+    resolve(&d, json!({"choice": "retry", "decided_by": "yolo"}));
+    // your own retry is yours, not YOLO's
+    let d = card();
+    resolve(&d, json!({"choice": "retry"}));
+    let d = card();
+    resolve(&d, json!({"choice": "retry", "decided_by": "yolo"}));
+    let d = card();
+    assert_eq!(retries(&d), judge::CHAN_RETRY_MAX);
+}

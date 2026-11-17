@@ -58,9 +58,9 @@ pub use integration::{
 pub use oauth::{ClientAuth, OAuthClient, OAuthSpec, TokenSet, TokenStyle};
 pub use pending::{PendingStates, STATE_TTL_MS};
 pub use provider::{
-    AccountInfo, AuthKind, CAPS, CONFIG_VERSION_KEY, ConnectionProvider, FieldDef, FieldOut,
-    Health, Minted, Owner, PAIR_KEY, Paired, Pairing, ProviderError, StewardHint, TokenKind,
-    fields_shown, integration_shown, shown,
+    AccountInfo, AuthKind, BlockScope, CAPS, CONFIG_VERSION_KEY, ConnectionProvider, FieldDef,
+    FieldOut, Health, Minted, Owner, PAIR_KEY, Paired, Pairing, ProviderError, StewardHint,
+    TokenKind, fields_shown, integration_shown, shown,
 };
 pub use service::{
     AdapterOut, CALLBACK_PATH, Connected, ConnectionOut, ConnectionUsage, Connections,

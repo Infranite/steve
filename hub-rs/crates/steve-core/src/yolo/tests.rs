@@ -884,6 +884,7 @@ fn outbound(
         customer: false,
         ai_prefix,
         send_option: Some("yes".into()),
+        retries: 0,
         stage,
     }
 }
@@ -1343,6 +1344,44 @@ fn every_row_of_the_table() {
             "retry",
         ),
         (
+            "chan retry, twice already",
+            facts(
+                "fail",
+                "chan_message",
+                &["retry", "discard"],
+                Subject::Chan(Outbound {
+                    send_option: Some("retry".into()),
+                    retries: CHAN_RETRY_MAX,
+                    ..outbound(
+                        Identity::Bot,
+                        Disclosure::Pass,
+                        false,
+                        OutboundStage::SendFailed,
+                    )
+                }),
+            ),
+            "chan.retry_limit",
+        ),
+        (
+            "chan blocked send",
+            facts(
+                "fail",
+                "chan_message",
+                &["discard"],
+                Subject::Chan(Outbound {
+                    send_option: None,
+                    ..outbound(
+                        Identity::SelfAccount,
+                        Disclosure::Pass,
+                        true,
+                        OutboundStage::Blocked,
+                    )
+                }),
+            ),
+            // a send no retry can fix (a read-only connection): a hard limit, never answered
+            "limit.6",
+        ),
+        (
             "chan handoff",
             facts(
                 "ask",
@@ -1630,6 +1669,7 @@ fn bot_first_send_cools_shorter_than_self() {
     // a stored policy from before the setting keeps working and gets the new default
     let old: Policy = serde_json::from_value(serde_json::json!({"chan_delay_s": 900})).unwrap();
     assert_eq!((old.chan_delay_s, old.chan_bot_delay_s), (900, 60));
+    assert_eq!(old.chan_retry_max, CHAN_RETRY_MAX);
 }
 
 #[test]
@@ -1784,6 +1824,7 @@ fn arb_policy() -> impl Strategy<Value = Policy> {
             chan_delay_s: delay,
             chan_bot_delay_s: delay,
             chan_retry_delay_s: delay,
+            chan_retry_max: CHAN_RETRY_MAX,
         })
 }
 

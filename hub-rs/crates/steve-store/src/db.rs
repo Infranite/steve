@@ -178,6 +178,9 @@ pub const MIGRATIONS: &[&str] = &[
     // 88: one space per platform chat: identities numbered per space with their platform and owner;
     // what each message is seen by.
     include_str!("../migrations/088.sql"),
+    // 89: writes a channel refused for good (read-only connections, chats that refuse writes),
+    // remembered for a day.
+    include_str!("../migrations/089.sql"),
 ];
 
 /// 027's item columns and their one-time backfill (applied by `run_pending` when `items.phase` is missing).

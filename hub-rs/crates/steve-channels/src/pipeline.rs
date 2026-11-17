@@ -83,6 +83,10 @@ pub(crate) fn outcome(d: &Delivery) -> Delivered {
             message_id: d.message_id.clone(),
             decision_id: id.clone(),
         },
+        // refused for good, after the one notice about it (`write_blocks`)
+        ("failed", None) => Delivered::Blocked {
+            message_id: d.message_id.clone(),
+        },
         ("sent" | "recalled", _) => Delivered::Sent {
             message_id: d.message_id.clone(),
         },

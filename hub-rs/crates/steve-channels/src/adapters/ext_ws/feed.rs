@@ -28,7 +28,7 @@ use super::provider::{
     self, ExtWs, GAP_PAGE, GAP_PAGES, OpenFail, call_err, full_jitter, open_err, same_identity,
 };
 use super::session::{CallError, Note, OpenError, Session};
-use super::wire::{self, Chat, Reason, SessionStatus, Status, WireMessage};
+use super::wire::{self, Chat, Reason, SessionStatus, Status, WireMessage, WritePolicy};
 use crate::Channels;
 use crate::channel::{InboundMessage, SpaceEvent};
 use crate::lifecycle::{ConnRun, ConnState, ConnectionHook, default_fingerprint};
@@ -347,6 +347,7 @@ impl Feed<'_> {
     async fn on_status(&mut self, st: Status, first: bool) -> Step {
         let was = self.s.status().status;
         self.s.set_status(st.clone());
+        self.lift_refusals(st.write_policy);
         let cx = &self.run.cx;
         match st.status {
             SessionStatus::Ok => {
@@ -378,6 +379,26 @@ impl Feed<'_> {
                 cx.report(Health::Failed(msg)).await;
                 Ok(())
             }
+        }
+    }
+
+    /// The service may write again (§3.6): what the Hub remembered of its refusals is lifted, the
+    /// connection's at once (`restricted`), its chats' too when nothing is refused (`allowed`).
+    fn lift_refusals(&self, policy: WritePolicy) {
+        if policy == WritePolicy::Forbidden {
+            return;
+        }
+        let every = policy == WritePolicy::Allowed;
+        let conn = self.conn();
+        match self
+            .hook
+            .channels
+            .store()
+            .transaction(|tx| crate::write_blocks::lift_connection(tx, conn, every))
+        {
+            Ok(true) => tracing::info!(conn, "ext_ws: writes allowed again"),
+            Ok(false) => {}
+            Err(e) => tracing::warn!(conn, "ext_ws: refused writes not lifted: {e}"),
         }
     }
 
