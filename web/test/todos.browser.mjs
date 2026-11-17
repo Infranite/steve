@@ -33,7 +33,9 @@ function fixture() {
     todo("Sort the November receipts", { state: "handed", item_id: "ST-433", closed: at(17, 15) }),
     todo("Settle the coordinator interface", { state: "done", parent: g, closed: at(6, 12) }),
   ]
-  return { todos, links: { goal1: ["ST-402", "ST-427"] }, calls: [] }
+  /* made: the items POST /items made, by client_id, as the Hub's send dedupe keeps them; failState: answer the next
+   * hand's state change with an error */
+  return { todos, links: { goal1: ["ST-402", "ST-427"] }, calls: [], made: new Map(), failState: false }
 }
 function progressOf(m, id) {
   const kids = m.todos.filter((x) => x.parent?.id === id), its = new Set(), states = []
@@ -63,6 +65,12 @@ async function open({ theme = "light", width = 1440, hash = "/#/todos", lang = "
     if (path === "/api/me") return json({ user: { id: "reader", name: "Morgan", email: null, role: "member" }, version: "fixture", web_version: "fixture" })
     if (path === "/api/plugins/themes") return json({ themes: [] })
     if (path === "/api/onboard") return json({ state: "done" })
+    if (path === "/api/items" && method === "POST") {
+      /* slow, so a second click lands while the first is on its way */
+      await new Promise((r) => setTimeout(r, 300))
+      if (!m.made.has(body.client_id)) m.made.set(body.client_id, item(500 + m.made.size, body.goal, "run"))
+      return json(m.made.get(body.client_id))
+    }
     if (path === "/api/digest/todos" && method === "GET") return json({ todos: m.todos.map((x) => view(m, x)) })
     if (path === "/api/digest/todos" && method === "POST") {
       const x = todo(body.text, { kind: body.kind ?? "todo", due: body.due ?? null, due_date: body.due_date ?? null, pri: body.pri ?? 0, target_date: body.target_date ?? null, parent: body.parent ? { id: body.parent, text: m.todos.find((y) => y.id === body.parent)?.text } : null })
@@ -75,6 +83,7 @@ async function open({ theme = "light", width = 1440, hash = "/#/todos", lang = "
       if (one[2]) { m.links[x.id] = body.linked === false ? (m.links[x.id] ?? []).filter((i) => i !== body.item) : [...(m.links[x.id] ?? []), body.item]; return json({ changed: true, change: "ch_link" }) }
       if (method === "GET") return json(x.kind === "goal" ? { ...view(m, x), children: m.todos.filter((y) => y.parent?.id === x.id).map((y) => view(m, y)), items: m.links[x.id] ?? [] } : view(m, x))
       if (method === "PATCH") { Object.assign(x, body); return json({ ok: true, change: "ch_edit_" + x.id }) }
+      if (method === "POST" && body.state === "handed" && m.failState) { m.failState = false; return json({ error: "暂时写不进去" }, 500) }
       if (method === "POST") { x.state = body.state; x.item_id = body.item ?? null; x.closed = body.state === "open" ? null : NOW.getTime(); return json({ ok: true, change: "ch_state_" + x.id, next: null }) }
     }
     if (path.startsWith("/api/digest/changes/") && path.endsWith("/undo")) {
@@ -148,6 +157,25 @@ try {
     await page.locator("[data-cmd-new-todo]").click()
     await page.locator("[data-quick-add=todo] [data-quick-input]").waitFor()
     assert.equal(await page.evaluate(() => document.activeElement?.hasAttribute("data-quick-input")), true)
+    await page.close()
+  }
+
+  /* 交给 Bot: a double click makes one item, and a retry after the todo's half failed gets the same item back */
+  {
+    const { page, m } = await open({ hash: "/#/todos/td_7" })
+    const hand = page.locator("[data-detail-hand]")
+    m.failState = true
+    await hand.dblclick()
+    await page.getByText("暂时写不进去").first().waitFor()
+    await page.waitForFunction(() => !document.querySelector("[data-detail-hand]")?.hasAttribute("disabled"))
+    await hand.click()
+    await page.getByText("已交给 Bot：事项 ST-500").first().waitFor()
+    const posts = m.calls.filter((c) => c.path === "/api/items")
+    assert.equal(posts.length, 2, "the double click sent once, the retry once more")
+    assert.equal(posts[0].body.client_id, posts[1].body.client_id)
+    assert.equal(posts[0].body.client_id, "todo-hand:td_7:" + m.todos.find((x) => x.id === "td_7").updated)
+    assert.equal(m.made.size, 1, "one item")
+    assert.deepEqual(m.calls.filter((c) => c.path === "/api/digest/todos/td_7").map((c) => c.body), [{ state: "handed", item: "ST-500" }, { state: "handed", item: "ST-500" }])
     await page.close()
   }
 

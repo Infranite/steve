@@ -9,10 +9,10 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSepara
 import { Progress } from "@/components/ui/progress"
 import { t as t_, useT } from "@/i18n"
 import { monthDayShort, weekday } from "@/i18n/format"
-import { newItem, st, toast } from "@/store"
+import { emit, newItem, st, toast } from "@/store"
 import { Card, go, Status } from "@/ui"
-import { change, todosApi } from "./data"
-import { dateOf, dayOf, dueWhen, isSnoozed, parseQuick, snoozeChoices, type Goal, type Todo, type Token } from "./model"
+import { change, loadTodos, todosApi } from "./data"
+import { dateOf, dayOf, dueWhen, handClientId, isSnoozed, parseQuick, snoozeChoices, type Goal, type Todo, type Token } from "./model"
 
 /* ───────── a deadline in words ───────── */
 /** "18:00", "明天", "周五 18:00", "11-20": the deadline relative to today, red once it has passed */
@@ -91,13 +91,25 @@ export function QuickAdd({ goals, parent, kind = "todo", autoFocus, className, p
 }
 
 /* ───────── actions on a todo ───────── */
+const handKey = (x: Pick<Todo, "id">) => "todo-hand:" + x.id
+/** a hand of this todo is on its way: its 交给 Bot buttons wait */
+export const handing = (x: Pick<Todo, "id">) => st.pendingActions.has(handKey(x))
 /** hands a todo to a Bot: a new item from its words (the Bot is chosen as for any new item), and the todo marked handed
- *  to it. The item is not taken back by undo: it is shown in the toast instead. */
+ *  to it. The item is not taken back by undo: it is shown in the toast instead. One hand at a time per todo, and the
+ *  item's send key comes from the todo as it is ({@link handClientId}), so a second click or a retry after the second
+ *  call failed gets back the item the first one made instead of starting the work twice. */
 export async function handToBot(x: Todo) {
-  const id = await newItem(x.text)
-  if (!id) return
-  const r = await change(todosApi.state(x.id, "handed", id))
-  if (r) toast(t_("todos:toast.handed", { id }), { action: { label: t_("todos:action.openItem"), onClick: () => go("#/items/" + id) } })
+  const key = handKey(x)
+  if (st.pendingActions.has(key)) return
+  st.pendingActions.add(key); emit()
+  try {
+    const id = await newItem(x.text, undefined, undefined, "start", handClientId(x))
+    if (!id) return
+    const r = await change(todosApi.state(x.id, "handed", id))
+    if (r) toast(t_("todos:toast.handed", { id }), { action: { label: t_("todos:action.openItem"), onClick: () => go("#/items/" + id) } })
+    /* the buttons wait until the list shows the todo handed */
+    await loadTodos()
+  } finally { st.pendingActions.delete(key); emit() }
 }
 export const complete = (x: Todo, done: boolean) =>
   change(todosApi.state(x.id, done ? "done" : "open"), done ? t_(x.recur ? "todos:toast.doneNext" : "todos:toast.done", { text: x.text }) : t_("todos:toast.reopened"))
@@ -127,7 +139,7 @@ export function TodoMenu({ x, now }: { x: Todo; now: number }) {
       <DropdownMenuTrigger render={<Button size="icon-sm" variant="ghost" className="size-7 text-muted-foreground" aria-label={t("todos:action.more", { text: x.text })} data-todo-more />}><MoreHorizontalIcon /></DropdownMenuTrigger>
       <DropdownMenuContent align="end" className="min-w-44">
         <DropdownMenuItem onClick={() => go("#/todos/" + x.id)}>{t("todos:action.open")}</DropdownMenuItem>
-        {x.state === "open" && <DropdownMenuItem onClick={() => void handToBot(x)} data-menu-hand><BotIcon />{t("todos:action.hand")}</DropdownMenuItem>}
+        {x.state === "open" && <DropdownMenuItem disabled={handing(x)} onClick={() => void handToBot(x)} data-menu-hand><BotIcon />{t("todos:action.hand")}</DropdownMenuItem>}
         {x.state === "open" && snoozeChoices(now).map((c) => <DropdownMenuItem key={c.key} onClick={() => void snooze(x, c.at)}><CalendarClockIcon />{t(`todos:snooze.${c.key}`)}</DropdownMenuItem>)}
         <DropdownMenuItem onClick={() => void setStar(x, !x.star)} data-menu-star><StarIcon />{x.star ? t("todos:action.unstar") : t("todos:action.star")}</DropdownMenuItem>
         <DropdownMenuSeparator />
@@ -200,7 +212,7 @@ export function TodoRow({ x, now, showGoal = true }: { x: Todo; now: number; sho
       </div>
       {/* the actions come in over the deadline on hover; on a phone "…" holds them */}
       {x.state === "open" && <div className="relative z-[1] hidden shrink-0 items-center gap-1 opacity-0 transition-opacity group-focus-within/todo:opacity-100 group-hover/todo:opacity-100 md:flex" data-todo-actions>
-        <Button size="sm" variant="outline" className="h-7 gap-1 px-2" onClick={() => void handToBot(x)} data-todo-hand><BotIcon className="size-3.5" />{t("todos:action.hand")}</Button>
+        <Button size="sm" variant="outline" className="h-7 gap-1 px-2" disabled={handing(x)} onClick={() => void handToBot(x)} data-todo-hand><BotIcon className="size-3.5" />{t("todos:action.hand")}</Button>
         <SnoozeMenu x={x} now={now} />
       </div>}
       <span className={cn("shrink-0 pt-0.5 type-footnote tabular-nums", x.state === "open" && "md:group-hover/todo:hidden md:group-focus-within/todo:hidden", w?.overdue && !closed ? "text-destructive" : "text-muted-foreground")} data-todo-due>

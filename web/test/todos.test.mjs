@@ -1,6 +1,6 @@
 import assert from "node:assert/strict"
 import { test } from "node:test"
-import { addDays, bucketOf, dayOf, dueCount, dueWhen, groups, parseQuick, snoozeChoices, upcoming, weekEnd } from "../src/todos/model.ts"
+import { addDays, bucketOf, dayOf, dueCount, dueWhen, groups, handClientId, parseQuick, snoozeChoices, upcoming, weekEnd } from "../src/todos/model.ts"
 
 /* Wednesday 18 November 2026, 10:00 local time: every date below is a local day, synthetic */
 const NOW = new Date(2026, 10, 18, 10, 0).getTime()
@@ -106,4 +106,12 @@ test("snooze offers this evening only while it is ahead, then tomorrow and next 
 test("the calendar page lists open todos due within the days it shows, overdue first", () => {
   const xs = [todo({ id: "in7", due_date: "2026-11-24" }), todo({ id: "out", due_date: "2026-11-25" }), todo({ id: "over", due_date: "2026-11-02" }), todo({ id: "today", due: at(18, 12) }), todo({ id: "nodate" })]
   assert.deepEqual(upcoming(xs, NOW, 7).map((x) => x.id), ["over", "today", "in7"])
+})
+
+test("a todo's hand keeps one send key until the todo changes", () => {
+  const x = todo({ id: "td_a", updated: at(18, 9) })
+  assert.equal(handClientId(x), handClientId({ ...x }))
+  assert.notEqual(handClientId(x), handClientId({ ...x, updated: at(18, 9, 1) }))
+  assert.notEqual(handClientId(x), handClientId({ ...x, id: "td_b" }))
+  assert.ok(handClientId({ id: "td_0123456789abcdef", updated: 9_999_999_999_999 }).length <= 80, "within the Hub's client_id limit")
 })

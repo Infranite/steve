@@ -18,6 +18,9 @@ export type Todo = {
   sources: { conv: string; message: string; name: string | null; href: string | null; excerpt: string | null }[]
   people: { id: string; name: string | null }[]
 }
+/** the send key (`client_id`) of the item a todo is handed to: the same while the todo is unchanged, so the Hub answers
+ *  a repeat with the item it already made; once the todo changes (handed, then put back by 撤销) a new hand is new */
+export const handClientId = (x: Pick<Todo, "id" | "updated">) => `todo-hand:${x.id}:${x.updated}`
 /** a goal read on its own: its child todos and the ids of the items linked to it */
 export type Goal = Todo & { children: Todo[]; items: string[] }
 

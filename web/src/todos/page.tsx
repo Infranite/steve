@@ -21,7 +21,7 @@ import { Count, Select } from "@/view-shared"
 import { change, isTodoEvent, loadTodos, todosApi, useMinute, useTodos } from "./data"
 import { takeQuickAdd } from "./quick"
 import { dayOf, groups, RECURS, type Bucket, type Goal, type Todo } from "./model"
-import { complete, daysLeft, drop, GoalCard, GoalProgress, handToBot, QuickAdd, recurKey, setStar, SnoozeMenu, TodoMenu, TodoRow, useDueText } from "./parts"
+import { complete, daysLeft, drop, GoalCard, GoalProgress, handing, handToBot, QuickAdd, recurKey, setStar, SnoozeMenu, TodoMenu, TodoRow, useDueText } from "./parts"
 
 type Tab = "today" | "all" | "goals"
 const TABS: Tab[] = ["today", "all", "goals"]
@@ -153,7 +153,7 @@ function TodoDetail({ x }: { x: Todo }) {
       actions={<TodoMenu x={x} now={now} />}
       toolbar={open ? <>
         <Button size="sm" onClick={() => void complete(x, true)} data-detail-done><CheckIcon />{t("todos:action.done")}</Button>
-        <Button size="sm" variant="outline" onClick={() => void handToBot(x)} data-detail-hand><BotIcon />{t("todos:action.hand")}</Button>
+        <Button size="sm" variant="outline" disabled={handing(x)} onClick={() => void handToBot(x)} data-detail-hand><BotIcon />{t("todos:action.hand")}</Button>
         <SnoozeMenu x={x} now={now} />
       </> : x.state === "handed" ? <Button size="sm" variant="outline" onClick={() => go("#/items/" + x.item_id)}><BotIcon />{t("todos:action.openItem")}</Button>
         : <Button size="sm" variant="outline" onClick={() => void complete(x, false)} data-detail-reopen><UndoIcon />{t("todos:action.reopen")}</Button>}>
