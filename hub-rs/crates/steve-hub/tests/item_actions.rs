@@ -21,6 +21,7 @@ struct Env {
     http: reqwest::Client,
     cookie: String,
     log: PathBuf,
+    db: PathBuf,
 }
 
 impl Env {
@@ -195,6 +196,7 @@ async fn start() -> Env {
         http,
         cookie,
         log,
+        db: cfg.db_path(),
     }
 }
 
@@ -760,4 +762,76 @@ async fn git_project_without_script_can_configure_done_when_on_create_and_patch(
         .await;
     assert_eq!(s, 200, "{v}");
     assert!(v["release"].is_null(), "{v}");
+}
+
+/// Q1: the design gate is off on a new item; only the instance's owner switches it, through its own
+/// route. The item's general patch does not carry it, and a member is refused.
+#[tokio::test(flavor = "multi_thread")]
+async fn only_the_owner_switches_the_design_gate() {
+    let e = start().await;
+    let sid = item(&e, "改进页面布局").await;
+    let iid = item_of(&e, &sid).await;
+    let gate = |v: &Value| v["design_gate"].clone();
+    let (_, i) = e.call("GET", &format!("/api/items/{iid}"), None).await;
+    assert_eq!(gate(&i), json!(false), "{i}");
+    let (s, _) = e
+        .call(
+            "PATCH",
+            &format!("/api/items/{iid}"),
+            Some(json!({"design_gate": true})),
+        )
+        .await;
+    assert_eq!(s, 200);
+    let (_, i) = e.call("GET", &format!("/api/items/{iid}"), None).await;
+    assert_eq!(
+        gate(&i),
+        json!(false),
+        "the general patch does not switch it"
+    );
+    for body in [json!({}), json!({"on": "yes"})] {
+        let (s, _) = e
+            .call("PUT", &format!("/api/items/{iid}/design-gate"), Some(body))
+            .await;
+        assert_eq!(s, 400);
+    }
+    let (s, v) = e
+        .call(
+            "PUT",
+            &format!("/api/items/{iid}/design-gate"),
+            Some(json!({"on": true})),
+        )
+        .await;
+    assert_eq!((s, gate(&v)), (200, json!(true)), "{v}");
+    let (_, i) = e.call("GET", &format!("/api/items/{iid}"), None).await;
+    assert!(
+        i["timeline"]
+            .as_array()
+            .is_some_and(|t| t.iter().any(|x| x["text"]
+                .as_str()
+                .is_some_and(|t| t.starts_with("开启设计确认")))),
+        "{i}"
+    );
+    let store = steve_store::Store::open(&e.db, steve_store::FnPublisher(|_| {})).unwrap();
+    let member = store
+        .users()
+        .create("design-gate-member", "Member", None, "member")
+        .unwrap();
+    let token = "design-gate-member-token";
+    store
+        .auth_sessions()
+        .create(&member, token, 3_600_000)
+        .unwrap();
+    let r = e
+        .http
+        .put(format!("{}/api/items/{iid}/design-gate", e.base))
+        .header("cookie", format!("steve_session={token}"))
+        .json(&json!({"on": false}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 403);
+    assert!(
+        store.items().get(&iid).unwrap().unwrap().design_gate,
+        "a member's request changed nothing"
+    );
 }

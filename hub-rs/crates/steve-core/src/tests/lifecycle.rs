@@ -28,6 +28,17 @@ fn design_report(k: &Kit, item: &str, body: &str) -> Output {
     }
 }
 
+/// The owner switches the item's design gate on (Q1): only then does a delivery wait for the design
+/// decision.
+fn gate(k: &Kit, item: &str) {
+    k.db()
+        .store()
+        .items()
+        .set_design_gate(item, true)
+        .unwrap()
+        .unwrap();
+}
+
 fn last_json(k: &Kit, v: serde_json::Value) {
     std::fs::create_dir_all(k.home().join("releases")).unwrap();
     std::fs::write(k.home().join("releases/last.json"), v.to_string()).unwrap();
@@ -553,9 +564,8 @@ fn auto_accept_holds_failed_or_unfinished_delivery_and_closes_clean_or_baseline(
 fn design_delivery_waits_for_the_users_implementation_decision() {
     let k = Kit::new();
     let item = k.item("run", "执行", None);
-    k.db()
-        .add_goal(&item, "交付一份可评审的页面设计方案")
-        .unwrap();
+    k.db().add_goal(&item, "改进页面布局").unwrap();
+    gate(&k, &item);
     let sid = k.session(&item, "idle");
     let session = k.db().session(&sid).unwrap().unwrap();
     let report = design_report(&k, &item, "# 完整设计\n\n正文");
@@ -586,23 +596,68 @@ fn design_delivery_waits_for_the_users_implementation_decision() {
     assert_eq!(k.status(&item).0, "done");
 }
 
+/// Q1: the words of a goal no longer open the design gate. With the switch off (the default), a goal
+/// that only asks for a design — once the very words that did — is delivered for acceptance like any
+/// other, without a design file.
 #[test]
-fn design_and_implementation_goal_does_not_ask_to_start_work_already_requested() {
+fn design_goal_without_the_switch_is_an_ordinary_delivery() {
+    for goal in [
+        "交付一份可评审的页面设计方案",
+        "先出设计，设计通过后再实现",
+        "设计并实现页面，完成验证",
+    ] {
+        let k = Kit::new();
+        let item = k.item("run", "执行", None);
+        k.db().add_goal(&item, goal).unwrap();
+        let sid = k.session(&item, "idle");
+        let session = k.db().session(&sid).unwrap().unwrap();
+        k.core
+            .tool_deliver(&session, "页面设计记录", &[], &[], &[])
+            .unwrap();
+        assert!(
+            k.db()
+                .decisions_of_item(&item)
+                .unwrap()
+                .iter()
+                .all(|d| d.subject_type != "design_implementation"),
+            "{goal}"
+        );
+        assert_ne!(k.status(&item).1, "设计确认", "{goal}");
+    }
+}
+
+/// The gate on, a delivery listing an external link beside a verifiable design file is confirmed on
+/// that file instead of being refused.
+#[test]
+fn gated_delivery_passes_over_an_unverifiable_link_to_the_design_file() {
     let k = Kit::new();
     let item = k.item("run", "执行", None);
-    k.db().add_goal(&item, "设计并实现页面，完成验证").unwrap();
+    k.db().add_goal(&item, "改进页面布局").unwrap();
+    gate(&k, &item);
     let sid = k.session(&item, "idle");
     let session = k.db().session(&sid).unwrap().unwrap();
-    let report = design_report(&k, &item, "页面设计与实现记录");
+    let external = Output {
+        kind: "方案".into(),
+        title: "外部文档".into(),
+        location: Some("https://docs.example/design".into()),
+        role: Some("result".into()),
+    };
+    let report = design_report(&k, &item, "完整方案");
+    let path = report.location.clone().unwrap();
     k.core
-        .tool_deliver(&session, "页面设计与实现记录", &[report], &[], &[])
+        .tool_deliver(&session, "完整方案", &[external, report], &[], &[])
+        .unwrap();
+    let decision = k
+        .db()
+        .decisions_of_item(&item)
+        .unwrap()
+        .into_iter()
+        .find(|d| d.status == "open" && d.subject_type == "design_implementation")
         .unwrap();
     assert!(
-        k.db()
-            .decisions_of_item(&item)
-            .unwrap()
-            .iter()
-            .all(|d| d.subject_type != "design_implementation")
+        decision.subject_id.contains(&path),
+        "{}",
+        decision.subject_id
     );
 }
 
@@ -610,9 +665,8 @@ fn design_and_implementation_goal_does_not_ask_to_start_work_already_requested()
 fn confirming_design_starts_implementation_without_reasking_the_design_question() {
     let k = Kit::new();
     let item = k.item("run", "执行", None);
-    k.db()
-        .add_goal(&item, "先出设计，设计通过后再实现")
-        .unwrap();
+    k.db().add_goal(&item, "改进页面布局").unwrap();
+    gate(&k, &item);
     let sid = k.session(&item, "idle");
     let session = k.db().session(&sid).unwrap().unwrap();
     let report = design_report(&k, &item, "完整方案");
@@ -643,15 +697,64 @@ fn confirming_design_starts_implementation_without_reasking_the_design_question(
             .iter()
             .all(|d| d.status != "open" || d.subject_type != "design_implementation")
     );
+    /* the switch still on, the implementation delivered next goes to ordinary acceptance: the design
+     * is not asked about again */
+    k.core
+        .tool_deliver(&session, "已按方案实现并验证", &[], &[], &[])
+        .unwrap();
+    assert_eq!(k.open_kinds(&item), vec!["accept"]);
+    assert_eq!(
+        k.db()
+            .decisions_of_item(&item)
+            .unwrap()
+            .iter()
+            .filter(|d| d.subject_type == "design_implementation")
+            .count(),
+        1
+    );
+    assert_ne!(k.status(&item).1, "设计确认");
+}
+
+/// The approval covers the implementation goal it added; a goal set after it is a new scope whose
+/// delivery the gate, still on, holds for a design decision again.
+#[test]
+fn a_new_goal_after_the_approval_is_gated_again() {
+    let k = Kit::new();
+    let item = k.item("run", "执行", None);
+    k.db().add_goal(&item, "改进页面布局").unwrap();
+    gate(&k, &item);
+    let sid = k.session(&item, "idle");
+    let session = k.db().session(&sid).unwrap().unwrap();
+    let open_design = |k: &Kit| {
+        k.db()
+            .decisions_of_item(&item)
+            .unwrap()
+            .into_iter()
+            .find(|d| d.status == "open" && d.subject_type == "design_implementation")
+    };
+    let report = design_report(&k, &item, "完整方案");
+    k.core
+        .tool_deliver(&session, "完整方案", &[report], &[], &[])
+        .unwrap();
+    let decision = open_design(&k).unwrap();
+    k.core
+        .resolve(&decision.id, "按方案实现", "", "me")
+        .unwrap();
+    k.db().add_goal(&item, "另加深色模式").unwrap();
+    let report = design_report(&k, &item, "深色模式方案");
+    k.core
+        .tool_deliver(&session, "深色模式方案", &[report], &[], &[])
+        .unwrap();
+    assert!(open_design(&k).is_some());
+    assert_eq!(k.status(&item).1, "设计确认");
 }
 
 #[test]
 fn changed_design_file_cannot_reuse_the_old_approval() {
     let k = Kit::new();
     let item = k.item("run", "执行", None);
-    k.db()
-        .add_goal(&item, "先出设计方案，用户确认后再实现")
-        .unwrap();
+    k.db().add_goal(&item, "改进页面布局").unwrap();
+    gate(&k, &item);
     let sid = k.session(&item, "idle");
     let session = k.db().session(&sid).unwrap().unwrap();
     let report = design_report(&k, &item, "原设计");
@@ -680,9 +783,8 @@ fn delivery_url_design_approval_checks_the_exact_record_and_bytes() {
     for tamper in [false, true] {
         let k = Kit::new();
         let item = k.item("run", "执行", None);
-        k.db()
-            .add_goal(&item, "先出设计，设计通过后再实现")
-            .unwrap();
+        k.db().add_goal(&item, "改进页面布局").unwrap();
+        gate(&k, &item);
         let sid = k.session(&item, "idle");
         let session = k.db().session(&sid).unwrap().unwrap();
         let body = b"immutable design";
@@ -748,9 +850,8 @@ fn a_received_openable_file_delivery_counts_as_the_design_file() {
     ] {
         let k = Kit::new();
         let item = k.item("run", "执行", None);
-        k.db()
-            .add_goal(&item, "先出设计，设计通过后再实现")
-            .unwrap();
+        k.db().add_goal(&item, "改进页面布局").unwrap();
+        gate(&k, &item);
         let sid = k.session(&item, "idle");
         let session = k.db().session(&sid).unwrap().unwrap();
         let body = format!("design {name}");

@@ -34,6 +34,7 @@
   "hub.annotation.send_interrupted": "发送中断：%{error}",
   "hub.annotation.none_to_send": "这些批注已经发送过，或者已经删除",
   "hub.item.archive_first": "先归档，才能永久删除",
+  "hub.item.design_gate_owner_only": "只有主人能开关设计确认",
   "hub.output.not_a_file": "这个产出不是可以直接打开的文件",
   "hub.output.file_gone": "文件不见了",
   "hub.output.no_location": "这个产出没有记录位置，只有标题",

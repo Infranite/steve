@@ -388,6 +388,9 @@ export default {
     forkedFrom: "Forked from {{id}}",
     fromChat: "Conversation",
     noFollow: "Don't follow up in the conversation",
+    propDesignGate: "Design confirmation",
+    designGateHint: "You confirm the design when it's delivered, then decide whether to implement it. YOLO won't answer for you",
+    designGateOwnerOnly: "Only the owner can switch this",
   },
   stage: {
     intake: "Intake",

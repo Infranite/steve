@@ -34,6 +34,7 @@
   "hub.annotation.send_interrupted": "Sending was interrupted: %{error}",
   "hub.annotation.none_to_send": "These annotations were already sent or deleted",
   "hub.item.archive_first": "Archive it before deleting it permanently",
+  "hub.item.design_gate_owner_only": "Only the owner can switch design confirmation on or off",
   "hub.output.not_a_file": "This output isn't a file that can be opened directly",
   "hub.output.file_gone": "The file is missing",
   "hub.output.no_location": "This output has a title but no recorded location",

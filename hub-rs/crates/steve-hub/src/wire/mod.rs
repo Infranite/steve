@@ -144,6 +144,9 @@ fn core_config(cfg: &Config, vars: &Vars) -> steve_core::CoreConfig {
     if let Some(n) = cfg.takeover_continues {
         c.takeover_continues = n;
     }
+    if let Some(n) = cfg.takeover_same_refusals {
+        c.takeover_same_refusals = n;
+    }
     if let Some(g) = &cfg.gh {
         c.gh = g.clone();
     }

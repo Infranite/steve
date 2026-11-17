@@ -38,7 +38,7 @@ import { ItemPeopleProp } from "@/people/item-people"
 import { QueuedComment, queuedComments, queueNote, QueueStrip } from "@/queue"
 import { homeTilde, NativeIdLine } from "@/resume"
 import { ItemStatsRows, SessionStats } from "@/stats/drill"
-import { ACC, accKey, closedSt, accOf, active, addDep, archive, bulk, closeRel, deleteItem, depsOpen, doFork, hm, importSessions, interrupt, it, itemThread, link, loadEvents, loadItem, loadLocalSessions, markDone, newItem, patchItem, pendingCards, memCards, reassign, rmDep, runtimeName, saveGoal, sessPatch, sessRemove, sessSend, setAcc, setSt, setTags, setKind, kindOf, kindTags, isKind, DOMAIN_CATS, snoozed, st, stageOf, star, supp, tag, tagCatLabel, tagDesc, tagLabel, threadFollow, tm, toast, unsnooze, WT, type Item, type PlanRound, type Reply } from "@/store"
+import { ACC, accKey, closedSt, setDesignGate, accOf, active, addDep, archive, bulk, closeRel, deleteItem, depsOpen, doFork, hm, importSessions, interrupt, it, itemThread, link, loadEvents, loadItem, loadLocalSessions, markDone, newItem, patchItem, pendingCards, memCards, reassign, rmDep, runtimeName, saveGoal, sessPatch, sessRemove, sessSend, setAcc, setSt, setTags, setKind, kindOf, kindTags, isKind, DOMAIN_CATS, snoozed, st, stageOf, star, supp, tag, tagCatLabel, tagDesc, tagLabel, threadFollow, tm, toast, unsnooze, WT, type Item, type PlanRound, type Reply } from "@/store"
 import { BotAvatar, BotName, Chips, closeSheet, Composer, DecisionCard, Empty, go, Group, ItemNo, KindTag, Meta, openSheet, Page, RelNote, ReplyBlock, Row, RunBar, SectionLabel, Segmented, SessionBlock, Status, StatusDot, Tags, ThemeSwitch, Transcript, type ComposerHandle, Chevron, Panel, Section, Tile, PANEL_W } from "@/ui"
 import { ChoiceCards, Count, dueLabel, ItemRow, ProjectChip, Select, selected } from "@/view-shared"
 import { YoloItemModes, YoloItemSwitch, YoloMark } from "@/yolo/badges"
@@ -723,6 +723,9 @@ export function ItemView({ id }: { id: string }) {
             <Prop label={t("views:item.propPri")}><Select quiet testId="pri" value={i.pri ?? "中"} onChange={(v) => patchItem(i.id, { pri: v as Item["pri"] })} options={["高", "中", "低"].map((v) => ({ v, l: labelOf(PRI_LABEL, v) }))} /></Prop>
             <Prop label={t("views:item.propDue")}><Select quiet testId="due" value={i.due ?? "无"} onChange={(v) => patchItem(i.id, { due: v === "无" ? undefined : v })} options={[...new Set(["无", i.due ?? "无", "今天 18:00", "明天", "周五", "下周一"])].map((v) => ({ v, l: dueLabel(v) }))} /></Prop>
             <Prop label={t("views:item.propAcc")}><Select quiet testId="acc" value={accKey(i.acc)} onChange={(v) => setAcc(i.id, v)} options={["inherit", "manual", "auto"].map((k) => ({ v: k, l: ACC[k] }))} />{accKey(i.acc) === "inherit" && <div className="type-footnote text-muted-foreground">{t("views:item.accEffective", { mode: accOf(i) })}</div>}</Prop>
+            {/* Q1: off unless the owner turns it on; others see it, switched by nobody but the owner */}
+            <Prop label={t("views:item.propDesignGate")}><label className="flex items-center gap-2 pt-1" data-design-gate><Switch size="sm" checked={!!i.designGate} disabled={!st.owner} onCheckedChange={(v) => setDesignGate(i.id, v)} aria-label={t("views:item.propDesignGate")} /></label>
+              <div className="type-footnote text-muted-foreground">{t(st.owner ? "views:item.designGateHint" : "views:item.designGateOwnerOnly")}</div></Prop>
             <Prop label={t("views:item.propDeps")}>
               <div className="flex flex-col gap-1 pt-1" data-deps>
                 {(i.deps || []).filter((d) => st.items.some((x) => x.id === d)).map((d) => { const x = it(d); return (
