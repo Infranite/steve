@@ -6,6 +6,7 @@ import { readEventPages } from "./event-pages"
 import { useEffect, useRef, useSyncExternalStore } from "react"
 import { toast as notify, type ToastOptions } from "./components/ui/toaster"
 import { promptNeedle, withDecisionNotes } from "./decision-notes"
+import { OPTION_IDS, optionKey } from "./decision-options"
 import { blockSlots, type FeedRow } from "./feed-order"
 import { api, cursorOf, setPageWorkspace, stream, Unauthenticated, type State, type RItem, type RItemDetail, type RSession, type RDecision, type RBot, type REvent, type RProject, type Proposal, type LocalSession, type HubEvent, type RNotice } from "./api"
 import { cue } from "./bus"
@@ -340,6 +341,8 @@ function orphanOf(d: RDecision): Orphan {
 /* what was chosen on a module card (signals, flows, vault, connections); a flow_step choice is its own label */
 const MODULE_CHOICE_SUBJECTS = new Set(["signal", "flow_step", "flow_run", "secret_use", "connection", "mail_draft"])
 const MODULE_CHOICE: Record<string, string> = live(["done", "to_item", "retry", "drop", "continue_once", "stop", "once", "grant_1h", "grant_8h", "grant_24h", "deny", "pause", "reauth", "send", "no"] as const, (k) => t(`core:moduleChoice.${k}`))
+/** an option's label: the label of a module's option id (decision-options.ts), else the option itself, already words */
+export const optionLabel = (subject: string, option: string) => { const k = optionKey(subject, option); return k ? t(k as "core:option.chan_message.done") : option }
 /** an approved release's outcome; undefined for anything else (and for approvals recorded before outcomes existed) */
 export function relOf(d: RDecision): Rel | undefined {
   const r = d.result ?? {}
@@ -402,6 +405,7 @@ function choiceLabel(d: RDecision) {
   if (d.status === "expired") return String(r.superseded ?? (r.dropped ? t("core:choice.itemDropped") : r.reassigned ? t("core:choice.reassigned") : t("core:choice.expired")))
   if (d.kind === "accept") return r.choice === "pass" ? t("core:choice.pass") : t("core:choice.rework", { text: r.text ?? "" })
   if (d.subject_type === "space") return (r.choice ?? r.answer) === "mute" ? t("core:choice.mute") : t("core:choice.setup")
+  if (optionKey(d.subject_type, r.choice)) return optionLabel(d.subject_type, r.choice)
   if (d.kind === "ask") return String(r.answer ?? "")
   if (d.subject_type === "party_merge") return r.choice === "merge" ? t("core:choice.merge") : t("core:choice.notSame")
   if (d.kind === "confirm") return r.choice === "yes" ? t("core:choice.confirmYes") : t("core:choice.confirmNo")
@@ -957,7 +961,7 @@ const DECIDED_BY_SUBJECT: Record<string, readonly string[] | ((c: string) => str
   mem: ["yes", "no"],
   party_merge: ["merge", "not_same"],
   release: ["no"],
-  chan_message: ["yes", "no", "rewrite"],
+  chan_message: OPTION_IDS.chan_message,
 }
 const DECIDED_ANY = ["pass", "rework", "yes", "no", "continue", "delivered", "look", "tosteve", "drop", "deny"]
 function decidedText(w: Wait, c: string, bot: string | null) {
