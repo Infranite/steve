@@ -50,6 +50,72 @@ final class NativeShellTests: XCTestCase {
     }
 
     @MainActor
+    func testAppearanceIsOptionalValidatedAndScopedWithContext() throws {
+        try fixture { c, _, owner in
+            _ = try call(c, owner, "shell.context", context())
+            XCTAssertNil(c.shellContext?.appearance, "Older Web metadata remains valid")
+            var args = context()
+            args["appearance"] = ["dark": true, "background": [0, 127, 255]] as [String: Any]
+            _ = try call(c, owner, "shell.context", args)
+            XCTAssertEqual(c.shellContext?.appearance?.dark, true)
+            XCTAssertEqual(c.shellContext?.appearance?.background, [0, 127, 255])
+            XCTAssertEqual(c.shellContext?.appearance?.followSystem, false, "Earlier appearance payloads preserve explicit native scheme behavior")
+            args["appearance"] = ["dark": false, "background": [255.0, 128.0, 0.0], "followSystem": true] as [String: Any]
+            _ = try call(c, owner, "shell.context", args)
+            XCTAssertEqual(c.shellContext?.appearance?.dark, false)
+            XCTAssertEqual(c.shellContext?.appearance?.background, [255, 128, 0])
+            XCTAssertEqual(c.shellContext?.appearance?.followSystem, true)
+            _ = try call(c, owner, "shell.context", context())
+            XCTAssertNil(c.shellContext?.appearance, "Missing metadata must not retain an earlier appearance")
+            _ = try call(c, owner, "shell.context", args)
+            let generation = c.shellState.generation
+            c.beginShellDocument(ownerID: owner)
+            XCTAssertNil(c.shellContext, "Appearance has no state outside the scoped context")
+            XCTAssertThrowsError(try call(c, owner, "shell.context", args, generation: generation))
+            _ = try call(c, owner, "shell.context", args, document: "replacement")
+            c.detachShell(ownerID: owner)
+            XCTAssertNil(c.shellContext)
+        }
+    }
+
+    @MainActor
+    func testMalformedAppearanceRejectsWholeContextWithoutReplacingValidMetadata() throws {
+        try fixture { c, _, owner in
+            var args = context()
+            args["appearance"] = ["dark": true, "background": [10, 20, 30]] as [String: Any]
+            _ = try call(c, owner, "shell.context", args)
+            let accepted = c.shellContext
+            let invalid: [Any] = [
+                NSNull(), true, [], "dark", [:] as [String: Any],
+                ["dark": true], ["background": [1, 2, 3]],
+                ["dark": 1, "background": [1, 2, 3]],
+                ["dark": true, "background": [1, 2, 3], "followSystem": 1],
+                ["dark": true, "background": [1, 2, 3], "followSystem": NSNull()],
+                ["dark": true, "background": [1, 2, 3], "followSystem": "true"],
+                ["dark": "true", "background": [1, 2, 3]],
+                ["dark": true, "background": [1, 2, 3], "extra": true],
+                ["dark": true, "background": "1,2,3"],
+                ["dark": true, "background": [1, 2]],
+                ["dark": true, "background": [1, 2, 3, 4]],
+                ["dark": true, "background": [true, 2, 3] as [Any]],
+                ["dark": true, "background": ["1", 2, 3] as [Any]],
+                ["dark": true, "background": [NSNull(), 2, 3] as [Any]],
+                ["dark": true, "background": [-1, 2, 3]],
+                ["dark": true, "background": [256, 2, 3]],
+                ["dark": true, "background": [1.5, 2, 3]],
+                ["dark": true, "background": [Double.nan, 2, 3]],
+                ["dark": true, "background": [Double.infinity, 2, 3]],
+            ]
+            for appearance in invalid {
+                args["appearance"] = appearance
+                args["title"] = "Must not replace the accepted context"
+                XCTAssertThrowsError(try call(c, owner, "shell.context", args), "\(appearance)")
+                XCTAssertEqual(c.shellContext, accepted)
+            }
+        }
+    }
+
+    @MainActor
     func testScopedIntentRequiresReadyIssuedMatchingSuccessfulAck() throws {
         try fixture { c, _, owner in
             XCTAssertTrue(c.navigate(route: "#/inbox", workspaceID: "second"))

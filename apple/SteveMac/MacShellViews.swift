@@ -56,20 +56,55 @@ struct MacHubMenu: View {
         } label: {
             Label {
                 Text(hubStore.activeProfile.displayName)
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
                     .lineLimit(1)
                     .truncationMode(.middle)
-                    .frame(maxWidth: 170)
+                    .frame(maxWidth: 120)
             } icon: {
-                Image(systemName: "server.rack")
+                Image(systemName: "server.rack").foregroundStyle(.secondary)
             }
         }
         .labelStyle(.titleAndIcon)
+        .menuStyle(.borderlessButton)
         .help(L10n.tr("切换或管理 Hub", "Switch or manage Hubs"))
         .accessibilityIdentifier("shell.hub")
     }
 
     private func navigate(_ route: String) {
         MacMainWindow.navigate(route, coordinator: coordinator, open: { openWindow(id: "main") })
+    }
+}
+
+extension ToolbarContent {
+    @ToolbarContentBuilder
+    func macUnsharedBackground() -> some ToolbarContent {
+        #if compiler(>=6.2)
+        if #available(macOS 26.0, *) {
+            self.sharedBackgroundVisibility(.hidden)
+        } else {
+            self
+        }
+        #else
+        self
+        #endif
+    }
+}
+
+struct MacConnectionIndicator: View {
+    let phase: HubConnectionPhase
+
+    var body: some View {
+        switch phase {
+        case .connected:
+            Image(systemName: "circle.fill")
+                .font(.system(size: 6))
+                .foregroundStyle(.secondary)
+                .frame(width: 20, height: 20)
+                .accessibilityLabel(L10n.tr("Hub 已连接", "Hub connected"))
+        default:
+            MacConnectionLabel(phase: phase)
+        }
     }
 }
 

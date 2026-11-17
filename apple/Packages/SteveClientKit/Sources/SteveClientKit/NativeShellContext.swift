@@ -1,6 +1,35 @@
 import Foundation
 import CoreFoundation
 
+/// The Web page's resolved appearance, with an opaque sRGB background (three bytes, red/green/blue).
+public struct NativeShellAppearance: Equatable, Sendable {
+    public let dark: Bool
+    public let background: [UInt8]
+    /// Do not pin native color scheme while Web is following the system (avoids a dark/light feedback lock).
+    public let followSystem: Bool
+
+    fileprivate init?(bridgeValue: Any) {
+        guard let value = bridgeValue as? [String: Any], Set(value.keys).isSubset(of: ["dark", "background", "followSystem"]),
+              let dark = value["dark"] as? NSNumber, CFGetTypeID(dark) == CFBooleanGetTypeID(),
+              let channels = value["background"] as? [Any], channels.count == 3 else { return nil }
+        if let followSystem = value["followSystem"] {
+            guard let bool = followSystem as? NSNumber, CFGetTypeID(bool) == CFBooleanGetTypeID() else { return nil }
+            self.followSystem = bool.boolValue
+        } else {
+            self.followSystem = false
+        }
+        var background: [UInt8] = []
+        for channel in channels {
+            guard let number = channel as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID() else { return nil }
+            let byte = number.doubleValue
+            guard byte.isFinite, byte >= 0, byte <= 255, byte.rounded(.towardZero) == byte else { return nil }
+            background.append(UInt8(byte))
+        }
+        self.dark = dark.boolValue
+        self.background = background
+    }
+}
+
 /// Page metadata only. Native assigns Hub, generation and document identity after WebView verification.
 public struct NativeShellContext: Equatable, Sendable {
     public let hubID: String
@@ -14,6 +43,7 @@ public struct NativeShellContext: Equatable, Sendable {
     public let authenticated: Bool
     public let focused: Bool
     public let visible: Bool
+    public let appearance: NativeShellAppearance?
 }
 
 public struct NativeNavigationIntent: Equatable, Sendable, Identifiable {
@@ -170,6 +200,15 @@ extension SteveClientCoordinator {
                   Self.nullableShellString(args["workspaceID"]), Self.nullableShellString(args["workspaceName"]) else {
                 throw BridgeCallError.invalidArgument("Invalid native shell context")
             }
+            let appearance: NativeShellAppearance?
+            if let rawAppearance = args["appearance"] {
+                guard let parsed = NativeShellAppearance(bridgeValue: rawAppearance) else {
+                    throw BridgeCallError.invalidArgument("Invalid native shell appearance")
+                }
+                appearance = parsed
+            } else {
+                appearance = nil // Older Web clients do not publish appearance.
+            }
             let workspace = (args["workspaceID"] as? String).flatMap { $0.isEmpty ? nil : $0 }
             // Account changes invalidate the old reports without forcing a reload of the sign-in page.
             let nativeAuthenticated = !(hubStore.credential(for: hubID) ?? "").isEmpty
@@ -186,7 +225,7 @@ extension SteveClientCoordinator {
             shellContext = NativeShellContext(hubID: hubID, generation: shellState.generation, documentID: documentID,
                 workspaceID: workspace, workspaceName: workspace == nil ? nil : (args["workspaceName"] as? String).map(Self.shellText),
                 route: route, title: Self.shellText(title), ready: ready, authenticated: authenticated,
-                focused: focused, visible: visible)
+                focused: focused, visible: visible, appearance: appearance)
             targetHashRoute = nil // This page uses acknowledged navigation, never also inject a hash.
             return [String: Any]()
         case "shell.attention.visible":

@@ -1,5 +1,8 @@
 import type { NativeBridge } from "./hub"
 
+/** Opaque rendered body background in sRGB bytes, not a fixed native palette. */
+export type ShellAppearance = { dark: boolean; background: [number, number, number]; followSystem?: boolean }
+
 /** Page context only. The trusted native document supplies Hub identity; never send credentials or counts. */
 export type ShellContext = {
   workspaceID: string | null
@@ -10,6 +13,7 @@ export type ShellContext = {
   authenticated: boolean
   focused: boolean
   visible: boolean
+  appearance?: ShellAppearance
 }
 export type ShellNavigation = { id: string; hubID: string; workspaceID?: string; route: string; targetID?: string }
 const OPERATIONS = ["shell.context", "shell.navigation.next", "shell.navigation.ack"]

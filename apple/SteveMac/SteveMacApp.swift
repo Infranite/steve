@@ -89,8 +89,8 @@ struct SteveMacApp: App {
                     coordinator.startIfNeeded()
                     appDelegate.coordinator = coordinator; appDelegate.attention = attention
                 }
-                .background(MacMainWindowIdentifier())
         }
+        .windowToolbarStyle(.unifiedCompact(showsTitle: false))
         .defaultSize(width: 1240, height: 820)
         .commands {
             HubCommands(coordinator: coordinator, hubStore: coordinator.hubStore)
@@ -349,6 +349,8 @@ private enum MacDebugHarness {
                 "isSheet": $0.isSheet,
                 "identifier": $0.identifier?.rawValue ?? "",
                 "miniaturized": $0.isMiniaturized,
+                "appearance": $0.effectiveAppearance.name.rawValue,
+                "background": $0.backgroundColor.description,
                 "sheetCount": $0.sheets.count,
                 "class": String(describing: type(of: $0)),
             ] as [String: Any] }
@@ -372,6 +374,7 @@ private enum MacDebugHarness {
                 }),
                 "attentionDedup": attention.state.dedupStatus.rawValue,
                 "attentionError": attention.error as Any,
+                "shellAppearance": coordinator.shellContext?.appearance.map { ["dark": $0.dark, "background": $0.background, "followSystem": $0.followSystem] as [String: Any] } as Any,
                 "shellContext": coordinator.shellContext.map { context in
                     ["hubID": context.hubID, "workspaceID": context.workspaceID as Any,
                      "workspaceName": context.workspaceName as Any, "route": context.route,

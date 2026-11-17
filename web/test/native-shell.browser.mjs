@@ -43,12 +43,13 @@ async function navigate(page, id, route, extra = {}) {
   return page.evaluate((id) => window.__acks.find((a) => a.id === id), id)
 }
 try {
-  for (const mode of ["browser", "older", "ios", "modern"]) {
+  for (const mode of ["browser", "older", "ios", "mac-web", "modern"]) {
     const f = await open(mode)
     try {
       assert.equal(await f.page.locator("[data-hub-switch]").count(), mode === "modern" ? 0 : 1, mode)
       assert.equal(await f.page.locator("[data-ws-switch]").count(), 1)
       assert.ok(await f.page.locator('[data-nav="items"]').count())
+      if (mode === "ios" || mode === "mac-web") assert.equal(Object.hasOwn(await f.page.evaluate(() => window.__contexts.at(-1)), "appearance"), false, mode)
       if (mode === "browser" || mode === "older") {
         await f.page.evaluate(() => { location.hash = "#/hub/add" })
         await f.page.locator("[data-hubs-dialog]").waitFor()
@@ -66,8 +67,58 @@ try {
     assert.equal(initial.route, "#/items")
     assert.equal(initial.authenticated, true)
     assert.equal(Object.hasOwn(initial, "hubID"), false)
-    assert.deepEqual(Object.keys(initial).sort(), ["workspaceID", "workspaceName", "route", "title", "ready", "authenticated", "focused", "visible"].sort())
+    assert.deepEqual(Object.keys(initial).sort(), ["workspaceID", "workspaceName", "route", "title", "ready", "authenticated", "focused", "visible", "appearance"].sort())
+    assert.equal(typeof initial.appearance.dark, "boolean")
+    assert.equal(initial.appearance.background.length, 3)
+    assert.ok(initial.appearance.background.every(c => Number.isInteger(c) && c >= 0 && c <= 255))
     check("App-level context contains selected workspace and metadata only, never credentials or web-supplied Hub identity")
+    // Theme preference, user theme stylesheet and inline body/root mutations need no route change.
+    const systemDark = await page.evaluate(() => matchMedia("(prefers-color-scheme: dark)").matches)
+    await page.evaluate(async (dark) => { const { setTheme } = await import("/src/ui.tsx"); setTheme(dark ? "dark" : "light") }, systemDark)
+    await page.waitForFunction(() => window.__contexts.at(-1).appearance?.followSystem === false)
+    const explicitAppearance = await page.evaluate(() => window.__contexts.at(-1).appearance)
+    await page.evaluate(async () => { const { setTheme } = await import("/src/ui.tsx"); setTheme("system") })
+    await page.waitForFunction(() => window.__contexts.at(-1).appearance?.followSystem === true)
+    const systemAppearance = await page.evaluate(() => window.__contexts.at(-1).appearance)
+    assert.equal(systemAppearance.dark, explicitAppearance.dark)
+    assert.deepEqual(systemAppearance.background, explicitAppearance.background)
+    await page.evaluate(async () => { const { setTheme } = await import("/src/ui.tsx"); setTheme("dark") })
+    await page.waitForFunction(() => window.__contexts.at(-1).appearance?.dark === true)
+    await page.evaluate(async () => { const { setAppearance } = await import("/src/themes/index.ts"); setAppearance({ neutral: "sand" }) })
+    await page.waitForFunction(() => JSON.stringify(window.__contexts.at(-1).appearance?.background) === "[17,17,16]")
+    await page.evaluate(async () => { const { setTheme } = await import("/src/ui.tsx"); setTheme("light") })
+    await page.waitForFunction(() => window.__contexts.at(-1).appearance?.dark === false && JSON.stringify(window.__contexts.at(-1).appearance?.background) === "[252,252,251]")
+    await page.evaluate(() => document.documentElement.style.setProperty("--background", "rgb(41 52 63)"))
+    await page.waitForFunction(() => JSON.stringify(window.__contexts.at(-1).appearance?.background) === "[41,52,63]")
+    await page.evaluate(() => { document.body.style.backgroundColor = "color(srgb 0.2 0.4 0.6)" })
+    await page.waitForFunction(() => JSON.stringify(window.__contexts.at(-1).appearance?.background) === "[51,102,153]")
+    assert.equal(await page.evaluate(() => location.hash), "#/items")
+    const appearanceReports = await page.evaluate(() => window.__contexts.length)
+    await page.evaluate(() => { for (let i = 0; i < 50; i++) document.documentElement.classList.toggle("unrelated-appearance-test") })
+    await page.waitForTimeout(100)
+    assert.equal(await page.evaluate(() => window.__contexts.length), appearanceReports)
+    check("opted-in Mac tracks explicit dark/light, user theme stylesheet, root/body color changes without navigation; equivalent mutations coalesce")
+    await page.evaluate(() => {
+      window.__savedAnimationFrame = window.requestAnimationFrame
+      window.requestAnimationFrame = () => 0 // Background WKWebView can stop painting entirely.
+      Object.defineProperty(document, "visibilityState", { configurable: true, value: "hidden" })
+      Object.defineProperty(document, "hasFocus", { configurable: true, value: () => false })
+      document.body.style.backgroundColor = "rgb(71 82 93)"
+    })
+    await page.waitForFunction(() => {
+      const context = window.__contexts.at(-1)
+      return !context.visible && !context.focused && JSON.stringify(context.appearance?.background) === "[71,82,93]"
+    }, null, { polling: 50 })
+    await page.evaluate(() => {
+      window.requestAnimationFrame = window.__savedAnimationFrame
+      delete window.__savedAnimationFrame
+      delete document.visibilityState
+      delete document.hasFocus
+      document.body.style.backgroundColor = "color(srgb 0.2 0.4 0.6)"
+      document.dispatchEvent(new Event("visibilitychange"))
+    })
+    await page.waitForFunction(() => window.__contexts.at(-1).visible && JSON.stringify(window.__contexts.at(-1).appearance?.background) === "[51,102,153]")
+    check("background theme metadata updates without animation frames or focus, then restores actual visibility")
     const before = await page.evaluate(() => window.__contexts.length)
     await page.evaluate(async () => { const { emit } = await import("/src/store.ts"); for (let i = 0; i < 50; i++) emit() })
     await page.waitForTimeout(150)
