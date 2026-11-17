@@ -1,0 +1,5 @@
+The README and the deployment guide now say which output is reviewed and how changes get merged:
+
+- Only your private chat with Steve and a Bot's replies to workspace members go without a model's review. Anything sent in your name to someone else passes the rule check and a second model's disclosure check and is held when either fails; YOLO does not send to people outside your organisation unless you allow it. Others' trigger words on your account are still screened first. See "Outbound checks" in the deployment guide.
+- Review findings are blocking or not by a fixed category table (correctness, security, data loss, goal not met, failed required check block; style, naming, documentation, optional optimisation go to a carry-over list the delivery must answer), and a code change made without a work graph is merged by you from a card, not automatically. Both are documented as the target and are being implemented.
+- The default rules of Steve's own developer Bot now say: plan and implement one scope in the same unit, and leave review to the independent review Bot. An existing Bot keeps the rules it has; change them on its settings page.
