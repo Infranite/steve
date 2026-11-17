@@ -73,4 +73,10 @@ CREATE TABLE work_policy (
 );
 
 -- The newest logical turn of a session (the turn a judgement or a late event is matched against).
+-- The one statement here whose cost grows with history: it indexes every turn ever run. Built in the
+-- upgrade, while the Hub is drained, rather than by a background step on a live Hub (which would hold
+-- the write lock while turns are recorded). Measured on a synthetic copy (one row per logical turn,
+-- SQLite 3.54, an Apple-silicon laptop): 1M turns 1.4-1.7 s, 5M turns 12-14 s, against the upgrade
+-- probe's 60 s. A Hub at a few thousand turns a day stays under a second for years; a store several
+-- times past 5M turns should move this build out of the upgrade first.
 CREATE INDEX runtime_turns_session ON runtime_turns(session_id,created);

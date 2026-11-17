@@ -264,6 +264,7 @@ impl Tx<'_> {
                 phase: item.phase.clone(),
                 paused: item.status == "pause",
                 code: item.branch.as_deref().is_some_and(|b| !b.is_empty()),
+                scope_revision: self.db().goals(&item.id)?.last().map_or(0, |g| g.version),
             },
             required,
             session,
@@ -289,6 +290,7 @@ impl Tx<'_> {
                     cycle: j.cycle,
                     session_id: j.session_id,
                     turn_id: j.turn_id,
+                    scope_revision: j.scope_revision,
                     verdict: j.verdict,
                     created: j.created,
                 })

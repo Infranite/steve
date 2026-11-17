@@ -70,6 +70,9 @@ pub struct ItemState {
     pub paused: bool,
     /// It works in a git worktree on a branch: its delivery is a commit.
     pub code: bool,
+    /// The version of what it is asked to do (its goal; 0: none). A change of scope moves it on, and
+    /// a judgement of an earlier scope says nothing of this one.
+    pub scope_revision: i64,
 }
 
 /// What closing needs, by kind (from the project's completion rule and the item's goal today).
@@ -140,6 +143,8 @@ pub struct Judged {
     pub cycle: i64,
     pub session_id: String,
     pub turn_id: String,
+    /// The scope it judged ([`ItemState::scope_revision`] then).
+    pub scope_revision: i64,
     pub verdict: String,
     pub created: i64,
 }
@@ -326,8 +331,9 @@ fn latest<'a>(f: &'a Facts, kind: &str, head: Option<&str>) -> Option<&'a Delive
 
 /// How settled the current session is, and what it waits for when it is not.
 fn settled(f: &Facts, policy: &WorkPolicy) -> (Settled, Option<(&'static str, NextStep)>) {
+    /* no session: there is no Hub-visible turn to be at rest, so nobody can tell (never settled) */
     let Some(s) = &f.session else {
-        return (Settled::Evaluable, None);
+        return (Settled::Unknown, None);
     };
     let turn = || NextStep::Turn {
         session_id: s.id.clone(),
@@ -405,8 +411,9 @@ fn settled(f: &Facts, policy: &WorkPolicy) -> (Settled, Option<(&'static str, Ne
     (Settled::Evaluable, None)
 }
 
-/// The judgement that speaks for now: of this cycle, of the current session and of its newest turn,
-/// and only while that turn is settled. Anything else is a late answer to an old question.
+/// The judgement that speaks for now: of this cycle, of the current session, of its newest turn and
+/// of the current scope, and only while that turn is settled. Anything else is a late answer to an
+/// old question (a judgement of the goal before you changed it included).
 fn current_judgement<'a>(f: &'a Facts, settled: Settled) -> Option<&'a Judged> {
     let s = f.session.as_ref()?;
     let turn = s.turn.as_deref()?;
@@ -415,7 +422,12 @@ fn current_judgement<'a>(f: &'a Facts, settled: Settled) -> Option<&'a Judged> {
     }
     f.judgements
         .iter()
-        .filter(|j| j.cycle == f.item.cycle && j.session_id == s.id && j.turn_id == turn)
+        .filter(|j| {
+            j.cycle == f.item.cycle
+                && j.session_id == s.id
+                && j.turn_id == turn
+                && j.scope_revision == f.item.scope_revision
+        })
         .max_by_key(|j| j.created)
 }
 
@@ -706,7 +718,9 @@ fn rows(
             due(Due::Wait, Some(w.id.clone()), Some(w.next_check)),
         );
     }
-    if settled == Settled::Evaluable
+    /* the Hub follows its closing operations once no turn is in the way: a settled one, or none at all
+     * (no session is not a settled turn, but nothing of it can change the result either) */
+    if (settled == Settled::Evaluable || f.session.is_none())
         && let Some(o) = f.closing_ops.first()
     {
         return row(

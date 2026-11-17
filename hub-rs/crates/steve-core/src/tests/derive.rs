@@ -46,6 +46,7 @@ fn base() -> Facts {
             phase: "active".into(),
             paused: false,
             code: true,
+            scope_revision: 0,
         },
         session: Some(session("t1")),
         continues_cap: 2,
@@ -179,6 +180,7 @@ fn a_late_fact_of_an_old_turn_never_closes_or_moves_the_new_turn() {
         cycle,
         session_id: session.into(),
         turn_id: turn.into(),
+        scope_revision: 0,
         verdict: "done".into(),
         created: NOW - 500,
     };
@@ -235,6 +237,93 @@ fn a_late_fact_of_an_old_turn_never_closes_or_moves_the_new_turn() {
     // and a turn starting again takes it back at once
     f.session.as_mut().unwrap().running = true;
     assert_eq!(derive(&f, &policy()).row, 5);
+}
+
+#[test]
+fn no_session_is_not_settled_but_unknown() {
+    // an open code item whose session is gone, with a verified commit all in its tree and a merged PR
+    let mut f = base();
+    f.session = None;
+    f.required.merge = true;
+    f.delivery = vec![
+        fact("commit", Some(HEAD), "committed", VERIFIED),
+        fact("tree", Some(HEAD), "committed", VERIFIED),
+        fact("pr", Some(HEAD), "merged", VERIFIED),
+    ];
+    let d = derive(&f, &policy());
+    assert_eq!(d.settled, Settled::Unknown, "{d:?}");
+    // nothing is reviewable, closable or judged on a turn nobody can see
+    assert!(d.reviewable.missing.contains(&"not_settled"), "{d:?}");
+    assert!(!d.closable.predicate.holds);
+    assert!(d.closable.predicate.missing.contains(&"not_settled"));
+    assert_eq!(d.closable.by, None);
+    assert_eq!((d.row, d.code, d.lane), (9, "nobody", Lane::NeedsYou));
+    // a judgement can never speak for it either
+    f.item.code = false;
+    f.required.merge = false;
+    f.judgements.push(Judged {
+        id: "j".into(),
+        cycle: 2,
+        session_id: "s1".into(),
+        turn_id: "t1".into(),
+        scope_revision: 0,
+        verdict: "done".into(),
+        created: NOW,
+    });
+    let d = derive(&f, &policy());
+    assert_ne!(d.row, 2, "{d:?}");
+    assert_eq!(d.closable.by, None);
+    // the Hub still follows its own closing operations: no turn is in their way
+    f.item.phase = "closing".into();
+    f.closing_ops.push(OpenOperation {
+        id: "op-build".into(),
+        kind: OP_BUILD.into(),
+        label: "build".into(),
+    });
+    let d = derive(&f, &policy());
+    assert_eq!(
+        (d.row, d.code, d.lane),
+        (4, "closing", Lane::Running),
+        "{d:?}"
+    );
+    assert!(check_next_step(&f, &d).is_ok());
+}
+
+#[test]
+fn a_judgement_of_an_earlier_scope_never_speaks_for_the_current_one() {
+    let mut f = base();
+    f.item.code = false;
+    f.item.scope_revision = 3;
+    let judged = |id: &str, scope: i64| Judged {
+        id: id.into(),
+        cycle: 2,
+        session_id: "s1".into(),
+        turn_id: "t1".into(),
+        scope_revision: scope,
+        verdict: "done".into(),
+        created: NOW - 500,
+    };
+    // the same cycle, session and turn, but judged against the goal before you changed it
+    f.judgements.push(judged("j-old-scope", 2));
+    let d = derive(&f, &policy());
+    assert_ne!(d.row, 2, "{d:?}");
+    assert_eq!(d.closable.by, None);
+    assert_eq!(d.closable.predicate.missing, vec!["judged_done"]);
+    // a newer scope's judgement does not count either: only the current one's
+    f.judgements.push(judged("j-new-scope", 4));
+    assert_ne!(derive(&f, &policy()).row, 2);
+    // the judgement of the current scope does
+    f.judgements.push(judged("j-this-scope", 3));
+    let d = derive(&f, &policy());
+    assert_eq!((d.row, d.code), (2, "judged_done"), "{d:?}");
+    assert_eq!(
+        d.next_step,
+        Some(NextStep::Due {
+            kind: Due::Grace,
+            id: Some("j-this-scope".into()),
+            at: Some(NOW - 500 + policy().close_grace()),
+        })
+    );
 }
 
 /// A release, build or deploy operation of `revision` in cycle 2, as today's gate records them.
@@ -531,6 +620,13 @@ fn the_view_shows_the_derived_state_next_to_todays() {
     facts.set_policy("no_such_entry", 1).unwrap();
     let v = k.core.shadow_view(&item).unwrap().unwrap();
     assert_eq!(v["policy_ignored"], json!([["no_such_entry", 1]]));
+    // the scope a judgement is matched against is the version of the item's goal
+    let i = k.db().item(&item).unwrap().unwrap();
+    let before = k.core.tx().item_facts(&i, NOW).unwrap().item.scope_revision;
+    let version = k.db().add_goal(&item, "换个目标").unwrap();
+    let after = k.core.tx().item_facts(&i, NOW).unwrap().item.scope_revision;
+    assert_eq!(after, version);
+    assert!(after > before, "{before} -> {after}");
 }
 
 #[test]
@@ -688,6 +784,7 @@ fn fixtures() -> Vec<(&'static str, Facts)> {
             cycle: 2,
             session_id: "s1".into(),
             turn_id: "t1".into(),
+            scope_revision: 0,
             verdict: "done".into(),
             created: NOW,
         });

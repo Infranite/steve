@@ -144,8 +144,12 @@ pub async fn get_one(
 ) -> ApiResult {
     own_item(&st, &c.ws, &id).await?;
     let lifecycle = st.domain.lifecycle_view(&id).await?;
-    // the derived state next to today's (#327): shown, not acted on
-    let shadow = st.domain.shadow_view(&id).await?;
+    // the derived state next to today's (#327): shown, not acted on, and never in the way of the item
+    // page: when it cannot be computed it is left out and the reason logged
+    let shadow = st.domain.shadow_view(&id).await.unwrap_or_else(|e| {
+        tracing::warn!(item = %id, error = %e, "item detail: shadow state left out");
+        None
+    });
     let workflow = st.domain.workflow_get(&id).await?;
     let dependency_wait = dependency_shown(st.domain.dependency_get(&id).await?);
     st.read(move |r| {
