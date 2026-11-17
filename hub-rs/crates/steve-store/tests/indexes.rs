@@ -428,6 +428,11 @@ const CASES: &[(&str, &str, &str)] = &[
     ),
     (
         "item_would_do_item",
+        "steve-store repo/would_do.rs open",
+        "SELECT * FROM item_would_do WHERE item_id=? AND cleared_at IS NULL ORDER BY rowid",
+    ),
+    (
+        "item_would_do_item",
         "steve-store repo/would_do.rs clear",
         "UPDATE item_would_do SET cleared_at=? WHERE item_id=? AND cleared_at IS NULL",
     ),

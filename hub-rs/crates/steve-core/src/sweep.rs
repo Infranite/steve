@@ -567,7 +567,8 @@ impl Tx<'_> {
     }
 
     /// One item's pass: its decision is recorded once it is due, and what no longer holds is
-    /// cleared. Carries nothing out ([`EXECUTE`]).
+    /// cleared. Carries nothing out ([`EXECUTE`]). Reads first and writes only on a change, so a
+    /// pass over items whose decision stays the same writes nothing.
     pub(crate) fn sweep_item(
         &self,
         id: &str,
@@ -575,38 +576,45 @@ impl Tx<'_> {
         policy: &WorkPolicy,
     ) -> Result<Option<WouldDo>> {
         let log = self.db().store().would_do();
+        let open = log.open(id)?;
         let Some(i) = self.db().item(id)? else {
             return Ok(None);
         };
-        if i.kind != "task" || i.phase == CLOSED || i.archived {
-            log.clear(id, now)?;
-            return Ok(None);
-        }
-        let (_, w) = self.sweep_plan(&i, now, policy)?;
-        match &w {
-            Some(w) if w.due(now) => {
-                log.record(
-                    &NewWouldDo {
-                        item_id: id,
-                        cycle: i.cycle,
-                        session_id: &w.session_id,
-                        turn_id: &w.turn_id,
-                        action: w.action.as_str(),
-                        reason: w.reason,
-                        detail: w.detail.as_deref(),
-                        row: i64::from(w.row),
-                        code: w.code,
-                        due_at: w.due_at,
-                    },
-                    now,
-                )?;
-                Ok(Some(w.clone()))
-            }
-            _ => {
+        let w = if i.kind != "task" || i.phase == CLOSED || i.archived {
+            None
+        } else {
+            self.sweep_plan(&i, now, policy)?.1.filter(|w| w.due(now))
+        };
+        let Some(w) = w else {
+            if !open.is_empty() {
                 log.clear(id, now)?;
-                Ok(None)
             }
+            return Ok(None);
+        };
+        let same = |r: &WouldDoRow| {
+            (r.cycle, r.session_id.as_str(), r.turn_id.as_str())
+                == (i.cycle, w.session_id.as_str(), w.turn_id.as_str())
+                && r.action == w.action.as_str()
+                && r.reason == w.reason
+        };
+        if !(open.len() == 1 && same(&open[0])) {
+            log.record(
+                &NewWouldDo {
+                    item_id: id,
+                    cycle: i.cycle,
+                    session_id: &w.session_id,
+                    turn_id: &w.turn_id,
+                    action: w.action.as_str(),
+                    reason: w.reason,
+                    detail: w.detail.as_deref(),
+                    row: i64::from(w.row),
+                    code: w.code,
+                    due_at: w.due_at,
+                },
+                now,
+            )?;
         }
+        Ok(Some(w))
     }
 
     /// The sweep's part of the shadow view: what it would do now, its switch, and the recent log.

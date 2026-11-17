@@ -133,6 +133,18 @@ impl WouldDo<'_> {
         })
     }
 
+    /// The open decisions of `item` (at most one, but read as many as there are).
+    pub fn open(&self, item: &str) -> Result<Vec<WouldDoRow>> {
+        self.0.read(|c| {
+            all(
+                c,
+                "SELECT * FROM item_would_do WHERE item_id=? AND cleared_at IS NULL ORDER BY rowid",
+                [item],
+                row,
+            )
+        })
+    }
+
     /// The newest decisions about `item`, open or cleared, newest first.
     pub fn log(&self, item: &str, limit: usize) -> Result<Vec<WouldDoRow>> {
         self.0.read(|c| {
