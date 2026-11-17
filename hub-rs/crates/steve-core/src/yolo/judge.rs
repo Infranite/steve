@@ -1149,7 +1149,7 @@ fn outbound(o: &Outbound, p: &Policy, what: &str) -> Verdict {
             if retry && o.retries >= p.chan_retry_max {
                 return decline(
                     &format!("{what}.retry_limit"),
-                    &retry_limit_reason(o.retries),
+                    retry_limit_reason(o.retries),
                 );
             }
             let (rule, delay) = match o.identity {
