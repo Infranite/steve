@@ -15,7 +15,7 @@
 //! 3. **send** ([`Outbox::send`]): the authorization is checked against the store again, the final
 //!    text gets the persona signature or “（由 Steve 代发）”, the message is claimed once (`sent` set while `pending`), the adapter is called with
 //!    `uuid = cm_…` (a retry cannot double-send), then `sent` / `failed` + a `fail` decision
-//!    (retry / discard), the basis record and the audit.
+//!    (retry / rewrite for review / discard), the basis record and the audit.
 //!
 //! Approvals wait out a short delay in the queue ([`Outbox::send_due`], every [`QUEUE_EVERY`]): the
 //! account's `send_delay_s`, else [`SEND_DELAY_MS`] in your name and [`BOT_SEND_DELAY_MS`] for a bot;
@@ -87,9 +87,9 @@ pub const LATE_MS: i64 = 60 * 60 * 1000;
 /// The choices on a message that may be out (sent, no answer, past the provider's dedupe window).
 pub const UNKNOWN_OPTIONS: [&str; 3] = ["sent", "retry", "discard"];
 /// Options of the decision after a failed send.
-pub const FAIL_OPTIONS: [&str; 2] = ["retry", "discard"];
+pub const FAIL_OPTIONS: [&str; 3] = ["retry", "rewrite", "discard"];
 /// Options of the decision after a blocked one.
-pub const BLOCKED_OPTIONS: [&str; 1] = ["discard"];
+pub const BLOCKED_OPTIONS: [&str; 3] = ["retry", "rewrite", "discard"];
 /// The choice “改写后再看”: the drafting model rewrites the flagged parts, the result is checked again
 /// and comes back as a new draft card.
 pub const REWRITE: &str = "rewrite";
@@ -99,9 +99,15 @@ pub const REWRITE_OPTIONS: [&str; 3] = ["yes", "no", REWRITE];
 /// A provider refusal for a missing permission (Feishu 99991672 tenant / 99991679 user scope, or
 /// the grant check before the call): retrying can't help.
 pub fn missing_permission(error: &str) -> bool {
-    ["99991672", "99991679", "没有开通这个权限", "授权里没有"]
-        .iter()
-        .any(|m| error.contains(m))
+    [
+        "99991672",
+        "99991679",
+        "没有开通这个权限",
+        "授权里没有",
+        "没有开启「",
+    ]
+    .iter()
+    .any(|m| error.contains(m))
 }
 
 /// The question of the one card about writes a channel refuses for good ([`write_blocks`]): what
@@ -110,10 +116,10 @@ fn blocked_notice(scope: BlockScope, space: &str, error: &str) -> String {
     let hours = write_blocks::MEMORY_MS / (60 * 60 * 1000);
     match scope {
         BlockScope::Connection => format!(
-            "发到「{space}」的消息没有发出去：{error}。这个连接现在不能发消息：{hours} 小时内 Steve 不在它的会话里自动起草回复，之后被拒的消息也不再逐条提醒。要让 Steve 发出，请在渠道服务里允许这个连接发送（例如给它的凭据加上发送权限），允许后自动恢复"
+            "发到「{space}」的消息没有发出去：{error}。作用域：整个连接。{hours} 小时内仅抑制重复自动回复和告警，明确请求仍处理。请在渠道服务里允许这个连接发送（检查凭据的发送权限或联系服务管理员）；Steve 没有该服务的授权管理 API，内部具体拒绝规则尚未核实。处理后点重试，仍会重新校验；也可修改后重新审阅或不发送。恢复权限不会重发已放弃的消息"
         ),
         BlockScope::Target => format!(
-            "发到「{space}」的消息没有发出去：{error}。{hours} 小时内 Steve 不在这个会话里自动起草回复，之后被拒的消息也不再逐条提醒。要在这里发出，请在渠道服务里允许这个会话"
+            "发到「{space}」的消息没有发出去：{error}。作用域：这个会话，其他会话不受此目标级拒绝影响。{hours} 小时内仅抑制重复自动回复和告警，明确请求仍处理。请在渠道服务里允许这个会话（检查目标发送范围或联系服务管理员）；Steve 没有该服务的授权管理 API，内部具体拒绝规则尚未核实。处理后点重试，仍会重新校验；也可修改后重新审阅或不发送。恢复权限不会重发已放弃的消息"
         ),
     }
 }
@@ -496,7 +502,7 @@ fn open_fail(tx: &Tx, row: &OutRow, question: String, options: &[&str]) -> Chann
             item_id: None,
             session_id: None,
             question,
-            draft: (options.len() > 1).then(|| row.text.clone()),
+            draft: Some(row.text.clone()),
             options: Some(options.iter().map(|s| s.to_string()).collect()),
             requested_by: "steve".into(),
         },
@@ -510,6 +516,67 @@ fn open_fail(tx: &Tx, row: &OutRow, question: String, options: &[&str]) -> Chann
 
 fn space_name(s: &SpaceRow) -> String {
     respond::space_label(s)
+}
+
+/// Recovery facts are additive card data. They describe the refusal, never an authorization.
+fn recovery_metadata(
+    tx: &Tx,
+    decision: &str,
+    kind: &str,
+    scope: &str,
+    conn: &str,
+    space: &str,
+    error: &str,
+) -> ChannelResult<()> {
+    let adapter: String =
+        tx.query_row("SELECT adapter FROM connections WHERE id=?", [conn], |r| {
+            r.get(0)
+        })?;
+    let code = [
+        "session.write_policy=forbidden",
+        "target_forbidden",
+        "write_forbidden",
+        "forbidden",
+        "99991672",
+        "99991679",
+    ]
+    .into_iter()
+    .find(|code| error.contains(code));
+    let rpc_code = if adapter.starts_with("ext_ws") {
+        match code {
+            Some("target_forbidden") => Some(-32016),
+            Some("write_forbidden") => Some(-32006),
+            Some("forbidden") => Some(-32009),
+            _ => None,
+        }
+    } else {
+        None
+    };
+    let message: String = tx.query_row(
+        "SELECT subject_id FROM decisions WHERE id=?",
+        [decision],
+        |r| r.get(0),
+    )?;
+    let managed = kind == "missing_permission" && error.contains("没有开启「msg.send_as_user」");
+    let question: String = tx.query_row(
+        "SELECT question FROM decisions WHERE id=?",
+        [decision],
+        |r| r.get(0),
+    )?;
+    let data = json!({"recovery": {
+        "kind": kind, "scope": scope, "source": if managed { "steve.connection_capability" } else { &adapter },
+        "provider": adapter, "code": if managed { Some("capability_disabled") } else { code }, "rpc_code": rpc_code, "error": error,
+        "connection_id": conn, "space_id": space, "requires_user_action": true,
+        "authorization_kind": if managed { "managed" } else { "external" },
+        "authorization_url": managed.then(|| format!("/api/chan-messages/{message}/authorization")),
+        "settings_href": format!("#/channels/acc/{conn}"), "instructions": question,
+        "external_policy_known": false
+    }});
+    tx.execute(
+        "UPDATE decisions SET result=? WHERE id=?",
+        params![data.to_string(), decision],
+    )?;
+    Ok(())
 }
 
 // ---------------------------------------------------------------- authorization
@@ -587,21 +654,21 @@ async fn rewrite_draft(
         Option<String>,
         basis::BasisOut,
         bool,
+        bool,
+        Option<String>,
     );
     let loaded = ch.store().reader(|c| -> ChannelResult<Option<Loaded>> {
         let Some(row) = out_row(c, message_id)? else {
             return Ok(None);
         };
         let d = base::decisions::get(c, decision_id)?;
-        let chosen = d.is_some_and(|d| {
+        let chosen = d.as_ref().is_some_and(|d| {
             d.status == "resolved" && d.result["choice"].as_str() == Some(REWRITE)
         });
         if row.status != "draft" || row.decision_id.as_deref() != Some(decision_id) || !chosen {
             return Ok(None);
         }
-        let Some(b) = basis::of_message(c, &row.ws, &row.id)? else {
-            return Ok(None);
-        };
+        let b = basis::of_message(c, &row.ws, &row.id)?.ok_or_else(|| ApiError::rule("原始披露依据已不可用，无法改写"))?;
         let space = spaces::get(c, &row.space_id)?.ok_or_else(|| ApiError::not_found("空间"))?;
         let p = place(
             c,
@@ -625,9 +692,13 @@ async fn rewrite_draft(
                 .optional()?,
             None => None,
         };
-        Ok(Some((row, p, a, k, said, b, complete)))
+        let recovering = d.as_ref().is_some_and(|d| d.kind == "fail");
+        let edited = d.as_ref().filter(|d| d.kind == "fail")
+            .and_then(|d| d.result["text"].as_str())
+            .filter(|t| !t.trim().is_empty()).map(|t| t.trim().to_string());
+        Ok(Some((row, p, a, k, said, b, complete, recovering, edited)))
     })?;
-    let Some((row, p, audience, knowledge, said, b, complete)) = loaded else {
+    let Some((row, p, audience, knowledge, said, b, complete, recovering, edited)) = loaded else {
         return Ok(());
     };
     let spans: Vec<steve_modules::outbound::Span> =
@@ -639,7 +710,11 @@ async fn rewrite_draft(
         check_model: b.check_model.clone(),
     };
     let model = b.answer_model.clone().unwrap_or_default();
-    let new = rewrite_text(ch, pinned, &audience, &row.text, &flagged, &model).await;
+    let new = match edited {
+        Some(t) => Some(t),
+        None => rewrite_text(ch, pinned, &audience, &row.text, &flagged, &model).await,
+    }
+    .filter(|t| !t.trim().is_empty() && t.chars().count() <= TEXT_MAX);
     let cx = CheckCx {
         ws: row.ws.clone(),
         actor: match (&p.persona, p.mode) {
@@ -679,6 +754,23 @@ async fn rewrite_draft(
             || cur.text != row.text
         {
             return Ok(());
+        }
+        if !base::decisions::get(tx, decision_id)?.is_some_and(|d| d.status == "resolved" && d.result["choice"] == REWRITE) {
+            return Ok(());
+        }
+        let mut row = row.clone();
+        if recovering {
+            // The old UUID has reached the provider. A changed payload needs a new UUID, even
+            // after a definite refusal: ext_ws rejects same-key/different-params requests.
+            let next = uid("cm");
+            tx.execute("INSERT INTO chan_messages (id,workspace_id,space_id,thread_key,reply_to,direction,sender_account_id,persona_id,on_behalf,text,status,created,seen_by)
+                SELECT ?,workspace_id,space_id,thread_key,reply_to,direction,sender_account_id,persona_id,on_behalf,text,'draft',?,seen_by FROM chan_messages WHERE id=?",
+                params![next, now, row.id])?;
+            set_status(tx, &row.id, &["draft"], DISCARDED)?;
+            tx.execute("UPDATE output_deliveries SET message_id=? WHERE message_id=?", params![next, row.id])?;
+            tx.execute("UPDATE decisions SET result=json_set(result,'$.draft_message',?) WHERE id=?", params![next, decision_id])?;
+            messages::event(tx, &row.ws, &row.space_id, &row.id);
+            row.id = next;
         }
         let mut q = format!("{}发到「{}」", p.speaker, space_name(&p.space));
         let text = match (&new, &checked) {
@@ -730,10 +822,16 @@ async fn rewrite_draft(
             }
             _ => {
                 q.push_str("（没能改写，原文未变）");
+                if recovering {
+                    tx.execute("UPDATE chan_messages SET basis_id=? WHERE id=?", params![b.id, row.id])?;
+                }
                 open_approval(tx, &row.ws, &row.id, q, &row.text, true)?;
                 row.text.clone()
             }
         };
+        if recovering {
+            tx.execute("UPDATE decisions SET result=json_object('recovery_review',json('true')) WHERE id=(SELECT decision_id FROM chan_messages WHERE id=?)", [&row.id])?;
+        }
         base::audit(
             tx,
             &row.ws,
@@ -886,6 +984,9 @@ pub fn verify(
         return Ok(Err("not in the chat".into()));
     };
     let (account, mode) = bindings::connection_account(c, &row.ws, &space.connection_id)?;
+    if spaces::settings(c, &space.id)?.attention == spaces::Attention::Blocked {
+        return Ok(Err("space blocked".into()));
+    }
     if row.sender_account_id.as_deref() != Some(account.as_str()) {
         return Ok(Err("sender".into()));
     }
@@ -1023,7 +1124,7 @@ pub enum SendOutcome {
     Sent { external_id: Option<String> },
     /// The authorization did not hold: back to a draft with its approval.
     Drafted { decision_id: String },
-    /// The provider failed: `failed`, a `fail` decision (retry / discard).
+    /// The provider failed: `failed`, a `fail` decision (retry / rewrite for review / discard).
     Failed { error: String, decision_id: String },
     /// The provider refuses writes there for now ([`ProviderError::Blocked`]) and the one notice
     /// about it is already out: `failed`, no card ([`write_blocks`]).
@@ -1138,7 +1239,26 @@ impl Outbox {
         }
         let t = &req.target;
         // an automatic answer where writes are refused for now is not drafted at all ([`write_blocks`])
+        let explicit = ch.store().reader(|c| -> ChannelResult<bool> {
+            match &req.auth {
+                Auth::Decision { .. } | Auth::Trigger { .. } | Auth::Requester { .. } => Ok(true),
+                Auth::Rule { source, .. } => {
+                    write_blocks::explicit_request(c, &t.ws, &t.connection_id, &t.space_id, source)
+                }
+                _ => match &t.source_message_id {
+                    Some(source) => write_blocks::explicit_request(
+                        c,
+                        &t.ws,
+                        &t.connection_id,
+                        &t.space_id,
+                        source,
+                    ),
+                    None => Ok(false),
+                },
+            }
+        })?;
         if automatic(req.purpose)
+            && !explicit
             && let Some(why) = ch
                 .store()
                 .reader(|c| write_blocks::active(c, &t.connection_id, &t.space_id, ch.now()))?
@@ -1562,8 +1682,104 @@ impl Outbox {
         });
         let (space, mode, adapter, text, at, in_thread) = match prep {
             Ok(x) => x,
-            Err(e) => return self.failed(ch, &row, &e.to_string(), None, claim),
+            Err(e) if again || row.sent.is_some() => {
+                return self.unknown(ch, &row, &e.to_string(), claim);
+            }
+            Err(e) => return self.failed(ch, &row, auth, &e.to_string(), None, claim),
         };
+        let retry = ch.store().reader(|c| -> ChannelResult<bool> {
+            Ok(
+                matches!(auth, Auth::Decision { id } if base::decisions::get(c, id)?
+                .is_some_and(|d| (d.kind == "fail" && d.result["choice"] == "retry") || d.result["recovery_review"] == true))
+                    && send_state::get(c, &row.id)?.is_none_or(|s| s.first_at.is_none()),
+            )
+        })?;
+        if retry {
+            // Permission recovery is not approval of stale disclosure facts. Reload the audience
+            // and original knowledge; no automatic rewrite or send when this check no longer passes.
+            let (audience, knowledge, complete, old, said) = ch.store().reader(|c| -> ChannelResult<_> {
+                let old = basis::of_message(c, &row.ws, &row.id)?;
+                let entries = old.as_ref().and_then(|b| b.entries.as_array()).cloned().unwrap_or_default();
+                let (knowledge, complete) = steve_knowledge::retrieve::knowledge_again(c, &row.ws, &entries)?;
+                let owner = compose::owner_user(c, &row.ws, &space.connection_id)?;
+                let (account, _) = bindings::connection_account(c, &row.ws, &space.connection_id)?;
+                let audience = disclosure::space_audience(c, &space, &account, &owner)?;
+                let said = row.reply_to.as_ref().map(|src| c.query_row("SELECT text FROM chan_messages WHERE workspace_id=? AND space_id=? AND external_id=? AND direction='in' AND purged IS NULL", params![row.ws, row.space_id, src], |r| r.get::<_, Option<String>>(0)).optional()).transpose()?.flatten().flatten();
+                Ok((audience, knowledge, complete && old.is_some(), old, said))
+            })?;
+            let mut check = b1::check(
+                ch.modules(),
+                &CheckCx {
+                    ws: row.ws.clone(),
+                    actor: "steve".into(),
+                    draft_model: old.as_ref().and_then(|b| b.answer_model.clone()),
+                    audience_said: said,
+                    skip_model: false,
+                    internal_skip: complete && mode == Mode::Bot && row.on_behalf != "proxy",
+                },
+                &audience,
+                &text,
+                &knowledge,
+            )
+            .await;
+            if !complete {
+                check.verdict = Verdict::Leak;
+                check.spans.push(b1::Span {
+                    text: String::new(),
+                    reason: b1::R_BASIS_GONE.into(),
+                });
+            }
+            let decision = ch
+                .store()
+                .transaction(|tx| -> ChannelResult<Option<String>> {
+                    let current = out_row(tx, &row.id)?;
+                    if !current.is_some_and(|r| {
+                        r.status == "pending" && r.sent == Some(claim) && r.text == row.text
+                    }) {
+                        return Ok(None);
+                    }
+                    let pass = check.verdict == Verdict::Pass;
+                    basis::insert(
+                        tx,
+                        &NewBasis {
+                            ws: row.ws.clone(),
+                            message_id: row.id.clone(),
+                            entries: check.entries.clone(),
+                            rewrites: old
+                                .as_ref()
+                                .and_then(|b| serde_json::from_value(b.rewrites.clone()).ok())
+                                .unwrap_or_default(),
+                            verdict: if pass { basis::PASS } else { basis::DRAFTED }.into(),
+                            answer_model: old.as_ref().and_then(|b| b.answer_model.clone()),
+                            check_model: check.check_model.clone(),
+                            spans: check.spans.clone(),
+                        },
+                        ch.now(),
+                    )?;
+                    if pass {
+                        return Ok(None);
+                    }
+                    set_status(tx, &row.id, &["pending"], "draft")?;
+                    send_state::forget(tx, &row.id)?;
+                    let d = open_approval(
+                        tx,
+                        &row.ws,
+                        &row.id,
+                        format!(
+                            "发到「{}」（重试前披露检查未通过：{}）",
+                            space_name(&space),
+                            spans_note(&check)
+                        ),
+                        &row.text,
+                        !unchecked(&check),
+                    )?;
+                    messages::event(tx, &row.ws, &row.space_id, &row.id);
+                    Ok(Some(d))
+                })?;
+            if let Some(decision_id) = decision {
+                return Ok(SendOutcome::Drafted { decision_id });
+            }
+        }
         // the adapter, on the connection as it is now: paused, to be authorized again or revoked, or
         // (in your name) sending as you turned off since the approval → not sent
         let cap = (mode == Mode::Own).then_some(spaces::SEND_AS_USER_CAP);
@@ -1576,8 +1792,8 @@ impl Outbox {
         if waits {
             ch.store().transaction(|tx| -> ChannelResult<()> {
                 tx.execute(
-                    "UPDATE chan_messages SET sent = NULL WHERE id = ? AND status = 'pending'",
-                    [&row.id],
+                    "UPDATE chan_messages SET sent = NULL, status=CASE WHEN EXISTS(SELECT 1 FROM chan_send_state WHERE message_id=?1 AND first_at IS NOT NULL) THEN 'unknown' ELSE 'pending' END WHERE id = ?1 AND status = 'pending' AND sent=?2",
+                    params![row.id, claim],
                 )?;
                 Ok(())
             })?;
@@ -1586,9 +1802,10 @@ impl Outbox {
         let cx = match ch.connections().cx_for(&row.ws, &space.connection_id, cap) {
             Ok(cx) => cx,
             Err(e) => {
-                ch.store()
-                    .transaction(|tx| send_state::forget(tx, &row.id))?;
-                return self.failed(ch, &row, &e.to_string(), None, claim);
+                if again || row.sent.is_some() {
+                    return self.unknown(ch, &row, &e.to_string(), claim);
+                }
+                return self.failed(ch, &row, auth, &e.to_string(), None, claim);
             }
         };
         #[cfg(feature = "fake")]
@@ -1608,8 +1825,9 @@ impl Outbox {
             if !ours { return Ok(None); }
             if crate::notifications::deferred(tx, &row.id, now)?
                 || verify(tx, &row, auth, now)?.is_err()
+                || may_write_in(tx, &row.ws, &space.connection_id, cap)?.is_err()
             {
-                tx.execute("UPDATE chan_messages SET sent=NULL WHERE id=? AND status='pending' AND sent=?",params![row.id,claim])?;
+                tx.execute("UPDATE chan_messages SET sent=NULL,status=CASE WHEN EXISTS(SELECT 1 FROM chan_send_state WHERE message_id=?1 AND first_at IS NOT NULL) THEN 'unknown' ELSE 'pending' END WHERE id=?1 AND status='pending' AND sent=?2",params![row.id,claim])?;
                 tx.execute("UPDATE personal_notifications SET next_attempt_at=? WHERE delivery_id=(SELECT id FROM output_deliveries WHERE message_id=?)",params![now+10_000,row.id])?;
                 return Ok(None);
             }
@@ -1726,9 +1944,10 @@ impl Outbox {
             // queue sends it again under the same dedupe key while the provider drops repeats, or
             // asks you after
             Err(ProviderError::Transient(e)) => self.unknown(ch, &row, &e, claim),
+            // A refusal of a later attempt says nothing about an earlier unanswered send. Keep
+            // the original UUID/body and uncertainty evidence until it can be reconciled.
+            Err(e) if again || row.sent.is_some() => self.unknown(ch, &row, &e.to_string(), claim),
             Err(e) => {
-                ch.store()
-                    .transaction(|tx| send_state::forget(tx, &row.id))?;
                 // refused for good: remembered for the connection or the chat, one notice
                 let block = match &e {
                     ProviderError::Blocked(scope, _) => {
@@ -1736,7 +1955,7 @@ impl Outbox {
                     }
                     _ => None,
                 };
-                let r = self.failed(ch, &row, &e.to_string(), block, claim);
+                let r = self.failed(ch, &row, auth, &e.to_string(), block, claim);
                 ch.react_answered(&row.id, false).await;
                 r
             }
@@ -1777,15 +1996,15 @@ impl Outbox {
         })
     }
 
-    /// The provider failed: `failed`, a `fail` decision (retry / discard). A missing permission
-    /// can't be fixed by retrying (nor by YOLO): only discard, and the question says where to grant it.
-    /// `block`: the provider refuses writes on that connection (or in this chat) for good
-    /// ([`ProviderError::Blocked`]): remembered ([`write_blocks`]); only the first such message gets
-    /// a card, the notice of how to allow sending, and the others stay `failed` without one.
+    /// The provider failed: `failed`, a `fail` decision (retry / rewrite for review / discard). A missing permission
+    /// requires permission recovery before a human retries; YOLO must leave it to the user.
+    /// `block`: the provider refuses writes on that connection (or in this chat). Remember it for
+    /// automatic noise suppression, while every explicit request or manual retry keeps a card.
     fn failed(
         &self,
         ch: &Channels,
         row: &OutRow,
+        auth: &Auth,
         error: &str,
         block: Option<(BlockScope, &str)>,
         claim: i64,
@@ -1802,12 +2021,19 @@ impl Outbox {
             {
                 return Ok(None);
             }
+            // A definitive refusal may clear the attempt only while this result still owns the
+            // claim. A late refusal must not erase a newer unknown attempt's dedupe evidence.
+            send_state::forget(tx, &row.id)?;
             tx.execute("UPDATE output_deliveries SET last_error=? WHERE message_id=?",params![error,row.id])?;
             let space =
                 spaces::get(tx, &row.space_id)?.ok_or_else(|| ApiError::not_found("空间"))?;
             if let Some((scope, conn)) = block {
                 let r = write_blocks::record(tx, &row.ws, conn, &row.space_id, scope, error, now)?;
-                let d = if r.notice {
+                let explicit = match auth {
+                    Auth::Rule { source, .. } => write_blocks::explicit_request(tx, &row.ws, conn, &row.space_id, source)?,
+                    _ => true,
+                };
+                let d = if r.notice || explicit {
                     Some(open_fail(
                         tx,
                         row,
@@ -1817,6 +2043,9 @@ impl Outbox {
                 } else {
                     None
                 };
+                if let Some(id) = &d {
+                    recovery_metadata(tx, id, "channel_refusal", scope_code(scope), conn, &row.space_id, error)?;
+                }
                 base::audit(
                     tx,
                     &row.ws,
@@ -1834,7 +2063,7 @@ impl Outbox {
                     tx,
                     row,
                     format!(
-                        "发到「{}」的消息没有发出去：{error}。重试也发不出，先到“接入”补上这项权限",
+                        "发到「{}」的消息没有发出去：{error}。请先到“接入”核对这项权限：平台缺少 scope 时需管理员开通后重新授权；Steve 本地关闭的代发能力可创建可审阅、可撤销的授权改动。权限处理后点重试；修改会重新审阅；不发送会关闭本条消息。清除拒绝缓存不会授予权限",
                         space_name(&space)
                     ),
                     &BLOCKED_OPTIONS,
@@ -1847,6 +2076,9 @@ impl Outbox {
                     &FAIL_OPTIONS,
                 )?
             };
+            if permanent {
+                recovery_metadata(tx, &d, "missing_permission", "connection", &space.connection_id, &row.space_id, error)?;
+            }
             base::audit(
                 tx,
                 &row.ws,
@@ -2025,7 +2257,7 @@ impl Outbox {
         n
     }
 
-    /// A direct reply that did not go out in time: `failed`, with the usual retry / discard card.
+    /// A direct reply that did not go out in time: `failed`, with a retry / rewrite / discard card.
     fn ask_late(&self, ch: &Channels, id: &str) -> ChannelResult<()> {
         ch.store().transaction(|tx| -> ChannelResult<()> {
             let Some(row) = out_row(tx, id)? else {
@@ -2536,7 +2768,7 @@ impl ItemHooks for ReturnToSource {
 // ---------------------------------------------------------------- decisions
 
 /// The `chan_message` decision handler: a draft's approval (`yes` sends the possibly edited text
-/// after the delay, `no` discards), a failed send (`retry` / `discard`), a handoff (`draft_reply`
+/// after the delay, `no` discards), a failed send (`retry` / `rewrite` / `discard`), a handoff (`draft_reply`
 /// opens an empty draft to write, `to_item` makes an item, `done`).
 pub struct MessageDecisions(OutLink);
 
@@ -2548,6 +2780,9 @@ impl MessageDecisions {
             return Err(ApiError::conflict(steve_i18n::t!("channels.error.handled")));
         }
         let mut result = choice_result(cx);
+        if d.result["recovery_review"] == true {
+            result["recovery_review"] = json!(true);
+        }
         match cx.choice {
             "yes" => {
                 let edited = !cx.text.trim().is_empty();
@@ -2625,8 +2860,17 @@ impl MessageDecisions {
             return Err(ApiError::conflict(steve_i18n::t!("channels.error.handled")));
         }
         let mut result = choice_result(cx);
+        result["was"] = json!(row.status);
         match (cx.choice, row.status.as_str()) {
             ("retry", "failed") => {
+                if !cx.text.trim().is_empty() {
+                    return Err(ApiError::invalid("text: use rewrite to edit and review"));
+                }
+                if d.result["recovery"]["requires_user_action"] == true
+                    && cx.actor == b1::YOLO_ACTOR
+                {
+                    return Err(ApiError::rule("渠道拒绝需要你处理权限后主动重试"));
+                }
                 tx.execute(
                     "UPDATE chan_messages SET status = 'pending', sent = NULL WHERE id = ? AND status = 'failed'",
                     [&row.id],
@@ -2637,8 +2881,23 @@ impl MessageDecisions {
                     result["decided_by"] = json!(b1::YOLO_ACTOR);
                 }
             }
+            (REWRITE, "failed") if d.options.iter().any(|o| o == REWRITE) => {
+                if cx.text.chars().count() > TEXT_MAX {
+                    return Err(ApiError::invalid("text"));
+                }
+                set_status(tx, &row.id, &["failed"], "draft")?;
+                result["rewrite_mode"] = json!(if cx.text.trim().is_empty() {
+                    "model"
+                } else {
+                    "manual"
+                });
+            }
             ("discard", "failed") => {
                 set_status(tx, &row.id, &["failed"], DISCARDED)?;
+                send_state::forget(tx, &row.id)?;
+                self.0.push(After::Discarded {
+                    message_id: row.id.clone(),
+                });
             }
             // may be out (no answer): you looked
             ("sent", "unknown") => {
@@ -2646,6 +2905,11 @@ impl MessageDecisions {
                 send_state::forget(tx, &row.id)?;
             }
             ("retry", "unknown") => {
+                if !cx.text.trim().is_empty() {
+                    return Err(ApiError::invalid(
+                        "text: an uncertain send cannot be edited",
+                    ));
+                }
                 tx.execute(
                     "UPDATE chan_messages SET status = 'pending', sent = NULL WHERE id = ? AND status = 'unknown'",
                     [&row.id],
@@ -2655,9 +2919,13 @@ impl MessageDecisions {
             }
             ("discard", "unknown") => {
                 set_status(tx, &row.id, &["unknown"], DISCARDED)?;
-                send_state::forget(tx, &row.id)?;
+                // Keep the uncertainty evidence while discarded. An explicit undo must not turn
+                // an unanswered send into a definitely-unsent failure with a fresh retry window.
             }
             _ => return Err(ApiError::conflict(steve_i18n::t!("channels.error.handled"))),
+        }
+        if let Some(recovery) = d.result.get("recovery") {
+            result["recovery"] = recovery.clone();
         }
         base::audit(
             tx,
@@ -2743,6 +3011,9 @@ impl DecisionHandler for MessageDecisions {
         let Some(row) = out_row(tx, &d.subject_id)? else {
             return Ok(());
         };
+        if row.decision_id.as_deref() != Some(&d.id) {
+            return Err(ApiError::conflict(steve_i18n::t!("channels.error.handled")));
+        }
         let choice = d.result["choice"].as_str().unwrap_or("");
         let in_window = row.status == "pending"
             && row.sent.is_none()
@@ -2754,14 +3025,34 @@ impl DecisionHandler for MessageDecisions {
             // the rewrite has not replaced this card yet: it stays open as it was
             ("approve", REWRITE)
                 if row.status == "draft" && row.decision_id.as_deref() == Some(d.id.as_str()) => {}
+            ("fail", REWRITE) if row.status == "draft" => {
+                set_status(tx, &row.id, &["draft"], "failed")?;
+            }
             ("approve", "no") if row.status == DISCARDED => {
                 set_status(tx, &row.id, &[DISCARDED], "draft")?;
             }
             ("fail", "retry") if row.status == "pending" && row.sent.is_none() => {
-                set_status(tx, &row.id, &["pending"], "failed")?;
+                let was = if d.result["was"] == "unknown" || d.options.iter().any(|o| o == "sent") {
+                    "unknown"
+                } else {
+                    "failed"
+                };
+                set_status(tx, &row.id, &["pending"], was)?;
             }
             ("fail", "discard") if row.status == DISCARDED => {
-                set_status(tx, &row.id, &[DISCARDED], "failed")?;
+                let uncertain =
+                    d.result["was"] == "unknown" || d.options.iter().any(|o| o == "sent");
+                if uncertain && send_state::get(tx, &row.id)?.is_none_or(|s| s.first_at.is_none()) {
+                    return Err(ApiError::conflict(
+                        "原发送结果未知且去重依据已不可用，不能撤销后重新发送",
+                    ));
+                }
+                set_status(
+                    tx,
+                    &row.id,
+                    &[DISCARDED],
+                    if uncertain { "unknown" } else { "failed" },
+                )?;
             }
             _ => {
                 return Err(ApiError::conflict(steve_i18n::t!(

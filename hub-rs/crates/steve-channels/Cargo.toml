@@ -14,6 +14,10 @@ name = "steve-fake-feishu"
 path = "src/bin/steve-fake-feishu.rs"
 required-features = ["fake"]
 
+[[example]]
+name = "st162_recovery_fixture"
+required-features = ["fake"]
+
 [dependencies]
 aes = "=0.9.3"
 base64 = "=0.23.1"

@@ -244,7 +244,7 @@ pub enum OutboundStage {
     LeakDraft,
     /// Sending failed (`retry` / `discard`).
     SendFailed,
-    /// Only `discard` is left (the check blocked it).
+    /// Channel refusal requiring human recovery, or an uncertain result. No automatic retry.
     Blocked,
     /// Someone asked for the user in person.
     Handoff,
@@ -1136,9 +1136,11 @@ fn outbound(o: &Outbound, p: &Policy, what: &str) -> Verdict {
     };
     match o.stage {
         OutboundStage::Handoff => decline(&format!("{what}.handoff"), "别人点名找的是你"),
-        OutboundStage::LeakDraft | OutboundStage::Blocked => {
-            decline(&format!("{what}.blocked"), "披露检查没通过")
-        }
+        OutboundStage::LeakDraft => decline(&format!("{what}.blocked"), "披露检查没通过"),
+        OutboundStage::Blocked => decline(
+            &format!("{what}.blocked"),
+            "渠道拒绝或结果待核实，需人工处理",
+        ),
         OutboundStage::Draft | OutboundStage::SendFailed => {
             if !o.disclosure.passed() {
                 return decline(&format!("{what}.unchecked"), "没有通过披露检查");

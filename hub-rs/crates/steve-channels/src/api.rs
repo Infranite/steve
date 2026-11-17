@@ -35,6 +35,7 @@ pub fn routes(ch: Channels) -> Router<Modules> {
         .route("/spaces/{id}/rules/to-flow", post(to_flow))
         .route("/spaces/{id}/flow", delete(back_to_rules))
         .route("/chan-messages/{id}/context", get(context))
+        .route("/chan-messages/{id}/authorization", post(authorization))
         .route("/chan-messages/{id}/resources/{n}", get(resource))
         .merge(crate::personas_api::routes())
         .layer(Extension(ch))
@@ -42,6 +43,16 @@ pub fn routes(ch: Channels) -> Router<Modules> {
 
 fn viewer(ch: &Channels, who: &Caller) -> ApiResult<Viewer> {
     ch.modules().viewer(who)
+}
+
+async fn authorization(
+    Extension(ch): Cx,
+    who: Caller,
+    Path(id): Path<String>,
+) -> ApiResult<Json<Value>> {
+    Ok(Json(serde_json::to_value(crate::recovery::propose(
+        &ch, &who, &id,
+    )?)?))
 }
 
 #[derive(Debug, Default, Deserialize)]

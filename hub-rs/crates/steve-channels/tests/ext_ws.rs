@@ -1601,7 +1601,7 @@ async fn a_read_only_connection_gives_one_notice_and_lifts_when_writes_are_allow
         )
     };
 
-    // the first refused message: the one notice, which offers no retry
+    // The first automatic refusal opens a full recovery card; retries require human action.
     let plan = ask(1).await;
     let first = outbox
         .deliver(&h.ch, &reply(&plan, Purpose::Reply))
@@ -2050,4 +2050,57 @@ async fn bot_connector_writes_require_bot_caps_and_never_discover_as_you_operati
     );
     assert_eq!(h.fake.with(|w| w.writes.len()), 1);
     assert!(h.fake.calls("messages.history").is_empty());
+}
+
+/// ST-162: target_forbidden is a target policy refusal, with its original code, not disclosure.
+#[tokio::test(flavor = "multi_thread")]
+async fn target_refusal_preserves_ext_ws_code_and_recovers_without_disabling_other_chats() {
+    let h = setup().await;
+    h.fake.with(|w| {
+        w.write_policy = "restricted".into();
+        w.forbidden_targets.insert("c_42".into());
+    });
+    let id = h.connect().await;
+    let cx = h.cx(&id);
+    let err = h
+        .ext
+        .send(
+            &cx,
+            &space("c_42"),
+            &OutContent::text("full proposed text"),
+            &SendKey("cm_recover_target".into()),
+        )
+        .await
+        .unwrap_err();
+    let AdapterError::Provider(ProviderError::Blocked(BlockScope::Target, why)) = err else {
+        panic!("{err:?}")
+    };
+    assert!(why.contains("target_forbidden (-32016)"), "{why}");
+    assert!(!why.contains("泄露"));
+    h.ext
+        .send(
+            &cx,
+            &space("c_other"),
+            &OutContent::text("other conversation"),
+            &SendKey("cm_other_target".into()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(h.fake.with(|w| w.writes.len()), 1);
+    h.fake.with(|w| {
+        w.forbidden_targets.clear();
+    });
+    let key = SendKey("cm_recover_target".into());
+    let body = OutContent::text("full proposed text");
+    let first = h.ext.send(&cx, &space("c_42"), &body, &key).await.unwrap();
+    let again = h.ext.send(&cx, &space("c_42"), &body, &key).await.unwrap();
+    assert_eq!(first, again);
+    assert_eq!(
+        h.fake.with(|w| w
+            .writes
+            .iter()
+            .filter(|(_, p, _)| p["idempotency_key"] == "cm_recover_target")
+            .count()),
+        1
+    );
 }

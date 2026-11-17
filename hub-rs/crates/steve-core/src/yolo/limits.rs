@@ -8,7 +8,7 @@
 //! 4. deleting, moving or writing outside the item's own directory; touching `STEVE_HOME`, port 8440, launchd;
 //! 5. pushing to a remote or publishing (only the user's own Steve deployment is exempt, and the item's
 //!    agent pushing its own branch to `origin` and opening its pull request or an issue: [`super::push`]);
-//! 6. outbound content the disclosure check judged Leak or Blocked;
+//! 6. outbound disclosure leaks or a channel refusal requiring human recovery;
 //! 7. what only the user can do in person (sign in, scan a code, type a one-time code, confirm on a
 //!    device, plug something in), or a claim that they did: a question about it, or an agent that
 //!    stopped waiting for it, stays with the user. Nobody's text, the agent's or the model's, counts
@@ -299,10 +299,14 @@ pub fn action_outside(text: &str) -> Option<String> {
 }
 
 fn outbound(f: &Facts, o: &Outbound) -> Option<Limit> {
-    if o.disclosure == Disclosure::Leak
-        || matches!(o.stage, OutboundStage::LeakDraft | OutboundStage::Blocked)
-    {
+    if o.disclosure == Disclosure::Leak || o.stage == OutboundStage::LeakDraft {
         return Some(Limit::new(6, "披露检查判为泄露或拦截"));
+    }
+    if o.stage == OutboundStage::Blocked {
+        return Some(Limit::new(
+            6,
+            "渠道发送被拒或结果待核实，需要你处理后主动操作",
+        ));
     }
     let as_user = matches!(o.identity, Identity::SelfAccount | Identity::Proxy)
         || f.subject_type == "mail_draft";

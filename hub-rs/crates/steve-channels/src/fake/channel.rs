@@ -40,6 +40,17 @@ pub struct FakeChannel {
     /// `send` is refused for good with this text while set: the connection is read-only
     /// ([`ProviderError::Blocked`], the whole connection).
     pub block_send: Mutex<Option<String>>,
+    /// A target-scoped refusal; recorded separately from a connection-wide policy.
+    pub block_target_send: Mutex<Option<String>>,
+    /// Every attempt, including refusals and deduped repeats.
+    pub send_calls: Mutex<Vec<(SendTarget, OutContent)>>,
+    /// Pause one external attempt so a test can exercise a stale claim's late answer.
+    pub send_pause: Mutex<
+        Option<(
+            std::sync::Arc<tokio::sync::Barrier>,
+            std::sync::Arc<tokio::sync::Barrier>,
+        )>,
+    >,
     /// The next send goes out, but its answer is lost (a transient error back): `unknown`.
     pub lose_answer: Mutex<bool>,
     /// Calls of `space_info` and `members`.
@@ -181,7 +192,7 @@ impl ConnectionProvider for FakeChannel {
         "假渠道"
     }
     fn caps(&self) -> &[&'static str] {
-        &["msg.receive", "msg.send"]
+        &["msg.receive", "msg.send", "msg.send_as_user"]
     }
     fn auth(&self) -> AuthKind {
         AuthKind::None
@@ -227,13 +238,29 @@ impl ChannelAdapter for FakeChannel {
         to: &SendTarget,
         content: &OutContent,
     ) -> Result<String, AdapterError> {
+        lock(&self.send_calls).push((to.clone(), content.clone()));
+        let failed = lock(&self.fail_send).clone();
+        let blocked = lock(&self.block_send).clone();
+        let target = lock(&self.block_target_send).clone();
+        let pause = lock(&self.send_pause).take();
+        if let Some((entered, release)) = pause {
+            entered.wait().await;
+            release.wait().await;
+        }
         // the provider refused it: nothing went out
-        if let Some(e) = lock(&self.fail_send).clone() {
+        if let Some(e) = failed {
             return Err(ProviderError::Rejected(e).into());
         }
-        if let Some(e) = lock(&self.block_send).clone() {
+        if let Some(e) = blocked {
             return Err(ProviderError::Blocked(
                 steve_modules::accounts::connections::BlockScope::Connection,
+                e,
+            )
+            .into());
+        }
+        if let Some(e) = target {
+            return Err(ProviderError::Blocked(
+                steve_modules::accounts::connections::BlockScope::Target,
                 e,
             )
             .into());

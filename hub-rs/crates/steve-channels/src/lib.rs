@@ -137,6 +137,7 @@ mod personas_api;
 pub mod pipeline;
 pub mod queries;
 pub mod reactions;
+pub mod recovery;
 pub mod replies;
 pub mod respond;
 pub mod rules;
