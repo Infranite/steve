@@ -28,6 +28,8 @@ fn the_feed_keeps_its_rows_and_numbers_and_old_reminders_are_planned() {
          INSERT INTO personal_notifications(id,workspace_id,user_id,event_id,delivery_key,mode,body,state,created)
            VALUES('ntf_1','default','u1','evt_1','notification:evt_1:u1','log','Work item completed: one','held',1),
                  ('ntf_2','default','u1','evt_2','notification:evt_2:u1','log','Work item completed: two','held',2);
+         INSERT INTO personal_notifications(id,workspace_id,user_id,event_id,delivery_key,mode,body,state,kind,message_id,created)
+           VALUES('ntf_s','default','u1','cm_1','notification:cm_1:u1','log','A 私聊你','held','starred','cm_1',2);
          INSERT INTO feed_reads(workspace_id,user_id,entry_id,read_at) VALUES('default','u1','feed_ntf_1',5);
          DELETE FROM feed_entries WHERE id='feed_ntf_2';
          INSERT INTO todos(id,workspace_id,owner,text,state,source,writer,created,updated,remind_at)
@@ -67,6 +69,23 @@ fn the_feed_keeps_its_rows_and_numbers_and_old_reminders_are_planned() {
             "SELECT count(*) FROM personal_notifications WHERE topic='work.item.done'"
         ),
         2
+    );
+
+    // 101's `kind` is folded into the one topic: a starred contact's notification is `contact.starred`, and its
+    // feed entry stays `starred`
+    assert_eq!(
+        count(
+            &c,
+            "SELECT count(*) FROM personal_notifications WHERE id='ntf_s' AND topic='contact.starred'"
+        ),
+        1
+    );
+    assert_eq!(
+        count(
+            &c,
+            "SELECT count(*) FROM feed_entries WHERE id='feed_ntf_s' AND kind='starred'"
+        ),
+        1
     );
 
     // a reminder's notification is a `reminder` entry, numbered after the old ones
@@ -151,5 +170,55 @@ fn the_feed_keeps_its_rows_and_numbers_and_old_reminders_are_planned() {
     assert_eq!(
         count(&c, "SELECT count(*) FROM pragma_foreign_key_check"),
         0
+    );
+}
+
+/// Every topic the column allows is mapped to its feed kind by the insert trigger, by name; nothing falls back.
+#[test]
+fn every_topic_has_its_feed_kind() {
+    let c = Connection::open_in_memory().unwrap();
+    db::migrate(&c).unwrap();
+    c.execute_batch(
+        "INSERT INTO workspaces(id,name,created) VALUES('default','Fixture',1);
+         INSERT INTO users(id,workspace_id,subject,name,role,created) VALUES('u1','default','s1','One','owner',1);
+         INSERT INTO workspace_members(workspace_id,user_id,role,created) VALUES('default','u1','owner',1);",
+    )
+    .unwrap();
+    for (n, (topic, kind)) in [
+        ("work.item.done", "completion"),
+        ("todo.due", "reminder"),
+        ("snooze.wake", "reminder"),
+        ("contact.starred", "starred"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        c.execute(
+            "INSERT INTO personal_notifications(id,workspace_id,user_id,event_id,delivery_key,mode,body,state,created,topic)
+               VALUES(?1,'default','u1',?1,'notification:'||?1,'log','x','held',1,?2)",
+            rusqlite::params![format!("ntf_{n}"), topic],
+        )
+        .unwrap();
+        let got: String = c
+            .query_row(
+                "SELECT kind FROM feed_entries WHERE notification_id=?",
+                [format!("ntf_{n}")],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(got, kind, "{topic}");
+    }
+    // the column's CHECK lists exactly these four
+    let ddl: String = c
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='personal_notifications'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(
+        ddl.contains(
+            "CHECK(topic IN ('work.item.done','todo.due','snooze.wake','contact.starred'))"
+        )
     );
 }

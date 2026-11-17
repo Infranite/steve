@@ -2,3 +2,4 @@
 - Moving a reminder cancels the old one and moving it back restores it. A reminder rings once, and never for a todo that is done, dropped, handed to a Bot or deleted.
 - Quiet hours hold reminders until they end and do not drop them. Reminders that come due together, wait out quiet hours or come due while the Hub is stopped arrive as one message, which says that some were late.
 - One time zone for each person: the one in your notification settings, or the workspace's time zone if you have set none. Todos, reminders, quiet hours and new schedules all follow it, and so do the times in the digest and `/汇报`, which use the workspace owner's. The Hub's own system time zone is no longer used for them.
+- The database moves to migration 102. It adds the alarms and gives every personal notification one topic, so a starred contact's message keeps showing as one. The feed table is rebuilt in place; its entries, read marks and numbering are kept.

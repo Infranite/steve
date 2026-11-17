@@ -147,7 +147,6 @@ fn topic_of(s: &str) -> ChannelResult<Topic> {
     Topic::parse(s).ok_or_else(|| ApiError::invalid("personal notification topic"))
 }
 
-
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Mode {
@@ -740,7 +739,11 @@ pub async fn pump(ch: &Channels, outbox: &Outbox) -> ChannelResult<usize> {
     let mut n = 0;
     for (ws, me, key, body, topic, message) in rows {
         let Some(topic) = Topic::parse(&topic) else {
-            tracing::warn!(key, topic, "personal notification of an unknown topic left waiting");
+            tracing::warn!(
+                key,
+                topic,
+                "personal notification of an unknown topic left waiting"
+            );
             continue;
         };
         // a starred contact's message you answered yourself (or whose space you set aside) meanwhile
@@ -966,5 +969,80 @@ pub(crate) fn answered(tx: &Tx, out: &str, now: i64) -> ChannelResult<bool> {
             Ok(true)
         }
         None => Ok(false),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn policy(mode: Mode, space: bool, starred_in_quiet: bool) -> Policy {
+        Policy {
+            mode,
+            space_id: space.then(|| "sp_1".into()),
+            starred_in_quiet,
+            ..Policy::default()
+        }
+    }
+
+    /// Every topic is stored by its own name, has a feed kind and a whole rule set; steve-flow's alarm topics
+    /// are among them with the same feed kind; a name no topic has is not read as any.
+    #[test]
+    fn every_topic_maps_to_a_feed_kind_and_a_rule_set() {
+        let mut codes: Vec<_> = Topic::ALL.iter().map(|t| t.code()).collect();
+        codes.sort_unstable();
+        codes.dedup();
+        assert_eq!(codes.len(), Topic::ALL.len());
+        for t in Topic::ALL {
+            assert_eq!(Topic::parse(t.code()), Some(t));
+            assert!(matches!(
+                t.feed_kind(),
+                "completion" | "starred" | "reminder"
+            ));
+            assert!(matches!(t.urgency(), "normal" | "high"));
+            assert!(!t.reason().is_empty());
+            for mode in [Mode::Now, Mode::Digest, Mode::Log] {
+                for space in [false, true] {
+                    for allowed in [false, true] {
+                        let p = policy(mode, space, allowed);
+                        // everything goes out under `now`, nothing under `log`
+                        match mode {
+                            Mode::Now => assert!(t.sends(&p)),
+                            Mode::Log => assert!(!t.sends(&p)),
+                            Mode::Digest => {}
+                        }
+                        // only what you allowed goes out within the quiet hours
+                        assert!(!t.quiet_allowed(&p) || allowed);
+                    }
+                }
+            }
+        }
+        for f in steve_flow::alarms::TOPICS {
+            let t = Topic::parse(f.name)
+                .unwrap_or_else(|| panic!("{} has no notification topic", f.name));
+            assert_eq!(t.feed_kind(), f.feed_kind, "{}", f.name);
+        }
+        assert_eq!(Topic::parse("completion"), None);
+        assert_eq!(Topic::parse("starred"), None);
+        assert!(topic_of("elsewhere").is_err());
+    }
+
+    /// The rules each topic is sent by.
+    #[test]
+    fn a_starred_contact_is_urgent_and_alarms_are_sent_like_completions() {
+        let s = Topic::ContactStarred;
+        assert_eq!(s.urgency(), "high");
+        assert!(s.checks_answered());
+        assert!(s.sends(&policy(Mode::Digest, true, false)));
+        assert!(!s.sends(&policy(Mode::Digest, false, false)));
+        assert!(s.quiet_allowed(&policy(Mode::Now, false, true)));
+        assert!(!s.quiet_allowed(&policy(Mode::Now, false, false)));
+        for t in [Topic::ItemDone, Topic::TodoDue, Topic::SnoozeWake] {
+            assert_eq!(t.urgency(), "normal");
+            assert!(!t.checks_answered());
+            assert!(t.sends(&policy(Mode::Now, false, false)));
+            assert!(!t.sends(&policy(Mode::Digest, true, true)));
+            assert!(!t.quiet_allowed(&policy(Mode::Now, false, true)));
+        }
     }
 }

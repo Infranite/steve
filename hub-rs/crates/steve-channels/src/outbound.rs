@@ -2977,7 +2977,7 @@ impl Outbox {
                       SELECT 1 FROM personal_notifications n JOIN output_deliveries od ON od.id=n.delivery_id
                       JOIN notification_policies p ON p.workspace_id=n.workspace_id AND p.user_id=n.user_id
                       WHERE od.message_id=m.id AND p.enabled=1 AND (n.next_attempt_at>?3 OR p.mode='log'
-                        OR (p.mode='digest' AND (n.kind<>'starred' OR p.space_id IS NULL)))))
+                        OR (p.mode='digest' AND (n.topic<>'contact.starred' OR p.space_id IS NULL)))))
                   ORDER BY m.created LIMIT 50",
             )?;
             let v = st

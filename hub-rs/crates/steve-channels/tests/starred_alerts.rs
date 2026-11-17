@@ -348,7 +348,7 @@ async fn a_starred_contacts_message_reaches_you_where_nothing_is_drafted() {
     let intent: Value = serde_json::from_str(
         row(
             &h,
-            "SELECT d.intent FROM output_deliveries d JOIN personal_notifications p ON p.delivery_id = d.id WHERE p.kind = 'starred'",
+            "SELECT d.intent FROM output_deliveries d JOIN personal_notifications p ON p.delivery_id = d.id WHERE p.topic = 'contact.starred'",
             &[],
         )[0]
         .as_str()
@@ -440,7 +440,7 @@ async fn nothing_once_you_answered_yourself() {
     assert_eq!(
         count(
             &h,
-            "SELECT count(*) FROM personal_notifications WHERE kind = 'starred' AND state = 'cancelled'",
+            "SELECT count(*) FROM personal_notifications WHERE topic = 'contact.starred' AND state = 'cancelled'",
             &[]
         ),
         1
@@ -525,7 +525,7 @@ async fn your_policy_decides_how_it_reaches_you() {
     assert_eq!(
         count(
             &h,
-            "SELECT count(*) FROM personal_notifications WHERE kind = 'starred' AND state = 'held'",
+            "SELECT count(*) FROM personal_notifications WHERE topic = 'contact.starred' AND state = 'held'",
             &[]
         ),
         2
@@ -613,7 +613,7 @@ async fn a_retry_after_you_answered_is_let_go() {
     *h.fake.fail_send.lock().unwrap() = None;
     let out = row(
         &h,
-        "SELECT d.message_id FROM output_deliveries d JOIN personal_notifications p ON p.delivery_id = d.id WHERE p.kind = 'starred'",
+        "SELECT d.message_id FROM output_deliveries d JOIN personal_notifications p ON p.delivery_id = d.id WHERE p.topic = 'contact.starred'",
         &[],
     )[0]
     .as_str()
@@ -644,7 +644,7 @@ async fn a_retry_after_you_answered_is_let_go() {
     assert_eq!(
         row(
             &h,
-            "SELECT state FROM personal_notifications WHERE kind = 'starred'",
+            "SELECT state FROM personal_notifications WHERE topic = 'contact.starred'",
             &[]
         )[0],
         json!("cancelled")
@@ -732,7 +732,7 @@ async fn under_digest_an_interrupted_send_is_resumed() {
     assert_eq!(
         row(
             &h,
-            "SELECT state FROM personal_notifications WHERE kind = 'starred'",
+            "SELECT state FROM personal_notifications WHERE topic = 'contact.starred'",
             &[]
         )[0],
         json!("submitted")
@@ -778,7 +778,7 @@ async fn two_notified(h: &H) {
     assert_eq!(
         count(
             h,
-            "SELECT count(*) FROM personal_notifications WHERE kind = 'starred' AND body IS NOT NULL",
+            "SELECT count(*) FROM personal_notifications WHERE topic = 'contact.starred' AND body IS NOT NULL",
             &[]
         ),
         2
@@ -791,7 +791,7 @@ fn no_copy_left(h: &H, how: &str) {
     assert_eq!(
         count(
             h,
-            "SELECT count(*) FROM personal_notifications WHERE kind = 'starred' AND (body IS NOT NULL OR state <> 'purged')",
+            "SELECT count(*) FROM personal_notifications WHERE topic = 'contact.starred' AND (body IS NOT NULL OR state <> 'purged')",
             &[]
         ),
         0,
