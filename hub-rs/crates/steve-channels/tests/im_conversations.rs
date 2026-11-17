@@ -2102,3 +2102,438 @@ async fn a_read_only_account_gets_the_write_block_notice_only() {
     }
     assert_eq!(unsendable_notices(&h), 0, "the write block's card says it");
 }
+
+// ---------------------------------------------------------------- the record in 对话 (#243)
+
+fn record_of(
+    h: &H,
+    user: &str,
+    space: &str,
+    q: &steve_channels::conv_record::RecordQuery,
+) -> ApiResult<Value> {
+    let conv = conversations::conv_space(space);
+    h.env
+        .store()
+        .reader(|c| steve_channels::conv_record::record(c, WS, &Viewer::bare(WS, user), &conv, q))
+}
+
+/// The handling of the received message `id` and the out state of Steve's message `id` in a record.
+fn rec<'a>(r: &'a Value, id: &str) -> &'a Value {
+    r["records"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|x| x["id"] == id)
+        .unwrap_or_else(|| panic!("{id} not in {r}"))
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_record_shows_every_message_with_what_steve_did() {
+    let h = setup(false).await;
+    let bot = h.bot.clone();
+    // answered
+    let a = push(
+        &h,
+        &bot,
+        msg("C_OPS", "o1", "ulilei", "部署挂了怎么办", true, false),
+    )
+    .await;
+    // no rule for a message nobody @-mentioned: only recorded
+    let b = push(
+        &h,
+        &bot,
+        msg("C_OPS", "o2", "uhan", "我先去吃饭", false, false),
+    )
+    .await;
+    // the answer could not go out
+    *h.fake.fail_send.lock().unwrap() = Some("飞书暂时不可用".into());
+    let c = push(
+        &h,
+        &bot,
+        msg("C_OPS", "o3", "uhan", "那回滚呢", true, false),
+    )
+    .await;
+    *h.fake.fail_send.lock().unwrap() = None;
+    let space = one(
+        &h,
+        "SELECT space_id FROM chan_messages WHERE id = ?",
+        &[&a.message_id],
+    );
+    let space = space.as_str().unwrap().to_string();
+
+    let r = record_of(&h, ME, &space, &Default::default()).unwrap();
+    let recs = r["records"].as_array().unwrap();
+    assert_eq!(recs.len(), 5, "three received, two answers: {r}");
+    assert!(
+        recs.windows(2)
+            .all(|w| w[0]["created"].as_i64() <= w[1]["created"].as_i64()),
+        "oldest first"
+    );
+    assert_eq!(r["has_more"], false);
+    assert_eq!(rec(&r, &a.message_id)["handling"]["state"], "answered");
+    let answer = a.response.unwrap().out_message_id.unwrap();
+    assert_eq!(rec(&r, &answer)["out"]["status"], "sent");
+    let skipped = &rec(&r, &b.message_id)["handling"];
+    assert!(
+        matches!(skipped["state"].as_str(), Some("recorded" | "none")),
+        "{skipped}"
+    );
+    let failed = &rec(&r, &c.message_id)["handling"];
+    assert_eq!(failed["state"], "failed", "{failed}");
+    assert!(
+        failed["error"].as_str().unwrap().contains("飞书暂时不可用"),
+        "{failed}"
+    );
+    let failed_out = c.response.unwrap().out_message_id.unwrap();
+    assert_eq!(rec(&r, &failed_out)["out"]["status"], "failed");
+    let out = &rec(&r, &failed_out)["out"];
+    assert!(
+        out["error"].as_str().unwrap().contains("飞书暂时不可用"),
+        "{out}"
+    );
+    assert!(out["decision"].is_string(), "its retry card: {out}");
+
+    // a page at a time, without losing or repeating a message
+    let q = |before: Option<&Value>| steve_channels::conv_record::RecordQuery {
+        before: before.and_then(|n| n["before"].as_i64()),
+        before_id: before.and_then(|n| n["before_id"].as_str().map(String::from)),
+        limit: Some(2),
+    };
+    let mut seen = Vec::new();
+    let mut next: Option<Value> = None;
+    loop {
+        let p = record_of(&h, ME, &space, &q(next.as_ref())).unwrap();
+        let ids: Vec<String> = p["records"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|x| x["id"].as_str().unwrap().into())
+            .collect();
+        seen.splice(0..0, ids);
+        if p["has_more"] == false {
+            assert_eq!(p["next"], Value::Null);
+            break;
+        }
+        next = Some(p["next"].clone());
+    }
+    let all: Vec<String> = recs
+        .iter()
+        .map(|x| x["id"].as_str().unwrap().into())
+        .collect();
+    assert_eq!(seen, all);
+    let bad = steve_channels::conv_record::RecordQuery {
+        before: Some(1),
+        ..Default::default()
+    };
+    assert!(
+        record_of(&h, ME, &space, &bad).is_err(),
+        "a cursor needs both halves"
+    );
+    let big = steve_channels::conv_record::RecordQuery {
+        limit: Some(steve_channels::conv_record::RECORD_MAX + 1),
+        ..Default::default()
+    };
+    assert!(record_of(&h, ME, &space, &big).is_err());
+
+    // a space Steve never answered in has no conversation, and is listed all the same
+    let quiet = push(
+        &h,
+        &bot,
+        msg("C_ACME", "q1", "ulilei", "周五见", false, false),
+    )
+    .await;
+    let quiet_space = one(
+        &h,
+        "SELECT space_id FROM chan_messages WHERE id = ?",
+        &[&quiet.message_id],
+    );
+    // in the list, with what is new for you; reading it clears that
+    let now =
+        h.ch.now()
+            .max(recs.last().unwrap()["created"].as_i64().unwrap());
+    let list = |user: &str, connection: Option<&str>| {
+        h.env
+            .store()
+            .reader(|c| {
+                conversations::list_page(
+                    c,
+                    WS,
+                    &Viewer::bare(WS, user),
+                    &conversations::ListQuery {
+                        connection: connection.map(String::from),
+                        ..Default::default()
+                    },
+                    now,
+                )
+            })
+            .unwrap()
+    };
+    let l = list(ME, None);
+    let row = l
+        .conversations
+        .iter()
+        .find(|x| x["space_id"] == space.as_str())
+        .expect("listed");
+    assert_eq!(row["unread"], 3);
+    assert_eq!(row["connection"], json!(bot));
+    let q = l
+        .conversations
+        .iter()
+        .find(|x| x["space_id"] == quiet_space)
+        .expect("a space without a conversation");
+    assert_eq!(
+        (
+            q["count"].clone(),
+            q["last_text"].clone(),
+            q["unread"].clone()
+        ),
+        (json!(0), json!("周五见"), json!(1))
+    );
+    assert_eq!(list(ME, Some(&bot)).total, l.total);
+    assert_eq!(list(ME, Some("con_missing")).total, 0);
+    let entries = h
+        .env
+        .store()
+        .reader(|c| steve_channels::conv_record::channels(&h.ch, c, &Viewer::bare(WS, ME), now))
+        .unwrap();
+    let e = entries
+        .iter()
+        .find(|e| e.connection == bot)
+        .expect("the bot");
+    assert_eq!((e.conversations, e.unread), (2, 2));
+    let conv = conversations::conv_space(&space);
+    let last = recs[2]["created"].as_i64().unwrap();
+    h.env
+        .store()
+        .transaction(|tx| {
+            steve_channels::conv_record::mark_read(tx, WS, &Viewer::bare(WS, ME), &conv, last, now)
+        })
+        .unwrap();
+    let unread_after = |l: conversations::ListPage| {
+        l.conversations
+            .iter()
+            .find(|x| x["space_id"] == space.as_str())
+            .unwrap()["unread"]
+            .clone()
+    };
+    let left = recs[3..]
+        .iter()
+        .filter(|x| x["direction"] == "in" && x["created"].as_i64() > Some(last))
+        .count();
+    assert_eq!(unread_after(list(ME, None)), json!(left));
+    // the marker never moves back
+    h.env
+        .store()
+        .transaction(|tx| {
+            steve_channels::conv_record::mark_read(tx, WS, &Viewer::bare(WS, ME), &conv, 0, now)
+        })
+        .unwrap();
+    assert_eq!(unread_after(list(ME, None)), json!(left));
+    h.env
+        .store()
+        .transaction(|tx| {
+            steve_channels::conv_record::mark_read(tx, WS, &Viewer::bare(WS, ME), &conv, now, now)
+        })
+        .unwrap();
+    assert_eq!(unread_after(list(ME, None)), json!(0));
+    // another workspace member keeps their own marker
+    assert_eq!(
+        unread_after(list(steve_modules::testkit::OTHER, None)),
+        json!(3)
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_record_of_your_own_account_is_yours_alone() {
+    let h = setup(false).await;
+    let me = h.me.clone();
+    let i = push(&h, &me, msg("D_LI", "d1", "ulilei", "在吗", false, false)).await;
+    let space = one(
+        &h,
+        "SELECT space_id FROM chan_messages WHERE id = ?",
+        &[&i.message_id],
+    );
+    let space = space.as_str().unwrap().to_string();
+    let r = record_of(&h, ME, &space, &Default::default()).unwrap();
+    assert_eq!(rec(&r, &i.message_id)["direction"], "in");
+    let other = steve_modules::testkit::OTHER;
+    assert!(record_of(&h, other, &space, &Default::default()).is_err());
+    let conv = conversations::conv_space(&space);
+    assert!(
+        h.env
+            .store()
+            .transaction(|tx| steve_channels::conv_record::mark_read(
+                tx,
+                WS,
+                &Viewer::bare(WS, other),
+                &conv,
+                1,
+                2
+            ))
+            .is_err()
+    );
+    let theirs = h
+        .env
+        .store()
+        .reader(|c| steve_channels::conv_record::channels(&h.ch, c, &Viewer::bare(WS, other), 0))
+        .unwrap();
+    assert!(
+        theirs.iter().all(|e| e.connection != me),
+        "your account is not in their switcher"
+    );
+    let l = h
+        .env
+        .store()
+        .reader(|c| {
+            conversations::list_page(c, WS, &Viewer::bare(WS, other), &Default::default(), 0)
+        })
+        .unwrap();
+    assert!(
+        l.conversations
+            .iter()
+            .all(|x| x["space_id"] != space.as_str())
+    );
+}
+
+/// A turn whose answer was an error (`meta.error`, as steve-core writes a failed turn) shows failed
+/// with that error as the reason, under its turn, before and after its reaction is ended.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_turn_whose_answer_failed_shows_failed_with_the_reason() {
+    let h = setup(true).await;
+    let a = push(
+        &h,
+        &h.bot.clone(),
+        msg("C_OPS", "o1", "ulilei", "部署挂了怎么办", true, false),
+    )
+    .await;
+    let (turn, _) = h.thread.as_ref().unwrap().turns.lock().unwrap()[0].clone();
+    let r = record_of(&h, ME, &a.space_id, &Default::default()).unwrap();
+    assert_eq!(rec(&r, &a.message_id)["turn"], json!(turn));
+    assert_eq!(rec(&r, &a.message_id)["handling"]["state"], "working");
+    let ops = conversations::conv_space(&a.space_id);
+    let err = h
+        .env
+        .store()
+        .messages()
+        .add(
+            WS,
+            "steve",
+            "（出错了：模型超时）",
+            None,
+            &json!({"origin": turn, "error": true}),
+            &ops,
+        )
+        .unwrap();
+    let failed = |h: &H| {
+        let r = record_of(h, ME, &a.space_id, &Default::default()).unwrap();
+        let x = rec(&r, &a.message_id).clone();
+        assert_eq!(x["turn"], json!(turn));
+        let hd = &x["handling"];
+        assert_eq!(hd["state"], "failed", "{hd}");
+        assert!(
+            hd["error"].as_str().unwrap().contains("模型超时"),
+            "the turn's error is the reason: {hd}"
+        );
+        assert_eq!(hd["main_turn"], Value::Null);
+    };
+    // the reaction is still “处理中”: the turn's error alone says it failed
+    assert_eq!(state(&h, &a.message_id), json!("ack"));
+    failed(&h);
+    h.ch.conv_deliver(WS, &err).await.unwrap();
+    assert_eq!(state(&h, &a.message_id), json!("failed"));
+    failed(&h);
+}
+
+/// Your `/bot` command where your account may not send as you is answered in your web conversation:
+/// the record shows what Steve said there (answered, or failed with the reason) and links that turn,
+/// though the space's “处理中” reaction is never taken off.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_command_answered_in_your_web_conversation_shows_that_answer() {
+    let h = setup(true).await;
+    exec(
+        &h,
+        "UPDATE connections SET caps = '[\"msg.receive\"]' WHERE id = ?",
+        &[&h.me],
+    );
+    exec(
+        &h,
+        "UPDATE channel_settings SET trigger = ? WHERE connection_id = ?",
+        &[
+            &json!({"on": true, "words": ["/bot"], "where": ["dm:*"], "mark": true}).to_string(),
+            &h.me,
+        ],
+    );
+    let me = h.me.clone();
+    let main = |h: &H, n: usize| -> String {
+        let turns = h.thread.as_ref().unwrap().turns.lock().unwrap().clone();
+        let (id, t) = turns[n].clone();
+        assert_eq!(t.space, conversations::MAIN_CONV, "{t:?}");
+        id
+    };
+    let a = push(
+        &h,
+        &me,
+        msg("D_LI", "d1", "upx", "/bot 看下磁盘", false, false),
+    )
+    .await;
+    assert_eq!(
+        a.response.as_ref().unwrap().label,
+        steve_channels::respond::NO_SEND_AS_YOU_COMMAND
+    );
+    let t1 = main(&h, 0);
+    let handling = |h: &H, id: &str| {
+        let r = record_of(h, ME, &a.space_id, &Default::default()).unwrap();
+        let x = rec(&r, id).clone();
+        assert_eq!(x["turn"], Value::Null, "no turn in the chat's conversation");
+        x["handling"].clone()
+    };
+    let x = handling(&h, &a.message_id);
+    assert_eq!(
+        (x["state"].clone(), x["main_turn"].clone()),
+        (json!("working"), json!(t1))
+    );
+    let msgs = h.env.store().messages();
+    msgs.add(
+        WS,
+        "steve",
+        "还剩 20G。",
+        None,
+        &json!({"origin": t1}),
+        conversations::MAIN_CONV,
+    )
+    .unwrap();
+    assert_eq!(state(&h, &a.message_id), json!("ack"));
+    let x = handling(&h, &a.message_id);
+    assert_eq!(
+        (x["state"].clone(), x["main_turn"].clone()),
+        (json!("answered"), json!(t1))
+    );
+
+    let b = push(
+        &h,
+        &me,
+        msg("D_LI", "d2", "upx", "/bot 清一下缓存", false, false),
+    )
+    .await;
+    let t2 = main(&h, 1);
+    msgs.add(
+        WS,
+        "steve",
+        "（出错了：只读策略拒绝了工具）",
+        None,
+        &json!({"origin": t2, "error": true}),
+        conversations::MAIN_CONV,
+    )
+    .unwrap();
+    let x = handling(&h, &b.message_id);
+    assert_eq!(
+        (x["state"].clone(), x["main_turn"].clone()),
+        (json!("failed"), json!(t2))
+    );
+    assert!(
+        x["error"].as_str().unwrap().contains("只读策略拒绝了工具"),
+        "{x}"
+    );
+    // another space's command in your web conversation is not this one's
+    assert_eq!(handling(&h, &a.message_id)["state"], "answered");
+}

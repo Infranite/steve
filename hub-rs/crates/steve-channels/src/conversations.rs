@@ -20,7 +20,8 @@
 //!
 //! The web shows these conversations read-only (a note links to the space, where a message can be
 //! sent by hand through the same outbound checks); the suggestion cards and offers in them are yours
-//! to click.
+//! to click. The list ([`list_page`]) has every space with something to show, a turn or a channel
+//! message the viewer may see; the chat's whole record is [`crate::conv_record`]'s.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -41,6 +42,10 @@ use crate::{ChannelResult, Channels, bindings, messages, personas};
 
 /// `messages.space` prefix of IM conversations.
 pub const PREFIX: &str = "chan:";
+
+/// `messages.space` of your web conversation (steve-core's `MAIN`): where your `/bot` command goes
+/// when no identity of yours may answer in its space ([`Channels::converse_web`]).
+pub const MAIN_CONV: &str = "steve";
 
 /// The conversation of a space.
 pub fn conv_space(space_id: &str) -> String {
@@ -303,7 +308,7 @@ impl Channels {
         let mut meta = chan_meta(self, plan, true)?;
         meta["web"] = json!(true);
         let turn = Turn {
-            space: "steve".into(),
+            space: MAIN_CONV.into(),
             text: if instruction.trim().is_empty() {
                 plan.text.clone()
             } else {
@@ -849,16 +854,21 @@ fn badge(c: &rusqlite::Connection, space: &crate::spaces::SpaceRow) -> ChannelRe
         "has_external": space.has_external,
         "member_count": space.member_count,
         "mode": mode.code(),
+        // the channel account that speaks there (its voice); `null` once disconnected
+        "connection": (!space.connection_id.is_empty()).then_some(&space.connection_id),
         // opens the chat in its platform's client (“在飞书中打开”); `null` without one
         "open_url": crate::open_link::space_url(c, space)?,
     }))
 }
 
-/// Optional server-side search, state filter and pagination. No limit preserves the legacy list.
+/// Optional server-side search, state filter, channel account and pagination. No limit preserves
+/// the legacy list.
 #[derive(Debug, Default, serde::Deserialize)]
 pub struct ListQuery {
     pub q: Option<String>,
     pub state: Option<String>,
+    /// Only the spaces this channel account (connection) sees or was first seen through.
+    pub connection: Option<String>,
     pub offset: Option<i64>,
     pub limit: Option<i64>,
 }
@@ -871,7 +881,7 @@ pub struct ListPage {
     pub next_offset: Option<i64>,
 }
 
-fn member(
+pub(crate) fn member(
     c: &rusqlite::Connection,
     ws: &str,
     viewer: &steve_store::base::Viewer,
@@ -892,14 +902,21 @@ pub fn list(
     ws: &str,
     viewer: &steve_store::base::Viewer,
 ) -> ChannelResult<Vec<Value>> {
-    Ok(list_page(c, ws, viewer, &ListQuery::default())?.conversations)
+    Ok(list_page(c, ws, viewer, &ListQuery::default(), steve_store::now())?.conversations)
 }
 
+/// The conversations of the spaces the viewer sees: every space with a message of its conversation
+/// or a channel message the viewer may see ([`crate::spaces::seen_visible_sql`]), by their latest
+/// activity, newest first. Each row is the space's badge with `count` (messages of its
+/// conversation), `last` / `last_text` / `last_author` (the newer of its conversation's last message
+/// and its last visible channel message), `closed` and `unread` ([`crate::conv_record::unread`] at
+/// `now`).
 pub fn list_page(
     c: &rusqlite::Connection,
     ws: &str,
     viewer: &steve_store::base::Viewer,
     query: &ListQuery,
+    now: i64,
 ) -> ChannelResult<ListPage> {
     member(c, ws, viewer)?;
     let state = match query.state.as_deref().unwrap_or("all") {
@@ -916,61 +933,93 @@ pub fn list_page(
     if q.chars().count() > 200 {
         return Err(steve_modules::ApiError::invalid("q"));
     }
+    let conn = query.connection.as_deref().unwrap_or("").trim();
     // Visibility and preferences are applied before pagination. Search is literal, not LIKE wildcards.
+    // The latest visible channel message walks the (space, created) index from the end.
     let cte = format!(
         "WITH grouped AS (
           SELECT space, count(*) AS n, max(created) AS last FROM messages
           WHERE workspace_id = ?1 AND space LIKE 'chan:%' GROUP BY space
-        ), visible AS (
-          SELECT g.*, s.id, s.name, s.system_id, coalesce(p.closed, 0) AS closed,
-            coalesce((SELECT nullif(name, '') FROM systems WHERE id = CASE WHEN s.system_id LIKE '%_app'
-              THEN substr(s.system_id, 1, length(s.system_id)-4) ELSE s.system_id END),
-              (SELECT nullif(name, '') FROM systems WHERE id = s.system_id), s.system_id) AS provider,
-            (SELECT text FROM messages WHERE workspace_id = ?1 AND space = g.space
-              ORDER BY created DESC, rowid DESC LIMIT 1) AS last_text
-          FROM grouped g JOIN spaces s ON g.space = 'chan:' || s.id
-          LEFT JOIN conversation_preferences p ON p.workspace_id = ?1 AND p.user_id = ?2 AND p.space_id = s.id
+        ), base AS (
+          SELECT s.id, s.name, s.system_id, g.space AS conv, g.n, g.last AS conv_last,
+            (SELECT m.id FROM chan_messages m WHERE m.space_id = s.id AND {seen}
+              ORDER BY m.created DESC, m.id DESC LIMIT 1) AS chan_id
+          FROM spaces s LEFT JOIN grouped g ON g.space = 'chan:' || s.id
           WHERE s.workspace_id = ?1 AND {visibility}
+            AND (?7 = '' OR s.connection_id = ?7 OR EXISTS (SELECT 1 FROM space_identities li
+              WHERE li.space_id = s.id AND li.connection_id = ?7 AND li.left_at IS NULL))
+        ), joined AS (
+          SELECT b.*, cm.created AS chan_last, coalesce(cm.text, '') AS chan_text, cm.direction AS chan_dir
+          FROM base b LEFT JOIN chan_messages cm ON cm.id = b.chan_id
+          WHERE b.conv IS NOT NULL OR b.chan_id IS NOT NULL
+        ), visible AS (
+          SELECT j.id, 'chan:' || j.id AS space, coalesce(j.n, 0) AS n,
+            max(coalesce(j.conv_last, 0), coalesce(j.chan_last, 0)) AS last,
+            coalesce(p.closed, 0) AS closed, p.read_up_to AS read_up_to, j.name, j.system_id,
+            coalesce((SELECT nullif(name, '') FROM systems WHERE id = CASE WHEN j.system_id LIKE '%_app'
+              THEN substr(j.system_id, 1, length(j.system_id)-4) ELSE j.system_id END),
+              (SELECT nullif(name, '') FROM systems WHERE id = j.system_id), j.system_id) AS provider,
+            CASE WHEN coalesce(j.chan_last, 0) > coalesce(j.conv_last, 0) THEN j.chan_text
+              ELSE (SELECT text FROM messages WHERE workspace_id = ?1 AND space = j.conv
+                ORDER BY created DESC, rowid DESC LIMIT 1) END AS last_text,
+            CASE WHEN coalesce(j.chan_last, 0) > coalesce(j.conv_last, 0)
+              THEN CASE j.chan_dir WHEN 'out' THEN 'steve' ELSE 'me' END
+              ELSE (SELECT author FROM messages WHERE workspace_id = ?1 AND space = j.conv
+                ORDER BY created DESC, rowid DESC LIMIT 1) END AS last_author
+          FROM joined j
+          LEFT JOIN conversation_preferences p ON p.workspace_id = ?1 AND p.user_id = ?2 AND p.space_id = j.id
         ), filtered AS (
           SELECT * FROM visible WHERE (?3 = -1 OR closed = ?3)
-          AND (?4 = '' OR instr(lower(coalesce(name, '') || ' ' || system_id || ' ' || provider || ' ' || last_text), lower(?4)) > 0)
-        )", visibility = spaces::visible_sql("?2"));
+          AND (?4 = '' OR instr(lower(coalesce(name, '') || ' ' || system_id || ' ' || provider || ' ' || coalesce(last_text, '')), lower(?4)) > 0)
+        )",
+        visibility = spaces::visible_sql("?2"),
+        seen = spaces::seen_visible_sql("m", "?2"),
+    );
     let total: i64 = c.query_row(
         &format!("{cte} SELECT count(*) FROM filtered"),
-        params![ws, viewer.user, state, q],
+        params![ws, viewer.user, state, q, -1, 0, conn],
         |r| r.get(0),
     )?;
-    let mut st = c.prepare(&format!("{cte} SELECT id, space, n, last, closed, last_text FROM filtered ORDER BY last DESC, space ASC LIMIT ?5 OFFSET ?6"))?;
+    let mut st = c.prepare(&format!("{cte} SELECT id, space, n, last, closed, coalesce(last_text, ''), coalesce(last_author, 'me'), read_up_to
+        FROM filtered ORDER BY last DESC, space ASC LIMIT ?5 OFFSET ?6"))?;
+    type Row = (String, String, i64, i64, bool, String, String, Option<i64>);
     let rows = st
         .query_map(
-            params![ws, viewer.user, state, q, query.limit.unwrap_or(-1), offset],
-            |r| {
+            params![
+                ws,
+                viewer.user,
+                state,
+                q,
+                query.limit.unwrap_or(-1),
+                offset,
+                conn
+            ],
+            |r| -> rusqlite::Result<Row> {
                 Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, String>(1)?,
-                    r.get::<_, i64>(2)?,
-                    r.get::<_, i64>(3)?,
-                    r.get::<_, bool>(4)?,
-                    r.get::<_, String>(5)?,
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                    r.get(6)?,
+                    r.get(7)?,
                 ))
             },
         )?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     let mut out = Vec::new();
-    for (id, conv, n, last, closed, text) in rows {
+    for (id, _conv, n, last, closed, text, author, read) in rows {
         let Some(space) = spaces::get(c, &id)? else {
             continue;
         };
         let mut b = badge(c, &space)?;
-        let author: String = c.query_row(
-            "SELECT author FROM messages WHERE workspace_id = ? AND space = ? ORDER BY created DESC, rowid DESC LIMIT 1",
-            params![ws, conv], |r| r.get(0),
-        )?;
         b["count"] = json!(n);
         b["last"] = json!(last);
         b["last_text"] = json!(text.chars().take(80).collect::<String>());
         b["last_author"] = json!(author);
         b["closed"] = json!(closed);
+        b["unread"] = json!(crate::conv_record::unread(c, &id, &viewer.user, read, now)?);
         out.push(b);
     }
     let next = offset.saturating_add(out.len() as i64);
@@ -983,6 +1032,29 @@ pub fn list_page(
     })
 }
 
+/// The viewer may see conversation `conv` and it has something to show: a message of its
+/// conversation or a channel message of its space. Its space id.
+pub(crate) fn shown_space<'a>(
+    c: &rusqlite::Connection,
+    ws: &str,
+    viewer: &steve_store::base::Viewer,
+    conv: &'a str,
+) -> ChannelResult<&'a str> {
+    member(c, ws, viewer)?;
+    let id = space_of_conv(conv).ok_or_else(|| steve_modules::ApiError::not_found("对话"))?;
+    spaces::own(c, viewer, id).map_err(|_| steve_modules::ApiError::not_found("对话"))?;
+    let exists: bool = c.query_row(
+        "SELECT EXISTS (SELECT 1 FROM messages WHERE workspace_id = ?1 AND space = ?2)
+             OR EXISTS (SELECT 1 FROM chan_messages WHERE workspace_id = ?1 AND space_id = ?3)",
+        params![ws, conv, id],
+        |r| r.get(0),
+    )?;
+    if !exists {
+        return Err(steve_modules::ApiError::not_found("对话"));
+    }
+    Ok(id)
+}
+
 /// Personal list preference only: leaves message history and channel processing untouched.
 /// The caller runs this inside a store transaction so visibility and mutation share one snapshot.
 pub fn set_closed(
@@ -992,17 +1064,7 @@ pub fn set_closed(
     conv: &str,
     closed: bool,
 ) -> ChannelResult<()> {
-    member(c, ws, viewer)?;
-    let id = space_of_conv(conv).ok_or_else(|| steve_modules::ApiError::not_found("对话"))?;
-    spaces::own(c, viewer, id).map_err(|_| steve_modules::ApiError::not_found("对话"))?;
-    let exists: bool = c.query_row(
-        "SELECT EXISTS (SELECT 1 FROM messages WHERE workspace_id = ? AND space = ?)",
-        params![ws, conv],
-        |r| r.get(0),
-    )?;
-    if !exists {
-        return Err(steve_modules::ApiError::not_found("对话"));
-    }
+    let id = shown_space(c, ws, viewer, conv)?;
     c.execute(
         "INSERT INTO conversation_preferences (workspace_id, user_id, space_id, closed) VALUES (?1, ?2, ?3, ?4)
          ON CONFLICT(workspace_id, user_id, space_id) DO UPDATE SET closed = excluded.closed",
@@ -1063,7 +1125,7 @@ pub fn messages_of(
 /// What became of Steve's message `id` in the space, and the open approval a draft waits on (the
 /// conversation answers it in place). A draft whose approval is no longer open (dismissed before
 /// that discarded it) never goes out as it stands: it reads `discarded`.
-fn out_state(
+pub(crate) fn out_state(
     c: &rusqlite::Connection,
     ws: &str,
     id: &str,

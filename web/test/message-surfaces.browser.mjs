@@ -14,6 +14,10 @@ await page.route("**/*", route => {
   if (!u.pathname.startsWith("/api/")) return route.continue()
   let data
   if (u.pathname === "/api/conversations") data = { conversations: [] }
+  /* the channel switcher and a conversation's record (#243): none here; showing it moves the read marker */
+  else if (u.pathname === "/api/conversations/channels") data = { channels: [] }
+  else if (u.pathname.endsWith("/record")) data = { records: [], has_more: false, next: null }
+  else if (u.pathname.endsWith("/read")) data = { ok: true }
   else if (u.pathname === "/api/conversations/space/messages") data = { conversation: badge, messages: [{ id: "m1", author: "me", text: "旧的文字不应泄漏", item_id: null, meta: { chan: { message: "cm_fixture", sender: "同事" } }, created: 100, channel_message: purged ? { ...message, text: null, attachments: [], purged: 200 } : message }] }
   else if (u.pathname === "/api/conversations/other/messages") return route.fulfill({ status: 404, contentType: "application/json", body: '{"error":"没有这个对话"}' })
   else if (u.pathname === "/api/spaces/space") data = { id: "space", connection_id: "connection", kind: "group", name: "项目群", member_count: 3, has_external: false, status: "active", persona: null, duty: "", rules: [], effective_rules: [], flow_id: null, muted: true, collab: false, memory_scope: "space", disclosure: "never", item_defaults: { tags: [], project_id: null, bot_id: null }, configured: true, teams: [], revision: 1, recent: [message], open_url: OPEN }

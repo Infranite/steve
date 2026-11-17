@@ -200,6 +200,27 @@ export default {
     readOnlyGroup: "这是{{provider}}「{{name}}」里的对话，在这里只读。要在群里说话，去群页手动发送，同样经过披露检查。",
     openDm: "打开私聊页",
     openGroup: "打开群页",
+    channels: "渠道",
+    allChannels: "全部渠道",
+    channelBot: "{{provider}}机器人「{{name}}」",
+    channelSelf: "你本人的{{provider}}账号「{{name}}」",
+    channelUnread_other: "{{name}}，{{count}} 个会话有新消息",
+    unread_other: "{{count}} 条新消息",
+  },
+  /* the full record of a channel conversation: what Steve did with each message of the chat */
+  record: {
+    answered: "已回复",
+    waiting: "等你处理",
+    item: "转成事项",
+    working: "处理中",
+    failed: "失败",
+    skipped: "没有回复",
+    decided: "你已处理",
+    recorded: "只记录",
+    history: "旧消息",
+    older: "更早的消息",
+    open: "去处理…",
+    inMain: "到 {{name}} 里看",
   },
   /* the reaction Steve puts on a chat message */
   reaction: {
@@ -223,5 +244,6 @@ export default {
     disconnected: "没有发出去：接入的账号已经移除",
     discard: "不发出",
     review: "去批准…",
+    recalled: "已撤回",
   },
 }

@@ -1522,6 +1522,59 @@ async fn conversation_preferences_and_pagination_are_wired() {
         )
         .await;
     assert_eq!(v["messages"][0]["text"], "keep this history");
+
+    // the record (#243): the space's channel messages, what is new, the read marker, the switcher
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    db.execute(
+        "INSERT INTO chan_messages (id, workspace_id, space_id, direction, text, status, created)
+         VALUES ('cm_pref', 'default', 'spc_pref', 'in', 'hello from the chat', 'received', ?)",
+        [now],
+    )
+    .unwrap();
+    let record = "/api/conversations/chan%3Aspc_pref/record";
+    let (s, v) = c.call("GET", record, None, None).await;
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(v["records"][0]["text"], "hello from the chat", "{v}");
+    assert_eq!(v["records"][0]["handling"]["state"], "none", "{v}");
+    assert_eq!(v["has_more"], false);
+    assert_eq!(
+        c.call("GET", &format!("{record}?limit=0"), None, None)
+            .await
+            .0,
+        400
+    );
+    assert_eq!(
+        c.call(
+            "GET",
+            "/api/conversations/chan%3Amissing/record",
+            None,
+            None
+        )
+        .await
+        .0,
+        404
+    );
+    let unread = |v: &Value| v["conversations"][0]["unread"].clone();
+    let (_, v) = c
+        .call("GET", "/api/conversations?limit=50", None, None)
+        .await;
+    assert_eq!(unread(&v), json!(1), "{v}");
+    let read = "/api/conversations/chan%3Aspc_pref/read";
+    let (s, v) = c.call("POST", read, Some(json!({"at": now})), None).await;
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(c.call("POST", read, Some(json!({})), None).await.0, 422);
+    let (_, v) = c
+        .call("GET", "/api/conversations?limit=50", None, None)
+        .await;
+    assert_eq!(unread(&v), json!(0), "{v}");
+    let (s, v) = c
+        .call("GET", "/api/conversations/channels", None, None)
+        .await;
+    assert_eq!(s, 200, "{v}");
+    assert!(v["channels"].is_array(), "{v}");
 }
 
 impl Client {

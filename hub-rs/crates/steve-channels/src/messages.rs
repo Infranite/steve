@@ -470,6 +470,35 @@ pub fn page(
     Ok(rows)
 }
 
+/// Like [`page`], with an exact cursor: the messages strictly before `(created, id)` (all when
+/// `None`), newest first, so messages of the same millisecond are never skipped between pages.
+pub fn page_before(
+    c: &Connection,
+    space: &str,
+    me: &str,
+    before: Option<(i64, &str)>,
+    limit: usize,
+) -> ChannelResult<Vec<ChanMessage>> {
+    let mask = crate::spaces::viewer_mask(c, space, me)?;
+    let (at, id) = match before {
+        Some((at, id)) => (Some(at), Some(id)),
+        None => (None, None),
+    };
+    let mut st = c.prepare_cached(&format!(
+        "SELECT {MSG_COLS} {MSG_FROM} WHERE m.space_id = ?1
+            AND (?2 IS NULL OR m.created < ?2 OR (m.created = ?2 AND m.id < ?3))
+            AND (m.seen_by = 0 OR (m.seen_by & ?5) <> 0)
+          ORDER BY m.created DESC, m.id DESC LIMIT ?4"
+    ))?;
+    let mut rows = st
+        .query_map(params![space, at, id, limit as i64, mask], msg_row)?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    for m in &mut rows {
+        with_basis(c, m)?;
+    }
+    Ok(rows)
+}
+
 // ---------------------------------------------------------------- retention
 
 /// How often `channels.retention` runs.

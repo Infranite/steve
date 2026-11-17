@@ -18,6 +18,8 @@ try {
         const filtered = rows.filter(r => (!q || r.name.includes(q)) && (state === "all" || (state === "closed" ? r.closed : !r.closed)))
         return route.fulfill({ json: { conversations: filtered.slice(offset, offset+50), has_more: offset+50<filtered.length, next_offset: offset+50, total: filtered.length } })
       }
+      /* the list's account filter (#243): this workspace has no channel account to pick */
+      if (u.pathname === "/api/conversations/channels") return route.fulfill({ json: { channels: [] } })
       if (u.pathname.endsWith("/preferences")) {
         if (delayed) await new Promise(resolve => { releaseMutation = resolve })
         if (fail) return route.fulfill({ status: 500, json: { error: "保存失败，请重试" } })

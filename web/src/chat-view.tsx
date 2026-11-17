@@ -26,7 +26,8 @@ import { Spinner } from "@/components/ui/spinner"
 import { fillTo, historyState, loadOlder, mainThread, onJump, useHistory } from "@/thread/history"
 import { dayLabel, HistoryPanel, HistoryToggle } from "@/thread/history-panel"
 import { readPos, savePos, type ReadPos } from "@/thread/topics"
-import { ChanOutNote, ConvBadgeChip, ConvSwitcher, ImMsgActions, ImReadOnly, SenderLine, useConversation } from "@/thread/conversations"
+import { ChannelSwitcher, ChanOutNote, ConvBadgeChip, ConvSwitcher, HandlingLine, ImMsgActions, ImReadOnly, OlderRecords, RecordRow, SenderLine, useConversation } from "@/thread/conversations"
+import { weave, type Entry } from "@/thread/channel-record"
 import { AskChips, CardLink, ComposerBars, ItemCard, OfferLine, QueuedNote, QuoteHead, Rerun, SuggestCard, threadDecisions, Updates } from "@/thread/parts"
 import { Composer, go, ItemRef, openSheet, type ComposerHandle } from "@/ui"
 import { cn } from "cn"
@@ -176,8 +177,12 @@ export function ChatView({ conv }: { conv?: string } = {}) {
   const S = st.bots.steve, away = useAway()
   const t = useT()
   useHistory()
-  const { data: im, error: imError, loading: imLoading, reload: reloadIm } = useConversation(conv)
+  const { data: im, error: imError, loading: imLoading, reload: reloadIm, older: olderRecords, loadingOlder } = useConversation(conv)
   const list: Msg[] = conv ? im?.msgs ?? [] : mainThread(st.thread)
+  /* a channel conversation shows the chat's whole record (#243): the messages without a turn come in between by time */
+  const woven = conv && im ? weave(list, im.records) : null
+  const entries: Entry<Msg>[] = woven?.entries ?? list.map((m) => ({ k: "msg", m }))
+  const lastRec = im?.records.at(-1)?.id
   /* decisions the thread already asks in place stay out of the card above the composer */
   const inThread = conv ? new Set<string>() : threadDecisions(list)
   const rawOf = (m: Msg) => (m.id ? im?.raw.get(m.id) : undefined)
@@ -304,6 +309,7 @@ export function ChatView({ conv }: { conv?: string } = {}) {
         {!conv && <HistoryToggle />}
         <RailToggle />
       </header>
+      <ChannelSwitcher current={conv ? im?.badge ?? null : undefined} />
       <ConvSwitcher current={conv} badge={im?.badge} />
       {conv && im && <div className="mx-auto flex w-full max-w-[800px] shrink-0 px-4 pb-1 sm:px-8"><ConvBadgeChip b={im.badge} /></div>}
       {/* the conversation never scrolls sideways: wide code and tables scroll in their own box, and a pixel too wide here
@@ -313,13 +319,18 @@ export function ChatView({ conv }: { conv?: string } = {}) {
           {!conv && list.length > 0 && <div ref={top} className="-mb-4 flex min-h-5 justify-center type-footnote text-tertiary" data-chat-older={loading ? "loading" : more ? "more" : ended ? "start" : "none"}>
             {loading ? <span className="flex items-center gap-2"><Spinner className="size-3.5" />{t("pages:chat.loadingOlder")}</span> : more ? <button type="button" className="hover:text-foreground" onClick={() => { keep.current = anchorNow(); void loadOlder() }}>{t("pages:chat.older")}</button> : ended && <span>{t("pages:chat.start")}</span>}
           </div>}
+          {conv && im && <OlderRecords more={!!im.next} loading={loadingOlder} onMore={() => { keep.current = anchorNow(); olderRecords() }} />}
           {conv && imLoading && <p role="status" className="flex items-center justify-center gap-2 py-3 type-callout text-muted-foreground" data-conv-loading><Spinner className="size-3.5" />{t("common:state.loading")}</p>}
           {conv && imError && <div role="alert" className="flex flex-wrap items-center justify-center gap-2 py-3 type-callout text-destructive" data-conv-error><span>{t("pages:chat.loadFailed")}</span><Button size="sm" variant="outline" onClick={reloadIm} data-conv-retry>{t("common:action.retry")}</Button></div>}
           {conv && !imLoading && !imError && im === null && <div className="py-16 text-center type-body text-muted-foreground" data-conv-missing>{t("pages:chat.missing")}</div>}
-          {list.map((m, n) => {
-            const key = m.clientId ?? m.id ?? m.k
-            const prev = list[n - 1], day = m.created && (!prev?.created || new Date(prev.created).toDateString() !== new Date(m.created).toDateString())
-            const dayLabel = day ? <div className="flex items-center gap-4 type-label text-tertiary" key={"d" + key} data-chat-day><span className="h-px flex-1 bg-border/70" /><span>{chatDay(m.created!)}</span><span className="h-px flex-1 bg-border/70" /></div> : null
+          {entries.map((e, n) => {
+            const before = entries[n - 1], beforeAt = before && (before.k === "rec" ? before.r.created : before.m.created)
+            const at = e.k === "rec" ? e.r.created : e.m.created
+            const key = e.k === "rec" ? "r" + e.r.id : e.m.clientId ?? e.m.id ?? e.m.k
+            const day = at && (!beforeAt || new Date(beforeAt).toDateString() !== new Date(at).toDateString())
+            const dayLabel = day ? <div className="flex items-center gap-4 type-label text-tertiary" key={"d" + key} data-chat-day><span className="h-px flex-1 bg-border/70" /><span>{chatDay(at!)}</span><span className="h-px flex-1 bg-border/70" /></div> : null
+            if (e.k === "rec") return <Fragment key={key}>{dayLabel}<RecordRow r={e.r} last={e.r.id === lastRec} /></Fragment>
+            const m = e.m, prev = before?.k === "msg" ? before.m : undefined
             /* the jumped-to message: a wash with a soft halo, both fading in and out together; the radius stays when it fades */
             const lit = m.id && m.id === flash ? "bg-blue/8 shadow-[0_0_0_8px_color-mix(in_srgb,var(--blue)_8%,transparent)]" : ""
             /* a quote of the message right above says nothing the eye does not already see */
@@ -328,7 +339,7 @@ export function ChatView({ conv }: { conv?: string } = {}) {
             /* an item's report is the card's delivery, folded there; not a second, full copy above it */
             const delivered = !!m.card && !m.cardOnly && !!m.t && m.card.delivery?.text === m.t
             const head = !(prev?.k === "steve" && !prev.notice && !day && m.created && prev.created && m.created - prev.created < RUN_GAP)
-            if (m.k === "me" && conv) return <Fragment key={key}>{dayLabel}<div className="group/me relative flex flex-col gap-1.5" data-msg={m.id} data-im-turn><SenderLine m={rawOf(m)} />{rawOf(m)?.channel_message ? <div className="w-full max-w-[600px] self-end"><ChannelMessageBody message={rawOf(m)!.channel_message!} /></div> : <Me t={m.t!} files={m.files} />}<QueuedNote m={m} /><ImMsgActions url={rawOf(m)?.channel_message?.open_url ?? im?.badge.open_url} side="end" last={m.id === lastMe} /></div></Fragment>
+            if (m.k === "me" && conv) return <Fragment key={key}>{dayLabel}<div className="group/me relative flex flex-col gap-1.5" data-msg={m.id} data-im-turn><SenderLine m={rawOf(m)} />{rawOf(m)?.channel_message ? <div className="w-full max-w-[600px] self-end"><ChannelMessageBody message={rawOf(m)!.channel_message!} /></div> : <Me t={m.t!} files={m.files} />}<HandlingLine h={m.id ? woven?.byTurn.get(m.id)?.handling : undefined} reacted={!!rawOf(m)?.reaction && rawOf(m)?.reaction?.state !== "cleared"} /><QueuedNote m={m} /><ImMsgActions url={rawOf(m)?.channel_message?.open_url ?? im?.badge.open_url} side="end" last={m.id === lastMe} /></div></Fragment>
             if (m.k === "me") return <Fragment key={key}>{dayLabel}<div tabIndex={-1} className={cn("group/me relative flex flex-col gap-1.5 rounded-xl outline-none transition-[background-color,box-shadow] duration-260 ease-(--ease-out)", lit)} data-msg={m.id} data-flash={lit ? "" : undefined}><QuoteHead id={replyTo} className="self-end" />{m.a2uiAction ? <A2uiActionNote a={m.a2uiAction} /> : <Me t={m.t!} files={m.files} />}<QueuedNote m={m} /><MeActions m={m} last={m.id === lastMe} /></div></Fragment>
             if (m.k === "thinking") return <div key={key} className="flex flex-col gap-2" data-chat-draft={st.draft?.mid} aria-busy="true"><LiveSteps />{st.draft?.text && <SteveSays><Markdown text={st.draft.text} streaming /></SteveSays>}</div>
             if (m.notice) return <Fragment key={key}>{dayLabel}<NoticeLine m={m} onOpen={showNotices} /></Fragment>

@@ -112,7 +112,7 @@ fn more_than_200_conversations_are_searchable_and_paginated_after_visibility() {
     close(&h, WS, OTHER, "chan:shared-214", true).unwrap();
     let page = |q: ListQuery| {
         h.store()
-            .reader(|c| conversations::list_page(c, WS, &Viewer::bare(WS, OTHER), &q))
+            .reader(|c| conversations::list_page(c, WS, &Viewer::bare(WS, OTHER), &q, 1))
             .unwrap()
     };
     let mut all = Vec::new();
@@ -210,7 +210,7 @@ fn invalid_query_is_rejected() {
     ] {
         assert!(
             h.store()
-                .reader(|c| conversations::list_page(c, WS, &Viewer::bare(WS, ME), &q))
+                .reader(|c| conversations::list_page(c, WS, &Viewer::bare(WS, ME), &q, 1))
                 .is_err()
         );
     }
