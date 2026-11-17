@@ -220,6 +220,26 @@ pub struct Generation {
     /// ([`crate::voice::Problem::code`]); the text is the second try's. Empty: passed at once.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub revised: Vec<String>,
+    /// The model's reason as a code ([`crate::decide::Reason`]): for a question to you, what it needs
+    /// you for (`commitment`, `owner_fact`, `substantive`, …); for a skip, why not. Empty: none given.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub reason: String,
+    /// Whom the message answered is for, as the model read it: `owner` (you), `others` (someone
+    /// else, the group). Empty: not said.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub addressee: String,
+    /// The reply would promise something for you (to look into it, to do it, a time, a result,
+    /// money, deleting something): it waits for you and YOLO never sends it. Kept with the draft
+    /// (`chan_messages.composed`).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub needs_commitment: bool,
+    /// One sentence on who wants what, for the card ([`crate::decide::SUMMARY_MAX`]).
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub summary: String,
+    /// With a question to you: the reply it would send if you agree, shown on the card as the
+    /// candidate draft (“发这条草稿”). Empty: none.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub draft: String,
 }
 
 /// One message to say.
@@ -344,9 +364,13 @@ impl Outbound for DraftOnly {
             return Ok(Delivered::Skipped);
         }
         let now = ch.now();
-        let (message_id, decision_id) = ch
-            .store()
-            .transaction(|tx| respond::open_draft_to(tx, &req.target, &req.text, now))?;
+        let (message_id, decision_id) = ch.store().transaction(|tx| {
+            let (m, d) = respond::open_draft_to(tx, &req.target, &req.text, now)?;
+            if let Some(g) = &req.generation {
+                crate::decide::keep_composed(tx, &m, g)?;
+            }
+            Ok::<_, crate::ChannelError>((m, d))
+        })?;
         Ok(Delivered::Drafted {
             message_id,
             decision_id,
@@ -436,6 +460,11 @@ mod tests {
             hits: Vec::new(),
             anchors: vec!["mem:1".into()],
             revised: vec!["opener".into()],
+            reason: "commitment".into(),
+            addressee: "owner".into(),
+            needs_commitment: true,
+            summary: "A 问周四能不能开会".into(),
+            draft: "周四可以".into(),
         };
         let v = serde_json::to_value(&g).unwrap();
         assert_eq!(v["outcome"], "ask_owner");

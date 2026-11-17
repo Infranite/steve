@@ -452,6 +452,8 @@ export default {
     mutedSub: "不发言，也不起草；转给你的仍进待处理（静默）",
     replyAsYou: "替你回复",
     replyAsYouSaved: "已设为替你回复：{{level}}",
+    botNotices: "机器人的通知",
+    botNoticesSaved: "已设为机器人的通知：{{level}}",
     mutedOn: "只记录，不发言",
     mutedOff: "已恢复按规则处理",
     voice: "替 Steve 发言的身份",

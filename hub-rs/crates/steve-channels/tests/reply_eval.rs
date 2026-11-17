@@ -531,3 +531,72 @@ fn the_replays_habits_leave_out_the_gold_answers() {
     assert!(n(&without) < n(&with), "{} vs {}", n(&without), n(&with));
     assert_eq!(without.situation, Some(re::situation(&late)));
 }
+
+#[test]
+fn nothing_to_answer_is_replayed_before_any_model() {
+    // a forwarded card nobody can read and no question of the sender waiting: G4
+    assert!(re::no_content(&case("fx-09-forwarded-card")));
+    // a sticker as the Feishu reader stores it (no text, a sticker file) is G4 too; a forwarded
+    // chat record or a task the reader did not parse is read
+    let mut c = case("fx-09-forwarded-card");
+    c.message.text = Some(String::new());
+    c.message.media = vec!["sticker".into()];
+    assert!(re::no_content(&c));
+    c.message.media.clear();
+    for t in ["[merge_forward消息]", "[todo消息]"] {
+        c.message.text = Some(t.into());
+        assert!(!re::no_content(&c), "{t}");
+    }
+    for id in [
+        "fx-10-schedule",
+        "fx-08-long-analysis",
+        "fx-01-joke-on-own-line",
+    ] {
+        assert!(!re::no_content(&case(id)), "{id}");
+    }
+    let outs = vec![Output {
+        case_id: "fx-09-forwarded-card".into(),
+        outcome: "ask_owner".into(),
+        text: "要看吗".into(),
+        ..Output::default()
+    }];
+    let (gated, why) = re::apply_gates(&cases(), &outs, &re::GateParams::default());
+    assert_eq!(gated[0].outcome, "skip");
+    assert_eq!(why[0].gate.as_deref(), Some("no_content"));
+}
+
+#[test]
+fn the_judge_sees_the_card_the_owner_would_see() {
+    let c = case("fx-10-schedule");
+    let new = Output {
+        case_id: c.case_id.clone(),
+        outcome: "ask_owner".into(),
+        code: "commitment".into(),
+        summary: "F 想约周四下午半小时聊方案".into(),
+        draft: "周四下午可以".into(),
+        text: "要不要答应？".into(),
+        ..Output::default()
+    };
+    let shown = re::card_shown(&c, &new);
+    assert!(
+        shown.contains("找你：F 想约周四下午半小时聊方案"),
+        "{shown}"
+    );
+    assert!(shown.contains("为什么要你："), "{shown}");
+    assert!(shown.contains("→ F："), "{shown}");
+    assert!(shown.ends_with("可以直接发的草稿：周四下午可以"), "{shown}");
+    assert!(
+        !shown.contains("要不要答应"),
+        "never the model's own question: {shown}"
+    );
+    // an answer from before the summary: the card as it was then
+    let old = Output {
+        summary: String::new(),
+        code: String::new(),
+        draft: String::new(),
+        ..new
+    };
+    let shown = re::card_shown(&c, &old);
+    assert!(shown.contains("Steve 想先问你：要不要答应？"), "{shown}");
+    assert!(re::judge_prompt(&c, &old, None, 10).contains("主人看到的卡片"));
+}

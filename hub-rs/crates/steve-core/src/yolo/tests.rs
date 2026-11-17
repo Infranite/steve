@@ -886,6 +886,8 @@ fn outbound(
         send_option: Some("yes".into()),
         retries: 0,
         stage,
+        composed: true,
+        commitment: false,
     }
 }
 
@@ -1395,6 +1397,62 @@ fn every_row_of_the_table() {
                 )),
             ),
             "chan.handoff",
+        ),
+        // the stage first: a hand-off card has no send option and says it is yours, not that
+        (
+            "chan handoff without a send option",
+            facts(
+                "ask",
+                "chan_message",
+                &["send_draft", "instruct", "verbatim", "to_item", "done"],
+                Subject::Chan(Outbound {
+                    send_option: None,
+                    ..outbound(
+                        Identity::SelfAccount,
+                        Disclosure::Pass,
+                        true,
+                        OutboundStage::Handoff,
+                    )
+                }),
+            ),
+            "chan.handoff",
+        ),
+        // in your name: only what the composer wrote, never what promises something for you
+        (
+            "chan your draft nobody composed",
+            facts(
+                "approve",
+                "chan_message",
+                &["yes", "no"],
+                Subject::Chan(Outbound {
+                    composed: false,
+                    ..outbound(
+                        Identity::SelfAccount,
+                        Disclosure::Pass,
+                        true,
+                        OutboundStage::Draft,
+                    )
+                }),
+            ),
+            "chan.uncomposed",
+        ),
+        (
+            "chan your draft that commits you",
+            facts(
+                "approve",
+                "chan_message",
+                &["yes", "no"],
+                Subject::Chan(Outbound {
+                    commitment: true,
+                    ..outbound(
+                        Identity::SelfAccount,
+                        Disclosure::Pass,
+                        true,
+                        OutboundStage::Draft,
+                    )
+                }),
+            ),
+            "chan.commitment",
         ),
         (
             "github",

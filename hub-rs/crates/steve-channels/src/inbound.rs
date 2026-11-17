@@ -1458,6 +1458,13 @@ impl Channels {
             Next::Handle | Next::Own => None,
             Next::Record(l) => Some(*l),
         };
+        // a bot's notice on your own account: proposed as an item by its structure or your setting,
+        // never by its words (crate::decide, G0); otherwise recorded
+        if label == Some(LABEL_BOT)
+            && let Some(r) = self.bot_notice(ws, conn, inbound).await?
+        {
+            return Ok(r);
+        }
         // only 不提醒 still listens, for your `/bot`
         if let Some(l) = label
             && l != LABEL_QUIET
@@ -1560,7 +1567,12 @@ impl Channels {
         if inbound.from_owner && mode == Mode::Own {
             return Ok(Response::skipped(LABEL_OWN));
         }
-        if policy == spaces::ReplyAsYou::Record {
+        // a contact you starred: their message to you reaches you as a card even where nothing is
+        // drafted for you (`record`) or no rule would hand it to you (crate::decide)
+        let starred = mode == Mode::Own
+            && store
+                .reader(|c| crate::decide::starred(c, ws, inbound.sender_party_id.as_deref()))?;
+        if policy == spaces::ReplyAsYou::Record && !starred {
             return Ok(Response::skipped(LABEL_REPLY_RECORD));
         }
         // nobody speaks here: recorded only
@@ -1578,6 +1590,11 @@ impl Channels {
         let original = inbound.facts.clone().unwrap_or_default();
         if !store.reader(|c| addressed(c, ws, conn, &space.id, &inbound.message_id, &original))? {
             return Ok(Response::skipped(rules::LABEL_UNADDRESSED));
+        }
+
+        if policy == spaces::ReplyAsYou::Record {
+            plan.act = rules::Act::Handoff;
+            return self.execute(&plan).await;
         }
 
         // 5. the space's flow
@@ -1614,12 +1631,63 @@ impl Channels {
         let verdict = rules::evaluate(&rules, &facts, set.muted, &judge).await;
         plan.act = verdict.act;
         plan.rule = verdict.rule;
+        if starred && plan.act == rules::Act::Record && !verdict.muted {
+            plan.act = rules::Act::Handoff;
+        }
 
         // 7. carry it out (never sends: C6 does, after approval)
         let mut r = self.execute(&plan).await?;
         r.muted = verdict.muted;
         tracing::debug!(space = space.id, act = r.act.code(), rule = ?r.rule, "channel rules");
         Ok(r)
+    }
+}
+
+impl Channels {
+    /// G0 for a bot's message received on your own account ([`crate::decide::bot_notice`]): a notice
+    /// proposed as an item (no receipt is said as you), or the same notice seen already. `None`: just
+    /// recorded, as any bot's message.
+    async fn bot_notice(
+        &self,
+        ws: &str,
+        conn: &str,
+        inbound: &Inbound,
+    ) -> ChannelResult<Option<Response>> {
+        let now = self.now();
+        let found = self.store().reader(|c| -> ChannelResult<_> {
+            let (_, mode) = crate::bindings::connection_account(c, ws, conn)?;
+            if mode != Mode::Own {
+                return Ok(None);
+            }
+            let space =
+                spaces::get(c, &inbound.space_id)?.ok_or_else(|| ApiError::not_found("空间"))?;
+            if spaces::reply_as_you(c, &space.id)? == spaces::ReplyAsYou::Off {
+                return Ok(None);
+            }
+            Ok(Some(crate::decide::bot_notice(
+                c,
+                &space,
+                &inbound.message_id,
+                now,
+            )?))
+        })?;
+        match found {
+            None | Some(crate::decide::BotNotice::Record) => Ok(None),
+            Some(crate::decide::BotNotice::Seen) => {
+                Ok(Some(Response::skipped(crate::decide::LABEL_BOT_SEEN)))
+            }
+            Some(crate::decide::BotNotice::Item { .. }) => {
+                let mut plan = self
+                    .store()
+                    .reader(|c| crate::flow_actions::plan_of(c, ws, &inbound.message_id))?;
+                plan.act = rules::Act::CreateItem(rules::ItemMode::Propose);
+                let mut r = self.execute(&plan).await?;
+                if r.item_id.is_some() {
+                    r.label = crate::decide::LABEL_BOT_ITEM.into();
+                }
+                Ok(Some(r))
+            }
+        }
     }
 }
 

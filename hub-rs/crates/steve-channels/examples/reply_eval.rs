@@ -53,7 +53,7 @@ use std::sync::Arc;
 
 use serde_json::{Value, json};
 use steve_channels::compose::{self, BotInfo, HISTORY, HISTORY_WIDE};
-use steve_channels::deliver::{Generation, Outcome};
+use steve_channels::deliver::Outcome;
 use steve_channels::reply_eval::{self as re, Case, CheckParams, Label, Output, OwnerLine};
 use steve_channels::spaces::Mode;
 use steve_modules::{Gateway, Tier};
@@ -304,53 +304,33 @@ fn gateway(route: &Route, a: &Args, scratch: &Path) -> (Arc<dyn Gateway>, String
 
 // ---------------------------------------------------------------- replay
 
-/// The composer's call and what it does with the answer (`Composer::generate`): once, and once more
-/// with the wider history when the model needs more context; then [`compose::after_wide`].
+/// The composer's call and what it does with the answer (`Composer::generate`): read and settled
+/// in code as the composer does ([`compose::answer_of`]).
 async fn compose_once(
     gw: &dyn Gateway,
-    prompt: &str,
-    owner: &str,
-) -> Result<(Outcome, String, String, String), String> {
+    layers: &compose::Layers,
+) -> Result<compose::Reply, String> {
     let out = steve_modules::gateway::purpose(
         "compose",
-        gw.run_with_images(Tier::Smart, prompt, &[], compose::TIMEOUT),
+        gw.run_with_images(Tier::Smart, &compose::prompt(layers), &[], compose::TIMEOUT),
     )
     .await?;
-    let (o, text, _, why) = compose::read_answer(&out.text, Mode::Own, owner)
-        .ok_or_else(|| "模型没有给出正文".to_string())?;
-    Ok((o, text, why, out.model))
+    compose::answer_of(&out.text, &out.model, layers).ok_or_else(|| "模型没有给出正文".to_string())
 }
 
-/// One case as `Composer::generate` answers it: the call, the wider pass on `need_context`, then the
-/// checks of writing as you and their second try.
+/// One case as `Composer::generate` answers it: the call, the wider pass on `need_context` (then
+/// [`compose::settle_wide`]), then the checks of writing as you and their second try.
 async fn replay_one(
     gw: &dyn Gateway,
     narrow: &compose::Layers,
     wide: &compose::Layers,
-    owner: &str,
 ) -> Result<compose::Reply, String> {
-    let reply = |(o, text, why, model): (Outcome, String, String, String)| compose::Reply {
-        text,
-        generation: Generation {
-            outcome: o,
-            why,
-            model,
-            ..Generation::default()
-        },
-    };
     let mut used = narrow;
-    let mut r = reply(compose_once(gw, &compose::prompt(narrow), owner).await?);
+    let mut r = compose_once(gw, narrow).await?;
     if r.generation.outcome == Outcome::NeedContext {
         used = wide;
-        r = reply(compose_once(gw, &compose::prompt(wide), owner).await?);
-        let (o, t) = compose::after_wide(
-            Mode::Own,
-            r.generation.outcome.clone(),
-            &r.text,
-            wide.unreadable,
-        );
-        r.generation.outcome = o;
-        r.text = t;
+        r = compose_once(gw, wide).await?;
+        compose::settle_wide(&mut r, wide, wide.unreadable);
     }
     let style = used
         .voice
@@ -368,7 +348,7 @@ async fn replay_one(
         revise: Some(feedback),
         ..used.clone()
     };
-    let second = reply(compose_once(gw, &compose::prompt(&again), owner).await?);
+    let second = compose_once(gw, &again).await?;
     let mut out = compose::settle_revised(&r, second, style);
     out.generation.revised = found;
     Ok(out)
@@ -449,11 +429,11 @@ async fn replay(a: &Args, scratch: &Path) {
     let mut tasks = tokio::task::JoinSet::new();
     for (id, narrow, wide) in prompts {
         for sample in 0..samples {
-            let (gw, sem, owner) = (gw.clone(), sem.clone(), owner.clone());
+            let (gw, sem) = (gw.clone(), sem.clone());
             let (id, narrow, wide) = (id.clone(), narrow.clone(), wide.clone());
             tasks.spawn(async move {
                 let _permit = sem.acquire_owned().await.expect("semaphore");
-                let r = replay_one(gw.as_ref(), &narrow, &wide, &owner).await;
+                let r = replay_one(gw.as_ref(), &narrow, &wide).await;
                 match r {
                     Ok(r) => Output {
                         case_id: id,
@@ -463,6 +443,10 @@ async fn replay(a: &Args, scratch: &Path) {
                         text: r.text,
                         model: r.generation.model,
                         revised: r.generation.revised,
+                        code: r.generation.reason,
+                        summary: r.generation.summary,
+                        draft: r.generation.draft,
+                        needs_commitment: r.generation.needs_commitment,
                     },
                     Err(e) => Output {
                         case_id: id,

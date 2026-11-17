@@ -90,6 +90,9 @@ pub struct AccountOut {
     pub send_delay_s: Option<i64>,
     /// The window it has now: the setting, or the identity's default (bot 3 s, you 10 s).
     pub send_delay_default_s: i64,
+    /// On your own account: hours after which a card about one of its chats that nobody answered
+    /// closes (`null`: never on time; a starred contact's card and a commitment never do).
+    pub card_ttl_h: Option<i64>,
     /// How late a message may arrive and still be acted on, in minutes.
     pub late_minutes: i64,
     /// Messages only recorded as history: `{before, late, at}` (written before the connection was
@@ -231,6 +234,7 @@ pub fn out(
     let (_, mode) = bindings::connection_account(c, ws, conn)?;
     let settings = spaces::channel_settings(c, ws, conn)?;
     let send_delay_s = settings.as_ref().and_then(|s| s.send_delay_s);
+    let card_ttl_h = settings.as_ref().and_then(|s| s.card_ttl_h);
     let (duty, rules, trigger, revision) = match settings {
         Some(s) => (s.duty, s.rules, s.trigger, s.revision),
         None => (
@@ -315,6 +319,7 @@ pub fn out(
         revision,
         send_delay_s,
         send_delay_default_s: crate::outbound::default_send_delay_ms(mode) / 1000,
+        card_ttl_h,
         late_minutes,
         history: json!({"before": before, "late": late, "at": at}),
     })
@@ -390,6 +395,10 @@ pub struct ChannelPatch {
     pub send_delay_s: Option<Option<i64>>,
     /// How late a message may arrive and still be acted on, in minutes (1 … 10080; default 30).
     pub late_minutes: Option<i64>,
+    /// Only on your own account: hours after which an unanswered card about one of its chats closes
+    /// (1 … [`crate::decide::CARD_TTL_MAX_H`]); `null`: never on time (the default).
+    #[serde(default, deserialize_with = "present")]
+    pub card_ttl_h: Option<Option<i64>>,
 }
 
 /// A key that is there, `null` included (`Some(None)`); absent stays `None`.
@@ -436,6 +445,12 @@ impl ChannelPatch {
         if let Some(Some(d)) = self.send_delay_s {
             c.that("send_delay_s", (0..=60).contains(&d));
         }
+        if let Some(Some(h)) = self.card_ttl_h {
+            c.that(
+                "card_ttl_h",
+                (1..=crate::decide::CARD_TTL_MAX_H).contains(&h),
+            );
+        }
         if let Some(m) = self.late_minutes {
             c.that(
                 "late_minutes",
@@ -473,6 +488,7 @@ impl ChannelPatch {
             ("persona_id", self.persona_id.is_some()),
             ("send_delay_s", self.send_delay_s.is_some()),
             ("late_minutes", self.late_minutes.is_some()),
+            ("card_ttl_h", self.card_ttl_h.is_some()),
         ]
         .into_iter()
         .filter_map(|(k, on)| on.then_some(k))
@@ -508,6 +524,10 @@ pub fn patch(
         return Err(ApiError::rule(steve_i18n::t!(
             "channels.error.trigger_self_only"
         )));
+    }
+    // a card's lifetime is about cards on your own account; a bot's hand-offs are left alone
+    if matches!(p.card_ttl_h, Some(Some(_))) && mode == Mode::Bot {
+        return Err(ApiError::invalid("card_ttl_h"));
     }
     let fields = p.fields();
     if fields.is_empty() {
@@ -634,6 +654,12 @@ pub fn patch(
             conn
         ],
     )?;
+    if let Some(h) = p.card_ttl_h {
+        tx.execute(
+            "UPDATE channel_settings SET card_ttl_h = ? WHERE connection_id = ?",
+            params![h, conn],
+        )?;
+    }
     if let Some(m) = p.late_minutes {
         tx.execute(
             "UPDATE channel_settings SET late_ms = ? WHERE connection_id = ?",

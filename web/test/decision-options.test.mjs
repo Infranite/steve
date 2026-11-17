@@ -2,7 +2,7 @@ import assert from "node:assert/strict"
 import { test } from "node:test"
 import { readFileSync } from "node:fs"
 
-const { OPTION_IDS, WORDS_OPTION, hasOptionIds, optionKey } = await import("../src/decision-options.ts")
+const { OPTION_IDS, WITH_WORDS, WORDS_OPTIONS, hasOptionIds, optionKey } = await import("../src/decision-options.ts")
 const zh = (await import("../src/i18n/locales/zh-CN/index.ts")).default
 const en = (await import("../src/i18n/locales/en/index.ts")).default
 
@@ -27,7 +27,7 @@ const label = (lang, key) => {
 
 test("every option of a channel decision has a label in zh-CN and en", () => {
   const lists = hubChannelOptions()
-  for (const name of ["HANDOFF_OPTIONS", "DRAFT_OPTIONS", "REWRITE_OPTIONS", "FAIL_OPTIONS", "UNKNOWN_OPTIONS", "BLOCKED_OPTIONS"]) assert.ok(lists.has(name), name)
+  for (const name of ["HANDOFF_OPTIONS", "HANDOFF_NO_DRAFT_OPTIONS", "DRAFT_OPTIONS", "REWRITE_OPTIONS", "FAIL_OPTIONS", "UNKNOWN_OPTIONS", "BLOCKED_OPTIONS"]) assert.ok(lists.has(name), name)
   for (const [name, ids] of lists) for (const id of ids) {
     const key = optionKey("chan_message", id)
     assert.ok(key, `${name}: "${id}" is listed in decision-options.ts`)
@@ -44,12 +44,18 @@ test("every listed option id has its label in both languages", () => {
     for (const l of [zh, en]) assert.ok(label(l, optionKey(subject, id))?.trim(), `${subject}.${id}`)
 })
 
-test("the handoff's reply is the option that takes your words", () => {
-  const handoff = hubChannelOptions().get("HANDOFF_OPTIONS")
-  assert.deepEqual(handoff, ["draft_reply", "to_item", "done"])
-  assert.ok(handoff.includes(WORDS_OPTION.chan_message))
-  assert.equal(label(zh, optionKey("chan_message", "done")), "不用回复")
+test("a message handed over to you: send the draft, tell it how to reply, send your words, an item, leave it", () => {
+  const lists = hubChannelOptions()
+  assert.deepEqual(lists.get("HANDOFF_OPTIONS"), ["send_draft", "instruct", "verbatim", "to_item", "done"])
+  assert.deepEqual(lists.get("HANDOFF_NO_DRAFT_OPTIONS"), ["instruct", "verbatim", "to_item", "done"])
+  /* how to reply is the field; your words as they are go with their own button */
+  assert.ok(lists.get("HANDOFF_OPTIONS").includes(WORDS_OPTIONS.chan_message[0]))
+  assert.deepEqual(WITH_WORDS.chan_message, ["verbatim"])
+  const zhOf = (id) => label(zh, optionKey("chan_message", id))
+  assert.deepEqual(["send_draft", "instruct", "verbatim", "to_item", "done"].map(zhOf), ["发这条草稿", "告诉它怎么回", "按原文发", "转事项", "不用管"])
   assert.equal(label(en, optionKey("chan_message", "to_item")), "Make it an item")
+  /* cards opened before keep their option */
+  assert.ok(WORDS_OPTIONS.chan_message.includes("draft_reply") && zhOf("draft_reply"))
 })
 
 test("options of other subjects stay words of their own", () => {

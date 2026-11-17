@@ -34,6 +34,9 @@ const MAX_COLS: usize = 20;
 const MAX_URL: usize = 2_048;
 const LANGS: [&str; 3] = ["zh_cn", "en_us", "ja_jp"];
 
+/// The text of a card with nothing readable in it (its `card` attachment has no blocks).
+pub const EMPTY: &str = "[卡片]";
+
 /// A card read from a message.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Card {
@@ -91,7 +94,7 @@ pub fn parse(content: &str, mentions: &[(String, String)]) -> Card {
         (Format::Schema, outer, None)
     };
     if !card.is_object() {
-        return empty(format, None, false, "[卡片]");
+        return empty(format, None, false, EMPTY);
     }
     if format == Format::Flattened {
         return w.flattened(&card);
@@ -1125,7 +1128,7 @@ impl<'m> Walker<'m> {
         let (text, cut_) = cut(&text, MAX_TEXT);
         self.truncated |= cut_;
         let text = if text.is_empty() {
-            "[卡片]".to_string()
+            EMPTY.to_string()
         } else {
             text
         };

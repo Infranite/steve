@@ -201,9 +201,37 @@ impl Replies {
                 ..Acted::default()
             }));
         }
+        // a contact you starred: whatever the composer made of it, it reaches you as a card, its
+        // reply (if any) the card's candidate draft (crate::decide)
+        let starred = plan.mode == Mode::Own
+            && ch
+                .store()
+                .reader(|c| crate::decide::starred(c, &plan.ws, plan.sender_party_id.as_deref()))?;
+        if starred {
+            let mut g = r.generation.clone();
+            if g.outcome == crate::deliver::Outcome::Reply && g.draft.trim().is_empty() {
+                g.draft = r.text.clone();
+            }
+            if g.outcome != crate::deliver::Outcome::AskOwner {
+                g.reason = crate::decide::Reason::Starred.code().into();
+            }
+            let d = ch.store().transaction(|tx| {
+                crate::decide::open_card(
+                    tx,
+                    plan,
+                    &crate::decide::Card::of(&g, "", Mode::Own, true),
+                )
+            })?;
+            return Ok(Some(Acted {
+                label: STARRED_ASKED.into(),
+                decision_id: Some(d),
+                ..Acted::default()
+            }));
+        }
         if let Some(a) = not_a_reply(ch, plan, &r)? {
             return Ok(Some(a));
         }
+        // needs_approval already carries needs_commitment (decide::settle)
         let approve =
             plan.act == Act::Draft || plan.mode == Mode::Own || r.generation.needs_approval;
         let auth = if plan.act == Act::Reply && plan.mode == Mode::Bot {
@@ -466,9 +494,13 @@ fn not_a_reply(
     match r.generation.outcome {
         Outcome::Reply => Ok(None),
         Outcome::AskOwner | Outcome::NeedContext => {
-            let d = ch
-                .store()
-                .transaction(|tx| crate::respond::open_handoff_asking(tx, plan, Some(&r.text)))?;
+            let d = ch.store().transaction(|tx| {
+                crate::decide::open_card(
+                    tx,
+                    plan,
+                    &crate::decide::Card::of(&r.generation, &r.text, plan.mode, false),
+                )
+            })?;
             Ok(Some(Acted {
                 label: ASKED.into(),
                 decision_id: Some(d),
@@ -485,6 +517,8 @@ fn not_a_reply(
 
 /// What a message the composer turned into a question to you says on its event.
 pub const ASKED: &str = "先问你，没有起草";
+/// … a starred contact's message, handed to you.
+pub const STARRED_ASKED: &str = "星标联系人的消息，交给你";
 
 /// The composer's reason for a skip, for the message's trail: its `why`, else its text.
 pub(crate) fn skip_reason(text: &str, why: &str) -> String {

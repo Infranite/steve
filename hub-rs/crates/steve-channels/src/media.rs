@@ -537,6 +537,9 @@ pub fn with_unread_note(text: &str, attachments: &Value) -> String {
     }
 }
 
+/// The note of a sticker (it has no words).
+pub const STICKER_NOTE: &str = "[表情包]";
+
 /// The notes alone ([`with_unread_note`]).
 pub fn unread_note(attachments: &Value) -> String {
     attachments
@@ -555,7 +558,7 @@ pub fn unread_note(attachments: &Value) -> String {
             match (a["type"].as_str()?, a["kind"].as_str()) {
                 ("image", _) => Some("[图片：未读取内容]".to_string()),
                 ("file", Some("folder")) => Some(named("文件夹", "无法读取")),
-                ("file", Some("sticker")) => Some("[表情包]".to_string()),
+                ("file", Some("sticker")) => Some(STICKER_NOTE.to_string()),
                 ("file", Some("audio")) => Some(named("音频", "未读取内容")),
                 ("file", Some("video")) => Some(named("视频", "未读取内容")),
                 ("file", _) => Some(named("文件", "未读取内容")),

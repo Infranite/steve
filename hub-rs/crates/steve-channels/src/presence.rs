@@ -497,6 +497,19 @@ pub fn stop(c: &Connection, ws: &str, target: &str, now: i64) -> ChannelResult<O
     Ok(owner_engaged(c, ws, target, now)?.map(|engaged| Stop::You { engaged }))
 }
 
+/// The ids of the turn stored inbound message `target` ends ([`burst`]), oldest first, without marking
+/// anything: what the gates before drafting read ([`crate::decide::gate`]). Empty when it is not an
+/// inbound message of `ws`.
+pub fn turn(c: &Connection, ws: &str, target: &str) -> ChannelResult<Vec<String>> {
+    let Some((t, space, _)) = said(c, ws, target)? else {
+        return Ok(Vec::new());
+    };
+    let my = my_accounts(c, ws, &space)?;
+    let from = t.at - BURST_GAP_MS * BURST_MAX as i64;
+    let before = lines(c, ws, &space, from, t.at, &my)?;
+    Ok(burst(&t, &before, BURST_GAP_MS))
+}
+
 /// The turn stored inbound message `target` ends ([`burst`]): the ids and what each says (with the
 /// note on what Steve cannot read of its attachments), oldest first. The earlier messages are marked
 /// as taken by it (`turn_of`) in the same transaction, so from now on no reply of their own is

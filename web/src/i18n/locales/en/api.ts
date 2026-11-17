@@ -77,6 +77,14 @@ export default {
     off: "Off",
     offSub: "Steve leaves this chat alone on your account: messages are only saved; your /bot still works",
   },
+  botNotices: {
+    auto: "Automatic",
+    autoSub: "In a private chat, a notice with an action link (a card button that opens a page) becomes a proposed item; anything else is recorded",
+    item: "Every message",
+    itemSub: "Every message this bot sends becomes a proposed item, each one once",
+    record: "Record only",
+    recordSub: "The bot's messages are recorded, never proposed as items",
+  },
   role: {
     answer: "Answer",
     answerSub: "Replies directly by the rules",

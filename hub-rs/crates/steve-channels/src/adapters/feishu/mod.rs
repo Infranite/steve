@@ -6,6 +6,7 @@
 //! - [`verify`]: bot/user verification, the self-built check, the permission table (F1);
 //! - [`directory`]: the address book as the contacts sync's `DirectoryAdapter` (F5);
 //! - [`crypto`], [`pbbp2`], [`ws`]: webhook crypto and the long connection (F0b/F2a);
+//! - [`emoji`]: the platform's emoji names, as a message's text carries them;
 //! - [`inbound`]: the bot as a `ChannelAdapter`, `im.message.receive_v1` → C1's inbound pipeline
 //!   over the long connection (C1);
 //! - [`send`], [`ratelimit`]: sending, replying and recalling as the bot, the send rates and the
@@ -26,6 +27,7 @@ pub mod client;
 pub mod crypto;
 pub mod decl;
 pub mod directory;
+pub mod emoji;
 pub mod hooks;
 pub mod inbound;
 pub mod links;

@@ -536,25 +536,42 @@ impl Engine {
 
     /// A channel message card: who it speaks as, the space's audience, the disclosure verdict.
     fn chan(&self, d: &Decision) -> ApiResult<Subject> {
-        type Row = (String, String, i64, Option<String>, Option<String>);
+        type Row = (
+            String,
+            String,
+            i64,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        );
         let row: Option<Row> = self.yolo().store().reader(|c| {
             Ok::<_, ApiError>(
                 c.prepare_cached(
                     "SELECT m.on_behalf, m.status, s.has_external, cs.mode,
-                            (SELECT b.verdict FROM reply_basis b WHERE b.message_id = m.id ORDER BY b.created DESC LIMIT 1)
+                            (SELECT b.verdict FROM reply_basis b WHERE b.message_id = m.id ORDER BY b.created DESC LIMIT 1),
+                            m.composed
                        FROM chan_messages m JOIN spaces s ON s.id = m.space_id
                        LEFT JOIN channel_settings cs ON cs.connection_id = s.connection_id
                       WHERE m.id = ? AND m.workspace_id = ?",
                 )?
                 .query_row(params![d.subject_id, d.workspace_id], |r| {
-                    Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+                    Ok((
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get(2)?,
+                        r.get(3)?,
+                        r.get(4)?,
+                        r.get(5)?,
+                    ))
                 })
                 .optional()?,
             )
         })?;
-        let Some((on_behalf, status, external, mode, verdict)) = row else {
+        let Some((on_behalf, status, external, mode, verdict, composed)) = row else {
             return Ok(Subject::Unverified("消息不在了".into()));
         };
+        // what the composer said about the text it wrote (steve-channels `decide::keep_composed`)
+        let composed: Option<Value> = composed.and_then(|s| serde_json::from_str(&s).ok());
         let identity = if on_behalf == "proxy" {
             Identity::Proxy
         } else if mode.as_deref() == Some("self") {
@@ -592,6 +609,10 @@ impl Engine {
             },
             send_option: send,
             stage,
+            composed: composed.as_ref().is_some_and(|c| c["outcome"] == "reply"),
+            commitment: composed
+                .as_ref()
+                .is_some_and(|c| c["needs_commitment"] == true),
         }))
     }
 
@@ -670,6 +691,8 @@ impl Engine {
             },
             send_option: send,
             stage,
+            composed: true,
+            commitment: false,
         }))
     }
 }

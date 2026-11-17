@@ -13,7 +13,7 @@ import { OutContext } from "@/channels/out-context"
 import { OpenInFeishu } from "@/channels/open-in-app"
 import { t as tr, useT } from "@/i18n"
 import { FLOW_SUBJECTS } from "@/auto/decision"
-import { hasOptionIds, WORDS_OPTION } from "@/decision-options"
+import { hasOptionIds, WITH_WORDS, WORDS_OPTIONS } from "@/decision-options"
 import { MODULE_CARDS } from "@/vault/decisions"
 import { isPeopleDecision } from "@/people/pending"
 import { acceptChoosesRelease, botName, decide, dismiss, FAIL_CHOICE, optionLabel, pendingCards, PR_AWAITING_MERGE, setSt, SNOOZE_KEYS, snooze, snoozeLabel, st, WT, type Item, type Wait } from "@/store"
@@ -168,12 +168,24 @@ export function mapDecision(i: Item, w: Wait, where: "inline" | "composer", show
   }
   if (w.type === "ask" && hasOptionIds(w.subject)) {
     /* a module's question (a message handed over to you): the choice sent is the option's id, shown by its label; the
-     * option that takes words (the reply you write) is the field, its label on the send button */
-    const words = WORDS_OPTION[w.subject], field = !!words && w.options.includes(words)
+     * option that takes words (how to reply; on older cards the reply you write) is the field, its label on the send
+     * button; an option that sends your words as they are (按原文发) takes what you typed along. The card's first line
+     * is its question; the lines under it (why you, the conversation) and the candidate draft are its detail */
+    const words = (WORDS_OPTIONS[w.subject] ?? []).find((o) => w.options.includes(o)), withWords = WITH_WORDS[w.subject] ?? []
+    const [head, ...rest] = w.q.split("\n")
+    const detail = <Detail w={{ ...w, draft: undefined }} extra={<>
+      {rest.length > 0 && <div className="whitespace-pre-line type-footnote text-muted-foreground" data-card-context>{rest.join("\n")}</div>}
+      {w.draft && <div className="flex flex-col gap-1" data-card-draft><span className="type-footnote text-muted-foreground">{tr("core:card.candidateDraft")}</span><div className="break-words whitespace-pre-line">{w.draft}</div></div>}
+    </>} />
     return {
-      d: { ...base, options: w.options.filter((o) => o !== words).map((o) => opt(o, optionLabel(w.subject, o), { "data-option": o })),
-        own: field ? { placeholder: tr("core:card.replyPlaceholder"), send: optionLabel(w.subject, words), attrs: { "data-option-words": words }, sendAttrs: { "data-option": words } } : false },
-      answer: (a) => { if (typeof a !== "object") return; if (a.option) act(a.option); else if (field && a.text?.trim()) act(words, a.text.trim()) },
+      d: { ...base, question: head, detail, options: w.options.filter((o) => o !== words).map((o) => opt(o, optionLabel(w.subject, o), { "data-option": o })),
+        own: words ? { placeholder: tr(words === "draft_reply" ? "core:card.replyPlaceholder" : "core:card.instructPlaceholder"), send: optionLabel(w.subject, words), attrs: { "data-option-words": words }, sendAttrs: { "data-option": words } } : false },
+      answer: (a) => {
+        if (typeof a !== "object") return
+        if (a.option && withWords.includes(a.option)) { if (a.text?.trim()) act(a.option, a.text.trim()) }
+        else if (a.option) act(a.option)
+        else if (words && a.text?.trim()) act(words, a.text.trim())
+      },
     }
   }
   if (w.type === "ask") {

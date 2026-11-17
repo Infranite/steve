@@ -485,7 +485,10 @@ async fn the_prompt_has_seven_layers_in_order() {
     // history and the message
     assert!(layer(7).contains("昨晚的告警处理完了"));
     assert!(p[pos[8]..].contains("部署失败了，回滚手册在哪"));
-    assert!(p.trim_end().ends_with(compose::OUTPUT));
+    assert!(
+        p.trim_end().ends_with(compose::OUTPUT_BOT),
+        "a bot's account"
+    );
 
     // a draft with the generated text and its approval; handed over with the knowledge used
     let out = r.out_message_id.clone().expect("draft");
@@ -598,13 +601,13 @@ async fn own_draft_uses_verified_connection_user_and_external_space_address() {
         assert_eq!(layers.persona, compose::self_layer(expected));
         assert!(!layers.persona.contains("Workspace owner public"));
         assert!(!layers.persona.contains("Member private nickname"));
-        assert!(compose::meant_for_owner(
+        assert!(steve_channels::decide::names_you(
             &format!("这条是发给{expected}的"),
-            &layers.owner
+            &layers.owner_names
         ));
-        assert!(!compose::meant_for_owner(
+        assert!(!steve_channels::decide::names_you(
             "Workspace owner public 稍后答复",
-            &layers.owner
+            &layers.owner_names
         ));
     };
     assert_address("Member public");

@@ -112,6 +112,7 @@ pub mod context;
 pub mod conv_record;
 pub mod conversation_card;
 pub mod conversations;
+pub mod decide;
 pub mod deliver;
 pub mod disclosure;
 pub mod drafts;
