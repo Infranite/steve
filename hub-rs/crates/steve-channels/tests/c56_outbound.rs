@@ -2439,7 +2439,10 @@ async fn attention_quiet_and_blocked_against_trigger_words() {
         Some(json!({"attention": "realtime"})),
     )
     .await;
-    let i = push(&h, &me, msg("C_OPS", "o6", "ulilei", "@你 再看下", true)).await;
+    // (later than the window in which your own `/bot` above still counts as you being there)
+    let mut m = msg("C_OPS", "o6", "ulilei", "@你 再看下", true);
+    m.created += steve_channels::presence::OWNER_LIVE_MS + 1_000;
+    let i = push(&h, &me, m).await;
     assert_eq!(i.next, Next::Handle);
     assert_eq!(i.response.expect("r").act, Act::Draft);
 

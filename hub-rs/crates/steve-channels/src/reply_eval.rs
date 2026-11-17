@@ -30,7 +30,9 @@ pub const STYLE_CROSS_SPACE_MAX: usize = 20;
 /// A style sample, in characters.
 pub const STYLE_LINE_MAX: usize = 80;
 /// You are present when you said something in the space this long before the message (seconds).
-/// A parameter of the presence metric, swept in the eval rather than trusted.
+/// A parameter of the presence metric, swept in the eval rather than trusted. It is the metric's own,
+/// deliberately not the gate's ([`crate::presence::OWNER_LIVE_MS`]): a gate change must not move what
+/// it is measured against.
 pub const LIVE_WINDOW_SECS: i64 = 180;
 /// The fewest of your messages a situation needs for its own statistics; with fewer it uses the
 /// broader situation's ([`Situation::broader`]).
@@ -593,6 +595,183 @@ pub fn presence(case: &Case, latency_secs: i64, live_secs: i64) -> Presence {
     Presence { replied, live }
 }
 
+// ---------------------------------------------------------------- the presence gate, replayed
+
+/// The case's message as the presence gate sees it, and the space around it: the messages before it
+/// and your own after it (`gold_owner_messages_60min`, at their minute). The eval has no provider ids,
+/// so a reply chain is only its thread.
+pub fn said_lines(case: &Case) -> (crate::presence::Said, Vec<crate::presence::Said>) {
+    use crate::presence::Said;
+    let at = millis(&case.message.time).unwrap_or(0);
+    let line = |l: &Line| Said {
+        id: l.id.clone(),
+        at: millis(&l.time).unwrap_or(0),
+        owner: l.is_owner,
+        sender: if l.is_owner {
+            "owner".into()
+        } else {
+            l.sender.clone()
+        },
+        thread_key: l.thread_key.clone(),
+        mentions_owner: l.mentions_owner,
+        ..Default::default()
+    };
+    let target = line(&case.message);
+    let mut around: Vec<Said> = case.previous_space_messages.iter().map(line).collect();
+    around.extend(case.gold_owner_messages_60min.iter().map(|g| {
+        Said {
+            id: g.id.clone(),
+            at: at + (g.minutes_after * 60_000.0) as i64,
+            owner: true,
+            sender: "owner".into(),
+            thread_key: g
+                .same_thread
+                .then(|| case.message.thread_key.clone())
+                .flatten(),
+            ..Default::default()
+        }
+    }));
+    (target, around)
+}
+
+/// The gate's parameters in a replay.
+#[derive(Debug, Clone, Copy)]
+pub struct GateParams {
+    pub live_ms: i64,
+    pub gap_ms: i64,
+    /// How long drafting takes, for the cases that record none (seconds).
+    pub latency_secs: i64,
+}
+
+impl Default for GateParams {
+    fn default() -> Self {
+        Self {
+            live_ms: crate::presence::OWNER_LIVE_MS,
+            gap_ms: crate::presence::BURST_GAP_MS,
+            latency_secs: 0,
+        }
+    }
+}
+
+/// What the gates did to one answer.
+#[derive(Debug, Clone, Default, Serialize, PartialEq)]
+pub struct Gated {
+    pub case_id: String,
+    pub sample: usize,
+    /// The answer before the gates.
+    pub before: String,
+    /// Which gate changed it: `owner_live` / `owner_replied` (before drafting or after it),
+    /// `merged` (the sender went on; answered with the later message).
+    pub gate: Option<String>,
+    pub merged_into: Option<String>,
+    /// It still opened, and your own message closed it later (within the hour of the case; in a
+    /// group only what you said about it).
+    pub closed_later: bool,
+}
+
+/// The cases a case's message is merged into: the later case of the same sender in the same space
+/// whose turn ([`crate::presence::burst`]) contains it.
+fn merged_into(case: &Case, cases: &[Case], gap_ms: i64) -> Option<String> {
+    cases
+        .iter()
+        .filter(|b| {
+            b.case_id != case.case_id
+                && b.space.id == case.space.id
+                && millis(&b.message.time) > millis(&case.message.time)
+        })
+        .filter(|b| {
+            let (t, around) = said_lines(b);
+            crate::presence::burst(&t, &around, gap_ms).contains(&case.message.id)
+        })
+        .min_by_key(|b| millis(&b.message.time))
+        .map(|b| b.case_id.clone())
+}
+
+/// Replays the gates of [`crate::presence`] on `outputs`, in the order the pipeline runs them: before
+/// drafting (at the message's time), after drafting (its observed latency, else `p.latency_secs`),
+/// then the merge of one sender's turn into its last message (the later case's answer, gated, is the
+/// answer). Returns the gated outputs and what changed.
+pub fn apply_gates(
+    cases: &[Case],
+    outputs: &[Output],
+    p: &GateParams,
+) -> (Vec<Output>, Vec<Gated>) {
+    let by_case: BTreeMap<&str, &Case> = cases.iter().map(|c| (c.case_id.as_str(), c)).collect();
+    // first the presence gates, per answer
+    // (answer, the gate, whether it stopped the composer from running at all)
+    let mut first: BTreeMap<(String, usize), (Output, Option<String>, bool)> = BTreeMap::new();
+    for o in outputs {
+        let Some(case) = by_case.get(o.case_id.as_str()) else {
+            continue;
+        };
+        let (t, around) = said_lines(case);
+        let dm = situation(case) == Situation::Dm;
+        let latency = observed_latency(case).unwrap_or(p.latency_secs);
+        let mut out = o.clone();
+        let mut gate = None;
+        let mut before_drafting = false;
+        for (n, now) in [t.at, t.at + latency * 1000].into_iter().enumerate() {
+            if gate.is_some() {
+                break;
+            }
+            if let Some(e) = crate::presence::engaged(dm, &t, &around, now, p.live_ms) {
+                gate = Some(e.reason().to_string());
+                before_drafting = n == 0;
+                if matches!(o.outcome.as_str(), "reply" | "ask_owner") {
+                    out.outcome = "skip".into();
+                    out.reason = e.label().into();
+                    out.text.clear();
+                } else {
+                    // it did nothing anyway: the gate changed nothing
+                    gate = None;
+                }
+            }
+        }
+        first.insert((o.case_id.clone(), o.sample), (out, gate, before_drafting));
+    }
+    // then the merge: a turn is answered once, with its last message's (gated) answer
+    let mut outs = Vec::new();
+    let mut gated = Vec::new();
+    for o in outputs {
+        let Some((mut out, mut gate, _)) = first.get(&(o.case_id.clone(), o.sample)).cloned()
+        else {
+            continue;
+        };
+        let case = by_case[o.case_id.as_str()];
+        let into = merged_into(case, cases, p.gap_ms);
+        // only an answer still open is merged (a skip left nothing to close), and only once the
+        // later message's composer ran (its first gate let it)
+        if matches!(out.outcome.as_str(), "reply" | "ask_owner")
+            && let Some(b) = &into
+            && let Some((later, _, stopped)) = first
+                .get(&(b.clone(), o.sample))
+                .or_else(|| first.get(&(b.clone(), 0)))
+            && !stopped
+        {
+            out.outcome = later.outcome.clone();
+            out.reason = format!("merged into {b}");
+            out.text = later.text.clone();
+            gate = Some("merged".into());
+        }
+        // closed later as your own message closes it (crate::presence::supersede): you are there
+        // for it by the end of the hour (in a group, what you said is about it)
+        let (t, around) = said_lines(case);
+        let dm = situation(case) == Situation::Dm;
+        let closed_later = matches!(out.outcome.as_str(), "reply" | "ask_owner")
+            && crate::presence::engaged(dm, &t, &around, t.at + 3_600_000, p.live_ms).is_some();
+        gated.push(Gated {
+            case_id: o.case_id.clone(),
+            sample: o.sample,
+            before: o.outcome.clone(),
+            merged_into: gate.as_deref().filter(|g| *g == "merged").and(into),
+            gate,
+            closed_later,
+        });
+        outs.push(out);
+    }
+    (outs, gated)
+}
+
 /// The median of the latencies the cases record, for the cases that record none.
 pub fn median_latency(cases: &[Case]) -> Option<i64> {
     let mut l: Vec<i64> = cases.iter().filter_map(observed_latency).collect();
@@ -710,7 +889,10 @@ pub struct Metrics {
     pub act_recall: Option<f64>,
     /// … and that did exactly what it should.
     pub act_exact: Option<f64>,
-    /// Of the answers to cases where you were there or had answered, the share that skipped.
+    /// Of the answers to cases where you were there or had answered ([`presence`], from what you
+    /// actually said: no labels), the share that skipped. With the gate on it is agreement with a
+    /// rule close to the gate's, not accuracy: judge the gate by `decision_accuracy` and
+    /// `act_recall`, which come from the labels.
     pub presence_skip_recall: Option<f64>,
     pub drafts: usize,
     pub length_ratio_median: Option<f64>,

@@ -69,6 +69,14 @@ export default {
     blocked: "Blocked",
     blockedSub: "Not handled, new messages not saved; hidden from lists by default",
   },
+  replyAsYou: {
+    draft: "Draft",
+    draftSub: "As your rules say: replies in your name are drafted for your approval, never once you answered yourself",
+    record: "Record only",
+    recordSub: "Nothing is drafted, asked or answered for you here and no rule or flow runs; replies in an item's thread still reach that item",
+    off: "Off",
+    offSub: "Steve leaves this chat alone on your account: messages are only saved; your /bot still works",
+  },
   role: {
     answer: "Answer",
     answerSub: "Replies directly by the rules",

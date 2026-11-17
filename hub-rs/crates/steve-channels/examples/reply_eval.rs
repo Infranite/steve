@@ -12,6 +12,8 @@
 //!          [--against F] [--live-secs N] [--latency-secs N] [--rows F]
 //! judge    --cases F --outputs F --out F --models m1,m2 [--harness H] [--corpus F]
 //!          [--owner NAME] [--alias A]... [--concurrency N]
+//! gate     --cases F --outputs F --out F [--live-secs N] [--gap-secs N] [--latency-secs N]
+//! sweep    --cases F --labels F --outputs F [--live 0,60,…] [--gap 0,30,…] [--latency-secs N]
 //! ```
 //!
 //! `replay` builds the composer's layers for each case at its time ([`reply_eval::layers`]; with
@@ -30,6 +32,12 @@
 //!
 //! `check` prints the rule metrics (all, dev, test) as JSON and a Markdown table; `--against` adds
 //! the baseline's column and the cases it got right that this run does not.
+//!
+//! `gate` replays the presence gate and the merge of one sender's turn
+//! ([`steve_channels::presence`], [`reply_eval::apply_gates`]) on answers: the gated answers go to
+//! `--out` (for `check`), what each gate changed to stdout. `sweep` does it for every pair of window
+//! lengths (seconds; the defaults are the gate's constants) and prints the rule metrics of each, with
+//! the cases each pair gets wrong that the ungated answers got right: how the windows were chosen.
 //!
 //! `judge` asks a different model than the one that drafted (refused otherwise) about understanding,
 //! voice and card answerability, and writes one judgment per answer.
@@ -110,6 +118,8 @@ fn main() {
     match cmd.as_str() {
         "baseline" => baseline(&args),
         "check" => check(&args),
+        "gate" => gate(&args),
+        "sweep" => sweep(&args),
         "replay" | "judge" => {
             let scratch = tempfile::tempdir().unwrap_or_else(|e| fail(&format!("tempdir: {e}")));
             if std::env::var_os("STEVE_HOME").is_none() {
@@ -567,6 +577,106 @@ fn check(a: &Args) {
     );
     println!("{}", serde_json::to_string_pretty(&report).expect("json"));
     println!("\n{md}");
+}
+
+// ---------------------------------------------------------------- gate, sweep
+
+fn secs(a: &Args, k: &str) -> Option<i64> {
+    one(a, k).map(|n| {
+        n.parse()
+            .unwrap_or_else(|_| fail(&format!("--{k}: a number")))
+    })
+}
+
+fn gate_params(a: &Args) -> re::GateParams {
+    let d = re::GateParams::default();
+    re::GateParams {
+        live_ms: secs(a, "live-secs").map_or(d.live_ms, |s| s * 1000),
+        gap_ms: secs(a, "gap-secs").map_or(d.gap_ms, |s| s * 1000),
+        latency_secs: secs(a, "latency-secs").unwrap_or(d.latency_secs),
+    }
+}
+
+fn gate(a: &Args) {
+    let cases: Vec<Case> = read(need(a, "cases"));
+    let outputs: Vec<Output> = read(need(a, "outputs"));
+    let mut p = gate_params(a);
+    if secs(a, "latency-secs").is_none() {
+        p.latency_secs = re::median_latency(&cases).unwrap_or(0);
+    }
+    let (outs, gated) = re::apply_gates(&cases, &outputs, &p);
+    write_jsonl(need(a, "out"), &outs);
+    for g in gated.iter().filter(|g| g.gate.is_some() || g.closed_later) {
+        println!("{}", serde_json::to_string(g).expect("json"));
+    }
+}
+
+fn sweep(a: &Args) {
+    let cases: Vec<Case> = read(need(a, "cases"));
+    let labels: Vec<Label> = read(need(a, "labels"));
+    let outputs: Vec<Output> = read(need(a, "outputs"));
+    let d = re::GateParams::default();
+    let nums = |k: &str, def: i64| -> Vec<i64> {
+        let v: Vec<i64> = list(a, k)
+            .iter()
+            .map(|n| {
+                n.parse()
+                    .unwrap_or_else(|_| fail(&format!("--{k}: numbers")))
+            })
+            .collect();
+        if v.is_empty() { vec![def] } else { v }
+    };
+    let latency = secs(a, "latency-secs")
+        .or_else(|| re::median_latency(&cases))
+        .unwrap_or(0);
+    let p = CheckParams {
+        names: names(a),
+        system: system_texts(),
+        live_secs: re::LIVE_WINDOW_SECS,
+        latency_secs: Some(latency),
+    };
+    let styles = BTreeMap::new();
+    let base = re::rows(&cases, &labels, &outputs, &styles, &p);
+    let m = re::metrics(&base);
+    println!(
+        "| live s | gap s | decision accuracy | act recall | act precision | presence-skip recall | gated | merged | opened, then closed by you | right before, wrong now |\n|---|---|---|---|---|---|---|---|---|---|"
+    );
+    println!(
+        "| (no gate) | | {} | {} | {} | {} | 0 | 0 | | |",
+        fmt(Some(m.decision_accuracy)),
+        fmt(m.act_recall),
+        fmt(m.act_precision),
+        fmt(m.presence_skip_recall)
+    );
+    for live in nums("live", d.live_ms / 1000) {
+        for gap in nums("gap", d.gap_ms / 1000) {
+            let gp = re::GateParams {
+                live_ms: live * 1000,
+                gap_ms: gap * 1000,
+                latency_secs: latency,
+            };
+            let (outs, gated) = re::apply_gates(&cases, &outputs, &gp);
+            let rows = re::rows(&cases, &labels, &outs, &styles, &p);
+            let m = re::metrics(&rows);
+            let n = |f: &dyn Fn(&re::Gated) -> bool| gated.iter().filter(|g| f(g)).count();
+            let broke = re::regressions(&base, &rows);
+            println!(
+                "| {live} | {gap} | {} | {} | {} | {} | {} | {} | {} | {} |",
+                fmt(Some(m.decision_accuracy)),
+                fmt(m.act_recall),
+                fmt(m.act_precision),
+                fmt(m.presence_skip_recall),
+                n(&|g| g.gate.as_deref().is_some_and(|x| x != "merged")),
+                n(&|g| g.gate.as_deref() == Some("merged")),
+                n(&|g| g.closed_later),
+                if broke.is_empty() {
+                    "none".into()
+                } else {
+                    broke.join(", ")
+                }
+            );
+        }
+    }
 }
 
 // ---------------------------------------------------------------- judge

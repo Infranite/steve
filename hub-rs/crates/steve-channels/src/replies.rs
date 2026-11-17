@@ -135,6 +135,24 @@ impl Replies {
                 composer_skip: None,
             }));
         }
+        // on your own account one sender's run of messages is one turn: answered together. The
+        // earlier ones are marked as taken by it now, so whichever composer finishes first, no reply
+        // of theirs opens, is approved by YOLO or is sent (crate::presence::take_turn)
+        let turn = if plan.mode == Mode::Own && plan.trigger.is_none() {
+            ch.store()
+                .transaction(|tx| crate::presence::take_turn(tx, &plan.ws, &plan.message_id))?
+        } else {
+            Vec::new()
+        };
+        let mut whole = plan.clone();
+        if turn.len() > 1 {
+            whole.text = turn
+                .iter()
+                .map(|(_, t)| t.as_str())
+                .collect::<Vec<_>>()
+                .join("\n");
+        }
+        let plan = &whole;
         let r = match self
             .composer
             .generate(ch, plan, &ComposeOpts::default())
@@ -142,11 +160,47 @@ impl Replies {
         {
             Ok(r) => r,
             Err(e) => {
-                // C3's fallback opens an empty draft: the message still reaches you
+                // C3's fallback opens an empty draft: the message still reaches you, and the earlier
+                // messages of the turn are their own again
                 tracing::warn!(space = plan.space_id, "channel reply not generated: {e}");
+                if turn.len() > 1 {
+                    ch.store()
+                        .transaction(|tx| crate::presence::release_turn(tx, &plan.message_id))?;
+                }
                 return Ok(None);
             }
         };
+        let earlier: Vec<String> = turn
+            .iter()
+            .map(|(id, _)| id.clone())
+            .filter(|id| *id != plan.message_id)
+            .collect();
+        if !earlier.is_empty() {
+            ch.store().transaction(|tx| {
+                crate::presence::supersede(
+                    tx,
+                    &plan.ws,
+                    &plan.space_id,
+                    crate::presence::Answering::Messages(&earlier),
+                    crate::presence::BY_LATER,
+                    &plan.message_id,
+                )
+            })?;
+        }
+        // drafting took a while: you may have answered meanwhile, or the sender went on and a later
+        // turn took this one (crate::presence, gate 2)
+        if let Some(e) = ch.owner_stop(plan)? {
+            tracing::info!(
+                space = plan.space_id,
+                reason = e.reason(),
+                "draft dropped: not said in your name"
+            );
+            return Ok(Some(Acted {
+                label: e.label().into(),
+                composer_skip: Some(format!("{}（{}）", e.label(), e.reason())),
+                ..Acted::default()
+            }));
+        }
         if let Some(a) = not_a_reply(ch, plan, &r)? {
             return Ok(Some(a));
         }

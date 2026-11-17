@@ -60,6 +60,10 @@ pub const LABEL_BOT_ANSWERED: &str = "已经回应过这个机器人，等有人
 pub const LABEL_ELSEWHERE: &str = "已从另一个连接收到";
 /// `outcome_label` of Steve's own outbound message read back in.
 pub const LABEL_ECHO: &str = "Steve 发出的消息";
+/// The space is set not to reply for you (`reply_as_you = record`): recorded, no rule or flow runs.
+pub const LABEL_REPLY_RECORD: &str = "这里设为只记录：不替你回复";
+/// … `off`: stored only.
+pub const LABEL_REPLY_OFF: &str = "这里设为不处理：只保存";
 /// `outcome_label` of a message in a space set to 不提醒.
 pub const LABEL_QUIET: &str = "不提醒，只记录";
 /// What happened to a message in a space set to 屏蔽 (not stored).
@@ -555,6 +559,36 @@ impl Channels {
         if inbound.duplicate {
             return Ok(inbound);
         }
+        // your own words in a space where your own account speaks: what Steve still has waiting to
+        // say for you about an older message you are now there for is stale
+        // (crate::presence::supersede). Not where a bot speaks (its hand-offs stay), not a bot
+        // account's own words, not another assistant's automatic reply on your account.
+        let yours = inbound.from_owner
+            || (inbound.next == Next::Own
+                && store
+                    .reader(|c| spaces::channel_settings(c, ws, conn))?
+                    .is_some_and(|s| s.mode == Mode::Own));
+        if yours
+            && inbound.next != Next::Record(crate::arbiter::LABEL_AUTOMATED)
+            && store.reader(|c| spaces::speaks_as_you(c, ws, &inbound.space_id, Some(conn)))?
+        {
+            let (sid, mid, before) = (
+                inbound.space_id.clone(),
+                inbound.message_id.clone(),
+                msg.created,
+            );
+            let what = crate::presence::Answering::YouThere {
+                before,
+                now: now.max(before),
+            };
+            match store.transaction(|tx| {
+                crate::presence::supersede(tx, ws, &sid, what, crate::presence::BY_YOU, &mid)
+            }) {
+                Ok(0) => {}
+                Ok(n) => tracing::info!(space = sid, closed = n, "you answered: cards superseded"),
+                Err(e) => tracing::warn!(space = sid, "you answered: cards not superseded: {e}"),
+            }
+        }
         // a sender known only by an id: the name job looks them up soon (crate::names)
         if steve_modules::accounts::looks_like_handle(&written.sender_name) && !msg.sender.is_bot {
             self.kick_names(ws, false);
@@ -603,10 +637,23 @@ impl Channels {
         let addressed = store
             .reader(|c| addressed(c, ws, conn, &inbound.space_id, &inbound.message_id, &rf))?;
         inbound.facts = Some(rf);
+        // `reply_as_you` other than `draft` on your own account: no flow starts or wakes on someone
+        // else's message here (decided in code, before anything reads it); under `off` nothing else
+        // acts on it either, under `record` only an item's thread still takes it (crate::respond)
+        let reply_as_you = if inbound.next == Next::Handle {
+            store.reader(|c| spaces::reply_as_you_here(c, ws, &inbound.space_id, conn))?
+        } else {
+            spaces::ReplyAsYou::Draft
+        };
         // a bot the loop guard stopped drives no flow on either, and history wakes nothing
         ev.wake = !matches!(inbound.next, Next::Record(LABEL_BOT | LABEL_BOT_ANSWERED))
-            && inbound.history.is_none();
+            && inbound.history.is_none()
+            && reply_as_you == spaces::ReplyAsYou::Draft;
         ev.record_only = match &inbound.next {
+            Next::Handle if reply_as_you == spaces::ReplyAsYou::Off => Some(LABEL_REPLY_OFF.into()),
+            Next::Handle if reply_as_you == spaces::ReplyAsYou::Record => {
+                Some(LABEL_REPLY_RECORD.into())
+            }
             Next::Handle if !addressed => Some(rules::LABEL_UNADDRESSED.into()),
             Next::Handle => None,
             Next::Own => Some(LABEL_OWN.into()),
@@ -1452,6 +1499,17 @@ impl Channels {
             trigger: None,
         };
 
+        // whether Steve replies for you here (your own account only): `off` leaves someone else's
+        // message alone, before anything reads it; `record` below, after an item's thread
+        let policy = if mode == Mode::Own {
+            set.reply_as_you
+        } else {
+            spaces::ReplyAsYou::Draft
+        };
+        let yours = inbound.next == Next::Own || inbound.from_owner;
+        if policy == spaces::ReplyAsYou::Off && !yours {
+            return Ok(Response::skipped(label.unwrap_or(LABEL_REPLY_OFF)));
+        }
         // a reply in the thread an item came from, by whoever raised it or you: straight to that item,
         // past the gate and the rules — the thread is that item's conversation (decided by the user on
         // 2026-11-09). Anyone else's reply, and a closed item's, take the usual way below.
@@ -1491,6 +1549,9 @@ impl Channels {
         // your own words are never answered as you, whichever identity received them
         if inbound.from_owner && mode == Mode::Own {
             return Ok(Response::skipped(LABEL_OWN));
+        }
+        if policy == spaces::ReplyAsYou::Record {
+            return Ok(Response::skipped(LABEL_REPLY_RECORD));
         }
         // nobody speaks here: recorded only
         let Some(v) = voice else {

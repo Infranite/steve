@@ -194,6 +194,9 @@ pub const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/094.sql"),
     // 95: the personal harness configuration default moves from each workspace to the Hub.
     include_str!("../migrations/095.sql"),
+    // 96: per space, whether Steve replies for you on your own account (`space_prefs.reply_as_you`), and the
+    // later message whose turn answers a message (`chan_messages.turn_of`).
+    include_str!("../migrations/096.sql"),
 ];
 
 /// 027's item columns and their one-time backfill (applied by `run_pending` when `items.phase` is missing).
