@@ -2789,9 +2789,10 @@ async fn on_your_account_a_message_never_reaches_the_router() {
 
 /// Production drafted, as you, the router's “前面还有 3 个问题在排队…” and its clarifying question with
 /// the options spelled out (“（可以回复：A / B）”). Neither is the composer's reply to the turn, so
-/// neither becomes a draft: not the queue sentence marked as a system text, not an older one
-/// without the mark, not a question or a suggestion card, not an item's receipt. The composer's own
-/// answer to the same turn is drafted, exactly as it wrote it, and waits for you (your `/bot` too).
+/// neither is said as you: not the queue sentence marked as a system text, not an older one
+/// without the mark, not a question or a suggestion card, not an item's receipt; an error is not
+/// said either, only the trigger word's fixed failure note (#254). The composer's own answer to the
+/// same turn goes out exactly as it wrote it, as your trigger words' settings say (`[AI]`-marked).
 #[tokio::test(flavor = "multi_thread")]
 async fn the_routers_queue_and_question_never_become_your_draft() {
     let h = setup(true).await;
@@ -2828,7 +2829,6 @@ async fn the_routers_queue_and_question_never_become_your_draft() {
             None,
             json!({"stopped": true}),
         ),
-        ("（出错了：超时）", None, json!({"error": true})),
         ("建好了", Some("ST-9"), json!({})),
     ] {
         let id = steve_says(&h, &space, &turn, text, item, meta);
@@ -2837,6 +2837,21 @@ async fn the_routers_queue_and_question_never_become_your_draft() {
     }
     assert!(out_texts(&h).is_empty(), "{:?}", out_texts(&h));
     assert!(sent(&h).is_empty());
+    // an error: only the fixed note of a failed trigger word, never the error's text
+    let id = steve_says(
+        &h,
+        &space,
+        &turn,
+        "（出错了：超时）",
+        None,
+        json!({"error": true}),
+    );
+    let d = h.ch.conv_deliver(WS, &id).await.unwrap();
+    assert!(matches!(d, Some(Delivered::Sent { .. })), "{d:?}");
+    assert_eq!(
+        sent(&h),
+        [format!("[AI] {}", conversations::TRIGGER_FAILED_NOTE)]
+    );
     assert_eq!(
         one(
             &h,
@@ -2847,7 +2862,7 @@ async fn the_routers_queue_and_question_never_become_your_draft() {
         "the item is still linked to your message"
     );
 
-    // the composer's answer: kept on the turn, drafted as it wrote it (no options added), not sent
+    // the composer's answer: kept on the turn, said as it wrote it (no options added)
     let said = h.ch.conv_answer(WS, &turn).await.expect("answer");
     assert_eq!(
         one(
@@ -2866,10 +2881,10 @@ async fn the_routers_queue_and_question_never_become_your_draft() {
         json!({"ask": {"options": ["A", "B"]}}),
     );
     let d = h.ch.conv_deliver(WS, &id).await.unwrap();
-    assert!(matches!(d, Some(Delivered::Drafted { .. })), "{d:?}");
-    assert_eq!(out_texts(&h), [said.clone()]);
-    assert!(!out_texts(&h)[0].contains(conversations::OPTIONS_HEAD));
-    assert!(sent(&h).is_empty(), "your /bot's answer waits for you");
+    assert!(matches!(d, Some(Delivered::Sent { .. })), "{d:?}");
+    let last = sent(&h).last().cloned().unwrap();
+    assert_eq!(last, format!("[AI] {}", said.trim()));
+    assert!(!last.contains(conversations::OPTIONS_HEAD));
     // the page shows what the composer decided, not the knowledge it used
     let page = conversations::messages_of(
         &h.ch,

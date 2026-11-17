@@ -6,9 +6,10 @@
 //! ([`Auth`]) and the outbound checks it.
 //!
 //! Trigger words: your own message starting with one of your words, where they work →
-//! the rest is the instruction; the reply is generated with the space's last 20 messages and is a
-//! draft for your approval, like everything said as you (`on_behalf=proxy`, “（由 Steve 代发）”
-//! when marked, once approved).
+//! the rest is the instruction; the reply is generated with the space's last 20 messages and goes
+//! out as you (`on_behalf=proxy`, `[AI]`-marked when the settings say), unless the model says it
+//! needs approval (an outward promise, money, deleting) — then it is a draft. It is still the
+//! composer's reply: nothing else is said as you.
 //!
 //! On your own account only the composer's reply speaks as you ([`crate::deliver::not_as_you`]):
 //! the item and handoff receipts are not said there.
@@ -335,8 +336,8 @@ impl Replies {
                 ch,
                 &OutRequest {
                     target,
-                    // as you: always your approval first
-                    approve: true,
+                    // your trigger words: out as their settings say, unless the model asks you first
+                    approve: r.generation.needs_approval,
                     text: r.text,
                     purpose: Purpose::Trigger,
                     generation: Some(r.generation),

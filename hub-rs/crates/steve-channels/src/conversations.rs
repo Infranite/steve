@@ -664,8 +664,9 @@ impl Channels {
         if text.trim().is_empty() {
             return Ok(None);
         }
-        // as you, it always waits for you (your `/bot` too)
-        let approve = as_you
+        // as you, a reply waits for you; your trigger words' answer goes out as their settings say
+        // unless the composer asks you first
+        let approve = (as_you && !command)
             || plan.act == Act::Draft
             || generation.as_ref().is_some_and(|g| g.needs_approval);
         let auth = if command && as_you {

@@ -1127,15 +1127,12 @@ async fn trigger_words_only_from_you_only_where_set_and_marked() {
     push(&h, &me, msg("D_LI", "m1", "ulilei", "/bot 帮他答应", false)).await;
     assert_eq!(sent(&h).len(), before);
 
-    // you, in a DM: a draft as you, which goes out marked once you approve it
+    // you, in a DM: sent as you, marked
     let r = push(&h, &me, msg("D_LI", "m2", "upx", "/bot 答应他周四", false))
         .await
         .response
         .unwrap();
     let id = r.out_message_id.expect("out");
-    assert_eq!(r.label, "触发语：起草，等你批准");
-    assert_eq!(sent(&h).len(), before, "nothing as you before you approve");
-    approve_and_send(&h, &r.decision_id.expect("approval")).await;
     let s = sent(&h);
     assert_eq!(s.len(), before + 1);
     assert_eq!(
@@ -1176,19 +1173,8 @@ async fn trigger_words_only_from_you_only_where_set_and_marked() {
         &h,
         json!({"on": true, "words": ["/bot"], "where": ["dm:*"], "mark": false}),
     );
-    let r = push(&h, &me, msg("D_LI", "m3", "upx", "/bot 再说一次", false))
-        .await
-        .response
-        .unwrap();
-    approve_and_send(&h, &r.decision_id.expect("approval")).await;
+    push(&h, &me, msg("D_LI", "m3", "upx", "/bot 再说一次", false)).await;
     assert_eq!(sent(&h).last().unwrap().1, "好的，周四见。");
-}
-
-/// You approve the draft as it is; it goes out once the undo delay is over.
-async fn approve_and_send(h: &H, decision: &str) {
-    decide(h, decision, "yes", "").expect("approve");
-    h.env.clock.advance(11_000);
-    assert_eq!(h.outbox.send_due(&h.ch).await, 1);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -2263,8 +2249,6 @@ async fn prod_trigger_in_your_chat_with_yourself_after_a_mention() {
             instruction: "你好".into()
         }
     );
-    nothing_sent(&h);
-    approve_and_send(&h, r.decision_id.as_deref().expect("approval")).await;
     let s = sent(&h);
     assert_eq!(s.len(), 1, "{s:?}");
     // a thread is asked for; a private chat answers with a quoting reply instead
@@ -2378,11 +2362,11 @@ async fn attention_quiet_and_blocked_against_trigger_words() {
     );
     let n = sent(&h).len();
     let i = push(&h, &me, msg("C_OPS", "o3", "upx", "/bot 回复收到", false)).await;
-    let r = i.response.expect("r");
-    assert!(matches!(r.by, By::Trigger { .. }), "/bot wins over 不提醒");
-    // drafted as you, for your approval
-    assert_eq!(status(&h, &r.out_message_id.expect("draft")), "draft");
-    assert_eq!(sent(&h).len(), n);
+    assert!(
+        matches!(i.response.expect("r").by, By::Trigger { .. }),
+        "/bot wins over 不提醒"
+    );
+    assert_eq!(sent(&h).len(), n + 1);
     assert_eq!(
         h.env
             .store()
@@ -2415,7 +2399,7 @@ async fn attention_quiet_and_blocked_against_trigger_words() {
     assert!(i.blocked && i.message_id.is_empty());
     let i = push(&h, &me, msg("C_OPS", "o5", "upx", "/bot 发个通知", false)).await;
     assert!(i.blocked);
-    assert_eq!(sent(&h).len(), n, "/bot does not work in 屏蔽");
+    assert_eq!(sent(&h).len(), n + 1, "/bot does not work in 屏蔽");
     assert_eq!(stored(), m0, "nothing stored");
 
     // impossible combinations: 400 with the reason

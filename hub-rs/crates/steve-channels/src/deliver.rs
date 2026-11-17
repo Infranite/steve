@@ -288,8 +288,9 @@ impl Delivered {
 /// [`Outcome::Reply`]; fixed receipts ([`Purpose::Item`], [`Purpose::HandoffAck`], [`Purpose::Done`])
 /// are never said as you (they name you in the third person and show item ids; the item and the
 /// handoff reach you in Steve). A flow's `reply_as` / `send_to_space` ([`Purpose::Flow`]) and an
-/// agent's or requester's update ([`Purpose::Source`]) are texts somebody asked for explicitly and
-/// stay drafts for your approval. Every [`Outbound`] checks this before anything else.
+/// agent's or requester's update ([`Purpose::Source`]: also your trigger words' fixed notes, a
+/// refusal or a failure, `[AI]`-marked) are texts somebody asked for explicitly; their caller and
+/// authorization decide. Every [`Outbound`] checks this before anything else.
 pub fn not_as_you(mode: Mode, req: &OutRequest) -> Option<&'static str> {
     if mode != Mode::Own {
         return None;
@@ -309,9 +310,11 @@ pub const NOT_AS_YOU_RECEIPT: &str = "本人账号不发 Steve 的固定回执";
 /// [`not_as_you`]: a text the composer did not write as its reply.
 pub const NOT_AS_YOU_UNCOMPOSED: &str = "不是起草器写的回复，不以你本人的名义发";
 
-/// On your own account a reply (and your `/bot`'s answer) always waits for your approval.
+/// On your own account a reply always waits for your approval. The answer to your trigger words
+/// ([`Purpose::Trigger`]) goes out as their settings say (`[AI]`-marked, #225), unless the composer
+/// says it needs your approval: the caller decides.
 pub fn must_approve(mode: Mode, req: &OutRequest) -> bool {
-    req.approve || (mode == Mode::Own && matches!(req.purpose, Purpose::Reply | Purpose::Trigger))
+    req.approve || (mode == Mode::Own && req.purpose == Purpose::Reply)
 }
 
 /// The outbound path (C6 implements it). Must authorize, check disclosure and audit before any
@@ -380,8 +383,10 @@ mod tests {
         use Purpose::*;
         for p in [Reply, Trigger] {
             assert_eq!(not_as_you(Mode::Own, &req(p, Some(Outcome::Reply))), None);
-            assert!(
+            // a reply waits for you; your trigger words' answer goes as their settings say
+            assert_eq!(
                 must_approve(Mode::Own, &req(p, Some(Outcome::Reply))),
+                p == Reply,
                 "{p:?}"
             );
             for o in [
