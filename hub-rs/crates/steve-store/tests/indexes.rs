@@ -441,6 +441,17 @@ const CASES: &[(&str, &str, &str)] = &[
         "steve-store repo/would_do.rs paused_at",
         "SELECT ts FROM audit WHERE target=? AND action='item.pause' ORDER BY id DESC LIMIT 1",
     ),
+    // ---------------------------------------------------------------- the judge (#335)
+    (
+        "item_judge_candidates_due",
+        "steve-store repo/item_facts.rs candidates_due",
+        "SELECT * FROM item_judge_candidates WHERE state IN ('pending','judging') AND next_check<=? AND (state='pending' OR claimed_at IS NULL OR claimed_at<?) ORDER BY next_check,rowid LIMIT ?",
+    ),
+    (
+        "sqlite_autoindex_item_judge_candidates_2",
+        "steve-store repo/item_facts.rs candidates",
+        "SELECT * FROM item_judge_candidates WHERE item_id=? AND cycle=? ORDER BY created DESC,rowid DESC",
+    ),
     // ---------------------------------------------------------------- YOLO
     (
         "yolo_actions_window",

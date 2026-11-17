@@ -2279,6 +2279,9 @@ impl Tx<'_> {
             self.st.pending.remove(&session.id);
             return Ok(());
         };
+        /* the completion judge's candidate for this turn (#335, shadow: it is only recorded and
+         * changes nothing below); the sweep registers one this misses */
+        self.judge_register(&session, t.attempt.as_deref(), "turn_end");
         let mark = self.st.pending.remove(&session.id).map(|(m, _)| m);
         if self.workflow_turn_end(&session, &t)? {
             self.diagnostic_session(

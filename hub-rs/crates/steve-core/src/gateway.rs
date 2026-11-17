@@ -582,6 +582,23 @@ pub async fn with_images<F: std::future::Future>(images: Vec<Value>, f: F) -> F:
     IMAGES.scope(std::sync::Arc::new(images), f).await
 }
 
+tokio::task_local! {
+    /// The harness and models the calls made inside [`with_choice`] run on.
+    static CHOICE: crate::models::Choice;
+}
+
+/// Runs `f` with its model calls on `choice` instead of what 设置 · 模型 says for their purpose: a
+/// caller that resolved the purpose itself and narrowed it (the completion judge keeps off the
+/// worker's model, `crate::judge`). The purpose still books the calls.
+pub async fn with_choice<F: std::future::Future>(choice: crate::models::Choice, f: F) -> F::Output {
+    CHOICE.scope(choice, f).await
+}
+
+/// The choice of [`with_choice`], if the current call runs inside one.
+pub fn current_choice() -> Option<crate::models::Choice> {
+    CHOICE.try_with(Clone::clone).ok()
+}
+
 /// The images of the current call, if any (see [`with_images`]).
 pub fn current_images() -> Option<std::sync::Arc<Vec<Value>>> {
     IMAGES
@@ -636,6 +653,10 @@ impl<M: OneModel> Fallback<M> {
     /// The models (and effort) of this call: its purpose and workspace come from the caller's
     /// [`crate::stats::CallTag`].
     pub fn choice(&self, tier: Tier) -> crate::models::Choice {
+        /* a caller that chose for itself ([`with_choice`]: the judge, kept off the worker's model) */
+        if let Some(c) = current_choice() {
+            return c;
+        }
         match &self.models {
             Some(m) => {
                 let tag = crate::stats::current_tag();

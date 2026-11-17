@@ -12,8 +12,8 @@ use steve_store::item_facts::ItemFacts;
 
 use crate::cycle::{ACTIVE, CLOSED, CLOSING, OP_BUILD, OP_RELEASE};
 use crate::derive::{
-    Card, Delivered, Derived, Dispatch, Facts, ItemState, Judged, Lane, OpenOperation, Required,
-    SessionState, VERIFIED, Wait, derive,
+    Card, Delivered, Derived, Dispatch, Facts, ItemState, Judged, Judging, Lane, OpenOperation,
+    Required, SessionState, VERIFIED, Wait, derive,
 };
 use crate::lifecycle::stop_card;
 use crate::proof::OP_DEPLOY;
@@ -249,6 +249,26 @@ impl Tx<'_> {
                 question: d.question,
             })
             .collect();
+        /* the current turn's judge candidate while it is not judged */
+        let judging = match &session {
+            Some(s) => facts
+                .candidates(&item.id, item.cycle)?
+                .into_iter()
+                .find(|c| {
+                    matches!(c.state.as_str(), "pending" | "judging")
+                        && c.session_id == s.id
+                        && s.turn.as_deref() == Some(c.turn_id.as_str())
+                })
+                .map(|c| Judging {
+                    id: c.id,
+                    cycle: c.cycle,
+                    session_id: c.session_id,
+                    turn_id: c.turn_id,
+                    next_check: c.next_check,
+                    failures: c.failures,
+                }),
+            None => None,
+        };
         let graph_busy = match store.workflows().get(&item.id)? {
             Some(g) if !g.single_session() => self
                 .graph_work(&g)?
@@ -295,6 +315,7 @@ impl Tx<'_> {
                     created: j.created,
                 })
                 .collect(),
+            judging,
             delivery,
             unknown_effects: from_ops.unknown_effects,
             closing_ops: from_ops.closing_ops,
@@ -323,6 +344,7 @@ impl Tx<'_> {
         let mut v = view(&d, item, &work, today, &policy);
         /* what the sweep would do on it (#334), not carried out */
         v["would_do"] = self.sweep_view(item, &facts, &d, &policy)?;
+        v["judge"] = self.judge_view(item, &facts)?;
         Ok(Some(v))
     }
 }
@@ -366,6 +388,7 @@ pub fn label(d: &Derived) -> String {
         "workflow" => steve_i18n::t!("core.derive.workflow", what = detail),
         "not_started" => steve_i18n::t!("core.derive.not_started"),
         "nobody" => steve_i18n::t!("core.derive.nobody"),
+        "judging" => steve_i18n::t!("core.derive.judging"),
         "follow_up" => steve_i18n::t!("core.derive.follow_up"),
         "stopped" => steve_i18n::t!("core.derive.stopped"),
         _ => steve_i18n::t!("core.derive.unknown"),

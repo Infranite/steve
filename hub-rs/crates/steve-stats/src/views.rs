@@ -107,6 +107,7 @@ pub fn fixed_label(key: &str) -> Option<String> {
         "draft" => steve_i18n::t!("stats.label.draft"),
         "extract" => steve_i18n::t!("stats.label.extract"),
         "compose" => steve_i18n::t!("stats.label.compose"),
+        "judge" => steve_i18n::t!("stats.label.judge"),
         "mail" => steve_i18n::t!("stats.label.mail"),
         "disclosure" => steve_i18n::t!("stats.label.disclosure"),
         "intent" => steve_i18n::t!("stats.label.intent"),

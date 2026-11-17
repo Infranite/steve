@@ -342,7 +342,8 @@ async fn model_settings() {
             "draft",
             "flow",
             "mail",
-            "compose"
+            "compose",
+            "judge"
         ]
     );
     assert_eq!(ps[0]["label"], "分流");

@@ -1,15 +1,15 @@
-//! Shadow facts of an item's work (migration 100, #327): what was delivered (with how far each fact
+//! Shadow facts of an item's work (migration 103, #327): what was delivered (with how far each fact
 //! can be trusted), what the work waits on, what a judge concluded, and the operator's overrides of
 //! the named work policy. Written only here; read by the core's derived state, which nothing acts on
 //! yet. Also the reads of the Node command ledger that state needs (a dispatch whose receipt never
 //! came is reconciled under its own `operation_id`, never sent again under a new one).
 
-use rusqlite::params;
+use rusqlite::{OptionalExtension, params};
 use serde::Serialize;
 use serde_json::Value;
 
 use super::all;
-use crate::{Result, Store, StoreError, now, uid};
+use crate::{Result, Store, StoreError, Tx, now, uid};
 
 /// Kinds of a delivery fact.
 pub const DELIVERY_KINDS: [&str; 8] = [
@@ -108,6 +108,15 @@ pub struct Judgement {
     pub harness: Option<String>,
     pub model: Option<String>,
     pub created: i64,
+    /// The candidate it judged (migration 104); `None` for one written without the judge.
+    pub candidate_id: Option<String>,
+    /// `facts` | `rule` | `model`
+    pub decided_by: Option<String>,
+    /// What it would trigger (nothing executes it in shadow).
+    pub would: Option<String>,
+    /// The model that answered was another than the worker's: `yes` | `no` | `unknown`.
+    pub independent: Option<String>,
+    pub fingerprint: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -121,6 +130,66 @@ pub struct NewJudgement<'a> {
     pub basis: Value,
     pub harness: Option<&'a str>,
     pub model: Option<&'a str>,
+    pub candidate_id: Option<&'a str>,
+    pub decided_by: Option<&'a str>,
+    pub would: Option<&'a str>,
+    pub independent: Option<&'a str>,
+    pub fingerprint: Option<&'a str>,
+}
+
+/// States of a judge candidate.
+pub const CANDIDATE_STATES: [&str; 5] = ["pending", "judging", "judged", "superseded", "failed"];
+/// Readings of the settled gate.
+pub const SETTLED: [&str; 3] = ["evaluable", "busy", "unknown"];
+
+/// One judge candidate (migration 104): a terminal turn of an item's current session, to be judged
+/// once per (item, cycle, session, logical turn, scope revision).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Candidate {
+    pub id: String,
+    pub item_id: String,
+    pub cycle: i64,
+    pub session_id: String,
+    pub turn_id: String,
+    pub scope_revision: i64,
+    pub terminal_attempt: Option<String>,
+    pub registered_by: String,
+    pub state: String,
+    pub settled: Option<String>,
+    pub settled_reason: Option<String>,
+    #[serde(skip)]
+    pub claim: Option<String>,
+    pub claimed_at: Option<i64>,
+    pub input_seq: Option<i64>,
+    pub fingerprint: Option<String>,
+    pub failures: i64,
+    pub last_error: Option<String>,
+    pub next_check: i64,
+    pub judgement_id: Option<String>,
+    pub created: i64,
+    pub updated: i64,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct NewCandidate<'a> {
+    pub item_id: &'a str,
+    pub cycle: i64,
+    pub session_id: &'a str,
+    pub turn_id: &'a str,
+    pub scope_revision: i64,
+    pub terminal_attempt: Option<&'a str>,
+    /// `turn_end` | `sweep`
+    pub registered_by: &'a str,
+    pub next_check: i64,
+}
+
+/// A terminal logical turn of a session: the newest turn, finished, and its last attempt.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct TerminalTurn {
+    pub turn_id: String,
+    pub attempt: Option<String>,
+    pub created: i64,
+    pub updated: i64,
 }
 
 /// A Node command of a session's turns whose outcome the Hub has not settled (not finished, not
@@ -203,7 +272,54 @@ fn judgement_row(r: &rusqlite::Row) -> rusqlite::Result<Judgement> {
         harness: r.get("harness")?,
         model: r.get("model")?,
         created: r.get("created")?,
+        candidate_id: r.get("candidate_id")?,
+        decided_by: r.get("decided_by")?,
+        would: r.get("would")?,
+        independent: r.get("independent")?,
+        fingerprint: r.get("fingerprint")?,
     })
+}
+
+fn candidate_row(r: &rusqlite::Row) -> rusqlite::Result<Candidate> {
+    Ok(Candidate {
+        id: r.get("id")?,
+        item_id: r.get("item_id")?,
+        cycle: r.get("cycle")?,
+        session_id: r.get("session_id")?,
+        turn_id: r.get("turn_id")?,
+        scope_revision: r.get("scope_revision")?,
+        terminal_attempt: r.get("terminal_attempt")?,
+        registered_by: r.get("registered_by")?,
+        state: r.get("state")?,
+        settled: r.get("settled")?,
+        settled_reason: r.get("settled_reason")?,
+        claim: r.get("claim")?,
+        claimed_at: r.get("claimed_at")?,
+        input_seq: r.get("input_seq")?,
+        fingerprint: r.get("fingerprint")?,
+        failures: r.get("failures")?,
+        last_error: r.get("last_error")?,
+        next_check: r.get("next_check")?,
+        judgement_id: r.get("judgement_id")?,
+        created: r.get("created")?,
+        updated: r.get("updated")?,
+    })
+}
+
+/// Inserts a judgement (`None`: its key has one already).
+fn insert_judgement_in(tx: &Tx<'_>, j: &NewJudgement<'_>) -> Result<Option<String>> {
+    if !VERDICTS.contains(&j.verdict) {
+        return Err(refuse("verdict", j.verdict));
+    }
+    let id = uid("jdg");
+    let n = tx.execute(
+        "INSERT OR IGNORE INTO item_judgements(id,item_id,cycle,session_id,turn_id,scope_revision,verdict,basis,harness,model,created,candidate_id,decided_by,would,independent,fingerprint)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        params![id, j.item_id, j.cycle, j.session_id, j.turn_id, j.scope_revision,
+            j.verdict, j.basis.to_string(), j.harness, j.model, now(), j.candidate_id,
+            j.decided_by, j.would, j.independent, j.fingerprint],
+    )?;
+    Ok((n > 0).then_some(id))
 }
 
 impl ItemFacts<'_> {
@@ -284,19 +400,7 @@ impl ItemFacts<'_> {
     /// Records a judgement. One per (item, cycle, session, turn, scope revision): a second one for
     /// the same key changes nothing and answers `None`.
     pub fn record_judgement(&self, j: &NewJudgement<'_>) -> Result<Option<String>> {
-        if !VERDICTS.contains(&j.verdict) {
-            return Err(refuse("verdict", j.verdict));
-        }
-        let id = uid("jdg");
-        self.0.transaction(|tx| {
-            let n = tx.execute(
-                "INSERT OR IGNORE INTO item_judgements(id,item_id,cycle,session_id,turn_id,scope_revision,verdict,basis,harness,model,created)
-                 VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-                params![id, j.item_id, j.cycle, j.session_id, j.turn_id, j.scope_revision,
-                    j.verdict, j.basis.to_string(), j.harness, j.model, now()],
-            )?;
-            Ok::<_, StoreError>((n > 0).then_some(id.clone()))
-        })
+        self.0.transaction(|tx| insert_judgement_in(tx, j))
     }
 
     /// The judgements of `item` in `cycle`, newest first.
@@ -390,6 +494,251 @@ impl ItemFacts<'_> {
                 |r| r.get::<_, Option<i64>>(0),
             )?
             .flatten())
+        })
+    }
+    /// Registers a judge candidate for its key; `false` when the key has one already (a turn end
+    /// told twice, or the sweep after the turn end did it).
+    pub fn register_candidate(&self, c: &NewCandidate<'_>) -> Result<bool> {
+        if !["turn_end", "sweep"].contains(&c.registered_by) {
+            return Err(refuse("registration", c.registered_by));
+        }
+        let (id, at) = (uid("jc"), now());
+        self.0.transaction(|tx| {
+            Ok::<_, StoreError>(tx.execute(
+                "INSERT OR IGNORE INTO item_judge_candidates(id,item_id,cycle,session_id,turn_id,scope_revision,terminal_attempt,registered_by,next_check,created,updated)
+                 VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                params![id, c.item_id, c.cycle, c.session_id, c.turn_id, c.scope_revision,
+                    c.terminal_attempt, c.registered_by, c.next_check, at, at],
+            )? > 0)
+        })
+    }
+
+    /// The candidate of a key, if it was registered.
+    pub fn candidate_of(
+        &self,
+        item: &str,
+        cycle: i64,
+        session: &str,
+        turn: &str,
+        scope_revision: i64,
+    ) -> Result<Option<Candidate>> {
+        self.0.read(|c| {
+            super::one(
+                c,
+                "SELECT * FROM item_judge_candidates WHERE item_id=? AND cycle=? AND session_id=? AND turn_id=? AND scope_revision=?",
+                params![item, cycle, session, turn, scope_revision],
+                candidate_row,
+            )
+        })
+    }
+
+    pub fn candidate(&self, id: &str) -> Result<Option<Candidate>> {
+        self.0.read(|c| {
+            super::one(
+                c,
+                "SELECT * FROM item_judge_candidates WHERE id=?",
+                [id],
+                candidate_row,
+            )
+        })
+    }
+
+    /// The candidates of `item` in `cycle`, newest first.
+    pub fn candidates(&self, item: &str, cycle: i64) -> Result<Vec<Candidate>> {
+        self.0.read(|c| {
+            all(
+                c,
+                "SELECT * FROM item_judge_candidates WHERE item_id=? AND cycle=? ORDER BY created DESC,rowid DESC",
+                params![item, cycle],
+                candidate_row,
+            )
+        })
+    }
+
+    /// Candidates to look at now: pending ones that are due, and ones whose judging pass claimed
+    /// them before `stale_before` and never came back (a restart, a lost task). Oldest due first.
+    pub fn candidates_due(
+        &self,
+        at: i64,
+        stale_before: i64,
+        limit: usize,
+    ) -> Result<Vec<Candidate>> {
+        self.0.read(|c| {
+            all(
+                c,
+                "SELECT * FROM item_judge_candidates
+                 WHERE state IN ('pending','judging') AND next_check<=?
+                   AND (state='pending' OR claimed_at IS NULL OR claimed_at<?)
+                 ORDER BY next_check,rowid LIMIT ?",
+                params![at, stale_before, limit as i64],
+                candidate_row,
+            )
+        })
+    }
+
+    /// The gate's reading of a pending candidate that is not judged now, and when it is looked at
+    /// again; `false` when it is not pending any more.
+    pub fn candidate_settled(
+        &self,
+        id: &str,
+        settled: &str,
+        reason: &str,
+        next_check: i64,
+    ) -> Result<bool> {
+        if !SETTLED.contains(&settled) {
+            return Err(refuse("settled", settled));
+        }
+        self.0.transaction(|tx| {
+            Ok::<_, StoreError>(tx.execute(
+                "UPDATE item_judge_candidates SET settled=?,settled_reason=?,next_check=?,updated=? WHERE id=? AND state='pending'",
+                params![settled, reason, next_check, now(), id],
+            )? > 0)
+        })
+    }
+
+    /// A candidate that no longer stands for the current turn (another turn, session, cycle or scope
+    /// came): never judged. `false` when it was judged or given up already.
+    pub fn candidate_supersede(&self, id: &str, why: &str) -> Result<bool> {
+        self.0.transaction(|tx| {
+            Ok::<_, StoreError>(tx.execute(
+                "UPDATE item_judge_candidates SET state='superseded',settled_reason=?,claim=NULL,updated=? WHERE id=? AND state IN ('pending','judging')",
+                params![why, now(), id],
+            )? > 0)
+        })
+    }
+
+    /// Claims a candidate for one judging pass (the only advancer of it): pending, or judging under a
+    /// claim older than `stale_before`. Keeps the inputs it is judged on. `false`: somebody else has it.
+    pub fn candidate_claim(
+        &self,
+        id: &str,
+        claim: &str,
+        input_seq: i64,
+        fingerprint: &str,
+        stale_before: i64,
+    ) -> Result<bool> {
+        let at = now();
+        self.0.transaction(|tx| {
+            Ok::<_, StoreError>(tx.execute(
+                "UPDATE item_judge_candidates
+                 SET state='judging',settled='evaluable',settled_reason=NULL,claim=?,claimed_at=?,input_seq=?,fingerprint=?,updated=?
+                 WHERE id=? AND (state='pending' OR (state='judging' AND (claimed_at IS NULL OR claimed_at<?)))",
+                params![claim, at, input_seq, fingerprint, at, id, stale_before],
+            )? > 0)
+        })
+    }
+
+    /// The claimed pass gives the candidate back: pending again at `next_check`, its failures
+    /// counted up by `failed` (with why), or given up (`failed` state) when `give_up`. Only the pass
+    /// that holds the claim may: `false` otherwise.
+    pub fn candidate_release(
+        &self,
+        id: &str,
+        claim: &str,
+        failed: Option<&str>,
+        give_up: bool,
+        next_check: i64,
+    ) -> Result<bool> {
+        let state = if give_up { "failed" } else { "pending" };
+        self.0.transaction(|tx| {
+            Ok::<_, StoreError>(tx.execute(
+                "UPDATE item_judge_candidates
+                 SET state=?,claim=NULL,claimed_at=NULL,failures=failures+?,last_error=COALESCE(?,last_error),next_check=?,updated=?
+                 WHERE id=? AND state='judging' AND claim=?",
+                params![state, i64::from(failed.is_some()), failed, next_check, now(), id, claim],
+            )? > 0)
+        })
+    }
+
+    /// Writes the verdict of the pass that holds the claim, compare-and-swap: the candidate becomes
+    /// `judged` and the judgement is inserted in one transaction, or nothing happens (`None`) when the
+    /// claim is gone or its key is judged already.
+    pub fn candidate_judged(
+        &self,
+        id: &str,
+        claim: &str,
+        j: &NewJudgement<'_>,
+    ) -> Result<Option<String>> {
+        self.0.transaction(|tx| {
+            let open: bool = tx
+                .query_row(
+                    "SELECT 1 FROM item_judge_candidates WHERE id=? AND state='judging' AND claim=?",
+                    params![id, claim],
+                    |_| Ok(true),
+                )
+                .optional()?
+                .unwrap_or(false);
+            if !open {
+                return Ok::<_, StoreError>(None);
+            }
+            let Some(jid) = insert_judgement_in(tx, j)? else {
+                tx.execute(
+                    "UPDATE item_judge_candidates SET state='superseded',settled_reason='judged_already',claim=NULL,updated=? WHERE id=?",
+                    params![now(), id],
+                )?;
+                return Ok(None);
+            };
+            tx.execute(
+                "UPDATE item_judge_candidates SET state='judged',claim=NULL,judgement_id=?,updated=? WHERE id=?",
+                params![jid, now(), id],
+            )?;
+            Ok(Some(jid))
+        })
+    }
+
+    /// The newest logical turn of `session` when it is finished, with its last attempt.
+    pub fn terminal_turn(&self, session: &str) -> Result<Option<TerminalTurn>> {
+        self.0.read(|c| {
+            super::one(
+                c,
+                "SELECT t.turn_id,t.updated,t.created,(SELECT a.attempt_id FROM runtime_attempts a WHERE a.turn_id=t.turn_id ORDER BY a.ordinal DESC LIMIT 1)
+                 FROM runtime_turns t WHERE t.session_id=? AND t.state='finished'
+                   AND t.rowid=(SELECT rowid FROM runtime_turns WHERE session_id=? ORDER BY created DESC,rowid DESC LIMIT 1)",
+                [session, session],
+                |r| {
+                    Ok(TerminalTurn {
+                        turn_id: r.get(0)?,
+                        updated: r.get(1)?,
+                        created: r.get(2)?,
+                        attempt: r.get(3)?,
+                    })
+                },
+            )
+        })
+    }
+
+    /// Open task items (being worked on or closing), not archived: what the judge's sweep looks at.
+    pub fn open_task_items(&self) -> Result<Vec<String>> {
+        self.0.read(|c| {
+            all(
+                c,
+                "SELECT id FROM items WHERE kind='task' AND phase IN ('active','closing') AND archived=0 ORDER BY rowid",
+                [],
+                |r| r.get(0),
+            )
+        })
+    }
+
+    /// The logical turn an attempt belongs to.
+    pub fn turn_of_attempt(&self, attempt: &str) -> Result<Option<String>> {
+        self.0.read(|c| {
+            super::one(
+                c,
+                "SELECT turn_id FROM runtime_attempts WHERE attempt_id=?",
+                [attempt],
+                |r| r.get(0),
+            )
+        })
+    }
+
+    /// The newest event of `session` (0: none): what the session's input and output have reached.
+    pub fn last_event_seq(&self, session: &str) -> Result<i64> {
+        self.0.read(|c| {
+            Ok(c.query_row(
+                "SELECT COALESCE(MAX(seq),0) FROM events WHERE session_id=?",
+                [session],
+                |r| r.get(0),
+            )?)
         })
     }
 }

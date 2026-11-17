@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react"
 import { BugIcon, CheckIcon, CopyIcon, RefreshCwIcon } from "lucide-react"
-import { debugApi, type DebugEvent, type DebugFilter, type DebugPage, type DebugShadow, type DebugSnapshot, type DebugWouldDo, type DebugWouldDoAction } from "@/api/debug"
+import { debugApi, type DebugEvent, type DebugFilter, type DebugJudge, type DebugPage, type DebugShadow, type DebugSnapshot, type DebugWouldDo, type DebugWouldDoAction } from "@/api/debug"
 import { Button } from "@/components/ui/button"
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
@@ -218,6 +218,7 @@ function ShadowState({ shadow }: { shadow: DebugShadow }) {
     <p className={cn("type-footnote", shadow.agrees ? "text-muted-foreground" : "text-attention")} data-debug-shadow-agrees={shadow.agrees}>{shadow.agrees ? t("views:debug.shadowAgrees") : t("views:debug.shadowDiffers", { today: lane(shadow.today.lane) })}</p>
     <p className="break-all type-footnote font-mono text-muted-foreground">{step ? t("views:debug.shadowNext", { step }) : t("views:debug.shadowNoNext")}</p>
     <p className="type-footnote text-muted-foreground">{t("views:debug.shadowSettled", { settled })} · {t("views:debug.shadowPredicates", { review: yes(shadow.reviewable.holds), merge: yes(shadow.mergeable.holds), close: yes(shadow.closable.holds) })}</p>
+    {shadow.judge && <JudgeLine judge={shadow.judge} />}
     {shadow.would_do && <WouldDo wouldDo={shadow.would_do} />}
   </div>
 }
@@ -241,6 +242,23 @@ function WouldDo({ wouldDo }: { wouldDo: DebugWouldDo }) {
         {time(r.first_seen)} · {action(r.action)} · {r.label}{r.episodes > 1 ? ` ×${r.episodes}` : ""} · {r.cleared_at ? t("views:debug.wouldCleared", { time: time(r.cleared_at) }) : t("views:debug.wouldOpen")}
       </li>)}
     </ul>}
+  </div>
+}
+
+/** The completion judge's newest candidate and verdict: what it would do, never done. */
+function JudgeLine({ judge }: { judge: DebugJudge }) {
+  const t = useT()
+  const c = judge.candidate
+  const j = judge.judgement
+  const state = t(`views:debug.judgeState.${c.state}`)
+  const verdict = j ? t(`views:debug.judgeVerdict.${j.verdict}`) : null
+  const by = j ? [j.decided_by, j.harness, j.model].filter(Boolean).join(" · ") : ""
+  return <div className="space-y-1" data-debug-judge data-debug-judge-state={c.state}>
+    <p className="type-footnote">{t("views:debug.judge", { state })}{!judge.current && <span className="ml-2 text-muted-foreground">{t("views:debug.judgeOld")}</span>}</p>
+    {c.state === "pending" && c.settled && c.settled !== "evaluable" && <p className="type-footnote text-muted-foreground">{t("views:debug.judgeWaits", { why: c.why ?? "", time: time(c.next_check) })}</p>}
+    {c.failures > 0 && <p className="break-all type-footnote text-muted-foreground">{t("views:debug.judgeFailures", { n: c.failures, error: c.last_error ?? "" })}</p>}
+    {j && verdict && <p className="break-words type-footnote">{t("views:debug.judgeVerdictLine", { verdict, would: j.would ?? "" })}{j.reason ? ` · ${j.reason}` : ""}</p>}
+    {j && <p className="break-all type-footnote font-mono text-muted-foreground">{by}{j.independent ? ` · ${t(`views:debug.judgeIndependent.${j.independent}`)}` : ""}</p>}
   </div>
 }
 

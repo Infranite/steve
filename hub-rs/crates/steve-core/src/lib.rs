@@ -21,6 +21,7 @@ pub mod derive;
 mod diagnostics;
 pub mod error;
 pub mod gateway;
+pub mod judge;
 pub mod git;
 pub mod harnesses;
 pub mod housekeeping;
