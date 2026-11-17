@@ -216,6 +216,10 @@ pub struct Generation {
     pub hits: Vec<Hit>,
     /// Layer 6: the contact card and memory ids shown (for the basis).
     pub anchors: Vec<String>,
+    /// On your own account, what the checks of writing as you found in the first draft
+    /// ([`crate::voice::Problem::code`]); the text is the second try's. Empty: passed at once.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub revised: Vec<String>,
 }
 
 /// One message to say.
@@ -431,6 +435,7 @@ mod tests {
             model: "m".into(),
             hits: Vec::new(),
             anchors: vec!["mem:1".into()],
+            revised: vec!["opener".into()],
         };
         let v = serde_json::to_value(&g).unwrap();
         assert_eq!(v["outcome"], "ask_owner");

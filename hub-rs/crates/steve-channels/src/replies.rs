@@ -371,6 +371,7 @@ impl Replies {
             persona_id: None,
             instruction: Some(instruction.to_string()).filter(|i| !i.trim().is_empty()),
             history: None,
+            revise: None,
         };
         let r = match self.composer.generate(ch, plan, &opts).await {
             Ok(r) => r,
@@ -421,6 +422,7 @@ impl Replies {
             persona_id: None,
             instruction: Some(instruction.to_string()).filter(|i| !i.trim().is_empty()),
             history: None,
+            revise: None,
         };
         let r = match self.composer.generate(ch, plan, &opts).await {
             Ok(r) => r,

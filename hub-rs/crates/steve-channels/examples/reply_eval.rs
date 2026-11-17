@@ -5,7 +5,8 @@
 //! cargo run -p steve-channels --example reply_eval -- <command> [options]
 //!
 //! replay   --cases F --out F --owner NAME [--samples N] [--only id,id] [--concurrency N]
-//!          [--corpus F --style] [--alias A]... [--tz ZONE] [--route-db PATH [--workspace WS]]
+//!          [--corpus F --style] [--bot-layer] [--alias A]... [--tz ZONE]
+//!          [--route-db PATH [--workspace WS]]
 //!          [--harness H] [--models m1,m2] [--effort E] [--dry-run]
 //! baseline --cases F --out F
 //! check    --cases F --labels F --outputs F [--corpus F] [--owner NAME] [--alias A]...
@@ -16,9 +17,12 @@
 //! sweep    --cases F --labels F --outputs F [--live 0,60,…] [--gap 0,30,…] [--latency-secs N]
 //! ```
 //!
-//! `replay` builds the composer's layers for each case at its time ([`reply_eval::layers`]; with
-//! `--style`, your messages from `--corpus` sent before the case, never any case's gold answers) and
-//! asks the model the composer asks: the gateway's smart tier with the purpose `compose`, through
+//! `replay` builds the composer's layers for each case at its time ([`reply_eval::layers`]; the
+//! rules of writing as you always; with `--style`, your samples and habits from `--corpus` sent
+//! before the case, never any case's gold answers; with `--bot-layer`, the ablation: the Bot's name,
+//! duty, manner and rules rendered on your own account as before) and asks the model the composer
+//! asks, with its second try when the checks of writing as you send a reply back
+//! ([`compose::voice_verdict`], [`compose::settle_revised`]): the gateway's smart tier with the purpose `compose`, through
 //! Steve's own model resolver and one-shot driver. The route — the main Bot's harness, model and
 //! effort, and the `models.compose` override — is read from `--route-db` (opened read-only, as a
 //! SQLite URI with `mode=ro`) and given to the resolver over a throwaway store in a temporary
@@ -26,7 +30,8 @@
 //! are read as the Hub reads them. The harness runs in a temporary directory with `STEVE_HOME`
 //! pointed there unless it is set, so the installed Hub's files are not touched; set
 //! `STEVE_ADAPTER_*` when the adapter is not on `PATH`. Output: `{case_id, sample, outcome, reason,
-//! text, model}` per line. `--dry-run` prints each prompt's size instead of calling a model.
+//! text, model}` per line. `--dry-run` prints each prompt's size, how many of your samples it has
+//! and which situation's habits (from how many messages) instead of calling a model.
 //!
 //! `baseline` writes what Steve did then (`steve` of each case) in the same format.
 //!
@@ -48,7 +53,7 @@ use std::sync::Arc;
 
 use serde_json::{Value, json};
 use steve_channels::compose::{self, BotInfo, HISTORY, HISTORY_WIDE};
-use steve_channels::deliver::Outcome;
+use steve_channels::deliver::{Generation, Outcome};
 use steve_channels::reply_eval::{self as re, Case, CheckParams, Label, Output, OwnerLine};
 use steve_channels::spaces::Mode;
 use steve_modules::{Gateway, Tier};
@@ -316,6 +321,59 @@ async fn compose_once(
     Ok((o, text, why, out.model))
 }
 
+/// One case as `Composer::generate` answers it: the call, the wider pass on `need_context`, then the
+/// checks of writing as you and their second try.
+async fn replay_one(
+    gw: &dyn Gateway,
+    narrow: &compose::Layers,
+    wide: &compose::Layers,
+    owner: &str,
+) -> Result<compose::Reply, String> {
+    let reply = |(o, text, why, model): (Outcome, String, String, String)| compose::Reply {
+        text,
+        generation: Generation {
+            outcome: o,
+            why,
+            model,
+            ..Generation::default()
+        },
+    };
+    let mut used = narrow;
+    let mut r = reply(compose_once(gw, &compose::prompt(narrow), owner).await?);
+    if r.generation.outcome == Outcome::NeedContext {
+        used = wide;
+        r = reply(compose_once(gw, &compose::prompt(wide), owner).await?);
+        let (o, t) = compose::after_wide(
+            Mode::Own,
+            r.generation.outcome.clone(),
+            &r.text,
+            wide.unreadable,
+        );
+        r.generation.outcome = o;
+        r.text = t;
+    }
+    let style = used
+        .voice
+        .as_ref()
+        .and_then(|v| v.style.as_ref())
+        .map(|(_, s)| s);
+    let Some(feedback) = compose::voice_verdict(Mode::Own, &r, style) else {
+        return Ok(r);
+    };
+    let found: Vec<String> = steve_channels::voice::problems(&r.text, style)
+        .iter()
+        .map(|p| p.code().to_string())
+        .collect();
+    let again = compose::Layers {
+        revise: Some(feedback),
+        ..used.clone()
+    };
+    let second = reply(compose_once(gw, &compose::prompt(&again), owner).await?);
+    let mut out = compose::settle_revised(&r, second, style);
+    out.generation.revised = found;
+    Ok(out)
+}
+
 async fn replay(a: &Args, scratch: &Path) {
     let cases: Vec<Case> = read(need(a, "cases"));
     let out_path = need(a, "out").to_string();
@@ -340,35 +398,40 @@ async fn replay(a: &Args, scratch: &Path) {
                 .unwrap_or_else(|_| fail("--tz: an IANA time zone"))
         }),
         bot: route.bot.clone(),
+        bot_layer: one(a, "bot-layer").is_some(),
         ..Default::default()
     };
     let todo: Vec<&Case> = cases
         .iter()
         .filter(|c| only.is_empty() || only.contains(&c.case_id))
         .collect();
-    let prompts: Vec<(String, String, String, bool)> = todo
+    let yours = names(a);
+    let people = re::people(&cases, &corpus);
+    let prompts: Vec<(String, compose::Layers, compose::Layers)> = todo
         .iter()
         .map(|c| {
-            let samples = if style {
-                re::style_samples(&corpus, c, &excluded, re::STYLE_MAX)
+            let voice = if style {
+                re::voice(&corpus, c, &excluded, &yours, &people)
             } else {
-                vec![]
+                re::bare_voice(c)
             };
-            let narrow = compose::prompt(&re::layers(c, &setting, HISTORY, samples.clone()));
-            let wide = re::layers(c, &setting, HISTORY_WIDE, samples);
             (
                 c.case_id.clone(),
-                narrow,
-                compose::prompt(&wide),
-                wide.unreadable,
+                re::layers(c, &setting, HISTORY, voice.clone()),
+                re::layers(c, &setting, HISTORY_WIDE, voice),
             )
         })
         .collect();
     if one(a, "dry-run").is_some() {
-        for (id, p, _, _) in &prompts {
+        for (id, l, _) in &prompts {
             println!(
                 "{}",
-                json!({"case_id": id, "prompt_chars": p.chars().count()})
+                json!({
+                    "case_id": id,
+                    "prompt_chars": compose::prompt(l).chars().count(),
+                    "samples": l.voice.as_ref().map_or(0, |v| v.samples.len()),
+                    "habits": l.voice.as_ref().and_then(|v| v.style.as_ref()).map(|(s, st)| (s.code(), st.n)),
+                })
             );
         }
         return;
@@ -384,29 +447,22 @@ async fn replay(a: &Args, scratch: &Path) {
             .unwrap_or(4),
     ));
     let mut tasks = tokio::task::JoinSet::new();
-    for (id, narrow, wide, unreadable) in prompts {
+    for (id, narrow, wide) in prompts {
         for sample in 0..samples {
             let (gw, sem, owner) = (gw.clone(), sem.clone(), owner.clone());
             let (id, narrow, wide) = (id.clone(), narrow.clone(), wide.clone());
             tasks.spawn(async move {
                 let _permit = sem.acquire_owned().await.expect("semaphore");
-                let mut r = compose_once(gw.as_ref(), &narrow, &owner).await;
-                if matches!(&r, Ok((Outcome::NeedContext, ..))) {
-                    r = compose_once(gw.as_ref(), &wide, &owner)
-                        .await
-                        .map(|(o, t, w, m)| {
-                            let (o, t) = compose::after_wide(Mode::Own, o, &t, unreadable);
-                            (o, t, w, m)
-                        });
-                }
+                let r = replay_one(gw.as_ref(), &narrow, &wide, &owner).await;
                 match r {
-                    Ok((o, text, why, model)) => Output {
+                    Ok(r) => Output {
                         case_id: id,
                         sample,
-                        outcome: o.code().into(),
-                        reason: why,
-                        text,
-                        model,
+                        outcome: r.generation.outcome.code().into(),
+                        reason: r.generation.why,
+                        text: r.text,
+                        model: r.generation.model,
+                        revised: r.generation.revised,
                     },
                     Err(e) => Output {
                         case_id: id,

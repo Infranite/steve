@@ -337,6 +337,7 @@ impl Action for ReplyAs {
                 persona_id: persona,
                 instruction: Some(text).filter(|t| !t.trim().is_empty()),
                 history: None,
+                revise: None,
             };
             match self
                 .replies

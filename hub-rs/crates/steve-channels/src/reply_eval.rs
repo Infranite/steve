@@ -22,21 +22,15 @@ use sha2::{Digest, Sha256};
 use crate::compose::{self, BotInfo, Layers};
 use crate::deliver::system_text_in;
 
-/// How many style samples go into the prompt at most.
-pub const STYLE_MAX: usize = 8;
-/// A style sample from another space: at most this many characters, with no digits and no @, so
-/// nothing from one chat is carried into another (only the tone).
-pub const STYLE_CROSS_SPACE_MAX: usize = 20;
-/// A style sample, in characters.
-pub const STYLE_LINE_MAX: usize = 80;
+pub use crate::voice::{
+    MIN_SUPPORT, SAMPLES_MAX as STYLE_MAX, Situation, Style, Voice, messages_of, style_for,
+};
+use crate::voice::{asks, chars, ends_with_full_stop, opener, quantile, question_count};
 /// You are present when you said something in the space this long before the message (seconds).
 /// A parameter of the presence metric, swept in the eval rather than trusted. It is the metric's own,
 /// deliberately not the gate's ([`crate::presence::OWNER_LIVE_MS`]): a gate change must not move what
 /// it is measured against.
 pub const LIVE_WINDOW_SECS: i64 = 180;
-/// The fewest of your messages a situation needs for its own statistics; with fewer it uses the
-/// broader situation's ([`Situation::broader`]).
-pub const MIN_SUPPORT: usize = 5;
 
 // ---------------------------------------------------------------- cases
 
@@ -155,6 +149,9 @@ pub struct OwnerLine {
     pub space_kind: String,
     #[serde(default)]
     pub text: String,
+    /// Attachment kinds.
+    #[serde(default)]
+    pub media: Vec<String>,
     /// The message before yours in the space.
     #[serde(default)]
     pub prev_line: Option<Value>,
@@ -174,6 +171,10 @@ pub struct Output {
     pub text: String,
     #[serde(default)]
     pub model: String,
+    /// What the checks of writing as you found in the first draft, when it was sent back
+    /// ([`crate::compose::voice_verdict`]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub revised: Vec<String>,
 }
 
 /// Reads JSON Lines (blank lines skipped); the error names the line.
@@ -213,8 +214,12 @@ pub struct Setting {
     pub aliases: Vec<String>,
     /// The zone times are told in (UTC when unset).
     pub tz: Option<chrono_tz::Tz>,
-    /// The Bot behind your account (the workspace's main Bot unless the space names one).
+    /// The Bot behind your account (the workspace's main Bot unless the space names one): it picks
+    /// the model.
     pub bot: Option<BotInfo>,
+    /// The ablation of the Bot layer's removal: render the Bot's name, duty, manner and rules on your
+    /// own account, as the composer did before it only picked the model.
+    pub bot_layer: bool,
     pub account_duty: String,
     pub space_duty: String,
 }
@@ -264,10 +269,10 @@ fn context_msg(l: &Line) -> crate::context::Msg {
 /// nothing of them, where and why ([`crate::context::occasion_block`]), your names, and the
 /// conversation before the target ([`crate::context::arrange`]: received or sent lines with a text
 /// or an attachment, `history` lines by people; more than [`compose::HISTORY`] is the wider pass) at
-/// the time Steve answered then ([`observed_latency`]) — then `style`, your style samples
-/// ([`style_samples`]). The case holds nothing said by others after the target, so there is no
-/// “after” block; drafts of Steve's still waiting before the target are listed.
-pub fn layers(case: &Case, s: &Setting, history: usize, style: Vec<String>) -> Layers {
+/// the time Steve answered then ([`observed_latency`]) — then `voice`: your samples, habits and the
+/// rules of writing as you ([`voice`]). The case holds nothing said by others after the target, so
+/// there is no “after” block; drafts of Steve's still waiting before the target are listed.
+pub fn layers(case: &Case, s: &Setting, history: usize, voice: Voice) -> Layers {
     use crate::context::{self, Clock, Occasion, Why};
     use crate::spaces::Mode;
     let target = &case.message;
@@ -341,9 +346,10 @@ pub fn layers(case: &Case, s: &Setting, history: usize, style: Vec<String>) -> L
         sender.clone()
     };
     Layers {
-        bot: s.bot.clone(),
+        bot: s.bot.clone().filter(|_| s.bot_layer),
+        model: s.bot.as_ref().and_then(|b| b.model.clone()),
         persona: compose::self_layer(&s.owner),
-        style,
+        voice: Some(voice),
         account_duty: s.account_duty.clone(),
         space_duty: s.space_duty.clone(),
         anchors: format!("发送人：{anchor}（Steve 对这个人还不了解）"),
@@ -365,76 +371,109 @@ pub fn layers(case: &Case, s: &Setting, history: usize, style: Vec<String>) -> L
     }
 }
 
-/// A message too specific to learn tone from: a link, a placeholder, a redaction, nothing.
-fn unusable_sample(t: &str) -> bool {
-    let t = t.trim();
-    t.is_empty()
-        || t.contains("http://")
-        || t.contains("https://")
-        || t.contains("[REDACTED]")
-        || (t.starts_with('[') && t.ends_with(']'))
-}
-
-/// Is a sample from another space plain enough to carry over (short, no digits, no @)?
-fn portable(t: &str) -> bool {
-    t.chars().count() <= STYLE_CROSS_SPACE_MAX
-        && !t
-            .chars()
-            .any(|c| c.is_ascii_digit() || c == '@' || c == '＠')
-}
-
 fn is_dm_kind(kind: &str) -> bool {
     kind == "dm"
 }
 
+/// The corpus as the composer's pool of your messages ([`crate::voice::Said`]), each with its
+/// situation ([`owner_situation`]).
+pub fn pool(corpus: &[OwnerLine], names: &[String]) -> Vec<crate::voice::Said> {
+    corpus
+        .iter()
+        .filter_map(|o| {
+            Some(crate::voice::Said {
+                id: o.id.clone(),
+                at: millis(&o.time)?,
+                space_id: o.space_id.clone(),
+                dm: is_dm_kind(&o.space_kind),
+                situation: Some(owner_situation(o, names)),
+                text: o.text.clone(),
+                media: !o.media.is_empty(),
+            })
+        })
+        .collect()
+}
+
+/// The people's names the cases and the corpus show (senders, mentions): what a sample from another
+/// space must not contain ([`crate::voice::portable`]), as the production query's
+/// [`crate::voice::people_names`].
+pub fn people(cases: &[Case], corpus: &[OwnerLine]) -> Vec<String> {
+    let mut n: Vec<String> = cases
+        .iter()
+        .flat_map(|c| std::iter::once(&c.message).chain(c.previous_space_messages.iter()))
+        .filter(|l| !l.is_owner)
+        .flat_map(|l| std::iter::once(l.sender.clone()).chain(l.mentions.iter().cloned()))
+        .chain(corpus.iter().filter_map(|o| {
+            o.prev_line
+                .as_ref()
+                .filter(|p| p["is_owner"] != true)
+                .and_then(|p| p["sender"].as_str().map(String::from))
+        }))
+        .map(|x| x.trim().trim_start_matches('@').to_string())
+        .filter(|x| x.chars().count() >= 2)
+        .collect();
+    n.sort();
+    n.dedup();
+    n
+}
+
 /// Your style samples for `case`: messages you sent before it — never one of `excluded` (every case's
-/// gold answers, [`gold_ids`]) — the same space's most recent first, then the same kind of space,
-/// then any; those from other spaces only when [`portable`]. Deduplicated, cut to
-/// [`STYLE_LINE_MAX`], at most `max`.
+/// gold answers, [`gold_ids`]) — picked as the composer picks them ([`crate::voice::samples`]).
 pub fn style_samples(
     corpus: &[OwnerLine],
     case: &Case,
     excluded: &HashSet<String>,
+    names: &[String],
     max: usize,
 ) -> Vec<String> {
     let Some(at) = millis(&case.message.time) else {
         return Vec::new();
     };
-    let mut eligible: Vec<&OwnerLine> = corpus
-        .iter()
-        .filter(|o| !excluded.contains(&o.id) && o.id != case.message.id)
-        .filter(|o| millis(&o.time).is_some_and(|t| t < at))
-        .filter(|o| !unusable_sample(&o.text))
+    let mut excluded = excluded.clone();
+    excluded.insert(case.message.id.clone());
+    crate::voice::samples(
+        &pool(corpus, names),
+        &case.space.id,
+        case.space.is_dm,
+        at,
+        &excluded,
+        names,
+        max,
+    )
+}
+
+/// What the composer is given to write like you for `case` ([`crate::voice::Voice`]): its situation,
+/// your samples ([`style_samples`]) and your habits from the corpus before the case, never from
+/// `excluded`. No drafts you rejected or edited (the replay has none; the cases' own drafts are the
+/// answers being measured). `names`: yours ([`owner_situation`]) and the people's, apart.
+pub fn voice(
+    corpus: &[OwnerLine],
+    case: &Case,
+    excluded: &HashSet<String>,
+    yours: &[String],
+    people: &[String],
+) -> Voice {
+    let sit = situation(case);
+    let at = millis(&case.message.time).unwrap_or(i64::MAX);
+    let before: Vec<crate::voice::Said> = pool(corpus, yours)
+        .into_iter()
+        .filter(|s| s.at < at && !excluded.contains(&s.id))
         .collect();
-    eligible.sort_by_key(|o| std::cmp::Reverse(millis(&o.time).unwrap_or(0)));
-    let dm = case.space.is_dm;
-    let rank = |o: &OwnerLine| {
-        if o.space_id == case.space.id {
-            0
-        } else if is_dm_kind(&o.space_kind) == dm {
-            1
-        } else {
-            2
-        }
-    };
-    let mut ranked: Vec<(usize, &OwnerLine)> = eligible.into_iter().map(|o| (rank(o), o)).collect();
-    ranked.sort_by_key(|(r, _)| *r);
-    let mut seen = HashSet::new();
-    let mut out = Vec::new();
-    for (r, o) in ranked {
-        let t = o.text.trim();
-        if r > 0 && !portable(t) {
-            continue;
-        }
-        let t: String = t.chars().take(STYLE_LINE_MAX).collect();
-        if seen.insert(t.clone()) {
-            out.push(t);
-        }
-        if out.len() >= max {
-            break;
-        }
+    let styles = crate::voice::styles(&before);
+    Voice {
+        situation: Some(sit),
+        style: style_for(&styles, sit).map(|(s, st)| (s, st.clone())),
+        samples: style_samples(corpus, case, excluded, people, STYLE_MAX),
+        ..Voice::default()
     }
-    out
+}
+
+/// The voice of a replay without your messages: the situation and the rules only.
+pub fn bare_voice(case: &Case) -> Voice {
+    Voice {
+        situation: Some(situation(case)),
+        ..Voice::default()
+    }
 }
 
 /// What Steve did with a case then, as an [`Output`]: a draft is a `reply`, a question to you
@@ -457,40 +496,11 @@ pub fn recorded_output(case: &Case) -> Output {
             .as_str()
             .unwrap_or_default()
             .to_string(),
+        revised: Vec::new(),
     }
 }
 
 // ---------------------------------------------------------------- situations and your statistics
-
-/// Where and why a message is answered: a private chat, a group where you were @-ed, a group.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Situation {
-    Dm,
-    GroupAt,
-    Group,
-    All,
-}
-
-impl Situation {
-    /// The situation whose statistics stand in when this one has too few messages.
-    pub fn broader(self) -> Option<Situation> {
-        match self {
-            Situation::GroupAt => Some(Situation::Group),
-            Situation::Dm | Situation::Group => Some(Situation::All),
-            Situation::All => None,
-        }
-    }
-
-    pub fn code(self) -> &'static str {
-        match self {
-            Situation::Dm => "dm",
-            Situation::GroupAt => "group_at",
-            Situation::Group => "group",
-            Situation::All => "all",
-        }
-    }
-}
 
 /// The case's situation.
 pub fn situation(case: &Case) -> Situation {
@@ -525,119 +535,10 @@ pub fn owner_situation(o: &OwnerLine, names: &[String]) -> Situation {
     }
 }
 
-/// The messages of a text as they would be sent: one per non-empty line.
-pub fn messages_of(text: &str) -> Vec<&str> {
-    text.lines()
-        .map(str::trim)
-        .filter(|l| !l.is_empty())
-        .collect()
-}
-
-fn chars(t: &str) -> usize {
-    t.trim().chars().count()
-}
-
-const QUESTION_MARKS: [char; 2] = ['？', '?'];
-
-fn ends_with_full_stop(t: &str) -> bool {
-    t.trim_end().ends_with('。')
-}
-
-fn asks(t: &str) -> bool {
-    t.contains(QUESTION_MARKS)
-}
-
-fn question_count(t: &str) -> usize {
-    t.chars().filter(|c| QUESTION_MARKS.contains(c)).count()
-}
-
-/// Openings that announce rather than say something (“收到，”, “明白。”). Measured, never blocked: your
-/// own rate in the same situation is reported next to the drafts'.
-pub const OPENERS: [&str; 6] = ["收到", "明白", "好的", "了解", "好嘞", "没问题"];
-
-fn boilerplate_opening(t: &str) -> bool {
-    let t = t.trim_start();
-    OPENERS.iter().any(|o| {
-        t.strip_prefix(o).is_some_and(|rest| {
-            rest.is_empty() || rest.starts_with(['，', ',', '。', '！', '!', '～', '~', ' ', '\n'])
-        })
-    })
-}
-
-/// Your statistics in one situation, from your own messages.
-#[derive(Debug, Clone, Default, Serialize, PartialEq)]
-pub struct Style {
-    pub n: usize,
-    pub median_len: f64,
-    pub p90_len: f64,
-    pub full_stop_rate: f64,
-    pub question_rate: f64,
-    pub opening_rate: f64,
-}
-
-fn quantile(sorted: &[usize], q: f64) -> f64 {
-    if sorted.is_empty() {
-        return 0.0;
-    }
-    let pos = q * (sorted.len() - 1) as f64;
-    let (lo, hi) = (pos.floor() as usize, pos.ceil() as usize);
-    sorted[lo] as f64 + (sorted[hi] as f64 - sorted[lo] as f64) * (pos - lo as f64)
-}
-
-fn rate(n: usize, of: usize) -> f64 {
-    if of == 0 { 0.0 } else { n as f64 / of as f64 }
-}
-
-fn style_of(texts: &[&str]) -> Style {
-    let mut lens: Vec<usize> = texts.iter().map(|t| chars(t)).collect();
-    lens.sort_unstable();
-    Style {
-        n: texts.len(),
-        median_len: quantile(&lens, 0.5),
-        p90_len: quantile(&lens, 0.9),
-        full_stop_rate: rate(
-            texts.iter().filter(|t| ends_with_full_stop(t)).count(),
-            texts.len(),
-        ),
-        question_rate: rate(texts.iter().filter(|t| asks(t)).count(), texts.len()),
-        opening_rate: rate(
-            texts.iter().filter(|t| boilerplate_opening(t)).count(),
-            texts.len(),
-        ),
-    }
-}
-
 /// Your statistics per situation, from `corpus` (your messages, as provisional as the corpus is:
 /// derived when the eval runs, never written down as numbers).
 pub fn owner_styles(corpus: &[OwnerLine], names: &[String]) -> BTreeMap<Situation, Style> {
-    let usable: Vec<&OwnerLine> = corpus
-        .iter()
-        .filter(|o| !unusable_sample(&o.text))
-        .collect();
-    let mut by: BTreeMap<Situation, Vec<&str>> = BTreeMap::new();
-    for o in &usable {
-        let s = owner_situation(o, names);
-        by.entry(s).or_default().push(o.text.as_str());
-        if s == Situation::GroupAt {
-            by.entry(Situation::Group)
-                .or_default()
-                .push(o.text.as_str());
-        }
-        by.entry(Situation::All).or_default().push(o.text.as_str());
-    }
-    by.into_iter().map(|(s, t)| (s, style_of(&t))).collect()
-}
-
-/// The statistics that stand for `s`: its own with [`MIN_SUPPORT`] messages, else the broader one's.
-pub fn style_for(styles: &BTreeMap<Situation, Style>, s: Situation) -> Option<(Situation, &Style)> {
-    let mut at = Some(s);
-    while let Some(x) = at {
-        if let Some(st) = styles.get(&x).filter(|st| st.n >= MIN_SUPPORT) {
-            return Some((x, st));
-        }
-        at = x.broader();
-    }
-    styles.get(&Situation::All).map(|st| (Situation::All, st))
+    crate::voice::styles(&pool(corpus, names))
 }
 
 // ---------------------------------------------------------------- presence
@@ -871,10 +772,6 @@ pub fn median_latency(cases: &[Case]) -> Option<i64> {
 
 // ---------------------------------------------------------------- the checks of one draft
 
-/// Lines that enumerate (`A. `, `1、`, `- `): two or more make a list of options.
-static ENUMERATED: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
-    Regex::new(r"^\s*(?:[A-Da-d][\.、:：\)）]|\d+[\.、\)）]|[-•·])\s*\S").expect("valid regex")
-});
 /// Words that may hint at Steve's own business; only counted for the log, never a verdict: your own
 /// messages use them too.
 static KEYWORDS: std::sync::LazyLock<Regex> =
@@ -902,18 +799,15 @@ pub fn check_draft(text: &str, system: &[&str]) -> DraftCheck {
     let msgs = messages_of(text);
     let mut lens: Vec<usize> = msgs.iter().map(|m| chars(m)).collect();
     lens.sort_unstable();
-    let enumerated = msgs.iter().filter(|m| ENUMERATED.is_match(m)).count();
     DraftCheck {
         messages: msgs.len(),
         len: msgs.iter().map(|m| chars(m)).sum(),
         line_median_len: quantile(&lens, 0.5),
         full_stop: msgs.iter().any(|m| ends_with_full_stop(m)),
         question: asks(text),
-        opening: msgs.first().is_some_and(|m| boilerplate_opening(m)),
+        opening: msgs.first().is_some_and(|m| opener(m).is_some()),
         leak: system_text_in(text, system).map(String::from),
-        option_list: text.contains(crate::conversations::OPTIONS_HEAD)
-            || enumerated >= 2
-            || question_count(text) >= 2,
+        option_list: crate::voice::option_list(text) || question_count(text) >= 2,
         keywords: KEYWORDS
             .find_iter(text)
             .map(|m| m.as_str().to_string())

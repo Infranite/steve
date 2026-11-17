@@ -1905,3 +1905,245 @@ async fn what_steve_sent_for_you_is_placed_when_it_was_sent() {
         l.after
     );
 }
+
+/// Moves every message so far half an hour back.
+fn a_while_ago(h: &H) {
+    exec(
+        h,
+        "UPDATE chan_messages SET created = created - 1800000,
+                ext_created = CASE WHEN ext_created IS NULL THEN NULL ELSE ext_created - 1800000 END;",
+    );
+}
+
+/// On your own account the draft is you talking: the Bot behind the account only picks the model (no
+/// name, duty, manner or rules of it in the prompt), and the composer is given your own messages,
+/// your habits in this situation, your verdicts on earlier drafts and the rules of writing as you.
+#[tokio::test(flavor = "multi_thread")]
+async fn your_own_account_writes_like_you_not_like_a_bot() {
+    let h = setup().await;
+    exec(
+        &h,
+        "UPDATE bots SET role = '你的助手：理解需求、分派、汇报', persona = '沉稳、简洁，先说结论',
+                         rules = '建事项交给合适的 Bot', model = 'm-pinned' WHERE id = 'steve';",
+    );
+    h.env.gateway.script(
+        H_SAFETY,
+        r#"{"outcome": "skip", "text": "玩笑", "why": "玩笑"}"#,
+    );
+    let me = h.me.clone();
+    // what you typed yourself, here and in another group
+    for (i, (space, text)) in [
+        ("C_DEV", "先放一放"),
+        ("C_DEV", "等它再跑跑"),
+        ("C_DEV", "https://example.com/doc 看这个"),
+        ("C_OPS", "看情况吧"),
+        ("C_OPS", "找李雷看下"),
+        ("C_OPS", "8080 先别管"),
+        ("C_OPS", "这是干嘛的"),
+        ("C_OPS", "等我下"),
+    ]
+    .iter()
+    .enumerate()
+    {
+        push(&h, &me, msg(space, &format!("o{i}"), "upx", text, false)).await;
+    }
+    // a while ago: you are not in the middle of talking here (the presence gate)
+    a_while_ago(&h);
+    let dev = one(
+        &h,
+        "SELECT space_id FROM chan_messages WHERE id = (SELECT id FROM chan_messages WHERE text = '先放一放')",
+        &[],
+    )[0]
+    .as_str()
+    .unwrap()
+    .to_string();
+    let ops = one(
+        &h,
+        "SELECT space_id FROM chan_messages WHERE text = '看情况吧'",
+        &[],
+    )[0]
+    .as_str()
+    .unwrap()
+    .to_string();
+    // your verdicts on earlier drafts as you: rejected, edited, approved unchanged, approved by YOLO
+    let verdict = |id: &str, space: &str, draft: &str, result: &str| {
+        format!(
+            "INSERT INTO chan_messages (id, workspace_id, space_id, direction, on_behalf, text, status, created)
+               VALUES ('{id}', '{WS}', '{space}', 'out', 'none', '{draft}', 'sent', 1);
+             INSERT INTO decisions (id, workspace_id, kind, subject_type, subject_id, question, draft, options, status, result, requested_by, created, resolved)
+               VALUES ('d_{id}', '{WS}', 'approve', '{SUBJECT_MESSAGE}', '{id}', 'q', '{draft}', '[]', 'resolved', '{result}', 'steve', 1, 2);"
+        )
+    };
+    exec(
+        &h,
+        &[
+            verdict(
+                "v1",
+                &dev,
+                "收到，这次要把问题出在哪一步查清楚",
+                r#"{"choice":"no"}"#,
+            ),
+            verdict(
+                "v2",
+                &dev,
+                "我下午瞅瞅",
+                r#"{"choice":"yes","text":"我瞅瞅"}"#,
+            ),
+            verdict("v3", &dev, "测试点一下", r#"{"choice":"yes"}"#),
+            verdict(
+                "v4",
+                &dev,
+                "YOLO 否掉的",
+                r#"{"choice":"no","decided_by":"yolo"}"#,
+            ),
+            verdict(
+                "v5",
+                &ops,
+                "别的群里否掉的一大段分析，提到李雷和 3 个集群",
+                r#"{"choice":"no"}"#,
+            ),
+        ]
+        .concat(),
+    );
+    let target = push(
+        &h,
+        &me,
+        msg("C_DEV", "t1", "uhan", "@你 关键是它不顶用", true),
+    )
+    .await;
+    let p = reply_prompts(&h).pop().expect("composed");
+    assert!(!p.contains("你代表 Bot"), "{p}");
+    assert!(
+        !p.contains("分派、汇报") && !p.contains("先说结论") && !p.contains("建事项"),
+        "{p}"
+    );
+    let style = p
+        .split(compose::H_STYLE)
+        .nth(1)
+        .and_then(|b| b.split("\n\n").next())
+        .expect("style block");
+    // the space's own first, another group's when plain; never a link, a name, a number
+    assert!(
+        style.contains("- 等它再跑跑\n- 先放一放\n- 等我下\n- 这是干嘛的\n- 看情况吧"),
+        "{style}"
+    );
+    assert!(
+        !style.contains("example.com") && !style.contains("找李雷") && !style.contains("8080"),
+        "{style}"
+    );
+    // nobody @-ed you before your own lines: the group's habits stand in, said as such
+    assert!(
+        style.contains("群里被 @ 或被回复时的消息太少，按我群聊的消息"),
+        "{style}"
+    );
+    assert!(style.contains("以句号结尾的占 0%"), "{style}");
+    // your verdicts: rejected as it was, edited as you sent it; not a test click, not YOLO's, not
+    // another space's long analysis
+    assert!(
+        p.contains(compose::H_REJECTED) && p.contains("- 收到，这次要把问题出在哪一步查清楚"),
+        "{p}"
+    );
+    assert!(
+        p.contains(compose::H_EDITED) && p.contains("- 我瞅瞅"),
+        "{p}"
+    );
+    assert!(
+        !p.contains("测试点一下") && !p.contains("YOLO 否掉的") && !p.contains("一大段分析"),
+        "{p}"
+    );
+    assert!(p.contains(compose::H_WRITE) && p.contains(steve_channels::voice::RULES));
+    // the item numbers of the sender are Steve's business, not yours
+    assert!(!p.contains("发送人提过、还在进行的事项"), "{p}");
+
+    // the Bot still picks the model
+    let plan =
+        h.ch.store()
+            .reader(|c| steve_channels::flow_actions::plan_of(c, WS, &target.message_id))
+            .unwrap();
+    let l = h
+        .env
+        .store()
+        .reader(|c| {
+            compose::gather(
+                c,
+                h.ch.knowledge_store(),
+                &plan,
+                &Default::default(),
+                h.ch.now(),
+            )
+        })
+        .unwrap();
+    assert!(l.bot.is_none());
+    assert_eq!(l.model.as_deref(), Some("m-pinned"));
+    let v = l.voice.expect("voice on your own account");
+    assert_eq!(v.situation, Some(steve_channels::voice::Situation::GroupAt));
+}
+
+/// A draft written as you that does not sound like you (options, several questions, far longer than
+/// you write, an opening you never use) goes back once with what was wrong; still wrong, nothing is
+/// drafted and the reason is kept. A bot's reply is never checked this way.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_draft_unlike_you_goes_back_once_then_is_not_made() {
+    let h = setup().await;
+    let me = h.me.clone();
+    // your own lines are recorded, never composed for
+    for (i, text) in [
+        "先放一放",
+        "等它再跑跑",
+        "看情况吧",
+        "这是干嘛的",
+        "等我下",
+        "我瞅瞅",
+    ]
+    .iter()
+    .enumerate()
+    {
+        push(&h, &me, msg("C_DEV", &format!("o{i}"), "upx", text, false)).await;
+    }
+    a_while_ago(&h);
+    let options = r#"{"outcome": "reply", "text": "你是想要哪种？\n1. 先重启\n2. 再看日志", "why": "问清楚"}"#;
+
+    // sent back once, the second try passes
+    h.env.gateway.reply(options);
+    h.env
+        .gateway
+        .reply(r#"{"outcome": "reply", "text": "先重启试试", "why": "短"}"#);
+    let i = push(&h, &me, msg("C_DEV", "t1", "uhan", "@你 挂了", true)).await;
+    let prompts = reply_prompts(&h);
+    assert_eq!(prompts.len(), 2, "{prompts:#?}");
+    assert!(!prompts[0].contains(compose::H_REVISE));
+    assert!(
+        prompts[1].contains(compose::H_REVISE) && prompts[1].contains("给对方列了选项"),
+        "{}",
+        prompts[1]
+    );
+    let out = i.response.expect("response").out_message_id.expect("draft");
+    assert_eq!(
+        one(&h, "SELECT text FROM chan_messages WHERE id = ?", &[&out])[0],
+        json!("先重启试试")
+    );
+    let reqs = h.out.reqs.lock().unwrap().clone();
+    let g = reqs.last().unwrap().generation.clone().unwrap();
+    assert_eq!(g.revised, vec!["option_list", "too_long"]);
+
+    // still wrong: not drafted, the reason kept
+    h.env.gateway.prompts.lock().unwrap().clear();
+    h.env.gateway.reply(options);
+    h.env.gateway.reply(
+        r#"{"outcome": "reply", "text": "收到，我这边先确认一下具体是哪一个环节出了问题，然后再跟你同步后续的处理方案和时间", "why": "长"}"#,
+    );
+    let n = h.out.reqs.lock().unwrap().len();
+    let i = push(&h, &me, msg("C_DEV", "t2", "uhan", "@你 又挂了", true)).await;
+    assert_eq!(reply_prompts(&h).len(), 2);
+    let r = i.response.expect("response");
+    assert!(r.out_message_id.is_none(), "nothing drafted");
+    assert_eq!(h.out.reqs.lock().unwrap().len(), n, "nothing delivered");
+    assert_eq!(
+        count(
+            &h,
+            "SELECT count(*) FROM chan_messages WHERE direction = 'out' AND status IN ('pending', 'sent')",
+            &[]
+        ),
+        0
+    );
+}
