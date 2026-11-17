@@ -303,7 +303,7 @@ pub fn of(c: &Connection, q: &Query, lo: i64, hi: i64) -> Result<Workflow> {
         .collect::<rusqlite::Result<_>>()?;
     w.reply_latency = P::of(&latency.into_iter().filter(|v| *v >= 0).collect::<Vec<_>>());
 
-    /* cold start: a session's first tool call (sessions from before migration 89, or a database not
+    /* cold start: a session's first tool call (sessions from before migration 92, or a database not
      * migrated yet, have it only as their first `tool_call` event) */
     let first_event =
         "(SELECT MIN(e.ts) FROM events e WHERE e.session_id = s.id AND e.kind = ?6)".to_string();

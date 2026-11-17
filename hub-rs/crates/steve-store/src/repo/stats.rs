@@ -274,7 +274,7 @@ pub(crate) fn mark_in(c: &Connection, m: &NewMark) -> Result<i64> {
 /// The event kind of a tool call (`events.kind`), the first of which sets `sessions.first_tool_at`.
 pub const TOOL_CALL_EVENT: &str = "tool_call";
 
-/// Notes when a session made its first tool call (migration 89), with the event that records it, in
+/// Notes when a session made its first tool call (migration 92), with the event that records it, in
 /// the caller's transaction: how long a fresh session takes to start working. Later calls change nothing.
 pub(crate) fn first_tool_in(c: &Connection, session: &str, kind: &str, ts: i64) -> Result<()> {
     if kind == TOOL_CALL_EVENT {

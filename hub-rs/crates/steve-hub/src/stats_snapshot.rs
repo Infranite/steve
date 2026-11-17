@@ -204,10 +204,10 @@ mod tests {
         {
             let c = Connection::open(&path).unwrap();
             c.execute_batch(
-                "CREATE TABLE schema_version(v INTEGER NOT NULL); INSERT INTO schema_version VALUES(88);",
+                "CREATE TABLE schema_version(v INTEGER NOT NULL); INSERT INTO schema_version VALUES(91);",
             )
             .unwrap();
-            for m in &db::MIGRATIONS[..88] {
+            for m in &db::MIGRATIONS[..91] {
                 c.execute_batch(m).unwrap();
             }
             c.execute_batch(
@@ -215,7 +215,7 @@ mod tests {
                  INSERT INTO items(id,workspace_id,no,title,status,stage,created,updated) VALUES ('i1','w',1,'t','run','执行',1,1);",
             )
             .unwrap();
-            // a closing invalidated today, known only from its timeline line before migration 89
+            // a closing invalidated today, known only from its timeline line before migration 92
             c.execute(
                 "INSERT INTO timeline(item_id,ts,actor,kind,text) VALUES ('i1',?,'steve','sys','收尾作废：计划里又有没做完的步骤')",
                 [steve_store::now()],
@@ -230,7 +230,7 @@ mod tests {
         })
         .unwrap();
         assert_eq!(v["workspace"], "w");
-        assert_eq!(v["schema"], 88);
+        assert_eq!(v["schema"], 91);
         assert_eq!(v["workflow"]["invalidations"]["plan"], 1);
         assert_eq!(v["quality"]["unit_retries"], 0);
         assert_eq!(

@@ -38,7 +38,7 @@ use crate::repo::{Item, PlanStep};
 use crate::thread::flowback::{Update, flow_quiet};
 
 /// Why a closing was invalidated: the reason code of its `invalidate` mark, which the statistics
-/// count by (migration 89 gave the timeline lines from before the same codes).
+/// count by (migration 92 gave the timeline lines from before the same codes).
 pub mod void {
     /// The agent's plan has open steps again.
     pub const PLAN: &str = "plan";
