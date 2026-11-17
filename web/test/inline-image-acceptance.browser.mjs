@@ -14,7 +14,7 @@ import { resolve, dirname, basename, sep } from "node:path"
 import { fileURLToPath } from "node:url"
 import { deflateSync } from "node:zlib"
 
-const repo = fileURLToPath(new URL("../..", import.meta.url))
+const repo = resolve(fileURLToPath(new URL("../..", import.meta.url)))
 const binary = resolve(process.env.STEVE_TEST_HUB_BIN || "")
 assert.ok(process.env.STEVE_TEST_HUB_BIN, "Provide a newly built Hub; never attach to an existing installation")
 await access(binary); await access(repo + "/web/dist/index.html")
