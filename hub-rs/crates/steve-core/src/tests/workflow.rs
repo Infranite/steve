@@ -1518,63 +1518,346 @@ fn unit_delivery_accepts_baseline_and_external_failures_when_unit_checks_pass() 
     assert_eq!(after.checks.as_array().unwrap().len(), 2);
 }
 
-#[test]
-fn global_workflow_concurrency_caps_active_units_across_items_and_wakes_next() {
-    let k = Kit::with(|cfg| {
-        cfg.max_workflow_parallel = 1;
-    });
+fn tree_kit(cap: usize) -> Kit {
+    let k = Kit::with(|cfg| cfg.max_workflow_parallel = cap);
     k.rt.st().workflow_execution_ready = true;
-    let specs = vec![
-        UnitSpec {
-            id: "a".into(),
-            title: "实现".into(),
-            goal: "做".into(),
-            bot_id: "dev".into(),
-            kind: "work".into(),
-            depends_on: vec![],
-            resources: vec![],
-            required: true,
-        },
-        UnitSpec {
-            id: "review".into(),
-            title: "评审".into(),
-            goal: "审".into(),
-            bot_id: "steve".into(),
-            kind: "review".into(),
-            depends_on: vec!["a".into()],
-            resources: vec![],
-            required: true,
-        },
-        UnitSpec {
-            id: "integrate".into(),
-            title: "集成".into(),
-            goal: "合".into(),
-            bot_id: "dev".into(),
-            kind: "integrate".into(),
-            depends_on: vec!["a".into(), "review".into()],
-            resources: vec![],
-            required: true,
-        },
-    ];
-    let p1 = k.item("run", "执行", None);
-    let p2 = k.item("run", "执行", None);
-    plan(&k, &p1, &specs);
-    plan(&k, &p2, &specs);
+    k
+}
 
-    assert_eq!(unit(&k, &p1, "a").status, "running");
+fn tree_specs() -> Vec<UnitSpec> {
+    [
+        ("a", "dev", "work", vec![]),
+        ("review", "steve", "review", vec!["a"]),
+        ("integrate", "dev", "integrate", vec!["review"]),
+    ]
+    .into_iter()
+    .map(|(id, bot, kind, deps)| UnitSpec {
+        id: id.into(),
+        title: id.into(),
+        goal: format!("完成 {id}"),
+        bot_id: bot.into(),
+        kind: kind.into(),
+        depends_on: deps.into_iter().map(String::from).collect(),
+        resources: vec![],
+        required: true,
+    })
+    .collect()
+}
+
+fn ordinary_fork(k: &Kit, parent: &str) -> String {
+    k.db()
+        .item_create(
+            crate::repo::WS,
+            &crate::repo::NewItem {
+                title: "普通派生事项".into(),
+                goal: "独立编排工作".into(),
+                bot_id: "dev".into(),
+                status: Some("run".into()),
+                stage: Some("执行".into()),
+                source: Some(("派生".into(), "fork".into())),
+                parent: Some(crate::repo::Parent {
+                    item: Some(Some(parent.into())),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .id
+}
+
+#[test]
+fn workflow_tree_cap_one_allows_independent_roots_to_run_together() {
+    for (cap, root_count) in [(Some(1), 2), (None, 5)] {
+        let k = cap.map_or_else(Kit::new, tree_kit);
+        k.rt.st().workflow_execution_ready = true;
+        if cap.is_none() {
+            assert_eq!(k.core.config().max_workflow_parallel, 4);
+        }
+        let specs = tree_specs();
+        let roots: Vec<_> = (0..root_count)
+            .map(|_| {
+                let parent = k.item("run", "执行", None);
+                plan(&k, &parent, &specs);
+                parent
+            })
+            .collect();
+        for parent in &roots {
+            assert_eq!(unit(&k, parent, "a").status, "running");
+            assert_eq!(
+                graph(&k, parent)
+                    .units
+                    .iter()
+                    .filter(|u| u.active())
+                    .count(),
+                1
+            );
+        }
+    }
+}
+
+#[test]
+fn workflow_tree_cap_is_shared_by_sibling_and_deep_graphs_and_completion_wakes_them() {
+    let k = tree_kit(1);
+    let root = k.item("run", "执行", None);
+    let first = ordinary_fork(&k, &root);
+    let sibling = ordinary_fork(&k, &root);
+    let middle = ordinary_fork(&k, &root);
+    let deep = ordinary_fork(&k, &ordinary_fork(&k, &middle));
+    let specs = tree_specs();
+    for parent in [&first, &sibling, &deep] {
+        plan(&k, parent, &specs);
+    }
+    assert!(k.db().store().workflows().get(&root).unwrap().is_none());
+    assert_eq!(unit(&k, &first, "a").status, "running");
+    assert_eq!(unit(&k, &sibling, "a").status, "pending");
+    assert_eq!(unit(&k, &deep, "a").status, "pending");
+
+    for id in ["a", "review", "integrate"] {
+        finish(&k, &first, id);
+    }
+    let waiting = [&sibling, &deep];
+    let next = waiting
+        .iter()
+        .find(|parent| unit(&k, parent, "a").status == "running")
+        .expect("releasing the tree's slot wakes a waiting graph");
     assert_eq!(
-        unit(&k, &p2, "a").status,
+        waiting
+            .iter()
+            .flat_map(|parent| graph(&k, parent).units)
+            .filter(|u| u.active())
+            .count(),
+        1,
+        "sibling and deep descendants share the same reservation"
+    );
+    for id in ["a", "review", "integrate"] {
+        finish(&k, next, id);
+    }
+    let last = waiting.iter().find(|parent| parent != &next).unwrap();
+    assert_eq!(unit(&k, last, "a").status, "running");
+}
+
+#[test]
+fn workflow_tree_allows_graphs_below_graphless_parents_but_preserves_nested_graph_rejection() {
+    let k = tree_kit(1);
+    let root = k.item("run", "执行", None);
+    let specs = tree_specs();
+    plan(&k, &root, &specs);
+    let middle = ordinary_fork(&k, &root);
+    let ordinary = ordinary_fork(&k, &middle);
+    plan(&k, &ordinary, &specs);
+    assert_eq!(unit(&k, &ordinary, "a").status, "pending");
+
+    let child = unit(&k, &root, "a").item_id.unwrap();
+    for parent in [&middle, &child] {
+        let err = k.core.workflow_change(
+            parent,
+            json!({"action":"plan", "reason":"不能嵌套", "expected_revision":0, "units":specs}),
+            "me",
+        );
+        assert!(
+            err.is_err(),
+            "an immediate child of a graph owner must not own a nested graph"
+        );
+        assert!(k.db().store().workflows().get(parent).unwrap().is_none());
+    }
+}
+
+#[test]
+fn workflow_tree_cap_does_not_replace_the_graph_local_parallel_cap() {
+    let k = tree_kit(2);
+    let root = k.item("run", "执行", None);
+    let mut specs = tree_specs();
+    let mut b = specs[0].clone();
+    b.id = "b".into();
+    b.title = "b".into();
+    specs.insert(1, b);
+    specs[2].depends_on.push("b".into());
+    k.core
+        .workflow_change(
+            &root,
+            json!({"action":"plan", "reason":"图内串行", "expected_revision":0,
+                "units":specs, "max_parallel":1}),
+            "me",
+        )
+        .unwrap();
+    let middle = ordinary_fork(&k, &root);
+    let sibling_graph = ordinary_fork(&k, &middle);
+    plan(&k, &sibling_graph, &tree_specs());
+
+    assert_eq!(graph(&k, &root).max_parallel, 1);
+    assert_eq!(unit(&k, &root, "a").status, "running");
+    assert_eq!(unit(&k, &root, "b").status, "pending");
+    assert_eq!(unit(&k, &sibling_graph, "a").status, "running");
+    finish(&k, &root, "a");
+    assert_eq!(unit(&k, &root, "b").status, "running");
+    assert_eq!(
+        graph(&k, &root).units.iter().filter(|u| u.active()).count(),
+        1
+    );
+}
+
+#[test]
+fn workflow_tree_root_uses_persisted_ancestry_without_a_depth_limit() {
+    let k = tree_kit(1);
+    let root = k.item("run", "执行", None);
+    for parent in [json!({}), json!({"item":null})] {
+        k.db()
+            .exec(
+                "UPDATE items SET parent=? WHERE id=?",
+                &[&parent.to_string(), &root],
+            )
+            .unwrap();
+        let t = k.core.tx();
+        assert_eq!(
+            t.workflow_root(&t.item(&root).unwrap()).unwrap(),
+            (crate::repo::WS.into(), root.clone())
+        );
+    }
+    let mut leaf = root.clone();
+    for _ in 0..40 {
+        leaf = ordinary_fork(&k, &leaf);
+    }
+    let another_root = k.item("run", "执行", None);
+    {
+        let t = k.core.tx();
+        assert_eq!(
+            t.workflow_root(&t.item(&leaf).unwrap()).unwrap(),
+            (crate::repo::WS.into(), root.clone())
+        );
+    }
+    k.db()
+        .exec(
+            "UPDATE items SET parent=? WHERE id=?",
+            &[&json!({"item":another_root}).to_string(), &root],
+        )
+        .unwrap();
+    let t = k.core.tx();
+    assert_eq!(
+        t.workflow_root(&t.item(&leaf).unwrap()).unwrap(),
+        (crate::repo::WS.into(), another_root)
+    );
+}
+
+fn assert_invalid_workflow_tree_is_isolated(invalid: &str) {
+    let k = tree_kit(1);
+    k.rt.st().workflow_execution_ready = false;
+    let ancestor = k.item("run", "执行", None);
+    let corrupt = ordinary_fork(&k, &ancestor);
+    let specs = tree_specs();
+    plan(&k, &corrupt, &specs);
+    match invalid {
+        "cycle" | "missing" => {
+            let parent = if invalid == "cycle" {
+                corrupt.as_str()
+            } else {
+                "missing-item"
+            };
+            k.db()
+                .exec(
+                    "UPDATE items SET parent=? WHERE id=?",
+                    &[&json!({"item":parent}).to_string(), &ancestor],
+                )
+                .unwrap();
+        }
+        "workspace" => {
+            k.db().exec("INSERT INTO workspaces(id,name,created,item_prefix) VALUES('other','Other',1,'OT')", &[]).unwrap();
+            k.db()
+                .exec(
+                    "UPDATE items SET workspace_id='other' WHERE id=?",
+                    &[&ancestor],
+                )
+                .unwrap();
+        }
+        _ => panic!("unknown invalid ancestry fixture"),
+    }
+    {
+        let t = k.core.tx();
+        assert!(
+            t.workflow_root(&t.item(&corrupt).unwrap()).is_err(),
+            "{invalid}"
+        );
+    }
+    k.rt.st().workflow_execution_ready = true;
+    let independent = k.item("run", "执行", None);
+    plan(&k, &independent, &specs);
+    k.core.lifecycle_tick().unwrap();
+    assert_eq!(
+        unit(&k, &corrupt, "a").status,
         "pending",
-        "second workflow queues behind global cap=1"
+        "{invalid} ancestry must not dispatch"
+    );
+    assert_eq!(
+        unit(&k, &independent, "a").status,
+        "running",
+        "{invalid} ancestry must not block another root"
+    );
+}
+
+#[test]
+fn workflow_tree_cycle_is_rejected_without_blocking_independent_roots() {
+    assert_invalid_workflow_tree_is_isolated("cycle");
+}
+
+#[test]
+fn workflow_tree_missing_parent_is_rejected_without_blocking_independent_roots() {
+    assert_invalid_workflow_tree_is_isolated("missing");
+}
+
+#[test]
+fn workflow_tree_cross_workspace_parent_is_rejected_without_blocking_independent_roots() {
+    assert_invalid_workflow_tree_is_isolated("workspace");
+}
+
+#[test]
+fn workflow_tree_paused_graph_reserves_capacity_only_until_its_turn_is_settled() {
+    let k = tree_kit(1);
+    let root = k.item("run", "执行", None);
+    let paused = ordinary_fork(&k, &root);
+    let waiting = ordinary_fork(&k, &root);
+    let specs = tree_specs();
+    plan(&k, &paused, &specs);
+    let sid = unit(&k, &paused, "a").session_id.unwrap();
+    change(&k, &paused, "pause", None).unwrap();
+    plan(&k, &waiting, &specs);
+    assert_eq!(
+        unit(&k, &waiting, "a").status,
+        "pending",
+        "an unconfirmed stop retains its reservation"
     );
 
-    finish(&k, &p1, "a");
-    let active_total = [&p1, &p2]
-        .iter()
-        .flat_map(|p| graph(&k, p).units)
-        .filter(|u| u.active())
-        .count();
-    assert_eq!(active_total, 1);
+    k.rt.end_turn(&k.core, &sid, "cancelled", None);
+    k.core.lifecycle_tick().unwrap();
+    assert!(graph(&k, &paused).paused);
+    assert_eq!(
+        unit(&k, &paused, "a").status,
+        "running",
+        "the paused graph retains its resumable logical status"
+    );
+    assert_eq!(
+        unit(&k, &waiting, "a").status,
+        "running",
+        "a settled paused unit no longer occupies the tree's capacity"
+    );
+
+    change(&k, &paused, "resume", None).unwrap();
+    assert!(!graph(&k, &paused).paused);
+    assert!(
+        !k.rt.st().turning.contains(&sid),
+        "resuming an idle logical running unit must wait for tree capacity"
+    );
+    assert_eq!(unit(&k, &waiting, "a").status, "running");
+    for id in ["a", "review", "integrate"] {
+        finish(&k, &waiting, id);
+    }
+    assert_eq!(
+        unit(&k, &paused, "a").session_id.as_deref(),
+        Some(sid.as_str())
+    );
+    assert!(
+        k.rt.st().turning.contains(&sid),
+        "releasing the occupied slot resumes the paused unit's original session"
+    );
 }
 
 /// The coordinator's contract: after building or retrying its graph it ends its turn, and Steve

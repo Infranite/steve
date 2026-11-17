@@ -55,7 +55,7 @@ pub struct CoreConfig {
     pub commit: Option<String>,
     /// Disk thresholds for the worktrees' volume (`workspace`).
     pub disk: crate::workspace::DiskPolicy,
-    /// `STEVE_WORKFLOW_MAX_PARALLEL`: global active workflow unit cap across all open workflows.
+    /// `STEVE_WORKFLOW_MAX_PARALLEL`: active workflow unit cap per root item and its descendants.
     pub max_workflow_parallel: usize,
 }
 
@@ -73,7 +73,7 @@ pub fn gh_cli() -> PathBuf {
         .unwrap_or_else(|| "gh".into())
 }
 
-/// Global active workflow units allowed simultaneously (`STEVE_WORKFLOW_MAX_PARALLEL`, default 4).
+/// Active workflow units allowed per item tree (`STEVE_WORKFLOW_MAX_PARALLEL`, default 4).
 pub fn workflow_max_parallel_from_env() -> usize {
     std::env::var("STEVE_WORKFLOW_MAX_PARALLEL")
         .ok()
