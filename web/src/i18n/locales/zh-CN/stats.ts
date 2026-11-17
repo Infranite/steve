@@ -667,7 +667,7 @@ export default {
       wakes: "叫醒主控",
       times_other: "{{count}} 次",
       void: { plan: "计划又有没做完的步骤", redeliver: "有新的交付", message: "收到新消息", changed: "冻结后结果变了", graph: "工作图调整", unit_failed: "工作单元未通过", rework: "验收返工", reaccept: "重新验收", undone: "撤销标记完成", other: "其他" },
-      refuse: { unit_unfinished: "单元还有未完成步骤", unit_evidence: "单元交付证据不全", workflow_open: "协作还没完成", design_file: "缺少可打开的设计文件", scope: "检查范围不对" },
+      refuse: { unit_unfinished: "单元还有未完成步骤", unit_evidence: "单元交付证据不全", unit_paused: "协作已暂停", unit_queued: "单元还有排队输入", unit_stale: "工作尝试已过期", workflow_open: "协作还没完成", design_file: "缺少可打开的设计文件", scope: "检查范围不对" },
       unit: { succeeded: "单元通过", failed: "单元失败", cancelled: "单元取消" },
     },
     events: {

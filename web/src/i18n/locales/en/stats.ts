@@ -707,7 +707,7 @@ export default {
       times_one: "{{count}} time",
       times_other: "{{count}} times",
       void: { plan: "Plan has open steps again", redeliver: "A new delivery", message: "A new message", changed: "Result changed after the freeze", graph: "Work graph changed", unit_failed: "A work unit failed", rework: "Acceptance rework", reaccept: "Accepted again", undone: "Marking done undone", other: "Other" },
-      refuse: { unit_unfinished: "Unit has open steps", unit_evidence: "Unit evidence incomplete", workflow_open: "Collaboration not finished", design_file: "No openable design file", scope: "Wrong check scope" },
+      refuse: { unit_unfinished: "Unit has open steps", unit_evidence: "Unit evidence incomplete", unit_paused: "Collaboration paused", unit_queued: "Unit has queued input", unit_stale: "Attempt no longer current", workflow_open: "Collaboration not finished", design_file: "No openable design file", scope: "Wrong check scope" },
       unit: { succeeded: "Unit passed", failed: "Unit failed", cancelled: "Unit cancelled" },
     },
     events: {

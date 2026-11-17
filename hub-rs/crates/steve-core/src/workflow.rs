@@ -5,8 +5,9 @@ use serde_json::{Value, json};
 use steve_store::{UnitSpec, WorkUnit, Workflow};
 
 use crate::cycle::{CANCEL, CLOSED, FAIL, Policy, conflict};
+use crate::marks::reject;
 use crate::repo::{Item, Session};
-use crate::{Check, Core, ItemAction, Mark, Output, Result, TurnEnd, Tx, patch};
+use crate::{Check, Core, CoreError, ItemAction, Mark, Output, Result, TurnEnd, Tx, patch};
 
 // A workflow response is a navigation surface, not an archive of every earlier revision.
 // The unabridged history stays in the store; large reports belong to child artifacts.
@@ -1260,6 +1261,20 @@ impl Tx<'_> {
         Ok(())
     }
 
+    /// `e` as it is; when the report is a delivery (`passed`), recorded as a refused delivery for
+    /// `code` (a [`reject`] reason). A failure report is the unit's own verdict, never a refusal.
+    fn unit_refused(&self, s: &Session, passed: bool, code: &str, e: CoreError) -> CoreError {
+        match s
+            .item_id
+            .as_deref()
+            .filter(|_| passed)
+            .map(|id| self.item(id))
+        {
+            Some(Ok(item)) => self.refused(&item, s, code, e),
+            _ => e,
+        }
+    }
+
     pub(crate) fn workflow_report(
         &mut self,
         s: &Session,
@@ -1272,42 +1287,63 @@ impl Tx<'_> {
             .item_id
             .as_deref()
             .ok_or_else(|| conflict("会话不属于工作单元"))?;
-        let (parent, unit) = self
-            .db()
-            .store()
-            .workflows()
-            .by_child(child)?
-            .ok_or_else(|| conflict("工作尝试已被替换"))?;
-        self.lc_guard_open(&parent)?;
-        let current = self
-            .db()
-            .store()
-            .workflows()
-            .get(&parent)?
-            .ok_or_else(|| conflict("工作图不存在"))?;
+        // each refusal is recorded where it happens, with its own reason
+        let refuse =
+            |t: &Self, code: &str, why: &str| t.unit_refused(s, passed, code, conflict(why));
+        let (parent, unit) = match self.db().store().workflows().by_child(child)? {
+            Some(found) => found,
+            None => return Err(refuse(self, reject::UNIT_STALE, "工作尝试已被替换")),
+        };
+        self.lc_guard_open(&parent)
+            .map_err(|e| self.unit_refused(s, passed, reject::UNIT_STALE, e))?;
+        let Some(current) = self.db().store().workflows().get(&parent)? else {
+            return Err(refuse(self, reject::UNIT_STALE, "工作图不存在"));
+        };
         if current.paused {
-            return Err(conflict("协作已暂停，恢复后才能交付"));
+            return Err(refuse(
+                self,
+                reject::UNIT_PAUSED,
+                "协作已暂停，恢复后才能交付",
+            ));
         }
         if !self.workflow_current(&current)? {
-            return Err(conflict("主事项目标或周期已变化，请由负责人重规划"));
+            return Err(refuse(
+                self,
+                reject::UNIT_STALE,
+                "主事项目标或周期已变化，请由负责人重规划",
+            ));
         }
         if summary.trim().is_empty() {
-            return Err(conflict("交付或失败说明不能为空"));
+            return Err(refuse(
+                self,
+                reject::UNIT_EVIDENCE,
+                "交付或失败说明不能为空",
+            ));
         }
         if checks.iter().any(|c| !c.valid_scope()) {
-            return Err(conflict("检查范围 scope 只能是 unit、baseline 或 external"));
+            return Err(refuse(
+                self,
+                reject::SCOPE,
+                "检查范围 scope 只能是 unit、baseline 或 external",
+            ));
         }
         if passed
             && (outputs.is_empty()
                 || !checks.iter().any(|c| c.is_unit_scope() && c.passed)
                 || checks.iter().any(|c| c.is_unit_scope() && !c.passed))
         {
-            return Err(conflict(
+            return Err(refuse(
+                self,
+                reject::UNIT_EVIDENCE,
                 "工作单元需提交共享产物、至少一项通过的单元检查（scope=unit），且所有单元范围检查必须通过；无关基线或外部环境失败请标注 scope=baseline 或 external",
             ));
         }
         if passed && !self.db().queued(&s.id)?.is_empty() {
-            return Err(conflict("工作单元还有排队输入，请处理后再交付"));
+            return Err(refuse(
+                self,
+                reject::UNIT_QUEUED,
+                "工作单元还有排队输入，请处理后再交付",
+            ));
         }
         if passed
             && unit.spec.kind == "integrate"
@@ -1315,7 +1351,11 @@ impl Tx<'_> {
                 .iter()
                 .any(|c| c.is_unit_scope() && c.passed && c.operated)
         {
-            return Err(conflict("集成验收需至少一项实际操作检查（operated: true）"));
+            return Err(refuse(
+                self,
+                reject::UNIT_EVIDENCE,
+                "集成验收需至少一项实际操作检查（operated: true）",
+            ));
         }
         // The full prose lives in the durable output file. The graph keeps its location for
         // downstream work instead of duplicating the report body in SQLite.

@@ -1773,7 +1773,7 @@ impl Tx<'_> {
     }
 
     /// `e` as it is, recorded as a refused delivery (`reject` mark with `code`) when it is a refusal.
-    fn refused(&self, item: &Item, s: &Session, code: &str, e: CoreError) -> CoreError {
+    pub(crate) fn refused(&self, item: &Item, s: &Session, code: &str, e: CoreError) -> CoreError {
         if let CoreError::Status(409, why) = &e {
             self.mark_reject(&item.workspace_id, &item.id, &Self::by(s), code, why);
         }
@@ -1808,9 +1808,8 @@ impl Tx<'_> {
                     crate::cycle::conflict("工作单元还有未完成步骤，不能交给下游"),
                 ));
             }
-            return self
-                .workflow_report(s, summary, outputs, checks, true)
-                .map_err(|e| self.refused(&item, s, reject::UNIT_EVIDENCE, e));
+            // its refusals are recorded where they happen, each with its reason
+            return self.workflow_report(s, summary, outputs, checks, true);
         }
         let blockers = self.workflow_blockers(item_id, true)?;
         if !blockers.is_empty() {

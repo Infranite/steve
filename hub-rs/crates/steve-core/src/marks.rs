@@ -29,8 +29,16 @@ pub(crate) fn release_value(outcome: &str, result: &Map<String, Value>) -> Optio
 pub mod reject {
     /// A work unit still has open steps.
     pub const UNIT_UNFINISHED: &str = "unit_unfinished";
-    /// A work unit's report did not meet the graph's evidence rules.
+    /// A work unit's report did not meet the graph's evidence rules (summary, outputs, unit checks,
+    /// an operated check for an integration).
     pub const UNIT_EVIDENCE: &str = "unit_evidence";
+    /// A work unit delivered while its work graph was paused.
+    pub const UNIT_PAUSED: &str = "unit_paused";
+    /// A work unit delivered with input still queued for its session.
+    pub const UNIT_QUEUED: &str = "unit_queued";
+    /// A work unit delivered on an attempt that no longer counts: it was replaced, or the item's goal
+    /// or cycle changed, or the item ended.
+    pub const UNIT_STALE: &str = "unit_stale";
     /// The item's work graph has units that still block it.
     pub const WORKFLOW_OPEN: &str = "workflow_open";
     /// The design confirmation needs a design file that opens and was received.

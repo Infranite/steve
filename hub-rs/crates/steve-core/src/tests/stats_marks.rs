@@ -386,3 +386,103 @@ fn waking_the_coordinator_marks_the_unit_its_status_and_attempt() {
         )]
     );
 }
+
+#[test]
+fn a_refused_unit_delivery_is_marked_with_the_check_that_refused_it() {
+    use crate::Output;
+    use crate::marks::reject;
+    use steve_store::UnitSpec;
+    let k = Kit::new();
+    k.rt.st().workflow_execution_ready = true;
+    let parent = k.item("run", "执行", None);
+    k.session(&parent, "idle");
+    let spec = |id: &str, bot: &str, kind: &str, deps: &[&str]| UnitSpec {
+        id: id.into(),
+        title: id.into(),
+        goal: format!("验证 {id}"),
+        bot_id: bot.into(),
+        kind: kind.into(),
+        depends_on: deps.iter().map(|s| (*s).into()).collect(),
+        resources: vec![],
+        required: true,
+    };
+    let units = vec![
+        spec("work", "dev", "work", &[]),
+        spec("review", "steve", "review", &["work"]),
+        spec("integrate", "dev", "integrate", &["review"]),
+    ];
+    k.core
+        .workflow_change(
+            &parent,
+            json!({"action":"plan","reason":"统计","expected_revision":0,
+                "units":units,"max_parallel":2,"max_attempts":3}),
+            "me",
+        )
+        .unwrap();
+    let graph = k.db().store().workflows().get(&parent).unwrap().unwrap();
+    let work = graph
+        .units
+        .into_iter()
+        .find(|u| u.spec.id == "work")
+        .unwrap();
+    let (child, sid) = (work.item_id.unwrap(), work.session_id.unwrap());
+    let s = k.db().session(&sid).unwrap().unwrap();
+    let output = || Output {
+        kind: "文件".into(),
+        title: "work".into(),
+        location: Some("work.txt".into()),
+        role: None,
+    };
+    let check = |scope: Option<&str>| Check {
+        name: "已检查".into(),
+        passed: true,
+        operated: false,
+        scope: scope.map(Into::into),
+    };
+    let refused = |outputs: &[Output], checks: &[Check]| {
+        assert!(
+            k.core
+                .tool_deliver(&s, "已验证", outputs, checks, &[])
+                .is_err()
+        );
+        of_kind(&k, &child, "reject")
+            .last()
+            .unwrap()
+            .0
+            .clone()
+            .unwrap()
+    };
+    assert_eq!(
+        refused(&[output()], &[check(Some("galaxy"))]),
+        reject::SCOPE
+    );
+    assert_eq!(refused(&[], &[check(None)]), reject::UNIT_EVIDENCE);
+    k.db().queue_add(&sid, "还有一句", "user", &[]).unwrap();
+    assert_eq!(refused(&[output()], &[check(None)]), reject::UNIT_QUEUED);
+    let revision = k
+        .db()
+        .store()
+        .workflows()
+        .get(&parent)
+        .unwrap()
+        .unwrap()
+        .revision;
+    k.core
+        .workflow_change(
+            &parent,
+            json!({"action":"pause","reason":"停止","expected_revision":revision}),
+            "me",
+        )
+        .unwrap();
+    assert_eq!(refused(&[output()], &[check(None)]), reject::UNIT_PAUSED);
+    // a failure report is the unit's own verdict: refused, but never a refused delivery
+    let before = of_kind(&k, &child, "reject").len();
+    assert!(
+        k.core
+            .tx()
+            .workflow_report(&s, "失败", &[], &[], false)
+            .is_err()
+    );
+    assert_eq!(of_kind(&k, &child, "reject").len(), before);
+    assert_eq!(before, 4);
+}
