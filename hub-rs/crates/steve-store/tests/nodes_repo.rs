@@ -126,49 +126,34 @@ fn node_capacity_is_persistent_owner_configuration_not_registration_state() {
 }
 
 #[test]
-fn a_nodes_own_choice_of_owner_context_overrides_the_workspace_setting() {
+fn a_nodes_own_choice_of_owner_context_overrides_the_hub_default() {
     let t = fresh();
-    let ws = steve_store::WS;
-    let set = |v: &str| {
-        let mut m = serde_json::Map::new();
-        m.insert("ownerContext".into(), serde_json::json!(v));
-        t.store.settings().set(ws, &m, "u1").unwrap();
-    };
     t.store
         .transaction::<_, StoreError>(|tx| {
             create_pairing(tx, "ctx", "u1", 1, 1000)?;
             claim_pairing(tx, "ctx", &node("n1", &[6; 32], "ctx-fp"), 2)?;
             assert_eq!(get(tx, "n1")?.unwrap().owner_context, None);
             // nothing set anywhere: on, the harness's own behavior
-            assert!(owner_context(tx, "n1", ws)?);
-            assert!(owner_context(tx, "unknown", ws)?);
-            Ok(())
-        })
-        .unwrap();
-    set("off");
-    t.store
-        .transaction::<_, StoreError>(|tx| {
-            assert!(!owner_context(tx, "n1", ws)?, "the workspace turned it off");
+            assert!(owner_context_default(tx)?);
+            assert!(owner_context(tx, "n1")?);
+            assert!(owner_context(tx, "unknown")?);
+            set_owner_context_default(tx, false, 3)?;
+            assert!(!owner_context(tx, "n1")?, "the Hub turned it off");
             assert!(
                 !set_owner_context(tx, "n1", "u2", Some(true))?,
                 "not theirs"
             );
             assert!(set_owner_context(tx, "n1", "u1", Some(true))?);
             assert_eq!(get(tx, "n1")?.unwrap().owner_context, Some(true));
-            assert!(owner_context(tx, "n1", ws)?, "the Node's own choice wins");
-            Ok(())
-        })
-        .unwrap();
-    set("on");
-    t.store
-        .transaction::<_, StoreError>(|tx| {
+            assert!(owner_context(tx, "n1")?, "the Node's own choice wins");
+            set_owner_context_default(tx, true, 4)?;
             assert!(set_owner_context(tx, "n1", "u1", Some(false))?);
             assert!(
-                !owner_context(tx, "n1", ws)?,
-                "off on this Node though on elsewhere"
+                !owner_context(tx, "n1")?,
+                "off on this Node though on by default"
             );
             assert!(set_owner_context(tx, "n1", "u1", None)?);
-            assert!(owner_context(tx, "n1", ws)?, "back to the workspace's");
+            assert!(owner_context(tx, "n1")?, "back to the Hub's default");
             revoke(tx, "n1", "u1", 4)?;
             assert!(!set_owner_context(tx, "n1", "u1", Some(false))?);
             Ok(())

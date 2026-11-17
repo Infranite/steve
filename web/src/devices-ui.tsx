@@ -73,3 +73,30 @@ export function Figure({ label, value, unit, fill, sub, title, ...rest }: { labe
     </div>
   )
 }
+
+/** a small line of recent values (no axes): a gap where a value is missing; `max` the top (at least the largest value) */
+export function Spark({ values, max, color, className, ...rest }: { values: (number | null)[]; max?: number; color: string; className?: string } & Data) {
+  const top = Math.max(max ?? 0, ...values.map((v) => v ?? 0)) || 1, n = values.length
+  let d = ""
+  values.forEach((v, i) => {
+    if (v == null || !Number.isFinite(v)) return
+    const x = n > 1 ? (i / (n - 1)) * 100 : 50, y = 2 + (1 - Math.min(1, Math.max(0, v) / top)) * 26
+    d += `${d && values[i - 1] != null ? "L" : "M"}${x.toFixed(2)},${y.toFixed(2)}`
+  })
+  return (
+    <svg viewBox="0 0 100 30" preserveAspectRatio="none" aria-hidden className={cn("block h-7 w-full overflow-visible", className)} {...rest}>
+      {d ? <path d={d} fill="none" stroke={color} strokeWidth="1.5" strokeLinejoin="round" vectorEffect="non-scaling-stroke" /> : <path d="M0,28 H100" stroke="var(--border)" strokeDasharray="2 3" vectorEffect="non-scaling-stroke" />}
+    </svg>
+  )
+}
+
+/** one line a card leads with: red for what went wrong, amber for what wants a step, blue for what is under way */
+export function Alert({ tone, children, action, ...rest }: { tone: "bad" | "warn" | "info"; children: ReactNode; action?: ReactNode } & Data) {
+  return (
+    <div role={tone === "bad" ? "alert" : "status"} className={cn("flex items-start gap-3 rounded-lg px-3 py-2 type-callout text-pretty [overflow-wrap:anywhere]",
+      tone === "bad" ? "bg-destructive/8 text-destructive" : tone === "warn" ? "bg-attention/10 text-attention" : "bg-blue/8 text-blue")} {...rest}>
+      <span className="min-w-0 flex-1">{children}</span>
+      {action && <span className="shrink-0">{action}</span>}
+    </div>
+  )
+}

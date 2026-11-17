@@ -189,3 +189,95 @@ export function clientKind(kind: string, platform = ""): ClientKind {
   if (kind === "cli") return "cli"
   return "other"
 }
+
+/** Rust's names of a system and an architecture (`node.host`), as people say them */
+const OS_NAMES: Record<string, string> = { macos: "macOS", linux: "Linux", windows: "Windows", freebsd: "FreeBSD" }
+const ARCH_NAMES: Record<string, string> = { aarch64: "arm64" }
+export type HostKind = "mac" | "linux" | "windows" | "other"
+export type HostFacts = { os: string | null; kind: HostKind; arch: string | null; cpus: number | null; memGb: number | null; hostname: string | null }
+/** What a Node's machine is: the host it reported (a remote Node, newer releases), else the Hub's device row for its own
+ *  machine; the cores and memory from the host, else from its last sample. Nothing is guessed from a name. */
+export function hostOf(v: NodeView, l?: RVitals["latest"] | null): HostFacts {
+  const h = v.node?.host
+  let os: string | null = null
+  if (h) {
+    const base = h.os_name || OS_NAMES[h.os] || h.os
+    os = h.os_version && !base.includes(h.os_version) ? `${base} ${h.os_version}` : base
+  } else if (v.local && v.device?.os) os = v.device.os
+  const said = `${h?.os ?? ""} ${os ?? ""}`
+  const kind: HostKind = /mac|darwin/i.test(said) ? "mac" : /linux|ubuntu|debian|fedora|centos|alpine|arch/i.test(said) ? "linux" : /windows/i.test(said) ? "windows" : "other"
+  const mem = h?.mem_total ?? l?.mem_total
+  return { os, kind, arch: h?.arch ? ARCH_NAMES[h.arch] ?? h.arch : null, cpus: h?.cpus ?? l?.cpus ?? null, memGb: mem ? gbOf(mem) : null, hostname: h?.hostname ?? null }
+}
+/** "macOS 26.1 · arm64 · 12 核 · 36 GB": what is known, in that order (a size the system line already names is not repeated) */
+export function hostLine(f: HostFacts): string {
+  const gb = f.memGb ? t("devices:vitals.gb", { n: f.memGb }) : ""
+  return [f.os, f.arch, f.cpus ? t("devices:hub.cores", { n: f.cpus }) : "", gb && !f.os?.includes(gb) ? gb : ""].filter(Boolean).join(" · ")
+}
+
+/** the route of the link a Node came in on, as the devices pages name it: the Hub's own is on this machine; tailcat and a
+ *  proxy by what they came through; otherwise where its machine is, a public one by whether it is HTTPS. Unknown: null. */
+export function linkRoute(v: NodeView): RouteKey | null {
+  if (v.local) return "local"
+  const l = v.node?.link
+  if (!l) return null
+  if (l.via === "tailcat") return "tailcat"
+  if (l.via === "proxy") return "proxy"
+  return ({ loopback: "local", lan: "lan", tailnet: "tailnet", public: l.tls ? "https" : "public" } as const)[l.route as "lan"] ?? null
+}
+/** the latest round trip to a remote Node in ms: its link's last call, else its last sample (none for the Hub's own) */
+export function rttOf(v: NodeView, l?: RVitals["latest"] | null): number | null {
+  if (v.local) return null
+  const ms = v.node?.link?.latency_ms ?? l?.rtt_ms
+  return ms == null || !Number.isFinite(ms) ? null : Math.round(ms)
+}
+
+/** the five steps of a Hub-managed upgrade, as the version card draws them */
+export const UPGRADE_STEPS = ["preparing", "staging", "draining", "switching", "linking"] as const
+const STEP_OF: Record<string, number> = { preparing: 0, staging: 1, staged: 2, draining: 2, switching: 3 }
+export type StepState = "done" | "active" | "todo" | "bad" | "back"
+export type UpgradeCard =
+  | { kind: "builtIn" } | { kind: "none" } | { kind: "devHub" } | { kind: "unknown" }
+  | { kind: "running"; run: RNodeUpgradeRun; steps: StepState[] }
+  | { kind: "offline"; last: string | null }
+  | { kind: "failed"; run: RNodeUpgradeRun; steps: StepState[] | null }
+  | { kind: "outdated"; from: string | null; to: string }
+  | { kind: "manual"; from: string | null; to: string; behind: boolean }
+  | { kind: "current"; last: RNodeUpgradeRun | null }
+
+/** What a Node's version card says, one of: built into the Hub; an upgrade under way (and its step); offline (its last
+ *  version); the last upgrade failed and it went back; behind and upgradable from here; upgraded only on its own machine;
+ *  on the Hub's build; or nothing to say (an older Hub, a development Hub, not asked yet). A failed run reads as in
+ *  nodeStatus. Only a rollback has a known failed step (the switch); for another failure no step is claimed. */
+export function upgradeCard(v: NodeView, hubVersion = ""): UpgradeCard {
+  if (v.local) return { kind: "builtIn" }
+  const u = v.node?.upgrade
+  if (!u) return { kind: "none" }
+  const latest = u.latest ?? null
+  if (latest && !SETTLED.has(latest.phase)) {
+    const at = STEP_OF[latest.phase] ?? 0
+    return { kind: "running", run: latest, steps: UPGRADE_STEPS.map((_, i) => (i < at ? "done" : i === at ? "active" : "todo")) }
+  }
+  if (!v.linked) return { kind: "offline", last: v.version ?? null }
+  if (latest && stillRolledBack(v, latest, hubVersion)) return { kind: "failed", run: latest, steps: latest.phase === "rolled_back" ? ["done", "done", "done", "bad", "back"] : null }
+  const to = hubVersion || u.build?.version || ""
+  if (u.reason === "outdated" && u.can) return { kind: "outdated", from: v.version ?? null, to }
+  if (u.reason === "manual") return { kind: "manual", from: v.version ?? null, to, behind: !!v.version && !!hubVersion && v.version !== hubVersion }
+  if (u.reason === "current") return { kind: "current", last: latest?.phase === "succeeded" ? latest : null }
+  return { kind: u.reason === "hub_dev_build" ? "devHub" : "unknown" }
+}
+
+export type NodeAlert = { tone: "bad" | "warn"; kind: "rolledBack" | "manual" | "outdated" | "pending" | "offline"; text: string }
+/** At most two lines a Node's card leads with, the one that must be dealt with first: what went wrong (an upgrade that
+ *  went back; a Node too far behind to upgrade from here), then what wants a step (behind and upgradable, a
+ *  fingerprint to confirm, offline). An upgrade under way is the status badge's to say. Nothing to say: none. */
+export function nodeAlerts(v: NodeView, hubVersion = "", now = Date.now()): NodeAlert[] {
+  const out: NodeAlert[] = []
+  const s = nodeStatus(v, hubVersion), card = upgradeCard(v, hubVersion)
+  if (s.kind === "rolledBack") out.push({ tone: "bad", kind: "rolledBack", text: t("devices:upgrade.failedTitle", { to: s.version ?? "", from: s.from ?? "" }) })
+  if (card.kind === "manual" && card.behind) out.push({ tone: "bad", kind: "manual", text: t("devices:card.manual", { v: card.from ?? "", hub: card.to }) })
+  if (s.kind === "pending") out.push({ tone: "warn", kind: "pending", text: t("devices:card.pending") })
+  if (s.kind === "offline") out.push({ tone: "warn", kind: "offline", text: v.linkError ? t("devices:card.offlineWhy", { ago: agoText(v.linkError.at, now), why: v.linkError.error }) : t("devices:node.offlineNote") })
+  if (card.kind === "outdated") out.push({ tone: "warn", kind: "outdated", text: t("devices:card.outdated", { v: card.from ?? "?", hub: card.to }) })
+  return out.slice(0, 2)
+}

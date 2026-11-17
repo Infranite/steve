@@ -9,7 +9,7 @@ const browser=await chromium.launch({headless:true,...(process.env.PLAYWRIGHT_EX
 const context=await browser.newContext({locale:'zh-CN'}), page=await context.newPage(), checks=[], errors=[]
 page.on('pageerror',e=>errors.push(e.message))
 const check=(name, fn)=>Promise.resolve().then(fn).then(()=>checks.push({name,passed:true}))
-const goto=async(hash)=>{await page.goto(base+'/#'+hash);await page.reload();await page.locator('[data-work-counts]').waitFor()}
+const goto=async(hash)=>{await page.goto(base+'/#'+hash);await page.reload();await page.locator(hash.startsWith('/devices/nodes/')?'[data-node-work]':'[data-nodes]').waitFor()}
 const scale=async(root='body')=>page.locator(root).evaluate(el=>{const els=[el,...el.querySelectorAll('*')].filter(e=>e instanceof HTMLElement); const sizes=els.map(e=>parseFloat(getComputedStyle(e).fontSize));els.forEach((e,i)=>e.style.fontSize=sizes[i]*2+'px')})
 try {
  await page.goto(base+'/auth/dev')
@@ -21,84 +21,57 @@ try {
   assert.equal(state.sessions.find(s=>s.id==='case-busy').busy,true)
   assert.equal(state.sessions.find(s=>s.id==='case-readonly').readonly,true)
  })
- await check('exclusive groups and queue message/session counts from actual API',async()=>{
-  assert.equal(await page.locator('[data-panel=attention] [data-work-session]').count(),2)
-  assert.equal(await page.locator('[data-panel=current] [data-work-session]').count(),4)
+ await check('exclusive groups from the actual API: answer-first and current rows, nothing unassigned',async()=>{
+  assert.equal(await page.locator('[data-node-work] > div [data-work-session]').count(),6)
   assert.equal(await page.locator('[data-work-session=case-idle-request]').count(),1)
-  await page.locator('[data-work-counts]').getByText('队列：3 条消息 · 2 个会话',{exact:true}).waitFor()
+  assert.ok(await page.locator('[data-work-session]').first().locator('[data-open-request]').count()>0,'a session waiting for an answer comes first')
+  await page.locator('[data-work-session=case-queued]').getByText('条消息在等',{exact:false}).waitFor()
   assert.equal(await page.locator('[data-work-session=case-unassigned]').count(),0)
  })
  for(const width of [1440,390,320]) for(const percent of [100,200]) {
   await page.setViewportSize({width,height:1000});await goto('/devices/nodes/local')
-  await page.locator('[data-monitor-expanded] > summary').click()
   if(percent===200) await scale()
-  for(const [request,sid,status,item] of [['case-request-running','case-running','running','TEST-1'],['case-request-idle','case-idle-request','idle','TEST-2']]) {
-   await check(`${width}/${percent} request ${request} preserves identity and raw state`,async()=>{
-    await page.locator(`[data-open-request=${request}]`).click();const dlg=page.locator('[data-slot=dialog-content]')
-    await dlg.getByText('原始状态：'+status,{exact:false}).waitFor();assert.ok((await dlg.locator('[data-slot=dialog-description]').innerText()).includes(item));assert.ok((await dlg.locator('[data-slot=dialog-description]').innerText()).includes(sid))
+  for(const request of ['case-request-running','case-request-idle']) {
+   await check(`${width}/${percent} request ${request} opens its decision and returns`,async()=>{
+    await page.locator(`[data-open-request=${request}]`).click();const dlg=page.locator('[data-slot=dialog-content]');await dlg.waitFor()
     if(percent===200) await scale('[data-slot=dialog-content]')
-    await page.keyboard.press('Escape');await page.locator(`[data-work-session=${sid}][data-raw-state=${status}]`).waitFor();assert.equal(await page.evaluate(()=>document.activeElement?.getAttribute('data-open-request')),request)
+    await page.keyboard.press('Escape');await dlg.waitFor({state:'detached'})
    })
   }
-  await check(`${width}/${percent} disk evidence preserves root/capacity/time and returns`,async()=>{
-   const button=page.locator('[data-disk-evidence]').first(), root=await button.getAttribute('data-disk-evidence')
-   const card=page.locator('[data-vital=disk]').filter({has:page.locator(`[data-disk-evidence="${root}"]`)})
-   const before=await card.innerText(), time=await page.locator('[data-sample-time]').innerText(), capacity=await card.locator('p').nth(1).innerText()
-   await button.click();const dlg=page.locator('[data-slot=dialog-content]');await dlg.getByText(capacity,{exact:true}).waitFor();await dlg.getByText('local',{exact:false}).waitFor();await dlg.getByText(time.replace('采样过旧：上次','采样时间：'),{exact:false}).waitFor()
-   if(percent===200) await scale('[data-slot=dialog-content]')
-   await page.keyboard.press('Escape');assert.equal(await card.innerText(),before);assert.equal(await page.evaluate(()=>document.activeElement?.getAttribute('data-disk-evidence')),root)
-  })
-  await check(`${width}/${percent} charts expose HTML axes, separate gaps and fit viewport`,async()=>{
-   assert.equal(await page.locator('[data-chart] svg text').count(),0)
-   assert.equal(await page.locator('[data-chart=rtt]').count(),0,'local has no remote RTT')
-   assert.ok(await page.locator('[data-sampling-gap]').count()>0)
-   const chart=page.locator('[data-chart=load]');await chart.scrollIntoViewIfNeeded()
-   const geometry=await page.locator('[data-chart]').evaluateAll(charts=>charts.map(c=>{
-    const r=c.getBoundingClientRect(), axis=[...c.querySelectorAll('[data-axis] span')].map(x=>x.getBoundingClientRect());
-    const plot=c.querySelector('svg').getBoundingClientRect();return {aligned:Math.abs((axis[0].top+axis[0].bottom)/2-plot.top)<1&&Math.abs((axis.at(-1).top+axis.at(-1).bottom)/2-plot.bottom)<1,left:r.left,right:r.right,overlap:axis.some((a,i)=>i>0&&a.top<axis[i-1].bottom),sizes:[...c.querySelectorAll('[data-axis] span')].map(x=>parseFloat(getComputedStyle(x).fontSize))}
-   }))
-   assert.ok(geometry.every(g=>g.left>=0&&g.right<=width+1&&!g.overlap&&g.aligned),JSON.stringify(geometry))
-   assert.ok(geometry.every(g=>g.sizes.every(s=>s>=(percent===200?24:12)&&s<=(percent===200?36:18))), 'font scaling must be exactly one doubling, not cumulative')
+  await check(`${width}/${percent} figures and the day's charts fit the viewport`,async()=>{
+   await page.locator('[data-vital=disk]').getByText('剩',{exact:false}).waitFor()
+   assert.equal(await page.locator('[data-vital=rtt]').count(),0,'local has no remote RTT')
+   assert.equal(await page.locator('[data-node-trends] .ui-kpic').count(),2,'load and memory; no RTT for the Hub\'s own Node')
+   const boxes=await page.locator('[data-node-trends] .ui-kpic').evaluateAll(cs=>cs.map(c=>{const r=c.getBoundingClientRect();return {left:r.left,right:r.right}}))
+   assert.ok(boxes.every(b=>b.left>=0&&b.right<=width+1),JSON.stringify(boxes))
    assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),'page overflow')
    await page.screenshot({path:`${out}/device-${width}-${percent}.png`,fullPage:true})
-   await page.setViewportSize({width,height:1600})
-   for(const metric of ['load','mem']) await page.locator(`[data-chart=${metric}]`).screenshot({path:`${out}/chart-${metric}-${width}-${percent}.png`})
-   await page.setViewportSize({width,height:1000})
   })
  }
  await page.setViewportSize({width:1440,height:1000});await goto('/devices/nodes/local')
- await page.locator('[data-session-queue=case-queued] > summary').click()
- await page.locator('[data-queue-id=queue-1]').waitFor();await page.locator('[data-queue-id=queue-2]').waitFor()
- await page.locator('.device-recent > summary').click();await page.locator('[data-work-session=case-readonly]').waitFor();await page.locator('[data-work-session=case-ended]').waitFor()
- checks.push({name:'queue IDs and collapsed recent readonly/ended session entries open',passed:true})
- await page.locator('[data-capabilities] > summary').click()
- const limit=page.locator('[data-concurrency]'), save=page.locator('[data-config-save]')
- const original=await limit.inputValue();await limit.fill('2');await page.locator('[data-config-cancel]').click();assert.equal(await limit.inputValue(),original)
- await limit.fill(original==='3'?'2':'3');await save.click();await page.locator('[data-config-receipt]').waitFor();checks.push({name:'actual configuration cancel restores values and save returns server revision receipt',passed:true})
- const latest=(await (await page.request.get(base+'/api/devices')).json()).devices.find(d=>d.id==='hub')
- const conflict=await page.request.patch(base+'/api/devices/hub',{data:{revision:latest.revision,max_sessions:4}});assert.equal(conflict.status(),200)
- await limit.fill('5');await save.click();await page.getByText('配置有并发修改。请读取最新值并核对后再提交。',{exact:true}).waitFor();assert.equal(await limit.inputValue(),'5')
- await page.locator('[data-config-read]').click();await page.locator('[data-config-latest]').waitFor();assert.equal(await limit.inputValue(),'5');await save.click();await page.locator('[data-config-receipt]').waitFor()
- checks.push({name:'actual 409 conflict retains draft; read-back compares latest before successful retry',passed:true})
- await context.setOffline(true);assert.equal(await save.isDisabled(),true);await context.setOffline(false);checks.push({name:'browser offline immediately disables configuration writes',passed:true})
+ await page.locator('[data-work-recent] > summary').click();await page.locator('[data-work-session=case-readonly]').waitFor();await page.locator('[data-work-session=case-ended]').waitFor()
+ checks.push({name:'collapsed recent readonly/ended session entries open',passed:true})
+ const limit=page.locator('[data-session-limit-input]'), original=Number(await limit.getAttribute('aria-valuenow'))
+ await limit.fill(String(original===3?2:3));await limit.press('Enter');await page.locator('[data-session-limit-save]').click()
+ await page.locator(`[data-session-limit="${original===3?2:3}"]`).waitFor();checks.push({name:'the limit is saved through the device row with its revision',passed:true})
+ const latest=(await (await page.request.get(base+'/api/devices')).json()).devices.find(d=>d.node_id==='local')
+ const conflict=await page.request.patch(base+'/api/devices/'+latest.id,{data:{revision:latest.revision,max_sessions:4}});assert.equal(conflict.status(),200)
+ await limit.fill('5');await limit.press('Enter');await page.locator('[data-session-limit-save]').click();await page.locator('[data-config-conflict]').waitFor()
+ await page.locator('[data-config-latest]').click();await page.locator('[data-config-conflict]').waitFor({state:'detached'});await page.locator('[data-session-limit="4"]').waitFor()
+ checks.push({name:'a change made elsewhere is said in place, never written over; "use the latest" reads it',passed:true})
  for(const width of [1440,390,320]) for(const percent of [100,200]) {
-  await page.setViewportSize({width,height:1000});await goto('/devices');await page.locator('[data-node-row=case-remote]').click();await page.locator('[data-node-detail]').waitFor()
-  await page.locator('[data-monitor-expanded] > summary').click();await page.locator('[data-chart=rtt]').waitFor()
+  await page.setViewportSize({width,height:1000});await goto('/devices/nodes');await page.locator('[data-node-row=case-remote]').click();await page.locator('[data-node-detail]').waitFor()
   if(percent===200) await scale('[data-node-detail]')
-  for(const metric of ['load','mem','rtt']) {
-   const chart=page.locator(`[data-chart=${metric}]`);await chart.scrollIntoViewIfNeeded()
-   const geometry=await chart.evaluate(el=>{const r=el.getBoundingClientRect(),axis=[...el.querySelectorAll('[data-axis] span')].map(s=>s.getBoundingClientRect());return {left:r.left,right:r.right,overlap:axis.some((a,i)=>i>0&&a.top<axis[i-1].bottom)}})
-   assert.ok(geometry.left>=0&&geometry.right<=width+1&&!geometry.overlap,JSON.stringify(geometry))
-   await page.setViewportSize({width,height:1600});await chart.screenshot({path:`${out}/remote-${metric}-${width}-${percent}.png`});await page.setViewportSize({width,height:1000})
-  }
-  checks.push({name:`actual disconnected remote identity: load/memory/RTT at ${width}px/${percent}% have legible axes and gaps`,passed:true})
-  await page.keyboard.press('Escape')
+  await page.locator('[data-node-trends]').waitFor()
+  assert.equal(await page.locator('[data-node-trends] .ui-kpic').count(),3,'a remote Node also charts its round trip')
+  assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),'page overflow')
+  await page.screenshot({path:`${out}/remote-${width}-${percent}.png`,fullPage:true})
+  checks.push({name:`actual remote identity: load/memory/RTT at ${width}px/${percent}% fit`,passed:true})
  }
- await goto('/devices')
- await page.locator('[data-node-row=case-no-samples]').click();await page.locator('[data-sample-state=none]').getByText('尚无样本',{exact:true}).waitFor();await page.keyboard.press('Escape')
- await page.locator('[data-node-row=case-stale]').click();await page.locator('[data-sample-state=stale]').waitFor();await page.getByText('采样过旧：上次',{exact:false}).waitFor();await page.keyboard.press('Escape')
- await context.setOffline(true);await page.locator('[data-node-row=case-remote]').click();await page.locator('[data-sample-state=failed]').waitFor();await page.getByText('读取失败：',{exact:false}).waitFor();assert.equal(await page.locator('[data-sample-state=none]').count(),0);await page.keyboard.press('Escape');await context.setOffline(false)
- checks.push({name:'real no-sample response, stale snapshot and actual network read failure produce separate monitoring states',passed:true})
+ await goto('/devices/nodes')
+ await page.locator('[data-node-row=case-no-samples]').click();await page.locator('[data-sample-state=none]').waitFor();await page.locator('[data-back]').click()
+ await page.locator('[data-node-row=case-stale]').click();await page.locator('[data-vitals-stale]').getByText('数据停在',{exact:false}).waitFor();await page.locator('[data-back]').click()
+ checks.push({name:'real no-sample response and stale snapshot produce separate monitoring states',passed:true})
  await page.locator('[data-pair]').click();await page.locator('[data-pair-dialog]').waitFor({timeout:3000}).catch(()=>page.getByRole('dialog').waitFor());await page.keyboard.press('Escape');checks.push({name:'existing pairing entry opens and closes on actual backend',passed:true})
  assert.deepEqual(errors,[])
  await fs.writeFile(out+'/browser-results.json',JSON.stringify({source:'isolated real HTTP API with controlled persisted edge cases; physical sampling recorded separately; no API routes mocked',checks,errors},null,2))

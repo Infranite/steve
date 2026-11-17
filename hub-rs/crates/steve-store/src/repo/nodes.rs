@@ -25,7 +25,7 @@ pub struct NodeRow {
     /// How many sessions it runs at once, as its owner set it ([`crate::runtime::session_room`]).
     pub max_sessions: i64,
     /// Whether its owner's sessions load the owner's personal harness configuration on this
-    /// machine ([`set_owner_context`]); `None` follows the workspace's `ownerContext` setting.
+    /// machine ([`set_owner_context`]); `None` follows the Hub's default ([`owner_context_default`]).
     pub owner_context: Option<bool>,
     /// `auto` | `notify` | `off`, as its owner set it; `None`: the Hub's default
     /// ([`upgrade_default`]).
@@ -193,7 +193,7 @@ pub fn set_max_sessions(tx: &Tx<'_>, node_id: &str, owner: &str, n: i64) -> Resu
 }
 
 /// The owner chooses whether their sessions on their Node load their personal harness
-/// configuration there (`None`: as the workspace's setting says). Any of their Nodes, the Hub's own
+/// configuration there (`None`: as the Hub's default says). Any of their Nodes, the Hub's own
 /// included. False: not theirs, or revoked.
 pub fn set_owner_context(
     tx: &Tx<'_>,
@@ -208,9 +208,13 @@ pub fn set_owner_context(
     told(tx, node_id, n)
 }
 
+/// The setting that holds the Hub's default for every Node without a choice of its own (`on` |
+/// `off`); it was each workspace's `ownerContext` setting until migration 095 moved it here.
+const OWNER_CONTEXT_DEFAULT_KEY: &str = "node.owner_context";
+
 /// Whether a session of `node`'s owner there loads the owner's personal harness configuration:
-/// the Node's own choice, else the workspace's `ownerContext` setting (on unless it is `off`).
-pub fn owner_context(c: &Connection, node: &str, ws: &str) -> Result<bool> {
+/// the Node's own choice, else the Hub's default ([`owner_context_default`]).
+pub fn owner_context(c: &Connection, node: &str) -> Result<bool> {
     let own: Option<Option<i64>> = c
         .query_row(
             "SELECT owner_context FROM nodes WHERE node_id=?",
@@ -218,20 +222,31 @@ pub fn owner_context(c: &Connection, node: &str, ws: &str) -> Result<bool> {
             |r| r.get(0),
         )
         .optional()?;
-    if let Some(Some(v)) = own {
-        return Ok(v != 0);
+    match own {
+        Some(Some(v)) => Ok(v != 0),
+        _ => owner_context_default(c),
     }
-    let set: Option<String> = c
+}
+
+/// The Hub's default for Nodes without their own choice: on unless the owner turned it off.
+pub fn owner_context_default(c: &Connection) -> Result<bool> {
+    let v: Option<String> = c
         .query_row(
-            "SELECT value FROM settings WHERE workspace_id=? AND key='ownerContext'",
-            [ws],
+            "SELECT value FROM settings WHERE workspace_id='default' AND key=?",
+            [OWNER_CONTEXT_DEFAULT_KEY],
             |r| r.get(0),
         )
         .optional()?;
-    Ok(set
-        .and_then(|v| serde_json::from_str::<String>(&v).ok())
-        .as_deref()
-        != Some("off"))
+    Ok(v.as_deref() != Some("off"))
+}
+
+pub fn set_owner_context_default(tx: &Tx<'_>, on: bool, now: i64) -> Result<()> {
+    tx.execute(
+        "INSERT INTO settings(workspace_id,key,value,updated) VALUES ('default',?1,?2,?3)
+         ON CONFLICT(workspace_id,key) DO UPDATE SET value=excluded.value, updated=excluded.updated",
+        params![OWNER_CONTEXT_DEFAULT_KEY, if on { "on" } else { "off" }, now],
+    )?;
+    Ok(())
 }
 
 /// What the Hub does when a Node runs another build than the Hub: upgrade it (`auto`), say so
@@ -406,6 +421,21 @@ pub fn upgrade_phase(
         }
     }
     Ok(n == 1)
+}
+
+/// Marks an unfinished upgrade as forced (its owner asked to switch it now).
+pub fn upgrade_force(tx: &Tx<'_>, operation_id: &str) -> Result<bool> {
+    Ok(tx.execute(
+        &format!(
+            "UPDATE node_upgrades SET force=1 WHERE operation_id=?1 AND phase NOT IN ({})",
+            UPGRADE_DONE
+                .iter()
+                .map(|p| format!("'{p}'"))
+                .collect::<Vec<_>>()
+                .join(",")
+        ),
+        params![operation_id],
+    )? == 1)
 }
 
 pub fn upgrade_get(c: &Connection, operation_id: &str) -> Result<Option<UpgradeRow>> {

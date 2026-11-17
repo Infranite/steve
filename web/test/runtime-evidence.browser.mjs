@@ -62,7 +62,6 @@ const open = async (rows, lang = "zh-CN", width = 375) => {
   f.errors = []; page.on("pageerror", e => f.errors.push(e.message))
   await page.addInitScript(lang => { localStorage.setItem("steve-lang", lang); localStorage.setItem("steve-onboarded", "1") }, lang)
   await page.goto(base + "/#/devices/nodes/local")
-  await page.locator("[data-capabilities]").evaluate(el => { el.open = true })
   await page.locator("[data-runtime]").first().waitFor()
   f.page = page
   return f

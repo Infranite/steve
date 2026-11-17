@@ -331,8 +331,9 @@ export default {
     handoffOff: "不换会话",
     archDays: "完成后自动归档",
     archDaysSub: "完成或放弃的事项过了这么久移到“已归档”",
-    ownerContext: "加载本机个人配置",
-    ownerContextSub: "agent 默认像原生一样加载所在设备主人的个人全局配置（用户级 AGENTS.md / CLAUDE.md、技能、子代理、命令）。关闭后只加载项目自己的文件和 Steve 注入的内容，让各设备行为一致。可在设备页为单台设备单独设置；对新会话生效",
+    ownerContext: "个人 agent 配置",
+    ownerContextSub: "agent 是否加载 Node 主人的个人全局配置（用户级 AGENTS.md / CLAUDE.md、技能、子代理、命令）由整个 Hub 统一设置，每台 Node 可单独选择，因为一台 Node 为所有工作空间服务。",
+    ownerContextOpen: "在设备页设置",
     archNever: "不自动归档",
   },
   notify: {

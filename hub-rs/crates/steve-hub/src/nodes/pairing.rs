@@ -471,7 +471,7 @@ pub struct RenameBody {
     #[serde(default)]
     max_sessions: Option<i64>,
     /// `context`: whether the owner's sessions on the Node load the owner's personal harness
-    /// configuration there: `on`, `off`, or `inherit` (the workspace's setting).
+    /// configuration there: `on`, `off`, or `inherit` (the Hub's default, `/api/node-context`).
     #[serde(default)]
     owner_context: Option<String>,
     /// `upgrade_policy`: `auto` | `notify` | `off`, or empty for the Hub's default.

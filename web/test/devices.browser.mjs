@@ -7,7 +7,11 @@ const base = process.env.STEVE_TEST_WEB || "http://127.0.0.1:5198"
 const page = await browser.newPage({ locale: "zh-CN", viewport: { width: 1360, height: 980 } })
 const errors = [], writes = []
 page.on("pageerror", e => errors.push(e.message))
-const remote = { node_id: "fixture-remote", name: "Remote laptop", fingerprint: "9e3f5a07c21b84d60f9a77e3b10c4d52", state: "active", linked: true, local: false, max_sessions: 32, running: 32, waiting: 2, last_seen: Date.now() - 60_000 }
+const remote = { node_id: "fixture-remote", name: "Remote laptop", fingerprint: "9e3f5a07c21b84d60f9a77e3b10c4d52", state: "active", linked: true, local: false, max_sessions: 32, running: 32, waiting: 2, last_seen: Date.now() - 60_000,
+  host: { os: "macos", os_version: "26.1", arch: "aarch64", cpus: 12, mem_total: 36 * 2 ** 30 }, link: { route: "loopback", via: "tailcat", tls: false, since: 0, latency_ms: 38.2, latency_at: Date.now() },
+  upgrade: { build: { version: "0.2.112", commit: "abc", target: "x" }, policy: "notify", own_policy: null, can: false, reason: "current", latest: null } }
+const sample = { at: Date.now() - 20_000, cpus: 12, load: [6, 5, 4], mem_total: 36 * 2 ** 30, mem_available: 18 * 2 ** 30, rtt_ms: 38 }
+const vitals = { "fixture-remote": { sampling: { interval_ms: 60_000, stale_after_ms: 180_000, now: Date.now() }, latest: sample, series: [{ at: Date.now() - 120_000, load: 0.4, mem: 0.5, rtt: 40 }, { at: Date.now() - 60_000, load: null, mem: 0.5, rtt: 38 }, { at: Date.now() - 20_000, load: 0.5, mem: 0.5, rtt: 38 }] } }
 let nodes = [{ ...remote }, { ...remote }, { ...remote, node_id: "fixture-local", local: true }]
 let status = 200, release, reads = 0
 const held = new Promise(resolve => { release = resolve })
@@ -24,6 +28,7 @@ await page.route("**/*", async route => {
     nodes = nodes.map(n => n.node_id === remote.node_id ? { ...n, max_sessions } : n)
     return json(route, { ok: true })
   }
+  if (url.pathname === "/api/nodes/fixture-remote/upgrade/switch" && request.method() === "POST") return json(route, { operation: "nup_fixture" }, 202)
   if (url.pathname === "/api/nodes/fixture-remote/pause" && request.method() === "POST") {
     nodes = nodes.map(n => n.node_id === remote.node_id ? { ...n, state: "paused" } : n)
     return json(route, { ok: true })
@@ -34,8 +39,11 @@ await page.route("**/*", async route => {
     if (hold) await held
     return json(route, status === 200 ? { nodes } : { error: "fixture: node list unavailable" }, status)
   }
+  if (url.pathname === "/api/vitals") return json(route, { nodes: vitals })
+  if (url.pathname === "/api/nodes/upgrade-default") return json(route, { policy: "notify", hub: { version: "0.2.112", commit: "abc", target: "x" }, drain_secs: 1800, health_secs: 180 })
+  if (url.pathname === "/api/node-context") return json(route, { owner_context: "off" })
   if (url.pathname === "/api/access") return json(route, { tokens: [], clients: [{ id: "c1", kind: "web", name: "This browser", platform: "macOS", version: "x", origin: null, created: 0, last_seen: Date.now(), last_route: "lan", last_ip: null, revoked: null }], current: "c1", route: "lan", hub: { version: "0.2.112" } })
-  // OwnerChip's contacts probe, vitals and the device rows are deliberately not wired in this fixture.
+  // OwnerChip's contacts probe and the device rows are deliberately not wired in this fixture.
   return json(route, {}, 404)
 })
 const row = () => page.locator('[data-node-row="fixture-remote"]')
@@ -53,12 +61,22 @@ try {
   await page.locator('[data-seg="nodes"][data-warn]').waitFor()
   await row().locator("[data-node-status=queued]").getByText("排队 2", { exact: true }).waitFor()
   assert.equal(await page.getByText("全部在 Hub", { exact: true }).count(), 0)
+  // a card: its machine as the Node reported it, CPU load over its cores, the round trip and route, sessions against the limit
+  await row().locator("[data-node-host]").getByText("macOS 26.1 · arm64 · 12 核 · 36 GB", { exact: true }).waitFor()
+  await row().locator('[data-metric="cpu"]').getByText("50%", { exact: true }).waitFor()
+  assert.match(await row().locator('[data-metric="rtt"]').innerText(), /38\s*ms[\s\S]*tailcat/)
+  assert.match(await row().locator('[data-metric="sessions"]').innerText(), /32\s*\/ 32[\s\S]*2 个在排队/)
+  assert.equal(await row().locator("[data-node-alert]").count(), 0, "a Node with nothing to do shows no alert line")
 
   await row().click()
   await page.waitForFunction(() => location.hash === "#/devices/nodes/fixture-remote")
   const detail = page.locator("[data-node-detail]")
   await detail.locator(`[data-node-fingerprint="${remote.fingerprint}"]`).getByText("9e3f 5a07 c21b 84d6 0f9a 77e3 b10c 4d52", { exact: true }).waitFor()
   await detail.getByText("最近连接", { exact: true }).waitFor()
+  await page.locator("[data-node-sub]").getByText("经 tailcat 连到 Hub", { exact: true }).waitFor()
+  await detail.locator('[data-node-upgrade="current"]').getByText("与 Hub 一致", { exact: true }).waitFor()
+  await detail.locator('[data-node-owner-context="inherit"]').getByText("跟随 Hub 默认（不加载）", { exact: true }).waitFor()
+  await detail.locator("[data-node-trends]").waitFor()
   assert.equal(await detail.getByText("Hub-only harness", { exact: true }).count(), 0)
   assert.equal(await detail.locator("[data-owner-chip]").count(), 0)
   assert.deepEqual(writes, [], "inventory and identity inspection never mutate pairing or permissions")
@@ -82,6 +100,18 @@ try {
     }
   }
   await page.setViewportSize({ width: 1360, height: 980 }); await page.evaluate(() => document.documentElement.classList.remove("dark"))
+  // an upgrade waiting for running sessions: "switch now" asks that upgrade to stop waiting, never starts a second one
+  const draining = { operation_id: "nup_fixture", version: "0.2.113", from_version: "0.2.112", phase: "draining", error: null, requested_by: "owner", force: false, created: Date.now() - 60_000, updated: Date.now() - 10_000 }
+  nodes = nodes.map(n => n.node_id === remote.node_id ? { ...n, upgrade: { ...n.upgrade, can: false, reason: "busy", latest: draining } } : n)
+  await reread()
+  await detail.locator('[data-node-upgrade="running"] [data-upgrade-drain]').waitFor()
+  await detail.locator("[data-node-upgrade-switch]").getByText("立即切换（中断 32 个会话）", { exact: true }).click()
+  for (let i = 0; i < 100 && writes.at(-1) !== "POST /api/nodes/fixture-remote/upgrade/switch"; i++) await page.waitForTimeout(50)
+  assert.deepEqual(writes.slice(-1), ["POST /api/nodes/fixture-remote/upgrade/switch"])
+  assert.ok(!writes.includes("POST /api/nodes/fixture-remote/upgrade"), "switch now does not start another upgrade")
+  nodes = nodes.map(n => n.node_id === remote.node_id ? { ...n, upgrade: remote.upgrade } : n)
+  await reread()
+  await detail.locator('[data-node-upgrade="current"]').waitFor()
   await page.locator("[data-node-pause=active]").click()
   await page.locator("[data-node-pause=paused]").waitFor()
   assert.deepEqual(writes.slice(-1), ["POST /api/nodes/fixture-remote/pause"], "stopping new work is the owner's explicit action")
