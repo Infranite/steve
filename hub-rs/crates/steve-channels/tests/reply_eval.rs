@@ -553,3 +553,39 @@ fn nothing_to_answer_is_replayed_before_any_model() {
     assert_eq!(gated[0].outcome, "skip");
     assert_eq!(why[0].gate.as_deref(), Some("no_content"));
 }
+
+#[test]
+fn the_judge_sees_the_card_the_owner_would_see() {
+    let c = case("fx-10-schedule");
+    let new = Output {
+        case_id: c.case_id.clone(),
+        outcome: "ask_owner".into(),
+        code: "commitment".into(),
+        summary: "F 想约周四下午半小时聊方案".into(),
+        draft: "周四下午可以".into(),
+        text: "要不要答应？".into(),
+        ..Output::default()
+    };
+    let shown = re::card_shown(&c, &new);
+    assert!(
+        shown.contains("找你：F 想约周四下午半小时聊方案"),
+        "{shown}"
+    );
+    assert!(shown.contains("为什么要你："), "{shown}");
+    assert!(shown.contains("→ F："), "{shown}");
+    assert!(shown.ends_with("可以直接发的草稿：周四下午可以"), "{shown}");
+    assert!(
+        !shown.contains("要不要答应"),
+        "never the model's own question: {shown}"
+    );
+    // an answer from before the summary: the card as it was then
+    let old = Output {
+        summary: String::new(),
+        code: String::new(),
+        draft: String::new(),
+        ..new
+    };
+    let shown = re::card_shown(&c, &old);
+    assert!(shown.contains("Steve 想先问你：要不要答应？"), "{shown}");
+    assert!(re::judge_prompt(&c, &old, None, 10).contains("主人看到的卡片"));
+}

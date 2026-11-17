@@ -130,9 +130,9 @@ needs_commitment：回复里替主人答应了事情（去查、去做、给时�
 /// On your own account, before the output format: when to answer, say nothing or ask
 /// ([`crate::decide`]; code checks the answer again, [`crate::decide::settle`]).
 pub const H_DECIDE: &str = "【回不回】";
-pub const DECIDE_RULES: &str = "- 拿不准就 skip：玩笑、抬杠、反驳、感叹、寒暄、只是告知、转发的卡片没附问题、球在对方那边（我刚把东西或答案给了他）、闲聊群里没完全看懂的，都 skip。
+pub const DECIDE_RULES: &str = "- ask_owner 只用在三种情况，reason 必须是其中之一：commitment（回这条就得替我答应事情：去查、去做、给时间或结果、花钱、删除、隐私、人际关系）；owner_fact（直接问我、要只有我知道的情况或判断）；substantive（直接发给我的实质性长消息，比如分析、方案、数据，即使没有提问也要我自己看）。owner_fact 和 substantive 只在这条是对我说的时候才用。
 - reply 只用在：直接问我或请我做事，而且答案能从上面的对话和我说过的话里得出；或者一句自然的短回应就够。
-- ask_owner 只用在三种情况，reason 必须是 commitment、owner_fact 或 substantive；owner_fact 和 substantive 只在这条是对我说的时候才用。
+- 其他都 skip，拿不准也 skip：玩笑、抬杠、反驳、感叹、寒暄、简短的告知、转发的卡片没附问题、球在对方那边（我刚把东西或答案给了他）、闲聊群里没完全看懂的。
 - 不问我说过什么、在说什么：这些对话里都看得到；也不要把自己看不懂写成问题。
 - need_context 只在这条明显接着一段上面看不到的对话时用。";
 

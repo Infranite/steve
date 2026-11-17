@@ -1134,14 +1134,16 @@ pub fn judge_prompt(case: &Case, out: &Output, style: Option<&Style>, history: u
             s.question_rate * 100.0
         ));
     }
+    let shown = if out.outcome == "ask_owner" {
+        format!("主人看到的卡片：\n{}", card_shown(case, out))
+    } else if out.text.trim().is_empty() {
+        "（无正文）".to_string()
+    } else {
+        out.text.trim().to_string()
+    };
     p.push_str(&format!(
-        "\n【助手的结果】outcome={}\n{}\n\n",
-        out.outcome,
-        if out.text.trim().is_empty() {
-            "（无正文）"
-        } else {
-            out.text.trim()
-        }
+        "\n【助手的结果】outcome={}\n{shown}\n\n",
+        out.outcome
     ));
     p.push_str(
         "逐项评估，只回答 JSON：{\"understanding\": true/false, \"understanding_why\": \"它是否读懂了谁在对谁说、在接哪句、指的是什么\", \
@@ -1149,6 +1151,90 @@ pub fn judge_prompt(case: &Case, out: &Output, style: Option<&Style>, history: u
 \"card_answerable\": true/false 或 null（只在 outcome=ask_owner 时：主人只看这张卡能不能直接做决定）, \"note\": \"一句话\"}",
     );
     p
+}
+
+/// The card the owner would see for a question to them ([`crate::decide::card_question`]): with the
+/// answer's summary, reason and candidate draft, the case's last lines with the owner's marked “我”.
+/// An answer without them (the replay of an earlier version, or what Steve did then) is shown as the
+/// card was before: the message cut at 60 characters and Steve's question under it.
+pub fn card_shown(case: &Case, out: &Output) -> String {
+    use crate::context::Why;
+    use crate::decide::{self, Card, Reason, flat};
+    let t = &case.message;
+    let space = if case.space.is_dm {
+        "私聊".to_string()
+    } else {
+        case.space.name.clone()
+    };
+    if out.summary.trim().is_empty() && out.code.trim().is_empty() && out.draft.trim().is_empty() {
+        let mut q = format!(
+            "「{space}」里 {} 找你：{}",
+            t.sender,
+            flat(t.text.as_deref().unwrap_or_default(), 60)
+        );
+        if !out.text.trim().is_empty() {
+            q.push_str(&format!("\nSteve 想先问你：{}", flat(&out.text, 60)));
+        }
+        return q;
+    }
+    let card = Card {
+        summary: if out.summary.trim().is_empty() {
+            t.text.clone().unwrap_or_default()
+        } else {
+            out.summary.clone()
+        },
+        reason: Reason::parse(&out.code).unwrap_or(Reason::OwnerFact),
+        note: (out.code == Reason::Voice.code()).then(|| out.reason.clone()),
+        draft: out.draft.clone(),
+        starred: false,
+    };
+    let facts = json!({
+        "dm": t.facts.dm.unwrap_or(case.space.is_dm),
+        "mentioned": t.facts.mentioned.unwrap_or(t.mentions_owner),
+        "reply_to_me": t.facts.reply_to_me.unwrap_or(false),
+    });
+    let at = millis(&t.time);
+    let mut before: Vec<&Line> = case
+        .previous_space_messages
+        .iter()
+        .filter(|l| l.id != t.id && !l.is_steve_sent)
+        .filter(|l| matches!((millis(&l.time), at), (Some(x), Some(a)) if x <= a))
+        .filter(|l| l.text.as_deref().is_some_and(|x| !x.is_empty()))
+        .collect();
+    before.sort_by_key(|l| millis(&l.time).unwrap_or(i64::MIN));
+    let who = |l: &Line| {
+        if l.is_owner {
+            "我".to_string()
+        } else {
+            l.sender.clone()
+        }
+    };
+    let mut lines: Vec<String> = before[before.len().saturating_sub(decide::EXCERPT_MAX - 1)..]
+        .iter()
+        .map(|l| {
+            format!(
+                "- {}：{}",
+                who(l),
+                flat(
+                    l.text.as_deref().unwrap_or_default(),
+                    decide::EXCERPT_LINE_MAX
+                )
+            )
+        })
+        .collect();
+    lines.push(format!(
+        "→ {}：{}",
+        t.sender,
+        flat(
+            t.text.as_deref().unwrap_or_default(),
+            decide::EXCERPT_LINE_MAX
+        )
+    ));
+    let mut q = decide::card_question(&space, &t.sender, &card, Why::of(&facts, false), &lines);
+    if !card.draft.trim().is_empty() {
+        q.push_str(&format!("\n可以直接发的草稿：{}", card.draft.trim()));
+    }
+    q
 }
 
 /// The judge's verdict on one answer.
