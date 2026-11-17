@@ -293,7 +293,12 @@ fn status(h: &H, id: &str) -> String {
 /// Your own message stored by another way in (another device's connection), so nothing reacts to it
 /// when it lands: only the later gates can see it.
 fn you_said_elsewhere(h: &H, space_ext: &str, secs: i64) {
-    let now = h.ch.now() + secs * 1000;
+    your_line_in(h, space_ext)(h.ch.now() + secs * 1000);
+}
+
+/// [`you_said_elsewhere`] as a closure that stores your line with the time it is given (to run while
+/// the composer “thinks”).
+fn your_line_in(h: &H, space_ext: &str) -> impl Fn(i64) + Send + 'static {
     let space: String = row(
         h,
         "SELECT id FROM spaces WHERE external_id = ?",
@@ -310,26 +315,28 @@ fn you_said_elsewhere(h: &H, space_ext: &str, secs: i64) {
     .as_str()
     .unwrap()
     .into();
-    h.env
-        .store()
-        .with_conn(|c| {
-            c.execute(
-                "INSERT INTO chan_messages (id, workspace_id, space_id, external_id, direction, sender_account_id,
-                    sender_party_id, text, status, created)
-                 VALUES (?, ?, ?, ?, 'in', ?, ?, '我来吧', 'received', ?)",
-                rusqlite::params![
-                    steve_store::uid("cm"),
-                    WS,
-                    space,
-                    format!("elsewhere_{now}"),
-                    h.my_account,
-                    party,
-                    now
-                ],
-            )?;
-            Ok(())
-        })
-        .expect("your message");
+    let (store, account) = (h.env.store().clone(), h.my_account.clone());
+    move |now| {
+        store
+            .with_conn(|c| {
+                c.execute(
+                    "INSERT INTO chan_messages (id, workspace_id, space_id, external_id, direction, sender_account_id,
+                        sender_party_id, text, status, created)
+                     VALUES (?, ?, ?, ?, 'in', ?, ?, '我来吧', 'received', ?)",
+                    rusqlite::params![
+                        steve_store::uid("cm"),
+                        WS,
+                        space,
+                        format!("elsewhere_{now}"),
+                        account,
+                        party,
+                        now
+                    ],
+                )?;
+                Ok(())
+            })
+            .expect("your message");
+    }
 }
 
 fn yolo(h: &H, d: &str, choice: &str) -> ApiResult<steve_store::Decision> {
@@ -451,7 +458,8 @@ async fn you_answering_while_it_drafts_drops_the_draft() {
     assert_eq!(drafts(&h), 1);
     h.model.prompts.lock().unwrap().clear();
     h.model.advance.store(90_000, Ordering::SeqCst);
-    you_said_elsewhere(&h, "D_LI", 30);
+    let (say, at) = (your_line_in(&h, "D_LI"), h.ch.now() + 30_000);
+    *h.model.during.lock().unwrap() = Some(Box::new(move || say(at)));
     let r = push(&h, &me, msg(&h, "D_LI", "l1", "ulilei", "帮忙看下这个", 0))
         .await
         .response
@@ -514,7 +522,12 @@ async fn your_own_message_closes_older_drafts_and_cards() {
     );
     // the group's card waits: you spoke elsewhere
     assert_eq!(decision(&h, &ask).0, "open");
-    push(&h, &me, msg(&h, "C_DEV", "y2", "upx", "我负责", 0)).await;
+    // and a line of yours in the group that answers nobody leaves it open too
+    push(&h, &me, msg(&h, "C_DEV", "y2", "upx", "我先去开会", 0)).await;
+    assert_eq!(decision(&h, &ask).0, "open");
+    let mut answer = msg(&h, "C_DEV", "y3", "upx", "我负责", 0);
+    answer.reply_to = Some("h1".into());
+    push(&h, &me, answer).await;
     let (st, res) = decision(&h, &ask);
     assert_eq!(
         (st.as_str(), res["superseded"].as_str()),
@@ -594,6 +607,142 @@ async fn a_yolo_approved_reply_is_not_sent_once_you_answered() {
     assert_eq!(h.outbox.send_due(&h.ch).await, 0);
     assert_eq!(status(&h, &draft), "discarded");
     assert!(h.fake.sent.lock().unwrap().is_empty());
+}
+
+// ---------------------------------------------------------------- times: late and early clocks
+
+/// Case-shaped (a private chat the owner dismissed: only the gaps): they write; you answer 38.5 s
+/// later, 1.7 s before the draft opens, but your answer reaches the Hub only afterwards (a
+/// rate-limited gateway). The draft opened; YOLO, judging again right before it approves, sees your
+/// answer and closes the card instead.
+#[tokio::test(flavor = "multi_thread")]
+async fn your_answer_that_reached_the_hub_after_the_draft_opened_stops_yolo() {
+    let h = setup().await;
+    let me = h.me.clone();
+    h.model.advance.store(40_200, Ordering::SeqCst);
+    let r = push(&h, &me, msg(&h, "D_LI", "l1", "ulilei", "今晚能看下吗", 0))
+        .await
+        .response
+        .unwrap();
+    let (draft, card) = (r.out_message_id.expect("draft"), r.decision_id.expect("card"));
+    // said 38.5 s after their message, stored now, without passing the inbound path
+    you_said_elsewhere(&h, "D_LI", -2);
+    h.env.clock.advance(600_000);
+    let d = yolo(&h, &card, "yes").expect("answered");
+    assert_eq!(d.status, "expired");
+    assert_eq!(d.result["superseded"], BY_YOU);
+    assert_eq!(status(&h, &draft), "discarded");
+    assert!(h.fake.sent.lock().unwrap().is_empty());
+}
+
+/// … and when YOLO approved before your answer was stored, the send, judging again, drops it.
+#[tokio::test(flavor = "multi_thread")]
+async fn your_late_answer_stops_a_yolo_approved_reply_before_it_is_sent() {
+    let h = setup().await;
+    let (draft, card) = drafted(&h, "l1").await;
+    assert_eq!(yolo(&h, &card, "yes").expect("approved").status, "resolved");
+    // your answer, written before YOLO approved, is stored only now
+    you_said_elsewhere(&h, "D_LI", -1);
+    h.env.clock.advance(11_000);
+    assert_eq!(h.outbox.send_due(&h.ch).await, 0);
+    assert_eq!(status(&h, &draft), "discarded");
+    assert!(h.fake.sent.lock().unwrap().is_empty());
+}
+
+/// The provider's clock runs a few seconds ahead of the Hub's: your stored answer carries a time
+/// after the Hub's “now”. It has happened all the same (the moment judged is the later of the two),
+/// so YOLO does not approve.
+#[tokio::test(flavor = "multi_thread")]
+async fn your_answer_stamped_ahead_of_the_hubs_clock_still_counts() {
+    let h = setup().await;
+    let (draft, card) = drafted(&h, "l1").await;
+    you_said_elsewhere(&h, "D_LI", 8);
+    let d = yolo(&h, &card, "yes").expect("answered");
+    assert_eq!(d.status, "expired");
+    assert_eq!(d.result["superseded"], BY_YOU);
+    assert_eq!(status(&h, &draft), "discarded");
+}
+
+// ---------------------------------------------------------------- a busy group
+
+/// A busy group: two people @ you a few seconds apart and others talk; you answer one of them by
+/// quoting their message. Only that one is yours now; the other's draft stays for you (or YOLO) to
+/// decide, where the old rule (anything you said within the window) closed both.
+#[tokio::test(flavor = "multi_thread")]
+async fn in_a_busy_group_answering_one_person_leaves_the_others_draft() {
+    let h = setup().await;
+    let me = h.me.clone();
+    push(&h, &me, msg(&h, "C_DEV", "x0", "uhan", "早", -3600)).await;
+    let li = push(
+        &h,
+        &me,
+        at_you(msg(&h, "C_DEV", "l1", "ulilei", "接口文档在哪", 0)),
+    )
+    .await
+    .response
+    .unwrap();
+    h.env.clock.advance(8_000);
+    let han = push(
+        &h,
+        &me,
+        at_you(msg(&h, "C_DEV", "h1", "uhan", "周五发布能赶上吗", 0)),
+    )
+    .await
+    .response
+    .unwrap();
+    let (li_draft, han_draft) = (
+        li.out_message_id.expect("li's draft"),
+        han.out_message_id.expect("han's draft"),
+    );
+    h.env.clock.advance(20_000);
+    let mut to_li = msg(&h, "C_DEV", "y1", "upx", "群公告里有", 0);
+    to_li.reply_to = Some("l1".into());
+    push(&h, &me, to_li).await;
+    assert_eq!(status(&h, &li_draft), "discarded", "the one you answered");
+    assert_eq!(status(&h, &han_draft), "draft", "not the other one");
+    // YOLO, judging again, still may approve it
+    let card: String = row(
+        &h,
+        "SELECT decision_id FROM chan_messages WHERE id = ?",
+        &[&han_draft],
+    )[0]
+    .as_str()
+    .unwrap()
+    .into();
+    h.env.clock.advance(10_000);
+    assert_eq!(yolo(&h, &card, "yes").expect("approved").status, "resolved");
+    assert_eq!(status(&h, &han_draft), "pending");
+}
+
+/// Case-shaped (a group of six the owner dismissed: only gaps and who spoke): someone @-s several
+/// people including you; you speak 27 s and 69 s later, quoting nobody and @-ing nobody, and the
+/// next voices are other people's. That is not an answer to them: the draft stays for you to
+/// decide. Quoting it is.
+#[tokio::test(flavor = "multi_thread")]
+async fn in_a_group_talking_after_a_cc_is_not_answering_it() {
+    let h = setup().await;
+    let me = h.me.clone();
+    push(&h, &me, msg(&h, "C_DEV", "x0", "uhan", "早", -3600)).await;
+    let r = push(
+        &h,
+        &me,
+        at_you(msg(&h, "C_DEV", "l1", "ulilei", "这个需求大家看一下", 0)),
+    )
+    .await
+    .response
+    .unwrap();
+    let draft = r.out_message_id.expect("draft");
+    h.env.clock.advance(27_000);
+    push(&h, &me, msg(&h, "C_DEV", "y1", "upx", "我在路上", 0)).await;
+    h.env.clock.advance(42_000);
+    push(&h, &me, msg(&h, "C_DEV", "y2", "upx", "十分钟到", 0)).await;
+    h.env.clock.advance(172_000);
+    push(&h, &me, msg(&h, "C_DEV", "h1", "uhan", "收到", 0)).await;
+    assert_eq!(status(&h, &draft), "draft");
+    let mut quote = msg(&h, "C_DEV", "y3", "upx", "我晚点看", 0);
+    quote.reply_to = Some("l1".into());
+    push(&h, &me, quote).await;
+    assert_eq!(status(&h, &draft), "discarded");
 }
 
 // ---------------------------------------------------------------- one sender's turn

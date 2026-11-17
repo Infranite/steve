@@ -14,14 +14,24 @@
 //! that space that you are now there for closes as superseded ([`supersede`], “你已亲自回复”).
 //!
 //! You are engaged for a message when you said something after it (`Replied`) — in a private chat
-//! anything; in a group only what is about it: an answer to it or to its sender, in its reply chain,
-//! @-mentioning its sender, or within [`OWNER_LIVE_MS`] of it (the same stretch of talk) — or when you
+//! anything; in a group only what is linked to it ([`about`]): a reply to it or to its sender's
+//! message in its reply chain or its turn, @-mentioning its sender, or its sender going on right
+//! after you (nobody in between). Merely speaking in the group soon after it is not an answer: in a
+//! busy group your remark to someone else would silence everyone who spoke in the minutes before
+//! (the owner's decision of 2026-11-17, from the drafts they dismissed). Or you are engaged when you
 //! said something shortly before it ([`OWNER_LIVE_MS`]) and it goes on with that conversation
 //! (`Live`): in a private chat always; in a group when it answers or @-mentions you, is in the reply
 //! chain of one of your messages, or nobody spoke between you and it. Spaces are judged by time, the
 //! thread only adds a reply-chain signal: most messages are alone in their thread, and a private chat
 //! gives every message its own. Only your own words count: what another assistant posted on your
 //! account by itself ([`crate::arbiter::looks_automated`]) does not, nor what Steve sent as you.
+//!
+//! Times: a message's time is the provider's (when it was said); relations between messages compare
+//! those. The moment a gate judges is the later of the Hub's clock and the newest time stored for
+//! the space ([`owner_engaged`]): a message Steve has stored has happened, even when the provider's
+//! clock runs ahead of the Hub's, and your own message that reached the Hub late (a rate-limited
+//! gateway) counts as soon as it is stored — gates 3 and 4 judge again right before YOLO approves
+//! and before anything is sent, so one that missed an earlier gate is still seen.
 //!
 //! Consecutive messages of one sender are one turn ([`burst`]) only while nobody else (you included)
 //! speaks between them, each follows the one before within [`BURST_GAP_MS`], and none of them has a
@@ -44,8 +54,8 @@ use crate::respond::SUBJECT_MESSAGE;
 use crate::spaces::ReplyAsYou;
 
 /// You said something in the space this long before the message, and it goes on with that
-/// conversation: you are there. In a group, what you said this long after a message counts as
-/// about it. In the eval sweep (`examples/reply_eval.rs sweep`, 44 cases of one day) every window
+/// conversation: you are there. In a group, its sender answering you within this after you spoke is
+/// still that conversation ([`about`]). In the eval sweep (`examples/reply_eval.rs sweep`, 44 cases of one day) every window
 /// from 100 s to 9 min gave the same decisions; shorter ones missed you chatting a minute and a half
 /// earlier, 10 min and more also silenced a message that needed you nine minutes after you last
 /// spoke. 3 min sits inside, away from both ends. Revisit with more cases.
@@ -176,20 +186,62 @@ impl Stop {
     }
 }
 
-/// Is what you said in `o`, after `target`, about it? In a group: an answer to it or to another
-/// message of its sender, in its reply chain, @-mentioning its sender, or within `live_ms` of it.
+/// The provider ids of `target` and of its sender's messages linked to it: in its reply chain (the
+/// same thread, the message it answers, one answering it) or in its turn (the sender's messages
+/// right before and after it, nobody in between, each within [`BURST_GAP_MS`] of the next).
+fn chain(target: &Said, around: &[&Said]) -> Vec<String> {
+    let mut all: Vec<&Said> = around.iter().copied().filter(|s| s.id != target.id).collect();
+    all.push(target);
+    all.sort_by_key(|s| s.at);
+    let at = all.iter().position(|s| s.id == target.id).unwrap_or(0);
+    let mut turn = vec![target];
+    for w in all[..at].iter().rev() {
+        let last = turn.last().map_or(target.at, |s| s.at);
+        if w.sender != target.sender || last - w.at > BURST_GAP_MS {
+            break;
+        }
+        turn.push(w);
+    }
+    let mut next = target.at;
+    for w in &all[at + 1..] {
+        if w.sender != target.sender || w.at - next > BURST_GAP_MS {
+            break;
+        }
+        turn.push(w);
+        next = w.at;
+    }
+    let linked = |s: &Said| {
+        s.sender == target.sender
+            && ((target.thread_key.is_some() && s.thread_key == target.thread_key)
+                || (s.external_id.is_some() && s.external_id == target.reply_to)
+                || (target.external_id.is_some() && s.reply_to == target.external_id))
+    };
+    turn.into_iter()
+        .chain(around.iter().copied().filter(|s| linked(s)))
+        .filter_map(|s| s.external_id.clone())
+        .collect()
+}
+
+/// Is what you said in `o`, after `target`, an answer to it? In a group only by how it is linked,
+/// never by time alone: `o` replies to it or to its sender's message in its reply chain or turn
+/// ([`chain`]), is in its thread without replying to someone else, @-mentions its sender, or its
+/// sender goes on right after `o` (the next message in the space is theirs, within `live_ms`).
 fn about(target: &Said, o: &Said, around: &[&Said], live_ms: i64) -> bool {
-    let answers = |id: &Option<String>| id.is_some() && o.reply_to == *id;
-    answers(&target.external_id)
-        || (target.thread_key.is_some() && o.thread_key == target.thread_key)
-        || around
-            .iter()
-            .any(|s| s.sender == target.sender && answers(&s.external_id))
-        || target
-            .sender_account
-            .as_ref()
-            .is_some_and(|a| o.mentions.contains(a))
-        || o.at - target.at <= live_ms
+    let chain = chain(target, around);
+    let replies = o.reply_to.as_ref().is_some_and(|r| chain.contains(r));
+    let in_thread = target.thread_key.is_some()
+        && o.thread_key == target.thread_key
+        && o.reply_to.is_none();
+    let mentions = target
+        .sender_account
+        .as_ref()
+        .is_some_and(|a| o.mentions.contains(a));
+    let answered_back = around
+        .iter()
+        .filter(|s| s.id != o.id && s.at > o.at)
+        .min_by_key(|s| s.at)
+        .is_some_and(|n| n.sender == target.sender && n.at - o.at <= live_ms);
+    replies || in_thread || mentions || answered_back
 }
 
 /// Are you there for `target` at `now`? `around`: the space's other messages from `live_ms` before
@@ -403,7 +455,10 @@ pub fn owner_engaged(
         return Ok(None);
     }
     let my = my_accounts(c, ws, &space)?;
-    let around = lines(c, ws, &space, t.at - OWNER_LIVE_MS, now.max(t.at), &my)?;
+    // everything stored has happened: the moment judged is the later of the Hub's clock and the
+    // newest time stored (a provider clock ahead of the Hub's does not hide your message)
+    let around = lines(c, ws, &space, t.at - OWNER_LIVE_MS, i64::MAX, &my)?;
+    let now = around.iter().map(|s| s.at).fold(now.max(t.at), i64::max);
     Ok(engaged(dm, &t, &around, now, OWNER_LIVE_MS))
 }
 
@@ -670,7 +725,9 @@ mod tests {
     #[test]
     fn you_answered_after_it() {
         let t = s("t", 1_000_000, false, "a");
-        let around = [s("o", 1_030_000, true, "me")];
+        let mut o = s("o", 1_030_000, true, "me");
+        o.reply_to = t.external_id.clone();
+        let around = [o];
         assert_eq!(
             engaged(false, &t, &around, 1_040_000, W),
             Some(Engaged::Replied {
@@ -726,14 +783,19 @@ mod tests {
         t.sender_account = Some("acc_a".into());
         let later = 1_000_000 + W + 60_000;
         let mut o = s("o", later, true, "me");
-        // later than the stretch of talk, to someone else: not about it
+        // later, to someone else: not about it
         assert_eq!(engaged(false, &t, std::slice::from_ref(&o), later, W), None);
         // in a private chat whatever you said counts
         assert!(engaged(true, &t, std::slice::from_ref(&o), later, W).is_some());
-        // within the stretch of talk it does
+        // soon after it is not enough by itself: your next line may be to anyone
         let mut soon = o.clone();
-        soon.at = 1_000_000 + W;
-        assert!(engaged(false, &t, &[soon], later, W).is_some());
+        soon.at = 1_000_000 + 5_000;
+        assert_eq!(engaged(false, &t, std::slice::from_ref(&soon), later, W), None);
+        // … unless its sender answers you right after it, nobody in between
+        let back = s("a3", soon.at + 20_000, false, "a");
+        assert!(engaged(false, &t, &[soon.clone(), back.clone()], later, W).is_some());
+        let b0 = s("b0", soon.at + 10_000, false, "b");
+        assert_eq!(engaged(false, &t, &[soon.clone(), b0, back], later, W), None);
         // an answer to it
         o.reply_to = t.external_id.clone();
         assert!(engaged(false, &t, std::slice::from_ref(&o), later, W).is_some());
@@ -741,19 +803,136 @@ mod tests {
         o.reply_to = None;
         o.thread_key = t.thread_key.clone();
         assert!(engaged(false, &t, std::slice::from_ref(&o), later, W).is_some());
+        // … but not when it replies to someone else's message there
+        let c = s("c", 1_000_000 + 10_000, false, "c");
+        o.reply_to = c.external_id.clone();
+        assert_eq!(engaged(false, &t, &[c, o.clone()], later, W), None);
         // @-mentioning its sender
         o.thread_key = None;
         o.mentions = vec!["acc_a".into()];
         assert!(engaged(false, &t, std::slice::from_ref(&o), later, W).is_some());
-        // an answer to another message of its sender
+        // an answer to another message of its sender in its turn (right after it, nobody between)
         o.mentions.clear();
         let a2 = s("a2", 1_000_000 + 30_000, false, "a");
         o.reply_to = a2.external_id.clone();
         assert!(engaged(false, &t, &[a2.clone(), o.clone()], later, W).is_some());
+        // … not to a message of theirs about something else much later
+        let a9 = s("a9", 1_000_000 + 3 * W, false, "a");
+        let b1 = s("b1", 1_000_000 + 2 * W, false, "b");
+        o.reply_to = a9.external_id.clone();
+        let mut o9 = o.clone();
+        o9.at = a9.at + 1_000;
+        assert_eq!(engaged(false, &t, &[b1, a9, o9], o.at.max(later), W), None);
         // … not to someone else's
         let b = s("b", 1_000_000 + 30_000, false, "b");
         o.reply_to = b.external_id.clone();
         assert_eq!(engaged(false, &t, &[b, o], later, W), None);
+    }
+
+    /// A busy group (timelines shaped like the drafts the owner dismissed on 2026-11-17: only gaps,
+    /// who spoke and the kind of chat). Five people talk; you say one line to one of them. It
+    /// silences nobody else's message, before or after it; only the person you answered is.
+    #[test]
+    fn in_a_busy_group_your_remark_to_one_person_silences_nobody_else() {
+        let t0 = 1_000_000;
+        let mut msgs: Vec<Said> = Vec::new();
+        for (i, (dt, who)) in [
+            (0, "a"),
+            (15_000, "b"),
+            (30_000, "c"),
+            (42_000, "d"),
+            (55_000, "b"),
+            (70_000, "e"),
+        ]
+        .iter()
+        .enumerate()
+        {
+            let mut m = s(&format!("m{i}"), t0 + dt, false, who);
+            m.sender_account = Some(format!("acc_{who}"));
+            msgs.push(m);
+        }
+        // your one line, 80 s in, quoting c's message
+        let mut you = s("you", t0 + 80_000, true, "me");
+        you.reply_to = msgs[2].external_id.clone();
+        let mut around = msgs.clone();
+        around.push(you.clone());
+        // the talk goes on after you: f right after you (nobody between: f is talking with you),
+        // then d
+        let mut next = s("m6", t0 + 90_000, false, "f");
+        next.sender_account = Some("acc_f".into());
+        let mut after = s("m7", t0 + 95_000, false, "d");
+        after.sender_account = Some("acc_d".into());
+        around.push(next.clone());
+        around.push(after.clone());
+        let now = t0 + 120_000;
+        for m in msgs.iter().chain([&next, &after]) {
+            let e = engaged(false, m, &around, now, W);
+            match m.id.as_str() {
+                "m2" => assert!(
+                    matches!(e, Some(Engaged::Replied { .. })),
+                    "the one you answered"
+                ),
+                "m6" => assert!(
+                    matches!(e, Some(Engaged::Live { .. })),
+                    "right after you, nobody between"
+                ),
+                _ => assert_eq!(e, None, "{} is not yours to have answered", m.id),
+            }
+        }
+        // the old rule (anything you said within the window counts) silenced all of them
+        assert!(
+            msgs.iter()
+                .filter(|m| you.at - m.at <= W && you.at > m.at)
+                .count()
+                >= 5
+        );
+        // an @ of the sender counts, and so does that sender answering you right back
+        let mut at_e = s("you2", t0 + 100_000, true, "me");
+        at_e.mentions = vec!["acc_e".into()];
+        let mut around2 = around.clone();
+        around2.push(at_e);
+        assert!(engaged(false, &msgs[5], &around2, now, W).is_some());
+        let mut back = s("m8", t0 + 101_000, false, "d");
+        back.sender_account = Some("acc_d".into());
+        around2.push(back);
+        assert!(engaged(false, &after, &around2, now, W).is_some());
+    }
+
+    /// Case-shaped: a private chat, they write; you answer 38.5 s later, 1.7 s before the draft
+    /// would open (your message reached the Hub after that). Whenever your answer is stored, the
+    /// next gate sees it: in a private chat anything you said after their message is an answer.
+    #[test]
+    fn your_answer_that_reached_the_hub_late_still_stops_the_reply_in_a_private_chat() {
+        let them = s("t", 1_000_000, false, "a");
+        let you = s("o", 1_000_000 + 38_500, true, "me");
+        // before it is stored: nothing to see
+        assert_eq!(engaged(true, &them, &[], 1_000_000 + 40_200, W), None);
+        // stored by the time YOLO would approve, or the send would go
+        for at in [1_000_000 + 40_200, 1_000_000 + 600_000] {
+            assert!(engaged(true, &them, std::slice::from_ref(&you), at, W).is_some());
+        }
+    }
+
+    /// Case-shaped: a group of six; someone @-s several people including you; you speak 27 s later
+    /// and again a minute later, quoting nobody and @-ing nobody, and the next voices are other
+    /// people's. That is not an answer to them: the message still reaches you (a card or a draft),
+    /// where the old window rule silenced it. Had you quoted it, it would be answered.
+    #[test]
+    fn in_a_group_a_cc_is_not_answered_by_you_talking_nearby() {
+        let mut t = s("t", 1_000_000, false, "b");
+        t.mentions_owner = true;
+        t.sender_account = Some("acc_b".into());
+        let you1 = s("o1", 1_000_000 + 27_000, true, "me");
+        let you2 = s("o2", 1_000_000 + 69_200, true, "me");
+        let c = s("c", 1_000_000 + 241_300, false, "c");
+        let d = s("d", 1_000_000 + 250_200, false, "d");
+        let around = [you1.clone(), you2.clone(), c.clone(), d.clone()];
+        assert_eq!(engaged(false, &t, &around, 1_000_000 + 600_000, W), None);
+        let mut quoted = you2.clone();
+        quoted.reply_to = t.external_id.clone();
+        assert!(
+            engaged(false, &t, &[you1, quoted, c, d], 1_000_000 + 600_000, W).is_some()
+        );
     }
 
     #[test]

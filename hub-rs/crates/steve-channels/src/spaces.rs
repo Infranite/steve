@@ -61,14 +61,14 @@ impl Attention {
     }
 }
 
-/// Whether Steve replies for you in a space where your own account speaks (migration 087
+/// Whether Steve replies for you in a space where your own account speaks (migration 096
 /// `space_prefs.reply_as_you`). Checked in code before any model reads the message
 /// ([`crate::inbound`]); it changes nothing where a bot speaks. Precedence: 屏蔽 > your `/bot` >
 /// 不提醒 > this > 只记录 (`muted`) > the rules.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ReplyAsYou {
-    /// 起草: the rules decide; what is said as you waits for your approval (as before 087).
+    /// 起草: the rules decide; what is said as you waits for your approval (as before 096).
     #[default]
     Draft,
     /// 只记录: nothing is drafted, asked or answered for you here, and no rule or flow runs on someone
@@ -994,7 +994,7 @@ pub struct SpaceSettings {
     pub revision: i64,
     /// Your attention (019), independent of `muted` (Steve's role 只记录).
     pub attention: Attention,
-    /// Whether Steve replies for you here on your own account (087).
+    /// Whether Steve replies for you here on your own account (096).
     pub reply_as_you: ReplyAsYou,
 }
 
