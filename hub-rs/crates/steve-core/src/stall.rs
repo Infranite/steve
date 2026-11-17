@@ -3,6 +3,9 @@
 //! prerequisites (a cancelled turn, an agent that died, a coordinator left with a failed unit or
 //! that paused its graph without asking you). They get one card,
 //! “它停下了：…”, with 让它继续 / 我来看看 / 放弃; it expires as soon as a turn starts again.
+//!
+//! The same tick also runs the sweep over every open item ([`crate::sweep`]), which only records
+//! what it would do: this watch and Steve's continues stay the only things that act.
 
 use std::time::Duration;
 
@@ -55,6 +58,14 @@ impl Core {
             match tokio::task::spawn_blocking(move || c.check_prs()).await {
                 Ok(Err(e)) => tracing::warn!("pull request check {e}"),
                 Err(e) => tracing::warn!("pull request check task {e}"),
+                Ok(Ok(_)) => {}
+            }
+            /* every open item: what the sweep would do, recorded and not carried out (#334). Last,
+             * so it sees what the passes above just did */
+            let c = self.clone();
+            match tokio::task::spawn_blocking(move || c.sweep()).await {
+                Ok(Err(e)) => tracing::warn!("sweep {e}"),
+                Err(e) => tracing::warn!("sweep task {e}"),
                 Ok(Ok(_)) => {}
             }
         }

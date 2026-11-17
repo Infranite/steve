@@ -37,6 +37,14 @@ export type DebugShadow = {
   closable: { holds: boolean; missing: string[]; by?: string; after?: number }
   today: { phase: string; status: string; work: string; why?: string | null; lane: string | null }
   agrees: boolean
+  /** What the sweep would do (observe-only: its execution switches are off). */
+  would_do?: DebugWouldDo
+}
+export type DebugWouldDoAction = "wake" | "card" | "remind"
+export type DebugWouldDo = {
+  current: { action: DebugWouldDoAction; reason: string; label: string; detail?: string; due_at: number; due: boolean; executes: boolean } | null
+  log: { id: string; action: DebugWouldDoAction; reason: string; label: string; detail?: string | null; due_at: number; first_seen: number; cleared_at: number | null; episodes: number; executed: boolean }[]
+  execute: Record<DebugWouldDoAction, boolean>
 }
 export type DebugSnapshot = {
   observed_at: number

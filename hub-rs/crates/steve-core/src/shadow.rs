@@ -320,7 +320,10 @@ impl Tx<'_> {
         let d = derive(&facts, &policy);
         let work = self.work(item)?;
         let today = legacy_lane(item, &work);
-        Ok(Some(view(&d, item, &work, today, &policy)))
+        let mut v = view(&d, item, &work, today, &policy);
+        /* what the sweep would do on it (#334), not carried out */
+        v["would_do"] = self.sweep_view(item, &facts, &d, &policy)?;
+        Ok(Some(v))
     }
 }
 

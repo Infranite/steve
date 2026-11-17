@@ -222,6 +222,9 @@ pub const MIGRATIONS: &[&str] = &[
     // 104: shadow facts of an item's work (#327): delivery facts with their provenance, waits, judge
     // results and the operator's overrides of the named work policy. Nothing acts on them yet.
     include_str!("../migrations/104.sql"),
+    // 105: what the sweep would do for each open item (#334), in shadow: a log of decisions keyed by
+    // (item, cycle, session, turn, action, reason). Nothing carries them out yet.
+    include_str!("../migrations/105.sql"),
 ];
 
 /// 027's item columns and their one-time backfill (applied by `run_pending` when `items.phase` is missing).

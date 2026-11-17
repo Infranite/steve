@@ -3,8 +3,9 @@
 //! overrides, by the same names. A name this build does not know is ignored and reported, a negative
 //! value is refused, so a typo can neither switch something off nor reach code that expects a number.
 //!
-//! In this release only the derived state ([`crate::derive`]) reads it, in shadow. The other
-//! entries are named now so later steps take their numbers from here instead of a new constant.
+//! In this release only the derived state ([`crate::derive`]) and the sweep ([`crate::sweep`]) read
+//! it, in shadow. The other entries are named now so later steps take their numbers from here
+//! instead of a new constant.
 //! Steve's continues keep their number in [`crate::config::CoreConfig::takeover_continues`] (the
 //! takeover reads it there) until the takeover itself moves to this table.
 
@@ -177,6 +178,18 @@ impl WorkPolicy {
     pub fn nobody_offline(&self) -> i64 {
         self.get("nobody_offline")
     }
+    pub fn stall_min(&self) -> i64 {
+        self.get("stall_min")
+    }
+    pub fn silent_min(&self) -> i64 {
+        self.get("silent_min")
+    }
+    pub fn build_remind(&self) -> i64 {
+        self.get("build_remind")
+    }
+    pub fn wait_note_after(&self) -> i64 {
+        self.get("wait_note_after")
+    }
 
     /// Every entry with the value in force, for the debug view.
     pub fn entries(&self) -> Vec<(&'static str, i64)> {
@@ -197,6 +210,10 @@ mod tests {
         let p = WorkPolicy::default();
         assert_eq!(p.close_grace(), 10 * MINUTE);
         assert_eq!(p.nobody_offline(), 30 * MINUTE);
+        assert_eq!(p.stall_min(), 20 * MINUTE);
+        assert_eq!(p.silent_min(), 2 * HOUR);
+        assert_eq!(p.build_remind(), 24 * HOUR);
+        assert_eq!(p.wait_note_after(), 6);
     }
 
     #[test]

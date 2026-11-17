@@ -18,15 +18,15 @@ use crate::shadow::from_operations;
 use crate::testkit::Kit;
 use crate::work_policy::WorkPolicy;
 
-const NOW: i64 = 1_800_000_000_000;
+pub(super) const NOW: i64 = 1_800_000_000_000;
 const HEAD: &str = "c0ffee1";
 const OLD_HEAD: &str = "bead001";
 
-fn policy() -> WorkPolicy {
+pub(super) fn policy() -> WorkPolicy {
     WorkPolicy::default()
 }
 
-fn session(turn: &str) -> SessionState {
+pub(super) fn session(turn: &str) -> SessionState {
     SessionState {
         id: "s1".into(),
         turn: Some(turn.into()),
@@ -37,7 +37,7 @@ fn session(turn: &str) -> SessionState {
 }
 
 /// An open code item of cycle 2 with an idle, settled session.
-fn base() -> Facts {
+pub(super) fn base() -> Facts {
     Facts {
         now: NOW,
         item: ItemState {
@@ -67,7 +67,7 @@ fn fact(kind: &str, head: Option<&str>, state: &str, provenance: &str) -> Delive
     }
 }
 
-fn card(id: &str, question: &str) -> Card {
+pub(super) fn card(id: &str, question: &str) -> Card {
     Card {
         id: id.into(),
         stop: false,
@@ -327,7 +327,7 @@ fn a_judgement_of_an_earlier_scope_never_speaks_for_the_current_one() {
 }
 
 /// A release, build or deploy operation of `revision` in cycle 2, as today's gate records them.
-fn op(
+pub(super) fn op(
     id: &str,
     revision: i64,
     kind: &str,
@@ -693,7 +693,7 @@ fn the_fact_records_keep_their_cycle_and_refuse_unknown_kinds() {
 }
 
 /// An open item today's system can hold, as facts: each is the state some code path leaves it in.
-fn fixtures() -> Vec<(&'static str, Facts)> {
+pub(super) fn fixtures() -> Vec<(&'static str, Facts)> {
     let mut out = vec![];
     let mut add = |name, edit: &dyn Fn(&mut Facts)| {
         let mut f = base();
@@ -804,7 +804,7 @@ fn fixtures() -> Vec<(&'static str, Facts)> {
 
 /// Open states that have no next step today, and the step of the redesign that gives them one. The
 /// list may only shrink: a fixture that gains a next step must be taken off, one that loses it fails.
-const KNOWN_GAPS: &[(&str, &str)] = &[
+pub(super) const KNOWN_GAPS: &[(&str, &str)] = &[
     (
         "you declined the merge",
         "PLAN 2.4, step 3: a declined merge raises rework / close / keep actions",

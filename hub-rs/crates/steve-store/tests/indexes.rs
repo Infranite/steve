@@ -420,6 +420,22 @@ const CASES: &[(&str, &str, &str)] = &[
         "steve-store repo/item_facts.rs latest_turn",
         "SELECT turn_id,state,updated FROM runtime_turns WHERE session_id=? ORDER BY created DESC,rowid DESC LIMIT 1",
     ),
+    // ---------------------------------------------------------------- the sweep's log (#334)
+    (
+        "item_would_do_item",
+        "steve-store repo/would_do.rs log",
+        "SELECT * FROM item_would_do WHERE item_id=? ORDER BY first_seen DESC,rowid DESC LIMIT ?",
+    ),
+    (
+        "item_would_do_item",
+        "steve-store repo/would_do.rs clear",
+        "UPDATE item_would_do SET cleared_at=? WHERE item_id=? AND cleared_at IS NULL",
+    ),
+    (
+        "audit_target",
+        "steve-store repo/would_do.rs paused_at",
+        "SELECT ts FROM audit WHERE target=? AND action='item.pause' ORDER BY id DESC LIMIT 1",
+    ),
     // ---------------------------------------------------------------- YOLO
     (
         "yolo_actions_window",

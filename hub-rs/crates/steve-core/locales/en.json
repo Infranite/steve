@@ -504,5 +504,22 @@
   "core.derive.nobody": "Nobody is on it: nothing can bring it back",
   "core.derive.follow_up": "Stopped; Steve follows up",
   "core.derive.stopped": "Stopped, not done; follow-ups used up",
-  "core.derive.unknown": "State unclear (diagnostic)"
+  "core.derive.unknown": "State unclear (diagnostic)",
+  "core.sweep.merge_declined": "You declined the merge and nothing follows: rework it, close it, or keep the branch",
+  "core.sweep.node_gone_closing": "Closing, and the Node of its session is gone",
+  "core.sweep.node_gone": "The Node of its session is gone",
+  "core.sweep.answered_while_paused": "You answered its card, but it is still paused",
+  "core.sweep.paused_silent": "Paused, and nothing has happened since",
+  "core.sweep.deploy_waiting": "Closing waits for this Hub to run the result: upgrade, or mark it done",
+  "core.sweep.required_failed": "A required step failed and the agent's turn after it is over",
+  "core.sweep.pr_unfixed": "The pull request still can't merge after the agent was told, on the same commit",
+  "core.sweep.hooks_silent": "The wrap-up module has said nothing for a long time",
+  "core.sweep.build_long": "The required build has been running for a long time (still followed)",
+  "core.sweep.nobody": "Nothing can bring it back",
+  "core.sweep.stopped": "Stopped, not done; follow-ups used up",
+  "core.sweep.unowned": "Stopped, and nothing looks at it today",
+  "core.sweep.follow_up": "Stopped; Steve would follow up",
+  "core.sweep.stall_question": "The turn has had no new output for a while: one status question",
+  "core.sweep.long_wait": "The wait has been looked at many times",
+  "core.sweep.silent": "Waiting, with nothing recorded for a long time"
 }
