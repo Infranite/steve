@@ -63,7 +63,7 @@ pub fn tools() -> Vec<Value> {
             "pri": {"type": "integer", "minimum": 0, "maximum": todo::PRI_MAX, "description": "0 none … 3 highest"},
             "star": {"type": "boolean"},
             "recur": n("string", "repeat: FREQ=DAILY|WEEKLY|MONTHLY|YEARLY with optional ;INTERVAL=n; needs a due"),
-            "matter": n("string", "a matter (事) id Steve gave"),
+            "matter": n("string", "a matter id Steve gave"),
         })
     };
     let mut update = fields(true);
@@ -71,7 +71,7 @@ pub fn tools() -> Vec<Value> {
     vec![
         tool(
             LIST,
-            "List the todos and goals of the person whose session this is (我的待办): open ones by default, deadlines first. Goals carry their progress (done of all not dropped; null when not split yet). Times are shown in the person's time zone.",
+            "List the todos and goals of the person whose session this is: open ones by default, deadlines first. Goals carry their progress (done of all not dropped; null when not split yet). Times are shown in the person's time zone.",
             json!({
                 "state": {"type": "string", "enum": ["open", "done", "dropped", "handed", "all"]},
                 "kind": {"type": "string", "enum": todo::KINDS},
@@ -94,7 +94,7 @@ pub fn tools() -> Vec<Value> {
         ),
         tool(
             COMPLETE,
-            "Mark one of the person's own todos or goals done (default), dropped (放下), or open again. A repeating todo done makes its next occurrence. Applied at once and undoable.",
+            "Mark one of the person's own todos or goals done (default), dropped (let go), or open again. A repeating todo done makes its next occurrence. Applied at once and undoable.",
             json!({
                 "todo": {"type": "string"},
                 "state": {"type": "string", "enum": ["done", "dropped", "open"]},
