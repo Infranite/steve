@@ -697,6 +697,56 @@ fn confirming_design_starts_implementation_without_reasking_the_design_question(
             .iter()
             .all(|d| d.status != "open" || d.subject_type != "design_implementation")
     );
+    /* the switch still on, the implementation delivered next goes to ordinary acceptance: the design
+     * is not asked about again */
+    k.core
+        .tool_deliver(&session, "已按方案实现并验证", &[], &[], &[])
+        .unwrap();
+    assert_eq!(k.open_kinds(&item), vec!["accept"]);
+    assert_eq!(
+        k.db()
+            .decisions_of_item(&item)
+            .unwrap()
+            .iter()
+            .filter(|d| d.subject_type == "design_implementation")
+            .count(),
+        1
+    );
+    assert_ne!(k.status(&item).1, "设计确认");
+}
+
+/// The approval covers the implementation goal it added; a goal set after it is a new scope whose
+/// delivery the gate, still on, holds for a design decision again.
+#[test]
+fn a_new_goal_after_the_approval_is_gated_again() {
+    let k = Kit::new();
+    let item = k.item("run", "执行", None);
+    k.db().add_goal(&item, "改进页面布局").unwrap();
+    gate(&k, &item);
+    let sid = k.session(&item, "idle");
+    let session = k.db().session(&sid).unwrap().unwrap();
+    let open_design = |k: &Kit| {
+        k.db()
+            .decisions_of_item(&item)
+            .unwrap()
+            .into_iter()
+            .find(|d| d.status == "open" && d.subject_type == "design_implementation")
+    };
+    let report = design_report(&k, &item, "完整方案");
+    k.core
+        .tool_deliver(&session, "完整方案", &[report], &[], &[])
+        .unwrap();
+    let decision = open_design(&k).unwrap();
+    k.core
+        .resolve(&decision.id, "按方案实现", "", "me")
+        .unwrap();
+    k.db().add_goal(&item, "另加深色模式").unwrap();
+    let report = design_report(&k, &item, "深色模式方案");
+    k.core
+        .tool_deliver(&session, "深色模式方案", &[report], &[], &[])
+        .unwrap();
+    assert!(open_design(&k).is_some());
+    assert_eq!(k.status(&item).1, "设计确认");
 }
 
 #[test]

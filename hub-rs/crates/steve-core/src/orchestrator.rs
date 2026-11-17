@@ -1811,9 +1811,10 @@ impl Tx<'_> {
             notes.push_str(&format!("\n\n注意：{why}"));
         }
         let summary = &format!("{summary}{notes}");
-        /* the owner switched the design gate on for this item (Q1): the delivery is a design that
-         * waits for the owner's decision, whatever its goal says */
-        let design_report = if item.design_gate {
+        /* the owner switched the design gate on for this item (Q1): until a design is approved for
+         * this goal the delivery is a design that waits for the owner's decision, whatever its goal
+         * says; the delivery after the approval is the implementation */
+        let design_report = if design_pending(self.db().store(), &item)? {
             let report = self.design_file(item_id, outputs)?;
             let goal_version = self
                 .db()
@@ -1876,13 +1877,13 @@ impl Tx<'_> {
             let d = self.db().decision_create(NewDecision {
                 workspace_id: item.workspace_id.clone(),
                 kind: "ask".into(),
-                subject_type: "design_implementation".into(),
+                subject_type: DESIGN_DECISION.into(),
                 subject_id: json!({"goal_version": goal_version, "location": report}).to_string(),
                 item_id: Some(item_id.into()),
                 session_id: Some(s.id.clone()),
                 question: "设计报告已交付，请先查看「产出」。下一步是否按方案实现？".into(),
                 draft: Some("选择「按方案实现」会继续当前事项；选择「只保留设计」会完成本次设计；也可以要求修改设计。".into()),
-                options: Some(vec!["按方案实现".into(), "只保留设计".into(), "修改设计".into()]),
+                options: Some(vec![IMPLEMENT_DESIGN.into(), "只保留设计".into(), "修改设计".into()]),
                 requested_by: Self::by(s),
             })?;
             self.db().item_patch(
@@ -2902,7 +2903,7 @@ impl Tx<'_> {
         let reget = |t: &Tx| t.db().decision(id).map(|d| d.expect("decision exists"));
         let tl = |t: &Tx, item: &str, text: &str| t.answer_line(item, actor, text, sid.as_deref());
         match (d.kind.as_str(), d.subject_type.as_str()) {
-            ("ask", "design_implementation") => {
+            ("ask", DESIGN_DECISION) => {
                 if actor == YOLO_ACTOR {
                     return Err(crate::cycle::conflict("设计是否实现必须由用户决定"));
                 }
@@ -2944,7 +2945,7 @@ impl Tx<'_> {
                 };
                 tl(self, &i, &format!("设计决定：{choice}{detail}"))?;
                 match choice {
-                    "按方案实现" => {
+                    IMPLEMENT_DESIGN => {
                         self.db().add_goal(&i, &format!("按用户确认的设计报告实现并验证。已确认方案文件：{location}。实现范围以此方案为准，发布仍按正常流程。"))?;
                         self.db()
                             .item_patch(&i, patch![stage: "执行", now: "设计已确认，开始实现"])?;
@@ -4727,6 +4728,36 @@ impl Tx<'_> {
 
 /// Output kinds that name a design file for the design gate.
 const DESIGN_KINDS: [&str; 3] = ["方案", "设计", "报告"];
+/// The decision a gated design delivery opens, and its answer that approves the design.
+const DESIGN_DECISION: &str = "design_implementation";
+const IMPLEMENT_DESIGN: &str = "按方案实现";
+
+/// Whether a delivery of `item` now is the design its gate waits for (Q1): the owner switched the
+/// gate on and has not approved a design for the goal the item works to. Approving one adds the
+/// implementation goal, one version past the goal the design was delivered for, so a delivery made to
+/// that goal is the implementation and goes to ordinary acceptance; a later goal is a new scope the
+/// gate covers again.
+pub fn design_pending(store: &steve_store::Store, item: &Item) -> Result<bool> {
+    if !item.design_gate {
+        return Ok(false);
+    }
+    let current = store
+        .items()
+        .goals(&item.id)?
+        .last()
+        .map(|g| g.version)
+        .unwrap_or(1);
+    let approved = store.decisions().of_item(&item.id)?.iter().any(|d| {
+        d.subject_type == DESIGN_DECISION
+            && d.status == "resolved"
+            && d.result.get("answer").and_then(Value::as_str) == Some(IMPLEMENT_DESIGN)
+            && serde_json::from_str::<Value>(&d.subject_id)
+                .ok()
+                .and_then(|b| b.get("goal_version").and_then(Value::as_i64))
+                .is_some_and(|v| v + 1 == current)
+    });
+    Ok(!approved)
+}
 
 /// A decision authorizes the exact content-addressed report that was shown for this goal.
 /// Whether `location` is the exact URL of a file delivery this item received, of a kind the
