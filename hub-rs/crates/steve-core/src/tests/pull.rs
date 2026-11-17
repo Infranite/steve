@@ -290,7 +290,6 @@ fn pr_marks(k: &Kit, x: &Remote) -> Vec<(String, Value)> {
         .unwrap()
 }
 
-/// The release operation the pull request is followed on.
 /// The `merge` marks of the item (the workflow statistics' accepted → merged time): `(to_v, ref)`.
 fn merge_marks(k: &Kit, x: &Remote) -> Vec<(String, String)> {
     k.db()
@@ -305,6 +304,7 @@ fn merge_marks(k: &Kit, x: &Remote) -> Vec<(String, String)> {
         .unwrap()
 }
 
+/// The release operation the pull request is followed on.
 fn release_op(k: &Kit, x: &Remote) -> steve_store::ItemOperation {
     let i = k.db().item(&x.item).unwrap().unwrap();
     k.db()

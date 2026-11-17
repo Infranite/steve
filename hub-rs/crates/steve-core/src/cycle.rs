@@ -40,7 +40,8 @@ use crate::thread::flowback::{Update, flow_quiet};
 /// Why a closing was invalidated: the reason code of its `invalidate` mark, which the statistics
 /// count by (migration 92 gave the timeline lines from before the same codes).
 pub mod void {
-    /// The agent's plan has open steps again.
+    /// The agent's plan has open steps again. Only closings from before #239 (their timeline lines):
+    /// a plan reported while closing is now only noted.
     pub const PLAN: &str = "plan";
     /// A new delivery replaced the one waiting for acceptance.
     pub const REDELIVER: &str = "redeliver";
