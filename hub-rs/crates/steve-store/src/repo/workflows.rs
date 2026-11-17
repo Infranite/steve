@@ -130,6 +130,32 @@ impl Workflow {
             .is_some_and(|h| h.action == "single_session")
     }
 
+    /// What a reset of unit `id` invalidates, in graph order: the unit and every unit that depends on
+    /// it, directly or through others. Retrying the unit reruns exactly these; the rest of the graph
+    /// keeps running and keeps its results.
+    pub fn reset_scope(&self, id: &str) -> Vec<&WorkUnit> {
+        let mut affected = HashSet::from([id]);
+        loop {
+            let before = affected.len();
+            for u in &self.units {
+                if u.spec
+                    .depends_on
+                    .iter()
+                    .any(|d| affected.contains(d.as_str()))
+                {
+                    affected.insert(u.spec.id.as_str());
+                }
+            }
+            if affected.len() == before {
+                break;
+            }
+        }
+        self.units
+            .iter()
+            .filter(|u| affected.contains(u.spec.id.as_str()))
+            .collect()
+    }
+
     /// Optional work may be waived by cancelling it; required units need successful evidence unless
     /// the user explicitly chose single-session acceptance. Active work always prevents closing.
     pub fn blockers(&self) -> Vec<String> {
@@ -1093,28 +1119,15 @@ impl Workflows<'_> {
             open_parent(tx, parent)?;
             let graph = must_graph(tx, parent)?;
             must_unit(&graph, id)?;
-            let mut affected = HashSet::from([id.to_string()]);
-            loop {
-                let old = affected.len();
-                for u in &graph.units {
-                    if u.spec.depends_on.iter().any(|d| affected.contains(d)) {
-                        affected.insert(u.spec.id.clone());
-                    }
-                }
-                if affected.len() == old {
-                    break;
-                }
-            }
-            let before: Vec<_> = graph
-                .units
-                .iter()
-                .filter(|u| affected.contains(&u.spec.id))
-                .collect();
+            let before = graph.reset_scope(id);
+            // Core names the unit and the way out for its caller; these hold for any other caller.
             if before.iter().any(|u| u.active()) {
-                return Err(conflict("当前工作或下游仍在运行，请先取消并停止其会话"));
+                return Err(conflict(
+                    "当前工作或下游仍在执行，等它结束或取消并确认停止后再重置",
+                ));
             }
             if before.iter().any(|u| u.attempt >= graph.max_attempts) {
-                return Err(conflict("当前工作或下游已达到尝试预算，请先提高预算再重置"));
+                return Err(conflict("当前工作或下游已达到尝试预算上限，不能重置"));
             }
             // The unit keeps its child item: the retry is a new cycle and session of the same item
             // (its number, branch and worktree), not a new item. The retired attempt's snapshot is kept.

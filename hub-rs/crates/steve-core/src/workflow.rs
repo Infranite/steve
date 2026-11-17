@@ -14,6 +14,14 @@ const VIEW_TEXT: usize = 2_000;
 const VIEW_HISTORY: usize = 20;
 const MAX_BOT_INITIAL_ATTEMPTS: i64 = 3;
 const MAX_BOT_REPLANS_PER_CYCLE: usize = 12;
+/// How much of a unit's summary or failure reason the coordinator's wake-up carries: enough to
+/// decide the next step without reading the graph; the full text stays on the graph and its outputs.
+pub(crate) const WAKE_SUMMARY_CHARS: usize = 500;
+/// Opens every message Steve itself puts into an agent's conversation (a wake-up, a notice), so it
+/// is not taken for the user's words. The coordinator's contract names it.
+pub(crate) const SYSTEM_NOTICE: &str = "【Steve 系统消息】";
+/// The coordinator's next step once its graph runs: it ends its turn instead of waiting in it.
+const NEXT_END_TURN: &str = "工作图已在执行。现在结束本回合：每个单元交付或失败时，Steve 会用系统消息叫醒你，并附上该单元的状态和摘要；不需要也不要轮询 get。";
 
 fn excerpt(s: &str, limit: usize) -> String {
     if s.chars().count() <= limit {
@@ -75,6 +83,18 @@ fn required_text<'a>(v: &'a Value, key: &str) -> Result<&'a str> {
         .ok_or_else(|| conflict(format!("{key} 不能为空")))
 }
 
+/// A `get` that names the revision its caller already read: when the graph is still at it, only
+/// that is said. Every recorded change (a plan, a start, a delivery, a failure) moves the revision.
+fn unchanged(args: &Value, revision: i64) -> Result<Option<Value>> {
+    let Some(known) = args.get("known_revision").filter(|v| !v.is_null()) else {
+        return Ok(None);
+    };
+    let known = known
+        .as_i64()
+        .ok_or_else(|| conflict("known_revision 必须为整数"))?;
+    Ok((known == revision).then(|| json!({"unchanged": true, "revision": revision})))
+}
+
 impl Core {
     pub fn workflow_get(&self, item: &str) -> Result<Value> {
         self.tx().workflow_view(item)
@@ -119,6 +139,9 @@ impl Core {
             }
             match args["action"].as_str().unwrap_or("get") {
                 "get" => {
+                    if let Some(same) = unchanged(&args, graph.revision)? {
+                        return Ok(same);
+                    }
                     return Ok(t.workflow_context(&graph, &unit));
                 }
                 "fail" => {
@@ -144,6 +167,13 @@ impl Core {
                 "单会话验收只能由用户在事项页明确确认，Bot 不能代为批准",
             ));
         }
+        let action = args["action"].as_str().unwrap_or("get").to_owned();
+        if action == "get"
+            && let Some(g) = t.db().store().workflows().get(item)?
+            && let Some(same) = unchanged(&args, g.revision)?
+        {
+            return Ok(same);
+        }
         // A plan that cannot run anything at once is said back to its author (a hint, never a refusal).
         let notes = match args["action"].as_str() {
             Some("plan") => serde_json::from_value::<Vec<UnitSpec>>(args["units"].clone())
@@ -153,10 +183,15 @@ impl Core {
         };
         let mut out =
             t.workflow_change(item, args, current.bot_id.as_deref().unwrap_or("agent"))?;
-        if !notes.is_empty()
-            && let Some(o) = out.as_object_mut()
-        {
-            o.insert("notes".into(), json!(notes));
+        if let Some(o) = out.as_object_mut() {
+            if !notes.is_empty() {
+                o.insert("notes".into(), json!(notes));
+            }
+            if matches!(action.as_str(), "plan" | "retry" | "resume")
+                && let Some(next) = t.workflow_next(item)?
+            {
+                o.insert("next".into(), json!(next));
+            }
         }
         Ok(out)
     }
@@ -233,6 +268,34 @@ impl Tx<'_> {
             }
         }
         Ok(false)
+    }
+
+    /// The first of `units` whose execution is not over: a turn in flight, queued input, or a stop
+    /// not yet confirmed ([`Self::workflow_busy`]). A retry asks this of what it resets
+    /// ([`Workflow::reset_scope`]), a prerequisite wait of the whole graph. A unit a pause stopped
+    /// keeps its status but holds nothing.
+    pub(crate) fn workflow_unsettled<'a>(
+        &self,
+        units: impl IntoIterator<Item = &'a WorkUnit>,
+    ) -> Result<Option<&'a WorkUnit>> {
+        for u in units {
+            if self.workflow_busy(u)? {
+                return Ok(Some(u));
+            }
+        }
+        Ok(None)
+    }
+
+    /// What the coordinator does after changing its graph, when the graph now runs on its own.
+    fn workflow_next(&self, item: &str) -> Result<Option<&'static str>> {
+        let Some(g) = self.db().store().workflows().get(item)? else {
+            return Ok(None);
+        };
+        let runs = !g.paused
+            && g.units
+                .iter()
+                .any(|u| matches!(u.status.as_str(), "pending" | "dispatching" | "running"));
+        Ok(runs.then_some(NEXT_END_TURN))
     }
 
     pub(crate) fn workflow_blockers(&self, item: &str, complete: bool) -> Result<Vec<String>> {
@@ -451,10 +514,12 @@ impl Tx<'_> {
                 u.reason = Some(excerpt(reason, VIEW_TEXT));
             }
         }
+        // `parent_item`, not `item_id`: the key is read back as a tool argument otherwise, and no
+        // tool of a unit session takes an item id it does not already know from its token.
         json!({
-            "item_id": g.item_id, "revision": g.revision, "unit": unit,
+            "parent_item": g.item_id, "revision": g.revision, "unit": unit,
             "upstream": upstream_units,
-            "note": "长内容仅显示摘要；通过上游单元的事项及产出打开完整报告。"
+            "note": "长内容仅显示摘要；完整报告在上游单元 outputs 列出的文件里，直接打开这些文件。本会话只能读取本单元的事项，不能读取主事项或其他单元的事项。"
         })
     }
 
@@ -680,24 +745,31 @@ impl Tx<'_> {
                             "这是上游永久拒绝；请先处理服务策略或无效请求，再由用户确认重试。已成功的单元保持原样",
                         ));
                     }
-                    if unit.attempt >= g.max_attempts {
+                    // A retry reruns the unit and its downstream (the store's reset): only those
+                    // must be settled and within budget; independent units keep running.
+                    let scope = g.reset_scope(id);
+                    if let Some(spent) = scope.iter().find(|u| u.attempt >= g.max_attempts) {
                         if actor == "agent" || self.db().bot(actor)?.is_some() {
-                            return Err(conflict(
-                                "工作单元已达到尝试预算上限，不能继续自动重试；请用 steve_ask 向用户汇报已有成果与具体阻塞原因，等待用户决定",
-                            ));
+                            return Err(conflict(format!(
+                                "「{}」已达到尝试预算上限，不能继续自动重试；请用 steve_ask 向用户汇报已有成果与具体阻塞原因，等待用户决定",
+                                spent.spec.title
+                            )));
                         }
-                        return Err(conflict(
-                            "工作单元已达到尝试预算上限，请先调整工作图尝试预算后再重试",
-                        ));
+                        return Err(conflict(format!(
+                            "「{}」已达到尝试预算上限，请先调整工作图尝试预算后再重试",
+                            spent.spec.title
+                        )));
                     }
-                    if g.units
-                        .iter()
-                        .map(|u| self.workflow_busy(u))
-                        .collect::<Result<Vec<_>>>()?
-                        .into_iter()
-                        .any(|b| b)
-                    {
-                        return Err(conflict("请先等待或暂停仍在执行的工作，确认停止后再重试"));
+                    // a paused unit holds no execution but is still the graph's running unit
+                    let busy = match scope.iter().copied().find(|u| u.active()) {
+                        Some(running) => Some(running),
+                        None => self.workflow_unsettled(scope)?,
+                    };
+                    if let Some(busy) = busy {
+                        return Err(conflict(format!(
+                            "「{}」仍在执行或停止尚未确认：等它结束（Steve 会叫醒你），或先 cancel 它并等停止确认后再重试",
+                            busy.spec.title
+                        )));
                     }
                     self.db().store().workflows().reset(item, id, reason)?;
                 } else {
@@ -1155,7 +1227,7 @@ impl Tx<'_> {
         let goal = self.db().goal(&graph.item_id)?;
         let retry = if u.attempt > 1 {
             format!(
-                "这是本单元的第 {} 次尝试：沿用同一事项和工作目录，分支里保留着之前尝试的提交；先核对已有改动和上次失败的原因（steve_workflow action=get），在此基础上继续，不要从头重做。\n",
+                "这是本单元的第 {} 次尝试：沿用同一事项和工作目录，分支里保留着之前尝试的提交；先核对已有改动和重试原因（下方共享上下文 unit.reason），在此基础上继续，不要从头重做。\n",
                 u.attempt
             )
         } else {
@@ -1442,38 +1514,73 @@ impl Tx<'_> {
         }
         /* only the graph's current attempt is news: a retired one keeps its outcome (a failure
          * stays failed) but the coordinator already decided what came after it */
-        let latest_graph = self.db().store().workflows().get(&parent)?;
-        let max_attempts = latest_graph
-            .as_ref()
-            .map_or(g.max_attempts, |lg| lg.max_attempts);
-        let latest = latest_graph.and_then(|lg| {
-            lg.units
-                .into_iter()
-                .find(|u| u.item_id.as_deref() == Some(child))
-        });
-        if !g.paused
-            && let Some(ref settled) = latest
+        let latest_graph = self.db().store().workflows().get(&parent)?.unwrap_or(g);
+        let latest = latest_graph
+            .units
+            .iter()
+            .find(|u| u.item_id.as_deref() == Some(child));
+        if !latest_graph.paused
+            && let Some(settled) = latest
             && matches!(settled.status.as_str(), "succeeded" | "failed")
             && let Some(coordinator) = self
                 .active_session(&parent)?
                 .filter(|s| s.status != "ended")
         {
-            let msg = if settled.status == "failed" && settled.attempt >= max_attempts {
-                format!(
-                    "协作工作 {} 已达到尝试预算上限（{}/{}）仍未通过。禁止通过重规划提高预算继续空转；请用 steve_workflow action=get 核对已有成果，并用 steve_ask 向用户汇报已完成的单元成果与具体阻塞原因，由用户决定下一步。",
-                    unit.spec.title, settled.attempt, max_attempts
-                )
-            } else {
-                format!(
-                    "协作工作 {} 已更新。请用 steve_workflow action=get 读取当前图及检查结果；失败且仍在预算内时修复目标后重试，全部关键单元通过后统一交付主事项。",
-                    unit.spec.title
-                )
-            };
+            let msg = wake_message(settled, &latest_graph);
             self.rt()
                 .prompt(&coordinator.id, &msg, "workflow.progress", &[])?;
         }
         Ok(true)
     }
+}
+
+/// The coordinator's wake-up when a unit of its graph settles: a Steve system message that carries
+/// what it needs to decide (the unit, its status and attempt, a bounded summary, where the graph
+/// stands and its revision for the next change) and the one next step that follows from it.
+fn wake_message(u: &WorkUnit, g: &Workflow) -> String {
+    let max_attempts = g.max_attempts;
+    let failed = u.status == "failed";
+    let said = if failed {
+        let why = u
+            .reason
+            .as_deref()
+            .filter(|r| !r.trim().is_empty())
+            .unwrap_or(u.summary.as_str());
+        workflow_error(why)
+    } else {
+        u.summary.clone()
+    };
+    let count = |status: &str| g.units.iter().filter(|x| x.status == status).count();
+    let next = if failed && u.attempt >= max_attempts {
+        "已达到尝试预算上限：禁止通过重规划提高预算继续空转；请用 steve_ask 向用户汇报已完成的单元成果与具体阻塞原因，由用户决定下一步。"
+    } else if failed {
+        "把失败原因写进需要修改的单元目标（plan，沿用同一单元 id），再 retry 该单元（它的下游评审和集成会随之重跑），然后结束回合。"
+    } else if g
+        .units
+        .iter()
+        .filter(|x| x.spec.required)
+        .all(|x| x.status == "succeeded")
+    {
+        "全部必需单元已通过：核对评审和集成证据后统一交付主事项。"
+    } else {
+        "其余单元由 Steve 继续调度，你现在无需操作：直接结束回合，下一个单元有结果时 Steve 会再叫醒你。"
+    };
+    format!(
+        "{SYSTEM_NOTICE}协作工作「{}」（{}）{}，第 {}/{} 次尝试。\n摘要：{}\n工作图 revision {}：已通过 {}，执行中 {}，待执行 {}，未通过 {}，已取消 {}（共 {}）。\n下一步：{next}",
+        u.spec.title,
+        u.spec.id,
+        if failed { "未通过" } else { "已通过" },
+        u.attempt,
+        max_attempts,
+        excerpt(&said, WAKE_SUMMARY_CHARS),
+        g.revision,
+        count("succeeded"),
+        count("running") + count("dispatching"),
+        count("pending"),
+        count("failed"),
+        count("cancelled"),
+        g.units.len(),
+    )
 }
 
 /// What keeps a plan from running units at the same time: a graph that is one chain, independent units serialised
@@ -1517,7 +1624,7 @@ pub fn plan_notes(specs: &[UnitSpec], max_parallel: Option<usize>) -> Vec<String
     let mut out = vec![];
     if specs.len() >= 3 && widest <= 1 {
         out.push(format!(
-            "这张工作图的 {} 个单元只能一个接一个执行，没有任何两个能同时进行：它比在你自己的会话里直接做更慢，也更贵（每个单元都要新开会话重读上下文）。把工作拆成互不依赖、能同时进行的部分（同一部分的调查、设计和实现留在一个单元里），或者在本会话里直接完成，只把独立评审交给评审 Bot。",
+            "这张工作图的 {} 个单元只能一个接一个执行，没有任何两个能同时进行：它比在你自己的会话里直接做更慢，也更贵（每个单元都要新开会话重读上下文）。把工作拆成互不依赖、能同时进行的部分（同一部分的调查、设计和实现留在一个单元里），或者不建工作图，直接在本会话里完成。",
             specs.len()
         ));
     }

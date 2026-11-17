@@ -158,14 +158,12 @@ impl Tx<'_> {
         {
             return Ok(Some("没有当前负责人可续跑的有效会话"));
         }
-        if let Some(graph) = self.db().store().workflows().get(&item.id)? {
-            for unit in &graph.units {
-                if self.workflow_busy(unit)? {
-                    return Ok(Some(
-                        "协作工作仍在执行或停止尚未确认，请先暂停工作图并确认停止后再登记前置等待",
-                    ));
-                }
-            }
+        if let Some(graph) = self.db().store().workflows().get(&item.id)?
+            && self.workflow_unsettled(&graph.units)?.is_some()
+        {
+            return Ok(Some(
+                "协作工作仍在执行或停止尚未确认，请先暂停工作图并确认停止后再登记前置等待",
+            ));
         }
         if self
             .db()
