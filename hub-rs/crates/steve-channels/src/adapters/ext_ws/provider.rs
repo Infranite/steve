@@ -670,7 +670,32 @@ pub(crate) fn inbound(
     msg.via = Some(via.into());
     msg.raw = m.raw.clone();
     msg.edited = m.edited_ms;
+    if let Some((text, card)) = body_from_raw(&m.text, &m.raw) {
+        msg.text = text;
+        msg.attachments.extend(card);
+    }
     msg
+}
+
+/// A text the remote could not render (empty, or a bracketed placeholder such as
+/// `[unsupported message]`) read again from `raw` when that is a Feishu / Lark message as its message
+/// API or receive event gives it (§6): rich text and cards keep their words. Only a card's read-only
+/// `card` attachment comes along: media keys in `raw` are the platform's, not this protocol's (§8).
+fn body_from_raw(text: &str, raw: &Value) -> Option<(String, Vec<Value>)> {
+    let t = text.trim();
+    let placeholder = t.is_empty()
+        || (t.starts_with('[') && t.ends_with(']') && t.chars().count() <= 40 && !t.contains('\n'));
+    if !placeholder {
+        return None;
+    }
+    let (body, atts) = crate::adapters::feishu::inbound::reparse(raw)?;
+    if body.trim().is_empty() {
+        return None;
+    }
+    Some((
+        body,
+        atts.into_iter().filter(|a| a["type"] == "card").collect(),
+    ))
 }
 
 /// One page of `messages.history` (§4.3): checked messages, the next page token, whether the
@@ -1239,6 +1264,35 @@ impl ProfileAdapter for ExtWs {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A body the remote could not render is read from a Feishu message in `raw`; a real text, or a
+    /// `raw` of another shape, is left alone.
+    #[test]
+    fn a_placeholder_is_read_again_from_a_feishu_raw() {
+        let post = json!({"msg_type": "post", "body": {"content": json!({"title": "周报", "content": [
+            [{"tag": "text", "text": "本周完成迁移"}],
+            [{"tag": "img", "image_key": "img_k"}]
+        ]}).to_string()}});
+        let (text, atts) = body_from_raw("[unsupported message]", &post).expect("read");
+        assert_eq!(text, "周报\n本周完成迁移\n[图片]");
+        assert!(
+            atts.is_empty(),
+            "platform media keys never come along: {atts:?}"
+        );
+        let card = json!({"msg_type": "interactive", "body": {"content": json!({
+            "title": "示例卡片标题",
+            "elements": [[{"tag": "text", "text": "请在本周内处理"}]]
+        }).to_string()}});
+        let (text, atts) = body_from_raw("", &card).expect("card");
+        assert!(
+            text.contains("示例卡片标题") && text.contains("请在本周内处理"),
+            "{text}"
+        );
+        assert_eq!(atts.len(), 1);
+        assert_eq!(atts[0]["type"], "card");
+        assert!(body_from_raw("你好", &post).is_none());
+        assert!(body_from_raw("[unsupported message]", &json!({})).is_none());
+    }
 
     #[test]
     fn the_identity_must_stay_the_same() {

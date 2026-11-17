@@ -90,6 +90,15 @@ const CASES: &[(&str, &str, &str)] = &[
     ),
     (
         "chan_messages_space_created",
+        "steve-channels context.rs load (before the message)",
+        "SELECT m.id, m.created, m.text FROM chan_messages m LEFT JOIN accounts a ON a.id = m.sender_account_id
+           LEFT JOIN parties p ON p.id = m.sender_party_id LEFT JOIN personas pe ON pe.id = m.persona_id
+          WHERE m.space_id = ?1 AND m.id <> ?2 AND m.status IN ('received', 'sent') AND m.text IS NOT NULL
+            AND (m.text <> '' OR coalesce(json_array_length(m.attachments), 0) > 0) AND m.created <= ?3
+          ORDER BY m.created DESC, m.id DESC LIMIT ?4",
+    ),
+    (
+        "chan_messages_space_created",
         "steve-channels inbound.rs answered_since_people",
         "WITH people AS (
            SELECT coalesce(max(h.created), 0) AS at FROM chan_messages h

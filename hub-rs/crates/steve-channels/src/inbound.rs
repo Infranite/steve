@@ -1109,6 +1109,16 @@ impl Channels {
         // on your own account your words are yours, never someone's to answer
         let own = sender_account.as_deref() == Some(facts.account_id.as_str())
             || (from_owner && mode == Mode::Own);
+        // your own account shows your name, not the id a provider gives for “me” (the composer
+        // tells your lines by ids; this is what the rest of Steve shows)
+        if own && mode == Mode::Own {
+            for a in [Some(facts.account_id.as_str()), sender_account.as_deref()]
+                .into_iter()
+                .flatten()
+            {
+                crate::context::settle_own_name(tx, a)?;
+            }
+        }
         if let Some(s) = &sender
             && s.created
             && !msg.sender.is_bot

@@ -50,6 +50,11 @@ pub struct Space {
     pub is_dm: bool,
     #[serde(default)]
     pub name: String,
+    /// People in the chat (0: unknown).
+    #[serde(default)]
+    pub member_count: i64,
+    #[serde(default)]
+    pub has_external: bool,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -203,9 +208,11 @@ pub fn gold_ids(cases: &[Case]) -> HashSet<String> {
 pub struct Setting {
     /// Your name as the composer's own-account persona uses it.
     pub owner: String,
-    /// What the history shows for your own messages; `None`: the case's sender name. (The production
-    /// history shows your account's display name, which may differ from your name.)
-    pub owner_shown_as: Option<String>,
+    /// Other names you go by (aliases, your accounts' display names), for the owner block. Ids and
+    /// raw handles among them are left out as in production ([`crate::context::raw_name`]).
+    pub aliases: Vec<String>,
+    /// The zone times are told in (UTC when unset).
+    pub tz: Option<chrono_tz::Tz>,
     /// The Bot behind your account (the workspace's main Bot unless the space names one).
     pub bot: Option<BotInfo>,
     pub account_duty: String,
@@ -225,40 +232,113 @@ fn attachments(media: &[String]) -> Value {
     )
 }
 
+/// A case line as the context reads it: whose it is from the case's flags (yours, sent by Steve),
+/// never from a name.
+fn context_msg(l: &Line) -> crate::context::Msg {
+    use crate::context::{Msg, Side};
+    let text = l.text.clone().unwrap_or_default();
+    let side = if l.is_steve_sent {
+        Side::OwnerViaSteve
+    } else if l.is_owner && crate::arbiter::looks_automated(&text) {
+        Side::OwnerAuto
+    } else if l.is_owner {
+        Side::Owner
+    } else {
+        Side::Other
+    };
+    Msg {
+        id: l.id.clone(),
+        at: millis(&l.time).unwrap_or(0),
+        name: crate::context::shown_name([l.sender.as_str()]),
+        side,
+        bot: false,
+        text: crate::context::typed(&text, &attachments(&l.media)),
+        thread_key: l.thread_key.clone(),
+        external_id: None,
+        reply_to: None,
+    }
+}
+
 /// The composer's layers for `case` at its time, as [`compose::gather`] builds them on your own
 /// account: your own-account persona, the Bot behind it, the duties, the sender as Steve knows
-/// nothing of them, and the `history` messages of the space before the target (received or sent,
-/// with text) — then `style`, your style samples ([`style_samples`]).
+/// nothing of them, where and why ([`crate::context::occasion_block`]), your names, and the
+/// conversation before the target ([`crate::context::arrange`]: received or sent lines with a text
+/// or an attachment, `history` lines by people; more than [`compose::HISTORY`] is the wider pass) at
+/// the time Steve answered then ([`observed_latency`]) — then `style`, your style samples
+/// ([`style_samples`]). The case holds nothing said by others after the target, so there is no
+/// “after” block; drafts of Steve's still waiting before the target are listed.
 pub fn layers(case: &Case, s: &Setting, history: usize, style: Vec<String>) -> Layers {
+    use crate::context::{self, Clock, Occasion, Why};
+    use crate::spaces::Mode;
     let target = &case.message;
     let at = millis(&target.time);
     let mut before: Vec<&Line> = case
         .previous_space_messages
         .iter()
         .filter(|l| l.id != target.id)
-        .filter(|l| matches!(l.status.as_str(), "received" | "sent"))
-        .filter(|l| l.text.as_deref().is_some_and(|t| !t.is_empty()))
         .filter(|l| match (millis(&l.time), at) {
             (Some(t), Some(a)) => t <= a,
             _ => true,
         })
         .collect();
     before.sort_by_key(|l| millis(&l.time).unwrap_or(i64::MIN));
-    let from = before.len().saturating_sub(history);
-    let history = before[from..]
+    let visible: Vec<context::Msg> = before
         .iter()
-        .map(|l| {
-            let who = match (&s.owner_shown_as, l.is_owner) {
-                (Some(shown), true) => shown.clone(),
-                _ => l.sender.clone(),
-            };
-            (who, l.text.clone().unwrap_or_default())
-        })
+        .filter(|l| matches!(l.status.as_str(), "received" | "sent"))
+        .filter(|l| l.text.as_deref().is_some_and(|t| !t.is_empty()) || !l.media.is_empty())
+        .map(|l| context_msg(l))
         .collect();
-    let sender = if target.sender.trim().is_empty() {
+    let now = at.unwrap_or(0) + observed_latency(case).unwrap_or(0) * 1000;
+    let clock = Clock {
+        now,
+        tz: s.tz.unwrap_or(chrono_tz::UTC),
+    };
+    let label = |m: &context::Msg| context::label(&m.name, m.side, Mode::Own, &s.owner);
+    let mut t = context_msg(target);
+    t.text = context::typed(
+        target.text.as_deref().unwrap_or_default(),
+        &attachments(&target.media),
+    );
+    let segments = if history > compose::HISTORY {
+        context::SEGMENTS_WIDE
+    } else {
+        context::SEGMENTS
+    };
+    let conv = context::arrange(&t, &visible, &[], history, segments, &label, &clock);
+    let facts = json!({
+        "dm": target.facts.dm.unwrap_or(case.space.is_dm),
+        "mentioned": target.facts.mentioned.unwrap_or(target.mentions_owner),
+        "reply_to_me": target.facts.reply_to_me.unwrap_or(false),
+    });
+    let sender = label(&t);
+    let occasion = context::occasion_block(
+        &Occasion {
+            dm: case.space.is_dm,
+            space_name: case.space.name.clone(),
+            members: case.space.member_count,
+            external: case.space.has_external,
+            sender: sender.clone(),
+            why: Why::of(&facts, false),
+            at: t.at,
+        },
+        Mode::Own,
+        &clock,
+    );
+    let names: Vec<String> = std::iter::once(s.owner.clone())
+        .chain(s.aliases.iter().cloned())
+        .collect();
+    let pending = before
+        .iter()
+        .rev()
+        .filter(|l| l.is_steve_sent && matches!(l.status.as_str(), "draft" | "pending"))
+        .filter_map(|l| Some((millis(&l.time)?, l.text.clone()?)))
+        .take(context::PENDING)
+        .map(|(at, text)| context::pending_line(at, &text, &clock))
+        .collect();
+    let anchor = if sender.trim().is_empty() {
         "某人".to_string()
     } else {
-        target.sender.clone()
+        sender.clone()
     };
     Layers {
         bot: s.bot.clone(),
@@ -266,12 +346,19 @@ pub fn layers(case: &Case, s: &Setting, history: usize, style: Vec<String>) -> L
         style,
         account_duty: s.account_duty.clone(),
         space_duty: s.space_duty.clone(),
-        anchors: format!("发送人：{sender}（Steve 对这个人还不了解）"),
-        history,
-        sender: target.sender.clone(),
-        message: crate::media::with_unread_note(
+        anchors: format!("发送人：{anchor}（Steve 对这个人还不了解）"),
+        occasion,
+        owner_block: context::owner_block(&names, Mode::Own),
+        history: conv.before,
+        chain: conv.chain,
+        pending,
+        sender,
+        message: t.text,
+        // the replay reads no attachment (as when none can be fetched)
+        unreadable: context::unreadable(
             target.text.as_deref().unwrap_or_default(),
             &attachments(&target.media),
+            false,
         ),
         owner: s.owner.clone(),
         ..Layers::default()

@@ -5,7 +5,7 @@
 //! cargo run -p steve-channels --example reply_eval -- <command> [options]
 //!
 //! replay   --cases F --out F --owner NAME [--samples N] [--only id,id] [--concurrency N]
-//!          [--corpus F --style] [--owner-shown-as S] [--route-db PATH [--workspace WS]]
+//!          [--corpus F --style] [--alias A]... [--tz ZONE] [--route-db PATH [--workspace WS]]
 //!          [--harness H] [--models m1,m2] [--effort E] [--dry-run]
 //! baseline --cases F --out F
 //! check    --cases F --labels F --outputs F [--corpus F] [--owner NAME] [--alias A]...
@@ -300,7 +300,7 @@ fn gateway(route: &Route, a: &Args, scratch: &Path) -> (Arc<dyn Gateway>, String
 // ---------------------------------------------------------------- replay
 
 /// The composer's call and what it does with the answer (`Composer::generate`): once, and once more
-/// with the wider history when the model needs more context; still not enough is a question to you.
+/// with the wider history when the model needs more context; then [`compose::after_wide`].
 async fn compose_once(
     gw: &dyn Gateway,
     prompt: &str,
@@ -334,7 +334,11 @@ async fn replay(a: &Args, scratch: &Path) {
     };
     let setting = re::Setting {
         owner: owner.clone(),
-        owner_shown_as: one(a, "owner-shown-as").map(String::from),
+        aliases: list(a, "alias"),
+        tz: one(a, "tz").map(|t| {
+            t.parse::<chrono_tz::Tz>()
+                .unwrap_or_else(|_| fail("--tz: an IANA time zone"))
+        }),
         bot: route.bot.clone(),
         ..Default::default()
     };
@@ -342,7 +346,7 @@ async fn replay(a: &Args, scratch: &Path) {
         .iter()
         .filter(|c| only.is_empty() || only.contains(&c.case_id))
         .collect();
-    let prompts: Vec<(String, String, String)> = todo
+    let prompts: Vec<(String, String, String, bool)> = todo
         .iter()
         .map(|c| {
             let samples = if style {
@@ -351,12 +355,17 @@ async fn replay(a: &Args, scratch: &Path) {
                 vec![]
             };
             let narrow = compose::prompt(&re::layers(c, &setting, HISTORY, samples.clone()));
-            let wide = compose::prompt(&re::layers(c, &setting, HISTORY_WIDE, samples));
-            (c.case_id.clone(), narrow, wide)
+            let wide = re::layers(c, &setting, HISTORY_WIDE, samples);
+            (
+                c.case_id.clone(),
+                narrow,
+                compose::prompt(&wide),
+                wide.unreadable,
+            )
         })
         .collect();
     if one(a, "dry-run").is_some() {
-        for (id, p, _) in &prompts {
+        for (id, p, _, _) in &prompts {
             println!(
                 "{}",
                 json!({"case_id": id, "prompt_chars": p.chars().count()})
@@ -375,7 +384,7 @@ async fn replay(a: &Args, scratch: &Path) {
             .unwrap_or(4),
     ));
     let mut tasks = tokio::task::JoinSet::new();
-    for (id, narrow, wide) in prompts {
+    for (id, narrow, wide, unreadable) in prompts {
         for sample in 0..samples {
             let (gw, sem, owner) = (gw.clone(), sem.clone(), owner.clone());
             let (id, narrow, wide) = (id.clone(), narrow.clone(), wide.clone());
@@ -386,11 +395,8 @@ async fn replay(a: &Args, scratch: &Path) {
                     r = compose_once(gw.as_ref(), &wide, &owner)
                         .await
                         .map(|(o, t, w, m)| {
-                            if o == Outcome::NeedContext {
-                                (Outcome::AskOwner, compose::still_unclear(&t), w, m)
-                            } else {
-                                (o, t, w, m)
-                            }
+                            let (o, t) = compose::after_wide(Mode::Own, o, &t, unreadable);
+                            (o, t, w, m)
                         });
                 }
                 match r {

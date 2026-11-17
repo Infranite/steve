@@ -108,6 +108,7 @@ pub mod cleanup;
 pub mod command_skill;
 pub mod compose;
 pub mod connector;
+pub mod context;
 pub mod conv_record;
 pub mod conversation_card;
 pub mod conversations;

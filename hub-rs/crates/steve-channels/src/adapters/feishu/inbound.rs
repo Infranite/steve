@@ -233,7 +233,14 @@ fn post_text(content: &Value, mentions: &[(String, String)]) -> String {
                     s(el, "language").to_lowercase(),
                     s(el, "text")
                 )),
-                _ => {}
+                // a tag this reader does not know keeps whatever text it carries
+                _ => {
+                    let t = [s(el, "text"), s(el, "content"), s(el, "href")]
+                        .into_iter()
+                        .find(|t| !t.is_empty())
+                        .unwrap_or_default();
+                    line.push_str(t);
+                }
             }
         }
         lines.push(line);
@@ -813,6 +820,22 @@ mod tests {
     }
 
     const BOT: &str = "ou_bot0000000000000000000000000001";
+
+    /// A rich-text tag this reader does not know keeps its text instead of vanishing (a list item,
+    /// a future tag).
+    #[test]
+    fn unknown_post_tags_keep_their_text() {
+        let content = json!({"title": "进展", "content": [
+            [{"tag": "text", "text": "要做的："}],
+            [{"tag": "list_item", "text": "第一步 先备份"}],
+            [{"tag": "future_widget", "content": "第二步 再迁移"}],
+            [{"tag": "img", "image_key": "k"}, {"tag": "unknown_empty"}]
+        ]});
+        assert_eq!(
+            post_text(&content, &[]),
+            "进展\n要做的：\n第一步 先备份\n第二步 再迁移\n[图片]"
+        );
+    }
 
     fn parse(name: &str) -> InboundMessage {
         parse_receive(&fixture(name), BOT)

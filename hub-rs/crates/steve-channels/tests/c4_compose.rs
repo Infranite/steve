@@ -720,6 +720,42 @@ async fn a_failed_generation_still_reaches_you() {
     nothing_sent(&h);
 }
 
+/// A message nobody can read (a voice message, forwarded chat history) that is still not understood
+/// after the wider pass: on a bot it stays a question to you — someone asked the bot and you may
+/// not be in that chat — while on your own account, where you see the message yourself, it is only
+/// recorded.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_message_nobody_can_read_still_reaches_you_on_a_bot() {
+    let h = setup().await;
+    let need = r#"{"outcome": "need_context", "text": "看不到语音的内容", "needs_approval": false, "why": ""}"#;
+    let c = h.oncall.clone();
+    for (id, text) in [("u1", "[audio]"), ("u2", "[forwarded messages]")] {
+        for _ in 0..2 {
+            h.env.gateway.reply(need);
+        }
+        let i = push(&h, &c, msg("C_OPS", id, "ulilei", text, true)).await;
+        let r = i.response.clone().expect("response");
+        assert!(r.out_message_id.is_none(), "{text}: {r:?}");
+        let d = r.decision_id.expect("a question to you");
+        let q = one(&h, "SELECT question FROM decisions WHERE id = ?", &[&d]);
+        assert!(
+            q[0].as_str().unwrap_or_default().contains(compose::UNCLEAR),
+            "{text}: {q:?}"
+        );
+    }
+    // your own account: the same message is recorded, not asked
+    for _ in 0..2 {
+        h.env.gateway.reply(need);
+    }
+    let me = h.me.clone();
+    let i = push(&h, &me, msg("C_OPS", "u3", "ulilei", "[audio]", true)).await;
+    if let Some(r) = i.response {
+        assert!(r.decision_id.is_none(), "{r:?}");
+        assert!(r.out_message_id.is_none(), "{r:?}");
+    }
+    nothing_sent(&h);
+}
+
 /// The owner's own message in a group becomes the user's goal as they wrote it; only the
 /// conversation before it (other people's words) is quoted as data for the agent.
 #[tokio::test(flavor = "multi_thread")]
@@ -1476,4 +1512,396 @@ async fn a_thread_reply_by_the_raiser_goes_to_its_item() {
         .expect("response");
     assert_ne!(r.by, steve_channels::By::Thread { item });
     assert_eq!(supplements(&h).len(), 1);
+}
+
+/// A model that reads the images it is given and says what it saw ([`compose::DESCRIBE`]).
+struct Describing;
+#[async_trait]
+impl compose::PinnedModel for Describing {
+    async fn run(
+        &self,
+        _: &str,
+        _: &str,
+        _: std::time::Duration,
+    ) -> Result<steve_modules::GatewayOut, String> {
+        panic!("images are given")
+    }
+    async fn run_with_images(
+        &self,
+        _: &str,
+        prompt: &str,
+        images: &[Value],
+        _: std::time::Duration,
+    ) -> Result<steve_modules::GatewayOut, String> {
+        assert!(!images.is_empty() && prompt.contains(compose::DESCRIBE));
+        Ok(steve_modules::GatewayOut {
+            text: r#"{"outcome": "skip", "text": "只是给我看图", "described": "一张部署失败的报错截图"}"#
+                .into(),
+            ..Default::default()
+        })
+    }
+}
+
+/// What the composer read in an image is kept with the message, and a later conversation shows it
+/// instead of an unread image (#203).
+#[tokio::test(flavor = "multi_thread")]
+async fn what_was_read_in_an_image_is_reused_later() {
+    let h = setup().await;
+    let c = h.oncall.clone();
+    let mut m = msg("C_OPS", "img-1", "ulilei", "[image]", false);
+    m.attachments = vec![json!({"type":"image","key":"img_fixture"})];
+    let first = push(&h, &c, m).await;
+    exec(&h, "UPDATE bots SET model='fixture-model' WHERE id='ops'");
+    let plan =
+        h.ch.store()
+            .reader(|c| steve_channels::flow_actions::plan_of(c, WS, &first.message_id))
+            .unwrap();
+    compose::Composer::new()
+        .media(Arc::new(MessageMedia))
+        .pinned(Arc::new(Describing))
+        .generate(&h.ch, &plan, &compose::ComposeOpts::default())
+        .await
+        .unwrap();
+    let atts: Value = serde_json::from_str(
+        one(
+            &h,
+            "SELECT attachments FROM chan_messages WHERE id = ?",
+            &[&first.message_id],
+        )[0]
+        .as_str()
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        atts[0][steve_channels::context::DESCRIBED],
+        "一张部署失败的报错截图"
+    );
+    assert_eq!(
+        atts[0]["key"], "img_fixture",
+        "the attachment stays fetchable"
+    );
+
+    let next = push(&h, &c, msg("C_OPS", "img-2", "ulilei", "这个怎么办", false)).await;
+    let plan =
+        h.ch.store()
+            .reader(|c| steve_channels::flow_actions::plan_of(c, WS, &next.message_id))
+            .unwrap();
+    let l = h
+        .env
+        .store()
+        .reader(|c| {
+            compose::gather(
+                c,
+                h.ch.knowledge_store(),
+                &plan,
+                &Default::default(),
+                h.ch.now(),
+            )
+        })
+        .unwrap();
+    let lines: Vec<String> = l.history.iter().map(|s| s.render()).collect();
+    assert!(
+        lines
+            .iter()
+            .any(|t| t.ends_with("李雷：[图片（之前读过）：一张部署失败的报错截图]")),
+        "{lines:?}"
+    );
+}
+
+/// On your own account the composer reads the conversation as #203 asks: your lines by your
+/// account and contact ids (your account's display name is a number), what Steve sent for you, the
+/// stretches of talk with a gap between them, bot runs folded, where and why, what came after the
+/// message and the drafts still waiting — and your account gets your name back when you speak.
+#[tokio::test(flavor = "multi_thread")]
+async fn your_own_account_reads_the_conversation_by_ids_and_time() {
+    let h = setup().await;
+    h.env.gateway.script(
+        H_SAFETY,
+        r#"{"outcome": "skip", "text": "玩笑", "why": "玩笑"}"#,
+    );
+    let me = h.me.clone();
+    let account = one(
+        &h,
+        "SELECT account_id FROM connections WHERE id = ?",
+        &[&me],
+    )[0]
+    .as_str()
+    .unwrap()
+    .to_string();
+    exec(
+        &h,
+        &format!("UPDATE accounts SET display_name = '7300000000000000001' WHERE id = '{account}'"),
+    );
+    // the space, by someone not addressing you (recorded, nothing composed)
+    let opened = push(&h, &me, msg("C_DEV", "x0", "ulilei", "开个头", false)).await;
+    let space = opened.space_id.clone();
+    let lilei = one(
+        &h,
+        "SELECT sender_account_id FROM chan_messages WHERE id = ?",
+        &[&opened.message_id],
+    )[0]
+    .as_str()
+    .unwrap()
+    .to_string();
+    let bot = one(
+        &h,
+        "SELECT account_id FROM connections WHERE id = ?",
+        &[&h.oncall],
+    )[0]
+    .as_str()
+    .unwrap()
+    .to_string();
+    let now = h.ch.now();
+    let row = |id: &str,
+               ago_min: i64,
+               dir: &str,
+               status: &str,
+               acct: &str,
+               text: &str,
+               atts: &str| {
+        format!(
+            "INSERT INTO chan_messages (id, workspace_id, space_id, external_id, direction, sender_account_id, on_behalf, text, attachments, status, created)
+             VALUES ('{id}', '{WS}', '{space}', '{id}', '{dir}', '{acct}', 'none', '{text}', '{atts}', '{status}', {});",
+            now - ago_min * 60_000 - 5_000
+        )
+    };
+    exec(
+        &h,
+        &[
+            row("h0", 180, "in", "received", &lilei, "上一段说的事", "[]"),
+            row("h1", 13, "in", "received", &bot, "P2 告警 1", "[]"),
+            row("h2", 12, "in", "received", &bot, "P2 告警 2", "[]"),
+            row(
+                "h3",
+                11,
+                "in",
+                "received",
+                &lilei,
+                "[image]",
+                r#"[{"type":"image","key":"k","described":"一张监控曲线截图"}]"#,
+            ),
+            row(
+                "h4",
+                10,
+                "in",
+                "received",
+                &account,
+                "@李雷 加个定时就好",
+                "[]",
+            ),
+            row("h5", 9, "out", "sent", &account, "收到", "[]"),
+            row("h6", 8, "out", "draft", &account, "还没发的草稿", "[]"),
+            row("h7", 7, "out", "failed", &account, "发失败的", "[]"),
+        ]
+        .concat(),
+    );
+    // the message, addressed to you
+    let target = push(
+        &h,
+        &me,
+        msg("C_DEV", "t1", "uhan", "@你 关键是它不顶用", true),
+    )
+    .await;
+    let p = reply_prompts(&h).pop().expect("composed");
+    assert!(
+        p.contains(compose::H_OCCASION) && p.contains(compose::H_OWNER),
+        "{p}"
+    );
+    assert!(
+        !p.contains("7300000000000000001"),
+        "an id is never a name\n{p}"
+    );
+
+    // something said after it, before drafting (the message's time is the real clock's)
+    let t_created = one(
+        &h,
+        "SELECT created FROM chan_messages WHERE id = ?",
+        &[&target.message_id],
+    )[0]
+    .as_i64()
+    .unwrap();
+    exec(
+        &h,
+        &format!(
+            "INSERT INTO chan_messages (id, workspace_id, space_id, external_id, direction, sender_account_id, on_behalf, text, attachments, status, created)
+             VALUES ('a1', '{WS}', '{space}', 'a1', 'in', '{lilei}', 'none', '补充一句', '[]', 'received', {});",
+            t_created + 1_000
+        ),
+    );
+    let plan =
+        h.ch.store()
+            .reader(|c| steve_channels::flow_actions::plan_of(c, WS, &target.message_id))
+            .unwrap();
+    let l = h
+        .env
+        .store()
+        .reader(|c| {
+            compose::gather(
+                c,
+                h.ch.knowledge_store(),
+                &plan,
+                &Default::default(),
+                h.ch.now(),
+            )
+        })
+        .unwrap();
+    let you = l.owner.clone();
+    let lines: Vec<String> = l.history.iter().map(|s| s.render()).collect();
+    let has = |s: &str| lines.iter().any(|t| t.contains(s));
+    assert!(
+        has(&format!("{you}（我）：@李雷 加个定时就好")),
+        "{lines:#?}"
+    );
+    assert!(
+        has(&format!("{you}（我，经 Steve 发出）：收到")),
+        "{lines:#?}"
+    );
+    assert!(has("[2 条机器人消息，最后一条：P2 告警 2]"), "{lines:#?}");
+    assert!(
+        has("李雷：[图片（之前读过）：一张监控曲线截图]"),
+        "{lines:#?}"
+    );
+    assert!(has("……隔了 2 小时……"), "{lines:#?}");
+    assert!(!has("还没发的草稿") && !has("发失败的"), "{lines:#?}");
+    assert_eq!(l.pending.len(), 1);
+    assert!(l.pending[0].ends_with("还没发的草稿"));
+    assert_eq!(l.after.len(), 1);
+    assert!(l.after[0].render().ends_with("李雷：补充一句"));
+    assert_eq!(l.sender, "韩梅梅");
+    assert!(
+        l.occasion.starts_with("群聊「Steve 开发群」"),
+        "{}",
+        l.occasion
+    );
+    assert!(
+        l.occasion.contains("韩梅梅 在群里 @ 了我"),
+        "{}",
+        l.occasion
+    );
+    assert!(l.owner_block.contains(&you) && !l.owner_block.contains("730000"));
+
+    // you speak: your account shows your name again
+    push(&h, &me, msg("C_DEV", "o1", "upx", "好", false)).await;
+    let shown = one(
+        &h,
+        "SELECT display_name FROM accounts WHERE id = ?",
+        &[&account],
+    )[0]
+    .as_str()
+    .unwrap()
+    .to_string();
+    assert!(!steve_channels::context::raw_name(&shown), "{shown}");
+}
+
+/// On your own account a draft waits for your approval: what Steve sent for you is placed at when
+/// it was sent, not when it was drafted. One drafted long before and sent just before the message
+/// sits last in the history (no false gap ahead of it); one drafted before the message but sent
+/// after it is among the lines after the message.
+#[tokio::test(flavor = "multi_thread")]
+async fn what_steve_sent_for_you_is_placed_when_it_was_sent() {
+    let h = setup().await;
+    h.env.gateway.script(
+        H_SAFETY,
+        r#"{"outcome": "skip", "text": "玩笑", "why": "玩笑"}"#,
+    );
+    let me = h.me.clone();
+    let account = one(
+        &h,
+        "SELECT account_id FROM connections WHERE id = ?",
+        &[&me],
+    )[0]
+    .as_str()
+    .unwrap()
+    .to_string();
+    let opened = push(&h, &me, msg("C_DEV", "x0", "ulilei", "开个头", false)).await;
+    let space = opened.space_id.clone();
+    let lilei = one(
+        &h,
+        "SELECT sender_account_id FROM chan_messages WHERE id = ?",
+        &[&opened.message_id],
+    )[0]
+    .as_str()
+    .unwrap()
+    .to_string();
+    // the message is stamped by the real clock (the modules' clock is frozen at setup)
+    let now = steve_store::now();
+    let min = 60_000;
+    let row = |id: &str, dir: &str, acct: &str, text: &str, created: i64, sent: Option<i64>| {
+        format!(
+            "INSERT INTO chan_messages (id, workspace_id, space_id, external_id, direction, sender_account_id, on_behalf, text, attachments, status, created, sent)
+             VALUES ('{id}', '{WS}', '{space}', '{id}', '{dir}', '{acct}', 'none', '{text}', '[]', '{}', {created}, {});",
+            if dir == "out" { "sent" } else { "received" },
+            sent.map_or("NULL".to_string(), |s| s.to_string())
+        )
+    };
+    exec(
+        &h,
+        &[
+            row(
+                "d0",
+                "out",
+                &account,
+                "晚点才发的回复",
+                now - 100 * min,
+                Some(now - 5 * min),
+            ),
+            row("b0", "in", &lilei, "先问一句", now - 60 * min, None),
+            row("b1", "in", &lilei, "中间的话", now - 40 * min, None),
+            row(
+                "d1",
+                "out",
+                &account,
+                "这条之后才发的",
+                now - 15 * min,
+                Some(now + 10 * min),
+            ),
+            row("b2", "in", &lilei, "又一句", now - 20 * min, None),
+        ]
+        .concat(),
+    );
+    let target = push(&h, &me, msg("C_DEV", "t1", "uhan", "@你 那就这样", true)).await;
+    let plan =
+        h.ch.store()
+            .reader(|c| steve_channels::flow_actions::plan_of(c, WS, &target.message_id))
+            .unwrap();
+    let l = h
+        .env
+        .store()
+        .reader(|c| {
+            compose::gather(
+                c,
+                h.ch.knowledge_store(),
+                &plan,
+                &Default::default(),
+                h.ch.now(),
+            )
+        })
+        .unwrap();
+    let you = l.owner.clone();
+    let lines: Vec<String> = l.history.iter().map(|s| s.render()).collect();
+    let at = |s: &str| {
+        lines
+            .iter()
+            .position(|t| t.contains(s))
+            .unwrap_or_else(|| panic!("{s} missing: {lines:#?}"))
+    };
+    assert!(
+        at("先问一句") < at("中间的话")
+            && at("中间的话") < at("又一句")
+            && at("又一句") < at(&format!("{you}（我，经 Steve 发出）：晚点才发的回复")),
+        "{lines:#?}"
+    );
+    assert!(!lines.iter().any(|t| t.contains("隔了")), "{lines:#?}");
+    assert!(
+        !lines.iter().any(|t| t.contains("这条之后才发的")),
+        "{lines:#?}"
+    );
+    assert_eq!(l.after.len(), 1, "{:#?}", l.after);
+    assert!(
+        l.after[0]
+            .render()
+            .ends_with(&format!("{you}（我，经 Steve 发出）：这条之后才发的")),
+        "{:#?}",
+        l.after
+    );
 }

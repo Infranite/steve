@@ -5,7 +5,8 @@
 
 use std::collections::{BTreeMap, HashSet};
 
-use steve_channels::compose::{self, H_HISTORY, H_STYLE, HISTORY};
+use steve_channels::compose::{self, H_HISTORY, H_OCCASION, H_OWNER, H_PENDING, H_STYLE, HISTORY};
+use steve_channels::context::Shown;
 use steve_channels::deliver::{SYSTEM_TEXTS, system_text_in};
 use steve_channels::reply_eval::{
     self as re, Case, CheckParams, Label, Output, OwnerLine, Setting, Situation,
@@ -72,33 +73,51 @@ fn the_fixtures_cover_twelve_patterns_with_a_label_each() {
     assert!(labels().iter().any(|l| l.correct_outcome != "skip"));
 }
 
+/// The rendered lines of a history.
+fn rendered(xs: &[Shown]) -> Vec<String> {
+    xs.iter().map(Shown::render).collect()
+}
+
 #[test]
 fn the_layers_are_the_composers_at_the_cases_time() {
     let c = case("fx-03-owner-replied-after");
     let l = re::layers(&c, &setting(), HISTORY, vec![]);
     assert_eq!(l.persona, compose::self_layer("主人"));
     assert_eq!(l.sender, "B");
-    // the history: what was there before the message, received or sent, with its text
-    assert_eq!(l.history, vec![("B".to_string(), "[image]".to_string())]);
+    // the history: what was there before the message, received or sent, with its text — the
+    // provider's placeholder as a typed note
+    assert_eq!(l.history.len(), 1);
+    assert!(
+        rendered(&l.history)[0].ends_with("B：[图片：未读取内容]"),
+        "{:?}",
+        rendered(&l.history)
+    );
     let p = compose::prompt(&l);
-    assert!(p.contains(H_HISTORY));
+    assert!(p.contains(H_HISTORY) && p.contains(H_OCCASION) && p.contains(H_OWNER));
+    assert!(p.contains("私聊：B 和我一对一。"), "{p}");
     // no style block unless the replay gives samples: the production prompt is unchanged
     assert!(!p.contains(H_STYLE));
 
-    // drafts, failed sends and Steve's own lines are not in the history, as in the store's query
+    // drafts, failed sends and Steve's own lines are not in the history, as in the store's query;
+    // a draft still waiting is listed apart
     let mut c = case("fx-02-dm-burst-owner-live");
     let mut draft = c.previous_space_messages[0].clone();
     draft.status = "draft".into();
+    draft.is_steve_sent = true;
+    draft.is_owner = false;
     draft.text = Some("好。".into());
     c.previous_space_messages.push(draft);
     let l = re::layers(&c, &setting(), HISTORY, vec![]);
     assert!(
-        l.history.iter().all(|(_, t)| t != "好。"),
+        rendered(&l.history).iter().all(|t| !t.ends_with("好。")),
         "{:?}",
-        l.history
+        rendered(&l.history)
     );
     assert_eq!(l.history.len(), 3);
-    // only the last `history` messages
+    assert_eq!(l.pending.len(), 1);
+    assert!(l.pending[0].ends_with("好。"));
+    assert!(compose::prompt(&l).contains(H_PENDING));
+    // only the last `history` lines by people
     assert_eq!(re::layers(&c, &setting(), 2, vec![]).history.len(), 2);
 }
 
@@ -108,22 +127,34 @@ fn an_unread_image_is_said_to_be_unread() {
     c.message.media = vec!["image".into()];
     let l = re::layers(&c, &setting(), HISTORY, vec![]);
     assert!(l.message.ends_with("[图片：未读取内容]"), "{}", l.message);
+    assert!(compose::prompt(&l).contains("不要猜里面是什么"));
 }
 
-/// Pattern 12: your account's display name is a number. The production history shows it; the replay
-/// shows what it is told to, so both can be measured.
+/// Pattern 12: your account's display name is a number. Your lines read as you, by the case's flags
+/// (in production: by your account and contact ids), never by that name; ids are not among your
+/// names.
 #[test]
-fn your_lines_can_be_shown_as_the_store_shows_them() {
-    let c = case("fx-12-numeric-owner-name");
+fn your_lines_read_as_you_whatever_your_display_name() {
+    let mut c = case("fx-12-numeric-owner-name");
+    for l in c.previous_space_messages.iter_mut().filter(|l| l.is_owner) {
+        l.sender = "7300000000000000001".into();
+    }
     let s = Setting {
-        owner_shown_as: Some("7300000000000000001".into()),
+        aliases: vec!["7300000000000000001".into(), "Lee".into()],
         ..setting()
     };
     let l = re::layers(&c, &s, HISTORY, vec![]);
-    assert_eq!(l.history[0].0, "7300000000000000001");
-    assert_eq!(
-        re::layers(&c, &setting(), HISTORY, vec![]).history[0].0,
-        "主人"
+    let lines = rendered(&l.history);
+    assert!(
+        lines.iter().any(|t| t.contains("主人（我）：")),
+        "{lines:?}"
+    );
+    let p = compose::prompt(&l);
+    assert!(!p.contains("730000000"), "{p}");
+    assert!(
+        l.owner_block.starts_with("我在这里的名字：主人、Lee。"),
+        "{}",
+        l.owner_block
     );
 }
 
