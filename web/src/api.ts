@@ -62,6 +62,7 @@ export type RDevice = { id: string; name: string; roles: string[]; os: string; v
 export type RBrowse = { path: string; parent: string | null; exists: boolean; denied: boolean; git: boolean; dirs: { name: string; path: string; git: boolean }[]; more: boolean }
 export type RBuild = { version: string; commit: string; target: string }
 export type RUpgradePolicy = "auto" | "notify" | "off"
+export type RUpgradeDefault = { policy: RUpgradePolicy; hub?: RBuild | null; drain_secs?: number | null; health_secs?: number | null }
 /** one Hub-managed upgrade of a Node, as the Hub records it */
 export type RNodeUpgradeRun = { operation_id: string; version: string; from_version?: string | null; phase: string; error?: string | null; requested_by: string; force: boolean; created: number; updated: number }
 /** what the Hub knows of a Node's build and whether it can upgrade it (`reason`: outdated | current | manual | unknown | hub_dev_build) */
@@ -328,8 +329,12 @@ export const api = {
   nodeOwnerContext: (id: string, owner_context: "inherit" | "on" | "off") => post<{ ok: boolean }>(`/nodes/${encodeURIComponent(id)}/context`, { owner_context }),
   nodeUpgradePolicy: (id: string, policy: RUpgradePolicy | "") => post<{ ok: boolean }>(`/nodes/${encodeURIComponent(id)}/upgrade_policy`, { policy }),
   upgradeNode: (id: string, force = false) => post<{ operation: string }>(`/nodes/${encodeURIComponent(id)}/upgrade`, { force }),
-  nodeUpgradeDefault: () => get<{ policy: RUpgradePolicy; hub?: RBuild | null }>("/nodes/upgrade-default"),
+  /** `drain_secs`: how long an upgrade waits for running turns; `health_secs`: how long the new release has to link before the Node goes back */
+  nodeUpgradeDefault: () => get<RUpgradeDefault>("/nodes/upgrade-default"),
   setNodeUpgradeDefault: (policy: RUpgradePolicy) => req<{ policy: RUpgradePolicy }>("PUT", "/nodes/upgrade-default", { policy }),
+  /** the Hub's default for whether a Node owner's sessions load the owner's personal agent config there (a Node may choose for itself) */
+  nodeContextDefault: () => get<{ owner_context: "on" | "off" }>("/node-context"),
+  setNodeContextDefault: (owner_context: "on" | "off") => req<{ owner_context: "on" | "off" }>("PUT", "/node-context", { owner_context }),
   /* the raw bytes as the body; the Hub decides the type from the content */
   upload: async (f: Blob, name: string): Promise<RFile> => {
     const r = await fetch(hubUrl("/api/files?name=" + encodeURIComponent(name)), { method: "POST", body: f, headers: wsHeaders({ "content-type": "application/octet-stream" }), credentials: "include" })

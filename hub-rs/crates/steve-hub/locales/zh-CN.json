@@ -189,6 +189,8 @@
   "hub.node.disk_low": "设备「%{name}」的项目磁盘只剩 %{free}，快满了。可以在那台机器上清理一下，或在设备页查看状态。",
   "hub.node.tag_unmet": "没有可用的设备带标签「%{tag}」，这个会话按通常的方式安排",
   "hub.node.tags_owner_only": "仅实例管理员可以修改设备标签",
+  "hub.node.context_owner_only": "仅实例管理员可以修改 Hub 的个人 agent 配置默认值",
+  "hub.node.context_bad": "只能选择加载或不加载",
   "hub.node.tag_bad": "标签只能包含字母、数字和 - _ . :，最长 40 个字符，最多 32 个",
   "hub.node.off": "这个 Hub 没有开启远程 Node（STEVE_NODE_LISTEN=0，或是只读的数据副本）",
   "hub.node.handed_over": "设备「%{name}」已离线 %{minutes} 分钟，等它处理的消息已转到新会话继续",

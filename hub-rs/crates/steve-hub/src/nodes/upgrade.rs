@@ -793,14 +793,25 @@ pub async fn start(
 }
 
 /// `GET /api/nodes/upgrade-default`, `PUT` `{policy}`: the Hub's default for Nodes without their
-/// own policy (`auto` | `notify` | `off`).
+/// own policy (`auto` | `notify` | `off`); the GET also says how long an upgrade waits
+/// (`drain_secs`, `health_secs`).
 pub async fn get_default(State(svc): State<Arc<NodeService>>, _caller: Caller) -> Response {
     let store = svc.store.clone();
     match tokio::task::spawn_blocking(move || store.reader(store_nodes::upgrade_default)).await {
-        Ok(Ok(p)) => json_response(
-            200,
-            &json!({ "policy": p, "hub": svc.upgrades.get().and_then(|u| u.hub().cloned()) }),
-        ),
+        Ok(Ok(p)) => {
+            let up = svc.upgrades.get();
+            json_response(
+                200,
+                &json!({
+                    "policy": p,
+                    "hub": up.and_then(|u| u.hub().cloned()),
+                    // how long an upgrade waits for running turns, and for the new release to link
+                    // before the Node goes back (STEVE_NODE_UPGRADE_DRAIN_SECS / _HEALTH_SECS)
+                    "drain_secs": up.map(|u| u.timing.drain.as_secs()),
+                    "health_secs": up.map(|u| u.timing.health.as_secs()),
+                }),
+            )
+        }
         _ => err(500, "internal"),
     }
 }

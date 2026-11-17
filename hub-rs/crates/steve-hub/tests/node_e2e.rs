@@ -1701,6 +1701,28 @@ async fn node_tags_send_work_where_it_fits() {
     let (_, v) = c.call("GET", "/api/node-tags", None).await;
     assert_eq!(v["tags"]["local"], json!(["gpu", "macos"]));
 
+    // the Hub's default for loading a Node owner's personal agent config: on until the owner says
+    let (s, v) = c.call("GET", "/api/node-context", None).await;
+    assert_eq!((s, v["owner_context"].clone()), (200, json!("on")), "{v}");
+    let (s, _) = c
+        .call(
+            "PUT",
+            "/api/node-context",
+            Some(json!({"owner_context": "maybe"})),
+        )
+        .await;
+    assert_eq!(s, 400);
+    let (s, v) = c
+        .call(
+            "PUT",
+            "/api/node-context",
+            Some(json!({"owner_context": "off"})),
+        )
+        .await;
+    assert_eq!((s, v["owner_context"].clone()), (200, json!("off")), "{v}");
+    let (_, v) = c.call("GET", "/api/node-context", None).await;
+    assert_eq!(v["owner_context"], json!("off"));
+
     let sid = c.item(&h, "标签验收 @say hello-tags-5T").await;
     let item = h
         .one("SELECT item_id FROM sessions WHERE id=?", &sid)

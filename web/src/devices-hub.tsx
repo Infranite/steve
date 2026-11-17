@@ -4,7 +4,7 @@
  * back and compared, never taken for success, and a draft is kept until it is saved or discarded. */
 import "./hub-settings.css"
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react"
-import { KeyRoundIcon, MonitorIcon, NetworkIcon, ServerIcon, SquareTerminalIcon } from "lucide-react"
+import { KeyRoundIcon, MonitorIcon, NetworkIcon, ServerIcon, SlidersHorizontalIcon, SquareTerminalIcon } from "lucide-react"
 import { useT } from "@/i18n"
 import { date, num } from "@/i18n/format"
 import { Button } from "@/components/ui/button"
@@ -23,11 +23,11 @@ import { access, type Oidc } from "@/access-api"
 import { currentHub, setHubNavigationGuard } from "@/hub"
 import { HubChooser, useHubs, useHubAddress } from "@/hub-ui"
 import { hubDraftErrors, parseHubSnapshot, normalizeHubDraft, readHubInfo, writeHubInfo, UnsupportedHubMetadata, type HubDraft, type HubInfo, type HubMetadata, type HubSnapshot } from "@/hub-management-api"
-import { agoText, disks, loadPct, memPct, one, routeLabel, LOCAL_NODE } from "@/device-model"
-import { useDevices } from "@/devices-data"
-import { useVitals } from "@/devices-vitals"
+import { agoText, disks, hostLine, hostOf, loadPct, memPct, one, routeLabel, LOCAL_NODE } from "@/device-model"
+import { useDevices, useNodeVitals } from "@/devices-data"
 import { deviceGroups } from "@/devices-work"
 import { Chip, DCard, DRow, Figure } from "@/devices-ui"
+import { ContextDefaultRow } from "@/devices-context"
 
 const draftOf = (m: HubMetadata): HubDraft => ({ display_name: m.display_name, purpose_note: m.purpose_note })
 const equal = (a: HubDraft, b: HubDraft) => JSON.stringify(normalizeHubDraft(a)) === JSON.stringify(normalizeHubDraft(b))
@@ -43,7 +43,7 @@ export function HubTab() {
   return (
     <div className="grid items-start gap-4 lg:grid-cols-[minmax(0,1.25fr)_minmax(0,1fr)]" data-devices-hub>
       <div className="flex min-w-0 flex-col gap-4"><HubCard route={v?.route ?? null} /><HubMachine /></div>
-      <div className="flex min-w-0 flex-col gap-4"><RemoteNodes /><SignIn /></div>
+      <div className="flex min-w-0 flex-col gap-4"><RemoteNodes /><NodeDefaults /><SignIn /></div>
     </div>
   )
 }
@@ -207,13 +207,12 @@ function HubMachine() {
   const t = useT(), { views } = useDevices()
   useStore()
   const local = views.find(v => v.local)
-  const { value: v, stale } = useVitals(LOCAL_NODE)
+  const { value: v, stale } = useNodeVitals(LOCAL_NODE)
   const l = v?.latest, lp = loadPct(l), mp = memPct(l), disk = disks(l)[0]
   const d = local?.device
   const ask = d && deviceWorkEvidence().loaded ? deviceGroups(d.id).attention.length : 0
-  /* the system as the device row says it (it may name the memory already), then the cores and memory it reported */
-  const os = d?.os ?? "", gb = l?.mem_total ? t("devices:vitals.gb", { n: Math.round(l.mem_total / 2 ** 30) }) : ""
-  const facts = [os, l?.cpus ? t("devices:hub.cores", { n: l.cpus }) : "", gb && !os.includes(gb) ? gb : ""].filter(Boolean).join(" · ")
+  /* the system as its Node or the device row says it, then the cores and memory it reported */
+  const facts = local ? hostLine(hostOf(local, l)) : ""
   return (
     <DCard icon={<MonitorIcon />} title={t("devices:hub.machine")} sub={facts || d?.name} data-hub-machine>
       <div className="grid grid-cols-2 gap-x-6 gap-y-4 px-5 pb-4 sm:grid-cols-3">
@@ -241,11 +240,9 @@ function HubMachine() {
 function RemoteNodes() {
   const t = useT(), { nodesRead, nodesError, nodesOff } = useDevices()
   const [tailcat, setTailcat] = useState<RTailcat | null>(null), [busy, setBusy] = useState(false)
-  const [policy, setPolicy] = useState<RUpgradePolicy | null>(null)
   useEffect(() => {
     let live = true
     void api.nodesTailcat().then(v => { if (live) setTailcat(v) }).catch(() => {})
-    void api.nodeUpgradeDefault().then(v => { if (live) setPolicy(v.policy) }).catch(() => {})
     return () => { live = false }
   }, [])
   /* the Node registry is the owner's: without it there is nothing here to read */
@@ -255,11 +252,6 @@ function RemoteNodes() {
     try { setTailcat(await api.setNodesTailcat(on)) }
     catch (e) { toast((e as Error).message); void api.nodesTailcat().then(setTailcat).catch(() => {}) }
     finally { setBusy(false) }
-  }
-  const setDefault = async (v: string) => {
-    const prev = policy
-    setPolicy(v as RUpgradePolicy)
-    try { setPolicy((await api.setNodeUpgradeDefault(v as RUpgradePolicy)).policy) } catch (e) { setPolicy(prev); toast((e as Error).message) }
   }
   return (
     <DCard icon={<ServerIcon />} title={t("devices:hub.remote")} sub={t("devices:hub.remoteSub")} data-hub-remote>
@@ -271,10 +263,32 @@ function RemoteNodes() {
           sub={tailcat.available || tailcat.enabled ? <>{t("devices:hub.tailcatSub")}{tailcat.enabled && tailcat.address && <span className="type-code">{tailcat.address}</span>}{tailcat.enabled && !tailcat.running && tailcat.error && <span className="text-destructive">{tailcat.error}</span>}</> : t("devices:hub.tailcatMissing")}>
           {(tailcat.available || tailcat.enabled) && <>{busy && <Spinner className="size-3.5 text-muted-foreground" />}<Switch checked={tailcat.enabled} disabled={busy} onCheckedChange={(on) => void toggle(on)} aria-label={t("devices:hub.tailcat")} data-tailcat-switch /></>}
         </DRow>}
+      </div>
+    </DCard>
+  )
+}
+
+/** what every Node follows unless it chooses for itself: the upgrade policy and the personal agent config (the
+ *  instance owner sets them; anyone else sees them) */
+function NodeDefaults() {
+  const t = useT(), { upgradeDefault, contextDefault, reloadDefaults } = useDevices()
+  useStore()
+  const [policy, setPolicy] = useState<RUpgradePolicy | null>(upgradeDefault?.policy ?? null)
+  useEffect(() => setPolicy(upgradeDefault?.policy ?? null), [upgradeDefault?.policy])
+  if (!policy && !contextDefault) return null
+  const setDefault = async (v: string) => {
+    const prev = policy
+    setPolicy(v as RUpgradePolicy)
+    try { setPolicy((await api.setNodeUpgradeDefault(v as RUpgradePolicy)).policy); reloadDefaults() } catch (e) { setPolicy(prev); toast((e as Error).message) }
+  }
+  return (
+    <DCard icon={<SlidersHorizontalIcon />} title={t("devices:hub.defaults")} sub={t("devices:hub.defaultsSub")} data-hub-defaults>
+      <div className="border-t border-border/70">
         {policy && <DRow title={t("devices:hub.upgradeDefault")} sub={t("devices:hub.upgradeDefaultSub")} className="flex-wrap">
-          <Select align="end" testId="node-upgrade-default" label={t("devices:hub.upgradeDefault")} value={policy} onChange={(v) => void setDefault(v)}
+          <Select align="end" testId="node-upgrade-default" label={t("devices:hub.upgradeDefault")} value={policy} onChange={(v) => void setDefault(v)} disabled={!st.owner}
             options={(["auto", "notify", "off"] as const).map(v => ({ v, l: t(`device:upgrade.policy.${v}`) }))} />
         </DRow>}
+        <ContextDefaultRow editable={st.owner} />
       </div>
     </DCard>
   )

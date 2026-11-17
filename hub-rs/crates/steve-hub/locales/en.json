@@ -189,6 +189,8 @@
   "hub.node.disk_low": "Device “%{name}” has only %{free} left on its project disk. Free some space on that machine, or check it on the devices page.",
   "hub.node.tag_unmet": "No available device has the tag “%{tag}”; this session is placed as usual",
   "hub.node.tags_owner_only": "Only the instance owner can change device tags",
+  "hub.node.context_owner_only": "Only the instance owner can change the Hub's default for personal agent config",
+  "hub.node.context_bad": "Choose on or off",
   "hub.node.tag_bad": "A tag is letters, digits and - _ . : only, up to 40 characters; 32 tags at most",
   "hub.node.off": "Remote Nodes are off on this Hub (STEVE_NODE_LISTEN=0, or a read-only copy of its data)",
   "hub.node.handed_over": "Device “%{name}” has been offline for %{minutes} minutes; the messages waiting for it went on in a new session",

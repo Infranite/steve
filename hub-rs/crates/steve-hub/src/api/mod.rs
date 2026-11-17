@@ -12,6 +12,7 @@ mod files;
 mod hub_metadata;
 mod items;
 mod misc;
+mod node_context;
 mod node_env;
 mod node_tags;
 pub(crate) mod outputs;
@@ -770,6 +771,10 @@ pub fn router(st: AppState, modules: Router) -> Router {
         .route(
             "/hub-metadata",
             get(hub_metadata::get).put(hub_metadata::put),
+        )
+        .route(
+            "/node-context",
+            get(node_context::get).put(node_context::put),
         )
         .route("/node-tags", get(node_tags::list))
         .route("/node-tags/{node}", put(node_tags::set))

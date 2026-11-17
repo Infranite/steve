@@ -2,6 +2,7 @@ import assert from "node:assert/strict"
 import { test } from "node:test"
 import {
   nodeViews, findNode, nodeStatus, statusText, loadPct, memPct, disks, fillTone, agoText, routeOf, routeLabel, ageOf, clientKind, one,
+  hostOf, hostLine, linkRoute, rttOf, upgradeCard, nodeAlerts, UPGRADE_STEPS,
   FILL_WARN, FILL_BAD, CLIENT_STALE_MS, CLIENT_UNUSED_MS, LOCAL_NODE,
 } from "../src/device-model.ts"
 
@@ -127,4 +128,60 @@ test("client kinds", () => {
   assert.equal(clientKind("mac"), "mac")
   assert.equal(clientKind("cli"), "cli")
   assert.equal(clientKind("watch"), "other")
+})
+
+test("a Node's machine: its reported host first, the Hub's device row for its own, cores and memory from a sample", () => {
+  const mac = hostOf(view({ node: node("m", { host: { os: "macos", os_version: "26.1", arch: "aarch64", cpus: 12, mem_total: 36 * 2 ** 30 } }) }))
+  assert.deepEqual(mac, { os: "macOS 26.1", kind: "mac", arch: "arm64", cpus: 12, memGb: 36, hostname: null })
+  assert.equal(hostLine(mac), "macOS 26.1 · arm64 · 12 核 · 36 GB")
+  const linux = hostOf(view({ node: node("l", { host: { os: "linux", os_name: "Ubuntu 24.04 LTS", os_version: "24.04", arch: "x86_64", hostname: "build-01" } }) }), { at: 1, cpus: 8, mem_total: 32 * 2 ** 30 })
+  assert.equal(linux.os, "Ubuntu 24.04 LTS", "a name that already says its version is not repeated"); assert.equal(linux.kind, "linux")
+  assert.equal(hostLine(linux), "Ubuntu 24.04 LTS · x86_64 · 8 核 · 32 GB")
+  const local = hostOf(view({ local: true, device: { ...hubDevice, os: "macOS 26.1 · 64 GB" } }), { at: 1, cpus: 14, mem_total: 64 * 2 ** 30 })
+  assert.equal(hostLine(local), "macOS 26.1 · 64 GB · 14 核", "a size the system line names is not repeated")
+  assert.equal(hostLine(hostOf(view({ name: "mac-mini" }))), "", "nothing is guessed from a name")
+})
+
+test("the route a Node came in on, and its round trip", () => {
+  const link = (l) => view({ node: node("n", { link: { route: "lan", tls: false, via: "direct", since: NOW, latency_ms: 38.4, latency_at: NOW, ...l } }) })
+  assert.equal(linkRoute(view({ local: true })), "local")
+  assert.equal(linkRoute(link({ via: "tailcat", route: "loopback" })), "tailcat")
+  assert.equal(linkRoute(link({ via: "proxy", route: "public", tls: true })), "proxy")
+  assert.equal(linkRoute(link({})), "lan"); assert.equal(linkRoute(link({ route: "tailnet" })), "tailnet")
+  assert.equal(linkRoute(link({ route: "public", tls: true })), "https"); assert.equal(linkRoute(link({ route: "public" })), "public")
+  assert.equal(linkRoute(link({ route: "unknown" })), null); assert.equal(linkRoute(view({ node: node("n") })), null, "an older Hub says nothing")
+  assert.equal(rttOf(link({})), 38); assert.equal(rttOf(view({ node: node("n") }), { at: 1, rtt_ms: 61.6 }), 62)
+  assert.equal(rttOf(view({ local: true }), { at: 1, rtt_ms: 1 }), null, "the Hub's own Node has no round trip")
+})
+
+test("the version card: one state per Node, and only a rollback claims a failed step", () => {
+  const up = (u, extra = {}) => view({ node: node("n", { upgrade: { policy: "notify", can: false, reason: "current", ...u } }), ...extra })
+  assert.deepEqual(upgradeCard(view({ local: true })), { kind: "builtIn" })
+  assert.deepEqual(upgradeCard(view({ node: node("n") })), { kind: "none" }, "an older Hub: no card")
+  const running = upgradeCard(up({ latest: run("draining") }), "0.2.112")
+  assert.equal(running.kind, "running"); assert.deepEqual(running.steps, ["done", "done", "active", "todo", "todo"]); assert.equal(UPGRADE_STEPS.length, 5)
+  assert.deepEqual(upgradeCard(up({ latest: run("staged") })).steps, ["done", "done", "active", "todo", "todo"], "downloaded: next it waits for running work")
+  assert.deepEqual(upgradeCard(up({ latest: run("switching") }, { linked: false })).steps, ["done", "done", "done", "active", "todo"], "a switch shows even while the link is down")
+  assert.deepEqual(upgradeCard(up({ reason: "unknown" }, { linked: false, version: "0.2.110" })), { kind: "offline", last: "0.2.110" })
+  const back = upgradeCard(up({ reason: "outdated", can: true, latest: run("rolled_back", { error: "no link" }) }, { version: "0.2.109" }), "0.2.112")
+  assert.equal(back.kind, "failed"); assert.deepEqual(back.steps, ["done", "done", "done", "bad", "back"])
+  assert.equal(upgradeCard(up({ reason: "outdated", can: true, latest: run("failed") }, { version: "0.2.109" }), "0.2.112").steps, null)
+  assert.deepEqual(upgradeCard(up({ reason: "outdated", can: true }, { version: "0.2.109" }), "0.2.112"), { kind: "outdated", from: "0.2.109", to: "0.2.112" })
+  assert.deepEqual(upgradeCard(up({ reason: "manual" }, { version: "0.2.109" }), "0.2.112"), { kind: "manual", from: "0.2.109", to: "0.2.112", behind: true })
+  assert.equal(upgradeCard(up({ reason: "manual" }), "0.2.112").behind, false)
+  assert.deepEqual(upgradeCard(up({ latest: run("succeeded") })), { kind: "current", last: run("succeeded") })
+  assert.equal(upgradeCard(up({ reason: "hub_dev_build" })).kind, "devHub")
+})
+
+test("a card leads with at most two lines, what went wrong first", () => {
+  const up = (u, extra = {}) => view({ node: node("n", { upgrade: { policy: "notify", can: true, reason: "outdated", ...u } }), version: "0.2.109", ...extra })
+  assert.deepEqual(nodeAlerts(view(), "0.2.112"), [], "nothing to say: nothing shown")
+  assert.deepEqual(nodeAlerts(up({ latest: run("rolled_back") }), "0.2.112").map((a) => [a.tone, a.kind]), [["bad", "rolledBack"]], "the failure says it all")
+  assert.match(nodeAlerts(up({ latest: run("rolled_back") }), "0.2.112")[0].text, /升级到 0\.2\.112 没有成功，已自动回到 0\.2\.109/)
+  assert.deepEqual(nodeAlerts(up({ reason: "manual", can: false }), "0.2.112").map((a) => a.kind), ["manual"])
+  assert.match(nodeAlerts(up({ reason: "manual", can: false }), "0.2.112")[0].text, /steve node update/)
+  const off = nodeAlerts(view({ linked: false, linkError: { at: NOW - 3 * 3_600_000, error: "connection refused: 7701" } }), "", NOW)
+  assert.deepEqual(off.map((a) => a.kind), ["offline"]); assert.match(off[0].text, /3 小时前.*connection refused/)
+  assert.deepEqual(nodeAlerts(view({ state: "pending" })).map((a) => a.kind), ["pending"])
+  assert.deepEqual(nodeAlerts(up({ latest: run("draining") }), "0.2.112"), [], "an upgrade under way is the badge's to say")
 })

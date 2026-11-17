@@ -7,7 +7,7 @@ import { go } from "@/ui"
 import { agoText, nodeStatus, type NodeStatus, type NodeView } from "@/device-model"
 import { useDevices } from "@/devices-data"
 import { DCard, Figure } from "@/devices-ui"
-import { NodesCard, linkReason } from "@/devices-nodes"
+import { NodesGrid, linkReason } from "@/devices-nodes"
 import { cn } from "cn"
 import type { ReactNode } from "react"
 
@@ -47,7 +47,7 @@ export function OverviewTab() {
         <Figure label={t("devices:stat.sameVersion")} value={same} unit={` / ${versioned.length}`} sub={hubVersion ? t("devices:stat.hubVersion", { version: hubVersion }) : undefined} data-stat="versions" />
         <Figure label={t("devices:stat.clientsSignedIn")} value={clients ?? "—"} sub={t("devices:stat.clientsSub")} data-stat="clients" />
       </div></DCard>
-      <NodesCard />
+      <NodesGrid />
     </div>
   )
 }

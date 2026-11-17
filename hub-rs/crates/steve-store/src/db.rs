@@ -192,6 +192,8 @@ pub const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/093.sql"),
     // 94: each Node's machine (`host`) and how its latest link arrived (`link`), for when it is away.
     include_str!("../migrations/094.sql"),
+    // 95: the personal harness configuration default moves from each workspace to the Hub.
+    include_str!("../migrations/095.sql"),
 ];
 
 /// 027's item columns and their one-time backfill (applied by `run_pending` when `items.phase` is missing).
