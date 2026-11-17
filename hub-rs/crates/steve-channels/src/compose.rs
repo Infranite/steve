@@ -38,6 +38,7 @@ use steve_store::base::mems::{self, MemFilter};
 use steve_store::base::{ObjRef, Viewer};
 
 use crate::context::{self, Clock, Msg, Occasion, Shown, Why};
+use crate::decide::Answer;
 use crate::deliver::{Generation, Outcome};
 use crate::personas::{self, PersonaRow};
 use crate::respond::Plan;
@@ -117,12 +118,23 @@ pub const KNOWLEDGE_HEAD: &str = "相关知识（Steve 按这条消息检索到�
 pub const KNOWLEDGE_RULES: &str = "使用规则：“仅用于推理”的内容不要原样写进回复；“可转述结论”只说结论，不提来源和细节；“可以引用”的可以直接说。回复里不要写 [K1] 这样的编号。";
 
 /// The output instruction, last.
-pub const OUTPUT: &str = "只回答 JSON：{\"outcome\": \"reply\", \"text\": \"回复正文\", \"needs_approval\": false, \"why\": \"一句话说明为什么这样做\"}。\
-outcome 三选一：reply 直接回复这条消息，text 是发到这个聊天里的正文，用这个聊天的语言，像平时在聊天里说话一样简短；\
-ask_owner 这条消息要主人自己判断（拿不准对方想要什么、涉及承诺或私人关系、消息没说完），text 是你私下问主人的一句话，不会发到聊天里；\
+pub const OUTPUT: &str = "只回答 JSON：{\"outcome\": \"reply\", \"reason\": \"原因代码\", \"addressee\": \"owner\", \"summary\": \"一句话：谁找主人、要什么\", \"text\": \"回复正文\", \"draft\": \"\", \"needs_commitment\": false, \"why\": \"一句话说明为什么这样做\"}。\
+outcome 四选一：reply 直接回复这条消息，text 是发到这个聊天里的正文，用这个聊天的语言，像平时在聊天里说话一样简短；\
+ask_owner 这条消息要主人自己来，reason 写为什么：commitment（要答应或安排事情：去查、去做、给时间或结果、花钱、删除、隐私、人际关系）、owner_fact（问的是只有主人知道的情况或判断）、substantive（发给主人的实质性长消息，比如分析、方案）；text 写要主人定的是什么，draft 写主人同意时可以直接发出去的回复（写不出就留空），都不会发到聊天里；\
 skip 闲聊、玩笑、寒暄、不需要回的消息，text 写一句原因；\
 need_context 需要先看更早的对话才能理解，text 写缺什么。\
-needs_approval 在回复里有对外承诺、花钱或删除时为 true。";
+addressee：这条消息是对谁说的，owner（对主人）或 others（对别人、对大家）。\
+summary：一句话说清谁找主人、要什么，不超过 80 字。\
+needs_commitment：回复里替主人答应了事情（去查、去做、给时间或结果、花钱、删除）时为 true。";
+
+/// On your own account, before the output format: when to answer, say nothing or ask
+/// ([`crate::decide`]; code checks the answer again, [`crate::decide::settle`]).
+pub const H_DECIDE: &str = "【回不回】";
+pub const DECIDE_RULES: &str = "- 拿不准就 skip：玩笑、抬杠、反驳、感叹、寒暄、只是告知、转发的卡片没附问题、球在对方那边（我刚把东西或答案给了他）、闲聊群里没完全看懂的，都 skip。
+- reply 只用在：直接问我或请我做事，而且答案能从上面的对话和我说过的话里得出；或者一句自然的短回应就够。
+- ask_owner 只用在三种情况，reason 必须是 commitment、owner_fact 或 substantive；owner_fact 和 substantive 只在这条是对我说的时候才用。
+- 不问我说过什么、在说什么：这些对话里都看得到；也不要把自己看不懂写成问题。
+- need_context 只在这条明显接着一段上面看不到的对话时用。";
 
 /// Written when a layer has nothing.
 const NONE: &str = "（无）";
@@ -209,6 +221,14 @@ pub struct Layers {
     pub instruction: Option<String>,
     /// Your name (the account owner), for the drafted-as-you check.
     pub owner: String,
+    /// Your own account: what the composer may answer is settled in code ([`crate::decide::settle`]).
+    pub own: bool,
+    /// The message is to you by its facts (a private chat, an @ of you, a reply to you).
+    pub addressed: bool,
+    /// The message asks something.
+    pub question: bool,
+    /// Your names in the chat (ids left out).
+    pub owner_names: Vec<String>,
     /// The message this one replies to `(who, text)`.
     pub replied: Option<(String, String)>,
     /// The date and time now, in the workspace's zone (`2026-11-17 星期二 02:25，Asia/Shanghai`).
@@ -400,6 +420,12 @@ pub fn prompt(l: &Layers) -> String {
         p.push_str(H_REVISE);
         p.push('\n');
         p.push_str(r.trim());
+        p.push_str("\n\n");
+    }
+    if l.own && l.instruction.as_deref().is_none_or(|i| i.trim().is_empty()) {
+        p.push_str(H_DECIDE);
+        p.push('\n');
+        p.push_str(DECIDE_RULES);
         p.push_str("\n\n");
     }
     p.push_str(UNDERSTAND);
@@ -768,6 +794,10 @@ pub fn gather(
         message: talk.message,
         instruction: opts.instruction.clone(),
         now: now_text(now, &crate::im_mcp::tz_of(c, ws)),
+        own: plan.mode == Mode::Own,
+        addressed: crate::decide::addressed(talk.why),
+        question: crate::decide::asks(&plan.text),
+        owner_names: talk.names,
     })
 }
 
@@ -784,6 +814,8 @@ struct Talk {
     sender: String,
     message: String,
     attachments: Value,
+    /// Your names in the chat.
+    names: Vec<String>,
 }
 
 /// Reads the conversation around `plan`'s message: your names and lines by your account and contact
@@ -876,48 +908,87 @@ fn conversation(
         sender,
         message: context::typed_target(&plan.text, &attachments),
         attachments,
+        names,
     })
 }
 
-/// Reads `{"outcome","text","needs_approval","why"}` (anywhere in the answer; no `outcome` = a
-/// reply). A plain non-empty answer is taken as the text, with approval required. `None`: nothing
-/// to say.
-pub fn parse(answer: &str) -> Option<(Outcome, String, bool, String)> {
+/// Reads the composer's answer ([`OUTPUT`]; anywhere in the text; no `outcome` = a reply). A plain
+/// non-empty answer is taken as the text, with approval required. `None`: nothing to say.
+pub fn parse_answer(answer: &str) -> Option<Answer> {
     if let Some(v) = steve_modules::changes::first_json(answer)
         && v.is_object()
     {
-        let text = v["text"].as_str().unwrap_or("").trim().to_string();
+        let s = |k: &str| v[k].as_str().unwrap_or("").trim().to_string();
+        let text = s("text");
         let outcome = match v["outcome"].as_str().unwrap_or("reply") {
             "ask_owner" => Outcome::AskOwner,
             "skip" => Outcome::Skip,
             "need_context" => Outcome::NeedContext,
             _ => Outcome::Reply,
         };
-        if text.is_empty() && !matches!(outcome, Outcome::Skip | Outcome::NeedContext) {
+        if text.is_empty() && outcome == Outcome::Reply {
             return None;
         }
-        let needs = v["needs_approval"].as_bool().unwrap_or(false);
-        let why = v["why"].as_str().unwrap_or("").trim().to_string();
-        return Some((outcome, text, needs, why));
+        return Some(Answer {
+            outcome,
+            text,
+            needs_approval: v["needs_approval"].as_bool().unwrap_or(false),
+            why: s("why"),
+            reason: s("reason"),
+            addressee: s("addressee"),
+            needs_commitment: v["needs_commitment"].as_bool().unwrap_or(false),
+            summary: s("summary"),
+            draft: s("draft"),
+        });
     }
     let t = answer.trim();
-    (!t.is_empty() && !t.starts_with('{'))
-        .then(|| (Outcome::Reply, t.to_string(), true, String::new()))
+    (!t.is_empty() && !t.starts_with('{')).then(|| Answer {
+        outcome: Outcome::Reply,
+        text: t.to_string(),
+        needs_approval: true,
+        ..Answer::default()
+    })
 }
 
-/// [`parse`], then what the composer does with the answer before anyone sees it: on your own account a
-/// reply that reads as meant for you ([`meant_for_owner`]) becomes a question to you. The offline
-/// replay (`examples/reply_eval`) reads answers with the same function.
-pub fn read_answer(
-    answer: &str,
-    mode: Mode,
-    owner: &str,
-) -> Option<(Outcome, String, bool, String)> {
-    let (mut outcome, text, needs_approval, why) = parse(answer)?;
-    if outcome == Outcome::Reply && mode == Mode::Own && meant_for_owner(&text, owner) {
-        outcome = Outcome::AskOwner;
+/// [`parse_answer`] as `(outcome, text, needs_approval, why)`.
+pub fn parse(answer: &str) -> Option<(Outcome, String, bool, String)> {
+    parse_answer(answer).map(|a| (a.outcome, a.text, a.needs_approval, a.why))
+}
+
+/// What the gates know about the message `l` answers ([`crate::decide::Seen`]).
+pub fn seen(l: &Layers) -> crate::decide::Seen {
+    crate::decide::Seen {
+        own: l.own,
+        instructed: l
+            .instruction
+            .as_deref()
+            .is_some_and(|i| !i.trim().is_empty()),
+        addressed: l.addressed,
+        question: l.question,
+        owner_names: l.owner_names.clone(),
     }
-    Some((outcome, text, needs_approval, why))
+}
+
+/// The composer's answer to the prompt of `l` as it goes on: read ([`parse_answer`]), then settled in
+/// code on your own account ([`crate::decide::settle`]). `model`: who answered. The offline replay
+/// (`examples/reply_eval`) reads answers with the same function. `None`: nothing to say.
+pub fn answer_of(raw: &str, model: &str, l: &Layers) -> Option<Reply> {
+    let a = crate::decide::settle(parse_answer(raw)?, &seen(l));
+    Some(Reply {
+        text: a.text,
+        generation: Generation {
+            outcome: a.outcome,
+            needs_approval: a.needs_approval,
+            why: a.why,
+            model: model.to_string(),
+            reason: a.reason,
+            addressee: a.addressee,
+            needs_commitment: a.needs_commitment,
+            summary: a.summary,
+            draft: a.draft,
+            ..Generation::default()
+        },
+    })
 }
 
 /// Asked under the attachments when images were given to the model: one line on what they show,
@@ -935,46 +1006,67 @@ pub fn described(answer: &str) -> Option<String> {
         .map(String::from)
 }
 
-/// The second `need_context` in a row: a question to you that says what is missing, never a guess.
+/// The second `need_context` in a row, on a bot: a question to you that says what is missing, never a
+/// guess.
 pub fn still_unclear(text: &str) -> String {
     format!("{UNCLEAR}{}", text.trim())
 }
 
-/// The answer after the wider context. Still not understood: a question to you ([`still_unclear`]),
-/// never a guess — unless, on your own account ([`Mode::Own`]), what cannot be read is the message
-/// itself (a card, a system message, an image nobody could read: [`Layers::unreadable`]). You see
-/// that message in the chat yourself, so a question adds nothing: it is not answered, only
-/// recorded, with what was missing ([`UNREADABLE`]). On a bot ([`Mode::Bot`]) someone asked the bot
-/// and you may not be in that chat at all: it stays a question to you, or nobody would hear of it.
-pub fn after_wide(mode: Mode, outcome: Outcome, text: &str, unreadable: bool) -> (Outcome, String) {
-    match outcome {
-        Outcome::NeedContext if unreadable && mode == Mode::Own => {
-            (Outcome::Skip, format!("{UNREADABLE}{}", text.trim()))
+/// Ahead of the reason a message still not understood on your own account is let go.
+pub const UNCLEAR_SKIP: &str = "前文不在能看到的范围里，也不是直接问你，先不回：";
+
+/// The answer after the wider context ([`HISTORY_WIDE`], once). Still not understood:
+/// - on your own account ([`Mode::Own`]): a message whose own content cannot be read
+///   ([`Layers::unreadable`]) is let go ([`UNREADABLE`]: you see it in the chat yourself); a direct
+///   question to you (`direct`: to you and asking) is a question to you
+///   ([`crate::decide::Reason::DirectQuestion`]; the card says what they asked, never that Steve is
+///   lost); anything else is let go ([`UNCLEAR_SKIP`]);
+/// - on a bot ([`Mode::Bot`]) someone asked the bot and you may not be in that chat: a question to
+///   you ([`still_unclear`]), or nobody would hear of it.
+///
+/// The third value is the reason a question to you gets.
+pub fn after_wide(
+    mode: Mode,
+    outcome: Outcome,
+    text: &str,
+    unreadable: bool,
+    direct: bool,
+) -> (Outcome, String, Option<crate::decide::Reason>) {
+    match (outcome, mode) {
+        (Outcome::NeedContext, Mode::Own) if unreadable => {
+            (Outcome::Skip, format!("{UNREADABLE}{}", text.trim()), None)
         }
-        Outcome::NeedContext => (Outcome::AskOwner, still_unclear(text)),
-        o => (o, text.to_string()),
+        (Outcome::NeedContext, Mode::Own) if direct => (
+            Outcome::AskOwner,
+            text.trim().to_string(),
+            Some(crate::decide::Reason::DirectQuestion),
+        ),
+        (Outcome::NeedContext, Mode::Own) => (
+            Outcome::Skip,
+            format!("{UNCLEAR_SKIP}{}", text.trim()),
+            None,
+        ),
+        (Outcome::NeedContext, Mode::Bot) => (Outcome::AskOwner, still_unclear(text), None),
+        (o, _) => (o, text.to_string(), None),
     }
 }
 
-/// A reply drafted as you must read as you talking to them (compose `self_layer`). One that speaks
-/// about you in the third person, asks you something or mentions Steve was meant for you: it
-/// becomes a question to you (prod 2026-11-02: "这条消息看起来是发给林知远的…你是想让我帮忙处理吗？").
-pub fn meant_for_owner(text: &str, owner: &str) -> bool {
-    let t = text.trim();
-    let owner = owner.trim();
-    (!owner.is_empty() && t.contains(owner))
-        || t.contains("Steve")
-        || [
-            "你是想让我",
-            "要我帮",
-            "需要我帮",
-            "想让我",
-            "帮你处理",
-            "发给你的",
-            "要不要我",
-        ]
-        .iter()
-        .any(|p| t.contains(p))
+/// [`after_wide`] on a reply to `l`'s message.
+pub fn settle_wide(r: &mut Reply, l: &Layers, unreadable: bool) {
+    let mode = if l.own { Mode::Own } else { Mode::Bot };
+    let direct = (l.addressed || r.generation.addressee == "owner") && l.question;
+    let (o, t, reason) = after_wide(
+        mode,
+        r.generation.outcome.clone(),
+        &r.text,
+        unreadable,
+        direct,
+    );
+    r.generation.outcome = o;
+    r.text = t;
+    if let Some(reason) = reason {
+        r.generation.reason = reason.code().into();
+    }
 }
 
 /// The generator: gathers the layers, calls the model, reads the answer.
@@ -1019,15 +1111,8 @@ impl Composer {
             ..opts.clone()
         };
         let mut again = self.generate_once(ch, plan, &wide).await?;
-        let r = &mut again.reply;
-        let (o, t) = after_wide(
-            plan.mode,
-            r.generation.outcome.clone(),
-            &r.text,
-            again.unreadable,
-        );
-        r.generation.outcome = o;
-        r.text = t;
+        let unreadable = again.unreadable;
+        settle_wide(&mut again.reply, &again.about, unreadable);
         self.in_your_voice(ch, plan, &wide, again).await
     }
 
@@ -1099,7 +1184,7 @@ impl Composer {
             }
         }
         .map_err(|e| ApiError::Internal(format!("回复没有生成：{e}")))?;
-        let (outcome, text, needs_approval, why) = read_answer(&out.text, plan.mode, &layers.owner)
+        let mut reply = answer_of(&out.text, &out.model, &layers)
             .ok_or_else(|| ApiError::Internal("回复没有生成：模型没有给出正文".into()))?;
         // what it saw in the images it was given, kept for later conversations
         if !media.images.is_empty()
@@ -1110,21 +1195,19 @@ impl Composer {
         {
             tracing::warn!(message = %plan.message_id, "image description not kept: {e}");
         }
+        let about = Layers {
+            own: layers.own,
+            addressed: layers.addressed,
+            question: layers.question,
+            ..Layers::default()
+        };
+        reply.generation.hits = layers.hits;
+        reply.generation.anchors = layers.anchor_ids;
         Ok(Once {
-            reply: Reply {
-                text,
-                generation: Generation {
-                    outcome,
-                    needs_approval,
-                    why,
-                    model: out.model,
-                    hits: layers.hits,
-                    anchors: layers.anchor_ids,
-                    revised: Vec::new(),
-                },
-            },
+            reply,
             unreadable: layers.unreadable && media.images.is_empty(),
             style: layers.voice.and_then(|v| v.style).map(|(_, s)| s),
+            about,
         })
     }
 }
@@ -1134,6 +1217,8 @@ struct Once {
     reply: Reply,
     unreadable: bool,
     style: Option<crate::voice::Style>,
+    /// What the gates know about the message (whose account, to you, asking): for [`settle_wide`].
+    about: Layers,
 }
 
 /// You said what to write ([`ComposeOpts::instruction`]): your trigger words, a flow step's text,
@@ -1181,8 +1266,16 @@ pub fn settle_revised(
         return second;
     }
     let why = crate::voice::gave_up(&still);
+    // the card offers the last draft as its candidate: you see it and decide
+    let draft = if second.generation.outcome == Outcome::Reply {
+        second.text.clone()
+    } else {
+        first.text.clone()
+    };
     second.generation.outcome = Outcome::AskOwner;
     second.generation.why = why.clone();
+    second.generation.reason = crate::decide::Reason::Voice.code().into();
+    second.generation.draft = draft;
     second.text = why;
     second
 }
@@ -1200,7 +1293,7 @@ pub(crate) fn str_list(v: &Value) -> Vec<String> {
 
 #[cfg(test)]
 mod outcome_tests {
-    use super::{meant_for_owner, parse};
+    use super::parse;
     use crate::deliver::Outcome;
 
     #[test]
@@ -1221,25 +1314,73 @@ mod outcome_tests {
     }
 
     #[test]
-    fn a_message_nobody_can_read_is_recorded_not_asked() {
-        use super::{Mode, UNREADABLE, after_wide, still_unclear};
+    fn reads_the_structured_answer() {
+        use super::parse_answer;
+        let a = parse_answer(
+            r#"{"outcome":"ask_owner","reason":"commitment","addressee":"owner","summary":"A 约周四","text":"要你定时间","draft":"周四可以","needs_commitment":true,"why":"约时间"}"#,
+        )
+        .unwrap();
+        assert_eq!(a.outcome, Outcome::AskOwner);
         assert_eq!(
-            after_wide(Mode::Own, Outcome::NeedContext, "看不到卡片", true),
-            (Outcome::Skip, format!("{UNREADABLE}看不到卡片"))
+            (
+                a.reason.as_str(),
+                a.addressee.as_str(),
+                a.summary.as_str(),
+                a.draft.as_str()
+            ),
+            ("commitment", "owner", "A 约周四", "周四可以")
+        );
+        assert!(a.needs_commitment);
+        // a question to you may come with only its draft
+        assert!(parse_answer(r#"{"outcome":"ask_owner","text":"","draft":"好"}"#).is_some());
+    }
+
+    #[test]
+    fn a_message_nobody_can_read_is_recorded_not_asked() {
+        use super::{Mode, UNCLEAR_SKIP, UNREADABLE, after_wide, still_unclear};
+        use crate::decide::Reason;
+        assert_eq!(
+            after_wide(Mode::Own, Outcome::NeedContext, "看不到卡片", true, true),
+            (Outcome::Skip, format!("{UNREADABLE}看不到卡片"), None)
         );
         // on a bot you may not be in the chat: it stays a question to you
         assert_eq!(
-            after_wide(Mode::Bot, Outcome::NeedContext, "看不到卡片", true),
-            (Outcome::AskOwner, still_unclear("看不到卡片"))
+            after_wide(Mode::Bot, Outcome::NeedContext, "看不到卡片", true, false),
+            (Outcome::AskOwner, still_unclear("看不到卡片"), None)
+        );
+        assert_eq!(
+            after_wide(
+                Mode::Bot,
+                Outcome::NeedContext,
+                "不知道指什么",
+                false,
+                false
+            ),
+            (Outcome::AskOwner, still_unclear("不知道指什么"), None)
+        );
+        // on your own account: a direct question to you is asked about (never “看不懂”), the rest let go
+        assert_eq!(
+            after_wide(Mode::Own, Outcome::NeedContext, "不知道指什么", false, true),
+            (
+                Outcome::AskOwner,
+                "不知道指什么".to_string(),
+                Some(Reason::DirectQuestion)
+            )
+        );
+        assert_eq!(
+            after_wide(
+                Mode::Own,
+                Outcome::NeedContext,
+                "不知道指什么",
+                false,
+                false
+            ),
+            (Outcome::Skip, format!("{UNCLEAR_SKIP}不知道指什么"), None)
         );
         for mode in [Mode::Own, Mode::Bot] {
             assert_eq!(
-                after_wide(mode, Outcome::NeedContext, "不知道指什么", false),
-                (Outcome::AskOwner, still_unclear("不知道指什么"))
-            );
-            assert_eq!(
-                after_wide(mode, Outcome::Reply, "好", true),
-                (Outcome::Reply, "好".to_string())
+                after_wide(mode, Outcome::Reply, "好", true, true),
+                (Outcome::Reply, "好".to_string(), None)
             );
         }
         let none = serde_json::json!([]);
@@ -1298,22 +1439,13 @@ mod outcome_tests {
             bad.generation.why, bad.text,
             "the reason is the give-up, not the model's"
         );
+        // the card offers the second draft as its candidate
+        assert_eq!(bad.generation.reason, "voice");
+        assert_eq!(bad.generation.draft, "收到，1. 重启\n2. 回滚");
         let ask = settle_revised(&options, r(Outcome::AskOwner, "要重启吗"), s);
         assert_eq!(ask.generation.outcome, Outcome::AskOwner);
         let more = settle_revised(&options, r(Outcome::NeedContext, "缺前文"), s);
         assert_eq!(more.generation.outcome, Outcome::AskOwner);
         assert!(more.text.starts_with(GAVE_UP), "{}", more.text);
-    }
-
-    #[test]
-    fn spots_a_reply_meant_for_the_owner() {
-        let owner = "林知远";
-        assert!(meant_for_owner(
-            "这条消息看起来是发给林知远的，而且没写完，你是想让我帮忙处理吗？",
-            owner
-        ));
-        assert!(meant_for_owner("我是 Steve，帮你看看", owner));
-        assert!(!meant_for_owner("周四可以，我下午确认。", owner));
-        assert!(!meant_for_owner("主打一个年年十八😂", owner));
     }
 }

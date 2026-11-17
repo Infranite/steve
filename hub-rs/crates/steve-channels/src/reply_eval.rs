@@ -175,6 +175,18 @@ pub struct Output {
     /// ([`crate::compose::voice_verdict`]).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub revised: Vec<String>,
+    /// The reason as a code ([`crate::decide::Reason`]; a skip's code), when the model gave one.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub code: String,
+    /// A question to you: the card's one-sentence summary …
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub summary: String,
+    /// … and its candidate draft.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub draft: String,
+    /// The reply would promise something for you.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub needs_commitment: bool,
 }
 
 /// Reads JSON Lines (blank lines skipped); the error names the line.
@@ -231,6 +243,7 @@ fn attachments(media: &[String]) -> Value {
             .iter()
             .map(|k| match k.as_str() {
                 "image" => json!({"type": "image"}),
+                "sticker" => json!({"type": "sticker"}),
                 other => json!({"type": "file", "kind": other}),
             })
             .collect(),
@@ -367,6 +380,10 @@ pub fn layers(case: &Case, s: &Setting, history: usize, voice: Voice) -> Layers 
             false,
         ),
         owner: s.owner.clone(),
+        own: true,
+        addressed: crate::decide::addressed(Why::of(&facts, false)),
+        question: crate::decide::asks(target.text.as_deref().unwrap_or_default()),
+        owner_names: names,
         ..Layers::default()
     }
 }
@@ -496,7 +513,7 @@ pub fn recorded_output(case: &Case) -> Output {
             .as_str()
             .unwrap_or_default()
             .to_string(),
-        revised: Vec::new(),
+        ..Output::default()
     }
 }
 
@@ -649,12 +666,49 @@ pub struct Gated {
     /// The answer before the gates.
     pub before: String,
     /// Which gate changed it: `owner_live` / `owner_replied` (before drafting or after it),
-    /// `merged` (the sender went on; answered with the later message).
+    /// `merged` (the sender went on; answered with the later message), `no_content` (nothing to
+    /// answer, [`crate::decide::content_free`]).
     pub gate: Option<String>,
     pub merged_into: Option<String>,
     /// It still opened, and your own message closed it later (within the hour of the case; in a
     /// group only what you said about it).
     pub closed_later: bool,
+}
+
+/// G4 on a case ([`crate::decide::gate`]): its message has nothing to answer, and the sender has no
+/// question waiting (one of theirs within [`crate::decide::OPEN_QUESTION_MS`] before it, with no line
+/// of yours after).
+pub fn no_content(case: &Case) -> bool {
+    let t = &case.message;
+    if !crate::decide::content_free(
+        t.text.as_deref().unwrap_or_default(),
+        &attachments(&t.media),
+    ) {
+        return false;
+    }
+    let Some(at) = millis(&t.time) else {
+        return true;
+    };
+    let lines: Vec<(&Line, i64)> = case
+        .previous_space_messages
+        .iter()
+        .filter(|l| l.id != t.id)
+        .filter_map(|l| Some((l, millis(&l.time)?)))
+        .filter(|(_, m)| *m < at)
+        .collect();
+    let asked = lines
+        .iter()
+        .filter(|(l, m)| {
+            l.sender == t.sender
+                && at - m <= crate::decide::OPEN_QUESTION_MS
+                && crate::decide::asks(l.text.as_deref().unwrap_or_default())
+        })
+        .map(|(_, m)| *m)
+        .max();
+    match asked {
+        Some(q) => lines.iter().any(|(l, m)| l.is_owner && *m > q),
+        None => true,
+    }
 }
 
 /// The cases a case's message is merged into: the later case of the same sender in the same space
@@ -698,6 +752,17 @@ pub fn apply_gates(
         let mut out = o.clone();
         let mut gate = None;
         let mut before_drafting = false;
+        // G4 runs before any model, after the presence gate at the message's time
+        let g4 = no_content(case)
+            && crate::presence::engaged(dm, &t, &around, t.at, p.live_ms).is_none()
+            && matches!(o.outcome.as_str(), "reply" | "ask_owner");
+        if g4 {
+            out.outcome = "skip".into();
+            out.reason = crate::decide::LABEL_NO_CONTENT.into();
+            out.text.clear();
+            gate = Some("no_content".into());
+            before_drafting = true;
+        }
         for (n, now) in [t.at, t.at + latency * 1000].into_iter().enumerate() {
             if gate.is_some() {
                 break;

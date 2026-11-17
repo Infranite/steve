@@ -21,12 +21,21 @@ use crate::{ChannelResult, Channels, bindings, messages, personas};
 
 /// `subject_type` of decisions about one channel message (C6 registers its handler).
 pub const SUBJECT_MESSAGE: &str = "chan_message";
-/// Options of the handoff decision.
-pub const HANDOFF_OPTIONS: [&str; 3] = ["draft_reply", "to_item", "done"];
+/// The card's choice “发这条草稿”: its candidate draft goes out as you approved it.
+pub const SEND_DRAFT: &str = "send_draft";
+/// “告诉它怎么回”: your words go to the composer as the instruction; its reply is a draft as usual.
+pub const INSTRUCT: &str = "instruct";
+/// “按原文发”: your words go out as they are.
+pub const VERBATIM: &str = "verbatim";
+/// The card's choice before the cards had a candidate draft: your words become a draft to approve
+/// (still accepted for cards opened then).
+pub const DRAFT_REPLY: &str = "draft_reply";
+/// Options of the handoff decision with a candidate draft ([`crate::decide::open_card`]).
+pub const HANDOFF_OPTIONS: [&str; 5] = [SEND_DRAFT, INSTRUCT, VERBATIM, "to_item", "done"];
+/// … and without one.
+pub const HANDOFF_NO_DRAFT_OPTIONS: [&str; 4] = [INSTRUCT, VERBATIM, "to_item", "done"];
 /// Options of the approval of a draft.
 pub const DRAFT_OPTIONS: [&str; 2] = ["yes", "no"];
-/// The handoff question's summary of the message, in characters.
-const SUMMARY_MAX: usize = 60;
 
 impl Channels {
     /// [`crate::presence::stop`] for a plan that would draft or ask in your name about someone
@@ -42,6 +51,23 @@ impl Channels {
         let now = self.now();
         self.store()
             .reader(|c| crate::presence::stop(c, &plan.ws, &plan.message_id, now))
+    }
+}
+
+impl Channels {
+    /// G4 and G5 ([`crate::decide::gate`]) for the same plans as [`Channels::owner_stop`].
+    pub(crate) fn owner_gate(&self, plan: &Plan) -> ChannelResult<Option<crate::decide::Gate>> {
+        if plan.mode != Mode::Own
+            || plan.trigger.is_some()
+            || !matches!(plan.act, Act::Reply | Act::Draft | Act::Handoff)
+        {
+            return Ok(None);
+        }
+        let now = self.now();
+        self.store().reader(|c| {
+            let starred = crate::decide::starred(c, &plan.ws, plan.sender_party_id.as_deref())?;
+            crate::decide::gate(c, &plan.ws, &plan.message_id, starred, now)
+        })
     }
 }
 
@@ -167,14 +193,6 @@ pub struct Fallback;
 
 impl Responder for Fallback {}
 
-fn cut(s: &str, n: usize) -> String {
-    let s = s.split_whitespace().collect::<Vec<_>>().join(" ");
-    match s.char_indices().nth(n) {
-        Some((i, _)) => format!("{}…", &s[..i]),
-        None => s,
-    }
-}
-
 /// A space's name in questions (`私聊` when it has none).
 pub(crate) fn space_label(s: &SpaceRow) -> String {
     if s.name.trim().is_empty() {
@@ -184,55 +202,13 @@ pub(crate) fn space_label(s: &SpaceRow) -> String {
     }
 }
 
-/// The handoff decision: `「<空间>」里 <发送人> 找你：<摘要>`. Linked from the inbound
-/// message (`decision_id`). One per message.
+/// The handoff card about the plan's message, as the rules open it ([`crate::decide::open_card`]): the
+/// message is its summary; marked when a contact you starred sent it on your own account. One per
+/// message.
 pub fn open_handoff(tx: &Tx, plan: &Plan) -> ChannelResult<String> {
-    open_handoff_asking(tx, plan, None)
-}
-
-/// [`open_handoff`] with Steve's question to you under the message (the composer's `ask_owner`).
-pub fn open_handoff_asking(tx: &Tx, plan: &Plan, ask: Option<&str>) -> ChannelResult<String> {
-    if let Some(d) = base::decisions::open_for(tx, &plan.ws, SUBJECT_MESSAGE, &plan.message_id)? {
-        return Ok(d.id);
-    }
-    let who = if plan.sender_name.trim().is_empty() {
-        "有人"
-    } else {
-        plan.sender_name.as_str()
-    };
-    let body = if plan.text.trim().is_empty() {
-        "[消息]".to_string()
-    } else {
-        cut(&plan.text, SUMMARY_MAX)
-    };
-    let d = base::decisions::open(
-        tx,
-        &NewDecision {
-            workspace_id: plan.ws.clone(),
-            kind: DecisionKind::Ask.code().into(),
-            subject_type: SUBJECT_MESSAGE.into(),
-            subject_id: plan.message_id.clone(),
-            item_id: None,
-            session_id: None,
-            question: match ask.map(str::trim).filter(|a| !a.is_empty()) {
-                Some(a) => format!(
-                    "「{}」里 {who} 找你：{body}\nSteve 想先问你：{}",
-                    plan.space_name,
-                    cut(a, SUMMARY_MAX)
-                ),
-                None => format!("「{}」里 {who} 找你：{body}", plan.space_name),
-            },
-            draft: None,
-            options: Some(HANDOFF_OPTIONS.map(String::from).to_vec()),
-            requested_by: "steve".into(),
-        },
-    )?;
-    tx.execute(
-        "UPDATE chan_messages SET decision_id = ? WHERE id = ?",
-        params![d.id, plan.message_id],
-    )?;
-    messages::event(tx, &plan.ws, &plan.space_id, &plan.message_id);
-    Ok(d.id)
+    let starred = plan.mode == Mode::Own
+        && crate::decide::starred(tx, &plan.ws, plan.sender_party_id.as_deref())?;
+    crate::decide::open_card(tx, plan, &crate::decide::Card::rule(starred))
 }
 
 /// A pending outbound draft replying to the message, and its `approve` decision: “以你本人
@@ -390,6 +366,20 @@ impl Channels {
             );
             r.act = Act::Record;
             r.label = e.label().into();
+            return Ok(r);
+        }
+        // nothing to answer, or a nudge onto the card still open (crate::decide, G4 and G5)
+        if let Some(g) = self.owner_gate(plan)? {
+            r.act = Act::Record;
+            match g {
+                crate::decide::Gate::NoContent => r.label = crate::decide::LABEL_NO_CONTENT.into(),
+                crate::decide::Gate::Nudge { decision } => {
+                    self.store()
+                        .transaction(|tx| crate::decide::nudge(tx, &decision, &plan.text))?;
+                    r.label = crate::decide::LABEL_NUDGE.into();
+                    r.decision_id = Some(decision);
+                }
+            }
             return Ok(r);
         }
         let now = self.now();

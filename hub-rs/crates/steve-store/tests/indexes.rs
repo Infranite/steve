@@ -148,6 +148,22 @@ const CASES: &[(&str, &str, &str)] = &[
  ORDER BY m.created DESC, m.id DESC LIMIT ?5",
     ),
     (
+        "decisions_chan_open",
+        "steve-channels outbound.rs expire_stale (088)",
+        "SELECT id, workspace_id, kind, subject_id FROM decisions INDEXED BY decisions_chan_open
+          WHERE subject_type = 'chan_message' AND status = 'open' AND kind IN ('ask', 'approve')
+            AND created < ? ORDER BY created LIMIT 100",
+    ),
+    (
+        "decisions_chan_answered",
+        "steve-channels outbound.rs instructions_asked (088)",
+        "SELECT workspace_id, id, subject_id, coalesce(json_extract(result, '$.text'), '')
+           FROM decisions INDEXED BY decisions_chan_answered
+          WHERE subject_type = 'chan_message' AND kind = 'ask' AND status = 'resolved' AND resolved >= ?
+            AND json_extract(result, '$.choice') = ? AND json_extract(result, '$.composed') IS NULL
+          ORDER BY resolved LIMIT 20",
+    ),
+    (
         "chan_messages_space_created",
         "steve-channels inbound.rs answered_since_people",
         "WITH people AS (

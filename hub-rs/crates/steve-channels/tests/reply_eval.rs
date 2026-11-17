@@ -531,3 +531,25 @@ fn the_replays_habits_leave_out_the_gold_answers() {
     assert!(n(&without) < n(&with), "{} vs {}", n(&without), n(&with));
     assert_eq!(without.situation, Some(re::situation(&late)));
 }
+
+#[test]
+fn nothing_to_answer_is_replayed_before_any_model() {
+    // a forwarded card nobody can read and no question of the sender waiting: G4
+    assert!(re::no_content(&case("fx-09-forwarded-card")));
+    for id in [
+        "fx-10-schedule",
+        "fx-08-long-analysis",
+        "fx-01-joke-on-own-line",
+    ] {
+        assert!(!re::no_content(&case(id)), "{id}");
+    }
+    let outs = vec![Output {
+        case_id: "fx-09-forwarded-card".into(),
+        outcome: "ask_owner".into(),
+        text: "要看吗".into(),
+        ..Output::default()
+    }];
+    let (gated, why) = re::apply_gates(&cases(), &outs, &re::GateParams::default());
+    assert_eq!(gated[0].outcome, "skip");
+    assert_eq!(why[0].gate.as_deref(), Some("no_content"));
+}

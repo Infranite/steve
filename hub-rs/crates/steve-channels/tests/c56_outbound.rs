@@ -1203,7 +1203,11 @@ async fn a_trigger_reply_that_needs_approval_is_a_draft() {
         "SELECT question FROM decisions WHERE id = ?",
         &[&r.decision_id.unwrap()],
     );
-    assert_eq!(q[0], "以你本人发到「私聊」");
+    // a reply that promises something says so on its card (and YOLO never sends it)
+    assert_eq!(
+        q[0],
+        format!("以你本人发到「私聊」{}", steve_channels::outbound::COMMITS)
+    );
     assert_eq!(
         row(
             &h,
@@ -1794,11 +1798,15 @@ async fn a_handoff_can_become_a_draft_reply() {
     // “我请 … 来看。” went out under the handoff rule
     assert_eq!(sent(&h).len(), 1);
     assert!(sent(&h)[0].1.contains("来看"));
-    let d = decide(&h, &r.decision_id.unwrap(), "draft_reply", "我晚点回你").unwrap();
+    // “按原文发”: your words, approved by that click, go out after the usual delay
+    let d = decide(&h, &r.decision_id.unwrap(), "verbatim", "我晚点回你").unwrap();
     let m = d.result["draft_message"].as_str().unwrap().to_string();
-    assert_eq!(status(&h, &m), "draft");
+    assert_eq!(status(&h, &m), "pending");
     let dd = d.result["draft_decision"].as_str().unwrap().to_string();
-    decide(&h, &dd, "yes", "").unwrap();
+    assert_eq!(
+        row(&h, "SELECT status FROM decisions WHERE id = ?", &[&dd])[0],
+        "resolved"
+    );
     h.env.clock.advance(11_000);
     assert_eq!(h.outbox.send_due(&h.ch).await, 1);
     assert_eq!(sent(&h)[1].1, "我晚点回你");
@@ -2624,8 +2632,15 @@ async fn a_reply_meant_for_you_becomes_a_question_in_your_inbox() {
     assert_eq!(q[0], json!("ask"));
     let question = q[1].as_str().unwrap_or_default();
     assert!(
-        question.contains("感觉得低调") && question.contains("Steve 想先问你"),
+        question.contains("感觉得低调")
+            && question.contains(steve_channels::decide::Reason::MeantForOwner.label()),
         "{question}"
+    );
+    // what it wrote is the card's candidate, never its question
+    assert!(!question.contains("你是想让我"), "{question}");
+    assert!(
+        q[2].as_str().unwrap_or_default().contains("你是想让我"),
+        "{q:?}"
     );
     nothing_sent(&h);
     let drafts = row(
@@ -2643,7 +2658,7 @@ async fn the_composer_can_ask_you_first() {
     checks_pass(&h);
     h.env.gateway.script(
         H_SAFETY,
-        r#"{"outcome": "ask_owner", "text": "他问周四能不能上线，你定了吗？", "needs_approval": false, "why": "涉及承诺"}"#,
+        r#"{"outcome": "ask_owner", "reason": "commitment", "summary": "李雷问周四能不能上线", "text": "他问周四能不能上线，你定了吗？", "draft": "周四可以", "needs_approval": false, "why": "涉及承诺"}"#,
     );
     let me = h.me.clone();
     let i = push(
@@ -2655,10 +2670,27 @@ async fn the_composer_can_ask_you_first() {
     let r = i.response.expect("response");
     assert!(r.out_message_id.is_none(), "{r:?}");
     let d = r.decision_id.expect("question");
-    let q = row(&h, "SELECT question FROM decisions WHERE id = ?", &[&d]);
+    let q = row(
+        &h,
+        "SELECT question, draft, options FROM decisions WHERE id = ?",
+        &[&d],
+    );
+    let question = q[0].as_str().unwrap_or_default();
+    // who wants what, why you, the lines; the candidate draft apart; never Steve asking you
     assert!(
-        q[0].as_str().unwrap_or_default().contains("你定了吗"),
-        "{q:?}"
+        question.starts_with("「Steve 开发群」里 李雷 找你：李雷问周四能不能上线\n"),
+        "{question}"
+    );
+    assert!(
+        question.contains(steve_channels::decide::Reason::Commitment.label()),
+        "{question}"
+    );
+    assert!(question.contains("→ 李雷：@你 周四能上线吗"), "{question}");
+    assert!(!question.contains("你定了吗"), "{question}");
+    assert_eq!(q[1], json!("周四可以"));
+    assert_eq!(
+        q[2],
+        json!(r#"["send_draft","instruct","verbatim","to_item","done"]"#)
     );
 }
 
@@ -2714,7 +2746,7 @@ async fn need_context_widens_the_history_once() {
         r#"{"outcome": "need_context", "text": "不知道“那个方案”指什么", "needs_approval": false, "why": ""}"#,
     );
     h.env.gateway.reply(
-        r#"{"outcome": "ask_owner", "text": "他问你那个方案定了没", "needs_approval": false, "why": ""}"#,
+        r#"{"outcome": "ask_owner", "reason": "owner_fact", "summary": "李雷问那个方案定了没", "text": "他问你那个方案定了没", "needs_approval": false, "why": ""}"#,
     );
     let me = h.me.clone();
     let i = push(
@@ -2728,13 +2760,16 @@ async fn need_context_widens_the_history_once() {
     let d = r.decision_id.expect("a question to you");
     let q = row(&h, "SELECT question FROM decisions WHERE id = ?", &[&d]);
     assert!(
-        q[0].as_str().unwrap_or_default().contains("那个方案定了没"),
+        q[0].as_str()
+            .unwrap_or_default()
+            .contains("李雷问那个方案定了没"),
         "{q:?}"
     );
     nothing_sent(&h);
 }
 
-/// Still not enough after widening: a question to you, not a reply.
+/// Still not enough after widening, and it asks you directly: a question to you, not a reply — and
+/// the card says what they asked, never that Steve is lost. Not asking you: let go.
 #[tokio::test]
 async fn need_context_twice_becomes_a_question() {
     let h = setup().await;
@@ -2750,13 +2785,29 @@ async fn need_context_twice_becomes_a_question() {
     assert!(r.out_message_id.is_none(), "{r:?}");
     let d = r.decision_id.expect("a question to you");
     let q = row(&h, "SELECT question FROM decisions WHERE id = ?", &[&d]);
+    let question = q[0].as_str().unwrap_or_default();
     assert!(
-        q[0].as_str()
-            .unwrap_or_default()
-            .contains("看不懂这条在接着什么说"),
-        "{q:?}"
+        question.contains(steve_channels::decide::Reason::DirectQuestion.label()),
+        "{question}"
+    );
+    assert!(
+        !question.contains(steve_channels::compose::UNCLEAR),
+        "{question}"
     );
     nothing_sent(&h);
+    // a private chat that asks nothing: let go
+    for _ in 0..2 {
+        h.env.gateway.reply(
+            r#"{"outcome": "need_context", "text": "不知道“那个”指什么", "needs_approval": false, "why": ""}"#,
+        );
+    }
+    h.env.clock.advance(4 * 60_000);
+    let i = push(&h, &me, msg("D_LI", "n3", "ulilei", "就那个", false)).await;
+    let r = i.response.expect("response");
+    assert!(
+        r.decision_id.is_none() && r.out_message_id.is_none(),
+        "{r:?}"
+    );
 }
 
 // ---------------------------------------------------------------- the check's context (disclosure-01)

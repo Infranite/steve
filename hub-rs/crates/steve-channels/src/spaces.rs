@@ -136,6 +136,68 @@ pub fn reply_as_you(c: &Connection, space: &str) -> ChannelResult<ReplyAsYou> {
     Ok(v.as_deref().and_then(ReplyAsYou::parse).unwrap_or_default())
 }
 
+/// What a bot's message in a space becomes on your own account (migration 088
+/// `space_prefs.bot_notices`). A bot is never answered there (`collab` aside); this only says
+/// whether its notice reaches you as a proposed item ([`crate::decide::bot_notice`]). Decided by the
+/// message's structure and this setting, never by its words.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BotNotices {
+    /// In a private chat with the bot, a notice that carries an action link (a card button or a
+    /// clickable block that opens a page) becomes a proposed item; anything else is recorded.
+    #[default]
+    Auto,
+    /// Every message the bot sends here becomes a proposed item (your allowlist of bots whose
+    /// notices are work).
+    Item,
+    /// Recorded only.
+    Record,
+}
+
+impl BotNotices {
+    pub const ALL: [BotNotices; 3] = [Self::Auto, Self::Item, Self::Record];
+
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Item => "item",
+            Self::Record => "record",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|a| a.code() == s)
+    }
+}
+
+/// Writes what a bot's message in a space becomes (no revision: the callers write theirs).
+pub fn write_bot_notices(
+    tx: &Tx,
+    ws: &str,
+    space: &str,
+    v: BotNotices,
+    now: i64,
+) -> ChannelResult<()> {
+    tx.execute(
+        "INSERT INTO space_prefs (space_id, workspace_id, bot_notices, updated) VALUES (?1, ?2, ?3, ?4)
+           ON CONFLICT (space_id) DO UPDATE SET bot_notices = excluded.bot_notices, updated = excluded.updated",
+        params![space, ws, v.code(), now],
+    )?;
+    Ok(())
+}
+
+/// What a bot's message in a space becomes (`auto` when nothing was set).
+pub fn bot_notices(c: &Connection, space: &str) -> ChannelResult<BotNotices> {
+    let v: Option<String> = c
+        .query_row(
+            "SELECT bot_notices FROM space_prefs WHERE space_id = ?",
+            [space],
+            |r| r.get(0),
+        )
+        .optional()?;
+    Ok(v.as_deref().and_then(BotNotices::parse).unwrap_or_default())
+}
+
 /// Does your own account speak in the space: its voice (else `conn`, the identity that received the
 /// message) is a personal connection (`Mode::Own`)?
 pub fn speaks_as_you(
@@ -996,12 +1058,14 @@ pub struct SpaceSettings {
     pub attention: Attention,
     /// Whether Steve replies for you here on your own account (096).
     pub reply_as_you: ReplyAsYou,
+    /// What a bot's message here becomes on your own account (088).
+    pub bot_notices: BotNotices,
 }
 
 pub fn settings(c: &Connection, space: &str) -> ChannelResult<SpaceSettings> {
     c.query_row(
         "SELECT s.duty, s.rules, s.flow_id, s.muted, s.collab, s.memory_scope, s.disclosure, s.item_defaults, s.configured, s.revision, a.attention,
-                a.reply_as_you
+                a.reply_as_you, a.bot_notices
            FROM space_settings s LEFT JOIN space_prefs a ON a.space_id = s.space_id WHERE s.space_id = ?",
         [space],
         |r| {
@@ -1028,6 +1092,11 @@ pub fn settings(c: &Connection, space: &str) -> ChannelResult<SpaceSettings> {
                     .get::<_, Option<String>>(11)?
                     .as_deref()
                     .and_then(ReplyAsYou::parse)
+                    .unwrap_or_default(),
+                bot_notices: r
+                    .get::<_, Option<String>>(12)?
+                    .as_deref()
+                    .and_then(BotNotices::parse)
                     .unwrap_or_default(),
             })
         },
@@ -1057,6 +1126,7 @@ pub fn settings_or_defaults(c: &Connection, s: &SpaceRow) -> ChannelResult<Space
             revision: 0,
             attention: Attention::Realtime,
             reply_as_you: ReplyAsYou::Draft,
+            bot_notices: BotNotices::Auto,
         }),
         r => r,
     }
@@ -1099,6 +1169,8 @@ pub struct SpaceOut {
     pub attention: Attention,
     /// Whether Steve replies for you here on your own account: `draft|record|off`.
     pub reply_as_you: ReplyAsYou,
+    /// What a bot's message here becomes on your own account: `auto|item|record`.
+    pub bot_notices: BotNotices,
     /// Steve's role here (derived from the voice's rules and `muted`).
     pub role: Role,
     /// The identity that speaks for Steve here, `null` when none sees it any more.
@@ -1544,6 +1616,7 @@ pub fn out_with(
         last_message: s.last_message,
         attention: set.attention,
         reply_as_you: set.reply_as_you,
+        bot_notices: set.bot_notices,
         role,
         voice,
         identities: ids,
@@ -1572,6 +1645,8 @@ pub struct SpacePatch {
     pub attention: Option<String>,
     /// `draft|record|off`: whether Steve replies for you here on your own account.
     pub reply_as_you: Option<String>,
+    /// `auto|item|record`: what a bot's message here becomes on your own account.
+    pub bot_notices: Option<String>,
     /// Absent = unchanged; `null` = automatic; a connection id = that identity speaks here (it must
     /// see the space, else `400`).
     #[serde(default, deserialize_with = "some_nullable")]
@@ -1628,6 +1703,9 @@ impl SpacePatch {
         }
         if let Some(a) = &self.reply_as_you {
             c.that("reply_as_you", ReplyAsYou::parse(a).is_some());
+        }
+        if let Some(a) = &self.bot_notices {
+            c.that("bot_notices", BotNotices::parse(a).is_some());
         }
         if let Some(d) = &self.item_defaults {
             c.that("item_defaults.tags", d.tags.len() <= 20);
@@ -1718,6 +1796,9 @@ pub fn patch(
     if let Some(a) = p.reply_as_you.as_deref().and_then(ReplyAsYou::parse) {
         after.reply_as_you = a;
     }
+    if let Some(a) = p.bot_notices.as_deref().and_then(BotNotices::parse) {
+        after.bot_notices = a;
+    }
     if let Some(v) = p.collab {
         after.collab = v;
     }
@@ -1780,10 +1861,13 @@ pub fn patch(
             )?;
         }
     }
+    if after.bot_notices != before.bot_notices {
+        write_bot_notices(tx, ws, id, after.bot_notices, now)?;
+    }
     let voice_after = chosen_voice(tx, id)?;
     let snap = |x: &SpaceSettings, persona: &Option<String>, voice: &Option<String>| {
         json!({
-            "persona_id": persona, "duty": x.duty, "rules": x.rules, "muted": x.muted, "attention": x.attention.code(), "reply_as_you": x.reply_as_you.code(), "voice": voice, "collab": x.collab, "memory_scope": x.memory_scope,
+            "persona_id": persona, "duty": x.duty, "rules": x.rules, "muted": x.muted, "attention": x.attention.code(), "reply_as_you": x.reply_as_you.code(), "bot_notices": x.bot_notices.code(), "voice": voice, "collab": x.collab, "memory_scope": x.memory_scope,
             "disclosure": x.disclosure, "item_defaults": item_defaults(&x.item_defaults),
         })
     };
@@ -1817,6 +1901,7 @@ fn patched_fields(p: &SpacePatch) -> Vec<&'static str> {
         ("muted", p.muted.is_some()),
         ("attention", p.attention.is_some()),
         ("reply_as_you", p.reply_as_you.is_some()),
+        ("bot_notices", p.bot_notices.is_some()),
         ("voice", p.voice.is_some()),
         ("collab", p.collab.is_some()),
         ("memory_scope", p.memory_scope.is_some()),

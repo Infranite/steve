@@ -197,6 +197,9 @@ pub const MIGRATIONS: &[&str] = &[
     // 96: per space, whether Steve replies for you on your own account (`space_prefs.reply_as_you`), and the
     // later message whose turn answers a message (`chan_messages.turn_of`).
     include_str!("../migrations/096.sql"),
+    // 97: the composer's answer kept with a draft in your name (`chan_messages.composed`), and per space what a bot's
+    // message becomes on your own account (`space_prefs.bot_notices`).
+    include_str!("../migrations/097.sql"),
 ];
 
 /// 027's item columns and their one-time backfill (applied by `run_pending` when `items.phase` is missing).

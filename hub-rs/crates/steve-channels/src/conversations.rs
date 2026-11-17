@@ -542,12 +542,20 @@ impl Channels {
         {
             self.react_finish(&plan.message_id, Finish::Clear).await;
             // the message's event says what became of it (the rules' mark ran before the answer)
-            let (q, why) = (c.text.clone(), c.generation.why.clone());
+            let (q, why, generation) = (
+                c.text.clone(),
+                c.generation.why.clone(),
+                c.generation.clone(),
+            );
             let asks = c.generation.outcome == Outcome::AskOwner;
             self.store().transaction(|tx| -> ChannelResult<()> {
                 use crate::respond::{TRAIL_COMPOSER, note_message_event, trail};
                 if asks {
-                    let d = crate::respond::open_handoff_asking(tx, &plan, Some(&q))?;
+                    let d = crate::decide::open_card(
+                        tx,
+                        &plan,
+                        &crate::decide::Card::of(&generation, &q, plan.mode, false),
+                    )?;
                     note_message_event(
                         tx,
                         &plan.message_id,

@@ -453,6 +453,8 @@ export default {
     mutedSub: "Doesn't speak or draft; hand-offs still go to your inbox (silent)",
     replyAsYou: "Reply for you",
     replyAsYouSaved: "Saved: reply for you is {{level}}",
+    botNotices: "Bot notices",
+    botNoticesSaved: "Saved: bot notices are {{level}}",
     mutedOn: "Record only, won't speak",
     mutedOff: "Back to following the rules",
     voice: "Identity speaking for Steve",

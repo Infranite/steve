@@ -233,6 +233,13 @@ pub struct Outbound {
     pub retries: u32,
     /// draft | leak_draft | send_failed | handoff
     pub stage: OutboundStage,
+    /// Said as you: the channel's composer wrote it as its reply (steve-channels
+    /// `chan_messages.composed`). A text in your name nobody composed (a fixed receipt, a flow's text,
+    /// an agent's update, a draft from before) is not approved by YOLO. Always `true` for mail.
+    pub composed: bool,
+    /// It promises something for you (to look into it, a time, a result, money, deleting): yours to
+    /// decide, never sent by YOLO.
+    pub commitment: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -1136,15 +1143,34 @@ fn ask(a: &Ask, p: &Policy) -> Verdict {
 }
 
 fn outbound(o: &Outbound, p: &Policy, what: &str) -> Verdict {
+    // the card's stage first: a hand-off or a blocked text says why, not that it has no send option
+    match o.stage {
+        OutboundStage::Handoff => return decline(&format!("{what}.handoff"), "别人点名找的是你"),
+        OutboundStage::LeakDraft | OutboundStage::Blocked => {
+            return decline(&format!("{what}.blocked"), "披露检查没通过");
+        }
+        OutboundStage::Draft | OutboundStage::SendFailed => {}
+    }
     let Some(send) = o.send_option.clone() else {
         return decline(&format!("{what}.no_option"), "卡上没有发送选项");
     };
     match o.stage {
-        OutboundStage::Handoff => decline(&format!("{what}.handoff"), "别人点名找的是你"),
-        OutboundStage::LeakDraft | OutboundStage::Blocked => {
-            decline(&format!("{what}.blocked"), "披露检查没通过")
+        OutboundStage::Handoff | OutboundStage::LeakDraft | OutboundStage::Blocked => {
+            unreachable!("declined above")
         }
         OutboundStage::Draft | OutboundStage::SendFailed => {
+            if o.commitment {
+                return decline(
+                    &format!("{what}.commitment"),
+                    "回复里替你答应了事情，要你自己定",
+                );
+            }
+            if matches!(o.identity, Identity::SelfAccount | Identity::Proxy) && !o.composed {
+                return decline(
+                    &format!("{what}.uncomposed"),
+                    "不是起草器写的回复，不以你的名义发",
+                );
+            }
             if !o.disclosure.passed() {
                 return decline(&format!("{what}.unchecked"), "没有通过披露检查");
             }

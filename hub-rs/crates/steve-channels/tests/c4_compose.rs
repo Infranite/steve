@@ -598,13 +598,13 @@ async fn own_draft_uses_verified_connection_user_and_external_space_address() {
         assert_eq!(layers.persona, compose::self_layer(expected));
         assert!(!layers.persona.contains("Workspace owner public"));
         assert!(!layers.persona.contains("Member private nickname"));
-        assert!(compose::meant_for_owner(
+        assert!(steve_channels::decide::names_you(
             &format!("这条是发给{expected}的"),
-            &layers.owner
+            &layers.owner_names
         ));
-        assert!(!compose::meant_for_owner(
+        assert!(!steve_channels::decide::names_you(
             "Workspace owner public 稍后答复",
-            &layers.owner
+            &layers.owner_names
         ));
     };
     assert_address("Member public");

@@ -632,9 +632,15 @@ async fn pm_handoff_reaches_the_inbox_while_muted() {
     assert!(!r.muted, "a handoff is not muted");
     let d = decision(&h, r.decision_id.as_deref().expect("decision"));
     assert_eq!(d[0], json!("ask"));
-    assert_eq!(
-        d[2],
-        json!("「Acme 客户群」里 Sarah 找你：@需求官 Can we get the report today?")
+    // the card: who and what (the message itself, no model ran), why, then the lines with it marked
+    let q = d[2].as_str().unwrap();
+    assert!(
+        q.starts_with("「Acme 客户群」里 Sarah 找你：@需求官 Can we get the report today?\n为什么要你：这里的规则把消息转给你（@了你）"),
+        "{q}"
+    );
+    assert!(
+        q.ends_with("→ Sarah：@需求官 Can we get the report today?"),
+        "{q}"
     );
     assert_eq!(
         rows(

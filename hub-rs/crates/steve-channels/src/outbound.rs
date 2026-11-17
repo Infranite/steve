@@ -125,6 +125,8 @@ fn scope_code(scope: BlockScope) -> &'static str {
     }
 }
 
+/// Said on the approval of a draft that promises something for you (YOLO never sends one).
+pub const COMMITS: &str = "（替你答应了事情，要你自己定）";
 /// Appended to messages Steve sends as you after your trigger words, verbatim.
 pub const PROXY_MARK: &str = "（由 Steve 代发）";
 /// The longest text, in characters (like `POST /spaces/:id/messages`).
@@ -773,6 +775,119 @@ fn rewrite_failed(ch: &Channels, message_id: &str, decision_id: &str) -> Channel
     })
 }
 
+/// Cards answered “告诉它怎么回” whose words the composer has not drafted with yet (`result.composed`
+/// unset), resolved within [`crate::decide::CARD_TTL_MS`]: `(ws, decision, message, your words)`.
+fn instructions_asked(
+    c: &Connection,
+    now: i64,
+) -> ChannelResult<Vec<(String, String, String, String)>> {
+    let mut st = c.prepare_cached(
+        "SELECT workspace_id, id, subject_id, coalesce(json_extract(result, '$.text'), '')
+           FROM decisions INDEXED BY decisions_chan_answered
+          WHERE subject_type = 'chan_message' AND kind = 'ask' AND status = 'resolved' AND resolved >= ?
+            AND json_extract(result, '$.choice') = ? AND json_extract(result, '$.composed') IS NULL
+          ORDER BY resolved LIMIT 20",
+    )?;
+    let rows = st
+        .query_map(
+            params![now - crate::decide::CARD_TTL_MS, respond::INSTRUCT],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+/// “告诉它怎么回” on card `decision` about message `message`: the composer writes the reply with your
+/// words as its instruction (so neither the checks of writing as you nor the decision rules
+/// override it), and it goes the usual way: checked, then a draft for your approval. When it does
+/// not come out as a reply, a new card says so. Drafted once (`result.composed`). Through the
+/// responder's outbound (the [`Outbox`] in the Hub), on a task of its own.
+async fn compose_instructed(
+    ch: &Channels,
+    ws: &str,
+    decision: &str,
+    message: &str,
+    words: &str,
+) -> ChannelResult<()> {
+    let plan = ch.store().reader(|c| plan_of(c, ws, message))?;
+    let r = match ch.responder().composer() {
+        Some(composer) => {
+            let opts = compose::ComposeOpts {
+                instruction: Some(instruction_of(words)),
+                ..Default::default()
+            };
+            composer
+                .generate(ch, &plan, &opts)
+                .await
+                .map_err(|e| e.to_string())
+        }
+        None => Err("没有起草器".to_string()),
+    };
+    match r {
+        Ok(r) if r.generation.outcome == crate::deliver::Outcome::Reply => {
+            let Some(out) = ch.responder().outbound() else {
+                return Err(ApiError::Internal("没有出站".into()));
+            };
+            let d = out
+                .deliver(
+                    ch,
+                    &OutRequest {
+                        target: OutTarget::reply(&plan),
+                        text: r.text,
+                        purpose: Purpose::Reply,
+                        approve: true,
+                        generation: Some(r.generation),
+                        auth: Auth::None,
+                    },
+                )
+                .await?;
+            let id = d.message_id().unwrap_or("skipped").to_string();
+            ch.store()
+                .transaction(|tx| mark_composed(tx, decision, &id))?;
+        }
+        other => {
+            if let Err(e) = &other {
+                tracing::warn!(decision, "drafting with your words: {e}");
+            }
+            ch.store().transaction(|tx| -> ChannelResult<()> {
+                if mark_composed(tx, decision, "failed")? {
+                    crate::decide::open_card(
+                        tx,
+                        &plan,
+                        &crate::decide::Card {
+                            summary: String::new(),
+                            reason: crate::decide::Reason::Instruction,
+                            note: None,
+                            draft: String::new(),
+                            starred: false,
+                        },
+                    )?;
+                }
+                Ok(())
+            })?;
+        }
+    }
+    Ok(())
+}
+
+/// What the composer is told when you answered a card with how to reply ([`respond::INSTRUCT`]).
+pub fn instruction_of(words: &str) -> String {
+    format!(
+        "我看过这条消息，这样回：{}\n按我的意思写一条回复，用我的口吻，outcome 写 reply。",
+        words.trim()
+    )
+}
+
+/// Marks a card answered with your words as drafted (`result.composed`: the draft's id, or
+/// `failed`), so it is drafted once.
+fn mark_composed(tx: &Tx, decision: &str, what: &str) -> ChannelResult<bool> {
+    Ok(tx.execute(
+        "UPDATE decisions SET result = json_set(coalesce(result, '{}'), '$.composed', ?)
+          WHERE id = ? AND json_extract(result, '$.composed') IS NULL",
+        params![what, decision],
+    )? == 1)
+}
+
 /// Flagged drafts whose card was answered “改写后再看” and that wait for the rewrite.
 fn rewrites_asked(c: &Connection) -> ChannelResult<Vec<(String, String)>> {
     let mut st = c.prepare_cached(
@@ -1276,6 +1391,9 @@ impl Outbox {
             if let Some(e) = envelope {
                 crate::pipeline::record(tx, e, req, &id, now)?;
             }
+            if let Some(g) = &req.generation {
+                crate::decide::keep_composed(tx, &id, g)?;
+            }
             // a direct one is found again under this authorization if the Hub stops before it is out
             if direct {
                 send_state::keep(tx, &id, &req.auth)?;
@@ -1305,6 +1423,9 @@ impl Outbox {
                 let mut q = format!("{}发到「{}」", p.speaker, space_name(&p.space));
                 if leak {
                     q.push_str(&format!("（可能泄露：{}）", spans_note(&res)));
+                }
+                if req.generation.as_ref().is_some_and(|g| g.needs_commitment) {
+                    q.push_str(COMMITS);
                 }
                 // a model's text the check flagged: the card can ask for the rewrite it did not get
                 let rewrite = leak && req.generation.is_some() && !unchecked(&res);
@@ -1885,6 +2006,69 @@ impl Outbox {
         })
     }
 
+    /// Closes the cards about your own account still open after [`crate::decide::CARD_TTL_MS`]
+    /// (`result.superseded` = [`crate::decide::BY_EXPIRY`]): a hand-off about someone's message where
+    /// your own account speaks, and a draft in your name answering one (discarded). Cards where a bot
+    /// speaks are left alone. Returns how many closed.
+    fn expire_stale(&self, ch: &Channels) -> ChannelResult<usize> {
+        let now = ch.now();
+        let mut closed = 0;
+        let mut after = Vec::new();
+        ch.store().transaction(|tx| -> ChannelResult<()> {
+            let stale: Vec<(String, String, String, String)> = {
+                let mut st = tx.prepare_cached(
+                    "SELECT id, workspace_id, kind, subject_id FROM decisions INDEXED BY decisions_chan_open
+                      WHERE subject_type = 'chan_message' AND status = 'open' AND kind IN ('ask', 'approve')
+                        AND created < ? ORDER BY created LIMIT 100",
+                )?;
+                st.query_map(params![now - crate::decide::CARD_TTL_MS], |r| {
+                    Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+            };
+            for (d, ws, kind, subject) in stale {
+                let space: Option<String> = tx
+                    .query_row(
+                        "SELECT space_id FROM chan_messages WHERE id = ?",
+                        [&subject],
+                        |r| r.get(0),
+                    )
+                    .optional()?;
+                let Some(space) = space else { continue };
+                let yours = match kind.as_str() {
+                    "ask" => spaces::speaks_as_you(tx, &ws, &space, None)?,
+                    _ => crate::presence::answered_message(tx, &ws, &subject)?.is_some(),
+                };
+                if !yours {
+                    continue;
+                }
+                if kind == "approve" {
+                    if !set_status(tx, &subject, &["draft"], DISCARDED)? {
+                        continue;
+                    }
+                    after.push(subject.clone());
+                }
+                if crate::presence::settle(tx, &d, crate::decide::BY_EXPIRY)? {
+                    closed += 1;
+                    base::audit(
+                        tx,
+                        &ws,
+                        "steve",
+                        "chan_message.expired",
+                        &subject,
+                        &json!({"decision": d, "why": crate::decide::BY_EXPIRY}),
+                    )?;
+                    messages::event(tx, &ws, &space, &subject);
+                }
+            }
+            Ok(())
+        })?;
+        for m in after {
+            self.link.push(After::Discarded { message_id: m });
+        }
+        Ok(closed)
+    }
+
     /// The queue (`channels.retry` and the approvals' delay): approved or retried messages whose
     /// delay is over are sent; handoffs answered “to_item” become items. Returns how many were
     /// sent.
@@ -1906,6 +2090,28 @@ impl Outbox {
                 }
                 After::Discarded { message_id } => ch.react_discarded(&message_id).await,
             }
+        }
+        // cards about your own account that waited too long close (crate::decide::CARD_TTL_MS)
+        if let Err(e) = self.expire_stale(ch) {
+            tracing::warn!("stale cards: {e}");
+        }
+        // “告诉它怎么回”: the composer drafts with your words, each on a task of its own
+        match ch.store().reader(|c| instructions_asked(c, ch.now())) {
+            Ok(asked) => {
+                for (ws, d, m, words) in asked {
+                    if !lock(&self.rewriting).insert(d.clone()) {
+                        continue;
+                    }
+                    let (ch, busy) = (ch.clone(), self.rewriting.clone());
+                    tokio::spawn(async move {
+                        if let Err(e) = compose_instructed(&ch, &ws, &d, &m, &words).await {
+                            tracing::warn!(decision = d, "drafting with your words failed: {e}");
+                        }
+                        lock(&busy).remove(&d);
+                    });
+                }
+            }
+            Err(e) => tracing::warn!("cards answered with your words: {e}"),
         }
         // “改写后再看”: each on a task of its own, so a slow model does not hold up the sends
         match ch.store().reader(rewrites_asked) {
@@ -2754,8 +2960,42 @@ impl MessageDecisions {
     fn handoff(&self, tx: &Tx, cx: &DecisionCx, d: &Decision) -> ApiResult<Value> {
         let now = self.0.now();
         let mut result = choice_result(cx);
+        // what speaks for you from a card is your own click: YOLO answers none of these
+        if cx.actor == b1::YOLO_ACTOR
+            && [respond::SEND_DRAFT, respond::VERBATIM, respond::INSTRUCT].contains(&cx.choice)
+        {
+            return Err(ApiError::rule(steve_i18n::t!(
+                "channels.error.yours_to_answer"
+            )));
+        }
         match cx.choice {
-            "draft_reply" => {
+            respond::SEND_DRAFT | respond::VERBATIM => {
+                // the card's draft as it showed it, or your own words as you wrote them
+                let text = if cx.choice == respond::SEND_DRAFT {
+                    d.draft.trim()
+                } else {
+                    cx.text.trim()
+                };
+                if text.is_empty() {
+                    return Err(ApiError::rule(steve_i18n::t!("channels.error.reply_empty")));
+                }
+                if text.chars().count() > TEXT_MAX {
+                    return Err(ApiError::invalid("text"));
+                }
+                let plan = plan_of(tx, cx.ws, &d.subject_id)?;
+                let (m, dd, send_at) = self.approve_as_you(tx, cx, &plan, text, &d.id, now)?;
+                result["draft_message"] = json!(m);
+                result["draft_decision"] = json!(dd);
+                result["send_at"] = json!(send_at);
+            }
+            respond::INSTRUCT => {
+                // your words go to the composer: the queue drafts with them (Outbox::send_due)
+                if cx.text.trim().is_empty() {
+                    return Err(ApiError::rule(steve_i18n::t!("channels.error.reply_empty")));
+                }
+                plan_of(tx, cx.ws, &d.subject_id)?;
+            }
+            respond::DRAFT_REPLY => {
                 let plan = plan_of(tx, cx.ws, &d.subject_id)?;
                 let (m, dd) = respond::open_draft(tx, &plan, cx.text.trim(), now)?;
                 result["draft_message"] = json!(m);
@@ -2772,6 +3012,47 @@ impl MessageDecisions {
             _ => return Err(ApiError::invalid("choice")),
         }
         Ok(result)
+    }
+}
+
+impl MessageDecisions {
+    /// Your click on a card that sends: `text` goes out as a reply to the plan's message, approved by
+    /// you (a draft and its approval resolved `yes` at once, after the usual delay, undoable within
+    /// it). Returns `(message, its approval, send_at)`.
+    fn approve_as_you(
+        &self,
+        tx: &Tx,
+        cx: &DecisionCx,
+        plan: &respond::Plan,
+        text: &str,
+        card: &str,
+        now: i64,
+    ) -> ApiResult<(String, String, i64)> {
+        let (m, dd) = respond::open_draft(tx, plan, text, now)?;
+        crate::reactions::expect_answer(tx, &plan.message_id, &m)?;
+        let row = own_out(tx, cx.ws, &m)?;
+        let send_at = now + send_delay_ms(tx, &row)?;
+        tx.execute(
+            "UPDATE chan_messages SET status = 'pending', sent = NULL WHERE id = ? AND status = 'draft'",
+            [&m],
+        )?;
+        base::decisions::settle(
+            tx,
+            &dd,
+            &json!({"choice": "yes", "hash": text_hash(text), "send_at": send_at, "from_card": card}),
+            "resolved",
+            &steve_modules::decisions::undo_marker(SUBJECT_MESSAGE),
+        )?;
+        base::audit(
+            tx,
+            cx.ws,
+            cx.actor,
+            "chan_message.approve",
+            &m,
+            &json!({"decision": dd, "card": card, "choice": cx.choice}),
+        )?;
+        messages::event(tx, cx.ws, &plan.space_id, &m);
+        Ok((m, dd, send_at))
     }
 }
 
