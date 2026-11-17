@@ -1,6 +1,15 @@
 //! Personal notification intake, not another sender. Durable facts and inbox rows commit with the
 //! outbox receipt; recovery submits the same event/member key to E1, whose C6 ledger owns every send.
 //! No owner inference: a real member explicitly opts in and names their user-linked party.
+//!
+//! Two kinds ([`Kind`]): a work item done (the `work.item.done` event, [`Intake`]) and a starred
+//! contact's message to you on your own account ([`queue_starred`], from [`crate::starred`]). A
+//! starred contact's message is the urgent one: it goes out now under `digest` too, to the private
+//! chat you chose for it (no route is looked up for you under `digest`: none chosen keeps it in the
+//! inbox, as `log` does; [`Kind::sends`]), and within your quiet hours when you allowed it
+//! (`starred_in_quiet`). Whether you
+//! answered it yourself is asked again before it is submitted and before every attempt: once you
+//! did, it is cancelled and nothing goes out ([`answered`]).
 
 use crate::{ChannelResult, Channels, Outbox};
 use chrono::Timelike;
@@ -27,6 +36,44 @@ pub struct Policy {
     /// Minutes since local midnight, [start,end); start > end crosses midnight.
     pub quiet_start: Option<u16>,
     pub quiet_end: Option<u16>,
+    /// A starred contact's message is sent within the quiet hours too (off by default).
+    #[serde(default)]
+    pub starred_in_quiet: bool,
+}
+
+/// What a personal notification is about (`personal_notifications.kind`; the feed entry's kind).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Kind {
+    /// A work item was done.
+    Completion,
+    /// A starred contact wrote to you on your own account.
+    Starred,
+}
+impl Kind {
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::Completion => "completion",
+            Self::Starred => "starred",
+        }
+    }
+    fn parse(s: &str) -> Self {
+        if s == "starred" {
+            Self::Starred
+        } else {
+            Self::Completion
+        }
+    }
+    /// Whether a notification of this kind goes out under policy `p` (not only into the inbox):
+    /// everything under `now`; under `digest` a starred contact's message only, and only to the
+    /// private chat you chose for it (`space_id`) — no route is looked up for you there.
+    pub fn sends(self, p: &Policy) -> bool {
+        match p.mode {
+            Mode::Now => true,
+            Mode::Digest => self == Self::Starred && p.space_id.is_some(),
+            Mode::Log => false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -55,10 +102,15 @@ impl Default for Policy {
             timezone: "UTC".into(),
             quiet_start: None,
             quiet_end: None,
+            starred_in_quiet: false,
         }
     }
 }
 impl Policy {
+    /// The quiet hours hold a notification of `kind` at `now`.
+    pub fn holds(&self, kind: Kind, now: i64) -> ChannelResult<bool> {
+        Ok(self.quiet(now)? && !(kind == Kind::Starred && self.starred_in_quiet))
+    }
     fn validate(&self) -> ChannelResult<()> {
         self.timezone
             .parse::<chrono_tz::Tz>()
@@ -92,12 +144,31 @@ impl Policy {
 }
 
 fn load(c: &Connection, who: &Caller) -> ChannelResult<Option<Policy>> {
-    let row:Option<(bool,String,Option<String>,Option<String>,String,Option<u16>,Option<u16>)>=c.query_row(
-        "SELECT enabled,mode,party_id,space_id,timezone,quiet_start,quiet_end FROM notification_policies WHERE workspace_id=? AND user_id=?",
-        params![who.ws,who.me],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?)),
+    type Row = (
+        bool,
+        String,
+        Option<String>,
+        Option<String>,
+        String,
+        Option<u16>,
+        Option<u16>,
+        bool,
+    );
+    let row:Option<Row>=c.query_row(
+        "SELECT enabled,mode,party_id,space_id,timezone,quiet_start,quiet_end,starred_in_quiet FROM notification_policies WHERE workspace_id=? AND user_id=?",
+        params![who.ws,who.me],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?,r.get(7)?)),
     ).optional()?;
     row.map(
-        |(enabled, mode, party_id, space_id, timezone, quiet_start, quiet_end)| {
+        |(
+            enabled,
+            mode,
+            party_id,
+            space_id,
+            timezone,
+            quiet_start,
+            quiet_end,
+            starred_in_quiet,
+        )| {
             Ok(Policy {
                 enabled,
                 mode: serde_json::from_value(serde_json::Value::String(mode))?,
@@ -106,6 +177,7 @@ fn load(c: &Connection, who: &Caller) -> ChannelResult<Option<Policy>> {
                 timezone,
                 quiet_start,
                 quiet_end,
+                starred_in_quiet,
             })
         },
     )
@@ -129,7 +201,7 @@ fn self_party(c: &Connection, who: &Caller, party: &str) -> ChannelResult<()> {
     Ok(())
 }
 
-fn intent(p: &Policy, key: &str, body: &str) -> DeliveryIntent {
+fn intent(p: &Policy, key: &str, body: &str, kind: Kind) -> DeliveryIntent {
     DeliveryIntent {
         key: key.into(),
         identity: Identity::Bot,
@@ -140,8 +212,16 @@ fn intent(p: &Policy, key: &str, body: &str) -> DeliveryIntent {
         source_message_id: None,
         space_id: p.space_id.clone(),
         party_id: p.party_id.clone(),
-        reason: "Personal work.item.done notification (explicit member policy)".into(),
-        urgency: "normal".into(),
+        reason: match kind {
+            Kind::Completion => "Personal work.item.done notification (explicit member policy)",
+            Kind::Starred => "A starred contact's message to you (explicit member policy)",
+        }
+        .into(),
+        urgency: match kind {
+            Kind::Completion => "normal",
+            Kind::Starred => "high",
+        }
+        .into(),
     }
 }
 
@@ -220,7 +300,11 @@ pub fn targets(ch: &Channels, who: &Caller) -> ChannelResult<Vec<Target>> {
             // Internal failures must not masquerade as an empty picker.
             let route = self_party(c, who, &target.party_id)
                 .and_then(|_| {
-                    crate::pipeline::route(c, &viewer, &intent(&p, "validation", "validation"))
+                    crate::pipeline::route(
+                        c,
+                        &viewer,
+                        &intent(&p, "validation", "validation", Kind::Completion),
+                    )
                 })
                 .and_then(|route| {
                     self_dm(c, who, &target.party_id, &route.space_id)?;
@@ -274,18 +358,21 @@ pub fn put_policy(ch: &Channels, who: &Caller, p: &Policy) -> ChannelResult<()> 
         require_person(tx,who)?;
         if p.enabled {
             if let Some(party)=&p.party_id { self_party(tx,who,party)?; }
-            if p.mode==Mode::Now { self_route(tx,who,&intent(p,"validation","validation"))?; }
+            // what is sent goes to a private chat with yourself and the bot: under digest only the one you chose
+            if p.mode==Mode::Now || (p.mode==Mode::Digest && p.space_id.is_some()) { self_route(tx,who,&intent(p,"validation","validation",Kind::Completion))?; }
         }
         let now=ch.now();
-        tx.execute("INSERT INTO notification_policies(workspace_id,user_id,enabled,mode,party_id,space_id,timezone,quiet_start,quiet_end,consented_at,consent_since_seq,updated)
-            VALUES(?,?,?,?,?,?,?,?,?,?,(SELECT coalesce(max(seq),0) FROM outbox_events),?) ON CONFLICT(workspace_id,user_id) DO UPDATE SET enabled=excluded.enabled,mode=excluded.mode,party_id=excluded.party_id,space_id=excluded.space_id,
-            timezone=excluded.timezone,quiet_start=excluded.quiet_start,quiet_end=excluded.quiet_end,
+        tx.execute("INSERT INTO notification_policies(workspace_id,user_id,enabled,mode,party_id,space_id,timezone,quiet_start,quiet_end,starred_in_quiet,consented_at,consent_since_seq,updated)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,(SELECT coalesce(max(seq),0) FROM outbox_events),?) ON CONFLICT(workspace_id,user_id) DO UPDATE SET enabled=excluded.enabled,mode=excluded.mode,party_id=excluded.party_id,space_id=excluded.space_id,
+            timezone=excluded.timezone,quiet_start=excluded.quiet_start,quiet_end=excluded.quiet_end,starred_in_quiet=excluded.starred_in_quiet,
             consented_at=CASE WHEN notification_policies.enabled=0 AND excluded.enabled=1 THEN excluded.consented_at ELSE notification_policies.consented_at END,
             consent_since_seq=CASE WHEN notification_policies.enabled=0 AND excluded.enabled=1 THEN excluded.consent_since_seq ELSE notification_policies.consent_since_seq END,updated=excluded.updated",
-            params![who.ws,who.me,p.enabled,p.mode.code(),p.party_id,p.space_id,p.timezone,p.quiet_start,p.quiet_end,now,now])?;
+            params![who.ws,who.me,p.enabled,p.mode.code(),p.party_id,p.space_id,p.timezone,p.quiet_start,p.quiet_end,p.starred_in_quiet,now,now])?;
         // A disabled policy never resurrects an old pending notification on a later opt-in.
         if !p.enabled { tx.execute("UPDATE personal_notifications SET state='cancelled' WHERE workspace_id=? AND user_id=? AND state IN ('waiting','held','submitted')",params![who.ws,who.me])?; }
-        if p.mode!=Mode::Now { tx.execute("UPDATE personal_notifications SET state='held',mode=? WHERE workspace_id=? AND user_id=? AND state='waiting'",params![p.mode.code(),who.ws,who.me])?; }
+        // what this policy no longer sends waits in the inbox only (Kind::sends: a starred contact's message
+        // still goes out under digest when you chose where)
+        if p.mode!=Mode::Now { tx.execute("UPDATE personal_notifications SET state='held',mode=?1 WHERE workspace_id=?2 AND user_id=?3 AND state='waiting' AND (?1<>'digest' OR kind<>'starred' OR ?4 IS NULL)",params![p.mode.code(),who.ws,who.me,p.space_id])?; }
         steve_store::base::audit(tx,&who.ws,&who.me,"notification.policy.updated",&who.me,&serde_json::to_value(p)?)?;
         Ok(())
     })
@@ -360,16 +447,19 @@ pub(crate) fn verify_intent(
     if !i.key.starts_with(PREFIX) {
         return Ok(());
     }
-    let row:Option<(Option<String>,String)>=c.query_row("SELECT body,state FROM personal_notifications WHERE workspace_id=? AND user_id=? AND delivery_key=?",params![who.ws,who.me,i.key],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
-    let Some((Some(body), state)) = row else {
+    type Row = (Option<String>, String, String, Option<String>);
+    let row:Option<Row>=c.query_row("SELECT body,state,kind,message_id FROM personal_notifications WHERE workspace_id=? AND user_id=? AND delivery_key=?",params![who.ws,who.me,i.key],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional()?;
+    let Some((Some(body), state, kind, message)) = row else {
         return Err(ApiError::Unauthenticated);
     };
+    let kind = Kind::parse(&kind);
     let p = load(c, who)?.ok_or(ApiError::Unauthenticated)?;
     if !p.enabled
-        || p.mode != Mode::Now
+        || !kind.sends(&p)
         || !matches!(state.as_str(), "waiting" | "submitted")
-        || p.quiet(now)?
-        || *i != intent(&p, &i.key, &body)
+        || p.holds(kind, now)?
+        || *i != intent(&p, &i.key, &body, kind)
+        || (kind == Kind::Starred && unwanted(c, &who.ws, message.as_deref(), now)?.is_some())
     {
         return Err(ApiError::Unauthenticated);
     }
@@ -409,14 +499,15 @@ pub(crate) fn attach(
 /// DND is a postponement, never a failed send or a reason to bypass the normal C6 authorization.
 /// Digest/log changes also park already queued sends; disabling is handled by verify_intent.
 pub(crate) fn deferred(c: &Connection, message: &str, now: i64) -> ChannelResult<bool> {
-    let who:Option<(String,String)>=c.query_row("SELECT workspace_id,user_id FROM personal_notifications WHERE delivery_id=(SELECT id FROM output_deliveries WHERE message_id=?)",[message],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
-    let Some((ws, me)) = who else {
+    let who:Option<(String,String,String)>=c.query_row("SELECT workspace_id,user_id,kind FROM personal_notifications WHERE delivery_id=(SELECT id FROM output_deliveries WHERE message_id=?)",[message],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?;
+    let Some((ws, me, kind)) = who else {
         return Ok(false);
     };
+    let kind = Kind::parse(&kind);
     let Some(p) = load(c, &Caller { ws, me })? else {
         return Ok(false);
     };
-    Ok(p.enabled && (p.mode != Mode::Now || p.quiet(now)?))
+    Ok(p.enabled && (!kind.sends(&p) || p.holds(kind, now)?))
 }
 
 #[derive(Serialize)]
@@ -451,12 +542,24 @@ pub fn seen(ch: &Channels, who: &Caller, id: &str) -> ChannelResult<()> {
 /// and log records never turn into individual sends on a later preference change.
 pub async fn pump(ch: &Channels, outbox: &Outbox) -> ChannelResult<usize> {
     let now = ch.now();
-    let rows=ch.store().reader(|c|->ChannelResult<Vec<(String,String,String,String)>> {
-        let mut st=c.prepare("SELECT workspace_id,user_id,delivery_key,body FROM personal_notifications WHERE state='waiting' AND delivery_id IS NULL AND body IS NOT NULL AND next_attempt_at<=? AND created>=? ORDER BY next_attempt_at,created LIMIT 50")?;
-        Ok(st.query_map([now,now-KEEP_MS],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)))?.collect::<rusqlite::Result<Vec<_>>>()?)
+    type Due = (String, String, String, String, String, Option<String>);
+    let rows=ch.store().reader(|c|->ChannelResult<Vec<Due>> {
+        let mut st=c.prepare("SELECT workspace_id,user_id,delivery_key,body,kind,message_id FROM personal_notifications WHERE state='waiting' AND delivery_id IS NULL AND body IS NOT NULL AND next_attempt_at<=? AND created>=? ORDER BY next_attempt_at,created LIMIT 50")?;
+        Ok(st.query_map([now,now-KEEP_MS],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?)))?.collect::<rusqlite::Result<Vec<_>>>()?)
     })?;
     let mut n = 0;
-    for (ws, me, key, body) in rows {
+    for (ws, me, key, body, kind, message) in rows {
+        let kind = Kind::parse(&kind);
+        // a starred contact's message you answered yourself (or whose space you set aside) meanwhile
+        if kind == Kind::Starred {
+            let why = ch
+                .store()
+                .reader(|c| unwanted(c, &ws, message.as_deref(), now))?;
+            if let Some(why) = why {
+                ch.store().transaction(|tx| cancel(tx, &ws, &key, why))?;
+                continue;
+            }
+        }
         // Round-robin due work even when the first member is quiet or has a broken route.
         ch.store().transaction(|tx|->ChannelResult<()> { tx.execute("UPDATE personal_notifications SET next_attempt_at=? WHERE delivery_key=? AND state='waiting'",params![now+10_000,key])?;Ok(()) })?;
         let who = Caller { ws, me };
@@ -470,10 +573,10 @@ pub async fn pump(ch: &Channels, outbox: &Outbox) -> ChannelResult<usize> {
             ch.store().transaction(|tx|->ChannelResult<()> {tx.execute("UPDATE personal_notifications SET state='cancelled' WHERE delivery_key=? AND state='waiting'",[&key])?;Ok(())})?;
             continue;
         };
-        if p.mode != Mode::Now || p.quiet(now)? {
+        if !kind.sends(&p) || p.holds(kind, now)? {
             continue;
         }
-        let i = intent(&p, &key, &body);
+        let i = intent(&p, &key, &body, kind);
         if let Err(e) = outbox.submit(ch, &who, i).await {
             tracing::warn!(key, "personal notification pending: {e}");
         } else {
@@ -495,5 +598,178 @@ pub async fn run(ch: Channels, outbox: Arc<Outbox>) {
             tracing::error!("personal notification recovery: {e}");
         }
         tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+    }
+}
+
+// ---------------------------------------------------------------- a starred contact's message
+
+/// Why a starred contact's notification about inbound message `message` is no longer wanted at
+/// `now`: you are there for it yourself ([`crate::presence::owner_engaged`]: you answered it, or are
+/// chatting there), or its space is set aside (不提醒, 屏蔽, or `reply_as_you = off`). `None`: still
+/// wanted. A message that is gone is not wanted.
+pub(crate) fn unwanted(
+    c: &Connection,
+    ws: &str,
+    message: Option<&str>,
+    now: i64,
+) -> ChannelResult<Option<&'static str>> {
+    let Some(message) = message else {
+        return Ok(Some(GONE));
+    };
+    let space: Option<String> = c
+        .query_row(
+            "SELECT space_id FROM chan_messages WHERE id = ? AND workspace_id = ? AND direction = 'in'",
+            params![message, ws],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let Some(space) = space else {
+        return Ok(Some(GONE));
+    };
+    if crate::presence::owner_engaged_chat(c, ws, message, now)?.is_some() {
+        return Ok(Some(crate::presence::REASON_REPLIED));
+    }
+    if crate::starred::set_aside_chat(c, ws, &space)? {
+        return Ok(Some(crate::presence::REASON_SETTING));
+    }
+    Ok(None)
+}
+
+/// `audit.why` of a notification whose message is no longer stored.
+const GONE: &str = "message_gone";
+
+fn cancel(tx: &Tx, ws: &str, key: &str, why: &str) -> ChannelResult<bool> {
+    let n = tx.execute(
+        "UPDATE personal_notifications SET state='cancelled' WHERE delivery_key=? AND state IN ('waiting','held','submitted')",
+        [key],
+    )?;
+    if n > 0 {
+        steve_store::base::audit(
+            tx,
+            ws,
+            "steve",
+            "notification.starred.cancelled",
+            key,
+            &serde_json::json!({ "why": why }),
+        )?;
+    }
+    Ok(n > 0)
+}
+
+/// What became of a starred contact's message as a notification ([`queue_starred`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Queued {
+    /// In your inbox (`ntf_…`), and to be sent now (`true`) or kept there (`log`: `false`).
+    Yes { id: String, sends: bool },
+    /// The same sender's earlier message in that space is notified already and you have not spoken
+    /// there since.
+    Again,
+    /// You have no personal notification policy turned on: nothing is queued.
+    Off,
+}
+
+/// Queues the notification of user `who` about starred contact's inbound message `message`, `body`
+/// its text ([`crate::starred`] decided it is one). One per sender and space while you have not
+/// spoken there since the last one, within one stretch of talk ([`crate::context::SEGMENT_GAP_MS`]).
+pub(crate) fn queue_starred(
+    tx: &Tx,
+    who: &Caller,
+    message: &str,
+    body: &str,
+    now: i64,
+) -> ChannelResult<Queued> {
+    if who.me.starts_with("svc:") {
+        return Ok(Queued::Off);
+    }
+    let member: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM workspace_members WHERE workspace_id=? AND user_id=?)",
+        params![who.ws, who.me],
+        |r| r.get(0),
+    )?;
+    let Some(p) = load(tx, who)?.filter(|p| p.enabled && member) else {
+        return Ok(Queued::Off);
+    };
+    let (space, sender): (String, Option<String>) = tx.query_row(
+        "SELECT space_id, coalesce(sender_party_id, sender_account_id) FROM chan_messages WHERE id = ?",
+        [message],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    let last: Option<i64> = tx
+        .query_row(
+            "SELECT max(n.created) FROM personal_notifications n
+               JOIN chan_messages m ON m.id = n.message_id
+              WHERE n.workspace_id = ?1 AND n.user_id = ?2 AND n.kind = 'starred' AND n.state <> 'cancelled'
+                AND m.space_id = ?3 AND coalesce(m.sender_party_id, m.sender_account_id) IS ?4
+                AND n.created > ?5",
+            params![
+                who.ws,
+                who.me,
+                space,
+                sender,
+                now - crate::context::SEGMENT_GAP_MS
+            ],
+            |r| r.get(0),
+        )
+        .optional()?
+        .flatten();
+    if let Some(at) = last
+        && !crate::presence::you_spoke(tx, &who.ws, &space, at, now)?
+    {
+        return Ok(Queued::Again);
+    }
+    let sends = Kind::Starred.sends(&p);
+    let id = uid("ntf");
+    let n = tx.execute(
+        "INSERT INTO personal_notifications(id,workspace_id,user_id,event_id,delivery_key,mode,body,state,kind,message_id,created)
+         VALUES(?,?,?,?,?,?,?,?,'starred',?,?) ON CONFLICT(workspace_id,user_id,event_id) DO NOTHING",
+        params![
+            id,
+            who.ws,
+            who.me,
+            message,
+            format!("{PREFIX}{message}:{}", who.me),
+            p.mode.code(),
+            body,
+            if sends { "waiting" } else { "held" },
+            message,
+            now
+        ],
+    )?;
+    if n == 0 {
+        // this message was notified already (processed again)
+        return Ok(Queued::Again);
+    }
+    steve_store::base::audit(
+        tx,
+        &who.ws,
+        "steve",
+        "notification.starred.queued",
+        message,
+        &serde_json::json!({ "notification": id, "sends": sends }),
+    )?;
+    Ok(Queued::Yes { id, sends })
+}
+
+/// For outbound message `out` about to be claimed or tried: when it is a starred contact's
+/// notification that is no longer wanted ([`unwanted`]), the notification is cancelled and `true`
+/// returned — the caller lets the message go instead of sending it.
+pub(crate) fn answered(tx: &Tx, out: &str, now: i64) -> ChannelResult<bool> {
+    let row: Option<(String, String, Option<String>)> = tx
+        .query_row(
+            "SELECT workspace_id, delivery_key, message_id FROM personal_notifications
+              WHERE kind = 'starred' AND delivery_id = (SELECT id FROM output_deliveries WHERE message_id = ?)",
+            [out],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()?;
+    let Some((ws, key, message)) = row else {
+        return Ok(false);
+    };
+    match unwanted(tx, &ws, message.as_deref(), now)? {
+        Some(why) => {
+            cancel(tx, &ws, &key, why)?;
+            Ok(true)
+        }
+        None => Ok(false),
     }
 }

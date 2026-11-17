@@ -13,6 +13,7 @@ export default {
     "allSources": "所有来源",
     "report": "汇报",
     "completion": "完成通知",
+    "starred": "星标联系人",
     "flow": "自动化",
     "notification": "个人通知",
     "selectLoaded": "选择已加载的未读条目",

@@ -24,8 +24,10 @@
 //! ([`crate::compose::after_wide`]); anything else is let go.
 //!
 //! **Starred contacts** (a contact you marked important, `parties.important` — the star on the
-//! contact page): their messages to you always reach you as a card marked [`STARRED`], unless you
-//! answered or are there already. The composer still writes a candidate reply for it.
+//! contact page, set in Steve, not read from Feishu/Lark): their messages to you always reach you as
+//! a card marked [`STARRED`], unless you answered or are there already. The composer still writes a
+//! candidate reply for it when the rules let it draft; the star alone never makes a draft. Apart from
+//! the card, the message is told to you as a personal notification ([`crate::starred`]).
 //!
 //! **The card** ([`open_card`]): one sentence on who wants what (the model's, never cut short below
 //! [`SUMMARY_MAX`]), why you are needed, the last few lines with yours marked “我”, and a candidate

@@ -51,6 +51,8 @@ export function NotificationSettingsPane({ workspace }: { workspace: string }) {
 }
 
 const targetKey = (target: { party_id: string | null; space_id: string | null }) => JSON.stringify([target.party_id, target.space_id])
+/* Digest's "no conversation": a starred contact's message stays in the inbox, no route is looked up. */
+const INBOX_ONLY = "inbox-only"
 function PolicyForm({ client, initial, party, name, targets, targetsKnown }: { client: NotificationsClient; initial: NotificationPolicy; party?: string; name?: string; targets: NotificationTarget[]; targetsKnown: boolean }) {
   const t = useT()
   const [draft, setDraft] = useState(initial), [saved, setSaved] = useState(initial)
@@ -61,10 +63,12 @@ function PolicyForm({ client, initial, party, name, targets, targetsKnown }: { c
   // Only this caller-scoped endpoint proves membership and current E1 bot reachability. /spaces
   // counterpart is a first-member/history fallback, not an exhaustive membership/route proof.
   const target = targets.find((candidate) => targetKey(candidate) === targetKey(draft))
-  const canSave = zoneValid && quietValid && (!draft.enabled || (party && (draft.mode !== "now" || target)))
+  // Digest sends only a starred contact's message, and only to a conversation chosen here (none: inbox only).
+  const routed = draft.mode === "now" || (draft.mode === "digest" && draft.space_id !== null)
+  const canSave = zoneValid && quietValid && (!draft.enabled || (party && (!routed || target)))
   const save = async () => {
     if (saving || !canSave) return
-    const next: NotificationPolicy = { ...draft, timezone: draft.timezone.trim(), party_id: draft.mode === "now" ? draft.party_id : party ?? (draft.enabled ? null : saved.party_id), space_id: draft.mode === "now" ? draft.space_id : null }
+    const next: NotificationPolicy = { ...draft, timezone: draft.timezone.trim(), party_id: routed ? draft.party_id : party ?? (draft.enabled ? null : saved.party_id), space_id: routed ? draft.space_id : null }
     setSaving(true); setError(undefined); setSuccess(false)
     try { await client.save(next); setSaved(next); setDraft(next); setSuccess(true) }
     catch (e) { setError(e) }
@@ -82,8 +86,9 @@ function PolicyForm({ client, initial, party, name, targets, targetsKnown }: { c
           ]} />
         </Row>
         <Row title={t("manage:notify.recipient")} sub={t("manage:notify.recipientSub")}><span className="text-sm">{party ? name?.trim() || t("manage:notify.selfIdentity") : t("manage:notify.identityMissing")}</span></Row>
-        {draft.mode === "now" && <Row title={t("manage:notify.target")} className="max-sm:flex-col max-sm:items-stretch">
-          <Select aria-label={t("manage:notify.target")} data-notify-target className="w-64 max-w-full max-sm:w-full" placeholder={t("manage:notify.chooseTarget")} value={target || draft.space_id ? targetKey(draft) : null} onChange={(key) => { const next = targets.find((candidate) => targetKey(candidate) === key); if (next) patch({ party_id: next.party_id, space_id: next.space_id }) }} options={[
+        {draft.mode !== "log" && <Row title={t("manage:notify.target")} sub={draft.mode === "digest" ? t("manage:notify.digestTargetSub") : undefined} className="max-sm:flex-col max-sm:items-stretch">
+          <Select aria-label={t("manage:notify.target")} data-notify-target className="w-64 max-w-full max-sm:w-full" placeholder={t("manage:notify.chooseTarget")} value={target || draft.space_id ? targetKey(draft) : draft.mode === "digest" ? INBOX_ONLY : null} onChange={(key) => { if (key === INBOX_ONLY) { patch({ space_id: null }); return } const next = targets.find((candidate) => targetKey(candidate) === key); if (next) patch({ party_id: next.party_id, space_id: next.space_id }) }} options={[
+            ...(draft.mode === "digest" ? [{ value: INBOX_ONLY, label: t("manage:notify.starredInboxOnly") }] : []),
             ...(!target && draft.space_id ? [{ value: targetKey(draft), label: t("manage:notify.savedTargetUnavailable"), disabled: true }] : []),
             ...targets.map((candidate) => ({ value: targetKey(candidate), label: candidate.space_name.trim() || t("manage:notify.unnamedConversation"), description: `${candidate.party_name.trim() || t("manage:notify.selfIdentity")} · ${candidate.channel}` })),
           ]} />
@@ -91,7 +96,7 @@ function PolicyForm({ client, initial, party, name, targets, targetsKnown }: { c
       </Panel>
       <p className="mt-3 text-sm text-muted-foreground" data-notify-mode-scope>{t(draft.mode === "now" ? "manage:notify.nowScope" : draft.mode === "digest" ? "manage:notify.digestScope" : "manage:notify.logScope")}</p>
       {targetsKnown && !targets.length && <p className="mt-2 text-sm text-muted-foreground" data-notify-no-targets>{t("manage:notify.noTargets")}</p>}
-      {draft.mode === "now" && !target && <p role="alert" className="mt-2 text-sm text-destructive">{t(draft.space_id ? "manage:notify.savedTargetUnavailable" : "manage:notify.chooseTarget")}</p>}
+      {routed && !target && <p role="alert" className="mt-2 text-sm text-destructive">{t(draft.space_id ? "manage:notify.savedTargetUnavailable" : "manage:notify.chooseTarget")}</p>}
       <div className="mt-4 flex flex-col gap-4 rounded-xl border border-border p-4">
         <TextField label={t("manage:notify.timezone")} hint={t("manage:notify.timezoneSub")} value={draft.timezone} data-notify-timezone onChange={(e) => patch({ timezone: e.currentTarget.value })} error={!zoneValid ? t("manage:notify.zoneInvalid") : undefined} />
         <Switch label={t("manage:notify.quietOn")} description={t("manage:notify.quietSub")} data-notify-quiet checked={quiet} onChange={(e) => patch(e.currentTarget.checked ? { quiet_start: 22 * 60, quiet_end: 7 * 60 } : { quiet_start: null, quiet_end: null })} />
@@ -100,6 +105,7 @@ function PolicyForm({ client, initial, party, name, targets, targetsKnown }: { c
           <TimePicker label={t("manage:notify.quietEnd")} value={minuteTime(draft.quiet_end)} onChange={(v) => patch({ quiet_end: timeMinute(v) })} hourCycle={24} locale={t("manage:notify.locale")} labels={timeLabels} />
           {!quietValid && <p role="alert" className="text-sm text-destructive sm:col-span-2">{t("manage:notify.quietInvalid")}</p>}
         </div>}
+        {quiet && <Switch label={t("manage:notify.starredInQuiet")} description={t("manage:notify.starredInQuietSub")} data-notify-starred-quiet checked={draft.starred_in_quiet ?? false} onChange={(e) => patch({ starred_in_quiet: e.currentTarget.checked })} />}
       </div>
     </fieldset>
     {draft.enabled && !saved.enabled && <Notice><span data-notify-consent>{t("manage:notify.consent")}</span></Notice>}

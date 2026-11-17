@@ -598,6 +598,19 @@ pub(crate) fn note_event(
     Ok(())
 }
 
+/// Adds `label` to what the event of inbound message `message` says happened (once): something
+/// done about it later, apart from what the rules did (a starred contact's notification).
+pub(crate) fn append_label(tx: &Tx, message: &str, label: &str) -> ChannelResult<()> {
+    tx.execute(
+        "UPDATE ext_events SET outcome_label = CASE WHEN coalesce(outcome_label, '') = '' THEN ?2
+                                                    ELSE outcome_label || ' · ' || ?2 END
+          WHERE id = (SELECT event_id FROM chan_messages WHERE id = ?1)
+            AND instr(coalesce(outcome_label, ''), ?2) = 0",
+        params![message, label],
+    )?;
+    Ok(())
+}
+
 /// [`note_event`] for the event of inbound message `message`, when it has one.
 pub(crate) fn note_message_event(
     tx: &Tx,

@@ -76,7 +76,7 @@ function ContactBody({ c, reload }: { c: Contact; reload: () => void }) {
       actions={<>
         <Button size="sm" variant="outline" onClick={() => setEdit(true)} data-edit-contact>{t("people:contact.editInfo")}</Button>
         {!c.is_me && <>
-          <Button variant="ghost" size="icon-sm" aria-label={c.important ? t("people:contact.unstar") : t("people:contact.star")} aria-pressed={c.important} className="text-muted-foreground" onClick={() => void act(people.patchContact(c.id, { important: !c.important }))} data-star-contact><StarIcon className={cn(c.important && "fill-current text-foreground")} /></Button>
+          <Button variant="ghost" size="icon-sm" aria-label={c.important ? t("people:contact.unstar") : t("people:contact.star")} title={t("people:contact.starHint")} aria-pressed={c.important} className="text-muted-foreground" onClick={() => void act(people.patchContact(c.id, { important: !c.important }))} data-star-contact><StarIcon className={cn(c.important && "fill-current text-foreground")} /></Button>
           <DropdownMenu>
             <DropdownMenuTrigger render={<Button variant="ghost" size="icon-sm" aria-label={t("common:action.more")} className="text-muted-foreground" data-contact-more />}><EllipsisIcon /></DropdownMenuTrigger>
             <DropdownMenuContent align="end" className="min-w-44">
@@ -94,6 +94,7 @@ function ContactBody({ c, reload }: { c: Contact; reload: () => void }) {
       {job && <JobDialog c={c} onClose={() => setJob(false)} onSaved={() => { setJob(false); reload() }} />}
       {merge && <MergeDialog from={c} onClose={() => setMerge(false)} />}
       <div className="flex flex-col gap-8">
+        {c.important && !c.is_me && <p className="type-callout text-muted-foreground" data-starred-note>{t("people:contact.starredNote")}</p>}
         {c.kind === "virtual" && <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl bg-muted/60 px-4 py-3 type-callout"><span>{t("people:contact.virtualBanner")}</span><Button size="sm" variant="outline" onClick={async () => { if (await act(people.patchContact(c.id, { kind: "real" }), t("people:contact.restored"))) reload() }}>{t("people:contact.restore")}</Button></div>}
         {unconfirmed && <div className="flex flex-wrap items-center gap-3 rounded-xl bg-card px-5 py-4 shadow-[var(--lift)]" data-unconfirmed-banner>
           <div className="min-w-0 flex-1"><div className="type-headline">{t("people:contact.unconfirmedTitle")}</div><div className="mt-0.5 type-callout text-muted-foreground">{t("people:contact.unconfirmedSub")}</div></div>

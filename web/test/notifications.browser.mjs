@@ -107,6 +107,23 @@ try {
     assert.ok(await page.locator("[data-notify-save]").isDisabled())
     await page.close()
   }
+  // Digest: the conversation is chosen for starred contacts' messages only; none chosen keeps them in the inbox
+  // and saves no conversation (Steve never looks one up), a chosen one is saved as chosen.
+  {
+    const { page, model, calls } = await open()
+    await page.locator("[data-notify-enabled]").click()
+    await choose(page, "[data-notify-mode]", "摘要 · 仅积累")
+    assert.match(await page.locator("[data-notify-target]").innerText(), /只放进收件箱/)
+    await page.locator("[data-notify-save]").click()
+    await saved(page).filter({ hasText: /^已保存$/ }).waitFor()
+    assert.equal(model.policy.mode, "digest"); assert.equal(model.policy.space_id, null); assert.equal(model.policy.party_id, me.id)
+    await choose(page, "[data-notify-target]", target.space_name)
+    await page.locator("[data-notify-save]").click()
+    await page.locator("[data-notify-save-status]").filter({ hasText: /^已保存$/ }).waitFor()
+    assert.equal(calls.filter((c) => c.method === "PUT").at(-1).body.space_id, target.space_id)
+    assert.equal(model.policy.space_id, target.space_id)
+    await page.close()
+  }
   // No bot targets means no immediate mode; failed discovery retries independently.
   {
     const { page, model } = await open({ targets: [], targetsFail: true, inbox: [] })

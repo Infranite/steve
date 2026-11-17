@@ -13,6 +13,7 @@ export default {
     "allSources": "All sources",
     "report": "Report",
     "completion": "Completion",
+    "starred": "Starred contact",
     "flow": "Automation",
     "notification": "Personal notification",
     "selectLoaded": "Select loaded unread entries",

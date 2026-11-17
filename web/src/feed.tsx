@@ -14,14 +14,14 @@ import { Loading, Page, Segmented } from "@/ui"
 export function FeedView({ workspace, filter }: { workspace: string; filter: string }) {
   const [client] = useState(() => feedApi.forWorkspace(workspace))
   const [unread, setUnread] = useState(false)
-  const [kind, setKind] = useState<FeedKind | "">(filter === "completion" || filter === "report" ? filter : "")
+  const [kind, setKind] = useState<FeedKind | "">(filter === "completion" || filter === "report" || filter === "starred" ? filter : "")
   const [source, setSource] = useState<FeedSource | "">("")
   const t = useT()
   const filters: FeedFilter = { unread, ...(kind ? { kind } : {}), ...(source ? { source } : {}) }
   const target = new URLSearchParams(location.hash.split("?")[1]).get("entry") ?? ""
   return <FeedReader key={JSON.stringify([filters, target])} client={client} filters={filters} target={target} controls={<div className="flex min-w-0 flex-wrap items-center gap-2" data-feed-filters>
     <Segmented value={unread ? "unread" : "all"} onChange={(v) => setUnread(v === "unread")} options={[["all", t("views:feed.all")], ["unread", t("views:feed.unread")]]} />
-    <Select aria-label={t("views:feed.kind")} className="w-36 max-sm:flex-1" value={kind} onChange={(v) => setKind(v as FeedKind | "")} options={[{ value: "", label: t("views:feed.allKinds") }, { value: "report", label: t("views:feed.report") }, { value: "completion", label: t("views:feed.completion") }]} />
+    <Select aria-label={t("views:feed.kind")} className="w-36 max-sm:flex-1" value={kind} onChange={(v) => setKind(v as FeedKind | "")} options={[{ value: "", label: t("views:feed.allKinds") }, { value: "report", label: t("views:feed.report") }, { value: "completion", label: t("views:feed.completion") }, { value: "starred", label: t("views:feed.starred") }]} />
     <Select aria-label={t("views:feed.source")} className="w-40 max-sm:flex-1" value={source} onChange={(v) => setSource(v as FeedSource | "")} options={[{ value: "", label: t("views:feed.allSources") }, { value: "flow", label: t("views:feed.flow") }, { value: "notification", label: t("views:feed.notification") }]} />
   </div>} />
 }
@@ -180,7 +180,7 @@ function FeedRow({ client, entry, checked, disabled, selectionDisabled, onSelect
           <span className="flex items-start gap-2"><span className={`mt-1.5 size-1.5 shrink-0 rounded-full ${entry.read_at === null ? "bg-primary" : "bg-transparent"}`} aria-label={entry.read_at === null ? t("views:feed.unread") : undefined} /><span className="min-w-0 flex-1 break-words text-sm leading-6 font-medium [overflow-wrap:anywhere]">{title}</span>{open ? <ChevronUpIcon className="mt-1 size-4 shrink-0 text-muted-foreground" /> : <ChevronDownIcon className="mt-1 size-4 shrink-0 text-muted-foreground" />}</span>
           {!open && <p className="ml-3.5 mt-0.5 line-clamp-2 text-sm leading-5 text-muted-foreground [overflow-wrap:anywhere]">{purged ? t("views:feed.purged") : entry.excerpt}</p>}
         </button>
-        <div className="ml-3.5 mt-1 flex flex-wrap gap-x-2 gap-y-1 text-xs text-muted-foreground"><span>{t(entry.kind === "report" ? "views:feed.report" : "views:feed.completion")}</span><span aria-hidden="true">·</span><span>{t(entry.source.type === "flow" ? "views:feed.flow" : "views:feed.notification")}</span><time dateTime={new Date(entry.published_at).toISOString()}>{new Date(entry.published_at).toLocaleTimeString(lang(), { hour: "2-digit", minute: "2-digit" })}</time></div>
+        <div className="ml-3.5 mt-1 flex flex-wrap gap-x-2 gap-y-1 text-xs text-muted-foreground"><span>{t(entry.kind === "report" ? "views:feed.report" : entry.kind === "starred" ? "views:feed.starred" : "views:feed.completion")}</span><span aria-hidden="true">·</span><span>{t(entry.source.type === "flow" ? "views:feed.flow" : "views:feed.notification")}</span><time dateTime={new Date(entry.published_at).toISOString()}>{new Date(entry.published_at).toLocaleTimeString(lang(), { hour: "2-digit", minute: "2-digit" })}</time></div>
         {open && <div id={contentId} className="ml-3.5 mt-4 min-w-0" data-feed-body data-feed-ready={!!detail && !loading && !error}>
           {loading && <Loading />}
           {error != null && (error instanceof HubError && error.status === 404 ? <p role="alert" className="text-sm text-muted-foreground">{t("views:feed.unavailable")}</p> : <FeedError error={error} retry={() => void load()} />)}

@@ -64,7 +64,8 @@ impl Attention {
 /// Whether Steve replies for you in a space where your own account speaks (migration 096
 /// `space_prefs.reply_as_you`). Checked in code before any model reads the message
 /// ([`crate::inbound`]); it changes nothing where a bot speaks. Precedence: 屏蔽 > your `/bot` >
-/// 不提醒 > this > 只记录 (`muted`) > the rules.
+/// 不提醒 > this > 只记录 (`muted`) > the rules. A starred contact's message to you is still told to
+/// you under `record` (not under `off`, 不提醒 or 屏蔽; [`crate::starred`]).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ReplyAsYou {

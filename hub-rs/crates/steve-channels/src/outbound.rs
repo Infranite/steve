@@ -2240,6 +2240,12 @@ impl Outbox {
             if !(pending || (again && row.status == "unknown")) {
                 return Ok(Err(SendOutcome::Skipped));
             }
+            // a starred contact's notification you answered yourself meanwhile: let go, not sent
+            if crate::notifications::answered(tx, &row.id, now)? {
+                set_status(tx, &row.id, &["pending", "unknown"], DISCARDED)?;
+                messages::event(tx, &row.ws, &row.space_id, &row.id);
+                return Ok(Err(SendOutcome::Skipped));
+            }
             if crate::notifications::deferred(tx, &row.id, now)? {
                 tx.execute("UPDATE personal_notifications SET next_attempt_at=? WHERE delivery_id=(SELECT id FROM output_deliveries WHERE message_id=?)",params![now+10_000,row.id])?;
                 return Ok(Err(SendOutcome::Skipped));
@@ -2458,6 +2464,11 @@ impl Outbox {
             let now = ch.now();
             let ours:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM chan_messages WHERE id=? AND status='pending' AND sent=?)",params![row.id,claim],|r|r.get(0))?;
             if !ours { return Ok(None); }
+            if crate::notifications::answered(tx, &row.id, now)? {
+                set_status(tx, &row.id, &["pending"], DISCARDED)?;
+                messages::event(tx, &row.ws, &row.space_id, &row.id);
+                return Ok(None);
+            }
             if crate::notifications::deferred(tx, &row.id, now)?
                 || verify(tx, &row, auth, now)?.is_err()
             {
@@ -2965,7 +2976,8 @@ impl Outbox {
                     AND (s.first_at IS NOT NULL OR NOT EXISTS (
                       SELECT 1 FROM personal_notifications n JOIN output_deliveries od ON od.id=n.delivery_id
                       JOIN notification_policies p ON p.workspace_id=n.workspace_id AND p.user_id=n.user_id
-                      WHERE od.message_id=m.id AND p.enabled=1 AND (p.mode<>'now' OR n.next_attempt_at>?3)))
+                      WHERE od.message_id=m.id AND p.enabled=1 AND (n.next_attempt_at>?3 OR p.mode='log'
+                        OR (p.mode='digest' AND (n.kind<>'starred' OR p.space_id IS NULL)))))
                   ORDER BY m.created LIMIT 50",
             )?;
             let v = st
