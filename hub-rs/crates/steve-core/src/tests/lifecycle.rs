@@ -224,11 +224,8 @@ fn a_no_to_the_release_holds_for_every_later_result_of_the_cycle() {
         k.core
             .resolve(&r, "no", "走 PR 合并，不用发布", "me")
             .unwrap();
-        // the agent's follow-up starts a new round of the plan: the frozen result is void
-        k.core
-            .tx()
-            .lc_invalidate(&x.id, "计划里又有没做完的步骤")
-            .unwrap();
+        // the agent's follow-up (a new message to it) voids the frozen result
+        k.core.tx().lc_invalidate(&x.id, "收到新的消息").unwrap();
         k.rt.end_turn(&k.core, &x.session, "end_turn", None);
         assert_eq!(k.phase(&x.id), "active");
         let before = k.rt.prompts_of(&x.session).len();
@@ -1034,8 +1031,10 @@ fn a_plan_sent_after_the_close_is_noted_and_reopens_nothing() {
     );
 }
 
+/// A plan reported while the result waits to close is recorded and voids nothing (#239): what the
+/// result holds is the worktree's fingerprint's to tell, and new input's.
 #[test]
-fn open_steps_while_closing_void_the_frozen_result() {
+fn open_steps_while_closing_are_recorded_and_keep_the_frozen_result() {
     let k = Kit::new();
     let x = k.delivered(false);
     let s = k.db().session(&x.session).unwrap().unwrap();
@@ -1043,12 +1042,19 @@ fn open_steps_while_closing_void_the_frozen_result() {
         .tool_update(&s, "补一步", &[step("a", true), step("b", false)])
         .unwrap();
     let i = k.db().item(&x.id).unwrap().unwrap();
-    assert_eq!(i.phase, "active", "the delivery is void");
-    assert!(
-        k.open_kinds(&x.id).is_empty(),
-        "its acceptance card expired"
+    assert_eq!(i.phase, "closing", "the delivery stands");
+    assert_eq!(i.plan.len(), 2, "the plan is recorded");
+    assert_eq!(
+        k.open_kinds(&x.id),
+        vec!["accept"],
+        "its acceptance card stays"
     );
-    assert!(k.core.resolve(&x.decision, "pass", "", "me").is_err());
+    assert!(
+        k.timeline_texts(&x.id)
+            .contains(&"收尾中的计划更新只记录，不作废待收尾的结果".to_string())
+    );
+    k.core.resolve(&x.decision, "pass", "", "me").unwrap();
+    assert_eq!(k.phase(&x.id), "closed");
 }
 
 #[test]

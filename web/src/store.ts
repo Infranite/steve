@@ -130,7 +130,9 @@ export const WT: Record<string, string> = live(WAIT_TYPES, (k) => t(`core:waitTy
 /** what you do about a card of this type: the button that takes you to it */
 export const WACT: Record<string, string> = live(WAIT_TYPES, (k) => t(`core:waitAction.${k}`))
 /** what a card asks of you, in a line: `审批：推送到 main` */
-export const waitLine = (w: Wait) => t("core:wait.line", { kind: w.subject === "tool_call" ? t("core:wait.tool") : w.subject === "release" ? t("core:wait.release") : WT[w.type] ?? t("core:wait.other"), q: w.q })
+/** the card asking you whether to merge a change no independent review passed (only you answer it) */
+export const PR_AWAITING_MERGE = "pr_awaiting_merge"
+export const waitLine = (w: Wait) => t("core:wait.line", { kind: w.subject === "tool_call" ? t("core:wait.tool") : w.subject === "release" ? t("core:wait.release") : w.subject === PR_AWAITING_MERGE ? t("core:wait.prMerge") : WT[w.type] ?? t("core:wait.other"), q: w.q })
 /* the name a harness's runtime reports (an adapter of one's own included), when the Hub listed it */
 export const runtimeName = (h: string): string | undefined => raw.state?.runtimes?.find((r) => r.id === h)?.name
 const harnessLabel = (h: string) => runtimeName(h) ?? h

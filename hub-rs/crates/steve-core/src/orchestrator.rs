@@ -217,7 +217,7 @@ pub(crate) fn pr_flow(p: &crate::repo::Project) -> bool {
 }
 
 /// What `steve_publish` answers in a project finished by its completion rule.
-pub(crate) const PR_FLOW_PUBLISH: &str = "这个项目按 PR 合并算完成，不用 steve_publish：把分支推送到 origin、用 gh pr create 开好 PR（修 bug 先建 issue），再用 steve_deliver 交付；验收通过后 Steve 会打开自动合并并跟踪 CI 和冲突。";
+pub(crate) const PR_FLOW_PUBLISH: &str = "这个项目按 PR 合并算完成，不用 steve_publish：把分支推送到 origin、用 gh pr create 开好 PR（修 bug 先建 issue），再用 steve_deliver 交付；验收通过后 Steve 跟踪 CI 和冲突，检查都通过后由 Steve 合并（没有经过独立评审的改动先等主人批准）。";
 
 /// What the agent hears when only the release is left.
 pub(crate) fn publish_text(branch: &str) -> String {
@@ -1167,7 +1167,7 @@ impl Tx<'_> {
                         "- Git workflow in this project: your branch {branch} starts from the remote's latest default branch. Follow the repository's own instructions (AGENTS.md, CLAUDE.md, CONTRIBUTING.md). Commit on {branch}, push it (`git push -u origin {branch}`) and open a pull request to the default branch (`gh pr create`) before you call steve_deliver, and name the PR in the delivery. For a bug, open an issue first and link it from the PR (`Closes #N`). Pushing your own branch to origin (never forced) and creating, editing or commenting on its pull request, and opening an issue, need no approval; a force push, another branch, a tag or another remote still do. Never push to the default branch, merge the pull request yourself, or tag by hand; do not call steve_publish."
                     ));
                     lines.push(format!(
-                        "- Done in this project means: {}. Once the user accepted your delivery, Steve turns on the host's auto-merge for your pull request and follows it: a failed check or a conflict with the default branch comes back to you, to fix on the same branch and push again with a plain `git push`, which needs no approval; for a conflict or a branch that has to catch up, merge the latest default branch into it (`git fetch origin`, `git merge origin/<default branch>`). If the repository's own instructions require a rebase instead, the force push after it (`git push --force-with-lease`) still needs approval through steve_request_approval. A CI or Release build is followed by Steve on its own — do not wait for it, end your turn{}.",
+                        "- Done in this project means: {}. Once the user accepted your delivery, Steve follows your pull request and merges it itself when every check passed (a change no independent review passed waits for the user's approval first); never merge it yourself: a failed check or a conflict with the default branch comes back to you, to fix on the same branch and push again with a plain `git push`, which needs no approval; for a conflict or a branch that has to catch up, merge the latest default branch into it (`git fetch origin`, `git merge origin/<default branch>`). If the repository's own instructions require a rebase instead, the force push after it (`git push --force-with-lease`) still needs approval through steve_request_approval. A CI or Release build is followed by Steve on its own — do not wait for it, end your turn{}.",
                         if rule == crate::upstream::DONE_TAG {
                             "your pull request is merged into the remote's default branch and a tag containing it is pushed by the repository's own release process"
                         } else {
@@ -1612,9 +1612,17 @@ impl Tx<'_> {
             self.db()
                 .timeline_add(item, &Self::by(s), "sys", &note, Some(&s.id))?;
         }
-        /* a result waiting to close whose plan has open steps again is not the result any more */
+        /* a result waiting to close is decided by what it holds (the worktree's fingerprint) and by
+         * new input, never by the plan the agent reports meanwhile (#239): open steps are recorded,
+         * the frozen result stands */
         if i.phase == crate::cycle::CLOSING && plan.iter().any(|p| !p.done) {
-            self.lc_invalidate(item, "计划里又有没做完的步骤")?;
+            self.db().timeline_add(
+                item,
+                &Self::by(s),
+                "sys",
+                "收尾中的计划更新只记录，不作废待收尾的结果",
+                Some(&s.id),
+            )?;
         }
         Ok(())
         })
@@ -3108,6 +3116,10 @@ impl Tx<'_> {
                     }
                 }
             }
+            ("approve", crate::pull::PR_AWAITING_MERGE) => {
+                self.pr_merge_answer(&d, choice, text, actor)?;
+                return reget(self);
+            }
             ("approve", "tool_call") => {
                 let opt = (choice != "deny").then_some(choice);
                 /* answer first: resolve() only touches open decisions, so marking it resolved first would hide the expiry;
@@ -3443,6 +3455,10 @@ impl Tx<'_> {
                     "expired",
                     None,
                 )?;
+            }
+            /* a pull request of an item that is gone: nothing left to merge */
+            ("approve", crate::pull::PR_AWAITING_MERGE) => {
+                db.decision_resolve(id, json!({"choice": choice}), "expired", None)?;
             }
             ("approve", "tool_call") => {
                 let opt = (choice != "deny").then_some(choice);

@@ -765,7 +765,7 @@ impl Tx<'_> {
             return Ok(());
         }
         /* not there yet: the agent hears once what is missing; Steve keeps looking while it waits and,
-         * on GitHub, follows the branch's pull request (`pull`: auto-merge, CI, conflicts) */
+         * on GitHub, follows the branch's pull request (`pull`: CI, conflicts, Steve's own merge) */
         if op.evidence.get("asked").is_none() {
             self.db().store().transaction(|tx| {
                 steve_store::operation_set_in(tx, &op.id, "pending", &json!({"asked": true}))
@@ -779,6 +779,35 @@ impl Tx<'_> {
                 && !branch.is_empty()
             {
                 self.follow_pr(&op.id, slug, &branch)?;
+                /* a pull request of this branch Steve already followed for an earlier result of the
+                 * cycle is followed on: the agent is not woken for it again (waking it was what made
+                 * it report a plan and void the result, #239), and what it was told stays told */
+                if let Some(prev) = self.pr_followed(i, &op.id, &branch)? {
+                    let n = prev.evidence["pr"].as_u64().unwrap_or(0);
+                    /* a card for you about the earlier result (merging it) went with it */
+                    let told: Vec<Value> = prev.evidence["pr_told"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter(|k| k.as_str() != Some(crate::pull::TOLD_AWAITING))
+                        .cloned()
+                        .collect();
+                    let carry = json!({
+                        "pr_told": told,
+                        "pr_tells": prev.evidence["pr_tells"].as_i64().unwrap_or(0),
+                    });
+                    self.db().store().transaction(|tx| {
+                        steve_store::operation_set_in(tx, &op.id, "pending", &carry)
+                    })?;
+                    self.db().timeline_add(
+                        &i.id,
+                        "steve",
+                        "sys",
+                        &format!("验收了新的结果，Steve 继续跟踪 PR #{n}"),
+                        None,
+                    )?;
+                    return Ok(());
+                }
             }
             let to = match self.active_session(&i.id)? {
                 Some(s) => To::Session(s.id),

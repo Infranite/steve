@@ -16,7 +16,7 @@ import { chatBusy, refresh } from "@/store"
 import { Markdown } from "@/components/markdown"
 import { Textarea } from "@/components/ui/textarea"
 import { clip as clipPlain } from "@/thread/topics"
-import { STEVE_TOOL, st, tm, emit, chatSend, takeOffer, chooseSuggest, cancelQueued, clearFocus, focusItem, quoteMsg, decisionDraft, decide, acceptChoosesRelease, botName, alertClosed, closeAlerts, type Msg, type SuggestChoice, type Steps, type Update, type Item, type ItemCardState, type LiveRun } from "@/store"
+import { PR_AWAITING_MERGE, STEVE_TOOL, st, tm, emit, chatSend, takeOffer, chooseSuggest, cancelQueued, clearFocus, focusItem, quoteMsg, decisionDraft, decide, acceptChoosesRelease, botName, alertClosed, closeAlerts, type Msg, type SuggestChoice, type Steps, type Update, type Item, type ItemCardState, type LiveRun } from "@/store"
 import { ItemRef, DecisionCard, ItemNo, AlertClose, go, Pill } from "@/ui"
 import { jumpToMsg, threadMsg } from "@/thread/history"
 import { Trans } from "react-i18next"
@@ -234,6 +234,7 @@ export function cardLook(i: Item, c?: ItemCardState): Look {
   if (w?.type === "fail") return { label: tr("thread:card.status.failed"), dot: "fail", tone: "fail" }
   if (w?.type === "accept") return { label: tr("thread:card.status.accept"), dot: "wait", tone: "wait" }
   if (w?.subject === "release") return { label: tr("thread:card.status.release"), dot: "wait", tone: "wait" }
+  if (w?.subject === PR_AWAITING_MERGE) return { label: tr("thread:card.status.prMerge"), dot: "wait", tone: "wait" }
   if (w?.subject === "tool_call") return { label: tr("thread:card.status.toolCall"), dot: "wait", tone: "wait" }
   if (w?.type === "approve") return { label: tr("thread:card.status.approve"), dot: "wait", tone: "wait" }
   if (w?.type === "ask") return { label: tr("thread:card.status.answer"), dot: "wait", tone: "wait" }

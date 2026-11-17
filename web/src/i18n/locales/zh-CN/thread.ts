@@ -103,6 +103,7 @@ export default {
       failed: "出错了，等你处理",
       accept: "交付了，等你验收",
       release: "等你批准发布",
+      prMerge: "PR 等你批准合并",
       toolCall: "等你允许",
       approve: "等你批准",
       answer: "等你回答",

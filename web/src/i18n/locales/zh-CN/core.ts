@@ -13,6 +13,7 @@ export default {
   wait: {
     tool: "权限",
     release: "发布",
+    prMerge: "PR 待合并",
     allowRun: "允许执行",
     other: "待处理",
     /* "审批：推送到 main" */
@@ -524,6 +525,7 @@ export default {
     rewriteFirst: "改写后再看",
     replyPlaceholder: "写下要回的话，批准后才发出…",
     approveRelease: "批准发布",
+    approveMerge: "批准合并",
     approve: "批准",
     notNeeded: "不需要",
     start: "开始",
