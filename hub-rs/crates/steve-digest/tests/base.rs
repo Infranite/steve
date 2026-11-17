@@ -492,6 +492,7 @@ fn personal_todo_deadlines_need_source_words_and_handoff_needs_real_item() {
                 packet: None,
                 refs: vec![(cv("s1"), "m1".into())],
                 parties: vec!["alice".into()],
+                ..Default::default()
             };
             assert!(todo::create(tx, &t, NOW).is_err());
             t.due_quote = Some("next week");

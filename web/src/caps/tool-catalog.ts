@@ -15,6 +15,7 @@ const DESC = {
   steve_contacts: "contacts", steve_github_read: "githubRead", steve_mail_read: "mailRead", steve_matters: "matters",
   steve_tools_search: "toolsSearch", steve_tool_call: "toolCall",
   steve_digest_batch: "digestBatch", steve_digest_read: "digestRead", steve_digest_chunk: "digestChunk", steve_digest_finish: "digestFinish", steve_digest_control: "digestControl", steve_digest_report: "digestReport", steve_matters_search: "mattersSearch", steve_matter_read: "matterRead",
+  steve_todo_list: "todoList", steve_todo_add: "todoAdd", steve_todo_update: "todoUpdate", steve_todo_complete: "todoComplete",
   steve_onboard_profile: "onboardProfile", steve_onboard_models: "onboardModels", steve_onboard_bots: "onboardBots", steve_onboard_done: "onboardDone",
 } as const
 type DescKey = (typeof DESC)[keyof typeof DESC]

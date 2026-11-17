@@ -117,6 +117,9 @@ fn parse<T: DeserializeOwned>(v: &Value) -> ApiResult<T> {
     serde_json::from_value(v.clone()).map_err(|e| bad(&format!("Invalid digest arguments: {e}")))
 }
 fn storage(e: StoreError) -> ApiError {
+    if let Some(m) = todo::message(&e) {
+        return bad(&m);
+    }
     match e {
         StoreError::Hook(s) => bad(&s),
         e => e.into(),
@@ -473,7 +476,7 @@ fn commit_chunk(m: &Modules, cx: &McpCx, user: &str, args: &Value, now: i64) -> 
             for n in t.positions { check_range(n, n)?; ms.extend(messages(&p, n, n)?); }
             let refs = ms.iter().map(|v| Ok((conversation.clone(), v["id"].as_str().ok_or_else(|| bad("source id missing"))?.to_string()))).collect::<ApiResult<Vec<_>>>()?;
             let target = target_at(t.matter, t.matter_at)?;
-            let id = todo::create(tx, &todo::NewTodo { ws: &cx.ws, owner: user, text: &t.text, matter: target.as_deref(), due: t.due, due_quote: t.due_quote.as_deref(), source: "steve", writer: &cx.bot_id, packet: Some(&p.id), refs, parties: parties(&ms) }, now).map_err(storage)?;
+            let id = todo::create(tx, &todo::NewTodo { ws: &cx.ws, owner: user, text: &t.text, matter: target.as_deref(), due: t.due, due_quote: t.due_quote.as_deref(), source: "steve", writer: &cx.bot_id, packet: Some(&p.id), refs, parties: parties(&ms), ..Default::default() }, now).map_err(storage)?;
             changes::record(tx, &cx.ws, run, &cx.bot_id, "todo", &id, Some(&p.id), &json!({}), &json!({"todo": id, "updated": now}), now)?;
             out["todos"].as_array_mut().unwrap().push(json!(id));
         }

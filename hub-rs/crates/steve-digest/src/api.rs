@@ -25,7 +25,11 @@ pub fn routes() -> Router<Modules> {
         .route("/digest/matters/{id}", get(read_matter).patch(edit_matter))
         .route("/digest/matters/{id}/relate", post(relate_matter))
         .route("/digest/todos", get(todos).post(new_todo))
-        .route("/digest/todos/{id}", post(todo_state))
+        .route(
+            "/digest/todos/{id}",
+            get(read_todo).post(todo_state).patch(edit_todo),
+        )
+        .route("/digest/todos/{id}/items", post(link_todo_item))
         .route(
             "/digest/memories/{id}/index",
             get(memory_index).post(link_memory),
@@ -40,6 +44,36 @@ fn owner(m: &Modules, who: &Caller) -> ApiResult<()> {
         params![who.ws, who.me], |r| r.get(0))?))?;
     if !ok {
         return Err(ApiError::Forbidden(steve_i18n::t!("digest.owner_only")));
+    }
+    Ok(())
+}
+
+/// Todos are every member's own: any member of the workspace, for their own todos only.
+fn member(m: &Modules, who: &Caller) -> ApiResult<()> {
+    let ok: bool =
+        m.store.reader(|c| {
+            Ok::<_, steve_store::StoreError>(c.query_row(
+        "SELECT EXISTS(SELECT 1 FROM workspace_members WHERE workspace_id = ? AND user_id = ?)",
+        params![who.ws, who.me], |r| r.get(0))?)
+        })?;
+    if !ok {
+        return Err(ApiError::Forbidden(steve_i18n::t!("digest.todo.not_yours")));
+    }
+    Ok(())
+}
+
+/// A todo value refused with its reason; other storage errors as [`input_error`].
+fn todo_error(e: steve_store::StoreError) -> ApiError {
+    match todo::message(&e) {
+        Some(m) => ApiError::rule(m),
+        None => input_error(e),
+    }
+}
+
+/// The caller's own todo `id`, else 404 (another member's todo is not there for them).
+fn own_todo(c: &rusqlite::Connection, who: &Caller, id: &str) -> ApiResult<()> {
+    if todo::owner_of(c, &who.ws, id)?.as_deref() != Some(who.me.as_str()) {
+        return Err(ApiError::not_found(steve_i18n::t!("digest.noun.todo")));
     }
     Ok(())
 }
@@ -135,6 +169,8 @@ struct List {
     run: Option<String>,
     packet: Option<String>,
     limit: Option<usize>,
+    kind: Option<String>,
+    parent: Option<String>,
 }
 impl List {
     fn limit(&self) -> usize {
@@ -346,9 +382,42 @@ async fn todos(
     Query(p): Query<List>,
 ) -> ApiResult<Json<Value>> {
     m.blocking(move |m| {
-        owner(m, &who)?;
-        Ok(Json(json!({"todos": m.store.reader(|c| todo::list(c, &who.ws, &who.me, &p.state.clone().into_iter().collect::<Vec<_>>(), p.limit()))?})))
-    }).await
+        member(m, &who)?;
+        let f = todo::Filter {
+            states: p.state.clone().into_iter().collect(),
+            kind: p.kind.clone(),
+            parent: p.parent.clone(),
+            limit: p.limit(),
+        };
+        Ok(Json(
+            json!({"todos": m.store.reader(|c| todo::list_by(c, &who.ws, &who.me, &f))?}),
+        ))
+    })
+    .await
+}
+async fn read_todo(
+    State(m): State<Modules>,
+    who: Caller,
+    Path(id): Path<String>,
+) -> ApiResult<Json<Value>> {
+    m.blocking(move |m| {
+        member(m, &who)?;
+        m.store.reader(|c| {
+            own_todo(c, &who, &id)?;
+            let mut t = todo::get(c, &who.ws, &id)?
+                .ok_or_else(|| ApiError::not_found(steve_i18n::t!("digest.noun.todo")))?;
+            if t["kind"] == "goal" {
+                let f = todo::Filter {
+                    parent: Some(id.clone()),
+                    limit: 500,
+                    ..Default::default()
+                };
+                t["children"] = json!(todo::list_by(c, &who.ws, &who.me, &f)?);
+            }
+            Ok(Json(t))
+        })
+    })
+    .await
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -356,6 +425,16 @@ struct TodoBody {
     text: String,
     matter: Option<String>,
     due: Option<i64>,
+    due_date: Option<String>,
+    kind: Option<String>,
+    parent: Option<String>,
+    target_date: Option<String>,
+    remind_at: Option<i64>,
+    #[serde(default)]
+    pri: i64,
+    #[serde(default)]
+    star: bool,
+    recur: Option<String>,
     #[serde(default)]
     refs: Vec<(ConvRef, String)>,
     #[serde(default)]
@@ -367,9 +446,9 @@ async fn new_todo(
     Body(b): Body<TodoBody>,
 ) -> ApiResult<Json<Value>> {
     m.blocking(move |m| {
-        owner(m, &who)?;
+        member(m, &who)?;
         let now = m.clock.now();
-        let id = m.store.transaction(|tx| {
+        let (id, change) = m.store.transaction(|tx| {
             let id = todo::create(
                 tx,
                 &todo::NewTodo {
@@ -378,17 +457,24 @@ async fn new_todo(
                     text: &b.text,
                     matter: b.matter.as_deref(),
                     due: b.due,
-                    due_quote: None,
+                    due_date: b.due_date.as_deref(),
+                    kind: b.kind.as_deref().unwrap_or("todo"),
+                    parent: b.parent.as_deref(),
+                    target_date: b.target_date.as_deref(),
+                    remind_at: b.remind_at,
+                    pri: b.pri,
+                    star: b.star,
+                    recur: b.recur.as_deref(),
                     source: "you",
                     writer: &who.me,
-                    packet: None,
                     refs: b.refs,
                     parties: b.parties,
+                    ..Default::default()
                 },
                 now,
             )
-            .map_err(input_error)?;
-            changes::record(
+            .map_err(todo_error)?;
+            let change = changes::record(
                 tx,
                 &who.ws,
                 &who.me,
@@ -400,9 +486,40 @@ async fn new_todo(
                 &json!({"todo": id, "updated": now}),
                 now,
             )?;
-            Ok::<_, ApiError>(id)
+            Ok::<_, ApiError>((id, change))
         })?;
-        Ok(Json(json!({"id": id})))
+        Ok(Json(json!({"id": id, "change": change})))
+    })
+    .await
+}
+async fn edit_todo(
+    State(m): State<Modules>,
+    who: Caller,
+    Path(id): Path<String>,
+    Body(p): Body<todo::Patch>,
+) -> ApiResult<Json<Value>> {
+    m.blocking(move |m| {
+        member(m, &who)?;
+        let now = m.clock.now();
+        let change = m.store.transaction(|tx| {
+            own_todo(tx, &who, &id)?;
+            let (before, after) = todo::edit(tx, &who.ws, &id, &p, now)
+                .map_err(todo_error)?
+                .ok_or_else(|| ApiError::not_found(steve_i18n::t!("digest.noun.todo")))?;
+            Ok::<_, ApiError>(changes::record(
+                tx,
+                &who.ws,
+                &who.me,
+                &who.me,
+                "todo_edit",
+                &id,
+                None,
+                &json!(before),
+                &json!({"todo": id, "fields": after, "updated": now}),
+                now,
+            )?)
+        })?;
+        Ok(Json(json!({"ok": true, "change": change})))
     })
     .await
 }
@@ -419,37 +536,106 @@ async fn todo_state(
     Body(b): Body<TodoState>,
 ) -> ApiResult<Json<Value>> {
     m.blocking(move |m| {
-        owner(m, &who)?;
+        member(m, &who)?;
         if !todo::STATES.contains(&b.state.as_str()) || (b.state == "handed") != b.item.is_some() {
             return Err(ApiError::invalid("state"));
         }
-        m.store.transaction(|tx| {
-            let t = todo::get(tx, &who.ws, &id)?.ok_or_else(|| ApiError::not_found("todo"))?;
-            let mine: bool = tx.query_row(
-                "SELECT owner = ? FROM todos WHERE id = ?",
-                params![who.me, id],
-                |r| r.get(0),
-            )?;
-            if !mine {
-                return Err(ApiError::not_found("todo"));
-            }
-            todo::set_state(tx, &who.ws, &id, &b.state, b.item.as_deref(), m.clock.now())
-                .map_err(input_error)?;
-            changes::record(
+        let now = m.clock.now();
+        let (change, next) = m.store.transaction(|tx| {
+            own_todo(tx, &who, &id)?;
+            set_todo_state(
                 tx,
                 &who.ws,
                 &who.me,
                 &who.me,
-                "todo_state",
                 &id,
-                None,
-                &json!({"state": t["state"], "item": t["item_id"]}),
-                &json!({"todo": id, "state": b.state, "item": b.item}),
-                m.clock.now(),
-            )?;
-            Ok::<_, ApiError>(())
+                &b.state,
+                b.item.as_deref(),
+                now,
+            )
         })?;
-        Ok(Json(json!({"ok": true})))
+        Ok(Json(json!({"ok": true, "change": change, "next": next})))
+    })
+    .await
+}
+
+/// Sets a todo's state (a recurring one done makes the next) and records the undoable change:
+/// `(change, next)`. The caller has checked whose todo it is.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn set_todo_state(
+    tx: &steve_store::Tx,
+    ws: &str,
+    run: &str,
+    writer: &str,
+    id: &str,
+    state: &str,
+    item: Option<&str>,
+    now: i64,
+) -> ApiResult<(String, Option<String>)> {
+    let t = todo::get(tx, ws, id)?
+        .ok_or_else(|| ApiError::not_found(steve_i18n::t!("digest.noun.todo")))?;
+    let next = todo::complete(tx, ws, id, state, item, now).map_err(todo_error)?;
+    let next_updated = match &next {
+        Some(n) => todo::fields(tx, ws, n)?.map(|x| x.2),
+        None => None,
+    };
+    let change = changes::record(
+        tx,
+        ws,
+        run,
+        writer,
+        "todo_state",
+        id,
+        None,
+        &json!({"state": t["state"], "item": t["item_id"]}),
+        &json!({"todo": id, "state": state, "item": item, "next": next, "next_updated": next_updated}),
+        now,
+    )?;
+    Ok((change, next))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LinkItem {
+    item: String,
+    #[serde(default = "yes")]
+    linked: bool,
+}
+fn yes() -> bool {
+    true
+}
+async fn link_todo_item(
+    State(m): State<Modules>,
+    who: Caller,
+    Path(id): Path<String>,
+    Body(b): Body<LinkItem>,
+) -> ApiResult<Json<Value>> {
+    m.blocking(move |m| {
+        member(m, &who)?;
+        let now = m.clock.now();
+        let (changed, change) = m.store.transaction(|tx| {
+            own_todo(tx, &who, &id)?;
+            let changed =
+                todo::link_item(tx, &who.ws, &id, &b.item, b.linked).map_err(todo_error)?;
+            let change = if changed {
+                Some(changes::record(
+                    tx,
+                    &who.ws,
+                    &who.me,
+                    &who.me,
+                    "todo_link",
+                    &id,
+                    None,
+                    &json!({}),
+                    &json!({"todo": id, "item": b.item, "linked": b.linked}),
+                    now,
+                )?)
+            } else {
+                None
+            };
+            Ok::<_, ApiError>((changed, change))
+        })?;
+        Ok(Json(json!({"changed": changed, "change": change})))
     })
     .await
 }
@@ -528,7 +714,25 @@ async fn change_list(
     who: Caller,
     Query(p): Query<List>,
 ) -> ApiResult<Json<Value>> {
-    m.blocking(move |m| { owner(m, &who)?; Ok(Json(json!({"changes": m.store.reader(|c| changes::list(c, &who.ws, p.run.as_deref(), p.packet.as_deref(), p.limit()))?}))) }).await
+    m.blocking(move |m| {
+        owner(m, &who)?;
+        let rows = m.store.reader(|c| {
+            let mut out = vec![];
+            for ch in changes::list(c, &who.ws, p.run.as_deref(), p.packet.as_deref(), p.limit())? {
+                // another member's todo changes are theirs alone
+                if changes::is_todo(&ch)
+                    && todo::owner_of(c, &who.ws, ch["target"].as_str().unwrap_or_default())?
+                        .is_some_and(|o| o != who.me)
+                {
+                    continue;
+                }
+                out.push(ch);
+            }
+            Ok::<_, steve_store::StoreError>(out)
+        })?;
+        Ok(Json(json!({"changes": rows})))
+    })
+    .await
 }
 async fn undo(
     State(m): State<Modules>,
@@ -536,7 +740,24 @@ async fn undo(
     Path(id): Path<String>,
 ) -> ApiResult<Json<Value>> {
     m.blocking(move |m| {
-        owner(m, &who)?;
+        // a todo change is undone by the todo's owner, any member; every other change by the workspace owner
+        let todo_of = m.store.reader(|c| {
+            Ok::<_, steve_store::StoreError>(match changes::get(c, &who.ws, &id)? {
+                Some(ch) if changes::is_todo(&ch) => Some(todo::owner_of(
+                    c,
+                    &who.ws,
+                    ch["target"].as_str().unwrap_or_default(),
+                )?),
+                _ => None,
+            })
+        })?;
+        match todo_of {
+            Some(Some(o)) if o != who.me => {
+                return Err(ApiError::not_found(steve_i18n::t!("digest.noun.change")));
+            }
+            Some(_) => member(m, &who)?,
+            None => owner(m, &who)?,
+        }
         changes::undo(m, &who.ws, &who.me, &id).map(Json)
     })
     .await

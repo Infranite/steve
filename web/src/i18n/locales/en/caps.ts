@@ -266,6 +266,10 @@ export default {
     digestReport: "Read the digest run’s saved changes, with undo available",
     mattersSearch: "Search existing cross-conversation matters",
     matterRead: "Read a matter’s timeline and visible memories",
+    todoList: "List your todos and goals, goals with their progress",
+    todoAdd: "Add a todo or goal for you, undoable",
+    todoUpdate: "Change one of your todos or goals, undoable",
+    todoComplete: "Mark one of your todos done, dropped or open again, undoable",
     toolsSearch: "Find available built-in or external tools by purpose",
     toolCall: "Run a discovered tool by name and arguments",
 

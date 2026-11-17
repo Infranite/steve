@@ -3,7 +3,8 @@
 //!
 //! Ops: `summary` (a conversation summary version), `segment` (a segment and its matter assignment; a matter it
 //! opened is dropped again when nothing else is in it), `todo` (a todo written), `todo_state` (a todo's state
-//! changed), `mem_link` (a memory indexed to a conversation, matter, people and message range), `mem_new` (a
+//! changed, with the next occurrence a recurring one made), `todo_edit` (a todo's fields changed: `before` the
+//! old fields, `after` the new ones), `todo_link` (an item linked to or unlinked from a goal), `mem_link` (a memory indexed to a conversation, matter, people and message range), `mem_new` (a
 //! candidate memory proposed, also one that would replace another; undone, it goes the way an unanswered
 //! candidate goes).
 
@@ -68,6 +69,13 @@ pub fn list(
         ))?
         .query_map(params![ws, run, packet], row)?
         .collect::<rusqlite::Result<_>>()?)
+}
+
+/// Whether change `ch` is of a todo (`target` is the todo): `todo`, `todo_state`, `todo_edit`, `todo_link`.
+pub fn is_todo(ch: &Value) -> bool {
+    ch["op"]
+        .as_str()
+        .is_some_and(|o| o == "todo" || o.starts_with("todo_"))
 }
 
 pub(crate) fn get(c: &Connection, ws: &str, id: &str) -> Result<Option<Value>> {
@@ -149,6 +157,7 @@ pub fn undo(m: &Modules, ws: &str, actor: &str, id: &str) -> ApiResult<Value> {
                     .ok_or_else(|| ApiError::not_found(steve_i18n::t!("digest.noun.todo")))?;
                 if cur["state"] != "open"
                     || after.get("updated").is_some_and(|u| u != &cur["updated"])
+                    || todo::parent_of_any(tx, &t)?
                 {
                     return Err(ApiError::rule(steve_i18n::t!("digest.change.todo_moved")));
                 }
@@ -161,9 +170,46 @@ pub fn undo(m: &Modules, ws: &str, actor: &str, id: &str) -> ApiResult<Value> {
                 if cur.0 != s(&after, "state") || cur.1.as_deref() != after["item"].as_str() {
                     return Err(ApiError::rule(steve_i18n::t!("digest.change.todo_moved")));
                 }
+                // the next occurrence it made goes with it, while nobody touched that one
+                if let Some(next) = after.get("next").and_then(Value::as_str)
+                    && let Some(n) = todo::get(tx, ws, next)?
+                {
+                    if n["state"] != "open" || n["updated"] != after["next_updated"] {
+                        return Err(ApiError::rule(steve_i18n::t!("digest.change.todo_moved")));
+                    }
+                    todo::delete(tx, ws, next)?;
+                }
                 let before = &ch["before"];
                 let item = before.get("item").and_then(Value::as_str);
                 todo::set_state(tx, ws, &t, &s(before, "state"), item, now)?;
+            }
+            "todo_edit" => {
+                let t = s(&after, "todo");
+                let (_, cur, _) = todo::fields(tx, ws, &t)?
+                    .ok_or_else(|| ApiError::not_found(steve_i18n::t!("digest.noun.todo")))?;
+                let was: todo::Fields = serde_json::from_value(ch["before"].clone())
+                    .map_err(|_| ApiError::invalid("before"))?;
+                let now_fields: todo::Fields = serde_json::from_value(after["fields"].clone())
+                    .map_err(|_| ApiError::invalid("after"))?;
+                // a later state change does not stand in the way; a later edit of its fields does
+                if cur != now_fields {
+                    return Err(ApiError::rule(steve_i18n::t!("digest.change.todo_moved")));
+                }
+                todo::write(tx, ws, &t, &was, now).map_err(|e| match todo::message(&e) {
+                    Some(_) => ApiError::rule(steve_i18n::t!("digest.change.todo_moved")),
+                    None => e.into(),
+                })?;
+            }
+            "todo_link" => {
+                let (t, item) = (s(&after, "todo"), s(&after, "item"));
+                let on = after["linked"] == true;
+                if todo::item_linked(tx, ws, &t, &item)? != on {
+                    return Err(ApiError::rule(steve_i18n::t!("digest.change.todo_moved")));
+                }
+                todo::link_item(tx, ws, &t, &item, !on).map_err(|e| match todo::message(&e) {
+                    Some(m) => ApiError::rule(m),
+                    None => e.into(),
+                })?;
             }
             "mem_link" => {
                 let a: memindex::Added = serde_json::from_value(after.clone())

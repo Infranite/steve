@@ -68,6 +68,7 @@ api GET /digest/memories/x/index
 api GET /digest/packets
 api GET /digest/packets/x
 api GET /digest/todos
+api GET /digest/todos/x
 api GET /flow-settings/allow-private
 api GET /flows
 api GET /flows/x
@@ -175,6 +176,7 @@ api PATCH /contacts/x/jobs/x
 api PATCH /conversations/x/preferences
 api PATCH /digest/conversations/x
 api PATCH /digest/matters/x
+api PATCH /digest/todos/x
 api PATCH /flows/x
 api PATCH /github/repos/x
 api PATCH /kb/docs/x
@@ -226,6 +228,7 @@ api POST /digest/memories/x/index
 api POST /digest/packets/x/retry
 api POST /digest/todos
 api POST /digest/todos/x
+api POST /digest/todos/x/items
 api POST /flows
 api POST /flows/draft
 api POST /flows/x/dry-run

@@ -203,6 +203,9 @@ pub const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/097.sql"),
     // 98: prospective final reply ordering/read state and scoped attention page capabilities (#290).
     include_str!("../migrations/098.sql"),
+    // 99: todos become goals and dated todos (kind, parent, target date, date-only deadlines,
+    // reminders, snooze, priority, star, recurrence).
+    include_str!("../migrations/099.sql"),
 ];
 
 /// 027's item columns and their one-time backfill (applied by `run_pending` when `items.phase` is missing).

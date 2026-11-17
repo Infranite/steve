@@ -32,6 +32,7 @@ const READ_ONLY: &[&str] = &[
     steve_digest::tools::REPORT,
     steve_digest::tools::MATTERS,
     steve_digest::tools::MATTER,
+    steve_digest::todo_tools::LIST,
     "steve_contacts_find",
     "steve_contact_get",
     "steve_im_read",
