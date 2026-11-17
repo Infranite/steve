@@ -136,7 +136,7 @@ pub fn reply_as_you(c: &Connection, space: &str) -> ChannelResult<ReplyAsYou> {
     Ok(v.as_deref().and_then(ReplyAsYou::parse).unwrap_or_default())
 }
 
-/// What a bot's message in a space becomes on your own account (migration 088
+/// What a bot's message in a space becomes on your own account (migration 097
 /// `space_prefs.bot_notices`). A bot is never answered there (`collab` aside); this only says
 /// whether its notice reaches you as a proposed item ([`crate::decide::bot_notice`]). Decided by the
 /// message's structure and this setting, never by its words.
@@ -1062,7 +1062,7 @@ pub struct SpaceSettings {
     pub attention: Attention,
     /// Whether Steve replies for you here on your own account (096).
     pub reply_as_you: ReplyAsYou,
-    /// What a bot's message here becomes on your own account (088).
+    /// What a bot's message here becomes on your own account (097).
     pub bot_notices: BotNotices,
 }
 

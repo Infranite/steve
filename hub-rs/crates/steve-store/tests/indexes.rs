@@ -149,7 +149,7 @@ const CASES: &[(&str, &str, &str)] = &[
     ),
     (
         "decisions_chan_open",
-        "steve-channels outbound.rs stale_cards (088)",
+        "steve-channels outbound.rs stale_cards (097)",
         "SELECT d.id, d.workspace_id, d.kind, d.subject_id, m.space_id, d.created
            FROM decisions d INDEXED BY decisions_chan_open
            JOIN chan_messages m ON m.id = d.subject_id
@@ -168,7 +168,7 @@ const CASES: &[(&str, &str, &str)] = &[
     ),
     (
         "decisions_chan_answered",
-        "steve-channels outbound.rs drafts_chosen (088)",
+        "steve-channels outbound.rs drafts_chosen (097)",
         "SELECT workspace_id, id, subject_id, draft, coalesce(json_extract(result, '$.by'), 'steve')
            FROM decisions INDEXED BY decisions_chan_answered
           WHERE subject_type = 'chan_message' AND kind = 'ask' AND status = 'resolved' AND resolved >= ?
@@ -177,7 +177,7 @@ const CASES: &[(&str, &str, &str)] = &[
     ),
     (
         "decisions_chan_answered",
-        "steve-channels outbound.rs instructions_asked (088)",
+        "steve-channels outbound.rs instructions_asked (097)",
         "SELECT workspace_id, id, subject_id, coalesce(json_extract(result, '$.text'), '')
            FROM decisions INDEXED BY decisions_chan_answered
           WHERE subject_type = 'chan_message' AND kind = 'ask' AND status = 'resolved' AND resolved >= ?
