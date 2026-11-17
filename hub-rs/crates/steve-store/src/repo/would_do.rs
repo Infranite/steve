@@ -1,5 +1,5 @@
-//! What the sweep would do (migration 101, #334), in shadow: one row per decision of the sweep, keyed
-//! by (item, cycle, session, turn, action, reason). Seeing the same decision again — on the next
+//! What the sweep would do (migration 105, #334), in shadow: one row per decision of the sweep, keyed
+//! by (item, cycle, session, turn, scope revision, action, reason, target). Seeing the same decision again — on the next
 //! pass or after a restart — is the same row; a decision that stopped holding is marked cleared, and
 //! counted as a new episode when it comes back. Nothing here carries an action out. Also the two
 //! reads the sweep needs that no other repository has: the open task items, and when an item was
@@ -21,6 +21,8 @@ pub struct WouldDoRow {
     pub cycle: i64,
     pub session_id: String,
     pub turn_id: String,
+    pub scope_revision: i64,
+    pub target: String,
     pub action: String,
     pub reason: String,
     pub detail: Option<String>,
@@ -39,6 +41,10 @@ pub struct NewWouldDo<'a> {
     pub cycle: i64,
     pub session_id: &'a str,
     pub turn_id: &'a str,
+    /// The item's scope revision (the version of its goal) it was decided on.
+    pub scope_revision: i64,
+    /// What it is about (an operation, a card or a wait id; `''`: the item as a whole).
+    pub target: &'a str,
     pub action: &'a str,
     pub reason: &'a str,
     pub detail: Option<&'a str>,
@@ -54,6 +60,8 @@ fn row(r: &rusqlite::Row) -> rusqlite::Result<WouldDoRow> {
         cycle: r.get("cycle")?,
         session_id: r.get("session_id")?,
         turn_id: r.get("turn_id")?,
+        scope_revision: r.get("scope_revision")?,
+        target: r.get("target")?,
         action: r.get("action")?,
         reason: r.get("reason")?,
         detail: r.get("detail")?,
@@ -89,18 +97,20 @@ impl WouldDo<'_> {
         self.0.transaction(|tx| {
             let id = uid("wd");
             let inserted = tx.execute(
-                "INSERT INTO item_would_do(id,item_id,cycle,session_id,turn_id,action,reason,detail,row,code,due_at,first_seen)
-                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
-                 ON CONFLICT(item_id,cycle,session_id,turn_id,action,reason) DO UPDATE
+                "INSERT INTO item_would_do(id,item_id,cycle,session_id,turn_id,scope_revision,target,action,reason,detail,row,code,due_at,first_seen)
+                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                 ON CONFLICT(item_id,cycle,session_id,turn_id,scope_revision,action,reason,target) DO UPDATE
                    SET cleared_at=NULL,episodes=episodes+1,detail=excluded.detail,row=excluded.row,
                        code=excluded.code,due_at=excluded.due_at
                    WHERE cleared_at IS NOT NULL",
-                params![id, w.item_id, w.cycle, w.session_id, w.turn_id, w.action, w.reason,
-                    w.detail, w.row, w.code, w.due_at, at],
+                params![id, w.item_id, w.cycle, w.session_id, w.turn_id, w.scope_revision, w.target,
+                    w.action, w.reason, w.detail, w.row, w.code, w.due_at, at],
             )? > 0;
             let id: String = tx.query_row(
-                "SELECT id FROM item_would_do WHERE item_id=? AND cycle=? AND session_id=? AND turn_id=? AND action=? AND reason=?",
-                params![w.item_id, w.cycle, w.session_id, w.turn_id, w.action, w.reason],
+                "SELECT id FROM item_would_do WHERE item_id=? AND cycle=? AND session_id=? AND turn_id=?
+                   AND scope_revision=? AND action=? AND reason=? AND target=?",
+                params![w.item_id, w.cycle, w.session_id, w.turn_id, w.scope_revision, w.action,
+                    w.reason, w.target],
                 |r| r.get(0),
             )?;
             tx.execute(

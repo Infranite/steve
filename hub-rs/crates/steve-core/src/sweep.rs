@@ -7,8 +7,9 @@
 //! Nothing is carried out. Each action has an execution switch ([`EXECUTE`]) and every switch is
 //! off, so the stall card and Steve's continues ([`crate::stall`], [`crate::takeover`]) stay the
 //! only things that act on an item: one advancer per item. The decision is recorded in a shadow log
-//! (`item_would_do`) under (item, cycle, session, turn, action, reason): seeing it again on the next
-//! pass, or after a restart, is the same record, so a later change that turns an action on can carry
+//! (`item_would_do`) under (item, cycle, session, turn, scope revision, action, reason, target):
+//! seeing it again on the next pass, or after a restart, is the same record, while the same reason
+//! about another operation, card or wait (or about a changed goal) is a new one, so a later change that turns an action on can carry
 //! each decision out exactly once. It is shown in the item's Debug view next to the derived state.
 //!
 //! The rules ([`RULES`]), first match wins. Above all, an open card already asks you, so the sweep
@@ -26,7 +27,7 @@ use steve_store::ItemOperation;
 use steve_store::would_do::{NewWouldDo, WouldDoRow};
 
 use crate::cycle::{CLOSED, CLOSING, OP_BUILD, OP_HOOKS, OP_RELEASE};
-use crate::derive::{Derived, Facts, Lane, Settled, derive};
+use crate::derive::{Derived, Facts, Lane, NextStep, Settled, derive};
 use crate::proof::OP_DEPLOY;
 use crate::repo::{Decision, Item};
 use crate::util::now;
@@ -270,6 +271,8 @@ pub struct Answered {
 pub struct Signals {
     pub pr_problem: Option<PrProblem>,
     pub pr_declined: Option<u64>,
+    /// The release operation whose merge you declined.
+    pub declined_op: Option<String>,
     pub required_failed: Option<OpSignal>,
     pub deploy_waiting: Option<OpSignal>,
     pub hooks_open: Option<OpSignal>,
@@ -307,12 +310,12 @@ pub fn from_operations(revision: i64, ops: &[ItemOperation]) -> Signals {
             told,
         })
     });
-    let pr_declined = mine()
-        .find(|o| o.kind == OP_RELEASE && o.evidence["pr_merge_declined"] == json!(true))
-        .map(|o| o.evidence["pr"].as_u64().unwrap_or(0));
+    let declined =
+        mine().find(|o| o.kind == OP_RELEASE && o.evidence["pr_merge_declined"] == json!(true));
     Signals {
         pr_problem,
-        pr_declined,
+        pr_declined: declined.map(|o| o.evidence["pr"].as_u64().unwrap_or(0)),
+        declined_op: declined.map(|o| o.id.clone()),
         required_failed: mine()
             .find(|o| o.required && o.status == "failed")
             .map(|o| sig(o, o.updated)),
@@ -373,6 +376,11 @@ pub struct WouldDo {
     pub due_at: i64,
     pub session_id: String,
     pub turn_id: String,
+    /// The item's scope revision it was decided on (the version of its goal).
+    pub scope_revision: i64,
+    /// What it is about, when the reason names one thing: an operation, a card or a wait (`''`:
+    /// the item as a whole). The same reason about another one is another decision.
+    pub target: String,
     /// The derived state it was decided on.
     pub row: u8,
     pub code: &'static str,
@@ -393,7 +401,12 @@ pub fn plan(f: &Facts, d: &Derived, s: &Signals, p: &WorkPolicy) -> Option<Would
     if !f.cards.is_empty() {
         return None;
     }
-    let (reason, since, detail) = matched(f, d, s, p)?;
+    let Matched {
+        reason,
+        since,
+        detail,
+        target,
+    } = matched(f, d, s, p)?;
     let r = rule_of(reason)?;
     let due_at = match r.clock {
         Clock::Now => since.min(f.now),
@@ -413,18 +426,38 @@ pub fn plan(f: &Facts, d: &Derived, s: &Signals, p: &WorkPolicy) -> Option<Would
         due_at,
         session_id,
         turn_id,
+        scope_revision: f.item.scope_revision,
+        target: target.unwrap_or_default(),
         row: d.row,
         code: d.code,
     })
 }
 
-/// The first rule that holds: its reason, from when its clock runs, and what it names.
-fn matched(
-    f: &Facts,
-    d: &Derived,
-    s: &Signals,
-    p: &WorkPolicy,
-) -> Option<(&'static str, i64, Option<String>)> {
+/// The rule that holds: its reason, from when its clock runs, what it says, and the one thing it is
+/// about when it names one (an operation, a card, a wait).
+struct Matched {
+    reason: &'static str,
+    since: i64,
+    detail: Option<String>,
+    target: Option<String>,
+}
+
+fn hit(
+    reason: &'static str,
+    since: i64,
+    detail: Option<String>,
+    target: Option<String>,
+) -> Option<Matched> {
+    Some(Matched {
+        reason,
+        since,
+        detail,
+        target,
+    })
+}
+
+/// The first rule that holds.
+fn matched(f: &Facts, d: &Derived, s: &Signals, p: &WorkPolicy) -> Option<Matched> {
     let now = f.now;
     let closing = f.item.phase == CLOSING;
     let settled = d.settled == Settled::Evaluable;
@@ -432,7 +465,12 @@ fn matched(
     let activity = session.map_or(0, |x| x.last_activity);
     let pr = |n: Option<u64>| n.filter(|n| *n > 0).map(|n| format!("#{n}"));
     if f.merge_declined {
-        return Some(("merge_declined", now, pr(s.pr_declined)));
+        return hit(
+            "merge_declined",
+            now,
+            pr(s.pr_declined),
+            s.declined_op.clone(),
+        );
     }
     if let Some(since) = session.and_then(|x| x.offline_since) {
         let reason = if closing {
@@ -440,50 +478,71 @@ fn matched(
         } else {
             "node_gone"
         };
-        return Some((reason, since, None));
+        return hit(reason, since, None, None);
     }
     if f.item.paused {
         /* a turn your answer started is not stuck */
         if let Some(a) = &s.answered
             && d.settled != Settled::Busy
         {
-            return Some(("answered_while_paused", a.at, Some(a.decision_id.clone())));
+            return hit(
+                "answered_while_paused",
+                a.at,
+                Some(a.decision_id.clone()),
+                Some(a.decision_id.clone()),
+            );
         }
         let since = s.last_record.max(activity).max(s.paused_at.unwrap_or(0));
-        return Some(("paused_silent", since, None));
+        return hit("paused_silent", since, None, None);
     }
     if closing && settled {
         if let Some(o) = &s.deploy_waiting {
-            return Some(("deploy_waiting", o.since, Some(o.label.clone())));
+            return hit(
+                "deploy_waiting",
+                o.since,
+                Some(o.label.clone()),
+                Some(o.id.clone()),
+            );
         }
         if let Some(o) = &s.required_failed {
-            return Some((
+            return hit(
                 "required_failed",
                 o.since.max(activity),
                 Some(o.label.clone()),
-            ));
+                Some(o.id.clone()),
+            );
         }
         if let Some(x) = s.pr_problem.as_ref().filter(|x| x.told) {
             let what = match pr(x.pr) {
                 Some(n) => format!("{n} {}", x.problem),
                 None => x.problem.clone(),
             };
-            return Some(("pr_unfixed", activity, Some(what)));
+            return hit("pr_unfixed", activity, Some(what), Some(x.op.clone()));
         }
     }
     if closing && let Some(o) = &s.hooks_open {
-        return Some(("hooks_silent", o.since, Some(o.label.clone())));
+        return hit(
+            "hooks_silent",
+            o.since,
+            Some(o.label.clone()),
+            Some(o.id.clone()),
+        );
     }
     if closing && let Some(o) = &s.build_running {
-        return Some(("build_long", o.since, Some(o.label.clone())));
+        return hit(
+            "build_long",
+            o.since,
+            Some(o.label.clone()),
+            Some(o.id.clone()),
+        );
     }
     match d.code {
-        "nobody" => return Some(("nobody", now, None)),
-        "stopped" => return Some(("stopped", now, None)),
-        "unknown" => return Some(("unowned", activity, None)),
-        "follow_up" => return Some(("follow_up", now, None)),
+        "nobody" => return hit("nobody", now, None, None),
+        "stopped" => return hit("stopped", now, None, None),
+        "unknown" => return hit("unowned", activity, None, None),
+        "follow_up" => return hit("follow_up", now, None, None),
         "running" if session.is_some_and(|x| x.running) => {
-            return Some(("stall_question", activity, None));
+            return hit("stall_question", activity, None, None);
         }
         _ => {}
     }
@@ -493,13 +552,23 @@ fn matched(
             .iter()
             .find(|w| w.cycle == f.item.cycle && w.wakes >= p.wait_note_after())
     {
-        return Some(("long_wait", now, Some(w.what.clone())));
+        return hit("long_wait", now, Some(w.what.clone()), Some(w.id.clone()));
     }
     if d.lane == Lane::Running
         && d.settled != Settled::Busy
         && matches!(d.code, "waiting" | "closing" | "quota")
     {
-        return Some(("silent", s.last_record.max(activity), d.detail.clone()));
+        /* about what it waits on: the wait or the closing operation it is due on */
+        let target = match &d.next_step {
+            Some(NextStep::Due { id, .. }) => id.clone(),
+            _ => None,
+        };
+        return hit(
+            "silent",
+            s.last_record.max(activity),
+            d.detail.clone(),
+            target,
+        );
     }
     None
 }
@@ -591,11 +660,15 @@ impl Tx<'_> {
             }
             return Ok(None);
         };
+        /* the same decision: of the same turn and scope, for the same reason about the same thing (the
+         * same reason about another operation, card or wait is a new decision, not the old one) */
         let same = |r: &WouldDoRow| {
             (r.cycle, r.session_id.as_str(), r.turn_id.as_str())
                 == (i.cycle, w.session_id.as_str(), w.turn_id.as_str())
+                && r.scope_revision == w.scope_revision
                 && r.action == w.action.as_str()
                 && r.reason == w.reason
+                && r.target == w.target
         };
         if !(open.len() == 1 && same(&open[0])) {
             log.record(
@@ -604,6 +677,8 @@ impl Tx<'_> {
                     cycle: i.cycle,
                     session_id: &w.session_id,
                     turn_id: &w.turn_id,
+                    scope_revision: w.scope_revision,
+                    target: &w.target,
                     action: w.action.as_str(),
                     reason: w.reason,
                     detail: w.detail.as_deref(),

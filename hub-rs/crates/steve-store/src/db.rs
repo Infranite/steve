@@ -223,7 +223,7 @@ pub const MIGRATIONS: &[&str] = &[
     // results and the operator's overrides of the named work policy. Nothing acts on them yet.
     include_str!("../migrations/104.sql"),
     // 105: what the sweep would do for each open item (#334), in shadow: a log of decisions keyed by
-    // (item, cycle, session, turn, action, reason). Nothing carries them out yet.
+    // (item, cycle, session, turn, scope revision, action, reason, target). Nothing carries them out yet.
     include_str!("../migrations/105.sql"),
 ];
 

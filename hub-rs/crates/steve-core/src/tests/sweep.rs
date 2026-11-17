@@ -247,6 +247,58 @@ fn every_silent_stuck_state_is_a_card_the_sweep_would_raise() {
 }
 
 #[test]
+fn a_decision_names_the_thing_it_is_about_and_the_scope_it_was_made_on() {
+    let failed = |id: &str| {
+        Case::new(|f| {
+            closing(f);
+            quiet_for(f, 10 * MIN);
+            f.item.scope_revision = 3;
+        })
+        .ops(vec![at(
+            op(id, REVISION, OP_BUILD, "failed", json!({})),
+            NOW - 20 * MIN,
+        )])
+        .plan()
+        .unwrap()
+    };
+    // the same reason on the same turn, about two different builds: two different decisions
+    let (a, b) = (failed("op-build"), failed("op-build-2"));
+    assert_eq!((a.reason, b.reason), ("required_failed", "required_failed"));
+    assert_eq!(
+        (a.session_id.as_str(), a.turn_id.as_str()),
+        (b.session_id.as_str(), b.turn_id.as_str())
+    );
+    assert_eq!(
+        (a.target.as_str(), b.target.as_str()),
+        ("op-build", "op-build-2")
+    );
+    assert_eq!(a.scope_revision, 3);
+    // a wait looked at often names that wait
+    let w = Case::new(|f| {
+        f.session.as_mut().unwrap().watched = false;
+        f.waits.push(crate::derive::Wait {
+            id: "wait-ci".into(),
+            cycle: 2,
+            on: "ci".into(),
+            what: "CI".into(),
+            next_check: NOW + MIN,
+            wakes: policy().wait_note_after(),
+            cap: None,
+        });
+    })
+    .plan()
+    .unwrap();
+    assert_eq!(
+        (w.reason, w.target.as_str()),
+        ("long_wait", "wait-ci"),
+        "{w:?}"
+    );
+    // a decision about the item as a whole names nothing
+    let w = Case::new(|_| {}).plan().unwrap();
+    assert_eq!((w.reason, w.target.as_str()), ("follow_up", ""));
+}
+
+#[test]
 fn the_cards_wait_for_what_would_still_move_the_item_on() {
     // told of nothing yet: the pull request watch tells the agent first
     let w = Case::new(|f| {
@@ -461,6 +513,77 @@ fn a_decision_is_recorded_once_per_key_cleared_when_it_stops_and_never_carried_o
         .clear_gone(later + 120_000)
         .unwrap();
     assert!(log(&k, &item)[0].cleared_at.is_some());
+}
+
+#[test]
+fn the_same_reason_about_another_target_or_scope_is_another_decision() {
+    let k = following();
+    let item = k.item("run", "执行", None);
+    let sid = k.session(&item, "idle");
+    let p = policy();
+    let later = crate::util::now() + HOUR;
+    let sweep = |at: i64| k.core.tx().sweep_item(&item, at, &p).unwrap().unwrap();
+    let first = sweep(later);
+    assert_eq!(first.reason, "follow_up");
+    // the goal changes on the same turn: the decision made on the old goal is not this one
+    let version = k.db().add_goal(&item, "换个目标").unwrap();
+    let second = sweep(later + 30_000);
+    assert_eq!(
+        (
+            second.reason,
+            second.turn_id.as_str(),
+            second.scope_revision
+        ),
+        ("follow_up", first.turn_id.as_str(), version)
+    );
+    let rows = log(&k, &item);
+    assert_eq!(rows.len(), 2, "{rows:?}");
+    assert!(
+        rows.iter()
+            .any(|r| r.scope_revision == first.scope_revision && r.cleared_at.is_some())
+    );
+    assert!(
+        rows.iter()
+            .any(|r| r.scope_revision == version && r.cleared_at.is_none())
+    );
+    // seen again unchanged: still the same record
+    sweep(later + 60_000);
+    assert_eq!(log(&k, &item).len(), 2);
+
+    // in the store: the same turn and reason about another operation is a new record, and the old
+    // one's coming back is a new episode of the old one
+    let store = k.db().store();
+    let log_ = store.would_do();
+    let rec = |target: &str, at: i64| {
+        log_.record(
+            &steve_store::would_do::NewWouldDo {
+                item_id: &item,
+                cycle: 1,
+                session_id: &sid,
+                turn_id: "t1",
+                scope_revision: version,
+                target,
+                action: "card",
+                reason: "required_failed",
+                row: 9,
+                code: "closing",
+                due_at: at,
+                ..Default::default()
+            },
+            at,
+        )
+        .unwrap()
+    };
+    let (a, new_a) = rec("op-build", later + 90_000);
+    assert!(new_a);
+    assert_eq!(rec("op-build", later + 91_000), (a.clone(), false));
+    let (b, new_b) = rec("op-build-2", later + 92_000);
+    assert!(new_b && b != a, "another target is another record");
+    let (a2, back) = rec("op-build", later + 93_000);
+    assert!(back && a2 == a, "the old target's record comes back");
+    let open = log_.open(&item).unwrap();
+    assert_eq!(open.len(), 1);
+    assert_eq!((open[0].id.as_str(), open[0].episodes), (a.as_str(), 2));
 }
 
 #[test]
