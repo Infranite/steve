@@ -698,3 +698,140 @@ fn a_goal_with_todos_under_it_is_not_deleted_by_undo() {
             .is_some()
     );
 }
+
+#[tokio::test]
+async fn a_members_todo_links_to_nothing_of_the_owners_digest() {
+    let e = env();
+    // the owner's digest: a matter, a message in a space, a person
+    e.store()
+        .with_conn(|c| {
+            c.execute_batch(
+                "INSERT INTO spaces (id, workspace_id, system_id, kind, external_id, name, created, updated)
+                    VALUES ('s1', 'default', 'test', 'group', 'g1', 'Board room', 1, 1);
+                 INSERT INTO parties (id, workspace_id, type, name, user_id, created_by, created, updated)
+                    VALUES ('me', 'default', 'person', 'Owner', 'usr_dev', 'usr_dev', 1, 1),
+                           ('alice', 'default', 'person', 'Alice', NULL, 'usr_dev', 1, 1);
+                 INSERT INTO accounts (id, workspace_id, system_id, family, party_id, kind, handle, handle_display, source, created, updated)
+                    VALUES ('owner_acc', 'default', 'test', 'other', 'me', 'personal', 'owner', 'Owner', 'me', 1, 1);
+                 INSERT INTO chan_messages (id, workspace_id, space_id, external_id, direction, sender_party_id, text, mentions, created)
+                    VALUES ('m1', 'default', 's1', 'm1', 'in', 'alice', 'the merger closes in March', '[]', 1);",
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let matter = e
+        .store()
+        .transaction(|tx| {
+            steve_digest::matter::create(tx, WS, "Secret merger", ME, NOW)
+                .map_err(|e| StoreError::Hook(format!("{e:?}")))
+        })
+        .unwrap();
+    let app = steve_digest::routes().with_state(e.modules.clone());
+    let (me, other) = (caller(WS, ME), caller(WS, OTHER));
+    // the owner links them and sees them
+    let (s, b) = call(
+        &app,
+        Some(&me),
+        "POST",
+        "/digest/todos",
+        Some(&json!({"text": "prepare the merger memo", "matter": matter,
+            "refs": [[{"type": "space", "id": "s1"}, "m1"]], "parties": ["alice"]})),
+    )
+    .await;
+    assert_eq!(s, 200, "{b}");
+    let (_, t) = call(
+        &app,
+        Some(&me),
+        "GET",
+        &format!("/digest/todos/{}", b["id"].as_str().unwrap()),
+        None,
+    )
+    .await;
+    assert_eq!(t["matter"]["title"], "Secret merger");
+    assert_eq!(t["sources"][0]["name"], "Board room");
+    assert_eq!(t["people"][0]["name"], "Alice");
+    // another member attaches none of them, by REST or by their agent
+    for body in [
+        json!({"text": "peek", "matter": matter}),
+        json!({"text": "peek", "refs": [[{"type": "space", "id": "s1"}, "m1"]]}),
+        json!({"text": "peek", "parties": ["alice"]}),
+    ] {
+        let (s, b) = call(&app, Some(&other), "POST", "/digest/todos", Some(&body)).await;
+        assert_eq!(s, 400, "{body} {b}");
+        assert!(
+            b.to_string().contains("owner") || b.to_string().contains("所有者"),
+            "{b}"
+        );
+    }
+    let (_, b) = call(
+        &app,
+        Some(&other),
+        "POST",
+        "/digest/todos",
+        Some(&json!({"text": "mine"})),
+    )
+    .await;
+    let theirs = b["id"].as_str().unwrap().to_string();
+    let (s, _) = call(
+        &app,
+        Some(&other),
+        "PATCH",
+        &format!("/digest/todos/{theirs}"),
+        Some(&json!({"matter": matter})),
+    )
+    .await;
+    assert_eq!(s, 400);
+    for (name, args) in [
+        (todo_tools::ADD, json!({"text": "peek", "matter": matter})),
+        (
+            todo_tools::UPDATE,
+            json!({"todo": theirs, "matter": matter}),
+        ),
+    ] {
+        let err = tool(&e, OTHER, name, args).unwrap_err();
+        assert!(
+            err.contains("owner") || err.contains("所有者"),
+            "{name}: {err}"
+        );
+    }
+    // and a member's todo that holds them anyway shows none of their content
+    e.store()
+        .with_conn(|c| {
+            c.execute(
+                "UPDATE todos SET matter_id = ? WHERE id = ?",
+                params![matter, theirs],
+            )?;
+            c.execute(
+                "INSERT INTO todo_refs (todo_id, conv, message_id) VALUES (?, 'space:s1', 'm1')",
+                [&theirs],
+            )?;
+            c.execute(
+                "INSERT INTO todo_parties (todo_id, party_id) VALUES (?, 'alice')",
+                [&theirs],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let (_, t) = call(
+        &app,
+        Some(&other),
+        "GET",
+        &format!("/digest/todos/{theirs}"),
+        None,
+    )
+    .await;
+    let shown = t.to_string();
+    for secret in ["Secret merger", "Board room", "merger closes", "Alice"] {
+        assert!(!shown.contains(secret), "{secret} in {shown}");
+    }
+    // their own todo stays editable with what it holds
+    let (s, b) = call(
+        &app,
+        Some(&other),
+        "PATCH",
+        &format!("/digest/todos/{theirs}"),
+        Some(&json!({"text": "mine, renamed"})),
+    )
+    .await;
+    assert_eq!(s, 200, "{b}");
+}

@@ -25,5 +25,6 @@
   "digest.todo.matter": "没有这件事",
   "digest.todo.item": "没有这个事项",
   "digest.todo.not_goal": "只有目标能关联事项",
+  "digest.todo.digest_only": "只有工作区所有者的待办能关联事情、来源消息和相关的人",
   "digest.todo.not_yours": "这不是你的待办"
 }

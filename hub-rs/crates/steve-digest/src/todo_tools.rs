@@ -63,7 +63,7 @@ pub fn tools() -> Vec<Value> {
             "pri": {"type": "integer", "minimum": 0, "maximum": todo::PRI_MAX, "description": "0 none … 3 highest"},
             "star": {"type": "boolean"},
             "recur": n("string", "repeat: FREQ=DAILY|WEEKLY|MONTHLY|YEARLY with optional ;INTERVAL=n; needs a due"),
-            "matter": n("string", "a matter id Steve gave"),
+            "matter": n("string", "a matter id from the workspace owner's digest; only the owner's todos take one"),
         })
     };
     let mut update = fields(true);

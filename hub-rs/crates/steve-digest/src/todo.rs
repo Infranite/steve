@@ -66,6 +66,7 @@ pub fn message(e: &StoreError) -> Option<String> {
         "matter" => steve_i18n::t!("digest.todo.matter"),
         "item" => steve_i18n::t!("digest.todo.item"),
         "not_goal" => steve_i18n::t!("digest.todo.not_goal"),
+        "digest_only" => steve_i18n::t!("digest.todo.digest_only"),
         _ => return None,
     })
 }
@@ -350,6 +351,13 @@ fn has_children(c: &Connection, id: &str) -> Result<bool> {
     )?)
 }
 
+/// Whether `user` is the person the digest is for (the workspace owner). Matters, source messages and
+/// people come from the digest of that person's conversations, so only their todos link to them: a todo
+/// of any other member links to none and shows none.
+pub fn digest_owner(c: &Connection, ws: &str, user: &str) -> Result<bool> {
+    Ok(crate::conv::owner(c, ws)?.as_deref() == Some(user))
+}
+
 /// Validates and normalizes `f` for a todo of `owner` (`id`: the todo itself, when it exists).
 pub fn check(
     c: &Connection,
@@ -417,6 +425,24 @@ pub fn check(
         }
     }
     if let Some(m) = &f.matter {
+        // a matter already on the todo stays (the workspace may have changed hands); a new one is the digest owner's
+        let kept = match id {
+            Some(id) => {
+                c.query_row(
+                    "SELECT matter_id FROM todos WHERE workspace_id = ? AND id = ?",
+                    params![ws, id],
+                    |r| r.get::<_, Option<String>>(0),
+                )
+                .optional()?
+                .flatten()
+                .as_deref()
+                    == Some(m.as_str())
+            }
+            None => false,
+        };
+        if !kept && !digest_owner(c, ws, owner)? {
+            return Err(bad("digest_only"));
+        }
         f.matter = Some(
             crate::matter::resolve(c, ws, m)?
                 .ok_or_else(|| bad("matter"))?
@@ -454,6 +480,9 @@ pub fn create(tx: &Tx, t: &NewTodo, now: i64) -> Result<String> {
         recur: t.recur.map(str::to_string),
     };
     check(tx, t.ws, t.owner, None, &mut f)?;
+    if (!t.refs.is_empty() || !t.parties.is_empty()) && !digest_owner(tx, t.ws, t.owner)? {
+        return Err(bad("digest_only"));
+    }
     for p in &t.parties {
         let exists: bool = tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM parties WHERE workspace_id = ? AND id = ?)",
@@ -898,6 +927,9 @@ fn conv_name(c: &Connection, conv: &ConvRef) -> Option<String> {
 fn json_of(c: &Connection, ws: &str, r: &rusqlite::Row) -> rusqlite::Result<Value> {
     let id: String = r.get(0)?;
     let matter: Option<String> = r.get(4)?;
+    // only the digest owner's todos show what the digest knows: matter titles, messages, people
+    let full = digest_owner(c, ws, &r.get::<_, String>(23)?)
+        .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
     let refs: Vec<(String, String)> = c
         .prepare_cached("SELECT conv, message_id FROM todo_refs WHERE todo_id = ? ORDER BY rowid")?
         .query_map([&id], |x| Ok((x.get(0)?, x.get(1)?)))?
@@ -905,7 +937,7 @@ fn json_of(c: &Connection, ws: &str, r: &rusqlite::Row) -> rusqlite::Result<Valu
     let mut sources: Vec<Value> = Vec::new();
     for (k, m) in &refs {
         let cv = ConvRef::parse(k);
-        let excerpt: Option<String> = match cv.as_ref().map(|x| x.kind.as_str()) {
+        let excerpt: Option<String> = match cv.as_ref().filter(|_| full).map(|x| x.kind.as_str()) {
             Some("space") => c
                 .query_row("SELECT text FROM chan_messages WHERE id = ?", [m], |x| {
                     x.get(0)
@@ -921,20 +953,20 @@ fn json_of(c: &Connection, ws: &str, r: &rusqlite::Row) -> rusqlite::Result<Valu
         };
         sources.push(json!({
             "conv": k, "message": m,
-            "name": cv.as_ref().and_then(|x| conv_name(c, x)),
+            "name": cv.as_ref().filter(|_| full).and_then(|x| conv_name(c, x)),
             "href": cv.as_ref().map(|x| x.href()),
             "excerpt": excerpt.map(|e| crate::cut(&e, 80)),
         }));
     }
     let people: Vec<Value> = c
         .prepare_cached("SELECT tp.party_id, p.name FROM todo_parties tp LEFT JOIN parties p ON p.id = tp.party_id WHERE tp.todo_id = ?")?
-        .query_map([&id], |x| Ok(json!({"id": x.get::<_, String>(0)?, "name": x.get::<_, Option<String>>(1)?})))?
+        .query_map([&id], |x| Ok(json!({"id": x.get::<_, String>(0)?, "name": x.get::<_, Option<String>>(1)?.filter(|_| full)})))?
         .collect::<rusqlite::Result<_>>()?;
     let matter_title: Option<String> = match &matter {
-        Some(m) => c
+        Some(m) if full => c
             .query_row("SELECT title FROM matters WHERE id = ?", [m], |x| x.get(0))
             .optional()?,
-        None => None,
+        _ => None,
     };
     let kind: String = r.get(12)?;
     let parent: Option<String> = r.get(13)?;
@@ -966,7 +998,7 @@ fn json_of(c: &Connection, ws: &str, r: &rusqlite::Row) -> rusqlite::Result<Valu
 }
 
 const COLS: &str = "id, text, state, item_id, matter_id, due, due_quote, source, writer, created, updated, closed,
-    kind, parent_id, target_date, due_kind, due_date, remind_at, snooze_until, block_event, pri, star, recur";
+    kind, parent_id, target_date, due_kind, due_date, remind_at, snooze_until, block_event, pri, star, recur, owner";
 
 /// Which of a person's todos to list.
 #[derive(Debug, Clone, Default)]
