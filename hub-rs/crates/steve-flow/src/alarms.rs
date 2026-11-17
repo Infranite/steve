@@ -62,7 +62,7 @@ pub const ALARM_FIRED_V: i64 = 1;
 pub struct Topic {
     /// The outbox topic.
     pub name: &'static str,
-    /// `feed_entries.kind` (migration 100's insert trigger maps the topics the same way).
+    /// `feed_entries.kind` (migration 102's insert trigger maps the topics the same way).
     pub feed_kind: &'static str,
     pub quiet: QuietRule,
     /// Alarms of this topic that fire in the same round, for the same person, are one notification.
