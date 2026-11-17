@@ -43,6 +43,10 @@ use crate::{ChannelResult, Channels, bindings, messages, personas};
 /// `messages.space` prefix of IM conversations.
 pub const PREFIX: &str = "chan:";
 
+/// `messages.space` of your web conversation (steve-core's `MAIN`): where your `/bot` command goes
+/// when no identity of yours may answer in its space ([`Channels::converse_web`]).
+pub const MAIN_CONV: &str = "steve";
+
 /// The conversation of a space.
 pub fn conv_space(space_id: &str) -> String {
     format!("{PREFIX}{space_id}")
@@ -304,7 +308,7 @@ impl Channels {
         let mut meta = chan_meta(self, plan, true)?;
         meta["web"] = json!(true);
         let turn = Turn {
-            space: "steve".into(),
+            space: MAIN_CONV.into(),
             text: if instruction.trim().is_empty() {
                 plan.text.clone()
             } else {

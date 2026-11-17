@@ -2394,3 +2394,146 @@ async fn a_record_of_your_own_account_is_yours_alone() {
             .all(|x| x["space_id"] != space.as_str())
     );
 }
+
+/// A turn whose answer was an error (`meta.error`, as steve-core writes a failed turn) shows failed
+/// with that error as the reason, under its turn, before and after its reaction is ended.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_turn_whose_answer_failed_shows_failed_with_the_reason() {
+    let h = setup(true).await;
+    let a = push(
+        &h,
+        &h.bot.clone(),
+        msg("C_OPS", "o1", "ulilei", "部署挂了怎么办", true, false),
+    )
+    .await;
+    let (turn, _) = h.thread.as_ref().unwrap().turns.lock().unwrap()[0].clone();
+    let r = record_of(&h, ME, &a.space_id, &Default::default()).unwrap();
+    assert_eq!(rec(&r, &a.message_id)["turn"], json!(turn));
+    assert_eq!(rec(&r, &a.message_id)["handling"]["state"], "working");
+    let ops = conversations::conv_space(&a.space_id);
+    let err = h
+        .env
+        .store()
+        .messages()
+        .add(
+            WS,
+            "steve",
+            "（出错了：模型超时）",
+            None,
+            &json!({"origin": turn, "error": true}),
+            &ops,
+        )
+        .unwrap();
+    let failed = |h: &H| {
+        let r = record_of(h, ME, &a.space_id, &Default::default()).unwrap();
+        let x = rec(&r, &a.message_id).clone();
+        assert_eq!(x["turn"], json!(turn));
+        let hd = &x["handling"];
+        assert_eq!(hd["state"], "failed", "{hd}");
+        assert!(
+            hd["error"].as_str().unwrap().contains("模型超时"),
+            "the turn's error is the reason: {hd}"
+        );
+        assert_eq!(hd["main_turn"], Value::Null);
+    };
+    // the reaction is still “处理中”: the turn's error alone says it failed
+    assert_eq!(state(&h, &a.message_id), json!("ack"));
+    failed(&h);
+    h.ch.conv_deliver(WS, &err).await.unwrap();
+    assert_eq!(state(&h, &a.message_id), json!("failed"));
+    failed(&h);
+}
+
+/// Your `/bot` command where your account may not send as you is answered in your web conversation:
+/// the record shows what Steve said there (answered, or failed with the reason) and links that turn,
+/// though the space's “处理中” reaction is never taken off.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_command_answered_in_your_web_conversation_shows_that_answer() {
+    let h = setup(true).await;
+    exec(
+        &h,
+        "UPDATE connections SET caps = '[\"msg.receive\"]' WHERE id = ?",
+        &[&h.me],
+    );
+    exec(
+        &h,
+        "UPDATE channel_settings SET trigger = ? WHERE connection_id = ?",
+        &[
+            &json!({"on": true, "words": ["/bot"], "where": ["dm:*"], "mark": true}).to_string(),
+            &h.me,
+        ],
+    );
+    let me = h.me.clone();
+    let main = |h: &H, n: usize| -> String {
+        let turns = h.thread.as_ref().unwrap().turns.lock().unwrap().clone();
+        let (id, t) = turns[n].clone();
+        assert_eq!(t.space, conversations::MAIN_CONV, "{t:?}");
+        id
+    };
+    let a = push(
+        &h,
+        &me,
+        msg("D_LI", "d1", "upx", "/bot 看下磁盘", false, false),
+    )
+    .await;
+    assert_eq!(
+        a.response.as_ref().unwrap().label,
+        steve_channels::respond::NO_SEND_AS_YOU_COMMAND
+    );
+    let t1 = main(&h, 0);
+    let handling = |h: &H, id: &str| {
+        let r = record_of(h, ME, &a.space_id, &Default::default()).unwrap();
+        let x = rec(&r, id).clone();
+        assert_eq!(x["turn"], Value::Null, "no turn in the chat's conversation");
+        x["handling"].clone()
+    };
+    let x = handling(&h, &a.message_id);
+    assert_eq!(
+        (x["state"].clone(), x["main_turn"].clone()),
+        (json!("working"), json!(t1))
+    );
+    let msgs = h.env.store().messages();
+    msgs.add(
+        WS,
+        "steve",
+        "还剩 20G。",
+        None,
+        &json!({"origin": t1}),
+        conversations::MAIN_CONV,
+    )
+    .unwrap();
+    assert_eq!(state(&h, &a.message_id), json!("ack"));
+    let x = handling(&h, &a.message_id);
+    assert_eq!(
+        (x["state"].clone(), x["main_turn"].clone()),
+        (json!("answered"), json!(t1))
+    );
+
+    let b = push(
+        &h,
+        &me,
+        msg("D_LI", "d2", "upx", "/bot 清一下缓存", false, false),
+    )
+    .await;
+    let t2 = main(&h, 1);
+    msgs.add(
+        WS,
+        "steve",
+        "（出错了：只读策略拒绝了工具）",
+        None,
+        &json!({"origin": t2, "error": true}),
+        conversations::MAIN_CONV,
+    )
+    .unwrap();
+    let x = handling(&h, &b.message_id);
+    assert_eq!(
+        (x["state"].clone(), x["main_turn"].clone()),
+        (json!("failed"), json!(t2))
+    );
+    assert!(
+        x["error"].as_str().unwrap().contains("只读策略拒绝了工具"),
+        "{x}"
+    );
+    // another space's command in your web conversation is not this one's
+    assert_eq!(handling(&h, &a.message_id)["state"], "answered");
+}

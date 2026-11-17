@@ -18,7 +18,8 @@ export type ConvMessage = RMessage & { reaction?: Reaction; channel_message?: Ch
 
 /** what Steve did with a received message of the record (#243) */
 export type HandlingState = "answered" | "waiting" | "item" | "working" | "failed" | "skipped" | "decided" | "recorded" | "none"
-export type Handling = { state: HandlingState; label: string; reason: string; error: string | null; item: string | null; decision: string | null }
+/** `main_turn`: your `/bot` command answered in your own conversation (no account of yours may answer in the chat): its turn there */
+export type Handling = { state: HandlingState; label: string; reason: string; error: string | null; item: string | null; decision: string | null; main_turn?: string | null }
 /** one message of a channel conversation's record: received ones say what Steve did with them, sent ones their send state;
  *  `turn`: the conversation message that already shows it */
 export type ConvRecord = ChanMessage & { turn: string | null; handling?: Handling; out?: { status: string; decision: string | null; error: string | null } }

@@ -220,6 +220,7 @@ export default {
     history: "旧消息",
     older: "更早的消息",
     open: "去处理…",
+    inMain: "到 {{name}} 里看",
   },
   /* the reaction Steve puts on a chat message */
   reaction: {

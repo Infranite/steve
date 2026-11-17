@@ -6,7 +6,10 @@
 //! you (a draft or a card), handed off to an item, still working, failed (with the reason), skipped
 //! or only recorded (with the label and reason its event got), or decided by you. Each sent one
 //! carries its send state and, when it failed, the provider's last error. A message that has a turn in
-//! the conversation names it (`turn`), so the page shows it once, with the turn.
+//! the conversation names it (`turn`), so the page shows it once, with the turn. Your `/bot` command
+//! where no identity of yours may answer goes to your web conversation instead
+//! ([`crate::conversations::MAIN_CONV`]): what Steve said to that turn there is its answer, and the
+//! handling names the turn (`main_turn`).
 //!
 //! The channel switcher ([`channels`]) lists the channel accounts the viewer sees with how many of
 //! their conversations have new messages; “new” is counted from the viewer's read marker
@@ -24,7 +27,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use steve_store::base::Viewer;
 
-use crate::conversations::{conv_space, out_state, shown_space};
+use crate::conversations::{MAIN_CONV, conv_space, out_state, shown_space};
 use crate::{ChannelResult, Channels, messages, spaces};
 
 /// Messages of a record page when the request names no limit.
@@ -125,6 +128,9 @@ pub struct Facts {
     pub turn_failed: bool,
     /// Steve has not said anything to that turn yet.
     pub turn_open: bool,
+    /// The turn is in your web conversation, and Steve said something to it there: that is its
+    /// answer (nothing goes back to the space, so its reaction says nothing about it).
+    pub turn_answered_in_main: bool,
 }
 
 /// [`Handling`] of `f`: a failure wins (it is what you need to see), then a handoff, an answer that
@@ -142,7 +148,7 @@ pub fn handling(f: &Facts) -> Handling {
     if f.item.is_some() {
         return Handling::Item;
     }
-    if answer == Some("sent") || f.reaction.as_deref() == Some("done") {
+    if answer == Some("sent") || f.reaction.as_deref() == Some("done") || f.turn_answered_in_main {
         return Handling::Answered;
     }
     if f.decision_open {
@@ -179,60 +185,113 @@ pub struct RecordQuery {
     pub limit: Option<usize>,
 }
 
-/// The conversation's turns and answers, by the channel messages they stand for.
+/// The conversation's turns and answers, by the channel messages they stand for; and the turns of the
+/// space's messages that went to your web conversation, with what Steve said to them there.
 #[derive(Default)]
 struct Turns {
     /// received channel message → the turn posted for it
     turn_of: HashMap<String, String>,
+    /// received channel message → its turn in your web conversation
+    main_turn_of: HashMap<String, String>,
     /// sent channel message → Steve's conversation message it said
     said_by: HashMap<String, String>,
     /// turn → the error its answer was
     failed: HashMap<String, String>,
     /// turns Steve said something to
     answered: std::collections::HashSet<String>,
+    /// turn → the item its answer handed it to
+    item_of: HashMap<String, String>,
 }
 
-fn turns(c: &Connection, ws: &str, conv: &str) -> ChannelResult<Turns> {
-    let mut st = c.prepare_cached(
-        "SELECT id, author, text, json_extract(meta, '$.chan.message'), json_extract(meta, '$.chan_out.message'),
-                json_extract(meta, '$.origin'), coalesce(json_extract(meta, '$.error'), 0)
-           FROM messages WHERE workspace_id = ? AND space = ?",
-    )?;
-    let rows = st
-        .query_map(params![ws, conv], |r| {
-            Ok((
-                r.get::<_, String>(0)?,
-                r.get::<_, String>(1)?,
-                r.get::<_, String>(2)?,
-                r.get::<_, Option<String>>(3)?,
-                r.get::<_, Option<String>>(4)?,
-                r.get::<_, Option<String>>(5)?,
-                r.get::<_, i64>(6)?,
-            ))
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    let mut t = Turns::default();
-    for (id, author, text, chan, out, origin, error) in rows {
-        if author == "me"
-            && let Some(cm) = chan
-        {
-            t.turn_of.insert(cm, id.clone());
-        }
-        if author == "steve" {
-            if let Some(o) = &origin {
-                t.answered.insert(o.clone());
-            }
-            if let Some(o) = out {
-                t.said_by.insert(o, id.clone());
-            }
-            if error != 0
-                && let Some(o) = origin
+/// One message of a conversation as [`turns`] reads it.
+struct Row {
+    id: String,
+    author: String,
+    text: String,
+    item: Option<String>,
+    /// `meta.chan.message`: the channel message a turn stands for
+    chan: Option<String>,
+    /// `meta.chan_out.message`: the channel message an answer was sent as
+    out: Option<String>,
+    /// `meta.origin`: the turn an answer is to
+    origin: Option<String>,
+    /// `meta.error`
+    error: bool,
+}
+
+impl Turns {
+    /// Takes in the rows of one conversation; `main`: they are your web conversation's.
+    fn add(&mut self, rows: Vec<Row>, main: bool) {
+        for r in rows {
+            if r.author == "me"
+                && let Some(cm) = r.chan
             {
-                t.failed
-                    .insert(o, text.trim().chars().take(ERROR_CHARS).collect());
+                if main {
+                    self.main_turn_of.insert(cm, r.id.clone());
+                } else {
+                    self.turn_of.insert(cm, r.id.clone());
+                }
+            }
+            if r.author == "steve" {
+                if let Some(o) = &r.origin {
+                    self.answered.insert(o.clone());
+                    if let Some(i) = &r.item {
+                        self.item_of.entry(o.clone()).or_insert_with(|| i.clone());
+                    }
+                }
+                if let Some(o) = r.out {
+                    self.said_by.insert(o, r.id.clone());
+                }
+                if r.error
+                    && let Some(o) = r.origin
+                {
+                    self.failed
+                        .insert(o, r.text.trim().chars().take(ERROR_CHARS).collect());
+                }
             }
         }
     }
+}
+
+const ROW_COLS: &str = "id, author, text, item_id, json_extract(meta, '$.chan.message'),
+    json_extract(meta, '$.chan_out.message'), json_extract(meta, '$.origin'),
+    coalesce(json_extract(meta, '$.error'), 0)";
+
+fn row(r: &rusqlite::Row) -> rusqlite::Result<Row> {
+    Ok(Row {
+        id: r.get(0)?,
+        author: r.get(1)?,
+        text: r.get(2)?,
+        item: r.get(3)?,
+        chan: r.get(4)?,
+        out: r.get(5)?,
+        origin: r.get(6)?,
+        error: r.get::<_, i64>(7)? != 0,
+    })
+}
+
+/// The turns of space `space`: its conversation's, and those of its messages in your web conversation
+/// (only those turns and what Steve said to them are read from there).
+fn turns(c: &Connection, ws: &str, space: &str) -> ChannelResult<Turns> {
+    let mut t = Turns::default();
+    let mut st = c.prepare_cached(&format!(
+        "SELECT {ROW_COLS} FROM messages WHERE workspace_id = ? AND space = ?"
+    ))?;
+    let rows = st
+        .query_map(params![ws, conv_space(space)], row)?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    t.add(rows, false);
+    let mut st = c.prepare_cached(&format!(
+        "SELECT {ROW_COLS} FROM messages WHERE workspace_id = ?1 AND space = ?3 AND (
+            (author = 'me' AND json_extract(meta, '$.chan.space') = ?2)
+            OR (author = 'steve' AND json_extract(meta, '$.origin') IN (
+                SELECT id FROM messages WHERE workspace_id = ?1 AND space = ?3 AND author = 'me'
+                   AND json_extract(meta, '$.chan.space') = ?2)))"
+    ))?;
+    let rows = st
+        .query_map(params![ws, space, MAIN_CONV], row)?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    t.add(rows, true);
     Ok(t)
 }
 
@@ -296,8 +355,8 @@ fn event_of(c: &Connection, ws: &str, id: &str) -> ChannelResult<Option<Event>> 
     .optional()?)
 }
 
-/// `handling` of received message `m`: `{state, label, reason, error, item, decision}`; `decision`
-/// is an open one waiting for you.
+/// `handling` of received message `m`: `{state, label, reason, error, item, decision, main_turn}`;
+/// `decision` is an open one waiting for you, `main_turn` its turn in your web conversation.
 fn received(
     c: &Connection,
     ws: &str,
@@ -328,12 +387,14 @@ fn received(
     if let Some((_, Some(d))) = &answer {
         open = open.or(Some(d.clone()));
     }
-    let turn = t.turn_of.get(&m.id);
+    let main_turn = t.main_turn_of.get(&m.id);
+    let turn = t.turn_of.get(&m.id).or(main_turn);
     let turn_error = turn.and_then(|x| t.failed.get(x));
     let item = m
         .work_item_id
         .clone()
-        .or_else(|| ev.as_ref().and_then(|e| e.3.clone()));
+        .or_else(|| ev.as_ref().and_then(|e| e.3.clone()))
+        .or_else(|| turn.and_then(|x| t.item_of.get(x)).cloned());
     let (outcome, label, reason) = match &ev {
         Some((o, l, r, _, _)) => (Some(o.clone()), l.clone(), r.clone()),
         None => (None, String::new(), String::new()),
@@ -349,6 +410,7 @@ fn received(
         turn: turn.is_some(),
         turn_failed: turn_error.is_some(),
         turn_open: turn.is_some_and(|x| !t.answered.contains(x)),
+        turn_answered_in_main: main_turn.is_some_and(|x| t.answered.contains(x)),
     };
     let state = handling(&facts);
     let error = if state == Handling::Failed {
@@ -367,6 +429,7 @@ fn received(
         "error": error,
         "item": item,
         "decision": open,
+        "main_turn": main_turn,
     }))
 }
 
@@ -393,7 +456,7 @@ pub fn record(
     let has_more = page.len() > limit;
     page.truncate(limit);
     page.reverse();
-    let t = turns(c, ws, &conv_space(space))?;
+    let t = turns(c, ws, space)?;
     let mut out = Vec::with_capacity(page.len());
     for m in &page {
         let mut v = serde_json::to_value(m).map_err(steve_modules::ApiError::from)?;
@@ -534,6 +597,11 @@ mod tests {
                 ..f()
             },
             Facts {
+                turn_failed: true,
+                turn_answered_in_main: true,
+                ..f()
+            },
+            Facts {
                 answer: Some("failed".into()),
                 decision_open: true,
                 ..f()
@@ -600,6 +668,16 @@ mod tests {
                 Handling::Working,
             ),
             (Facts { turn: true, ..f() }, Handling::Skipped),
+            // answered in your web conversation: its “处理中” is never taken off in the space
+            (
+                Facts {
+                    reaction: Some("ack".into()),
+                    turn: true,
+                    turn_answered_in_main: true,
+                    ..f()
+                },
+                Handling::Answered,
+            ),
             (
                 Facts {
                     reaction: Some("cleared".into()),

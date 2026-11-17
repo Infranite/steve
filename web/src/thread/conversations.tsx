@@ -363,7 +363,7 @@ const HANDLING: Record<Exclude<Handling["state"], "none">, `thread:record.${stri
 }
 
 /** what Steve did with a received message (#243): its state as a badge, the reason after it, and the way to its item or
- *  to the card waiting for you. Nothing when nothing is known. `side`: where the message sits; `reacted`: a turn whose
+ *  to the card waiting for you, or to your own conversation when it was answered there. Nothing when nothing is known. `side`: where the message sits; `reacted`: a turn whose
  *  reaction chip already says it is being answered or was */
 export function HandlingLine({ h, side = "end", reacted = false }: { h?: Handling; side?: "start" | "end"; reacted?: boolean }) {
   const t = useT()
@@ -375,6 +375,7 @@ export function HandlingLine({ h, side = "end", reacted = false }: { h?: Handlin
       {detail && <span className={cn("min-w-0 break-words", h.state === "failed" ? "text-destructive" : "text-muted-foreground")} data-handling-detail>{detail}</span>}
       {h.item && <Button size="xs" variant="ghost" className="font-mono tabular-nums" onClick={() => go("#/items/" + h.item)} data-handling-item={h.item}>{h.item}</Button>}
       {h.decision && <Button size="xs" variant="outline" onClick={() => go("#/inbox")} data-handling-decision={h.decision}>{t("thread:record.open")}</Button>}
+      {h.main_turn && <Button size="xs" variant="ghost" onClick={() => go("#/")} data-handling-main={h.main_turn}>{t("thread:record.inMain", { name: st.bots.steve?.n ?? "Steve" })}</Button>}
     </div>
   )
 }

@@ -223,6 +223,7 @@ export default {
     history: "Older message",
     older: "Earlier messages",
     open: "Open…",
+    inMain: "See it in {{name}}",
   },
   reaction: {
     ack: "Working on it",

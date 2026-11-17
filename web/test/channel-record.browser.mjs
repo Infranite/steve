@@ -1,6 +1,6 @@
 /* A channel conversation's full record in 对话 (#243), on the real chat page against a fixture-only API: the channel
  * switcher, every message of the chat woven in between the turns with what Steve did with it (a failed trigger word with
- * its reason, a skip, a handoff, a card waiting), a turn's message shown once, earlier pages, the read marker, and the
+ * its reason and the way to your own conversation that answered it, a skip, a handoff, a card waiting), a turn's message shown once, earlier pages, the read marker, and the
  * switcher opening an account's conversations. No request reaches a Hub. */
 import assert from "node:assert/strict"
 import { mkdirSync } from "node:fs"
@@ -18,7 +18,7 @@ const page1 = [
   chan("cm_lunch", now - 50 * min, "in", "韩梅梅", "我先去吃饭", { handling: h("recorded", { label: "没有匹配的规则，只记录" }) }),
   chan("cm_in1", now - 40 * min, "in", "李雷", "部署挂了怎么办", { turn: "t1", handling: h("answered") }),
   chan("cm_out1", now - 39 * min, "out", "值班小运", "先看部署日志，再按回滚手册处理。", { turn: "s1", out: { status: "sent", decision: null, error: null } }),
-  chan("cm_ai", now - 20 * min, "in", "你", "/ai 看下我现在的磁盘情况", { handling: h("failed", { error: "会话没有启动：模型服务暂时不可用" }) }),
+  chan("cm_ai", now - 20 * min, "in", "你", "/ai 看下我现在的磁盘情况", { handling: h("failed", { error: "会话没有启动：模型服务暂时不可用", main_turn: "tm_ai" }) }),
   chan("cm_item", now - 10 * min, "in", "李雷", "帮忙把回滚手册更新一下", { handling: h("item", { item: "ST-12" }) }),
   chan("cm_wait", now - 5 * min, "in", "韩梅梅", "明天的发布还按计划吗？", { handling: h("waiting", { decision: "dec_1" }) }),
   chan("cm_late", now - 2 * min, "out", "值班小运", "收到，稍后回复。", { out: { status: "failed", decision: "dec_2", error: "发到「运维群」的消息没有发出去：飞书暂时不可用" } }),
@@ -81,6 +81,7 @@ try {
       const ai = page.locator('[data-msg="cm_ai"] [data-handling="failed"]')
       assert.match(await ai.innerText(), /失败/)
       assert.match(await ai.innerText(), /模型服务暂时不可用/)
+      assert.match(await ai.locator('[data-handling-main="tm_ai"]').innerText(), /到 Steve 里看/)
       assert.match(await page.locator('[data-msg="cm_lunch"] [data-handling="recorded"]').innerText(), /只记录.*没有匹配的规则/s)
       await page.locator('[data-msg="cm_wait"] [data-handling-decision="dec_1"]').waitFor()
       assert.match(await page.locator('[data-msg="cm_late"] [data-chan-out="failed"]').innerText(), /没有发出去.*飞书暂时不可用/s)
