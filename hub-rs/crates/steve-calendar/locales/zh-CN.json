@@ -1,0 +1,17 @@
+{
+  "calendar.ics.name": "ICS 日历订阅",
+  "calendar.ics.field_name": "名称",
+  "calendar.ics.field_name_hint": "在 Steve 里显示的名字；不填就用日历文件里的",
+  "calendar.ics.field_url": "订阅地址",
+  "calendar.ics.field_url_hint": "以 https:// 或 webcal:// 开头的 .ics 地址；不填的话，连接后在这里上传 .ics 文件",
+  "calendar.ics.field_tz": "时区",
+  "calendar.ics.field_tz_hint": "日历文件没写时区时用，例如 Asia/Shanghai",
+  "calendar.ics.note": "读一个日历订阅地址或 .ics 文件里的日程，只读",
+  "calendar.demo.name": "示例日历",
+  "calendar.demo.field_tz": "时区",
+  "calendar.demo.field_tz_hint": "示例日程排在这个时区的工作时间里",
+  "calendar.demo.note": "合成的示例日程，用来试用日历；不连接任何服务",
+  "calendar.api.not_ics": "只有 ICS 日历能上传 .ics 文件",
+  "calendar.api.subscribed": "这个 ICS 日历读的是订阅地址；要改用文件，先断开后重新接入",
+  "calendar.api.free_busy_only": "这个日历在来源那里只给看忙闲，不能保存详情"
+}

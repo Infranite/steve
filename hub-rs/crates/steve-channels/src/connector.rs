@@ -77,8 +77,23 @@ impl Operation {
     }
 }
 
+/// A fixed contract a connector implements besides its own operations (version 2): the Hub defines
+/// its methods and fields, the connector only translates (`calendar.v1`). `caps` are the capability
+/// codes it offers through the profile; `features` say which optional parts it has, so the Hub can
+/// fall back where one is missing. Profile methods are called only by the Hub module that owns the
+/// profile ([`ConnectorTools::profile_call`]) and are never exported as tools.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Profile {
+    pub id: String,
+    #[serde(default)]
+    pub caps: Vec<String>,
+    #[serde(default)]
+    pub features: Vec<String>,
+}
+
 /// An optional `connector` in the existing ext_ws v1 hello. The extension is versioned separately
-/// so a legacy messaging bridge is not mistaken for a generic connector.
+/// so a legacy messaging bridge is not mistaken for a generic connector. Version 2 adds `profiles`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Manifest {
@@ -88,6 +103,8 @@ pub struct Manifest {
     pub operations: Vec<Operation>,
     #[serde(default)]
     pub events: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub profiles: Vec<Profile>,
 }
 
 fn name_ok(s: &str) -> bool {
@@ -103,8 +120,33 @@ impl Manifest {
             return Err("connector declaration exceeds 256 KiB".into());
         }
         let m: Self = serde_json::from_value(v.clone()).map_err(|e| e.to_string())?;
-        if m.version != 1 || !name_ok(&m.id) || m.operations.len() > 64 || m.events.len() > 64 {
+        if !matches!(m.version, 1 | 2)
+            || !name_ok(&m.id)
+            || m.operations.len() > 64
+            || m.events.len() > 64
+        {
             return Err("invalid connector version/id or declaration limits".into());
+        }
+        if m.version == 1 && !m.profiles.is_empty() {
+            return Err("profiles need connector version 2".into());
+        }
+        let key_ok = |s: &str| {
+            !s.is_empty()
+                && s.len() <= 64
+                && s.bytes()
+                    .all(|c| c.is_ascii_alphanumeric() || b"._-".contains(&c))
+        };
+        let mut ids = std::collections::HashSet::new();
+        if m.profiles.len() > 16
+            || m.profiles.iter().any(|p| {
+                !key_ok(&p.id)
+                    || !ids.insert(&p.id)
+                    || p.caps.len() > 16
+                    || p.features.len() > 32
+                    || !p.caps.iter().chain(&p.features).all(|x| key_ok(x))
+            })
+        {
+            return Err("invalid or duplicate connector profile".into());
         }
         let mut names = std::collections::HashSet::new();
         for op in &m.operations {
@@ -168,6 +210,19 @@ pub trait ConnectorTools: Send + Sync {
         args: Value,
         key: &str,
     ) -> Result<Value, String>;
+    /// A read method of a declared [`Profile`], for the Hub module that owns the profile only (the
+    /// calendar service for `calendar.v1`). Nothing here is exported as a tool, and a read is never
+    /// retried by this layer. Default: this connector has no profiles.
+    async fn profile_call(
+        &self,
+        cx: &ConnCx,
+        profile: &str,
+        method: &str,
+        args: Value,
+    ) -> Result<Value, String> {
+        let _ = (cx, profile, method, args);
+        Err("this connector has no profiles".into())
+    }
 }
 
 /// One operation on one visible account, for the Hub's unified Source::Connector registry.
@@ -498,6 +553,24 @@ mod tests {
         m["operations"][0]["annotations"]["readOnlyHint"] = true.into();
         assert!(Manifest::parse(&m).is_ok());
         m["operations"][0]["inputSchema"]["additionalProperties"] = true.into();
+        assert!(Manifest::parse(&m).is_err());
+    }
+
+    #[test]
+    fn profiles_need_version_two_and_stay_out_of_operations() {
+        let mut m = json!({"version":1,"id":"cal","profiles":[{"id":"calendar.v1","caps":["cal.read"],"features":["changes","instances"]}]});
+        assert!(Manifest::parse(&m).is_err());
+        m["version"] = 2.into();
+        let p = Manifest::parse(&m).unwrap();
+        assert_eq!(p.profiles[0].id, "calendar.v1");
+        assert!(p.operations.is_empty());
+        let again = m["profiles"][0].clone();
+        m["profiles"].as_array_mut().unwrap().push(again);
+        assert!(Manifest::parse(&m).is_err(), "duplicate profile");
+        m["profiles"] = json!([{"id":"calendar v1"}]);
+        assert!(Manifest::parse(&m).is_err(), "bad id");
+        m["version"] = 3.into();
+        m["profiles"] = json!([]);
         assert!(Manifest::parse(&m).is_err());
     }
 }

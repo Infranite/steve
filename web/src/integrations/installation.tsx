@@ -24,6 +24,7 @@ import { IntegrationSection, IntegrationSettings } from "@/components/affect/int
 import { FeishuConnectDialog, SelfButtons } from "@/integrations/feishu"
 import { CleanupDialog, DisconnectDialog, type Leaving } from "@/integrations/disconnect"
 import { OwnerChip } from "../people/owner-chip"
+import { CalendarSection } from "@/integrations/calendar"
 
 const join = (xs: string[]) => xs.join(tr("integrations:list.sep"))
 const isFeishu = (p: string) => p === "feishu"
@@ -156,6 +157,7 @@ function Identity({ kind, c, p, chan, app, appConn, onLeave }: { kind: "steve" |
         <Row title={t("integrations:inst.owner")} data-conn-owner><OwnerChip objectType="connection" objectId={c.id} showStatus /></Row>
       </Group>
       <Capabilities c={c} kind={kind} feishu={feishu} planned={planned.map((a) => areaLabel(a.area))} />
+      {c.installed !== false && <CalendarSection conn={c.id} />}
       {native && c.installed !== false && (kind === "steve" ? <BotPermissions c={c} app={app} /> : <UserPermissions c={c} app={app} appConn={appConn} side={selfSideOf(p.adapters) as IAdapter | null} />)}
       {!native && missingOf(c).length > 0 && <Blocked>{t("integrations:inst.missingScopes", { list: join(missingOf(c).map((m) => m.scope)) })}</Blocked>}
       {c.warning && <Blocked data-blocked="warning">{c.warning}</Blocked>}

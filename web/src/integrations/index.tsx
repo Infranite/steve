@@ -22,7 +22,7 @@ import { FeishuGuide } from "@/integrations/feishu"
 import { InstallationCard } from "@/integrations/installation"
 import { CleanupDialog } from "@/integrations/disconnect"
 
-const ICON: Record<string, any> = { ext_ws: WebhookIcon, feishu: MessagesSquareIcon, github: GitPullRequestIcon, mail: MailIcon, slack: HashIcon, gcal: CalendarIcon }
+const ICON: Record<string, any> = { ext_ws: WebhookIcon, feishu: MessagesSquareIcon, github: GitPullRequestIcon, mail: MailIcon, slack: HashIcon, gcal: CalendarIcon, ics: CalendarIcon, cal_demo: CalendarIcon }
 /** the provider's mark, for the tiles of the directory and the installation cards (they draw the frame) */
 export const ProviderGlyph = ({ id }: { id: string }) => { const I = ICON[id] ?? PlugIcon; return <I className="size-4 text-muted-foreground" strokeWidth={1.5} aria-hidden /> }
 const Note = ({ children }: { children: React.ReactNode }) => <div className="mt-3 type-footnote text-muted-foreground">{children}</div>

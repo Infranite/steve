@@ -394,6 +394,20 @@ Declared events arrive in existing cursor/ack batches as `{type: "event", event_
 
 A write is sent once. If the response is lost or times out, its result is `status: "unknown", retry: false` with the request identity; do not automatically replay it. Reconcile against the upstream state before deliberately requesting another write. Capability removal and declaration changes take effect on the next dispatch. The full wire contract and fake-websocket regression vectors live beside the adapter, as linked above.
 
+### Connector profiles and calendar sources
+
+A connector declaration with `version: 2` may add `profiles: [{id, caps, features}]`: fixed contracts the Hub defines and the plugin only translates. The first is `calendar.v1` (`caps: ["cal.read"]`; features such as `changes`, `instances`, `freebusy`). Profile methods are called by the Hub's calendar service with `profile.call {profile, method, arguments}` and are never exported as agent tools; the method and field list is in the ext_ws protocol notes (§17) beside the adapter. A connection whose connector declares `calendar.v1` with `cal.read` is a calendar source; nothing else has to be configured.
+
+## Calendars
+
+Calendars are data sources like any other connection. Under **Connections**, a calendar source lists its calendars: whose each is (yours, or a contact's), how much Steve keeps (everything, or only busy times, the default for someone else's calendar), on or off, and when it was last right. Steve keeps a read-only cache it can rebuild; the provider stays the source of truth.
+
+- Built in: **ICS calendar subscription** (an `https://` or `webcal://` address, kept in the vault, or an `.ics` file uploaded on its card, up to 10 MB) and, only when the Hub runs with `STEVE_CALENDAR_DEMO=1`, a **demo calendar** with made-up events for trying it out. Other providers come as connector plugins declaring `calendar.v1`.
+- Sync: every 5 minutes per connection, doubling after failures up to 6 hours, and **Sync now** on the card. With the `changes` feature only what changed since the last cursor is read; otherwise the window from 30 days back to 180 days ahead. A failure marks only that calendar and keeps its cache. Event ids stay the same across syncs; an event's `version` goes up only when its time, place, attendees, status or your reply changed.
+- The same meeting in several of one person's calendars (the same iCalendar UID and start, or the same organizer, title and start within a minute) is shown once.
+- API (the caller's own data only): `GET /api/calendar/sources`, `POST /api/calendar/sources/<connection>/sync`, `PUT /api/calendar/sources/<connection>/ics {name, text}`, `GET /api/calendar/calendars`, `PATCH /api/calendar/calendars/<id> {enabled?, party_id?, detail?}`, `GET /api/calendar/events?from&to`, `GET /api/calendar/events/<id>`, `GET /api/calendar/search?q`, `GET /api/calendar/freebusy?party&from&to`, `POST /api/calendar/find-time {people, duration_min, from?, to?}`. Times are in your notification time zone, else the workspace's.
+- Agent tools (read only, found with `steve_tools_search`): `steve_calendar_agenda`, `steve_calendar_search`, `steve_calendar_get` (asks the source for the current version first) and `steve_calendar_find_time` (free times by rule: working days 09:00–18:00 on a 30-minute grid; people without a calendar are named, not counted).
+
 ## Realtime output statistics
 
 Poll `GET /api/stats/realtime` once per second with the same sign-in and `x-steve-ws` workspace header as other APIs. Workspace membership is checked by the API middleware; optional `project` and `bot` references must belong to that workspace, otherwise the response is 404. Together they form an intersection. Historical `range`, `from`, `to`, `hour`, time zone, model and source parameters have no effect. A workspace query parameter cannot switch the authenticated workspace. Responses use `Cache-Control: no-store` and bypass the historical statistics cache.

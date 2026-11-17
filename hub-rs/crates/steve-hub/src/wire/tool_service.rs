@@ -44,6 +44,10 @@ const READ_ONLY: &[&str] = &[
     "steve_github_ci_log",
     "steve_mail_thread",
     "steve_mail_attachment",
+    steve_calendar::tools::AGENDA,
+    steve_calendar::tools::SEARCH,
+    steve_calendar::tools::GET,
+    steve_calendar::tools::FIND_TIME,
 ];
 
 /// The most a tool's text may take once JSON-escaped: its answer to a Node goes in one frame

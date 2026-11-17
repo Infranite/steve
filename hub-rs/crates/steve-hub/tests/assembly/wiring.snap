@@ -34,6 +34,13 @@ api GET /attr-defs
 api GET /bots/x/capabilities
 api GET /bots/x/flows
 api GET /bots/x/tools
+api GET /calendar/calendars
+api GET /calendar/events
+api GET /calendar/events/x
+api GET /calendar/freebusy
+api GET /calendar/search
+api GET /calendar/sources
+api GET /calendar/sources/x
 api GET /capabilities/a2a-agents
 api GET /capabilities/mcp-servers
 api GET /capabilities/skills
@@ -166,6 +173,7 @@ api GET /yolo/items/x
 api PATCH /accounts/x
 api PATCH /attr-defs/x
 api PATCH /attrs/x
+api PATCH /calendar/calendars/x
 api PATCH /capabilities/a2a-agents/x
 api PATCH /capabilities/mcp-servers/x
 api PATCH /capabilities/skills/x
@@ -195,6 +203,8 @@ api PATCH /teams/x
 api PATCH /vault/items/x
 api POST /accounts
 api POST /attr-defs
+api POST /calendar/find-time
+api POST /calendar/sources/x/sync
 api POST /capabilities/a2a-agents
 api POST /capabilities/a2a-agents/preview
 api POST /capabilities/mcp-servers
@@ -302,6 +312,7 @@ api POST /yolo/actions/x/undo
 api POST /yolo/resume
 api PUT /bots/x/capabilities/x/x
 api PUT /bots/x/tool-pins/x/x
+api PUT /calendar/sources/x/ics
 api PUT /connections/x/credential
 api PUT /digest/bot
 api PUT /flow-settings/allow-private
@@ -327,7 +338,7 @@ decl feishu_app platform 1ms
 decl feishu_user platform 1ms
 event_source github_app
 event_source github_pat
-jobs 19
+jobs 20
 lifecycle ext_ws
 lifecycle ext_ws.bot
 lifecycle feishu_app
@@ -347,6 +358,7 @@ provider feishu_app {"id":"feishu_app","system":"feishu_app","name":"飞书应�
 provider feishu_user {"id":"feishu_user","system":"feishu","name":"飞书 · 你本人","auth":"oauth","caps":["msg.receive","msg.send_as_user"],"device":false}
 provider github_app managed
 provider github_pat {"id":"github_pat","system":"github","name":"GitHub 个人令牌","auth":"credential","caps":["repo.read","repo.write","events"],"device":false,"fields":[{"key":"token","label":"令牌","secret":true,"required":true,"type":"password","hint":"GitHub 设置 → Developer settings → Fine-grained tokens：选好仓库，给 Contents、Pull requests、Issues 读写，Checks、Actions 读；要接收事件再给 Webhooks 读写"}]}
+provider ics {"id":"ics","system":"ics","name":"ICS 日历订阅","auth":"credential","caps":["cal.read"],"device":false,"fields":[{"key":"name","label":"名称","secret":false,"required":false,"type":"text","hint":"在 Steve 里显示的名字；不填就用日历文件里的"},{"key":"url","label":"订阅地址","secret":true,"required":false,"type":"password","hint":"以 https:// 或 webcal:// 开头的 .ics 地址；不填的话，连接后在这里上传 .ics 文件"},{"key":"tz","label":"时区","secret":false,"required":false,"type":"text","hint":"日历文件没写时区时用，例如 Asia/Shanghai"}]}
 provider imap {"id":"imap","system":"mail","name":"其他邮箱（IMAP）","auth":"credential","caps":["mail.read","mail.draft","mail.send","events"],"device":false,"fields":[{"key":"address","label":"邮箱地址","secret":false,"required":true,"type":"text"},{"key":"username","label":"用户名","secret":false,"required":false,"type":"text","hint":"默认同邮箱地址"},{"key":"password","label":"应用专用密码","secret":true,"required":true,"type":"password"},{"key":"imap_host","label":"IMAP 服务器","secret":false,"required":true,"type":"text"},{"key":"imap_port","label":"IMAP 端口","secret":false,"required":true,"type":"number","default":"993"},{"key":"imap_security","label":"IMAP 加密","secret":false,"required":true,"type":"select","default":"tls","hint":"tls | starttls"},{"key":"smtp_host","label":"SMTP 服务器","secret":false,"required":true,"type":"text"},{"key":"smtp_port","label":"SMTP 端口","secret":false,"required":true,"type":"number","default":"465"},{"key":"smtp_security","label":"SMTP 加密","secret":false,"required":true,"type":"select","default":"tls","hint":"tls | starttls"}]}
 root GET /auth/connect/callback
 root POST /hooks/github

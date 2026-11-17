@@ -1,5 +1,5 @@
 //! The extensions of the `steve-hub` binary: Feishu as the bot and as you, an external channel
-//! service, IMAP mailboxes, GitHub. They register the same objects the Hub created inline before
+//! service, IMAP mailboxes, GitHub, the built-in calendar sources. They register the same objects the Hub created inline before
 //! the extension entry.
 
 use std::sync::{Arc, Mutex};
@@ -189,6 +189,30 @@ impl Extension for GitHub {
         for p in steve_github::providers_for(&env) {
             d.provider(p.clone())?;
             d.event_source(Arc::new(crate::wire::signals::GithubSource(p)))?;
+        }
+        Ok(())
+    }
+}
+
+/// `calendar`: the built-in calendar sources: ICS subscriptions and files, and (only with
+/// `STEVE_CALENDAR_DEMO=1`) the synthetic demo calendar.
+pub(crate) struct Calendars;
+
+/// Registers the demo calendar source when set to `1`.
+pub const CALENDAR_DEMO_VAR: &str = "STEVE_CALENDAR_DEMO";
+
+impl Extension for Calendars {
+    fn id(&self) -> &str {
+        "calendar"
+    }
+
+    fn declare(&self, d: &mut Declare<'_>) -> Result<(), ExtensionError> {
+        use steve_calendar::sources::{DemoSource, IcsSource};
+        d.system(IcsSource::ID, "ICS 日历")?;
+        d.calendar(Arc::new(IcsSource::new()))?;
+        if (d.vars)(CALENDAR_DEMO_VAR).as_deref().map(str::trim) == Some("1") {
+            d.system(DemoSource::ID, "示例日历")?;
+            d.calendar(Arc::new(DemoSource::new()))?;
         }
         Ok(())
     }

@@ -1390,6 +1390,36 @@ impl crate::connector::ConnectorTools for ExtWs {
             Err(e) => Err(format!("connector call: {e:?}")),
         }
     }
+
+    async fn profile_call(
+        &self,
+        cx: &ConnCx,
+        profile: &str,
+        method: &str,
+        args: Value,
+    ) -> Result<Value, String> {
+        let guard = self.session(cx).await.map_err(|e| e.to_string())?;
+        let s = &guard.s;
+        if s.status().status != SessionStatus::Ok {
+            return Err("connector session is not signed in".into());
+        }
+        if !s
+            .hello()
+            .connector
+            .as_ref()
+            .is_some_and(|m| m.profiles.iter().any(|p| p.id == profile))
+        {
+            return Err(format!("connector does not declare profile {profile}"));
+        }
+        // a read: sent once, never replayed here (§17)
+        s.call(
+            "profile.call",
+            json!({"profile": profile, "method": method, "arguments": args}),
+            s.timing().call,
+        )
+        .await
+        .map_err(|e| format!("profile call: {e:?}"))
+    }
 }
 
 // The bot has no ActAsUser view registered. Sharing the transport does not confer self authority.

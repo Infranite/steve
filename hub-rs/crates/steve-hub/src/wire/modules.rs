@@ -198,6 +198,7 @@ pub struct Tools {
     pub uses: steve_modules::vault::SecretUses,
     pub gh: steve_github::GitHub,
     pub mail: steve_mail::Mail,
+    pub calendar: steve_calendar::Calendar,
     pub flow: Arc<steve_flow::FlowCx>,
     pub core: Core,
     pub channels: steve_channels::Channels,
@@ -515,6 +516,15 @@ pub fn build(env: Env<'_>) -> Result<Built, BackendError> {
         .knowledge(kb.clone())
         .build();
     mail_hooks.bind(&mail);
+    // the calendar read cache: the built-in sources, and every connector that declares `calendar.v1`
+    let mut calendar = steve_calendar::Calendar::builder(modules.clone(), conns.clone());
+    for c in &declared.calendars {
+        calendar = calendar.source(c.clone());
+    }
+    for c in &declared.connectors {
+        calendar = calendar.source(super::calendar::ProfileSource::source(c.clone()));
+    }
+    let calendar = calendar.build();
 
     // S1–S4, S10: the flow engine with GitHub as an event source, the code nodes (http with
     // `{{secrets}}`, cmd), the `bot` node, mail actions, GitHub's `item.link`
@@ -657,6 +667,7 @@ pub fn build(env: Env<'_>) -> Result<Built, BackendError> {
         .merge(steve_github::comment::routes(gh.clone()))
         .merge(steve_github::issues::routes(gh.clone()))
         .merge(steve_mail::api::routes(mail.clone()))
+        .merge(steve_calendar::api::routes(calendar.clone()))
         .merge(steve_channels::api::routes(channels.clone()))
         .merge(steve_channels::channels_api::routes(channels.clone()))
         .merge(super::chan::routes(channels.clone(), outbox.clone()));
@@ -741,6 +752,8 @@ pub fn build(env: Env<'_>) -> Result<Built, BackendError> {
         Box::pin(steve_flow::retention::run(flow.clone())),
         Box::pin(steve_channels::messages::retention(modules.clone())),
         Box::pin(plugins.supervise(modules.clone(), bus.tap(&["connection"]))),
+        // calendar sources pulled every few minutes
+        Box::pin(calendar.clone().run()),
     ];
     // the extensions' (built in: Feishu app registrations resumed) and the connection runtime
     // (built in: the Feishu long connections and self pollers)
@@ -762,6 +775,7 @@ pub fn build(env: Env<'_>) -> Result<Built, BackendError> {
         uses,
         gh,
         mail,
+        calendar,
         flow: flow.clone(),
         core: core.clone(),
         channels: channels.clone(),

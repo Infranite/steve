@@ -429,3 +429,69 @@ async fn registry_pins_and_dispatch_use_current_session_account_and_references()
     assert_eq!(fake.calls("connector.call").len(), calls);
     assert!(fake.calls("messages.history").is_empty());
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_connector_declaring_calendar_v1_is_a_calendar_source() {
+    let fake = FakeExtWs::start().await.unwrap();
+    let now = steve_store::now();
+    fake.with(|w| {
+        w.features = vec!["me".into(), "changes".into()];
+        // version 2: a profile and no operations of its own
+        w.connector = Some(json!({"version":2,"id":"calfix","profiles":[
+            {"id":"calendar.v1","caps":["cal.read"],"features":["instances"]}]}));
+        w.connector_results.insert(
+            "calendar.v1 cal.calendars.list".into(),
+            json!({"calendars":[{"id":"primary","name":"Team","role":"owner"}]}),
+        );
+        w.connector_results.insert(
+            "calendar.v1 cal.events.list".into(),
+            json!({"events":[{"id":"e1","title":"Plan","start":{"ms":now + 3_600_000},"end":{"ms":now + 5_400_000}}]}),
+        );
+    });
+    let e = start_with(&[("STEVE_CALENDAR_DEMO", "1".into())]).await;
+    assert_eq!(e.call("POST", "/api/vault/init", None).await.0, 200);
+    let (status, connection) = e
+        .call(
+            "POST",
+            "/api/connections",
+            Some(json!({"adapter":"ext_ws","fields":{"url":fake.url(),"token":TOKEN}})),
+        )
+        .await;
+    assert_eq!(status, 200, "{connection}");
+    let conn = connection["id"].as_str().unwrap();
+    let (s, v) = e
+        .call("POST", &format!("/api/calendar/sources/{conn}/sync"), None)
+        .await;
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(v["calendars"][0]["name"], "Team");
+    assert_eq!(v["features"], json!(["instances"]));
+    let (s, v) = e
+        .call(
+            "GET",
+            &format!("/api/calendar/events?from={}&to={}", now, now + 86_400_000),
+            None,
+        )
+        .await;
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(v["events"][0]["title"], "Plan", "{v}");
+    let methods: Vec<String> = fake.with(|w| {
+        w.profile_calls
+            .iter()
+            .map(|p| p["method"].as_str().unwrap_or("").to_string())
+            .collect()
+    });
+    assert_eq!(methods, ["cal.calendars.list", "cal.events.list"]);
+    assert!(fake.calls("connector.call").is_empty());
+    // the built-in sources are on the 接入 page (the demo only because it was asked for)
+    let (_, x) = e.call("GET", "/api/connections/integrations", None).await;
+    let providers: Vec<&str> = x["providers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|p| p["id"].as_str())
+        .collect();
+    assert!(
+        providers.contains(&"ics") && providers.contains(&"cal_demo"),
+        "{providers:?}"
+    );
+}

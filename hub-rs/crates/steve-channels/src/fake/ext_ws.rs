@@ -53,6 +53,8 @@ pub struct World {
     pub connector_results: HashMap<String, Value>,
     /// Execute one connector write, then close before its response (unknown outcome).
     pub lose_connector_response: bool,
+    /// Every `profile.call` request's params, in order.
+    pub profile_calls: Vec<Value>,
     pub limits: Value,
     pub write_policy: String,
     pub source_only: bool,
@@ -180,6 +182,7 @@ impl FakeExtWs {
             platform: None,
             connector_results: HashMap::new(),
             lose_connector_response: false,
+            profile_calls: Vec::new(),
             limits: json!({"max_frame_bytes": 1_048_576, "max_text_bytes": 153_600,
                 "max_batch_items": 100, "max_unacked_batches": 4, "max_ids_per_call": 50,
                 "history_max_limit": 50, "write_per_sec": 5, "write_burst": 5,
@@ -555,6 +558,24 @@ fn answer(
                 w.writes.push((method.into(), p.clone(), result.clone()));
             }
             Ok(result)
+        }
+        // §17: a profile method answers `connector_results["<profile> <method>"]`, recorded in `profile_calls`
+        "profile.call" => {
+            let profile = p["profile"].as_str().unwrap_or("");
+            let declared = w
+                .connector
+                .as_ref()
+                .and_then(|m| m["profiles"].as_array())
+                .is_some_and(|ps| ps.iter().any(|x| x["id"] == profile));
+            if !declared {
+                return err(Reason::Unsupported, "profile not declared");
+            }
+            let key = format!("{profile} {}", p["method"].as_str().unwrap_or(""));
+            w.profile_calls.push(p.clone());
+            match w.connector_results.get(&key) {
+                Some(v) => Ok(v.clone()),
+                None => err(Reason::Unsupported, "method not answered"),
+            }
         }
         "ping" => Ok(json!({"time_ms": now})),
         "me.get" => {

@@ -43,7 +43,7 @@ pub fn delivers_json(e: &serde_json::Value, subscriber_ws: &str) -> bool {
 }
 
 /// Every event type the module specs add.
-pub const MODULE_TYPES: [&str; 17] = [
+pub const MODULE_TYPES: [&str; 18] = [
     "party",
     "mm",
     "changeset",
@@ -57,6 +57,7 @@ pub const MODULE_TYPES: [&str; 17] = [
     "chan_message",
     "persona",
     "digest",
+    "calendar",
     "channel",
     // GitHub (G2) and mail (E1) notices, published as plain JSON by the Hub
     "gh",
