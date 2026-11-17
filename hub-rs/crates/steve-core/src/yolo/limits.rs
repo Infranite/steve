@@ -299,6 +299,12 @@ pub fn action_outside(text: &str) -> Option<String> {
 }
 
 fn outbound(f: &Facts, o: &Outbound) -> Option<Limit> {
+    if o.stage == OutboundStage::HumanReview {
+        return Some(Limit::new(
+            6,
+            "恢复后的修改稿需要你明确审阅批准，披露检查通过不代表批准",
+        ));
+    }
     if o.disclosure == Disclosure::Leak || o.stage == OutboundStage::LeakDraft {
         return Some(Limit::new(6, "披露检查判为泄露或拦截"));
     }

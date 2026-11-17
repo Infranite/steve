@@ -464,6 +464,14 @@ fn open_approval(
     text: &str,
     rewrite: bool,
 ) -> ChannelResult<String> {
+    // Every reopening of a recovery draft inherits the review boundary. In particular, a failed
+    // rewrite or a send-time disclosure/authorization recheck must not turn it into an ordinary
+    // YOLO-eligible draft. A new UUID created by a rewrite is marked explicitly below.
+    let review: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM chan_messages m JOIN decisions d ON d.id=m.decision_id
+           WHERE m.id=? AND m.workspace_id=? AND (d.kind='fail' OR json_extract(d.result,'$.recovery_review')=1))",
+        params![id, ws], |r| r.get(0),
+    )?;
     let options = if rewrite {
         &REWRITE_OPTIONS[..]
     } else {
@@ -488,7 +496,19 @@ fn open_approval(
         "UPDATE chan_messages SET decision_id = ? WHERE id = ?",
         params![d.id, id],
     )?;
+    if review {
+        mark_recovery_review(tx, &d.id)?;
+    }
     Ok(d.id)
+}
+
+/// A durable requirement for human approval, not proof of disclosure or channel authorization.
+fn mark_recovery_review(tx: &Tx, decision: &str) -> ChannelResult<()> {
+    tx.execute(
+        "UPDATE decisions SET result=json_set(CASE WHEN json_type(result)='object' THEN result ELSE '{}' END,'$.recovery_review',json('true')) WHERE id=?",
+        [decision],
+    )?;
+    Ok(())
 }
 
 fn open_fail(tx: &Tx, row: &OutRow, question: String, options: &[&str]) -> ChannelResult<String> {
@@ -655,6 +675,7 @@ async fn rewrite_draft(
         basis::BasisOut,
         bool,
         bool,
+        bool,
         Option<String>,
     );
     let loaded = ch.store().reader(|c| -> ChannelResult<Option<Loaded>> {
@@ -692,13 +713,21 @@ async fn rewrite_draft(
                 .optional()?,
             None => None,
         };
-        let recovering = d.as_ref().is_some_and(|d| d.kind == "fail");
+        // rewrite_failed can reopen an approval on the original, already-attempted UUID. Its
+        // next successful edit still needs a new UUID; the approval kind alone is not evidence
+        // that the old payload never reached a provider.
+        let recovering: bool = c.query_row(
+            "SELECT EXISTS(SELECT 1 FROM decisions WHERE workspace_id=? AND subject_type=? AND subject_id=? AND kind='fail')",
+            params![row.ws, SUBJECT_MESSAGE, row.id], |r| r.get(0),
+        )?;
+        let review = recovering || d.as_ref().is_some_and(|d| d.result["recovery_review"] == true);
         let edited = d.as_ref().filter(|d| d.kind == "fail")
             .and_then(|d| d.result["text"].as_str())
             .filter(|t| !t.trim().is_empty()).map(|t| t.trim().to_string());
-        Ok(Some((row, p, a, k, said, b, complete, recovering, edited)))
+        Ok(Some((row, p, a, k, said, b, complete, recovering, review, edited)))
     })?;
-    let Some((row, p, audience, knowledge, said, b, complete, recovering, edited)) = loaded else {
+    let Some((row, p, audience, knowledge, said, b, complete, recovering, review, edited)) = loaded
+    else {
         return Ok(());
     };
     let spans: Vec<steve_modules::outbound::Span> =
@@ -829,8 +858,10 @@ async fn rewrite_draft(
                 row.text.clone()
             }
         };
-        if recovering {
-            tx.execute("UPDATE decisions SET result=json_object('recovery_review',json('true')) WHERE id=(SELECT decision_id FROM chan_messages WHERE id=?)", [&row.id])?;
+        if review {
+            let decision = out_row(tx, &row.id)?.and_then(|r| r.decision_id)
+                .ok_or_else(|| ApiError::not_found("审批卡"))?;
+            mark_recovery_review(tx, &decision)?;
         }
         base::audit(
             tx,
@@ -855,6 +886,11 @@ fn rewrite_failed(ch: &Channels, message_id: &str, decision_id: &str) -> Channel
         if row.status != "draft" || row.decision_id.as_deref() != Some(decision_id) {
             return Ok(());
         }
+        if !base::decisions::get(tx, decision_id)?
+            .is_some_and(|d| d.status == "resolved" && d.result["choice"] == REWRITE)
+        {
+            return Ok(());
+        }
         let name = spaces::get(tx, &row.space_id)?
             .map(|s| space_name(&s))
             .unwrap_or_default();
@@ -864,7 +900,7 @@ fn rewrite_failed(ch: &Channels, message_id: &str, decision_id: &str) -> Channel
             &row.id,
             format!("发到「{name}」（没能改写，原文未变）"),
             &row.text,
-            false,
+            true,
         )?;
         messages::event(tx, &row.ws, &row.space_id, &row.id);
         Ok(())
@@ -993,6 +1029,13 @@ pub fn verify(
     if let Err(why) = crate::pipeline::verify_route(c, &row.id, now)? {
         return Ok(Err(why));
     }
+    if let Some(id) = &row.decision_id
+        && let Some(d) = base::decisions::get(c, id)?
+        && d.result["recovery_review"] == true
+        && !matches!(auth, Auth::Decision { id: approved } if approved == id)
+    {
+        return Ok(Err("recovery draft requires its human approval".into()));
+    }
     if !direct_ok(mode, auth) {
         return Ok(Err(format!("{} on {}", auth.code(), mode.code())));
     }
@@ -1012,6 +1055,8 @@ pub fn verify(
                     && d.status == "resolved"
                     && row.decision_id.as_deref() == Some(d.id.as_str())
                     && ((d.kind == "approve" && choice == "yes") || (d.kind == "fail" && choice == "retry"))
+                    // Also fence approvals scheduled by older YOLO engines before this fix.
+                    && !(d.result["recovery_review"] == true && b1::decided_by_yolo(&d.result))
                     && d.result["hash"].as_str() == Some(text_hash(&row.text).as_str())
                     && d.result["send_at"].as_i64().is_some_and(|t| t <= now)
             })
@@ -2785,6 +2830,9 @@ impl MessageDecisions {
         }
         match cx.choice {
             "yes" => {
+                if d.result["recovery_review"] == true && cx.actor == b1::YOLO_ACTOR {
+                    return Err(ApiError::rule("恢复后的修改稿需要你明确审阅批准"));
+                }
                 let edited = !cx.text.trim().is_empty();
                 let text = if edited {
                     // your edit on the card is what you approve
@@ -2964,6 +3012,23 @@ impl MessageDecisions {
 }
 
 impl DecisionHandler for MessageDecisions {
+    fn reopen_result(&self, d: &Decision) -> Value {
+        // Undo revokes the answer/hash/send_at. Keep only the non-authorizing review/refusal
+        // facts: clearing these would let YOLO immediately approve or retry the reopened card.
+        let mut result = json!({});
+        if d.result["recovery_review"] == true {
+            result["recovery_review"] = json!(true);
+        }
+        if let Some(recovery) = d.result.get("recovery") {
+            result["recovery"] = recovery.clone();
+        }
+        if result == json!({}) {
+            Value::Null
+        } else {
+            result
+        }
+    }
+
     fn resolve(&self, tx: &Tx, cx: &DecisionCx, d: &Decision) -> ApiResult<Value> {
         match d.kind.as_str() {
             "approve" => self.approve(tx, cx, d),

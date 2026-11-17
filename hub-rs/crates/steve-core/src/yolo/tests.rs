@@ -2451,6 +2451,7 @@ fn a_channel_refusal_with_retry_is_not_a_disclosure_leak_or_an_automatic_retry()
     for (disclosure, stage, expected) in [
         (Disclosure::Pass, OutboundStage::Blocked, "渠道"),
         (Disclosure::Leak, OutboundStage::LeakDraft, "披露"),
+        (Disclosure::Pass, OutboundStage::HumanReview, "审阅"),
     ] {
         let f = facts(
             "fail",

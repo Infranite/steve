@@ -32,6 +32,13 @@ pub trait DecisionHandler: Send + Sync {
         Ok(())
     }
 
+    /// Non-authorizing metadata to retain when undo reopens a card (for example, a required
+    /// human review). Never retain a choice, approval, content hash or send schedule here.
+    /// Other modules keep the original empty-result behavior by default.
+    fn reopen_result(&self, _d: &Decision) -> Value {
+        Value::Null
+    }
+
     /// Called when a job expires the decision (e.g. 30-day candidates); default does nothing.
     fn expire(&self, tx: &Tx, d: &Decision) -> ApiResult<()> {
         let _ = (tx, d);
@@ -146,9 +153,11 @@ pub fn undo(
             .filter(|d| undoable(d))
             .ok_or_else(|| ApiError::rule(steve_i18n::t!("modules.decision.not_undoable")))?;
         handler.before_undo(tx, &d)?;
+        let metadata = handler.reopen_result(&d);
+        let result = (!metadata.is_null()).then(|| metadata.to_string());
         tx.execute(
-            "UPDATE decisions SET status = 'open', result = NULL, resolved = NULL, undo = NULL WHERE id = ?",
-            [id],
+            "UPDATE decisions SET status = 'open', result = ?, resolved = NULL, undo = NULL WHERE id = ?",
+            rusqlite::params![result, id],
         )?;
         tx.publish(steve_store::ChangeEvent::Decision {
             id: id.into(),

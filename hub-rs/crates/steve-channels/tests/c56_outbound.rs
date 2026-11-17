@@ -51,6 +51,9 @@ use steve_store::base::{self, Level, ObjRef, Viewer, Visibility};
 use steve_store::{NewDecision, uid};
 use tempfile::TempDir;
 
+#[path = "../examples/support/recovery_yolo.rs"]
+mod recovery_yolo;
+
 const REPLY: &str =
     r#"{"text": "先看部署日志，再按回滚手册处理。", "needs_approval": false, "why": "按手册"}"#;
 const PASS: &str = r#"{"verdict": "pass", "spans": []}"#;
@@ -5095,6 +5098,475 @@ async fn notification_thirty_day_source_sweep_cannot_leave_feed_body_or_title_co
 }
 
 // ---------------------------------------------------------------- ST-162: recoverable refusals
+
+fn review_engine(h: &H) -> steve_core::yolo::Engine {
+    recovery_yolo::engine(&h.env.modules, h.env.dir.path(), h.env.clock.clone())
+}
+
+fn cold_outbox(h: &H) -> Outbox {
+    let link = OutLink::new();
+    link.bind_clock(h.env.clock.clone());
+    Outbox::new(link)
+}
+
+async fn review_refusal(h: &H, managed: bool) -> (String, String) {
+    if !managed {
+        *h.fake.block_target_send.lock().unwrap() = Some("ext_ws target_forbidden (-32016)".into());
+        return refused(h, "review-refused", "待恢复的完整正文\n第二行").await;
+    }
+    checks_pass(h);
+    h.env.gateway.script(H_SAFETY, REPLY);
+    let r = push(
+        h,
+        &h.me,
+        msg("C_DEV", "review-local", "ulilei", "请回答", true),
+    )
+    .await
+    .response
+    .unwrap();
+    let m = r.out_message_id.unwrap();
+    decide(
+        h,
+        &r.decision_id.unwrap(),
+        "yes",
+        "待恢复的完整正文\n第二行",
+    )
+    .unwrap();
+    exec(
+        h,
+        &format!(
+            "UPDATE connections SET caps='[\"msg.receive\"]' WHERE id='{}'",
+            h.me
+        ),
+    );
+    h.env.clock.advance(11_000);
+    h.outbox.send_due(&h.ch).await;
+    assert_eq!(status(h, &m), "failed");
+    (m.clone(), decision_of(h, &m))
+}
+
+fn restore_review_permission(h: &H, managed: bool, message: &str) {
+    if managed {
+        let p = steve_channels::recovery::propose(&h.ch, &caller(WS, ME), message).unwrap();
+        steve_modules::changes::apply(&h.env.modules, &caller(WS, ME), &p.id)
+            .unwrap()
+            .unwrap();
+    } else {
+        *h.fake.block_target_send.lock().unwrap() = None;
+    }
+    assert_eq!(
+        status(h, message),
+        "failed",
+        "restoring authorization is not a send"
+    );
+}
+
+async fn wait_review(h: &H, original: &str, previous: &str) -> (String, String) {
+    for _ in 0..200 {
+        let old = h
+            .env
+            .store()
+            .reader(|c| base::decisions::get(c, previous))
+            .unwrap()
+            .unwrap();
+        let message = old.result["draft_message"].as_str().unwrap_or(original);
+        let decision = decision_of(h, message);
+        if decision != previous {
+            let d = h
+                .env
+                .store()
+                .reader(|c| base::decisions::get(c, &decision))
+                .unwrap()
+                .unwrap();
+            assert_eq!(d.kind, "approve");
+            assert_eq!(d.status, "open");
+            assert_eq!(d.result["recovery_review"], true);
+            return (message.into(), decision);
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    panic!("rewrite did not reopen a human review");
+}
+
+/// Real Engine -> actual module handler -> Outbox -> adapter: disclosure pass and restored
+/// authorization cannot approve a recovery edit. Both ordinary and full YOLO keep this boundary.
+#[tokio::test(flavor = "multi_thread")]
+async fn recovery_review_survives_edits_failed_rewrites_cooling_and_cold_restart() {
+    for managed in [false, true] {
+        for mode in ["manual", "model", "model_failure", "missing_basis"] {
+            for full in [false, true] {
+                let h = setup_yolo(None, None, true).await;
+                let (old, fail) = review_refusal(&h, managed).await;
+                let engine = review_engine(&h);
+                recovery_yolo::enable(&engine, full);
+                assert_eq!(engine.consider(&fail).unwrap().unwrap().outcome, "declined");
+                restore_review_permission(&h, managed, &old);
+                let basis = row(&h, "SELECT basis_id FROM chan_messages WHERE id=?", &[&old])[0]
+                    .as_str()
+                    .unwrap()
+                    .to_string();
+                h.env
+                    .gateway
+                    .script(REWRITE_HEAD, r#"{"text":"模型修改后的正文"}"#);
+                if mode == "model_failure" {
+                    h.env.gateway.unscript(REWRITE_HEAD);
+                    h.env
+                        .gateway
+                        .script_fail(REWRITE_HEAD, "model is unavailable");
+                }
+                if mode == "missing_basis" {
+                    exec(
+                        &h,
+                        &format!("UPDATE chan_messages SET basis_id=NULL WHERE id='{old}'"),
+                    );
+                }
+                let edited = if mode == "manual" {
+                    "人工修改后的正文\n必须再次审阅"
+                } else {
+                    ""
+                };
+                decide(&h, &fail, "rewrite", edited).unwrap();
+                assert!(decide(&h, &fail, "rewrite", edited).is_err());
+                // The rewrite request itself is recovered by a new queue, not a retained task.
+                let queue = cold_outbox(&h);
+                queue.send_due(&h.ch).await;
+                let (message, approve) = wait_review(&h, &old, &fail).await;
+                if mode == "missing_basis" {
+                    assert_eq!(message, old, "exception path reopens unchanged original");
+                    exec(
+                        &h,
+                        &format!(
+                            "UPDATE chan_messages SET basis_id='{basis}' WHERE id='{message}'"
+                        ),
+                    );
+                } else {
+                    assert_ne!(message, old, "changed send gets a new provider UUID");
+                    assert_eq!(status(&h, &old), "discarded");
+                }
+                let card = h
+                    .env
+                    .store()
+                    .reader(|c| base::decisions::get(c, &approve))
+                    .unwrap()
+                    .unwrap();
+                let expected = match mode {
+                    "manual" => edited,
+                    "model" => "模型修改后的正文",
+                    _ => "待恢复的完整正文\n第二行",
+                };
+                assert_eq!(card.draft, expected);
+                assert_eq!(
+                    h.env
+                        .gateway
+                        .prompts
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .filter(|p| p.starts_with(REWRITE_HEAD))
+                        .count(),
+                    usize::from(mode == "model" || mode == "model_failure")
+                );
+                let attempts = h.fake.send_calls.lock().unwrap().len();
+                assert_eq!(
+                    engine.consider(&approve).unwrap().unwrap().outcome,
+                    "declined"
+                );
+                assert!(
+                    steve_modules::decisions::dispatch(
+                        &h.env.modules,
+                        &caller(WS, "yolo"),
+                        &approve,
+                        "yes",
+                        ""
+                    )
+                    .unwrap()
+                    .is_err(),
+                    "execution boundary rejects an automatic approval independently of facts"
+                );
+                h.env.clock.advance(3_600_000);
+                engine.tick();
+                queue.send_due(&h.ch).await;
+                drop(engine);
+                let restarted = review_engine(&h);
+                assert!(restarted.yolo().effective(WS, None).unwrap().on);
+                restarted.tick();
+                h.env.clock.advance(3_600_000);
+                restarted.tick();
+                let queue = cold_outbox(&h);
+                queue.send_due(&h.ch).await;
+                assert_eq!(status(&h, &message), "draft", "{managed}/{mode}/{full}");
+                assert_eq!(h.fake.send_calls.lock().unwrap().len(), attempts);
+                nothing_sent(&h);
+                let yes = decide(&h, &approve, "yes", "").unwrap();
+                assert_eq!(yes.result["recovery_review"], true);
+                assert!(yes.result.get("decided_by").is_none());
+                assert!(decide(&h, &approve, "yes", "").is_err());
+                h.env.clock.advance(11_000);
+                tokio::join!(queue.send_due(&h.ch), h.outbox.send_due(&h.ch));
+                restarted.tick();
+                queue.send_due(&h.ch).await;
+                assert_eq!(status(&h, &message), "sent");
+                assert_eq!(sent(&h).len(), 1);
+                assert_eq!(h.fake.send_calls.lock().unwrap().len(), attempts + 1);
+                assert_eq!(sent(&h)[0].2.as_deref(), Some(message.as_str()));
+            }
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn recovery_review_undo_and_a_second_rewrite_do_not_remove_the_human_gate() {
+    for managed in [false, true] {
+        let h = setup_yolo(None, None, true).await;
+        let (old, fail) = review_refusal(&h, managed).await;
+        let engine = review_engine(&h);
+        recovery_yolo::enable(&engine, false);
+        restore_review_permission(&h, managed, &old);
+        // A model failure reopens a review that still offers another rewrite.
+        h.env.gateway.script_fail(REWRITE_HEAD, "unavailable");
+        let (message, first) = recovered_draft(&h, &old, &fail, "").await;
+        h.env.gateway.unscript(REWRITE_HEAD);
+        h.env
+            .gateway
+            .script(REWRITE_HEAD, r#"{"text":"第二次修改后的正文"}"#);
+        decide(&h, &first, "rewrite", "").unwrap();
+        cold_outbox(&h).send_due(&h.ch).await;
+        let (same, review) = wait_review(&h, &message, &first).await;
+        assert_eq!(same, message, "unattempted review keeps its new UUID");
+        let yes = decide(&h, &review, "yes", "").unwrap();
+        assert_eq!(yes.result["recovery_review"], true);
+        // Exercise the real module undo; the old test helper did not clear result as production does.
+        steve_modules::decisions::undo(&h.env.modules, &review, ME, |_| true)
+            .unwrap()
+            .unwrap();
+        let reopened = h
+            .env
+            .store()
+            .reader(|c| base::decisions::get(c, &review))
+            .unwrap()
+            .unwrap();
+        assert_eq!(reopened.result, json!({"recovery_review":true}));
+        let restarted = review_engine(&h);
+        assert_eq!(
+            restarted.consider(&review).unwrap().unwrap().outcome,
+            "declined"
+        );
+        h.env.clock.advance(3_600_000);
+        restarted.tick();
+        cold_outbox(&h).send_due(&h.ch).await;
+        assert_eq!(status(&h, &message), "draft");
+        nothing_sent(&h);
+        assert!(
+            steve_modules::decisions::dispatch(
+                &h.env.modules,
+                &caller(WS, "yolo"),
+                &review,
+                "yes",
+                ""
+            )
+            .unwrap()
+            .is_err()
+        );
+        decide(&h, &review, "yes", "").unwrap();
+        h.env.clock.advance(11_000);
+        h.outbox.send_due(&h.ch).await;
+        assert_eq!(sent(&h).len(), 1);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn recovery_review_fences_legacy_auto_approval_and_preserves_send_time_rechecks() {
+    let h = setup_yolo(None, None, true).await;
+    let (old, fail) = review_refusal(&h, false).await;
+    restore_review_permission(&h, false, &old);
+    let (message, review) = recovered_draft(&h, &old, &fail, "仍需人工批准的正文").await;
+    // Simulate a pending approval persisted by a pre-fix engine; verify must fence it too.
+    let result = json!({"choice":"yes","recovery_review":true,"decided_by":"yolo",
+        "hash":steve_channels::outbound::text_hash("仍需人工批准的正文"),"send_at":h.ch.now()});
+    exec(
+        &h,
+        &format!(
+            "UPDATE decisions SET status='resolved',result='{}' WHERE id='{review}'; UPDATE chan_messages SET status='pending',sent=NULL WHERE id='{message}'",
+            result
+        ),
+    );
+    cold_outbox(&h).send_due(&h.ch).await;
+    assert_eq!(status(&h, &message), "draft");
+    let reopened = decision_of(&h, &message);
+    assert_ne!(reopened, review);
+    assert_eq!(
+        h.env
+            .store()
+            .reader(|c| base::decisions::get(c, &reopened))
+            .unwrap()
+            .unwrap()
+            .result["recovery_review"],
+        true
+    );
+    nothing_sent(&h);
+    let engine = review_engine(&h);
+    recovery_yolo::enable(&engine, false);
+    assert_eq!(
+        engine.consider(&reopened).unwrap().unwrap().outcome,
+        "declined"
+    );
+    // Human approval still does not waive the final disclosure check.
+    h.env.gateway.unscript(CHECK_HEAD);
+    h.env.gateway.script(
+        CHECK_HEAD,
+        r#"{"verdict":"leak","spans":[{"text":"正文","reason":"needs review"}]}"#,
+    );
+    decide(&h, &reopened, "yes", "").unwrap();
+    h.env.clock.advance(11_000);
+    h.outbox.send_due(&h.ch).await;
+    let disclosure = decision_of(&h, &message);
+    assert_ne!(disclosure, reopened);
+    assert_eq!(status(&h, &message), "draft");
+    assert_eq!(
+        engine.consider(&disclosure).unwrap().unwrap().outcome,
+        "declined"
+    );
+    nothing_sent(&h);
+    h.env.gateway.unscript(CHECK_HEAD);
+    checks_pass(&h);
+    decide(&h, &disclosure, "yes", "").unwrap();
+    h.env.clock.advance(11_000);
+    h.outbox.send_due(&h.ch).await;
+    assert_eq!(status(&h, &message), "sent");
+    assert_eq!(sent(&h).len(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn recovery_review_fix_keeps_ordinary_yolo_bot_approval_and_send_deduplication() {
+    let h = setup_yolo(None, None, true).await;
+    checks_pass(&h);
+    let plan = recorded(
+        &h,
+        &h.oncall,
+        "C_OPS",
+        "ordinary-review",
+        "ulilei",
+        "请回复",
+    )
+    .await;
+    let mut request = out(&plan, "普通已授权的机器人回复", rule(&plan), None);
+    request.approve = true;
+    let Delivered::Drafted {
+        message_id,
+        decision_id,
+    } = h.outbox.deliver(&h.ch, &request).await.unwrap()
+    else {
+        panic!("expected draft")
+    };
+    let engine = review_engine(&h);
+    recovery_yolo::enable(&engine, false);
+    assert_eq!(
+        engine.consider(&decision_id).unwrap().unwrap().outcome,
+        "scheduled"
+    );
+    h.env.clock.advance(61_000);
+    let restarted = review_engine(&h);
+    restarted.tick();
+    let card = h
+        .env
+        .store()
+        .reader(|c| base::decisions::get(c, &decision_id))
+        .unwrap()
+        .unwrap();
+    assert_eq!(card.result["choice"], "yes");
+    assert_eq!(card.result["decided_by"], "yolo");
+    assert_ne!(card.result["recovery_review"], true);
+    tokio::join!(h.outbox.send_due(&h.ch), h.outbox.send_due(&h.ch));
+    restarted.tick();
+    h.outbox.send_due(&h.ch).await;
+    assert_eq!(status(&h, &message_id), "sent");
+    assert_eq!(sent(&h).len(), 1);
+    assert_eq!(h.fake.send_calls.lock().unwrap().len(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn recovery_review_exception_then_another_edit_uses_a_fresh_provider_uuid() {
+    let h = setup_yolo(None, None, true).await;
+    let (old, fail) = review_refusal(&h, false).await;
+    restore_review_permission(&h, false, &old);
+    let basis = row(&h, "SELECT basis_id FROM chan_messages WHERE id=?", &[&old])[0]
+        .as_str()
+        .unwrap()
+        .to_string();
+    exec(
+        &h,
+        &format!("UPDATE chan_messages SET basis_id=NULL WHERE id='{old}'"),
+    );
+    decide(&h, &fail, "rewrite", "").unwrap();
+    cold_outbox(&h).send_due(&h.ch).await;
+    let (original, reopened) = wait_review(&h, &old, &fail).await;
+    assert_eq!(original, old);
+    exec(
+        &h,
+        &format!("UPDATE chan_messages SET basis_id='{basis}' WHERE id='{old}'"),
+    );
+    h.env
+        .gateway
+        .script(REWRITE_HEAD, r#"{"text":"异常恢复后重新修改的正文"}"#);
+    decide(&h, &reopened, "rewrite", "").unwrap();
+    cold_outbox(&h).send_due(&h.ch).await;
+    let (next, review) = wait_review(&h, &old, &reopened).await;
+    assert_ne!(
+        next, old,
+        "an earlier provider attempt cannot change payload under its UUID"
+    );
+    assert_eq!(status(&h, &old), "discarded");
+    let engine = review_engine(&h);
+    recovery_yolo::enable(&engine, false);
+    assert_eq!(
+        engine.consider(&review).unwrap().unwrap().outcome,
+        "declined"
+    );
+    nothing_sent(&h);
+    decide(&h, &review, "yes", "").unwrap();
+    h.env.clock.advance(11_000);
+    h.outbox.send_due(&h.ch).await;
+    assert_eq!(sent(&h).len(), 1);
+    assert_eq!(sent(&h)[0].2.as_deref(), Some(next.as_str()));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn recovery_review_undoing_discard_keeps_the_refusal_human_action_requirement() {
+    for managed in [false, true] {
+        let h = setup_yolo(None, None, true).await;
+        let (old, fail) = review_refusal(&h, managed).await;
+        decide(&h, &fail, "discard", "").unwrap();
+        steve_modules::decisions::undo(&h.env.modules, &fail, ME, |_| true)
+            .unwrap()
+            .unwrap();
+        assert_eq!(status(&h, &old), "failed");
+        let reopened = h
+            .env
+            .store()
+            .reader(|c| base::decisions::get(c, &fail))
+            .unwrap()
+            .unwrap();
+        assert_eq!(reopened.result["recovery"]["requires_user_action"], true);
+        assert!(reopened.result.get("choice").is_none());
+        let engine = review_engine(&h);
+        recovery_yolo::enable(&engine, false);
+        assert_eq!(engine.consider(&fail).unwrap().unwrap().outcome, "declined");
+        assert!(
+            steve_modules::decisions::dispatch(
+                &h.env.modules,
+                &caller(WS, "yolo"),
+                &fail,
+                "retry",
+                ""
+            )
+            .unwrap()
+            .is_err()
+        );
+        h.env.clock.advance(3_600_000);
+        cold_outbox(&h).send_due(&h.ch).await;
+        nothing_sent(&h);
+    }
+}
 
 async fn refused(h: &H, id: &str, text: &str) -> (String, String) {
     checks_pass(h);

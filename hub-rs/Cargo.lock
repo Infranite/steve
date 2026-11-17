@@ -5218,6 +5218,7 @@ dependencies = [
  "serde_json",
  "sha2 0.11.1",
  "steve-channels",
+ "steve-core",
  "steve-flow",
  "steve-i18n",
  "steve-knowledge",

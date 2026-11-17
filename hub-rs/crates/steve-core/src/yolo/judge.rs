@@ -231,7 +231,7 @@ pub struct Outbound {
     pub send_option: Option<String>,
     /// How many times YOLO already sent it again after a failed send.
     pub retries: u32,
-    /// draft | leak_draft | send_failed | handoff
+    /// The send/review boundary, separate from the disclosure verdict.
     pub stage: OutboundStage,
 }
 
@@ -242,6 +242,8 @@ pub enum OutboundStage {
     Draft,
     /// A draft the disclosure check turned out of a leak.
     LeakDraft,
+    /// A recovery edit that requires the owner's explicit approval, even if disclosure passed.
+    HumanReview,
     /// Sending failed (`retry` / `discard`).
     SendFailed,
     /// Channel refusal requiring human recovery, or an uncertain result. No automatic retry.
@@ -1131,6 +1133,12 @@ fn ask(a: &Ask, p: &Policy) -> Verdict {
 }
 
 fn outbound(o: &Outbound, p: &Policy, what: &str) -> Verdict {
+    if o.stage == OutboundStage::HumanReview {
+        return decline(
+            &format!("{what}.human_review"),
+            "恢复后的修改稿需要你明确审阅批准，披露检查通过不代表批准",
+        );
+    }
     let Some(send) = o.send_option.clone() else {
         return decline(&format!("{what}.no_option"), "卡上没有发送选项");
     };
@@ -1141,6 +1149,7 @@ fn outbound(o: &Outbound, p: &Policy, what: &str) -> Verdict {
             &format!("{what}.blocked"),
             "渠道拒绝或结果待核实，需人工处理",
         ),
+        OutboundStage::HumanReview => unreachable!("handled before send options"),
         OutboundStage::Draft | OutboundStage::SendFailed => {
             if !o.disclosure.passed() {
                 return decline(&format!("{what}.unchecked"), "没有通过披露检查");
