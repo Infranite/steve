@@ -3,13 +3,16 @@ import SteveClientKit
 import SwiftUI
 
 struct MacMenuBarPopoverView: View {
+    @ObservedObject private var language = NativeUILanguageState.shared
     @ObservedObject var coordinator: SteveClientCoordinator
+    @ObservedObject var attention: MacAttentionController
     @ObservedObject private var hubStore: HubStore
     @Environment(\.openWindow) private var openWindow
     @State private var showConnection = false
 
-    init(coordinator: SteveClientCoordinator) {
+    init(coordinator: SteveClientCoordinator, attention: MacAttentionController) {
         self.coordinator = coordinator
+        self.attention = attention
         self.hubStore = coordinator.hubStore
     }
 
@@ -29,7 +32,7 @@ struct MacMenuBarPopoverView: View {
             }
             MacConnectionLabel(phase: coordinator.summary.phase).font(.caption)
             Divider()
-            MacAttentionView(coordinator: coordinator, navigate: navigate)
+            MacAttentionView(coordinator: coordinator, attention: attention, navigate: navigate)
             if let error = coordinator.shellNavigationError {
                 Text(error).font(.caption).foregroundStyle(.orange)
                 Button(L10n.tr("关闭导航错误", "Dismiss navigation error")) { coordinator.dismissShellNavigationError() }

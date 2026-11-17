@@ -1,6 +1,35 @@
 import Foundation
 import CoreFoundation
 
+/// The Web page's resolved appearance, with an opaque sRGB background (three bytes, red/green/blue).
+public struct NativeShellAppearance: Equatable, Sendable {
+    public let dark: Bool
+    public let background: [UInt8]
+    /// Do not pin native color scheme while Web is following the system (avoids a dark/light feedback lock).
+    public let followSystem: Bool
+
+    fileprivate init?(bridgeValue: Any) {
+        guard let value = bridgeValue as? [String: Any], Set(value.keys).isSubset(of: ["dark", "background", "followSystem"]),
+              let dark = value["dark"] as? NSNumber, CFGetTypeID(dark) == CFBooleanGetTypeID(),
+              let channels = value["background"] as? [Any], channels.count == 3 else { return nil }
+        if let followSystem = value["followSystem"] {
+            guard let bool = followSystem as? NSNumber, CFGetTypeID(bool) == CFBooleanGetTypeID() else { return nil }
+            self.followSystem = bool.boolValue
+        } else {
+            self.followSystem = false
+        }
+        var background: [UInt8] = []
+        for channel in channels {
+            guard let number = channel as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID() else { return nil }
+            let byte = number.doubleValue
+            guard byte.isFinite, byte >= 0, byte <= 255, byte.rounded(.towardZero) == byte else { return nil }
+            background.append(UInt8(byte))
+        }
+        self.dark = dark.boolValue
+        self.background = background
+    }
+}
+
 /// Page metadata only. Native assigns Hub, generation and document identity after WebView verification.
 public struct NativeShellContext: Equatable, Sendable {
     public let hubID: String
@@ -14,6 +43,8 @@ public struct NativeShellContext: Equatable, Sendable {
     public let authenticated: Bool
     public let focused: Bool
     public let visible: Bool
+    public let appearance: NativeShellAppearance?
+    public let language: NativeShellLanguage?
 }
 
 public struct NativeNavigationIntent: Equatable, Sendable, Identifiable {
@@ -93,6 +124,7 @@ extension SteveClientCoordinator {
         shellState.hubSwitchTimeout?.cancel()
         shellState.hubSwitchTimeout = nil
         shellState.hubSwitch = nil
+        shellHubSwitchTarget = nil
     }
 
     func requestHubSwitchApproval(id: String) {
@@ -102,6 +134,7 @@ extension SteveClientCoordinator {
         cancelHubSwitchApproval()
         let request = NativeHubSwitchRequest(hubID: id)
         shellState.hubSwitch = request
+        shellHubSwitchTarget = id
         shellState.hubSwitchTimeout = Task { @MainActor [weak self] in
             do { try await Task.sleep(for: .seconds(30)) } catch { return }
             self?.expireHubSwitchApproval(id: request.id)
@@ -118,6 +151,7 @@ extension SteveClientCoordinator {
         cancelHubSwitchApproval()
         shellState.generation &+= 1
         if !keepDocument { shellState.documentID = nil }
+        shellAttentionVisibility = nil
         shellContext = nil
         shellState.issuedID = nil
         shellState.issuedWorkspaceID = nil
@@ -142,7 +176,8 @@ extension SteveClientCoordinator {
               shellState.documentID == nil || shellState.documentID == documentID else {
             throw BridgeCallError.operationFailed("Stale native shell document")
         }
-        shellState.documentID = documentID
+        // A malformed context must not claim an otherwise unbound document scope.
+        if op != "shell.context" { shellState.documentID = documentID }
         switch op {
         case "shell.hub-switch.next":
             guard var request = shellState.hubSwitch else { return NSNull() }
@@ -167,6 +202,24 @@ extension SteveClientCoordinator {
                   Self.nullableShellString(args["workspaceID"]), Self.nullableShellString(args["workspaceName"]) else {
                 throw BridgeCallError.invalidArgument("Invalid native shell context")
             }
+            let appearance: NativeShellAppearance?
+            if let rawAppearance = args["appearance"] {
+                guard let parsed = NativeShellAppearance(bridgeValue: rawAppearance) else {
+                    throw BridgeCallError.invalidArgument("Invalid native shell appearance")
+                }
+                appearance = parsed
+            } else {
+                appearance = nil // Older Web clients do not publish appearance.
+            }
+            let language: NativeShellLanguage?
+            if let rawLanguage = args["language"] {
+                guard let value = rawLanguage as? String, let parsed = NativeShellLanguage(rawValue: value) else {
+                    throw BridgeCallError.invalidArgument("Invalid native shell language")
+                }
+                language = parsed
+            } else {
+                language = nil // A valid current document from an older Web client restores OS fallback.
+            }
             let workspace = (args["workspaceID"] as? String).flatMap { $0.isEmpty ? nil : $0 }
             // Account changes invalidate the old reports without forcing a reload of the sign-in page.
             let nativeAuthenticated = !(hubStore.credential(for: hubID) ?? "").isEmpty
@@ -174,14 +227,22 @@ extension SteveClientCoordinator {
                   authenticated || workspace == nil else {
                 throw BridgeCallError.invalidArgument("Context authentication or workspace is stale")
             }
+            shellState.documentID = documentID
             if shellContext?.authenticated == true && !authenticated {
                 invalidateShellScope(clearNavigation: true, keepDocument: true)
+            }
+            if shellContext?.route != route || shellContext?.workspaceID != workspace || !ready || !authenticated {
+                shellAttentionVisibility = nil
             }
             shellContext = NativeShellContext(hubID: hubID, generation: shellState.generation, documentID: documentID,
                 workspaceID: workspace, workspaceName: workspace == nil ? nil : (args["workspaceName"] as? String).map(Self.shellText),
                 route: route, title: Self.shellText(title), ready: ready, authenticated: authenticated,
-                focused: focused, visible: visible)
+                focused: focused, visible: visible, appearance: appearance, language: language)
+            if nativeShellLanguageEnabled { shellLanguageState.accept(language) }
             targetHashRoute = nil // This page uses acknowledged navigation, never also inject a hash.
+            return [String: Any]()
+        case "shell.attention.visible":
+            try acceptAttentionVisibility(args, hubID: hubID, documentID: documentID)
             return [String: Any]()
         case "shell.navigation.next":
             guard let context = shellContext, context.ready,
@@ -198,7 +259,8 @@ extension SteveClientCoordinator {
                 throw BridgeCallError.invalidArgument("Unknown or stale navigation acknowledgement")
             }
             if ok {
-                guard context.ready, context.authenticated || intent.route == "#/hub/add", intent.targetID == nil,
+                guard context.ready, context.authenticated || intent.route == "#/hub/add",
+                      intent.targetID == nil || hasLandedDeepTarget(intent, context: context),
                       context.route == NativeShellRoute.destination(intent.route),
                       context.workspaceID == (intent.workspaceID ?? shellState.issuedWorkspaceID) else {
                     throw BridgeCallError.invalidArgument("Navigation has not reached its target")
@@ -249,7 +311,7 @@ extension SteveClientCoordinator {
     private static func nullableShellString(_ value: Any?) -> Bool {
         value is NSNull || (value as? String).map { $0.count <= 512 } == true
     }
-    private static func shellBoolean(_ value: Any?) -> Bool? {
+    static func shellBoolean(_ value: Any?) -> Bool? {
         guard let value = value as? NSNumber, CFGetTypeID(value) == CFBooleanGetTypeID() else { return nil }
         return value.boolValue
     }

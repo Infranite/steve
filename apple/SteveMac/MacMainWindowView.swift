@@ -2,12 +2,15 @@ import SteveClientKit
 import SwiftUI
 
 struct MacMainWindowView: View {
+    @ObservedObject private var language = NativeUILanguageState.shared
     @ObservedObject var coordinator: SteveClientCoordinator
+    @ObservedObject var attention: MacAttentionController
     @State private var showAttention = false
     @State private var showConnection = false
 
-    init(coordinator: SteveClientCoordinator) {
+    init(coordinator: SteveClientCoordinator, attention: MacAttentionController) {
         self.coordinator = coordinator
+        self.attention = attention
     }
 
     var body: some View {
@@ -40,29 +43,50 @@ struct MacMainWindowView: View {
             }
         }
         .navigationTitle(windowTitle)
+        .background(MacMainWindowIdentifier(appearance: coordinator.shellContext?.appearance))
+        .preferredColorScheme(coordinator.shellContext?.appearance.flatMap { $0.followSystem ? nil : ($0.dark ? .dark : .light) })
+        .toolbarBackground(.hidden, for: .windowToolbar)
         .toolbar {
             ToolbarItem(placement: .navigation) { MacHubMenu(coordinator: coordinator) }
+                .macUnsharedBackground()
             ToolbarItem(placement: .principal) {
-                VStack(spacing: 2) {
-                    Text(MacShellContext.title(coordinator)).font(.headline).lineLimit(1)
-                    Text(MacShellContext.workspace(coordinator)).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                HStack(spacing: 10) {
+                    Text(MacShellContext.title(coordinator))
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(.primary)
+                    if let context = MacShellContext.confirmed(coordinator), context.workspaceID != nil {
+                        Rectangle().fill(.quaternary).frame(width: 1, height: 12)
+                        Text(MacShellContext.workspace(coordinator))
+                            .font(.system(size: 12))
+                            .foregroundStyle(.secondary)
+                    }
                 }
+                .lineLimit(1)
+                .frame(maxWidth: 320)
                 .accessibilityElement(children: .combine)
             }
-            ToolbarItemGroup(placement: .primaryAction) {
+            .macUnsharedBackground()
+            ToolbarItem(placement: .primaryAction) {
                 Button { showAttention.toggle() } label: {
-                    Label(L10n.tr("提醒", "Attention"), systemImage: "bell")
+                    Label(L10n.tr("提醒", "Attention"), systemImage: attention.state.hasAttention ? "bell.badge" : "bell")
                 }
-                .help(L10n.tr("提醒来源与入口（提醒尚不可用）", "Attention sources (reminders not yet available)"))
+                .help(L10n.tr("分类提醒与入口", "Category attention and source pages"))
                 .popover(isPresented: $showAttention) {
-                    MacAttentionView(coordinator: coordinator) { route in
+                    MacAttentionView(coordinator: coordinator, attention: attention) { route in
                         showAttention = false
                         coordinator.navigate(hashRoute: route)
                     }.padding(16).frame(width: 330)
                 }
-                Button { showConnection.toggle() } label: { MacConnectionLabel(phase: coordinator.summary.phase) }
-                    .popover(isPresented: $showConnection) { MacConnectionDetails(coordinator: coordinator).padding(16).frame(width: 360) }
             }
+            .macUnsharedBackground()
+            ToolbarItem(placement: .primaryAction) {
+                Button { showConnection.toggle() } label: {
+                    MacConnectionIndicator(phase: coordinator.summary.phase)
+                }
+                .help(L10n.tr("查看 Hub 连接", "View Hub connection"))
+                .popover(isPresented: $showConnection) { MacConnectionDetails(coordinator: coordinator).padding(16).frame(width: 360) }
+            }
+            .macUnsharedBackground()
         }
         .safeAreaInset(edge: .top, spacing: 0) {
             if let error = coordinator.shellNavigationError {

@@ -44,8 +44,12 @@ public final class SteveClientCoordinator: ObservableObject {
     @Published public private(set) var webReloadNonce = UUID()
     @Published public internal(set) var targetHashRoute: String?
     @Published public internal(set) var shellContext: NativeShellContext?
+    @Published public internal(set) var shellAttentionVisibility: NativeAttentionVisibility?
+    @Published public internal(set) var shellHubSwitchTarget: String?
     @Published public internal(set) var shellNavigationError: String?
     public let nativeShellChromeEnabled: Bool
+    public let nativeShellLanguageEnabled: Bool
+    var shellLanguageState = NativeUILanguageState.shared
     var shellState = NativeShellState()
 
     @Published public var isQRScannerPresented = false
@@ -78,9 +82,15 @@ public final class SteveClientCoordinator: ObservableObject {
         preferredPortDefaults: UserDefaults? = .standard,
         clientDescriptor: ClientDescriptor,
         purgeWebCookiesHandler: ((Set<String>) -> Void)? = nil,
-        nativeShellChromeEnabled: Bool = false
+        nativeShellChromeEnabled: Bool = false,
+        nativeShellLanguageEnabled: Bool = false
     ) {
         self.nativeShellChromeEnabled = nativeShellChromeEnabled
+        #if os(macOS)
+        self.nativeShellLanguageEnabled = nativeShellLanguageEnabled
+        #else
+        self.nativeShellLanguageEnabled = false
+        #endif
         self.hubStore = hubStore ?? HubStore()
         self.api = api
         self.resolver = resolver
@@ -232,7 +242,7 @@ public final class SteveClientCoordinator: ObservableObject {
     // MARK: - Native Bridge v2 (`window.__STEVE_NATIVE__`)
 
     public nonisolated static func bridgeCapabilities(for platform: String, nativeShellChromeEnabled: Bool = false) -> [String] {
-        var caps = ["hubs.list", "hubs.switch", "hubs.add", "hubs.forget", "hubs.rename", "pair.claim", "shell.context", "shell.navigation.next", "shell.navigation.ack", "shell.hub-switch.next", "shell.hub-switch.ack"]
+        var caps = ["hubs.list", "hubs.switch", "hubs.add", "hubs.forget", "hubs.rename", "pair.claim", "shell.context", "shell.navigation.next", "shell.navigation.ack", "shell.hub-switch.next", "shell.hub-switch.ack", "shell.attention.visible"]
         if platform == "macos" && nativeShellChromeEnabled { caps.append("shell.chrome.hub") }
         if platform == "ios" {
             caps.append("pair.scan")

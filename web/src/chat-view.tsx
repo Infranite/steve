@@ -26,6 +26,7 @@ import { Spinner } from "@/components/ui/spinner"
 import { fillTo, historyState, loadOlder, mainThread, onJump, useHistory } from "@/thread/history"
 import { dayLabel, HistoryPanel, HistoryToggle } from "@/thread/history-panel"
 import { readPos, savePos, type ReadPos } from "@/thread/topics"
+import { useReplyReading } from "@/thread/use-reply-reading"
 import { ChannelSwitcher, ChanOutNote, ConvBadgeChip, ConvSwitcher, HandlingLine, ImMsgActions, ImReadOnly, OlderRecords, RecordRow, SenderLine, useConversation } from "@/thread/conversations"
 import { weave, type Entry } from "@/thread/channel-record"
 import { AskChips, CardLink, ComposerBars, ItemCard, OfferLine, QueuedNote, QuoteHead, Rerun, SuggestCard, threadDecisions, Updates } from "@/thread/parts"
@@ -187,6 +188,7 @@ export function ChatView({ conv }: { conv?: string } = {}) {
   const inThread = conv ? new Set<string>() : threadDecisions(list)
   const rawOf = (m: Msg) => (m.id ? im?.raw.get(m.id) : undefined)
   const scroller = useRef<HTMLDivElement>(null), composer = useRef<ComposerHandle | null>(null), top = useRef<HTMLDivElement>(null)
+  useReplyReading(scroller, conv)
   const working = isThinking() || !!st.live
   const posKey = conv ? "" : st.workspace?.id ?? ""
   /* where you were reading last time (ST-50): reopening there, the page does not start at the bottom first */
@@ -302,7 +304,7 @@ export function ChatView({ conv }: { conv?: string } = {}) {
   const fresh = unread ? list.filter((m) => m.created && m.created > leftAt.current && m.k !== "thinking").length : 0
   const { more, ended, loading } = historyState()
   return (
-    <div className="flex h-full min-h-0 overflow-hidden text-foreground" data-chat-page><div className="relative flex min-w-0 flex-1 flex-col">
+    <div className="flex h-full min-h-0 overflow-hidden text-foreground" data-chat-page data-chat-conversation={conv?.replace(/^chan:/, "")} data-chat-conversation-ready={conv ? !!im && !imLoading && !imError : undefined}><div className="relative flex min-w-0 flex-1 flex-col">
       <header className="flex h-13 shrink-0 items-center gap-2 border-b border-border/70 px-3 sm:px-5" data-chat-header>
         <Hero />
         <div className="flex-1" />
@@ -343,7 +345,7 @@ export function ChatView({ conv }: { conv?: string } = {}) {
             if (m.k === "me") return <Fragment key={key}>{dayLabel}<div tabIndex={-1} className={cn("group/me relative flex flex-col gap-1.5 rounded-xl outline-none transition-[background-color,box-shadow] duration-260 ease-(--ease-out)", lit)} data-msg={m.id} data-flash={lit ? "" : undefined}><QuoteHead id={replyTo} className="self-end" />{m.a2uiAction ? <A2uiActionNote a={m.a2uiAction} /> : <Me t={m.t!} files={m.files} />}<QueuedNote m={m} /><MeActions m={m} last={m.id === lastMe} /></div></Fragment>
             if (m.k === "thinking") return <div key={key} className="flex flex-col gap-2" data-chat-draft={st.draft?.mid} aria-busy="true"><LiveSteps />{st.draft?.text && <SteveSays><Markdown text={st.draft.text} streaming /></SteveSays>}</div>
             if (m.notice) return <Fragment key={key}>{dayLabel}<NoticeLine m={m} onOpen={showNotices} /></Fragment>
-            return <Fragment key={key}>{dayLabel}<div tabIndex={-1} className={cn("group/sm relative flex min-w-0 flex-col gap-2.5 rounded-xl outline-none transition-[background-color,box-shadow] duration-260 ease-(--ease-out)", lit)} data-msg={m.id} data-flash={lit ? "" : undefined}>
+            return <Fragment key={key}>{dayLabel}<div tabIndex={-1} className={cn("group/sm relative flex min-w-0 flex-col gap-2.5 rounded-xl outline-none transition-[background-color,box-shadow] duration-260 ease-(--ease-out)", lit)} data-msg={m.id} data-attention-reply={!conv && m.k === "steve" && m.id !== st.drafted ? m.id : undefined} data-flash={lit ? "" : undefined}>
               {head && <div className="flex min-w-0 items-baseline gap-2 px-1 type-footnote text-tertiary" data-chat-author><span className="truncate type-callout font-semibold text-foreground">{S?.n ?? "Steve"}</span>{m.created && <time className="shrink-0" dateTime={new Date(m.created).toISOString()}>{tm(m.created)}</time>}</div>}
               <QuoteHead id={replyTo} /><StepsBlock m={m} /><SteveSays still={m.id === st.drafted}>{!m.update && !m.cardOnly && !delivered && <A2uiHost msg={m.id} records={m.a2ui} readonly={conv ? t("pages:chat.readonlyUi") : undefined}><Markdown text={linkCites(m.t ?? "", m.cites)} /></A2uiHost>}{m.item && !m.update && !m.card && (m.wasCard || list.some((x) => x.card?.item === m.item) ? <CardLink id={m.item} from={m.id} /> : <ItemRef id={m.item} />)}{m.card ? <ItemCard c={m.card} /> : <Updates m={m} />}<OfferLine m={m} /><SuggestCard m={m} /><AskChips m={m} conv={!!conv} /><Rerun m={m} conv={!!conv} /></SteveSays>{m.meet && meeting() && m.id === st.settings.onboardFrom && <Button size="sm" variant="ghost" className="-mt-1 self-start text-muted-foreground" onClick={() => void endMeeting()} data-meet-skip>{t("pages:chat.onboard.meetSkip")}</Button>}{m.cfgs && <div className="-mt-1 flex flex-col gap-2 self-start">{m.cfgs.map((p) => <ProposalCard key={p.id} p={p} inChat />)}</div>}<Cites cites={m.cites} />{conv ? <><ChanOutNote m={rawOf(m)} /><ImMsgActions url={im?.badge.open_url} side="start" last={m.id === lastSteve} /></> : <MsgActions m={m} last={m.id === lastSteve} />}</div></Fragment>
           })}

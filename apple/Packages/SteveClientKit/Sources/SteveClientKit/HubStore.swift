@@ -114,6 +114,7 @@ public final class HubStore: ObservableObject {
         }
         var next = profiles
         next[idx].name = value
+        next[idx].nameSource = nil
         let data = try JSONEncoder().encode(next)
         let old = defaults.data(forKey: profilesKey)
         defaults.set(data, forKey: profilesKey)
@@ -137,6 +138,7 @@ public final class HubStore: ObservableObject {
     public func addPairedProfile(_ profile: HubProfile, credential: String, makeActive: Bool = true) throws -> HubProfile {
         var candidate = profile
         candidate.isLocalDefault = false
+        candidate.nameSource = nil
         if candidate.id == HubProfile.localDefaultID {
             candidate.id = UUID().uuidString
         }
@@ -177,8 +179,10 @@ public final class HubStore: ObservableObject {
             let endpointsChanged = Self.endpointSignature(of: existing) != Self.endpointSignature(of: updated)
             updated.id = existing.id
             updated.isLocalDefault = existing.isLocalDefault
-            if updated.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            if updated.nameSource == .generatedLocalDefault || updated.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                // Rediscovery is not a user rename and cannot promote an ambiguous legacy alias.
                 updated.name = existing.name
+                updated.nameSource = existing.nameSource
             }
             if endpointsChanged {
                 pendingCookieCleanupHubIDs.insert(updated.id)

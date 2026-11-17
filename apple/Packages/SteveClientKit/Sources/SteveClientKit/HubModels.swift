@@ -1,12 +1,9 @@
 import Foundation
 
 public enum L10n {
-    public static var prefersChinese: Bool {
-        guard let primary = Locale.preferredLanguages.first?.lowercased() else {
-            return true
-        }
-        return primary.hasPrefix("zh")
-    }
+    static let uiLanguageSnapshot = NativeUILanguageSnapshot()
+
+    public static var prefersChinese: Bool { uiLanguageSnapshot.prefersChinese }
 
     public static func tr(_ zh: String, _ en: String) -> String {
         prefersChinese ? zh : en
@@ -208,11 +205,17 @@ public enum URLNormalizer {
     }
 }
 
+public enum HubProfileNameSource: String, Codable, Sendable {
+    case generatedLocalDefault
+}
+
 public struct HubProfile: Identifiable, Codable, Sendable, Equatable {
     public static let localDefaultID = "local-default"
 
     public var id: String
     public var name: String
+    /// Absent in legacy profiles: their names are always treated as user aliases.
+    public var nameSource: HubProfileNameSource?
     public var publicURL: URL?
     public var lanURLs: [URL]
     public var isLocalDefault: Bool
@@ -224,6 +227,7 @@ public struct HubProfile: Identifiable, Codable, Sendable, Equatable {
     public init(
         id: String = UUID().uuidString,
         name: String,
+        nameSource: HubProfileNameSource? = nil,
         publicURL: URL? = nil,
         lanURLs: [URL] = [],
         isLocalDefault: Bool = false,
@@ -234,6 +238,7 @@ public struct HubProfile: Identifiable, Codable, Sendable, Equatable {
     ) {
         self.id = id
         self.name = name
+        self.nameSource = nameSource
         self.publicURL = publicURL
         self.lanURLs = lanURLs
         self.isLocalDefault = isLocalDefault
@@ -264,7 +269,13 @@ public struct HubProfile: Identifiable, Codable, Sendable, Equatable {
     }
 
     /// Native menus keep an address visible when the personal alias was explicitly cleared.
-    public var displayName: String { name.isEmpty ? primaryDisplayAddress : name }
+    public var displayName: String {
+        guard !name.isEmpty else { return primaryDisplayAddress }
+        if nameSource == .generatedLocalDefault {
+            return L10n.tr("本机 Hub", "Local Hub")
+        }
+        return name
+    }
 
     public var primaryDisplayAddress: String {
         if let pub = publicURL {
@@ -281,6 +292,7 @@ public struct HubProfile: Identifiable, Codable, Sendable, Equatable {
         return HubProfile(
             id: localDefaultID,
             name: L10n.tr("本机 Hub", "Local Hub"),
+            nameSource: .generatedLocalDefault,
             publicURL: nil,
             lanURLs: [loopback],
             isLocalDefault: true

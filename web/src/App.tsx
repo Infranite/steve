@@ -15,7 +15,7 @@ import { hubNavigationAllowed, API, currentHub, hello, hubBase, HubError, hubUrl
 import { HubChooser, hubErrorText, HubLine, HubLostBanner, HubsDialog, HubsOffer, HubsOfferDialog, PairClaim, ScanButton, usePairRequest } from "@/hub-ui"
 import { CommandPalette } from "@/command-palette"
 import { st, useStore, start } from "@/store"
-import { useT } from "@/i18n"
+import { lang, useT } from "@/i18n"
 import { useRoute, getSheet, openSheet } from "@/ui"
 import { Sidebar, MobileTabs } from "@/shell"
 const FeedView = lazyView(() => import("@/feed").then((m) => ({ default: m.FeedView })))
@@ -201,7 +201,7 @@ export default function App({ deliveryId }: { deliveryId?: string }) {
   useNativeShell({
     workspaceID: !login ? st.workspace?.id ?? null : null,
     workspaceName: !login ? st.workspace?.name ?? null : null,
-    route: location.hash || "#/", title: String(pageTitle).slice(0, 512),
+    route: location.hash || "#/", title: String(pageTitle).slice(0, 512), language: lang(),
     ready: !pairing && (up || !!login || hub === "missing"), authenticated: !login && hub === "ok" && !!st.workspace,
   }, !!login && (others || intent === "add") || hub === "missing")
   const title = (sub: string) => <><Robot k="steve" size={72} /><div><div className="type-title">Steve</div><div className="mt-1 type-callout text-muted-foreground">{sub}</div></div></>

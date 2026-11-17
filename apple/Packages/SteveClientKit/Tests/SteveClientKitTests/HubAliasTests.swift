@@ -11,6 +11,70 @@ private final class RefusingDefaults: UserDefaults {
 
 final class HubAliasTests: XCTestCase {
     @MainActor
+    func testGeneratedLocalNameFollowsLanguageButRenameAndClearRemoveProvenance() throws {
+        let suite = "hub-alias-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let language = NativeUILanguageState.shared
+        defer { language.accept(nil) }
+        language.accept(.english)
+        let profile = HubProfile.makeLocalDefault(port: 19990)
+        XCTAssertEqual(profile.nameSource, .generatedLocalDefault)
+        XCTAssertEqual(profile.displayName, "Local Hub")
+        let store = HubStore(defaults: defaults, credentials: InMemoryCredentialStore(), defaultProfile: profile)
+        language.accept(.chinese)
+        XCTAssertEqual(store.activeProfile.displayName, "本机 Hub")
+        XCTAssertEqual(store.activeProfile.name, profile.name, "UI translation does not rewrite persisted data")
+        XCTAssertEqual(L10n.tr("中文", "English"), "中文")
+        XCTAssertEqual(HubRouteKind.loopback.displayTitle, "本机")
+        let decoded = try JSONDecoder().decode(HubProfile.self, from: JSONEncoder().encode(store.activeProfile))
+        XCTAssertEqual(decoded.nameSource, .generatedLocalDefault)
+        try store.renameHub(id: profile.id, alias: "Local Hub")
+        XCTAssertNil(store.activeProfile.nameSource)
+        XCTAssertEqual(store.activeProfile.displayName, "Local Hub", "Even a default-looking user alias stays literal")
+        _ = store.upsertProfile(HubProfile.makeLocalDefault(port: 19990))
+        XCTAssertNil(store.activeProfile.nameSource, "Rediscovery cannot restore removed provenance")
+        try store.renameHub(id: profile.id, alias: "")
+        XCTAssertNil(store.activeProfile.nameSource)
+        language.accept(.english)
+        XCTAssertEqual(store.activeProfile.displayName, "http://127.0.0.1:19990")
+        let reopened = HubStore(defaults: defaults, credentials: InMemoryCredentialStore(), defaultProfile: profile)
+        XCTAssertNil(reopened.activeProfile.nameSource)
+        XCTAssertEqual(reopened.activeProfile.name, "")
+        XCTAssertEqual(reopened.activeProfile.displayName, "http://127.0.0.1:19990")
+        for address in ["http://127.0.0.1:19990", "https://hub.example.test"] {
+            let discovered = LocalHubDiscovery.defaultProfile(environment: ["STEVE_HUB_URL": address, "STEVE_PORT": "19990"])
+            XCTAssertEqual(discovered.nameSource, .generatedLocalDefault)
+        }
+    }
+
+    @MainActor
+    func testLegacyDefaultLookingAliasesAndClearedNamesAreNeverPromoted() throws {
+        let language = NativeUILanguageState.shared
+        defer { language.accept(nil) }
+        language.accept(.chinese)
+        for alias in ["Local Hub", "本机 Hub", "Custom", ""] {
+            let suite = "hub-alias-\(UUID().uuidString)"
+            let defaults = UserDefaults(suiteName: suite)!
+            defer { defaults.removePersistentDomain(forName: suite) }
+            let legacy = HubProfile(id: HubProfile.localDefaultID, name: alias,
+                lanURLs: [URL(string: "http://127.0.0.1:19990")!], isLocalDefault: true)
+            let data = try JSONEncoder().encode([legacy])
+            let json = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [[String: Any]])
+            XCTAssertNil(json[0]["nameSource"], "Legacy records have no provenance field")
+            defaults.set(data, forKey: "steve.apple.hubs")
+            let store = HubStore(defaults: defaults, credentials: InMemoryCredentialStore(),
+                defaultProfile: HubProfile.makeLocalDefault(port: 19990))
+            XCTAssertEqual(store.activeProfile.name, alias)
+            XCTAssertNil(store.activeProfile.nameSource)
+            XCTAssertEqual(store.activeProfile.displayName, alias.isEmpty ? "http://127.0.0.1:19990" : alias)
+            _ = store.upsertProfile(HubProfile.makeLocalDefault(port: 19990))
+            XCTAssertEqual(store.activeProfile.name, alias)
+            XCTAssertNil(store.activeProfile.nameSource)
+        }
+    }
+
+    @MainActor
     func testRenameAndClearAreLocalAndPreserveConnectionAndCredentials() async throws {
         let suite = "hub-alias-\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suite)!

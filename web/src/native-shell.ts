@@ -1,5 +1,8 @@
 import type { NativeBridge } from "./hub"
 
+/** Opaque rendered body background in sRGB bytes, not a fixed native palette. */
+export type ShellAppearance = { dark: boolean; background: [number, number, number]; followSystem?: boolean }
+
 /** Page context only. The trusted native document supplies Hub identity; never send credentials or counts. */
 export type ShellContext = {
   workspaceID: string | null
@@ -10,6 +13,8 @@ export type ShellContext = {
   authenticated: boolean
   focused: boolean
   visible: boolean
+  appearance?: ShellAppearance
+  language?: "zh-CN" | "en"
 }
 export type ShellNavigation = { id: string; hubID: string; workspaceID?: string; route: string; targetID?: string }
 const OPERATIONS = ["shell.context", "shell.navigation.next", "shell.navigation.ack"]
@@ -49,6 +54,13 @@ export function shellDestination(route: string): string {
   return route
 }
 
+export function attentionTargetRoute(route: string, targetID: unknown): boolean {
+  if (typeof targetID !== "string" || !targetID || targetID.length > 512 || /[\u0000-\u001f\u007f]/u.test(targetID)) return false
+  return route === "#/" || route === "#/inbox"
+    || route === `#/feed?entry=${encodeURIComponent(targetID)}`
+    || route === `#/c/${encodeURIComponent("chan:" + targetID)}`
+}
+
 export type ShellPort = {
   allowed(): boolean
   hasWorkspace(id: string): boolean
@@ -56,6 +68,8 @@ export type ShellPort = {
   navigate(route: string): void
   /** Hub actions redirect to #/; success means their sheet is actually displayed. */
   actionOpen(route: string): boolean
+  /** Resolves only after the scoped entity is rendered and its visibility report reaches native. */
+  landTarget?(route: string, targetID: string, workspace: string, signal: AbortSignal, active: () => boolean): Promise<void>
 }
 
 /** One session per mounted App, not per keyed route. Polls never overlap; context reports coalesce by value. */
@@ -69,6 +83,7 @@ export class NativeShellSession {
   private timer: ReturnType<typeof setTimeout> | undefined
   private waiters = new Set<() => void>()
   private polling = false
+  private landing: AbortController | undefined
 
   private bridge: NativeBridge
   private port: ShellPort
@@ -77,6 +92,7 @@ export class NativeShellSession {
   update(context: ShellContext) {
     if (!this.live) return
     const previous = this.context
+    if (previous && (previous.workspaceID !== context.workspaceID || previous.route !== context.route || !context.ready || !context.authenticated)) this.landing?.abort()
     if (previous?.authenticated !== context.authenticated) this.authGeneration++
     if (previous?.authenticated !== context.authenticated || previous?.workspaceID !== context.workspaceID || previous?.ready !== context.ready) this.revision++
     this.context = context
@@ -157,8 +173,7 @@ export class NativeShellSession {
       intent = raw as ShellNavigation
       const route = shellRoute(intent.route)
       if (!route || typeof intent.hubID !== "string" || (intent.workspaceID !== undefined && typeof intent.workspaceID !== "string")) throw new Error("Unsupported navigation target")
-      // No final-reply/deep-target contract in this foundation. Do not pretend an ignored target succeeded.
-      if (intent.targetID !== undefined) throw new Error("Deep navigation targets are not available")
+      if (intent.targetID !== undefined && (!this.port.landTarget || !attentionTargetRoute(route, intent.targetID))) throw new Error("Unsupported deep navigation target")
       const hubs = await this.bridge.call("hubs.list")
       if (!this.live || revision !== this.revision) return
       if (hubs?.hubs?.find((h: { current?: boolean }) => h.current)?.id !== intent.hubID) throw new Error("Navigation belongs to another Hub")
@@ -185,6 +200,14 @@ export class NativeShellSession {
         if (this.context?.workspaceID !== workspace || !this.context.ready) throw new Error("Workspace changed during navigation")
         return route.startsWith("#/hub/") ? this.context.route === "#/" && this.port.actionOpen(route) : this.context.route === shellDestination(route)
       })
+      if (intent.targetID !== undefined) {
+        const controller = new AbortController(); this.landing = controller
+        const stillHere = () => this.live && !controller.signal.aborted && auth === this.authGeneration
+          && !!this.context?.authenticated && this.context.ready && this.context.workspaceID === workspace
+          && this.context.route === shellDestination(route)
+        await this.port.landTarget!(route, intent.targetID, workspace!, controller.signal, stillHere)
+        if (!stillHere()) throw new Error("Navigation target changed")
+      }
       await this.publish()
       active()
       if (!this.context?.ready || this.context.workspaceID !== workspace || (route.startsWith("#/hub/") ? !this.port.actionOpen(route) : this.context.route !== shellDestination(route))) throw new Error("Navigation target changed")
@@ -195,6 +218,7 @@ export class NativeShellSession {
         await this.bridge.call("shell.navigation.ack", { id: intent.id, ok: false, error: e instanceof Error ? e.message : "Navigation failed" }).catch(() => {})
       }
     } finally {
+      this.landing?.abort(); this.landing = undefined
       this.polling = false
       this.schedule()
     }
@@ -202,6 +226,7 @@ export class NativeShellSession {
 
   stop() {
     this.live = false
+    this.landing?.abort()
     if (this.timer) clearTimeout(this.timer)
     this.waiters.forEach((wake) => wake())
   }
