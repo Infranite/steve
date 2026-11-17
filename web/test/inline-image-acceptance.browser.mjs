@@ -166,6 +166,15 @@ try {
     await shot("INLINE_QR_MANUAL_DONE", "qr-desktop-before-cleanup")
     return { images, source_exists: await exists(manual.source), persisted_files: fileCount() }
   })
+  await check("Existing original Node path fails in the browser while its retained URL displays", async () => {
+    assert.equal(await exists(manual.source), true)
+    const result = await page.evaluate((url) => new Promise((done) => {
+      const image = new Image(); image.onload = () => done({ event: "load", width: image.naturalWidth })
+      image.onerror = () => done({ event: "error", width: image.naturalWidth }); image.src = url
+    }), base + manual.source)
+    assert.deepEqual(result, { event: "error", width: 0 })
+    return { ...result, source: manual.source, source_exists: true, retained: await retained(manual.text, qr) }
+  })
   await check("Delete only our generated cwd source; authenticated bytes survive", async () => {
     assert.ok(manual.source.startsWith(root + sep), "refuse to delete outside our test installation")
     assert.equal(basename(manual.source), "qr.png"); assert.ok(basename(dirname(manual.source)).startsWith("inline-image-"))
@@ -186,13 +195,6 @@ try {
     assert.ok(images.every((i) => i.displayedWidth > 0 && i.displayedWidth <= 390))
     await shot("INLINE_QR_MANUAL_DONE", "qr-mobile-390-after-cleanup-refresh")
     return images
-  })
-  await check("Original Node path fails in the browser; retained URL remains readable", async () => {
-    const result = await page.evaluate((url) => new Promise((done) => {
-      const image = new Image(); image.onload = () => done({ event: "load", width: image.naturalWidth })
-      image.onerror = () => done({ event: "error", width: image.naturalWidth }); image.src = url
-    }), base + automatic.source)
-    assert.deepEqual(result, { event: "error", width: 0 }); return result
   })
   await check("Anonymous access is 401 and another real workspace is 404", async () => {
     const href = (await retained(automatic.text, qr)).url, anonymous = await browser.newContext()
