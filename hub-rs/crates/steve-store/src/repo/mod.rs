@@ -2,6 +2,7 @@
 //! Each `store.x()` returns a borrowed view named like the TS object (`items`, `bots`, …).
 
 pub mod access;
+pub mod attention;
 mod annotations;
 mod bots;
 mod catalog;

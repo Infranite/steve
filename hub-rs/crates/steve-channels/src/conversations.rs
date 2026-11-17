@@ -1028,6 +1028,79 @@ pub(crate) fn member(
     Ok(())
 }
 
+/// Personal attention uses the same visibility, read marker and unread horizon as the record.
+/// The unit is conversations, never the capped message count returned by `unread`.
+/// Quiet/Steve-role-muted are NOT personal mute. Closed conversations, blocked spaces and
+/// disabled/inaccessible connections are excluded; groups without a personal opt-in remain a
+/// generic indicator (`notify=false`), while direct chats can notify by default.
+pub fn attention(
+    c: &rusqlite::Connection,
+    ws: &str,
+    viewer: &steve_store::base::Viewer,
+    now: i64,
+) -> ChannelResult<Vec<steve_store::attention::Entry>> {
+    member(c, ws, viewer)?;
+    let sql = format!(
+        "SELECT s.id,s.kind,p.read_up_to FROM spaces s
+         LEFT JOIN conversation_preferences p ON p.workspace_id=s.workspace_id AND p.user_id=?2 AND p.space_id=s.id
+         LEFT JOIN space_prefs pref ON pref.space_id=s.id AND pref.workspace_id=s.workspace_id
+         WHERE s.workspace_id=?1 AND s.status='active' AND {visible} AND coalesce(p.closed,0)=0
+           AND coalesce(pref.attention,'realtime')<>'blocked'
+           AND (EXISTS (SELECT 1 FROM space_identities si JOIN connections cn ON cn.id=si.connection_id
+             WHERE si.space_id=s.id AND si.left_at IS NULL AND cn.workspace_id=?1
+               AND cn.status IN ('ok','error') AND EXISTS(SELECT 1 FROM json_each(cn.caps) cap WHERE cap.value='msg.receive')
+               AND (si.owner_user IS NULL OR si.owner_user=?2))
+             OR (NOT EXISTS (SELECT 1 FROM space_identities si WHERE si.space_id=s.id)
+               AND EXISTS (SELECT 1 FROM connections cn WHERE cn.id=s.connection_id AND cn.workspace_id=?1
+                 AND cn.status IN ('ok','error') AND EXISTS(SELECT 1 FROM json_each(cn.caps) cap WHERE cap.value='msg.receive'))))",
+        visible = spaces::visible_sql("?2"),
+    );
+    let mut st = c.prepare_cached(&sql)?;
+    let rows = st
+        .query_map(params![ws, viewer.user], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, Option<i64>>(2)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut out = vec![];
+    for (id, kind, read) in rows {
+        if crate::conv_record::unread(c, &id, &viewer.user, read, now)? == 0 {
+            continue;
+        }
+        // The same definition of live, incoming, not-self and visible as count_new. Stable
+        // persisted message ID is the event identity, never a mutable rowid or unread count.
+        let latest_sql = format!("SELECT m.id,m.created FROM chan_messages m
+          WHERE m.space_id=?1 AND m.direction='in' AND m.history IS NULL AND m.created>?3 AND {seen}
+            AND NOT EXISTS (SELECT 1 FROM parties pp WHERE pp.id=m.sender_party_id AND pp.user_id=?2)
+          ORDER BY m.created DESC,m.id DESC LIMIT 1",seen=spaces::seen_visible_sql("m","?2"));
+        let (message, created): (String, i64) = c.query_row(
+            &latest_sql,
+            params![
+                id,
+                viewer.user,
+                read.unwrap_or(i64::MIN)
+                    .max(now.saturating_sub(crate::conv_record::UNREAD_HORIZON_MS))
+            ],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        let mut e =
+            steve_store::attention::Entry::new(conv_space(&id), created, "", conv_space(&id));
+        e.event_id = message.clone();
+        e.source_id = message;
+        e.notify = kind == "dm";
+        out.push(e);
+    }
+    out.sort_by(|a, b| {
+        b.created
+            .cmp(&a.created)
+            .then_with(|| b.event_id.cmp(&a.event_id))
+    });
+    Ok(out)
+}
+
 /// The IM conversations the viewer may see, newest first; no silently omitted older conversations.
 pub fn list(
     c: &rusqlite::Connection,

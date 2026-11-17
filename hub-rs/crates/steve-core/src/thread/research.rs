@@ -844,6 +844,17 @@ impl Core {
             self.fold_offers(ws, &id)?;
         }
         let th = self.store().store().thread();
+        // Both short answers and research name their persisted final receipt. Attention assigns
+        // commit order only when this run subsequently ends with a persisted final receipt, never to draft tokens.
+        if let Some(run) = &j.run {
+            th.run_patch(
+                run,
+                &RunPatch {
+                    reply_id: Some(id.clone()),
+                    ..Default::default()
+                },
+            )?;
+        }
         if th
             .route_of(&j.origin)?
             .is_some_and(|r| r.reply_id.is_none())
@@ -903,13 +914,10 @@ impl Core {
             } else {
                 format!("{partial}\n\n（已停下）")
             };
-            self.post(
-                ws,
-                &j.space,
-                &text,
-                None,
-                Some(&json!({"origin": j.origin, "stopped": true, SYSTEM: true})),
-            )?;
+            let mut meta = self.inline_meta(ws, j, None, json!({}))?;
+            meta["stopped"] = json!(true);
+            meta[SYSTEM] = json!(true);
+            self.inline_reply(ws, j, &text, &meta)?;
             return Ok(());
         };
         /* the question needs tools the answer does not have: an item does it, or the reply says why not */

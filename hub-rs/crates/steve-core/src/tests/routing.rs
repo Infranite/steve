@@ -1232,6 +1232,129 @@ async fn forwarded_messages_carry_their_files() {
     assert!(tl.iter().any(|t| t.text == "照这张图改"));
 }
 
+#[tokio::test]
+async fn personal_attention_tracks_only_final_owned_inline_run_receipts() {
+    let k = Kit::new();
+    k.db().store().with_conn(|c| {
+        c.execute_batch("INSERT INTO users(id,workspace_id,subject,name,role,created) VALUES('attention_user','default','attention_user','Reader','owner',1);
+          INSERT INTO workspace_members(workspace_id,user_id,role,created) VALUES('default','attention_user','owner',1);")?;
+        Ok(())
+    }).unwrap();
+    router(&k, |_| json!({"kind":"answer"}));
+    let mid = k
+        .core
+        .say_as(WS, Some("attention_user"), "解释这个概念", &[], &[])
+        .unwrap();
+    until(|| {
+        k.db()
+            .store()
+            .thread()
+            .runs_of_message(&mid)
+            .unwrap()
+            .iter()
+            .any(|r| r.status == "done")
+    })
+    .await;
+    let runs = k.db().store().thread().runs_of_message(&mid).unwrap();
+    let reply = runs[0]
+        .reply_id
+        .as_ref()
+        .expect("short answer names its persisted final receipt");
+    let (entries, upper) = k
+        .db()
+        .store()
+        .reader(|c| steve_store::attention::replies(c, WS, "attention_user"))
+        .unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(&entries[0].id, reply);
+    assert_eq!(entries[0].order, Some(upper));
+    assert!(k.db().message(reply).unwrap().unwrap().meta["run_receipt"] == true);
+    // An unowned workspace answer is not assigned to the signed-in user's attention.
+    let unowned = k.core.say(WS, "再解释一下", &[]).unwrap();
+    until(|| {
+        k.db()
+            .store()
+            .thread()
+            .runs_of_message(&unowned)
+            .unwrap()
+            .iter()
+            .any(|r| r.status == "done")
+    })
+    .await;
+    assert_eq!(
+        k.db()
+            .store()
+            .reader(|c| steve_store::attention::replies(c, WS, "attention_user"))
+            .unwrap()
+            .0
+            .len(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn personal_attention_tracks_actual_stopped_short_answer_receipt() {
+    let k = Kit::new();
+    k.db().store().with_conn(|c| {
+        c.execute_batch("INSERT INTO users(id,workspace_id,subject,name,role,created) VALUES('attention_user','default','attention_user','Reader','owner',1);
+          INSERT INTO workspace_members(workspace_id,user_id,role,created) VALUES('default','attention_user','owner',1);")?;
+        Ok(())
+    }).unwrap();
+    router(&k, |_| json!({"kind":"answer"}));
+    *k.gw.slow.lock().unwrap() = Some(("You are Steve", Duration::from_secs(60)));
+    let mid = k
+        .core
+        .say_as(WS, Some("attention_user"), "解释这个概念", &[], &[])
+        .unwrap();
+    until(|| {
+        k.gw.calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|p| p.starts_with("You are Steve"))
+    })
+    .await;
+    assert!(k.core.stop(WS).unwrap());
+    until(|| {
+        k.db()
+            .store()
+            .thread()
+            .runs_of_message(&mid)
+            .unwrap()
+            .iter()
+            .any(|r| r.status == "stopped")
+    })
+    .await;
+    let runs = k.db().store().thread().runs_of_message(&mid).unwrap();
+    let id = runs[0]
+        .reply_id
+        .as_ref()
+        .expect("stopped answer names persisted receipt");
+    let reply = k.db().message(id).unwrap().unwrap();
+    assert_eq!(reply.meta["run_receipt"], true);
+    assert_eq!(reply.meta["stopped"], true);
+    assert_eq!(
+        reply.meta["system"], true,
+        "stopped receipt retains the upstream system-note classification"
+    );
+    assert_eq!(reply.meta["origin"], mid);
+    let (entries, _) = k
+        .db()
+        .store()
+        .reader(|c| steve_store::attention::replies(c, WS, "attention_user"))
+        .unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(&entries[0].id, id);
+    assert_eq!(
+        k.db()
+            .store()
+            .reader(|c| steve_store::attention::reply(c, WS, "attention_user", id))
+            .unwrap()
+            .0,
+        *id
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn interrupted_local_answer_recovers_after_ready_once_across_two_boots() {
     let k = Kit::new();
