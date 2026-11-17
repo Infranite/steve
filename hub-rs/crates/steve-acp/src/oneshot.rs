@@ -28,6 +28,9 @@ use steve_node_api::{
 };
 use tokio::sync::mpsc;
 
+/// What [`OneShotError::ToolRefused`] says, also where a Node reports it back as text.
+pub const TOOL_REFUSED: &str = "read-only policy refused a tool";
+
 /// Why a one-shot call failed. The words a user sees are the caller's.
 #[derive(Debug, thiserror::Error)]
 pub enum OneShotError {
@@ -37,9 +40,14 @@ pub enum OneShotError {
     /// Still running after the timeout; the adapter is stopped.
     #[error("timed out after {0:?}")]
     Timeout(Duration),
-    /// The adapter could not be started or opened, or the client's policy stopped the call.
+    /// The adapter could not be started or opened.
     #[error("{0}")]
     Failed(String),
+    /// The model reached for a tool the call's policy does not allow (a call without tools, or
+    /// with a narrower set than it wanted): the request needs what this call cannot do, and the
+    /// caller decides where it goes instead.
+    #[error("{TOOL_REFUSED}")]
+    ToolRefused,
     /// The adapter answered the prompt with an error (a JSON-RPC error: the provider, the model).
     /// `transient`: it said the service was unavailable or overloaded, so another try may succeed.
     #[error("{text}")]
@@ -280,7 +288,7 @@ fn incoming(
                         .fact(id)
                         .is_some_and(|f| !awaiting_input(f) && !(req.allow_tool)(f))
                 {
-                    return Err(failed("read-only policy refused a tool"));
+                    return Err(OneShotError::ToolRefused);
                 }
                 out.events(facts, on_event);
             }
@@ -295,7 +303,7 @@ fn incoming(
             };
             conn.respond(id, permission::answer(&asked, Some(decision)));
             if !allowed {
-                return Err(failed("read-only policy refused a tool"));
+                return Err(OneShotError::ToolRefused);
             }
             out.events(asked.updates, on_event);
         }
@@ -758,7 +766,7 @@ for line in sys.stdin:
             seen.lock().unwrap().push(ev)
         })
         .await;
-        assert!(matches!(out, Err(OneShotError::Failed(e)) if e.contains("read-only policy")));
+        assert!(matches!(out, Err(OneShotError::ToolRefused)));
         assert!(
             !seen
                 .lock()
@@ -815,7 +823,7 @@ for line in sys.stdin:
             fact.paths == ["allowed.txt"]
         };
         let out = run(request(&cfg, temp.path(), &allow), &|_| true, &|_| {}).await;
-        assert!(matches!(out, Err(OneShotError::Failed(e)) if e.contains("read-only policy")));
+        assert!(matches!(out, Err(OneShotError::ToolRefused)));
         assert_eq!(*checked.lock().unwrap(), [vec!["outside.txt".to_string()]]);
     }
 
@@ -837,7 +845,7 @@ for line in sys.stdin:
                 false
             };
             let out = run(request(&cfg, temp.path(), &allow), &|_| true, &|_| {}).await;
-            assert!(matches!(out, Err(OneShotError::Failed(e)) if e.contains("read-only policy")));
+            assert!(matches!(out, Err(OneShotError::ToolRefused)));
             assert_eq!(checked.load(Ordering::Relaxed), 1);
         }
     }

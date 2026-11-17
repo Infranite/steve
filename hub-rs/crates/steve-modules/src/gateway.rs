@@ -42,6 +42,17 @@ pub struct GatewayOut {
     pub duration_ms: u64,
 }
 
+/// A call's error when the model reached for a tool the call does not allow (a call without tools,
+/// or one with only some): the request needs what the call cannot do — run a command, read a file,
+/// look at the machine — so no model of the call can answer it. The gateway says exactly these
+/// words, inside whatever a caller wraps around them; [`needs_tools`] reads them back.
+pub const NEEDS_TOOLS: &str = "needs tools: the model reached for a tool this call does not allow";
+
+/// Whether a call's error ([`Gateway::run`]'s `Err`, or a message made from it) is [`NEEDS_TOOLS`].
+pub fn needs_tools(error: &str) -> bool {
+    error.contains(NEEDS_TOOLS)
+}
+
 #[async_trait]
 pub trait Gateway: Send + Sync {
     /// Runs `prompt` on `tier` within `timeout`. `Err` carries a message for the log; callers decide

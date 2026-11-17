@@ -1853,7 +1853,7 @@ impl Outbox {
                 "steve",
                 "chan_message.send.failed",
                 &row.id,
-                &json!({"space": row.space_id}),
+                &json!({"space": row.space_id, "error": error}),
             )?;
             messages::event(tx, &row.ws, &row.space_id, &row.id);
             Ok(Some(Some(d)))

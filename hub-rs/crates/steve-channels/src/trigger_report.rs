@@ -210,7 +210,10 @@ pub async fn sweep(ch: &Channels, outbox: &Outbox) -> ChannelResult<usize> {
             },
         };
         match outbox.deliver_checked(ch, &req).await {
-            Ok(_) => n += 1,
+            Ok((d, _)) => {
+                ch.after_trigger_send(&o.ws, &plan.connection_id, &d);
+                n += 1;
+            }
             Err(e) => tracing::warn!(item = o.item, "trigger report not sent: {e}"),
         }
     }

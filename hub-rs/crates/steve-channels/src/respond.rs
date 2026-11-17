@@ -295,6 +295,14 @@ pub fn open_draft_to(
     Ok((id, d.id))
 }
 
+/// What a trigger word's conversation records when it got no answer: why, and where to look.
+pub fn not_answered(why: &str) -> String {
+    format!(
+        "（这条触发词没有回答：{}。到“接入”里看这个账号的连接和权限，修好后在聊天里再发一次。）",
+        why.trim().trim_end_matches('。')
+    )
+}
+
 /// `Response.label` when your account may not send as you.
 pub const NO_SEND_AS_YOU: &str = "没有“以你的名义发送”的权限：只记录，不起草";
 /// … and it was your `/bot`.
@@ -336,10 +344,15 @@ impl Channels {
                 self.react_ack(&plan.message_id).await;
                 match self.converse_web(plan, i).await {
                     Ok(_) => r.label = NO_SEND_AS_YOU_COMMAND.into(),
-                    Err(e) => tracing::warn!(
-                        space = plan.space_id,
-                        "command to the web conversation: {e}"
-                    ),
+                    Err(e) => {
+                        tracing::warn!(
+                            space = plan.space_id,
+                            "command to the web conversation: {e}"
+                        );
+                        self.react_finish(&plan.message_id, crate::reactions::Finish::Failed)
+                            .await;
+                        self.conv_failed(plan, &not_answered(&format!("{NO_SEND_AS_YOU}（{e}）")));
+                    }
                 }
             }
             return Ok(r);
@@ -379,6 +392,7 @@ impl Channels {
                 }
             }
         }
+        let mut failed = None;
         match self.responder().act(self, plan).await {
             Ok(Some(a)) => {
                 if !a.label.is_empty() {
@@ -404,13 +418,16 @@ impl Channels {
             Err(e) => {
                 // the responder failed: fall back below, so the message still reaches you
                 tracing::warn!(space = plan.space_id, "channel responder failed: {e}");
+                failed = Some(e.to_string());
             }
         }
         if plan.trigger.is_some() {
             r.label = "触发语未接入，只记录".into();
             r.act = Act::Record;
-            self.react_finish(&plan.message_id, crate::reactions::Finish::Clear)
+            self.react_finish(&plan.message_id, crate::reactions::Finish::Failed)
                 .await;
+            let why = failed.unwrap_or_else(|| "这个账号没有接上 Steve 的对话".into());
+            self.conv_failed(plan, &not_answered(&why));
             return Ok(r);
         }
         match plan.act {

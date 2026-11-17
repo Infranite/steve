@@ -566,6 +566,7 @@ mod tests {
                     Err(crate::error::msg("API Error: 503 upstream unavailable")),
                     vec![],
                 ),
+                "tool" => (Err(crate::error::CoreError::NeedsTools), vec![]),
                 "slow" => (
                     Err(crate::error::msg(format!(
                         "Command timed out after {} ms",
@@ -646,6 +647,32 @@ mod tests {
                 ("slow".into(), None, cc(), 1500, false),
             ]
         );
+    }
+
+    /// A model that reached for a tool the call does not allow ends the chain like a timeout: the
+    /// request needs tools from any model, and the caller hands it on.
+    #[tokio::test]
+    async fn a_request_that_needs_tools_is_not_tried_on_the_next_model() {
+        let scripted = crate::gateway::Fallback {
+            one: Scripted {
+                tries: Default::default(),
+            },
+            fast: vec!["tool".into(), "haiku".into()],
+            smart: vec![],
+            models: None,
+        };
+        let a = scripted
+            .attempt(
+                "hi",
+                Tier::Fast,
+                Duration::from_secs(10),
+                &ThinkTools::None,
+                None,
+            )
+            .await;
+        assert!(matches!(a.result, Err(crate::error::CoreError::NeedsTools)));
+        assert_eq!(a.attempts, 1);
+        assert_eq!(tries(&scripted).len(), 1, "haiku is not tried");
     }
 
     /// The adapter a call that chose none runs on.

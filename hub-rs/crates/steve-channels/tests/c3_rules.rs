@@ -471,6 +471,25 @@ async fn your_account_drafts_records_and_takes_trigger_words() {
         }
     );
     assert_eq!(r.label, "触发语未接入，只记录");
+    // not dropped: the chat's conversation in Steve has the turn and why it got no answer
+    let conv = steve_channels::conversations::conv_space(&i.space_id);
+    let said = h
+        .env
+        .store()
+        .messages()
+        .list(WS, &conv, 50)
+        .expect("conversation");
+    assert!(
+        said.iter()
+            .any(|m| m.author == "me" && m.text.starts_with("/bot"))
+    );
+    let last = said.iter().find(|m| m.author == "steve").expect("recorded");
+    assert!(
+        last.text.starts_with("（这条触发词没有回答"),
+        "{}",
+        last.text
+    );
+    assert_eq!(last.meta["error"], json!(true));
     // someone else's trigger word is just a message
     let n = calls(&h);
     let i = push(&h, &me, msg("C_DEV", "m6", "uhan", "/bot 帮我发", false)).await;

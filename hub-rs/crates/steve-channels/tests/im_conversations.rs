@@ -1817,3 +1817,127 @@ async fn react_settled_synchronizes_with_detached_ack_provider_without_polling()
     h.ch.react_settled(&m.message_id).await;
     assert_eq!(h.fake.reactions_on("r1"), [ReactionKind::Ack]);
 }
+
+// ---------------------------------------------------------------- a trigger word that failed
+
+/// Your trigger word on your own account, its turn in the conversation; the id of that turn.
+async fn your_trigger(h: &H, id: &str, text: &str) -> String {
+    let t = h.thread.clone().unwrap();
+    let before = t.turns.lock().unwrap().len();
+    push(h, &h.me.clone(), msg("D_LI", id, "upx", text, false, false)).await;
+    let turns = t.turns.lock().unwrap().clone();
+    assert_eq!(turns.len(), before + 1, "{turns:?}");
+    let (turn, tt) = turns.last().unwrap().clone();
+    assert_eq!(tt.meta["chan"]["command"], json!(true));
+    turn
+}
+
+/// What the conversation said for turn `turn`: the failure steve-core records (`meta.error`).
+fn failed_answer(h: &H, turn: &str, text: &str) -> String {
+    let conv = h.env.store().messages().get(turn).unwrap().unwrap().space;
+    h.env
+        .store()
+        .messages()
+        .add(
+            WS,
+            "steve",
+            text,
+            None,
+            &json!({"origin": turn, "error": true}),
+            &conv,
+        )
+        .unwrap()
+}
+
+fn unsendable_notices(h: &H) -> i64 {
+    one(
+        h,
+        "SELECT count(*) FROM messages WHERE space = 'notify' AND json_extract(meta, '$.notice.kind') = ?",
+        &[steve_channels::unsendable::NOTICE_KIND],
+    )
+    .as_i64()
+    .unwrap()
+}
+
+/// The owner sent `/ai 看下我现在磁盘情况` on their own account; the answer's model reached for a tool,
+/// the turn failed, and before this nothing reached the chat and the failure was in the log only.
+/// Now the failure is said in its thread as you (the reason stays in Steve), the reaction ends
+/// failed; when the account cannot send (a read-only connection) the conversation records it and you
+/// are told once in Steve, not for every message, until the account sends again.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_trigger_word_is_visible_in_its_thread_and_in_steve() {
+    let h = setup(true).await;
+    push(
+        &h,
+        &h.me.clone(),
+        msg("D_LI", "d0", "ulilei", "在吗", false, false),
+    )
+    .await;
+    exec(
+        &h,
+        "UPDATE channel_settings SET trigger = ? WHERE connection_id = ?",
+        &[
+            &json!({"on": true, "words": ["/ai"], "where": ["dm:*"], "who": ["me"], "reply": "thread", "mark": true}).to_string(),
+            &h.me,
+        ],
+    );
+    let turn = your_trigger(&h, "d1", "/ai 看下我现在磁盘情况").await;
+    let err = failed_answer(&h, &turn, "（这件事要在机器上动手……）");
+    let d = h.ch.conv_deliver(WS, &err).await.unwrap();
+    assert!(matches!(d, Some(Delivered::Sent { .. })), "{d:?}");
+    let s = sent(&h);
+    assert_eq!(
+        s.last().unwrap(),
+        &format!("[AI] {}", conversations::TRIGGER_FAILED_NOTE),
+        "said in the chat as you, marked; the details stay in Steve"
+    );
+    assert!(h.fake.reactions_on("d1").contains(&ReactionKind::Failed));
+    let m = h.env.store().messages().get(&err).unwrap().unwrap();
+    assert_eq!(m.meta["chan_out"]["status"], json!("sent"));
+    assert_eq!(unsendable_notices(&h), 0);
+
+    // the account cannot send (the channel service forbids writes): recorded, told once
+    *h.fake.fail_send.lock().unwrap() = Some("连接只读：渠道服务禁止写入".into());
+    for (id, n) in [("d2", 1), ("d3", 1)] {
+        let turn = your_trigger(&h, id, "/ai 看下我现在磁盘情况").await;
+        let err = failed_answer(&h, &turn, "（没能生成回答）");
+        let d = h.ch.conv_deliver(WS, &err).await.unwrap();
+        assert!(matches!(d, Some(Delivered::Failed { .. })), "{d:?}");
+        let m = h.env.store().messages().get(&err).unwrap().unwrap();
+        assert_eq!(m.meta["chan_out"]["status"], json!("failed"));
+        assert_eq!(unsendable_notices(&h), n, "one notice, not one per message");
+    }
+    let notice = one(
+        &h,
+        "SELECT text FROM messages WHERE space = 'notify' AND json_extract(meta, '$.notice.kind') = ?",
+        &[steve_channels::unsendable::NOTICE_KIND],
+    );
+    let notice = notice.as_str().unwrap();
+    assert!(
+        notice.contains("连接只读") && notice.contains("接入"),
+        "why and where to fix it: {notice}"
+    );
+    assert_eq!(
+        one(
+            &h,
+            "SELECT count(*) FROM messages WHERE space = 'steve' AND json_extract(meta, '$.notice.kind') = ?",
+            &[steve_channels::unsendable::NOTICE_KIND],
+        ),
+        json!(1),
+        "a line in your conversation too"
+    );
+
+    // it sends again: a later failure is told again
+    *h.fake.fail_send.lock().unwrap() = None;
+    let turn = your_trigger(&h, "d4", "/ai 看下我现在磁盘情况").await;
+    let err = failed_answer(&h, &turn, "（没能生成回答）");
+    assert!(matches!(
+        h.ch.conv_deliver(WS, &err).await.unwrap(),
+        Some(Delivered::Sent { .. })
+    ));
+    *h.fake.fail_send.lock().unwrap() = Some("连接只读：渠道服务禁止写入".into());
+    let turn = your_trigger(&h, "d5", "/ai 看下我现在磁盘情况").await;
+    let err = failed_answer(&h, &turn, "（没能生成回答）");
+    h.ch.conv_deliver(WS, &err).await.unwrap();
+    assert_eq!(unsendable_notices(&h), 2);
+}

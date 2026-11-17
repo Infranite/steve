@@ -60,6 +60,10 @@ pub fn failure_note(owner: &str) -> String {
     format!("抱歉，这次没能答上来，我请 {owner} 来看。")
 }
 
+/// What your own trigger word gets in its thread when Steve could not answer it: why, and what to
+/// do, are in Steve (the conversation of the chat), not in a chat others may read.
+pub const TRIGGER_FAILED_NOTE: &str = "这次没能处理，原因和处理办法记在 Steve 里这个聊天的对话中。";
+
 /// Only the user whose view connection `conn` speaks with reads `space`: their private chat with Steve.
 pub fn owner_only(
     c: &rusqlite::Connection,
@@ -483,6 +487,44 @@ impl Channels {
         };
         if m.meta.get("error").is_some_and(|v| v == true) {
             self.react_finish(&plan.message_id, Finish::Failed).await;
+            // a trigger word answered as you: said in its thread too, as you; the reaction stays failed
+            if command && plan.mode == Mode::Own {
+                let yours = self.store().reader(|c| {
+                    crate::arbiter::from_you(
+                        c,
+                        ws,
+                        plan.sender_account_id.as_deref(),
+                        plan.sender_party_id.as_deref(),
+                    )
+                })?;
+                let text = if yours {
+                    TRIGGER_FAILED_NOTE.to_string()
+                } else {
+                    let owner = self
+                        .store()
+                        .reader(|c| personas::owner_name_for_space(c, ws, &plan.space_id))
+                        .unwrap_or_default();
+                    failure_note(&owner)
+                };
+                let d = out
+                    .deliver(
+                        self,
+                        &OutRequest {
+                            target: crate::command_skill::target(self, &plan)?,
+                            text,
+                            purpose: Purpose::Source,
+                            approve: false,
+                            generation: None,
+                            auth: Auth::Trigger {
+                                source: plan.message_id.clone(),
+                            },
+                        },
+                    )
+                    .await?;
+                self.mark_out(&m, &d)?;
+                self.after_trigger_send(ws, &plan.connection_id, &d);
+                return Ok(Some(d));
+            }
             if plan.mode == Mode::Bot {
                 let owner = self
                     .store()
@@ -561,6 +603,9 @@ impl Channels {
             )
             .await?;
         self.mark_out(&m, &d)?;
+        if command && as_you {
+            self.after_trigger_send(ws, &plan.connection_id, &d);
+        }
         Ok(Some(d))
     }
 
@@ -670,6 +715,30 @@ impl Channels {
         }
     }
 
+    /// Records a turn that got no answer in the space's conversation, with why in plain words and
+    /// what to do (`meta.error`): a trigger word that failed before the conversation took it is
+    /// still seen there. Best-effort.
+    pub(crate) fn conv_failed(&self, plan: &Plan, why: &str) {
+        let r = (|| -> ChannelResult<()> {
+            let conv = conv_space(&plan.space_id);
+            let meta = json!({ "chan": chan_meta(self, plan, plan.trigger.is_some())? });
+            let msgs = self.store().messages();
+            let origin = msgs.add(&plan.ws, "me", &plan.text, None, &meta, &conv)?;
+            msgs.add(
+                &plan.ws,
+                "steve",
+                why,
+                None,
+                &json!({"origin": origin, "error": true}),
+                &conv,
+            )?;
+            Ok(())
+        })();
+        if let Err(e) = r {
+            tracing::warn!(message = plan.message_id, "conversation failure note: {e}");
+        }
+    }
+
     fn conv_note_inner(&self, plan: &Plan, said: &str, item: Option<&str>) -> ChannelResult<()> {
         let conv = conv_space(&plan.space_id);
         let meta = json!({ "chan": chan_meta(self, plan, plan.trigger.is_some())? });
@@ -696,7 +765,7 @@ impl Channels {
 
 /// The provider's name for a space's system: the bot account's own system (`feishu_app`) is shown
 /// as its platform (`feishu` → 飞书).
-fn provider_name(c: &rusqlite::Connection, system: &str) -> String {
+pub(crate) fn provider_name(c: &rusqlite::Connection, system: &str) -> String {
     let name = |id: &str| -> Option<String> {
         c.query_row(
             "SELECT nullif(name, '') FROM systems WHERE id = ?",

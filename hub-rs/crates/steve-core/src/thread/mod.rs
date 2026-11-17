@@ -12,6 +12,7 @@ pub mod decide;
 mod eval;
 pub mod flowback;
 mod handle;
+pub mod handoff;
 mod offer;
 pub mod onboard;
 mod reroute;
@@ -1640,6 +1641,7 @@ impl Core {
             t0: now(),
             resume: None,
             space: m.space,
+            to_item: None,
         };
         if !self.enqueue_inline(&r.workspace_id, job)? {
             // Still interrupted in the database; next ready/restart can retry.

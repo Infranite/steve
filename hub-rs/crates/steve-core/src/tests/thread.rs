@@ -623,6 +623,7 @@ async fn an_answer_stopped_while_its_message_was_routed_is_not_queued() {
         t0: crate::util::now(),
         resume: None,
         space: crate::thread::MAIN.into(),
+        to_item: None,
     };
     assert!(k.core.enqueue_inline(WS, job).unwrap());
     assert!(!k.core.inline_busy(WS));
@@ -1152,4 +1153,26 @@ async fn a_plain_question_skips_the_router() {
     k.core.say(WS, "把检索的打分改成按时间加权", &[]).unwrap();
     settle(&k, 4).await;
     assert_eq!(routed.load(std::sync::atomic::Ordering::SeqCst), 1);
+}
+
+/// In your own conversation too, a question whose answer reached for a tool it may not use is
+/// handed to an item instead of ending as a failed answer.
+#[tokio::test]
+async fn a_question_that_needs_tools_becomes_an_item() {
+    let k = Kit::new();
+    k.gw.set(move |p, _| {
+        if p.starts_with("You are the router of Steve") {
+            Ok(json!({"kind": "answer", "confidence": 0.9, "signals": ["question"], "title": "看磁盘", "goal": "看看这台机器的磁盘用量", "bot": "steve"}).to_string())
+        } else if p.starts_with("You are Steve, the user's assistant.") {
+            Err(crate::error::CoreError::NeedsTools)
+        } else {
+            Err(msg("unexpected prompt"))
+        }
+    });
+    k.core.say(WS, "看下我现在磁盘情况", &[]).unwrap();
+    let ms = settle(&k, 2).await;
+    let id = ms[1].item_id.clone().expect("an item, not a failed answer");
+    assert!(!ms[1].text.starts_with("（回答失败"), "{}", ms[1].text);
+    assert!(ms[1].text.contains(&id), "{}", ms[1].text);
+    assert_eq!(k.db().item(&id).unwrap().unwrap().source.1, "chat");
 }

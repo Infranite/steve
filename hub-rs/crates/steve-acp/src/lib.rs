@@ -37,6 +37,6 @@ pub use config::{
     is_executable_file, is_node_script, npm_root, resolve_builtin_adapters, which_in,
 };
 pub use errors::{is_dead_agent, is_transient};
-pub use oneshot::{Image, OneShotError};
+pub use oneshot::{Image, OneShotError, TOOL_REFUSED};
 pub use rollout::find as codex_rollout;
 pub use rpc::RpcError;
