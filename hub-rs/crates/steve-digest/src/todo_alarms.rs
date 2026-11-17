@@ -1,7 +1,7 @@
 //! A todo's alarms (steve-flow [`steve_flow::alarms`], family `todo`): its reminder at `remind_at` (kind
 //! `todo`) and its wake-up at `snooze_until` (kind `snooze`), only while it is open. A reminder that falls
 //! inside the snooze is not rung on its own: the wake-up is the reminder. Planned again whenever one of
-//! those fields or the state changes (the triggers of migration 099), so done, dropped, handed, deleted or
+//! those fields or the state changes (the triggers of migration 100), so done, dropped, handed, deleted or
 //! moved todos lose the alarms they no longer have.
 
 use rusqlite::{Connection, OptionalExtension, params};
