@@ -727,7 +727,8 @@ async fn in_a_busy_group_answering_one_person_leaves_the_others_draft() {
     push(&h, &me, to_li).await;
     assert_eq!(status(&h, &li_draft), "discarded", "the one you answered");
     assert_eq!(status(&h, &han_draft), "draft", "not the other one");
-    // YOLO, judging again, still may approve it
+    // YOLO, judging again once its disclosure check is done, still may approve it
+    checked(&h).await;
     let card: String = row(
         &h,
         "SELECT decision_id FROM chan_messages WHERE id = ?",

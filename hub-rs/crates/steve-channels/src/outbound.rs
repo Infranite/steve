@@ -743,7 +743,12 @@ fn later_of(c: &Connection, message_id: &str, now: i64) -> ChannelResult<Option<
     let Some(b) = basis::of_message(c, &row.ws, &row.id)? else {
         return Ok(None);
     };
-    let space = spaces::get(c, &row.space_id)?.ok_or_else(|| ApiError::not_found("空间"))?;
+    // checked as it goes out: through its sender's identity in the chat (one space per chat: the space's
+    // own connection may be a bot's while the draft is yours), else the space's voice
+    let space = match sending_space(c, &row)? {
+        Some(s) => s,
+        None => spaces::get(c, &row.space_id)?.ok_or_else(|| ApiError::not_found("空间"))?,
+    };
     let p = place(
         c,
         &row.ws,
