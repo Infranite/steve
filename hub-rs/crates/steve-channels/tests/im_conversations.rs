@@ -2067,3 +2067,38 @@ async fn a_trigger_word_no_one_took_records_the_real_reason_once() {
     );
     assert!(h.fake.reactions_on("n1").contains(&ReactionKind::Failed));
 }
+
+/// An account the channel refuses writes for good (read-only, remembered as a write block): its own
+/// card is the one notice about it, so a failed trigger word adds no second one, however often.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_read_only_account_gets_the_write_block_notice_only() {
+    let h = setup(true).await;
+    push(
+        &h,
+        &h.me.clone(),
+        msg("D_LI", "b0", "ulilei", "在吗", false, false),
+    )
+    .await;
+    exec(
+        &h,
+        "UPDATE channel_settings SET trigger = ? WHERE connection_id = ?",
+        &[
+            &json!({"on": true, "words": ["/ai"], "where": ["dm:*"], "who": ["me"], "reply": "thread", "mark": true}).to_string(),
+            &h.me,
+        ],
+    );
+    *h.fake.block_send.lock().unwrap() = Some("write_policy forbidden".into());
+    for id in ["b1", "b2"] {
+        let turn = your_trigger(&h, id, "/ai 看下我现在磁盘情况").await;
+        let err = failed_answer(&h, &turn, "（没能生成回答）");
+        let d = h.ch.conv_deliver(WS, &err).await.unwrap();
+        assert!(
+            matches!(
+                d,
+                Some(Delivered::Failed { .. } | Delivered::Blocked { .. })
+            ),
+            "{d:?}"
+        );
+    }
+    assert_eq!(unsendable_notices(&h), 0, "the write block's card says it");
+}

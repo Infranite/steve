@@ -5,6 +5,9 @@
 //! where that is fixed. Not again for every message: the account is remembered in `settings`
 //! (`trigger.unsendable.<connection>`) until a send from it goes out, after which a new failure is
 //! told again.
+//!
+//! A write the channel refused for good ([`crate::write_blocks`]) has its own one notice already
+//! (the card of the first refused message): no second one is given here for it.
 
 use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::json;
@@ -101,6 +104,19 @@ impl Channels {
                     if told {
                         return Ok(());
                     }
+                    // refused for good: the write block's own card is the one notice
+                    let space: Option<String> = tx
+                        .query_row(
+                            "SELECT space_id FROM chan_messages WHERE id = ?",
+                            [message_id],
+                            |r| r.get(0),
+                        )
+                        .optional()?;
+                    if crate::write_blocks::active(tx, conn, space.as_deref().unwrap_or(""), now)?
+                        .is_some()
+                    {
+                        return Ok(());
+                    }
                     let error = last_error(tx, message_id)?;
                     let (provider, name) = account(tx, conn)?;
                     let why = error.trim().trim_end_matches('。');
@@ -133,6 +149,8 @@ impl Channels {
                     Ok(())
                 })?;
             }
+            // refused for good and told once already (the write block's card)
+            Delivered::Blocked { .. } => {}
             Delivered::Drafted { .. } | Delivered::Queued { .. } | Delivered::Skipped => {}
         }
         Ok(())

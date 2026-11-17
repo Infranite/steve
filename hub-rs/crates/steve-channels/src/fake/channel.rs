@@ -37,6 +37,9 @@ pub struct FakeChannel {
     pub fail_info: Mutex<bool>,
     /// `send` fails with this text while set (C6 tests).
     pub fail_send: Mutex<Option<String>>,
+    /// `send` is refused for good with this text while set: the connection is read-only
+    /// ([`ProviderError::Blocked`], the whole connection).
+    pub block_send: Mutex<Option<String>>,
     /// The next send goes out, but its answer is lost (a transient error back): `unknown`.
     pub lose_answer: Mutex<bool>,
     /// Calls of `space_info` and `members`.
@@ -227,6 +230,13 @@ impl ChannelAdapter for FakeChannel {
         // the provider refused it: nothing went out
         if let Some(e) = lock(&self.fail_send).clone() {
             return Err(ProviderError::Rejected(e).into());
+        }
+        if let Some(e) = lock(&self.block_send).clone() {
+            return Err(ProviderError::Blocked(
+                steve_modules::accounts::connections::BlockScope::Connection,
+                e,
+            )
+            .into());
         }
         let mut sent = lock(&self.sent);
         // the same uuid twice sends once, like Feishu
