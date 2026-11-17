@@ -239,6 +239,16 @@ Native macOS (`SteveMac`) and iOS (`SteveIOS`) clients live in `apple/SteveClien
 
 Individual targets can also be run directly (`./scripts/build-apple-client.sh test`, `mac`, `ios`, or `ios-sim`).
 
+## Channel send recovery
+
+A failed channel-send card retains the full proposed text and structured recovery facts: `kind`, `source`, `provider`, `scope`, `code`, optional `rpc_code`, connection/space identifiers, `instructions`, `settings_href`, and `authorization_kind`. These describe the observed restriction; they do not prove the external service's internal policy or grant permission. In particular, ext_ws `target_forbidden` (-32016) is a target refusal, distinct from a disclosure failure.
+
+For a personal connection whose platform already offers `msg.send_as_user` but whose local capability is disabled, `POST /api/chan-messages/:id/authorization` creates a deterministic Proposal. Review its connection-wide scope and before/after values; the existing `/api/config/:id/apply` and `/undo` routes recheck ownership, platform capabilities and revision. Applying enables only the local capability and never sends the message. Undo preserves a later conflicting connection edit. External restrictions have recovery instructions and a settings link; Steve has no API to grant the remote service's permission.
+
+After restoring access, explicitly choose `retry`; current authorization and content are checked again. `rewrite` with text makes a new draft for review, while empty text requests a model rewrite. Recovery drafts retain `recovery_review` through rewrite failure, undo and restart, and require a human `yes` even with YOLO enabled. A changed payload uses a new message UUID. `discard` closes the send; later permission changes do not revive discarded messages.
+
+The 24-hour refusal memory suppresses repeated automatic replies and notices. Explicit mentions, trigger words and manual retries are processed again; the existing blocked-space and manual silence checks remain in force. Retries reuse the existing claim, UUID and send-state contracts. Unknown results keep their original payload and key, disallow edits and require reconciliation rather than a blind send outside the provider's deduplication window. A local `sent` state is not a read receipt; inspect the channel message and provider receipt when available. Older clients may still use `retry`/`rewrite`/`discard`; recovery metadata and the Proposal route are additive.
+
 ## An external channel service
 
 A messaging system Steve has no built-in adapter for can be connected through a separate channel service: a program that signs in to that system as you or as a bot and speaks Steve's external channel protocol over a WebSocket. The service runs on its own (on your machine or LAN); the Hub dials out to it, so the Hub opens no port for it, and a crash or restart of the service only pauses the channel.

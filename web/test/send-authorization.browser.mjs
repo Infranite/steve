@@ -135,6 +135,7 @@ try {
     assert.equal(await card.locator('[data-undo]').isDisabled(), true)
     readFailed = false; await click('[data-send-refresh]')
     await card.locator('[data-authorization-current="enabled"]').waitFor()
+    await page.waitForFunction(() => document.querySelector('[data-undo]')?.disabled === false)
     assert.equal(await card.locator('[data-undo]').isDisabled(), false)
 
     await open(); await click('[data-authorization-create]'); lost = true; await click('[data-apply]')
