@@ -128,7 +128,10 @@ fn freeze(k: &Kit, x: &Remote) {
 
 /// The result is void (a new message) and the same change is delivered and accepted again.
 fn accepted_again(k: &Kit, x: &Remote) {
-    k.core.tx().lc_invalidate(&x.item, "收到新的消息").unwrap();
+    k.core
+        .tx()
+        .lc_invalidate(&x.item, crate::cycle::void::MESSAGE, "收到新的消息")
+        .unwrap();
     let s = k.db().session(&x.session).unwrap().unwrap();
     k.core
         .tool_deliver(
@@ -428,7 +431,10 @@ fn an_invalidated_result_is_never_merged() {
     let (k, x) = reviewed(&gh);
     let h = head(&x.wt);
     gh.prs(open_pr(&h, json!({})));
-    k.core.tx().lc_invalidate(&x.item, "收到新的消息").unwrap();
+    k.core
+        .tx()
+        .lc_invalidate(&x.item, crate::cycle::void::MESSAGE, "收到新的消息")
+        .unwrap();
     assert_eq!(k.phase(&x.item), "active");
     look(&k);
     look(&k);
@@ -568,7 +574,10 @@ fn the_merge_card_expires_with_the_result_it_was_for() {
     gh.prs(open_pr(&head(&x.wt), json!({})));
     look(&k);
     let card = merge_cards(&k, &x).pop().unwrap();
-    k.core.tx().lc_invalidate(&x.item, "收到新的消息").unwrap();
+    k.core
+        .tx()
+        .lc_invalidate(&x.item, crate::cycle::void::MESSAGE, "收到新的消息")
+        .unwrap();
     assert_eq!(k.db().decision(&card).unwrap().unwrap().status, "expired");
     assert!(k.core.resolve(&card, "yes", "", "me").is_err());
     look(&k);
@@ -936,7 +945,10 @@ fn a_merge_that_ran_while_its_result_went_void_is_said_marked_and_yours() {
     // the look before the merge was fine; the result goes void while the merge call runs
     let due = k.core.tx().prs_due().unwrap();
     assert_eq!(due.len(), 1);
-    k.core.tx().lc_invalidate(&x.item, "收到新的消息").unwrap();
+    k.core
+        .tx()
+        .lc_invalidate(&x.item, crate::cycle::void::MESSAGE, "收到新的消息")
+        .unwrap();
     let crate::pull::Look::Found(pr) = crate::pull::read(&open_pr(&h, json!({}))) else {
         panic!()
     };
