@@ -675,7 +675,7 @@ const painted = new Set<string>()
 const paint = (sid: string) => { painted.add(sid); painting ??= setTimeout(() => { painting = null; for (const id of painted) updateSession(id); painted.clear(); emit() }, 80) }
 /* The module SSE types (steve-modules `sse::MODULE_TYPES`, plus `kb`): ids only, scoped to the workspace; the module
  * pages refetch what they show. They don't touch /api/state, so they never trigger a state refresh here. */
-export const MODULE_EVENTS = ["party", "mm", "changeset", "account", "connection", "vault", "signal", "flow", "run", "space", "chan_message", "persona", "digest", "channel", "gh", "mail", "kb", "yolo", "yolo_action", "stats"] as const
+export const MODULE_EVENTS = ["party", "mm", "changeset", "account", "connection", "vault", "signal", "flow", "run", "space", "chan_message", "persona", "digest", "channel", "gh", "mail", "calendar", "kb", "yolo", "yolo_action", "stats"] as const
 export type ModuleEvent = { type: (typeof MODULE_EVENTS)[number] | "resync"; id: string; ws?: string; flow_id?: string; space_id?: string }
 const moduleTypes = new Set<string>(MODULE_EVENTS)
 /** every stream event, for pages that keep their own data (contacts, knowledge, accounts, vault, signals, flows, GitHub …) */

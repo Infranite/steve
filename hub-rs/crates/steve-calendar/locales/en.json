@@ -1,0 +1,17 @@
+{
+  "calendar.ics.name": "ICS calendar subscription",
+  "calendar.ics.field_name": "Name",
+  "calendar.ics.field_name_hint": "The name shown in Steve; empty: the one in the calendar file",
+  "calendar.ics.field_url": "Subscription address",
+  "calendar.ics.field_url_hint": "An .ics address starting with https:// or webcal://; leave it empty to upload an .ics file here after connecting",
+  "calendar.ics.field_tz": "Time zone",
+  "calendar.ics.field_tz_hint": "Used when the calendar file names none, for example Asia/Shanghai",
+  "calendar.ics.note": "Reads the events of a calendar subscription address or an .ics file, read only",
+  "calendar.demo.name": "Demo calendar",
+  "calendar.demo.field_tz": "Time zone",
+  "calendar.demo.field_tz_hint": "The demo events are placed in working hours of this time zone",
+  "calendar.demo.note": "Made-up demo events to try the calendar with; connects to no service",
+  "calendar.api.not_ics": "Only an ICS calendar takes an .ics file",
+  "calendar.api.subscribed": "This ICS calendar reads a subscription address; to use a file instead, disconnect it and connect again",
+  "calendar.api.free_busy_only": "The source shows only free/busy for this calendar; its details cannot be kept"
+}

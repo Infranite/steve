@@ -206,6 +206,8 @@ pub const MIGRATIONS: &[&str] = &[
     // 99: todos become goals and dated todos (kind, parent, target date, date-only deadlines,
     // reminders, snooze, priority, star, recurrence).
     include_str!("../migrations/099.sql"),
+    // 100: the calendar read cache: calendars per connection and person, events, attendees, meetings.
+    include_str!("../migrations/100.sql"),
 ];
 
 /// 027's item columns and their one-time backfill (applied by `run_pending` when `items.phase` is missing).

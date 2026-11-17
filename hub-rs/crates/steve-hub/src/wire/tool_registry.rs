@@ -160,6 +160,7 @@ fn steve_meta(name: &str) -> (&'static [&'static str], bool) {
         n if n.starts_with("secret") => &["secret", "credential"],
         n if n.starts_with("github") => &["github", "repository", "pull_request"],
         n if n.starts_with("mail") => &["mail", "email"],
+        n if n.starts_with("calendar") => &["calendar", "event", "meeting", "schedule"],
         n if n.starts_with("a2a_") => &["agent"],
         _ => &[],
     };

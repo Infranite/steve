@@ -43,6 +43,7 @@ pub(crate) enum Owner {
     Vault,
     Github,
     Mail,
+    Calendar,
     Flow,
     ReplySource,
     Im,
@@ -172,6 +173,8 @@ pub(crate) fn owner_of(name: &str) -> Option<Owner> {
         Some(Owner::Github)
     } else if steve_mail::mcp::handles(name) {
         Some(Owner::Mail)
+    } else if steve_calendar::tools::handles(name) {
+        Some(Owner::Calendar)
     } else if steve_flow::mcp::handles(name) {
         Some(Owner::Flow)
     } else if name == REPLY_SOURCE {
@@ -198,6 +201,7 @@ fn extra_tools() -> Vec<Value> {
     v.extend(steve_modules::vault::mcp::tools().iter().cloned());
     v.extend(steve_github::mcp::tools().iter().cloned());
     v.extend(steve_mail::mcp::tools().iter().cloned());
+    v.extend(steve_calendar::tools::tools());
     v.extend(steve_flow::mcp::tools().iter().cloned());
     v.push(reply_source_tool());
     v.push(devices_tool());
@@ -576,6 +580,7 @@ async fn call_owned_inner(
         }
         // `steve_mail_draft` marks the session itself (`DraftHooks::awaiting_approval`)
         Owner::Mail => steve_mail::mcp::call(&x.tools.mail, &cx, name, &args).await,
+        Owner::Calendar => steve_calendar::tools::call(&x.tools.calendar, &cx, name, &args).await,
         Owner::Flow => steve_flow::mcp::call(&x.tools.flow, &cx, name, &args).await,
         Owner::Im => steve_channels::im_mcp::call(&x.tools.channels, &cx, name, &args).await,
         Owner::Devices => {

@@ -800,3 +800,39 @@
 //!   connection. It is not part of the identity: a change is never `account_changed`.
 //! - The service, not the Hub, is in control of the connection: the user starts it, then registers
 //!   its address and token in the Hub (or the plugin store does both); the Hub dials it.
+//!
+//! ## 17. Connector profiles (2026-11-17)
+//!
+//! A connector declaration with `version: 2` MAY add `profiles` (at most 16): fixed contracts the
+//! Hub defines and the service only translates, `{id, caps, features}`. `id` names the contract
+//! (`calendar.v1`); `caps` are the capability codes the service offers through it (`cal.read`,
+//! `cal.write`); `features` say which optional parts it has, and the Hub falls back where one is
+//! missing. Ids, caps and features are `[A-Za-z0-9._-]`, 1–64 bytes; an unknown profile is ignored.
+//! Version 1 declarations stay valid and have no profiles.
+//!
+//! Profile methods are not `operations`: they are never exported as agent tools, so an agent cannot
+//! reach a provider around the Hub module that owns the profile (and its approvals). The Hub calls
+//! `profile.call {profile, method, arguments}` and expects the method's JSON result. This revision
+//! sends reads only, once, without replay; a write method will carry an idempotency key.
+//!
+//! `calendar.v1` (read methods; times are Unix ms, dates `YYYY-MM-DD`, ids are the provider's):
+//!
+//! - `cal.calendars.list {}` → `{calendars: [{id, name, color?, kind?: primary|shared|team|subscribed,
+//!   role?: free_busy|reader|writer|owner, share?: private|busy|details, tz?, owner?: person}]}`.
+//! - `cal.events.changes {calendar, cursor|null, from_ms, to_ms}` → `{events: [event], deleted: [id],
+//!   cursor, full}` (feature `changes`). Without a cursor, `events` is the whole window; with one, what
+//!   changed since it, whatever the window (`full: true`: the cursor was not usable and `events` is the
+//!   whole window). The Hub asks without a cursor again once a day, for the days entering the window.
+//! - `cal.events.list {calendar, from_ms, to_ms}` → `{events: [event]}`, the whole window.
+//! - `cal.events.get {calendar, event}` → `{event: event|null}`, with the body and every attendee.
+//! - `cal.freebusy {calendar, from_ms, to_ms}` → `{busy: [{start_ms, end_ms}]}` (feature `freebusy`).
+//!
+//! An event is `{id, series_id?, original_start?, ical_uid?, sequence?, etag?, title?, location?,
+//! meeting_url?, description?, start: {ms?|date?, tz?}, end: {ms?|date?, tz?}, status?:
+//! confirmed|tentative|cancelled, my_rsvp?: accepted|declined|tentative|needs_action, organizer?:
+//! person, attendees?: [person + {rsvp?, organizer?, optional?}], can_modify?}`; a person is `{email?,
+//! name?, ref?, self?}`. A timed event has `start.ms`/`end.ms`, an all-day one `start.date`/`end.date`
+//! (end exclusive). Recurring events come as their occurrences, each with its own `id` and
+//! `original_start` (feature `instances`: the provider expands them; without it the service does).
+//! Features: `changes`, `instances`, `conditional_write`, `ext_props`, `ical_uid`, `freebusy`,
+//! `rooms`, `rsvp`, `push`.

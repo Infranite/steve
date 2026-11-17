@@ -111,7 +111,7 @@ pub struct Assembly {
 
 impl Assembly {
     /// What the `steve-hub` binary registers: `feishu.bot`, `feishu.self`, `ext_ws`, `mail.imap`,
-    /// `github`.
+    /// `github`, `calendar`.
     pub fn builtin() -> Self {
         let list: Vec<Arc<dyn Extension>> = vec![
             Arc::new(builtin::FeishuBot),
@@ -119,6 +119,7 @@ impl Assembly {
             Arc::new(builtin::ExternalChannel::default()),
             Arc::new(builtin::MailImap),
             Arc::new(builtin::GitHub),
+            Arc::new(builtin::Calendars),
         ];
         Self {
             list: list
@@ -206,6 +207,7 @@ impl Assembly {
             history: Vec::new(),
             connectors: Vec::new(),
             mail: Vec::new(),
+            calendars: Vec::new(),
             event_sources: Vec::new(),
             systems: Vec::new(),
         };
@@ -319,6 +321,7 @@ pub struct Declare<'a> {
     pub(crate) history: Vec<Arc<dyn steve_channels::ext::HistoryRead>>,
     pub(crate) connectors: Vec<Arc<dyn steve_channels::ext::ConnectorTools>>,
     pub(crate) mail: Vec<Arc<dyn steve_mail::MailAdapter>>,
+    pub(crate) calendars: Vec<Arc<dyn steve_calendar::CalendarSource>>,
     pub(crate) event_sources: Vec<Arc<dyn steve_flow::EventAdapter>>,
     /// Handle systems declared by the extensions: `(id, label, extension)`.
     pub(crate) systems: Vec<(String, String, String)>,
@@ -450,6 +453,19 @@ impl Declare<'_> {
         self.claim(a.id())?;
         self.providers.push(a.clone());
         self.mail.push(a);
+        Ok(())
+    }
+
+    /// A calendar source with its own connections (a provider for `Connections`, a source for the
+    /// calendar service). A connector plugin's calendars need nothing here: an ext_ws connection
+    /// that declares `calendar.v1` is a source already.
+    pub fn calendar<T>(&mut self, a: Arc<T>) -> Result<(), ExtensionError>
+    where
+        T: ConnectionProvider + steve_calendar::CalendarSource + 'static,
+    {
+        self.claim(ConnectionProvider::id(a.as_ref()))?;
+        self.providers.push(a.clone());
+        self.calendars.push(a);
         Ok(())
     }
 

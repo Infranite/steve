@@ -1135,7 +1135,7 @@ async fn connections_passkeys_and_github_are_mounted() {
     assert_eq!(s, 200, "{ig}");
     let ps = ig["providers"].as_array().expect("providers");
     let ids: Vec<_> = ps.iter().filter_map(|p| p["id"].as_str()).collect();
-    assert_eq!(ids, ["feishu", "github", "mail", "ext_ws"], "{ig}");
+    assert_eq!(ids, ["feishu", "github", "mail", "ext_ws", "ics"], "{ig}");
     let status = |id: &str| {
         ps.iter()
             .find(|p| p["id"] == id)
