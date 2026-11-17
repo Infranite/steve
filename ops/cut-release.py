@@ -5,6 +5,12 @@
   cut-release.py cut [--minor | --version X.Y.Z] [--branch B] [--dry-run] [--ci-wait S | --skip-ci]
   cut-release.py lint [--base REF]                 a branch carries release-note fragments only
 
+Versions are MAJOR.MINOR.PATCH (CONTRIBUTING.md, "Changes and releases"): PATCH for every ordinary
+release; --minor when an operator must act (Hub/Node or client protocol change, something removed or
+changed in meaning, manual configuration, an upgrade that reinstalling the previous release cannot
+undo), announced by a fragment whose first line is `Needs a minor release: <why>`; MAJOR stays 0 until
+the interfaces are declared stable.
+
 Release notes are fragments: each change adds `docs/releases/unreleased/<name>.md` (its item, e.g.
 `ST-38.md`, or its branch), a few sentences or bullets, no version and no `# ` title. `cut` takes the
 target branch as it is on `origin` (in a worktree of its own, so the caller's checkout does not matter),
