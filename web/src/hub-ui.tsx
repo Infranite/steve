@@ -1,9 +1,9 @@
 import { readHubInfo } from "@/hub-management-api"
 /* Hubs and pairing, the same in a browser and inside the apps: the switcher in the sidebar, the list with its add
- * field (on the no-Hub, signed-out and cannot-connect screens, in a dialog, and in 设置 · 访问与客户端), the answer
+ * field (on the no-Hub, signed-out and cannot-connect screens, and in a dialog), the answer
  * to a pairing link, and the offer of the Hubs another page sent along. The list itself is `hubDirectory()`. */
 import { useCallback, useEffect, useMemo, useState } from "react"
-import { CheckIcon, CircleAlertIcon, ChevronsUpDownIcon, KeyRoundIcon, PlusIcon, QrCodeIcon, ServerIcon, ServerOffIcon } from "lucide-react"
+import { CheckIcon, CircleAlertIcon, ChevronsUpDownIcon, NetworkIcon, PlusIcon, QrCodeIcon, ServerIcon, ServerOffIcon } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { DropdownMenu, DropdownMenuContent, DropdownMenuGroup, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
@@ -97,27 +97,26 @@ export function HubSwitcher() {
                 {h.current && <CheckIcon className="size-4 text-blue" />}
               </DropdownMenuItem>))}
           </DropdownMenuGroup>
+          {/* the Hub in use is managed on its devices page; the list of Hubs is this client's own */}
           <DropdownMenuSeparator />
-          <DropdownMenuItem onClick={() => go("#/settings/hub")} data-hub-manage><ServerIcon />{t("hub:title")}</DropdownMenuItem>
-          <DropdownMenuItem onClick={() => openSheet("hubs", { add: true })} data-hub-add><PlusIcon />{t("shell:hub.add")}</DropdownMenuItem>
-          <DropdownMenuItem onClick={() => openSheet("pairClient")} data-hub-pair><QrCodeIcon />{t("shell:hub.pairDevice")}</DropdownMenuItem>
-          <DropdownMenuItem onClick={() => go("#/settings/access")}><KeyRoundIcon />{t("shell:hub.access")}</DropdownMenuItem>
+          <DropdownMenuItem onClick={() => go("#/devices")} data-hub-devices><NetworkIcon />{t("devices:switcher.devices")}</DropdownMenuItem>
+          <DropdownMenuItem onClick={() => openSheet("addDevice")} data-hub-add-device><PlusIcon />{t("devices:switcher.add")}</DropdownMenuItem>
+          <DropdownMenuSeparator />
+          <DropdownMenuItem onClick={() => openSheet("hubs")} data-hub-add><ServerIcon />{t("devices:switcher.hubs")}</DropdownMenuItem>
         </DropdownMenuContent>
       </DropdownMenu>
     </SidebarMenuItem>
   )
 }
 
-/** the same entries on 我的, where a phone has no sidebar */
+/** the same two ways on 我的, where a phone has no sidebar: this Hub's devices page, and the list of Hubs */
 export function HubMore() {
   const t = useT(), { hubs } = useHubs()
   const cur = hubs?.find((h) => h.current)
   return (
     <Section label="Hub" data-more-hub><Panel>
-      <Row icon={<Tile I={ServerIcon} />} title={t("hub:title")} sub={t("hub:subtitle")} onClick={() => go("#/settings/hub")} data-more-hub-manage><Chevron /></Row>
-      <Row icon={<Tile I={ServerIcon} />} title={cur?.name ?? t("shell:hub.rowHubs")} sub={cur ? [hubSub(cur), t("shell:hub.rowHubs")].filter(Boolean).join(" · ") : undefined} onClick={() => openSheet("hubs")} data-more-hubs><Chevron /></Row>
-      <Row icon={<Tile I={QrCodeIcon} />} title={t("shell:hub.rowPair")} sub={t("shell:hub.rowPairSub")} onClick={() => openSheet("pairClient")} data-more-pair><Chevron /></Row>
-      <Row icon={<Tile I={KeyRoundIcon} />} title={t("shell:hub.rowAccess")} sub={t("shell:hub.rowAccessSub")} onClick={() => go("#/settings/access")} data-more-access><Chevron /></Row>
+      <Row icon={<Tile I={NetworkIcon} />} title={t("devices:switcher.devices")} sub={t("devices:switcher.devicesSub")} onClick={() => go("#/devices")} data-more-devices><Chevron /></Row>
+      <Row icon={<Tile I={ServerIcon} />} title={cur?.name ?? t("devices:switcher.hubsRow")} sub={cur ? [hubSub(cur), t("devices:switcher.hubsRow")].filter(Boolean).join(" · ") : undefined} onClick={() => openSheet("hubs")} data-more-hubs><Chevron /></Row>
     </Panel></Section>
   )
 }

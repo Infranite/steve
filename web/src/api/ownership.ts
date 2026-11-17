@@ -30,7 +30,7 @@ export const ownership = {
 export function objectHref(o: ObjectInfo): string | null {
   switch (o.object_type) {
     case "bot": return "#/bots/" + o.object_id
-    case "device": return "#/devices/" + o.object_id
+    case "device": return "#/devices/nodes/" + encodeURIComponent(o.object_id)
     case "persona": return "#/personas/" + o.object_id
     case "party": return "#/contacts/" + o.object_id
     case "account": return "#/accounts/" + o.object_id

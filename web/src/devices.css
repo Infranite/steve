@@ -31,3 +31,6 @@
 .device-chart-plot { margin-block: .75lh; }
 .device-chart-axis > :first-child { transform: translateY(-50%); }
 .device-chart-axis > :last-child { transform: translateY(50%); }
+
+/* the Nodes tab's count turns amber while a Node wants you */
+[data-devices-tabs] .ui-segc__opt[data-warn] .ui-segc__count { background: color-mix(in srgb, var(--attention) 16%, transparent); color: var(--attention); box-shadow: none; }

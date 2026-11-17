@@ -999,18 +999,37 @@ fn internal(e: impl std::fmt::Display) -> crate::error::ApiError {
     crate::error::ApiError::Json(500, e.to_string())
 }
 
-/// `GET /api/access`: the caller's tokens and clients, and which client asks.
+#[derive(Deserialize, Default)]
+pub struct OverviewQuery {
+    /// `1`: every member's clients, for the instance owner (anyone else still gets their own)
+    #[serde(default)]
+    all: Option<String>,
+}
+
+/// `GET /api/access[?all=1]`: the caller's tokens and clients, and which client asks. With `all`, the instance
+/// owner gets every member's clients and the members' names (`users`); a member still gets only their own.
 pub async fn overview(
     State(st): State<AppState>,
     axum::Extension(c): axum::Extension<crate::api::Ctx>,
+    axum::extract::Query(q): axum::extract::Query<OverviewQuery>,
 ) -> Result<axum::response::Response, crate::error::ApiError> {
     let store = store_of(&st)?;
     let me = c.me.clone();
-    let (tokens, clients) = tokio::task::spawn_blocking(move || {
-        Ok::<_, steve_store::StoreError>((
-            store.access().tokens(Some(&me))?,
-            store.access().clients(Some(&me))?,
-        ))
+    let all = q.all.as_deref() == Some("1") && is_owner(&c);
+    let (tokens, clients, users) = tokio::task::spawn_blocking(move || {
+        let tokens = store.access().tokens(Some(&me))?;
+        let clients = store.access().clients(if all { None } else { Some(&me) })?;
+        let mut users = serde_json::Map::new();
+        if all {
+            for c in &clients {
+                if !users.contains_key(&c.user_id)
+                    && let Some(u) = store.users().get(&c.user_id)?
+                {
+                    users.insert(c.user_id.clone(), json!(u.name));
+                }
+            }
+        }
+        Ok::<_, steve_store::StoreError>((tokens, clients, users))
     })
     .await
     .map_err(internal)?
@@ -1023,8 +1042,16 @@ pub async fn overview(
             "current": c.client.as_ref().map(|x| x.id.clone()),
             "route": c.client.as_ref().map(|x| x.route.clone()),
             "hub": {"version": st.cfg.version, "api": API_VERSION},
+            "me": c.me.clone(),
+            "all": all,
+            "users": users,
         }),
     ))
+}
+
+/// Whether the caller is the instance's owner.
+fn is_owner(c: &crate::api::Ctx) -> bool {
+    c.user.get("role").and_then(Value::as_str) == Some("owner")
 }
 
 #[derive(Deserialize)]
@@ -1098,7 +1125,7 @@ pub async fn token_revoke(
     Ok(reply(StatusCode::OK, json!({"ok": true})))
 }
 
-/// `DELETE /api/access/clients/{id}`: signs one of the caller's clients out.
+/// `DELETE /api/access/clients/{id}`: signs one of the caller's clients out; the instance owner, anyone's.
 pub async fn client_revoke(
     State(st): State<AppState>,
     axum::Extension(c): axum::Extension<crate::api::Ctx>,
@@ -1106,22 +1133,32 @@ pub async fn client_revoke(
 ) -> Result<axum::response::Response, crate::error::ApiError> {
     let store = store_of(&st)?;
     let me = c.me.clone();
+    let owner = is_owner(&c);
     let cid = id.clone();
     let done = tokio::task::spawn_blocking(move || {
-        let Some(cl) = store.access().client(&cid)?.filter(|x| x.user_id == me) else {
-            return Ok::<_, steve_store::StoreError>(false);
+        let Some(cl) = store
+            .access()
+            .client(&cid)?
+            .filter(|x| x.user_id == me || owner)
+        else {
+            return Ok::<_, steve_store::StoreError>(None);
         };
         let ok = store.access().client_revoke(&cl.id)?;
-        store.audit(&me, "client.revoke", &cl.id, &json!({}), steve_store::WS)?;
-        Ok(ok)
+        store.audit(
+            &me,
+            "client.revoke",
+            &cl.id,
+            &json!({"user": cl.user_id}),
+            steve_store::WS,
+        )?;
+        Ok(ok.then_some(cl.user_id))
     })
     .await
     .map_err(internal)?
     .map_err(internal)?;
-    if !done {
+    let Some(uid) = done else {
         return Err(crate::error::ApiError::not_found("client"));
-    }
-    let uid = c.me.clone();
+    };
     drop_pending_pairings(|p| {
         p.user_id == uid && p.creator_client_id.as_deref() == Some(id.as_str())
     });
@@ -1880,7 +1917,7 @@ pub fn restore_oidc(
 }
 
 fn owner_only(c: &crate::api::Ctx) -> Result<(), crate::error::ApiError> {
-    if c.user.get("role").and_then(Value::as_str) == Some("owner") {
+    if is_owner(c) {
         Ok(())
     } else {
         Err(crate::error::ApiError::Json(

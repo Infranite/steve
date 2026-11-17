@@ -1,6 +1,4 @@
-import { HubSettingsPane } from "@/hub-settings"
 /* Bot 菜单与设置：Bot 是独立菜单；设置是分类页。所有改动都写到 Hub，也都可以直接告诉 Steve。 */
-import { ACCESS_CAT, AccessSettingsPane } from "@/access-settings"
 import { itemDisplayStatus } from "@/item-workflow-relation"
 import { useT } from "@/i18n"
 import { Trans } from "react-i18next"
@@ -353,8 +351,6 @@ const cats = (t: T): [string, string, any, string][] => [
   ["notify", t("manage:settings.catNotify"), BellIcon, t("manage:settings.catNotifySub")],
   ["look", t("manage:settings.catLook"), SunMoonIcon, t("manage:settings.catLookSub")],
   MODELS_CAT,
-  ["hub", t("hub:title"), SlidersHorizontalIcon, t("hub:subtitle")],
-  ACCESS_CAT,
   VAULT_CAT,
   STATS_CAT,
   /* the audit trail names every member, client and token: the Hub answers the instance's owner only */
@@ -427,8 +423,6 @@ function Pane({ id }: { id: string }) {
   if (id === "stats") return <StatsSettingsPane />
   if (id === "audit") return <AuditSettingsPane />
   if (id === "models") return <ModelsSettingsPane />
-  if (id === "hub") return <HubSettingsPane />
-  if (id === "access") return <AccessSettingsPane />
   if (id === "plugins") return <PluginsSettingsPane />
   if (id === "general") return <div className="flex flex-col gap-8">
     <Section label={t("manage:general.assistant")}><Panel><Row icon={<BotAvatar k="steve" size={36} />} title={st.bots.steve?.n} sub={t("manage:general.assistantSub")} onClick={() => go("#/bots/steve")}><Chevron /></Row></Panel></Section>

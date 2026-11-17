@@ -77,7 +77,7 @@ async function fixture({ runtimes = [legacy, runtime("fixture-runtime", "not_ins
     else return route.fulfill({ status: 404, json: {} })
     return route.fulfill({ json: data })
   })
-  f.open = async (hash = "#/devices/hub") => { await page.goto(base + "/" + hash); if (hash.startsWith("#/devices/")) await page.locator("[data-capabilities]").evaluate(el => { el.open = true }); await page.locator(hash.startsWith("#/devices") ? "[data-panel=runtimes]" : "[data-slot=sidebar]").first().waitFor() }
+  f.open = async (hash = "#/devices/nodes/local") => { await page.goto(base + "/" + hash); if (hash.startsWith("#/devices/")) await page.locator("[data-capabilities]").evaluate(el => { el.open = true }); await page.locator(hash.startsWith("#/devices") ? "[data-panel=runtimes]" : "[data-slot=sidebar]").first().waitFor() }
   return f
 }
 
@@ -160,7 +160,7 @@ try {
     assert.equal(f.bots.find(b => b.id === "pi-bot").perm_mode, "bypassPermissions")
     assert.equal(f.bots.find(b => b.id === "pi-bot").model, "fixture-model")
 
-    await page.goto(base + "/#/devices/hub")
+    await page.goto(base + "/#/devices/nodes/local")
     await page.locator("[data-capabilities]").evaluate(el => { el.open = true })
     await card(page).locator("[data-runtime-use]").click()
     await page.locator("#new-goal").fill("Fixture conversation after runtime installation")
@@ -191,7 +191,7 @@ try {
     assert.notEqual(await option.getAttribute("aria-disabled"), "true")
     await p.keyboard.press("Escape")
     await p.locator('[data-runtime-availability="fixture-runtime"] [data-runtime-setup-link]').click()
-    await p.waitForFunction(() => location.hash === "#/devices/hub")
+    await p.waitForFunction(() => location.hash === "#/devices/nodes/local")
     await p.goto(base + "/#/settings/models")
     await p.locator("[data-models-advanced-toggle]").click()
     await p.locator('[data-purpose="chat"]').click()

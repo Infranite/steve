@@ -314,6 +314,11 @@ export const api = {
   install: (id: string) => get<RInstall>(`/nodes/installs/${encodeURIComponent(id)}`),
   runInstall: (id: string, address: string) => post<RInstall>(`/nodes/installs/${encodeURIComponent(id)}/run`, { address }),
   confirmNode: (id: string) => post<{ ok: boolean }>(`/nodes/${encodeURIComponent(id)}/confirm`),
+  /* the owner's Node actions: stop or resume taking new work (running sessions carry on), rename, unpair */
+  pauseNode: (id: string) => post<{ ok: boolean }>(`/nodes/${encodeURIComponent(id)}/pause`),
+  resumeNode: (id: string) => post<{ ok: boolean }>(`/nodes/${encodeURIComponent(id)}/resume`),
+  renameNode: (id: string, name: string) => post<{ ok: boolean }>(`/nodes/${encodeURIComponent(id)}/rename`, { name }),
+  revokeNode: (id: string) => post<{ ok: boolean }>(`/nodes/${encodeURIComponent(id)}/revoke`),
   nodeLimit: (id: string, max_sessions: number) => post<{ ok: boolean }>(`/nodes/${encodeURIComponent(id)}/limit`, { max_sessions }),
   nodeOwnerContext: (id: string, owner_context: "inherit" | "on" | "off") => post<{ ok: boolean }>(`/nodes/${encodeURIComponent(id)}/context`, { owner_context }),
   nodeUpgradePolicy: (id: string, policy: RUpgradePolicy | "") => post<{ ok: boolean }>(`/nodes/${encodeURIComponent(id)}/upgrade_policy`, { policy }),

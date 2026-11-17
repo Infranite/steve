@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { hubDirectory, rememberHub, savedHubs, normalizeAlias, setSharedHubName } from '../src/hub.ts'
-import { hubDraftErrors, linkedHubDevice, normalizeHubDraft, parseHubInfo, parseHubSnapshot, UnsupportedHubMetadata } from '../src/hub-management-model.ts'
+import { hubDraftErrors, linkedHubDevice, runtimeSetupHrefFor, normalizeHubDraft, parseHubInfo, parseHubSnapshot, UnsupportedHubMetadata } from '../src/hub-management-model.ts'
 
 test('Hub device link requires a unique explicit inventory binding, never a name or role', () => {
   const named = { id: 'inventory-hub', name: 'Same name', roles: ['Hub'], node_id: null }
@@ -66,4 +66,10 @@ test('native rename uses dedicated capability and preserves legacy bridge behavi
     window.__STEVE_NATIVE__.call=async()=>{throw Error('disk full')}
     await assert.rejects(hubDirectory().rename({id:'stable-profile'},'New'))
   } finally { delete globalThis.window }
+})
+
+test('harness setup links open the Hub\'s own Node page, or the Node list when the binding is unknown', () => {
+  assert.equal(runtimeSetupHrefFor([{ id: 'd1', name: 'Studio Mac', node_id: 'local' }]), '#/devices/nodes/local')
+  assert.equal(runtimeSetupHrefFor([]), '#/devices/nodes')
+  assert.equal(runtimeSetupHrefFor([{ id: 'd1', name: 'A', node_id: 'local' }, { id: 'd2', name: 'B', node_id: 'local' }]), '#/devices/nodes')
 })

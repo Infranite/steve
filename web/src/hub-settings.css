@@ -1,10 +1,5 @@
-/* Scope the settings card's typography to the Hub page. Text enlargement must grow
-   line boxes and names; fixed component line heights and ellipses hide shared data. */
-[data-hub-management] * { line-height: 1.5 !important; }
-[data-hub-management] .ui-isc__name-text,
-[data-hub-management] .ui-isc__meta { white-space: normal; overflow: visible; text-overflow: clip; }
-[data-hub-management] .ui-isc__head { align-items: flex-start; }
-[data-hub-management] button { height: auto; min-height: 2rem; white-space: normal; }
+/* The Hub card's editor (devices-hub.tsx): with enlarged text the field's footer wraps instead of clipping its
+   hint and counter. */
 [data-hub-management] .ui-fldc__foot { flex-wrap: wrap; }
 [data-hub-management] .ui-fldc__count { margin-inline-start: 0; }
 @media (max-width: 480px) {

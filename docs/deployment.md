@@ -177,6 +177,8 @@ Besides a browser session, a client signs in with a user's name and one of that 
 - `POST /api/access/pairings` (authenticated) issues a 5-minute single-use `stp_...` pairing code and answers `{id, code, name, expires, links, …}`. `links` has one entry per address a device may reach the Hub by, the public one before those of the local network: `{url, kind: "public"|"lan", link}`. `link` is what the QR code holds: `<that address's web page>/#/pair?v=1&code=stp_...&name=...&pub=...&lan=...`, a page any browser opens. The apps read the same link, also as `steve://pair?` with the same query.
 - `GET /api/access/pairings/{id}` reports when a device claims it, and `POST /auth/pair {"code": "stp_...", "client": {...}}` exchanges that single-use code for a dedicated client credential without creating a reusable access token.
 
+**Devices → Clients** (`#/devices/clients`) shows this client, the other clients signed in to the Hub and the access tokens. A client not seen for 7 days is listed under "not used lately", and one (or a token) unused for 30 days is flagged. Signing a client out can revoke the token it signed in with too. The instance owner sees every member's clients there and can sign any of them out (`GET /api/access?all=1` lists them with the members' names under `users`; `DELETE /api/access/clients/{id}` accepts anyone's for the owner); anyone else sees and signs out only their own.
+
 The Hub records each client's kind and name, and the route it last came by. Routes are `loopback`, `lan`, `tailnet`, `proxy` or `public`, with `+tls` added when the request arrived over TLS. Forwarding headers are believed only from this machine or the local network. Failed sign-ins from another address are slowed down after ten tries in ten minutes.
 
 Manage tokens and clients on the Hub's machine, also when it does not answer. `steve-hub` is the installation's own binary, `<home>/current/bin/steve-hub` (`~/.steve/current/bin/steve-hub` for the usual installation); it is not on the `PATH`. For an installation in another directory, name it with `STEVE_HOME=<home>` in front of the command, as the line `steve setup` prints when it is done does.
@@ -191,7 +193,7 @@ steve-hub --access client revoke ID
 
 On a Hub nobody has signed in to yet, `token create` makes `--user` (default: your account name) its owner.
 
-Single sign-on through OIDC is optional. The owner sets it up in **Settings · Access & clients** with an issuer, a client ID and a secret. It takes effect without a restart. The secret is kept in `secrets/oidc-client-secret` (mode 0600). The page shows the callback to register with the provider. An `STEVE_OIDC_*` environment configuration takes precedence and is shown read-only. When the web client has a port of its own, its `/auth/…` paths redirect to the Hub's port, so a callback registered on the web address works.
+Single sign-on through OIDC is optional. The owner sets it up in **Devices → Hub → Signing in** with an issuer, a client ID and a secret. It takes effect without a restart. The secret is kept in `secrets/oidc-client-secret` (mode 0600). The page shows the callback to register with the provider. An `STEVE_OIDC_*` environment configuration takes precedence and is shown read-only. When the web client has a port of its own, its `/auth/…` paths redirect to the Hub's port, so a callback registered on the web address works.
 
 ## A web client apart from the Hub
 
@@ -212,7 +214,7 @@ Opened somewhere no Hub answers, it asks for the Hub's address once, checks it w
 
 The web client keeps a list of Hubs and switches between them. It is the same screens in a browser and inside the macOS and iOS apps.
 
-- **Where.** The Hub switcher is at the top of the sidebar (on a phone: the **Me** page). It lists the saved Hubs and has **Add Hub…** and **Pair a new device…**. The sign-in screen and the "cannot connect" screen show the same list. **Settings · Access & clients** has the full list, where a Hub can be forgotten, and <kbd>⌘</kbd> <kbd>K</kbd> has the same entries. A link can open them directly: `#/hub/add`, `#/hub/pair`. In a browser, a pairing opened by a link makes its code only after a click.
+- **Where.** The Hub switcher is at the top of the sidebar (on a phone: the **Me** page). It lists the saved Hubs, then **Devices & connections** (the devices page of the Hub in use), **Add device…** (a Node, or a phone or browser by QR code) and **Add or manage Hubs…**, the full list where a Hub can be added or forgotten. The sign-in screen and the "cannot connect" screen show the same list, and <kbd>⌘</kbd> <kbd>K</kbd> has the same entries. A link can open them directly: `#/hub/add`, `#/hub/pair`. In a browser, a pairing opened by a link makes its code only after a click.
 - **The list** is kept in the browser (`localStorage`), per page origin. Inside the apps it is the app's list, with the credentials in the Keychain.
 - **Adding** takes a Hub address or a pairing link. The address is checked with `/auth/hello` before it is saved. The address of a Hub's pages (what the address bar shows when the web client has a port of its own) works too: the page port names its Hub in `/hub.json`.
 - **Switching in a browser** goes one of two ways. When the page can hold a session at the other Hub (same host on another port, or an HTTPS Hub), it stays where it is and calls that Hub. Otherwise (plain HTTP on another host, or an HTTPS page and an HTTP Hub) the browser goes to that Hub's own page. The saved list travels along in the address fragment, which is not sent to any server, holds addresses and names only, and is added to the other page's list only after the person agrees. Some browsers refuse the cookie of a Hub on another site (Safari, private windows); the sign-in then says so and offers that Hub's own page.
@@ -614,7 +616,7 @@ Steve runs work on Nodes. The Hub is always one of them: its own Node, `local`, 
 
 ### Concurrent sessions and capacity queues
 
-Every session-capable Node, including the Hub's own in-process or service Node, starts with **32 concurrent turns**. In **Devices → Hub details → Capabilities and admission configuration**, the instance owner can save 1–256 using the current configuration revision; for a paired Node, its owner uses **Devices → that Node's details → Concurrent sessions**. This is resource scheduling, not a new approval or harness permission. It applies to every harness through the same Node contract. Idle/open sessions do not use turn slots; model jobs and command executions keep their separate capacities.
+Every session-capable Node, including the Hub's own in-process or service Node, starts with **32 concurrent turns**. In **Devices → Nodes → this machine's Node → Capabilities and admission configuration**, the instance owner can save 1–256 using the current configuration revision; for a paired Node, its owner uses **Devices → Nodes → that Node → Concurrent sessions**. This is resource scheduling, not a new approval or harness permission. It applies to every harness through the same Node contract. Idle/open sessions do not use turn slots; model jobs and command executions keep their separate capacities.
 
 The setting is persisted on the Hub (`devices.max_sessions` for its `hub`/`local` machine, `nodes.max_sessions` for a paired Node). A save needs no restart: the Hub uses it on the next dispatch, normally within one second when its sender is idle. Raising it releases eligible queued turns; lowering it does not interrupt accepted/running turns and starts no more until the count drops below the new setting. The Hub reapplies the setting to the Node's actual limiter before each turn dispatch, including after a Node reconnect or restart. Offline or paused Nodes still wait for their normal link/resume; saving capacity does not connect, resume or move work.
 
@@ -1231,14 +1233,16 @@ appears among the choices of its kind; a stored choice whose theme is not regist
 
 ### Hub management and personal aliases
 
-Open **Manage current Hub** in the desktop Hub menu, **Settings → Hub**, or **Me → Hub
-management** on a phone (`#/settings/hub`). The page manages the connected Hub; switching
-connections is a separate action. Its shared name and purpose note are visible to signed-in
-workspace members, and only the instance owner (`users.role=owner`, not a workspace
-administrator) can edit them. Connection addresses and stable identity are read-only.
-The related-device entry uses the current inventory's unique explicit `node_id=local`
-association. With no association or an ambiguous one it opens the device list and reports
-that no trusted association is available; names and Hub roles never establish identity.
+Open **Devices → Hub** (`#/devices/hub`; the old `#/settings/hub` leads there) from the Hub
+menu's **Devices & connections**, or from **Me → Devices & connections** on a phone. The page
+manages the connected Hub; switching connections is a separate action. Its shared name and
+purpose note are visible to signed-in workspace members, and only the instance owner
+(`users.role=owner`, not a workspace administrator) can edit them. Version, address and stable
+identity are read-only. The same page shows the computer the Hub runs on (CPU load as the
+1-minute load average over the cores, memory, the fullest project disk) with the way into the
+Hub's own Node, how remote Nodes reach the Hub (whether it listens, tailcat, the default
+upgrade policy) and how clients sign in. The Hub's own Node is the inventory's unique explicit
+`node_id=local` association; names and Hub roles never establish identity.
 
 `GET /auth/hello` declares `capabilities.hub_metadata: 1`. Without this declaration the
 editor reports unsupported, while existing connection and pairing features remain usable;

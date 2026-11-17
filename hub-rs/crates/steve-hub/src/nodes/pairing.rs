@@ -500,7 +500,9 @@ pub async fn act(
                 let detail = match action2.as_str() {
                     "limit" => max_sessions.map(|n| n.to_string()),
                     "context" => choice.clone(),
-                    "upgrade_policy" => Some(detail_policy.clone().unwrap_or_else(|| "default".into())),
+                    "upgrade_policy" => {
+                        Some(detail_policy.clone().unwrap_or_else(|| "default".into()))
+                    }
                     _ => None,
                 };
                 audit(
