@@ -52,7 +52,8 @@ export type Space = {
   open_url?: string | null
 }
 export type BasisEntry = { source_type: string; source_id: string; source_label: string; level: Level; effective: Level; used: string; out: "verbatim" | "conclusion" | "reasoning" | "blocked" }
-export type Basis = { verdict: "pass" | "rewritten" | "drafted"; entries: BasisEntry[]; rewrites: { from: string; to: string; reason: string }[] }
+/** `unchecked`: the check model gave no answer (not a leak); `checking`: it still runs after the draft was written */
+export type Basis = { verdict: "pass" | "rewritten" | "drafted" | "unchecked" | "checking"; entries: BasisEntry[]; rewrites: { from: string; to: string; reason: string }[] }
 export type ChanMessage = {
   attachments?: ChannelAttachment[]
   id: string; space_id: string; direction: "in" | "out"; sender: { name: string; party_id: string | null; account_id?: string | null }; persona_id: string | null; on_behalf: "none" | "persona" | "proxy"

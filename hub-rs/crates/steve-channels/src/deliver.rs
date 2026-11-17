@@ -240,6 +240,12 @@ pub struct Generation {
     /// candidate draft (“发这条草稿”). Empty: none.
     #[serde(skip_serializing_if = "String::is_empty")]
     pub draft: String,
+    /// On your own account, what the composer was shown of how you talk (your samples, your edited
+    /// and rejected drafts): inputs for the tone, never content. The disclosure check flags their
+    /// content copied into the reply (`CheckCx::style_samples`); kept with the draft
+    /// (`chan_messages.composed`) for the check that runs after it is written.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub style_samples: Vec<String>,
 }
 
 /// One message to say.
@@ -465,6 +471,7 @@ mod tests {
             needs_commitment: true,
             summary: "A 问周四能不能开会".into(),
             draft: "周四可以".into(),
+            style_samples: vec!["稍等".into()],
         };
         let v = serde_json::to_value(&g).unwrap();
         assert_eq!(v["outcome"], "ask_owner");

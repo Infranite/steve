@@ -14,7 +14,15 @@ use crate::ChannelResult;
 /// `reply_basis.verdict`.
 pub const PASS: &str = "pass";
 pub const REWRITTEN: &str = "rewritten";
+/// The check flagged something (a leak, possibly): the text waits for you with the parts marked.
 pub const DRAFTED: &str = "drafted";
+/// The check could not finish (its model timed out, failed or answered nothing readable): not a
+/// leak, not a pass. `check_model` names every model tried; a span says what happened.
+pub const UNCHECKED: &str = "unchecked";
+/// A draft on your own account whose check model still runs, after the draft was written
+/// (steve-channels `Outbox::send_due`); it becomes one of the others, or [`UNCHECKED`] when the
+/// draft is dealt with first.
+pub const CHECKING: &str = "checking";
 
 /// One rewrite: `{"from","to","reason"}`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -31,7 +39,7 @@ pub struct NewBasis {
     pub message_id: String,
     pub entries: Vec<BasisEntry>,
     pub rewrites: Vec<Rewrite>,
-    /// [`PASS`], [`REWRITTEN`] or [`DRAFTED`].
+    /// [`PASS`], [`REWRITTEN`], [`DRAFTED`], [`UNCHECKED`] or [`CHECKING`].
     pub verdict: String,
     pub answer_model: Option<String>,
     pub check_model: Option<String>,
@@ -59,12 +67,6 @@ pub struct BasisOut {
 /// and split off again when read ([`of_message`]).
 pub fn insert(tx: &Tx, b: &NewBasis, now: i64) -> ChannelResult<String> {
     let id = uid("bs");
-    let mut entries = serde_json::to_value(&b.entries).unwrap_or_else(|_| json!([]));
-    if let Value::Array(a) = &mut entries {
-        for s in &b.spans {
-            a.push(json!({"source_type": "span", "text": s.text, "reason": s.reason}));
-        }
-    }
     tx.execute(
         "INSERT INTO reply_basis (id, workspace_id, message_id, entries, rewrites, verdict, answer_model, check_model, created)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -72,7 +74,7 @@ pub fn insert(tx: &Tx, b: &NewBasis, now: i64) -> ChannelResult<String> {
             id,
             b.ws,
             b.message_id,
-            entries.to_string(),
+            entries_json(b),
             serde_json::to_string(&b.rewrites).unwrap_or_else(|_| "[]".into()),
             b.verdict,
             b.answer_model,
@@ -85,6 +87,48 @@ pub fn insert(tx: &Tx, b: &NewBasis, now: i64) -> ChannelResult<String> {
         params![id, b.message_id],
     )?;
     Ok(id)
+}
+
+fn entries_json(b: &NewBasis) -> String {
+    let mut entries = serde_json::to_value(&b.entries).unwrap_or_else(|_| json!([]));
+    if let Value::Array(a) = &mut entries {
+        for s in &b.spans {
+            a.push(json!({"source_type": "span", "text": s.text, "reason": s.reason}));
+        }
+    }
+    entries.to_string()
+}
+
+/// The check that ran after the draft was written settles its basis `id`: verdict, entries, spans,
+/// rewrites and check model as in `b`. Only while it is still [`CHECKING`]; `false` when it is not
+/// any more (the draft was dealt with first).
+pub fn settle(tx: &Tx, id: &str, b: &NewBasis) -> ChannelResult<bool> {
+    let n = tx.execute(
+        "UPDATE reply_basis SET verdict = ?, entries = ?, rewrites = ?, check_model = ?
+          WHERE id = ? AND verdict = ?",
+        params![
+            b.verdict,
+            entries_json(b),
+            serde_json::to_string(&b.rewrites).unwrap_or_else(|_| "[]".into()),
+            b.check_model,
+            id,
+            CHECKING
+        ],
+    )?;
+    Ok(n > 0)
+}
+
+/// The draft `message` was dealt with while its check still ran: its basis says the check did not
+/// finish ([`UNCHECKED`], with `why` as a span), so it never reads as checked. Nothing when it was
+/// not [`CHECKING`].
+pub fn checking_stopped(tx: &Tx, message: &str, why: &str) -> ChannelResult<bool> {
+    let n = tx.execute(
+        "UPDATE reply_basis SET verdict = ?,
+                entries = json_insert(entries, '$[#]', json_object('source_type', 'span', 'text', '', 'reason', ?))
+          WHERE id = (SELECT basis_id FROM chan_messages WHERE id = ?) AND verdict = ?",
+        params![UNCHECKED, why, message, CHECKING],
+    )?;
+    Ok(n > 0)
 }
 
 /// A `reply_basis` row as stored.

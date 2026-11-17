@@ -635,6 +635,8 @@ pub fn supersede(
             "UPDATE chan_messages SET status = 'discarded' WHERE id = ? AND status = ?",
             params![id, status],
         )?;
+        // closed while its disclosure check still ran: the record says the check did not finish
+        crate::basis::checking_stopped(tx, id, crate::outbound::R_DEALT_FIRST)?;
         if let Some(d) = base::decisions::open_for(tx, ws, SUBJECT_MESSAGE, id)? {
             closed += settle(tx, &d.id, why)? as usize;
         }

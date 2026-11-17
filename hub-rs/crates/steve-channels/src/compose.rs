@@ -1215,6 +1215,11 @@ impl Composer {
         };
         reply.generation.hits = layers.hits;
         reply.generation.anchors = layers.anchor_ids;
+        reply.generation.style_samples = layers
+            .voice
+            .as_ref()
+            .map(crate::voice::Voice::inputs)
+            .unwrap_or_default();
         Ok(Once {
             reply,
             unreadable: layers.unreadable && media.images.is_empty(),

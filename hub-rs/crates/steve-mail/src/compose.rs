@@ -490,6 +490,7 @@ impl Mail {
                     audience_said: None,
                     skip_model,
                     internal_skip: false,
+                    ..Default::default()
                 },
                 &audience,
                 &format!("{subject}\n\n{body}"),

@@ -95,6 +95,19 @@ pub const BLOCKED_OPTIONS: [&str; 1] = ["discard"];
 pub const REWRITE: &str = "rewrite";
 /// Options of the approval of a model's draft the check flagged.
 pub const REWRITE_OPTIONS: [&str; 3] = ["yes", "no", REWRITE];
+/// On the card of a draft on your own account while its disclosure check runs, after the draft was
+/// written ([`Outbox::send_due`]); replaced by what the check found when it is done.
+pub const CHECKING_NOTE: &str = "（披露检查还在跑）";
+/// The basis span of a draft dealt with (approved, discarded, closed) before its check finished.
+pub const R_DEALT_FIRST: &str = "检查没跑完（草稿在检查结束前就处理了）";
+/// Why a flagged reply was dropped: the rewrite that deleted the flagged parts left no text at all
+/// ([`disclosure::Rewrite::Empty`]).
+pub const BY_NOTHING_LEFT: &str = "删掉可能泄露的部分以后什么都不剩，不回了";
+/// On the card of a flagged draft whose rewrite wrote something the draft did not say.
+pub const NOTE_ADDED: &str = "（改写加了原文没有的话，已作废，原文未变）";
+/// On the card of a flagged draft whose rewrite left only hedges ([`disclosure::Rewrite::Hollow`]): not
+/// used, the original waits for you.
+pub const NOTE_HOLLOW: &str = "（改写后只剩空话，没用上，原文未变）";
 
 /// A provider refusal for a missing permission (Feishu 99991672 tenant / 99991679 user scope, or
 /// the grant check before the call): retrying can't help.
@@ -142,6 +155,9 @@ pub const DISCARDED: &str = "discarded";
 pub const SRC_POSTED: &str = "Posted.";
 pub const SRC_DRAFTED: &str = "Drafted for the user's approval.";
 pub const SRC_NO_SOURCE: &str = "This item did not come from a chat.";
+/// … when the disclosure check could not finish (not a leak).
+pub const SRC_UNCHECKED: &str =
+    "Not posted: the disclosure check did not finish. A draft is waiting for the user.";
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
@@ -271,12 +287,17 @@ fn set_status(tx: &Tx, id: &str, from: &[&str], to: &str) -> ChannelResult<bool>
     for f in from {
         p.push(f);
     }
-    Ok(tx.execute(
+    let changed = tx.execute(
         &format!(
             "UPDATE chan_messages SET status = ?, sent = NULL WHERE id = ? AND status IN ({list})"
         ),
         p.as_slice(),
-    )? > 0)
+    )? > 0;
+    // a draft dealt with while its check still ran: the record says the check did not finish
+    if changed && from.contains(&"draft") && to != "draft" {
+        basis::checking_stopped(tx, id, R_DEALT_FIRST)?;
+    }
+    Ok(changed)
 }
 
 /// Everything about where a message goes.
@@ -436,10 +457,13 @@ fn insert_out(tx: &Tx, n: &NewOut, now: i64) -> ChannelResult<String> {
     Ok(id)
 }
 
+/// The suspicious parts, for a card: each span's text, or its reason when it has none. The check's
+/// own failure is not a suspicious part ([`check_note`] says it).
 fn spans_note(r: &CheckResult) -> String {
     let parts: Vec<String> = r
         .spans
         .iter()
+        .filter(|s| !s.reason.starts_with(disclosure::R_MODEL_FAILED))
         .map(|s| {
             if s.text.trim().is_empty() {
                 s.reason.clone()
@@ -449,6 +473,133 @@ fn spans_note(r: &CheckResult) -> String {
         })
         .collect();
     parts.join("、")
+}
+
+/// What a card says about its draft's check, in brackets: nothing when it passed; `（可能泄露：…）`
+/// when it flagged something; `（检查没跑完：…；试过 …）` when its model gave no answer — never
+/// “可能泄露” for that. Both when the local checks flagged something and the model did not answer.
+pub fn check_note(r: &CheckResult) -> String {
+    let failed: Vec<&str> = r
+        .spans
+        .iter()
+        .filter_map(|s| s.reason.strip_prefix(disclosure::R_MODEL_FAILED))
+        .map(|w| w.trim_start_matches('（').trim_end_matches('）'))
+        .collect();
+    let unbound = r.spans.iter().any(|s| s.reason == disclosure::R_UNBOUND);
+    let mut parts: Vec<String> = Vec::new();
+    if r.verdict == Verdict::Leak {
+        let flagged = spans_note(r);
+        if !flagged.is_empty() {
+            parts.push(format!("可能泄露：{flagged}"));
+        }
+    }
+    if r.verdict != Verdict::Pass && (!failed.is_empty() || unbound || parts.is_empty()) {
+        let mut w = if unbound {
+            disclosure::R_UNBOUND.to_string()
+        } else {
+            failed.first().copied().unwrap_or("没有检查").to_string()
+        };
+        if let Some(m) = r.check_model.as_deref().filter(|m| !m.is_empty()) {
+            w.push_str(&format!("；试过 {m}"));
+        }
+        parts.push(format!("{}：{w}", disclosure::R_MODEL_FAILED));
+    }
+    if parts.is_empty() {
+        String::new()
+    } else {
+        format!("（{}）", parts.join("；"))
+    }
+}
+
+/// The `reply_basis.verdict` of a check result: a leak is [`basis::DRAFTED`], a check that did not
+/// finish [`basis::UNCHECKED`], a pass [`basis::PASS`] or, after a rewrite, [`basis::REWRITTEN`].
+fn verdict_code(r: &CheckResult, rewritten: bool) -> &'static str {
+    match r.verdict {
+        Verdict::Leak => basis::DRAFTED,
+        Verdict::Unchecked => basis::UNCHECKED,
+        Verdict::Pass if rewritten => basis::REWRITTEN,
+        Verdict::Pass => basis::PASS,
+    }
+}
+
+/// What the audience can read in the conversation around the inbound message `source` of `space`:
+/// the stretches of talk before it (as the composer reads them, [`crate::context::arrange`]), it,
+/// and what was said after it, one `- 名字：text` line each. `None` when it is not there.
+fn seen_of(
+    c: &Connection,
+    ws: &str,
+    space: &str,
+    source: &str,
+    mode: Mode,
+    now: i64,
+) -> ChannelResult<Option<String>> {
+    use crate::context::{self as cx, Shown};
+    let mine = cx::mine(c, ws, space)?;
+    let Some((t, before, after)) = cx::load(c, space, source, &mine, mode)? else {
+        return Ok(None);
+    };
+    let label = |m: &cx::Msg| cx::label(&m.name, m.side, mode, "");
+    let clock = cx::Clock {
+        now,
+        tz: chrono_tz::UTC,
+    };
+    let conv = cx::arrange(
+        &t,
+        &before,
+        &after,
+        compose::HISTORY,
+        cx::SEGMENTS,
+        &label,
+        &clock,
+    );
+    let mut lines: Vec<String> = conv
+        .chain
+        .iter()
+        .chain(&conv.before)
+        .map(Shown::render)
+        .collect();
+    lines.push(format!("- （这条）{}：{}", label(&t), t.text.trim()));
+    lines.extend(conv.after.iter().map(Shown::render));
+    Ok(Some(lines.join("\n")))
+}
+
+/// The inbound message an outbound row answers (by its `reply_to`, in its space).
+fn source_of_row(c: &Connection, row: &OutRow) -> ChannelResult<Option<(String, String)>> {
+    let Some(src) = &row.reply_to else {
+        return Ok(None);
+    };
+    Ok(c.query_row(
+        "SELECT id, coalesce(text, '') FROM chan_messages WHERE external_id = ? AND space_id = ? AND direction = 'in'
+            AND purged IS NULL ORDER BY created DESC LIMIT 1",
+        params![src, row.space_id],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )
+    .optional()?)
+}
+
+/// What the composer was shown of how you talk, kept with the draft ([`crate::decide::keep_composed`]),
+/// and whether the composer wrote it as its reply.
+fn composed_of(c: &Connection, message: &str) -> ChannelResult<(Vec<String>, bool)> {
+    let v: Option<String> = c
+        .query_row(
+            "SELECT composed FROM chan_messages WHERE id = ?",
+            [message],
+            |r| r.get(0),
+        )
+        .optional()?
+        .flatten();
+    let v: Value = v
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or(Value::Null);
+    let samples = v["style_samples"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+    Ok((samples, v["outcome"] == "reply"))
 }
 
 /// The `approve` decision of a draft. Returns its id.
@@ -570,27 +721,322 @@ async fn rewrite_text(
     }
 }
 
-/// “改写后再看”: the flagged draft `message_id` is rewritten once by the model that wrote it, checked
-/// again and put back as a draft with a new card (still flagged: it says so, and offers another
-/// rewrite). Nothing is sent. A failed rewrite keeps the text and says so on the card. Only while the
-/// draft still waits on the card `decision_id` the choice closed (an undo reopened it: nothing). Runs on
-/// a task of its own ([`Outbox::send_due`] finds the choice in the store, so a restart does not lose it).
+/// What a later check of a draft is given: its row, where it goes, its audience, the knowledge it was
+/// written with (read again; `complete`: all of it), its basis, and the check's context.
+struct Later {
+    row: OutRow,
+    p: Place,
+    audience: Audience,
+    knowledge: Vec<KnowledgeUse>,
+    complete: bool,
+    b: basis::BasisOut,
+    cx: CheckCx,
+    /// The composer wrote it as its reply (only such a text is rewritten).
+    composed: bool,
+}
+
+/// Loads what checking the draft `message_id` again needs ([`Later`]); `None` when it has no basis.
+fn later_of(c: &Connection, message_id: &str, now: i64) -> ChannelResult<Option<Later>> {
+    let Some(row) = out_row(c, message_id)? else {
+        return Ok(None);
+    };
+    let Some(b) = basis::of_message(c, &row.ws, &row.id)? else {
+        return Ok(None);
+    };
+    let space = spaces::get(c, &row.space_id)?.ok_or_else(|| ApiError::not_found("空间"))?;
+    let p = place(
+        c,
+        &row.ws,
+        &space.connection_id,
+        &row.space_id,
+        row.persona_id.as_deref(),
+    )?;
+    let audience = disclosure::space_audience(c, &p.space, &p.account, &p.owner_user)?;
+    // the same knowledge the first check had (retrieved pieces and memories), read again
+    let entries = b.entries.as_array().cloned().unwrap_or_default();
+    let (knowledge, complete) = steve_knowledge::retrieve::knowledge_again(c, &row.ws, &entries)?;
+    let source = source_of_row(c, &row)?;
+    let said = source
+        .as_ref()
+        .map(|(_, t)| t.clone())
+        .filter(|t| !t.trim().is_empty());
+    let seen = match &source {
+        Some((id, _)) => seen_of(c, &row.ws, &row.space_id, id, p.mode, now)?,
+        None => None,
+    };
+    let (samples, composed) = composed_of(c, &row.id)?;
+    let cx = CheckCx {
+        ws: row.ws.clone(),
+        actor: match (&p.persona, p.mode) {
+            (Some(per), _) => per.bot_id.clone(),
+            (None, Mode::Own) => "me".into(),
+            (None, Mode::Bot) => "steve".into(),
+        },
+        draft_model: b.answer_model.clone(),
+        audience_said: said,
+        audience_seen: seen,
+        style_samples: samples,
+        skip_model: false,
+        // the model may be left out only when the knowledge is all here, as in the first check
+        internal_skip: complete && p.mode == Mode::Bot && row.on_behalf != "proxy",
+        // a draft waits for you anyway
+        patient: true,
+    };
+    Ok(Some(Later {
+        row,
+        p,
+        audience,
+        knowledge,
+        complete,
+        b,
+        cx,
+        composed,
+    }))
+}
+
+/// B1's check of `text` for a later check ([`Later`]): checked against less than it was written with,
+/// it does not pass on that.
+async fn check_again(ch: &Channels, l: &Later, text: &str) -> CheckResult {
+    let mut r = b1::check(ch.modules(), &l.cx, &l.audience, text, &l.knowledge).await;
+    if !l.complete && r.verdict == Verdict::Pass {
+        r.verdict = Verdict::Leak;
+        r.spans.push(steve_modules::outbound::Span {
+            text: String::new(),
+            reason: steve_modules::outbound::R_BASIS_GONE.into(),
+        });
+    }
+    r
+}
+
+/// One rewrite of the flagged `text` ([`rewrite_text`]), held to deleting ([`disclosure::judge_rewrite`]):
+/// `None` when the model gave no answer.
+async fn rewrite_once(
+    ch: &Channels,
+    pinned: Option<&Arc<dyn PinnedModel>>,
+    audience: &Audience,
+    text: &str,
+    r: &CheckResult,
+    model: &str,
+) -> Option<disclosure::Rewrite> {
+    let new = rewrite_text(ch, pinned, audience, text, r, model).await?;
+    let judged = disclosure::judge_rewrite(text, &new);
+    if judged == disclosure::Rewrite::Added {
+        tracing::info!("a rewrite wrote what the reply did not say: discarded");
+    }
+    Some(judged)
+}
+
+fn reasons(r: &CheckResult) -> String {
+    r.spans
+        .iter()
+        .map(|s| s.reason.clone())
+        .collect::<Vec<_>>()
+        .join("；")
+}
+
+/// A flagged draft whose rewrite left no text at all: there is nothing to say. The draft is discarded
+/// (its card `decision`, when still open, closes saying why).
+fn nothing_left(
+    tx: &Tx,
+    link: &OutLink,
+    row: &OutRow,
+    decision: Option<&str>,
+) -> ChannelResult<()> {
+    if !set_status(tx, &row.id, &["draft"], DISCARDED)? {
+        return Ok(());
+    }
+    link.push(After::Discarded {
+        message_id: row.id.clone(),
+    });
+    if let Some(d) = decision {
+        crate::presence::settle(tx, d, BY_NOTHING_LEFT)?;
+    }
+    base::audit(
+        tx,
+        &row.ws,
+        "steve",
+        "chan_message.nothing_left",
+        &row.id,
+        &json!({"decision": decision, "why": BY_NOTHING_LEFT}),
+    )?;
+    messages::event(tx, &row.ws, &row.space_id, &row.id);
+    Ok(())
+}
+
+/// The disclosure check of a draft on your own account, after it was written (its basis is
+/// [`basis::CHECKING`]): nothing waits on it — the draft waits for your approval anyway — so the
+/// check model gets its patient time limit and one more try ([`CheckCx::patient`]), against the
+/// knowledge the draft was written with, the conversation the audience can read and the samples of
+/// how you talk the composer was shown. Under YOLO (which never approves a flagged text) a flagged
+/// reply the composer wrote is rewritten once first, by deleting only; no text left at all: the draft
+/// is dropped; only hedges left: not used, the original stays flagged for you. Then the basis and the card say what it found: nothing, `（可能泄露：…）` with
+/// “改写后再看”, or `（检查没跑完：…）` — never “可能泄露” for a check that did not finish. A draft
+/// dealt with meanwhile keeps its card; its basis already says the check did not finish
+/// ([`basis::checking_stopped`]). On a task of its own ([`Outbox::send_due`] finds such drafts in
+/// the store, so a restart does not lose one).
+async fn check_later(
+    ch: &Channels,
+    link: &OutLink,
+    pinned: Option<&Arc<dyn PinnedModel>>,
+    message_id: &str,
+) -> ChannelResult<()> {
+    let now = ch.now();
+    let Some(l) = ch.store().reader(|c| later_of(c, message_id, now))? else {
+        return Ok(());
+    };
+    if l.b.verdict != basis::CHECKING || l.row.status != "draft" {
+        return Ok(());
+    }
+    let mut res = check_again(ch, &l, &l.row.text).await;
+    let mut text = l.row.text.clone();
+    let mut rewrites: Vec<Rewrite> = Vec::new();
+    let mut empty = false;
+    let mut unused: Option<&str> = None;
+    if res.verdict == Verdict::Leak
+        && l.composed
+        && !disclosure::not_run(&res)
+        && ch.yolo_on(&l.row.ws)
+    {
+        let model = l.b.answer_model.clone().unwrap_or_default();
+        match rewrite_once(ch, pinned, &l.audience, &text, &res, &model).await {
+            Some(disclosure::Rewrite::Kept(t)) => {
+                rewrites.push(Rewrite {
+                    from: text.clone(),
+                    to: t.clone(),
+                    reason: reasons(&res),
+                });
+                res = check_again(ch, &l, &t).await;
+                text = t;
+            }
+            Some(disclosure::Rewrite::Empty) => empty = true,
+            Some(disclosure::Rewrite::Hollow(_)) => unused = Some(NOTE_HOLLOW),
+            Some(disclosure::Rewrite::Added) => unused = Some(NOTE_ADDED),
+            None => {}
+        }
+    }
+    let leak = res.verdict == Verdict::Leak;
+    ch.store().transaction(|tx| -> ChannelResult<()> {
+        let Some(cur) = out_row(tx, &l.row.id)? else {
+            return Ok(());
+        };
+        // edited meanwhile: what was checked is not what waits
+        if cur.text != l.row.text {
+            basis::checking_stopped(tx, &cur.id, R_DEALT_FIRST)?;
+            return Ok(());
+        }
+        let settled = basis::settle(
+            tx,
+            &l.b.id,
+            &NewBasis {
+                ws: l.row.ws.clone(),
+                message_id: l.row.id.clone(),
+                entries: res.entries.clone(),
+                rewrites: rewrites.clone(),
+                verdict: verdict_code(&res, !rewrites.is_empty()).into(),
+                answer_model: l.b.answer_model.clone(),
+                check_model: res.check_model.clone(),
+                spans: if res.verdict == Verdict::Pass {
+                    Vec::new()
+                } else {
+                    res.spans.clone()
+                },
+            },
+        )?;
+        if !settled || cur.status != "draft" {
+            return Ok(());
+        }
+        let Some(d) = cur.decision_id.as_deref() else {
+            return Ok(());
+        };
+        let open: bool = tx
+            .query_row(
+                "SELECT status = 'open' FROM decisions WHERE id = ?",
+                [d],
+                |r| r.get(0),
+            )
+            .optional()?
+            .unwrap_or(false);
+        if !open {
+            return Ok(());
+        }
+        if empty {
+            return nothing_left(tx, link, &cur, Some(d));
+        }
+        let mut note = format!("{}{}", unused.unwrap_or_default(), check_note(&res));
+        if !rewrites.is_empty() {
+            note = format!("（已改写）{note}");
+            tx.execute(
+                "UPDATE chan_messages SET text = ? WHERE id = ? AND status = 'draft'",
+                params![text, cur.id],
+            )?;
+            tx.execute(
+                "UPDATE decisions SET draft = ? WHERE id = ?",
+                params![text, d],
+            )?;
+        }
+        tx.execute(
+            "UPDATE decisions SET question = replace(question, ?, ?) WHERE id = ?",
+            params![CHECKING_NOTE, note, d],
+        )?;
+        // a model's text the check flagged: the card can ask for the rewrite
+        if leak && l.composed && !disclosure::not_run(&res) {
+            tx.execute(
+                "UPDATE decisions SET options = ? WHERE id = ?",
+                params![
+                    serde_json::to_string(&REWRITE_OPTIONS).unwrap_or_default(),
+                    d
+                ],
+            )?;
+        }
+        base::audit(
+            tx,
+            &cur.ws,
+            "steve",
+            "chan_message.checked",
+            &cur.id,
+            &json!({"decision": d, "verdict": verdict_code(&res, !rewrites.is_empty()),
+                    "check_model": res.check_model}),
+        )?;
+        tx.publish(steve_store::ChangeEvent::Decision {
+            id: d.into(),
+            item_id: Some(None),
+        });
+        messages::event(tx, &cur.ws, &cur.space_id, &cur.id);
+        Ok(())
+    })
+}
+
+/// Drafts whose disclosure check runs after they were written ([`check_later`]).
+fn checks_waiting(c: &Connection) -> ChannelResult<Vec<String>> {
+    let mut st = c.prepare_cached(
+        "SELECT m.id FROM chan_messages m JOIN reply_basis b ON b.id = m.basis_id
+          WHERE m.direction = 'out' AND m.status = 'draft' AND b.verdict = ?
+          ORDER BY m.created LIMIT 20",
+    )?;
+    let rows = st
+        .query_map([basis::CHECKING], |r| r.get(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+/// “改写后再看”: the flagged draft `message_id` is rewritten once by the model that wrote it — by
+/// deleting the flagged parts only ([`disclosure::judge_rewrite`]) — checked again and put back as a
+/// draft with a new card (still flagged: it says so, and offers another rewrite). A rewrite that
+/// wrote something the draft did not say is discarded: the text stays and the card says so; so is one
+/// that leaves only hedges. One that leaves no text at all means there is nothing to say: the draft
+/// is dropped. Nothing is sent.
+/// A failed rewrite keeps the text and says so on the card. Only while the draft still waits on the
+/// card `decision_id` the choice closed (an undo reopened it: nothing). Runs on a task of its own
+/// ([`Outbox::send_due`] finds the choice in the store, so a restart does not lose it).
 async fn rewrite_draft(
     ch: &Channels,
+    link: &OutLink,
     pinned: Option<&Arc<dyn PinnedModel>>,
     message_id: &str,
     decision_id: &str,
 ) -> ChannelResult<()> {
-    type Loaded = (
-        OutRow,
-        Place,
-        Audience,
-        Vec<KnowledgeUse>,
-        Option<String>,
-        basis::BasisOut,
-        bool,
-    );
-    let loaded = ch.store().reader(|c| -> ChannelResult<Option<Loaded>> {
+    let now = ch.now();
+    let loaded = ch.store().reader(|c| -> ChannelResult<Option<Later>> {
         let Some(row) = out_row(c, message_id)? else {
             return Ok(None);
         };
@@ -601,76 +1047,26 @@ async fn rewrite_draft(
         if row.status != "draft" || row.decision_id.as_deref() != Some(decision_id) || !chosen {
             return Ok(None);
         }
-        let Some(b) = basis::of_message(c, &row.ws, &row.id)? else {
-            return Ok(None);
-        };
-        let space = spaces::get(c, &row.space_id)?.ok_or_else(|| ApiError::not_found("空间"))?;
-        let p = place(
-            c,
-            &row.ws,
-            &space.connection_id,
-            &row.space_id,
-            row.persona_id.as_deref(),
-        )?;
-        let a = disclosure::space_audience(c, &p.space, &p.account, &p.owner_user)?;
-        // the same knowledge the first check had (retrieved pieces and memories), read again
-        let entries = b.entries.as_array().cloned().unwrap_or_default();
-        let (k, complete) = steve_knowledge::retrieve::knowledge_again(c, &row.ws, &entries)?;
-        let said = match &row.reply_to {
-            Some(src) => c
-                .query_row(
-                    "SELECT text FROM chan_messages WHERE external_id = ? AND space_id = ? AND direction = 'in'
-                        AND purged IS NULL AND text IS NOT NULL AND trim(text) <> ''",
-                    params![src, row.space_id],
-                    |r| r.get::<_, String>(0),
-                )
-                .optional()?,
-            None => None,
-        };
-        Ok(Some((row, p, a, k, said, b, complete)))
+        later_of(c, message_id, now)
     })?;
-    let Some((row, p, audience, knowledge, said, b, complete)) = loaded else {
+    let Some(l) = loaded else {
         return Ok(());
     };
+    let row = &l.row;
     let spans: Vec<steve_modules::outbound::Span> =
-        serde_json::from_value(b.spans.clone()).unwrap_or_default();
+        serde_json::from_value(l.b.spans.clone()).unwrap_or_default();
     let flagged = CheckResult {
         verdict: Verdict::Leak,
         entries: Vec::new(),
         spans,
-        check_model: b.check_model.clone(),
+        check_model: l.b.check_model.clone(),
     };
-    let model = b.answer_model.clone().unwrap_or_default();
-    let new = rewrite_text(ch, pinned, &audience, &row.text, &flagged, &model).await;
-    let cx = CheckCx {
-        ws: row.ws.clone(),
-        actor: match (&p.persona, p.mode) {
-            (Some(per), _) => per.bot_id.clone(),
-            (None, Mode::Own) => "me".into(),
-            (None, Mode::Bot) => "steve".into(),
-        },
-        draft_model: b.answer_model.clone(),
-        audience_said: said,
-        skip_model: false,
-        // the model may be left out only when the knowledge is all here, as in the first check
-        internal_skip: complete && p.mode == Mode::Bot && row.on_behalf != "proxy",
-    };
+    let model = l.b.answer_model.clone().unwrap_or_default();
+    let new = rewrite_once(ch, pinned, &l.audience, &row.text, &flagged, &model).await;
     let checked = match &new {
-        Some(t) => {
-            let mut r = b1::check(ch.modules(), &cx, &audience, t, &knowledge).await;
-            // checked against less than it was written with: it does not pass on that
-            if !complete && r.verdict == Verdict::Pass {
-                r.verdict = Verdict::Leak;
-                r.spans.push(steve_modules::outbound::Span {
-                    text: String::new(),
-                    reason: steve_modules::outbound::R_BASIS_GONE.into(),
-                });
-            }
-            Some(r)
-        }
-        None => None,
+        Some(disclosure::Rewrite::Kept(t)) => Some(check_again(ch, &l, t).await),
+        _ => None,
     };
-    let now = ch.now();
     ch.store().transaction(|tx| -> ChannelResult<()> {
         // answered or edited meanwhile: the rewrite is not wanted any more
         let Some(cur) = out_row(tx, &row.id)? else {
@@ -682,21 +1078,16 @@ async fn rewrite_draft(
         {
             return Ok(());
         }
-        let mut q = format!("{}发到「{}」", p.speaker, space_name(&p.space));
+        let mut q = format!("{}发到「{}」", l.p.speaker, space_name(&l.p.space));
         let text = match (&new, &checked) {
-            (Some(t), Some(r)) => {
+            (Some(disclosure::Rewrite::Kept(t)), Some(r)) => {
                 let leak = r.verdict != Verdict::Pass;
                 let mut rewrites: Vec<Rewrite> =
-                    serde_json::from_value(b.rewrites.clone()).unwrap_or_default();
+                    serde_json::from_value(l.b.rewrites.clone()).unwrap_or_default();
                 rewrites.push(Rewrite {
                     from: row.text.clone(),
                     to: t.clone(),
-                    reason: flagged
-                        .spans
-                        .iter()
-                        .map(|s| s.reason.clone())
-                        .collect::<Vec<_>>()
-                        .join("；"),
+                    reason: reasons(&flagged),
                 });
                 basis::insert(
                     tx,
@@ -705,30 +1096,40 @@ async fn rewrite_draft(
                         message_id: row.id.clone(),
                         entries: r.entries.clone(),
                         rewrites,
-                        verdict: if leak {
-                            basis::DRAFTED
-                        } else {
-                            basis::REWRITTEN
-                        }
-                        .into(),
-                        answer_model: b.answer_model.clone(),
+                        verdict: verdict_code(r, true).into(),
+                        answer_model: l.b.answer_model.clone(),
                         check_model: r.check_model.clone(),
                         spans: if leak { r.spans.clone() } else { Vec::new() },
                     },
                     now,
                 )?;
-                q.push_str("（已改写");
-                if leak {
-                    q.push_str(&format!("，仍可能泄露：{}", spans_note(r)));
-                }
-                q.push('）');
+                q.push_str("（已改写）");
+                q.push_str(&check_note(r));
                 tx.execute(
                     "UPDATE chan_messages SET text = ? WHERE id = ? AND status = 'draft'",
                     params![t, row.id],
                 )?;
-                let again = leak && !unchecked(r);
+                let again = r.verdict == Verdict::Leak && !disclosure::not_run(r);
                 open_approval(tx, &row.ws, &row.id, q, t, again)?;
                 t.clone()
+            }
+            (Some(disclosure::Rewrite::Empty), _) => {
+                nothing_left(tx, link, &cur, None)?;
+                tx.execute(
+                    "UPDATE decisions SET result = json_set(coalesce(result, '{}'), '$.superseded', ?) WHERE id = ?",
+                    params![BY_NOTHING_LEFT, decision_id],
+                )?;
+                return Ok(());
+            }
+            (Some(disclosure::Rewrite::Added), _) => {
+                q.push_str(NOTE_ADDED);
+                open_approval(tx, &row.ws, &row.id, q, &row.text, true)?;
+                row.text.clone()
+            }
+            (Some(disclosure::Rewrite::Hollow(_)), _) => {
+                q.push_str(NOTE_HOLLOW);
+                open_approval(tx, &row.ws, &row.id, q, &row.text, true)?;
+                row.text.clone()
             }
             _ => {
                 q.push_str("（没能改写，原文未变）");
@@ -1023,8 +1424,9 @@ fn drafts_chosen(c: &Connection, now: i64) -> ChannelResult<Vec<Chosen>> {
     Ok(rows)
 }
 
-/// The note on an approval of a card's draft the check flagged.
-pub const CARD_DRAFT_FLAGGED: &str = "（卡片上的草稿可能泄露：{}）";
+/// The note on an approval of a card's draft the check flagged, or could not finish checking:
+/// `{}` is what the check found ([`check_note`], without its brackets).
+pub const CARD_DRAFT_FLAGGED: &str = "（卡片上的草稿{}）";
 
 /// “发这条草稿” on card `decision` about `message`: the draft is a model's text (the composer's
 /// candidate, a reply it meant for you, the voice check's last try, a starred contact's reply), so it
@@ -1043,10 +1445,12 @@ async fn send_chosen(
 ) -> ChannelResult<()> {
     let plan = ch.store().reader(|c| plan_of(c, ws, message))?;
     let t = OutTarget::reply(&plan);
-    let (p, audience, said) = ch.store().reader(|c| -> ChannelResult<_> {
+    let now = ch.now();
+    let (p, audience, said, seen) = ch.store().reader(|c| -> ChannelResult<_> {
         let p = place(c, &t.ws, &t.connection_id, &t.space_id, None)?;
         let a = disclosure::space_audience(c, &p.space, &p.account, &p.owner_user)?;
-        Ok((p, a, audience_said(c, &t)?))
+        let seen = seen_of(c, ws, &t.space_id, message, p.mode, now)?;
+        Ok((p, a, audience_said(c, &t)?, seen))
     })?;
     let cx = CheckCx {
         ws: ws.into(),
@@ -1057,11 +1461,16 @@ async fn send_chosen(
         },
         draft_model: None,
         audience_said: said,
+        audience_seen: seen,
+        style_samples: Vec::new(),
         skip_model: false,
         internal_skip: false,
+        // on a task of its own: nobody waits on it
+        patient: true,
     };
     let res = b1::check(ch.modules(), &cx, &audience, text, &[]).await;
     let leak = res.verdict != Verdict::Pass;
+    let verdict = verdict_code(&res, false);
     let now = ch.now();
     ch.store().transaction(|tx| -> ChannelResult<()> {
         let pending: bool = tx.query_row(
@@ -1081,7 +1490,7 @@ async fn send_chosen(
                 message_id: m.clone(),
                 entries: res.entries.clone(),
                 rewrites: Vec::new(),
-                verdict: if leak { basis::DRAFTED } else { basis::PASS }.into(),
+                verdict: verdict.into(),
                 answer_model: None,
                 check_model: res.check_model.clone(),
                 spans: if leak { res.spans.clone() } else { Vec::new() },
@@ -1089,9 +1498,11 @@ async fn send_chosen(
             now,
         )?;
         if leak {
+            let note = check_note(&res);
+            let note = note.trim_start_matches('（').trim_end_matches('）');
             tx.execute(
                 "UPDATE decisions SET question = question || ? WHERE id = ?",
-                params![CARD_DRAFT_FLAGGED.replace("{}", &spans_note(&res)), dd],
+                params![CARD_DRAFT_FLAGGED.replace("{}", note), dd],
             )?;
         } else {
             approve_draft(tx, ws, &m, &dd, text, decision, now)?;
@@ -1099,7 +1510,15 @@ async fn send_chosen(
         tx.execute(
             "UPDATE decisions SET result = json_set(coalesce(result, '{}'), '$.composed', ?, '$.check', ?)
               WHERE id = ?",
-            params![m, if leak { "leak" } else { "pass" }, decision],
+            params![
+                m,
+                match res.verdict {
+                    Verdict::Pass => "pass",
+                    Verdict::Leak => "leak",
+                    Verdict::Unchecked => "unchecked",
+                },
+                decision
+            ],
         )?;
         base::audit(
             tx,
@@ -1112,7 +1531,7 @@ async fn send_chosen(
             },
             &m,
             &json!({"decision": dd, "card": decision, "choice": respond::SEND_DRAFT,
-                    "verdict": if leak { basis::DRAFTED } else { basis::PASS }}),
+                    "verdict": verdict}),
         )?;
         tx.publish(steve_store::ChangeEvent::Decision {
             id: decision.into(),
@@ -1143,13 +1562,6 @@ fn rewrites_asked(c: &Connection) -> ChannelResult<Vec<(String, String)>> {
 /// note): nothing a model wrote, so only the local checks run on it.
 fn template(req: &OutRequest) -> bool {
     matches!(req.purpose, Purpose::Item | Purpose::HandoffAck) && req.generation.is_none()
-}
-
-/// A check that could not run found nothing to rewrite: the text waits for the owner as it is.
-fn unchecked(r: &CheckResult) -> bool {
-    r.spans
-        .iter()
-        .any(|s| s.reason == disclosure::R_MODEL_FAILED || s.reason == disclosure::R_UNBOUND)
 }
 
 /// Whether `auth` may let a message out without a draft on an account in `mode` (step 2). The
@@ -1507,7 +1919,8 @@ impl Outbox {
         if text.chars().count() > TEXT_MAX {
             text = text.chars().take(TEXT_MAX).collect();
         }
-        let (p, audience, knowledge, said) = ch.store().reader(|c| -> ChannelResult<_> {
+        let now = ch.now();
+        let (p, audience, knowledge, said, seen) = ch.store().reader(|c| -> ChannelResult<_> {
             let p = place(
                 c,
                 &t.ws,
@@ -1518,7 +1931,11 @@ impl Outbox {
             let a = disclosure::space_audience(c, &p.space, &p.account, &p.owner_user)?;
             let k = knowledge_of(c, req.generation.as_ref())?;
             let said = audience_said(c, t)?;
-            Ok((p, a, k, said))
+            let seen = match &t.source_message_id {
+                Some(src) => seen_of(c, &t.ws, &t.space_id, src, p.mode, now)?,
+                None => None,
+            };
+            Ok((p, a, k, said, seen))
         })?;
         // only the composer's reply speaks as you, and it waits for you (decided before any check runs)
         if let Some(why) = crate::deliver::not_as_you(p.mode, req) {
@@ -1540,6 +1957,12 @@ impl Outbox {
             },
             draft_model: draft_model.clone(),
             audience_said: said,
+            audience_seen: seen,
+            style_samples: req
+                .generation
+                .as_ref()
+                .map(|g| g.style_samples.clone())
+                .unwrap_or_default(),
             // a fixed receipt (“收到，已记为 …”, “我请 … 来看。”) no model wrote: the rules only
             skip_model: template(req),
             // a bot's own reply whose knowledge was tracked (a generation) may skip the model for the
@@ -1548,22 +1971,39 @@ impl Outbox {
             internal_skip: req.generation.is_some()
                 && p.mode == Mode::Bot
                 && req.purpose != Purpose::Trigger,
+            patient: false,
         };
 
         // 1. disclosure (and the rewrites)
-        let mut res = b1::check(ch.modules(), &cx, &audience, &text, &knowledge).await;
+        let will_draft = approve || !direct_ok(p.mode, &req.auth);
+        // On your own account a draft waits for your approval anyway: only the local checks run now (for
+        // the basis), the check model runs after the draft is written, without hurry ([`check_later`]),
+        // and the card says so until it is done
+        let later = p.mode == Mode::Own && will_draft && !cx.skip_model;
+        let now_cx = if later {
+            CheckCx {
+                skip_model: true,
+                ..cx.clone()
+            }
+        } else {
+            cx.clone()
+        };
+        let mut res = b1::check(ch.modules(), &now_cx, &audience, &text, &knowledge).await;
         let mut rewrites: Vec<Rewrite> = Vec::new();
         // a text that waits for the owner whatever the check says is not rewritten: they see the original
         // with the parts marked, and the card offers the rewrite. Unless YOLO decides the card: it never
-        // approves a flagged text, so the one rewrite comes first, as for a direct reply
-        let will_draft = approve || !direct_ok(p.mode, &req.auth);
+        // approves a flagged text, so the one rewrite comes first, as for a direct reply (on your own
+        // account, after the check that runs later). A rewrite may only delete; one left empty means
+        // there is nothing to say (recorded); one that leaves only hedges is not used: the original
+        // stays flagged and waits for the owner
         if res.verdict == Verdict::Leak
+            && !later
             && req.generation.is_some()
-            && !unchecked(&res)
+            && !disclosure::not_run(&res)
             && (!will_draft || ch.yolo_on(&t.ws))
         {
             for _ in 0..MAX_REWRITES {
-                let Some(new) = rewrite_text(
+                let Some(judged) = rewrite_once(
                     ch,
                     self.pinned.as_ref(),
                     &audience,
@@ -1575,19 +2015,45 @@ impl Outbox {
                 else {
                     break;
                 };
+                let new = match judged {
+                    disclosure::Rewrite::Kept(t) => t,
+                    disclosure::Rewrite::Added => break,
+                    disclosure::Rewrite::Hollow(_) => {
+                        tracing::info!(space = t.space_id, "a rewrite left only hedges: not used");
+                        break;
+                    }
+                    disclosure::Rewrite::Empty => {
+                        tracing::info!(space = t.space_id, "not said: {BY_NOTHING_LEFT}");
+                        // not said, and not silently: the audit says what was dropped and why
+                        let reasons = reasons(&res);
+                        ch.store().transaction(|tx| -> ChannelResult<()> {
+                            base::audit(
+                                tx,
+                                &t.ws,
+                                "steve",
+                                "chan_message.nothing_left",
+                                t.source_message_id.as_deref().unwrap_or(&t.space_id),
+                                &json!({"space": t.space_id, "purpose": format!("{:?}", req.purpose),
+                                        "flagged": reasons, "why": BY_NOTHING_LEFT}),
+                            )?;
+                            Ok(())
+                        })?;
+                        if completes(req.purpose)
+                            && let Some(src) = &t.source_message_id
+                        {
+                            ch.react_finish(src, crate::reactions::Finish::Clear).await;
+                        }
+                        return Ok((Delivered::Skipped, Some(res)));
+                    }
+                };
                 rewrites.push(Rewrite {
                     from: text.clone(),
                     to: new.clone(),
-                    reason: res
-                        .spans
-                        .iter()
-                        .map(|s| s.reason.clone())
-                        .collect::<Vec<_>>()
-                        .join("；"),
+                    reason: reasons(&res),
                 });
                 text = new;
                 res = b1::check(ch.modules(), &cx, &audience, &text, &knowledge).await;
-                if res.verdict != Verdict::Leak || unchecked(&res) {
+                if res.verdict != Verdict::Leak || disclosure::not_run(&res) {
                     break;
                 }
             }
@@ -1602,12 +2068,10 @@ impl Outbox {
             // the handoff's own decision already reaches you
             return Ok((Delivered::Skipped, Some(res)));
         }
-        let verdict = if leak {
-            basis::DRAFTED
-        } else if rewrites.is_empty() {
-            basis::PASS
+        let verdict = if later {
+            basis::CHECKING
         } else {
-            basis::REWRITTEN
+            verdict_code(&res, !rewrites.is_empty())
         };
         let (id, decision, reused) = ch.store().transaction(|tx| -> ChannelResult<_> {
             // Concurrent submissions serialize here, before either can create a second message.
@@ -1660,8 +2124,10 @@ impl Outbox {
                 None
             } else {
                 let mut q = format!("{}发到「{}」", p.speaker, space_name(&p.space));
-                if leak {
-                    q.push_str(&format!("（可能泄露：{}）", spans_note(&res)));
+                if later {
+                    q.push_str(CHECKING_NOTE);
+                } else {
+                    q.push_str(&check_note(&res));
                 }
                 // on your own account: the reply promises something in your name
                 if p.mode == Mode::Own
@@ -1670,7 +2136,10 @@ impl Outbox {
                     q.push_str(COMMITS);
                 }
                 // a model's text the check flagged: the card can ask for the rewrite it did not get
-                let rewrite = leak && req.generation.is_some() && !unchecked(&res);
+                let rewrite = !later
+                    && res.verdict == Verdict::Leak
+                    && req.generation.is_some()
+                    && !disclosure::not_run(&res);
                 Some(open_approval(tx, &t.ws, &id, q, &text, rewrite)?)
             };
             messages::event(tx, &t.ws, &t.space_id, &id);
@@ -2385,6 +2854,31 @@ impl Outbox {
             }
             Err(e) => tracing::warn!("cards answered with their draft: {e}"),
         }
+        // drafts on your own account whose disclosure check runs after they were written, each on a
+        // task of its own
+        match ch.store().reader(checks_waiting) {
+            Ok(waiting) => {
+                for m in waiting {
+                    let key = format!("check:{m}");
+                    if !lock(&self.rewriting).insert(key.clone()) {
+                        continue;
+                    }
+                    let (ch, link, pinned, busy) = (
+                        ch.clone(),
+                        self.link.clone(),
+                        self.pinned.clone(),
+                        self.rewriting.clone(),
+                    );
+                    tokio::spawn(async move {
+                        if let Err(e) = check_later(&ch, &link, pinned.as_ref(), &m).await {
+                            tracing::warn!(message = m, "checking a draft failed: {e}");
+                        }
+                        lock(&busy).remove(&key);
+                    });
+                }
+            }
+            Err(e) => tracing::warn!("drafts to check: {e}"),
+        }
         // “改写后再看”: each on a task of its own, so a slow model does not hold up the sends
         match ch.store().reader(rewrites_asked) {
             Ok(asked) => {
@@ -2392,10 +2886,14 @@ impl Outbox {
                     if !lock(&self.rewriting).insert(m.clone()) {
                         continue;
                     }
-                    let (ch, pinned, busy) =
-                        (ch.clone(), self.pinned.clone(), self.rewriting.clone());
+                    let (ch, link, pinned, busy) = (
+                        ch.clone(),
+                        self.link.clone(),
+                        self.pinned.clone(),
+                        self.rewriting.clone(),
+                    );
                     tokio::spawn(async move {
-                        if let Err(e) = rewrite_draft(&ch, pinned.as_ref(), &m, &d).await {
+                        if let Err(e) = rewrite_draft(&ch, &link, pinned.as_ref(), &m, &d).await {
                             tracing::warn!(message = m, "rewriting a draft failed: {e}");
                             if let Err(e) = rewrite_failed(&ch, &m, &d) {
                                 tracing::warn!(message = m, "putting the draft back: {e}");
@@ -2784,10 +3282,11 @@ impl Outbox {
                 "Not posted: this chat does not accept messages from Steve for now (read-only). The user was told how to allow sending.".into()
             }
             Delivered::Drafted { .. } => match r.filter(|r| r.verdict != Verdict::Pass) {
-                Some(r) => format!(
+                Some(r) if r.verdict == Verdict::Leak => format!(
                     "Not posted: it may reveal {}. A draft is waiting for the user.",
                     spans_note(&r)
                 ),
+                Some(_) => SRC_UNCHECKED.into(),
                 None => SRC_DRAFTED.into(),
             },
             Delivered::Queued { .. } => {
@@ -3097,6 +3596,22 @@ impl MessageDecisions {
             result["superseded"] = json!(e.why());
             return Ok(result);
         }
+        // YOLO never approves a draft whose disclosure check did not pass (flagged, still running or
+        // not finished): only you do
+        if cx.choice == "yes" && cx.actor == b1::YOLO_ACTOR {
+            let verdict: Option<String> = tx
+                .query_row(
+                    "SELECT b.verdict FROM chan_messages m JOIN reply_basis b ON b.id = m.basis_id WHERE m.id = ?",
+                    [&row.id],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            if !matches!(verdict.as_deref(), Some(basis::PASS | basis::REWRITTEN)) {
+                return Err(ApiError::conflict(steve_i18n::t!(
+                    "channels.error.not_checked"
+                )));
+            }
+        }
         match cx.choice {
             "yes" => {
                 let edited = !cx.text.trim().is_empty();
@@ -3122,6 +3637,8 @@ impl MessageDecisions {
                     "UPDATE chan_messages SET text = ?, status = 'pending', sent = NULL WHERE id = ? AND status = 'draft'",
                     params![text, row.id],
                 )?;
+                // approved before its check finished: the record says so
+                basis::checking_stopped(tx, &row.id, R_DEALT_FIRST)?;
                 base::audit(
                     tx,
                     cx.ws,

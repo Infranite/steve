@@ -22,6 +22,7 @@
   "channels.error.recall_failed": "没有撤回：%{error}",
   "channels.error.handled": "这条消息已经处理过了",
   "channels.error.reply_empty": "要先写好回复的内容",
+  "channels.error.not_checked": "披露检查没有通过或还没跑完，YOLO 不替你发",
   "channels.error.yours_to_answer": "这张卡要你自己回，YOLO 不替你选",
   "channels.error.unknown_decision": "不认识这种决定",
   "channels.error.already_sent": "消息已经发出，不能撤销",

@@ -620,6 +620,7 @@ impl Mail {
                     audience_said: None,
                     skip_model,
                     internal_skip: false,
+                    ..Default::default()
                 },
                 &p.audience,
                 &format!("{}\n\n{}", p.subject, p.body),

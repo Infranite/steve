@@ -231,6 +231,7 @@ impl GitHub {
                 audience_said: None,
                 skip_model: false,
                 internal_skip: false,
+                ..Default::default()
             },
             &Audience {
                 external: true,
@@ -257,7 +258,14 @@ impl GitHub {
                 Ok::<_, ApiError>((g, name, pat))
             })
             .map_err(|e| e.to_string())?;
-        if let Some(g) = grant.filter(|_| check.verdict != Verdict::Leak) {
+        // a check whose model gave no answer (unchecked, with a span saying so) is not a pass: the
+        // grant does not cover it; only no check installed at all (unchecked, nothing said) is as before
+        let cleared = match check.verdict {
+            Verdict::Pass => true,
+            Verdict::Unchecked => check.spans.is_empty(),
+            Verdict::Leak => false,
+        };
+        if let Some(g) = grant.filter(|_| cleared) {
             let (url, _) = self
                 .post_comment(&ws, &t, &body)
                 .await
@@ -276,6 +284,8 @@ impl GitHub {
         }
         if check.verdict == Verdict::Leak {
             question.push_str("（披露检查提示可能泄露内部信息）");
+        } else if !cleared {
+            question.push_str("（披露检查没跑完）");
         }
         let d = NewDecision {
             workspace_id: ws.clone(),

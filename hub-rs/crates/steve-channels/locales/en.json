@@ -22,6 +22,7 @@
   "channels.error.recall_failed": "Not recalled: %{error}",
   "channels.error.handled": "This message has already been handled",
   "channels.error.reply_empty": "Write the reply first",
+  "channels.error.not_checked": "The disclosure check did not pass or has not finished; YOLO does not send it for you",
   "channels.error.yours_to_answer": "This card is yours to answer; YOLO does not choose for you",
   "channels.error.unknown_decision": "Unknown kind of decision",
   "channels.error.already_sent": "The message has already been sent and can't be undone",
