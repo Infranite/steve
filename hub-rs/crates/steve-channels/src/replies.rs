@@ -128,6 +128,7 @@ impl Replies {
                 decision_id: None,
                 out_message_id: None,
                 item_id: None,
+                composer_skip: None,
             }));
         }
         let r = match self
