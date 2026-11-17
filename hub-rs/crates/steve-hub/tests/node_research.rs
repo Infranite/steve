@@ -7,7 +7,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -223,6 +223,45 @@ struct Hub {
     data: PathBuf,
     /// What the adapter is told the local Node's roots are (a test may break them).
     roots: Arc<Mutex<Result<Vec<steve_node::Root>, String>>>,
+    image_files: Option<Arc<CountedFiles>>,
+}
+
+/// Observe the real Node -> Hub file port, without replacing its storage or authorization.
+struct CountedFiles {
+    inner: NodeFiles,
+    transfers: AtomicUsize,
+}
+#[async_trait::async_trait]
+impl HubFiles for CountedFiles {
+    async fn fetch(
+        &self,
+        a: FileAccess,
+        id: ArtifactId,
+        at: u64,
+        max: u32,
+    ) -> ApiResult<ReadChunk> {
+        self.inner.fetch(a, id, at, max).await
+    }
+    async fn begin_upload(&self, b: BeginUpload) -> ApiResult<Transfer> {
+        self.transfers.fetch_add(1, Ordering::SeqCst);
+        self.inner.begin_upload(b).await
+    }
+    async fn upload(&self, b: BlobChunk) -> ApiResult<Transfer> {
+        self.transfers.fetch_add(1, Ordering::SeqCst);
+        self.inner.upload(b).await
+    }
+    async fn finish_upload(&self, id: TransferId) -> ApiResult<ArtifactRef> {
+        self.transfers.fetch_add(1, Ordering::SeqCst);
+        self.inner.finish_upload(id).await
+    }
+    async fn upload_status(&self, id: TransferId) -> ApiResult<TransferState> {
+        self.transfers.fetch_add(1, Ordering::SeqCst);
+        self.inner.upload_status(id).await
+    }
+    async fn abort_upload(&self, id: TransferId) -> ApiResult<TransferState> {
+        self.transfers.fetch_add(1, Ordering::SeqCst);
+        self.inner.abort_upload(id).await
+    }
 }
 
 impl Hub {
@@ -269,6 +308,7 @@ impl Hub {
                 tools: None,
                 data,
                 roots: Arc::new(Mutex::new(Ok(vec![]))),
+                image_files: None,
             };
         }
         let roots = vec![steve_node::Root {
@@ -310,13 +350,13 @@ impl Hub {
         );
         node.enable_research(cfg);
         let rt = NodeRuntime::new(store.clone(), node.clone(), Arc::new(NoDomain));
+        let image_files = Arc::new(CountedFiles {
+            inner: NodeFiles::new(store.clone(), NodeId::new("local").unwrap(), data.clone()),
+            transfers: AtomicUsize::new(0),
+        });
         node.connect(
             Arc::new(Sink(Arc::downgrade(&rt))),
-            Some(Arc::new(NodeFiles::new(
-                store.clone(),
-                NodeId::new("local").unwrap(),
-                data.clone(),
-            ))),
+            Some(image_files.clone()),
         );
         let tools = NodeTools::open(
             store.clone(),
@@ -341,6 +381,7 @@ impl Hub {
             tools: Some(tools),
             data,
             roots: told,
+            image_files: Some(image_files),
         }
     }
 
@@ -754,6 +795,103 @@ async fn temporary_inline_images_survive_research_cleanup_and_stay_scoped() {
         hub.store.files().get(other).unwrap().unwrap().workspace_id,
         "other"
     );
+    assert!(hub.adapter.shutdown(Duration::from_secs(5)).await);
+}
+
+/// GFM literal autolinks never authorize even a transfer call, with a real temporary image present.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn gfm_autolinks_never_capture_local_images_on_real_node() {
+    use base64::Engine as _;
+    let w = World::new();
+    let hub = Hub::new(&w, "gfm-inline", true, 3).await;
+    let mut png = std::io::Cursor::new(vec![]);
+    image::DynamicImage::new_rgb8(2, 2)
+        .write_to(&mut png, image::ImageFormat::Png)
+        .unwrap();
+    let question = format!(
+        "GFM 语义\n@msg url\n@urlimage {}",
+        base64::engine::general_purpose::STANDARD.encode(png.into_inner())
+    );
+    let mut req = request(&w, "tr_gfm_inline", "default", &question);
+    req.full = true;
+    let result = hub.adapter.research(req, &Seen::default()).await;
+    assert_eq!(result.end, RunEnd::Done, "{result:?}");
+    let source = PathBuf::from(w.read("image"));
+    assert!(!source.exists());
+    assert_eq!(
+        result.text,
+        format!(
+            "https://example.test/![授权二维码]({})\nwww.example.test/![授权二维码]({})",
+            source.display(),
+            source.display()
+        )
+    );
+    assert_eq!(
+        hub.image_files
+            .as_ref()
+            .unwrap()
+            .transfers
+            .load(Ordering::SeqCst),
+        0
+    );
+    assert_eq!(q::<i64>(&hub.store, "SELECT count(*) FROM files"), 0);
+    assert!(hub.adapter.shutdown(Duration::from_secs(5)).await);
+}
+
+/// No test abort, restart or TTL wait: malformed PNGs must not poison this Node's next captures.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn four_bad_images_do_not_block_same_message_or_next_research_execution() {
+    use base64::Engine as _;
+    let w = World::new();
+    let hub = Hub::new(&w, "bad-inline", true, 3).await;
+    let mut png = std::io::Cursor::new(vec![]);
+    image::DynamicImage::new_rgb8(2, 2)
+        .write_to(&mut png, image::ImageFormat::Png)
+        .unwrap();
+    let bytes = png.into_inner();
+    let encode = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
+    let mut question = "坏图恢复\n@msg images\n".to_string();
+    for i in 0..4 {
+        let mut bad = b"\x89PNG\r\n\x1a\ninvalid-".to_vec();
+        bad.extend(i.to_string().as_bytes());
+        question.push_str(&format!("@image {}\n", encode(&bad)));
+    }
+    question.push_str(&format!(
+        "@image {}\n@say SAME_MESSAGE_DONE",
+        encode(&bytes)
+    ));
+    for (run, prompt, marker) in [
+        ("tr_bad_inline", question, "SAME_MESSAGE_DONE"),
+        (
+            "tr_next_inline",
+            format!(
+                "正常图片\n@msg fresh\n@image {}\n@say NEXT_EXECUTION_DONE",
+                encode(&bytes)
+            ),
+            "NEXT_EXECUTION_DONE",
+        ),
+    ] {
+        let mut req = request(&w, run, "default", &prompt);
+        req.full = true;
+        let result = hub.adapter.research(req, &Seen::default()).await;
+        assert_eq!(result.end, RunEnd::Done, "{result:?}");
+        assert!(result.text.contains(marker), "{}", result.text);
+        assert!(!PathBuf::from(w.read("image")).exists(), "source cleaned");
+        let id = result
+            .text
+            .split("/api/files/")
+            .nth(1)
+            .expect("good image survived four failures")
+            .split('?')
+            .next()
+            .unwrap();
+        let row = hub.store.files().get(id).unwrap().unwrap();
+        assert_eq!(
+            std::fs::read(steve_core::attachments::blob_path(&hub.data, &row)).unwrap(),
+            bytes
+        );
+        assert_eq!(q::<i64>(&hub.store, "SELECT count(*) FROM files"), 1);
+    }
     assert!(hub.adapter.shutdown(Duration::from_secs(5)).await);
 }
 

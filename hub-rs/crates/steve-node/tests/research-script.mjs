@@ -11,6 +11,10 @@
 //                        that never completes
 //   @sleep <ms>          waits
 //   @touch <path>        creates the file
+//   @image <base64>      creates a TMPDIR PNG and emits two references
+//   @imagecwd <base64>   the same, inside the working directory
+//   @urlimage <base64>   emits https and www GFM autolink literals, not image nodes
+//   @semanticimage <base64> emits inline/reference/nested alt, titles and code examples
 //   @cat <dir> <out>     copies the first `*.txt` under <dir>/*/ to <out>
 //   @mcp                 copies session/new's mcpServers to `.mcp`
 //   @child               a child `sleep 30` (same process group), its pid to `<log>.pid` (written whole)
@@ -72,11 +76,20 @@ async function run(id, prompt) {
     else if (cmd === "asking") tool(a[0], a.slice(1).join(" "), false)
     else if (cmd === "sleep") await sleep(Number(a[0]))
     else if (cmd === "touch") writeFileSync(a[0], "")
-    else if (cmd === "image" || cmd === "imagecwd") {
-      const source = join(mkdtempSync(join(cmd === "image" ? tmpdir() : process.cwd(), "inline-image-")), "qr.png")
+    else if (["image", "imagecwd", "urlimage", "semanticimage"].includes(cmd)) {
+      const source = join(mkdtempSync(join(cmd === "imagecwd" ? process.cwd() : tmpdir(), "inline-image-")), "qr.png")
       writeFileSync(source, Buffer.from(rest, "base64"))
       put("image", source)
-      say(`![授权二维码](${source}) ![重复二维码](${source})`)
+      say(cmd === "semanticimage" ? [
+        `![独立 *图片*](${source} "独立标题")`,
+        `![引用图][q]`,
+        `![outer ![inner](unreferenced.png)](${source} "嵌套标题")`,
+        `\`![代码示例](${source})\``,
+        "```md\n" + `![围栏示例](${source})` + "\n```",
+        `[q]: ${source} "引用标题"\n\n`,
+      ].join("\n\n") : cmd === "urlimage"
+        ? `https://example.test/![授权二维码](${source})\nwww.example.test/![授权二维码](${source})`
+        : `![授权二维码](${source}) ![重复二维码](${source})`)
     }
     else if (cmd === "cat") {
       for (const d of readdirSync(a[0])) {

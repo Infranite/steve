@@ -27,6 +27,15 @@ fn conflict() -> ApiError {
     ApiError::new(ErrorCode::Conflict, "image transfer does not match")
 }
 impl Upload {
+    fn abort(&mut self) {
+        if !matches!(self.state, TransferState::Done { .. }) {
+            // Drop the allocation, not just its length: failed decodes can otherwise exhaust
+            // both the Node's four Open slots and its byte budget until the next TTL sweep.
+            self.bytes = vec![];
+            self.state = TransferState::Aborted;
+            self.touched = Instant::now();
+        }
+    }
     fn transfer(&self, id: TransferId) -> Transfer {
         Transfer {
             id,
@@ -40,6 +49,17 @@ impl Upload {
 }
 impl NodeFiles {
     pub(super) fn begin_image(&self, b: BeginUpload) -> ApiResult<Transfer> {
+        let mut uploads = self.uploads.lock().unwrap();
+        uploads.0.retain(|_, u| u.touched.elapsed() < TTL);
+        for u in uploads
+            .0
+            .values_mut()
+            .filter(|u| matches!(u.state, TransferState::Open { .. }))
+        {
+            // An attempt can end or be cancelled while its Node is disconnected. Reclaim its
+            // partial bytes before admitting another execution; no restart or TTL wait needed.
+            let _ = self.check_upload(u);
+        }
         let exec = self.execution(b.access)?;
         let (workspace, _) = self.grant(&exec)?;
         if b.manifest.size == 0
@@ -52,17 +72,30 @@ impl NodeFiles {
         // The key belongs to this authenticated Node, and can never be rebound to another execution.
         let digest = Digest::sha256(format!("{}\0{}", self.node, b.key).as_bytes());
         let id = TransferId::new(format!("img_{}", &digest.as_str()[7..])).map_err(internal)?;
-        let mut uploads = self.uploads.lock().unwrap();
-        uploads.0.retain(|_, u| u.touched.elapsed() < TTL);
         if let Some(u) = uploads.0.get_mut(id.as_str()) {
             if u.execution != exec || u.workspace != workspace || u.manifest != b.manifest {
+                return Err(conflict());
+            }
+            if matches!(u.state, TransferState::Aborted) {
                 return Err(conflict());
             }
             u.touched = Instant::now();
             return Ok(u.transfer(id));
         }
+        if uploads.0.len() >= 256 {
+            // Bounded tombstones preserve immediate abort/status replay, but never deny a new
+            // upload solely because earlier content was invalid. Done receipts keep their TTL.
+            uploads
+                .0
+                .retain(|_, u| !matches!(u.state, TransferState::Aborted));
+        }
         if uploads.0.len() >= 256
-            || uploads.0.values().filter(|u| u.execution == exec).count() >= MAX_INLINE_IMAGES
+            || uploads
+                .0
+                .values()
+                .filter(|u| u.execution == exec && !matches!(u.state, TransferState::Aborted))
+                .count()
+                >= MAX_INLINE_IMAGES
             || uploads
                 .0
                 .values()
@@ -85,11 +118,18 @@ impl NodeFiles {
         Ok(transfer)
     }
 
-    fn check_upload(&self, u: &Upload) -> ApiResult<()> {
-        if u.touched.elapsed() >= TTL || self.grant(&u.execution)?.0 != u.workspace {
+    fn check_upload(&self, u: &mut Upload) -> ApiResult<()> {
+        if u.touched.elapsed() >= TTL {
+            u.abort();
             return Err(denied());
         }
-        Ok(())
+        match self.grant(&u.execution) {
+            Ok((workspace, _)) if workspace == u.workspace => Ok(()),
+            result => {
+                u.abort();
+                Err(result.err().unwrap_or_else(denied))
+            }
+        }
     }
 
     pub(super) fn image_chunk(&self, b: BlobChunk) -> ApiResult<Transfer> {
@@ -129,8 +169,8 @@ impl NodeFiles {
         Ok(u.transfer(b.transfer))
     }
     pub(super) fn image_status(&self, id: TransferId) -> ApiResult<TransferState> {
-        let uploads = self.uploads.lock().unwrap();
-        let u = uploads.0.get(id.as_str()).ok_or_else(denied)?;
+        let mut uploads = self.uploads.lock().unwrap();
+        let u = uploads.0.get_mut(id.as_str()).ok_or_else(denied)?;
         self.check_upload(u)?;
         Ok(u.state.clone())
     }
@@ -143,11 +183,20 @@ impl NodeFiles {
             TransferState::Aborted => return Err(conflict()),
             _ => {}
         }
-        if u.bytes.len() as u64 != u.manifest.size || Digest::sha256(&u.bytes) != u.manifest.sha256
-        {
+        // An early finish is recoverable by sending the missing suffix. Complete but corrupt
+        // content cannot be repaired by the immutable chunk protocol and is terminal.
+        if (u.bytes.len() as u64) < u.manifest.size {
             return Err(conflict());
         }
-        validate_image(&u.bytes, &u.manifest.mime)?;
+        if u.bytes.len() as u64 != u.manifest.size || Digest::sha256(&u.bytes) != u.manifest.sha256
+        {
+            u.abort();
+            return Err(conflict());
+        }
+        if let Err(error) = validate_image(&u.bytes, &u.manifest.mime) {
+            u.abort();
+            return Err(error);
+        }
         self.check_upload(u)?;
         let artifact = super::job_input(
             &self.store,
@@ -166,11 +215,9 @@ impl NodeFiles {
     pub(super) fn abort_image(&self, id: TransferId) -> ApiResult<TransferState> {
         let mut uploads = self.uploads.lock().unwrap();
         let u = uploads.0.get_mut(id.as_str()).ok_or_else(denied)?;
-        self.check_upload(u)?;
-        if !matches!(u.state, TransferState::Done { .. }) {
-            u.bytes = vec![];
-            u.state = TransferState::Aborted;
-        }
+        // This is cleanup of this authenticated Node's own registry, not permission to read or
+        // publish. Allow it after cancellation/revocation too. Never discard a Done receipt/blob.
+        u.abort();
         Ok(u.state.clone())
     }
 }
@@ -395,6 +442,86 @@ mod tests {
         );
     }
     #[tokio::test]
+    async fn malformed_images_release_slots_without_caller_abort() {
+        let h = fixture(vec![]).await;
+        let files = NodeFiles::new(
+            h.store.clone(),
+            NodeId::new("local").unwrap(),
+            h.dir.path().into(),
+        );
+        for i in 0..4 {
+            let mut bytes = b"\x89PNG\r\n\x1a\ninvalid-".to_vec();
+            bytes.extend(i.to_string().as_bytes());
+            let t = files
+                .begin_upload(request(&h.exec, &bytes, &format!("bad-{i}")))
+                .await
+                .unwrap();
+            files.upload(chunk(&t.id, 0, &bytes)).await.unwrap();
+            assert!(files.finish_upload(t.id.clone()).await.is_err());
+            assert_eq!(
+                files.upload_status(t.id.clone()).await.unwrap(),
+                TransferState::Aborted
+            );
+            assert!(
+                files.uploads.lock().unwrap().0[t.id.as_str()]
+                    .bytes
+                    .is_empty()
+            );
+        }
+        let bytes = png();
+        let t = files
+            .begin_upload(request(&h.exec, &bytes, "valid-after-bad"))
+            .await
+            .unwrap();
+        files.upload(chunk(&t.id, 0, &bytes)).await.unwrap();
+        files.finish_upload(t.id).await.unwrap();
+        let uploads = files.uploads.lock().unwrap();
+        assert!(uploads.0.values().all(|u| u.bytes.is_empty()));
+        assert!(
+            !uploads
+                .0
+                .values()
+                .any(|u| matches!(u.state, TransferState::Open { .. }))
+        );
+    }
+    #[tokio::test]
+    async fn aborted_transfers_do_not_exhaust_active_or_metadata_quota() {
+        let h = fixture(vec![]).await;
+        let files = NodeFiles::new(
+            h.store.clone(),
+            NodeId::new("local").unwrap(),
+            h.dir.path().into(),
+        );
+        let bad = b"\x89PNG\r\n\x1a\ntruncated";
+        for i in 0..260 {
+            let request = request(&h.exec, bad, &format!("invalid-batch-{i}"));
+            let t = files.begin_upload(request.clone()).await.unwrap();
+            files.upload(chunk(&t.id, 0, bad)).await.unwrap();
+            assert!(files.finish_upload(t.id.clone()).await.is_err());
+            assert!(
+                files.begin_upload(request).await.is_err(),
+                "a terminal key must not reopen"
+            );
+            let uploads = files.uploads.lock().unwrap();
+            assert!(uploads.0.len() <= 256);
+            assert!(uploads.0.values().all(|u| u.bytes.capacity() == 0));
+        }
+        let bytes = png();
+        let t = files
+            .begin_upload(request(&h.exec, &bytes, "valid-after-many"))
+            .await
+            .unwrap();
+        files.upload(chunk(&t.id, 0, &bytes)).await.unwrap();
+        let artifact = files.finish_upload(t.id.clone()).await.unwrap();
+        assert_eq!(
+            files.abort_upload(t.id.clone()).await.unwrap(),
+            TransferState::Done {
+                artifact: artifact.clone()
+            }
+        );
+        assert_eq!(files.finish_upload(t.id).await.unwrap(), artifact);
+    }
+    #[tokio::test]
     async fn invalid_content_size_hash_abort_and_expiry_never_create_files() {
         let h = fixture(vec![]).await;
         let files = NodeFiles::new(
@@ -426,8 +553,13 @@ mod tests {
                 ErrorCode::Invalid
             );
             assert_eq!(
-                files.abort_upload(t.id.clone()).await.unwrap(),
+                files.upload_status(t.id.clone()).await.unwrap(),
                 TransferState::Aborted
+            );
+            assert!(
+                files.uploads.lock().unwrap().0[t.id.as_str()]
+                    .bytes
+                    .is_empty()
             );
             assert!(files.finish_upload(t.id).await.is_err());
         }
@@ -439,6 +571,15 @@ mod tests {
         assert_eq!(
             files.finish_upload(t.id.clone()).await.unwrap_err().code,
             ErrorCode::Conflict
+        );
+        assert_eq!(
+            files.upload_status(t.id.clone()).await.unwrap(),
+            TransferState::Aborted
+        );
+        assert!(
+            files.uploads.lock().unwrap().0[t.id.as_str()]
+                .bytes
+                .is_empty()
         );
         files
             .uploads
@@ -460,6 +601,107 @@ mod tests {
             0
         );
         assert!(!h.dir.path().join("files").exists());
+    }
+    #[tokio::test]
+    async fn cancellation_and_expiry_reclaim_partial_bytes_and_allow_cleanup() {
+        for cancel in [true, false] {
+            let h = fixture(vec![]).await;
+            let files = NodeFiles::new(
+                h.store.clone(),
+                NodeId::new("local").unwrap(),
+                h.dir.path().into(),
+            );
+            let bytes = png();
+            let mut ids = vec![];
+            for i in 0..4 {
+                let t = files
+                    .begin_upload(request(&h.exec, &bytes, &format!("partial-{i}")))
+                    .await
+                    .unwrap();
+                files.upload(chunk(&t.id, 0, &bytes[..20])).await.unwrap();
+                ids.push(t.id);
+            }
+            if cancel {
+                h.store
+                    .transaction::<_, steve_store::StoreError>(|tx| {
+                        tx.execute("UPDATE runtime_attempts SET cancel_requested=1", [])?;
+                        Ok(())
+                    })
+                    .unwrap();
+            } else {
+                for u in files.uploads.lock().unwrap().0.values_mut() {
+                    u.touched = Instant::now() - TTL;
+                }
+            }
+            assert!(files.upload_status(ids[0].clone()).await.is_err());
+            assert!(
+                files
+                    .upload(chunk(&ids[1], 20, &bytes[20..]))
+                    .await
+                    .is_err()
+            );
+            assert!(files.finish_upload(ids[2].clone()).await.is_err());
+            // Cleanup must work after execution eligibility or the upload deadline is gone.
+            assert_eq!(
+                files.abort_upload(ids[3].clone()).await.unwrap(),
+                TransferState::Aborted
+            );
+            assert!(
+                files
+                    .uploads
+                    .lock()
+                    .unwrap()
+                    .0
+                    .values()
+                    .all(|u| u.bytes.is_empty() && matches!(u.state, TransferState::Aborted))
+            );
+            if !cancel {
+                let t = files
+                    .begin_upload(request(&h.exec, &bytes, "after-expiry"))
+                    .await
+                    .unwrap();
+                files.upload(chunk(&t.id, 0, &bytes)).await.unwrap();
+                files.finish_upload(t.id).await.unwrap();
+            }
+        }
+    }
+    #[tokio::test]
+    async fn new_begin_reclaims_ineligible_executions_without_old_node_cleanup() {
+        let h = fixture(vec![]).await;
+        let files = NodeFiles::new(
+            h.store.clone(),
+            NodeId::new("local").unwrap(),
+            h.dir.path().into(),
+        );
+        let bytes = png();
+        for i in 0..4 {
+            let t = files
+                .begin_upload(request(&h.exec, &bytes, &format!("lost-{i}")))
+                .await
+                .unwrap();
+            files.upload(chunk(&t.id, 0, &bytes[..20])).await.unwrap();
+        }
+        h.store
+            .transaction::<_, steve_store::StoreError>(|tx| {
+                tx.execute("UPDATE runtime_attempts SET state='finished'", [])?;
+                Ok(())
+            })
+            .unwrap();
+        assert!(
+            files
+                .begin_upload(request(&h.exec, &bytes, "new-begin"))
+                .await
+                .is_err()
+        );
+        assert!(
+            files
+                .uploads
+                .lock()
+                .unwrap()
+                .0
+                .values()
+                .all(|u| u.bytes.is_empty() && matches!(u.state, TransferState::Aborted))
+        );
     }
     #[tokio::test]
     async fn node_execution_and_workspace_cannot_be_rebound() {
