@@ -21,7 +21,8 @@ struct SteveIOSApp: App {
         let coord = SteveClientCoordinator(
             hubStore: hubStore,
             webRoot: webRoot,
-            clientDescriptor: descriptor
+            clientDescriptor: descriptor,
+            nativeShellChromeEnabled: false
         )
         coord.pairConfirmationVisibilityProbe = { IOSPairConfirmation.isAlertOnScreen() }
         _coordinator = StateObject(wrappedValue: coord)

@@ -495,11 +495,11 @@ final class SteveClientKitTests: XCTestCase {
 
         XCTAssertEqual(
             SteveClientCoordinator.bridgeCapabilities(for: "macos"),
-            ["hubs.list", "hubs.switch", "hubs.add", "hubs.forget", "hubs.rename", "pair.claim"]
+            ["hubs.list", "hubs.switch", "hubs.add", "hubs.forget", "hubs.rename", "pair.claim", "shell.context", "shell.navigation.next", "shell.navigation.ack"]
         )
         XCTAssertEqual(
             SteveClientCoordinator.bridgeCapabilities(for: "ios"),
-            ["hubs.list", "hubs.switch", "hubs.add", "hubs.forget", "hubs.rename", "pair.claim", "pair.scan"]
+            ["hubs.list", "hubs.switch", "hubs.add", "hubs.forget", "hubs.rename", "pair.claim", "shell.context", "shell.navigation.next", "shell.navigation.ack", "pair.scan"]
         )
 
         await coordinator.activateCurrentHub(forceReloadWeb: false)
@@ -1155,6 +1155,42 @@ final class SteveClientKitTests: XCTestCase {
         XCTAssertEqual(bridgeCheck?["platform"] as? String, "macos")
         XCTAssertEqual(bridgeCheck?["helloName"] as? String, "steve")
         XCTAssertEqual(bridgeCheck?["hubCount"] as? Int, 1)
+
+        // Shell calls use the same main-frame trust gate plus a per-document identity, not a web-supplied Hub.
+        _ = try await webView.callAsyncJavaScript(
+            """
+            return await window.__STEVE_NATIVE__.call('shell.context', {
+              workspaceID: null, workspaceName: null, route: '#/', title: 'Signed out',
+              ready: false, authenticated: false, focused: true, visible: true, hubID: 'forged'
+            });
+            """, arguments: [:], in: nil, contentWorld: .page)
+        XCTAssertEqual(coordinator.shellContext?.hubID, HubProfile.localDefaultID)
+        XCTAssertEqual(coordinator.shellContext?.title, "Signed out")
+        let rejectedDocument = try await webView.callAsyncJavaScript(
+            """
+            try {
+              await window.webkit.messageHandlers.steveNative.postMessage({
+                op: 'shell.context', documentID: 'previous-document', args: {}
+              });
+              return false;
+            } catch (_) { return true; }
+            """, arguments: [:], in: nil, contentWorld: .page) as? Bool
+        XCTAssertEqual(rejectedDocument, true)
+        let rejectedSubframe = try await webView.callAsyncJavaScript(
+            """
+            const frame = document.createElement('iframe');
+            const loaded = new Promise(resolve => frame.onload = resolve);
+            frame.srcdoc = '<html><body>untrusted subframe</body></html>';
+            document.body.appendChild(frame); await loaded;
+            try {
+              await frame.contentWindow.webkit.messageHandlers.steveNative.postMessage({
+                op: 'shell.context', documentID: window.__STEVE_NATIVE__.documentID, args: {}
+              });
+              return false;
+            } catch (_) { return true; } finally { frame.remove(); }
+            """, arguments: [:], in: nil, contentWorld: .page) as? Bool
+        XCTAssertEqual(rejectedSubframe, true)
+        XCTAssertEqual(coordinator.shellContext?.title, "Signed out")
 
         // 5. Cross-port fetch to `http://127.0.0.1:<foreignPort>/auth/hello` (which serves `Access-Control-Allow-Origin: *`)
         //    is blocked solely by `WKContentRuleList` before touching the socket.

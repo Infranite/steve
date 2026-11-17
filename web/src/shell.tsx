@@ -7,6 +7,8 @@ import { useEffect, useState } from "react"
 import { cn } from "cn"
 import { api } from "@/api"
 import { usePeopleOn, useMyAvatar } from "@/api/people"
+import { nativeBridge } from "@/hub"
+import { nativeHubChrome } from "@/native-shell"
 import { HubSwitcher } from "@/hub-ui"
 import { useT } from "@/i18n"
 import { RunningNowPill } from "@/running-pill"
@@ -158,7 +160,7 @@ export function Sidebar({ route: full }: { route: string }) {
           <SidebarToggle className="group-data-[collapsible=icon]:absolute group-data-[collapsible=icon]:inset-0.5 group-data-[collapsible=icon]:size-7 group-data-[collapsible=icon]:bg-sidebar group-data-[collapsible=icon]:opacity-0 group-data-[collapsible=icon]:group-hover/head:opacity-100 group-data-[collapsible=icon]:focus-visible:opacity-100" />
         </div>
         <SidebarMenu>
-          <HubSwitcher />
+          {!nativeHubChrome(nativeBridge()) && <HubSwitcher />}
           {st.yolo && <SidebarMenuItem className="group-data-[collapsible=icon]:hidden" data-sidebar-yolo><YoloPill className="h-[30px] w-full gap-[13px] rounded-lg pr-2 pl-[11px] hover:bg-sidebar-accent" /></SidebarMenuItem>}
           <SidebarMenuItem className="group-data-[collapsible=icon]:hidden" data-sidebar-running><RunningNowPill className="steve-rn-side" /></SidebarMenuItem>
           {/* search as App Shell's field: a lifted card with its shortcut; in the rail only its icon */}

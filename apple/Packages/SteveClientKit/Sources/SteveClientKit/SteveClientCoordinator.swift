@@ -42,7 +42,11 @@ public final class SteveClientCoordinator: ObservableObject {
     @Published public private(set) var localGatewayURL: URL?
     @Published public private(set) var proxyStartupError: String?
     @Published public private(set) var webReloadNonce = UUID()
-    @Published public private(set) var targetHashRoute: String?
+    @Published public internal(set) var targetHashRoute: String?
+    @Published public internal(set) var shellContext: NativeShellContext?
+    @Published public internal(set) var shellNavigationError: String?
+    public let nativeShellChromeEnabled: Bool
+    var shellState = NativeShellState()
 
     @Published public var isQRScannerPresented = false
     @Published public private(set) var pendingExternalPairConfirmation: PendingPairConfirmation?
@@ -73,8 +77,10 @@ public final class SteveClientCoordinator: ObservableObject {
         webRoot: URL? = nil,
         preferredPortDefaults: UserDefaults? = .standard,
         clientDescriptor: ClientDescriptor,
-        purgeWebCookiesHandler: ((Set<String>) -> Void)? = nil
+        purgeWebCookiesHandler: ((Set<String>) -> Void)? = nil,
+        nativeShellChromeEnabled: Bool = false
     ) {
+        self.nativeShellChromeEnabled = nativeShellChromeEnabled
         self.hubStore = hubStore ?? HubStore()
         self.api = api
         self.resolver = resolver
@@ -90,6 +96,7 @@ public final class SteveClientCoordinator: ObservableObject {
                 // activation of the Hub being switched to.
                 if self.hubStore.activeHubID == hubID {
                     self.activationGeneration &+= 1
+                    self.invalidateShellScope(clearNavigation: true, keepDocument: true)
                 }
                 switch event {
                 case .signedIn(let signed):
@@ -176,6 +183,7 @@ public final class SteveClientCoordinator: ObservableObject {
     }
 
     public func failGatewayIsolation(_ message: String) {
+        invalidateShellScope(clearNavigation: true)
         proxy.stop()
         localGatewayURL = nil
         proxyStartupError = message
@@ -189,9 +197,11 @@ public final class SteveClientCoordinator: ObservableObject {
     private func ensureGatewayRunning() async {
         do {
             let url = try await proxy.ensureRunning()
+            if localGatewayURL != url { invalidateShellScope(clearNavigation: false) }
             localGatewayURL = url
             proxyStartupError = nil
         } catch {
+            invalidateShellScope(clearNavigation: false)
             localGatewayURL = nil
             proxyStartupError = error.localizedDescription
             summary = HubRuntimeSummary(
@@ -203,6 +213,7 @@ public final class SteveClientCoordinator: ObservableObject {
     }
 
     public func stop() {
+        invalidateShellScope(clearNavigation: true)
         activationGeneration &+= 1
         if let cont = pendingPairContinuation {
             pendingPairContinuation = nil
@@ -220,8 +231,9 @@ public final class SteveClientCoordinator: ObservableObject {
 
     // MARK: - Native Bridge v2 (`window.__STEVE_NATIVE__`)
 
-    public static func bridgeCapabilities(for platform: String) -> [String] {
-        var caps = ["hubs.list", "hubs.switch", "hubs.add", "hubs.forget", "hubs.rename", "pair.claim"]
+    public nonisolated static func bridgeCapabilities(for platform: String, nativeShellChromeEnabled: Bool = false) -> [String] {
+        var caps = ["hubs.list", "hubs.switch", "hubs.add", "hubs.forget", "hubs.rename", "pair.claim", "shell.context", "shell.navigation.next", "shell.navigation.ack"]
+        if platform == "macos" && nativeShellChromeEnabled { caps.append("shell.chrome.hub") }
         if platform == "ios" {
             caps.append("pair.scan")
         }
@@ -303,6 +315,7 @@ public final class SteveClientCoordinator: ObservableObject {
                     summary.errorMessage ?? L10n.tr("无法连接到该 Hub", "Could not connect to Hub")
                 )
             }
+            invalidateShellScope(clearNavigation: false)
             webReloadNonce = UUID()
             return [:]
 
@@ -385,6 +398,7 @@ public final class SteveClientCoordinator: ObservableObject {
         guard hubStore.profiles.contains(where: { $0.id == id }) else { return }
         guard hubStore.activeHubID != id else { return }
         hubStore.selectHub(id: id)
+        invalidateShellScope(clearNavigation: true)
         Task { [weak self] in
             await self?.activateCurrentHub(forceReloadWeb: true)
         }
@@ -440,7 +454,7 @@ public final class SteveClientCoordinator: ObservableObject {
     }
 
     public func navigate(hashRoute: String) {
-        targetHashRoute = hashRoute
+        _ = navigate(route: hashRoute)
     }
 
     public func consumeTargetHashRoute() {
@@ -712,6 +726,7 @@ public final class SteveClientCoordinator: ObservableObject {
         purgePendingWebCookies()
         let previousTargetHubID = proxy.currentTarget().hubID
         if forceReloadWeb {
+            invalidateShellScope(clearNavigation: previousTargetHubID != hubStore.activeHubID)
             activationGeneration &+= 1
             webReloadOwed = true
         }
@@ -816,6 +831,7 @@ public final class SteveClientCoordinator: ObservableObject {
     private func issueOwedWebReload() {
         guard webReloadOwed else { return }
         webReloadOwed = false
+        invalidateShellScope(clearNavigation: false)
         webReloadNonce = UUID()
     }
 

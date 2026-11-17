@@ -3,6 +3,8 @@ import SwiftUI
 
 struct MacMainWindowView: View {
     @ObservedObject var coordinator: SteveClientCoordinator
+    @State private var showAttention = false
+    @State private var showConnection = false
 
     init(coordinator: SteveClientCoordinator) {
         self.coordinator = coordinator
@@ -38,6 +40,39 @@ struct MacMainWindowView: View {
             }
         }
         .navigationTitle(windowTitle)
+        .toolbar {
+            ToolbarItem(placement: .navigation) { MacHubMenu(coordinator: coordinator) }
+            ToolbarItem(placement: .principal) {
+                VStack(spacing: 2) {
+                    Text(MacShellContext.title(coordinator)).font(.headline).lineLimit(1)
+                    Text(MacShellContext.workspace(coordinator)).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                }
+                .accessibilityElement(children: .combine)
+            }
+            ToolbarItemGroup(placement: .primaryAction) {
+                Button { showAttention.toggle() } label: {
+                    Label(L10n.tr("提醒", "Attention"), systemImage: "bell")
+                }
+                .help(L10n.tr("提醒来源与入口（提醒尚不可用）", "Attention sources (reminders not yet available)"))
+                .popover(isPresented: $showAttention) {
+                    MacAttentionView(coordinator: coordinator) { route in
+                        showAttention = false
+                        coordinator.navigate(hashRoute: route)
+                    }.padding(16).frame(width: 330)
+                }
+                Button { showConnection.toggle() } label: { MacConnectionLabel(phase: coordinator.summary.phase) }
+                    .popover(isPresented: $showConnection) { MacConnectionDetails(coordinator: coordinator).padding(16).frame(width: 360) }
+            }
+        }
+        .safeAreaInset(edge: .top, spacing: 0) {
+            if let error = coordinator.shellNavigationError {
+                HStack {
+                    Label(error, systemImage: "exclamationmark.triangle").font(.callout)
+                    Spacer()
+                    Button(L10n.tr("关闭", "Dismiss")) { coordinator.dismissShellNavigationError() }
+                }.padding(10).background(.regularMaterial)
+            }
+        }
         .alert(
             SteveClientCoordinator.pairConfirmationTitle,
             isPresented: Binding(
@@ -87,9 +122,6 @@ struct MacMainWindowView: View {
     }
 
     private var windowTitle: String {
-        if let ws = coordinator.summary.workspaceName, !ws.isEmpty {
-            return "Steve · \(ws)"
-        }
-        return "Steve"
+        MacShellContext.title(coordinator)
     }
 }
