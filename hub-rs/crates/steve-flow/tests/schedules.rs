@@ -1693,3 +1693,75 @@ async fn a_brief_is_its_owners_alone_and_only_its_name_time_and_switch_change() 
     assert!(claim_due(&e.flow).unwrap().is_empty());
     assert!(runs_of(&e, &id).is_empty());
 }
+
+/// The generic flow and run routes serve a brief under its own visibility: another member does not see it
+/// listed, and gets 404 from its routes and its runs'; nobody runs or dry-runs it by hand.
+#[tokio::test]
+async fn the_flow_routes_keep_a_brief_its_owners_and_never_run_it() {
+    use steve_modules::testkit::OTHER;
+    let e = env();
+    let r = e.router();
+    let (me, other) = (caller(WS, ME), caller(WS, OTHER));
+    let id = brief(&e);
+    let run = e
+        .env
+        .store()
+        .transaction(|tx| {
+            steve_flow::runs::insert(
+                tx,
+                &steve_flow::runs::NewRun {
+                    ws: WS,
+                    flow_id: &id,
+                    flow_version: 1,
+                    trigger_kind: "time",
+                    status: "running",
+                    outcome_label: "已发到私聊：今天到期 2 个待办",
+                    cursor: None,
+                    context: &json!({}),
+                    now: monday_8am(),
+                },
+            )
+        })
+        .unwrap();
+    let listed = |v: &Value| v.as_array().unwrap().iter().any(|f| f["id"] == id.as_str());
+    for q in ["/flows", "/flows?kind=schedule"] {
+        let (st, v) = call(&r, Some(&me), "GET", q, None).await;
+        assert_eq!(st, 200, "{q}");
+        assert!(listed(&v), "{q} lists it to its owner");
+        let (st, v) = call(&r, Some(&other), "GET", q, None).await;
+        assert_eq!(st, 200, "{q}");
+        assert!(!listed(&v), "{q} leaves it out for another member");
+    }
+    let flow = format!("/flows/{id}");
+    let empty = json!({});
+    for (m, p, b) in [
+        ("GET", flow.clone(), None),
+        ("GET", format!("{flow}/versions/1"), None),
+        ("GET", format!("{flow}/runs"), None),
+        ("POST", format!("{flow}/run"), None),
+        ("POST", format!("{flow}/dry-run"), None),
+        ("PATCH", flow.clone(), Some(&empty)),
+        ("DELETE", flow.clone(), None),
+        ("POST", format!("{flow}/duplicate"), None),
+        ("GET", format!("/runs/{run}"), None),
+        ("POST", format!("/runs/{run}/cancel"), None),
+    ] {
+        let (st, v) = call(&r, Some(&other), m, &p, b).await;
+        assert_eq!(st, 404, "{m} {p} by another member: {v}");
+    }
+    // its owner reads it and its runs, but does not run it by hand
+    for p in [
+        flow.clone(),
+        format!("{flow}/versions/1"),
+        format!("{flow}/runs"),
+        format!("/runs/{run}"),
+    ] {
+        let (st, v) = call(&r, Some(&me), "GET", &p, None).await;
+        assert_eq!(st, 200, "GET {p}: {v}");
+    }
+    for p in [format!("{flow}/run"), format!("{flow}/dry-run")] {
+        let (st, v) = call(&r, Some(&me), "POST", &p, None).await;
+        assert_eq!(st, 400, "POST {p}: {v}");
+    }
+    assert_eq!(runs_of(&e, &id).len(), 1, "no run was started");
+}

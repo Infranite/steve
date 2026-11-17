@@ -1076,7 +1076,12 @@ mod tests {
         assert!(!s.sends(&policy(Mode::Digest, false, false)));
         assert!(s.quiet_allowed(&policy(Mode::Now, false, true)));
         assert!(!s.quiet_allowed(&policy(Mode::Now, false, false)));
-        for t in [Topic::ItemDone, Topic::TodoDue, Topic::SnoozeWake, Topic::BriefingReady] {
+        for t in [
+            Topic::ItemDone,
+            Topic::TodoDue,
+            Topic::SnoozeWake,
+            Topic::BriefingReady,
+        ] {
             assert_eq!(t.urgency(), "normal");
             assert!(!t.checks_answered());
             assert!(t.sends(&policy(Mode::Now, false, false)));
