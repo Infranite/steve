@@ -274,6 +274,18 @@ The work graph API shows bounded unit summaries and the latest 20 plan changes; 
 
 For a design or report delivery, Steve retains the delivery text as an immutable Markdown delivery on the Hub and registers its version URL as an item output. A design-only goal, or one that explicitly defers implementation until design confirmation, opens a user-only decision bound to the exact delivered bytes and goal version; choosing implementation continues the same item, while choosing design only closes that design cycle. Earlier path-based design deliveries remain valid and retain their content checks. The design file is the output of kind 方案, 设计 or 报告; failing that, any output (not a `record`) whose location is the exact URL of a file this item received with `steve_deliver_file`, when it opens in the browser: HTML, Markdown or text, PDF, an image, or a ZIP with an entry.
 
+### Review findings and merging
+
+A work graph splits by independent scope, not by phase: planning and implementing one scope stay in one unit, and review goes to the independent review Bot. A review unit's findings are blocking or non-blocking by a fixed category table, not by the reviewer's judgment of severity:
+
+| Blocking | Non-blocking |
+| --- | --- |
+| correctness, security, data loss, the goal not met, a required check failed | style, naming, documentation, optional optimisation |
+
+A blocking finding keeps the work from merging. A non-blocking one is recorded on a carry-over list, and the delivery must answer each entry: fixed, or why not. This is the target contract and is being implemented; until then a review verdict is pass or fail with a free-text reason.
+
+A git item that changed code without a work graph had no independent review. It is not merged automatically: once its delivery is accepted, Steve shows a card for its pull request, a person merges it, and YOLO does not answer that card. This is being implemented together with the pull-request auto-merge fix.
+
 ### File delivery and independent sharing
 
 A bound Node resolves file delivery paths (absolute or relative) inside the workspace captured for the current turn. The Hub's session directory may be a placeholder on another machine and is not a path mapping. Both `steve_deliver_file.path` and actual files in `steve_deliver.outputs.location` use this boundary; HTTP(S) references retain their link semantics. Upgrade older Nodes if execution-scoped delivery is unsupported, then start a new turn to capture its boundary. Traversal, symlinks, hard links, replaced workspaces and stale executions are refused.
@@ -1407,6 +1419,14 @@ Tools are discovered with `steve_tools_search` and executed through `steve_tool_
 Segments use `first`/`last` positive packet positions. Todos use `text` and `positions`, and only explicit source words justify a `due` timestamp (`due_quote`). Todos are the owner's personal list with `source:"steve"`, not Bot work items. Memories use source `first`/`last`: `id` indexes an existing visible memory; without it `text` and optional `kind` propose a private candidate, and optional `supersedes` references a visible confirmed memory for the existing confirmation flow. Both todos and memories may link an existing `matter`, or use `matter_at` (a position of a segment in the same submission) to link the newly created matter without inventing its ID. Summary-only packets forbid these associations. IDs, participants, message ranges and chain identity are derived or validated by modules, not trusted from model prose.
 
 The Bot reads and judges multiple conversations in one session but saves each chunk separately. For a large window it reads persisted segment pages, combines them with the previous summary and publishes **one complete-window summary**, never one summary per chunk. A later item/session resumes done chunks after yield, failure or expiration. A stale lease or a different run cannot write; repeated done-chunk submissions are no-ops. Failure before a chunk transaction commits leaves neither its writes nor its acknowledgement. The deterministic alert rules still count categories, firing/recovery and handlers; only queued anomalies/human discussion reach the Bot. No automatic history pull, attachment-body download, output-notification pipeline or dedicated messages page is implemented here.
+
+## Outbound checks
+
+Apart from fixed receipts no model wrote ("received, recorded as …"), only two kinds of output go without a model's review. What you and Steve say to each other in your private chat is not reviewed at all. A Bot's reply to an audience made only of workspace members skips the model check when every piece of knowledge it used is public to them; the rule check still runs.
+
+Every other outgoing text, including one sent in your name to a third party (a message from your own account or on your behalf, a mail), passes the rule check (names, amounts, links, file names and item numbers that only restricted knowledge holds) and a second model other than the one that wrote it (`STEVE_MODELS_CHECK`). A flagged span, or a check model that fails or gives no readable answer, holds the text for you. One gap remains: a mail draft written while YOLO is off has the rule check only; its card says so and offers the model check, and YOLO never sends an unchecked draft. Mail sent as you will always run the model check (being implemented, [#247](https://github.com/Infranite/steve/issues/247)). YOLO speaks as you only with the `[AI]` mark, and to an audience with people outside your organisation only when its settings allow it, which they do not by default.
+
+On your own account, trigger words (`/ai`, `/bot`) from anyone but you are screened by a fast model first. A request for your personal details, the deployment or Steve's prompts gets a fixed refusal, and you are told.
 
 ## Output intents
 
