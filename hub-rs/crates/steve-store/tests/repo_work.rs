@@ -207,7 +207,7 @@ fn item_json_shape() {
             "priority": "中", "archived": false, "created": i.created, "updated": i.updated, "project_id": null, "star": false,
             "due": null, "snooze": null, "source": ["派生", "fork"], "parent": {"item": null, "session": "ses_1", "at": 12},
             "phase": "active", "cycle": 1, "revision": 0, "outcome": null, "acceptance": null, "closing": null,
-            "closed_at": null, "closed_reason": null
+            "closed_at": null, "closed_reason": null, "design_gate": false
         })
     );
     s.with_conn(|c| {
@@ -296,6 +296,42 @@ fn item_patch() {
         .unwrap();
     assert!(s.items().list(WS, false).unwrap().is_empty());
     assert_eq!(s.items().list(WS, true).unwrap().len(), 1);
+}
+
+/// Q1: the design gate is off on a new item and is switched only by its own write; a stored undo or
+/// any other patch carrying the key leaves it as it is.
+#[test]
+fn design_gate_is_off_by_default_and_only_its_own_write_switches_it() {
+    let t = with_steve();
+    let s = &t.store;
+    let i = new_item(s, WS, "a");
+    assert!(!i.design_gate);
+    t.events.take();
+    let on = s.items().set_design_gate(&i.id, true).unwrap().unwrap();
+    assert!(on.design_gate);
+    assert_eq!(
+        t.events.take(),
+        vec![ChangeEvent::Item { id: i.id.clone() }]
+    );
+    assert!(
+        s.items()
+            .set_design_gate(&i.id, true)
+            .unwrap()
+            .unwrap()
+            .design_gate
+    );
+    assert!(t.events.take().is_empty(), "unchanged: nothing published");
+    let undo: ItemPatch =
+        serde_json::from_value(json!({"now": "x", "design_gate": false})).unwrap();
+    assert!(s.items().patch(&i.id, &undo).unwrap().unwrap().design_gate);
+    assert!(
+        !s.items()
+            .set_design_gate(&i.id, false)
+            .unwrap()
+            .unwrap()
+            .design_gate
+    );
+    assert!(s.items().set_design_gate("ST-404", true).unwrap().is_none());
 }
 
 #[test]

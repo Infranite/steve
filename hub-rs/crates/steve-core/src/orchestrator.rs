@@ -428,8 +428,17 @@ impl Core {
         if let Some(item) = &s.item_id {
             self.git_before(item);
         }
-        self.tx()
-            .tool_deliver(s, summary, outputs, checks, unfinished)
+        let delivered = self
+            .tx()
+            .tool_deliver(s, summary, outputs, checks, unfinished);
+        /* a refusal is noted for takeover, which tells the agent why and hands a repeated one to you */
+        if let (Err(CoreError::Status(409, why)), Some(item)) = (&delivered, &s.item_id)
+            && let Err(e) = self.tx().deliver_refused(item, &s.id, why)
+        {
+            /* the agent still hears the refusal itself */
+            tracing::warn!("note the refused delivery of {item}: {e}");
+        }
+        delivered
     }
     pub fn tool_publish(&self, s: &Session, branch: &str, summary: &str) -> Result<()> {
         if let Some(item) = &s.item_id {
@@ -1724,6 +1733,36 @@ impl Tx<'_> {
         Ok(())
     }
 
+    /// The design file a gated delivery is confirmed on: the first result the Bot named a design, a
+    /// plan or a report, then any file this item received that opens in the browser (#205) — the first
+    /// of them whose content Steve verifies. With the gate on `steve_deliver` always saves the delivery
+    /// body as one of them, so an external link or a format that does not open beside it is passed
+    /// over rather than refusing the delivery.
+    fn design_file(&self, item_id: &str, outputs: &[Output]) -> Result<String> {
+        let named = outputs
+            .iter()
+            .filter(|o| {
+                o.role.as_deref() == Some("result")
+                    && DESIGN_KINDS.iter().any(|word| o.kind.contains(word))
+            })
+            .filter_map(|o| o.location.as_deref());
+        let openable = outputs
+            .iter()
+            .filter(|o| o.role.as_deref() != Some("record"))
+            .filter_map(|o| o.location.as_deref())
+            .filter(|l| openable_delivery(self.db().store(), item_id, l).unwrap_or(false));
+        let mut refused = None;
+        for location in named.chain(openable) {
+            match verify_design_file(self.db().store(), &self.cfg().home, item_id, location) {
+                Ok(()) => return Ok(location.to_string()),
+                Err(e) => {
+                    refused.get_or_insert(e);
+                }
+            }
+        }
+        Err(refused.unwrap_or_else(|| crate::cycle::conflict("设计确认前需交付可打开的方案文件")))
+    }
+
     pub(crate) fn tool_deliver(
         &mut self,
         s: &Session,
@@ -1772,35 +1811,17 @@ impl Tx<'_> {
             notes.push_str(&format!("\n\n注意：{why}"));
         }
         let summary = &format!("{summary}{notes}");
-        let design_report = if design_confirmation_required(&self.db().goal(item_id)?) {
-            let named = outputs.iter().find_map(|o| {
-                (o.role.as_deref() == Some("result")
-                    && ["方案", "设计", "报告"]
-                        .iter()
-                        .any(|word| o.kind.contains(word)))
-                .then(|| o.location.as_deref())
-                .flatten()
-            });
-            // A file the Bot published with steve_deliver_file and listed as a result (any kind:
-            // `file`, `文件`…) is the design file too, when this item received it and it opens in
-            // the browser (#205).
-            let report = match named {
-                Some(r) => Some(r),
-                None => outputs
-                    .iter()
-                    .filter(|o| o.role.as_deref() != Some("record"))
-                    .filter_map(|o| o.location.as_deref())
-                    .find(|l| openable_delivery(self.db().store(), item_id, l).unwrap_or(false)),
-            }
-            .ok_or_else(|| crate::cycle::conflict("设计确认前需交付可打开的方案文件"))?;
-            verify_design_file(self.db().store(), &self.cfg().home, item_id, report)?;
+        /* the owner switched the design gate on for this item (Q1): the delivery is a design that
+         * waits for the owner's decision, whatever its goal says */
+        let design_report = if item.design_gate {
+            let report = self.design_file(item_id, outputs)?;
             let goal_version = self
                 .db()
                 .goals(item_id)?
                 .last()
                 .map(|g| g.version)
                 .unwrap_or(1);
-            Some((report.to_string(), goal_version))
+            Some((report, goal_version))
         } else {
             None
         };
@@ -1844,8 +1865,13 @@ impl Tx<'_> {
                     .join("；")
             )
         };
-        self.db()
-            .timeline_add(item_id, &Self::by(s), "sys", "交付，等你验收", Some(&s.id))?;
+        self.db().timeline_add(
+            item_id,
+            &Self::by(s),
+            "sys",
+            crate::takeover::DELIVERED,
+            Some(&s.id),
+        )?;
         if let Some((report, goal_version)) = design_report {
             let d = self.db().decision_create(NewDecision {
                 workspace_id: item.workspace_id.clone(),
@@ -4699,40 +4725,8 @@ impl Tx<'_> {
     }
 }
 
-/// A design-only goal or an explicit review gate leaves implementation to the user. A model's
-/// quality review cannot answer this product decision, even with automatic acceptance enabled.
-fn design_confirmation_required(goal: &str) -> bool {
-    let deferred = [
-        "设计通过后",
-        "设计通过之后",
-        "经用户确认后",
-        "用户确认后",
-        "不直接实现",
-        "先出设计",
-        "先设计",
-    ]
-    .iter()
-    .any(|phrase| goal.contains(phrase));
-    let design = ["设计", "方案", "原型", "线框"]
-        .iter()
-        .any(|word| goal.contains(word));
-    let implementation = [
-        "并实现",
-        "并开发",
-        "并落地",
-        "设计与实现",
-        "设计和实现",
-        "实现并",
-        "开发并",
-        "按方案实施",
-        "部署",
-        "上线",
-        "修复",
-    ]
-    .iter()
-    .any(|phrase| goal.contains(phrase));
-    deferred || (design && !implementation)
-}
+/// Output kinds that name a design file for the design gate.
+const DESIGN_KINDS: [&str; 3] = ["方案", "设计", "报告"];
 
 /// A decision authorizes the exact content-addressed report that was shown for this goal.
 /// Whether `location` is the exact URL of a file delivery this item received, of a kind the

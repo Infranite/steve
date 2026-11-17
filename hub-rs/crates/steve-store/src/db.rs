@@ -181,6 +181,8 @@ pub const MIGRATIONS: &[&str] = &[
     // 89: writes a channel refused for good (read-only connections, chats that refuse writes),
     // remembered for a day.
     include_str!("../migrations/089.sql"),
+    // 90: the design gate is a switch on the item, off by default; only the owner turns it on.
+    include_str!("../migrations/090.sql"),
 ];
 
 /// 027's item columns and their one-time backfill (applied by `run_pending` when `items.phase` is missing).

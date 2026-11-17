@@ -442,6 +442,43 @@ pub async fn patch_one(
     .await
 }
 
+/// `PUT /items/{id}/design-gate {on}` (Q1): a delivery of the item waits for the owner to confirm the
+/// design before any implementation. Only the instance's owner switches it, from the page or the API;
+/// no Bot, MCP tool or YOLO has a way to write it.
+pub async fn design_gate(
+    State(st): State<AppState>,
+    Extension(c): Extension<Ctx>,
+    Path(id): Path<String>,
+    b: Bytes,
+) -> ApiResult {
+    if c.user.get("role").and_then(Value::as_str) != Some("owner") {
+        return Err(ApiError::Json(
+            403,
+            steve_i18n::t!("hub.item.design_gate_owner_only"),
+        ));
+    }
+    let v = body(&b)?;
+    let mut k = Check::object(&v);
+    let on = k.opt_bool("on");
+    k.finish()?;
+    let Some(on) = on else {
+        return Err(ApiError::Invalid(vec!["on".into()]));
+    };
+    st.write(move |r| {
+        let i = own(r.item_get(&id)?, &c.ws, Noun::Item)?;
+        if i.get("design_gate").and_then(Value::as_bool) != Some(on) {
+            let line = if on {
+                "开启设计确认：交付后先由你确认设计，再决定是否实现"
+            } else {
+                "关闭设计确认"
+            };
+            r.timeline_add(&id, &c.me, "me", line, None)?;
+        }
+        ok(opt_obj(r.item_set_design_gate(&id, on)?))
+    })
+    .await
+}
+
 pub async fn delete_one(
     State(st): State<AppState>,
     Extension(c): Extension<Ctx>,

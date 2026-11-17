@@ -5,6 +5,10 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+/// The default of [`CoreConfig::takeover_same_refusals`]: the second refusal for the same reason is
+/// the user's (decided by the user on 2026-11-17).
+pub const TAKEOVER_SAME_REFUSALS: u32 = 2;
+
 #[derive(Debug, Clone)]
 pub struct CoreConfig {
     /// `STEVE_HOME`
@@ -39,6 +43,9 @@ pub struct CoreConfig {
     /// How many times in a row Steve continues an agent that stopped without delivering or asking
     /// before the user hears of it (`takeover`); anything the user does on the item starts over.
     pub takeover_continues: u32,
+    /// How many refusals of `steve_deliver` in a row for the same reason hand the item to the user
+    /// instead of another continue (`takeover`); 0: never.
+    pub takeover_same_refusals: u32,
     /// `STEVE_GH`: the GitHub CLI that follows Release builds.
     pub gh: PathBuf,
     /// The version this Hub runs (`dev` when unknown): what an item whose goal asks for its result to
@@ -105,6 +112,7 @@ impl CoreConfig {
             resume_delay: Duration::from_secs(3),
             no_resume: false,
             takeover_continues: 2,
+            takeover_same_refusals: TAKEOVER_SAME_REFUSALS,
             gh: gh_cli(),
             version: "dev".into(),
             commit: None,

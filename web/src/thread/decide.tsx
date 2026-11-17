@@ -156,11 +156,13 @@ export function mapDecision(i: Item, w: Wait, where: "inline" | "composer", show
     }
   }
   if (w.type === "ask" && w.subject === "design_implementation") {
-    /* the typed note goes with every choice; a revision needs one */
+    /* the typed note goes with every choice; a revision needs one. The owner turned the item's design gate on,
+     * and only a person answers it: the card says so rather than wait for YOLO */
     const [impl, keep, revise] = w.options
     const rows = [impl && opt(impl, tr("core:card.designImplement"), { "data-design-choice": "0" }), keep && opt(keep, tr("core:card.designKeep"), { "data-design-choice": "1" })].filter(Boolean) as DecisionOption[]
+    const note = <div className="type-footnote text-muted-foreground" data-design-gate-note>{tr("core:card.designGateNote")}</div>
     return {
-      d: { ...base, options: rows, own: revise ? { placeholder: tr("core:card.designFeedback"), send: tr("core:card.designRevise"), attrs: { "data-design-feedback": "" }, sendAttrs: { "data-design-choice": "2" } } : false },
+      d: { ...base, detail: <Detail w={w} extra={note} />, options: rows, own: revise ? { placeholder: tr("core:card.designFeedback"), send: tr("core:card.designRevise"), attrs: { "data-design-feedback": "" }, sendAttrs: { "data-design-choice": "2" } } : false },
       answer: (a) => { if (typeof a !== "object") return; if (a.option) act(a.option, a.text ?? ""); else if (revise && a.text) act(revise, a.text) },
     }
   }

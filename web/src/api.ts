@@ -9,7 +9,7 @@ export type PlanStep = { step: string; done: boolean; left?: boolean }
 export type RItem = {
   id: string; workspace_id: string; no: number; title: string; status: ItemStatus; stage: string; bot_id: string | null; project_id: string | null; cwd: string | null; branch: string | null
   plan: PlanStep[]; now: string; accept_mode: string | null; priority: string; archived: boolean; star: boolean; due: string | null; snooze: { label: string; until: number } | null
-  source: [string, string]; parent: { item?: string | null; session?: string | null; at?: number | null } | null; phase?: "ready" | "active" | "closing" | "closed"; cycle?: number; created: number; updated: number
+  source: [string, string]; parent: { item?: string | null; session?: string | null; at?: number | null } | null; design_gate?: boolean; phase?: "ready" | "active" | "closing" | "closed"; cycle?: number; created: number; updated: number
   goal: string; goals: number; tags: string[]; deps: string[]; sessionIds: string[]; open: string[]; queued: number; live: boolean
   workflow_paused?: boolean; workflow_cycle?: number; workflow_failed?: string[]; workflow_attempt?: number; workflow_superseded?: boolean
 }
@@ -263,6 +263,8 @@ export const api = {
   itemAction: (id: string, action: string) => post(`/items/${id}/actions`, { action }), bulk: (ids: string[], op: string) => post<{ n: number }>("/items/bulk", { ids, op }),
   goal: (id: string, text: string) => post(`/items/${id}/goal`, { text }),
   patchItem: (id: string, p: Partial<{ title: string; priority: string; due: string | null; star: boolean; accept_mode: string; project_id: string | null; tags: string[] }>) => patch(`/items/${id}`, p),
+  /* only the instance's owner switches it; nothing else writes it */
+  designGate: (id: string, on: boolean) => req<RItem>("PUT", `/items/${encodeURIComponent(id)}/design-gate`, { on }),
   deleteItem: (id: string) => del(`/items/${id}`),
   supplement: (id: string, text: string, mode: "auto" | "steer" | "new", files: string[] = []) => post(`/items/${id}/supplement`, { text, mode, files }), deliver: (id: string) => post(`/items/${id}/deliver`),
   reassign: (id: string, bot: string) => post(`/items/${id}/reassign`, { bot }),

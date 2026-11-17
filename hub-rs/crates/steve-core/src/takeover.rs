@@ -10,6 +10,9 @@
 //!    a turn already running or a message already queued is the continue.
 //! 4. Out of continues, or nothing to continue (no session) → one card for you, saying so. A card that
 //!    is already open for the same thing is not opened again.
+//! 5. A refused `steve_deliver` is noted on the item ([`REFUSED`]): the next continue tells the agent
+//!    why, and the same reason `takeover_same_refusals` times in a row hands the item to you instead —
+//!    delivering again would only be refused again.
 //!
 //! A required release of a project with a completion rule is the rule itself: met when the remote shows
 //! it, re-checked while the item waits to close. The build the tag starts is followed on its own
@@ -35,6 +38,10 @@ use crate::{Core, Tx, detach, patch};
 pub const LINE: &str = "Steve 接手：";
 /// In a card's question: Steve already continued the agent; YOLO does not continue it again.
 pub const STEVE_TRIED: &str = "Steve 已让它继续";
+/// Timeline lines of a refused `steve_deliver` start with this; the reason follows.
+pub const REFUSED: &str = "交付被拒：";
+/// The timeline line of a delivery taken in: refusals before it are old news.
+pub(crate) const DELIVERED: &str = "交付，等你验收";
 /// A probe of the same `HEAD` younger than this decides without asking the remote again.
 pub const PROBE_FRESH_MS: i64 = 2 * 60_000;
 /// A probe that has not come back after this is taken for lost (its deadlines are far shorter).
@@ -249,23 +256,53 @@ impl Tx<'_> {
         Ok(())
     }
 
-    /// Steve's continues since you last did something on the item.
-    fn takeover_count(&self, item_id: &str) -> Result<u32> {
-        /* you answered a card of the item (not YOLO for you) */
-        let answered = self
+    /// When you last answered a card of the item (not YOLO for you); 0 when never.
+    fn last_answered(&self, item_id: &str) -> Result<i64> {
+        Ok(self
             .db()
             .decisions_of_item(item_id)?
             .iter()
             .filter(|d| d.status == "resolved" && d.result["decided_by"] != "yolo")
             .filter_map(|d| d.resolved)
             .max()
-            .unwrap_or(0);
+            .unwrap_or(0))
+    }
+
+    /// Steve's continues since you last did something on the item.
+    fn takeover_count(&self, item_id: &str) -> Result<u32> {
+        let answered = self.last_answered(item_id)?;
         let t = self.db().timeline(item_id)?;
         Ok(t.iter()
             .rev()
             .take_while(|e| e.kind != "me")
             .filter(|e| e.ts > answered && e.actor == "steve" && e.text.starts_with(LINE))
             .count() as u32)
+    }
+
+    /// `steve_deliver` was refused for `why`: noted on the item, for the next continue to read.
+    pub(crate) fn deliver_refused(&mut self, item_id: &str, sid: &str, why: &str) -> Result<()> {
+        self.db().timeline_add(
+            item_id,
+            "steve",
+            "sys",
+            &format!("{REFUSED}{}", js_head(why, REFUSED_CHARS)),
+            Some(sid),
+        )?;
+        Ok(())
+    }
+
+    /// The reasons `steve_deliver` was refused since the last delivery taken in or the last thing you
+    /// did on the item, newest first.
+    fn refusals(&self, item_id: &str) -> Result<Vec<String>> {
+        let answered = self.last_answered(item_id)?;
+        let t = self.db().timeline(item_id)?;
+        Ok(t.iter()
+            .rev()
+            .take_while(|e| e.kind != "me" && e.ts > answered && e.text != DELIVERED)
+            .filter(|e| e.actor == "steve")
+            .filter_map(|e| e.text.strip_prefix(REFUSED))
+            .map(str::to_string)
+            .collect())
     }
 
     /// Continues the agent with `text`, within the limit. `Some(why)` for the card when it can't.
@@ -337,6 +374,29 @@ impl Tx<'_> {
             );
             return Ok(Some(why.into()));
         }
+        /* its delivery was refused for the same reason again and again: delivering once more would
+         * only be refused once more, so it is yours; a different reason is the agent's to work on */
+        let refusals = self.refusals(&i.id)?;
+        let same = self.cfg().takeover_same_refusals as usize;
+        if same > 0 && refusals.len() >= same && refusals[..same].iter().all(|r| *r == refusals[0])
+        {
+            self.diagnostic_session(
+                &s.id,
+                None,
+                "takeover.evaluated",
+                "same_refusal",
+                false,
+                steve_store::diagnostics::Details {
+                    attempt_ordinal: Some(same as u64),
+                    limit: Some(same as u64),
+                    ..Default::default()
+                },
+            );
+            return Ok(Some(format!(
+                "{why}（交付连续 {same} 次因同一原因被拒：{}）",
+                refusals[0]
+            )));
+        }
         let n = self.takeover_count(&i.id)?;
         let cap = self.cfg().takeover_continues;
         if n >= cap {
@@ -371,7 +431,11 @@ impl Tx<'_> {
         )?;
         self.db().item_patch(&i.id, patch![now: "Steve 让它继续"])?;
         settle(self.db(), &i.id)?;
-        self.prompt(&s.id, text, "steve");
+        let text = match refusals.first() {
+            Some(r) => format!("{text}{}", refused_text(r)),
+            None => text.to_string(),
+        };
+        self.prompt(&s.id, &text, "steve");
         self.diagnostic_session(
             &s.id,
             None,
@@ -936,6 +1000,17 @@ pub(crate) fn stopped_to_report(text: &str) -> bool {
             .trim_matches(|c: char| c == '*' || c == ':' || c == '：' || c.is_whitespace());
         head.chars().count() <= 20 && REPORT_HEADS.iter().any(|w| head.contains(w))
     })
+}
+
+/// How much of a refusal's reason the timeline keeps.
+const REFUSED_CHARS: usize = 300;
+
+/// What a continue adds when the agent's last delivery was refused: the reason, and not to deliver the
+/// same again.
+fn refused_text(reason: &str) -> String {
+    format!(
+        "你上一次用 steve_deliver 交付被拒绝了，原因：{reason}。先解决这个原因再交付，不要原样再交一次；只有用户能解决时，用 steve_ask 提问。"
+    )
 }
 
 /// What the continue says: why Steve stepped in, what it found, what is left, how not to repeat work.

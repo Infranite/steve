@@ -1407,3 +1407,62 @@ fn stopped_without_a_commit_of_its_own_is_continued_not_closed_as_merged() {
             .any(|l| l.contains("判定完成"))
     );
 }
+
+fn deliver_refused(k: &Kit, sid: &str, checks: &[crate::Check]) -> String {
+    let s = k.db().session(sid).unwrap().unwrap();
+    k.core
+        .tool_deliver(&s, "做完了", &[], checks, &[])
+        .unwrap_err()
+        .to_string()
+}
+
+/// P0-7: a refused delivery is read back on the next continue, and the same reason twice in a row is
+/// yours rather than a third attempt the agent would only have refused again.
+#[test]
+fn the_same_refusal_twice_hands_the_item_to_you() {
+    let k = kit(5);
+    let (item, sid) = started(&k);
+    k.db().store().items().set_design_gate(&item, true).unwrap();
+    let why = deliver_refused(&k, &sid, &[]);
+    stop(&k, &sid, "已经交付。");
+    assert!(k.open_fails(&item).is_empty());
+    let p = k.rt.prompts_of(&sid).pop().unwrap();
+    assert!(p.contains(&format!("被拒绝了，原因：{why}")), "{p}");
+    assert_eq!(deliver_refused(&k, &sid, &[]), why);
+    stop(&k, &sid, "已经交付。");
+    let fails = k.open_fails(&item);
+    assert_eq!(fails.len(), 1, "{fails:?}");
+    assert!(
+        fails[0].contains(&format!("交付连续 2 次因同一原因被拒：{why}")),
+        "{}",
+        fails[0]
+    );
+    assert_eq!(steve_lines(&k, &item).len(), 1, "no second continue");
+}
+
+/// A different reason each time is the agent's to work on: it is continued, told the latest one.
+#[test]
+fn different_refusals_are_continued_with_the_latest_reason() {
+    let k = kit(5);
+    let (item, sid) = started(&k);
+    let items = k.db().store().items();
+    items.set_design_gate(&item, true).unwrap();
+    deliver_refused(&k, &sid, &[]);
+    stop(&k, &sid, "已经交付。");
+    items.set_design_gate(&item, false).unwrap();
+    let scope = deliver_refused(
+        &k,
+        &sid,
+        &[crate::Check {
+            name: "tests".into(),
+            passed: true,
+            operated: false,
+            scope: Some("everything".into()),
+        }],
+    );
+    stop(&k, &sid, "已经交付。");
+    assert!(k.open_fails(&item).is_empty(), "{:?}", k.open_fails(&item));
+    assert_eq!(steve_lines(&k, &item).len(), 2);
+    let p = k.rt.prompts_of(&sid).pop().unwrap();
+    assert!(p.contains(&format!("原因：{scope}")), "{p}");
+}

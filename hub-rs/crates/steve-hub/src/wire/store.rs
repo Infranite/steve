@@ -616,6 +616,9 @@ impl Repo for StoreBackend {
     fn item_patch(&self, id: &str, p: &Obj) -> BResult<Option<Obj>> {
         opt(self.0.items().patch(id, &patch(p)?).map_err(err)?)
     }
+    fn item_set_design_gate(&self, id: &str, on: bool) -> BResult<Option<Obj>> {
+        opt(self.0.items().set_design_gate(id, on).map_err(err)?)
+    }
     fn item_remove(&self, id: &str) -> BResult<()> {
         self.0.items().remove(id).map_err(err)
     }

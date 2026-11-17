@@ -41,6 +41,8 @@ export type Out = [string, string, string | null, string, number?, ("record" | "
 export type PlanRound = { n: number; steps: [string, number][]; end: "done" | "replaced"; at: string }
 export type Item = {
   id: string; t: string; b: string; st: "prop" | "run" | "wait" | "pause" | "done" | "drop" | "block" | "fail"; phase?: "ready" | "active" | "closing" | "closed"; cycle?: number; deps?: string[]; src: [string, string]; ws: string; project: string | null; up: string; star?: boolean; acc: string
+  /** the design gate (Q1): a delivery waits for the owner to confirm the design; off unless the owner turned it on */
+  designGate?: boolean
   goals: string[]; now: string; plan?: [string, number][]; rounds: PlanRound[]; wait?: Wait; waits: Wait[]; ss: string[]; tl: any[]; outs: Out[]; anns: RAnnotation[]; q: RQueued[]; qs: string | null; parent?: { item?: string; s?: string; at?: number } | null
   due?: string; pri?: "高" | "中" | "低"; arch?: boolean; snooze?: string; snoozeUntil?: number; tags?: string[]; branch: string | null; cwd: string | null; projNext?: boolean; detail: boolean; dependents: string[]; created: number; updated: number
   /** the last approved release of this item and what became of it */
@@ -480,7 +482,7 @@ function itemOf(i: RItem): Item {
     const sk = started(lines[k]); tl.push(sk ? ["sess", sk] : ["reply", replies.get(lines[k].id)])
   })
   return {
-    id: i.id, t: i.title, b: i.bot_id ?? "steve", st: i.status, phase: i.phase, cycle: i.cycle, deps: i.deps, src: i.source, ws: proj?.name ?? "—", project: i.project_id, up: tm(i.updated), star: i.star, acc: ACC[i.accept_mode ?? "inherit"] ?? ACC.inherit,
+    id: i.id, t: i.title, b: i.bot_id ?? "steve", st: i.status, phase: i.phase, cycle: i.cycle, deps: i.deps, src: i.source, ws: proj?.name ?? "—", project: i.project_id, up: tm(i.updated), star: i.star, acc: ACC[i.accept_mode ?? "inherit"] ?? ACC.inherit, designGate: !!i.design_gate,
     workflowPaused: i.workflow_paused, workflowCycle: i.workflow_cycle, workflowFailed: i.workflow_failed, workflowAttempt: i.workflow_attempt, workflowSuperseded: i.workflow_superseded,
     goals: det ? det.goalsList.map((g) => g.text) : [i.goal], now: i.status === "block" && i.now === "等前置事项完成后自动开始" ? t("views:dependencyWait.waiting") : i.now || "", plan: i.plan.length ? steps(i.plan) : undefined,
     rounds: (det?.planRounds ?? []).map((r) => ({ n: r.round, steps: steps(r.steps), end: r.end, at: tm(r.created) })),
@@ -1065,6 +1067,8 @@ export async function markDone(id: string) {
 }
 export function star(id: string) { void call(api.patchItem(id, { star: !it(id).star })) }
 export function setAcc(id: string, v: string) { void call(api.patchItem(id, { accept_mode: accKey(v) })) }
+/** the owner switches the item's design gate (the Hub refuses anyone else) */
+export function setDesignGate(id: string, on: boolean) { void call(api.designGate(id, on), t(on ? "core:toast.designGateOn" : "core:toast.designGateOff")) }
 export function patchItem(id: string, p: Partial<Item>) {
   const q: Parameters<typeof api.patchItem>[1] = {}
   if (p.t !== undefined) q.title = p.t

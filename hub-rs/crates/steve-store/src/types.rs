@@ -355,6 +355,9 @@ pub struct Item {
     pub snooze: Option<Snooze>,
     pub source: (String, String),
     pub parent: Option<Parent>,
+    /// The design gate (migration 090): a delivery waits for the owner to confirm the design before
+    /// any implementation. Off by default; written only by `Items::set_design_gate`.
+    pub design_gate: bool,
     /// The lifecycle (migration 027): `ready` | `active` | `closing` | `closed`. Written only by the
     /// core's lifecycle ([`crate::lifecycle_write_in`]); `status` is its legacy projection.
     pub phase: String,
@@ -398,6 +401,7 @@ impl Item {
             snooze: json_col(r, "snooze", None)?,
             source: json_col(r, "source", default_source())?,
             parent: json_col(r, "parent", None)?,
+            design_gate: bool_col(r, "design_gate")?,
             phase: r.get("phase")?,
             cycle: r.get("cycle")?,
             revision: r.get("revision")?,

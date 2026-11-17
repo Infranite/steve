@@ -394,6 +394,10 @@ pub trait Repo {
     fn item_patch(&self, id: &str, patch: &Obj) -> BResult<Option<Obj>> {
         todo_backend!("item_patch")
     }
+    /// Switches the item's design gate (never part of `item_patch`); the item as read back.
+    fn item_set_design_gate(&self, id: &str, on: bool) -> BResult<Option<Obj>> {
+        todo_backend!("item_set_design_gate")
+    }
     fn item_remove(&self, id: &str) -> BResult<()> {
         todo_backend!("item_remove")
     }

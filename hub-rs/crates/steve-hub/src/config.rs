@@ -151,6 +151,9 @@ pub struct Config {
     /// `STEVE_TAKEOVER_CONTINUES`: how often Steve continues a stopped agent before the user hears of it
     /// (`None`: the core's default).
     pub takeover_continues: Option<u32>,
+    /// `STEVE_TAKEOVER_SAME_REFUSALS`: how many refusals of a delivery in a row for the same reason
+    /// hand the item to the user instead of another continue; 0: never (`None`: the core's default).
+    pub takeover_same_refusals: Option<u32>,
     /// `STEVE_DISK_FLOOR_GB`, `STEVE_DISK_LOW_GB`, `STEVE_WORKTREE_IDLE_HOURS` (task workspaces).
     pub disk: steve_core::workspace::DiskPolicy,
     /// `STEVE_GH`: the GitHub CLI that follows Release builds (`None`: looked up by the core).
@@ -504,6 +507,8 @@ impl Config {
             no_resume: get("STEVE_NO_RESUME").as_deref() == Some("1"),
             backup: crate::daily_backup::enabled(get("STEVE_BACKUP").as_deref()),
             takeover_continues: get("STEVE_TAKEOVER_CONTINUES").and_then(|v| v.parse().ok()),
+            takeover_same_refusals: get("STEVE_TAKEOVER_SAME_REFUSALS")
+                .and_then(|v| v.parse().ok()),
             disk: steve_core::workspace::DiskPolicy::from_vars(&get),
             gh: get("STEVE_GH").filter(|v| !v.is_empty()).map(PathBuf::from),
             claude_executable: env("CLAUDE_CODE_EXECUTABLE", "/opt/homebrew/bin/claude"),

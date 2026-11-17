@@ -2263,6 +2263,10 @@ impl steve_mcp::Backend for CoreMcp {
                 tool(move || {
                     if let Some(item) = s.item_id.as_deref() {
                         let goal = store.items().goal(item)?;
+                        /* the design gate confirms a file Steve holds: with it on, the delivery body
+                         * is always saved as one, whatever else the Bot listed (an external link, a
+                         * format that does not open) */
+                        let gated = store.items().get(item)?.is_some_and(|i| i.design_gate);
                         let referenced = outputs
                             .iter()
                             .any(|o| super::output_files::summary_reference(o.location.as_deref()));
@@ -2272,13 +2276,12 @@ impl steve_mcp::Backend for CoreMcp {
                                     .iter()
                                     .any(|word| o.kind.contains(word))
                         });
-                        let report_goal = goal.contains("设计方案")
-                            || goal.contains("设计通过")
-                            || goal.contains("报告")
+                        let report_goal = goal.contains("报告")
                             || goal.contains("报表")
                             || goal.contains("分析")
                             || goal.contains("调研");
-                        if referenced || text_result || report_goal || summary.len() > 2000 {
+                        if gated || referenced || text_result || report_goal || summary.len() > 2000
+                        {
                             let report = svc
                                 .accept(&s, "交付正文", "report.md", summary.as_bytes(), None)
                                 .map_err(|e| {

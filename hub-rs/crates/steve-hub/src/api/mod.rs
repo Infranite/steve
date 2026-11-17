@@ -636,6 +636,7 @@ pub fn router(st: AppState, modules: Router) -> Router {
             "/items/{id}/dependency-wait",
             get(items::dependency_get).post(items::dependency_wait),
         )
+        .route("/items/{id}/design-gate", put(items::design_gate))
         .route("/items/{id}/goal", post(items::goal))
         .route("/items/{id}/supplement", post(items::supplement))
         .route("/items/{id}/deliver", post(items::deliver))

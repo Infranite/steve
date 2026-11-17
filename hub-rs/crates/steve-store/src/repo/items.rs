@@ -214,6 +214,22 @@ impl Items<'_> {
         })
     }
 
+    /// Switches the item's design gate. Kept out of [`ItemPatch`] on purpose: no general item write
+    /// (an agent's update, a module, a stored undo) can turn it, only the owner's own request. `None`
+    /// when there is no such item; an unchanged value bumps and publishes nothing.
+    pub fn set_design_gate(&self, id: &str, on: bool) -> Result<Option<Item>> {
+        self.0.write(|w| {
+            let n = w.c.run(
+                "UPDATE items SET design_gate = ?, updated = ? WHERE id = ? AND design_gate != ?",
+                params![on as i64, now(), id, on as i64],
+            )?;
+            if n > 0 {
+                w.publish(ChangeEvent::Item { id: id.into() });
+            }
+            one(w.c, ITEM, [id], Item::from_row)
+        })
+    }
+
     /// Deletes the item and what hangs off it; sessions and decisions are kept but unlinked.
     pub fn remove(&self, id: &str) -> Result<()> {
         self.0.write(|w| {
