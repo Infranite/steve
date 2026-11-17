@@ -1,6 +1,6 @@
 /* Shared building blocks for the Steve prototype — see DESIGN.md.
  * Quiet chrome: grey scale everywhere, blue = selected/running, orange = needs you. */
-import { Children, Fragment, Suspense, lazy, memo, useEffect, useId, useRef, useState, useSyncExternalStore, type ComponentProps, type InputHTMLAttributes, type ReactNode, type Ref } from "react"
+import { Children, Fragment, Suspense, lazy, memo, useEffect, useLayoutEffect, useId, useRef, useState, useSyncExternalStore, type ComponentProps, type InputHTMLAttributes, type ReactNode, type Ref } from "react"
 import { flushSync } from "react-dom"
 import { Robot } from "@/robot"
 import { clockDur } from "@/i18n/format"
@@ -449,24 +449,31 @@ export function Disclosure({ label, children, open, onOpenChange, defaultOpen, c
 
 /** the width of a panel beside a page */
 export const PANEL_W = "w-[320px]"
-/** a panel beside a page that slides open and shut: its width eases between 0 and PANEL_W, the content keeps its
- *  width (so it doesn't reflow while it moves) and leaves the page once closed */
+/** Allocate the final docked width once, then reveal only the panel. Animating width makes the neighbouring
+ * conversation rewrap and run its ResizeObserver/scroll anchoring on every animation frame. */
 export function SidePanel({ open, children, className, test }: { open: boolean; children: ReactNode; className?: string; test: Record<string, string> }) {
-  const [mounted, setMounted] = useState(open), [shown, setShown] = useState(open)
-  useEffect(() => {
-    if (open) {
-      setMounted(true)
-      let r = requestAnimationFrame(() => { r = requestAnimationFrame(() => setShown(true)) })
-      return () => cancelAnimationFrame(r)
-    }
-    setShown(false)
-    const h = setTimeout(() => setMounted(false), 280)
-    return () => clearTimeout(h)
+  const [mounted, setMounted] = useState(open)
+  const body = useRef<HTMLElement>(null), opener = useRef<HTMLElement | null>(null), focused = useRef(false)
+  // Capture before a child such as history's search field takes focus in its mount effect.
+  useLayoutEffect(() => {
+    if (open) { opener.current = document.activeElement instanceof HTMLElement ? document.activeElement : null; focused.current = false }
   }, [open])
-  if (!mounted) return null
+  useEffect(() => {
+    if (open) { setMounted(true); return }
+    // Inert may already have blurred a keyboard user to body. Restore only their opener, not focus
+    // elsewhere (including the other panel's toggle during a mutual switch).
+    if (focused.current && (document.activeElement === document.body || body.current?.contains(document.activeElement))) opener.current?.focus({ preventScroll: true })
+    let live = true
+    // Includes reduced motion, a canceled animation (e.g. a mutual panel switch), and no animation at all.
+    // An old exit must not unmount a panel that was reopened in the meantime.
+    const animations = body.current?.getAnimations() ?? []
+    void Promise.all(animations.map((a) => a.finished.catch(() => {}))).then(() => { if (live) setMounted(false) })
+    return () => { live = false }
+  }, [open])
+  if (!open && !mounted) return null
   return (
-    <div className={cn("flex shrink-0 justify-end overflow-hidden transition-[width] duration-260 ease-(--ease-out)", shown && open ? PANEL_W : "w-0")} inert={!open || undefined} data-side-panel>
-      <aside className={cn("flex shrink-0 flex-col overflow-hidden border-l border-sidebar-border bg-sidebar transition-opacity duration-260 ease-(--ease-out)", PANEL_W, shown && open ? "opacity-100" : "opacity-60", className)} {...(open ? test : {})}>{children}</aside>
+    <div className={cn("flex shrink-0 justify-end overflow-hidden", PANEL_W)} inert={!open || undefined} data-side-panel data-state={open ? "open" : "closed"}>
+      <aside ref={body} onFocusCapture={() => { focused.current = true }} className={cn("side-panel-body flex shrink-0 flex-col overflow-hidden border-l border-sidebar-border bg-sidebar", PANEL_W, className)} {...(open ? test : {})}>{children}</aside>
     </div>
   )
 }

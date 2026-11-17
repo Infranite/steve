@@ -220,6 +220,13 @@ html.font-large { --type-scale: 1.125; }
 
 /* motion scale: 120ms colour and press · 180ms popovers, toggles, chevrons, entrances and page changes · 260ms dialogs,
  * sheets, expand and collapse; all on --ease-out. */
+/* Docked panels reserve their final width once; only the contents move, never the conversation.
+ * Keep the dock during an ordinary exit, but a mutual switch replaces it immediately (not two docks). */
+@keyframes steve-panel-in { from { opacity: 0; transform: translateX(24px); } to { opacity: 1; transform: none; } }
+@keyframes steve-panel-out { from { opacity: 1; transform: none; } to { opacity: 0; transform: translateX(24px); } }
+[data-side-panel][data-state="open"] > .side-panel-body { animation: steve-panel-in 260ms var(--ease-out) both; }
+[data-side-panel][data-state="closed"] > .side-panel-body { animation: steve-panel-out 260ms var(--ease-out) both; }
+:has(> [data-side-panel][data-state="open"]) > [data-side-panel][data-state="closed"] { display: none; }
 /* running dot — the only looping animation in the product */
 @keyframes steve-breathe { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: .35; transform: scale(.82); } }
 .dot-running { animation: steve-breathe 1.6s ease-in-out infinite; }
