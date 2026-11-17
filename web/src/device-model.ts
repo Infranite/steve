@@ -2,7 +2,7 @@
  * Hub's own Node) and the Node registry (/api/nodes: pairing, link, upgrade) merged into one NodeView per Node, the
  * one status a Node shows, and the figures the pages print. Pure, so the overview, the lists, a Node's page and the
  * map all say the same thing; web/test/device-model.test.mjs pins it. Imports use .ts so node --test loads it. */
-import type { RDevice, RNode, RVitals } from "./api.ts"
+import type { RDevice, RNode, RNodeUpgradeRun, RVitals } from "./api.ts"
 import { t } from "./i18n/index.ts"
 
 const MIN = 60_000, DAY = 86_400_000
@@ -92,6 +92,13 @@ export type NodeStatusKind = "revoked" | "pending" | "offline" | "upgrading" | "
 export type StatusTone = "ok" | "warn" | "bad" | "info" | "off" | "neutral"
 export type NodeStatus = { kind: NodeStatusKind; tone: StatusTone; since?: number | null; phase?: string; version?: string; from?: string | null; n?: number }
 
+/** A failed run only describes the Node while it is still the current attempt: the Node is on the version it fell
+ *  back to (a hand reinstall moves it on) and the run aimed at the Hub's release (once the Hub moves on, the Node is
+ *  simply behind again). An unknown Hub version (development build) does not retire it. */
+function stillRolledBack(n: NodeView, latest: RNodeUpgradeRun, hubVersion: string) {
+  return FAILED.has(latest.phase) && n.version !== latest.version && n.version === (latest.from_version ?? n.version) && (!hubVersion || latest.version === hubVersion)
+}
+
 /** The one state a Node shows, the first that holds in this order: unpaired, fingerprint to confirm, offline,
  *  upgrading, upgrade failed (and back on its old version), not taking new work, can upgrade, queued, online. */
 export function nodeStatus(n: NodeView, hubVersion = ""): NodeStatus {
@@ -100,7 +107,7 @@ export function nodeStatus(n: NodeView, hubVersion = ""): NodeStatus {
   if (!n.linked) return { kind: "offline", tone: "off", since: n.lastSeen ?? n.linkError?.at ?? null }
   const u = n.node?.upgrade, latest = u?.latest
   if (latest && !SETTLED.has(latest.phase)) return { kind: "upgrading", tone: "info", phase: latest.phase, version: latest.version }
-  if (latest && FAILED.has(latest.phase) && n.version !== latest.version) return { kind: "rolledBack", tone: "bad", version: latest.version, from: latest.from_version ?? n.version ?? null }
+  if (latest && stillRolledBack(n, latest, hubVersion)) return { kind: "rolledBack", tone: "bad", version: latest.version, from: latest.from_version ?? n.version ?? null }
   if (n.paused) return { kind: "paused", tone: "neutral" }
   const target = u?.reason === "outdated" ? hubVersion || undefined : undefined
   if (u?.reason === "outdated" || (!u && !n.local && n.version && hubVersion && n.version !== hubVersion)) return { kind: "outdated", tone: "warn", version: target ?? hubVersion }

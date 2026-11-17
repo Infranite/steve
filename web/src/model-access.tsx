@@ -1,14 +1,15 @@
 /* Model access for service sessions (#222): which provider endpoint, and which key from the Hub's shared vault, the
  * sessions of a workspace's service principal (schedules, flows) use per harness. They never use anyone's personal
  * account, so without it they cannot reach a model. Settings · Models edits it (instance owner only); the schedules
- * page and the devices page show which principals and Bots cannot run right now and where that is fixed. */
+ * page shows which principals and Bots cannot run right now and where that is fixed. */
 import { useEffect, useState } from "react"
 import { TriangleAlertIcon } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Spinner } from "@/components/ui/spinner"
 import { modReq, isNotWired } from "@/api"
-import { toast } from "@/store"
+import { st, toast } from "@/store"
+import { runtimeSetupHrefFor } from "@/hub-management-model"
 import { Section, Panel, Row, Notice, Pill } from "@/ui"
 import { SetSelect } from "@/settings-controls"
 import { HarnessMark } from "@/components/harness-mark"
@@ -28,7 +29,8 @@ export const modelAccessApi = {
 }
 
 /** where each kind of trouble is fixed */
-export const fixHref = (f: Fix) => (f === "devices" ? "#/devices" : f === "vault" ? "#/vault" : "#/settings/models")
+/** "devices" means a harness is not ready: that is set up on the Hub's own Node page, not the devices overview */
+export const fixHref = (f: Fix) => (f === "devices" ? runtimeSetupHrefFor(st.devices) : f === "vault" ? "#/vault" : "#/settings/models")
 
 /** the setting, loaded once per mount; `null` while loading, `undefined` where the Hub does not serve it */
 export function useModelAccess(): [ModelAccess | null | undefined, (v: ModelAccess) => void] {

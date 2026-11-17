@@ -5,14 +5,11 @@ import { SetSelect } from "@/settings-controls"
 import { st, useStore } from "@/store"
 import { closeSheet } from "@/ui"
 import { useT } from "@/i18n"
-import { linkedHubDevice } from "@/hub-management-model"
+import { runtimeSetupHrefFor } from "@/hub-management-model"
 import type { RRuntime } from "@/api"
 import { permissionModes, runtimeReason, runtimeState, supportsPermission } from "@/runtime-status"
 
-export const runtimeSetupHref = () => {
-  const hub = linkedHubDevice(st.devices)
-  return hub ? "#/devices/nodes/local" : "#/devices/nodes"
-}
+export const runtimeSetupHref = () => runtimeSetupHrefFor(st.devices)
 
 export function RuntimeSetupLink() {
   const t = useT()

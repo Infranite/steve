@@ -55,6 +55,21 @@ test("one status per Node, the first that holds in the fixed order", () => {
   assert.equal(nodeStatus(view({ waiting: 2 })).n, 2)
 })
 
+test("a failed upgrade stops showing once it no longer describes the Node", () => {
+  const failed = (extra = {}) => ({ node: { upgrade: { policy: "notify", can: true, reason: "outdated", latest: run("rolled_back", extra) } } })
+  assert.equal(nodeStatus(view({ version: "0.2.109", ...failed() }), "0.2.112").kind, "rolledBack", "still on the version it fell back to, aiming at the Hub's release")
+  assert.equal(nodeStatus(view({ version: "0.2.109", ...failed({ phase: "failed" }) }), "0.2.112").kind, "rolledBack")
+  assert.equal(nodeStatus(view({ version: "0.2.109", ...failed() })).kind, "rolledBack", "a development Hub without a version does not retire it")
+  const reinstalled = view({ version: "0.2.113", node: { upgrade: { policy: "notify", can: false, reason: "current", latest: run("rolled_back", { version: "0.2.112", from_version: "0.2.111" }) } } })
+  assert.equal(nodeStatus(reinstalled, "0.2.113").kind, "online", "reinstalled by hand past the failed target: no stale failure")
+  const reinstalledBehind = view({ version: "0.2.111", ...failed({ version: "0.2.113", from_version: "0.2.110" }) })
+  assert.equal(nodeStatus(reinstalledBehind, "0.2.113").kind, "outdated", "moved off the fallback version but still behind: it can upgrade")
+  const hubMovedOn = view({ version: "0.2.109", ...failed() })
+  assert.deepEqual([nodeStatus(hubMovedOn, "0.2.115").kind, nodeStatus(hubMovedOn, "0.2.115").version], ["outdated", "0.2.115"], "the Hub moved on: the new release is offered, not the old failure")
+  assert.equal(nodeStatus(view({ version: "0.2.109", paused: true, ...failed() }), "0.2.115").kind, "paused", "falls through in order")
+  assert.equal(nodeStatus(view({ version: "0.2.109", ...failed({ from_version: null }) }), "0.2.112").kind, "rolledBack", "an unknown starting version keeps the failure while it aims at the Hub's release")
+})
+
 test("statuses read as plain words", () => {
   assert.equal(statusText({ kind: "offline", tone: "off", since: NOW - 3 * 3_600_000 }, NOW), "离线 · 3 小时前")
   assert.equal(statusText({ kind: "outdated", tone: "warn", version: "0.2.112" }), "可升级到 0.2.112")
