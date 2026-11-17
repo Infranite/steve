@@ -55,6 +55,11 @@ export function NodeVersion({ v, editable }: { v: NodeView; editable: boolean })
     setBusy(true)
     try { await api.upgradeNode(node.node_id, force); toast(t("device:upgrade.started")); reloadNodes() } catch (e) { toast((e as Error).message) } finally { setBusy(false) }
   }
+  /* the upgrade under way stops waiting: its own route, never a second start */
+  const switchNow = async () => {
+    setBusy(true)
+    try { await api.switchNodeUpgrade(node.node_id); toast(t("devices:upgrade.switching")); reloadNodes() } catch (e) { toast((e as Error).message) } finally { setBusy(false) }
+  }
   const sub = c.kind === "running" ? t("devices:upgrade.runningSub", { from: c.run.from_version ?? "?", to: c.run.version, ago: agoText(c.run.created) })
     : c.kind === "offline" ? t("devices:upgrade.offlineSub", { version: c.last ?? "?" })
     : c.kind === "current" ? (c.last ? t("devices:upgrade.currentLast", { version: v.version ?? "", ago: agoText(c.last.updated), from: c.last.from_version ?? "?", to: c.last.version }) : (v.version ?? ""))
@@ -105,7 +110,7 @@ export function NodeVersion({ v, editable }: { v: NodeView; editable: boolean })
         {editable && (c.kind === "outdated" || c.kind === "failed" || (c.kind === "running" && ["staged", "draining"].includes(c.run.phase) && running > 0)) && <div className="flex flex-wrap items-center justify-end gap-2 px-5">
           {c.kind === "failed" && c.run.error && <Button size="sm" variant="ghost" onClick={() => void navigator.clipboard?.writeText(c.run.error ?? "").then(() => toast(t("devices:upgrade.copied")))} data-upgrade-copy><CopyIcon />{t("devices:upgrade.copy")}</Button>}
           {c.kind === "outdated" && <Button size="sm" variant="ghost" className="text-muted-foreground" disabled={busy} onClick={() => void upgrade(true)} data-node-upgrade-force>{t("device:upgrade.force")}</Button>}
-          {c.kind === "running" && <Button size="sm" variant="ghost" className="text-destructive" disabled={busy} onClick={() => void upgrade(true)} data-node-upgrade-force>{t("devices:upgrade.switchNow", { count: running })}</Button>}
+          {c.kind === "running" && <Button size="sm" variant="ghost" className="text-destructive" disabled={busy} onClick={() => void switchNow()} data-node-upgrade-switch>{t("devices:upgrade.switchNow", { count: running })}</Button>}
           {u.can && c.kind !== "running" && <Button size="sm" disabled={busy} onClick={() => void upgrade(false)} data-node-upgrade-start>{busy ? <Spinner className="size-3" /> : null}{c.kind === "failed" ? t("devices:upgrade.retry") : t("devices:upgrade.to", { version: c.kind === "outdated" ? c.to : hubVersion })}</Button>}
         </div>}
       </div>

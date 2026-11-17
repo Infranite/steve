@@ -252,6 +252,7 @@ pub fn api_router(svc: Arc<NodeService>) -> Router {
             get(upgrade::get_default).put(upgrade::put_default),
         )
         .route("/nodes/{id}/upgrade", post(upgrade::start))
+        .route("/nodes/{id}/upgrade/switch", post(upgrade::switch_now))
         .route("/nodes/{id}/{action}", post(pairing::act))
         .with_state(svc)
 }

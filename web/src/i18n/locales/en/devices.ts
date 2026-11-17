@@ -283,6 +283,7 @@ export default {
     to: "Upgrade to {{version}}",
     switchNow_one: "Switch now (stops {{count}} session)",
     switchNow_other: "Switch now (stops {{count}} sessions)",
+    switching: "Switching now. The stopped sessions continue after the Node restarts.",
   },
 
   add: {

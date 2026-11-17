@@ -423,6 +423,21 @@ pub fn upgrade_phase(
     Ok(n == 1)
 }
 
+/// Marks an unfinished upgrade as forced (its owner asked to switch it now).
+pub fn upgrade_force(tx: &Tx<'_>, operation_id: &str) -> Result<bool> {
+    Ok(tx.execute(
+        &format!(
+            "UPDATE node_upgrades SET force=1 WHERE operation_id=?1 AND phase NOT IN ({})",
+            UPGRADE_DONE
+                .iter()
+                .map(|p| format!("'{p}'"))
+                .collect::<Vec<_>>()
+                .join(",")
+        ),
+        params![operation_id],
+    )? == 1)
+}
+
 pub fn upgrade_get(c: &Connection, operation_id: &str) -> Result<Option<UpgradeRow>> {
     Ok(c.query_row(
         &format!("SELECT {UCOLS} FROM node_upgrades WHERE operation_id=?"),

@@ -15,14 +15,15 @@
 //!    beside its release ([`Discovery::upgrade_stage`]).
 //! 3. `draining`: no new turns go to the Node; the Hub waits for its running ones to end. Past the
 //!    drain time the upgrade is given up, unless it was forced (running turns then end with the
-//!    Node's restart and are continued as after any restart).
+//!    Node's restart and are continued as after any restart). The instance owner may also say
+//!    "switch now" while it waits ([`Upgrades::switch_now`]): the wait ends at once, forced.
 //! 4. `switching`: the Node switches and goes back on its own if the new release does not link in
 //!    time ([`Discovery::upgrade_switch`]); the Hub reads where it ended up.
 //!
 //! A lost answer is asked about ([`Discovery::upgrade_status`]), never sent again. After a Hub
 //! restart an unfinished upgrade is settled from the Node's state, never run on.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -37,6 +38,9 @@ use super::now;
 
 /// The artifact ids of upgrade archives (`node-upgrade.<operation>`).
 pub const ARTIFACT_PREFIX: &str = "node-upgrade.";
+
+/// The phases in which an upgrade has not yet switched: "switch now" still applies.
+const WAITING: &[&str] = &["preparing", "staging", "staged", "draining"];
 
 /// What the orchestration needs of the fleet, so tests can stand in.
 pub trait Fleet: Send + Sync {
@@ -113,6 +117,9 @@ pub struct Upgrades {
     release_dir: Option<PathBuf>,
     timing: Timing,
     seen: Mutex<HashMap<String, Seen>>,
+    /// Upgrades the owner asked to switch now: their drain stops waiting. Kept in memory only, as
+    /// an upgrade cut off by a Hub restart is settled, never run on.
+    switch_now: Mutex<HashSet<String>>,
 }
 
 fn hub_build() -> Option<BuildIdentity> {
@@ -163,6 +170,7 @@ impl Upgrades {
             release_dir,
             timing,
             seen: Mutex::new(HashMap::new()),
+            switch_now: Mutex::new(HashSet::new()),
         })
     }
 
@@ -267,6 +275,40 @@ impl Upgrades {
         Ok(op)
     }
 
+    /// Asks `node`'s unfinished upgrade to stop waiting for its running turns and switch now (they
+    /// end with the Node's restart and are continued as after any restart); its operation id.
+    /// Never starts another upgrade: refused (`not_upgrading`) when none is under way, or
+    /// (`switching`) once it is past waiting.
+    pub async fn switch_now(&self, node: &str) -> Result<String, String> {
+        let (store, node2) = (self.store.clone(), node.to_string());
+        let open = tokio::task::spawn_blocking(move || {
+            store.transaction(|tx| {
+                let Some(row) = store_nodes::upgrade_latest(tx, &node2)? else {
+                    return Ok(Err("not_upgrading"));
+                };
+                if UPGRADE_DONE.contains(&row.phase.as_str()) {
+                    return Ok(Err("not_upgrading"));
+                }
+                if !WAITING.contains(&row.phase.as_str()) {
+                    return Ok(Err("switching"));
+                }
+                // the record says it was forced
+                store_nodes::upgrade_force(tx, &row.operation_id)?;
+                Ok(Ok(row.operation_id))
+            })
+        })
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e: steve_store::StoreError| e.to_string())?;
+        let op = open.map_err(String::from)?;
+        self.switch_now.lock().unwrap().insert(op.clone());
+        Ok(op)
+    }
+
+    fn switching_now(&self, op: &str) -> bool {
+        self.switch_now.lock().unwrap().contains(op)
+    }
+
     async fn row(&self, op: &str) -> Option<UpgradeRow> {
         let (store, op) = (self.store.clone(), op.to_string());
         tokio::task::spawn_blocking(move || store.reader(|c| store_nodes::upgrade_get(c, &op)))
@@ -321,6 +363,7 @@ impl Upgrades {
             "node upgrade"
         );
         self.phase(op, &phase, error).await;
+        self.switch_now.lock().unwrap().remove(op);
         self.look(&node).await;
     }
 
@@ -390,6 +433,10 @@ impl Upgrades {
         loop {
             let running = self.running(&row.node_id).await;
             if running == 0 {
+                break;
+            }
+            if self.switching_now(op) {
+                force = true;
                 break;
             }
             if tokio::time::Instant::now() >= until {
@@ -792,6 +839,25 @@ pub async fn start(
     }
 }
 
+/// `POST /api/nodes/{id}/upgrade/switch`: the Node's upgrade under way stops waiting for its
+/// running turns and switches now (the instance owner only). Never starts an upgrade.
+pub async fn switch_now(
+    State(svc): State<Arc<NodeService>>,
+    caller: Caller,
+    UrlPath(id): UrlPath<String>,
+) -> Response {
+    let Some(up) = svc.upgrades.get().cloned() else {
+        return err(409, "off");
+    };
+    if !instance_owner(&svc, &caller.me) {
+        return err(403, "denied");
+    }
+    match up.switch_now(&id).await {
+        Ok(op) => json_response(202, &json!({ "operation": op })),
+        Err(why) => err(409, &why),
+    }
+}
+
 /// `GET /api/nodes/upgrade-default`, `PUT` `{policy}`: the Hub's default for Nodes without their
 /// own policy (`auto` | `notify` | `off`); the GET also says how long an upgrade waits
 /// (`drain_secs`, `health_secs`).
@@ -1018,6 +1084,46 @@ mod tests {
             }
             assert_eq!(f.fleet.holds.lock().unwrap().last(), Some(&false));
         }
+    }
+
+    #[tokio::test]
+    async fn switch_now_ends_the_wait_at_once_and_never_starts_another_upgrade() {
+        // a drain time far longer than the test: only "switch now" can end the wait
+        let f = fixture(true, Some(build("2.0.0", 'b')), 600_000);
+        assert_eq!(
+            f.up.switch_now("n_a").await.unwrap_err(),
+            "not_upgrading",
+            "nothing under way: nothing to switch, nothing started"
+        );
+        assert!(f.node.staged_upgrades().is_empty());
+        f.store
+            .transaction::<_, steve_store::StoreError>(|tx| {
+                tx.execute_batch(
+                    "INSERT INTO node_commands(operation_id,node_id,method,request,digest,state,created,updated) VALUES ('op_t','n_a','start_turn','{}','d','active',1,1);",
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        let op = f.up.start("n_a", "u", false).await.unwrap();
+        // waiting for the running turn
+        for _ in 0..500 {
+            if f.up.row(&op).await.unwrap().phase == "draining" {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(f.up.row(&op).await.unwrap().phase, "draining");
+        // a second start is still refused; switch now acts on the same upgrade
+        assert_eq!(f.up.start("n_a", "u", true).await.unwrap_err(), "busy");
+        assert_eq!(f.up.switch_now("n_a").await.unwrap(), op);
+        let r = tokio::time::timeout(Duration::from_secs(5), ended(&f, &op))
+            .await
+            .expect("switch now did not wait out the drain time");
+        assert_eq!(r.phase, "succeeded", "{:?}", r.error);
+        assert!(r.force, "the record says it was forced");
+        assert_eq!(f.node.staged_upgrades().len(), 1, "one upgrade, not two");
+        assert_eq!(f.fleet.holds.lock().unwrap().last(), Some(&false));
+        assert_eq!(f.up.switch_now("n_a").await.unwrap_err(), "not_upgrading");
     }
 
     #[tokio::test]

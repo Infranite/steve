@@ -276,6 +276,7 @@ export default {
     to: "升级到 {{version}}",
     switchNow_one: "立即切换（中断 {{count}} 个会话）",
     switchNow_other: "立即切换（中断 {{count}} 个会话）",
+    switching: "正在切换。被中断的会话会在 Node 重启后接着做。",
   },
 
   add: {

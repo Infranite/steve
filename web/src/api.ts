@@ -329,6 +329,8 @@ export const api = {
   nodeOwnerContext: (id: string, owner_context: "inherit" | "on" | "off") => post<{ ok: boolean }>(`/nodes/${encodeURIComponent(id)}/context`, { owner_context }),
   nodeUpgradePolicy: (id: string, policy: RUpgradePolicy | "") => post<{ ok: boolean }>(`/nodes/${encodeURIComponent(id)}/upgrade_policy`, { policy }),
   upgradeNode: (id: string, force = false) => post<{ operation: string }>(`/nodes/${encodeURIComponent(id)}/upgrade`, { force }),
+  /** the Node's upgrade under way stops waiting for its running sessions and switches now; never starts one */
+  switchNodeUpgrade: (id: string) => post<{ operation: string }>(`/nodes/${encodeURIComponent(id)}/upgrade/switch`, {}),
   /** `drain_secs`: how long an upgrade waits for running turns; `health_secs`: how long the new release has to link before the Node goes back */
   nodeUpgradeDefault: () => get<RUpgradeDefault>("/nodes/upgrade-default"),
   setNodeUpgradeDefault: (policy: RUpgradePolicy) => req<{ policy: RUpgradePolicy }>("PUT", "/nodes/upgrade-default", { policy }),

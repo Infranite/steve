@@ -28,6 +28,7 @@ await page.route("**/*", async route => {
     nodes = nodes.map(n => n.node_id === remote.node_id ? { ...n, max_sessions } : n)
     return json(route, { ok: true })
   }
+  if (url.pathname === "/api/nodes/fixture-remote/upgrade/switch" && request.method() === "POST") return json(route, { operation: "nup_fixture" }, 202)
   if (url.pathname === "/api/nodes/fixture-remote/pause" && request.method() === "POST") {
     nodes = nodes.map(n => n.node_id === remote.node_id ? { ...n, state: "paused" } : n)
     return json(route, { ok: true })
@@ -99,6 +100,18 @@ try {
     }
   }
   await page.setViewportSize({ width: 1360, height: 980 }); await page.evaluate(() => document.documentElement.classList.remove("dark"))
+  // an upgrade waiting for running sessions: "switch now" asks that upgrade to stop waiting, never starts a second one
+  const draining = { operation_id: "nup_fixture", version: "0.2.113", from_version: "0.2.112", phase: "draining", error: null, requested_by: "owner", force: false, created: Date.now() - 60_000, updated: Date.now() - 10_000 }
+  nodes = nodes.map(n => n.node_id === remote.node_id ? { ...n, upgrade: { ...n.upgrade, can: false, reason: "busy", latest: draining } } : n)
+  await reread()
+  await detail.locator('[data-node-upgrade="running"] [data-upgrade-drain]').waitFor()
+  await detail.locator("[data-node-upgrade-switch]").getByText("立即切换（中断 32 个会话）", { exact: true }).click()
+  for (let i = 0; i < 100 && writes.at(-1) !== "POST /api/nodes/fixture-remote/upgrade/switch"; i++) await page.waitForTimeout(50)
+  assert.deepEqual(writes.slice(-1), ["POST /api/nodes/fixture-remote/upgrade/switch"])
+  assert.ok(!writes.includes("POST /api/nodes/fixture-remote/upgrade"), "switch now does not start another upgrade")
+  nodes = nodes.map(n => n.node_id === remote.node_id ? { ...n, upgrade: remote.upgrade } : n)
+  await reread()
+  await detail.locator('[data-node-upgrade="current"]').waitFor()
   await page.locator("[data-node-pause=active]").click()
   await page.locator("[data-node-pause=paused]").waitFor()
   assert.deepEqual(writes.slice(-1), ["POST /api/nodes/fixture-remote/pause"], "stopping new work is the owner's explicit action")

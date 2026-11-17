@@ -10,8 +10,8 @@ A Node's page is the same for the Hub's own Node and a paired one.
 
 The **Version** card follows a Hub-managed upgrade step by step and quotes the Hub's real waits:
 - what upgrading does, with **Upgrade to …** and **Upgrade now**;
-- while it waits for running sessions, how many are left, with **Switch now**;
+- while it waits for running sessions, how many are left, with **Switch now**: that upgrade stops waiting and switches at once (the stopped sessions continue after the Node restarts);
 - after a failure, the error, **Copy error** and **Try again**;
 - for a Node that is upgraded on its own computer, the command to run there.
 
-**Personal agent config** is now one default for the whole Hub, under **Devices → Hub → Defaults for every Node**, next to the default upgrade policy, because a Node serves every workspace. Each Node can still follow it or choose for itself. Upgrading starts the Hub's default as off if any workspace had turned the old workspace setting off; **Settings → Items** now links to the new place. API: `GET`/`PUT /api/node-context` (instance owner), and `GET /api/nodes/upgrade-default` also returns `drain_secs` and `health_secs`.
+**Personal agent config** is now one default for the whole Hub, under **Devices → Hub → Defaults for every Node**, next to the default upgrade policy, because a Node serves every workspace. Each Node can still follow it or choose for itself. Upgrading starts the Hub's default as off if any workspace had turned the old workspace setting off; **Settings → Items** now links to the new place. API: `GET`/`PUT /api/node-context` (instance owner), `GET /api/nodes/upgrade-default` also returns `drain_secs` and `health_secs`, and `POST /api/nodes/{id}/upgrade/switch` (instance owner) makes the Node's upgrade under way switch now; it never starts another upgrade.
