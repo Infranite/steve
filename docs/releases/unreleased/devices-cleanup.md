@@ -1,4 +1,4 @@
 - Devices · Hub lists every address the Hub answers on (public, local network, tailnet), each with its kind, instead of only the one this client uses.
 - Devices · Clients marks the clients that hold a live connection to the Hub now as online; the page head counts the clients online, and the Clients tab counts this browser too when its sign-in is not a registered client.
-- A Node's page keeps the details of what changing its session limit does in a tip beside the limit, and its CPU figure says the load is a one-minute average.
+- A Node's page keeps the details of what changing its session limit does in a tip beside the limit that opens on a click or a tap (so it reads on a phone too), and its CPU figure says the load is a one-minute average.
 - With much larger text, the Hub's name editor keeps its hint and counter lines from overlapping.

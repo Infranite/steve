@@ -1,6 +1,7 @@
 // Screenshot check of the devices pages: every page and its main states (the overview with a few, many and no Nodes,
-// the Hub, the Node list, a Node in each of its version states, the clients, a client's sign-out, the Add device steps)
-// at 1440 and 390 px, light and dark, on the real pages with an isolated owner API and example names only.
+// the Hub, the Node list, a Node in each of its version states and with its limit's tip tapped open, the clients, a
+// client's sign-out, the Add device steps) at 1440 and 390 px (390 px as a touch screen), light and dark, on the real
+// pages with an isolated owner API and example names only.
 //
 // Each screen is checked as it is drawn: nothing runs past the window or is cut off at its right edge, no text key is
 // shown instead of its words, the dark theme is on when asked, and the page logs no error and asks the Hub for nothing
@@ -67,6 +68,15 @@ const screens = [
   { name: "nodes-list", scene: "normal", hash: "#/devices/nodes", ready: '[data-node-row="n-imac"]' },
   { name: "node-local", scene: "normal", hash: "#/devices/nodes/local", ready: "[data-node-trends]" },
   { name: "node-remote-mbp", scene: "normal", hash: "#/devices/nodes/n-mbp", ready: '[data-node-upgrade="current"]' },
+  { name: "node-limit-tip", scene: "normal", hash: "#/devices/nodes/n-mbp", ready: "[data-limit-how]", then: async (page) => {
+    /* what changing the limit does opens on a tap (390 px is a touch screen here) or a click, not only on hover or focus */
+    const how = page.locator("[data-limit-how]")
+    if (page.viewportSize().width < 600) await how.tap(); else await how.click()
+    await page.locator("[data-limit-semantics]").waitFor()
+  }, check: async (page) => {
+    assert.match(await page.locator("[data-limit-semantics]").innerText(), /无需重启[\s\S]*不打断/)
+    assert.equal(await page.locator("[data-limit-how]").getAttribute("aria-expanded"), "true")
+  } },
   { name: "node-outdated", scene: "normal", hash: "#/devices/nodes/n-build", ready: '[data-node-upgrade="outdated"]' },
   { name: "node-offline", scene: "normal", hash: "#/devices/nodes/n-imac", ready: "[data-node-offline]" },
   { name: "node-upgrading", scene: "upgrading", hash: "#/devices/nodes/n-build", ready: '[data-node-upgrade="running"]' },
@@ -166,7 +176,7 @@ const problems = [], moved = []
 let drawn = 0
 try {
   for (const [width, height] of [[1440, 1000], [390, 844]]) for (const theme of ["light", "dark"]) {
-    const ctx = await browser.newContext({ locale: "zh-CN", timezoneId: "UTC", colorScheme: theme, reducedMotion: "reduce", viewport: { width, height }, deviceScaleFactor: 1 })
+    const ctx = await browser.newContext({ locale: "zh-CN", timezoneId: "UTC", colorScheme: theme, reducedMotion: "reduce", viewport: { width, height }, deviceScaleFactor: 1, hasTouch: width < 600 })
     await ctx.clock.setFixedTime(NOW)
     await ctx.addInitScript(() => { localStorage.setItem("steve-lang", "zh-CN"); localStorage.setItem("steve-onboarded", "1") })
     for (const s of screens) {
