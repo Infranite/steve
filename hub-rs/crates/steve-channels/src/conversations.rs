@@ -455,11 +455,16 @@ impl Channels {
         let block = match self.turn_source(ws, origin) {
             Ok(Some((_, plan, _))) if plan.space_id == space_id => self
                 .store()
-                .reader(|c| crate::im_context::build(c, &plan))
-                .map(|x| format!("{}\n\n{}\n\n", x.render(), CONV_TOOLS_NOTE))
+                .reader(|c| -> ChannelResult<String> {
+                    Ok(crate::im_context::render_for(c, &plan))
+                })
+                .map(|b| format!("{b}\n\n{CONV_TOOLS_NOTE}\n\n"))
                 .unwrap_or_else(|e| {
-                    tracing::warn!(origin, "identity block not built: {e}");
-                    String::new()
+                    tracing::warn!(origin, "identity block not built, identity unknown: {e}");
+                    format!(
+                        "{}\n\n{CONV_TOOLS_NOTE}\n\n",
+                        crate::im_context::unknown_block()
+                    )
                 }),
             _ => String::new(),
         };

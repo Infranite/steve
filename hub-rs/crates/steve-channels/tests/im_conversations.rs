@@ -3331,3 +3331,167 @@ async fn the_chat_read_tools_read_only_their_own_chat() {
         .is_err()
     );
 }
+
+/// Marks contact `party` as working at an outside organization.
+fn make_external(h: &H, party: &str) {
+    exec(
+        h,
+        "INSERT OR IGNORE INTO parties (id, workspace_id, type, name, org_kind, created_by, created, updated) VALUES ('org_acme', ?, 'org', 'ACME 客户', 'customer', 'u', 1, 1)",
+        &[WS],
+    );
+    exec(
+        h,
+        "INSERT INTO links (workspace_id, subject_type, subject_id, predicate, object_type, object_id, source, created) VALUES (?, 'party', ?, 'works_at', 'party', 'org_acme', 'manual', 1)",
+        &[WS, party],
+    );
+}
+
+/// An outside sender alone in the chat: the sender reads the answer too, so it is public and the
+/// sender is listed as outside; a sender nobody recorded is treated the same way.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_sender_is_part_of_the_audience() {
+    let h = setup(true).await;
+    let t = h.thread.clone().unwrap();
+    push(
+        &h,
+        &h.bot.clone(),
+        msg("D_LI", "e0", "ulilei", "在吗", false, false),
+    )
+    .await;
+    let party = one(
+        &h,
+        "SELECT sender_party_id FROM chan_messages WHERE external_id = ?",
+        &["e0"],
+    );
+    make_external(&h, party.as_str().unwrap());
+    push(
+        &h,
+        &h.bot.clone(),
+        msg("D_LI", "e1", "ulilei", "报价多少", false, false),
+    )
+    .await;
+    let (turn, _) = t.turns.lock().unwrap().last().unwrap().clone();
+    let b = block_of(&research_of(&h, &turn));
+    for want in [
+        "kind=\"dm\"",
+        "external=\"1: 李雷(外部·ACME 客户)\"",
+        "<disclosure level=\"public\"/>",
+        "is_owner=\"false\"",
+        RULE_NOT_OWNER,
+    ] {
+        assert!(b.contains(want), "{want} in {b}");
+    }
+
+    // a sender with no recorded contact: unknown, so public
+    exec(
+        &h,
+        "DELETE FROM links WHERE subject_id = ? AND predicate = 'works_at'",
+        &[party.as_str().unwrap()],
+    );
+    let b = block_of(&research_of(&h, &turn));
+    assert!(b.contains("<disclosure level=\"public\"/>"), "{b}");
+    assert!(b.contains("unknown=\"1\""), "the sender counted: {b}");
+}
+
+/// The thread root is chosen among messages anyone saw: an unsent draft at the start of a thread is
+/// never read, as the root or as the quoted message, and the identity block does not name it.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unsent_draft_is_never_the_thread_root() {
+    let h = setup(true).await;
+    let t = h.thread.clone().unwrap();
+    push(
+        &h,
+        &h.bot.clone(),
+        msg("C_OPS", "u1", "ulilei", "草稿根消息", true, false),
+    )
+    .await;
+    let mut u2 = msg("C_OPS", "u2", "uhan", "看到的回复", true, false);
+    u2.thread_key = Some("u1".into());
+    u2.reply_to = Some("u1".into());
+    push(&h, &h.bot.clone(), u2).await;
+    let (turn, _) = t.turns.lock().unwrap().last().unwrap().clone();
+    let draft = one(
+        &h,
+        "SELECT id FROM chan_messages WHERE external_id = ?",
+        &["u1"],
+    );
+    let draft = draft.as_str().unwrap().to_string();
+    // the root turns out to be Steve's own draft, never sent
+    exec(
+        &h,
+        "UPDATE chan_messages SET direction = 'out', status = 'draft' WHERE id = ?",
+        &[&draft],
+    );
+    let scope =
+        h.ch.conv_read_scope(WS, &turn)
+            .unwrap()
+            .expect("a channel conversation");
+    let thread = im_conv_mcp::call(
+        &h.ch,
+        &scope,
+        im_conv_mcp::THREAD,
+        &json!({"message_id": "u2"}),
+    )
+    .await
+    .expect("the thread");
+    let text = &thread.text;
+    assert!(!text.contains("草稿根消息"), "{text}");
+    assert!(!text.contains(&draft), "{text}");
+    assert!(!text.contains("被引用的消息："), "{text}");
+    assert!(text.contains("看到的回复 ← 问的这条"), "{text}");
+    // the draft itself is not readable either
+    assert!(
+        im_conv_mcp::call(
+            &h.ch,
+            &scope,
+            im_conv_mcp::THREAD,
+            &json!({"message_id": draft})
+        )
+        .await
+        .is_err()
+    );
+    let b = block_of(&research_of(&h, &turn));
+    assert!(!b.contains(&format!("root=\"{draft}\"")), "{b}");
+}
+
+/// When the own account's identity cannot be resolved, no identity is made up: the block says the
+/// identity is unknown, takes the most restrictive disclosure and never puts the owner's name in.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unresolved_own_account_leaves_the_identity_unknown() {
+    let h = setup(true).await;
+    push(
+        &h,
+        &h.me.clone(),
+        msg("D_LI", "f0", "ulilei", "在吗", false, false),
+    )
+    .await;
+    set_trigger(
+        &h,
+        json!({"on": true, "words": ["/ai"], "where": ["dm:*"], "who": ["me"], "reply": "thread", "mark": true}),
+    );
+    let turn = your_trigger(&h, "f1", "/ai 看下告警").await;
+    let b = block_of(&research_of(&h, &turn));
+    let owner = b
+        .split("<as_whom>以")
+        .nth(1)
+        .and_then(|s| s.split("本人账号发出").next())
+        .expect("your name")
+        .to_string();
+    assert!(!owner.is_empty());
+    // your account is no longer verified: who speaks can't be told
+    exec(
+        &h,
+        "UPDATE accounts SET verified = 0 WHERE id = (SELECT account_id FROM connections WHERE id = ?)",
+        &[&h.me],
+    );
+    let ctx = research_of(&h, &turn);
+    let b = block_of(&ctx);
+    assert!(
+        b.contains(steve_channels::im_context::IDENTITY_UNKNOWN),
+        "{b}"
+    );
+    assert!(b.contains("<disclosure level=\"public\"/>"), "{b}");
+    assert!(b.contains(RULE_NOT_OWNER), "{b}");
+    assert!(!b.contains("本人账号发出"), "{b}");
+    assert!(!b.contains(&owner), "the owner's name is not put in: {b}");
+}

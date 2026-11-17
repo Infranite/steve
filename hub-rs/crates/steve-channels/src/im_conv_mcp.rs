@@ -17,7 +17,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::{Value, json};
 use steve_store::base::Level;
 
-use crate::im_context::POLICY;
+use crate::im_context::{POLICY, SEEN};
 use crate::spaces::{self, Attention};
 use crate::{ChannelResult, Channels, conversations};
 
@@ -176,9 +176,6 @@ fn readable(c: &Connection, scope: &Scope) -> ChannelResult<Level> {
     Ok(level)
 }
 
-/// Messages anyone in the chat saw (SQL over alias `m`).
-const SEEN: &str = "(m.direction = 'in' OR m.status IN ('sent', 'recalled'))";
-
 /// The stored message `q` (its id `cm_…` or the provider's id) of the scope's space, when it is one
 /// anyone in the chat saw.
 fn resolve(c: &Connection, scope: &Scope, q: &str) -> ChannelResult<String> {
@@ -304,7 +301,9 @@ fn thread(ch: &Channels, scope: &Scope, args: &Value) -> ChannelResult<String> {
         let id = resolve(c, scope, q)?;
         let target = one(c, &id)?;
         let tz = crate::im_mcp::tz_of(c, &scope.ws);
-        let root_id = crate::im_context::thread_root(c, &scope.space_id, &id)?.unwrap_or(id.clone());
+        // the root, like the replies and the quoted message, only among messages anyone saw
+        let root_id =
+            crate::im_context::thread_root(c, &scope.space_id, &id)?.unwrap_or(id.clone());
         let root = one(c, &root_id)?;
         let key = target
             .thread_key

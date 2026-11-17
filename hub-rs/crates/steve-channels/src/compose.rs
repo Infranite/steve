@@ -792,7 +792,7 @@ pub fn gather(
 
     // a trigger word: who speaks as whom, where, to whom, first
     let im_context = if plan.trigger.is_some() {
-        crate::im_context::build(c, plan)?.render()
+        crate::im_context::render_for(c, plan)
     } else {
         String::new()
     };

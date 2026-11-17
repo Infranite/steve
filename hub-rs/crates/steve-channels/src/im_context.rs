@@ -267,8 +267,14 @@ pub fn escape(s: &str) -> String {
     out
 }
 
-/// The stored message's root in its thread: the message whose provider id is the thread key, else
-/// the earliest message of that thread (a provider thread id such as Feishu's `omt_…`).
+/// Messages anyone in the chat saw (SQL over alias `m`): received ones, and Steve's own once sent.
+/// Drafts and messages waiting or refused never count, as a thread's root or anything else.
+pub const SEEN: &str = "(m.direction = 'in' OR m.status IN ('sent', 'recalled'))";
+
+/// The stored message's root in its thread, among the messages anyone in the chat saw ([`SEEN`]):
+/// the message whose provider id is the thread key, else the earliest seen message of that thread
+/// (a provider thread id such as Feishu's `omt_…`), else the message itself. A draft or a message
+/// never sent is never the root.
 pub fn thread_root(c: &Connection, space: &str, message: &str) -> ChannelResult<Option<String>> {
     let row: Option<(Option<String>, Option<String>)> = c
         .query_row(
@@ -285,16 +291,73 @@ pub fn thread_root(c: &Connection, space: &str, message: &str) -> ChannelResult<
     };
     let root: Option<String> = c
         .query_row(
-            "SELECT id FROM chan_messages WHERE space_id = ?1 AND external_id = ?2
-             UNION ALL
-             SELECT id FROM (SELECT id FROM chan_messages WHERE space_id = ?1 AND thread_key = ?2
-                              ORDER BY created, id LIMIT 1)
-             LIMIT 1",
+            &format!(
+                "SELECT m.id FROM chan_messages m WHERE m.space_id = ?1 AND m.external_id = ?2 AND {SEEN}
+                 UNION ALL
+                 SELECT id FROM (SELECT m.id FROM chan_messages m
+                                  WHERE m.space_id = ?1 AND m.thread_key = ?2 AND {SEEN}
+                                  ORDER BY m.created, m.id LIMIT 1)
+                 LIMIT 1"
+            ),
             params![space, key],
             |r| r.get(0),
         )
         .optional()?;
     Ok(Some(root.unwrap_or_else(|| message.to_string())))
+}
+
+/// Contact `party` is a recorded member of `space` (through one of its accounts).
+fn sender_recorded(c: &Connection, space: &str, party: Option<&str>) -> ChannelResult<bool> {
+    let Some(party) = party.filter(|p| !p.is_empty()) else {
+        return Ok(false);
+    };
+    Ok(c.query_row(
+        "SELECT EXISTS (SELECT 1 FROM space_members sm JOIN accounts a ON a.id = sm.account_id
+                         WHERE sm.space_id = ?1 AND a.party_id = ?2)",
+        params![space, party],
+        |r| r.get(0),
+    )?)
+}
+
+/// What the block says in place of the identity when it could not be told from the records.
+pub const IDENTITY_UNKNOWN: &str = "系统没能从记录确认这次以谁的身份、在哪里回答";
+
+/// The block when its facts could not be built ([`build`] failed): the identity unknown, and the
+/// most restrictive defaults (public disclosure, the sender not the owner). No name is put in.
+pub fn unknown_block() -> String {
+    let mut s = String::from(OPEN);
+    s.push('\n');
+    s.push_str(&format!("  <identity>{IDENTITY_UNKNOWN}</identity>\n"));
+    s.push_str("  <as_whom>未知：不以任何人的名义承诺、表态，不说自己是谁</as_whom>\n");
+    s.push_str("  <sender is_owner=\"false\"/>\n");
+    s.push_str(&format!(
+        "  <audience>{}</audience>\n",
+        Disclosure::Public.audience()
+    ));
+    s.push_str(&format!(
+        "  <disclosure level=\"{}\"/>\n",
+        Disclosure::Public.code()
+    ));
+    s.push_str("  <mark>正文不写前缀、署名，不自称 AI 或真人。</mark>\n");
+    s.push_str("  <rules>\n");
+    for r in [RULE_SOURCE, RULE_DATA, RULE_NOT_OWNER] {
+        s.push_str(&format!("    <rule>{r}</rule>\n"));
+    }
+    s.push_str("  </rules>\n");
+    s.push_str(CLOSE);
+    s
+}
+
+/// The block for answering `plan`'s message: [`build`] rendered, or, when its facts can't be told,
+/// logged and [`unknown_block`].
+pub fn render_for(c: &Connection, plan: &Plan) -> String {
+    match build(c, plan) {
+        Ok(x) => x.render(),
+        Err(e) => {
+            tracing::warn!(message = %plan.message_id, "identity block not built, identity unknown: {e}");
+            unknown_block()
+        }
+    }
 }
 
 /// The identity block's facts for answering `plan`'s message.
@@ -321,9 +384,10 @@ pub fn build(c: &Connection, plan: &Plan) -> ChannelResult<ImContext> {
         Mode::Bot => bindings::effective(c, &space)?.map(|e| e.persona.name),
         Mode::Own => None,
     };
+    // on your own account the reply is that account's user speaking: when who that is can't be
+    // told, there is no block ([`unknown_block`] instead), never the workspace owner's name in its place
     let owner = match plan.mode {
-        Mode::Own => crate::compose::own_name(c, ws, &plan.connection_id, &space.id)
-            .or_else(|_| personas::owner_name_for_space(c, ws, &space.id))?,
+        Mode::Own => crate::compose::own_name(c, ws, &plan.connection_id, &space.id)?,
         Mode::Bot => personas::owner_name_for_space(c, ws, &space.id)?,
     };
     let owner_only = crate::conversations::owner_only(c, ws, &space, &plan.connection_id)?;
@@ -348,7 +412,31 @@ pub fn build(c: &Connection, plan: &Plan) -> ChannelResult<ImContext> {
             Relation::Owner | Relation::Colleague => {}
         }
     }
-    let disclosure = if owner_only {
+    // the sender reads the answer too: an outside sender is listed, one nobody recorded is unknown
+    let sender_rel = card
+        .asker
+        .as_ref()
+        .map_or(Relation::Unknown, |p| p.relation.clone());
+    let sender_outside = match &sender_rel {
+        Relation::External { org } => {
+            external.push(Named {
+                name: plan.sender_name.clone(),
+                org: org.clone(),
+            });
+            true
+        }
+        Relation::Unknown => {
+            // a recorded member is not among the members the provider counts but nobody recorded
+            if sender_recorded(c, &space.id, plan.sender_party_id.as_deref())? {
+                unknown += 1;
+            }
+            true
+        }
+        Relation::Owner | Relation::Colleague => false,
+    };
+    let disclosure = if sender_outside {
+        Disclosure::Public
+    } else if owner_only {
         Disclosure::Private
     } else if space.has_external || !external.is_empty() || unknown > 0 {
         Disclosure::Public
