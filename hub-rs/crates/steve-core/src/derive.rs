@@ -15,7 +15,9 @@
 //! - **Provenance**: only facts the Hub verified count as hard facts. What the executor reported, or
 //!   nobody could tell, never closes anything by itself.
 //! - **Late facts**: a fact of another cycle, and a judgement of another session or of a turn that is
-//!   not the newest, is ignored: an old turn's answer never closes or moves the new turn.
+//!   not the newest, is ignored: an old turn's answer never closes or moves the new turn. What
+//!   closes (a merged pull request, a passed build, a live deploy) must be about the current
+//!   result's commit, exactly: a fact of an earlier head of the same cycle is not.
 //!
 //! The rows, first match wins (numbered as in the design):
 //! 1 done · 2 judged done, undoable for a while · 3 a card or something only you can do ·
@@ -495,8 +497,17 @@ fn closable(f: &Facts, settled: Settled, judged: Option<&Judged>, policy: &WorkP
         missing.push("open_card");
     }
     let r = f.required;
+    let head = latest(f, "commit", None)
+        .filter(|d| d.verified())
+        .and_then(|d| d.head.clone());
+    /* what closes is about this result: of its commit when one is known, and while none is, only a
+     * fact tied to no head (a fact of some head cannot be told to be this result's) */
     let fact = |kind: &str, state: &str| {
-        latest(f, kind, None).is_some_and(|d| d.verified() && d.state == state)
+        f.delivery
+            .iter()
+            .filter(|d| d.cycle == f.item.cycle && d.kind == kind && d.head == head)
+            .max_by_key(|d| d.observed_at)
+            .is_some_and(|d| d.verified() && d.state == state)
     };
     if r.merge && !fact("pr", "merged") {
         missing.push("merged");
@@ -508,9 +519,6 @@ fn closable(f: &Facts, settled: Settled, judged: Option<&Judged>, policy: &WorkP
         missing.push("deployed");
     }
     let hard_only = (r.merge || r.build || r.deploy) && !r.operate;
-    let head = latest(f, "commit", None)
-        .filter(|d| d.verified())
-        .and_then(|d| d.head.clone());
     if hard_only || !missing.is_empty() {
         let by = (hard_only && missing.is_empty()).then_some("hard_facts");
         return Closable {

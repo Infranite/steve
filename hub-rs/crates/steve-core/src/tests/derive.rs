@@ -5,12 +5,16 @@
 //! the next step over fixtures of every open state today's system reaches.
 
 use serde_json::json;
+use steve_store::ItemOperation;
 use steve_store::runtime::{NewAttempt, NewCommand, insert_attempt_in, insert_command_in};
 
+use crate::cycle::{OP_BUILD, OP_RELEASE};
 use crate::derive::{
     Card, Delivered, Derived, Dispatch, Due, Facts, ItemState, Judged, Lane, NextStep,
     OpenOperation, Owner, SessionState, Settled, VERIFIED, Wait, check_next_step, derive,
 };
+use crate::proof::OP_DEPLOY;
+use crate::shadow::from_operations;
 use crate::testkit::Kit;
 use crate::work_policy::WorkPolicy;
 
@@ -231,6 +235,137 @@ fn a_late_fact_of_an_old_turn_never_closes_or_moves_the_new_turn() {
     // and a turn starting again takes it back at once
     f.session.as_mut().unwrap().running = true;
     assert_eq!(derive(&f, &policy()).row, 5);
+}
+
+/// A release, build or deploy operation of `revision` in cycle 2, as today's gate records them.
+fn op(
+    id: &str,
+    revision: i64,
+    kind: &str,
+    status: &str,
+    evidence: serde_json::Value,
+) -> ItemOperation {
+    ItemOperation {
+        id: id.into(),
+        item_id: "i1".into(),
+        cycle: 2,
+        revision,
+        kind: kind.into(),
+        effect_id: None,
+        required: true,
+        status: status.into(),
+        label: kind.into(),
+        evidence,
+        created: NOW - 20_000,
+        updated: NOW - 20_000,
+    }
+}
+
+#[test]
+fn a_fact_of_an_earlier_result_of_the_same_cycle_never_closes_or_holds_the_current_one() {
+    // revision 1: Steve merged its PR while it went void, its build passed, it went live, and you
+    // declined to merge it; revision 2 (the current result) has opened its release, no PR yet
+    let ops = vec![
+        op(
+            "op-r1-release",
+            1,
+            OP_RELEASE,
+            "pending",
+            json!({"pr": 7, "pr_state": "MERGED", "pr_merged": true, "pr_merged_void": true}),
+        ),
+        op(
+            "op-r1-declined",
+            1,
+            OP_RELEASE,
+            "pending",
+            json!({"pr": 6, "pr_state": "OPEN", "pr_merge_declined": true}),
+        ),
+        op("op-r1-build", 1, OP_BUILD, "succeeded", json!({})),
+        op("op-r1-deploy", 1, OP_DEPLOY, "succeeded", json!({})),
+        op(
+            "op-r2-release",
+            2,
+            OP_RELEASE,
+            "pending",
+            json!({"pr_before": 7}),
+        ),
+    ];
+    let of = from_operations(2, 2, true, &ops);
+    assert!(of.delivery.is_empty(), "{:?}", of.delivery);
+    assert!(!of.merge_declined, "the decline was for revision 1's PR");
+    assert_eq!(
+        of.closing_ops
+            .iter()
+            .map(|o| o.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["op-r2-release"]
+    );
+    let mut f = base();
+    f.item.phase = "closing".into();
+    f.required.merge = true;
+    f.required.build = true;
+    f.required.deploy = true;
+    f.delivery = of.delivery;
+    f.closing_ops = of.closing_ops;
+    f.merge_declined = of.merge_declined;
+    let d = derive(&f, &policy());
+    assert!(!d.closable.predicate.holds, "{:?}", d.closable);
+    assert_eq!(
+        d.closable.predicate.missing,
+        vec!["merged", "build_passed", "deployed"]
+    );
+    assert_eq!((d.row, d.code), (4, "closing"), "{d:?}");
+
+    // the same operations read for revision 1 are its own facts (a void merge never counts)
+    let of1 = from_operations(2, 1, true, &ops);
+    assert!(of1.merge_declined);
+    let kinds: Vec<_> = of1
+        .delivery
+        .iter()
+        .map(|d| (d.kind.as_str(), d.state.as_str()))
+        .collect();
+    assert_eq!(
+        kinds,
+        vec![
+            ("pr", "open"),
+            ("approval", "declined"),
+            ("build", "passed"),
+            ("deploy", "live")
+        ]
+    );
+    // an effect nobody knows holds the current result whatever result it was for
+    let mut unknown = ops.clone();
+    unknown.push(op("op-r1-unknown", 1, OP_DEPLOY, "unknown", json!({})));
+    assert_eq!(
+        from_operations(2, 2, true, &unknown).unknown_effects,
+        vec!["op-r1-unknown"]
+    );
+
+    // facts tied to an earlier head of this cycle are not this result's: not with its commit known,
+    // and not while none is
+    let mut f = base();
+    f.item.code = false;
+    f.required.merge = true;
+    f.required.build = true;
+    f.delivery = vec![
+        fact("pr", Some(OLD_HEAD), "merged", VERIFIED),
+        fact("build", Some(OLD_HEAD), "passed", VERIFIED),
+    ];
+    let d = derive(&f, &policy());
+    assert_eq!(d.closable.predicate.missing, vec!["merged", "build_passed"]);
+    f.delivery
+        .push(fact("commit", Some(HEAD), "pushed", VERIFIED));
+    let d = derive(&f, &policy());
+    assert_eq!(d.closable.predicate.missing, vec!["merged", "build_passed"]);
+    assert_eq!(d.closable.predicate.head.as_deref(), Some(HEAD));
+    // the same facts of this head close it
+    f.delivery.extend([
+        fact("pr", Some(HEAD), "merged", VERIFIED),
+        fact("build", Some(HEAD), "passed", VERIFIED),
+    ]);
+    let d = derive(&f, &policy());
+    assert!(d.closable.predicate.holds, "{:?}", d.closable);
+    assert_eq!(d.closable.by, Some("hard_facts"));
 }
 
 #[test]

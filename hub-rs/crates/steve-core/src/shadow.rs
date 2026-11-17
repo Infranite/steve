@@ -37,15 +37,74 @@ fn legacy_lane(item: &Item, work: &Work) -> Option<Lane> {
     }
 }
 
-/// What the release of the cycle already knows, as delivery facts.
-fn release_facts(cycle: i64, ops: &[steve_store::ItemOperation]) -> Vec<Delivered> {
+/// What the operations of the cycle say, as the derived state's facts.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct OpFacts {
+    pub delivery: Vec<Delivered>,
+    pub unknown_effects: Vec<String>,
+    pub closing_ops: Vec<OpenOperation>,
+    pub merge_declined: bool,
+}
+
+/// The operations of `cycle` as facts of the current result (`revision`), the way today's gate reads
+/// them ([`crate::cycle`], [`crate::pull`]):
+/// - what a release, its build or a deploy says is about the result it was opened for: an earlier
+///   result's merged pull request, passed build or live deploy says nothing of this one, and your
+///   "don't merge" was for that pull request only. So only operations of `revision` count, and a
+///   merge Steve made while its result went void is never this result's (it is kept on that release);
+/// - an effect nobody knows holds everything, whatever result it was for: it is reconciled first;
+/// - closing waits for this result's open required operations, and for any effect still in flight.
+///
+/// The facts carry no head (today's operations do not record one), so they only ever stand for the
+/// result of `revision` while no commit of it is known ([`crate::derive`] matches heads exactly).
+pub(crate) fn from_operations(
+    cycle: i64,
+    revision: i64,
+    closing: bool,
+    ops: &[steve_store::ItemOperation],
+) -> OpFacts {
+    let mine = |o: &&steve_store::ItemOperation| o.revision == revision;
+    OpFacts {
+        delivery: release_facts(cycle, ops.iter().filter(mine)),
+        unknown_effects: ops
+            .iter()
+            .filter(|o| o.status == "unknown")
+            .map(|o| o.id.clone())
+            .collect(),
+        closing_ops: if closing {
+            ops.iter()
+                .filter(|o| {
+                    o.status == "running"
+                        || (o.required && o.revision == revision && o.status == "pending")
+                })
+                .map(|o| OpenOperation {
+                    id: o.id.clone(),
+                    kind: o.kind.clone(),
+                    label: o.label.clone(),
+                })
+                .collect()
+        } else {
+            vec![]
+        },
+        merge_declined: ops
+            .iter()
+            .filter(mine)
+            .any(|o| o.kind == OP_RELEASE && o.evidence["pr_merge_declined"] == json!(true)),
+    }
+}
+
+/// What the releases, builds and deploys of the current result already know, as delivery facts.
+fn release_facts<'a>(
+    cycle: i64,
+    ops: impl Iterator<Item = &'a steve_store::ItemOperation>,
+) -> Vec<Delivered> {
     let mut out = vec![];
     for o in ops {
         let ev = &o.evidence;
         let fact = |kind: &str, state: &str, provenance: &str, ref_: Option<String>| Delivered {
             cycle,
             kind: kind.into(),
-            head: ev["head"].as_str().map(str::to_owned),
+            head: None,
             ref_,
             state: state.into(),
             provenance: provenance.into(),
@@ -53,6 +112,10 @@ fn release_facts(cycle: i64, ops: &[steve_store::ItemOperation]) -> Vec<Delivere
         };
         match o.kind.as_str() {
             OP_RELEASE => {
+                /* merged while its result went void: that result's, never the current one's */
+                if ev["pr_merged_void"] == json!(true) {
+                    continue;
+                }
                 if let Some(pr) = ev["pr"].as_u64() {
                     let state = if ev["pr_merged"] == json!(true) {
                         "merged"
@@ -79,14 +142,12 @@ fn release_facts(cycle: i64, ops: &[steve_store::ItemOperation]) -> Vec<Delivere
                         "declined"
                     };
                     /* not tied to a head today: never your approval of a particular head */
-                    let mut a = fact(
+                    out.push(fact(
                         "approval",
                         state,
                         VERIFIED,
                         ev["pr_merge_by"].as_str().map(str::to_owned),
-                    );
-                    a.head = None;
-                    out.push(a);
+                    ));
                 }
             }
             OP_BUILD => {
@@ -132,24 +193,8 @@ impl Tx<'_> {
                 observed_at: d.observed_at,
             })
             .collect();
-        delivery.extend(release_facts(item.cycle, &ops));
-        let unknown_effects = ops
-            .iter()
-            .filter(|o| o.status == "unknown")
-            .map(|o| o.id.clone())
-            .collect();
-        let closing_ops = if item.phase == CLOSING {
-            ops.iter()
-                .filter(|o| o.required && matches!(o.status.as_str(), "pending" | "running"))
-                .map(|o| OpenOperation {
-                    id: o.id.clone(),
-                    kind: o.kind.clone(),
-                    label: o.label.clone(),
-                })
-                .collect()
-        } else {
-            vec![]
-        };
+        let from_ops = from_operations(item.cycle, item.revision, item.phase == CLOSING, &ops);
+        delivery.extend(from_ops.delivery);
         let needs = self.needs_of(item)?;
         let required = Required {
             merge: self.done_rule(item)?.is_some(),
@@ -211,9 +256,6 @@ impl Tx<'_> {
                 .and_then(|w| w.text().map(str::to_owned)),
             _ => None,
         };
-        let merge_declined = ops
-            .iter()
-            .any(|o| o.kind == OP_RELEASE && o.evidence["pr_merge_declined"] == json!(true));
         Ok(Facts {
             now,
             item: ItemState {
@@ -252,12 +294,12 @@ impl Tx<'_> {
                 })
                 .collect(),
             delivery,
-            unknown_effects,
-            closing_ops,
+            unknown_effects: from_ops.unknown_effects,
+            closing_ops: from_ops.closing_ops,
             dependency_wait: self.dependency_waiting(&item.id)?,
             quota_until: self.st.quota_waits.get(&item.id).map(|w| w.until),
             graph_busy,
-            merge_declined,
+            merge_declined: from_ops.merge_declined,
             continues_spent: self.takeover_count(&item.id)?,
             continues_cap: self.cfg().takeover_continues,
             stall_after: crate::stall::STALL_AFTER_MS,
