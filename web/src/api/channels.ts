@@ -3,7 +3,7 @@ import type { ChannelAttachment } from "@/api/channel-content"
  * /api/personas, /api/channels/feishu/* and the accounts module's /api/connections (with /connections/integrations
  * for which provider a connection belongs to and whether it can carry messages). The TS Hub has none of them;
  * `NotWired` makes a page fall back to its Unwired placeholder. Nothing here sends a message. */
-import { modReq, qs, isNotWired } from "@/api"
+import { modReq, qs, isNotWired, type Proposal } from "@/api"
 import { accountsApi, type RAccount, type RConnection, type RDevice, type RDeviceStatus } from "@/api/accounts"
 import { integrationsApi, providerByAdapter } from "@/api/integrations"
 import { lazy } from "@/api/accounts"
@@ -224,6 +224,17 @@ export const MSG_STATUS: Partial<Record<ChanMessage["status"], string>> = lazy({
 })
 
 /* ───────── what an outbound message answers (its approval card) ───────── */
+/** Evidence supplied by the failed-send decision, never inferred from its wording. */
+export type SendRecoveryInfo = {
+  kind: "channel_refusal" | "missing_permission"; scope: "target" | "connection"; source: string
+  provider?: string; code?: string | null; rpc_code?: number | null; error?: string
+  connection_id?: string; space_id?: string; requires_user_action?: boolean
+  authorization_kind: "managed" | "external"; authorization_url?: string | null
+  settings_href?: string; instructions?: string; external_policy_known?: boolean
+}
+/** The URL advertised by recovery must name this message on the current Hub. */
+export const sendAuthorizationUrl = (id: string) => "/api/chan-messages/" + e(id) + "/authorization"
+export const sendAuthorization = (id: string) => modReq<Proposal>("POST", sendAuthorizationUrl(id).slice(4), {})
 export type ROutContext = {
   space: { id: string; name: string; kind: string; external: boolean }
   as_you: boolean; persona: string | null; text: string | null
