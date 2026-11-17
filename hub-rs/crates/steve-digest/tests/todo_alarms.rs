@@ -101,6 +101,13 @@ impl Env {
     }
 }
 
+/// The stored body is what the feed shows and what the Bot DM sends as a Feishu `text` message: plain
+/// text, no markdown link and no relative `#/…` fragment (neither can be opened from a DM).
+fn assert_plain(body: &str) {
+    assert!(!body.contains("]("), "no markdown link: {body}");
+    assert!(!body.contains("#/"), "no web fragment: {body}");
+}
+
 #[test]
 fn a_reminder_is_planned_moved_and_rung_once_into_its_owners_feed() {
     let e = env();
@@ -143,7 +150,7 @@ fn a_reminder_is_planned_moved_and_rung_once_into_its_owners_feed() {
     assert_eq!(kind, "reminder");
     assert!(body.starts_with("待办提醒：交 Q4 复盘"), "{body}");
     assert!(body.contains("截止 2027-02-05"), "{body}");
-    assert!(body.contains(&format!("(#/todos/{id})")), "{body}");
+    assert_plain(body);
 }
 
 #[test]
@@ -235,4 +242,40 @@ fn a_recurring_todos_next_one_gets_its_reminder_and_a_policy_that_sends_waits_to
         ("now", "waiting")
     );
     assert!(notes[0].4.contains("截止 02-07 12:00"), "{}", notes[0].4);
+    assert_plain(&notes[0].4);
+}
+
+#[test]
+fn reminders_due_together_are_sent_as_one_plain_message() {
+    let e = env();
+    e.e.store()
+        .with_conn(|c| {
+            c.execute(
+                "INSERT INTO notification_policies (workspace_id, user_id, enabled, mode, timezone, consented_at, consent_since_seq, updated)
+                 VALUES (?, ?, 1, 'now', 'UTC', 1, 0, 1)",
+                params![WS, ME],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    e.add(ME, "回邮件", |t| t.remind_at = Some(NOW + HOUR));
+    e.add(ME, "订机票", |t| {
+        t.remind_at = Some(NOW + HOUR);
+        t.due_date = Some("2027-02-03");
+    });
+    e.round(NOW);
+    assert_eq!(e.round(NOW + HOUR).fired, 2);
+    let notes = e.notes();
+    assert_eq!(notes.len(), 1, "one message for the two: {notes:?}");
+    let body = &notes[0].4;
+    assert_eq!(
+        (notes[0].2.as_str(), notes[0].3.as_str()),
+        ("now", "waiting")
+    );
+    assert!(
+        body.contains("- 回邮件") && body.contains("- 订机票"),
+        "{body}"
+    );
+    assert!(body.contains("截止 2027-02-03"), "{body}");
+    assert_plain(body);
 }

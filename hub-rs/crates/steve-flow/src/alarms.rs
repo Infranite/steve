@@ -131,7 +131,8 @@ pub struct AlarmLine {
     /// A second part (`截止 11-20 18:00`), already in the owner's time zone.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
-    /// Where it opens in the web (`#/todos/<id>`).
+    /// Where it opens in the web (`#/todos/<id>`). Payload only: the stored notification body is plain
+    /// text for the feed and the Bot DM, so it does not carry it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub link: Option<String>,
 }

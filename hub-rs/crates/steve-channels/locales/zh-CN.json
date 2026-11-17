@@ -205,6 +205,5 @@
   "channels.notify.todo_due_many": "待办提醒：%{count} 条",
   "channels.notify.snooze_wake_one": "推迟的待办回来了：%{text}",
   "channels.notify.snooze_wake_many": "%{count} 条推迟的待办回来了",
-  "channels.notify.late": "有的到时没能发出（免打扰或 Hub 没在运行），现在一起补上。",
-  "channels.notify.open": "打开"
+  "channels.notify.late": "有的到时没能发出（免打扰或 Hub 没在运行），现在一起补上。"
 }
