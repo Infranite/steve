@@ -6,6 +6,7 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use markdown::mdast::Node;
 use pulldown_cmark::{Event, Parser, Tag, TagEnd};
 use steve_node_api::*;
 
@@ -177,7 +178,7 @@ impl Images {
                         let bytes = tokio::task::spawn_blocking(move || read(&scope, &source))
                             .await
                             .map_err(|_| invalid())??;
-                        upload(&*hub, &exec, &bytes).await
+                        upload(hub, &exec, &bytes).await
                     })
                     .await;
                     self.capture_spent += started.elapsed();
@@ -260,13 +261,20 @@ impl ImageNode {
         } else {
             format!(
                 " \"{}\"",
-                self.title.replace('\\', "\\\\").replace('"', "\\\"")
+                self.title
+                    .replace('\\', "\\\\")
+                    .replace('"', "\\\"")
+                    .replace('&', "\\&")
             )
         };
         format!("![{}]({url}{title})", self.alt)
     }
 }
+// Only the intersection of GFM resources and our existing semantic-alt parser may read a file.
+// markdown-rs omits nested image alt when stringifying its AST, so it confirms resource ranges,
+// destinations and titles; pulldown-cmark continues to preserve the original rendered alt.
 fn nodes(markdown: &str) -> Vec<ImageNode> {
+    let confirmed = gfm_nodes(markdown);
     let mut nodes = vec![];
     let mut current: Option<ImageNode> = None;
     let mut nested = 0usize;
@@ -291,7 +299,7 @@ fn nodes(markdown: &str) -> Vec<ImageNode> {
                 if let Some(node) = current.as_mut() {
                     // Preserve the rendered alt, including literal brackets/backslashes.
                     for c in t.chars() {
-                        if matches!(c, '\\' | '[' | ']' | '`' | '*' | '_') {
+                        if c.is_ascii_punctuation() {
                             node.alt.push('\\');
                         }
                         node.alt.push(c);
@@ -314,6 +322,61 @@ fn nodes(markdown: &str) -> Vec<ImageNode> {
             }
             _ => {}
         }
+    }
+    nodes.retain(|node| {
+        confirmed
+            .get(&node.range)
+            .is_some_and(|(url, title)| *url == node.destination && *title == node.title)
+    });
+    nodes
+}
+
+fn gfm_nodes(markdown: &str) -> HashMap<std::ops::Range<usize>, (String, String)> {
+    // Streamdown's production remark plugins use GFM, including literal autolinks. CommonMark
+    // alone would treat `https://host/![alt](local.png)` as a file-read request even though the
+    // browser renders no image. Use the micromark-family GFM AST, including reference images.
+    let Ok(tree) = markdown::to_mdast(markdown, &markdown::ParseOptions::gfm()) else {
+        return HashMap::new();
+    };
+    let mut definitions = HashMap::new();
+    let mut images = vec![];
+    let mut pending = vec![&tree];
+    while let Some(node) = pending.pop() {
+        match node {
+            Node::Definition(d) => {
+                // AST identifiers are already normalized; the first definition wins in GFM.
+                definitions.entry(d.identifier.as_str()).or_insert(d);
+            }
+            Node::Image(_) | Node::ImageReference(_) => images.push(node),
+            _ => {}
+        }
+        if let Some(children) = node.children() {
+            pending.extend(children.iter().rev());
+        }
+    }
+    let mut nodes = HashMap::new();
+    for node in images {
+        let Some(position) = node.position() else {
+            continue;
+        };
+        let range = position.start.offset..position.end.offset;
+        if markdown.get(range.clone()).is_none() {
+            continue;
+        }
+        let (destination, title) = match node {
+            Node::Image(i) => (&i.url, &i.title),
+            Node::ImageReference(i) => {
+                let Some(d) = definitions.get(i.identifier.as_str()) else {
+                    continue;
+                };
+                (&d.url, &d.title)
+            }
+            _ => unreachable!(),
+        };
+        nodes.insert(
+            range,
+            (destination.clone(), title.clone().unwrap_or_default()),
+        );
     }
     nodes
 }
@@ -428,7 +491,62 @@ fn read(scope: &Scope, source: &str) -> ApiResult<Vec<u8>> {
     Ok(bytes)
 }
 
-async fn upload(files: &dyn HubFiles, execution: &ExecutionRef, bytes: &[u8]) -> ApiResult<String> {
+/// An upload can outlive a cancelled begin/finish RPC. Keep the key before the first await, so
+/// dropping the capture future (timeout, cancellation or shutdown) can find and release it too.
+struct PendingUpload {
+    files: Arc<dyn HubFiles>,
+    begin: BeginUpload,
+    id: Option<TransferId>,
+    armed: bool,
+}
+impl Drop for PendingUpload {
+    fn drop(&mut self) {
+        if self.armed
+            && let Ok(runtime) = tokio::runtime::Handle::try_current()
+        {
+            runtime.spawn(abandon(
+                self.files.clone(),
+                self.begin.clone(),
+                self.id.clone(),
+            ));
+        }
+    }
+}
+fn retryable(error: &ApiError) -> bool {
+    // Every blob method here is idempotent. An unknown/lost reply is safe to resume with the
+    // same begin key; validation, permission and protocol errors cannot be repaired by resending.
+    matches!(
+        error.retry,
+        RetryClass::SameOperation | RetryClass::AfterReconcile
+    ) || error.code == ErrorCode::Internal
+}
+async fn abandon(files: Arc<dyn HubFiles>, begin: BeginUpload, mut id: Option<TransferId>) {
+    for _ in 0..2 {
+        let result = tokio::time::timeout(Duration::from_secs(1), async {
+            if id.is_none() {
+                id = Some(files.begin_upload(begin.clone()).await?.id);
+            }
+            files
+                .abort_upload(id.clone().expect("discovered transfer"))
+                .await
+        })
+        .await;
+        match result {
+            Ok(Ok(_)) => return,
+            Ok(Err(error)) if !retryable(&error) => return,
+            _ => {}
+        }
+    }
+    // No path or source bytes in diagnostics. If the Hub stays offline, its next begin also
+    // sweeps uploads whose execution is no longer eligible; TTL remains the crash fallback.
+    tracing::debug!("inline image cleanup not acknowledged by Hub");
+}
+
+async fn upload(
+    files: Arc<dyn HubFiles>,
+    execution: &ExecutionRef,
+    bytes: &[u8],
+) -> ApiResult<String> {
     let mime = if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
         "image/png"
     } else if bytes.starts_with(&[255, 216, 255]) {
@@ -459,12 +577,22 @@ async fn upload(files: &dyn HubFiles, execution: &ExecutionRef, bytes: &[u8]) ->
             name: format!("inline-{}", &digest.as_str()[7..19]),
         },
     };
+    let mut pending = PendingUpload {
+        files: files.clone(),
+        begin: begin.clone(),
+        id: None,
+        armed: true,
+    };
     let mut last = invalid();
     // Retry begin too: a lost finish reply, reconnect or Hub restart is safe. Successful content
     // is addressed by workspace+hash on the Hub; it never depends on a surviving source pathname.
     for _ in 0..2 {
         let attempt = async {
             let mut transfer = files.begin_upload(begin.clone()).await?;
+            pending.id = Some(transfer.id.clone());
+            if transfer.next_offset > bytes.len() as u64 {
+                return Err(invalid());
+            }
             let workspace = transfer
                 .workspace
                 .clone()
@@ -488,7 +616,7 @@ async fn upload(files: &dyn HubFiles, execution: &ExecutionRef, bytes: &[u8]) ->
                 }
                 transfer = next;
             }
-            let artifact = files.finish_upload(transfer.id).await?;
+            let artifact = files.finish_upload(transfer.id.clone()).await?;
             if artifact.sha256 != digest
                 || artifact.size != bytes.len() as u64
                 || artifact.mime != mime
@@ -509,10 +637,24 @@ async fn upload(files: &dyn HubFiles, execution: &ExecutionRef, bytes: &[u8]) ->
         }
         .await;
         match attempt {
-            Ok(url) => return Ok(url),
-            Err(e) => last = e,
+            Ok(url) => {
+                pending.armed = false;
+                return Ok(url);
+            }
+            Err(e) => {
+                // A Hub restart loses an in-memory transfer ID. Begin with the same key must
+                // recheck the execution grant before restarting bytes; a revoked grant still
+                // refuses it. Content/integrity errors remain terminal and are never retried.
+                let again = retryable(&e) || (pending.id.is_some() && e.code == ErrorCode::Denied);
+                last = e;
+                if !again {
+                    break;
+                }
+            }
         }
     }
+    abandon(files, begin, pending.id.clone()).await;
+    pending.armed = false;
     Err(last)
 }
 
@@ -528,6 +670,23 @@ mod tests {
         bytes: Mutex<Vec<u8>>,
         manifest: Mutex<Option<BlobManifest>>,
         corrupt_receipt: bool,
+        aborts: AtomicUsize,
+        finishes: AtomicUsize,
+        fault: Fault,
+        entered: tokio::sync::Notify,
+        aborted: tokio::sync::Notify,
+    }
+    #[derive(Clone, Copy, Default, PartialEq)]
+    enum Fault {
+        #[default]
+        None,
+        BeginReplyLost,
+        ChunkHangs,
+        FinishHangs,
+        FinishOfflineOnce,
+        FinishDeniedOnce,
+        FinishOffline,
+        FinishInvalid,
     }
     #[async_trait::async_trait]
     impl HubFiles for Files {
@@ -541,8 +700,12 @@ mod tests {
             Err(invalid())
         }
         async fn begin_upload(&self, b: BeginUpload) -> ApiResult<Transfer> {
-            self.reads.fetch_add(1, Ordering::SeqCst);
+            let first = self.reads.fetch_add(1, Ordering::SeqCst) == 0;
             *self.manifest.lock().unwrap() = Some(b.manifest);
+            if self.fault == Fault::BeginReplyLost && first {
+                self.entered.notify_one();
+                std::future::pending::<()>().await;
+            }
             Ok(Transfer {
                 id: TransferId::new("tr").unwrap(),
                 next_offset: self.bytes.lock().unwrap().len() as u64,
@@ -551,6 +714,10 @@ mod tests {
         }
         async fn upload(&self, b: BlobChunk) -> ApiResult<Transfer> {
             self.bytes.lock().unwrap().extend(b.bytes);
+            if self.fault == Fault::ChunkHangs {
+                self.entered.notify_one();
+                std::future::pending::<()>().await;
+            }
             Ok(Transfer {
                 id: b.transfer,
                 next_offset: self.bytes.lock().unwrap().len() as u64,
@@ -558,6 +725,26 @@ mod tests {
             })
         }
         async fn finish_upload(&self, _: TransferId) -> ApiResult<ArtifactRef> {
+            let first = self.finishes.fetch_add(1, Ordering::SeqCst) == 0;
+            if self.fault == Fault::FinishHangs {
+                self.entered.notify_one();
+                std::future::pending::<()>().await;
+            }
+            if self.fault == Fault::FinishOffline
+                || (self.fault == Fault::FinishOfflineOnce && first)
+            {
+                return Err(ApiError::new(ErrorCode::Offline, "lost reply"));
+            }
+            if self.fault == Fault::FinishDeniedOnce && first {
+                *self.bytes.lock().unwrap() = vec![];
+                return Err(ApiError::new(
+                    ErrorCode::Denied,
+                    "transfer registry restarted",
+                ));
+            }
+            if self.fault == Fault::FinishInvalid {
+                return Err(ApiError::new(ErrorCode::Invalid, "invalid image"));
+            }
             let m = self.manifest.lock().unwrap().clone().unwrap();
             Ok(ArtifactRef {
                 id: ArtifactId::new("fil_kept").unwrap(),
@@ -574,6 +761,9 @@ mod tests {
             Err(invalid())
         }
         async fn abort_upload(&self, _: TransferId) -> ApiResult<TransferState> {
+            self.aborts.fetch_add(1, Ordering::SeqCst);
+            *self.bytes.lock().unwrap() = vec![];
+            self.aborted.notify_one();
             Ok(TransferState::Aborted)
         }
     }
@@ -612,6 +802,97 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+    #[tokio::test]
+    async fn cancelled_and_timed_out_uploads_release_even_a_lost_begin_reply() {
+        for fault in [Fault::BeginReplyLost, Fault::ChunkHangs, Fault::FinishHangs] {
+            for cancel in [true, false] {
+                let files = Arc::new(Files {
+                    fault,
+                    ..Files::default()
+                });
+                let f = files.clone();
+                let work = async move { upload(f, &exec(), b"\x89PNG\r\n\x1a\npayload").await };
+                if cancel {
+                    let task = tokio::spawn(work);
+                    tokio::time::timeout(Duration::from_secs(2), files.entered.notified())
+                        .await
+                        .unwrap();
+                    task.abort();
+                    assert!(task.await.unwrap_err().is_cancelled());
+                } else {
+                    assert!(
+                        tokio::time::timeout(Duration::from_millis(50), work)
+                            .await
+                            .is_err()
+                    );
+                }
+                tokio::time::timeout(Duration::from_secs(2), files.aborted.notified())
+                    .await
+                    .expect("capture drop must release its upload");
+                assert_eq!(files.aborts.load(Ordering::SeqCst), 1);
+                assert!(files.bytes.lock().unwrap().is_empty());
+                if fault == Fault::BeginReplyLost {
+                    assert_eq!(
+                        files.reads.load(Ordering::SeqCst),
+                        2,
+                        "recover the key to clean a lost begin reply"
+                    );
+                }
+            }
+        }
+    }
+    #[tokio::test]
+    async fn permanent_failure_and_retry_exhaustion_abort_but_a_lost_finish_resumes() {
+        for (fault, expected_finishes, ok) in [
+            (Fault::FinishInvalid, 1, false),
+            (Fault::FinishOffline, 2, false),
+            (Fault::FinishOfflineOnce, 2, true),
+            (Fault::FinishDeniedOnce, 2, true),
+        ] {
+            let files = Arc::new(Files {
+                fault,
+                ..Files::default()
+            });
+            let result = upload(files.clone(), &exec(), b"\x89PNG\r\n\x1a\npayload").await;
+            assert_eq!(result.is_ok(), ok);
+            assert_eq!(files.finishes.load(Ordering::SeqCst), expected_finishes);
+            assert_eq!(files.aborts.load(Ordering::SeqCst), usize::from(!ok));
+            assert_eq!(files.bytes.lock().unwrap().is_empty(), !ok);
+            if ok {
+                assert_eq!(result.unwrap(), "/api/files/fil_kept?ws=space%20one");
+                assert_eq!(
+                    files.bytes.lock().unwrap().as_slice(),
+                    b"\x89PNG\r\n\x1a\npayload",
+                    "retry must not append the same bytes again"
+                );
+            }
+        }
+    }
+    #[tokio::test]
+    async fn gfm_urls_preserve_original_text_and_never_call_hub_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let scope = Scope::new(root.clone(), vec![root.clone()], vec![]);
+        std::fs::write(root.join("qr.png"), b"\x89PNG\r\n\x1a\npayload").unwrap();
+        let files = Arc::new(Files::default());
+        let original =
+            "https://example.test/![授权二维码](qr.png)\nwww.example.test/![授权二维码](qr.png)";
+        let mut images = Images::default();
+        let events = images
+            .process(
+                &scope,
+                &exec(),
+                Some(files.clone()),
+                vec![start(), delta(0, original), end()],
+            )
+            .await;
+        assert_eq!(text(events), original);
+        assert_eq!(images.rewrite(original), original);
+        assert_eq!(files.reads.load(Ordering::SeqCst), 0);
+        assert_eq!(files.finishes.load(Ordering::SeqCst), 0);
+        assert_eq!(files.aborts.load(Ordering::SeqCst), 0);
+        assert!(files.bytes.lock().unwrap().is_empty());
     }
     #[tokio::test]
     async fn split_images_wait_for_complete_markdown_keep_alt_and_stream_text_once() {
@@ -719,6 +1000,38 @@ mod tests {
             .await;
         events.extend(images.drain_original());
         assert_eq!(text(events), original, "cancellation retains pending text");
+    }
+    #[test]
+    fn gfm_autolink_literals_are_not_image_nodes() {
+        for prefix in [
+            "https://example.test/",
+            "http://example.test/",
+            "www.example.test/",
+        ] {
+            let markdown = format!("{prefix}![授权二维码](qr.png)");
+            assert!(nodes(&markdown).is_empty(), "{markdown}");
+            let independent = format!("{markdown}\n\n![合法](qr.png)");
+            let n = nodes(&independent);
+            assert_eq!(n.len(), 1);
+            assert_eq!(&independent[n[0].range.clone()], "![合法](qr.png)");
+        }
+    }
+    #[test]
+    fn gfm_reference_images_titles_and_semantic_alt_survive_rewrite() {
+        let source = "![授权 *图片* &amp;copy;][ QR ]\n\n![outer ![inner](ignored.png)](qr.png \"title &amp;copy;\")\n\n[qr]: qr.png \"引用标题\"\n";
+        let n = nodes(source);
+        assert_eq!(n.len(), 2);
+        assert_eq!(n[0].destination, "qr.png");
+        assert_eq!(n[0].title, "引用标题");
+        assert_eq!(n[1].alt, "outer inner");
+        assert_eq!(n[1].title, "title &copy;");
+        for node in n {
+            let replacement = node.markdown("/api/files/kept?ws=default");
+            let roundtrip = nodes(&replacement);
+            assert_eq!(roundtrip.len(), 1);
+            assert_eq!(roundtrip[0].alt, node.alt);
+            assert_eq!(roundtrip[0].title, node.title);
+        }
     }
     #[test]
     fn markdown_images_only_and_semantic_alt() {
