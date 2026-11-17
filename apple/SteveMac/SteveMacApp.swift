@@ -4,6 +4,7 @@ import SwiftUI
 
 @main
 struct SteveMacApp: App {
+    @NSApplicationDelegateAdaptor(MacApplicationDelegate.self) private var appDelegate
     @StateObject private var coordinator: SteveClientCoordinator
 
     init() {
@@ -56,7 +57,8 @@ struct SteveMacApp: App {
             hubStore: hubStore,
             webRoot: webRoot,
             preferredPortDefaults: defaults,
-            clientDescriptor: descriptor
+            clientDescriptor: descriptor,
+            nativeShellChromeEnabled: true
         )
         coord.pairConfirmationVisibilityProbe = { MacPairConfirmation.isAlertOnScreen() }
         _coordinator = StateObject(wrappedValue: coord)
@@ -77,24 +79,21 @@ struct SteveMacApp: App {
     }
 
     var body: some Scene {
-        WindowGroup("Steve", id: "main") {
+        Window("Steve", id: "main") {
             MacMainWindowView(coordinator: coordinator)
                 .onAppear {
                     coordinator.startIfNeeded()
+                    appDelegate.coordinator = coordinator
                 }
-                .onOpenURL { url in
-                    if url.scheme?.lowercased() == "steve" {
-                        coordinator.requestExternalPairingConfirmation(uri: url.absoluteString)
-                    }
-                }
-                // An open main window takes a `steve://` link itself. Without this the window group
-                // opens a second main window for it: two WebViews on one coordinator, two alerts.
-                .handlesExternalEvents(preferring: ["*"], allowing: ["*"])
+                .background(MacMainWindowIdentifier())
         }
         .defaultSize(width: 1240, height: 820)
         .commands {
             HubCommands(coordinator: coordinator, hubStore: coordinator.hubStore)
+            MacNavigationCommands(coordinator: coordinator)
         }
+
+        Settings { MacClientSettingsView() }
 
         MenuBarExtra {
             MacMenuBarPopoverView(coordinator: coordinator)
@@ -103,7 +102,8 @@ struct SteveMacApp: App {
                 .task {
                     coordinator.startIfNeeded()
                 }
-                .modifier(MacPairConfirmationWindowOpener(coordinator: coordinator))
+                .modifier(MacMainWindowLifecycle(coordinator: coordinator))
+                .onAppear { appDelegate.coordinator = coordinator }
         }
         .menuBarExtraStyle(.window)
     }
@@ -111,8 +111,6 @@ struct SteveMacApp: App {
 
 /// The pairing confirmation is an alert on the main window.
 enum MacPairConfirmation {
-    private static let mainWindowIDPrefix = "main"
-
     /// Is the confirmation alert on screen: a visible sheet that carries the confirmation's title.
     @MainActor
     static func isAlertOnScreen() -> Bool {
@@ -132,40 +130,14 @@ enum MacPairConfirmation {
     }
 
     @MainActor
-    static var mainWindows: [NSWindow] {
-        NSApplication.shared.windows.filter {
-            $0.identifier?.rawValue.hasPrefix(mainWindowIDPrefix) == true && !$0.isSheet
-        }
-    }
+    static var mainWindows: [NSWindow] { MacMainWindow.windows }
 
-    /// Puts a main window on screen for the confirmation; `open` makes one when none exists.
     @MainActor
-    static func bringUpMainWindow(open: () -> Void) {
-        if let window = mainWindows.first(where: { $0.isVisible || $0.isMiniaturized }) {
-            if window.isMiniaturized {
-                window.deminiaturize(nil)
-            }
-            window.makeKeyAndOrderFront(nil)
-        } else {
-            open()
-        }
-        NSApplication.shared.activate(ignoringOtherApps: true)
+    static func bringUpMainWindow(open: @escaping () -> Void) {
+        MacMainWindow.bringUpMainWindow(open: open)
     }
 }
 
-/// Lives on the menu-bar item, which exists for the whole run of the app: a pairing request that
-/// arrives with no main window to show its confirmation opens one.
-private struct MacPairConfirmationWindowOpener: ViewModifier {
-    @ObservedObject var coordinator: SteveClientCoordinator
-    @Environment(\.openWindow) private var openWindow
-
-    func body(content: Content) -> some View {
-        content.onChange(of: coordinator.pendingExternalPairConfirmation?.id) { _, pendingID in
-            guard pendingID != nil else { return }
-            MacPairConfirmation.bringUpMainWindow { openWindow(id: "main") }
-        }
-    }
-}
 
 private struct HubCommands: Commands {
     @ObservedObject var coordinator: SteveClientCoordinator
@@ -175,16 +147,12 @@ private struct HubCommands: Commands {
     var body: some Commands {
         CommandMenu("Hub") {
             Button(L10n.tr("添加 Hub…", "Add Hub…")) {
-                openWindow(id: "main")
-                NSApplication.shared.activate(ignoringOtherApps: true)
-                coordinator.navigate(hashRoute: "#/hub/add")
+                MacMainWindow.navigate("#/hub/add", coordinator: coordinator, open: { openWindow(id: "main") })
             }
             .keyboardShortcut("H", modifiers: [.command, .shift])
 
             Button(L10n.tr("配对新设备…", "Pair Device…")) {
-                openWindow(id: "main")
-                NSApplication.shared.activate(ignoringOtherApps: true)
-                coordinator.navigate(hashRoute: "#/hub/pair")
+                MacMainWindow.navigate("#/hub/pair", coordinator: coordinator, open: { openWindow(id: "main") })
             }
             .keyboardShortcut("P", modifiers: [.command, .shift])
 
@@ -218,10 +186,6 @@ private struct MacMenuBarIconLabel: View {
     var body: some View {
         HStack(spacing: 4) {
             Image(systemName: symbolName)
-            if summary.openDecisions > 0 {
-                Text("\(summary.openDecisions)")
-                    .font(.caption2.monospacedDigit())
-            }
         }
         .help(tooltipText)
     }
@@ -229,10 +193,7 @@ private struct MacMenuBarIconLabel: View {
     private var symbolName: String {
         switch summary.phase {
         case .connected:
-            if summary.openDecisions > 0 {
-                return "sparkles.rectangle.stack.fill"
-            }
-            return summary.steveThinking || summary.runningSessions > 0 ? "bolt.horizontal.circle.fill" : "circle.hexagongrid.fill"
+            return "circle.hexagongrid.fill"
         case .connecting:
             return "arrow.triangle.2.circlepath.circle"
         case .authRequired:

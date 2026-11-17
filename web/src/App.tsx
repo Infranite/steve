@@ -1,3 +1,4 @@
+import { useNativeShell } from "@/use-native-shell"
 import { lazyView } from "@/lazy"
 import { ChatView } from "@/chat-view"
 import { useEffect, useState } from "react"
@@ -190,6 +191,19 @@ export default function App({ deliveryId }: { deliveryId?: string }) {
     setIntent("")
   }, [intent, up])
   const pairing = usePairRequest()
+  const root = a.split("?")[0]
+  const label = root === "" || root === "c" ? t("core:nav.chat")
+    : root === "more" ? t("core:nav.mine")
+    : t("core:nav." + root, { defaultValue: root === "github" ? "GitHub" : "Steve" })
+  const pageTitle = root === "items" && b ? st.items.find((i) => i.id === b)?.t ?? label
+    : root === "projects" && b ? st.projects.find((p) => p.id === b)?.name ?? label
+    : root === "sessions" && b ? st.S[b]?.title ?? label : label
+  useNativeShell({
+    workspaceID: !login ? st.workspace?.id ?? null : null,
+    workspaceName: !login ? st.workspace?.name ?? null : null,
+    route: location.hash || "#/", title: String(pageTitle).slice(0, 512),
+    ready: !pairing && (up || !!login || hub === "missing"), authenticated: !login && hub === "ok" && !!st.workspace,
+  }, !!login && (others || intent === "add") || hub === "missing")
   const title = (sub: string) => <><Robot k="steve" size={72} /><div><div className="type-title">Steve</div><div className="mt-1 type-callout text-muted-foreground">{sub}</div></div></>
   const list = others || intent === "add"
   if (pairing) return <Splash><PairClaim /></Splash>
