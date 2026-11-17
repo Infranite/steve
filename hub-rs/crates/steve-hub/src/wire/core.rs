@@ -818,9 +818,7 @@ impl steve_core::AgentRuntime for RoutedRuntime {
             .get()
             .is_some_and(|c| c.config().dynamic_workflows)
         {
-            return Err(CoreError::Msg(steve_i18n::t!(
-                "core.workflow.blocker.disabled"
-            )));
+            return Err(CoreError::Msg(steve_i18n::t!("hub.workflow.disabled")));
         }
         if let Some(why) = self
             .store

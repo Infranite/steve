@@ -275,6 +275,7 @@
   "hub.dep_wait.work_running": "协作工作仍在执行或停止尚未确认，请先暂停工作图并确认停止后再登记前置等待",
   "hub.session.protocol_updated": "已同步当前 Steve 工作协议",
   "hub.session.node_parked": "该会话绑定在 Node 上，但 Node 未启用（STEVE_NODE_MODE），消息已排队，不会交给旧运行器。",
+  "hub.workflow.disabled": "动态工作流已关闭，不再启动新单元；已有成果和验收要求保留。请先暂停并等待执行停稳，再明确选择单会话接管。",
   "hub.workflow.node_unavailable": "协作会话绑定的 Node 不可用或不再获授权。",
   "hub.plugins.owner_only": "只有实例所有者可以添加插件库和安装插件",
   "hub.plugins.no_library": "没有这个插件库",

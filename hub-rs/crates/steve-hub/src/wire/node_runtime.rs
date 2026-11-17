@@ -442,7 +442,7 @@ impl NodeRuntime {
                 |r| r.get(0),
             )?;
             if child {
-                return Ok(Some(steve_i18n::t!("core.workflow.blocker.disabled")));
+                return Ok(Some(steve_i18n::t!("hub.workflow.disabled")));
             }
         }
         Ok(None)
