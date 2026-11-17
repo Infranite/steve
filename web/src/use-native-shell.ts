@@ -25,7 +25,7 @@ export function useNativeShell(context: Omit<ShellContext, "visible" | "focused"
     const value = { ...context, ...(appearance.current ? { appearance: appearance.current } : {}), focused: document.hasFocus(), visible: document.visibilityState === "visible" }
     session.current?.update(value)
     attention.current?.update({ ...value, ready: value.ready && !sheet && !addHubVisible })
-  }, [context.workspaceID, context.workspaceName, context.route, context.title, context.ready, context.authenticated, sheet, addHubVisible, themePreference])
+  }, [context.workspaceID, context.workspaceName, context.route, context.title, context.ready, context.authenticated, context.language, sheet, addHubVisible, themePreference])
   useEffect(() => {
     const bridge = shellBridge(nativeBridge())
     if (!bridge) return

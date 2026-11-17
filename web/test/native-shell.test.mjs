@@ -52,6 +52,21 @@ test("context coalesces by metadata, nullable workspace and focus are preserved"
     assert.equal(f.calls.filter(([op]) => op === "shell.navigation.next").length, 0)
   } finally { f.session.stop() }
 })
+test("language-only context changes publish without changing route or user title", async () => {
+  const f = fixture(null)
+  try {
+    f.update({ title: "A user-owned title", language: "zh-CN" }); await f.session.publish()
+    const before = f.calls.filter(([op]) => op === "shell.context").length
+    f.update({ language: "en" }); await f.session.publish()
+    const reports = f.calls.filter(([op]) => op === "shell.context")
+    assert.equal(reports.length, before + 1)
+    assert.equal(reports.at(-1)[1].title, "A user-owned title")
+    assert.equal(reports.at(-1)[1].route, "#/")
+    assert.equal(reports.at(-1)[1].language, "en")
+    f.update({ language: "en" }); await f.session.publish()
+    assert.equal(f.calls.filter(([op]) => op === "shell.context").length, reports.length)
+  } finally { f.session.stop() }
+})
 test("next is a direct intent, context reaches scoped destination before success ack", async () => {
   const f = fixture(navigation({ workspaceID: "second" }))
   try {

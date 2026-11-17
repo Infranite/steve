@@ -1,17 +1,21 @@
+import Combine
 import Foundation
 import XCTest
 @testable import SteveClientKit
 
 final class NativeShellTests: XCTestCase {
     @MainActor
-    private func fixture(_ test: (SteveClientCoordinator, HubStore, UUID) throws -> Void) rethrows {
+    private func fixture(languageEnabled: Bool = false, languageState: NativeUILanguageState? = nil,
+                         _ test: (SteveClientCoordinator, HubStore, UUID) throws -> Void) rethrows {
         let suite = "native-shell-\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suite)!
         defer { defaults.removePersistentDomain(forName: suite) }
         let store = HubStore(defaults: defaults, credentials: InMemoryCredentialStore(), includeLocalDefault: false)
         _ = store.upsertProfile(HubProfile(id: "a", name: "Test", lanURLs: [URL(string: "http://127.0.0.1:19999")!]), credential: "fixture-only")
         let coordinator = SteveClientCoordinator(hubStore: store, preferredPortDefaults: defaults,
-            clientDescriptor: ClientDescriptor(kind: "mac", name: "Test", platform: "macOS", version: "test"))
+            clientDescriptor: ClientDescriptor(kind: "mac", name: "Test", platform: "macOS", version: "test"),
+            nativeShellLanguageEnabled: languageEnabled)
+        if let languageState { coordinator.shellLanguageState = languageState }
         defer { coordinator.stop() }
         let owner = UUID()
         coordinator.attachShell(ownerID: owner)
@@ -31,6 +35,121 @@ final class NativeShellTests: XCTestCase {
         try c.handleShellBridgeCall(op: op, args: args, ownerID: owner, documentID: document,
             generation: generation ?? c.shellState.generation, hubID: hub)
     }
+
+    @MainActor
+    func testLanguageSnapshotFallbackAndPublishesOnlyEffectiveChanges() {
+        let snapshot = NativeUILanguageSnapshot(systemLanguages: { ["en-US", "zh-CN"] })
+        let state = NativeUILanguageState(snapshot: snapshot)
+        var values: [Bool] = []
+        let subscription = state.$prefersChinese.sink { values.append($0) }
+        state.accept(.english)
+        state.accept(nil)
+        XCTAssertEqual(values, [false])
+        state.accept(.chinese)
+        XCTAssertTrue(snapshot.prefersChinese, "Synchronous readers change before UI publication")
+        state.accept(.chinese)
+        state.accept(nil)
+        XCTAssertEqual(values, [false, true, false])
+        withExtendedLifetime(subscription) {}
+        XCTAssertTrue(NativeUILanguageSnapshot(systemLanguages: { ["zh-Hant", "en"] }).prefersChinese)
+        XCTAssertTrue(NativeUILanguageSnapshot(systemLanguages: { [] }).prefersChinese)
+        XCTAssertFalse(NativeUILanguageSnapshot(systemLanguages: { ["fr-FR", "zh-CN"] }).prefersChinese)
+    }
+
+    func testLanguageSnapshotHasSynchronousConcurrentReaders() {
+        let snapshot = NativeUILanguageSnapshot(systemLanguages: { ["en"] })
+        DispatchQueue.concurrentPerform(iterations: 100) { index in
+            _ = snapshot.set(index.isMultiple(of: 2) ? .chinese : .english)
+            _ = snapshot.prefersChinese
+        }
+        _ = snapshot.set(.chinese)
+        XCTAssertTrue(snapshot.prefersChinese)
+    }
+
+    @MainActor
+    func testLanguageRequiresOptInAndDoesNotChangeOSAcceptLanguageHeader() throws {
+        let snapshot = NativeUILanguageSnapshot(systemLanguages: { ["en"] })
+        let state = NativeUILanguageState(snapshot: snapshot)
+        let header = L10n.acceptLanguageHeader
+        try fixture(languageState: state) { c, _, owner in
+            var args = context(); args["language"] = "zh-CN"
+            _ = try call(c, owner, "shell.context", args)
+            XCTAssertEqual(c.shellContext?.language, .chinese)
+            XCTAssertFalse(state.prefersChinese, "Shared clients, including iOS, do not opt into a UI override")
+        }
+        XCTAssertEqual(L10n.acceptLanguageHeader, header)
+    }
+
+    #if os(macOS)
+    @MainActor
+    func testCurrentDocumentLanguageSwitchMissingFallbackAndTransientRetention() throws {
+        let snapshot = NativeUILanguageSnapshot(systemLanguages: { ["en-US"] })
+        let state = NativeUILanguageState(snapshot: snapshot)
+        try fixture(languageEnabled: true, languageState: state) { c, _, owner in
+            var args = context(); args["language"] = "zh-CN"
+            _ = try call(c, owner, "shell.context", args)
+            XCTAssertTrue(state.prefersChinese)
+            XCTAssertEqual(c.shellContext?.language, .chinese)
+            let generation = c.shellState.generation
+            c.beginShellDocument(ownerID: owner)
+            XCTAssertNil(c.shellContext)
+            XCTAssertTrue(state.prefersChinese, "Reload does not flash back to the OS language")
+            XCTAssertThrowsError(try call(c, owner, "shell.context", context(), generation: generation))
+            XCTAssertTrue(state.prefersChinese)
+            _ = try call(c, owner, "shell.context", context(), document: "replacement")
+            XCTAssertNil(c.shellContext?.language)
+            XCTAssertFalse(state.prefersChinese, "A valid legacy current document restores OS fallback")
+            _ = try call(c, owner, "shell.context", args, document: "replacement")
+            c.invalidateShellScope(clearNavigation: true, keepDocument: true)
+            XCTAssertTrue(state.prefersChinese)
+            args["language"] = "en"
+            _ = try call(c, owner, "shell.context", args, document: "replacement")
+            XCTAssertFalse(state.prefersChinese)
+            args["language"] = "zh-CN"
+            _ = try call(c, owner, "shell.context", args, document: "replacement")
+            c.detachShell(ownerID: owner)
+            XCTAssertTrue(state.prefersChinese, "Closing the main window keeps MenuBar and Settings in the last language")
+            XCTAssertThrowsError(try call(c, owner, "shell.context", context(), document: "replacement"))
+            XCTAssertTrue(state.prefersChinese)
+        }
+    }
+
+    @MainActor
+    func testMalformedOrUntrustedLanguageCannotMutateContextOrLanguage() throws {
+        let snapshot = NativeUILanguageSnapshot(systemLanguages: { ["en"] })
+        let state = NativeUILanguageState(snapshot: snapshot)
+        try fixture(languageEnabled: true, languageState: state) { c, store, owner in
+            var args = context(); args["language"] = "zh-CN"
+            _ = try call(c, owner, "shell.context", args)
+            let accepted = c.shellContext
+            for invalid in [NSNull(), true, 1, [], ["language": "en"], "", "zh", "zh-cn", "en-US", "fr", " en"] as [Any] {
+                args["language"] = invalid
+                args["title"] = "Must not replace context"
+                XCTAssertThrowsError(try call(c, owner, "shell.context", args), "\(invalid)")
+                XCTAssertEqual(c.shellContext, accepted)
+                XCTAssertTrue(state.prefersChinese)
+            }
+            args = context(); args["language"] = "en"
+            XCTAssertThrowsError(try call(c, UUID(), "shell.context", args))
+            XCTAssertThrowsError(try call(c, owner, "shell.context", args, document: "old"))
+            XCTAssertThrowsError(try call(c, owner, "shell.context", args, hub: "old-hub"))
+            var invalidAppearance = args; invalidAppearance["appearance"] = ["dark": true]
+            XCTAssertThrowsError(try call(c, owner, "shell.context", invalidAppearance))
+            var invalidWorkspace = args; invalidWorkspace["workspaceID"] = NSNull()
+            XCTAssertThrowsError(try call(c, owner, "shell.context", invalidWorkspace))
+            store.updateAuthMetadata(id: "a", clientID: nil, userName: nil, credential: nil)
+            XCTAssertThrowsError(try call(c, owner, "shell.context", args))
+            XCTAssertEqual(c.shellContext, accepted)
+            XCTAssertTrue(state.prefersChinese)
+            c.beginShellDocument(ownerID: owner)
+            args["language"] = NSNull()
+            XCTAssertThrowsError(try call(c, owner, "shell.context", args, document: "invalid"))
+            XCTAssertNil(c.shellState.documentID, "Invalid metadata cannot claim the new document")
+            XCTAssertNil(c.shellContext)
+            XCTAssertTrue(state.prefersChinese)
+        }
+    }
+    #endif
 
     func testRouteAllowlistAndCanonicalActions() {
         for route in ["javascript:alert(1)", "https://example.test/#/", "#//devices", "#/items/../settings", "#/items/%2e%2e/settings", "#/items/%5c", "#/items/%00", "#/items/%23", "#/unknown", "#/hub/delete", "#/hub/add?run=1", "#/auto/acc/old", "#/pair?code=secret"] {

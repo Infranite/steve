@@ -2,6 +2,7 @@ import SteveClientKit
 import SwiftUI
 
 struct MacMainWindowView: View {
+    @ObservedObject private var language = NativeUILanguageState.shared
     @ObservedObject var coordinator: SteveClientCoordinator
     @ObservedObject var attention: MacAttentionController
     @State private var showAttention = false

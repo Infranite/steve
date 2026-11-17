@@ -48,6 +48,8 @@ public final class SteveClientCoordinator: ObservableObject {
     @Published public internal(set) var shellHubSwitchTarget: String?
     @Published public internal(set) var shellNavigationError: String?
     public let nativeShellChromeEnabled: Bool
+    public let nativeShellLanguageEnabled: Bool
+    var shellLanguageState = NativeUILanguageState.shared
     var shellState = NativeShellState()
 
     @Published public var isQRScannerPresented = false
@@ -80,9 +82,15 @@ public final class SteveClientCoordinator: ObservableObject {
         preferredPortDefaults: UserDefaults? = .standard,
         clientDescriptor: ClientDescriptor,
         purgeWebCookiesHandler: ((Set<String>) -> Void)? = nil,
-        nativeShellChromeEnabled: Bool = false
+        nativeShellChromeEnabled: Bool = false,
+        nativeShellLanguageEnabled: Bool = false
     ) {
         self.nativeShellChromeEnabled = nativeShellChromeEnabled
+        #if os(macOS)
+        self.nativeShellLanguageEnabled = nativeShellLanguageEnabled
+        #else
+        self.nativeShellLanguageEnabled = false
+        #endif
         self.hubStore = hubStore ?? HubStore()
         self.api = api
         self.resolver = resolver

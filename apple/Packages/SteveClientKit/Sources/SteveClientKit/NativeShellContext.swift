@@ -44,6 +44,7 @@ public struct NativeShellContext: Equatable, Sendable {
     public let focused: Bool
     public let visible: Bool
     public let appearance: NativeShellAppearance?
+    public let language: NativeShellLanguage?
 }
 
 public struct NativeNavigationIntent: Equatable, Sendable, Identifiable {
@@ -175,7 +176,8 @@ extension SteveClientCoordinator {
               shellState.documentID == nil || shellState.documentID == documentID else {
             throw BridgeCallError.operationFailed("Stale native shell document")
         }
-        shellState.documentID = documentID
+        // A malformed context must not claim an otherwise unbound document scope.
+        if op != "shell.context" { shellState.documentID = documentID }
         switch op {
         case "shell.hub-switch.next":
             guard var request = shellState.hubSwitch else { return NSNull() }
@@ -209,6 +211,15 @@ extension SteveClientCoordinator {
             } else {
                 appearance = nil // Older Web clients do not publish appearance.
             }
+            let language: NativeShellLanguage?
+            if let rawLanguage = args["language"] {
+                guard let value = rawLanguage as? String, let parsed = NativeShellLanguage(rawValue: value) else {
+                    throw BridgeCallError.invalidArgument("Invalid native shell language")
+                }
+                language = parsed
+            } else {
+                language = nil // A valid current document from an older Web client restores OS fallback.
+            }
             let workspace = (args["workspaceID"] as? String).flatMap { $0.isEmpty ? nil : $0 }
             // Account changes invalidate the old reports without forcing a reload of the sign-in page.
             let nativeAuthenticated = !(hubStore.credential(for: hubID) ?? "").isEmpty
@@ -216,6 +227,7 @@ extension SteveClientCoordinator {
                   authenticated || workspace == nil else {
                 throw BridgeCallError.invalidArgument("Context authentication or workspace is stale")
             }
+            shellState.documentID = documentID
             if shellContext?.authenticated == true && !authenticated {
                 invalidateShellScope(clearNavigation: true, keepDocument: true)
             }
@@ -225,7 +237,8 @@ extension SteveClientCoordinator {
             shellContext = NativeShellContext(hubID: hubID, generation: shellState.generation, documentID: documentID,
                 workspaceID: workspace, workspaceName: workspace == nil ? nil : (args["workspaceName"] as? String).map(Self.shellText),
                 route: route, title: Self.shellText(title), ready: ready, authenticated: authenticated,
-                focused: focused, visible: visible, appearance: appearance)
+                focused: focused, visible: visible, appearance: appearance, language: language)
+            if nativeShellLanguageEnabled { shellLanguageState.accept(language) }
             targetHashRoute = nil // This page uses acknowledged navigation, never also inject a hash.
             return [String: Any]()
         case "shell.attention.visible":

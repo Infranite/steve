@@ -3,6 +3,7 @@ import SteveClientKit
 import SwiftUI
 
 struct MacMenuBarPopoverView: View {
+    @ObservedObject private var language = NativeUILanguageState.shared
     @ObservedObject var coordinator: SteveClientCoordinator
     @ObservedObject var attention: MacAttentionController
     @ObservedObject private var hubStore: HubStore

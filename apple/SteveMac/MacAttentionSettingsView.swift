@@ -5,6 +5,7 @@ import UserNotifications
 /// Host supplies a binding backed by AttentionMonitor.setPreferences and presents its write failures.
 /// Changing a toggle never invokes system authorization. Only the explicit button below does.
 struct MacAttentionSettingsView: View {
+    @ObservedObject private var language = NativeUILanguageState.shared
     @ObservedObject var delivery: MacAttentionDelivery
     @Binding var preferences: AttentionPreferences
     var dedupStatus: AttentionDedupStatus = .ready

@@ -27,6 +27,7 @@ enum MacShellContext {
 }
 
 struct MacHubMenu: View {
+    @ObservedObject private var language = NativeUILanguageState.shared
     @ObservedObject var coordinator: SteveClientCoordinator
     @ObservedObject private var hubStore: HubStore
     @Environment(\.openWindow) private var openWindow
@@ -92,6 +93,7 @@ extension ToolbarContent {
 }
 
 struct MacConnectionIndicator: View {
+    @ObservedObject private var language = NativeUILanguageState.shared
     let phase: HubConnectionPhase
 
     var body: some View {
@@ -109,6 +111,7 @@ struct MacConnectionIndicator: View {
 }
 
 struct MacConnectionLabel: View {
+    @ObservedObject private var language = NativeUILanguageState.shared
     let phase: HubConnectionPhase
 
     var body: some View {
@@ -136,6 +139,7 @@ struct MacConnectionLabel: View {
 }
 
 struct MacConnectionDetails: View {
+    @ObservedObject private var language = NativeUILanguageState.shared
     @ObservedObject var coordinator: SteveClientCoordinator
     @ObservedObject private var hubStore: HubStore
 
@@ -181,6 +185,7 @@ struct MacConnectionDetails: View {
 
 /// Separate category units, never an aggregate count. Missing/stale sources are not a known zero.
 struct MacAttentionView: View {
+    @ObservedObject private var language = NativeUILanguageState.shared
     @ObservedObject var coordinator: SteveClientCoordinator
     @ObservedObject var attention: MacAttentionController
     let navigate: (String) -> Void
@@ -278,6 +283,7 @@ struct MacAttentionView: View {
 }
 
 struct MacClientSettingsView: View {
+    @ObservedObject private var language = NativeUILanguageState.shared
     @ObservedObject var attention: MacAttentionController
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -299,6 +305,7 @@ struct MacClientSettingsView: View {
 
 /// No new global composer shortcuts: Cmd-K, Cmd-B and Return remain owned by the web editor.
 struct MacNavigationCommands: Commands {
+    @ObservedObject private var language = NativeUILanguageState.shared
     @ObservedObject var coordinator: SteveClientCoordinator
     @Environment(\.openWindow) private var openWindow
 

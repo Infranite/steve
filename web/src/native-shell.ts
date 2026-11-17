@@ -14,6 +14,7 @@ export type ShellContext = {
   focused: boolean
   visible: boolean
   appearance?: ShellAppearance
+  language?: "zh-CN" | "en"
 }
 export type ShellNavigation = { id: string; hubID: string; workspaceID?: string; route: string; targetID?: string }
 const OPERATIONS = ["shell.context", "shell.navigation.next", "shell.navigation.ack"]

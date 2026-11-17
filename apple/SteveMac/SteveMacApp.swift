@@ -59,7 +59,8 @@ struct SteveMacApp: App {
             webRoot: webRoot,
             preferredPortDefaults: defaults,
             clientDescriptor: descriptor,
-            nativeShellChromeEnabled: true
+            nativeShellChromeEnabled: true,
+            nativeShellLanguageEnabled: true
         )
         coord.pairConfirmationVisibilityProbe = { MacPairConfirmation.isAlertOnScreen() }
         _coordinator = StateObject(wrappedValue: coord)
@@ -144,6 +145,7 @@ enum MacPairConfirmation {
 
 
 private struct HubCommands: Commands {
+    @ObservedObject private var language = NativeUILanguageState.shared
     @ObservedObject var coordinator: SteveClientCoordinator
     @ObservedObject var hubStore: HubStore
     @Environment(\.openWindow) private var openWindow
@@ -185,6 +187,7 @@ private struct HubCommands: Commands {
 }
 
 private struct MacMenuBarIconLabel: View {
+    @ObservedObject private var language = NativeUILanguageState.shared
     let summary: HubRuntimeSummary
     @ObservedObject var attention: MacAttentionController
 
@@ -430,10 +433,21 @@ private enum MacDebugHarness {
                 try? png.write(to: outURL)
                 return ["ok": true, "windowNumber": sheetWin.windowNumber]
             }
-            if target == "menubar" {
+            if ["menubar", "settings", "attention"].contains(target) {
+                // Render production native roots without keyboard automation or permission prompts.
+                let preview: AnyView
+                switch target {
+                case "settings":
+                    preview = AnyView(MacClientSettingsView(attention: attention))
+                case "attention":
+                    preview = AnyView(MacAttentionView(coordinator: coordinator, attention: attention) { route in
+                        coordinator.navigate(hashRoute: route)
+                    }.padding(16).frame(width: 330))
+                default:
+                    preview = AnyView(MacMenuBarPopoverView(coordinator: coordinator, attention: attention))
+                }
                 let host = NSHostingView(
-                    rootView: MacMenuBarPopoverView(coordinator: coordinator, attention: attention)
-                        .background(Color(nsColor: .windowBackgroundColor))
+                    rootView: preview.background(Color(nsColor: .windowBackgroundColor))
                 )
                 let size = host.fittingSize
                 host.frame = NSRect(origin: .zero, size: NSSize(width: max(size.width, 320), height: max(size.height, 360)))
@@ -443,7 +457,7 @@ private enum MacDebugHarness {
                     backing: .buffered,
                     defer: false
                 )
-                win.title = "Steve MenuBar"
+                win.title = "Steve \(target)"
                 win.isOpaque = true
                 win.backgroundColor = .windowBackgroundColor
                 win.contentView = host

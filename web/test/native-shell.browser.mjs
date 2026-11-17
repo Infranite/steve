@@ -19,7 +19,7 @@ async function open(mode = "modern", signedIn = true) {
   page.on("pageerror", (e) => errors.push(e.message))
   await page.addInitScript(({ mode }) => {
     localStorage.setItem("steve-onboarded", "1")
-    localStorage.setItem("steve-lang", "en")
+    if (!localStorage.getItem("steve-lang")) localStorage.setItem("steve-lang", "en")
     window.__contexts = []; window.__acks = []; window.__intents = []; window.__calls = []
     if (mode === "browser") return
     window.__STEVE_NATIVE__ = { v: 2, platform: mode === "ios" ? "ios" : "macos", can: ["hubs.list", "hubs.switch", "hubs.add", "hubs.forget", "hubs.rename", "pair.claim", ...(mode === "older" ? [] : ["shell.context", "shell.navigation.next", "shell.navigation.ack"]), ...(mode === "modern" ? ["shell.chrome.hub", "shell.attention.visible"] : [])], call: async (op, args) => {
@@ -67,11 +67,27 @@ try {
     assert.equal(initial.route, "#/items")
     assert.equal(initial.authenticated, true)
     assert.equal(Object.hasOwn(initial, "hubID"), false)
-    assert.deepEqual(Object.keys(initial).sort(), ["workspaceID", "workspaceName", "route", "title", "ready", "authenticated", "focused", "visible", "appearance"].sort())
+    assert.deepEqual(Object.keys(initial).sort(), ["workspaceID", "workspaceName", "route", "title", "ready", "authenticated", "focused", "visible", "appearance", "language"].sort())
+    assert.equal(initial.language, "en")
     assert.equal(typeof initial.appearance.dark, "boolean")
     assert.equal(initial.appearance.background.length, 3)
     assert.ok(initial.appearance.background.every(c => Number.isInteger(c) && c >= 0 && c <= 255))
     check("App-level context contains selected workspace and metadata only, never credentials or web-supplied Hub identity")
+    assert.equal((await navigate(page, "language-detail", "#/items/ST-100")).ok, true)
+    const fixedTitle = await page.evaluate(() => window.__contexts.at(-1).title)
+    assert.equal(fixedTitle, "Delivered files")
+    await page.evaluate(async () => { const { setLang } = await import("/src/i18n/index.ts"); setLang("zh-CN") })
+    await page.waitForFunction(() => window.__contexts.at(-1).language === "zh-CN")
+    assert.equal(await page.evaluate(() => window.__contexts.at(-1).title), fixedTitle)
+    assert.equal(await page.evaluate(() => location.hash), "#/items/ST-100")
+    await page.reload()
+    await page.waitForFunction(() => window.__contexts.some(c => c.ready && c.language === "zh-CN"))
+    assert.equal(await page.evaluate(() => window.__contexts.at(-1).title), fixedTitle)
+    await page.evaluate(async () => { const { setLang } = await import("/src/i18n/index.ts"); setLang("en") })
+    await page.waitForFunction(() => window.__contexts.at(-1).language === "en")
+    assert.equal(await page.evaluate(() => window.__contexts.at(-1).title), fixedTitle)
+    assert.equal((await navigate(page, "language-return", "#/items")).ok, true)
+    check("language-only changes publish both ways without navigation or changing a user-owned detail title")
     // Theme preference, user theme stylesheet and inline body/root mutations need no route change.
     const systemDark = await page.evaluate(() => matchMedia("(prefers-color-scheme: dark)").matches)
     await page.evaluate(async (dark) => { const { setTheme } = await import("/src/ui.tsx"); setTheme(dark ? "dark" : "light") }, systemDark)
