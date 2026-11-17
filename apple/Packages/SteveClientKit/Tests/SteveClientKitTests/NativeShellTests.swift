@@ -135,6 +135,86 @@ final class NativeShellTests: XCTestCase {
         }
     }
 
+    private func visibility(_ target: AttentionTarget, workspace: String = "first", visible: Bool = true) -> [String: Any] {
+        ["workspaceID": workspace, "targets": [["destination": target.destination.rawValue, "entityID": target.entityID]],
+         "focused": true, "visible": visible]
+    }
+
+    @MainActor
+    func testDeepTargetsRequireTypedRouteAndActuallyVisibleCurrentDocument() throws {
+        try fixture { c, _, owner in
+            for destination in [AttentionTarget.Destination.reply, .pending, .feed, .channel] {
+                let target = try AttentionTarget(destination: destination, entityID: "target:one &two")
+                _ = try call(c, owner, "shell.context", context())
+                XCTAssertTrue(c.navigate(route: target.nativeRoute, workspaceID: "first", targetID: target.entityID))
+                let intent = try XCTUnwrap(try call(c, owner, "shell.navigation.next") as? [String: Any])
+                _ = try call(c, owner, "shell.context", context(route: target.nativeRoute))
+                XCTAssertThrowsError(try call(c, owner, "shell.navigation.ack", ["id": intent["id"]!, "ok": true]))
+                _ = try call(c, owner, "shell.attention.visible", visibility(target, visible: false))
+                XCTAssertThrowsError(try call(c, owner, "shell.navigation.ack", ["id": intent["id"]!, "ok": true]))
+                let wrongType = try AttentionTarget(destination: destination == .reply ? .pending : .reply, entityID: target.entityID)
+                _ = try call(c, owner, "shell.attention.visible", visibility(wrongType))
+                XCTAssertThrowsError(try call(c, owner, "shell.navigation.ack", ["id": intent["id"]!, "ok": true]))
+                _ = try call(c, owner, "shell.attention.visible", visibility(target))
+                _ = try call(c, owner, "shell.navigation.ack", ["id": intent["id"]!, "ok": true])
+                XCTAssertTrue(c.shellState.intents.isEmpty)
+            }
+        }
+    }
+
+    @MainActor
+    func testReloadIsTransientAndForegroundRequiresExactVisibleFocusedScope() throws {
+        try fixture { c, _, owner in
+            let target = try AttentionTarget(destination: .reply, entityID: "reply1")
+            let other = try AttentionTarget(destination: .reply, entityID: "reply2")
+            let scope = AttentionScope(hubProfileID: "a", userID: "native-verified-user", workspaceID: "first")
+            XCTAssertEqual(NativeAttentionContextUpdate.classify(nil, hubID: "a"), .transient)
+            _ = try call(c, owner, "shell.context", context(workspace: nil, ready: false, authenticated: false))
+            XCTAssertEqual(NativeAttentionContextUpdate.classify(c.shellContext, hubID: "a"), .transient)
+            _ = try call(c, owner, "shell.context", context())
+            XCTAssertEqual(NativeAttentionContextUpdate.classify(c.shellContext, hubID: "a"), .workspace(id: "first", name: "first"))
+            _ = try call(c, owner, "shell.attention.visible", visibility(target))
+            let report = try XCTUnwrap(c.shellAttentionVisibility)
+            XCTAssertTrue(report.activelyViews(target, scope: scope, context: c.shellContext, nativeFocused: true))
+            XCTAssertFalse(report.activelyViews(other, scope: scope, context: c.shellContext, nativeFocused: true))
+            XCTAssertFalse(report.activelyViews(target, scope: scope, context: c.shellContext, nativeFocused: false))
+            XCTAssertFalse(report.activelyViews(target, scope: .init(hubProfileID: "a", userID: scope.userID, workspaceID: "other"), context: c.shellContext, nativeFocused: true))
+            var blurred = context(); blurred["focused"] = false
+            _ = try call(c, owner, "shell.context", blurred)
+            XCTAssertFalse(report.activelyViews(target, scope: scope, context: c.shellContext, nativeFocused: true))
+            c.beginShellDocument(ownerID: owner)
+            XCTAssertFalse(report.activelyViews(target, scope: scope, context: c.shellContext, nativeFocused: true))
+            _ = try call(c, owner, "shell.context", context(workspace: nil, authenticated: false), document: "replacement")
+            XCTAssertEqual(NativeAttentionContextUpdate.classify(c.shellContext, hubID: "a"), .signedOut)
+        }
+    }
+
+    @MainActor
+    func testVisibilityScopeRejectsWrongWorkspaceMalformedAndStaleReports() throws {
+        try fixture { c, _, owner in
+            let target = try AttentionTarget(destination: .reply, entityID: "reply1")
+            XCTAssertThrowsError(try call(c, owner, "shell.attention.visible", visibility(target)))
+            _ = try call(c, owner, "shell.context", context())
+            XCTAssertThrowsError(try call(c, owner, "shell.attention.visible", visibility(target, workspace: "other")))
+            var malformed = visibility(target); malformed["focused"] = 1
+            XCTAssertThrowsError(try call(c, owner, "shell.attention.visible", malformed))
+            malformed = visibility(target); malformed["targets"] = [["destination": "script", "entityID": "id"]]
+            XCTAssertThrowsError(try call(c, owner, "shell.attention.visible", malformed))
+            _ = try call(c, owner, "shell.attention.visible", visibility(target))
+            XCTAssertEqual(c.shellAttentionVisibility?.hubID, "a")
+            XCTAssertEqual(c.shellAttentionVisibility?.targets, [target])
+            _ = try call(c, owner, "shell.context", context(route: "#/inbox"))
+            XCTAssertNil(c.shellAttentionVisibility)
+            _ = try call(c, owner, "shell.attention.visible", visibility(target))
+            let generation = c.shellState.generation
+            c.beginShellDocument(ownerID: owner)
+            XCTAssertNil(c.shellAttentionVisibility)
+            XCTAssertThrowsError(try call(c, owner, "shell.attention.visible", visibility(target), generation: generation))
+            _ = try call(c, owner, "shell.context", context(workspace: nil, ready: true, authenticated: false), document: "replacement")
+            XCTAssertThrowsError(try call(c, owner, "shell.attention.visible", visibility(target), document: "replacement"))
+        }
+    }
+
     @MainActor
     func testHubSwitchRequiresScopedApprovalBeforeMutatingHubOrProxy() throws {
         try fixture { c, store, owner in

@@ -6,6 +6,7 @@ import SwiftUI
 struct SteveMacApp: App {
     @NSApplicationDelegateAdaptor(MacApplicationDelegate.self) private var appDelegate
     @StateObject private var coordinator: SteveClientCoordinator
+    @StateObject private var attention: MacAttentionController
 
     init() {
         let env = ProcessInfo.processInfo.environment
@@ -62,6 +63,8 @@ struct SteveMacApp: App {
         )
         coord.pairConfirmationVisibilityProbe = { MacPairConfirmation.isAlertOnScreen() }
         _coordinator = StateObject(wrappedValue: coord)
+        let attentionController = MacAttentionController(coordinator: coord, defaults: defaults)
+        _attention = StateObject(wrappedValue: attentionController)
         #if DEBUG
         if let portStr = env["STEVE_CLIENT_DEBUG_PORT"],
            let port = UInt16(portStr),
@@ -72,7 +75,8 @@ struct SteveMacApp: App {
                 port: port,
                 expectedToken: token,
                 snapshotDir: env["STEVE_CLIENT_DEBUG_DIR"],
-                coordinator: coord
+                coordinator: coord,
+                attention: attentionController
             )
         }
         #endif
@@ -80,10 +84,10 @@ struct SteveMacApp: App {
 
     var body: some Scene {
         Window("Steve", id: "main") {
-            MacMainWindowView(coordinator: coordinator)
+            MacMainWindowView(coordinator: coordinator, attention: attention)
                 .onAppear {
                     coordinator.startIfNeeded()
-                    appDelegate.coordinator = coordinator
+                    appDelegate.coordinator = coordinator; appDelegate.attention = attention
                 }
                 .background(MacMainWindowIdentifier())
         }
@@ -93,17 +97,17 @@ struct SteveMacApp: App {
             MacNavigationCommands(coordinator: coordinator)
         }
 
-        Settings { MacClientSettingsView() }
+        Settings { MacClientSettingsView(attention: attention) }
 
         MenuBarExtra {
-            MacMenuBarPopoverView(coordinator: coordinator)
+            MacMenuBarPopoverView(coordinator: coordinator, attention: attention)
         } label: {
-            MacMenuBarIconLabel(summary: coordinator.summary)
+            MacMenuBarIconLabel(summary: coordinator.summary, attention: attention)
                 .task {
                     coordinator.startIfNeeded()
                 }
                 .modifier(MacMainWindowLifecycle(coordinator: coordinator))
-                .onAppear { appDelegate.coordinator = coordinator }
+                .onAppear { appDelegate.coordinator = coordinator; appDelegate.attention = attention }
         }
         .menuBarExtraStyle(.window)
     }
@@ -182,10 +186,11 @@ private struct HubCommands: Commands {
 
 private struct MacMenuBarIconLabel: View {
     let summary: HubRuntimeSummary
+    @ObservedObject var attention: MacAttentionController
 
     var body: some View {
         HStack(spacing: 4) {
-            Image(systemName: symbolName)
+            Image(systemName: attention.state.hasAttention ? "bell.badge" : symbolName)
         }
         .help(tooltipText)
     }
@@ -242,7 +247,8 @@ private enum MacDebugHarness {
         port: UInt16,
         expectedToken: String,
         snapshotDir: String?,
-        coordinator: SteveClientCoordinator
+        coordinator: SteveClientCoordinator,
+        attention: MacAttentionController
     ) {
         guard let nwPort = NWEndpoint.Port(rawValue: port),
               expectedToken.utf8.count >= 16 else { return }
@@ -275,7 +281,7 @@ private enum MacDebugHarness {
                 let bodyData = Data(raw[split.upperBound...].utf8)
                 let req = (try? JSONSerialization.jsonObject(with: bodyData) as? [String: Any]) ?? [:]
                 Task { @MainActor in
-                    let resp = await handle(req, snapshotDir: snapshotDir, coordinator: coordinator)
+                    let resp = await handle(req, snapshotDir: snapshotDir, coordinator: coordinator, attention: attention)
                     let payload = (try? JSONSerialization.data(withJSONObject: resp)) ?? Data("{}".utf8)
                     let head = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: \(payload.count)\r\nConnection: close\r\n\r\n"
                     conn.send(content: Data(head.utf8) + payload, completion: .contentProcessed { _ in conn.cancel() })
@@ -330,7 +336,8 @@ private enum MacDebugHarness {
     private static func handle(
         _ req: [String: Any],
         snapshotDir: String?,
-        coordinator: SteveClientCoordinator
+        coordinator: SteveClientCoordinator,
+        attention: MacAttentionController
     ) async -> [String: Any] {
         let cmd = req["cmd"] as? String ?? "status"
         switch cmd {
@@ -357,6 +364,20 @@ private enum MacDebugHarness {
                 "mainWindowCount": MacPairConfirmation.mainWindows.count,
                 "pairError": coordinator.externalPairErrorMessage as Any,
                 "windows": winIDs,
+                "attentionScope": attention.state.scope.map { ["hubID": $0.hubProfileID, "userID": $0.userID, "workspaceID": $0.workspaceID] } as Any,
+                "attentionCategories": Dictionary(uniqueKeysWithValues: AttentionKind.allCases.map { kind in
+                    (kind.rawValue, ["phase": attention.state.categories[kind]?.phase.rawValue ?? "unknown",
+                                    "count": attention.state.categories[kind]?.lastSuccess?.count as Any,
+                                    "unit": kind.unit.rawValue] as [String: Any])
+                }),
+                "attentionDedup": attention.state.dedupStatus.rawValue,
+                "attentionError": attention.error as Any,
+                "shellContext": coordinator.shellContext.map { context in
+                    ["hubID": context.hubID, "workspaceID": context.workspaceID as Any,
+                     "workspaceName": context.workspaceName as Any, "route": context.route,
+                     "title": context.title, "ready": context.ready, "authenticated": context.authenticated,
+                     "focused": context.focused, "visible": context.visible] as [String: Any]
+                } as Any,
             ]
         case "eval":
             guard let wv = SteveWebView.BridgeCoordinator.debugLastAttachedWebView,
@@ -376,6 +397,21 @@ private enum MacDebugHarness {
                 return ["ok": false, "error": "invalid or unauthorized snapshot path"]
             }
             let target = (req["target"] as? String) ?? "webview"
+            if target == "window" {
+                guard let window = MacMainWindow.windows.first(where: { $0.isVisible }),
+                      let content = window.contentView,
+                      let root = content.superview ?? window.contentView,
+                      let bitmap = root.bitmapImageRepForCachingDisplay(in: root.bounds) else {
+                    return ["ok": false, "error": "no visible main window"]
+                }
+                root.cacheDisplay(in: root.bounds, to: bitmap)
+                guard let png = bitmap.representation(using: .png, properties: [:]) else {
+                    return ["ok": false, "error": "png failed"]
+                }
+                do { try png.write(to: outURL) }
+                catch { return ["ok": false, "error": "snapshot write failed"] }
+                return ["ok": true, "windowNumber": window.windowNumber]
+            }
             if target == "alert" {
                 let candidateWindows = NSApplication.shared.windows.flatMap { [$0] + $0.sheets }
                 guard let sheetWin = candidateWindows.first(where: {
@@ -393,7 +429,7 @@ private enum MacDebugHarness {
             }
             if target == "menubar" {
                 let host = NSHostingView(
-                    rootView: MacMenuBarPopoverView(coordinator: coordinator)
+                    rootView: MacMenuBarPopoverView(coordinator: coordinator, attention: attention)
                         .background(Color(nsColor: .windowBackgroundColor))
                 )
                 let size = host.fittingSize
@@ -587,6 +623,25 @@ private enum MacDebugHarness {
             }
             delegate.application?(NSApplication.shared, open: [url])
             return ["ok": true]
+        case "setAppearance":
+            guard let dark = req["dark"] as? Bool else { return ["ok": false, "error": "missing appearance"] }
+            NSApplication.shared.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
+            return ["ok": true]
+        case "resizeMainWindow":
+            guard let width = req["width"] as? Double, let height = req["height"] as? Double,
+                  (640...2400).contains(width), (480...1800).contains(height),
+                  let window = MacMainWindow.windows.first else { return ["ok": false, "error": "invalid window size"] }
+            window.setContentSize(NSSize(width: width, height: height))
+            return ["ok": true]
+        case "restoreMainWindow":
+            MacMainWindow.bringUpMainWindow()
+            return ["ok": true]
+        case "miniaturizeMainWindow":
+            MacMainWindow.windows.first?.miniaturize(nil)
+            return ["ok": true]
+        case "attentionRefresh":
+            attention.monitor.refresh()
+            return ["ok": true]
         case "closeMainWindows":
             let mains = MacPairConfirmation.mainWindows
             mains.forEach { $0.close() }
@@ -597,10 +652,9 @@ private enum MacDebugHarness {
             }
             return ["ok": true]
         case "navigate":
-            if let route = req["route"] as? String {
-                coordinator.navigate(hashRoute: route)
-            }
-            return ["ok": true]
+            guard let route = req["route"] as? String else { return ["ok": false, "error": "missing route"] }
+            return ["ok": coordinator.navigate(route: route, workspaceID: req["workspaceID"] as? String,
+                                               targetID: req["targetID"] as? String)]
         case "switchHub":
             if let id = req["id"] as? String {
                 coordinator.switchToHub(id: id)

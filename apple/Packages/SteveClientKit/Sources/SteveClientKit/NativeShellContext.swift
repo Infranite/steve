@@ -93,6 +93,7 @@ extension SteveClientCoordinator {
         shellState.hubSwitchTimeout?.cancel()
         shellState.hubSwitchTimeout = nil
         shellState.hubSwitch = nil
+        shellHubSwitchTarget = nil
     }
 
     func requestHubSwitchApproval(id: String) {
@@ -102,6 +103,7 @@ extension SteveClientCoordinator {
         cancelHubSwitchApproval()
         let request = NativeHubSwitchRequest(hubID: id)
         shellState.hubSwitch = request
+        shellHubSwitchTarget = id
         shellState.hubSwitchTimeout = Task { @MainActor [weak self] in
             do { try await Task.sleep(for: .seconds(30)) } catch { return }
             self?.expireHubSwitchApproval(id: request.id)
@@ -118,6 +120,7 @@ extension SteveClientCoordinator {
         cancelHubSwitchApproval()
         shellState.generation &+= 1
         if !keepDocument { shellState.documentID = nil }
+        shellAttentionVisibility = nil
         shellContext = nil
         shellState.issuedID = nil
         shellState.issuedWorkspaceID = nil
@@ -177,11 +180,17 @@ extension SteveClientCoordinator {
             if shellContext?.authenticated == true && !authenticated {
                 invalidateShellScope(clearNavigation: true, keepDocument: true)
             }
+            if shellContext?.route != route || shellContext?.workspaceID != workspace || !ready || !authenticated {
+                shellAttentionVisibility = nil
+            }
             shellContext = NativeShellContext(hubID: hubID, generation: shellState.generation, documentID: documentID,
                 workspaceID: workspace, workspaceName: workspace == nil ? nil : (args["workspaceName"] as? String).map(Self.shellText),
                 route: route, title: Self.shellText(title), ready: ready, authenticated: authenticated,
                 focused: focused, visible: visible)
             targetHashRoute = nil // This page uses acknowledged navigation, never also inject a hash.
+            return [String: Any]()
+        case "shell.attention.visible":
+            try acceptAttentionVisibility(args, hubID: hubID, documentID: documentID)
             return [String: Any]()
         case "shell.navigation.next":
             guard let context = shellContext, context.ready,
@@ -198,7 +207,8 @@ extension SteveClientCoordinator {
                 throw BridgeCallError.invalidArgument("Unknown or stale navigation acknowledgement")
             }
             if ok {
-                guard context.ready, context.authenticated || intent.route == "#/hub/add", intent.targetID == nil,
+                guard context.ready, context.authenticated || intent.route == "#/hub/add",
+                      intent.targetID == nil || hasLandedDeepTarget(intent, context: context),
                       context.route == NativeShellRoute.destination(intent.route),
                       context.workspaceID == (intent.workspaceID ?? shellState.issuedWorkspaceID) else {
                     throw BridgeCallError.invalidArgument("Navigation has not reached its target")
@@ -249,7 +259,7 @@ extension SteveClientCoordinator {
     private static func nullableShellString(_ value: Any?) -> Bool {
         value is NSNull || (value as? String).map { $0.count <= 512 } == true
     }
-    private static func shellBoolean(_ value: Any?) -> Bool? {
+    static func shellBoolean(_ value: Any?) -> Bool? {
         guard let value = value as? NSNumber, CFGetTypeID(value) == CFBooleanGetTypeID() else { return nil }
         return value.boolValue
     }

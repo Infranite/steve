@@ -83,6 +83,67 @@ test("unsupported target, unknown workspace and wrong Hub produce honest failure
     } finally { f.session.stop() }
   }
 })
+test("pending next never overlaps; logout and dispose cancel a late result without ack or route", async () => {
+  for (const cancel of ["logout", "dispose", "workspace"]) {
+    let resolve, nextCalls = 0
+    const f = fixture(null, { call: async (op) => { if (op === "shell.navigation.next") { nextCalls++; return new Promise((r) => { resolve = r }) } return {} } })
+    try {
+      const pending = f.session.poll()
+      while (!resolve) await new Promise((r) => setImmediate(r))
+      await f.session.poll()
+      assert.equal(nextCalls, 1)
+      if (cancel === "logout") f.update({ authenticated: false, ready: false, workspaceID: null })
+      if (cancel === "dispose") f.session.stop()
+      if (cancel === "workspace") f.update({ workspaceID: "second" })
+      resolve(navigation())
+      await pending
+      assert.deepEqual(f.navigated, [])
+      assert.equal(f.calls.some(([op]) => op === "shell.navigation.ack"), false)
+    } finally { f.session.stop() }
+  }
+})
+
+test("deep targets wait for actual scoped landing before acknowledging", async () => {
+  for (const route of ["#/", "#/inbox", "#/feed?entry=entity-1", "#/c/chan%3Aentity-1"]) {
+    let finish, started = false
+    const f = fixture(navigation({ route, targetID: "entity-1" }), {}, {
+      landTarget: async (actualRoute, id, workspace, signal, active) => {
+        assert.equal(actualRoute, route); assert.equal(id, "entity-1"); assert.equal(workspace, "first")
+        assert.equal(signal.aborted, false); assert.equal(active(), true); started = true
+        await new Promise(resolve => { finish = resolve })
+      },
+    })
+    try {
+      const pending = f.session.poll()
+      while (!started) await new Promise(resolve => setImmediate(resolve))
+      assert.equal(f.calls.some(([op]) => op === "shell.navigation.ack"), false)
+      finish(); await pending
+      assert.deepEqual(f.calls.at(-1), ["shell.navigation.ack", { id: "intent-1", ok: true }])
+    } finally { f.session.stop() }
+  }
+})
+test("invalid route-target pairs are rejected before navigation", async () => {
+  for (const route of ["#/items", "#/feed", "#/feed?entry=other", "#/c/chan%3Aother"]) {
+    const f = fixture(navigation({ route, targetID: "entity-1" }), {}, { landTarget: async () => { throw new Error("must not run") } })
+    try { await f.session.poll(); assert.deepEqual(f.navigated, []); assert.equal(f.calls.at(-1)[1].ok, false) }
+    finally { f.session.stop() }
+  }
+})
+test("scope changes during entity landing abort and never acknowledge success", async () => {
+  let finish, signal, active
+  const f = fixture(navigation({ route: "#/", targetID: "reply-1" }), {}, {
+    landTarget: async (_route, _id, _workspace, s, a) => { signal = s; active = a; await new Promise(resolve => { finish = resolve }) },
+  })
+  try {
+    const pending = f.session.poll()
+    while (!finish) await new Promise(resolve => setImmediate(resolve))
+    f.update({ workspaceID: "second" })
+    assert.equal(signal.aborted, true); assert.equal(active(), false)
+    finish(); await pending
+    assert.equal(f.calls.some(([op, args]) => op === "shell.navigation.ack" && args.ok), false)
+  } finally { f.session.stop() }
+})
+
 test("edit/in-flight guard rejects cross-workspace intent before any selection or navigation", async () => {
   const f = fixture(navigation({ workspaceID: "second" }), {}, { allowed: () => false })
   try {
@@ -136,23 +197,4 @@ test("stale Hub switch response does not ask the guard or approve for a replacem
     assert.deepEqual(guards, [])
     assert.equal(calls.some(([op]) => op === "shell.hub-switch.ack"), false)
   } finally { f.session.stop() }
-})
-test("pending next never overlaps; logout and dispose cancel a late result without ack or route", async () => {
-  for (const cancel of ["logout", "dispose", "workspace"]) {
-    let resolve, nextCalls = 0
-    const f = fixture(null, { call: async (op) => { if (op === "shell.navigation.next") { nextCalls++; return new Promise((r) => { resolve = r }) } return {} } })
-    try {
-      const pending = f.session.poll()
-      while (!resolve) await new Promise((r) => setImmediate(r))
-      await f.session.poll()
-      assert.equal(nextCalls, 1)
-      if (cancel === "logout") f.update({ authenticated: false, ready: false, workspaceID: null })
-      if (cancel === "dispose") f.session.stop()
-      if (cancel === "workspace") f.update({ workspaceID: "second" })
-      resolve(navigation())
-      await pending
-      assert.deepEqual(f.navigated, [])
-      assert.equal(f.calls.some(([op]) => op === "shell.navigation.ack"), false)
-    } finally { f.session.stop() }
-  }
 })

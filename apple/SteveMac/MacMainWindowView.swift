@@ -3,11 +3,13 @@ import SwiftUI
 
 struct MacMainWindowView: View {
     @ObservedObject var coordinator: SteveClientCoordinator
+    @ObservedObject var attention: MacAttentionController
     @State private var showAttention = false
     @State private var showConnection = false
 
-    init(coordinator: SteveClientCoordinator) {
+    init(coordinator: SteveClientCoordinator, attention: MacAttentionController) {
         self.coordinator = coordinator
+        self.attention = attention
     }
 
     var body: some View {
@@ -51,11 +53,11 @@ struct MacMainWindowView: View {
             }
             ToolbarItemGroup(placement: .primaryAction) {
                 Button { showAttention.toggle() } label: {
-                    Label(L10n.tr("提醒", "Attention"), systemImage: "bell")
+                    Label(L10n.tr("提醒", "Attention"), systemImage: attention.state.hasAttention ? "bell.badge" : "bell")
                 }
-                .help(L10n.tr("提醒来源与入口（提醒尚不可用）", "Attention sources (reminders not yet available)"))
+                .help(L10n.tr("分类提醒与入口", "Category attention and source pages"))
                 .popover(isPresented: $showAttention) {
-                    MacAttentionView(coordinator: coordinator) { route in
+                    MacAttentionView(coordinator: coordinator, attention: attention) { route in
                         showAttention = false
                         coordinator.navigate(hashRoute: route)
                     }.padding(16).frame(width: 330)

@@ -63,6 +63,7 @@ struct MacHubMenu: View {
                 Image(systemName: "server.rack")
             }
         }
+        .labelStyle(.titleAndIcon)
         .help(L10n.tr("切换或管理 Hub", "Switch or manage Hubs"))
         .accessibilityIdentifier("shell.hub")
     }
@@ -143,15 +144,16 @@ struct MacConnectionDetails: View {
     }
 }
 
-/// No personal reminder contract is available in this foundation release. A missing source is
-/// not a known zero: there are no unread badges, aggregate totals, or synthetic recent entries.
+/// Separate category units, never an aggregate count. Missing/stale sources are not a known zero.
 struct MacAttentionView: View {
     @ObservedObject var coordinator: SteveClientCoordinator
+    @ObservedObject var attention: MacAttentionController
     let navigate: (String) -> Void
 
     private enum Category: String, CaseIterable, Identifiable {
         case replies, pending, completions, channels
         var id: String { rawValue }
+        var kind: AttentionKind { self == .completions ? .feed : AttentionKind(rawValue: rawValue)! }
         var title: String {
             switch self {
             case .replies: return L10n.tr("Steve 回复", "Steve replies")
@@ -181,14 +183,12 @@ struct MacAttentionView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text(L10n.tr("提醒", "Attention")).font(.headline)
-            Text(MacShellContext.workspace(coordinator))
+            Text(attention.workspaceName ?? MacShellContext.workspace(coordinator))
                 .font(.callout).foregroundStyle(.secondary)
                 .accessibilityIdentifier("shell.attention.workspace")
-            Text(L10n.tr(
-                "个人提醒尚未接入。下方入口可查看原始内容；不可用不代表没有新消息。",
-                "Personal reminders are not connected yet. Open the source pages below; unavailable does not mean there are no new messages."
-            ))
-            .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            Text(L10n.tr("回复按消息、待处理按卡片、交付按条目、渠道按会话计数，不合并相加。", "Replies count messages, pending counts cards, deliveries count entries, and channels count conversations. Counts are not added together."))
+                .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            if let error = attention.error { Text(error).font(.caption).foregroundStyle(.orange) }
             ForEach(Category.allCases) { category in
                 Button { navigate(category.route) } label: {
                     HStack(spacing: 10) {
@@ -196,7 +196,7 @@ struct MacAttentionView: View {
                             .foregroundStyle(.secondary)
                         VStack(alignment: .leading, spacing: 3) {
                             Text(category.title).foregroundStyle(.primary)
-                            Text(L10n.tr("提醒不可用 · 打开页面", "Reminders unavailable · Open page"))
+                            Text(status(category.kind))
                                 .font(.caption).foregroundStyle(.secondary)
                         }
                         Spacer(minLength: 4)
@@ -207,33 +207,58 @@ struct MacAttentionView: View {
                 }
                 .buttonStyle(.plain)
                 .accessibilityIdentifier("shell.attention.\(category.rawValue)")
+                if let scope = attention.state.scope,
+                   let entry = attention.state.categories[category.kind]?.lastSuccess?.entries.max(by: { $0.created < $1.created }) {
+                    Button(L10n.tr("打开最新条目", "Open latest entry")) { attention.open(scope: scope, target: entry.target) }
+                        .font(.caption)
+                }
             }
+            if let updated = attention.state.updatedAt {
+                Text(updated, style: .time).font(.caption2).foregroundStyle(.secondary)
+            }
+            Button(L10n.tr("重新检查", "Check again")) { attention.retry() }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func status(_ kind: AttentionKind) -> String {
+        guard let category = attention.state.categories[kind] else { return L10n.tr("尚未确认 · 需要登录和工作区", "Not confirmed · Sign in and select a workspace") }
+        let count = category.lastSuccess.map { value -> String in
+            let n = value.count
+            switch kind {
+            case .replies: return L10n.tr("\(n) 条消息", "\(n) \(n == 1 ? "message" : "messages")")
+            case .pending: return L10n.tr("\(n) 张卡片", "\(n) \(n == 1 ? "card" : "cards")")
+            case .feed: return L10n.tr("\(n) 条交付", "\(n) \(n == 1 ? "entry" : "entries")")
+            case .channels: return L10n.tr("\(n) 个会话", "\(n) \(n == 1 ? "conversation" : "conversations")")
+            }
+        }
+        switch category.phase {
+        case .known: return count ?? L10n.tr("未知", "Unknown")
+        case .loading: return L10n.tr("正在检查…", "Checking…")
+        case .stale: return L10n.tr("连接中断 · 上次：", "Connection unavailable · Last: ") + (count ?? L10n.tr("未知", "Unknown"))
+        case .unsupported: return L10n.tr("此 Hub 不支持", "Unsupported by this Hub")
+        case .authRequired: return L10n.tr("需要重新登录", "Sign-in required")
+        }
     }
 }
 
 struct MacClientSettingsView: View {
+    @ObservedObject var attention: MacAttentionController
     var body: some View {
-        Form {
-            Section(L10n.tr("提醒与隐私", "Reminders & Privacy")) {
-                Text(L10n.tr("此版本尚不发送系统通知，也不请求通知权限。", "This version does not send system notifications or request notification permission."))
-                Text(L10n.tr(
-                    "Steve 回复、待处理、完成与交付和渠道消息需接入个人提醒服务后才会显示准确状态。当前可从提醒面板打开对应页面。",
-                    "Steve replies, pending actions, completions and channel messages need a personal reminder service before accurate status can be shown. The attention panel currently opens their source pages."
-                ))
-                .foregroundStyle(.secondary)
+        VStack(alignment: .leading, spacing: 8) {
+            if let error = attention.error { Text(error).foregroundStyle(.orange).padding(.horizontal) }
+            if attention.state.scope == nil {
+                Text(L10n.tr("请先连接 Hub 并确认账号和工作区。", "Connect a Hub and confirm your account and workspace first.")).padding()
             }
-            Section(L10n.tr("窗口与菜单栏", "Window & Menu Bar")) {
-                Text(L10n.tr("关闭窗口（⌘W）会保留菜单栏客户端；点按 Dock 图标或“打开 Steve”可恢复窗口。", "Close the window (⌘W) to keep the menu bar client running. Click the Dock icon or Open Steve to restore it."))
-                Text(L10n.tr("退出 Steve（⌘Q）只退出此客户端，不会停止 Hub。当前版本的后台连接检查不等于后台消息提醒。", "Quit Steve (⌘Q) exits only this client, not the Hub. Background connection checks in this version are not background message reminders."))
-                    .foregroundStyle(.secondary)
-            }
+            MacAttentionSettingsView(delivery: attention.delivery,
+                preferences: Binding(get: { attention.preferences }, set: { attention.setPreferences($0) }),
+                dedupStatus: attention.state.dedupStatus,
+                channels: attention.state.categories[.channels]?.lastSuccess?.entries.map(\.target.entityID) ?? [])
+                .disabled(attention.state.scope == nil)
+            Text(L10n.tr("关闭窗口后继续提醒；⌘Q 只退出客户端，不停止 Hub。", "Reminders continue with the window closed. ⌘Q quits only the client, not the Hub."))
+                .font(.caption).foregroundStyle(.secondary).padding()
         }
-        .formStyle(.grouped)
-        .padding(8)
-        .frame(width: 480)
-        .fixedSize(horizontal: false, vertical: true)
+        .frame(width: 540, height: 660)
     }
 }
 

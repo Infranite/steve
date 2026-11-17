@@ -46,6 +46,7 @@ enum MacMainWindow {
 
 @MainActor
 final class MacApplicationDelegate: NSObject, NSApplicationDelegate {
+    weak var attention: MacAttentionController?
     weak var coordinator: SteveClientCoordinator? {
         didSet {
             guard coordinator != nil, !pendingURLs.isEmpty else { return }
@@ -79,6 +80,7 @@ final class MacApplicationDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         // Stops only the client's polling/proxy; this never stops a local or remote Hub.
+        attention?.stop()
         coordinator?.stop()
     }
 }

@@ -17,6 +17,9 @@
 		A10000080000000000000001 /* SteveClientKit in Frameworks */ = {isa = PBXBuildFile; productRef = A10000520000000000000001 /* SteveClientKit */; };
 		A10000090000000000000001 /* MacShellViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10001090000000000000001 /* MacShellViews.swift */; };
 		A100000A0000000000000001 /* MacWindowLifecycle.swift in Sources */ = {isa = PBXBuildFile; fileRef = A100010A0000000000000001 /* MacWindowLifecycle.swift */; };
+		A100000B0000000000000001 /* MacAttentionController.swift in Sources */ = {isa = PBXBuildFile; fileRef = A100010B0000000000000001 /* MacAttentionController.swift */; };
+		A100000C0000000000000001 /* MacAttentionDelivery.swift in Sources */ = {isa = PBXBuildFile; fileRef = A100010C0000000000000001 /* MacAttentionDelivery.swift */; };
+		A100000D0000000000000001 /* MacAttentionSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A100010D0000000000000001 /* MacAttentionSettingsView.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -32,6 +35,9 @@
 		A100001A0000000000000001 /* SteveIOS.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = SteveIOS.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		A10001090000000000000001 /* MacShellViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MacShellViews.swift; sourceTree = "<group>"; };
 		A100010A0000000000000001 /* MacWindowLifecycle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MacWindowLifecycle.swift; sourceTree = "<group>"; };
+		A100010B0000000000000001 /* MacAttentionController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MacAttentionController.swift; sourceTree = "<group>"; };
+		A100010C0000000000000001 /* MacAttentionDelivery.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MacAttentionDelivery.swift; sourceTree = "<group>"; };
+		A100010D0000000000000001 /* MacAttentionSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MacAttentionSettingsView.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -71,6 +77,9 @@
 				A10000130000000000000001 /* MacMenuBarPopoverView.swift */,
 				A100010A0000000000000001 /* MacWindowLifecycle.swift */,
 				A10001090000000000000001 /* MacShellViews.swift */,
+				A100010D0000000000000001 /* MacAttentionSettingsView.swift */,
+				A100010C0000000000000001 /* MacAttentionDelivery.swift */,
+				A100010B0000000000000001 /* MacAttentionController.swift */,
 				A10000140000000000000001 /* Info.plist */,
 			);
 			path = SteveMac;
@@ -225,6 +234,9 @@
 				A10000030000000000000001 /* MacMenuBarPopoverView.swift in Sources */,
 				A100000A0000000000000001 /* MacWindowLifecycle.swift in Sources */,
 				A10000090000000000000001 /* MacShellViews.swift in Sources */,
+				A100000D0000000000000001 /* MacAttentionSettingsView.swift in Sources */,
+				A100000C0000000000000001 /* MacAttentionDelivery.swift in Sources */,
+				A100000B0000000000000001 /* MacAttentionController.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
