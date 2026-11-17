@@ -138,7 +138,7 @@ export function NodesGrid({ action = true }: { action?: boolean }) {
           <h2 className="type-headline text-foreground">{t("devices:nodes.title", { n: live.length })}</h2>
           <p className="type-footnote text-pretty text-muted-foreground">{t("devices:nodes.sub")}</p>
         </div>
-        {action && <Button size="sm" variant="outline" onClick={() => openSheet("pair")} data-pair><PlusIcon />{t("devices:nodes.add")}</Button>}
+        {action && <Button size="sm" variant="outline" onClick={() => openSheet("addDevice", { kind: "node" })} data-pair><PlusIcon />{t("devices:nodes.add")}</Button>}
       </header>
       {nodesError && <p role="alert" className="rounded-lg bg-destructive/10 px-3 py-2 type-callout text-destructive" data-node-error>{t("devices:nodes.unavailable")} · {nodesError}</p>}
       {!nodesRead && !nodesError && !live.length ? <Loading className="py-8" /> : <div className="grid gap-4 lg:grid-cols-2">{live.map((v) => <NodeCard key={v.id} v={v} />)}</div>}

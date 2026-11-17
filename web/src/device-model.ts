@@ -281,3 +281,24 @@ export function nodeAlerts(v: NodeView, hubVersion = "", now = Date.now()): Node
   if (card.kind === "outdated") out.push({ tone: "warn", kind: "outdated", text: t("devices:card.outdated", { v: card.from ?? "?", hub: card.to }) })
   return out.slice(0, 2)
 }
+
+/** a fingerprint is read in groups of this many hex digits, as `steve-node` prints it */
+export const FP_GROUP = 4
+/** the hex digits of a fingerprint as typed or pasted: case, spaces, dashes and the words around it fall away */
+export const fpDigits = (text: string) => text.toLowerCase().replace(/fingerprint|sha256:/g, "").replace(/[^0-9a-f]/g, "")
+/** a fingerprint in its groups of four */
+export const fpGroups = (fp: string) => fpDigits(fp).match(new RegExp(`.{1,${FP_GROUP}}`, "g")) ?? []
+/** How the groups typed so far compare with the fingerprint the Hub received: each group `match`, `wrong` (complete and
+ *  different) or `open`; `all` only when every group of the whole fingerprint matches. */
+export function fpCheck(typed: readonly string[], fp: string): { groups: ("match" | "wrong" | "open")[]; all: boolean; wrong: number } {
+  const want = fpGroups(fp)
+  const groups = want.map((g, i) => { const got = fpDigits(typed[i] ?? ""); return got.length < g.length ? "open" as const : got === g ? "match" as const : "wrong" as const })
+  return { groups, all: want.length > 0 && groups.every((g) => g === "match"), wrong: groups.filter((g) => g === "wrong").length }
+}
+/** what was pasted, spread over the groups from group `from` on (a whole fingerprint always from the first) */
+export function fpSpread(typed: readonly string[], text: string, from: number, groups: number): string[] {
+  const d = fpDigits(text), out = Array.from({ length: groups }, (_, i) => typed[i] ?? "")
+  const start = d.length >= groups * FP_GROUP ? 0 : from
+  for (let i = 0; i * FP_GROUP < d.length && start + i < groups; i++) out[start + i] = d.slice(i * FP_GROUP, (i + 1) * FP_GROUP)
+  return out
+}

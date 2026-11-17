@@ -10,7 +10,7 @@
 use anyhow::{Result, bail};
 use steve_node_cli::config::Home;
 use steve_node_cli::dial;
-use steve_node_wire::Identity;
+use steve_node_wire::{Identity, identity};
 
 fn usage() -> ! {
     eprintln!(
@@ -93,13 +93,15 @@ async fn main() -> Result<()> {
             let p = dial::pair(&home, url, &code()?, pin, &name).await?;
             let id = Identity::load(&home.identity())?;
             println!("paired as {} with hub {}", p.node_id, p.hub_id);
-            println!("fingerprint {}", id.fingerprint());
-            println!("confirm this fingerprint on the hub, then run: steve-node run");
+            println!("fingerprint {}", identity::grouped(&id.fingerprint()));
+            println!(
+                "confirm this fingerprint on the hub (Devices, Add device: paste it or type its eight groups), then run: steve-node run"
+            );
         }
         Some("run") => dial::run(&home).await?,
         Some("rotate") => {
             let fp = dial::rotate(&home).await?;
-            println!("new key in place; fingerprint {fp}");
+            println!("new key in place; fingerprint {}", identity::grouped(&fp));
             println!(
                 "restart the Node now (steve node restart): its running process still has the old key, which the hub no longer takes"
             );
@@ -113,9 +115,9 @@ async fn main() -> Result<()> {
                     p.name,
                     p.hub_id,
                     p.hub_url,
-                    id.fingerprint()
+                    identity::grouped(&id.fingerprint())
                 ),
-                Err(e) => println!("{e}\nfingerprint {}", id.fingerprint()),
+                Err(e) => println!("{e}\nfingerprint {}", identity::grouped(&id.fingerprint())),
             }
         }
         Some("adapters") => {

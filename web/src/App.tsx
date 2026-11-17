@@ -41,9 +41,7 @@ const HubOfflinePage = lazyView(() => import("@/devices-hub").then(m => ({ defau
 const SettingsView = lazyView(() => import("@/manage").then((m) => ({ default: m.SettingsView })))
 const TagDialog = lazyView(() => import("@/manage").then((m) => ({ default: m.TagDialog })))
 const DevicesRoute = lazyView(() => import("@/devices").then((m) => ({ default: m.DevicesRoute })))
-const PairDialog = lazyView(() => import("@/devices-add").then((m) => ({ default: m.PairDialog })))
 const AddDeviceDialog = lazyView(() => import("@/devices-add").then((m) => ({ default: m.AddDeviceDialog })))
-const PairDeviceDialog = lazyView(() => import("@/access-settings").then((m) => ({ default: m.PairDeviceDialog })))
 const ProjectsView = lazyView(() => import("@/projects").then((m) => ({ default: m.ProjectsView })))
 const ProjectView = lazyView(() => import("@/projects").then((m) => ({ default: m.ProjectView })))
 const NewProjectDialog = lazyView(() => import("@/projects").then((m) => ({ default: m.NewProjectDialog })))
@@ -188,7 +186,7 @@ export default function App({ deliveryId }: { deliveryId?: string }) {
   useEffect(() => {
     if (!intent || !up) return
     /* in a browser anyone's link can carry the route: the code is made on a click. In a shell it is the shell's menu */
-    if (intent === "pair") openSheet("pairClient", { ask: !nativeBridge() }); else openSheet("hubs", { add: true })
+    if (intent === "pair") openSheet("addDevice", { kind: "client", ask: !nativeBridge() }); else openSheet("hubs", { add: true })
     setIntent("")
   }, [intent, up])
   const pairing = usePairRequest()
@@ -260,9 +258,7 @@ export default function App({ deliveryId }: { deliveryId?: string }) {
         {sh?.kind === "link" && <LinkDialog k={sh.payload.k} />}
         {sh?.kind === "import" && <ImportDialog />}
         {sh?.kind === "deleteBot" && <DeleteBotDialog k={sh.payload.k} />}
-        {sh?.kind === "addDevice" && <AddDeviceDialog />}
-        {sh?.kind === "pair" && <PairDialog />}
-        {sh?.kind === "pairClient" && <PairDeviceDialog ask={sh.payload?.ask === true} />}
+        {sh?.kind === "addDevice" && <AddDeviceDialog key={JSON.stringify(sh.payload ?? {})} {...(sh.payload ?? {})} />}
         {sh?.kind === "hubs" && <HubsDialog add={sh.payload?.add} />}
         <HubsOfferDialog />
         {sh?.kind === "tag" && <TagDialog id={sh.payload?.id} item={sh.payload?.item} name={sh.payload?.name} />}

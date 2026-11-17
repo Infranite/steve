@@ -1,15 +1,14 @@
-/* Signing another device in to this Hub: the QR code of a pairing link, and the link itself (A4). Opened from Add
- * device, the Clients page, ⌘K and `#/hub/pair`. */
+/* Signing another device in to this Hub: the QR code of a pairing link, and the link itself (A4), shown by the Add
+ * device dialog (devices-add.tsx) when a client is added. */
 import { useT } from "@/i18n"
 import { useEffect, useMemo, useState } from "react"
 import { CheckCircle2Icon, RefreshCwIcon } from "lucide-react"
 import { Button } from "@/components/ui/button"
-import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { Spinner } from "@/components/ui/spinner"
 import { access, type ClientPairing, type PairingStatus } from "@/access-api"
 import { encodeQr, qrSvgPath } from "@/qr"
 import { toast } from "@/store"
-import { closeSheet, Pill } from "@/ui"
+import { Pill } from "@/ui"
 import { cn } from "cn"
 
 function QrSvg({ text, size = 216 }: { text: string; size?: number }) {
@@ -163,25 +162,5 @@ export function PairContent({ onClaimed, ask = false }: { onClaimed?: () => void
         )}
       </div>
     </div>
-  )
-}
-
-/** the pairing in a dialog: `openSheet("pairClient")`, from Add device, the Clients page, ⌘K and `#/hub/pair`
- * (`ask`: opened by an address, so the code is made on a click) */
-export function PairDeviceDialog({ ask }: { ask?: boolean }) {
-  const t = useT()
-  return (
-    <Dialog open onOpenChange={(o) => !o && closeSheet()}>
-      <DialogContent className="sm:max-w-md" data-pair-device-dialog>
-        <DialogHeader>
-          <DialogTitle>{t("pages:access.pairTitle")}</DialogTitle>
-          <DialogDescription>{t("pages:access.pairSub")}</DialogDescription>
-        </DialogHeader>
-        <PairContent ask={ask} />
-        <DialogFooter>
-          <Button variant="outline" onClick={() => closeSheet()}>{t("pages:access.done")}</Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
   )
 }

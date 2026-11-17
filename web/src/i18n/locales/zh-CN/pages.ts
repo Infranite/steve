@@ -50,8 +50,6 @@ export default {
     oidcSave: "保存",
     oidcOff: "关闭单点登录",
     oidcSaved: "单点登录已生效",
-    pairTitle: "配对新设备",
-    pairSub: "让另一台设备登录当前账号：用它的相机或 Steve App 扫描二维码，或在它的浏览器里打开配对链接。二维码和链接 5 分钟内有效，只能用一次。",
     pairRefresh: "刷新二维码",
     pairShow: "显示配对二维码",
     pairCopyUri: "复制配对链接",

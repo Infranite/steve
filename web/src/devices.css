@@ -9,3 +9,119 @@
 .device-step-live { background-image: linear-gradient(90deg, transparent 0%, color-mix(in srgb, white 45%, transparent) 50%, transparent 100%); background-size: 200% 100%; animation: device-step 1.6s linear infinite; }
 @keyframes device-step { from { background-position: 100% 0; } to { background-position: -100% 0; } }
 @media (prefers-reduced-motion: reduce) { .device-step-live { animation: none; background-image: none; } }
+
+/* The connection map (devices-map.tsx): cards are HTML, the edges an SVG under them computed from the cards' boxes.
+ * Edges differ by line style as well as color (solid, dashed, dotted), so they read without color too. */
+[data-device-map] { --dmap-exec: color-mix(in srgb, var(--foreground) 34%, transparent); --dmap-access: color-mix(in srgb, var(--blue) 55%, transparent); }
+.dmap {
+  --dmap-bg: color-mix(in srgb, var(--muted) 55%, var(--card));
+  position: relative; border-radius: 12px; padding: 28px 24px; background-color: var(--dmap-bg);
+  background-image: radial-gradient(color-mix(in srgb, var(--foreground) 7%, transparent) 1px, transparent 1px); background-size: 16px 16px;
+}
+.dmap-edges { position: absolute; inset: 0; width: 100%; height: 100%; z-index: 0; pointer-events: none; overflow: visible; }
+.dmap-cols { position: relative; z-index: 1; display: grid; grid-template-columns: minmax(150px, 0.78fr) minmax(250px, 1.05fr) minmax(230px, 1.1fr); gap: 0 clamp(68px, 8%, 112px); align-items: center; }
+.dmap:not([data-clients]) .dmap-cols { grid-template-columns: minmax(230px, 1fr) minmax(230px, 1.2fr); }
+.dmap-col { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.dmap-col-label { display: flex; align-items: center; gap: 6px; margin: 0 2px 2px; font-size: 11.5px; font-weight: 500; color: var(--tertiary); }
+.dmap-col-label svg { width: 14px; height: 14px; }
+
+.dmap-card { position: relative; display: flex; flex-direction: column; gap: 4px; width: 100%; min-width: 0; padding: 10px 12px; border: 0; border-radius: 10px; text-align: left; cursor: pointer;
+  background: var(--card); box-shadow: var(--lift); transition: box-shadow 180ms var(--ease-out), opacity 180ms, background-color 180ms; animation: dmap-in 240ms var(--ease-out); }
+.dmap-card:hover, .dmap-card:focus-visible { outline: none; box-shadow: var(--lift-hover), 0 0 0 2px color-mix(in srgb, var(--ring) 35%, transparent); }
+.dmap-card.is-warn { box-shadow: var(--lift), inset 3px 0 0 var(--attention); }
+.dmap-card.is-bad { box-shadow: var(--lift), inset 3px 0 0 var(--destructive); }
+.dmap-card.is-info { box-shadow: var(--lift), inset 3px 0 0 var(--blue); }
+.dmap-card.is-warn:is(:hover, :focus-visible) { box-shadow: var(--lift-hover), inset 3px 0 0 var(--attention), 0 0 0 2px color-mix(in srgb, var(--ring) 35%, transparent); }
+.dmap-card.is-bad:is(:hover, :focus-visible) { box-shadow: var(--lift-hover), inset 3px 0 0 var(--destructive), 0 0 0 2px color-mix(in srgb, var(--ring) 35%, transparent); }
+.dmap-card.is-info:is(:hover, :focus-visible) { box-shadow: var(--lift-hover), inset 3px 0 0 var(--blue), 0 0 0 2px color-mix(in srgb, var(--ring) 35%, transparent); }
+.dmap-card.is-off { background: color-mix(in srgb, var(--card) 70%, transparent); }
+.dmap-card.is-off .dmap-name { color: var(--muted-foreground); }
+.dmap-card.is-compact { padding: 7px 10px; }
+.dmap-card.is-client { padding: 8px 10px; }
+.dmap-card.is-client .dmap-name { font-size: 13px; }
+.dmap-card.is-stale { opacity: 0.62; }
+.dmap-card.is-hub { gap: 8px; padding: 14px; box-shadow: var(--lift), 0 0 0 1px color-mix(in srgb, var(--blue) 30%, transparent); }
+.dmap-card.is-hub .dmap-name { font-size: 15px; font-weight: 600; }
+.dmap-card.is-ghost { align-items: flex-start; padding: 14px; background: transparent; box-shadow: none; border: 1.5px dashed color-mix(in srgb, var(--foreground) 20%, transparent); color: var(--muted-foreground); }
+.dmap-card.is-ghost:is(:hover, :focus-visible) { border-color: var(--ring); box-shadow: none; }
+.dmap-ghost-sub { font-size: 12px; line-height: 18px; color: var(--muted-foreground); text-wrap: pretty; }
+
+.dmap-l1 { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.dmap-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13.5px; font-weight: 500; line-height: 20px; color: var(--foreground); }
+.dmap-l2 { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 10px; min-width: 0; font-size: 12px; line-height: 18px; color: var(--muted-foreground); font-variant-numeric: tabular-nums; }
+.dmap-ico { display: flex; flex: none; width: 16px; height: 16px; color: var(--muted-foreground); }
+.dmap-ico svg { width: 16px; height: 16px; stroke-width: 1.75; }
+.dmap-dot { flex: none; width: 8px; height: 8px; border-radius: 999px; }
+.dmap-dot.is-ok { background: var(--success); }
+.dmap-dot.is-off { box-shadow: inset 0 0 0 1.5px var(--tertiary); }
+.dmap-sessions { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+.dmap-bar { display: inline-block; width: 32px; height: 4px; border-radius: 2px; overflow: hidden; background: color-mix(in srgb, var(--foreground) 10%, transparent); }
+.dmap-bar i { display: block; height: 100%; border-radius: 2px; background: var(--blue); transition: width 180ms var(--ease-out); }
+.dmap-bar i.is-full { background: var(--attention); }
+.dmap-version { display: inline-flex; align-items: center; height: 18px; padding: 0 6px; border-radius: 6px; font-size: 11.5px; color: var(--attention); background: color-mix(in srgb, var(--attention) 12%, transparent); font-variant-numeric: tabular-nums; }
+.dmap-aside { display: flex; flex: none; align-items: center; gap: 8px; margin-left: auto; font-size: 12px; color: var(--muted-foreground); }
+.dmap-state.is-warn { color: var(--attention); } .dmap-state.is-bad { color: var(--destructive); } .dmap-state.is-info { color: var(--blue); } .dmap-state.is-off { color: var(--tertiary); }
+.dmap-hub-mark { display: flex; flex: none; align-items: center; justify-content: center; width: 28px; height: 28px; border-radius: 8px; color: var(--blue); background: color-mix(in srgb, var(--blue) 10%, transparent); }
+.dmap-hub-mark svg { width: 16px; height: 16px; }
+.dmap-hub-facts { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; }
+.dmap-hub-facts > div { min-width: 0; padding: 6px 8px; border-radius: 8px; background: var(--muted); }
+.dmap-hub-facts span { display: block; font-size: 11px; line-height: 16px; color: var(--muted-foreground); }
+.dmap-hub-facts b { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12.5px; font-weight: 600; color: var(--foreground); font-variant-numeric: tabular-nums; }
+
+/* the Hub's computer: the Hub and its own Node in one dashed frame */
+.dmap-machine { position: relative; display: flex; flex-direction: column; gap: 22px; padding: 26px 12px 12px; border-radius: 14px; border: 1.5px dashed color-mix(in srgb, var(--foreground) 16%, transparent); }
+.dmap-machine-label { position: absolute; top: -10px; left: 12px; display: inline-flex; align-items: center; gap: 6px; height: 20px; max-width: calc(100% - 24px); padding: 0 6px; border-radius: 6px; font-size: 11.5px; color: var(--muted-foreground); background: var(--dmap-bg); white-space: nowrap; }
+.dmap-machine-label svg { flex: none; width: 14px; height: 14px; }
+.dmap-more { display: inline-flex; align-items: center; gap: 2px; align-self: flex-start; padding: 2px; font-size: 12px; color: var(--muted-foreground); }
+.dmap-more:hover, .dmap-more:focus-visible { color: var(--foreground); outline: none; text-decoration: underline; }
+.dmap-more svg { width: 14px; height: 14px; }
+
+/* route labels at the Node ends */
+.dmap-label { position: absolute; z-index: 2; display: inline-flex; align-items: center; height: 18px; padding: 0 6px; border-radius: 9px; transform: translate(-50%, -50%); pointer-events: none; white-space: nowrap;
+  font-size: 11px; color: var(--muted-foreground); background: var(--card); box-shadow: 0 0 0 1px var(--border); transition: opacity 180ms; }
+.dmap-label.is-unknown { color: var(--tertiary); }
+.dmap-label.is-warn, .dmap-label.is-pending { color: var(--attention); }
+.dmap-label.is-bad { color: var(--destructive); }
+.dmap-label.is-upgrading { color: var(--blue); }
+.dmap-label.is-off { color: var(--tertiary); }
+
+.dmap-edge { fill: none; stroke-linecap: round; transition: opacity 180ms, stroke 180ms, stroke-width 180ms; }
+.dmap-edge.is-exec, .dmap-edge.is-neutral { stroke: var(--dmap-exec); }
+.dmap-edge.is-ok { stroke: color-mix(in srgb, var(--success) 70%, transparent); }
+.dmap-edge.is-warn { stroke: var(--attention); }
+.dmap-edge.is-bad { stroke: var(--destructive); }
+.dmap-edge.is-off { stroke: color-mix(in srgb, var(--tertiary) 60%, transparent); stroke-dasharray: 2 5; }
+.dmap-edge.is-pending { stroke: var(--attention); stroke-dasharray: 1 5; }
+.dmap-edge.is-upgrading { stroke: var(--blue); stroke-dasharray: 6 5; animation: dmap-flow-11 1s linear infinite; }
+.dmap-edge.is-flow { stroke-dasharray: 10 6; animation: dmap-flow-16 1.4s linear infinite; }
+.dmap-edge.is-trunk { stroke: var(--dmap-exec); stroke-width: 2; }
+.dmap-edge.is-access { stroke: var(--dmap-access); stroke-dasharray: 4 4; stroke-width: 1.25; }
+.dmap-edge.is-access.is-me { stroke: var(--blue); stroke-width: 1.75; }
+.dmap-edge.is-access.is-stale { stroke: color-mix(in srgb, var(--tertiary) 45%, transparent); }
+.dmap-edge.is-dim, .dmap-label.is-dim { opacity: 0.18; }
+@keyframes dmap-flow-16 { to { stroke-dashoffset: -16; } }
+@keyframes dmap-flow-11 { to { stroke-dashoffset: -11; } }
+@keyframes dmap-in { from { opacity: 0; } }
+@media (prefers-reduced-motion: reduce) { .dmap-edge, .dmap-card { animation: none !important; } }
+
+/* a phone: a tree from top to bottom */
+.dmap[data-narrow] { padding: 16px 10px 14px; }
+.dmap[data-narrow] .dmap-cols { grid-template-columns: minmax(0, 1fr); gap: 26px 0; }
+.dmap[data-narrow] .dmap-clients { flex-direction: row; flex-wrap: wrap; gap: 6px; }
+.dmap[data-narrow] .dmap-clients .dmap-col-label { width: 100%; }
+.dmap[data-narrow] .dmap-clients .dmap-card { flex: 1 1 140px; width: auto; max-width: calc(50% - 3px); }
+.dmap[data-narrow] .dmap-clients .dmap-kind { display: none; }
+.dmap[data-narrow] .dmap-clients .dmap-more { width: 100%; }
+.dmap[data-narrow] .dmap-nodes { padding-left: 30px; }
+
+/* a client's row brought into view from the map: lit for a moment */
+[data-client-focus] { background: color-mix(in srgb, var(--blue) 8%, transparent); transition: background-color 600ms var(--ease-out); }
+
+/* the Add device stepper sits flush in its dialog: no card of its own, its text lined up with the dialog's title and
+ * its footer running to the dialog's edges */
+.ui-stpc.steve-add-stepper { margin: 0 -24px; width: auto; background: transparent; box-shadow: none; border-radius: 0; }
+.steve-add-stepper .ui-stpc__head { padding: 4px 24px 0; }
+.steve-add-stepper .ui-stpc__pane { padding: 18px 24px 20px; }
+.steve-add-stepper .ui-stpc__foot { padding: 0 16px; }
+/* a fingerprint group's characters keep the code face at every box size */
+[data-fp-input] .ui-otpc__box { font-family: var(--font-mono); font-size: 14px; }

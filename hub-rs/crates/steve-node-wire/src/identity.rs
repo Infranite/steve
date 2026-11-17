@@ -22,6 +22,17 @@ pub fn fingerprint(pubkey: &[u8; 32]) -> String {
     hex::encode(sha256(pubkey))[..32].to_string()
 }
 
+/// A fingerprint as people read it: groups of four hex digits, `9e3f 5a07 …`. The Hub's Add device dialog asks
+/// for it in the same groups; it compares the hex digits only, so the spaces are for reading.
+pub fn grouped(fp: &str) -> String {
+    let digits: Vec<char> = fp.chars().collect();
+    digits
+        .chunks(4)
+        .map(|c| c.iter().collect::<String>())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// The bytes a key rotation signs, with the old key and with the new one: this Hub, this Node,
 /// from this key to that one.
 pub fn rotate_message(hub_id: &str, node_id: &str, old: &[u8; 32], new: &[u8; 32]) -> Vec<u8> {
@@ -141,5 +152,15 @@ mod tests {
         assert!(!verify(&id.public(), b"other", &id.sign(&msg)));
         assert_eq!(id.fingerprint().len(), 32);
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn grouped_reads_in_fours() {
+        assert_eq!(
+            grouped("9e3f5a07c21b84d60f9a77e3b10c4d52"),
+            "9e3f 5a07 c21b 84d6 0f9a 77e3 b10c 4d52"
+        );
+        assert_eq!(grouped("abcdef"), "abcd ef");
+        assert_eq!(grouped(""), "");
     }
 }

@@ -4,7 +4,9 @@ import { SidebarProvider } from "../../src/components/ui/sidebar"
 import { DevicesRoute } from "../../src/devices"
 import { setPageWorkspace } from "../../src/api"
 import { st } from "../../src/store"
-import { useRoute } from "../../src/ui"
+import { getSheet, useRoute } from "../../src/ui"
+import { useStore } from "../../src/store"
+import { AddDeviceDialog } from "../../src/devices-add"
 
 setPageWorkspace("fixture-workspace")
 st.owner = true
@@ -18,4 +20,10 @@ function Routed() {
   const [, b, c] = useRoute()
   return <DevicesRoute key={`${b}/${c}`} b={b} c={c} />
 }
-createRoot(document.getElementById("root")!).render(<SidebarProvider><Routed /></SidebarProvider>)
+/* the Add device dialog, as the app opens it from a sheet */
+function Sheet() {
+  useStore()
+  const sh = getSheet()
+  return sh?.kind === "addDevice" ? <AddDeviceDialog key={JSON.stringify(sh.payload ?? {})} {...(sh.payload ?? {})} /> : null
+}
+createRoot(document.getElementById("root")!).render(<SidebarProvider><Routed /><Sheet /></SidebarProvider>)
