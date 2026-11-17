@@ -163,6 +163,10 @@ pub trait Discovery: Send + Sync {
     async fn vitals(&self) -> ApiResult<NodeVitals> {
         Err(ApiError::new(ErrorCode::Unsupported, "vitals"))
     }
+    /// What machine this is ([`HostInfo`]); a Node that cannot say answers `unsupported`.
+    async fn host(&self) -> ApiResult<HostInfo> {
+        Err(ApiError::new(ErrorCode::Unsupported, "host"))
+    }
 }
 
 /// All faces of one Node.

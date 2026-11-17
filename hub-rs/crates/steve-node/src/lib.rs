@@ -30,6 +30,7 @@ pub mod git;
 mod harness_context;
 mod harness_login;
 pub mod history;
+mod host;
 mod job;
 mod journal;
 mod procs;
@@ -4152,6 +4153,12 @@ impl Discovery for LocalNode {
             }
         }
         Ok(r)
+    }
+    async fn host(&self) -> ApiResult<HostInfo> {
+        // the computer name may take a short command, once
+        tokio::task::spawn_blocking(host::this_machine)
+            .await
+            .map_err(|e| ApiError::new(ErrorCode::Internal, e.to_string()))
     }
     async fn vitals(&self) -> ApiResult<NodeVitals> {
         let roots = self.0.roots();

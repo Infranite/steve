@@ -110,7 +110,7 @@ impl Tailcat {
         use axum::serve::ListenerExt as _;
         let listener = listener
             .tap_io(|tcp: &mut tokio::net::TcpStream| steve_node_wire::sock::low_water(tcp));
-        let app = super::node_router(svc);
+        let app = super::node_router_at(svc, super::link::Door::Tailcat);
         let serve = tokio::spawn(async move {
             let _ = axum::serve(
                 listener,

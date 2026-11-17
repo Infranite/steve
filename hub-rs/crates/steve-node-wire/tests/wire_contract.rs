@@ -340,3 +340,41 @@ async fn an_upgrade_is_staged_switched_and_asked_about_over_the_link() {
         "2.0.0"
     );
 }
+
+/// G2: what machine a Node is crosses the link as the Node says it (`node.host`); a Node of an
+/// earlier protocol is never sent the method.
+#[tokio::test]
+async fn host_crosses_the_link_and_an_older_node_is_not_asked() {
+    let fake = FakeNode::new("n1");
+    let w = wire(fake.clone(), 1);
+    let h = w.remote.host().await.unwrap();
+    assert_eq!(h, fake.host().await.unwrap());
+    assert_eq!(h.hostname.as_deref(), Some("Studio Mac"));
+    assert_eq!((h.os.as_str(), h.arch.as_str()), ("macos", "aarch64"));
+
+    let (hub, node) = steve_node_wire::testkit::pair();
+    let hub_conn = steve_node_wire::Conn::spawn(
+        hub.sink,
+        hub.stream,
+        1,
+        steve_node_wire::NodeServer::new(fake.clone()),
+        steve_node_wire::ConnOptions {
+            side: "h",
+            peer: (PROTOCOL.0, HOST_INFO.1 - 1),
+            ..Default::default()
+        },
+    );
+    let _node_conn = steve_node_wire::Conn::spawn(
+        node.sink,
+        node.stream,
+        1,
+        steve_node_wire::NodeServer::new(fake.clone()),
+        common::opts("n"),
+    );
+    let remote = steve_node_wire::RemoteNode::new(NodeId::new("n1").unwrap());
+    remote.attach(hub_conn, false);
+    assert_eq!(
+        remote.host().await.unwrap_err().code,
+        ErrorCode::Unsupported
+    );
+}

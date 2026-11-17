@@ -1146,3 +1146,177 @@ async fn an_outside_mcp_client_with_an_access_token_gets_the_scoped_tools() {
         401
     );
 }
+
+/// An open live stream of `cred`, read chunk by chunk.
+struct Live(reqwest::Response, String);
+
+impl Live {
+    async fn open(e: &Env, cred: &str) -> Live {
+        let r = e
+            .http
+            .get(format!("{}/api/stream", e.base))
+            .header("authorization", format!("Bearer {cred}"))
+            .send()
+            .await
+            .expect("stream");
+        assert_eq!(r.status().as_u16(), 200);
+        Live(r, String::new())
+    }
+
+    /// Reads until `want` was written (true), the stream ended (false), or `secs` passed (false).
+    async fn until(&mut self, want: &str, secs: u64) -> bool {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(secs);
+        while !self.1.contains(want) {
+            match tokio::time::timeout_at(deadline, self.0.chunk()).await {
+                Ok(Ok(Some(b))) => self.1.push_str(&String::from_utf8_lossy(&b)),
+                _ => return false,
+            }
+        }
+        true
+    }
+
+    /// Whether the stream ends within `secs`.
+    async fn ends(&mut self, secs: u64) -> bool {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(secs);
+        loop {
+            match tokio::time::timeout_at(deadline, self.0.chunk()).await {
+                Ok(Ok(Some(b))) => self.1.push_str(&String::from_utf8_lossy(&b)),
+                Ok(_) => return true,
+                Err(_) => return false,
+            }
+        }
+    }
+}
+
+async fn sign_in(e: &Env, user: &str, token: &str, name: &str) -> (String, String) {
+    let (s, ok) = e
+        .call(
+            "POST",
+            "/auth/token",
+            None,
+            Some(json!({"user": user, "token": token, "client": {"kind": "cli", "name": name}})),
+        )
+        .await;
+    assert_eq!(s, 200, "{ok}");
+    (
+        ok["client_id"].as_str().unwrap().to_string(),
+        ok["credential"].as_str().unwrap().to_string(),
+    )
+}
+
+fn client_of<'a>(v: &'a Value, id: &str) -> &'a Value {
+    v["clients"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["id"] == id)
+        .unwrap_or(&Value::Null)
+}
+
+/// G6, G8, G11: a client is online while it holds the live stream; its user's other streams (and only
+/// theirs) hear it come and go; signing it out, or the token it signed in with, ends its stream at once.
+#[tokio::test]
+async fn a_client_is_online_while_its_stream_is_open_and_signing_it_out_ends_it() {
+    let e = start().await;
+    let st = e.store();
+    let owner = st.access().owner().unwrap().expect("owner");
+    let (tok, token) = st.access().token_create(&owner.id, "laptop", None).unwrap();
+    let (watcher, watcher_cred) = sign_in(&e, &owner.name, &token, "Watcher").await;
+    let (laptop, laptop_cred) = sign_in(&e, &owner.name, &token, "Laptop").await;
+    // someone else on the Hub
+    let other = st
+        .users()
+        .create("local:m", "Member", None, "member")
+        .unwrap();
+    let (_, other_token) = st.access().token_create(&other, "m", None).unwrap();
+    let (_, member_cred) = sign_in(&e, "Member", &other_token, "Member's").await;
+
+    let (s, v) = e
+        .call("GET", "/api/access", Some(&watcher_cred), None)
+        .await;
+    assert_eq!(s, 200, "{v}");
+    let c = client_of(&v, &laptop);
+    assert_eq!(c["online"], false, "{c}");
+    assert_eq!(c["streams"], 0);
+    assert!(c["connected_since"].is_null());
+    assert_eq!(
+        c["token_id"],
+        json!(tok.id),
+        "G8: the token it signed in with"
+    );
+
+    let mut watching = Live::open(&e, &watcher_cred).await;
+    let mut member = Live::open(&e, &member_cred).await;
+    let mut on_laptop = Live::open(&e, &laptop_cred).await;
+    let said = format!(
+        "{{\"type\":\"client\",\"id\":\"{laptop}\",\"user\":\"{}\"}}",
+        owner.id
+    );
+    assert!(watching.until(&said, 5).await, "{}", watching.1);
+    let (_, v) = e
+        .call("GET", "/api/access", Some(&watcher_cred), None)
+        .await;
+    let c = client_of(&v, &laptop);
+    assert_eq!(
+        (c["online"].clone(), c["streams"].clone()),
+        (json!(true), json!(1))
+    );
+    let since = c["connected_since"].as_i64().expect("since");
+    let mut second = Live::open(&e, &laptop_cred).await;
+    let (_, v) = e
+        .call("GET", "/api/access", Some(&watcher_cred), None)
+        .await;
+    let c = client_of(&v, &laptop);
+    assert_eq!(c["streams"], 2);
+    assert_eq!(c["connected_since"], since, "since its first stream");
+    assert_eq!(client_of(&v, &watcher)["online"], true);
+    // one stream closes: still online
+    drop(second.0);
+    second.1.clear();
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    let (_, v) = e
+        .call("GET", "/api/access", Some(&watcher_cred), None)
+        .await;
+    assert_eq!(client_of(&v, &laptop)["streams"], 1);
+
+    // signed out from another client: its stream ends now, not at its next request
+    let (s, _) = e
+        .call(
+            "DELETE",
+            &format!("/api/access/clients/{laptop}"),
+            Some(&watcher_cred),
+            None,
+        )
+        .await;
+    assert_eq!(s, 200);
+    assert!(on_laptop.ends(5).await, "the signed-out stream ended");
+    let r = e
+        .http
+        .get(format!("{}/api/stream", e.base))
+        .header("authorization", format!("Bearer {laptop_cred}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 401, "and may not come back");
+    let (_, v) = e
+        .call("GET", "/api/access", Some(&watcher_cred), None)
+        .await;
+    let c = client_of(&v, &laptop);
+    assert_eq!(c["online"], false);
+    assert!(c["revoked"].as_i64().is_some());
+
+    // the member heard none of it
+    assert!(!member.until(&laptop, 1).await, "{}", member.1);
+
+    // revoking the token signs the watcher out too: its stream ends
+    let (s, _) = e
+        .call(
+            "DELETE",
+            &format!("/api/access/tokens/{}", tok.id),
+            Some(&watcher_cred),
+            None,
+        )
+        .await;
+    assert_eq!(s, 200);
+    assert!(watching.ends(5).await, "the token's clients' streams end");
+}

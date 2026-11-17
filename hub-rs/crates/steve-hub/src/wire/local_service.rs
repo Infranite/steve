@@ -139,7 +139,7 @@ pub(crate) fn host(
     }
     svc.fleet.adopt(&node_id, runtime.clone(), tools.clone());
     // the Node's own way in: loopback, the Node routes only
-    let app = crate::nodes::node_router(svc.clone());
+    let app = crate::nodes::node_router_at(svc.clone(), crate::nodes::link::Door::Colocated);
     let listen = async move {
         let l = match tokio::net::TcpListener::bind(("127.0.0.1", port)).await {
             Ok(l) => l,

@@ -412,6 +412,27 @@ pub async fn list(State(svc): State<Arc<NodeService>>, caller: Caller) -> Respon
             v["waiting"] = json!(room.waiting);
             // the limit in force: the Hub's own Node keeps it on the Hub's device row
             v["max_sessions"] = json!(room.max);
+            // how its latest link reached the Hub (G1): kept while it is away (`linked` says
+            // whether it is up); its latency only while it is
+            let rtt = svc.registry.rtt(&n.node_id).filter(|_| linked);
+            v["link"] = match n
+                .link
+                .as_deref()
+                .and_then(|l| serde_json::from_str::<Value>(l).ok())
+            {
+                Some(mut l) => {
+                    l["latency_ms"] = json!(rtt.map(|r| r.0));
+                    l["latency_at"] = json!(rtt.map(|r| r.1));
+                    l
+                }
+                None => Value::Null,
+            };
+            // what its machine is, as it last said (G2)
+            v["host"] = n
+                .host
+                .as_deref()
+                .and_then(|h| serde_json::from_str::<Value>(h).ok())
+                .unwrap_or(Value::Null);
             if !linked && let Some((at, why)) = svc.fleet.link_failure(&n.node_id) {
                 v["link_error"] = json!({ "at": at, "error": why });
             }

@@ -498,6 +498,10 @@ pub async fn boot(st: &AppState) -> anyhow::Result<()> {
     }
     // closings waiting for something the turn-end callback may never report (queued turns, the hold)
     crate::jobs::spawn_lifecycle_tick(st.clone());
+    // live streams of clients signed out by another process (`steve access revoke`) end too (G11)
+    if let Some(m) = &st.modules {
+        tokio::spawn(st.presence.clone().sweep(m.store.clone()));
+    }
     // warm the runtimes cache so the first /api/state doesn't wait for `claude --version`
     let rt = st.clone();
     tokio::spawn(async move {

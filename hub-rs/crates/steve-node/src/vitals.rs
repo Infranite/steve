@@ -73,7 +73,7 @@ fn space(dir: &Path) -> Option<(u64, u64, Option<u64>)> {
 
 /// (total, available) bytes of memory.
 #[cfg(target_os = "linux")]
-fn memory() -> (Option<u64>, Option<u64>) {
+pub(crate) fn memory() -> (Option<u64>, Option<u64>) {
     let Ok(m) = std::fs::read_to_string("/proc/meminfo") else {
         return (None, None);
     };
@@ -95,7 +95,7 @@ fn meminfo(m: &str, key: &str) -> Option<u64> {
 /// (total, available) bytes of memory: `hw.memsize`, and free, inactive, speculative and purgeable
 /// pages as `vm_stat` counts them (what macOS gives back without swapping).
 #[cfg(target_os = "macos")]
-fn memory() -> (Option<u64>, Option<u64>) {
+pub(crate) fn memory() -> (Option<u64>, Option<u64>) {
     let mut total: u64 = 0;
     let mut len = std::mem::size_of::<u64>();
     // SAFETY: the name is NUL-terminated and `total` is a u64 of the size passed in `len`
@@ -146,7 +146,7 @@ fn vm_stat(out: &str) -> Option<u64> {
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-fn memory() -> (Option<u64>, Option<u64>) {
+pub(crate) fn memory() -> (Option<u64>, Option<u64>) {
     (None, None)
 }
 

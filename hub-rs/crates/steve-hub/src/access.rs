@@ -48,7 +48,7 @@ impl ClientRef {
     }
 }
 
-fn private(ip: &IpAddr) -> bool {
+pub(crate) fn private(ip: &IpAddr) -> bool {
     match ip {
         IpAddr::V4(v) => v.is_private() || v.is_link_local(),
         IpAddr::V6(v) => {
@@ -58,7 +58,7 @@ fn private(ip: &IpAddr) -> bool {
 }
 
 /// Tailscale's (and tailcat's) address range, 100.64.0.0/10.
-fn tailnet(ip: &IpAddr) -> bool {
+pub(crate) fn tailnet(ip: &IpAddr) -> bool {
     matches!(ip, IpAddr::V4(v) if v.octets()[0] == 100 && (v.octets()[1] & 0xc0) == 64)
 }
 
@@ -336,7 +336,7 @@ async fn sign_in(State(st): State<AppState>, req: Request) -> axum::response::Re
                 }),
             );
             if b.cookie {
-                retire_replaced(&store, &headers, &c.id).await;
+                retire_replaced(&st, &store, &headers, &c.id).await;
                 let secure = secure_request(&st.cfg, &headers);
                 /* a page on another host (not only another port) is another site: its requests carry
                  * the cookie only as SameSite=None, which browsers take over TLS only */
@@ -386,7 +386,7 @@ async fn sign_in(State(st): State<AppState>, req: Request) -> axum::response::Re
 /// A browser that signs in again is given a new client and a new cookie; the client its old cookie
 /// named is left with a credential nobody holds. It is signed out here, with the pairings it had
 /// open, so the list of clients keeps no entry that can never be used again.
-async fn retire_replaced(store: &Store, headers: &HeaderMap, new_client: &str) {
+async fn retire_replaced(st: &AppState, store: &Store, headers: &HeaderMap, new_client: &str) {
     let Some(old) = crate::api::cookie(headers, COOKIE).filter(|c| !c.is_empty()) else {
         return;
     };
@@ -403,6 +403,8 @@ async fn retire_replaced(store: &Store, headers: &HeaderMap, new_client: &str) {
     .ok()
     .flatten();
     if let Some((uid, cid)) = retired {
+        st.presence
+            .kick(st.modules.as_ref().map(|m| &m.store), &cid);
         drop_pending_pairings(|p| {
             p.user_id == uid && p.creator_client_id.as_deref() == Some(cid.as_str())
         });
@@ -424,6 +426,7 @@ async fn sign_out(State(st): State<AppState>, headers: HeaderMap) -> axum::respo
         .ok()
         .flatten();
         if let Some((uid, cid)) = revoked_client {
+            st.presence.kick(Some(&m.store), &cid);
             drop_pending_pairings(|p| {
                 p.user_id == uid && p.creator_client_id.as_deref() == Some(cid.as_str())
             });
@@ -773,6 +776,43 @@ mod tests {
             "every link names every address; only where the page is differs"
         );
 
+        // G12: the Hub's addresses, by kind
+        let kinds = |a: Vec<HubAddress>| a.into_iter().map(|a| (a.kind, a.url)).collect::<Vec<_>>();
+        assert_eq!(
+            kinds(hub_addresses_with(
+                &cfg_pub,
+                &h(&[("host", "127.0.0.1:8440")]),
+                &ifs
+            )),
+            vec![
+                ("public", "https://steve.example".to_string()),
+                ("lan", "http://192.168.1.42:8440".to_string()),
+                ("tailnet", "http://100.64.0.9:8440".to_string()),
+                ("loopback", "http://127.0.0.1:8440".to_string()),
+            ]
+        );
+        assert_eq!(
+            kinds(hub_addresses_with(
+                &mk("127.0.0.1", false, "http://127.0.0.1:8440"),
+                &h(&[("host", "127.0.0.1:8440")]),
+                &ifs
+            )),
+            vec![("loopback", "http://127.0.0.1:8440".to_string())],
+            "a Hub on this machine only"
+        );
+        assert_eq!(
+            kinds(hub_addresses_with(
+                &mk("100.64.0.9", false, "https://hub.example.ts.net"),
+                &h(&[]),
+                &ifs
+            )),
+            vec![
+                ("tailnet", "https://hub.example.ts.net".to_string()),
+                ("tailnet", "http://100.64.0.9:8440".to_string()),
+            ],
+            "not on loopback: no address of this machine"
+        );
+
         // No public URL, explicit LAN listen: public_url is None, lan_urls has the LAN address.
         let ep_lan = pair_endpoints_with(
             &mk("127.0.0.1,192.168.1.42", false, "http://127.0.0.1:8440"),
@@ -1034,6 +1074,18 @@ pub async fn overview(
     .await
     .map_err(internal)?
     .map_err(internal)?;
+    // each with whether it holds the live stream open now (G6), and since when
+    let clients: Vec<Value> = clients
+        .into_iter()
+        .map(|cl| {
+            let online = st.presence.online(&cl.id);
+            let mut v = serde_json::to_value(&cl).unwrap_or(Value::Null);
+            v["online"] = json!(online.is_some());
+            v["streams"] = json!(online.map_or(0, |o| o.streams));
+            v["connected_since"] = json!(online.map(|o| o.since));
+            v
+        })
+        .collect();
     Ok(reply(
         StatusCode::OK,
         json!({
@@ -1107,17 +1159,29 @@ pub async fn token_revoke(
     let tid = id.clone();
     let done = tokio::task::spawn_blocking(move || {
         let Some(t) = store.access().token(&tid)?.filter(|t| t.user_id == me) else {
-            return Ok::<_, steve_store::StoreError>(false);
+            return Ok::<_, steve_store::StoreError>(None);
         };
         let ok = store.access().token_revoke(&t.id)?;
         store.audit(&me, "token.revoke", &t.id, &json!({}), steve_store::WS)?;
-        Ok(ok)
+        // the clients it signed in are signed out with it: their open streams end too
+        let signed_in: Vec<String> = store
+            .access()
+            .clients(Some(&me))?
+            .into_iter()
+            .filter(|c| c.token_id.as_deref() == Some(t.id.as_str()))
+            .map(|c| c.id)
+            .collect();
+        Ok(ok.then_some(signed_in))
     })
     .await
     .map_err(internal)?
     .map_err(internal)?;
-    if !done {
+    let Some(signed_in) = done else {
         return Err(crate::error::ApiError::not_found("token"));
+    };
+    let store = store_of(&st)?;
+    for cid in &signed_in {
+        st.presence.kick(Some(&store), cid);
     }
     let uid = c.me.clone();
     drop_pending_pairings(|p| p.user_id == uid && p.token_id.as_deref() == Some(id.as_str()));
@@ -1159,6 +1223,8 @@ pub async fn client_revoke(
     let Some(uid) = done else {
         return Err(crate::error::ApiError::not_found("client"));
     };
+    // signed out now, not at its next request: its open streams end (G11)
+    st.presence.kick(Some(&store_of(&st)?), &id);
     drop_pending_pairings(|p| {
         p.user_id == uid && p.creator_client_id.as_deref() == Some(id.as_str())
     });
@@ -1424,6 +1490,71 @@ pub fn pair_endpoints_with(
         lan_urls,
         loopback_only,
     }
+}
+
+/// One address of this Hub (G12): its endpoint, where its pages are, and what kind of route it is.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct HubAddress {
+    pub url: String,
+    /// The web client's pages there (another port when `STEVE_WEB_PORT` splits them off).
+    pub page: String,
+    /// `public`, `lan`, `tailnet` or `loopback` (this machine only).
+    pub kind: &'static str,
+}
+
+/// [`hub_addresses_with`] on this machine's own interfaces.
+pub fn hub_addresses(cfg: &crate::config::Config, headers: &HeaderMap) -> Vec<HubAddress> {
+    hub_addresses_with(cfg, headers, &machine_lan_ipv4s())
+}
+
+/// Every address other devices can reach this Hub at, as a pairing offers them ([`pair_endpoints_with`]):
+/// the public one first, then the local network and tailnet ones, and last this machine's own when the
+/// Hub listens there.
+pub fn hub_addresses_with(
+    cfg: &crate::config::Config,
+    headers: &HeaderMap,
+    if_ips: &[std::net::Ipv4Addr],
+) -> Vec<HubAddress> {
+    let ep = pair_endpoints_with(cfg, headers, if_ips);
+    let at = |url: String, kind: &'static str| HubAddress {
+        page: page_of(cfg, &url),
+        url,
+        kind,
+    };
+    // a tailnet address or MagicDNS name is reached from the tailnet, whichever list it is in
+    let tail = |u: &str| {
+        reqwest::Url::parse(u)
+            .ok()
+            .and_then(|x| {
+                x.host_str()
+                    .map(|h| h.trim_matches(['[', ']']).to_ascii_lowercase())
+            })
+            .is_some_and(|h| {
+                h.trim_end_matches('.').ends_with(".ts.net")
+                    || h.parse::<IpAddr>().is_ok_and(|ip| tailnet(&ip))
+            })
+    };
+    let mut out: Vec<HubAddress> = Vec::new();
+    for (u, kind) in ep
+        .public_url
+        .into_iter()
+        .map(|u| (u, "public"))
+        .chain(ep.lan_urls.into_iter().map(|u| (u, "lan")))
+    {
+        let kind = if tail(&u) { "tailnet" } else { kind };
+        out.push(at(u, kind));
+    }
+    let port = cfg.listen.port;
+    if cfg.listen.any()
+        || cfg
+            .listen
+            .hosts
+            .iter()
+            .any(|h| is_loopback_host(h) && h.parse::<IpAddr>().is_ok_and(|ip| ip.is_ipv4()))
+    {
+        out.push(at(format!("http://127.0.0.1:{port}"), "loopback"));
+    }
+    out
 }
 
 /// Where the pages of the Hub at `endpoint` are: the same address, on the web client's own port
@@ -1773,7 +1904,7 @@ async fn pair_sign_in(State(st): State<AppState>, req: Request) -> axum::respons
                 }),
             );
             if b.cookie {
-                retire_replaced(&store, &headers, &c.id).await;
+                retire_replaced(&st, &store, &headers, &c.id).await;
                 let secure = secure_request(&st.cfg, &headers);
                 let cross_site = origin_seen.as_deref().is_some_and(|o| {
                     host_of(o)

@@ -116,6 +116,7 @@ rpc_table! {
     IMPORT_PAGE = "import.page": HubToNode Control Read false;
     HISTORY_LOCATE = "history.locate": HubToNode Control Read false;
     NODE_VITALS = "node.vitals": HubToNode Control Read false;
+    NODE_HOST = "node.host": HubToNode Control Read false;
     // Idempotent setting, not an execution: resending it cannot duplicate work.
     NODE_SESSION_CAPACITY = "node.session_capacity": HubToNode Control Read false;
     // Lost after it was written: ask its state (`node.upgrade_status`), never stage or switch again.

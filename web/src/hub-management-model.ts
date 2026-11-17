@@ -1,5 +1,7 @@
 export type HubMetadata = { hub_id: string; display_name: string; purpose_note: string; revision: number; updated_at: number | null; updated_by: string | null }
-export type HubInfo = { contract: 1; capabilities: { shared_metadata: 1 }; metadata: HubMetadata; can_edit: boolean; edit_reason: string | null; device_id: string | null }
+/** one address of the Hub: its endpoint, where its pages are, and the route it is on */
+export type HubAddress = { url: string; page: string; kind: "public" | "lan" | "tailnet" | "loopback" }
+export type HubInfo = { contract: 1; capabilities: { shared_metadata: 1; addresses?: 1 }; metadata: HubMetadata; can_edit: boolean; edit_reason: string | null; device_id: string | null; addresses?: HubAddress[] }
 export type HubDraft = Pick<HubMetadata, "display_name" | "purpose_note">
 /** The inventory explicitly declares the local binding; a Hub role or name is not an identity join.
  * Ambiguous bindings stay unknown rather than linking to an arbitrary device. */

@@ -1,7 +1,7 @@
 //! Access tokens and clients (A1). A user signs a client in with their name and an access token; the
 //! client gets its own secret and uses that from then on. Only sha256 of a token or secret is kept.
 
-use rusqlite::{Row, params};
+use rusqlite::{OptionalExtension, Row, params};
 use serde::Serialize;
 
 use super::{Cached, all, one};
@@ -17,6 +17,14 @@ fn secret() -> String {
         uuid::Uuid::new_v4().simple(),
         uuid::Uuid::new_v4().simple()
     )
+}
+
+/// `{type:"client", id, user}`: the client was signed in or out (its user's pages refetch).
+fn client_changed(id: &str, user: &str) -> crate::ChangeEvent {
+    crate::ChangeEvent::Client {
+        id: id.into(),
+        user: user.into(),
+    }
 }
 
 /// An access token, without the token itself.
@@ -196,10 +204,15 @@ impl Access<'_> {
                 "UPDATE access_tokens SET revoked = ? WHERE id = ? AND revoked IS NULL",
                 params![t, id],
             )?;
-            w.c.run(
-                "UPDATE clients SET revoked = ? WHERE token_id = ? AND revoked IS NULL",
-                params![t, id],
+            let mut st = w.c.prepare_cached(
+                "UPDATE clients SET revoked = ? WHERE token_id = ? AND revoked IS NULL RETURNING id, user_id",
             )?;
+            let out = st
+                .query_map(params![t, id], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            for (client, user) in out {
+                w.publish(client_changed(&client, &user));
+            }
             Ok(n > 0)
         })
     }
@@ -274,6 +287,7 @@ impl Access<'_> {
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 params![id, u.id, tok, sha(&sec), c.kind, c.name, c.platform, c.version, c.origin, t, t],
             )?;
+            w.publish(client_changed(&id, &u.id));
             Ok(())
         })?;
         let client = self.client(&id)?.expect("just written");
@@ -299,6 +313,7 @@ impl Access<'_> {
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 params![id, u.id, token_id, sha(&sec), c.kind, c.name, c.platform, c.version, c.origin, t, t],
             )?;
+            w.publish(client_changed(&id, &u.id));
             Ok(())
         })?;
         let client = self.client(&id)?.expect("just written");
@@ -386,10 +401,18 @@ impl Access<'_> {
     /// Revokes one client; false when there was no live one.
     pub fn client_revoke(&self, id: &str) -> Result<bool> {
         self.0.write(|w| {
-            Ok(w.c.run(
-                "UPDATE clients SET revoked = ? WHERE id = ? AND revoked IS NULL",
-                params![now(), id],
-            )? > 0)
+            let user: Option<String> = w
+                .c
+                .row(
+                    "UPDATE clients SET revoked = ? WHERE id = ? AND revoked IS NULL RETURNING user_id",
+                    params![now(), id],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            if let Some(user) = &user {
+                w.publish(client_changed(id, user));
+            }
+            Ok(user.is_some())
         })
     }
 }

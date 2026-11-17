@@ -30,9 +30,15 @@ pub struct NodeRow {
     /// `auto` | `notify` | `off`, as its owner set it; `None`: the Hub's default
     /// ([`upgrade_default`]).
     pub upgrade_policy: Option<String>,
+    /// What its machine is, as it last said (`node.host`, JSON; [`set_host`]).
+    #[serde(skip)]
+    pub host: Option<String>,
+    /// How its latest link reached the Hub (JSON; [`set_link`]).
+    #[serde(skip)]
+    pub link: Option<String>,
 }
 
-const COLS: &str = "node_id,owner,name,pubkey,fingerprint,state,generation,incarnation,local,created,last_seen,revoked_at,revoked_by,max_sessions,owner_context,upgrade_policy";
+const COLS: &str = "node_id,owner,name,pubkey,fingerprint,state,generation,incarnation,local,created,last_seen,revoked_at,revoked_by,max_sessions,owner_context,upgrade_policy,host,link";
 
 fn row(r: &rusqlite::Row<'_>) -> rusqlite::Result<NodeRow> {
     Ok(NodeRow {
@@ -52,7 +58,34 @@ fn row(r: &rusqlite::Row<'_>) -> rusqlite::Result<NodeRow> {
         max_sessions: r.get(13)?,
         owner_context: r.get::<_, Option<i64>>(14)?.map(|v| v != 0),
         upgrade_policy: r.get(15)?,
+        host: r.get(16)?,
+        link: r.get(17)?,
     })
+}
+
+/// Tells whoever shows `node_id` that it changed (G5: `{type:"node", id, user}`, to its owner), after
+/// the commit. Nothing for a Node that is not there.
+pub fn changed(tx: &Tx<'_>, node_id: &str) -> Result<()> {
+    let owner: Option<String> = tx
+        .query_row("SELECT owner FROM nodes WHERE node_id=?", [node_id], |r| {
+            r.get(0)
+        })
+        .optional()?;
+    if let Some(user) = owner {
+        tx.publish(crate::ChangeEvent::Node {
+            id: node_id.into(),
+            user,
+        });
+    }
+    Ok(())
+}
+
+/// `true` (and the Node's owner told, [`changed`]) when `n` rows were written.
+fn told(tx: &Tx<'_>, node_id: &str, n: usize) -> Result<bool> {
+    if n == 1 {
+        changed(tx, node_id)?;
+    }
+    Ok(n == 1)
 }
 
 /// A one-time code for `created_by`, valid until `expires`.
@@ -115,31 +148,35 @@ pub fn claim_pairing(
         "INSERT INTO nodes(node_id,owner,name,pubkey,fingerprint,state,created) VALUES (?,?,?,?,?,?,?)",
         params![n.node_id, owner, n.name, &n.pubkey[..], n.fingerprint, state, now],
     )?;
+    changed(tx, n.node_id)?;
     Ok(Some(owner))
 }
 
 /// `from` → `to` for the owner's Node (confirm: pending → active, pause, resume).
 pub fn set_state(tx: &Tx<'_>, node_id: &str, owner: &str, from: &str, to: &str) -> Result<bool> {
-    Ok(tx.execute(
+    let n = tx.execute(
         "UPDATE nodes SET state=?4 WHERE node_id=?1 AND owner=?2 AND state=?3",
         params![node_id, owner, from, to],
-    )? == 1)
+    )?;
+    told(tx, node_id, n)
 }
 
 /// Revoked for good, and the generation moves on so that no live link of it may act again.
 pub fn revoke(tx: &Tx<'_>, node_id: &str, owner: &str, now: i64) -> Result<bool> {
-    Ok(tx.execute(
+    let n = tx.execute(
         "UPDATE nodes SET state='revoked', revoked_at=?3, revoked_by=?2, generation=generation+1
          WHERE node_id=?1 AND owner=?2 AND state!='revoked'",
         params![node_id, owner, now],
-    )? == 1)
+    )?;
+    told(tx, node_id, n)
 }
 
 pub fn rename(tx: &Tx<'_>, node_id: &str, owner: &str, name: &str) -> Result<bool> {
-    Ok(tx.execute(
+    let n = tx.execute(
         "UPDATE nodes SET name=?3 WHERE node_id=?1 AND owner=?2",
         params![node_id, owner, name],
-    )? == 1)
+    )?;
+    told(tx, node_id, n)
 }
 
 /// The owner sets how many sessions their Node runs at once (1 to
@@ -148,10 +185,11 @@ pub fn set_max_sessions(tx: &Tx<'_>, node_id: &str, owner: &str, n: i64) -> Resu
     if !(1..=crate::runtime::SESSIONS_MAX).contains(&n) {
         return Ok(false);
     }
-    Ok(tx.execute(
+    let n = tx.execute(
         "UPDATE nodes SET max_sessions=?3 WHERE node_id=?1 AND owner=?2 AND local=0 AND state!='revoked'",
         params![node_id, owner, n],
-    )? == 1)
+    )?;
+    told(tx, node_id, n)
 }
 
 /// The owner chooses whether their sessions on their Node load their personal harness
@@ -163,10 +201,11 @@ pub fn set_owner_context(
     owner: &str,
     on: Option<bool>,
 ) -> Result<bool> {
-    Ok(tx.execute(
+    let n = tx.execute(
         "UPDATE nodes SET owner_context=?3 WHERE node_id=?1 AND owner=?2 AND state!='revoked'",
         params![node_id, owner, on],
-    )? == 1)
+    )?;
+    told(tx, node_id, n)
 }
 
 /// Whether a session of `node`'s owner there loads the owner's personal harness configuration:
@@ -213,10 +252,11 @@ pub fn set_upgrade_policy(
     if policy.is_some_and(|p| !UPGRADE_POLICIES.contains(&p)) {
         return Ok(false);
     }
-    Ok(tx.execute(
+    let n = tx.execute(
         "UPDATE nodes SET upgrade_policy=?3 WHERE node_id=?1 AND owner=?2 AND local=0 AND state!='revoked'",
         params![node_id, owner, policy],
-    )? == 1)
+    )?;
+    told(tx, node_id, n)
 }
 
 /// The Hub's default policy for Nodes without their own.
@@ -334,6 +374,7 @@ pub fn upgrade_insert(tx: &Tx<'_>, u: &UpgradeRow) -> Result<bool> {
             u.updated
         ],
     )?;
+    changed(tx, &u.node_id)?;
     Ok(true)
 }
 
@@ -345,13 +386,26 @@ pub fn upgrade_phase(
     error: Option<&str>,
     now: i64,
 ) -> Result<bool> {
-    Ok(tx.execute(
+    let n = tx.execute(
         &format!(
             "UPDATE node_upgrades SET phase=?2, error=?3, updated=?4 WHERE operation_id=?1 AND phase NOT IN ({})",
             UPGRADE_DONE.iter().map(|p| format!("'{p}'")).collect::<Vec<_>>().join(",")
         ),
         params![operation_id, phase, error, now],
-    )? == 1)
+    )?;
+    if n == 1 {
+        let node: Option<String> = tx
+            .query_row(
+                "SELECT node_id FROM node_upgrades WHERE operation_id=?",
+                [operation_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if let Some(node) = node {
+            changed(tx, &node)?;
+        }
+    }
+    Ok(n == 1)
 }
 
 pub fn upgrade_get(c: &Connection, operation_id: &str) -> Result<Option<UpgradeRow>> {
@@ -425,12 +479,31 @@ pub fn begin_link(tx: &Tx<'_>, node_id: &str, incarnation: i64, now: i64) -> Res
     }))
 }
 
+/// The Node was there at `now` (its link just closed): its owner is told.
 pub fn touch(tx: &Tx<'_>, node_id: &str, now: i64) -> Result<()> {
-    tx.execute(
+    let n = tx.execute(
         "UPDATE nodes SET last_seen=? WHERE node_id=?",
         params![now, node_id],
     )?;
-    Ok(())
+    told(tx, node_id, n).map(|_| ())
+}
+
+/// What the Node's machine is (`node.host`, JSON), as it just said; its owner is told when it
+/// differs from what was kept.
+pub fn set_host(tx: &Tx<'_>, node_id: &str, host: &str) -> Result<bool> {
+    let n = tx.execute(
+        "UPDATE nodes SET host=?2 WHERE node_id=?1 AND host IS NOT ?2",
+        params![node_id, host],
+    )?;
+    told(tx, node_id, n)
+}
+
+/// How the Node's latest link reached the Hub (JSON), kept while the Node is away.
+pub fn set_link(tx: &Tx<'_>, node_id: &str, link: &str) -> Result<bool> {
+    Ok(tx.execute(
+        "UPDATE nodes SET link=?2 WHERE node_id=?1",
+        params![node_id, link],
+    )? == 1)
 }
 
 pub fn get(c: &Connection, node_id: &str) -> Result<Option<NodeRow>> {

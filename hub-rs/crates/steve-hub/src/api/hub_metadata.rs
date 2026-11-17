@@ -4,7 +4,7 @@
 //! one SQLite transaction. Identity reuses node.hub_id even with both Nodes disabled.
 //!
 //! `GET /api/hub-metadata` returns contract/capabilities v1, metadata, can_edit and
-//! edit_reason. `PUT` accepts only revision, display_name and purpose_note. A stale
+//! edit_reason, and the Hub's addresses (`addresses: [{url, page, kind}]`, `capabilities.addresses: 1`). `PUT` accepts only revision, display_name and purpose_note. A stale
 //! revision is 409; revoked/non-owner access is 403; invalid fields are 400. No force
 //! overwrite exists. Times are Unix milliseconds; updated_by is the stable users.id.
 //! Names are trimmed, single-line, 1–64 Unicode scalars. Notes normalize CRLF/CR to
@@ -13,6 +13,7 @@
 //! neither API generation nor software version implies this capability.
 use super::{AppState, Ctx, blocking};
 use crate::error::ApiError;
+use axum::http::HeaderMap;
 use axum::{Extension, Json, extract::State};
 use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
@@ -142,29 +143,41 @@ fn reply(m: Metadata, can_edit: bool) -> Value {
         "device_id": null})
 }
 
+/// `reply` with the Hub's addresses (G12, `capabilities.addresses`): `[{url, page, kind}]`, the public one
+/// first, then `lan` / `tailnet`, then `loopback`.
+fn with_addresses(mut v: Value, st: &AppState, headers: &HeaderMap) -> Value {
+    v["capabilities"]["addresses"] = json!(1);
+    v["addresses"] = json!(crate::access::hub_addresses(&st.cfg, headers));
+    v
+}
+
 pub async fn get(
     State(st): State<AppState>,
     Extension(cx): Extension<Ctx>,
+    headers: HeaderMap,
 ) -> Result<Json<Value>, ApiError> {
     let s = store(&st)?;
-    blocking(move || {
+    let v = blocking(move || {
         let (m, edit) = snapshot(&s, &cx.me)?;
-        Ok(Json(reply(m, edit)))
+        Ok(reply(m, edit))
     })
-    .await
+    .await?;
+    Ok(Json(with_addresses(v, &st, &headers)))
 }
 
 pub async fn put(
     State(st): State<AppState>,
     Extension(cx): Extension<Ctx>,
+    headers: HeaderMap,
     Json(b): Json<Change>,
 ) -> Result<Json<Value>, ApiError> {
     let s = store(&st)?;
-    blocking(move || {
+    let v = blocking(move || {
         let m = update(&s, &cx.me, &b)?;
-        Ok(Json(reply(m, true)))
+        Ok(reply(m, true))
     })
-    .await
+    .await?;
+    Ok(Json(with_addresses(v, &st, &headers)))
 }
 
 #[cfg(test)]
