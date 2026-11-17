@@ -618,6 +618,14 @@ pub fn error_backoff_s(attempts: u32, restart: bool) -> u64 {
     STEPS[i.min(STEPS.len() - 1)]
 }
 
+/// The stored frame of the reason YOLO gives when a message it already resent still did not go out.
+const RETRY_LIMIT_HEAD: &str = "YOLO 已经重发过 ";
+const RETRY_LIMIT_TAIL: &str = " 次，还是没发出去，留给你";
+
+fn retry_limit_reason(retries: u32) -> String {
+    format!("{RETRY_LIMIT_HEAD}{retries}{RETRY_LIMIT_TAIL}")
+}
+
 /// A stored reason (a ledger row's, a scope's) as the UI shows it, in the request's language. The reasons are
 /// stored in Chinese and read back by rules and the digest; this translates the fixed ones and the fixed frame
 /// of the ones with a value, and leaves the rest (a model's own words, a guard's detail) as it is.
@@ -657,6 +665,12 @@ pub fn reason_shown(reason: &str) -> String {
     }
     if let Some(c) = tail("YOLO 不会选「").and_then(|w| w.strip_suffix('」')) {
         return steve_i18n::t!("core.yolo.reason.never", choice = c);
+    }
+    if let Some(n) = tail(RETRY_LIMIT_HEAD)
+        .and_then(|w| w.strip_suffix(RETRY_LIMIT_TAIL))
+        .and_then(|n| n.parse::<u32>().ok())
+    {
+        return steve_i18n::t!("core.yolo.reason.retry_limit", n = n);
     }
     if reason == format!("这件事项已经代答了 {ASK_PER_ITEM} 次，之后的提问留给你")
     {
@@ -1135,7 +1149,7 @@ fn outbound(o: &Outbound, p: &Policy, what: &str) -> Verdict {
             if retry && o.retries >= p.chan_retry_max {
                 return decline(
                     &format!("{what}.retry_limit"),
-                    &format!("YOLO 已经重发过 {} 次，还是没发出去，留给你", o.retries),
+                    &retry_limit_reason(o.retries),
                 );
             }
             let (rule, delay) = match o.identity {
