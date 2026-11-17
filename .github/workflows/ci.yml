@@ -1,5 +1,6 @@
 name: CI
-# One Rust job per platform compiles the workspace's tests and runs all of them on that runner.
+# Each platform runs the Rust tests in parallel shards, one runner each (RUST_TEST_SHARDS below); a last
+# job per platform proves that together they ran every test exactly once and it passed on its first try.
 # Every job has a time limit of two to several times its longest run, so one that hangs is stopped
 # there instead of holding a runner for GitHub's six hours.
 # A pull request runs the Linux jobs (and the Apple job only when it touches the apps, the web client they
@@ -14,6 +15,10 @@ on:
   merge_group:
 permissions:
   contents: read
+env:
+  # How many runners share each platform's Rust tests (`--partition hash:k/N`). Linux runners are
+  # plentiful; macOS ones are scarce (and run only on main), so it takes fewer of them.
+  RUST_TEST_SHARDS: '{"ubuntu-22.04": 4, "macos-15": 2}'
 concurrency:
   group: ci-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -102,21 +107,51 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: python3 scripts/skip-rust-jobs.py
-  rust:
-    needs: changes
-    # Only `skip=true` from `changes` skips them: they run when it was skipped itself or did not finish.
-    if: ${{ !cancelled() && needs.changes.outputs.skip != 'true' }}
+  # The Rust tests of each platform run in parallel shards (`--partition hash:k/N`, N from RUST_TEST_SHARDS):
+  # every shard compiles the workspace's tests from its own checkout and runs its share, and `rust` proves
+  # from every shard's list and report that each test ran exactly once and passed on its first try.
+  # Nothing is handed between runners but lists and reports.
+  rust-plan:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    outputs:
+      shards: ${{ steps.plan.outputs.shards }}
+    steps:
+      - name: The shard matrix of every platform this run tests
+        id: plan
+        env:
+          RUNNERS: ${{ github.event_name == 'pull_request' && '["ubuntu-22.04"]' || '["ubuntu-22.04", "macos-15"]' }}
+        run: |
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json, os
+          shards = json.loads(os.environ['RUST_TEST_SHARDS'])
+          print('shards=' + json.dumps([dict(runner=runner, shard=k, shards=shards[runner])
+                                        for runner in json.loads(os.environ['RUNNERS'])
+                                        for k in range(1, shards[runner] + 1)]))
+          PY
+  rust-test:
+    name: rust-test (${{ matrix.runner }}, ${{ matrix.shard }}/${{ matrix.shards }})
+    needs: [changes, rust-plan]
+    # Only `skip=true` from `changes` skips the Rust jobs: they run when it was skipped itself or did not finish.
+    if: ${{ !cancelled() && needs.changes.outputs.skip != 'true' && needs.rust-plan.result == 'success' }}
     strategy:
       fail-fast: false
       matrix:
-        runner: ${{ fromJSON(github.event_name == 'pull_request' && '["ubuntu-22.04"]' || '["ubuntu-22.04", "macos-15"]') }}
+        include: ${{ fromJSON(needs.rust-plan.outputs.shards) }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
+    # Linux builds without debug info: that halved compiling the workspace's tests (464 s with line
+    # tables, 213 s without, on otherwise identical runners). Panic messages still carry file and line,
+    # and a backtrace, when RUST_BACKTRACE asks for one, still names functions (symbols stay). macOS keeps
+    # line tables: its linker leaves them in the object files anyway, and without them Cargo strips the
+    # debug info of the standard library from every test binary, which made the integration tests slower
+    # to build there (their units took 696 s of build time with line tables, 929 to 1248 s without).
     env:
       MACOSX_DEPLOYMENT_TARGET: '14.0'
       CARGO_INCREMENTAL: '0'
-      CARGO_PROFILE_DEV_DEBUG: line-tables-only
-      CARGO_PROFILE_TEST_DEBUG: line-tables-only
+      CARGO_PROFILE_DEV_DEBUG: ${{ startsWith(matrix.runner, 'ubuntu') && '0' || 'line-tables-only' }}
+      CARGO_PROFILE_TEST_DEBUG: ${{ startsWith(matrix.runner, 'ubuntu') && '0' || 'line-tables-only' }}
+      PARTITION: hash:${{ matrix.shard }}/${{ matrix.shards }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
@@ -150,47 +185,77 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: python3 scripts/install-nextest.py
+      # The full list is this build's whole inventory; the shard's list differs from it only in which
+      # tests the partition selects.
       - name: Compile all Rust tests and record the inventory
         id: rust-build
         run: |
           mkdir -p ci-artifacts
           cargo nextest run --locked --manifest-path hub-rs/Cargo.toml --workspace --profile ci --no-run --timings
           cargo nextest list --locked --manifest-path hub-rs/Cargo.toml --workspace --profile ci --message-format json > ci-artifacts/full.json
+          cargo nextest list --locked --manifest-path hub-rs/Cargo.toml --workspace --profile ci --partition "$PARTITION" --message-format json > ci-artifacts/list.json
+          cp hub-rs/target/cargo-timings/cargo-timing.html ci-artifacts/
       - name: Rust tests
         id: rust-tests
-        run: cargo nextest run --locked --manifest-path hub-rs/Cargo.toml --workspace --profile ci --retries 0 --no-fail-fast
+        run: cargo nextest run --locked --manifest-path hub-rs/Cargo.toml --workspace --profile ci --retries 0 --no-fail-fast --partition "$PARTITION"
       - name: Rust test report (first-attempt failures remain failures)
         if: ${{ !cancelled() && steps.rust-tests.outcome != 'skipped' }}
-        run: python3 scripts/nextest-summary.py hub-rs/target/nextest/ci/junit.xml
-      - name: Verify the entire test inventory ran exactly once and passed on the first try
-        run: python3 scripts/nextest-partitions.py ci-artifacts/full.json ci-artifacts/full.json --junit hub-rs/target/nextest/ci/junit.xml
+        run: |
+          python3 scripts/nextest-summary.py hub-rs/target/nextest/ci/junit.xml
+          cp hub-rs/target/nextest/ci/junit.xml ci-artifacts/
+      # The doctests are not partitioned: the first shard of each platform runs all of them.
       - name: Rust doctests (reuse the compiled workspace)
-        if: ${{ !cancelled() && steps.rust-build.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.rust-build.outcome == 'success' && matrix.shard == 1 }}
         run: cargo test --locked --manifest-path hub-rs/Cargo.toml --workspace --doc
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: ${{ !cancelled() && steps.rust-tests.outcome != 'skipped' }}
         with:
-          name: rust-results-${{ matrix.runner }}
-          path: |
-            ci-artifacts/full.json
-            hub-rs/target/nextest/ci/junit.xml
-            hub-rs/target/cargo-timings/cargo-timing.html
+          name: rust-shard-${{ matrix.runner }}-${{ matrix.shard }}
+          path: ci-artifacts/
           retention-days: 7
           if-no-files-found: error
       # Only third-party dependencies enter the trusted cache. Workspace artifacts always come
       # from this checkout, even when cache fingerprints or file timestamps would allow reuse.
-      # A failing test does not keep a built dependency set from being cached.
+      # A failing test does not keep a built dependency set from being cached. Every shard builds
+      # the same dependencies; the first one saves them.
       - name: Keep only dependency artifacts in the cache
-        if: ${{ !cancelled() && github.event_name == 'push' && steps.rust-build.outcome == 'success' && steps.rust-cache.outputs.cache-hit != 'true' }}
+        if: ${{ !cancelled() && matrix.shard == 1 && github.event_name == 'push' && steps.rust-build.outcome == 'success' && steps.rust-cache.outputs.cache-hit != 'true' }}
         run: cargo clean --locked --manifest-path hub-rs/Cargo.toml --workspace --profile dev
       - uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
-        if: ${{ !cancelled() && github.event_name == 'push' && steps.rust-build.outcome == 'success' && steps.rust-cache.outputs.cache-hit != 'true' }}
+        if: ${{ !cancelled() && matrix.shard == 1 && github.event_name == 'push' && steps.rust-build.outcome == 'success' && steps.rust-cache.outputs.cache-hit != 'true' }}
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
             hub-rs/target/debug
           key: ${{ steps.rust-cache.outputs.cache-primary-key }}
+  # Proves for each platform that its shards together ran the entire test inventory, each test exactly
+  # once and passing on its first try: every shard's build must list the same binaries and tests as the
+  # first shard's. It reads only lists and reports, so it runs on Linux for both platforms.
+  rust:
+    needs: [changes, rust-test]
+    if: ${{ !cancelled() && needs.changes.outputs.skip != 'true' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: ${{ fromJSON(github.event_name == 'pull_request' && '["ubuntu-22.04"]' || '["ubuntu-22.04", "macos-15"]') }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: rust-shard-${{ matrix.runner }}-*
+          path: rust-results
+      - name: Verify the entire test inventory ran exactly once and passed on the first try
+        env:
+          SHARDS: ${{ fromJSON(env.RUST_TEST_SHARDS)[matrix.runner] }}
+          RESULTS: rust-results/rust-shard-${{ matrix.runner }}
+        run: |
+          set -- "$RESULTS-1/full.json"
+          for k in $(seq 1 "$SHARDS"); do set -- "$@" "$RESULTS-$k/list.json"; done
+          for k in $(seq 1 "$SHARDS"); do set -- "$@" --junit "$RESULTS-$k/junit.xml"; done
+          python3 scripts/nextest-partitions.py "$@"
   # The macOS and iOS apps: the Swift package's tests, then both apps built unsigned around the web
   # client of this commit (the iOS one for the simulator, which needs no signing identity).
   # Skipped with the Rust jobs when only release notes changed.
@@ -217,7 +282,7 @@ jobs:
   test:
     name: CI gate
     if: ${{ always() }}
-    needs: [changes, scripts, web, rust, apple]
+    needs: [changes, scripts, web, rust-plan, rust-test, rust, apple]
     runs-on: ubuntu-22.04
     timeout-minutes: 5
     steps:
@@ -228,12 +293,12 @@ jobs:
           python3 - <<'PY'
           import json, os
           results = json.loads(os.environ['RESULTS'])
-          assert set(results) == {'changes', 'scripts', 'web', 'rust', 'apple'}, results
+          assert set(results) == {'changes', 'scripts', 'web', 'rust-plan', 'rust-test', 'rust', 'apple'}, results
           changes = results.pop('changes')
           assert changes['result'] in ('success', 'skipped'), changes
           # The Rust and Apple jobs may be skipped only on the word of `changes`; everything else must have passed.
           if changes['result'] == 'success' and changes['outputs'].get('skip') == 'true':
-              for job in ('rust', 'apple'):
+              for job in ('rust-test', 'rust', 'apple'):
                   assert results.pop(job)['result'] in ('success', 'skipped'), results
           # A pull request that does not touch the apps skips the Apple job, on the word of `changes` only.
           elif changes['result'] == 'success' and changes['outputs'].get('apple') == 'false':

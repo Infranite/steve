@@ -1,17 +1,21 @@
 #!/usr/bin/env python3
 """Prove that nextest's actual lists and reports cover the default suite exactly once.
 
+    python3 scripts/nextest-partitions.py full.json shard-1.json shard-2.json ... \
+        --junit junit-1.xml --junit junit-2.xml ...
     python3 scripts/nextest-partitions.py full.json full.json --junit junit.xml
-    python3 scripts/nextest-partitions.py full.json shard-1.json shard-2.json ...
 
-CI runs the whole suite in one job per platform and passes the full list as its only
-list, with the run's JUnit report: every selected test ran once and passed first try.
-A suite split across runners passes one list (and report) per shard instead.
+CI splits each platform's suite across runners, each building it from its own checkout:
+the full list is the first shard's whole inventory, every shard's list must hold the same
+inventory, and each shard's JUnit report proves that every test it selected ran once and
+passed first try. A suite run whole on one runner passes the full list as its only list,
+with that run's report.
 
 Inputs are `cargo nextest list --message-format json`, with identical build/profile
-options and only `--partition hash:M/N` added for each shard. The full list must
-select every non-ignored test. Ignored tests remain present but unselected in every
-list; this preserves the ordinary CI policy without enabling opt-in integrations.
+options and only `--partition hash:M/N` added for each shard. Where a build put the
+binaries is not part of a test's identity. The full list must select every non-ignored
+test. Ignored tests remain present but unselected in every list; this preserves the
+ordinary CI policy without enabling opt-in integrations.
 
 Test identity is (binary-id, test-name), never the test name alone. We check the
 complete inventory as well as selected tests, so a missing binary or an accidentally

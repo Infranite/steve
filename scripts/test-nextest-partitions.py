@@ -151,6 +151,34 @@ class Tests(unittest.TestCase):
                 with self.assertRaisesRegex(partitions.Invalid, "differs from selection"):
                     partitions.verify(full, [full], [self.report(0, actual)])
 
+    def test_shards_built_on_their_own_runners_match_the_first_shards_list(self):
+        # Each CI shard lists its own build: only where the binaries lie may differ, and that is not
+        # part of a test's identity; what each binary is must not.
+        for binary, suite in self.full["rust-suites"].items():
+            suite.update({"binary-path": f"/first/target/debug/deps/{binary}", "cwd": "/first/crate"})
+        for part in self.parts:
+            for binary, suite in part["rust-suites"].items():
+                suite.update({"binary-path": f"/shard/target/debug/deps/{binary}", "cwd": "/shard/crate"})
+        self.assertEqual(self.verify()["coverage"], "exactly-once")
+        self.parts[1]["rust-suites"]["pkg::first"]["kind"] = "lib"
+        with self.assertRaisesRegex(partitions.Invalid, "binary inventory"):
+            self.verify()
+
+    def test_command_takes_every_shards_list_then_every_shards_report_as_ci_passes_them(self):
+        full, *parts = self.files()
+        reports = [self.report(0, [("pkg::first", "same_name")]), self.report(1, [("pkg::second", "same_name")])]
+        command = [sys.executable, str(SCRIPT), str(full), *map(str, parts)]
+        result = subprocess.run(command + [arg for path in reports for arg in ("--junit", str(path))],
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)["execution"], "all-selected-passed-first-try")
+        # Reports in the wrong shard order, or one shard's report missing, fail.
+        for junit in ([reports[1], reports[0]], reports[:1]):
+            with self.subTest(junit=junit):
+                result = subprocess.run(command + [arg for path in junit for arg in ("--junit", str(path))],
+                                        capture_output=True, text=True)
+                self.assertNotEqual(result.returncode, 0)
+
     def test_junit_rejects_failure_skip_and_retry_history(self):
         for issue in ["failure", "error", "skipped", "flakyFailure", "flakyError", "rerunFailure", "rerunError"]:
             with self.subTest(issue=issue):
