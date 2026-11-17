@@ -305,6 +305,13 @@ async fn pause_finish_drop_and_new_cycles() {
         (Some("done"), Some("你标记了完成"))
     );
     assert_eq!(v["cycles"].as_array().map(Vec::len), Some(1), "{v}");
+    // the derived state rides along read-only, next to today's (#327)
+    assert_eq!(
+        (v["shadow"]["lane"].as_str(), v["shadow"]["agrees"].as_bool()),
+        (Some("done"), Some(true)),
+        "{}",
+        v["shadow"]
+    );
     let (_, state) = e.call("GET", "/api/state", None).await;
     let row = state["items"]
         .as_array()

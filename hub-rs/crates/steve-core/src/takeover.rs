@@ -269,7 +269,7 @@ impl Tx<'_> {
     }
 
     /// Steve's continues since you last did something on the item.
-    fn takeover_count(&self, item_id: &str) -> Result<u32> {
+    pub(crate) fn takeover_count(&self, item_id: &str) -> Result<u32> {
         let answered = self.last_answered(item_id)?;
         let t = self.db().timeline(item_id)?;
         Ok(t.iter()

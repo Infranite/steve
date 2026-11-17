@@ -791,6 +791,11 @@ pub trait Domain: Send + Sync + 'static {
     async fn lifecycle_view(&self, id: &str) -> BResult<Option<Value>> {
         Ok(None)
     }
+    /// The derived state of one item next to today's, in shadow (#327); `None` without a domain
+    /// that derives it, or for a conversation item. Read-only.
+    async fn shadow_view(&self, id: &str) -> BResult<Option<Value>> {
+        Ok(None)
+    }
     /// Read-only diagnostic projection; authorization is performed by the caller.
     async fn diagnostic_snapshot(&self, id: &str) -> BResult<Value> {
         todo_backend!("diagnostic_snapshot")

@@ -219,6 +219,9 @@ pub const MIGRATIONS: &[&str] = &[
     // 103: the morning brief: its schedule's alarms planned again by triggers, `briefings` (one per member
     // and local day), the topic `briefing.ready` and the feed kind `briefing`.
     include_str!("../migrations/103.sql"),
+    // 104: shadow facts of an item's work (#327): delivery facts with their provenance, waits, judge
+    // results and the operator's overrides of the named work policy. Nothing acts on them yet.
+    include_str!("../migrations/104.sql"),
 ];
 
 /// 027's item columns and their one-time backfill (applied by `run_pending` when `items.phase` is missing).

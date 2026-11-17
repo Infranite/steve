@@ -144,6 +144,8 @@ pub async fn get_one(
 ) -> ApiResult {
     own_item(&st, &c.ws, &id).await?;
     let lifecycle = st.domain.lifecycle_view(&id).await?;
+    // the derived state next to today's (#327): shown, not acted on
+    let shadow = st.domain.shadow_view(&id).await?;
     let workflow = st.domain.workflow_get(&id).await?;
     let dependency_wait = dependency_shown(st.domain.dependency_get(&id).await?);
     st.read(move |r| {
@@ -151,6 +153,9 @@ pub async fn get_one(
         let mut out = summary(r, i)?;
         if let Some(l) = lifecycle {
             out.insert("lifecycle".into(), l);
+        }
+        if let Some(v) = shadow {
+            out.insert("shadow".into(), v);
         }
         out.insert("workflow".into(), workflow);
         out.insert("dependency_wait".into(), dependency_wait);

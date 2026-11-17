@@ -42,6 +42,8 @@ export default {
     "markRead": "标为已读"
 },
   debug: {
+    shadow: "推算状态（影子）", shadowHint: "由事项的事实推算，与当前状态并列显示；尚不驱动任何动作。", shadowLane: "{{lane}} · 第 {{row}} 行", shadowAgrees: "与当前状态一致", shadowDiffers: "与当前状态不同（{{today}}）", shadowNext: "下一步：{{step}}", shadowNoNext: "没有下一步", shadowPredicates: "可评审 {{review}} · 可合并 {{merge}} · 可结项 {{close}}", shadowSettled: "停稳：{{settled}}", yes: "是", no: "否",
+    settledEvaluable: "可评估", settledBusy: "确知在忙", settledUnknown: "不明", laneNeedsYou: "要你处理", laneRunning: "进行中", laneDone: "已完成",
     open: "调试", title: "{{item}} · 调试", description: "查看当前阻塞与执行证据，新事项默认记录创建后 30 分钟的判断细节。",
     current: "当前状态", stateUnavailable: "暂时读不到当前状态。", refresh: "刷新", loading: "正在读取…",
     itemState: "事项状态：{{status}}", revision: "周期 {{cycle}} · 目标版本 {{revision}}", observed: "采样于 {{time}}",
