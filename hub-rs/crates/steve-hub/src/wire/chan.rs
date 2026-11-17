@@ -30,6 +30,7 @@ pub fn routes(ch: Channels, outbox: Arc<Outbox>) -> Router<Modules> {
         .route("/chan-messages/{id}/recall", post(recall))
         .route("/chan-messages/{id}/basis", get(basis))
         .route("/conversations", get(conversations))
+        .route("/conversations/channels", get(conversation_channels))
         .route(
             "/conversations/{space}/preferences",
             patch(conversation_preferences),
@@ -38,6 +39,8 @@ pub fn routes(ch: Channels, outbox: Arc<Outbox>) -> Router<Modules> {
             "/conversations/{space}/messages",
             get(conversation_messages),
         )
+        .route("/conversations/{space}/record", get(conversation_record))
+        .route("/conversations/{space}/read", post(conversation_read))
         .layer(Extension(outbox))
         .layer(Extension(ch))
 }
@@ -157,7 +160,7 @@ async fn conversations(
         .blocking(move |_| {
             let viewer = c2.modules().viewer(&who)?;
             let list = c2.store().reader(|c| {
-                steve_channels::conversations::list_page(c, &who.ws, &viewer, &query)
+                steve_channels::conversations::list_page(c, &who.ws, &viewer, &query, c2.now())
             })?;
             Ok(Json(serde_json::to_value(list).map_err(ApiError::from)?))
         })
@@ -203,6 +206,71 @@ async fn conversation_messages(
             let viewer = c2.modules().viewer(&who)?;
             let v = steve_channels::conversations::messages_of(&c2, &who.ws, &viewer, &space)?;
             Ok(Json(v))
+        })
+        .await
+}
+
+/// `GET /conversations/channels`: the channel switcher of 对话, the channel accounts the caller sees
+/// with how many of their conversations have new messages.
+async fn conversation_channels(
+    Extension(ch): Extension<Channels>,
+    who: Caller,
+) -> ApiResult<Json<Value>> {
+    let c2 = ch.clone();
+    ch.modules()
+        .blocking(move |_| {
+            let viewer = c2.modules().viewer(&who)?;
+            let list = c2
+                .store()
+                .reader(|c| steve_channels::conv_record::channels(&c2, c, &viewer, c2.now()))?;
+            Ok(Json(json!({ "channels": list })))
+        })
+        .await
+}
+
+/// `GET /conversations/:space/record`: the space's channel messages with what Steve did with each,
+/// a page at a time (`before`, `before_id`, `limit`), oldest first.
+async fn conversation_record(
+    Extension(ch): Extension<Channels>,
+    who: Caller,
+    Path(space): Path<String>,
+    Query(query): Query<steve_channels::conv_record::RecordQuery>,
+) -> ApiResult<Json<Value>> {
+    let c2 = ch.clone();
+    ch.modules()
+        .blocking(move |_| {
+            let viewer = c2.modules().viewer(&who)?;
+            let v = c2.store().reader(|c| {
+                steve_channels::conv_record::record(c, &who.ws, &viewer, &space, &query)
+            })?;
+            Ok(Json(v))
+        })
+        .await
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ConversationRead {
+    /// the newest message time the caller was shown
+    at: i64,
+}
+
+/// `POST /conversations/:space/read`: the caller's read marker of the conversation moves to `at`.
+async fn conversation_read(
+    Extension(ch): Extension<Channels>,
+    who: Caller,
+    Path(space): Path<String>,
+    Json(body): Json<ConversationRead>,
+) -> ApiResult<Json<Value>> {
+    let c2 = ch.clone();
+    ch.modules()
+        .blocking(move |_| {
+            let viewer = c2.modules().viewer(&who)?;
+            let now = c2.now();
+            c2.store().transaction(|tx| {
+                steve_channels::conv_record::mark_read(tx, &who.ws, &viewer, &space, body.at, now)
+            })?;
+            Ok(Json(json!({"ok": true})))
         })
         .await
 }

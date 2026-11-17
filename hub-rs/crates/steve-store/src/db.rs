@@ -188,6 +188,8 @@ pub const MIGRATIONS: &[&str] = &[
     // 92: the workflow statistics (#242): a session's first tool call; closing invalidations and pull
     // request merges become item marks (their timeline lines before, once).
     include_str!("../migrations/092.sql"),
+    // 93: how far each user has read a channel conversation (unread counts in 对话).
+    include_str!("../migrations/093.sql"),
 ];
 
 /// 027's item columns and their one-time backfill (applied by `run_pending` when `items.phase` is missing).

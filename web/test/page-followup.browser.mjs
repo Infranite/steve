@@ -22,6 +22,8 @@ try {
       const req = route.request(), u = new URL(req.url())
       if (u.origin !== base) return route.abort()
       if (!u.pathname.startsWith("/api/")) return route.continue()
+      /* showing a conversation moves your own read marker (#243): not a write to anything outside */
+      if (req.method() === "POST" && /^\/api\/conversations\/[^/]+\/read$/.test(u.pathname)) return route.fulfill({ json: { ok: true } })
       if (req.method() !== "GET") { writes.push(`${req.method()} ${u.pathname}`); return route.fulfill({ status: 405, json: { error: "fixture forbids writes" } }) }
       if (u.pathname.includes("/conversations/") && u.pathname.endsWith("/messages")) {
         requests++

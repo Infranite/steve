@@ -24,6 +24,10 @@ try {
       if (!u.pathname.startsWith("/api/")) return route.continue()
       const m = route.request().method()
       if (u.pathname === "/api/conversations") return route.fulfill({ json: { conversations: [] } })
+      /* the channel switcher and a conversation's record (#243): none here; showing it moves the read marker */
+      if (u.pathname === "/api/conversations/channels") return route.fulfill({ json: { channels: [] } })
+      if (u.pathname.endsWith("/record")) return route.fulfill({ json: { records: [], has_more: false, next: null } })
+      if (u.pathname.endsWith("/read") && m === "POST") return route.fulfill({ json: { ok: true } })
       if (u.pathname === "/api/conversations/chan%3Asp1/messages" || u.pathname === "/api/conversations/chan:sp1/messages") return route.fulfill({ json: { conversation: badge, messages: messages() } })
       if (u.pathname === "/api/decisions/dc1" && m === "POST") {
         decided.push(route.request().postDataJSON().choice)
