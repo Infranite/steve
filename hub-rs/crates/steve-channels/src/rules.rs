@@ -784,6 +784,21 @@ impl Trigger {
                 .any(|w| w == WHERE_EVERYWHERE || w == space_id || (dm && w == WHERE_ALL_DMS))
     }
 
+    /// The trigger word the text (after leading mentions) starts with and the instruction after
+    /// it, wherever the words work or not: what a message said, for the identity block
+    /// ([`crate::im_context`]). A word must end there (`/bot` does not start `/bots`).
+    pub fn split<'a>(&'a self, text: &str, mentions: &[String]) -> Option<(&'a str, String)> {
+        let t = strip_leading_mentions(text, mentions);
+        self.words.iter().find_map(|w| {
+            let rest = t.strip_prefix(w.as_str())?;
+            let ends = rest
+                .chars()
+                .next()
+                .is_none_or(|c| !(c.is_ascii_alphanumeric() || c == '_'));
+            ends.then(|| (w.as_str(), rest.trim().to_string()))
+        })
+    }
+
     /// The instruction after a trigger word, when the text (after leading mentions) starts with one
     /// in a space where they work. A word must end there (`/bot` does not start `/bots`).
     pub fn instruction(
@@ -796,15 +811,7 @@ impl Trigger {
         if !self.on || !self.applies(space_id, dm) {
             return None;
         }
-        let t = strip_leading_mentions(text, mentions);
-        self.words.iter().find_map(|w| {
-            let rest = t.strip_prefix(w.as_str())?;
-            let ends = rest
-                .chars()
-                .next()
-                .is_none_or(|c| !(c.is_ascii_alphanumeric() || c == '_'));
-            ends.then(|| rest.trim().to_string())
-        })
+        self.split(text, mentions).map(|(_, i)| i)
     }
 }
 

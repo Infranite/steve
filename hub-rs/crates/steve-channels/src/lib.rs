@@ -122,6 +122,8 @@ pub mod fake;
 pub mod fallback;
 pub mod flow_actions;
 pub mod history;
+pub mod im_context;
+pub mod im_conv_mcp;
 pub mod im_mcp;
 pub mod inbound;
 pub mod lifecycle;

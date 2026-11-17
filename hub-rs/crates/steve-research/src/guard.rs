@@ -7,14 +7,17 @@ use serde_json::Value;
 use std::fmt;
 use std::path::{Component, Path, PathBuf};
 
-/// Steve's read-only MCP tools (on the `steve` server).
-pub const MCP_TOOLS: [&str; 6] = [
+/// Steve's read-only MCP tools (on the `steve` server); the two chat read tools only in a channel
+/// conversation's run.
+pub const MCP_TOOLS: [&str; 8] = [
     "steve_knowledge_search",
     "steve_knowledge_read",
     "steve_items_search",
     "steve_item_read",
     "steve_sessions_list",
     "steve_debug",
+    "steve_im_thread",
+    "steve_im_media",
 ];
 
 /// Directories under the home directory that hold secrets. Relative to `Scope::home`.

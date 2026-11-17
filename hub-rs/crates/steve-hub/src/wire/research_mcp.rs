@@ -1,7 +1,8 @@
 //! Steve's `/mcp` for a research run's token (thread-routing §7.4): only read-only tools exist — the
 //! knowledge base (`steve_knowledge_search`, `steve_knowledge_read`), this workspace's items
-//! (`steve_items_search`, `steve_item_read`) and its agent sessions (`steve_sessions_list`). Anything
-//! else is refused. The token is the run's own
+//! (`steve_items_search`, `steve_item_read`) and its agent sessions (`steve_sessions_list`); for a run
+//! answering a channel conversation also that chat's thread and media
+//! ([`steve_channels::im_conv_mcp`], scoped to its space). Anything else is refused. The token is the run's own
 //! (`thread_runs.token_hash`), valid while the run is `running`.
 
 use axum::http::StatusCode;
@@ -405,6 +406,9 @@ pub async fn call(
             .await
             .unwrap_or_else(|e| Err(e.to_string()))
         }
+        n if steve_channels::im_conv_mcp::handles(n) => {
+            im_conv(x, run, n, args).await.map(|a| a.text_only())
+        }
         SESSIONS_LIST => {
             let (store, all) = (x.store.clone(), args["all"].as_bool().unwrap_or(false));
             let origin = run.message_id.clone();
@@ -422,6 +426,47 @@ pub async fn call(
     }
 }
 
+/// The chat read scope of `run`: `Some` only for a run answering a channel conversation's turn.
+async fn im_scope(x: &Extra, run: &ThreadRun) -> Option<steve_channels::im_conv_mcp::Scope> {
+    let (ch, ws, origin) = (
+        x.tools.channels.clone(),
+        run.workspace_id.clone(),
+        run.message_id.clone(),
+    );
+    tokio::task::spawn_blocking(move || ch.conv_read_scope(&ws, &origin))
+        .await
+        .ok()?
+        .map_err(|e| tracing::warn!("research chat scope not read: {e}"))
+        .ok()
+        .flatten()
+}
+
+/// A chat read tool for `run`, refused outside a channel conversation.
+async fn im_conv(
+    x: &Extra,
+    run: &ThreadRun,
+    name: &str,
+    args: &Value,
+) -> Result<steve_channels::im_conv_mcp::Answer, String> {
+    let Some(scope) = im_scope(x, run).await else {
+        return Err(REFUSED.into());
+    };
+    steve_channels::im_conv_mcp::call(&x.tools.channels, &scope, name, args).await
+}
+
+fn im_descriptors() -> Vec<steve_node_api::ToolDescriptor> {
+    steve_channels::im_conv_mcp::tools()
+        .into_iter()
+        .map(|t| steve_node_api::ToolDescriptor {
+            name: t["name"].as_str().unwrap_or_default().to_string(),
+            description: t["description"].as_str().unwrap_or_default().to_string(),
+            input_schema: t["inputSchema"].clone(),
+            read_only: true,
+            annotations: serde_json::Value::Null,
+        })
+        .collect()
+}
+
 /// The first meeting is on for `run` (`onboard_mcp::open`), asked off the async workers.
 async fn meeting(x: &Extra, run: &ThreadRun) -> bool {
     let (core, run) = (x.tools.core.clone(), run.clone());
@@ -430,9 +475,13 @@ async fn meeting(x: &Extra, run: &ThreadRun) -> bool {
         .unwrap_or(false)
 }
 
-/// What `/mcp` lists for `run`: the research tools, and the first meeting's while it is on for it.
+/// What `/mcp` lists for `run`: the research tools, the chat read tools in a channel conversation,
+/// and the first meeting's while it is on for it.
 async fn listed(x: &Extra, run: &ThreadRun) -> Vec<Value> {
     let mut list = tools();
+    if im_scope(x, run).await.is_some() {
+        list.extend(steve_channels::im_conv_mcp::tools());
+    }
     if meeting(x, run).await {
         list.extend(super::onboard_mcp::tools());
     }
@@ -454,10 +503,13 @@ pub fn descriptors() -> Vec<steve_node_api::ToolDescriptor> {
         .collect()
 }
 
-/// The catalog of the research job of `run`: [`descriptors`], and the first meeting's tools while
-/// it is on for that run.
+/// The catalog of the research job of `run`: [`descriptors`], the chat read tools in a channel
+/// conversation, and the first meeting's tools while it is on for that run.
 pub async fn catalog(x: &Extra, run: &ThreadRun) -> Vec<steve_node_api::ToolDescriptor> {
     let mut list = descriptors();
+    if im_scope(x, run).await.is_some() {
+        list.extend(im_descriptors());
+    }
     if meeting(x, run).await {
         list.extend(super::onboard_mcp::descriptors());
     }
@@ -508,6 +560,17 @@ pub async fn handle(x: &Extra, run: ThreadRun, msg: Value, owner: String) -> Res
                 .pointer("/params/arguments")
                 .cloned()
                 .unwrap_or_else(|| json!({}));
+            // a chat image goes along as MCP image content; anything else is text
+            if name == steve_channels::im_conv_mcp::MEDIA {
+                return match im_conv(x, &run, &name, &args).await {
+                    Ok(a) => {
+                        let mut content = vec![json!({"type": "text", "text": a.text})];
+                        content.extend(a.mcp_images());
+                        rpc(&id, json!({"content": content}))
+                    }
+                    Err(t) => text_result(&id, Err(t)),
+                };
+            }
             let out = call(x, &run, &name, &args, &owner).await;
             text_result(&id, out)
         }
@@ -517,5 +580,42 @@ pub async fn handle(x: &Extra, run: ThreadRun, msg: Value, owner: String) -> Res
             json!({"jsonrpc": "2.0", "id": id, "error": {"code": -32601, "message": format!("Method not found: {method}")}}).to_string(),
         )
             .into_response(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The chat read tools are never in the fixed research set (outside clients, the capability
+    /// page): only a channel conversation's run lists them, read-only.
+    #[test]
+    fn the_chat_read_tools_are_listed_only_per_run() {
+        let fixed: Vec<String> = tools()
+            .iter()
+            .filter_map(|t| t["name"].as_str().map(String::from))
+            .chain(descriptors().into_iter().map(|d| d.name))
+            .collect();
+        for name in [
+            steve_channels::im_conv_mcp::THREAD,
+            steve_channels::im_conv_mcp::MEDIA,
+        ] {
+            assert!(!fixed.iter().any(|n| n == name), "{name}");
+        }
+        let im = im_descriptors();
+        assert_eq!(
+            im.iter().map(|d| d.name.as_str()).collect::<Vec<_>>(),
+            [
+                steve_channels::im_conv_mcp::THREAD,
+                steve_channels::im_conv_mcp::MEDIA
+            ]
+        );
+        assert!(im.iter().all(|d| d.read_only));
+        for name in [
+            steve_channels::im_conv_mcp::THREAD,
+            steve_channels::im_conv_mcp::MEDIA,
+        ] {
+            assert!(steve_research::guard::MCP_TOOLS.contains(&name), "{name}");
+        }
     }
 }

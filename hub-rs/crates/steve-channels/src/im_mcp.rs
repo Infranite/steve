@@ -113,7 +113,7 @@ pub fn parse_time(v: &Value, tz: chrono_tz::Tz) -> Option<i64> {
     }
 }
 
-fn shown(at: i64, tz: chrono_tz::Tz) -> String {
+pub(crate) fn shown(at: i64, tz: chrono_tz::Tz) -> String {
     tz.timestamp_millis_opt(at)
         .single()
         .map(|d| d.format("%Y-%m-%d %H:%M").to_string())
