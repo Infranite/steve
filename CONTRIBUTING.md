@@ -55,6 +55,18 @@ Official GitHub cache actions restore Rust dependencies under a key made of the 
 
 A version is chosen when it is released, never ahead on a branch:
 
+- **What the three numbers mean.** Versions are `MAJOR.MINOR.PATCH`.
+  - **PATCH** goes up with every ordinary release: features, fixes, interface changes, migrations that run by themselves. Clients and Nodes of the previous release keep working with the new Hub.
+  - **MINOR** goes up (and PATCH starts again at 0) for a release that an operator must act on, or should know about before upgrading:
+    - the protocol between Hub and Node or Hub and clients changes, so older Nodes or clients must be upgraded first;
+    - a feature, setting, API or command-line form is removed or changes meaning;
+    - configuration has to be changed by hand;
+    - the upgrade cannot be undone by reinstalling the previous release (for example, a migration that older releases cannot read).
+
+    Its release notes start with what to do.
+  - **MAJOR** stays 0 until the interfaces and data formats are declared stable. It then becomes 1 once, by hand (`--version 1.0.0`).
+
+  A change that needs a MINOR release says so in the first line of its fragment (`Needs a minor release: <why>`), and whoever cuts the release then passes `--minor`.
 - **Release notes are fragments.** A change adds `docs/releases/unreleased/<item>.md` (its item, such as `ST-38.md`, or its branch name): what changes for the user, in a few sentences or bullets, with no version and no title. Do not write `docs/releases/X.Y.Z.md` on a branch; `python3 ops/cut-release.py lint` checks this.
 - **Releasing:** after the change is on `main`, run `python3 ops/cut-release.py cut`. It takes `main` as it is on `origin`, gives it the next free version (one more than the highest `vX.Y.Z` tag), and joins the fragments into `docs/releases/X.Y.Z.md`. Because `main` takes nothing but pull requests, that commit goes in as one: `cut` pushes it to `release/vX.Y.Z`, opens a pull request, waits for its CI run (the Rust and Apple jobs are skipped for it, as above), rebase-merges it, and pushes the annotated tag `vX.Y.Z` on the commit it became; the tag starts the Release workflow. If `main` moved before the merge or someone else released first, it closes that pull request and starts again. A release whose pull request merged but whose tag did not land is finished by the next `cut`. `--dry-run` shows the notes without releasing; `--minor` bumps the minor version. Releasing needs `gh` logged in with the right to open and merge pull requests and to push tags.
 - **Only a tested `main` is tagged.** `cut` asks GitHub (with `gh`) for the CI run on the commit it is about to release, waits while it runs (`--ci-wait`, 45 minutes by default), and refuses when it failed or there is none. Until that run has finished, the pull request's own run counts when it tested exactly what is being released: the pull request was up to date with `main` and rebase-merged, so `main` now ends in the same commits with the same trees, one for one. `cut` checks this itself, and then releases without waiting for the second run; a pull request that was behind `main`, was squashed, or whose run did not pass still waits for the run on `main`. Investigate test failures before releasing; a rerun is appropriate for a resolved runner or service failure, not a substitute for fixing a flaky test. `--skip-ci` releases without the check, on purpose. If the Release build on the tag fails on a flake, rerun it the same way on the same tag; nothing is published until every target is built.
