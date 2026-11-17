@@ -327,7 +327,7 @@ pub fn burst(target: &Said, before: &[Said], gap_ms: i64) -> Vec<String> {
 
 /// Your contacts in `ws` (the workspace owners', and those merged into them) and the personal
 /// accounts of the space's own connection, as SQL: `?1` = ws, `?2` = space.
-const MINE: &str = "WITH RECURSIVE mine(id) AS (
+pub(crate) const MINE: &str = "WITH RECURSIVE mine(id) AS (
        SELECT p.id FROM parties p JOIN workspace_members wm
            ON wm.user_id = p.user_id AND wm.workspace_id = ?1 AND wm.role = 'owner'
         WHERE p.workspace_id = ?1

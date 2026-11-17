@@ -443,6 +443,10 @@
 //!   is `ws`, or `history` for a history read.
 //! - `kind` is `text`, `rich`, `system` or `unknown`. For anything other than `text`, `text` is a
 //!   plain rendering or a short description.
+//! - When `text` is empty or only a bracketed placeholder (`[unsupported message]`) and `raw` is a
+//!   Feishu / Lark message as that platform's message API (`{msg_type, body: {content}}`) or receive
+//!   event (`{event: {message}}`) gives it, the Hub reads the text from `raw`: rich text and cards
+//!   keep their words. Media keys inside `raw` are never used (§8).
 //! - `attachments[].type` is `image`, `file`, `audio` or `video`. `key` (1–512 bytes) is the media
 //!   key (§8), and it is valid only together with this message.
 //!
