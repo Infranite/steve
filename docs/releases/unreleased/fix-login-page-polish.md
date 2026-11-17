@@ -1,0 +1,1 @@
+The sign-in page is quieter and livelier: the paragraph about where access tokens come from is gone from under the Sign in button (that guidance stays in `docs/deployment.md`), and Steve's face there is now the live one, whose eyes follow the pointer. It keeps still when the system asks for reduced motion. Bots' faces elsewhere stay static.

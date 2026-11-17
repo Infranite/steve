@@ -2,7 +2,6 @@ import { useNativeShell } from "@/use-native-shell"
 import { lazyView } from "@/lazy"
 import { ChatView } from "@/chat-view"
 import { useEffect, useState } from "react"
-import { Trans } from "react-i18next"
 import { TooltipProvider } from "@/components/ui/tooltip"
 import { Toaster, toast as notify } from "@/components/ui/toaster"
 import { SidebarInset, SidebarProvider } from "@/components/ui/sidebar"
@@ -99,7 +98,6 @@ function TokenSignIn() {
       {error && <div className="type-footnote text-destructive" role="alert" data-sign-in-error>{error}</div>}
       {there && <Button type="button" variant="outline" onClick={() => { location.href = openUrl(hubBase()) }} data-sign-in-there>{t("shell:hub.pairOpenThere")}</Button>}
       <Button type="submit" disabled={busy || !user.trim() || !token.trim()}>{busy ? <Spinner className="size-4" /> : t("shell:app.signIn")}</Button>
-      <div className="type-footnote text-muted-foreground"><Trans t={t} i18nKey="shell:app.tokenHint" components={{ c: <code className="type-code wrap-anywhere text-foreground/80" /> }} /></div>
     </form>
   )
 }
@@ -204,7 +202,8 @@ export default function App({ deliveryId }: { deliveryId?: string }) {
     route: location.hash || "#/", title: String(pageTitle).slice(0, 512), language: lang(),
     ready: !pairing && (up || !!login || hub === "missing"), authenticated: !login && hub === "ok" && !!st.workspace,
   }, !!login && (others || intent === "add") || hub === "missing")
-  const title = (sub: string) => <><Robot k="steve" size={72} /><div><div className="type-title">Steve</div><div className="mt-1 type-callout text-muted-foreground">{sub}</div></div></>
+  /* the sign-in page shows Steve's live face, whose eyes follow the pointer (it keeps still under reduced motion); the other splash pages keep the static one */
+  const title = (sub: string, live = false) => <><Robot k="steve" size={72} live={live} /><div><div className="type-title">Steve</div><div className="mt-1 type-callout text-muted-foreground">{sub}</div></div></>
   const list = others || intent === "add"
   if (pairing) return <Splash><PairClaim /></Splash>
   if ((a === "settings" || a === "devices") && b === "hub" && !st.login && (hub === "missing" || (!st.ready && !!st.error))) return <HubOfflinePage />
@@ -212,7 +211,7 @@ export default function App({ deliveryId }: { deliveryId?: string }) {
     <Splash>{title(t("shell:app.connectTitle"))}<HubsOffer className="max-w-xs" /><HubChooser down className="max-w-xs" /></Splash>
   )
   if (login) return (
-    <Splash>{title(t("shell:app.signInToContinue"))}<HubLine className="-mt-2" />
+    <Splash>{title(t("shell:app.signInToContinue"), true)}<HubLine className="-mt-2" />
       {list ? <><HubChooser className="max-w-xs" /><Button variant="ghost" size="sm" onClick={() => { setOthers(false); setIntent("") }} data-login-back>{t("common:action.back")}</Button></> : <>
         {signIn.token && <TokenSignIn />}
         {(signIn.link || !signIn.token) && !(signIn.refused && signIn.token) && <Button variant={signIn.token ? "ghost" : "default"} onClick={() => void browserSignIn()} data-login>{signIn.token ? t("shell:app.signInWithBrowser") : t("shell:app.signIn")}</Button>}
