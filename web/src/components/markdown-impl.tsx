@@ -7,6 +7,9 @@ import { cn } from "cn"
 import { st } from "@/store"
 import { A2uiPending, useA2uiNested } from "@/a2ui/host"
 import { useT } from "@/i18n"
+import { currentHub } from "@/hub"
+import { markdownImageSource, type MarkdownImageSource } from "@/markdown-images"
+import { Button } from "@/components/ui/button"
 
 /* A2UI blocks (ST-46) draw with the app's controls and the stats chart: loaded the first time a reply carries one */
 const A2uiBlock = lazy(() => import("@/a2ui/render").then((m) => ({ default: m.A2uiBlock })))
@@ -121,8 +124,41 @@ function A2uiCode(props: CodeProps) {
   return <Suspense fallback={<A2uiPending loading={!streaming} />}><A2uiBlock src={text(props.children)} streaming={streaming} code={code} /></Suspense>
 }
 
+type ImageProps = ComponentProps<DefaultComponents["img"]>
+function MarkdownImage({ source, ...props }: ImageProps & { source: MarkdownImageSource | null }) {
+  const t = useT(), root = useRef<HTMLSpanElement>(null), [failed, setFailed] = useState(false), [attempt, setAttempt] = useState(0)
+  // Cached failures may have completed before React attached the event handlers.
+  useEffect(() => {
+    const img = root.current?.querySelector("img")
+    if (img?.complete && !img.naturalWidth) setFailed(true)
+  }, [attempt])
+  return <span ref={root} className="inline-block max-w-full align-middle [&_[data-streamdown=image-wrapper]]:max-w-full" data-md-image>
+    {source && <span hidden={failed}>
+      <defaultComponents.img {...props} key={attempt} src={source.src} className={cn("h-auto", props.className)}
+        // CORS with credentials also permits the Hub's CORP-protected images in a separately served client.
+        crossOrigin={source.authenticated ? "use-credentials" : props.crossOrigin}
+        onLoad={(e) => { setFailed(false); props.onLoad?.(e) }} onError={(e) => { setFailed(true); props.onError?.(e) }} />
+    </span>}
+    {(!source || failed) && <span className="my-3 inline-flex max-w-full flex-wrap items-center gap-2 rounded-md border px-3 py-2 type-footnote text-muted-foreground" data-md-image-error>
+      <span role="status" className="min-w-0 break-words">
+        {props.alt && <span className="mr-2 font-medium text-foreground">{props.alt}</span>}
+        {t(source ? "misc:markdown.imageFailed" : "misc:markdown.imageUnavailable")}
+      </span>
+      {source && <Button type="button" variant="outline" size="xs" onClick={(e) => { e.preventDefault(); e.stopPropagation(); setFailed(false); setAttempt((n) => n + 1) }}>{t("common:action.retry")}</Button>}
+    </span>}
+  </span>
+}
+function Image(props: ImageProps) {
+  const source = typeof props.src === "string" ? markdownImageSource(props.src, currentHub()) : null
+  return <MarkdownImage key={source?.src ?? String(props.src)} {...props} source={source} />
+}
+const hasImage = (n?: Hast): boolean => n?.tagName === "img" || !!n?.children?.some(hasImage)
+
 const components: Components = {
   table: Table,
+  img: Image,
+  // Streamdown's image has block controls. Mixed text/images cannot live inside a <p>.
+  p: ({ node, children, ...props }) => hasImage(node) ? <div {...props}>{children}</div> : <defaultComponents.p {...props} node={node}>{children}</defaultComponents.p>,
   /* in-app links (item refs) stay in this tab: drop the target/rel rehype-harden adds to every link */
   a: ({ href, children, node: _n, target: _t, rel: _r, ...rest }) => href?.startsWith("#/")
     ? <a {...rest} href={href} onClick={(e) => e.stopPropagation()} className="font-medium tabular-nums text-blue hover:underline" data-ref={/^#\/items\/(.+)/.exec(href)?.[1]}>{children}</a>
