@@ -391,7 +391,7 @@ struct ScheduleTarget;
 
 impl DraftTarget for ScheduleTarget {
     fn prepare(&self, c: &Connection, viewer: &Viewer, id: Option<&str>) -> ApiResult<Prepared> {
-        let tz = schedules::workspace_tz(c, &viewer.ws)?;
+        let tz = schedules::person_tz(c, &viewer.ws, &viewer.user)?;
         let modes: Vec<&str> = MODES.iter().map(|m| m.label()).collect();
         let Some(id) = id else {
             return Ok(Prepared {

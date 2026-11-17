@@ -17,7 +17,7 @@
 //! A digest writes todos straight in (`source = steve`, marked “Steve 记的”), without asking; every change can
 //! be undone ([`crate::changes`]).
 
-use chrono::{Days, Months, NaiveDate, NaiveDateTime, TimeZone};
+use chrono::{Days, Months, NaiveDate, NaiveDateTime};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -36,8 +36,6 @@ pub const TEXT_MAX: usize = 500;
 pub const PRI_MAX: i64 = 3;
 /// The most occurrences completing a recurring todo late may step over to reach one not past.
 const RECUR_STEPS_MAX: u32 = 1000;
-/// The longest gap a daylight-saving change can open in a local clock, in minutes.
-const DST_GAP_MAX_MIN: i64 = 180;
 /// The link from an item to the goal it is part of.
 pub const PART_OF: &str = "part_of";
 
@@ -279,68 +277,9 @@ impl Recur {
     }
 }
 
-/// The time zone a person's local dates and times are in: their notification policy's, else the Hub's.
-#[derive(Debug, Clone, Copy)]
-pub enum Zone {
-    Tz(chrono_tz::Tz),
-    Hub,
-}
-
-impl Zone {
-    pub fn of(c: &Connection, ws: &str, user: &str) -> Zone {
-        c.query_row(
-            "SELECT timezone FROM notification_policies WHERE workspace_id = ? AND user_id = ?",
-            params![ws, user],
-            |r| r.get::<_, String>(0),
-        )
-        .ok()
-        .and_then(|s| s.parse::<chrono_tz::Tz>().ok())
-        .map_or(Zone::Hub, Zone::Tz)
-    }
-
-    pub fn name(&self) -> String {
-        match self {
-            Zone::Tz(t) => t.name().to_string(),
-            Zone::Hub => "hub-local".into(),
-        }
-    }
-
-    pub fn local(&self, ms: i64) -> Option<NaiveDateTime> {
-        match self {
-            Zone::Tz(t) => t.timestamp_millis_opt(ms).single().map(|d| d.naive_local()),
-            Zone::Hub => chrono::Local
-                .timestamp_millis_opt(ms)
-                .single()
-                .map(|d| d.naive_local()),
-        }
-    }
-
-    /// Unix ms of a local time: the first of a repeated one, and one in a daylight-saving gap moved past it.
-    pub fn instant(&self, at: NaiveDateTime) -> Option<i64> {
-        fn first<T: TimeZone>(tz: &T, at: NaiveDateTime) -> Option<i64> {
-            (0..=DST_GAP_MAX_MIN).find_map(|m| {
-                tz.from_local_datetime(&(at + chrono::Duration::minutes(m)))
-                    .earliest()
-                    .map(|d| d.timestamp_millis())
-            })
-        }
-        match self {
-            Zone::Tz(t) => first(t, at),
-            Zone::Hub => first(&chrono::Local, at),
-        }
-    }
-
-    /// RFC 3339 with this zone's offset.
-    pub fn show(&self, ms: i64) -> Option<String> {
-        match self {
-            Zone::Tz(t) => t.timestamp_millis_opt(ms).single().map(|d| d.to_rfc3339()),
-            Zone::Hub => chrono::Local
-                .timestamp_millis_opt(ms)
-                .single()
-                .map(|d| d.to_rfc3339()),
-        }
-    }
-}
+/// The time zone a person's local dates and times are in: their notification policy's, else the
+/// workspace's ([`steve_modules::zone`], the one rule every module reads).
+pub use steve_modules::zone::Zone;
 
 /// Whether `id` (of `ws`) has child todos.
 fn has_children(c: &Connection, id: &str) -> Result<bool> {
@@ -767,7 +706,7 @@ pub fn complete(
     if state != "done" || was == "done" {
         return Ok(None);
     }
-    let Some(next) = next_occurrence(Zone::of(tx, ws, &owner), &f, now) else {
+    let Some(next) = next_occurrence(Zone::of(tx, ws, &owner)?, &f, now) else {
         return Ok(None);
     };
     let (source, writer): (String, String) =

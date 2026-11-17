@@ -17,6 +17,7 @@ sha2 = "=0.11.1"
 subtle = "=2.6.1"
 zeroize = { version = "=1.9.1", features = ["serde"] }
 chrono = { version = "=0.4.45", default-features = false, features = ["clock"] }
+chrono-tz = "=0.10.4"
 axum = { version = "=0.8.9", default-features = false, features = ["json", "query"] }
 regex = "=1.13.1"
 # Connections (A2): token endpoints of OAuth providers.

@@ -11,6 +11,7 @@
 //! - B1, the seams between modules and steve-core: [`gateway`] (model calls),
 //!   [`hooks`] (item lifecycle), [`context`] (extra prompt context), [`panels`] (item sidebar panels),
 //!   [`outbound`] (disclosure check), [`clock`]; decision handlers are in [`decisions`];
+//! - [`zone`]: whose clock a local date or time is read on (a person's, else the workspace's);
 //! - [`net`]: the `STEVE_FORBID_REAL_HOSTS=1` guard every outbound client calls before connecting.
 //!
 //! The SQL lives in `steve_store::base` (tables of migration 4). Integration (steve-hub / steve-core,
@@ -49,6 +50,7 @@ pub mod shown;
 pub mod sse;
 pub mod testkit;
 pub mod vault;
+pub mod zone;
 
 use std::collections::BTreeMap;
 use std::sync::Arc;

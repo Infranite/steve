@@ -3,7 +3,7 @@
 //! The scheduler (S7) claims a trigger, asks [`plan_claim`] what to do with it, and writes the
 //! `flow_runs` row and the new `next_at` in the same transaction.
 
-use chrono::DateTime;
+use chrono::{DateTime, TimeZone};
 use chrono_tz::Tz;
 use serde::{Deserialize, Serialize};
 
@@ -203,6 +203,80 @@ pub fn overlap_blocks(policy: OverlapPolicy, previous_status: Option<&str>) -> b
     policy == OverlapPolicy::Skip && previous_status.is_some_and(is_active_status)
 }
 
+/// When an alarm ([`crate::alarms`]) stops being worth firing (`time_alarms.stale_at`, computed when
+/// it is planned). Like a schedule's missed rule, but for one-off alarms.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "rule", content = "at")]
+pub enum Staleness {
+    /// Never: one claimed late still fires (a todo reminder, a snooze wake-up).
+    Never,
+    /// Once the thing it is about has started (a reminder before a meeting): `stale_at` = its start.
+    StaleAfterStart,
+    /// After a local time of the planned day, minutes since midnight (the morning brief: 12:00).
+    StaleAfter(u16),
+}
+
+impl Staleness {
+    /// `stale_at` of an alarm planned for `planned_for`, about something starting at `start`
+    /// (`StaleAfterStart` without a start never goes stale), on `tz`'s clock.
+    pub fn stale_at(self, planned_for: i64, start: Option<i64>, tz: Tz) -> Option<i64> {
+        match self {
+            Staleness::Never => None,
+            Staleness::StaleAfterStart => start,
+            Staleness::StaleAfter(minute) => {
+                let local = tz.timestamp_millis_opt(planned_for).single()?.naive_local();
+                let at = local.date().and_hms_opt(
+                    u32::from(minute.min(1439) / 60),
+                    u32::from(minute.min(1439) % 60),
+                    0,
+                )?;
+                steve_modules::zone::instant(tz, at)
+            }
+        }
+    }
+}
+
+/// How quiet hours treat a notification topic ([`crate::alarms::TOPICS`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QuietRule {
+    /// Postponed until the quiet hours end (quiet ≠ muted: nothing is dropped).
+    Postpone,
+    /// Delivered on time without a sound (it is only useful on time).
+    Silent,
+}
+
+/// What a due alarm does when claimed ([`plan_alarm`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AlarmAction {
+    /// Fire now; `late_ms` past its time (0 when on time or early).
+    Fire { late_ms: i64 },
+    /// Past its `stale_at`: written `stale`, nothing sent.
+    Stale,
+    /// Within the owner's quiet hours and its topic waits: claimed again at `until`.
+    Hold { until: i64 },
+}
+
+/// Decides a due alarm (`fire_at <= now`): stale first, then quiet hours. `quiet_ends` is when the
+/// owner's quiet hours end if `now` is inside them and they would hear it (`None` otherwise).
+pub fn plan_alarm(
+    fire_at: i64,
+    stale_at: Option<i64>,
+    now: i64,
+    quiet_ends: Option<i64>,
+    rule: QuietRule,
+) -> AlarmAction {
+    if stale_at.is_some_and(|s| now >= s) {
+        return AlarmAction::Stale;
+    }
+    if let (Some(until), QuietRule::Postpone) = (quiet_ends, rule) {
+        return AlarmAction::Hold { until };
+    }
+    AlarmAction::Fire {
+        late_ms: (now - fire_at).max(0),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -358,5 +432,56 @@ mod tests {
         assert_eq!(OverlapPolicy::from_db(Some("x")), OverlapPolicy::Skip);
         assert_eq!(MissedPolicy::default(), MissedPolicy::CatchUpOnce);
         assert_eq!(OverlapPolicy::default(), OverlapPolicy::Skip);
+    }
+
+    #[test]
+    fn staleness_rules() {
+        let tz = parse_tz("Asia/Shanghai").unwrap();
+        let at = ms(2026, 11, 18, 0, 30); // 08:30 local
+        assert_eq!(Staleness::Never.stale_at(at, Some(at + 1), tz), None);
+        let start = at + 600_000;
+        assert_eq!(
+            Staleness::StaleAfterStart.stale_at(at, Some(start), tz),
+            Some(start)
+        );
+        assert_eq!(Staleness::StaleAfterStart.stale_at(at, None, tz), None);
+        // 12:00 local of the planned day = 04:00 UTC
+        assert_eq!(
+            Staleness::StaleAfter(12 * 60).stale_at(at, None, tz),
+            Some(ms(2026, 11, 18, 4, 0))
+        );
+        assert_eq!(
+            serde_json::to_value(Staleness::StaleAfter(720)).unwrap(),
+            serde_json::json!({"rule": "stale_after", "at": 720})
+        );
+        assert_eq!(
+            serde_json::to_value(Staleness::StaleAfterStart).unwrap(),
+            serde_json::json!({"rule": "stale_after_start"})
+        );
+    }
+
+    #[test]
+    fn an_alarm_goes_stale_waits_out_quiet_hours_or_fires() {
+        let t = 1_000_000;
+        assert_eq!(
+            plan_alarm(t, None, t + 5, None, QuietRule::Postpone),
+            AlarmAction::Fire { late_ms: 5 }
+        );
+        assert_eq!(
+            plan_alarm(t, None, t - 500, None, QuietRule::Postpone),
+            AlarmAction::Fire { late_ms: 0 }
+        );
+        assert_eq!(
+            plan_alarm(t, Some(t + 10), t + 10, Some(t + 99), QuietRule::Postpone),
+            AlarmAction::Stale
+        );
+        assert_eq!(
+            plan_alarm(t, None, t + 1, Some(t + 99), QuietRule::Postpone),
+            AlarmAction::Hold { until: t + 99 }
+        );
+        assert_eq!(
+            plan_alarm(t, Some(t + 50), t + 1, Some(t + 99), QuietRule::Silent),
+            AlarmAction::Fire { late_ms: 1 }
+        );
     }
 }

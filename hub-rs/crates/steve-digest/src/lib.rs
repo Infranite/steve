@@ -44,6 +44,7 @@ pub mod profile;
 pub mod queue;
 pub mod summary;
 pub mod todo;
+pub mod todo_alarms;
 pub mod todo_tools;
 pub mod tools;
 pub mod window;
@@ -59,26 +60,6 @@ pub(crate) fn event(tx: &steve_store::Tx, ws: &str, id: &str) {
         id: id.into(),
         ws: ws.into(),
     });
-}
-
-/// Unix ms as `MM-DD HH:MM` in the Hub's local time (packet text, tool results).
-pub(crate) fn short_time(ms: i64) -> String {
-    use chrono::TimeZone;
-    chrono::Local
-        .timestamp_millis_opt(ms)
-        .earliest()
-        .map(|d| d.format("%m-%d %H:%M").to_string())
-        .unwrap_or_default()
-}
-
-/// The local day `YYYY-MM-DD` of Unix ms.
-pub(crate) fn day_of(ms: i64) -> String {
-    use chrono::TimeZone;
-    chrono::Local
-        .timestamp_millis_opt(ms)
-        .earliest()
-        .map(|d| d.format("%Y-%m-%d").to_string())
-        .unwrap_or_default()
 }
 
 /// The first `n` characters of `s`, with `…` when cut.

@@ -149,7 +149,8 @@ pub fn run_conv(
         since: initial_since(now, b),
         ..Default::default()
     });
-    let day = crate::day_of(now);
+    // the budget day, on the clock of the person the digest is for
+    let day = steve_modules::zone::Zone::of_owner(tx, ws)?.day(now);
     if k.day != day {
         k.day = day;
         k.spent = 0;

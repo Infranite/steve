@@ -212,6 +212,10 @@ pub const MIGRATIONS: &[&str] = &[
     // `message_id`; `notification_policies.starred_in_quiet`), and the feed reads it as its own kind (`feed_entries`
     // rebuilt to allow `starred`; 098's triggers on it created again).
     include_str!("../migrations/101.sql"),
+    // 102: alarms (`time_alarms`, each fires at most once; `time_alarm_dirty`, the subjects to plan again, written
+    // by triggers on todos); a personal notification's one topic (`personal_notifications.topic`, 101's `kind`
+    // folded in and legacy), and the feed kind `reminder`.
+    include_str!("../migrations/102.sql"),
 ];
 
 /// 027's item columns and their one-time backfill (applied by `run_pending` when `items.phase` is missing).

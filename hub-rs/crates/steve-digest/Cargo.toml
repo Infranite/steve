@@ -10,6 +10,8 @@ steve-store = { path = "../steve-store" }
 # Source adapter reuses channel visibility rather than widening personal-account access.
 steve-channels = { path = "../steve-channels" }
 steve-modules = { path = "../steve-modules" }
+# A todo's reminders and snooze wake-ups are steve-flow alarms (`todo_alarms`).
+steve-flow = { path = "../steve-flow" }
 steve-knowledge = { path = "../steve-knowledge" }
 steve-i18n = { path = "../steve-i18n" }
 rust-i18n = "=4.2.4"

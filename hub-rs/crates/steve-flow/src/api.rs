@@ -197,7 +197,9 @@ async fn create(
     b.check(true)?;
     let tz_name = match &b.tz {
         Some(t) => t.trim().to_string(),
-        None => cx.store().reader(|c| schedules::workspace_tz(c, &who.ws))?,
+        None => cx
+            .store()
+            .reader(|c| schedules::person_tz(c, &who.ws, &who.me))?,
     };
     let tz = zone(&tz_name)?;
     let (when, expr) = resolve_time(&cx, b.when.as_deref(), b.cron.as_deref(), tz).await?;
@@ -406,7 +408,10 @@ async fn parse(Extension(cx): Cx, who: Caller, Body(b): Body<ParseBody>) -> ApiR
     Check::new().len("when", &b.when, 1, 60).done()?;
     let tz = match &b.tz {
         Some(t) => zone(t)?,
-        None => zone(&cx.store().reader(|c| schedules::workspace_tz(c, &who.ws))?)?,
+        None => zone(
+            &cx.store()
+                .reader(|c| schedules::person_tz(c, &who.ws, &who.me))?,
+        )?,
     };
     let p = parse_phrase(&cx, &b.when, tz).await?;
     Ok(Json(serde_json::to_value(p)?))

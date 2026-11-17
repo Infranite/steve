@@ -26,5 +26,6 @@
   "digest.todo.item": "No such item",
   "digest.todo.not_goal": "Only a goal has items linked to it",
   "digest.todo.digest_only": "Only the workspace owner's todos link to matters, source messages and people",
-  "digest.todo.not_yours": "This is not your todo"
+  "digest.todo.not_yours": "This is not your todo",
+  "digest.alarm.due": "due %{at}"
 }

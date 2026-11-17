@@ -93,10 +93,11 @@ fn applies_on_an_099_database_and_keeps_the_feed() {
         0
     );
 
-    // a starred contact's notification: its own kind in the feed, after the removed number
+    // a starred contact's notification: its own kind in the feed, after the removed number (written with its
+    // topic: 102 folded this migration's `kind` into `topic`)
     c.execute_batch(
-        "INSERT INTO personal_notifications(id, workspace_id, user_id, event_id, delivery_key, mode, body, state, kind, message_id, created)
-           VALUES ('ntf_2', 'default', 'alice', 'cm_1', 'notification:cm_1:alice', 'now', 'A 私聊你', 'waiting', 'starred', 'cm_1', 20);",
+        "INSERT INTO personal_notifications(id, workspace_id, user_id, event_id, delivery_key, mode, body, state, topic, message_id, created)
+           VALUES ('ntf_2', 'default', 'alice', 'cm_1', 'notification:cm_1:alice', 'now', 'A 私聊你', 'waiting', 'contact.starred', 'cm_1', 20);",
     )
     .unwrap();
     let (seq, kind): (i64, String) = c
