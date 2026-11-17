@@ -88,7 +88,11 @@ function loadToday(day: string) {
   if (today.ws !== ws) { today.ws = ws; today.agenda = null }
   todayFlight = true; todayDay = day
   calendarApi.events().then(seen).then((a) => { if (ws === (st.workspace?.id ?? null)) today.agenda = a }, () => { today.agenda = null })
-    .finally(() => { todayFlight = false; today.ver++; todaySubs.forEach((f) => f()) })
+    .finally(() => {
+      todayFlight = false; today.ver++; todaySubs.forEach((f) => f())
+      /* the workspace changed while this was on its way: read the new one's */
+      if ((st.workspace?.id ?? null) !== ws) loadToday(day)
+    })
 }
 /** today's agenda (the Hub's today, in the reader's zone), loaded once per workspace and day and on `calendar` events;
  *  null on a Hub without calendars */
