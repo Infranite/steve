@@ -2104,3 +2104,12 @@ async fn target_refusal_preserves_ext_ws_code_and_recovers_without_disabling_oth
         1
     );
 }
+
+#[test]
+fn personal_send_retains_the_protocol_dedupe_window() {
+    // Outbox dispatches personal accounts through ActAsUser, not ChannelAdapter. Both routes
+    // must expose the protocol's 24-hour guarantee after a lost response or a Hub restart.
+    let ext = ExtWs::new();
+    let personal: &dyn ActAsUser = &ext;
+    assert_eq!(personal.send_dedup(), Some(Duration::from_secs(24 * 3600)));
+}

@@ -988,6 +988,12 @@ impl ActAsUser for ExtWs {
         self.adapter()
     }
 
+    fn send_dedup(&self) -> Option<Duration> {
+        // Personal sends use this trait rather than ChannelAdapter. The wire protocol's
+        // mandatory 24-hour guarantee applies to the same key and payload on both paths.
+        Some(Duration::from_secs(24 * 3600))
+    }
+
     async fn send(
         &self,
         cx: &ConnCx,
