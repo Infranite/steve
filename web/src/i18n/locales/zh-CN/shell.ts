@@ -362,6 +362,9 @@ export default {
     page: {
       chat: "对话",
       inbox: "待处理",
+      calendar: "日历",
+      todos: "待办",
+      goals: "待办 · 目标",
       items: "事项",
       projects: "项目",
       sessions: "会话",
@@ -386,6 +389,7 @@ export default {
     empty: "没有匹配的结果",
     actions: "操作",
     newItem: "新事项",
+    newTodo: "新待办",
     newProject: "新建项目",
     newBot: "新建 Bot",
     switchHub: "切换 Hub",

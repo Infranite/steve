@@ -219,6 +219,8 @@ export default {
   },
   nav: {
     feed: "Feed",
+    calendar: "Calendar",
+    todos: "Todos",
     chat: "Chat",
     inbox: "Inbox",
     items: "Items",
@@ -260,6 +262,8 @@ export default {
     crumbsMenu: "More levels",
     breadcrumb: "Breadcrumb",
     tabs: "Main navigation",
+    todoCount_one: "{{count}} due today or overdue",
+    todoCount_other: "{{count}} due today or overdue",
   },
   cmd: {
     newItem: "New item",

@@ -3,6 +3,7 @@
 import { Children, Fragment, Suspense, lazy, memo, useEffect, useLayoutEffect, useId, useRef, useState, useSyncExternalStore, type ComponentProps, type InputHTMLAttributes, type ReactNode, type Ref } from "react"
 import { flushSync } from "react-dom"
 import { Robot } from "@/robot"
+import { MineButton } from "@/mine"
 import { clockDur } from "@/i18n/format"
 import { LANGS, lang, setLang, t, useT, type Lang } from "@/i18n"
 import { cn } from "cn"
@@ -513,7 +514,7 @@ export function Page({ title, sub, back, actions, toolbar, toolbarTop = false, c
           <Breadcrumb aria-label={t("core:sidebar.breadcrumb")} moreLabel={(count) => t("core:sidebar.crumbsMore", { count })} menuLabel={t("core:sidebar.crumbsMenu")} separator="chevron" currentLast={!bar && !!textOf(title)} data-quiet={scrolled || noTitle ? undefined : ""}
             className={cn("steve-crumbs type-callout", bar ? "shrink-0" : "min-w-0")}
             items={[{ label: back[1], href: back[0], icon: <ChevronLeftIcon className="size-4" />, data: { "data-back": "" } }, ...(!bar && textOf(title) ? [{ label: textOf(title) }] : [])]} />
-        ) : null}
+        ) : <MineButton className="-ml-0.5" />}
         {bar ?? (!back && <span className={cn("min-w-0 truncate type-headline transition-opacity duration-180", scrolled || noTitle ? "opacity-100" : "opacity-0")}>{title}</span>)}
         <span className="flex-1" />
         {/* on a phone the sidebar is away: the running-status pill sits in the page's header instead */}

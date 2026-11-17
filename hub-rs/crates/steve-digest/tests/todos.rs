@@ -524,6 +524,11 @@ async fn every_member_has_their_own_todos_and_nobody_elses() {
     )
     .await;
     assert_eq!(g["children"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        g["items"],
+        json!(["ST-2"]),
+        "the goal page lists its linked items"
+    );
     assert_eq!(g["progress"]["pct"], 50);
     let (_, b) = call(
         &app,

@@ -370,6 +370,9 @@ export default {
     page: {
       chat: "Chat",
       inbox: "Inbox",
+      calendar: "Calendar",
+      todos: "Todos",
+      goals: "Todos · Goals",
       items: "Items",
       projects: "Projects",
       sessions: "Conversations",
@@ -394,6 +397,7 @@ export default {
     empty: "No matches",
     actions: "Actions",
     newItem: "New item",
+    newTodo: "New todo",
     newProject: "New project",
     newBot: "New bot",
     switchHub: "Switch Hub",

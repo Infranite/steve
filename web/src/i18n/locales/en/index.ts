@@ -22,6 +22,7 @@ import thread from "./thread.ts"
 import vault from "./vault.ts"
 import yolo from "./yolo.ts"
 import misc from "./misc.ts"
+import todos from "./todos.ts"
 import common from "./common.ts"
 
-export default { hub, device, devices, accounts, api, views, manage, core, pages, shell, auto, channels, github, integrations, knowledge, caps, mail, people, stats, thread, vault, yolo, misc, common }
+export default { hub, device, devices, accounts, api, views, manage, core, pages, shell, auto, channels, github, integrations, knowledge, caps, mail, people, stats, thread, vault, yolo, misc, todos, common }
