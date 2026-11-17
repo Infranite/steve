@@ -30,6 +30,8 @@ test("a download in progress shows its bytes, speed, share and time, the steps a
   assert.deepEqual(trail.map(s => [s.id, s.state]), [["probe", "done"], ["fetch", "running"], ["send", "pending"], ["setup", "pending"]])
   assert.equal(trail[0].duration, 2000)
   const f = trail[1]
+  assert.equal(f.title, "fetch text", "the Hub's line while it runs")
+  assert.equal(trail[0].title, "连接目标机器")
   assert.equal(f.status, "10.0 MB / 40.0 MB · 1.0 MB/s")
   assert.equal(f.percent, 25)
   assert.equal(f.startedAt, now - 9000)
@@ -64,22 +66,23 @@ test("a failure says at which step, after how long and why", () => {
   const o = op({ state: "failed", failed_step: "send", error: "发送安装包卡住了", steps: [step("probe"), step("fetch"), step("send", { elapsed_ms: 74_000, text: "正在把安装包发到目标机器" })] })
   const trail = installTrail(o, 0, t)
   assert.deepEqual(trail.map(s => s.state), ["done", "done", "failed", "pending"])
-  assert.deepEqual(failureOf(o, t), { step: "正在把安装包发到目标机器", elapsed: "1:14", error: "发送安装包卡住了" })
+  assert.deepEqual(failureOf(o, t), { step: "把安装包发到目标机器", elapsed: "1:14", error: "发送安装包卡住了" })
+  assert.equal(trail[2].title, "把安装包发到目标机器", "a step that ended goes by its name")
   assert.equal(failureOf(op({}), t), null)
   const said = t("shell:devices.install.failedAt", { step: "x", elapsed: "1:14" })
   assert.ok(said.includes("x") && said.includes("1:14"), said)
 })
 
-test("a page opened later picks the running install, else the newest unfinished one", () => {
+test("a page opened later picks the running install, else the newest one", () => {
   assert.equal(resumable([op({ id: "a", state: "failed" }), op({ id: "b" })]).id, "b")
   assert.equal(resumable([op({ id: "a", state: "failed" }), op({ id: "b", state: "done" })]).id, "a")
-  assert.equal(resumable([op({ id: "a", state: "done" })]), null)
+  assert.equal(resumable([op({ id: "a", state: "done" })]).id, "a", "a finished one still shows its result")
   assert.equal(resumable([]), null)
 })
 
 test("every install string is there in both languages", () => {
   for (const lang of ["zh-CN", "en"]) {
-    for (const key of ["progress", "working", "failed", "finished", "pending", "of", "failedAt", "joined", "retry",
+    for (const key of ["progress", "working", "failed", "finished", "pending", "of", "failedAt", "joined", "retry", "another",
       "kind.probe", "kind.fetch", "kind.send", "kind.setup",
       "phase.download", "phase.verify", "phase.verifying", "phase.cached", "phase.install", "phase.pair", "phase.adapters", "phase.start"])
       assert.ok(i18n.exists(`shell:devices.install.${key}`, { lng: lang }), `${lang} ${key}`)

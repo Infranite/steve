@@ -92,7 +92,8 @@ export function installTrail(op: RInstall, receivedAt: number, t: T): InstallTra
     const elapsed = s.elapsed_ms ?? 0
     const step: InstallTrailStep = {
       id: s.kind,
-      title: s.text || t(`shell:devices.install.kind.${s.kind}`),
+      /* the Hub's line says what is happening ("正在…") while it does; a finished step goes by its name */
+      title: (running && s.text) || t(`shell:devices.install.kind.${s.kind}`),
       state: running ? "running" : failed ? "failed" : "done",
       substeps: substepsOf(s, running || failed, t),
     }
@@ -117,13 +118,14 @@ export function failureOf(op: RInstall, t: T): { step: string; elapsed: string; 
   if (op.state !== "failed") return null
   const s = [...op.steps].reverse().find(x => x.kind === op.failed_step) ?? op.steps[op.steps.length - 1]
   return {
-    step: s ? s.text || t(`shell:devices.install.kind.${s.kind}`) : "",
+    step: s ? t(`shell:devices.install.kind.${s.kind}`) : "",
     elapsed: s ? formatElapsed(s.elapsed_ms ?? 0) : "",
     error: op.error ?? "",
   }
 }
 
-/** the install a page opened later shows: one that runs, else the newest one not yet done */
+/** the install a page opened later shows: one that runs, else the newest one, finished or not (the Hub forgets
+ * an install an hour after it was started) */
 export function resumable(ops: RInstall[]): RInstall | null {
-  return ops.find(o => o.state === "running") ?? (ops[0] && ops[0].state !== "done" ? ops[0] : null)
+  return ops.find(o => o.state === "running") ?? ops[0] ?? null
 }

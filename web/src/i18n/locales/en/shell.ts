@@ -170,6 +170,7 @@ export default {
       step2: "2. Paste the tc… address it prints here. The Hub does the rest: it fetches and checks the installer, installs, pairs and starts the Node, which needs no fingerprint check this way:",
       run: "Install",
       retry: "Retry",
+      another: "Install another",
       done: "Done: Node {{id}} is paired and started. Give it project directories to use it.",
       progress: "Install progress",
       working: "Working",
