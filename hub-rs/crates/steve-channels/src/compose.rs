@@ -1032,7 +1032,8 @@ impl Composer {
     }
 
     /// On your own account, a reply goes through the checks of writing as you ([`voice_verdict`]):
-    /// sent back once with what was wrong, then given up.
+    /// sent back once with what was wrong, then handed to you. Not what you asked for yourself (an
+    /// instruction: your trigger words, a flow step's text, your answer in a conversation).
     async fn in_your_voice(
         &self,
         ch: &Channels,
@@ -1040,7 +1041,12 @@ impl Composer {
         opts: &ComposeOpts,
         first: Once,
     ) -> ChannelResult<Reply> {
-        let Some(feedback) = voice_verdict(plan.mode, &first.reply, first.style.as_ref()) else {
+        let Some(feedback) = voice_verdict(
+            plan.mode,
+            instructed(opts),
+            &first.reply,
+            first.style.as_ref(),
+        ) else {
             return Ok(first.reply);
         };
         let found: Vec<String> = crate::voice::problems(&first.reply.text, first.style.as_ref())
@@ -1130,20 +1136,36 @@ struct Once {
     style: Option<crate::voice::Style>,
 }
 
+/// You said what to write ([`ComposeOpts::instruction`]): your trigger words, a flow step's text,
+/// your answer in a conversation. The checks of writing as you never override it.
+pub fn instructed(opts: &ComposeOpts) -> bool {
+    opts.instruction
+        .as_deref()
+        .is_some_and(|i| !i.trim().is_empty())
+}
+
 /// Whether a reply goes back for a second try, and with what: only the composer's own reply on your
-/// own account (its provenance: a Bot's reply, a question to you or a skip is never checked), and
-/// only when [`crate::voice::problems`] finds something against your habits (`style`).
-pub fn voice_verdict(mode: Mode, r: &Reply, style: Option<&crate::voice::Style>) -> Option<String> {
-    if mode != Mode::Own || r.generation.outcome != Outcome::Reply {
+/// own account (its provenance: a Bot's reply, a question to you or a skip is never checked), not
+/// one you said what to write (`instructed`, [`instructed`]), and only when
+/// [`crate::voice::problems`] finds something against your habits (`style`).
+pub fn voice_verdict(
+    mode: Mode,
+    instructed: bool,
+    r: &Reply,
+    style: Option<&crate::voice::Style>,
+) -> Option<String> {
+    if mode != Mode::Own || instructed || r.generation.outcome != Outcome::Reply {
         return None;
     }
     let found = crate::voice::problems(&r.text, style);
     (!found.is_empty()).then(|| crate::voice::feedback(&r.text, &found))
 }
 
-/// The second try's result: a reply that passes, a question to you or a skip as the model gave it;
-/// a reply still wrong, or a second need for context, is not drafted — a skip with the reason
-/// ([`crate::voice::gave_up`]).
+/// The second try's result: a reply that passes, a question to you or a skip as the model gave it.
+/// A reply still wrong, or a second need for context, is never dropped: the composer had decided the
+/// message needs an answer, so it becomes a question to you (the hand-off card) with what was wrong
+/// as its note and its reason ([`crate::voice::gave_up`]). A wrong-sounding draft costs you a look;
+/// a dropped message costs a conversation.
 pub fn settle_revised(
     first: &Reply,
     mut second: Reply,
@@ -1158,8 +1180,10 @@ pub fn settle_revised(
     if still.is_empty() && second.generation.outcome == Outcome::Reply {
         return second;
     }
-    second.generation.outcome = Outcome::Skip;
-    second.text = crate::voice::gave_up(&still);
+    let why = crate::voice::gave_up(&still);
+    second.generation.outcome = Outcome::AskOwner;
+    second.generation.why = why.clone();
+    second.text = why;
     second
 }
 
@@ -1252,25 +1276,33 @@ mod outcome_tests {
         };
         let s = Some(&style);
         let options = r(Outcome::Reply, "1. 重启\n2. 回滚");
-        assert!(voice_verdict(Mode::Own, &options, s).is_some());
-        // a bot's reply, a question to you, a skip: never checked
-        assert!(voice_verdict(Mode::Bot, &options, s).is_none());
-        assert!(voice_verdict(Mode::Own, &r(Outcome::AskOwner, "1. a\n2. b"), s).is_none());
-        assert!(voice_verdict(Mode::Own, &r(Outcome::Reply, "先重启"), s).is_none());
-        // the second try: fine → kept; still wrong → not drafted, with the reason; a question to
-        // you or a skip → as given
+        assert!(voice_verdict(Mode::Own, false, &options, s).is_some());
+        // a bot's reply, what you said to write, a question to you, a skip: never checked
+        assert!(voice_verdict(Mode::Bot, false, &options, s).is_none());
+        assert!(voice_verdict(Mode::Own, true, &options, s).is_none());
+        assert!(voice_verdict(Mode::Own, false, &r(Outcome::AskOwner, "1. a\n2. b"), s).is_none());
+        assert!(voice_verdict(Mode::Own, false, &r(Outcome::Reply, "先重启"), s).is_none());
+        // the second try: fine → kept; still wrong → a question to you with the reason, never a
+        // skip; a question to you or a skip the model gave → as given
         let ok = settle_revised(&options, r(Outcome::Reply, "先重启"), s);
         assert_eq!(
             (ok.generation.outcome, ok.text.as_str()),
             (Outcome::Reply, "先重启")
         );
-        let bad = settle_revised(&options, r(Outcome::Reply, "收到，1. 重启\n2. 回滚"), s);
-        assert_eq!(bad.generation.outcome, Outcome::Skip);
+        let mut wrong = r(Outcome::Reply, "收到，1. 重启\n2. 回滚");
+        wrong.generation.why = "长".into();
+        let bad = settle_revised(&options, wrong, s);
+        assert_eq!(bad.generation.outcome, Outcome::AskOwner);
         assert!(bad.text.starts_with(GAVE_UP), "{}", bad.text);
+        assert_eq!(
+            bad.generation.why, bad.text,
+            "the reason is the give-up, not the model's"
+        );
         let ask = settle_revised(&options, r(Outcome::AskOwner, "要重启吗"), s);
         assert_eq!(ask.generation.outcome, Outcome::AskOwner);
         let more = settle_revised(&options, r(Outcome::NeedContext, "缺前文"), s);
-        assert_eq!(more.generation.outcome, Outcome::Skip);
+        assert_eq!(more.generation.outcome, Outcome::AskOwner);
+        assert!(more.text.starts_with(GAVE_UP), "{}", more.text);
     }
 
     #[test]

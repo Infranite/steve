@@ -357,7 +357,7 @@ async fn replay_one(
         .as_ref()
         .and_then(|v| v.style.as_ref())
         .map(|(_, s)| s);
-    let Some(feedback) = compose::voice_verdict(Mode::Own, &r, style) else {
+    let Some(feedback) = compose::voice_verdict(Mode::Own, false, &r, style) else {
         return Ok(r);
     };
     let found: Vec<String> = steve_channels::voice::problems(&r.text, style)

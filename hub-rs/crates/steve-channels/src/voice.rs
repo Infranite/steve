@@ -13,16 +13,21 @@
 //!   when the reply is drafted from your recent messages in the same situation (a private chat, a
 //!   group where someone @-ed or answered you, a group), never written down as numbers. With too few
 //!   messages in a situation, the broader one's stand in ([`Situation::broader`]).
-//! - **Your verdicts on earlier drafts** ([`examples`]): the drafts you rejected as “not like this”,
-//!   and the drafts you edited before sending, in their edited form, as “like this”. A draft you
-//!   approved unchanged teaches nothing (it may have been a test click); one approved by YOLO is not
-//!   your verdict.
+//! - **Your verdicts on earlier drafts** ([`examples`]): the drafts you edited before sending, in
+//!   their edited form, as “like this”; and a draft you rejected as “not like this” only when your
+//!   being there does not explain the rejection — most drafts you turn down sound like you and are
+//!   wrong only because you had answered yourself (the presence gate's business, [`crate::presence`]),
+//!   so a rejection counts only when you said nothing yourself in that space from shortly before the
+//!   message ([`crate::presence::OWNER_LIVE_MS`]) until you rejected it, and its message was not
+//!   merged into a later turn. A draft you approved unchanged teaches nothing (it may have been a
+//!   test click); one approved by YOLO is not your verdict.
 //! - **The rules of writing as you** ([`RULES`]) and, after the model answered, **the checks**
 //!   ([`problems`]): a list of options, more than one question, a draft far longer than you write
 //!   (over [`OVER_P90`] × your P90 in the situation), an opening you never use. They apply only to
-//!   the composer's own reply on your account (its provenance), never to a Bot's: the composer asks
-//!   once more with what was wrong ([`feedback`]); still wrong, nothing is drafted and the reason is
-//!   kept ([`gave_up`]).
+//!   the composer's own reply on your account (its provenance), never to a Bot's, and never to what
+//!   you said to write yourself (your trigger words, a flow step's text, your answer in a
+//!   conversation): the composer asks once more with what was wrong ([`feedback`]); still wrong, the
+//!   message is handed to you with the reason ([`gave_up`]), never dropped.
 
 use std::collections::{BTreeMap, HashSet};
 use std::sync::LazyLock;
@@ -52,8 +57,8 @@ pub const MIN_SUPPORT: usize = 5;
 pub const EXAMPLES_MAX: usize = 3;
 /// A draft longer than this many times your P90 length in the situation is sent back ([`problems`]).
 pub const OVER_P90: f64 = 2.0;
-/// Ahead of the reason a draft is not made after the second try ([`gave_up`]).
-pub const GAVE_UP: &str = "写出来不像你会说的话，没有起草：";
+/// Ahead of the reason a message is handed to you after the second try ([`gave_up`]).
+pub const GAVE_UP: &str = "起草的回复不像你会说的话，交给你自己回：";
 
 // ---------------------------------------------------------------- situations
 
@@ -370,7 +375,7 @@ pub struct Voice {
     /// Your habits standing for it (and the situation they come from).
     pub style: Option<(Situation, Style)>,
     pub samples: Vec<String>,
-    /// Drafts you rejected.
+    /// Drafts you rejected while you were not there yourself ([`examples`]).
     pub rejected: Vec<String>,
     /// Drafts you edited before sending, as sent.
     pub edited: Vec<String>,
@@ -473,7 +478,7 @@ impl Voice {
         }
         if !self.rejected.is_empty() {
             p.push_str(H_REJECTED);
-            p.push_str("（我没让发的，不要这样写）\n");
+            p.push_str("（当时我没在场，也没让发的，不要这样写）\n");
             p.push_str(&list(&self.rejected));
             p.push_str("\n\n");
         }
@@ -594,7 +599,7 @@ pub fn feedback(draft: &str, problems: &[Problem]) -> String {
     )
 }
 
-/// The reason kept when the second try is still wrong.
+/// The note and reason of the hand-off when the second try is still wrong.
 pub fn gave_up(problems: &[Problem]) -> String {
     let said: Vec<String> = problems.iter().map(Problem::said).collect();
     format!("{GAVE_UP}{}", said.join("；"))
@@ -733,7 +738,8 @@ pub fn people_names(c: &Connection, ws: &str, conn: &str) -> ChannelResult<Vec<S
 
 /// Your verdicts on drafts written as you on `conn` (not YOLO's): `(rejected, edited)`, the same
 /// space's first, then the most recent; from another space only when [`portable`]. A rejected draft
-/// as it was; an edited one as you sent it.
+/// as it was, and only when your being there does not explain it ([`rejected_for_its_words`]); an
+/// edited one as you sent it.
 pub fn examples(
     c: &Connection,
     ws: &str,
@@ -743,7 +749,7 @@ pub fn examples(
 ) -> ChannelResult<(Vec<String>, Vec<String>)> {
     let mut st = c.prepare_cached(
         "SELECT d.draft, json_extract(d.result, '$.choice'), coalesce(json_extract(d.result, '$.text'), ''),
-                m.space_id = ?3
+                m.space_id = ?3, m.id, m.space_id, d.created, coalesce(d.resolved, d.created)
            FROM decisions d JOIN chan_messages m ON m.id = d.subject_id
            JOIN spaces s ON s.id = m.space_id
           WHERE d.workspace_id = ?1 AND d.subject_type = ?4 AND d.kind = ?5 AND d.status = 'resolved'
@@ -768,14 +774,23 @@ pub fn examples(
                     r.get::<_, String>(1)?,
                     r.get::<_, String>(2)?,
                     r.get::<_, bool>(3)?,
+                    r.get::<_, String>(4)?,
+                    r.get::<_, String>(5)?,
+                    r.get::<_, i64>(6)?,
+                    r.get::<_, i64>(7)?,
                 ))
             },
         )?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     let (mut rejected, mut edited) = (Vec::new(), Vec::new());
-    for (draft, choice, text, here) in rows {
+    for (draft, choice, text, here, out, out_space, created, resolved) in rows {
         let (list, t) = match choice.as_str() {
-            "no" => (&mut rejected, draft.trim().to_string()),
+            "no" if rejected.len() < EXAMPLES_MAX
+                && rejected_for_its_words(c, ws, &out, &out_space, created, resolved)? =>
+            {
+                (&mut rejected, draft.trim().to_string())
+            }
+            "no" => continue,
             _ if !text.trim().is_empty() && text.trim() != draft.trim() => {
                 (&mut edited, text.trim().to_string())
             }
@@ -789,6 +804,39 @@ pub fn examples(
         }
     }
     Ok((rejected, edited))
+}
+
+/// Whether a rejected draft (outbound message `out` in `space`, its card opened at `created` and
+/// answered at `resolved`) can say something about how you write: not when your being there explains
+/// it — you said something yourself in the space from [`crate::presence::OWNER_LIVE_MS`] before the
+/// message it answers (or the card, without one) until you rejected it, or that message was merged
+/// into a later turn. Space-wide on purpose, wider than the presence gate's own rule: a rejection
+/// that may have been about presence never teaches voice.
+pub fn rejected_for_its_words(
+    c: &Connection,
+    ws: &str,
+    out: &str,
+    space: &str,
+    created: i64,
+    resolved: i64,
+) -> ChannelResult<bool> {
+    let src = crate::presence::answered_message(c, ws, out)?;
+    let from = match &src {
+        Some(id) => {
+            if crate::presence::merged_into(c, id)?.is_some() {
+                return Ok(false);
+            }
+            crate::presence::said(c, ws, id)?.map_or(created, |(s, _, _)| s.at.min(created))
+        }
+        None => created,
+    };
+    Ok(!crate::presence::you_spoke(
+        c,
+        ws,
+        space,
+        from - crate::presence::OWNER_LIVE_MS,
+        resolved.max(created),
+    )?)
 }
 
 /// Everything [`Voice`] holds for a message in `space` (`dm`) on `conn`, in `situation`, said at

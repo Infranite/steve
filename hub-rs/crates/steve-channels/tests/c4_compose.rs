@@ -2002,8 +2002,28 @@ async fn your_own_account_writes_like_you_not_like_a_bot() {
                 "别的群里否掉的一大段分析，提到李雷和 3 个集群",
                 r#"{"choice":"no"}"#,
             ),
+            verdict("v6", &dev, "这个我回头看下", r#"{"choice":"no"}"#),
         ]
         .concat(),
+    );
+    // v6 was rejected after you had said something there yourself: it sounded like you and was
+    // wrong only because you were there (the presence gate's business), so it teaches nothing
+    let you_said = one(
+        &h,
+        "SELECT created FROM chan_messages WHERE text = '等它再跑跑'",
+        &[],
+    )[0]
+    .as_i64()
+    .unwrap();
+    exec(
+        &h,
+        &format!(
+            "UPDATE chan_messages SET created = {}, status = 'discarded' WHERE id = 'v6';
+             UPDATE decisions SET created = {}, resolved = {} WHERE id = 'd_v6';",
+            you_said - 60_000,
+            you_said - 50_000,
+            you_said + 60_000
+        ),
     );
     let target = push(
         &h,
@@ -2051,6 +2071,10 @@ async fn your_own_account_writes_like_you_not_like_a_bot() {
         !p.contains("测试点一下") && !p.contains("YOLO 否掉的") && !p.contains("一大段分析"),
         "{p}"
     );
+    assert!(
+        !p.contains("这个我回头看下"),
+        "rejected while you were there: {p}"
+    );
     assert!(p.contains(compose::H_WRITE) && p.contains(steve_channels::voice::RULES));
     // the item numbers of the sender are Steve's business, not yours
     assert!(!p.contains("发送人提过、还在进行的事项"), "{p}");
@@ -2080,10 +2104,10 @@ async fn your_own_account_writes_like_you_not_like_a_bot() {
 }
 
 /// A draft written as you that does not sound like you (options, several questions, far longer than
-/// you write, an opening you never use) goes back once with what was wrong; still wrong, nothing is
-/// drafted and the reason is kept. A bot's reply is never checked this way.
+/// you write, an opening you never use) goes back once with what was wrong; still wrong, it is not
+/// drafted and the message is handed to you with the reason — never dropped as nothing to do.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_draft_unlike_you_goes_back_once_then_is_not_made() {
+async fn a_draft_unlike_you_goes_back_once_then_is_handed_to_you() {
     let h = setup().await;
     let me = h.me.clone();
     // your own lines are recorded, never composed for
@@ -2126,7 +2150,7 @@ async fn a_draft_unlike_you_goes_back_once_then_is_not_made() {
     let g = reqs.last().unwrap().generation.clone().unwrap();
     assert_eq!(g.revised, vec!["option_list", "too_long"]);
 
-    // still wrong: not drafted, the reason kept
+    // still wrong: not drafted; handed to you with the give-up as the reason, not the model's
     h.env.gateway.prompts.lock().unwrap().clear();
     h.env.gateway.reply(options);
     h.env.gateway.reply(
@@ -2138,6 +2162,18 @@ async fn a_draft_unlike_you_goes_back_once_then_is_not_made() {
     let r = i.response.expect("response");
     assert!(r.out_message_id.is_none(), "nothing drafted");
     assert_eq!(h.out.reqs.lock().unwrap().len(), n, "nothing delivered");
+    let d = r.decision_id.expect("handed to you");
+    let q = one(
+        &h,
+        "SELECT kind, question FROM decisions WHERE id = ?",
+        &[&d],
+    );
+    assert_eq!(q[0], json!("ask"));
+    let q = q[1].as_str().unwrap();
+    assert!(
+        q.contains(steve_channels::voice::GAVE_UP) && q.contains("用“收到”开头"),
+        "{q}"
+    );
     assert_eq!(
         count(
             &h,
@@ -2146,4 +2182,55 @@ async fn a_draft_unlike_you_goes_back_once_then_is_not_made() {
         ),
         0
     );
+}
+
+/// What you said to write yourself — your trigger words, a flow step's text — is yours: the checks of
+/// writing as you never send it back, hand it to you or drop it.
+#[tokio::test(flavor = "multi_thread")]
+async fn what_you_asked_for_is_not_checked_for_your_voice() {
+    let h = setup().await;
+    let me = h.me.clone();
+    let options = r#"{"outcome": "reply", "text": "两个方案：\n1. 先重启\n2. 再看日志", "why": "你让我列方案"}"#;
+    exec(
+        &h,
+        &format!(
+            "UPDATE channel_settings SET trigger = '{}' WHERE connection_id = '{me}'",
+            json!({"on": true, "words": ["/bot"], "where": [], "mark": false})
+        ),
+    );
+
+    // your trigger words
+    h.env.gateway.reply(options);
+    let i = push(
+        &h,
+        &me,
+        msg("C_DEV", "t1", "upx", "/bot 给他列两个方案", false),
+    )
+    .await;
+    let r = i.response.expect("response");
+    assert!(r.out_message_id.is_some(), "drafted: {r:?}");
+    let prompts = reply_prompts(&h);
+    assert_eq!(prompts.len(), 1, "never sent back: {prompts:#?}");
+    let reqs = h.out.reqs.lock().unwrap().clone();
+    let last = reqs.last().expect("delivered");
+    assert_eq!(last.text, "两个方案：\n1. 先重启\n2. 再看日志");
+    assert!(last.generation.as_ref().unwrap().revised.is_empty());
+
+    // a flow step that generates with your text
+    let m = push(&h, &me, msg("C_DEV", "t2", "uhan", "怎么办", false)).await;
+    a_while_ago(&h);
+    h.env.gateway.prompts.lock().unwrap().clear();
+    h.env.gateway.reply(options);
+    let reply_as = ReplyAs::new(h.replies.clone(), h.late.clone());
+    let (o, _) = run_action(
+        &h,
+        &reply_as,
+        json!({"action": "reply_as", "generate": true, "text": "给他列两个方案"}),
+        json!({"message_id": m.message_id, "space_id": m.space_id}),
+    )
+    .await;
+    let out = out_of(&o);
+    assert_eq!(out["status"], "draft", "{out}");
+    assert_eq!(out["text"], "两个方案：\n1. 先重启\n2. 再看日志");
+    assert_eq!(reply_prompts(&h).len(), 1, "never sent back");
 }
