@@ -197,5 +197,6 @@
   "channels.scope.user_group": "Read messages in your groups",
   "channels.scope.user_chats": "List your own chats",
   "channels.scope.user_send": "Send as you (needs your explicit consent)",
-  "channels.scope.search": "Search messages"
+  "channels.scope.search": "Search messages",
+  "channels.notice.trigger_unsendable": "Your %{provider} account (%{account}) can't send messages right now: %{error}. Replies to trigger words, and why one failed, stay in this chat's conversation in Steve and aren't sent back to the chat. Allow sending for this account in Connections to resume."
 }

@@ -60,6 +60,29 @@ pub fn failure_note(owner: &str) -> String {
     format!("抱歉，这次没能答上来，我请 {owner} 来看。")
 }
 
+/// What your own trigger word gets in its thread when Steve could not answer it: why, and what to
+/// do, are in Steve (the conversation of the chat), not in a chat others may read.
+pub const TRIGGER_FAILED_NOTE: &str = "这次没能处理，原因和处理办法记在 Steve 里这个聊天的对话中。";
+
+/// … and someone else's use of your trigger word: the note goes out from your own account, so it
+/// speaks as you (it does not send for yourself); the details stay in Steve.
+pub const TRIGGER_FAILED_FOR_OTHERS: &str = "抱歉，这次没能自动答上来，我看到后再回复你。";
+
+/// What a trigger word's turn says in its conversation: the instruction without the trigger word
+/// (the reply skill reaches the composer and research as context, never the routing); any other
+/// turn, its message.
+fn turn_text(plan: &Plan, command: bool) -> String {
+    let text = match (&plan.trigger, command) {
+        (Some(i), true) if !i.trim().is_empty() => i.clone(),
+        _ => plan.text.clone(),
+    };
+    if text.trim().is_empty() {
+        "[消息]".to_string()
+    } else {
+        text
+    }
+}
+
 /// Only the user whose view connection `conn` speaks with reads `space`: their private chat with Steve.
 pub fn owner_only(
     c: &rusqlite::Connection,
@@ -96,6 +119,9 @@ pub struct Turn {
     /// The workspace user who asks (the owner on their own trigger word): an item the turn makes
     /// is requested by them and runs as them. `None`: someone who is not a workspace user.
     pub user: Option<String>,
+    /// The owner's own trigger word on their account: an answer that needs tools is handed on to
+    /// an item (where `items` allows one). Any other turn's answer says why and stays an answer.
+    pub hands_on: bool,
 }
 
 /// The sender (`party`) is the workspace's owner: a contact linked to the user who owns it. A sender
@@ -217,12 +243,8 @@ impl Channels {
         let mut meta = json!({ "chan": chan_meta(self, plan, command)? });
         meta["chan"]["owner_only"] = json!(owner_only);
         meta["chan"]["start"] = json!(start);
-        // a trigger word: what is routed is the instruction alone (the reply skill reaches the
-        // composer and research as context, never the routing)
-        let text = match (&plan.trigger, command) {
-            (Some(i), true) if !i.trim().is_empty() => i.clone(),
-            _ => plan.text.clone(),
-        };
+        // a trigger word: what is routed is the instruction alone
+        let text = turn_text(plan, command);
         // the owner's own command: what it starts is theirs
         let user = if command && start {
             self.store().reader(|c| -> ChannelResult<Option<String>> {
@@ -239,11 +261,6 @@ impl Channels {
         } else {
             None
         };
-        let text = if text.trim().is_empty() {
-            "[消息]".to_string()
-        } else {
-            text
-        };
         let turn = Turn {
             space: conv_space(&plan.space_id),
             text,
@@ -253,6 +270,8 @@ impl Channels {
             owner_only,
             start,
             user,
+            // only the owner's own trigger word: anyone else's still says why it got no answer
+            hands_on: command && plan.mode == Mode::Own && start,
         };
         let ws = plan.ws.clone();
         let id = tokio::task::spawn_blocking(move || thread.say(&ws, turn))
@@ -296,6 +315,8 @@ impl Channels {
             owner_only: false,
             start: true, // only the owner's command gets here (above)
             user: None,
+            // the owner's own trigger word, answered here because the account may not send
+            hands_on: true,
         };
         let ws = plan.ws.clone();
         let id = tokio::task::spawn_blocking(move || thread.say(&ws, turn))
@@ -483,6 +504,12 @@ impl Channels {
         };
         if m.meta.get("error").is_some_and(|v| v == true) {
             self.react_finish(&plan.message_id, Finish::Failed).await;
+            // a trigger word answered as you: said in its thread too, as you; the reaction stays failed
+            if command && plan.mode == Mode::Own {
+                let d = self.trigger_failed_note(ws, &plan, out).await?;
+                self.mark_out(&m, &d)?;
+                return Ok(Some(d));
+            }
             if plan.mode == Mode::Bot {
                 let owner = self
                     .store()
@@ -561,6 +588,9 @@ impl Channels {
             )
             .await?;
         self.mark_out(&m, &d)?;
+        if command && as_you {
+            self.after_trigger_send(ws, &plan.connection_id, &d);
+        }
         Ok(Some(d))
     }
 
@@ -606,7 +636,7 @@ impl Channels {
     }
 
     /// `meta.chan_out` on the conversation message: what became of it in the space.
-    fn mark_out(&self, m: &steve_store::Message, d: &Delivered) -> ChannelResult<()> {
+    pub(crate) fn mark_out(&self, m: &steve_store::Message, d: &Delivered) -> ChannelResult<()> {
         let status = match d {
             Delivered::Sent { .. } => "sent",
             Delivered::Drafted { .. } => "draft",
@@ -670,6 +700,97 @@ impl Channels {
         }
     }
 
+    /// The short note a trigger word answered as you gets in its thread when it got no answer:
+    /// sent as you, `[AI]`-marked, without details (they are in the conversation). The reaction
+    /// stays failed (`Purpose::Source`).
+    pub(crate) async fn trigger_failed_note(
+        &self,
+        ws: &str,
+        plan: &Plan,
+        out: &dyn crate::deliver::Outbound,
+    ) -> ChannelResult<Delivered> {
+        let yours = self.store().reader(|c| {
+            crate::arbiter::from_you(
+                c,
+                ws,
+                plan.sender_account_id.as_deref(),
+                plan.sender_party_id.as_deref(),
+            )
+        })?;
+        let text = if yours {
+            TRIGGER_FAILED_NOTE
+        } else {
+            TRIGGER_FAILED_FOR_OTHERS
+        };
+        let d = out
+            .deliver(
+                self,
+                &OutRequest {
+                    target: crate::command_skill::target(self, plan)?,
+                    text: text.into(),
+                    purpose: Purpose::Source,
+                    approve: false,
+                    generation: None,
+                    auth: Auth::Trigger {
+                        source: plan.message_id.clone(),
+                    },
+                },
+            )
+            .await?;
+        self.after_trigger_send(ws, &plan.connection_id, &d);
+        Ok(d)
+    }
+
+    /// Records a turn that got no answer in the conversation, with why in plain words and what to do
+    /// (`meta.error`): a trigger word that failed before the conversation took it is still seen
+    /// there. The turn is the one already stored for the message when the conversation took it
+    /// before failing (any conversation: the chat's or your web one), else it is stored here as a
+    /// turn is: the instruction without the trigger word. Best-effort: the failure line.
+    pub(crate) fn conv_failed(&self, plan: &Plan, why: &str) -> Option<steve_store::Message> {
+        let r = (|| -> ChannelResult<steve_store::Message> {
+            let command = plan.trigger.is_some();
+            let msgs = self.store().messages();
+            let stored = self
+                .store()
+                .reader(|c| -> ChannelResult<Option<(String, String)>> {
+                    Ok(c.query_row(
+                        "SELECT id, space FROM messages WHERE workspace_id = ?1 AND author = 'me'
+                        AND json_extract(meta, '$.chan.message') = ?2
+                      ORDER BY created, rowid LIMIT 1",
+                        rusqlite::params![plan.ws, plan.message_id],
+                        |r| Ok((r.get(0)?, r.get(1)?)),
+                    )
+                    .optional()?)
+                })?;
+            let (origin, conv) = match stored {
+                Some(t) => t,
+                None => {
+                    let conv = conv_space(&plan.space_id);
+                    let meta = json!({ "chan": chan_meta(self, plan, command)? });
+                    let text = turn_text(plan, command);
+                    (msgs.add(&plan.ws, "me", &text, None, &meta, &conv)?, conv)
+                }
+            };
+            let id = msgs.add(
+                &plan.ws,
+                "steve",
+                why,
+                None,
+                &json!({"origin": origin, "error": true}),
+                &conv,
+            )?;
+            msgs.get(&id)?
+                .ok_or_else(|| steve_modules::ApiError::Internal("失败说明没有存下".into()))
+        })();
+        match r {
+            Ok(m) => Some(m),
+            Err(e) => {
+                tracing::warn!(message = plan.message_id, "conversation failure note: {e}");
+                None
+            }
+        }
+    }
+
     fn conv_note_inner(&self, plan: &Plan, said: &str, item: Option<&str>) -> ChannelResult<()> {
         let conv = conv_space(&plan.space_id);
         let meta = json!({ "chan": chan_meta(self, plan, plan.trigger.is_some())? });
@@ -696,7 +817,7 @@ impl Channels {
 
 /// The provider's name for a space's system: the bot account's own system (`feishu_app`) is shown
 /// as its platform (`feishu` → 飞书).
-fn provider_name(c: &rusqlite::Connection, system: &str) -> String {
+pub(crate) fn provider_name(c: &rusqlite::Connection, system: &str) -> String {
     let name = |id: &str| -> Option<String> {
         c.query_row(
             "SELECT nullif(name, '') FROM systems WHERE id = ?",

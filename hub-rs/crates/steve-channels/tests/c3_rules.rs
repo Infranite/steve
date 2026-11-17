@@ -471,6 +471,26 @@ async fn your_account_drafts_records_and_takes_trigger_words() {
         }
     );
     assert_eq!(r.label, "触发语未接入，只记录");
+    // not dropped: the chat's conversation in Steve has the turn and why it got no answer
+    let conv = steve_channels::conversations::conv_space(&i.space_id);
+    let said = h
+        .env
+        .store()
+        .messages()
+        .list(WS, &conv, 50)
+        .expect("conversation");
+    // the turn once, as any trigger word's turn: its instruction without the trigger word
+    let turns: Vec<_> = said.iter().filter(|m| m.author == "me").collect();
+    assert_eq!(turns.len(), 1, "{said:#?}");
+    assert_eq!(turns[0].text, "回复他进度");
+    let last = said.iter().find(|m| m.author == "steve").expect("recorded");
+    // why in the words of what failed: here nothing took it (no conversation port)
+    assert_eq!(
+        last.text,
+        steve_channels::respond::not_answered("渠道模块没有接上 Steve 的对话"),
+    );
+    assert_eq!(last.meta["origin"], json!(turns[0].id));
+    assert_eq!(last.meta["error"], json!(true));
     // someone else's trigger word is just a message
     let n = calls(&h);
     let i = push(&h, &me, msg("C_DEV", "m6", "uhan", "/bot 帮我发", false)).await;

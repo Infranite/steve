@@ -197,5 +197,6 @@
   "channels.scope.user_group": "读你所在群的消息",
   "channels.scope.user_chats": "列出你本人的会话",
   "channels.scope.user_send": "以你本人身份发送（需要你明确同意）",
-  "channels.scope.search": "搜索消息"
+  "channels.scope.search": "搜索消息",
+  "channels.notice.trigger_unsendable": "你的%{provider}账号（%{account}）现在发不出消息：%{error}。触发词的回复和失败说明只记在 Steve 里这个聊天的对话中，不会发回聊天。到“接入”里给这个账号打开发送后恢复。"
 }

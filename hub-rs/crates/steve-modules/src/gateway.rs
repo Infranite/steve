@@ -42,6 +42,35 @@ pub struct GatewayOut {
     pub duration_ms: u64,
 }
 
+/// A call's error when the model reached for a tool the call does not allow (a call without tools,
+/// or one with only some): the request needs what the call cannot do — run a command, read a file,
+/// look at the machine. The gateway says exactly these words, inside whatever a caller wraps around
+/// them; [`needs_tools`] reads them back.
+pub const NEEDS_TOOLS: &str = "needs tools: the model reached for a tool this call does not allow";
+
+/// Whether a call's error ([`Gateway::run`]'s `Err`, or a message made from it) is [`NEEDS_TOOLS`].
+pub fn needs_tools(error: &str) -> bool {
+    error.contains(NEEDS_TOOLS)
+}
+
+tokio::task_local! {
+    static HANDS_ON: bool;
+}
+
+/// Runs `f` whose gateway calls end their model chain on [`NEEDS_TOOLS`]: the caller hands such a
+/// request on (a trigger word's answer becomes an item), so trying the next model without tools
+/// only costs time. Every other call keeps falling back to the next model, as for any fast error:
+/// a router, a triage, a summary or a draft whose model reached for a tool may well get its answer
+/// from the next one.
+pub async fn hands_on_needs_tools<F: Future>(f: F) -> F::Output {
+    HANDS_ON.scope(true, f).await
+}
+
+/// Whether the current call's caller hands a request that needs tools on ([`hands_on_needs_tools`]).
+pub fn hands_on() -> bool {
+    HANDS_ON.try_with(|h| *h).unwrap_or(false)
+}
+
 #[async_trait]
 pub trait Gateway: Send + Sync {
     /// Runs `prompt` on `tier` within `timeout`. `Err` carries a message for the log; callers decide

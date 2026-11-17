@@ -63,6 +63,10 @@ impl FakeGateway {
     pub fn script_fail(&self, prefix: impl Into<String>, err: impl Into<String>) {
         lock(&self.scripts).push((prefix.into(), Err(err.into())));
     }
+    /// Takes back the scripts for `prefix` (a later [`FakeGateway::script`] or the queue answers).
+    pub fn unscript(&self, prefix: &str) {
+        lock(&self.scripts).retain(|(p, _)| p != prefix);
+    }
     /// Queues one answer.
     pub fn reply(&self, s: impl Into<String>) {
         lock(&self.replies).push_back(Ok(out(s)));

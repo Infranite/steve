@@ -212,6 +212,7 @@ fn call_error(e: OneShotError) -> CoreError {
         OneShotError::OutputLimit => msg("输出超出这次运行的限制"),
         OneShotError::Timeout(t) => msg(format!("Command timed out after {} ms", t.as_millis())),
         OneShotError::Failed(err) => msg(format!("Command failed: {}", js_head(&err, 300))),
+        OneShotError::ToolRefused => CoreError::NeedsTools,
         OneShotError::Harness { text, .. } => msg(js_head(&text, 300).to_string()),
         e @ OneShotError::Unsupported(_) => msg(e.to_string()),
         OneShotError::Io(e) => CoreError::Io(e),
@@ -736,10 +737,15 @@ impl<M: OneModel> Fallback<M> {
                     } else {
                         format!("{m}: {e1}")
                     });
+                    // a request that needs tools, from a caller that hands it on (a trigger
+                    // word's answer becomes an item): the next model has no tools either. Any
+                    // other caller falls back, as for every fast error
+                    let handed_on =
+                        matches!(e, CoreError::NeedsTools) && steve_modules::gateway::hands_on();
                     a.result = Err(e);
                     // a timeout is not the model's own fault (the provider or the harness is slow): the
                     // next one would wait as long, so the chain ends here; fast errors fall back
-                    if r.timed_out {
+                    if r.timed_out || handed_on {
                         break;
                     }
                 }
@@ -1603,6 +1609,8 @@ pub struct Answer {
     pub offer: Option<Offer>,
     pub model: Option<String>,
     pub failed: bool,
+    /// It failed because the question needs tools the answer does not have ([`CoreError::NeedsTools`]).
+    pub needs_tools: bool,
 }
 
 /// Told the reasoning and the answer so far while a chat answer is written.
@@ -1675,6 +1683,7 @@ pub async fn answer(
                         offer,
                         model: Some(model),
                         failed: false,
+                        needs_tools: false,
                     }
                 }
                 None => {
@@ -1685,6 +1694,7 @@ pub async fn answer(
                         offer,
                         model: Some(model),
                         failed: false,
+                        needs_tools: false,
                     }
                 }
             }
@@ -1695,6 +1705,7 @@ pub async fn answer(
             offer: None,
             model: None,
             failed: true,
+            needs_tools: matches!(e, CoreError::NeedsTools),
         },
     }
 }

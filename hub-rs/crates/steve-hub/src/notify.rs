@@ -125,7 +125,9 @@ pub fn shown(stored: &str) -> Option<String> {
         "hub.node.handed_over",
         "hub.notice.outbox_dead",
     ];
-    steve_core::notice_line::shown(stored).or_else(|| steve_i18n::reword!(stored, HUB))
+    steve_core::notice_line::shown(stored)
+        .or_else(|| steve_channels::unsendable::shown(stored))
+        .or_else(|| steve_i18n::reword!(stored, HUB))
 }
 
 /// `text` of a message or a notice row in the request's language, when it is a notice.

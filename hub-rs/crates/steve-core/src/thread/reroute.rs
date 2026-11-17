@@ -217,6 +217,7 @@ impl Core {
             t0: now(),
             resume: None,
             space: om.space.clone(),
+            to_item: None,
         };
         if !self.enqueue_inline(ws, job)? {
             /* the item is already back in the conversation; the answer waits for the user to ask again */

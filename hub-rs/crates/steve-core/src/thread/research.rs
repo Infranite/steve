@@ -22,6 +22,8 @@ use tokio::sync::mpsc;
 pub const MAX_WAITING: usize = 3;
 /// The reply when the queue is full.
 pub const QUEUE_FULL: &str = "前面还有 3 个问题在排队，先等等或停掉当前的";
+/// Where to look when a chat's answer could not be written.
+const FIX_MODEL: &str = "到「设置 · 模型」看看回复用的模型是否可用，或稍后再发一次";
 
 /// One tool call of a research run, as the executor saw it.
 #[derive(Debug, Clone, PartialEq)]
@@ -206,6 +208,22 @@ pub(crate) struct InlineJob {
     pub resume: Option<ResumeFrom>,
     /// the conversation (`messages.space`) it is answered in
     pub space: String,
+    /// An answer that needs tools becomes an item here ([`Core::hand_off`], [`Conv::hands_on`]):
+    /// `Some(start)`, the speaker may start work (else it is a proposal); `None`, it does not
+    /// become one on its own.
+    ///
+    /// [`Conv::hands_on`]: super::Conv::hands_on
+    pub to_item: Option<bool>,
+}
+
+/// `f`, whose gateway calls end their model chain on a request that needs tools when `j` hands
+/// such a request on to an item ([`InlineJob::to_item`]); otherwise they fall back as always.
+async fn handing_on<F: std::future::Future>(j: &InlineJob, f: F) -> F::Output {
+    if j.to_item.is_some() {
+        steve_modules::gateway::hands_on_needs_tools(f).await
+    } else {
+        f.await
+    }
 }
 
 /// The inline queue of a conversation: the web's is keyed by the workspace (as before), a guest
@@ -858,7 +876,7 @@ impl Core {
         let on_draft = |thought: &str, t: &str| drafts.send(thought, t);
         /* a stop ends the call right away (its harness is killed), not after the whole answer is written */
         let a = tokio::select! {
-            a = crate::stats::tagged(
+            a = handing_on(j, crate::stats::tagged(
                 "chat",
                 ws,
                 gateway::answer(
@@ -870,7 +888,7 @@ impl Core {
                     extra,
                     &on_draft,
                 ),
-            ) => Some(a),
+            )) => Some(a),
             _ = j.stop.stopped() => None,
         };
         lock(&drafts.state).closed = true;
@@ -891,6 +909,15 @@ impl Core {
             )?;
             return Ok(());
         };
+        /* the question needs tools the answer does not have: an item does it, or the reply says why not */
+        let text = if a.needs_tools {
+            match self.needs_tools(ws, j).await {
+                None => return Ok(()),
+                Some(why) => why,
+            }
+        } else {
+            a.text.clone()
+        };
         let steps = Steps {
             route: j.route.clone(),
             answer: Some(
@@ -899,8 +926,11 @@ impl Core {
             ..Default::default()
         };
         let offer = a.offer.clone().or_else(|| j.offer.clone());
-        let meta = self.inline_meta(ws, j, offer.as_ref(), steps.json(now() - j.t0))?;
-        let id = self.inline_reply(ws, j, &a.text, &meta)?;
+        let mut meta = self.inline_meta(ws, j, offer.as_ref(), steps.json(now() - j.t0))?;
+        if a.failed {
+            meta["error"] = json!(true);
+        }
+        let id = self.inline_reply(ws, j, &text, &meta)?;
         if let Some((provider, c)) = &cx
             && !a.failed
             && let Err(e) = self.chat_done(ws, *provider, c, &id, &a.text)
@@ -919,7 +949,7 @@ impl Core {
         host: Arc<dyn super::ConvHost>,
     ) -> Result<()> {
         let a0 = now();
-        let r = host.answer(ws, &j.space, &j.origin).await;
+        let r = handing_on(j, host.answer(ws, &j.space, &j.origin)).await;
         if j.stop.is_stopped() {
             self.post(
                 ws,
@@ -932,8 +962,18 @@ impl Core {
         }
         let (text, failed) = match r {
             Ok(t) if !t.trim().is_empty() => (t, false),
-            Ok(_) => ("（没能生成回答）".to_string(), true),
-            Err(e) => (format!("（没能生成回答：{}）", js_head(&e, 80)), true),
+            Ok(_) => (format!("（没能生成回答。{FIX_MODEL}）"), true),
+            /* the question needs tools the answer does not have: an item does it, or the reply says why not */
+            Err(e) if steve_modules::gateway::needs_tools(&e) => {
+                match self.needs_tools(ws, j).await {
+                    None => return Ok(()),
+                    Some(why) => (why, true),
+                }
+            }
+            Err(e) => (
+                format!("（没能生成回答：{}。{FIX_MODEL}）", js_head(&e, 80)),
+                true,
+            ),
         };
         let steps = Steps {
             route: j.route.clone(),
@@ -946,6 +986,33 @@ impl Core {
         }
         self.inline_reply(ws, j, &text, &meta)?;
         Ok(())
+    }
+
+    /// The answer to `j` needed tools: handed to an item where `j` hands it on (`None`, its announcement is the reply), or
+    /// the words that say why not.
+    async fn needs_tools(&self, ws: &str, j: &InlineJob) -> Option<String> {
+        if j.to_item.is_none() {
+            return Some(
+                if j.space == super::MAIN {
+                    super::handoff::NEEDS_TOOLS_ANSWER
+                } else {
+                    super::handoff::NEEDS_TOOLS_HERE
+                }
+                .to_string(),
+            );
+        }
+        match self.hand_off(ws, j).await {
+            Ok(Some(_)) => None,
+            // already an item (made meanwhile): its announcement said so
+            Ok(None) => None,
+            Err(e) => {
+                tracing::warn!(
+                    origin = j.origin,
+                    "hand-off of a question that needs tools: {e}"
+                );
+                Some(super::handoff::not_handed_off(&e.to_string()))
+            }
+        }
     }
 
     async fn research_now(&self, ws: &str, j: &InlineJob, r: Arc<dyn Researcher>) -> Result<()> {

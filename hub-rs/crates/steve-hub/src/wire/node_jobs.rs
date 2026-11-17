@@ -789,6 +789,14 @@ fn call_error(c: &Completion, timeout: Duration) -> OneShotError {
     {
         return OneShotError::OutputLimit;
     }
+    // the model reached for a tool the call does not allow: the same typed error as in process,
+    // so the caller can hand the request on (the Node reports it as its words)
+    if c.error
+        .as_ref()
+        .is_some_and(|e| e.safe_detail == steve_acp::TOOL_REFUSED)
+    {
+        return OneShotError::ToolRefused;
+    }
     let detail = c.error.as_ref().map(super::said).unwrap_or_default();
     match (c.outcome, c.stop_reason.as_str()) {
         (Outcome::TimedOut, _) | (_, "timeout") => OneShotError::Timeout(timeout),
@@ -1288,5 +1296,32 @@ impl ResearchJobRun {
         self.cancelled = true;
         let (rt, attempt) = (self.waiting.runtime.clone(), self.waiting.attempt.clone());
         tokio::task::spawn_blocking(move || rt.stop_job(&attempt));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_tool_refused_on_a_node_is_the_typed_error_of_an_in_process_run() {
+        let refused = ended(
+            Outcome::Failed,
+            "error",
+            Some(ApiError::new(ErrorCode::Internal, steve_acp::TOOL_REFUSED)),
+        );
+        assert!(matches!(
+            call_error(&refused, Duration::from_secs(1)),
+            OneShotError::ToolRefused
+        ));
+        let other = ended(
+            Outcome::Failed,
+            "error",
+            Some(ApiError::new(ErrorCode::Internal, "the provider said no")),
+        );
+        assert!(matches!(
+            call_error(&other, Duration::from_secs(1)),
+            OneShotError::Harness { .. }
+        ));
     }
 }

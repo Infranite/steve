@@ -175,6 +175,7 @@ impl Core {
                 t0: now(),
                 resume: None,
                 space: m.space.clone(),
+                to_item: None,
             };
             if !self.enqueue_inline(ws, job)? {
                 return Err(CoreError::Status(

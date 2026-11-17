@@ -101,6 +101,7 @@ impl steve_channels::conversations::Thread for CoreThread {
             items: turn.items,
             owner_only: turn.owner_only,
             start: turn.start,
+            hands_on: turn.hands_on,
         };
         self.0
             .say_in_as(ws, conv, &turn.text, &turn.meta, turn.user.as_deref())

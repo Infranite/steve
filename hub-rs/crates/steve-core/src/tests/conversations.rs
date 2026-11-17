@@ -77,6 +77,7 @@ fn guest(research: bool, items: bool) -> Conv {
         research,
         items,
         start: false,
+        hands_on: false,
     }
 }
 
@@ -424,4 +425,186 @@ async fn only_the_owner_alone_gets_a_run_with_their_own_access() {
     settle(&k, SPACE, 6).await;
     assert!(!full(6));
     assert_eq!(fr.seen.lock().unwrap().len(), 7);
+}
+
+/// A host whose model reaches for a tool its answer may not use: a request that needs the machine
+/// (“看下我现在磁盘情况”). The channel's composer reports it in its own words around the gateway's.
+#[derive(Default)]
+struct NeedsTools {
+    answered: Mutex<usize>,
+    said: Mutex<Vec<(String, String)>>,
+}
+
+#[async_trait::async_trait]
+impl ConvHost for NeedsTools {
+    async fn answer(&self, _ws: &str, _space: &str, _origin: &str) -> Result<String, String> {
+        *self.answered.lock().unwrap() += 1;
+        Err(format!(
+            "回复没有生成：{}",
+            steve_modules::gateway::NEEDS_TOOLS
+        ))
+    }
+    fn research_context(&self, _ws: &str, _space: &str, _origin: &str) -> String {
+        String::new()
+    }
+    fn said(&self, _ws: &str, space: &str, id: &str) {
+        self.said.lock().unwrap().push((space.into(), id.into()));
+    }
+}
+
+fn needs_tools_router(k: &Kit) {
+    router(
+        k,
+        Arc::new(Mutex::new(vec![])),
+        |_| json!({"kind": "answer", "confidence": 0.9, "signals": ["question"], "title": "看磁盘", "goal": "看看这台机器的磁盘用量", "bot": "steve"}),
+    );
+}
+
+/// Your own trigger word asked for something only the machine can tell; the answer has no tools,
+/// its model reached for one and the call refused it. Before, that failure ended in the log only.
+/// Now the question becomes an item a Bot runs, once, said in the conversation (and so in the chat).
+#[tokio::test]
+async fn an_answer_that_needs_tools_is_handed_to_an_item_once() {
+    let k = Kit::new();
+    let host = Arc::new(NeedsTools::default());
+    assert!(k.core.set_conv_host(host.clone()));
+    needs_tools_router(&k);
+    let before = k.db().items(WS).unwrap().len();
+    // your own trigger word
+    let mine = Conv {
+        start: true,
+        hands_on: true,
+        ..guest(true, true)
+    };
+    let mid = turn(&k, "看下我现在磁盘情况", mine);
+    let ms = settle(&k, SPACE, 2).await;
+    assert_eq!(*host.answered.lock().unwrap(), 1);
+    let id = ms[1].item_id.clone().expect("handed to an item");
+    assert_eq!(k.db().items(WS).unwrap().len(), before + 1);
+    assert!(
+        ms[1].text.contains(&id) && ms[1].text.contains("跑命令"),
+        "says why: {}",
+        ms[1].text
+    );
+    assert_eq!(ms[1].meta["origin"], json!(mid));
+    assert_eq!(ms[1].meta["handoff"]["why"], "needs_tools");
+    let it = k.db().item(&id).unwrap().unwrap();
+    assert_eq!(it.source.1, "chat", "yours: the work starts");
+    assert_eq!(
+        k.db()
+            .store()
+            .thread()
+            .item(&id)
+            .unwrap()
+            .unwrap()
+            .origin_msg,
+        mid
+    );
+    let log = k.db().store().thread().route_of(&mid).unwrap().unwrap();
+    assert_eq!(log.outcome.as_deref(), Some("needs_tools"));
+    assert_eq!(log.item_id.as_deref(), Some(id.as_str()));
+    // the announcement reaches the chat through the host, like any item made there
+    for _ in 0..300 {
+        if host
+            .said
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(_, m)| m == &ms[1].id)
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(
+        host.said
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(_, m)| m == &ms[1].id)
+    );
+
+    // once: the same question failing again does not make a second item
+    let job = crate::thread::research::InlineJob {
+        kind: crate::thread::research::Inline::Answer,
+        origin: mid.clone(),
+        question: "看下我现在磁盘情况".into(),
+        files: vec![],
+        earlier: vec![],
+        user: None,
+        project: None,
+        route: None,
+        offer: None,
+        reply_to: None,
+        run: None,
+        stop: crate::thread::Stop::default(),
+        t0: crate::util::now(),
+        resume: None,
+        space: SPACE.into(),
+        to_item: Some(true),
+    };
+    assert_eq!(k.core.hand_off(WS, &job).await.unwrap(), None);
+    assert_eq!(k.db().items(WS).unwrap().len(), before + 1);
+}
+
+/// Where a turn may not become an item (a chat with outside members), a request that needs tools
+/// is not dropped either: the conversation says why in plain words and what to do, marked as a
+/// failure so the chat hears of it.
+#[tokio::test]
+async fn an_answer_that_needs_tools_where_no_item_may_be_made_says_why() {
+    let k = Kit::new();
+    let host = Arc::new(NeedsTools::default());
+    assert!(k.core.set_conv_host(host.clone()));
+    needs_tools_router(&k);
+    let before = k.db().items(WS).unwrap().len();
+    let mine = Conv {
+        start: true,
+        hands_on: true,
+        ..guest(true, false)
+    };
+    turn(&k, "看下我现在磁盘情况", mine);
+    let ms = settle(&k, SPACE, 2).await;
+    assert_eq!(k.db().items(WS).unwrap().len(), before);
+    assert_eq!(ms[1].item_id, None);
+    assert_eq!(ms[1].text, crate::thread::handoff::NEEDS_TOOLS_HERE);
+    assert_eq!(ms[1].meta["error"], true);
+    assert!(
+        host.said
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(_, m)| m == &ms[1].id)
+    );
+}
+
+/// A turn that is not a trigger word on the owner's account (a Bot's chat, where items are
+/// allowed) is not handed to an item on its own when its answer needs tools: it stays a failed
+/// answer that says why, as before; “做成事项” is the way to make one.
+#[tokio::test]
+async fn an_answer_that_needs_tools_in_a_bots_chat_is_not_made_an_item() {
+    let k = Kit::new();
+    let host = Arc::new(NeedsTools::default());
+    assert!(k.core.set_conv_host(host.clone()));
+    needs_tools_router(&k);
+    let before = k.db().items(WS).unwrap().len();
+    let mid = turn(
+        &k,
+        "看下我现在磁盘情况",
+        Conv {
+            start: true,
+            ..guest(true, true)
+        },
+    );
+    let ms = settle(&k, SPACE, 2).await;
+    assert_eq!(*host.answered.lock().unwrap(), 1);
+    assert_eq!(
+        k.db().items(WS).unwrap().len(),
+        before,
+        "no item on its own"
+    );
+    assert_eq!(ms[1].item_id, None);
+    assert_eq!(ms[1].text, crate::thread::handoff::NEEDS_TOOLS_HERE);
+    assert_eq!(ms[1].meta["error"], true);
+    let log = k.db().store().thread().route_of(&mid).unwrap().unwrap();
+    assert_eq!(log.item_id, None);
 }

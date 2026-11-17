@@ -295,6 +295,14 @@ pub fn open_draft_to(
     Ok((id, d.id))
 }
 
+/// What a trigger word's conversation records when it got no answer: why, and where to look.
+pub fn not_answered(why: &str) -> String {
+    format!(
+        "（这条触发词没有回答：{}。到“接入”里看这个账号的连接和权限，修好后在聊天里再发一次。）",
+        why.trim().trim_end_matches('。')
+    )
+}
+
 /// `Response.label` when your account may not send as you.
 pub const NO_SEND_AS_YOU: &str = "没有“以你的名义发送”的权限：只记录，不起草";
 /// … and it was your `/bot`.
@@ -336,10 +344,15 @@ impl Channels {
                 self.react_ack(&plan.message_id).await;
                 match self.converse_web(plan, i).await {
                     Ok(_) => r.label = NO_SEND_AS_YOU_COMMAND.into(),
-                    Err(e) => tracing::warn!(
-                        space = plan.space_id,
-                        "command to the web conversation: {e}"
-                    ),
+                    Err(e) => {
+                        tracing::warn!(
+                            space = plan.space_id,
+                            "command to the web conversation: {e}"
+                        );
+                        self.react_finish(&plan.message_id, crate::reactions::Finish::Failed)
+                            .await;
+                        self.conv_failed(plan, &not_answered(&format!("{NO_SEND_AS_YOU}（{e}）")));
+                    }
                 }
             }
             return Ok(r);
@@ -363,6 +376,8 @@ impl Channels {
         // Steve responds: “收到” first, before anything is generated (best-effort, bounded)
         self.react_ack(&plan.message_id).await;
         let command = plan.trigger.is_some();
+        // why a trigger word got no answer, in the words of what failed
+        let mut failed: Vec<String> = vec![];
         if matches!(plan.act, Act::Reply | Act::Draft) {
             match self.converse(plan, command).await {
                 Ok(Some(_)) => {
@@ -375,7 +390,8 @@ impl Channels {
                 }
                 Ok(None) => {}
                 Err(e) => {
-                    tracing::warn!(space = plan.space_id, "conversation hand-off failed: {e}")
+                    tracing::warn!(space = plan.space_id, "conversation hand-off failed: {e}");
+                    failed.push(e.to_string());
                 }
             }
         }
@@ -404,13 +420,36 @@ impl Channels {
             Err(e) => {
                 // the responder failed: fall back below, so the message still reaches you
                 tracing::warn!(space = plan.space_id, "channel responder failed: {e}");
+                failed.push(e.to_string());
             }
         }
         if plan.trigger.is_some() {
             r.label = "触发语未接入，只记录".into();
             r.act = Act::Record;
-            self.react_finish(&plan.message_id, crate::reactions::Finish::Clear)
+            self.react_finish(&plan.message_id, crate::reactions::Finish::Failed)
                 .await;
+            let why = if !failed.is_empty() {
+                failed.join("；")
+            } else if self.thread().is_none() {
+                "渠道模块没有接上 Steve 的对话".to_string()
+            } else {
+                "渠道的回复器没有接手这条触发词".to_string()
+            };
+            let said = self.conv_failed(plan, &not_answered(&why));
+            // said in its thread too, as you, like any failed trigger word answered as you
+            if plan.mode == Mode::Own
+                && let Some(m) = said
+                && let Some(out) = self.responder().outbound()
+            {
+                match self.trigger_failed_note(&plan.ws, plan, out).await {
+                    Ok(d) => {
+                        if let Err(e) = self.mark_out(&m, &d) {
+                            tracing::warn!(space = plan.space_id, "failure note not marked: {e}");
+                        }
+                    }
+                    Err(e) => tracing::warn!(space = plan.space_id, "failure note not sent: {e}"),
+                }
+            }
             return Ok(r);
         }
         match plan.act {

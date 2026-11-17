@@ -145,6 +145,7 @@ mod service;
 pub mod space_decisions;
 pub mod spaces;
 pub mod trigger_report;
+pub mod unsendable;
 pub mod usage;
 pub mod write_blocks;
 

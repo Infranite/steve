@@ -566,6 +566,7 @@ mod tests {
                     Err(crate::error::msg("API Error: 503 upstream unavailable")),
                     vec![],
                 ),
+                "tool" => (Err(crate::error::CoreError::NeedsTools), vec![]),
                 "slow" => (
                     Err(crate::error::msg(format!(
                         "Command timed out after {} ms",
@@ -646,6 +647,60 @@ mod tests {
                 ("slow".into(), None, cc(), 1500, false),
             ]
         );
+    }
+
+    /// A model that reached for a tool the call does not allow, for a caller that hands such a
+    /// request on (a trigger word's answer): the chain ends like on a timeout, the next model has
+    /// no tools either.
+    #[tokio::test]
+    async fn a_request_that_needs_tools_is_not_tried_on_the_next_model_when_handed_on() {
+        let scripted = crate::gateway::Fallback {
+            one: Scripted {
+                tries: Default::default(),
+            },
+            fast: vec!["tool".into(), "haiku".into()],
+            smart: vec![],
+            models: None,
+        };
+        let a = steve_modules::gateway::hands_on_needs_tools(scripted.attempt(
+            "hi",
+            Tier::Fast,
+            Duration::from_secs(10),
+            &ThinkTools::None,
+            None,
+        ))
+        .await;
+        assert!(matches!(a.result, Err(crate::error::CoreError::NeedsTools)));
+        assert_eq!(a.attempts, 1);
+        assert_eq!(tries(&scripted).len(), 1, "haiku is not tried");
+    }
+
+    /// Every other caller (the router, mail triage, a summary, a config draft) falls back to the
+    /// next model as for any fast error: that one may answer without a tool.
+    #[tokio::test]
+    async fn a_request_that_needs_tools_falls_back_for_other_callers() {
+        let scripted = crate::gateway::Fallback {
+            one: Scripted {
+                tries: Default::default(),
+            },
+            fast: vec!["tool".into(), "haiku".into()],
+            smart: vec![],
+            models: None,
+        };
+        let a = crate::stats::purpose(
+            "route",
+            scripted.attempt(
+                "hi",
+                Tier::Fast,
+                Duration::from_secs(10),
+                &ThinkTools::None,
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(a.result.expect("haiku answers").model, "haiku");
+        assert_eq!(a.attempts, 2);
+        assert_eq!(tries(&scripted).len(), 2);
     }
 
     /// The adapter a call that chose none runs on.

@@ -623,6 +623,7 @@ async fn an_answer_stopped_while_its_message_was_routed_is_not_queued() {
         t0: crate::util::now(),
         resume: None,
         space: crate::thread::MAIN.into(),
+        to_item: None,
     };
     assert!(k.core.enqueue_inline(WS, job).unwrap());
     assert!(!k.core.inline_busy(WS));
@@ -1152,4 +1153,28 @@ async fn a_plain_question_skips_the_router() {
     k.core.say(WS, "把检索的打分改成按时间加权", &[]).unwrap();
     settle(&k, 4).await;
     assert_eq!(routed.load(std::sync::atomic::Ordering::SeqCst), 1);
+}
+
+/// In your own conversation a question whose answer reached for a tool it may not use is not
+/// made an item on its own (only a trigger word on your account is): the reply says why and points
+/// at “做成事项”, and every model of the list is still tried first.
+#[tokio::test]
+async fn a_question_that_needs_tools_says_to_make_it_an_item() {
+    let k = Kit::new();
+    k.gw.set(move |p, _| {
+        if p.starts_with("You are the router of Steve") {
+            Ok(json!({"kind": "answer", "confidence": 0.9, "signals": ["question"], "title": "看磁盘", "goal": "看看这台机器的磁盘用量", "bot": "steve"}).to_string())
+        } else if p.starts_with("You are Steve, the user's assistant.") {
+            Err(crate::error::CoreError::NeedsTools)
+        } else {
+            Err(msg("unexpected prompt"))
+        }
+    });
+    let before = k.db().items(WS).unwrap().len();
+    k.core.say(WS, "看下我现在磁盘情况", &[]).unwrap();
+    let ms = settle(&k, 2).await;
+    assert_eq!(ms[1].item_id, None, "{}", ms[1].text);
+    assert_eq!(k.db().items(WS).unwrap().len(), before);
+    assert_eq!(ms[1].text, crate::thread::handoff::NEEDS_TOOLS_ANSWER);
+    assert_eq!(ms[1].meta["error"], true);
 }
