@@ -45,6 +45,18 @@ await page.route("**/*", async (route) => {
 })
 const map = page.locator("[data-device-map]")
 const reread = () => page.evaluate(() => document.dispatchEvent(new Event("visibilitychange")))
+/* every card lies inside the map and the columns fit in it: the map clips what runs past it, so the page itself never
+ * overflows and noOverflow alone would not see a cut-off column */
+const cardsInside = async (what) => {
+  const out = await page.evaluate(() => {
+    const map = document.querySelector(".dmap"), cols = map.querySelector(".dmap-cols"), m = map.getBoundingClientRect()
+    const cut = [...map.querySelectorAll("[data-map-card]")].filter((c) => { const r = c.getBoundingClientRect(); return r.left < m.left - 0.5 || r.right > m.right + 0.5 }).map((c) => c.dataset.mapCard)
+    return { cut, cols: cols.scrollWidth - cols.clientWidth, width: Math.round(m.width), narrow: map.hasAttribute("data-narrow") }
+  })
+  assert.deepEqual(out.cut, [], `${what}: every card inside the map (map ${out.width} px, narrow ${out.narrow})`)
+  assert.ok(out.cols <= 0, `${what}: the columns fit in the map (map ${out.width} px, ${out.cols} px over)`)
+  return out
+}
 const noOverflow = async (what) => assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), what + ": no horizontal overflow")
 const shot = async (name) => { if (process.env.STEVE_TEST_SHOTS) { await mkdir(process.env.STEVE_TEST_SHOTS, { recursive: true }); await page.screenshot({ path: `${process.env.STEVE_TEST_SHOTS}/${name}.png`, fullPage: true, animations: "disabled" }) } }
 try {
@@ -107,7 +119,24 @@ try {
   assert.equal(await map.locator("[data-map-clients]").count(), 0)
   await map.locator("[data-map-show-clients]").click()
   await map.locator("[data-map-clients]").waitFor()
-  await shot("map-1440"); await noOverflow("1440")
+  await shot("map-1440"); await noOverflow("1440"); await cardsInside("1440")
+
+  // between a phone and a wide window: the wide map where its columns fit, the tree where they do not, nothing cut off
+  const layouts = new Set()
+  for (const width of [1280, 1160, 1024, 980, 920, 900, 860, 820, 780, 720, 640, 560]) {
+    await page.setViewportSize({ width, height: 1000 })
+    await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))))
+    layouts.add((await cardsInside("window " + width)).narrow)
+  }
+  assert.deepEqual([...layouts].sort(), [false, true], "both layouts seen between 560 and 1280 px")
+  await page.setViewportSize({ width: 780, height: 1000 })
+  await page.waitForFunction(() => document.querySelector(".dmap")?.hasAttribute("data-narrow"))
+  await map.locator("[data-map-show-clients]").click()
+  await page.waitForFunction(() => !document.querySelector(".dmap")?.hasAttribute("data-narrow"))
+  await cardsInside("780 without clients")
+  await map.locator("[data-map-show-clients]").click()
+  await map.locator("[data-map-clients]").waitFor()
+  await page.setViewportSize({ width: 1440, height: 1000 })
 
   // a phone: a tree, no hover card
   await page.setViewportSize({ width: 390, height: 844 })

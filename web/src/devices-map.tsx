@@ -9,7 +9,7 @@
  * edges an SVG over them, computed from the cards' real boxes whenever any of them moves (ResizeObserver): text size,
  * width and counts never misplace an edge. The order is fixed while the page is open (device-map-model's keepOrder),
  * so cards do not jump; layout, order and shapes come only from the data. */
-import { useLayoutEffect, useRef, useState, type KeyboardEvent, type ReactNode } from "react"
+import { useLayoutEffect, useRef, useState, type CSSProperties, type KeyboardEvent, type ReactNode } from "react"
 import { ChevronRightIcon, GlobeIcon, LaptopIcon, MonitorIcon, MonitorSmartphoneIcon, NetworkIcon, PlusIcon, ServerIcon, SmartphoneIcon, SquareTerminalIcon, UsersIcon } from "lucide-react"
 import { useT } from "@/i18n"
 import { num } from "@/i18n/format"
@@ -26,8 +26,19 @@ import { hostIcon, linkReason, nodeHref } from "@/devices-nodes"
 import { Chip, DCard, StatusBadge, StatusDot } from "@/devices-ui"
 import { cn } from "cn"
 
-/** below this width (the map's own, not the window's) the map is a vertical tree */
-const NARROW_BELOW = 640
+/* the wide map's columns and their smallest widths, in px: the CSS draws the grid from these (as --dmap-* variables), and
+ * the map turns into a vertical tree whenever its own width (not the window's) is less than they add up to, so a column
+ * is never cut off between a phone and a wide window */
+const MAP_PAD_X = 24
+const MAP_GAP_MIN = 68
+const MAP_COL_MIN = { clients: 150, hub: 250, nodes: 230, hubNoClients: 230 }
+/** the smallest width of the map, padding included, at which the wide (three or two column) layout fits */
+const wideMinWidth = (clients: boolean) =>
+  2 * MAP_PAD_X + (clients ? MAP_COL_MIN.clients + MAP_COL_MIN.hub + MAP_COL_MIN.nodes + 2 * MAP_GAP_MIN : MAP_COL_MIN.hubNoClients + MAP_COL_MIN.nodes + MAP_GAP_MIN)
+const MAP_VARS = {
+  "--dmap-pad-x": `${MAP_PAD_X}px`, "--dmap-gap-min": `${MAP_GAP_MIN}px`, "--dmap-col-c": `${MAP_COL_MIN.clients}px`,
+  "--dmap-col-h": `${MAP_COL_MIN.hub}px`, "--dmap-col-n": `${MAP_COL_MIN.nodes}px`, "--dmap-col-h0": `${MAP_COL_MIN.hubNoClients}px`,
+} as CSSProperties
 /** where this client remembers whether the map shows the clients */
 const SHOW_CLIENTS = "steve.devices.mapClients"
 const GIB = 2 ** 30
@@ -83,7 +94,8 @@ export function DeviceMap() {
   const layout = () => {
     const el = canvas.current
     if (!el) return
-    const isNarrow = el.clientWidth < NARROW_BELOW
+    /* the padding is the wide one in both layouts here, so the choice depends on the map's width alone and cannot flip back and forth */
+    const isNarrow = el.clientWidth < wideMinWidth(show)
     setNarrow(isNarrow)
     const cr = el.getBoundingClientRect()
     const box = (x: Element | null): Box | null => { if (!x) return null; const r = x.getBoundingClientRect(); return { l: r.left - cr.left, t: r.top - cr.top, r: r.right - cr.left, b: r.bottom - cr.top } }
@@ -174,7 +186,7 @@ export function DeviceMap() {
         </div>
       </header>
       <div className="px-5 pb-5">
-        <div ref={canvas} className="dmap" data-narrow={narrow || undefined} data-clients={show || undefined} data-hot={hot ?? undefined} data-map-compact={compact || undefined}>
+        <div ref={canvas} className="dmap" style={MAP_VARS} data-narrow={narrow || undefined} data-clients={show || undefined} data-hot={hot ?? undefined} data-map-compact={compact || undefined}>
           <svg className="dmap-edges" aria-hidden>
             {drawn.trunk && <path className="dmap-edge is-exec is-trunk" d={drawn.trunk} />}
             {drawn.edges.map((e) => <path key={e.kind + e.id} d={e.d} data-edge={e.id} data-edge-kind={e.kind === "access" ? "access" : e.tone}
