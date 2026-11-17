@@ -63,6 +63,8 @@ export default {
     code: "Code",
     moreRows_one: "Show {{count}} more row",
     moreRows_other: "Show {{count}} more rows",
+    imageFailed: "Image failed to load. Check your connection or sign-in, then retry.",
+    imageUnavailable: "Image unavailable. Ask the assistant to regenerate or upload it.",
   },
   permission: {
     request: "Request",
