@@ -70,7 +70,7 @@ Agent tools send and end the turn, so nothing waits in memory. External effects 
 
 #### 🛑 Autonomy has hard limits
 
-YOLO only decides things that stay on your machine and can be undone. Money, high-sensitivity secrets, pushing, publishing, merging and speaking as you without an `[AI]` mark are out of reach whatever the settings say; the one exception is an item's agent pushing its own branch to `origin` and opening its pull request. It does not speak to people outside your organisation unless you turn that on. Breakers pause it when things go wrong.
+YOLO only decides things that stay on your machine and can be undone. Money, high-sensitivity secrets, pushing, publishing and speaking as you without an `[AI]` mark are out of reach whatever the settings say; the one exception is an item's agent pushing its own branch to `origin` and opening its pull request. No agent runs `gh pr merge`: a pull request lands through the host's auto-merge once its item is accepted, and a code change without a work graph waits for you to merge it (being implemented). It does not speak to people outside your organisation unless you turn that on. Breakers pause it when things go wrong.
 
 </td>
 </tr>
@@ -86,7 +86,7 @@ Steve runs the command with the secret in its environment, stdin or a temporary 
 
 #### 🙊 Knowledge has a disclosure level
 
-Public, paraphrase only, reasoning only, or never. Only your private chat with Steve and a Bot's replies to workspace members go without a model's review. Whatever is sent in your name to anyone else passes a rule check and a second model's disclosure check, and is held when either fails.
+Public, paraphrase only, reasoning only, or never. Only your private chat with Steve and a Bot's replies to workspace members go without a model's review. Whatever is sent in your name to anyone else passes a rule check and a second model's disclosure check, and is held when either fails; a mail draft still skips the model check while YOLO is off (being fixed, [#247](https://github.com/Infranite/steve/issues/247)).
 
 </td>
 <td width="33%" valign="top">
@@ -177,7 +177,7 @@ On GitHub, Steve asks before opening a PR after you accept, and again before mer
 
 ### 🔌 Connections
 
-Every outgoing message takes the same path: disclosure check, authorization, the send itself, a record of which knowledge was used at what level, and an audit entry. Your own account never sends without approval, and messages sent on your behalf say so. Your private chat with Steve is not reviewed, and a Bot's reply to workspace members skips the model check when all the knowledge it uses is public to them; anything sent in your name to a third party has both the rule check and a second model's check, and a failure holds it. YOLO sends to an audience with people outside your organisation only when you allow it. On your own account, trigger words from anyone but you are screened by a fast model before they are answered. See [outbound checks](docs/deployment.md#outbound-checks).
+Every outgoing message takes the same path: disclosure check, authorization, the send itself, a record of which knowledge was used at what level, and an audit entry. Your own account never sends without approval, and messages sent on your behalf say so. Your private chat with Steve is not reviewed, and a Bot's reply to workspace members skips the model check when all the knowledge it uses is public to them; anything sent in your name to a third party has both the rule check and a second model's check, and a failure holds it (a mail draft written while YOLO is off has the rule check only until [#247](https://github.com/Infranite/steve/issues/247) is fixed). YOLO sends to an audience with people outside your organisation only when you allow it. On your own account, trigger words from anyone but you are screened by a fast model before they are answered. See [outbound checks](docs/deployment.md#outbound-checks).
 
 - **Feishu / Lark.** Create a bot by scanning one QR code. Steve works as the bot or, through OAuth, as you, and receives messages over the long connection. Each chat becomes a space with an attention level (live, muted, blocked) and response rules (mention, DM, keyword, intent…) that can turn into flows. Personas set how much a reply reveals: name, role, that it's an AI, that it's Steve, who the owner is. Once a message has become an item, replies in its thread from whoever raised it, or from you, go straight to that item.
 - **Email** over IMAP/SMTP, with presets. IDLE push sync, and views for *needs action*, *waiting on them* and drafts. HTML renders in a sandbox with remote images blocked. Sending always goes through an approval card bound to the content, and the server computes the recipients, so agents can't add any. Your first mailbox comes with a triage flow that drops notification mail before any model call.
