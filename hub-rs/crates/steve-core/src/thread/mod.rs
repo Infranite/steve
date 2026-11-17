@@ -174,6 +174,11 @@ pub struct Conv {
     /// the person speaking may start work: the workspace's owner. What anyone else asks for becomes an
     /// item that waits for the owner's yes (a proposal), never work that runs on its own
     pub start: bool,
+    /// an answer that needs tools it does not have is handed on to an item (`Core::hand_off`),
+    /// where `items` allows one: the owner's own trigger word on their account. Elsewhere (the web
+    /// conversation, a Bot's chat) such an answer says why and points at “做成事项”, as before
+    #[serde(default)]
+    pub hands_on: bool,
 }
 
 impl Default for Conv {
@@ -190,6 +195,7 @@ impl Conv {
             items: true,
             owner_only: false,
             start: true,
+            hands_on: false,
         }
     }
     /// A conversation whose turns are not the user's own (an IM space).

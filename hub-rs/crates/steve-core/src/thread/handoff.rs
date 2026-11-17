@@ -1,9 +1,12 @@
 //! An answer that needs tools: the answer is a model call without them, so a question that has to
 //! run a command, read a file or look at the machine (“看下磁盘还剩多少”) makes the model reach for
 //! one, and the call refuses it ([`CoreError::NeedsTools`]). That is decided by the refusal, not by
-//! how the question reads: the question becomes an item a Bot works on, once, where the
-//! conversation lets a turn become one. Where it may not, the conversation says why in plain words
-//! and what to do instead.
+//! how the question reads: for the owner's own trigger word on their account ([`Conv::hands_on`]) the
+//! question becomes an item a Bot works on, once, where the conversation lets a turn become one.
+//! Anywhere else (the web conversation, a Bot's chat, a chat with outside members) the
+//! conversation says why in plain words and what to do instead; “做成事项” still makes one.
+//!
+//! [`Conv::hands_on`]: super::Conv::hands_on
 //!
 //! [`CoreError::NeedsTools`]: crate::error::CoreError::NeedsTools
 
@@ -19,7 +22,7 @@ use serde_json::{Map, json};
 pub const NEEDS_TOOLS_OUTCOME: &str = "needs_tools";
 
 /// What a chat's conversation says when a question needs tools and may not become an item there.
-pub const NEEDS_TOOLS_HERE: &str = "（这件事要在机器上动手：跑命令、读文件或查看系统状态。这里只能直接回答，做不了，也不能在这里建事项。要做的话，在 Steve 的对话里交代给我，我会交给 Bot 去做。）";
+pub const NEEDS_TOOLS_HERE: &str = "（这件事要在机器上动手：跑命令、读文件或查看系统状态，这里的直接回答做不到。要做的话，在 Steve 的对话里交代给我，我会交给 Bot 去做。）";
 /// … and your own conversation, where the answer was asked for here (“在这里回答”).
 pub const NEEDS_TOOLS_ANSWER: &str = "（这件事要在机器上动手：跑命令、读文件或查看系统状态，直接回答做不到。点“做成事项”交给 Bot 去做。）";
 

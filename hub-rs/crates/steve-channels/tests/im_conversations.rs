@@ -47,6 +47,8 @@ const PASS: &str = r#"{"verdict": "pass", "spans": []}"#;
 struct FakeThread {
     store: steve_store::Store,
     turns: Mutex<Vec<(String, Turn)>>,
+    /// The turn is stored, then taking it fails with this.
+    fail: Mutex<Option<String>>,
 }
 
 impl Thread for FakeThread {
@@ -57,6 +59,9 @@ impl Thread for FakeThread {
             .add(ws, "me", &turn.text, None, &turn.meta, &turn.space)
             .map_err(|e| e.to_string())?;
         self.turns.lock().unwrap().push((id.clone(), turn));
+        if let Some(e) = self.fail.lock().unwrap().clone() {
+            return Err(e);
+        }
         Ok(id)
     }
 }
@@ -249,6 +254,7 @@ async fn setup(with_thread: bool) -> H {
         Arc::new(FakeThread {
             store: env.store().clone(),
             turns: Mutex::new(vec![]),
+            fail: Mutex::new(None),
         })
     });
     let mut b = Channels::builder(env.modules.clone(), conns, Arc::new(flow.clone()))
@@ -1940,4 +1946,124 @@ async fn a_failed_trigger_word_is_visible_in_its_thread_and_in_steve() {
     let err = failed_answer(&h, &turn, "（没能生成回答）");
     h.ch.conv_deliver(WS, &err).await.unwrap();
     assert_eq!(unsendable_notices(&h), 2);
+}
+
+/// Someone else may use your trigger word; their turn failed. The note goes out from your own
+/// account, so it speaks as you: never “我请 <你> 来看” (you asking yourself).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_trigger_word_of_someone_else_is_answered_in_your_voice() {
+    let h = setup(true).await;
+    push(
+        &h,
+        &h.me.clone(),
+        msg("D_LI", "o0", "ulilei", "在吗", false, false),
+    )
+    .await;
+    exec(
+        &h,
+        "UPDATE channel_settings SET trigger = ? WHERE connection_id = ?",
+        &[
+            &json!({"on": true, "words": ["/ai"], "where": ["dm:*"], "who": ["*"], "reply": "thread", "mark": true}).to_string(),
+            &h.me,
+        ],
+    );
+    // the privacy guard lets an ordinary request through
+    h.env.gateway.script(
+        "你是一道隐私关卡",
+        r#"{"verdict": "safe", "why": "工作问题"}"#,
+    );
+    let t = h.thread.clone().unwrap();
+    let i = push(
+        &h,
+        &h.me.clone(),
+        msg("D_LI", "o1", "ulilei", "/ai 帮我看看磁盘", false, false),
+    )
+    .await;
+    assert_eq!(
+        i.response.as_ref().map(|r| r.label.as_str()),
+        Some("你的指令，交给对话回答")
+    );
+    let (turn, tt) = t.turns.lock().unwrap().last().unwrap().clone();
+    assert_eq!(tt.meta["chan"]["command"], json!(true));
+    assert!(
+        !tt.start,
+        "not the owner: what it asks for waits for the owner"
+    );
+    assert!(
+        !tt.hands_on,
+        "only the owner's own trigger word is handed to an item"
+    );
+    let err = failed_answer(&h, &turn, "（没能生成回答）");
+    let d = h.ch.conv_deliver(WS, &err).await.unwrap();
+    assert!(matches!(d, Some(Delivered::Sent { .. })), "{d:?}");
+    let s = sent(&h);
+    let note = s.last().unwrap();
+    assert_eq!(
+        note,
+        &format!("[AI] {}", conversations::TRIGGER_FAILED_FOR_OTHERS)
+    );
+    assert!(!note.contains("我请"), "{note}");
+}
+
+/// Your trigger word the conversation stored and then failed to take, and the reply could not be
+/// written either: what is recorded is the real error, on the turn already stored (not a second
+/// one), and the thread hears of it as for any other failure.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_trigger_word_no_one_took_records_the_real_reason_once() {
+    let h = setup(true).await;
+    push(
+        &h,
+        &h.me.clone(),
+        msg("D_LI", "n0", "ulilei", "在吗", false, false),
+    )
+    .await;
+    exec(
+        &h,
+        "UPDATE channel_settings SET trigger = ? WHERE connection_id = ?",
+        &[
+            &json!({"on": true, "words": ["/ai"], "where": ["dm:*"], "who": ["me"], "reply": "thread", "mark": true}).to_string(),
+            &h.me,
+        ],
+    );
+    let t = h.thread.clone().unwrap();
+    *t.fail.lock().unwrap() = Some("对话队列已满".into());
+    h.env.gateway.unscript(H_SAFETY);
+    h.env.gateway.script_fail(H_SAFETY, "模型不可用");
+    let before = sent(&h).len();
+    let i = push(
+        &h,
+        &h.me.clone(),
+        msg("D_LI", "n1", "upx", "/ai 看下我现在磁盘情况", false, false),
+    )
+    .await;
+    assert_eq!(
+        i.response.as_ref().map(|r| r.label.as_str()),
+        Some("触发语未接入，只记录")
+    );
+    let conv = conversations::conv_space(&i.space_id);
+    let said = h.env.store().messages().list(WS, &conv, 50).unwrap();
+    let turns: Vec<_> = said
+        .iter()
+        .filter(|m| m.author == "me" && m.meta["chan"]["message"] == json!(i.message_id))
+        .collect();
+    assert_eq!(turns.len(), 1, "the turn once: {said:#?}");
+    assert_eq!(
+        turns[0].text, "看下我现在磁盘情况",
+        "the instruction, as any turn"
+    );
+    let why = said
+        .iter()
+        .find(|m| m.author == "steve" && m.meta["origin"] == json!(turns[0].id))
+        .expect("why");
+    assert!(why.text.contains("对话队列已满"), "{}", why.text);
+    assert!(!why.text.contains("没有接上"), "{}", why.text);
+    assert_eq!(why.meta["error"], json!(true));
+    // said in its thread as you, like any failed trigger word
+    let s = sent(&h);
+    assert_eq!(s.len(), before + 1, "{s:?}");
+    assert_eq!(
+        s.last().unwrap(),
+        &format!("[AI] {}", conversations::TRIGGER_FAILED_NOTE)
+    );
+    assert!(h.fake.reactions_on("n1").contains(&ReactionKind::Failed));
 }

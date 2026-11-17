@@ -1428,4 +1428,6 @@ mod tests {
 }
 
 #[cfg(test)]
+mod chan_tests;
+#[cfg(test)]
 mod workflow_tests;

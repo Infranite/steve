@@ -1155,10 +1155,11 @@ async fn a_plain_question_skips_the_router() {
     assert_eq!(routed.load(std::sync::atomic::Ordering::SeqCst), 1);
 }
 
-/// In your own conversation too, a question whose answer reached for a tool it may not use is
-/// handed to an item instead of ending as a failed answer.
+/// In your own conversation a question whose answer reached for a tool it may not use is not
+/// made an item on its own (only a trigger word on your account is): the reply says why and points
+/// at “做成事项”, and every model of the list is still tried first.
 #[tokio::test]
-async fn a_question_that_needs_tools_becomes_an_item() {
+async fn a_question_that_needs_tools_says_to_make_it_an_item() {
     let k = Kit::new();
     k.gw.set(move |p, _| {
         if p.starts_with("You are the router of Steve") {
@@ -1169,10 +1170,11 @@ async fn a_question_that_needs_tools_becomes_an_item() {
             Err(msg("unexpected prompt"))
         }
     });
+    let before = k.db().items(WS).unwrap().len();
     k.core.say(WS, "看下我现在磁盘情况", &[]).unwrap();
     let ms = settle(&k, 2).await;
-    let id = ms[1].item_id.clone().expect("an item, not a failed answer");
-    assert!(!ms[1].text.starts_with("（回答失败"), "{}", ms[1].text);
-    assert!(ms[1].text.contains(&id), "{}", ms[1].text);
-    assert_eq!(k.db().item(&id).unwrap().unwrap().source.1, "chat");
+    assert_eq!(ms[1].item_id, None, "{}", ms[1].text);
+    assert_eq!(k.db().items(WS).unwrap().len(), before);
+    assert_eq!(ms[1].text, crate::thread::handoff::NEEDS_TOOLS_ANSWER);
+    assert_eq!(ms[1].meta["error"], true);
 }

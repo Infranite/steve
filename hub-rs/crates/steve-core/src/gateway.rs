@@ -737,13 +737,15 @@ impl<M: OneModel> Fallback<M> {
                     } else {
                         format!("{m}: {e1}")
                     });
-                    // a request that needs tools needs them from every model of the call: the
-                    // caller hands it on instead of a next model answering without them
-                    let needs_tools = matches!(e, CoreError::NeedsTools);
+                    // a request that needs tools, from a caller that hands it on (a trigger
+                    // word's answer becomes an item): the next model has no tools either. Any
+                    // other caller falls back, as for every fast error
+                    let handed_on =
+                        matches!(e, CoreError::NeedsTools) && steve_modules::gateway::hands_on();
                     a.result = Err(e);
                     // a timeout is not the model's own fault (the provider or the harness is slow): the
                     // next one would wait as long, so the chain ends here; fast errors fall back
-                    if r.timed_out || needs_tools {
+                    if r.timed_out || handed_on {
                         break;
                     }
                 }

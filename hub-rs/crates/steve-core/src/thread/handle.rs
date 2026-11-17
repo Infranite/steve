@@ -399,7 +399,7 @@ impl Core {
                     t0: now(),
                     resume,
                     space: conv.space.clone(),
-                    to_item: conv.items.then_some(conv.start),
+                    to_item: (conv.hands_on && conv.items).then_some(conv.start),
                 };
                 if !self.enqueue_inline(ws, job)? {
                     reply(QUEUE_FULL, None, None);

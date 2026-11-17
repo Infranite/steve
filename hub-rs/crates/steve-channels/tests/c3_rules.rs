@@ -479,16 +479,17 @@ async fn your_account_drafts_records_and_takes_trigger_words() {
         .messages()
         .list(WS, &conv, 50)
         .expect("conversation");
-    assert!(
-        said.iter()
-            .any(|m| m.author == "me" && m.text.starts_with("/bot"))
-    );
+    // the turn once, as any trigger word's turn: its instruction without the trigger word
+    let turns: Vec<_> = said.iter().filter(|m| m.author == "me").collect();
+    assert_eq!(turns.len(), 1, "{said:#?}");
+    assert_eq!(turns[0].text, "回复他进度");
     let last = said.iter().find(|m| m.author == "steve").expect("recorded");
-    assert!(
-        last.text.starts_with("（这条触发词没有回答"),
-        "{}",
-        last.text
+    // why in the words of what failed: here nothing took it (no conversation port)
+    assert_eq!(
+        last.text,
+        steve_channels::respond::not_answered("渠道模块没有接上 Steve 的对话"),
     );
+    assert_eq!(last.meta["origin"], json!(turns[0].id));
     assert_eq!(last.meta["error"], json!(true));
     // someone else's trigger word is just a message
     let n = calls(&h);

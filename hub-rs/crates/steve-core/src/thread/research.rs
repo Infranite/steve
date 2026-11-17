@@ -208,9 +208,22 @@ pub(crate) struct InlineJob {
     pub resume: Option<ResumeFrom>,
     /// the conversation (`messages.space`) it is answered in
     pub space: String,
-    /// An answer that needs tools becomes an item here ([`Core::hand_off`]): `Some(start)`, the
-    /// speaker may start work (else it is a proposal); `None`, it may not become one.
+    /// An answer that needs tools becomes an item here ([`Core::hand_off`], [`Conv::hands_on`]):
+    /// `Some(start)`, the speaker may start work (else it is a proposal); `None`, it does not
+    /// become one on its own.
+    ///
+    /// [`Conv::hands_on`]: super::Conv::hands_on
     pub to_item: Option<bool>,
+}
+
+/// `f`, whose gateway calls end their model chain on a request that needs tools when `j` hands
+/// such a request on to an item ([`InlineJob::to_item`]); otherwise they fall back as always.
+async fn handing_on<F: std::future::Future>(j: &InlineJob, f: F) -> F::Output {
+    if j.to_item.is_some() {
+        steve_modules::gateway::hands_on_needs_tools(f).await
+    } else {
+        f.await
+    }
 }
 
 /// The inline queue of a conversation: the web's is keyed by the workspace (as before), a guest
@@ -863,7 +876,7 @@ impl Core {
         let on_draft = |thought: &str, t: &str| drafts.send(thought, t);
         /* a stop ends the call right away (its harness is killed), not after the whole answer is written */
         let a = tokio::select! {
-            a = crate::stats::tagged(
+            a = handing_on(j, crate::stats::tagged(
                 "chat",
                 ws,
                 gateway::answer(
@@ -875,7 +888,7 @@ impl Core {
                     extra,
                     &on_draft,
                 ),
-            ) => Some(a),
+            )) => Some(a),
             _ = j.stop.stopped() => None,
         };
         lock(&drafts.state).closed = true;
@@ -936,7 +949,7 @@ impl Core {
         host: Arc<dyn super::ConvHost>,
     ) -> Result<()> {
         let a0 = now();
-        let r = host.answer(ws, &j.space, &j.origin).await;
+        let r = handing_on(j, host.answer(ws, &j.space, &j.origin)).await;
         if j.stop.is_stopped() {
             self.post(
                 ws,
@@ -975,7 +988,7 @@ impl Core {
         Ok(())
     }
 
-    /// The answer to `j` needed tools: handed to an item (`None`, its announcement is the reply), or
+    /// The answer to `j` needed tools: handed to an item where `j` hands it on (`None`, its announcement is the reply), or
     /// the words that say why not.
     async fn needs_tools(&self, ws: &str, j: &InlineJob) -> Option<String> {
         if j.to_item.is_none() {

@@ -77,6 +77,7 @@ fn guest(research: bool, items: bool) -> Conv {
         research,
         items,
         start: false,
+        hands_on: false,
     }
 }
 
@@ -469,8 +470,10 @@ async fn an_answer_that_needs_tools_is_handed_to_an_item_once() {
     assert!(k.core.set_conv_host(host.clone()));
     needs_tools_router(&k);
     let before = k.db().items(WS).unwrap().len();
+    // your own trigger word
     let mine = Conv {
         start: true,
+        hands_on: true,
         ..guest(true, true)
     };
     let mid = turn(&k, "看下我现在磁盘情况", mine);
@@ -554,7 +557,12 @@ async fn an_answer_that_needs_tools_where_no_item_may_be_made_says_why() {
     assert!(k.core.set_conv_host(host.clone()));
     needs_tools_router(&k);
     let before = k.db().items(WS).unwrap().len();
-    turn(&k, "看下我现在磁盘情况", guest(true, false));
+    let mine = Conv {
+        start: true,
+        hands_on: true,
+        ..guest(true, false)
+    };
+    turn(&k, "看下我现在磁盘情况", mine);
     let ms = settle(&k, SPACE, 2).await;
     assert_eq!(k.db().items(WS).unwrap().len(), before);
     assert_eq!(ms[1].item_id, None);
@@ -567,4 +575,36 @@ async fn an_answer_that_needs_tools_where_no_item_may_be_made_says_why() {
             .iter()
             .any(|(_, m)| m == &ms[1].id)
     );
+}
+
+/// A turn that is not a trigger word on the owner's account (a Bot's chat, where items are
+/// allowed) is not handed to an item on its own when its answer needs tools: it stays a failed
+/// answer that says why, as before; “做成事项” is the way to make one.
+#[tokio::test]
+async fn an_answer_that_needs_tools_in_a_bots_chat_is_not_made_an_item() {
+    let k = Kit::new();
+    let host = Arc::new(NeedsTools::default());
+    assert!(k.core.set_conv_host(host.clone()));
+    needs_tools_router(&k);
+    let before = k.db().items(WS).unwrap().len();
+    let mid = turn(
+        &k,
+        "看下我现在磁盘情况",
+        Conv {
+            start: true,
+            ..guest(true, true)
+        },
+    );
+    let ms = settle(&k, SPACE, 2).await;
+    assert_eq!(*host.answered.lock().unwrap(), 1);
+    assert_eq!(
+        k.db().items(WS).unwrap().len(),
+        before,
+        "no item on its own"
+    );
+    assert_eq!(ms[1].item_id, None);
+    assert_eq!(ms[1].text, crate::thread::handoff::NEEDS_TOOLS_HERE);
+    assert_eq!(ms[1].meta["error"], true);
+    let log = k.db().store().thread().route_of(&mid).unwrap().unwrap();
+    assert_eq!(log.item_id, None);
 }
