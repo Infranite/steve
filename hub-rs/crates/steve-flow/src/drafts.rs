@@ -127,8 +127,19 @@ fn text_of(v: &Value) -> Option<String> {
     }
 }
 
+/// One of [`MODES`]: a brief is never made or edited in conversation (Steve turns it on; its owner
+/// changes it on its page).
 fn parse_mode(s: &str) -> Option<Mode> {
-    Mode::parse(s).or_else(|| MODES.into_iter().find(|m| m.label() == s))
+    MODES
+        .into_iter()
+        .find(|m| m.as_str() == s || m.label() == s)
+}
+
+/// [`schedules::own`], except a brief (see [`parse_mode`]): not found.
+fn own_general(c: &Connection, ws: &str, id: &str) -> ApiResult<schedules::Schedule> {
+    Some(schedules::own(c, ws, id)?)
+        .filter(|s| s.spec.mode != Mode::Brief)
+        .ok_or_else(|| ApiError::not_found("定时任务"))
 }
 
 fn parse_missed(s: &str) -> Option<MissedPolicy> {
@@ -412,7 +423,7 @@ impl DraftTarget for ScheduleTarget {
                 context: json!({ "tz": tz }),
             });
         };
-        let s = schedules::own(c, &viewer.ws, id)?;
+        let s = own_general(c, &viewer.ws, id)?;
         let sp = &s.spec;
         Ok(Prepared {
             target_id: Some(s.id.clone()),
@@ -480,7 +491,7 @@ impl DraftTarget for ScheduleTarget {
         let mut plan = Plan::default();
         match &p.target_id {
             Some(id) => {
-                let s = schedules::own(c, &viewer.ws, id)?;
+                let s = own_general(c, &viewer.ws, id)?;
                 let mut set = Map::new();
                 for op in raw {
                     if op["op"] != "set" {
@@ -525,6 +536,7 @@ impl DraftTarget for ScheduleTarget {
     fn candidates(&self, c: &Connection, viewer: &Viewer) -> ApiResult<Vec<Candidate>> {
         let mut out: Vec<Candidate> = schedules::list(c, &viewer.ws)?
             .into_iter()
+            .filter(|s| s.spec.mode != Mode::Brief)
             .map(|s| Candidate {
                 code: format!("schedule:{}", s.id),
                 label: format!("定时任务 {}", s.name),
@@ -692,6 +704,9 @@ impl ChangeOp for CreateOp {
     fn validate(&self, c: &Connection, cx: &OpCx, op: &Value) -> ApiResult<()> {
         let spec: Spec =
             serde_json::from_value(op["spec"].clone()).map_err(|_| ApiError::invalid("spec"))?;
+        if spec.mode == Mode::Brief {
+            return Err(ApiError::invalid("mode"));
+        }
         schedules::check_refs(c, cx.ws, &spec)?;
         schedules::check_can_run(self.core.as_ref(), c, cx.ws, &spec, true)
     }
@@ -736,14 +751,14 @@ struct PatchOp {
 
 impl ChangeOp for PatchOp {
     fn validate(&self, c: &Connection, cx: &OpCx, op: &Value) -> ApiResult<()> {
-        let s = schedules::own(c, cx.ws, op["id"].as_str().unwrap_or(""))?;
+        let s = own_general(c, cx.ws, op["id"].as_str().unwrap_or(""))?;
         let (_, spec, enabled) = apply_set(&s, &op["set"]);
         schedules::check_refs(c, cx.ws, &spec)?;
         schedules::check_can_run(self.core.as_ref(), c, cx.ws, &spec, enabled)
     }
 
     fn apply(&self, tx: &Tx, cx: &OpCx, op: &Value) -> ApiResult<Value> {
-        let s = schedules::own(tx, cx.ws, op["id"].as_str().unwrap_or(""))?;
+        let s = own_general(tx, cx.ws, op["id"].as_str().unwrap_or(""))?;
         let (name, spec, enabled) = apply_set(&s, &op["set"]);
         let f = Fields {
             name: &name,

@@ -189,6 +189,8 @@ fn every_topic_has_its_feed_kind() {
         ("todo.due", "reminder"),
         ("snooze.wake", "reminder"),
         ("contact.starred", "starred"),
+        // 103
+        ("briefing.ready", "briefing"),
     ]
     .into_iter()
     .enumerate()
@@ -208,7 +210,7 @@ fn every_topic_has_its_feed_kind() {
             .unwrap();
         assert_eq!(got, kind, "{topic}");
     }
-    // the column's CHECK lists exactly these four
+    // the column's CHECK lists exactly these (103 rebuilt the table and added `briefing.ready`)
     let ddl: String = c
         .query_row(
             "SELECT sql FROM sqlite_master WHERE type='table' AND name='personal_notifications'",
@@ -218,7 +220,7 @@ fn every_topic_has_its_feed_kind() {
         .unwrap();
     assert!(
         ddl.contains(
-            "CHECK(topic IN ('work.item.done','todo.due','snooze.wake','contact.starred'))"
+            "CHECK(topic IN ('work.item.done','todo.due','snooze.wake','contact.starred','briefing.ready'))"
         )
     );
 }

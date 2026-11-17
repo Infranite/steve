@@ -442,6 +442,7 @@ export default {
       item: "Create an item and start",
       propose: "Propose a plan first",
       report: "Publish to Feed · visible to workspace members",
+      brief: "Morning brief, for you only",
     },
     missed: {
       catch_up_once: "Catch up once",
@@ -476,6 +477,9 @@ export default {
     rowRun: "Runs as",
     rowRules: "Rules",
     rules: "If missed: {{missed}} · if still running: {{overlap}} · budget {{budget}} per run",
+    briefWhat: "Your todos, goals, items and pending cards for the day, put together by rule, for you only",
+    briefRules: "Waits out your quiet hours; after 12:00 it stays in the Feed only; not pushed on a day with nothing planned",
+    briefEdit: "Only a morning brief's name and time change; its time zone follows your notification settings. Turn it off with the switch in the list.",
     runs: "Run history",
     earlier: "Earlier",
     editTitle: "Edit schedule",

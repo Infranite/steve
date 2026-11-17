@@ -24,13 +24,17 @@
 //! - [`bot`] and [`tools`]: ordinary Bot rules, leased chunk reads, validated writes and persisted reports.
 //!   The Hub binds its ordinary schedule; this crate never starts a harness or calls a model.
 //! - [`todo_tools`]: the agent's `steve_todo_*` tools, for the person whose session it is.
-//! - [`api`]: the routes of the conversation page, the knowledge page's matters and 待处理's 我的待办.
+//! - [`brief`]: a member's morning brief (a `brief` schedule fired by alarms; made by rule from their todos,
+//!   items and 待处理; their feed and Bot DM).
+//! - [`api`]: the routes of the conversation page, the knowledge page's matters, 待处理's 我的待办 and
+//!   today's brief.
 
 steve_i18n::init!();
 
 pub mod alerts;
 pub mod api;
 pub mod bot;
+pub mod brief;
 pub mod candidates;
 pub mod changes;
 pub mod chunk;

@@ -435,6 +435,7 @@ export default {
       item: "建事项并开始",
       propose: "先给方案",
       report: "发布到信息流，工作空间成员可见",
+      brief: "晨报，只发给你自己",
     },
     missed: {
       catch_up_once: "补跑一次",
@@ -469,6 +470,9 @@ export default {
     rowRun: "执行",
     rowRules: "规则",
     rules: "错过时{{missed}} · 上次没结束时{{overlap}} · 每次预算 {{budget}}",
+    briefWhat: "按规则整理你今天的待办、目标、事项和待处理，只发给你",
+    briefRules: "免打扰时等结束再发；过了 12:00 只留在信息流；没有安排的日子不推送",
+    briefEdit: "晨报只改名字和时间，时区跟随你的通知设置；关掉用列表上的开关。",
     runs: "运行记录",
     earlier: "更早的",
     editTitle: "编辑定时任务",

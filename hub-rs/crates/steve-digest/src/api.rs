@@ -30,6 +30,7 @@ pub fn routes() -> Router<Modules> {
             get(read_todo).post(todo_state).patch(edit_todo),
         )
         .route("/digest/todos/{id}/items", post(link_todo_item))
+        .route("/digest/briefing/today", get(briefing_today))
         .route(
             "/digest/memories/{id}/index",
             get(memory_index).post(link_memory),
@@ -395,6 +396,18 @@ async fn todos(
     })
     .await
 }
+/// The caller's brief, made again now ([`crate::brief::today`]).
+async fn briefing_today(State(m): State<Modules>, who: Caller) -> ApiResult<Json<Value>> {
+    m.blocking(move |m| {
+        member(m, &who)?;
+        let now = m.clock.now();
+        Ok(Json(m.store.reader(|c| {
+            crate::brief::today(c, &who.ws, &who.me, now)
+        })?))
+    })
+    .await
+}
+
 async fn read_todo(
     State(m): State<Modules>,
     who: Caller,

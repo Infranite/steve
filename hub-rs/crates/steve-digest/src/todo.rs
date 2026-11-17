@@ -465,6 +465,10 @@ pub fn create(tx: &Tx, t: &NewTodo, now: i64) -> Result<String> {
         f.due_quote = None;
     }
     let id = insert(tx, t.ws, t.owner, &f, t.source, t.writer, t.packet, now)?;
+    // the first todo a member writes themselves turns their morning brief on
+    if t.source != "steve" {
+        crate::brief::ensure(tx, t.ws, t.owner, now)?;
+    }
     for (conv, msg) in &t.refs {
         tx.execute(
             "INSERT OR IGNORE INTO todo_refs (todo_id, conv, message_id) VALUES (?, ?, ?)",

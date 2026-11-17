@@ -1,5 +1,5 @@
-//! `time_alarms`: one table for every alarm a person has (a todo's reminder, a snooze wake-up; later
-//! the morning brief, meeting preparation and reminders). An alarm fires at most once.
+//! `time_alarms`: one table for every alarm a person has (a todo's reminder, a snooze wake-up, the
+//! morning brief; later meeting preparation and reminders). An alarm fires at most once.
 //!
 //! **Planning.** A module that owns a kind of subject registers an [`AlarmSource`] for its family
 //! (`todo` for `todo:<id>`). When a subject changes, its row in `time_alarm_dirty` is written (by
@@ -14,6 +14,10 @@
 //! - a wanted alarm whose time is already more than [`PAST_GRACE_MS`] past is not added (or brought
 //!   back): changing a todo does not ring a reminder for a time long gone. One that was planned before
 //!   and came due while the Hub was down still fires.
+//!
+//! A subject whose alarm fired or went stale is marked again, so a source that repeats (a `brief`
+//! schedule, family `brief`) plans its next one; a one-off subject (a todo) plans the same rows again,
+//! which changes nothing.
 //!
 //! **Firing.** [`claim_due`] takes the due rows in one transaction. Per row, by
 //! [`crate::policy::plan_alarm`]: past its `stale_at` it is `stale`; within its owner's quiet hours (when
@@ -53,7 +57,9 @@ pub const BATCH: usize = 200;
 pub const TODO_DUE: &str = "todo.due";
 /// The topic of a snooze wake-up.
 pub const SNOOZE_WAKE: &str = "snooze.wake";
-/// Payload version of [`TODO_DUE`] and [`SNOOZE_WAKE`] ([`AlarmFired`]).
+/// The topic of a morning brief (its alarm is planned from a `brief` schedule; steve-digest `brief`).
+pub const BRIEFING_READY: &str = "briefing.ready";
+/// Payload version of [`TODO_DUE`], [`SNOOZE_WAKE`] and [`BRIEFING_READY`] ([`AlarmFired`]).
 pub const ALARM_FIRED_V: i64 = 1;
 
 /// One personal notification topic: what the feed calls it, how quiet hours treat it, and whether
@@ -62,7 +68,7 @@ pub const ALARM_FIRED_V: i64 = 1;
 pub struct Topic {
     /// The outbox topic.
     pub name: &'static str,
-    /// `feed_entries.kind` (migration 102's insert trigger maps the topics the same way).
+    /// `feed_entries.kind` (the insert trigger of migrations 102 and 103 maps the topics the same way).
     pub feed_kind: &'static str,
     pub quiet: QuietRule,
     /// Alarms of this topic that fire in the same round, for the same person, are one notification.
@@ -71,10 +77,13 @@ pub struct Topic {
     pub alarm: Option<&'static str>,
     /// The id of the notification intake's outbox consumer of this topic (stable: its cursor is kept by it).
     pub consumer: &'static str,
+    /// The notification is written from the fired alarms' lines (steve-channels `AlarmIntake`); `false`:
+    /// the module that owns the topic has its own intake (the morning brief's composes the day).
+    pub from_lines: bool,
 }
 
 /// The personal notification topics. Each has its own consumer in the notification intake.
-pub const TOPICS: [Topic; 3] = [
+pub const TOPICS: [Topic; 4] = [
     Topic {
         name: steve_work_api::ITEM_DONE,
         feed_kind: "completion",
@@ -82,6 +91,7 @@ pub const TOPICS: [Topic; 3] = [
         merges: false,
         alarm: None,
         consumer: "notifications.work_done",
+        from_lines: false,
     },
     Topic {
         name: TODO_DUE,
@@ -90,6 +100,7 @@ pub const TOPICS: [Topic; 3] = [
         merges: true,
         alarm: Some("todo"),
         consumer: "notifications.todo_due",
+        from_lines: true,
     },
     Topic {
         name: SNOOZE_WAKE,
@@ -98,6 +109,17 @@ pub const TOPICS: [Topic; 3] = [
         merges: true,
         alarm: Some("snooze"),
         consumer: "notifications.snooze_wake",
+        from_lines: true,
+    },
+    Topic {
+        name: BRIEFING_READY,
+        feed_kind: "briefing",
+        quiet: QuietRule::Postpone,
+        // one per schedule and day: never several in one message
+        merges: false,
+        alarm: Some("brief"),
+        consumer: "notifications.briefing",
+        from_lines: false,
     },
 ];
 
@@ -121,6 +143,9 @@ pub struct AlarmFired {
     pub lines: Vec<AlarmLine>,
     /// At least one was claimed later than [`MISSED_GRACE_MS`] (held through quiet hours, the Hub down).
     pub late: bool,
+    /// When they fired (the round's clock; an intake that reads the subject reads it as of then).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub at: Option<i64>,
 }
 
 /// What one fired alarm says.
@@ -135,6 +160,9 @@ pub struct AlarmLine {
     /// text for the feed and the Bot DM, so it does not carry it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub link: Option<String>,
+    /// The alarm's planned time (the moment it is about), filled by [`claim_due`] when it fires.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub planned_for: Option<i64>,
 }
 
 /// An alarm a subject should have.
@@ -392,6 +420,7 @@ struct Due {
     owner: String,
     kind: String,
     subject: String,
+    planned_for: i64,
     fire_at: i64,
     stale_at: Option<i64>,
     hold_until: Option<i64>,
@@ -415,12 +444,22 @@ fn same_line(s: &str) -> String {
         .to_lowercase()
 }
 
+/// Marks `subject` to be planned again: after one of its alarms fired or went stale, a source that
+/// repeats (a brief schedule) plans the next one; for the others it changes nothing.
+fn mark(tx: &Tx, ws: &str, subject: &str) -> FlowResult<()> {
+    tx.execute(
+        "INSERT INTO time_alarm_dirty(workspace_id, subject) VALUES (?, ?) ON CONFLICT DO NOTHING",
+        params![ws, subject],
+    )?;
+    Ok(())
+}
+
 /// One round: claims every due alarm (see the module docs). One transaction: nothing fires twice.
 pub fn claim_due(store: &Store, sources: &AlarmSources, now: i64) -> FlowResult<Claimed> {
     store.transaction(|tx| {
         let due: Vec<Due> = {
             let mut st = tx.prepare_cached(
-                "SELECT id, workspace_id, owner_user, kind, subject, fire_at, stale_at, hold_until FROM time_alarms
+                "SELECT id, workspace_id, owner_user, kind, subject, planned_for, fire_at, stale_at, hold_until FROM time_alarms
                   WHERE state = 'planned' AND fire_at <= ? ORDER BY workspace_id, owner_user, fire_at, id LIMIT ?",
             )?;
             st.query_map(params![now + EARLY_MS, BATCH as i64], |r| {
@@ -430,9 +469,10 @@ pub fn claim_due(store: &Store, sources: &AlarmSources, now: i64) -> FlowResult<
                     owner: r.get(2)?,
                     kind: r.get(3)?,
                     subject: r.get(4)?,
-                    fire_at: r.get(5)?,
-                    stale_at: r.get(6)?,
-                    hold_until: r.get(7)?,
+                    planned_for: r.get(5)?,
+                    fire_at: r.get(6)?,
+                    stale_at: r.get(7)?,
+                    hold_until: r.get(8)?,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?
@@ -469,6 +509,7 @@ pub fn claim_due(store: &Store, sources: &AlarmSources, now: i64) -> FlowResult<
                         "UPDATE time_alarms SET state = 'stale', hold_until = NULL, updated = ? WHERE id = ?",
                         params![now, d.id],
                     )?;
+                    mark(tx, &d.ws, &d.subject)?;
                     out.stale += 1;
                 }
                 AlarmAction::Hold { until } => {
@@ -488,11 +529,13 @@ pub fn claim_due(store: &Store, sources: &AlarmSources, now: i64) -> FlowResult<
                         },
                         None => None,
                     };
-                    let Some(line) = line else {
+                    let Some(mut line) = line else {
                         cancel(tx)?;
                         out.cancelled += 1;
                         continue;
                     };
+                    line.planned_for = Some(d.planned_for);
+                    mark(tx, &d.ws, &d.subject)?;
                     let late = late_ms > MISSED_GRACE_MS;
                     let at = groups.iter_mut().find(|g| {
                         topic.merges && g.ws == d.ws && g.owner == d.owner && g.topic.name == topic.name
@@ -533,6 +576,7 @@ pub fn claim_due(store: &Store, sources: &AlarmSources, now: i64) -> FlowResult<
                 alarms: ids.clone(),
                 lines,
                 late,
+                at: Some(now),
             };
             let ev = steve_store::outbox::emit(
                 tx,
@@ -651,7 +695,12 @@ mod tests {
                 assert_eq!(topic_of_kind(k).map(|t| t.name), Some(t.name));
             }
             assert_eq!(topic(t.name), Some(&t));
-            assert!(matches!(t.feed_kind, "completion" | "reminder"));
+            assert!(matches!(
+                t.feed_kind,
+                "completion" | "reminder" | "briefing"
+            ));
+            // an alarm topic that is not written from its lines has its own intake; a non-alarm one has no lines
+            assert!(t.alarm.is_some() || !t.from_lines);
         }
         let mut ids: Vec<_> = TOPICS.iter().map(|t| t.name).collect();
         ids.sort_unstable();
