@@ -307,6 +307,49 @@ fn workflow_child_does_not_inherit_a_main_origin() {
 }
 
 #[test]
+fn a_session_limited_to_its_own_item_is_told_so_and_a_unit_where_its_upstream_is() {
+    let f = Fixture::new();
+    let own = f.item("default", "P1 own");
+    let other = f.item("default", "P1 other");
+    let s = f.session(&own);
+    let (current, view) = scope(&f.store, &s).unwrap();
+    assert_eq!(only_own(&f.store, &current, &view, &own.id).unwrap(), None);
+    assert_eq!(
+        only_own(&f.store, &current, &view, &other.id).unwrap(),
+        Some(format!("This session can only read item {}.", own.id))
+    );
+    // a conversation that sees several items keeps the ordinary answer
+    let sibling = f.item("default", "P1 sibling");
+    f.origin(&own, "chan:group-a");
+    f.origin(&sibling, "chan:group-a");
+    let (current, view) = scope(&f.store, &s).unwrap();
+    assert_eq!(
+        only_own(&f.store, &current, &view, &other.id).unwrap(),
+        None
+    );
+
+    let unit = f.item("default", "P1 unit");
+    f.store
+        .with_conn(|c| {
+            c.execute(
+                "UPDATE items SET source=? WHERE id=?",
+                params![json!(["collaboration", "workflow"]).to_string(), unit.id],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let (current, view) = scope(&f.store, &f.session(&unit)).unwrap();
+    let said = only_own(&f.store, &current, &view, &other.id)
+        .unwrap()
+        .unwrap();
+    assert!(
+        said.starts_with(&format!("This session can only read item {}.", unit.id))
+            && said.contains("steve_workflow action=get"),
+        "{said}"
+    );
+}
+
+#[test]
 fn stale_identity_and_non_agent_sessions_are_rejected_from_persisted_state() {
     for mutation in [
         "UPDATE sessions SET readonly=1 WHERE id=?",

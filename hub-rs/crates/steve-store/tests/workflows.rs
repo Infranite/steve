@@ -704,7 +704,7 @@ fn cancelled_required_work_blocks_acceptance_retry_preserves_budget_and_pausing_
     is_conflict(t.store.workflows().claim(&parent, "b"), "暂停");
     assert!(t.store.workflows().active().unwrap().is_empty());
     assert_eq!(t.store.workflows().all_open().unwrap().len(), 1);
-    is_conflict(t.store.workflows().reset(&parent, "a", "重试"), "仍在运行");
+    is_conflict(t.store.workflows().reset(&parent, "a", "重试"), "仍在执行");
     t.store
         .workflows()
         .cancel(&parent, "a", "取消执行")

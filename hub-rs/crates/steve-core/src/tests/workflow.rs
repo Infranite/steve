@@ -1576,3 +1576,224 @@ fn global_workflow_concurrency_caps_active_units_across_items_and_wakes_next() {
         .count();
     assert_eq!(active_total, 1);
 }
+
+/// The coordinator's contract: after building or retrying its graph it ends its turn, and Steve
+/// wakes it with what happened. A unit reads its upstream from its opening, not with a get.
+#[test]
+fn the_coordinator_contract_ends_the_turn_and_a_unit_needs_no_get_for_its_upstream() {
+    let (k, parent, specs) = setup(true);
+    let coord_sid = k.session(&parent, "idle");
+    let coord = k.db().session(&coord_sid).unwrap().unwrap();
+    let t = k.core.tx();
+    let item = t.item(&parent).unwrap();
+    let bot = k
+        .db()
+        .bot(item.bot_id.as_deref().unwrap())
+        .unwrap()
+        .unwrap();
+    let contract = t.protocol(&item, &bot, &coord).unwrap();
+    assert!(
+        contract.contains("After you build or retry the graph, end your turn")
+            && contract.contains(crate::workflow::SYSTEM_NOTICE)
+            && contract.contains("known_revision"),
+        "{contract}"
+    );
+    assert!(
+        contract.contains("then retry that unit: its review and everything downstream rerun"),
+        "a retry already reruns the review: {contract}"
+    );
+    drop(t);
+    plan(&k, &parent, &specs);
+    let a = unit(&k, &parent, "a");
+    let s = k
+        .db()
+        .session(a.session_id.as_deref().unwrap())
+        .unwrap()
+        .unwrap();
+    let t = k.core.tx();
+    let child = t.item(a.item_id.as_deref().unwrap()).unwrap();
+    let dev = k.db().bot("dev").unwrap().unwrap();
+    let contract = t.protocol(&child, &dev, &s).unwrap();
+    assert!(
+        contract.contains("upstream results are in the opening message")
+            && contract.contains("This session can read only its own item"),
+        "{contract}"
+    );
+    assert!(
+        !contract.contains("Read your upstream artifacts with steve_workflow action=get"),
+        "{contract}"
+    );
+}
+
+#[test]
+fn plan_and_retry_say_next_and_a_get_of_a_known_revision_is_only_unchanged() {
+    let (k, parent, specs) = setup(true);
+    let coord_sid = k.session(&parent, "idle");
+    let coord = k.db().session(&coord_sid).unwrap().unwrap();
+    let out = k
+        .core
+        .tool_workflow(
+            &coord,
+            json!({"action":"plan","reason":"拆分独立工作","expected_revision":0,"units":specs}),
+        )
+        .unwrap();
+    assert!(
+        out["next"].as_str().unwrap().contains("现在结束本回合"),
+        "{out}"
+    );
+    let rev = graph(&k, &parent).revision;
+    assert_eq!(
+        k.core
+            .tool_workflow(&coord, json!({"action":"get","known_revision":rev}))
+            .unwrap(),
+        json!({"unchanged": true, "revision": rev})
+    );
+    let full = k
+        .core
+        .tool_workflow(&coord, json!({"action":"get","known_revision":rev - 1}))
+        .unwrap();
+    assert_eq!(full["revision"], rev);
+    assert!(full["units"].is_array());
+    assert!(full.get("next").is_none(), "a read says no next step");
+    assert!(
+        k.core
+            .tool_workflow(&coord, json!({"action":"get","known_revision":"latest"}))
+            .is_err()
+    );
+
+    // a unit reads its parent as parent_item (never an item_id it would pass back), and the same
+    // known revision answers it too
+    let a = unit(&k, &parent, "a");
+    let s = k
+        .db()
+        .session(a.session_id.as_deref().unwrap())
+        .unwrap()
+        .unwrap();
+    let context = k.core.tool_workflow(&s, json!({"action":"get"})).unwrap();
+    assert_eq!(context["parent_item"], parent);
+    assert!(context.get("item_id").is_none(), "{context}");
+    assert!(
+        context["note"]
+            .as_str()
+            .unwrap()
+            .contains("本会话只能读取本单元的事项"),
+        "{context}"
+    );
+    let rev = graph(&k, &parent).revision;
+    assert_eq!(
+        k.core
+            .tool_workflow(&s, json!({"action":"get","known_revision":rev}))
+            .unwrap()["unchanged"],
+        true
+    );
+
+    k.rt.end_turn(
+        &k.core,
+        a.session_id.as_deref().unwrap(),
+        "error",
+        Some("检查失败"),
+    );
+    let rev = graph(&k, &parent).revision;
+    let out = k
+        .core
+        .tool_workflow(
+            &coord,
+            json!({"action":"retry","unit_id":"a","reason":"修正后重试","expected_revision":rev}),
+        )
+        .unwrap();
+    assert!(
+        out["next"].as_str().unwrap().contains("现在结束本回合"),
+        "{out}"
+    );
+}
+
+#[test]
+fn the_coordinator_is_woken_with_the_units_status_and_a_bounded_summary() {
+    let (k, parent, specs) = setup(true);
+    plan(&k, &parent, &specs);
+    let coord = k.session(&parent, "idle");
+    finish(&k, &parent, "a");
+    let woken = k.rt.prompts_of(&coord);
+    let wake = woken.last().unwrap();
+    assert!(
+        wake.starts_with(crate::workflow::SYSTEM_NOTICE),
+        "marked as Steve's: {wake}"
+    );
+    assert!(
+        wake.contains("协作工作「a」（a）已通过，第 1/3 次尝试"),
+        "{wake}"
+    );
+    assert!(wake.contains("摘要：a 已验证"), "{wake}");
+    let g = graph(&k, &parent);
+    assert!(
+        wake.contains(&format!(
+            "工作图 revision {}：已通过 1，执行中 1",
+            g.revision
+        )),
+        "{wake}"
+    );
+    assert!(wake.contains("直接结束回合"), "nothing to do: {wake}");
+    k.rt.end_turn(&k.core, &coord, "end_turn", None);
+
+    let long = "很长的失败原因".repeat(200);
+    let b = unit(&k, &parent, "b").session_id.unwrap();
+    k.rt.end_turn(&k.core, &b, "error", Some(&long));
+    let woken = k.rt.prompts_of(&coord);
+    let wake = woken.last().unwrap();
+    assert!(
+        wake.contains("协作工作「b」（b）未通过，第 1/3 次尝试"),
+        "{wake}"
+    );
+    let summary = wake
+        .lines()
+        .find(|l| l.starts_with("摘要："))
+        .unwrap()
+        .trim_start_matches("摘要：");
+    let kept: String = long
+        .chars()
+        .take(crate::workflow::WAKE_SUMMARY_CHARS)
+        .collect();
+    assert!(summary.contains(&kept), "{summary}");
+    assert!(
+        summary.chars().count() < long.chars().count(),
+        "bounded: {summary}"
+    );
+    assert!(wake.contains("再 retry 该单元"), "{wake}");
+}
+
+/// A retry reruns the unit and its downstream; only those must be settled. Independent work goes on.
+#[test]
+fn a_retry_waits_only_for_the_units_it_reruns() {
+    let (k, parent, specs) = setup(true);
+    plan(&k, &parent, &specs);
+    let sa = unit(&k, &parent, "a").session_id.unwrap();
+    let sb = unit(&k, &parent, "b").session_id.unwrap();
+    // a reports its failure, its turn not yet over: a itself is not settled
+    let s = k.db().session(&sa).unwrap().unwrap();
+    k.core
+        .tool_workflow(&s, json!({"action":"fail","reason":"缺少回归"}))
+        .unwrap();
+    let err = change(&k, &parent, "retry", Some("a"))
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("「a」仍在执行"), "{err}");
+    k.rt.end_turn(&k.core, &sa, "end_turn", None);
+    // b, independent of a, still runs: the retry does not wait for it, nor touch it
+    assert_eq!(unit(&k, &parent, "b").status, "running");
+    change(&k, &parent, "retry", Some("a")).unwrap();
+    let a = unit(&k, &parent, "a");
+    assert_eq!((a.status.as_str(), a.attempt), ("running", 2));
+    let b = unit(&k, &parent, "b");
+    assert_eq!(
+        (b.status.as_str(), b.session_id.as_deref()),
+        ("running", Some(sb.as_str()))
+    );
+    // a downstream unit that runs holds the retry, named
+    finish(&k, &parent, "a");
+    finish(&k, &parent, "b");
+    assert_eq!(unit(&k, &parent, "review").status, "running");
+    let err = change(&k, &parent, "retry", Some("a"))
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("「review」仍在执行"), "{err}");
+}

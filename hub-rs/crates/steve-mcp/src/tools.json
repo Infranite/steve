@@ -192,7 +192,7 @@
           "description": "build, tests, manual checks you actually ran"
         },
         "unfinished": {
-          "description": "plan steps (exact text) you deliberately left open; every other step must already be done, or the delivery is refused",
+          "description": "plan steps (exact text) you deliberately left open; they and any step not ticked off are shown to the user as left open. A collaboration work unit cannot deliver with open steps",
           "type": "array",
           "items": {
             "type": "string"

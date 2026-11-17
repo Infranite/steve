@@ -216,6 +216,42 @@ pub(super) fn dependency_management_allowed(
         .map_err(|e| e.to_string())
 }
 
+/// A session that sees only its own item and asked for another: said as it is, instead of "no
+/// such item", so the agent stops looking. A work unit is told where its upstream results are.
+fn only_own(
+    store: &Store,
+    current: &Session,
+    scope: &ItemScope,
+    id: &str,
+) -> Result<Option<String>, String> {
+    let Some(own) = current.item_id.as_deref() else {
+        return Ok(None);
+    };
+    let ItemScope::Conversation(ids) = scope else {
+        return Ok(None);
+    };
+    if id.trim() == own || ids.len() != 1 || !ids.contains(own) {
+        return Ok(None);
+    }
+    let unit = store
+        .items()
+        .get(own)
+        .map_err(|e| e.to_string())?
+        .is_some_and(|i| i.source.1 == "workflow")
+        || store
+            .workflows()
+            .by_child(own)
+            .map_err(|e| e.to_string())?
+            .is_some();
+    Ok(Some(if unit {
+        format!(
+            "This session can only read item {own}. Your upstream results are in your opening message and in steve_workflow action=get; open the files their outputs list."
+        )
+    } else {
+        format!("This session can only read item {own}.")
+    }))
+}
+
 #[cfg(test)]
 #[path = "item_mcp_tests.rs"]
 mod tests;
@@ -257,7 +293,11 @@ pub fn call(
             string(&args, "query")?,
         ),
         research_mcp::ITEM_READ => {
-            research_mcp::item_read(store, &current.workspace_id, &scope, string(&args, "id")?)
+            let id = string(&args, "id")?;
+            if let Some(refused) = only_own(store, &current, &scope, id)? {
+                return Err(refused);
+            }
+            research_mcp::item_read(store, &current.workspace_id, &scope, id)
         }
         DEPENDENCIES => {
             let wait = args["action"] == "wait";

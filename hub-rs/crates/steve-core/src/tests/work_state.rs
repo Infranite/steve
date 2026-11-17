@@ -1153,7 +1153,7 @@ fn a_unit_failing_itself_closes_its_child_and_tells_the_coordinator() {
     assert!(
         k.rt.prompts_of(&coord)
             .iter()
-            .any(|p| p.contains("协作工作 a 已更新")),
+            .any(|p| p.contains("协作工作「a」（a）未通过") && p.contains("评审未通过：缺少回归")),
         "the coordinator was told"
     );
     assert!(k.core.tx().check_stalls(later()).unwrap().is_empty());
