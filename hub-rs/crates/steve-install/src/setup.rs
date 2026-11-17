@@ -1125,12 +1125,14 @@ impl<'a> Wizard<'a> {
 
 /// Whether a setup recorded in `record` got as far as making something a later version must not
 /// take over: a step done, an identity, a database, a service.
+/// Whether `home` holds something of an installation's own. A pairing that never made the Node's
+/// key (`node/identity.key`, saved before anything is sent) sent nothing: a home left by it, as a
+/// failed remote install leaves one, is taken over by the next setup, of any version or Hub.
 fn underway(record: &Value, home: &Path) -> bool {
     record["steps"]
         .as_array()
         .is_some_and(|steps| !steps.is_empty())
         || record["keychain_started"] == true
-        || record["pair_started"] == true
         || [
             "current",
             "signing/identity.json",
@@ -1867,14 +1869,22 @@ pub fn run(source: &Path, options: Options) -> Result<()> {
         if wizard.record["pair_started"] != true && exists(&home.join("node/identity.key")) {
             bail!("{}", t!("install.setup.node.identity_foreign"));
         }
-        if wizard.record["pair_started"] == true && wizard.record["hub_url"] != hub {
+        if wizard.record["pair_started"] == true
+            && wizard.record["hub_url"] != hub
+            && exists(&home.join("node/identity.key"))
+        {
             bail!("{}", t!("install.setup.node.pairing_sent_elsewhere"));
         }
         let pin = options
             .pin
             .as_ref()
             .map(|p| p.to_lowercase())
-            .or_else(|| wizard.record["pin"].as_str().map(str::to_string));
+            /* a pin recorded for another Hub is that Hub's */
+            .or_else(|| {
+                (wizard.record["hub_url"] == hub)
+                    .then(|| wizard.record["pin"].as_str().map(str::to_string))
+                    .flatten()
+            });
         wizard.record["pair_started"] = true.into();
         wizard.record["hub_url"] = hub.clone().into();
         wizard.record["pin"] = json!(pin);
@@ -2065,6 +2075,19 @@ mod tests {
             }
             Ok(self.lines.remove(0))
         }
+    }
+    #[test]
+    fn a_pairing_that_made_no_key_is_not_under_way() {
+        let home = tempfile::tempdir().unwrap();
+        let record = json!({"steps": [], "pair_started": true, "hub_url": "https://old.example"});
+        assert!(!underway(&record, home.path()));
+        fs::create_dir_all(home.path().join("node")).unwrap();
+        fs::write(home.path().join("node/identity.key"), b"key").unwrap();
+        assert!(underway(&record, home.path()), "a key may have been sent");
+        assert!(underway(
+            &json!({"steps": ["installed"]}),
+            tempfile::tempdir().unwrap().path()
+        ));
     }
     fn meta(version: &str) -> Value {
         json!({"version":version,"commit":"a".repeat(40)})

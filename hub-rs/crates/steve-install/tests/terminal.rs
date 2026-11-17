@@ -739,6 +739,19 @@ fn setup_node_passes_the_pairing_code_it_was_given_to_the_pairing() {
              status) exit 0 ;;\n *) exit 95 ;;\nesac\n"
         ),
     );
+    // what a remote install that failed before the Node made its key leaves behind: an older
+    // version's setup that started pairing with another Hub. Nothing was sent, so it is taken over.
+    let left = account.join(".steve-node");
+    fs::create_dir_all(&left).unwrap();
+    fs::set_permissions(&left, fs::Permissions::from_mode(0o700)).unwrap();
+    private_fixture_file(
+        &left.join("setup.json"),
+        serde_json::to_vec(&json!({
+            "format":1,"component":"node","home":left,"version":"1.2.2","commit":"b".repeat(40),
+            "files":{},"steps":[],"pair_started":true,"hub_url":"https://old-hub.example","pin":"sha256:old"
+        }))
+        .unwrap(),
+    );
     let mut child = Command::new("/bin/sh")
         .args([
             "-c",
@@ -784,9 +797,14 @@ fn setup_node_passes_the_pairing_code_it_was_given_to_the_pairing() {
         .filter_map(|l| l.strip_prefix("steve-setup-progress "))
         .collect();
     assert_eq!(phases, ["install", "pair", "adapters", "start"], "{said}");
-    // the code is never in an argument list or the setup record
+    // the code is never in an argument list or the setup record; the old Hub's pin is gone
     let record = fs::read_to_string(account.join(".steve-node/setup.json")).unwrap();
     assert!(!record.contains("stv1-the-code"), "{record}");
+    let record: Value = serde_json::from_str(&record).unwrap();
+    assert_eq!(
+        (&record["version"], &record["hub_url"], &record["pin"]),
+        (&json!("1.2.3"), &json!("https://hub.example"), &Value::Null)
+    );
 
     // without STEVE_SETUP_PROGRESS, setup says nothing of phases
     fs::remove_dir_all(account.join(".steve-node")).unwrap();
