@@ -203,7 +203,7 @@ export function TodoRow({ x, now, showGoal = true }: { x: Todo; now: number; sho
         <Button size="sm" variant="outline" className="h-7 gap-1 px-2" onClick={() => void handToBot(x)} data-todo-hand><BotIcon className="size-3.5" />{t("todos:action.hand")}</Button>
         <SnoozeMenu x={x} now={now} />
       </div>}
-      <span className={cn("shrink-0 pt-0.5 type-footnote tabular-nums md:group-hover/todo:hidden md:group-focus-within/todo:hidden", w?.overdue && !closed ? "text-destructive" : "text-muted-foreground")} data-todo-due>
+      <span className={cn("shrink-0 pt-0.5 type-footnote tabular-nums", x.state === "open" && "md:group-hover/todo:hidden md:group-focus-within/todo:hidden", w?.overdue && !closed ? "text-destructive" : "text-muted-foreground")} data-todo-due>
         {isSnoozed(x, now) && x.state === "open" ? t("todos:row.snoozedUntil", { when: due(at(x.snooze_until!), now) }) : x.state === "dropped" ? t("todos:row.dropped") : x.state === "done" && x.closed ? due(at(x.closed), now) : w ? (w.time && w.rel === "today" && !w.overdue ? t("todos:row.before", { time: w.time }) : due(x, now)) : null}
       </span>
       <span className="relative z-[1] md:hidden"><TodoMenu x={x} now={now} /></span>
