@@ -297,6 +297,7 @@
   "core.yolo.reason.not_answered": "YOLO did not answer for you: %{why}",
   "core.yolo.reason.unsure": "Not sure",
   "core.yolo.reason.ask_count": "YOLO has already answered %{n} times on this item; later questions are left to you",
+  "core.yolo.reason.retry_limit": "YOLO has already resent this %{n} times and it still did not go out; left to you",
   "core.yolo.reason.recheck_changed_why": "The recheck before acting gave a different result: %{why}",
   "core.yolo.reason.failed": "Failed to carry out: %{error}",
   "core.yolo.reason.model_failed": "The model call failed (%{error})",

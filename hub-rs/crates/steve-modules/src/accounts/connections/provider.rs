@@ -336,6 +336,20 @@ pub enum ProviderError {
     Config(String),
     #[error("这个接入方式不支持这个操作")]
     Unsupported,
+    /// The provider refuses this write, and will refuse it again until a permission changes on its
+    /// side: the connection is read-only or lacks the write permission ([`BlockScope::Connection`]),
+    /// or this one target refuses writes ([`BlockScope::Target`]). A retry cannot help.
+    #[error("{1}")]
+    Blocked(BlockScope, String),
+}
+
+/// How far a [`ProviderError::Blocked`] reaches.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum BlockScope {
+    /// Every write of the connection (read-only, the write permission missing).
+    Connection,
+    /// Only the target written to (a chat that refuses writes); others may still work.
+    Target,
 }
 
 /// A health check's outcome.

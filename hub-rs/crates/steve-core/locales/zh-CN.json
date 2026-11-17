@@ -297,6 +297,7 @@
   "core.yolo.reason.not_answered": "YOLO 没替你答：%{why}",
   "core.yolo.reason.unsure": "拿不准",
   "core.yolo.reason.ask_count": "这件事项已经代答了 %{n} 次，之后的提问留给你",
+  "core.yolo.reason.retry_limit": "YOLO 已经重发过 %{n} 次，还是没发出去，留给你",
   "core.yolo.reason.recheck_changed_why": "执行前复查结果变了：%{why}",
   "core.yolo.reason.failed": "执行失败：%{error}",
   "core.yolo.reason.model_failed": "模型调用失败（%{error}）",

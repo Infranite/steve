@@ -146,6 +146,7 @@ pub mod space_decisions;
 pub mod spaces;
 pub mod trigger_report;
 pub mod usage;
+pub mod write_blocks;
 
 pub use channel::{
     ActAsUser, ActTarget, ChannelAdapter, ChannelFeatures, HandleRef, InboundMessage, MemberInfo,

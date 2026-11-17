@@ -194,7 +194,12 @@ pub enum Delivered {
     /// On its way, not confirmed: waiting for its connection (paused), or sent without an answer
     /// (`unknown`; the queue sends it again while the provider drops repeats, else asks you).
     Queued { message_id: String },
-    /// Not said at all (a handoff acknowledgement while drafts are all there is).
+    /// Not sent: the connection, or this chat, refuses writes for now (read-only; ext_ws protocol
+    /// §3.6). Kept as not sent without a card of its own: the one notice about it is already out
+    /// ([`crate::write_blocks`]).
+    Blocked { message_id: String },
+    /// Not said at all (a handoff acknowledgement while drafts are all there is, an automatic reply
+    /// where writes are refused).
     Skipped,
 }
 
@@ -204,7 +209,8 @@ impl Delivered {
             Self::Drafted { message_id, .. }
             | Self::Sent { message_id }
             | Self::Failed { message_id, .. }
-            | Self::Queued { message_id } => Some(message_id),
+            | Self::Queued { message_id }
+            | Self::Blocked { message_id } => Some(message_id),
             Self::Skipped => None,
         }
     }

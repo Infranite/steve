@@ -224,6 +224,13 @@ async fn deliver(
                     cx.effects.decision_id = Some(decision_id.clone());
                     "failed"
                 }
+                Delivered::Blocked { .. } => {
+                    cx.effects.label = Some(format!(
+                        "没有发出去：「{}」现在不允许发消息",
+                        req.target.space_name
+                    ));
+                    "failed"
+                }
                 Delivered::Queued { .. } => {
                     cx.effects.label = Some(format!("正在发到「{}」", req.target.space_name));
                     "pending"

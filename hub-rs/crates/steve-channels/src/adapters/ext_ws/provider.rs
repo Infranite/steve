@@ -15,8 +15,8 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 use steve_flow::AdapterError;
 use steve_modules::accounts::connections::{
-    AccountInfo, AuthKind, CapSpec, ConnCx, ConnectionProvider, FieldDef, Health, Integration,
-    Owner, ProviderError, StartCx,
+    AccountInfo, AuthKind, BlockScope, CapSpec, ConnCx, ConnectionProvider, FieldDef, Health,
+    Integration, Owner, ProviderError, StartCx,
 };
 use tokio::time::Instant;
 use zeroize::Zeroizing;
@@ -322,7 +322,7 @@ impl ExtWs {
                             tokio::time::sleep(w).await;
                             backoff = (backoff * 2).min(Duration::from_secs(60));
                         }
-                        _ => return Err(call_err(e)),
+                        _ => return Err(write_err(e)),
                     }
                 }
             }
@@ -424,12 +424,14 @@ pub(crate) fn call_err(e: CallError) -> ProviderError {
             Reason::SessionLocked => {
                 ProviderError::Rejected(steve_i18n::t!("channels.ext_ws.session_locked"))
             }
-            Reason::WriteForbidden => {
-                ProviderError::Rejected(steve_i18n::t!("channels.ext_ws.read_only"))
-            }
-            Reason::TargetForbidden => {
-                ProviderError::Rejected(steve_i18n::t!("channels.ext_ws.target_forbidden"))
-            }
+            Reason::WriteForbidden => ProviderError::Blocked(
+                BlockScope::Connection,
+                steve_i18n::t!("channels.ext_ws.read_only"),
+            ),
+            Reason::TargetForbidden => ProviderError::Blocked(
+                BlockScope::Target,
+                steve_i18n::t!("channels.ext_ws.target_forbidden"),
+            ),
             Reason::Invalid
             | Reason::NotFound
             | Reason::Forbidden
@@ -448,6 +450,18 @@ pub(crate) fn call_err(e: CallError) -> ProviderError {
             "channels.ext_ws.unavailable",
             detail = e.to_string()
         )),
+    }
+}
+
+/// A [`CallError`] of a write: as [`call_err`], except that `forbidden` on a write is the
+/// credential's missing write permission, which every later write meets too (§7).
+pub(crate) fn write_err(e: CallError) -> ProviderError {
+    match &e {
+        CallError::Rpc(r) if r.reason == Reason::Forbidden => ProviderError::Blocked(
+            BlockScope::Connection,
+            steve_i18n::t!("channels.ext_ws.refused", detail = r.to_string()),
+        ),
+        _ => call_err(e),
     }
 }
 
@@ -483,9 +497,10 @@ pub(crate) fn full_jitter(d: Duration) -> Duration {
 fn writable(s: &Session) -> Result<(), ProviderError> {
     let st = s.status();
     if st.write_policy == WritePolicy::Forbidden {
-        return Err(ProviderError::Rejected(steve_i18n::t!(
-            "channels.ext_ws.read_only"
-        )));
+        return Err(ProviderError::Blocked(
+            BlockScope::Connection,
+            steve_i18n::t!("channels.ext_ws.read_only"),
+        ));
     }
     match st.status {
         SessionStatus::Ok => Ok(()),

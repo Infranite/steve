@@ -49,7 +49,7 @@ impl From<ProviderError> for AdapterError {
     fn from(e: ProviderError) -> Self {
         match e {
             ProviderError::Auth(m) => Self::Auth(m),
-            ProviderError::Rejected(m) => Self::Rejected(m),
+            ProviderError::Rejected(m) | ProviderError::Blocked(_, m) => Self::Rejected(m),
             ProviderError::Transient(m) => Self::Transient(m),
             ProviderError::Config(m) => Self::Config(m),
             ProviderError::Unsupported => Self::Unsupported,

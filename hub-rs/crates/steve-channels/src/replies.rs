@@ -24,7 +24,7 @@ use crate::deliver::{Auth, Delivered, DraftOnly, OutRequest, OutTarget, Outbound
 use crate::respond::{self, Acted, Plan, Responder};
 use crate::rules::{Act, ItemMode};
 use crate::spaces::{self, Mode};
-use crate::{ChannelResult, Channels, bindings, messages, personas};
+use crate::{ChannelResult, Channels, bindings, messages, personas, write_blocks};
 
 /// Context lines put into an item's goal.
 pub const ITEM_CONTEXT: usize = 10;
@@ -112,6 +112,19 @@ impl Replies {
     }
 
     async fn reply(&self, ch: &Channels, plan: &Plan) -> ChannelResult<Option<Acted>> {
+        // writes are refused there for now: no reply is written that could not go out
+        let now = ch.now();
+        if let Some(why) = ch
+            .store()
+            .reader(|c| write_blocks::active(c, &plan.connection_id, &plan.space_id, now))?
+        {
+            return Ok(Some(Acted {
+                label: format!("没有起草回复：{why}"),
+                decision_id: None,
+                out_message_id: None,
+                item_id: None,
+            }));
+        }
         let r = match self
             .composer
             .generate(ch, plan, &ComposeOpts::default())
@@ -411,6 +424,7 @@ fn acted(d: &Delivered, item: Option<String>, label: Option<String>) -> Acted {
             Delivered::Drafted { .. } => "等你确认回复".into(),
             Delivered::Sent { .. } => "已回复".into(),
             Delivered::Failed { .. } => "回复没有发出去".into(),
+            Delivered::Blocked { .. } => "回复没有发出去：这里现在不允许发消息".into(),
             Delivered::Queued { .. } => "回复正在发出".into(),
             Delivered::Skipped => String::new(),
         }),

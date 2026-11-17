@@ -58,7 +58,13 @@ pub struct Policy {
     /// nobody reads it as the user, and it can still be recalled.
     pub chan_bot_delay_s: u64,
     pub chan_retry_delay_s: u64,
+    /// How many times YOLO sends one message or mail again after its send failed; after that the
+    /// card stays for the user ([`CHAN_RETRY_MAX`]).
+    pub chan_retry_max: u32,
 }
+
+/// [`Policy::chan_retry_max`] by default: a failure that survives two retries is not a blip.
+pub const CHAN_RETRY_MAX: u32 = 2;
 
 impl Default for Policy {
     fn default() -> Self {
@@ -80,6 +86,7 @@ impl Default for Policy {
             chan_delay_s: 600,
             chan_bot_delay_s: 60,
             chan_retry_delay_s: 300,
+            chan_retry_max: CHAN_RETRY_MAX,
         }
     }
 }
@@ -105,6 +112,8 @@ impl Policy {
             chan_delay_s: 0,
             chan_bot_delay_s: 0,
             chan_retry_delay_s: 0,
+            // a bound, not a switch: even the widest policy does not retry a failing send forever
+            chan_retry_max: CHAN_RETRY_MAX,
         }
     }
 }
@@ -220,6 +229,8 @@ pub struct Outbound {
     pub ai_prefix: bool,
     /// The option that sends (`yes`, `retry`, `send`…), as on the card.
     pub send_option: Option<String>,
+    /// How many times YOLO already sent it again after a failed send.
+    pub retries: u32,
     /// draft | leak_draft | send_failed | handoff
     pub stage: OutboundStage,
 }
@@ -607,6 +618,14 @@ pub fn error_backoff_s(attempts: u32, restart: bool) -> u64 {
     STEPS[i.min(STEPS.len() - 1)]
 }
 
+/// The stored frame of the reason YOLO gives when a message it already resent still did not go out.
+const RETRY_LIMIT_HEAD: &str = "YOLO 已经重发过 ";
+const RETRY_LIMIT_TAIL: &str = " 次，还是没发出去，留给你";
+
+fn retry_limit_reason(retries: u32) -> String {
+    format!("{RETRY_LIMIT_HEAD}{retries}{RETRY_LIMIT_TAIL}")
+}
+
 /// A stored reason (a ledger row's, a scope's) as the UI shows it, in the request's language. The reasons are
 /// stored in Chinese and read back by rules and the digest; this translates the fixed ones and the fixed frame
 /// of the ones with a value, and leaves the rest (a model's own words, a guard's detail) as it is.
@@ -646,6 +665,12 @@ pub fn reason_shown(reason: &str) -> String {
     }
     if let Some(c) = tail("YOLO 不会选「").and_then(|w| w.strip_suffix('」')) {
         return steve_i18n::t!("core.yolo.reason.never", choice = c);
+    }
+    if let Some(n) = tail(RETRY_LIMIT_HEAD)
+        .and_then(|w| w.strip_suffix(RETRY_LIMIT_TAIL))
+        .and_then(|n| n.parse::<u32>().ok())
+    {
+        return steve_i18n::t!("core.yolo.reason.retry_limit", n = n);
     }
     if reason == format!("这件事项已经代答了 {ASK_PER_ITEM} 次，之后的提问留给你")
     {
@@ -1121,6 +1146,12 @@ fn outbound(o: &Outbound, p: &Policy, what: &str) -> Verdict {
                 return decline(&format!("{what}.customer"), "客户群留给你");
             }
             let retry = o.stage == OutboundStage::SendFailed;
+            if retry && o.retries >= p.chan_retry_max {
+                return decline(
+                    &format!("{what}.retry_limit"),
+                    retry_limit_reason(o.retries),
+                );
+            }
             let (rule, delay) = match o.identity {
                 Identity::Bot => {
                     if !p.chan_bot_internal {

@@ -20,7 +20,7 @@ use steve_flow::testkit::FakeCore;
 use steve_flow::{AdapterError, FlowSetup, LinearExecutor};
 use steve_modules::Clock;
 use steve_modules::accounts::connections::{
-    self, ConnCx, Connections, ConnectionsConfig, ProviderError,
+    self, BlockScope, ConnCx, Connections, ConnectionsConfig, ProviderError,
 };
 use steve_modules::accounts::repo as arepo;
 use steve_modules::accounts::service::ensure_seeds;
@@ -954,7 +954,13 @@ async fn v14_read_only_refuses_writes_locally() {
         )
         .await;
     assert!(
-        matches!(e, Err(AdapterError::Provider(ProviderError::Rejected(_)))),
+        matches!(
+            e,
+            Err(AdapterError::Provider(ProviderError::Blocked(
+                BlockScope::Connection,
+                _
+            )))
+        ),
         "{e:?}"
     );
     assert!(h.fake.calls("messages.send").is_empty());
@@ -1516,6 +1522,168 @@ async fn connect_bot(h: &H) -> String {
         .await
         .expect("bot connected")
         .id
+}
+
+/// A read-only connection (§3.6): the first refused message opens the one card saying how to
+/// allow sending, later ones are kept as not sent without a card, a rule's acknowledgement is not
+/// drafted, and the service reporting writes allowed lifts it at once.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_read_only_connection_gives_one_notice_and_lifts_when_writes_are_allowed() {
+    use steve_channels::deliver::{Auth, Delivered, OutRequest, OutTarget, Outbound, Purpose};
+    use steve_channels::outbound::{BLOCKED_OPTIONS, OutLink, Outbox};
+    use steve_channels::{spaces, write_blocks};
+    use steve_store::base::Viewer;
+
+    let h = setup().await;
+    bot_identity(&h);
+    h.fake.with(|w| w.write_policy = "forbidden".into());
+    let id = connect_bot(&h).await;
+    let (rt, _tx) = h.runtime();
+    until("bot subscribed", || h.subscribes().len() == 1).await;
+    let now = h.ch.now();
+    h.env
+        .store()
+        .transaction(|tx| {
+            spaces::set_account_rules(
+                tx,
+                &Viewer::bare(WS, ME),
+                &id,
+                &json!([{"when":{"kind":"all"},"act":"reply"}]),
+                now,
+            )
+        })
+        .unwrap();
+    for _ in 0..4 {
+        h.env.gateway.script(
+            steve_channels::disclosure::CHECK_HEAD,
+            r#"{"verdict":"pass","spans":[]}"#,
+        );
+    }
+    let outbox = Outbox::new(OutLink::new());
+    let ask = |n: i64| {
+        let h = &h;
+        async move {
+            let (ev, text) = (format!("ro_in_{n}"), format!("hello bot {n}"));
+            let seq = h
+                .fake
+                .push_message(msg(h, "ro_chat", &ev, "u_somebody", &text, n));
+            until("inbound stored", || h.fake.acked() >= seq).await;
+            let source = h.rows(
+                "SELECT m.id FROM chan_messages m JOIN spaces s ON s.id=m.space_id
+                  WHERE s.external_id='ro_chat' AND m.direction='in' AND m.text=?",
+                &[&text],
+            )[0][0]
+                .as_str()
+                .unwrap()
+                .to_string();
+            h.env
+                .store()
+                .reader(|c| steve_channels::flow_actions::plan_of(c, WS, &source))
+                .unwrap()
+        }
+    };
+    let reply = |plan: &steve_channels::respond::Plan, purpose: Purpose| OutRequest {
+        target: OutTarget::reply(plan),
+        text: "bot answer".into(),
+        purpose,
+        approve: false,
+        generation: None,
+        auth: Auth::Rule {
+            source: plan.message_id.clone(),
+            act: steve_channels::rules::Act::Reply,
+        },
+    };
+    let cards = || {
+        h.rows(
+            "SELECT d.options, d.question FROM decisions d JOIN chan_messages m ON m.id = d.subject_id
+              JOIN spaces s ON s.id = m.space_id WHERE s.connection_id = ? AND d.kind = 'fail'",
+            &[&id],
+        )
+    };
+
+    // the first refused message: the one notice, which offers no retry
+    let plan = ask(1).await;
+    let first = outbox
+        .deliver(&h.ch, &reply(&plan, Purpose::Reply))
+        .await
+        .unwrap();
+    assert!(matches!(first, Delivered::Failed { .. }), "{first:?}");
+    let c = cards();
+    assert_eq!(c.len(), 1, "{c:?}");
+    assert_eq!(
+        serde_json::from_str::<Value>(c[0][0].as_str().unwrap()).unwrap(),
+        json!(BLOCKED_OPTIONS)
+    );
+    assert!(
+        c[0][1].as_str().unwrap().contains("允许这个连接发送"),
+        "{c:?}"
+    );
+    assert!(h.fake.calls("messages.send").is_empty());
+    assert!(h.fake.calls("messages.reply").is_empty());
+
+    // the next one: not sent, kept, no second card
+    let plan = ask(2).await;
+    let second = outbox
+        .deliver(&h.ch, &reply(&plan, Purpose::Reply))
+        .await
+        .unwrap();
+    let Delivered::Blocked { message_id } = second else {
+        panic!("{second:?}")
+    };
+    assert_eq!(
+        h.rows(
+            "SELECT status, decision_id FROM chan_messages WHERE id=?",
+            &[&message_id]
+        )[0],
+        vec![json!("failed"), Value::Null]
+    );
+    assert_eq!(cards().len(), 1);
+    // a rule's acknowledgement is not even drafted there
+    let ack = outbox
+        .deliver(&h.ch, &reply(&plan, Purpose::Item))
+        .await
+        .unwrap();
+    assert_eq!(ack, Delivered::Skipped);
+    let space = plan.space_id.clone();
+    assert!(
+        h.env
+            .store()
+            .reader(|c| write_blocks::active(c, &id, &space, h.ch.now()))
+            .unwrap()
+            .is_some()
+    );
+
+    // the service allows writes again: lifted at once, and the next reply goes out
+    h.fake.with(|w| w.write_policy = "allowed".into());
+    h.fake.notify(
+        "session.status",
+        json!({"status": "ok", "write_policy": "allowed"}),
+    );
+    until("lifted", || {
+        h.env
+            .store()
+            .reader(|c| write_blocks::active(c, &id, &space, h.ch.now()))
+            .unwrap()
+            .is_none()
+    })
+    .await;
+    let plan = ask(3).await;
+    let sent = outbox
+        .deliver(&h.ch, &reply(&plan, Purpose::Reply))
+        .await
+        .unwrap();
+    let id_sent = match sent {
+        Delivered::Sent { message_id } | Delivered::Queued { message_id } => message_id,
+        other => panic!("{other:?}"),
+    };
+    h.env.clock.advance(10_000);
+    outbox.send_due(&h.ch).await;
+    assert_eq!(
+        h.rows("SELECT status FROM chan_messages WHERE id=?", &[&id_sent])[0][0],
+        "sent"
+    );
+    assert_eq!(cards().len(), 1);
+    rt.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
