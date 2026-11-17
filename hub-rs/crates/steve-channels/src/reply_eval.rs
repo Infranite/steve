@@ -389,6 +389,21 @@ pub fn layers(case: &Case, s: &Setting, history: usize, voice: Voice) -> Layers 
     }
 }
 
+/// The conversation the audience could read when Steve answered `case`, as the disclosure check is
+/// given it (`CheckCx::audience_seen`; the outbound path reads it from the store the same way): the
+/// stretches of talk before the message and the message itself, one `- 名字：text` line each.
+pub fn seen(case: &Case, s: &Setting) -> String {
+    let l = layers(case, s, compose::HISTORY, bare_voice(case));
+    let mut lines: Vec<String> = l
+        .chain
+        .iter()
+        .chain(&l.history)
+        .map(crate::context::Shown::render)
+        .collect();
+    lines.push(format!("- （这条）{}：{}", l.sender, l.message.trim()));
+    lines.join("\n")
+}
+
 fn is_dm_kind(kind: &str) -> bool {
     kind == "dm"
 }

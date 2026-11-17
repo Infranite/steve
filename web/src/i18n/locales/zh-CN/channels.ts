@@ -175,6 +175,8 @@ export default {
     entries_other: "{{count}} 条知识",
     rewrites_other: "改写 {{count}} 处",
     drafted: "转成了草稿",
+    unchecked: "检查没跑完",
+    checking: "检查还在跑",
     levelChanged: "{{level}}（原级别：{{from}}）",
     rewrite: "“{{from}}” 改成了 “{{to}}”：{{reason}}",
     onlyYou: "只有你能看到依据；群里的人只看到回复。",

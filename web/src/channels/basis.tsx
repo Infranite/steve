@@ -10,8 +10,11 @@ import { useT } from "@/i18n"
 
 export function BasisView({ b }: { b: B | null }) {
   const t = useT()
-  if (!b || (!b.entries.length && !b.rewrites.length)) return null
-  const summary = [t("channels:basis.title"), t("channels:basis.entries", { count: b.entries.length }), b.rewrites.length ? t("channels:basis.rewrites", { count: b.rewrites.length }) : "", b.verdict === "drafted" ? t("channels:basis.drafted") : ""].filter(Boolean).join(" · ")
+  /* a check that did not finish (or still runs) is said even without knowledge: it is not a pass, and not a leak */
+  const pending = b?.verdict === "unchecked" || b?.verdict === "checking"
+  if (!b || (!b.entries.length && !b.rewrites.length && !pending)) return null
+  const state = b.verdict === "drafted" ? t("channels:basis.drafted") : b.verdict === "unchecked" ? t("channels:basis.unchecked") : b.verdict === "checking" ? t("channels:basis.checking") : ""
+  const summary = [t("channels:basis.title"), t("channels:basis.entries", { count: b.entries.length }), b.rewrites.length ? t("channels:basis.rewrites", { count: b.rewrites.length }) : "", state].filter(Boolean).join(" · ")
   return (
     <Collapsible>
       <CollapsibleTrigger className="mt-1 inline-flex items-center gap-1 rounded-md type-footnote text-muted-foreground hover:text-foreground focus-visible:outline-2 focus-visible:outline-ring" data-basis>

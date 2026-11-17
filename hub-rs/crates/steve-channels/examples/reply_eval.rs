@@ -14,6 +14,8 @@
 //! judge    --cases F --outputs F --out F --models m1,m2 [--harness H] [--corpus F]
 //!          [--owner NAME] [--alias A]... [--concurrency N]
 //! gate     --cases F --outputs F --out F [--live-secs N] [--gap-secs N] [--latency-secs N]
+//! disclose --cases F --out F --db PATH --owner NAME [--workspace WS] [--harness H] [--models m1,m2]
+//!          [--concurrency N]
 //! sweep    --cases F --labels F --outputs F [--live 0,60,…] [--gap 0,30,…] [--latency-secs N]
 //! ```
 //!
@@ -43,6 +45,14 @@
 //! `--out` (for `check`), what each gate changed to stdout. `sweep` does it for every pair of window
 //! lengths (seconds; the defaults are the gate's constants) and prints the rule metrics of each, with
 //! the cases each pair gets wrong that the ungated answers got right: how the windows were chosen.
+//!
+//! `disclose` runs the disclosure check again on the drafts Steve wrote then (each case's first
+//! basis: the text it checked, the knowledge it was written with read again from `--db`, opened
+//! read-only), as a draft on your own account is checked now: without hurry
+//! ([`steve_modules::outbound::CheckCx::patient`]: the patient time limit, then one more try on the
+//! smart tier), with the conversation the audience could read ([`re::seen`]). It writes `{case_id,
+//! before, after, check_model, secs, spans, rewrite}` per draft (`rewrite`: what the deletion-only
+//! rule makes of the rewrite Steve did then) and prints the counts: no text of the case.
 //!
 //! `judge` asks a different model than the one that drafted (refused otherwise) about understanding,
 //! voice and card answerability, and writes one judgment per answer.
@@ -125,7 +135,7 @@ fn main() {
         "check" => check(&args),
         "gate" => gate(&args),
         "sweep" => sweep(&args),
-        "replay" | "judge" => {
+        "replay" | "judge" | "disclose" => {
             let scratch = tempfile::tempdir().unwrap_or_else(|e| fail(&format!("tempdir: {e}")));
             if std::env::var_os("STEVE_HOME").is_none() {
                 // before any thread exists: the harness's home is the scratch directory
@@ -133,10 +143,10 @@ fn main() {
             }
             let rt = tokio::runtime::Runtime::new().expect("runtime");
             rt.block_on(async {
-                if cmd == "replay" {
-                    replay(&args, scratch.path()).await
-                } else {
-                    judge(&args, scratch.path()).await
+                match cmd.as_str() {
+                    "replay" => replay(&args, scratch.path()).await,
+                    "disclose" => disclose(&args, scratch.path()).await,
+                    _ => judge(&args, scratch.path()).await,
                 }
             });
         }
@@ -224,6 +234,18 @@ fn env_list(k: &str) -> Vec<String> {
 /// route, and the one-shot driver in `scratch`. Explicit `--harness/--models/--effort` become the
 /// purpose's override.
 fn gateway(route: &Route, a: &Args, scratch: &Path) -> (Arc<dyn Gateway>, String) {
+    gateway_for("compose", Tier::Smart, route, a, scratch)
+}
+
+/// [`gateway`] for `purpose` on `tier` (what it describes); `--harness/--models/--effort` become that
+/// purpose's override.
+fn gateway_for(
+    purpose: &str,
+    tier: Tier,
+    route: &Route,
+    a: &Args,
+    scratch: &Path,
+) -> (Arc<dyn Gateway>, String) {
     let store = steve_store::Store::open(
         scratch.join("route.sqlite3"),
         steve_store::FnPublisher(|_| {}),
@@ -268,7 +290,7 @@ fn gateway(route: &Route, a: &Args, scratch: &Path) -> (Arc<dyn Gateway>, String
     }
     if let Some(c) = compose {
         let mut m = serde_json::Map::new();
-        m.insert(steve_core::models::key("compose"), c);
+        m.insert(steve_core::models::key(purpose), c);
         store
             .settings()
             .set(ws, &m, "reply_eval")
@@ -280,7 +302,14 @@ fn gateway(route: &Route, a: &Args, scratch: &Path) -> (Arc<dyn Gateway>, String
         ..Default::default()
     };
     let resolver = steve_core::models::Models::new(store, defaults);
-    let shown = resolver.for_call(ws, "compose", steve_core::Tier::Smart);
+    let shown = resolver.for_call(
+        ws,
+        purpose,
+        match tier {
+            Tier::Fast => steve_core::Tier::Fast,
+            _ => steve_core::Tier::Smart,
+        },
+    );
     let described = shown.describe();
     let inner = Arc::new(steve_core::InProcess {
         one: steve_core::LocalAcp {
@@ -806,4 +835,196 @@ async fn judge(a: &Args, scratch: &Path) {
                "card_answerable": rate("card_answerable")})
     );
     write_jsonl(&out_path, &rows);
+}
+
+// ---------------------------------------------------------------- disclose
+
+/// What a check of Steve's said then, in short: `pass`, `rewritten`, `leak`, or `model_failed`
+/// (the model gave no answer, shown then as a possible leak).
+fn verdict_then(b: &Value) -> &'static str {
+    let failed = b["entries"].as_array().into_iter().flatten().any(|e| {
+        e["source_type"] == "span"
+            && e["reason"].as_str().is_some_and(|r| {
+                r.contains("检查模型没有给出结果")
+                    || r.starts_with(steve_channels::disclosure::R_MODEL_FAILED)
+            })
+    });
+    match b["verdict"].as_str() {
+        Some("pass") => "pass",
+        Some("rewritten") => "rewritten",
+        _ if failed => "model_failed",
+        _ => "leak",
+    }
+}
+
+async fn disclose(a: &Args, scratch: &Path) {
+    use steve_channels::disclosure::{self, Disclosure};
+    use steve_modules::outbound::{Audience, CheckCx, OutboundCheck, Verdict};
+    let cases: Vec<Case> = read(need(a, "cases"));
+    let out_path = need(a, "out").to_string();
+    let db = need(a, "db").to_string();
+    let ws = one(a, "workspace").unwrap_or(steve_store::WS).to_string();
+    let setting = re::Setting {
+        owner: need(a, "owner").to_string(),
+        aliases: list(a, "alias"),
+        ..Default::default()
+    };
+    let (gw, described) = gateway_for("disclosure", Tier::Fast, &Route::default(), a, scratch);
+    eprintln!("reply_eval: checking on {described}");
+    // the names rule reads a store: an empty one (the replay knows no contacts)
+    let names = steve_store::Store::open(
+        scratch.join("names.sqlite3"),
+        steve_store::FnPublisher(|_| {}),
+    )
+    .unwrap_or_else(|e| fail(&format!("names store: {e}")));
+    names.ensure_workspace().expect("workspace");
+    let check = Disclosure::with_models(Vec::new());
+    check.bind(names, gw);
+    let open_db = || {
+        use rusqlite::OpenFlags;
+        rusqlite::Connection::open_with_flags(
+            format!("file:{db}?mode=ro"),
+            OpenFlags::SQLITE_OPEN_READ_ONLY
+                | OpenFlags::SQLITE_OPEN_URI
+                | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+        .unwrap_or_else(|e| fail(&format!("{db}: {e}")))
+    };
+    let conn = open_db();
+    let sem = Arc::new(tokio::sync::Semaphore::new(
+        one(a, "concurrency")
+            .and_then(|n| n.parse().ok())
+            .unwrap_or(4),
+    ));
+    let mut tasks = tokio::task::JoinSet::new();
+    for case in &cases {
+        let Some(b) = case.steve["reply_basis"]
+            .as_array()
+            .and_then(|v| v.first())
+            .cloned()
+        else {
+            continue;
+        };
+        let rewrites: Vec<Value> = b["rewrites"].as_array().cloned().unwrap_or_default();
+        let text = rewrites
+            .first()
+            .and_then(|r| r["from"].as_str())
+            .or_else(|| case.steve["draft_text"].as_str())
+            .unwrap_or_default()
+            .to_string();
+        if text.trim().is_empty() {
+            continue;
+        }
+        let entries: Vec<Value> = b["entries"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|e| e["source_type"] != "span")
+            .cloned()
+            .collect();
+        let (knowledge, complete) =
+            steve_knowledge::retrieve::knowledge_again(&conn, &ws, &entries)
+                .unwrap_or_else(|e| fail(&format!("knowledge: {e}")));
+        let rewrite = rewrites.first().map(|r| {
+            match disclosure::judge_rewrite(
+                r["from"].as_str().unwrap_or_default(),
+                r["to"].as_str().unwrap_or_default(),
+            ) {
+                disclosure::Rewrite::Kept(_) => "kept",
+                disclosure::Rewrite::Hollow(_) => "hollow",
+                disclosure::Rewrite::Empty => "empty",
+                disclosure::Rewrite::Added => "added",
+            }
+        });
+        let audience = Audience {
+            external: case.space.has_external,
+            description: format!(
+                "「{}」的 {} 位成员{}",
+                if case.space.name.trim().is_empty() {
+                    "私聊"
+                } else {
+                    case.space.name.as_str()
+                },
+                case.space.member_count,
+                if case.space.has_external {
+                    "，有外部成员"
+                } else {
+                    "，都是本公司的人"
+                }
+            ),
+            scopes: vec![format!("space:{}", case.space.id)],
+            ..Default::default()
+        };
+        let cx = CheckCx {
+            ws: ws.clone(),
+            actor: "me".into(),
+            audience_said: case.message.text.clone(),
+            audience_seen: Some(re::seen(case, &setting)),
+            patient: true,
+            ..Default::default()
+        };
+        let (check, sem, id, before) = (
+            check.clone(),
+            sem.clone(),
+            case.case_id.clone(),
+            verdict_then(&b),
+        );
+        tasks.spawn(async move {
+            let _permit = sem.acquire_owned().await.expect("semaphore");
+            let t0 = std::time::Instant::now();
+            let r = check.check(&cx, &audience, &text, &knowledge).await;
+            let after = match r.verdict {
+                Verdict::Pass => "pass",
+                Verdict::Leak => "leak",
+                Verdict::Unchecked => "unchecked",
+            };
+            // what happened when the model gave no answer (no text of the case)
+            let why = r
+                .spans
+                .iter()
+                .find(|s| s.reason.starts_with(disclosure::R_MODEL_FAILED))
+                .map(|s| s.reason.clone());
+            json!({
+                "case_id": id, "before": before, "after": after, "check_model": r.check_model,
+                "why": why,
+                "secs": t0.elapsed().as_secs_f64(), "spans": r.spans.len(), "rewrite": rewrite,
+                "knowledge": knowledge.len(), "knowledge_complete": complete,
+            })
+        });
+    }
+    let mut rows: Vec<Value> = Vec::new();
+    while let Some(r) = tasks.join_next().await {
+        let v = r.expect("task");
+        eprintln!(
+            "reply_eval: {} {} → {}",
+            v["case_id"].as_str().unwrap_or_default(),
+            v["before"].as_str().unwrap_or_default(),
+            v["after"].as_str().unwrap_or_default()
+        );
+        rows.push(v);
+    }
+    rows.sort_by(|x, y| x["case_id"].as_str().cmp(&y["case_id"].as_str()));
+    write_jsonl(&out_path, &rows);
+    let count = |k: &str, v: &str| rows.iter().filter(|r| r[k] == v).count();
+    let mut secs: Vec<f64> = rows.iter().filter_map(|r| r["secs"].as_f64()).collect();
+    secs.sort_by(|x, y| x.total_cmp(y));
+    let pct = |p: f64| {
+        secs.get(((secs.len() as f64 - 1.0) * p).round() as usize)
+            .copied()
+    };
+    println!(
+        "{}",
+        json!({
+            "drafts": rows.len(),
+            "before": {"pass": count("before", "pass"), "rewritten": count("before", "rewritten"),
+                       "leak": count("before", "leak"), "model_failed": count("before", "model_failed")},
+            "after": {"pass": count("after", "pass"), "leak": count("after", "leak"),
+                      "unchecked": count("after", "unchecked")},
+            "cards_saying_leak_before": rows.len() - count("before", "pass") - count("before", "rewritten"),
+            "cards_saying_leak_after": count("after", "leak"),
+            "secs_median": pct(0.5), "secs_max": pct(1.0),
+            "rewrites": {"kept": count("rewrite", "kept"), "empty": count("rewrite", "empty"),
+                         "added": count("rewrite", "added")},
+        })
+    );
 }

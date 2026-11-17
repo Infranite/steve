@@ -293,6 +293,11 @@ pub fn keep_composed(tx: &Tx, message: &str, g: &crate::deliver::Generation) -> 
         "needs_commitment": g.needs_commitment || g.needs_approval,
         "model": g.model,
     });
+    let mut v = v;
+    // what the composer was shown of how you talk, for the disclosure check that runs later
+    if !g.style_samples.is_empty() {
+        v["style_samples"] = json!(g.style_samples);
+    }
     tx.execute(
         "UPDATE chan_messages SET composed = ? WHERE id = ?",
         params![v.to_string(), message],
