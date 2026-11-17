@@ -681,7 +681,7 @@ The signed-in owner can generate a pairing code in **Devices → Add device** an
      <absolute-path-to-steve-node> pair "https://<hub>" --name "<node-name>"
    ```
 
-3. In Devices, find the pending Node, compare its fingerprint with the CLI output, enter the full fingerprint and confirm it. Save its `node_id` for subsequent checks; do not identify it by name alone. The API equivalent is to read `GET /api/nodes`, match the Node ID and fingerprint, then call `POST /api/nodes/<node_id>/confirm` and check for `{"ok": true}`.
+3. Once the Node claims the code, **Add device** moves on to its fingerprint (a pending Node also has **Confirm** on the Devices overview). Paste or type the whole fingerprint the CLI printed, eight groups of four hex digits: each group is checked as it is entered, and **They match, add it** is available only when all eight match. If they differ, **They differ, reject** unpairs it; make a new code and pair again. Save its `node_id` for subsequent checks; do not identify it by name alone. The API equivalent is to read `GET /api/nodes`, match the Node ID and fingerprint, then call `POST /api/nodes/<node_id>/confirm` and check for `{"ok": true}`.
 4. Install and start its own user service with the [service commands](#hub-and-node-service-commands), or run the Node in the foreground:
 
    ```sh
@@ -767,7 +767,7 @@ This collection does not rewrite historical statistics. Existing Node journal re
 
 The event stream tells a Node's owner (and the Hub's owner) when anything of this changes, with `{"type": "node", "id": "<node_id>", "user": "<owner id>"}`: it asked to join, was confirmed, renamed, paused, resumed, revoked, linked or went away, its limit, personal-config choice or upgrade policy changed, an upgrade moved to another phase, it said what machine it is, or it reported why it could not link.
 
-Fingerprints are 32 hex digits (128 bits of the key's SHA-256). Devices shows Nodes paired earlier at the same length, computed from their stored key.
+Fingerprints are 32 hex digits (128 bits of the key's SHA-256); `steve-node pair`, `status` and `rotate` print them in groups of four. Devices shows Nodes paired earlier at the same length, computed from their stored key.
 
 To change a Node's key, for example after its machine or a backup of `node/identity.key` may have been exposed, run `steve-node rotate` on that Node, with its `STEVE_HOME`, then restart its service (`steve node restart`). The new key is kept aside until the Hub has accepted the change, which both keys sign. The old key is kept as `node/identity.key.previous`, and the Hub refuses it from then on and audits the change. A Node must be confirmed (active or paused) to rotate. A Node whose key is lost cannot rotate: revoke it and pair it again.
 
@@ -921,7 +921,7 @@ Only the actual TCP peer is trusted; `X-Forwarded-For` never grants access. A co
 
 ### Remote Nodes over tailcat
 
-When a Node cannot reach the Hub over HTTPS (no public address, no VPN), the Hub can be reached over [tailcat](https://github.com/tailscale/tailcat), an optional program from Tailscale that tunnels TCP between two machines without an account or root. Install `tailcat` on both machines (`STEVE_TAILCAT` names the program when it is not on the service's `PATH`). The owner then turns on **Devices → Add device → Connect over tailcat**.
+When a Node cannot reach the Hub over HTTPS (no public address, no VPN), the Hub can be reached over [tailcat](https://github.com/tailscale/tailcat), an optional program from Tailscale that tunnels TCP between two machines without an account or root. Install `tailcat` on both machines (`STEVE_TAILCAT` names the program when it is not on the service's `PATH`). The owner then chooses **Through tailcat** in **Devices → Add device** and turns it on there (or with the switch on **Devices → Hub**).
 
 The Hub then:
 
@@ -933,7 +933,7 @@ Devices shows the resulting address, `tailcat:<address>:<port>`. Use it wherever
 
 ### Installing a Node remotely over tailcat
 
-From **Devices → Add device → Install remotely over tailcat**, the Hub can install a Node on another machine itself. Both machines need `tailcat`; the Hub also needs OpenSSH's `ssh` and `ssh-keygen`.
+From **Devices → Add device → Install remotely**, the Hub can install a Node on another machine itself. Both machines need `tailcat`; the Hub also needs OpenSSH's `ssh` and `ssh-keygen`.
 
 1. Devices shows one line for the target, carrying a key made for this install only:
 

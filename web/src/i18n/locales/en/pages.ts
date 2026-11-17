@@ -48,8 +48,6 @@ export default {
     oidcSave: "Save",
     oidcOff: "Turn single sign-on off",
     oidcSaved: "Single sign-on is on",
-    pairTitle: "Pair a new device",
-    pairSub: "Sign another device in to this account: scan the QR code with its camera or the Steve app, or open the pairing link in its browser. The code and the link work once, for 5 minutes.",
     pairRefresh: "Refresh QR code",
     pairShow: "Show the pairing code",
     pairCopyUri: "Copy pairing link",

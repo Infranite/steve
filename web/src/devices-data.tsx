@@ -1,13 +1,14 @@
 /* What the devices pages read, once for all of their tabs: the device rows, the Node registry, the access view, every
  * Node's vitals and the Hub's defaults for Nodes (upgrade policy and its waits, personal agent config). Each keeps its
  * last good answer (also across tab changes, which remount the page) and says when a later read failed, so a failure
- * is never shown as an empty list. Nodes and devices are read every 10 seconds while the page is visible, vitals every
- * minute (the Hub samples once a minute); there is no refresh button. */
+ * is never shown as an empty list. The Hub's stream says when a Node or a client changed (`node`, `client` events) and
+ * they are read again at once; besides, Nodes and devices are read every 10 seconds while the page is visible (a Hub
+ * of an earlier release sends no such events), vitals every minute (the Hub samples once a minute). No refresh button. */
 import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from "react"
 import { api, type RDevice, type RNode, type RUpgradeDefault, type RVitals } from "@/api"
 import { access, type AccessView } from "@/access-api"
 import { nodeViews, type NodeView } from "@/device-model"
-import { st, useStore } from "@/store"
+import { st, useHubEvents, useStore } from "@/store"
 
 const EVERY = 10_000, VITALS_EVERY = 60_000
 type NodesRead = { nodes: RNode[]; off: boolean }
@@ -72,6 +73,8 @@ export function DevicesProvider({ children }: { children: ReactNode }) {
     const [upgrade, context] = await Promise.all([api.nodeUpgradeDefault().catch(() => null), api.nodeContextDefault().then((r) => r.owner_context, () => null)])
     return { upgrade, context }
   }, lastDefaults, (v) => { lastDefaults = v }, [], 10 * 60_000)
+  useHubEvents(["node", "device"], () => { nodes.reload(); devices.reload() })
+  useHubEvents(["client"], () => acc.reload())
   const hubVersion = st.version
   const ds = devices.value ?? st.devices
   const views = useMemo(() => nodeViews(ds, nodes.value?.nodes ?? null, hubVersion), [ds, nodes.value, hubVersion])

@@ -1,52 +1,85 @@
-/* Devices · Overview (#/devices): first what wants you (a Node to confirm, offline, behind the Hub, an upgrade under
- * way or failed), then four numbers (sessions, Nodes online, Nodes on the Hub's version, clients), then the Nodes. */
-import { CircleAlertIcon, ShieldAlertIcon, ArrowUpCircleIcon, WifiOffIcon, LoaderIcon } from "lucide-react"
+/* Devices · Overview (#/devices): first what wants you, one line each with its next step (a Node to confirm, an upgrade
+ * that failed and went back, one under way, a Node behind the Hub, a Node offline, sessions waiting for an answer), then
+ * four numbers (sessions, Nodes online, Nodes on the Hub's version, clients online), then the map of how everything
+ * connects (devices-map.tsx) and the Node cards. */
+import { useState, type ReactNode } from "react"
+import { ArrowUpCircleIcon, CircleAlertIcon, LoaderIcon, MessageCircleIcon, RotateCcwIcon, ShieldAlertIcon, WifiOffIcon } from "lucide-react"
 import { useT } from "@/i18n"
 import { Button } from "@/components/ui/button"
-import { go } from "@/ui"
-import { agoText, nodeStatus, type NodeStatus, type NodeView } from "@/device-model"
+import { go, openSheet } from "@/ui"
+import { api } from "@/api"
+import { deviceWorkEvidence, st, toast, useStore } from "@/store"
+import { agoText, nodeStatus, upgradeCard, type NodeView } from "@/device-model"
+import { mapClients } from "@/device-map-model"
 import { useDevices } from "@/devices-data"
+import { deviceGroups } from "@/devices-work"
 import { DCard, Figure } from "@/devices-ui"
-import { NodesGrid, linkReason } from "@/devices-nodes"
+import { DeviceMap } from "@/devices-map"
+import { NodesGrid, linkReason, nodeHref } from "@/devices-nodes"
 import { cn } from "cn"
-import type { ReactNode } from "react"
 
-const ICON: Partial<Record<NodeStatus["kind"], typeof CircleAlertIcon>> = { pending: ShieldAlertIcon, offline: WifiOffIcon, rolledBack: CircleAlertIcon, outdated: ArrowUpCircleIcon, upgrading: LoaderIcon }
+/** at most this many lines of what wants you; the rest behind "N more" */
+const ATTENTION_ROWS = 4
+
+type Row = { key: string; tone: "bad" | "warn" | "info"; icon: typeof CircleAlertIcon; text: ReactNode; actions: ReactNode }
 
 export function OverviewTab() {
-  const t = useT(), { views, hubVersion, access } = useDevices()
+  const t = useT(), { views, hubVersion, access, reloadNodes } = useDevices()
+  useStore()
+  const [all, setAll] = useState(false), [busy, setBusy] = useState("")
   const now = Date.now()
   const live = views.filter((v) => v.state !== "revoked")
-  const rows: { v: NodeView; s: NodeStatus; text: ReactNode }[] = []
-  for (const v of live) {
-    const s = nodeStatus(v, hubVersion), name = v.local ? t("devices:map.localNode") : v.name
-    const text = s.kind === "pending" ? t("devices:attn.pending", { name })
-      : s.kind === "offline" ? <>{t("devices:attn.offline", { name, ago: s.since ? agoText(s.since, now) : "—" })}{linkReason(v) && <span className="text-muted-foreground"> · {linkReason(v)}</span>}</>
-      : s.kind === "rolledBack" ? t("devices:attn.failed", { name, to: s.version ?? "", from: s.from ?? "" })
-      : s.kind === "outdated" ? t("devices:attn.outdated", { name, v: v.version ?? "?", hub: hubVersion })
-      : s.kind === "upgrading" ? t("devices:attn.upgrading", { name, to: s.version ?? "" }) : null
-    if (text) rows.push({ v, s, text })
+  const open = (v: NodeView, label = t("devices:attn.open")) => <Button size="xs" variant="ghost" onClick={() => go(nodeHref(v.id))} data-attention-open={v.id}>{label}</Button>
+  const upgrade = async (v: NodeView) => {
+    setBusy(v.id)
+    try { await api.upgradeNode(v.id); toast(t("devices:attn.upgradeStarted", { name: v.name })); reloadNodes() } catch (e) { toast((e as Error).message) } finally { setBusy("") }
   }
-  const running = live.reduce((n, v) => n + (v.running ?? 0), 0), max = live.reduce((n, v) => n + (v.max ?? 0), 0), queued = live.reduce((n, v) => n + (v.waiting ?? 0), 0)
-  const online = live.filter((v) => v.linked && v.state !== "pending").length
-  const versioned = live.filter((v) => v.version), same = versioned.filter((v) => v.version === hubVersion).length
-  const clients = access?.clients.filter((c) => !c.revoked).length
+  const rows: Row[] = []
+  for (const v of live) {
+    const s = nodeStatus(v, hubVersion), name = v.local ? t("devices:map.localNode") : v.name, card = upgradeCard(v, hubVersion)
+    if (s.kind === "pending") rows.push({ key: v.id, tone: "warn", icon: ShieldAlertIcon, text: t("devices:attn.pending", { name }),
+      actions: st.owner ? <Button size="xs" onClick={() => openSheet("addDevice", { kind: "node", node: v.id })} data-attention-confirm={v.id}>{t("devices:attn.confirm")}</Button> : open(v) })
+    else if (s.kind === "rolledBack") rows.push({ key: v.id, tone: "bad", icon: RotateCcwIcon, text: t("devices:attn.failed", { name, to: s.version ?? "", from: s.from ?? "" }), actions: open(v, t("devices:attn.why")) })
+    else if (s.kind === "upgrading") rows.push({ key: v.id, tone: "info", icon: LoaderIcon, text: t("devices:attn.upgrading", { name, to: s.version ?? "" }), actions: open(v) })
+    else if (s.kind === "offline") rows.push({ key: v.id, tone: "warn", icon: WifiOffIcon,
+      text: <>{t("devices:attn.offline", { name, ago: s.since ? agoText(s.since, now) : "—" })}{linkReason(v) && <span className="text-muted-foreground">{t("devices:attn.reason", { why: linkReason(v) })}</span>}</>, actions: open(v) })
+    else if (card.kind === "outdated" || card.kind === "manual" && card.behind) rows.push({ key: v.id, tone: "warn", icon: ArrowUpCircleIcon, text: t("devices:attn.outdated", { name, v: v.version ?? "?", hub: hubVersion }),
+      actions: <>{open(v, t("devices:card.details"))}{card.kind === "outdated" && st.owner && <Button size="xs" disabled={busy === v.id} onClick={() => void upgrade(v)} data-attention-upgrade={v.id}>{t("devices:attn.upgrade")}</Button>}</> })
+    const asks = v.device && deviceWorkEvidence().loaded ? deviceGroups(v.device.id).attention.length : 0
+    if (asks > 0) rows.push({ key: v.id + ":ask", tone: "warn", icon: MessageCircleIcon, text: t("devices:attn.ask", { name, count: asks }),
+      actions: <Button size="xs" variant="outline" onClick={() => go(nodeHref(v.id))} data-attention-ask={v.id}>{t("devices:attn.answer")}</Button> })
+  }
+  const order = { bad: 0, warn: 1, info: 2 }
+  rows.sort((a, b) => order[a.tone] - order[b.tone])
+  const shown = all ? rows : rows.slice(0, ATTENTION_ROWS)
+  const worst = rows.some((r) => r.tone === "bad")
+
+  const counted = live.filter((v) => v.state !== "pending")
+  const running = counted.reduce((n, v) => n + (v.linked ? v.running ?? 0 : 0), 0), max = counted.reduce((n, v) => n + (v.linked ? v.max ?? 0 : 0), 0)
+  const queued = counted.reduce((n, v) => n + (v.waiting ?? 0), 0)
+  const online = counted.filter((v) => v.linked).length
+  const versioned = counted.filter((v) => v.version), same = versioned.filter((v) => v.version === hubVersion).length
+  const clients = mapClients(access, t("devices:clients.browserSession"))
   return (
     <div className="flex min-w-0 flex-col gap-4" data-devices-overview>
-      {rows.length > 0 && <div className="flex flex-col overflow-hidden rounded-xl bg-attention/8 shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--attention)_25%,transparent)]" data-attention>
-        {rows.map(({ v, s, text }) => { const I = ICON[s.kind] ?? CircleAlertIcon; return (
-          <div key={v.id} className="flex items-center gap-3 px-4 py-2.5 [&+&]:border-t [&+&]:border-attention/15" data-attention-row={s.kind}>
-            <I className={cn("size-4 shrink-0", s.tone === "bad" ? "text-destructive" : s.tone === "info" ? "text-blue" : s.tone === "off" ? "text-muted-foreground" : "text-attention")} aria-hidden />
-            <span className="min-w-0 flex-1 type-callout text-foreground">{text}</span>
-            <Button size="xs" variant="ghost" onClick={() => go("#/devices/nodes/" + encodeURIComponent(v.id))}>{t("devices:attn.open")}</Button>
-          </div>) })}
+      {rows.length > 0 && <div className={cn("flex flex-col overflow-hidden rounded-xl", worst ? "bg-destructive/6 shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--destructive)_22%,transparent)]" : "bg-attention/8 shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--attention)_25%,transparent)]")} data-attention>
+        {shown.map((r) => (
+          <div key={r.key} className="flex min-h-11 flex-wrap items-center gap-x-3 gap-y-1.5 border-attention/15 px-4 py-2 [&+&]:border-t" data-attention-row={r.key}>
+            <r.icon className={cn("size-4 shrink-0", r.tone === "bad" ? "text-destructive" : r.tone === "info" ? "text-blue" : "text-attention")} aria-hidden />
+            <span className="min-w-0 flex-1 basis-48 type-callout text-pretty text-foreground">{r.text}</span>
+            <span className="ml-auto flex shrink-0 items-center gap-1.5">{r.actions}</span>
+          </div>))}
+        {rows.length > ATTENTION_ROWS && <button type="button" className="border-t border-attention/15 px-4 py-2.5 text-left type-footnote text-muted-foreground hover:text-foreground" onClick={() => setAll((x) => !x)} data-attention-more>
+          {all ? t("devices:attn.less") : t("devices:attn.more", { count: rows.length - ATTENTION_ROWS })}</button>}
       </div>}
       <DCard data-device-stats><div className="grid grid-cols-2 gap-x-6 gap-y-5 px-5 py-4 md:grid-cols-4">
-        <Figure label={t("devices:stat.sessions")} value={running} unit={max ? ` / ${max}` : undefined} fill={max ? running / max : null} sub={queued ? t("devices:stat.queued", { n: queued }) : t("devices:stat.noQueue")} data-stat="sessions" />
-        <Figure label={t("devices:stat.nodesOnline")} value={online} unit={` / ${live.length}`} sub={online < live.length ? t("devices:stat.nodesOffline", { n: live.length - online }) : t("devices:stat.allOnline")} data-stat="nodes" />
+        <Figure label={t("devices:stat.sessions")} value={running} unit={max ? ` / ${max}` : undefined} fill={max ? running / max : null}
+          sub={queued ? <span className="text-attention">{t("devices:stat.queued", { n: queued })}</span> : t("devices:stat.noQueue")} data-stat="sessions" />
+        <Figure label={t("devices:stat.nodesOnline")} value={online} unit={` / ${counted.length}`} sub={online < counted.length ? t("devices:stat.nodesOffline", { n: counted.length - online }) : t("devices:stat.allOnline")} data-stat="nodes" />
         <Figure label={t("devices:stat.sameVersion")} value={same} unit={` / ${versioned.length}`} sub={hubVersion ? t("devices:stat.hubVersion", { version: hubVersion }) : undefined} data-stat="versions" />
-        <Figure label={t("devices:stat.clientsSignedIn")} value={clients ?? "—"} sub={t("devices:stat.clientsSub")} data-stat="clients" />
+        <Figure label={t("devices:stat.clientsOnline")} value={access ? clients.online : "—"} sub={access ? t("devices:stat.signedIn", { n: clients.total }) : undefined} data-stat="clients" />
       </div></DCard>
+      <DeviceMap />
       <NodesGrid />
     </div>
   )

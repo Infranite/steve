@@ -72,7 +72,7 @@ try {
  await page.locator('[data-node-row=case-no-samples]').click();await page.locator('[data-sample-state=none]').waitFor();await page.locator('[data-back]').click()
  await page.locator('[data-node-row=case-stale]').click();await page.locator('[data-vitals-stale]').getByText('数据停在',{exact:false}).waitFor();await page.locator('[data-back]').click()
  checks.push({name:'real no-sample response and stale snapshot produce separate monitoring states',passed:true})
- await page.locator('[data-pair]').click();await page.locator('[data-pair-dialog]').waitFor({timeout:3000}).catch(()=>page.getByRole('dialog').waitFor());await page.keyboard.press('Escape');checks.push({name:'existing pairing entry opens and closes on actual backend',passed:true})
+ await page.locator('[data-pair]').click();await page.locator('[data-add-device]').waitFor({timeout:3000});await page.keyboard.press('Escape');checks.push({name:'existing pairing entry opens and closes on actual backend',passed:true})
  assert.deepEqual(errors,[])
  await fs.writeFile(out+'/browser-results.json',JSON.stringify({source:'isolated real HTTP API with controlled persisted edge cases; physical sampling recorded separately; no API routes mocked',checks,errors},null,2))
  console.log(`${checks.length} real API browser checks passed`)

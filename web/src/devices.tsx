@@ -1,6 +1,6 @@
 /* Devices: one page for the Hub in use and everything on it, in tabs: Overview (#/devices), the Hub
  * (#/devices/hub), its Nodes (#/devices/nodes, a Node at #/devices/nodes/<id>) and the clients signed in to it
- * (#/devices/clients). Old places lead here: #/settings/hub, #/settings/access and #/devices/<device id>. */
+ * (#/devices/clients, a client's row at #/devices/clients/<id>). Old places lead here: #/settings/hub, #/settings/access and #/devices/<device id>. */
 import { useEffect } from "react"
 import { NetworkIcon, PlusIcon } from "lucide-react"
 import { Button } from "@/components/ui/button"
@@ -36,10 +36,10 @@ export function DevicesRoute({ b, c }: { b?: string; c?: string }) {
     const id = decodeURIComponent(b), d = st.devices.find((x) => x.id === id)
     return <Redirect to={"#/devices/nodes/" + encodeURIComponent(d?.node_id ?? id)} />
   }
-  return <DevicesProvider>{b === "nodes" && c ? <NodePage key={c} id={decodeURIComponent(c)} /> : <DevicesPage tab={(b as Tab) ?? "overview"} />}</DevicesProvider>
+  return <DevicesProvider>{b === "nodes" && c ? <NodePage key={c} id={decodeURIComponent(c)} /> : <DevicesPage tab={(b as Tab) ?? "overview"} focus={b === "clients" && c ? decodeURIComponent(c) : undefined} />}</DevicesProvider>
 }
 
-function DevicesPage({ tab }: { tab: Tab }) {
+function DevicesPage({ tab, focus }: { tab: Tab; focus?: string }) {
   const t = useT(), { views, hubVersion, access } = useDevices(), { hubs } = useHubs()
   const cur = hubs?.find((h) => h.current)
   const live = views.filter((v) => v.state !== "revoked")
@@ -58,6 +58,6 @@ function DevicesPage({ tab }: { tab: Tab }) {
         { value: "nodes", label: t("devices:tab.nodes"), count: live.length || undefined, data: { "data-seg": "nodes", "data-warn": warn ? "" : undefined } },
         { value: "clients", label: t("devices:tab.clients"), count: clients || undefined, data: { "data-seg": "clients" } },
       ]} />
-    {tab === "hub" ? <HubTab /> : tab === "nodes" ? <NodesTab /> : tab === "clients" ? <ClientsTab /> : <OverviewTab />}
+    {tab === "hub" ? <HubTab /> : tab === "nodes" ? <NodesTab /> : tab === "clients" ? <ClientsTab focus={focus} /> : <OverviewTab />}
   </Page></div>
 }
