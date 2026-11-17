@@ -17,7 +17,7 @@ pub const MAX_BYTES: usize = 20 * 1024 * 1024;
 pub const MAX_IMAGE: usize = 3_750_000;
 pub const MAX_IMAGES: usize = 7_500_000;
 pub const MAX_TEXT: usize = 32 * 1024;
-const FETCH_TIMEOUT: Duration = Duration::from_secs(30);
+pub(crate) const FETCH_TIMEOUT: Duration = Duration::from_secs(30);
 const TOTAL_TIMEOUT: Duration = Duration::from_secs(60);
 static PARSERS: OnceLock<Arc<Semaphore>> = OnceLock::new();
 
@@ -197,7 +197,7 @@ pub async fn prepare(
     }
 }
 
-async fn read_resource(resource: Resource, image_bytes: &mut usize) -> Prepared {
+pub(crate) async fn read_resource(resource: Resource, image_bytes: &mut usize) -> Prepared {
     let name = resource
         .name
         .chars()

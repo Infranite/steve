@@ -6,7 +6,9 @@
 //! model gateway's smart tier (the Bot's own `model` when it has one and a [`PinnedModel`] is
 //! wired), no ACP session. The answer is `{"text","needs_approval","why"}`.
 //!
-//! 1. safety rules ([`SAFETY_RULES`], a constant);
+//! 1. safety rules ([`SAFETY_RULES`], a constant); for a trigger word, right after them, the
+//!    identity block ([`crate::im_context`]: account, as whom, chat, thread, sender, audience,
+//!    disclosure, the `[AI]` rule, the trigger);
 //! 2. the Bot behind it: its own prompt, else duty, manner and working rules — on a bot account
 //!    only. On your own account the Bot only picks the model ([`Layers::model`]): the draft is you
 //!    talking, not the Bot, so none of its name, duty, manner or rules is in the prompt;
@@ -190,6 +192,9 @@ pub struct BotInfo {
 /// Everything a reply prompt is made of, gathered from the store.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Layers {
+    /// The identity block of a trigger word's turn ([`crate::im_context`]), rendered; empty for
+    /// any other message. First after the fixed safety rules.
+    pub im_context: String,
     /// Layer 2: the Bot the reply speaks for (a bot account); `None` on your own account.
     pub bot: Option<BotInfo>,
     /// The model the reply is written with: the Bot's own `model` (on your own account too).
@@ -306,6 +311,10 @@ fn or_none(s: &str) -> &str {
 pub fn prompt(l: &Layers) -> String {
     let mut p = String::from(SAFETY_RULES);
     p.push_str("\n\n");
+    if !l.im_context.trim().is_empty() {
+        p.push_str(l.im_context.trim());
+        p.push_str("\n\n");
+    }
 
     p.push_str(H_BOT);
     p.push('\n');
@@ -594,7 +603,7 @@ fn sender_items(c: &Connection, ws: &str, party: &str) -> ChannelResult<Vec<Stri
 
 /// Draft-as-you uses the verified account's linked user, never the workspace owner or the
 /// connection creator. The existing profile resolver owns address scope and external fallback.
-fn own_name(c: &Connection, ws: &str, conn: &str, space: &str) -> ChannelResult<String> {
+pub(crate) fn own_name(c: &Connection, ws: &str, conn: &str, space: &str) -> ChannelResult<String> {
     let user: String = c
         .query_row(
             "SELECT p.user_id FROM connections c
@@ -781,7 +790,15 @@ pub fn gather(
         })
         .collect();
 
+    // a trigger word: who speaks as whom, where, to whom, first
+    let im_context = if plan.trigger.is_some() {
+        crate::im_context::render_for(c, plan)
+    } else {
+        String::new()
+    };
+
     Ok(Layers {
+        im_context,
         owner: owner.clone(),
         replied: talk.replied,
         bot,
