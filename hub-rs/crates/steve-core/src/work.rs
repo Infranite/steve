@@ -374,6 +374,14 @@ impl Tx<'_> {
                 names = names(&user)
             ))));
         }
+        if !self.cfg().dynamic_workflows
+            && !g.single_session()
+            && (to_start || !queued.is_empty() || !failed.is_empty())
+        {
+            return Ok(Some(Work::User(steve_i18n::t!(
+                "core.workflow.blocker.disabled"
+            ))));
+        }
         if to_start && let Err(e) = self.rt().check_workflow_execution(&g.item_id) {
             return Ok(Some(Work::Failed(steve_i18n::t!(
                 "core.now.workflow_cannot_start",

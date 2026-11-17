@@ -1279,13 +1279,13 @@ mod host_tests {
             yolo: Default::default(),
             local_node: Default::default(),
         });
-        let routed = super::super::core::RoutedRuntime {
+        let routed = Arc::new(super::super::core::RoutedRuntime {
             node: None,
             fleet: None,
             bind_remote: None,
             spread: false,
             store: store.clone(),
-            host,
+            host: host.clone(),
             workspaces: super::super::workspaces::Workspaces::new(
                 store.clone(),
                 None,
@@ -1294,7 +1294,32 @@ mod host_tests {
             ),
             worktrees: None,
             preflight: None,
-        };
+        });
+        struct NoModels;
+        #[async_trait::async_trait]
+        impl steve_core::ModelGateway for NoModels {
+            async fn call(
+                &self,
+                _: &str,
+                _: steve_core::Tier,
+                _: std::time::Duration,
+                _: &steve_core::gateway::ThinkTools,
+            ) -> steve_core::Result<steve_core::gateway::Printed> {
+                panic!("this admission fixture never runs a model")
+            }
+        }
+        let mut core_cfg = steve_core::CoreConfig::for_home(&cfg.home);
+        core_cfg.dynamic_workflows = true;
+        assert!(
+            host.core
+                .set(steve_core::Core::new(
+                    steve_core::repo::Db::new(store.clone()),
+                    routed.clone(),
+                    Arc::new(NoModels),
+                    core_cfg,
+                ))
+                .is_ok()
+        );
         for (change, restore, message) in [
             (
                 "UPDATE items SET cycle=2 WHERE id='parent'",

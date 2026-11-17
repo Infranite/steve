@@ -122,7 +122,7 @@ impl NodeRuntime {
     fn plan_state_in(&self, tx: &Tx, session: &str) -> Result<Planned, StoreError> {
         // Node facts and reconciliation can schedule the next queued turn without going through
         // RoutedRuntime::flush. Recheck the durable graph in the same transaction as the claim.
-        if steve_store::workflow_gate::session_blocker(tx, session)?.is_some() {
+        if self.workflow_blocker_in(tx, session)?.is_some() {
             return Ok(Planned::Held);
         }
         // the persisted upgrade maintenance holds too: after a restart mid-drain nobody calls hold

@@ -275,6 +275,7 @@
   "hub.dep_wait.work_running": "Collaboration work is still running or its stop is not confirmed; pause the work graph and confirm it stopped before registering a wait for prerequisites",
   "hub.session.protocol_updated": "Synced the current Steve working protocol",
   "hub.session.node_parked": "This session is bound to a Node, but Nodes are not enabled here (STEVE_NODE_MODE): the message is queued and will not go to the old runner.",
+  "hub.workflow.disabled": "Dynamic workflows are disabled. No new units will start; existing results and acceptance requirements are retained. Pause and wait for execution to settle before explicitly choosing single-session takeover.",
   "hub.workflow.node_unavailable": "The Node this collaboration's sessions are bound to is unavailable or no longer authorized.",
   "hub.plugins.owner_only": "Only the instance owner can add plugin libraries and install plugins",
   "hub.plugins.no_library": "No such plugin library",

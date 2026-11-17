@@ -711,6 +711,9 @@ pub(crate) mod tests {
     use steve_node_api::testkit::{FakeNode, build};
     pub(crate) struct Ends;
     impl NodeDomain for Ends {
+        fn dynamic_workflows(&self) -> bool {
+            true
+        }
         fn turn_ended(&self, _: &str, _: Option<&str>, _: &str, _: Option<String>) {}
     }
     pub(crate) struct Host {

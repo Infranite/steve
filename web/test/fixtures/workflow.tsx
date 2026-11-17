@@ -31,7 +31,10 @@ const initial: Workflow = {
 
 function Fixture() {
   const query = new URLSearchParams(location.search)
-  const [workflow, setWorkflow] = useState<Workflow>({ ...initial, current_cycle: query.has("prior") ? false : undefined,
+  const [workflow, setWorkflow] = useState<Workflow>({ ...initial,
+    enabled: !query.has("disabled"),
+    execution_ready: !query.has("disabled") && initial.execution_ready,
+    current_cycle: query.has("prior") ? false : undefined,
     units: [...initial.units, ...(query.has("many") ? ["a", "b", "c", "d", "e"].map((x) => unit(`extra-${x}`, `补充工作 ${x}`, "work", "pending")) : []),
       ...(query.has("done") ? ["a", "b", "c", "d"].map((x) => unit(`done-${x}`, `已完成工作 ${x}`, "work", "succeeded")) : [])].map((u) => query.has("stopping") && (u.id === "api" || u.id === "review") ? { ...u, stop_pending: true } : u).map((u) => query.has("rework") && u.id === "web" ? { ...u, status: "failed" } : query.has("reworkActive") && u.id === "review" ? { ...u, status: "running" } : u),
     history_attempts: query.has("archive") ? [{ item_id: "ST-old", unit_id: "api", created: 1, snapshot: { title: "旧接口尝试", status: "cancelled", attempt: 1, session_id: "old-session", reason: "已被返工替代" } }] : [],

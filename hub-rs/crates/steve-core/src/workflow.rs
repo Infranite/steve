@@ -140,7 +140,9 @@ impl Core {
             }
             match args["action"].as_str().unwrap_or("get") {
                 "get" => {
-                    if let Some(same) = unchanged(&args, graph.revision)? {
+                    if t.cfg().dynamic_workflows
+                        && let Some(same) = unchanged(&args, graph.revision)?
+                    {
                         return Ok(same);
                     }
                     return Ok(t.workflow_context(&graph, &unit));
@@ -170,6 +172,7 @@ impl Core {
         }
         let action = args["action"].as_str().unwrap_or("get").to_owned();
         if action == "get"
+            && t.cfg().dynamic_workflows
             && let Some(g) = t.db().store().workflows().get(item)?
             && let Some(same) = unchanged(&args, g.revision)?
         {
@@ -318,6 +321,15 @@ impl Tx<'_> {
         };
         if complete && !self.workflow_current(&g)? {
             out.push(steve_i18n::t!("core.workflow.blocker.stale"));
+        }
+        if complete
+            && !self.cfg().dynamic_workflows
+            && !g.single_session()
+            && g.units
+                .iter()
+                .any(|u| u.spec.required && u.status != "succeeded")
+        {
+            out.push(steve_i18n::t!("core.workflow.blocker.disabled"));
         }
         if complete && g.paused && !g.single_session() {
             out.push(steve_i18n::t!("core.workflow.blocker.paused"));
@@ -478,6 +490,7 @@ impl Tx<'_> {
         out["current_cycle"] = json!(current_cycle);
         let mut blockers = self.workflow_blockers(item, true)?;
         if let Err(e) = &ready
+            && self.cfg().dynamic_workflows
             && !g.single_session()
         {
             blockers.push(e.to_string());
@@ -487,7 +500,8 @@ impl Tx<'_> {
         } else {
             "collaborative"
         });
-        out["execution_ready"] = json!(ready.is_ok());
+        out["enabled"] = json!(self.cfg().dynamic_workflows);
+        out["execution_ready"] = json!(self.cfg().dynamic_workflows && ready.is_ok());
         out["blockers"] = json!(blockers);
         Ok(out)
     }
@@ -518,6 +532,7 @@ impl Tx<'_> {
         // `parent_item`, not `item_id`: the key is read back as a tool argument otherwise, and no
         // tool of a unit session takes an item id it does not already know from its token.
         json!({
+            "enabled": self.cfg().dynamic_workflows,
             "parent_item": g.item_id, "revision": g.revision, "unit": unit,
             "upstream": upstream_units,
             "note": "长内容仅显示摘要；完整报告在上游单元 outputs 列出的文件里，直接打开这些文件。本会话只能读取本单元的事项，不能读取主事项或其他单元的事项。"
@@ -540,6 +555,9 @@ impl Tx<'_> {
         let action = args["action"].as_str().unwrap_or("get");
         if action == "get" {
             return self.workflow_view(item);
+        }
+        if !self.cfg().dynamic_workflows && matches!(action, "plan" | "retry" | "resume") {
+            return Err(conflict(steve_i18n::t!("core.workflow.blocker.disabled")));
         }
         self.lc_guard_open(item)?;
         let parent = self.item(item)?;
@@ -1018,7 +1036,7 @@ impl Tx<'_> {
     }
 
     fn workflow_drive(&mut self, parent: &str) -> Result<()> {
-        if self.holding() || self.cfg().no_resume {
+        if !self.cfg().dynamic_workflows || self.holding() || self.cfg().no_resume {
             return Ok(());
         }
         let Some(g) = self.db().store().workflows().get(parent)? else {

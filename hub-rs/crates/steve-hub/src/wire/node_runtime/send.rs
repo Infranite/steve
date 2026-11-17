@@ -236,6 +236,29 @@ impl NodeRuntime {
             "prepare_workspace" => n.prepare_workspace(parse(&l.request)?).await,
             "open_session" => n.open_session(parse(&l.request)?).await,
             "start_turn" => {
+                let blocked = if self.domain.dynamic_workflows() {
+                    None
+                } else {
+                    self.store.reader(|c| {
+                        let session: String = c.query_row(
+                            "SELECT t.session_id FROM runtime_attempts a JOIN runtime_turns t USING(turn_id) WHERE a.operation_id=?",
+                            [&l.operation], |r| r.get(0),
+                        )?;
+                        self.disabled_workflow_in(c, &session)
+                    }).map_err(|e| ApiError::new(ErrorCode::Offline, e.to_string()))?
+                };
+                if let Some(why) = blocked {
+                    // A prior uncertain send may already be running: only reconciliation can
+                    // settle it, never manufacture a pre-admission rejection for it.
+                    return Err(ApiError::new(
+                        if l.maybe_sent {
+                            ErrorCode::OutcomeUnknown
+                        } else {
+                            ErrorCode::Invalid
+                        },
+                        why,
+                    ));
+                }
                 let limit = self
                     .store
                     .reader(|c| rt::session_limit(c, self.node_id.as_str()))
@@ -531,7 +554,7 @@ impl NodeRuntime {
             .optional()?;
         if ok {
             if let Some(turn) = waiting {
-                if let Some(why) = steve_store::workflow_gate::session_blocker(tx, s)? {
+                if let Some(why) = self.workflow_blocker_in(tx, s)? {
                     return self.after_attempt_in(
                         tx,
                         s,
@@ -724,7 +747,7 @@ impl NodeRuntime {
         let reopen = gone
             && !reopened_before
             && !cancelled
-            && steve_store::workflow_gate::session_blocker(tx, &session)?.is_none();
+            && self.workflow_blocker_in(tx, &session)?.is_none();
         let completion = Completion {
             outcome: Outcome::Failed,
             stop_reason: if reopen { "released" } else { "error" }.into(),
