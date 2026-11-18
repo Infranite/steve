@@ -106,6 +106,35 @@ try {
   assert.deepEqual(runs[1], { id: "ni_new_1", address: "tcNEXTtarget0123456789_-x" })
   await shot("next-started")
 
+  // A real browser must show all the transfer facts at phone width without truncating them
+  // in the Agent Trail's single-line status area.
+  await page.setViewportSize({ width: 390, height: 844 })
+  const current = installs[0]
+  current.transfer_route = "derp_observed"
+  current.steps = [
+    { kind: "probe", text: "连接目标机器", ended: 1, elapsed_ms: 40 },
+    { kind: "fetch", text: "获取并校验安装包", ended: 1, elapsed_ms: 94000 },
+    { kind: "send", text: "正在把安装包发到目标机器", elapsed_ms: 150000,
+      progress: { phase: "send", done: 51 * 2 ** 20, total: 60 * 2 ** 20, rate: 356515, eta_secs: 27 } },
+  ]
+  const transfer = page.locator("[data-install-transfer]")
+  await transfer.getByText("tailcat SSH · 观测到 DERP 中继", { exact: true }).waitFor()
+  for (const fact of ["51.0 MB / 60.0 MB", "348 KB/s", "预计还需 27 s 传完"]) {
+    const item = transfer.getByText(fact, { exact: true })
+    await item.waitFor()
+    assert.ok(await item.evaluate(el => el.scrollWidth <= el.clientWidth + 1), fact)
+  }
+  await shot("relayed-transfer")
+  current.transfer_route = "direct_observed"
+  const send = current.steps.at(-1)
+  Object.assign(send, { transfer_ms: 152000, unpack_ms: 400,
+    progress: { phase: "unpack", done: 60 * 2 ** 20, total: 60 * 2 ** 20, rate: null } })
+  await transfer.getByText("tailcat SSH · 观测到直连", { exact: true }).waitFor()
+  await transfer.getByText("传输：2:32", { exact: true }).waitFor()
+  await transfer.getByText("目标机解压：<1 秒", { exact: true }).waitFor()
+  assert.equal(await transfer.getByText(/预计还需/).count(), 0)
+  await shot("target-extraction")
+
   // Waiting attempts can also be cancelled, including after Back and a remount of the install step.
   installs = []
   await page.keyboard.press("Escape"); await dialog.waitFor({ state: "detached" })
