@@ -1,0 +1,289 @@
+{
+  "schema": 1,
+  "baseline": "3b69ca887",
+  "workspaces": {
+    "a": "default",
+    "b": "ws_87146038d33442b8"
+  },
+  "entities": {
+    "default": {
+      "kind": "workspace",
+      "ws": "default"
+    },
+    "ws_87146038d33442b8": {
+      "kind": "workspace",
+      "ws": "ws_87146038d33442b8"
+    },
+    "ST-1": {
+      "kind": "item",
+      "ws": "default"
+    },
+    "dec_314a64c4080c4438": {
+      "kind": "decision",
+      "ws": "default"
+    },
+    "dec_d8bb422c0dc04318": {
+      "kind": "decision",
+      "ws": "default"
+    },
+    "ses_1f68583bc0124bec": {
+      "kind": "session",
+      "ws": "default"
+    },
+    "tag_a46d14d2a88545a6": {
+      "kind": "tag",
+      "ws": "default"
+    },
+    "prj_813b81fb73e04962": {
+      "kind": "project",
+      "ws": "default"
+    },
+    "bot_62eff8dbeeb64eca": {
+      "kind": "bot",
+      "ws": "default"
+    },
+    "ct_a9fe4d6b15c84022": {
+      "kind": "party",
+      "ws": "default"
+    },
+    "acc_c7acd0e66cfe40f6": {
+      "kind": "account",
+      "ws": "default"
+    },
+    "mm_f173a703a8c94a51": {
+      "kind": "mm",
+      "ws": "default"
+    },
+    "per_33f4515f068c4f45": {
+      "kind": "persona",
+      "ws": "default"
+    },
+    "flw_3e7722d79c6c46b5": {
+      "kind": "flow",
+      "ws": "default"
+    },
+    "run_2a4d56d8c84f42f5": {
+      "kind": "run",
+      "ws": "default"
+    },
+    "msg_41f44c923d354a6b": {
+      "kind": "message",
+      "ws": "default"
+    },
+    "msg_14d28fcc28b14877": {
+      "kind": "message",
+      "ws": "default"
+    },
+    "GB-1": {
+      "kind": "item",
+      "ws": "ws_87146038d33442b8"
+    },
+    "dec_e231c5b6ec8341ee": {
+      "kind": "decision",
+      "ws": "ws_87146038d33442b8"
+    },
+    "ct_475fb7d1cb9b4d69": {
+      "kind": "party",
+      "ws": "ws_87146038d33442b8"
+    }
+  },
+  "steps": [
+    {
+      "name": "item.create",
+      "ws": "default",
+      "method": "POST",
+      "route": "/api/items",
+      "status": 200
+    },
+    {
+      "name": "item.title",
+      "ws": "default",
+      "method": "PATCH",
+      "route": "/api/items/ST-1",
+      "status": 200
+    },
+    {
+      "name": "item.comment",
+      "ws": "default",
+      "method": "POST",
+      "route": "/api/items/ST-1/supplement",
+      "status": 500
+    },
+    {
+      "name": "item.drop",
+      "ws": "default",
+      "method": "POST",
+      "route": "/api/items/ST-1/actions",
+      "status": 200
+    },
+    {
+      "name": "item.archive",
+      "ws": "default",
+      "method": "POST",
+      "route": "/api/items/ST-1/actions",
+      "status": 200
+    },
+    {
+      "name": "item.delete",
+      "ws": "default",
+      "method": "DELETE",
+      "route": "/api/items/ST-1",
+      "status": 200
+    },
+    {
+      "name": "tag.create",
+      "ws": "default",
+      "method": "POST",
+      "route": "/api/tags",
+      "status": 200
+    },
+    {
+      "name": "tag.rename",
+      "ws": "default",
+      "method": "PATCH",
+      "route": "/api/tags/tag_a46d14d2a88545a6",
+      "status": 200
+    },
+    {
+      "name": "tag.delete",
+      "ws": "default",
+      "method": "DELETE",
+      "route": "/api/tags/tag_a46d14d2a88545a6",
+      "status": 200
+    },
+    {
+      "name": "project.create",
+      "ws": "default",
+      "method": "POST",
+      "route": "/api/projects",
+      "status": 200
+    },
+    {
+      "name": "project.rename",
+      "ws": "default",
+      "method": "PATCH",
+      "route": "/api/projects/prj_813b81fb73e04962",
+      "status": 200
+    },
+    {
+      "name": "bot.create",
+      "ws": "default",
+      "method": "POST",
+      "route": "/api/bots",
+      "status": 200
+    },
+    {
+      "name": "bot.patch",
+      "ws": "default",
+      "method": "PATCH",
+      "route": "/api/bots/bot_62eff8dbeeb64eca",
+      "status": 200
+    },
+    {
+      "name": "bot.memory",
+      "ws": "default",
+      "method": "POST",
+      "route": "/api/bots/bot_62eff8dbeeb64eca/memories",
+      "status": 200
+    },
+    {
+      "name": "settings.patch",
+      "ws": "default",
+      "method": "PATCH",
+      "route": "/api/settings",
+      "status": 200
+    },
+    {
+      "name": "party.create",
+      "ws": "default",
+      "method": "POST",
+      "route": "/api/contacts",
+      "status": 200
+    },
+    {
+      "name": "account.record",
+      "ws": "default",
+      "method": "POST",
+      "route": "/api/accounts",
+      "status": 200
+    },
+    {
+      "name": "party.memory",
+      "ws": "default",
+      "method": "POST",
+      "route": "/api/parties/ct_a9fe4d6b15c84022/memories",
+      "status": 200
+    },
+    {
+      "name": "persona.create",
+      "ws": "default",
+      "method": "POST",
+      "route": "/api/personas",
+      "status": 200
+    },
+    {
+      "name": "flow.create",
+      "ws": "default",
+      "method": "POST",
+      "route": "/api/flows",
+      "status": 200
+    },
+    {
+      "name": "flow.rename",
+      "ws": "default",
+      "method": "PATCH",
+      "route": "/api/flows/flw_3e7722d79c6c46b5",
+      "status": 200
+    },
+    {
+      "name": "flow.run",
+      "ws": "default",
+      "method": "POST",
+      "route": "/api/flows/flw_3e7722d79c6c46b5/run",
+      "status": 200
+    },
+    {
+      "name": "yolo.project.off",
+      "ws": "default",
+      "method": "PUT",
+      "route": "/api/yolo/scopes/project/prj_813b81fb73e04962",
+      "status": 200
+    },
+    {
+      "name": "yolo.off",
+      "ws": "default",
+      "method": "PUT",
+      "route": "/api/yolo",
+      "status": 200
+    },
+    {
+      "name": "thread.say",
+      "ws": "default",
+      "method": "POST",
+      "route": "/api/thread",
+      "status": 200
+    },
+    {
+      "name": "b.item.create",
+      "ws": "ws_87146038d33442b8",
+      "method": "POST",
+      "route": "/api/items",
+      "status": 200
+    },
+    {
+      "name": "b.party.create",
+      "ws": "ws_87146038d33442b8",
+      "method": "POST",
+      "route": "/api/contacts",
+      "status": 200
+    },
+    {
+      "name": "b.workspace.rename",
+      "ws": "ws_87146038d33442b8",
+      "method": "PATCH",
+      "route": "/api/workspaces/ws_87146038d33442b8",
+      "status": 200
+    }
+  ],
+  "binary_sha256": "d61b2049d001e667450bd82901c43ab688b016b63e49c65464c68e76ac327fcf"
+}
