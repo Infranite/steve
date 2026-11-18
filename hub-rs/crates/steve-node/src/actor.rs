@@ -2588,10 +2588,14 @@ async fn open_harness(
         }
     }
     let hide_cli_creds = row.open.state.as_ref().is_some_and(|st| !st.import_owner);
-    // the owner's harness homes are hidden from anyone else's session, but for the Node's sign-in
-    // it uses: its credential files where they are, and what renewing it makes beside them
-    let login_store = match (&state, &declared_state) {
-        (Some(_), Some(sd)) if hide_cli_creds => node_login_store(inner, &harness, sd),
+    // Even reading Pi's linked auth.json takes a lock beside its real target. Allow the
+    // declared names where the Node keeps its sign-in, not the whole harness directory.
+    let login_store = match (&row.open.state, &state, &declared_state) {
+        (Some(_), Some(_), Some(sd))
+            if inner.confine.opens_principal_login_store(hide_cli_creds) =>
+        {
+            node_login_store(inner, &harness, sd)
+        }
         _ => None,
     };
     let (program, args) = if adapter_props.nested_sandbox {

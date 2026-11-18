@@ -190,6 +190,13 @@ impl Confine {
         }
     }
 
+    /// A principal uses linked credentials. Seatbelt can let the owner also renew them
+    /// in place without making the rest of the directory writable. Bubblewrap's store
+    /// mount masks other entries, so keep that mount for non-owner sessions only.
+    pub(crate) fn opens_principal_login_store(&self, hide_cli_creds: bool) -> bool {
+        hide_cli_creds || matches!(self.sandbox, Sandbox::Seatbelt(_))
+    }
+
     /// `program args` run in the sandbox; `readable`: directories it may read although they are
     /// under what is hidden (a command's own secret files).
     pub(crate) fn wrap(
@@ -1209,6 +1216,72 @@ mod tests {
             })
             .is_empty()
         );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn owner_seatbelt_can_lock_pis_linked_auth_but_not_write_other_files_in_the_store() {
+        if !steve_vault::harness::seatbelt_works() {
+            return;
+        }
+        let t = tempfile::tempdir().unwrap();
+        let root = t.path().canonicalize().unwrap();
+        let store = root.join("node-pi");
+        let state = root.join("principal-pi");
+        std::fs::create_dir(&store).unwrap();
+        std::fs::create_dir(&state).unwrap();
+        let auth = store.join("auth.json");
+        std::fs::write(&auth, "{}").unwrap();
+        let link = state.join("auth.json");
+        std::os::unix::fs::symlink(&auth, &link).unwrap();
+        let login = LoginStore {
+            dir: store.clone(),
+            names: steve_acp::adapters::spec("pi", None)
+                .properties
+                .state
+                .unwrap()
+                .login
+                .store_names(),
+        };
+        let c = Confine {
+            // The tempdir normally permits writes. Simulate a store outside it.
+            sandbox: Sandbox::Seatbelt(format!(
+                "(deny file-write* (subpath \"{}\"))\n",
+                store.display()
+            )),
+            files: true,
+            env: None,
+        };
+        let run = |script: String, grant: bool| {
+            let (p, args) = c.wrap_in_mode(
+                "/bin/sh".into(),
+                vec![
+                    "-c".into(),
+                    script.into(),
+                    "pi-lock".into(),
+                    link.as_os_str().into(),
+                    store.as_os_str().into(),
+                ],
+                &[],
+                std::slice::from_ref(&state),
+                Some(&state),
+                true,
+                false,
+                None,
+                (grant && c.opens_principal_login_store(false)).then_some(&login),
+            );
+            std::process::Command::new(p)
+                .args(args)
+                .output()
+                .unwrap()
+                .status
+                .success()
+        };
+        let lock = r#"target="$(readlink "$1")" && mkdir "$target.lock" &&
+            cat "$1" && rmdir "$target.lock""#;
+        assert!(!run(lock.into(), false));
+        assert!(run(lock.into(), true));
+        assert!(!run(r#"touch "$2/unrelated""#.into(), true));
     }
 
     #[cfg(target_os = "macos")]
