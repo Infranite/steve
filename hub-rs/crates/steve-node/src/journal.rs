@@ -857,6 +857,30 @@ impl Tx<'_> {
             .map_err(internal)
     }
 
+    /// Two workspaces may have been prepared at the same path or one inside another.
+    /// Within an overlap the filesystem alone cannot prove item ownership.
+    pub fn overlaps_other_workspace(
+        &self,
+        current: &WorkspaceId,
+        base: &std::path::Path,
+        file: &std::path::Path,
+    ) -> ApiResult<bool> {
+        let mut q = self
+            .c()
+            .prepare("SELECT path FROM workspaces WHERE id != ?")
+            .map_err(internal)?;
+        let mut rows = q.query([current.as_str()]).map_err(internal)?;
+        while let Some(row) = rows.next().map_err(internal)? {
+            let path: String = row.get(0).map_err(internal)?;
+            let path = std::path::Path::new(&path);
+            // A parent workspace cannot read inside this one either (the test is symmetric).
+            if file.starts_with(path) && path.starts_with(base) || base.starts_with(path) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     pub fn put_workspace(&self, w: &WorkspaceRow) -> ApiResult<()> {
         // Re-preparing the same resource creates a new directory generation. Its predecessors'
         // artifact grants must neither survive as authorization nor accumulate in the journal.

@@ -8,17 +8,17 @@ use steve_store::Session;
 use super::{Delivery, MAX_FILE, Service};
 use crate::wire::workspaces::{At, PlacementError, Subject, Workspaces};
 
-const CHUNK: u32 = 128 * 1024;
+pub(super) const CHUNK: u32 = 128 * 1024;
 
 #[derive(Default)]
-struct Receive {
-    bytes: Vec<u8>,
+pub(super) struct Receive {
+    pub(super) bytes: Vec<u8>,
     version: Option<Revision>,
     size: Option<u64>,
 }
 
 impl Receive {
-    fn push(&mut self, r: DeliveryChunk) -> Result<bool, String> {
+    pub(super) fn push(&mut self, r: DeliveryChunk) -> Result<bool, String> {
         let c = r.chunk;
         if r.size > MAX_FILE as u64
             || c.bytes.len() > CHUNK as usize
@@ -147,6 +147,7 @@ impl Service {
                                 execution,
                                 workspace,
                                 location: path.to_string(),
+                                reply: false,
                                 expected: None,
                                 offset: 0,
                                 max: CHUNK,
@@ -225,6 +226,9 @@ impl Service {
             .get(id, Some(&session.workspace_id))
             .map_err(|e| e.to_string())?
             .ok_or("delivery is not in this workspace")?;
+        if d.reply {
+            return Err("reply resources belong to their original session".into());
+        }
         // Accept old receipts without a selector, and the exact new page URL. Do not infer
         // an association from a path on an arbitrary origin, or swallow a wrong selector.
         if location != format!("{prefix}{}", d.id) && location != self.url(&d.id, &d.workspace_id) {
@@ -385,6 +389,7 @@ mod tests {
                         id: WorkspaceId::new("w").unwrap(),
                     },
                     location: "/actual/node/workspace/report.md".into(),
+                    reply: false,
                     expected: None,
                     offset: 0,
                     max: CHUNK,

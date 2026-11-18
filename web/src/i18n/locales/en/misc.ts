@@ -64,6 +64,14 @@ export default {
     moreRows_one: "Show {{count}} more row",
     moreRows_other: "Show {{count}} more rows",
     imageFailed: "Image failed to load. Check your connection or sign-in, then retry.",
+    fileUnavailable: {
+      legacy: "Not retained by Steve; ask for a new reply with this file.",
+      scope: "Not retained: outside the execution’s authorized files.",
+      missing: "Not retained: file missing, unreadable or changed during capture.",
+      offline: "Not retained: execution Node unavailable during capture.",
+      limit: "Not retained: capture size or time limit reached.",
+      type: "Not retained: unsupported or invalid file type.",
+    },
     imageUnavailable: "Image unavailable. Ask the assistant to regenerate or upload it.",
   },
   permission: {

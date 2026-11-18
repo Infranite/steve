@@ -51,12 +51,22 @@ struct Block {
 #[derive(Default)]
 pub(crate) struct Images {
     blocks: Vec<Block>,
+    ordinary: bool,
+    reply_calls: usize,
+    reply_spent: Duration,
     /// Successful captures are immutable receipts, shared by repeated references in this attempt.
     urls: HashMap<String, String>,
     tried: usize,
     capture_spent: Duration,
 }
 impl Images {
+    pub fn for_replies() -> Self {
+        Self {
+            ordinary: true,
+            ..Self::default()
+        }
+    }
+
     fn stream(&mut self, body: EventBody) -> Option<EventBody> {
         match &body {
             EventBody::MessageStarted {
@@ -90,10 +100,16 @@ impl Images {
                     }
                     // A literal ! may become ![ in the next chunk. Everything before a candidate
                     // keeps streaming. Once one appears, the suffix waits for complete Markdown.
-                    let end = b
-                        .text
-                        .find("![")
-                        .unwrap_or_else(|| b.text.len() - usize::from(b.text.ends_with('!')));
+                    let maybe = if self.ordinary {
+                        b.text.find('[').map(|at| {
+                            // Do not send the image bang before we know whether its reference changes.
+                            at - usize::from(at > 0 && b.text.as_bytes()[at - 1] == b'!')
+                        })
+                    } else {
+                        b.text.find("![")
+                    };
+                    let end =
+                        maybe.unwrap_or_else(|| b.text.len() - usize::from(b.text.ends_with('!')));
                     if end <= b.emitted {
                         return None;
                     }
@@ -153,6 +169,40 @@ impl Images {
             if !all && !b.completed {
                 continue;
             }
+            if self.ordinary
+                && b.emitted < b.text.len()
+                && b.text.len() <= MAX_REPLY_CAPTURE
+                && self.reply_calls < 8
+                && let Some(files) = &files
+            {
+                self.reply_calls += 1;
+                let start = std::time::Instant::now();
+                let remaining = Duration::from_secs(8).saturating_sub(self.reply_spent);
+                let result = tokio::time::timeout(
+                    remaining,
+                    files.capture_reply(ReplyCapture {
+                        execution: execution.clone(),
+                        markdown: b.text.clone(),
+                    }),
+                )
+                .await;
+                self.reply_spent += start.elapsed();
+                match result {
+                    // A newer Node can still send the old image attachments to an older Hub.
+                    Ok(Err(e)) if e.code == ErrorCode::Unsupported => {}
+                    result => {
+                        let text = match result {
+                            Ok(Ok(text)) if text.starts_with(&b.text[..b.emitted]) => text,
+                            _ => b.text.clone(),
+                        };
+                        append_tail(b, &text, &mut out);
+                        continue;
+                    }
+                }
+            } else if self.ordinary {
+                append_tail(b, &b.text, &mut out);
+                continue;
+            }
             let mut replacements = vec![];
             let mut captured: HashMap<String, String> = HashMap::new();
             for node in nodes(&b.text) {
@@ -207,12 +257,7 @@ impl Images {
                 for (range, replacement) in replacements.into_iter().rev() {
                     text.replace_range(range, &replacement);
                 }
-                out.push(EventBody::TextDelta {
-                    message: b.message.clone(),
-                    block: b.block.clone(),
-                    utf8_offset: b.emitted as u64,
-                    text: text[b.emitted..].to_string(),
-                });
+                append_tail(b, &text, &mut out);
             }
         }
         // These blocks have reached a stable Markdown boundary. Keep incomplete ones for the end.
@@ -234,17 +279,28 @@ impl Images {
 
     /// Cancellation can end a normal turn without an async capture. Preserve its text as-is.
     pub fn drain_original(&mut self) -> Vec<EventBody> {
-        self.blocks
-            .drain(..)
-            .filter_map(|b| {
-                (b.emitted < b.text.len()).then(|| EventBody::TextDelta {
-                    message: b.message,
-                    block: b.block,
-                    utf8_offset: b.emitted as u64,
-                    text: b.text[b.emitted..].to_string(),
-                })
-            })
-            .collect()
+        let mut out = vec![];
+        for b in self.blocks.drain(..) {
+            append_tail(&b, &b.text, &mut out);
+        }
+        out
+    }
+}
+
+fn append_tail(b: &Block, text: &str, out: &mut Vec<EventBody>) {
+    let mut at = b.emitted;
+    while at < text.len() {
+        let mut end = (at + 4000).min(text.len());
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        out.push(EventBody::TextDelta {
+            message: b.message.clone(),
+            block: b.block.clone(),
+            utf8_offset: at as u64,
+            text: text[at..end].to_string(),
+        });
+        at = end;
     }
 }
 
@@ -409,6 +465,12 @@ fn invalid() -> ApiError {
     ApiError::new(ErrorCode::Denied, "inline image unavailable")
 }
 
+pub(crate) fn protected_path(rel: &Path, path: &Path, protected: &[PathBuf]) -> bool {
+    sensitive(rel)
+        || path.components().any(|c| matches!(c, Component::Normal(c) if matches!(c.to_string_lossy().to_ascii_lowercase().as_str(), ".ssh" | ".aws" | ".gnupg" | ".codex" | ".claude" | ".config" | ".kube" | ".git" | "keychains")))
+        || protected.iter().any(|p| path.starts_with(p) || path.to_string_lossy().starts_with(p.to_string_lossy().as_ref()))
+}
+
 fn sensitive(rel: &Path) -> bool {
     rel.components().any(|c| {
         let Component::Normal(c) = c else {
@@ -452,13 +514,7 @@ fn read(scope: &Scope, source: &str) -> ApiResult<Vec<u8>> {
     // Translate only an alias of an already captured installation root. Never resolve a file
     // supplied by the assistant, which could be a link into another workspace or a secret.
     let path = root.path.join(rel);
-    if sensitive(rel)
-        || path.components().any(|c| matches!(c, Component::Normal(c) if matches!(c.to_string_lossy().to_ascii_lowercase().as_str(), ".ssh" | ".aws" | ".gnupg" | ".codex" | ".claude" | ".config" | ".kube" | ".git" | "keychains")))
-        || scope
-            .protected
-            .iter()
-            .any(|p| path.starts_with(p) || path.to_string_lossy().starts_with(p.to_string_lossy().as_ref()))
-    {
+    if protected_path(rel, &path, &scope.protected) {
         return Err(invalid());
     }
     let rel = RelPath::new(rel.to_str().ok_or_else(invalid)?).map_err(|_| invalid())?;

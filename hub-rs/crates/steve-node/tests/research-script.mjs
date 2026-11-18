@@ -14,6 +14,7 @@
 //   @touch <path>        creates the file
 //   @image <base64>      creates a TMPDIR PNG and emits two references
 //   @imagecwd <base64>   the same, inside the working directory
+//   @replyfiles <base64> ordinary report link with a report image and an inline image
 //   @urlimage <base64>   emits https and www GFM autolink literals, not image nodes
 //   @semanticimage <base64> emits inline/reference/nested alt, titles and code examples
 //   @cat <dir> <out>     copies the first `*.txt` under <dir>/*/ to <out>
@@ -26,7 +27,7 @@
 //   @failon <model> <message>  the same, only on that model
 //   @stop <reason>       the turn ends with that stopReason
 // A session/load answers as the session it loads.
-import { appendFileSync, copyFileSync, existsSync, mkdtempSync, readdirSync, renameSync, writeFileSync } from "node:fs"
+import { appendFileSync, copyFileSync, existsSync, mkdtempSync, readdirSync, renameSync, symlinkSync, writeFileSync } from "node:fs"
 import { spawn } from "node:child_process"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
@@ -78,6 +79,17 @@ async function run(id, prompt) {
     else if (cmd === "running") tool(a[0], a.slice(1).join(" "), false, "in_progress")
     else if (cmd === "sleep") await sleep(Number(a[0]))
     else if (cmd === "touch") writeFileSync(a[0], "")
+    else if (cmd === "replyfiles") {
+      const dir = mkdtempSync(join(process.cwd(), "reply-files-"))
+      const png = join(dir, "figure.png"), report = join(dir, "my report.md")
+      writeFileSync(png, Buffer.from(rest, "base64"))
+      writeFileSync(report, "# Snapshot report\n\n![Figure in report](figure.png)\n\n![Missing figure](missing.png)\n")
+      symlinkSync(png, join(dir, "symlink.png"))
+      writeFileSync(join(dir, "credentials.txt"), "fixture only")
+      put("replyfiles", dir)
+      say("Preview [Report][r] and ")
+      say(`![Inline figure](${png})\n\n[Symlink](${join(dir, "symlink.png")}) · [Protected](${join(dir, "credentials.txt")}) · [Outside](/not-in-this-workspace.txt)\n\n[r]: <file://${report}>`)
+    }
     else if (["image", "imagecwd", "urlimage", "semanticimage"].includes(cmd)) {
       const source = join(mkdtempSync(join(cmd === "imagecwd" ? process.cwd() : tmpdir(), "inline-image-")), "qr.png")
       writeFileSync(source, Buffer.from(rest, "base64"))

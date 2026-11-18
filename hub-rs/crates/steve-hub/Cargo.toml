@@ -13,6 +13,7 @@ name = "steve-hub"
 path = "src/main.rs"
 
 [dependencies]
+markdown = "=1.0.0"
 steve-install = { path = "../steve-install" }
 steve-store = { path = "../steve-store" }
 steve-auth = { path = "../steve-auth" }
