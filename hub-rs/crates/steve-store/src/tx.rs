@@ -63,6 +63,7 @@ pub(crate) enum WriteTx<'a> {
 
 impl<'a> WriteTx<'a> {
     pub(crate) fn begin(c: &'a Connection) -> rusqlite::Result<Self> {
+        metrics::counter!("steve_store_transactions_total").increment(1);
         if c.is_autocommit() {
             Ok(Self::Root(crate::immediate(c)?))
         } else {
@@ -342,6 +343,7 @@ impl Store {
         })
     }
 
+    #[track_caller]
     fn atomic_with<T, E: From<StoreError>>(
         &self,
         f: impl FnOnce(&Connection) -> Result<T, E>,
@@ -427,6 +429,7 @@ impl Store {
     /// deadlocking, see uncommitted writes immediately, and isolate nested scopes with SQLite
     /// `SAVEPOINT`s. `ChangeEvent`s, diagnostics, and outbox notifications are held back until the
     /// outermost transaction commits, and discarded on error or panic.
+    #[track_caller]
     pub fn atomic<T, E: From<StoreError>>(&self, f: impl FnOnce() -> Result<T, E>) -> Result<T, E> {
         self.atomic_with(|_| f())
     }
@@ -435,6 +438,7 @@ impl Store {
     ///
     /// Re-entrant with [`Store::atomic`] and repository helpers; `f` must still avoid blocking on
     /// external network or subprocess I/O while holding the write lock.
+    #[track_caller]
     pub fn transaction<T, E: From<StoreError>>(
         &self,
         f: impl FnOnce(&Tx) -> Result<T, E>,

@@ -246,11 +246,18 @@ impl Store {
         self.emit_event(e)
     }
 
-    pub(crate) fn lock(&self) -> MutexGuard<'_, Connection> {
+    #[track_caller]
+    pub(crate) fn lock(&self) -> WriteGuard<'_> {
+        let timing = LockTiming::start("store", std::panic::Location::caller());
         // A panic mid-write leaves SQLite consistent (the transaction rolls back), so poisoning is ignored.
-        self.inner.writer.lock().unwrap_or_else(|e| e.into_inner())
+        let conn = self.inner.writer.lock().unwrap_or_else(|e| e.into_inner());
+        WriteGuard {
+            conn,
+            timing: timing.map(LockTiming::acquired),
+        }
     }
 
+    #[track_caller]
     pub(crate) fn write<T>(&self, f: impl FnOnce(&W) -> Result<T>) -> Result<T> {
         if let Some(c) = self.active_conn() {
             return f(&W { c, store: self });
@@ -269,6 +276,7 @@ impl Store {
 
     /// Refreshes the query planner's statistics where they went stale (`PRAGMA optimize`, bounded), on
     /// the write connection. Cheap when nothing changed; meant for an hourly housekeeping pass.
+    #[track_caller]
     pub fn optimize(&self) -> Result<()> {
         if let Some(c) = self.active_conn() {
             return Ok(db::optimize(c, false)?);
@@ -278,6 +286,7 @@ impl Store {
 
     /// Runs `f` on the write connection under the write lock, for one-off maintenance and tests.
     /// Prefer a repository method; this exists so callers never need a second connection.
+    #[track_caller]
     pub fn with_conn<T>(&self, f: impl FnOnce(&Connection) -> Result<T>) -> Result<T> {
         if let Some(c) = self.active_conn() {
             return f(c);
@@ -301,4 +310,90 @@ pub(crate) fn read_snapshot<T>(
     let out = f(&tx)?;
     tx.commit()?;
     Ok(out)
+}
+
+// Shared lock-boundary mechanics; recorder installation belongs to the embedding application.
+pub mod instrumentation {
+    /// Whether the Hub installed its in-memory recorder. Off: one relaxed load, no clock or TLS.
+    static LOCK_METRICS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+    pub fn enable_lock_metrics() {
+        LOCK_METRICS.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Shared by the store and core lock boundaries. Handles are registered once per source location
+    /// and thread. Only that cold registration formats the bounded source label; repeated acquisitions
+    /// clone handles without allocating strings or taking another application lock.
+    pub struct LockTiming {
+        since: std::time::Instant,
+        wait: metrics::Histogram,
+        hold: metrics::Histogram,
+        count: metrics::Counter,
+    }
+
+    impl LockTiming {
+        pub fn start(
+            kind: &'static str,
+            caller: &'static std::panic::Location<'static>,
+        ) -> Option<Self> {
+            if !LOCK_METRICS.load(std::sync::atomic::Ordering::Relaxed) {
+                return None;
+            }
+            type Handles = (metrics::Histogram, metrics::Histogram, metrics::Counter);
+            thread_local! {
+                static HANDLES: std::cell::RefCell<std::collections::HashMap<
+                    (&'static str, &'static std::panic::Location<'static>), Handles
+                >> = std::cell::RefCell::new(std::collections::HashMap::new());
+            }
+            let (wait, hold, count) = HANDLES.with(|cache| {
+            cache.borrow_mut().entry((kind, caller)).or_insert_with(|| {
+                let site = format!("{}:{}", caller.file(), caller.line());
+                (
+                    metrics::histogram!("steve_lock_wait_seconds", "lock" => kind, "caller" => site.clone()),
+                    metrics::histogram!("steve_lock_hold_seconds", "lock" => kind, "caller" => site.clone()),
+                    metrics::counter!("steve_lock_acquisitions_total", "lock" => kind, "caller" => site),
+                )
+            }).clone()
+        });
+            Some(Self {
+                since: std::time::Instant::now(),
+                wait,
+                hold,
+                count,
+            })
+        }
+
+        pub fn acquired(mut self) -> Self {
+            self.wait.record(self.since.elapsed().as_secs_f64());
+            self.count.increment(1);
+            self.since = std::time::Instant::now();
+            self
+        }
+    }
+
+    impl Drop for LockTiming {
+        fn drop(&mut self) {
+            self.hold.record(self.since.elapsed().as_secs_f64());
+        }
+    }
+}
+
+use instrumentation::LockTiming;
+
+pub(crate) struct WriteGuard<'a> {
+    conn: MutexGuard<'a, Connection>,
+    timing: Option<LockTiming>,
+}
+
+impl std::ops::Deref for WriteGuard<'_> {
+    type Target = Connection;
+    fn deref(&self) -> &Self::Target {
+        &self.conn
+    }
+}
+
+impl Drop for WriteGuard<'_> {
+    fn drop(&mut self) {
+        drop(self.timing.take());
+    }
 }

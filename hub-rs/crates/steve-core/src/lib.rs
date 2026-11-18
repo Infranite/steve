@@ -183,6 +183,7 @@ pub(crate) struct State {
 pub(crate) struct Tx<'a> {
     c: &'a Core,
     st: MutexGuard<'a, State>,
+    _timing: Option<steve_store::instrumentation::LockTiming>,
 }
 
 impl Core {
@@ -294,10 +295,17 @@ impl Core {
     }
 
     /// Enter the critical section.
+    #[track_caller]
     pub(crate) fn tx(&self) -> Tx<'_> {
+        let timing =
+            steve_store::instrumentation::LockTiming::start("core", std::panic::Location::caller());
         let mut st = self.0.state.lock().unwrap_or_else(|e| e.into_inner());
         st.tx_seq += 1;
-        Tx { c: self, st }
+        Tx {
+            c: self,
+            st,
+            _timing: timing.map(steve_store::instrumentation::LockTiming::acquired),
+        }
     }
 }
 
@@ -331,5 +339,87 @@ impl Tx<'_> {
                 false
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod lock_metrics_tests {
+    use super::*;
+
+    struct Sink(Arc<Mutex<Vec<(metrics::Key, f64)>>>);
+    struct Sample(metrics::Key, Arc<Mutex<Vec<(metrics::Key, f64)>>>);
+    impl metrics::HistogramFn for Sample {
+        fn record(&self, value: f64) {
+            self.1.lock().unwrap().push((self.0.clone(), value));
+        }
+    }
+    impl metrics::Recorder for Sink {
+        fn describe_counter(
+            &self,
+            _: metrics::KeyName,
+            _: Option<metrics::Unit>,
+            _: metrics::SharedString,
+        ) {
+        }
+        fn describe_gauge(
+            &self,
+            _: metrics::KeyName,
+            _: Option<metrics::Unit>,
+            _: metrics::SharedString,
+        ) {
+        }
+        fn describe_histogram(
+            &self,
+            _: metrics::KeyName,
+            _: Option<metrics::Unit>,
+            _: metrics::SharedString,
+        ) {
+        }
+        fn register_counter(
+            &self,
+            _: &metrics::Key,
+            _: &metrics::Metadata<'_>,
+        ) -> metrics::Counter {
+            metrics::Counter::noop()
+        }
+        fn register_gauge(&self, _: &metrics::Key, _: &metrics::Metadata<'_>) -> metrics::Gauge {
+            metrics::Gauge::noop()
+        }
+        fn register_histogram(
+            &self,
+            key: &metrics::Key,
+            _: &metrics::Metadata<'_>,
+        ) -> metrics::Histogram {
+            metrics::Histogram::from_arc(Arc::new(Sample(key.clone(), self.0.clone())))
+        }
+    }
+
+    #[test]
+    fn core_lock_records_wait_then_hold_on_release_at_the_external_callsite() {
+        let core = crate::testkit::Kit::new();
+        let sink = Sink(Arc::new(Mutex::new(vec![])));
+        steve_store::instrumentation::enable_lock_metrics();
+        metrics::with_local_recorder(&sink, || {
+            let line = line!() + 1;
+            let tx = core.core.tx();
+            {
+                let samples = sink.0.lock().unwrap();
+                assert_eq!(samples.len(), 1);
+                assert_eq!(samples[0].0.name(), "steve_lock_wait_seconds");
+            }
+            drop(tx);
+            let samples = sink.0.lock().unwrap();
+            assert_eq!(samples.len(), 2);
+            assert_eq!(samples[1].0.name(), "steve_lock_hold_seconds");
+            assert!(samples.iter().all(|(key, value)| {
+                *value >= 0.0
+                    && key.labels().any(|label| {
+                        label.key() == "caller" && label.value() == format!("{}:{line}", file!())
+                    })
+                    && key
+                        .labels()
+                        .any(|label| label.key() == "lock" && label.value() == "core")
+            }));
+        });
     }
 }
