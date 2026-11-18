@@ -336,6 +336,22 @@ export default {
       ownerSub: "Your name",
     },
   },
+  reply: {
+    draft: "Reply to send",
+    send: "Approve and send",
+    edit: "Edit reply",
+    sendEdited: "Approve and send edited reply",
+    noReply: "Don't reply",
+    noDraft: "No formal reply draft yet",
+    draftChanged: "The formal draft changed. Your edits are preserved. Compare the latest draft and choose which text to use before approving.",
+    latestDraft: "Latest formal draft",
+    useLatest: "Use latest draft",
+    keepEdits: "I've compared; keep my edits",
+    reviewNote: "Review the chat, sending identity and reply. Approval queues it for sending; check the channel record for the outcome.",
+    contextUnavailable: "The original message, target chat or sending identity is unavailable. Open the channel to check.",
+    submitFailed: "Submission failed; sending is unconfirmed. Check the error and retry. Your edits are preserved.",
+    queued: "Approved, waiting for the channel to send. Check the channel record for the actual outcome.",
+  },
   out: {
     kind: {
       group: "Group",

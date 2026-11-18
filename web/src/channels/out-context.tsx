@@ -14,9 +14,10 @@ export function OutContext({ id, context }: { id?: string; context?: ROutContext
   const t = useT()
   const [c, setC] = useState<ROutContext | null>(null)
   const [open, setOpen] = useState(false)
-  useEffect(() => { if (!id || context !== undefined) return; let live = true; setC(null); outContext(id).then((x) => live && setC(x ?? null), () => live && setC(null)); return () => { live = false } }, [id, context])
-  const shown = context === undefined ? c : context
-  if (!shown) return null
+  const [loaded, setLoaded] = useState<string | undefined>()
+  useEffect(() => { if (!id || context !== undefined) return; let live = true; setC(null); setLoaded(undefined); setOpen(false); outContext(id).then((x) => { if (live) { setC(x ?? null); setLoaded(id) } }, () => { if (live) { setC(null); setLoaded(id) } }); return () => { live = false } }, [id, context])
+  const shown = context === undefined ? (loaded === id ? c : null) : context
+  if (!shown) return context !== undefined ? null : <div role="status" className="type-footnote text-muted-foreground" data-out-context-state={id && loaded !== id ? "loading" : "unavailable"}>{t(id && loaded !== id ? "common:state.loading" : "channels:reply.contextUnavailable")}</div>
   const who = shown.as_you ? t("channels:out.asYou") : shown.persona ? t("channels:out.asPersona", { persona: shown.persona }) : t("channels:out.asBot")
   const kind = shown.space.kind
   return (

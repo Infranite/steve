@@ -78,6 +78,30 @@ pub(crate) fn conv_operation(m: &steve_store::Message, origin: &str, purpose: &s
     format!("conv:{}:{origin}:{purpose}", m.id)
 }
 
+/// Claim an ineligible answer together with its handoff so cold concurrent replays cannot reopen it.
+fn claim_not_sent(
+    tx: &steve_store::Tx,
+    m: &steve_store::Message,
+    code: &str,
+    reason: &str,
+) -> ChannelResult<bool> {
+    let n = tx.execute(
+        "UPDATE messages SET meta = json_set(meta, '$.chan_out', json(?))
+          WHERE id = ? AND workspace_id = ? AND json_type(meta, '$.chan_out') IS NULL",
+        params![
+            json!({"message": null, "status": "skipped", "decision": null,
+            "stage": "eligibility", "code": code, "reason": reason})
+            .to_string(),
+            m.id,
+            m.workspace_id
+        ],
+    )?;
+    if n == 1 {
+        tx.publish(steve_store::ChangeEvent::Message { id: m.id.clone() });
+    }
+    Ok(n == 1)
+}
+
 /// The short note an IM space gets when Steve could not answer (the details are in the conversation).
 pub fn failure_note(owner: &str) -> String {
     FAILURE_NOTE.replacen("{}", owner, 1)
@@ -207,6 +231,19 @@ impl Composed {
     /// The composer's answer kept on turn `m`, if any.
     pub fn of(m: &steve_store::Message) -> Option<Self> {
         let v = m.meta.get(CHAN_GEN)?;
+        // Generation has defaults for older outbound records. A conversation's send eligibility
+        // must not inherit those defaults: absent classification / disclosure evidence is unknown.
+        for key in [
+            "outcome",
+            "needs_approval",
+            "why",
+            "model",
+            "hits",
+            "anchors",
+            "text",
+        ] {
+            v.get(key)?;
+        }
         serde_json::from_value(v.clone()).ok()
     }
 
@@ -626,7 +663,13 @@ impl Channels {
             }
             return Ok(None);
         }
-        if space_of_conv(&m.space).is_none() {
+        if space_of_conv(&m.space).is_none()
+            || !self
+                .store()
+                .messages()
+                .get(origin)?
+                .is_some_and(|o| o.workspace_id == ws && o.space == m.space && o.author == "me")
+        {
             return Ok(None);
         }
         if let Some(space) = space_of_conv(&m.space)
@@ -637,6 +680,9 @@ impl Channels {
         let Some((chan, plan, composed)) = self.turn_source(ws, origin)? else {
             return Ok(None);
         };
+        if m.space != conv_space(&plan.space_id) {
+            return Ok(None);
+        }
         let command = chan["command"] == true;
         if m.meta["host_reply"]["status"] == "ineligible" {
             self.react_finish(&plan.message_id, Finish::Clear).await;
@@ -649,6 +695,23 @@ impl Channels {
         // the composer's answer to this turn, when this message is it
         let composed = composed.filter(|c| c.says(&m.text));
         let system = system_text(&m.meta);
+        if !system && composed.is_none() && !self.fixed_or_routed_answer(&m, origin)? {
+            // Never turn an unknown legacy question, skip or pending promise into a Bot reply.
+            // The handoff only contains the inbound message, not this unclassified private text.
+            self.store().transaction(|tx| -> ChannelResult<()> {
+                if claim_not_sent(
+                    tx,
+                    &m,
+                    "unverified_reply",
+                    "缺少本回合完整的分类或披露依据，请根据原消息重新起草",
+                )? {
+                    crate::respond::open_handoff(tx, &plan)?;
+                }
+                Ok(())
+            })?;
+            self.react_finish(&plan.message_id, Finish::Clear).await;
+            return Ok(None);
+        }
         // only a reply is said in the space: a question to you goes to your inbox, a skip nowhere
         if !system
             && let Some(c) = composed
@@ -665,6 +728,14 @@ impl Channels {
             let asks = c.generation.outcome == Outcome::AskOwner;
             self.store().transaction(|tx| -> ChannelResult<()> {
                 use crate::respond::{TRAIL_COMPOSER, note_message_event, trail};
+                if !claim_not_sent(
+                    tx,
+                    &m,
+                    c.generation.outcome.code(),
+                    if why.trim().is_empty() { &q } else { &why },
+                )? {
+                    return Ok(());
+                }
                 if asks {
                     let d = crate::decide::open_card(
                         tx,
@@ -685,11 +756,6 @@ impl Channels {
                     note_message_event(tx, &plan.message_id, "recorded", q.trim(), &reason, None)
                 }
             })?;
-            self.mark_not_sent(
-                &m,
-                c.generation.outcome.code(),
-                if why.trim().is_empty() { &q } else { &why },
-            )?;
             return Ok(None);
         }
         if m.meta.get("stopped").is_some_and(|v| v == true) {
@@ -844,6 +910,24 @@ impl Channels {
         Ok(Some(d))
     }
 
+    /// Only fixed receipts are reconstructed without a composer. Router questions have a durable
+    /// binding to this exact answer; a metadata flag or a route kind alone is not evidence.
+    fn fixed_or_routed_answer(
+        &self,
+        m: &steve_store::Message,
+        origin: &str,
+    ) -> ChannelResult<bool> {
+        self.store().reader(|c| -> ChannelResult<bool> {
+            if let Some(item) = &m.item_id {
+                return Ok(c.query_row("SELECT EXISTS(SELECT 1 FROM items WHERE id = ? AND workspace_id = ?)", params![item, m.workspace_id], |r| r.get(0))?);
+            }
+            let kind = if m.meta["ask"]["options"].is_array() { "ask" }
+                else if m.meta["suggest"]["choices"].is_array() { "suggest" }
+                else { return Ok(false) };
+            Ok(c.query_row("SELECT EXISTS(SELECT 1 FROM route_log WHERE workspace_id = ? AND message_id = ? AND reply_id = ? AND kind = ?)", params![m.workspace_id, origin, m.id, kind], |r| r.get(0))?)
+        })
+    }
+
     /// No outbound message exists: do not confuse generation or an eligibility refusal with a
     /// failed provider send, and do not retry a historical unclassified result automatically.
     fn mark_not_sent(
@@ -905,7 +989,7 @@ impl Channels {
         let said = !system_text(&m.meta)
             && match &composed {
                 Some(c) => c.generation.outcome == Outcome::Reply,
-                None => !as_you,
+                None => !as_you && self.fixed_or_routed_answer(m, origin)?,
             };
         let source = turn.and_then(|o| o.meta["chan"]["message"].as_str().map(str::to_string));
         if let Some(cm) = &source {

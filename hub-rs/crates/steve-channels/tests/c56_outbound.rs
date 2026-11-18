@@ -545,7 +545,7 @@ async fn your_own_account_always_drafts_and_sends_the_edited_text_after_the_dela
     );
     assert_eq!(q[0], "以你本人发到「Steve 开发群」");
     assert_eq!(q[1], "先看部署日志，再按回滚手册处理。");
-    assert_eq!(q[2], json!(r#"["yes","no"]"#));
+    assert_eq!(q[2], json!(r#"["yes","no","to_item"]"#));
 
     // you edit and approve: it waits out the delay, then the edited text goes out
     decide(&h, &d, "yes", "周四可以，我下午确认。").expect("approve");
@@ -930,7 +930,11 @@ async fn the_check_model_sees_the_whole_reply_and_its_failure_is_not_a_pass() {
         "{q0}"
     );
     assert!(!q0.contains("可能泄露"), "{q0}");
-    assert_eq!(q[1], json!(r#"["yes","no"]"#), "nothing to rewrite");
+    assert_eq!(
+        q[1],
+        json!(r#"["yes","no","to_item"]"#),
+        "nothing to rewrite"
+    );
     // the model finds a source reference
     h.env.gateway.script(
         CHECK_HEAD,
@@ -2915,12 +2919,9 @@ async fn a_reply_meant_for_you_becomes_a_question_in_your_inbox() {
             && question.contains(steve_channels::decide::Reason::MeantForOwner.label()),
         "{question}"
     );
-    // what it wrote is the card's candidate, never its question
+    // The private meta-question must never become an outward candidate draft.
     assert!(!question.contains("你是想让我"), "{question}");
-    assert!(
-        q[2].as_str().unwrap_or_default().contains("你是想让我"),
-        "{q:?}"
-    );
+    assert!(q[2].as_str().unwrap_or_default().is_empty(), "{q:?}");
     nothing_sent(&h);
     let drafts = row(
         &h,
@@ -3617,7 +3618,7 @@ async fn a_draft_is_not_rewritten_until_you_ask() {
         &[&decision_id],
     );
     assert_eq!(q[0], "Acme 的预算有 30 万，下周开会再细聊。");
-    assert_eq!(q[1], json!(r#"["yes","no","rewrite"]"#));
+    assert_eq!(q[1], json!(r#"["yes","no","rewrite","to_item"]"#));
 
     // undone before the queue came by: the card is back, nothing is rewritten
     decide(&h, &decision_id, "rewrite", "").expect("rewrite");
@@ -3652,7 +3653,7 @@ async fn a_draft_is_not_rewritten_until_you_ask() {
     assert_eq!(q[1], "下周开会再细聊。");
     assert_eq!(
         q[2],
-        json!(r#"["yes","no"]"#),
+        json!(r#"["yes","no","to_item"]"#),
         "it passed: no rewrite offered"
     );
     assert_eq!(q[3], "open");
@@ -3724,7 +3725,7 @@ async fn under_yolo_a_flagged_draft_is_rewritten_first() {
         &[&decision_id],
     );
     assert_eq!(q[0], "下周开会再细聊。");
-    assert_eq!(q[1], json!(r#"["yes","no"]"#));
+    assert_eq!(q[1], json!(r#"["yes","no","to_item"]"#));
     assert_eq!(q[2], "以你本人发到「Steve 开发群」（已改写）");
     assert_eq!(text_of(&h, &message_id), "下周开会再细聊。");
     let b = h
@@ -6675,7 +6676,7 @@ async fn a_check_that_did_not_finish_is_not_a_leak() {
         q[0],
         "以你本人发到「Steve 开发群」（检查没跑完：出错：upstream timeout；试过 tier:fast → tier:smart）"
     );
-    assert_eq!(q[1], json!(r#"["yes","no"]"#));
+    assert_eq!(q[1], json!(r#"["yes","no","to_item"]"#));
     assert_eq!(q[2], "open");
     // YOLO never approves it; you can
     let yolo =
@@ -7097,4 +7098,164 @@ async fn recovery_model_rewrites_preserve_delete_only_and_human_review() {
         }
         nothing_sent(&h);
     }
+}
+
+// #291: review actions share the existing send and recovery gates.
+#[tokio::test(flavor = "multi_thread")]
+async fn edited_approval_undo_reopens_the_same_formal_draft() {
+    let h = setup().await;
+    checks_pass(&h);
+    let (m, d) = own_draft(&h, "review-edit", "你是谁啊", "我是值班助手。", composed()).await;
+    let changed = "我是项目答疑助手。\n这是审核后的正文。";
+    decide(&h, &d, "yes", changed).unwrap();
+    undo(&h, &d).unwrap();
+    assert_eq!(status(&h, &m), "draft");
+    assert_eq!(
+        row(&h, "SELECT draft FROM decisions WHERE id=?", &[&d])[0],
+        json!(changed)
+    );
+    decide(&h, &d, "yes", "").unwrap();
+    h.env.clock.advance(11_000);
+    h.outbox.send_due(&h.ch).await;
+    assert_eq!(status(&h, &m), "sent");
+    assert!(sent(&h).iter().any(|(_, text, _)| text.contains(changed)));
+    assert!(decide(&h, &d, "yes", "obsolete draft").is_err());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn approve_to_item_discards_the_draft_and_survives_a_cold_queue_without_sending() {
+    let h = setup().await;
+    checks_pass(&h);
+    let (m, d) = own_draft(
+        &h,
+        "review-item",
+        "请整理本周问题",
+        "这是不能同时发出的正文。",
+        composed(),
+    )
+    .await;
+    assert!(
+        row(&h, "SELECT options FROM decisions WHERE id=?", &[&d])[0]
+            .as_str()
+            .unwrap()
+            .contains("to_item")
+    );
+    let result = decide(&h, &d, "to_item", "").unwrap();
+    assert!(result.result["source_message"].is_string());
+    assert_eq!(status(&h, &m), "discarded");
+    assert!(undo(&h, &d).is_err());
+    let link = OutLink::new();
+    link.bind_clock(h.env.clock.clone());
+    let cold = Outbox::new(link);
+    h.env.clock.advance(11_000);
+    cold.send_due(&h.ch).await;
+    let converted = row(
+        &h,
+        "SELECT json_extract(result,'$.item') FROM decisions WHERE id=?",
+        &[&d],
+    );
+    assert!(converted[0].is_string(), "{converted:?}");
+    cold.send_due(&h.ch).await;
+    assert_eq!(
+        row(
+            &h,
+            "SELECT json_extract(result,'$.item') FROM decisions WHERE id=?",
+            &[&d]
+        ),
+        converted
+    );
+    assert!(
+        sent(&h).is_empty(),
+        "neither original body nor acknowledgement is sent"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn bot_outbox_never_sends_nonreply_generation_even_when_caller_allows_it() {
+    let h = setup().await;
+    let plan = recorded(
+        &h,
+        &h.oncall,
+        "C_OPS",
+        "not-reply",
+        "ulilei",
+        "请确认是否承诺",
+    )
+    .await;
+    for outcome in [
+        steve_channels::deliver::Outcome::AskOwner,
+        steve_channels::deliver::Outcome::Skip,
+        steve_channels::deliver::Outcome::NeedContext,
+    ] {
+        let mut req = out(
+            &plan,
+            "你确认承诺了吗？",
+            Auth::Rule {
+                source: plan.message_id.clone(),
+                act: Act::Reply,
+            },
+            Some(Generation {
+                outcome,
+                ..Generation::default()
+            }),
+        );
+        req.approve = false;
+        assert_eq!(
+            h.outbox.deliver(&h.ch, &req).await.unwrap(),
+            Delivered::Skipped
+        );
+    }
+    assert!(sent(&h).is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_callers_false_flag_cannot_erase_the_composers_approval_requirement() {
+    let h = setup().await;
+    checks_pass(&h);
+    let plan = recorded(
+        &h,
+        &h.oncall,
+        "C_OPS",
+        "approval-required",
+        "ulilei",
+        "请确认是否承诺",
+    )
+    .await;
+    set_rules(
+        &h,
+        &h.oncall,
+        json!([{"when":{"kind":"all"},"act":"reply"}]),
+    );
+    let control = out(
+        &plan,
+        "可公开的普通答复。",
+        rule(&plan),
+        Some(Generation::default()),
+    );
+    assert!(matches!(
+        h.outbox.deliver(&h.ch, &control).await.unwrap(),
+        Delivered::Sent { .. }
+    ));
+    for commitment in [false, true] {
+        let g = Generation {
+            needs_approval: !commitment,
+            needs_commitment: commitment,
+            ..Generation::default()
+        };
+        let mut req = out(
+            &plan,
+            "我会按已确认的计划交付。",
+            Auth::Rule {
+                source: plan.message_id.clone(),
+                act: Act::Reply,
+            },
+            Some(g),
+        );
+        req.approve = false;
+        assert!(matches!(
+            h.outbox.deliver(&h.ch, &req).await.unwrap(),
+            Delivered::Drafted { .. }
+        ));
+    }
+    assert_eq!(sent(&h).len(), 1, "only the unflagged control may send");
 }

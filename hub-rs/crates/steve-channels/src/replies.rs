@@ -273,6 +273,7 @@ impl Replies {
         ch: &Channels,
         plan: &Plan,
         mode: ItemMode,
+        acknowledge: bool,
     ) -> ChannelResult<Option<Acted>> {
         let Some(flow) = ch.flow() else {
             return Ok(None);
@@ -352,6 +353,13 @@ impl Replies {
             messages::event(tx, &ws, &plan.space_id, &plan.message_id);
             Ok(())
         })?;
+        if !acknowledge {
+            return Ok(Some(acted(
+                &Delivered::Skipped,
+                Some(item.clone()),
+                Some(format!("已转事项 {item}，没有发送回复")),
+            )));
+        }
         let text = match mode {
             ItemMode::Start => item_ack(&item),
             ItemMode::Propose => propose_ack(&owner),
@@ -569,9 +577,13 @@ impl Responder for Replies {
         }
         match plan.act {
             Act::Reply | Act::Draft => self.reply(ch, plan).await,
-            Act::CreateItem(m) => self.create_item(ch, plan, m).await,
+            Act::CreateItem(m) => self.create_item(ch, plan, m, true).await,
             Act::Record | Act::Handoff => Ok(None),
         }
+    }
+
+    async fn to_item(&self, ch: &Channels, plan: &Plan) -> ChannelResult<Option<Acted>> {
+        self.create_item(ch, plan, ItemMode::Start, false).await
     }
 
     async fn acknowledge(&self, ch: &Channels, plan: &Plan, text: &str) -> ChannelResult<bool> {

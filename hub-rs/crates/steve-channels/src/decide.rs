@@ -230,21 +230,51 @@ pub fn addressed(why: Why) -> bool {
     matches!(why, Why::Dm | Why::Mentioned | Why::ReplyToYou)
 }
 
-/// A reply that names you in the third person was written to you, not as you. Your names of at least
-/// two characters, anywhere in the text.
+/// An explicit question to the owner about handling the incoming message, mislabelled as a reply.
+/// A name alone is also valid in an introduction or a factual answer; it is not an addressee.
 pub fn names_you(text: &str, names: &[String]) -> bool {
-    names
+    let names_owner = names
         .iter()
         .map(|n| n.trim().trim_start_matches('@'))
         .filter(|n| n.chars().count() >= 2 && !context::raw_name(n))
-        .any(|n| text.contains(n))
+        .any(|n| text.contains(n));
+    let lower = text.to_ascii_lowercase();
+    let private_english = ["this message", "their message", "incoming message"]
+        .iter()
+        .any(|p| lower.contains(p))
+        && [
+            "would you like me",
+            "do you want me",
+            "shall i reply",
+            "how should i reply",
+            "how should i handle",
+        ]
+        .iter()
+        .any(|p| lower.contains(p))
+        && (names_owner || lower.contains("for you") || lower.contains("to you"));
+    private_english
+        || (names_owner || text.contains("发给你") || text.contains("找你"))
+            && ["这条", "这段消息", "对方的消息"]
+                .iter()
+                .any(|p| text.contains(p))
+            && [
+                "要不要我",
+                "你是想让我",
+                "需要我帮",
+                "要我帮",
+                "让我怎么",
+                "怎么回复",
+                "怎么处理",
+            ]
+            .iter()
+            .any(|p| text.contains(p))
 }
 
-/// What the composer's answer becomes on your own account, decided in code. Not where you said what
-/// to write, and not on a bot's account.
+/// Preserve private addressing and safety flags on both accounts. The remaining decision rules
+/// run only on your own account, except where you explicitly instructed what to write.
 ///
-/// - A reply that names you in the third person was meant for you: a question to you with the text
-///   as the candidate draft ([`Reason::MeantForOwner`]).
+/// - An explicit private question about handling the incoming message stays private
+///   ([`Reason::MeantForOwner`]); it is never offered as an outward candidate draft.
 /// - A question to you must say why ([`Reason::of_ask`]): a commitment always; a fact only you know
 ///   or a substantive message only when the message is to you. Without a reason it may give, a
 ///   message to you is still asked about (for what you know); anything else is let go: saying
@@ -256,17 +286,18 @@ pub fn settle(mut a: Answer, s: &Seen) -> Answer {
     let commits = a.needs_commitment || a.needs_approval;
     a.needs_commitment = commits;
     a.needs_approval = commits;
+    if !s.instructed && a.outcome == Outcome::Reply && names_you(&a.text, &s.owner_names) {
+        a.outcome = Outcome::AskOwner;
+        a.reason = Reason::MeantForOwner.code().into();
+        a.draft.clear();
+        return a;
+    }
     if !s.own || s.instructed {
         return a;
     }
     let to_owner = s.to_owner(&a);
-    match a.outcome {
-        Outcome::Reply if names_you(&a.text, &s.owner_names) => {
-            a.outcome = Outcome::AskOwner;
-            a.reason = Reason::MeantForOwner.code().into();
-            a.draft = std::mem::take(&mut a.text);
-        }
-        Outcome::AskOwner => match Reason::of_ask(&a.reason) {
+    if a.outcome == Outcome::AskOwner {
+        match Reason::of_ask(&a.reason) {
             Some(Reason::Commitment) => a.reason = Reason::Commitment.code().into(),
             Some(r) if to_owner => a.reason = r.code().into(),
             None if to_owner => a.reason = Reason::OwnerFact.code().into(),
@@ -276,8 +307,7 @@ pub fn settle(mut a: Answer, s: &Seen) -> Answer {
                 a.reason = "not_for_owner".into();
                 a.draft.clear();
             }
-        },
-        _ => {}
+        }
     }
     a
 }
@@ -1039,10 +1069,41 @@ mod tests {
         let a = settle(r("这条是发给林知远的，要不要我回"), &seen(true));
         assert_eq!(a.outcome, Outcome::AskOwner);
         assert_eq!(a.reason, "meant_for_owner");
-        assert_eq!(a.draft, "这条是发给林知远的，要不要我回");
-        assert!(a.text.is_empty());
+        assert!(
+            a.draft.is_empty(),
+            "a private question is not an outward draft"
+        );
+        assert_eq!(a.text, "这条是发给林知远的，要不要我回");
+        let mut bot = seen(true);
+        bot.own = false;
+        let a = settle(r("这条是发给林知远的，要不要我回"), &bot);
+        assert_eq!(a.outcome, Outcome::AskOwner);
+        assert!(a.draft.is_empty());
+        let mut english = seen(true);
+        english.owner_names = vec!["Alice Chen".into()];
+        let a = settle(
+            r("This message is for Alice Chen. Would you like me to handle it?"),
+            &english,
+        );
+        assert_eq!(a.outcome, Outcome::AskOwner);
+        assert!(a.draft.is_empty());
+        assert_eq!(
+            settle(
+                r("I'm Steve, Alice Chen's AI assistant. How can I help you?"),
+                &english
+            )
+            .outcome,
+            Outcome::Reply
+        );
         // words that are no name of yours are a reply, whatever they say ("Steve", "要不要我")
-        for t in ["要不要我帮你看下", "Steve 挺好用", "周四可以"] {
+        for t in [
+            "要不要我帮你看下",
+            "Steve 挺好用",
+            "周四可以",
+            "我是 Steve，林知远的 AI 助手。有什么可以帮你处理的？",
+            "我是林知远。",
+            "林知远已经公开介绍过这个功能。",
+        ] {
             assert_eq!(settle(r(t), &seen(true)).outcome, Outcome::Reply, "{t}");
         }
         // an id is no name

@@ -531,7 +531,7 @@ const css = /* css */ `
   -webkit-font-smoothing: antialiased;
 }
 .ui-dcc *, .ui-dcc *::before, .ui-dcc *::after { box-sizing: border-box; }
-:where(.ui-dcc) button { margin: 0; padding: 0; border: 0; background: none; font: inherit; color: inherit; text-align: inherit; cursor: pointer; -webkit-tap-highlight-color: transparent; }
+:where(.ui-dcc) button:where(.ui-dcc__link, .ui-dcc__page, .ui-dcc__opt, .ui-dcc__tile, .ui-dcc__send) { margin: 0; padding: 0; border: 0; background: none; font: inherit; color: inherit; text-align: inherit; cursor: pointer; -webkit-tap-highlight-color: transparent; }
 .ui-dcc button:focus-visible { outline: 2px solid var(--ui-dcc-focus); outline-offset: 2px; }
 .ui-dcc :is(p, dl, dd) { margin: 0; }
 .ui-dcc svg { display: block; flex: none; }

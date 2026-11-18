@@ -334,6 +334,23 @@ export default {
     },
   },
   /* what an outbound draft answers, on the approval card */
+  reply: {
+    draft: "拟发送正文",
+    send: "批准并发送",
+    edit: "修改回复",
+    sendEdited: "批准并发送修改稿",
+    noReply: "不回复",
+    noDraft: "还没有正式回复草稿",
+    draftChanged: "正式草稿已更新，你的修改已保留。请对照最新稿并选择使用哪份正文，再批准发送。",
+    latestDraft: "最新正式稿",
+    useLatest: "使用最新稿",
+    keepEdits: "已对照，保留我的修改",
+    reviewNote: "请核对目标聊天、发送身份和正文；批准后进入发送队列，发送结果以渠道记录为准。",
+    contextUnavailable: "暂时无法读取原消息、目标聊天或发送身份，请打开渠道核对。",
+    submitFailed: "提交失败，未确认发送。请查看错误提示后重试，修改内容已保留。",
+    queued: "已批准，等待渠道发送。实际发送结果请查看渠道记录。",
+  },
+  /* what an outbound draft answers, on the approval card */
   out: {
     kind: {
       group: "群",
