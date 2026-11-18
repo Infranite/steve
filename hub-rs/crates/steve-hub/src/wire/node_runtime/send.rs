@@ -50,6 +50,14 @@ impl NodeRuntime {
         // a turn end to report, and a session whose configure was refused for a stale revision
         let r = self.send_tx(|tx| match &sent {
             Ok(receipt) => self.receipt_in(tx, receipt).map(|end| (end, None)),
+            Err(e) if e.code == ErrorCode::OutcomeUnknown && e.retry == RetryClass::Never => {
+                // Leasing already persisted maybe_sent=1. Do not resend or call this a refusal:
+                // the Node may have executed it. A later receipt/reconcile can settle unknown.
+                self.receipt_in(tx, &Receipt {
+                    operation: idv(lease.operation.clone())?,
+                    state: Observed::Unknown { reason: said(e) },
+                }).map(|end| (end, None))
+            }
             Err(e)
                 if e.retry == RetryClass::SameOperation || e.code == ErrorCode::OutcomeUnknown =>
             {

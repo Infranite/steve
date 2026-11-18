@@ -7,9 +7,13 @@ struct Seen {
     finished: Mutex<Vec<String>>,
     ended: Mutex<Vec<String>>,
     started: Mutex<Vec<String>>,
+    workspaces: Mutex<Vec<WorkspaceFact>>,
 }
 
 impl NodeDomain for Seen {
+    fn workspace_changed(&self, fact: WorkspaceFact) {
+        self.workspaces.lock().unwrap().push(fact);
+    }
     fn turn_ended(&self, session: &str, _: Option<&str>, _: &str, _: Option<String>) {
         self.ended.lock().unwrap().push(session.into());
     }
@@ -797,4 +801,200 @@ async fn device_pause_keeps_existing_attempt_and_retry_then_holds_followup_until
         )
         .unwrap();
     assert_eq!(h._rt.flush("s1", None).unwrap(), Planned::Created);
+}
+
+// No workers or sleeps: tests drive each lease/receipt and periodic sweep explicitly.
+fn retry_fixture() -> (
+    tempfile::TempDir,
+    Arc<FakeNode>,
+    Arc<NodeRuntime>,
+    Arc<Seen>,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path().join("hub.sqlite3"), steve_store::NoPublisher).unwrap();
+    store.ensure_workspace().unwrap();
+    store.transaction::<_, StoreError>(|tx| {
+        tx.execute_batch("INSERT INTO items(id,workspace_id,no,title,status,stage,created,updated) VALUES ('i1','default',1,'retry','run','执行',1,1);
+            INSERT INTO sessions(id,workspace_id,item_id,harness,cwd,status,created,updated) VALUES ('s1','default','i1','claude-code','.','active',1,1);")?;
+        Ok(())
+    }).unwrap();
+    let node = FakeNode::new("n1");
+    let seen = Arc::new(Seen::default());
+    let rt = NodeRuntime::new(store, node.clone(), seen.clone());
+    rt.reconciled.store(true, Ordering::SeqCst);
+    rt.bind(&Binding {
+        session: "s1".into(),
+        resource: "item:i1".into(),
+        prepare: serde_json::from_value(json!({"type":"worktree",
+            "repository":{"root":"root","rel":"repo"},"branch":"test"}))
+        .unwrap(),
+        choice: build::choice(),
+        policy: build::policy(),
+    })
+    .unwrap();
+    (dir, node, rt, seen)
+}
+
+fn retry_query<T: rusqlite::types::FromSql>(rt: &NodeRuntime, sql: &str) -> T {
+    rt.store
+        .reader(|c| Ok::<_, StoreError>(c.query_row(sql, [], |r| r.get(0))?))
+        .unwrap()
+}
+
+fn retry_count(rt: &NodeRuntime, method: &str) -> i64 {
+    let sql = format!("SELECT COUNT(*) FROM node_commands WHERE method='{method}'");
+    retry_query(rt, &sql)
+}
+
+fn retry_sql(rt: &NodeRuntime, sql: &str) {
+    rt.tx(|tx| tx.execute_batch(sql).map_err(StoreError::from))
+        .unwrap();
+}
+
+fn retry_failed(rt: &NodeRuntime, op: String, error: ApiError) {
+    let mut receipt = Receipt {
+        operation: idv(op).unwrap(),
+        state: Observed::Accepted,
+    };
+    rt.tx(|tx| {
+        rt.receipt_in(tx, &receipt)?;
+        receipt.state = Observed::Finished {
+            outcome: Outcome::Failed,
+            result: None,
+            error: Some(error),
+        };
+        rt.receipt_in(tx, &receipt)?;
+        Ok(())
+    })
+    .unwrap();
+}
+
+#[tokio::test]
+async fn tidy_never_failure_holds_sweeps_until_new_prepare_but_retryable_failure_does_not() {
+    for rejected in [false, true] {
+        for retry in [RetryClass::Never, RetryClass::AfterReconcile] {
+            let (_dir, node, rt, seen) = retry_fixture();
+            assert!(rt.send_one().await); // prepare
+            assert!(rt.send_one().await); // open
+            assert!(rt.tidy_session_workspace("s1", true).unwrap());
+            let mut error = ApiError::new(ErrorCode::Internal, "dirty worktree retained");
+            error.retry = retry;
+            if rejected {
+                node.refuse_next("tidy_workspace", error);
+                assert!(rt.send_one().await);
+            } else {
+                let op = retry_query(
+                    &rt,
+                    "SELECT operation_id FROM node_commands WHERE method='tidy_workspace'",
+                );
+                retry_failed(&rt, op, error);
+            }
+            assert!(seen.workspaces.lock().unwrap().iter().any(|f| matches!(f,
+                WorkspaceFact::Tidied { removed: false, note: Some(note), .. } if note == "dirty worktree retained")));
+            for _ in 0..3 {
+                assert!(rt.tidy_session_workspace("s1", true).unwrap());
+            }
+            assert_eq!(
+                retry_count(&rt, "tidy_workspace"),
+                if retry == RetryClass::Never { 1 } else { 2 }
+            );
+            // A new prepare is a new cleanup generation, regardless of the older failure.
+            retry_sql(&rt, "INSERT INTO node_commands(operation_id,node_id,method,request,digest,state,receipt,created,updated)
+                SELECT 'new_prepare',node_id,method,json_set(request,'$.id','new_prepare'),digest,state,receipt,created,updated
+                FROM node_commands WHERE operation_id='op_prep_s1'");
+            let before = retry_count(&rt, "tidy_workspace");
+            assert!(rt.tidy_session_workspace("s1", true).unwrap());
+            assert_eq!(retry_count(&rt, "tidy_workspace"), before + 1);
+        }
+    }
+}
+
+#[tokio::test]
+async fn open_never_failure_blocks_all_reopen_callers_until_explicit_retry() {
+    for rejected in [false, true] {
+        let (_dir, node, rt, _seen) = retry_fixture();
+        assert!(rt.send_one().await); // prepare
+        assert!(rt.send_one().await); // first open succeeds
+        assert_eq!(
+            rt.prompt("s1", "first", "user", &[]).unwrap(),
+            Planned::Created
+        );
+        node.refuse_next(
+            "start_turn",
+            ApiError::new(ErrorCode::Invalid, "session not open"),
+        );
+        assert!(rt.send_one().await); // the refused-start path calls reopen_in
+        let failed_op: String = retry_query(
+            &rt,
+            "SELECT operation_id FROM node_commands WHERE method='open_session' ORDER BY rowid DESC LIMIT 1",
+        );
+        let error = ApiError::new(ErrorCode::Invalid, "unsupported effort");
+        if rejected {
+            node.refuse_next("open_session", error);
+            assert!(rt.send_one().await);
+        } else {
+            retry_failed(&rt, failed_op.clone(), error);
+        }
+        assert_eq!(
+            rt.prompt("s1", "queued", "user", &[]).unwrap(),
+            Planned::Held
+        );
+        for _ in 0..3 {
+            assert_eq!(rt.flush("s1", None).unwrap(), Planned::Held); // plan.rs released + queued
+            rt.tx(|tx| rt.reopen_in(tx, "s1")).unwrap(); // refused-start caller's common guard
+        }
+        // Late successful recover callbacks must also respect the stop, for both target kinds.
+        for target in [failed_op.as_str(), "op_prep_s1"] {
+            rt.tx(|tx| {
+                tx.execute("INSERT INTO node_commands(operation_id,node_id,method,request,digest,state,created,updated)
+                    VALUES (?1,'n1','recover',json_object('body',json_object('target',?2)),'test','finished',1,1)",
+                    rusqlite::params![format!("recover_{target}"), target])?;
+                // Model the held control / dependent open that the recover is retiring.
+                tx.execute("UPDATE runtime_sessions SET phase='opening'", [])?;
+                if target == "op_prep_s1" {
+                    tx.execute("UPDATE node_commands SET state='pending' WHERE operation_id='op_open_s1'", [])?;
+                }
+                rt.recover_receipt_in(tx, &format!("recover_{target}"), ReceiptState::Finished, true, "")?;
+                assert!(super::plan::startup_blocked_in(tx, "s1")?);
+                Ok(())
+            }).unwrap();
+        }
+        assert_eq!(retry_count(&rt, "open_session"), 2);
+        rt.retry_open("s1", &build::choice()).unwrap();
+        assert_eq!(retry_count(&rt, "open_session"), 3);
+        assert!(rt.store.sessions().stop("s1").unwrap().is_none());
+    }
+}
+
+#[tokio::test]
+async fn outcome_unknown_never_stops_leasing_and_can_be_settled_by_reconciliation() {
+    let (_dir, node, rt, _seen) = retry_fixture();
+    let mut error = ApiError::new(ErrorCode::OutcomeUnknown, "reply lost; do not retry");
+    error.retry = RetryClass::Never;
+    node.refuse_next("prepare_workspace", error);
+    assert!(rt.send_one().await);
+    for _ in 0..3 {
+        retry_sql(&rt, "UPDATE node_commands SET retry_at=0,lease_until=NULL");
+        assert!(!rt.send_one().await);
+    }
+    let (state, maybe_sent, generation): (String, bool, i64) = rt.store.reader(|c| Ok::<_, StoreError>(c.query_row(
+        "SELECT state,maybe_sent,lease_generation FROM node_commands WHERE operation_id='op_prep_s1'", [],
+        |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?)),
+    )?)).unwrap();
+    assert_eq!(
+        (state.as_str(), maybe_sent, generation),
+        ("unknown", true, 1)
+    );
+    // The uncertain send may actually have run: put its result into the Node's ledger only.
+    let request: String = retry_query(
+        &rt,
+        "SELECT request FROM node_commands WHERE operation_id='op_prep_s1'",
+    );
+    node.prepare_workspace(serde_json::from_str(&request).unwrap())
+        .await
+        .unwrap();
+    rt.reconcile().await.unwrap();
+    assert!(rt.send_one().await); // its dependent open can now go
+    assert_eq!(retry_count(&rt, "prepare_workspace"), 1);
+    assert_eq!(node.log().len(), 2); // one prepare and its dependent open
 }

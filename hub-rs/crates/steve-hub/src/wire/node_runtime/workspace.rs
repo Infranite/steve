@@ -27,7 +27,7 @@ pub enum WorkspaceFact {
         error: Option<ApiError>,
     },
     /// The tidy of the item's worktree is over: `removed`, or it is kept (dirty, changed since,
-    /// refused). `note`: what could not be done besides (a branch git would not delete).
+    /// refused). `note`: why it was kept, or what else could not be done.
     Tidied {
         item: String,
         removed: bool,
@@ -129,7 +129,8 @@ fn workspace_id(resource: &str) -> String {
 }
 
 /// A tidy of the workspace written after the prepare at `rowid`: `Some(true)` it removed it,
-/// `Some(false)` one is on its way or unknown, `None` none (or only failed ones).
+/// `Some(false)` one is on its way, unknown, or must be kept after a non-retryable failure;
+/// `None` none (or only retryable failures).
 fn tidy_since_in(
     tx: &rusqlite::Connection,
     node: &str,
@@ -139,7 +140,7 @@ fn tidy_since_in(
     let (done, open): (bool, bool) = tx.query_row(
         "SELECT
            EXISTS(SELECT 1 FROM node_commands WHERE node_id=?1 AND method='tidy_workspace' AND json_extract(request,'$.body.workspace.id')=?2 AND rowid>?3 AND state='finished' AND json_extract(receipt,'$.success')=1),
-           EXISTS(SELECT 1 FROM node_commands WHERE node_id=?1 AND method='tidy_workspace' AND json_extract(request,'$.body.workspace.id')=?2 AND rowid>?3 AND state NOT IN ('finished','rejected'))",
+           EXISTS(SELECT 1 FROM node_commands WHERE node_id=?1 AND method='tidy_workspace' AND json_extract(request,'$.body.workspace.id')=?2 AND rowid>?3 AND (state NOT IN ('finished','rejected') OR (state='rejected' AND json_extract(receipt,'$.payload.retry')='never') OR (state='finished' AND json_extract(receipt,'$.success')=0 AND json_extract(receipt,'$.payload.state.error.retry')='never')))",
         rusqlite::params![node, workspace, rowid],
         |r| Ok((r.get(0)?, r.get(1)?)),
     )?;
@@ -235,7 +236,7 @@ impl NodeRuntime {
 
     /// Gives back the worktree this Node made for `item`, through the ledger; `keep_branch`: its
     /// branch stays. `true`: on its way (or one is already, or one whose outcome nobody knows
-    /// waits for reconciliation: it is never sent twice). `false`: this Node has no worktree of
+    /// waits for reconciliation, or kept after a non-retryable failure). `false`: this Node has no worktree of
     /// the item now (none made, or given back already): nothing was done.
     pub fn tidy_workspace(&self, item: &str, keep_branch: bool) -> Result<bool, StoreError> {
         self.running()?;
@@ -410,7 +411,7 @@ impl NodeRuntime {
             .push(WorkspaceFact::Tidied {
                 item,
                 removed,
-                note: (removed && !detail.is_empty()).then(|| detail.to_string()),
+                note: (!detail.is_empty()).then(|| detail.to_string()),
             });
         Ok(())
     }
