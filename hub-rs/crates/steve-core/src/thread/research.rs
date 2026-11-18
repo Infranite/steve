@@ -1196,7 +1196,62 @@ impl Core {
             }
             s.research = Some(research);
         }
-        let meta = self.inline_meta(ws, j, offer.as_ref(), lock(&steps).json(now() - j.t0))?;
+        // Research uses tools, not the host's inline answer. Hand a completed result back to the
+        // host explicitly; otherwise owner-voice channels have no classified reply to deliver.
+        // Incomplete results and preparation errors stay readable but may never be sent raw.
+        let raw = text.clone();
+        let mut host_reply = None;
+        if j.space != super::MAIN {
+            if out.end == RunEnd::Done && !text.is_empty() && !j.stop.is_stopped() {
+                let prepared = match self.conv_host() {
+                    Some(host) => tokio::select! {
+                        r = host.research_answer(ws, &j.space, &j.origin, &raw) => r,
+                        _ = j.stop.stopped() => Err("已停止，研究结果未进入发送流程".into()),
+                    },
+                    None => Err("对话渠道不可用，未核验研究结果的发送资格".into()),
+                };
+                match prepared {
+                    Ok(t) if !t.trim().is_empty() && !j.stop.is_stopped() => {
+                        text = t;
+                        host_reply = Some(json!({"status": "prepared"}));
+                    }
+                    other => {
+                        let why = match other {
+                            Err(e) => e,
+                            _ => "未获得可发送的正式回复".into(),
+                        };
+                        host_reply = Some(json!({"status": "ineligible", "reason": why}));
+                    }
+                }
+            } else {
+                let why = match out.end {
+                    RunEnd::Done => "研究未生成可用结果，未进入发送流程",
+                    RunEnd::Stopped => "研究已停止，部分结果仅保留在 Steve 对话中",
+                    RunEnd::Budget => "研究预算已用完，部分结果仅保留在 Steve 对话中",
+                    RunEnd::Violated => "研究在工具检查时停止，部分结果仅保留在 Steve 对话中",
+                    RunEnd::Failed => "研究失败，部分结果仅保留在 Steve 对话中",
+                };
+                host_reply = Some(json!({"status": "ineligible", "reason": why}));
+            }
+        }
+        if j.stop.is_stopped() && out.end == RunEnd::Done {
+            out.end = RunEnd::Stopped;
+            text = format!("{raw}\n\n（已停下）");
+            if j.space != super::MAIN {
+                host_reply = Some(
+                    json!({"status": "ineligible", "reason": "已停止，研究结果未进入发送流程"}),
+                );
+            }
+            if let Some(research) = lock(&steps).research.as_mut() {
+                research["stopped"] = json!("user");
+            }
+        }
+        let mut meta = self.inline_meta(ws, j, offer.as_ref(), lock(&steps).json(now() - j.t0))?;
+        if let Some(h) = host_reply {
+            meta["host_reply"] = h;
+            // Keep the evidence even if composing changes the wording or asks the owner instead.
+            meta["research_result"] = json!(raw);
+        }
         let id = self.inline_reply(ws, j, &text, &meta)?;
         th.run_patch(
             &run,

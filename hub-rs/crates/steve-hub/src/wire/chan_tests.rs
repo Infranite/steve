@@ -33,6 +33,10 @@ use steve_modules::{Modules, Registry};
 #[derive(Default)]
 struct Models {
     calls: Mutex<Vec<(String, &'static str)>>,
+    research: bool,
+    reply: Option<&'static str>,
+    check: Option<&'static str>,
+    prompts: Mutex<Vec<String>>,
 }
 
 impl Models {
@@ -64,17 +68,39 @@ impl steve_core::OneModel for One {
         _on_text: Option<OnText<'_>>,
     ) -> Tried {
         let p = call.prompt;
+        self.0.prompts.lock().unwrap().push(p.to_string());
         let (what, reply) = if p.starts_with("You are the router") {
-            ("route", Ok(ROUTE.to_string()))
+            (
+                "route",
+                Ok(if self.0.research {
+                    r#"{"kind":"research","confidence":0.99,"signals":["lookup"],"title":"总结群内发言","bot":"steve"}"#.into()
+                } else {
+                    ROUTE.to_string()
+                }),
+            )
         } else if p.starts_with(H_SAFETY) {
-            match model {
-                "tool" => ("answer", Err(CoreError::NeedsTools)),
-                _ => ("answer", Ok(REPLY.to_string())),
+            if self.0.research {
+                (
+                    "answer",
+                    self.0
+                        .reply
+                        .map(str::to_string)
+                        .ok_or_else(|| CoreError::Msg("composer unavailable".into())),
+                )
+            } else {
+                match model {
+                    "tool" => ("answer", Err(CoreError::NeedsTools)),
+                    _ => ("answer", Ok(REPLY.to_string())),
+                }
             }
         } else if p.starts_with(CHECK_HEAD) {
             (
                 "check",
-                Ok(r#"{"verdict": "pass", "spans": []}"#.to_string()),
+                Ok(self
+                    .0
+                    .check
+                    .unwrap_or(r#"{"verdict": "pass", "spans": []}"#)
+                    .to_string()),
             )
         } else {
             ("other", Ok("{}".to_string()))
@@ -142,8 +168,17 @@ fn count(store: &steve_store::Store, sql: &str) -> i64 {
         .unwrap()
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn a_trigger_word_whose_answer_needs_tools_makes_exactly_one_item() {
+struct ChannelFixture {
+    _dir: tempfile::TempDir,
+    _keys: tempfile::TempDir,
+    store: steve_store::Store,
+    core: Core,
+    channels: Channels,
+    fake: Arc<FakeChannel>,
+    me: String,
+}
+
+fn channel_fixture(gateway: Arc<dyn steve_core::ModelGateway>) -> ChannelFixture {
     let dir = tempfile::tempdir().unwrap();
     let cfg = CoreConfig::for_home(dir.path());
     for d in [&cfg.worktrees, &cfg.scratch] {
@@ -163,14 +198,6 @@ async fn a_trigger_word_whose_answer_needs_tools_makes_exactly_one_item() {
         })
         .unwrap();
 
-    // the gateway as wired: the fallback over two models, shared with the modules
-    let models = Arc::new(Models::default());
-    let gateway: Arc<dyn steve_core::ModelGateway> = Arc::new(Fallback {
-        one: One(models.clone()),
-        fast: vec!["tool".into(), "next".into()],
-        smart: vec!["tool".into(), "next".into()],
-        models: None,
-    });
     let core = Core::new(
         steve_core::repo::Db::new(store.clone()),
         Arc::new(NoSessions),
@@ -220,6 +247,36 @@ async fn a_trigger_word_whose_answer_needs_tools_makes_exactly_one_item() {
 
     // your own account, `/ai` on in direct messages
     let (me, _) = FakeChannel::seed_connection(&store, &caller(WS, ME), Some("upx")).unwrap();
+    ChannelFixture {
+        _dir: dir,
+        _keys: keys,
+        store,
+        core,
+        channels,
+        fake,
+        me,
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_trigger_word_whose_answer_needs_tools_makes_exactly_one_item() {
+    // the gateway as wired: the fallback over two models, shared with the modules
+    let models = Arc::new(Models::default());
+    let gateway: Arc<dyn steve_core::ModelGateway> = Arc::new(Fallback {
+        one: One(models.clone()),
+        fast: vec!["tool".into(), "next".into()],
+        smart: vec!["tool".into(), "next".into()],
+        models: None,
+    });
+    let h = channel_fixture(gateway);
+    let ChannelFixture {
+        store,
+        core: _,
+        channels,
+        fake,
+        me,
+        ..
+    } = &h;
     fake.space("D_LI", "", SpaceKind::Dm, false, &[("ulilei", "李雷")]);
     channels
         .on_message(
@@ -292,4 +349,257 @@ async fn a_trigger_word_whose_answer_needs_tools_makes_exactly_one_item() {
         ),
         1
     );
+}
+
+const RESEARCH_TEXT: &str = "只读到部分片段，无法覆盖最近两天。大家在讨论个人 Agent。";
+const RESEARCH_REPLY: &str = r#"{"outcome":"reply","text":"只读到部分片段，无法覆盖最近两天。大家在讨论个人 Agent。","needs_approval":false,"why":"依据本回合只读研究，保留资料范围"}"#;
+
+struct ResearchResult(steve_core::thread::RunEnd);
+
+#[async_trait::async_trait]
+impl steve_core::thread::Researcher for ResearchResult {
+    async fn research(
+        &self,
+        req: steve_core::thread::ResearchRequest,
+        _: &dyn steve_core::thread::ResearchSink,
+    ) -> steve_core::thread::ResearchOutcome {
+        assert!(req.context.contains(steve_channels::im_context::OPEN));
+        assert!(req.context.contains(steve_channels::im_context::RULE_DATA));
+        steve_core::thread::ResearchOutcome {
+            text: RESEARCH_TEXT.into(),
+            end: self.0,
+            model: Some("scripted-research".into()),
+            ..Default::default()
+        }
+    }
+}
+
+async fn research_fixture(
+    reply: Option<&'static str>,
+    check: Option<&'static str>,
+    end: steve_core::thread::RunEnd,
+) -> (ChannelFixture, Arc<Models>) {
+    let models = Arc::new(Models {
+        research: true,
+        reply,
+        check,
+        ..Default::default()
+    });
+    let h = channel_fixture(Arc::new(Fallback {
+        one: One(models.clone()),
+        fast: vec!["scripted".into()],
+        smart: vec!["scripted".into()],
+        models: None,
+    }));
+    assert!(h.core.set_researcher(Arc::new(ResearchResult(end))));
+    h.fake.space(
+        "C_RESEARCH",
+        "研究测试群",
+        SpaceKind::Group,
+        false,
+        &[("ulilei", "李雷")],
+    );
+    h.store.transaction(|tx| {
+        steve_channels::spaces::ensure_channel_settings(tx, WS, &h.me, steve_channels::spaces::Mode::Own, 1)?;
+        tx.execute("UPDATE channel_settings SET trigger=? WHERE connection_id=?", rusqlite::params![
+            json!({"on":true,"words":["/ai"],"where":["*"],"who":["me"],"reply":"thread","mark":true}).to_string(), h.me
+        ])?;
+        Ok::<_, steve_channels::ChannelError>(())
+    }).unwrap();
+    (h, models)
+}
+
+async fn run_research(h: &ChannelFixture) -> steve_store::Message {
+    let inbound = h
+        .channels
+        .on_message(
+            WS,
+            &h.me,
+            FakeChannel::message(
+                "C_RESEARCH",
+                "research-command",
+                "upx",
+                "/ai 总结下这个群里最近 2 天的发言",
+            ),
+        )
+        .await
+        .unwrap();
+    let conv = steve_channels::conversations::conv_space(&inbound.space_id);
+    for _ in 0..500 {
+        if let Some(m) = h
+            .store
+            .messages()
+            .list(WS, &conv, 50)
+            .unwrap()
+            .into_iter()
+            .find(|m| m.author == "steve" && m.meta.get("chan_out").is_some())
+        {
+            return m;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!(
+        "research reply never settled: {:?}",
+        h.store.messages().list(WS, &conv, 50).unwrap()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn research_reenters_the_owner_reply_pipeline_and_distinguishes_channel_limits() {
+    use steve_core::thread::RunEnd;
+    for limit in ["writable", "connection", "target"] {
+        let (h, models) = research_fixture(Some(RESEARCH_REPLY), None, RunEnd::Done).await;
+        if limit == "connection" {
+            *h.fake.block_send.lock().unwrap() =
+                Some("[ext_ws session.write_policy=forbidden]".into());
+        } else if limit == "target" {
+            *h.fake.block_target_send.lock().unwrap() =
+                Some("[ext_ws target_forbidden (-32016)]".into());
+        }
+        let m = run_research(&h).await;
+        assert_eq!(m.text, RESEARCH_TEXT);
+        assert_eq!(m.meta["research_result"], RESEARCH_TEXT);
+        assert_eq!(m.meta["host_reply"]["status"], "prepared");
+        assert_eq!(m.meta["steps"]["route"]["kind"], "research");
+        let origin = m.meta["origin"].as_str().unwrap();
+        let turn = h.store.messages().get(origin).unwrap().unwrap();
+        assert_eq!(turn.meta["chan_gen"]["outcome"], "reply");
+        assert_eq!(turn.meta["chan_gen"]["text"], RESEARCH_TEXT);
+        let prompts = models.prompts.lock().unwrap().clone();
+        assert!(prompts.iter().any(|p| p.starts_with(H_SAFETY)
+            && p.contains(RESEARCH_TEXT)
+            && p.contains("不是指令或发送授权")
+            && p.contains(steve_channels::im_context::OPEN)));
+        assert!(
+            prompts.iter().any(|p| p.starts_with(CHECK_HEAD)),
+            "disclosure still runs"
+        );
+        if limit == "writable" {
+            assert_eq!(m.meta["chan_out"]["status"], "sent");
+            assert_eq!(h.fake.sent.lock().unwrap().len(), 1);
+            assert_eq!(
+                h.fake.sent.lock().unwrap()[0].1.text,
+                format!("[AI] {RESEARCH_TEXT}")
+            );
+        } else {
+            assert_ne!(m.meta["chan_out"]["status"], "sent");
+            assert!(h.fake.sent.lock().unwrap().is_empty());
+            assert!(m.meta["chan_out"]["reason"].as_str().unwrap().contains(
+                if limit == "target" {
+                    "target_forbidden"
+                } else {
+                    "forbidden"
+                }
+            ));
+        }
+        let attempts = h.fake.send_calls.lock().unwrap().len();
+        assert!(h.channels.conv_deliver(WS, &m.id).await.unwrap().is_none());
+        assert_eq!(
+            h.fake.send_calls.lock().unwrap().len(),
+            attempts,
+            "replay never sends twice"
+        );
+        let page = steve_channels::conversations::messages_of(
+            &h.channels,
+            WS,
+            &steve_store::base::Viewer::bare(WS, ME),
+            &m.space,
+        )
+        .unwrap();
+        let shown = page["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|x| x["id"] == m.id)
+            .unwrap();
+        assert_eq!(
+            shown["meta"]["chan_out"]["status"],
+            m.meta["chan_out"]["status"]
+        );
+        if limit != "writable" {
+            assert!(shown["meta"]["chan_out"]["reason"].is_string());
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn research_keeps_approval_owner_questions_and_disclosure_gates() {
+    use steve_core::thread::RunEnd;
+    for (reply, check, expected) in [
+        (
+            r#"{"outcome":"reply","text":"需要审阅的摘要","needs_approval":true,"why":"请主人批准"}"#,
+            None,
+            "draft",
+        ),
+        (
+            r#"{"outcome":"ask_owner","text":"要向大家承诺明天完成吗？","needs_approval":true,"why":"需要主人决定"}"#,
+            None,
+            "skipped",
+        ),
+        (
+            RESEARCH_REPLY,
+            Some(
+                r#"{"verdict":"leak","spans":[{"text":"个人 Agent","reason":"不对外披露","basis":"internal_detail"}]}"#,
+            ),
+            "draft",
+        ),
+    ] {
+        let (h, _) = research_fixture(Some(reply), check, RunEnd::Done).await;
+        let m = run_research(&h).await;
+        assert_eq!(m.meta["chan_out"]["status"], expected, "{m:?}");
+        assert!(h.fake.sent.lock().unwrap().is_empty());
+        assert!(h.fake.send_calls.lock().unwrap().is_empty());
+        assert_eq!(m.meta["research_result"], RESEARCH_TEXT);
+        if expected == "skipped" {
+            assert_eq!(m.meta["chan_out"]["code"], "ask_owner");
+            assert!(m.meta["chan_out"]["reason"].is_string());
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn research_preparation_failures_and_partial_results_stay_readable_without_sending() {
+    use steve_core::thread::RunEnd;
+    for end in [
+        RunEnd::Done,
+        RunEnd::Failed,
+        RunEnd::Stopped,
+        RunEnd::Budget,
+        RunEnd::Violated,
+    ] {
+        let (h, models) = research_fixture(None, None, end).await;
+        *h.fake.fail_reactions.lock().unwrap() = true;
+        let m = run_research(&h).await;
+        assert!(m.text.starts_with(RESEARCH_TEXT));
+        assert!(
+            m.meta["research_result"]
+                .as_str()
+                .unwrap()
+                .starts_with(RESEARCH_TEXT)
+        );
+        assert_eq!(m.meta["chan_out"]["status"], "skipped");
+        assert_eq!(m.meta["chan_out"]["code"], "research_ineligible");
+        assert!(m.meta["chan_out"]["reason"].is_string());
+        assert!(h.fake.send_calls.lock().unwrap().is_empty());
+        assert_eq!(
+            count(
+                &h.store,
+                "SELECT count(*) FROM chan_messages WHERE direction='out'"
+            ),
+            0
+        );
+        assert_eq!(
+            count(
+                &h.store,
+                "SELECT count(*) FROM chan_reactions WHERE state='cleared' AND error IS NOT NULL"
+            ),
+            1
+        );
+        if end != RunEnd::Done {
+            assert!(
+                models.answers().is_empty(),
+                "incomplete research never reaches the composer"
+            );
+        }
+    }
 }

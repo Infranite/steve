@@ -318,7 +318,7 @@ fn send_error(c: &Connection, id: &str) -> ChannelResult<Option<String>> {
 
 /// Why sent message `id` did not go out: the provider's last error while it is unsettled, else
 /// the question of the card it failed with (what 待处理 shows).
-fn out_error(c: &Connection, ws: &str, id: &str) -> ChannelResult<Option<String>> {
+pub(crate) fn out_error(c: &Connection, ws: &str, id: &str) -> ChannelResult<Option<String>> {
     if let Some(e) = send_error(c, id)? {
         return Ok(Some(e));
     }

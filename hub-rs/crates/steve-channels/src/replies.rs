@@ -410,6 +410,7 @@ impl Replies {
             instruction: Some(instruction.to_string()).filter(|i| !i.trim().is_empty()),
             history: None,
             revise: None,
+            research: None,
         };
         let r = match self.composer.generate(ch, plan, &opts).await {
             Ok(r) => r,
@@ -462,6 +463,7 @@ impl Replies {
             instruction: Some(instruction.to_string()).filter(|i| !i.trim().is_empty()),
             history: None,
             revise: None,
+            research: None,
         };
         let r = match self.composer.generate(ch, plan, &opts).await {
             Ok(r) => r,

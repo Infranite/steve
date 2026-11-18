@@ -680,3 +680,75 @@ async fn a_full_queue_is_marked_as_a_system_text() {
     assert_eq!(m.meta[crate::thread::research::SYSTEM], json!(true));
     host.go.notify_waiters();
 }
+
+struct PreparingResearch(tokio::sync::Semaphore);
+
+#[async_trait::async_trait]
+impl ConvHost for PreparingResearch {
+    async fn answer(&self, _: &str, _: &str, _: &str) -> Result<String, String> {
+        panic!("research never uses the tool-less answer")
+    }
+    fn research_context(&self, _: &str, _: &str, _: &str) -> String {
+        String::new()
+    }
+    async fn research_answer(&self, _: &str, _: &str, _: &str, _: &str) -> Result<String, String> {
+        self.0.add_permits(1);
+        std::future::pending().await
+    }
+    fn said(&self, _: &str, _: &str, _: &str) {}
+}
+
+#[tokio::test]
+async fn stopping_during_research_preparation_keeps_the_result_without_sending_authority() {
+    use crate::testkit::{FakeResearch, Step};
+    let k = Kit::new();
+    let host = Arc::new(PreparingResearch(tokio::sync::Semaphore::new(0)));
+    k.core.set_conv_host(host.clone());
+    k.core
+        .set_researcher(FakeResearch::new(vec![Step::Text("已读到的部分摘要")]));
+    router(
+        &k,
+        Arc::new(Mutex::new(vec![])),
+        |_| json!({"kind":"research","confidence":0.99,"signals":["lookup"],"title":"群聊摘要","bot":"steve"}),
+    );
+    let origin = turn(&k, "总结最近两天", guest(true, true));
+    tokio::time::timeout(Duration::from_secs(5), host.0.acquire())
+        .await
+        .unwrap()
+        .unwrap()
+        .forget();
+    let run = k
+        .db()
+        .store()
+        .thread()
+        .runs_of_message(&origin)
+        .unwrap()
+        .remove(0);
+    assert!(k.core.stop_run(WS, &run.id).unwrap());
+    let ms = settle(&k, SPACE, 2).await;
+    assert_eq!(ms[1].meta["research_result"], "已读到的部分摘要");
+    assert_eq!(ms[1].meta["host_reply"]["status"], "ineligible");
+    assert!(
+        ms[1].meta["host_reply"]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("停止")
+    );
+    assert_eq!(ms[1].meta["steps"]["research"]["stopped"], "user");
+    assert!(ms[1].text.contains("已读到的部分摘要") && ms[1].text.contains("已停下"));
+    for _ in 0..100 {
+        if k.db()
+            .store()
+            .thread()
+            .run(&run.id)
+            .unwrap()
+            .unwrap()
+            .status
+            == "stopped"
+        {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("stopped run did not settle");
+}

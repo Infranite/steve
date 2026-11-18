@@ -218,6 +218,19 @@ pub trait ConvHost: Send + Sync {
     /// What research answering message `origin` in `space` is told about where it answers (the
     /// conversation card and the rules of the place).
     fn research_context(&self, ws: &str, space: &str, origin: &str) -> String;
+    /// Prepare a completed read-only research result in this conversation's voice before it is
+    /// stored and `said` is called. Channel hosts must run their normal reply classification and
+    /// retain its provenance; a research run alone is not authority to speak as the owner.
+    /// An error keeps the original result readable, marked ineligible for external delivery.
+    async fn research_answer(
+        &self,
+        _ws: &str,
+        _space: &str,
+        _origin: &str,
+        text: &str,
+    ) -> std::result::Result<String, String> {
+        Ok(text.to_string())
+    }
     /// Steve stored message `id` in guest conversation `space`.
     fn said(&self, ws: &str, space: &str, id: &str);
 }
