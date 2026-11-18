@@ -12,7 +12,7 @@ use steve_channels::adapters::ext_ws::{self, ExtWs, ExtWsHook, Timing};
 use steve_channels::channel::{ActAsUser, ActTarget, MessageRef, OutContent, SendKey};
 use steve_channels::fake::ext_ws::{self as fake, FakeExtWs};
 use steve_channels::history::HistoryRead;
-use steve_channels::inbound::{LABEL_HISTORY_BACKFILL, LABEL_OWN};
+use steve_channels::inbound::{LABEL_HISTORY_BACKFILL, LABEL_HISTORY_BEFORE, LABEL_OWN};
 use steve_channels::lifecycle::ConnectionRuntime;
 use steve_channels::media::{MediaError, MediaFetch};
 use steve_channels::{Channels, HandleRef};
@@ -984,6 +984,377 @@ async fn v14_read_only_refuses_writes_locally() {
         h.fake.calls("reactions.add").is_empty(),
         "global read-only rejects reactions before RPC"
     );
+}
+
+/// Exercise the actual adapter boundary, deliberately retaining a ConnCx from before a toggle.
+async fn personal_write(h: &H, cx: &ConnCx, method: &str) -> Result<(), AdapterError> {
+    let target = MessageRef::platform("gate-chat", "m_target");
+    match method {
+        "messages.send" => h
+            .ext
+            .send(
+                cx,
+                &space("gate-chat"),
+                &OutContent::text("new send"),
+                &SendKey("gate-send".into()),
+            )
+            .await
+            .map(|_| ()),
+        "messages.reply" => h
+            .ext
+            .send(
+                cx,
+                &ActTarget::Reply {
+                    to: target,
+                    in_thread: true,
+                },
+                &OutContent::text("new reply"),
+                &SendKey("gate-reply".into()),
+            )
+            .await
+            .map(|_| ()),
+        "messages.recall" => h.ext.recall(cx, &target).await,
+        "reactions.add" => h
+            .ext
+            .add_reaction(cx, &target, steve_channels::ReactionKind::Ack)
+            .await
+            .map(|_| ()),
+        "reactions.remove" => h.ext.remove_reaction(cx, &target, "r_target").await,
+        _ => unreachable!(),
+    }
+}
+
+const PERSONAL_WRITES: [&str; 5] = [
+    "messages.send",
+    "messages.reply",
+    "messages.recall",
+    "reactions.add",
+    "reactions.remove",
+];
+
+#[tokio::test(flavor = "multi_thread")]
+async fn every_personal_write_requires_both_gates_without_confusing_their_sources() {
+    for (hub_on, policy, target_blocked) in [
+        (false, "allowed", false),
+        (false, "restricted", false),
+        (false, "forbidden", false),
+        (true, "forbidden", false),
+        (true, "restricted", true),
+        (true, "restricted", false),
+        (true, "allowed", false),
+    ] {
+        let h = setup().await;
+        h.fake.with(|w| {
+            w.write_policy = policy.into();
+            if target_blocked {
+                w.forbidden_targets.insert("gate-chat".into());
+            }
+        });
+        let id = h.connect().await;
+        let cx = h.cx(&id);
+        if !hub_on {
+            h.conns
+                .patch(&caller(WS, ME), &id, None, Some(vec!["msg.receive".into()]))
+                .unwrap();
+        }
+        let handshakes = h.fake.calls("hello").len();
+        for method in PERSONAL_WRITES {
+            let result = personal_write(&h, &cx, method).await;
+            let sent = hub_on && policy != "forbidden" && !target_blocked;
+            assert_eq!(
+                result.is_ok(),
+                sent,
+                "hub={hub_on}, policy={policy}, method={method}: {result:?}"
+            );
+            if !hub_on {
+                let error = result.unwrap_err();
+                assert!(
+                    matches!(error, AdapterError::Provider(ProviderError::Rejected(_))),
+                    "{error:?}"
+                );
+                assert!(error.to_string().contains("Hub:"));
+                assert!(error.to_string().contains("msg.send_as_user"));
+            } else if !sent {
+                let error = result.unwrap_err();
+                let scope = if target_blocked {
+                    BlockScope::Target
+                } else {
+                    BlockScope::Connection
+                };
+                assert!(
+                    matches!(error, AdapterError::Provider(ProviderError::Blocked(s, _)) if s == scope),
+                    "{error:?}"
+                );
+                assert!(error.to_string().contains(if target_blocked {
+                    "target_forbidden"
+                } else {
+                    "session.write_policy=forbidden"
+                }));
+            }
+            assert_eq!(
+                h.fake.calls(method).len(),
+                usize::from(hub_on && policy != "forbidden"),
+                "{method}: denied local writes never reach the service"
+            );
+        }
+        assert_eq!(
+            h.fake.with(|w| w.writes.len()),
+            if hub_on && policy != "forbidden" && !target_blocked {
+                5
+            } else {
+                0
+            }
+        );
+        if !hub_on {
+            assert_eq!(
+                h.fake.calls("hello").len(),
+                handshakes,
+                "Hub refusal precedes even dialing"
+            );
+        }
+        // Read and write facts remain independent in both APIs, even when both gates are closed.
+        let who = caller(WS, ME);
+        let account = h.conns.get(&who, &id).unwrap();
+        assert_eq!(account.caps.iter().any(|c| c == "msg.send_as_user"), hub_on);
+        assert_eq!(
+            account.detail.as_ref().unwrap()["external_write_policy"]["policy"],
+            policy
+        );
+        let integrations = serde_json::to_value(h.conns.integrations(&who).unwrap()).unwrap();
+        let c = &integrations["providers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|p| p["connections"].as_array().unwrap())
+            .find(|c| c["id"] == id)
+            .unwrap();
+        assert_eq!(c["detail"], serde_json::to_value(account.detail).unwrap());
+        assert_eq!(
+            c["capabilities"][1]["state"],
+            if hub_on { "on" } else { "off" }
+        );
+        h.ext
+            .read(&cx, "gate-chat", h.t0, h.t0 + 100, 1)
+            .await
+            .unwrap();
+        assert!(
+            !h.fake.calls("messages.history").is_empty(),
+            "reads still work with either gate closed"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn personal_writes_recheck_both_gates_after_rate_limit_backoff() {
+    for hub in [true, false] {
+        let h = Arc::new(setup().await);
+        let id = h.connect().await;
+        let (rt, _tx) = h.runtime();
+        until("subscribed", || !h.subscribes().is_empty()).await;
+        h.fake.with(|w| w.rate_limit_next = Some(1_500));
+        let pending = {
+            let h = h.clone();
+            let cx = h.cx(&id);
+            tokio::spawn(async move { personal_write(&h, &cx, "messages.send").await })
+        };
+        until("rate limited", || h.fake.calls("messages.send").len() == 1).await;
+        if hub {
+            h.conns
+                .patch(&caller(WS, ME), &id, None, Some(vec!["msg.receive".into()]))
+                .unwrap();
+        } else {
+            h.fake.with(|w| w.write_policy = "forbidden".into());
+            h.fake.notify(
+                "session.status",
+                json!({"status":"ok", "write_policy":"forbidden"}),
+            );
+            until("policy recorded", || {
+                h.conns.get(&caller(WS, ME), &id).unwrap().detail.unwrap()["external_write_policy"]
+                    ["policy"]
+                    == "forbidden"
+            })
+            .await;
+        }
+        let error = pending.await.unwrap().unwrap_err().to_string();
+        assert!(
+            error.contains(if hub {
+                "Hub:"
+            } else {
+                "session.write_policy=forbidden"
+            }),
+            "{error}"
+        );
+        assert_eq!(
+            h.fake.calls("messages.send").len(),
+            1,
+            "backoff cannot retain a stale grant"
+        );
+        assert!(h.fake.with(|w| w.writes.is_empty()));
+        rt.shutdown().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn enabling_personal_writes_keeps_history_read_only_and_does_not_replay_denials() {
+    let h = setup().await;
+    let id = h.connect().await;
+    let cx = h.cx(&id);
+    h.conns
+        .patch(&caller(WS, ME), &id, None, Some(vec!["msg.receive".into()]))
+        .unwrap();
+    let (rt, _tx) = h.runtime();
+    until("subscribed", || !h.subscribes().is_empty()).await;
+    for method in PERSONAL_WRITES {
+        assert!(personal_write(&h, &cx, method).await.is_err());
+    }
+    h.env.clock.advance(5 * 60_000);
+    h.conns
+        .patch(
+            &caller(WS, ME),
+            &id,
+            None,
+            Some(vec!["msg.receive".into(), "msg.send_as_user".into()]),
+        )
+        .unwrap();
+    // Arrives on the still-open subscription after enabling, but predates the new Hub watermark.
+    let seq = h.fake.push_message(msg(
+        &h,
+        "gate-chat",
+        "old-on-enable",
+        "u_7",
+        "old while disabled",
+        1,
+    ));
+    until("history acknowledged", || h.fake.acked() >= seq).await;
+    let old = h.messages("gate-chat");
+    assert_eq!(
+        old[0][2], LABEL_HISTORY_BEFORE,
+        "enabling does not start historical automation: {old:?}"
+    );
+    assert!(
+        h.fake.with(|w| w.writes.is_empty()),
+        "neither denied operations nor history are replayed"
+    );
+    // Only a new explicit operation can write, including through a context from before enabling.
+    personal_write(&h, &cx, "messages.send").await.unwrap();
+    assert_eq!(h.fake.with(|w| w.writes.len()), 1);
+    h.conns
+        .patch(&caller(WS, ME), &id, Some(true), None)
+        .unwrap();
+    assert!(
+        personal_write(&h, &cx, "messages.recall")
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("Hub:")
+    );
+    rt.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn direct_personal_connector_writes_cannot_bypass_the_hub_gate() {
+    use steve_channels::connector::{ConnectorTools, Manifest};
+    let h = setup().await;
+    h.fake.with(|w| w.connector = Some(connector_manifest()));
+    let id = h.connect().await;
+    let cx = h.cx(&id);
+    let manifest = Manifest::parse(&connector_manifest()).unwrap();
+    let op = manifest
+        .operations
+        .iter()
+        .find(|o| o.name == "update")
+        .unwrap();
+    h.conns
+        .patch(&caller(WS, ME), &id, None, Some(vec!["msg.receive".into()]))
+        .unwrap();
+    let args = json!({"reference":"remote-id", "text":"new text"});
+    let error = h
+        .ext
+        .call(&cx, op, args.clone(), "write-disabled")
+        .await
+        .unwrap_err();
+    assert!(error.contains("Hub:"), "{error}");
+    assert!(h.fake.calls("connector.call").is_empty());
+    h.conns
+        .patch(
+            &caller(WS, ME),
+            &id,
+            None,
+            Some(vec!["msg.receive".into(), "msg.send_as_user".into()]),
+        )
+        .unwrap();
+    h.fake.with(|w| w.write_policy = "forbidden".into());
+    let error = h
+        .ext
+        .call(&cx, op, args.clone(), "service-disabled")
+        .await
+        .unwrap_err();
+    assert!(error.contains("session.write_policy=forbidden"), "{error}");
+    assert!(h.fake.calls("connector.call").is_empty());
+    h.fake.with(|w| w.write_policy = "allowed".into());
+    h.ext.call(&cx, op, args, "new-write").await.unwrap();
+    assert_eq!(h.fake.with(|w| w.writes.len()), 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn personal_reactions_and_connector_writes_recheck_the_hub_after_pacing() {
+    use steve_channels::connector::{ConnectorTools, Manifest};
+    for connector in [false, true] {
+        let h = Arc::new(setup().await);
+        h.fake.with(|w| {
+            w.limits["write_per_sec"] = json!(0.5);
+            w.limits["write_burst"] = json!(1);
+            w.connector = Some(connector_manifest());
+        });
+        let id = h.connect().await;
+        let cx = h.cx(&id);
+        personal_write(&h, &cx, "messages.send").await.unwrap();
+        let handshakes = h.fake.calls("hello").len();
+        let pending = {
+            let h = h.clone();
+            tokio::spawn(async move {
+                if connector {
+                    let manifest = Manifest::parse(&connector_manifest()).unwrap();
+                    let op = manifest
+                        .operations
+                        .iter()
+                        .find(|o| o.name == "update")
+                        .unwrap();
+                    h.ext
+                        .call(
+                            &cx,
+                            op,
+                            json!({"reference":"remote-id","text":"after pacing"}),
+                            "paced-write",
+                        )
+                        .await
+                        .map(|_| ())
+                } else {
+                    personal_write(&h, &cx, "reactions.add")
+                        .await
+                        .map_err(|e| e.to_string())
+                }
+            })
+        };
+        // A second hello proves the operation passed the initial Hub check. The first write
+        // consumed its burst token, so this operation cannot dispatch before the pacing wait.
+        until("write session opened", || {
+            h.fake.calls("hello").len() > handshakes
+        })
+        .await;
+        h.conns
+            .patch(&caller(WS, ME), &id, None, Some(vec!["msg.receive".into()]))
+            .unwrap();
+        let error = pending.await.unwrap().unwrap_err();
+        assert!(error.contains("Hub:"), "{error}");
+        assert!(h.fake.calls("reactions.add").is_empty());
+        assert!(h.fake.calls("connector.call").is_empty());
+        assert_eq!(
+            h.fake.with(|w| w.writes.len()),
+            1,
+            "only the earlier explicit send was written"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------------------------

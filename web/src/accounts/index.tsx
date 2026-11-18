@@ -18,6 +18,7 @@ import { NewAccountDialog, ConnectDialog, CredentialDialog } from "@/accounts/di
 import { NewVaultDialog } from "@/vault/new-item"
 import { MailSettingsSections, useMailSettings } from "@/mail/settings"; import { MAIL_ADAPTERS } from "@/api/mail"
 import { IntegrationRow, IntegrationSection, IntegrationSettings } from "@/components/affect/integration-settings-clean"
+import { hasExternalWritePolicy, ServiceWritePolicy } from "@/accounts/write-policy"
 import { useT } from "@/i18n"
 import { num } from "@/i18n/format"
 
@@ -195,6 +196,7 @@ function Connection({ c, adapter, label, mine, onChange }: { c: RConnection; ada
   const [busy, act] = useBusy(), [cred, setCred] = useState<string[] | null>(null), [usage, setUsage] = useState<RUsage | null>(null), [asking, setAsking] = useState(false)
   const m = useMailSettings(mine && MAIL_ADAPTERS.includes(c.adapter) ? c.id : null)
   const [s, dot] = connStatusOf(c)
+  const personalWrites = hasExternalWritePolicy(c.detail) && c.available_caps.includes("msg.send_as_user")
   const reauth = async () => {
     const r = await act(() => accountsApi.reauth(c.id))
     if (!r) return
@@ -232,7 +234,10 @@ function Connection({ c, adapter, label, mine, onChange }: { c: RConnection; ada
         </IntegrationSection>}
         <MailSettingsSections m={m} connection={c.id} />
         {c.available_caps.length > 0 && <IntegrationSection label={t("accounts:conn.allow")}>{c.available_caps.map((cap) => (
-          <IntegrationRow key={cap} title={capLabel(cap)}><Switch aria-label={capLabel(cap)} checked={c.caps.includes(cap)} disabled={busy} onCheckedChange={(v) => toggleCap(cap, v)} data-cap-toggle={cap} /></IntegrationRow>))}</IntegrationSection>}
+          <IntegrationRow key={cap} title={personalWrites && cap === "msg.send_as_user" ? t("accounts:writePolicy.hub") : capLabel(cap)}
+            hint={personalWrites && cap === "msg.send_as_user" ? t(c.caps.includes(cap) ? "accounts:writePolicy.hubOnNote" : "accounts:writePolicy.hubOffNote") : undefined}>
+            <Switch aria-label={personalWrites && cap === "msg.send_as_user" ? t("accounts:writePolicy.hub") : capLabel(cap)} checked={c.caps.includes(cap)} disabled={busy} onCheckedChange={(v) => toggleCap(cap, v)} data-cap-toggle={cap} /></IntegrationRow>))}
+          <ServiceWritePolicy detail={c.detail} /></IntegrationSection>}
         {c.caps.includes("msg.receive") && <IntegrationSection><IntegrationRow title={t("accounts:conn.identity")} hint={t("accounts:conn.identitySub")}>
           <Button size="xs" variant="ghost" className="text-muted-foreground" onClick={() => go("#/channels/acc/" + c.account_id)} data-conn-identity>{t("accounts:conn.open")}<Chevron /></Button></IntegrationRow></IntegrationSection>}
       </IntegrationSettings>

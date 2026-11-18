@@ -19,7 +19,7 @@ export type RAccount = {
 export type ConnStatus = "ok" | "reauth" | "error" | "paused" | "revoked"
 export type RConnection = { id: string; account_id: string; adapter: string; auth: "oauth" | "credential" | "none"; status: ConnStatus; caps: string[]; available_caps: string[]; health: { last_ok: number; last_error: string; error_at: number }; last_sync: number | null
   /** the Hub has its adapter (absent on older Hubs: installed) */
-  installed?: boolean }
+  installed?: boolean; detail?: Record<string, unknown> }
 export type RFieldDef = { key: string; label: string; secret: boolean; required: boolean; type: "text" | "password" | "number" | "select"; default?: string; hint?: string }
 export type RAdapter = { id: string; system: string; name: string; auth: "oauth" | "credential" | "managed" | "none"; caps: string[]; device: boolean; fields?: RFieldDef[] }
 export type RMatchRule = { id: string; family: string; kind: string; config: { same_org_only: boolean; exclude: string[]; min_len: number }; enabled: boolean; updated: number }

@@ -13,6 +13,7 @@ import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/component
 import { go, Group, Row, SectionLabel, StatusDot } from "@/ui"
 import { Select } from "@/view-shared"
 import { t as tr, useT } from "@/i18n"
+import { hasExternalWritePolicy, ServiceWritePolicy } from "@/accounts/write-policy"
 import { tm, toast } from "@/store"
 import { useBusy } from "@/accounts/load"
 import { accountsApi, CONN_STATUS, connStatusOf } from "@/api/accounts"
@@ -20,7 +21,7 @@ import { selfSideOf } from "@/integrations/sides"
 import { channelsApi, type ChannelAccount, type Rule, type Space } from "@/api/channels"
 import { areaLabel, feishuGrantUrl, viaService, type FeishuAppDetail, type FeishuUserDetail, type IAdapter, type IConnection, type IInstallation, type IProvider, type MissingRow } from "@/api/integrations"
 import { ProviderGlyph } from "@/integrations/index"
-import { IntegrationSection, IntegrationSettings } from "@/components/affect/integration-settings-clean"
+import { IntegrationRow, IntegrationSection, IntegrationSettings } from "@/components/affect/integration-settings-clean"
 import { FeishuConnectDialog, SelfButtons } from "@/integrations/feishu"
 import { CleanupDialog, DisconnectDialog, type Leaving } from "@/integrations/disconnect"
 import { OwnerChip } from "../people/owner-chip"
@@ -126,6 +127,7 @@ function Identity({ kind, c, p, chan, app, appConn, onLeave }: { kind: "steve" |
   const feishu = isFeishu(p.id), [s, dot] = connStatusOf(c), [clean, setClean] = useState(false)
   // the provider's own permissions and app apply only to its own adapters
   const service = viaService(c, p), native = feishu && !service
+  const hubWriteOn = c.capabilities.some((a) => a.area === "send_as_you" && a.state === "on")
   const name = c.name || c.handle
   const live = c.capabilities.filter((a) => a.state !== "planned"), planned = c.capabilities.filter((a) => a.state === "planned")
   const channelHref = live.some((a) => a.area === "channel") ? "#/channels/acc/" + c.id : "#/accounts/" + c.account_id
@@ -149,6 +151,11 @@ function Identity({ kind, c, p, chan, app, appConn, onLeave }: { kind: "steve" |
       {c.status === "paused" && <Blocked data-blocked="paused">{t("integrations:inst.paused")}</Blocked>}
       {c.status === "error" && <Blocked data-blocked="error">{c.health.last_error ? t("integrations:inst.errorWith", { error: c.health.last_error }) : t("integrations:inst.errorPlain")}</Blocked>}
       <Group>
+        {c.identity === "self" && hasExternalWritePolicy(c.detail) && <IntegrationRow title={t("accounts:writePolicy.hub")}
+          hint={t(hubWriteOn ? "accounts:writePolicy.hubOnNote" : "accounts:writePolicy.hubOffNote")} data-hub-write-policy={hubWriteOn ? "on" : "off"}>
+          <a href={"#/accounts/" + c.account_id} className="inline-flex items-center gap-1 type-footnote text-muted-foreground hover:text-foreground">{t("accounts:writePolicy.manage")}<ChevronRightIcon className="size-4 text-tertiary" /></a>
+        </IntegrationRow>}
+        <ServiceWritePolicy detail={c.detail} />
         {feishu && chan && <Defaults kind={kind} c={c} chan={chan} />}
         {kind === "steve" && feishu && chan?.persona && <Row title={t("integrations:inst.persona")} sub={t("integrations:inst.personaSub")} onClick={() => go("#/channels/personas/" + chan.persona!.id)} data-persona>
           <span className="type-callout text-muted-foreground">{chan.persona.name}</span><ChevronRightIcon className="size-4 text-tertiary" /></Row>}
