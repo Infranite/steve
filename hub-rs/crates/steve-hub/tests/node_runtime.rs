@@ -5239,8 +5239,9 @@ async fn the_open_carries_the_principals_variables_on_this_node() {
     );
 }
 
-/// With `STEVE_PRINCIPAL_STATE=on` a new session gets its principal's own harness directory on
-/// the Node, recorded on the session; only the Node's owner starts from their own settings there.
+/// A new session gets a private harness directory within its principal's state on the Node,
+/// recorded on the session. Even without managed skills it must not share legacy skill files.
+/// Only a session of the Node's owner starts from the owner's settings.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_new_session_gets_its_principals_own_harness_directory() {
     for (node_owner, imports) in [("u", true), ("someone-else", false)] {
@@ -5263,11 +5264,13 @@ async fn a_new_session_gets_its_principals_own_harness_directory() {
         let v: serde_json::Value = serde_json::from_str(&request).unwrap();
         let state = &v["body"]["state"];
         let dir = state["dir"].as_str().unwrap().to_string();
-        assert_eq!(dir.split('/').count(), 4, "{dir}");
-        assert!(
-            dir.starts_with("default-") && dir.contains("/u-") && dir.contains("/dev-"),
-            "{dir}"
-        );
+        let parts: Vec<_> = dir.split('/').collect();
+        assert_eq!(parts.len(), 5, "{dir}");
+        assert!(parts[0].starts_with("default-"), "{dir}");
+        assert!(parts[1].starts_with("u-"), "{dir}");
+        assert!(parts[2].starts_with("dev-"), "{dir}");
+        assert!(parts[3].starts_with("claude-code-"), "{dir}");
+        assert!(parts[4].starts_with("session-s1-"), "{dir}");
         assert_eq!(state["import_owner"], imports, "{v}");
         let recorded: String = h.q("SELECT state_dir FROM runtime_sessions WHERE session_id='s1'");
         assert_eq!(recorded, dir);

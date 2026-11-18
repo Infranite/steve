@@ -1,4 +1,8 @@
 {
+  "modules.caps.skill_version": "技能版本",
+  "modules.caps.skill_changed": "技能已更改，请刷新后再试。",
+  "modules.caps.skill_not_published": "该版本从未发布，不能回滚到它。",
+  "modules.caps.skill_write_denied": "你已无权修改该工作空间的技能。",
   "modules.error.invalid": "参数不对：%{fields}",
   "modules.error.list_sep": "、",
   "modules.error.internal": "出了点问题，请稍后再试",

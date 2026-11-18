@@ -34,6 +34,7 @@ mod host;
 mod inline_images;
 mod job;
 mod journal;
+mod managed_skills;
 mod procs;
 pub mod project_setup;
 pub mod reclaim;
@@ -513,6 +514,7 @@ pub(crate) struct Inner {
     /// daily updater. Held only while inspecting/reserving work, never across an await.
     adapter_maintenance: Mutex<Option<String>>,
     adapter_io: tokio::sync::RwLock<()>,
+    skill_cache_io: Mutex<()>,
     imports: history::Imports,
     research: research::Research,
     /// The OS sandbox around what this Node starts for runs ([`confine`]).
@@ -1508,6 +1510,7 @@ impl LocalNode {
             adapter_updates: Default::default(),
             adapter_maintenance: Mutex::new(None),
             adapter_io: tokio::sync::RwLock::new(()),
+            skill_cache_io: Mutex::new(()),
             imports: Default::default(),
             session_capacity: AtomicUsize::new(cfg.capacity.sessions as usize),
             cfg,
@@ -2466,6 +2469,20 @@ impl SessionExecutor for LocalNode {
             self.check_harness_policy(&o.choice.harness, &o.policy)?;
             McpServer::check_all(&o.mcp_servers)?;
             Skill::check_all(&o.skills)?;
+            if let Some(snap) = &o.skill_snapshot {
+                snap.check()?;
+                if !o.skills.is_empty()
+                    || !o.state.as_ref().is_some_and(HarnessState::valid)
+                    || !managed_skills::supported(
+                        &self.0.cfg.acp.adapter_properties(&o.choice.harness),
+                    )
+                {
+                    return Err(ApiError::new(
+                        ErrorCode::Unsupported,
+                        "this adapter cannot isolate managed skills",
+                    ));
+                }
+            }
             let w = t
                 .workspace(&o.workspace.id)?
                 .ok_or_else(|| ApiError::new(ErrorCode::Invalid, "no such workspace"))?;
@@ -2475,6 +2492,14 @@ impl SessionExecutor for LocalNode {
                 Self::idle(t, &o.session)?;
                 if s.view.phase != SessionPhase::Released {
                     return Err(ApiError::new(ErrorCode::Conflict, "already open"));
+                }
+                if s.open.skill_snapshot != o.skill_snapshot
+                    || (o.skill_snapshot.is_some() && s.open.state != o.state)
+                {
+                    return Err(ApiError::new(
+                        ErrorCode::Conflict,
+                        "a session's managed skill snapshot cannot change",
+                    ));
                 }
                 if s.open.workspace != o.workspace || s.open.choice.harness != o.choice.harness {
                     return Err(ApiError::new(
@@ -2506,6 +2531,7 @@ impl SessionExecutor for LocalNode {
                 effective_permissions: o.policy.permissions,
                 guarantees: vec![],
                 resume: acp_id.clone().map(id).transpose()?,
+                skill_receipt: None,
             };
             t.put_session(&SessionRow {
                 open: o.clone(),
@@ -4200,6 +4226,26 @@ fn root_of(at: &RootPath) -> RootPath {
 
 #[async_trait]
 impl Discovery for LocalNode {
+    async fn sync_skills(&self, target: SyncSkills) -> ApiResult<SkillCacheReceipt> {
+        if !target.snapshot.entries.is_empty()
+            && (self.0.cfg.capacity.sessions == 0
+                || !self.0.cfg.acp.adapters.contains_key(&target.adapter)
+                || !managed_skills::supported(&self.0.cfg.acp.adapter_properties(&target.adapter)))
+        {
+            return Err(ApiError::new(
+                ErrorCode::Unsupported,
+                "this adapter cannot isolate managed skills",
+            ));
+        }
+        let inner = self.0.clone();
+        tokio::task::spawn_blocking(move || {
+            let _guard = inner.skill_cache_io.lock().unwrap();
+            managed_skills::sync(&inner.cfg.home, &target)
+        })
+        .await
+        .map_err(internal)?
+    }
+
     async fn set_session_capacity(&self, sessions: u32) -> ApiResult<()> {
         if self.0.cfg.capacity.sessions == 0 {
             return unsupported("this node runs no sessions");
@@ -4426,6 +4472,20 @@ impl Discovery for LocalNode {
             })
             .collect::<ApiResult<_>>()?;
         harnesses.sort_by(|a, b| a.name.cmp(&b.name));
+        let skill_features = harnesses
+            .iter()
+            .filter(|h| {
+                h.sessions
+                    && h.setup
+                        .as_ref()
+                        .is_none_or(|s| s.state == SetupState::Ready)
+                    && h.adapter
+                        .as_ref()
+                        .is_none_or(|a| a.status == AdapterStatus::Ready)
+                    && managed_skills::supported(&self.0.cfg.acp.adapter_properties(&h.name))
+            })
+            .map(|h| format!("{SKILLS_ADAPTER_PREFIX}{}", h.name))
+            .collect::<Vec<_>>();
         Ok(Capabilities {
             node: self.0.cfg.node.clone(),
             os: std::env::consts::OS.into(),
@@ -4447,7 +4507,12 @@ impl Discovery for LocalNode {
             },
             // a command's secret as a temp file on this machine
             features: {
-                let mut f = vec![FEATURE_SECRET_FILE.into(), FEATURE_ARTIFACT_READ.into()];
+                let mut f = vec![
+                    FEATURE_SECRET_FILE.into(),
+                    FEATURE_ARTIFACT_READ.into(),
+                    FEATURE_MANAGED_SKILLS.into(),
+                ];
+                f.extend(skill_features);
                 if self.0.upgrader.get().is_some() {
                     f.push(FEATURE_NODE_UPGRADE.into());
                 }

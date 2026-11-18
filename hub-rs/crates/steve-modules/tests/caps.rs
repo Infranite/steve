@@ -330,7 +330,17 @@ async fn a_bots_skills_stay_within_what_its_node_is_given() {
         )
         .await;
         assert_eq!(s, 200, "{v}");
-        ids.push(v["id"].as_str().unwrap().to_string());
+        let id = v["id"].as_str().unwrap().to_string();
+        assert!(v["published_version"].is_null());
+        let (s, v) = req(
+            &h,
+            "PUT",
+            &format!("/capabilities/skills/{id}/publication"),
+            Some(json!({"version":1,"publication":0})),
+        )
+        .await;
+        assert_eq!(s, 200, "{v}");
+        ids.push(id);
     }
     // 4 × 31 KiB + 4 KiB is exactly what a Bot may have on
     for id in &ids[..5] {
@@ -360,12 +370,20 @@ async fn a_bots_skills_stay_within_what_its_node_is_given() {
     )
     .await;
     assert_eq!(s, 200);
-    // a body that grows past it for a Bot that has it on is refused; one that is off may grow
+    // Growth is allowed in a draft, but publication must fit every enabled Bot.
     let (s, _) = req(
         &h,
         "PATCH",
         &format!("/capabilities/skills/{}", ids[4]),
-        Some(json!({"content": "y".repeat(5 * 1024)})),
+        Some(json!({"base_version":1,"content": "y".repeat(5 * 1024)})),
+    )
+    .await;
+    assert_eq!(s, 200);
+    let (s, _) = req(
+        &h,
+        "PUT",
+        &format!("/capabilities/skills/{}/publication", ids[4]),
+        Some(json!({"version":2,"publication":1})),
     )
     .await;
     assert_eq!(s, 400);
@@ -373,7 +391,7 @@ async fn a_bots_skills_stay_within_what_its_node_is_given() {
         &h,
         "PATCH",
         &format!("/capabilities/skills/{}", ids[5]),
-        Some(json!({"content": "y".repeat(32 * 1024)})),
+        Some(json!({"base_version":1,"content": "y".repeat(32 * 1024)})),
     )
     .await;
     assert_eq!(s, 200);
@@ -686,4 +704,54 @@ async fn bot_tool_pins_are_scoped_bounded_and_follow_enabled_capabilities() {
         ),
         1
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn drafts_conflict_and_rollback_never_replace_the_editor_head() {
+    let h = setup();
+    let (status, draft) = req(
+        &h,
+        "POST",
+        "/capabilities/skills",
+        Some(json!({
+            "name":"review","description":"Use for review","content":"v1","bot":"dev"
+        })),
+    )
+    .await;
+    assert_eq!(status, 200, "{draft}");
+    let path = format!("/capabilities/skills/{}", draft["id"].as_str().unwrap());
+    let publication = format!("{path}/publication");
+    let publish = |v, p| {
+        req(
+            &h,
+            "PUT",
+            &publication,
+            Some(json!({"version":v,"publication":p})),
+        )
+    };
+    assert_eq!(publish(1, 0).await.0, 200);
+    let b = |body: &str| Some(json!({"base_version":1,"content":body}));
+    let (x, y) = tokio::join!(
+        req(&h, "PATCH", &path, b("one")),
+        req(&h, "PATCH", &path, b("two"))
+    );
+    assert!(matches!((x.0, y.0), (200, 409) | (409, 200)), "{x:?} {y:?}");
+    let (x, y) = tokio::join!(publish(2, 1), publish(2, 1));
+    assert!(matches!((x.0, y.0), (200, 409) | (409, 200)), "{x:?} {y:?}");
+    let (status, rolled) = req(
+        &h,
+        "PUT",
+        &publication,
+        Some(json!({
+            "version":1,"publication":2,"rollback":true
+        })),
+    )
+    .await;
+    assert_eq!(status, 200, "{rolled}");
+    assert_eq!(rolled["head_version"], 2);
+    assert_eq!(rolled["published_version"], 1);
+    assert_eq!(rolled["publication"], 3);
+    assert_ne!(rolled["content"], "v1");
+    let (_, v1) = req(&h, "GET", &format!("{path}/versions/1"), None).await;
+    assert_eq!(v1["content"], "v1");
 }

@@ -59,8 +59,12 @@ fn a_session_gets_the_entries_its_bot_has_switched_on() {
             mcp::insert(tx, &server("bmcp_a", "files", "stdio"))?;
             mcp::insert(tx, &server("bmcp_b", "remote", "http"))?;
             mcp::insert(tx, &server("bmcp_c", "unused", "sse"))?;
-            skills::insert(tx, &skill("bskill_a", "review"))?;
-            skills::insert(tx, &skill("bskill_b", "drafts"))?;
+            for (id, name) in [("bskill_a", "review"), ("bskill_b", "drafts")] {
+                let s = skill(id, name);
+                skills::insert(tx, &s)?;
+                skills::save_version(tx, &s, 1, "user", "")?;
+                skills::publish(tx, id, 1, 1)?;
+            }
             caps::set(tx, "dev", "mcp", "bmcp_a", true, 1)?;
             caps::set(tx, "dev", "mcp", "bmcp_b", false, 1)?;
             caps::set(tx, "doc", "mcp", "bmcp_b", true, 1)?;
@@ -79,7 +83,7 @@ fn a_session_gets_the_entries_its_bot_has_switched_on() {
             assert!(mcp::enabled_for_session(c, "s_none")?.is_empty());
             let got: Vec<String> = skills::enabled_for_session(c, "s_dev")?
                 .into_iter()
-                .map(|s| s.name)
+                .map(|s| s.version.name)
                 .collect();
             assert_eq!(got, ["review"]);
             let used: Vec<String> = caps::of_entry(c, "mcp", "bmcp_b")?
@@ -262,6 +266,41 @@ fn pins_follow_their_entries_and_usage_sums_by_tool() {
             )?;
             assert_eq!(old, 0, "older than 90 days: dropped");
             Ok::<_, steve_store::StoreError>(())
+        })
+        .unwrap();
+}
+
+#[test]
+fn history_retains_current_three_others_and_thirty_day_boundary() {
+    let t = setup();
+    t.store
+        .transaction::<_, steve_store::StoreError>(|c| {
+            let mut s = skill("retained", "review");
+            skills::insert(c, &s)?;
+            let now = skills::RETENTION_MS + 1000;
+            for v in 1..=7 {
+                s.updated = match v {
+                    4 => 1000,
+                    3 => 999,
+                    _ => v,
+                };
+                s.content = format!("body {v}");
+                skills::save_version(c, &s, v, "user", "")?;
+            }
+            skills::publish(c, &s.id, 1, 1)?;
+            assert_eq!(skills::prune(c, now)?, 2);
+            assert_eq!(
+                (1..=7)
+                    .filter(|&v| skills::version(c, &s.id, v).unwrap().is_some())
+                    .collect::<Vec<_>>(),
+                [1, 4, 5, 6, 7]
+            );
+            skills::publish(c, &s.id, 6, now)?;
+            skills::publish(c, &s.id, 1, now)?;
+            assert_eq!(skills::history(c, &s.id)?.head_version, 7);
+            assert_eq!(skills::version(c, &s.id, 1)?.unwrap().saved_at, 1);
+            assert_eq!(skills::history(c, &s.id)?.publication, 3);
+            Ok(())
         })
         .unwrap();
 }

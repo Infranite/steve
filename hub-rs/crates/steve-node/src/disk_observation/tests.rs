@@ -298,6 +298,7 @@ fn unknown_operation_invalidates_started_even_while_session_keeps_active_executi
                     effective_permissions: open.policy.permissions,
                     guarantees: vec![],
                     resume: None,
+                    skill_receipt: None,
                 },
                 open,
                 incarnation,

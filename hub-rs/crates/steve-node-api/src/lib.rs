@@ -19,6 +19,7 @@ pub mod glob;
 pub mod ids;
 pub mod ports;
 pub mod run;
+pub mod skills;
 pub mod stop;
 pub mod tools;
 pub mod workspace;
@@ -33,13 +34,17 @@ pub use events::*;
 pub use ids::*;
 pub use ports::*;
 pub use run::*;
+pub use skills::*;
 pub use stop::*;
 pub use tools::*;
 pub use workspace::*;
 
 /// Major.minor of this contract. A major change refuses the connection; a minor one only adds, and
 /// the Hub sends what a minor added only to a Node whose hello says that minor (see [`AUTO_MODE`]).
-pub const PROTOCOL: (u16, u16) = (0, 9);
+pub const PROTOCOL: (u16, u16) = (0, 10);
+
+/// Managed snapshots and proactive skills synchronization; older Nodes must not get the bodies.
+pub const MANAGED_SKILLS: (u16, u16) = (0, 10);
 
 /// The first protocol whose execution-delivery reads can enforce automatic reply scope.
 pub const REPLY_DELIVERY_SCOPE: (u16, u16) = (0, 9);

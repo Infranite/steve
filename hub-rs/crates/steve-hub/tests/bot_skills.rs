@@ -8,7 +8,7 @@ use std::sync::Arc;
 use node_harness::*;
 use serde_json::{Value, json};
 use steve_modules::caps::Capabilities;
-use steve_modules::caps::skills::SkillIn;
+use steve_modules::caps::skills::{PublishIn, SkillIn};
 use steve_modules::vault::Vault;
 use steve_modules::vault::keystore::FileKeyStore;
 
@@ -34,10 +34,29 @@ async fn a_bots_enabled_skills_go_into_open_session() {
         Arc::new(FileKeyStore::open(keys.path()).unwrap()),
     );
     let svc = Capabilities::new(vault);
-    svc.skill_create(
+    let draft = svc.skill_create(
         "default",
         "u1",
         skill(json!({"name": "code-review", "description": "Review a change.", "content": "# Review", "bot": "dev"})),
+    )
+    .unwrap();
+    let id = draft["id"].as_str().unwrap();
+    svc.skill_publish(
+        "default",
+        "u1",
+        id,
+        PublishIn {
+            version: 1,
+            publication: 0,
+            rollback: false,
+        },
+    )
+    .unwrap();
+    svc.skill_update(
+        "default",
+        "u1",
+        id,
+        skill(json!({"base_version":1,"content":"not published"})),
     )
     .unwrap();
     let off = svc
@@ -66,9 +85,13 @@ async fn a_bots_enabled_skills_go_into_open_session() {
     let _rt = h.bind(&node, "s1");
     let open: String = h.q("SELECT request FROM node_commands WHERE method = 'open_session'");
     let open: Value = serde_json::from_str(&open).unwrap();
+    assert!(open["body"]["skills"].is_null(), "{open}");
     assert_eq!(
-        open["body"]["skills"],
-        json!([{"name": "code-review", "description": "Review a change.", "content": "# Review"}]),
+        open["body"]["skill_snapshot"]["entries"],
+        json!([{
+            "id":id,"version":1,"publication":1,
+            "name":"code-review","description":"Review a change.","content":"# Review"
+        }]),
         "{open}"
     );
 }

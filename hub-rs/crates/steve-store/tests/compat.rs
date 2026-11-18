@@ -192,6 +192,51 @@ fn sql_schema_at(version: usize) -> Connection {
 }
 
 #[test]
+fn skill_version_migration_publishes_existing_content_and_preserves_bot_switches() {
+    let before = db::MIGRATIONS
+        .iter()
+        .position(|sql| sql.contains("CREATE TABLE skill_versions ("))
+        .unwrap();
+    let c = sql_schema_at(before);
+    c.execute_batch(
+        "INSERT INTO workspaces(id,name,created) VALUES ('default','Fixture',1);
+         INSERT INTO bots(id,workspace_id,name,harness,updated) VALUES
+             ('on','default','Enabled Bot','codex',1), ('off','default','Disabled Bot','codex',1);
+         INSERT INTO skills(id,workspace_id,name,description,content,created,updated)
+             VALUES ('skill','default','legacy-skill','Legacy instructions','Existing body',1,7);
+         INSERT INTO bot_capabilities(bot_id,kind,entry_id,enabled,created) VALUES
+             ('on','skill','skill',1,2), ('off','skill','skill',0,3);",
+    )
+    .unwrap();
+    db::migrate(&c).unwrap();
+    db::migrate(&c).unwrap();
+    let skill = steve_store::caps::skills::published_for_bot(&c, "default", "on").unwrap();
+    assert_eq!(skill.len(), 1);
+    assert_eq!(skill[0].version.version, 1);
+    assert_eq!(skill[0].publication, 1);
+    assert_eq!(skill[0].version.content, "Existing body");
+    assert!(
+        steve_store::caps::skills::published_for_bot(&c, "default", "off")
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        one(
+            &c,
+            "SELECT first_published_at FROM skill_versions WHERE skill_id='skill'"
+        ),
+        7
+    );
+    assert_eq!(
+        one(
+            &c,
+            "SELECT COUNT(*) FROM bot_capabilities WHERE kind='skill'"
+        ),
+        2
+    );
+}
+
+#[test]
 fn delivery_migration_preserves_the_existing_main_schema_and_device_revision() {
     // Find the contract, not a merge-time migration number: another branch may take the slot.
     let before = db::MIGRATIONS

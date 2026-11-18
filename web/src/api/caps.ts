@@ -24,8 +24,21 @@ export type McpServer = {
 /** what POST / PATCH take: a secret without `value` keeps the stored one; `bot` on POST also assigns it */
 export type McpServerIn = Partial<{ name: string; transport: McpTransport; command: string; args: string[]; env: McpVar[]; url: string; headers: McpVar[]; bot: string }>
 
-export type Skill = { id: string; name: string; description: string; content: string; created: number; updated: number; bots?: CapUser[]; enabled?: boolean }
-export type SkillIn = Partial<{ name: string; description: string; content: string; bot: string }>
+export type Skill = { id: string; name: string; description: string; content: string; created: number; updated: number; bots?: CapUser[]; enabled?: boolean
+  head_version: number; published_version: number | null; publication: number
+}
+export type SkillIn = Partial<{ name: string; description: string; content: string; bot: string; base_version: number; note: string }>
+export type SkillVersionSummary = {
+  version: number; name: string; saved_at: number; saved_by: string | null; note: string; first_published_at: number | null
+}
+export type SkillVersion = SkillVersionSummary & { description: string; content: string }
+export type SkillNodeStatus = "cached" | "pending" | "offline" | "unknown" | "failed" | "unpublished" | "disabled" | "ineligible" | "unsupported" | "no_nodes"
+export type SkillDistribution = {
+  nodes: { bot: string; enabled: boolean; node?: string; label?: string; desired?: number | null;
+    confirmed?: number | null; received_at?: number | null; status: SkillNodeStatus; error?: string | null;
+    online?: boolean; eligible?: boolean | null }[]
+  sessions: { session: string; node: string; phase: string; version: number; status: "opened" | "conflict" | "unknown" }[]
+}
 
 export type A2aAuth = { scheme: "none" } | { scheme: "bearer" } | { scheme: "header"; header: string }
 export type A2aSkill = { id: string; name: string; description: string; tags: string[] }
@@ -69,6 +82,11 @@ export const capsApi = {
     create: (b: SkillIn) => req<Skill>("POST", lib("skills"), b),
     update: (id: string, b: SkillIn) => req<Skill>("PATCH", one("skills", id), b),
     remove: (id: string) => req<{ ok: true }>("DELETE", one("skills", id)),
+    versions: (id: string, signal?: AbortSignal) => req<SkillVersionSummary[]>("GET", one("skills", id) + "/versions", undefined, signal),
+    version: (id: string, version: number, signal?: AbortSignal) => req<SkillVersion>("GET", one("skills", id) + `/versions/${version}`, undefined, signal),
+    publish: (id: string, version: number, publication: number, rollback: boolean) =>
+      req<Skill>("PUT", one("skills", id) + "/publication", { version, publication, rollback }),
+    distribution: (id: string, signal?: AbortSignal) => req<SkillDistribution>("GET", one("skills", id) + "/distribution", undefined, signal),
   },
   a2a: {
     list: () => req<A2aAgent[]>("GET", lib("a2a-agents")),

@@ -23,7 +23,7 @@ const PATH = { mcp: 'mcp-servers', skill: 'skills', a2a: 'a2a-agents' }
 const KIND = { 'mcp-servers': 'mcp', skills: 'skill', 'a2a-agents': 'a2a' }
 
 export const mcpServer = (id, name, transport, extra = {}) => ({ id, name, transport, command: null, args: [], env: [], url: null, headers: [], created: 0, updated: 0, bots: [], ...extra })
-export const skillEntry = (id, name, description, content, extra = {}) => ({ id, name, description, content, created: 0, updated: 0, bots: [], ...extra })
+export const skillEntry = (id, name, description, content, extra = {}) => ({ id, name, description, content, created: 0, updated: 0, bots: [], head_version: 1, published_version: 1, publication: 1, ...extra })
 export const agentEntry = (id, name, title, extra = {}) => ({ id, name, tool: 'steve_a2a_' + name, card_url: 'https://agent.example.test/.well-known/agent-card.json', title, description: title + ' 的说明', url: 'https://agent.example.test/a2a', version: '1.0.0', provider: 'Example', protocol: '0.3.0', skills: [], auth: { scheme: 'none' }, has_secret: false, fetched: Date.now() - 3600_000, created: 0, updated: 0, bots: [], ...extra })
 
 export function capsHub(lib) {
@@ -52,13 +52,13 @@ export function capsHub(lib) {
     if (m && method === 'POST') {
       const kind = KIND[m[1]], b = body(); calls.push(['POST', kind, b])
       const { bot, ...rest } = b
-      const e = kind === 'mcp' ? mcpServer('bmcp_' + ++n, rest.name, rest.transport, rest) : kind === 'skill' ? skillEntry('bskill_' + ++n, rest.name, rest.description, rest.content ?? '') : agentEntry('a2a_' + ++n, 'trip_planner', 'Trip Planner', { card_url: rest.card_url, auth: rest.auth ?? { scheme: 'none' }, has_secret: !!rest.secret, skills: [{ id: 'plan', name: '安排行程', description: '按天排', tags: [] }] })
+      const e = kind === 'mcp' ? mcpServer('bmcp_' + ++n, rest.name, rest.transport, rest) : kind === 'skill' ? skillEntry('bskill_' + ++n, rest.name, rest.description, rest.content ?? '', { published_version: null, publication: 0 }) : agentEntry('a2a_' + ++n, 'trip_planner', 'Trip Planner', { card_url: rest.card_url, auth: rest.auth ?? { scheme: 'none' }, has_secret: !!rest.secret, skills: [{ id: 'plan', name: '安排行程', description: '按天排', tags: [] }] })
       if (bot) e.bots.push({ id: bot, enabled: true })
       list(kind).push(e); list(kind).sort((x, y) => x.name.localeCompare(y.name))
       return json(200, out(kind, e))
     }
     m = /^\/api\/capabilities\/(mcp-servers|skills|a2a-agents)\/([^/]+)$/.exec(p)
-    if (m && method === 'PATCH') { const kind = KIND[m[1]], b = body(); calls.push(['PATCH', kind, m[2], b]); const e = list(kind).find((x) => x.id === m[2]); const { secret, refresh, ...rest } = b; Object.assign(e, rest, secret ? { has_secret: true } : {}); return json(200, out(kind, e)) }
+    if (m && method === 'PATCH') { const kind = KIND[m[1]], b = body(); calls.push(['PATCH', kind, m[2], b]); const e = list(kind).find((x) => x.id === m[2]); const { secret, refresh, base_version, ...rest } = b; if (kind === 'skill') e.head_version += 1; Object.assign(e, rest, secret ? { has_secret: true } : {}); return json(200, out(kind, e)) }
     if (m && method === 'DELETE') { const kind = KIND[m[1]]; calls.push(['DELETE', kind, m[2]]); lib[kind] = list(kind).filter((x) => x.id !== m[2]); return json(200, { ok: true }) }
     return false
   }
