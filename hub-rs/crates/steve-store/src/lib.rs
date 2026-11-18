@@ -316,11 +316,12 @@ pub(crate) fn read_snapshot<T>(
 
 // Shared lock-boundary mechanics; recorder installation belongs to the embedding application.
 pub mod instrumentation {
-    /// Whether the Hub installed its in-memory recorder. Off: one relaxed load, no clock or TLS.
+    /// Whether the Hub installed its in-memory recorder. Off: one flag load, no clock or TLS.
     static LOCK_METRICS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
     pub fn enable_lock_metrics() {
-        LOCK_METRICS.store(true, std::sync::atomic::Ordering::Relaxed);
+        // Publish the already-installed recorder before any worker caches its first handle.
+        LOCK_METRICS.store(true, std::sync::atomic::Ordering::Release);
     }
 
     tokio::task_local! {
@@ -344,7 +345,7 @@ pub mod instrumentation {
     /// Carry only this request's counter into synchronous work on another thread. Like i18n's
     /// carrier, sync_scope restores the worker's previous context on return or unwind.
     pub fn carry<R>(f: impl FnOnce() -> R) -> impl FnOnce() -> R {
-        let calls = if LOCK_METRICS.load(std::sync::atomic::Ordering::Relaxed) {
+        let calls = if LOCK_METRICS.load(std::sync::atomic::Ordering::Acquire) {
             REQUEST_CALLS.try_with(std::sync::Arc::clone).ok()
         } else {
             None
@@ -356,7 +357,7 @@ pub mod instrumentation {
     }
 
     pub(crate) fn store_acquired() {
-        if !LOCK_METRICS.load(std::sync::atomic::Ordering::Relaxed) {
+        if !LOCK_METRICS.load(std::sync::atomic::Ordering::Acquire) {
             return;
         }
         let _ = REQUEST_CALLS.try_with(|calls| {
@@ -366,7 +367,7 @@ pub mod instrumentation {
 
     /// Same opt-in gate as lock timing; only the first transaction on a thread registers a handle.
     pub(crate) fn transaction_started() {
-        if !LOCK_METRICS.load(std::sync::atomic::Ordering::Relaxed) {
+        if !LOCK_METRICS.load(std::sync::atomic::Ordering::Acquire) {
             return;
         }
         thread_local! {
@@ -394,7 +395,7 @@ pub mod instrumentation {
             kind: &'static str,
             caller: &'static std::panic::Location<'static>,
         ) -> Option<Self> {
-            if !LOCK_METRICS.load(std::sync::atomic::Ordering::Relaxed) {
+            if !LOCK_METRICS.load(std::sync::atomic::Ordering::Acquire) {
                 return None;
             }
             type Handles = (metrics::Histogram, metrics::Histogram, metrics::Counter);
