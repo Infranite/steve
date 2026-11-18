@@ -4,7 +4,7 @@
  * tokens: the address (as the Hub is configured to be reached), a token made here and shown once, a copyable
  * configuration for the client, and the tools such a client gets (the ones that need no Steve session). */
 import { useState } from "react"
-import { CheckIcon, CopyIcon, KeyRoundIcon } from "lucide-react"
+import { CheckIcon, CopyIcon, KeyRoundIcon, WrenchIcon } from "lucide-react"
 import { useT } from "@/i18n"
 import { Button } from "@/components/ui/button"
 import { TextField } from "@/components/ui/input"
@@ -18,6 +18,7 @@ import { errText, useList } from "./common"
 import { CLIENTS, FILE, LANGUAGE, mcpUrl, snippet, type ClientKind } from "./snippets"
 
 import { toolDescKey, toolCount } from "./tool-catalog"
+import { steveToolIcon } from "@/tool-icons"
 export { toolDescKey } from "./tool-catalog"
 
 /** the tools in a fold: name, what it is for, and (on a Bot) how often it was called in 30 days */
@@ -26,10 +27,10 @@ function ToolList({ tools, counts }: { tools: SteveTool[]; counts?: Map<string, 
   return (
     <ul className="flex flex-col divide-y divide-border/60" data-steve-tools>
       {tools.map((x) => {
-        const k = toolDescKey(x.name), n = counts && toolCount(x, counts)
+        const k = toolDescKey(x.name), n = counts && toolCount(x, counts), Icon = steveToolIcon(x.name) ?? WrenchIcon
         return (
           <li key={x.name} className="flex min-w-0 flex-wrap items-baseline gap-x-3 gap-y-0.5 py-2 sm:flex-nowrap" data-steve-tool={x.name}>
-            <span className="min-w-0 shrink-0 truncate font-mono type-footnote max-sm:basis-full sm:w-52" title={x.name}>{x.name}</span>
+            <span className="flex min-w-0 shrink-0 items-center gap-2 font-mono type-footnote max-sm:basis-full sm:w-52" title={x.name}><Icon className="size-3.5 shrink-0 text-muted-foreground" strokeWidth={1.5} aria-hidden /><span className="truncate">{x.name}</span></span>
             <span className="min-w-0 flex-1 type-footnote text-muted-foreground">{k ? t(`caps:tool.${k}`) : x.description}</span>
             {counts && <span className="shrink-0 type-footnote tabular-nums text-tertiary">{n ? t("caps:steve.uses", { count: n }) : t("caps:steve.unused")}</span>}
           </li>

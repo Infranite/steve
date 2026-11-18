@@ -9,7 +9,7 @@ import { LANGS, lang, setLang, t, useT, type Lang } from "@/i18n"
 import { cn } from "cn"
 import { itemDisplayStatus } from "@/item-workflow-relation"
 import type { RRoom } from "@/api"
-import { ChevronLeftIcon, FileTextIcon, GitForkIcon, InboxIcon, ListTodoIcon, MoonIcon, PencilIcon, SearchIcon, SquareTerminalIcon, SunIcon, TerminalIcon, ArrowUpRightIcon, CornerDownRightIcon, MonitorIcon, XIcon, CircleCheckIcon, CircleSlashIcon, ChevronDownIcon, ChevronRightIcon, CircleAlertIcon, InfoIcon, TriangleAlertIcon, FileDiffIcon, FilePlusIcon, GlobeIcon, SparklesIcon, WrenchIcon,
+import { ChevronLeftIcon, FileTextIcon, GitForkIcon, InboxIcon, ListTodoIcon, MoonIcon, PencilIcon, SearchIcon, SquareTerminalIcon, SunIcon, TerminalIcon, ArrowUpRightIcon, CornerDownRightIcon, MonitorIcon, XIcon, CircleCheckIcon, CircleSlashIcon, ChevronDownIcon, ChevronRightIcon, CircleAlertIcon, InfoIcon, TriangleAlertIcon, FileDiffIcon, FilePlusIcon, GlobeIcon, WrenchIcon,
   CircleAlertIcon as RelFailIcon, CircleCheckIcon as RelOkIcon, MegaphoneIcon as RelRunIcon,
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
@@ -46,6 +46,7 @@ import { isPeopleDecision, PeopleDecisionBody } from "@/people/pending"
 import { useTurnUsage } from "@/session/turn-usage"
 import { fmtUsageCost, fmtUsage } from "@/stats/format"
 import { reducedMotion } from "@/lib/motion"
+import { steveToolIcon } from "@/tool-icons"
 
 /* ───────── routing ───────── */
 /* a route change cross-fades the content area (view-transition-name: page) while the sidebar stays; without view
@@ -635,7 +636,7 @@ type StepView = { I: any; verb: string; subj: string; mono: boolean; full?: stri
 /** icon, verb and subject of one tool call: the command (with the agent's own description), the file, the pattern */
 function stepView(e: any[]): StepView {
   const tool = String(e[9] ?? ""), file = e[3] && e[3] !== "Steve" ? String(e[3]) : ""
-  if (e[1] === "steve") return { I: SparklesIcon, verb: e[2], subj: e[10] ?? "", mono: false }
+  if (e[1] === "steve") return { I: steveToolIcon(tool) ?? WrenchIcon, verb: e[2], subj: e[10] ?? "", mono: false }
   if (e[1] === "read") return { I: FileTextIcon, verb: t("core:transcript.read"), subj: base(file) || e[2], mono: true, full: file }
   if (e[1] === "edit") return { I: tool === "Write" ? FilePlusIcon : PencilIcon, verb: t(tool === "Write" ? "core:transcript.write" : "core:transcript.edit"), subj: base(file) || e[2], mono: true, full: file }
   if (e[1] === "search") { const web = /^Web/.test(tool); return { I: web ? GlobeIcon : SearchIcon, verb: t(web ? "core:transcript.webSearch" : "core:transcript.search"), subj: e[11] ?? e[3] ?? "", mono: !web, full: e[11] } }
@@ -697,7 +698,7 @@ function trailOf(evs: any[], ts: number[], t1: number | undefined, live: boolean
     /* the call as a Tool Call Card: the tool's own name, what Steve has of its input (the command, file, query or brief)
      * and what came back, its time from the update that started it to the one that settled it ([13]) */
     const out = String(e[4] ?? "").trim().replace(/^```[a-z]*\n?/, "").replace(/\n?```$/, "").trim(), t0 = ts[j] || undefined
-    const card = { name: (tool || String(e[2] ?? "")).replace(/^mcp__steve__/, "").replace(/^mcp__[^_]+__/, ""), icon: <v.I strokeWidth={1.5} />,
+    const card = { name: (tool || String(e[2] ?? "")).replace(/^mcp__steve__/, "").replace(/^mcp__[^_]+__/, ""), icon: <v.I strokeWidth={1.5} aria-hidden />,
       args: e[1] === "steve" ? e[14] ?? (e[10] || undefined) : v.I === TerminalIcon ? v.full ?? v.subj : DELEGATE.includes(tool) ? e[10] ?? e[11] : e[11] ?? (e[3] && e[3] !== "Steve" ? e[3] : undefined),
       result: state === "fail" ? undefined : plan ? (j === lastPlan ? undefined : plan.map(([x, d]) => (d ? "✓ " : "○ ") + x).join("\n")) : out || undefined,
       resultView: plan && j !== lastPlan ? <SubSteps steps={plan} live={false} /> : e[1] === "edit" && out ? <Detail text={out} /> : undefined,
