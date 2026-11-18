@@ -4,7 +4,7 @@
 import { modReq } from "@/api"
 import { lazy } from "@/api/accounts"
 import { t } from "@/i18n"
-import type { ConnStatus, RAdapter, RFieldDef } from "@/api/accounts"
+import type { ConnStatus, RAdapter, RFieldDef, ServiceWritePolicy } from "@/api/accounts"
 import type { ChannelSummary, Pairing } from "@/integrations/sides"
 
 export type AreaId = "channel" | "docs" | "sheets" | "calendar" | "tasks" | "approval" | "minutes" | "mail" | "repo" | "directory" | string
@@ -20,6 +20,7 @@ export type IAdapter = {
 export type IConnection = {
   id: string; account_id: string; adapter: string; adapter_name: string; identity: Identity; name: string; handle: string
   status: ConnStatus; health: { last_ok: number; last_error: string; error_at: number }; last_sync: number | null; capabilities: CapState[]; warning?: string
+  service_write_policy?: ServiceWritePolicy
   /** provider-specific facts (Feishu: the app, the console links, what is 未开通); absent on older Hubs */
   detail?: FeishuAppDetail | FeishuUserDetail | Record<string, unknown>
   /** the Hub has its adapter (absent on older Hubs: installed) */

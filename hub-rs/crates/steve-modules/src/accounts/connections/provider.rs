@@ -352,6 +352,16 @@ pub enum BlockScope {
     Target,
 }
 
+/// The live channel service's write policy, separate from capabilities enabled in Steve.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ServiceWritePolicy {
+    Allowed,
+    Restricted,
+    Forbidden,
+    Unknown,
+}
+
 /// A health check's outcome.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Health {
@@ -438,6 +448,12 @@ pub trait ConnectionProvider: Send + Sync + 'static {
         caps: &[super::integration::CapState],
     ) -> Option<Value> {
         let _ = (config, caps);
+        None
+    }
+
+    /// A channel service's last policy on its current session, without opening a connection.
+    /// `None` for providers that have no separate service policy to show.
+    fn service_write_policy(&self, _connection: &str) -> Option<ServiceWritePolicy> {
         None
     }
 

@@ -13,7 +13,8 @@ use serde::Serialize;
 use serde_json::Value;
 
 use super::provider::{
-    AuthKind, ConnectionProvider, FieldOut, Pairing, fields_shown, integration_shown, shown,
+    AuthKind, ConnectionProvider, FieldOut, Pairing, ServiceWritePolicy, fields_shown,
+    integration_shown, shown,
 };
 use super::repo::ConnRow;
 use super::service::{Connections, HealthOut};
@@ -262,6 +263,8 @@ pub struct ConnectionInfo {
     pub health: HealthOut,
     pub last_sync: Option<i64>,
     pub capabilities: Vec<CapState>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub service_write_policy: Option<ServiceWritePolicy>,
     /// A warning `verify` left (Feishu: no refresh token).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub warning: Option<String>,
@@ -646,6 +649,7 @@ impl Connections {
             },
             last_sync: r.last_sync,
             capabilities,
+            service_write_policy: p.service_write_policy(&r.id),
             warning: r
                 .config
                 .get("warning")
@@ -684,6 +688,7 @@ fn uninstalled(r: &ConnRow, a: &Account) -> ConnectionInfo {
         },
         last_sync: r.last_sync,
         capabilities: Vec::new(),
+        service_write_policy: None,
         warning: None,
         detail: None,
         installed: false,

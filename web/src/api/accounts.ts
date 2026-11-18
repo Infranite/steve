@@ -17,7 +17,9 @@ export type RAccount = {
   connection: RConnBrief | null; vault_items: { id: string; title: string }[]; revision: number
 }
 export type ConnStatus = "ok" | "reauth" | "error" | "paused" | "revoked"
+export type ServiceWritePolicy = "allowed" | "restricted" | "forbidden" | "unknown"
 export type RConnection = { id: string; account_id: string; adapter: string; auth: "oauth" | "credential" | "none"; status: ConnStatus; caps: string[]; available_caps: string[]; health: { last_ok: number; last_error: string; error_at: number }; last_sync: number | null
+  service_write_policy?: ServiceWritePolicy
   /** the Hub has its adapter (absent on older Hubs: installed) */
   installed?: boolean }
 export type RFieldDef = { key: string; label: string; secret: boolean; required: boolean; type: "text" | "password" | "number" | "select"; default?: string; hint?: string }

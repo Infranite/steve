@@ -703,10 +703,11 @@ fn recovery_metadata(
     space: &str,
     error: &str,
 ) -> ChannelResult<()> {
-    let adapter: String =
-        tx.query_row("SELECT adapter FROM connections WHERE id=?", [conn], |r| {
-            r.get(0)
-        })?;
+    let (adapter, account): (String, String) = tx.query_row(
+        "SELECT adapter, account_id FROM connections WHERE id=?",
+        [conn],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
     let code = [
         "session.write_policy=forbidden",
         "target_forbidden",
@@ -744,7 +745,8 @@ fn recovery_metadata(
         "connection_id": conn, "space_id": space, "requires_user_action": true,
         "authorization_kind": if managed { "managed" } else { "external" },
         "authorization_url": managed.then(|| format!("/api/chan-messages/{message}/authorization")),
-        "settings_href": format!("#/channels/acc/{conn}"), "instructions": question,
+        "settings_href": if managed && adapter == crate::adapters::ext_ws::ADAPTER { format!("#/accounts/{account}") } else { format!("#/channels/acc/{conn}") },
+        "instructions": question,
         "external_policy_known": false
     }});
     tx.execute(
@@ -2970,7 +2972,7 @@ impl Outbox {
                     tx,
                     row,
                     format!(
-                        "发到「{}」的消息没有发出去：{error}。请先到“接入”核对这项权限：平台缺少 scope 时需管理员开通后重新授权；Steve 本地关闭的代发能力可创建可审阅、可撤销的授权改动。权限处理后点重试；修改会重新审阅；不发送会关闭本条消息。清除拒绝缓存不会授予权限",
+                        "发到「{}」的消息没有发出去：{error}。请核对权限：Steve 本地关闭的代发能力可在账号授权中开启，也可创建可审阅、可撤销的授权改动；平台缺少 scope 时，需管理员开通后重新授权。权限处理后点重试；修改会重新审阅；不发送会关闭本条消息。清除拒绝缓存不会授予权限",
                         space_name(&space)
                     ),
                     &BLOCKED_OPTIONS,

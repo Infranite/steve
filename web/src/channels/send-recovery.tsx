@@ -69,7 +69,8 @@ export function SendRecovery({ i, w }: { i: Item; w: Wait }) {
   const recovery = w.recovery, reason = recovery?.error || record?.out?.error || w.q
   const managed = recovery?.authorization_kind === "managed" && recovery.kind === "missing_permission" && !!recovery.connection_id
     && !!w.subjectId && recovery.authorization_url === sendAuthorizationUrl(w.subjectId)
-  const settings = recovery?.settings_href?.startsWith("#/channels/acc/") ? recovery.settings_href : null
+  const href = recovery?.settings_href
+  const settings = href?.startsWith("#/channels/acc/") || (managed && href?.startsWith("#/accounts/")) ? href : null
   return <div className="flex min-w-0 flex-col gap-3" data-send-recovery>
     <OutContext context={context} />
     <section className="min-w-0" aria-label={t("core:sendRecovery.body")}>
@@ -87,7 +88,7 @@ export function SendRecovery({ i, w }: { i: Item; w: Wait }) {
       {recovery?.instructions && <p className="mt-2! whitespace-pre-wrap" data-send-instructions>{recovery.instructions}</p>}
       {!managed && <p className="mt-2!">{t("core:sendRecovery.restore")}</p>}
       {recovery?.authorization_kind === "external" && recovery.external_policy_known === false && <p className="mt-2!">{t("core:sendRecovery.externalUnknown")}</p>}
-      {settings && <a className="mt-2 inline-block text-foreground underline" href={settings} data-send-settings>{t("core:sendRecovery.openSettings")}</a>}
+      {settings && <a className="mt-2 inline-block text-foreground underline" href={settings} data-send-settings>{t(settings.startsWith("#/accounts/") ? "core:sendRecovery.openAccountAuthorization" : "core:sendRecovery.openSettings")}</a>}
     </section>
     {managed && <SendAuthorization key={w.subjectId} w={w} locked={locked} revision={revision} />}
     <div className="flex min-w-0 flex-wrap items-center gap-2" role="status" aria-live="polite" data-send-status={status ?? "unread"}>

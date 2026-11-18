@@ -22,7 +22,7 @@ use super::oauth::{self, DevicePoll, TokenSet, pkce_challenge, random_token};
 use super::pending::{Device, DeviceStatus, Devices, Flow, PendingStates};
 use super::provider::{
     AccountInfo, AuthKind, CONFIG_VERSION_KEY, ConnectionProvider, Health, Owner, PAIR_KEY, Paired,
-    ProviderError, StewardHint, TokenKind,
+    ProviderError, ServiceWritePolicy, StewardHint, TokenKind,
 };
 use super::repo::{self, ConnRow, HealthState};
 use crate::accounts::claim::claim_self;
@@ -153,6 +153,8 @@ pub struct ConnectionOut {
     pub status: String,
     pub caps: Vec<String>,
     pub available_caps: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub service_write_policy: Option<ServiceWritePolicy>,
     pub health: HealthOut,
     pub last_sync: Option<i64>,
     /// The Hub has an adapter for it. A connection whose adapter is not installed (an extension
@@ -608,6 +610,9 @@ impl Connections {
             status: r.status.clone(),
             caps: r.caps.clone(),
             available_caps: available,
+            service_write_policy: self
+                .provider(&r.adapter)
+                .and_then(|p| p.service_write_policy(&r.id)),
             health: HealthOut {
                 last_ok: r.health.last_ok,
                 last_error: r.health.last_error.clone(),
@@ -723,6 +728,37 @@ impl Connections {
             .ok_or_else(|| ApiError::not_found("连接"))?;
         may_write(&r, cap).map_err(ApiError::from)?;
         Ok(self.cx_of(&r))
+    }
+
+    /// Rechecks a write capability after pacing or a retry delay, without using the credential.
+    pub async fn check_write(
+        &self,
+        ws: &str,
+        id: &str,
+        cap: &'static str,
+    ) -> Result<(), ProviderError> {
+        let (ws, id) = (ws.to_string(), id.to_string());
+        let allowed = self
+            .blocking(move |c| {
+                Ok(c.0
+                    .m
+                    .store
+                    .reader(|db| may_write_in(db, &ws, &id, Some(cap)))?)
+            })
+            .await
+            .map_err(|e| ProviderError::Config(e.to_string()))?;
+        allowed.map_err(|e| match e {
+            WriteRefusal::Later(msg) => ProviderError::Transient(msg),
+            WriteRefusal::Never(msg) => ProviderError::Rejected(msg),
+        })
+    }
+
+    /// Reports provider state held in memory, without changing the connection's settings.
+    pub fn notify_runtime_change(&self, ws: &str, id: &str) {
+        self.0.m.store.publish(ChangeEvent::Connection {
+            id: id.to_string(),
+            ws: ws.to_string(),
+        });
     }
 
     fn cx_of(&self, r: &ConnRow) -> ConnCx {
@@ -1418,20 +1454,15 @@ impl Connections {
         let pair = u.config.get(PAIR_KEY).cloned();
         let version = version_value(p.config_version());
         let available = p.available_caps(&u.scopes);
-        let pick = |req: &Option<Vec<String>>, current: &[String]| -> Vec<String> {
-            match req {
-                Some(r) => available
-                    .iter()
-                    .filter(|c| r.contains(c))
-                    .cloned()
-                    .collect(),
-                None if current.is_empty() => available.clone(),
-                None => available
-                    .iter()
-                    .filter(|c| current.contains(c))
-                    .cloned()
-                    .collect(),
-            }
+        // An empty selection is valid on an existing connection. Only a new connection
+        // without an explicit selection takes the defaults.
+        let pick = |current: Option<&[String]>| -> Vec<String> {
+            let selected = u.caps.as_deref().or(current);
+            available
+                .iter()
+                .filter(|c| selected.is_none_or(|caps| caps.contains(c)))
+                .cloned()
+                .collect()
         };
         let mut config = u.config.clone();
         merge(&mut config, &u.info.config);
@@ -1465,7 +1496,7 @@ impl Connections {
                 }
                 let old = c.credential_item.replace(u.item.clone());
                 c.status = "ok".into();
-                c.caps = pick(&u.caps, &c.caps);
+                c.caps = pick(Some(&c.caps));
                 c.granted_scopes = u.scopes.clone();
                 merge(&mut c.config, &config);
                 put_key(&mut c.config, PAIR_KEY, pair);
@@ -1500,7 +1531,7 @@ impl Connections {
                     adapter: p.id().into(),
                     auth: p.auth().column().into(),
                     granted_scopes: u.scopes.clone(),
-                    caps: pick(&u.caps, &[]),
+                    caps: pick(None),
                     credential_item: Some(u.item.clone()),
                     status: "ok".into(),
                     health,

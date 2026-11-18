@@ -511,6 +511,7 @@ export default {
   },
   sendRecovery: {
     ruleSource: "规则来源：", fields: { kind: "阻塞类型", scope: "作用域", authorizationKind: "授权来源", provider: "渠道适配器", code: "错误标识", rpcCode: "RPC 错误码", connection: "连接", space: "目标会话" },
+    openAccountAuthorization: "打开 Steve 账号授权",
     openSettings: "打开接入设置，核对平台授权", externalUnknown: "该外部服务内部的具体限制尚未核实，请以服务管理端或管理员的核查为准。",
     authorizationTitle: "审阅授权改动", authorizationAgain: "重新创建并审阅授权改动", authorizationScope: "本次改动目标：", authorizationUndoUnknown: "请求撤销这份改动并核对结果",
     authorizationNote: "仅修改这个连接的本地代发能力；请审阅实际范围和前后值。应用不会发送消息，平台权限和每条消息的审批仍分别校验，完成后需手动重试。",

@@ -527,6 +527,7 @@ export default {
   },
   sendRecovery: {
     ruleSource: "Rule source:", fields: { kind: "Block kind", scope: "Scope", authorizationKind: "Authorization source", provider: "Channel adapter", code: "Error code", rpcCode: "RPC error code", connection: "Connection", space: "Target conversation" },
+    openAccountAuthorization: "Open Steve account authorization",
     openSettings: "Open connection settings to check platform access", externalUnknown: "The external service's internal restriction has not been verified. Check its management console or contact its administrator.",
     authorizationTitle: "Review authorization change", authorizationAgain: "Create a new authorization change for review", authorizationScope: "Change target:", authorizationUndoUnknown: "Request undo of this change and check the result",
     authorizationNote: "Only this connection's local send-as-user capability changes. Review the actual scope and before/after values. Applying sends no messages; platform permissions and message approval are still checked separately. Retry manually afterwards.",

@@ -20,7 +20,7 @@ use steve_flow::testkit::FakeCore;
 use steve_flow::{AdapterError, FlowSetup, LinearExecutor};
 use steve_modules::Clock;
 use steve_modules::accounts::connections::{
-    self, BlockScope, ConnCx, Connections, ConnectionsConfig, ProviderError,
+    self, BlockScope, ConnCx, Connections, ConnectionsConfig, ProviderError, ServiceWritePolicy,
 };
 use steve_modules::accounts::repo as arepo;
 use steve_modules::accounts::service::ensure_seeds;
@@ -937,12 +937,104 @@ async fn v12_writes_are_paced_and_rate_limits_honoured() {
     rt.shutdown().await;
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn personal_write_switch_blocks_every_mutation_without_stopping_inbound() {
+    use steve_channels::{ReactionKind, spaces::SEND_AS_USER_CAP};
+
+    let h = setup().await;
+    let id = h.connect().await;
+    let cx = h.cx(&id);
+    let who = caller(WS, ME);
+    let (rt, tx) = h.runtime();
+    until("service allows writes", || {
+        h.conns.get(&who, &id).unwrap().service_write_policy == Some(ServiceWritePolicy::Allowed)
+    })
+    .await;
+    let c = h
+        .conns
+        .patch(&who, &id, None, Some(vec!["msg.receive".into()]))
+        .unwrap();
+    assert_eq!(c.service_write_policy, Some(ServiceWritePolicy::Allowed));
+    assert!(!c.caps.iter().any(|cap| cap == SEND_AS_USER_CAP));
+    h.publish(&tx);
+
+    let seq = h
+        .fake
+        .push_message(msg(&h, "c_42", "in_read_only", "u_7", "still receiving", 0));
+    until("inbound still active", || h.fake.acked() >= seq).await;
+    assert_eq!(h.messages("c_42")[0][0], "still receiving");
+
+    let to = MessageRef::platform("c_42", "m_in_read_only");
+    let reply = ActTarget::Reply {
+        to: to.clone(),
+        in_thread: false,
+    };
+    let body = OutContent::text("blocked");
+    let key = SendKey("cm_off".into());
+    let errors = [
+        h.ext
+            .send(&cx, &space("c_42"), &body, &key)
+            .await
+            .unwrap_err(),
+        h.ext.send(&cx, &reply, &body, &key).await.unwrap_err(),
+        h.ext.recall(&cx, &to).await.unwrap_err(),
+        h.ext
+            .add_reaction(&cx, &to, ReactionKind::Ack)
+            .await
+            .unwrap_err(),
+        h.ext.remove_reaction(&cx, &to, "r_1").await.unwrap_err(),
+    ];
+    for e in errors {
+        assert!(
+            matches!(e, AdapterError::Provider(ProviderError::Rejected(s)) if s.contains(SEND_AS_USER_CAP))
+        );
+    }
+    for method in [
+        "messages.send",
+        "messages.reply",
+        "messages.recall",
+        "reactions.add",
+        "reactions.remove",
+    ] {
+        assert!(h.fake.calls(method).is_empty(), "unexpected {method} RPC");
+    }
+
+    rt.shutdown().await;
+    assert_eq!(
+        h.conns.get(&who, &id).unwrap().service_write_policy,
+        Some(ServiceWritePolicy::Unknown)
+    );
+    h.conns.patch(&who, &id, None, Some(vec![])).unwrap();
+    let replaced = h
+        .conns
+        .put_credential(&who, &id, &fields(&h.fake.url(), fake::TOKEN))
+        .await
+        .unwrap();
+    assert!(replaced.caps.is_empty());
+    assert_eq!(h.connect().await, id);
+    assert!(h.conns.get(&who, &id).unwrap().caps.is_empty());
+}
+
 /// V14: with `write_policy: forbidden` a write is refused inside the Hub; the service sees none.
 #[tokio::test(flavor = "multi_thread")]
 async fn v14_read_only_refuses_writes_locally() {
     let h = setup().await;
     h.fake.with(|w| w.write_policy = "forbidden".into());
     let id = h.connect().await;
+    let who = caller(WS, ME);
+    let (rt, _) = h.runtime();
+    until("service forbids writes", || {
+        h.conns.get(&who, &id).unwrap().service_write_policy == Some(ServiceWritePolicy::Forbidden)
+    })
+    .await;
+    assert!(
+        h.conns
+            .get(&who, &id)
+            .unwrap()
+            .caps
+            .iter()
+            .any(|c| c == "msg.send_as_user")
+    );
     let cx = h.cx(&id);
     let e = h
         .ext
@@ -984,6 +1076,7 @@ async fn v14_read_only_refuses_writes_locally() {
         h.fake.calls("reactions.add").is_empty(),
         "global read-only rejects reactions before RPC"
     );
+    rt.shutdown().await;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1674,7 +1767,38 @@ async fn a_read_only_connection_gives_one_notice_and_lifts_when_writes_are_allow
             .is_some()
     );
 
-    // the service allows writes again: lifted at once, and the next reply goes out
+    // A restricted service lifts the connection block but not a known target refusal.
+    let target_refusal = "the service restricts this chat";
+    h.env
+        .store()
+        .transaction(|tx| {
+            write_blocks::record(
+                tx,
+                WS,
+                &id,
+                &space,
+                BlockScope::Target,
+                target_refusal,
+                h.ch.now(),
+            )
+        })
+        .unwrap();
+    h.fake.with(|w| w.write_policy = "restricted".into());
+    h.fake.notify(
+        "session.status",
+        json!({"status": "ok", "write_policy": "restricted"}),
+    );
+    until("only the target block remains", || {
+        h.env
+            .store()
+            .reader(|c| write_blocks::active(c, &id, &space, h.ch.now()))
+            .unwrap()
+            .as_deref()
+            == Some(target_refusal)
+    })
+    .await;
+
+    // The service now allows all targets: the target block lifts, without replaying old replies.
     h.fake.with(|w| w.write_policy = "allowed".into());
     h.fake.notify(
         "session.status",
@@ -1688,6 +1812,11 @@ async fn a_read_only_connection_gives_one_notice_and_lifts_when_writes_are_allow
             .is_none()
     })
     .await;
+    assert!(h.fake.calls("messages.send").is_empty());
+    assert!(
+        h.fake.calls("messages.reply").is_empty(),
+        "policy changes do not replay failed replies"
+    );
     let plan = ask(3).await;
     let sent = outbox
         .deliver(&h.ch, &reply(&plan, Purpose::Reply))

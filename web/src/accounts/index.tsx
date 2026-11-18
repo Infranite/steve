@@ -14,6 +14,7 @@ import { Unwired } from "@/unwired"
 import { tm, toast } from "@/store"
 import { accountsApi, capLabel, kindLabel, KIND_LABEL, CONN_STATUS, connStatusOf, type RAccount, type RAdapter, type RConnection, type RMatchRule, type RUsage } from "@/api/accounts"
 import { useLoad, useBusy, report } from "@/accounts/load"
+import { ServiceWritePolicyNote } from "@/accounts/service-write-policy"
 import { NewAccountDialog, ConnectDialog, CredentialDialog } from "@/accounts/dialogs"
 import { NewVaultDialog } from "@/vault/new-item"
 import { MailSettingsSections, useMailSettings } from "@/mail/settings"; import { MAIL_ADAPTERS } from "@/api/mail"
@@ -231,8 +232,11 @@ function Connection({ c, adapter, label, mine, onChange }: { c: RConnection; ada
           {c.installed !== false && (c.status === "reauth" || c.status === "error") && <IntegrationRow title={t("accounts:conn.reauth")} hint={c.auth === "oauth" ? t("accounts:conn.reauthOAuth") : t("accounts:conn.reauthCred")}><Button size="sm" disabled={busy} onClick={() => void reauth()} data-reauth>{t("accounts:conn.reauth")}</Button></IntegrationRow>}
         </IntegrationSection>}
         <MailSettingsSections m={m} connection={c.id} />
-        {c.available_caps.length > 0 && <IntegrationSection label={t("accounts:conn.allow")}>{c.available_caps.map((cap) => (
-          <IntegrationRow key={cap} title={capLabel(cap)}><Switch aria-label={capLabel(cap)} checked={c.caps.includes(cap)} disabled={busy} onCheckedChange={(v) => toggleCap(cap, v)} data-cap-toggle={cap} /></IntegrationRow>))}</IntegrationSection>}
+        {c.available_caps.length > 0 && <IntegrationSection label={t("accounts:conn.allow")}>{c.available_caps.map((cap) => {
+          const policy = cap === "msg.send_as_user" ? c.service_write_policy : undefined
+          const label = policy ? t("accounts:conn.writeAsYou") : capLabel(cap)
+          return <IntegrationRow key={cap} title={label} hint={policy && <>{t("accounts:conn.writeHint")} <ServiceWritePolicyNote policy={policy} /></>}><Switch aria-label={label} checked={c.caps.includes(cap)} disabled={busy} onCheckedChange={(v) => toggleCap(cap, v)} data-cap-toggle={cap} /></IntegrationRow>
+        })}</IntegrationSection>}
         {c.caps.includes("msg.receive") && <IntegrationSection><IntegrationRow title={t("accounts:conn.identity")} hint={t("accounts:conn.identitySub")}>
           <Button size="xs" variant="ghost" className="text-muted-foreground" onClick={() => go("#/channels/acc/" + c.account_id)} data-conn-identity>{t("accounts:conn.open")}<Chevron /></Button></IntegrationRow></IntegrationSection>}
       </IntegrationSettings>

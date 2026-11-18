@@ -16,6 +16,7 @@ import { Select } from "@/view-shared"
 import { Unwired } from "@/unwired"
 import { tm, toast } from "@/store"
 import { useLoad, useBusy } from "@/accounts/load"
+import { ServiceWritePolicyNote } from "@/accounts/service-write-policy"
 import { accountsApi, CONN_STATUS } from "@/api/accounts"
 import { channelsApi, TRIGGER_ALL_DMS, TRIGGER_EVERYWHERE, attentionOf, isDm, spaceTitle, type ChannelAccount, type Rule, type Space, type Trigger } from "@/api/channels"
 import { SpaceAvatar, kindLine } from "@/channels/space-bits"
@@ -69,6 +70,8 @@ export function AccountView({ id }: { id: string }) {
           <div className="font-medium">{t("channels:account.badTitle", { status: st })}</div>
           <div className="type-footnote text-muted-foreground">{[c.health.last_error ? <Clamp key="e" text={c.health.last_error} lines={2} /> : null, c.health.last_ok ? t("channels:account.lastOk", { time: tm(c.health.last_ok) }) : ""].filter(Boolean).map((x, n) => <div key={n}>{x}</div>)}</div>
         </Notice>}
+        {c.service_write_policy && <Group><Row title={t("accounts:conn.writeAsYou")} sub={<ServiceWritePolicyNote policy={c.service_write_policy} />} onClick={() => go("#/accounts/" + a.account.id)} data-write-authorization>
+          <span className="type-footnote text-muted-foreground">{t(c.caps.includes("msg.send_as_user") ? "accounts:conn.writeOn" : "accounts:conn.writeOff")}</span><ChevronRightIcon className="size-4 text-tertiary" /></Row></Group>}
         <section><SectionLabel>{t("channels:account.spacesLabel", { n: a.spaces.length })}</SectionLabel>
           <GroupedSpaces a={a} empty={t(me ? "channels:account.noSessions" : "channels:account.noGroups")} onChanged={() => void L.reload()} />
         </section>

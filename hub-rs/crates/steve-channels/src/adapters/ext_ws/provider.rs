@@ -16,7 +16,7 @@ use serde_json::{Value, json};
 use steve_flow::AdapterError;
 use steve_modules::accounts::connections::{
     AccountInfo, AuthKind, BlockScope, CapSpec, ConnCx, ConnectionProvider, FieldDef, Health,
-    Integration, Owner, ProviderError, StartCx,
+    Integration, Owner, ProviderError, ServiceWritePolicy, StartCx,
 };
 use tokio::time::Instant;
 use zeroize::Zeroizing;
@@ -148,15 +148,11 @@ impl ExtWs {
     }
 
     /// The feed's session of connection `conn` is this one from now on (`None`: it ended).
-    pub(crate) fn set_live(&self, conn: &str, s: Option<Arc<Session>>) {
+    pub(crate) fn set_live(&self, conn: &str, s: Option<Arc<Session>>) -> bool {
         let mut live = lock(&self.reg.live);
         match s {
-            Some(s) => {
-                live.insert(conn.to_string(), s);
-            }
-            None => {
-                live.remove(conn);
-            }
+            Some(s) => live.insert(conn.to_string(), s).is_none(),
+            None => live.remove(conn).is_some(),
         }
     }
 
@@ -255,6 +251,21 @@ impl ExtWs {
         }
     }
 
+    pub(crate) fn notify_write_policy(&self, cx: &ConnCx) {
+        if self.identity == Identity::Self_ {
+            cx.connections().notify_runtime_change(cx.ws(), cx.id());
+        }
+    }
+
+    async fn check_personal_write(&self, cx: &ConnCx) -> Result<(), ProviderError> {
+        if self.identity == Identity::Self_ {
+            cx.connections()
+                .check_write(cx.ws(), cx.id(), crate::spaces::SEND_AS_USER_CAP)
+                .await?;
+        }
+        Ok(())
+    }
+
     /// One write as you: paced, retried with the same idempotency key on `rate_limited` (after
     /// its hint plus up to 20 %) and on transient errors (§2, §4.4).
     async fn write(
@@ -287,8 +298,17 @@ impl ExtWs {
             params["idempotency_key"] = k.into();
         }
         let mut backoff = Duration::from_secs(1);
+        let mut uncertain = None;
         for attempt in 0..=RETRIES {
             self.pace(cx.id(), s).await;
+            if let Err(e) = self
+                .check_personal_write(cx)
+                .await
+                .and_then(|()| writable(s))
+            {
+                // Stopping a retry doesn't tell us what the earlier unanswered write did.
+                return Err(uncertain.unwrap_or(e));
+            }
             match s.call(method, params.clone(), s.timing().call).await {
                 Ok(v) => return Ok(v),
                 Err(e) => {
@@ -311,18 +331,21 @@ impl ExtWs {
                         }
                         _ => None,
                     };
-                    if let Some(Reason::WriteForbidden) = e.reason() {
-                        s.forbid_writes();
+                    if e.reason() == Some(Reason::WriteForbidden) && s.forbid_writes() && !u.own {
+                        self.notify_write_policy(cx);
                     }
                     if let Some(Reason::AccountChanged | Reason::Unauthorized) = e.reason() {
                         s.close(1000, "account changed");
                     }
                     match wait {
                         Some(w) if attempt < RETRIES => {
+                            if e.reason() != Some(Reason::RateLimited) {
+                                uncertain = Some(write_err(e));
+                            }
                             tokio::time::sleep(w).await;
                             backoff = (backoff * 2).min(Duration::from_secs(60));
                         }
-                        _ => return Err(write_err(e)),
+                        _ => return Err(uncertain.unwrap_or_else(|| write_err(e))),
                     }
                 }
             }
@@ -869,6 +892,20 @@ impl ConnectionProvider for ExtWs {
         self.identity == Identity::Self_
     }
 
+    fn service_write_policy(&self, connection: &str) -> Option<ServiceWritePolicy> {
+        if self.identity != Identity::Self_ {
+            return None;
+        }
+        Some(match self.live(connection).map(|s| s.status()) {
+            Some(st) if st.status == SessionStatus::Ok => match st.write_policy {
+                WritePolicy::Allowed => ServiceWritePolicy::Allowed,
+                WritePolicy::Restricted => ServiceWritePolicy::Restricted,
+                WritePolicy::Forbidden => ServiceWritePolicy::Forbidden,
+            },
+            _ => ServiceWritePolicy::Unknown,
+        })
+    }
+
     async fn verify(&self, cx: &ConnCx) -> Result<AccountInfo, ProviderError> {
         let (s, _notes, me) = self.open(cx).await.map_err(OpenFail::into_provider)?;
         s.close(1000, "verified");
@@ -1395,6 +1432,10 @@ impl crate::connector::ConnectorTools for ExtWs {
             p["expected_sender"] = expected_sender(cx).map_err(|e| e.to_string())?;
             p["expected_identity"] = self.identity.name().into();
             p["idempotency_key"] = wire::idempotency_key(key).into();
+            self.check_personal_write(cx)
+                .await
+                .map_err(|e| e.to_string())?;
+            writable(s).map_err(|e| e.to_string())?;
         }
         // Deliberately not ExtWs::read/write: neither a read nor write is replayed here.
         match s.call("connector.call", p, s.timing().call).await {

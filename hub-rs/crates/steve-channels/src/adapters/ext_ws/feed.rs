@@ -102,7 +102,9 @@ impl ConnectionHook for ExtWsHook {
             }
             let started = Instant::now();
             let end = self.once(&run).await;
-            self.ext.set_live(&conn, None);
+            if self.ext.set_live(&conn, None) {
+                self.ext.notify_write_policy(&run.cx);
+            }
             let wait = match end {
                 End::Stopped => return Ok(()),
                 End::Auth(e) => {
@@ -345,13 +347,17 @@ impl Feed<'_> {
     /// A session status from hello or a notification (§9.2): usable → (re)check the identity
     /// and subscribe; expired or locked → shown, nothing taken from the feed until it is back.
     async fn on_status(&mut self, st: Status, first: bool) -> Step {
-        let was = self.s.status().status;
+        let was = self.s.status();
+        let changed = first || was.status != st.status || was.write_policy != st.write_policy;
         self.s.set_status(st.clone());
-        self.lift_refusals(st.write_policy);
         let cx = &self.run.cx;
+        if changed {
+            self.hook.ext.notify_write_policy(cx);
+        }
+        self.lift_refusals(st.write_policy);
         match st.status {
             SessionStatus::Ok => {
-                if first || was != SessionStatus::Ok || self.sub.is_none() {
+                if first || was.status != SessionStatus::Ok || self.sub.is_none() {
                     if !first {
                         let me = provider::me(&self.s).await.map_err(|e| self.lost(&e))?;
                         if let Err(e) = same_identity(cx.config(), &me) {

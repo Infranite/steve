@@ -49,8 +49,8 @@ try {
 
     await open()
     assert.ok((await card.locator('[data-send-source]').innerText()).includes("steve.connection_capability"))
-    for (const value of ["missing_permission", "connection", "managed", "fixture.user", "capability_disabled", "conn_review", "sp1"]) assert.ok((await card.locator('[data-send-recovery-info]').innerText()).includes(value))
-    assert.equal(await card.locator('[data-send-settings]').getAttribute("href"), "#/channels/acc/conn_review")
+    for (const value of ["missing_permission", "connection", "managed", "ext_ws", "capability_disabled", "conn_review", "sp1"]) assert.ok((await card.locator('[data-send-recovery-info]').innerText()).includes(value))
+    assert.equal(await card.locator('[data-send-settings]').getAttribute("href"), "#/accounts/acc_review")
     assert.equal(await card.locator('[data-send-body]').textContent(), await page.evaluate(() => window.__body))
 
     hold = "create"

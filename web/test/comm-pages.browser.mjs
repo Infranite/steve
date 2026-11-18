@@ -12,7 +12,7 @@ const shots = process.env.STEVE_TEST_SHOTS; if (shots) mkdirSync(shots, { recurs
 const now = Date.now(), m = 60_000
 const health = (err = "") => ({ last_ok: now - m, last_error: err, error_at: err ? now : 0 })
 const conn = (id, account_id, adapter, status, err) => ({ id, account_id, adapter, auth: "credential", status, caps: ["msg.receive"], available_caps: [], health: health(err), last_sync: now })
-const connections = [conn("conn_bot", "acc_bot", "feishu_app", "ok"), conn("conn_me", "acc_me", "feishu_user", "ok"), conn("conn_ext", "acc_ext", "ext_ws", "error", "bridge did not answer")]
+const connections = [conn("conn_bot", "acc_bot", "feishu_app", "ok"), conn("conn_me", "acc_me", "feishu_user", "ok"), { ...conn("conn_ext", "acc_ext", "ext_ws", "error", "bridge did not answer"), service_write_policy: "allowed", available_caps: ["msg.receive", "msg.send_as_user"] }]
 const account = (id, name) => ({ id, system: { id: "feishu", name: "飞书", kind: "im" }, party: { id: "p" + id, name, type: "bot", is_me: false }, kind: "app_bot", handle: id, display_name: name, verified: true, confidence: 1, source: "", source_label: "", connection: null, vault_items: [], revision: 1 })
 const accounts = { acc_bot: account("acc_bot", "值班机器人"), acc_me: account("acc_me", "我"), acc_ext: account("acc_ext", "夜班桥") }
 const persona = { id: "per_1", name: "小运", avatar: {}, bot_id: "steve", intro: "", soul: "", reveal: { name: true, role: true, ai: true, steve: false, owner: true }, signature: "", is_default: true, intro_preview: "", used_by: { accounts: [{ account_id: "acc_bot", name: "值班机器人" }], spaces: [] }, revision: 1 }
@@ -45,7 +45,7 @@ const run = async ({ width, scheme }) => {
     else if (p === "/personas") data = [persona]
     else if (p === "/connections/integrations") data = integrations
     else if (p === "/channels/conn_me") data = { connection_id: "conn_me", persona: null, rules: [{ when: { kind: "dm" }, act: "draft" }], trigger: { on: false, words: ["/bot"], where: ["*"], mark: true }, send_delay_s: null, send_delay_default_s: 3 }
-    else if (p.startsWith("/channels/")) data = []
+    else if (p.startsWith("/channels/")) data = null
     else return route.fulfill({ status: 404, contentType: "application/json", body: JSON.stringify({ error: "fixture" }) })
     return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(data) })
   })
@@ -75,6 +75,14 @@ const run = async ({ width, scheme }) => {
     await page.goto(base + "/test/fixtures/comm-pages.html?view=account" + q); await page.locator("[data-trigger-on]").waitFor()
     assert.equal(await page.locator("[data-trigger-scope]").count(), 0)
     await fits(); await shot("account")
+    // The Hub switch and service policy are independent; the row leads to account authorization.
+    await page.goto(base + "/test/fixtures/comm-pages.html?view=account&id=conn_ext" + q)
+    const write = page.locator("[data-write-authorization]")
+    await write.locator('[data-service-write-policy="allowed"]').waitFor()
+    assert.match(await write.innerText(), /Steve 已关闭/)
+    await write.click()
+    await page.waitForURL((u) => u.hash === "#/accounts/acc_ext")
+    await fits()
     // the bot's account: its spaces grouped, the new one first with one action for all new ones, the blocked one folded
     await page.goto(base + "/test/fixtures/comm-pages.html?view=account&id=conn_bot" + q); await page.locator("[data-grouped-spaces]").waitFor()
     assert.equal(await page.locator('[data-spaces-group="new"] [data-space-row="周会"]').count(), 1)

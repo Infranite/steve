@@ -15,6 +15,7 @@ import { Select } from "@/view-shared"
 import { t as tr, useT } from "@/i18n"
 import { tm, toast } from "@/store"
 import { useBusy } from "@/accounts/load"
+import { ServiceWritePolicyNote } from "@/accounts/service-write-policy"
 import { accountsApi, CONN_STATUS, connStatusOf } from "@/api/accounts"
 import { selfSideOf } from "@/integrations/sides"
 import { channelsApi, type ChannelAccount, type Rule, type Space } from "@/api/channels"
@@ -154,6 +155,8 @@ function Identity({ kind, c, p, chan, app, appConn, onLeave }: { kind: "steve" |
           <span className="type-callout text-muted-foreground">{chan.persona.name}</span><ChevronRightIcon className="size-4 text-tertiary" /></Row>}
         <Row title={feishu ? t("integrations:inst.perGroup") : t("integrations:inst.settings")} sub={feishu ? t("integrations:inst.perGroupSub") : undefined} onClick={() => go(channelHref)} data-identity-settings>
           <ChevronRightIcon className="size-4 text-tertiary" /></Row>
+        {c.service_write_policy && <Row title={t("accounts:conn.writeAsYou")} sub={<ServiceWritePolicyNote policy={c.service_write_policy} />} onClick={() => go("#/accounts/" + c.account_id)} data-write-authorization>
+          <span className="type-footnote text-muted-foreground">{t(c.capabilities.some((a) => a.caps.includes("msg.send_as_user")) ? "accounts:conn.writeOn" : "accounts:conn.writeOff")}</span><ChevronRightIcon className="size-4 text-tertiary" /></Row>}
         <Row title={t("integrations:inst.owner")} data-conn-owner><OwnerChip objectType="connection" objectId={c.id} showStatus /></Row>
       </Group>
       <Capabilities c={c} kind={kind} feishu={feishu} planned={planned.map((a) => areaLabel(a.area))} />

@@ -360,8 +360,11 @@ impl Session {
     }
 
     /// A write crossed a change to `forbidden` (§3.6).
-    pub fn forbid_writes(&self) {
-        lock(&self.status).write_policy = WritePolicy::Forbidden;
+    pub fn forbid_writes(&self) -> bool {
+        let mut status = lock(&self.status);
+        let changed = status.write_policy != WritePolicy::Forbidden;
+        status.write_policy = WritePolicy::Forbidden;
+        changed
     }
 
     pub fn is_closed(&self) -> bool {
