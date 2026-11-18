@@ -1,3 +1,4 @@
+import type { Code } from "./gen"
 import type { ResearchEvent } from "@/thread/chat-progress"
 /* Hub API: raw shapes (as the Hub's store returns them) and calls. store.ts maps them onto the view model. */
 import { lang, t } from "@/i18n"
@@ -273,7 +274,7 @@ export const cursorOf = (s: State): string | null => stateCursors.get(s) ?? null
  * shows the module's Unwired placeholder instead — never sample data. */
 export class NotWired extends Error { constructor() { super(t("shell:http.unreachable")) } }
 /** an error answer of a module route that exists; `status` tells 400 / 404 / 409 / 503 apart */
-export class HubError extends Error { status: number; constructor(status: number, msg: string) { super(msg); this.status = status } }
+export class HubError extends Error { status: number; code?: Code; constructor(status: number, msg: string, code?: Code) { super(msg); this.status = status; this.code = code } }
 export const isNotWired = (e: unknown): e is NotWired => e instanceof NotWired
 
 /** A resource that outlives a workspace/Hub switch can bind requests to the scope it was loaded in. */
@@ -294,7 +295,7 @@ export async function modReq<T>(method: string, path: string, body?: unknown, si
     throw new HubError(r.status, t("shell:http.failed", { status: r.status }))
   }
   if ((r.status === 404 || r.status === 405) && !j?.error) throw new NotWired()
-  if (!r.ok) throw new HubError(r.status, j?.error ?? t("shell:http.failed", { status: r.status }))
+  if (!r.ok) throw new HubError(r.status, j?.error ?? t("shell:http.failed", { status: r.status }), j?.code)
   if (j === undefined) throw new Error(t("shell:http.incomplete"))
   return j as T
 }
