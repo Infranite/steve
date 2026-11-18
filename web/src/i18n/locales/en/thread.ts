@@ -251,9 +251,12 @@ export default {
     ackAsBot: "The bot added “Working on it” to the message",
     changedAsUser: "Changed the reaction to “{{label}}” as you",
     changedAsBot: "The bot changed the reaction to “{{label}}”",
-    withError: "{{text}} (Feishu didn't accept it: {{error}})",
+    withError: "{{text}} (not confirmed by the channel: {{error}})",
+    unconfirmed: "Reaction not confirmed: {{error}}",
   },
   chanOut: {
+    notSent: "Not sent to chat",
+    blocked: "Channel restricted; not sent",
     sent: "Sent",
     pending: "Sending",
     draft: "Sends once you approve",

@@ -141,6 +141,20 @@ impl steve_core::thread::ConvHost for ChanConvHost {
             .unwrap_or_default()
     }
 
+    async fn research_answer(
+        &self,
+        ws: &str,
+        _space: &str,
+        origin: &str,
+        text: &str,
+    ) -> Result<String, String> {
+        let ch = self
+            .0
+            .upgrade()
+            .ok_or_else(|| "渠道模块已停止".to_string())?;
+        ch.conv_research_answer(ws, origin, text).await
+    }
+
     fn said(&self, ws: &str, space: &str, id: &str) {
         if let Some(ch) = self.0.upgrade() {
             ch.conv_said(ws, space, id);

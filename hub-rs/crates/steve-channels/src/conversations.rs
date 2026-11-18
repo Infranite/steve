@@ -17,9 +17,10 @@
 //! - on your own account only the composer speaks as you. A message there never reaches the router
 //!   (C4's composer decides reply, skip or ask); only your own `/bot` does, and of what the
 //!   conversation says about it only the composer's answer to that turn goes back to the space —
-//!   kept on the turn (`meta.chan_gen`, [`Composed`]), said exactly as written, always as a draft
-//!   for your approval. The router's questions and suggestions, research, receipts and the thread's
-//!   own state (queue full, stop, error: [`system_text`]) stay in the conversation;
+//!   kept on the turn (`meta.chan_gen`, [`Composed`]), said exactly as written. A completed research
+//!   result re-enters that composer through [`Channels::conv_research_answer`]; raw or incomplete
+//!   research never grants sending authority. The router's questions and suggestions, receipts
+//!   and the thread's own state (queue full, stop, error: [`system_text`]) stay in the conversation;
 //! - configuration changes, `#ST-n`, “送到事项” and `/汇报` never come from a chat (steve-core treats
 //!   a `chan:` conversation as a guest's).
 //!
@@ -404,6 +405,27 @@ impl Channels {
     /// answer): the channel composer, so the persona, the safety rules and the knowledge by
     /// disclosure level hold. Your `/bot` command is the instruction.
     pub async fn conv_answer(&self, ws: &str, origin: &str) -> Result<String, String> {
+        self.conv_compose(ws, origin, None).await
+    }
+
+    /// A completed research result is evidence for the ordinary channel composer, not itself an
+    /// owner-voice reply. Keep the classified answer exactly as for an inline answer.
+    pub async fn conv_research_answer(
+        &self,
+        ws: &str,
+        origin: &str,
+        result: &str,
+    ) -> Result<String, String> {
+        self.conv_compose(ws, origin, Some(result.to_string()))
+            .await
+    }
+
+    async fn conv_compose(
+        &self,
+        ws: &str,
+        origin: &str,
+        research: Option<String>,
+    ) -> Result<String, String> {
         let (_, plan, _) = self
             .turn_source(ws, origin)
             .map_err(|e| e.to_string())?
@@ -422,6 +444,7 @@ impl Channels {
             instruction,
             history: None,
             revise: None,
+            research,
         };
         let r = replies
             .generate(self, &plan, &opts)
@@ -581,6 +604,14 @@ impl Channels {
             return Ok(None);
         };
         let command = chan["command"] == true;
+        if m.meta["host_reply"]["status"] == "ineligible" {
+            self.react_finish(&plan.message_id, Finish::Clear).await;
+            let why = m.meta["host_reply"]["reason"]
+                .as_str()
+                .unwrap_or("研究结果未获得发送资格");
+            self.mark_not_sent(&m, "research_ineligible", why)?;
+            return Ok(None);
+        }
         // the composer's answer to this turn, when this message is it
         let composed = composed.filter(|c| c.says(&m.text));
         let system = system_text(&m.meta);
@@ -620,6 +651,11 @@ impl Channels {
                     note_message_event(tx, &plan.message_id, "recorded", q.trim(), &reason, None)
                 }
             })?;
+            self.mark_not_sent(
+                &m,
+                c.generation.outcome.code(),
+                if why.trim().is_empty() { &q } else { &why },
+            )?;
             return Ok(None);
         }
         if m.meta.get("stopped").is_some_and(|v| v == true) {
@@ -713,6 +749,11 @@ impl Channels {
                         "not said as you: not the composer's reply to the turn"
                     );
                     self.react_finish(&plan.message_id, Finish::Clear).await;
+                    self.mark_not_sent(
+                        &m,
+                        "unverified_reply",
+                        "未核实为本回合经渠道生成器确认的正式回复，结果保留在 Steve 对话中",
+                    )?;
                     return Ok(None);
                 }
             },
@@ -769,6 +810,29 @@ impl Channels {
         Ok(Some(d))
     }
 
+    /// No outbound message exists: do not confuse generation or an eligibility refusal with a
+    /// failed provider send, and do not retry a historical unclassified result automatically.
+    fn mark_not_sent(
+        &self,
+        m: &steve_store::Message,
+        code: &str,
+        reason: &str,
+    ) -> ChannelResult<()> {
+        self.store().transaction(|tx| -> ChannelResult<()> {
+            tx.execute(
+                "UPDATE messages SET meta = json_set(CASE WHEN json_valid(meta) THEN meta ELSE '{}' END,
+                  '$.chan_out', json(?)) WHERE id = ? AND workspace_id = ?",
+                params![
+                    json!({"message": null, "status": "skipped", "decision": null,
+                        "stage": "eligibility", "code": code, "reason": reason}).to_string(),
+                    m.id, m.workspace_id,
+                ],
+            )?;
+            tx.publish(steve_store::ChangeEvent::Message { id: m.id.clone() });
+            Ok(())
+        })
+    }
+
     /// The space of conversation message `m` has no connected identity any more (its connections
     /// were removed): what Steve said cannot go out. It is recorded on the message
     /// (`chan_out.status = "disconnected"`, shown under it in the conversation) and the reaction of
@@ -780,6 +844,22 @@ impl Channels {
         origin: &str,
     ) -> ChannelResult<Option<Delivered>> {
         let turn = self.store().messages().get(origin)?;
+        if m.meta["host_reply"]["status"] == "ineligible" {
+            if let Some(source) = turn
+                .as_ref()
+                .and_then(|o| o.meta["chan"]["message"].as_str())
+            {
+                self.react_finish(source, Finish::Clear).await;
+            }
+            self.mark_not_sent(
+                m,
+                "research_ineligible",
+                m.meta["host_reply"]["reason"]
+                    .as_str()
+                    .unwrap_or("研究结果未获得发送资格"),
+            )?;
+            return Ok(None);
+        }
         let composed = turn
             .as_ref()
             .and_then(Composed::of)
@@ -839,12 +919,17 @@ impl Channels {
                 None => None,
             };
             let status = now.as_deref().unwrap_or(said);
+            let reason = match d.message_id() {
+                Some(id) if matches!(status, "failed" | "blocked" | "unknown") =>
+                    crate::conv_record::out_error(tx, &m.workspace_id, id)?,
+                _ => None,
+            };
             let msgs = self.store().messages();
             let current = msgs.get(&m.id)?.map_or_else(|| m.meta.clone(), |x| x.meta);
             let mut meta: Map<String, Value> = current.as_object().cloned().unwrap_or_default();
             meta.insert(
                 "chan_out".into(),
-                json!({"message": d.message_id(), "status": status, "decision": d.decision_id()}),
+                json!({"message": d.message_id(), "status": status, "decision": d.decision_id(), "reason": reason}),
             );
             msgs.patch_meta(&m.id, &Value::Object(meta))?;
             Ok(())
@@ -1396,6 +1481,12 @@ pub fn messages_of(
             {
                 v["meta"]["chan_out"]["status"] = json!(st);
                 v["meta"]["chan_out"]["decision"] = json!(decision);
+                v["meta"]["chan_out"]["reason"] =
+                    if matches!(st.as_str(), "failed" | "blocked" | "unknown") {
+                        json!(crate::conv_record::out_error(c, ws, out_id)?)
+                    } else {
+                        Value::Null
+                    };
             }
             out.push(v);
         }

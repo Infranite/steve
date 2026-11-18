@@ -418,7 +418,13 @@ impl Channels {
         if !allowed {
             return Ok(());
         }
-        let mut err: Option<String> = None;
+        // Clearing an acknowledgement that the provider never accepted performs no successful
+        // provider action. Retain its refusal instead of erasing the only persisted evidence.
+        let mut err = if how == Finish::Clear && row.reaction_id.is_none() {
+            row.error.clone()
+        } else {
+            None
+        };
         // the space's connections were removed: nothing can be put on or taken off at the
         // provider any more, the state ends here only
         let kind = match how {
