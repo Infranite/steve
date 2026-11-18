@@ -2538,11 +2538,26 @@ async fn open_harness(
         }
         _ => None,
     };
-    // the Bot's skills where the adapter declares it reads them, in that directory
+    // A managed snapshot uses this session's state only. Legacy opens retain their stored
+    // payload and placement contract; no new save/publication reaches their shared directory.
+    let mut skill_receipt = None;
     match (
         &state,
         inner.cfg.acp.adapter_properties(&harness).skills.as_deref(),
     ) {
+        (Some((dir, _)), Some(sub)) if row.open.skill_snapshot.is_some() => {
+            let snapshot = crate::managed_skills::pinned(
+                &inner.cfg.home,
+                row.open.skill_snapshot.as_ref().expect("managed snapshot"),
+            )?;
+            skill_receipt = Some(crate::managed_skills::place(dir, sub, &snapshot)?);
+        }
+        _ if row.open.skill_snapshot.is_some() => {
+            return Err(ApiError::new(
+                ErrorCode::Unsupported,
+                "this adapter cannot isolate managed skills",
+            ));
+        }
         (Some((dir, _)), Some(sub)) => {
             if let Err(why) = crate::bot_skills::place(dir, sub, &row.open.skills) {
                 tracing::warn!(session = %session, "the Bot's skills were not placed: {why}");
@@ -2857,6 +2872,7 @@ async fn open_harness(
     let (new_id, model, effort) = seen.0.into_inner().unwrap();
     // Tasks return candidates only. The actor commits them against its operation/attempt fence.
     let mut view = row.view;
+    view.skill_receipt = skill_receipt;
     view.effective = row.open.choice;
     if model.is_some() {
         view.effective.model = model;

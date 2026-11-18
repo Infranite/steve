@@ -118,6 +118,7 @@ rpc_table! {
     NODE_VITALS = "node.vitals": HubToNode Control Read false;
     NODE_HOST = "node.host": HubToNode Control Read false;
     // Idempotent setting, not an execution: resending it cannot duplicate work.
+    NODE_SKILLS_SYNC = "node.skills_sync": HubToNode Control Read false;
     NODE_SESSION_CAPACITY = "node.session_capacity": HubToNode Control Read false;
     // Lost after it was written: ask its state (`node.upgrade_status`), never stage or switch again.
     NODE_UPGRADE = "node.upgrade": HubToNode Control Command true;

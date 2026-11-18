@@ -1,4 +1,6 @@
 {
+  "hub.skills.read_failed": "无法读取技能分发状态",
+  "hub.skills.not_found": "没有这个技能",
   "hub.error.invalid": "参数不对：%{fields}",
   "hub.error.list_sep": "、",
   "hub.not_found.item": "没有这个事项",

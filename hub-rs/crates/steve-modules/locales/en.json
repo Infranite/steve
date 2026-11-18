@@ -1,4 +1,8 @@
 {
+  "modules.caps.skill_version": "Skill version",
+  "modules.caps.skill_changed": "This skill changed. Reload it before trying again.",
+  "modules.caps.skill_not_published": "This version has not been published before.",
+  "modules.caps.skill_write_denied": "You no longer have access to change skills in this workspace.",
   "modules.error.invalid": "Invalid parameters: %{fields}",
   "modules.error.list_sep": ", ",
   "modules.error.internal": "Something went wrong, please try again later",

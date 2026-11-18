@@ -66,6 +66,7 @@ impl NodeRuntime {
             // Plugins stay at the Hub; only skills are filled from the Bot below.
             mcp_servers: vec![],
             skills: vec![],
+            skill_snapshot: None,
         };
         let fresh = self.tx(|tx| {
             self.session_owners_work_in(tx, &b.session)?;
@@ -120,8 +121,12 @@ impl NodeRuntime {
             // the principal's own variables on this Node, as recorded just now (node_env)
             let mut open = open.clone();
             open.env = super::super::node_env::for_session(tx, self.node_id.as_str(), &b.session)?;
-            // and its skills
-            open.skills = super::super::bot_skills::for_session(tx, &b.session)?;
+            // A publication is picked exactly once, in the binding transaction.
+            open.skill_snapshot = super::super::bot_skills::for_session(tx, &b.session)?;
+            if let Some(snapshot) = &open.skill_snapshot {
+                tx.execute("UPDATE runtime_sessions SET skill_snapshot_digest=?,skill_expected=? WHERE session_id=?",
+                    rusqlite::params![snapshot.digest.as_str(), serde_json::to_string(&snapshot.refs())?, b.session])?;
+            }
             if self.principal_state.load(Ordering::Relaxed) {
                 open.state = super::super::principal::harness_state_in(
                     tx,
@@ -129,6 +134,14 @@ impl NodeRuntime {
                     self.node_id.as_str(),
                     &open.choice.harness,
                 )?;
+                if let Some(state) = &mut open.state {
+                    // Even a fresh empty set must not erase a legacy session's shared files.
+                    // Keep continuation on the same recorded root for the lifetime of this session.
+                    state.dir.push('/');
+                    state.dir.push_str(&super::super::principal::session_segment(&b.session));
+                    tx.execute("UPDATE runtime_sessions SET state_dir=? WHERE session_id=?",
+                        rusqlite::params![state.dir, b.session])?;
+                }
             }
             let (open_v, open_d) = command(&open_op, open.clone())?;
             rt::insert_command_in(
@@ -224,7 +237,11 @@ impl NodeRuntime {
         open.resume = resume_of_in(tx, &self.node_id, session)?;
         // the variables as they are now: a removed or changed one does not come back
         open.env = super::super::node_env::for_session(tx, self.node_id.as_str(), session)?;
-        open.skills = super::super::bot_skills::for_session(tx, session)?;
+        // Do not recompute skills from the current publication. Resume keeps its bound facility.
+        tx.execute(
+            "UPDATE runtime_sessions SET skill_use_receipt=NULL WHERE session_id=?",
+            [session],
+        )?;
         let op = uid(&format!("op_open_{session}"));
         let (req, digest) = command(&op, open)?;
         rt::insert_command_in(

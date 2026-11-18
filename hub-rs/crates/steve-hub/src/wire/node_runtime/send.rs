@@ -234,7 +234,58 @@ impl NodeRuntime {
         let n = &self.node;
         match l.method.as_str() {
             "prepare_workspace" => n.prepare_workspace(parse(&l.request)?).await,
-            "open_session" => n.open_session(parse(&l.request)?).await,
+            "open_session" => {
+                let open: Command<OpenSession> = parse(&l.request)?;
+                if let Some(pin) = &open.body.skill_snapshot {
+                    let blocked = |code, why| {
+                        ApiError::new(
+                            if l.maybe_sent {
+                                ErrorCode::OutcomeUnknown
+                            } else {
+                                code
+                            },
+                            why,
+                        )
+                    };
+                    if open.body.state.is_none() {
+                        return Err(blocked(
+                            ErrorCode::Unsupported,
+                            "managed skills require isolated principal state",
+                        ));
+                    }
+                    let caps = n.probe(false).await?;
+                    if !super::super::bot_skills::supports(
+                        &caps.features,
+                        &open.body.choice.harness,
+                    ) {
+                        return Err(blocked(
+                            ErrorCode::Unsupported,
+                            "the node's adapter cannot isolate managed skills",
+                        ));
+                    }
+                    if self.is_remote() {
+                        let takes = self
+                            .store
+                            .reader(|c| {
+                                super::super::node_binding::node_takes(
+                                    c,
+                                    self.node_id.as_str(),
+                                    &pin.workspace,
+                                )
+                            })
+                            .map_err(|_| {
+                                ApiError::new(ErrorCode::Offline, "could not verify skill scope")
+                            })?;
+                        if !takes {
+                            return Err(blocked(
+                                ErrorCode::Offline,
+                                "node is not authorized for this skill snapshot",
+                            ));
+                        }
+                    }
+                }
+                n.open_session(open).await
+            }
             "start_turn" => {
                 let blocked = if self.domain.dynamic_workflows() {
                     None
@@ -364,6 +415,16 @@ impl NodeRuntime {
             ("open_session", ReceiptState::Finished) => {
                 let s = command_session_in(tx, op)?;
                 self.config_opened_in(tx, &s, op, success)?;
+                if success
+                    && let Observed::Finished {
+                        result: Some(OperationResult::Session(view)),
+                        ..
+                    } = &receipt.state
+                    && view.id.as_str() == s
+                    && let Some(proof) = &view.skill_receipt
+                {
+                    super::super::bot_skills::receipt_in(tx, &s, self.node_id.as_str(), proof)?;
+                }
                 return self.opened_in(tx, &s, success, &detail);
             }
             ("abandon", ReceiptState::Finished) if !success => {

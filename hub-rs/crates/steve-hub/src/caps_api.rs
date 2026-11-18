@@ -71,6 +71,53 @@ pub async fn steve_h(State(st): State<AppState>, headers: HeaderMap) -> Json<Val
     }))
 }
 
+/// The skill center's workspace-scoped desired state and authenticated receipts.
+pub async fn skill_distribution(
+    State(st): State<AppState>,
+    axum::Extension(c): axum::Extension<crate::api::Ctx>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> crate::api::ApiResult {
+    use crate::wire::bot_skills as skills;
+    let modules = st
+        .modules
+        .clone()
+        .ok_or_else(crate::error::ApiError::no_route)?;
+    let links = st
+        .nodes
+        .as_ref()
+        .map(|svc| {
+            svc.registry
+                .linked()
+                .into_iter()
+                .filter_map(|id| {
+                    let link = skills::remote_link(svc.registry.current(&id)?);
+                    Some((id, link))
+                })
+                .collect::<std::collections::HashMap<_, _>>()
+        })
+        .unwrap_or_default();
+    let local = st.node.is_some();
+    crate::api::blocking(move || {
+        let mut links = links;
+        let record = modules.store.reader::<_, steve_store::StoreError>(|conn| {
+            let local_link = skills::local_link();
+            if local && !links.contains_key("local") && conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM node_skill_inventory WHERE node_id='local' AND link=?)",
+                [&local_link], |r| r.get::<_,bool>(0),
+            )? {
+                links.insert("local".into(), local_link);
+            }
+            skills::distribution(conn, &c.ws, &id, &c.me, &links, local)
+        }).map_err(|e| {
+            tracing::warn!(%e, "skill distribution read failed");
+            crate::error::ApiError::internal(steve_i18n::t!("hub.skills.read_failed"))
+        })?;
+        crate::api::ok(record.ok_or_else(|| crate::error::ApiError::not_found(
+            steve_i18n::t!("hub.skills.not_found"),
+        ))?)
+    }).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

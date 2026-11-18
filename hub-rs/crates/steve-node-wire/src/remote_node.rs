@@ -134,7 +134,11 @@ impl RemoteNode {
     /// them, a merge left conflicted or a push without its origin check. Refused here, nothing
     /// sent, so `unsupported` truly means nothing ran.
     fn needs(&self, minor: u16, what: &str) -> ApiResult<()> {
-        let have = self.conn(false)?.peer_minor();
+        Self::check_minor(self.conn(false)?.as_ref(), minor, what)
+    }
+
+    fn check_minor(conn: &Conn, minor: u16, what: &str) -> ApiResult<()> {
+        let have = conn.peer_minor();
         if have < minor {
             return Err(ApiError::new(
                 ErrorCode::Unsupported,
@@ -156,6 +160,26 @@ impl RemoteNode {
         answer_of(method, v, op)
     }
 
+    /// Reconciliation may not reuse a payload computed for a superseded connection.
+    pub async fn sync_skills_on(
+        &self,
+        generation: u64,
+        target: SyncSkills,
+    ) -> ApiResult<SkillCacheReceipt> {
+        let conn = self.conn(!target.snapshot.entries.is_empty())?;
+        if conn.generation() != generation {
+            return Err(ApiError::new(
+                ErrorCode::Offline,
+                "skill target link replaced",
+            ));
+        }
+        Self::check_minor(&conn, MANAGED_SKILLS.1, NODE_SKILLS_SYNC)?;
+        let value = conn
+            .call(NODE_SKILLS_SYNC, to_value(&target)?, None)
+            .await?;
+        answer_of(NODE_SKILLS_SYNC, value, None)
+    }
+
     async fn cmd<T: Serialize + Send + Sync>(
         &self,
         method: &str,
@@ -169,7 +193,15 @@ impl RemoteNode {
 #[async_trait]
 impl SessionExecutor for RemoteNode {
     async fn open_session(&self, c: Command<OpenSession>) -> ApiResult<Receipt> {
-        self.cmd(m::SESSION_OPEN, &c, true).await
+        if c.body.skill_snapshot.is_none() {
+            return self.cmd(m::SESSION_OPEN, &c, true).await;
+        }
+        let conn = self.conn(true)?;
+        Self::check_minor(&conn, MANAGED_SKILLS.1, m::SESSION_OPEN)?;
+        let value = conn
+            .call(m::SESSION_OPEN, to_value(&c)?, Some(&c.id))
+            .await?;
+        answer_of(m::SESSION_OPEN, value, Some(&c.id))
     }
     async fn configure_session(&self, c: Command<ConfigureSession>) -> ApiResult<Receipt> {
         self.cmd(SESSION_CONFIGURE, &c, false).await
@@ -318,6 +350,13 @@ impl WorkspaceExecutor for RemoteNode {
 
 #[async_trait]
 impl Discovery for RemoteNode {
+    async fn sync_skills(&self, target: SyncSkills) -> ApiResult<SkillCacheReceipt> {
+        let generation = self
+            .generation()
+            .ok_or_else(|| ApiError::new(ErrorCode::Offline, "node offline"))?;
+        self.sync_skills_on(generation, target).await
+    }
+
     async fn set_session_capacity(&self, sessions: u32) -> ApiResult<()> {
         self.needs(steve_node_api::SESSION_CAPACITY.1, NODE_SESSION_CAPACITY)?;
         self.go(NODE_SESSION_CAPACITY, &sessions, None, false).await

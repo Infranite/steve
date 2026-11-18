@@ -927,6 +927,7 @@ async fn another_nodes_session_is_refused() {
                     effective_permissions: PermissionMode::Ask,
                     guarantees: vec![],
                     resume: None,
+                    skill_receipt: None,
                 },
             },
         ),

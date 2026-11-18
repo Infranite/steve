@@ -164,6 +164,7 @@ impl Fixture {
                     artifact_view: None,
                     mcp_servers: vec![],
                     skills: vec![],
+                    skill_snapshot: None,
                 },
             ))
             .await
