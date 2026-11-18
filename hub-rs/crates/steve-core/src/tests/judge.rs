@@ -858,3 +858,73 @@ fn candidates_are_one_per_key_and_refuse_unknown_values() {
     assert!(!facts.candidate_release(&id, "k2", None, false, 0).unwrap());
     assert!(facts.candidate_release(&id, "k1", None, false, 0).unwrap());
 }
+
+/// Polls `f` (≤15 s) without blocking the runtime the watches run on.
+async fn eventually(f: impl Fn() -> bool) -> bool {
+    for _ in 0..1500 {
+        if f() {
+            return true;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    false
+}
+
+/// The judge runs in its own watch: while one of its model calls hangs, the stall watch still
+/// opens the card of an item that stopped after the call began (in one loop it would wait behind
+/// the call, and so would the Release build and pull request checks).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_hanging_judge_call_never_holds_up_the_stall_watch() {
+    let k = Kit::new();
+    let (item, _) = item_with_turn(&k, "做好了");
+    k.gw.set(|_, _| Ok(DONE.into()));
+    *k.gw.slow.lock().unwrap() = Some(("You judge whether", std::time::Duration::from_secs(3_600)));
+    let judge = tokio::spawn(k.core.clone().run_judge_watch());
+    let stall = tokio::spawn(
+        k.core
+            .clone()
+            .stall_watch(std::time::Duration::from_millis(50)),
+    );
+    assert!(
+        eventually(|| k.gw.calls.lock().unwrap().len() == 1).await,
+        "the judge's call is under way"
+    );
+
+    // now an item stops (you cancelled its turn) and has been quiet past the stall time
+    let stopped = k.item("run", "另一件事", None);
+    let s = k.session(&stopped, "idle");
+    crate::AgentRuntime::prompt(&*k.rt, &s, "做事", "me", &[]).unwrap();
+    k.rt.end_turn(&k.core, &s, "cancelled", None);
+    k.db()
+        .store()
+        .transaction(|tx| {
+            tx.execute("UPDATE sessions SET updated=0 WHERE id=?", [&s])?;
+            tx.execute("UPDATE events SET ts=0 WHERE session_id=?", [&s])?;
+            Ok::<_, steve_store::StoreError>(())
+        })
+        .unwrap();
+    let card = || {
+        k.db()
+            .decisions_of_item(&stopped)
+            .unwrap()
+            .iter()
+            .any(|d| d.subject_type == crate::stall::STALL)
+    };
+    assert!(
+        eventually(card).await,
+        "the stall card opens while the judge waits"
+    );
+    // the judge call is still hanging: nothing of it was written, and no second pass began
+    assert_eq!(k.gw.calls.lock().unwrap().len(), 1);
+    let facts = k.db().store().item_facts();
+    assert!(facts.judgements(&item, 1).unwrap().is_empty());
+    judge.abort();
+    stall.abort();
+}
+
+#[test]
+fn no_session_is_unknown_with_its_own_reason() {
+    let mut f = facts();
+    f.session = None;
+    assert_eq!(judge_gate(&f, &policy()), (Settled::Unknown, "no_session"));
+}

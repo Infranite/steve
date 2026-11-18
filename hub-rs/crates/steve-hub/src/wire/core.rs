@@ -1453,6 +1453,9 @@ impl Domain for CoreDomain {
         tokio::spawn(self.core.clone().run_housekeeping());
         tokio::spawn(self.core.clone().run_workspace_watch());
         tokio::spawn(self.core.clone().run_stall_watch());
+        // the completion judge in shadow (#335): its own watch, so its model calls never hold up
+        // the stall, build and pull request checks
+        tokio::spawn(self.core.clone().run_judge_watch());
         // ST-34: items made before the categories, or left without one, get theirs
         tokio::spawn(self.core.clone().backfill_kinds_all());
         true

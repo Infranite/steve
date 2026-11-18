@@ -358,6 +358,11 @@ pub fn result_fact(f: &Facts, kind: &str) -> Option<usize> {
 /// quota wait, pause, Stop of yours or busy work graph. It never says the machine has no background
 /// work; it says the Hub sees nothing more coming for this turn.
 pub fn judge_gate(f: &Facts, policy: &WorkPolicy) -> (Settled, &'static str) {
+    /* no session: nothing of a turn to read (before the session's own readings, which say the
+     * same Unknown without a reason) */
+    let Some(s) = &f.session else {
+        return (Settled::Unknown, "no_session");
+    };
     let (settled, busy) = settled(f, policy);
     if let Some((code, _)) = busy {
         return (settled, code);
@@ -365,9 +370,6 @@ pub fn judge_gate(f: &Facts, policy: &WorkPolicy) -> (Settled, &'static str) {
     if settled != Settled::Evaluable {
         return (settled, "node_away");
     }
-    let Some(s) = &f.session else {
-        return (Settled::Unknown, "no_session");
-    };
     if s.turn.is_none() {
         return (Settled::Unknown, "no_turn");
     }

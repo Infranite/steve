@@ -96,7 +96,13 @@ pub const TABLE: &[Entry] = &[
         name: "judge_per_pass",
         default: 4,
         unit: "count",
-        meaning: "judge model calls one pass makes, every 30 seconds",
+        meaning: "judge model calls one pass makes",
+    },
+    Entry {
+        name: "judge_every",
+        default: 30_000,
+        unit: "ms",
+        meaning: "the pause between one judging pass ending and the next starting (passes never overlap, and run apart from the stall, build and pull request checks)",
     },
     Entry {
         name: "judge_looks_per_pass",
@@ -278,6 +284,9 @@ impl WorkPolicy {
     pub fn judge_looks_per_pass(&self) -> usize {
         usize::try_from(self.get("judge_looks_per_pass")).unwrap_or(0)
     }
+    pub fn judge_every(&self) -> i64 {
+        self.get("judge_every")
+    }
 
     /// Every entry with the value in force, for the debug view.
     pub fn entries(&self) -> Vec<(&'static str, i64)> {
@@ -311,6 +320,7 @@ mod tests {
         assert_eq!(p.judge_text_chars(), 6_000);
         assert_eq!(p.judge_per_pass(), 4);
         assert_eq!(p.judge_looks_per_pass(), 16);
+        assert_eq!(p.judge_every(), 30_000);
         // the retry waits double up to their cap
         assert_eq!(p.judge_retry_after(1), MINUTE);
         assert_eq!(p.judge_retry_after(2), 2 * MINUTE);

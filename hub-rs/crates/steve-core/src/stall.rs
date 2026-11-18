@@ -35,9 +35,15 @@ impl Core {
         self.tx().expire_stall(session_id)
     }
 
-    /// Every 30 s. Runs forever.
+    /// Every 30 s. Runs forever. The completion judge has its own watch
+    /// ([`Core::run_judge_watch`]): its model calls never hold up these checks.
     pub async fn run_stall_watch(self) {
-        let mut tick = tokio::time::interval(CHECK_EVERY);
+        self.stall_watch(CHECK_EVERY).await;
+    }
+
+    /// The stall watch every `every` (tests run it faster).
+    pub(crate) async fn stall_watch(self, every: Duration) {
+        let mut tick = tokio::time::interval(every);
         loop {
             tick.tick().await;
             let c = self.clone();

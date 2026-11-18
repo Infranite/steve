@@ -1047,8 +1047,31 @@ fn tail(text: &str, n: usize) -> String {
     chars[chars.len().saturating_sub(n)..].iter().collect()
 }
 
+/// The shortest pause between two judging passes, whatever `judge_every` is set to: an override
+/// of 0 must not make the watch spin on the lock.
+const PASS_GAP_FLOOR: Duration = Duration::from_secs(1);
+
 impl Core {
-    /// One judging pass (every 30 s, from the stall watch): the facts and rules under the lock, the
+    /// The judge's own watch, apart from the stall watch: its model calls (up to `judge_per_pass`
+    /// of `judge_timeout` each) never hold up stall cards, Release builds or pull request checks.
+    /// One pass at a time, `judge_every` after the last one ended, so passes never overlap and a
+    /// slow pass is not followed by a burst. Runs forever.
+    pub async fn run_judge_watch(self) {
+        loop {
+            if let Err(e) = self.check_judges().await {
+                tracing::warn!("judge pass {e}");
+            }
+            let c = self.clone();
+            let every = match tokio::task::spawn_blocking(move || c.tx().work_policy()).await {
+                Ok(Ok(p)) => p.judge_every(),
+                _ => WorkPolicy::default().judge_every(),
+            };
+            let every = Duration::from_millis(u64::try_from(every).unwrap_or(0));
+            tokio::time::sleep(every.max(PASS_GAP_FLOOR)).await;
+        }
+    }
+
+    /// One judging pass (from [`Core::run_judge_watch`]): the facts and rules under the lock, the
     /// model calls outside it, one at a time, each verdict written compare-and-swap. Shadow: it
     /// stores verdicts and acts on none. Returns the judgements written.
     pub async fn check_judges(&self) -> Result<usize> {
