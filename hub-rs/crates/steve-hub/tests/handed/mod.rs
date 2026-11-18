@@ -2,8 +2,7 @@
 //! a listening socket (`steve_hub::config::Handed`, systemd's socket activation), so no other test
 //! can take it between choosing it and the Hub binding it, nor while the Hub restarts.
 
-use std::os::fd::AsRawFd;
-use std::os::unix::process::CommandExt;
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::process::Command;
 
 /// A listening socket on a free loopback port, kept for as long as the test needs the port.
@@ -19,46 +18,62 @@ impl Socket {
     }
 }
 
-/// `program`, started with `sockets` as its listening sockets, each under its name
-/// (`LISTEN_FDNAMES`). The program runs in the process `Command` starts (`sh` execs it), so the
-/// child's id is the program's.
-pub fn command(program: &str, sockets: &[(&str, &Socket)]) -> Command {
-    const MAX: usize = 4;
-    assert!(sockets.len() <= MAX, "at most {MAX} sockets");
-    let mut fds = [-1; MAX];
-    for (fd, (_, s)) in fds.iter_mut().zip(sockets) {
-        *fd = s.0.as_raw_fd();
+/// A command that starts `program` with sockets handed to it: use it as the [`Command`] it
+/// derefs to. Copies of the sockets that its child inherits live as long as this.
+pub struct Handing {
+    command: Command,
+    _copies: Vec<OwnedFd>,
+}
+
+impl std::ops::Deref for Handing {
+    type Target = Command;
+    fn deref(&self) -> &Command {
+        &self.command
     }
-    let n = sockets.len();
+}
+
+impl std::ops::DerefMut for Handing {
+    fn deref_mut(&mut self) -> &mut Command {
+        &mut self.command
+    }
+}
+
+/// `program` with `sockets` as its listening sockets, each under its name (`LISTEN_FDNAMES`).
+///
+/// The child inherits copies of the sockets (made without close-on-exec, above descriptor
+/// 3 + their count), and `bash` puts them on descriptors 3.. as it execs `program` in the same
+/// process: the child's id is the program's, the `LISTEN_PID` the Hub expects. No `pre_exec`, so
+/// std spawns with `posix_spawn`: a `fork` in a multithreaded test can crash on macOS before it
+/// gets to `exec`.
+pub fn command(program: &str, sockets: &[(&str, &Socket)]) -> Handing {
+    let n = sockets.len() as libc::c_int;
+    let copies: Vec<OwnedFd> = sockets
+        .iter()
+        .map(|(_, s)| {
+            // SAFETY: a copy of a socket this process owns, at a free descriptor of 3 + n or more;
+            // the copy is owned (and closed) by the returned value
+            let fd = unsafe { libc::fcntl(s.0.as_raw_fd(), libc::F_DUPFD, 3 + n) };
+            assert!(fd >= 0, "{}", std::io::Error::last_os_error());
+            unsafe { OwnedFd::from_raw_fd(fd) }
+        })
+        .collect();
     let names: Vec<&str> = sockets.iter().map(|(name, _)| *name).collect();
-    // LISTEN_PID is the process that is to take the sockets: the shell, which becomes `program`
-    let mut c = Command::new("/bin/sh");
-    c.args([
-        "-c",
-        "LISTEN_PID=$$; export LISTEN_PID; exec \"$0\"",
-        program,
-    ])
-    .env("LISTEN_FDS", n.to_string())
-    .env("LISTEN_FDNAMES", names.join(":"));
-    // SAFETY: only fcntl, dup2 and close between fork and exec (async-signal-safe, no allocation):
-    // first every socket out of the way of descriptors 3.., then each onto its own one
-    unsafe {
-        c.pre_exec(move || {
-            let mut moved = [-1; MAX];
-            for (m, fd) in moved.iter_mut().zip(fds).take(n) {
-                *m = libc::fcntl(fd, libc::F_DUPFD, (3 + n) as libc::c_int);
-                if *m < 0 {
-                    return Err(std::io::Error::last_os_error());
-                }
-            }
-            for (i, fd) in moved.iter().enumerate().take(n) {
-                if libc::dup2(*fd, 3 + i as libc::c_int) < 0 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                libc::close(*fd);
-            }
-            Ok(())
-        });
+    let mut script = String::from("LISTEN_PID=$$; export LISTEN_PID; exec \"$0\"");
+    for (i, c) in copies.iter().enumerate() {
+        script += &format!(" {}<&{}", 3 + i, c.as_raw_fd());
     }
-    c
+    for c in &copies {
+        script += &format!(" {}<&-", c.as_raw_fd());
+    }
+    let mut command = Command::new("/bin/bash");
+    command
+        .arg("-c")
+        .arg(script)
+        .arg(program)
+        .env("LISTEN_FDS", n.to_string())
+        .env("LISTEN_FDNAMES", names.join(":"));
+    Handing {
+        command,
+        _copies: copies,
+    }
 }

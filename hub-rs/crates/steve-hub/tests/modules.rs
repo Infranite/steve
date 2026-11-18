@@ -65,13 +65,18 @@ async fn start_in(home: tempfile::TempDir, web_dir: &std::path::Path) -> Hub {
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
+    let exited = child.try_wait().ok().flatten();
     let _ = child.kill();
     let _ = child.wait();
-    let last = std::fs::read_to_string(&log).unwrap_or_default();
-    let tail: Vec<&str> = last.lines().rev().take(40).collect();
+    let tail = |p: &std::path::Path| {
+        let s = std::fs::read_to_string(p).unwrap_or_default();
+        let l: Vec<&str> = s.lines().collect();
+        l[l.len().saturating_sub(40)..].join("\n")
+    };
     panic!(
-        "hub did not start; its log ends:\n{}",
-        tail.into_iter().rev().collect::<Vec<_>>().join("\n")
+        "hub did not start (exited: {exited:?}); its output ends:\n{}\nits log ends:\n{}",
+        tail(&out),
+        tail(&log)
     );
 }
 

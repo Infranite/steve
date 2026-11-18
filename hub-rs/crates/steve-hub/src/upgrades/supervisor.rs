@@ -661,7 +661,7 @@ mod tests {
             "#!/bin/sh\nexit 1\n".to_string()
         } else {
             r#"#!/usr/bin/env python3
-import os,json,http.server,threading,time,sys
+import os,json,http.server,threading,time,sys,errno
 # Build metadata is a CLI query, not a request to start a server. In particular,
 # never bind an inherited STEVE_PORT when these tests run inside a live Node.
 if '--build-info' in sys.argv:
@@ -678,7 +678,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
    with open(home+'/updates/operations/'+op+'.json') as f: maintenance=json.load(f)['phase'] not in ['committed','succeeded']
   body=json.dumps(dict(ok=True,ready=True,version=version,web_version=version,upgrade_id=op,maintenance=maintenance)).encode()
   self.send_response(200);self.send_header('Content-Length',str(len(body)));self.end_headers();self.wfile.write(body)
-Server(('127.0.0.1',int(os.environ['STEVE_PORT'])),Handler).serve_forever()
+# the port was chosen before this binds it: say so when something else took it meanwhile
+try: server=Server(('127.0.0.1',int(os.environ['STEVE_PORT'])),Handler)
+except OSError as e:
+ if e.errno==errno.EADDRINUSE: open(home+'/port-taken','w').close()
+ raise
+server.serve_forever()
 "#.into()
         };
         fs::write(dir.join("bin/steve-hub"), script).unwrap();
@@ -722,8 +727,21 @@ Server(('127.0.0.1',int(os.environ['STEVE_PORT'])),Handler).serve_forever()
             );
         }
     }
+    /// An upgrade between two fixture Hubs, on a port chosen before they bind it: another test
+    /// can take it first, or between one child and the next. A fixture that finds it taken says so
+    /// (`port-taken`), and the case runs again on another port, three times at most (#429).
     async fn scenario(broken: bool) {
+        for _ in 0..3 {
+            if scenario_on_a_free_port(broken).await {
+                return;
+            }
+        }
+        panic!("the fixtures' port was taken three times");
+    }
+    /// The case, or `false` when a fixture's port was taken.
+    async fn scenario_on_a_free_port(broken: bool) -> bool {
         let home = tempfile::tempdir().unwrap();
+        let taken = || home.path().join("port-taken").exists();
         let port = std::net::TcpListener::bind("127.0.0.1:0")
             .unwrap()
             .local_addr()
@@ -764,10 +782,18 @@ Server(('127.0.0.1',int(os.environ['STEVE_PORT'])),Handler).serve_forever()
         op.target = Some(new.to_string_lossy().into());
         u.phase(&mut op, "ready", None).unwrap();
         let mut child = spawn(&cfg, &old, None).unwrap();
-        wait_health(&cfg, &u, &mut child, "0.1.0", None)
-            .await
-            .unwrap();
-        apply(&cfg, &u, &mut child, &mut op).await.unwrap();
+        let up = wait_health(&cfg, &u, &mut child, "0.1.0", None).await;
+        if taken() {
+            let _ = stop(&mut child).await;
+            return false;
+        }
+        up.unwrap();
+        let applied = apply(&cfg, &u, &mut child, &mut op).await;
+        if taken() {
+            let _ = stop(&mut child).await;
+            return false;
+        }
+        applied.unwrap();
         assert_eq!(op.phase, if broken { "rolled_back" } else { "succeeded" });
         assert_eq!(
             fs::canonicalize(home.path().join("current")).unwrap(),
@@ -780,6 +806,7 @@ Server(('127.0.0.1',int(os.environ['STEVE_PORT'])),Handler).serve_forever()
             "before-upgrade"
         );
         stop(&mut child).await.unwrap();
+        true
     }
     #[tokio::test]
     async fn fixture_build_info_does_not_start_a_server_or_need_runtime_env() {
