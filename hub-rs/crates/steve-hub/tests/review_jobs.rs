@@ -1290,6 +1290,21 @@ async fn retained_final_repairs_the_same_bill_after_runtime_job_pruning() {
     let call = q::<String>(&store, "SELECT call_id FROM gateway_calls");
     task.abort();
     let _ = task.await;
+    // Dropping the caller schedules cancellation asynchronously. A finished attempt is
+    // not prunable while its cancel command can still reach the Node.
+    until("cancel receipt applied", || {
+        store
+            .reader::<_, StoreError>(|c| {
+                Ok(c.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM node_commands
+                     WHERE target_job_attempt=? AND method='cancel' AND state='finished')",
+                    [execution.attempt().as_str()],
+                    |r| r.get::<_, bool>(0),
+                )?)
+            })
+            .unwrap()
+    })
+    .await;
     let mut done = build::done();
     done.outcome = Outcome::Cancelled;
     done.stop_reason = "cancelled".into();
