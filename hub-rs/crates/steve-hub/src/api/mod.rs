@@ -232,7 +232,7 @@ pub(crate) async fn blocking<R: Send + 'static>(
     f: impl FnOnce() -> Result<R, ApiError> + Send + 'static,
 ) -> Result<R, ApiError> {
     // the request's language goes along: errors and labels built off the runtime are in it too
-    tokio::task::spawn_blocking(steve_i18n::carry(f))
+    tokio::task::spawn_blocking(crate::metrics::carry(steve_i18n::carry(f)))
         .await
         .map_err(|e| ApiError::internal(format!("task failed: {e}")))?
 }

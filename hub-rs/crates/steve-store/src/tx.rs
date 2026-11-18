@@ -458,6 +458,7 @@ impl Store {
             return f(c);
         }
         let c = self.inner.readers.get().map_err(StoreError::from)?;
+        crate::instrumentation::store_acquired();
         f(&c)
     }
 }

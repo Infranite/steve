@@ -251,6 +251,7 @@ impl Store {
         let timing = LockTiming::start("store", std::panic::Location::caller());
         // A panic mid-write leaves SQLite consistent (the transaction rolls back), so poisoning is ignored.
         let conn = self.inner.writer.lock().unwrap_or_else(|e| e.into_inner());
+        instrumentation::store_acquired();
         WriteGuard {
             conn,
             timing: timing.map(LockTiming::acquired),
@@ -271,6 +272,7 @@ impl Store {
             return f(c);
         }
         let c = self.inner.readers.get()?;
+        instrumentation::store_acquired();
         f(&c)
     }
 
@@ -319,6 +321,47 @@ pub mod instrumentation {
 
     pub fn enable_lock_metrics() {
         LOCK_METRICS.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    tokio::task_local! {
+        static REQUEST_CALLS: std::sync::Arc<std::sync::atomic::AtomicU64>;
+    }
+
+    /// One HTTP request's successful store connection acquisitions, shared with carried closures.
+    #[derive(Clone, Default)]
+    pub struct RequestCalls(std::sync::Arc<std::sync::atomic::AtomicU64>);
+
+    impl RequestCalls {
+        pub async fn scope<F: std::future::Future>(&self, future: F) -> F::Output {
+            REQUEST_CALLS.scope(self.0.clone(), future).await
+        }
+
+        pub fn count(&self) -> u64 {
+            self.0.load(std::sync::atomic::Ordering::Relaxed)
+        }
+    }
+
+    /// Carry only this request's counter into synchronous work on another thread. Like i18n's
+    /// carrier, sync_scope restores the worker's previous context on return or unwind.
+    pub fn carry<R>(f: impl FnOnce() -> R) -> impl FnOnce() -> R {
+        let calls = if LOCK_METRICS.load(std::sync::atomic::Ordering::Relaxed) {
+            REQUEST_CALLS.try_with(std::sync::Arc::clone).ok()
+        } else {
+            None
+        };
+        move || match calls {
+            Some(calls) => REQUEST_CALLS.sync_scope(calls, f),
+            None => f(),
+        }
+    }
+
+    pub(crate) fn store_acquired() {
+        if !LOCK_METRICS.load(std::sync::atomic::Ordering::Relaxed) {
+            return;
+        }
+        let _ = REQUEST_CALLS.try_with(|calls| {
+            calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        });
     }
 
     /// Same opt-in gate as lock timing; only the first transaction on a thread registers a handle.
