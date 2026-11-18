@@ -63,7 +63,7 @@ pub(crate) enum WriteTx<'a> {
 
 impl<'a> WriteTx<'a> {
     pub(crate) fn begin(c: &'a Connection) -> rusqlite::Result<Self> {
-        metrics::counter!("steve_store_transactions_total").increment(1);
+        crate::instrumentation::transaction_started();
         if c.is_autocommit() {
             Ok(Self::Root(crate::immediate(c)?))
         } else {
