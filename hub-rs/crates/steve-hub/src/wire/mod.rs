@@ -17,6 +17,7 @@ pub mod digest_bot;
 pub mod flow_cmd;
 pub mod git_push;
 pub mod host_node;
+mod install;
 pub mod item_git;
 pub mod item_mcp;
 pub mod library_mcp;
