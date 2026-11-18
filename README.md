@@ -439,6 +439,8 @@ For an existing Hub that completed managed setup, run `steve setup --reconfigure
 
 Installation steps, vault backends, service-manager settings and the upgrade lifecycle are in **[docs/deployment.md](docs/deployment.md)**.
 
+Upgrade probes allow long SQLite migrations while actual migration progress continues, with a 60-second idle timeout and a 15-minute total limit. An older installed runner still uses its old timeout; see the [deployment instructions](docs/deployment.md) for the first upgrade through that runner and the pre-commit backup/rollback boundary.
+
 ## Repository layout
 
 ```text

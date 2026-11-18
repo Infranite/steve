@@ -165,8 +165,26 @@ impl Store {
     /// Opens `path` (creating it), sets the pragmas, migrates, and starts the read pool.
     /// The TS Hub's path is `STEVE_HOME/data/steve.sqlite3`; the caller decides.
     pub fn open(path: impl AsRef<Path>, bus: impl Publisher + 'static) -> Result<Self> {
-        let path = path.as_ref().to_path_buf();
-        let writer = db::open_writer(&path)?;
+        Self::open_observed(path.as_ref(), bus, None)
+    }
+
+    /// Like [`Self::open`], with a callback for actual migration work (also within long statements).
+    /// The caller owns reporting; ordinary opens install no progress handler.
+    pub fn open_with_migration_progress(
+        path: impl AsRef<Path>,
+        bus: impl Publisher + 'static,
+        observer: db::MigrationObserver,
+    ) -> Result<Self> {
+        Self::open_observed(path.as_ref(), bus, Some(observer))
+    }
+
+    fn open_observed(
+        path: &Path,
+        bus: impl Publisher + 'static,
+        observer: Option<db::MigrationObserver>,
+    ) -> Result<Self> {
+        let path = path.to_path_buf();
+        let writer = db::open_writer(&path, observer)?;
         let manager = SqliteConnectionManager::file(&path)
             .with_flags(OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX)
             .with_init(|c| db::pragmas(c));
