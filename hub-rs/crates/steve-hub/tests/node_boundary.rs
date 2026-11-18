@@ -284,7 +284,7 @@ const ALLOWED: &[Entry] = &[
     e(Fs, "steve-hub/src/wire/host_node.rs", 2, Hub, "the roots file the service Node reads (B1)"),
     e(Spawn, "steve-hub/src/nodes/tailcat.rs", 2, Hub, "tailcat genkey and serve: the Hub's own tunnel for remote Nodes"),
     e(Fs, "steve-hub/src/nodes/tailcat.rs", 2, Hub, "the Hub's tailcat key directory"),
-    e(Spawn, "steve-hub/src/nodes/install.rs", 2, Hub, "ssh-keygen and ssh: the Hub installing a Node on another machine"),
+    e(Spawn, "steve-hub/src/nodes/install.rs", 2, Hub, "ssh-keygen, the per-install SSH tunnel, and its commands: the Hub installing a Node on another machine"),
     e(Spawn, "steve-hub/src/plugins/run.rs", 1, Hub, "a connected channel plugin: the Hub's own channel service, never a task harness"),
     e(Dir, "steve-hub/src/plugins/mod.rs", 1, Hub, "the installed plugins under <home>/plugins"),
     e(Fs, "steve-hub/src/plugins/mod.rs", 8, Hub, "atomic writes, reads and removal of installed plugins, their theme manifests and connected instances under <home>/plugins"),

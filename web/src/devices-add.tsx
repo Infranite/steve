@@ -30,7 +30,7 @@ import { fpCheck, fpGroups, fpSpread, FP_GROUP, hostLine, hostOf, linkRoute, nod
 import { useHubAddress, useHubs } from "@/hub-ui"
 import { AgentTrail } from "@/components/affect/agent-trail-clean"
 import { Progress } from "@/components/ui/progress"
-import { failureOf, installTrail, resumable } from "@/devices-install"
+import { failureOf, installTrail, resumable, transferDetails } from "@/devices-install"
 import { cn } from "cn"
 
 type Kind = "node" | "client"
@@ -329,6 +329,7 @@ function RemoteInstall({ op, onChange }: { op: RInstall | null; onChange: (op: R
   const tk = (key: string, o?: Record<string, unknown>) => String(t(key as never, o as never))
   const trail = installTrail(op, receivedAt, tk)
   const current = trail.find((s) => s.state === "running")
+  const transfer = transferDetails(op, tk)
   const failure = failureOf(op, tk)
   const run = () => void act(async () => {
     const v = await api.runInstall(op.id, address)
@@ -344,6 +345,13 @@ function RemoteInstall({ op, onChange }: { op: RInstall | null; onChange: (op: R
       {joined && op.state === "running" && <p className="text-muted-foreground" data-install-joined>{t("shell:devices.install.joined")}</p>}
       {op.state !== "waiting" && <div className="flex flex-col gap-2" data-install-steps>
         <AgentTrail steps={trail} labels={{ title: t("shell:devices.install.progress"), running: t("shell:devices.install.working"), failed: t("shell:devices.install.failed"), done: t("shell:devices.install.finished"), pending: t("shell:devices.install.pending") }} />
+        {transfer && <div className="flex min-w-0 flex-col gap-1 text-muted-foreground" data-install-transfer>
+          <p>{transfer.route}</p>
+          <div className="flex flex-wrap gap-x-4 gap-y-1 tabular-nums">
+            {[transfer.bytes, transfer.rate, transfer.eta, transfer.transferTime, transfer.unpackTime]
+              .map((fact, i) => fact && <span key={i}>{fact}</span>)}
+          </div>
+        </div>}
         {current?.percent !== undefined && <Progress value={current.percent} aria-label={current.title} data-install-percent />}
       </div>}
       {failure && <div role="alert" className="flex flex-col gap-1 text-destructive" data-install-failed>

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict"
 import { test } from "node:test"
-import { bytesLine, failureOf, formatBytes, formatElapsed, installTrail, resumable } from "../src/devices-install.ts"
+import { bytesLine, failureOf, formatBytes, formatElapsed, installTrail, resumable, transferDetails } from "../src/devices-install.ts"
 
 const i18n = (await import("../src/i18n/index.ts")).default
 const tIn = (lng) => (key, o) => i18n.t(key, { lng, ...o })
@@ -88,4 +88,29 @@ test("every install string is there in both languages", () => {
       assert.ok(i18n.exists(`shell:devices.install.${key}`, { lng: lang }), `${lang} ${key}`)
   }
   assert.equal(installTrail(op({ steps: [] }), 0, tIn("en"))[0].title, "Reach the target machine")
+})
+
+test("transfer details use observed route and ETA without equating buffered bytes with receipt", () => {
+  const partial = { phase: "send", done: 30 * MB, total: 40 * MB, rate: 512 * 1024, eta_secs: 20 }
+  const sending = (progress, route = "derp_observed") => op({
+    transfer_route: route, steps: [step("probe"), step("fetch"), step("send", { ended: null, progress })],
+  })
+  assert.deepEqual(transferDetails(sending(partial), t), {
+    route: "tailcat SSH · 观测到 DERP 中继",
+    bytes: "30.0 MB / 40.0 MB", rate: "512 KB/s", eta: "预计还需 20 s 传完",
+    transferTime: undefined, unpackTime: undefined,
+  })
+  assert.equal(transferDetails(sending({ ...partial, rate: null }, null), t).eta, "正在估算传输剩余时间…")
+  assert.equal(transferDetails(sending(partial, null), t).route, "tailcat SSH · 数据路径未确认")
+  const queued = sending({ ...partial, done: partial.total })
+  assert.equal(transferDetails(queued, t).eta, "等待目标机确认收包…")
+  assert.equal(installTrail(queued, 0, t)[2].percent, 99)
+  const unpacking = sending({ ...partial, phase: "unpack", done: partial.total, rate: null }, "direct_observed")
+  Object.assign(unpacking.steps[2], { transfer_ms: 2700, unpack_ms: 400 })
+  assert.deepEqual(transferDetails(unpacking, t), {
+    route: "tailcat SSH · 观测到直连",
+    bytes: undefined, rate: undefined, eta: undefined,
+    transferTime: "传输：3 s", unpackTime: "目标机解压：<1 秒",
+  })
+  assert.equal(installTrail(unpacking, 0, t)[2].status, "在目标机器上解压")
 })

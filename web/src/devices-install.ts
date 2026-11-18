@@ -59,7 +59,7 @@ export function statusOf(kind: RInstallKind, p: RInstallProgress | null | undefi
     if (p.phase === "cached") return t("shell:devices.install.phase.cached")
     return t("shell:devices.install.phase.verifying")
   }
-  if (kind === "send") return bytesLine(p, t)
+  if (kind === "send") return p.phase === "unpack" ? t("shell:devices.install.unpacking") : bytesLine(p, t)
   if (kind === "setup") return t(`shell:devices.install.phase.${SETUP_PHASES.includes(p.phase as never) ? p.phase : "install"}`)
   return t("shell:devices.install.working")
 }
@@ -98,10 +98,11 @@ export function installTrail(op: RInstall, receivedAt: number, t: T): InstallTra
       substeps: substepsOf(s, running || failed, t),
     }
     if (running) {
-      step.status = statusOf(s.kind, s.progress, t)
+      step.status = s.kind === "send" && op.transfer_route !== undefined && s.progress?.phase === "send"
+        ? undefined : statusOf(s.kind, s.progress, t)
       step.startedAt = receivedAt - elapsed
       const pct = s.progress && (s.progress.phase === "download" || s.progress.phase === "send") ? percentOf(s.progress) : undefined
-      if (pct !== undefined) step.percent = pct
+      if (pct !== undefined) step.percent = s.kind === "send" && op.transfer_route !== undefined ? Math.min(99, pct) : pct
     } else {
       step.duration = elapsed
     }
@@ -113,12 +114,38 @@ export function installTrail(op: RInstall, receivedAt: number, t: T): InstallTra
   return out
 }
 
+/** Detailed transfer metrics sit outside Agent Trail's single-line status so they can wrap. */
+export function transferDetails(op: RInstall, t: T) {
+  const send = op.steps.find(s => s.kind === "send")
+  if (!send) return null
+  const route = op.transfer_route === "direct_observed" || op.transfer_route === "derp_observed" ? op.transfer_route : "unknown"
+  const p = send.progress
+  const active = op.state === "running" && send.ended == null
+  const timing = (key: "transferTime" | "unpackTime", ms: number | undefined) =>
+    ms === undefined ? undefined : t(`shell:devices.install.${key}`, { time: ms < 1000 ? t("shell:devices.install.subsecond") : formatElapsed(ms) })
+  return {
+    route: t(`shell:devices.install.route.${route}`),
+    bytes: active && p?.phase === "send" ? bytesLine({ ...p, rate: null }, t) : undefined,
+    rate: active && p?.phase === "send" && p.rate && (p.total == null || p.done < p.total)
+      ? t("shell:devices.install.rate", { rate: formatBytes(p.rate) }) : undefined,
+    eta: active && p?.phase === "send"
+      ? p.total != null && p.done >= p.total && op.transfer_route !== undefined
+        ? t("shell:devices.install.waitingReceipt")
+        : p.eta_secs != null && p.eta_secs > 0 && p.rate && p.total != null && p.done < p.total
+          ? t("shell:devices.install.eta", { time: formatElapsed(p.eta_secs * 1000) })
+          : t("shell:devices.install.etaUnknown")
+      : undefined,
+    transferTime: timing("transferTime", send.transfer_ms),
+    unpackTime: timing("unpackTime", send.unpack_ms),
+  }
+}
+
 /** where and why it failed: "Failed at “Sending …” after 1:14" */
 export function failureOf(op: RInstall, t: T): { step: string; elapsed: string; error: string } | null {
   if (op.state !== "failed") return null
   const s = [...op.steps].reverse().find(x => x.kind === op.failed_step) ?? op.steps[op.steps.length - 1]
   return {
-    step: s ? t(`shell:devices.install.kind.${s.kind}`) : "",
+    step: s ? (s.progress?.phase === "unpack" ? t("shell:devices.install.unpacking") : t(`shell:devices.install.kind.${s.kind}`)) : "",
     elapsed: s ? formatElapsed(s.elapsed_ms ?? 0) : "",
     error: op.error ?? "",
   }

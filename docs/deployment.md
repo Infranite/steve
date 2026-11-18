@@ -989,11 +989,16 @@ From **Devices → Add device → Install remotely**, the Hub can install a Node
 2. Paste the address into Devices. The Hub then works through steps the page shows:
    1. reads the target's platform with `uname`;
    2. fetches the installer archive of its own version for that platform and checks it against the release's `steve-installer.json` (size and SHA256);
-   3. sends it over the tunnel and unpacks it in `~/.steve-node-install`;
+   3. stages it over the tunnel, checks that the target received the full size, then separately unpacks it in `~/.steve-node-install`;
    4. runs `steve setup node --hub <this Hub>` and `steve node start`.
 
    The pairing code goes over stdin, never on a command line. A code made for an install is *confirmed*: the owner authorised the install, so the Node is active once it pairs, with no fingerprint to compare by hand.
 3. When it is done, stop `tailcat serve` on the target. The key is deleted on the Hub, and the unpacked archive on the target.
+
+The Hub reuses one authenticated OpenSSH connection for the platform check, archive and setup, so a direct route discovered by tailcat is not thrown away between steps. In the progress view, **direct path observed** or **DERP relay observed** is the latest route evidence from that particular tunnel, not a promise about every packet. Same-network hosts can still relay; an older or unrecognized tailcat diagnostic format leaves the data path unknown. The transfer estimate is based on recent progress writing to SSH; completion waits for the target's receipt. Target extraction is timed separately and setup is not included in the transfer ETA. Allow disk space for both the compressed and extracted archive on the target.
+
+If the target can already reach the Hub directly, **Devices → Add device → Same network or HTTPS** is an alternative with no Hub-to-target archive push. Install the trusted release on the target, then use that flow's one-time code and fingerprint confirmation. For remote installation, a release fetched earlier can be reused from the Hub's installer cache, but is still verified against the release manifest; for an offline Hub, use the configured installer directory described below.
+
 
 Closing the dialog keeps the current install available to resume. If it has not started or has failed, **Cancel this pairing** discards it and deletes its temporary SSH key on the Hub. Stop `tailcat serve` on the original target with Ctrl-C, then add another device to get a new command and key. **Retry** keeps the current install and target. An install that is running or completed cannot be cancelled; cancellation does not uninstall anything or revoke a Node that already paired. A setup attempt that exits without claiming its pairing code invalidates that code.
 

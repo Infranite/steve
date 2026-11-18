@@ -103,7 +103,12 @@ async fn the_hub_installs_a_node_that_is_active_once_paired() {
         &tools.path().join("ssh"),
         &format!(
             "echo \"$@\" >> '{log}'\nfor a; do cmd=\"$a\"; done\n\
-             case \"$*\" in\n\
+             socket=''\nprev=''\nfor a; do [ \"$prev\" != -S ] || socket=$a; prev=$a; done\n\
+             case \" $* \" in *' -N '*) echo '2026/11/18 10:00:00 magicsock: disco: node [peer] d:123 now using 192.0.2.2:1234 mtu=1360' >&2; \
+                 touch \"$socket\"; exec sleep 60 ;; esac\n\
+             # The real SSH mux identifies the peer by its private control socket.\n\
+             d=$(dirname \"$socket\"); grep -F -- \"-S $socket -o ControlPersist=no -M -N\" '{log}' | tail -1 > \"$d/route\"; master=$(cat \"$d/route\");\n\
+             case \"$master $*\" in\n\
              *{FAIL_SEND}*) case \"$cmd\" in *\"uname -sm\"*) ;; *) cat >/dev/null; echo 'transfer failed' >&2; exit 255 ;; esac ;;\n\
              *{FAIL}*\"setup node\"*) cat > '{home}/failed-code'; echo 'pairing code: Error: no pairing code' >&2; exit 1 ;; esac\n\
              HOME='{home}' exec sh -c \"$cmd\"\n",
@@ -267,9 +272,14 @@ async fn the_hub_installs_a_node_that_is_active_once_paired() {
         .unwrap()
         .len();
     assert_eq!(steps[1]["progress"]["phase"], "verify", "{done}");
-    assert_eq!(steps[2]["progress"]["phase"], "send", "{done}");
+    assert_eq!(steps[2]["progress"]["phase"], "unpack", "{done}");
     assert_eq!(steps[2]["progress"]["done"], size, "{done}");
     assert_eq!(steps[2]["progress"]["total"], size, "{done}");
+    assert!(
+        steps[2]["transfer_ms"].is_u64() && steps[2]["unpack_ms"].is_u64(),
+        "{done}"
+    );
+    assert_eq!(done["transfer_route"], "direct_observed");
     assert_eq!(steps[3]["progress"]["phase"], "start", "{done}");
     assert!(done["address"].is_null(), "not kept once installed: {done}");
 
@@ -286,7 +296,7 @@ async fn the_hub_installs_a_node_that_is_active_once_paired() {
     assert!(!log.contains(&code), "{log}");
     assert!(
         log.contains(&format!(
-            "ProxyCommand='{}' {ADDR} 22",
+            "ProxyCommand='{}' --verbose {ADDR} 22",
             tools.path().join("tailcat").display()
         )),
         "{log}"

@@ -8,7 +8,7 @@
 //! 2. the installer archive of this Hub's own version for that platform, checked against the
 //!    release's `steve-installer.json` (from the release repository, or `STEVE_NODE_INSTALLERS`, a
 //!    directory holding the same files for a Hub without the internet);
-//! 3. the archive goes over the tunnel and is unpacked under `~/.steve-node-install`;
+//! 3. the target stages the whole archive over the tunnel before unpacking under `~/.steve-node-install`;
 //! 4. `steve setup node --hub <this Hub>` then `steve node start`, the pairing code on stdin. The
 //!    code is made `confirmed`: the owner authorised this install, so the Node is active once it
 //!    pairs, with no fingerprint to compare by hand.
@@ -16,7 +16,8 @@
 //! The Hub runs the system `ssh` with `tailcat <address> 22` as its proxy (what `tailcat ssh` does,
 //! with this install's own key). The key exists for this install only and is deleted when it ends.
 //! The target authenticates the Hub by that key; the Hub reaches the target by the address, which
-//! names the target's tunnel key, so no host key is checked. Address and key are kept in memory, for
+//! names the target's tunnel key, so no host key is checked. A private, per-attempt OpenSSH
+//! control socket keeps that connection warm from the probe through setup. Address and key are kept in memory, for
 //! a retry, until the install succeeds or is forgotten; neither is ever written to the database.
 //!
 //! Each step says how far it is (bytes fetched or sent and how fast, the phase of the setup on the
@@ -53,6 +54,8 @@ const ARCHIVE_MAX: u64 = 256 * 1024 * 1024;
 const REMOTE_DIR: &str = "$HOME/.steve-node-install";
 /// How often at most a step's progress is written into the install.
 const TICK: Duration = Duration::from_millis(500);
+const RATE_FRESH: Duration = Duration::from_secs(3);
+const RECEIVED: &str = "steve-install-received";
 /// Installer archives kept for the next install, the most recently used ones.
 pub const CACHE_KEEP: usize = 2;
 /// The phases `steve setup node` names on the target, in order.
@@ -102,6 +105,8 @@ struct Op {
     failed_step: Option<&'static str>,
     /// The target's tailcat address, from the run until the install succeeds (for a retry).
     address: Option<String>,
+    /// Route evidence from the current attempt's tunnel, never from a separate ping.
+    route: Option<Route>,
 }
 
 #[derive(Clone, Serialize)]
@@ -112,12 +117,48 @@ struct Step {
     at: i64,
     ended: Option<i64>,
     progress: Option<Progress>,
+    #[serde(skip)]
+    updated: Option<Instant>,
+    #[serde(skip)]
+    started: Instant,
+    #[serde(skip)]
+    unpack_started: Option<Instant>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    transfer_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    unpack_ms: Option<u64>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum Route {
+    DirectObserved,
+    DerpObserved,
+}
+
+/// Best-effort evidence from the dedicated tailcat ProxyCommand. DERP bootstrap and netcheck
+/// messages alone do not indicate peer contact. These are route observations, not packet-level
+/// accounting: the selected path can change, and unknown log formats need no special handling.
+fn route_in(line: &str) -> Option<Route> {
+    let (_, msg) = line.split_once(" magicsock: ")?;
+    if msg.starts_with("new contact: peer=") && msg.ends_with(" via=derp") {
+        return Some(Route::DerpObserved);
+    }
+    let (_, rest) = msg
+        .strip_prefix("disco: node ")?
+        .split_once(" now using ")?;
+    let (endpoint, mtu) = rest.split_once(" mtu=")?;
+    let endpoint: std::net::SocketAddr = endpoint.parse().ok()?;
+    (endpoint.port() != 0
+        && endpoint.ip().to_string() != "127.3.3.40"
+        && mtu.as_bytes().first().is_some_and(u8::is_ascii_digit))
+    .then_some(Route::DirectObserved)
 }
 
 /// How far a step is.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Progress {
-    /// fetch: download, cached (a copy fetched before) or verify; send: send; setup: one of
+    /// fetch: download, cached (a copy fetched before) or verify; send: send or unpack; setup: one of
     /// [`SETUP_PHASES`]
     pub phase: &'static str,
     /// Bytes so far.
@@ -136,6 +177,24 @@ impl Op {
             .map(|s| {
                 let mut v = serde_json::to_value(s).unwrap_or_default();
                 v["elapsed_ms"] = json!((s.ended.unwrap_or(t) - s.at).max(0));
+                if s.ended.is_none() {
+                    if let Some(started) = s.unpack_started {
+                        v["unpack_ms"] = json!(started.elapsed().as_millis() as u64);
+                    }
+                    if let Some(p) = &s.progress
+                        && let Some(rate) = p.rate.filter(|&r| r > 0)
+                        && s.updated.is_some_and(|u| u.elapsed() <= RATE_FRESH)
+                        && matches!(p.phase, "download" | "send")
+                    {
+                        if let Some(total) = p.total.filter(|&n| n > p.done) {
+                            v["progress"]["eta_secs"] = json!((total - p.done).div_ceil(rate));
+                        } else if p.total.is_some() {
+                            v["progress"]["rate"] = Value::Null;
+                        }
+                    } else if s.progress.is_some() {
+                        v["progress"]["rate"] = Value::Null;
+                    }
+                }
                 v
             })
             .collect();
@@ -148,6 +207,7 @@ impl Op {
             "error": self.error,
             "failed_step": self.failed_step,
             "address": self.address,
+            "transfer_route": self.route,
             "created": self.created,
         })
     }
@@ -212,6 +272,11 @@ fn step(op: &Arc<Mutex<Op>>, kind: &'static str, text: &str) {
         at: t,
         ended: None,
         progress: None,
+        updated: None,
+        started: Instant::now(),
+        unpack_started: None,
+        transfer_ms: None,
+        unpack_ms: None,
     });
 }
 
@@ -260,6 +325,7 @@ impl Meter {
         };
         if let Some(s) = self.op.lock().unwrap().steps.last_mut() {
             s.progress = Some(progress);
+            s.updated = Some(Instant::now());
         }
     }
 }
@@ -322,6 +388,7 @@ pub async fn create(State(svc): State<Arc<NodeService>>, caller: Caller) -> Resp
         error: None,
         failed_step: None,
         address: None,
+        route: None,
     };
     let view = op.view();
     installs
@@ -450,6 +517,7 @@ pub async fn run(
         o.error = None;
         o.failed_step = None;
         o.address = Some(address.clone());
+        o.route = None;
         o.steps.clear();
     }
     let (svc2, op2) = (svc.clone(), op.clone());
@@ -527,15 +595,37 @@ async fn install(
         let o = op.lock().unwrap();
         (o.id.clone(), o.owner.clone())
     };
+    let program_ssh = std::env::var_os("STEVE_SSH").unwrap_or("ssh".into());
     let ssh = Ssh {
-        program: std::env::var_os("STEVE_SSH").unwrap_or("ssh".into()),
-        key: installs.key_dir(&id).join("key"),
-        proxy: format!("{} {address} 22", sh_quote(&program.to_string_lossy())),
+        program: if Path::new(&program_ssh)
+            .parent()
+            .is_some_and(|p| !p.as_os_str().is_empty())
+        {
+            std::path::absolute(&program_ssh)?.into_os_string()
+        } else {
+            program_ssh
+        },
+        key: std::path::absolute(installs.key_dir(&id).join("key"))?,
+        proxy: format!(
+            "{} --verbose {address} 22",
+            sh_quote(&std::path::absolute(program)?.to_string_lossy())
+        ),
+        control: Some(format!(
+            "s-{}",
+            hex::encode(steve_node_wire::identity::random::<8>()?)
+        )),
     };
     let Limits { stall, quiet } = installs.limits;
     let secs = |d: Duration| d.as_secs().max(1);
 
     step(op, "probe", &steve_i18n::t!("hub.nodes.install_step_probe"));
+    let _tunnel = ssh
+        .open(
+            op,
+            stall,
+            steve_i18n::t!("hub.nodes.install_stalled_probe", secs = secs(stall)),
+        )
+        .await?;
     let uname = ssh
         .exec(
             "uname -sm",
@@ -570,18 +660,43 @@ async fn install(
     let total = archive.len() as u64;
     let mut meter = Meter::new(op);
     meter.update("send", 0, Some(total));
-    ssh.exec(
-        &sh(&format!(
-            "umask 077; d=\"{REMOTE_DIR}\"; rm -rf \"$d\" && mkdir -p \"$d\" && tar xzf - -C \"$d\""
-        )),
-        &archive,
-        stall,
-        steve_i18n::t!("hub.nodes.install_stalled_send", secs = secs(stall)),
-        &mut |n| meter.update("send", n, Some(total)),
-        &mut |_| {},
-    )
-    .await?;
-    meter.put(total);
+    let result = ssh
+        .exec(
+            &receive_command(total),
+            &archive,
+            stall,
+            steve_i18n::t!("hub.nodes.install_stalled_send", secs = secs(stall)),
+            &mut |n| meter.update("send", n, Some(total)),
+            &mut |line| {
+                if line == RECEIVED
+                    && let Some(s) = op.lock().unwrap().steps.last_mut()
+                    && s.unpack_started.is_none()
+                {
+                    s.transfer_ms = Some(s.started.elapsed().as_millis() as u64);
+                    s.unpack_started = Some(Instant::now());
+                    s.progress = Some(Progress {
+                        phase: "unpack",
+                        done: total,
+                        total: Some(total),
+                        rate: None,
+                    });
+                }
+            },
+        )
+        .await;
+    let unpacking = {
+        let mut o = op.lock().unwrap();
+        let s = o.steps.last_mut().expect("send step");
+        let started = s.unpack_started.take();
+        s.unpack_ms = started.map(|t| t.elapsed().as_millis() as u64);
+        started.is_some()
+    };
+    if unpacking {
+        result.context(steve_i18n::t!("hub.nodes.install_unpack_failed"))?;
+    } else {
+        result?;
+        anyhow::bail!(steve_i18n::t!("hub.nodes.install_no_receipt"));
+    }
 
     step(op, "setup", &steve_i18n::t!("hub.nodes.install_step_setup"));
     let code = super::pairing::new_code(&svc.store, &owner, true).await?;
@@ -634,6 +749,18 @@ async fn install(
     Ok(node)
 }
 
+/// Stage the verified bytes before extracting, so target disk/decompression can't be mistaken
+/// for streaming network time. SSH authenticates and integrity-protects the bytes; the size check
+/// prevents a prematurely closed stdin from being accepted. The receipt is emitted before tar.
+fn receive_command(total: u64) -> String {
+    sh(&format!(
+        "umask 077; d=\"{REMOTE_DIR}\"; rm -rf \"$d\" && mkdir -p \"$d\" || exit 1; \
+         a=$(mktemp \"$d/.archive.XXXXXXXX\") || exit 1; trap 'rm -f \"$a\"' 0; \
+         trap 'exit 1' HUP INT TERM; cat > \"$a\" && \
+         [ \"$(wc -c < \"$a\")\" -eq {total} ] && printf '%s\\n' {RECEIVED} && tar xzf \"$a\" -C \"$d\""
+    ))
+}
+
 /// `uname -sm` → a release target.
 fn target_of(uname: &str) -> Option<&'static str> {
     match uname.split_whitespace().collect::<Vec<_>>().as_slice() {
@@ -652,6 +779,21 @@ struct Ssh {
     program: std::ffi::OsString,
     key: PathBuf,
     proxy: String,
+    /// Relative to the private key directory, so it also works with long STEVE_HOME paths.
+    control: Option<String>,
+}
+
+/// The foreground master (no ControlPersist or detached process). Dropping it also stops users
+/// of its channels; the operation directory owns the socket, including on abort or retry.
+struct Tunnel {
+    child: tokio::process::Child,
+    diagnostics: tokio::task::JoinHandle<()>,
+}
+
+impl Drop for Tunnel {
+    fn drop(&mut self) {
+        self.diagnostics.abort();
+    }
 }
 
 /// The last lines of what a command said, for its error.
@@ -661,11 +803,13 @@ fn tail_of(text: &str) -> String {
 }
 
 impl Ssh {
-    fn command(&self, cmd: &str) -> tokio::process::Command {
+    fn command(&self, cmd: Option<&str>) -> tokio::process::Command {
         let mut c = tokio::process::Command::new(&self.program);
         c.arg("-i")
             .arg(&self.key)
             .args([
+                "-o",
+                "ClearAllForwardings=yes",
                 "-o",
                 "IdentitiesOnly=yes",
                 "-o",
@@ -681,14 +825,87 @@ impl Ssh {
                 "-o",
                 "ServerAliveInterval=15",
             ])
-            .arg("-o")
-            .arg(format!("ProxyCommand={}", self.proxy))
-            .args(["-T", "steve-install", "--", cmd])
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .kill_on_drop(true);
+        if let Some(control) = &self.control {
+            // Only the very same authenticated connection may run these commands. Falling back
+            // implicitly could change the path and invalidate the route evidence.
+            c.current_dir(self.key.parent().expect("key directory"))
+                .arg("-S")
+                .arg(format!("./{control}"))
+                .args(["-o", "ControlPersist=no"]);
+            if cmd.is_none() {
+                c.args(["-M", "-N"]);
+            } else {
+                c.args(["-o", "ControlMaster=no"]);
+            }
+        }
+        let proxy = if self.control.is_some() && cmd.is_some() {
+            "false"
+        } else {
+            &self.proxy
+        };
+        c.arg("-o")
+            .arg(format!("ProxyCommand={proxy}"))
+            .args(["-T", "steve-install"]);
+        if let Some(cmd) = cmd {
+            c.args(["--", cmd]);
+        } else {
+            c.stdin(std::process::Stdio::null());
+        }
         c
+    }
+
+    async fn open(
+        &self,
+        op: &Arc<Mutex<Op>>,
+        limit: Duration,
+        stalled: String,
+    ) -> anyhow::Result<Tunnel> {
+        let socket = self
+            .key
+            .with_file_name(self.control.as_ref().expect("a control socket"));
+        let mut child = self.command(None).spawn()?;
+        let stderr = child.stderr.take().expect("piped");
+        let error = Arc::new(Mutex::new(String::new()));
+        let (op, last_error) = (op.clone(), error.clone());
+        let diagnostics = tokio::spawn(async move {
+            let mut lines = tokio::io::BufReader::new(stderr).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                if let Some(route) = route_in(&line) {
+                    let mut o = op.lock().unwrap();
+                    if !matches!(o.steps.last().map(|s| s.kind), Some("setup" | "done"))
+                        && !o.steps.last().is_some_and(|s| s.transfer_ms.is_some())
+                    {
+                        o.route = Some(route);
+                    }
+                } else if line.starts_with("ssh:") || line.contains("Permission denied (") {
+                    // Do not pass the verbose log, with peer addresses and keys, to the API.
+                    *last_error.lock().unwrap() = tail_of(&line);
+                }
+            }
+        });
+        let mut tunnel = Tunnel { child, diagnostics };
+        tokio::time::timeout(limit, async {
+            loop {
+                if let Some(status) = tunnel.child.try_wait()? {
+                    let _ = (&mut tunnel.diagnostics).await;
+                    anyhow::bail!(steve_i18n::t!(
+                        "hub.nodes.install_remote_failed",
+                        status = status.to_string(),
+                        output = error.lock().unwrap().as_str()
+                    ));
+                }
+                if socket.exists() {
+                    return Ok(tunnel);
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .map_err(|_| anyhow::anyhow!(stalled))?
     }
 
     /// `cmd` on the target with `input` on its stdin; its stdout, or why it failed. `sent` hears
@@ -704,7 +921,7 @@ impl Ssh {
         line: &mut (dyn FnMut(&str) + Send),
     ) -> anyhow::Result<String> {
         let mut child = self
-            .command(cmd)
+            .command(Some(cmd))
             .spawn()
             .map_err(|e| anyhow::anyhow!("ssh: {e}"))?;
         let mut stdin = child.stdin.take().expect("piped");
@@ -737,7 +954,7 @@ impl Ssh {
                         let text = String::from_utf8_lossy(&buf);
                         let text = text.trim_end();
                         line(text);
-                        if !text.starts_with(PROGRESS_LINE) {
+                        if !text.starts_with(PROGRESS_LINE) && text != RECEIVED {
                             all.extend_from_slice(&buf);
                         }
                     }
@@ -1246,6 +1463,7 @@ mod tests {
             program: program.into(),
             key: dir.join("key"),
             proxy: "true".into(),
+            control: None,
         }
     }
 
@@ -1331,6 +1549,7 @@ mod tests {
             error: None,
             failed_step: None,
             address: None,
+            route: None,
         }));
         step(&op, "fetch", "fetching");
         let mut m = Meter::new(&op);
@@ -1342,12 +1561,56 @@ mod tests {
         m.update("verify", 100, Some(100));
         assert_eq!((seen(&op).phase, seen(&op).done), ("verify", 100));
         step(&op, "send", "sending");
+        m.since = Instant::now() - Duration::from_secs(2);
+        m.phase = "send";
+        m.total = Some(1000);
+        m.put(400);
+        let active = op.lock().unwrap().view();
+        assert!(active["steps"][1]["progress"]["eta_secs"].is_u64());
+        op.lock().unwrap().steps[1].updated = Some(Instant::now() - 2 * RATE_FRESH);
         let v = op.lock().unwrap().view();
+        assert!(v["steps"][1]["progress"]["rate"].is_null());
+        assert!(v["steps"][1]["progress"]["eta_secs"].is_null());
         assert!(
             v["steps"][0]["ended"].is_i64() && v["steps"][1]["ended"].is_null(),
             "{v}"
         );
         assert!(v["steps"][1]["elapsed_ms"].as_i64().unwrap() >= 0);
+    }
+
+    #[test]
+    fn route_evidence_is_from_the_peer_not_relay_bootstrap_or_interface_ips() {
+        let classify = |s: &str| route_in(&format!("2026/11/18 10:00:00 magicsock: {s}"));
+        assert_eq!(classify("derp-1 connected; connGen=1"), None);
+        assert_eq!(
+            classify("new contact: control-netmap usec=600 cached=false"),
+            None
+        );
+        assert_eq!(
+            classify("new contact: peer=[p] usec=600 cached=false via=derp"),
+            Some(Route::DerpObserved)
+        );
+        assert_eq!(
+            classify("disco: node [p] d:abc now using [2001:db8::1]:5000 mtu=1360"),
+            Some(Route::DirectObserved)
+        );
+        assert_eq!(
+            classify("disco: node [p] d:abc now using 127.3.3.40:1 mtu=1360"),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn receiving_a_truncated_archive_neither_confirms_nor_unpacks_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let ssh = local_ssh(dir.path());
+        let mut command = ssh.command(Some(&receive_command(100)));
+        command
+            .env("HOME", dir.path())
+            .stdin(std::process::Stdio::null());
+        let out = command.output().await.unwrap();
+        assert!(!out.status.success());
+        assert!(out.stdout.is_empty());
     }
 
     #[test]
