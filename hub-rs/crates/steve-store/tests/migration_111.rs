@@ -25,7 +25,10 @@ fn upgrade_keeps_outgoing_reactions_separate_and_cascades_removed_message_data()
     db::migrate(&c).unwrap();
     c.execute_batch("PRAGMA foreign_keys=ON;
         INSERT INTO chan_message_reactions(workspace_id,connection_id,message_external_id,message_id,actor_account_id,emoji,origin,removed,action_at)
-          VALUES('default','connection','platform-id','message','account','👍','manual',1,3);").unwrap();
+          VALUES('default','connection','platform-id','message','account','👍','manual',1,3);
+        INSERT INTO chan_messages(id,workspace_id,space_id,direction,text,created)
+          VALUES('reply','default','space','out','Answer',3);
+        INSERT INTO chan_reply_sources(out_message_id,source_message_id) VALUES('reply','message');").unwrap();
     db::migrate(&c).unwrap();
     assert_eq!(c.query_row("SELECT time_source, source_revision FROM chan_message_reactions WHERE message_id='message'", [],
         |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<i64>>(1)?))).unwrap(), ("provider".into(), None));
@@ -60,6 +63,12 @@ fn upgrade_keeps_outgoing_reactions_separate_and_cascades_removed_message_data()
         .unwrap();
     c.execute("DELETE FROM chan_messages WHERE id='message'", [])
         .unwrap();
+    assert_eq!(
+        c.query_row("SELECT count(*) FROM chan_reply_sources", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
     assert!(
         c.prepare("PRAGMA foreign_key_check")
             .unwrap()

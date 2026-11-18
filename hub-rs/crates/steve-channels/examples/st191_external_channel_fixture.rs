@@ -9,6 +9,7 @@ use axum::{
     extract::Path,
     routing::{get, post},
 };
+use rusqlite::OptionalExtension;
 use std::collections::BTreeMap;
 use steve_channels::adapters::ext_ws::{self, ExtWs, ExtWsHook};
 use steve_channels::lifecycle::ConnectionRuntime;
@@ -41,7 +42,9 @@ async fn state(Extension(f): F) -> ApiResult<Json<Value>> {
         ids.into_iter().map(|id| {
             let m = steve_channels::messages::get(c,&id)?.unwrap();
             let decision = match &m.decision_id {Some(d)=>base::decisions::get(c,d)?,None=>None};
-            Ok(json!({"message":m,"decision":decision,"gate":presence::stop(c,WS,&id,f.ch.now())?}))
+            let source_id = c.query_row("SELECT source_id FROM chan_message_seen WHERE message_id=? AND connection_id=?", [&id, &f.connection], |r| r.get::<_, Option<String>>(0)).optional()?.flatten();
+            Ok(json!({"message":m,"decision":decision,"source_id":source_id,
+                "source_message_id":presence::answered_message(c,WS,&id)?,"gate":presence::stop(c,WS,&id,f.ch.now())?}))
         }).collect()
     })?;
     Ok(Json(

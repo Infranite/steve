@@ -388,8 +388,9 @@ fn said_of(r: &rusqlite::Row<'_>, my: &[String]) -> rusqlite::Result<Said> {
 const SAID_COLUMNS: &str = "m.id, m.created, {IS_MINE},
        coalesce(m.sender_party_id, m.sender_account_id, ''), m.thread_key, m.external_id, m.reply_to, m.mentions,
        m.sender_account_id, coalesce(m.text, ''),
-       EXISTS (SELECT 1 FROM chan_messages o WHERE o.space_id = m.space_id AND o.direction = 'out'
-                  AND o.reply_to = m.external_id AND o.status IN {ANSWERED}
+       EXISTS (SELECT 1 FROM chan_messages o LEFT JOIN chan_reply_sources q ON q.out_message_id = o.id
+                WHERE o.space_id = m.space_id AND o.direction = 'out'
+                  AND coalesce(q.source_message_id = m.id, o.reply_to = m.external_id) AND o.status IN {ANSWERED}
                   AND o.on_behalf = 'none' AND o.persona_id IS NULL
                   AND o.sender_account_id IN (SELECT id FROM my_accounts))";
 
@@ -675,8 +676,9 @@ pub fn supersede(
     let drafts: Vec<(String, String, String)> = {
         let mut st = tx.prepare(&format!(
             "{MINE} SELECT o.id, o.status, src.id FROM chan_messages o
+               LEFT JOIN chan_reply_sources q ON q.out_message_id = o.id
                JOIN chan_messages src ON src.space_id = o.space_id AND src.direction = 'in'
-                    AND src.external_id = o.reply_to
+                    AND coalesce(q.source_message_id = src.id, src.external_id = o.reply_to)
                JOIN chan_messages m ON m.id = src.id
               WHERE o.space_id = ?2 AND o.direction = 'out' AND o.status IN ('draft', 'failed')
                 AND o.on_behalf = 'none' AND o.persona_id IS NULL
@@ -765,9 +767,9 @@ pub fn settle(tx: &Tx, decision: &str, why: &str) -> ChannelResult<bool> {
     )?)
 }
 
-/// The inbound message an outbound one answers (its `reply_to` in its space), when someone else wrote
-/// it: what the gates of a draft in your name ask about. `None` for anything else (a new message, an
-/// answer to your own `/bot`, a bot's reply).
+/// The inbound message an outbound one answers, when someone else wrote it: its durable internal
+/// source, or the legacy platform `reply_to` in the same space. A quote id is optional on channels
+/// with only delivery ids. `None` for a new message, an answer to your own `/bot`, or a bot's reply.
 pub fn answered_message(c: &Connection, ws: &str, out: &str) -> ChannelResult<Option<String>> {
     let row: Option<(
         String,
@@ -775,15 +777,17 @@ pub fn answered_message(c: &Connection, ws: &str, out: &str) -> ChannelResult<Op
         String,
         Option<String>,
         Option<String>,
+        Option<String>,
     )> = c
         .query_row(
-            "SELECT space_id, reply_to, on_behalf, persona_id, sender_account_id FROM chan_messages
-              WHERE id = ? AND workspace_id = ? AND direction = 'out'",
+            "SELECT m.space_id, m.reply_to, m.on_behalf, m.persona_id, m.sender_account_id, q.source_message_id
+               FROM chan_messages m LEFT JOIN chan_reply_sources q ON q.out_message_id = m.id
+              WHERE m.id = ? AND m.workspace_id = ? AND m.direction = 'out'",
             params![out, ws],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
         )
         .optional()?;
-    let Some((space, Some(reply_to), on_behalf, None, Some(sender))) = row else {
+    let Some((space, reply_to, on_behalf, None, Some(sender), source)) = row else {
         return Ok(None);
     };
     if on_behalf != "none" || !my_accounts(c, ws, &space)?.contains(&sender) {
@@ -793,9 +797,10 @@ pub fn answered_message(c: &Connection, ws: &str, out: &str) -> ChannelResult<Op
         .query_row(
             &format!(
                 "{MINE} SELECT m.id, {IS_MINE} FROM chan_messages m
-                  WHERE m.space_id = ?2 AND m.direction = 'in' AND m.external_id = ?3"
+                  WHERE m.space_id = ?2 AND m.direction = 'in'
+                    AND coalesce(m.id = ?4, m.external_id = ?3)"
             ),
-            params![ws, space, reply_to],
+            params![ws, space, reply_to, source],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .optional()?;

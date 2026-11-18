@@ -20,3 +20,11 @@ CREATE TABLE chan_message_reactions (
 CREATE INDEX chan_message_reactions_message ON chan_message_reactions(message_id, actor_account_id, emoji, action_at);
 CREATE INDEX chan_message_reactions_unresolved ON chan_message_reactions(connection_id, message_external_id, message_source_id)
     WHERE message_id IS NULL;
+
+-- A reply's internal source is independent of an optional platform quote id. It must survive
+-- approval/restart so source-id-only channels get the same presence and already-answered gates.
+CREATE TABLE chan_reply_sources (
+    out_message_id TEXT PRIMARY KEY REFERENCES chan_messages(id) ON DELETE CASCADE,
+    source_message_id TEXT NOT NULL REFERENCES chan_messages(id) ON DELETE CASCADE
+);
+CREATE INDEX chan_reply_sources_source ON chan_reply_sources(source_message_id);

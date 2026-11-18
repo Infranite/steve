@@ -21,6 +21,28 @@ pub const RECENT: usize = 30;
 /// `GET /spaces/:id/messages`: default and maximum page size.
 pub const PAGE: usize = 50;
 pub const PAGE_MAX: usize = 100;
+
+/// Bind a new reply to its exact internal source, even when the service has no platform quote id.
+/// Never infer this relation from text/time, or allow a source in another chat or workspace.
+pub(crate) fn link_reply(tx: &Tx, out: &str, source: Option<&str>) -> ChannelResult<()> {
+    let Some(source) = source else {
+        return Ok(());
+    };
+    let changed = tx.execute(
+        "INSERT INTO chan_reply_sources(out_message_id, source_message_id)
+         SELECT o.id, s.id FROM chan_messages o JOIN chan_messages s
+            ON s.workspace_id = o.workspace_id AND s.space_id = o.space_id AND s.direction = 'in'
+          WHERE o.id = ?1 AND o.direction = 'out' AND s.id = ?2
+         ON CONFLICT(out_message_id) DO UPDATE SET source_message_id = excluded.source_message_id
+           WHERE chan_reply_sources.source_message_id = excluded.source_message_id",
+        params![out, source],
+    )?;
+    if changed != 1 {
+        return Err(steve_modules::ApiError::invalid("source_message_id"));
+    }
+    Ok(())
+}
+
 /// The timeline line shows this many characters of a message.
 const TIMELINE_CUT: usize = 60;
 

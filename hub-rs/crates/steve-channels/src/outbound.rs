@@ -462,6 +462,7 @@ fn insert_out(tx: &Tx, n: &NewOut, now: i64) -> ChannelResult<String> {
             now
         ],
     )?;
+    crate::messages::link_reply(tx, &id, n.t.source_message_id.as_deref())?;
     Ok(id)
 }
 
@@ -571,15 +572,15 @@ fn seen_of(
     Ok(Some(lines.join("\n")))
 }
 
-/// The inbound message an outbound row answers (by its `reply_to`, in its space).
+/// The inbound message an outbound row answers: its internal source, or a legacy platform quote.
 fn source_of_row(c: &Connection, row: &OutRow) -> ChannelResult<Option<(String, String)>> {
-    let Some(src) = &row.reply_to else {
-        return Ok(None);
-    };
     Ok(c.query_row(
-        "SELECT id, coalesce(text, '') FROM chan_messages WHERE external_id = ? AND space_id = ? AND direction = 'in'
-            AND purged IS NULL ORDER BY created DESC LIMIT 1",
-        params![src, row.space_id],
+        "SELECT s.id, coalesce(s.text, '') FROM chan_messages s
+           LEFT JOIN chan_reply_sources q ON q.out_message_id = ?3
+          WHERE s.space_id = ?2 AND s.direction = 'in' AND s.purged IS NULL
+            AND coalesce(q.source_message_id = s.id, s.external_id = ?1)
+          ORDER BY s.created DESC LIMIT 1",
+        params![row.reply_to, row.space_id, row.id],
         |r| Ok((r.get(0)?, r.get(1)?)),
     )
     .optional()?)

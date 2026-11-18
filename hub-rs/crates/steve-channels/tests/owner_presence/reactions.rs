@@ -26,6 +26,114 @@ fn stop(h: &H, message: &str) -> Option<presence::Stop> {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn source_id_only_reactions_close_drafts_and_hold_yolo_at_send() {
+    use steve_channels::Outbound;
+    use steve_channels::deliver::{Auth, Delivered, OutRequest, OutTarget, Purpose};
+    for pending in [false, true] {
+        let h = setup_ids(true).await;
+        let mut message = msg(&h, "D_LI", "", "ulilei", "请确认", 0).source_id("source-only");
+        message.thread_key = None;
+        let got = h.ch.on_inbound(WS, &h.me, message).await.unwrap();
+        let plan = h
+            .env
+            .store()
+            .reader(|c| steve_channels::flow_actions::plan_of(c, WS, &got.message_id))
+            .unwrap();
+        let mut target = OutTarget::reply(&plan);
+        // A service without a platform id can reply using its connection-scoped delivery id.
+        target.reply_to = None;
+        let delivered = h
+            .outbox
+            .deliver(
+                &h.ch,
+                &OutRequest {
+                    target,
+                    text: "回复草稿".into(),
+                    purpose: Purpose::Reply,
+                    approve: true,
+                    generation: Some(Default::default()),
+                    auth: Auth::None,
+                    operation_id: None,
+                },
+            )
+            .await
+            .unwrap();
+        let Delivered::Drafted {
+            message_id: draft,
+            decision_id: card,
+        } = delivered
+        else {
+            panic!("{delivered:?}")
+        };
+        checked(&h).await;
+        if pending {
+            yolo(&h, &card, "yes").unwrap();
+            assert_eq!(status(&h, &draft), "pending");
+        }
+        let mut ev = reaction(&h, "D_LI", "unused", "upx");
+        ev.message_ext_id = None;
+        ev.message_source_id = Some("source-only".into());
+        h.ch.on_reaction(WS, &h.me, ev).unwrap();
+        assert!(stop(&h, &got.message_id).is_some());
+        if !pending {
+            assert_eq!(status(&h, &draft), "discarded");
+            assert_eq!(decision(&h, &card).0, "expired");
+        }
+        h.env.clock.advance(11_000);
+        assert_eq!(h.outbox.send_due(&h.ch).await, 0);
+        assert_eq!(status(&h, &draft), "discarded");
+        assert!(h.fake.sent.lock().unwrap().is_empty());
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_reply_source_in_another_chat_cannot_bind_or_persist_a_draft() {
+    use steve_channels::Outbound;
+    use steve_channels::deliver::{Auth, OutRequest, OutTarget, Purpose};
+    let h = setup().await;
+    let source =
+        h.ch.on_inbound(
+            WS,
+            &h.me,
+            msg(&h, "D_LI", "private", "ulilei", "Private question", 0),
+        )
+        .await
+        .unwrap();
+    let target =
+        h.ch.on_inbound(
+            WS,
+            &h.me,
+            msg(&h, "C_DEV", "group", "ulilei", "Group question", 0),
+        )
+        .await
+        .unwrap();
+    let plan = h
+        .env
+        .store()
+        .reader(|c| steve_channels::flow_actions::plan_of(c, WS, &target.message_id))
+        .unwrap();
+    let mut target = OutTarget::reply(&plan);
+    target.source_message_id = Some(source.message_id);
+    let result = steve_channels::DraftOnly
+        .deliver(
+            &h.ch,
+            &OutRequest {
+                target,
+                text: "Draft".into(),
+                purpose: Purpose::Reply,
+                approve: true,
+                generation: Some(Default::default()),
+                auth: Auth::None,
+                operation_id: None,
+            },
+        )
+        .await;
+    assert!(result.is_err());
+    assert_eq!(drafts(&h), 0);
+    assert_eq!(count(&h, "SELECT count(*) FROM chan_reply_sources", &[]), 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn producer_revision_orders_same_millisecond_removal_readd_and_replay() {
     let h = setup().await;
     let source =
@@ -269,7 +377,7 @@ async fn deferred_reply_and_handoff_persistence_recheck_reactions_in_the_write_t
                 text: "延迟返回的生成结果".into(),
                 purpose: Purpose::Reply,
                 approve: true,
-                generation: None,
+                generation: Some(Default::default()),
                 auth: Auth::None,
                 operation_id: None,
             },

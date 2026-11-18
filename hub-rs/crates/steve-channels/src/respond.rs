@@ -258,6 +258,7 @@ pub(crate) fn open_draft_as(
             now
         ],
     )?;
+    messages::link_reply(tx, &id, t.source_message_id.as_deref())?;
     let name = spaces::display_title(tx, &space)?;
     let question = match (&persona, t.mode) {
         (Some(p), _) => format!("以{}发到「{name}」", p.name),

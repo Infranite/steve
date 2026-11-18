@@ -107,6 +107,10 @@ pub(crate) struct H {
 }
 
 pub(crate) async fn setup() -> H {
+    setup_ids(false).await
+}
+
+pub(crate) async fn setup_ids(without_platform_ids: bool) -> H {
     let core = Arc::new(FakeCore::default());
     let flow_setup = FlowSetup::new(core.clone());
     let disclosure = Disclosure::with_models(Vec::new());
@@ -160,11 +164,18 @@ pub(crate) async fn setup() -> H {
         .connections(conns.clone())
         .action(Arc::new(StubReplyAs))
         .build(env.modules.clone(), Arc::new(LinearExecutor));
-    let ch = Channels::builder(env.modules.clone(), conns, Arc::new(flow.clone()))
+    let mut builder = Channels::builder(env.modules.clone(), conns, Arc::new(flow.clone()))
         .adapter(fake.clone())
         .responder(replies)
-        .flow(flow)
-        .build();
+        .flow(flow);
+    if without_platform_ids {
+        builder = builder.decl(
+            steve_channels::ext::ChannelDecl::new(FakeChannel::ID)
+                .handle_system(FakeChannel::SYSTEM)
+                .message_ids(steve_channels::ext::MessageIds::None),
+        );
+    }
+    let ch = builder.build();
     let api = api::routes(ch.clone()).with_state(env.modules.clone());
     let (me, my_account) =
         FakeChannel::seed_connection(env.store(), &caller(WS, ME), Some("upx")).expect("you");
