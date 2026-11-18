@@ -589,8 +589,8 @@ mod tests {
         let handle = recorder.handle();
         steve_store::instrumentation::enable_lock_metrics();
         let tmp = tempfile::tempdir().unwrap();
-        let store = Store::open(tmp.path().join("locks.sqlite3"), NoPublisher).unwrap();
         metrics::with_local_recorder(&recorder, || {
+            let store = Store::open(tmp.path().join("locks.sqlite3"), NoPublisher).unwrap();
             let line = line!() + 1;
             store.with_conn(|_| Ok(())).unwrap();
             let text = handle.render();

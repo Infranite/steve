@@ -321,6 +321,21 @@ pub mod instrumentation {
         LOCK_METRICS.store(true, std::sync::atomic::Ordering::Relaxed);
     }
 
+    /// Same opt-in gate as lock timing; only the first transaction on a thread registers a handle.
+    pub(crate) fn transaction_started() {
+        if !LOCK_METRICS.load(std::sync::atomic::Ordering::Relaxed) {
+            return;
+        }
+        thread_local! {
+            static TRANSACTIONS: std::cell::OnceCell<metrics::Counter> = const { std::cell::OnceCell::new() };
+        }
+        TRANSACTIONS.with(|counter| {
+            counter
+                .get_or_init(|| metrics::counter!("steve_store_transactions_total"))
+                .increment(1);
+        });
+    }
+
     /// Shared by the store and core lock boundaries. Handles are registered once per source location
     /// and thread. Only that cold registration formats the bounded source label; repeated acquisitions
     /// clone handles without allocating strings or taking another application lock.
@@ -346,15 +361,19 @@ pub mod instrumentation {
                 >> = std::cell::RefCell::new(std::collections::HashMap::new());
             }
             let (wait, hold, count) = HANDLES.with(|cache| {
-            cache.borrow_mut().entry((kind, caller)).or_insert_with(|| {
-                let site = format!("{}:{}", caller.file(), caller.line());
-                (
-                    metrics::histogram!("steve_lock_wait_seconds", "lock" => kind, "caller" => site.clone()),
-                    metrics::histogram!("steve_lock_hold_seconds", "lock" => kind, "caller" => site.clone()),
-                    metrics::counter!("steve_lock_acquisitions_total", "lock" => kind, "caller" => site),
-                )
-            }).clone()
-        });
+                cache
+                    .borrow_mut()
+                    .entry((kind, caller))
+                    .or_insert_with(|| {
+                        let site = format!("{}:{}", caller.file(), caller.line());
+                        (
+                            metrics::histogram!("steve_lock_wait_seconds", "lock" => kind, "caller" => site.clone()),
+                            metrics::histogram!("steve_lock_hold_seconds", "lock" => kind, "caller" => site.clone()),
+                            metrics::counter!("steve_lock_acquisitions_total", "lock" => kind, "caller" => site),
+                        )
+                    })
+                    .clone()
+            });
             Some(Self {
                 since: std::time::Instant::now(),
                 wait,
@@ -374,6 +393,96 @@ pub mod instrumentation {
     impl Drop for LockTiming {
         fn drop(&mut self) {
             self.hold.record(self.since.elapsed().as_secs_f64());
+        }
+    }
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+
+        struct Sink {
+            registrations: AtomicUsize,
+            samples: Arc<AtomicUsize>,
+        }
+        struct Count(Arc<AtomicUsize>);
+        impl metrics::CounterFn for Count {
+            fn increment(&self, value: u64) {
+                self.0.fetch_add(value as usize, Ordering::Relaxed);
+            }
+            fn absolute(&self, value: u64) {
+                self.0.store(value as usize, Ordering::Relaxed);
+            }
+        }
+        impl metrics::Recorder for Sink {
+            fn describe_counter(
+                &self,
+                _: metrics::KeyName,
+                _: Option<metrics::Unit>,
+                _: metrics::SharedString,
+            ) {
+            }
+            fn describe_gauge(
+                &self,
+                _: metrics::KeyName,
+                _: Option<metrics::Unit>,
+                _: metrics::SharedString,
+            ) {
+            }
+            fn describe_histogram(
+                &self,
+                _: metrics::KeyName,
+                _: Option<metrics::Unit>,
+                _: metrics::SharedString,
+            ) {
+            }
+            fn register_counter(
+                &self,
+                key: &metrics::Key,
+                _: &metrics::Metadata<'_>,
+            ) -> metrics::Counter {
+                assert_eq!(key.name(), "steve_store_transactions_total");
+                self.registrations.fetch_add(1, Ordering::Relaxed);
+                metrics::Counter::from_arc(Arc::new(Count(self.samples.clone())))
+            }
+            fn register_gauge(
+                &self,
+                _: &metrics::Key,
+                _: &metrics::Metadata<'_>,
+            ) -> metrics::Gauge {
+                metrics::Gauge::noop()
+            }
+            fn register_histogram(
+                &self,
+                _: &metrics::Key,
+                _: &metrics::Metadata<'_>,
+            ) -> metrics::Histogram {
+                metrics::Histogram::noop()
+            }
+        }
+
+        #[test]
+        fn transactions_are_disabled_until_enabled_and_register_once_per_thread() {
+            std::thread::spawn(|| {
+                let sink = Sink {
+                    registrations: AtomicUsize::new(0),
+                    samples: Arc::new(AtomicUsize::new(0)),
+                };
+                metrics::with_local_recorder(&sink, || {
+                    transaction_started();
+                    assert_eq!(sink.registrations.load(Ordering::Relaxed), 0);
+                    enable_lock_metrics();
+                    for _ in 0..3 {
+                        transaction_started();
+                    }
+                    assert_eq!(sink.registrations.load(Ordering::Relaxed), 1);
+                    assert_eq!(sink.samples.load(Ordering::Relaxed), 3);
+                });
+            })
+            .join()
+            .unwrap();
         }
     }
 }
