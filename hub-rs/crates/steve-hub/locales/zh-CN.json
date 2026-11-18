@@ -80,6 +80,7 @@
   "hub.nodes.install_step_setup": "正在目标机器上安装、配对并启动 Node",
   "hub.nodes.install_step_done": "Node 已配对并启动",
   "hub.nodes.install_busy": "已有一个安装正在装到这台机器上，请等它结束",
+  "hub.nodes.install_cancel_inactive": "只能取消尚未开始或已失败的安装，请刷新后查看当前状态",
   "hub.nodes.install_stalled_probe": "目标机器 %{secs} 秒内没有应答：它上面的 tailcat serve 还在运行吗？地址对吗？",
   "hub.nodes.install_stalled_fetch": "下载安装包卡住了：%{secs} 秒没有收到数据。请检查 Hub 的网络后重试",
   "hub.nodes.install_stalled_send": "发送安装包卡住了：目标机器 %{secs} 秒没有接收数据。它上面的 tailcat serve 还在运行吗？",

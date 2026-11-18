@@ -82,7 +82,7 @@ test("the dialog picks up the running install, else the newest unfinished one", 
 
 test("every install string is there in both languages", () => {
   for (const lang of ["zh-CN", "en"]) {
-    for (const key of ["progress", "working", "failed", "finished", "pending", "of", "failedAt", "joined", "retry",
+    for (const key of ["progress", "working", "failed", "finished", "pending", "of", "failedAt", "joined", "retry", "cancel", "cancelHint",
       "kind.probe", "kind.fetch", "kind.send", "kind.setup",
       "phase.download", "phase.verify", "phase.verifying", "phase.cached", "phase.install", "phase.pair", "phase.adapters", "phase.start"])
       assert.ok(i18n.exists(`shell:devices.install.${key}`, { lng: lang }), `${lang} ${key}`)

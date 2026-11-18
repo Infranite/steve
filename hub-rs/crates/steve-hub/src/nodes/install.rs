@@ -369,6 +369,40 @@ pub async fn get(
     }
 }
 
+/// Discards an inactive install and its temporary SSH key. Closing the dialog alone keeps it
+/// resumable; cancellation is explicit, and never interrupts an install another page started.
+pub async fn cancel(
+    State(svc): State<Arc<NodeService>>,
+    caller: Caller,
+    UrlPath(id): UrlPath<String>,
+) -> Response {
+    let Some(installs) = svc.installs.get() else {
+        return err(404, "not available");
+    };
+    // Use the same lock order as run, so cancellation and retry cannot both win.
+    let mut ops = installs.ops.lock().unwrap();
+    let Some(op) = ops.get(&id) else {
+        return json_response(200, &json!({ "ok": true }));
+    };
+    {
+        let o = op.lock().unwrap();
+        if o.owner != caller.me {
+            return err(404, "not found");
+        }
+        if o.state != "waiting" && o.state != "failed" {
+            return err(409, steve_i18n::t!("hub.nodes.install_cancel_inactive"));
+        }
+        if let Err(e) = std::fs::remove_dir_all(installs.key_dir(&o.id))
+            && e.kind() != std::io::ErrorKind::NotFound
+        {
+            tracing::error!("node install: cannot remove cancelled install's key: {e}");
+            return err(500, "internal");
+        }
+    }
+    ops.remove(&id);
+    json_response(200, &json!({ "ok": true }))
+}
+
 #[derive(Deserialize)]
 pub struct RunBody {
     address: String,
@@ -394,6 +428,10 @@ pub async fn run(
         // one install at a time to an address: a second one joins the running one. Checked and
         // marked under the list's lock, so two at once cannot both start.
         let ops = installs.ops.lock().unwrap();
+        // find may have returned just before a cancellation (or sweep) removed this install.
+        if !ops.contains_key(&id) {
+            return err(404, "not found");
+        }
         for (other_id, other) in ops.iter().filter(|(k, _)| **k != id) {
             let other = other.lock().unwrap();
             if other.state == "running" && other.address.as_deref() == Some(address.as_str()) {
@@ -566,25 +604,32 @@ async fn install(
                 }
             },
         )
-        .await?;
-    tracing::debug!("node install: {out}");
+        .await;
 
     let hash = super::pairing::code_hash(&code);
     let store = svc.store.clone();
     let node = tokio::task::spawn_blocking(move || {
-        store.reader(|c| {
+        store.transaction(|tx| {
             use rusqlite::OptionalExtension;
-            c.query_row(
+            let node = tx.query_row(
                 "SELECT node_id FROM node_pairings WHERE code_hash=? AND claimed_at IS NOT NULL",
                 [&hash],
                 |r| r.get::<_, String>(0),
             )
-            .optional()
-            .map_err(steve_store::StoreError::from)
+            .optional()?;
+            // Once setup exits, a failed attempt must not leave an auto-confirming code usable.
+            // A retry gets its own code; a Node that already paired is left alone.
+            tx.execute(
+                "UPDATE node_pairings SET expires=? WHERE code_hash=? AND claimed_at IS NULL",
+                rusqlite::params![now(), hash],
+            )?;
+            Ok::<_, steve_store::StoreError>(node)
         })
     })
-    .await??
-    .context(steve_i18n::t!("hub.nodes.install_not_paired"))?;
+    .await??;
+    let out = out?;
+    tracing::debug!("node install: {out}");
+    let node = node.context(steve_i18n::t!("hub.nodes.install_not_paired"))?;
     step(op, "done", &steve_i18n::t!("hub.nodes.install_step_done"));
     Ok(node)
 }

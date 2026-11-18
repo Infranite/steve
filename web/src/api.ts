@@ -326,6 +326,7 @@ export const api = {
   installs: () => get<{ installs: RInstall[] }>("/nodes/installs"),
   install: (id: string) => get<RInstall>(`/nodes/installs/${encodeURIComponent(id)}`),
   runInstall: (id: string, address: string) => post<RInstall>(`/nodes/installs/${encodeURIComponent(id)}/run`, { address }),
+  cancelInstall: (id: string) => del<{ ok: boolean }>(`/nodes/installs/${encodeURIComponent(id)}`),
   confirmNode: (id: string) => post<{ ok: boolean }>(`/nodes/${encodeURIComponent(id)}/confirm`),
   /* the owner's Node actions: stop or resume taking new work (running sessions carry on), rename, unpair */
   pauseNode: (id: string) => post<{ ok: boolean }>(`/nodes/${encodeURIComponent(id)}/pause`),
