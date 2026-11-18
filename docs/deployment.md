@@ -1019,6 +1019,14 @@ The Hub's own Node, which runs every session on the Hub's machine, runs as `stev
 - The remote Node listener must be on (the default; `STEVE_NODE_LISTEN=0` and `service` together refuse to start).
 - Going back to `local` is an ordinary restart with `STEVE_NODE_MODE=local`. Stop it first with `steve hub stop` (or `kill $(cat <data>/node/service.pid)` for a Hub not set up by `steve setup`) so that two Nodes never use one home.
 
+## Setting up a project's directory
+
+In **Projects → New project**, use an existing folder, or (as the instance owner) choose a parent and create an empty folder or clone a Git repository. These operations stay on the Hub's own Node. For new folders, the dialog checks and shows the absolute destination before it starts. An existing directory, file, or symbolic link is never replaced.
+
+For a clone, use an HTTPS URL or an SSH address (including `git@host:owner/repo.git`), without embedded passwords, tokens or URL parameters. Git uses the Hub Node's service account's existing system/user Git configuration, credential helper or SSH setup. Make sure the **service** can access those credentials or the SSH agent and known hosts without prompts, not just an interactive shell. Use the final HTTPS URL rather than a redirect. Leave the branch blank to use the remote default, or enter an existing branch name. The operation is a one-time clone: it does not initialize submodules, download Git LFS contents, or set up automatic pulls or pushes.
+
+Git clones into a private temporary sibling and puts the checkout in place only after it succeeds; Steve registers the project after the directory is ready. For a failed clone, fix the credentials, address, branch or connectivity and retry the same path. If the page lost its connection, check the project list and destination before retrying; the Hub can finish without the page. If the directory is ready but registration failed, choose **Use existing folder**. An abrupt Hub or host stop during cloning can leave a hidden `.steve-clone-*` sibling; inspect it before removing it, and do not remove one for a live clone.
+
 ## Harness setup
 
 A local Node holds its home exclusively until its last handle is dropped after shutdown. The
