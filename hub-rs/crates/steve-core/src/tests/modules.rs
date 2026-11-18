@@ -475,6 +475,36 @@ struct Undo {
     log: Log,
 }
 
+#[test]
+fn recovery_keeps_only_opted_in_cards_on_completed_items() {
+    struct ResultCard;
+    impl DecisionHandler for ResultCard {
+        fn resolve(&self, _: &Tx, _: &DecisionCx, _: &Decision) -> ApiResult<serde_json::Value> {
+            Ok(json!({}))
+        }
+
+        fn retain_on_completed_item_recovery(&self, d: &Decision) -> bool {
+            d.kind == "approve"
+        }
+    }
+
+    let k = Kit::new();
+    attach(&k, |r| {
+        r.decision("result_card", Box::new(ResultCard));
+    });
+    let done = k.item("done", "完成", None);
+    let dropped = k.item("drop", "作罢", None);
+    let approval = k.decision(&done, None, "approve", "result_card", &["yes", "no"]);
+    let ordinary = k.decision(&done, None, "approve", "other_card", &["yes", "no"]);
+    let dropped = k.decision(&dropped, None, "approve", "result_card", &["yes", "no"]);
+    k.core.recover().unwrap();
+
+    let status = |id: &str| k.db().decision(id).unwrap().unwrap().status;
+    assert_eq!(status(&approval), "open");
+    assert_eq!(status(&ordinary), "expired");
+    assert_eq!(status(&dropped), "expired");
+}
+
 impl DecisionHandler for Undo {
     fn resolve(&self, _: &Tx, _: &DecisionCx, _: &Decision) -> ApiResult<serde_json::Value> {
         Ok(json!({}))

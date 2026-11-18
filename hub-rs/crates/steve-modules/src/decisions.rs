@@ -39,6 +39,13 @@ pub trait DecisionHandler: Send + Sync {
         Value::Null
     }
 
+    /// This card was opened to act on an already completed result, rather than to finish the item.
+    /// Keep it open on Hub recovery for completed (never dropped) items. The normal answer and
+    /// effect checks still apply; this does not approve or retry anything.
+    fn retain_on_completed_item_recovery(&self, _d: &Decision) -> bool {
+        false
+    }
+
     /// Called when a job expires the decision (e.g. 30-day candidates); default does nothing.
     fn expire(&self, tx: &Tx, d: &Decision) -> ApiResult<()> {
         let _ = (tx, d);

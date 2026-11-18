@@ -406,6 +406,10 @@ fn not_posted(f: &Fail) -> String {
 pub(crate) struct CommentDecisions(pub(crate) Slot);
 
 impl DecisionHandler for CommentDecisions {
+    fn retain_on_completed_item_recovery(&self, d: &Decision) -> bool {
+        d.kind == "approve" && d.requested_by == crate::automation::APPROVAL_ACTOR
+    }
+
     fn resolve(&self, tx: &Tx, cx: &DecisionCx, d: &Decision) -> ApiResult<Value> {
         let gh = self.0.need()?;
         let t = target(tx, cx.ws, &d.subject_id)?.ok_or_else(|| ApiError::not_found("PR"))?;
