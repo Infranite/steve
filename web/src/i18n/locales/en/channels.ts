@@ -351,7 +351,6 @@ export default {
     cleaned: "(Cleared)",
     before_one: "Show {{count}} earlier message",
     before_other: "Show {{count}} earlier messages",
-    replyTo: "Below is the reply to {{name}}",
     direct: {
       group: "Sent straight to this group, not as a reply to a message",
       topic_group: "Sent straight to this topic group, not as a reply to a message",

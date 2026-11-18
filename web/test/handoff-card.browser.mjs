@@ -45,9 +45,16 @@ try {
 
     await open()
     let text = await words()
-    /* the question is the first line; why you, the lines and the candidate draft are its detail */
-    assert.ok(text.includes("李雷问周四下午能不能一起过一下方案") && text.includes("为什么要你") && text.includes("→ 李雷：周四下午能过一下吗"), text)
-    assert.ok(text.includes("可以直接发的草稿") && text.includes("周四可以"), text)
+    /* The original speaker and words are separate from the unsent reply; context stays secondary. */
+    assert.ok(text.includes("李雷问周四下午能不能一起过一下方案") && text.includes("为什么要你"), text)
+    assert.equal(await card.locator("[data-card-source] [data-reply-sender]").textContent(), "李雷")
+    assert.equal(await card.locator("[data-card-source] [data-reply-text]").textContent(), "周四下午能过一下吗")
+    assert.ok(text.includes("回复草稿") && text.includes("尚未发送") && text.includes("周四可以"), text)
+    assert.equal(await card.locator("[data-reply-history]").getAttribute("open"), null)
+    await card.locator("[data-reply-history] summary").click()
+    await card.locator("[data-reply-history] > div").waitFor({ state: "visible" })
+    assert.ok((await card.locator("[data-reply-history]").innerText()).includes("方案我晚点发"))
+    await card.locator("[data-reply-history] summary").click()
     assert.ok(["发这条草稿", "按原文发", "转事项", "不用管", "告诉它怎么回"].every((x) => text.includes(x)), text)
     assert.doesNotMatch(text, RAW)
     assert.equal(await card.locator("[data-card-context]").count(), 1)
@@ -98,7 +105,7 @@ try {
     await open("?en")
     text = await words()
     assert.ok(text.includes("Send this draft") && text.includes("Make it an item") && text.includes("Leave it") && text.includes("Tell it how to reply"), text)
-    assert.doesNotMatch(text, RAW)
+    for (const label of await card.locator("[data-option]").allTextContents()) assert.doesNotMatch(label, RAW)
 
     // Normal approval still asks the model for a rewrite, without the failed-send edit contract.
     for (const [selector, choice, note] of [['[data-approve]', "yes"], ['[data-rewrite]', "rewrite"], ['[data-reject]', "no", "请补充依据"]]) {

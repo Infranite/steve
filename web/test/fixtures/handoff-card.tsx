@@ -38,5 +38,6 @@ api.state = async () => {
 }
 fixture.__reload = () => hubSubs.forEach((f) => f({ type: "chan_message", id: "cm_out", space_id: "sp1" }))
 fixture.__refresh = refresh
+fixture.__preview = (question: string, draft: string) => { w.q = question; w.draft = draft; return refresh() }
 function App() { useStore(); const current = st.orphans[0]; return <main className="mx-auto max-w-[640px] px-4 py-6">{current ? <DecisionCard i={current.i} showItem={false} /> : <p data-closed>这条处理已关闭</p>}<Toaster /></main> }
 createRoot(document.getElementById("root")!).render(<App />)
