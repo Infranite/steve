@@ -123,6 +123,10 @@ rpc_table! {
     NODE_UPGRADE = "node.upgrade": HubToNode Control Command true;
     NODE_UPGRADE_SWITCH = "node.upgrade_switch": HubToNode Control Command true;
     NODE_UPGRADE_STATUS = "node.upgrade_status": HubToNode Control Read false;
+    // Lost after it was written: ask its state (`node.remove_status`), never begin or commit again.
+    NODE_REMOVE = "node.remove": HubToNode Control Command true;
+    NODE_REMOVE_COMMIT = "node.remove_commit": HubToNode Control Command true;
+    NODE_REMOVE_STATUS = "node.remove_status": HubToNode Control Read false;
     // EventSink
     EVENTS_COMMIT = "events.commit": NodeToHub Events Commit false;
     // HubTools

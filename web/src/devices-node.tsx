@@ -1,5 +1,6 @@
 /* Devices · a Node (#/devices/nodes/<id>): the Hub's own Node and a paired one on one page. The head says what it is,
- * its one status and how it reaches the Hub, with "stop taking new work" and (for a paired Node) rename and unpair.
+ * its one status and how it reaches the Hub, with "stop taking new work" and (for a paired Node) rename, unpair and
+ * remove from its machine.
  * The left column is about now: its figures, its version, what it runs, its day. The right column is about its
  * settings: how it takes work, personal agent config, its harnesses, its identity, its project folders. An old link to
  * a device (#/devices/<device id>) lands here by the Node its row names. */
@@ -27,6 +28,7 @@ import { NodeVersion } from "@/devices-upgrade"
 import { RunningCard } from "@/devices-work"
 import { TakeWork, useWorkSettings } from "@/devices-config"
 import { NodeContext } from "@/devices-context"
+import { LeaveCard, RemoveDialog } from "@/devices-remove-dialog"
 
 const BACK = "#/devices/nodes"
 
@@ -42,7 +44,7 @@ function NodeDetail({ v }: { v: NodeView }) {
   const t = useT(), { hubVersion, reloadNodes } = useDevices(), { value: vit } = useNodeVitals(v.id)
   useStore()
   const w = useWorkSettings(v)
-  const [renaming, setRenaming] = useState(false), [revoking, setRevoking] = useState(false), [busy, setBusy] = useState(false)
+  const [renaming, setRenaming] = useState(false), [revoking, setRevoking] = useState(false), [removing, setRemoving] = useState(false), [busy, setBusy] = useState(false)
   const status = nodeStatus(v, hubVersion), route = linkRoute(v), facts = hostLine(hostOf(v, vit?.latest))
   const remote = !!v.node && !v.local
   const pairable = remote && (v.state === "active" || v.state === "paused")
@@ -63,6 +65,7 @@ function NodeDetail({ v }: { v: NodeView }) {
         <DropdownMenuContent align="end">
           <DropdownMenuItem onClick={() => setRenaming(true)} data-node-rename>{t("devices:node.rename")}</DropdownMenuItem>
           <DropdownMenuItem variant="destructive" onClick={() => setRevoking(true)} data-node-revoke>{t("devices:node.revoke")}</DropdownMenuItem>
+          <DropdownMenuItem variant="destructive" onClick={() => setRemoving(true)} data-node-remove>{t("devices:remove.action")}</DropdownMenuItem>
         </DropdownMenuContent>
       </DropdownMenu>}
     </>}>
@@ -79,10 +82,10 @@ function NodeDetail({ v }: { v: NodeView }) {
         {v.local && <RuntimeSetupPanel>{v.device?.can_configure && !st.down && <AddHarness />}</RuntimeSetupPanel>}
         <Identity v={v} />
         <Projects v={v} />
-        {pairable && <DCard data-node-unpair><DRow title={<span className="text-destructive">{t("devices:node.revoke")}</span>} sub={t("devices:node.revokeSub")}>
-          <Button size="sm" variant="outline" className="text-destructive" onClick={() => setRevoking(true)}>{t("devices:node.revokeShort")}</Button></DRow></DCard>}
+        {pairable && <LeaveCard onUnpair={() => setRevoking(true)} onRemove={() => setRemoving(true)} />}
       </div>
     </div>
+    {removing && <RemoveDialog v={v} onClose={() => setRemoving(false)} />}
     {renaming && <Rename v={v} onClose={() => setRenaming(false)} onDone={reloadNodes} />}
     {revoking && <Dialog open onOpenChange={(x) => !x && setRevoking(false)}><DialogContent className="sm:max-w-md" data-node-revoke-dialog>
       <DialogHeader><DialogTitle>{t("devices:node.revokeTitle", { name: v.name })}</DialogTitle><DialogDescription>{t("devices:node.revokeSub")}</DialogDescription></DialogHeader>

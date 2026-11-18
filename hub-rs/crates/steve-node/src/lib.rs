@@ -74,6 +74,17 @@ pub trait Upgrader: Send + Sync {
     fn status(&self, operation: &OperationId) -> ApiResult<NodeUpgradeState>;
 }
 
+/// What removes a Node from its machine when the Hub asks ([`Discovery::remove_begin`]): the host
+/// that installed the Node as a service (`steve-node`), never the Node library itself. The Node
+/// gives it what it needs: [`LocalNode::set_retiring`], [`LocalNode::running_work`] and
+/// [`LocalNode::cancel_running`].
+#[async_trait]
+pub trait Remover: Send + Sync {
+    async fn begin(&self, node: &LocalNode, r: NodeRemove) -> ApiResult<NodeRemoveState>;
+    async fn commit(&self, node: &LocalNode, c: RemoveCommit) -> ApiResult<NodeRemoveState>;
+    fn status(&self, operation: &OperationId) -> ApiResult<NodeRemoveState>;
+}
+
 /// The OS sandbox a Node with these homes and this `STEVE_CONFINE` would give its runs
 /// (`seatbelt`, `bubblewrap`), or why none: what `steve-hub --check-config` reports before a switch.
 pub fn confinement(
@@ -458,6 +469,11 @@ pub(crate) struct Inner {
     /// Who stages and switches releases for the Hub ([`LocalNode::set_upgrader`]); none: this Node
     /// is upgraded by its operator.
     upgrader: std::sync::OnceLock<Arc<dyn Upgrader>>,
+    /// Who removes this Node from its machine for the Hub ([`LocalNode::set_remover`]); none: its
+    /// operator does, on that machine.
+    remover: std::sync::OnceLock<Arc<dyn Remover>>,
+    /// Being removed: no new work is taken ([`LocalNode::set_retiring`]).
+    retiring: AtomicBool,
     wake: tokio::sync::Notify,
     delivering: AtomicBool,
     closed: AtomicBool,
@@ -1504,6 +1520,8 @@ impl LocalNode {
             files: Mutex::new(None),
             secrets: Mutex::new(None),
             upgrader: std::sync::OnceLock::new(),
+            remover: std::sync::OnceLock::new(),
+            retiring: AtomicBool::new(false),
             wake: tokio::sync::Notify::new(),
             delivering: AtomicBool::new(false),
             closed: AtomicBool::new(false),
@@ -1557,6 +1575,58 @@ impl LocalNode {
     /// service): probes then say [`FEATURE_NODE_UPGRADE`] and the build. Set once.
     pub fn set_upgrader(&self, upgrader: Arc<dyn Upgrader>) {
         let _ = self.0.upgrader.set(upgrader);
+    }
+
+    /// Lets the Hub remove this Node from its machine through `remover` (the host that installed
+    /// it as a service): probes then say [`FEATURE_NODE_REMOVE`]. Set once.
+    pub fn set_remover(&self, remover: Arc<dyn Remover>) {
+        let _ = self.0.remover.set(remover);
+    }
+
+    /// While on, the Node takes no new work (a command that is not a control one is `busy`);
+    /// what runs goes on. A removal turns it on, and off again when it is given up.
+    pub fn set_retiring(&self, on: bool) {
+        self.0.retiring.store(on, Ordering::SeqCst);
+    }
+
+    pub fn is_retiring(&self) -> bool {
+        self.0.retiring.load(Ordering::SeqCst)
+    }
+
+    /// Cancels every turn, job and command still running, as the Hub's cancel would (`reason`
+    /// says why); how many it asked to stop. Their ends come as their operations' own states.
+    pub async fn cancel_running(&self, reason: &str) -> ApiResult<usize> {
+        let ops = self.0.j.read(|t| t.ops())?;
+        let mut n = 0;
+        for (id, o) in ops {
+            if !matches!(o.method.as_str(), "start_turn" | "start_job" | "exec")
+                || o.receipt.state.is_finished()
+            {
+                continue;
+            }
+            let t = now();
+            // the target's own id when it fits, else one of the moment
+            let Ok(cancel_id) = OperationId::new(format!("{}-remove-cancel", id.as_str()))
+                .or_else(|_| OperationId::new(format!("remove-cancel-{t}-{n}")))
+            else {
+                continue;
+            };
+            let c = Command {
+                id: cancel_id,
+                issued_at: Timestamp(t),
+                accept_before: Timestamp(t + 60_000),
+                grant: GrantId::new("node-remove").map_err(internal)?,
+                body: Cancel {
+                    target: id.clone(),
+                    reason: reason.into(),
+                },
+            };
+            match ExecutionControl::cancel(self, c).await {
+                Ok(_) => n += 1,
+                Err(e) => tracing::warn!("cancelling {} for the removal: {e}", id.as_str()),
+            }
+        }
+        Ok(n)
     }
 
     /// Turns, jobs and commands this Node runs now: what an upgrade waits for.
@@ -1800,6 +1870,12 @@ impl LocalNode {
                 method,
                 "cancel" | "abandon" | "recover" | "release_session" | "resolve_permission"
             );
+            if !control && self.0.retiring.load(Ordering::SeqCst) {
+                return Err(ApiError::new(
+                    ErrorCode::Busy,
+                    "the node is being removed from its machine",
+                ));
+            }
             if maintenance.is_some() && !control {
                 // Different HTTP requests during the same setup observe its one operation.
                 if method == "install_harness"
@@ -4291,6 +4367,9 @@ impl Discovery for LocalNode {
                 if self.0.upgrader.get().is_some() {
                     f.push(FEATURE_NODE_UPGRADE.into());
                 }
+                if self.0.remover.get().is_some() {
+                    f.push(FEATURE_NODE_REMOVE.into());
+                }
                 f
             },
             build: self.0.upgrader.get().map(|u| u.build()),
@@ -4312,6 +4391,24 @@ impl Discovery for LocalNode {
         match self.0.upgrader.get().cloned() {
             Some(up) => up.status(&operation),
             None => unsupported("this node is upgraded by its operator"),
+        }
+    }
+    async fn remove_begin(&self, r: NodeRemove) -> ApiResult<NodeRemoveState> {
+        match self.0.remover.get().cloned() {
+            Some(rm) => rm.begin(self, r).await,
+            None => unsupported("this node is removed by its operator"),
+        }
+    }
+    async fn remove_commit(&self, c: RemoveCommit) -> ApiResult<NodeRemoveState> {
+        match self.0.remover.get().cloned() {
+            Some(rm) => rm.commit(self, c).await,
+            None => unsupported("this node is removed by its operator"),
+        }
+    }
+    async fn remove_status(&self, operation: OperationId) -> ApiResult<NodeRemoveState> {
+        match self.0.remover.get().cloned() {
+            Some(rm) => rm.status(&operation),
+            None => unsupported("this node is removed by its operator"),
         }
     }
     /// Newest first; the cursor is the position in that order.

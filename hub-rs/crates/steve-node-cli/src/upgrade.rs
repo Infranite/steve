@@ -166,14 +166,7 @@ impl ServiceUpgrader {
     /// release than the installed one).
     pub fn detect(home: &Path) -> Option<Arc<ServiceUpgrader>> {
         let build = own_build()?;
-        let record: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(home.join("services/node.json")).ok()?).ok()?;
-        let release = PathBuf::from(record["release"].as_str()?);
-        let exe = std::env::current_exe().ok()?.canonicalize().ok()?;
-        let release = release.canonicalize().ok()?;
-        if exe != release.join("bin/steve-node").canonicalize().ok()? {
-            return None;
-        }
+        let release = service_release(home)?;
         settle(home, &build);
         Some(Arc::new(ServiceUpgrader {
             home: home.to_owned(),
@@ -182,6 +175,23 @@ impl ServiceUpgrader {
             lock: tokio::sync::Mutex::new(()),
         }))
     }
+}
+
+/// The release the Node's service record (`steve node install`) names, when this very process runs
+/// from it: `None` for a Node run by hand, or from another release than the installed one.
+pub(crate) fn service_release(home: &Path) -> Option<PathBuf> {
+    let record: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(home.join("services/node.json")).ok()?).ok()?;
+    if record["uninstalled"] == true {
+        return None;
+    }
+    let release = PathBuf::from(record["release"].as_str()?);
+    let exe = std::env::current_exe().ok()?.canonicalize().ok()?;
+    let release = release.canonicalize().ok()?;
+    if exe != release.join("bin/steve-node").canonicalize().ok()? {
+        return None;
+    }
+    Some(release)
 }
 
 /// Records a restart left unfinished: staging dies with the process; a switch whose helper is long
@@ -548,8 +558,15 @@ fn verify(dir: &Path, want: &BuildIdentity) -> anyhow::Result<()> {
 }
 
 /// `steve-node upgrade-switch <op>`, detached from the service so stopping it does not stop the
-/// helper: its own session, and its own systemd scope under systemd.
+/// helper.
 fn spawn_helper(home: &Path, op: &str) -> std::io::Result<()> {
+    spawn_detached(home, &["upgrade-switch", op], &format!("upgrade-{op}"))
+}
+
+/// This binary with `args`, detached from the service so stopping the service does not stop it:
+/// its own session, and its own systemd scope (`steve-node-<name>`) under systemd. Its output goes
+/// to `<home>/logs/node-<name>.log`.
+pub(crate) fn spawn_detached(home: &Path, args: &[&str], name: &str) -> std::io::Result<()> {
     let exe = std::env::current_exe()?;
     let logs = home.join("logs");
     std::fs::create_dir_all(&logs)?;
@@ -557,19 +574,19 @@ fn spawn_helper(home: &Path, op: &str) -> std::io::Result<()> {
         .create(true)
         .append(true)
         .mode(0o600)
-        .open(logs.join(format!("node-upgrade-{op}.log")))?;
+        .open(logs.join(format!("node-{name}.log")))?;
     let systemd =
         std::env::var_os("INVOCATION_ID").is_some() && Path::new("/usr/bin/systemd-run").exists();
     let mut cmd = if systemd {
         let mut c = std::process::Command::new("/usr/bin/systemd-run");
         c.args(["--user", "--scope", "--collect", "--quiet"])
-            .arg(format!("--unit=steve-node-upgrade-{op}"))
+            .arg(format!("--unit=steve-node-{name}"))
             .arg(&exe);
         c
     } else {
         std::process::Command::new(&exe)
     };
-    cmd.args(["upgrade-switch", op])
+    cmd.args(args)
         .env("STEVE_HOME", home)
         .stdin(std::process::Stdio::null())
         .stdout(log.try_clone()?)
@@ -595,7 +612,7 @@ pub trait ServiceOps {
 }
 
 /// The Node's own user service (launchd or systemd).
-pub struct InstalledService(steve_install::service::Service);
+pub struct InstalledService(pub(crate) steve_install::service::Service);
 
 impl InstalledService {
     pub fn open(home: &Path) -> anyhow::Result<InstalledService> {

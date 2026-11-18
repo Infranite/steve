@@ -475,6 +475,137 @@ pub fn upgrades_open(c: &Connection) -> Result<Vec<UpgradeRow>> {
     Ok(v)
 }
 
+/// One removal of a Node from its machine its owner asked for (`node_removals`).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct RemovalRow {
+    pub operation_id: String,
+    pub node_id: String,
+    pub requested_by: String,
+    pub grace_secs: i64,
+    /// `requested` | `draining` | `cancelling` | `ready` | `confirming` | `removed` |
+    /// `unconfirmed` | `failed` | `manual`.
+    pub phase: String,
+    pub error: Option<String>,
+    pub created: i64,
+    pub updated: i64,
+}
+
+/// Phases after which nothing more happens to a removal: `removed` (the Node confirmed and was
+/// unpaired), `unconfirmed` (it did not confirm: offline, or too slow), `failed` (it refused or
+/// failed), `manual` (it cannot remove itself).
+pub const REMOVAL_DONE: &[&str] = &["removed", "unconfirmed", "failed", "manual"];
+
+const RCOLS: &str = "operation_id,node_id,requested_by,grace_secs,phase,error,created,updated";
+
+fn removal_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<RemovalRow> {
+    Ok(RemovalRow {
+        operation_id: r.get(0)?,
+        node_id: r.get(1)?,
+        requested_by: r.get(2)?,
+        grace_secs: r.get(3)?,
+        phase: r.get(4)?,
+        error: r.get(5)?,
+        created: r.get(6)?,
+        updated: r.get(7)?,
+    })
+}
+
+fn removal_done_sql() -> String {
+    REMOVAL_DONE
+        .iter()
+        .map(|p| format!("'{p}'"))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+/// A new removal, unless the Node has one unfinished (`false`).
+pub fn removal_insert(tx: &Tx<'_>, r: &RemovalRow) -> Result<bool> {
+    let open: i64 = tx.query_row(
+        &format!(
+            "SELECT count(*) FROM node_removals WHERE node_id=? AND phase NOT IN ({})",
+            removal_done_sql()
+        ),
+        [&r.node_id],
+        |x| x.get(0),
+    )?;
+    if open > 0 {
+        return Ok(false);
+    }
+    tx.execute(
+        &format!("INSERT INTO node_removals ({RCOLS}) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)"),
+        params![
+            r.operation_id,
+            r.node_id,
+            r.requested_by,
+            r.grace_secs,
+            r.phase,
+            r.error,
+            r.created,
+            r.updated
+        ],
+    )?;
+    changed(tx, &r.node_id)?;
+    Ok(true)
+}
+
+/// Moves an unfinished removal on; a finished one stays as it ended (`false`).
+pub fn removal_phase(
+    tx: &Tx<'_>,
+    operation_id: &str,
+    phase: &str,
+    error: Option<&str>,
+    now: i64,
+) -> Result<bool> {
+    let node: Option<String> = tx
+        .query_row(
+            &format!(
+                "UPDATE node_removals SET phase=?2, error=?3, updated=?4
+                 WHERE operation_id=?1 AND phase NOT IN ({}) RETURNING node_id",
+                removal_done_sql()
+            ),
+            params![operation_id, phase, error, now],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if let Some(node) = &node {
+        changed(tx, node)?;
+    }
+    Ok(node.is_some())
+}
+
+pub fn removal_get(c: &Connection, operation_id: &str) -> Result<Option<RemovalRow>> {
+    Ok(c.query_row(
+        &format!("SELECT {RCOLS} FROM node_removals WHERE operation_id=?"),
+        [operation_id],
+        removal_row,
+    )
+    .optional()?)
+}
+
+/// The Node's latest removal.
+pub fn removal_latest(c: &Connection, node_id: &str) -> Result<Option<RemovalRow>> {
+    Ok(c.query_row(
+        &format!(
+            "SELECT {RCOLS} FROM node_removals WHERE node_id=? ORDER BY created DESC, rowid DESC LIMIT 1"
+        ),
+        [node_id],
+        removal_row,
+    )
+    .optional()?)
+}
+
+/// Removals not finished (after a Hub restart: to settle, never to run on).
+pub fn removals_open(c: &Connection) -> Result<Vec<RemovalRow>> {
+    let mut st = c.prepare(&format!(
+        "SELECT {RCOLS} FROM node_removals WHERE phase NOT IN ({}) ORDER BY created",
+        removal_done_sql()
+    ))?;
+    let v = st
+        .query_map([], removal_row)?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(v)
+}
+
 /// A new link of an active or paused Node: the next generation, the incarnation it reported, and
 /// the one before (a change means the Node restarted). `None`: it may not connect.
 pub struct Link {
