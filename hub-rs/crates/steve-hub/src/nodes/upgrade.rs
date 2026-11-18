@@ -7,7 +7,7 @@
 //!
 //! One upgrade, `node_upgrades` row by row (each phase written before it is taken):
 //!
-//! 1. `preparing`: the archive for the Node's target — a bundle of this Hub's own `steve-node` when
+//! 1. `preparing`: the archive for the Node's target — this Hub's own `steve-node` and `steve` when
 //!    the Node is the Hub's platform, else the published installer archive checked against the
 //!    release's manifest ([`super::install::installer`]) — kept under `<data>/node-upgrades`.
 //! 2. `staging` → `staged`: the Node fetches it over its link (`blob.fetch` under the upgrade's
@@ -539,14 +539,16 @@ impl Upgrades {
             "steve-node-{}-{}.tar.gz",
             build.version, build.target
         ));
-        let hub = self.hub.clone().filter(|h| h.target == build.target);
-        let bytes = match (hub, &self.release_dir) {
-            (Some(_), Some(release)) => {
-                let (release, b) = (release.clone(), build.clone());
-                tokio::task::spawn_blocking(move || own_bundle(&release, &b)).await??
-            }
-            _ => super::install::installer(&build.version, &build.target).await?,
-        };
+        let local = self
+            .release_dir
+            .clone()
+            .filter(|_| self.hub.as_ref().is_some_and(|h| h.target == build.target));
+        let bytes = upgrade_archive(
+            build,
+            local,
+            super::install::installer(&build.version, &build.target),
+        )
+        .await?;
         let sha = hex::encode(Sha256::digest(&bytes));
         let tmp = file.with_extension("tmp");
         tokio::fs::write(&tmp, &bytes).await?;
@@ -694,14 +696,34 @@ impl Upgrades {
     }
 }
 
-/// A Node bundle of the Hub's own release: its manifest and its `steve-node`.
+/// A Hub upgraded through a legacy runtime archive has no CLI in its release. In that case use
+/// the same verified installer source as for a different platform, never an older release's CLI.
+/// The future is lazy: a complete local release needs neither network nor an installer mirror.
+async fn upgrade_archive(
+    build: &BuildIdentity,
+    local: Option<PathBuf>,
+    installer: impl std::future::Future<Output = anyhow::Result<Vec<u8>>>,
+) -> anyhow::Result<Vec<u8>> {
+    use anyhow::Context;
+    if let Some(release) = local.filter(|r| r.join("bin/steve").is_file()) {
+        let build = build.clone();
+        return tokio::task::spawn_blocking(move || own_bundle(&release, &build)).await?;
+    }
+    installer.await.context("a complete Node upgrade requires this release's verified installer; check the release source or STEVE_NODE_INSTALLERS for an offline Hub")
+}
+
+/// A Node bundle of the Hub's own release: the Node and maintenance CLI switch and roll back
+/// together. Keep the legacy runtime archive's allowlist unchanged.
 fn own_bundle(release: &Path, build: &BuildIdentity) -> anyhow::Result<Vec<u8>> {
-    let manifest: Value = serde_json::from_slice(&std::fs::read(release.join("release.json"))?)?;
+    use anyhow::Context;
+    let mut manifest: Value =
+        serde_json::from_slice(&std::fs::read(release.join("release.json"))?)?;
     anyhow::ensure!(
         manifest["version"] == build.version.as_str()
             && manifest["commit"] == build.commit.as_str(),
         "the hub's release directory is not the running release"
     );
+    manifest["cli_protocol"] = json!(2);
     let mut tar = tar::Builder::new(flate2::write::GzEncoder::new(
         Vec::new(),
         flate2::Compression::default(),
@@ -714,16 +736,13 @@ fn own_bundle(release: &Path, build: &BuildIdentity) -> anyhow::Result<Vec<u8>> 
         h.set_mtime(0);
         tar.append_data(&mut h, name, data)
     };
-    add(
-        "release.json",
-        &std::fs::read(release.join("release.json"))?,
-        0o644,
-    )?;
-    add(
-        "bin/steve-node",
-        &std::fs::read(release.join("bin/steve-node"))?,
-        0o755,
-    )?;
+    add("release.json", &serde_json::to_vec(&manifest)?, 0o644)?;
+    for name in ["bin/steve-node", "bin/steve"] {
+        let bytes = std::fs::read(release.join(name)).with_context(|| {
+            format!("Hub release lacks {name}; use the complete verified installer for this release before upgrading Nodes")
+        })?;
+        add(name, &bytes, 0o755)?;
+    }
     Ok(tar.into_inner()?.finish()?)
 }
 
@@ -970,6 +989,7 @@ mod tests {
         )
         .unwrap();
         std::fs::write(release.join("bin/steve-node"), b"#!/bin/sh\n").unwrap();
+        std::fs::write(release.join("bin/steve"), b"maintenance CLI fixture\n").unwrap();
         let node = FakeNode::new("n_a");
         if features {
             node.set_features(vec![FEATURE_NODE_UPGRADE.into()]);
@@ -1029,19 +1049,66 @@ mod tests {
         assert_eq!(staged[0].sha256, hex::encode(Sha256::digest(&bytes)));
         assert_eq!(staged[0].size, bytes.len() as u64);
         assert_eq!(staged[0].build, build("2.0.0", 'b'));
-        // the hub's own steve-node, in a bundle the node's checks read
-        let mut names: Vec<String> = tar::Archive::new(flate2::read::GzDecoder::new(&bytes[..]))
-            .entries()
-            .unwrap()
-            .map(|e| e.unwrap().path().unwrap().display().to_string())
-            .collect();
+        // Both executables are covered by the offered checksum and the CLI promise.
+        let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(&bytes[..]));
+        let mut names = vec![];
+        for entry in archive.entries().unwrap() {
+            use std::io::Read;
+            let mut entry = entry.unwrap();
+            let name = entry.path().unwrap().display().to_string();
+            let mut data = vec![];
+            entry.read_to_end(&mut data).unwrap();
+            if name == "bin/steve" {
+                assert_eq!(entry.header().mode().unwrap(), 0o755);
+                assert_eq!(data, b"maintenance CLI fixture\n");
+            }
+            if name == "release.json" {
+                let manifest: Value = serde_json::from_slice(&data).unwrap();
+                assert_eq!(manifest["cli_protocol"], 2);
+            }
+            names.push(name);
+        }
         names.sort();
-        assert_eq!(names, vec!["bin/steve-node", "release.json"]);
+        assert_eq!(names, vec!["bin/steve", "bin/steve-node", "release.json"]);
         // new turns held only while it switched
         assert_eq!(*f.fleet.holds.lock().unwrap(), vec![true, false]);
         assert_eq!(f.up.seen("n_a").unwrap().build, Some(build("2.0.0", 'b')));
         // done: now current, nothing more to do
         assert_eq!(f.up.start("n_a", "u", false).await.unwrap_err(), "current");
+    }
+
+    #[tokio::test]
+    async fn a_hub_without_its_cli_uses_the_verified_installer_or_fails_before_staging() {
+        let f = fixture(true, Some(build("2.0.0", 'b')), 1000);
+        let release = f.up.release_dir.clone();
+        // A complete local release does not even poll the download future.
+        upgrade_archive(&build("2.0.0", 'b'), release.clone(), async {
+            panic!("complete local release must not download an installer")
+        })
+        .await
+        .unwrap();
+        std::fs::remove_file(release.as_ref().unwrap().join("bin/steve")).unwrap();
+        let checked = b"verified installer fixture";
+        assert_eq!(
+            upgrade_archive(&build("2.0.0", 'b'), release.clone(), async {
+                Ok(checked.to_vec())
+            })
+            .await
+            .unwrap(),
+            checked
+        );
+        let error = upgrade_archive(&build("2.0.0", 'b'), release, async {
+            anyhow::bail!("installer is unavailable")
+        })
+        .await
+        .unwrap_err();
+        let why = format!("{error:#}");
+        assert!(
+            why.contains("verified installer") && why.contains("STEVE_NODE_INSTALLERS"),
+            "{why}"
+        );
+        assert!(f.node.staged_upgrades().is_empty());
+        assert!(f.fleet.holds.lock().unwrap().is_empty());
     }
 
     #[tokio::test]

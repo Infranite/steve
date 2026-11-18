@@ -234,26 +234,34 @@ fn run(mut args: Vec<String>) -> Result<i32> {
             {
                 ids.push(args.remove(0));
             }
-            /* hub or node: as given, else the Hub's home when there is one */
-            let role = match args.first().map(String::as_str) {
+            /* The role is explicit or comes from this home's installation records. */
+            let requested = match args.first().map(String::as_str) {
                 Some(r @ ("hub" | "node")) => {
                     let r = r.to_string();
                     args.remove(0);
-                    r
+                    Some(r)
                 }
-                _ if selected.is_none() && !role_home("hub", None)?.join("current").exists() => {
-                    "node".into()
-                }
-                _ => "hub".into(),
+                _ => None,
             };
             if !args.is_empty() {
                 bail!("unknown adapters arguments");
             }
-            let home = role_home(&role, selected)?;
-            let current = home
-                .join("current")
-                .canonicalize()
-                .with_context(|| t!("install.cli.role_not_set_up", role = role))?;
+            let home = match (selected, requested.as_deref()) {
+                (Some(selected), _) => common::canonical(Path::new(&selected))?,
+                (None, Some(role)) => role_home(role, None)?,
+                (None, None) => {
+                    let hub = role_home("hub", None)?;
+                    if steve_install::service::has_active_registration(&hub, "hub")? {
+                        hub
+                    } else {
+                        role_home("node", None)?
+                    }
+                }
+            };
+            let (role, current) =
+                steve_install::service::adapter_target(&home, requested.as_deref()).with_context(
+                    || t!("install.cli.adapters_home_invalid", home = home.display()),
+                )?;
             let mut passed = vec![if action == "upgrade" {
                 "install"
             } else {
