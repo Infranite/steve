@@ -3,24 +3,29 @@ name: CI
 # job per platform proves that together they ran every test exactly once and it passed on its first try.
 # Every job has a time limit of two to several times its longest run, so one that hangs is stopped
 # there instead of holding a runner for GitHub's six hours.
-# A pull request runs the Linux jobs (and the Apple job only when it touches the apps, the web client they
-# bundle or this workflow); macOS runners are scarce and were the queue every PR waited in. A push to main
-# and a merge queue run cover both platforms. cut-release.py releases only a main commit whose own push run
-# passed, with its release notes on top, so nothing reaches a release untested on macOS. Branch rules on main
+# A pull request into main runs the Linux jobs (and the Apple job only when it touches the apps, the web
+# client they bundle or this workflow); macOS runners are scarce and were the queue every PR waited in. A push to main
+# and a merge queue run cover both platforms. Main pushes share one running and at most one pending run;
+# a newer push replaces the pending run without stopping the running one. Merge queue runs stay independent.
+# cut-release.py releases the newest main commit whose own push run passed, with its release notes on top,
+# so nothing reaches a release untested on macOS. Branch rules on main
 # require the `CI gate` check, by that name. `merge_group` lets GitHub's own merge queue run it too.
 on:
   pull_request:
+    branches: [main]
   push:
     branches: [main]
   merge_group:
 permissions:
   contents: read
 env:
+  # Opt in only once this workflow is on main; older workflows still require CI on the current head.
+  RELEASE_BASE_POLICY: latest-tested-push
   # How many runners share each platform's Rust tests (`--partition hash:k/N`). Linux runners are
   # plentiful; macOS ones are scarce (and run only on main), so it takes fewer of them.
   RUST_TEST_SHARDS: '{"ubuntu-22.04": 4, "macos-15": 2}'
 concurrency:
-  group: ci-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
+  group: ci-${{ github.event_name == 'push' && 'main' || github.event_name == 'pull_request' && github.ref || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
   scripts:
@@ -296,7 +301,9 @@ jobs:
         run: scripts/build-apple-client.sh ios-sim
   test:
     name: CI gate
-    if: ${{ always() }}
+    # Superseding a pending workflow cancels that run, not a check of the newer commit. Do not turn
+    # cancellation into a failed gate; an active run still requires all of its own jobs to pass.
+    if: ${{ !cancelled() }}
     needs: [changes, scripts, web, rust-plan, rust-test, rust, apple]
     runs-on: ubuntu-22.04
     timeout-minutes: 5
