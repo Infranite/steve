@@ -794,7 +794,7 @@ pub fn load(
             row,
         )
         .optional()?;
-    let Some((t, t_created)) = t else {
+    let Some((mut t, t_created)) = t else {
         return Ok(None);
     };
     let read = |cond: &str, order: &str, limit: usize| -> ChannelResult<Vec<(Msg, i64)>> {
@@ -808,6 +808,12 @@ pub fn load(
     };
     let mut rows = read("m.created <= ?3", "DESC", SCAN)?;
     rows.extend(read("m.created > ?3", "ASC", AFTER + AFTER_SLACK)?);
+    for (m, _) in &mut rows {
+        m.text
+            .push_str(&crate::incoming_reactions::context(c, &m.id, mine)?);
+    }
+    t.text
+        .push_str(&crate::incoming_reactions::context(c, &t.id, mine)?);
     rows.sort_by(|(a, ac), (b, bc)| (a.at, *ac, &a.id).cmp(&(b.at, *bc, &b.id)));
     let (before, after): (Vec<_>, Vec<_>) = rows
         .into_iter()

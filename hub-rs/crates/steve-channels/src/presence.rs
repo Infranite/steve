@@ -25,6 +25,9 @@
 //! thread only adds a reply-chain signal: most messages are alone in their thread, and a private chat
 //! gives every message its own. Only your own words count: what another assistant posted on your
 //! account by itself ([`crate::arbiter::looks_automated`]) does not, nor what Steve sent as you.
+//! An explicitly manual reaction from you also handles its exact message (and the same sender's
+//! earlier unanswered DM burst), via [`crate::incoming_reactions`]. It is never a `Live` signal:
+//! reacting to an old message does not say anything about a newer one.
 //!
 //! Times: a message's time is the provider's (when it was said); relations between messages compare
 //! those. The moment a gate judges is the later of the Hub's clock and the newest time stored for
@@ -72,6 +75,9 @@ const AROUND_MAX: usize = 400;
 
 /// `result.superseded` of a card closed because you answered yourself.
 pub const BY_YOU: &str = "你已亲自回复";
+pub const BY_REACTION: &str = "你已用表情回应";
+pub const LABEL_REACTION: &str = "你已用表情回应，不替你起草";
+pub const REASON_REACTION: &str = "owner_reacted";
 /// `result.superseded` of a card closed because the sender went on and the turn was answered as one.
 pub const BY_LATER: &str = "对方接着发了消息，已合在一起处理";
 /// `result.superseded` of a card closed because the space is set not to reply for you any more.
@@ -117,6 +123,8 @@ pub struct Said {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Engaged {
+    /// A manual reaction on this message (or a later message of the same private burst).
+    Reacted { message_id: String, at: i64 },
     /// You said something about it after it: your latest such message.
     Replied { message_id: String, at: i64 },
     /// You said something shortly before it and it goes on with that: your latest such message.
@@ -126,6 +134,7 @@ pub enum Engaged {
 impl Engaged {
     pub fn reason(&self) -> &'static str {
         match self {
+            Self::Reacted { .. } => REASON_REACTION,
             Self::Replied { .. } => REASON_REPLIED,
             Self::Live { .. } => REASON_LIVE,
         }
@@ -133,6 +142,7 @@ impl Engaged {
 
     pub fn label(&self) -> &'static str {
         match self {
+            Self::Reacted { .. } => LABEL_REACTION,
             Self::Replied { .. } => LABEL_REPLIED,
             Self::Live { .. } => LABEL_LIVE,
         }
@@ -141,7 +151,7 @@ impl Engaged {
     /// When you last spoke.
     pub fn at(&self) -> i64 {
         match self {
-            Self::Replied { at, .. } | Self::Live { at, .. } => *at,
+            Self::Reacted { at, .. } | Self::Replied { at, .. } | Self::Live { at, .. } => *at,
         }
     }
 }
@@ -179,6 +189,9 @@ impl Stop {
     /// `result.superseded` of the card it closes.
     pub fn why(&self) -> &'static str {
         match self {
+            Self::You {
+                engaged: Engaged::Reacted { .. },
+            } => BY_REACTION,
             Self::You { .. } => BY_YOU,
             Self::Merged { .. } => BY_LATER,
             Self::Setting { .. } => BY_SETTING,
@@ -386,7 +399,7 @@ fn columns() -> String {
         .replace("{ANSWERED}", ANSWERED)
 }
 
-fn my_accounts(c: &Connection, ws: &str, space: &str) -> ChannelResult<Vec<String>> {
+pub(crate) fn my_accounts(c: &Connection, ws: &str, space: &str) -> ChannelResult<Vec<String>> {
     let mut st = c.prepare_cached(&format!("{MINE} SELECT id FROM my_accounts"))?;
     let v = st
         .query_map(params![ws, space], |r| r.get::<_, String>(0))?
@@ -472,6 +485,9 @@ pub fn owner_engaged(
     if t.owner {
         return Ok(None);
     }
+    if let Some(r) = crate::incoming_reactions::owner_reacted(c, ws, target)? {
+        return Ok(Some(r));
+    }
     let my = my_accounts(c, ws, &space)?;
     // everything stored has happened: the moment judged is the later of the Hub's clock and the
     // newest time stored (a provider clock ahead of the Hub's does not hide your message)
@@ -495,6 +511,9 @@ pub fn owner_engaged_chat(
     };
     if t.owner {
         return Ok(None);
+    }
+    if let Some(r) = crate::incoming_reactions::owner_reacted(c, ws, target)? {
+        return Ok(Some(r));
     }
     let mut st = c.prepare_cached(
         "SELECT o.id FROM spaces s JOIN spaces o ON o.workspace_id = s.workspace_id AND o.external_id = s.external_id
@@ -528,7 +547,14 @@ pub fn merged_into(c: &Connection, id: &str) -> ChannelResult<Option<String>> {
 /// you are there ([`owner_engaged`]).
 pub fn stop(c: &Connection, ws: &str, target: &str, now: i64) -> ChannelResult<Option<Stop>> {
     if let Some(into) = merged_into(c, target)? {
-        return Ok(Some(Stop::Merged { into }));
+        // A later group message stopped by its own reaction cannot handle the earlier messages
+        // merely because its composer had already grouped them. Recheck even if the event-time
+        // cleanup has not run yet.
+        let group_reaction = said(c, ws, target)?.is_some_and(|(_, _, dm)| !dm)
+            && crate::incoming_reactions::owner_reacted(c, ws, &into)?.is_some();
+        if !group_reaction {
+            return Ok(Some(Stop::Merged { into }));
+        }
     }
     Ok(owner_engaged(c, ws, target, now)?.map(|engaged| Stop::You { engaged }))
 }
@@ -554,9 +580,17 @@ pub fn take_turn(tx: &Tx, ws: &str, target: &str) -> ChannelResult<Vec<(String, 
     let Some((t, space, _)) = said(tx, ws, target)? else {
         return Ok(Vec::new());
     };
+    if crate::incoming_reactions::owner_reacted(tx, ws, target)?.is_some() {
+        return Ok(Vec::new());
+    }
     let my = my_accounts(tx, ws, &space)?;
     let from = t.at - BURST_GAP_MS * BURST_MAX as i64;
-    let before = lines(tx, ws, &space, from, t.at, &my)?;
+    let mut before = lines(tx, ws, &space, from, t.at, &my)?;
+    // An earlier message handled by a reaction is a boundary, not part of the next draft. The
+    // reaction itself never takes a later message into its scope.
+    for s in &mut before {
+        s.answered |= crate::incoming_reactions::owner_reacted(tx, ws, &s.id)?.is_some();
+    }
     let ids = burst(&t, &before, BURST_GAP_MS);
     let mut out = Vec::new();
     for id in ids {

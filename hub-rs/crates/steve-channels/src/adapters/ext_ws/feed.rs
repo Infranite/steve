@@ -520,6 +520,15 @@ impl Feed<'_> {
         let mut chats: Vec<(String, String)> = Vec::new();
         for it in items {
             match it.get("type").and_then(Value::as_str) {
+                Some("reaction") => match wire::reaction(it, now, &self.realm) {
+                    Ok(ev) => {
+                        if let Err(e) = self.run.inbound.reaction(ev) {
+                            self.s.close(1011, "reaction not stored");
+                            return Err(End::Lost(format!("reaction not stored: {e}")));
+                        }
+                    }
+                    Err(e) => tracing::warn!(conn = self.conn(), "ext_ws: reaction dropped: {e}"),
+                },
                 Some("message") => match WireMessage::meta(it, now, true) {
                     Ok(m) => {
                         let inline = it

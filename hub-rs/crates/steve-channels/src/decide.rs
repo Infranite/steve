@@ -761,6 +761,15 @@ pub fn open_card(tx: &Tx, plan: &Plan, card: &Card) -> ChannelResult<String> {
         params![d.id, plan.message_id],
     )?;
     crate::messages::event(tx, &plan.ws, &plan.space_id, &plan.message_id);
+    if plan.mode == Mode::Own
+        && plan.trigger.is_none()
+        && crate::incoming_reactions::owner_reacted(tx, &plan.ws, &plan.message_id)?.is_some()
+    {
+        // The event arrived while a conversation-backed composer was running. No open card may
+        // commit, and its earlier group cards must not be superseded by this handled message.
+        crate::incoming_reactions::supersede(tx, &plan.ws, &plan.message_id)?;
+        return Ok(d.id);
+    }
     if plan.mode == Mode::Own {
         let (sender, thread): (String, Option<String>) = tx.query_row(
             "SELECT coalesce(sender_party_id, sender_account_id, ''), thread_key FROM chan_messages WHERE id = ?",

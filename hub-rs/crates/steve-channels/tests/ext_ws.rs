@@ -252,6 +252,67 @@ fn msg(h: &H, chat: &str, source: &str, from: &str, text: &str, dt: i64) -> Valu
 // Connecting.
 
 #[tokio::test(flavor = "multi_thread")]
+async fn reaction_changes_are_durable_scoped_and_do_not_become_owner_presence() {
+    let h = setup().await;
+    let conn = h.connect().await;
+    let (rt, tx) = h.runtime();
+    until("subscribed", || !h.subscribes().is_empty()).await;
+    let m = msg(&h, "c_reaction", "src_reaction", "u_peer", "请确认", 1);
+    h.fake.push_message(m.clone());
+    until("message stored", || h.messages("c_reaction").len() == 1).await;
+    let event = json!({"type":"reaction", "chat_id":"c_reaction", "source_id":"src_reaction",
+        "actor":{"id":{"kind":"id","value":fake::ME}}, "emoji":"👍", "change":"created",
+        "origin":"manual", "action_ms":h.t0+2});
+    let seq = h.fake.push(vec![event.clone()]);
+    until("reaction acknowledged", || h.fake.acked() >= seq).await;
+    let id = h.rows("SELECT id FROM chan_messages WHERE text='请确认'", &[])[0][0]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(
+        h.env
+            .store()
+            .reader(|c| steve_channels::presence::stop(c, WS, &id, h.t0 + 3))
+            .unwrap()
+            .is_some()
+    );
+    let space = h.rows("SELECT space_id FROM chan_messages WHERE id=?", &[&id])[0][0]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(
+        !h.env
+            .store()
+            .reader(|c| steve_channels::presence::you_spoke(c, WS, &space, h.t0, h.t0 + 10))
+            .unwrap()
+    );
+    let mut removed = event.clone();
+    removed["change"] = json!("removed");
+    removed["action_ms"] = json!(h.t0 + 4);
+    let seq = h.fake.push(vec![removed, event]);
+    until("removal and stale create acknowledged", || {
+        h.fake.acked() >= seq
+    })
+    .await;
+    assert_eq!(
+        h.env
+            .store()
+            .reader(|c| steve_channels::presence::stop(c, WS, &id, h.t0 + 5))
+            .unwrap(),
+        None
+    );
+    assert_eq!(
+        h.rows(
+            "SELECT count(*) FROM chan_message_reactions WHERE connection_id=?",
+            &[&conn]
+        )[0][0],
+        1
+    );
+    rt.shutdown().await;
+    drop(tx);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn connecting_checks_the_url_says_hello_and_claims_who_is_signed_in() {
     let h = setup().await;
     let id = h.connect().await;

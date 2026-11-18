@@ -208,6 +208,10 @@ export default {
     truncated: "卡片较长，部分内容未展示，请在飞书中查看完整内容",
   },
   body: {
+    someone: "某人",
+    reactionManual: "手动表情回应",
+    reactionAutomated: "自动化表情，仅作上下文",
+    reactionUnknown: "表情来源未明，仅作上下文",
     purged: "原文已过保留期限",
     recalled: "消息已撤回",
     draftEmpty: "（草稿还没有正文）",

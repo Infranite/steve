@@ -945,7 +945,11 @@ fn conversation(
         pending,
         replied,
         sender,
-        message: context::typed_target(&plan.text, &attachments),
+        message: format!(
+            "{}{}",
+            context::typed_target(&plan.text, &attachments),
+            crate::incoming_reactions::context(c, &plan.message_id, &mine)?
+        ),
         attachments,
         names,
     })

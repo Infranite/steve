@@ -126,6 +126,7 @@ pub mod im_context;
 pub mod im_conv_mcp;
 pub mod im_mcp;
 pub mod inbound;
+pub mod incoming_reactions;
 pub mod lifecycle;
 pub mod media;
 pub mod media_agent;
@@ -162,8 +163,8 @@ pub mod write_blocks;
 pub use channel::{
     ActAsUser, ActTarget, ChannelAdapter, ChannelFeatures, HandleRef, InboundMessage, MemberInfo,
     Mention, MessageRef, OutContent, Profile, ProfileAdapter, ProfileAnswer, ProfileQuery,
-    PushOutcome, ReactionKind, SendKey, SendTarget, Sender, Sent, SpaceEvent, SpaceInfo, SpaceKind,
-    TenantInfo,
+    PushOutcome, ReactionEvent, ReactionKind, ReactionOrigin, SendKey, SendTarget, Sender, Sent,
+    SpaceEvent, SpaceInfo, SpaceKind, TenantInfo,
 };
 pub use deliver::{Auth, Delivered, DraftOnly, OutRequest, OutTarget, Outbound};
 pub use disclosure::Disclosure;

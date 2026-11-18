@@ -212,6 +212,10 @@ export default {
     truncated: "This card is long and partly hidden. View the full card in Feishu",
   },
   body: {
+    someone: "Someone",
+    reactionManual: "Manual reaction",
+    reactionAutomated: "Automated reaction, context only",
+    reactionUnknown: "Reaction provenance unknown, context only",
     purged: "Original text is past its retention period",
     recalled: "Message recalled",
     draftEmpty: "(Draft has no text yet)",

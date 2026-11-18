@@ -401,6 +401,16 @@ pub trait MessageSink: Send + Sync {
     /// [`Channels::on_inbound`].
     async fn inbound(&self, ws: &str, conn: &str, msg: InboundMessage) -> ChannelResult<Inbound>;
 
+    async fn reaction_event(
+        &self,
+        ws: &str,
+        conn: &str,
+        ev: crate::ReactionEvent,
+    ) -> ChannelResult<()> {
+        let _ = (ws, conn, ev);
+        Ok(())
+    }
+
     /// [`Channels::on_space_event`]. Sinks that only take messages ignore it.
     async fn space_event(
         &self,
@@ -415,6 +425,14 @@ pub trait MessageSink: Send + Sync {
 
 #[async_trait]
 impl MessageSink for Channels {
+    async fn reaction_event(
+        &self,
+        ws: &str,
+        conn: &str,
+        ev: crate::ReactionEvent,
+    ) -> ChannelResult<()> {
+        self.on_reaction(ws, conn, ev)
+    }
     /// The whole pipeline, steps 1–7 ([`Channels::on_message`]).
     async fn inbound(&self, ws: &str, conn: &str, msg: InboundMessage) -> ChannelResult<Inbound> {
         self.on_message(ws, conn, msg).await

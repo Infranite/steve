@@ -8,6 +8,7 @@ import { useT } from "@/i18n"
 const CardMarkdown = lazy(() => import("@/channels/card-markdown"))
 import type { CardAttachment, CardBlock } from "@/api/channel-content"
 import { Disclosure } from "@/ui"
+import { Badge } from "@/components/affect/badge-clean"
 
 function Md({ text }: { text?: string }) {
   return text ? <Suspense fallback={<div className="whitespace-pre-wrap break-words">{text}</div>}><CardMarkdown text={text.slice(0, 8000)} /></Suspense> : null
@@ -85,7 +86,7 @@ const UNAVAILABLE = {
 } as const
 const unavailableKey = (code?: string) => (code && Object.hasOwn(UNAVAILABLE, code) ? UNAVAILABLE[code as keyof typeof UNAVAILABLE] : undefined)
 /** Shared by the space's recent messages and the read-only IM conversation. */
-export function ChannelMessageBody({ message: m }: { message: Pick<ChanMessage, "id" | "text" | "status" | "purged" | "attachments"> }) {
+export function ChannelMessageBody({ message: m }: { message: Pick<ChanMessage, "id" | "text" | "status" | "purged" | "attachments" | "reactions"> }) {
   const t = useT()
   if (m.purged || m.text === null) return <p className="type-body text-muted-foreground" data-message-purged>{t("channels:body.purged")}</p>
   if (m.status === "recalled") return <p className="type-body text-muted-foreground">{t("channels:body.recalled")}</p>
@@ -101,5 +102,10 @@ export function ChannelMessageBody({ message: m }: { message: Pick<ChanMessage, 
       const why = unavailableKey(a.unavailable)
       return <MessageResource key={`${m.id}:${i}`} url={url} name={name} image={a.type === "image"} unavailable={why ? t(why) : undefined} />
     })}
+    {!!m.reactions?.length && <div className="flex flex-wrap gap-1" data-message-reactions>
+      {m.reactions.slice(0, 50).map((r, i) => <Badge key={`${r.actor.account_id}:${r.emoji}:${i}`} title={`${t(r.origin === "manual" ? "channels:body.reactionManual" : r.origin === "automated" ? "channels:body.reactionAutomated" : "channels:body.reactionUnknown")} · ${new Date(r.at).toLocaleString()}`}>
+        {r.emoji} {r.actor.name || t("channels:body.someone")}
+      </Badge>)}
+    </div>}
   </div>
 }

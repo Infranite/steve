@@ -183,18 +183,6 @@ impl Replies {
             .map(|(id, _)| id.clone())
             .filter(|id| *id != plan.message_id)
             .collect();
-        if !earlier.is_empty() {
-            ch.store().transaction(|tx| {
-                crate::presence::supersede(
-                    tx,
-                    &plan.ws,
-                    &plan.space_id,
-                    crate::presence::Answering::Messages(&earlier),
-                    crate::presence::BY_LATER,
-                    &plan.message_id,
-                )
-            })?;
-        }
         // drafting took a while: you may have answered meanwhile, or the sender went on and a later
         // turn took this one (crate::presence, gate 2)
         if let Some(e) = ch.owner_stop(plan)? {
@@ -208,6 +196,18 @@ impl Replies {
                 composer_skip: Some(format!("{}（{}）", e.label(), e.reason())),
                 ..Acted::default()
             }));
+        }
+        if !earlier.is_empty() {
+            ch.store().transaction(|tx| {
+                crate::presence::supersede(
+                    tx,
+                    &plan.ws,
+                    &plan.space_id,
+                    crate::presence::Answering::Messages(&earlier),
+                    crate::presence::BY_LATER,
+                    &plan.message_id,
+                )
+            })?;
         }
         // a contact you starred: whatever the composer made of it, it reaches you as a card, its
         // reply (if any) the card's candidate draft (crate::decide)
