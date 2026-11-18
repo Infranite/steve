@@ -261,6 +261,7 @@ impl Replies {
                     approve,
                     generation: Some(r.generation),
                     auth,
+                    operation_id: None,
                 },
             )
             .await?;
@@ -368,6 +369,7 @@ impl Replies {
                         source: plan.message_id.clone(),
                         act: plan.act,
                     },
+                    operation_id: None,
                 },
             )
             .await;
@@ -435,6 +437,7 @@ impl Replies {
                     auth: Auth::Trigger {
                         source: plan.message_id.clone(),
                     },
+                    operation_id: None,
                 },
             )
             .await?;
@@ -484,6 +487,7 @@ impl Replies {
                         source: plan.message_id.clone(),
                         act: Act::Reply,
                     },
+                    operation_id: None,
                 },
             )
             .await?;
@@ -582,6 +586,7 @@ impl Responder for Replies {
                         source: plan.message_id.clone(),
                         act: Act::Handoff,
                     },
+                    operation_id: None,
                 },
             )
             .await?;

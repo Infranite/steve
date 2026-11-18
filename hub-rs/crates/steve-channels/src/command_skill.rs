@@ -187,6 +187,7 @@ impl Channels {
                         auth: crate::deliver::Auth::Trigger {
                             source: plan.message_id.clone(),
                         },
+                        operation_id: None,
                     },
                 )
                 .await?;

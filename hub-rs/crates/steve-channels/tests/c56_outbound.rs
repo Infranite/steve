@@ -433,6 +433,7 @@ fn out(plan: &Plan, text: &str, auth: Auth, g: Option<Generation>) -> OutRequest
         approve: false,
         generation: g,
         auth,
+        operation_id: None,
     }
 }
 
@@ -5854,6 +5855,7 @@ async fn refused(h: &H, id: &str, text: &str) -> (String, String) {
                     source: plan.message_id,
                     act: Act::Reply,
                 },
+                operation_id: None,
             },
         )
         .await
@@ -6403,6 +6405,7 @@ async fn recovery_explicit_acknowledgements_are_not_swallowed_by_the_automatic_c
                     source: plan.message_id,
                     act: Act::Reply,
                 },
+                operation_id: None,
             },
         )
         .await

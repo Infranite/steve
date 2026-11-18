@@ -226,6 +226,17 @@ pub fn open_draft_to(
     text: &str,
     now: i64,
 ) -> ChannelResult<(String, String)> {
+    open_draft_as(tx, t, text, now, uid("cm"))
+}
+
+/// [`open_draft_to`] stored as message `id` (an operation's: [`crate::deliver::operation_message_id`]).
+pub(crate) fn open_draft_as(
+    tx: &Tx,
+    t: &crate::deliver::OutTarget,
+    text: &str,
+    now: i64,
+    id: String,
+) -> ChannelResult<(String, String)> {
     let space =
         spaces::get(tx, &t.space_id)?.ok_or_else(|| steve_modules::ApiError::not_found("空间"))?;
     let (account, _) = bindings::connection_account(tx, &t.ws, &t.connection_id)?;
@@ -238,7 +249,6 @@ pub fn open_draft_to(
         ),
         (Mode::Bot, None) => bindings::effective(tx, &space)?.map(|e| e.persona),
     };
-    let id = uid("cm");
     tx.execute(
         // seen by the identity it goes out as (`seen_by`, migration 88)
         "INSERT INTO chan_messages (id, workspace_id, space_id, thread_key, reply_to, direction, sender_account_id,
@@ -472,7 +482,12 @@ impl Channels {
                 && let Some(m) = said
                 && let Some(out) = self.responder().outbound()
             {
-                match self.trigger_failed_note(&plan.ws, plan, out).await {
+                let op = crate::conversations::conv_operation(
+                    &m,
+                    m.meta["origin"].as_str().unwrap_or_default(),
+                    crate::conversations::OP_TRIGGER_FAILED,
+                );
+                match self.trigger_failed_note(&plan.ws, plan, out, op).await {
                     Ok(d) => {
                         if let Err(e) = self.mark_out(&m, &d) {
                             tracing::warn!(space = plan.space_id, "failure note not marked: {e}");

@@ -98,6 +98,7 @@ async fn request(Extension(f): F, Json(body): Json<Value>) -> ApiResult<Json<Val
                     source: stored.message_id,
                     act: steve_channels::rules::Act::Reply,
                 },
+                operation_id: None,
             },
         )
         .await?;

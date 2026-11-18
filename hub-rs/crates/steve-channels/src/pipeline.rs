@@ -74,27 +74,7 @@ pub(crate) fn existing(c: &Connection, e: &Envelope) -> ChannelResult<Option<Del
 }
 
 pub(crate) fn outcome(d: &Delivery) -> Delivered {
-    match (d.status.as_str(), d.decision_id.as_ref()) {
-        ("draft", Some(id)) => Delivered::Drafted {
-            message_id: d.message_id.clone(),
-            decision_id: id.clone(),
-        },
-        ("failed", Some(id)) => Delivered::Failed {
-            message_id: d.message_id.clone(),
-            decision_id: id.clone(),
-        },
-        // refused for good, after the one notice about it (`write_blocks`)
-        ("failed", None) => Delivered::Blocked {
-            message_id: d.message_id.clone(),
-        },
-        ("sent" | "recalled", _) => Delivered::Sent {
-            message_id: d.message_id.clone(),
-        },
-        ("discarded", _) => Delivered::Skipped,
-        _ => Delivered::Queued {
-            message_id: d.message_id.clone(),
-        },
-    }
+    crate::deliver::delivered_of(&d.message_id, &d.status, d.decision_id.as_deref())
 }
 
 /// Executed in the SAME transaction as `insert_out`; a crash cannot leave an untracked message.
@@ -339,6 +319,7 @@ impl Outbox {
             } else {
                 Auth::None
             },
+            operation_id: None,
         };
         self.deliver_enveloped(ch, &req, Some(&e)).await?;
         ch.store()

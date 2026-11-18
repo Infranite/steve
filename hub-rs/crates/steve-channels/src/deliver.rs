@@ -261,6 +261,61 @@ pub struct OutRequest {
     pub generation: Option<Generation>,
     /// What lets it go out directly (C6 checks it again before sending).
     pub auth: Auth,
+    /// The deterministic id of the operation this message is (what it answers, which turn, why),
+    /// for a caller that may ask again for the same message: a retry, a restart, a second delivery
+    /// pass. The outbound message is stored under an id derived from it ([`operation_message_id`]),
+    /// claimed by the insert that first finds it free; a request whose operation already has its
+    /// message gets that message's state back ([`delivered_of`]) and is never created or sent
+    /// again. The id is also the provider's dedupe key of every send of it. `None`: a new message
+    /// each time.
+    pub operation_id: Option<String>,
+}
+
+/// The `chan_messages` id of operation `op` in workspace `ws` ([`OutRequest::operation_id`]): the
+/// same for every request of it, shaped like any other outbound id.
+pub fn operation_message_id(ws: &str, op: &str) -> String {
+    let h = steve_store::sha(&format!("{ws}\n{op}"));
+    format!("cm_{}", &h[..16])
+}
+
+/// What became of stored outbound message `message_id`, from its `status` and open `decision`.
+pub fn delivered_of(message_id: &str, status: &str, decision: Option<&str>) -> Delivered {
+    let message_id = message_id.to_string();
+    match (status, decision) {
+        ("draft", Some(id)) => Delivered::Drafted {
+            message_id,
+            decision_id: id.into(),
+        },
+        ("failed", Some(id)) => Delivered::Failed {
+            message_id,
+            decision_id: id.into(),
+        },
+        // refused for good, after the one notice about it (`write_blocks`)
+        ("failed", None) => Delivered::Blocked { message_id },
+        ("sent" | "recalled", _) => Delivered::Sent { message_id },
+        ("discarded", _) => Delivered::Skipped,
+        // pending (claimed, or waiting for the queue) or unknown (may be out): never sent from here
+        _ => Delivered::Queued { message_id },
+    }
+}
+
+/// The state of operation `op`'s outbound message, when it has one ([`OutRequest::operation_id`]).
+pub fn operation_delivered(
+    c: &rusqlite::Connection,
+    ws: &str,
+    op: &str,
+) -> ChannelResult<Option<Delivered>> {
+    use rusqlite::OptionalExtension;
+    let id = operation_message_id(ws, op);
+    let row: Option<(String, Option<String>)> = c
+        .query_row(
+            "SELECT status, decision_id FROM chan_messages
+              WHERE id = ? AND workspace_id = ? AND direction = 'out'",
+            rusqlite::params![id, ws],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    Ok(row.map(|(status, decision)| delivered_of(&id, &status, decision.as_deref())))
 }
 
 /// What became of a message.
@@ -370,16 +425,26 @@ impl Outbound for DraftOnly {
             return Ok(Delivered::Skipped);
         }
         let now = ch.now();
-        let (message_id, decision_id) = ch.store().transaction(|tx| {
-            let (m, d) = respond::open_draft_to(tx, &req.target, &req.text, now)?;
+        let ws = &req.target.ws;
+        ch.store().transaction(|tx| {
+            // asked again for the same operation: its draft, not a second one
+            if let Some(op) = &req.operation_id
+                && let Some(d) = operation_delivered(tx, ws, op)?
+            {
+                return Ok(d);
+            }
+            let id = match &req.operation_id {
+                Some(op) => operation_message_id(ws, op),
+                None => steve_store::uid("cm"),
+            };
+            let (m, d) = respond::open_draft_as(tx, &req.target, &req.text, now, id)?;
             if let Some(g) = &req.generation {
                 crate::decide::keep_composed(tx, &m, g)?;
             }
-            Ok::<_, crate::ChannelError>((m, d))
-        })?;
-        Ok(Delivered::Drafted {
-            message_id,
-            decision_id,
+            Ok::<_, crate::ChannelError>(Delivered::Drafted {
+                message_id: m,
+                decision_id: d,
+            })
         })
     }
 }
@@ -409,6 +474,7 @@ mod tests {
                 ..Default::default()
             }),
             auth: Auth::None,
+            operation_id: None,
         }
     }
 

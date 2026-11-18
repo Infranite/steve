@@ -1592,6 +1592,7 @@ async fn a_read_only_connection_gives_one_notice_and_lifts_when_writes_are_allow
             source: plan.message_id.clone(),
             act: steve_channels::rules::Act::Reply,
         },
+        operation_id: None,
     };
     let cards = || {
         h.rows(
@@ -1775,6 +1776,7 @@ async fn bot_connect_claims_a_bot_not_me_and_outbox_sends_as_bot_with_source_rec
                     source: source.clone(),
                     act: steve_channels::rules::Act::Reply,
                 },
+                operation_id: None,
             },
         )
         .await
