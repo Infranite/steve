@@ -4,7 +4,8 @@
 //! 1. `stage` ([`NodeUpgrade`]): the archive comes from the Hub over this Node's own link
 //!    (`blob.fetch`, granted to that one operation), its size and SHA256 are checked, it is
 //!    unpacked (plain files and directories only) and what it holds must say the version, commit
-//!    and target the Hub asked for, its `bin/steve-node --build-info` included. It is kept next to
+//!    and target the Hub asked for, both `bin/steve-node` and `bin/steve --build-info` included.
+//!    Legacy Node-only archives remain supported when they do not promise a CLI. It is kept next to
 //!    the current release as `<home>/releases/<version>`; nothing switches.
 //! 2. `switch` ([`UpgradeSwitch`]): refused while the Node runs work, unless forced. A helper
 //!    (`steve-node upgrade-switch <op>`, this binary, outside the service's process group and
@@ -521,7 +522,8 @@ fn unpack(archive: &Path, dest: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// The unpacked release says, and its Node binary reports, the build the Hub offered.
+/// The release, Node and CLI report the offered build. Unmarked legacy Node-only packages can
+/// still be staged; `cli_protocol` promises a CLI and may never silently degrade to Node-only.
 fn verify(dir: &Path, want: &BuildIdentity) -> anyhow::Result<()> {
     use anyhow::Context;
     let manifest: serde_json::Value =
@@ -533,27 +535,37 @@ fn verify(dir: &Path, want: &BuildIdentity) -> anyhow::Result<()> {
             && manifest["commit"] == want.commit.as_str(),
         "release.json is not the offered release"
     );
-    let bin = dir.join("bin/steve-node");
-    let meta = std::fs::symlink_metadata(&bin).context("bin/steve-node")?;
-    anyhow::ensure!(
-        meta.is_file() && meta.permissions().mode() & 0o111 != 0,
-        "bin/steve-node is not an executable file"
-    );
-    let out = std::process::Command::new(&bin)
-        .arg("--build-info")
-        .env_clear()
-        .stdin(std::process::Stdio::null())
-        .output()
-        .context("running bin/steve-node --build-info")?;
-    anyhow::ensure!(out.status.success(), "bin/steve-node --build-info failed");
-    let info: serde_json::Value =
-        serde_json::from_slice(&out.stdout).context("bin/steve-node --build-info")?;
-    anyhow::ensure!(
-        info["version"] == want.version.as_str()
-            && info["commit"] == want.commit.as_str()
-            && info["target"] == want.target.as_str(),
-        "bin/steve-node is not the offered build"
-    );
+    let mut binaries = vec!["bin/steve-node"];
+    if manifest.get("cli_protocol").is_some()
+        || steve_install::common::exists(&dir.join("bin/steve"))
+    {
+        binaries.push("bin/steve");
+    }
+    for name in binaries {
+        let bin = dir.join(name);
+        let meta = std::fs::symlink_metadata(&bin).with_context(|| {
+            format!("missing {name}; use a complete verified installer or Node upgrade package")
+        })?;
+        anyhow::ensure!(
+            meta.is_file() && meta.permissions().mode() & 0o111 != 0,
+            "{name} is not an executable file"
+        );
+        let out = std::process::Command::new(&bin)
+            .arg("--build-info")
+            .env_clear()
+            .stdin(std::process::Stdio::null())
+            .output()
+            .with_context(|| format!("running {name} --build-info"))?;
+        anyhow::ensure!(out.status.success(), "{name} --build-info failed");
+        let info: serde_json::Value =
+            serde_json::from_slice(&out.stdout).with_context(|| format!("{name} --build-info"))?;
+        anyhow::ensure!(
+            info["version"] == want.version.as_str()
+                && info["commit"] == want.commit.as_str()
+                && info["target"] == want.target.as_str(),
+            "{name} is not the offered build"
+        );
+    }
     Ok(())
 }
 
@@ -747,6 +759,16 @@ mod tests {
 
     /// A release archive whose `bin/steve-node --build-info` says `info`.
     fn archive(version: &str, info: &str, extra: Option<(&str, tar::EntryType)>) -> Vec<u8> {
+        package(version, info, None, false, extra)
+    }
+
+    fn package(
+        version: &str,
+        info: &str,
+        cli: Option<(&str, u32)>,
+        promised: bool,
+        extra: Option<(&str, tar::EntryType)>,
+    ) -> Vec<u8> {
         let mut b = tar::Builder::new(flate2::write::GzEncoder::new(
             Vec::new(),
             flate2::Compression::fast(),
@@ -758,14 +780,20 @@ mod tests {
             h.set_entry_type(tar::EntryType::Regular);
             b.append_data(&mut h, name, data).unwrap();
         };
-        let manifest =
+        let mut manifest =
             serde_json::json!({"format_version":1,"version":version,"commit":"a".repeat(40)});
+        if promised {
+            manifest["cli_protocol"] = 2.into();
+        }
         add("release.json", manifest.to_string().as_bytes(), 0o644);
         add(
             "bin/steve-node",
             format!("#!/bin/sh\necho '{info}'\n").as_bytes(),
             0o755,
         );
+        if let Some((script, mode)) = cli {
+            add("bin/steve", script.as_bytes(), mode);
+        }
         if let Some((name, kind)) = extra {
             let mut h = tar::Header::new_ustar();
             h.set_size(0);
@@ -837,12 +865,91 @@ mod tests {
         let dir = stage_release(home.path(), &files, &u).await.unwrap();
         assert_eq!(dir, home.path().join("releases/1.2.3"));
         assert!(dir.join("bin/steve-node").is_file());
+        assert!(
+            !dir.join("bin/steve").exists(),
+            "unmarked legacy Node-only package remains supported"
+        );
         // nothing left behind
         let left: Vec<_> = std::fs::read_dir(home.path().join("releases"))
             .unwrap()
             .map(|e| e.unwrap().file_name())
             .collect();
         assert_eq!(left, vec![std::ffi::OsString::from("1.2.3")]);
+    }
+
+    #[tokio::test]
+    async fn a_cli_is_staged_with_the_node_and_must_report_the_same_build() {
+        let home = tempfile::tempdir().unwrap();
+        let cli = format!("#!/bin/sh\nprintf '%s\\n' '{}'\n", info("1.2.3"));
+        let bytes = package("1.2.3", &info("1.2.3"), Some((&cli, 0o755)), true, None);
+        let u = request("nup_cli", "1.2.3", &bytes);
+        let files = Files {
+            op: u.operation.clone(),
+            bytes,
+        };
+        let dir = stage_release(home.path(), &files, &u).await.unwrap();
+        assert_eq!(std::fs::read_to_string(dir.join("bin/steve")).unwrap(), cli);
+        assert!(dir.join("bin/steve-node").is_file());
+        // A retry cannot overwrite an existing release, including its CLI.
+        let again = stage_release(home.path(), &files, &u).await.unwrap();
+        assert_ne!(again, dir);
+        assert_eq!(
+            std::fs::read(dir.join("bin/steve")).unwrap(),
+            std::fs::read(again.join("bin/steve")).unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_promised_or_present_cli_cannot_be_missing_corrupt_or_from_another_release() {
+        let good = format!("#!/bin/sh\nprintf '%s\\n' '{}'\n", info("1.2.3"));
+        let other = format!("#!/bin/sh\nprintf '%s\\n' '{}'\n", info("9.9.9"));
+        let home = tempfile::tempdir().unwrap();
+        for (index, (cli, promised, why)) in [
+            (None, true, "missing bin/steve"),
+            (
+                Some((other.as_str(), 0o755)),
+                true,
+                "bin/steve is not the offered build",
+            ),
+            (
+                Some((other.as_str(), 0o755)),
+                false,
+                "bin/steve is not the offered build",
+            ),
+            (
+                Some((good.as_str(), 0o644)),
+                true,
+                "bin/steve is not an executable",
+            ),
+            (
+                Some(("#!/bin/sh\nexit 9\n", 0o755)),
+                true,
+                "bin/steve --build-info failed",
+            ),
+            (
+                Some(("#!/bin/sh\nprintf broken\n", 0o755)),
+                true,
+                "bin/steve --build-info",
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let bytes = package("1.2.3", &info("1.2.3"), cli, promised, None);
+            let u = request(&format!("nup_bad_cli_{index}"), "1.2.3", &bytes);
+            let files = Files {
+                op: u.operation.clone(),
+                bytes,
+            };
+            let error = stage_release(home.path(), &files, &u).await.unwrap_err();
+            assert!(format!("{error:#}").contains(why), "{why}: {error:#}");
+            assert_eq!(
+                std::fs::read_dir(home.path().join("releases"))
+                    .unwrap()
+                    .count(),
+                0
+            );
+        }
     }
 
     #[tokio::test]

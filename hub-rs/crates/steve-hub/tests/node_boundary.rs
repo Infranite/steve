@@ -292,7 +292,7 @@ const ALLOWED: &[Entry] = &[
     e(Fs, "steve-hub/src/plugins/run.rs", 3, Hub, "a running plugin's own files, data directory and bounded log under <home>/plugins"),
     e(Fs, "steve-hub/src/nodes/install.rs", 15, Hub, "the install's own SSH key (removed on cancellation too), a local release directory, the bounded cache of checked installer archives under <home>/tailcat/installs/cache, and its tests' fixtures"),
     e(Dir, "steve-hub/src/nodes/install.rs", 1, Hub, "the installer archive cache, to keep only the most recently used"),
-    e(Fs, "steve-hub/src/nodes/upgrade.rs", 7, Hub, "a Node upgrade's archive under <data>/node-upgrades, built from the Hub's own release, and its tests' fixtures"),
+    e(Fs, "steve-hub/src/nodes/upgrade.rs", 6, Hub, "a Node upgrade's archive under <data>/node-upgrades, built from the Hub's own release's Node and maintenance CLI; the manifest is read once"),
     e(Spawn, "steve-hub/src/upgrades/runner.rs", 6, Hub, "the upgrader and explicit legacy source-maintenance path; published bundles prepare and deploy in native Rust"),
     e(Spawn, "steve-hub/src/upgrades/cli.rs", 1, Hub, "OS-owner upgrade CLI queries the signed Hub's service and code identity, never a task harness"),
     e(Dir, "steve-hub/src/upgrades/cli.rs", 1, Hub, "OS-owner upgrade CLI lists this installation's operation journals only"),
