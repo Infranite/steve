@@ -1989,6 +1989,8 @@ pub struct Probe {
     /// What a scratch session offered; `None` when it could not be opened (`session_error`).
     pub session: Option<SessionOffer>,
     pub session_error: Option<String>,
+    /// The adapter explicitly rejected session/new with ACP authentication required.
+    pub session_auth_required: bool,
 }
 
 impl Probe {
@@ -2007,6 +2009,7 @@ impl Probe {
             auth: vec![],
             session: None,
             session_error: None,
+            session_auth_required: false,
         }
     }
 
@@ -2062,6 +2065,7 @@ impl Probe {
             auth,
             session: None,
             session_error: None,
+            session_auth_required: false,
         }
     }
 }
@@ -2160,7 +2164,12 @@ pub async fn probe(cfg: &crate::AcpConfig, id: &str, cwd: &Path, timeout: Durati
             }
             p.session = Some(offer);
         }
-        Err(e) => p.session_error = Some(e.message),
+        Err(e) => {
+            // ACP AuthenticationRequired (rather than guess from translated error messages).
+            p.session_auth_required =
+                e.data.as_ref().and_then(|d| d["code"].as_i64()) == Some(-32000);
+            p.session_error = Some(e.message);
+        }
     }
     conn.kill();
     p

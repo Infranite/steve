@@ -116,6 +116,11 @@ impl RemoteNode {
         *self.connected.borrow()
     }
 
+    /// A live generation that can take new work, not a closed or reconciling socket.
+    pub fn ready_generation(&self) -> Option<u64> {
+        self.conn(true).ok().map(|c| c.generation())
+    }
+
     fn conn(&self, new_work: bool) -> ApiResult<Arc<Conn>> {
         let slot = self.slot.lock().unwrap();
         match slot.link.as_ref() {

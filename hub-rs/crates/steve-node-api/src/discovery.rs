@@ -138,6 +138,14 @@ pub struct AdapterInfo {
     pub session: Option<AdapterOffer>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_error: Option<String>,
+    /// Only present when the adapter explicitly required authentication during session/new.
+    /// Absence is not proof that the provider account or entitlement was verified.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_auth_required: Option<bool>,
+    /// Modes the Node's own ceiling allows for a normal unrestricted-network session.
+    /// Missing on older Nodes; the adapter offer alone cannot prove Node policy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_modes: Option<Vec<crate::PermissionMode>>,
     /// An adapter Steve installed and keeps up to date (`<home>/adapters`): what its last check of
     /// the npm registry found. `None` for one installed otherwise, or a Node that is older.
     #[serde(default, skip_serializing_if = "Option::is_none")]

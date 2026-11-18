@@ -1119,3 +1119,266 @@ async fn an_auto_bot_session_skips_a_remote_node_that_predates_auto() {
         h.log()
     );
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn bot_teams_keep_discovery_separate_from_authorized_dispatch() {
+    let h = Home::new();
+    let _hub = spawn_hub(&h, None);
+    serving(&h).await;
+    let c = Client::login(&h).await;
+    let (_, bot) = c
+        .call(
+            "POST",
+            "/api/bots",
+            Some(json!({
+                "name":"Team worker", "harness":"claude-code",
+                "model":"kiro/claude-opus-5-5", "perm_mode":"default"
+            })),
+        )
+        .await;
+    let bot = bot["id"].as_str().expect("Bot created");
+    let path = format!("/api/bots/{bot}/execution-nodes");
+    let a = NodeHome::new();
+    let b = NodeHome::new();
+    for home in [&a, &b] {
+        let p = home.path().join("adapter.sh");
+        let plain = std::fs::read_to_string(&p).unwrap();
+        std::fs::write(
+            &p,
+            plain.replace("exec node", "export FAKE_ACP_SHAPE=claude099\nexec node"),
+        )
+        .unwrap();
+    }
+    let p = a.path().join("adapter.sh");
+    let plain = std::fs::read_to_string(&p).unwrap();
+    std::fs::write(
+        &p,
+        plain.replace(
+            "exec node",
+            "export FAKE_ACP_MODEL_ALIAS=option=team-a-only\nexec node",
+        ),
+    )
+    .unwrap();
+    let id_a = a.pair(&h, &c.code().await);
+    let id_b = b.pair(&h, &c.code().await);
+    c.confirm(&id_a).await;
+    c.confirm(&id_b).await;
+    let _proc_a = a.run();
+    let mut proc_b = b.run();
+    assert!(
+        wait(30, || [&id_a, &id_b].iter().all(|id| {
+            h.count("SELECT generation FROM nodes WHERE node_id=?", id) > 0
+        }))
+        .await
+    );
+    let (_, report) = c
+        .call(
+            "GET",
+            "/api/system/models?harness=claude-code&fresh=1",
+            None,
+        )
+        .await;
+    let (status, discovery) = c.call("GET", &path, None).await;
+    assert_eq!(status, 200, "{discovery}");
+    assert!(
+        discovery["bindings"].is_null(),
+        "discovery is not authorization: {discovery}"
+    );
+    for id in [&id_a, &id_b] {
+        assert!(
+            discovery["candidates"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|n| { n["id"] == id.as_str() && n["state"] == "candidate" }),
+            "{id}: {discovery}; {report}"
+        );
+    }
+
+    let (_, limited) = c
+        .call(
+            "POST",
+            "/api/bots",
+            Some(json!({
+                "name":"Only A", "harness":"claude-code", "model":"team-a-only"
+            })),
+        )
+        .await;
+    let limited_path = format!(
+        "/api/bots/{}/execution-nodes",
+        limited["id"].as_str().unwrap()
+    );
+    let (_, limited) = c.call("GET", &limited_path, None).await;
+    assert!(
+        limited["candidates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|n| n["id"] == id_b && n["reason"] == "model"),
+        "{limited}"
+    );
+    let (st, v) = c
+        .call("PUT", &limited_path, Some(json!({"nodes":[id_b]})))
+        .await;
+    assert_eq!(st, 409, "{v}");
+
+    let (st, v) = c.call("PUT", &path, Some(json!({"nodes":[id_a]}))).await;
+    assert_eq!(st, 200, "{v}");
+    let (st, v) = c
+        .call(
+            "POST",
+            "/api/bot-teams",
+            Some(json!({
+                "name":"Unbound", "members":[{"bot":bot,"nodes":[id_b]}]
+            })),
+        )
+        .await;
+    assert_eq!(st, 409, "a Team cannot grant a candidate: {v}");
+
+    let (st, v) = c
+        .call(
+            "POST",
+            "/api/items",
+            Some(json!({
+                "title":"Original team", "goal":"@say bound-before-team", "bot":bot, "project":null
+            })),
+        )
+        .await;
+    assert_eq!(st, 200, "{v}");
+    let old_id = v["id"].as_str().unwrap();
+    let (_, old) = c.call("GET", &format!("/api/items/{old_id}"), None).await;
+    assert_eq!(old["dispatch"]["placement"]["node"], id_a, "{old}");
+    assert_eq!(b.got("bound-before-team"), 0);
+
+    let (st, v) = c
+        .call("PUT", &path, Some(json!({"nodes":[id_b,id_a]})))
+        .await;
+    assert_eq!(st, 200, "{v}");
+    let mut team_ids = vec![];
+    for (name, nodes) in [
+        ("A only", json!([id_a])),
+        ("B only", json!([id_b])),
+        ("Both", Value::Null),
+    ] {
+        let (st, v) = c
+            .call(
+                "POST",
+                "/api/bot-teams",
+                Some(json!({"name":name,"members":[{"bot":bot,"nodes":nodes}]})),
+            )
+            .await;
+        assert_eq!(st, 200, "{v}");
+        team_ids.push(v["id"].as_str().unwrap().to_string());
+    }
+    let [team_a, team_b, both] = team_ids.as_slice() else {
+        unreachable!()
+    };
+    async fn default_team(c: &Client, team: &str) {
+        let (st, v) = c
+            .call("PUT", "/api/bot-teams/default", Some(json!({"team":team})))
+            .await;
+        assert_eq!(st, 200, "{v}");
+    }
+    async fn make(c: &Client, bot: &str, team: Option<&str>, goal: &str) -> Value {
+        let mut body = json!({"title":"Team test","bot":bot,"project":null,"goal":goal});
+        if let Some(team) = team {
+            body["team"] = json!(team);
+        }
+        let (st, v) = c.call("POST", "/api/items", Some(body)).await;
+        assert_eq!(st, 200, "{v}");
+        let (st, v) = c
+            .call(
+                "GET",
+                &format!("/api/items/{}", v["id"].as_str().unwrap()),
+                None,
+            )
+            .await;
+        assert_eq!(st, 200, "{v}");
+        v
+    }
+    default_team(&c, team_a).await;
+    let run = make(&c, bot, None, "@sleep 4500 @say never-moved").await;
+    let (rid, sid) = (
+        run["id"].as_str().unwrap(),
+        run["dispatch"]["placement"]["session"].as_str().unwrap(),
+    );
+    assert_eq!(run["dispatch"]["team"]["id"], team_a.as_str());
+    assert_eq!(run["dispatch"]["team"]["source"], "default");
+    assert_eq!(run["dispatch"]["placement"]["node"], id_a);
+    assert!(
+        wait(35, || a.got("never-moved") == 1).await,
+        "A received work: {}",
+        a.log()
+    );
+    default_team(&c, team_b).await;
+    let second = make(&c, bot, None, "@say default-to-B").await;
+    assert_eq!(second["dispatch"]["placement"]["node"], id_b, "{second}");
+    assert!(
+        wait(35, || b.got("default-to-B") == 1).await,
+        "B received work: {}",
+        b.log()
+    );
+    let explicit = make(&c, bot, Some(team_a), "@say team-override").await;
+    assert_eq!(explicit["dispatch"]["team"]["source"], "explicit");
+    assert_eq!(explicit["dispatch"]["placement"]["node"], id_a);
+    assert!(
+        wait(30, || said(&h, sid, "never-moved") > 0).await,
+        "old session completed: {}",
+        dump(&h, sid)
+    );
+    assert_eq!(b.got("never-moved"), 0);
+    let (_, again) = c.call("GET", &format!("/api/items/{rid}"), None).await;
+    assert_eq!(again["dispatch"]["placement"]["session"], sid);
+    assert_eq!(again["dispatch"]["placement"]["node"], id_a);
+    assert_eq!(again["dispatch"]["team"]["id"], team_a.as_str());
+
+    proc_b.kill();
+    assert!(
+        until(15, || async {
+            let (_, v) = c.call("GET", &path, None).await;
+            v["candidates"].as_array().is_some_and(|ns| {
+                ns.iter()
+                    .any(|n| n["id"] == id_b && n["reason"] == "offline")
+            })
+        })
+        .await
+    );
+    let blocked = make(&c, bot, None, "@say must-not-cross").await;
+    assert_eq!(
+        blocked["dispatch"]["placement"]["reason"], "offline",
+        "{blocked}"
+    );
+    assert!(blocked["dispatch"]["placement"]["node"].is_null());
+    assert_eq!(a.got("must-not-cross"), 0);
+    let fallback = make(&c, bot, Some(both), "@say fallback-to-A").await;
+    assert_eq!(
+        fallback["dispatch"]["placement"]["node"], id_a,
+        "{fallback}"
+    );
+    assert_eq!(fallback["dispatch"]["placement"]["reason"], "fallback");
+    assert_eq!(
+        fallback["dispatch"]["placement"]["skipped"],
+        json!(["offline"])
+    );
+
+    // A second workspace member removes the remote owner's exclusive admission. Use a
+    // fixture user, not credentials, and assert that formerly granted device reports vanish.
+    let db = rusqlite::Connection::open(h.steve().join("data/steve.sqlite3")).unwrap();
+    db.execute_batch(
+        "INSERT INTO users(id,workspace_id,subject,name,role,created)
+       VALUES ('fixture_member','default','fixture:bot-team-member','Fixture member','member',1);
+       INSERT INTO workspace_members(workspace_id,user_id,role,created)
+       VALUES ('default','fixture_member','member',1);",
+    )
+    .unwrap();
+    let (_, hidden) = c.call("GET", &path, None).await;
+    assert!(!hidden.to_string().contains(&id_a), "{hidden}");
+    assert!(!hidden.to_string().contains(&id_b), "{hidden}");
+    let refused = make(&c, bot, Some(team_a), "@say must-not-share").await;
+    assert_eq!(
+        refused["dispatch"]["placement"]["reason"], "unauthorized",
+        "{refused}"
+    );
+    assert!(refused["dispatch"]["placement"]["node"].is_null());
+    assert_eq!(a.got("must-not-share"), 0);
+}

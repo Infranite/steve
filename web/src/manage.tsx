@@ -49,6 +49,7 @@ import { NotificationSettingsPane } from "@/notification-settings"
 import { currentHub } from "@/hub"
 import { flowApi, useLoad as useFlowLoad, errText } from "@/api/flow"
 import { when } from "@/auto/common"
+import { ExecutionNodes, TeamsSection } from "@/bot-dispatch"
 import { BotOverview, BotPrompt, RunsOn } from "@/bot-page"
 import { HarnessMark } from "@/components/harness-mark"
 import { RuntimeAvailability, RuntimePermissionNotice, RuntimeSelect, RuntimeSetupLink } from "@/runtime-access"
@@ -87,6 +88,7 @@ export function BotsView() {
       {S && <Section label={t("manage:list.main")}>
         <BotCard k="steve" size={44} title={S.n} sub={S.role} meta={[S.h, S.m, t("manage:bot.running", { count: runOf("steve") })]} action={<Chevron />} />
       </Section>}
+      <TeamsSection key={st.workspace?.id} />
       <Section label={<><span className="hidden sm:inline">{t("manage:list.others", { ws: st.workspace?.name, n: Object.keys(st.bots).length - 1 })}</span><span className="sm:hidden">{t("manage:list.othersShort", { n: Object.keys(st.bots).length - 1 })}</span></>} note={<Trans t={t} i18nKey="manage:list.hint" components={{ code: <span className="font-mono" /> }} />}
         right={<Segmented size="sm" value={botFilter} onChange={(v) => { botFilter = v; r() }} options={[["全部", t("manage:list.filterAll")], ["启用", t("manage:list.filterOn")], ["停用", t("manage:list.filterOff")]] as const} />}>
         {ks.length ? <ul className="grid gap-3 sm:grid-cols-2" data-bot-cards>{ks.map((k) => { const b = st.bots[k]; return (
@@ -289,11 +291,11 @@ export function BotView({ k }: { k: string }) {
             </div>
             <RuntimeAvailability harness={fm.harness} />
             {b.main && <SteveJudges harness={fm.harness} model={fm.model ?? ""} />}
-            <F label={t("manage:form.device")} hint={t("manage:form.deviceHint")}><SetSelect wide testId="bot-dev" label={t("manage:form.device")} value="hub" onChange={() => {}} options={st.devices.map((d) => ({ v: d.id, l: d.name }))} /></F>
             <F label={t("manage:form.project")} hint={t("manage:form.projectHint")}><SetSelect wide testId="bot-project" label={t("manage:form.project")} value={fm.project} onChange={(v) => set({ project: v })} options={[{ v: "none", l: t("manage:form.projectInfer") }, ...st.projects.map((p) => ({ v: p.id, l: p.name }))]} /></F>
             {!b.main && <F label={t("manage:form.workspaces")} hint={t("manage:form.workspacesHint")}>
               <div className="flex flex-col gap-1.5">{st.workspaces.map((w) => <label key={w.id} className="flex items-center gap-2 type-callout"><Checkbox checked={fm.ws.includes(w.id)} disabled={fm.ws.length === 1 && fm.ws.includes(w.id)} onCheckedChange={(v) => set({ ws: v ? [...fm.ws, w.id] : fm.ws.filter((x: string) => x !== w.id) })} />{w.name}</label>)}</div></F>}
           </Card></Section>
+          {!b.main && <ExecutionNodes key={`${st.workspace?.id}:${k}`} bot={k} />}
           <div className="flex gap-2"><Button data-save-bot disabled={!modeSupported} onClick={async () => {
             await saveBot(k, { n: fm.n.trim() || b.n, role: fm.role, pers: fm.pers, pro: PRO.indexOf(fm.pro), rule: fm.rule, acc: fm.acc, harness: fm.harness, model: fm.model || null, reasoningEffort: effort || null, color: fm.color, round: fm.round, skin: fm.skin, project: fm.project === "none" ? null : fm.project, permMode: fm.permMode })
             if (!b.main && JSON.stringify([...fm.ws].sort()) !== JSON.stringify([...b.workspaces].sort())) setBotWorkspaces(k, fm.ws)

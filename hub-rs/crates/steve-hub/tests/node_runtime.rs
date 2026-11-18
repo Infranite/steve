@@ -5573,6 +5573,8 @@ async fn startup_preflight_uses_the_actual_node_offer_and_preserves_defaults() {
         fork_command: None,
         error: None,
         session_error: None,
+        session_auth_required: None,
+        execution_modes: None,
         session: Some(AdapterOffer {
             modes: vec![PermissionMode::Ask],
             models: vec![],

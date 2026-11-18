@@ -661,6 +661,7 @@ pub struct CreateItem {
     pub goal: String,
     pub title: String,
     pub bot: Option<String>,
+    pub team: Option<String>,
     /// `None` → the bot's default project; `Some(None)` → explicitly no project.
     pub project: Option<Option<String>>,
     pub tag_ids: Vec<String>,
@@ -733,6 +734,12 @@ pub trait Domain: Send + Sync + 'static {
     // ── items ──
     async fn create_item(&self, p: CreateItem) -> BResult<Obj> {
         todo_backend!("create_item")
+    }
+    async fn route_for_team(&self, ws: &str, text: &str, _team: Option<&str>) -> BResult<Route> {
+        self.route(ws, text).await
+    }
+    async fn bot_nodes(&self, _ws: &str, _bot: &str) -> BResult<Value> {
+        todo_backend!("bot_nodes")
     }
     async fn route(&self, ws: &str, text: &str) -> BResult<Route> {
         todo_backend!("route")

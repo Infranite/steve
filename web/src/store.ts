@@ -58,6 +58,7 @@ export type Item = {
   workflowSuperseded?: boolean
   workflow?: RItemDetail["workflow"]
   dependencyWait?: RItemDetail["dependency_wait"]
+  dispatch?: RItemDetail["dispatch"]
 }
 export type Tag = { id: string; name: string; cat: string; desc: string; by: "Steve" | "你"; created: string }
 export type Bot = { id: string; main?: boolean; n: string; a: string; role: string; pers: string; pro: number; h: string; harness: string; m: string; model: string | null; on: boolean; acc: string; ws: string; project: string | null; perm: string; permMode: string; rule: string; prompt: string | null
@@ -498,6 +499,7 @@ function itemOf(i: RItem): Item {
     rounds: (det?.planRounds ?? []).map((r) => ({ n: r.round, steps: steps(r.steps), end: r.end, at: tm(r.created) })),
     workflow: det?.workflow,
     dependencyWait: det?.dependency_wait,
+    dispatch: det?.dispatch,
     wait: open.length ? waitOf(open[0]) : undefined, waits: open.map(waitOf), ss: i.sessionIds, tl, outs: det ? det.artifacts.map((a): Out => [a.kind, a.title, a.location, a.id, a.created, det.artifactRoles?.[a.id] as Out[5], a.delivery_id]) : [], anns: det?.annotations ?? [],
     q: act?.queued ?? [], qs: act?.id ?? null,
     parent: i.parent?.item || i.parent?.session ? { item: i.parent.item ?? undefined, s: i.parent.session ?? undefined, at: i.parent.at ?? undefined } : null, due: i.due ?? undefined, pri: (i.priority as Item["pri"]) ?? "中", arch: i.archived, snooze: snoozed, snoozeUntil: snoozed ? i.snooze!.until : undefined, tags: i.tags,
@@ -1068,8 +1070,8 @@ export function undoDecision(n: number) { const d = st.done[n]; if (!d?.canUndo)
 
 /* ───────── actions: items ───────── */
 /** `clientId`: the same for every retry of one unchanged form, so a retry does not make a second item */
-export async function newItem(goal: string, bot?: string, project?: string | null, mode: "start" | "propose" = "start", clientId = newClientId()) {
-  const r = await call(api.newItem({ goal, bot, project, mode, client_id: clientId })); return r?.id
+export async function newItem(goal: string, bot?: string, project?: string | null, mode: "start" | "propose" = "start", clientId = newClientId(), team?: string) {
+  const r = await call(api.newItem({ goal, bot, project, mode, client_id: clientId, team })); return r?.id
 }
 export async function supp(id: string, v: string, target: "auto" | "steer" | "new", files: string[] = []) {
   const msg = t(target === "steer" ? "core:toast.steered" : target === "new" ? "core:toast.newSession" : active(it(id))?.st === "run" ? "core:toast.queuedForTurn" : "core:toast.delivered")

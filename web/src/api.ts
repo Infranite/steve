@@ -3,6 +3,7 @@ import type { ResearchEvent } from "@/thread/chat-progress"
 import { lang, t } from "@/i18n"
 import { resumableStream } from "./stream-cursor"
 import { clientInfo, hello, hubBase, hubUrl, signedIn } from "./hub"
+import type { ItemDispatch } from "./bot-dispatch"
 import type { Workflow } from "./workflow"
 import type { Delivery, DeliveryShare } from "./delivery"
 export type ItemStatus = "prop" | "run" | "wait" | "pause" | "done" | "drop" | "fail" | "block"
@@ -26,6 +27,7 @@ export type DependencyWait = {
 export type RItemDetail = RItem & { goalsList: { version: number; text: string; created: number }[]; planRounds?: { round: number; steps: PlanStep[]; end: "done" | "replaced"; created: number }[]; timeline: { id: number; ts: number; actor: string; kind: string; text: string; session_id: string | null; files?: RFile[]; via?: string }[]; artifacts: { id: string; kind: string; title: string; location: string | null; created: number; delivery_id?: string | null }[]; decisions: RDecision[]; dependents: string[]
   workflow?: Workflow | null
   dependency_wait?: DependencyWait | null
+  dispatch?: ItemDispatch
   /** outputs delivered as records of the work (self-check screenshots, logs): `{artifact id: "record"}` */
   artifactRoles?: Record<string, string>
   /** the user's notes on the outputs, drafts and sent (ST-38) */
@@ -271,7 +273,7 @@ export const api = {
   annRemove: (id: string, ann: string) => del<{ ok: boolean }>(`/items/${encodeURIComponent(id)}/annotations/${encodeURIComponent(ann)}`),
   /* one send per key: the same key again (a second click, a retry) is answered `again` and sends nothing */
   annSend: (id: string, ids: string[], key: string) => post<{ ok: boolean; again: boolean; pending?: boolean; sent: number; timeline_id?: number | null; warning?: string }>(`/items/${encodeURIComponent(id)}/annotations/send`, { ids, key }),
-  newItem: (p: { goal: string; bot?: string; project?: string | null; mode?: "start" | "propose"; client_id?: string }) => post<RItem>("/items", p),
+  newItem: (p: { goal: string; bot?: string; team?: string; project?: string | null; mode?: "start" | "propose"; client_id?: string }) => post<RItem>("/items", p),
   itemAction: (id: string, action: string) => post(`/items/${id}/actions`, { action }), bulk: (ids: string[], op: string) => post<{ n: number }>("/items/bulk", { ids, op }),
   goal: (id: string, text: string) => post(`/items/${id}/goal`, { text }),
   patchItem: (id: string, p: Partial<{ title: string; priority: string; due: string | null; star: boolean; accept_mode: string; project_id: string | null; tags: string[] }>) => patch(`/items/${id}`, p),

@@ -30,6 +30,7 @@ pub async fn create(
     let goal = k.str("goal", Str::min(1));
     let title = k.opt_str("title", Str::ANY);
     let bot = k.opt_str("bot", Str::ANY);
+    let team = k.opt_str("team", Str::len(1, 64));
     let project = k.opt_nullable_str("project", Str::ANY);
     let mode = k
         .opt_enum("mode", &["start", "propose"])
@@ -42,7 +43,7 @@ pub async fn create(
     let item = st
         .dedupe
         .once(&c.ws, &c.me, "items", client_id, move || async move {
-            create_now(&st2, &c2, goal, title, bot, project, mode).await
+            create_now(&st2, &c2, goal, title, bot, project, mode, team).await
         })
         .await?;
     ok(item)
@@ -56,13 +57,30 @@ async fn create_now(
     bot: Option<String>,
     project: Option<Option<String>>,
     mode: String,
+    team: Option<String>,
 ) -> Result<Value, ApiError> {
+    if let Some(id) = team.as_deref() {
+        let store =
+            super::bot_dispatch::store(st).ok_or_else(|| ApiError::not_found("Bot Team"))?;
+        store
+            .reader(|db| steve_store::bot_dispatch::selected(db, &c.ws, Some(id)))
+            .map_err(|e| match e {
+                steve_store::StoreError::NotFound(_) => {
+                    ApiError::not_found(steve_i18n::t!("hub.dispatch.not_found"))
+                }
+                e => ApiError::internal(e.to_string()),
+            })?;
+    }
     // whatever the user left open (bot, project, title, tags) Steve decides, the same way as in the conversation
     let needs_route = bot.as_deref().is_none_or(str::is_empty)
         || project.is_none()
         || title.as_deref().is_none_or(str::is_empty);
     let r = if needs_route {
-        Some(st.domain.route(&c.ws, &goal).await?)
+        Some(
+            st.domain
+                .route_for_team(&c.ws, &goal, team.as_deref())
+                .await?,
+        )
     } else {
         None
     };
@@ -98,6 +116,7 @@ async fn create_now(
             goal,
             title,
             bot,
+            team,
             project,
             tag_ids,
             source: ["手动新建".into(), "manual".into()],
@@ -152,9 +171,17 @@ pub async fn get_one(
     });
     let workflow = st.domain.workflow_get(&id).await?;
     let dependency_wait = dependency_shown(st.domain.dependency_get(&id).await?);
+    let dispatch = super::bot_dispatch::store(&st).and_then(|s| {
+        s.reader(|db| super::bot_dispatch::item_dispatch(db, &id, &c.ws))
+            .inspect_err(|e| tracing::warn!(item = %id, "item dispatch detail unavailable: {e}"))
+            .ok()
+    });
     st.read(move |r| {
         let i = own(r.item_get(&id)?, &c.ws, Noun::Item)?;
         let mut out = summary(r, i)?;
+        if let Some(dispatch) = dispatch {
+            out.insert("dispatch".into(), dispatch);
+        }
         if let Some(l) = lifecycle {
             out.insert("lifecycle".into(), l);
         }

@@ -367,6 +367,18 @@ pub fn remote_binding_for(
     Some(b)
 }
 
+/// The strict router already checked ownership, tag, project and item affinity, and checks
+/// them once more in the bind transaction. Remote projects are never mapped to scratch.
+pub(super) fn scoped_remote_plan(
+    store: &Store,
+    session: &str,
+    perm: Option<&str>,
+) -> Option<Binding> {
+    let mut plan = binding_for(store, session, perm, &|_| true)?;
+    plan.prepare = PrepareKind::Scratch;
+    Some(plan)
+}
+
 /// Why a paired remote Node may not get a workspace's work ([`remote_refusal`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RemoteRefusal {
@@ -1163,6 +1175,7 @@ mod host_tests {
             ),
             worktrees: None,
             preflight: None,
+            dispatch_harnesses: None,
         };
         let bound = |sid: &str| -> i64 {
             store
@@ -1294,6 +1307,7 @@ mod host_tests {
             ),
             worktrees: None,
             preflight: None,
+            dispatch_harnesses: None,
         });
         struct NoModels;
         #[async_trait::async_trait]

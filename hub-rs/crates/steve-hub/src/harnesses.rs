@@ -59,7 +59,29 @@ struct Probed {
     local_unknown: bool,
     /// The remote Nodes whose answers `remote` holds.
     reported: BTreeSet<String>,
-    by_node: BTreeMap<String, (std::time::Instant, Vec<HarnessCapability>)>,
+    by_node: BTreeMap<String, NodeReport>,
+}
+
+struct NodeReport {
+    received: std::time::Instant,
+    checked_at: i64,
+    link_generation: Option<u64>,
+    caps: Vec<HarnessCapability>,
+}
+
+impl NodeReport {
+    fn new(caps: Vec<HarnessCapability>, link_generation: Option<u64>) -> Self {
+        Self {
+            received: std::time::Instant::now(),
+            checked_at: steve_store::now(),
+            link_generation,
+            caps,
+        }
+    }
+
+    fn recent(&self) -> bool {
+        self.received.elapsed() < REFRESH * 2
+    }
 }
 
 pub struct HubHarnesses {
@@ -171,7 +193,7 @@ impl HubHarnesses {
         if let Some(caps) = &caps {
             probed
                 .by_node
-                .insert("local".into(), (std::time::Instant::now(), caps.clone()));
+                .insert("local".into(), NodeReport::new(caps.clone(), None));
         }
         probed.caps = caps.unwrap_or_default();
         drop(probed);
@@ -200,8 +222,8 @@ impl HubHarnesses {
         let caps = probed
             .by_node
             .get(node)
-            .filter(|(at, _)| at.elapsed() < REFRESH * 2)
-            .map(|(_, caps)| caps.as_slice())
+            .filter(|r| r.recent())
+            .map(|r| r.caps.as_slice())
             .unwrap_or_default();
         known
             .into_iter()
@@ -216,6 +238,25 @@ impl HubHarnesses {
             .collect()
     }
 
+    /// A strict dispatch decision uses only this link's evidence, never the merged model list.
+    /// A relink must report again, even if an earlier link's result is still in the cache.
+    pub(crate) fn target_report(
+        &self,
+        node: &str,
+        generation: Option<u64>,
+        harness: &str,
+    ) -> Option<(i64, Option<HarnessCapability>)> {
+        let probes = self.probed.read().unwrap_or_else(|e| e.into_inner());
+        let report = probes
+            .by_node
+            .get(node)
+            .filter(|r| r.recent() && r.link_generation == generation)?;
+        Some((
+            report.checked_at,
+            report.caps.iter().find(|c| c.name == harness).cloned(),
+        ))
+    }
+
     pub fn bot_source(
         self: &Arc<Self>,
         store: steve_store::Store,
@@ -223,12 +264,27 @@ impl HubHarnesses {
     ) -> steve_core::models::BotHarnessSource {
         let me = self.clone();
         Arc::new(move |bot| {
-            let mut nodes: BTreeSet<String> = store.reader(|c| {
-                let mut q = c.prepare("SELECT DISTINCT r.node_id FROM runtime_sessions r JOIN sessions s ON s.id=r.session_id WHERE s.bot_id=? AND s.status<>'ended'")?;
+            let (mut nodes, legacy): (BTreeSet<String>, bool) = store.reader(|c| {
+                let mut q = c.prepare(
+                    "SELECT r.node_id FROM runtime_sessions r JOIN sessions s ON s.id=r.session_id
+                       WHERE s.bot_id=?1 AND s.status<>'ended'
+                     UNION
+                     SELECT n.value FROM bot_node_bindings b JOIN bot_workspaces w
+                       ON w.workspace_id=b.workspace_id AND w.bot_id=b.bot_id, json_each(b.nodes) n
+                       WHERE b.bot_id=?1"
+                )?;
                 let rows = q.query_map([bot], |r| r.get(0))?.collect::<Result<BTreeSet<String>, _>>()?;
-                Ok::<_, steve_store::StoreError>(rows)
+                let legacy: bool = c.query_row(
+                    "SELECT NOT EXISTS(SELECT 1 FROM bot_node_bindings WHERE bot_id=?1)
+                         OR EXISTS(SELECT 1 FROM bot_workspaces w WHERE w.bot_id=?1 AND NOT EXISTS
+                           (SELECT 1 FROM bot_node_bindings b WHERE b.bot_id=w.bot_id AND b.workspace_id=w.workspace_id))",
+                    [bot], |r| r.get(0),
+                )?;
+                Ok::<_, steve_store::StoreError>((rows, legacy))
             }).unwrap_or_default();
-            nodes.extend(default_node.iter().cloned());
+            if legacy {
+                nodes.extend(default_node.iter().cloned());
+            }
             if nodes.is_empty() {
                 // Placement is not fixed yet; another Node's offer must not certify this one.
                 return me.for_node("");
@@ -287,10 +343,7 @@ impl HubHarnesses {
         if let Some(node) = local {
             match node.probe(fresh).await {
                 Ok(c) => {
-                    by_node.insert(
-                        "local".into(),
-                        (std::time::Instant::now(), c.harnesses.clone()),
-                    );
+                    by_node.insert("local".into(), NodeReport::new(c.harnesses.clone(), None));
                     combined = merge_cap_lists(combined, c.harnesses);
                 }
                 Err(e) => {
@@ -304,24 +357,33 @@ impl HubHarnesses {
                 .registry
                 .linked()
                 .into_iter()
-                .filter(|id| id != "local")
                 .filter_map(|id| {
                     steve_node_api::NodeId::new(id.clone())
                         .ok()
                         .map(|n| (id, svc.fleet.remote(&n)))
                 })
                 .map(|(id, remote)| async move {
+                    let generation = remote.generation();
                     let res = tokio::time::timeout(REMOTE_PROBE, remote.probe(fresh)).await;
-                    (id, res)
+                    (
+                        id,
+                        generation.filter(|g| Some(*g) == remote.generation()),
+                        res,
+                    )
                 });
-            for (id, res) in futures::future::join_all(asks).await {
+            for (id, link_generation, res) in futures::future::join_all(asks).await {
                 match res {
-                    Ok(Ok(c)) => {
-                        by_node
-                            .insert(id.clone(), (std::time::Instant::now(), c.harnesses.clone()));
-                        remote_caps = merge_cap_lists(remote_caps, c.harnesses);
-                        reported.insert(id);
+                    Ok(Ok(c)) if link_generation.is_some() => {
+                        by_node.insert(
+                            id.clone(),
+                            NodeReport::new(c.harnesses.clone(), link_generation),
+                        );
+                        if id != "local" {
+                            remote_caps = merge_cap_lists(remote_caps, c.harnesses);
+                            reported.insert(id);
+                        }
                     }
+                    Ok(Ok(_)) => {}
                     Ok(Err(e)) => {
                         tracing::debug!(node = %id, "harnesses: remote probe: {}", e.safe_detail);
                     }
@@ -568,6 +630,8 @@ mod tests {
                 system_prompt: false,
                 session: offer,
                 session_error: None,
+                session_auth_required: None,
+                execution_modes: None,
                 update: None,
                 resume_command: None,
                 fork_command: None,
@@ -799,7 +863,7 @@ mod tests {
             let remote = vec![reported("claude-code", Some(offer("remote-model")))];
             p.remote = remote.clone();
             p.by_node
-                .insert("remote".into(), (std::time::Instant::now(), remote));
+                .insert("remote".into(), NodeReport::new(remote, Some(1)));
         }
         let dir = tempfile::tempdir().unwrap();
         let store =
@@ -830,7 +894,7 @@ mod tests {
             .by_node
             .get_mut("remote")
             .unwrap()
-            .0 = std::time::Instant::now() - REFRESH * 3;
+            .received = std::time::Instant::now() - REFRESH * 3;
         assert!(source(None).iter().all(|h| h.ready.is_none()));
         assert!(
             steve_core::models::validate_bot_patch(None, local.as_object().unwrap(), &source(None))

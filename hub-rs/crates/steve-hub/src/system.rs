@@ -1197,6 +1197,8 @@ mod tests {
                     efforts: vec![],
                 }),
                 session_error: None,
+                session_auth_required: None,
+                execution_modes: None,
                 update: None,
                 resume_command: None,
                 fork_command: None,

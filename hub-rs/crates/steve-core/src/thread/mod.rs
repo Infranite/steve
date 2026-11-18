@@ -1291,13 +1291,42 @@ impl Core {
         promote: bool,
         guest: bool,
     ) -> Result<Route> {
-        let c = self.route_ctx_in(ws, guest)?;
-        Ok(crate::stats::tagged(
+        self.route_for_team(ws, text, history, promote, guest, None)
+            .await
+    }
+
+    pub async fn route_for_team(
+        &self,
+        ws: &str,
+        text: &str,
+        history: &[Said],
+        promote: bool,
+        guest: bool,
+        team: Option<&str>,
+    ) -> Result<Route> {
+        let mut c = self.route_ctx_in(ws, guest)?;
+        let selected = self
+            .store()
+            .store()
+            .reader(|db| steve_store::bot_dispatch::selected(db, ws, team))?;
+        if let Some(team) = &selected {
+            c.bots.retain(|b| team.member(&b.id).is_some());
+            c.bots
+                .sort_by_key(|b| team.members.iter().position(|m| m.bot == b.id));
+        }
+        let mut route = crate::stats::tagged(
             "route",
             ws,
             gateway::route(self.gw(), &c, text, history, promote),
         )
-        .await)
+        .await;
+        if selected.is_some()
+            && !c.bots.iter().any(|b| b.id == route.bot)
+            && let Some(first) = c.bots.first()
+        {
+            route.bot = first.id.clone();
+        }
+        Ok(route)
     }
 
     /// The model gateway, for the API's one-off drafts (`bots/draft`, `projects/describe`).

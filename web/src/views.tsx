@@ -3,6 +3,8 @@ import { itemState, type ItemState } from "@/item-state"
 import { clip } from "@/thread/topics"
 import { isAttachedWorkflowChild, isWorkflowChild, itemDisplayState, itemDisplayStatus, partitionSubtasks } from "@/item-workflow-relation"
 import { laneOf } from "@/item-lanes"
+import { DispatchDetails, LEGACY_TEAM, useBotTeams } from "@/bot-dispatch"
+import { SetSelect } from "@/settings-controls"
 import { DependencyWaitPanel } from "@/dependency-wait-panel"
 import { ItemDebugDialog } from "@/debug-panel"
 import { usePeopleOn } from "@/api/people"
@@ -312,26 +314,35 @@ export function ForkDialog({ k, at }: { k: string; at: number }) {
 export function NewItemDialog({ project: pre, bot: preBot }: { project?: string; bot?: string } = {}) {
   const t = useT()
   const [g, setG] = useState(""), [mode, setMode] = useState<"start" | "propose">("start"), [bot, setBot] = useState(preBot ?? "auto"), [proj, setProj] = useState(pre ?? "auto"), [busy, setBusy] = useState(false)
-  const selected = st.bots[bot]
+  const { value: teams } = useBotTeams()
+  const [team, setTeam] = useState("")
+  const activeTeam = teams?.teams.find(v => v.id === (team || teams.default))
+  const allowed = Object.keys(st.bots).filter(k => st.bots[k].on && (!activeTeam || activeTeam.members.some(m => m.bot === k)))
+  const target = activeTeam && !allowed.includes(bot) ? "auto" : bot
+  const selected = st.bots[target]
   // The execution target is resolved by the backend. Hub-local probes cannot admit or reject it.
   // A proposal creates a decision, without opening a session.
-  const canSubmit = mode === "propose" || bot === "auto" || !!selected?.on
+  const canSubmit = (!activeTeam || allowed.length > 0) && (mode === "propose" || target === "auto" || !!selected?.on)
   /* one send idempotency key while the form stays the same: a retry after a lost answer makes no second item */
   const sendKey = useRef<{ form: string; id: string } | null>(null)
   const clientId = () => {
-    const form = JSON.stringify([g.trim(), bot, proj, mode])
+    const form = JSON.stringify([g.trim(), target, proj, mode, team])
     if (sendKey.current?.form !== form) sendKey.current = { form, id: newClientId() }
     return sendKey.current.id
   }
   return (
     <Modal open title={t("views:newItem.title")} desc={t("views:newItem.desc")}
       footer={<><Button variant="outline" onClick={closeSheet}>{t("common:action.cancel")}</Button><Button data-testid="new-go" disabled={!g.trim() || busy || !canSubmit} onClick={async () => {
-        setBusy(true); const id = await newItem(g.trim(), bot === "auto" ? undefined : bot, proj === "auto" ? undefined : proj === "none" ? null : proj, mode, clientId())
+        setBusy(true); const id = await newItem(g.trim(), target === "auto" ? undefined : target, proj === "auto" ? undefined : proj === "none" ? null : proj, mode, clientId(), team || undefined)
         setBusy(false); if (id) { closeSheet(); go("#/items/" + id) } }}>{busy && <Spinner className="size-3.5" />}{t("views:newItem.create")}</Button></>}>
       <FieldGroup className="gap-4">
         <Field><FieldLabel htmlFor="new-goal">{t("views:newItem.goal")}</FieldLabel><Textarea id="new-goal" autoFocus className="min-h-24 rounded-lg" placeholder={t("views:newItem.goalPlaceholder")} value={g} onChange={(e) => setG(e.target.value)} /></Field>
+        {!!teams?.teams.length && <Field><FieldLabel>{t("manage:dispatch.teams")}</FieldLabel><SetSelect wide testId="new-item-team" label={t("manage:dispatch.teams")} value={team || "default"}
+          options={[{ v: "default", l: t("manage:dispatch.useDefault", { name: teams.teams.find(v => v.id === teams.default)?.name ?? t("manage:dispatch.legacy") }) }, { v: LEGACY_TEAM, l: t("manage:dispatch.legacy") }, ...teams.teams.map(v => ({ v: v.id, l: v.name }))]}
+          onChange={v => { setTeam(v === "default" ? "" : v); setBot("auto") }} /></Field>}
+        {activeTeam && !allowed.length && <p role="status" className="type-footnote text-attention">{t("manage:dispatch.noMembers")}</p>}
         <div className="grid grid-cols-2 gap-3">
-          <Field><FieldLabel>{t("views:newItem.bot")}</FieldLabel><Select testId="new-bot" value={bot} onChange={setBot} options={[{ v: "auto", l: t("views:newItem.auto") }, ...Object.keys(st.bots).filter((k) => st.bots[k].on).map((k) => ({ v: k, l: <span><BotName k={k} /> · {runtimeName(st.bots[k].harness) ?? st.bots[k].harness}</span> }))]} /></Field>
+          <Field><FieldLabel>{t("views:newItem.bot")}</FieldLabel><Select testId="new-bot" value={target} onChange={setBot} options={[{ v: "auto", l: t("views:newItem.auto") }, ...allowed.map((k) => ({ v: k, l: <span><BotName k={k} /> · {runtimeName(st.bots[k].harness) ?? st.bots[k].harness}</span> }))]} /></Field>
           <Field><FieldLabel>{t("views:newItem.project")}</FieldLabel><Select testId="new-project" value={proj} onChange={setProj} options={[{ v: "auto", l: t("views:newItem.auto") }, ...st.projects.map((p) => ({ v: p.id, l: p.name })), { v: "none", l: t("views:newItem.noProject") }]} /></Field>
         </div>
         {selected && <><RuntimeAvailability harness={selected.harness} /><RuntimePermissionNotice harness={selected.harness} mode={selected.permMode} /></>}
@@ -665,6 +676,7 @@ export function ItemView({ id }: { id: string }) {
               </div>
               {i.workflow && <div className="max-sm:basis-full max-sm:pl-10"><WorkflowButtons at={at} /></div>}
             </div>
+            {i.dispatch && <DispatchDetails dispatch={i.dispatch} bot={i.b} />}
             {at.dialogs}
             {i.waits.length > 0 && <div className="mt-5 flex flex-col gap-3">{i.waits.map((w) => <DecisionCard key={w.decision} i={i} w={w} showItem={false} />)}</div>}
             {i.rel && <RelNote rel={i.rel} box={i.rel.tone !== "ok"} className="mt-3" onClose={i.rel.tone === "fail" ? () => closeRel(i) : undefined} />}
