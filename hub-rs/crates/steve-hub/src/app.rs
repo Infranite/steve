@@ -190,6 +190,11 @@ async fn upgrade_drain_call(st: AppState, action: &'static str, req: Request) ->
 
 /// healthz, `/auth` (from steve-auth), `/internal/release/drain`, `/api`, static web; `/mcp` in front of all of it.
 /// `root`: module routes at the root that read the session without requiring it.
+// Heterogeneous Axum layers retain their concrete types and their written order.
+macro_rules! layers {
+    ($routes:expr; $($layer:expr),+ $(,)?) => { $routes$(.layer($layer))+ };
+}
+
 pub fn app(
     st: AppState,
     auth: Router,
@@ -197,24 +202,51 @@ pub fn app(
     modules: Router,
     root: Router,
 ) -> Router {
-    let maintenance_state = st.clone();
-    let version = st.cfg.version.clone();
-    let fallback_state = st.clone();
-    let cors_state = st.clone();
     let root = root.layer(middleware::from_fn_with_state(
         st.clone(),
         api::optional_user,
     ));
-    // remote Nodes (N2): mounted unless STEVE_NODE_LISTEN=0 or a NO_RESUME copy (wired with the Hub's coordinators)
-    let nodes = st.nodes.clone();
-    let (base, modules) = match nodes {
+    // remote Nodes (N2): mounted unless STEVE_NODE_LISTEN=0 or a NO_RESUME copy
+    let (base, modules) = match st.nodes.clone() {
         Some(svc) => (
             crate::nodes::node_router(svc.clone()),
             modules.merge(crate::nodes::api_router(svc)),
         ),
         None => (Router::new(), modules.merge(crate::nodes::off_router())),
     };
-    base.merge(root)
+    let roots = [
+        base,
+        root,
+        health_routes(&st),
+        Router::new().nest("/auth", auth.merge(crate::access::auth_routes(st.clone()))),
+        crate::a2a_server::routes(st.clone()),
+        drain_routes(&st),
+        Router::new().nest("/api", api::router(st.clone(), modules)),
+    ];
+    let fallback_state = st.clone();
+    let routes = roots
+        .into_iter()
+        .fold(Router::new(), Router::merge)
+        .fallback(move |req: Request| {
+            let st = fallback_state.clone();
+            async move { crate::web::serve(&st.cfg, req).await }
+        });
+    // Listed from inner to outer, just like chained Router::layer calls.
+    layers! { routes;
+        middleware::from_fn_with_state(mcp, mcp_gate),
+        middleware::from_fn_with_state(st.clone(), maintenance_gate),
+        compression(),
+        middleware::from_fn(vary_encoding),
+        middleware::from_fn(slow_requests),
+        middleware::from_fn(locale),
+        // A cross-origin client's preflight is answered before the login check.
+        middleware::from_fn_with_state(st, crate::access::cors),
+    }
+}
+
+fn health_routes(st: &AppState) -> Router {
+    let version = st.cfg.version.clone();
+    Router::new()
         // `version` is the Hub (ops/release.sh waits for it after a restart); the web build is released on its own
         .route("/healthz", get({
             let cfg = st.cfg.clone();
@@ -240,9 +272,10 @@ pub fn app(
                 json_response(200, &json!({ "ok": true, "version": version, "build_commit": crate::build_identity().map(|(_, commit)| commit), "web_version": crate::web::web_version(&cfg), "drain": drain, "outbox": outbox, "node": node, "recovery": crate::recovery::status() }))
             }
         }))
-        .nest("/auth", auth.merge(crate::access::auth_routes(st.clone())))
-        // Steve as an A2A agent: its card (open) and its endpoint (an access token)
-        .merge(crate::a2a_server::routes(st.clone()))
+}
+
+fn drain_routes(st: &AppState) -> Router {
+    Router::new()
         .route(
             "/internal/release/drain",
             post({
@@ -254,22 +287,21 @@ pub fn app(
                 move |req: Request| drain_call(st, false, req)
             }),
         )
-        .route("/internal/upgrade/drain", post({ let st=st.clone(); move |req: Request| upgrade_drain_call(st,"start",req) })
-            .get({ let st=st.clone(); move |req: Request| upgrade_drain_call(st,"status",req) })
-            .delete({ let st=st.clone(); move |req: Request| upgrade_drain_call(st,"cancel",req) }))
-        .nest("/api", api::router(st, modules))
-        .fallback(move |req: Request| {
-            let st = fallback_state.clone();
-            async move { crate::web::serve(&st.cfg, req).await }
-        })
-        .layer(middleware::from_fn_with_state(mcp, mcp_gate))
-        .layer(middleware::from_fn_with_state(maintenance_state, maintenance_gate))
-        .layer(compression())
-        .layer(middleware::from_fn(vary_encoding))
-        .layer(middleware::from_fn(slow_requests))
-        .layer(middleware::from_fn(locale))
-        // outermost: a cross-origin web client's preflight is answered before anything asks for a login
-        .layer(middleware::from_fn_with_state(cors_state, crate::access::cors))
+        .route(
+            "/internal/upgrade/drain",
+            post({
+                let st = st.clone();
+                move |req: Request| upgrade_drain_call(st, "start", req)
+            })
+            .get({
+                let st = st.clone();
+                move |req: Request| upgrade_drain_call(st, "status", req)
+            })
+            .delete({
+                let st = st.clone();
+                move |req: Request| upgrade_drain_call(st, "cancel", req)
+            }),
+        )
 }
 
 /// The Hub's cookies under names of its own, as it is served on `port`. A browser keeps cookies by host and not by
