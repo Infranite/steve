@@ -341,6 +341,20 @@ impl Discovery for RemoteNode {
         self.needs(steve_node_api::NODE_UPGRADES.1, NODE_UPGRADE_STATUS)?;
         self.go(NODE_UPGRADE_STATUS, &operation, None, false).await
     }
+    async fn remove_begin(&self, r: NodeRemove) -> ApiResult<NodeRemoveState> {
+        self.needs(steve_node_api::NODE_REMOVAL.1, NODE_REMOVE)?;
+        let op = r.operation.clone();
+        self.go(NODE_REMOVE, &r, Some(&op), false).await
+    }
+    async fn remove_commit(&self, c: RemoveCommit) -> ApiResult<NodeRemoveState> {
+        self.needs(steve_node_api::NODE_REMOVAL.1, NODE_REMOVE_COMMIT)?;
+        let op = c.operation.clone();
+        self.go(NODE_REMOVE_COMMIT, &c, Some(&op), false).await
+    }
+    async fn remove_status(&self, operation: OperationId) -> ApiResult<NodeRemoveState> {
+        self.needs(steve_node_api::NODE_REMOVAL.1, NODE_REMOVE_STATUS)?;
+        self.go(NODE_REMOVE_STATUS, &operation, None, false).await
+    }
     async fn install_harness(&self, c: Command<InstallHarness>) -> ApiResult<Receipt> {
         self.needs(steve_node_api::CONTROLLED_INSTALL.1, "harness.install")?;
         if !self.is_colocated() {

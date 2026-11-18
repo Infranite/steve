@@ -8,7 +8,7 @@
 import { useCallback, useEffect, useRef, useState } from "react"
 import { cn } from "cn"
 import { ArrowLeftIcon, BotIcon, CheckIcon, LoaderIcon, UsersIcon, UserIcon, XIcon, ExternalLinkIcon, ListIcon, MessagesSquareIcon } from "lucide-react"
-import { conversationsApi, type ChannelEntry, type ConvBadge, type ConvMessage, type ConvRecord, type ConvRow, type Handling, type Reaction, type RecordPage } from "@/api/conversations"
+import { conversationsApi, type ChannelEntry, type ConvBadge, type ConvMessage, type ConvRecord, type ConvRow, type ConvState, type Handling, type Reaction, type RecordPage } from "@/api/conversations"
 import { HANDLING_TONE, handlingDetail, shownUpTo } from "@/thread/channel-record"
 import { st, msgOf, discardOut, tm, useHubEvents, type Msg } from "@/store"
 import { SegmentedControl } from "@/components/affect/segmented-control-clean"
@@ -177,7 +177,7 @@ export function ConvSwitcher({ current, badge }: { current?: string; badge?: Con
   }, [])
   const channels = useChannels()
   const [query, setQuery] = useState("")
-  const [state, setState] = useState<"open" | "closed" | "all">("open")
+  const [state, setState] = useState<ConvState>("open")
   const [rows, setRows] = useState<ConvRow[]>([])
   const [next, setNext] = useState<number | null>(null)
   const [loading, setLoading] = useState(false)
@@ -209,7 +209,7 @@ export function ConvSwitcher({ current, badge }: { current?: string; badge?: Con
     return () => { clearTimeout(timer); request.current++ }
   }, [open, load])
   const refresh = useCallback(() => { if (open) setUpdates(true) }, [open])
-  useHubEvents(["message", "chan_message", "space"], refresh, 600)
+  useHubEvents(["message", "chan_message", "space", "decision"], refresh, 600)
   const change = async (space: string, closed: boolean) => {
     const hash = location.hash
     setBusy(space); setError("")
@@ -239,7 +239,7 @@ export function ConvSwitcher({ current, badge }: { current?: string; badge?: Con
         {!!channels?.length && <Segmented pressed className="max-w-full" label={t("thread:conv.channels")} value={account} onChange={setAccount}
           options={[["", t("thread:conv.allChannels")] as const, ...channels.map((c) => [c.connection, c.name, t(c.mode === "self" ? "thread:conv.channelSelf" : "thread:conv.channelBot", { provider: c.provider, name: c.name })] as const)]} />}
         <SearchField aria-label={t("thread:conv.search")} placeholder={t("thread:conv.searchPlaceholder")} value={query} onChange={e => setQuery(e.target.value)} />
-        <Segmented pressed full className="sm:w-fit" label={t("thread:conv.stateLabel")} value={state} onChange={setState} options={(["open", "closed", "all"] as const).map((key) => [key, t(`thread:conv.state.${key}`)] as const)} />
+        <Segmented pressed className="max-w-full" label={t("thread:conv.stateLabel")} value={state} onChange={setState} options={(["open", "closed", "all", "replied"] as const).map((key) => [key, t(`thread:conv.state.${key}`)] as const)} />
         {updates && <Button size="sm" variant="secondary" className="w-fit justify-self-start anim-in" onClick={() => load()}>{t("thread:conv.updated")}</Button>}
         {error && <div role="alert" className="flex items-center gap-2 type-callout text-destructive">{error}<Button size="sm" variant="outline" onClick={() => load()}>{t("common:action.retry")}</Button></div>}
         <div className="-mx-2 min-h-24 overflow-y-auto overscroll-contain px-2" style={{ maxHeight: "48dvh" }} aria-busy={loading}>
@@ -260,7 +260,7 @@ export function ConvSwitcher({ current, badge }: { current?: string; badge?: Con
             </button>
             <Button size="sm" variant="ghost" className="shrink-0 text-muted-foreground" disabled={busy !== null} onClick={() => void change(r.space, !r.closed)} aria-label={r.closed ? t("thread:conv.restoreNamed", { name: r.name }) : t("thread:conv.closeNamed", { name: r.name })}>{busy === r.space ? t("thread:conv.saving") : r.closed ? t("thread:conv.restore") : t("common:action.close")}</Button>
           </div>)}
-          {!rows.length && !loading && !error && <Empty icon={<MessagesSquareIcon />} title={query ? t("thread:conv.noMatch") : state === "closed" ? t("thread:conv.noClosed") : t("thread:conv.none")} />}
+          {!rows.length && !loading && !error && <Empty icon={<MessagesSquareIcon />} title={query || state === "replied" ? t("thread:conv.noMatch") : state === "closed" ? t("thread:conv.noClosed") : t("thread:conv.none")} />}
           {loading && <p role="status" className="py-3 text-center type-callout text-tertiary">{t("thread:conv.loading")}</p>}
           {next !== null && <Button className="mt-3 w-full" variant="outline" disabled={loading} onClick={() => load(next)}>{t("thread:conv.more")}</Button>}
         </div>

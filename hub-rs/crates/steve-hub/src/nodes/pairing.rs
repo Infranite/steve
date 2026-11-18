@@ -385,10 +385,12 @@ pub async fn list(State(svc): State<Arc<NodeService>>, caller: Caller) -> Respon
                 .into_iter()
                 .map(|n| {
                     let latest = steve_store::nodes::upgrade_latest(c, &n.node_id)?;
+                    let removal = steve_store::nodes::removal_latest(c, &n.node_id)?;
                     Ok((
                         steve_store::runtime::session_room(c, &n.node_id)?,
                         n,
                         latest,
+                        removal,
                     ))
                 })
                 .collect::<steve_store::Result<Vec<_>>>()?;
@@ -402,9 +404,10 @@ pub async fn list(State(svc): State<Arc<NodeService>>, caller: Caller) -> Respon
     };
     let (default, rows) = rows;
     let up = svc.upgrades.get().cloned();
+    let rm = svc.removals.get().cloned();
     let items: Vec<Value> = rows
         .into_iter()
-        .map(|(room, n, latest)| {
+        .map(|(room, n, latest, removal)| {
             let linked = svc.registry.current(&n.node_id).is_some();
             let mut v = serde_json::to_value(&n).unwrap_or(Value::Null);
             v["linked"] = json!(linked);
@@ -439,6 +442,16 @@ pub async fn list(State(svc): State<Arc<NodeService>>, caller: Caller) -> Respon
             // from the key, at today's length: a Node paired before M4 stored 16 digits
             if let Ok(k) = <[u8; 32]>::try_from(n.pubkey.as_slice()) {
                 v["fingerprint"] = json!(identity::fingerprint(&k));
+            }
+            if let Some(rm) = &rm {
+                v["removal"] = rm.view(&n, linked, removal.as_ref());
+                // asked in the background: the next list shows whether it can remove itself
+                if linked && !n.local && rm.seen(&n.node_id).is_none() {
+                    let (rm, id) = (rm.clone(), n.node_id.clone());
+                    tokio::spawn(async move {
+                        rm.look(&id).await;
+                    });
+                }
             }
             if let Some(up) = &up {
                 v["upgrade"] = up.view(&n, &default, latest.as_ref());
@@ -547,14 +560,12 @@ pub async fn act(
         Ok(Some(true)) => {
             // after the commit, under the lock a link is installed with: a link being installed
             // either saw this change in the store or is in the registry by now
+            if action == "revoke" {
+                svc.revoked(&id).await;
+                return json_response(200, &json!({ "ok": true }));
+            }
             let _g = svc.links.lock().await;
             match action.as_str() {
-                "revoke" => {
-                    svc.registry.kill(&id, "revoked");
-                    if let Some(rt) = svc.fleet.runtime_for(&id) {
-                        rt.set_paused(true);
-                    }
-                }
                 "pause" | "resume" => {
                     let paused = action == "pause";
                     if let Some(c) = svc.registry.conn(&id) {

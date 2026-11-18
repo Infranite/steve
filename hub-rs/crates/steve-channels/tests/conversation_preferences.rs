@@ -215,3 +215,217 @@ fn invalid_query_is_rejected() {
         );
     }
 }
+
+fn outgoing(h: &TestEnv, space: &str, id: &str, status: &str, approval: Option<(&str, &str)>) {
+    h.store().with_conn(|c| {
+        let decision = approval.map(|_| format!("decision-{id}"));
+        c.execute("INSERT INTO chan_messages (id, workspace_id, space_id, direction, text, status, decision_id, created)
+            VALUES (?1, ?2, ?3, 'out', 'reply', ?4, ?5, 2)", params![id, WS, space, status, decision])?;
+        if let Some((kind, state)) = approval {
+            c.execute("INSERT INTO decisions (id, workspace_id, kind, subject_type, subject_id, question, requested_by, status, created)
+                VALUES (?1, ?2, ?3, 'chan_message', ?4, 'Send?', 'steve', ?5, 2)", params![decision, WS, kind, id, state])?;
+        }
+        Ok(())
+    }).unwrap();
+}
+
+fn replied(h: &TestEnv, user: &str, q: ListQuery) -> conversations::ListPage {
+    h.store()
+        .reader(|c| {
+            conversations::list_page(
+                c,
+                WS,
+                &Viewer::bare(WS, user),
+                &ListQuery {
+                    state: Some("replied".into()),
+                    ..q
+                },
+                100,
+            )
+        })
+        .unwrap()
+}
+
+#[test]
+fn replied_requires_a_sent_message_or_a_draft_still_awaiting_approval() {
+    let h = setup();
+    for (space, status, decision) in [
+        ("sent", "sent", None),
+        ("draft", "draft", Some(("approve", "open"))),
+        ("both", "sent", None),
+        ("failed", "failed", Some(("fail", "open"))),
+        ("pending", "pending", None),
+        ("unknown", "unknown", None),
+        ("discarded", "discarded", Some(("approve", "resolved"))),
+        ("settled-draft", "draft", Some(("approve", "resolved"))),
+        ("unreviewed-draft", "draft", None),
+        ("not-approval", "draft", Some(("fail", "open"))),
+    ] {
+        add(&h, WS, space, Some("shared"), 1);
+        outgoing(&h, space, &format!("out-{space}"), status, decision);
+    }
+    outgoing(
+        &h,
+        "both",
+        "second-draft",
+        "draft",
+        Some(("approve", "open")),
+    );
+    add(&h, WS, "only-incoming", Some("shared"), 10);
+    add(&h, WS, "internal-answer", Some("shared"), 10);
+    // An internal conversation answer did not necessarily leave the channel.
+    h.store()
+        .messages()
+        .add(
+            WS,
+            "steve",
+            "not sent",
+            None,
+            &json!({}),
+            "chan:internal-answer",
+        )
+        .unwrap();
+    close(&h, WS, ME, "chan:sent", true).unwrap();
+    h.store().with_conn(|c| {
+        // Draft-only channel records need not have any internal conversation turns.
+        c.execute("DELETE FROM messages WHERE space = 'chan:draft'", [])?;
+        // Latest-author filtering would lose a conversation with a reply followed by incoming text.
+        c.execute("INSERT INTO chan_messages (id, workspace_id, space_id, direction, text, status, created)
+            VALUES ('new-incoming', ?1, 'sent', 'in', 'new incoming', 'received', 20)", [WS])?;
+        // Retaining the sending fact does not depend on retaining the message body.
+        c.execute("UPDATE chan_messages SET text = NULL, purged = 10 WHERE id = 'out-sent'", [])?;
+        Ok(())
+    }).unwrap();
+    let p = replied(&h, ME, ListQuery::default());
+    assert_eq!(p.total, 3);
+    assert_eq!(
+        p.conversations
+            .iter()
+            .map(|r| r["space_id"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["sent", "both", "draft"]
+    );
+    assert_eq!(p.conversations[0]["last_author"], "me");
+    assert_eq!(
+        p.conversations[0]["closed"], true,
+        "the replied view includes closed conversations too"
+    );
+    assert!(!p.has_more);
+    assert_eq!(p.next_offset, None);
+    // Resolving approval removes a draft-only conversation, but not a previously sent one.
+    h.store()
+        .with_conn(|c| {
+            c.execute(
+                "UPDATE decisions SET status = 'resolved' WHERE kind = 'approve'",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(replied(&h, ME, ListQuery::default()).total, 2);
+}
+
+#[test]
+fn replied_is_filtered_before_pagination_and_combines_with_search_and_channel() {
+    let h = setup();
+    for n in 0..55 {
+        let space = format!("replied-{n:03}");
+        add(&h, WS, &space, Some("shared"), n + 10);
+        outgoing(&h, &space, &format!("out-{n}"), "sent", None);
+    }
+    // Newer non-matching conversations must not consume pages of the replied view.
+    for n in 0..60 {
+        add(&h, WS, &format!("incoming-{n}"), Some("shared"), 1000 + n);
+    }
+    h.store()
+        .with_conn(|c| {
+            c.execute("INSERT INTO connections (id, workspace_id, account_id, adapter, auth, created_by, created, updated)
+                VALUES ('test-channel', ?1, 'shared', 'feishu_app', 'none', ?2, 1, 1)", params![WS, ME])?;
+            c.execute(
+                "UPDATE spaces SET connection_id = 'test-channel' WHERE id LIKE 'replied-%'",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let p = replied(
+        &h,
+        ME,
+        ListQuery {
+            limit: Some(50),
+            connection: Some("test-channel".into()),
+            ..Default::default()
+        },
+    );
+    assert_eq!(p.total, 55);
+    assert_eq!(p.conversations.len(), 50);
+    assert_eq!(p.conversations[0]["space_id"], "replied-054");
+    assert_eq!(p.next_offset, Some(50));
+    let last = replied(
+        &h,
+        ME,
+        ListQuery {
+            limit: Some(50),
+            offset: p.next_offset,
+            ..Default::default()
+        },
+    );
+    assert_eq!(last.total, 55);
+    assert_eq!(last.conversations.len(), 5);
+    assert_eq!(last.conversations[4]["space_id"], "replied-000");
+    assert!(!last.has_more);
+    let search = replied(
+        &h,
+        ME,
+        ListQuery {
+            q: Some("replied-000".into()),
+            connection: Some("test-channel".into()),
+            ..Default::default()
+        },
+    );
+    assert_eq!(search.total, 1);
+    assert_eq!(search.conversations[0]["space_id"], "replied-000");
+    assert_eq!(
+        replied(
+            &h,
+            ME,
+            ListQuery {
+                connection: Some("another-channel".into()),
+                ..Default::default()
+            }
+        )
+        .total,
+        0
+    );
+}
+
+#[test]
+fn replied_does_not_reveal_other_users_sends_or_drafts() {
+    let h = setup();
+    for id in ["visible-sent", "hidden-sent", "hidden-draft"] {
+        add(&h, WS, id, Some("shared"), 1);
+    }
+    add(&h, WS, "private-space", Some("private"), 1);
+    outgoing(&h, "visible-sent", "public-out", "sent", None);
+    outgoing(&h, "hidden-sent", "private-out", "sent", None);
+    outgoing(
+        &h,
+        "hidden-draft",
+        "private-draft",
+        "draft",
+        Some(("approve", "open")),
+    );
+    outgoing(&h, "private-space", "own-out", "sent", None);
+    h.store().with_conn(|c| {
+        // The groups are visible, but these two messages only reached ME's personal identity.
+        c.execute("INSERT INTO space_identities (space_id, connection_id, workspace_id, ordinal, owner_user, joined)
+            VALUES ('hidden-sent', 'mine', ?2, 0, ?1, 1), ('hidden-draft', 'mine', ?2, 0, ?1, 1),
+                ('hidden-sent', 'shared', ?2, 1, NULL, 1), ('hidden-draft', 'shared', ?2, 1, NULL, 1)", params![ME, WS])?;
+        c.execute("UPDATE chan_messages SET seen_by = 1 WHERE id IN ('private-out', 'private-draft')", [])?;
+        Ok(())
+    }).unwrap();
+    let other = replied(&h, OTHER, ListQuery::default());
+    assert_eq!(other.total, 1);
+    assert_eq!(other.conversations[0]["space_id"], "visible-sent");
+    assert_eq!(replied(&h, ME, ListQuery::default()).total, 4);
+}

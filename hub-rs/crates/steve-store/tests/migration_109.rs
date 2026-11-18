@@ -2,17 +2,17 @@ use rusqlite::{Connection, params};
 use steve_store::{bot_dispatch, db};
 
 #[test]
-fn upgrades_a_107_database_without_granting_new_nodes_legacy_dispatch() {
-    assert_eq!(db::MIGRATIONS[107], include_str!("../migrations/108.sql"));
+fn upgrades_a_108_database_without_granting_new_nodes_legacy_dispatch() {
+    assert_eq!(db::MIGRATIONS[108], include_str!("../migrations/109.sql"));
     let c = Connection::open_in_memory().unwrap();
-    for migration in &db::MIGRATIONS[..107] {
+    for migration in &db::MIGRATIONS[..108] {
         c.execute_batch(migration).unwrap();
     }
     c.execute_batch(
         "CREATE TABLE schema_version(v INTEGER NOT NULL);
-         INSERT INTO schema_version VALUES (107);
+         INSERT INTO schema_version VALUES (108);
          CREATE TABLE schema_compat(min_reader INTEGER NOT NULL);
-         INSERT INTO schema_compat VALUES (107);
+         INSERT INTO schema_compat VALUES (108);
          INSERT INTO workspaces(id,name,created) VALUES ('default','Fixture',1);",
     )
     .unwrap();
@@ -29,8 +29,23 @@ fn upgrades_a_107_database_without_granting_new_nodes_legacy_dispatch() {
     insert("pending", "pending", false);
     insert("revoked", "revoked", false);
     insert("local", "active", true);
+    c.execute(
+        "INSERT INTO node_removals
+         (operation_id,node_id,requested_by,grace_secs,phase,created,updated)
+         VALUES ('removal','existing','owner',30,'requested',1,1)",
+        [],
+    )
+    .unwrap();
 
     db::migrate(&c).unwrap();
+    let removal: (String, String) = c
+        .query_row(
+            "SELECT node_id,phase FROM node_removals WHERE operation_id='removal'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(removal, ("existing".into(), "requested".into()));
     assert_eq!(
         db::compat(&c).unwrap(),
         db::Compat {

@@ -66,7 +66,7 @@ steve hub uninstall
 brew uninstall steve
 ```
 
-Use `node` instead of `hub` on a separate Node and verify its sessions in Devices before stopping it. `uninstall` requires a known stopped service, also unloaded from launchd on macOS, and preserves a backup of its registration. It does not remove the private runtime, configuration, keys, data or Node pairing; keep those for diagnosis or a separately planned removal. Revoke a retired Node from Hub Devices when you intend to remove its access.
+Use `node` instead of `hub` on a separate Node and verify its sessions in Devices before stopping it. `uninstall` requires a known stopped service, also unloaded from launchd on macOS, and preserves a backup of its registration. It does not remove the private runtime, configuration, keys, data or Node pairing; keep those for diagnosis or a separately planned removal. Revoke a retired Node from Hub Devices when you intend to remove its access, or use [**Remove from this machine**](#removing-a-node-from-its-machine) there to have the Node uninstall itself and delete its home.
 
 Without Homebrew, use the verified installer archive from the same [Release](https://github.com/Infranite/steve/releases), then run `<installer>/bin/steve setup`. The separate runtime archives and `steve-release.json` remain compatible with existing upgrade clients; Homebrew uses `steve-installer.json` and the installer archives.
 
@@ -885,6 +885,30 @@ Each Node has an upgrade policy: `auto` (the Hub upgrades it on its own when the
 4. A helper outside the Node's service (its own session; its own `systemd-run --user --scope` under systemd) stops the service, points it at the new release as `steve node update` does, starts it and waits for the new Node to link to the Hub (`STEVE_NODE_UPGRADE_HEALTH_SECS`, default 180, set on the Hub). If it does not, the helper switches back to the release it came from and reports `rolled_back`.
 
 Both sides record every step before taking it: the Hub in `node_upgrades` (shown as the Node's last upgrade), the Node in `<node-home>/updates/node/<operation>.json`, the helper's log in `<node-home>/logs/node-upgrade-<operation>.log`. A lost answer is asked about, never sent again; after a Hub or Node restart an unfinished upgrade is settled from the other side's state, not run on. The previous release stays on the Node for a manual rollback with the procedure above.
+
+### Removing a Node from its machine
+
+A Node's page in Devices offers two ways out, each saying what it does to the machine:
+
+- **Unpair** (`POST /api/nodes/<node_id>/revoke`): the Node can no longer link to this Hub, but its service, release and home stay installed on its machine.
+- **Remove from this machine** (`POST /api/nodes/<node_id>/remove`, the Node's owner only): the Hub asks the Node, over its own authenticated link, to remove itself, then unpairs it. Use it for a Node installed remotely over tailcat, whose one-time SSH key is gone, or any Node whose machine you do not want to log in to.
+
+The Hub can ask a Node that is linked and says so in its probe (`node-remove-v1`): a Node installed as a service (`steve node install`, or a Devices install over tailcat) of this release or later. After the owner confirms:
+
+1. The Hub gives the Node no new turns and sends `node.remove` under an operation id, with the grace period `STEVE_NODE_REMOVE_GRACE_SECS` (set on the Hub, default 600). The Node takes no new work at once and waits for its running turns, jobs and commands to end; past the grace period it cancels them.
+2. With nothing running, the Node is ready, and nothing has been removed yet. It waits up to ten minutes for the Hub; without an answer it gives the removal up and takes work again.
+3. The Hub confirms (`node.remove_commit`). The Node answers, drops its link, and a helper outside its service (its own session; its own `systemd-run --user --scope` under systemd) stops the service, uninstalls it as `steve node uninstall` does, and deletes the Node's home: its key, pairing, journal, worktrees, releases and logs. Project folders outside the home stay.
+4. The Hub records the removal as `removed` and unpairs the Node.
+
+A Node that is offline, runs an earlier release or was not installed as a service cannot be asked; one that does not get ready within the grace period plus three minutes, or never says it took the confirmation, stays paired (`unconfirmed`). For these, Devices shows the command to run on that machine, as the user the Node runs as:
+
+```sh
+S=$(command -v steve || ls ~/.steve-node/releases/*/bin/steve | tail -n 1) && "$S" node stop && "$S" node uninstall && rm -rf ~/.steve-node
+```
+
+It uses the `steve` CLI on the `PATH`, else the one the Node's setup left in its home, and assumes the default home: for a Node set up with `--home`, pass the same `--home` and delete that directory instead. Then unpair the Node in Devices.
+
+The Hub records every removal in `node_removals` (the Node's page shows the latest), and the Node every step in `<node-home>/updates/remove/<operation>.json` until its home is deleted. A lost answer is asked about, never sent again. After a Hub restart an unfinished removal is settled from the Node's state: one the Node already took the confirmation of is unpaired, any other is given up. A Node that restarts in the middle of a removal gives it up.
 
 ## Source-based macOS service installation
 

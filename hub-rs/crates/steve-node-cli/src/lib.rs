@@ -2,5 +2,6 @@
 
 pub mod config;
 pub mod dial;
+pub mod remove;
 pub mod tunnel;
 pub mod upgrade;

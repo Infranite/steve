@@ -199,6 +199,7 @@ export default {
       open: "Open",
       closed: "Closed",
       all: "All",
+      replied: "Recently replied",
     },
     updated: "Conversations changed. Refresh list",
     restoreOpen: "Restore and open: {{name}}",

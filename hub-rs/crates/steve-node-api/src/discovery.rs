@@ -416,6 +416,59 @@ impl NodeUpgradeState {
     }
 }
 
+/// The Node can remove itself from its machine when the Hub asks ([`Discovery::remove_begin`]):
+/// stop taking work, let what runs end (or cancel it past a grace period), then, once the Hub
+/// confirms, stop and uninstall its service and delete its home. Only a Node installed as a
+/// service says so: one run by hand has no service to uninstall.
+pub const FEATURE_NODE_REMOVE: &str = "node-remove-v1";
+
+/// Begin removing the Node from its machine (H→N `node.remove`), under `operation`. The Node stops
+/// taking new work at once and waits up to `grace_secs` for what runs to end; past it, it cancels
+/// what still runs. Then it is `ready` and waits for the Hub's [`RemoveCommit`]: nothing is
+/// uninstalled or deleted before. The same operation again answers its state; another while one
+/// is unfinished is `busy`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NodeRemove {
+    pub operation: OperationId,
+    /// How long running turns, jobs and commands may go on before they are cancelled (seconds).
+    pub grace_secs: u32,
+}
+
+/// The Hub recorded that the Node is `ready` and confirms the removal (`abandon: false`): the
+/// Node answers `removing`, drops its link, and a helper outside its service stops and uninstalls
+/// the service and deletes the Node's home. `abandon: true` gives the removal up instead: the
+/// Node takes work again. Refused (`busy`) while it is still draining.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoveCommit {
+    pub operation: OperationId,
+    #[serde(default)]
+    pub abandon: bool,
+}
+
+/// Where a removal is. `draining` (no new work, waiting for what runs) → `cancelling` (past the
+/// grace period, what ran was cancelled) → `ready` (nothing runs; waiting for the Hub) →
+/// `removing` (confirmed: being uninstalled and deleted). Terminal: `removing`, `abandoned` (the
+/// Node takes work again), `failed`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NodeRemoveState {
+    pub operation: OperationId,
+    pub phase: String,
+    /// Turns, jobs and commands still running when it was written.
+    #[serde(default)]
+    pub running: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// When it last changed (ms).
+    pub updated: Timestamp,
+}
+
+impl NodeRemoveState {
+    pub const TERMINAL: &'static [&'static str] = &["removing", "abandoned", "failed"];
+    pub fn is_terminal(&self) -> bool {
+        Self::TERMINAL.contains(&self.phase.as_str())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HistoryRef {
     pub harness: String,

@@ -78,6 +78,22 @@ async fn main() -> Result<()> {
             )?;
             println!("{}", serde_json::to_string(&s)?);
         }
+        // the helper a removal the Hub confirmed starts, outside the service (see `remove`)
+        Some("remove-finish") => {
+            let Some(op) = args.get(1) else { usage() };
+            let mut svc = steve_node_cli::upgrade::InstalledService::open(&home.0)?;
+            steve_node_cli::remove::run_remove(
+                &home.0,
+                op,
+                &mut svc,
+                std::time::Duration::from_secs(2),
+                std::time::Duration::from_secs(1),
+            )?;
+            println!(
+                "removed this node's service and its home {}",
+                home.0.display()
+            );
+        }
         Some("pair") => {
             let Some(url) = args.get(1) else { usage() };
             let mut pin = None;

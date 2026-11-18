@@ -969,6 +969,41 @@ async fn a_cancel_ends_the_attempt_as_cancelled() {
     assert_eq!(t.sent("session/cancel"), 1);
 }
 
+/// A Node being removed takes no new work, lets what runs go on until it cancels it, and takes
+/// work again once the removal is given up.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_retiring_node_takes_no_new_work_and_cancels_what_runs() {
+    let t = T::new(&[]);
+    let n = t.node();
+    ready(&n, "s_1").await;
+    let start = now_cmd("op_t", turn("s_1", "t_1", "a_1", "@sleep 5000"));
+    n.start_turn(start.clone()).await.unwrap();
+    t.until("the prompt", |t| t.sent("session/prompt") == 1)
+        .await;
+    assert_eq!(n.running_work().unwrap(), 1);
+    n.set_retiring(true);
+    // a resent command still answers its receipt; a new one is refused
+    n.start_turn(start).await.unwrap();
+    let e = n
+        .open_session(now_cmd("op_o2", open_body("s_2")))
+        .await
+        .unwrap_err();
+    assert_eq!(e.code, ErrorCode::Busy, "{e}");
+    assert_eq!(n.cancel_running("removing").await.unwrap(), 1);
+    t.until("the end", |t| !t.ended().is_empty()).await;
+    assert_eq!(t.ended()[0].outcome, Outcome::Cancelled);
+    assert_eq!(n.running_work().unwrap(), 0);
+    assert_eq!(
+        n.cancel_running("removing").await.unwrap(),
+        0,
+        "nothing left"
+    );
+    n.set_retiring(false);
+    n.open_session(now_cmd("op_o3", open_body("s_3")))
+        .await
+        .unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_late_cancel_never_reaches_the_next_attempt() {
     let t = T::new(&[]);

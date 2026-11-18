@@ -524,9 +524,18 @@ fn remote_nodes(
             crate::nodes::upgrade::Timing::from_vars(|k| vars(k)),
         );
         let _ = svc.upgrades.set(up.clone());
+        let rm = crate::nodes::removal::Removals::new(
+            store.clone(),
+            Arc::new(crate::nodes::removal::LiveFleet {
+                svc: Arc::downgrade(svc),
+            }),
+            crate::nodes::removal::Timing::from_vars(|k| vars(k)),
+        );
+        let _ = svc.removals.set(rm.clone());
         if let Ok(rt) = tokio::runtime::Handle::try_current() {
             rt.spawn(crate::nodes::tailcat::restore(t, store.clone()));
             rt.spawn(up.follow());
+            rt.spawn(rm.settle_open());
         }
     }
     let bind = match bind.map(|v| steve_node_api::NodeId::new(v.trim())) {

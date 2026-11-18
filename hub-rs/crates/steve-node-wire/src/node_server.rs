@@ -87,6 +87,9 @@ impl<N: Node + ?Sized + 'static> Handler for NodeServer<N> {
             NODE_UPGRADE => en(&n.upgrade_stage(de(p)?).await?),
             NODE_UPGRADE_SWITCH => en(&n.upgrade_switch(de(p)?).await?),
             NODE_UPGRADE_STATUS => en(&n.upgrade_status(de(p)?).await?),
+            NODE_REMOVE => en(&n.remove_begin(de(p)?).await?),
+            NODE_REMOVE_COMMIT => en(&n.remove_commit(de(p)?).await?),
+            NODE_REMOVE_STATUS => en(&n.remove_status(de(p)?).await?),
             other => Err(unsupported(other)),
         }
     }

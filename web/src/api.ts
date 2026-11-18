@@ -90,7 +90,13 @@ export type RNodeUpgrade = { build?: RBuild | null; policy: RUpgradePolicy; own_
 export type RNodeLink = { route: "loopback" | "lan" | "tailnet" | "public" | "unknown"; tls: boolean; via: "direct" | "proxy" | "tailcat"; peer?: string; since: number; latency_ms: number | null; latency_at: number | null }
 /** what a Node's machine is, as the Node last said (`node.host`); `os`/`arch` as Rust names them (`macos`, `aarch64`) */
 export type RNodeHost = { hostname?: string; os: string; os_name?: string; os_version?: string; arch: string; cpus?: number; mem_total?: number }
-export type RNode = { node_id: string; name: string; fingerprint: string; state: "pending" | "active" | "paused" | "revoked"; linked: boolean; local: boolean; last_seen?: number | null; link_error?: { at: number; error: string }; max_sessions?: number; running?: number; waiting?: number; owner_context?: boolean | null; upgrade?: RNodeUpgrade; link?: RNodeLink | null; host?: RNodeHost | null }
+/** one removal of a Node from its machine, as the Hub records it: `requested` | `draining` | `cancelling` | `ready` |
+ * `confirming`, then `removed` (unpaired), `unconfirmed` (it did not confirm), `failed` or `manual` (it cannot remove itself) */
+export type RNodeRemovalRun = { operation_id: string; phase: string; error?: string | null; requested_by: string; grace_secs: number; created: number; updated: number }
+/** whether the Hub can ask a Node to remove itself from its machine (`reason`: ok | offline | manual | unknown | local |
+ * unpaired), its latest removal, and the command to run on its machine instead */
+export type RNodeRemoval = { reason: string; latest?: RNodeRemovalRun | null; command: string; grace_secs?: number }
+export type RNode = { node_id: string; name: string; fingerprint: string; state: "pending" | "active" | "paused" | "revoked"; linked: boolean; local: boolean; last_seen?: number | null; link_error?: { at: number; error: string }; max_sessions?: number; running?: number; waiting?: number; owner_context?: boolean | null; upgrade?: RNodeUpgrade; removal?: RNodeRemoval; link?: RNodeLink | null; host?: RNodeHost | null }
 /** a Node machine's day (B3): the latest sample, and load per CPU, memory in use (0..1) and round trip over time */
 export type RVitals = { sampling?: { interval_ms: number; stale_after_ms: number; now: number }; gaps?: { from: number; to: number }[]; latest: { at: number; sampled_at?: number; cpus?: number; load?: [number, number, number]; mem_total?: number; mem_available?: number; roots?: { root: string; display?: string; free: number; total: number; inodes_free?: number }[]; sessions?: number; rtt_ms?: number | null }; series: { at: number; load: number | null; mem: number | null; rtt: number | null }[] }
 export type RPairing = { code: string; expires: number; pin: string | null; hub_id: string }
@@ -389,6 +395,9 @@ export const api = {
   resumeNode: (id: string) => post<{ ok: boolean }>(`/nodes/${encodeURIComponent(id)}/resume`),
   renameNode: (id: string, name: string) => post<{ ok: boolean }>(`/nodes/${encodeURIComponent(id)}/rename`, { name }),
   revokeNode: (id: string) => post<{ ok: boolean }>(`/nodes/${encodeURIComponent(id)}/revoke`),
+  /** asks the Node to remove itself from its machine (stop, uninstall its service, delete its home), then unpairs it;
+   *  refused with `offline`, `manual` (it cannot) or `busy` */
+  removeNode: (id: string) => post<{ operation: string }>(`/nodes/${encodeURIComponent(id)}/remove`),
   nodeLimit: (id: string, max_sessions: number) => post<{ ok: boolean }>(`/nodes/${encodeURIComponent(id)}/limit`, { max_sessions }),
   nodeOwnerContext: (id: string, owner_context: "inherit" | "on" | "off") => post<{ ok: boolean }>(`/nodes/${encodeURIComponent(id)}/context`, { owner_context }),
   nodeUpgradePolicy: (id: string, policy: RUpgradePolicy | "") => post<{ ok: boolean }>(`/nodes/${encodeURIComponent(id)}/upgrade_policy`, { policy }),
