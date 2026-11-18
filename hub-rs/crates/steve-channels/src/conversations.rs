@@ -61,6 +61,22 @@ pub fn space_of_conv(conv: &str) -> Option<&str> {
     conv.strip_prefix(PREFIX).filter(|s| !s.is_empty())
 }
 
+/// [`conv_operation`] purposes, what a conversation message is said in its space as: your trigger
+/// word's failure note ([`TRIGGER_FAILED_NOTE`]) …
+pub(crate) const OP_TRIGGER_FAILED: &str = "trigger_failed";
+/// … a bot's failure note ([`failure_note`]) …
+pub(crate) const OP_FAILURE_NOTE: &str = "failure_note";
+/// … or the message itself (a reply, an item's receipt, a trigger word's answer).
+pub(crate) const OP_SAID: &str = "said";
+
+/// The operation id ([`crate::deliver::OutRequest::operation_id`]) of what conversation message `m`
+/// answering turn `origin` says in its space, for `purpose` ([`OP_SAID`], …): every delivery of `m`
+/// (a retry, a restart before its result was recorded, a second pass at the same time) asks for the
+/// same outbound message, so it is created and sent once.
+pub(crate) fn conv_operation(m: &steve_store::Message, origin: &str, purpose: &str) -> String {
+    format!("conv:{}:{origin}:{purpose}", m.id)
+}
+
 /// The short note an IM space gets when Steve could not answer (the details are in the conversation).
 pub fn failure_note(owner: &str) -> String {
     FAILURE_NOTE.replacen("{}", owner, 1)
@@ -617,7 +633,8 @@ impl Channels {
             self.react_finish(&plan.message_id, Finish::Failed).await;
             // a trigger word answered as you: said in its thread too, as you; the reaction stays failed
             if command && plan.mode == Mode::Own {
-                let d = self.trigger_failed_note(ws, &plan, out).await?;
+                let op = conv_operation(&m, origin, OP_TRIGGER_FAILED);
+                let d = self.trigger_failed_note(ws, &plan, out, op).await?;
                 self.mark_out(&m, &d)?;
                 return Ok(Some(d));
             }
@@ -639,6 +656,7 @@ impl Channels {
                                 source: plan.message_id.clone(),
                                 act: Act::Reply,
                             },
+                            operation_id: Some(conv_operation(&m, origin, OP_FAILURE_NOTE)),
                         },
                     )
                     .await?;
@@ -740,6 +758,7 @@ impl Channels {
                     approve,
                     generation,
                     auth,
+                    operation_id: Some(conv_operation(&m, origin, OP_SAID)),
                 },
             )
             .await?;
@@ -798,24 +817,38 @@ impl Channels {
         Ok(None)
     }
 
-    /// `meta.chan_out` on the conversation message: what became of it in the space.
+    /// `meta.chan_out` on conversation message `m`: what became of it in the space. The status is
+    /// the outbound message's own, read in the same transaction as the write: two deliveries of one
+    /// message ([`conv_operation`]) may finish in either order, and the one that writes last still
+    /// writes the newest state (never the `pending` a second pass saw while the first was sending).
     pub(crate) fn mark_out(&self, m: &steve_store::Message, d: &Delivered) -> ChannelResult<()> {
-        let status = match d {
+        let said = match d {
             Delivered::Sent { .. } => "sent",
             Delivered::Drafted { .. } => "draft",
             Delivered::Failed { .. } | Delivered::Blocked { .. } => "failed",
             Delivered::Queued { .. } => "pending",
             Delivered::Skipped => "skipped",
         };
-        let mut meta: Map<String, Value> = m.meta.as_object().cloned().unwrap_or_default();
-        meta.insert(
-            "chan_out".into(),
-            json!({"message": d.message_id(), "status": status, "decision": d.decision_id()}),
-        );
-        self.store()
-            .messages()
-            .patch_meta(&m.id, &Value::Object(meta))?;
-        Ok(())
+        self.store().transaction(|tx| -> ChannelResult<()> {
+            let now: Option<String> = match d.message_id() {
+                Some(id) => tx
+                    .query_row("SELECT status FROM chan_messages WHERE id = ?", [id], |r| {
+                        r.get(0)
+                    })
+                    .optional()?,
+                None => None,
+            };
+            let status = now.as_deref().unwrap_or(said);
+            let msgs = self.store().messages();
+            let current = msgs.get(&m.id)?.map_or_else(|| m.meta.clone(), |x| x.meta);
+            let mut meta: Map<String, Value> = current.as_object().cloned().unwrap_or_default();
+            meta.insert(
+                "chan_out".into(),
+                json!({"message": d.message_id(), "status": status, "decision": d.decision_id()}),
+            );
+            msgs.patch_meta(&m.id, &Value::Object(meta))?;
+            Ok(())
+        })
     }
 
     /// `links(item, from, chan_message)` and `work_item_id`, like a rule's `create_item`.
@@ -868,11 +901,14 @@ impl Channels {
     /// The short note a trigger word answered as you gets in its thread when it got no answer:
     /// sent as you, `[AI]`-marked, without details (they are in the conversation). The reaction
     /// stays failed (`Purpose::Source`).
+    /// `operation`: the note's [`conv_operation`], so that it goes out once however often it is
+    /// asked for.
     pub(crate) async fn trigger_failed_note(
         &self,
         ws: &str,
         plan: &Plan,
         out: &dyn crate::deliver::Outbound,
+        operation: String,
     ) -> ChannelResult<Delivered> {
         let yours = self.store().reader(|c| {
             crate::arbiter::from_you(
@@ -899,6 +935,7 @@ impl Channels {
                     auth: Auth::Trigger {
                         source: plan.message_id.clone(),
                     },
+                    operation_id: Some(operation),
                 },
             )
             .await?;

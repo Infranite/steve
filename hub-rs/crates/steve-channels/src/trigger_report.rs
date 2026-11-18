@@ -208,6 +208,7 @@ pub async fn sweep(ch: &Channels, outbox: &Outbox) -> ChannelResult<usize> {
             auth: Auth::Trigger {
                 source: plan.message_id.clone(),
             },
+            operation_id: None,
         };
         match outbox.deliver_checked(ch, &req).await {
             Ok((d, _)) => {

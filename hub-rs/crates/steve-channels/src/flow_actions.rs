@@ -360,6 +360,7 @@ impl Action for ReplyAs {
                     purpose: Purpose::Flow,
                     generation: Some(r.generation),
                     auth,
+                    operation_id: None,
                 },
                 // the model failed: worth another try later
                 Err(e) => return NodeOutcome::Retry(e.to_string()),
@@ -375,6 +376,7 @@ impl Action for ReplyAs {
                 approve,
                 generation: None,
                 auth,
+                operation_id: None,
             }
         };
         deliver(cx, &self.replies, &ch, req).await
@@ -477,6 +479,7 @@ impl Action for SendToSpace {
             approve,
             generation: None,
             auth,
+            operation_id: None,
         };
         deliver(cx, &self.replies, &ch, req).await
     }

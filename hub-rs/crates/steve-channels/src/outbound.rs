@@ -425,6 +425,8 @@ fn knowledge_of(c: &Connection, g: Option<&Generation>) -> ChannelResult<Vec<Kno
 
 /// The insert of an outbound row.
 struct NewOut<'a> {
+    /// Its id: an operation's ([`crate::deliver::operation_message_id`]), else a new one.
+    id: Option<String>,
     t: &'a OutTarget,
     p: &'a Place,
     text: &'a str,
@@ -433,7 +435,7 @@ struct NewOut<'a> {
 }
 
 fn insert_out(tx: &Tx, n: &NewOut, now: i64) -> ChannelResult<String> {
-    let id = uid("cm");
+    let id = n.id.clone().unwrap_or_else(|| uid("cm"));
     let on_behalf = if n.proxy {
         "proxy"
     } else if n.p.persona.is_some() {
@@ -1447,6 +1449,7 @@ async fn compose_instructed(
                         approve: true,
                         generation: Some(r.generation),
                         auth: Auth::None,
+                        operation_id: None,
                     },
                 )
                 .await?;
@@ -2050,6 +2053,18 @@ impl Outbox {
             return Ok((crate::pipeline::outcome(&d), None));
         }
         let t = &req.target;
+        // asked again for an operation that has its message: what became of it, nothing new
+        if let Some(op) = &req.operation_id
+            && let Some(d) = ch
+                .store()
+                .reader(|c| crate::deliver::operation_delivered(c, &t.ws, op))?
+        {
+            tracing::info!(
+                message = d.message_id(),
+                "operation already has its message: not sent again"
+            );
+            return Ok((d, None));
+        }
         // an automatic answer where writes are refused for now is not drafted at all ([`write_blocks`])
         let explicit = ch.store().reader(|c| -> ChannelResult<bool> {
             match &req.auth {
@@ -2244,11 +2259,21 @@ impl Outbox {
             if let Some(e) = envelope
                 && let Some(d) = crate::pipeline::existing(tx, e)?
             {
-                return Ok((d.message_id.clone(), d.decision_id.clone(), Some(d)));
+                return Ok((String::new(), None, Some(crate::pipeline::outcome(&d))));
+            }
+            // … and so do two deliveries of one operation: the first to get here claims it
+            if let Some(op) = &req.operation_id
+                && let Some(d) = crate::deliver::operation_delivered(tx, &t.ws, op)?
+            {
+                return Ok((String::new(), None, Some(d)));
             }
             let id = insert_out(
                 tx,
                 &NewOut {
+                    id: req
+                        .operation_id
+                        .as_ref()
+                        .map(|op| crate::deliver::operation_message_id(&t.ws, op)),
                     t,
                     p: &p,
                     text: &text,
@@ -2312,7 +2337,7 @@ impl Outbox {
             Ok((id, decision, None))
         })?;
         if let Some(d) = reused {
-            return Ok((crate::pipeline::outcome(&d), Some(res)));
+            return Ok((d, Some(res)));
         }
         if let Some(d) = decision {
             // waiting for your approval is not “working on it”: the acknowledgement comes off, and
@@ -3481,6 +3506,7 @@ impl Outbox {
             } else {
                 Auth::None
             },
+            operation_id: None,
         };
         Ok(Some(self.deliver_checked(ch, &req).await?.0))
     }
@@ -3520,6 +3546,7 @@ impl Outbox {
                     auth: Auth::Trigger {
                         source: tp.message_id.clone(),
                     },
+                    operation_id: None,
                 };
                 (tp, Some(req))
             }
@@ -3538,6 +3565,7 @@ impl Outbox {
                     source: plan.message_id.clone(),
                     act: Act::Reply,
                 },
+                operation_id: None,
             }
         };
         let (d, r) = self.deliver_checked(ch, &req).await?;

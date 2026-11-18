@@ -3495,3 +3495,207 @@ async fn an_unresolved_own_account_leaves_the_identity_unknown() {
     assert!(!b.contains("本人账号发出"), "{b}");
     assert!(!b.contains(&owner), "the owner's name is not put in: {b}");
 }
+
+// ---------------------------------------------------------------- one send per conversation message
+
+/// Attempts at the provider (deduped repeats included) whose text contains `text`.
+fn attempts(h: &H, text: &str) -> usize {
+    h.fake
+        .send_calls
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(_, c)| c.text.contains(text))
+        .count()
+}
+
+/// Messages the provider posted whose text contains `text`.
+fn posted(h: &H, text: &str) -> usize {
+    sent(h).iter().filter(|s| s.contains(text)).count()
+}
+
+/// The Hub stopped after the send and before its result was recorded on the conversation message.
+fn forget_mark(h: &H, mid: &str) {
+    let m = h.env.store().messages().get(mid).unwrap().unwrap();
+    let mut meta = m.meta.as_object().cloned().unwrap();
+    meta.remove("chan_out");
+    h.env
+        .store()
+        .messages()
+        .patch_meta(mid, &Value::Object(meta))
+        .unwrap();
+}
+
+/// Your trigger words in `D_LI` answered in their thread as you.
+async fn own_trigger_words(h: &H) {
+    push(
+        h,
+        &h.me.clone(),
+        msg("D_LI", "x0", "ulilei", "在吗", false, false),
+    )
+    .await;
+    exec(
+        h,
+        "UPDATE channel_settings SET trigger = ? WHERE connection_id = ?",
+        &[
+            &json!({"on": true, "words": ["/ai"], "where": ["dm:*"], "who": ["me"], "reply": "thread", "mark": true}).to_string(),
+            &h.me,
+        ],
+    );
+}
+
+/// Two deliveries of one conversation message at the same time: the second finds the first's
+/// outbound message (claimed, being sent) and sends nothing. Returns what each said.
+async fn deliver_twice_at_once(h: &H, mid: &str) -> (Option<Delivered>, Option<Delivered>) {
+    let entered = Arc::new(tokio::sync::Barrier::new(2));
+    let release = Arc::new(tokio::sync::Barrier::new(2));
+    *h.fake.send_pause.lock().unwrap() = Some((entered.clone(), release.clone()));
+    let (ch, m) = (h.ch.clone(), mid.to_string());
+    let first = tokio::spawn(async move { ch.conv_deliver(WS, &m).await });
+    entered.wait().await;
+    let second = h.ch.conv_deliver(WS, mid).await.unwrap();
+    release.wait().await;
+    (first.await.unwrap().unwrap(), second)
+}
+
+/// Your trigger word's turn failed. However often its failure is delivered — two passes at once, or
+/// again after a restart between the send and its record — the note goes out once.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_trigger_words_note_goes_out_once() {
+    let h = setup(true).await;
+    own_trigger_words(&h).await;
+    let note = conversations::TRIGGER_FAILED_NOTE;
+
+    // at the same time
+    let turn = your_trigger(&h, "t1", "/ai 看下我现在磁盘情况").await;
+    let err = failed_answer(&h, &turn, "（没能生成回答）");
+    let (first, second) = deliver_twice_at_once(&h, &err).await;
+    let Some(Delivered::Sent { message_id }) = first else {
+        panic!("{first:?}")
+    };
+    assert_eq!(
+        second,
+        Some(Delivered::Queued {
+            message_id: message_id.clone()
+        }),
+        "the first one's message, still on its way"
+    );
+    assert_eq!(attempts(&h, note), 1);
+    assert_eq!(posted(&h, note), 1);
+    let m = h.env.store().messages().get(&err).unwrap().unwrap();
+    assert_eq!(
+        m.meta["chan_out"]["status"],
+        json!("sent"),
+        "the newest state, whoever marked last"
+    );
+    assert_eq!(m.meta["chan_out"]["message"], json!(message_id));
+
+    // after a restart between the send and its record
+    let turn = your_trigger(&h, "t2", "/ai 看下我现在磁盘情况").await;
+    let err = failed_answer(&h, &turn, "（没能生成回答）");
+    let d = h.ch.conv_deliver(WS, &err).await.unwrap();
+    assert!(matches!(d, Some(Delivered::Sent { .. })), "{d:?}");
+    forget_mark(&h, &err);
+    let again = h.ch.conv_deliver(WS, &err).await.unwrap();
+    assert_eq!(again, d, "what the first delivery did, not a second note");
+    assert_eq!(attempts(&h, note), 2, "one per turn");
+    assert_eq!(posted(&h, note), 2);
+    let m = h.env.store().messages().get(&err).unwrap().unwrap();
+    assert_eq!(m.meta["chan_out"]["status"], json!("sent"));
+}
+
+/// A bot's turn failed: its short note (“我请 … 来看”) goes out once however often it is delivered.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_bots_failure_note_goes_out_once() {
+    let h = setup(true).await;
+    let note = "抱歉，这次没能答上来";
+    let bot_turn = |id: &'static str| {
+        let h = &h;
+        async move {
+            let t = h.thread.clone().unwrap();
+            let before = t.turns.lock().unwrap().len();
+            push(
+                h,
+                &h.bot.clone(),
+                msg("C_OPS", id, "ulilei", "部署挂了怎么办", true, false),
+            )
+            .await;
+            let turns = t.turns.lock().unwrap().clone();
+            assert_eq!(turns.len(), before + 1, "{turns:?}");
+            turns.last().unwrap().0.clone()
+        }
+    };
+
+    // at the same time
+    let turn = bot_turn("b1").await;
+    let err = failed_answer(&h, &turn, "（出错了：模型超时）");
+    let (first, second) = deliver_twice_at_once(&h, &err).await;
+    let Some(Delivered::Sent { message_id }) = first else {
+        panic!("{first:?}")
+    };
+    assert_eq!(second, Some(Delivered::Queued { message_id }));
+    assert_eq!(attempts(&h, note), 1);
+    assert_eq!(posted(&h, note), 1);
+    assert_eq!(h.fake.reactions_on("b1"), [ReactionKind::Failed]);
+
+    // after a restart between the send and its record
+    let turn = bot_turn("b2").await;
+    let err = failed_answer(&h, &turn, "（出错了：模型超时）");
+    let d = h.ch.conv_deliver(WS, &err).await.unwrap();
+    assert!(matches!(d, Some(Delivered::Sent { .. })), "{d:?}");
+    forget_mark(&h, &err);
+    assert_eq!(h.ch.conv_deliver(WS, &err).await.unwrap(), d);
+    assert_eq!(attempts(&h, note), 2, "one per turn");
+    assert_eq!(posted(&h, note), 2);
+    let m = h.env.store().messages().get(&err).unwrap().unwrap();
+    assert_eq!(m.meta["chan_out"]["status"], json!("sent"));
+}
+
+/// The provider took the note but its answer was lost: the note is `unknown` (it may be out). A
+/// second delivery of the turn's failure does not send it again; only the queue does, under the same
+/// dedupe key, so the chat still has it once.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_lost_receipt_does_not_send_the_note_again() {
+    let h = setup(true).await;
+    own_trigger_words(&h).await;
+    let note = conversations::TRIGGER_FAILED_NOTE;
+    let turn = your_trigger(&h, "l1", "/ai 看下我现在磁盘情况").await;
+    let err = failed_answer(&h, &turn, "（没能生成回答）");
+    *h.fake.lose_answer.lock().unwrap() = true;
+    let d = h.ch.conv_deliver(WS, &err).await.unwrap();
+    let Some(Delivered::Queued { message_id }) = d.clone() else {
+        panic!("{d:?}")
+    };
+    let status = |h: &H| {
+        one(
+            h,
+            "SELECT status FROM chan_messages WHERE id = ?",
+            &[&message_id],
+        )
+    };
+    assert_eq!(status(&h), json!("unknown"));
+    let m = h.env.store().messages().get(&err).unwrap().unwrap();
+    assert_eq!(
+        m.meta["chan_out"]["status"],
+        json!("unknown"),
+        "may be out, not pending"
+    );
+    assert_eq!((attempts(&h, note), posted(&h, note)), (1, 1));
+
+    // delivered again (a restart before the record, a retry): nothing is sent blindly
+    forget_mark(&h, &err);
+    assert_eq!(h.ch.conv_deliver(WS, &err).await.unwrap(), d);
+    h.ch.conv_deliver(WS, &err).await.unwrap();
+    assert_eq!(
+        attempts(&h, note),
+        1,
+        "not sent again from the conversation"
+    );
+    assert_eq!(status(&h), json!("unknown"));
+
+    // the queue settles it under the same key: the provider drops the repeat
+    h.outbox.send_due(&h.ch).await;
+    assert_eq!(status(&h), json!("sent"));
+    assert_eq!(attempts(&h, note), 2);
+    assert_eq!(posted(&h, note), 1, "in the chat once");
+}
