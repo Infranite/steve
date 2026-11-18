@@ -324,10 +324,15 @@ async fn creation_blocks_before_opening_a_session_and_completion_starts_it_once(
             .count(),
         1
     );
+    // the fake adapter records a prompt after its session is already running: wait for it
     assert!(
-        e.prompts()
-            .iter()
-            .any(|p| p.contains("无需为核对进度读取其他事项或请求扩大读取范围"))
+        until(15, || async {
+            e.prompts()
+                .iter()
+                .any(|p| p.contains("无需为核对进度读取其他事项或请求扩大读取范围"))
+        })
+        .await,
+        "the dependent's prompt says it need not read other items"
     );
     let (status, result) = act(&e, id, "drop").await;
     assert_eq!(status, 200, "{result}");
