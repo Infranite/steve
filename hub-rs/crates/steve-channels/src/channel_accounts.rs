@@ -22,7 +22,7 @@ use crate::{ChannelResult, Channels};
 /// `channel_settings.trigger` of a new account as it reads (the column default's `where: []`
 /// means everywhere).
 pub fn default_trigger() -> Value {
-    json!({"on": false, "words": ["/ai", "/bot"], "where": ["*"], "who": ["me"], "reply": "thread", "mark": true})
+    json!({"on": false, "words": ["/ai", "/bot"], "where": ["*"], "who": ["me"], "reply": "thread", "mark": true, "ignore_prefixes": []})
 }
 
 /// What the account page shows of a channel provider (`GET /channels` `providers`).
@@ -383,6 +383,7 @@ fn normal_trigger(v: &Value) -> Value {
         "who": t.who,
         "reply": t.reply.code(),
         "mark": pick("mark", Value::is_boolean),
+        "ignore_prefixes": t.ignore_prefixes,
     })
 }
 
@@ -423,6 +424,7 @@ pub struct TriggerPatch {
     /// `thread`, `quote` or `message`.
     pub reply: Option<String>,
     pub mark: Option<bool>,
+    pub ignore_prefixes: Option<Vec<String>>,
 }
 
 /// `/^\/[A-Za-z0-9_]{1,20}$/`
@@ -462,6 +464,18 @@ impl ChannelPatch {
             );
         }
         if let Some(t) = &self.trigger {
+            if let Some(prefixes) = &t.ignore_prefixes {
+                c.that("trigger.ignore_prefixes", prefixes.len() <= 20);
+                for (i, prefix) in prefixes.iter().enumerate() {
+                    c.len(
+                        &format!("trigger.ignore_prefixes.{i}"),
+                        prefix.trim(),
+                        1,
+                        100,
+                    );
+                    c.that("trigger.ignore_prefixes", !prefix.contains(['\n', '\r']));
+                }
+            }
             if let Some(w) = &t.words {
                 c.that("trigger.words", w.len() <= 10);
                 for (i, x) in w.iter().enumerate() {
@@ -627,6 +641,16 @@ pub fn patch(
             if let Some(x) = t.mark {
                 v["mark"] = json!(x);
             }
+            if let Some(prefixes) = &t.ignore_prefixes {
+                let mut unique = Vec::new();
+                for prefix in prefixes {
+                    let prefix = prefix.trim();
+                    if !unique.contains(&prefix) {
+                        unique.push(prefix);
+                    }
+                }
+                v["ignore_prefixes"] = json!(unique);
+            }
             v
         }
         None => trigger_before.clone(),
@@ -771,11 +795,29 @@ mod tests {
     }
 
     #[test]
+    fn automation_prefix_validation_rejects_empty_multiline_and_unbounded_values() {
+        for prefixes in [
+            vec![" ".to_string()],
+            vec!["a\nb".to_string()],
+            vec!["x".repeat(101)],
+            vec!["x".to_string(); 21],
+        ] {
+            let patch: ChannelPatch =
+                serde_json::from_value(json!({"trigger":{"ignore_prefixes":prefixes}})).unwrap();
+            assert!(patch.check().is_err());
+        }
+        let patch: ChannelPatch =
+            serde_json::from_value(json!({"trigger":{"ignore_prefixes":["AUTO:","机器人："]}}))
+                .unwrap();
+        patch.check().unwrap();
+    }
+
+    #[test]
     fn triggers_get_every_key() {
         assert_eq!(normal_trigger(&Value::Null), default_trigger());
         assert_eq!(
             normal_trigger(&json!({"on": true, "words": "x"})),
-            json!({"on": true, "words": ["/ai", "/bot"], "where": ["*"], "who": ["me"], "reply": "thread", "mark": true})
+            json!({"on": true, "words": ["/ai", "/bot"], "where": ["*"], "who": ["me"], "reply": "thread", "mark": true, "ignore_prefixes": []})
         );
         // prod: switched on without choosing where
         assert_eq!(

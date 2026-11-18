@@ -215,67 +215,112 @@ pub fn from_owner(
     Ok(false)
 }
 
-/// A trigger word in `space` received through connection `conn`: the instruction after it (may be
-/// empty), when `conn` is your own account (a `mode=self` connection of the user whose trigger it
-/// is — what a bot receives keeps the bot's own rules), the trigger is on, its scope (`*`, `dm:*`,
-/// space ids) covers this space and its `who` allows the sender (you, anyone, or chosen contacts).
-/// Leading mentions are skipped (`@张三 /ai …`); what Steve itself sent as you (`[AI]`, the proxy
-/// mark) and other assistants' automatic replies never count. A conversation goes on without the
-/// word: stored message `msg` in the thread of an answered trigger word, or replying to one or to
-/// its answer, is one too (its whole text the instruction), under the same conditions.
-#[allow(clippy::too_many_arguments)]
+/// An instruction admitted using the live receiving connection's verified author.
+pub struct Command {
+    pub instruction: String,
+    pub sender_account: Option<String>,
+    pub sender_party: Option<String>,
+    pub from_self: bool,
+}
+
+/// Record a live human message received on a personal connection. The adapter's `mine` assertion
+/// and owner aliases are scoped to that connection; neither workspace ownership nor another
+/// member's self connection is proof of authorship here. Never change a receipt on redelivery.
+pub(crate) fn receipt(
+    c: &Connection,
+    conn: &str,
+    message: &str,
+    account: Option<&str>,
+    party: Option<&str>,
+    from_self: bool,
+) -> ChannelResult<()> {
+    c.execute(
+        "INSERT INTO chan_trigger_receipts(message_id,connection_id,sender_account_id,sender_party_id,from_self)
+         SELECT ?1,?2,?3,?4,?5 WHERE EXISTS (
+           SELECT 1 FROM chan_messages WHERE id=?1 AND direction='in' AND history IS NULL)
+         ON CONFLICT(message_id,connection_id) DO NOTHING",
+        rusqlite::params![message, conn, account, party, from_self],
+    )?;
+    Ok(())
+}
+
+/// Built-in automation markers and the receiving account's extra prefixes. Mentions do not hide
+/// a prefix; this check also applies to follow-ups without a trigger word and at send time.
+pub fn automated(text: &str, mentions: &[String], trigger: &crate::rules::Trigger) -> bool {
+    let raw = text.trim_start();
+    let text = crate::rules::strip_leading_mentions(raw, mentions).trim_start();
+    looks_automated(raw)
+        || looks_automated(text)
+        || trigger.ignore_prefixes.iter().any(|prefix| {
+            let prefix = prefix.trim();
+            !prefix.is_empty() && (raw.starts_with(prefix) || text.starts_with(prefix))
+        })
+}
+
+/// The command in a stored message, or a follow-up to one, admitted on the actual receiving
+/// personal connection. Sending reuses this exact check, including the persisted receipt, current
+/// connection settings, author, automation filter, scope and blocked-space boundary. Bot copies,
+/// bot authors and historical messages cannot create a personal-send authorization.
 pub fn command(
     c: &Connection,
     ws: &str,
     space: &SpaceRow,
     conn: &str,
     msg: &str,
-    sender_account: Option<&str>,
-    sender_party: Option<&str>,
-    text: &str,
-    mention_names: &[String],
-) -> ChannelResult<Option<String>> {
-    if looks_automated(text) {
-        return Ok(None);
-    }
-    let Some((owner_conn, t)) = spaces::your_trigger_on(c, ws)? else {
+) -> ChannelResult<Option<Command>> {
+    let Some(cs) = spaces::channel_settings(c, ws, conn)? else {
         return Ok(None);
     };
-    // your own account: the connection the words are set on, or another self one of the same user
-    let yours: bool = c.query_row(
-        "SELECT ?1 = ?2 OR EXISTS (
-            SELECT 1 FROM channel_settings cs JOIN connections x ON x.id = cs.connection_id
-              JOIN accounts a ON a.id = x.account_id JOIN parties p ON p.id = a.party_id
-             WHERE cs.connection_id = ?1 AND cs.mode = 'self' AND p.user_id IS NOT NULL
-               AND p.user_id = (SELECT p2.user_id FROM connections x2 JOIN accounts a2 ON a2.id = x2.account_id
-                                  JOIN parties p2 ON p2.id = a2.party_id WHERE x2.id = ?2))",
-        rusqlite::params![conn, owner_conn],
-        |r| r.get(0),
-    )?;
-    if !yours {
+    if cs.mode != Mode::Own
+        || spaces::settings(c, &space.id)?.attention == spaces::Attention::Blocked
+    {
         return Ok(None);
     }
-    let you = from_you(c, ws, sender_account, sender_party)?;
-    if !t.allows(you, sender_party) {
+    let receipt: Option<(Option<String>, Option<String>, bool)> = c
+        .query_row(
+            "SELECT r.sender_account_id,r.sender_party_id,r.from_self FROM chan_trigger_receipts r
+           JOIN chan_messages m ON m.id=r.message_id JOIN connections cn ON cn.id=r.connection_id
+           JOIN space_identities si ON si.space_id=m.space_id AND si.connection_id=cn.id
+          WHERE r.message_id=?1 AND r.connection_id=?2 AND m.workspace_id=?3 AND m.space_id=?4
+            AND cn.workspace_id=?3 AND cn.status IN ('ok','error') AND si.left_at IS NULL
+            AND m.direction='in' AND m.history IS NULL
+            AND (r.from_self=0 OR r.sender_account_id=cn.account_id)",
+            rusqlite::params![msg, conn, ws, space.id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()?;
+    let Some((sender_account, sender_party, from_self)) = receipt else {
+        return Ok(None);
+    };
+    let t = crate::rules::Trigger::from_value(&cs.trigger);
+    let m = crate::inbound::stored(c, msg)?;
+    if automated(&m.text, &m.mention_names, &t) || !t.allows(from_self, sender_party.as_deref()) {
         return Ok(None);
     }
     let dm = space.kind == crate::channel::SpaceKind::Dm.code();
-    if let Some(i) = t.instruction(&space.id, dm, text, mention_names) {
-        return Ok(Some(i));
-    }
-    if !t.on || !t.applies(&space.id, dm) || !continues(c, &space.id, msg)? {
-        return Ok(None);
-    }
-    let said = crate::rules::strip_leading_mentions(text, mention_names).trim();
-    Ok((!said.is_empty()).then(|| said.to_string()))
+    let instruction = match t.instruction(&space.id, dm, &m.text, &m.mention_names) {
+        Some(i) => Some(i),
+        None if t.on && t.applies(&space.id, dm) && continues(c, &space.id, msg, conn)? => {
+            let said = crate::rules::strip_leading_mentions(&m.text, &m.mention_names).trim();
+            (!said.is_empty()).then(|| said.to_string())
+        }
+        None => None,
+    };
+    Ok(instruction.map(|instruction| Command {
+        instruction,
+        sender_account,
+        sender_party,
+        from_self,
+    }))
 }
 
 /// Does stored message `msg` go on with a trigger word answered in `space`: in the thread of one
 /// (its root or a message in it), or replying to one or to Steve's answer to one?
-pub fn continues(c: &Connection, space: &str, msg: &str) -> ChannelResult<bool> {
+pub fn continues(c: &Connection, space: &str, msg: &str, conn: &str) -> ChannelResult<bool> {
     // a message whose trigger word was taken (its conversation turn says so)
     const ANSWERED: &str = "EXISTS (SELECT 1 FROM messages turn WHERE turn.workspace_id = t.workspace_id
-        AND json_extract(turn.meta, '$.chan.message') = t.id AND json_extract(turn.meta, '$.chan.command') = 1)";
+        AND json_extract(turn.meta, '$.chan.message') = t.id AND json_extract(turn.meta, '$.chan.command') = 1
+        AND json_extract(turn.meta, '$.chan.connection') = ?3)";
     Ok(c.query_row(
         &format!(
             "SELECT EXISTS (
@@ -286,10 +331,11 @@ pub fn continues(c: &Connection, space: &str, msg: &str) -> ChannelResult<bool> 
                     (m.thread_key IS NOT NULL AND (t.external_id = m.thread_key OR t.thread_key = m.thread_key) AND {ANSWERED})
                     -- replying to the trigger word, or to Steve's answer said as you
                     OR (m.reply_to IS NOT NULL AND t.external_id = m.reply_to
-                        AND ({ANSWERED} OR (t.direction = 'out' AND t.on_behalf = 'proxy')))
+                        AND ({ANSWERED} OR (t.direction = 'out' AND t.on_behalf = 'proxy'
+                            AND t.sender_account_id=(SELECT account_id FROM connections WHERE id=?3))))
                   ))"
         ),
-        rusqlite::params![msg, space],
+        rusqlite::params![msg, space, conn],
         |r| r.get(0),
     )?)
 }
@@ -315,6 +361,26 @@ mod tests {
             "好的，明天十点"
         );
         assert_eq!(echo_key("  好的，\n明天十点 "), "好的， 明天十点");
+    }
+
+    #[test]
+    fn literal_prefixes_work_before_or_after_mentions() {
+        let t = crate::rules::Trigger::from_value(
+            &serde_json::json!({"ignore_prefixes":["AUTO:","@worker"]}),
+        );
+        assert!(automated(" @worker automatic follow-up", &[], &t));
+        assert!(automated(
+            " @Person AUTO: follow-up",
+            &["Person".into()],
+            &t
+        ));
+        assert!(automated("@Person [AI] follow-up", &["Person".into()], &t));
+        assert!(!automated(
+            "a person discussing AUTO: in a sentence",
+            &[],
+            &t
+        ));
+        assert!(!automated("auto: a different literal prefix", &[], &t));
     }
 
     #[test]

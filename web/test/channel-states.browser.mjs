@@ -24,7 +24,7 @@ try {
       assert.match(await text(name), /表情状态未确认.*target_forbidden \(-32016\)/)
       assert.doesNotMatch(await text(name), /已回答|已发出/)
     }
-    assert.equal(await text("reaction-accepted"), "已回答")
+    assert.equal(await text("reaction-accepted"), "已处理")
     assert.equal(await page.locator("[data-summary]").innerText(), "只读到了部分片段，无法覆盖最近两天。")
     assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth))
     assert.deepEqual(errors, [])

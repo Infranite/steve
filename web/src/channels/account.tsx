@@ -106,9 +106,10 @@ const whoOf = (who: string[] | undefined): "me" | "anyone" | "some" =>
   !who?.length || (who.length === 1 && who[0] === "me") ? "me" : who.includes("*") ? "anyone" : "some"
 const scopeOf = (where: string[]): Scope => !where.length || where.includes(TRIGGER_EVERYWHERE) ? "all" : where.length === 1 && where[0] === TRIGGER_ALL_DMS ? "dms" : "some"
 
-function TriggerSection({ a, onSave, busy }: { a: ChannelAccount; onSave: (t: Partial<Trigger>) => Promise<boolean>; busy: boolean }) {
+export function TriggerSection({ a, onSave, busy }: { a: { connection: Pick<ChannelAccount["connection"], "id">; trigger: Trigger | null; editable: boolean; spaces: Space[] }; onSave: (t: Partial<Trigger>) => Promise<boolean>; busy: boolean }) {
   const t = useT()
   const [word, setWord] = useState("")
+  const [prefix, setPrefix] = useState("")
   /* `/bot` is your command anywhere: every space you can see, not only this account's */
   const [all, setAll] = useState<Space[] | null>(null)
   useEffect(() => { let live = true; channelsApi.spaces().then((x) => live && setAll(x), () => live && setAll(a.spaces)); return () => { live = false } }, [a.connection.id])
@@ -163,6 +164,17 @@ function TriggerSection({ a, onSave, busy }: { a: ChannelAccount; onSave: (t: Pa
           <Segmented full className="w-full" size="sm" value={tr.reply ?? "thread"} onChange={(v) => void onSave({ reply: v })}
             options={[["thread", t("channels:trigger.replyThread")], ["quote", t("channels:trigger.replyQuote")], ["message", t("channels:trigger.replyMessage")]] as const} />
           <div className="type-footnote text-muted-foreground">{t("channels:trigger.replyHint")}</div>
+        </div>}
+        {tr.on && <div className="flex min-w-0 flex-col gap-2 px-2 py-2.5" data-trigger-ignore>
+          <div className="type-body">{t("channels:trigger.ignorePrefixes")}</div>
+          <div className="type-footnote text-muted-foreground">{t("channels:trigger.ignoreHint")}</div>
+          <div className="flex flex-wrap gap-1">{(tr.ignore_prefixes ?? []).map((p) => <span key={p} className="inline-flex min-w-0 max-w-full items-center gap-1 rounded-full bg-muted px-2 py-1 type-footnote">
+            <span className="break-all font-mono">{p}</span><button type="button" aria-label={t("channels:trigger.removePrefix", { prefix: p })} disabled={busy} onClick={() => void onSave({ ignore_prefixes: (tr.ignore_prefixes ?? []).filter((x) => x !== p) })}><XIcon className="size-3" /></button>
+          </span>)}</div>
+          <form className="flex min-w-0 gap-2" onSubmit={(e) => { e.preventDefault(); const p = prefix.trim(); if (p && !(tr.ignore_prefixes ?? []).includes(p)) void onSave({ ignore_prefixes: [...(tr.ignore_prefixes ?? []), p] }).then((ok) => { if (ok) setPrefix("") }) }}>
+            <Input className="min-w-0 flex-1" aria-label={t("channels:trigger.ignorePrefixes")} value={prefix} maxLength={100} disabled={busy} onChange={(e) => setPrefix(e.target.value)} data-trigger-prefix />
+            <Button type="submit" size="sm" variant="outline" disabled={busy || !prefix.trim() || (tr.ignore_prefixes ?? []).length >= 20 || (tr.ignore_prefixes ?? []).includes(prefix.trim())} data-trigger-prefix-add>{t("channels:trigger.addPrefix")}</Button>
+          </form>
         </div>}
         {tr.on && <Row title={t("channels:trigger.mark")} sub={t("channels:trigger.markSub")}><Switch aria-label={t("channels:trigger.markAria")} checked={tr.mark} disabled={busy} onCheckedChange={(v) => void onSave({ mark: v })} /></Row>}
       </Group>
