@@ -11,7 +11,8 @@
 //! checks before letting anything go), what it did up to there is in its events, and only the Hub
 //! decides what happens next. An empty memory never means "never ran".
 
-use std::collections::HashMap;
+use std::cell::RefCell;
+use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 use std::sync::Mutex;
 
@@ -64,7 +65,7 @@ CREATE INDEX IF NOT EXISTS disk_observations_stage ON disk_observations(stage,se
 const VERSION: i64 = 3;
 
 pub(crate) struct Journal {
-    db: Mutex<Connection>,
+    db: Mutex<(Connection, BTreeMap<String, StreamHead>)>,
     /// This journal's identity, fixed when it was made: a new journal in the same home (deleted or
     /// recreated) is another one, so its streams and event ids never repeat what the Hub holds.
     id: String,
@@ -91,7 +92,14 @@ pub(crate) fn free_bytes(dir: &Path) -> Option<u64> {
 }
 
 /// One transaction on the journal.
-pub(crate) struct Tx<'a>(Transaction<'a>);
+pub(crate) struct Tx<'a>(
+    Transaction<'a>,
+    &'a BTreeMap<String, StreamHead>,
+    RefCell<BTreeMap<String, Option<StreamHead>>>,
+);
+
+const RETENTION_MS: i64 = 24 * 60 * 60_000;
+const PRUNE_BATCH: usize = 128;
 
 #[derive(Clone)]
 pub(crate) struct Op {
@@ -170,7 +178,7 @@ impl Journal {
             ));
         }
         let mut j = Journal {
-            db: Mutex::new(c),
+            db: Mutex::new((c, BTreeMap::new())),
             id: String::new(),
         };
         let (incarnation, id) =
@@ -199,6 +207,10 @@ impl Journal {
                     .pragma_update(None, "user_version", VERSION)
                     .map_err(internal)?;
                 let inc = t.bump("incarnation")?;
+                // A restart always resumes a sweep, even if the previous sweep finished recently.
+                t.c()
+                    .execute("DELETE FROM meta WHERE key='prune_after'", [])
+                    .map_err(internal)?;
                 t.mark_unknown()?;
                 t.optional_disk_update(|| {
                     t.interrupt_disk_records(
@@ -209,15 +221,33 @@ impl Journal {
                 Ok((inc, id))
             })?;
         j.id = id;
+        let heads = j.read(|t| {
+            t.rows(
+                "SELECT stream, epoch, produced, acknowledged FROM streams ORDER BY stream",
+                [],
+                |r| {
+                    Ok(StreamHead {
+                        stream: conv(StreamId::new(r.get::<_, String>(0)?))?,
+                        epoch: conv(Epoch::new(r.get::<_, String>(1)?))?,
+                        produced: r.get::<_, i64>(2)? as u64,
+                        acknowledged: r.get::<_, i64>(3)? as u64,
+                    })
+                },
+            )
+        })?;
+        j.db.lock().unwrap_or_else(|e| e.into_inner()).1 = heads
+            .into_iter()
+            .map(|h| (h.stream.as_str().into(), h))
+            .collect();
         Ok((j, incarnation))
     }
 
     /// Tests: caps the journal's file at `pages` (or its size now, if larger), as a full disk would.
     pub fn cap_pages(&self, pages: u64) -> ApiResult<u64> {
         let c = self.db.lock().unwrap_or_else(|e| e.into_inner());
-        let n: i64 = c
-            .pragma_update_and_check(None, "max_page_count", pages as i64, |r| r.get(0))
-            .map_err(internal)?;
+        let n: i64 =
+            c.0.pragma_update_and_check(None, "max_page_count", pages as i64, |r| r.get(0))
+                .map_err(internal)?;
         Ok(n as u64)
     }
 
@@ -228,25 +258,44 @@ impl Journal {
 
     /// One write transaction (IMMEDIATE: it holds the write lock from the start).
     pub fn tx<R>(&self, f: impl FnOnce(&Tx) -> ApiResult<R>) -> ApiResult<R> {
-        let mut c = self.db.lock().unwrap_or_else(|e| e.into_inner());
-        let t = c
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(internal)?;
-        let t = Tx(t);
-        let r = f(&t)?;
-        t.0.commit().map_err(internal)?;
-        Ok(r)
+        self.transaction(TransactionBehavior::Immediate, f)
     }
 
     /// One read transaction: everything read in it is the same moment.
     pub fn read<R>(&self, f: impl FnOnce(&Tx) -> ApiResult<R>) -> ApiResult<R> {
-        let mut c = self.db.lock().unwrap_or_else(|e| e.into_inner());
-        let t = c
-            .transaction_with_behavior(TransactionBehavior::Deferred)
-            .map_err(internal)?;
-        let t = Tx(t);
-        let r = f(&t)?;
-        t.0.commit().map_err(internal)?;
+        self.transaction(TransactionBehavior::Deferred, f)
+    }
+
+    fn transaction<R>(
+        &self,
+        behavior: TransactionBehavior,
+        f: impl FnOnce(&Tx) -> ApiResult<R>,
+    ) -> ApiResult<R> {
+        let mut db = self.db.lock().unwrap_or_else(|e| e.into_inner());
+        let (c, heads) = &mut *db;
+        let (r, changes) = {
+            let t = Tx(
+                c.transaction_with_behavior(behavior).map_err(internal)?,
+                heads,
+                RefCell::new(BTreeMap::new()),
+            );
+            let r = f(&t)?;
+            let changes = t.2.take();
+            t.0.commit().map_err(internal)?;
+            (r, changes)
+        };
+        // Both closure errors and COMMIT errors drop the private delta. Publish only after commit,
+        // while still holding the connection lock; readers cannot see an intermediate cache.
+        for (stream, head) in changes {
+            match head {
+                Some(h) => {
+                    heads.insert(stream, h);
+                }
+                None => {
+                    heads.remove(&stream);
+                }
+            }
+        }
         Ok(r)
     }
 }
@@ -591,33 +640,24 @@ impl Tx<'_> {
         stream: &StreamId,
         build: impl FnOnce(Watermark) -> NodeEvent,
     ) -> ApiResult<NodeEvent> {
-        let row: Option<(String, i64)> = self
-            .c()
-            .query_row(
-                "SELECT epoch, produced FROM streams WHERE stream = ?1",
-                [stream.as_str()],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .optional()
-            .map_err(internal)?;
-        let (epoch, produced) = match row {
-            Some((e, p)) => (e, p as u64),
+        let mut head = match self.head(stream.as_str()) {
+            Some(h) => h,
             None => {
-                // a new stream belongs to this journal: another journal never reuses its positions
-                let epoch = format!("j{}", self.journal_id()?);
-                self.c()
-                    .execute(
-                        "INSERT INTO streams (stream, epoch, produced, acknowledged) VALUES (?1, ?2, 0, 0)",
-                        params![stream.as_str(), epoch],
-                    )
-                    .map_err(internal)?;
-                (epoch, 0)
+                let epoch = Epoch::new(format!("j{}", self.journal_id()?)).map_err(internal)?;
+                self.c().execute("INSERT INTO streams (stream, epoch, produced, acknowledged) VALUES (?1, ?2, 0, 0)", params![stream.as_str(), epoch.as_str()]).map_err(internal)?;
+                StreamHead {
+                    stream: stream.clone(),
+                    epoch,
+                    produced: 0,
+                    acknowledged: 0,
+                }
             }
         };
+        let produced = head.produced;
         let seq = produced + 1;
         let ev = build(Watermark {
             stream: stream.clone(),
-            epoch: Epoch::new(epoch).map_err(internal)?,
+            epoch: head.epoch.clone(),
             seq,
         });
         self.c()
@@ -632,6 +672,10 @@ impl Tx<'_> {
                 params![stream.as_str(), seq as i64],
             )
             .map_err(internal)?;
+        head.produced = seq;
+        self.2
+            .borrow_mut()
+            .insert(stream.as_str().into(), Some(head));
         Ok(ev)
     }
 
@@ -664,42 +708,49 @@ impl Tx<'_> {
         Ok(out)
     }
 
-    pub fn heads(&self) -> ApiResult<Vec<StreamHead>> {
-        let rows: Vec<(String, String, i64, i64)> = self.rows(
-            "SELECT stream, epoch, produced, acknowledged FROM streams ORDER BY stream",
-            [],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
-        )?;
-        rows.into_iter()
-            .map(|(s, e, p, a)| {
-                Ok(StreamHead {
-                    stream: StreamId::new(s).map_err(internal)?,
-                    epoch: Epoch::new(e).map_err(internal)?,
-                    produced: p as u64,
-                    acknowledged: a as u64,
-                })
-            })
-            .collect()
+    fn head(&self, stream: &str) -> Option<StreamHead> {
+        self.2
+            .borrow()
+            .get(stream)
+            .cloned()
+            .unwrap_or_else(|| self.1.get(stream).cloned())
     }
 
-    /// Moves the watermarks and drops what they cover, all or nothing.
-    pub fn ack(&self, ack: &EventAck) -> ApiResult<()> {
+    pub fn covered(&self, marks: &[Watermark]) -> bool {
+        marks.iter().all(|m| {
+            self.head(m.stream.as_str())
+                .is_none_or(|h| h.epoch != m.epoch || h.acknowledged >= m.seq)
+        })
+    }
+
+    pub fn heads(&self) -> ApiResult<Vec<StreamHead>> {
+        let changes = self.2.borrow();
+        let mut out: Vec<_> = self
+            .1
+            .iter()
+            .filter(|(s, _)| !changes.contains_key(*s))
+            .map(|(_, h)| h.clone())
+            .chain(changes.values().filter_map(Clone::clone))
+            .collect();
+        out.sort_unstable_by(|a, b| a.stream.as_str().cmp(b.stream.as_str()));
+        Ok(out)
+    }
+
+    /// Moves the watermarks and drops what they cover, all or nothing. Returns whether any moved.
+    pub fn ack(&self, ack: &EventAck) -> ApiResult<bool> {
+        let mut moved = false;
         for w in &ack.durable {
-            let row: Option<(String, i64, i64)> = self
-                .c()
-                .query_row(
-                    "SELECT epoch, produced, acknowledged FROM streams WHERE stream = ?1",
-                    [w.stream.as_str()],
-                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-                )
-                .optional()
-                .map_err(internal)?;
-            let Some((epoch, produced, acknowledged)) = row else {
+            let Some(mut head) = self.head(w.stream.as_str()) else {
                 return Err(ApiError::new(
                     ErrorCode::Invalid,
                     "ack of an unknown stream",
                 ));
             };
+            let (epoch, produced, acknowledged) = (
+                head.epoch.as_str(),
+                head.produced as i64,
+                head.acknowledged as i64,
+            );
             if epoch != w.epoch.as_str() {
                 return Err(ApiError::new(ErrorCode::Stale, "ack of another epoch"));
             }
@@ -707,6 +758,7 @@ impl Tx<'_> {
                 return Err(ApiError::new(ErrorCode::Invalid, "ack ahead of the stream"));
             }
             if w.seq as i64 > acknowledged {
+                moved = true;
                 self.c()
                     .execute(
                         "UPDATE streams SET acknowledged = ?2 WHERE stream = ?1",
@@ -719,9 +771,15 @@ impl Tx<'_> {
                         params![w.stream.as_str(), w.seq as i64],
                     )
                     .map_err(internal)?;
+                head.acknowledged = w.seq;
+                self.2
+                    .borrow_mut()
+                    .insert(w.stream.as_str().into(), Some(head));
             }
         }
-        self.compact()
+        self.compact()?;
+        self.prune(crate::now())?;
+        Ok(moved)
     }
 
     /// Drops what finished operations no longer need: the body of one whose final state the Hub
@@ -730,41 +788,16 @@ impl Tx<'_> {
     /// taken once every event of those streams is acknowledged (one that finished without any
     /// stream, like a cancel, has nothing to deliver and is taken at once). An operation that is not finished
     /// (running or unknown) keeps its body for recovery; the ops rows (id, digest, receipt) stay
-    /// for idempotency.
+    /// for idempotency until retention expires.
     fn compact(&self) -> ApiResult<()> {
         let specs: Vec<(String, String, Option<String>)> = self.rows(
             "SELECT o.id, o.receipt, o.execution FROM command_specs s JOIN ops o ON o.id = s.op",
             [],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )?;
-        'specs: for (op, receipt, execution) in specs {
-            let r: Receipt = from(&receipt).map_err(internal)?;
-            if !r.state.is_finished() {
+        for (op, receipt, execution) in specs {
+            if !self.final_taken(&op, &receipt, execution.as_deref())? {
                 continue;
-            }
-            let mut streams = vec![crate::stream_of(&Subject::Operation {
-                operation: OperationId::new(op.clone()).map_err(internal)?,
-            })];
-            if let Some(e) = execution {
-                streams.push(crate::stream_of(&Subject::Execution(
-                    from(&e).map_err(internal)?,
-                )));
-            }
-            // A stream that does not exist has nothing left to deliver: an operation finished at
-            // accept without events (a cancel) is taken as soon as it is finished.
-            for stream in streams {
-                let taken: Option<bool> = self
-                    .c()
-                    .query_row(
-                        "SELECT produced = acknowledged FROM streams WHERE stream = ?1",
-                        [stream],
-                        |r| r.get(0),
-                    )
-                    .optional()
-                    .map_err(internal)?;
-                if taken == Some(false) {
-                    continue 'specs;
-                }
             }
             self.c()
                 .execute("DELETE FROM command_specs WHERE op = ?1", [&op])
@@ -784,6 +817,104 @@ impl Tx<'_> {
             }
         }
         Ok(())
+    }
+
+    // Shared by compaction and tombstone retention: missing streams have nothing to deliver.
+    fn op_streams(op: &str, execution: Option<&str>) -> ApiResult<Vec<String>> {
+        let mut streams = vec![crate::stream_of(&Subject::Operation {
+            operation: OperationId::new(op).map_err(internal)?,
+        })];
+        if let Some(e) = execution {
+            streams.push(crate::stream_of(&Subject::Execution(
+                from(e).map_err(internal)?,
+            )));
+        }
+        Ok(streams)
+    }
+
+    fn final_taken(&self, op: &str, receipt: &str, execution: Option<&str>) -> ApiResult<bool> {
+        Ok(from::<Receipt>(receipt)
+            .map_err(internal)?
+            .state
+            .is_finished()
+            && Self::op_streams(op, execution)?
+                .iter()
+                .all(|s| self.head(s).is_none_or(|h| h.produced == h.acknowledged)))
+    }
+
+    /// One bounded slice of an hourly sweep; persist the cursor with the deletions, so failure or
+    /// restart resumes safely. 24h exceeds the first-party Hub's largest accept window (10min).
+    /// Session streams and externally referenced receipts/grants survive retention.
+    pub(crate) fn prune(&self, now: i64) -> ApiResult<usize> {
+        let next: i64 = self
+            .c()
+            .query_row(
+                "SELECT COALESCE((SELECT value FROM meta WHERE key='prune_after'),0)",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(internal)?;
+        if now < next {
+            return Ok(0);
+        }
+        let cursor: i64 = self
+            .c()
+            .query_row(
+                "SELECT COALESCE((SELECT value FROM meta WHERE key='prune_cursor'),0)",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(internal)?;
+        let rows: Vec<(i64, String, String, Option<String>, i64)> = self.rows("SELECT rowid,id,receipt,execution,accepted FROM ops WHERE rowid>?1 ORDER BY rowid LIMIT ?2", params![cursor, PRUNE_BATCH as i64], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?)))?;
+        for (_, op, receipt, execution, accepted) in &rows {
+            if *accepted >= now.saturating_sub(RETENTION_MS)
+                || !self.final_taken(op, receipt, execution.as_deref())?
+            {
+                continue;
+            }
+            let held: bool = self.c().query_row("SELECT EXISTS(SELECT 1 FROM harness_setups WHERE op=?1 UNION ALL SELECT 1 FROM waits WHERE op=?1 UNION ALL SELECT 1 FROM attempts a JOIN artifact_grants g ON g.attempt=a.attempt WHERE a.op=?1)", [op], |r| r.get(0)).map_err(internal)?;
+            if held {
+                continue;
+            }
+            let streams = Self::op_streams(op, execution.as_deref())?;
+            let pending: bool = self
+                .c()
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM events WHERE stream=?1 OR stream=?2)",
+                    params![streams[0], streams.get(1)],
+                    |r| r.get(0),
+                )
+                .map_err(internal)?;
+            if pending {
+                continue;
+            }
+            let shared = match execution.as_deref().map(from::<ExecutionRef>).transpose().map_err(internal)? {
+                Some(ExecutionRef::Turn { .. }) => true,
+                Some(ExecutionRef::Job { job, .. }) => self.c().query_row("SELECT EXISTS(SELECT 1 FROM ops WHERE id!=?1 AND json_extract(execution,'$.job')=?2)", params![op,job.as_str()], |r| r.get(0)).map_err(internal)?,
+                None => false,
+            };
+            for stream in streams.into_iter().take(if shared { 1 } else { 2 }) {
+                self.c()
+                    .execute(
+                        "DELETE FROM streams WHERE stream=?1 AND produced=acknowledged",
+                        [&stream],
+                    )
+                    .map_err(internal)?;
+                self.2.borrow_mut().insert(stream, None);
+            }
+            for table in ["attempts", "command_specs", "reservations", "answers"] {
+                self.c()
+                    .execute(&format!("DELETE FROM {table} WHERE op=?1"), [op])
+                    .map_err(internal)?;
+            }
+            self.c()
+                .execute("DELETE FROM ops WHERE id=?1", [op])
+                .map_err(internal)?;
+        }
+        let done = rows.len() < PRUNE_BATCH;
+        self.c().execute("INSERT INTO meta(key,value) VALUES ('prune_cursor',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value", [if done { 0 } else { rows.last().unwrap().0 }]).map_err(internal)?;
+        self.c().execute("INSERT INTO meta(key,value) VALUES ('prune_after',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value", [if done { now.saturating_add(60*60_000) } else { 0 }]).map_err(internal)?;
+        Ok(rows.len())
     }
 
     pub fn replay(&self, from_mark: &Watermark, max_bytes: u32) -> ApiResult<EventBatch> {
@@ -1372,5 +1503,287 @@ mod answer_fence_tests {
             Ok(())
         })
         .unwrap();
+    }
+}
+
+#[cfg(test)]
+mod retention_tests {
+    use super::*;
+
+    fn add(
+        t: &Tx,
+        name: &str,
+        accepted: i64,
+        finished: bool,
+        execution: Option<ExecutionRef>,
+        acked: bool,
+    ) -> ApiResult<Watermark> {
+        let operation = OperationId::new(name).unwrap();
+        let receipt: Receipt = from(&json(&serde_json::json!({"operation": name, "state": {"state": if finished { "finished" } else { "running" }, "outcome": "succeeded"}}))).unwrap();
+        t.c().execute("INSERT INTO ops(id,method,digest,receipt,execution,accepted) VALUES (?1,'test',?2,?3,?4,?5)", params![name,Digest::sha256(name.as_bytes()).as_str(),json(&receipt),execution.as_ref().map(json),accepted]).map_err(internal)?;
+        let mut mark = None;
+        for subject in std::iter::once(Subject::Operation {
+            operation: operation.clone(),
+        })
+        .chain(execution.map(Subject::Execution))
+        {
+            let stream = StreamId::new(crate::stream_of(&subject)).unwrap();
+            let ev = t.record(&stream, |cursor| serde_json::from_value(serde_json::json!({
+                "schema": EVENT_SCHEMA, "id": format!("ev_{name}_{}",cursor.seq), "at": accepted,
+                "cursor": cursor, "subject": subject, "body": {"type": "operation_changed", "receipt": receipt}
+            })).unwrap())?;
+            if acked {
+                t.ack(&EventAck {
+                    durable: vec![ev.cursor.clone()],
+                })?;
+            }
+            mark = Some(ev.cursor);
+        }
+        t.save_spec(&operation, &serde_json::json!({}))?;
+        Ok(mark.unwrap())
+    }
+
+    fn consistent(j: &Journal) {
+        j.read(|t| {
+            let sql: Vec<String> = t.rows("SELECT json_object('stream',stream,'epoch',epoch,'produced',produced,'acknowledged',acknowledged) FROM streams ORDER BY stream", [], |r| r.get(0))?;
+            let sql: Vec<StreamHead> = sql.iter().map(|s| from(s).unwrap()).collect();
+            assert_eq!(t.heads()?,sql);
+            Ok(())
+        }).unwrap();
+    }
+
+    fn sweep(j: &Journal, now: i64) {
+        j.tx(|t| {
+            t.c()
+                .execute(
+                    "DELETE FROM meta WHERE key IN ('prune_after','prune_cursor')",
+                    [],
+                )
+                .map_err(internal)?;
+            Ok(())
+        })
+        .unwrap();
+        while j.tx(|t| t.prune(now)).unwrap() == PRUNE_BATCH {}
+    }
+
+    #[test]
+    fn pruning_retains_live_unacked_recent_session_and_referenced_state_across_restart() {
+        let d = tempfile::tempdir().unwrap();
+        let path = d.path().join("j");
+        let (j, _) = Journal::open(&path).unwrap();
+        let now = crate::now();
+        let old = now - RETENTION_MS - 1;
+        let job = |job: &str, attempt: &str| {
+            Some(ExecutionRef::Job {
+                job: JobId::new(job).unwrap(),
+                attempt: AttemptId::new(attempt).unwrap(),
+            })
+        };
+        j.tx(|t| {
+            t.c()
+                .execute("INSERT INTO meta VALUES ('prune_after',?1)", [i64::MAX])
+                .map_err(internal)?;
+            for (name, age, finished, acked) in [
+                ("old", old, true, true),
+                ("young", now, true, true),
+                ("unacked", old, true, false),
+                ("live", old, false, true),
+                ("installation", old, true, true),
+            ] {
+                add(t, name, age, finished, None, acked)?;
+            }
+            add(
+                t,
+                "turn",
+                old,
+                true,
+                Some(ExecutionRef::Turn {
+                    session: SessionId::new("session").unwrap(),
+                    turn: TurnId::new("turn").unwrap(),
+                    attempt: AttemptId::new("turn_attempt").unwrap(),
+                }),
+                true,
+            )?;
+            add(t, "job_old", old, true, job("shared", "a1"), true)?;
+            add(t, "job_live", old, false, job("shared", "a2"), true)?;
+            add(t, "job_last", old, true, job("last", "a3"), true)?;
+            t.take_attempt(
+                &job("last", "a3").unwrap(),
+                &OperationId::new("job_last").unwrap(),
+            )?;
+            t.c()
+                .execute("INSERT INTO reservations VALUES ('owned','old')", [])
+                .map_err(internal)?;
+            t.set_installation("test", &OperationId::new("installation").unwrap())?;
+            Ok(())
+        })
+        .unwrap();
+        sweep(&j, now);
+        consistent(&j);
+        let before = j
+            .read(|t| {
+                let ids: Vec<_> = t
+                    .ops()?
+                    .into_iter()
+                    .map(|(id, _)| id.as_str().to_owned())
+                    .collect();
+                assert_eq!(
+                    ids,
+                    ["installation", "job_live", "live", "unacked", "young"]
+                );
+                assert_eq!(t.heads()?.len(), 7); // Five retained op streams, the shared job and session.
+                assert_eq!(
+                    t.c()
+                        .query_row("SELECT count(*) FROM attempts", [], |r| r.get::<_, i64>(0))
+                        .unwrap(),
+                    0
+                );
+                assert_eq!(
+                    t.c()
+                        .query_row("SELECT count(*) FROM reservations", [], |r| r
+                            .get::<_, i64>(0))
+                        .unwrap(),
+                    0
+                );
+                assert!(t.spec(&OperationId::new("old").unwrap())?.is_none());
+                Ok(t.heads()?)
+            })
+            .unwrap();
+        drop(j);
+        let (j, _) = Journal::open(&path).unwrap();
+        consistent(&j);
+        j.read(|t| {
+            assert_eq!(t.heads()?, before);
+            assert!(matches!(
+                t.op(&OperationId::new("live").unwrap())?
+                    .unwrap()
+                    .receipt
+                    .state,
+                Observed::Unknown { .. }
+            ));
+            assert!(t.op(&OperationId::new("old").unwrap())?.is_none());
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn record_ack_prune_and_failed_commit_publish_only_committed_heads() {
+        let d = tempfile::tempdir().unwrap();
+        let (j, _) = Journal::open(&d.path().join("j")).unwrap();
+        let now = crate::now();
+        let mark = j.tx(|t| add(t, "op", now, true, None, false)).unwrap();
+        let ack = EventAck {
+            durable: vec![mark.clone()],
+        };
+        assert!(j.tx(|t| t.ack(&ack)).unwrap());
+        assert!(!j.tx(|t| t.ack(&ack)).unwrap());
+        consistent(&j);
+        let baseline = j.read(|t| t.heads()).unwrap();
+        assert!(
+            j.tx(|t| {
+                add(t, "rolled_back", now, true, None, false)?;
+                let mut bad = mark.clone();
+                bad.stream = StreamId::new("missing").unwrap();
+                t.ack(&EventAck { durable: vec![bad] })
+            })
+            .is_err()
+        );
+        assert!(
+            j.tx::<()>(|t| {
+                t.c()
+                    .execute(
+                        "DELETE FROM meta WHERE key IN ('prune_after','prune_cursor')",
+                        [],
+                    )
+                    .map_err(internal)?;
+                t.prune(now + RETENTION_MS + 1)?;
+                assert!(t.heads()?.is_empty());
+                Err(internal("rollback after prune"))
+            })
+            .is_err()
+        );
+        assert_eq!(j.read(|t| t.heads()).unwrap(), baseline);
+        consistent(&j);
+        j.db.lock().unwrap().0.execute_batch("PRAGMA foreign_keys=ON; CREATE TABLE parent(id PRIMARY KEY); CREATE TABLE child(id REFERENCES parent(id) DEFERRABLE INITIALLY DEFERRED);").unwrap();
+        assert!(
+            j.tx(|t| {
+                add(t, "commit_failure", now, true, None, true)?;
+                t.c()
+                    .execute("INSERT INTO child VALUES (1)", [])
+                    .map_err(internal)?;
+                Ok(())
+            })
+            .is_err()
+        );
+        consistent(&j);
+        assert_eq!(j.read(|t| t.heads()).unwrap(), baseline);
+        for (epoch, seq, code) in [
+            ("wrong", 1, ErrorCode::Stale),
+            (mark.epoch.as_str(), 2, ErrorCode::Invalid),
+        ] {
+            let mut bad = mark.clone();
+            bad.epoch = Epoch::new(epoch).unwrap();
+            bad.seq = seq;
+            assert_eq!(
+                j.tx(|t| t.ack(&EventAck { durable: vec![bad] }))
+                    .unwrap_err()
+                    .code,
+                code
+            );
+        }
+    }
+
+    #[test]
+    fn ack_and_heads_work_without_a_streams_table_to_select() {
+        let d = tempfile::tempdir().unwrap();
+        let (j, _) = Journal::open(&d.path().join("j")).unwrap();
+        let mark = j
+            .tx(|t| add(t, "cached", crate::now(), true, None, true))
+            .unwrap();
+        // Every SELECT from streams would fail, including a per-watermark SELECT. The redundant
+        // ack needs no writes, and the entire heads vector must still come from committed memory.
+        j.tx(|t| {
+            t.c()
+                .execute("ALTER TABLE streams RENAME TO hidden_streams", [])
+                .map_err(internal)?;
+            Ok(())
+        })
+        .unwrap();
+        j.read(|t| {
+            assert!(!t.ack(&EventAck {
+                durable: vec![mark]
+            })?);
+            assert_eq!(t.heads()?.len(), 1);
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn pruning_is_bounded_and_hourly() {
+        let d = tempfile::tempdir().unwrap();
+        let (j, _) = Journal::open(&d.path().join("j")).unwrap();
+        let now = crate::now();
+        j.tx(|t| {
+            for i in 0..(PRUNE_BATCH + 1) {
+                add(
+                    t,
+                    &format!("op{i}"),
+                    now - RETENTION_MS - 1,
+                    true,
+                    None,
+                    false,
+                )?;
+            }
+            Ok(())
+        })
+        .unwrap();
+        // Unacknowledged operations consume scan slots but survive, so each sweep is bounded.
+        assert_eq!(j.tx(|t| t.prune(now)).unwrap(), PRUNE_BATCH);
+        assert_eq!(j.tx(|t| t.prune(now)).unwrap(), 1);
+        assert_eq!(j.tx(|t| t.prune(now)).unwrap(), 0);
+        assert_eq!(j.tx(|t| t.prune(now + 60 * 60_000)).unwrap(), PRUNE_BATCH);
+        consistent(&j);
     }
 }

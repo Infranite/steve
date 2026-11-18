@@ -1527,6 +1527,7 @@ impl LocalNode {
         // and the throwaway repositories of pushes
         git::cleanup(&cfg.home);
         let (j, incarnation) = Journal::open(&cfg.home.join("node.sqlite3"))?;
+        while j.tx(|t| t.prune(now()))? != 0 {}
         // a group of the old incarnation that is surely gone holds nothing
         j.tx(|t| {
             for p in t.procs()? {
@@ -2441,12 +2442,7 @@ async fn deliver_loop(inner: std::sync::Weak<Inner>) {
             Ok(Ok(ack)) => {
                 last_ok = std::time::Instant::now();
                 *me.hub_down_since.lock().unwrap() = None;
-                let moved = me.j.tx(|t| {
-                    let before: u64 = t.heads()?.iter().map(|h| h.acknowledged).sum();
-                    t.ack(&ack)?;
-                    let after: u64 = t.heads()?.iter().map(|h| h.acknowledged).sum();
-                    Ok(after > before)
-                });
+                let moved = me.j.tx(|t| t.ack(&ack));
                 match moved {
                     Ok(m) => progress |= m,
                     Err(e) => {
@@ -2455,13 +2451,7 @@ async fn deliver_loop(inner: std::sync::Weak<Inner>) {
                     }
                 }
                 // what this batch carried must be covered now (by its own ack or an earlier one)
-                let heads = me.j.read(|t| t.heads()).unwrap_or_default();
-                let covered = marks.iter().all(|m| {
-                    heads
-                        .iter()
-                        .find(|h| h.stream == m.stream)
-                        .is_none_or(|h| h.epoch != m.epoch || h.acknowledged >= m.seq)
-                });
+                let covered = me.j.read(|t| Ok(t.covered(&marks))).unwrap_or(true);
                 if !covered {
                     short = true;
                 } else if progress && flight.is_empty() {
@@ -3292,7 +3282,7 @@ impl ExecutionControl for LocalNode {
     }
 
     async fn acknowledge(&self, ack: EventAck) -> ApiResult<()> {
-        self.0.j.tx(|t| t.ack(&ack))
+        self.0.j.tx(|t| t.ack(&ack).map(|_| ()))
     }
 }
 

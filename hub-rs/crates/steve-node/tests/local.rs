@@ -36,6 +36,8 @@ async fn snapshot_pages_thousands_of_stream_heads_without_oversized_frames() {
         .unwrap();
     }
     tx.commit().unwrap();
+    drop(n);
+    let n = t.node(); // Load externally seeded stream fixtures into the startup cache.
 
     let mut cursor = None;
     let mut seen = std::collections::HashSet::new();
@@ -5845,4 +5847,84 @@ async fn live_session_capacity_changes_the_actual_limiter_without_stopping_turns
         );
     }
     n.shutdown().await;
+}
+
+#[tokio::test]
+async fn pruned_commands_are_stale_recent_commands_deduplicate_and_snapshot_pages_recover() {
+    let t = T::new(&[]);
+    drop(LocalNode::open(t.config()).unwrap());
+    let mut commands: Vec<_> = ["expired", "recent"]
+        .into_iter()
+        .map(|id| {
+            now_cmd(
+                id,
+                Cancel {
+                    target: OperationId::new("unused").unwrap(),
+                    reason: "test".into(),
+                },
+            )
+        })
+        .collect();
+    commands[0].issued_at = Timestamp(wall() - 25 * 60 * 60_000);
+    commands[0].accept_before = Timestamp(commands[0].issued_at.0 + 10 * 60_000);
+    let db = rusqlite::Connection::open(t.home.join("node.sqlite3")).unwrap();
+    for command in &commands {
+        let receipt = Receipt {
+            operation: command.id.clone(),
+            state: Observed::Finished {
+                outcome: Outcome::Succeeded,
+                result: Some(OperationResult::Unit),
+                error: None,
+            },
+        };
+        db.execute(
+            "INSERT INTO ops(id,method,digest,receipt,accepted) VALUES (?1,'cancel',?2,?3,?4)",
+            rusqlite::params![
+                command.id.as_str(),
+                command.digest("cancel").unwrap().as_str(),
+                serde_json::to_string(&receipt).unwrap(),
+                command.issued_at.0
+            ],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO streams VALUES (?1,'epoch',1,1)",
+            [derived_id("op", command.id.as_str())],
+        )
+        .unwrap();
+    }
+    drop(db);
+    let n = LocalNode::open(t.config()).unwrap();
+    assert_eq!(
+        n.cancel(commands[0].clone()).await.unwrap_err().code,
+        ErrorCode::Stale
+    );
+    let first = n.cancel(commands[1].clone()).await.unwrap();
+    assert_eq!(n.cancel(commands[1].clone()).await.unwrap(), first);
+    let mut changed = commands[1].clone();
+    changed.body.reason = "different".into();
+    assert_eq!(
+        n.cancel(changed).await.unwrap_err().code,
+        ErrorCode::Conflict
+    );
+    let page = n
+        .snapshot(PageRequest {
+            cursor: None,
+            limit: 0,
+        })
+        .await
+        .unwrap();
+    assert_eq!(page.entries.len(), 1);
+    assert_eq!(page.entries[0].receipt, first);
+    assert_eq!(page.heads, n.streams().await.unwrap());
+    assert_eq!(page.heads.len(), 1);
+    assert!(page.next.is_none());
+    drop(n);
+    let n = LocalNode::open(t.config()).unwrap();
+    assert_eq!(
+        n.cancel(commands[0].clone()).await.unwrap_err().code,
+        ErrorCode::Stale
+    );
+    assert_eq!(n.cancel(commands[1].clone()).await.unwrap(), first);
+    assert_eq!(n.streams().await.unwrap(), page.heads);
 }
