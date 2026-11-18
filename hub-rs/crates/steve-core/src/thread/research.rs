@@ -233,6 +233,7 @@ async fn handing_on<F: std::future::Future>(j: &InlineJob, f: F) -> F::Output {
 /// The inline queue of a conversation: the web's is keyed by the workspace (as before), a guest
 /// conversation's has its own, so a chat's question never waits behind your research.
 struct Active {
+    origin: String,
     run: Option<String>,
     kind: Inline,
     stop: super::Stop,
@@ -491,12 +492,12 @@ impl Core {
         let lanes = lock(&self.0.thread.inline);
         let lane = lanes.get(ws);
         let mut st = lane.map(|l| lock(&l.st));
-        let (says_so, taken) = match st.as_deref_mut() {
+        let (says_so, taken, origin) = match st.as_deref_mut() {
             Some(LaneState {
                 running: Some(a), ..
             }) => {
                 a.stop.stop();
-                (true, false)
+                (true, false, None)
             }
             Some(q) if !q.waiting.is_empty() => {
                 let a = q.waiting.remove(0);
@@ -504,18 +505,18 @@ impl Core {
                 if let Some(run) = &a.run {
                     self.end_unstarted(ws, run)?;
                 }
-                (false, true)
+                (false, true, Some(a.origin))
             }
             _ if routing.is_none() => return Ok(false),
-            _ => (false, false),
+            _ => (false, false, routing.and_then(|f| f.origin.clone())),
         };
         if !says_so {
-            self.store().message_add(
+            self.post(
                 ws,
-                "steve",
+                super::MAIN,
                 "好，停下了。要我换个方式就直接说。",
                 None,
-                Some(&json!({"stopped": true, SYSTEM: true})),
+                Some(&json!({"origin": origin, "stopped": true, SYSTEM: true})),
             )?;
         }
         if let Some(f) = routing {
@@ -565,10 +566,13 @@ impl Core {
                     st.running
                         .iter()
                         .chain(st.waiting.iter())
-                        .find(|a| a.run.as_deref() == Some(run))
+                        .find(|a| a.run.as_deref() == Some(run) && !a.stop.is_stopped())
                         .map(|a| {
+                            // Claim the stop under the lanes lock; repeated stop requests must not
+                            // write another queued stop receipt.
+                            a.stop.stop();
                             (
-                                a.stop.clone(),
+                                a.origin.clone(),
                                 st.running
                                     .as_ref()
                                     .is_some_and(|r| r.run.as_deref() == Some(run)),
@@ -576,12 +580,18 @@ impl Core {
                         })
                 })
         };
-        let Some((stop, running)) = found else {
+        let Some((origin, running)) = found else {
             return Ok(false);
         };
-        stop.stop();
         if !running {
             self.end_unstarted(ws, run)?;
+            self.post(
+                ws,
+                &self.conv_of(&origin),
+                "好，停下了。要我换个方式就直接说。",
+                None,
+                Some(&json!({"origin": origin, "run": run, "stopped": true, SYSTEM: true})),
+            )?;
         }
         Ok(true)
     }
@@ -610,6 +620,7 @@ impl Core {
                 return Ok(false);
             }
             st.waiting.push(Active {
+                origin: job.origin.clone(),
                 run: None,
                 kind: job.kind,
                 stop: job.stop.clone(),
@@ -713,6 +724,7 @@ impl Core {
                         continue;
                     }
                     g.running = Some(Active {
+                        origin: j.origin.clone(),
                         run: j.run.clone(),
                         kind: j.kind,
                         stop: j.stop.clone(),

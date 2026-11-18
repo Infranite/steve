@@ -564,9 +564,10 @@ impl Channels {
     }
 
     /// Steve stored message `mid` in conversation `conv`: take it out to the space when it answers a
-    /// turn that came from there. Runs in the background; never fails the caller.
+    /// turn that came from there. A web fallback only ends the source message's reaction, without
+    /// sending any text to the channel. Runs in the background; never fails the caller.
     pub fn conv_said(&self, ws: &str, conv: &str, mid: &str) {
-        if space_of_conv(conv).is_none() {
+        if conv != MAIN_CONV && space_of_conv(conv).is_none() {
             return;
         }
         let (ch, ws, mid) = (self.clone(), ws.to_string(), mid.to_string());
@@ -582,7 +583,7 @@ impl Channels {
         let Some(m) = self.store().messages().get(mid)? else {
             return Ok(None);
         };
-        if m.author != "steve" || m.meta.get("chan_out").is_some() {
+        if m.workspace_id != ws || m.author != "steve" || m.meta.get("chan_out").is_some() {
             return Ok(None);
         }
         // flow-back cards, hidden notes: the conversation's own
@@ -595,6 +596,39 @@ impl Channels {
         let Some(origin) = m.meta.get("origin").and_then(Value::as_str) else {
             return Ok(None);
         };
+        if m.space == MAIN_CONV {
+            // No send-as-you grant: the answer belongs to the web conversation. Do not enter the
+            // outbound path, even if permissions changed while it was being answered.
+            if let Some(turn) = self.store().messages().get(origin)?.filter(|o| {
+                o.workspace_id == ws && o.space == MAIN_CONV && o.meta["chan"]["web"] == true
+            }) && let Some(source) = turn.meta["chan"]["message"].as_str()
+                && self.store().reader(|c| -> ChannelResult<bool> {
+                    Ok(c.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM chan_messages WHERE id = ? AND workspace_id = ? AND direction = 'in')",
+                        params![source, ws],
+                        |r| r.get(0),
+                    )?)
+                })?
+            {
+                // Research receipts keep their terminal reason under steps, rather than the
+                // inline answer's top-level error/stopped flags. Partial results are not success.
+                let research_end = m.meta["steps"]["research"]["stopped"].as_str();
+                let how = if m.meta["stopped"] == true || research_end == Some("user") {
+                    Finish::Clear
+                } else if m.meta["error"] == true || research_end.is_some() {
+                    Finish::Failed
+                } else if system_text(&m.meta) {
+                    Finish::Clear
+                } else {
+                    Finish::Done
+                };
+                self.react_finish(source, how).await;
+            }
+            return Ok(None);
+        }
+        if space_of_conv(&m.space).is_none() {
+            return Ok(None);
+        }
         if let Some(space) = space_of_conv(&m.space)
             && self.store().reader(|c| spaces::voice(c, space))?.is_none()
         {

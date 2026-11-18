@@ -88,6 +88,124 @@ fn turn(k: &Kit, text: &str, c: Conv) -> String {
 }
 
 #[tokio::test]
+async fn main_channel_turns_report_outcomes_without_using_the_hosts_voice() {
+    let k = Kit::new();
+    let host = Arc::new(Host::default());
+    k.core.set_conv_host(host.clone());
+    router(
+        &k,
+        Arc::new(Mutex::new(vec![])),
+        |_| json!({"kind": "answer", "confidence": 1}),
+    );
+    let origin = k
+        .core
+        .say_in(
+            WS,
+            Conv::main(),
+            "看下磁盘",
+            &json!({"chan": {"message": "cm_web", "web": true}}),
+        )
+        .unwrap();
+    let ms = settle(&k, crate::thread::MAIN, 2).await;
+    assert_eq!(ms[1].text, "主线的回答");
+    assert_eq!(ms[1].meta["origin"], origin);
+    for _ in 0..500 {
+        if !host.said.lock().unwrap().is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let mut expected = vec![(crate::thread::MAIN.to_string(), ms[1].id.clone())];
+    assert_eq!(*host.said.lock().unwrap(), expected);
+    assert!(host.answered.lock().unwrap().is_empty());
+
+    // The same hook handles failure and stop receipts, including system messages.
+    for outcome in ["error", "stopped"] {
+        let mut meta = json!({"origin": origin, "system": true});
+        meta[outcome] = json!(true);
+        let id = k
+            .core
+            .post(WS, crate::thread::MAIN, outcome, None, Some(&meta))
+            .unwrap();
+        expected.push((crate::thread::MAIN.into(), id));
+    }
+    assert_eq!(*host.said.lock().unwrap(), expected);
+
+    // Ordinary main-conversation turns and an unscoped note never reach the host.
+    let ordinary = k
+        .db()
+        .message_add_in(WS, crate::thread::MAIN, "me", "你好", None, &json!({}))
+        .unwrap();
+    for meta in [
+        json!({}),
+        json!({"origin": ordinary}),
+        json!({"origin": "missing"}),
+    ] {
+        k.core
+            .post(WS, crate::thread::MAIN, "你好", None, Some(&meta))
+            .unwrap();
+    }
+    assert_eq!(*host.said.lock().unwrap(), expected);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn stopping_a_main_channel_turn_during_routing_or_queueing_reports_its_origin() {
+    for stop_kind in ["routing", "queued", "queued_run"] {
+        let queued = stop_kind != "routing";
+        let k = Kit::new();
+        let host = Arc::new(Host::default());
+        k.core.set_conv_host(host.clone());
+        let store = k.db().store().clone();
+        router(&k, Arc::new(Mutex::new(vec![])), move |_| {
+            if queued {
+                store.maintenance_set(true).unwrap();
+            }
+            json!({"kind": "answer", "confidence": 1})
+        });
+        if !queued {
+            *k.gw.slow.lock().unwrap() = Some(("You are the router", Duration::from_secs(30)));
+        }
+        let origin = k
+            .core
+            .say_in(
+                WS,
+                Conv::main(),
+                "慢慢答",
+                &json!({"chan": {"message": "cm_web", "web": true}}),
+            )
+            .unwrap();
+        assert!(k.wait(|| if queued {
+            k.core.inline_busy(WS) && !k.core.routing(WS)
+        } else {
+            k.gw.calls
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|p| p.starts_with("You are the router"))
+        }));
+        if stop_kind == "queued_run" {
+            let run = k.db().store().thread().runs_of_message(&origin).unwrap()[0]
+                .id
+                .clone();
+            assert!(k.core.stop_run(WS, &run).unwrap());
+            assert!(!k.core.stop_run(WS, &run).unwrap());
+        } else {
+            assert!(k.core.stop(WS).unwrap());
+        }
+        let ms = settle(&k, crate::thread::MAIN, 2).await;
+        assert_eq!(ms[1].meta["origin"], origin);
+        assert_eq!(ms[1].meta["stopped"], true);
+        assert_eq!(
+            *host.said.lock().unwrap(),
+            [(crate::thread::MAIN.into(), ms[1].id.clone())]
+        );
+        k.db().store().maintenance_set(false).unwrap();
+        assert!(k.wait(|| !k.core.main_busy(WS).unwrap()));
+        assert_eq!(k.db().messages(WS).unwrap().len(), 2, "one stop receipt");
+    }
+}
+
+#[tokio::test]
 async fn guest_turns_are_routed_and_answered_in_their_own_conversation() {
     let k = Kit::new();
     let host = Arc::new(Host::default());
