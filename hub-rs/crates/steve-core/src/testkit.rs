@@ -432,6 +432,8 @@ pub struct FakeGateway {
     pub images: Mutex<Vec<Vec<serde_json::Value>>>,
     /// how long a call whose prompt starts with the text takes (awaited, so a stop can cut it short)
     pub slow: Mutex<Option<(&'static str, Duration)>>,
+    /// the model the fake harness names itself in its reports (`None`: it names none)
+    pub reported: Mutex<Option<String>>,
 }
 impl FakeGateway {
     pub fn set(&self, f: impl Fn(&str, Tier) -> Result<String> + Send + Sync + 'static) {
@@ -463,6 +465,7 @@ impl ModelGateway for FakeGateway {
         Ok(crate::gateway::Printed {
             text,
             model: "fake-model".into(),
+            reported_model: self.reported.lock().unwrap().clone(),
             cost_usd: None,
             ..Default::default()
         })
@@ -522,6 +525,7 @@ impl Kit {
             tools: Mutex::new(vec![]),
             images: Mutex::new(vec![]),
             slow: Mutex::new(None),
+            reported: Mutex::new(Some("fake-model".into())),
         });
         let core = Core::new(store, rt.clone(), gw.clone(), cfg);
         core.seed().unwrap();

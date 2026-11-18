@@ -4,7 +4,7 @@
 //! yet. Also the reads of the Node command ledger that state needs (a dispatch whose receipt never
 //! came is reconciled under its own `operation_id`, never sent again under a new one).
 
-use rusqlite::{OptionalExtension, params};
+use rusqlite::params;
 use serde::Serialize;
 use serde_json::Value;
 
@@ -320,6 +320,93 @@ fn insert_judgement_in(tx: &Tx<'_>, j: &NewJudgement<'_>) -> Result<Option<Strin
             j.decided_by, j.would, j.independent, j.fingerprint],
     )?;
     Ok((n > 0).then_some(id))
+}
+
+/// What a judge's write finds ([`ItemFacts::candidate_judged`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Judged {
+    /// Written: the judgement's id.
+    Written(String),
+    /// The claim is gone (another pass took the candidate over, or it was superseded).
+    Lost,
+    /// Its key was judged already: the candidate is superseded.
+    Already,
+    /// Something it rests on changed since it was claimed (`cycle`, `turn`, `scope`, `inputs` or
+    /// `evidence`): nothing was written.
+    Stale(&'static str),
+}
+
+/// [`ItemFacts::evidence_version`] on `c` (a read, or the write transaction).
+fn evidence_version_in(c: &rusqlite::Connection, item: &str, cycle: i64) -> Result<String> {
+    let facts: Vec<String> = all(
+        c,
+        "SELECT id||'|'||kind||'|'||state||'|'||provenance||'|'||COALESCE(head,'')||'|'||COALESCE(ref,'')||'|'||observed_at
+         FROM item_delivery_facts WHERE item_id=? AND cycle=? ORDER BY rowid",
+        params![item, cycle],
+        |r| r.get(0),
+    )?;
+    let outputs: Vec<String> = all(
+        c,
+        "SELECT id||'|'||title||'|'||COALESCE(location,'') FROM artifacts WHERE item_id=? ORDER BY rowid",
+        [item],
+        |r| r.get(0),
+    )?;
+    let closing: Option<String> =
+        super::one(c, "SELECT closing FROM items WHERE id=?", [item], |r| {
+            r.get::<_, Option<String>>(0)
+        })?
+        .flatten();
+    Ok(crate::sha(&format!(
+        "{}\n--\n{}\n--\n{}",
+        facts.join("\n"),
+        outputs.join("\n"),
+        closing.unwrap_or_default()
+    )))
+}
+
+/// Why claimed candidate `c` no longer stands, read in the write transaction: its item's cycle
+/// moved on (or it closed), its session's newest logical turn is another or not finished, the
+/// scope revision moved on, the session's input moved past the version it was claimed on, or the
+/// evidence version is not `evidence`. `None`: it all still holds.
+fn stale_in(tx: &Tx<'_>, c: &Candidate, evidence: &str) -> Result<Option<&'static str>> {
+    let cycle: Option<(i64, String)> = super::one(
+        tx,
+        "SELECT cycle,phase FROM items WHERE id=?",
+        [&c.item_id],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    if cycle.is_none_or(|(n, phase)| n != c.cycle || phase == "closed") {
+        return Ok(Some("cycle"));
+    }
+    let turn: Option<(String, String)> = super::one(
+        tx,
+        "SELECT turn_id,state FROM runtime_turns WHERE session_id=? ORDER BY created DESC,rowid DESC LIMIT 1",
+        [&c.session_id],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    if turn.is_none_or(|(t, state)| t != c.turn_id || state != "finished") {
+        return Ok(Some("turn"));
+    }
+    let scope: i64 = tx.query_row(
+        "SELECT COALESCE(MAX(version),0) FROM item_goals WHERE item_id=?",
+        [&c.item_id],
+        |r| r.get(0),
+    )?;
+    if scope != c.scope_revision {
+        return Ok(Some("scope"));
+    }
+    let input: i64 = tx.query_row(
+        "SELECT COALESCE(MAX(seq),0) FROM events WHERE session_id=?",
+        [&c.session_id],
+        |r| r.get(0),
+    )?;
+    if c.input_seq != Some(input) {
+        return Ok(Some("inputs"));
+    }
+    if evidence_version_in(tx, &c.item_id, c.cycle)? != evidence {
+        return Ok(Some("evidence"));
+    }
+    Ok(None)
 }
 
 impl ItemFacts<'_> {
@@ -650,40 +737,53 @@ impl ItemFacts<'_> {
         })
     }
 
-    /// Writes the verdict of the pass that holds the claim, compare-and-swap: the candidate becomes
-    /// `judged` and the judgement is inserted in one transaction, or nothing happens (`None`) when the
-    /// claim is gone or its key is judged already.
+    /// Writes the verdict of the pass that holds the claim, compare-and-swap in one transaction:
+    /// inside it, the claim, the item's cycle, the session's current logical turn (its newest, and
+    /// finished), the scope revision, the input version (the session's newest event, as claimed) and
+    /// the evidence version ([`ItemFacts::evidence_version`], `evidence` as the pass read it) are
+    /// read again. Only when every one is unchanged does the candidate become `judged` and the
+    /// judgement get inserted; otherwise nothing is written and the answer says why
+    /// ([`Judged::Stale`]), for the caller to supersede the candidate or judge it again.
     pub fn candidate_judged(
         &self,
         id: &str,
         claim: &str,
+        evidence: &str,
         j: &NewJudgement<'_>,
-    ) -> Result<Option<String>> {
+    ) -> Result<Judged> {
         self.0.transaction(|tx| {
-            let open: bool = tx
-                .query_row(
-                    "SELECT 1 FROM item_judge_candidates WHERE id=? AND state='judging' AND claim=?",
-                    params![id, claim],
-                    |_| Ok(true),
-                )
-                .optional()?
-                .unwrap_or(false);
-            if !open {
-                return Ok::<_, StoreError>(None);
+            let Some(c) = super::one(
+                tx,
+                "SELECT * FROM item_judge_candidates WHERE id=? AND state='judging' AND claim=?",
+                params![id, claim],
+                candidate_row,
+            )?
+            else {
+                return Ok::<_, StoreError>(Judged::Lost);
+            };
+            if let Some(why) = stale_in(tx, &c, evidence)? {
+                return Ok(Judged::Stale(why));
             }
             let Some(jid) = insert_judgement_in(tx, j)? else {
                 tx.execute(
                     "UPDATE item_judge_candidates SET state='superseded',settled_reason='judged_already',claim=NULL,updated=? WHERE id=?",
                     params![now(), id],
                 )?;
-                return Ok(None);
+                return Ok(Judged::Already);
             };
             tx.execute(
                 "UPDATE item_judge_candidates SET state='judged',claim=NULL,judgement_id=?,updated=? WHERE id=?",
                 params![jid, now(), id],
             )?;
-            Ok(Some(jid))
+            Ok(Judged::Written(jid))
         })
+    }
+
+    /// The version of what a judgement of `item` in `cycle` rests on besides the session's events:
+    /// a digest of its delivery facts, its outputs and its closing (with the checks the executor
+    /// reported). Any fact recorded, output added or closing changed gives another version.
+    pub fn evidence_version(&self, item: &str, cycle: i64) -> Result<String> {
+        self.0.read(|c| evidence_version_in(c, item, cycle))
     }
 
     /// The newest logical turn of `session` when it is finished, with its last attempt.

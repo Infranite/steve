@@ -11,16 +11,22 @@
 //!    and its newest turn, and evaluable — the Hub-visible turn is quiescent. Busy or unknown is
 //!    looked at again later; another turn, session, cycle or scope supersedes the candidate.
 //! 3. **A fixed input bundle** ([`Bundle`]): the original request's reference, the criteria with
-//!    stable ids, kinds and versions, the turn's final text (read from its events: a session turn's
-//!    completion carries no text), and the deliveries and evidence with their provenance.
-//! 4. **Facts first** ([`fact_checks`]): each criterion met, unmet or unknown from verified facts
-//!    only; a read that failed is unknown. Deterministic rules of the turn ([`ruled`]) decide what
-//!    needs no model. Only then **the model**, one call without tools, outside the core lock, on the
-//!    owner's "judge" model setting and by default not the worker's model ([`choose`]); the harness
-//!    and model that answered are recorded. Its output must be one of five verdicts with a status
-//!    for every criterion id ([`parse`]); anything else is a failure, retried, given up after the cap.
+//!    stable ids, kinds and versions, the final text and the end of the candidate's own turn and
+//!    attempt (read from its events up to that attempt's end; `unknown` when that end was not kept,
+//!    never another turn's), and the deliveries and evidence with their provenance.
+//! 4. **Facts first** ([`fact_checks`]), criterion by criterion: a hard condition ([`HARD`]) is met
+//!    or unmet only by a verified fact; a read that failed is unknown and stays unknown — the model
+//!    never upgrades it ([`parse`]). Deterministic rules of the turn ([`ruled`]) decide what needs no
+//!    model; a goal in words or an operation is always the model's, also when every hard condition
+//!    is met. The model: one call without tools, outside the core lock, on the owner's "judge" model
+//!    setting and by default not the worker's model ([`choose`]); the harness and model that
+//!    reported back are recorded (`unknown` when they did not name themselves). Its output must be
+//!    one of five verdicts with a status for every criterion id ([`parse`]); anything else is a
+//!    failure, retried, given up after the cap.
 //! 5. **Compare-and-swap**: the cycle, session, turn, scope, input sequence, evidence and human
-//!    actions are read again before the verdict is written; any change throws the result away.
+//!    actions are read again before the verdict is written, and the cycle, logical turn, scope
+//!    revision, input version and evidence version once more inside the write's own transaction
+//!    ([`steve_store::item_facts::ItemFacts::candidate_judged`]); any change throws the result away.
 
 use std::collections::HashSet;
 use std::time::Duration;
@@ -28,7 +34,7 @@ use std::time::Duration;
 use serde::Serialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use steve_store::item_facts::{Candidate, NewCandidate, NewJudgement, VERDICTS};
+use steve_store::item_facts::{Candidate, Judged, NewCandidate, NewJudgement, VERDICTS};
 
 use crate::derive::{Facts, Required, Settled, judge_gate, result_fact};
 use crate::gateway::{ThinkTools, Tier};
@@ -43,6 +49,20 @@ pub const PURPOSE: &str = "judge";
 
 /// What a criterion is checked against.
 pub const KINDS: [&str; 5] = ["merge", "build", "deploy", "operated", "free"];
+
+/// The kinds of the hard conditions: settled only by a verified fact about the current result.
+/// What facts leave unknown stays unknown, whatever the model says. An actual operation is only
+/// ever reported and a goal in words is no fact: those two are the model's to judge, always.
+pub const HARD: [&str; 3] = ["merge", "build", "deploy"];
+
+/// What the judge records for what nobody reported: a turn's end that was not kept, a harness or
+/// a model that did not name itself.
+pub const UNKNOWN: &str = "unknown";
+
+/// Whether a criterion of `kind` is a hard condition ([`HARD`]).
+pub fn is_hard(kind: &str) -> bool {
+    HARD.contains(&kind)
+}
 
 /// One completion criterion: a stable id, the kind that says how it is checked, and the version
 /// of the scope it belongs to.
@@ -124,9 +144,14 @@ pub struct Bundle {
     pub attempt: Option<String>,
     pub request: Request,
     pub criteria: Vec<Criterion>,
-    /// The end of what the agent said in this turn after its last tool call.
+    /// The end of what the agent said in this turn after its last tool call, read from the events
+    /// of this turn and attempt only (empty when [`Bundle::final_text_source`] is `unknown`).
     pub final_text: String,
-    /// How the turn ended (`end_turn`, `cancelled`, `error`…) and its error, if any.
+    /// `turn`: read from the candidate's own turn and attempt; `unknown`: that turn's end was not
+    /// kept (another attempt's end is the session's last), so its words are not known.
+    pub final_text_source: &'static str,
+    /// How the candidate's attempt ended (`end_turn`, `cancelled`, `error`…; `unknown` when its end
+    /// was not kept) and its error, if any.
     pub stop_reason: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
@@ -230,9 +255,10 @@ pub fn evidence(
     out
 }
 
-/// The criteria facts can settle, settled: only by a verified fact about the current result (a read
-/// that failed, or nothing to read, is unknown). An actual operation is only ever reported by the
-/// executor and a goal in words is no fact: both are left to the model.
+/// Every criterion, one by one, as facts have it: a hard condition ([`HARD`]) met or unmet only by a
+/// verified fact about the current result (a read that failed, or nothing to read, is unknown, and
+/// stays so). An actual operation is only ever reported by the executor and a goal in words is no
+/// fact: both are unknown here and left to the model.
 pub fn fact_checks(f: &Facts, criteria: &[Criterion]) -> Vec<Checked> {
     criteria
         .iter()
@@ -287,8 +313,10 @@ const UNDERWAY: [&str; 3] = ["open", "running", "pending"];
 /// A verdict that needs no model: `Some((verdict, why, decided_by))`.
 /// - a turn cancelled (not by you: your Stop holds the gate) says nothing of the work: unknown;
 /// - a turn that failed did not finish it: not done;
-/// - every criterion hard and settled by facts: done, waiting (one is underway) or not done;
-/// - nothing said and nothing delivered in the turn: unknown (nothing to judge on);
+/// - every criterion a hard condition, each settled by verified facts: done, waiting (one is
+///   underway) or not done. A criterion the model judges (a goal in words, an operation) is never
+///   skipped because the hard ones are settled: with one, this rule does not apply;
+/// - nothing said (or its words not known) and nothing delivered in the turn: unknown;
 /// - the judge's model switched off (`judge_model` = 0): unknown.
 pub fn ruled(
     b: &Bundle,
@@ -301,19 +329,18 @@ pub fn ruled(
     if b.stop_reason == "error" || b.error.as_deref().is_some_and(|e| !e.is_empty()) {
         return Some(("not_done", "turn_failed", "rule"));
     }
-    let hard: Vec<&Checked> = checked
+    let status = |c: &Criterion| {
+        checked
+            .iter()
+            .find(|k| k.id == c.id)
+            .filter(|k| k.by == "facts")
+    };
+    let by_facts: Option<Vec<&Checked>> = b
+        .criteria
         .iter()
-        .filter(|k| {
-            b.criteria
-                .iter()
-                .any(|c| c.id == k.id && matches!(c.kind, "merge" | "build" | "deploy"))
-        })
+        .map(|c| status(c).filter(|_| is_hard(c.kind)))
         .collect();
-    let operated = b.criteria.iter().any(|c| c.kind == "operated");
-    /* a completion rule that settles it (merged, built, deployed): the goal in words is what those
-     * facts were asked to prove, so no model is asked about it. An actual operation is only ever
-     * reported: it is never settled by facts */
-    if !hard.is_empty() && !operated && hard.iter().all(|k| k.status != Status::Unknown) {
+    if let Some(hard) = by_facts.filter(|h| !h.is_empty()) {
         if hard.iter().all(|k| k.status == Status::Met) {
             return Some(("done", "hard_facts_met", "facts"));
         }
@@ -327,7 +354,15 @@ pub fn ruled(
         });
     }
     if b.final_text.is_empty() && !b.delivered_this_turn {
-        return Some(("unknown", "no_reply", "rule"));
+        return Some((
+            "unknown",
+            if b.final_text_source == UNKNOWN {
+                "reply_unknown"
+            } else {
+                "no_reply"
+            },
+            "rule",
+        ));
     }
     if !model_on {
         return Some(("unknown", "model_off", "rule"));
@@ -337,12 +372,13 @@ pub fn ruled(
 
 /// The judge's instructions: the stable head of its prompt.
 const INSTRUCTIONS: &str = r#"You judge whether a piece of delegated work is done. You only judge; you do not do the work.
-You get one JSON bundle: the original request, the completion criteria (each with an id), the agent's final text of its last turn, how that turn ended, and evidence. Each piece of evidence has a "ref" and a "provenance": "verified" means the system checked it itself; "reported" means the agent only said so; "unknown" means nobody could tell.
+You get one JSON bundle: the original request, the completion criteria (each with an id), the agent's final text of its last turn ("final_text_source" "unknown": it could not be read), how that turn ended ("unknown": not known), and evidence. Each piece of evidence has a "ref" and a "provenance": "verified" means the system checked it itself; "reported" means the agent only said so; "unknown" means nobody could tell.
 
 Rules:
 - Judge the original request, not the last question. Finishing one exchange is not finishing the task.
 - Only what the evidence and the final text show counts. If you are not sure, it is not done.
-- A criterion whose "status" is already given in "checked" was settled by verified facts: repeat that status.
+- A criterion listed in "checked" is a hard condition the system checked itself against verified facts: repeat its status exactly. "unknown" there means nobody could verify it: it stays "unknown", whatever the final text or reported evidence says.
+- Judge every other criterion yourself, each one, also when the hard conditions are met.
 - "met" needs at least one reference: an evidence "ref", "final_text" or "request".
 - verdict "done" only when every criterion is "met". "waiting" when the work waits on something outside the agent (a review, a build, another person). "needs_you" when only the owner can decide or answer. "not_done" when work is missing. "unknown" when you cannot tell.
 
@@ -352,9 +388,10 @@ List every criterion id exactly once."#;
 
 /// The judge's prompt: its instructions, then the bundle and what facts already settled.
 pub fn prompt(b: &Bundle, checked: &[Checked]) -> String {
+    /* every hard condition, unknown ones too: the model repeats them, it never settles them */
     let settled: Vec<Value> = checked
         .iter()
-        .filter(|k| k.by == "facts")
+        .filter(|k| b.criteria.iter().any(|c| c.id == k.id && is_hard(c.kind)))
         .map(|k| json!({"id": k.id, "status": k.status, "evidence": k.evidence}))
         .collect();
     let body = json!({
@@ -362,6 +399,7 @@ pub fn prompt(b: &Bundle, checked: &[Checked]) -> String {
         "criteria": b.criteria,
         "checked": settled,
         "final_text": b.final_text,
+        "final_text_source": b.final_text_source,
         "turn": {"stop_reason": b.stop_reason, "delivered": b.delivered_this_turn},
         "evidence": b.evidence,
     });
@@ -377,9 +415,9 @@ pub struct ModelVerdict {
 }
 
 /// The model's reply, strictly: one of the five verdicts, every criterion id exactly once with a
-/// valid status, references that exist in the bundle, a met criterion with at least one, no status
-/// that contradicts what facts settled, and `done` only when every criterion is met. `Err` says why
-/// it was refused.
+/// valid status, references that exist in the bundle, a met criterion with at least one, a hard
+/// condition exactly as facts have it (an unknown one stays unknown: the model never upgrades it),
+/// and `done` only when every criterion is met. `Err` says why it was refused.
 pub fn parse(
     raw: &str,
     b: &Bundle,
@@ -424,8 +462,12 @@ pub fn parse(
         if status == Status::Met && evidence.is_empty() {
             return Err(format!("met_without_evidence:{id}"));
         }
-        if let Some(k) = checked.iter().find(|k| k.id == id && k.by == "facts")
-            && k.status != status
+        let hard = b.criteria.iter().any(|k| k.id == id && is_hard(k.kind));
+        if hard
+            && checked
+                .iter()
+                .find(|k| k.id == id)
+                .is_none_or(|k| k.status != status)
         {
             return Err(format!("contradicts_facts:{id}"));
         }
@@ -447,9 +489,11 @@ pub fn parse(
     if verdict == "done" && out.iter().any(|c| c.status != Status::Met) {
         return Err("done_with_open_criteria".into());
     }
-    /* what facts settled stays theirs */
+    /* a hard condition stays as facts have it, with their evidence */
     for c in &mut out {
-        if let Some(k) = checked.iter().find(|k| k.id == c.id && k.by == "facts") {
+        if b.criteria.iter().any(|k| k.id == c.id && is_hard(k.kind))
+            && let Some(k) = checked.iter().find(|k| k.id == c.id)
+        {
             *c = k.clone();
         }
     }
@@ -539,10 +583,12 @@ pub fn choose(
 }
 
 /// Whether the model that answered was another than the worker's: `yes`, `no`, or `unknown` (a
-/// harness default on either side: its name is not known).
+/// harness default on the worker's side, or a judge's harness or model that did not report itself:
+/// its name is not known).
 pub fn independent(harness: &str, model: &str, worker: &Worker) -> &'static str {
+    let known = |v: &str| !v.is_empty() && v != UNKNOWN;
     match worker.model.as_deref() {
-        Some(w) if !model.is_empty() => {
+        Some(w) if known(model) && known(harness) => {
             if harness.eq(&worker.harness) && model == w {
                 "no"
             } else {
@@ -570,12 +616,16 @@ pub(crate) struct Prepared {
     pub(crate) checked: Vec<Checked>,
     pub(crate) fingerprint: String,
     pub(crate) input_seq: i64,
+    /// The evidence version ([`steve_store::item_facts::ItemFacts::evidence_version`]) the bundle
+    /// was read on: the write compares it again in its own transaction.
+    pub(crate) evidence: String,
     pub(crate) choice: Choice,
     pub(crate) worker: Worker,
     pub(crate) timeout: Duration,
 }
 
-/// What the model call gave: its text, and the harness and model that actually answered.
+/// What the model call gave: its text, and the harness and model that actually answered, as they
+/// reported themselves ([`UNKNOWN`] when they did not).
 pub(crate) struct Called {
     pub(crate) result: std::result::Result<String, String>,
     pub(crate) harness: String,
@@ -752,10 +802,26 @@ impl Tx<'_> {
                 && t.text == crate::takeover::DELIVERED
                 && t.ts >= since
         });
-        let stop = store.sessions().stop(&s.id)?;
-        let text = self.db().final_reply(&s.id)?;
+        /* how this candidate's turn and attempt ended, and what it said: never another turn's or
+         * attempt's (the session's last end is kept for its last attempt only) */
+        let stop = store
+            .sessions()
+            .stop(&s.id)?
+            .filter(|k| c.terminal_attempt.is_some() && k.attempt == c.terminal_attempt);
+        let this_turn = turn.as_ref().filter(|t| t.turn_id == c.turn_id);
         let chars = policy.judge_text_chars();
-        let final_text = tail(&text, chars);
+        let (final_text, final_text_source) = match (&stop, this_turn) {
+            (Some(k), Some(t)) => (
+                tail(
+                    &self
+                        .db()
+                        .final_reply_of(&s.id, Some(k.seq.unwrap_or(0)), t.created)?,
+                    chars,
+                ),
+                "turn",
+            ),
+            _ => (String::new(), UNKNOWN),
+        };
         let first = goals.first().map_or(item.title.clone(), |g| g.text.clone());
         let bundle = Bundle {
             item: item.id.clone(),
@@ -772,10 +838,12 @@ impl Tx<'_> {
             },
             criteria,
             final_text,
+            final_text_source,
             stop_reason: stop
                 .as_ref()
                 .and_then(|k| k.stop_reason.clone())
-                .unwrap_or_default(),
+                .filter(|r| !r.is_empty())
+                .unwrap_or_else(|| UNKNOWN.into()),
             error: stop.and_then(|k| k.error),
             delivered_this_turn,
             evidence,
@@ -839,6 +907,7 @@ impl Tx<'_> {
                 facts.candidate_settled(&c.id, reading, why, at + policy.judge_recheck())?;
                 continue;
             }
+            let evidence = facts.evidence_version(&c.item_id, c.cycle)?;
             let (bundle, checked, fingerprint, input_seq) =
                 self.judge_inputs(&c, &item, &s, &f, &policy)?;
             let claim = uid("claim");
@@ -854,9 +923,10 @@ impl Tx<'_> {
                     f.continues_spent < f.continues_cap,
                 );
                 let basis = json!({"reason": why, "criteria": checked, "bundle": bundle});
-                facts.candidate_judged(
+                let written = facts.candidate_judged(
                     &c.id,
                     &claim,
+                    &evidence,
                     &NewJudgement {
                         item_id: &c.item_id,
                         cycle: c.cycle,
@@ -872,6 +942,9 @@ impl Tx<'_> {
                         ..Default::default()
                     },
                 )?;
+                if let Judged::Stale(why) = written {
+                    self.judge_stale(&c, &claim, why, &policy, at)?;
+                }
                 continue;
             }
             let worker = Worker {
@@ -896,6 +969,7 @@ impl Tx<'_> {
                 checked,
                 fingerprint,
                 input_seq,
+                evidence,
                 choice,
                 worker,
                 timeout: Duration::from_millis(u64::try_from(policy.judge_timeout()).unwrap_or(0)),
@@ -977,9 +1051,10 @@ impl Tx<'_> {
             "reason": v.reason, "criteria": v.criteria, "bundle": p.bundle,
             "choice": p.choice, "failures": c.failures,
         });
-        Ok(facts.candidate_judged(
+        let written = facts.candidate_judged(
             &c.id,
             &p.claim,
+            &p.evidence,
             &NewJudgement {
                 item_id: &c.item_id,
                 cycle: c.cycle,
@@ -988,19 +1063,58 @@ impl Tx<'_> {
                 scope_revision: c.scope_revision,
                 verdict: &v.verdict,
                 basis,
-                harness: Some(&called.harness)
-                    .filter(|h| !h.is_empty())
-                    .map(|h| h.as_str()),
-                model: Some(&called.model)
-                    .filter(|m| !m.is_empty())
-                    .map(|m| m.as_str()),
+                harness: Some(&called.harness),
+                model: Some(&called.model),
                 candidate_id: Some(&c.id),
                 decided_by: Some("model"),
                 would: Some(w),
                 independent: Some(ind),
                 fingerprint: Some(&p.fingerprint),
             },
-        )?)
+        )?;
+        Ok(match written {
+            Judged::Written(id) => Some(id),
+            Judged::Stale(why) => {
+                self.judge_stale(c, &p.claim, why, &policy, at)?;
+                None
+            }
+            Judged::Lost | Judged::Already => None,
+        })
+    }
+
+    /// A verdict the write's own transaction found stale ([`Judged::Stale`]) was thrown away: a
+    /// cycle, turn or scope that moved on supersedes the candidate; inputs or evidence that changed
+    /// have it judged again on the new ones, counted as a failure (inputs that never hold cannot
+    /// keep the model busy).
+    fn judge_stale(
+        &self,
+        c: &Candidate,
+        claim: &str,
+        why: &'static str,
+        policy: &WorkPolicy,
+        at: i64,
+    ) -> Result<()> {
+        let facts = self.db().store().item_facts();
+        match why {
+            "inputs" | "evidence" => {
+                let failures = c.failures + 1;
+                facts.candidate_release(
+                    &c.id,
+                    claim,
+                    Some(if why == "inputs" {
+                        "inputs_changed"
+                    } else {
+                        "evidence_changed"
+                    }),
+                    failures >= policy.judge_failures(),
+                    at + policy.settle_debounce(),
+                )?;
+            }
+            _ => {
+                facts.candidate_supersede(&c.id, why)?;
+            }
+        }
+        Ok(())
     }
 
     /// The judge's part of the shadow view: the newest candidate of the cycle and its judgement.
@@ -1039,6 +1153,23 @@ impl Tx<'_> {
             "judgement": judgement,
         }))
     }
+}
+
+/// Who answered a call, as they reported it: the harness the answer came back from and the model
+/// that harness named itself ([`crate::gateway::Printed::reported_model`]) — never the choice that
+/// was asked for. [`UNKNOWN`] for what did not report: no answer, a gateway that does not say its
+/// harness, a harness that names no model.
+pub(crate) fn answered_by(a: &crate::gateway::Attempt) -> (String, String) {
+    let answered = a.result.as_ref().ok();
+    let harness = Some(&a.harness)
+        .filter(|h| answered.is_some() && !h.is_empty())
+        .cloned()
+        .unwrap_or_else(|| UNKNOWN.into());
+    let model = answered
+        .and_then(|r| r.reported_model.clone())
+        .filter(|m| !m.is_empty())
+        .unwrap_or_else(|| UNKNOWN.into());
+    (harness, model)
 }
 
 /// The last `n` characters of `text` (all of it when shorter).
@@ -1112,18 +1243,14 @@ impl Core {
             ),
         )
         .await;
-        let harness = if a.harness.is_empty() {
-            p.choice.harness.clone()
-        } else {
-            a.harness.clone()
-        };
+        let (harness, model) = answered_by(&a);
         Called {
             result: a
                 .result
                 .map(|r| r.text)
                 .map_err(|e| js_head(&e.to_string(), 300).to_string()),
             harness,
-            model: a.model,
+            model,
         }
     }
 }

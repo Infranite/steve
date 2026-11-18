@@ -77,6 +77,7 @@ fn bundle(f: &Facts, required: Required, text: &str) -> (Bundle, Vec<Checked>) {
         },
         criteria,
         final_text: text.into(),
+        final_text_source: "turn",
         stop_reason: "end_turn".into(),
         error: None,
         delivered_this_turn: false,
@@ -240,6 +241,14 @@ fn only_verified_facts_settle_a_criterion() {
     assert_eq!(fact_checks(&f, &crit)[1].status, Status::Unknown);
 }
 
+/// Only the hard conditions: the criteria of an item whose goal in words is left out.
+fn hard_only(f: &Facts, required: Required) -> (Bundle, Vec<Checked>) {
+    let (mut b, _) = bundle(f, required, "做好了");
+    b.criteria.retain(|c| crate::judge::is_hard(c.kind));
+    let k = fact_checks(f, &b.criteria);
+    (b, k)
+}
+
 #[test]
 fn facts_and_rules_decide_what_needs_no_model() {
     let required = Required {
@@ -250,7 +259,7 @@ fn facts_and_rules_decide_what_needs_no_model() {
     let mut f = facts();
     f.delivery.push(fact("pr", "merged", VERIFIED));
     f.delivery.push(fact("build", "passed", VERIFIED));
-    let (b, k) = bundle(&f, required, "做好了");
+    let (b, k) = hard_only(&f, required);
     assert_eq!(
         ruled(&b, &k, true),
         Some(("done", "hard_facts_met", "facts"))
@@ -260,7 +269,7 @@ fn facts_and_rules_decide_what_needs_no_model() {
     let mut f = facts();
     f.delivery.push(fact("pr", "merged", VERIFIED));
     f.delivery.push(fact("build", "running", VERIFIED));
-    let (b, k) = bundle(&f, required, "做好了");
+    let (b, k) = hard_only(&f, required);
     assert_eq!(
         ruled(&b, &k, true),
         Some(("waiting", "hard_facts_underway", "facts"))
@@ -269,7 +278,7 @@ fn facts_and_rules_decide_what_needs_no_model() {
     let mut f = facts();
     f.delivery.push(fact("pr", "merged", VERIFIED));
     f.delivery.push(fact("build", "failed", VERIFIED));
-    let (b, k) = bundle(&f, required, "做好了");
+    let (b, k) = hard_only(&f, required);
     assert_eq!(
         ruled(&b, &k, true),
         Some(("not_done", "hard_facts_failed", "facts"))
@@ -278,7 +287,7 @@ fn facts_and_rules_decide_what_needs_no_model() {
     // a hard criterion nobody can tell is left to the model, and an operation always is
     let mut f = facts();
     f.delivery.push(fact("pr", "merged", VERIFIED));
-    let (b, k) = bundle(&f, required, "做好了");
+    let (b, k) = hard_only(&f, required);
     assert_eq!(ruled(&b, &k, true), None);
     let mut f = facts();
     f.delivery.push(fact("pr", "merged", VERIFIED));
@@ -306,6 +315,113 @@ fn facts_and_rules_decide_what_needs_no_model() {
     assert_eq!(ruled(&b, &k, true), Some(("unknown", "cancelled", "rule")));
     let (b, k) = bundle(&facts(), Required::default(), "");
     assert_eq!(ruled(&b, &k, true), Some(("unknown", "no_reply", "rule")));
+    // the turn's words could not be read (its end was not kept): not known, not "nothing said"
+    let (mut b, k) = bundle(&facts(), Required::default(), "");
+    b.final_text_source = "unknown";
+    assert_eq!(
+        ruled(&b, &k, true),
+        Some(("unknown", "reply_unknown", "rule"))
+    );
+}
+
+/// Finding: once the hard conditions were met, the goal in words was never judged. Every criterion
+/// is checked one by one: the hard ones by facts, the goal in words always by the model.
+#[test]
+fn the_goal_in_words_is_judged_also_when_every_hard_condition_is_met() {
+    let required = Required {
+        merge: true,
+        build: true,
+        ..Default::default()
+    };
+    let mut f = facts();
+    f.delivery.push(fact("pr", "merged", VERIFIED));
+    f.delivery.push(fact("build", "passed", VERIFIED));
+    let (b, k) = bundle(&f, required, "合并了，但说明还没写");
+    // merged and built is not the goal: the model is asked
+    assert_eq!(ruled(&b, &k, true), None);
+    let ids: Vec<_> = k.iter().map(|c| (c.id.as_str(), c.status, c.by)).collect();
+    assert_eq!(
+        ids,
+        vec![
+            ("merge", Status::Met, "facts"),
+            ("build", Status::Met, "facts"),
+            ("goal", Status::Unknown, "none")
+        ]
+    );
+    let prompt = crate::judge::prompt(&b, &k);
+    assert!(prompt.contains(r#""checked":[{"id":"merge","status":"met","evidence":["e1"]},{"id":"build","status":"met","evidence":["e2"]}]"#), "{prompt}");
+    // and its answer about the goal counts: not done, though the hard conditions are met
+    let v = parse(
+        r#"{"verdict":"not_done","criteria":[{"id":"merge","status":"met","evidence":["e1"]},{"id":"build","status":"met","evidence":["e2"]},{"id":"goal","status":"unmet"}],"reason":"说明没写"}"#,
+        &b,
+        &k,
+    )
+    .unwrap();
+    assert_eq!(v.verdict, "not_done");
+    assert_eq!(
+        v.criteria
+            .iter()
+            .map(|c| (c.id.as_str(), c.status, c.by))
+            .collect::<Vec<_>>(),
+        vec![
+            ("merge", Status::Met, "facts"),
+            ("build", Status::Met, "facts"),
+            ("goal", Status::Unmet, "model")
+        ]
+    );
+}
+
+/// Finding: the model could mark a hard condition facts left unknown as met. Unknown stays unknown:
+/// the model has to repeat it, and with it unknown nothing is done.
+#[test]
+fn the_model_never_upgrades_an_unknown_hard_condition() {
+    let required = Required {
+        merge: true,
+        ..Default::default()
+    };
+    let mut f = facts();
+    // the agent says it merged: reported, so a hard condition nobody verified
+    f.delivery.push(fact("pr", "merged", "reported"));
+    let (b, k) = bundle(&f, required, "已经合并");
+    assert_eq!((k[0].status, k[0].by), (Status::Unknown, "none"));
+    // the model is shown it as checked and unknown
+    let prompt = crate::judge::prompt(&b, &k);
+    assert!(
+        prompt.contains(r#""checked":[{"id":"merge","status":"unknown","evidence":["e1"]}]"#),
+        "{prompt}"
+    );
+    let refused = |raw: &str| parse(raw, &b, &k).unwrap_err();
+    assert_eq!(
+        refused(
+            r#"{"verdict":"done","criteria":[{"id":"merge","status":"met","evidence":["e1"]},{"id":"goal","status":"met","evidence":["final_text"]}]}"#
+        ),
+        "contradicts_facts:merge"
+    );
+    assert_eq!(
+        refused(
+            r#"{"verdict":"not_done","criteria":[{"id":"merge","status":"unmet","evidence":["e1"]},{"id":"goal","status":"met","evidence":["final_text"]}]}"#
+        ),
+        "contradicts_facts:merge"
+    );
+    // repeated as unknown: accepted, and it stays the facts' unknown
+    let v = parse(
+        r#"{"verdict":"waiting","criteria":[{"id":"merge","status":"unknown"},{"id":"goal","status":"met","evidence":["final_text"]}],"reason":"等确认合并"}"#,
+        &b,
+        &k,
+    )
+    .unwrap();
+    assert_eq!(
+        (v.criteria[0].status, v.criteria[0].by),
+        (Status::Unknown, "none")
+    );
+    assert_eq!(v.criteria[0].evidence, vec!["e1".to_string()]);
+    // and done needs it met, which it is not
+    assert_eq!(
+        refused(
+            r#"{"verdict":"done","criteria":[{"id":"merge","status":"unknown"},{"id":"goal","status":"met","evidence":["final_text"]}]}"#
+        ),
+        "done_with_open_criteria"
+    );
 }
 
 #[test]
@@ -472,8 +588,27 @@ fn finished_turn(k: &Kit, sid: &str, turn: &str, at: i64) {
                 "INSERT INTO runtime_turns(turn_id,session_id,state,created,updated) VALUES (?,?,'finished',?,?)",
                 rusqlite::params![turn, sid, at, at],
             )?;
+            tx.execute(
+                "INSERT INTO runtime_attempts(attempt_id,turn_id,ordinal,node_id,operation_id,execution,spec,digest,state,created,updated)
+                 VALUES (?,?,0,'node-a',?,'{}','{}','d','finished',?,?)",
+                rusqlite::params![attempt_of(turn), turn, format!("op-{turn}"), at, at],
+            )?;
             Ok::<_, steve_store::StoreError>(())
         })
+        .unwrap();
+}
+
+/// The one attempt of logical turn `turn` ([`finished_turn`]).
+fn attempt_of(turn: &str) -> String {
+    format!("{turn}-a")
+}
+
+/// The end of `turn`'s attempt as the Hub keeps it (`session_stops`): its events so far are its own.
+fn ended(k: &Kit, sid: &str, turn: &str, stop_reason: &str) {
+    k.db()
+        .store()
+        .sessions()
+        .stop_ended(sid, Some(&attempt_of(turn)), stop_reason, None, false)
         .unwrap();
 }
 
@@ -484,6 +619,7 @@ fn item_with_turn(k: &Kit, text: &str) -> (String, String) {
     let sid = k.session(&item, "idle");
     finished_turn(k, &sid, "t1", steve_store::now() - 1_000);
     k.rt.say(&sid, text);
+    ended(k, &sid, "t1", "end_turn");
     k.db()
         .store()
         .item_facts()
@@ -531,9 +667,10 @@ async fn a_settled_turn_is_judged_once_by_the_model_and_nothing_acts_on_it() {
     assert_eq!(
         j.model.as_deref(),
         Some("fake-model"),
-        "the model that answered"
+        "the model that answered, as it named itself"
     );
-    assert!(j.harness.is_some());
+    // the fake gateway does not say which harness answered
+    assert_eq!(j.harness.as_deref(), Some("unknown"));
     // the worker ran the harness default: whether the judge was another model is not known
     assert_eq!(j.independent.as_deref(), Some("unknown"));
     assert_eq!(j.would.as_deref(), Some("close_after_grace"));
@@ -605,6 +742,8 @@ async fn a_verdict_for_a_turn_that_is_no_longer_current_is_thrown_away() {
     assert_eq!(prepared.len(), 1);
     // a new turn started while the model ran: the old turn's answer is late
     finished_turn(&k, &sid, "t2", steve_store::now());
+    k.rt.say(&sid, "第二轮也做好了");
+    ended(&k, &sid, "t2", "end_turn");
     let p = prepared.into_iter().next().unwrap();
     let called = k.core.judge_call(&p).await;
     assert!(k.core.tx().judge_commit(p, called).unwrap().is_none());
@@ -927,4 +1066,333 @@ fn no_session_is_unknown_with_its_own_reason() {
     let mut f = facts();
     f.session = None;
     assert_eq!(judge_gate(&f, &policy()), (Settled::Unknown, "no_session"));
+}
+
+/// Finding: the final text and the stop reason were the session's, whichever turn they came from.
+/// They are the candidate's own turn and attempt: words said after its end are not its words, and
+/// when the session's last end is another attempt's, its end and words are unknown.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_bundle_reads_the_candidates_own_turn_and_attempt() {
+    let k = Kit::new();
+    let (_, sid) = item_with_turn(&k, "第一轮做好了");
+    // said after the attempt ended (a later turn's beginning): not this turn's words
+    k.rt.say(&sid, "之后又说的话");
+    let p = k
+        .core
+        .tx()
+        .judge_prepare(steve_store::now())
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap();
+    assert_eq!(p.bundle.final_text, "第一轮做好了");
+    assert_eq!(
+        (p.bundle.final_text_source, p.bundle.stop_reason.as_str()),
+        ("turn", "end_turn")
+    );
+    assert_eq!(p.bundle.attempt.as_deref(), Some("t1-a"));
+
+    // the session's last end is another attempt's: this one's end and words are not known
+    let k = Kit::new();
+    let (item, sid) = item_with_turn(&k, "做好了");
+    k.db()
+        .store()
+        .sessions()
+        .stop_ended(&sid, Some("another-attempt"), "error", Some("boom"), false)
+        .unwrap();
+    k.gw.set(|_, _| Ok(DONE.into()));
+    assert_eq!(k.core.check_judges().await.unwrap(), 0);
+    let j = &k.db().store().item_facts().judgements(&item, 1).unwrap()[0];
+    // not the other attempt's failure, and not "nothing said": unknown, with no model call
+    assert_eq!(
+        (j.verdict.as_str(), j.basis["reason"].as_str()),
+        ("unknown", Some("reply_unknown"))
+    );
+    assert_eq!(j.basis["bundle"]["stop_reason"], json!("unknown"));
+    assert_eq!(j.basis["bundle"]["final_text_source"], json!("unknown"));
+    assert_eq!(j.basis["bundle"]["final_text"], json!(""));
+    assert!(j.basis["bundle"]["error"].is_null());
+    assert!(k.gw.calls.lock().unwrap().is_empty());
+
+    // the attempt's own end says it failed: that is what the bundle reads
+    let k = Kit::new();
+    let (item, sid) = item_with_turn(&k, "做了一半");
+    ended(&k, &sid, "t1", "error");
+    k.core.check_judges().await.unwrap();
+    let j = &k.db().store().item_facts().judgements(&item, 1).unwrap()[0];
+    assert_eq!(j.basis["reason"], json!("turn_failed"));
+    assert_eq!(j.basis["bundle"]["stop_reason"], json!("error"));
+}
+
+/// Finding: the write's transaction re-checked only the claim. It re-checks the cycle, the current
+/// logical turn, the scope revision, the input version and the evidence version, and writes nothing
+/// when any of them moved since the claim.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_write_rechecks_turn_scope_inputs_and_evidence_in_its_own_transaction() {
+    use steve_store::item_facts::{Judged, NewDeliveryFact, NewJudgement};
+    let k = Kit::new();
+    let (item, sid) = item_with_turn(&k, "做好了");
+    let p = k
+        .core
+        .tx()
+        .judge_prepare(steve_store::now())
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap();
+    let facts = k.db().store().item_facts();
+    let c = p.candidate.clone();
+    let write = || {
+        facts
+            .candidate_judged(
+                &c.id,
+                &p.claim,
+                &p.evidence,
+                &NewJudgement {
+                    item_id: &item,
+                    cycle: 1,
+                    session_id: &sid,
+                    turn_id: "t1",
+                    scope_revision: c.scope_revision,
+                    verdict: "done",
+                    basis: json!({}),
+                    candidate_id: Some(&c.id),
+                    decided_by: Some("model"),
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+    };
+    // each change alone is caught: made from the last check to the first
+    facts
+        .record_delivery(&NewDeliveryFact {
+            item_id: &item,
+            cycle: 1,
+            kind: "pr",
+            state: "open",
+            provenance: VERIFIED,
+            source: "test",
+            observed_at: steve_store::now(),
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(write(), Judged::Stale("evidence"));
+    k.rt.say(&sid, "补充一句");
+    assert_eq!(write(), Judged::Stale("inputs"));
+    k.db().add_goal(&item, "改了范围").unwrap();
+    assert_eq!(write(), Judged::Stale("scope"));
+    finished_turn(&k, &sid, "t2", steve_store::now());
+    assert_eq!(write(), Judged::Stale("turn"));
+    k.db()
+        .exec(
+            "UPDATE items SET cycle=2 WHERE id=?",
+            &[&item as &dyn rusqlite::ToSql],
+        )
+        .unwrap();
+    assert_eq!(write(), Judged::Stale("cycle"));
+    // nothing was written, and the claim is still the pass's to give back
+    assert!(facts.judgements(&item, 1).unwrap().is_empty());
+    let now = facts.candidate(&c.id).unwrap().unwrap();
+    assert_eq!(now.state, "judging");
+
+    // unchanged, it is written once; a claim that is gone writes nothing
+    let k = Kit::new();
+    let (item, sid) = item_with_turn(&k, "做好了");
+    let p = k
+        .core
+        .tx()
+        .judge_prepare(steve_store::now())
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap();
+    let facts = k.db().store().item_facts();
+    let j = NewJudgement {
+        item_id: &item,
+        cycle: 1,
+        session_id: &sid,
+        turn_id: "t1",
+        scope_revision: p.candidate.scope_revision,
+        verdict: "done",
+        basis: json!({}),
+        ..Default::default()
+    };
+    assert_eq!(
+        facts
+            .candidate_judged(&p.candidate.id, "not-the-claim", &p.evidence, &j)
+            .unwrap(),
+        Judged::Lost
+    );
+    assert!(matches!(
+        facts
+            .candidate_judged(&p.candidate.id, &p.claim, &p.evidence, &j)
+            .unwrap(),
+        Judged::Written(_)
+    ));
+}
+
+/// A stale write found by the transaction is handled as the checks before it: evidence that
+/// changed while the model ran has the candidate judged again, counted as a failure.
+#[tokio::test(flavor = "multi_thread")]
+async fn evidence_that_changes_while_the_model_runs_is_judged_again() {
+    use steve_store::item_facts::NewDeliveryFact;
+    let k = Kit::new();
+    let (item, sid) = item_with_turn(&k, "做好了");
+    k.gw.set(|_, _| Ok(DONE.into()));
+    let p = k
+        .core
+        .tx()
+        .judge_prepare(steve_store::now())
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap();
+    let called = k.core.judge_call(&p).await;
+    k.db()
+        .store()
+        .item_facts()
+        .record_delivery(&NewDeliveryFact {
+            item_id: &item,
+            cycle: 1,
+            kind: "commit",
+            head: Some("abc"),
+            state: "pushed",
+            provenance: "reported",
+            source: "test",
+            observed_at: steve_store::now(),
+            ..Default::default()
+        })
+        .unwrap();
+    assert!(k.core.tx().judge_commit(p, called).unwrap().is_none());
+    let facts = k.db().store().item_facts();
+    assert!(facts.judgements(&item, 1).unwrap().is_empty());
+    let c = facts
+        .candidate_of(&item, 1, &sid, "t1", 1)
+        .unwrap()
+        .unwrap();
+    assert_eq!((c.state.as_str(), c.failures), ("pending", 1));
+}
+
+/// A one-shot runner whose harness names `reported` itself, whatever model was asked for.
+struct Serves(Option<&'static str>);
+
+#[async_trait::async_trait]
+impl crate::gateway::OneModel for Serves {
+    async fn once(
+        &self,
+        _: &crate::gateway::OneCall<'_>,
+        _: &str,
+        _: Option<&str>,
+        _: Option<crate::gateway::OnText<'_>>,
+    ) -> crate::gateway::Tried {
+        crate::gateway::Tried {
+            reply: Ok((DONE.into(), None)),
+            usage: vec![],
+            timed_out: false,
+            reported_model: self.0.map(String::from),
+        }
+    }
+}
+
+/// Finding: the judgement recorded the model that was asked for. It records the harness and model
+/// that reported back, and `unknown` for what did not.
+#[tokio::test]
+async fn the_judgement_records_who_reported_back_not_who_was_asked() {
+    use crate::gateway::{Fallback, ModelGateway, ThinkTools, Tier};
+    let asked = |one| Fallback {
+        one,
+        fast: vec![],
+        smart: vec!["asked-model".into()],
+        models: None,
+    };
+    let call = |g: Fallback<Serves>| async move {
+        g.attempt(
+            "q",
+            Tier::Smart,
+            std::time::Duration::from_secs(5),
+            &ThinkTools::None,
+            None,
+        )
+        .await
+    };
+    let a = call(asked(Serves(Some("served-model")))).await;
+    let p = a.result.as_ref().unwrap();
+    // booked under the model asked for, answered by the one the harness named
+    assert_eq!(
+        (p.model.as_str(), p.reported_model.as_deref()),
+        ("asked-model", Some("served-model"))
+    );
+    let (harness, model) = crate::judge::answered_by(&a);
+    assert_eq!(model, "served-model");
+    assert!(!harness.is_empty() && harness != "unknown", "{harness}");
+    // a harness that names no model: unknown, not the model asked for
+    let a = call(asked(Serves(None))).await;
+    assert_eq!(crate::judge::answered_by(&a).1, "unknown");
+    // no answer: neither is known
+    let failed = crate::gateway::Attempt {
+        result: Err(crate::error::msg("503")),
+        attempts: 1,
+        duration_ms: 0,
+        usage: vec![],
+        model: "asked-model".into(),
+        failures: vec![],
+        harness: "h".into(),
+    };
+    assert_eq!(
+        crate::judge::answered_by(&failed),
+        ("unknown".to_string(), "unknown".to_string())
+    );
+    // which model reported is read from the harness's own usage reports, its main one first
+    let report = |scope, model: Option<&str>| steve_node_api::UsageReport {
+        report_id: format!("{scope:?}{model:?}"),
+        model: model.map(String::from),
+        meter_epoch: steve_node_api::Epoch::new("m").unwrap(),
+        scope,
+        measurement: steve_node_api::Measurement::Delta,
+        tokens: Default::default(),
+        context_used: None,
+        context_limit: None,
+        cost: None,
+    };
+    use steve_node_api::UsageScope::{All, Main};
+    assert_eq!(
+        crate::gateway::reported_model(&[
+            report(All, Some("sum")),
+            report(Main, Some("main")),
+            report(Main, None)
+        ]),
+        Some("main".into())
+    );
+    assert_eq!(
+        crate::gateway::reported_model(&[report(All, Some("sum"))]),
+        Some("sum".into())
+    );
+    assert_eq!(crate::gateway::reported_model(&[report(Main, None)]), None);
+
+    // end to end: the fake harness names no model, so the judgement says unknown
+    let k = Kit::new();
+    let (item, _) = item_with_turn(&k, "说明写好了");
+    k.gw.set(|_, _| Ok(DONE.into()));
+    *k.gw.reported.lock().unwrap() = None;
+    assert_eq!(k.core.check_judges().await.unwrap(), 1);
+    let j = &k.db().store().item_facts().judgements(&item, 1).unwrap()[0];
+    assert_eq!(
+        (
+            j.harness.as_deref(),
+            j.model.as_deref(),
+            j.independent.as_deref()
+        ),
+        (Some("unknown"), Some("unknown"), Some("unknown"))
+    );
+    assert_eq!(
+        independent(
+            "unknown",
+            "big",
+            &Worker {
+                harness: "unknown".into(),
+                model: Some("big".into()),
+            }
+        ),
+        "unknown"
+    );
 }

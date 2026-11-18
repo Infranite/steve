@@ -586,6 +586,7 @@ mod tests {
                 reply,
                 usage,
                 timed_out,
+                reported_model: None,
             }
         }
     }
