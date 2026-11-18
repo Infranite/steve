@@ -76,6 +76,8 @@ def main():
         tmp = Path(tmp)
         (tmp / "src").mkdir()
         (tmp / "fixtures").mkdir()
+        # The Hub binary always has serde_json/preserve_order (steve-hub and others enable it), so
+        # json! objects go out in insertion order: capture them the way production emits them.
         (tmp / "Cargo.toml").write_text('''[package]
 name="legacy-wire-capture"
 version="0.0.0"
@@ -83,7 +85,7 @@ edition="2024"
 [workspace]
 [dependencies]
 serde={version="=1.0.229",features=["derive"]}
-serde_json="=1.0.154"
+serde_json={version="=1.0.154",features=["preserve_order"]}
 ''')
         program = 'use serde::{Serialize,Deserialize};\nuse serde_json::{Value,json};\n'
         program += store_enum + "\n" + hub_enum + "\n" + hub[helper_start:helper_end]
