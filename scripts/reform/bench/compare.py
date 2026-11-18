@@ -9,7 +9,7 @@ import sys
 # Metadata/config are context, not performance measurements. PID and CLI return
 # codes are identities/categories; statuses are emitted as explanatory rows.
 EXCLUDE = {"pid", "returncode", "schema_version"}
-ROOTS = ("startup_to_health_ms", "snapshot_copy_s", "elapsed_s", "endpoints", "idle", "load",
+ROOTS = ("startup_to_health_ms", "snapshot_copy_s", "elapsed_s", "endpoints", "post_start", "idle", "load",
          "load_average_before", "load_average_after", "cpu_top")
 
 
@@ -57,11 +57,24 @@ def percent(a, b):
     return f"{(b - a) / abs(a) * 100:+.2f}%"
 
 
+def load_context(label, data):
+    def averages(key):
+        values = data.get(key)
+        return ", ".join(number(v) for v in values) if values else "unavailable"
+    top = sorted(data.get("cpu_top", []), key=lambda row: -row["cpu_percent"])[:3]
+    processes = ", ".join(f"{escape(row['name'])} {number(row['cpu_percent'])}%" for row in top)
+    return (f"{label} load_average_before: [{averages('load_average_before')}]; "
+            f"load_average_after: [{averages('load_average_after')}]; "
+            f"cpu_top (3): {processes or 'unavailable'}")
+
+
 def compare(a, b):
     left = metrics({key: a[key] for key in ROOTS if key in a})
     right = metrics({key: b[key] for key in ROOTS if key in b})
     lines = [f"A: {escape(a.get('label', ''))} ({escape(a.get('status', 'unknown'))}); "
              f"B: {escape(b.get('label', ''))} ({escape(b.get('status', 'unknown'))})", "",
+             load_context("A", a), "", load_context("B", b), "",
+             "注意：负载不同时，性能数字不可直接比较（different system loads are not directly comparable）。", "",
              "| Metric | A | B | Change (B−A)/A |", "| --- | ---: | ---: | ---: |"]
     for key in sorted(left.keys() | right.keys()):
         av, bv = left.get(key), right.get(key)
