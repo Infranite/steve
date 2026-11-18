@@ -1374,6 +1374,16 @@ async fn bot_teams_keep_discovery_separate_from_authorized_dispatch() {
     let (_, hidden) = c.call("GET", &path, None).await;
     assert!(!hidden.to_string().contains(&id_a), "{hidden}");
     assert!(!hidden.to_string().contains(&id_b), "{hidden}");
+    let (_, presets) = c.call("GET", "/api/bot-teams", None).await;
+    assert!(!presets.to_string().contains(&id_a), "{presets}");
+    assert!(!presets.to_string().contains(&id_b), "{presets}");
+    let narrowed = presets["teams"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["id"] == team_a.as_str())
+        .unwrap();
+    assert_eq!(narrowed["members"][0]["nodes"], json!([]));
     let refused = make(&c, bot, Some(team_a), "@say must-not-share").await;
     assert_eq!(
         refused["dispatch"]["placement"]["reason"], "unauthorized",

@@ -54,11 +54,29 @@ fn is_bot(c: &rusqlite::Connection, ws: &str, id: &str) -> steve_store::Result<b
 pub async fn list(State(st): State<AppState>, Extension(cx): Extension<Ctx>) -> ApiResult {
     let s = required_store(&st)?;
     operate(move || {
-        s.reader(|c| Ok(json!({
-        "teams":bot_dispatch::teams(c, &cx.ws)?,
-        "default":bot_dispatch::selected(c, &cx.ws, None)?.map_or_else(||LEGACY.into(), |t|t.id),
-        "editable":bot_dispatch::owner(c, &cx.ws, &cx.me)?,
-    }))).map_err(error)
+        s.reader(|c| {
+            let mut teams = bot_dispatch::teams(c, &cx.ws)?;
+            // A previously private workspace can gain members. Hide stale remote grants in
+            // preset reads too; do not turn an empty restricted list into "all bound Nodes".
+            for member in teams.iter_mut().flat_map(|team| &mut team.members) {
+                if let Some(nodes) = &mut member.nodes {
+                    let mut visible = Vec::with_capacity(nodes.len());
+                    for node in nodes.drain(..) {
+                        if node == "local"
+                            || crate::wire::node_binding::node_takes(c, &node, &cx.ws)?
+                        {
+                            visible.push(node);
+                        }
+                    }
+                    *nodes = visible;
+                }
+            }
+            Ok(json!({
+                "teams":teams,
+                "default":bot_dispatch::selected(c, &cx.ws, None)?.map_or_else(|| LEGACY.into(), |t| t.id),
+                "editable":bot_dispatch::owner(c, &cx.ws, &cx.me)?,
+            }))
+        }).map_err(error)
     })
     .await
 }
