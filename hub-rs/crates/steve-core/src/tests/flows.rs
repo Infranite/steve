@@ -1453,14 +1453,16 @@ fn removing_the_last_open_dependency_unblocks() {
         ("wait".into(), "执行".into(), "前置完成，等你开始".into())
     );
     assert_eq!(k.open_kinds(&b), vec!["propose"]);
-    /* resume with open deps blocks again */
+    /* a dependency does not override your pause; an explicit resume restores its wait */
     let c = k.item("pause", "执行", None);
     k.core.add_dep(&c, &a).unwrap();
     assert_eq!(
         k.status(&c).0,
-        "block",
-        "a paused item becomes blocked (as in TS)"
+        "pause",
+        "adding a prerequisite preserves an explicit pause"
     );
+    k.core.item_action(&c, ItemAction::Resume, "me").unwrap();
+    assert_eq!(k.status(&c).0, "block");
 }
 
 #[test]
