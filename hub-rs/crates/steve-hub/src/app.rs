@@ -188,11 +188,6 @@ async fn upgrade_drain_call(st: AppState, action: &'static str, req: Request) ->
     }
 }
 
-// Heterogeneous Axum layers retain their concrete types and their written order.
-macro_rules! layers {
-    ($routes:expr; $($layer:expr),+ $(,)?) => { $routes$(.layer($layer))+ };
-}
-
 /// healthz, `/auth` (from steve-auth), `/internal/release/drain`, `/api`, static web; `/mcp` in front of all of it.
 /// `root`: module routes at the root that read the session without requiring it.
 pub fn app(
@@ -231,17 +226,16 @@ pub fn app(
             let st = fallback_state.clone();
             async move { crate::web::serve(&st.cfg, req).await }
         });
-    // Listed from inner to outer, just like chained Router::layer calls.
-    layers! { routes;
-        middleware::from_fn_with_state(mcp, mcp_gate),
-        middleware::from_fn_with_state(st.clone(), maintenance_gate),
-        compression(),
-        middleware::from_fn(vary_encoding),
-        middleware::from_fn(slow_requests),
-        middleware::from_fn(locale),
-        // A cross-origin client's preflight is answered before the login check.
-        middleware::from_fn_with_state(st, crate::access::cors),
-    }
+    // from inner to outer, one layer a line
+    routes
+        .layer(middleware::from_fn_with_state(mcp, mcp_gate))
+        .layer(middleware::from_fn_with_state(st.clone(), maintenance_gate))
+        .layer(compression())
+        .layer(middleware::from_fn(vary_encoding))
+        .layer(middleware::from_fn(slow_requests))
+        .layer(middleware::from_fn(locale))
+        // outermost: a cross-origin web client's preflight is answered before anything asks for a login
+        .layer(middleware::from_fn_with_state(st, crate::access::cors))
 }
 
 fn health_routes(st: &AppState) -> Router {
