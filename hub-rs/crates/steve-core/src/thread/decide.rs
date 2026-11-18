@@ -264,7 +264,12 @@ pub fn decide(r: &Route, text: &str, cx: DecideCtx) -> Decision {
         return d("item", Some("1"));
     }
     /* 2: the user asked for an item in so many words */
-    if explicit_item(text) && matches!(model, "item" | "answer" | "research" | "suggest") {
+    if explicit_item(text)
+        && matches!(
+            model,
+            "item" | "answer" | "research" | "suggest" | "supplement"
+        )
+    {
         return d("item", Some("2"));
     }
     if model == "item" {
@@ -281,12 +286,8 @@ pub fn decide(r: &Route, text: &str, cx: DecideCtx) -> Decision {
             };
         }
     }
-    /* 5: a supplement the model is not sure about becomes a card “追加到 ST-n，还是单独建项？” — unless
-    the user named the item: then it is theirs to say, and asked already */
-    if model == "supplement"
-        && r.confidence < 0.8
-        && !r.item.as_deref().is_some_and(|i| names_item(text, i))
-    {
+    /* 5: an unsure supplement asks once. Naming an item supplies context, not consent to append. */
+    if model == "supplement" && r.confidence < 0.8 {
         return Decision {
             for_item: r.item.clone(),
             ..d("suggest", Some("5"))
@@ -468,6 +469,15 @@ mod tests {
             go("item", 0.3, &[], "为什么慢？建个事项查一下"),
             ("item".into(), None)
         );
+        assert_eq!(
+            go(
+                "supplement",
+                0.95,
+                &[],
+                "ST-3 开了 issues，请给每个 issue 建一个事项"
+            ),
+            ("item".into(), Some("2"))
+        );
         for t in ["事项是什么", "交给你了吗", "我想跟进度"] {
             assert!(!explicit_item(t), "{t}");
         }
@@ -556,7 +566,7 @@ mod tests {
             go("supplement", 0.85, &[], "先别改列表页"),
             ("supplement".into(), None)
         );
-        /* the user named the item: no asking again */
+        /* Even an id with explicit-looking wording cannot override the router's uncertainty. */
         for t in [
             "追加到 ST-3：统计按小时",
             "这个也给st3加上",
@@ -564,7 +574,7 @@ mod tests {
         ] {
             assert_eq!(
                 go("supplement", 0.5, &[], t),
-                ("supplement".into(), None),
+                ("suggest".into(), Some("5")),
                 "{t}"
             );
         }

@@ -1124,6 +1124,8 @@ pub struct RouteCtx {
     pub focus: Vec<FocusItem>,
     /// ids of the workspace's items: an `item` the router names must be one of them
     pub items: Vec<String>,
+    /// Finished items remain valid context for status/research, but cannot receive supplements.
+    pub closed_items: Vec<String>,
     /// an inline research run is reading right now
     pub researching: bool,
     /// The main conversation's messages Steve is still answering (running first, then waiting): the
@@ -1219,6 +1221,24 @@ pub fn route_prompt_for(c: &RouteCtx, texts: &[String], history: &[Said], promot
     head.push("goal: the task, self-contained, in the user language, written as short Markdown a person can scan: first one sentence saying what will be done and what counts as done; then only the sections that apply, each a few short bullets: **背景** (why, at most two lines), **要做**, **验收** (how to check it is done), **不做/约束**. Keep it under about 12 lines; never paste a wall of text, logs or file lists into it (the conversation keeps those). For a short ordinary message whose meaning is plain, the goal may be that one sentence. title: names the work concretely, never just “按建议” or “好的”.".into());
     head.push("Reply with ONLY one JSON object: {\"kind\":\"answer\"|\"research\"|\"item\"|\"suggest\"|\"ask\"|\"supplement\"|\"status\"|\"config\"|\"reroute\",\"confidence\":0.0-1.0,\"signals\":[\"explicit\"|\"change\"|\"deliverable\"|\"long\"|\"question\"|\"lookup\"|\"vague\"],\"offer\":{\"title\":\"\",\"goal\":\"\"} or null,\"item\":\"<item id or null>\",\"options\":[\"\"],\"title\":\"<= 24 chars, user language\",\"goal\":\"\",\"bot\":\"<bot id>\",\"project\":\"<project id or null>\",\"tags\":[\"<tag id>\"],\"newTags\":[{\"name\":\"\",\"cat\":\"\",\"description\":\"\"}],\"reply\":\"one short sentence in the user language, without tags\",\"why\":\"one short sentence in the user language: why this kind\"}".into());
     let mut lines: Vec<String> = vec![];
+    let context = texts
+        .iter()
+        .map(String::as_str)
+        .chain(history.iter().map(|s| s.text.as_str()))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let closed: Vec<&str> = c
+        .closed_items
+        .iter()
+        .filter(|id| crate::thread::decide::names_item(&context, id))
+        .map(String::as_str)
+        .collect();
+    if !closed.is_empty() {
+        lines.push(format!(
+            "Closed items (context only; never supplement these): {}",
+            closed.join(", ")
+        ));
+    }
     if !c.focus.is_empty() {
         lines.push(
             "Open items of this conversation (id: title · status · from the user's message):"
@@ -2370,6 +2390,45 @@ mod tests {
         let r = parse_route(&c, "x", r#"{"kind":"chat","project":"prj_a"}"#, true).unwrap();
         assert_eq!(r.kind, "item");
         assert_eq!((r.bot.as_str(), r.bot_from_project), ("dev", true));
+    }
+
+    #[test]
+    fn route_prompt_marks_only_referenced_finished_items_as_context() {
+        let mut c = ctx();
+        c.items = vec![
+            "ST-2".into(),
+            "ST-20".into(),
+            "ST-206".into(),
+            "ST-99".into(),
+        ];
+        c.closed_items = c.items.clone();
+        let history = [Said {
+            author: "steve".into(),
+            text: "st20 的工作已经结束".into(),
+        }];
+        let texts = [
+            "根据 #st-206 的结果修复登录页".into(),
+            "st-206 的进度怎么样了？".into(),
+        ];
+        let p = route_prompt_for(&c, &texts, &history, false);
+        let (head, tail) = split_static(&p);
+        assert!(!head.unwrap().contains("Closed items (context only"));
+        assert!(
+            tail.contains("Closed items (context only; never supplement these): ST-20, ST-206\n")
+        );
+        assert!(!tail.contains("ST-99"));
+        // Finished ids remain valid for status; suppressing them at parsing would lose context.
+        assert_eq!(
+            parse_route(
+                &c,
+                "ST-206 进度怎么样了？",
+                r#"{"kind":"status","item":"ST-206"}"#,
+                false
+            )
+            .unwrap()
+            .kind,
+            "status"
+        );
     }
 
     #[test]
