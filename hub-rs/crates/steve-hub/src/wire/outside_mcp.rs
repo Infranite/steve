@@ -94,12 +94,13 @@ pub fn tools() -> Vec<Value> {
         .collect();
     v.push(json!({
         "name": ITEM_CREATE,
-        "description": "Hand Steve a new piece of work as the signed-in user: it becomes an item (ST-…) that one of Steve's Bots works on, and the owner follows it in Steve. Write `goal` as a complete, self-contained request. Leave out `bot` and `title` and Steve chooses them the way it does for a message. Returns the item's id; read it later with steve_item_read for its progress and result.",
+        "description": "Hand Steve a new piece of work as the signed-in user: it becomes an item (ST-…) that one of Steve's Bots works on, and the owner follows it in Steve. Write `goal` as a complete, self-contained request. For dependent batches, pass verified prerequisite IDs in deps at creation, never create first and add dependencies later: an incomplete prerequisite blocks every session start. Leave out `bot` and `title` and Steve chooses them the way it does for a message. Returns the item's id; read it later with steve_item_read for its progress and result.",
         "inputSchema": schema(json!({
             "goal": {"type": "string", "description": "What should be done, self-contained."},
             "title": {"type": "string", "description": "A short title; Steve writes one when left out."},
             "bot": {"type": "string", "description": "The id or name of the Bot to do it; Steve chooses when left out."},
-            "team": {"type": "string", "description": "A Bot Team id or unambiguous name in this workspace, for this item only. Omit to use the workspace default."}
+            "team": {"type": "string", "description": "A Bot Team id or unambiguous name in this workspace, for this item only. Omit to use the workspace default."},
+            "deps": {"type": "array", "items": {"type": "string", "minLength": 1, "maxLength": 80}, "maxItems": 200, "uniqueItems": true, "description": "Verified prerequisite item IDs in this workspace. Saved atomically before startup; no session runs until all are successfully completed. The workspace's dependency resume policy applies."}
         }), &["goal"]),
         "annotations": {"readOnlyHint": false, "destructiveHint": false, "openWorldHint": false}
     }));
@@ -287,13 +288,32 @@ async fn create(x: &Extra, o: &Outside, args: &Value) -> Result<String, String> 
     let obj = args.as_object().cloned().unwrap_or_default();
     if obj
         .keys()
-        .any(|k| !["goal", "title", "bot", "team"].contains(&k.as_str()))
+        .any(|k| !["goal", "title", "bot", "team", "deps"].contains(&k.as_str()))
     {
         return Err("Invalid arguments: unexpected property.".into());
     }
     let goal = text_arg(args, "goal")
         .ok_or("Invalid arguments: goal must be a non-empty string.")?
         .to_string();
+    let deps: Vec<String> = match args.get("deps") {
+        None => vec![],
+        Some(v) => serde_json::from_value(v.clone())
+            .map_err(|_| "Invalid arguments: deps must be an array of item IDs.")?,
+    };
+    if deps.len() > 200 || deps.iter().any(|d| d.is_empty() || d.len() > 80) {
+        return Err("Invalid arguments: invalid prerequisite item IDs.".into());
+    }
+    if deps.iter().collect::<std::collections::HashSet<_>>().len() != deps.len() {
+        return Err("Invalid arguments: duplicate prerequisite item IDs.".into());
+    }
+    for dep in &deps {
+        x.store
+            .items()
+            .get(dep)
+            .map_err(|e| e.to_string())?
+            .filter(|i| i.workspace_id == o.ws && i.kind == "task")
+            .ok_or("Prerequisite item not found in this workspace.")?;
+    }
     let title = text_arg(args, "title").map(str::to_string);
     let team = match args.get("team") {
         None => None,
@@ -384,6 +404,7 @@ async fn create(x: &Extra, o: &Outside, args: &Value) -> Result<String, String> 
             title,
             bot,
             team,
+            deps,
             project,
             source: Some((format!("MCP · {source}"), "mcp".into())),
             tag_ids,
@@ -395,10 +416,11 @@ async fn create(x: &Extra, o: &Outside, args: &Value) -> Result<String, String> 
     .map_err(|e| e.to_string())?
     .map_err(|e| e.to_string())?;
     Ok(format!(
-        "Created {} «{}» for {}. Read it with steve_item_read to follow its progress and result.",
+        "Created {} «{}» for {}. Status: {}. Read it with steve_item_read to follow its progress and result.",
         item.id,
         item.title,
-        item.bot_id.as_deref().unwrap_or("Steve")
+        item.bot_id.as_deref().unwrap_or("Steve"),
+        item.status
     ))
 }
 

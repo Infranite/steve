@@ -300,6 +300,12 @@ For a bot, both the `hello` result and `me.get` result **must** contain `"identi
 
 These are generic external-service contracts only. No built-in platform adapter is removed or migrated, and notification defaults and existing platform adoption workflows are unchanged.
 
+## Item prerequisites
+
+`POST /api/items` and the outside-client MCP tool `steve_item_create` accept an optional `deps` array, for example `{"goal":"Prepare the follow-up","deps":["ST-12","ST-13"]}`. Use this field when creating a batch; adding prerequisites after creation can be too late to prevent its first turn. Each ID must name an ordinary task in the same workspace. An invalid batch creates no item, dependency edge or session.
+
+Creation commits the item and all prerequisite edges together. Until every prerequisite is closed as successfully completed, its status is `block`, no execution session or work directory is created, and reading progress does not start work or raise a question. Cancelled or failed prerequisites do not unblock it. The wait survives a Hub restart. Once ready, the workspace's dependency policy (`depsAfter`: `自动开始` or `提醒我开始`) starts it once or offers a start decision; an existing proposal still needs its approval. Automatic continuation disabled for a snapshot also disables this startup. The opening carries the Hub's prerequisite summary, so the agent does not need to expand its disclosure scope to check readiness.
+
 ## Workflow execution
 
 `STEVE_WORKFLOW_MAX_PARALLEL` limits claimed collaboration units **per root item tree** (default `4`; unset, invalid or nonpositive values use the default), not across the Hub. All work graphs belonging to a root item and its recursive provenance descendants share that budget, including graphs on ordinary forked items and trees whose root has no graph. Unrelated root items have independent budgets, so their combined collaboration concurrency can exceed four. An explicit graph `max_parallel` can further restrict that graph but cannot reset or enlarge the shared tree budget. Manual sessions and coordinator sessions are not additional collaboration units. Workflow units still cannot create nested work graphs.
@@ -1289,7 +1295,7 @@ Such a client lists `steve_knowledge_search`, `steve_items_search`, `steve_item_
 | Tool | What it does |
 | --- | --- |
 | `steve_items_search`, `steve_item_read` | find the workspace's items and read one (goal, status, plan, timeline, last delivery) |
-| `steve_item_create` | hand Steve new work: `goal`, and optionally `title` and `bot` (id or name); without them Steve chooses as for a message. The item's source is `MCP · <token name>` |
+| `steve_item_create` | hand Steve new work: `goal`, and optionally `title`, `bot` (id or name), `team` and `deps` (prerequisite IDs); without routing choices Steve chooses as for a message. Dependencies are saved before startup. The item's source is `MCP · <token name>` |
 | `steve_item_supplement` | add to an item, or answer what its bot asked (`id`, `text`) |
 | `steve_knowledge_search`, `steve_knowledge_read` | the user's knowledge base |
 | `steve_memory_list` | the user's memories (read only; tidying them stays with Steve's own runs) |

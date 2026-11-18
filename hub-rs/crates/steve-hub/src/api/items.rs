@@ -31,6 +31,9 @@ pub async fn create(
     let title = k.opt_str("title", Str::ANY);
     let bot = k.opt_str("bot", Str::ANY);
     let team = k.opt_str("team", Str::len(1, 64));
+    let deps = k
+        .opt_str_array_of("deps", Str::len(1, 80), None, Some(200))
+        .unwrap_or_default();
     let project = k.opt_nullable_str("project", Str::ANY);
     let mode = k
         .opt_enum("mode", &["start", "propose"])
@@ -43,7 +46,7 @@ pub async fn create(
     let item = st
         .dedupe
         .once(&c.ws, &c.me, "items", client_id, move || async move {
-            create_now(&st2, &c2, goal, title, bot, project, mode, team).await
+            create_now(&st2, &c2, goal, title, bot, project, mode, team, deps).await
         })
         .await?;
     ok(item)
@@ -58,7 +61,11 @@ async fn create_now(
     project: Option<Option<String>>,
     mode: String,
     team: Option<String>,
+    deps: Vec<String>,
 ) -> Result<Value, ApiError> {
+    for dep in &deps {
+        own_item(st, &c.ws, dep).await?;
+    }
     if let Some(id) = team.as_deref() {
         let store =
             super::bot_dispatch::store(st).ok_or_else(|| ApiError::not_found("Bot Team"))?;
@@ -117,6 +124,7 @@ async fn create_now(
             title,
             bot,
             team,
+            deps,
             project,
             tag_ids,
             source: ["手动新建".into(), "manual".into()],

@@ -265,6 +265,75 @@ async fn command(e: &Env, iid: &str, body: Value) -> (u16, Value) {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn creation_blocks_before_opening_a_session_and_completion_starts_it_once() {
+    let e = start().await;
+    let (_, state) = e.call("GET", "/api/state", None).await;
+    let bot = state["bots"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|b| b["harness"] == "claude-code")
+        .unwrap()["id"]
+        .clone();
+    let (status, dep) = e.call("POST", "/api/items", Some(json!({
+        "goal":"prerequisite", "title":"prerequisite", "bot":bot, "project":null, "mode":"propose"
+    }))).await;
+    assert_eq!(status, 200, "{dep}");
+    let dep = dep["id"].as_str().unwrap();
+    let (status, item) = e.call("POST", "/api/items", Some(json!({
+        "goal":"dependent @sleep 20000", "title":"dependent", "bot":bot, "project":null, "deps":[dep]
+    }))).await;
+    assert_eq!(status, 200, "{item}");
+    assert_eq!(item["status"], "block", "{item}");
+    let id = item["id"].as_str().unwrap();
+    let (_, sessions) = e.call("GET", "/api/sessions", None).await;
+    assert!(
+        !sessions
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|s| s["item_id"] == id)
+    );
+    let (_, detail) = e.call("GET", &format!("/api/items/{id}"), None).await;
+    assert_eq!(detail["dependency_wait"]["open_dependencies"], json!([dep]));
+    assert!(
+        detail["decisions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|d| d["status"] != "open")
+    );
+    let (status, result) = act(&e, dep, "finish").await;
+    assert_eq!(status, 200, "{result}");
+    assert!(
+        until(15, || async {
+            let (_, ss) = e.call("GET", "/api/sessions", None).await;
+            ss.as_array()
+                .unwrap()
+                .iter()
+                .any(|s| s["item_id"] == id && s["busy"] == true)
+        })
+        .await
+    );
+    let (_, ss) = e.call("GET", "/api/sessions", None).await;
+    assert_eq!(
+        ss.as_array()
+            .unwrap()
+            .iter()
+            .filter(|s| s["item_id"] == id)
+            .count(),
+        1
+    );
+    assert!(
+        e.prompts()
+            .iter()
+            .any(|p| p.contains("无需为核对进度读取其他事项或请求扩大读取范围"))
+    );
+    let (status, result) = act(&e, id, "drop").await;
+    assert_eq!(status, 200, "{result}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn pause_finish_drop_and_new_cycles() {
     let e = start().await;
     let sid = item(&e, "慢慢做 @sleep 20000").await;

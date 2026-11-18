@@ -63,6 +63,7 @@ impl steve_flow::Core for FlowCore {
                     source: Some(req.source),
                     parent: None,
                     tag_ids: req.tag_ids,
+                    deps: vec![],
                     propose: req.propose,
                     opening: None,
                     files: vec![],

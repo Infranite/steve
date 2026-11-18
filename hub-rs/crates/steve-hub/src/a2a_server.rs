@@ -292,6 +292,7 @@ async fn rpc_h(State(st): State<AppState>, req: Request) -> Response {
                     title,
                     bot: Some(r.bot.clone()),
                     team: None,
+                    deps: vec![],
                     project: Some(r.project.clone()),
                     tag_ids: r.tag_ids.clone(),
                     source: [format!("A2A · {}", who.token), "a2a".into()],

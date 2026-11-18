@@ -1147,6 +1147,77 @@ async fn an_outside_mcp_client_with_an_access_token_gets_the_scoped_tools() {
     );
 }
 
+#[tokio::test]
+async fn outside_mcp_creation_persists_prerequisites_without_starting_a_session() {
+    let e = start().await;
+    let st = e.store();
+    let owner = st.access().owner().unwrap().unwrap();
+    let (_, token) = st
+        .access()
+        .token_create(&owner.id, "test prerequisites", None)
+        .unwrap();
+    let dep = st
+        .items()
+        .create(
+            "default",
+            &steve_store::NewItem {
+                title: "prerequisite".into(),
+                goal: "fixture".into(),
+                bot_id: "steve".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .unwrap();
+    let call = |args: Value| {
+        let (http, url, token) = (e.http.clone(), format!("{}/mcp", e.base), token.clone());
+        async move {
+            http.post(url)
+                .bearer_auth(token)
+                .header("accept", "application/json, text/event-stream")
+                .json(
+                    &json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{
+                        "name":"steve_item_create","arguments":args
+                    }}),
+                )
+                .send()
+                .await
+                .unwrap()
+                .json::<Value>()
+                .await
+                .unwrap()
+        }
+    };
+    let before = st.items().all("default").unwrap().len();
+    let bad =
+        call(json!({"goal":"invalid","title":"invalid","bot":"steve","deps":[dep.id,"missing"]}))
+            .await;
+    assert_eq!(bad["result"]["isError"], true, "{bad}");
+    assert_eq!(st.items().all("default").unwrap().len(), before);
+    let good = call(
+        json!({"goal":"dependent work","title":"MCP dependent","bot":"steve","deps":[dep.id]}),
+    )
+    .await;
+    assert!(good["result"]["isError"].is_null(), "{good}");
+    let item = st
+        .items()
+        .all("default")
+        .unwrap()
+        .into_iter()
+        .find(|i| i.title == "MCP dependent")
+        .unwrap();
+    assert_eq!(item.status, "block");
+    assert_eq!(st.deps().of(&item.id).unwrap(), [dep.id]);
+    assert!(st.sessions().of_item(&item.id).unwrap().is_empty());
+    assert!(
+        st.decisions()
+            .of_item(&item.id)
+            .unwrap()
+            .iter()
+            .all(|d| d.status != "open")
+    );
+}
+
 /// An open live stream of `cred`, read chunk by chunk.
 struct Live(reqwest::Response, String);
 

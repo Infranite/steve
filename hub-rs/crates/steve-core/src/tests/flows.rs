@@ -1421,7 +1421,7 @@ fn dependencies_block_and_start_when_done() {
     assert_eq!(k.status(&b.id).0, "run");
     let sb = only_session(&k, &b.id);
     assert!(k.rt.prompts_of(&sb.id)[0].ends_with(&format!(
-        "前置事项都已完成：\n{}「标题」：已验收\n现在开始这个事项。",
+        "Hub 已核对前置事项都已完成：\n{}「标题」：已验收\n现在开始这个事项。前置状态由 Hub 管理，无需为核对进度读取其他事项或请求扩大读取范围。",
         a.id
     )));
     assert!(
