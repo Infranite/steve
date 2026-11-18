@@ -1,5 +1,0 @@
-Needs a minor release: the Hub↔Node protocol goes to 0.8 with `node.remove`, `node.remove_commit` and `node.remove_status`. Nodes of earlier releases keep working with the new Hub, but only Nodes upgraded to this release can remove themselves; for the others Devices shows the command to run on their machine.
-
-- A Node's page in Devices has **Remove from this machine** next to **Unpair** (#325). After its owner confirms, the Hub asks the Node over its own connection to stop taking work, let running sessions end (cancelling them after `STEVE_NODE_REMOVE_GRACE_SECS`, default 10 minutes), stop and uninstall its service and delete its home; once the Node confirms, the Hub unpairs it. This works for Nodes installed remotely over tailcat, whose one-time SSH key is gone.
-- When the Node is offline, runs an earlier release, or does not confirm, the dialog shows the exact command to run on that machine instead, and keeps **Unpair** at hand.
-- **Unpair** is unchanged and now says so: the Node stays installed on its machine but can no longer connect.
