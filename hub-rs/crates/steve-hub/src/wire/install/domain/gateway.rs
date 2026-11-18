@@ -27,3 +27,7 @@ install! { install(reg, cx) [declared, disclosure, kb_hooks, out_link, registry,
     disclosure.bind(modules.store.clone(), modules.gateway.clone());
     out_link.bind_clock(modules.clock.clone());
 }}
+
+install! { routes(reg, _cx) [module_routes, modules] => [modules, routes] {
+    let routes = module_routes.with_state(modules.clone());
+}}

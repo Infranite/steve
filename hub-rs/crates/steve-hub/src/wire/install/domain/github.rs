@@ -35,3 +35,7 @@ install! { routes(reg, _cx) [gh, mut module_routes] => [gh, module_routes] {
     module_routes = module_routes.merge(steve_github::comment::routes(gh.clone()));
     module_routes = module_routes.merge(steve_github::issues::routes(gh.clone()));
 }}
+
+install! { root(reg, _cx) [gh, mut root_routes] => [gh, root_routes] {
+    root_routes = root_routes.merge(steve_github::hooks::routes(gh.clone()));
+}}
