@@ -447,7 +447,6 @@ export default {
     missing: "没有这个对话，或者你看不到它所在的空间。",
     loadFailed: "对话载入失败，请重试。",
     readonlyUi: "群聊里的界面只能看，操作请在你和 Steve 的主线对话里进行",
-    stopped: "你停下了这次回答",
     jumpBack: "返回刚才位置",
     newCount_other: "{{count}} 条新消息",
     latest: "回到最新",

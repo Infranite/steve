@@ -456,7 +456,6 @@ export default {
     missing: "This conversation doesn't exist, or you can't see its space.",
     loadFailed: "Couldn't load this conversation. Try again.",
     readonlyUi: "UI in group chats is view-only. Act on it in your main conversation with Steve.",
-    stopped: "You stopped this answer",
     jumpBack: "Back to where you were",
     newCount_one: "{{count}} new message",
     newCount_other: "{{count}} new messages",

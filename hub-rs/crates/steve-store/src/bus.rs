@@ -70,6 +70,13 @@ pub enum ChangeEvent {
         /// The call has begun and has not ended: `ok` says nothing yet.
         #[serde(skip_serializing_if = "std::ops::Not::not")]
         running: bool,
+        /// Opaque call number within this run; absent in older events.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        call: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        started_at: Option<i64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        at: Option<i64>,
     },
     /// An inline research run was queued, started or ended.
     #[serde(rename = "thread.run")]
@@ -315,6 +322,9 @@ mod tests {
             ok: true,
             kind: kind.into(),
             running,
+            call: None,
+            started_at: None,
+            at: None,
         };
         assert_eq!(
             j(tool("", false)),

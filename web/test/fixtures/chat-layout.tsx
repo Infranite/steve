@@ -66,7 +66,7 @@ window.addEventListener("fixture-thinking-stage", (event) => {
   if (stage === "thought") st.draft = { mid:"request",text:"",thought:reasoning,t0 }
   if (stage === "research" || stage === "research-update") {
     st.phase = "research"
-    st.live = { mid:"request",run:"fixture-research",t0,tools:[{name:"Read",brief:"src/app.ts",kind:"read",ok:true},{name:"Read",brief:"src/config.ts",kind:"read",ok:true}],now:{name:"Grep",brief:"model settings",kind:"search"} }
+    st.live = { mid:"request",run:"fixture-research",startedAt:t0,tools:[{name:"Read",brief:"src/app.ts",kind:"read",ok:true},{name:"Read",brief:"src/config.ts",kind:"read",ok:true}],now:{name:"Grep",brief:"model settings",kind:"search"} }
     if (stage === "research-update") { st.live.tools.push({name:"Grep",brief:"model settings",kind:"search",ok:true}); st.live.now={name:"Bash",brief:"npm run check",kind:"exec"} }
   }
   if (stage === "reply") { st.phase="answer"; st.draft={mid:"request",thought:reasoning,text:"核对完成，正在生成回答。",t0} }

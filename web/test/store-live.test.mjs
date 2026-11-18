@@ -13,6 +13,8 @@ import * as i18n from "../src/i18n/index.ts"
 import * as composerDraft from "../src/composer-draft.ts"
 import * as runtimeStatus from "../src/runtime-status.ts"
 
+import * as chatProgress from "../src/thread/chat-progress.ts"
+
 const code = ts.transpileModule(readFileSync(new URL("../src/store.ts", import.meta.url), "utf8"), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2023 } }).outputText
 const flush = async () => { for (let i = 0; i < 40; i++) await Promise.resolve() }
 const defer = () => { let resolve, reject; const promise = new Promise((a, b) => { resolve = a; reject = b }); return { promise, resolve, reject } }
@@ -26,6 +28,7 @@ function harness(local = { getItem: () => "1" }) {
   const exports = {}
   runInNewContext(code, {
     exports, require: (id) => {
+      if (id === "@/thread/chat-progress") return chatProgress
       if (id === "./api") return { api, setPageWorkspace: (ws) => { pageWs.push(ws) }, cursorOf: (s) => marks.get(s) ?? null, stream: (event, open, cursor) => { onEvent = event; onOpen = open; cursorFn = cursor; opens++; return () => { closes++ } }, Unauthenticated: class extends Error {} }
       if (id === "./event-pages") return pages
       if (id === "./live-utils") return live

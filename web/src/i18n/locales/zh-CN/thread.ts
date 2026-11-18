@@ -6,7 +6,6 @@ export default {
     done: "处理完成",
     failed: "处理失败",
     stopped: "已停止",
-    callFailures_other: "{{count}} 次调用失败",
   },
   /* who said a message */
   who: {
@@ -14,6 +13,22 @@ export default {
     someone: "某人",
   },
   /* the research run being read, and its summary once done */
+  progress: {
+    process: "执行过程",
+    show: "查看过程",
+    hide: "收起过程",
+    unavailable: "进度暂不可用",
+    lastActivity: "最近活动：{{time}}前",
+    recovered: "已恢复",
+    noOutput: "未保留工具输出",
+    awaiting: "待确认",
+    unfinished: "本轮未完成",
+    stopped: "本轮已停止",
+    violation: "工具检查中止了本轮操作。",
+    budget: "本轮达到执行限额，未能完成。",
+    restart: "Hub 重启，本轮未完成。",
+    action: { read: "正在读取资料", search: "正在搜索", exec: "正在运行命令", edit: "正在修改", fetch: "正在读取网页" },
+  },
   research: {
     files_other: "读了 {{count}} 个文件",
     searches_other: "搜索 {{count}} 次",

@@ -1,3 +1,5 @@
+import { researchEvent, type LiveRun } from "@/thread/chat-progress"
+export type { LiveRun } from "@/thread/chat-progress"
 import { debounceMax, bounded } from "./live-utils"
 import { readEventPages } from "./event-pages"
 /* View model over the Hub API. Keeps the prototype's shapes (st.items, st.S, st.bots …) so the views stay as designed;
@@ -96,9 +98,7 @@ export type Update = { kind: "ask" | "reply" | "deliver" | "done" | "drop" | "fa
 /** what Steve did for one message (hub meta.steps): routing, the reasoning behind a direct answer, a research run, tools; times in ms */
 export type Steps = { route?: { kind: string; modelKind?: string; guard?: string | null; confidence?: number; title: string; bot: string; project: string | null; tags: string[]; newTags: string[]; why: string; model: string | null; fallback: boolean; ms: number; picked?: string }; answer?: { thought: string; model: string | null; ms: number; failed: boolean }
   research?: { run: string; model: string | null; ms: number; turns: number; tools: number; stopped?: "user" | "budget" | "violation" | "restart" | "failed" }
-  tools: { name: string; /** the category the adapter gave the call (`read`, `exec`, …); absent on Steve's own steps and on older ones */ kind?: string; args: Record<string, any>; result?: Record<string, any>; status: "ok" | "failed"; error?: string; ms: number }[]; ms?: number }
-/** a research run being read live (steve.tool), for the user message `mid` */
-export type LiveRun = { mid: string; run: string; t0: number; tools: { name: string; brief: string; ok: boolean; kind?: string }[]; /** the call running right now */ now?: { name: string; brief: string; kind?: string } }
+  tools: { name: string; call?: number; /** the category the adapter gave the call (`read`, `exec`, …); absent on Steve's own steps and on older ones */ kind?: string; args: Record<string, any>; result?: Record<string, any>; status: "ok" | "failed"; error?: string; ms: number }[]; ms?: number }
 /** an open decision with no item (a forked or imported session, or its item was deleted): shown with the same card */
 export type Orphan = { i: Item; w: Wait }
 export type Project = RProject
@@ -188,7 +188,7 @@ export const st = {
   localSessions: [] as LocalSession[], hold: null as RHold | null, thinking: false, onboard: -1, /** the user is the instance's owner */ owner: false, prefix: "ST", noSeq: 0,
   notices: [] as RNotice[], noticeSeen: 0, phase: "" as string, orphans: [] as Orphan[],
   /* the chat answer being written (steve.draft), until the stored reply replaces it; `drafted` is that reply's id */
-  draft: null as Draft | null, drafted: "",
+  draft: null as Draft | null, drafted: "", draftedStart: undefined as number | undefined,
   /* the research being read right now (steve.tool), the message being quoted, the item the conversation is talking to */
   live: null as LiveRun | null, quote: null as string | null, focus: null as { item: string; until: number } | null,
   /* modules that are not wired to a backend yet: always empty, never sample data */
@@ -566,10 +566,10 @@ function build() {
   if (!st.ready && s.thinking) st.thinking = true
   if (st.draft) {
     const reply = s.thread.findLast((m) => m.author === "steve" && m.meta?.origin === st.draft!.mid && !priorDraftReplies.has(m.id))
-    if (reply) { st.drafted = reply.id; st.draft = null }
+    if (reply) { st.drafted = reply.id; st.draftedStart = st.draft.t0; st.draft = null }
   }
   /* a research run's answer is stored: its live line goes, and the thinking line with it */
-  if (st.live && s.thread.some((m) => m.author === "steve" && m.meta?.origin === st.live!.mid && m.meta?.steps?.research)) {
+  if (st.live && s.thread.some((m) => m.author === "steve" && m.meta?.origin === st.live!.mid && m.meta?.steps?.research?.run === st.live!.run)) {
     st.live = null; if (st.phase === "research" || st.phase === "answer") { st.thinking = false; st.phase = "" }
   }
   if (st.thinking || st.draft || st.live) st.thread.push({ k: "thinking" })
@@ -730,9 +730,17 @@ export const yoloUndo = (id: string, text?: string) => yoloCall(yoloApi.undo(id,
 export const yoloNow = (id: string) => yoloCall(yoloApi.now(id)).then((r) => { void refresh(); return r })
 export const yoloCancel = (id: string) => yoloCall(yoloApi.cancel(id), t("core:yolo.leftToYou"))
 
+function forgetResearchActivity() {
+  if (st.live) { st.live.now = undefined; st.live.active = []; st.live.at = undefined }
+}
+
 function onHub(e: HubEvent | ModuleEvent) {
   /* the Hub could not continue from our cursor (it restarted, or we were away past its window): refetch everything, once */
-  if (e.type === "stream.reset") { void resync(); return }
+  if (e.type === "stream.reset" || e.type === "stream.gap") {
+    // The research deltas are not replayed. Keep recorded results, but forget which call was active.
+    forgetResearchActivity(); emit()
+    if (e.type === "stream.reset") { void resync(); return }
+  }
   /* the replay after a reconnect is done; transcript chunks from the gap are not replayed, the events API has them */
   if (e.type === "stream.gap") { freezeCursors(); void bounded([...new Set([...raw.events.keys(), ...raw.loadingEv])], catchUp); yoloSoon(); return }
   hubSubs.forEach((f) => f(e))
@@ -752,9 +760,8 @@ function onHub(e: HubEvent | ModuleEvent) {
     drawDraft(); return
   }
   if (e.type === "steve.tool") {
-    if (st.live?.run !== e.run) st.live = { mid: e.mid, run: e.run, t0: Date.now(), tools: [] }
-    if (e.running) st.live.now = { name: e.name, brief: e.brief, kind: e.kind }
-    else { st.live.now = undefined; st.live.tools.push({ name: e.name, brief: e.brief, ok: e.ok, kind: e.kind }) }
+    if (st.thread.some(m => m.steps?.research?.run === e.run)) return
+    st.live = researchEvent(st.live, e)
     if (!st.thread.some((m) => m.k === "thinking")) st.thread.push({ k: "thinking" })
     drawDraft(); return
   }
@@ -816,7 +823,7 @@ const connect = () => {
     void resync().then(() => { if (gen === streamGen && watermark) connect() })
   }, () => from, () => {
     if (gen !== streamGen || st.down || downTimer) return
-    downTimer = setTimeout(() => { downTimer = null; if (gen === streamGen) { st.down = true; emit() } }, DOWN_AFTER_MS)
+    downTimer = setTimeout(() => { downTimer = null; if (gen === streamGen) { st.down = true; forgetResearchActivity(); emit() } }, DOWN_AFTER_MS)
   })
   yoloSoon()
 }
@@ -1185,7 +1192,7 @@ export function setBotWorkspaces(k: string, ids: string[]) { void call(api.botWo
 
 /* ───────── actions: workspaces and projects ───────── */
 export async function switchWorkspace(id: string) {
-  try { await api.switchWs(id); setPageWorkspace(id); scopeEpoch++; st.ready = false; emit(); replayFrom.clear(); painted.clear(); raw.loadingItem.clear(); raw.loadingEv.clear(); reloadAgain.clear(); missedEv.clear(); raw.details.clear(); raw.events.clear(); convs.clear(); openItems.clear(); dirty.clear(); watermark = null; st.thinking = false; st.draft = null; closeStream(); await refresh(); connect(); location.hash = "#/"; toast(t("core:toast.switchedWorkspace", { name: st.workspace?.name ?? "" })); return st.ready && st.workspace?.id === id } catch (e) { fail(e); return false }
+  try { await api.switchWs(id); setPageWorkspace(id); scopeEpoch++; st.ready = false; emit(); replayFrom.clear(); painted.clear(); raw.loadingItem.clear(); raw.loadingEv.clear(); reloadAgain.clear(); missedEv.clear(); raw.details.clear(); raw.events.clear(); convs.clear(); openItems.clear(); dirty.clear(); watermark = null; st.thinking = false; st.draft = null; st.live = null; st.phase = ""; closeStream(); await refresh(); connect(); location.hash = "#/"; toast(t("core:toast.switchedWorkspace", { name: st.workspace?.name ?? "" })); return st.ready && st.workspace?.id === id } catch (e) { fail(e); return false }
 }
 export async function newWorkspace(name: string, description: string, item_prefix?: string) { const w = await call(api.newWs({ name, description, item_prefix })); if (w) await switchWorkspace(w.id) }
 export async function newProject(p: { name: string; path: string; description?: string; worktree?: boolean; default_bot?: string | null; done_when?: "merge" | "tag" | null; node?: string }) { const r = await call(api.newProject(p), t("core:toast.projectAdded", { name: p.name })); return r?.id }

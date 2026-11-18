@@ -31,6 +31,7 @@ pub const SYSTEM: &str = "system";
 /// One tool call of a research run, as the executor saw it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ToolSeen {
+    pub call: Option<u32>,
     /// the harness tool name (`Read`, `Grep`, `mcp__steve__steve_knowledge_search`, …)
     pub name: String,
     /// its category (`read`, `search`, `exec`, …), or empty
@@ -143,7 +144,7 @@ pub trait ResearchSink: Send + Sync {
     /// A tool call finished.
     fn tool(&self, t: &ToolSeen);
     /// A tool call began, or says more about itself, and has not finished: what the run is doing now.
-    fn tool_running(&self, _name: &str, _kind: &str, _brief: &str) {}
+    fn tool_running(&self, _call: Option<u32>, _name: &str, _kind: &str, _brief: &str) {}
 }
 
 /// What a run produced.
@@ -362,6 +363,9 @@ impl ResearchSink for Sink<'_> {
             "ms": t.ms,
         });
         // what the step did is told by this, not by the tool's name: every harness names its own
+        if let Some(call) = t.call {
+            step["call"] = json!(call);
+        }
         if !t.kind.is_empty() {
             step["kind"] = json!(t.kind);
         }
@@ -382,9 +386,12 @@ impl ResearchSink for Sink<'_> {
             ok: t.ok,
             kind: t.kind.clone(),
             running: false,
+            call: t.call,
+            started_at: Some(self.t0),
+            at: Some(now()),
         });
     }
-    fn tool_running(&self, name: &str, kind: &str, brief: &str) {
+    fn tool_running(&self, call: Option<u32>, name: &str, kind: &str, brief: &str) {
         let d = &self.drafts;
         if d.quiet {
             return;
@@ -398,6 +405,9 @@ impl ResearchSink for Sink<'_> {
             ok: true,
             kind: kind.into(),
             running: true,
+            call,
+            started_at: Some(self.t0),
+            at: Some(now()),
         });
     }
 }

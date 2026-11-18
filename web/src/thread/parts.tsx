@@ -8,7 +8,7 @@ import { CornerDownRightIcon, FileTextIcon, LibraryIcon, RotateCcwIcon, SearchIc
 import { Button } from "@/components/ui/button"
 import { Spinner } from "@/components/ui/spinner"
 import { type StepState, type ToolStep, type TrailItem } from "@/components/work-trail"
-import { ChatThinking } from "@/thread/thinking"
+import { recoveredCalls } from "@/thread/chat-progress"
 import { SteveModelControl } from "@/steve-model"
 import { api } from "@/api"
 import { newClientId } from "@/composer-draft"
@@ -64,13 +64,13 @@ export function researchStep(key: string, name: string, kind: string | undefined
 
 /** The event stream determines every step; an empty list is still a running panel. */
 export function researchLiveItems(l: LiveRun): TrailItem[] {
-  const items: TrailItem[] = l.tools.map((x,n) => researchStep(String(n),x.name,x.kind,x.brief,x.ok ? "done" : "fail"))
-  if (l.now) items.push(researchStep("now",l.now.name,l.now.kind,l.now.brief,"run"))
+  const recovered = recoveredCalls(l.tools, x => x.ok)
+  const items: TrailItem[] = l.tools.map((x,n) => researchStep(String(n), x.name, x.kind, x.brief || "", x.ok ? "done" : "fail",
+    { attrs: { kind: toolClass(x.name,x.kind), recovered: recovered.has(n) ? "" : undefined } }))
+  for (const call of l.active ?? (l.now ? [l.now] : [])) {
+    items.push(researchStep("now:" + (call.call ?? ""), call.name, call.kind, call.brief || "", "run"))
+  }
   return items
-}
-export function ResearchLive() {
-  const l = st.live
-  return l ? <div className="w-full min-w-0 self-start px-1" data-research-live={l.run}><ChatThinking items={researchLiveItems(l)} startedAt={l.t0} /></div> : null
 }
 
 /* ───────── offer · suggestion card · ask ───────── */
@@ -118,14 +118,16 @@ export function AskChips({ m, conv }: { m: Msg; conv?: boolean }) {
   if (!m.ask?.options?.length) return null
   if (conv) return <div className="mt-2 type-callout text-muted-foreground" data-ask={m.id} data-ask-readonly>{t("thread:ask.canReply", { options: m.ask.options.join(" / ") })}</div>
   const at = st.thread.findIndex((x) => x === m || (!!m.id && x.id === m.id))
-  if (at >= 0 && st.thread.slice(at + 1).some((x) => x.k === "me")) return null
+  if ((at >= 0 ? st.thread.slice(at + 1) : st.thread.filter(x => (x.created ?? 0) > (m.created ?? 0))).some(x => x.k === "me")) return null
   const key = m.id ?? ""
   const send = async (o: string) => {
     if (answering.has(key)) return
     answering.add(key)
     try { await chatSend(o) } finally { answering.delete(key) }
   }
-  return <div className="mt-3 flex flex-wrap gap-2 anim-in" data-ask={m.id}>{m.ask.options.map((o) => <Button key={o} size="sm" variant="outline" className="rounded-full" onClick={() => void send(o)} data-ask-opt={o}>{o}</Button>)}</div>
+  return <div className="mt-3 rounded-lg border bg-muted/35 px-3 py-2 anim-in" data-ask={m.id} data-chat-awaiting>
+    <p className="flex items-center gap-2 type-callout font-medium text-attention"><CircleAlertIcon className="size-4 shrink-0" aria-hidden />{t("thread:progress.awaiting")}</p>
+    <div className="mt-1 flex flex-wrap gap-2">{m.ask.options.map((o) => <Button key={o} size="sm" variant="outline" className="rounded-full" onClick={() => void send(o)} data-ask-opt={o}>{o}</Button>)}</div></div>
 }
 
 /** "（Hub 重启，没答完）": ask the question again (your own conversation only: an IM turn is asked in its chat) */
