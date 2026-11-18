@@ -510,12 +510,15 @@ function itemOf(i: RItem): Item {
 export const knownMsgs = new Map<string, Msg>()
 /* A rerun keeps the question's origin: replies already on screen cannot finish its new draft. */
 let priorDraftReplies = new Set<string>(), nextDraft = true
+/* a reply stopped while it was being written was stored for a while (#301) with `steps: {}`: no tool list, which every
+ * reader of steps assumes */
+const stepsOf = (s: unknown): Steps | undefined => s && typeof s === "object" ? { ...(s as Steps), tools: Array.isArray((s as Steps).tools) ? (s as Steps).tools : [] } : undefined
 export function msgOf(m: State["thread"][number]): Msg {
   const x = m.meta ?? {}
   /* one drafted change (`proposal`) or several (`proposals`); `cfg_state` is what became of each */
   const ps: Proposal[] = Array.isArray(x.proposals) ? x.proposals : x.proposal ? [x.proposal] : []
   const cfgs = ps.map((p) => proposalOf(p, x.cfg_state?.[p.id] ?? (x.applied ? "applied" : x.dropped ? "dropped" : "draft")))
-  return { id: m.id, k: m.author, t: m.text, item: m.item_id ?? undefined, chat: x.chat, files: x.files, created: m.created, steps: x.steps, notice: x.notice, cites: x.cites, cfgs: cfgs.length ? cfgs : undefined,
+  return { id: m.id, k: m.author, t: m.text, item: m.item_id ?? undefined, chat: x.chat, files: x.files, created: m.created, steps: stepsOf(x.steps), notice: x.notice, cites: x.cites, cfgs: cfgs.length ? cfgs : undefined,
     held: !!x.held || undefined, stopped: !!x.stopped || undefined, meet: x.onboard === true || undefined,
     offer: x.offer ?? undefined, suggest: x.suggest ?? undefined, ask: x.ask ?? undefined, queued: x.queued ?? undefined, replyTo: x.reply_to ?? undefined, origin: x.origin ?? undefined, answer: x.answer ?? undefined,
     update: x.update ?? undefined, updates: Array.isArray(x.updates) ? x.updates : undefined, rerun: x.rerun ?? undefined,

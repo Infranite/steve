@@ -46,7 +46,7 @@ export function useNativeShell(context: Omit<ShellContext, "visible" | "focused"
       navigate: go,
       actionOpen: (route) => route === "#/hub/add"
         ? addHub.current || (committedSheet.current?.kind === "hubs" && committedSheet.current.payload?.add === true)
-        : route === "#/hub/pair" && committedSheet.current?.kind === "pairClient",
+        : route === "#/hub/pair" && committedSheet.current?.kind === "addDevice" && committedSheet.current.payload?.kind === "client",
     })
     session.current = native
     const value = () => ({ ...latest.current, ...(appearance.current ? { appearance: appearance.current } : {}), focused: document.hasFocus(), visible: document.visibilityState === "visible" })

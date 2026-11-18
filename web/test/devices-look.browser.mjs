@@ -122,6 +122,8 @@ async function hub(page, scene, unknown) {
     if (path === "/api/devices") return json(route, { devices: [{ id: "hub", name: "Studio Mac", roles: ["Hub"], node_id: "local", os: "macOS 26.1", version: HUB, status: "正常", max_sessions: 32, seen: NOW, created: 0 }], runtimes })
     /* the owner chip asks for the people module, which this Hub (like any without it) does not have */
     if (path === "/api/me/contact") return json(route, {}, 404)
+    /* the page header's account button asks who is signed in */
+    if (path === "/api/me") return json(route, { user: { id: "u1", name: "Owner", email: null, role: "owner" }, version: HUB, web_version: HUB })
     unknown.add(request.method() + " " + path)
     return json(route, { error: "fixture" }, 404)
   })

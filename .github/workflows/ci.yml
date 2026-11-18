@@ -74,6 +74,15 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run check && npm run test:web && npm run build:web
+      # A few fast browser tests of the app in headless Chromium (web/test/browser-smoke.mjs lists them), on Linux
+      # only: they answer the API themselves, so they need no Hub, and macOS draws the same pages. The other
+      # web/test/*.browser.mjs tests are run by hand where they need a test Hub or take minutes.
+      - name: Browser smoke tests
+        if: runner.os == 'Linux'
+        timeout-minutes: 6
+        run: |
+          npx playwright install --only-shell chromium
+          npm run test:web:browser-smoke
   # A push or pull request that changed only release notes (cut-release.py's release pull request, and its
   # commit on main) repeats the Rust jobs of the commit it stands on. This job waits for CI on that commit
   # and, when it passed, lets them be skipped. Merge queue runs do not run it, and always run the Rust jobs.

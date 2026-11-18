@@ -22,7 +22,7 @@ const graph = {
   ],
   edges: [{ from: "t", to: "f", label: "" }, { from: "f", to: "a", label: "yes" }, { from: "f", to: "b", label: "否" }],
 }
-const MODE = { item_auto: "建事项并开始，自动验收", report: "在对话里发一条汇报" }
+const MODE = { item_auto: "建事项并开始，自动验收", report: "发布到信息流，工作空间成员可见" }
 const flow = { id: "flw_1", kind: "flow", name: "分支对不上", description: "", enabled: false, version: 1, origin: "user", origin_label: "", trigger: { source: "manual", types: [] }, uses_ai: false, outcomes: 2, runs24: 0, last_run: null, created: 1, updated: 1, graph, versions: [{ version: 1, author: "usr_dev", note: "", created: 1 }] }
 const dryRun = { id: "run_d", flow_id: "flw_1", flow_version: 1, status: "done", dry_run: true, event_id: null, outcome: "ignored", outcome_label: "忽略了", started: 2, ended: 3, steps: [
   { seq: 1, node_id: "t", status: "ok", branch: null, input: { summary: "样例" }, output: { summary: "样例" }, ms: 1, error: null },
