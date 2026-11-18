@@ -6,6 +6,10 @@
 
 steve_i18n::init!();
 
+// Shared WebSocket/HTTP fixtures are also included by unit tests.
+#[cfg(test)]
+extern crate self as steve_hub;
+
 pub mod a2a_server;
 pub mod access;
 pub mod api;

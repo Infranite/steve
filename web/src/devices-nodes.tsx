@@ -10,11 +10,12 @@ import { Button } from "@/components/ui/button"
 import { Card } from "@/components/affect/card-clean"
 import { HoverCard } from "@/components/affect/hover-card-clean"
 import { go, Loading, openSheet } from "@/ui"
-import { deviceWorkEvidence, st, useStore } from "@/store"
+import { deviceWorkEvidence, useStore } from "@/store"
 import type { RVitals } from "@/api"
 import { hostLine, hostOf, linkRoute, loadPct, memPct, nodeAlerts, nodeStatus, one, rttOf, type HostKind, type NodeView } from "@/device-model"
 import { useDevices } from "@/devices-data"
 import { deviceGroups } from "@/devices-work"
+import { harnessSummary } from "@/node-harness-model"
 import { Alert, Chip, Spark, StatusBadge } from "@/devices-ui"
 import { Meter } from "@/panel"
 import { cn } from "cn"
@@ -37,12 +38,6 @@ export function agentsLine(v: NodeView): { n: number; working: number } {
   return { n: v.running ?? 0, working: v.running ?? 0 }
 }
 
-/** the harnesses it runs and their versions; only the Hub's own Node reports them so far */
-export function harnessLine(v: NodeView): string {
-  if (!v.local) return ""
-  return st.runtimes.filter((r) => r.ok && r.version).map((r) => `${r.id} ${r.version}`).join(" · ")
-}
-
 /** one of a card's four figures: its label, the value large, one quiet line and its last hour */
 function Metric({ label, value, sub, children, ...rest }: { label: ReactNode; value: ReactNode; sub?: ReactNode; children?: ReactNode } & { [k: `data-${string}`]: unknown }) {
   return (
@@ -59,7 +54,7 @@ const tail = <T,>(xs: T[]) => xs.slice(-SPARK_POINTS)
 
 /** one Node as a card */
 export function NodeCard({ v }: { v: NodeView }) {
-  const t = useT(), { hubVersion, vitals } = useDevices()
+  const t = useT(), { hubVersion, vitals, harnesses, harnessesError } = useDevices()
   useStore()
   const vit: RVitals | undefined = vitals?.[v.id]
   const l = v.linked ? vit?.latest : undefined
@@ -67,7 +62,7 @@ export function NodeCard({ v }: { v: NodeView }) {
   const alerts = nodeAlerts(v, hubVersion)
   const lp = loadPct(l), mp = memPct(l), rtt = v.linked ? rttOf(v, l) : null, route = linkRoute(v)
   const series = tail(vit?.series ?? [])
-  const agents = agentsLine(v), harness = harnessLine(v)
+  const agents = agentsLine(v), harness = harnessesError ? t("devices:harness.readFailed") : harnessSummary(v, harnesses?.[v.id])
   const name = v.local ? t("devices:map.localNode") : v.name
   const open = () => go(nodeHref(v.id))
   return (
@@ -103,9 +98,9 @@ export function NodeCard({ v }: { v: NodeView }) {
           {v.max != null && v.running != null && <div className="pt-3"><Meter value={v.max ? v.running / v.max : 0} tone={v.running >= v.max ? "wait" : "run"} /></div>}
         </Metric>
       </div>
-      <footer className="-mx-4 -mb-4 mt-auto flex min-w-0 items-center gap-3 border-t border-border/70 px-4 py-2.5 type-footnote text-muted-foreground">
+      <footer className="-mx-4 -mb-4 mt-auto flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 border-t border-border/70 px-4 py-2.5 type-footnote text-muted-foreground">
         <span className="min-w-0 flex-1 truncate" data-node-agents={agents.n}>{agents.n ? t("devices:card.agents", { count: agents.n, working: agents.working }) : t("devices:card.noAgents")}</span>
-        {harness && <span className="hidden min-w-0 truncate font-mono sm:inline" title={harness} data-node-harness>{harness}</span>}
+        <span className="order-last w-full min-w-0 truncate" title={harness} data-node-harness>{harness}</span>
         <span className="inline-flex shrink-0 items-center text-foreground/80">{t("devices:card.details")}<ChevronRightIcon className="size-3.5" aria-hidden /></span>
       </footer>
     </Card>

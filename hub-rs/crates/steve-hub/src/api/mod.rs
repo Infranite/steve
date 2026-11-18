@@ -16,6 +16,7 @@ mod items;
 mod misc;
 mod node_context;
 mod node_env;
+mod node_harnesses;
 mod node_tags;
 pub(crate) mod outputs;
 mod project_setup;
@@ -55,6 +56,8 @@ pub struct Inner {
     pub domain: Arc<dyn Domain>,
     pub bus: Bus,
     pub runtimes: Runtimes,
+    /// Device observations stay separate from the merged model/dispatch catalogue.
+    pub node_harnesses: node_harnesses::Inventory,
     /// The models each harness offers (`/system/models`).
     pub catalog: crate::catalog::Catalog,
     pub state_cache: misc::StateCache,
@@ -98,6 +101,7 @@ impl AppState {
             domain,
             bus,
             runtimes,
+            node_harnesses: Default::default(),
             state_cache: Default::default(),
             dedupe: Default::default(),
             modules: None,
@@ -798,6 +802,8 @@ pub fn router(st: AppState, modules: Router) -> Router {
         .route("/node-tags/{node}", put(node_tags::set))
         .route("/items/{id}/node-tag", put(node_tags::set_item))
         .route("/vitals", get(crate::nodes::vitals::get))
+        .route("/node-harnesses", get(node_harnesses::list))
+        .route("/node-harnesses/{id}", get(node_harnesses::get))
         .route("/devices/{id}", patch(misc::device_patch))
         .route("/system/models", get(misc::system_models))
         .route("/system/harnesses", post(misc::system_harness_add))

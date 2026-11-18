@@ -10,6 +10,16 @@ export default {
   tabs: "Device pages",
   tab: { overview: "Overview", hub: "Hub", nodes: "Nodes", clients: "Clients" },
   loadFailed: "Could not read it: {{error}}",
+  harness: {
+    title: "Harnesses", refresh: "Probe again", checked: "Last successful probe: {{at}}", details: "Probe and component details",
+    none: "No harness is available", unreported: "Harnesses not yet reported (awaiting a probe or an older Node)", unsupported: "This Node version does not support harness probes; upgrade the Node",
+    available: "Available: {{names}}", legacy: "Availability not reported (possibly an older Node)", offline: "Node offline; no harness report yet", offlineCached: "Node offline; harness data may be out of date",
+    failed: "Harness probe failed; try probing again", failedCached: "Harness probe failed; showing the last report", stale: "Data may be out of date",
+    readFailed: "Could not read the harness report; try probing again", lastReport: "Last reported", versionUnknown: "Version unknown",
+    models: "Available models", reportedModels: "Last reported models (current availability unconfirmed)", noModels: "No model list reported",
+    componentInstalled: "Installed", manageLocal: "Manage local runtimes",
+    state: { ready: "Available", not_installed: "Not installed", installing: "Installing", unavailable: "Unavailable", unknown: "Availability unknown" },
+  },
 
   map: {
     title: "How it connects",
