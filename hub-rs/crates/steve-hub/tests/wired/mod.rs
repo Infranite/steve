@@ -420,9 +420,19 @@ fn one<T: rusqlite::types::FromSql>(
 }
 
 /// E1/E3: a mailbox connected over the API (fake IMAP/SMTP with a test CA), a draft written and
-/// sent through its approval decision, and the mail arrives at the fake SMTP server.
+/// sent through its approval decision and real C5 with an offline ACP checker, then fake SMTP.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_mail_draft_goes_out_through_its_approval() {
+    mail_draft_through_approval(true).await;
+}
+
+/// A user approval cannot bypass a missing disclosure model in the fully wired Hub either.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_mail_draft_is_held_when_its_disclosure_model_is_unavailable() {
+    mail_draft_through_approval(false).await;
+}
+
+async fn mail_draft_through_approval(checker_available: bool) {
     use steve_mail::fake::{FakeImap, FakeSmtp, ImapConfig, SmtpConfig, TestCa, TlsMode};
     let ca = TestCa::generate().expect("ca");
     let imap = FakeImap::start(ImapConfig {
@@ -440,7 +450,19 @@ async fn a_mail_draft_goes_out_through_its_approval() {
     let ca_dir = tempfile::tempdir().expect("tmp");
     let pem = ca_dir.path().join("ca.pem");
     std::fs::write(&pem, ca.ca_pem()).expect("pem");
-    let e = start_with(&[("STEVE_MAIL_TEST_CA", pem.display().to_string())]).await;
+    let mut vars = vec![("STEVE_MAIL_TEST_CA", pem.display().to_string())];
+    if checker_available {
+        // The default fixture deliberately disables every model adapter. Reuse the offline C5
+        // responder from the channel test; never weaken the production send gate for a smoke test.
+        let model = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fake-claude-chan.mjs");
+        vars.extend([
+            ("CLAUDE_CODE_EXECUTABLE", model.to_string()),
+            ("STEVE_ADAPTER_CLAUDE", model.to_string()),
+            ("STEVE_ADAPTER_CODEX", model.to_string()),
+            ("STEVE_MODELS_FAST", "claude-haiku-5-5".into()),
+        ]);
+    }
+    let e = start_with(&vars).await;
     assert!(e.vars.contains_key("STEVE_MAIL_TEST_CA"));
     assert_eq!(e.call("POST", "/api/vault/init", None).await.0, 200);
     let sec = |m: TlsMode| {
@@ -487,11 +509,50 @@ async fn a_mail_draft_goes_out_through_its_approval() {
     assert_eq!(s, 200, "{d}");
     assert!(d["decision_id"].as_str().is_some(), "{d}");
     assert!(
-        until(15, || async { !smtp.sent().is_empty() }).await,
-        "nothing reached the fake SMTP server"
+        // The send queue can spend up to 30 seconds in its final disclosure check.
+        until(40, || async {
+            let (_, d) = e.call("GET", &format!("/api/mail/drafts/{id}"), None).await;
+            matches!(d["status"].as_str(), Some("sent" | "failed"))
+        })
+        .await,
+        "draft never finished: {:?}",
+        e.call("GET", &format!("/api/mail/drafts/{id}"), None).await
     );
+    let (s, d) = e.call("GET", &format!("/api/mail/drafts/{id}"), None).await;
+    assert_eq!(s, 200, "{d}");
     let sent = smtp.sent();
-    assert_eq!(sent.len(), 1);
+    if checker_available {
+        assert_eq!(d["status"], "sent", "{d}");
+        assert_eq!(d["basis"]["verdict"], "pass", "{d}");
+        assert!(
+            d["basis"]["check_model"]
+                .as_str()
+                .is_some_and(|m| !m.is_empty()),
+            "{d}"
+        );
+        assert_eq!(sent.len(), 1);
+        assert_eq!(
+            e.call("POST", &format!("/api/mail/drafts/{id}/send"), None)
+                .await
+                .0,
+            409
+        );
+        assert_eq!(smtp.sent().len(), 1, "a repeat Send must not submit again");
+    } else {
+        assert_eq!(d["status"], "failed", "{d}");
+        assert_eq!(d["basis"]["verdict"], "unchecked", "{d}");
+        assert!(d["error"].as_str().is_some_and(|e| !e.is_empty()), "{d}");
+        assert!(
+            sent.is_empty(),
+            "approval must not bypass the unavailable model"
+        );
+    }
+    assert!(
+        d["basis"]["checked_content_hash"]
+            .as_str()
+            .is_some_and(|h| !h.is_empty()),
+        "{d}"
+    );
     // the triage template was installed for the new mailbox
     assert!(
         until(5, || async {

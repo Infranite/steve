@@ -3,9 +3,10 @@
  * last good answer (also across tab changes, which remount the page) and says when a later read failed, so a failure
  * is never shown as an empty list. The Hub's stream says when a Node or a client changed (`node`, `client` events) and
  * they are read again at once; besides, Nodes and devices are read every 10 seconds while the page is visible (a Hub
- * of an earlier release sends no such events), vitals every minute (the Hub samples once a minute). No refresh button. */
+ * of an earlier release sends no such events). Per-Node harness reports are read with them and can be explicitly
+ * reprobed on a Node's page; vitals are read every minute (the Hub samples once a minute). */
 import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from "react"
-import { api, type RDevice, type RNode, type RUpgradeDefault, type RVitals } from "@/api"
+import { api, type RDevice, type RNode, type RNodeHarnessReport, type RUpgradeDefault, type RVitals } from "@/api"
 import { access, type AccessView } from "@/access-api"
 import { nodeViews, type NodeView } from "@/device-model"
 import { st, useHubEvents, useStore } from "@/store"
@@ -15,6 +16,7 @@ type NodesRead = { nodes: RNode[]; off: boolean }
 type Defaults = { upgrade: RUpgradeDefault | null; context: "on" | "off" | null }
 let lastNodes: NodesRead | null = null, lastDevices: RDevice[] | null = null, lastAccess: AccessView | null = null
 let lastVitals: Record<string, RVitals> | null = null, lastDefaults: Defaults | null = null
+let lastHarnesses: Record<string, RNodeHarnessReport> | null = null
 
 /** reads `load` now, again every `every` ms (10 s) while the page is visible, and at once when it becomes visible again */
 function usePoll<T>(load: () => Promise<T>, initial: T | null, keep: (v: T) => void, deps: unknown[] = [], every = EVERY) {
@@ -34,7 +36,7 @@ function usePoll<T>(load: () => Promise<T>, initial: T | null, keep: (v: T) => v
     document.addEventListener("visibilitychange", visible)
     return () => { live = false; clearTimeout(timer); document.removeEventListener("visibilitychange", visible) }
   }, [rev, ...deps])
-  return { value, error, reload: () => setRev((x) => x + 1) }
+  return { value, error, replace: (v: T) => { keep(v); setValue(v) }, reload: () => setRev((x) => x + 1) }
 }
 
 export type DevicesData = {
@@ -42,6 +44,9 @@ export type DevicesData = {
   views: NodeView[]
   nodesRead: boolean
   nodesError: string
+  harnesses: Record<string, RNodeHarnessReport> | null
+  harnessesError: string
+  refreshHarnesses: (id: string) => Promise<void>
   /** the Hub does not listen for remote Nodes */
   nodesOff: boolean
   devicesError: string
@@ -65,6 +70,7 @@ export function DevicesProvider({ children }: { children: ReactNode }) {
   useStore()
   const nodes = usePoll(async () => { const r = await api.nodes(); return { nodes: r.nodes, off: !!r.off } }, lastNodes, (v) => { lastNodes = v })
   const devices = usePoll(async () => (await api.devices()).devices, lastDevices, (v) => { lastDevices = v })
+  const harnesses = usePoll(async () => (await api.nodeHarnesses()).nodes, lastHarnesses, (v) => { lastHarnesses = v })
   /* the owner lists every member's clients; the Hub answers anyone else with their own */
   const acc = usePoll(() => access.get(st.owner), lastAccess, (v) => { lastAccess = v }, [st.owner])
   const vit = usePoll(async () => (await api.vitals()).nodes, lastVitals, (v) => { lastVitals = v }, [], VITALS_EVERY)
@@ -73,13 +79,19 @@ export function DevicesProvider({ children }: { children: ReactNode }) {
     const [upgrade, context] = await Promise.all([api.nodeUpgradeDefault().catch(() => null), api.nodeContextDefault().then((r) => r.owner_context, () => null)])
     return { upgrade, context }
   }, lastDefaults, (v) => { lastDefaults = v }, [], 10 * 60_000)
-  useHubEvents(["node", "device"], () => { nodes.reload(); devices.reload() })
+  useHubEvents(["node", "device"], () => { nodes.reload(); devices.reload(); harnesses.reload() })
   useHubEvents(["client"], () => acc.reload())
   const hubVersion = st.version
   const ds = devices.value ?? st.devices
   const views = useMemo(() => nodeViews(ds, nodes.value?.nodes ?? null, hubVersion), [ds, nodes.value, hubVersion])
   const value: DevicesData = {
     views, nodesRead: nodes.value != null, nodesError: nodes.error, nodesOff: !!nodes.value?.off, devicesError: devices.error,
+    harnesses: harnesses.value, harnessesError: harnesses.error,
+    refreshHarnesses: async (id) => {
+      const r = await api.refreshNodeHarnesses(id)
+      harnesses.replace({ ...(harnesses.value ?? {}), [id]: r.report })
+      harnesses.reload()
+    },
     access: acc.value, accessError: acc.error, hubVersion, vitals: vit.value, vitalsError: vit.error,
     upgradeDefault: defs.value?.upgrade ?? null, contextDefault: defs.value?.context ?? null,
     reloadNodes: () => { nodes.reload(); devices.reload() }, reloadAccess: acc.reload, reloadDefaults: defs.reload,
