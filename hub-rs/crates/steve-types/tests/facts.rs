@@ -87,6 +87,15 @@ fn durable_topics_keep_snapshot_fields_and_roundtrip() {
         let bytes = serde_json::to_string(&fact).unwrap();
         assert!(bytes.starts_with(&format!(r#"{{"topic":"{topic}","payload":"#)));
         assert_eq!(serde_json::from_str::<DurableFact>(&bytes).unwrap(), fact);
+        // Database JSON may put payload before topic; raw snapshots must survive either key order.
+        let payload =
+            &bytes[bytes.find(",\"payload\":").unwrap() + ",\"payload\":".len()..bytes.len() - 1];
+        let reversed = format!(r#"{{"payload":{payload},"topic":"{topic}"}}"#);
+        assert_eq!(
+            serde_json::from_str::<DurableFact>(&reversed).unwrap(),
+            fact
+        );
+
         if bytes.contains("snapshot") {
             assert!(bytes.contains(r#"{"text": "snapshot", "n":1e+02}"#));
         }

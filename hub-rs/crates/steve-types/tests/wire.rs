@@ -1,5 +1,5 @@
 //! Golden bytes were captured from the pre-migration enums, not from these new types.
-use serde::{Serialize, de::DeserializeOwned};
+use serde::Serialize;
 use std::{collections::BTreeSet, fs, path::Path};
 use steve_types::*;
 use strum::EnumCount;
@@ -9,68 +9,48 @@ fn without_ws(text: &str) -> String {
         .replace("\"ws\":\"workspace-a\",", "")
 }
 
-fn check<E>(value: E, name: &str, expected: Scope, live: bool, object_order: bool)
-where
-    E: Serialize + DeserializeOwned + Scoped + std::fmt::Debug + PartialEq + Clone,
-{
-    let golden = fs::read_to_string(
-        Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fixtures/wire")
-            .join(format!("{name}.json")),
-    )
-    .unwrap();
-    assert_eq!(value.scope(), expected, "{name}");
-    let bytes = if object_order {
-        serde_json::to_string(&serde_json::to_value(&value).unwrap()).unwrap()
-    } else {
-        serde_json::to_string(&value).unwrap()
+// Exercise each child and its actual aggregate/envelope without reading bus events back in Rust.
+macro_rules! golden_check {
+    ($name:ident, $aggregate:ty) => {
+        fn $name<E>(value: E, name: &str, expected: Scope, object_order: bool)
+        where
+            E: Serialize + Scoped + Into<$aggregate>,
+        {
+            let golden = fs::read_to_string(
+                Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("tests/fixtures/wire")
+                    .join(format!("{name}.json")),
+            )
+            .unwrap();
+            assert_eq!(value.scope(), expected, "{name}");
+            let bytes = serde_json::to_string(&value).unwrap();
+            let wire = if object_order {
+                serde_json::to_string(&serde_json::to_value(&value).unwrap()).unwrap()
+            } else {
+                bytes.clone()
+            };
+            assert_eq!(without_ws(&wire), without_ws(&golden), "{name}");
+            let event: $aggregate = value.into();
+            assert_eq!(event.scope(), expected, "{name}");
+            assert_eq!(serde_json::to_string(&event).unwrap(), bytes, "{name}");
+            let envelope = Envelope {
+                event,
+                rev: Rev(47),
+            };
+            assert_eq!(envelope.scope(), expected, "{name}");
+            assert_eq!(
+                serde_json::to_string(&envelope).unwrap(),
+                format!("{},\"rev\":47}}", &bytes[..bytes.len() - 1]),
+                "{name}"
+            );
+        }
     };
-    assert_eq!(without_ws(&bytes), without_ws(&golden), "{name}");
-    let mut input = golden.clone();
-    if matches!(expected, Scope::Ws(_)) && !input.contains("\"ws\":") {
-        input.pop();
-        input.push_str(",\"ws\":\"workspace-a\"}");
-    }
-    assert_eq!(serde_json::from_str::<E>(&input).unwrap(), value, "{name}");
-    if live {
-        let event: LiveEvent = serde_json::from_str(&bytes).unwrap();
-        assert_eq!(event.scope(), expected);
-        assert_eq!(
-            serde_json::to_string(&event).unwrap(),
-            serde_json::to_string(&value).unwrap()
-        );
-        let env = Envelope {
-            event,
-            rev: Rev(47),
-        };
-        assert_eq!(env.scope(), expected);
-        assert_eq!(
-            serde_json::from_str::<Envelope<LiveEvent>>(&serde_json::to_string(&env).unwrap())
-                .unwrap(),
-            env
-        );
-    } else {
-        let event: DomainEvent = serde_json::from_str(&bytes).unwrap();
-        assert_eq!(event.scope(), expected);
-        assert_eq!(
-            serde_json::to_string(&event).unwrap(),
-            serde_json::to_string(&value).unwrap()
-        );
-        let env = Envelope {
-            event,
-            rev: Rev(47),
-        };
-        assert_eq!(env.scope(), expected);
-        assert_eq!(
-            serde_json::from_str::<Envelope<DomainEvent>>(&serde_json::to_string(&env).unwrap())
-                .unwrap(),
-            env
-        );
-    }
 }
+golden_check!(check, DomainEvent);
+golden_check!(check_live, LiveEvent);
 
 #[test]
-fn every_wire_variant_has_bytes_roundtrip_and_scope() {
+fn every_wire_variant_has_golden_bytes_and_scope() {
     let mut fixtures = BTreeSet::new();
     let mut workevent = BTreeSet::new();
     let mut workliveevent = BTreeSet::new();
@@ -92,7 +72,6 @@ fn every_wire_variant_has_bytes_roundtrip_and_scope() {
         "item",
         Scope::Ws("workspace-a".into()),
         false,
-        false,
     );
     fixtures.insert("item.json".to_owned());
     workevent.insert("item");
@@ -104,7 +83,6 @@ fn every_wire_variant_has_bytes_roundtrip_and_scope() {
         },
         "decision",
         Scope::Ws("workspace-a".into()),
-        false,
         false,
     );
     fixtures.insert("decision.json".to_owned());
@@ -118,7 +96,6 @@ fn every_wire_variant_has_bytes_roundtrip_and_scope() {
         "decision-null",
         Scope::Ws("workspace-a".into()),
         false,
-        false,
     );
     fixtures.insert("decision-null.json".to_owned());
     workevent.insert("decision");
@@ -130,7 +107,6 @@ fn every_wire_variant_has_bytes_roundtrip_and_scope() {
         },
         "decision-value",
         Scope::Ws("workspace-a".into()),
-        false,
         false,
     );
     fixtures.insert("decision-value.json".to_owned());
@@ -144,7 +120,6 @@ fn every_wire_variant_has_bytes_roundtrip_and_scope() {
         "session",
         Scope::Ws("workspace-a".into()),
         false,
-        false,
     );
     fixtures.insert("session.json".to_owned());
     workevent.insert("session");
@@ -156,7 +131,6 @@ fn every_wire_variant_has_bytes_roundtrip_and_scope() {
         },
         "session-null",
         Scope::Ws("workspace-a".into()),
-        false,
         false,
     );
     fixtures.insert("session-null.json".to_owned());
@@ -170,11 +144,10 @@ fn every_wire_variant_has_bytes_roundtrip_and_scope() {
         "session-value",
         Scope::Ws("workspace-a".into()),
         false,
-        false,
     );
     fixtures.insert("session-value.json".to_owned());
     workevent.insert("session");
-    check(
+    check_live(
         WorkLiveEvent::Event {
             session_id: "session-1".into(),
             seq: Seq(7),
@@ -184,7 +157,6 @@ fn every_wire_variant_has_bytes_roundtrip_and_scope() {
         },
         "event",
         Scope::Ws("workspace-a".into()),
-        true,
         false,
     );
     fixtures.insert("event.json".to_owned());
@@ -197,11 +169,10 @@ fn every_wire_variant_has_bytes_roundtrip_and_scope() {
         "message",
         Scope::Ws("workspace-a".into()),
         false,
-        false,
     );
     fixtures.insert("message.json".to_owned());
     workevent.insert("message");
-    check(
+    check_live(
         WorkLiveEvent::SteveThinking {
             on: true,
             ws: "workspace-a".into(),
@@ -209,12 +180,11 @@ fn every_wire_variant_has_bytes_roundtrip_and_scope() {
         },
         "steve.thinking",
         Scope::Ws("workspace-a".into()),
-        true,
         false,
     );
     fixtures.insert("steve.thinking.json".to_owned());
     workliveevent.insert("steve.thinking");
-    check(
+    check_live(
         WorkLiveEvent::SteveThinking {
             on: true,
             ws: "workspace-a".into(),
@@ -222,12 +192,11 @@ fn every_wire_variant_has_bytes_roundtrip_and_scope() {
         },
         "steve.thinking-full",
         Scope::Ws("workspace-a".into()),
-        true,
         false,
     );
     fixtures.insert("steve.thinking-full.json".to_owned());
     workliveevent.insert("steve.thinking");
-    check(
+    check_live(
         WorkLiveEvent::SteveDraft {
             ws: "workspace-a".into(),
             mid: "message-1".into(),
@@ -236,12 +205,11 @@ fn every_wire_variant_has_bytes_roundtrip_and_scope() {
         },
         "steve.draft",
         Scope::Ws("workspace-a".into()),
-        true,
         false,
     );
     fixtures.insert("steve.draft.json".to_owned());
     workliveevent.insert("steve.draft");
-    check(
+    check_live(
         WorkLiveEvent::SteveTool {
             ws: "workspace-a".into(),
             mid: "message-1".into(),
@@ -257,12 +225,11 @@ fn every_wire_variant_has_bytes_roundtrip_and_scope() {
         },
         "steve.tool",
         Scope::Ws("workspace-a".into()),
-        true,
         false,
     );
     fixtures.insert("steve.tool.json".to_owned());
     workliveevent.insert("steve.tool");
-    check(
+    check_live(
         WorkLiveEvent::SteveTool {
             ws: "workspace-a".into(),
             mid: "message-1".into(),
@@ -278,7 +245,6 @@ fn every_wire_variant_has_bytes_roundtrip_and_scope() {
         },
         "steve.tool-full",
         Scope::Ws("workspace-a".into()),
-        true,
         false,
     );
     fixtures.insert("steve.tool-full.json".to_owned());
@@ -291,7 +257,6 @@ fn every_wire_variant_has_bytes_roundtrip_and_scope() {
         "thread.run",
         Scope::Ws("workspace-a".into()),
         false,
-        false,
     );
     fixtures.insert("thread.run.json".to_owned());
     workevent.insert("thread.run");
@@ -299,7 +264,6 @@ fn every_wire_variant_has_bytes_roundtrip_and_scope() {
         DevicesEvent::ReleaseHold { hold: None },
         "release.hold",
         Scope::Hub,
-        false,
         false,
     );
     fixtures.insert("release.hold.json".to_owned());
@@ -310,7 +274,6 @@ fn every_wire_variant_has_bytes_roundtrip_and_scope() {
         },
         "release.hold-full",
         Scope::Hub,
-        false,
         false,
     );
     fixtures.insert("release.hold-full.json".to_owned());
@@ -323,7 +286,6 @@ fn every_wire_variant_has_bytes_roundtrip_and_scope() {
         "bot",
         Scope::Ws("workspace-a".into()),
         false,
-        false,
     );
     fixtures.insert("bot.json".to_owned());
     configevent.insert("bot");
@@ -334,7 +296,6 @@ fn every_wire_variant_has_bytes_roundtrip_and_scope() {
         },
         "project",
         Scope::Ws("workspace-a".into()),
-        false,
         false,
     );
     fixtures.insert("project.json".to_owned());
@@ -347,7 +308,6 @@ fn every_wire_variant_has_bytes_roundtrip_and_scope() {
         "tag",
         Scope::Ws("workspace-a".into()),
         false,
-        false,
     );
     fixtures.insert("tag.json".to_owned());
     configevent.insert("tag");
@@ -358,7 +318,6 @@ fn every_wire_variant_has_bytes_roundtrip_and_scope() {
         },
         "workspace",
         Scope::Ws("workspace-a".into()),
-        false,
         false,
     );
     fixtures.insert("workspace.json".to_owned());
@@ -371,7 +330,6 @@ fn every_wire_variant_has_bytes_roundtrip_and_scope() {
         "settings",
         Scope::Ws("workspace-a".into()),
         false,
-        false,
     );
     fixtures.insert("settings.json".to_owned());
     configevent.insert("settings");
@@ -381,7 +339,6 @@ fn every_wire_variant_has_bytes_roundtrip_and_scope() {
         },
         "device",
         Scope::Hub,
-        false,
         false,
     );
     fixtures.insert("device.json".to_owned());
@@ -394,7 +351,6 @@ fn every_wire_variant_has_bytes_roundtrip_and_scope() {
         "node",
         Scope::User("user-a".into()),
         false,
-        false,
     );
     fixtures.insert("node.json".to_owned());
     devicesevent.insert("node");
@@ -405,7 +361,6 @@ fn every_wire_variant_has_bytes_roundtrip_and_scope() {
         },
         "client",
         Scope::User("user-a".into()),
-        false,
         false,
     );
     fixtures.insert("client.json".to_owned());
@@ -418,7 +373,6 @@ fn every_wire_variant_has_bytes_roundtrip_and_scope() {
         "party",
         Scope::Ws("workspace-a".into()),
         false,
-        false,
     );
     fixtures.insert("party.json".to_owned());
     peopleevent.insert("party");
@@ -429,7 +383,6 @@ fn every_wire_variant_has_bytes_roundtrip_and_scope() {
         },
         "mm",
         Scope::Ws("workspace-a".into()),
-        false,
         false,
     );
     fixtures.insert("mm.json".to_owned());
@@ -442,7 +395,6 @@ fn every_wire_variant_has_bytes_roundtrip_and_scope() {
         "changeset",
         Scope::Ws("workspace-a".into()),
         false,
-        false,
     );
     fixtures.insert("changeset.json".to_owned());
     configevent.insert("changeset");
@@ -453,7 +405,6 @@ fn every_wire_variant_has_bytes_roundtrip_and_scope() {
         },
         "account",
         Scope::Ws("workspace-a".into()),
-        false,
         false,
     );
     fixtures.insert("account.json".to_owned());
@@ -466,7 +417,6 @@ fn every_wire_variant_has_bytes_roundtrip_and_scope() {
         "connection",
         Scope::Ws("workspace-a".into()),
         false,
-        false,
     );
     fixtures.insert("connection.json".to_owned());
     channelsevent.insert("connection");
@@ -477,7 +427,6 @@ fn every_wire_variant_has_bytes_roundtrip_and_scope() {
         },
         "vault",
         Scope::Ws("workspace-a".into()),
-        false,
         false,
     );
     fixtures.insert("vault.json".to_owned());
@@ -490,7 +439,6 @@ fn every_wire_variant_has_bytes_roundtrip_and_scope() {
         "signal",
         Scope::Ws("workspace-a".into()),
         false,
-        false,
     );
     fixtures.insert("signal.json".to_owned());
     automationevent.insert("signal");
@@ -501,7 +449,6 @@ fn every_wire_variant_has_bytes_roundtrip_and_scope() {
         },
         "flow",
         Scope::Ws("workspace-a".into()),
-        false,
         false,
     );
     fixtures.insert("flow.json".to_owned());
@@ -515,7 +462,6 @@ fn every_wire_variant_has_bytes_roundtrip_and_scope() {
         "run",
         Scope::Ws("workspace-a".into()),
         false,
-        false,
     );
     fixtures.insert("run.json".to_owned());
     automationevent.insert("run");
@@ -526,7 +472,6 @@ fn every_wire_variant_has_bytes_roundtrip_and_scope() {
         },
         "space",
         Scope::Ws("workspace-a".into()),
-        false,
         false,
     );
     fixtures.insert("space.json".to_owned());
@@ -540,7 +485,6 @@ fn every_wire_variant_has_bytes_roundtrip_and_scope() {
         "chan_message",
         Scope::Ws("workspace-a".into()),
         false,
-        false,
     );
     fixtures.insert("chan_message.json".to_owned());
     channelsevent.insert("chan_message");
@@ -551,7 +495,6 @@ fn every_wire_variant_has_bytes_roundtrip_and_scope() {
         },
         "persona",
         Scope::Ws("workspace-a".into()),
-        false,
         false,
     );
     fixtures.insert("persona.json".to_owned());
@@ -564,7 +507,6 @@ fn every_wire_variant_has_bytes_roundtrip_and_scope() {
         "digest",
         Scope::Ws("workspace-a".into()),
         false,
-        false,
     );
     fixtures.insert("digest.json".to_owned());
     channelsevent.insert("digest");
@@ -575,7 +517,6 @@ fn every_wire_variant_has_bytes_roundtrip_and_scope() {
         },
         "calendar",
         Scope::Ws("workspace-a".into()),
-        false,
         false,
     );
     fixtures.insert("calendar.json".to_owned());
@@ -588,7 +529,6 @@ fn every_wire_variant_has_bytes_roundtrip_and_scope() {
         "channel",
         Scope::Ws("workspace-a".into()),
         false,
-        false,
     );
     fixtures.insert("channel.json".to_owned());
     channelsevent.insert("channel");
@@ -598,7 +538,6 @@ fn every_wire_variant_has_bytes_roundtrip_and_scope() {
         },
         "yolo",
         Scope::Ws("workspace-a".into()),
-        false,
         false,
     );
     fixtures.insert("yolo.json".to_owned());
@@ -612,7 +551,6 @@ fn every_wire_variant_has_bytes_roundtrip_and_scope() {
         "yolo_action",
         Scope::Ws("workspace-a".into()),
         false,
-        false,
     );
     fixtures.insert("yolo_action.json".to_owned());
     autonomyevent.insert("yolo_action");
@@ -625,7 +563,6 @@ fn every_wire_variant_has_bytes_roundtrip_and_scope() {
         "yolo_action-full",
         Scope::Ws("workspace-a".into()),
         false,
-        false,
     );
     fixtures.insert("yolo_action-full.json".to_owned());
     autonomyevent.insert("yolo_action");
@@ -636,7 +573,6 @@ fn every_wire_variant_has_bytes_roundtrip_and_scope() {
         },
         "stats",
         Scope::Ws("workspace-a".into()),
-        false,
         false,
     );
     fixtures.insert("stats.json".to_owned());
@@ -649,7 +585,6 @@ fn every_wire_variant_has_bytes_roundtrip_and_scope() {
         "stats-full",
         Scope::Ws("workspace-a".into()),
         false,
-        false,
     );
     fixtures.insert("stats-full.json".to_owned());
     statsevent.insert("stats");
@@ -660,7 +595,6 @@ fn every_wire_variant_has_bytes_roundtrip_and_scope() {
         },
         "kb",
         Scope::Ws("workspace-a".into()),
-        false,
         true,
     );
     fixtures.insert("kb.json".to_owned());
@@ -672,7 +606,6 @@ fn every_wire_variant_has_bytes_roundtrip_and_scope() {
         },
         "gh",
         Scope::Ws("workspace-a".into()),
-        false,
         true,
     );
     fixtures.insert("gh.json".to_owned());
@@ -684,7 +617,6 @@ fn every_wire_variant_has_bytes_roundtrip_and_scope() {
         },
         "mail",
         Scope::Ws("workspace-a".into()),
-        false,
         true,
     );
     fixtures.insert("mail.json".to_owned());
@@ -763,22 +695,23 @@ fn every_wire_variant_has_bytes_roundtrip_and_scope() {
 }
 
 #[test]
-fn workspace_scope_is_required_and_opaque_bytes_survive_envelopes() {
-    for bad in [
-        r#"{"type":"item","id":"i"}"#,
-        r#"{"type":"item","id":"i","ws":null}"#,
-        r#"{"type":"steve.thinking","on":true}"#,
-        r#"{"type":"plugin.custom","ws":"workspace-a"}"#,
-    ] {
-        assert!(serde_json::from_str::<DomainEvent>(bad).is_err());
-        assert!(serde_json::from_str::<LiveEvent>(bad).is_err());
+fn opaque_payload_bytes_survive_envelope_serialization() {
+    let raw = r#"{"b": [1,  2], "a":1e+02, "escaped":"\u0061"}"#;
+    let event: LiveEvent = WorkLiveEvent::Event {
+        session_id: "s".into(),
+        seq: Seq(7),
+        kind: "append".into(),
+        data: RawJson::from_str(raw).unwrap(),
+        ws: "workspace-a".into(),
     }
-    let bytes = r#"{"rev":47,"data":{"b": [1,  2], "a":1e+02, "escaped":"\u0061"},"kind":"append","seq":7,"session_id":"s","ws":"workspace-a","type":"event"}"#;
-    let envelope: Envelope<LiveEvent> = serde_json::from_str(bytes).unwrap();
-    let output = serde_json::to_string(&envelope).unwrap();
-    assert!(output.contains(r#"{"b": [1,  2], "a":1e+02, "escaped":"\u0061"}"#));
-    assert_eq!(
-        serde_json::from_str::<Envelope<LiveEvent>>(&output).unwrap(),
-        envelope
+    .into();
+    let envelope = Envelope {
+        event,
+        rev: Rev(47),
+    };
+    let expected = format!(
+        r#"{{"type":"event","session_id":"s","seq":7,"kind":"append","data":{raw},"ws":"workspace-a","rev":47}}"#
     );
+    assert_eq!(serde_json::to_string(&envelope).unwrap(), expected);
+    assert_eq!(envelope.scope(), Scope::Ws("workspace-a".into()));
 }
