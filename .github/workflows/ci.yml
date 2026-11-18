@@ -172,6 +172,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec
         with:
           toolchain: 1.99.1
+          components: rustfmt
+      # Formatting needs no build, so one shard checks it before compiling and fails within seconds.
+      - name: Rust formatting (cargo fmt --check)
+        if: runner.os == 'Linux' && matrix.shard == 1
+        run: cargo fmt --manifest-path hub-rs/Cargo.toml --all --check
       - name: Install Linux test prerequisites
         if: runner.os == 'Linux'
         run: sh scripts/install-ci-zsh.sh

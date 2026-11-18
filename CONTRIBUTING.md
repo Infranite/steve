@@ -27,6 +27,8 @@ npm run check
 npm run test:web
 ```
 
+CI enforces Rust formatting: run `cargo fmt --all` in `hub-rs/` with the pinned toolchain (`cargo +1.99.1 fmt --all`) before you push.
+
 The workspace suite includes the Node boundary guard (`hub-rs/crates/steve-hub/tests/node_boundary.rs`): production code outside `steve-node` may start processes or harnesses, list directories, or open, write, create or remove files and directories, only at the call sites its table allows, each with a reason; a new one fails until it goes through the Node or is listed. Imports count too, so a braced, renamed or glob `use` of a listed item cannot hide a call. It is a text scan, so it sees where harness handles are made and imported, not every place one is passed to.
 
 The harness parity guard (`hub-rs/crates/steve-hub/tests/harness_parity.rs`, and `web/test/harness-parity.test.mjs` for the web) fails when production code tells harnesses apart by name outside the adapter layer (`steve-acp/src/config.rs`, `steve-acp/src/adapters.rs`). Declare a property in the adapter registry instead. Places that still do are listed in `harness_parity.txt`; the list may only shrink, and `STEVE_PARITY_BLESS=1` rewrites it after removing one.

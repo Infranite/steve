@@ -422,38 +422,22 @@ fn settled(f: &Facts, policy: &WorkPolicy) -> (Settled, Option<(&'static str, Ne
     if s.running {
         return (Settled::Busy, Some(("running", turn())));
     }
-    for d in &s.dispatches {
-        match d.state.as_str() {
-            "accepted" | "active" => return (Settled::Busy, Some(("running", turn()))),
+    /* the oldest open dispatch (they come in the order they were made) says where the turn is */
+    if let Some(d) = s.dispatches.first() {
+        let due = |kind| NextStep::Due {
+            kind,
+            id: Some(d.operation_id.clone()),
+            at: Some(d.retry_at.max(f.now)),
+        };
+        return match d.state.as_str() {
+            "accepted" | "active" => (Settled::Busy, Some(("running", turn()))),
             "pending" if !d.maybe_sent => {
-                return (
-                    Settled::Busy,
-                    Some((
-                        "dispatching",
-                        NextStep::Due {
-                            kind: Due::Dispatch,
-                            id: Some(d.operation_id.clone()),
-                            at: Some(d.retry_at.max(f.now)),
-                        },
-                    )),
-                );
+                (Settled::Busy, Some(("dispatching", due(Due::Dispatch))))
             }
             /* it may have reached the Node and nothing came back: the same operation is asked for
              * again, never a new one */
-            _ => {
-                return (
-                    Settled::Unknown,
-                    Some((
-                        "reconciling",
-                        NextStep::Due {
-                            kind: Due::Reconcile,
-                            id: Some(d.operation_id.clone()),
-                            at: Some(d.retry_at.max(f.now)),
-                        },
-                    )),
-                );
-            }
-        }
+            _ => (Settled::Unknown, Some(("reconciling", due(Due::Reconcile)))),
+        };
     }
     if let Some(since) = s.offline_since {
         let back_by = since + policy.nobody_offline();
