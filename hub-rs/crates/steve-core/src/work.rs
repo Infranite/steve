@@ -161,6 +161,17 @@ impl Tx<'_> {
                 )
             }));
         }
+        if let Some(d) = self
+            .db()
+            .decisions_of_item(&item.id)?
+            .into_iter()
+            .find(|d| d.status == "open" && d.subject_type == steve_store::SESSION_START_FAILURE)
+        {
+            return Ok(Work::User(steve_i18n::t!(
+                "core.now.waiting_user",
+                question = js_head(&d.question, 80)
+            )));
+        }
         if let Some(s) = self.active_session(&item.id)? {
             if self.busy(&s.id)
                 || self.rt().uncertain(&s.id)

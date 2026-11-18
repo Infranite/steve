@@ -187,6 +187,7 @@ export default {
     sessionRemoved: "已移除「{{title}}」，本机原始记录没有改动",
     importedSome: "导入了 {{ok}} 个，{{bad}} 个失败：{{error}}",
     imported_other: "已导入 {{count}} 个会话，导入的会话只读",
+    botSelectionUnknown: "已保存；目标 Node 的模型或思考强度清单未知，启动前会再次校验。",
     botSaved: "已保存，对之后的回复和运行生效",
     botCreated: "已创建，先设定性格和工作方式",
     botDrafted: "Steve 起草好了，看看要不要改",
@@ -527,6 +528,8 @@ export default {
     edit: "修改回复", review: "保存修改并重新审阅", reviewNote: "修改只会重新生成待审阅草稿，不会立即发送；确认正文后再批准。", cancelEdit: "取消修改", retry: "授权后重试",
   },
   card: {
+    retrySession: "重试启动会话",
+    fixBotConfig: "修正 Bot 配置",
     sessionTitle: "会话 {{title}}",
     waited: "{{bot}} · 等了 {{since}}",
     snooze: "稍后提醒",

@@ -1029,6 +1029,14 @@ pub trait Domain: Send + Sync + 'static {
         let _ = fresh;
         Ok(steve_core::harnesses::builtin())
     }
+    /// Offers of the Nodes this Bot targets, rather than the Hub-wide discovery catalogue.
+    async fn bot_harnesses(
+        &self,
+        bot: Option<&str>,
+    ) -> BResult<Vec<steve_core::harnesses::Harness>> {
+        let _ = bot;
+        self.harnesses(false).await
+    }
     /// Every decision purpose with its default and chosen models, the agent defaults, the known models.
     async fn models_view(&self, ws: &str) -> BResult<Value> {
         todo_backend!("models_view")

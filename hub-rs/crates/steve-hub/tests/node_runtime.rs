@@ -1438,7 +1438,7 @@ async fn a_stopped_runtime_refuses_instead_of_queueing() {
 }
 
 /// The Node let the session go by itself, then refuses to open it again: the session is not
-/// wedged in `opening`; the user hears why, and the next message tries again.
+/// wedged in `opening`; the user hears why, and only a human retry can open it.
 #[tokio::test]
 async fn a_refused_reopen_does_not_wedge_the_session() {
     let h = hub();
@@ -1472,7 +1472,10 @@ async fn a_refused_reopen_does_not_wedge_the_session() {
     assert_eq!(h.rt.prompt(S, "again", "user", &[]).unwrap(), Planned::Busy);
     until("refused open reported", || h.ends().len() == ends + 1).await;
     let (session, stop, error) = h.ends().last().unwrap().clone();
-    assert_eq!((session.as_str(), stop.as_str()), (S, "error"));
+    assert_eq!(
+        (session.as_str(), stop.as_str()),
+        (S, steve_store::SESSION_START_FAILURE)
+    );
     assert!(error.unwrap().contains("没能重新打开会话"));
     assert_eq!(h.phase(), "released", "back where it was, not opening");
     let state: String = h.q(
@@ -1486,12 +1489,13 @@ async fn a_refused_reopen_does_not_wedge_the_session() {
     ));
     assert_eq!(queued, 1, "the message still waits");
 
-    // once the Node has really let it go, the next message opens it and both go
+    // once the Node has really let it go, an explicit retry opens it and both go
     h.node
         .release_session(build::cmd("op_test_release", SessionId::new(S).unwrap()))
         .await
         .unwrap();
-    h.rt.prompt(S, "third", "user", &[]).unwrap();
+    assert_eq!(h.rt.prompt(S, "third", "user", &[]).unwrap(), Planned::Held);
+    h.rt.retry_open(S, &build::choice()).unwrap();
     until("reopened turn", || h.count("start_turn") == 2).await;
     let opens: i64 = h.q("SELECT COUNT(*) FROM node_commands WHERE method='open_session'");
     assert_eq!(opens, 3);
@@ -1969,9 +1973,9 @@ async fn a_refused_release_leaves_the_session_ready_and_what_waited_runs() {
 }
 
 /// Issue: an open the Node refuses leaves the session released (not opening for good); the
-/// message stays queued, nothing is retried by itself, the next message tries again.
+/// message stays queued, and more input cannot replace an explicit human retry.
 #[tokio::test]
-async fn a_refused_reopen_leaves_the_session_released_and_the_next_message_tries_again() {
+async fn a_refused_reopen_leaves_the_session_released_until_a_human_retries() {
     let h = hub();
     h.bind();
     h.one_turn("hello").await;
@@ -1988,7 +1992,8 @@ async fn a_refused_reopen_leaves_the_session_released_and_the_next_message_tries
     assert_eq!(h.systems("没能打开"), 1);
     tokio::time::sleep(Duration::from_millis(50)).await;
     assert_eq!(h.count("open_session"), 1, "not retried by itself");
-    h.rt.prompt(S, "again", "user", &[]).unwrap();
+    assert_eq!(h.rt.prompt(S, "again", "user", &[]).unwrap(), Planned::Held);
+    h.rt.retry_open(S, &build::choice()).unwrap();
     until("second turn", || h.count("start_turn") == 2).await;
     assert!(h.prompt_of(1).contains("more") && h.prompt_of(1).contains("again"));
 }
@@ -2294,14 +2299,12 @@ async fn without_the_dependency_a_successor_opens_beside_the_old_harness() {
     assert_eq!(h.node.most_open_in_a_workspace(), 2);
 }
 
-/// A handoff while the old session is still opening: its release waits for the open; an open
-/// that fails lets nothing go, so that release is done without going out and the successor opens.
+/// A handoff before the old open is sent rejects that open without starting its harness.
+/// Its release settles without going out and the successor can open.
 #[tokio::test]
-async fn a_handoff_while_the_old_open_fails_lets_the_successor_open() {
+async fn a_handoff_before_the_old_open_is_sent_never_opens_the_ended_session() {
     let h = hub();
     h.rt.bind(&on_the_item(S)).unwrap();
-    h.node
-        .refuse_next("open_session", ApiError::new(ErrorCode::Invalid, "no"));
     // one thread: nothing went out yet
     let op = h.hand_off();
     until("the successor's turn", || h.count("start_turn") == 1).await;
@@ -5421,4 +5424,223 @@ async fn accounting_vectors_cross_node_admission_and_the_shared_gateway_boundary
             c.name
         );
     }
+}
+
+/// ST-174: a startup message is not an unlimited retry token. The stop survives a runtime
+/// restart and even dismissal of the card; explicit retries reuse the same card on failure.
+#[tokio::test]
+async fn startup_failure_holds_the_queue_and_reuses_its_card_until_human_retry() {
+    let h = hub();
+    h.node.refuse_next(
+        "open_session",
+        ApiError::new(ErrorCode::Invalid, "unsupported effort"),
+    );
+    h.bind();
+    h.rt.prompt(S, "initial task", "steve", &[]).unwrap();
+    until("blocked startup", || {
+        h.phase() == "released" && !h.ends().is_empty()
+    })
+    .await;
+    assert_eq!(h.store.sessions().get(S).unwrap().unwrap().status, "error");
+    let card: String = h.q("SELECT id FROM decisions WHERE subject_type='session_start'");
+    assert_eq!(h.q::<i64>("SELECT COUNT(*) FROM queued"), 1);
+    for _ in 0..5 {
+        assert_eq!(h.rt.flush(S, None).unwrap(), Planned::Held);
+    }
+    assert_eq!(
+        h.q::<i64>("SELECT COUNT(*) FROM node_commands WHERE method='open_session'"),
+        1
+    );
+    assert_eq!(h.count("start_turn"), 0);
+    assert_eq!(h.q::<i64>("SELECT COUNT(*) FROM decisions"), 1);
+    // A fresh coordinator reads the same durable stop without being started or contacting a Node.
+    let restarted = NodeRuntime::new(h.store.clone(), h.node.clone(), h.ends.clone());
+    assert_eq!(restarted.flush(S, None).unwrap(), Planned::Held);
+    h.store
+        .decisions()
+        .resolve(
+            &card,
+            &serde_json::json!({"choice":"retry"}),
+            "resolved",
+            &serde_json::Value::Null,
+        )
+        .unwrap();
+    h.node.refuse_next(
+        "open_session",
+        ApiError::new(ErrorCode::Invalid, "unsupported effort"),
+    );
+    h.rt.retry_open(S, &build::choice()).unwrap();
+    until("retry failed", || {
+        h.q::<i64>("SELECT COUNT(*) FROM node_commands WHERE method='open_session'") == 2
+            && h.phase() == "released"
+    })
+    .await;
+    assert_eq!(h.q::<i64>("SELECT COUNT(*) FROM decisions"), 1);
+    assert_eq!(
+        h.store.decisions().get(&card).unwrap().unwrap().status,
+        "open"
+    );
+    h.rt.retry_open(S, &build::choice()).unwrap();
+    until("retry started the queued task", || {
+        h.count("start_turn") == 1
+    })
+    .await;
+    assert_eq!(h.q::<i64>("SELECT COUNT(*) FROM queued"), 0);
+    assert!(h.store.sessions().stop(S).unwrap().is_none());
+}
+
+/// ST-174: legacy queues on ended sessions must never reopen the old harness, including when
+/// a handoff races an in-flight failure. Queueing and explicit retry cannot bypass retirement.
+#[tokio::test]
+async fn startup_handoff_discards_queued_input_and_never_reopens_the_ended_session() {
+    let h = hub();
+    h.node.refuse_next(
+        "open_session",
+        ApiError::new(ErrorCode::Invalid, "bad model"),
+    );
+    h.rt.bind(&on_the_item(S)).unwrap();
+    h.rt.prompt(S, "initial task", "steve", &[]).unwrap();
+    until("failure", || {
+        h.phase() == "released" && !h.ends().is_empty()
+    })
+    .await;
+    assert_eq!(
+        h.q::<i64>("SELECT COUNT(*) FROM decisions WHERE subject_type='session_start'"),
+        1
+    );
+    h.store
+        .sessions()
+        .patch(
+            S,
+            &steve_store::SessionPatch {
+                status: Some("ended".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(h.rt.release(S).unwrap(), Release::Gone);
+    h.store.transaction::<_, StoreError>(|tx| {
+        tx.execute("INSERT INTO sessions(id,workspace_id,harness,cwd,status,created,updated) VALUES (?,'default','claude-code','.','starting',1,1)", [S2])?;
+        Ok(())
+    }).unwrap();
+    h.rt.bind(&on_the_item(S2)).unwrap();
+    h.rt.prompt(S2, "successor protocol", "steve", &[]).unwrap();
+    until("successor", || h.count("start_turn") == 1).await;
+    assert!(h.store.queued().list(S).unwrap().is_empty());
+    assert_eq!(
+        h.q::<i64>("SELECT COUNT(*) FROM decisions WHERE subject_type='session_start'"),
+        1
+    );
+    assert_eq!(
+        h.q::<i64>(
+            "SELECT COUNT(*) FROM decisions WHERE subject_type='session_start' AND status='open'"
+        ),
+        0
+    );
+    assert!(h.rt.prompt(S, "late", "user", &[]).is_err());
+    assert!(h.rt.retry_open(S, &build::choice()).is_err());
+    // Inject a queue left by an older build; reconciliation/flush repairs it without opening.
+    h.store.transaction::<_, StoreError>(|tx| {
+        tx.execute("INSERT INTO queued(id,session_id,text,via,created) VALUES ('legacy',?,'old startup','steve',1)", [S])?;
+        Ok(())
+    }).unwrap();
+    for _ in 0..5 {
+        assert_eq!(h.rt.flush(S, None).unwrap(), Planned::Held);
+    }
+    assert!(h.store.queued().list(S).unwrap().is_empty());
+    assert_eq!(h.q::<i64>("SELECT COUNT(*) FROM node_commands WHERE method='open_session' AND json_extract(request,'$.body.session')='s1'"), 1);
+}
+
+#[tokio::test]
+async fn startup_preflight_uses_the_actual_node_offer_and_preserves_defaults() {
+    let h = hub();
+    let mut caps = h.node.probe(false).await.unwrap().harnesses;
+    let cap = &mut caps[0];
+    cap.adapter = Some(AdapterInfo {
+        title: "Fixture".into(),
+        builtin: false,
+        status: AdapterStatus::Ready,
+        version: None,
+        load_session: true,
+        list_sessions: false,
+        mcp_http: true,
+        embedded_context: false,
+        auth: vec![],
+        install_hint: None,
+        system_prompt: false,
+        update: None,
+        resume_command: None,
+        fork_command: None,
+        error: None,
+        session_error: None,
+        session: Some(AdapterOffer {
+            modes: vec![PermissionMode::Ask],
+            models: vec![],
+            default_model: None,
+            efforts: vec![],
+        }),
+    });
+    h.node.set_harnesses(caps);
+    h.bind(); // build::choice names a model, while this Node only offers its default.
+    h.rt.prompt(S, "task", "steve", &[]).unwrap();
+    until("preflight blocked", || {
+        h.phase() == "released" && !h.ends().is_empty()
+    })
+    .await;
+    assert_eq!(
+        h.count("open_session"),
+        0,
+        "incompatible selection never reaches the harness"
+    );
+    let mut default = build::choice();
+    default.model = None;
+    h.rt.retry_open(S, &default).unwrap();
+    until("default starts", || h.count("start_turn") == 1).await;
+    assert_eq!(h.count("open_session"), 1);
+}
+
+#[tokio::test]
+async fn startup_upgrade_repairs_legacy_failure_loops_before_planning() {
+    let mut h = hub();
+    h.node.refuse_next(
+        "open_session",
+        ApiError::new(ErrorCode::Invalid, "legacy bad model"),
+    );
+    h.bind();
+    h.rt.prompt(S, "legacy task", "steve", &[]).unwrap();
+    until("initial failure", || {
+        h.phase() == "released" && !h.ends().is_empty()
+    })
+    .await;
+    h.rt.stop("upgrade fixture");
+    h.store.transaction::<_,StoreError>(|tx| {
+        // An older build had only a generic error stop, no durable startup gate.
+        tx.execute("UPDATE session_stops SET stop_reason='error' WHERE session_id=?", [S])?;
+        tx.execute("DELETE FROM decisions WHERE session_id=?", [S])?;
+        // A handed-off session from the same older build still has its startup message.
+        tx.execute("INSERT INTO sessions(id,workspace_id,harness,cwd,status,created,updated) VALUES ('old-ended','default','fixture','.','ended',1,1)", [])?;
+        tx.execute("INSERT INTO runtime_sessions(session_id,node_id,workspace_ref,node_session_id,config_revision,phase,updated) VALUES ('old-ended','n1','{}','old-ended','r1','released',1)", [])?;
+        tx.execute("INSERT INTO queued(id,session_id,text,via,created) VALUES ('leftover','old-ended','obsolete task','steve',1)", [])?;
+        Ok(())
+    }).unwrap();
+    h.restart_hub().await;
+    assert_eq!(
+        h.q::<String>("SELECT stop_reason FROM session_stops WHERE session_id='s1'"),
+        steve_store::SESSION_START_FAILURE
+    );
+    assert_eq!(
+        h.q::<i64>(
+            "SELECT COUNT(*) FROM decisions WHERE subject_type='session_start' AND status='open'"
+        ),
+        1
+    );
+    assert_eq!(
+        h.q::<i64>("SELECT COUNT(*) FROM queued WHERE session_id='old-ended'"),
+        0
+    );
+    assert_eq!(h.rt.flush(S, None).unwrap(), Planned::Held);
+    assert_eq!(
+        h.q::<i64>("SELECT COUNT(*) FROM node_commands WHERE method='open_session'"),
+        1
+    );
 }

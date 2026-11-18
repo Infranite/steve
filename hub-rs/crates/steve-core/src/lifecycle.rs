@@ -51,7 +51,14 @@ pub fn settle(db: &Store, item: &str) -> Result<()> {
 /// Questions and failure cards only matter until the conversation goes on without them: the user writes to
 /// the session anyway, or the bot keeps working, asks again or delivers.
 pub fn supersede(db: &Store, item: &str, kinds: &[&str], why: &str) -> Result<usize> {
-    supersede_where(db, item, |d| kinds.contains(&d.kind.as_str()), why)
+    supersede_where(
+        db,
+        item,
+        |d| {
+            d.subject_type != steve_store::SESSION_START_FAILURE && kinds.contains(&d.kind.as_str())
+        },
+        why,
+    )
 }
 
 /// A card saying the agent stopped (its turn ended without a delivery, it failed, it sat idle): it
@@ -107,7 +114,11 @@ pub fn tidy(db: &Store, item: &str) -> Result<usize> {
         .max(0);
     let stale: Vec<_> = open
         .iter()
-        .filter(|d| (d.kind == "ask" || d.kind == "fail") && d.created < later)
+        .filter(|d| {
+            d.subject_type != steve_store::SESSION_START_FAILURE
+                && (d.kind == "ask" || d.kind == "fail")
+                && d.created < later
+        })
         .collect();
     for d in &stale {
         db.decision_resolve(

@@ -90,6 +90,10 @@ pub type ItemDeletedHook = dyn Fn(&Tx, &str, &str) -> std::result::Result<(), St
 
 pub type Result<T, E = StoreError> = std::result::Result<T, E>;
 
+/// A failed session open requires an explicit human retry. Used by both its durable stop and
+/// its decision card, so background queue flushing and YOLO cannot restart it.
+pub const SESSION_START_FAILURE: &str = "session_start";
+
 /// Unix milliseconds, like `Date.now()`.
 pub fn now() -> i64 {
     SystemTime::now()

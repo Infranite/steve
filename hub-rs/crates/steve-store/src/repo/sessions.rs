@@ -178,38 +178,66 @@ impl Sessions<'_> {
 
     /// Sets the given fields and `updated`; an empty patch does nothing.
     pub fn patch(&self, id: &str, p: &SessionPatch) -> Result<()> {
-        self.0.write(|w| {
-            let mut s = Sets::default();
-            s.val("status", p.status.clone())
-                .null("acp_session_id", p.acp_session_id.clone())
-                .null("used", p.used)
-                .null("size", p.size)
-                .null("cost", p.cost)
-                .null("model", p.model.clone())
-                .null("reasoning_effort", p.reasoning_effort.clone())
-                .val("title", p.title.clone())
-                .null("item_id", p.item_id.clone())
-                .val("no", p.no);
-            if s.is_empty() {
-                return Ok(());
+        self.0.atomic(|| {
+            self.0.write(|w| {
+                let mut s = Sets::default();
+                s.val("status", p.status.clone())
+                    .null("acp_session_id", p.acp_session_id.clone())
+                    .null("used", p.used)
+                    .null("size", p.size)
+                    .null("cost", p.cost)
+                    .null("model", p.model.clone())
+                    .null("reasoning_effort", p.reasoning_effort.clone())
+                    .val("title", p.title.clone())
+                    .null("item_id", p.item_id.clone())
+                    .val("no", p.no);
+                if s.is_empty() {
+                    return Ok(());
+                }
+                w.c.prepare_cached(&format!(
+                    "UPDATE sessions SET {}, updated = ? WHERE id = ?",
+                    s.sql()
+                ))?
+                .execute(rusqlite::params_from_iter(
+                    s.params([now().into(), id.to_string().into()]),
+                ))?;
+                if p.status.as_deref() == Some("ended") {
+                    self.retire_queue(id)?;
+                }
+                let item_id = one(
+                    w.c,
+                    "SELECT item_id FROM sessions WHERE id = ?",
+                    [id],
+                    |r| r.get::<_, Option<String>>(0),
+                )?;
+                w.publish(ChangeEvent::Session {
+                    id: id.into(),
+                    item_id,
+                });
+                Ok(())
+            })
+        })
+    }
+
+    /// End/handoff discards unsent input, including the initial protocol. A successor receives
+    /// a fresh protocol; replaying this queue would give it obsolete Bot/session instructions.
+    /// Also used to repair queues left on ended sessions by earlier builds.
+    pub fn retire_queue(&self, id: &str) -> Result<()> {
+        self.0.atomic(|| {
+            if self.get(id)?.is_none_or(|s| s.status != "ended") {
+                return Err(crate::StoreError::Conflict("只能清理已结束会话的旧队列。".into()));
             }
-            w.c.prepare_cached(&format!(
-                "UPDATE sessions SET {}, updated = ? WHERE id = ?",
-                s.sql()
-            ))?
-            .execute(rusqlite::params_from_iter(
-                s.params([now().into(), id.to_string().into()]),
-            ))?;
-            let item_id = one(
-                w.c,
-                "SELECT item_id FROM sessions WHERE id = ?",
-                [id],
-                |r| r.get::<_, Option<String>>(0),
-            )?;
-            w.publish(ChangeEvent::Session {
-                id: id.into(),
-                item_id,
-            });
+            let n = self.0.write(|w| Ok(w.c.execute("DELETE FROM queued WHERE session_id=?", [id])?))?;
+            if n > 0 {
+                self.0.events().add(id, "system", serde_json::json!({
+                    "text": format!("会话已结束，已丢弃 {n} 条未发送消息；新会话使用新的任务说明。"),
+                    "discarded_queued": n
+                }))?;
+            }
+            let cards = self.0.read(|c| all(c, "SELECT * FROM decisions WHERE session_id=?", [id], crate::Decision::from_row))?;
+            for d in cards.into_iter().filter(|d| d.status == "open" && d.subject_type == crate::SESSION_START_FAILURE) {
+                self.0.decisions().resolve(&d.id, &serde_json::json!({"superseded":"会话已结束"}), "expired", &Value::Null)?;
+            }
             Ok(())
         })
     }
@@ -285,7 +313,7 @@ impl Sessions<'_> {
         let at = now();
         self.0.write(|w| {
             w.c.run(
-                "INSERT INTO session_stops (session_id, attempt, stop_reason, error, yours, stop_asked, ended, seq, updated) VALUES (?1, ?2, ?3, ?4, ?5, NULL, ?6, (SELECT MAX(seq) FROM events WHERE session_id = ?1), ?6) ON CONFLICT(session_id) DO UPDATE SET attempt = ?2, stop_reason = ?3, error = ?4, yours = ?5, stop_asked = NULL, asked_seq = NULL, ended = ?6, seq = excluded.seq, updated = ?6",
+                "INSERT INTO session_stops (session_id, attempt, stop_reason, error, yours, stop_asked, ended, seq, updated) VALUES (?1, ?2, ?3, ?4, ?5, NULL, ?6, (SELECT MAX(seq) FROM events WHERE session_id = ?1), ?6) ON CONFLICT(session_id) DO UPDATE SET attempt = ?2, stop_reason = ?3, error = ?4, yours = ?5, stop_asked = NULL, asked_seq = NULL, ended = ?6, seq = excluded.seq, updated = ?6 WHERE session_stops.stop_reason IS NOT 'session_start' OR ?3='session_start'",
                 params![id, attempt, stop_reason, error, yours as i64, at],
             )?;
             Ok(())
@@ -389,6 +417,20 @@ impl Sessions<'_> {
             Ok(())
         })
     }
+}
+
+fn ensure_open(c: &rusqlite::Connection, session: &str) -> Result<()> {
+    let ended: bool = c.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sessions WHERE id=? AND status='ended')",
+        [session],
+        |r| r.get(0),
+    )?;
+    if ended {
+        return Err(crate::StoreError::Conflict(
+            "已结束的会话不能接收新消息，请使用当前会话。".into(),
+        ));
+    }
+    Ok(())
 }
 
 pub struct Events<'a>(&'a Store);
@@ -693,6 +735,7 @@ impl QueuedRepo<'_> {
 
     pub fn add(&self, session_id: &str, text: &str, via: &str, files: &[FileRef]) -> Result<()> {
         self.0.write(|w| {
+            ensure_open(w.c, session_id)?;
             w.c.run(
                 "INSERT INTO queued (id, session_id, text, via, created, files) VALUES (?, ?, ?, ?, ?, ?)",
                 params![uid("q"), session_id, text, via, now(), super::file_refs(files)?],
@@ -717,6 +760,7 @@ impl QueuedRepo<'_> {
     ) -> Result<bool> {
         let refs = super::file_refs(files)?;
         self.0.write(|w| {
+            ensure_open(w.c, session_id)?;
             let waiting: Option<i64> = one(
                 w.c,
                 "SELECT 1 FROM queued WHERE session_id = ? AND text = ? AND coalesce(files, '') = coalesce(?, '')",

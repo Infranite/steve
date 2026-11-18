@@ -31,6 +31,41 @@ pub enum Release {
 }
 
 impl NodeRuntime {
+    pub(super) fn repair_startup_queues(&self) -> Result<(), StoreError> {
+        let sessions = self.store.reader(|c| {
+            let mut q = c.prepare("SELECT s.id,s.status FROM runtime_sessions r JOIN sessions s ON s.id=r.session_id WHERE r.node_id=? AND ((s.status='ended' AND (EXISTS(SELECT 1 FROM queued WHERE session_id=s.id) OR EXISTS(SELECT 1 FROM decisions WHERE session_id=s.id AND subject_type='session_start' AND status='open'))) OR (s.status='error' AND r.phase='released' AND EXISTS(SELECT 1 FROM queued WHERE session_id=s.id) AND (SELECT c.state IN ('finished','rejected') AND COALESCE(json_extract(c.receipt,'$.success'),0)=0 FROM node_commands c WHERE c.method='open_session' AND json_extract(c.request,'$.body.session')=s.id ORDER BY c.created DESC,c.rowid DESC LIMIT 1)))")?;
+            let rows = q.query_map([self.node_id.as_str()], |r| Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?)))?.collect::<Result<Vec<_>,_>>()?;
+            Ok::<_,StoreError>(rows)
+        })?;
+        for (session, status) in sessions {
+            if status == "ended" {
+                self.store.sessions().retire_queue(&session)?;
+            } else {
+                self.tx(|tx| {
+                    if ended_in(tx, &session)? || super::plan::startup_blocked_in(tx, &session)? {
+                        return Ok(());
+                    }
+                    let detail: Option<String> = tx
+                        .query_row(
+                            "SELECT error FROM session_stops WHERE session_id=?",
+                            [&session],
+                            |r| r.get(0),
+                        )
+                        .optional()?
+                        .flatten();
+                    self.startup_failed_in(
+                        tx,
+                        &session,
+                        detail
+                            .as_deref()
+                            .unwrap_or("上次启动失败，已保留排队消息，请检查配置后手动重试。"),
+                    )
+                })?;
+            }
+        }
+        Ok(())
+    }
+
     /// The session runs on this Node from now on: its workspace is prepared and it is opened, by
     /// two commands (the open waits for the prepare). Idempotent for the same binding. Refused
     /// once [`Self::stop`] was called: nothing would ever send those commands.
@@ -68,6 +103,9 @@ impl NodeRuntime {
             skills: vec![],
         };
         let fresh = self.tx(|tx| {
+            if ended_in(tx, &b.session)? {
+                return Err(conflict("已结束的会话不能绑定或重开。"));
+            }
             self.session_owners_work_in(tx, &b.session)?;
             let fresh = rt::bind_session_in(
                 tx,
@@ -213,6 +251,9 @@ impl NodeRuntime {
         session: &str,
         dependency: Option<&str>,
     ) -> Result<(), StoreError> {
+        if ended_in(tx, session)? || super::plan::startup_blocked_in(tx, session)? {
+            return Ok(());
+        }
         // a worktree it made that was tidied since, or that it could not make: made again first
         let again = match dependency {
             None => self.prepare_again_in(tx, session)?,
@@ -252,6 +293,44 @@ impl NodeRuntime {
             },
             now(),
         )?;
+        Ok(())
+    }
+
+    /// One explicit retry, with the user's current Bot selection. Automatic planners cannot
+    /// clear the durable startup stop. No other harness is chosen on the user's behalf.
+    pub fn retry_open(&self, session: &str, choice: &HarnessChoice) -> Result<(), StoreError> {
+        self.running()?;
+        self.tx(|tx| {
+            if ended_in(tx, session)? {
+                return Err(conflict("已结束的会话不能重开，请使用当前会话。"));
+            }
+            if !super::plan::startup_blocked_in(tx, session)? {
+                return Err(conflict("会话已经重试或状态已变化，请刷新。"));
+            }
+            let mut open = self.open_of(tx, session)?;
+            // A binding keeps its adapter identity; this compares user-selected ids, not adapter kinds.
+            if !choice.harness.eq(&open.choice.harness) {
+                return Err(conflict("Bot 的执行器已改变，请重新指派以创建新会话。"));
+            }
+            open.choice = choice.clone();
+            let mut desired =
+                super::config::desired_in(tx, session)?.unwrap_or(super::config::Desired {
+                    choice: choice.clone(),
+                    policy: open.policy,
+                    refreshes: 0,
+                    expected: None,
+                });
+            desired.choice = choice.clone();
+            rt::set_desired_config_in(tx, session, Some(&serde_json::to_value(desired)?), now())?;
+            tx.execute(
+                "DELETE FROM session_stops WHERE session_id=? AND stop_reason=?",
+                [session, steve_store::SESSION_START_FAILURE],
+            )?;
+            self.reopen_in(tx, session)?;
+            status_in(tx, session, "starting")?;
+            Ok(())
+        })?;
+        self.wake_send.notify_one();
         Ok(())
     }
 

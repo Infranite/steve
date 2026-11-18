@@ -422,6 +422,7 @@ function choiceLabel(d: RDecision) {
   if (d.kind === "confirm") return r.choice === "yes" ? t("core:choice.confirmYes") : t("core:choice.confirmNo")
   if (d.kind === "propose") return r.choice === "yes" ? t("core:choice.proposeYes") : t("core:choice.proposeNo")
   if (MODULE_CHOICE_SUBJECTS.has(d.subject_type)) return MODULE_CHOICE[r.choice] ?? String(r.choice ?? t("core:choice.handled"))
+  if (d.subject_type === "session_start" && r.choice === "retry") return t("core:card.retrySession")
   if (d.kind === "fail") return FAIL_CHOICE[r.choice] ?? r.choice
   if (d.subject_type === "tool_call") return r.optionId ? t("core:choice.allow") : t("core:choice.deny")
   if (d.subject_type === "release") return r.approved ? t("core:choice.release") : t("core:choice.noRelease")
@@ -1157,12 +1158,14 @@ export async function saveBot(k: string, p: { n?: string; role?: string; pers?: 
   if (p.acc !== undefined) q.accept_mode = accKey(p.acc); if (p.harness !== undefined) q.harness = p.harness; if (p.model !== undefined) q.model = p.model; if (p.permMode !== undefined) q.perm_mode = p.permMode
   if (p.project !== undefined) q.default_project = p.project; if (p.prompt !== undefined) q.prompt = p.prompt; if (p.on !== undefined) q.enabled = p.on; if (p.dev !== undefined) q.device = p.dev
   if (p.color !== undefined || p.round !== undefined || p.skin !== undefined) q.avatar = { color: p.color ?? b.color, round: p.round ?? b.round, skin: p.skin !== undefined ? p.skin : b.skin }
-  await call(api.patchBot(k, q), msg)
+  const saved = await call(api.patchBot(k, q), msg)
+  if (saved?.selection_validation === "unknown" && (p.harness !== undefined || p.model !== undefined || p.reasoningEffort !== undefined)) toast(t("core:toast.botSelectionUnknown"))
 }
 export async function makeBot(n: string, role: string, harness = defaultHarness(), model: string | null = null, permMode?: string) {
   const q: Partial<RBot> & { name: string } = { name: n, role, model }
   if (harness) { q.harness = harness; q.perm_mode = permMode ?? defaultPermMode(harness) }
   const r = await call(api.newBot(q), t("core:toast.botCreated"))
+  if (r?.selection_validation === "unknown") toast(t("core:toast.botSelectionUnknown"))
   return r?.id
 }
 export async function draftBot(desc: string) { const r = await call(api.draftBot(desc), t("core:toast.botDrafted")); return r?.id }

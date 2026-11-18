@@ -33,6 +33,8 @@ pub struct FakeState {
     pub release_answers: HashMap<String, Released>,
     /// `created` calls: (session, the release it waits for)
     pub created: Vec<(String, Option<String>)>,
+    /// A Node starts only after another thread can read the committed session (ST-174).
+    pub starts_require_commit: bool,
     /// decision id → still answerable
     pub permissions: HashSet<String>,
     /// decision id → answerable through a queued command (a Node's): answers are [`Answered::Pending`]
@@ -270,6 +272,16 @@ impl AgentRuntime for FakeRuntime {
         self.st().turning.contains(sid)
     }
     fn created(&self, sid: &str, after: Option<&str>) {
+        if self.st().starts_require_commit {
+            let (store, id) = (self.store.clone(), sid.to_string());
+            let visible = std::thread::spawn(move || store.session(&id).unwrap().is_some())
+                .join()
+                .unwrap();
+            assert!(
+                visible,
+                "Node startup must follow the session transaction's commit"
+            );
+        }
         let mut st = self.st();
         st.created.push((sid.into(), after.map(String::from)));
         if st.makes_worktrees && st.binds_worktrees {
