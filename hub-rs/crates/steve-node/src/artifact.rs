@@ -132,19 +132,26 @@ pub(crate) fn read_delivery(grant: &Grant, q: &ExecutionDeliveryRead) -> ApiResu
         return Err(denied());
     }
     let base = Path::new(&grant.dir);
-    let input = Path::new(&q.location);
-    let rel = if input.is_absolute() {
-        input.strip_prefix(base).map_err(|_| denied())?
-    } else {
-        input
-    };
-    let rel = RelPath::new(rel.to_str().ok_or_else(denied)?).map_err(|_| denied())?;
+    let rel = delivery_relative(grant, q)?;
     let dir = anchor(base)?;
     let meta = dir.metadata().map_err(io_error)?;
     if (meta.dev(), meta.ino()) != (grant.device, grant.inode) {
         return Err(denied());
     }
     read_open(base, dir, &rel, q.expected.as_ref(), q.offset, q.max)
+}
+
+pub(crate) fn delivery_relative(grant: &Grant, q: &ExecutionDeliveryRead) -> ApiResult<RelPath> {
+    let input = Path::new(&q.location);
+    let rel = if input.is_absolute() {
+        input
+            .strip_prefix(&grant.dir)
+            .or_else(|_| input.strip_prefix(grant.recorded_dir()))
+            .map_err(|_| denied())?
+    } else {
+        input
+    };
+    RelPath::new(rel.to_str().ok_or_else(denied)?).map_err(|_| denied())
 }
 
 /// Used by the local-off compatibility path too: the caller authorizes the root, this Node

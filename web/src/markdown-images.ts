@@ -19,3 +19,34 @@ export function markdownImageSource(ref: string, hub: string): MarkdownImageSour
     }
   } catch { return null }
 }
+
+const UNAVAILABLE = "#steve-file-unavailable-"
+// rehype-harden refuses fragments in image src. A private render-only placeholder
+// survives that check; Image recognizes it before creating an <img> (no request).
+const IMAGE_UNAVAILABLE = "/api/steve-file-unavailable-"
+const REASONS = ["legacy", "scope", "missing", "offline", "limit", "type"] as const
+export function replyFileReason(ref?: string) {
+  return REASONS.find(reason => ref === UNAVAILABLE + reason || ref === IMAGE_UNAVAILABLE + reason)
+}
+
+/** Old transcripts only get a disabled reference; never request a Node path from the browser. */
+export function historicalReplyPath(ref: string, image: boolean): boolean {
+  if (/^file:/i.test(ref)) return true
+  if (!ref || ref.startsWith("#") || ref.startsWith("//") || ref.includes(":")
+    || /^\/(?:api|deliveries|shares|auth|assets)\//.test(ref)) return false
+  return image || (ref.startsWith("/") && ref !== "/") || /^\.\.?\//.test(ref)
+    || /\.(?:md|markdown|pdf|png|jpe?g|gif|webp|txt|log|csv|tsv|jsonl?|ya?ml|xml|toml|docx|xlsx|pptx|mp3|mp4|webm|wav|zip|html?)(?:[?#]|$)/i.test(ref)
+}
+
+export function replyImageHint(ref: string): string {
+  const reason = ref.startsWith(UNAVAILABLE) && replyFileReason(ref)
+  return reason ? IMAGE_UNAVAILABLE + reason : ref
+}
+
+export const historicalReplyMarker = UNAVAILABLE + "legacy"
+
+/** Use the Hub in this tab, not the web origin or another saved Hub. Keep the captured workspace. */
+export function replyDeliveryUrl(ref: string | undefined, hub: string): string | null {
+  if (!ref || !/^\/deliveries\/dlv_[0-9a-f]{32}\?ws=[^&#]+$/.test(ref)) return null
+  try { return new URL(ref, hub).href } catch { return null }
+}

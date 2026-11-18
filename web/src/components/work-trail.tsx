@@ -212,7 +212,7 @@ export function Trail({ items, live, end, tail, className }: { items: TrailItem[
       {rs.slice(cut).map((x) => Array.isArray(x) ? <GroupRow key={x[0].key} g={x} live={live} />
         : x.t === "tool" ? <ToolRow key={x.key} s={x} live={live} />
         : x.t === "think" ? <ThinkRow key={x.key} s={x} live={live} />
-        : x.t === "note" ? <Row key={x.key} s="done" data-narration><div className="py-0.5 type-callout text-foreground/80"><Markdown text={x.text} /></div></Row>
+        : x.t === "note" ? <Row key={x.key} s="done" data-narration><div className="py-0.5 type-callout text-foreground/80"><Markdown text={x.text} replyFiles /></div></Row>
         : <Row key={x.key} s={live && x.state === "run" ? "run" : x.state === "fail" ? "fail" : "done"} {...attrsOf(x.attrs)}><Fold head={<>{x.label}{x.detail}</>} body={x.body} /></Row>)}
       {end && <Row s={end.s === "fail" ? "fail" : end.s} data-trail-end={end.s}><div className={HEAD}>{end.label}</div></Row>}
     </ol>

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict"
 import { test } from "node:test"
-import { markdownImageSource } from "../src/markdown-images.ts"
+import { historicalReplyMarker, historicalReplyPath, markdownImageSource, replyDeliveryUrl, replyFileReason, replyImageHint } from "../src/markdown-images.ts"
 
 const hub = "https://hub.example.test"
 test("Hub Markdown images use the current Hub and retain the exact source workspace/query/hash", () => {
@@ -24,4 +24,27 @@ test("local paths and unsafe or unresolvable image sources never become browser 
   for (const ref of ["", "/private/tmp/sample.png", "/tmp/sample.png", "/home/user/sample.png", "C:\\Temp\\sample.png", "C:/Temp/sample.png", "sample.png", "../sample.png", "file:///tmp/sample.png", "javascript:alert(1)", "vbscript:alert(1)", "data:image/svg+xml,<svg/>", "/api/../../private/file.png", "/api/\\file.png", "/api/files/\nfile"]) assert.equal(markdownImageSource(ref, hub), null, ref)
   assert.equal(markdownImageSource("/api/files/f", "invalid Hub"), null)
   assert.deepEqual(markdownImageSource("streamdown:incomplete-image", hub), { src: "streamdown:incomplete-image", authenticated: false })
+})
+
+test("legacy reply paths never become browser resource requests", () => {
+  for (const path of ["file:///workspace/my%20report.md", "/workspace/report.md", "./report.md", "reports/report.md"]) {
+    assert.equal(historicalReplyPath(path, false), true, path)
+    assert.equal(markdownImageSource(path, hub), null, path)
+  }
+  for (const path of ["https://example.test/report.md", "//cdn.example.test/a.png", "#/items/ST-1", "/api/file-deliveries/d/content/a.png?ws=original", "/deliveries/dlv_x?ws=original"]) {
+    assert.equal(historicalReplyPath(path, false), false, path)
+  }
+  assert.equal(replyFileReason(historicalReplyMarker), "legacy")
+  assert.equal(replyFileReason("#steve-file-unavailable-scope"), "scope")
+  assert.equal(replyFileReason(replyImageHint(historicalReplyMarker)), "legacy")
+  assert.equal(replyImageHint("/api/files/old"), "/api/files/old")
+  assert.equal(replyFileReason("#something-else"), undefined)
+})
+
+test("captured reply delivery routes use the current Hub and original workspace", () => {
+  const path = "/deliveries/dlv_1234567890abcdef1234567890abcdef?ws=other"
+  assert.equal(replyDeliveryUrl(path, hub), hub + path)
+  for (const ref of ["/Users/example/report.md", "//example.test" + path, path.replace("?ws=other", ""), path.replace("/dlv_", "/../dlv_")]) {
+    assert.equal(replyDeliveryUrl(ref, hub), null)
+  }
 })

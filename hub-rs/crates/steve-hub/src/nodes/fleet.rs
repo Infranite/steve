@@ -38,6 +38,7 @@ pub struct NodeFleet {
     domain: Option<Arc<dyn NodeDomain>>,
     /// Steve's tools; the Hub installs them once they exist ([`Self::set_service`]).
     service: OnceLock<Arc<dyn Service>>,
+    deliveries: OnceLock<crate::deliveries::Service>,
     nodes: Mutex<HashMap<String, Entry>>,
     /// The Hub's release hold, for every coordinator (and the ones started later).
     holding: AtomicBool,
@@ -96,6 +97,7 @@ impl NodeFleet {
             data_dir,
             domain,
             service: OnceLock::new(),
+            deliveries: OnceLock::new(),
             nodes: Mutex::new(HashMap::new()),
             holding: AtomicBool::new(false),
             turn_limit: AtomicI64::new(0),
@@ -110,6 +112,10 @@ impl NodeFleet {
     }
 
     /// Steve's tools for every Node's link, including the ones opened before.
+    pub(crate) fn set_deliveries(&self, svc: crate::deliveries::Service) {
+        let _ = self.deliveries.set(svc);
+    }
+
     pub fn set_service(&self, service: Arc<dyn Service>) {
         let _ = self.service.set(service);
     }
@@ -324,11 +330,12 @@ impl NodeFleet {
             entry
                 .files
                 .get_or_insert_with(|| {
-                    Arc::new(NodeFiles::new(
-                        self.store.clone(),
-                        node.clone(),
-                        self.data_dir.clone(),
-                    ))
+                    let files =
+                        NodeFiles::new(self.store.clone(), node.clone(), self.data_dir.clone());
+                    Arc::new(match self.deliveries.get() {
+                        Some(svc) => files.with_reply_source(svc.clone(), entry.remote.clone()),
+                        None => files,
+                    })
                 })
                 .clone()
         })
