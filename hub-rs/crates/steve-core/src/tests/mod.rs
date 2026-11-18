@@ -20,6 +20,7 @@ mod new_cycle;
 mod node_git;
 mod onboard;
 mod outbox;
+mod parent_closure;
 mod pull;
 mod queued;
 mod refused;

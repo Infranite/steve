@@ -1282,6 +1282,7 @@ impl Tx<'_> {
         if !committed {
             return Ok(false);
         }
+        self.lc_finish_children(&i.id)?;
         /* nothing of Steve's automation for the item is left to run */
         self.drop_steve_queued(&i.id)?;
         self.db().timeline_add(
@@ -1364,6 +1365,11 @@ impl Tx<'_> {
     /// Checks every item waiting to close (boot after recovery, the periodic tick).
     pub(crate) fn lc_tick(&mut self) -> Result<usize> {
         let mut n = 0;
+        // Independent of dynamic workflows and automatic continuation: an upgrade must retire
+        // historical child items too, even when their graph/attempt is no longer current.
+        for id in self.db().store().items().closed_parents()? {
+            self.lc_finish_children(&id)?;
+        }
         let ids = self.db().store().items().closing_ids()?;
         self.st.git_polling = true;
         self.st.lc_ticking = true;
@@ -1377,6 +1383,85 @@ impl Tx<'_> {
         self.st.lc_ticking = false;
         self.st.git_polling = false;
         Ok(n)
+    }
+
+    fn lc_finish_children(&mut self, parent: &str) -> Result<()> {
+        let p = self.item(parent)?;
+        if p.phase != CLOSED || !matches!(p.outcome.as_deref(), Some("completed" | "cancelled")) {
+            return Ok(());
+        }
+        let why = format!(
+            "随父事项 {parent} 结束：父事项已{}{}；子事项未完成，停止后归档",
+            if p.outcome.as_deref() == Some("completed") {
+                "完成"
+            } else {
+                "放弃"
+            },
+            p.closed_reason
+                .as_deref()
+                .filter(|r| !r.is_empty())
+                .map(|r| format!("（{r}）"))
+                .unwrap_or_default()
+        );
+        let mut seen = std::collections::HashSet::from([parent.to_string()]);
+        let mut pending = vec![parent.to_string()];
+        while let Some(id) = pending.pop() {
+            for child in self.db().store().items().children(&id)? {
+                if !seen.insert(child.id.clone()) {
+                    continue;
+                }
+                // Traverse archived and successful intermediates too; old attempts can hang off
+                // them. Do not alter an already archived child or its immutable cycle history.
+                pending.push(child.id.clone());
+                if (child.archived && child.phase == CLOSED)
+                    || (child.phase == CLOSED && child.outcome.as_deref() != Some("failed"))
+                {
+                    continue;
+                }
+                if child.phase != CLOSED {
+                    if stopping(&child) {
+                        self.lc_try_close(&child.id)?;
+                    } else {
+                        self.lc_stop(&child.id, CANCEL, "parent", &why, None)?;
+                    }
+                }
+                if self.item(&child.id)?.phase != CLOSED {
+                    continue;
+                }
+                // A historical closed/failed item can still have a leftover execution. Request
+                // its stop, but do not hide it until the runtime has confirmed settlement.
+                let mut busy = false;
+                for s in self.db().sessions_of_item(&child.id)? {
+                    if let Some(turn) = self.rt().running(&s.id) {
+                        self.st.cancels.push((turn, child.id.clone()));
+                    }
+                    busy |= self.busy(&s.id)
+                        || self.rt().uncertain(&s.id)
+                        || matches!(s.status.as_str(), "starting" | "running");
+                }
+                if busy {
+                    continue;
+                }
+                for s in self.db().sessions_of_item(&child.id)? {
+                    for q in self.db().queued(&s.id)? {
+                        self.db().store().queued().remove(&s.id, &q.id)?;
+                    }
+                    if s.status != "ended" {
+                        self.end_and_release(&s.id)?;
+                    }
+                }
+                let db = self.db();
+                db.atomic(|| {
+                    if db.item(&child.id)?.is_some_and(|i| !i.archived) {
+                        crate::lifecycle::supersede_where(db, &child.id, |_| true, &why)?;
+                        db.item_patch(&child.id, crate::patch![archived: true, now: why])?;
+                        db.timeline_add(&child.id, "steve", "sys", &why, None)?;
+                    }
+                    Ok(())
+                })?;
+            }
+        }
+        Ok(())
     }
 
     /// Boot: hook consultations that were pending when the Hub stopped are asked again.
