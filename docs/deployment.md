@@ -334,6 +334,8 @@ For a design or report delivery, Steve retains the delivery text as an immutable
 
 Successful item deliveries and questions are saved with a receipt for the current item cycle, goal and logical turn. Turn-end handling and recovery use that persisted receipt, including after a Hub restart or a retried attempt of the same turn. A successful submission that persists after the turn-end judgment clears the earlier no-delivery fallback; replayed or older turn-end notifications cannot replace current acceptance or PR closeout with that fallback. MCP calls still require a running authorized attempt: a new call made after it ended is refused. Prose claiming completion, rejected tool calls and receipts from an earlier cycle or turn do not count. Execution failures and unknown publication outcomes retain their own recovery cards.
 
+Choosing **It's actually done** (`delivered`) on a failure card records your human acceptance immediately, including any note you supplied. It creates no further acceptance card, so automatic acceptance cannot send it back for missing agent checks. The accepted result still follows the project's PR merge, release, workflow and other closeout requirements; this choice alone does not authorize publication or merging.
+
 ### Review findings and merging
 
 A work graph splits by independent scope, not by phase: planning and implementing one scope stay in one unit, and review goes to the independent review Bot. A review unit's findings are blocking or non-blocking by a fixed category table, not by the reviewer's judgment of severity:

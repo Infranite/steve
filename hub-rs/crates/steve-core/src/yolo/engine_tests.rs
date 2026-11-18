@@ -377,6 +377,128 @@ fn an_accept_with_passing_checks_passes_and_without_checks_is_reworked() {
 }
 
 #[test]
+fn your_delivered_choice_is_human_acceptance_even_with_yolo() {
+    for on in [false, true] {
+        let t = t();
+        if !on {
+            t.yolo
+                .put(
+                    WS,
+                    "me",
+                    Switch {
+                        on: false,
+                        full: false,
+                        preview: false,
+                        include_open: false,
+                    },
+                )
+                .unwrap();
+        }
+        let (item, sid, _) = t.item();
+        t.kit.rt.say(&sid, "PR 已全绿，但没能调用 steve_deliver");
+        t.kit.rt.end_turn(&t.kit.core, &sid, "end_turn", None);
+        let fail = t
+            .kit
+            .db()
+            .decisions_of_item(&item)
+            .unwrap()
+            .into_iter()
+            .find(|d| d.status == "open" && d.kind == "fail")
+            .unwrap();
+        let note = "已查看 PR，CI 全部通过";
+        t.kit
+            .core
+            .resolve(&fail.id, "delivered", note, "me")
+            .unwrap();
+        let i = t.kit.db().item(&item).unwrap().unwrap();
+        assert_eq!(
+            i.phase, "closed",
+            "owner acceptance must not need another card"
+        );
+        assert_eq!(i.outcome.as_deref(), Some("completed"));
+        assert_eq!(i.acceptance.as_deref(), Some("human"));
+        assert!(t.kit.open_kinds(&item).is_empty());
+        assert_eq!(t.decision(&fail.id).result["text"], note);
+        assert_eq!(t.audit_actor(&fail.id), vec!["me"]);
+        assert!(
+            t.kit
+                .timeline_texts(&item)
+                .iter()
+                .any(|line| line.contains(note))
+        );
+
+        // Neither a periodic pass nor a Hub restart can turn this into automatic rework.
+        t.clock.advance(181_000);
+        assert!(t.engine.tick().is_empty());
+        let reopened = t.kit.reopened();
+        reopened.lifecycle_tick().unwrap();
+        let again = Engine::new(reopened.clone(), t.yolo.clone());
+        assert!(again.tick().is_empty());
+        assert_eq!(
+            reopened
+                .store()
+                .item(&item)
+                .unwrap()
+                .unwrap()
+                .acceptance
+                .as_deref(),
+            Some("human")
+        );
+        assert!(
+            t.kit.rt.prompts_of(&sid).is_empty(),
+            "never sends the item back to the agent"
+        );
+        assert!(t.kit.gw.calls.lock().unwrap().is_empty());
+    }
+}
+
+#[test]
+fn yolo_cannot_choose_delivered_in_place_of_the_owner() {
+    let t = t();
+    let (item, sid, _) = t.item();
+    let d = t.card(
+        &item,
+        &sid,
+        "fail",
+        "item",
+        "Agent 停下来了，没有交付也没有提问",
+        "",
+        &["continue", "delivered", "look"],
+    );
+    assert!(t.kit.core.resolve(&d, "delivered", "", "yolo").is_err());
+    assert_eq!(t.decision(&d).status, "open");
+    assert_ne!(t.kit.phase(&item), "closed");
+}
+
+#[test]
+fn your_delivered_choice_cancels_a_scheduled_auto_continue() {
+    let t = t();
+    let (item, sid, _) = t.item();
+    t.kit
+        .rt
+        .end_turn(&t.kit.core, &sid, "error", Some("unavailable"));
+    let fail = t
+        .kit
+        .db()
+        .decisions_of_item(&item)
+        .unwrap()
+        .into_iter()
+        .find(|d| d.status == "open" && d.kind == "fail")
+        .unwrap();
+    assert_eq!(
+        t.engine.consider(&fail.id).unwrap().unwrap().outcome,
+        "scheduled"
+    );
+    t.kit.core.resolve(&fail.id, "delivered", "", "me").unwrap();
+    t.clock.advance(61_000);
+    t.engine.tick();
+    assert_eq!(t.actions(&fail.id)[0].outcome, "cancelled");
+    assert_eq!(t.kit.phase(&item), "closed");
+    assert!(t.kit.open_kinds(&item).is_empty());
+    assert!(t.kit.rt.prompts_of(&sid).is_empty());
+}
+
+#[test]
 fn the_policy_setting_narrows_what_yolo_does() {
     let t = t();
     let mut p = serde_json::Map::new();

@@ -3044,10 +3044,6 @@ impl Tx<'_> {
         Ok(())
     }
 
-    fn new_decision(&self, d: NewDecision) -> Result<Decision> {
-        self.db().decision_create(d)
-    }
-
     /// The timeline line of an answer: the user's own (`kind=me`), or for YOLO's a system line
     /// `YOLO：…` by Steve, so it never reads as something the user said.
     pub(crate) fn answer_line(
@@ -3528,39 +3524,38 @@ impl Tx<'_> {
                         self.send(&to, or(text, &next))?;
                     }
                     "delivered" => {
+                        if actor == YOLO_ACTOR {
+                            return Err(crate::cycle::conflict(
+                                "确认已交付必须由你决定，自动验收不能代选",
+                            ));
+                        }
                         self.db().decision_resolve(
                             id,
-                            json!({"choice": choice}),
+                            json!({"choice": choice, "text": text}),
                             "resolved",
                             None,
                         )?;
-                        let draft = self.last_agent_text(sid.as_deref().unwrap_or(""))?
-                            + &plan_note(&self.item(&i)?.plan);
+                        // The owner's explicit choice is the acceptance (#434). A second
+                        // card with no agent checks lets YOLO overrule it and restart the loop.
+                        let line = if text.trim().is_empty() {
+                            "你确认已交付并验收通过".into()
+                        } else {
+                            format!("你确认已交付并验收通过：{text}")
+                        };
+                        tl(self, &i, &line)?;
                         self.lc_invalidate(
                             &i,
                             crate::cycle::void::REACCEPT,
-                            "你说它其实做完了，重新验收",
+                            "你确认已交付并验收通过",
                         )?;
-                        let acc = self.new_decision(NewDecision {
-                            workspace_id: d.workspace_id.clone(),
-                            kind: "accept".into(),
-                            subject_type: "item".into(),
-                            subject_id: i.clone(),
-                            item_id: Some(i.clone()),
-                            session_id: sid.clone(),
-                            question: "请验收".into(),
-                            draft: Some(draft),
-                            options: Some(vec!["pass".into(), "rework".into()]),
-                            requested_by: "steve".into(),
-                        })?;
                         self.lc_request_complete(
                             &i,
                             actor,
                             crate::cycle::Policy::Human,
-                            false,
-                            "你说它其实做完了",
-                            Some(acc.id),
-                            vec![],
+                            true,
+                            "你确认已交付并验收通过",
+                            None,
+                            vec![line],
                         )?;
                     }
                     /* a release whose result nobody knew, checked by you */

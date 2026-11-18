@@ -499,6 +499,60 @@ fn a_plan_reported_after_the_acceptance_is_only_noted_and_the_result_still_merge
 }
 
 #[test]
+fn your_delivered_choice_accepts_the_result_but_still_waits_for_merge_approval() {
+    let gh = Gh::new();
+    let script = gh.script.clone();
+    let k = Kit::with(|c| c.gh = script);
+    let x = remote_for(&k, upstream::DONE_MERGE, false, None);
+    k.core
+        .tx()
+        .lc_invalidate(&x.item, crate::cycle::void::REDELIVER, "交付回执未成功")
+        .unwrap();
+    let h = head(&x.wt);
+    gh.prs(open_pr(&h, json!({})));
+    k.rt.end_turn(&k.core, &x.session, "error", Some("delivery unavailable"));
+    let fail = k
+        .db()
+        .decisions_of_item(&x.item)
+        .unwrap()
+        .into_iter()
+        .find(|d| d.status == "open" && d.kind == "fail")
+        .unwrap();
+    let note = "我已检查 PR 的 CI，确认已交付";
+    k.core.resolve(&fail.id, "delivered", note, "me").unwrap();
+    let i = k.db().item(&x.item).unwrap().unwrap();
+    let closing = crate::cycle::closing_of(&i).unwrap();
+    assert!(closing.accepted);
+    assert_eq!(closing.policy, "human");
+    assert!(closing.decision.is_none());
+    assert!(closing.evidence.iter().any(|e| e.contains(note)));
+    assert_eq!(i.phase, "closing", "the project's merge rule still applies");
+    assert!(k.wait(|| release_op(&k, &x).evidence["pr_slug"] == "acme/app"));
+    look(&k);
+    assert_eq!(merge_cards(&k, &x).len(), 1);
+    assert!(gh.merges().is_empty(), "acceptance is not consent to merge");
+    assert!(
+        !k.db()
+            .decisions_of_item(&x.item)
+            .unwrap()
+            .iter()
+            .any(|d| d.kind == "accept" && d.status == "open")
+    );
+    assert!(
+        k.rt.prompts_of(&x.session).is_empty(),
+        "an errored session is not restarted"
+    );
+
+    let reopened = k.reopened();
+    reopened.lifecycle_tick().unwrap();
+    let i = reopened.store().item(&x.item).unwrap().unwrap();
+    assert_eq!(i.phase, "closing");
+    assert!(crate::cycle::closing_of(&i).unwrap().accepted);
+    assert_eq!(merge_cards(&k, &x).len(), 1);
+    assert!(gh.merges().is_empty());
+}
+
+#[test]
 fn an_unreviewed_change_waits_for_your_yes_which_yolo_cannot_give() {
     let gh = Gh::new();
     let (k, x) = accepted(&gh);
