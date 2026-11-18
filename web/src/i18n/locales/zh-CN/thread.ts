@@ -253,6 +253,7 @@ export default {
   },
   /* what became of Steve's message in the space */
   chanOut: {
+    withReason: "{{label}}：{{reason}}",
     notSent: "未发送到聊天",
     blocked: "渠道限制，未发送",
     sent: "已发出",
