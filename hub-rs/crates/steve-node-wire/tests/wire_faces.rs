@@ -604,6 +604,69 @@ struct OldPeer {
     seen: std::sync::Mutex<Vec<String>>,
 }
 
+#[tokio::test]
+async fn a_node_with_reply_delivery_scope_but_not_managed_skills_gets_no_snapshot() {
+    let fake = FakeNode::new("n1");
+    fake.prepare_workspace(cmd("op_prep", prepare("item:s1")))
+        .await
+        .unwrap();
+    let (h, n) = pair();
+    let hub = Conn::spawn(
+        h.sink,
+        h.stream,
+        1,
+        Arc::new(Echo),
+        ConnOptions {
+            side: "h",
+            peer: REPLY_DELIVERY_SCOPE,
+            ..Default::default()
+        },
+    );
+    let peer = Arc::new(OldPeer {
+        node: NodeServer::new(fake),
+        seen: Default::default(),
+    });
+    let _node = Conn::spawn(n.sink, n.stream, 1, peer.clone(), opts("n"));
+    let remote = steve_node_wire::RemoteNode::new(NodeId::new("n1").unwrap());
+    remote.attach(hub, false);
+    let snapshot = SkillSnapshot::new(
+        "default".into(),
+        "dev".into(),
+        vec![VersionedSkill {
+            id: "skill".into(),
+            version: 1,
+            publication: 1,
+            body: Skill {
+                name: "managed-skill".into(),
+                description: "Fixture".into(),
+                content: "Managed content".into(),
+            },
+        }],
+    )
+    .unwrap();
+    let result = remote
+        .sync_skills_on(
+            1,
+            SyncSkills {
+                generation: 1,
+                adapter: "claude-code".into(),
+                snapshot: snapshot.clone(),
+            },
+        )
+        .await;
+    assert_eq!(result.unwrap_err().code, ErrorCode::Unsupported);
+    let mut request = open("s1", "n1");
+    request.skill_snapshot = Some(snapshot);
+    let result = remote.open_session(cmd("op_managed", request)).await;
+    assert_eq!(result.unwrap_err().code, ErrorCode::Unsupported);
+    assert!(peer.seen.lock().unwrap().is_empty(), "nothing was sent");
+    remote
+        .open_session(cmd("op_unmanaged", open("s1", "n1")))
+        .await
+        .unwrap();
+    assert_eq!(*peer.seen.lock().unwrap(), [SESSION_OPEN]);
+}
+
 /// `GitQuery` of 0.1: no `reads`.
 #[derive(serde::Serialize, serde::Deserialize)]
 struct OldQuery {
