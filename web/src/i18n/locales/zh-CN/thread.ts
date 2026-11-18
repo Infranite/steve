@@ -232,7 +232,7 @@ export default {
     item: "转成事项",
     working: "处理中",
     failed: "失败",
-    skipped: "没有回复",
+    skipped: "已跳过",
     decided: "你已处理",
     recorded: "只记录",
     history: "旧消息",

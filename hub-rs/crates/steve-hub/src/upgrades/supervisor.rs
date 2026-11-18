@@ -1,5 +1,6 @@
 //! The service manager owns this process, which owns the replaceable Hub child.
 use super::*;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::process::{Child, Command};
 struct HubChild {
@@ -233,6 +234,7 @@ async fn healthy(cfg: &Config, client: &reqwest::Client, version: &str, id: Opti
         .timeout(Duration::from_secs(2))
         .send()
         .await
+        .and_then(reqwest::Response::error_for_status)
     else {
         return false;
     };
@@ -296,20 +298,21 @@ async fn wait_health(
     version: &str,
     id: Option<&str>,
 ) -> Result<()> {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
-    while tokio::time::Instant::now() < deadline {
+    let mut budget = steve_install::migration::Budget::new(
+        id.unwrap_or(""),
+        child.group,
+        Duration::from_secs(60),
+    );
+    loop {
         if let Some(status) = child.try_wait()? {
             bail!("candidate exited: {status}")
         };
-        if tokio::time::timeout_at(deadline, healthy(cfg, &u.client, version, id))
-            .await
-            .unwrap_or(false)
-        {
+        budget.check(id.and_then(|id| steve_install::migration::read(&cfg.home, id)))?;
+        if healthy(cfg, &u.client, version, id).await {
             return Ok(());
         };
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
-    bail!("Hub health verification timed out")
 }
 async fn apply(cfg: &Config, u: &Updates, child: &mut HubChild, op: &mut Operation) -> Result<()> {
     let previous = fs::canonicalize(cfg.home.join("current"))?;
@@ -553,7 +556,21 @@ pub async fn startup_gate(cfg: &Config) -> Result<()> {
 
     let keys = steve_modules::vault::keystore::from_env(&cfg.home, |k| std::env::var(k).ok())
         .map_err(|e| anyhow::anyhow!("vault unavailable: {e}"))?;
-    let store = steve_store::Store::open(cfg.db_path(), steve_store::NoPublisher)?;
+    let progress = std::sync::Mutex::new(steve_install::migration::Reporter::new(&cfg.home, &id)?);
+    let store = steve_store::Store::open_with_migration_progress(
+        cfg.db_path(),
+        steve_store::NoPublisher,
+        Arc::new(move |snapshot| {
+            if let Err(error) = progress.lock().unwrap_or_else(|e| e.into_inner()).report(
+                snapshot.migration,
+                snapshot.target,
+                snapshot.vm_steps,
+                snapshot.complete,
+            ) {
+                tracing::warn!(%error, "could not report upgrade migration progress");
+            }
+        }),
+    )?;
     drop(store);
     let db = rusqlite::Connection::open(cfg.db_path())?;
     let schema: u32 = db.query_row("SELECT v FROM schema_version", [], |r| r.get(0))?;
@@ -667,6 +684,43 @@ Server(('127.0.0.1',int(os.environ['STEVE_PORT'])),Handler).serve_forever()
         fs::write(dir.join("bin/steve-hub"), script).unwrap();
         fs::set_permissions(dir.join("bin/steve-hub"), fs::Permissions::from_mode(0o755)).unwrap();
         dir
+    }
+    #[tokio::test]
+    async fn health_rejects_http_failure_even_when_maintenance_identity_matches() {
+        let home = tempfile::tempdir().unwrap();
+        let candidate = bundle(home.path(), "0.2.0", false);
+        switch(home.path(), &candidate).unwrap();
+        for status in [
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            axum::http::StatusCode::OK,
+        ] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let cfg = Config::from_vars(|key| match key {
+                "STEVE_HOME" => Some(home.path().to_string_lossy().into()),
+                "STEVE_PORT" => Some(port.to_string()),
+                "STEVE_ADAPTER_CLAUDE" | "STEVE_ADAPTER_CODEX" => Some("unused".into()),
+                _ => None,
+            })
+            .unwrap();
+            let app = axum::Router::new().route("/healthz", axum::routing::get(move || async move {
+                (status, axum::Json(json!({"ok":true,"maintenance":true,"version":"0.2.0","web_version":"0.2.0","upgrade_id":"health-fixture","build_commit":"a".repeat(40)})))
+            }));
+            let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            let healthy = healthy(
+                &cfg,
+                &reqwest::Client::new(),
+                "0.2.0",
+                Some("health-fixture"),
+            )
+            .await;
+            server.abort();
+            assert_eq!(
+                healthy,
+                status.is_success(),
+                "a matching JSON identity cannot make an HTTP failure healthy"
+            );
+        }
     }
     async fn scenario(broken: bool) {
         let home = tempfile::tempdir().unwrap();

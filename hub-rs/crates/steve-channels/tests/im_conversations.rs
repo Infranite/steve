@@ -2157,6 +2157,74 @@ fn rec<'a>(r: &'a Value, id: &str) -> &'a Value {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn the_record_shows_a_composer_skip_with_its_reason() {
+    let h = setup_answering(
+        false,
+        r#"{"outcome": "skip", "text": "没有明确的请求", "needs_approval": false, "why": "没有明确的请求"}"#,
+    )
+    .await;
+    let a = push(
+        &h,
+        &h.bot,
+        msg("D_LI", "skip1", "ulilei", "1", false, false),
+    )
+    .await;
+    let response = a.response.as_ref().unwrap();
+    assert_eq!(response.composer_skip.as_deref(), Some("没有明确的请求"));
+    assert!(response.out_message_id.is_none(), "no draft");
+    assert!(response.decision_id.is_none(), "no approval");
+    assert_eq!(state(&h, &a.message_id), "ack");
+
+    let r = record_of(&h, ME, &a.space_id, &Default::default()).unwrap();
+    let handling = &rec(&r, &a.message_id)["handling"];
+    assert_eq!(handling["state"], "skipped", "{handling}");
+    assert_eq!(
+        handling["label"],
+        format!("{}没有明确的请求", conversations::NO_REPLY)
+    );
+    assert_eq!(handling["reason"], "起草器：没有明确的请求");
+    assert_eq!(state(&h, &a.message_id), "ack", "the record is read-only");
+    assert!(sent(&h).is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_record_keeps_an_unanswered_turn_working() {
+    let h = setup(true).await;
+    let a = push(
+        &h,
+        &h.bot,
+        msg("C_OPS", "work1", "ulilei", "部署挂了怎么办", true, false),
+    )
+    .await;
+    let r = record_of(&h, ME, &a.space_id, &Default::default()).unwrap();
+    let m = rec(&r, &a.message_id);
+    assert!(m["turn"].is_string());
+    assert_eq!(m["handling"]["state"], "working");
+    assert_eq!(state(&h, &a.message_id), "ack");
+    assert!(sent(&h).is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_record_keeps_a_draft_waiting_for_approval() {
+    let h = setup(false).await;
+    let a = push(
+        &h,
+        &h.me,
+        msg("D_LI", "draft1", "ulilei", "部署挂了怎么办", false, false),
+    )
+    .await;
+    let response = a.response.as_ref().unwrap();
+    let decision = response.decision_id.as_ref().expect("approval");
+    let draft = response.out_message_id.as_ref().expect("draft");
+    let r = record_of(&h, ME, &a.space_id, &Default::default()).unwrap();
+    let handling = &rec(&r, &a.message_id)["handling"];
+    assert_eq!(handling["state"], "waiting");
+    assert_eq!(handling["decision"], *decision);
+    assert_eq!(rec(&r, draft)["out"]["status"], "draft");
+    assert!(sent(&h).is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn the_record_shows_every_message_with_what_steve_did() {
     let h = setup(false).await;
     let bot = h.bot.clone();
