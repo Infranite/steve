@@ -437,11 +437,11 @@ impl Db {
     /// the call may have made moot) is never read as what it waits for now. Only a call's update that
     /// comes late (the call began before the reply) does not count as a call after the reply.
     pub fn final_reply(&self, session: &str) -> Result<String> {
-        self.final_reply_of(session, None, i64::MIN)
+        self.final_reply_of(session, None, 0)
     }
-    /// [`Db::final_reply`] of one turn: the turn whose last event was `until` (`None`: the session's
-    /// last), from its events at or after `since` (when it began) only — a later turn's words, or an
-    /// earlier one's, are never this turn's.
+    /// [`Db::final_reply`] of one attempt: the events up to `until` (its end; `None`: the session's
+    /// last) and from `since` (its first event, a seq) on — a later attempt's words, or an earlier
+    /// one's (a retry of the same turn), are never this attempt's.
     pub fn final_reply_of(&self, session: &str, until: Option<i64>, since: i64) -> Result<String> {
         /// How many of the turn's last events are read: a call whose beginning lies further back
         /// counts as begun at its oldest update read.
@@ -465,7 +465,7 @@ impl Db {
             };
             before = oldest.seq;
             for e in &page {
-                if e.ts < since {
+                if e.seq < since {
                     break 'back;
                 }
                 read += 1;

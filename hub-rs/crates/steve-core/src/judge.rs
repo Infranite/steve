@@ -145,10 +145,11 @@ pub struct Bundle {
     pub request: Request,
     pub criteria: Vec<Criterion>,
     /// The end of what the agent said in this turn after its last tool call, read from the events
-    /// of this turn and attempt only (empty when [`Bundle::final_text_source`] is `unknown`).
+    /// of its terminal attempt only (empty when [`Bundle::final_text_source`] is `unknown`).
     pub final_text: String,
-    /// `turn`: read from the candidate's own turn and attempt; `unknown`: that turn's end was not
-    /// kept (another attempt's end is the session's last), so its words are not known.
+    /// `attempt`: read from the candidate's terminal attempt's own events; `unknown`: that attempt's
+    /// end was not kept (another attempt's end is the session's last), or its events cannot be told
+    /// from another attempt's, so its words are not known.
     pub final_text_source: &'static str,
     /// How the candidate's attempt ended (`end_turn`, `cancelled`, `error`…; `unknown` when its end
     /// was not kept) and its error, if any.
@@ -802,25 +803,30 @@ impl Tx<'_> {
                 && t.text == crate::takeover::DELIVERED
                 && t.ts >= since
         });
-        /* how this candidate's turn and attempt ended, and what it said: never another turn's or
-         * attempt's (the session's last end is kept for its last attempt only) */
+        /* how this candidate's attempt ended, and what it said: never another turn's or attempt's.
+         * The session's last end is kept for its last attempt only; the words are the attempt's own
+         * events (a retry's earlier attempt left its own), as their Node stream attributes them */
         let stop = store
             .sessions()
             .stop(&s.id)?
             .filter(|k| c.terminal_attempt.is_some() && k.attempt == c.terminal_attempt);
-        let this_turn = turn.as_ref().filter(|t| t.turn_id == c.turn_id);
         let chars = policy.judge_text_chars();
-        let (final_text, final_text_source) = match (&stop, this_turn) {
-            (Some(k), Some(t)) => (
-                tail(
-                    &self
-                        .db()
-                        .final_reply_of(&s.id, Some(k.seq.unwrap_or(0)), t.created)?,
-                    chars,
-                ),
-                "turn",
+        let start = match (&stop, c.terminal_attempt.as_deref()) {
+            (Some(k), Some(a)) => {
+                let until = k.seq.unwrap_or(0);
+                store
+                    .item_facts()
+                    .attempt_start(&s.id, a, until)?
+                    .map(|since| (until, since))
+            }
+            _ => None,
+        };
+        let (final_text, final_text_source) = match start {
+            Some((until, since)) => (
+                tail(&self.db().final_reply_of(&s.id, Some(until), since)?, chars),
+                "attempt",
             ),
-            _ => (String::new(), UNKNOWN),
+            None => (String::new(), UNKNOWN),
         };
         let first = goals.first().map_or(item.title.clone(), |g| g.text.clone());
         let bundle = Bundle {

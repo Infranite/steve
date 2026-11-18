@@ -351,23 +351,36 @@ fn evidence_version_in(c: &rusqlite::Connection, item: &str, cycle: i64) -> Resu
         [item],
         |r| r.get(0),
     )?;
-    let closing: Option<String> =
-        super::one(c, "SELECT closing FROM items WHERE id=?", [item], |r| {
-            r.get::<_, Option<String>>(0)
-        })?
-        .flatten();
+    /* the cycle's operations, as the derived state reads them for the current result (a merge,
+     * a release, the acceptance hooks): each with its status and when it last changed */
+    let operations: Vec<String> = all(
+        c,
+        "SELECT id||'|'||kind||'|'||revision||'|'||required||'|'||status||'|'||updated||'|'||evidence
+         FROM item_operations WHERE item_id=? AND cycle=? ORDER BY created,id",
+        params![item, cycle],
+        |r| r.get(0),
+    )?;
+    let (revision, closing): (i64, Option<String>) = super::one(
+        c,
+        "SELECT revision,closing FROM items WHERE id=?",
+        [item],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?
+    .unwrap_or((0, None));
     Ok(crate::sha(&format!(
-        "{}\n--\n{}\n--\n{}",
+        "{}\n--\n{}\n--\n{}\n--\n{revision}\n{}",
         facts.join("\n"),
         outputs.join("\n"),
+        operations.join("\n"),
         closing.unwrap_or_default()
     )))
 }
 
 /// Why claimed candidate `c` no longer stands, read in the write transaction: its item's cycle
-/// moved on (or it closed), its session's newest logical turn is another or not finished, the
-/// scope revision moved on, the session's input moved past the version it was claimed on, or the
-/// evidence version is not `evidence`. `None`: it all still holds.
+/// moved on (or it closed), the item's current session is another, that session's newest logical
+/// turn is another or not finished, the scope revision moved on, the session's input moved past
+/// the version it was claimed on, or the evidence version is not `evidence`. `None`: it all still
+/// holds.
 fn stale_in(tx: &Tx<'_>, c: &Candidate, evidence: &str) -> Result<Option<&'static str>> {
     let cycle: Option<(i64, String)> = super::one(
         tx,
@@ -377,6 +390,16 @@ fn stale_in(tx: &Tx<'_>, c: &Candidate, evidence: &str) -> Result<Option<&'stati
     )?;
     if cycle.is_none_or(|(n, phase)| n != c.cycle || phase == "closed") {
         return Ok(Some("cycle"));
+    }
+    /* the item's current session: its newest one that has not ended */
+    let session: Option<String> = super::one(
+        tx,
+        "SELECT id FROM sessions WHERE item_id=? AND status<>'ended' ORDER BY no DESC,rowid DESC LIMIT 1",
+        [&c.item_id],
+        |r| r.get(0),
+    )?;
+    if session.as_deref() != Some(c.session_id.as_str()) {
+        return Ok(Some("session"));
     }
     let turn: Option<(String, String)> = super::one(
         tx,
@@ -779,9 +802,61 @@ impl ItemFacts<'_> {
         })
     }
 
+    /// Where the events of attempt `attempt` of `session` begin, among the session's events up to
+    /// `until` (that attempt's end): the first of its own events, read from the Node stream each
+    /// came on (its inbox entry names the attempt). An earlier attempt's event (a retry of the same
+    /// turn, or another turn) or a message sent to the session ends the search. `Some(until + 1)`: the Node told of the attempt but none of its
+    /// events is a session event (it said nothing). `None`: it cannot be told — an event in between
+    /// whose inbox entry is gone (pruned), events not from a Node, or an attempt the inbox does not
+    /// know.
+    pub fn attempt_start(&self, session: &str, attempt: &str, until: i64) -> Result<Option<i64>> {
+        /// How many of the session's last events are looked at.
+        const SCAN: i64 = 5000;
+        self.0.read(|c| {
+            let rows: Vec<(i64, bool, bool, Option<String>, bool)> = all(
+                c,
+                "SELECT ev.seq, ev.source_node IS NOT NULL, i.seq IS NOT NULL, json_extract(i.payload,'$.subject.attempt'),
+                        ev.kind IN ('user','user_message_chunk') OR (ev.kind='text' AND json_extract(ev.data,'$.role')='user')
+                 FROM events ev LEFT JOIN node_event_inbox i
+                   ON i.node_id=ev.source_node AND i.stream=ev.source_stream AND i.epoch=ev.source_epoch AND i.seq=ev.source_seq
+                 WHERE ev.session_id=? AND ev.seq<=? ORDER BY ev.seq DESC LIMIT ?",
+                params![session, until, SCAN],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            )?;
+            let mut first = None;
+            for (seq, from_node, known, of, sent) in rows {
+                if sent {
+                    break;
+                }
+                match (from_node, known, of.as_deref()) {
+                    /* the Hub's own line (a prompt, a note): nobody's attempt */
+                    (false, _, _) => {}
+                    (true, true, Some(a)) if a == attempt => first = Some(seq),
+                    /* another attempt's event: where this one began */
+                    (true, true, Some(_)) => break,
+                    /* a session-level fact (no attempt) */
+                    (true, true, None) => {}
+                    /* its inbox entry is gone: whose it was is not known */
+                    (true, false, _) => return Ok(None),
+                }
+            }
+            if first.is_some() {
+                return Ok(first);
+            }
+            let told: bool = c.query_row(
+                "SELECT EXISTS(SELECT 1 FROM runtime_attempts a JOIN node_event_inbox i ON i.node_id=a.node_id
+                   AND json_extract(i.payload,'$.subject.attempt')=a.attempt_id WHERE a.attempt_id=?)",
+                [attempt],
+                |r| r.get(0),
+            )?;
+            Ok(told.then_some(until.saturating_add(1)))
+        })
+    }
+
     /// The version of what a judgement of `item` in `cycle` rests on besides the session's events:
-    /// a digest of its delivery facts, its outputs and its closing (with the checks the executor
-    /// reported). Any fact recorded, output added or closing changed gives another version.
+    /// a digest of its delivery facts, its outputs, its operations (status and when each last
+    /// changed), its result revision and its closing (with the checks the executor reported). Any
+    /// fact recorded, output added, operation moved or closing changed gives another version.
     pub fn evidence_version(&self, item: &str, cycle: i64) -> Result<String> {
         self.0.read(|c| evidence_version_in(c, item, cycle))
     }
