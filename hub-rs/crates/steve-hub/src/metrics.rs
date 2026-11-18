@@ -102,6 +102,17 @@ pub async fn start(st: crate::api::AppState) {
     }
     steve_store::instrumentation::enable_lock_metrics();
     ENABLED.store(true, Ordering::Release);
+    // build_recorder deliberately starts no exporter upkeep. Fold buffered samples even when
+    // nobody scrapes; this uses the existing runtime and never samples process disk I/O.
+    let upkeep = handle.clone();
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(std::time::Duration::from_secs(5));
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            tick.tick().await;
+            upkeep.run_upkeep();
+        }
+    });
     let app = router(modules.store.clone(), handle);
     tokio::spawn(async move {
         let result = match listener {
@@ -338,6 +349,46 @@ mod tests {
             .enable_all()
             .build()
             .unwrap()
+    }
+
+    #[test]
+    fn upkeep_retains_bucket_counts_across_unscraped_intervals() {
+        let recorder = recorder();
+        let handle = recorder.handle();
+        metrics::with_local_recorder(&recorder, || {
+            let histogram = metrics::histogram!("steve_lock_wait_seconds", "lock" => "store", "caller" => "upkeep-fixture:1");
+            for _ in 0..3 {
+                histogram.record(0.0025);
+            }
+            handle.run_upkeep();
+            handle.run_upkeep();
+            for _ in 0..2 {
+                histogram.record(0.005);
+            }
+            handle.run_upkeep();
+        });
+        let text = handle.render();
+        for (prefix, labels, value) in [
+            ("steve_lock_wait_seconds_count{", None, " 5"),
+            (
+                "steve_lock_wait_seconds_bucket{",
+                Some("le=\"0.0025\""),
+                " 3",
+            ),
+            (
+                "steve_lock_wait_seconds_bucket{",
+                Some("le=\"0.005\""),
+                " 5",
+            ),
+        ] {
+            assert!(
+                text.lines().any(|line| line.starts_with(prefix)
+                    && line.contains("caller=\"upkeep-fixture:1\"")
+                    && labels.is_none_or(|label| line.contains(label))
+                    && line.ends_with(value)),
+                "{text}"
+            );
+        }
     }
 
     #[test]
