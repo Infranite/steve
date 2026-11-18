@@ -284,6 +284,7 @@ conflicts, compatibility and sampling limits.
 
 - **Sessions run on a Node.** The Hub does not start agent processes itself: every session, Steve's own judgment calls and inline research run on the local Node, which is on by default (`STEVE_NODE_MODE=off` parks it).
 - **Multiple devices** (experimental). A `steve-node` on another machine can pair with the Hub and run harnesses there. The listener is on by default; `STEVE_NODE_LISTEN=0` disables it, and diagnostic database copies never enable it. The Node always dials out, pairing uses a one-time code and a fingerprint check, and each Node keeps an execution journal for reconciliation. Devices are not automatically registered or assigned work: the owner generates a code and confirms the device in Devices; the Node claims the code through its CLI. `STEVE_NODE_BIND` remains unset until an operator selects a paired Node ([docs/deployment.md](docs/deployment.md#remote-nodes)).
+- **Each Node's harnesses.** Devices shows each machine's own harness availability, known CLI and ACP versions, and models. Open a Node to probe it again or inspect missing, unavailable, older unsupported and offline reports. Provider configuration and sign-in stay on that Node ([report contract](docs/deployment.md#per-node-harness-reports)).
 - **Not built yet:** plugin kinds other than channels and themes, quiet hours and a daily digest (marked *Works once push is connected* in Settings), Gmail and Outlook API mail adapters, Feishu docs, calendar and approvals, and external vault backends (1Password, Bitwarden).
 
 ## How it works

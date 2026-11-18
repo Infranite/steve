@@ -29,6 +29,7 @@ import { RunningCard } from "@/devices-work"
 import { TakeWork, useWorkSettings } from "@/devices-config"
 import { NodeContext } from "@/devices-context"
 import { LeaveCard, RemoveDialog } from "@/devices-remove-dialog"
+import { NodeHarnesses } from "@/devices-harnesses"
 
 const BACK = "#/devices/nodes"
 
@@ -79,7 +80,7 @@ function NodeDetail({ v }: { v: NodeView }) {
       <div className="flex min-w-0 flex-col gap-4">
         <TakeWork v={v} w={w} />
         <NodeContext v={v} editable={v.local || pairable} />
-        {v.local && <RuntimeSetupPanel>{v.device?.can_configure && !st.down && <AddHarness />}</RuntimeSetupPanel>}
+        <NodeHarnesses v={v}>{v.local && <RuntimeSetupPanel>{v.device?.can_configure && !st.down && <AddHarness />}</RuntimeSetupPanel>}</NodeHarnesses>
         <Identity v={v} />
         <Projects v={v} />
         {pairable && <LeaveCard onUnpair={() => setRevoking(true)} onRemove={() => setRemoving(true)} />}
