@@ -32,6 +32,7 @@ await page.route("**/*", async route => {
     return route.fulfill({ json: data[id] })
   }
   const response = p === "/api/nodes" ? { nodes: [node("local"), node("remote")] }
+    : p === "/api/node-harnesses" ? { nodes: Object.fromEntries(["local", "remote"].map(id => [id, { state: "reported", stale: false, refreshing: false, checked_at: Date.now(), harnesses: [{ id: "fixture", name: "Fixture Runtime", available: true, version: id === "local" ? "1.0.0" : "1.5.0", adapter_version: "1.0.0", models: [id + "/model"] }] }])) }
     : p === "/api/devices" ? { devices: [{ id: "hub", name: "Local", roles: ["Hub"], node_id: "local", connected: true, status: "正常", max_sessions: 4 }], runtimes: [] }
     : p === "/api/vitals" ? { nodes: {} } : p === "/api/node-context" ? { owner_context: "off" }
     : p === "/api/nodes/upgrade-default" ? { policy: "notify", drain_secs: 1800, health_secs: 180 }
@@ -44,6 +45,7 @@ const open = async id => {
   await page.goto(base + "/test/fixtures/devices.html?strict#/devices/nodes/" + id)
   await panel().locator("[data-harness-update=fixture]").waitFor()
   await page.waitForFunction(id => document.querySelector(`[data-harness-updates="${id}"] [data-harness-update=fixture]`)?.textContent.includes(id === "local" ? "1.0.0" : "1.5.0"), id)
+  await page.locator(`[data-node-harnesses="${id}"] [data-node-harness-models]`).getByText(id + "/model", { exact: true }).waitFor()
 }
 const reread = () => page.evaluate(() => document.dispatchEvent(new Event("visibilitychange")))
 try {
