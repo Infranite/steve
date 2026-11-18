@@ -1428,6 +1428,16 @@ impl Tx<'_> {
                 if self.item(&child.id)?.phase != CLOSED {
                     continue;
                 }
+                if self
+                    .db()
+                    .store()
+                    .items()
+                    .operations(&child.id, child.cycle)?
+                    .iter()
+                    .any(|o| matches!(o.status.as_str(), "running" | "unknown"))
+                {
+                    continue;
+                }
                 // A historical closed/failed item can still have a leftover execution. Request
                 // its stop, but do not hide it until the runtime has confirmed settlement.
                 let mut busy = false;

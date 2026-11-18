@@ -126,10 +126,12 @@ fn a_child_turn_or_unknown_effect_must_settle_before_parent_cleanup_hides_it() {
     let running = child(&k, &parent);
     let sid = k.session(&running, "idle");
     k.rt.prompt(&sid, "work", "steve", &[]).unwrap();
+    let stop_gate = k.rt.stop_gate.write().unwrap();
     k.core.item_action(&parent, ItemAction::Drop, "me").unwrap();
     let i = k.db().item(&running).unwrap().unwrap();
     assert_eq!(i.phase, "closing");
     assert!(!i.archived);
+    drop(stop_gate);
     k.rt.end_turn(&k.core, &sid, "cancelled", None);
     k.core.lifecycle_tick().unwrap();
     assert!(k.db().item(&running).unwrap().unwrap().archived);
