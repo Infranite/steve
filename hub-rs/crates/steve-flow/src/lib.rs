@@ -114,7 +114,7 @@ pub use bots::on_bot_deleted;
 pub use budget::on_session_cost;
 pub use engine::GraphEngine;
 pub use exec::{LinearExecutor, RunExecutor, RunStatus};
-pub use ingest::{Poller, ingest};
+pub use ingest::{IngestCommit, Poller, ingest, ingest_in};
 pub use item_events::{ItemEvent, ItemTrigger, ingest_item_event};
 pub use link::ItemFinder;
 pub use nodes::action::Action;

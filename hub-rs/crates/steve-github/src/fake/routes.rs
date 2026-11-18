@@ -286,6 +286,7 @@ pub fn router(state: AppState) -> Router {
         .route("/repos/{o}/{r}/branches/{*b}", get(get_branch))
         .route("/repos/{o}/{r}/pulls", get(list_pulls).post(create_pull))
         .route("/repos/{o}/{r}/pulls/{n}", get(get_pull))
+        .route("/repos/{o}/{r}/compare/{range}", get(get_compare))
         .route("/repos/{o}/{r}/pulls/{n}/merge", put(merge_pull))
         .route("/repos/{o}/{r}/git/refs/heads/{*b}", delete(delete_ref))
         .route("/repos/{o}/{r}/git/ref/heads/{*b}", get(get_ref))
@@ -570,6 +571,21 @@ async fn get_pull(
     let p = principal(&s, &w, &h)?;
     let full = repo(&w, &p, &o, &r)?.full_name();
     ok(200, w.pull_json(find_pull(&w, &full, n)?))
+}
+
+async fn get_compare(
+    State(s): State<AppState>,
+    h: HeaderMap,
+    Path((o, r, range)): Path<(String, String, String)>,
+) -> R {
+    let w = s.lock();
+    let p = principal(&s, &w, &h)?;
+    let full = repo(&w, &p, &o, &r)?.full_name();
+    let comparison = w
+        .comparisons
+        .get(&(full, range))
+        .ok_or_else(ApiError::not_found)?;
+    ok(200, comparison.clone())
 }
 
 async fn create_pull(

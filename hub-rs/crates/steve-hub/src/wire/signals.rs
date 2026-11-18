@@ -26,7 +26,7 @@ use crate::bus::Bus;
 
 // ---------------------------------------------------------------- GitHub (G2)
 
-/// The eight event types of GitHub signals (github.md §5.2), for the source page.
+/// The event types of GitHub signals (github.md §5.2), for the source page.
 pub const GITHUB_TYPES: &[EventTypeDef] = &[
     EventTypeDef::new(
         "github.check_failed",
@@ -44,6 +44,16 @@ pub const GITHUB_TYPES: &[EventTypeDef] = &[
     EventTypeDef::new("github.pr_merged", "PR 已合并", "PR 合并了"),
     EventTypeDef::new("github.pr_closed", "PR 已关闭", "PR 没有合并就关闭了"),
     EventTypeDef::new("github.issue_opened", "新 Issue", "仓库里开了新 Issue"),
+    EventTypeDef::new(
+        steve_github::automation::PR_TYPE,
+        "PR 评审",
+        "仓库启用了自动评审并收到待评审提交",
+    ),
+    EventTypeDef::new(
+        steve_github::automation::ISSUE_TYPE,
+        "Issue 初筛",
+        "仓库启用了自动初筛并收到新 Issue",
+    ),
 ];
 
 /// The labels and descriptions of [`GITHUB_TYPES`] in every language (zh-CN: as declared there).
@@ -64,6 +74,10 @@ const GITHUB_TYPE_KEYS: &[&str] = &[
     "hub.github_type.pr_closed_desc",
     "hub.github_type.issue_opened",
     "hub.github_type.issue_opened_desc",
+    "hub.github_type.pr_review",
+    "hub.github_type.pr_review_desc",
+    "hub.github_type.issue_triage",
+    "hub.github_type.issue_triage_desc",
 ];
 
 /// A GitHub connection provider as an S1 event source: the same provider (all connection calls

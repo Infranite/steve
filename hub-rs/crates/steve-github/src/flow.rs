@@ -247,14 +247,7 @@ impl GitHub {
     /// Installs “PR 检查失败” (enabled, `origin=template:github`) unless the workspace ever had it
     /// (a deleted template stays deleted). Returns the new flow's id.
     pub fn install_template(&self, ws: &str, actor: &str) -> Result<Option<String>, ApiError> {
-        let issues = self.install_one(
-            ws,
-            actor,
-            ISSUE_TEMPLATE_ORIGIN,
-            ISSUE_TEMPLATE_NAME,
-            "关联仓库里有新 issue 时，提一个建议事项，由你决定要不要开始。",
-            issue_template_graph(),
-        )?;
+        use crate::automation as auto;
         let checks = self.install_one(
             ws,
             actor,
@@ -263,7 +256,23 @@ impl GitHub {
             "关联事项的 PR 检查失败时，把失败的检查送给事项去修；主干失败时提一个建议事项。",
             template_graph(),
         )?;
-        Ok(checks.or(issues))
+        let review = self.install_one(
+            ws,
+            actor,
+            auto::PR_FLOW,
+            "GitHub PR 评审",
+            "在仓库启用评审后，由无工具 Bot 分析 PR 差异并保存内部事项。",
+            auto::graph(auto::PR_TYPE, "评审提交差异"),
+        )?;
+        let issues = self.install_one(
+            ws,
+            actor,
+            auto::ISSUE_FLOW,
+            "GitHub Issue 初筛",
+            "在仓库启用初筛后，由无工具 Bot 判断新 Issue 并保存内部事项。",
+            auto::graph(auto::ISSUE_TYPE, "初筛新 Issue"),
+        )?;
+        Ok(checks.or(review).or(issues))
     }
 
     /// One template, unless the workspace ever had it (a deleted template stays deleted).

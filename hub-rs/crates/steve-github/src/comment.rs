@@ -321,6 +321,9 @@ impl GitHub {
             self.tell_session(&ws, item, session, DENIED).await;
             return Ran::Done(json!({}));
         }
+        if d.requested_by == crate::automation::APPROVAL_ACTOR && d.result["choice"] != "yes" {
+            return Ran::Failed("没有逐条批准这条分析评论".into());
+        }
         let t = match self.store().reader(|c| target(c, &ws, &d.subject_id)) {
             Ok(Some(t)) => t,
             _ => {
@@ -348,10 +351,14 @@ impl GitHub {
         let posted = if reconcile {
             self.posted_before(&conn, &t, &body).await
         } else {
-            match self.effect_sending(&d.id) {
-                Ok(()) => self.post_on(&conn, &t, &body).await,
-                Err(f) => Err(f),
+            async {
+                if d.requested_by == crate::automation::APPROVAL_ACTOR {
+                    crate::automation::check_before_send(self, d, &conn, &t).await?;
+                }
+                self.effect_sending(&d.id)?;
+                self.post_on(&conn, &t, &body).await
             }
+            .await
         };
         match posted {
             Ok((url, id)) => {
@@ -363,7 +370,7 @@ impl GitHub {
                 );
                 self.tell_session(&ws, item, session, &posted_message(&t, &url, granted))
                     .await;
-                Ran::Done(json!({ "comment": id }))
+                Ran::Done(json!({ "comment": id, "url": url }))
             }
             Err(f) => match f.ran() {
                 Some(r) => r,
@@ -403,6 +410,15 @@ impl DecisionHandler for CommentDecisions {
         let gh = self.0.need()?;
         let t = target(tx, cx.ws, &d.subject_id)?.ok_or_else(|| ApiError::not_found("PR"))?;
         let mut out = choice_result(cx);
+        if d.requested_by == crate::automation::APPROVAL_ACTOR {
+            if !matches!(cx.choice, "yes" | "no") {
+                return Err(ApiError::invalid("choice"));
+            }
+            if cx.choice == "yes" {
+                crate::automation::check_approval(tx, d)?;
+            }
+            out.as_object_mut().expect("choice result").remove("text");
+        }
         if cx.choice == "grant_8h" {
             let now = gh.now();
             let id = steve_store::uid("gr");
