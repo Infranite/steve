@@ -30,6 +30,7 @@ pub mod git;
 mod harness_context;
 mod harness_login;
 pub mod history;
+pub mod project_setup;
 mod host;
 mod inline_images;
 mod job;

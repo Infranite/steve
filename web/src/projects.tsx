@@ -1,5 +1,6 @@
 /* 工作空间与项目：工作空间是数据边界，切换后所有页面只显示这个空间的内容；一个工作空间管理多个项目，每个项目一个独立目录 */
-import { api, type RBrowse, type RNode, type RProject } from "@/api"
+import { api, type CloneProgress, type RBrowse, type RNode, type RProject } from "@/api"
+import { SegmentedControl } from "@/components/affect/segmented-control-clean"
 import { stats, statsSeed } from "@/api/stats"
 import type { GhOverview } from "@/api/github"
 import { Button } from "@/components/ui/button"
@@ -14,7 +15,7 @@ import { crumbs, emptyNote, lookUp, nameOf, narrowed, projectNodes } from "@/dir
 import { GitHubLine, Health, projectRepo, useProjectGitHub } from "@/github/index"
 import { itemDisplayStatus } from "@/item-workflow-relation"
 import { fmtMs, fmtN, fmtPct, fmtUsd, useStats } from "@/stats/format"
-import { botName, closedSt, newProject, newWorkspace, patchProject, st, toast, type Item } from "@/store"
+import { botName, closedSt, newProject, newWorkspace, patchProject, refresh, st, toast, type Item } from "@/store"
 import { Blank, BotName, Card, closeSheet, Empty, Fact, Figure, go, Group, Loading, Meta, openSheet, Page, Panel, Row, Section, Segmented } from "@/ui"
 import { ItemRowExport as ItemRow, Select } from "@/view-shared"
 import { YoloProjectSelect } from "@/yolo/badges"
@@ -262,46 +263,151 @@ function DirBrowser({ path, node, onPick, onSeen }: { path: string; node: string
   )
 }
 
+type ProjectMode = "existing" | "empty" | "clone"
+type TargetCheck = { key: string; path: string } | { key: string; error: string }
+
 export function NewProjectDialog() {
   const t = useT()
-  const [path, setPath] = useState(""), [n, setN] = useState(""), [d, setD] = useState(""), [bot, setBot] = useState("none"), [git, setGit] = useState<boolean | null>(null), [wt, setWt] = useState(true), [doneWhen, setDoneWhen] = useState<"merge" | "tag" | "none">("merge")
-  const [named, setNamed] = useState(false), [busy, setBusy] = useState(false), [nodes, setNodes] = useState<RNode[]>([])
-  // the Nodes are the owner's to list: anyone else is offered the Hub's own
-  useEffect(() => { api.nodes().then((r) => setNodes(r.nodes)).catch(() => {}) }, [])
-  // the built-in Node's own name says it is the Hub's; without the list, the Hub's device stands for it
+  const [path, setPath] = useState(""), [n, setN] = useState(""), [d, setD] = useState(""), [bot, setBot] = useState("none"), [seenGit, setSeenGit] = useState<boolean | null>(null), [wt, setWt] = useState(true), [doneWhen, setDoneWhen] = useState<"merge" | "tag" | "none">("merge")
+  const [mode, setMode] = useState<ProjectMode>("existing")
+  const [directory, setDirectory] = useState(""), [remoteUrl, setRemoteUrl] = useState(""), [branch, setBranch] = useState("")
+  const [named, setNamed] = useState(false), [drafting, setDrafting] = useState(false), [submitting, setSubmitting] = useState(false)
+  const [nodes, setNodes] = useState<RNode[]>([]), [progress, setProgress] = useState<CloneProgress | null>(null)
+  const [check, setCheck] = useState<TargetCheck>(), [revision, recheck] = useState(0), [error, setError] = useState("")
+  const locked = useRef(false), mounted = useRef(false)
+  const existing = mode === "existing", clone = mode === "clone", git = clone || (existing && seenGit)
+  const parent = path.trim(), dir = directory.trim()
+  const checkKey = JSON.stringify([parent, dir, revision])
+  const target = check?.key === checkKey ? check : undefined
+  const preview = target && "path" in target ? target.path : undefined
+
+  // The Nodes are the owner's to list: anyone else is offered the Hub's own.
+  useEffect(() => {
+    mounted.current = true
+    api.nodes().then((r) => setNodes(r.nodes)).catch(() => {})
+    return () => { mounted.current = false }
+  }, [])
+  useEffect(() => {
+    if (existing || !parent || !dir) return
+    const abort = new AbortController()
+    const timer = setTimeout(async () => {
+      try {
+        const answer = await api.projectDestination({ parent, directory: dir, node: "hub" }, AbortSignal.any([abort.signal, AbortSignal.timeout(15_000)]))
+        if (!abort.signal.aborted) setCheck({ key: checkKey, path: answer.path })
+      } catch (e) {
+        if (!abort.signal.aborted) setCheck({ key: checkKey, error: (e as Error).message })
+      }
+    }, 180)
+    return () => { clearTimeout(timer); abort.abort() }
+  }, [existing, parent, dir, checkKey])
+
   const { local, remote } = projectNodes(nodes)
   const here = local?.name ?? t("pages:projects.nodeBuiltin", { name: st.devices.find((x) => x.roles.includes("Hub"))?.name ?? "Hub" })
-  // a project's sessions run on the Hub's own Node only, so the others are shown and not offered
   const nodeOptions = [{ v: "hub", l: here }, ...remote.map((x) => ({ v: x.node_id, l: t("pages:projects.nodeRemoteSoon", { name: x.name }), disabled: true }))]
-  const pick = (p: string) => { setPath(p); setGit(null); const name = nameOf(p); if (!named && name) setN(name) }
+  const pick = (p: string) => {
+    setPath(p); setSeenGit(null); setError("")
+    if (existing && !named) setN(nameOf(p.replace(/\/+$/, "")))
+  }
+  const changeMode = (m: ProjectMode) => {
+    setMode(m); setError("")
+    if (!named) setN(m === "existing" ? nameOf(parent.replace(/\/+$/, "")) : dir.slice(0, 40))
+  }
   const draft = async () => {
-    if (!path.trim()) return; setBusy(true)
-    try { const r = await api.describeProject(path.trim()); if (!n) setN(r.name); setD(r.description); setGit(r.git) } catch (e) { toast((e as Error).message) } finally { setBusy(false) }
+    if (!parent) return
+    setDrafting(true)
+    try { const r = await api.describeProject(parent); if (!n) setN(r.name); setD(r.description); setSeenGit(r.git) } catch (e) { toast((e as Error).message) } finally { setDrafting(false) }
+  }
+  const ready = !!n.trim() && (existing ? !!parent : !!preview && (!clone || !!remoteUrl.trim()))
+  const submit = async () => {
+    if (locked.current || !ready) return
+    locked.current = true
+    setSubmitting(true); setProgress(null); setError("")
+    const fields = {
+      name: n.trim(), description: d.trim(), worktree: wt, default_bot: bot === "none" ? null : bot,
+      done_when: git && wt && doneWhen !== "none" ? doneWhen : undefined, node: "hub" as const,
+    }
+    try {
+      let id
+      if (existing) {
+        id = await newProject({ ...fields, path: parent })
+      } else if (preview) {
+        const dest = { ...fields, parent, directory: dir, preview }
+        const result = await api.setupProject(clone
+          ? { ...dest, mode: "clone", remote: remoteUrl.trim(), branch: branch.trim() || undefined }
+          : { ...dest, mode: "empty" }, setProgress)
+        id = result.id
+        toast(t("core:toast.projectAdded", { name: result.name }))
+        await refresh()
+      }
+      if (id && mounted.current) { closeSheet(); go("#/projects/" + id) }
+    } catch (e) {
+      setError((e as Error).message)
+    } finally {
+      locked.current = false
+      setSubmitting(false)
+    }
   }
   return (
-    <Dialog open onOpenChange={(o) => !o && closeSheet()}>
-      <DialogContent className="max-h-[92vh] gap-4 overflow-y-auto rounded-2xl sm:max-w-[560px]" data-new-project-dialog>
+    <Dialog open onOpenChange={(o) => !o && !locked.current && closeSheet()}>
+      <DialogContent className="max-h-[92vh] gap-4 overflow-y-auto rounded-2xl sm:max-w-[560px]" showCloseButton={!submitting} data-new-project-dialog>
         <DialogHeader><DialogTitle className="type-headline">{t("pages:projects.newProject")}</DialogTitle><DialogDescription className="type-callout">{t("pages:projects.newProjectDesc")}</DialogDescription></DialogHeader>
-        <FieldGroup className="gap-4">
+        <FieldGroup className="gap-4" inert={submitting || drafting}>
           <Field className="gap-1.5"><div className="flex items-center justify-between gap-3"><FieldLabel>{t("pages:projects.node")}</FieldLabel>
             <Select align="end" testId="project-node" value="hub" onChange={() => {}} options={nodeOptions} /></div>
             {nodeOptions.length > 1 && <FieldDescription className="type-footnote">{t("pages:projects.nodeHint")}</FieldDescription>}</Field>
-          <Field className="gap-1.5"><FieldLabel htmlFor="pj-path">{t("pages:projects.dir")}</FieldLabel>
-            <Input id="pj-path" autoFocus className="rounded-lg type-code" value={path} onChange={(e) => { setPath(e.target.value); setGit(null) }} placeholder="~/code/my-project" data-project-path />
-            <DirBrowser path={path} node="hub" onPick={pick} onSeen={setGit} />
-            <FieldDescription className="type-footnote">{t("pages:projects.browseHere")}</FieldDescription>
+          <Field className="gap-1.5">
+            <FieldLabel id="pj-mode">{t("pages:projects.setupMode")}</FieldLabel>
+            <SegmentedControl aria-labelledby="pj-mode" variant="tray" fullWidth value={mode} onChange={changeMode} options={
+              (["existing", "empty", "clone"] as const).map(value => ({ value, label: t(`pages:projects.setupModes.${value}`), disabled: value !== "existing" && !st.owner, data: { "data-project-mode": value } }))
+            } />
+            {!st.owner && <FieldDescription className="type-footnote">{t("pages:projects.setupOwnerOnly")}</FieldDescription>}
           </Field>
-          <Field className="gap-1.5"><FieldLabel htmlFor="pj-n">{t("pages:projects.name")}</FieldLabel><Input id="pj-n" className="rounded-lg" value={n} onChange={(e) => { setN(e.target.value); setNamed(true) }} placeholder={t("pages:projects.projectNamePh")} /></Field>
+          {clone && <>
+            <Field className="gap-1.5"><FieldLabel htmlFor="pj-remote">{t("pages:projects.cloneRemote")}</FieldLabel>
+              <Input id="pj-remote" className="rounded-lg type-code" autoComplete="off" autoCapitalize="off" spellCheck={false} value={remoteUrl} onChange={(e) => { setRemoteUrl(e.target.value); setError("") }} placeholder="https://example.com/org/repo.git" />
+              <FieldDescription className="type-footnote">{t("pages:projects.cloneHint")}</FieldDescription></Field>
+            <Field className="gap-1.5"><FieldLabel htmlFor="pj-branch">{t("pages:projects.cloneBranch")}</FieldLabel>
+              <Input id="pj-branch" className="rounded-lg type-code" value={branch} autoCapitalize="off" spellCheck={false} onChange={(e) => { setBranch(e.target.value); setError("") }} placeholder={t("pages:projects.cloneDefault")} /></Field>
+          </>}
+          <Field className="gap-1.5"><FieldLabel htmlFor="pj-path">{t(existing ? "pages:projects.dir" : "pages:projects.setupParent")}</FieldLabel>
+            <Input id="pj-path" autoFocus className="rounded-lg type-code" value={path} onChange={(e) => pick(e.target.value)} placeholder={existing ? "~/code/my-project" : "~/code"} data-project-path />
+            <DirBrowser path={path} node="hub" onPick={pick} onSeen={setSeenGit} />
+            <FieldDescription className="type-footnote">{t(existing ? "pages:projects.browseHere" : "pages:projects.setupParentHint")}</FieldDescription>
+          </Field>
+          {!existing && <>
+            <Field className="gap-1.5"><FieldLabel htmlFor="pj-directory">{t("pages:projects.setupDirName")}</FieldLabel>
+              <Input id="pj-directory" className="rounded-lg type-code" value={directory} onChange={(e) => { setDirectory(e.target.value); setError(""); if (!named) setN(e.target.value.trim().slice(0, 40)) }} /></Field>
+            <Field className="gap-1.5">
+              <div className="flex items-center justify-between gap-2">
+                <FieldLabel>{t("pages:projects.setupDestination")}</FieldLabel>
+                <Button type="button" size="xs" variant="ghost" disabled={!parent || !dir} onClick={() => { recheck(i => i + 1); setError("") }}>{t("pages:projects.setupRecheck")}</Button>
+              </div>
+              <div className="min-w-0 rounded-lg border border-border px-3 py-2 type-footnote" aria-live="polite">
+                {preview
+                  ? <span className="type-code break-all" data-project-preview>{preview}</span>
+                  : target && "error" in target
+                    ? <span className="text-destructive" data-project-preview-error>{target.error}</span>
+                    : <span className="text-muted-foreground">{t(parent && dir ? "pages:projects.setupChecking" : "pages:projects.setupNeedPath")}</span>}
+              </div>
+            </Field>
+          </>}
+          <Field className="gap-1.5"><FieldLabel htmlFor="pj-n">{t("pages:projects.name")}</FieldLabel><Input id="pj-n" className="rounded-lg" value={n} maxLength={40} onChange={(e) => { setN(e.target.value); setNamed(true) }} placeholder={t("pages:projects.projectNamePh")} /></Field>
           <Field className="gap-1.5"><div className="flex items-center justify-between"><FieldLabel htmlFor="pj-d">{t("pages:projects.desc")}</FieldLabel>
-            <Button size="xs" variant="ghost" className="text-muted-foreground" disabled={!path.trim() || busy} onClick={() => void draft()} data-describe>{busy ? <Spinner className="size-3" /> : <SparklesIcon />}{t("pages:projects.draft")}</Button></div>
+            {existing && <Button size="xs" variant="ghost" className="text-muted-foreground" disabled={!parent || drafting} onClick={() => void draft()} data-describe>{drafting ? <Spinner className="size-3" /> : <SparklesIcon />}{t("pages:projects.draft")}</Button>}</div>
             <Textarea id="pj-d" className="min-h-20 rounded-lg" value={d} onChange={(e) => setD(e.target.value)} placeholder={t("pages:projects.projectDescPh")} /></Field>
           <Field orientation="horizontal" className="justify-between"><FieldLabel>{t("pages:projects.defaultBot")}</FieldLabel>
             <Select align="end" value={bot} onChange={setBot} options={[{ v: "none", l: t("pages:projects.bySteve") }, ...Object.keys(st.bots).filter((k) => st.bots[k].on).map((k) => ({ v: k, l: <BotName k={k} /> }))]} /></Field>
-          {git && <Field orientation="horizontal" className="justify-between"><div><FieldLabel>{t("pages:projects.worktree")}</FieldLabel><FieldDescription className="type-footnote">{t("pages:projects.gitDetected")}</FieldDescription></div><Switch checked={wt} onCheckedChange={setWt} /></Field>}
+          {git && <Field orientation="horizontal" className="justify-between"><div><FieldLabel>{t("pages:projects.worktree")}</FieldLabel>{existing && <FieldDescription className="type-footnote">{t("pages:projects.gitDetected")}</FieldDescription>}</div><Switch checked={wt} onCheckedChange={setWt} /></Field>}
           {git && wt && <Field orientation="horizontal" className="justify-between"><div><FieldLabel>{t("pages:projects.doneWhen")}</FieldLabel><FieldDescription className="type-footnote">{doneWhen === "none" ? t("pages:projects.releaseNone") : t("pages:projects.doneRemote")}</FieldDescription></div><Select align="end" testId="new-proj-done" value={doneWhen} onChange={(v) => setDoneWhen(v as "merge" | "tag" | "none")} options={[{ v: "merge", l: t("pages:projects.optMerge") }, { v: "tag", l: t("pages:projects.optTag") }, { v: "none", l: t("pages:projects.optNone") }]} /></Field>}
         </FieldGroup>
-        <DialogFooter className="gap-2"><Button variant="outline" onClick={closeSheet}>{t("common:action.cancel")}</Button>
-          <Button disabled={!path.trim() || !n.trim()} className={cn()} data-testid="project-go" onClick={async () => { const id = await newProject({ name: n.trim(), path: path.trim(), description: d.trim(), worktree: wt, default_bot: bot === "none" ? null : bot, done_when: git && wt && doneWhen !== "none" ? doneWhen : undefined, node: "hub" }); if (id) { closeSheet(); go("#/projects/" + id) } }}>{t("pages:projects.create")}</Button></DialogFooter>
+        {error && <p className="rounded-lg border border-border p-3 type-callout text-destructive" role="alert" data-project-setup-error>{error}</p>}
+        {submitting && <div role="status" className="flex items-center gap-2 type-callout text-muted-foreground" data-project-progress>
+          <Spinner className="size-4" />
+          {clone ? t(`pages:projects.cloneProgress.${progress?.phase ?? "connecting"}`) : t("pages:projects.setupSaving")}
+          {progress?.percent != null && <span className="tabular-nums">{progress.percent}%</span>}
+        </div>}
+        <DialogFooter className="gap-2"><Button variant="outline" disabled={submitting} onClick={closeSheet}>{t("common:action.cancel")}</Button>
+          <Button disabled={!ready || submitting || drafting} data-testid="project-go" onClick={() => void submit()}>{t(clone ? "pages:projects.cloneCreate" : "pages:projects.create")}</Button></DialogFooter>
       </DialogContent>
     </Dialog>
   )
