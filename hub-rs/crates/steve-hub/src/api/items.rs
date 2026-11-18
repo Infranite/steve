@@ -767,3 +767,40 @@ mod dependency_text_tests {
         );
     }
 }
+
+/// Routes mounted behind the shared API login and body-limit layers.
+pub(crate) fn routes() -> axum::Router<super::AppState> {
+    use super::*;
+    Router::new()
+        .route("/items", post(items::create))
+        .route("/items/bulk", post(items::bulk))
+        .route(
+            "/items/{id}",
+            get(items::get_one)
+                .patch(items::patch_one)
+                .delete(items::delete_one),
+        )
+        .route("/items/{id}/actions", post(items::actions))
+        .route(
+            "/items/{id}/workflow",
+            get(items::workflow_get).post(items::workflow_change),
+        )
+        .route("/items/{id}/lifecycle", post(items::lifecycle))
+        .route(
+            "/items/{id}/dependency-wait",
+            get(items::dependency_get).post(items::dependency_wait),
+        )
+        .route("/items/{id}/design-gate", put(items::design_gate))
+        .route("/items/{id}/goal", post(items::goal))
+        .route("/items/{id}/supplement", post(items::supplement))
+        .route("/items/{id}/deliver", post(items::deliver))
+        .route("/items/{id}/reassign", post(items::reassign))
+        .route("/items/{id}/deps", post(items::add_dep))
+        .route("/items/{id}/deps/{dep}", delete(items::rm_dep))
+        .route("/items/{id}/snooze", post(items::snooze))
+        .route("/items/{id}/panels", get(items::panels))
+        .route(
+            "/items/{id}/panels/{panel}/actions/{action}",
+            post(items::panel_action),
+        )
+}

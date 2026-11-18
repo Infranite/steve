@@ -404,3 +404,15 @@ mod tests {
         );
     }
 }
+
+/// Routes mounted behind the shared API login and body-limit layers.
+pub(crate) fn routes() -> axum::Router<super::AppState> {
+    use super::*;
+    Router::new()
+        .route("/items/{id}/annotations", post(annotations::add))
+        .route("/items/{id}/annotations/send", post(annotations::send))
+        .route(
+            "/items/{id}/annotations/{ann}",
+            patch(annotations::edit).delete(annotations::remove),
+        )
+}

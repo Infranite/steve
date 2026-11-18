@@ -1017,3 +1017,11 @@ mod tests {
         assert!(!target.exists());
     }
 }
+
+/// Routes mounted behind the shared API login and body-limit layers.
+pub(crate) fn routes() -> axum::Router<super::AppState> {
+    use super::*;
+    Router::new()
+        .route("/items/{id}/artifacts/{art}/preview", get(outputs::preview))
+        .route("/items/{id}/artifacts/{art}/raw", get(outputs::raw))
+}

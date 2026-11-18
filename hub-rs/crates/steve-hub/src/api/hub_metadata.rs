@@ -280,3 +280,12 @@ mod tests {
         assert_eq!(snapshot(&s, "a").unwrap().0.display_name, "New");
     }
 }
+
+/// Routes mounted behind the shared API login and body-limit layers.
+pub(crate) fn routes() -> axum::Router<super::AppState> {
+    use super::*;
+    Router::new().route(
+        "/hub-metadata",
+        get(hub_metadata::get).put(hub_metadata::put),
+    )
+}

@@ -917,3 +917,13 @@ mod tests {
         ));
     }
 }
+
+/// Routes mounted behind the shared API login and body-limit layers.
+pub(crate) fn routes() -> axum::Router<super::AppState> {
+    use super::*;
+    Router::new()
+        .route("/projects", post(projects::create))
+        .route("/projects/describe", post(projects::describe))
+        .route("/projects/{id}", patch(projects::patch_one))
+        .route("/fs/browse", get(projects::browse))
+}

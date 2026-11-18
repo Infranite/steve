@@ -72,3 +72,12 @@ pub async fn put(
     .map_err(internal)?;
     Ok(Json(json!({ "owner_context": word(on) })))
 }
+
+/// Routes mounted behind the shared API login and body-limit layers.
+pub(crate) fn routes() -> axum::Router<super::AppState> {
+    use super::*;
+    Router::new().route(
+        "/node-context",
+        get(node_context::get).put(node_context::put),
+    )
+}

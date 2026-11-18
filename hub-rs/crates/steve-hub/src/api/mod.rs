@@ -548,289 +548,33 @@ const BODY_MAX: usize = 16 * 1024 * 1024;
 
 /// The `/api` router with every route of api.ts, in declaration order.
 pub fn router(st: AppState, modules: Router) -> Router {
-    Router::new()
-        .route(
-            "/file-deliveries",
-            get(deliveries::list)
-                .post(deliveries::upload)
-                .layer(axum::extract::DefaultBodyLimit::disable()),
-        )
-        .route(
-            "/file-deliveries/{id}",
-            get(deliveries::metadata).patch(deliveries::patch),
-        )
-        .route("/file-deliveries/{id}/raw", get(deliveries::raw))
-        .route(
-            "/file-deliveries/{id}/content/{*path}",
-            get(deliveries::content),
-        )
-        .route(
-            "/file-deliveries/{id}/shares",
-            get(deliveries::shares).post(deliveries::create_share),
-        )
-        .route(
-            "/file-deliveries/{id}/shares/{token}",
-            delete(deliveries::revoke),
-        )
-        .route("/updates", get(updates::status).post(updates::request))
-        .route("/updates/check", post(updates::check))
-        .route("/updates/{id}", get(updates::get))
-        .route("/updates/{id}/approve", post(updates::approve))
-        .route("/updates/{id}/reject", post(updates::reject))
-        .route("/me", get(misc::me))
-        .route("/node-env/{node}", get(node_env::list))
-        .route(
-            "/node-env/{node}/{key}",
-            put(node_env::put).delete(node_env::delete),
-        )
-        .route("/state", get(misc::state))
-        // workspaces
-        .route("/workspaces", post(misc::workspace_create))
-        .route("/workspaces/{id}", patch(misc::workspace_patch))
-        .route("/workspaces/{id}/switch", post(misc::workspace_switch))
-        // attachments
-        // reads the body itself up to its own limit, and answers a larger one with a clean 413
-        .route(
-            "/files",
-            post(files::upload).layer(axum::extract::DefaultBodyLimit::disable()),
-        )
-        .route("/files/{id}", get(files::download))
-        // a contact's picture: its own upload limit, like /files
-        .route(
-            "/contacts/{id}/avatar",
-            put(avatar::put)
-                .delete(avatar::delete)
-                .layer(axum::extract::DefaultBodyLimit::disable()),
-        )
-        // conversation
-        .route("/thread", post(misc::thread_say))
-        .route("/thread/stop", post(misc::thread_stop))
-        .route("/thread/history", get(misc::thread_history))
-        .route("/thread/search", get(misc::thread_search))
-        .route(
-            "/thread/queued/{id}",
-            patch(misc::thread_queued_edit).delete(misc::thread_queued_withdraw),
-        )
-        .route("/notifications/read", post(misc::notifications_read))
-        .route(
-            "/notifications/{id}/dismiss",
-            post(misc::notifications_dismiss),
-        )
-        .route("/thread/{id}/promote", post(misc::thread_promote))
-        .route("/thread/{id}/reroute", post(misc::thread_reroute))
-        .route("/thread/{id}/offer", post(misc::thread_offer))
-        .route("/thread/{id}/suggest", post(misc::thread_suggest))
-        .route("/thread/{id}/a2ui", post(misc::thread_a2ui))
-        .route("/thread/runs/{id}/stop", post(misc::thread_run_stop))
-        .route("/thread/runs/{id}", delete(misc::thread_run_stop))
-        .route("/items/{id}/thread", patch(misc::item_thread_follow))
-        // items (`/items/bulk` before `/items/{id}` matters only for POST, which axum resolves statically)
-        .route("/items", post(items::create))
-        .route("/items/bulk", post(items::bulk))
-        .route(
-            "/items/{id}",
-            get(items::get_one)
-                .patch(items::patch_one)
-                .delete(items::delete_one),
-        )
-        .route("/items/{id}/actions", post(items::actions))
-        .route(
-            "/items/{id}/debug",
-            get(diagnostics::explain).post(diagnostics::capture),
-        )
-        .route("/items/{id}/debug/events", get(diagnostics::events))
-        .route(
-            "/items/{id}/workflow",
-            get(items::workflow_get).post(items::workflow_change),
-        )
-        .route("/items/{id}/lifecycle", post(items::lifecycle))
-        .route(
-            "/items/{id}/dependency-wait",
-            get(items::dependency_get).post(items::dependency_wait),
-        )
-        .route("/items/{id}/design-gate", put(items::design_gate))
-        .route("/items/{id}/goal", post(items::goal))
-        .route("/items/{id}/supplement", post(items::supplement))
-        .route("/items/{id}/deliver", post(items::deliver))
-        .route("/items/{id}/reassign", post(items::reassign))
-        .route("/items/{id}/deps", post(items::add_dep))
-        .route("/items/{id}/deps/{dep}", delete(items::rm_dep))
-        .route("/items/{id}/snooze", post(items::snooze))
-        .route("/items/{id}/artifacts/{art}/preview", get(outputs::preview))
-        .route("/items/{id}/artifacts/{art}/raw", get(outputs::raw))
-        .route("/items/{id}/annotations", post(annotations::add))
-        .route("/items/{id}/annotations/send", post(annotations::send))
-        .route(
-            "/items/{id}/annotations/{ann}",
-            patch(annotations::edit).delete(annotations::remove),
-        )
-        // item sidebar panels of the modules (B1)
-        .route("/items/{id}/panels", get(items::panels))
-        .route(
-            "/items/{id}/panels/{panel}/actions/{action}",
-            post(items::panel_action),
-        )
-        // sessions
-        .route("/sessions", get(sessions::list))
-        .route("/sessions/search", get(sessions::search))
-        .route(
-            "/sessions/{id}",
-            get(sessions::get_one)
-                .patch(sessions::patch_one)
-                .delete(sessions::delete_one),
-        )
-        .route("/sessions/{id}/events", get(sessions::events))
-        .route("/sessions/{id}/messages", post(sessions::message))
-        .route("/sessions/{id}/cancel", post(sessions::cancel))
-        .route("/sessions/{id}/end", post(sessions::end))
-        .route("/sessions/{id}/continue", post(sessions::continue_new))
-        .route("/sessions/{id}/fork", post(sessions::fork))
-        .route("/sessions/{id}/link", post(sessions::link))
-        .route("/sessions/{id}/queued", get(sessions::queued_list))
-        .route("/sessions/{id}/resume", get(sessions::resume))
-        .route(
-            "/sessions/{id}/principal-state",
-            get(sessions::principal_state),
-        )
-        .route(
-            "/sessions/{id}/queued/{qid}",
-            patch(sessions::queued_edit).delete(sessions::queued_remove),
-        )
-        .route(
-            "/sessions/{id}/queued/{qid}/send-now",
-            post(sessions::queued_send_now),
-        )
-        .route("/queued/{id}", delete(sessions::drop_queued))
-        .route("/local-sessions", get(sessions::local))
-        .route("/local-sessions/import", post(sessions::import))
-        // decisions
-        .route("/decisions/{id}", post(misc::decision_resolve))
-        .route("/decisions/{id}/dismiss", post(misc::decision_dismiss))
-        .route("/decisions/{id}/undo", post(misc::decision_undo))
-        // bots
-        .route(
-            "/bot-teams",
-            get(bot_dispatch::list).post(bot_dispatch::create),
-        )
-        .route("/bot-teams/default", put(bot_dispatch::set_default))
-        .route("/bot-teams/{id}", put(bot_dispatch::update))
-        .route(
-            "/bots/{id}/execution-nodes",
-            get(bot_dispatch::candidates).put(bot_dispatch::set_bindings),
-        )
-        .route("/bots", post(bots::create))
-        .route("/bots/draft", post(bots::draft))
-        .route(
-            "/bots/{id}",
-            patch(bots::patch_one).delete(bots::delete_one),
-        )
-        .route("/bots/{id}/prompt", get(bots::prompt))
-        .route("/bots/{id}/workspaces", put(bots::set_workspaces))
-        .route("/bots/{id}/duplicate", post(bots::duplicate))
-        .route("/bots/{id}/restore", post(bots::restore))
-        .route(
-            "/bots/{id}/memories",
-            get(bots::memories).post(bots::memory_add),
-        )
-        .route("/memories", delete(bots::memories_clear))
-        .route(
-            "/memories/{id}",
-            patch(bots::memory_edit).delete(bots::memory_remove),
-        )
-        // projects and filesystem
-        .route("/projects", post(projects::create))
-        .route(
-            "/projects/setup/preview",
-            post(project_setup::setup_preview),
-        )
-        .route("/projects/setup", post(project_setup::setup))
-        .route("/projects/describe", post(projects::describe))
-        .route("/projects/{id}", patch(projects::patch_one))
-        .route("/fs/browse", get(projects::browse))
-        // tags
-        .route("/tags", post(misc::tag_create))
-        .route(
-            "/tags/{id}",
-            patch(misc::tag_patch).delete(misc::tag_remove),
-        )
-        .route("/tags/{id}/merge", post(misc::tag_merge))
-        .route("/tags/kinds/backfill", post(misc::kinds_backfill))
-        .route(
-            "/tags/kinds/review",
-            get(misc::kinds_review).post(misc::kinds_reviewed),
-        )
-        // settings · access and clients (A4)
-        .route("/access", get(crate::access::overview))
-        .route(
-            "/access/oidc",
-            get(crate::access::oidc_get)
-                .put(crate::access::oidc_put)
-                .delete(crate::access::oidc_delete),
-        )
-        .route("/access/tokens", post(crate::access::token_create))
-        // 能力: Steve itself as a built-in MCP server, and where outside clients connect
-        .route("/capabilities/steve", get(crate::caps_api::steve_h))
-        .route("/access/tokens/{id}", delete(crate::access::token_revoke))
-        .route("/access/clients/{id}", delete(crate::access::client_revoke))
-        .route("/access/pairings", post(crate::access::pair_create))
-        .route("/access/pairings/{id}", get(crate::access::pair_status))
-        // settings and conversational configuration
-        .route("/settings/schema", get(misc::settings_schema))
-        .route(
-            "/settings/models",
-            get(misc::models_get).patch(misc::models_patch),
-        )
-        .route("/settings/models/select", post(misc::models_select))
-        .route("/settings", patch(misc::settings_patch))
-        .route("/onboard/start", post(misc::onboard_start))
-        .route("/onboard/skip", post(misc::onboard_skip))
-        .route("/audit", get(misc::audit_list))
-        .route("/config/draft", post(misc::config_draft))
-        .route("/config/{id}/apply", post(misc::config_apply))
-        .route("/config/{id}/undo", post(misc::config_undo))
-        .route("/config/{id}/drop", post(misc::config_drop))
-        // devices
-        .route("/devices", get(misc::devices))
-        .route(
-            "/hub-metadata",
-            get(hub_metadata::get).put(hub_metadata::put),
-        )
-        .route(
-            "/node-context",
-            get(node_context::get).put(node_context::put),
-        )
-        .route("/node-tags", get(node_tags::list))
-        .route("/node-harness-updates/{node}", get(harness_updates::get))
-        .route(
-            "/node-harness-updates/{node}/{harness}",
-            post(harness_updates::start),
-        )
-        .route("/node-tags/{node}", put(node_tags::set))
-        .route("/items/{id}/node-tag", put(node_tags::set_item))
-        .route("/vitals", get(crate::nodes::vitals::get))
-        .route("/node-harnesses", get(node_harnesses::list))
-        .route("/node-harnesses/{id}", get(node_harnesses::get))
-        .route("/devices/{id}", patch(misc::device_patch))
-        .route("/system/models", get(misc::system_models))
-        .route("/system/harnesses", post(misc::system_harness_add))
-        .route(
-            "/system/harnesses/{id}/install",
-            post(misc::system_harness_install),
-        )
-        .route(
-            "/system/harnesses/{id}",
-            delete(misc::system_harness_remove),
-        )
-        .route("/system/workspaces", get(misc::system_workspaces))
-        .route(
-            "/system/workspaces/reclaim",
-            post(misc::system_workspaces_reclaim),
-        )
-        .route("/system/backup", get(misc::system_backup))
-        .route("/system/outbox", get(misc::system_outbox))
-        .route("/system/outbox/revive", post(misc::system_outbox_revive))
-        // event stream
-        .route("/stream", get(stream::stream))
+    let areas: &[fn() -> Router<AppState>] = &[
+        deliveries::routes,
+        updates::routes,
+        misc::routes,
+        node_env::routes,
+        files::routes,
+        avatar::routes,
+        items::routes,
+        diagnostics::routes,
+        outputs::routes,
+        annotations::routes,
+        sessions::routes,
+        bot_dispatch::routes,
+        bots::routes,
+        projects::routes,
+        project_setup::routes,
+        hub_metadata::routes,
+        node_context::routes,
+        node_tags::routes,
+        harness_updates::routes,
+        node_harnesses::routes,
+        stream::routes,
+    ];
+    let routes = areas
+        .iter()
+        .fold(Router::new(), |routes, area| routes.merge(area()));
+    routes
         .fallback(api_fallback)
         .method_not_allowed_fallback(api_fallback)
         .with_state(st.clone())

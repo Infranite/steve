@@ -92,3 +92,12 @@ pub async fn set_item(
     }
     Ok(Json(json!({ "ok": true })))
 }
+
+/// Routes mounted behind the shared API login and body-limit layers.
+pub(crate) fn routes() -> axum::Router<super::AppState> {
+    use super::*;
+    Router::new()
+        .route("/node-tags", get(node_tags::list))
+        .route("/node-tags/{node}", put(node_tags::set))
+        .route("/items/{id}/node-tag", put(node_tags::set_item))
+}

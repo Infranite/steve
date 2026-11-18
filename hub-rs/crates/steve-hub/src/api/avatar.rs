@@ -96,3 +96,14 @@ pub async fn delete(
             .await,
     )
 }
+
+/// Routes mounted behind the shared API login and body-limit layers.
+pub(crate) fn routes() -> axum::Router<super::AppState> {
+    use super::*;
+    Router::new().route(
+        "/contacts/{id}/avatar",
+        put(avatar::put)
+            .delete(avatar::delete)
+            .layer(axum::extract::DefaultBodyLimit::disable()),
+    )
+}

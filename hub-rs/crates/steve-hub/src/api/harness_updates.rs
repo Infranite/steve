@@ -478,3 +478,14 @@ pub async fn start(
     }
     Ok(Json(json!({"receipt":receipt})))
 }
+
+/// Routes mounted behind the shared API login and body-limit layers.
+pub(crate) fn routes() -> axum::Router<super::AppState> {
+    use super::*;
+    Router::new()
+        .route("/node-harness-updates/{node}", get(harness_updates::get))
+        .route(
+            "/node-harness-updates/{node}/{harness}",
+            post(harness_updates::start),
+        )
+}

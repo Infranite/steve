@@ -653,3 +653,28 @@ mod tests {
         );
     }
 }
+
+/// Routes mounted behind the shared API login and body-limit layers.
+pub(crate) fn routes() -> axum::Router<super::AppState> {
+    use super::*;
+    Router::new()
+        .route("/bots", post(bots::create))
+        .route("/bots/draft", post(bots::draft))
+        .route(
+            "/bots/{id}",
+            patch(bots::patch_one).delete(bots::delete_one),
+        )
+        .route("/bots/{id}/prompt", get(bots::prompt))
+        .route("/bots/{id}/workspaces", put(bots::set_workspaces))
+        .route("/bots/{id}/duplicate", post(bots::duplicate))
+        .route("/bots/{id}/restore", post(bots::restore))
+        .route(
+            "/bots/{id}/memories",
+            get(bots::memories).post(bots::memory_add),
+        )
+        .route("/memories", delete(bots::memories_clear))
+        .route(
+            "/memories/{id}",
+            patch(bots::memory_edit).delete(bots::memory_remove),
+        )
+}

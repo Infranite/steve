@@ -287,3 +287,11 @@ pub async fn get(
 
 #[cfg(test)]
 mod tests;
+
+/// Routes mounted behind the shared API login and body-limit layers.
+pub(crate) fn routes() -> axum::Router<super::AppState> {
+    use super::*;
+    Router::new()
+        .route("/node-harnesses", get(node_harnesses::list))
+        .route("/node-harnesses/{id}", get(node_harnesses::get))
+}

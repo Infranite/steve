@@ -419,3 +419,32 @@ pub(super) fn public_router(st: AppState) -> Router {
         .route("/delivery-frames/{grant}/{*path}", get(grant_frame))
         .with_state(st)
 }
+
+/// Routes mounted behind the shared API login and body-limit layers.
+pub(crate) fn routes() -> axum::Router<super::AppState> {
+    use super::*;
+    Router::new()
+        .route(
+            "/file-deliveries",
+            get(deliveries::list)
+                .post(deliveries::upload)
+                .layer(axum::extract::DefaultBodyLimit::disable()),
+        )
+        .route(
+            "/file-deliveries/{id}",
+            get(deliveries::metadata).patch(deliveries::patch),
+        )
+        .route("/file-deliveries/{id}/raw", get(deliveries::raw))
+        .route(
+            "/file-deliveries/{id}/content/{*path}",
+            get(deliveries::content),
+        )
+        .route(
+            "/file-deliveries/{id}/shares",
+            get(deliveries::shares).post(deliveries::create_share),
+        )
+        .route(
+            "/file-deliveries/{id}/shares/{token}",
+            delete(deliveries::revoke),
+        )
+}
