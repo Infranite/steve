@@ -12,7 +12,7 @@ fn without_ws(text: &str) -> String {
 // Exercise each child and its actual aggregate/envelope without reading bus events back in Rust.
 macro_rules! golden_check {
     ($name:ident, $aggregate:ty) => {
-        fn $name<E>(value: E, name: &str, expected: Scope, object_order: bool)
+        fn $name<E>(value: E, name: &str, expected: Scope)
         where
             E: Serialize + Scoped + Into<$aggregate>,
         {
@@ -23,13 +23,10 @@ macro_rules! golden_check {
             )
             .unwrap();
             assert_eq!(value.scope(), expected, "{name}");
+            // Straight from the struct, never through a JSON map: the bytes must not depend on
+            // whether some other crate in the build enables serde_json/preserve_order.
             let bytes = serde_json::to_string(&value).unwrap();
-            let wire = if object_order {
-                serde_json::to_string(&serde_json::to_value(&value).unwrap()).unwrap()
-            } else {
-                bytes.clone()
-            };
-            assert_eq!(without_ws(&wire), without_ws(&golden), "{name}");
+            assert_eq!(without_ws(&bytes), without_ws(&golden), "{name}");
             let event: $aggregate = value.into();
             assert_eq!(event.scope(), expected, "{name}");
             assert_eq!(serde_json::to_string(&event).unwrap(), bytes, "{name}");
@@ -71,7 +68,6 @@ fn every_wire_variant_has_golden_bytes_and_scope() {
         },
         "item",
         Scope::Ws("workspace-a".into()),
-        false,
     );
     fixtures.insert("item.json".to_owned());
     workevent.insert("item");
@@ -83,7 +79,6 @@ fn every_wire_variant_has_golden_bytes_and_scope() {
         },
         "decision",
         Scope::Ws("workspace-a".into()),
-        false,
     );
     fixtures.insert("decision.json".to_owned());
     workevent.insert("decision");
@@ -95,7 +90,6 @@ fn every_wire_variant_has_golden_bytes_and_scope() {
         },
         "decision-null",
         Scope::Ws("workspace-a".into()),
-        false,
     );
     fixtures.insert("decision-null.json".to_owned());
     workevent.insert("decision");
@@ -107,7 +101,6 @@ fn every_wire_variant_has_golden_bytes_and_scope() {
         },
         "decision-value",
         Scope::Ws("workspace-a".into()),
-        false,
     );
     fixtures.insert("decision-value.json".to_owned());
     workevent.insert("decision");
@@ -119,7 +112,6 @@ fn every_wire_variant_has_golden_bytes_and_scope() {
         },
         "session",
         Scope::Ws("workspace-a".into()),
-        false,
     );
     fixtures.insert("session.json".to_owned());
     workevent.insert("session");
@@ -131,7 +123,6 @@ fn every_wire_variant_has_golden_bytes_and_scope() {
         },
         "session-null",
         Scope::Ws("workspace-a".into()),
-        false,
     );
     fixtures.insert("session-null.json".to_owned());
     workevent.insert("session");
@@ -143,7 +134,6 @@ fn every_wire_variant_has_golden_bytes_and_scope() {
         },
         "session-value",
         Scope::Ws("workspace-a".into()),
-        false,
     );
     fixtures.insert("session-value.json".to_owned());
     workevent.insert("session");
@@ -157,7 +147,6 @@ fn every_wire_variant_has_golden_bytes_and_scope() {
         },
         "event",
         Scope::Ws("workspace-a".into()),
-        false,
     );
     fixtures.insert("event.json".to_owned());
     workliveevent.insert("event");
@@ -168,7 +157,6 @@ fn every_wire_variant_has_golden_bytes_and_scope() {
         },
         "message",
         Scope::Ws("workspace-a".into()),
-        false,
     );
     fixtures.insert("message.json".to_owned());
     workevent.insert("message");
@@ -180,7 +168,6 @@ fn every_wire_variant_has_golden_bytes_and_scope() {
         },
         "steve.thinking",
         Scope::Ws("workspace-a".into()),
-        false,
     );
     fixtures.insert("steve.thinking.json".to_owned());
     workliveevent.insert("steve.thinking");
@@ -192,7 +179,6 @@ fn every_wire_variant_has_golden_bytes_and_scope() {
         },
         "steve.thinking-full",
         Scope::Ws("workspace-a".into()),
-        false,
     );
     fixtures.insert("steve.thinking-full.json".to_owned());
     workliveevent.insert("steve.thinking");
@@ -205,7 +191,6 @@ fn every_wire_variant_has_golden_bytes_and_scope() {
         },
         "steve.draft",
         Scope::Ws("workspace-a".into()),
-        false,
     );
     fixtures.insert("steve.draft.json".to_owned());
     workliveevent.insert("steve.draft");
@@ -225,7 +210,6 @@ fn every_wire_variant_has_golden_bytes_and_scope() {
         },
         "steve.tool",
         Scope::Ws("workspace-a".into()),
-        false,
     );
     fixtures.insert("steve.tool.json".to_owned());
     workliveevent.insert("steve.tool");
@@ -245,7 +229,6 @@ fn every_wire_variant_has_golden_bytes_and_scope() {
         },
         "steve.tool-full",
         Scope::Ws("workspace-a".into()),
-        false,
     );
     fixtures.insert("steve.tool-full.json".to_owned());
     workliveevent.insert("steve.tool");
@@ -256,7 +239,6 @@ fn every_wire_variant_has_golden_bytes_and_scope() {
         },
         "thread.run",
         Scope::Ws("workspace-a".into()),
-        false,
     );
     fixtures.insert("thread.run.json".to_owned());
     workevent.insert("thread.run");
@@ -264,7 +246,6 @@ fn every_wire_variant_has_golden_bytes_and_scope() {
         DevicesEvent::ReleaseHold { hold: None },
         "release.hold",
         Scope::Hub,
-        false,
     );
     fixtures.insert("release.hold.json".to_owned());
     devicesevent.insert("release.hold");
@@ -274,7 +255,6 @@ fn every_wire_variant_has_golden_bytes_and_scope() {
         },
         "release.hold-full",
         Scope::Hub,
-        false,
     );
     fixtures.insert("release.hold-full.json".to_owned());
     devicesevent.insert("release.hold");
@@ -285,7 +265,6 @@ fn every_wire_variant_has_golden_bytes_and_scope() {
         },
         "bot",
         Scope::Ws("workspace-a".into()),
-        false,
     );
     fixtures.insert("bot.json".to_owned());
     configevent.insert("bot");
@@ -296,7 +275,6 @@ fn every_wire_variant_has_golden_bytes_and_scope() {
         },
         "project",
         Scope::Ws("workspace-a".into()),
-        false,
     );
     fixtures.insert("project.json".to_owned());
     configevent.insert("project");
@@ -307,7 +285,6 @@ fn every_wire_variant_has_golden_bytes_and_scope() {
         },
         "tag",
         Scope::Ws("workspace-a".into()),
-        false,
     );
     fixtures.insert("tag.json".to_owned());
     configevent.insert("tag");
@@ -318,7 +295,6 @@ fn every_wire_variant_has_golden_bytes_and_scope() {
         },
         "workspace",
         Scope::Ws("workspace-a".into()),
-        false,
     );
     fixtures.insert("workspace.json".to_owned());
     configevent.insert("workspace");
@@ -329,7 +305,6 @@ fn every_wire_variant_has_golden_bytes_and_scope() {
         },
         "settings",
         Scope::Ws("workspace-a".into()),
-        false,
     );
     fixtures.insert("settings.json".to_owned());
     configevent.insert("settings");
@@ -339,7 +314,6 @@ fn every_wire_variant_has_golden_bytes_and_scope() {
         },
         "device",
         Scope::Hub,
-        false,
     );
     fixtures.insert("device.json".to_owned());
     devicesevent.insert("device");
@@ -350,7 +324,6 @@ fn every_wire_variant_has_golden_bytes_and_scope() {
         },
         "node",
         Scope::User("user-a".into()),
-        false,
     );
     fixtures.insert("node.json".to_owned());
     devicesevent.insert("node");
@@ -361,7 +334,6 @@ fn every_wire_variant_has_golden_bytes_and_scope() {
         },
         "client",
         Scope::User("user-a".into()),
-        false,
     );
     fixtures.insert("client.json".to_owned());
     devicesevent.insert("client");
@@ -372,7 +344,6 @@ fn every_wire_variant_has_golden_bytes_and_scope() {
         },
         "party",
         Scope::Ws("workspace-a".into()),
-        false,
     );
     fixtures.insert("party.json".to_owned());
     peopleevent.insert("party");
@@ -383,7 +354,6 @@ fn every_wire_variant_has_golden_bytes_and_scope() {
         },
         "mm",
         Scope::Ws("workspace-a".into()),
-        false,
     );
     fixtures.insert("mm.json".to_owned());
     configevent.insert("mm");
@@ -394,7 +364,6 @@ fn every_wire_variant_has_golden_bytes_and_scope() {
         },
         "changeset",
         Scope::Ws("workspace-a".into()),
-        false,
     );
     fixtures.insert("changeset.json".to_owned());
     configevent.insert("changeset");
@@ -405,7 +374,6 @@ fn every_wire_variant_has_golden_bytes_and_scope() {
         },
         "account",
         Scope::Ws("workspace-a".into()),
-        false,
     );
     fixtures.insert("account.json".to_owned());
     peopleevent.insert("account");
@@ -416,7 +384,6 @@ fn every_wire_variant_has_golden_bytes_and_scope() {
         },
         "connection",
         Scope::Ws("workspace-a".into()),
-        false,
     );
     fixtures.insert("connection.json".to_owned());
     channelsevent.insert("connection");
@@ -427,7 +394,6 @@ fn every_wire_variant_has_golden_bytes_and_scope() {
         },
         "vault",
         Scope::Ws("workspace-a".into()),
-        false,
     );
     fixtures.insert("vault.json".to_owned());
     vaultevent.insert("vault");
@@ -438,7 +404,6 @@ fn every_wire_variant_has_golden_bytes_and_scope() {
         },
         "signal",
         Scope::Ws("workspace-a".into()),
-        false,
     );
     fixtures.insert("signal.json".to_owned());
     automationevent.insert("signal");
@@ -449,7 +414,6 @@ fn every_wire_variant_has_golden_bytes_and_scope() {
         },
         "flow",
         Scope::Ws("workspace-a".into()),
-        false,
     );
     fixtures.insert("flow.json".to_owned());
     automationevent.insert("flow");
@@ -461,7 +425,6 @@ fn every_wire_variant_has_golden_bytes_and_scope() {
         },
         "run",
         Scope::Ws("workspace-a".into()),
-        false,
     );
     fixtures.insert("run.json".to_owned());
     automationevent.insert("run");
@@ -472,7 +435,6 @@ fn every_wire_variant_has_golden_bytes_and_scope() {
         },
         "space",
         Scope::Ws("workspace-a".into()),
-        false,
     );
     fixtures.insert("space.json".to_owned());
     channelsevent.insert("space");
@@ -484,7 +446,6 @@ fn every_wire_variant_has_golden_bytes_and_scope() {
         },
         "chan_message",
         Scope::Ws("workspace-a".into()),
-        false,
     );
     fixtures.insert("chan_message.json".to_owned());
     channelsevent.insert("chan_message");
@@ -495,7 +456,6 @@ fn every_wire_variant_has_golden_bytes_and_scope() {
         },
         "persona",
         Scope::Ws("workspace-a".into()),
-        false,
     );
     fixtures.insert("persona.json".to_owned());
     channelsevent.insert("persona");
@@ -506,7 +466,6 @@ fn every_wire_variant_has_golden_bytes_and_scope() {
         },
         "digest",
         Scope::Ws("workspace-a".into()),
-        false,
     );
     fixtures.insert("digest.json".to_owned());
     channelsevent.insert("digest");
@@ -517,7 +476,6 @@ fn every_wire_variant_has_golden_bytes_and_scope() {
         },
         "calendar",
         Scope::Ws("workspace-a".into()),
-        false,
     );
     fixtures.insert("calendar.json".to_owned());
     automationevent.insert("calendar");
@@ -528,7 +486,6 @@ fn every_wire_variant_has_golden_bytes_and_scope() {
         },
         "channel",
         Scope::Ws("workspace-a".into()),
-        false,
     );
     fixtures.insert("channel.json".to_owned());
     channelsevent.insert("channel");
@@ -538,7 +495,6 @@ fn every_wire_variant_has_golden_bytes_and_scope() {
         },
         "yolo",
         Scope::Ws("workspace-a".into()),
-        false,
     );
     fixtures.insert("yolo.json".to_owned());
     autonomyevent.insert("yolo");
@@ -550,7 +506,6 @@ fn every_wire_variant_has_golden_bytes_and_scope() {
         },
         "yolo_action",
         Scope::Ws("workspace-a".into()),
-        false,
     );
     fixtures.insert("yolo_action.json".to_owned());
     autonomyevent.insert("yolo_action");
@@ -562,7 +517,6 @@ fn every_wire_variant_has_golden_bytes_and_scope() {
         },
         "yolo_action-full",
         Scope::Ws("workspace-a".into()),
-        false,
     );
     fixtures.insert("yolo_action-full.json".to_owned());
     autonomyevent.insert("yolo_action");
@@ -573,7 +527,6 @@ fn every_wire_variant_has_golden_bytes_and_scope() {
         },
         "stats",
         Scope::Ws("workspace-a".into()),
-        false,
     );
     fixtures.insert("stats.json".to_owned());
     statsevent.insert("stats");
@@ -584,7 +537,6 @@ fn every_wire_variant_has_golden_bytes_and_scope() {
         },
         "stats-full",
         Scope::Ws("workspace-a".into()),
-        false,
     );
     fixtures.insert("stats-full.json".to_owned());
     statsevent.insert("stats");
@@ -595,7 +547,6 @@ fn every_wire_variant_has_golden_bytes_and_scope() {
         },
         "kb",
         Scope::Ws("workspace-a".into()),
-        true,
     );
     fixtures.insert("kb.json".to_owned());
     knowledgeevent.insert("kb");
@@ -606,7 +557,6 @@ fn every_wire_variant_has_golden_bytes_and_scope() {
         },
         "gh",
         Scope::Ws("workspace-a".into()),
-        true,
     );
     fixtures.insert("gh.json".to_owned());
     integrationsevent.insert("gh");
@@ -617,7 +567,6 @@ fn every_wire_variant_has_golden_bytes_and_scope() {
         },
         "mail",
         Scope::Ws("workspace-a".into()),
-        true,
     );
     fixtures.insert("mail.json".to_owned());
     integrationsevent.insert("mail");
