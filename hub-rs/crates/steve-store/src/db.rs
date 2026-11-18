@@ -232,8 +232,10 @@ pub const MIGRATIONS: &[&str] = &[
     // 108: removing a Node from its machine (#325): each removal its owner asked for, and where it
     // is. Additive: a new, empty table.
     include_str!("../migrations/108.sql"),
-    // 109: opt-in Bot execution bindings and workspace Team presets.
+    // 109: immutable deliveries captured from replies keep their original session scope.
     include_str!("../migrations/109.sql"),
+    // 110: opt-in Bot execution bindings and workspace Team presets.
+    include_str!("../migrations/110.sql"),
 ];
 
 /// 027's item columns and their one-time backfill (applied by `run_pending` when `items.phase` is missing).

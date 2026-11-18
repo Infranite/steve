@@ -275,11 +275,17 @@ fn open_in_process_node(
     node.connect_secrets(secrets.for_node(node_id.clone()));
     node.connect(
         Arc::new(node_runtime::Sink(Arc::downgrade(&runtime))),
-        Some(Arc::new(node_files::NodeFiles::new(
-            store.clone(),
-            node_id,
-            cfg.data_dir.clone(),
-        ))),
+        Some(Arc::new(
+            node_files::NodeFiles::new(store.clone(), node_id, cfg.data_dir.clone())
+                .with_reply_source(
+                    crate::deliveries::Service::new(
+                        store.clone(),
+                        cfg.home.clone(),
+                        cfg.public_url.clone(),
+                    ),
+                    node.clone(),
+                ),
+        )),
     );
     jobs.push(Box::pin(start_node(
         runtime.clone(),
@@ -486,6 +492,11 @@ fn remote_nodes(
     }
     let fleet =
         crate::nodes::NodeFleet::new(store.clone(), cfg.data_dir.clone(), Some(domain), None);
+    fleet.set_deliveries(crate::deliveries::Service::new(
+        store.clone(),
+        cfg.home.clone(),
+        cfg.public_url.clone(),
+    ));
     if let Some(ms) = turn_limit(vars) {
         fleet.set_turn_limit(ms);
     }

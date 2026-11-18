@@ -838,7 +838,7 @@ const SegView = memo(function SegView({ k, g, live }: { k: string; g: Seg; live:
   )
   if (g.t === "a") return (
     <div className="group/msg flex items-start gap-1 anim-in" data-agent-msg>
-      <div className="min-w-0 flex-1 break-words type-body text-foreground"><Markdown text={e[1]} /></div>
+      <div className="min-w-0 flex-1 break-words type-body text-foreground"><Markdown text={e[1]} replyFiles /></div>
       <ForkBtn k={k} at={g.idx} />
     </div>
   )
@@ -1052,7 +1052,7 @@ export function ReplyBlock({ r }: { r: Reply }) {
           <div className="pb-2 pt-1"><Transcript k={r.s} compact={!r.live} range={[r.from, r.to]} /></div>
         </CollapsibleContent>
       </Collapsible>
-      {!open && r.text ? <div className="line-clamp-6 whitespace-pre-wrap break-words pb-1 type-body text-foreground animate-[steve-fade_180ms_var(--ease-out)_both]" data-reply-text><Markdown text={r.text} /></div> : null}
+      {!open && r.text ? <div className="line-clamp-6 whitespace-pre-wrap break-words pb-1 type-body text-foreground animate-[steve-fade_180ms_var(--ease-out)_both]" data-reply-text><Markdown text={r.text} replyFiles /></div> : null}
     </div>
   )
 }

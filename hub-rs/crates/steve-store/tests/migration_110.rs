@@ -2,17 +2,17 @@ use rusqlite::{Connection, params};
 use steve_store::{bot_dispatch, db};
 
 #[test]
-fn upgrades_a_108_database_without_granting_new_nodes_legacy_dispatch() {
-    assert_eq!(db::MIGRATIONS[108], include_str!("../migrations/109.sql"));
+fn upgrades_a_109_database_without_granting_new_nodes_legacy_dispatch() {
+    assert_eq!(db::MIGRATIONS[109], include_str!("../migrations/110.sql"));
     let c = Connection::open_in_memory().unwrap();
-    for migration in &db::MIGRATIONS[..108] {
+    for migration in &db::MIGRATIONS[..109] {
         c.execute_batch(migration).unwrap();
     }
     c.execute_batch(
         "CREATE TABLE schema_version(v INTEGER NOT NULL);
-         INSERT INTO schema_version VALUES (108);
+         INSERT INTO schema_version VALUES (109);
          CREATE TABLE schema_compat(min_reader INTEGER NOT NULL);
-         INSERT INTO schema_compat VALUES (108);
+         INSERT INTO schema_compat VALUES (109);
          INSERT INTO workspaces(id,name,created) VALUES ('default','Fixture',1);",
     )
     .unwrap();
@@ -37,7 +37,23 @@ fn upgrades_a_108_database_without_granting_new_nodes_legacy_dispatch() {
     )
     .unwrap();
 
+    c.execute(
+        "INSERT INTO deliveries
+         (id,url,workspace_id,session_id,title,name,mime,size,created,sha256,manifest,preview,reply)
+         VALUES ('reply','/reply','default','session','Reply','file.txt','text/plain',1,1,'hash','[]','{}',1)",
+        [],
+    )
+    .unwrap();
+
     db::migrate(&c).unwrap();
+    let reply: (String, bool) = c
+        .query_row(
+            "SELECT session_id,reply FROM deliveries WHERE id='reply'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(reply, ("session".into(), true));
     let removal: (String, String) = c
         .query_row(
             "SELECT node_id,phase FROM node_removals WHERE operation_id='removal'",

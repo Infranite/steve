@@ -319,6 +319,11 @@ pub struct GuardedFiles(pub LinkCtx);
 
 #[async_trait]
 impl HubFiles for GuardedFiles {
+    async fn capture_reply(&self, q: ReplyCapture) -> ApiResult<String> {
+        self.0.fresh().await?;
+        self.0.fleet.files_for(&self.0.node).capture_reply(q).await
+    }
+
     async fn fetch(
         &self,
         access: FileAccess,

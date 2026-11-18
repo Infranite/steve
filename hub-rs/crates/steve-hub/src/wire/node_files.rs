@@ -10,12 +10,13 @@ use steve_node_api::*;
 use steve_store::{Store, StoreError};
 
 #[path = "node_uploads.rs"]
-mod uploads;
+pub(crate) mod uploads;
 
 pub struct NodeFiles {
     store: Store,
     node: NodeId,
     data_dir: PathBuf,
+    reply_source: Option<(crate::deliveries::Service, std::sync::Weak<dyn Node>)>,
     uploads: std::sync::Arc<std::sync::Mutex<uploads::Uploads>>,
 }
 impl NodeFiles {
@@ -24,8 +25,17 @@ impl NodeFiles {
             store,
             node,
             data_dir,
+            reply_source: None,
             uploads: Default::default(),
         }
+    }
+    pub(crate) fn with_reply_source(
+        mut self,
+        svc: crate::deliveries::Service,
+        node: std::sync::Arc<dyn Node>,
+    ) -> Self {
+        self.reply_source = Some((svc, std::sync::Arc::downgrade(&node)));
+        self
     }
     fn execution(&self, access: FileAccess) -> ApiResult<ExecutionRef> {
         match access {
@@ -154,6 +164,17 @@ fn component(s: &str) -> bool {
 }
 #[async_trait]
 impl HubFiles for NodeFiles {
+    async fn capture_reply(&self, q: ReplyCapture) -> ApiResult<String> {
+        let (svc, source) = self
+            .reply_source
+            .as_ref()
+            .ok_or_else(|| ApiError::new(ErrorCode::Unsupported, "reply capture unsupported"))?;
+        let source = source
+            .upgrade()
+            .ok_or_else(|| ApiError::new(ErrorCode::Offline, "reply Node unavailable"))?;
+        svc.capture_reply(&self.node, source.as_ref(), q).await
+    }
+
     async fn fetch(
         &self,
         access: FileAccess,
@@ -280,6 +301,7 @@ impl HubFiles for NodeFiles {
             store: self.store.clone(),
             node: self.node.clone(),
             data_dir: self.data_dir.clone(),
+            reply_source: None,
             uploads: self.uploads.clone(),
         };
         tokio::task::spawn_blocking(move || this.finish_image(id))

@@ -222,7 +222,7 @@ impl NodeFiles {
     }
 }
 
-fn validate_image(bytes: &[u8], claimed: &str) -> ApiResult<()> {
+pub(crate) fn validate_image(bytes: &[u8], claimed: &str) -> ApiResult<()> {
     use image::{AnimationDecoder, ImageDecoder};
     if !crate::files::sniff(bytes).is_some_and(|kind| kind.mime == claimed) {
         return Err(invalid("image content type mismatch"));

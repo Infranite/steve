@@ -3,6 +3,7 @@
 //! synced. A failed receive can leave unreferenced objects, never a partial published delivery.
 mod bundle;
 mod receive;
+mod replies;
 #[cfg(test)]
 mod tests;
 
@@ -32,7 +33,7 @@ const MEMBER: &str =
 /// Who manages a delivery a Bot made outside an item: the member its session works for, else the
 /// workspace's owner (the same rule as the workspace's other owner-less records).
 const SESSION_OWNER: &str = "SELECT COALESCE((SELECT m.user_id FROM runtime_sessions r JOIN workspace_members m ON m.user_id=r.principal AND m.workspace_id=?2 WHERE r.session_id=?1),(SELECT user_id FROM workspace_members WHERE workspace_id=?2 AND role='owner' ORDER BY created LIMIT 1))";
-const COLUMNS: &str = "d.id,d.workspace_id,d.item_id,d.title,d.name,d.mime,d.size,d.created,d.entrypoint,d.sha256,d.manifest,d.preview,d.url,d.owner_id,d.interactive";
+const COLUMNS: &str = "d.id,d.workspace_id,d.item_id,d.title,d.name,d.mime,d.size,d.created,d.entrypoint,d.sha256,d.manifest,d.preview,d.url,d.owner_id,d.interactive,d.reply";
 /// A frame grant lives this long; the page asks for a new one each time it loads the metadata.
 const FRAME_TTL_MS: i64 = 12 * 3600 * 1000;
 const FRAME_GRANTS_MAX: usize = 10_000;
@@ -86,6 +87,8 @@ pub struct Delivery {
     pub preview: Value,
     /// Static is the default; only then do the package's scripts never run.
     pub interactive: bool,
+    #[serde(skip)]
+    pub(crate) reply: bool,
     #[serde(skip)]
     pub workspace_id: String,
     /// The user who manages a delivery made outside an item; item deliveries have none.
@@ -368,6 +371,9 @@ impl Service {
     /// Who may manage a delivery (turn its interactive preview on or off): its owner; for an item
     /// delivery, the member who asked for the item or an owner of the workspace.
     pub fn can_manage(&self, d: &Delivery, user: &str) -> Result<bool, StoreError> {
+        if d.reply {
+            return Ok(false);
+        }
         if d.owner_id.as_deref() == Some(user) {
             return Ok(true);
         }
@@ -408,8 +414,8 @@ impl Service {
 
     pub fn get(&self, id: &str, ws: Option<&str>) -> Result<Option<Delivery>, StoreError> {
         self.store.reader(|c| {
-            c.query_row(&format!("SELECT {COLUMNS} FROM deliveries d LEFT JOIN items i ON i.id=d.item_id WHERE d.id=?1 AND (d.item_id IS NULL OR i.workspace_id=d.workspace_id) AND (?2 IS NULL OR d.workspace_id=?2)"), params![id,ws], |r| {
-                Ok((Delivery { id:r.get(0)?,workspace_id:r.get(1)?,item_id:r.get(2)?,title:r.get(3)?,name:r.get(4)?,mime:r.get(5)?,size:r.get::<_,i64>(6)? as u64,created:r.get(7)?,entrypoint:r.get(8)?,sha256:r.get(9)?,manifest:BTreeMap::new(),preview:Value::Null,registered_url:r.get(12)?,owner_id:r.get(13)?,interactive:r.get(14)? },r.get::<_,String>(10)?,r.get::<_,String>(11)?))
+            c.query_row(&format!("SELECT {COLUMNS} FROM deliveries d LEFT JOIN items i ON i.id=d.item_id LEFT JOIN sessions s ON s.id=d.session_id WHERE d.id=?1 AND (d.reply=0 OR (s.workspace_id=d.workspace_id AND s.item_id IS d.item_id)) AND (d.item_id IS NULL OR i.workspace_id=d.workspace_id) AND (?2 IS NULL OR d.workspace_id=?2)"), params![id,ws], |r| {
+                Ok((Delivery { id:r.get(0)?,workspace_id:r.get(1)?,item_id:r.get(2)?,title:r.get(3)?,name:r.get(4)?,mime:r.get(5)?,size:r.get::<_,i64>(6)? as u64,created:r.get(7)?,entrypoint:r.get(8)?,sha256:r.get(9)?,manifest:BTreeMap::new(),preview:Value::Null,registered_url:r.get(12)?,owner_id:r.get(13)?,interactive:r.get(14)?,reply:r.get(15)? },r.get::<_,String>(10)?,r.get::<_,String>(11)?))
             }).optional()?.map(|(mut d,m,p)| { d.manifest=serde_json::from_str(&m)?;d.preview=serde_json::from_str(&p)?;Ok(d) }).transpose()
         })
     }
@@ -569,6 +575,7 @@ impl Service {
             preview,
             interactive,
             owner_id: owner,
+            reply: false,
         };
         self.store.transaction(|t| {
             // A scope change while copying or validating an archive must fail the receipt,
@@ -584,6 +591,9 @@ impl Service {
 
     /// Only REST handlers with an authenticated user call this. Bots get no sharing tool.
     pub fn create_share(&self, d: &Delivery, user: &str, expires_at: i64) -> Result<Share, String> {
+        if d.reply {
+            return Err("reply resources cannot be shared".into());
+        }
         let now = steve_store::now();
         if expires_at <= now {
             return Err("expires_at must be a future Unix millisecond timestamp".into());
@@ -623,7 +633,7 @@ impl Service {
     pub fn shared(&self, token: &str) -> Result<Option<Delivery>, StoreError> {
         let id=self.store.reader(|c| Ok::<_,StoreError>(c.query_row("SELECT delivery_id FROM delivery_shares WHERE token=? AND revoked_at IS NULL AND expires_at>?",params![token,steve_store::now()],|r|r.get::<_,String>(0)).optional()?))?;
         match id {
-            Some(id) => self.get(&id, None),
+            Some(id) => Ok(self.get(&id, None)?.filter(|d| !d.reply)),
             None => Ok(None),
         }
     }
@@ -709,15 +719,14 @@ impl Service {
         let (hash, size, mime, name) = match content {
             None => (&d.sha256, d.size, d.mime.clone(), d.name.clone()),
             Some(path) if bundle::plain(path) => {
-                if d.name.to_ascii_lowercase().ends_with(".zip") {
-                    let o = d.manifest.get(path).ok_or("resource not found")?;
+                if let Some(o) = d.manifest.get(path) {
                     (
                         &o.sha256,
                         o.size,
                         o.mime.clone(),
                         path.rsplit('/').next().unwrap_or(path).into(),
                     )
-                } else if path == d.name {
+                } else if d.mime != "application/zip" && path == d.name {
                     (&d.sha256, d.size, d.mime.clone(), d.name.clone())
                 } else {
                     return Err("resource not found".into());

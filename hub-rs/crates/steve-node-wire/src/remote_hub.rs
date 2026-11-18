@@ -148,6 +148,10 @@ impl HubTools for RemoteTools {
 
 #[async_trait]
 impl HubFiles for RemoteFiles {
+    async fn capture_reply(&self, q: ReplyCapture) -> ApiResult<String> {
+        self.0.go(REPLY_CAPTURE, &q, None).await
+    }
+
     async fn fetch(
         &self,
         access: FileAccess,

@@ -8,7 +8,7 @@ import { st } from "@/store"
 import { A2uiPending, useA2uiNested } from "@/a2ui/host"
 import { useT } from "@/i18n"
 import { currentHub } from "@/hub"
-import { markdownImageSource, type MarkdownImageSource } from "@/markdown-images"
+import { historicalReplyMarker, historicalReplyPath, markdownImageSource, replyDeliveryUrl, replyFileReason, replyImageHint, type MarkdownImageSource } from "@/markdown-images"
 import { Button } from "@/components/ui/button"
 
 /* A2UI blocks (ST-46) draw with the app's controls and the stats chart: loaded the first time a reply carries one */
@@ -112,7 +112,7 @@ function Table({ node, children, className, ...rest }: ComponentProps<DefaultCom
     </div>
   )
 }
-type Hast = { type: string; tagName?: string; children?: Hast[] }
+type Hast = { type: string; tagName?: string; children?: Hast[]; properties?: Record<string, unknown> }
 const countRows = (n?: Hast): number => !n ? 0 : n.tagName === "tbody" ? (n.children ?? []).filter((c) => c.tagName === "tr").length
   : (n.children ?? []).reduce((s, c) => s + countRows(c), 0)
 
@@ -125,7 +125,7 @@ function A2uiCode(props: CodeProps) {
 }
 
 type ImageProps = ComponentProps<DefaultComponents["img"]>
-function MarkdownImage({ source, ...props }: ImageProps & { source: MarkdownImageSource | null }) {
+function MarkdownImage({ source, reason, ...props }: ImageProps & { source: MarkdownImageSource | null; reason?: ReturnType<typeof replyFileReason> }) {
   const t = useT(), root = useRef<HTMLSpanElement>(null), [failed, setFailed] = useState(false), [attempt, setAttempt] = useState(0)
   // Cached failures may have completed before React attached the event handlers.
   useEffect(() => {
@@ -142,17 +142,36 @@ function MarkdownImage({ source, ...props }: ImageProps & { source: MarkdownImag
     {(!source || failed) && <span className="my-3 inline-flex max-w-full flex-wrap items-center gap-2 rounded-md border px-3 py-2 type-footnote text-muted-foreground" data-md-image-error>
       <span role="status" className="min-w-0 break-words">
         {props.alt && <span className="mr-2 font-medium text-foreground">{props.alt}</span>}
-        {t(source ? "misc:markdown.imageFailed" : "misc:markdown.imageUnavailable")}
+        {reason ? t(`misc:markdown.fileUnavailable.${reason}`) : t(source ? "misc:markdown.imageFailed" : "misc:markdown.imageUnavailable")}
       </span>
       {source && <Button type="button" variant="outline" size="xs" onClick={(e) => { e.preventDefault(); e.stopPropagation(); setFailed(false); setAttempt((n) => n + 1) }}>{t("common:action.retry")}</Button>}
     </span>}
   </span>
 }
 function Image(props: ImageProps) {
-  const source = typeof props.src === "string" ? markdownImageSource(props.src, currentHub()) : null
-  return <MarkdownImage key={source?.src ?? String(props.src)} {...props} source={source} />
+  const reason = replyFileReason(props.src)
+  const source = !reason && typeof props.src === "string" ? markdownImageSource(props.src, currentHub()) : null
+  return <MarkdownImage key={source?.src ?? String(props.src)} {...props} source={source} reason={reason} />
 }
 const hasImage = (n?: Hast): boolean => n?.tagName === "img" || !!n?.children?.some(hasImage)
+
+function Link({ href, children, node: _n, target: _t, rel: _r, ...rest }: ComponentProps<DefaultComponents["a"]>) {
+  const t = useT(), reason = replyFileReason(href)
+  if (reason) return <span data-md-file-unavailable className="break-words">{children} <span className="type-footnote text-muted-foreground">({t(`misc:markdown.fileUnavailable.${reason}`)})</span></span>
+  if (href?.startsWith("#/")) return <a {...rest} href={href} onClick={(e) => e.stopPropagation()} className="font-medium tabular-nums text-blue hover:underline" data-ref={/^#\/items\/(.+)/.exec(href)?.[1]}>{children}</a>
+  const delivery = replyDeliveryUrl(href, currentHub())
+  if (delivery) return <a {...rest} href={delivery} onClick={(e) => e.stopPropagation()} className="font-medium text-blue underline underline-offset-2" data-reply-delivery>{children}</a>
+  return <defaultComponents.a {...rest} href={href}>{children}</defaultComponents.a>
+}
+
+function remarkHistoricalReplyFiles() {
+  const walk = (n: MdNode) => {
+    // Definitions are evaluated by the parser: rewrite file-shaped definitions, not literal text.
+    if ((n.type === "link" || n.type === "image" || n.type === "definition") && n.url && historicalReplyPath(n.url, n.type === "image")) n.url = historicalReplyMarker
+    for (const c of n.children ?? []) walk(c)
+  }
+  return (tree: MdNode) => walk(tree)
+}
 
 const components: Components = {
   table: Table,
@@ -160,9 +179,7 @@ const components: Components = {
   // Streamdown's image has block controls. Mixed text/images cannot live inside a <p>.
   p: ({ node, children, ...props }) => hasImage(node) ? <div {...props}>{children}</div> : <defaultComponents.p {...props} node={node}>{children}</defaultComponents.p>,
   /* in-app links (item refs) stay in this tab: drop the target/rel rehype-harden adds to every link */
-  a: ({ href, children, node: _n, target: _t, rel: _r, ...rest }) => href?.startsWith("#/")
-    ? <a {...rest} href={href} onClick={(e) => e.stopPropagation()} className="font-medium tabular-nums text-blue hover:underline" data-ref={/^#\/items\/(.+)/.exec(href)?.[1]}>{children}</a>
-    : <defaultComponents.a {...rest} href={href}>{children}</defaultComponents.a>,
+  a: Link,
   code: (props) => !("data-block" in props) ? <defaultComponents.code {...props} />
     : /\blanguage-html\b/.test(props.className ?? "") ? <HtmlBlock {...props} />
     : /\blanguage-a2ui\b/.test(props.className ?? "") ? <A2uiCode {...props} /> : <defaultComponents.code {...props} />,
@@ -172,7 +189,14 @@ const components: Components = {
 const plugins = { cjk, code, mermaid }
 const remarkPlugins = [...Object.values(defaultRemarkPlugins), remarkBreaks, remarkHtmlAsText, remarkItemRefs]
 /* Streamdown's defaults minus rehype-raw: sanitize + harden still apply to what markdown itself produces */
-const rehypePlugins = [defaultRehypePlugins.sanitize, defaultRehypePlugins.harden]
+function rehypeReplyImageHints() {
+  const walk = (n: Hast) => {
+    if (n.tagName === "img" && n.properties && typeof n.properties.src === "string") n.properties.src = replyImageHint(n.properties.src)
+    for (const c of n.children ?? []) walk(c)
+  }
+  return (tree: Hast) => walk(tree)
+}
+const rehypePlugins = [defaultRehypePlugins.sanitize, rehypeReplyImageHints, defaultRehypePlugins.harden]
 
 /** `streaming`: the text is still being written (unclosed markdown is completed, a caret follows the end) */
 /* a document of a delivered package: its relative images and links point into the package; an absolute URL stays */
@@ -187,8 +211,8 @@ function remarkRebase(resolve: (ref: string) => string | null) {
   }
 }
 
-export default function MarkdownImpl({ text, className, streaming, resolve }: { text: string; className?: string; streaming?: boolean; resolve?: (ref: string) => string | null }) {
-  const remark = useMemo(() => resolve ? [...remarkPlugins, remarkRebase(resolve)] : remarkPlugins, [resolve])
+export default function MarkdownImpl({ text, className, streaming, resolve, replyFiles }: { text: string; className?: string; streaming?: boolean; replyFiles?: boolean; resolve?: (ref: string) => string | null }) {
+  const remark = useMemo(() => resolve ? [...remarkPlugins, remarkRebase(resolve)] : replyFiles ? [...remarkPlugins, remarkHistoricalReplyFiles] : remarkPlugins, [resolve, replyFiles])
   return (
     <Streamdown className={cn("md", className)} plugins={plugins} components={components} remarkPlugins={remark} rehypePlugins={rehypePlugins}
       shikiTheme={["github-light", "github-dark"]} controls={{ mermaid: { panZoom: false }, table: false }} tableMaxHeight="none"

@@ -299,6 +299,12 @@ impl WorkspaceExecutor for RemoteNode {
         &self,
         mut q: ExecutionDeliveryRead,
     ) -> ApiResult<DeliveryChunk> {
+        if q.reply {
+            self.needs(
+                steve_node_api::REPLY_DELIVERY_SCOPE.1,
+                EXECUTION_DELIVERY_READ,
+            )?;
+        }
         q.max = q.max.min(crate::envelope::CHUNK_BYTES);
         self.go(EXECUTION_DELIVERY_READ, &q, None, false).await
     }
