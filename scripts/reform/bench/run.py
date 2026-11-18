@@ -439,13 +439,17 @@ class Processes:
             return {"process_groups_remaining": sorted(remaining)}
 
 
-def phase(name, seconds, hub, db, client, config, env, processes, binary):
+def phase(name, seconds, hub, db, client, config, env, processes, binary,
+          samples=None, cpu_meter=None):
     start = time.perf_counter()
     deadline = start + seconds
     stop = threading.Event()
     probe = LockProbe(db, config["lock_interval_ms"] / 1000)
     disk = DiskMeter(hub.pid)
-    disk.sample(process_table(), baseline=True)
+    table = process_table()
+    disk.sample(table, baseline=True)
+    if cpu_meter is not None:
+        cpu_meter.sample(table, baseline=True)
     reads, writes, cli, thread_errors = [], [], [], []
     def get_loop():
         local = Client(client.base, client.timeout, client.cookie)
@@ -503,10 +507,16 @@ def phase(name, seconds, hub, db, client, config, env, processes, binary):
         for thread in threads:
             thread.join(timeout=config["request_timeout_s"] + 6)
     duration = time.perf_counter() - start
-    disk.sample(process_table())
+    table = process_table()
+    disk.sample(table)
     result = {"target_s": seconds, "elapsed_s": duration, "lock": probe.result(),
               "disk": disk.result(duration), "worker_errors": thread_errors}
     if name == "load":
+        if samples is not None:
+            samples["reads_ms"] = [r["ms"] for r in reads]
+        if cpu_meter is not None:
+            cpu_meter.sample(table)
+            result["cpu"] = cpu_meter.result(len(reads) + len(writes))
         result.update({"reads": requests_summary(reads), "writes": requests_summary(writes),
                        "read_requests_per_s": len(reads) / duration,
                        "write_requests_per_s": len(writes) / duration,
