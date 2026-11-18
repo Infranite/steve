@@ -300,6 +300,11 @@ pub(crate) fn open_draft_as(
         params![d.id, id],
     )?;
     messages::event(tx, &t.ws, &t.space_id, &id);
+    if t.mode == Mode::Own
+        && let Some(src) = &t.source_message_id
+    {
+        crate::incoming_reactions::supersede(tx, &t.ws, src)?;
+    }
     Ok((id, d.id))
 }
 

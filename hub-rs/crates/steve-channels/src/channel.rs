@@ -140,6 +140,44 @@ impl HandleRef {
     }
 }
 
+/// Provenance supplied by the channel, never inferred from the reacting account or emoji.
+/// A user-token API call and a click can have the same provider identity.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReactionOrigin {
+    Manual,
+    Automated,
+    #[default]
+    Unknown,
+}
+
+impl ReactionOrigin {
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::Manual => "manual",
+            Self::Automated => "automated",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+/// An incoming reaction change. Missing chat ids are allowed for providers such as Feishu;
+/// the target must then be resolved through a message seen by this connection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReactionEvent {
+    pub space_ext_id: Option<String>,
+    pub message_ext_id: Option<String>,
+    /// The delivery id of the target message, scoped to the receiving connection.
+    pub message_source_id: Option<String>,
+    pub actor: HandleRef,
+    pub actor_name: Option<String>,
+    pub origin: ReactionOrigin,
+    pub emoji: String,
+    /// Provider action time, Unix ms. Removals at the same time win over additions.
+    pub at: i64,
+    pub removed: bool,
+}
+
 /// `space_info`: what a new space row gets.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SpaceInfo {

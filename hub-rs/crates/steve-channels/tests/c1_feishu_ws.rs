@@ -182,6 +182,48 @@ const MSGS: &str = "SELECT count(*) FROM chan_messages WHERE ?1 = ?1 AND directi
 const EVENTS: &str = "SELECT count(*) FROM ext_events WHERE ?1 = ?1";
 
 #[tokio::test(flavor = "multi_thread")]
+async fn native_reaction_events_are_stored_without_inventing_manual_provenance() {
+    let h = setup().await;
+    let lc = start(&h).await;
+    let message = fixture("message_group_plain").unwrap();
+    let mid = message["event"]["message"]["message_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let actor = message["event"]["sender"]["sender_id"].clone();
+    let event_id = h.fake.ws_push_envelope(message);
+    h.fake.ws_wait_acked(&event_id, T).await.unwrap();
+    until(&h, MSGS, 1).await;
+    let created = json!({"schema":"2.0", "header":{"event_type":"im.message.reaction.created_v1", "app_id":ids::APP_ID},
+        "event":{"message_id":mid,"reaction_type":{"emoji_type":"THUMBSUP"},"operator_type":"user", "user_id":actor,
+            "action_time":"1761900004000", "origin":"manual"}});
+    let id = h.fake.ws_push_envelope(created.clone());
+    h.fake.ws_wait_acked(&id, T).await.unwrap();
+    assert_eq!(
+        n(
+            &h,
+            "SELECT count(*) FROM chan_message_reactions WHERE origin='unknown' AND removed=0 AND ?1=?1"
+        ),
+        1
+    );
+    let mut deleted = created.clone();
+    deleted["header"]["event_type"] = json!("im.message.reaction.deleted_v1");
+    deleted["event"]["action_time"] = json!("1761900005000");
+    let id = h.fake.ws_push_envelope(deleted);
+    h.fake.ws_wait_acked(&id, T).await.unwrap();
+    let id = h.fake.ws_push_envelope(created);
+    h.fake.ws_wait_acked(&id, T).await.unwrap();
+    assert_eq!(
+        n(
+            &h,
+            "SELECT count(*) FROM chan_message_reactions WHERE removed=1 AND ?1=?1"
+        ),
+        1
+    );
+    lc.stop().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn group_mention_over_the_long_connection() {
     let h = setup().await;
     let lc = start(&h).await;

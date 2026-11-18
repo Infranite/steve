@@ -129,6 +129,11 @@ impl ConnSink {
         self.channels.on_message(&self.ws, &self.conn, msg).await
     }
 
+    pub fn reaction(&self, ev: crate::ReactionEvent) -> ChannelResult<()> {
+        self.open()?;
+        self.channels.on_reaction(&self.ws, &self.conn, ev)
+    }
+
     /// A checked generic connector event. Connection/workspace are bound to this live run.
     pub async fn connector_event(
         &self,
@@ -151,6 +156,17 @@ impl ConnSink {
 /// As a [`MessageSink`] for code written against it: only for its own workspace and connection.
 #[async_trait]
 impl MessageSink for ConnSink {
+    async fn reaction_event(
+        &self,
+        ws: &str,
+        conn: &str,
+        ev: crate::ReactionEvent,
+    ) -> ChannelResult<()> {
+        if ws != self.ws || conn != self.conn {
+            return Err(ChannelError::not_found("连接"));
+        }
+        self.reaction(ev)
+    }
     async fn inbound(&self, ws: &str, conn: &str, msg: InboundMessage) -> ChannelResult<Inbound> {
         if ws != self.ws || conn != self.conn {
             return Err(ChannelError::not_found("连接"));

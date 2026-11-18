@@ -23,12 +23,17 @@ const card2: CardAttachment = { type: "card", schema: 2, format: "user_dsl", tit
 ] }
 const msg = (id: string, card: CardAttachment): ChanMessage => ({ id, space_id: "space", direction: "in", sender: { name: "同事", party_id: null }, persona_id: null, on_behalf: "none", text: "卡片文本回退", attachments: [card], status: "received", work_item_id: null, decision_id: null, created: 1, sent: null, purged: null, basis: null })
 function Fixture() {
-  const [one, setOne] = useState(msg("card_one", card1)), [two, setTwo] = useState(msg("card_two", card2))
+  const [one, setOne] = useState<ChanMessage>({ ...msg("card_one", card1), reactions: [
+    { actor: { name: "你", party_id: null, account_id: "owner" }, emoji: "👍", origin: "manual", at: 1761900004000 },
+    { actor: { name: "助手", party_id: null, account_id: "assistant" }, emoji: "✅", origin: "automated", at: 1761900005000 },
+    { actor: { name: "同事", party_id: null, account_id: "peer" }, emoji: "👀", origin: "unknown", at: 1761900006000 },
+  ] }), [two, setTwo] = useState(msg("card_two", card2))
   useEffect(() => {
     const purge = () => setOne(m => ({ ...m, text: null, purged: 2 }))
     const recall = () => setTwo(m => ({ ...m, status: "recalled" }))
-    window.addEventListener("fixture-purge", purge); window.addEventListener("fixture-recall", recall)
-    return () => { window.removeEventListener("fixture-purge", purge); window.removeEventListener("fixture-recall", recall) }
+    const unreact = () => setOne(m => ({ ...m, reactions: m.reactions?.filter(r => r.emoji !== "👍") }))
+    window.addEventListener("fixture-purge", purge); window.addEventListener("fixture-recall", recall); window.addEventListener("fixture-unreact", unreact)
+    return () => { window.removeEventListener("fixture-purge", purge); window.removeEventListener("fixture-recall", recall); window.removeEventListener("fixture-unreact", unreact) }
   }, [])
   return <main style={{ maxWidth: 720, margin: "auto", padding: 20 }} className="flex flex-col gap-5">
     <ChannelMessageBody message={one} /><ChannelMessageBody message={two} />

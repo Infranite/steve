@@ -334,6 +334,14 @@
 //! - Item types: `message` and `gap` (R); `message_recalled` `{chat_id, source_id?, id?}`,
 //!   `message_edited` `{…, edited_ms}` and `chat` `{chat_id, change: joined|left|renamed|members}`
 //!   (O; → `ConnSink::space_event`). The Hub skips an unknown type but still acks it.
+//! - Optional `reaction` items: `{type:"reaction", chat_id, id?, source_id?, actor:Sender,
+//!   emoji, change:"created"|"removed", action_ms, origin?:"manual"|"automated"|"unknown"}`.
+//!   `id`/`source_id` identify the reacted-to message, not the event (at least one required).
+//!   The action time is Unix ms; removals win ties and stale additions cannot undo a removal.
+//!   `manual` requires affirmative evidence of a human action; a user account, `is_mine`, emoji
+//!   choice or absence of a bot marker is insufficient. Missing/unknown provenance is context only;
+//!   bot actors are always automated. Services unable to distinguish user-token automation from
+//!   clicks MUST send `unknown`. This addition requires no new mandatory capability or subscription.
 //! - Flow control: at most `max_unacked_batches` batches are outstanding. When the window is full
 //!   the server waits; it never drops items silently. If it has to discard, for example when its
 //!   buffer overflows, it emits a `gap` for the affected chats.

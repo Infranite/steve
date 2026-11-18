@@ -28,12 +28,15 @@ use super::ws::{self, WsError, WsHandle, WsHandler, WsOptions};
 use super::{chats, send};
 use crate::channel::{
     ChannelAdapter, ChannelFeatures, HandleRef, InboundMessage, MemberInfo, Mention, OutContent,
-    ReactionKind, SendTarget, Sender, SpaceEvent, SpaceInfo, SpaceKind,
+    ReactionEvent, ReactionKind, ReactionOrigin, SendTarget, Sender, SpaceEvent, SpaceInfo,
+    SpaceKind,
 };
 use crate::service::MessageSink;
 
 /// The message event this module maps; member and chat events are [`chats::parse_chat_event`]'s.
 pub const RECEIVE: &str = "im.message.receive_v1";
+pub const REACTION_CREATED: &str = "im.message.reaction.created_v1";
+pub const REACTION_DELETED: &str = "im.message.reaction.deleted_v1";
 /// `event_id`s remembered at most …
 pub const SEEN_MAX: usize = 10_000;
 /// … and for this long.
@@ -502,6 +505,37 @@ impl SeenEvents {
 pub enum Queued {
     Message(Box<InboundMessage>),
     Space(SpaceEvent),
+    Reaction(ReactionEvent),
+}
+
+/// Native Feishu identifies user/app, but supplies no manual-vs-user-token-automation evidence.
+/// Keep native user events as context; never invent manual provenance from an account id.
+pub fn parse_reaction(env: &Value) -> Option<ReactionEvent> {
+    let removed = match s(&env["header"], "event_type") {
+        REACTION_CREATED => false,
+        REACTION_DELETED => true,
+        _ => return None,
+    };
+    let e = &env["event"];
+    let (actor, origin) = match s(e, "operator_type") {
+        "user" => (handle_of(&e["user_id"], false)?, ReactionOrigin::Unknown),
+        "app" => (
+            HandleRef::new(APP_SYSTEM, opt(e, "app_id")?),
+            ReactionOrigin::Automated,
+        ),
+        _ => return None,
+    };
+    Some(ReactionEvent {
+        space_ext_id: opt(e, "chat_id"),
+        message_ext_id: Some(opt(e, "message_id")?),
+        message_source_id: None,
+        actor,
+        actor_name: None,
+        origin,
+        emoji: opt(&e["reaction_type"], "emoji_type")?,
+        at: s(e, "action_time").parse::<i64>().ok().filter(|t| *t > 0)?,
+        removed,
+    })
 }
 
 /// The ws handler of one bot connection.
@@ -550,6 +584,17 @@ impl FeishuInbound {
             tracing::warn!(app, "feishu ws: event of another app ignored");
             return Ok(());
         }
+        // Durable reaction folding handles replay. Do not mark its event id seen before the
+        // transaction succeeds: a failed write must still be retried by Feishu.
+        if let Some(ev) = parse_reaction(&env) {
+            if let Some((ch, ws, conn)) = &self.others {
+                return ch.on_reaction(ws, conn, ev).map_err(|e| e.to_string());
+            }
+            return self
+                .queue
+                .send(Queued::Reaction(ev))
+                .map_err(|_| "feishu ws: inbound worker stopped".to_string());
+        }
         if let Some(id) = opt(header, "event_id")
             && !lock(&self.seen).insert(&id, steve_store::now())
         {
@@ -589,6 +634,7 @@ impl Queued {
         match self {
             Self::Message(m) => &m.space_ext_id,
             Self::Space(ev) => ev.space_ext_id(),
+            Self::Reaction(ev) => ev.space_ext_id.as_deref().unwrap_or(""),
         }
     }
 }
@@ -665,6 +711,11 @@ async fn run_lane(
                 let ext = ev.space_ext_id().to_string();
                 if let Err(e) = sink.space_event(&ws, &conn, ev).await {
                     tracing::warn!(conn, space = ext, "feishu ws: space event failed: {e}");
+                }
+            }
+            Queued::Reaction(ev) => {
+                if let Err(e) = sink.reaction_event(&ws, &conn, ev).await {
+                    tracing::warn!(conn, "feishu ws: reaction failed: {e}");
                 }
             }
         }

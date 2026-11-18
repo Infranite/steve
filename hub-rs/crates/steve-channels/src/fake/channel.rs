@@ -64,6 +64,13 @@ pub struct FakeChannel {
     pub fail_reactions: Mutex<bool>,
     /// `add_reaction` waits this long first (the ack must not hold the reply up for long).
     pub reaction_delay: Mutex<Option<std::time::Duration>>,
+    /// Hold one detached reaction until a test explicitly releases it (no wall-clock assumption).
+    pub reaction_pause: Mutex<
+        Option<(
+            std::sync::Arc<tokio::sync::Barrier>,
+            std::sync::Arc<tokio::sync::Barrier>,
+        )>,
+    >,
 }
 
 impl FakeChannel {
@@ -291,6 +298,11 @@ impl ChannelAdapter for FakeChannel {
         ext_msg_id: &str,
         kind: ReactionKind,
     ) -> Result<String, AdapterError> {
+        let pause = lock(&self.reaction_pause).take();
+        if let Some((entered, resume)) = pause {
+            entered.wait().await;
+            resume.wait().await;
+        }
         let delay = *lock(&self.reaction_delay);
         if let Some(d) = delay {
             tokio::time::sleep(d).await;

@@ -1484,7 +1484,18 @@ pub fn messages_of(
                     .flatten()
                     .filter(|x| x.space_id == id && in_ws(c, cm, ws));
                 v["channel_message"] = match src {
-                    Some(x) => serde_json::to_value(x).map_err(steve_modules::ApiError::from)?,
+                    Some(mut x) => {
+                        x.reactions = if x.purged.is_none() {
+                            crate::incoming_reactions::list(
+                                c,
+                                &x.id,
+                                spaces::viewer_mask(c, &x.space_id, &viewer.user)?,
+                            )?
+                        } else {
+                            Vec::new()
+                        };
+                        serde_json::to_value(x).map_err(steve_modules::ApiError::from)?
+                    }
                     None => Value::Null,
                 };
             }
