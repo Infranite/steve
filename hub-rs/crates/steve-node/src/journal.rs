@@ -207,10 +207,6 @@ impl Journal {
                     .pragma_update(None, "user_version", VERSION)
                     .map_err(internal)?;
                 let inc = t.bump("incarnation")?;
-                // A restart always resumes a sweep, even if the previous sweep finished recently.
-                t.c()
-                    .execute("DELETE FROM meta WHERE key='prune_after'", [])
-                    .map_err(internal)?;
                 t.mark_unknown()?;
                 t.optional_disk_update(|| {
                     t.interrupt_disk_records(
@@ -778,7 +774,6 @@ impl Tx<'_> {
             }
         }
         self.compact()?;
-        self.prune(crate::now())?;
         Ok(moved)
     }
 
@@ -840,6 +835,13 @@ impl Tx<'_> {
             && Self::op_streams(op, execution)?
                 .iter()
                 .all(|s| self.head(s).is_none_or(|h| h.produced == h.acknowledged)))
+    }
+
+    pub(crate) fn resume_pruning(&self) -> ApiResult<()> {
+        self.c()
+            .execute("DELETE FROM meta WHERE key='prune_after'", [])
+            .map_err(internal)?;
+        Ok(())
     }
 
     /// One bounded slice of an hourly sweep; persist the cursor with the deletions, so failure or
@@ -1580,9 +1582,6 @@ mod retention_tests {
             })
         };
         j.tx(|t| {
-            t.c()
-                .execute("INSERT INTO meta VALUES ('prune_after',?1)", [i64::MAX])
-                .map_err(internal)?;
             for (name, age, finished, acked) in [
                 ("old", old, true, true),
                 ("young", now, true, true),
@@ -1755,6 +1754,29 @@ mod retention_tests {
                 durable: vec![mark]
             })?);
             assert_eq!(t.heads()?.len(), 1);
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn failed_pruning_cannot_roll_back_a_committed_ack() {
+        let (j, _) = Journal::open(Path::new(":memory:")).unwrap();
+        let now = crate::now();
+        let mark = j
+            .tx(|t| add(t, "old", now - RETENTION_MS - 1, true, None, false))
+            .unwrap();
+        j.tx(|t| {
+            t.c().execute_batch("CREATE TRIGGER fail_prune BEFORE DELETE ON ops BEGIN SELECT RAISE(ABORT,'prune failed'); END").map_err(internal)?;
+            t.ack(&EventAck { durable: vec![mark.clone()] })
+        }).unwrap();
+        assert!(j.tx(|t| t.prune(now)).is_err());
+        consistent(&j);
+        j.read(|t| {
+            assert!(t.covered(&[mark]));
+            assert_eq!(t.heads()?[0].acknowledged, 1);
+            assert!(t.unacked_past(&HashMap::new(), 10)?.is_empty());
+            assert!(t.op(&OperationId::new("old").unwrap())?.is_some());
             Ok(())
         })
         .unwrap();
