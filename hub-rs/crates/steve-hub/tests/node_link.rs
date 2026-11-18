@@ -180,6 +180,12 @@ async fn a_node_with_many_historical_streams_links_and_reconciles_every_head() {
         .unwrap();
     }
     tx.commit().unwrap();
+    drop(db);
+    local.shutdown().await;
+    drop(local);
+    // the Node keeps its stream heads in memory: rows seeded behind it count from its next open
+    let (cfg, _) = local_config(dir.path(), &node);
+    let local = LocalNode::open(cfg).unwrap();
     let pairing = Pairing {
         hub_url: h.url(),
         node_id: node.to_string(),
