@@ -132,7 +132,9 @@ async fn silence_past_the_budget_closes_the_link() {
     assert!(w.hub_conn.is_closed());
 }
 
-#[tokio::test]
+// On the paused clock, as `silence_past_the_budget_closes_the_link`: in real time a runner that stalls
+// the runtime past `dead_after` closes the link (#375).
+#[tokio::test(start_paused = true)]
 async fn heartbeats_keep_an_idle_link() {
     let fake = FakeNode::new("n1");
     let (h, n) = pair();

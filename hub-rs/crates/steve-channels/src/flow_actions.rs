@@ -338,6 +338,7 @@ impl Action for ReplyAs {
                 instruction: Some(text).filter(|t| !t.trim().is_empty()),
                 history: None,
                 revise: None,
+                research: None,
             };
             match self
                 .replies

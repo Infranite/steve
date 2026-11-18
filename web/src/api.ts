@@ -8,11 +8,20 @@ import type { Workflow } from "./workflow"
 import type { Delivery, DeliveryShare } from "./delivery"
 export type ItemStatus = "prop" | "run" | "wait" | "pause" | "done" | "drop" | "fail" | "block"
 export type PlanStep = { step: string; done: boolean; left?: boolean }
+export type Closeout = {
+  status: "syncing" | "sync_failed" | "no_pr" | "waiting_checks" | "checks_failed" | "conflict" | "behind" | "draft"
+    | "head" | "uncommitted" | "accepted_unknown" | "closed" | "waiting_github" | "waiting_result" | "ready"
+    | "merge_retry" | "merge_method" | "awaiting_approval" | "manual_merge" | "merged"
+  next_owner: "steve" | "agent" | "user" | "none"
+  pr: { number: number; url: string; head: string; state: string; checks: { passed: number; pending: number; failed: number; other: number; failing: string[] } | null } | null
+  last_success_at: number | null; sync_error: string | null; merge_error: string | null
+}
 export type RItem = {
   id: string; workspace_id: string; no: number; title: string; status: ItemStatus; stage: string; bot_id: string | null; project_id: string | null; cwd: string | null; branch: string | null
   plan: PlanStep[]; now: string; accept_mode: string | null; priority: string; archived: boolean; star: boolean; due: string | null; snooze: { label: string; until: number } | null
   source: [string, string]; parent: { item?: string | null; session?: string | null; at?: number | null } | null; design_gate?: boolean; phase?: "ready" | "active" | "closing" | "closed"; cycle?: number; created: number; updated: number
   goal: string; goals: number; tags: string[]; deps: string[]; sessionIds: string[]; open: string[]; queued: number; live: boolean
+  closeout?: Closeout
   workflow_paused?: boolean; workflow_cycle?: number; workflow_failed?: string[]; workflow_attempt?: number; workflow_superseded?: boolean
 }
 export type DependencyWait = {
@@ -49,6 +58,12 @@ export type RBot = { selection_validation?: "supported" | "unsupported" | "unkno
 /** GET /sessions/:id/resume: the harness's own session, how to resume it there, and whether its transcript is on the Hub's machine */
 export type RResume = { harness: string; id: string | null; cwd: string; cwd_exists: boolean; command: string | null; fork_command?: string | null; transcript_checked?: boolean; transcript: { path: string; updated: number | null; id: string | null; cwd: string | null; matches: boolean } | null }
 export type RProject = { id: string; workspace_id: string; name: string; description: string; device_id: string; path: string; kind: "git" | "dir"; worktree: boolean; default_bot: string | null; release: { kind: string; cmd: string; done_when?: "merge" | "tag" } | null; archived: boolean; created: number; updated: number }
+export type NewProjectInput = { name: string; path: string; description?: string; worktree?: boolean; default_bot?: string | null; done_when?: "merge" | "tag" | null; node?: string }
+export type ProjectDestination = { parent: string; directory: string; node: "hub" }
+export type ProjectSetup = Omit<NewProjectInput, "path"> & ProjectDestination & { preview: string } & (
+  { mode: "empty" } | { mode: "clone"; remote: string; branch?: string }
+)
+export type CloneProgress = { phase: "connecting" | "receiving" | "resolving" | "checkout" | "registering"; percent?: number }
 export type RWorkspace = { id: string; name: string; description: string; item_prefix: string; sort: number; created: number; role?: string }
 export type RTag = { id: string; name: string; cat: string; description: string; created_by: string; created: number }
 /** an item whose category Steve filled in unsure (ST-34) */
@@ -185,16 +200,51 @@ async function refused(e: unknown): Promise<never> {
   throw e
 }
 const CUT = {}
-async function req<T>(method: string, path: string, body?: unknown, seen?: (r: Response) => void): Promise<T> {
+async function apiResponse(method: string, path: string, body?: unknown, signal?: AbortSignal): Promise<Response> {
   /* a read that stalls (proxy, dropped connection) must fail, not leave a view loading forever; a delete (no body) is
    * keepalive so one sent as the page goes away, like a forget whose Undo ran out, still reaches the Hub */
-  const r = await fetch(hubUrl("/api" + path), { method, headers: wsHeaders(body !== undefined ? { "content-type": "application/json" } : {}), body: body !== undefined ? JSON.stringify(body) : undefined, credentials: "include", signal: method === "GET" ? AbortSignal.timeout(30_000) : undefined, keepalive: method === "DELETE" }).catch(refused)
+  const r = await fetch(hubUrl("/api" + path), { method, headers: wsHeaders(body !== undefined ? { "content-type": "application/json" } : {}), body: body !== undefined ? JSON.stringify(body) : undefined, credentials: "include", signal: signal ?? (method === "GET" ? AbortSignal.timeout(30_000) : undefined), keepalive: method === "DELETE" }).catch(refused)
   if (r.status === 401) { const j = await r.json().catch(() => ({})); if (r.headers.get("x-steve-origin") === "refused") signIn.refused = true; throw new Unauthenticated(j.login ?? null, j.token === true) }
+  return r
+}
+async function req<T>(method: string, path: string, body?: unknown, seen?: (r: Response) => void, signal?: AbortSignal): Promise<T> {
+  const r = await apiResponse(method, path, body, signal)
   const j = await r.json().catch(() => (r.ok && method === "GET" ? CUT : {}))
   if (j === CUT) throw new Error(t("shell:http.incomplete")) // a cut-off body used to come back as {} and break the caller silently
   if (!r.ok) throw new Error(j.error ?? t("shell:http.failed", { status: r.status }))
   seen?.(r)
   return j as T
+}
+async function setupProject(p: ProjectSetup, progress: (p: CloneProgress) => void): Promise<RProject> {
+  const interrupted = () => new Error(t("pages:projects.setupInterrupted"))
+  const r = await apiResponse("POST", "/projects/setup", p, AbortSignal.timeout(660_000))
+    .catch((e) => { throw e instanceof Unauthenticated ? e : interrupted() })
+  if (!r.ok) {
+    const answer = await r.json().catch(() => ({}))
+    throw new Error(answer.error ?? t("shell:http.failed", { status: r.status }))
+  }
+  // A POST so the clone URL is never in a query string. The Hub sends SSE JSON and
+  // keepalives, and only the terminal project record confirms registration.
+  if (!r.headers.get("content-type")?.startsWith("text/event-stream") || !r.body) throw interrupted()
+  const reader = r.body.getReader(), decoder = new TextDecoder()
+  let pending = ""
+  try {
+    for (;;) {
+      const read = await reader.read().catch(() => { throw interrupted() })
+      if (read.done) throw interrupted()
+      const lines = (pending + decoder.decode(read.value, { stream: true })).split("\n")
+      pending = lines.pop()!
+      for (const line of lines) {
+        if (!line.startsWith("data: ")) continue
+        const event = JSON.parse(line.slice(6)) as CloneProgress | { project: RProject } | { error: string }
+        if ("error" in event) throw new Error(event.error)
+        if ("project" in event) return event.project
+        progress(event)
+      }
+    }
+  } finally {
+    void reader.cancel().catch(() => {})
+  }
 }
 /* the change-log watermark each /api/state body was read at (`x-steve-cursor`): the stream resumes after it */
 const stateCursors = new WeakMap<object, string>()
@@ -300,7 +350,10 @@ export const api = {
   botWorkspaces: (id: string, ids: string[]) => req("PUT", `/bots/${id}/workspaces`, { ids }), dupBot: (id: string) => post<RBot>(`/bots/${id}/duplicate`), deleteBot: (id: string, to: string, memory: "delete" | "export") => del<{ moved: string[]; memories: any[] }>("/bots/" + id, { to, memory }), restoreBot: (id: string) => post(`/bots/${id}/restore`),
   botPrompt: (id: string) => get<{ generated: string; custom: string | null }>(`/bots/${id}/prompt`), memories: (id: string) => get<{ id: string; text: string; source: string; created: number }[]>(`/bots/${id}/memories`),
   addMemory: (id: string, text: string) => post(`/bots/${id}/memories`, { text }), editMemory: (id: string, text: string) => patch(`/memories/${id}`, { text }), deleteMemory: (id: string) => del(`/memories/${id}`), clearMemories: () => del("/memories"),
-  newProject: (p: { name: string; path: string; description?: string; worktree?: boolean; default_bot?: string | null; done_when?: "merge" | "tag" | null; node?: string }) => post<RProject>("/projects", p), patchProject: (id: string, p: Partial<RProject> & { done_when?: "merge" | "tag" | null }) => patch<RProject>("/projects/" + id, p),
+  newProject: (p: NewProjectInput) => post<RProject>("/projects", p),
+  projectDestination: (p: ProjectDestination, signal: AbortSignal) => req<{ path: string }>("POST", "/projects/setup/preview", p, undefined, signal),
+  setupProject,
+   patchProject: (id: string, p: Partial<RProject> & { done_when?: "merge" | "tag" | null }) => patch<RProject>("/projects/" + id, p),
   describeProject: (path: string) => post<{ name: string; description: string; git: boolean }>("/projects/describe", { path }),
   browse: (path: string, node = "hub") => get<RBrowse>(`/fs/browse?path=${encodeURIComponent(path)}&node=${encodeURIComponent(node)}`),
   newTag: (p: { name: string; cat: string; description: string }) => post<RTag>("/tags", p), patchTag: (id: string, p: Partial<RTag>) => patch("/tags/" + id, p), deleteTag: (id: string) => del("/tags/" + id), mergeTag: (id: string, into: string) => post(`/tags/${id}/merge`, { into }),

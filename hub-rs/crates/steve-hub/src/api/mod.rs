@@ -18,6 +18,7 @@ mod node_context;
 mod node_env;
 mod node_tags;
 pub(crate) mod outputs;
+mod project_setup;
 mod projects;
 mod sessions;
 pub mod slim;
@@ -733,6 +734,8 @@ pub fn router(st: AppState, modules: Router) -> Router {
         )
         // projects and filesystem
         .route("/projects", post(projects::create))
+        .route("/projects/setup/preview", post(project_setup::setup_preview))
+        .route("/projects/setup", post(project_setup::setup))
         .route("/projects/describe", post(projects::describe))
         .route("/projects/{id}", patch(projects::patch_one))
         .route("/fs/browse", get(projects::browse))
@@ -927,6 +930,7 @@ pub(crate) fn extras_one(r: &dyn Repo, id: &str) -> BResult<ItemExtras> {
         sessions,
         open,
         queued,
+        closeout: r.item_closeout(id)?,
         workflow_paused: None,
         workflow_cycle: None,
         workflow_failed: Vec::new(),
@@ -960,6 +964,12 @@ pub(crate) fn summary_with(mut i: Obj, x: ItemExtras) -> Obj {
                 .collect(),
         ),
     );
+    if let Some(mut closeout) = x.closeout {
+        if !x.open.is_empty() && closeout.next_owner != "none" {
+            closeout.next_owner = "user";
+        }
+        i.insert("closeout".into(), json!(closeout));
+    }
     i.insert("open".into(), json!(x.open));
     i.insert("queued".into(), json!(x.queued));
     i.insert("live".into(), json!(live));

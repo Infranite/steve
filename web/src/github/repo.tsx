@@ -1,8 +1,9 @@
 /* #/github/:repo —— 一个关联的仓库：设置（github.md §3.4）、PR、Issue、投递记录 */
 import { useHubEvents } from "@/store"
-import { useEffect, useState, type ReactNode } from "react"
+import { useEffect, useRef, useState, type ReactNode } from "react"
 import { ExternalLinkIcon, RefreshCwIcon, UnlinkIcon } from "lucide-react"
 import { Button } from "@/components/ui/button"
+import { Badge } from "@/components/affect/badge-clean"
 import { Switch } from "@/components/ui/switch"
 import { Spinner } from "@/components/ui/spinner"
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog"
@@ -10,7 +11,7 @@ import { st, tm, toast } from "@/store"
 import { go, Page, Group, Row, SectionLabel, Meta, Empty, StatusDot, ItemNo, Segmented, Chips } from "@/ui"
 import { Select } from "@/view-shared"
 import { Unwired } from "@/unwired"
-import { gh, type GhRepo, type GhPr, type GhIssue, type GhDelivery, type GhSettings } from "@/api/github"
+import { gh, type GhRepo, type GhPr, type GhIssue, type GhDelivery, type GhRun, type GhTrace, type GhSettings } from "@/api/github"
 import { NotWired } from "@/api"
 import { useOverview, Health, Loading, Failed, errMsg, type Load } from "@/github/index"
 import { t, useT } from "@/i18n"
@@ -38,8 +39,13 @@ export function RepoView({ id }: { id: string }) {
 function Repo({ r: r0, reload }: { r: GhRepo; reload: () => void }) {
   const t = useT()
   const [r, setR] = useState(r0), [tab, setTab] = useState<"prs" | "issues" | "deliveries">("prs"), [syncing, setSyncing] = useState(false), [unlink, setUnlink] = useState(false)
+  const saving = useRef(false), [settingsBusy, setSettingsBusy] = useState(false)
   const save = async (p: { project_id?: string | null; settings?: Partial<GhSettings>; enabled?: boolean }) => {
+    if (saving.current) return
+    saving.current = true
+    setSettingsBusy(true)
     try { setR(await gh.patch(r.id, p)); toast(t("common:state.saved")) } catch (e) { toast(errMsg(e)) }
+    finally { saving.current = false; setSettingsBusy(false) }
   }
   const set = <K extends keyof GhSettings>(k: K) => (v: GhSettings[K]) => void save({ settings: { [k]: v } as Partial<GhSettings> })
   const sync = async () => { setSyncing(true); try { await gh.sync(r.id); toast(t("github:repo.syncStarted")); setTimeout(reload, 2500) } catch (e) { toast(errMsg(e)) } finally { setSyncing(false) } }
@@ -68,6 +74,18 @@ function Repo({ r: r0, reload }: { r: GhRepo; reload: () => void }) {
           </Group>
         </section>
         <section>
+          <SectionLabel>{t("github:automation.title")}</SectionLabel>
+          <Group>
+            <Row title={t("github:automation.pr_review")} sub={t("github:automation.prHint")}>
+              <Switch checked={s.pr_review ?? false} disabled={!r.enabled || settingsBusy} onCheckedChange={set("pr_review")} aria-label={t("github:automation.pr_review")} data-gh-pr-review />
+            </Row>
+            <Row title={t("github:automation.issue_triage")} sub={t("github:automation.issueHint")}>
+              <Switch checked={s.issue_triage ?? false} disabled={!r.enabled || settingsBusy} onCheckedChange={set("issue_triage")} aria-label={t("github:automation.issue_triage")} data-gh-issue-triage />
+            </Row>
+          </Group>
+          <p className="mt-2 type-footnote text-muted-foreground">{t("github:automation.hint")}</p>
+        </section>
+        <section>
           <div className="mb-3"><Segmented value={tab} onChange={setTab} options={[["prs", t("github:repo.tabPrs", { n: r.open_prs })], ["issues", t("github:repo.tabIssues", { n: r.open_issues })], ["deliveries", t("github:repo.tabDeliveries")]] as const} /></div>
           <div key={tab} className="anim-in">{tab === "prs" ? <Prs repo={r.id} /> : tab === "issues" ? <Issues repo={r.id} /> : <Deliveries repo={r.id} />}</div>
         </section>
@@ -86,11 +104,20 @@ function Repo({ r: r0, reload }: { r: GhRepo; reload: () => void }) {
 }
 
 /** a list tab: loads on mount and when `dep` changes */
-function useList<T>(f: () => Promise<T[]>, dep: string) {
+function useList<T>(f: () => Promise<T[]>, dep: string, events = ["gh"]) {
   const [v, setV] = useState<Load<T[]>>({ s: "loading" })
-  const load = () => { setV({ s: "loading" }); f().then((x) => setV({ s: "ok", v: x }), (e) => setV(e instanceof NotWired ? { s: "absent" } : { s: "error", msg: errMsg(e) })) }
-  useEffect(load, [dep])
-  useHubEvents(["gh"], () => f().then((x) => setV({ s: "ok", v: x }), () => {}))
+  const seq = useRef(0)
+  const fetch = (showLoading: boolean) => {
+    const n = ++seq.current
+    if (showLoading) setV({ s: "loading" })
+    void f().then(
+      (x) => { if (n === seq.current) setV({ s: "ok", v: x }) },
+      (e) => { if (n === seq.current) setV(e instanceof NotWired ? { s: "absent" } : { s: "error", msg: errMsg(e) }) },
+    )
+  }
+  const load = () => fetch(true)
+  useEffect(() => { load(); return () => { seq.current++ } }, [dep])
+  useHubEvents(events, () => fetch(false))
   return [v, load] as const
 }
 function ListOf<T>({ v, retry, empty, row }: { v: Load<T[]>; retry: () => void; empty: [string, string]; row: (x: T) => ReactNode }) {
@@ -155,15 +182,68 @@ function Issues({ repo }: { repo: string }) {
   </>)
 }
 
+function RunTrace({ run }: { run: GhRun }) {
+  const t = useT()
+  const requesting = useRef(false), [busy, setBusy] = useState(false)
+  const report = run.item_id
+  const publish = run.publication
+  const status = run.outcome === "ignored" && run.status === "done" ? "skipped" : run.status
+  const draft = async () => {
+    if (!report || requesting.current) return
+    requesting.current = true
+    setBusy(true)
+    try { await gh.commentDraft(report); go("#/items/" + report) }
+    catch (e) { toast(errMsg(e)) }
+    finally { requesting.current = false; setBusy(false) }
+  }
+  return <li className="flex min-w-0 flex-col gap-1 border-l border-border pl-3" data-gh-run={status}>
+    <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+      <Badge dot live={status === "running"} tone={status === "failed" ? "danger" : status === "running" ? "info" : status === "done" ? "success" : "neutral"}>{t(`github:automation.run.${status}`, { defaultValue: status })}</Badge>
+      {run.flow_deleted ? <span>{run.flow_name}</span> : <a className="text-blue hover:underline" href={`#/auto/rule/${run.flow_id}?run=${encodeURIComponent(run.id)}`}>{run.flow_name}</a>}
+      {report && <a className="text-blue hover:underline" href={"#/items/" + report} data-gh-analysis-item={report}><ItemNo id={report} /></a>}
+    </div>
+    {(run.error || run.label) && <span className={run.error ? "break-words text-destructive" : "break-words"}>{run.error || run.label}</span>}
+    {publish && <div className="flex flex-wrap items-center gap-x-3 gap-y-1" data-gh-publication={publish.state}>
+      {publish.state === "available" ? <Button size="xs" variant="outline" disabled={busy} onClick={() => void draft()}>{t("github:automation.prepareComment")}</Button>
+        : <span>{t(`github:automation.publish.${publish.state}`, { defaultValue: publish.state })}</span>}
+      {publish.error && <span className="break-words text-destructive">{publish.error}</span>}
+      {publish.url?.startsWith("https://github.com/") && <a className="text-blue hover:underline" href={publish.url} target="_blank" rel="noreferrer">{t("github:automation.openComment")}</a>}
+    </div>}
+  </li>
+}
+
+function AutomationTrace({ trace }: { trace: GhTrace }) {
+  const t = useT()
+  return <div className="flex min-w-0 flex-col gap-2 text-muted-foreground" data-gh-trace={trace.reason}>
+    <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+      <Badge tone={trace.state === "matched" ? "info" : trace.state === "failed" ? "danger" : "neutral"}>{t(`github:automation.receipt.${trace.state}`)}</Badge>
+      <span>{t(`github:automation.${trace.kind}`)}{trace.number ? ` #${trace.number}` : ""}</span>
+      {trace.head && <span className="font-mono" title={trace.head}>{trace.head.slice(0, 10)}</span>}
+      {trace.state !== "matched" && <span>{t(`github:automation.reason.${trace.reason}`, { defaultValue: trace.reason })}</span>}
+    </div>
+    {trace.runs.length ? <ul className="flex min-w-0 flex-col gap-2">{trace.runs.map((run) => <RunTrace key={run.id} run={run} />)}</ul>
+      : trace.state === "matched" && <span>{t("github:automation.runUnavailable")}</span>}
+  </div>
+}
+
 function Deliveries({ repo }: { repo: string }) {
   const t = useT()
-  const [v, retry] = useList(() => gh.deliveries(repo), repo)
+  const [only, setOnly] = useState(false)
+  const [v, retry] = useList(() => gh.deliveries(repo, 50, only ? "only" : undefined), repo + only, ["gh", "run", "decision", "item"])
+  const all = t("github:automation.all"), analysis = t("github:automation.filter")
   return (<>
-    <div className="mb-2 flex items-center justify-between gap-2"><span className="type-footnote text-muted-foreground">{t("github:delivery.hint")}</span><Button size="xs" variant="ghost" className="text-muted-foreground" onClick={retry}><RefreshCwIcon />{t("common:action.refresh")}</Button></div>
+    <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+      <Chips value={only ? analysis : all} onChange={(label) => setOnly(label === analysis)} options={[all, analysis]} />
+      <Button size="xs" variant="ghost" className="text-muted-foreground" onClick={retry}><RefreshCwIcon />{t("common:action.refresh")}</Button>
+    </div>
+    <p className="mb-2 type-footnote text-muted-foreground">{t("github:delivery.hint")}</p>
     <ListOf v={v} retry={retry} empty={[t("github:delivery.empty"), t("github:delivery.emptySub")]} row={(d: GhDelivery) => {
       const [dot, label] = delivery(d.status)
-      return <Row key={d.id} data-gh-delivery={d.status} title={<span className="font-mono">{d.event}{d.action ? "." + d.action : ""}</span>}
-        sub={<Meta><span className="tabular-nums">{tm(d.received)}</span><span className="inline-flex items-center gap-1.5"><StatusDot s={dot} />{label}</span>{d.error && <span className="text-destructive">{d.error}</span>}{d.id.startsWith("poll:") && <span>{t("github:delivery.poll")}</span>}</Meta>} />
+      return <Row key={d.id} data-gh-delivery={d.status} title={<span className="break-all font-mono" title={d.id}>{d.event}{d.action ? "." + d.action : ""}</span>}
+        sub={<div className="flex min-w-0 flex-col gap-2">
+          <Meta><span className="tabular-nums">{tm(d.received)}</span><span className="inline-flex items-center gap-1.5"><StatusDot s={dot} />{label}</span>{d.error && <span className="break-words text-destructive">{d.error}</span>}{d.id.startsWith("poll:") && <span>{t("github:delivery.poll")}</span>}</Meta>
+          {d.automation && <AutomationTrace trace={d.automation} />}
+        </div>} />
     }} />
   </>)
 }

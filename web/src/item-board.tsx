@@ -2,6 +2,7 @@
  * itemDisplayState) decides its column the way the items page counts and filters it (item-lanes.ts), its "now" line
  * or open card says where it stands, and its plan gives the progress. Nothing here is made up: what Steve has no data
  * for (tool and source counts, a per-task running clock) is left out. */
+import { CloseoutSummary } from "@/item-closeout"
 import { AgentInbox, type AgentTask } from "@/components/affect/agent-inbox"
 import { isWorkflowChild, itemDisplayState, partitionSubtasks } from "@/item-workflow-relation"
 import { besideState, laneOf, planProgress } from "@/item-lanes"
@@ -26,8 +27,9 @@ export function ItemsBoard({ xs, cap }: { xs: Item[]; cap: number }) {
     const plan = i.plan?.filter((x) => x[1] === 1).map((x) => ({ label: x[0] })) ?? []
     // the step it is on is marked with its state only while a session works on it
     const next = i.plan?.find((x) => x[1] !== 1)
-    const details = (i.project || i.due || i.tags?.length || sub) ? (
+    const details = (i.closeout || i.project || i.due || i.tags?.length || sub) ? (
       <div className="flex flex-col gap-1.5">
+        {i.closeout && <CloseoutSummary value={i.closeout} compact />}
         {sub && <span className="type-footnote text-muted-foreground" data-board-subtasks={i.id}>{sub.live.length > 0 ? t("views:items.subtasksLive", { live: sub.live.length, done: sub.doneCount }) : t("views:items.subtasksDone", { count: sub.doneCount || sub.total })}</span>}
         {(i.project || i.due) && <Meta>{i.project && <ProjectChip id={i.project} plain />}{i.due && <span>{t("views:items.due", { due: dueLabel(i.due) })}</span>}</Meta>}
         {!!i.tags?.length && <Tags ids={i.tags} />}

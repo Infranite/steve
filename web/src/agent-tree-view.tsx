@@ -32,7 +32,7 @@ import { ParallelAttempts, type Attempt, type AttemptStatus, type PacLabels } fr
 /** the tree's root takes the item page's one state (item-state.ts) */
 export const ROOT_STATUS: Record<ItemState["kind"], AgentStatus> = {
   done: "done", dropped: "stopped", failed: "failed", proposed: "proposed", asking: "asking", unavailable: "blocked",
-  graphPaused: "paused", paused: "paused", blocked: "blocked", working: "running", queued: "idle", idle: "idle",
+  graphPaused: "paused", paused: "paused", blocked: "blocked", working: "running", closing: "idle", queued: "idle", idle: "idle",
 }
 
 type Action = "pause" | "resume" | "retry" | "cancel" | "single_session"

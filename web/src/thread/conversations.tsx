@@ -281,6 +281,7 @@ const REACT: Record<Reaction["state"], ["thread:reaction.ack" | "thread:reaction
 export function ReactionChip({ r }: { r?: Reaction }) {
   const t = useT()
   const x = r ? REACT[r.state] : null
+  if (r?.error) return <span className="type-footnote break-words text-muted-foreground" data-reaction="unconfirmed" title={r.error}>{t("thread:reaction.unconfirmed", { error: r.error })}</span>
   if (!r || !x) return null
   const [key, I, tone] = x, label = t(key)
   const said = r.state === "ack" ? t(r.as_user ? "thread:reaction.ackAsUser" : "thread:reaction.ackAsBot") : t(r.as_user ? "thread:reaction.changedAsUser" : "thread:reaction.changedAsBot", { label })
@@ -292,7 +293,7 @@ export function ReactionChip({ r }: { r?: Reaction }) {
 }
 
 /* a chan_out status from the Hub to its label; an unknown status shows as it is */
-const CHAN_OUT = { sent: "thread:chanOut.sent", pending: "thread:chanOut.pending", draft: "thread:chanOut.draft", failed: "thread:chanOut.failed", unknown: "thread:chanOut.unknown", discarded: "thread:chanOut.discarded", disconnected: "thread:chanOut.disconnected" } as const
+const CHAN_OUT = { sent: "thread:chanOut.sent", pending: "thread:chanOut.pending", draft: "thread:chanOut.draft", failed: "thread:chanOut.failed", blocked: "thread:chanOut.blocked", unknown: "thread:chanOut.unknown", discarded: "thread:chanOut.discarded", disconnected: "thread:chanOut.disconnected", skipped: "thread:chanOut.notSent" } as const
 
 /** what became of Steve's message in the space. A draft is closed right here, in its own conversation; sending it is
  *  approved on its card in 待处理, which shows the text that would actually go out and any disclosure warning */
@@ -300,12 +301,14 @@ export function ChanOutNote({ m }: { m?: ConvMessage }) {
   const t = useT()
   const [closed, setClosed] = useState(false)
   const s = m?.meta?.chan_out?.status as string | undefined, decision = m?.meta?.chan_out?.decision as string | undefined
+  const reason = m?.meta?.chan_out?.reason as string | undefined
   /* a new state from the Hub replaces what this click assumed */
   useEffect(() => setClosed(false), [s, decision])
-  if (!s || s === "skipped") return null
+  if (!s || (s === "skipped" && !reason)) return null
   /* only a draft can be assumed closed: whatever the Hub says past it wins over a late click */
   const shown = closed && s === "draft" ? "discarded" : s
-  const note = <div className={cn("type-callout", shown === "failed" || shown === "disconnected" ? "text-destructive" : "text-muted-foreground")} data-chan-out={shown}>{shown in CHAN_OUT ? t(CHAN_OUT[shown as keyof typeof CHAN_OUT]) : shown}</div>
+  const label = shown in CHAN_OUT ? t(CHAN_OUT[shown as keyof typeof CHAN_OUT]) : shown
+  const note = <div className={cn("type-callout", shown === "failed" || shown === "disconnected" ? "text-destructive" : "text-muted-foreground")} data-chan-out={shown}>{reason ? t("thread:chanOut.withReason", { label, reason }) : label}</div>
   if (shown !== "draft" || !decision) return note
   const busy = st.pendingActions.has("decision:" + decision)
   const discard = async () => { if (await discardOut(decision)) setClosed(true) }

@@ -111,6 +111,46 @@ pub struct RunView {
     pub error: Option<String>,
 }
 
+/// Connector-facing projection of canonical flow runs. A connector stores an event reference
+/// alongside its own receipt, then reads these rows; it does not maintain a copy of run status.
+#[derive(Debug, Serialize)]
+pub struct ConnectorRun {
+    pub id: String,
+    pub flow_id: String,
+    pub flow_name: String,
+    pub flow_deleted: bool,
+    pub status: String,
+    pub outcome: Option<String>,
+    pub label: String,
+    pub error: Option<String>,
+    pub item_id: Option<String>,
+}
+
+pub fn connector_runs(c: &Connection, ws: &str, event: &str) -> FlowResult<Vec<ConnectorRun>> {
+    let mut st = c.prepare_cached(
+        "SELECT r.id, r.flow_id, f.name, f.deleted, r.status, r.outcome, r.outcome_label, r.error, i.id
+           FROM flow_runs r JOIN flows f ON f.id = r.flow_id AND f.workspace_id = r.workspace_id
+           LEFT JOIN items i ON i.id = r.work_item_id AND i.workspace_id = r.workspace_id
+          WHERE r.workspace_id = ? AND r.event_id = ? AND r.dry_run = 0
+          ORDER BY r.started, r.id",
+    )?;
+    Ok(st
+        .query_map(params![ws, event], |r| {
+            Ok(ConnectorRun {
+                id: r.get(0)?,
+                flow_id: r.get(1)?,
+                flow_name: r.get(2)?,
+                flow_deleted: r.get(3)?,
+                status: r.get(4)?,
+                outcome: r.get(5)?,
+                label: r.get(6)?,
+                error: r.get(7)?,
+                item_id: r.get(8)?,
+            })
+        })?
+        .collect::<Result<_, _>>()?)
+}
+
 /// A row to insert.
 #[derive(Debug, Clone)]
 pub struct NewRun<'a> {

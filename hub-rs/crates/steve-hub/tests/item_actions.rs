@@ -869,3 +869,84 @@ async fn only_the_owner_switches_the_design_gate() {
         "a member's request changed nothing"
     );
 }
+
+#[tokio::test]
+async fn project_setup_requires_owner_and_a_current_preview_and_registers_after_creation() {
+    let e = start().await;
+    let parent = e._home.path().canonicalize().unwrap();
+    let mut v = json!({
+        "node": "hub", "mode": "empty", "name": "new project",
+        "parent": parent, "directory": "fresh", "preview": "not-the-destination",
+    });
+    for route in ["/api/projects/setup/preview", "/api/projects/setup"] {
+        let anon = e
+            .http
+            .post(format!("{}{route}", e.base))
+            .json(&v)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(anon.status(), 401);
+    }
+    let store = steve_store::Store::open(&e.db, steve_store::NoPublisher).unwrap();
+    let member = store
+        .users()
+        .create("setup-member", "Member", None, "member")
+        .unwrap();
+    let member_token = "project-setup-member-token";
+    store
+        .auth_sessions()
+        .create(&member, member_token, 3_600_000)
+        .unwrap();
+    for route in ["/api/projects/setup/preview", "/api/projects/setup"] {
+        let refused = e
+            .http
+            .post(format!("{}{route}", e.base))
+            .header("cookie", format!("steve_session={member_token}"))
+            .json(&v)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(refused.status(), 403);
+    }
+    let (s, preview) = e
+        .call("POST", "/api/projects/setup/preview", Some(v.clone()))
+        .await;
+    let target = parent.join("fresh");
+    assert_eq!(s, 200, "{preview}");
+    assert_eq!(preview["path"], json!(target));
+    assert!(!target.exists());
+    let (s, _) = e.call("POST", "/api/projects/setup", Some(v.clone())).await;
+    assert_eq!(s, 409);
+    assert!(!target.exists());
+    v["preview"] = preview["path"].clone();
+    v["node"] = json!("remote");
+    let (s, _) = e.call("POST", "/api/projects/setup", Some(v.clone())).await;
+    assert_eq!(s, 400);
+    assert!(!target.exists());
+    v["node"] = json!("hub");
+    let (s, answer) = e.call("POST", "/api/projects/setup", Some(v.clone())).await;
+    assert_eq!(s, 200, "{answer}");
+    let answer: Value = serde_json::from_str(
+        answer
+            .as_str()
+            .unwrap()
+            .strip_prefix("data: ")
+            .unwrap()
+            .trim(),
+    )
+    .unwrap();
+    assert_eq!(answer["project"]["kind"], "dir");
+    assert_eq!(answer["project"]["path"], json!(target));
+    assert_eq!(target.read_dir().unwrap().count(), 0);
+    let (_, state) = e.call("GET", "/api/state", None).await;
+    assert!(
+        state["projects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p == &answer["project"])
+    );
+    let (s, _) = e.call("POST", "/api/projects/setup", Some(v)).await;
+    assert_eq!(s, 409, "retry must not overwrite or register again");
+}

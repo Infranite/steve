@@ -18,8 +18,8 @@ use steve_channels::fake::feishu::{
 };
 use steve_modules::accounts::connections::{self, Connections, ConnectionsConfig};
 use steve_modules::contacts::sync::{
-    DEBOUNCE_MS, DirConnection, DirectoryAdapter, DirectoryConnections, DirectoryError,
-    DirectorySync, JobState, Snapshot, TableConnections,
+    DAILY_HOUR, DEBOUNCE_MS, DirConnection, DirectoryAdapter, DirectoryConnections, DirectoryError,
+    DirectorySync, JobState, Snapshot, TableConnections, next_daily,
 };
 use steve_modules::testkit::{ME, TestEnv, WS, caller};
 use steve_modules::vault::Vault;
@@ -41,6 +41,11 @@ struct H {
 async fn setup(world: World) -> H {
     let fake = FakeFeishu::start_with(world).await.expect("fake feishu");
     let env = TestEnv::new(connections::register);
+    // six hours after the daily run, not the real time: started within a few minutes before 06:00
+    // local, the debounce test's ticks would reach the daily run and queue it too (CI on UTC
+    // runners at 05:58 failed on that)
+    env.clock
+        .set(next_daily(env.clock.now(), DAILY_HOUR) + 6 * 3_600_000);
     let keys = tempfile::tempdir().expect("tmp");
     let vault = Vault::new(
         env.store().clone(),

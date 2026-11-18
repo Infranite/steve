@@ -19,10 +19,12 @@ ENV = dict({k: v for k, v in os.environ.items() if k != "STEVE_GH"}, GIT_AUTHOR_
 # as merged ("merged_as": another commit instead; "base": its target), and its head has one pull-request run
 # ("conclusion", "status").
 # `gh pr create|merge|view|close` act on $FAKE_GH_ORIGIN (a bare repository) and keep the pull requests in
-# $FAKE_GH_PRS. A merge is a rebase merge: the head's changes replayed onto the base as a new commit. A release
-# pull request's head has one pull-request run: {"release_pr": {"conclusion": ..., "status": ...}} (default
-# success); {"move_main": true} pushes a commit onto main the first time that run is asked about;
-# {"merge_refused": "..."} makes the merge fail with that message.
+# $FAKE_GH_PRS. A merge is a merge commit: the base's head and the pull request's head as its two parents, or
+# "not mergeable" when they conflict. A release pull request's head has one pull-request run:
+# {"release_pr": {"conclusion": ..., "status": ...}} (default success); {"move_main": true} pushes a commit onto
+# main the first time that run is asked about ({"move_main": {path: text}}: one that writes those files);
+# {"merge_refused": "..."} makes the merge fail with that message; {"base_modified": true} makes the first
+# merge fail the way GitHub does when the base moved at that very moment.
 FAKE_GH = r"""#!/usr/bin/env python3
 import json, os, re, subprocess, sys
 args = " ".join(sys.argv[1:])
@@ -48,13 +50,20 @@ if sys.argv[1:2] == ["pr"]:
         print("https://github.example/acme/app/pull/" + n)
     elif verb == "merge":
         pr = prs[rest[0]]
-        assert "--rebase" in rest and opt("--match-head-commit") == pr["sha"], args
+        assert "--merge" in rest and opt("--match-head-commit") == pr["sha"], args
         if ci.get("merge_refused"):
             sys.exit(ci["merge_refused"])
+        if ci.get("base_modified") and not os.path.exists(prs_file + ".modified"):
+            open(prs_file + ".modified", "w").close()
+            sys.exit("GraphQL: Base branch was modified. Review and try the merge again. (mergePullRequest)")
         base = og("rev-parse", "refs/heads/" + pr["base"])
-        tree = og("merge-tree", "--write-tree", base, pr["sha"]).splitlines()[0]
-        msg = og("log", "-1", "--format=%B", pr["sha"])
-        new = og("commit-tree", tree, "-p", base, "-m", msg, env={"GIT_COMMITTER_NAME": "merger"})
+        trial = subprocess.run(["git", "-C", origin, "merge-tree", "--write-tree", base, pr["sha"]],
+                               capture_output=True, text=True)
+        if trial.returncode != 0:
+            sys.exit("X Pull request #" + rest[0] + " is not mergeable: the merge commit cannot be cleanly created.")
+        tree = trial.stdout.splitlines()[0]
+        msg = "Merge pull request #" + rest[0] + " from acme/" + pr["head"]
+        new = og("commit-tree", tree, "-p", base, "-p", pr["sha"], "-m", msg, env={"GIT_COMMITTER_NAME": "merger"})
         og("update-ref", "refs/heads/" + pr["base"], new, base)
         pr.update(state="MERGED", merged=new)
         save()
@@ -83,7 +92,14 @@ if tested and any(p["sha"] == tested.group(1) for p in prs.values()):
     if ci.get("move_main") and not os.path.exists(prs_file + ".moved"):
         open(prs_file + ".moved", "w").close()
         main = og("rev-parse", "refs/heads/main")
-        og("update-ref", "refs/heads/main", og("commit-tree", main + "^{tree}", "-p", main, "-m", "meanwhile"), main)
+        index = prs_file + ".index"
+        og("read-tree", main, env={"GIT_INDEX_FILE": index})
+        for path, text in (ci["move_main"] if isinstance(ci["move_main"], dict) else {}).items():
+            blob = subprocess.run(["git", "-C", origin, "hash-object", "-w", "--stdin"], input=text, check=True,
+                                  capture_output=True, text=True).stdout.strip()
+            og("update-index", "--add", "--cacheinfo", "100644," + blob + "," + path, env={"GIT_INDEX_FILE": index})
+        tree = og("write-tree", env={"GIT_INDEX_FILE": index})
+        og("update-ref", "refs/heads/main", og("commit-tree", tree, "-p", main, "-m", "meanwhile"), main)
     rel = ci.get("release_pr", {})
     runs = [{"id": 88, "run_number": 9, "head_sha": tested.group(1), "event": "pull_request",
              "head_branch": "release", "status": rel.get("status", "completed"),
@@ -123,6 +139,8 @@ def fake_gh(tmp):
 
 def set_ci(**state):
     Path(ENV["FAKE_GH_CI"]).write_text(json.dumps(state))
+    for once in (".moved", ".modified"):  # move_main and base_modified happen once after each set_ci
+        Path(ENV["FAKE_GH_PRS"] + once).unlink(missing_ok=True)
 
 
 def prs():
@@ -252,21 +270,22 @@ def main():
         r = cut(a, "cut")
         assert r.returncode == 0 and "released v0.2.25" in r.stdout, r
         assert git(a, "rev-parse", "--abbrev-ref", "HEAD") == "elsewhere" and Path(a, "scratch.txt").exists()
-        assert git(origin, "rev-parse", "v0.2.25^{commit}") == git(origin, "rev-parse", "main")
+        pr = prs()["100"]
+        assert git(origin, "rev-parse", "v0.2.25^{commit}") == pr["sha"] == git(origin, "rev-parse", "main^2")
+        assert git(origin, "rev-parse", "main^1") == head
         assert git(origin, "cat-file", "-t", "v0.2.25") == "tag"
         notes = git(origin, "show", "main:docs/releases/0.2.25.md")
         assert notes == "# Steve v0.2.25\n\n- First change. (ST-1)\n\n- Second change. (ST-2)", notes
         assert git(origin, "ls-tree", "--name-only", "main", "docs/releases/unreleased/") == ""
         assert git(origin, "rev-parse", "v0.2.25^{commit}^") == head
         assert "CI passed on" in r.stderr and "gh run rerun <run id> --failed" in r.stderr, r.stderr
-        pr = prs()["100"]
         assert pr["title"] == "Release notes 0.2.25" and pr["head"] == "release/v0.2.25" and pr["base"] == "main", pr
         assert pr["state"] == "MERGED" and pr["merged"] == git(origin, "rev-parse", "main"), pr
         assert "- First change. (ST-1)" in pr["body"] and "release pull request #100" in r.stderr, (pr, r.stderr)
         assert git(origin, "branch", "--list", "release/*") == "", "the release branch is deleted"
         assert any("pull_request" in c and pr["sha"] in c for c in gh_calls()), "it waited for the release PR's CI"
-        ok("cut releases the branch as it is on origin once its CI passed: the notes through a rebase-merged "
-           "pull request, the tag on the commit it became")
+        ok("cut releases the branch as it is on origin once its CI passed: the notes through a pull request "
+           "merged with a merge commit, the tag on the notes commit its run tested")
 
         # a second clone that hasn't seen the release yet still gets the next free number
         b = Path(tmp, "b")
@@ -418,11 +437,23 @@ def main():
         assert len(git(b, "worktree", "list").splitlines()) == 1, git(b, "worktree", "list")
         assert "- Eighth." in git(origin, "show", "main:docs/releases/0.2.32.md")
         ok("a tag push that did not land leaves no tag and no worktree behind")
+        notes_commit = git(origin, "rev-parse", "main^2")
+        assert git(origin, "log", "-1", "--format=%s", notes_commit) == "Release notes 0.2.32"
+        # main moves on before the next cut, with a fragment of its own
+        git(b, "checkout", "-q", "-B", "main", "origin/main")
+        subprocess.run(["git", "-C", str(b), "pull", "-q", "--rebase", "origin", "main"], check=True, env=ENV)
+        commit(b, {"src/later.txt": "l\n", "docs/releases/unreleased/ST-8b.md": "- Later.\n"}, "later")
+        git(b, "push", "-q", "origin", "main")
+        r = cut(a, "cut", "--dry-run")
+        assert r.returncode == 0 and "- Eighth." in r.stdout and "Later" not in r.stdout, r
+        assert "without its tag" in r.stderr, r.stderr
         opened = len(prs())
         assert m.cut(b, "main", None, False, False) == "0.2.32"
         assert len(prs()) == opened, "no second pull request"
-        assert git(origin, "rev-parse", "v0.2.32^{commit}") == git(origin, "rev-parse", "main")
-        ok("the next cut tags notes that merged without their tag, as they are")
+        assert git(origin, "rev-parse", "v0.2.32^{commit}") == notes_commit
+        assert git(origin, "show", "main:docs/releases/unreleased/ST-8b.md") == "- Later."
+        ok("the next cut tags notes that merged without their tag, as they are, even with main moved on; "
+           "what arrived since waits for the next release")
 
         # a pull request, rebase-merged: GitHub replays its commits onto the branch, under new ids
         def pull_request(number, files):
@@ -510,15 +541,95 @@ def main():
         ok("a release branch already on origin: refused, naming it")
 
         before = len(prs())
-        set_ci(conclusion="success", move_main=True)
+        # main moves between the CI check on its head and the merge, with a change and a fragment of its own
+        late = "docs/releases/unreleased/ST-late.md"
+        set_ci(conclusion="success", move_main={"src/meanwhile.txt": "moved\n", late: "- Late.\n"})
         r = cut(a, "cut")
-        assert r.returncode == 0 and "released v0.2.34" in r.stdout and "again from the new state" in r.stderr, r
-        states = [p["state"] for p in list(prs().values())[before:]]
-        assert states == ["CLOSED", "MERGED"], states
-        assert git(origin, "log", "-1", "--format=%s", "v0.2.34^{commit}^") == "meanwhile"
-        assert git(origin, "rev-parse", "v0.2.34^{commit}") == git(origin, "rev-parse", "main")
+        assert r.returncode == 0 and "released v0.2.34" in r.stdout and "again from the new state" not in r.stderr, r
+        new = list(prs().values())[before:]
+        assert [p["state"] for p in new] == ["MERGED"], new
+        tagged = git(origin, "rev-parse", "v0.2.34^{commit}")
+        # the tag is the very notes commit whose run passed, on the head whose push run passed
+        assert tagged == new[0]["sha"] and git(origin, "rev-parse", "v0.2.34^{commit}^") == head
+        assert any("pull_request" in c and tagged in c for c in gh_calls())
+        assert git(origin, "log", "--format=%s", "-1", "main^1") == "meanwhile"
+        assert git(origin, "rev-parse", "main") == new[0]["merged"] and git(origin, "rev-parse", "main^2") == tagged
+        assert subprocess.run(["git", "-C", str(origin), "merge-base", "--is-ancestor", tagged, "main"]).returncode == 0
+        changed = git(origin, "diff", "--name-status", head, tagged)
+        assert changed == "A\tdocs/releases/0.2.34.md\nD\tdocs/releases/unreleased/ST-10.md", changed
+        assert "Late" not in git(origin, "show", "v0.2.34:docs/releases/0.2.34.md")
+        assert git(origin, "show", "v0.2.34:src/meanwhile.txt") == "m", "the tag has the tested tree, not main's"
+        # the merge keeps main's own changes: its fragment for the next release, and its code
+        assert git(origin, "show", f"main:{late}") == "- Late."
+        assert git(origin, "show", "main:src/meanwhile.txt") == "moved"
+        assert git(origin, "ls-tree", "--name-only", "main", "docs/releases/unreleased/") == late
+        notes = "docs/releases/0.2.34.md"
+        assert git(origin, "show", f"main:{notes}") == git(origin, "show", f"v0.2.34:{notes}")
         set_ci(conclusion="success")
-        ok("the branch moved while the release pull request waited: closed, and released from the new state")
+        ok("main moved between the CI check and the merge: released anyway, without starting again; the tag is the "
+           "tested notes commit, an ancestor of main")
+        ok("a fragment that landed on main meanwhile survives the merge for the next release")
+
+        # another pull request merges at the very moment of the release's merge: the merge is tried again
+        head, before = fragment("ST-11"), len(prs())
+        set_ci(conclusion="success", base_modified=True)
+        r = cut(a, "cut")
+        assert r.returncode == 0 and "released v0.2.35" in r.stdout and "again from the new state" not in r.stderr, r
+        assert "merging again" in r.stderr and [p["state"] for p in list(prs().values())[before:]] == ["MERGED"]
+        notes = git(origin, "show", "v0.2.35:docs/releases/0.2.35.md")
+        assert "- Late." in notes and "- ST-11." in notes, notes
+        assert git(origin, "ls-tree", "--name-only", "main", "docs/releases/unreleased/") == ""
+        ok("GitHub's \"base branch was modified\" retries the merge, not the release")
+
+        # main changes a fragment the release removes: the merge conflicts, so the release starts again
+        head, before = fragment("ST-12"), len(prs())
+        set_ci(conclusion="success", move_main={"docs/releases/unreleased/ST-12.md": "- ST-12, reworded.\n"})
+        r = cut(a, "cut")
+        assert r.returncode == 0 and "released v0.2.36" in r.stdout, r
+        assert "again from the new state" in r.stderr and "does not merge cleanly" in r.stderr, r.stderr
+        assert [p["state"] for p in list(prs().values())[before:]] == ["CLOSED", "MERGED"]
+        assert git(origin, "show", "v0.2.36:docs/releases/0.2.36.md") == "# Steve v0.2.36\n\n- ST-12, reworded."
+        assert git(origin, "log", "-1", "--format=%s", "v0.2.36^{commit}^") == "meanwhile"
+        assert git(origin, "ls-tree", "--name-only", "main", "docs/releases/unreleased/") == ""
+        assert git(origin, "branch", "--list", "release/*") == ""
+        set_ci(conclusion="success")
+        ok("a release pull request that conflicts with main: closed, and released from the new state")
+
+        # a conflict every time: it gives up after a few attempts and tags nothing
+        fragment("ST-13")
+        spec2 = importlib.util.spec_from_file_location("cut_release2", CUT)
+        m2 = importlib.util.module_from_spec(spec2)
+        spec2.loader.exec_module(m2)
+        real_gh = m2.gh
+
+        def conflicting(*args, cwd):
+            if args[:2] == ("pr", "merge"):
+                raise m2.Refused("can't ask GitHub: gh pr merge: X Pull request #1 is not mergeable: the merge "
+                                 "commit cannot be cleanly created.")
+            return real_gh(*args, cwd=cwd)
+        m2.gh = conflicting
+        before = len(prs())
+        try:
+            m2.cut(b, "main", None, False, False)
+            raise AssertionError("released a conflicting pull request")
+        except m2.Refused as e:
+            assert "origin moved while releasing" in str(e) and "does not merge cleanly" in str(e), e
+        assert [p["state"] for p in list(prs().values())[before:]] == ["CLOSED"] * m2.ATTEMPTS
+        assert git(origin, "tag", "-l", "v0.2.37") == "" and git(origin, "branch", "--list", "release/*") == ""
+        ok("a release pull request that never merges cleanly: closed each time, nothing tagged")
+
+        commit(b, {"src/unmerged.txt": "u\n"}, "unmerged")
+        git(b, "push", "-q", "origin", "HEAD:refs/heads/elsewhere")
+        sleep, m2.time.sleep = m2.time.sleep, lambda s: None
+        try:
+            m2.tag(b, b, git(b, "rev-parse", "HEAD"), "0.2.37", "main")
+            raise AssertionError("tagged a commit main does not contain")
+        except m2.Refused as e:
+            assert "is not on origin's main" in str(e), e
+        finally:
+            m2.time.sleep = sleep
+        assert git(origin, "tag", "-l", "v0.2.37") == "" and git(b, "tag", "-l", "v0.2.37") == ""
+        ok("a commit main does not contain is never tagged")
 
         # origin unreachable: an error, not "no tags"
         git(a, "remote", "set-url", "origin", str(Path(tmp, "gone.git")))

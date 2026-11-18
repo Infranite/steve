@@ -56,6 +56,8 @@ pub struct Settings {
     /// `supplement|signal`.
     pub ci_fail: String,
     pub draft_pr: bool,
+    pub pr_review: bool,
+    pub issue_triage: bool,
 }
 
 const ENUMS: [(&str, &[&str]); 4] = [
@@ -64,7 +66,7 @@ const ENUMS: [(&str, &[&str]); 4] = [
     ("merge_method", &["squash", "merge", "rebase"]),
     ("ci_fail", &["supplement", "signal"]),
 ];
-const BOOLS: [&str; 2] = ["delete_branch", "draft_pr"];
+const BOOLS: [&str; 4] = ["delete_branch", "draft_pr", "pr_review", "issue_triage"];
 
 impl Settings {
     /// From `gh_repos.settings`; missing or odd values take the default.
@@ -87,6 +89,8 @@ impl Settings {
             delete_branch: v["delete_branch"].as_bool().unwrap_or(true),
             ci_fail: e("ci_fail", "supplement"),
             draft_pr: v["draft_pr"].as_bool().unwrap_or(false),
+            pr_review: v["pr_review"].as_bool().unwrap_or(false),
+            issue_triage: v["issue_triage"].as_bool().unwrap_or(false),
         }
     }
 
@@ -95,6 +99,7 @@ impl Settings {
             "after_accept": self.after_accept, "finish_on": self.finish_on,
             "merge_method": self.merge_method, "delete_branch": self.delete_branch,
             "ci_fail": self.ci_fail, "draft_pr": self.draft_pr,
+            "pr_review": self.pr_review, "issue_triage": self.issue_triage,
         })
     }
 
@@ -727,17 +732,24 @@ impl GitHub {
                 .filter(|n| (1..=100).contains(n))
                 .ok_or_else(|| ApiError::invalid("limit"))?,
         };
-        let rows = self.store().reader(|c| {
-            repo::deliveries(c, &who.ws, q.repo.as_deref(), limit).map_err(ApiError::from)
-        })?;
-        Ok(Value::Array(
-            rows.iter()
-                .map(|d| {
+        Ok(self.store().reader(|c| {
+            let mut rows = Vec::new();
+            for d in repo::deliveries(
+                c,
+                &who.ws,
+                q.repo.as_deref(),
+                limit,
+                q.automation.as_deref() == Some("only"),
+            )? {
+                let trace = crate::automation::delivery_trace(c, &who.ws, &d)?;
+                rows.push(
                     json!({"id": d.delivery_id, "received": d.received, "event": d.event,
-                           "action": d.action, "status": d.status, "error": d.error, "repo_id": d.repo_id})
-                })
-                .collect(),
-        ))
+                    "action": d.action, "status": d.status, "error": d.error, "repo_id": d.repo_id,
+                    "automation": trace}),
+                );
+            }
+            Ok::<_, ApiError>(Value::Array(rows))
+        })?)
     }
 }
 
@@ -892,6 +904,7 @@ pub struct ListQuery {
     pub state: Option<String>,
     pub item: Option<String>,
     pub limit: Option<String>,
+    pub automation: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -921,6 +934,10 @@ pub fn routes(gh: GitHub) -> Router<Modules> {
         .route("/github/prs", get(prs))
         .route("/github/issues", get(issues))
         .route("/github/deliveries", get(deliveries))
+        .route(
+            "/github/analysis/{id}/comment-draft",
+            post(crate::automation::comment_draft),
+        )
         .layer(Extension(gh.clone()))
         .merge(crate::link::routes(gh))
 }
@@ -1046,7 +1063,7 @@ mod tests {
         assert_eq!(
             d.to_json(),
             json!({"after_accept":"ask_pr","finish_on":"accepted","merge_method":"squash",
-                   "delete_branch":true,"ci_fail":"supplement","draft_pr":false})
+                   "delete_branch":true,"ci_fail":"supplement","draft_pr":false,"pr_review":false,"issue_triage":false})
         );
         let m = json!({"finish_on": "merged", "draft_pr": true});
         let p = Settings::patched(&json!({}), m.as_object().unwrap()).unwrap();

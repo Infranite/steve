@@ -102,6 +102,7 @@ pub struct ItemExtras {
     pub open: Vec<String>,
     /// Queued rows of the last non-ended session.
     pub queued: usize,
+    pub closeout: Option<steve_core::pull::Closeout>,
     /// Graph identity and pause flag, plus failed children only when the graph matches the item cycle.
     pub workflow_paused: Option<bool>,
     pub workflow_cycle: Option<i64>,
@@ -133,6 +134,9 @@ pub trait Repo {
         &self,
         ws: &str,
     ) -> BResult<Option<std::collections::HashMap<String, ItemExtras>>> {
+        Ok(None)
+    }
+    fn item_closeout(&self, id: &str) -> BResult<Option<steve_core::pull::Closeout>> {
         Ok(None)
     }
     /// Queued rows of the sessions `sessions_list(ws)` returns, keyed by session id.

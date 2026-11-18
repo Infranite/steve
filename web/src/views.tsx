@@ -1,4 +1,6 @@
 import { AgentDetailPanel, hasAgentTree, History, Notices, ROOT_STATUS, TeamSteps, useAgentTree, useSelectedNode, WorkflowButtons } from "@/agent-tree-view"
+import { CloseoutSummary } from "@/item-closeout"
+import { Card } from "@/components/ui/card"
 import { itemState, type ItemState } from "@/item-state"
 import { clip } from "@/thread/topics"
 import { isAttachedWorkflowChild, isWorkflowChild, itemDisplayState, itemDisplayStatus, partitionSubtasks } from "@/item-workflow-relation"
@@ -376,7 +378,7 @@ const STATE_TONE: Record<ItemState["tone"], [string, string]> = {
 }
 const STATE_ICON: Record<ItemState["kind"], typeof CheckIcon> = {
   done: CheckIcon, dropped: BanIcon, failed: CircleAlertIcon, proposed: CircleHelpIcon, asking: CircleHelpIcon,
-  unavailable: CircleAlertIcon, graphPaused: PauseIcon, paused: PauseIcon, blocked: HourglassIcon, working: LoaderCircleIcon, queued: HourglassIcon, idle: CircleDashedIcon,
+  unavailable: CircleAlertIcon, graphPaused: PauseIcon, paused: PauseIcon, blocked: HourglassIcon, working: LoaderCircleIcon, queued: HourglassIcon, closing: HourglassIcon, idle: CircleDashedIcon,
 }
 function StateMark({ state, centered }: { state: ItemState; centered?: boolean }) {
   const I = STATE_ICON[state.kind]
@@ -589,7 +591,7 @@ export function ItemView({ id }: { id: string }) {
   const state = rootState!
   /* the now card with nothing under its headline (finished, say): one centred line in a smaller card */
   const compact = !i.waits.length && state.move === "none"
-  const centered = compact && !i.workflow && !state.detail && state.kind !== "idle" && !i.rel && !i.dependencyWait
+  const centered = compact && !i.workflow && !state.detail && state.kind !== "idle" && !i.rel && !i.dependencyWait && !i.closeout
   const goal = <>
           {/* 1 — goal reads as the description of the title */}
           <section data-goal className="-mt-3">
@@ -667,7 +669,7 @@ export function ItemView({ id }: { id: string }) {
               <div className="min-w-[min(100%,14rem)] flex-1 basis-0">
                 <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
                   <h2 className={cn("type-headline", state.kind === "working" && "shimmer shimmer-once")} data-state-title>{t(`views:itemState.${state.kind}`)}</h2>
-                  {state.move !== "none" && <span className="type-footnote text-muted-foreground">{t(`views:itemState.${state.move}`)}</span>}
+                  {state.move !== "none" && state.kind !== "closing" && <span className="type-footnote text-muted-foreground">{t(`views:itemState.${state.move}`)}</span>}
                 </div>
                 {state.detail && !i.workflow && <p className="mt-1 line-clamp-3 break-words type-callout text-muted-foreground">{clip(state.detail, 360)}</p>}
                 {state.kind === "working" && i.workflow && state.detail && <p className="mt-1 line-clamp-2 break-words type-callout text-muted-foreground">{clip(state.detail, 240)}</p>}
@@ -676,6 +678,7 @@ export function ItemView({ id }: { id: string }) {
               </div>
               {i.workflow && <div className="max-sm:basis-full max-sm:pl-10"><WorkflowButtons at={at} /></div>}
             </div>
+            {i.closeout && <CloseoutSummary value={i.closeout} className="mt-3 pl-10" />}
             {i.dispatch && <DispatchDetails dispatch={i.dispatch} bot={i.b} />}
             {at.dialogs}
             {i.waits.length > 0 && <div className="mt-5 flex flex-col gap-3">{i.waits.map((w) => <DecisionCard key={w.decision} i={i} w={w} showItem={false} />)}</div>}
@@ -691,6 +694,10 @@ export function ItemView({ id }: { id: string }) {
             </div>
             {dtab === "动态" && (
               <div key="activity" className="anim-in flex flex-col" data-worklog>
+                {i.closeout && <Card size="sm" className="mb-4 gap-1.5 p-3" data-closeout-timeline>
+                  <h3 className="type-label text-tertiary">{t("views:closeout.timeline")}</h3>
+                  <CloseoutSummary value={i.closeout} />
+                </Card>}
                 {byDay(foldProcess(feed, (x) => x.e[0] === "sys" && !queued.byComment.has(x.n))).map(([day, gs]) => <Fragment key={day}>
                   {day && <h3 className="mb-1 mt-5 type-label text-tertiary first:mt-0" data-day>{day}</h3>}
                   {gs.map((g) => Array.isArray(g)

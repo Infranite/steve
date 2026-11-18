@@ -248,6 +248,7 @@ api POST /flows/x/duplicate
 api POST /flows/x/edit-draft
 api POST /flows/x/rollback
 api POST /flows/x/run
+api POST /github/analysis/x/comment-draft
 api POST /github/app/manifest
 api POST /github/comments
 api POST /github/issues/x/to-item

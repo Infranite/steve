@@ -280,6 +280,90 @@ async fn hub_dir_and_git(path: &str) -> Result<(bool, bool), ApiError> {
     blocking(move || Ok((exists(&p) && is_dir(&p), exists(&join(&p, ".git"))))).await
 }
 
+pub(super) struct Registration {
+    name: String,
+    description: String,
+    worktree: Option<bool>,
+    default_bot: Option<String>,
+    done_when: Option<Option<String>>,
+}
+
+impl Registration {
+    pub(super) fn parse(k: &mut Check<'_>) -> Self {
+        Self {
+            name: k.str("name", Str::len(1, 40)),
+            description: k.opt_str("description", Str::max(1000)).unwrap_or_default(),
+            worktree: k.opt_bool("worktree"),
+            default_bot: k.opt_nullable_str("default_bot", Str::ANY).flatten(),
+            done_when: k.opt_nullable_str("done_when", Str::ANY),
+        }
+    }
+
+    pub(super) async fn validate(&self, st: &AppState, c: &Ctx) -> Result<(), ApiError> {
+        if let Some(Some(ref dw)) = self.done_when
+            && ![steve_store::DONE_MERGE, steve_store::DONE_TAG].contains(&dw.as_str())
+        {
+            return Err(ApiError::Invalid(vec!["done_when".into()]));
+        }
+        if let Some(bot) = self.default_bot.clone().filter(|b| !b.is_empty()) {
+            let ws = c.ws.clone();
+            st.read(move |r| Ok(own_bot(r, &bot, &ws)?)).await?;
+        }
+        Ok(())
+    }
+
+    pub(super) async fn save(
+        self,
+        st: &AppState,
+        c: Ctx,
+        path: String,
+        git: bool,
+    ) -> Result<Value, ApiError> {
+        let Self {
+            name,
+            description,
+            worktree,
+            default_bot,
+            done_when,
+        } = self;
+        st.write(move |r| {
+            if r.project_by_path(&c.ws, &path)?.is_some() {
+                return Err(already_project());
+            }
+            let x = r.project_create(
+                &c.ws,
+                &NewProject {
+                    name,
+                    description,
+                    device_id: "hub".into(),
+                    path: path.clone(),
+                    kind: if git { "git" } else { "dir" }.into(),
+                    worktree: git && worktree.unwrap_or(true),
+                    default_bot,
+                    release: match done_when {
+                        Some(Some(dw)) if git && worktree.unwrap_or(true) => {
+                            Some(json!(steve_store::Release {
+                                kind: "script".into(),
+                                cmd: String::new(),
+                                done_when: Some(dw),
+                            }))
+                        }
+                        _ => None,
+                    },
+                },
+            )?;
+            let id = x.get("id").and_then(Value::as_str).unwrap_or_default();
+            r.audit(&c.me, "project.create", id, &json!({ "path": path }), &c.ws)?;
+            Ok(Value::Object(x))
+        })
+        .await
+    }
+}
+
+pub(super) fn already_project() -> ApiError {
+    ApiError::bad_request(steve_i18n::t!("hub.project.already_project"))
+}
+
 pub async fn create(
     State(st): State<AppState>,
     Extension(c): Extension<Ctx>,
@@ -287,27 +371,12 @@ pub async fn create(
 ) -> ApiResult {
     let v = body(&b)?;
     let mut k = Check::object(&v);
-    let name = k.str("name", Str::len(1, 40));
+    let registration = Registration::parse(&mut k);
     let raw = k.str("path", Str::min(1));
-    let description = k.opt_str("description", Str::max(1000)).unwrap_or_default();
-    let worktree = k.opt_bool("worktree");
-    let default_bot = match k.opt_nullable_str("default_bot", Str::ANY) {
-        Some(Some(b)) => Some(b),
-        _ => None,
-    };
-    let done_when = k.opt_nullable_str("done_when", Str::ANY);
     let node = k.opt_str("node", Str::ANY);
     k.finish()?;
-    if let Some(Some(ref dw)) = done_when
-        && ![steve_store::DONE_MERGE, steve_store::DONE_TAG].contains(&dw.as_str())
-    {
-        return Err(ApiError::Invalid(vec!["done_when".into()]));
-    }
     on_builtin_node(node.as_deref())?;
-    if let Some(bot) = default_bot.clone().filter(|b| !b.is_empty()) {
-        let ws = c.ws.clone();
-        st.read(move |r| Ok(own_bot(r, &bot, &ws)?)).await?;
-    }
+    registration.validate(&st, &c).await?;
     let path = expand(&raw);
     let (dir_ok, git) = match via(&st, &path).await? {
         Via::Hub | Via::Outside => hub_dir_and_git(&path).await?,
@@ -324,49 +393,7 @@ pub async fn create(
             path = raw
         )));
     }
-    st.write(move |r| {
-        if r.project_by_path(&c.ws, &path)?.is_some() {
-            return Err(ApiError::bad_request(steve_i18n::t!(
-                "hub.project.already_project"
-            )));
-        }
-        let x = r.project_create(
-            &c.ws,
-            &NewProject {
-                name,
-                description,
-                device_id: "hub".into(),
-                path: path.clone(),
-                kind: if git { "git" } else { "dir" }.into(),
-                worktree: git && worktree.unwrap_or(true),
-                default_bot,
-                release: match done_when {
-                    Some(Some(dw)) if git && worktree.unwrap_or(true) => {
-                        Some(json!(steve_store::Release {
-                            kind: "script".into(),
-                            cmd: String::new(),
-                            done_when: Some(dw),
-                        }))
-                    }
-                    _ => None,
-                },
-            },
-        )?;
-        let id = x
-            .get("id")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string();
-        r.audit(
-            &c.me,
-            "project.create",
-            &id,
-            &json!({ "path": path }),
-            &c.ws,
-        )?;
-        ok(Value::Object(x))
-    })
-    .await
+    ok(registration.save(&st, c, path, git).await?)
 }
 
 pub async fn patch_one(
@@ -596,7 +623,7 @@ pub async fn describe(
 }
 
 /// The Node a project is being made on: only the Hub's built-in one runs sessions so far.
-fn on_builtin_node(node: Option<&str>) -> Result<(), ApiError> {
+pub(super) fn on_builtin_node(node: Option<&str>) -> Result<(), ApiError> {
     match node {
         None | Some("" | "hub") => Ok(()),
         Some(_) => Err(ApiError::bad_request(steve_i18n::t!(
@@ -676,15 +703,21 @@ pub async fn browse(
     Extension(c): Extension<Ctx>,
     Query(q): Query<HashMap<String, String>>,
 ) -> ApiResult {
-    if c.user.get("role").and_then(Value::as_str) != Some("owner") {
-        return Err(ApiError::Json(
-            403,
-            steve_i18n::t!("hub.project.browse_owner_only"),
-        ));
-    }
+    require_fs_owner(&c)?;
     on_builtin_node(q.get("node").map(String::as_str))?;
     let raw = q.get("path").cloned().unwrap_or_default();
     ok(blocking(move || Ok(browse_dir(&raw))).await?)
+}
+
+pub(super) fn require_fs_owner(c: &Ctx) -> Result<(), ApiError> {
+    if c.user.get("role").and_then(Value::as_str) == Some("owner") {
+        Ok(())
+    } else {
+        Err(ApiError::Json(
+            403,
+            steve_i18n::t!("hub.project.browse_owner_only"),
+        ))
+    }
 }
 
 #[cfg(test)]

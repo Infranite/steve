@@ -248,10 +248,14 @@ export default {
     ackAsBot: "机器人在消息上加了“处理中”",
     changedAsUser: "以你本人在消息上换成了“{{label}}”",
     changedAsBot: "机器人在消息上换成了“{{label}}”",
-    withError: "{{text}}（飞书没有收下：{{error}}）",
+    withError: "{{text}}（渠道没有确认：{{error}}）",
+    unconfirmed: "表情状态未确认：{{error}}",
   },
   /* what became of Steve's message in the space */
   chanOut: {
+    withReason: "{{label}}：{{reason}}",
+    notSent: "未发送到聊天",
+    blocked: "渠道限制，未发送",
     sent: "已发出",
     pending: "正在发出",
     draft: "等你批准后发出",

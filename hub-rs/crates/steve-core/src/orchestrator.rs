@@ -4863,6 +4863,14 @@ impl Tx<'_> {
                     .flatten()
                     && i.is_finished()
                 {
+                    if i.status == "done"
+                        && self
+                            .c
+                            .modules()
+                            .is_some_and(|m| m.registry.retain_on_completed_item_recovery(&d))
+                    {
+                        continue;
+                    }
                     /* reminders left behind on items that were finished or dropped before this was enforced */
                     let why = if i.status == "done" {
                         "finished"

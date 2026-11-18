@@ -5,9 +5,9 @@ name: CI
 # there instead of holding a runner for GitHub's six hours.
 # A pull request runs the Linux jobs (and the Apple job only when it touches the apps, the web client they
 # bundle or this workflow); macOS runners are scarce and were the queue every PR waited in. A push to main
-# and a merge queue run cover both platforms. cut-release.py releases only a head whose own push run passed,
-# so nothing reaches a release untested on macOS. Branch rules on main require the `CI gate` check, by that
-# name. `merge_group` lets GitHub's own merge queue run it too.
+# and a merge queue run cover both platforms. cut-release.py releases only a main commit whose own push run
+# passed, with its release notes on top, so nothing reaches a release untested on macOS. Branch rules on main
+# require the `CI gate` check, by that name. `merge_group` lets GitHub's own merge queue run it too.
 on:
   pull_request:
   push:
@@ -83,8 +83,8 @@ jobs:
         run: |
           npx playwright install --only-shell chromium
           npm run test:web:browser-smoke
-  # A push or pull request that changed only release notes (cut-release.py's release pull request, and its
-  # commit on main) repeats the Rust jobs of the commit it stands on. This job waits for CI on that commit
+  # A push or pull request that changed only release notes (cut-release.py's release pull request, and the
+  # merge commit that brings it into main) repeats the Rust jobs of the commit it stands on. This job waits for CI on that commit
   # and, when it passed, lets them be skipped. Merge queue runs do not run it, and always run the Rust jobs.
   changes:
     if: ${{ github.event_name == 'push' || github.event_name == 'pull_request' }}

@@ -276,6 +276,8 @@ impl GitHub {
         });
         if let Err(err) = r {
             tracing::error!(effect = %e.id, error = %err, "github effect result not recorded");
+        } else {
+            self.notifier().gh(&e.workspace_id, &e.decision_id);
         }
     }
 

@@ -57,6 +57,7 @@ export type Item = {
   workflowAttempt?: number
   workflowSuperseded?: boolean
   workflow?: RItemDetail["workflow"]
+  closeout?: RItem["closeout"]
   dependencyWait?: RItemDetail["dependency_wait"]
   dispatch?: RItemDetail["dispatch"]
 }
@@ -499,6 +500,7 @@ function itemOf(i: RItem): Item {
     rounds: (det?.planRounds ?? []).map((r) => ({ n: r.round, steps: steps(r.steps), end: r.end, at: tm(r.created) })),
     workflow: det?.workflow,
     dependencyWait: det?.dependency_wait,
+    closeout: i.closeout,
     dispatch: det?.dispatch,
     wait: open.length ? waitOf(open[0]) : undefined, waits: open.map(waitOf), ss: i.sessionIds, tl, outs: det ? det.artifacts.map((a): Out => [a.kind, a.title, a.location, a.id, a.created, det.artifactRoles?.[a.id] as Out[5], a.delivery_id]) : [], anns: det?.annotations ?? [],
     q: act?.queued ?? [], qs: act?.id ?? null,

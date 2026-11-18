@@ -6,7 +6,7 @@ import { spawn } from "node:child_process"
 import { fileURLToPath } from "node:url"
 
 /* full app and its shell first (sign-in, settings with a workspace switch, the native shell's bridge), then pages */
-const SMOKE = ["sign-in", "settings-panes", "notifications", "native-shell", "bots", "conversations", "item-card", "message-cards"]
+const SMOKE = ["sign-in", "settings-panes", "notifications", "native-shell", "bots", "conversations", "channel-states", "item-card", "message-cards", "reply-preview"]
 const LIMIT_MS = 120_000
 
 const web = fileURLToPath(new URL("..", import.meta.url))

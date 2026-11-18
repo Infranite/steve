@@ -964,6 +964,26 @@ async fn v14_read_only_refuses_writes_locally() {
         "{e:?}"
     );
     assert!(h.fake.calls("messages.send").is_empty());
+    let error = h
+        .ext
+        .add_reaction(
+            &cx,
+            &MessageRef::platform("c_42", "m_9"),
+            steve_channels::ReactionKind::Ack,
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            error,
+            AdapterError::Provider(ProviderError::Blocked(BlockScope::Connection, _))
+        ),
+        "{error:?}"
+    );
+    assert!(
+        h.fake.calls("reactions.add").is_empty(),
+        "global read-only rejects reactions before RPC"
+    );
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -2114,4 +2134,47 @@ fn personal_send_retains_the_protocol_dedupe_window() {
     let ext = ExtWs::new();
     let personal: &dyn ActAsUser = &ext;
     assert_eq!(personal.send_dedup(), Some(Duration::from_secs(24 * 3600)));
+}
+
+/// Reactions are writes too; a target-level policy refusal is not a missing reaction feature.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_rejected_reaction_keeps_its_target_scope_and_leaves_other_chats_writable() {
+    let h = setup().await;
+    h.fake.with(|w| {
+        w.write_policy = "restricted".into();
+        w.forbidden_targets.insert("c_42".into());
+    });
+    let id = h.connect().await;
+    let cx = h.cx(&id);
+    let error = h
+        .ext
+        .add_reaction(
+            &cx,
+            &MessageRef::platform("c_42", "m_9"),
+            steve_channels::ReactionKind::Ack,
+        )
+        .await
+        .unwrap_err();
+    let AdapterError::Provider(ProviderError::Blocked(BlockScope::Target, why)) = error else {
+        panic!("{error:?}")
+    };
+    assert!(why.contains("target_forbidden (-32016)"));
+    h.ext
+        .add_reaction(
+            &cx,
+            &MessageRef::platform("c_other", "m_other"),
+            steve_channels::ReactionKind::Ack,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        h.fake.calls("reactions.add").len(),
+        2,
+        "a target refusal does not make other chats read-only"
+    );
+    assert_eq!(
+        h.fake.with(|w| w.writes.len()),
+        1,
+        "only the accepted reaction had a side effect"
+    );
 }

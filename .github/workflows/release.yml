@@ -1,8 +1,8 @@
 name: Release
 # Build, package and publish the tagged commit. Its tests ran before the tag: ops/cut-release.py tags only
-# a main whose CI workflow (ci.yml) passed. A build here that fails on something passing (a runner
-# hiccup) is run again on the same tag with `gh run rerun <run id> --failed`: nothing is published
-# before every target built, so the version is not lost.
+# release notes on a main commit whose CI workflow (ci.yml) passed. A build here that fails on something
+# passing (a runner hiccup) is run again on the same tag with `gh run rerun <run id> --failed`: nothing is
+# published before every target built, so the version is not lost.
 # The build uses no cache: a cache saved on a tag can be read only by that tag, never by the next one.
 # Every job has a time limit of two to several times its longest run; one stopped there is rerun the same way.
 on:

@@ -3699,3 +3699,59 @@ async fn a_lost_receipt_does_not_send_the_note_again() {
     assert_eq!(attempts(&h, note), 2);
     assert_eq!(posted(&h, note), 1, "in the chat once");
 }
+
+/// A research marker is evidence of generation, never of classification or owner-voice authority.
+#[tokio::test(flavor = "multi_thread")]
+async fn unclassified_research_keeps_its_result_and_an_explicit_eligibility_reason() {
+    let h = setup(true).await;
+    bot_command_everywhere(&h);
+    let i = push(
+        &h,
+        &h.me,
+        msg(
+            "C_OPS",
+            "raw-research",
+            "upx",
+            "/bot 总结群内最近两天",
+            false,
+            false,
+        ),
+    )
+    .await;
+    let (turn, _) = h
+        .thread
+        .as_ref()
+        .unwrap()
+        .turns
+        .lock()
+        .unwrap()
+        .last()
+        .cloned()
+        .unwrap();
+    let text = "只读到了部分片段，无法覆盖两天。";
+    let id = steve_says(
+        &h,
+        &i.space_id,
+        &turn,
+        text,
+        None,
+        json!({"steps":{"route":{"kind":"research"},"research":{"run":"old-run"}},"run_receipt":true}),
+    );
+    h.env.take_events();
+    assert_eq!(h.ch.conv_deliver(WS, &id).await.unwrap(), None);
+    assert!(h.env.take_events().iter().any(|event| matches!(event, steve_store::ChangeEvent::Message { id: changed } if changed == &id)), "eligibility reason is published to an already open conversation");
+    assert!(sent(&h).is_empty());
+    let m = h.env.store().messages().get(&id).unwrap().unwrap();
+    assert_eq!(m.text, text);
+    assert_eq!(m.meta["chan_out"]["status"], "skipped");
+    assert_eq!(m.meta["chan_out"]["stage"], "eligibility");
+    assert_eq!(m.meta["chan_out"]["code"], "unverified_reply");
+    assert!(
+        m.meta["chan_out"]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("未核实")
+    );
+    assert_eq!(h.ch.conv_deliver(WS, &id).await.unwrap(), None);
+    assert!(sent(&h).is_empty());
+}

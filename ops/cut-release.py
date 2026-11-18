@@ -17,26 +17,42 @@ target branch as it is on `origin` (in a worktree of its own, so the caller's ch
 gives it the next free version (one more than the highest `vX.Y.Z` tag on `origin`), joins the fragments
 in the order they arrived on the branch into `docs/releases/X.Y.Z.md` and removes them.
 
-The branch takes changes only through pull requests (it may be protected), so the notes go in as one: the
-commit is pushed to `release/vX.Y.Z`, a pull request into the branch carries it, `cut` waits for that pull
-request's CI run, rebase-merges it, and tags the commit it became on the branch with the annotated tag
-`vX.Y.Z`. Only the tag is pushed directly; branch rules do not cover tags. A release branch already on
-`origin` is someone else's release in progress (or one left behind: delete it once nobody is releasing).
-When the branch moved before the merge, or someone else released first, the pull request is closed, its
-branch deleted, and `cut` starts again from the new state, a few times at most. A release whose pull request
-merged but whose tag never landed is finished by the next `cut`: the branch then carries the notes of an
-untagged version and no other fragment, and that commit is tagged as it is.
+The branch takes changes only through pull requests (it may be protected), so the notes go in as one. `cut`
+takes the branch's head as `base`, commits the notes on it (adding `docs/releases/X.Y.Z.md`, removing the
+fragments present at `base`, nothing else), pushes that commit to `release/vX.Y.Z`, opens a pull request into
+the branch, waits for its CI run, merges it with a merge commit (`--match-head-commit`, so exactly that commit
+goes in), and then tags the notes commit itself with the annotated tag `vX.Y.Z`: the tag is the tree that was
+tested, whatever landed on the branch meanwhile. Only the tag is pushed directly; branch rules do not cover tags.
 
-Only a tested commit is tagged: `cut` first asks GitHub (`gh`: $STEVE_GH, else on PATH, else in /opt/homebrew/bin,
-/usr/local/bin or /usr/bin, as the Hub finds it) for the CI workflow's run (`.github/workflows/
-ci.yml`) pushed to the branch at the head it is about to release. It waits while that run is queued or running
-(up to `--ci-wait` seconds, default 45 minutes), and refuses when it failed or there is none, naming the run and
-how to run its failed jobs again (`gh run rerun <id> --failed`) when it was only a flake. `--skip-ci` releases
-without that check and without waiting for the release pull request's run, on purpose (it says so; a
-protected branch that requires the run then refuses the merge). `--dry-run` asks nothing and pushes nothing.
+The branch keeps moving while a release waits for CI (other pull requests merge every few minutes), and that is
+no reason to start again: the merge commit joins the notes commit to whatever the branch has become. Fragments
+that arrived after `base` are not touched by the notes commit, so the merge keeps them for the next release.
+`cut` starts again from the new state, a few times at most, only on a real problem: the pull request does not
+merge cleanly (someone changed a fragment it removes), someone else released the version first, or the release
+branch was taken while pushing it. The pull request is then closed and its branch deleted. A release branch
+already on `origin` is someone else's release in progress (or one left behind: delete it once nobody is
+releasing); `cut` refuses it.
 
-Only the head's own push run counts. Pull requests run the Linux jobs only (macOS runs on main), so a pull
-request's green run is never taken for the head it was merged as.
+The tag is pushed after the merge, never before: the tag starts the Release workflow, which publishes it, and a
+tag pushed first would publish a version the branch might never contain when the merge then fails. Before
+tagging, `cut` checks that the notes commit is on origin's branch. A release whose pull request merged but whose
+tag never landed is finished by the next `cut`: the branch then carries `docs/releases/X.Y.Z.md` of an untagged
+version, added by a notes commit of `cut`'s shape, and that commit is tagged as it is (after the same CI
+checks); fragments that arrived since wait for the release after it.
+
+Only a tested commit is released: `cut` first asks GitHub (`gh`: $STEVE_GH, else on PATH, else in
+/opt/homebrew/bin, /usr/local/bin or /usr/bin, as the Hub finds it) for the CI workflow's run
+(`.github/workflows/ci.yml`) pushed to the branch at `base`. It waits while that run is queued or running (up to
+`--ci-wait` seconds, default 45 minutes), and refuses when it failed or there is none, naming the run and how to
+run its failed jobs again (`gh run rerun <id> --failed`) when it was only a flake. The notes commit then needs
+its release pull request's run to pass: that run checks the notes (ci.yml skips its Rust and Apple jobs when the
+pull request changes release notes alone and stands right on a main commit whose run passed), so the tagged
+tree is `base`, tested on every platform, plus notes that passed their checks. `--skip-ci` releases without
+either check, on purpose (it says so; a protected branch that requires the run then refuses the merge).
+`--dry-run` asks nothing and pushes nothing.
+
+Only `base`'s own push run counts for it. Pull requests run the Linux jobs only (macOS runs on main), so a pull
+request's green run is never taken for the commit it was merged as.
 
 A `docs/releases/X.Y.Z.md` for a version no tag has yet (written ahead the old way) is taken as the
 first fragment of that release.
@@ -66,6 +82,8 @@ NET_TIMEOUT = 60
 CI_WORKFLOW = "ci.yml"
 CI_WAIT = 45 * 60
 CI_POLL = 30
+MERGE_TRIES = 3  # a merge refused because the target moved at that very moment is tried again
+MERGE_RETRY = 5
 CI_APPEAR = 180  # a push's run shows up within seconds; one that never does is no run
 # where gh is when PATH is launchd's bare one (a service running `cut` with its environment); the same places
 # the Hub looks (steve-core config.rs gh_cli())
@@ -252,44 +270,85 @@ def assemble(version, parts):
 def cut_once(repo, branch, version_arg, minor, dry, ci_wait=CI_WAIT):
     if git("fetch", "--quiet", "--tags", "origin", cwd=repo, check=False, timeout=NET_TIMEOUT).returncode != 0:
         raise Refused("can't fetch origin")
-    head = git("rev-parse", f"refs/remotes/origin/{branch}^{{commit}}", cwd=repo).stdout.strip()
+    base = git("rev-parse", f"refs/remotes/origin/{branch}^{{commit}}", cwd=repo).stdout.strip()
     version = version_arg or next_version(repo, minor)
     taken(repo, version, version_arg)
     with tempfile.TemporaryDirectory(prefix="steve-cut-") as tmp:
         wt = Path(tmp, "wt")
-        git("worktree", "add", "--quiet", "--detach", str(wt), head, cwd=repo)
+        git("worktree", "add", "--quiet", "--detach", str(wt), base, cwd=repo)
         try:
+            notes_rel = f"{NOTES}/{version}.md"
+            if left := left_behind(wt, version):
+                # a release whose pull request merged but whose tag never landed: its notes commit is tagged as
+                # it is, once it passes the checks it had to pass before its merge. Fragments that arrived since
+                # wait for the release after it.
+                print(f"v{version}'s notes commit {left[:7]} is on {branch} without its tag: tagging it",
+                      file=sys.stderr)
+                if dry:
+                    print(git("show", f"{left}:{notes_rel}", cwd=wt).stdout, end="")
+                    return version
+                if ci_wait is not None:
+                    ci_gate(repo, git("rev-parse", f"{left}^", cwd=wt).stdout.strip(), branch, ci_wait)
+                    notes_ci(repo, left, f"notes commit {left[:7]}", ci_wait, branch)
+                tag(repo, wt, left, version, branch)
+                return fetched(repo, version)
             parts = fragments(wt, version)
             if not parts:
                 raise Refused(f"no release notes: add {FRAGMENTS}/<item>.md on {branch} first")
-            notes_rel = f"{NOTES}/{version}.md"
-            # the notes of this untagged version are on the branch and nothing else waits: a release whose
-            # pull request merged but whose tag never landed (or notes written ahead the old way, alone)
+            # notes of this untagged version written ahead the old way, alone: `base` is tagged as it is
             ready = [p for p, _ in parts] == [notes_rel]
             text = parts[0][1] if ready else assemble(version, parts)
             if dry:
                 print(text, end="")
                 return version
             if ci_wait is not None:
-                ci_gate(repo, head, branch, ci_wait)
+                ci_gate(repo, base, branch, ci_wait)
             if ready:
-                target = head
+                target = base
             else:
+                # The notes commit: the notes added, the fragments present at `base` removed, nothing else.
+                # Fragments that reach the branch after `base` are no part of it, so the merge keeps them.
                 for p, _ in parts:
                     if p != notes_rel:
                         git("rm", "--quiet", "--", p, cwd=wt)
                 Path(wt, notes_rel).write_text(text)
                 git("add", "--", notes_rel, cwd=wt)
                 git("commit", "--quiet", "-m", f"Release notes {version}", cwd=wt)
-                target = release_pr(repo, wt, branch, version, head, text, ci_wait)
-            tag(repo, wt, target, version)
+                target = release_pr(repo, wt, branch, version, text, ci_wait)
+            tag(repo, wt, target, version, branch)
         finally:
             git("worktree", "remove", "--force", str(wt), cwd=repo, check=False)
+    return fetched(repo, version)
+
+
+def fetched(repo, version):
     try:
         git("fetch", "--quiet", "--tags", "origin", cwd=repo, check=False, timeout=NET_TIMEOUT)
     except Refused:
         pass  # released; the next fetch brings it here
     return version
+
+
+def left_behind(wt, version):
+    """The notes commit of a release of `version` that reached the branch (checked out in `wt`) without its
+    tag, or None. It is the commit that added `docs/releases/X.Y.Z.md`, in the shape `cut` makes it: titled
+    `Release notes X.Y.Z`, one parent, that file added and fragments removed, nothing else. A release pull
+    request goes in with a merge commit, so the notes commit is the merge's second parent; `git log` on the
+    file follows the parent it came from. Notes written ahead by hand (the old way) are not one: they are the
+    first fragment of their release."""
+    rel = f"{NOTES}/{version}.md"
+    if not Path(wt, rel).is_file():
+        return None
+    c = git("log", "-1", "--format=%H", "--diff-filter=A", "--", rel, cwd=wt).stdout.strip()
+    if not c or git("log", "-1", "--format=%s", c, cwd=wt).stdout.strip() != f"Release notes {version}":
+        return None
+    if len(git("rev-list", "--parents", "-n", "1", c, cwd=wt).stdout.split()) != 2:
+        return None
+    changes = git("diff", "--name-status", "--no-renames", f"{c}^", c, cwd=wt).stdout.splitlines()
+    removed = re.compile(rf"D\t{re.escape(FRAGMENTS)}/[^/]+\.md")
+    if f"A\t{rel}" not in changes or any(l != f"A\t{rel}" and not removed.fullmatch(l) for l in changes):
+        return None
+    return c
 
 
 def taken(repo, version, version_arg):
@@ -319,44 +378,39 @@ def push(wt, *refspecs):
         raise Refused(f"push failed: {(r.stderr or r.stdout).strip()[:300]}")
 
 
-def release_pr(repo, wt, branch, version, base, text, ci_wait):
-    """Bring the release notes commit in `wt` (on `base`) into `branch` through a pull request: the commit
-    it became on the branch. Anything short of the merge closes the pull request and deletes its branch."""
+def release_pr(repo, wt, branch, version, text, ci_wait):
+    """Bring the release notes commit in `wt` into `branch` through a pull request merged with a merge commit,
+    and return the notes commit itself: what its pull request's run tested, now on the branch. Anything short
+    of the merge closes the pull request and deletes its branch."""
     rb = f"release/v{version}"
     sha = git("rev-parse", "HEAD", cwd=wt).stdout.strip()
     if remote_ref(repo, f"refs/heads/{rb}"):
         raise Refused(f"{rb} is already on origin: another release of v{version} is in progress, or one was "
                       f"left behind (delete it with `git push origin --delete {rb}` once nobody is releasing)")
-    push(wt, f"HEAD:refs/heads/{rb}")
+    push(wt, f"HEAD:refs/heads/{rb}")  # rejected: someone took the release branch meanwhile, start again
     number = None
     try:
         url = gh("pr", "create", "--base", branch, "--head", rb, "--title", f"Release notes {version}",
                  "--body", f"Release notes of v{version}, opened by `ops/cut-release.py cut`, which merges it and "
-                           f"tags the result.\n\n{text}", cwd=repo).strip().splitlines()[-1]
+                           f"tags this pull request's commit.\n\n{text}", cwd=repo).strip().splitlines()[-1]
         m = re.search(r"/pull/(\d+)$", url)
         if not m:
             raise Refused(f"can't tell the release pull request from {url!r}")
         number = m.group(1)
         print(f"release pull request #{number}: {url}", file=sys.stderr)
         if ci_wait is not None:
-            pr_ci(repo, sha, number, ci_wait)
-        # the branch moved since its CI was checked: what would be tagged was not
-        if remote_ref(repo, f"refs/heads/{branch}") != base:
-            raise Raced(f"{branch} moved while the release pull request waited")
+            notes_ci(repo, sha, f"release pull request #{number}", ci_wait)
+        # The branch may well have moved since `base`: that changes nothing about the notes commit, which is
+        # what is tagged. Only someone else's release of this version is a reason to start again.
         taken(repo, version, None)
-        merged = merge(repo, number, sha)
+        merge(repo, number, sha)
     except BaseException:
         if number:
             gh_quiet(repo, "pr", "close", number, "--comment", "Closed by `ops/cut-release.py cut`: not released.")
         git("push", "--quiet", "origin", "--delete", rb, cwd=repo, check=False, timeout=NET_TIMEOUT)
         raise
     git("push", "--quiet", "origin", "--delete", rb, cwd=repo, check=False, timeout=NET_TIMEOUT)
-    git("fetch", "--quiet", "origin", cwd=repo, check=False, timeout=NET_TIMEOUT)
-    parent = git("rev-parse", f"{merged}^", cwd=repo, check=False).stdout.strip()
-    if parent != base and ci_wait is not None:
-        # merged onto a branch that had moved after all: its own run is what tested the tagged tree
-        ci_gate(repo, merged, branch, ci_wait)
-    return merged
+    return sha
 
 
 def gh_quiet(repo, *args):
@@ -366,39 +420,66 @@ def gh_quiet(repo, *args):
         print(f"warning: {e}", file=sys.stderr)
 
 
-def pr_ci(repo, sha, number, wait):
-    """Return once the CI workflow passed on the release pull request's head `sha`."""
+def notes_ci(repo, sha, what, wait, branch=None):
+    """Return once the CI workflow passed on the notes commit `sha`: its release pull request's run, or with
+    `branch` (a notes commit already on it) also a push run there. Either checks the same change of notes
+    on a tested `base`; a notes commit that was rebase-merged before merge commits were used has only the
+    push run."""
     start, said = time.monotonic(), None
+    open_pr = branch is None
     while True:
-        run = newest(ci_runs(repo, sha, "pull_request"))
+        runs = ci_runs(repo, sha, "pull_request")
+        if branch is not None:
+            runs += [r for r in [ci_run(repo, sha, branch)] if r]
+        run = newest(runs)
         waited = time.monotonic() - start
         if run is not None and run.get("status") == "completed":
             if run.get("conclusion") == "success":
-                print(f"CI passed on release pull request #{number}: {run.get('html_url', run.get('id'))}",
-                      file=sys.stderr)
+                print(f"CI passed on {what}: {run.get('html_url', run.get('id'))}", file=sys.stderr)
                 return
-            raise Refused(f"CI ({CI_WORKFLOW}) {run.get('conclusion')} on release pull request #{number}: "
-                          f"{run.get('html_url', run.get('id'))}. It is closed; cut again once the cause is fixed "
-                          f"(a flake: just cut again)")
+            raise Refused(f"CI ({CI_WORKFLOW}) {run.get('conclusion')} on {what}: "
+                          f"{run.get('html_url', run.get('id'))}. "
+                          + ("It is closed; cut again once the cause is fixed (a flake: just cut again)" if open_pr
+                             else rerun_hint(run)))
         state = "no run yet" if run is None else run.get("status") or "pending"
         if waited >= (min(wait, CI_APPEAR) if run is None else wait):
-            raise Refused(f"CI ({CI_WORKFLOW}) on release pull request #{number} is still {state} after "
-                          f"{int(waited)}s; it is closed, cut again")
+            raise Refused(f"CI ({CI_WORKFLOW}) on {what} is still {state} after {int(waited)}s; "
+                          + ("it is closed, cut again" if open_pr else "cut again once it has passed"))
         if state != said:
-            print(f"waiting for CI on release pull request #{number} ({state})", file=sys.stderr)
+            print(f"waiting for CI on {what} ({state})", file=sys.stderr)
             said = state
         time.sleep(CI_POLL)
 
 
 def merge(repo, number, sha):
-    """Rebase-merge the release pull request at `sha`: the commit it became on the branch."""
-    try:
-        gh("pr", "merge", number, "--rebase", "--match-head-commit", sha, cwd=repo)
-    except Refused as e:
-        why = str(e)
-        if re.search(r"not up to date|base branch was modified|head branch was modified", why, re.I):
-            raise Raced(why)
-        raise Refused(f"merging release pull request #{number}: {why}")
+    """Merge the release pull request at `sha` with a merge commit, and return that commit.
+
+    A merge commit, not a rebase: `sha` goes into the branch as it is, so the tag can name the very commit
+    whose run passed, however far the branch moved meanwhile. Its three-way merge applies only what `sha`
+    changed from `base` (the notes added, the fragments of `base` removed), so fragments that arrived on the
+    branch since stay for the next release. `--match-head-commit` merges nothing but `sha`."""
+    for attempt in range(1, MERGE_TRIES + 1):
+        try:
+            gh("pr", "merge", number, "--merge", "--match-head-commit", sha, cwd=repo)
+            break
+        except Refused as e:
+            why = str(e)
+            if re.search(r"base branch was modified", why, re.I) and attempt < MERGE_TRIES:
+                # another pull request merged at the same moment: the merge itself is tried again
+                print(f"{why}; merging again", file=sys.stderr)
+                time.sleep(MERGE_RETRY)
+                continue
+            if re.search(r"not mergeable|cannot be cleanly created|conflict", why, re.I):
+                raise Raced(f"release pull request #{number} does not merge cleanly: {why}")
+            if re.search(r"head branch was modified", why, re.I):
+                raise Raced(f"release pull request #{number}'s branch changed: {why}")
+            if re.search(r"base branch was modified", why, re.I):
+                raise Raced(why)
+            if re.search(r"not up to date", why, re.I):
+                raise Refused(f"merging release pull request #{number}: {why}. `cut` merges it with a merge commit "
+                              f"while the branch moves on, so the branch rules must not require pull requests to "
+                              f"be up to date before merging")
+            raise Refused(f"merging release pull request #{number}: {why}")
     for _ in range(10):
         out = gh("pr", "view", number, "--json", "state,mergeCommit", cwd=repo)
         try:
@@ -411,11 +492,23 @@ def merge(repo, number, sha):
     raise Refused(f"release pull request #{number} did not show as merged")
 
 
-def tag(repo, wt, target, version):
-    """Tag `target` (on origin's branch) `vX.Y.Z` and push only the tag."""
+def tag(repo, wt, target, version, branch):
+    """Tag `target` `vX.Y.Z` and push only the tag, once origin's `branch` contains `target`.
+
+    The tag comes after the merge, never before it. A pushed tag starts the Release workflow, which publishes
+    the version; tagged first, a merge that then failed (a conflict, a branch rule) would leave a published
+    release that the branch does not contain, and its number taken. Merged first, a tag that then fails to
+    land leaves only notes on the branch, which the next `cut` finds and tags (`left_behind`)."""
     name = f"v{version}"
-    if git("cat-file", "-e", f"{target}^{{commit}}", cwd=repo, check=False).returncode != 0:
+    for attempt in range(3):  # a merge GitHub reported may take a moment to show on the branch
+        if attempt:
+            time.sleep(3)
         git("fetch", "--quiet", "origin", cwd=repo, check=False, timeout=NET_TIMEOUT)
+        if git("merge-base", "--is-ancestor", target, f"refs/remotes/origin/{branch}", cwd=repo,
+               check=False).returncode == 0:
+            break
+    else:
+        raise Refused(f"{target[:7]} is not on origin's {branch}: v{version} is not tagged (cut again once it is)")
     git("tag", "-a", name, "-m", f"Steve {name}", target, cwd=repo)
     try:
         push(wt, f"refs/tags/{name}")

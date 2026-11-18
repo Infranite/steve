@@ -16,11 +16,11 @@ export type RunState = "running" | "needs-you" | "paused"
 
 const LANE: Record<StateKind, Lane | null> = {
   proposed: "needs", asking: "needs", unavailable: "needs",
-  working: "running", queued: "running", idle: "running",
+  working: "running", queued: "running", idle: "running", closing: "running",
   paused: "paused", graphPaused: "paused", blocked: "paused",
   done: "done", dropped: null, failed: null,
 }
-export const laneOf = (s: ItemState): Lane | null => LANE[s.kind]
+export const laneOf = (s: ItemState): Lane | null => s.kind === "closing" && s.move === "you" ? "needs" : LANE[s.kind]
 
 /** null: not in the pill (closed or done) */
 export function runStateOf(s: ItemState): RunState | null {

@@ -304,7 +304,7 @@ struct Fetched {
 impl GitHub {
     /// Applies one change. Never panics on odd payloads: what cannot be read is `ignored`.
     pub async fn apply(&self, src: &Source, event: &str, payload: &Value) -> Outcome {
-        self.apply_as(src, event, payload, false).await
+        self.apply_as(src, event, payload, false, None).await
     }
 
     /// [`GitHub::apply`]; `late`: processed after it was received (a retry, the recovery), so an
@@ -315,6 +315,7 @@ impl GitHub {
         event: &str,
         payload: &Value,
         late: bool,
+        delivery: Option<&str>,
     ) -> Outcome {
         // Which connection, and in which workspace.
         let resolved = match src {
@@ -374,11 +375,12 @@ impl GitHub {
             Ok(_) => return Outcome::ignored(Some(&ws), None, "这个仓库没有关联"),
             Err(e) => return Outcome::failed(Some(&ws), None, e.to_string()),
         };
-        if !repo.enabled {
-            return Outcome::ignored(Some(&ws), Some(&repo.id), "这个仓库已停用");
-        }
         let from_hook = !matches!(src, Source::Poll { .. });
-        let fetched = match self.fetch(&repo, event, payload).await {
+        let fetched = match if repo.enabled {
+            self.fetch(&repo, event, payload).await
+        } else {
+            Ok(Fetched::default())
+        } {
             // tried again later rather than applied without it
             Err((e, true)) => return Outcome::failed(Some(&ws), Some(&repo.id), e),
             f => f,
@@ -386,7 +388,31 @@ impl GitHub {
         let note = fetched.as_ref().err().map(|(e, _)| e.clone());
         let fetched = fetched.unwrap_or_default();
         let now = self.now();
+        let flow = self.flow();
         let res = self.store().transaction(|tx| {
+            // Re-read under the writer lock: a settings change while fetching must win.
+            let Some(repo) =
+                repo::repo_get(tx, &repo.id)?.filter(|r| r.connection_id == repo.connection_id)
+            else {
+                return Ok((
+                    Outcome::ignored(Some(&ws), None, "这个仓库没有关联"),
+                    Effects::default(),
+                    None,
+                ));
+            };
+            let staged = match delivery {
+                Some(id) => {
+                    crate::automation::stage(tx, flow.as_ref(), &repo, id, event, payload, now)?
+                }
+                None => None,
+            };
+            if !repo.enabled {
+                return Ok((
+                    Outcome::ignored(Some(&ws), Some(&repo.id), "这个仓库已停用"),
+                    Effects::default(),
+                    staged,
+                ));
+            }
             let mut fx = Effects {
                 note: note.clone(),
                 late,
@@ -398,12 +424,15 @@ impl GitHub {
             self.dispatch(tx, &repo, event, payload, fetched, now, &mut fx)?;
             self.ask_merges(tx, &repo, &fx)?;
             crate::after::emit(tx, &repo.workspace_id, &repo.connection_id, &mut fx)?;
-            Ok::<_, ApiError>(fx)
+            let mut out = Outcome::ok(&ws, Some(&repo.id));
+            out.error = fx.note.clone();
+            Ok::<_, ApiError>((out, fx, staged))
         });
         match res {
-            Ok(fx) => {
-                let mut out = Outcome::ok(&ws, Some(&repo.id));
-                out.error = fx.note.clone();
+            Ok((out, fx, staged)) => {
+                if let (Some(commit), Some(flow)) = (staged, flow.as_ref()) {
+                    commit.dispatch(flow, &ws);
+                }
                 self.after_commit(&ws, &repo.connection_id, fx).await;
                 out
             }

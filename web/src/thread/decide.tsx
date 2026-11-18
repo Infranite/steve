@@ -10,6 +10,8 @@ import { PermissionDetails } from "@/components/permission"
 import { Button } from "@/components/ui/button"
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuRadioGroup, DropdownMenuRadioItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
 import { OutContext } from "@/channels/out-context"
+import { handoffContent } from "@/channels/handoff-content"
+import { HandoffPreview, ReplyDraft } from "@/channels/reply-preview"
 import { OpenInFeishu } from "@/channels/open-in-app"
 import { SendRecovery } from "@/channels/send-recovery"
 import { t as tr, useT } from "@/i18n"
@@ -84,7 +86,7 @@ function Detail({ w, extra }: { w: Wait; extra?: ReactNode }) {
     {w.subject === "chan_message" && <OpenInFeishu url={w.openUrl} className="-ml-2 self-start" />}
     {w.subject === "session_start" && w.subjectId && <Button variant="outline" size="sm" data-session-config={w.subjectId} onClick={() => w.subjectId && editBot(w.subjectId)}>{t("core:card.fixBotConfig")}</Button>}
     {/* the draft's headings are text: a "## 交付" never outranks the question above it */}
-    {w.draft && !isToolCall(w) && <div className="max-h-72 overflow-auto break-words text-muted-foreground [&_:is(h1,h2,h3,h4,h5,h6)]:mt-0! [&_:is(h1,h2,h3,h4,h5,h6)]:mb-1! [&_:is(h1,h2,h3,h4,h5,h6)]:[font:inherit]! [&_:is(h1,h2,h3,h4,h5,h6)]:font-medium! [&_:is(h1,h2,h3,h4,h5,h6)]:text-foreground"><Markdown text={w.draft} /></div>}
+    {w.draft && !isToolCall(w) && (w.subject === "chan_message" ? <ReplyDraft text={w.draft} /> : <div className="max-h-72 overflow-auto break-words text-muted-foreground [&_:is(h1,h2,h3,h4,h5,h6)]:mt-0! [&_:is(h1,h2,h3,h4,h5,h6)]:mb-1! [&_:is(h1,h2,h3,h4,h5,h6)]:[font:inherit]! [&_:is(h1,h2,h3,h4,h5,h6)]:font-medium! [&_:is(h1,h2,h3,h4,h5,h6)]:text-foreground"><Markdown text={w.draft} /></div>)}
     {extra}
     <YoloBadge decision={w.decision} subject={w.subject} />
     {w.busy && <div role="status" className="flex items-center gap-1.5 type-footnote text-muted-foreground" data-agent-busy><span className="size-1.5 rounded-full bg-blue dot-running" aria-hidden />{t("core:card.agentBusy")}</div>}
@@ -182,12 +184,13 @@ export function mapDecision(i: Item, w: Wait, where: "inline" | "composer", show
      * is its question; the lines under it (why you, the conversation) and the candidate draft are its detail */
     const words = (WORDS_OPTIONS[w.subject] ?? []).find((o) => w.options.includes(o)), withWords = WITH_WORDS[w.subject] ?? []
     const [head, ...rest] = w.q.split("\n")
-    const detail = <Detail w={{ ...w, draft: undefined }} extra={<>
+    const channel = w.subject === "chan_message"
+    const detail = <Detail w={{ ...w, draft: undefined }} extra={channel ? <HandoffPreview key={w.decision} question={w.q} draft={w.draft} /> : <>
       {rest.length > 0 && <div className="whitespace-pre-line type-footnote text-muted-foreground" data-card-context>{rest.join("\n")}</div>}
       {w.draft && <div className="flex flex-col gap-1" data-card-draft><span className="type-footnote text-muted-foreground">{tr("core:card.candidateDraft")}</span><div className="break-words whitespace-pre-line">{w.draft}</div></div>}
     </>} />
     return {
-      d: { ...base, question: head, detail, options: w.options.filter((o) => o !== words).map((o) => opt(o, optionLabel(w.subject, o), { "data-option": o })),
+      d: { ...base, question: (channel && handoffContent(w.q)?.question) || head, detail, options: w.options.filter((o) => o !== words).map((o) => opt(o, optionLabel(w.subject, o), { "data-option": o })),
         own: words ? { placeholder: tr(words === "draft_reply" ? "core:card.replyPlaceholder" : "core:card.instructPlaceholder"), send: optionLabel(w.subject, words), attrs: { "data-option-words": words }, sendAttrs: { "data-option": words } } : false },
       answer: (a) => {
         if (typeof a !== "object") return
