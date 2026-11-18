@@ -1285,6 +1285,7 @@ impl SessionExecutor for FakeNode {
                 effective_permissions: o.policy.permissions,
                 guarantees: vec![],
                 resume: Some(id(derived_id("resume", o.session.as_str()))),
+                skill_receipt: None,
             };
             st.sessions.insert(
                 o.session.clone(),
@@ -2540,6 +2541,7 @@ pub mod build {
             artifact_view: None,
             mcp_servers: vec![],
             skills: vec![],
+            skill_snapshot: None,
         }
     }
 

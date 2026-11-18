@@ -205,6 +205,9 @@ pub struct OpenSession {
     /// Node ignores them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub skills: Vec<Skill>,
+    /// New bindings carry a fixed, isolated snapshot. Reopen and replay use exactly this one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skill_snapshot: Option<crate::SkillSnapshot>,
 }
 
 /// One skill: written as `<name>/SKILL.md`, its front matter `name` and `description`, then
@@ -735,4 +738,7 @@ pub struct SessionView {
     pub guarantees: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resume: Option<ResumeHandle>,
+    /// Node evidence after it materialized this snapshot and opened the adapter.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skill_receipt: Option<crate::SkillUseReceipt>,
 }

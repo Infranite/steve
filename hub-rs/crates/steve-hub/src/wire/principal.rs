@@ -196,6 +196,11 @@ fn segment(s: &str) -> String {
     format!("{clean}-{}", &d[..8])
 }
 
+/// A plain path component for a session's pinned harness-state view.
+pub(super) fn session_segment(session: &str) -> String {
+    format!("session-{}", segment(session))
+}
+
 /// `session`'s principal's own directory for `harness` on `node` (path model §4.5.1): one per
 /// (workspace, principal, bot, adapter), recorded as `runtime_sessions.state_dir`. The principal
 /// who owns the Node starts it from their own settings and login there.

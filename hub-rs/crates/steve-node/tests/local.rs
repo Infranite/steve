@@ -247,6 +247,7 @@ fn open_body(session: &str) -> OpenSession {
         artifact_view: None,
         mcp_servers: vec![],
         skills: vec![],
+        skill_snapshot: None,
     }
 }
 

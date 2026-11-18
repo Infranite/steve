@@ -105,9 +105,12 @@ function myers(x: string[], y: string[], limit = 1500): { t: 0 | 1 | 2; s: strin
 }
 
 /** Word-level diff of two texts (LCS over word and whitespace tokens), grouped into equal runs and changes */
-export function diffWords(original: string, suggested: string): DiffSegment[] {
-  const a = original.match(TOKEN) ?? [];
-  const b = suggested.match(TOKEN) ?? [];
+export function diffWords(original: string, suggested: string, granularity: "word" | "line" = "word"): DiffSegment[] {
+  const split = (text: string) => granularity === "line"
+    ? text.match(/[^\n]*\n|[^\n]+$/g) ?? []
+    : text.match(TOKEN) ?? [];
+  const a = split(original);
+  const b = split(suggested);
 
   // Strip the common start and end so the table only covers the middle
   let pre = 0;

@@ -1,4 +1,6 @@
 {
+  "hub.skills.read_failed": "Could not read skill distribution",
+  "hub.skills.not_found": "No such skill",
   "hub.error.invalid": "Invalid parameters: %{fields}",
   "hub.error.list_sep": ", ",
   "hub.not_found.item": "No such item",

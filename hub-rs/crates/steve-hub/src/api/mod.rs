@@ -748,6 +748,10 @@ pub fn router(st: AppState, modules: Router) -> Router {
         .route("/access/tokens", post(crate::access::token_create))
         // 能力: Steve itself as a built-in MCP server, and where outside clients connect
         .route("/capabilities/steve", get(crate::caps_api::steve_h))
+        .route(
+            "/capabilities/skills/{id}/distribution",
+            get(crate::caps_api::skill_distribution),
+        )
         .route("/access/tokens/{id}", delete(crate::access::token_revoke))
         .route("/access/clients/{id}", delete(crate::access::client_revoke))
         .route("/access/pairings", post(crate::access::pair_create))

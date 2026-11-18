@@ -60,7 +60,7 @@ const run = async ({ width, height, scheme }) => {
   await caps('doc')
   await page.locator('[data-skills-empty]').waitFor()
   assert.match(await page.locator('[data-skills-empty]').innerText(), /技能是一份写给 Bot 的做事说明/)
-  assert.match(await page.locator('[data-skills-unread]').innerText(), /My Agent 不读技能/)
+  assert.match(await page.locator('[data-skills-unread]').innerText(), /My Agent 不支持托管技能/)
   assert.equal(await page.locator('[data-planned]').count(), 0)
   await page.locator('[data-skills]').scrollIntoViewIfNeeded(); await page.waitForTimeout(600)
   await fits(); await shot('empty')
@@ -102,7 +102,7 @@ const run = async ({ width, height, scheme }) => {
   await fits(); await shotDialog('edit')
   await dlg.locator('[data-skill-save]').click()
   await settle(2)
-  assert.deepEqual(calls[1], ['PATCH', 'skill', 'bskill_1', { name: 'code-review', description: '审查一次改动：合并前、或者有人请你看 PR 时用。', content: '# 审查\n\n1. 先读 diff。\n2. 跑测试。\n3. 写下结论。' }])
+  assert.deepEqual(calls[1], ['PATCH', 'skill', 'bskill_1', { base_version: 1, note: '', name: 'code-review', description: '审查一次改动：合并前、或者有人请你看 PR 时用。', content: '# 审查\n\n1. 先读 diff。\n2. 跑测试。\n3. 写下结论。' }])
   await dlg.waitFor({ state: 'detached' })
 
   /* a pasted SKILL.md fills a new skill, which goes into the library and to this Bot */
@@ -118,7 +118,7 @@ const run = async ({ width, height, scheme }) => {
   assert.equal(await dlg.locator('textarea[data-skill-description-edit], [data-skill-description-edit] textarea').first().inputValue(), 'Check a deploy before announcing it.')
   await dlg.locator('[data-skill-save]').click()
   await page.locator('[data-skills] [data-bot-skill=deploy-check]').waitFor()
-  assert.deepEqual(calls[2], ['POST', 'skill', { name: 'deploy-check', description: 'Check a deploy before announcing it.', content: '# Deploy check\n\n- Look at the dashboard.', bot: 'dev' }])
+  assert.deepEqual(calls[2], ['POST', 'skill', { name: 'deploy-check', description: 'Check a deploy before announcing it.', content: '# Deploy check\n\n- Look at the dashboard.', note: '', bot: 'dev' }])
 
   /* a name a harness cannot take is caught before saving */
   await page.locator('[data-cap-add=skill]').click()
