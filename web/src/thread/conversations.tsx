@@ -307,7 +307,8 @@ export function ChanOutNote({ m }: { m?: ConvMessage }) {
   if (!s || (s === "skipped" && !reason)) return null
   /* only a draft can be assumed closed: whatever the Hub says past it wins over a late click */
   const shown = closed && s === "draft" ? "discarded" : s
-  const note = <div className={cn("type-callout", shown === "failed" || shown === "disconnected" ? "text-destructive" : "text-muted-foreground")} data-chan-out={shown}>{shown in CHAN_OUT ? t(CHAN_OUT[shown as keyof typeof CHAN_OUT]) : shown}{reason ? `：${reason}` : ""}</div>
+  const label = shown in CHAN_OUT ? t(CHAN_OUT[shown as keyof typeof CHAN_OUT]) : shown
+  const note = <div className={cn("type-callout", shown === "failed" || shown === "disconnected" ? "text-destructive" : "text-muted-foreground")} data-chan-out={shown}>{reason ? t("thread:chanOut.withReason", { label, reason }) : label}</div>
   if (shown !== "draft" || !decision) return note
   const busy = st.pendingActions.has("decision:" + decision)
   const discard = async () => { if (await discardOut(decision)) setClosed(true) }

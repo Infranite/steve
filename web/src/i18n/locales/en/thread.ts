@@ -255,6 +255,7 @@ export default {
     unconfirmed: "Reaction not confirmed: {{error}}",
   },
   chanOut: {
+    withReason: "{{label}}: {{reason}}",
     notSent: "Not sent to chat",
     blocked: "Channel restricted; not sent",
     sent: "Sent",
