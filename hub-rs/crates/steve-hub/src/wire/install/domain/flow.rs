@@ -1,16 +1,15 @@
 use super::*;
 
-install! { prepare(reg, cx) [mut registry] => [digest, item_events, registry, setup] {
+install! { prepare(reg, cx) [mut registry] => [registry, setup] {
     let Env { core, preflight, .. } = cx.clone();
     let setup = steve_flow::FlowSetup::new(Arc::new(FlowCore {
         core: core.clone(),
         preflight: preflight.clone(),
     }));
     setup.register(&mut registry);
-    // A2: the `connection` decision (re-authorize)
-    steve_modules::accounts::connections::register(&mut registry);
-    // C1: `space:<id>` visibility scopes of the spaces a viewer sees
-    registry.viewer_scopes(Box::new(steve_channels::spaces::SpaceScopes));
+}}
+
+install! { hooks(reg, _cx) [mut registry] => [digest, item_events, registry] {
     // C2 + S10: personas and flow nodes follow a deleted Bot
     registry.bot_deleted(Box::new(hp::BotHeirs));
     // S10: item events and the report notes, bound to the flow once it exists

@@ -1,6 +1,11 @@
 use super::*;
 use steve_modules::accounts::connections;
 
+install! { prepare(reg, _cx) [mut registry] => [registry] {
+    // A2: the `connection` decision (re-authorize)
+    steve_modules::accounts::connections::register(&mut registry);
+}}
+
 install! { install(reg, cx) [declared, modules, ports, vault] => [conns, declared, gh_env, mail_cfg, modules, ports, vault] {
     let Env { vars, .. } = cx.clone();
     // One Connections for every declared adapter (built in: GitHub (G1), Feishu bot and user

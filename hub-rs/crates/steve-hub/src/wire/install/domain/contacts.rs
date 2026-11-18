@@ -1,6 +1,11 @@
 use super::*;
 use steve_channels::adapters::feishu;
 
+install! { prepare(reg, _cx) [ports, mut registry] => [ports, registry] {
+    steve_modules::contacts::changes::register(&mut registry, &ports);
+    steve_modules::contacts::merge::register(&mut registry, &ports);
+}}
+
 install! { install(reg, cx) [conns, modules] => [conns, directory, modules] {
     let Env { bus, .. } = cx.clone();
     // C1/C3: channels on the Feishu bot; F5: its address book feeds the directory sync
