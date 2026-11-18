@@ -435,10 +435,33 @@ pub async fn layer(
         let m = msg.as_ref().unwrap();
         let id = m.get("id").cloned().unwrap_or(Value::Null);
         if method == "tools/list" {
+            let (store, sid) = (x.store.clone(), s.id.clone());
+            let attachment =
+                tokio::task::spawn_blocking(move || store.sessions().mcp_attachment(&sid))
+                    .await
+                    .ok()
+                    .and_then(Result::ok)
+                    .flatten();
             let r = service
                 .registry(&s, super::tool_service::Reach::Listed)
                 .await;
             let tools: Vec<Value> = r.listed_entries().iter().map(|e| e.mcp()).collect();
+            if let Some(a) = attachment
+                && !a.ready
+                && [
+                    steve_mcp::tools::UPDATE,
+                    steve_mcp::tools::ASK,
+                    steve_mcp::tools::DELIVER,
+                ]
+                .iter()
+                .all(|name| tools.iter().any(|t| t["name"] == *name))
+            {
+                let (store, sid) = (x.store.clone(), s.id.clone());
+                let _ = tokio::task::spawn_blocking(move || {
+                    store.sessions().confirm_mcp(&sid, &a.open)
+                })
+                .await;
+            }
             return json_rpc(&id, json!({"tools": tools}));
         }
         if method == "initialize" {

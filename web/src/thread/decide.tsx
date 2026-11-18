@@ -71,7 +71,7 @@ export function CardTools({ i, w }: { i: Item; w: Wait }) {
     <DropdownMenu>
       <DropdownMenuTrigger render={<Button variant="ghost" size="icon-xs" aria-label={t("common:action.more")} className="text-muted-foreground" data-decision-more={i.id} />}><EllipsisIcon /></DropdownMenuTrigger>
       <DropdownMenuContent align="end" className="min-w-52">
-        {w.subject !== "session_start" && !(w.subject === "mail_draft" && w.options.includes("confirmed_not_sent")) && <DropdownMenuItem disabled={busy} onClick={() => void dismiss(i.id, w.decision)} data-dismiss={i.id}><BellOffIcon />{t(w.subject === "tool_call" ? "core:card.dismissTool" : "core:card.dismiss")}</DropdownMenuItem>}
+        {!["session_start", "session_mcp"].includes(w.subject) && !(w.subject === "mail_draft" && w.options.includes("confirmed_not_sent")) && <DropdownMenuItem disabled={busy} onClick={() => void dismiss(i.id, w.decision)} data-dismiss={i.id}><BellOffIcon />{t(w.subject === "tool_call" ? "core:card.dismissTool" : "core:card.dismiss")}</DropdownMenuItem>}
         {i.id && <><DropdownMenuSeparator />
         <DropdownMenuItem variant="destructive" disabled={busy} onClick={() => setSt(i.id, "drop")} data-drop-item={i.id}><BanIcon />{t("core:card.dropItem")}</DropdownMenuItem></>}
       </DropdownMenuContent>
@@ -235,7 +235,7 @@ export function mapDecision(i: Item, w: Wait, where: "inline" | "composer", show
     const os = w.options.filter((o) => FAIL_ORDER.includes(o)).sort((a, b) => FAIL_ORDER.indexOf(a) - FAIL_ORDER.indexOf(b))
     const go = os.includes("continue")
     return {
-      d: { ...base, options: os.filter((o) => o !== "continue").map((o) => opt(o, w.subject === "session_start" && o === "retry" ? tr("core:card.retrySession") : FAIL_CHOICE[o], { "data-fail": o })), own: go ? { placeholder: tr("core:card.nextPlaceholder"), send: FAIL_CHOICE.continue, required: false, attrs: { "data-fail-note": "" }, sendAttrs: { "data-fail": "continue" } } : false },
+      d: { ...base, options: os.filter((o) => o !== "continue").map((o) => opt(o, ["session_start", "session_mcp"].includes(w.subject) && o === "retry" ? tr("core:card.retrySession") : FAIL_CHOICE[o], { "data-fail": o })), own: go ? { placeholder: tr("core:card.nextPlaceholder"), send: FAIL_CHOICE.continue, required: false, attrs: { "data-fail-note": "" }, sendAttrs: { "data-fail": "continue" } } : false },
       answer: (a) => { if (typeof a !== "object") return; if (a.option) act(a.option); else if (go) act("continue", a.text) },
     }
   }

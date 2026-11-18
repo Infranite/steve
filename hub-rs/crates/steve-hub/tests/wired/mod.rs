@@ -5,6 +5,7 @@
 //! test connections point their API base at a closed local port).
 
 mod connectors;
+mod mcp_recovery;
 
 use std::collections::HashMap;
 use std::net::SocketAddr;

@@ -329,7 +329,10 @@ impl Engine {
         }
         // Startup blockers are explicitly human-owned, even at full YOLO. An old queued
         // protocol is not authorization to keep restarting a harness that cannot open.
-        if d.subject_type == steve_store::SESSION_START_FAILURE {
+        if matches!(
+            d.subject_type.as_str(),
+            steve_store::SESSION_START_FAILURE | steve_store::SESSION_MCP_FAILURE
+        ) {
             return Ok(None);
         }
         // a release YOLO approved went wrong (B1): looked at as its failure card comes up

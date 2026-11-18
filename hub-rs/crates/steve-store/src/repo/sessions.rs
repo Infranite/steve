@@ -107,9 +107,76 @@ pub struct ImportedSession {
 
 pub struct Sessions<'a>(&'a Store);
 
+/// Attachment evidence belongs to one open, not the lifetime of the conversation. Keeping it in
+/// the event log makes a Hub restart retain both the deadline and the confirmed generation.
+#[derive(Debug, Clone)]
+pub struct McpAttachment {
+    pub open: String,
+    pub ready: bool,
+    pub seq: i64,
+}
+
 const SESSION: &str = "SELECT * FROM sessions WHERE id = ?";
 
 impl Sessions<'_> {
+    pub fn mcp_attachment(&self, id: &str) -> Result<Option<McpAttachment>> {
+        self.0.read(|c| {
+            one(c, "SELECT seq,json_extract(data,'$.steve_mcp.open'),json_extract(data,'$.steve_mcp.ready') FROM events WHERE session_id=? AND kind='system' AND json_type(data,'$.steve_mcp.open')='text' ORDER BY seq DESC LIMIT 1", [id], |r| {
+                Ok(McpAttachment {seq:r.get(0)?, open:r.get(1)?, ready:r.get(2)?})
+            })
+        })
+    }
+
+    /// Called in the transaction that schedules an open/configure, before a harness can connect.
+    pub fn expect_mcp(&self, id: &str, open: &str) -> Result<()> {
+        self.0.events().add(
+            id,
+            "system",
+            serde_json::json!({
+                "steve_mcp":{"open":open,"ready":false}
+            }),
+        )?;
+        Ok(())
+    }
+
+    /// A successful authenticated tools/list of this open. Late responses of a previous open,
+    /// other sessions and repeated lists cannot satisfy or overwrite the current open's check.
+    pub fn confirm_mcp(&self, id: &str, open: &str) -> Result<()> {
+        self.0.atomic(|| {
+            if self.get(id)?.is_none_or(|s| s.status == "ended")
+                || self
+                    .mcp_attachment(id)?
+                    .is_none_or(|a| a.open != open || a.ready)
+            {
+                return Ok(());
+            }
+            self.0.events().add(
+                id,
+                "system",
+                serde_json::json!({
+                    "steve_mcp":{"open":open,"ready":true}
+                }),
+            )?;
+            Ok(())
+        })
+    }
+
+    /// A configure refused before acceptance did not replace the live harness. Restore its
+    /// previous evidence instead of declaring an otherwise working adapter tool-less.
+    pub fn mcp_open_refused(&self, id: &str, open: &str) -> Result<()> {
+        self.0.atomic(|| {
+            if self.mcp_attachment(id)?.is_none_or(|a| a.open != open || a.ready) {
+                return Ok(());
+            }
+            let previous: Option<String> = self.0.read(|c| one(c,
+                "SELECT data FROM events WHERE session_id=?1 AND kind='system' AND json_type(data,'$.steve_mcp.open')='text' AND json_extract(data,'$.steve_mcp.open')<>?2 ORDER BY seq DESC LIMIT 1",[id,open],|r|r.get(0)))?;
+            if let Some(previous) = previous {
+                self.0.events().add(id,"system",serde_json::from_str(&previous)?)?;
+            }
+            Ok(())
+        })
+    }
+
     pub fn get(&self, id: &str) -> Result<Option<Session>> {
         self.0.read(|c| one(c, SESSION, [id], Session::from_row))
     }
@@ -235,7 +302,7 @@ impl Sessions<'_> {
                 }))?;
             }
             let cards = self.0.read(|c| all(c, "SELECT * FROM decisions WHERE session_id=?", [id], crate::Decision::from_row))?;
-            for d in cards.into_iter().filter(|d| d.status == "open" && d.subject_type == crate::SESSION_START_FAILURE) {
+            for d in cards.into_iter().filter(|d| d.status == "open" && matches!(d.subject_type.as_str(), crate::SESSION_START_FAILURE | crate::SESSION_MCP_FAILURE)) {
                 self.0.decisions().resolve(&d.id, &serde_json::json!({"superseded":"会话已结束"}), "expired", &Value::Null)?;
             }
             Ok(())
@@ -313,7 +380,7 @@ impl Sessions<'_> {
         let at = now();
         self.0.write(|w| {
             w.c.run(
-                "INSERT INTO session_stops (session_id, attempt, stop_reason, error, yours, stop_asked, ended, seq, updated) VALUES (?1, ?2, ?3, ?4, ?5, NULL, ?6, (SELECT MAX(seq) FROM events WHERE session_id = ?1), ?6) ON CONFLICT(session_id) DO UPDATE SET attempt = ?2, stop_reason = ?3, error = ?4, yours = ?5, stop_asked = NULL, asked_seq = NULL, ended = ?6, seq = excluded.seq, updated = ?6 WHERE session_stops.stop_reason IS NOT 'session_start' OR ?3='session_start'",
+                "INSERT INTO session_stops (session_id, attempt, stop_reason, error, yours, stop_asked, ended, seq, updated) VALUES (?1, ?2, ?3, ?4, ?5, NULL, ?6, (SELECT MAX(seq) FROM events WHERE session_id = ?1), ?6) ON CONFLICT(session_id) DO UPDATE SET attempt = ?2, stop_reason = ?3, error = ?4, yours = ?5, stop_asked = NULL, asked_seq = NULL, ended = ?6, seq = excluded.seq, updated = ?6 WHERE session_stops.stop_reason IS NULL OR session_stops.stop_reason NOT IN ('session_start','session_mcp') OR ?3=session_stops.stop_reason",
                 params![id, attempt, stop_reason, error, yours as i64, at],
             )?;
             Ok(())

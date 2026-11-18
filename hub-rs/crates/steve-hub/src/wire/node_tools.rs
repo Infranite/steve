@@ -454,7 +454,29 @@ fn saved(db: &Connection, key: &str, digest: Option<&Digest>) -> ApiResult<Optio
 impl HubTools for NodeTools {
     async fn catalog(&self, execution: ExecutionRef) -> ApiResult<Catalog> {
         let caller = self.authorized(&execution, true).await?;
-        Self::catalog_of(&*self.service()?, &caller).await
+        let attachment = if let Caller::Session(s) = &caller {
+            let (store, id) = (self.store.clone(), s.id.clone());
+            blocking(move || store.sessions().mcp_attachment(&id).map_err(internal)).await?
+        } else {
+            None
+        };
+        let catalog = Self::catalog_of(&*self.service()?, &caller).await?;
+        // A prefetch or configuration declaration is not attachment evidence. This is the
+        // session's authenticated catalog request from its Node's MCP endpoint.
+        if let (Caller::Session(s), Some(a)) = (&caller, attachment)
+            && !a.ready
+            && [
+                steve_mcp::tools::UPDATE,
+                steve_mcp::tools::ASK,
+                steve_mcp::tools::DELIVER,
+            ]
+            .iter()
+            .all(|name| catalog.tools.iter().any(|t| t.name == *name))
+        {
+            let (store, id) = (self.store.clone(), s.id.clone());
+            blocking(move || store.sessions().confirm_mcp(&id, &a.open).map_err(internal)).await?;
+        }
+        Ok(catalog)
     }
     async fn call(&self, q: ToolCall) -> ApiResult<ToolResult> {
         let key = q.key();

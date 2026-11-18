@@ -19,7 +19,7 @@ import { Trans } from "react-i18next"
 import { t, useT } from "@/i18n"
 
 /** A startup failure holds queued input until the user explicitly retries its card. */
-const startupBlocked = (sid: string) => st.items.some(i => i.waits.some(w => w.subject === "session_start" && w.session === sid))
+const startupBlocked = (sid: string) => st.items.some(i => i.waits.some(w => ["session_start", "session_mcp"].includes(w.subject) && w.session === sid))
 
 /** when the queue goes, in the strip's header */
 export function queueNote(s: Sess | null) {

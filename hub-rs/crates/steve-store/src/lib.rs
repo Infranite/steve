@@ -94,6 +94,8 @@ pub type Result<T, E = StoreError> = std::result::Result<T, E>;
 /// A failed session open requires an explicit human retry. Used by both its durable stop and
 /// its decision card, so background queue flushing and YOLO cannot restart it.
 pub const SESSION_START_FAILURE: &str = "session_start";
+/// A live harness opened without Steve's required tool catalog.
+pub const SESSION_MCP_FAILURE: &str = "session_mcp";
 
 /// Unix milliseconds, like `Date.now()`.
 pub fn now() -> i64 {

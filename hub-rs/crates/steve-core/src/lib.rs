@@ -28,6 +28,7 @@ pub mod judge;
 pub mod kinds;
 pub mod lifecycle;
 mod marks;
+mod mcp_recovery;
 pub mod models;
 mod modules;
 pub mod node_git;

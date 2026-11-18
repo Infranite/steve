@@ -429,7 +429,7 @@ function choiceLabel(d: RDecision) {
   if (d.kind === "confirm") return r.choice === "yes" ? t("core:choice.confirmYes") : t("core:choice.confirmNo")
   if (d.kind === "propose") return r.choice === "yes" ? t("core:choice.proposeYes") : t("core:choice.proposeNo")
   if (MODULE_CHOICE_SUBJECTS.has(d.subject_type)) return MODULE_CHOICE[r.choice] ?? String(r.choice ?? t("core:choice.handled"))
-  if (d.subject_type === "session_start" && r.choice === "retry") return t("core:card.retrySession")
+  if (["session_start", "session_mcp"].includes(d.subject_type) && r.choice === "retry") return t("core:card.retrySession")
   if (d.kind === "fail") return FAIL_CHOICE[r.choice] ?? r.choice
   if (d.subject_type === "tool_call") return r.optionId ? t("core:choice.allow") : t("core:choice.deny")
   if (d.subject_type === "release") return r.approved ? t("core:choice.release") : t("core:choice.noRelease")

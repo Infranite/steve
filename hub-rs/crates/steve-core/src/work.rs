@@ -165,7 +165,13 @@ impl Tx<'_> {
             .db()
             .decisions_of_item(&item.id)?
             .into_iter()
-            .find(|d| d.status == "open" && d.subject_type == steve_store::SESSION_START_FAILURE)
+            .find(|d| {
+                d.status == "open"
+                    && matches!(
+                        d.subject_type.as_str(),
+                        steve_store::SESSION_START_FAILURE | steve_store::SESSION_MCP_FAILURE
+                    )
+            })
         {
             return Ok(Work::User(steve_i18n::t!(
                 "core.now.waiting_user",
