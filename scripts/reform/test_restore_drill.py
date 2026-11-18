@@ -87,6 +87,9 @@ class RestoreTests(unittest.TestCase):
         with patch.dict(os.environ, {"AWS_SECRET_ACCESS_KEY": "must-not-inherit", "STEVE_HOME": "unsafe"}):
             env = d.isolated_environment(home, 18760, "on")
         self.assertNotIn("AWS_SECRET_ACCESS_KEY", env)
+        for name in d.r.isolation.ADAPTERS:
+            self.assertEqual(env[f"STEVE_ADAPTER_{name}"], "/usr/bin/false")
+        self.assertEqual(env["STEVE_UPDATE_CHECK"], "0")
         self.assertEqual(env["STEVE_HOME"], str(home))
         self.assertEqual(env["STEVE_NO_RESUME"], "1")
         self.assertEqual(env["STEVE_BACKUP"], "on")
