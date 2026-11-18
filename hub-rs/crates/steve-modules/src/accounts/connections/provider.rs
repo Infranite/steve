@@ -352,6 +352,91 @@ pub enum BlockScope {
     Target,
 }
 
+impl From<ProviderError> for steve_types::Error {
+    fn from(error: ProviderError) -> Self {
+        use steve_types::{Code, Param, Params};
+        let safe_detail = error.to_string();
+        let mut params = Params::default();
+        let code = match error {
+            ProviderError::Auth(_) => Code::Unauthenticated,
+            ProviderError::Rejected(_) => Code::Forbidden,
+            ProviderError::Transient(_) => Code::Unavailable,
+            ProviderError::Config(_) => Code::NotConfigured,
+            ProviderError::Unsupported => Code::Unsupported,
+            ProviderError::Blocked(scope, _) => {
+                let scope = match scope {
+                    BlockScope::Connection => "connection",
+                    BlockScope::Target => "target",
+                };
+                params.0.insert("scope".into(), Param::Str(scope.into()));
+                Code::Forbidden
+            }
+        };
+        Self {
+            code,
+            retry: code.default_retry(),
+            reason: None,
+            params,
+            safe_detail,
+        }
+    }
+}
+
+#[cfg(test)]
+mod error_contract_tests {
+    use super::*;
+    use steve_types::{Code, Param};
+
+    #[test]
+    fn every_provider_error_and_block_scope() {
+        for (provider, code, scope) in [
+            (
+                ProviderError::Auth("auth".into()),
+                Code::Unauthenticated,
+                None,
+            ),
+            (
+                ProviderError::Rejected("rejected".into()),
+                Code::Forbidden,
+                None,
+            ),
+            (
+                ProviderError::Transient("transient".into()),
+                Code::Unavailable,
+                None,
+            ),
+            (
+                ProviderError::Config("config".into()),
+                Code::NotConfigured,
+                None,
+            ),
+            (ProviderError::Unsupported, Code::Unsupported, None),
+            (
+                ProviderError::Blocked(BlockScope::Connection, "blocked".into()),
+                Code::Forbidden,
+                Some("connection"),
+            ),
+            (
+                ProviderError::Blocked(BlockScope::Target, "blocked".into()),
+                Code::Forbidden,
+                Some("target"),
+            ),
+        ] {
+            let detail = provider.to_string();
+            let error = steve_types::Error::from(provider);
+            assert_eq!(error.code, code);
+            assert_eq!(error.retry, code.default_retry());
+            assert_eq!(error.safe_detail, detail);
+            assert_eq!(error.reason, None);
+            assert_eq!(
+                error.params.0.get("scope"),
+                scope.map(|s| Param::Str(s.into())).as_ref()
+            );
+            assert_eq!(error.params.0.len(), usize::from(scope.is_some()));
+        }
+    }
+}
+
 /// A health check's outcome.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Health {

@@ -13,6 +13,7 @@ edge	steve-channels	steve-knowledge
 edge	steve-channels	steve-modules
 edge	steve-channels	steve-node-wire
 edge	steve-channels	steve-store
+edge	steve-channels	steve-types
 edge	steve-channels	steve-work-api
 edge	steve-core	steve-acp
 edge	steve-core	steve-i18n
@@ -60,6 +61,7 @@ edge	steve-hub	steve-research
 edge	steve-hub	steve-stats
 edge	steve-hub	steve-store
 edge	steve-hub	steve-transcript
+edge	steve-hub	steve-types
 edge	steve-hub	steve-vault
 edge	steve-install	steve-i18n
 edge	steve-knowledge	steve-i18n
@@ -73,11 +75,13 @@ edge	steve-mail	steve-modules
 edge	steve-mail	steve-store
 edge	steve-modules	steve-i18n
 edge	steve-modules	steve-store
+edge	steve-modules	steve-types
 edge	steve-node	steve-acp
 edge	steve-node	steve-node-api
 edge	steve-node	steve-research
 edge	steve-node	steve-toolchains
 edge	steve-node	steve-vault
+edge	steve-node-api	steve-types
 edge	steve-node-cli	steve-acp
 edge	steve-node-cli	steve-install
 edge	steve-node-cli	steve-node

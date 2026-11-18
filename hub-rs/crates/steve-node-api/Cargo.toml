@@ -10,6 +10,7 @@ description = "The Hub-Node contract: typed ids, run specs, Steve events, errors
 testkit = []
 
 [dependencies]
+steve-types = { path = "../steve-types" }
 async-trait = "=0.1.92"
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = { version = "=1.0.154", features = ["preserve_order"] }

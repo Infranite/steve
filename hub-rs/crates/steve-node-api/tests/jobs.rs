@@ -630,7 +630,7 @@ fn the_contract_has_no_store_core_or_agent_protocol_dependency() {
             assert_ne!(name, banned, "steve-node-api must not depend on {banned}");
         }
         assert!(
-            !name.starts_with("steve-"),
+            !name.starts_with("steve-") || name == "steve-types",
             "unexpected Steve dependency {name}"
         );
     }

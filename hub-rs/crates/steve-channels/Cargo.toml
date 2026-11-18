@@ -27,6 +27,7 @@ name = "personal_trigger_fixture"
 required-features = ["fake"]
 
 [dependencies]
+steve-types = { path = "../steve-types" }
 aes = "=0.9.3"
 base64 = "=0.23.1"
 cbc = { version = "=0.2.1", features = ["alloc", "block-padding"] }

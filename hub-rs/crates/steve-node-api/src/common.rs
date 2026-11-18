@@ -111,6 +111,131 @@ impl fmt::Display for ApiError {
 
 impl std::error::Error for ApiError {}
 
+/// Preserve the Node's explicit retry classification; this conversion never resends a command.
+impl From<ApiError> for steve_types::Error {
+    fn from(error: ApiError) -> Self {
+        use steve_types::{Code, Param, Params, Retry};
+        let code = match error.code {
+            ErrorCode::Offline => Code::Unavailable,
+            ErrorCode::Busy => Code::Busy,
+            ErrorCode::Unsupported => Code::Unsupported,
+            ErrorCode::Denied => Code::Forbidden,
+            ErrorCode::Expired | ErrorCode::Stale => Code::Stale,
+            ErrorCode::Conflict => Code::Conflict,
+            ErrorCode::Exhausted => Code::Exhausted,
+            ErrorCode::Invalid => Code::Invalid,
+            ErrorCode::OutcomeUnknown => Code::OutcomeUnknown,
+            ErrorCode::Gap => Code::Gap,
+            ErrorCode::Internal => Code::Internal,
+        };
+        let retry = match error.retry {
+            RetryClass::Never => Retry::Never,
+            RetryClass::SameOperation => Retry::Later { after_ms: None },
+            RetryClass::AfterReconcile => Retry::Now,
+        };
+        let mut params = Params::default();
+        if let Some(operation) = error.operation {
+            params
+                .0
+                .insert("operation".into(), Param::Str(operation.to_string()));
+        }
+        if let Some(state) = error.state {
+            let state = match state {
+                StateTag::Accepted => "accepted",
+                StateTag::Running => "running",
+                StateTag::Waiting => "waiting",
+                StateTag::Finished => "finished",
+                StateTag::Unknown => "unknown",
+            };
+            params.0.insert("state".into(), Param::Str(state.into()));
+        }
+        Self {
+            code,
+            retry,
+            reason: None,
+            params,
+            safe_detail: error.safe_detail,
+        }
+    }
+}
+
+#[cfg(test)]
+mod error_contract_tests {
+    use super::*;
+    use steve_types::{Code, Param, Retry};
+
+    #[test]
+    fn every_node_code_and_explicit_retry_class() {
+        let table = [
+            (ErrorCode::Offline, Code::Unavailable),
+            (ErrorCode::Busy, Code::Busy),
+            (ErrorCode::Unsupported, Code::Unsupported),
+            (ErrorCode::Denied, Code::Forbidden),
+            (ErrorCode::Expired, Code::Stale),
+            (ErrorCode::Stale, Code::Stale),
+            (ErrorCode::Conflict, Code::Conflict),
+            (ErrorCode::Exhausted, Code::Exhausted),
+            (ErrorCode::Invalid, Code::Invalid),
+            (ErrorCode::OutcomeUnknown, Code::OutcomeUnknown),
+            (ErrorCode::Gap, Code::Gap),
+            (ErrorCode::Internal, Code::Internal),
+        ];
+        for (node_code, code) in table {
+            for (wire_retry, retry) in [
+                (RetryClass::Never, Retry::Never),
+                (RetryClass::SameOperation, Retry::Later { after_ms: None }),
+                (RetryClass::AfterReconcile, Retry::Now),
+            ] {
+                let error = steve_types::Error::from(ApiError {
+                    code: node_code,
+                    retry: wire_retry,
+                    operation: None,
+                    state: None,
+                    safe_detail: "safe detail".into(),
+                });
+                assert_eq!(error.code, code, "{node_code:?}");
+                assert_eq!(error.retry, retry, "{node_code:?} / {wire_retry:?}");
+                assert_eq!(error.safe_detail, "safe detail");
+                assert_eq!(error.reason, None);
+                assert!(error.params.0.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn outcome_unknown_with_never_does_not_enable_retry() {
+        let error = steve_types::Error::from(ApiError {
+            code: ErrorCode::OutcomeUnknown,
+            retry: RetryClass::Never,
+            operation: None,
+            state: None,
+            safe_detail: "unknown".into(),
+        });
+        assert_eq!(error.retry, Retry::Never);
+    }
+
+    #[test]
+    fn operation_and_every_state_are_display_params() {
+        for (state, expected) in [
+            (StateTag::Accepted, "accepted"),
+            (StateTag::Running, "running"),
+            (StateTag::Waiting, "waiting"),
+            (StateTag::Finished, "finished"),
+            (StateTag::Unknown, "unknown"),
+        ] {
+            let error = steve_types::Error::from(ApiError {
+                code: ErrorCode::OutcomeUnknown,
+                retry: RetryClass::Never,
+                operation: Some(OperationId::new("op-1").unwrap()),
+                state: Some(state),
+                safe_detail: "safe detail".into(),
+            });
+            assert_eq!(error.params.0["operation"], Param::Str("op-1".into()));
+            assert_eq!(error.params.0["state"], Param::Str(expected.into()));
+        }
+    }
+}
+
 pub type ApiResult<T> = Result<T, ApiError>;
 
 /// A command from the Hub. `id` makes it idempotent; `issued_at` and `accept_before` never change on
