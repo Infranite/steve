@@ -229,6 +229,11 @@ async fn a_live_harness_that_lost_its_attempt_keeps_discovery_but_is_replaced_sa
     acceptance("missing-attempt").await
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_missing_code_mode_tool_function_recreates_a_working_session() {
+    acceptance("function-missing").await
+}
+
 async fn retire(e: &Env, store: &steve_store::Store, sid: &str) {
     let sid_ref = sid;
     let core = e.tools.core.clone();

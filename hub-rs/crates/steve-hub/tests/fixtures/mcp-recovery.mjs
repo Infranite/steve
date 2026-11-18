@@ -41,6 +41,11 @@ async function prompt(p) {
   if (!existsSync(marker)) {
     writeFileSync(marker, "The existing work must survive session recovery.")
     say("The adapter opened successfully, but Steve MCP tools are undefined.")
+    if (text.includes("function-missing")) {
+      const tools=Object.create(null), name="steve_update"
+      try { tools[name]() } catch(error) { say(String(error)) }
+      return {stopReason:"end_turn"}
+    }
     if (text.includes("missing-attempt")) {
       const server=servers.find(s=>s.name==="steve")
       await rpc(server,"initialize",{protocolVersion:"2025-06-18",capabilities:{},clientInfo:{name:"lost-attempt",version:"1"}})
