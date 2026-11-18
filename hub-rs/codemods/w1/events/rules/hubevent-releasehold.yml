@@ -1,0 +1,11 @@
+id: hubevent-releasehold
+language: Rust
+message: Migrate HubEvent::ReleaseHold; run.py also converts field types.
+severity: hint
+rule:
+  pattern: '$ENUM::ReleaseHold { $$$FIELDS }'
+  kind: struct_expression
+constraints:
+  ENUM:
+    regex: '^(.*::)?HubEvent$'
+fix: 'steve_types::DevicesEvent::ReleaseHold { $$$FIELDS }.into()'

@@ -1,0 +1,7 @@
+id: hubevent-stevetool
+valid:
+  - "fn f() { let _ = Other::SteveTool { id: id }; }"
+  - "fn f(e: HubEvent) { match e { HubEvent::SteveTool { .. } => (), _ => () } }"
+invalid:
+  - "fn f() { send(HubEvent::SteveTool { id: id }); }"
+  - "fn f() { send(s::HubEvent::SteveTool { ws, id: make(\"comma,colon:\") }); }"

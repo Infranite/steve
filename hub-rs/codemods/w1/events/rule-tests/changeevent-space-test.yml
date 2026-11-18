@@ -1,0 +1,7 @@
+id: changeevent-space
+valid:
+  - "fn f() { let _ = Other::Space { id: id }; }"
+  - "fn f(e: ChangeEvent) { match e { ChangeEvent::Space { .. } => (), _ => () } }"
+invalid:
+  - "fn f() { send(ChangeEvent::Space { id: id }); }"
+  - "fn f() { send(s::ChangeEvent::Space { ws, id: make(\"comma,colon:\") }); }"

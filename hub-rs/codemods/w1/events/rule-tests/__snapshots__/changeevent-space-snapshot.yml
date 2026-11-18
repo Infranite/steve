@@ -1,0 +1,16 @@
+id: changeevent-space
+snapshots:
+  "fn f() { send(ChangeEvent::Space { id: id }); }":
+    fixed: "fn f() { send(steve_types::ChannelsEvent::Space { id: id }.into()); }"
+    labels:
+    - source: "ChangeEvent::Space { id: id }"
+      style: primary
+      start: 14
+      end: 43
+  "fn f() { send(s::ChangeEvent::Space { ws, id: make(\"comma,colon:\") }); }":
+    fixed: "fn f() { send(steve_types::ChannelsEvent::Space { ws, id: make(\"comma,colon:\") }.into()); }"
+    labels:
+    - source: "s::ChangeEvent::Space { ws, id: make(\"comma,colon:\") }"
+      style: primary
+      start: 14
+      end: 68

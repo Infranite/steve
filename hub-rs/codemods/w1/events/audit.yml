@@ -1,0 +1,8 @@
+id: legacy-event-constructor-audit
+language: Rust
+rule:
+  kind: struct_expression
+  pattern: '$ENUM::$VARIANT { $$$FIELDS }'
+constraints:
+  ENUM:
+    regex: '^(.*::)?(ChangeEvent|HubEvent)$'

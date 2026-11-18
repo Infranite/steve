@@ -1,0 +1,16 @@
+id: changeevent-vault
+snapshots:
+  "fn f() { send(ChangeEvent::Vault { id: id }); }":
+    fixed: "fn f() { send(steve_types::VaultEvent::Vault { id: id }.into()); }"
+    labels:
+    - source: "ChangeEvent::Vault { id: id }"
+      style: primary
+      start: 14
+      end: 43
+  "fn f() { send(s::ChangeEvent::Vault { ws, id: make(\"comma,colon:\") }); }":
+    fixed: "fn f() { send(steve_types::VaultEvent::Vault { ws, id: make(\"comma,colon:\") }.into()); }"
+    labels:
+    - source: "s::ChangeEvent::Vault { ws, id: make(\"comma,colon:\") }"
+      style: primary
+      start: 14
+      end: 68

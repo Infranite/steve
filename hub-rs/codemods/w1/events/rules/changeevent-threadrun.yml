@@ -1,0 +1,11 @@
+id: changeevent-threadrun
+language: Rust
+message: Migrate ChangeEvent::ThreadRun; run.py also converts field types.
+severity: hint
+rule:
+  pattern: '$ENUM::ThreadRun { $$$FIELDS }'
+  kind: struct_expression
+constraints:
+  ENUM:
+    regex: '^(.*::)?ChangeEvent$'
+fix: 'steve_types::WorkEvent::ThreadRun { $$$FIELDS }.into()'

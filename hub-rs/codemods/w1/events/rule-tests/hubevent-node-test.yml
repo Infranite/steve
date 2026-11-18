@@ -1,0 +1,7 @@
+id: hubevent-node
+valid:
+  - "fn f() { let _ = Other::Node { id: id }; }"
+  - "fn f(e: HubEvent) { match e { HubEvent::Node { .. } => (), _ => () } }"
+invalid:
+  - "fn f() { send(HubEvent::Node { id: id }); }"
+  - "fn f() { send(s::HubEvent::Node { ws, id: make(\"comma,colon:\") }); }"

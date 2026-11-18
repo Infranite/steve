@@ -1,0 +1,7 @@
+id: changeevent-client
+valid:
+  - "fn f() { let _ = Other::Client { id: id }; }"
+  - "fn f(e: ChangeEvent) { match e { ChangeEvent::Client { .. } => (), _ => () } }"
+invalid:
+  - "fn f() { send(ChangeEvent::Client { id: id }); }"
+  - "fn f() { send(s::ChangeEvent::Client { ws, id: make(\"comma,colon:\") }); }"

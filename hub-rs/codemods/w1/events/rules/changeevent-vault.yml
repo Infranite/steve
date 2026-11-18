@@ -1,0 +1,11 @@
+id: changeevent-vault
+language: Rust
+message: Migrate ChangeEvent::Vault; run.py also converts field types.
+severity: hint
+rule:
+  pattern: '$ENUM::Vault { $$$FIELDS }'
+  kind: struct_expression
+constraints:
+  ENUM:
+    regex: '^(.*::)?ChangeEvent$'
+fix: 'steve_types::VaultEvent::Vault { $$$FIELDS }.into()'

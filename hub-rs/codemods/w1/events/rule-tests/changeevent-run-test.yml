@@ -1,0 +1,7 @@
+id: changeevent-run
+valid:
+  - "fn f() { let _ = Other::Run { id: id }; }"
+  - "fn f(e: ChangeEvent) { match e { ChangeEvent::Run { .. } => (), _ => () } }"
+invalid:
+  - "fn f() { send(ChangeEvent::Run { id: id }); }"
+  - "fn f() { send(s::ChangeEvent::Run { ws, id: make(\"comma,colon:\") }); }"

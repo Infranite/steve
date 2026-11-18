@@ -1,0 +1,11 @@
+id: hubevent-workspace
+language: Rust
+message: Migrate HubEvent::Workspace; run.py also converts field types.
+severity: hint
+rule:
+  pattern: '$ENUM::Workspace { $$$FIELDS }'
+  kind: struct_expression
+constraints:
+  ENUM:
+    regex: '^(.*::)?HubEvent$'
+fix: 'steve_types::ConfigEvent::Workspace { ws: steve_types::ws_todo!(), $$$FIELDS }.into()'

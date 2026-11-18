@@ -1,0 +1,11 @@
+id: hubevent-account
+language: Rust
+message: Migrate HubEvent::Account; run.py also converts field types.
+severity: hint
+rule:
+  pattern: '$ENUM::Account { $$$FIELDS }'
+  kind: struct_expression
+constraints:
+  ENUM:
+    regex: '^(.*::)?HubEvent$'
+fix: 'steve_types::PeopleEvent::Account { $$$FIELDS }.into()'

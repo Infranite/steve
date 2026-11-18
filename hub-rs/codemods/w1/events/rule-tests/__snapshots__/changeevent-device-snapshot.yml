@@ -1,0 +1,16 @@
+id: changeevent-device
+snapshots:
+  "fn f() { send(ChangeEvent::Device { id: id }); }":
+    fixed: "fn f() { send(steve_types::DevicesEvent::Device { id: id }.into()); }"
+    labels:
+    - source: "ChangeEvent::Device { id: id }"
+      style: primary
+      start: 14
+      end: 44
+  "fn f() { send(s::ChangeEvent::Device { ws, id: make(\"comma,colon:\") }); }":
+    fixed: "fn f() { send(steve_types::DevicesEvent::Device { ws, id: make(\"comma,colon:\") }.into()); }"
+    labels:
+    - source: "s::ChangeEvent::Device { ws, id: make(\"comma,colon:\") }"
+      style: primary
+      start: 14
+      end: 69

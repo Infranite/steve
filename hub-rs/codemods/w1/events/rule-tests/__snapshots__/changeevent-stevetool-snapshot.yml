@@ -1,0 +1,16 @@
+id: changeevent-stevetool
+snapshots:
+  "fn f() { send(ChangeEvent::SteveTool { id: id }); }":
+    fixed: "fn f() { send(steve_types::WorkLiveEvent::SteveTool { id: id }.into()); }"
+    labels:
+    - source: "ChangeEvent::SteveTool { id: id }"
+      style: primary
+      start: 14
+      end: 47
+  "fn f() { send(s::ChangeEvent::SteveTool { ws, id: make(\"comma,colon:\") }); }":
+    fixed: "fn f() { send(steve_types::WorkLiveEvent::SteveTool { ws, id: make(\"comma,colon:\") }.into()); }"
+    labels:
+    - source: "s::ChangeEvent::SteveTool { ws, id: make(\"comma,colon:\") }"
+      style: primary
+      start: 14
+      end: 72

@@ -1,0 +1,16 @@
+id: changeevent-digest
+snapshots:
+  "fn f() { send(ChangeEvent::Digest { id: id }); }":
+    fixed: "fn f() { send(steve_types::ChannelsEvent::Digest { id: id }.into()); }"
+    labels:
+    - source: "ChangeEvent::Digest { id: id }"
+      style: primary
+      start: 14
+      end: 44
+  "fn f() { send(s::ChangeEvent::Digest { ws, id: make(\"comma,colon:\") }); }":
+    fixed: "fn f() { send(steve_types::ChannelsEvent::Digest { ws, id: make(\"comma,colon:\") }.into()); }"
+    labels:
+    - source: "s::ChangeEvent::Digest { ws, id: make(\"comma,colon:\") }"
+      style: primary
+      start: 14
+      end: 69

@@ -1,0 +1,16 @@
+id: hubevent-signal
+snapshots:
+  "fn f() { send(HubEvent::Signal { id: id }); }":
+    fixed: "fn f() { send(steve_types::AutomationEvent::Signal { id: id }.into()); }"
+    labels:
+    - source: "HubEvent::Signal { id: id }"
+      style: primary
+      start: 14
+      end: 41
+  "fn f() { send(s::HubEvent::Signal { ws, id: make(\"comma,colon:\") }); }":
+    fixed: "fn f() { send(steve_types::AutomationEvent::Signal { ws, id: make(\"comma,colon:\") }.into()); }"
+    labels:
+    - source: "s::HubEvent::Signal { ws, id: make(\"comma,colon:\") }"
+      style: primary
+      start: 14
+      end: 66

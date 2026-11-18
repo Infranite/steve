@@ -1,0 +1,11 @@
+id: hubevent-decision
+language: Rust
+message: Migrate HubEvent::Decision; run.py also converts field types.
+severity: hint
+rule:
+  pattern: '$ENUM::Decision { $$$FIELDS }'
+  kind: struct_expression
+constraints:
+  ENUM:
+    regex: '^(.*::)?HubEvent$'
+fix: 'steve_types::WorkEvent::Decision { ws: steve_types::ws_todo!(), $$$FIELDS }.into()'

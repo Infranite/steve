@@ -1,0 +1,11 @@
+id: hubevent-signal
+language: Rust
+message: Migrate HubEvent::Signal; run.py also converts field types.
+severity: hint
+rule:
+  pattern: '$ENUM::Signal { $$$FIELDS }'
+  kind: struct_expression
+constraints:
+  ENUM:
+    regex: '^(.*::)?HubEvent$'
+fix: 'steve_types::AutomationEvent::Signal { $$$FIELDS }.into()'

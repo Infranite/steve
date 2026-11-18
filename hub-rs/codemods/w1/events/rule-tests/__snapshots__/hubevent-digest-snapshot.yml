@@ -1,0 +1,16 @@
+id: hubevent-digest
+snapshots:
+  "fn f() { send(HubEvent::Digest { id: id }); }":
+    fixed: "fn f() { send(steve_types::ChannelsEvent::Digest { id: id }.into()); }"
+    labels:
+    - source: "HubEvent::Digest { id: id }"
+      style: primary
+      start: 14
+      end: 41
+  "fn f() { send(s::HubEvent::Digest { ws, id: make(\"comma,colon:\") }); }":
+    fixed: "fn f() { send(steve_types::ChannelsEvent::Digest { ws, id: make(\"comma,colon:\") }.into()); }"
+    labels:
+    - source: "s::HubEvent::Digest { ws, id: make(\"comma,colon:\") }"
+      style: primary
+      start: 14
+      end: 66

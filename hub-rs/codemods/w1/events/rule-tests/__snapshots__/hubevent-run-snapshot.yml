@@ -1,0 +1,16 @@
+id: hubevent-run
+snapshots:
+  "fn f() { send(HubEvent::Run { id: id }); }":
+    fixed: "fn f() { send(steve_types::AutomationEvent::Run { id: id }.into()); }"
+    labels:
+    - source: "HubEvent::Run { id: id }"
+      style: primary
+      start: 14
+      end: 38
+  "fn f() { send(s::HubEvent::Run { ws, id: make(\"comma,colon:\") }); }":
+    fixed: "fn f() { send(steve_types::AutomationEvent::Run { ws, id: make(\"comma,colon:\") }.into()); }"
+    labels:
+    - source: "s::HubEvent::Run { ws, id: make(\"comma,colon:\") }"
+      style: primary
+      start: 14
+      end: 63

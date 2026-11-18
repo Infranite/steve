@@ -1,0 +1,11 @@
+id: changeevent-node
+language: Rust
+message: Migrate ChangeEvent::Node; run.py also converts field types.
+severity: hint
+rule:
+  pattern: '$ENUM::Node { $$$FIELDS }'
+  kind: struct_expression
+constraints:
+  ENUM:
+    regex: '^(.*::)?ChangeEvent$'
+fix: 'steve_types::DevicesEvent::Node { $$$FIELDS }.into()'

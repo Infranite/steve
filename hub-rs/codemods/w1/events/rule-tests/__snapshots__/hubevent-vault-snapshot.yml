@@ -1,0 +1,16 @@
+id: hubevent-vault
+snapshots:
+  "fn f() { send(HubEvent::Vault { id: id }); }":
+    fixed: "fn f() { send(steve_types::VaultEvent::Vault { id: id }.into()); }"
+    labels:
+    - source: "HubEvent::Vault { id: id }"
+      style: primary
+      start: 14
+      end: 40
+  "fn f() { send(s::HubEvent::Vault { ws, id: make(\"comma,colon:\") }); }":
+    fixed: "fn f() { send(steve_types::VaultEvent::Vault { ws, id: make(\"comma,colon:\") }.into()); }"
+    labels:
+    - source: "s::HubEvent::Vault { ws, id: make(\"comma,colon:\") }"
+      style: primary
+      start: 14
+      end: 65

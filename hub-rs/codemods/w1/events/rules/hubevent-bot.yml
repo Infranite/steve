@@ -1,0 +1,11 @@
+id: hubevent-bot
+language: Rust
+message: Migrate HubEvent::Bot; run.py also converts field types.
+severity: hint
+rule:
+  pattern: '$ENUM::Bot { $$$FIELDS }'
+  kind: struct_expression
+constraints:
+  ENUM:
+    regex: '^(.*::)?HubEvent$'
+fix: 'steve_types::ConfigEvent::Bot { ws: steve_types::ws_todo!(), $$$FIELDS }.into()'

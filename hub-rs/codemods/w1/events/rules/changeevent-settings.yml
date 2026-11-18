@@ -1,0 +1,11 @@
+id: changeevent-settings
+language: Rust
+message: Migrate ChangeEvent::Settings; run.py also converts field types.
+severity: hint
+rule:
+  pattern: '$ENUM::Settings { $$$FIELDS }'
+  kind: struct_expression
+constraints:
+  ENUM:
+    regex: '^(.*::)?ChangeEvent$'
+fix: 'steve_types::ConfigEvent::Settings { ws: steve_types::ws_todo!(), $$$FIELDS }.into()'

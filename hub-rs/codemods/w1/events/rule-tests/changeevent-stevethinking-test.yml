@@ -1,0 +1,7 @@
+id: changeevent-stevethinking
+valid:
+  - "fn f() { let _ = Other::SteveThinking { id: id }; }"
+  - "fn f(e: ChangeEvent) { match e { ChangeEvent::SteveThinking { .. } => (), _ => () } }"
+invalid:
+  - "fn f() { send(ChangeEvent::SteveThinking { id: id }); }"
+  - "fn f() { send(s::ChangeEvent::SteveThinking { ws, id: make(\"comma,colon:\") }); }"

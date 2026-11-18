@@ -1,0 +1,16 @@
+id: hubevent-settings
+snapshots:
+  "fn f() { send(HubEvent::Settings { id: id }); }":
+    fixed: "fn f() { send(steve_types::ConfigEvent::Settings { ws: steve_types::ws_todo!(), id: id }.into()); }"
+    labels:
+    - source: "HubEvent::Settings { id: id }"
+      style: primary
+      start: 14
+      end: 43
+  "fn f() { send(s::HubEvent::Settings { ws, id: make(\"comma,colon:\") }); }":
+    fixed: "fn f() { send(steve_types::ConfigEvent::Settings { ws: steve_types::ws_todo!(), ws, id: make(\"comma,colon:\") }.into()); }"
+    labels:
+    - source: "s::HubEvent::Settings { ws, id: make(\"comma,colon:\") }"
+      style: primary
+      start: 14
+      end: 68

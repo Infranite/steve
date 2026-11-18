@@ -1,0 +1,7 @@
+id: changeevent-bot
+valid:
+  - "fn f() { let _ = Other::Bot { id: id }; }"
+  - "fn f(e: ChangeEvent) { match e { ChangeEvent::Bot { .. } => (), _ => () } }"
+invalid:
+  - "fn f() { send(ChangeEvent::Bot { id: id }); }"
+  - "fn f() { send(s::ChangeEvent::Bot { ws, id: make(\"comma,colon:\") }); }"

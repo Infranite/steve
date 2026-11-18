@@ -1,0 +1,7 @@
+id: changeevent-vault
+valid:
+  - "fn f() { let _ = Other::Vault { id: id }; }"
+  - "fn f(e: ChangeEvent) { match e { ChangeEvent::Vault { .. } => (), _ => () } }"
+invalid:
+  - "fn f() { send(ChangeEvent::Vault { id: id }); }"
+  - "fn f() { send(s::ChangeEvent::Vault { ws, id: make(\"comma,colon:\") }); }"

@@ -1,0 +1,16 @@
+id: hubevent-party
+snapshots:
+  "fn f() { send(HubEvent::Party { id: id }); }":
+    fixed: "fn f() { send(steve_types::PeopleEvent::Party { id: id }.into()); }"
+    labels:
+    - source: "HubEvent::Party { id: id }"
+      style: primary
+      start: 14
+      end: 40
+  "fn f() { send(s::HubEvent::Party { ws, id: make(\"comma,colon:\") }); }":
+    fixed: "fn f() { send(steve_types::PeopleEvent::Party { ws, id: make(\"comma,colon:\") }.into()); }"
+    labels:
+    - source: "s::HubEvent::Party { ws, id: make(\"comma,colon:\") }"
+      style: primary
+      start: 14
+      end: 65

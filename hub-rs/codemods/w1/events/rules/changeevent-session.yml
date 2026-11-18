@@ -1,0 +1,11 @@
+id: changeevent-session
+language: Rust
+message: Migrate ChangeEvent::Session; run.py also converts field types.
+severity: hint
+rule:
+  pattern: '$ENUM::Session { $$$FIELDS }'
+  kind: struct_expression
+constraints:
+  ENUM:
+    regex: '^(.*::)?ChangeEvent$'
+fix: 'steve_types::WorkEvent::Session { ws: steve_types::ws_todo!(), $$$FIELDS }.into()'

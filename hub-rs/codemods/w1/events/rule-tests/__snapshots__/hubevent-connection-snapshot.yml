@@ -1,0 +1,16 @@
+id: hubevent-connection
+snapshots:
+  "fn f() { send(HubEvent::Connection { id: id }); }":
+    fixed: "fn f() { send(steve_types::ChannelsEvent::Connection { id: id }.into()); }"
+    labels:
+    - source: "HubEvent::Connection { id: id }"
+      style: primary
+      start: 14
+      end: 45
+  "fn f() { send(s::HubEvent::Connection { ws, id: make(\"comma,colon:\") }); }":
+    fixed: "fn f() { send(steve_types::ChannelsEvent::Connection { ws, id: make(\"comma,colon:\") }.into()); }"
+    labels:
+    - source: "s::HubEvent::Connection { ws, id: make(\"comma,colon:\") }"
+      style: primary
+      start: 14
+      end: 70
