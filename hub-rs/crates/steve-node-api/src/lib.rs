@@ -39,7 +39,10 @@ pub use workspace::*;
 
 /// Major.minor of this contract. A major change refuses the connection; a minor one only adds, and
 /// the Hub sends what a minor added only to a Node whose hello says that minor (see [`AUTO_MODE`]).
-pub const PROTOCOL: (u16, u16) = (0, 7);
+pub const PROTOCOL: (u16, u16) = (0, 8);
+
+/// The first protocol whose execution-delivery reads can enforce automatic reply scope.
+pub const REPLY_DELIVERY_SCOPE: (u16, u16) = (0, 8);
 
 /// The first protocol with [`Discovery::host`] (what machine a Node is): an older Node is not asked.
 pub const HOST_INFO: (u16, u16) = (0, 7);

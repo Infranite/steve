@@ -1339,9 +1339,9 @@ fn sha256_hex(b: &[u8]) -> String {
 }
 
 /// A service Node crosses the real authenticated blob RPC link. The browser reads only a Hub
-/// attachment, after the ordinary session's local source has gone, with the original image alt.
+/// object, after the ordinary session's local source has gone, with the original image alt.
 #[tokio::test(flavor = "multi_thread")]
-async fn inline_images_from_service_node_are_authenticated_durable_attachments() {
+async fn reply_images_from_service_node_are_authenticated_durable_deliveries() {
     use base64::Engine as _;
     let h = Home::new();
     let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -1370,16 +1370,19 @@ async fn inline_images_from_service_node_are_authenticated_durable_attachments()
         )
         .await;
     assert!(
-        wait(30, || steve_v1(&h, &sid, "/api/files/") > 0).await,
+        wait(30, || steve_v1(&h, &sid, "/api/file-deliveries/") > 0).await,
         "Hub: {}\nNode: {}\nEvents: {:?}\nSource: {:?}",
         hub_log(&h),
         std::fs::read_to_string(h.steve().join("data/node/logs/local-node.log")).unwrap_or_default(),
         h.one("SELECT group_concat(kind||':'||data,char(10)) FROM events WHERE session_id=? AND kind IN ('text','turn_end','system','error')", &sid),
         std::fs::read_to_string(format!("{}.image", log.display()))
     );
-    let text = h.one("SELECT json_extract(data,'$.text') FROM events WHERE session_id=? AND kind='text' AND instr(data,'/api/files/')>0 ORDER BY rowid DESC LIMIT 1", &sid).unwrap();
-    assert!(text.starts_with("![授权二维码](/api/files/"), "{text}");
-    assert!(text.contains("?ws=default) ![重复二维码](/api/files/"));
+    let text = h.one("SELECT json_extract(data,'$.text') FROM events WHERE session_id=? AND kind='text' AND instr(data,'/api/file-deliveries/')>0 ORDER BY rowid DESC LIMIT 1", &sid).unwrap();
+    assert!(
+        text.starts_with("![授权二维码](/api/file-deliveries/"),
+        "{text}"
+    );
+    assert!(text.contains("?ws=default) ![重复二维码](/api/file-deliveries/"));
     let source = std::fs::read_to_string(format!("{}.image", log.display())).unwrap();
     std::fs::remove_file(&source).unwrap();
     assert!(!std::path::Path::new(&source).exists());
@@ -1423,7 +1426,10 @@ async fn inline_images_from_service_node_are_authenticated_durable_attachments()
         .unwrap();
     assert_eq!(wrong.status().as_u16(), 404);
     assert_eq!(
-        h.count("SELECT count(*) FROM files WHERE workspace_id=?", "default"),
+        h.count(
+            "SELECT count(*) FROM deliveries WHERE workspace_id=? AND reply=1",
+            "default"
+        ),
         1
     );
     // Exercise multiple bulk frames too; a tiny QR alone cannot detect overlarge hex frames.
@@ -1452,7 +1458,7 @@ async fn inline_images_from_service_node_are_authenticated_durable_attachments()
     .await;
     let mut text = None;
     assert!(wait(30, || {
-        text = h.one("SELECT json_extract(data,'$.text') FROM events WHERE session_id=? AND kind='text' AND instr(data,'多块图片')>0 AND instr(data,'/api/files/')>0 ORDER BY rowid DESC LIMIT 1", &sid);
+        text = h.one("SELECT json_extract(data,'$.text') FROM events WHERE session_id=? AND kind='text' AND instr(data,'多块图片')>0 AND instr(data,'/api/file-deliveries/')>0 ORDER BY rowid DESC LIMIT 1", &sid);
         text.is_some()
     }).await, "{}", hub_log(&h));
     std::fs::remove_file(large_source).unwrap();
@@ -1921,5 +1927,148 @@ async fn node_tags_send_work_where_it_fits() {
         ) == 1)
         .await,
         "placed as usual"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn ordinary_reply_keeps_report_and_its_image_without_a_tool_call() {
+    use base64::Engine as _;
+    let h = Home::new();
+    let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../steve-node/tests/research-script.mjs");
+    let log = h.dir.path().join("reply-fixture");
+    let _hub = spawn_mode(
+        &h,
+        Some("service"),
+        &[
+            ("STEVE_ADAPTER_CLAUDE", script.to_str().unwrap()),
+            ("FAKE_RESEARCH_LOG", log.to_str().unwrap()),
+        ],
+    );
+    serving(&h).await;
+    let c = Client::login(&h).await;
+    assert_eq!(
+        node_health_until(&h, 30, |n| n["reconciled"] == true).await["reconciled"],
+        true
+    );
+    let bytes = png([4, 45, 99]);
+    let prompt = format!(
+        "@msg report\n@replyfiles {}",
+        base64::engine::general_purpose::STANDARD.encode(&bytes)
+    );
+    let sid = c.item(&h, &prompt).await;
+    let sql = "SELECT group_concat(json_extract(data,'$.text'),'') FROM
+               (SELECT data FROM events WHERE session_id=? AND kind='text' ORDER BY seq)";
+    assert!(
+        wait(30, || h
+            .one(sql, &sid)
+            .is_some_and(|t| t.contains("[Report](/deliveries/")))
+        .await,
+        "Hub log: {}\nText: {:?}",
+        hub_log(&h),
+        h.one(sql, &sid)
+    );
+    let text = h.one(sql, &sid).unwrap();
+    assert_eq!(
+        text.matches("#steve-file-unavailable-scope").count(),
+        3,
+        "{text}"
+    );
+    let path = text
+        .split_once("[Report](/deliveries/")
+        .unwrap()
+        .1
+        .split(')')
+        .next()
+        .unwrap();
+    let id = path.split('?').next().unwrap();
+    let api = format!("/api/file-deliveries/{id}");
+    let source = std::fs::read_to_string(log.with_extension("replyfiles")).unwrap();
+    std::fs::remove_dir_all(&source).unwrap();
+    assert!(!std::path::Path::new(&source).exists());
+    let (status, body) = c.call("GET", &api, None).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["can_manage"], false);
+    assert_eq!(body["mime"], "text/markdown");
+    let rendered = body["preview"]["text"].as_str().unwrap();
+    assert!(
+        rendered.contains("![Missing figure](#steve-file-unavailable-missing)"),
+        "{rendered}"
+    );
+    let asset = rendered
+        .split_once("![Figure in report](")
+        .unwrap()
+        .1
+        .split(')')
+        .next()
+        .unwrap();
+    assert!(asset.starts_with("assets/"), "{rendered}");
+    let response = c
+        .http
+        .get(format!("{}{api}/content/{asset}?ws=default", c.base))
+        .header("cookie", &c.cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status().as_u16(), 200);
+    assert_eq!(response.bytes().await.unwrap().as_ref(), bytes);
+    let response = c
+        .http
+        .get(format!("{}{api}/raw?ws=default", c.base))
+        .header("cookie", &c.cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status().as_u16(), 200);
+    assert!(
+        response
+            .text()
+            .await
+            .unwrap()
+            .contains("![Figure in report](figure.png)")
+    );
+    let (status, _) = c
+        .call(
+            "POST",
+            &format!("{api}/shares"),
+            Some(json!({"expires_at":steve_store::now()+360_000})),
+        )
+        .await;
+    assert!(matches!(status, 400 | 403));
+    assert_eq!(
+        h.count(
+            "SELECT count(*) FROM deliveries WHERE session_id=? AND reply=1",
+            &sid
+        ),
+        2
+    );
+    let (status, _) = c
+        .call("GET", &format!("{api}/content/not-in-the-report.png"), None)
+        .await;
+    assert_eq!(status, 404);
+
+    // The colocated Node can resolve a user's durable outputs path (which can differ
+    // from the cwd). A different item's path is still refused by the same grant.
+    let own = h
+        .steve()
+        .join("workspaces")
+        .join(body["item_id"].as_str().unwrap())
+        .join("outputs");
+    let other = h.steve().join("workspaces/ST-unrelated/outputs");
+    for dir in [&own, &other] {
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(dir.join("result.txt"), b"fixture").unwrap();
+    }
+    c.say(&sid, &format!("@msg durable\n@say [Durable](<file://{}/result.txt>) · [Foreign output](<file://{}/result.txt>)",
+        own.display(), other.display())).await;
+    assert!(
+        wait(30, || h.one(sql, &sid).is_some_and(|t| {
+            t.contains("[Durable](/deliveries/")
+                && t.contains("[Foreign output](#steve-file-unavailable-scope)")
+        }))
+        .await,
+        "{:?} {}",
+        h.one(sql, &sid),
+        hub_log(&h)
     );
 }

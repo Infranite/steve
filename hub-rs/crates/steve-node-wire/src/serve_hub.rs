@@ -35,6 +35,7 @@ impl Handler for ServeHub {
             TOOL_CALL => en(&self.tools.call(de(p)?).await?),
             TOOL_INSPECT => en(&self.tools.call_status(de(p)?).await?),
             TOOL_CANCEL => en(&self.tools.cancel_call(de(p)?).await?),
+            REPLY_CAPTURE => en(&self.files()?.capture_reply(de(p)?).await?),
             BLOB_FETCH => {
                 let a: FetchArgs = de(p)?;
                 en(&self.files()?.fetch(a.access, a.id, a.offset, a.max).await?)

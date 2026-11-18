@@ -30,12 +30,12 @@ pub mod git;
 mod harness_context;
 mod harness_login;
 pub mod history;
-pub mod project_setup;
 mod host;
 mod inline_images;
 mod job;
 mod journal;
 mod procs;
+pub mod project_setup;
 pub mod reclaim;
 mod research;
 mod scan;
@@ -3172,6 +3172,23 @@ impl ExecutionControl for LocalNode {
     }
 }
 
+fn check_reply_path(rel: &Path, path: &Path, protected: &[PathBuf]) -> ApiResult<()> {
+    if inline_images::protected_path(rel, path, protected)
+        || rel.components().any(|c| {
+            matches!(
+                c.as_os_str().to_str(),
+                Some("node_modules" | "target" | "dist" | "__pycache__" | "vendor")
+            )
+        })
+    {
+        return Err(ApiError::new(
+            ErrorCode::Denied,
+            "reply file outside its authorized scope",
+        ));
+    }
+    Ok(())
+}
+
 #[async_trait]
 impl WorkspaceExecutor for LocalNode {
     /// The same resource and spec: the workspace there is. A new one: reserved and accepted now,
@@ -3828,7 +3845,17 @@ impl WorkspaceExecutor for LocalNode {
 
     async fn read_execution_delivery(&self, q: ExecutionDeliveryRead) -> ApiResult<DeliveryChunk> {
         self.mine(&q.workspace)?;
-        let grant = self.0.j.read(|t| {
+        let protected = if q.reply {
+            inline_images::protected(&self.0.cfg.acp.steve_home, &self.0.cfg.home)
+        } else {
+            vec![]
+        };
+        // Only the Hub-hosted Node shares this installation's durable item outputs. Match an
+        // absolute path under that item's directory, never reinterpret it on a paired Node.
+        let local_outputs = (q.reply && self.id().as_str() == "local")
+            .then(|| self.0.cfg.acp.steve_home.canonicalize().ok())
+            .flatten();
+        let (grant, output) = self.0.j.read(|t| {
             let denied = || {
                 ApiError::new(
                     ErrorCode::Denied,
@@ -3861,13 +3888,70 @@ impl WorkspaceExecutor for LocalNode {
             {
                 return Err(denied());
             }
-            Ok(grant)
+            let mut output = None;
+            if q.reply {
+                let base = Path::new(&grant.dir);
+                if let Some(home) = &local_outputs
+                    && let Some(item) = current.resource.strip_prefix("item:")
+                    && !item.is_empty()
+                    && item
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+                {
+                    let prefix = Path::new("workspaces").join(item).join("outputs");
+                    let input = Path::new(&q.location);
+                    if let Ok(path) = input
+                        .strip_prefix(home)
+                        .or_else(|_| input.strip_prefix(&self.0.cfg.acp.steve_home))
+                        && let Ok(rel) = path.strip_prefix(&prefix)
+                    {
+                        let full = home.join(path);
+                        check_reply_path(rel, &full, &protected)?;
+                        if t.overlaps_other_workspace(&q.workspace.id, &home.join(prefix), &full)? {
+                            return Err(denied());
+                        }
+                        output = Some((
+                            home.clone(),
+                            RelPath::new(path.to_str().ok_or_else(denied)?)
+                                .map_err(|_| denied())?,
+                        ));
+                    }
+                }
+                if output.is_none() {
+                    let rel = artifact::delivery_relative(&grant, &q)?;
+                    let rel = Path::new(rel.as_str());
+                    let path = base.join(rel);
+                    if let Some(home) = &local_outputs
+                        && ["workspaces", "worktrees"].into_iter().any(|root| {
+                            path.strip_prefix(home.join(root)).ok().is_some_and(|tail| {
+                                !current
+                                    .resource
+                                    .strip_prefix("item:")
+                                    .is_some_and(|item| tail.starts_with(item))
+                            })
+                        })
+                    {
+                        return Err(denied());
+                    }
+                    check_reply_path(rel, &path, &protected)?;
+                    if t.overlaps_other_workspace(&q.workspace.id, base, &path)? {
+                        return Err(denied());
+                    }
+                }
+            }
+            Ok((grant, output))
         })?;
         // Configured roots may have been revoked since this execution started.
         if workspace_dir(&self.0, &q.workspace)? != Path::new(&grant.dir) {
             return Err(ApiError::new(ErrorCode::Denied, "delivery workspace moved"));
         }
-        blocking(move || artifact::read_delivery(&grant, &q)).await
+        blocking(move || match output {
+            Some((home, rel)) => {
+                artifact::read_delivery_file(&home, &rel, q.expected.as_ref(), q.offset, q.max)
+            }
+            None => artifact::read_delivery(&grant, &q),
+        })
+        .await
     }
 
     async fn read_artifact(&self, q: ArtifactRead) -> ApiResult<ReadChunk> {

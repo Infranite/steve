@@ -229,6 +229,7 @@ pub const MIGRATIONS: &[&str] = &[
     // scope revision) and what a judgement rests on. Nothing acts on them.
     include_str!("../migrations/106.sql"),
     include_str!("../migrations/107.sql"),
+    include_str!("../migrations/108.sql"),
 ];
 
 /// 027's item columns and their one-time backfill (applied by `run_pending` when `items.phase` is missing).

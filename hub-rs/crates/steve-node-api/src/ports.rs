@@ -195,6 +195,15 @@ pub trait HubTools: Send + Sync {
 
 #[async_trait]
 pub trait HubFiles: Send + Sync {
+    /// Completed assistant Markdown, before the turn releases its execution workspace. The Hub
+    /// derives placement and audience from the authenticated Node and execution ledger.
+    async fn capture_reply(&self, _q: ReplyCapture) -> ApiResult<String> {
+        Err(ApiError::new(
+            ErrorCode::Unsupported,
+            "reply capture unsupported",
+        ))
+    }
+
     async fn fetch(
         &self,
         access: FileAccess,

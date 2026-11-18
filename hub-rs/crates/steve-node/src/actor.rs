@@ -1241,7 +1241,7 @@ impl Actor {
             usage_task: None,
             usage_pending: false,
             unknown: None,
-            images: Default::default(),
+            images: crate::inline_images::Images::for_replies(),
             image_scope,
         });
         self.inner.reset_output(&self.session);

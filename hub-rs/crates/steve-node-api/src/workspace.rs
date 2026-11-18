@@ -445,6 +445,15 @@ pub struct DeliveryChunk {
     pub chunk: crate::blob::ReadChunk,
 }
 
+/// A best-effort request from the Node's transcript normalizer, not a harness tool.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReplyCapture {
+    pub execution: crate::common::ExecutionRef,
+    pub markdown: String,
+}
+
+pub const MAX_REPLY_CAPTURE: usize = 32 * 1024;
+
 /// A delivery from the current accepted turn. The Node resolves absolute or relative input
 /// against its captured workspace, never a Hub path or a caller-selected root.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -452,6 +461,9 @@ pub struct ExecutionDeliveryRead {
     pub execution: crate::common::ExecutionRef,
     pub workspace: WorkspaceRef,
     pub location: String,
+    /// Automatic reads forbid sensitive paths and overlapping workspace ownership.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub reply: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected: Option<Revision>,
     pub offset: u64,

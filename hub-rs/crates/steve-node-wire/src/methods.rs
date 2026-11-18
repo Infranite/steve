@@ -131,6 +131,7 @@ rpc_table! {
     TOOL_INSPECT = "tool.inspect": NodeToHub Control Read false;
     TOOL_CANCEL = "tool.cancel": NodeToHub Control Command true;
     // HubFiles
+    REPLY_CAPTURE = "delivery.capture_reply": NodeToHub Bulk Read false;
     BLOB_FETCH = "blob.fetch": NodeToHub Bulk Blob false;
     BLOB_BEGIN = "blob.begin": NodeToHub Control Blob true;
     BLOB_CHUNK = "blob.chunk": NodeToHub Bulk Blob false;
