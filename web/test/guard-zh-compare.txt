@@ -2,11 +2,18 @@
 # file under web<TAB>JSON-escaped literal<TAB>count.
 # Rewrite: STEVE_ZH_BLESS=1 node --test web/test/guard-zh-compare.test.mjs
 src/auto/decision.tsx	"不"	1
+src/bot-page.tsx	"能力"	1
 src/bot-page.tsx	"自己写"	1
-src/bot-page.tsx	"设置"	1
+src/bot-page.tsx	"设置"	3
 src/channels/handoff-content.ts	"最近的对话："	1
+src/channels/persona-intro.ts	"/^我是[^，,。]*[，,]?/"	1
 src/chat-view.tsx	"（附件）"	1
+src/composer.tsx	"新 Bot"	4
+src/composer.tsx	"新事项"	4
+src/composer.tsx	"新项目"	4
 src/composer.tsx	"未确认"	1
+src/composer.tsx	"汇报"	4
+src/decision-notes.ts	"/^(回答|返工|批准|拒绝)：/"	1
 src/decision-notes.ts	"批准"	1
 src/device-model.ts	"暂停接活"	2
 src/knowledge/index.tsx	"待确认"	1
@@ -15,33 +22,43 @@ src/knowledge/index.tsx	"来源"	1
 src/knowledge/index.tsx	"知识条目"	2
 src/knowledge/index.tsx	"笔记与文档"	1
 src/knowledge/index.tsx	"长期记忆"	2
+src/knowledge/steward.tsx	"每周日 03:00"	3
+src/knowledge/steward.tsx	"每天 03:00"	3
+src/knowledge/steward.tsx	"每月 1 日 03:00"	3
 src/lib/motion.ts	"大"	1
 src/lib/motion.ts	"开"	1
 src/manage.tsx	"1 年"	2
 src/manage.tsx	"90 天"	1
-src/manage.tsx	"全部"	2
-src/manage.tsx	"启用"	1
-src/manage.tsx	"定时与流程"	1
-src/manage.tsx	"对外身份"	1
+src/manage.tsx	"全部"	4
+src/manage.tsx	"启用"	2
+src/manage.tsx	"定时与流程"	2
+src/manage.tsx	"对外身份"	2
 src/manage.tsx	"开"	1
-src/manage.tsx	"概览"	1
+src/manage.tsx	"概览"	2
 src/manage.tsx	"永久"	1
-src/manage.tsx	"系统提示词"	1
-src/manage.tsx	"能力"	1
-src/manage.tsx	"记忆"	2
-src/manage.tsx	"设置"	2
+src/manage.tsx	"系统提示词"	2
+src/manage.tsx	"能力"	2
+src/manage.tsx	"记忆"	3
+src/manage.tsx	"设置"	3
 src/outputs.tsx	"源码"	1
 src/outputs.tsx	"连续"	3
 src/outputs.tsx	"逐张"	4
+src/permission-question.ts	"/^允许执行(?:[：:]\\s*(?=\\S))?/"	1
+src/permission-question.ts	"/^允许执行[：:]\\s*/"	1
 src/queue.tsx	"（附件）"	2
 src/store.ts	"不"	1
-src/store.ts	"交付"	2
+src/store.ts	"主题"	1
+src/store.ts	"交付"	3
 src/store.ts	"你"	1
 src/store.ts	"删除"	1
+src/store.ts	"客户"	1
 src/store.ts	"导出"	2
 src/store.ts	"开始会话"	1
 src/store.ts	"排队"	1
 src/store.ts	"等前置事项完成后自动开始"	1
+src/store.ts	"类型"	1
+src/store.ts	"项目"	1
+src/store.ts	"领域"	1
 src/thread/topics.ts	"（附件）"	1
 src/todos/model.ts	"下"	1
 src/todos/model.ts	"半"	1
@@ -49,10 +66,25 @@ src/ui.tsx	"交付"	3
 src/ui.tsx	"（附件）"	1
 src/version.tsx	"拒绝"	1
 src/view-shared.tsx	"高"	1
+src/views.tsx	"下周一"	1
+src/views.tsx	"中"	1
+src/views.tsx	"交付与验收"	3
 src/views.tsx	"产出"	1
+src/views.tsx	"今天 18:00"	1
+src/views.tsx	"低"	1
+src/views.tsx	"准备"	3
+src/views.tsx	"分流"	3
 src/views.tsx	"动态"	1
-src/views.tsx	"无"	1
+src/views.tsx	"周五"	1
+src/views.tsx	"定义"	3
+src/views.tsx	"执行"	3
+src/views.tsx	"接收"	3
+src/views.tsx	"收尾"	3
+src/views.tsx	"无"	3
+src/views.tsx	"明天"	1
 src/views.tsx	"本机 "	1
 src/views.tsx	"等你"	1
+src/views.tsx	"规划"	3
 src/views.tsx	"进行中"	1
+src/views.tsx	"高"	1
 src/views.tsx	"（附件）"	1
