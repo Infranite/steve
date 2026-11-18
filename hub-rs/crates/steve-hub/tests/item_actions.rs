@@ -311,7 +311,7 @@ async fn creation_blocks_before_opening_a_session_and_completion_starts_it_once(
             ss.as_array()
                 .unwrap()
                 .iter()
-                .any(|s| s["item_id"] == id && s["busy"] == true)
+                .any(|s| s["item_id"] == id && s["busy"] == true && s["status"] == "running")
         })
         .await
     );
