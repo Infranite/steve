@@ -34,7 +34,7 @@ use steve_modules::ApiError;
 use crate::compose::ComposeOpts;
 use crate::deliver::{Auth, Delivered, OutRequest, OutTarget, Purpose};
 use crate::replies::Replies;
-use crate::respond::{self, Plan};
+use crate::respond::Plan;
 use crate::rules::Act;
 use crate::service::WeakChannels;
 use crate::spaces::{self, Mode};
@@ -118,7 +118,7 @@ pub fn plan_of(c: &Connection, ws: &str, message_id: &str) -> ChannelResult<Plan
         ws: ws.into(),
         connection_id: space.connection_id.clone(),
         mode,
-        space_name: respond::space_label(&space),
+        space_name: spaces::display_title(c, &space)?,
         space_id: space.id,
         message_id: message_id.into(),
         external_id: ext.unwrap_or_default(),
@@ -455,7 +455,7 @@ impl Action for SendToSpace {
                 ws: ws.clone(),
                 connection_id: s.connection_id.clone(),
                 mode,
-                space_name: respond::space_label(&s),
+                space_name: spaces::display_title(c, &s)?,
                 space_id: s.id,
                 reply_to: None,
                 thread_key: None,

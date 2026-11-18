@@ -25,7 +25,7 @@ use steve_store::base::links::{self, NewLink};
 use crate::compose::{self, ComposeOpts, Composer};
 use crate::conversations::sender_is_owner;
 use crate::deliver::{Auth, Delivered, DraftOnly, OutRequest, OutTarget, Outbound, Purpose};
-use crate::respond::{self, Acted, Plan, Responder};
+use crate::respond::{Acted, Plan, Responder};
 use crate::rules::{Act, ItemMode};
 use crate::spaces::{self, Mode};
 use crate::{ChannelResult, Channels, bindings, messages, personas, write_blocks};
@@ -291,10 +291,11 @@ impl Replies {
             let context = messages::context_before(c, &space.id, &plan.message_id, ITEM_CONTEXT)?;
             let from_owner = sender_is_owner(c, &ws, plan.sender_party_id.as_deref())?;
             let goal = item_goal(&plan.text, &context, from_owner);
+            let space_name = spaces::display_title(c, &space)?;
             let title = {
                 let flat = plan.text.split_whitespace().collect::<Vec<_>>().join(" ");
                 if flat.is_empty() {
-                    format!("来自「{}」的消息", plan.space_name)
+                    format!("来自「{space_name}」的消息")
                 } else {
                     flat.chars().take(TITLE_MAX).collect()
                 }
@@ -307,7 +308,7 @@ impl Replies {
                 bot,
                 project: d["project_id"].as_str().map(String::from),
                 tag_ids: compose::str_list(&d["tags"]),
-                source: (respond::space_label(&space), LINK_SOURCE.into()),
+                source: (space_name, LINK_SOURCE.into()),
                 propose: mode == ItemMode::Propose,
                 accept_auto: false,
                 run_id: String::new(),

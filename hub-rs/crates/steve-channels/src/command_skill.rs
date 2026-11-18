@@ -60,7 +60,7 @@ impl Channels {
                 connection_id: conn.to_string(),
                 mode: Mode::Own,
                 space_id: space.id.clone(),
-                space_name: crate::respond::space_label(&space),
+                space_name: crate::spaces::display_title(c, &space)?,
                 message_id: inbound.message_id.clone(),
                 external_id: m.external_id.clone(),
                 thread_key: m.thread_key.clone(),

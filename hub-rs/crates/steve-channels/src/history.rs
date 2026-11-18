@@ -243,7 +243,7 @@ impl Channels {
                 "channels.im_read.error.not_readable"
             )));
         }
-        let space_name = crate::respond::space_label(&row);
+        let space_name = store.reader(|c| spaces::display_title(c, &row))?;
         let mut page = Page {
             space_id: row.id.clone(),
             space_name,

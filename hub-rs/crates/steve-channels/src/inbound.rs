@@ -689,7 +689,8 @@ impl Channels {
             let (sid, now) = (inbound.space_id.clone(), self.now());
             let r = store.transaction(|tx| -> ChannelResult<()> {
                 let label = spaces::get(tx, &sid)?
-                    .map(|s| respond::space_label(&s))
+                    .map(|s| spaces::display_title(tx, &s))
+                    .transpose()?
                     .unwrap_or_default();
                 let text = format!("「{label}」有新消息（不提醒，只记录）");
                 let open: bool = tx.query_row(
@@ -1514,7 +1515,7 @@ impl Channels {
             connection_id: voice.clone().unwrap_or_else(|| conn.to_string()),
             mode,
             space_id: space.id.clone(),
-            space_name: respond::space_label(&space),
+            space_name: store.reader(|c| spaces::display_title(c, &space))?,
             message_id: inbound.message_id.clone(),
             external_id: m.external_id.clone(),
             thread_key: m.thread_key.clone(),

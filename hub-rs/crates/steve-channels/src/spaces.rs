@@ -1500,6 +1500,34 @@ pub fn dm_party(c: &Connection, s: &SpaceRow) -> ChannelResult<(Option<Counterpa
     Ok((None, self_chat))
 }
 
+/// The name used in cards, notices and conversation metadata, as in the space list. A provider
+/// may name a DM after our own account: its other party, not that provider name, names the chat.
+/// This is display only; routing and authorization still use the stored space and connection ids.
+pub(crate) fn display_title(c: &Connection, s: &SpaceRow) -> ChannelResult<String> {
+    let (counterpart, self_chat) = if SpaceKind::parse(&s.kind) == Some(SpaceKind::Dm) {
+        dm_party(c, s)?
+    } else {
+        (None, false)
+    };
+    Ok(title_of(s, counterpart.as_ref(), self_chat))
+}
+
+fn title_of(s: &SpaceRow, counterpart: Option<&Counterpart>, self_chat: bool) -> String {
+    if self_chat {
+        SELF_CHAT_TITLE.to_string()
+    } else if let Some(p) = counterpart {
+        p.name.clone()
+    } else if s.name.trim().is_empty() {
+        if SpaceKind::parse(&s.kind) == Some(SpaceKind::Dm) {
+            DM_FALLBACK.into()
+        } else {
+            "群".into()
+        }
+    } else {
+        s.name.clone()
+    }
+}
+
 pub fn out(c: &Connection, s: &SpaceRow) -> ChannelResult<SpaceOut> {
     out_with(c, s, &your_trigger(c, &s.workspace_id)?)
 }
@@ -1562,22 +1590,7 @@ pub fn out_with(
     } else {
         (None, false)
     };
-    let title = if self_chat {
-        SELF_CHAT_TITLE.to_string()
-    } else if let Some(p) = &counterpart {
-        p.name.clone()
-    } else if s.name.trim().is_empty() {
-        kind.map_or("群", |k| {
-            if k == SpaceKind::Dm {
-                DM_FALLBACK
-            } else {
-                "群"
-            }
-        })
-        .to_string()
-    } else {
-        s.name.clone()
-    };
+    let title = title_of(s, counterpart.as_ref(), self_chat);
     let member_count = if s.member_count > 0 {
         s.member_count
     } else {

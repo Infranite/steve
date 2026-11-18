@@ -640,21 +640,16 @@ fn account_name(c: &Connection, ws: &str, conn: &str) -> ApiResult<String> {
         .unwrap_or_else(|| conn.to_string()))
 }
 
-fn space_name(s: &SpaceRow) -> String {
-    if s.name.is_empty() {
-        "私聊".into()
-    } else {
-        s.name.clone()
-    }
-}
-
-/// [`space_name`] for the card.
-fn space_name_card(s: &SpaceRow) -> String {
-    if s.name.is_empty() {
-        t!("channels.draft.dm")
-    } else {
-        s.name.clone()
-    }
+/// The shared title, with the unnamed-DM fallback translated for the settings card.
+fn space_name_card(c: &Connection, s: &SpaceRow) -> ApiResult<String> {
+    let name = spaces::display_title(c, s)?;
+    Ok(
+        if s.kind == "dm" && s.name.trim().is_empty() && name == spaces::DM_FALLBACK {
+            t!("channels.draft.dm")
+        } else {
+            name
+        },
+    )
 }
 
 /// `item_defaults` with every key present.
@@ -754,7 +749,7 @@ impl DraftTarget for SpaceTarget {
     fn prepare(&self, c: &Connection, viewer: &Viewer, id: Option<&str>) -> ApiResult<Prepared> {
         let id = id.ok_or_else(|| ApiError::invalid("target.id"))?;
         let s = SpaceNow::load(c, viewer, id)?;
-        let name = space_name(&s.row);
+        let name = spaces::display_title(c, &s.row)?;
         let mut fields = Vec::new();
         if s.mode == Mode::Bot {
             fields.push(FieldSpec::new(
@@ -805,7 +800,10 @@ impl DraftTarget for SpaceTarget {
         Ok(Prepared {
             target_id: Some(id.to_string()),
             revision: Some(s.set.revision),
-            title: t!("channels.draft.title.space", name = space_name_card(&s.row)),
+            title: t!(
+                "channels.draft.title.space",
+                name = space_name_card(c, &s.row)?
+            ),
             href: format!("#/channels/space/{id}"),
             subject: format!("the chat space \"{name}\" of the account \"{}\"", s.account),
             fields,
@@ -1015,7 +1013,7 @@ impl DraftTarget for SpaceTarget {
                 code: format!("space:{}", s.id),
                 label: format!(
                     "{}（{}）",
-                    space_name(&s),
+                    spaces::display_title(c, &s)?,
                     account_name(c, &viewer.ws, &s.connection_id)?
                 ),
             });

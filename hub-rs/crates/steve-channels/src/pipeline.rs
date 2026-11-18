@@ -193,10 +193,10 @@ fn reachable(
     }
     Ok(OutTarget {
         ws: viewer.ws.clone(),
-        connection_id: s.connection_id,
+        connection_id: s.connection_id.clone(),
         mode,
+        space_name: spaces::display_title(c, &s)?,
         space_id: s.id,
-        space_name: s.name,
         reply_to: None,
         thread_key: None,
         persona_id: None,

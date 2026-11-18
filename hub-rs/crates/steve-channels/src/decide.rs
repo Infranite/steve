@@ -734,7 +734,10 @@ pub fn open_card(tx: &Tx, plan: &Plan, card: &Card) -> ChannelResult<String> {
     let why = Why::of(&context::facts_of(tx, &plan.message_id)?, false);
     let shown = shown(tx, plan)?;
     let lines: Vec<String> = shown.iter().map(|(_, l)| l.clone()).collect();
-    let question = card_question(&plan.space_name, &plan.sender_name, &card, why, &lines);
+    let space = crate::spaces::get(tx, &plan.space_id)?
+        .ok_or_else(|| steve_modules::ApiError::not_found("空间"))?;
+    let name = crate::spaces::display_title(tx, &space)?;
+    let question = card_question(&name, &plan.sender_name, &card, why, &lines);
     let draft = card.draft.trim();
     let options: Vec<String> = if draft.is_empty() {
         HANDOFF_NO_DRAFT_OPTIONS.map(String::from).to_vec()

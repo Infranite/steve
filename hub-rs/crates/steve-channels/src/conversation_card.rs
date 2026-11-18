@@ -116,7 +116,7 @@ pub fn build(
     asker_name: &str,
     speaker: &str,
     owner_only: bool,
-) -> rusqlite::Result<Card> {
+) -> crate::ChannelResult<Card> {
     // members, Steve's own identities (bot accounts) left out; your own account is a connection too
     // (Steve reads your chats through it) and stays: you read the answer
     let mut st = c.prepare_cached(
@@ -154,7 +154,7 @@ pub fn build(
     });
     let group = space.kind != "dm";
     Ok(Card {
-        place: crate::respond::space_label(space),
+        place: crate::spaces::display_title(c, space)?,
         group,
         asker,
         others,
