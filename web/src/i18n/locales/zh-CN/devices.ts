@@ -8,6 +8,16 @@ export default {
   tabs: "设备页面",
   tab: { overview: "概览", hub: "Hub", nodes: "Node", clients: "客户端" },
   loadFailed: "读取失败：{{error}}",
+  harness: {
+    title: "Harness", refresh: "重新探测", checked: "上次成功探测：{{at}}", details: "探测与组件细节",
+    none: "没有可用 harness", unreported: "尚未报告 harness（等待探测或 Node 版本较旧）", unsupported: "此 Node 版本不支持 harness 探测，请升级 Node",
+    available: "可用：{{names}}", legacy: "可用性尚未报告（可能为旧版 Node）", offline: "Node 离线，尚无 harness 报告", offlineCached: "Node 离线，harness 数据可能过期",
+    failed: "Harness 探测失败，请重新探测", failedCached: "Harness 探测失败，显示上次结果", stale: "数据可能过期",
+    readFailed: "Harness 报告读取失败，请重新探测", lastReport: "上次报告", versionUnknown: "版本未知",
+    models: "可用模型", reportedModels: "上次报告的模型（当前可用性未确认）", noModels: "未报告模型列表",
+    componentInstalled: "已安装", manageLocal: "管理本机运行环境",
+    state: { ready: "可用", not_installed: "未安装", installing: "安装中", unavailable: "不可用", unknown: "可用性未知" },
+  },
 
   map: {
     title: "连接关系",

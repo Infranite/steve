@@ -147,6 +147,29 @@ async fn patch(e: &Env, cookie: &str, body: Value) -> (u16, Value) {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn harness_reports_require_login_and_an_inert_copy_stays_offline() {
+    let e = start(false).await;
+    let (status, _) = e.get("/api/node-harnesses", None, None).await;
+    assert_eq!(status, 401);
+    let (status, report) = e
+        .get("/api/node-harnesses", Some(&e.owner_cookie), None)
+        .await;
+    assert_eq!(status, 200);
+    assert_eq!(report["nodes"]["local"]["state"], "offline");
+    assert!(report["nodes"]["local"]["checked_at"].is_null());
+    let (status, report) = e
+        .get(
+            "/api/node-harnesses/local?fresh=1",
+            Some(&e.owner_cookie),
+            None,
+        )
+        .await;
+    assert_eq!(status, 200);
+    assert_eq!(report["report"]["state"], "offline");
+    assert!(report["report"]["harnesses"].as_array().unwrap().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn device_config_requires_owner_revision_and_returns_committed_receipt() {
     let e = start(true).await;
     for _ in 0..100 {

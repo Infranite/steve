@@ -1,6 +1,7 @@
 //! The only way mail leaves Steve: an approval decision answered `send`, a delay you can
-//! undo, then [`Mail::execute`] — which checks the approval again, builds the MIME and calls the
-//! adapter. `MailAdapter::send(` appears nowhere else in this crate.
+//! undo, then [`Mail::execute`] — which checks the approval again, builds the MIME, checks final
+//! disclosure and sending authority, then calls the adapter. `MailAdapter::send(` appears nowhere
+//! else in this crate.
 //!
 //! - [`MailDraftHandler`]: the `mail_draft` decision handler (`send`/`no`, `retry`/`discard`, undo);
 //! - [`DraftLink`]: what the handler shares with [`Mail`] (the clock, the hooks, approvals that hit an
@@ -21,6 +22,7 @@ use steve_modules::accounts::connections::{WriteRefusal, may_write_in};
 use steve_modules::accounts::service::current_party;
 use steve_modules::contacts::people_repo;
 use steve_modules::decisions::{DecisionCx, DecisionHandler, choice_result};
+use steve_modules::outbound::Verdict;
 use steve_modules::outbound::{YOLO_ACTOR, decided_by_yolo, strip_ai_prefix, with_ai_prefix};
 use steve_modules::{ApiError, ApiResult, Clock, SystemClock};
 use steve_store::base;
@@ -364,7 +366,7 @@ pub(crate) fn undo_approval(tx: &Tx, d: &DraftRow, now: i64) -> MailResult<()> {
 pub enum SendOutcome {
     /// Sent; the outgoing `mail_messages` row.
     Sent { message: String },
-    /// Refused before anything left (no valid approval): audit `mail.send.blocked`.
+    /// Refused before anything left (approval, disclosure or authority): audit `mail.send.blocked`.
     Blocked { reason: String },
     /// The provider failed; a `fail` decision is open.
     Failed { error: String },
@@ -383,6 +385,7 @@ fn message_id(d: &DraftRow) -> String {
 struct SendGuard {
     mail: Mail,
     draft: DraftRow,
+    submitted: bool,
     completed: bool,
 }
 impl Drop for SendGuard {
@@ -390,8 +393,21 @@ impl Drop for SendGuard {
         if self.completed {
             return;
         }
-        // Conditional transition: an error after a committed outcome cannot overwrite it.
-        if let Err(e) = self.mail.unknown(&self.draft, "发送任务中断") {
+        // Before provider I/O the outcome is definite. Conditional transitions keep a committed
+        // failure/success from being overwritten if a later local operation fails.
+        let result = if self.submitted {
+            self.mail.unknown(&self.draft, "发送任务中断")
+        } else {
+            self.mail
+                .fail(&self.draft, &steve_i18n::t!("mail.disclosure.interrupted"))
+                .or_else(|e| {
+                    // Keep the existing reconciliation fallback if even a definite local failure
+                    // cannot be recorded. A failed `failed` transition must not strand a live claim.
+                    tracing::warn!(draft = %self.draft.id, error = %e, "mail preparation failure could not be recorded");
+                    self.mail.unknown(&self.draft, "发送准备中断，失败记录未能保存")
+                })
+        };
+        if let Err(e) = result {
             tracing::error!(draft = %self.draft.id, error = %e, "mail send recovery failed; claim remains for startup recovery");
         }
     }
@@ -469,7 +485,7 @@ impl Mail {
 
     /// Step 1: `approved → sending` (conditional, so a mail goes out once) and the approval
     /// checked again — a resolved `send` decision about this draft for exactly this content.
-    fn claim(&self, id: &str, now: i64) -> MailResult<Result<(DraftRow, String), SendOutcome>> {
+    fn claim(&self, id: &str, now: i64) -> MailResult<Result<(DraftRow, Decision), SendOutcome>> {
         self.0.m.store.transaction(|tx| {
             let Some(d) = repo::draft(tx, id)? else {
                 return Ok(Err(SendOutcome::Skipped));
@@ -517,15 +533,10 @@ impl Mail {
             };
             base::audit(tx, &d.workspace_id, "steve", "mail.send.attempt", &d.id,
                 &json!({"message_id": message_id(&d), "content_hash": d.content_hash, "decision": a.id}))?;
-            // `[AI] ` on the first line of the body only for YOLO's approval; a mark the text brought
-            // along is removed otherwise. The subject stays as written.
             let mut d = d;
-            d.body = if decided_by_yolo(&a.result) {
-                with_ai_prefix(&d.body)
-            } else {
-                strip_ai_prefix(&d.body).to_string()
-            };
-            Ok(Ok((d, a.id)))
+            d.status = "sending".into();
+            d.updated = now;
+            Ok(Ok((d, a)))
         })
     }
 
@@ -630,23 +641,32 @@ impl Mail {
         })
     }
 
-    /// Sends one approved draft whose delay is over. Never sends without a resolved `send`
-    /// decision for exactly this content; refusals write `mail.send.blocked`.
+    /// Sends one approved draft whose delay is over. Every path, retries included, needs a resolved
+    /// `send` for this content and a fresh full disclosure check of its final audience and wire body.
+    /// Neither a manual approval nor YOLO can bypass the check. Refusals write `mail.send.blocked`.
     pub async fn execute(&self, draft_id: &str) -> MailResult<SendOutcome> {
         let Some(_activity) = self.0.m.store.try_activity("mail_send") else {
             return Ok(SendOutcome::Skipped);
         };
         self.recover_sending()?;
         let now = self.now();
-        let (d, decision) = match self.claim(draft_id, now)? {
+        let (stored, approval) = match self.claim(draft_id, now)? {
             Ok(x) => x,
             Err(o) => return Ok(o),
         };
         // A cancelled task must not leave a live-process claim stuck until a restart.
         let mut attempt = SendGuard {
             mail: self.clone(),
-            draft: d.clone(),
+            draft: stored.clone(),
+            submitted: false,
             completed: false,
+        };
+        // Check exactly what the MIME builder sends, after the outbound identity mark is applied.
+        let mut d = stored.clone();
+        d.body = if decided_by_yolo(&approval.result) {
+            with_ai_prefix(&d.body)
+        } else {
+            strip_ai_prefix(&d.body).to_string()
         };
         let built = match self.0.m.store.reader(|c| self.build(c, &d, now)) {
             Ok(b) => b,
@@ -657,11 +677,63 @@ impl Mail {
             Ok(v) => v,
             Err(e) => return self.fail(&d, &e.to_string()),
         };
+        let (check, inputs) = match self.full_check(&d).await {
+            Ok(c) => c,
+            Err(e) => return self.fail(&d, &e.to_string()),
+        };
+        let checked_hash = crate::disclosure::checked_hash(&d, &inputs);
+        let mut basis = crate::disclosure::basis(&d, &check);
+        basis["checked_content_hash"] = json!(checked_hash);
+        let refusal = self.0.m.store.transaction(|tx| -> MailResult<Option<SendOutcome>> {
+            let current = repo::draft(tx, &d.id)?;
+            let decision = base::decisions::get(tx, &approval.id)?;
+            let unchanged = current.as_ref() == Some(&stored)
+                && decision.as_ref().is_some_and(|a| {
+                    a.status == "resolved" && a.result == approval.result
+                })
+                && crate::disclosure::inputs(tx, &d)? == inputs;
+            if !unchanged {
+                self.blocked(tx, &d, "disclosure_changed", json!({"checked_content_hash": checked_hash}))?;
+                return Ok(Some(SendOutcome::Blocked {
+                    reason: steve_i18n::t!("mail.disclosure.changed").to_string(),
+                }));
+            }
+            tx.execute("UPDATE mail_drafts SET basis = ? WHERE id = ?", rusqlite::params![basis.to_string(), d.id])?;
+            base::audit(tx, &d.workspace_id, "steve", "mail.send.check", &d.id,
+                &json!({"verdict": check.verdict, "check_model": check.check_model, "content_hash": d.content_hash, "checked_content_hash": checked_hash, "decision": approval.id}))?;
+            if check.verdict != Verdict::Pass {
+                self.blocked(tx, &d, "disclosure", json!({"verdict": check.verdict, "checked_content_hash": checked_hash}))?;
+                return Ok(Some(SendOutcome::Blocked {
+                    reason: steve_i18n::t!("mail.disclosure.held").to_string(),
+                }));
+            }
+            // Authorization may change while the model is running. A paused connection waits as it
+            // did before; a revoked capability/connection cannot use the earlier permission.
+            match may_write_in(tx, &d.workspace_id, &d.connection_id, Some(SEND_CAP))? {
+                Ok(()) => Ok(None),
+                Err(WriteRefusal::Later(_)) => {
+                    repo::draft_transition(tx, &d.id, &["sending"], "approved", self.now())?;
+                    Ok(Some(SendOutcome::Skipped))
+                }
+                Err(WriteRefusal::Never(why)) => {
+                    self.blocked(tx, &d, "connection", json!({"why": why}))?;
+                    Ok(Some(SendOutcome::Blocked { reason: why }))
+                }
+            }
+        })?;
+        if let Some(outcome) = refusal {
+            if let SendOutcome::Blocked { reason } = &outcome {
+                self.fail(&d, reason)?;
+            }
+            attempt.completed = true;
+            return Ok(outcome);
+        }
+        attempt.submitted = true;
         let sent =
             tokio::time::timeout(SEND_TIMEOUT, adapter.send(&cx, &built.mime, &built.meta)).await;
         let result = match sent {
             Ok(Ok(r)) => {
-                let msg = match self.record_sent(&d, &decision, &built, r.ext_id, now) {
+                let msg = match self.record_sent(&d, &approval.id, &built, r.ext_id, now) {
                     Ok(msg) => msg,
                     Err(_) => return self.unknown(&d, "服务器已接受邮件，但本地发送记录保存失败"),
                 };
@@ -841,7 +913,9 @@ impl Mail {
     fn fail(&self, d: &DraftRow, error: &str) -> MailResult<SendOutcome> {
         let now = self.now();
         self.0.m.store.transaction(|tx| -> MailResult<()> {
-            repo::draft_transition(tx, &d.id, &["sending"], "failed", now)?;
+            if !repo::draft_transition(tx, &d.id, &["sending"], "failed", now)? {
+                return Ok(());
+            }
             repo::set_draft_error(tx, &d.id, Some(error))?;
             drafts::expire_open(tx, &d.workspace_id, &d.id)?;
             base::decisions::open(

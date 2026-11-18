@@ -62,7 +62,7 @@ const open = async (rows, lang = "zh-CN", width = 375) => {
   f.errors = []; page.on("pageerror", e => f.errors.push(e.message))
   await page.addInitScript(lang => { localStorage.setItem("steve-lang", lang); localStorage.setItem("steve-onboarded", "1") }, lang)
   await page.goto(base + "/#/devices/nodes/local")
-  await page.locator("[data-runtime]").first().waitFor()
+  await page.locator("[data-panel=runtimes]").waitFor()
   f.page = page
   return f
 }
@@ -91,6 +91,8 @@ try {
     const f = await open([external, discovered, ready, provider, failed, interrupted], lang, width), p = f.page
     try {
       const ext = card(p, external.id), component = ext.locator('[data-runtime-component="adapter"]')
+      await p.locator("[data-runtime-unavailable-toggle]").click()
+      for (const r of [external, discovered, provider]) await card(p, r.id).locator("[data-runtime-details-toggle]").click()
       assert.equal(await component.locator("[data-component-status]").getAttribute("data-component-status"), "unknown")
       assert.match(await component.innerText(), lang === "zh-CN" ? /未核验/ : /Not verified/)
       assert.doesNotMatch(await component.innerText(), /未安装|Not installed/)
@@ -135,6 +137,7 @@ try {
       else f.stateGates.push(old)
       await p.locator("[data-runtime-refresh]").click()
       await entered(old)
+      await p.locator("[data-runtime-unavailable-toggle]").click()
       f.deviceGates.push(fresh)
       const accepted = p.waitForResponse(r => r.url().endsWith("/install") && r.request().method() === "POST")
       await card(p).locator("[data-runtime-install]").click()

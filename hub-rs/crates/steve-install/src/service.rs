@@ -72,6 +72,120 @@ fn maintenance_file(path: &Path) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
+fn registration(home: &Path, role: &str) -> Result<Option<Value>> {
+    ensure!(
+        matches!(role, "hub" | "node"),
+        "component must be hub or node"
+    );
+    let path = home.join("services").join(format!("{role}.json"));
+    if !exists(&path) {
+        return Ok(None);
+    }
+    let record: Value = serde_json::from_slice(&maintenance_file(&path)?)?;
+    ensure!(
+        record["component"] == role,
+        "service record has the wrong component"
+    );
+    if record["uninstalled"] == true || record.get("uninstall").is_some() {
+        return Ok(None);
+    }
+    ensure!(
+        record["label"].as_str().is_some_and(|s| !s.is_empty())
+            && record["release"]
+                .as_str()
+                .is_some_and(|s| Path::new(s).is_absolute())
+            && ["version", "commit"]
+                .iter()
+                .all(|k| record["build"][k].as_str().is_some_and(|s| !s.is_empty())),
+        "service record is incomplete"
+    );
+    Ok(Some(record))
+}
+
+/// Presence alone is not an installation: retired registrations must not take precedence over
+/// another home, and unreadable or malformed records must not silently select another service.
+pub fn has_active_registration(home: &Path, role: &str) -> Result<bool> {
+    Ok(registration(home, role)?.is_some())
+}
+
+/// Resolve maintenance commands without contacting the service manager. A separate Node pins
+/// its release in the service record (and need not have `current`); a Hub's updater switches
+/// `current` without rewriting its original service or setup receipt.
+pub fn adapter_target(home: &Path, requested: Option<&str>) -> Result<(String, PathBuf)> {
+    let mut registrations = Vec::new();
+    for role in ["hub", "node"] {
+        if let Some(record) = registration(home, role)? {
+            registrations.push((role, record));
+        }
+    }
+    let (role, record) = if let Some(role) = requested {
+        registrations
+            .iter()
+            .find(|(r, _)| *r == role)
+            .with_context(|| {
+                format!(
+                    "no active {role} installation in {}; inspect services/{role}.json",
+                    home.display()
+                )
+            })?
+    } else {
+        ensure!(
+            registrations.len() == 1,
+            "expected one active Hub or Node installation in {}; inspect services/hub.json and services/node.json, or specify hub/node when both are installed",
+            home.display()
+        );
+        &registrations[0]
+    };
+    let setup = home.join("setup.json");
+    if exists(&setup) {
+        let receipt: Value = serde_json::from_slice(&maintenance_file(&setup)?)?;
+        ensure!(
+            receipt["format"] == 1
+                && receipt["home"].as_str() == home.to_str()
+                && receipt["component"] == *role,
+            "setup receipt does not identify this installation"
+        );
+    }
+    let registered = Path::new(record["release"].as_str().unwrap());
+    let release = if *role == "hub" {
+        let release = home
+            .join("current")
+            .canonicalize()
+            .context("Hub current release is missing")?;
+        ensure!(
+            registered.canonicalize().ok().as_ref() == Some(&release)
+                || home.join("releases").canonicalize().ok().as_deref() == release.parent(),
+            "Hub current does not belong to this installation"
+        );
+        release
+    } else {
+        registered
+            .canonicalize()
+            .context("registered Node release is missing")?
+    };
+    let manifest: Value =
+        serde_json::from_slice(&maintenance_file(&release.join("release.json"))?)?;
+    ensure!(
+        manifest["format_version"] == 1
+            && ["version", "commit"]
+                .iter()
+                .all(|k| manifest[k].as_str().is_some_and(|s| !s.is_empty()))
+            && (*role == "hub"
+                || ["version", "commit"]
+                    .iter()
+                    .all(|k| manifest[k] == record["build"][k])),
+        "installed release manifest is missing, unsupported or differs from the Node registration"
+    );
+    let binary = release.join(format!("bin/steve-{role}"));
+    crate::signing::owned_file(&binary)
+        .context("installed release has no trusted adapter command")?;
+    ensure!(
+        fs::symlink_metadata(&binary)?.mode() & 0o111 != 0,
+        "installed adapter command is not executable"
+    );
+    Ok(((*role).into(), release))
+}
+
 fn text(path: &Path) -> Result<String> {
     path.to_str()
         .map(str::to_owned)

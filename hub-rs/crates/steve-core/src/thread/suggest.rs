@@ -8,12 +8,25 @@ use super::{decide::Decision, lock, meta_of};
 use crate::Core;
 use crate::error::{CoreError, Result};
 use crate::gateway::Route;
-use crate::repo::{FileRef, Item};
+use crate::repo::{FileRef, Item, ItemExt};
 use crate::util::now;
 use serde_json::{Value, json};
 
 /// After this long an unanswered card is `expired`.
 const EXPIRES: i64 = 24 * 3600 * 1000;
+
+/// The request stays on the same card, with choices that do not reopen the finished item.
+fn closed_card(name: &str, work: Value) -> (String, Value) {
+    let q = format!("{name} 已经结束了。这条请求要单独建一个事项，还是在这里讨论？");
+    (
+        q.clone(),
+        json!({
+            "question": q,
+            "choices": [work, {"id": "here", "label": "在这里讨论"}],
+            "state": "open",
+        }),
+    )
+}
 
 /// The card's text and `meta.suggest` for a route the guards turned into a suggestion. About an existing
 /// item (`item`, the one the model named): why the message belongs there, the recommendation, and the
@@ -49,6 +62,13 @@ pub(crate) fn card(r: &Route, d: &Decision, item: Option<&Item>) -> (String, Val
                 item.filter(|i| i.project_id == project)
                     .and_then(|i| i.bot_id.clone())
             });
+        if item.is_some_and(|i| i.is_finished()) {
+            return closed_card(
+                &name,
+                json!({"id": "new", "label": "单独建项", "title": title, "goal": goal,
+                "project": project, "bot": bot, "tags": r.tag_ids}),
+            );
+        }
         return (
             q.clone(),
             json!({
@@ -197,7 +217,26 @@ impl Core {
             .as_str()
             .filter(|_| pick.get("title").is_none())
         {
-            self.forward(target, &om.text, &files, &origin)?;
+            if !self.forward_open(target, &om.text, &files, &origin)? {
+                let work = card["choices"]
+                    .as_array()
+                    .and_then(|cs| cs.iter().find(|c| c["id"] == "new"))
+                    .cloned()
+                    .unwrap_or_else(|| json!({"id": "new", "label": "单独建项", "goal": om.text}));
+                let (q, next) = closed_card(target, work);
+                meta["suggest"] = next;
+                self.store().store().messages().patch_text_meta(
+                    msg_id,
+                    &q,
+                    &Value::Object(meta),
+                )?;
+                th.route_outcome(&origin, "suggest_closed", None)?;
+                return Ok(Handled {
+                    message_id: msg_id.into(),
+                    item: None,
+                    already: false,
+                });
+            }
             meta["suggest"]["item"] = json!(target);
             self.store()
                 .message_patch_meta(msg_id, &Value::Object(meta))?;

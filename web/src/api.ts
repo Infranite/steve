@@ -134,6 +134,16 @@ export type RRuntime = {
   /** an adapter Steve installed and keeps up to date: its last check (`policy`: STEVE_ADAPTER_UPDATES) */
   update?: { policy: "auto" | "check" | "off"; installed?: string | null; latest?: string | null; checked?: number | null; error?: string | null; pending?: boolean } | null
 }
+/** Read-only report from one particular Node, never the Hub's merged model catalogue. */
+export type RNodeHarness = {
+  id: string; name: string; available: boolean | null; version: string; adapter_version: string | null
+  models: string[]; error: string | null; setup: RRuntime["setup"] | null
+}
+export type RNodeHarnessReport = {
+  state: "reported" | "unreported" | "offline" | "unsupported" | "failed"
+  checked_at: number | null; attempted_at: number | null; stale: boolean; refreshing: boolean
+  error: string | null; harnesses: RNodeHarness[]
+}
 export type REvent = { seq: number; ts: number; kind: string; data: any }
 export type Proposal = { id: string; title: string; target: { kind: string; id?: string }; href: string; changes: { label: string; from: string; to: string }[]; patch?: Record<string, unknown> }
 export type LocalSession = { key: string; harness: string; title: string; cwd: string; when: number; size: number; imported: boolean }
@@ -376,6 +386,8 @@ export const api = {
   removeHarness: (id: string) => del<{ removed: boolean; restart: boolean }>("/system/harnesses/" + encodeURIComponent(id)), patchDevice: (id: string, p: { revision: number; name?: string; status?: string; max_sessions?: number }) => modReq<{ device: RDevice }>("PATCH", "/devices/" + encodeURIComponent(id), p, AbortSignal.timeout(30_000)),
   /** `off`: this Hub does not listen for remote Nodes (STEVE_NODE_LISTEN=0, or a read-only copy) */
   nodes: () => get<{ nodes: RNode[]; off?: boolean }>("/nodes"),
+  nodeHarnesses: () => get<{ nodes: Record<string, RNodeHarnessReport> }>("/node-harnesses"),
+  refreshNodeHarnesses: (id: string) => get<{ node_id: string; report: RNodeHarnessReport }>(`/node-harnesses/${encodeURIComponent(id)}?fresh=1`),
   createPairing: () => post<RPairing>("/nodes/pairings"),
   vitals: () => get<{ nodes: Record<string, RVitals> }>("/vitals"),
   nodeTags: () => get<{ tags: Record<string, string[]> }>("/node-tags"),

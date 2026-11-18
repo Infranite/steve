@@ -870,16 +870,14 @@ export function stageOf(i: Item): string {
 /* ───────── actions: conversation ───────── */
 /** how long the conversation keeps talking to an item after the last message sent to it (§5.3) */
 const FOCUS_MS = 10 * 60_000
-const ITEM_REF = /^#([A-Z]{1,6}-\d+)\b/
 /** `clientId`: the send idempotency key (the composer's draft keeps one across retries; a button sends a new one) */
 export async function chatSend(v: string, files: string[] = [], refs: RFile[] = [], mentions: { kind: "party" | "bot"; id: string }[] = [], clientId = newClientId()) {
-  /* a quote of an item's message, or the focus bar, sends straight to that item; `#ST-n` does too and starts the focus */
+  /* Only an explicit quote or focus selects an item. A textual reference never starts a focus. */
   const quoted = st.quote ? st.thread.find((m) => m.id === st.quote) ?? knownMsgs.get(st.quote) : undefined
-  const focus = st.focus && st.focus.until > Date.now() ? st.focus.item : undefined
+  const focus = focusItem() ?? undefined
   const item = quoted?.item ?? (quoted ? undefined : focus)
-  const toItem = item ?? ITEM_REF.exec(v)?.[1]
   const to = { item, reply_to: quoted?.id, client_id: clientId }
-  st.quote = null; st.focus = toItem ? { item: toItem, until: Date.now() + FOCUS_MS } : st.focus
+  st.quote = null; st.focus = item && !closedSt(it(item)?.st) ? { item, until: Date.now() + FOCUS_MS } : null
   /* Steve is on a turn: the message waits in the queue above the composer and goes when the turn ends (the Hub decides) */
   if (chatBusy()) {
     const m: Msg = { clientId: crypto.randomUUID(), k: "me", t: v, files: refs, replyTo: to.reply_to, held: true }
@@ -912,7 +910,7 @@ export async function threadQueuedWithdraw(id: string, composer?: { empty: () =>
 }
 export function quoteMsg(id: string | null) { st.quote = id; emit(); requestAnimationFrame(() => document.querySelector<HTMLTextAreaElement>("[data-composer='chat'] textarea, textarea")?.focus()) }
 export function clearFocus() { st.focus = null; emit() }
-export const focusItem = () => (st.focus && st.focus.until > Date.now() ? st.focus.item : null)
+export const focusItem = () => (st.focus && st.focus.until > Date.now() && !closedSt(it(st.focus.item)?.st) ? st.focus.item : null)
 /* thread routing actions: a 409 (already handled) comes back as its message */
 export async function takeOffer(m: Msg, take: boolean) { if (!m.id) return; const r = await call(api.offer(m.id, take)); if (r?.item) toast(t("core:toast.madeItem", { id: r.item.id })) }
 /** an A2UI button pressed in a reply: `already` when this surface had been submitted (another tab, a double click that got through) */

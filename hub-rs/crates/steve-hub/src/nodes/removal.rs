@@ -541,6 +541,59 @@ pub async fn start(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_manual_command_finds_the_upgraded_release_cli_without_a_path_installation() {
+        use std::os::unix::fs::PermissionsExt;
+        for stop_code in [0, 7] {
+            let temp = tempfile::tempdir().unwrap();
+            let home = temp.path().canonicalize().unwrap();
+            let cli = home.join(".steve-node/releases/2.0.0/bin/steve");
+            let commands = home.join("commands");
+            std::fs::create_dir_all(cli.parent().unwrap()).unwrap();
+            std::fs::create_dir(&commands).unwrap();
+            let log = home.join("calls");
+            std::fs::write(&cli, "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$TEST_LOG\"\n[ \"$2\" = stop ] && exit \"$TEST_STOP_CODE\"\nexit 0\n").unwrap();
+            // Never run a real removal or contact the machine's service manager.
+            let remove = commands.join("rm");
+            std::fs::write(
+                &remove,
+                "#!/bin/sh\nprintf 'rm %s\\n' \"$*\" >> \"$TEST_LOG\"\n",
+            )
+            .unwrap();
+            for path in [&cli, &remove] {
+                std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            }
+            for (name, program) in [("ls", "/bin/ls"), ("tail", "/usr/bin/tail")] {
+                std::os::unix::fs::symlink(program, commands.join(name)).unwrap();
+            }
+            let out = std::process::Command::new("/bin/sh")
+                .args(["-c", super::MANUAL_COMMAND])
+                .env_clear()
+                .env("HOME", &home)
+                .env("PATH", &commands)
+                .env("TEST_LOG", &log)
+                .env("TEST_STOP_CODE", stop_code.to_string())
+                .output()
+                .unwrap();
+            assert_eq!(
+                out.status.success(),
+                stop_code == 0,
+                "{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            let expected = if stop_code == 0 {
+                format!(
+                    "node stop\nnode uninstall\nrm -rf {}\n",
+                    home.join(".steve-node").display()
+                )
+            } else {
+                "node stop\n".into()
+            };
+            assert_eq!(std::fs::read_to_string(log).unwrap(), expected);
+            assert!(cli.is_file());
+        }
+    }
+
     use super::*;
     use steve_node_api::testkit::FakeNode;
 

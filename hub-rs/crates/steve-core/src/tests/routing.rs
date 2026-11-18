@@ -588,6 +588,346 @@ async fn an_answer_with_an_offer_is_taken_by_a_confirmation() {
 }
 
 #[tokio::test]
+async fn item_references_are_context_for_new_work() {
+    for status in ["run", "done", "drop", "fail"] {
+        for placement in ["bare", "hash", "middle", "lowercase"] {
+            let k = Kit::new();
+            let old = k.item(status, "执行", None);
+            if status == "fail" {
+                k.db()
+                    .exec(
+                        "UPDATE items SET phase='closed',outcome='failed' WHERE id=?",
+                        &[&old],
+                    )
+                    .unwrap();
+            }
+            let session = k.session(&old, if status == "run" { "idle" } else { "ended" });
+            let reference = match placement {
+                "bare" => old.clone(),
+                "hash" => format!("#{old}"),
+                "middle" => format!("根据 {old} 的结果，"),
+                _ => old.to_lowercase(),
+            };
+            let text = format!("{reference} 已开 issues #417–#420，请给每个 issue 分别建一个事项");
+            router(&k, |_| {
+                json!({"kind":"item", "confidence":0.95, "signals":["explicit"],
+                "title":"逐项跟进 issue", "bot":"dev"})
+            });
+            let before = k.db().timeline(&old).unwrap().len();
+            let file = k.file("issues.txt", "text/plain", b"issue context");
+            let mid = k.core.say(WS, &text, std::slice::from_ref(&file)).unwrap();
+            let ms = settle(&k, 2).await;
+            let new = ms[1].item_id.as_deref().expect("new tracked work");
+            assert_ne!(new, old, "{status}/{placement}: {}", ms[1].text);
+            assert_eq!(
+                k.db()
+                    .goals(new)
+                    .unwrap()
+                    .last()
+                    .unwrap()
+                    .text
+                    .lines()
+                    .next(),
+                Some(text.as_str())
+            );
+            assert_eq!(route_log(&k, &mid).kind, "item");
+            assert_eq!(items(&k), 2);
+            assert_eq!(k.db().timeline(&old).unwrap().len(), before);
+            assert!(k.rt.prompts_of(&session).is_empty());
+            assert!(k.db().queued(&session).unwrap().is_empty());
+            assert_eq!(
+                k.db().message(&mid).unwrap().unwrap().meta["files"],
+                json!([file])
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn explicit_new_work_overrides_a_mistaken_supplement() {
+    for status in ["run", "done"] {
+        let k = Kit::new();
+        let old = k.item(status, "执行", None);
+        let target = old.clone();
+        router(&k, move |_| {
+            json!({"kind":"supplement", "confidence":0.95, "item":target,
+            "reply":"已送到旧事项", "bot":"dev"})
+        });
+        let text = format!("{old} 开了 issues #417–#420，请给每个 issue 建一个事项");
+        let mid = k.core.say(WS, &text, &[]).unwrap();
+        let ms = settle(&k, 2).await;
+        assert_ne!(ms[1].item_id.as_deref().expect("new work"), old);
+        assert!(!ms[1].text.contains("已送到旧事项"));
+        assert_eq!(route_log(&k, &mid).guard.as_deref(), Some("2"));
+        assert_eq!(items(&k), 2);
+    }
+}
+
+#[tokio::test]
+async fn clear_textual_supplements_still_reach_unfinished_items() {
+    for status in ["run", "pause", "wait"] {
+        let k = Kit::new();
+        let old = k.item(status, "执行", None);
+        let session = k.session(&old, "idle");
+        let target = old.clone();
+        router(
+            &k,
+            move |_| json!({"kind":"supplement", "confidence":0.95, "item":target}),
+        );
+        let text = format!("追加到 #{old}：记得覆盖跨日统计");
+        k.core.say(WS, &text, &[]).unwrap();
+        let ms = settle(&k, 2).await;
+        assert_eq!(ms[1].text, format!("已作为补充送到 {old}。"));
+        assert_eq!(k.rt.prompts_of(&session), vec![format!("补充信息：{text}")]);
+        assert_eq!(items(&k), 1);
+    }
+}
+
+#[tokio::test]
+async fn questions_about_a_finished_item_remain_in_the_conversation() {
+    for kind in ["status", "research"] {
+        let k = Kit::new();
+        let old = k.item("done", "收尾", None);
+        let session = k.session(&old, "ended");
+        let target = old.clone();
+        router(
+            &k,
+            move |_| json!({"kind":kind, "confidence":0.95, "item":target}),
+        );
+        assert!(
+            k.core
+                .set_researcher(FakeResearch::new(vec![Step::Text("旧事项的结论")]))
+        );
+        k.core
+            .say(WS, &format!("#{old} 进展怎么样了？"), &[])
+            .unwrap();
+        let ms = settle(&k, 2).await;
+        assert!(ms[1].meta.get("error").is_none());
+        assert_eq!(ms[1].item_id, None);
+        assert_eq!(items(&k), 1);
+        assert!(k.rt.prompts_of(&session).is_empty());
+        assert!(k.db().queued(&session).unwrap().is_empty());
+    }
+}
+
+#[tokio::test]
+async fn a_named_but_unsure_supplement_asks_once_and_the_choice_is_idempotent() {
+    let k = Kit::new();
+    let old = k.item("run", "执行", None);
+    let session = k.session(&old, "idle");
+    let target = old.clone();
+    router(&k, move |_| {
+        json!({"kind":"supplement", "confidence":0.6, "item":target,
+        "title":"补充统计", "goal":"统计按小时展示"})
+    });
+    let text = format!("#{old} 那个统计也处理一下");
+    let mid = k.core.say(WS, &text, &[]).unwrap();
+    let ms = settle(&k, 2).await;
+    assert_eq!(route_log(&k, &mid).kind, "suggest");
+    assert_eq!(ms[1].meta["suggest"]["state"], "open");
+    assert!(k.rt.prompts_of(&session).is_empty());
+    let first = k.core.suggest(WS, &ms[1].id, "item", None).unwrap();
+    let second = k.core.suggest(WS, &ms[1].id, "item", None).unwrap();
+    assert_eq!(first.item.unwrap().id, old);
+    assert!(second.already);
+    assert_eq!(k.rt.prompts_of(&session), vec![format!("补充信息：{text}")]);
+    assert_eq!(
+        k.db()
+            .messages(WS)
+            .unwrap()
+            .iter()
+            .filter(|m| m.meta.get("suggest").is_some())
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn a_closed_supplement_offers_separate_work_without_losing_the_request() {
+    for status in ["done", "drop", "fail"] {
+        for confidence in [0.6, 0.95] {
+            let k = Kit::new();
+            let old = k.item(status, "收尾", None);
+            if status == "fail" {
+                k.db()
+                    .exec(
+                        "UPDATE items SET phase='closed',outcome='failed' WHERE id=?",
+                        &[&old],
+                    )
+                    .unwrap();
+            }
+            let session = k.session(&old, "ended");
+            let target = old.clone();
+            router(&k, move |_| {
+                json!({"kind":"supplement", "confidence":confidence, "item":target,
+                "reply":"已送到旧事项", "bot":"dev"})
+            });
+            let text = format!("{old} 的统计也需要调整");
+            let file = k.file("context.txt", "text/plain", b"keep this");
+            let mid = k.core.say(WS, &text, std::slice::from_ref(&file)).unwrap();
+            let ms = settle(&k, 2).await;
+            let card = &ms[1];
+            assert_eq!(route_log(&k, &mid).guard.as_deref(), Some("closed"));
+            assert!(card.text.contains("已经结束"));
+            assert!(card.meta.get("error").is_none());
+            assert_eq!(card.meta["suggest"]["choices"][0]["id"], "new");
+            assert_eq!(card.meta["suggest"]["choices"][1]["id"], "here");
+            assert!(
+                card.meta["suggest"]["choices"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .all(|c| c.get("item").is_none())
+            );
+            let made = k
+                .core
+                .suggest(WS, &card.id, "new", None)
+                .unwrap()
+                .item
+                .unwrap();
+            assert_ne!(made.id, old);
+            assert_eq!(
+                k.db()
+                    .goals(&made.id)
+                    .unwrap()
+                    .last()
+                    .unwrap()
+                    .text
+                    .lines()
+                    .next(),
+                Some(text.as_str())
+            );
+            assert!(k.core.suggest(WS, &card.id, "new", None).unwrap().already);
+            assert_eq!(items(&k), 2);
+            assert!(k.rt.prompts_of(&session).is_empty());
+            assert!(k.db().queued(&session).unwrap().is_empty());
+            assert_eq!(k.db().session(&session).unwrap().unwrap().status, "ended");
+            assert!(
+                k.rt.st()
+                    .files
+                    .iter()
+                    .any(|(_, files)| files.contains(&file))
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_closed_supplement_can_be_made_into_work_from_the_message_menu() {
+    let k = Kit::new();
+    let old = k.item("done", "收尾", None);
+    let target = old.clone();
+    router(
+        &k,
+        move |_| json!({"kind":"supplement", "confidence":0.95, "item":target}),
+    );
+    let text = format!("{old} 的统计也需要调整");
+    let mid = k.core.say(WS, &text, &[]).unwrap();
+    let ms = settle(&k, 2).await;
+    let made = k
+        .core
+        .reroute(WS, &ms[1].id, RerouteTo::Item, None)
+        .await
+        .unwrap()
+        .item
+        .unwrap();
+    assert_ne!(made.id, old);
+    assert_eq!(k.db().goal(&made.id).unwrap(), text);
+    assert_eq!(items(&k), 2);
+    assert!(
+        k.core
+            .reroute(WS, &mid, RerouteTo::Item, None)
+            .await
+            .unwrap()
+            .already
+    );
+}
+
+#[tokio::test]
+async fn stale_focus_and_quotes_of_closed_items_go_through_the_router() {
+    for quoted in [false, true] {
+        let k = Kit::new();
+        let old = k.item("done", "收尾", None);
+        let message = k
+            .db()
+            .message_add(WS, "steve", "旧交付", Some(&old), None)
+            .unwrap();
+        router(
+            &k,
+            |_| json!({"kind":"item", "confidence":0.95, "signals":["change"], "bot":"dev"}),
+        );
+        let to = crate::thread::SayTo {
+            item: (!quoted).then_some(old.clone()),
+            reply_to: quoted.then_some(message),
+        };
+        k.core.say_to(WS, None, "修复登录页", &[], &[], to).unwrap();
+        let ms = settle(&k, 3).await;
+        assert_ne!(ms[2].item_id.as_deref().expect("new work"), old);
+        assert!(ms[2].meta.get("error").is_none());
+        assert_eq!(items(&k), 2);
+    }
+}
+
+#[tokio::test]
+async fn a_supplement_target_closing_during_routing_is_checked_again() {
+    let k = Kit::new();
+    let old = k.item("run", "执行", None);
+    let target = old.clone();
+    let db = k.db().clone();
+    router(&k, move |_| {
+        db.exec(
+            "UPDATE items SET phase='closed',status='done' WHERE id=?",
+            &[&target],
+        )
+        .unwrap();
+        json!({"kind":"supplement", "confidence":0.95, "item":target})
+    });
+    k.core
+        .say(WS, &format!("追加到 {old}：覆盖跨日统计"), &[])
+        .unwrap();
+    let ms = settle(&k, 2).await;
+    assert_eq!(ms[1].meta["suggest"]["state"], "open");
+    assert_eq!(ms[1].meta["steps"]["route"]["guard"], "closed");
+    assert!(ms[1].meta.get("error").is_none());
+}
+
+#[tokio::test]
+async fn a_suggestion_target_closing_before_the_choice_keeps_the_card_actionable() {
+    let k = Kit::new();
+    let old = k.item("run", "执行", None);
+    let target = old.clone();
+    router(
+        &k,
+        move |_| json!({"kind":"supplement", "confidence":0.6, "item":target}),
+    );
+    let text = "统计也处理一下";
+    k.core.say(WS, text, &[]).unwrap();
+    let ms = settle(&k, 2).await;
+    let card = &ms[1];
+    k.db()
+        .exec(
+            "UPDATE items SET phase='closed',status='done' WHERE id=?",
+            &[&old],
+        )
+        .unwrap();
+    let h = k.core.suggest(WS, &card.id, "item", None).unwrap();
+    assert_eq!(h.message_id, card.id);
+    assert!(h.item.is_none());
+    let card = k.db().message(&card.id).unwrap().unwrap();
+    assert!(card.text.contains("已经结束"));
+    assert_eq!(card.meta["suggest"]["state"], "open");
+    let made = k
+        .core
+        .suggest(WS, &card.id, "new", None)
+        .unwrap()
+        .item
+        .unwrap();
+    assert_eq!(k.db().goals(&made.id).unwrap().last().unwrap().text, text);
+    assert_ne!(made.id, old);
+    assert_eq!(items(&k), 2);
+}
+
+#[tokio::test]
 async fn status_and_supplement_and_unsure_supplement() {
     let k = Kit::new();
     let i = k.item("run", "执行", None);
@@ -640,7 +980,7 @@ async fn status_and_supplement_and_unsure_supplement() {
 /// ST-44: the screenshot of 2026-11-05 — “统计信息如果维度是今天，那里面的统计数据粒度应该是小时级的”
 /// while ST-40 (the statistics page) was open, answered with “这是给 ST-40 的吗？ [送到 ST-40] [在这里回答]”.
 /// Now the card says why it belongs there, recommends appending, and asks “追加 / 单独建项”; a message that
-/// names the item is not asked about.
+/// clearly supplements an open item is forwarded when the router is sure.
 #[tokio::test]
 async fn an_unsure_supplement_explains_and_asks_append_or_new() {
     let k = Kit::new();
@@ -653,8 +993,8 @@ async fn an_unsure_supplement_explains_and_asks_append_or_new() {
         .unwrap();
     let s = k.session(&i, "idle");
     let item = i.clone();
-    router(&k, move |_| {
-        json!({"kind": "supplement", "item": item, "confidence": 0.6,
+    router(&k, move |m| {
+        json!({"kind": "supplement", "item": item, "confidence": if m.starts_with("追加到") { 0.9 } else { 0.6 },
                "title": "今日统计按小时展示", "goal": "统计维度选今天时按小时汇总",
                "why": format!("这条也是统计页的展示要求，和 {item} 改的是同一个页面。")})
     });

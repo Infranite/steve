@@ -1,4 +1,4 @@
-//! The main thread: lanes, /汇报, #REF supplements, routing to chat, config or an item, @bot, stop.
+//! The main thread: lanes, /汇报, explicit supplements, routing to chat, config or an item, @bot, stop.
 
 use crate::Tier;
 use crate::error::msg;
@@ -64,16 +64,26 @@ async fn digest() {
 }
 
 #[tokio::test]
-async fn a_reference_supplements_the_item() {
+async fn an_explicit_target_supplements_the_item() {
     let k = Kit::new();
     let i = k.item("run", "执行", None);
     let s = k.session(&i, "idle");
     let f = k.file("log.txt", "text/plain; charset=utf-8", b"hello");
     k.core
-        .say(WS, &format!("#{i} 记得加测试"), std::slice::from_ref(&f))
+        .say_to(
+            WS,
+            None,
+            "记得加测试",
+            std::slice::from_ref(&f),
+            &[],
+            crate::thread::SayTo {
+                item: Some(i.clone()),
+                reply_to: None,
+            },
+        )
         .unwrap();
     let ms = settle(&k, 2).await;
-    assert_eq!(ms[0].meta, json!({"files": [f]}));
+    assert_eq!(ms[0].meta["files"], json!([f]));
     assert_eq!(
         k.rt.st().files.last().unwrap().1,
         vec![f.clone()],
@@ -1062,7 +1072,7 @@ async fn a_contact_field_said_in_the_conversation_is_applied_at_once() {
     assert!(important);
 }
 
-/// #51: a message whose way is fixed (to an item, `#ST-n`, `/汇报`) does not wait behind the answer in
+/// #51: a message whose way is fixed (to an open item, `/汇报`) does not wait behind the answer in
 /// progress: it is not held, and its acknowledgement comes while the answer still runs.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_message_to_an_item_passes_the_answer_in_progress() {
@@ -1076,7 +1086,20 @@ async fn a_message_to_an_item_passes_the_answer_in_progress() {
     let s = k.session(&i, "idle");
     k.core.say(WS, "慢慢答", &[]).unwrap();
     assert!(k.wait(|| k.core.inline_busy(WS)));
-    let to = k.core.say(WS, &format!("#{i} 记得加测试"), &[]).unwrap();
+    let to = k
+        .core
+        .say_to(
+            WS,
+            None,
+            "记得加测试",
+            &[],
+            &[],
+            crate::thread::SayTo {
+                item: Some(i.clone()),
+                reply_to: None,
+            },
+        )
+        .unwrap();
     assert!(
         k.db()
             .message(&to)

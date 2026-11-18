@@ -64,6 +64,40 @@ test("stream paint preserves unrelated sessions, bots, items and thread referenc
   assert.equal(s.st.S.b, before.b); assert.equal(s.st.bots, before.bots); assert.equal(s.st.items, before.items); assert.equal(s.st.thread, before.thread)
 })
 
+test("item references never focus this request or the next one", async () => {
+  const h = harness(), s = h.store, sent = []
+  h.api.say = async (...args) => { sent.push(args) }
+  for (const text of ["#ST-206 的结果作为背景，修复登录", "ST-206 只是上下文", "继续新的工作"]) {
+    s.st.thinking = false
+    await s.chatSend(text)
+    assert.equal(sent.at(-1)[3].item, undefined)
+    assert.equal(s.focusItem(), null)
+    assert.equal(s.st.focus, null)
+  }
+})
+
+test("only an open explicit focus or quote directs a message to an item", async () => {
+  const h = harness(), s = h.store, sent = []
+  h.api.say = async (...args) => { sent.push(args) }
+  s.st.items = [{ id: "ST-1", st: "run" }, { id: "ST-2", st: "done" }]
+  s.st.focus = { item: "ST-1", until: Date.now() + 60_000 }
+  await s.chatSend("记得覆盖跨日统计")
+  assert.equal(sent.at(-1)[3].item, "ST-1")
+  assert.equal(s.focusItem(), "ST-1")
+  s.st.items[0].st = "done"
+  assert.equal(s.focusItem(), null)
+  s.st.thinking = false
+  await s.chatSend("修复另一个页面")
+  assert.equal(sent.at(-1)[3].item, undefined)
+  assert.equal(s.st.focus, null)
+
+  s.st.thread = [{ id: "old", k: "steve", t: "旧交付", item: "ST-2" }]
+  s.st.quote = "old"; s.st.thinking = false
+  await s.chatSend("根据旧交付，再修登录页")
+  assert.equal(sent.at(-1)[3].reply_to, "old", "the quote remains available as context")
+  assert.equal(s.st.focus, null, "quoting a finished item cannot capture later messages")
+})
+
 test("capacity-only refreshes update wait counts and actual Node reasons without new transcript events", async () => {
   const h = harness(), s = h.store, row = h.state.sessions[0]
   row.room = { running: 32, max: 32, waiting: 2, reason: "capacity" }
