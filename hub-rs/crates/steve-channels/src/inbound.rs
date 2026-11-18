@@ -653,8 +653,10 @@ impl Channels {
             spaces::ReplyAsYou::Draft
         };
         // a bot the loop guard stopped drives no flow on either, and history wakes nothing
-        ev.wake = !matches!(inbound.next, Next::Record(LABEL_BOT | LABEL_BOT_ANSWERED))
-            && inbound.history.is_none()
+        ev.wake = !matches!(
+            inbound.next,
+            Next::Record(LABEL_BOT | LABEL_BOT_ANSWERED | crate::arbiter::LABEL_AUTOMATED)
+        ) && inbound.history.is_none()
             && reply_as_you == spaces::ReplyAsYou::Draft;
         ev.record_only = match &inbound.next {
             Next::Handle if reply_as_you == spaces::ReplyAsYou::Off => Some(LABEL_REPLY_OFF.into()),
@@ -834,6 +836,47 @@ impl Channels {
             None => sender_name.unwrap_or("").to_string(),
         };
 
+        let bot_author = msg.sender.is_bot
+            || sender.as_ref().is_some_and(|s| s.is_ours)
+            || sender_account
+                .as_deref()
+                .map(|id| {
+                    tx.query_row(
+                        "SELECT kind IN ('bot','app_bot') FROM accounts WHERE id=?",
+                        [id],
+                        |r| r.get::<_, bool>(0),
+                    )
+                })
+                .transpose()?
+                .unwrap_or(false);
+        // Trigger authorship belongs to the receiving personal account, not every workspace
+        // owner. Canonicalize only this receipt/plan, without merging contacts or their handles.
+        let trigger_self = mode == Mode::Own
+            && !bot_author
+            && (msg.mine
+                || sender_account.as_deref() == Some(facts.account_id.as_str())
+                || crate::arbiter::from_owner(
+                    tx,
+                    ws,
+                    &facts.owner_user.iter().cloned().collect::<Vec<_>>(),
+                    sender_party.as_deref(),
+                    &msg.sender,
+                )?);
+        let trigger_party: Option<String> = if trigger_self {
+            tx.query_row(
+                "SELECT party_id FROM accounts WHERE id=?",
+                [&facts.account_id],
+                |r| r.get(0),
+            )?
+        } else {
+            sender_party.clone()
+        };
+        let trigger_account = if trigger_self {
+            Some(facts.account_id.as_str())
+        } else {
+            sender_account.as_deref()
+        };
+
         // a DM stored before anyone could be named for it is named after the other party
         let from_other = sender_account.as_deref() != Some(facts.account_id.as_str());
         if space.kind == SpaceKind::Dm.code()
@@ -1006,6 +1049,22 @@ impl Channels {
             fallback::supplied(tx, id, conn, source, !has_id)?;
             // one message, one more identity that received it
             spaces::mark_seen(tx, id, conn)?;
+            if mode == Mode::Own
+                && !bot_author
+                && history.is_none()
+                && first
+                    .as_ref()
+                    .is_some_and(|(_, _, label)| *label != LABEL_ECHO)
+            {
+                crate::arbiter::receipt(
+                    tx,
+                    conn,
+                    id,
+                    trigger_account,
+                    trigger_party.as_deref(),
+                    trigger_self,
+                )?;
+            }
         }
         if let Some((id, space_id, label)) = first {
             return Ok(Written {
@@ -1063,6 +1122,16 @@ impl Channels {
             return Err(ApiError::conflict("这条消息已经记下了"));
         };
         fallback::supplied(tx, &message_id, conn, source, false)?;
+        if mode == Mode::Own && !bot_author && history.is_none() {
+            crate::arbiter::receipt(
+                tx,
+                conn,
+                &message_id,
+                trigger_account,
+                trigger_party.as_deref(),
+                trigger_self,
+            )?;
+        }
         if history.is_none() && !msg.sender.is_bot {
             crate::pipeline::observe_reply(
                 tx,
@@ -1148,17 +1217,36 @@ impl Channels {
         } else {
             Next::Handle
         };
-        // another assistant's automatic reply on your account: recorded, never an instruction
+        // Automation is never an instruction on a personal receiver, even when `who` allows
+        // other people. Apply the same filter that command admission and send authorization use.
         let next = match next {
             Next::Handle | Next::Own
-                if crate::arbiter::looks_automated(&msg.text)
+                if mode == Mode::Own
+                    && spaces::channel_settings(tx, ws, conn)?.is_some_and(|cs| {
+                        crate::arbiter::automated(
+                            &msg.text,
+                            &msg.mentions
+                                .iter()
+                                .map(|m| m.name.clone())
+                                .collect::<Vec<_>>(),
+                            &crate::rules::Trigger::from_value(&cs.trigger),
+                        )
+                    }) =>
+            {
+                Next::Record(crate::arbiter::LABEL_AUTOMATED)
+            }
+            Next::Handle | Next::Own
+                if mode == Mode::Bot
+                    && crate::arbiter::looks_automated(&msg.text)
                     && (own
                         || sender_account
                             .as_deref()
-                            .map(|a| crate::arbiter::is_yours(tx, ws, a))
+                            .map(|id| crate::arbiter::is_yours(tx, ws, id))
                             .transpose()?
                             .unwrap_or(false)) =>
             {
+                // Preserve the built-in echo/automation fence on your messages seen by a bot.
+                // A bot never borrows another connection's configurable personal trigger policy.
                 Next::Record(crate::arbiter::LABEL_AUTOMATED)
             }
             n => n,
@@ -1429,6 +1517,11 @@ impl Channels {
                 && inbound.next != Next::Record(LABEL_ECHO)
             {
                 inbound.response = self.on_command(ws, conn, &inbound).await?;
+                if let Some(r) = &inbound.response {
+                    self.store().transaction(|tx| {
+                        respond::mark_message_event(tx, &inbound.message_id, r)
+                    })?;
+                }
             }
             return Ok(inbound);
         }

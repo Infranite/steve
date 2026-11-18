@@ -25,67 +25,55 @@ impl Channels {
         conn: &str,
         inbound: &crate::inbound::Inbound,
     ) -> ChannelResult<Option<crate::respond::Response>> {
-        let plan = self.store().reader(|c| -> ChannelResult<Option<Plan>> {
-            let Some(space) = spaces::get(c, &inbound.space_id)? else {
-                return Ok(None);
-            };
-            let m = crate::inbound::stored(c, &inbound.message_id)?;
-            let Some(instruction) = crate::arbiter::command(
-                c,
-                ws,
-                &space,
-                conn,
-                &inbound.message_id,
-                inbound.sender_account_id.as_deref(),
-                inbound.sender_party_id.as_deref(),
-                &m.text,
-                &m.mention_names,
-            )?
-            else {
-                return Ok(None);
-            };
-            // once per message; and only while your account is still in the chat
-            if answered(c, ws, &inbound.message_id)? || !present(c, &space.id, conn)? {
-                return Ok(None);
-            }
-            // the thread of an item handed off: what is said there goes to that item
-            if crate::messages::thread_item(c, ws, &inbound.message_id, inbound.from_owner)?
-                .is_some()
-            {
-                return Ok(None);
-            }
-            let set = spaces::settings(c, &space.id)?;
-            Ok(Some(Plan {
-                ws: ws.into(),
-                connection_id: conn.to_string(),
-                mode: Mode::Own,
-                space_id: space.id.clone(),
-                space_name: crate::spaces::display_title(c, &space)?,
-                message_id: inbound.message_id.clone(),
-                external_id: m.external_id.clone(),
-                thread_key: m.thread_key.clone(),
-                text: crate::media::with_unread_note(&m.text, &m.attachments),
-                sender_account_id: inbound.sender_account_id.clone(),
-                sender_party_id: inbound.sender_party_id.clone(),
-                sender_name: m.sender_name.clone(),
-                act: crate::rules::Act::Reply,
-                rule: None,
-                muted: set.muted,
-                trigger: Some(instruction),
-            }))
-        })?;
-        let Some(plan) = plan else {
+        let plan = self
+            .store()
+            .reader(|c| -> ChannelResult<Option<(Plan, bool)>> {
+                let Some(space) = spaces::get(c, &inbound.space_id)? else {
+                    return Ok(None);
+                };
+                let m = crate::inbound::stored(c, &inbound.message_id)?;
+                let Some(command) =
+                    crate::arbiter::command(c, ws, &space, conn, &inbound.message_id)?
+                else {
+                    return Ok(None);
+                };
+                // once per message; and only while your account is still in the chat
+                if answered(c, ws, &inbound.message_id)? || !present(c, &space.id, conn)? {
+                    return Ok(None);
+                }
+                // the thread of an item handed off: what is said there goes to that item
+                if crate::messages::thread_item(c, ws, &inbound.message_id, inbound.from_owner)?
+                    .is_some()
+                {
+                    return Ok(None);
+                }
+                let set = spaces::settings(c, &space.id)?;
+                Ok(Some((
+                    Plan {
+                        ws: ws.into(),
+                        connection_id: conn.to_string(),
+                        mode: Mode::Own,
+                        space_id: space.id.clone(),
+                        space_name: crate::spaces::display_title(c, &space)?,
+                        message_id: inbound.message_id.clone(),
+                        external_id: m.external_id.clone(),
+                        thread_key: m.thread_key.clone(),
+                        text: crate::media::with_unread_note(&m.text, &m.attachments),
+                        sender_account_id: command.sender_account,
+                        sender_party_id: command.sender_party,
+                        sender_name: m.sender_name.clone(),
+                        act: crate::rules::Act::Reply,
+                        rule: None,
+                        muted: set.muted,
+                        trigger: Some(command.instruction),
+                    },
+                    command.from_self,
+                )))
+            })?;
+        let Some((plan, yours)) = plan else {
             return Ok(None);
         };
         // someone else's words: what they ask for is checked first; your own are yours
-        let yours = self.store().reader(|c| {
-            crate::arbiter::from_you(
-                c,
-                ws,
-                plan.sender_account_id.as_deref(),
-                plan.sender_party_id.as_deref(),
-            )
-        })?;
         if !yours {
             let guard = self.guard(&plan).await;
             if guard != Guard::Safe {

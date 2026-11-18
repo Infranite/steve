@@ -232,9 +232,15 @@ export default {
   /* the full record of a channel conversation: what Steve did with each message of the chat */
   record: {
     answered: "Answered",
+    drafted: "Drafted; not sent",
+    blocked: "Send blocked",
+    unknown: "Delivery unconfirmed",
+    recalled: "Recalled",
+    local: "Answered only in Steve",
     waiting: "Waiting for you",
     item: "Handed off",
     working: "Working",
+    failureNoticeSent: "Failure notice sent",
     failed: "Failed",
     skipped: "Not answered",
     decided: "You handled it",
@@ -246,7 +252,7 @@ export default {
   },
   reaction: {
     ack: "Working on it",
-    done: "Answered",
+    done: "Processed",
     failed: "Couldn't answer",
     ackAsUser: "Added “Working on it” to the message as you",
     ackAsBot: "The bot added “Working on it” to the message",

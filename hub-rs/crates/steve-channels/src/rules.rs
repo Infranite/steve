@@ -668,6 +668,8 @@ pub struct Trigger {
     pub reply: ReplyStyle,
     /// The answer, said as you, starts with `[AI] `.
     pub mark: bool,
+    /// Additional automatic-message prefixes; built-in markers always remain filtered.
+    pub ignore_prefixes: Vec<String>,
 }
 
 /// `trigger.who` entry for you.
@@ -765,6 +767,7 @@ impl Trigger {
                 .and_then(ReplyStyle::parse)
                 .unwrap_or_default(),
             mark: v["mark"].as_bool().unwrap_or(true),
+            ignore_prefixes: list("ignore_prefixes"),
         }
     }
 
