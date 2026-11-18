@@ -1554,3 +1554,74 @@ async fn a_retried_turn_is_judged_on_its_last_attempts_own_words() {
     let j = &k.db().store().item_facts().judgements(&item, 1).unwrap()[0];
     assert_eq!(j.basis["reason"], json!("reply_unknown"));
 }
+
+/// Re-review: words of the attempt's range that its Node stream does not attribute to it were read
+/// as its words. Only confirmed text counts: mixed with unattributed assistant text the reply is
+/// unknown, and when every text is the attempt's own, all of it (and nothing else) is read.
+#[tokio::test(flavor = "multi_thread")]
+async fn unattributed_words_in_the_attempts_range_make_its_reply_unknown() {
+    /// Turn `t1` whose one attempt said `words`, each attributed (`true`) or not.
+    fn said(k: &Kit, words: &[(&str, bool)]) -> (String, String) {
+        let item = k.item("run", "执行", None);
+        let sid = k.session(&item, "idle");
+        finished_turn(k, &sid, "t1", steve_store::now() - 1_000);
+        for (text, attributed) in words {
+            if *attributed {
+                attempt_says(k, &sid, "t1", &attempt_of("t1"), text);
+            } else {
+                k.rt.say(&sid, text);
+            }
+        }
+        ended(k, &sid, "t1", "end_turn");
+        k.db()
+            .store()
+            .item_facts()
+            .set_policy("settle_debounce", 0)
+            .unwrap();
+        (item, sid)
+    }
+
+    // attributed and unattributed text in the same range: not known, and no model is asked
+    let k = Kit::new();
+    let (item, sid) = said(
+        &k,
+        &[
+            ("第一句，", true),
+            ("不知是谁说的，", false),
+            ("最后一句", true),
+        ],
+    );
+    let facts = k.db().store().item_facts();
+    let ev = facts
+        .attempt_events(&sid, "t1-a", i64::MAX)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        ev.own.len(),
+        2,
+        "only the two attributed events are its own"
+    );
+    k.gw.set(|_, _| Ok(DONE.into()));
+    assert_eq!(k.core.check_judges().await.unwrap(), 0);
+    let j = &facts.judgements(&item, 1).unwrap()[0];
+    assert_eq!(j.basis["reason"], json!("reply_unknown"));
+    assert_eq!(j.basis["bundle"]["final_text_source"], json!("unknown"));
+    assert_eq!(j.basis["bundle"]["final_text"], json!(""));
+    assert!(k.gw.calls.lock().unwrap().is_empty());
+
+    // every text attributed: exactly the attempt's own words
+    let k = Kit::new();
+    let (_, _) = said(&k, &[("第一句，", true), ("最后一句", true)]);
+    let p = k
+        .core
+        .tx()
+        .judge_prepare(steve_store::now())
+        .unwrap()
+        .into_iter()
+        .next()
+        .expect("judged by the model");
+    assert_eq!(
+        (p.bundle.final_text.as_str(), p.bundle.final_text_source),
+        ("第一句，最后一句", "attempt")
+    );
+}

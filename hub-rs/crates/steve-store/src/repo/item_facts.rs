@@ -322,6 +322,15 @@ fn insert_judgement_in(tx: &Tx<'_>, j: &NewJudgement<'_>) -> Result<Option<Strin
     Ok((n > 0).then_some(id))
 }
 
+/// The events of one attempt in its session ([`ItemFacts::attempt_events`]).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct AttemptEvents {
+    /// Its first event's seq (its range runs from here to its end).
+    pub start: i64,
+    /// The seqs of the range confirmed to be its own, oldest first.
+    pub own: Vec<i64>,
+}
+
 /// What a judge's write finds ([`ItemFacts::candidate_judged`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Judged {
@@ -802,14 +811,21 @@ impl ItemFacts<'_> {
         })
     }
 
-    /// Where the events of attempt `attempt` of `session` begin, among the session's events up to
-    /// `until` (that attempt's end): the first of its own events, read from the Node stream each
-    /// came on (its inbox entry names the attempt). An earlier attempt's event (a retry of the same
-    /// turn, or another turn) or a message sent to the session ends the search. `Some(until + 1)`: the Node told of the attempt but none of its
+    /// The events of attempt `attempt` of `session`, among the session's events up to `until`
+    /// (that attempt's end), as the Node stream each came on attributes it (its inbox entry names
+    /// the attempt): where they begin, and which are confirmed its own. An earlier attempt's event
+    /// (a retry of the same turn, or another turn) or a message sent to the session ends the
+    /// search. Start `until + 1` with none of its own: the Node told of the attempt but none of its
     /// events is a session event (it said nothing). `None`: it cannot be told — an event in between
-    /// whose inbox entry is gone (pruned), events not from a Node, or an attempt the inbox does not
-    /// know.
-    pub fn attempt_start(&self, session: &str, attempt: &str, until: i64) -> Result<Option<i64>> {
+    /// whose inbox entry is gone (pruned), or an attempt the inbox does not know. Events of the
+    /// range that are not its own (the Hub's own lines, session-level facts) are left out of
+    /// [`AttemptEvents::own`]; a reader decides what they mean.
+    pub fn attempt_events(
+        &self,
+        session: &str,
+        attempt: &str,
+        until: i64,
+    ) -> Result<Option<AttemptEvents>> {
         /// How many of the session's last events are looked at.
         const SCAN: i64 = 5000;
         self.0.read(|c| {
@@ -823,7 +839,7 @@ impl ItemFacts<'_> {
                 params![session, until, SCAN],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
             )?;
-            let mut first = None;
+            let mut own: Vec<i64> = vec![];
             for (seq, from_node, known, of, sent) in rows {
                 if sent {
                     break;
@@ -831,7 +847,7 @@ impl ItemFacts<'_> {
                 match (from_node, known, of.as_deref()) {
                     /* the Hub's own line (a prompt, a note): nobody's attempt */
                     (false, _, _) => {}
-                    (true, true, Some(a)) if a == attempt => first = Some(seq),
+                    (true, true, Some(a)) if a == attempt => own.push(seq),
                     /* another attempt's event: where this one began */
                     (true, true, Some(_)) => break,
                     /* a session-level fact (no attempt) */
@@ -840,8 +856,9 @@ impl ItemFacts<'_> {
                     (true, false, _) => return Ok(None),
                 }
             }
-            if first.is_some() {
-                return Ok(first);
+            own.reverse();
+            if let Some(&start) = own.first() {
+                return Ok(Some(AttemptEvents { start, own }));
             }
             let told: bool = c.query_row(
                 "SELECT EXISTS(SELECT 1 FROM runtime_attempts a JOIN node_event_inbox i ON i.node_id=a.node_id
@@ -849,7 +866,10 @@ impl ItemFacts<'_> {
                 [attempt],
                 |r| r.get(0),
             )?;
-            Ok(told.then_some(until.saturating_add(1)))
+            Ok(told.then(|| AttemptEvents {
+                start: until.saturating_add(1),
+                own: vec![],
+            }))
         })
     }
 

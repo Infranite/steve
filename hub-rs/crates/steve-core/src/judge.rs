@@ -147,9 +147,10 @@ pub struct Bundle {
     /// The end of what the agent said in this turn after its last tool call, read from the events
     /// of its terminal attempt only (empty when [`Bundle::final_text_source`] is `unknown`).
     pub final_text: String,
-    /// `attempt`: read from the candidate's terminal attempt's own events; `unknown`: that attempt's
-    /// end was not kept (another attempt's end is the session's last), or its events cannot be told
-    /// from another attempt's, so its words are not known.
+    /// `attempt`: read from the candidate's terminal attempt's own events (each confirmed by its
+    /// Node stream entry); `unknown`: that attempt's end was not kept (another attempt's end is the
+    /// session's last), or some assistant text of its range cannot be attributed to it, so its
+    /// words are not known.
     pub final_text_source: &'static str,
     /// How the candidate's attempt ended (`end_turn`, `cancelled`, `error`…; `unknown` when its end
     /// was not kept) and its error, if any.
@@ -811,21 +812,22 @@ impl Tx<'_> {
             .stop(&s.id)?
             .filter(|k| c.terminal_attempt.is_some() && k.attempt == c.terminal_attempt);
         let chars = policy.judge_text_chars();
-        let start = match (&stop, c.terminal_attempt.as_deref()) {
+        let reply = match (&stop, c.terminal_attempt.as_deref()) {
             (Some(k), Some(a)) => {
                 let until = k.seq.unwrap_or(0);
-                store
-                    .item_facts()
-                    .attempt_start(&s.id, a, until)?
-                    .map(|since| (until, since))
+                match store.item_facts().attempt_events(&s.id, a, until)? {
+                    Some(ev) => {
+                        let own: HashSet<i64> = ev.own.into_iter().collect();
+                        self.db()
+                            .final_reply_of(&s.id, Some(until), ev.start, Some(&own))?
+                    }
+                    None => None,
+                }
             }
             _ => None,
         };
-        let (final_text, final_text_source) = match start {
-            Some((until, since)) => (
-                tail(&self.db().final_reply_of(&s.id, Some(until), since)?, chars),
-                "attempt",
-            ),
+        let (final_text, final_text_source) = match reply {
+            Some(text) => (tail(&text, chars), "attempt"),
             None => (String::new(), UNKNOWN),
         };
         let first = goals.first().map_or(item.title.clone(), |g| g.text.clone());
