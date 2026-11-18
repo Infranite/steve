@@ -12,6 +12,27 @@ mod fixture;
 use fixture::*;
 
 struct Domain;
+
+struct LoseUpgradeAnswer {
+    node: Arc<dyn Node>,
+    accepted: Arc<tokio::sync::Notify>,
+}
+#[async_trait::async_trait]
+impl steve_node_wire::Handler for LoseUpgradeAnswer {
+    async fn handle(&self, method: &str, params: Value) -> ApiResult<Value> {
+        if method == steve_node_wire::methods::HARNESS_UPGRADE {
+            let command = serde_json::from_value(params).unwrap();
+            self.node.upgrade_harness(command).await?;
+            self.accepted.notify_one();
+            // The installer is accepted on the Node, but the transport never sends its answer.
+            std::future::pending::<()>().await;
+            unreachable!()
+        }
+        steve_node_wire::NodeServer::new(self.node.clone())
+            .handle(method, params)
+            .await
+    }
+}
 impl steve_hub::wire::node_runtime::NodeDomain for Domain {
     fn turn_ended(&self, _: &str, _: Option<&str>, _: &str, _: Option<String>) {}
 }
@@ -75,6 +96,18 @@ impl Env {
         node: Arc<dyn Node>,
         generation: u64,
     ) -> (Arc<steve_node_wire::Conn>, Arc<steve_node_wire::Conn>) {
+        self.link_with(
+            node.clone(),
+            generation,
+            steve_node_wire::NodeServer::new(node),
+        )
+    }
+    fn link_with(
+        &self,
+        node: Arc<dyn Node>,
+        generation: u64,
+        handler: Arc<dyn steve_node_wire::Handler>,
+    ) -> (Arc<steve_node_wire::Conn>, Arc<steve_node_wire::Conn>) {
         use steve_node_wire::*;
         let (hub, remote) = testkit::pair();
         let h = Conn::spawn(
@@ -88,7 +121,7 @@ impl Env {
             remote.sink,
             remote.stream,
             generation,
-            NodeServer::new(node.clone()),
+            handler,
             ConnOptions::default(),
         );
         let target = self.svc.fleet.remote(node.id());
@@ -214,6 +247,59 @@ async fn start(node: Arc<dyn Node>) -> Env {
         svc,
         server,
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_lost_acceptance_answer_is_unknown_and_reconnect_reads_the_same_operation() {
+    let local = Fixture::new("local", "1.0.0", "1.0.0", "2.0.0");
+    let remote = Fixture::new("remote", "1.5.0", "1.5.0", "2.0.0");
+    let (n1, n2) = (Arc::new(local.node()), Arc::new(remote.node()));
+    checked(n2.as_ref()).await;
+    let e = start(n1.clone()).await;
+    e.register("remote");
+    let accepted = Arc::new(tokio::sync::Notify::new());
+    let (link, _peer) = e.link_with(
+        n2.clone(),
+        1,
+        Arc::new(LoseUpgradeAnswer {
+            node: n2.clone(),
+            accepted: accepted.clone(),
+        }),
+    );
+    let (http, url, cookie) = (e.http.clone(), e.base.clone(), e.cookie.clone());
+    let body = json!({"operation":"lost_answer","versions":{"pi":"2.0.0","adapter":"2.0.0"}});
+    let task = tokio::spawn(async move {
+        http.post(format!("{url}/api/node-harness-updates/remote/pi"))
+            .header("cookie", cookie)
+            .json(&body)
+            .send()
+            .await
+            .unwrap()
+            .json::<Value>()
+            .await
+            .unwrap()
+    });
+    tokio::time::timeout(Duration::from_secs(5), accepted.notified())
+        .await
+        .unwrap();
+    link.close(None, 1000, "accepted answer lost");
+    e.svc.fleet.remote(n2.id()).detach(1);
+    let response = task.await.unwrap();
+    assert_eq!(
+        response["receipt"]["state"]["state"], "unknown",
+        "{response}"
+    );
+    let r = e.report("remote").await;
+    assert_eq!(r["runs"]["pi"]["state"]["state"], "unknown");
+    assert!(r["retryable_unknown"].as_array().unwrap().is_empty());
+    finished(n2.as_ref(), OperationId::new("lost_answer").unwrap()).await;
+    let (_link, _peer) = e.link(n2.clone(), 2);
+    let r = e.wait_receipt("remote", "lost_answer").await;
+    assert_eq!(r["runs"]["pi"]["state"]["outcome"], "succeeded");
+    assert_eq!(remote.installs(), 1);
+    assert_eq!(local.installs(), 0);
+    n1.shutdown().await;
+    n2.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
