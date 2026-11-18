@@ -27,6 +27,8 @@ const run = (name) => new Promise((resolve) => {
   child.on("close", (code) => { clearTimeout(timer); resolve({ name, ok: code === 0, s: ((Date.now() - start) / 1000).toFixed(1), out }) })
 })
 
+SMOKE.push("harness-updates")
+
 const failed = []
 try {
   for (const name of process.argv.slice(2).length ? process.argv.slice(2) : SMOKE) {
