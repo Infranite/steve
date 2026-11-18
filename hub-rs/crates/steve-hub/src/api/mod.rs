@@ -734,7 +734,10 @@ pub fn router(st: AppState, modules: Router) -> Router {
         )
         // projects and filesystem
         .route("/projects", post(projects::create))
-        .route("/projects/setup/preview", post(project_setup::setup_preview))
+        .route(
+            "/projects/setup/preview",
+            post(project_setup::setup_preview),
+        )
         .route("/projects/setup", post(project_setup::setup))
         .route("/projects/describe", post(projects::describe))
         .route("/projects/{id}", patch(projects::patch_one))

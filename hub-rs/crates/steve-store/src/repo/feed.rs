@@ -53,14 +53,15 @@ pub struct Filter {
 }
 impl Filter {
     pub fn validate(&self) -> Result<()> {
-        if self
-            .kind
+        if self.kind.as_deref().is_some_and(|x| {
+            !matches!(
+                x,
+                "report" | "completion" | "starred" | "reminder" | "briefing"
+            )
+        }) || self
+            .source
             .as_deref()
-            .is_some_and(|x| !matches!(x, "report" | "completion" | "starred" | "reminder" | "briefing"))
-            || self
-                .source
-                .as_deref()
-                .is_some_and(|x| !matches!(x, "flow" | "notification"))
+            .is_some_and(|x| !matches!(x, "flow" | "notification"))
         {
             return Err(StoreError::Conflict("Invalid feed filter".into()));
         }

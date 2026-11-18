@@ -190,7 +190,11 @@ impl Stop {
 /// same thread, the message it answers, one answering it) or in its turn (the sender's messages
 /// right before and after it, nobody in between, each within [`BURST_GAP_MS`] of the next).
 fn chain(target: &Said, around: &[&Said]) -> Vec<String> {
-    let mut all: Vec<&Said> = around.iter().copied().filter(|s| s.id != target.id).collect();
+    let mut all: Vec<&Said> = around
+        .iter()
+        .copied()
+        .filter(|s| s.id != target.id)
+        .collect();
     all.push(target);
     all.sort_by_key(|s| s.at);
     let at = all.iter().position(|s| s.id == target.id).unwrap_or(0);
@@ -229,9 +233,8 @@ fn chain(target: &Said, around: &[&Said]) -> Vec<String> {
 fn about(target: &Said, o: &Said, around: &[&Said], live_ms: i64) -> bool {
     let chain = chain(target, around);
     let replies = o.reply_to.as_ref().is_some_and(|r| chain.contains(r));
-    let in_thread = target.thread_key.is_some()
-        && o.thread_key == target.thread_key
-        && o.reply_to.is_none();
+    let in_thread =
+        target.thread_key.is_some() && o.thread_key == target.thread_key && o.reply_to.is_none();
     let mentions = target
         .sender_account
         .as_ref()
@@ -853,12 +856,18 @@ mod tests {
         // soon after it is not enough by itself: your next line may be to anyone
         let mut soon = o.clone();
         soon.at = 1_000_000 + 5_000;
-        assert_eq!(engaged(false, &t, std::slice::from_ref(&soon), later, W), None);
+        assert_eq!(
+            engaged(false, &t, std::slice::from_ref(&soon), later, W),
+            None
+        );
         // … unless its sender answers you right after it, nobody in between
         let back = s("a3", soon.at + 20_000, false, "a");
         assert!(engaged(false, &t, &[soon.clone(), back.clone()], later, W).is_some());
         let b0 = s("b0", soon.at + 10_000, false, "b");
-        assert_eq!(engaged(false, &t, &[soon.clone(), b0, back], later, W), None);
+        assert_eq!(
+            engaged(false, &t, &[soon.clone(), b0, back], later, W),
+            None
+        );
         // an answer to it
         o.reply_to = t.external_id.clone();
         assert!(engaged(false, &t, std::slice::from_ref(&o), later, W).is_some());
@@ -993,9 +1002,7 @@ mod tests {
         assert_eq!(engaged(false, &t, &around, 1_000_000 + 600_000, W), None);
         let mut quoted = you2.clone();
         quoted.reply_to = t.external_id.clone();
-        assert!(
-            engaged(false, &t, &[you1, quoted, c, d], 1_000_000 + 600_000, W).is_some()
-        );
+        assert!(engaged(false, &t, &[you1, quoted, c, d], 1_000_000 + 600_000, W).is_some());
     }
 
     #[test]
