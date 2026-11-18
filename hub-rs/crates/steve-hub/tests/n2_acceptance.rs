@@ -151,6 +151,7 @@ fn spawn_hub(h: &Home, bind: Option<&str>) -> Hub {
         .env("STEVE_REPO", "/nonexistent")
         .env("STEVE_VAULT_KEYSTORE", "file")
         .env("STEVE_FORBID_REAL_HOSTS", "1")
+        .env("STEVE_ADAPTER_UPDATES", "off")
         .env("STEVE_VERSION", VERSION)
         .env("STEVE_WEB_DIR", &h.web)
         .env("STEVE_NODE_LISTEN", "1")
@@ -431,6 +432,7 @@ impl NodeHome {
             .env("HOME", self.path())
             .env("STEVE_HOME", self.path())
             .env("STEVE_NODE_LOOPBACK_PLAINTEXT", "1")
+            .env("STEVE_ADAPTER_UPDATES", "off")
             .env_remove("STEVE_PAIR_CODE")
             .env_remove("FAKE_ACP_LOG")
             .stdin(Stdio::null());

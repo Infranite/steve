@@ -56,6 +56,19 @@ fn names_bot(name: &str, at: &str) -> bool {
     a == n || a == n.clone() + "Bot"
 }
 
+/// Apply the same Team boundary to normal, ahead-of-turn and batched routes, even if the model
+/// returns Steve or another Bot outside the prompt's list. Core checks membership again at create.
+fn team_route(c: &RouteCtx, restricted: bool, mut route: Route) -> Route {
+    if restricted && !c.bots.iter().any(|b| b.id == route.bot) {
+        route.bot = c.bots.first().map(|b| b.id.clone()).unwrap_or_default();
+        // The model's acknowledgement could still name the wrong Bot.
+        if route.kind == "item" {
+            route.reply.clear();
+        }
+    }
+    route
+}
+
 /// A message waiting on its workspace lane.
 #[derive(serde::Serialize, serde::Deserialize)]
 struct Job {
@@ -627,7 +640,7 @@ impl Core {
             return None;
         }
         let history = self.history_before(ws, mid).ok()?;
-        let mut c = self.route_ctx_in(ws, false).ok()?;
+        let (mut c, restricted) = self.route_ctx_for_team(ws, false, None).ok()?;
         c.pending = self.inline_questions(ws);
         if let Some(d) = lock(&self.0.thread.deferred).get(ws) {
             c.pending.extend(d.iter().map(|(_, t)| t.clone()));
@@ -643,7 +656,7 @@ impl Core {
             gateway::route(self.gw(), &c, &routed_text(text, files), &history, false),
         )
         .await;
-        self.goes_ahead(ws, text, r, now() - r0)
+        self.goes_ahead(ws, text, team_route(&c, restricted, r), now() - r0)
     }
 
     /// A route made while Steve is still answering ([`Core::ahead`], or a burst's): kept when the
@@ -693,9 +706,9 @@ impl Core {
         if picked.len() < 2 {
             return;
         }
-        let (Ok(history), Ok(mut c)) = (
+        let (Ok(history), Ok((mut c, restricted))) = (
             self.history_before(ws, &picked[0].0),
-            self.route_ctx_in(ws, guest),
+            self.route_ctx_for_team(ws, guest, None),
         ) else {
             return;
         };
@@ -723,7 +736,7 @@ impl Core {
                 mid,
                 Prerouted {
                     text,
-                    route,
+                    route: team_route(&c, restricted, route),
                     ms,
                     pending,
                 },
@@ -1241,6 +1254,25 @@ impl Core {
         })
     }
 
+    fn route_ctx_for_team(
+        &self,
+        ws: &str,
+        guest: bool,
+        team: Option<&str>,
+    ) -> Result<(RouteCtx, bool)> {
+        let mut c = self.route_ctx_in(ws, guest)?;
+        let selected = self
+            .store()
+            .store()
+            .reader(|db| steve_store::bot_dispatch::selected(db, ws, team))?;
+        if let Some(team) = &selected {
+            c.bots.retain(|b| team.member(&b.id).is_some());
+            c.bots
+                .sort_by_key(|b| team.members.iter().position(|m| m.bot == b.id));
+        }
+        Ok((c, selected.is_some()))
+    }
+
     /// The conversation's open items with something going on in the last 24 hours, latest first (≤3).
     fn focus(&self, ws: &str, items: &[crate::repo::Item]) -> Result<Vec<FocusItem>> {
         let since = now() - 24 * 3600 * 1000;
@@ -1304,29 +1336,14 @@ impl Core {
         guest: bool,
         team: Option<&str>,
     ) -> Result<Route> {
-        let mut c = self.route_ctx_in(ws, guest)?;
-        let selected = self
-            .store()
-            .store()
-            .reader(|db| steve_store::bot_dispatch::selected(db, ws, team))?;
-        if let Some(team) = &selected {
-            c.bots.retain(|b| team.member(&b.id).is_some());
-            c.bots
-                .sort_by_key(|b| team.members.iter().position(|m| m.bot == b.id));
-        }
-        let mut route = crate::stats::tagged(
+        let (c, restricted) = self.route_ctx_for_team(ws, guest, team)?;
+        let route = crate::stats::tagged(
             "route",
             ws,
             gateway::route(self.gw(), &c, text, history, promote),
         )
         .await;
-        if selected.is_some()
-            && !c.bots.iter().any(|b| b.id == route.bot)
-            && let Some(first) = c.bots.first()
-        {
-            route.bot = first.id.clone();
-        }
-        Ok(route)
+        Ok(team_route(&c, restricted, route))
     }
 
     /// The model gateway, for the API's one-off drafts (`bots/draft`, `projects/describe`).
@@ -1778,7 +1795,7 @@ impl Core {
 
 #[cfg(test)]
 mod tests {
-    use super::names_bot;
+    use super::{Route, names_bot, team_route};
 
     #[test]
     fn at_names_a_bot_with_or_without_spaces() {
@@ -1788,5 +1805,44 @@ mod tests {
         assert!(names_bot("研究", "研究Bot"));
         assert!(!names_bot("Steve 开发", "Steve"));
         assert!(!names_bot("研究", "研究员"));
+    }
+
+    #[tokio::test]
+    async fn team_router_limits_the_prompt_and_corrects_out_of_team_choices() {
+        let k = crate::testkit::Kit::new();
+        let ws = crate::repo::WS;
+        k.db()
+            .store()
+            .transaction(|tx| {
+                tx.execute(
+                    "INSERT INTO bot_teams(id,workspace_id,name,members) VALUES ('team',?,'Preset','[{\"bot\":\"dev\",\"nodes\":null}]')",
+                    [ws],
+                )?;
+                tx.execute(
+                    "INSERT INTO bot_team_defaults(workspace_id,team_id) VALUES (?,'team')",
+                    [ws],
+                )?;
+                Ok::<_, steve_store::StoreError>(())
+            })
+            .unwrap();
+        let (c, restricted) = k.core.route_ctx_for_team(ws, false, None).unwrap();
+        assert!(restricted);
+        assert_eq!(c.bots.len(), 1);
+        assert_eq!(c.bots[0].id, "dev");
+        let proposed = Route {
+            kind: "item".into(),
+            bot: "steve".into(),
+            reply: "Steve will do it".into(),
+            ..Default::default()
+        };
+        let picked = team_route(&c, restricted, proposed.clone());
+        assert_eq!(picked.bot, "dev");
+        assert!(picked.reply.is_empty());
+        let (c, restricted) = k
+            .core
+            .route_ctx_for_team(ws, false, Some(steve_store::bot_dispatch::LEGACY))
+            .unwrap();
+        assert!(!restricted);
+        assert_eq!(team_route(&c, restricted, proposed).bot, "steve");
     }
 }
