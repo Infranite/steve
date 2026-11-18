@@ -7,11 +7,20 @@ import type { Workflow } from "./workflow"
 import type { Delivery, DeliveryShare } from "./delivery"
 export type ItemStatus = "prop" | "run" | "wait" | "pause" | "done" | "drop" | "fail" | "block"
 export type PlanStep = { step: string; done: boolean; left?: boolean }
+export type Closeout = {
+  status: "syncing" | "sync_failed" | "no_pr" | "waiting_checks" | "checks_failed" | "conflict" | "behind" | "draft"
+    | "head" | "uncommitted" | "accepted_unknown" | "closed" | "waiting_github" | "waiting_result" | "ready"
+    | "merge_retry" | "merge_method" | "awaiting_approval" | "manual_merge" | "merged"
+  next_owner: "steve" | "agent" | "user" | "none"
+  pr: { number: number; url: string; head: string; state: string; checks: { passed: number; pending: number; failed: number; other: number; failing: string[] } | null } | null
+  last_success_at: number | null; sync_error: string | null; merge_error: string | null
+}
 export type RItem = {
   id: string; workspace_id: string; no: number; title: string; status: ItemStatus; stage: string; bot_id: string | null; project_id: string | null; cwd: string | null; branch: string | null
   plan: PlanStep[]; now: string; accept_mode: string | null; priority: string; archived: boolean; star: boolean; due: string | null; snooze: { label: string; until: number } | null
   source: [string, string]; parent: { item?: string | null; session?: string | null; at?: number | null } | null; design_gate?: boolean; phase?: "ready" | "active" | "closing" | "closed"; cycle?: number; created: number; updated: number
   goal: string; goals: number; tags: string[]; deps: string[]; sessionIds: string[]; open: string[]; queued: number; live: boolean
+  closeout?: Closeout
   workflow_paused?: boolean; workflow_cycle?: number; workflow_failed?: string[]; workflow_attempt?: number; workflow_superseded?: boolean
 }
 export type DependencyWait = {

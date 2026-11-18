@@ -2,7 +2,7 @@
 //! has exactly one card in it (`meta.card` on one message), updated in place as the item moves —
 //! running, waiting for you, delivered, released, failed, done — with the latest delivery summary and
 //! the latest reply to something forwarded from the conversation. Lifecycle events never post a message
-//! of their own.
+//! of their own. The PR follower updates this same card for milestones, not routine snapshots.
 //!
 //! Where the card is: on Steve's announcement of the item, or on Steve's acknowledgement of the user's
 //! latest message to it ([`adopt`]). Only when the user's input is needed (a question, an approval, a
@@ -24,7 +24,7 @@ use crate::util::{js_head, now};
 use serde_json::{Map, Value, json};
 
 /// Kinds that go back even when the user turned following off.
-const ALWAYS: [&str; 3] = ["ask", "deliver", "fail"];
+const ALWAYS: [&str; 4] = ["ask", "deliver", "fail", "pr_approve"];
 /// The card counts as far up once this many messages are below it.
 pub const FAR: usize = 3;
 /// The settings key of the one-time cleanup ([`cleanup`]).
@@ -33,7 +33,7 @@ pub const CLEANUP_KEY: &str = "thread.cards";
 /// What happened to the item.
 #[derive(Debug, Clone, Default)]
 pub struct Update<'a> {
-    /// ask | reply | deliver | done | drop | fail | release | build
+    /// ask | reply | deliver | done | drop | fail | release | build | pr_approve | pr_checks_failed | pr_merged
     pub kind: &'a str,
     pub text: String,
     /// the decision to answer here (ask, approval, fail, acceptance)
@@ -47,7 +47,13 @@ pub struct Update<'a> {
 impl Update<'_> {
     /// The user has to do something: answer, approve, accept, or decide what to do about a failure.
     fn needs_you(&self) -> bool {
-        matches!(self.kind, "ask" | "fail") || (self.kind == "deliver" && self.decision.is_some())
+        matches!(self.kind, "ask" | "fail" | "pr_approve")
+            || (self.kind == "deliver" && self.decision.is_some())
+    }
+
+    /// A PR milestone bumps the living card but must not clear a pending decision or its delivery.
+    fn pr_milestone(&self) -> bool {
+        matches!(self.kind, "pr_checks_failed" | "pr_merged")
     }
 }
 
@@ -74,8 +80,15 @@ fn card_only(m: &Message) -> bool {
 fn merged(c: Option<&Value>, item: &str, u: &Update<'_>, at: i64) -> Value {
     let mut c = c.cloned().unwrap_or_else(|| json!({}));
     c["item"] = json!(item);
-    c["state"] = json!(u.kind);
     c["at"] = json!(at);
+    if u.pr_milestone() {
+        c["pr_event"] = json!({"kind": u.kind, "text": u.text, "at": at});
+        if c["state"].is_null() {
+            c["state"] = json!("run");
+        }
+        return c;
+    }
+    c["state"] = json!(u.kind);
     match u.kind {
         "deliver" => {
             let mut d = json!({"text": u.text, "full": u.full, "at": at});
@@ -90,7 +103,7 @@ fn merged(c: Option<&Value>, item: &str, u: &Update<'_>, at: i64) -> Value {
         _ => {}
     }
     /* the line of what is going on now (a question, a failure); a later event clears it */
-    if matches!(u.kind, "ask" | "fail") {
+    if matches!(u.kind, "ask" | "fail" | "pr_approve") {
         c["text"] = json!(u.text);
     } else if let Some(o) = c.as_object_mut() {
         o.remove("text");
@@ -142,7 +155,11 @@ fn headline(item: &str, card: &Value) -> String {
             "{item} 交付了：{}",
             card["delivery"]["text"].as_str().unwrap_or("")
         ),
-        "ask" | "fail" => s("text").to_string(),
+        "ask" | "fail" | "pr_approve" => s("text").to_string(),
+        "done" if card["pr_event"]["kind"] == "pr_merged" => card["pr_event"]["text"]
+            .as_str()
+            .unwrap_or(item)
+            .to_string(),
         "build" => card["build"]["text"].as_str().unwrap_or(item).to_string(),
         _ => item.to_string(),
     }
@@ -178,7 +195,12 @@ pub fn flow(db: &Db, item: &str, u: Update<'_>) -> Result<Option<String>> {
     let below = h.map_or(usize::MAX, |i| visible.len() - 1 - i);
     let card = merged(h.and_then(|i| card_of(&visible[i])), item, &u, at);
     /* an answer to a question is worth reading where the user is now, like the user's input */
-    let urgent = u.needs_you() || (u.kind == "deliver" && u.full);
+    let urgent = u.needs_you() || u.pr_milestone() || (u.kind == "deliver" && u.full);
+    let text = if u.pr_milestone() {
+        u.text.clone()
+    } else {
+        headline(item, &card)
+    };
     if let Some(i) = h
         && !(urgent && below >= FAR)
     {
@@ -187,9 +209,7 @@ pub fn flow(db: &Db, item: &str, u: Update<'_>) -> Result<Option<String>> {
             o.insert("card".into(), card.clone());
         });
         if card_only(m) {
-            db.store()
-                .messages()
-                .patch_text_meta(&m.id, &headline(item, &card), &meta)?;
+            db.store().messages().patch_text_meta(&m.id, &text, &meta)?;
         } else {
             db.message_patch_meta(&m.id, &meta)?;
         }
@@ -201,11 +221,7 @@ pub fn flow(db: &Db, item: &str, u: Update<'_>) -> Result<Option<String>> {
     }
     /* a question's answer is a normal message (the summary is its text); otherwise the card is the message */
     let full = u.kind == "deliver" && u.full;
-    let text = if full {
-        u.text.clone()
-    } else {
-        headline(item, &card)
-    };
+    let text = if full { u.text } else { text };
     let meta = json!({"card": card, "card_only": !full, "reply_to": ti.origin_msg});
     let id = db.message_add_in(&ti.workspace_id, &space, "steve", &text, Some(item), &meta)?;
     th.item_posted(item, at)?;

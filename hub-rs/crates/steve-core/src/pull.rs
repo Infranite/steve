@@ -55,6 +55,9 @@ use crate::thread::flowback::{Update, flow_quiet};
 use crate::util::{js_head, now};
 use crate::{Core, Tx};
 
+mod closeout;
+pub use closeout::{Checks, Closeout, Snapshot};
+
 /// How long one `gh` call may take.
 const GH_DEADLINE: Duration = Duration::from_secs(30);
 /// How often a followed pull request is looked at.
@@ -141,6 +144,8 @@ pub struct Pr {
     pub failing: Vec<String>,
     /// Some check has not finished.
     pub pending: bool,
+    /// The check rollup on this head; absent is not an observed empty rollup.
+    pub checks: Option<Checks>,
     /// The host is still working out whether it can merge (`UNKNOWN`).
     pub settling: bool,
     /// The commit merging it made on the default branch (merged only): a squash or a rebase copy of
@@ -189,37 +194,53 @@ pub fn read(list: &Value) -> Look {
     else {
         return Look::None;
     };
-    let mut failing = vec![];
-    let mut pending = false;
-    for c in p["statusCheckRollup"].as_array().into_iter().flatten() {
-        let name = c["name"]
-            .as_str()
-            .or_else(|| c["context"].as_str())
-            .unwrap_or("check")
-            .to_string();
-        if let Some(state) = c["state"].as_str() {
-            /* a commit status */
-            match state {
-                "FAILURE" | "ERROR" => failing.push(name),
-                "PENDING" | "EXPECTED" => pending = true,
-                _ => {}
+    let checks = p["statusCheckRollup"].as_array().map(|rows| {
+        let mut out = Checks::default();
+        for c in rows {
+            let name = c["name"]
+                .as_str()
+                .or_else(|| c["context"].as_str())
+                .unwrap_or("check");
+            let (failed, pending, passed) = if let Some(state) = c["state"].as_str() {
+                (
+                    matches!(state, "FAILURE" | "ERROR"),
+                    matches!(state, "PENDING" | "EXPECTED"),
+                    state == "SUCCESS",
+                )
+            } else if c["status"].as_str().is_some_and(|s| s != "COMPLETED") {
+                (false, true, false)
+            } else {
+                let conclusion = c["conclusion"].as_str();
+                (
+                    matches!(
+                        conclusion,
+                        Some(
+                            "FAILURE"
+                                | "TIMED_OUT"
+                                | "CANCELLED"
+                                | "ACTION_REQUIRED"
+                                | "STARTUP_FAILURE"
+                        )
+                    ),
+                    false,
+                    conclusion == Some("SUCCESS"),
+                )
+            };
+            if failed {
+                out.failed += 1;
+                out.failing.push(name.into());
+            } else if pending {
+                out.pending += 1;
+            } else if passed {
+                out.passed += 1;
+            } else {
+                out.other += 1;
             }
-            continue;
         }
-        /* a check run */
-        if c["status"].as_str().is_some_and(|s| s != "COMPLETED") {
-            pending = true;
-            continue;
-        }
-        if matches!(
-            c["conclusion"].as_str(),
-            Some("FAILURE" | "TIMED_OUT" | "CANCELLED" | "ACTION_REQUIRED" | "STARTUP_FAILURE")
-        ) {
-            failing.push(name);
-        }
-    }
-    failing.sort();
-    failing.dedup();
+        out.failing.sort();
+        out.failing.dedup();
+        out
+    });
     let merge_state = p["mergeStateStatus"].as_str().unwrap_or("");
     let mergeable = p["mergeable"].as_str().unwrap_or("");
     Look::Found(Pr {
@@ -231,8 +252,12 @@ pub fn read(list: &Value) -> Look {
         auto: p["autoMergeRequest"].is_object(),
         conflict: mergeable == "CONFLICTING" || merge_state == "DIRTY",
         behind: merge_state == "BEHIND",
-        failing,
-        pending,
+        failing: checks
+            .as_ref()
+            .map(|c| c.failing.clone())
+            .unwrap_or_default(),
+        pending: checks.as_ref().is_some_and(|c| c.pending > 0),
+        checks,
         settling: mergeable == "UNKNOWN" || merge_state == "UNKNOWN",
         merge_commit: p["mergeCommit"]["oid"]
             .as_str()
@@ -444,6 +469,8 @@ pub(crate) struct Due {
     item: String,
     slug: String,
     branch: String,
+    /// A detached verification can overlap a normal look; don't publish the older result last.
+    checked_at: i64,
     /// Looked at only for whether it merged: the branch has nothing of its own (#218).
     only_merged: bool,
     /// The pull request this result is followed on (seen by this result): looked up by its number,
@@ -578,6 +605,18 @@ pub(crate) fn follow_text(branch: &str) -> String {
     format!(
         "Steve 会跟踪分支 {branch} 的 PR 的 CI 和冲突，检查都通过后由 Steve 按验收的版本合并它（没有经过独立评审的改动先等主人批准）：确认这个分支已经推送到 origin、PR 已经开好（还没有就现在推送，用 gh pr create 开 PR；修 bug 先建 issue，在 PR 里写 Closes #编号）。不要自己合并、不要推送默认分支、不要手工打 tag（发版按仓库自己的流程）；CI 失败或冲突时 Steve 会叫你在同一个分支上修。"
     )
+}
+
+fn merged_update(item: &str, pr: &Pr) -> Update<'static> {
+    Update {
+        kind: "pr_merged",
+        text: format!(
+            "{item} 的 PR #{} 已合并（{}）",
+            pr.number,
+            js_head(&pr.head, 12)
+        ),
+        ..Default::default()
+    }
 }
 
 /// The strings of a JSON array (`pr_told`).
@@ -835,6 +874,7 @@ impl Tx<'_> {
                 item: o.item_id.clone(),
                 slug,
                 branch,
+                checked_at: t,
                 only_merged: o.evidence["own"] == json!(false),
                 tracked: o.evidence["pr"].as_u64(),
                 may_merge: self.pr_may_merge(&o.id)?,
@@ -874,18 +914,34 @@ impl Tx<'_> {
             }
             return Ok(());
         }
+        if o.evidence["pr_merged"] == true
+            || (o.evidence["pr_observed_since"]
+                .as_i64()
+                .is_some_and(|at| at > d.checked_at)
+                && !matches!(merging, Some(Merging::Merged))
+                && !matches!(&look, Look::Found(pr) if pr.state == "MERGED"))
+        {
+            return Ok(());
+        }
         /* a branch with nothing of its own (#218): only a merged pull request counts; anything else
          * (none, open, closed, or the host can't be asked) leaves it to the acceptance alone */
         if o.evidence["own"] == json!(false) {
-            let merged = matches!(&look, Look::Found(pr) if pr.state == "MERGED");
-            let ev = if merged {
-                json!({"pr_merged": true})
-            } else {
-                json!({"pr_none": true})
+            let (ev, merged) = match look {
+                Look::Found(pr) if pr.state == "MERGED" => (
+                    json!({"pr_merged": true, "pr_snapshot": pr.snapshot(), "pr_looked": now()}),
+                    Some(pr),
+                ),
+                _ => (json!({"pr_none": true}), None),
             };
-            self.db()
-                .store()
-                .transaction(|tx| steve_store::operation_set_in(tx, &d.op, "pending", &ev))?;
+            self.db().atomic(|| {
+                self.db()
+                    .store()
+                    .transaction(|tx| steve_store::operation_set_in(tx, &d.op, "pending", &ev))?;
+                if let Some(pr) = merged.filter(|_| o.evidence["pr_merged"] != true) {
+                    flow_quiet(self.db(), &i.id, merged_update(&i.id, &pr));
+                }
+                Ok(())
+            })?;
             self.forget_probe(&i.id);
             self.st.pr_checked.remove(&d.op);
             self.lc_try_close(&i.id)?;
@@ -895,8 +951,9 @@ impl Tx<'_> {
         let review = self.pr_review(&i, &o)?;
         /* what the agent is told (once per key: a pushed head, a set of failed checks) */
         let mut tell: Option<(String, String)> = None;
-        let mut ev = json!({});
+        let mut ev = json!({"pr_observed_since": d.checked_at});
         let mut close = false;
+        let mut signal = None;
         /* a card for you, once per key */
         let mut card: Option<(String, String)> = None;
         let mut ask_merge: Option<(u64, String)> = None;
@@ -908,11 +965,19 @@ impl Tx<'_> {
          * answer after that before it voids the result (#347) */
         if !matches!(look, Look::Unknown(_)) {
             ev["pr_looked"] = json!(now());
+            ev["pr_sync_error"] = Value::Null;
+            ev["pr_snapshot"] = Value::Null;
+            ev["pr_progress"] = json!("no_pr");
         }
         match look {
             Look::Unknown(e) => {
                 let n = unknown + 1;
                 ev["pr_unknown"] = json!(n);
+                ev["pr_sync_error"] = json!(if e.is_empty() {
+                    "gh 未返回错误详情"
+                } else {
+                    &e
+                });
                 if n >= UNKNOWN_LOOKS_CARD {
                     ev["pr_problem"] = json!("unknown");
                     card = Some((
@@ -958,6 +1023,7 @@ impl Tx<'_> {
                 ));
             }
             Look::Found(pr) => {
+                ev["pr_snapshot"] = json!(pr.snapshot());
                 ev["pr"] = json!(pr.number);
                 ev["pr_url"] = json!(pr.url);
                 ev["pr_state"] = json!(pr.state);
@@ -981,6 +1047,7 @@ impl Tx<'_> {
                         close = true;
                     }
                     "CLOSED" => {
+                        ev["pr_progress"] = json!("closed");
                         card = Some((
                             "closed".into(),
                             format!(
@@ -991,6 +1058,7 @@ impl Tx<'_> {
                     }
                     _ if pr.conflict => {
                         ev["pr_problem"] = json!("conflict");
+                        ev["pr_progress"] = json!("conflict");
                         tell = Some((
                             format!("conflict:{}", pr.head),
                             format!(
@@ -1001,6 +1069,7 @@ impl Tx<'_> {
                     }
                     _ if pr.behind => {
                         ev["pr_problem"] = json!("behind");
+                        ev["pr_progress"] = json!("behind");
                         tell = Some((
                             format!("behind:{}", pr.head),
                             format!(
@@ -1011,6 +1080,7 @@ impl Tx<'_> {
                     }
                     _ if !pr.failing.is_empty() => {
                         ev["pr_problem"] = json!("ci");
+                        ev["pr_progress"] = json!("checks_failed");
                         ev["pr_failing"] = json!(pr.failing);
                         tell = Some((
                             format!("ci:{}:{}", pr.head, pr.failing.join(",")),
@@ -1025,6 +1095,7 @@ impl Tx<'_> {
                     }
                     _ if pr.draft => {
                         ev["pr_problem"] = json!("draft");
+                        ev["pr_progress"] = json!("draft");
                         tell = Some((
                             format!("draft:{}", pr.head),
                             format!(
@@ -1036,6 +1107,26 @@ impl Tx<'_> {
                     }
                     _ => {
                         ev["pr_problem"] = Value::Null;
+                        ev["pr_progress"] = json!(if pr.pending {
+                            "waiting_checks"
+                        } else if pr.settling {
+                            "waiting_github"
+                        } else if !matches!(&accepted, Accepted::At(h) if *h == pr.head) {
+                            "waiting_result"
+                        } else if o.evidence["pr_merge_after"]
+                            .as_i64()
+                            .is_some_and(|at| now() < at)
+                            && o.evidence["pr_error_head"] == pr.head
+                            && o.evidence["pr"] == pr.number
+                        {
+                            if o.evidence["pr_error_method"] == true {
+                                "merge_method"
+                            } else {
+                                "merge_retry"
+                            }
+                        } else {
+                            "ready"
+                        });
                         /* the branch on the host is not what was accepted: the accepted commit was
                          * not pushed, or something else was pushed over it */
                         if let Accepted::At(h) = &accepted
@@ -1043,6 +1134,7 @@ impl Tx<'_> {
                             && !d.on_node
                         {
                             ev["pr_problem"] = json!("head");
+                            ev["pr_progress"] = json!("head");
                             tell = Some((
                                 format!("head:{}:{h}", pr.head),
                                 format!(
@@ -1059,6 +1151,7 @@ impl Tx<'_> {
                         /* the accepted result is not all committed: the pushed head can't hold it */
                         if let Accepted::Uncommitted(h) = &accepted {
                             ev["pr_problem"] = json!("uncommitted");
+                            ev["pr_progress"] = json!("uncommitted");
                             tell = Some((
                                 format!("dirty:{h}"),
                                 format!(
@@ -1074,6 +1167,7 @@ impl Tx<'_> {
                          * not merge a head it can't bind to the result */
                         if accepted == Accepted::Unknown && d.may_merge && pr.mergeable_now() {
                             ev["pr_problem"] = json!("accepted_unknown");
+                            ev["pr_progress"] = json!("accepted_unknown");
                             card = Some((
                                 "accepted-unknown".into(),
                                 format!(
@@ -1112,7 +1206,10 @@ impl Tx<'_> {
                         ev["pr_merge_failures"] = json!(n);
                         ev["pr_merge_after"] = json!(now() + merge_retry_ms(n));
                         ev["pr_merge_error"] = json!(js_head(why, 300));
+                        ev["pr_error_head"] = json!(pr.head);
+                        ev["pr_error_method"] = json!(true);
                         ev["pr_problem"] = json!("merge_method");
+                        ev["pr_progress"] = json!("merge_method");
                         card = Some((
                             format!("method:{}", pr.head),
                             format!(
@@ -1129,7 +1226,10 @@ impl Tx<'_> {
                         ev["pr_merge_failures"] = json!(n);
                         ev["pr_merge_after"] = json!(now() + wait);
                         ev["pr_merge_error"] = json!(js_head(e, 300));
+                        ev["pr_error_head"] = json!(pr.head);
+                        ev["pr_error_method"] = json!(false);
                         ev["pr_problem"] = json!("merge");
+                        ev["pr_progress"] = json!("merge_retry");
                         self.db().timeline_add(
                             &i.id,
                             "steve",
@@ -1155,6 +1255,30 @@ impl Tx<'_> {
                         }
                     }
                     None => {}
+                }
+                if close && o.evidence["pr_merged"] != true {
+                    signal = Some(merged_update(&i.id, &pr));
+                } else if pr.state == "OPEN" && !pr.failing.is_empty() {
+                    let key = json!([pr.number, pr.head, pr.failing]);
+                    let mut sent = o.evidence["pr_ci_notified"]
+                        .as_array()
+                        .cloned()
+                        .unwrap_or_default();
+                    if !sent.contains(&key) {
+                        sent.push(key);
+                        ev["pr_ci_notified"] = json!(sent);
+                        signal = Some(Update {
+                            kind: "pr_checks_failed",
+                            text: format!(
+                                "{} 的 PR #{}（{}）检查失败：{}",
+                                i.id,
+                                pr.number,
+                                js_head(&pr.head, 12),
+                                pr.failing.join("、")
+                            ),
+                            ..Default::default()
+                        });
+                    }
                 }
             }
         }
@@ -1189,17 +1313,27 @@ impl Tx<'_> {
         if all.len() != told.len() {
             ev["pr_told"] = json!(all);
         }
-        self.db()
-            .store()
-            .transaction(|tx| steve_store::operation_set_in(tx, &d.op, "pending", &ev))?;
+        // Persist decision creation and the dedupe markers together with the observation. Only
+        // the potentially external agent wake and the normal lifecycle gate run after this commit.
+        let db = self.db().clone();
+        db.atomic(|| {
+            db.store()
+                .transaction(|tx| steve_store::operation_set_in(tx, &d.op, "pending", &ev))?;
+            if let Some(u) = signal
+                && (u.kind == "pr_merged" || card.is_none())
+            {
+                flow_quiet(&db, &i.id, u);
+            }
+            if let Some((_, why)) = card {
+                self.fail(&i.id, &why)?;
+            }
+            if let Some((n, url)) = ask_merge {
+                self.pr_ask_merge(&i, &d.op, n, &url)?;
+            }
+            Ok(())
+        })?;
         if let Some(text) = wake {
             self.pr_wake(&i.id, &text)?;
-        }
-        if let Some((_, why)) = card {
-            self.fail(&i.id, &why)?;
-        }
-        if let Some((n, url)) = ask_merge {
-            self.pr_ask_merge(&i, &d.op, n, &url)?;
         }
         if close {
             self.forget_probe(&i.id);
@@ -1263,7 +1397,7 @@ impl Tx<'_> {
             self.db(),
             &i.id,
             Update {
-                kind: "approve",
+                kind: "pr_approve",
                 text: format!("{} 的 PR #{number} 等你批准合并", i.id),
                 decision: Some(d.id),
                 ..Default::default()

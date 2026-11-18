@@ -157,6 +157,36 @@ fn str_field(o: &Obj, k: &str) -> Option<String> {
     o.get(k).and_then(Value::as_str).map(str::to_string)
 }
 
+/// The same scoped read for the item detail and the whole workspace's list. Older revisions
+/// (including a merge of a void result) are history, not a live closeout.
+fn pr_closeouts(
+    c: &rusqlite::Connection,
+    scope: &str,
+    param: &str,
+    mut found: impl FnMut(String, steve_core::pull::Closeout),
+) -> rusqlite::Result<()> {
+    each(c, &format!(
+        "SELECT i.id, i.phase = 'closed', o.evidence,
+                EXISTS (SELECT 1 FROM decisions d WHERE d.item_id = i.id
+                        AND d.subject_type = 'pr_awaiting_merge' AND d.subject_id = o.id AND d.status = 'open')
+         FROM items i JOIN item_operations o ON o.id = (
+            SELECT p.id FROM item_operations p WHERE p.item_id = i.id AND p.cycle = i.cycle
+                AND p.revision = i.revision AND p.kind = 'release'
+                AND json_extract(p.evidence, '$.pr_slug') IS NOT NULL
+                AND p.status IN ('pending', 'succeeded')
+            ORDER BY p.created DESC, p.id DESC LIMIT 1
+         )
+         WHERE {scope} AND i.kind = 'task'
+           AND (i.phase = 'closing' OR (i.phase = 'closed' AND i.status = 'done'))"
+    ), param, |r| {
+        let evidence = serde_json::from_str(&r.get::<_, String>(2)?).unwrap_or(Value::Null);
+        if let Some(p) = steve_core::pull::Closeout::from_evidence(&evidence, r.get(1)?, r.get(3)?) {
+            found(r.get(0)?, p);
+        }
+        Ok(())
+    })
+}
+
 impl Repo for StoreBackend {
     fn item_extras(&self, ws: &str) -> BResult<Option<HashMap<String, ItemExtras>>> {
         self.batch(|c| {
@@ -212,12 +242,22 @@ impl Repo for StoreBackend {
                 }
                 Ok(())
             })?;
+            pr_closeouts(c, "i.workspace_id = ?1", ws, |id, closeout| {
+                m.entry(id).or_default().closeout = Some(closeout);
+            })?;
             for x in m.values_mut() {
                 if let Some((sid, _)) = x.sessions.iter().rev().find(|(_, st)| st != "ended") {
                     x.queued = counts.get(sid).copied().unwrap_or(0);
                 }
             }
             Ok(Some(m))
+        })
+    }
+    fn item_closeout(&self, id: &str) -> BResult<Option<steve_core::pull::Closeout>> {
+        self.batch(|c| {
+            let mut closeout = None;
+            pr_closeouts(c, "i.id = ?1", id, |_, p| closeout = Some(p))?;
+            Ok(closeout)
         })
     }
     fn queued_by_session(&self, ws: &str) -> BResult<Option<HashMap<String, Vec<Obj>>>> {

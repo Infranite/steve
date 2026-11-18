@@ -916,6 +916,7 @@ pub(crate) fn extras_one(r: &dyn Repo, id: &str) -> BResult<ItemExtras> {
         sessions,
         open,
         queued,
+        closeout: r.item_closeout(id)?,
         workflow_paused: None,
         workflow_cycle: None,
         workflow_failed: Vec::new(),
@@ -949,6 +950,12 @@ pub(crate) fn summary_with(mut i: Obj, x: ItemExtras) -> Obj {
                 .collect(),
         ),
     );
+    if let Some(mut closeout) = x.closeout {
+        if !x.open.is_empty() && closeout.next_owner != "none" {
+            closeout.next_owner = "user";
+        }
+        i.insert("closeout".into(), json!(closeout));
+    }
     i.insert("open".into(), json!(x.open));
     i.insert("queued".into(), json!(x.queued));
     i.insert("live".into(), json!(live));

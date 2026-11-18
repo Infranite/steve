@@ -11,12 +11,15 @@ const oldWorkflow = (item: Item): boolean => item.workflowCycle !== undefined &&
  * graph's pause flag and cycle; the page's loaded graph adds the rest. */
 const AS_ST: Record<StateKind, Item["st"]> = {
   done: "done", dropped: "drop", failed: "fail", proposed: "prop", asking: "wait", unavailable: "wait",
-  graphPaused: "pause", paused: "pause", blocked: "block", working: "run", queued: "run", idle: "run",
+  graphPaused: "pause", paused: "pause", blocked: "block", working: "run", queued: "run", closing: "run", idle: "run",
 }
 const graphOf = (item: Item): Workflow | null => item.workflow ?? (item.workflowCycle === undefined && !item.workflowPaused ? null
   : { item_id: item.id, revision: 0, paused: !!item.workflowPaused, max_parallel: 1, max_attempts: 1, units: [], blockers: [], history: [], current_cycle: !oldWorkflow(item) })
 export const itemDisplayState = (item: Item) => itemState(item, graphOf(item), (item.ss ?? []).some((k) => st.S?.[k]?.st === "run"))
-export const itemDisplayStatus = (item: Item): Item["st"] => AS_ST[itemDisplayState(item).kind]
+export const itemDisplayStatus = (item: Item): Item["st"] => {
+  const s = itemDisplayState(item)
+  return s.kind === "closing" && s.move === "you" ? "wait" : AS_ST[s.kind]
+}
 
 export type WorkflowRelation = { kind: "parent"; children: string[] } | { kind: "child"; parent: string } | { kind: "paused"; failed: string[] } | { kind: "previous" }
 

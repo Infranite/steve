@@ -1,3 +1,4 @@
+import { CloseoutSummary } from "@/item-closeout"
 import { Button } from "@/components/ui/button"
 import { Checkbox } from "@/components/ui/checkbox"
 import { Field, FieldContent, FieldDescription, FieldLabel, FieldTitle } from "@/components/ui/field"
@@ -94,7 +95,7 @@ export function ItemRow({ i, pick, proj = true, bot = true, nested = false, badg
           {i.star && <StarIcon className="size-3.5 shrink-0 fill-current text-tertiary" />}
           {badge}
           {closed && nested && i.workflowSuperseded && <span className="shrink-0 rounded bg-muted/70 px-1.5 py-0.5 type-footnote text-tertiary" data-subtask-superseded>{t("shell:item.supersededTry")}</span>}
-          {closed && i.now && <span className="hidden min-w-0 shrink-[2] truncate type-footnote text-muted-foreground sm:block" data-item-now>{i.now}</span>}
+          {closed && i.now && !i.closeout && <span className="hidden min-w-0 shrink-[2] truncate type-footnote text-muted-foreground sm:block" data-item-now>{i.now}</span>}
           {side}
         </div>
         {/* a card waiting on you says what it asks and takes you to it; otherwise the row says what is going on now */}
@@ -104,7 +105,7 @@ export function ItemRow({ i, pick, proj = true, bot = true, nested = false, badg
             {!pick && <Button size="xs" variant="outline" className="shrink-0" onClick={(e) => { e.stopPropagation(); go("#/items/" + i.id) }} data-item-wait-go={i.id}>{t("shell:item.goAct", { act: WACT[w.type] ?? t("shell:item.handle") })}</Button>}
           </div>
         )}
-        {!closed && !w && (i.now || relation || extra.length > 0) && (
+        {!closed && !w && !i.closeout && (i.now || relation || extra.length > 0) && (
           <Meta one className="mt-0.5 pl-14">
             {/* beside a "now" line the relation keeps its width and the line truncates; alone it yields to the counts after it */}
             {relation && <span className={cn("min-w-0 max-w-[60%] truncate type-callout font-medium text-foreground/80", i.now && relation.kind !== "paused" && relation.kind !== "previous" && "shrink-0")} data-workflow-relation={relation.kind}>{workflowRelationText(relation)}</span>}
@@ -112,6 +113,7 @@ export function ItemRow({ i, pick, proj = true, bot = true, nested = false, badg
             {extra}
           </Meta>
         )}
+        {i.closeout && <CloseoutSummary value={i.closeout} compact className="mt-0.5 pl-14" />}
         {i.rel && i.rel.tone !== "ok" && <RelNote rel={i.rel} className="mt-1 pl-14" onClose={i.rel.tone === "fail" ? () => closeRel(i) : undefined} />}
       </div>
     </div>

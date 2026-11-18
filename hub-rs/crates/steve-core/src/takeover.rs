@@ -821,6 +821,7 @@ impl Tx<'_> {
                             .cloned()
                             .collect();
                         carry["pr_told"] = json!(told);
+                        carry["pr_ci_notified"] = prev.evidence["pr_ci_notified"].clone();
                         carry["pr_tells"] = json!(prev.evidence["pr_tells"].as_i64().unwrap_or(0));
                     }
                     self.db().store().transaction(|tx| {
