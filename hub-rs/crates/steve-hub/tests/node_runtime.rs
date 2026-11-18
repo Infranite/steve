@@ -6,12 +6,16 @@ use std::time::Duration;
 
 use steve_hub::wire::acp_stats;
 use steve_hub::wire::node_runtime::{
-    AttemptFacts, Binding, ConfigChange, Configured, NodeDomain, NodeRuntime, Planned, Release,
-    Sink,
+    AttemptFacts, Binding, Clock, ConfigChange, Configured, NodeDomain, NodeRuntime, Planned,
+    Release, Sink,
 };
 use steve_node_api::testkit::{FakeNode, Scripted, build};
 use steve_node_api::*;
 use steve_store::{ChangeEvent, FileRef, FnPublisher, Store, StoreError};
+
+#[path = "node_runtime/clock.rs"]
+mod clock;
+use clock::ManualClock;
 
 #[path = "node_runtime/capacity.rs"]
 mod capacity;
@@ -85,6 +89,7 @@ struct H {
     store: Store,
     node: Arc<FakeNode>,
     rt: Arc<NodeRuntime>,
+    clock: Option<Arc<ManualClock>>,
     ends: Arc<Ends>,
     seen: Arc<Tee>,
     published: Arc<Mutex<Vec<ChangeEvent>>>,
@@ -123,6 +128,14 @@ fn turn_of(e: &ExecutionRef) -> TurnId {
 const S: &str = "s1";
 
 fn hub() -> H {
+    hub_with_clock(None)
+}
+
+fn clocked_hub() -> H {
+    hub_with_clock(Some(Arc::new(ManualClock::new())))
+}
+
+fn hub_with_clock(clock: Option<Arc<ManualClock>>) -> H {
     let dir = tempfile::tempdir().unwrap();
     let published = Arc::new(Mutex::new(vec![]));
     let p = published.clone();
@@ -144,7 +157,12 @@ fn hub() -> H {
     let node = FakeNode::new("n1");
     let ends = Arc::new(Ends::default());
     let _ = ends.4.set(store.clone());
-    let rt = NodeRuntime::new(store.clone(), node.clone(), ends.clone());
+    let rt = match &clock {
+        Some(clock) => {
+            NodeRuntime::with_clock(store.clone(), node.clone(), ends.clone(), clock.clone())
+        }
+        None => NodeRuntime::new(store.clone(), node.clone(), ends.clone()),
+    };
     let seen = Arc::new(Tee {
         to: Sink(Arc::downgrade(&rt)),
         seen: Mutex::new(vec![]),
@@ -157,6 +175,7 @@ fn hub() -> H {
         store,
         node,
         rt,
+        clock,
         ends,
         seen,
         published,
@@ -164,6 +183,18 @@ fn hub() -> H {
 }
 
 impl H {
+    fn clock(&self) -> &ManualClock {
+        self.clock.as_deref().expect("clocked fixture")
+    }
+
+    async fn advance_to(&self, at: i64) {
+        self.clock().advance_to(at);
+        until("sender observed advanced clock", || {
+            self.clock().observed(at)
+        })
+        .await;
+    }
+
     fn bind(&self) {
         self.rt
             .bind(&Binding {
@@ -550,7 +581,7 @@ async fn a_busy_node_gets_the_very_same_command_again() {
 /// told. Now the same command waits longer each time and the session hears it once.
 #[tokio::test]
 async fn an_exhausted_node_backs_off_tells_the_session_once_and_runs_the_same_command_later() {
-    let h = hub();
+    let h = clocked_hub();
     h.node.refuse("start_turn", Some(ErrorCode::Exhausted));
     h.bind();
     h.rt.prompt(S, "hello", "user", &[]).unwrap();
@@ -567,16 +598,12 @@ async fn an_exhausted_node_backs_off_tells_the_session_once_and_runs_the_same_co
         delays.push(
             h.q::<i64>("SELECT retry_at-updated FROM node_commands WHERE method='start_turn'"),
         );
-        // not waiting it out: due now
-        h.store
-            .transaction::<_, StoreError>(|tx| {
-                tx.execute(
-                    "UPDATE node_commands SET retry_at=0 WHERE method='start_turn'",
-                    [],
-                )?;
-                Ok(())
-            })
-            .unwrap();
+        let at: i64 = h.q("SELECT retry_at FROM node_commands WHERE method='start_turn'");
+        h.advance_to(at - 1).await;
+        assert_eq!(exhausted(), n, "no resend before the persisted deadline");
+        if n < 3 {
+            h.advance_to(at).await;
+        }
     }
     for (d, want) in delays.iter().zip([2_000, 4_000, 8_000]) {
         assert!((want..want + 50).contains(d), "{delays:?}");
@@ -591,6 +618,8 @@ async fn an_exhausted_node_backs_off_tells_the_session_once_and_runs_the_same_co
 
     // room again: the very same operation runs, once
     h.node.refuse("start_turn", None);
+    h.advance_to(h.q("SELECT retry_at FROM node_commands WHERE method='start_turn'"))
+        .await;
     until("start_turn", || h.methods().contains(&"start_turn")).await;
     until("active", || h.phase() == "active").await;
     let ran: Vec<_> = h
@@ -1715,7 +1744,19 @@ impl H {
     /// [`Self::restart_hub`], the new coordinator's reconcile waiting `apply_wait` at most for the
     /// Node's heads to be applied.
     async fn restart_hub_with(&mut self, apply_wait: Option<Duration>) {
-        let rt = NodeRuntime::new(self.store.clone(), self.node.clone(), self.ends.clone());
+        self.restart_hub_at(apply_wait, None).await;
+    }
+
+    async fn restart_hub_at(&mut self, apply_wait: Option<Duration>, at: Option<i64>) {
+        let rt = match &self.clock {
+            Some(clock) => NodeRuntime::with_clock(
+                self.store.clone(),
+                self.node.clone(),
+                self.ends.clone(),
+                clock.clone(),
+            ),
+            None => NodeRuntime::new(self.store.clone(), self.node.clone(), self.ends.clone()),
+        };
         if let Some(d) = apply_wait {
             rt.set_apply_wait(d);
         }
@@ -1729,6 +1770,9 @@ impl H {
         self.rt = rt;
         self.seen = seen;
         until("old Hub gone", || old.upgrade().is_none()).await;
+        if let Some(at) = at {
+            self.clock().advance_to(at);
+        }
         // the boot closes the statistics rows the restart cut, before anything runs
         acp_stats::interrupt_open(&self.store, steve_store::now());
         self.rt.start();

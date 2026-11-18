@@ -25,10 +25,10 @@ impl NodeRuntime {
     ) -> Result<Option<CapacityWait>, StoreError> {
         let first: i64 = tx.query_row(
             "SELECT COALESCE(MIN(updated),?2) FROM runtime_attempts WHERE turn_id=?1 AND json_extract(completion,'$.stop_reason')=?3",
-            rusqlite::params![turn, now(), UNAVAILABLE],
+            rusqlite::params![turn, self.clock.now_ms(), UNAVAILABLE],
             |r| r.get(0),
         )?;
-        let at = now();
+        let at = self.clock.now_ms();
         let deadline = first.saturating_add(MAX_WAIT_MS);
         if ordinal >= RETRIES || at >= deadline {
             return Ok(None);
@@ -70,7 +70,7 @@ impl NodeRuntime {
             Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, String>(3)?, r.get::<_, i64>(4)?, r.get::<_, i64>(5)?))
         })?.collect::<Result<Vec<_>, _>>()?;
         for (op, attempt, session, error, deadline, retries) in rows {
-            let expired = deadline <= now();
+            let expired = deadline <= self.clock.now_ms();
             // A receipt/configuration may arrive while the provider wait is pending. Recheck
             // before every lease, rather than relying only on the boundary at failure time.
             if !expired
@@ -90,7 +90,7 @@ impl NodeRuntime {
                 ReceiptState::Rejected,
                 false,
                 &json!({"reason": error}),
-                now(),
+                self.clock.now_ms(),
             )?;
             let completion = Completion {
                 outcome: Outcome::Failed,

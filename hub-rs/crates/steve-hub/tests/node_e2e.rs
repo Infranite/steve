@@ -113,6 +113,19 @@ impl Home {
         )
         .expect("db")
     }
+    /// Stage an already-due command in this isolated fixture. Deadline calculation and restart
+    /// recovery are exercised with an injected clock in node_runtime; this subprocess test keeps
+    /// the real adapter/Node/Hub/client path without a production clock override.
+    fn make_retry_due(&self, session: &str) {
+        let db = rusqlite::Connection::open(self.steve().join("data/steve.sqlite3")).unwrap();
+        db.busy_timeout(Duration::from_secs(5)).unwrap();
+        let changed = db.execute(
+            "UPDATE node_commands SET retry_at=0 WHERE method='start_turn' AND state='pending' AND maybe_sent=0 AND target_attempt=(SELECT active_attempt FROM runtime_sessions WHERE session_id=?)",
+            [session],
+        ).unwrap();
+        assert_eq!(changed, 1, "exactly the fixture's unsent retry becomes due");
+    }
+
     fn count(&self, sql: &str, p: &str) -> i64 {
         self.db()
             .query_row(sql, [p], |r| r.get(0))
@@ -362,6 +375,27 @@ impl Client {
             .and_then(|b| b["id"].as_str())
             .expect("a claude-code bot")
             .to_string();
+        self.item_for_bot(h, goal, &bot).await
+    }
+
+    /// These cases cover retry orchestration, not transcript settlement. Pi's native accounting
+    /// has no transcript tail window; the very same scripted ACP adapter supplies the failures.
+    async fn retry_item(&self, h: &Home, goal: &str) -> String {
+        let (st, bot) = self
+            .call(
+                "POST",
+                "/api/bots",
+                Some(json!({
+                    "name": "Retry fixture", "harness": "pi", "perm_mode": "bypassPermissions"
+                })),
+            )
+            .await;
+        assert_eq!(st, 200, "{bot}");
+        self.item_for_bot(h, goal, bot["id"].as_str().expect("retry bot"))
+            .await
+    }
+
+    async fn item_for_bot(&self, h: &Home, goal: &str, bot: &str) -> String {
         let (st, i) = self
             .call(
                 "POST",
@@ -470,11 +504,21 @@ async fn the_hubs_port_stays_the_tests_across_restarts() {
 #[tokio::test(flavor = "multi_thread")]
 async fn provider_stream_interruption_is_retried_without_continues_then_shown_as_a_service_card() {
     let h = Home::new();
-    let _hub = spawn(&h, true, &[]);
+    let _hub = spawn(
+        &h,
+        true,
+        &[(
+            "STEVE_ADAPTER_PI",
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../steve-acp/tests/fake-acp.js"
+            ),
+        )],
+    );
     serving(&h).await;
     let c = Client::login(&h).await;
     let sid = c
-        .item(
+        .retry_item(
             &h,
             "stream failure acceptance @tool execute Bash\n@streamfail 3",
         )
@@ -509,6 +553,7 @@ async fn provider_stream_interruption_is_retried_without_continues_then_shown_as
         ),
         2
     );
+    h.make_retry_due(&sid);
     assert!(
         wait(35, || h
             .prompts()
@@ -520,7 +565,12 @@ async fn provider_stream_interruption_is_retried_without_continues_then_shown_as
     );
     assert_eq!(cards(), 0);
     assert!(
-        wait(75, || cards() == 1).await,
+        wait(30, || retry_count() == 3).await,
+        "second retry planned"
+    );
+    h.make_retry_due(&sid);
+    assert!(
+        wait(30, || cards() == 1).await,
         "exhausted service card; {}",
         hub_log(&h)
     );
@@ -564,11 +614,21 @@ async fn provider_stream_interruption_is_retried_without_continues_then_shown_as
 #[tokio::test(flavor = "multi_thread")]
 async fn provider_capacity_waits_for_recovery_then_exhausts_as_one_service_card() {
     let h = Home::new();
-    let _hub = spawn(&h, true, &[]);
+    let _hub = spawn(
+        &h,
+        true,
+        &[(
+            "STEVE_ADAPTER_PI",
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../steve-acp/tests/fake-acp.js"
+            ),
+        )],
+    );
     serving(&h).await;
     let c = Client::login(&h).await;
     let sid = c
-        .item(
+        .retry_item(
             &h,
             "capacity failure acceptance @tool execute Bash\n@capacityfail 4 5",
         )
@@ -610,7 +670,15 @@ async fn provider_capacity_waits_for_recovery_then_exhausts_as_one_service_card(
         2,
         "the first attempt already ran a tool"
     );
-    let exhausted = wait(60, || cards() == 1).await;
+    for attempts in 2..=4 {
+        assert!(
+            wait(30, || retry_count() == attempts).await,
+            "capacity retry planned"
+        );
+        assert_eq!(cards(), 0);
+        h.make_retry_due(&sid);
+    }
+    let exhausted = wait(30, || cards() == 1).await;
     let observed_attempts: Vec<(i64, String, Option<String>, i64)> = h.db().prepare(
         "SELECT a.ordinal,a.state,a.completion,a.updated FROM runtime_attempts a JOIN runtime_turns t USING(turn_id) WHERE t.session_id=? ORDER BY a.ordinal",
     ).unwrap().query_map([&sid], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).unwrap().collect::<Result<_, _>>().unwrap();

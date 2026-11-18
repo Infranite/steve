@@ -32,10 +32,10 @@ impl NodeRuntime {
                 tx,
                 self.node_id.as_str(),
                 &self.owner,
-                now(),
-                now() + LEASE_MS,
+                self.clock.now_ms(),
+                self.clock.now_ms() + LEASE_MS,
             )? {
-                Some(l) if !l.maybe_sent => fresh_envelope_in(tx, l).map(Some),
+                Some(l) if !l.maybe_sent => fresh_envelope_in(tx, l, self.clock.now_ms()).map(Some),
                 l => Ok(l),
             }
         }) {
@@ -68,7 +68,7 @@ impl NodeRuntime {
                 } else {
                     1_000
                 };
-                rt::retry_command_in(tx, &lease, now(), now() + delay, uncertain)?;
+                rt::retry_command_in(tx, &lease, self.clock.now_ms(), self.clock.now_ms() + delay, uncertain)?;
                 if !uncertain && !lease.maybe_sent {
                     tx.execute(
                         "UPDATE node_commands SET receipt=json_set(COALESCE(receipt,'{}'),'$.last_error',json(?)) WHERE operation_id=? AND state='pending'",
@@ -552,8 +552,8 @@ impl NodeRuntime {
         tx.execute(
             "UPDATE node_commands SET retry_at=?, updated=? WHERE operation_id=? AND state='pending'",
             rusqlite::params![
-                now() + (1_000i64 << (failures - 1).clamp(0, 6)).min(60_000),
-                now(),
+                self.clock.now_ms() + (1_000i64 << (failures - 1).clamp(0, 6)).min(60_000),
+                self.clock.now_ms(),
                 op
             ],
         )?;
@@ -921,13 +921,17 @@ pub(super) fn receipt_state(s: &Observed) -> (ReceiptState, bool) {
 /// A command that never went out and waited long (behind its dependency, say: a successor's
 /// prepare behind its predecessor's turn) is issued again now, so the Node does not refuse it as
 /// past `accept_before`. Only one no send can have reached: the Node knows nothing of it yet.
-fn fresh_envelope_in(tx: &Tx, mut l: rt::CommandLease) -> Result<rt::CommandLease, StoreError> {
+fn fresh_envelope_in(
+    tx: &Tx,
+    mut l: rt::CommandLease,
+    at: i64,
+) -> Result<rt::CommandLease, StoreError> {
     let mut c: Command<Value> = serde_json::from_value(l.request.clone()).map_err(conflict)?;
-    if c.accept_before.0 - now() >= ACCEPT_WINDOW_MS / 2 {
+    if c.accept_before.0 - at >= ACCEPT_WINDOW_MS / 2 {
         return Ok(l);
     }
-    c.issued_at = Timestamp(now());
-    c.accept_before = Timestamp(now() + ACCEPT_WINDOW_MS);
+    c.issued_at = Timestamp(at);
+    c.accept_before = Timestamp(at + ACCEPT_WINDOW_MS);
     let v = serde_json::to_value(&c).map_err(conflict)?;
     let digest = digest_of(&v).map_err(conflict)?.to_string();
     tx.execute(
@@ -935,7 +939,7 @@ fn fresh_envelope_in(tx: &Tx, mut l: rt::CommandLease) -> Result<rt::CommandLeas
         rusqlite::params![
             serde_json::to_string(&v).map_err(conflict)?,
             digest,
-            now(),
+            at,
             l.operation
         ],
     )?;

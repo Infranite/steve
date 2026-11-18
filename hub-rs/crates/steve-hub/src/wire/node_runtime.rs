@@ -37,6 +37,7 @@ use steve_store::{FileRef, Store, StoreError, Tx};
 
 mod apply;
 mod capacity_retry;
+mod clock;
 mod config;
 mod cost;
 mod heads;
@@ -60,6 +61,7 @@ mod tests;
 mod workspace;
 
 pub use apply::AttemptFacts;
+pub use clock::Clock;
 pub(crate) use config::mode_str;
 pub use config::{ConfigChange, Configured};
 pub use cost::CostCaps;
@@ -239,6 +241,7 @@ pub struct NodeRuntime {
     /// [`Self::set_configured_roots`].
     configured_roots: OnceLock<Vec<String>>,
     store: Store,
+    clock: Arc<dyn Clock>,
     node: Arc<dyn Node>,
     node_id: NodeId,
     domain: Arc<dyn NodeDomain>,
@@ -343,12 +346,24 @@ fn command<T: serde::Serialize>(op: &str, body: T) -> Result<(Value, String), St
 
 impl NodeRuntime {
     pub fn new(store: Store, node: Arc<dyn Node>, domain: Arc<dyn NodeDomain>) -> Arc<NodeRuntime> {
+        Self::with_clock(store, node, domain, Arc::new(clock::SystemClock))
+    }
+
+    /// Assemble the coordinator with its source of retry time. Durable timestamps remain Unix
+    /// milliseconds; a replacement clock must use the same epoch across coordinator restarts.
+    pub fn with_clock(
+        store: Store,
+        node: Arc<dyn Node>,
+        domain: Arc<dyn NodeDomain>,
+        clock: Arc<dyn Clock>,
+    ) -> Arc<NodeRuntime> {
         let node_id = node.id().clone();
         Arc::new(NodeRuntime {
             principal_state: AtomicBool::new(false),
             transport_link_required: AtomicBool::new(false),
             configured_roots: OnceLock::new(),
             store,
+            clock,
             node,
             node_id,
             domain,
@@ -585,6 +600,7 @@ impl NodeRuntime {
         // each worker holds the runtime only while it works, never while it waits: dropping the
         // last handle ends both. Nothing is sent before the Hub has reconciled with the Node.
         let (weak, wake) = (Arc::downgrade(self), self.wake_send.clone());
+        let clock = self.clock.clone();
         tokio::spawn(async move {
             // the Node links a moment after the Hub starts: the first try finding it not there is
             // the usual order, a later one is worth a warning
@@ -615,14 +631,20 @@ impl NodeRuntime {
                     Err(e) => tracing::warn!("node {}: reconcile: {e}; trying again", me.node_id),
                 }
                 drop(me);
-                tokio::time::sleep(Duration::from_secs(5)).await;
+                clock.sleep(Duration::from_secs(5)).await;
             }
             loop {
                 let Some(me) = weak.upgrade() else { return };
+                // Prepare before sending so a clock advance during the transaction is observed.
+                // The system timer still starts after the send. Do not retain the runtime asleep.
+                let tick = clock.sleep(Duration::from_secs(1));
                 let sent = me.send_one().await;
                 drop(me);
                 if !sent {
-                    let _ = tokio::time::timeout(Duration::from_secs(1), wake.notified()).await;
+                    tokio::select! {
+                        _ = tick => {},
+                        _ = wake.notified() => {},
+                    }
                 }
             }
         });

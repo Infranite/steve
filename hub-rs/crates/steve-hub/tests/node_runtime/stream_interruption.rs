@@ -38,11 +38,11 @@ pub(super) fn retry_at(h: &H) -> i64 {
     h.q("SELECT retry_at FROM node_commands WHERE target_attempt=(SELECT active_attempt FROM runtime_sessions WHERE session_id='s1')")
 }
 
-/// Run the production backoff, including a coordinator restart during the first wait. No test
-/// clock or shortened deadline: the Node cannot get either retry before its stored 20/60 s delay.
+/// Advance retry time across a coordinator restart without editing the command ledger: the Node
+/// cannot get either retry even one millisecond before its stored 20/60 s deadline.
 #[tokio::test]
 async fn provider_stream_interruption_retries_the_same_turn_after_tools_and_exhausts_once() {
-    let mut h = hub();
+    let mut h = clocked_hub();
     h.bind();
     let mut exec = h.running("original task").await;
     let turn = turn_of(&exec);
@@ -59,7 +59,7 @@ async fn provider_stream_interruption_retries_the_same_turn_after_tools_and_exha
         .await;
         let mut done = build::done();
         done.acted = true;
-        let before = steve_store::now();
+        let before = h.clock().now_ms();
         h.node.finish(&exec, done).await.unwrap();
         until("provider retry planned", || {
             h.attempts().len() == ordinal + 1
@@ -80,7 +80,7 @@ async fn provider_stream_interruption_retries_the_same_turn_after_tools_and_exha
             at >= before + delay,
             "backoff was skipped: {at} vs {before}"
         );
-        assert!(at <= steve_store::now() + delay);
+        assert!(at <= h.clock().now_ms() + delay);
         let spec: String = h.q("SELECT spec FROM runtime_attempts ORDER BY ordinal DESC LIMIT 1");
         let spec: TurnSpec = serde_json::from_str(&spec).unwrap();
         assert_eq!(spec.turn, turn);
@@ -100,6 +100,8 @@ async fn provider_stream_interruption_retries_the_same_turn_after_tools_and_exha
         );
         if ordinal == 1 {
             let replay = h.seen.seen.lock().unwrap().clone();
+            h.advance_to(at - 1_234).await;
+            assert_eq!(h.count("start_turn"), 1);
             h.restart_hub().await;
             assert_eq!(retry_at(&h), at, "restart must keep the backoff and count");
             Sink(Arc::downgrade(&h.rt))
@@ -113,14 +115,18 @@ async fn provider_stream_interruption_retries_the_same_turn_after_tools_and_exha
             );
         }
         assert_eq!(h.count("start_turn"), ordinal, "not sent before backoff");
-        tokio::time::timeout(Duration::from_millis(delay as u64 + 10_000), async {
-            while h.count("start_turn") != ordinal + 1 {
-                tokio::time::sleep(Duration::from_millis(20)).await;
-            }
+        h.advance_to(at - 1).await;
+        assert_eq!(
+            h.count("start_turn"),
+            ordinal,
+            "not sent one millisecond early"
+        );
+        h.advance_to(at).await;
+        until("retry reached Node after backoff", || {
+            h.count("start_turn") == ordinal + 1
         })
-        .await
-        .expect("retry reached Node after backoff");
-        assert!(steve_store::now() >= at);
+        .await;
+        assert!(h.clock().now_ms() >= at);
         exec = h.attempts().last().unwrap().clone();
     }
     say(&h, &exec, Role::Assistant, &[ERROR]).await;
@@ -145,6 +151,20 @@ async fn provider_stream_interruption_retries_the_same_turn_after_tools_and_exha
     h.node.finish(&next, build::done()).await.unwrap();
     until("new ordinary end", || h.ends().len() == 2).await;
     assert_eq!(h.ends()[1].1, "end_turn");
+    let next = h.running("another interrupted task").await;
+    say(&h, &next, Role::Assistant, &[ERROR]).await;
+    h.node.finish(&next, build::done()).await.unwrap();
+    until("new turn has its own retry budget", || {
+        h.attempts().len() == 6
+    })
+    .await;
+    assert_ne!(turn_of(&next), turn);
+    assert_eq!(
+        h.q::<i64>("SELECT retry_ordinal FROM runtime_turns ORDER BY rowid DESC LIMIT 1"),
+        1
+    );
+    assert_eq!(retry_at(&h), h.clock().now_ms() + 20_000);
+    assert_eq!(h.ends().len(), 2);
 }
 
 #[tokio::test]

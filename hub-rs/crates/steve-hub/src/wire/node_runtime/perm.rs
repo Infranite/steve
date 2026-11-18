@@ -215,7 +215,7 @@ impl NodeRuntime {
                 target_attempt: Some(&row.attempt),
                 dependency: None,
             },
-            now(),
+            self.clock.now_ms(),
         )?;
         Ok(op)
     }
