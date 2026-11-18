@@ -79,7 +79,7 @@ fn watchdog_preserves_user_queue_and_files_and_waits_for_the_old_release() {
     k.db()
         .queue_add(
             &sid,
-            "Include this pending detail.",
+        "You are working for Steve, the user's assistant, on item ST-1: Include this pending detail.",
             "me",
             std::slice::from_ref(&f),
         )

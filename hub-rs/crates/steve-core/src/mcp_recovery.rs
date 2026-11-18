@@ -132,8 +132,9 @@ impl Tx<'_> {
         }
         let mut messages = vec![];
         for q in waiting.iter().filter(|q| {
-            !q.text
-                .starts_with("You are working for Steve, the user's assistant, on item ")
+            !(q.via == "steve"
+                && q.text
+                    .starts_with("You are working for Steve, the user's assistant, on item "))
         }) {
             messages.push(q.text.clone());
             for f in &q.files {
