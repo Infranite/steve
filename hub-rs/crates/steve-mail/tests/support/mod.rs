@@ -75,7 +75,28 @@ impl Default for Opts {
             imap: ImapConfig::default(),
             smtp_tls: TlsMode::Implicit,
             hooks: None,
-            check: None,
+            check: Some(Arc::new(PassingCheck)),
+        }
+    }
+}
+
+/// Transport-focused fixtures explicitly supply a working second-model check. Disclosure tests
+/// replace it with the real C5 and a scripted model, or with `None` to exercise missing wiring.
+pub struct PassingCheck;
+#[async_trait::async_trait]
+impl steve_modules::outbound::OutboundCheck for PassingCheck {
+    async fn check(
+        &self,
+        cx: &steve_modules::outbound::CheckCx,
+        _: &steve_modules::outbound::Audience,
+        _: &str,
+        _: &[steve_modules::outbound::KnowledgeUse],
+    ) -> steve_modules::outbound::CheckResult {
+        steve_modules::outbound::CheckResult {
+            verdict: steve_modules::outbound::Verdict::Pass,
+            entries: Vec::new(),
+            spans: Vec::new(),
+            check_model: (!cx.skip_model).then(|| "fixture-reviewer".into()),
         }
     }
 }

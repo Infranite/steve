@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use steve_modules::accounts::service::current_party;
-use steve_modules::outbound::{self, Audience, CheckCx, CheckResult, Verdict};
+use steve_modules::outbound::{Audience, CheckResult, Verdict};
 use steve_modules::{ApiError, Caller, decisions};
 use steve_store::base::{self, Viewer, Visibility};
 use steve_store::{FileRef, NewDecision, Tx, uid};
@@ -297,7 +297,7 @@ pub fn audience_of_draft(c: &Connection, d: &DraftRow) -> MailResult<Audience> {
         names.push(if r.name.is_empty() {
             r.addr.clone()
         } else {
-            r.name.clone()
+            format!("{} <{}>", r.name, r.addr)
         });
     }
     a.description = format!(
@@ -547,8 +547,9 @@ impl Mail {
 
     /// Whether a draft written now gets the model check at once: only while YOLO decides for it (it treats
     /// an unchecked draft as failed). Otherwise the local checks run and the card offers the model check
-    /// ([`Mail::check_draft`]), so writing a draft does not wait for it.
-    pub(crate) fn model_check_now(&self, ws: &str, item_id: Option<&str>) -> bool {
+    /// ([`Mail::check_draft`]), so writing a draft does not wait for it. Every actual send runs the
+    /// full check again on its final recipients and body, regardless of this preview policy.
+    pub(crate) fn preview_model_now(&self, ws: &str, item_id: Option<&str>) -> bool {
         self.0.link.hooks().yolo_on(ws, item_id)
     }
 
@@ -559,58 +560,16 @@ impl Mail {
         if !["draft", "pending"].contains(&d.status.as_str()) {
             return Err(ApiError::conflict(steve_i18n::t!("mail.draft.locked")).into());
         }
-        let (audience, knowledge, complete) = self.0.m.store.reader(|c| -> MailResult<_> {
-            let a = audience_of_draft(c, &d)?;
-            // the same knowledge the drafting check had (retrieved pieces and memories), read again
-            let entries = d
-                .basis
-                .as_ref()
-                .and_then(|b| b["entries"].as_array().cloned())
-                .unwrap_or_default();
-            let (k, complete) =
-                steve_knowledge::retrieve::knowledge_again(c, &d.workspace_id, &entries)?;
-            Ok((a, k, complete))
-        })?;
-        let draft_model = d
-            .basis
-            .as_ref()
-            .and_then(|b| b["answer_model"].as_str())
-            .filter(|m| !m.is_empty())
-            .map(str::to_string);
-        let mut check = outbound::check(
-            &self.0.m,
-            &CheckCx {
-                ws: who.ws.clone(),
-                actor: d.author.clone(),
-                draft_model,
-                audience_said: None,
-                skip_model: false,
-                internal_skip: false,
-                ..Default::default()
-            },
-            &audience,
-            &format!("{}\n\n{}", d.subject, d.body),
-            &knowledge,
-        )
-        .await;
-        // checked against less than it was written with: it does not pass on that
-        if !complete && check.verdict == Verdict::Pass {
-            check.verdict = Verdict::Leak;
-            check.spans.push(outbound::Span {
-                text: String::new(),
-                reason: outbound::R_BASIS_GONE.into(),
-            });
-        }
-        let mut basis = serde_json::to_value(&check).unwrap_or(Value::Null);
-        if let (Some(Value::Object(old)), Value::Object(new)) = (&d.basis, &mut basis) {
-            for k in ["why", "needs_attention", "cites", "answer_model"] {
-                if let Some(v) = old.get(k) {
-                    new.insert(k.into(), v.clone());
-                }
-            }
-        }
+        let (check, inputs) = self.full_check(&d).await?;
+        let mut basis = crate::disclosure::basis(&d, &check);
+        basis["checked_content_hash"] = json!(crate::disclosure::checked_hash(&d, &inputs));
         let now = self.now();
         let done = self.0.m.store.transaction(|tx| -> MailResult<bool> {
+            if repo::draft(tx, id)?.as_ref() != Some(&d)
+                || crate::disclosure::inputs(tx, &d)? != inputs
+            {
+                return Ok(false);
+            }
             let n = tx.execute(
                 "UPDATE mail_drafts SET basis = ?, updated = ? WHERE id = ? AND updated = ? AND status IN ('draft', 'pending')",
                 rusqlite::params![basis.to_string(), now.max(d.updated + 1), d.id, d.updated],
