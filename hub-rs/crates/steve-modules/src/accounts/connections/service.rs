@@ -159,6 +159,9 @@ pub struct ConnectionOut {
     /// left out of the assembly) is listed and can be disconnected; it is not tested, refreshed or
     /// re-authorized until the adapter is back, and its spaces, messages and contacts stay.
     pub installed: bool,
+    /// The same non-secret provider facts shown in integrations (e.g. remote write policy).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<Value>,
 }
 
 /// `GET /connections/adapters`.
@@ -600,6 +603,15 @@ impl Connections {
 
     fn out(&self, r: &ConnRow) -> ConnectionOut {
         let available = self.available_of(r);
+        let detail = self.provider(&r.adapter).and_then(|p| {
+            let caps = p
+                .integration()
+                .capabilities
+                .iter()
+                .map(|s| super::integration::cap_state(s, &r.caps, &available, &r.config))
+                .collect::<Vec<_>>();
+            p.integration_detail(&r.config, &caps)
+        });
         ConnectionOut {
             id: r.id.clone(),
             account_id: r.account_id.clone(),
@@ -615,6 +627,7 @@ impl Connections {
             },
             last_sync: r.last_sync,
             installed: self.provider(&r.adapter).is_some(),
+            detail,
         }
     }
 

@@ -5,6 +5,22 @@ export default {
   },
   /* separator between items of an inline list: "读消息、发消息" */
   listSep: "、",
+  writePolicy: {
+    hub: "Hub 允许以本人身份写入",
+    hubOnNote: "Hub 已开启，发送、回复、撤回和表情仍受服务端策略及原有审批限制；开启不会补发历史消息。",
+    hubOffNote: "Hub 已关闭，发送、回复、撤回和表情均被阻止；接收和读取不受此开关影响。",
+    service: "服务端写策略（最近上报）",
+    allowed: "允许尝试",
+    allowedNote: "服务端未报告全局限制；每次操作仍须通过 Hub 权限和上游校验。",
+    restricted: "按目标限制",
+    restrictedNote: "服务端按会话或目标决定是否允许；开启 Hub 开关不能解除这些限制。",
+    forbidden: "禁止写入",
+    forbiddenNote: "服务端禁止所有写入。请在渠道服务恢复权限；开启 Hub 开关不能解除此限制。",
+    unknown: "尚未上报",
+    unknownNote: "尚无服务端策略记录；实际写入时会检查当前服务会话。",
+    observedAt: "记录时间：{{time}}；连接不可用时不代表当前服务状态。",
+    manage: "账号设置",
+  },
   page: {
     title: "账号",
     sub: "你和本公司在各个系统里的账号。接入 Steve 的账号可以收发消息、产生事件；登录要用的密码和令牌放在保险箱",
