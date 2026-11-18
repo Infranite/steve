@@ -182,8 +182,9 @@ pub(crate) struct State {
 /// One critical section: the core plus the held state lock.
 pub(crate) struct Tx<'a> {
     c: &'a Core,
-    st: MutexGuard<'a, State>,
+    // After Tx::drop's hook handling, record hold time before the state guard unlocks.
     _timing: Option<steve_store::instrumentation::LockTiming>,
+    st: MutexGuard<'a, State>,
 }
 
 impl Core {
@@ -346,10 +347,27 @@ impl Tx<'_> {
 mod lock_metrics_tests {
     use super::*;
 
-    struct Sink(Arc<Mutex<Vec<(metrics::Key, f64)>>>);
-    struct Sample(metrics::Key, Arc<Mutex<Vec<(metrics::Key, f64)>>>);
+    struct Sink(
+        Arc<Mutex<Vec<(metrics::Key, f64)>>>,
+        std::sync::Weak<Inner>,
+        Arc<std::sync::atomic::AtomicBool>,
+    );
+    struct Sample(
+        metrics::Key,
+        Arc<Mutex<Vec<(metrics::Key, f64)>>>,
+        std::sync::Weak<Inner>,
+        Arc<std::sync::atomic::AtomicBool>,
+    );
     impl metrics::HistogramFn for Sample {
         fn record(&self, value: f64) {
+            if self.0.name() == "steve_lock_hold_seconds"
+                && let Some(core) = self.2.upgrade()
+            {
+                self.3.store(
+                    core.state.try_lock().is_err(),
+                    std::sync::atomic::Ordering::Relaxed,
+                );
+            }
             self.1.lock().unwrap().push((self.0.clone(), value));
         }
     }
@@ -390,14 +408,23 @@ mod lock_metrics_tests {
             key: &metrics::Key,
             _: &metrics::Metadata<'_>,
         ) -> metrics::Histogram {
-            metrics::Histogram::from_arc(Arc::new(Sample(key.clone(), self.0.clone())))
+            metrics::Histogram::from_arc(Arc::new(Sample(
+                key.clone(),
+                self.0.clone(),
+                self.1.clone(),
+                self.2.clone(),
+            )))
         }
     }
 
     #[test]
     fn core_lock_records_wait_then_hold_on_release_at_the_external_callsite() {
         let core = crate::testkit::Kit::new();
-        let sink = Sink(Arc::new(Mutex::new(vec![])));
+        let sink = Sink(
+            Arc::new(Mutex::new(vec![])),
+            Arc::downgrade(&core.core.0),
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        );
         steve_store::instrumentation::enable_lock_metrics();
         metrics::with_local_recorder(&sink, || {
             let line = line!() + 1;
@@ -411,6 +438,10 @@ mod lock_metrics_tests {
             let samples = sink.0.lock().unwrap();
             assert_eq!(samples.len(), 2);
             assert_eq!(samples[1].0.name(), "steve_lock_hold_seconds");
+            assert!(
+                sink.2.load(std::sync::atomic::Ordering::Relaxed),
+                "hold timestamp must be taken before unlocking state"
+            );
             assert!(samples.iter().all(|(key, value)| {
                 *value >= 0.0
                     && key.labels().any(|label| {
