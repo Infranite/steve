@@ -12,3 +12,12 @@ install! { install(reg, cx) [db, mut jobs] => [db, jobs, price_url] {
         price_url.clone(),
     )));
 }}
+
+install! { routes(reg, cx) [mut built, db, harnesses, price_url] => [built, db, harnesses, module_routes] {
+    let HubEnv { bus, .. } = *cx;
+    let module_routes = std::mem::take(&mut built.routes)
+        .merge(crate::api::stats::routes(
+            crate::api::stats::StatsApi::new(db.clone(), bus.clone(), price_url)
+                .with_harness_source(harnesses.source()),
+        ));
+}}

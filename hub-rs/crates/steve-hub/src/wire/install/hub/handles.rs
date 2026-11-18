@@ -1,14 +1,6 @@
 use super::*;
 
-install! { install(reg, cx) [auth, backend, built, core, db, engine, harnesses, jobs, local_node, local_runtime, mcp, nodes, price_url, routed, workspaces, yolo] => [] {
-    let HubEnv { bus, .. } = *cx;
-    let module_routes = built
-        .routes
-        .merge(crate::api::stats::routes(
-            crate::api::stats::StatsApi::new(db.clone(), bus.clone(), price_url)
-                .with_harness_source(harnesses.source()),
-        ))
-        .merge(crate::api::yolo::routes(engine.clone()));
+install! { install(reg, _cx) [auth, backend, built, core, engine, harnesses, jobs, local_node, local_runtime, mcp, module_routes, nodes, routed, workspaces, yolo] => [] {
     reg.wired = Some(Wired {
         backend,
         #[cfg(test)]

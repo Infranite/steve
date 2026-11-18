@@ -26,6 +26,8 @@ ordered_installers! { MODULES: fn(&mut HubRegistry, &HubEnv<'_>) -> Result<(), B
     mod mcp; install,
     mod stats; install,
     mod backup; install,
+    stats::routes,
+    yolo::routes,
     mod handles; install,
 }
 
@@ -67,6 +69,7 @@ pub(crate) struct HubRegistry {
     local_node: Option<Option<Arc<steve_node::LocalNode>>>,
     local_runtime: Option<Option<Arc<node_runtime::NodeRuntime>>>,
     mcp: Option<Router>,
+    module_routes: Option<Router>,
     price_url: Option<Option<String>>,
     wired: Option<Wired>,
 }
