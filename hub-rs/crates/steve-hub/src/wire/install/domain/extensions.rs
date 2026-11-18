@@ -13,9 +13,14 @@ install! { prepare(reg, cx) [ports] => [declared, ports] {
         .map_err(|e| BackendError::msg(e.to_string()))?;
 }}
 
-install! { mount(reg, cx) [channels, declared, jobs, module_routes] => [channels, ext_jobs, jobs, module_routes, pending_lifecycle] {
-    let Env { bus, vars, assembly, .. } = cx.clone();
+// Capture the extension context before the plugin and route constructors, as at the old root.
+install! { context(reg, cx) [channels] => [channels, started] {
+    let Env { bus, vars, .. } = cx.clone();
     let started = crate::extension::Started::new(&channels, bus, vars);
+}}
+
+install! { mount(reg, cx) [channels, declared, jobs, module_routes, started] => [channels, ext_jobs, jobs, module_routes, pending_lifecycle] {
+    let Env { bus, assembly, .. } = cx.clone();
     let crate::extension::StartedAll {
         routes: module_routes,
         jobs: ext_jobs,
