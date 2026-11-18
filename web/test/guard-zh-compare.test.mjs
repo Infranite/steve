@@ -25,9 +25,10 @@ const unwrap = (n) => {
   while (ts.isParenthesizedExpression(n) || ts.isAsExpression(n) || ts.isNonNullExpression(n) || ts.isSatisfiesExpression(n)) n = n.expression
   return n
 }
-// Only literal/template operands count, not arbitrary literals inside a function call.
+// Literal pieces used by a logic operation (display-only expressions are never queried).
 const literals = (n) => {
   n = unwrap(n)
+  if (ts.isRegularExpressionLiteral(n)) return han(n.text) ? [n.text] : []
   if (ts.isStringLiteral(n) || ts.isNoSubstitutionTemplateLiteral(n)) return han(n.text) ? [n.text] : []
   if (ts.isTemplateExpression(n)) {
     const parts = [n.head.text, ...n.templateSpans.map((s) => s.literal.text)]
@@ -35,15 +36,44 @@ const literals = (n) => {
   }
   return []
 }
-const scan = (src, filename = "fixture.tsx") => {
-  const ast = ts.createSourceFile(filename, src, ts.ScriptTarget.Latest, true,
+const nestedLiterals = (n) => {
+  const direct = literals(n)
+  if (ts.isTemplateExpression(unwrap(n))) return [...direct, ...unwrap(n).templateSpans.flatMap((s) => nestedLiterals(s.expression))]
+  if (direct.length) return direct
+  const found = []
+  ts.forEachChild(n, (child) => { found.push(...nestedLiterals(child)) })
+  return found
+}
+const iterators = new Set(["some", "every", "find", "findIndex", "findLastIndex", "filter", "map", "flatMap", "includes", "indexOf", "lastIndexOf"])
+const scan = (src, filename = "fixture.tsx", checker) => {
+  const ast = (checker ? program.getSourceFile(filename) : undefined) ?? ts.createSourceFile(filename, src, ts.ScriptTarget.Latest, true,
     filename.endsWith(".tsx") ? ts.ScriptKind.TSX : ts.ScriptKind.TS)
   assert.equal(ast.parseDiagnostics.length, 0, `${filename}: invalid TypeScript`)
+  const declarations = new Map()
+  const collect = (n) => {
+    if (ts.isVariableDeclaration(n) && ts.isIdentifier(n.name) && (n.parent.flags & ts.NodeFlags.Const)) declarations.set(n.name.text, n)
+    ts.forEachChild(n, collect)
+  }
+  collect(ast)
+  const table = (n, seen = new Set(), element = false) => {
+    n = unwrap(n)
+    if (ts.isArrayLiteralExpression(n)) return n.elements.flatMap((e) => table(e, seen, true))
+    if (ts.isCallExpression(n) && ts.isPropertyAccessExpression(n.expression)) return table(n.expression.expression, seen, element)
+    if (ts.isIdentifier(n)) {
+      let symbol = checker?.getSymbolAtLocation(n)
+      if (symbol?.flags & ts.SymbolFlags.Alias) symbol = checker.getAliasedSymbol(symbol)
+      const decl = checker ? symbol?.valueDeclaration : declarations.get(n.text)
+      if (decl && ts.isVariableDeclaration(decl) && (decl.parent.flags & ts.NodeFlags.Const) && decl.initializer && !seen.has(decl)) {
+        const next = new Set(seen); next.add(decl); return table(decl.initializer, next, element)
+      }
+    }
+    return element ? nestedLiterals(n) : []
+  }
   const found = new Map()
   const add = (values) => { for (const s of values) { const key = JSON.stringify(s); found.set(key, (found.get(key) ?? 0) + 1) } }
   const visit = (n) => {
     if (ts.isBinaryExpression(n) && operators.has(n.operatorToken.kind)) {
-      add(literals(n.left)); add(literals(n.right))
+      add(nestedLiterals(n.left)); add(nestedLiterals(n.right))
     }
     if (ts.isCaseClause(n)) add(literals(n.expression))
     if (ts.isCallExpression(n)) {
@@ -53,11 +83,14 @@ const scan = (src, filename = "fixture.tsx") => {
       } else if (ts.isElementAccessExpression(n.expression) && ts.isStringLiteral(n.expression.argumentExpression)) {
         receiver = n.expression.expression; method = n.expression.argumentExpression.text
       }
-      if (methods.has(method)) for (const arg of n.arguments) add(literals(arg))
-      if (method === "includes" && ts.isArrayLiteralExpression(unwrap(receiver))) {
-        for (const element of unwrap(receiver).elements) add(literals(element))
+      if (methods.has(method)) {
+        for (const arg of n.arguments) add(literals(arg))
+        if (!ts.isArrayLiteralExpression(unwrap(receiver))) add(literals(receiver))
       }
+      if (iterators.has(method)) add(table(receiver))
+      if (ts.isIdentifier(n.expression) && n.expression.text === "RegExp") for (const arg of n.arguments) add(nestedLiterals(arg))
     }
+    if (ts.isNewExpression(n) && ts.isIdentifier(n.expression) && n.expression.text === "RegExp") for (const arg of n.arguments ?? []) add(nestedLiterals(arg))
     ts.forEachChild(n, visit)
   }
   visit(ast)
@@ -71,10 +104,14 @@ const differences = (now, listed) => {
   return problems
 }
 
+let program
 test("Chinese comparisons only shrink", () => {
+  const paths = files(join(root, "src"))
+  program = ts.createProgram(paths, { target: ts.ScriptTarget.Latest, jsx: ts.JsxEmit.Preserve, noEmit: true })
+  const checker = program.getTypeChecker()
   const now = new Map()
-  for (const f of files(join(root, "src"))) {
-    for (const [literal, n] of scan(readFileSync(f, "utf8"), f)) now.set(`${relative(root, f).replaceAll("\\", "/")}\t${literal}`, n)
+  for (const f of paths) {
+    for (const [literal, n] of scan(readFileSync(f, "utf8"), f, checker)) now.set(`${relative(root, f).replaceAll("\\", "/")}\t${literal}`, n)
   }
   if (process.env.STEVE_ZH_BLESS === "1") {
     const text = [...now].sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0).map(([k, n]) => `${k}\t${n}\n`).join("")
@@ -105,10 +142,27 @@ test("AST covers branches, templates and array membership while leaving display 
   ].join("\n")
   assert.deepEqual([...scan(source)].sort(), [
     "相等", "不等", "双等", "双不等", "分支", "包含", "开头", "结尾", "位置", "匹配",
-    "替换", "输出", "分隔", "同义", "关键词", "索引调用", "模板", "末尾", "测试", "𠀀",
+    "替换", "输出", "分隔", "同义", "关键词", "索引调用", "模板", "末尾", "测试", "𠀀", "构造参数",
   ].map((s) => [JSON.stringify(s), 1]).sort())
   assert.equal(han("かな한글"), false)
   assert.ok(differences(new Map([["new", 1]]), new Map()).length)
   assert.ok(differences(new Map(), new Map([["gone", 1]])).length)
   assert.ok(differences(new Map([["count", 2]]), new Map([["count", 1]])).length)
+})
+
+
+test("expanded logic covers nested operands, const table chains, receivers and regex construction", () => {
+  const found = scan([
+    'const WORDS = ["词表"]; const ALIAS = WORDS;',
+    'ALIAS.map(x => x).filter(Boolean).some(Boolean); WORDS.every(Boolean);',
+    'const LABEL = "字段别名"; const BUILT = [make("构造表字段"), LABEL]; BUILT.map(x => x);',
+    'x === make("包裹"); x !== ["元组".toString(), `模板${id}`];',
+    '"接收者".indexOf(x); "接收者包含".includes(x);',
+    'new RegExp("正则"); RegExp(`构造${id}`); x.match(/匹配中文/u);',
+    'ordinary("普通参数"); console.log("显示"); const prompt = "提示词";',
+  ].join("\n"))
+  assert.deepEqual([...found].sort(), [
+    ["构造表字段", 1], ["字段别名", 1], ["词表", 4], ["包裹", 1], ["元组", 1], ["模板", 1], ["接收者", 1], ["接收者包含", 1],
+    ["正则", 1], ["构造", 1], ["/匹配中文/u", 1],
+  ].map(([s, n]) => [JSON.stringify(s), n]).sort())
 })
