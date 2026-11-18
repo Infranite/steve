@@ -747,7 +747,13 @@ fn imported_sessions() {
     s.events()
         .add(&id, "user", json!({"text": "x", "via": "me"}))
         .unwrap();
-    s.queued().add(&id, "q", "me", &[]).unwrap();
+    assert!(s.queued().add(&id, "q", "me", &[]).is_err());
+    assert!(s.queued().add_unless_waiting(&id, "q", "me", &[]).is_err());
+    // Removal must clean up queues from older builds too, although new writes are refused.
+    s.transaction::<_, steve_store::StoreError>(|tx| {
+        tx.execute("INSERT INTO queued(id,session_id,text,via,created) VALUES ('legacy-import-queue',?,'q','me',1)", [&id])?;
+        Ok(())
+    }).unwrap();
     t.events.take();
     s.sessions().remove(&id).unwrap();
     assert_eq!(
@@ -758,6 +764,7 @@ fn imported_sessions() {
         }]
     );
     assert!(s.sessions().get(&id).unwrap().is_none());
+    assert!(s.queued().list(&id).unwrap().is_empty());
 }
 
 #[test]

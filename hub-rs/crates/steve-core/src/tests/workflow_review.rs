@@ -190,7 +190,10 @@ fn replan_cannot_forget_a_cancelled_attempt_until_its_execution_has_settled() {
             }
         }
         if unsettled == "queued" {
-            k.db().queue_add(sid, "尚未结清的输入", "me", &[]).unwrap();
+            assert!(k.db().queue_add(sid, "尚未结清的输入", "me", &[]).is_err());
+            // Older builds could leave input on an ended session. Inject that durable legacy
+            // state directly; current queue APIs must never create it.
+            k.db().exec("INSERT INTO queued(id,session_id,text,via,created) VALUES ('legacy-unsettled',?,'尚未结清的输入','me',1)", &[&sid]).unwrap();
         }
         let before = graph(&k, &parent);
         for remove in [false, true] {

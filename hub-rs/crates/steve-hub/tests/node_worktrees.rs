@@ -275,7 +275,7 @@ async fn a_worktree_it_made_is_told_given_back_once_and_made_again_before_it_ope
 }
 
 #[tokio::test]
-async fn a_failed_prepare_ends_its_open_and_the_next_message_prepares_again() {
+async fn a_failed_prepare_holds_its_queue_until_an_explicit_retry_prepares_again() {
     let h = hub();
     h.node.refuse_next(
         "prepare_workspace",
@@ -300,8 +300,9 @@ async fn a_failed_prepare_ends_its_open_and_the_next_message_prepares_again() {
         h.facts.ends.lock().unwrap().is_empty(),
         "no turn waited: one card, not a turn end too"
     );
-    // the next message prepares again
-    h.rt.prompt(S, "again", "user", &[]).unwrap();
+    // Further input stays held until the user explicitly retries the failed startup.
+    assert_eq!(h.rt.prompt(S, "again", "user", &[]).unwrap(), Planned::Held);
+    h.rt.retry_open(S, &build::choice()).unwrap();
     until("the turn", || h.methods().contains(&"start_turn")).await;
     assert_eq!(h.count("prepare_workspace"), 1, "the refused one never ran");
     assert_eq!(
