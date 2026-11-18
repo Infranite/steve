@@ -116,6 +116,32 @@ pub struct Items<'a>(&'a Store);
 const ITEM: &str = "SELECT * FROM items WHERE id = ?";
 
 impl Items<'_> {
+    /// Direct descendants only, including archived/failed attempts. Parent links are scoped to
+    /// the same workspace, including for old data that predates validation of those links.
+    pub fn children(&self, parent: &str) -> Result<Vec<Item>> {
+        self.0.read(|c| {
+            all(
+                c,
+                "SELECT i.* FROM items i JOIN items p ON p.id=? AND p.workspace_id=i.workspace_id
+                 WHERE i.kind='task' AND json_extract(i.parent,'$.item')=p.id AND i.id<>p.id",
+                [parent],
+                Item::from_row,
+            )
+        })
+    }
+
+    /// Replayed after boot as well as on the lifecycle tick. The archive flag of the parent is
+    /// irrelevant: closing it retired its unfinished descendants even if it was later archived.
+    pub fn closed_parents(&self) -> Result<Vec<String>> {
+        self.0.read(|c| {
+            all(c,
+                "SELECT p.id FROM items p WHERE p.phase='closed' AND p.outcome IN ('completed','cancelled')
+                 AND EXISTS(SELECT 1 FROM items i WHERE i.workspace_id=p.workspace_id
+                     AND json_extract(i.parent,'$.item')=p.id AND i.id<>p.id)",
+                [], |r| r.get(0))
+        })
+    }
+
     /// Task items (not chats), archived or not, most recently updated first.
     pub fn list(&self, ws: &str, archived: bool) -> Result<Vec<Item>> {
         self.0.read(|c| {

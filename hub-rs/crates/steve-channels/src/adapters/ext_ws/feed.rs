@@ -347,6 +347,7 @@ impl Feed<'_> {
     async fn on_status(&mut self, st: Status, first: bool) -> Step {
         let was = self.s.status().status;
         self.s.set_status(st.clone());
+        ExtWs::remember_write_policy(&self.run.cx, &self.s).await;
         self.lift_refusals(st.write_policy);
         let cx = &self.run.cx;
         match st.status {

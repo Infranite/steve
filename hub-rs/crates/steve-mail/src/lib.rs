@@ -37,6 +37,7 @@ pub mod api;
 pub mod attach;
 pub mod compose;
 pub mod config;
+mod disclosure;
 pub mod drafts;
 pub mod error;
 pub mod events;

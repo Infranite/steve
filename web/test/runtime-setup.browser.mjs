@@ -17,6 +17,18 @@ const workspace = { id: "fixture", name: "Fixture", description: "", item_prefix
 const fits = async page => assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), "no horizontal overflow")
 const card = (page, id = "fixture-runtime") => page.locator(`[data-runtime="${id}"]`)
 const installs = (page, id = "fixture-runtime") => page.locator(`[data-runtime-install="${id}"]`)
+const inventory = page => page.locator("[data-runtime-inventory]")
+const fold = page => page.locator("[data-runtime-unavailable-toggle]")
+const visibleIds = page => page.locator("[data-runtime]:visible").evaluateAll(es => es.map(e => e.dataset.runtime))
+const unfold = async page => {
+  const toggle = fold(page)
+  if (await toggle.count() && await toggle.getAttribute("aria-expanded") === "false") await toggle.click()
+}
+const showDetails = async (page, id = "fixture-runtime") => {
+  await unfold(page)
+  const toggle = card(page, id).locator("[data-runtime-details-toggle]")
+  if (await toggle.getAttribute("aria-expanded") === "false") await toggle.click()
+}
 
 async function fixture({ runtimes = [legacy, runtime("fixture-runtime", "not_installed")], width = 1280, lang = "zh-CN", dark = false } = {}) {
   const page = await browser.newPage({ locale: lang, viewport: { width, height: 900 }, colorScheme: dark ? "dark" : "light", reducedMotion: "reduce" })
@@ -84,18 +96,48 @@ async function fixture({ runtimes = [legacy, runtime("fixture-runtime", "not_ins
 try {
   const cases = [
     runtime("fixture-runtime", "not_installed"), runtime("body-only", "not_installed", [true, false]), runtime("adapter-only", "not_installed", [false, true]),
-    runtime("unknown", "unknown"), runtime("ready", "ready", [true, true]), runtime("probe-failed", "unavailable", [true, true], { error: "fixture: provider credentials missing" }),
+    runtime("unknown", "unknown"), runtime("ready", "ready", [true, true], { version: "2.4.1", path: "/fixture/ready/adapter", auth: [{ id: "api", name: "API credentials" }] }), runtime("probe-failed", "unavailable", [true, true], { error: "fixture: provider credentials missing" }),
     runtime("no-npm", "unavailable", [false, false], { setup: { ...runtime("x", "unavailable").setup, reason: "fixture: Node/npm missing", can_install: false } }),
     runtime("offline", "unavailable", [true, false], { setup: { ...runtime("x", "unavailable", [true, false]).setup, error: "fixture: offline", can_install: true } }),
     runtime("external-install", "installing"), runtime("ready-but-failed", "ready", [true, true], { ok: false }), legacy,
     { ...legacy, id: "custom-command", custom: true, path: "/fixture/custom/adapter" },
+    ...Array.from({ length: 5 }, (_, i) => runtime(`extra-${i}`, "not_installed", [false, false], { custom: i === 0 })),
   ]
   for (const [width, lang, dark] of [[1280, "zh-CN", false], [375, "zh-CN", true], [320, "zh-CN", false], [1280, "en", true], [375, "en", false], [320, "en", true]]) {
     const f = await fixture({ runtimes: cases, width, lang, dark }), page = f.page
     try {
       await f.open()
+      const available = cases.filter(r => r.ok), attention = cases.filter(r => !r.ok && (r.setup?.state === "installing" || r.setup?.error))
+      const unavailable = cases.length - available.length - attention.length
+      assert.equal(cases.length, 17)
+      assert.deepEqual(await visibleIds(page), [...available, ...attention].map(r => r.id), "usable runtimes precede operation feedback; other entries are folded")
+      assert.equal(await fold(page).getAttribute("aria-expanded"), "false")
+      assert.match(await fold(page).innerText(), new RegExp(`^${unavailable} `))
+      assert.doesNotMatch(await inventory(page).innerText(), /\/fixture\/|@example\/|Registry reason|Registry help|Simulated registry|credentials missing|fixture: offline/)
+      assert.match(await card(page, "ready").innerText(), /2\.4\.1/)
+      assert.equal(await page.locator("[data-runtime-diagnostics]:visible").count(), 0)
+      assert.equal(await card(page, "offline").locator("[data-runtime-install-error]").isVisible(), true)
+      await page.locator("[data-panel=runtimes]").scrollIntoViewIfNeeded()
+      await fits(page)
+      if (shots) await page.locator("[data-panel=runtimes]").screenshot({ path: `${shots}/runtime-default-${width}-${lang}.png` })
+      await fold(page).focus()
+      await page.keyboard.press("Enter")
+      assert.equal(await fold(page).getAttribute("aria-expanded"), "true")
+      assert.equal(await fold(page).evaluate(el => el === document.activeElement), true)
+      assert.equal((await visibleIds(page)).length, 17)
+      assert.doesNotMatch(await inventory(page).innerText(), /\/fixture\/|@example\/|Registry reason|Registry help|credentials missing|fixture: offline/)
+      // aria-controls resolves to the exact folded cards; hidden content stays out of the accessible tree.
+      assert.equal(await fold(page).evaluate(el => el.getAttribute("aria-controls").split(" ").every(id => !!document.getElementById(id)?.querySelector("[data-runtime]"))), true)
+      if (shots) await page.locator("[data-panel=runtimes]").screenshot({ path: `${shots}/runtime-expanded-${width}-${lang}.png` })
       for (const r of cases) {
-        assert.equal(await card(page, r.id).locator("[data-runtime-state]").getAttribute("data-runtime-state"), r.setup?.state ?? "ready")
+        if (["body-only", "adapter-only", "probe-failed", "unknown", "ready"].includes(r.id)) {
+          const toggle = card(page, r.id).locator("[data-runtime-details-toggle]")
+          await toggle.focus()
+          await page.keyboard.press("Space")
+          assert.equal(await toggle.getAttribute("aria-expanded"), "true")
+          assert.equal(await toggle.evaluate(el => el === document.activeElement && !!document.getElementById(el.getAttribute("aria-controls"))), true)
+        }
+        assert.equal(await card(page, r.id).locator("[data-runtime-state]").getAttribute("data-runtime-state"), r.setup?.state === "ready" && !r.ok ? "unavailable" : r.setup?.state ?? "ready")
         assert.equal(await card(page, r.id).locator("[data-runtime-component]").count(), r.setup?.components.length ?? 0)
         assert.equal(await card(page, r.id).locator("[data-runtime-use]").count(), r.ok ? 1 : 0)
       }
@@ -108,20 +150,73 @@ try {
       await fits(page)
       await installs(page).scrollIntoViewIfNeeded()
       assert.equal(await installs(page).isVisible(), true)
-      if (shots) await page.screenshot({ path: `${shots}/runtime-matrix-${width}-${lang}.png` })
+      if (shots) await card(page, "ready").screenshot({ path: `${shots}/runtime-details-${width}-${lang}.png` })
+      // Details are independent, and folding the inventory leaves focus on its visible trigger.
+      await card(page, "ready").locator("[data-runtime-details-toggle]").click()
+      assert.equal(await card(page, "ready").locator("[data-runtime-diagnostics]").isVisible(), false)
+      assert.equal(await card(page, "unknown").locator("[data-runtime-diagnostics]").isVisible(), true)
+      await fold(page).focus()
+      await page.keyboard.press("Space")
+      assert.equal(await fold(page).getAttribute("aria-expanded"), "false")
+      assert.equal(await fold(page).evaluate(el => el === document.activeElement), true)
+      assert.deepEqual(await visibleIds(page), [...available, ...attention].map(r => r.id))
+      await page.keyboard.press("Tab")
+      assert.equal(await page.evaluate(() => !!document.activeElement.closest("[hidden]")), false, "tab cannot enter a folded card")
       assert.deepEqual(f.mutations, [])
       assert.deepEqual(f.errors, [])
     } finally { await page.close() }
   }
-  console.log("PASS: five states, both partial installations, probe failure, missing Node/npm, offline retry, legacy/custom commands, no false ready; zh/en × 1280/375/320, light/dark")
+  console.log("PASS: 17 runtimes, usable first + visible pending/failure, exact collapsed count, no raw diagnostics by default; independent details and keyboard focus, five states, partial/legacy/custom installs; zh/en × 1280/375/320, light/dark")
+
+  for (const [width, lang] of [[1280, "zh-CN"], [320, "en"]]) {
+    const allMissing = Array.from({ length: 17 }, (_, i) => runtime(`missing-${i}`, "not_installed"))
+    const f = await fixture({ runtimes: allMissing, width, lang }), page = f.page
+    try {
+      await f.open()
+      assert.deepEqual(await visibleIds(page), [])
+      assert.match(await fold(page).innerText(), /^17 /)
+      assert.equal((await page.getByRole("button", { name: /17 / }).count()), 1)
+      await unfold(page)
+      assert.equal((await visibleIds(page)).length, 17)
+      await fold(page).click()
+      // An installation reported by a later probe is promoted even while the inventory is collapsed.
+      f.runtimes = f.runtimes.map((r, i) => i === 0 ? runtime(r.id, "installing") : r)
+      await page.locator("[data-runtime-refresh]").click()
+      await card(page, "missing-0").waitFor()
+      assert.equal(await installs(page, "missing-0").isDisabled(), true)
+      assert.match(await fold(page).innerText(), /^16 /)
+      assert.equal(await fold(page).getAttribute("aria-expanded"), "false")
+      f.runtimes = f.runtimes.map((r, i) => i === 0 ? runtime(r.id, "ready", [true, true]) : r)
+      await page.waitForFunction(() => !document.querySelector("[data-runtime-refresh]")?.disabled)
+      await page.locator("[data-runtime-refresh]").click()
+      await card(page, "missing-0").locator("[data-runtime-use]").waitFor()
+      assert.deepEqual(await visibleIds(page), ["missing-0"])
+      await fits(page)
+      assert.deepEqual(f.errors, [])
+    } finally { await page.close() }
+    const empty = await fixture({ runtimes: [], width, lang }), ep = empty.page
+    try {
+      await empty.open()
+      assert.equal(await fold(ep).count(), 0)
+      assert.equal(await ep.locator("[data-runtime]").count(), 0)
+      assert.match(await ep.locator("[data-panel=runtimes]").innerText(), /没有检测到|No harness found/)
+      await fits(ep)
+    } finally { await ep.close() }
+  }
+  console.log("PASS: all 17 unavailable → single row, empty inventory, external installation and ready probes update collapsed count without opening it; desktop Chinese and 320px English")
 
   // Failure, duplicate clicks, install polling, real refresh calls, and the Bot → item → session path.
-  const f = await fixture(), page = f.page
+  const f = await fixture({ runtimes: [legacy, runtime("fixture-runtime", "not_installed"), runtime("spare", "not_installed")] }), page = f.page
   try {
     await f.open()
+    await unfold(page)
     f.failInstall = true
     await installs(page).click()
     await card(page).locator("[data-runtime-install-error]").waitFor()
+    assert.doesNotMatch(await card(page).innerText(), /npm offline/)
+    await fold(page).click()
+    assert.equal(await card(page).isVisible(), true, "failed installation remains visible outside the folded inventory")
+    await card(page).locator("[data-runtime-details-toggle]").click()
     assert.match(await card(page).innerText(), /npm offline/)
     assert.equal(await card(page).locator("[data-runtime-use]").count(), 0)
     await page.waitForFunction(() => !document.querySelector("[data-runtime-install=fixture-runtime]")?.disabled)
@@ -131,6 +226,7 @@ try {
     assert.equal(f.mutations.filter(m => m.path.endsWith("/install")).length, 2, "the second click cannot submit twice")
     assert.equal(await installs(page).isDisabled(), true)
     await card(page).locator('[data-runtime-state="ready"]').waitFor()
+    assert.equal(await card(page).locator("[data-runtime-details-toggle]").getAttribute("aria-expanded"), "true", "card details survive promotion to usable")
     assert.ok(f.probes >= 4, "completion is read via fresh device probes")
     assert.equal(f.catalogs.includes("fixture-runtime"), false, "unavailable runtime never fetched a model catalog")
 
@@ -226,9 +322,12 @@ try {
   const h = await fixture(), q = h.page
   try {
     await h.open()
+    await unfold(q)
     h.rejectInstall = true
     await installs(q).click()
     await card(q).locator("[data-runtime-install-error]").waitFor()
+    assert.match(await card(q).innerText(), /安装未完成/)
+    await showDetails(q)
     assert.match(await card(q).innerText(), /未接受安装请求/)
     await q.waitForFunction(() => !document.querySelector("[data-runtime-install=fixture-runtime]")?.disabled)
     h.rejectInstall = false; h.restart = true
@@ -239,6 +338,10 @@ try {
     await q.locator("[data-runtime-refresh]").click()
     await q.locator("[data-runtime-refresh-error]").waitFor()
     assert.match(await q.locator("[data-runtime-refresh-error]").innerText(), /上次读取结果/)
+    assert.doesNotMatch(await q.locator("[data-panel=runtimes]").innerText(), /Node probe unreachable/)
+    await q.locator("summary:has([data-runtime-refresh-error])").click()
+    await q.locator("[data-runtime-refresh-error-detail]").waitFor()
+    assert.match(await q.locator("[data-runtime-refresh-error-detail]").innerText(), /Node probe unreachable/)
     assert.equal(await card(q).locator("[data-runtime-use]").count(), 0)
     h.probeStatus = 200; h.finishAt = h.probes + 1
     await q.locator("[data-runtime-refresh]").click()

@@ -43,8 +43,6 @@ use steve_modules::contacts::item_people::{self, Mention};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-static REF: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^#?([A-Z]{1,6}-\d+)\b\s*").expect("valid regex"));
 static AT: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^@(\S+)\s*").expect("valid regex"));
 
 /// Whether “@`at`” names the bot called `name`: “名字” or “名字Bot”, spaces ignored (the composer
@@ -83,7 +81,7 @@ struct Job {
     to: SayTo,
     /// the conversation it was said in
     conv: Conv,
-    /// Its way is fixed without the router (`/汇报`, sent to an item, quoting one, `#ST-n`): it goes on
+    /// Its way is fixed without the router (`/汇报`, sent to an open item, quoting one): it goes on
     /// its own lane and does not wait for the turn in progress. Worked out again whenever it is queued.
     #[serde(skip)]
     direct: bool,
@@ -172,7 +170,7 @@ pub struct ThreadReady {
 
 /// A conversation: the web's (`steve`) or a guest one — an IM space's (`chan:<space>`),
 /// whose turns come from people in that space. A guest conversation is routed like the web's,
-/// but never changes configuration, never talks to items (`#ST-n`, “送到事项”, progress questions)
+/// but never changes configuration, never talks to items (“送到事项”, progress questions)
 /// and never answers `/汇报`; research and items are allowed only when the host says so.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Conv {
@@ -250,7 +248,7 @@ pub trait ConvHost: Send + Sync {
 }
 
 /// Where a message goes besides the router: straight to an item (the focus bar “正在跟 ST-n 说”), or
-/// as a reply quoting a message (a message of an item goes to that item).
+/// as a reply quoting a message (a message of an unfinished item goes to that item).
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct SayTo {
     pub item: Option<String>,
@@ -1020,8 +1018,8 @@ impl Core {
     }
 
     /// Whether a message's way is fixed without the router, as [`Core::handle`] takes it: `/汇报`, sent to an
-    /// item of this workspace (focus bar) or quoting one of its messages, or `#ST-n …` (a bare `ST-n …`
-    /// unless it asks about it) of an item that exists. Never in a guest conversation.
+    /// open item of this workspace (focus bar) or quoting one of its messages. Textual references
+    /// are context for the router, including `#ST-n`. Never in a guest conversation.
     fn direct_way(&self, ws: &str, text: &str, to: &SayTo, guest: bool) -> Result<bool> {
         if guest {
             return Ok(false);
@@ -1030,24 +1028,17 @@ impl Core {
             return Ok(true);
         }
         let db = self.store();
-        let here =
-            |id: &str| -> Result<bool> { Ok(db.item(id)?.is_some_and(|i| i.workspace_id == ws)) };
         let target = match (&to.item, &to.reply_to) {
             (Some(i), _) => Some(i.clone()),
             (None, Some(r)) => db.message(r)?.and_then(|m| m.item_id),
             _ => None,
         };
-        if let Some(id) = target
-            && here(&id)?
-        {
-            return Ok(true);
-        }
-        if let Some(c) = REF.captures(text)
-            && (text.starts_with('#') || !decide::pure_question(text))
-        {
-            return here(&c[1]);
-        }
-        Ok(false)
+        Ok(match target {
+            Some(id) => db
+                .item(&id)?
+                .is_some_and(|i| i.workspace_id == ws && !i.is_finished()),
+            None => false,
+        })
     }
 
     /// Queues a stored message on its conversation's routing lane (its own lane when its way is fixed).
@@ -1252,6 +1243,17 @@ impl Core {
         Ok(())
     }
 
+    /// A main-conversation message must stay actionable when its target closes, even between the
+    /// router's decision and the transaction's lifecycle guard. `false` asks the caller to route it
+    /// normally or offer separate work. Other forwarding failures remain errors.
+    fn forward_open(&self, item: &str, text: &str, files: &[FileRef], mid: &str) -> Result<bool> {
+        match self.forward(item, text, files, mid) {
+            Ok(()) => Ok(true),
+            Err(_) if self.store().item(item)?.is_some_and(|i| i.is_finished()) => Ok(false),
+            Err(e) => Err(e),
+        }
+    }
+
     /// The forwarded message an item's turn answered, once.
     pub(crate) fn forwarded_take(&self, item: &str) -> Option<Forwarded> {
         lock(&self.0.thread.forwarded).remove(item)
@@ -1285,6 +1287,15 @@ impl Core {
                 vec![]
             } else {
                 self.focus(ws, &items)?
+            },
+            closed_items: if guest {
+                vec![]
+            } else {
+                items
+                    .iter()
+                    .filter(|i| i.is_finished())
+                    .map(|i| i.id.clone())
+                    .collect()
             },
             items: items.into_iter().map(|i| i.id).collect(),
             researching: self.researching(ws),

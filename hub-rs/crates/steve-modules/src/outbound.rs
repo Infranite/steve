@@ -104,8 +104,8 @@ pub struct CheckCx {
     /// changes no rule. `None` when the text answers nothing (email, comments, a new message).
     pub audience_said: Option<String>,
     /// Only the local checks (secrets, never-level knowledge, the rule check), no check model: a fixed
-    /// receipt no model wrote, or an email draft the model checks only on request. A result without
-    /// spans then has no `check_model`.
+    /// receipt no model wrote, or an email draft preview (actual mail sends always check again).
+    /// A result without spans then has no `check_model`.
     pub skip_model: bool,
     /// The text goes out under a bot's own identity (not yours, not on your behalf) and the knowledge
     /// given is everything its writer was given: then, for an audience made only of the workspace's own

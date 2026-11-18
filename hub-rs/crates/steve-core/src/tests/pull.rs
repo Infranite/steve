@@ -431,12 +431,15 @@ fn a_head_other_than_the_accepted_one_is_never_merged() {
 #[test]
 fn a_head_that_cannot_be_bound_to_the_accepted_result_is_not_merged_and_is_yours() {
     let gh = Gh::new();
-    let (k, x) = accepted_unfrozen(&gh);
-    let op = release_op(&k, &x).id;
+    let (k, x) = reviewed(&gh);
     k.db()
         .store()
-        .transaction(|tx| {
-            steve_store::operation_set_in(tx, &op, "pending", &json!({"pr_merge_ok": true}))
+        .with_conn(|c| {
+            c.execute(
+                "UPDATE items SET closing = json_remove(closing, '$.fingerprint') WHERE id = ?",
+                [&x.item],
+            )?;
+            Ok(())
         })
         .unwrap();
     gh.prs(open_pr(&head(&x.wt), json!({})));
@@ -713,6 +716,308 @@ fn a_new_result_of_a_followed_pull_request_does_not_wake_the_agent_again() {
     // the card for the void result expired; the new result is asked about on its own
     assert!(merge_cards(&k, &x).is_empty());
     look(&k);
+    assert_eq!(merge_cards(&k, &x).len(), 1);
+}
+
+fn all_merge_cards(k: &Kit, x: &Remote) -> Vec<crate::repo::Decision> {
+    k.db()
+        .decisions_of_item(&x.item)
+        .unwrap()
+        .into_iter()
+        .filter(|d| d.subject_type == PR_AWAITING_MERGE)
+        .collect()
+}
+
+fn approve_head(k: &Kit, x: &Remote, gh: &Gh) -> String {
+    gh.prs(open_pr(&head(&x.wt), json!({})));
+    look(k);
+    let card = merge_cards(k, x).pop().unwrap();
+    k.core.resolve(&card, "yes", "reviewed", "me").unwrap();
+    card
+}
+
+#[test]
+fn merge_consent_survives_report_redelivery_and_restart_at_the_same_exact_target() {
+    let gh = Gh::new();
+    let (k, x) = accepted(&gh);
+    let h = head(&x.wt);
+    let card = approve_head(&k, &x, &gh);
+    let receipt = k.db().decision(&card).unwrap().unwrap();
+    assert_eq!(
+        receipt.result["merge_target"],
+        json!({"repo":"acme/app", "pr":7, "head":h})
+    );
+    // A plan/report update keeps the closeout; a new accepted report creates another operation.
+    let s = k.db().session(&x.session).unwrap().unwrap();
+    k.core
+        .tool_update(&s, "补充报告", &[step("代码已完成", true)])
+        .unwrap();
+    assert_eq!(k.phase(&x.item), "closing");
+    let old = release_op(&k, &x).id;
+    accepted_again(&k, &x);
+    assert_ne!(release_op(&k, &x).id, old);
+    assert_eq!(head(&x.wt), h);
+    gh.prs(open_pr(
+        &h,
+        json!({"statusCheckRollup":[{"name":"CI gate", "status":"IN_PROGRESS"}]}),
+    ));
+    look(&k);
+    assert_eq!(
+        all_merge_cards(&k, &x).len(),
+        1,
+        "no duplicate consent card"
+    );
+    assert!(gh.merges().is_empty(), "still waits for CI");
+    assert_eq!(release_op(&k, &x).evidence["pr_merge_decision"], card);
+    // Fresh Core/SQLite connection; no in-memory permission survives this.
+    let restarted = k.reopened();
+    restarted.check_prs().unwrap();
+    assert!(gh.merges().is_empty());
+    restarted.tx().st.pr_checked.clear();
+    gh.prs(open_pr(&h, json!({})));
+    restarted.check_prs().unwrap();
+    assert_eq!(
+        gh.merges(),
+        [format!(
+            "pr merge 7 --repo acme/app --rebase --match-head-commit {h}"
+        )]
+    );
+    assert!(k.wait(|| k.phase(&x.item) == "closed"));
+    assert_eq!(all_merge_cards(&k, &x).len(), 1);
+}
+
+#[test]
+fn merge_consent_does_not_cross_a_new_sha_pr_or_repository() {
+    for change in ["sha", "pr", "repo"] {
+        let gh = Gh::new();
+        let (k, x) = accepted(&gh);
+        approve_head(&k, &x, &gh);
+        if change == "sha" {
+            // Even an empty commit (same tree/rebase-equivalent result) needs new consent.
+            g(&x.wt, &["commit", "--allow-empty", "-m", "new head"]);
+        }
+        accepted_again(&k, &x);
+        if change == "repo" {
+            k.core
+                .tx()
+                .follow_pr(&release_op(&k, &x).id, "acme/other", "item")
+                .unwrap();
+        }
+        gh.prs(open_pr(
+            &head(&x.wt),
+            if change == "pr" {
+                json!({"number":8})
+            } else {
+                json!({})
+            },
+        ));
+        look(&k);
+        look(&k);
+        assert!(gh.merges().is_empty(), "{change}");
+        assert_eq!(all_merge_cards(&k, &x).len(), 2, "{change}");
+        assert_eq!(merge_cards(&k, &x).len(), 1, "{change}");
+    }
+}
+
+#[test]
+fn invalid_or_unverifiable_merge_consent_is_not_reused() {
+    for change in [
+        "expired",
+        "reopened",
+        "revoked",
+        "missing",
+        "legacy",
+        "yolo",
+        "wrong-target",
+        "other-workspace",
+        "other-cycle",
+        "unknown-host",
+        "unknown-result",
+    ] {
+        let gh = Gh::new();
+        let (k, x) = accepted(&gh);
+        let card = approve_head(&k, &x, &gh);
+        match change {
+            "expired" => {
+                k.db()
+                    .store()
+                    .with_conn(|c| {
+                        c.execute("UPDATE decisions SET status='expired' WHERE id=?", [&card])?;
+                        Ok(())
+                    })
+                    .unwrap();
+            }
+            "reopened" => {
+                k.db().decision_reopen(&card).unwrap();
+            }
+            "revoked" => {
+                let mut result = k.db().decision(&card).unwrap().unwrap().result;
+                result["approved"] = json!(false);
+                k.db().decision_set_result(&card, &result).unwrap();
+            }
+            "missing" => {
+                k.db()
+                    .store()
+                    .with_conn(|c| {
+                        c.execute("DELETE FROM decisions WHERE id=?", [&card])?;
+                        Ok(())
+                    })
+                    .unwrap();
+            }
+            "legacy" => {
+                k.db()
+                    .decision_set_result(&card, &json!({"approved":true}))
+                    .unwrap();
+            }
+            "yolo" => {
+                let mut result = k.db().decision(&card).unwrap().unwrap().result;
+                result["actor"] = json!(YOLO_ACTOR);
+                k.db().decision_set_result(&card, &result).unwrap();
+            }
+            "wrong-target" => {
+                let mut result = k.db().decision(&card).unwrap().unwrap().result;
+                result["merge_target"]["head"] = json!("0123456789abcdef0123456789abcdef01234567");
+                k.db().decision_set_result(&card, &result).unwrap();
+            }
+            "other-workspace" => {
+                k.db()
+                    .store()
+                    .with_conn(|c| {
+                        c.execute(
+                            "INSERT INTO workspaces(id,name,created) VALUES('foreign','Foreign',1)",
+                            [],
+                        )?;
+                        c.execute(
+                            "UPDATE decisions SET workspace_id='foreign' WHERE id=?",
+                            [&card],
+                        )?;
+                        Ok(())
+                    })
+                    .unwrap();
+            }
+            "other-cycle" => {
+                let op = release_op(&k, &x).id;
+                k.db()
+                    .store()
+                    .with_conn(|c| {
+                        c.execute("UPDATE item_operations SET cycle=0 WHERE id=?", [&op])?;
+                        Ok(())
+                    })
+                    .unwrap();
+            }
+            _ => {}
+        }
+        accepted_again(&k, &x);
+        if change == "unknown-result" {
+            k.db()
+                .store()
+                .with_conn(|c| {
+                    c.execute(
+                        "UPDATE items SET closing=json_remove(closing,'$.fingerprint') WHERE id=?",
+                        [&x.item],
+                    )?;
+                    Ok(())
+                })
+                .unwrap();
+        }
+        gh.prs(open_pr(&head(&x.wt), json!({})));
+        if change == "unknown-host" {
+            gh.offline(true);
+        }
+        look(&k);
+        look(&k);
+        assert!(gh.merges().is_empty(), "{change}");
+        if change == "revoked" {
+            assert!(merge_cards(&k, &x).is_empty(), "a no stays manual");
+            assert_eq!(release_op(&k, &x).evidence["pr_merge_declined"], true);
+        } else if !change.starts_with("unknown") {
+            assert_eq!(merge_cards(&k, &x).len(), 1, "{change}");
+        }
+    }
+}
+
+#[test]
+fn a_card_and_an_approved_operation_cannot_authorize_a_different_live_pr() {
+    let gh = Gh::new();
+    let (k, x) = accepted(&gh);
+    let h = head(&x.wt);
+    let card = approve_head(&k, &x, &gh);
+    // Same operation and SHA, but a new PR; the fresh target must be checked before merge.
+    gh.prs(open_pr(&h, json!({"number":8})));
+    look(&k);
+    assert!(gh.merges().is_empty());
+    let other = merge_cards(&k, &x).pop().unwrap();
+    assert_ne!(other, card);
+    gh.prs(open_pr(&h, json!({"number":9})));
+    look(&k);
+    assert_eq!(k.db().decision(&other).unwrap().unwrap().status, "expired");
+    assert!(k.core.resolve(&other, "yes", "", "me").is_err());
+    assert!(gh.merges().is_empty());
+}
+
+#[test]
+fn reused_merge_consent_does_not_skip_failed_ci_or_host_sha_protection() {
+    let gh = Gh::new();
+    let (k, x) = accepted(&gh);
+    let h = head(&x.wt);
+    approve_head(&k, &x, &gh);
+    accepted_again(&k, &x);
+    gh.prs(open_pr(&h, json!({"statusCheckRollup":null})));
+    look(&k);
+    assert!(
+        gh.merges().is_empty(),
+        "an unread check rollup is not a pass"
+    );
+    gh.prs(open_pr(&h, json!({"statusCheckRollup":[{"name":"CI gate", "status":"COMPLETED", "conclusion":"FAILURE"}]})));
+    look(&k);
+    assert!(gh.merges().is_empty());
+    assert_eq!(all_merge_cards(&k, &x).len(), 1);
+    gh.merge_fails(Some(
+        "GraphQL: Head branch was modified. Review and try the merge again.",
+    ));
+    gh.prs(open_pr(&h, json!({})));
+    look(&k);
+    assert_eq!(
+        gh.merges(),
+        [format!(
+            "pr merge 7 --repo acme/app --rebase --match-head-commit {h}"
+        )]
+    );
+    assert_eq!(release_op(&k, &x).evidence["pr_progress"], "merge_retry");
+    assert_eq!(k.phase(&x.item), "closing");
+}
+
+#[test]
+fn merge_consent_is_rechecked_after_host_methods_and_before_the_merge_call() {
+    let gh = Gh::new();
+    let (k, x) = accepted(&gh);
+    let card = approve_head(&k, &x, &gh);
+    let script = std::fs::read_to_string(&gh.script).unwrap();
+    std::fs::write(&gh.script, script.replace(
+        "case \"$1 $2\" in",
+        "if [ \"$1 $2\" = 'api repos/acme/app' ]; then touch \"$d/repo.entered\"; while [ -f \"$d/repo.wait\" ]; do sleep 0.01; done; fi\ncase \"$1 $2\" in",
+    )).unwrap();
+    std::fs::write(gh.dir.join("repo.wait"), "").unwrap();
+    let core = k.core.clone();
+    let checking = std::thread::spawn(move || core.check_prs());
+    let paused = k.wait(|| gh.dir.join("repo.entered").exists());
+    k.db()
+        .store()
+        .with_conn(|c| {
+            c.execute("UPDATE decisions SET status='expired' WHERE id=?", [&card])?;
+            Ok(())
+        })
+        .unwrap();
+    std::fs::remove_file(gh.dir.join("repo.wait")).unwrap();
+    checking.join().unwrap().unwrap();
+    assert!(
+        paused,
+        "the host methods query was reached after the first consent check"
+    );
+    assert!(
+        gh.merges().is_empty(),
+        "revoked during the host query: no merge call"
+    );
     assert_eq!(merge_cards(&k, &x).len(), 1);
 }
 
@@ -1335,12 +1640,21 @@ fn closeout_publishes_only_current_checks_and_deduplicates_conversation_mileston
     gh.prs(open_pr(&h2, queued));
     look(&k);
     let fresh = read();
-    assert_eq!(fresh.status, "waiting_checks");
+    assert_eq!(fresh.status, "awaiting_approval");
     assert_eq!(fresh.sync_error, None);
     let pr = fresh.pr.unwrap();
     assert_eq!(pr.head, h2);
     assert!(pr.checks.unwrap().failing.is_empty());
-    assert_eq!(visible_card().meta, card.meta);
+    // Same tree on a new SHA still requires a new human answer. Once answered, routine CI
+    // observations are quiet again; they must not retain the earlier head's merge permission.
+    let changed_head_card = merge_cards(&k, &x).pop().unwrap();
+    assert_ne!(changed_head_card, approvals[0]);
+    assert_eq!(visible_card().meta["card"]["decision"], changed_head_card);
+    k.core.resolve(&changed_head_card, "yes", "", "me").unwrap();
+    let approved = visible_card().meta;
+    look(&k);
+    assert_eq!(read().status, "waiting_checks");
+    assert_eq!(visible_card().meta, approved);
     assert!(gh.merges().is_empty());
 
     gh.prs(open_pr(&h2, json!({})));

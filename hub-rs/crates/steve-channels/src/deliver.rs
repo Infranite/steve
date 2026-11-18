@@ -399,7 +399,12 @@ pub const NOT_AS_YOU_UNCOMPOSED: &str = "不是起草器写的回复，不以你
 /// ([`Purpose::Trigger`]) goes out as their settings say (`[AI]`-marked, #225), unless the composer
 /// says it needs your approval: the caller decides.
 pub fn must_approve(mode: Mode, req: &OutRequest) -> bool {
-    req.approve || (mode == Mode::Own && req.purpose == Purpose::Reply)
+    req.approve
+        || (mode == Mode::Own && req.purpose == Purpose::Reply)
+        || req
+            .generation
+            .as_ref()
+            .is_some_and(|g| g.needs_approval || g.needs_commitment)
 }
 
 /// The outbound path (C6 implements it). Must authorize, check disclosure and audit before any
@@ -417,7 +422,12 @@ pub struct DraftOnly;
 #[async_trait]
 impl Outbound for DraftOnly {
     async fn deliver(&self, ch: &Channels, req: &OutRequest) -> ChannelResult<Delivered> {
-        if req.purpose == Purpose::HandoffAck {
+        if req.purpose == Purpose::HandoffAck
+            || req
+                .generation
+                .as_ref()
+                .is_some_and(|g| g.outcome != Outcome::Reply)
+        {
             return Ok(Delivered::Skipped);
         }
         if let Some(why) = not_as_you(req.target.mode, req) {

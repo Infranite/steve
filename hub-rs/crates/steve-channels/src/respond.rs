@@ -35,7 +35,16 @@ pub const HANDOFF_OPTIONS: [&str; 5] = [SEND_DRAFT, INSTRUCT, VERBATIM, "to_item
 /// … and without one.
 pub const HANDOFF_NO_DRAFT_OPTIONS: [&str; 4] = [INSTRUCT, VERBATIM, "to_item", "done"];
 /// Options of the approval of a draft.
-pub const DRAFT_OPTIONS: [&str; 2] = ["yes", "no"];
+pub const DRAFT_OPTIONS: [&str; 3] = ["yes", "no", "to_item"];
+
+/// Direct outbound messages have no inbound request to turn into an item.
+pub(crate) fn draft_options(has_source: bool) -> Vec<String> {
+    DRAFT_OPTIONS
+        .iter()
+        .filter(|o| has_source || **o != "to_item")
+        .map(|o| o.to_string())
+        .collect()
+}
 
 impl Channels {
     /// [`crate::presence::stop`] for a plan that would draft or ask in your name about someone
@@ -169,6 +178,12 @@ pub trait Responder: Send + Sync {
         Ok(None)
     }
 
+    /// An explicit conversion creates the item without sending an acknowledgement to the chat.
+    async fn to_item(&self, ch: &Channels, plan: &Plan) -> ChannelResult<Option<Acted>> {
+        let _ = (ch, plan);
+        Ok(None)
+    }
+
     /// Sends a handoff's “我请 <主人称呼> 来看。” (never called when muted). Returns whether it
     /// was sent. Default: not sent.
     async fn acknowledge(&self, ch: &Channels, plan: &Plan, text: &str) -> ChannelResult<bool> {
@@ -283,7 +298,7 @@ pub(crate) fn open_draft_as(
             session_id: None,
             question,
             draft: Some(text.to_string()),
-            options: Some(DRAFT_OPTIONS.map(String::from).to_vec()),
+            options: Some(draft_options(t.source_message_id.is_some())),
             requested_by: "steve".into(),
         },
     )?;

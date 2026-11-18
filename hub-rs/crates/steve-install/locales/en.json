@@ -21,6 +21,7 @@
   "install.cli.hub_silent": "The Hub has not answered yet; steve hub status and steve hub doctor show why.",
   "install.cli.adapters_action_missing": "Choose one of adapters status/upgrade/install",
   "install.cli.role_not_set_up": "%{role} is not set up yet; run steve setup first",
+  "install.cli.adapters_home_invalid": "Cannot resolve the installed adapter command at %{home}; check this home's setup/service records and release files",
   "install.cli.upgrade_action_missing": "Choose one of upgrade check/request/status/watch",
   "install.cli.hub_not_set_up": "The Hub is not set up yet; run steve setup first",
   "install.cli.current_outside_releases": "current does not belong to this installation's releases",

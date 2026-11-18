@@ -46,6 +46,9 @@ pub const ME: &str = "me";
 /// `connections.config` key: the platform the service said it reaches (hello `platform`, §16), a
 /// provider id. Kept current on every connect; the 接入 page lists the connection under it.
 pub const PLATFORM: &str = steve_modules::accounts::connections::PLATFORM_KEY;
+/// Last service-reported policy, for display only. Authorization always uses the live session.
+const WRITE_POLICY: &str = "write_policy";
+const WRITE_POLICY_AT: &str = "write_policy_checked_at";
 
 /// How many times a read or a write is tried again (§2, §7).
 const RETRIES: usize = 3;
@@ -226,6 +229,7 @@ impl ExtWs {
             s.close(1000, "account changed");
             return Err(e);
         }
+        Self::remember_write_policy(cx, &s).await;
         Ok(Use { s, own: true })
     }
 
@@ -265,6 +269,7 @@ impl ExtWs {
         mut params: Value,
         key: Option<String>,
     ) -> Result<Value, ProviderError> {
+        self.hub_writable(cx)?;
         let u = self.session(cx).await?;
         let s = &u.s;
         writable(s)?;
@@ -289,6 +294,10 @@ impl ExtWs {
         let mut backoff = Duration::from_secs(1);
         for attempt in 0..=RETRIES {
             self.pace(cx.id(), s).await;
+            // A borrowed ConnCx and an earlier approval are not a grant: the switch or the
+            // service policy may have changed during pacing/backoff. Never replay after denial.
+            self.hub_writable(cx)?;
+            writable(s)?;
             match s.call(method, params.clone(), s.timing().call).await {
                 Ok(v) => return Ok(v),
                 Err(e) => {
@@ -313,6 +322,7 @@ impl ExtWs {
                     };
                     if let Some(Reason::WriteForbidden) = e.reason() {
                         s.forbid_writes();
+                        Self::remember_write_policy(cx, s).await;
                     }
                     if let Some(Reason::AccountChanged | Reason::Unauthorized) = e.reason() {
                         s.close(1000, "account changed");
@@ -328,6 +338,33 @@ impl ExtWs {
             }
         }
         unreachable!("the loop returns")
+    }
+
+    /// All personal writes, including recall/reactions and direct connector dispatch, share the
+    /// account's existing Hub switch. Re-read the row, including paused/revoked status, each time.
+    /// A local denial must not be remembered as a provider-side write block.
+    fn hub_writable(&self, cx: &ConnCx) -> Result<(), ProviderError> {
+        if self.identity == Identity::Self_ {
+            cx.connections()
+                .cx_for(cx.ws(), cx.id(), Some(crate::spaces::SEND_AS_USER_CAP))
+                .map_err(|e| ProviderError::Rejected(format!("Hub: {e}")))?;
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn remember_write_policy(cx: &ConnCx, s: &Session) {
+        let policy = Value::from(s.status().write_policy.name());
+        let at = cx.connections().modules().clock.now();
+        cx.connections()
+            .update_config(cx.ws(), cx.id(), move |c| {
+                if c.get(WRITE_POLICY) == Some(&policy) {
+                    return false;
+                }
+                c[WRITE_POLICY] = policy;
+                c[WRITE_POLICY_AT] = at.into();
+                true
+            })
+            .await;
     }
 
     /// One read, retried up to 3 times on transient errors (§2).
@@ -850,6 +887,17 @@ impl ConnectionProvider for ExtWs {
         }
     }
 
+    fn integration_detail(
+        &self,
+        config: &Value,
+        _caps: &[steve_modules::accounts::connections::CapState],
+    ) -> Option<Value> {
+        Some(json!({"external_write_policy": {
+            "policy": config.get(WRITE_POLICY),
+            "observed_at": config.get(WRITE_POLICY_AT),
+        }}))
+    }
+
     fn reauth_question(&self, account: &str) -> String {
         format!("{account} 的渠道服务需要重新连接")
     }
@@ -880,6 +928,8 @@ impl ConnectionProvider for ExtWs {
             "server": s.hello().server,
             "connector": s.hello().connector,
             PLATFORM: s.hello().platform,
+            WRITE_POLICY: s.status().write_policy.name(),
+            WRITE_POLICY_AT: cx.connections().modules().clock.now(),
         }));
         info.strict_identity_owner = true;
         if self.identity == Identity::Bot {
@@ -900,6 +950,7 @@ impl ConnectionProvider for ExtWs {
     /// re-authorization: the channel service brings it back); else a dial.
     async fn health(&self, cx: &ConnCx) -> Health {
         if let Some(s) = self.live(cx.id()) {
+            Self::remember_write_policy(cx, &s).await;
             return match s.status().status {
                 SessionStatus::Ok => Health::Ok,
                 SessionStatus::Expired => {
@@ -914,7 +965,10 @@ impl ConnectionProvider for ExtWs {
             Ok((s, _, me)) => {
                 s.close(1000, "health");
                 match same_identity(cx.config(), &me) {
-                    Ok(()) => Health::Ok,
+                    Ok(()) => {
+                        Self::remember_write_policy(cx, &s).await;
+                        Health::Ok
+                    }
                     Err(e) => Health::from(&e),
                 }
             }
@@ -1368,6 +1422,9 @@ impl crate::connector::ConnectorTools for ExtWs {
         args: Value,
         key: &str,
     ) -> Result<Value, String> {
+        if !op.read_only() {
+            self.hub_writable(cx).map_err(|e| e.to_string())?;
+        }
         let guard = self.session(cx).await.map_err(|e| e.to_string())?;
         let s = &guard.s;
         if s.status().status != SessionStatus::Ok {
@@ -1392,6 +1449,8 @@ impl crate::connector::ConnectorTools for ExtWs {
                 return Err("write requires a request identity".into());
             }
             self.pace(cx.id(), s).await;
+            self.hub_writable(cx).map_err(|e| e.to_string())?;
+            writable(s).map_err(|e| e.to_string())?;
             p["expected_sender"] = expected_sender(cx).map_err(|e| e.to_string())?;
             p["expected_identity"] = self.identity.name().into();
             p["idempotency_key"] = wire::idempotency_key(key).into();
@@ -1402,7 +1461,13 @@ impl crate::connector::ConnectorTools for ExtWs {
             Err(CallError::Timeout | CallError::Closed(_)) if !op.read_only() => {
                 Ok(json!({"status": "unknown", "request_id": key, "retry": false}))
             }
-            Err(e) => Err(format!("connector call: {e:?}")),
+            Err(e) => {
+                if e.reason() == Some(Reason::WriteForbidden) && !op.read_only() {
+                    s.forbid_writes();
+                    Self::remember_write_policy(cx, s).await;
+                }
+                Err(format!("connector call: {e:?}"))
+            }
         }
     }
 

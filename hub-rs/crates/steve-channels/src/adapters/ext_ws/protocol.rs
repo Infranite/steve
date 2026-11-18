@@ -163,6 +163,12 @@
 //! `session.status` (§4.6) carries `write_policy`. A write that crosses the change in flight gets
 //! `write_forbidden`, and the Hub then behaves as for `forbidden`.
 //!
+//! For personal connections, every write also requires the account's existing Hub capability
+//! `msg.send_as_user`, rechecked at the adapter boundary and after pacing/retry waits. This is
+//! independent of service policy: enabling it grants no upstream permission and replays no prior
+//! operation. Connection and integrations APIs show both gates separately; their saved service
+//! policy snapshot is informational, never authorization.
+//!
 //! ## 4. Methods
 //!
 //! **R** marks a required method and **O** an optional one. Every request goes from client to

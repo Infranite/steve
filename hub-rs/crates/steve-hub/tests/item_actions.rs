@@ -334,6 +334,60 @@ async fn creation_blocks_before_opening_a_session_and_completion_starts_it_once(
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn closing_a_parent_archives_a_historical_failed_child_over_http() {
+    let e = start().await;
+    let store = steve_store::Store::open(&e.db, steve_store::NoPublisher).unwrap();
+    let parent = store
+        .items()
+        .create(
+            "default",
+            &steve_store::NewItem {
+                title: "parent".into(),
+                goal: "fixture parent".into(),
+                bot_id: "steve".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .unwrap();
+    let child = store
+        .items()
+        .create(
+            "default",
+            &steve_store::NewItem {
+                title: "legacy failed child".into(),
+                goal: "fixture attempt".into(),
+                bot_id: "steve".into(),
+                parent: Some(steve_store::Parent {
+                    item: Some(Some(parent.id.clone())),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .unwrap();
+    store.with_conn(|c| {
+        c.execute("UPDATE items SET phase='closed',status='fail',outcome='failed',closed_reason='old review failed' WHERE id=?", [&child.id])?;
+        Ok(())
+    }).unwrap();
+    let (status, result) = act(&e, &parent.id, "finish").await;
+    assert_eq!(status, 200, "{result}");
+    let (status, read) = e
+        .call("GET", &format!("/api/items/{}", child.id), None)
+        .await;
+    assert_eq!(status, 200, "{read}");
+    assert_eq!(read["archived"], true, "{read}");
+    assert_eq!(read["outcome"], "failed");
+    assert!(
+        read["now"]
+            .as_str()
+            .unwrap()
+            .contains(&format!("随父事项 {} 结束", parent.id))
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn pause_finish_drop_and_new_cycles() {
     let e = start().await;
     let sid = item(&e, "慢慢做 @sleep 20000").await;

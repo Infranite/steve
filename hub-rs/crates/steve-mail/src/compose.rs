@@ -479,7 +479,7 @@ impl Mail {
                 seq: Some(h.seq),
             })
             .collect();
-        let skip_model = !self.model_check_now(&who.ws, q.item_id.as_deref());
+        let skip_model = !self.preview_model_now(&who.ws, q.item_id.as_deref());
         let check = drafts::local_only(
             outbound::check(
                 &self.0.m,

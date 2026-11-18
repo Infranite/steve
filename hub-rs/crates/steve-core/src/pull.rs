@@ -57,6 +57,8 @@ use crate::{Core, Tx};
 
 mod closeout;
 pub use closeout::{Checks, Closeout, Snapshot};
+mod approval;
+use approval::MergeTarget;
 
 /// How long one `gh` call may take.
 const GH_DEADLINE: Duration = Duration::from_secs(30);
@@ -77,8 +79,6 @@ pub const PR_TELLS_MAX: i64 = 8;
 /// `subject_type` of the card asking you whether to merge a change no independent review passed
 /// (an `approve`; the subject is the release operation). Only you answer it.
 pub const PR_AWAITING_MERGE: &str = "pr_awaiting_merge";
-/// The `pr_told` key of the "PR awaiting merge" card: asked once per result.
-pub(crate) const TOLD_AWAITING: &str = "awaiting";
 /// The `pr_told` keys of what the agent was told (each followed by what it was about, a head, the
 /// checks that failed); every other key is of a card for you.
 const TELL_KEYS: [&str; 8] = [
@@ -159,6 +159,7 @@ impl Pr {
         self.state == "OPEN"
             && !self.draft
             && !self.head.is_empty()
+            && self.checks.is_some()
             && !self.pending
             && self.failing.is_empty()
             && !self.conflict
@@ -563,10 +564,14 @@ impl Core {
             let accepted = if open { d.accepted() } else { Accepted::Moved };
             let merging = match (&look, &accepted) {
                 (Look::Found(pr), Accepted::At(h))
-                    if d.may_merge
+                    if !d.only_merged
                         && now() >= d.merge_after
                         && pr.mergeable_now()
-                        && &pr.head == h =>
+                        && &pr.head == h
+                        && self.tx().pr_may_merge_at(
+                            &d.op,
+                            MergeTarget::new(&d.slug, pr.number, h).as_ref(),
+                        )? =>
                 {
                     /* the methods are read first (and whether the branch can be rebased, #316), so
                      * that between asking again under the lock (a result invalidated since is never
@@ -584,7 +589,10 @@ impl Core {
                                 Some(Merging::Refused(
                                     "GitHub 说这个分支不能 rebase（分支里有合并提交，或 rebase 会冲突），而仓库只允许 rebase 合并".into(),
                                 ))
-                            } else if self.tx().pr_may_merge(&d.op)? {
+                            } else if self.tx().pr_may_merge_at(
+                                &d.op,
+                                MergeTarget::new(&d.slug, pr.number, h).as_ref(),
+                            )? {
                                 Some(merge_any(&gh_cli, &d.slug, pr.number, h, &methods))
                             } else {
                                 None
@@ -812,7 +820,11 @@ impl Tx<'_> {
     fn pr_review(&self, i: &Item, o: &steve_store::ItemOperation) -> Result<&'static str> {
         Ok(if self.pr_reviewed(i)? {
             "graph"
-        } else if o.evidence["pr_merge_ok"] == json!(true) {
+        } else if let Some(target) = MergeTarget::observed(o)
+            && self
+                .pr_merge_receipt(i, &target)?
+                .is_some_and(|d| d.result["approved"] == true)
+        {
             "you"
         } else {
             "none"
@@ -822,6 +834,18 @@ impl Tx<'_> {
     /// Steve may merge the item's pull request right now: its release is still open, the item still
     /// closing on the revision that was accepted, and the change reviewed or yours to have said yes to.
     pub(crate) fn pr_may_merge(&mut self, op: &str) -> Result<bool> {
+        let target = self
+            .db()
+            .store()
+            .items()
+            .operation(op)?
+            .as_ref()
+            .and_then(MergeTarget::observed);
+        self.pr_may_merge_at(op, target.as_ref())
+    }
+
+    /// Recheck consent against the freshly observed target, including immediately before merge.
+    fn pr_may_merge_at(&self, op: &str, target: Option<&MergeTarget>) -> Result<bool> {
         let Some(o) = self.db().store().items().operation(op)? else {
             return Ok(false);
         };
@@ -829,12 +853,24 @@ impl Tx<'_> {
             return Ok(false);
         };
         let accepted = closing_of(&i).is_some_and(|c| c.kind == COMPLETE && c.accepted);
+        let receipt = match target {
+            Some(target) if o.evidence["pr_slug"].as_str() == Some(&target.repo) => {
+                self.pr_merge_receipt(&i, target)?
+            }
+            _ => None,
+        };
         Ok(o.status == "pending"
+            && o.kind == OP_RELEASE
+            && o.cycle == i.cycle
+            && target.is_some()
+            && target.is_some_and(|t| o.evidence["pr_slug"].as_str() == Some(t.repo.as_str()))
             && i.phase == CLOSING
             && o.revision == i.revision
             && accepted
-            && o.evidence["pr_merge_declined"] != json!(true)
-            && self.pr_review(&i, &o)? != "none")
+            && !receipt
+                .as_ref()
+                .is_some_and(|d| d.result["approved"] == false)
+            && (self.pr_reviewed(&i)? || receipt.is_some_and(|d| d.result["approved"] == true)))
     }
 
     /// The pull requests due for a look: required releases still pending, followed, of a closing item.
@@ -864,7 +900,7 @@ impl Tx<'_> {
             let Some(i) = self.db().item(&o.item_id)? else {
                 continue;
             };
-            if i.phase != CLOSING || o.revision != i.revision {
+            if i.phase != CLOSING || o.cycle != i.cycle || o.revision != i.revision {
                 continue;
             }
             self.st.pr_checked.insert(o.id.clone(), t);
@@ -906,7 +942,11 @@ impl Tx<'_> {
         let Some(i) = self.db().item(&d.item)? else {
             return Ok(());
         };
-        if o.status != "pending" || i.phase != CLOSING || o.revision != i.revision {
+        if o.status != "pending"
+            || i.phase != CLOSING
+            || o.cycle != i.cycle
+            || o.revision != i.revision
+        {
             /* the result went void while Steve's merge ran (the last look before it was fine): the
              * merge happened all the same, and is never left unsaid */
             if let (Some(Merging::Merged), Look::Found(pr)) = (&merging, &look) {
@@ -948,15 +988,46 @@ impl Tx<'_> {
             return Ok(());
         }
         let told = strings(&o.evidence["pr_told"]);
-        let review = self.pr_review(&i, &o)?;
+        let found = matches!(&look, Look::Found(_));
+        let target = match &look {
+            Look::Found(pr) => MergeTarget::new(&d.slug, pr.number, &pr.head),
+            _ => None,
+        };
+        let receipt = match &target {
+            Some(t) => self.pr_merge_receipt(&i, t)?,
+            None => None,
+        };
+        let declined = receipt
+            .as_ref()
+            .is_some_and(|d| d.result["approved"] == false);
+        let verified = target
+            .as_ref()
+            .is_some_and(|t| matches!(&accepted, Accepted::At(h) if *h == t.head));
+        let review = if self.pr_reviewed(&i)? {
+            "graph"
+        } else if (verified || matches!(&look, Look::Found(pr) if pr.state == "MERGED"))
+            && receipt
+                .as_ref()
+                .is_some_and(|d| d.result["approved"] == true)
+        {
+            "you"
+        } else {
+            "none"
+        };
         /* what the agent is told (once per key: a pushed head, a set of failed checks) */
         let mut tell: Option<(String, String)> = None;
         let mut ev = json!({"pr_observed_since": d.checked_at});
+        if matches!(look, Look::Found(_)) {
+            // These fields describe this observation; only the source decision grants authority.
+            ev["pr_merge_ok"] = json!(review == "you");
+            ev["pr_merge_declined"] = json!(declined);
+            ev["pr_merge_decision"] = json!(receipt.as_ref().map(|d| &d.id));
+        }
         let mut close = false;
         let mut signal = None;
         /* a card for you, once per key */
         let mut card: Option<(String, String)> = None;
-        let mut ask_merge: Option<(u64, String)> = None;
+        let mut ask_merge: Option<(MergeTarget, String)> = None;
         let unknown = o.evidence["pr_unknown"].as_i64().unwrap_or(0);
         if unknown > 0 && !matches!(look, Look::Unknown(_)) {
             ev["pr_unknown"] = json!(0);
@@ -1109,7 +1180,7 @@ impl Tx<'_> {
                         ev["pr_problem"] = Value::Null;
                         ev["pr_progress"] = json!(if pr.pending {
                             "waiting_checks"
-                        } else if pr.settling {
+                        } else if pr.settling || pr.checks.is_none() {
                             "waiting_github"
                         } else if !matches!(&accepted, Accepted::At(h) if *h == pr.head) {
                             "waiting_result"
@@ -1160,12 +1231,19 @@ impl Tx<'_> {
                                 ),
                             ));
                         }
-                        if review == "none" && o.evidence["pr_merge_declined"] != json!(true) {
-                            ask_merge = Some((pr.number, pr.url.clone()));
+                        if review == "none" && !declined && verified {
+                            ask_merge = target.clone().map(|t| (t, pr.url.clone()));
                         }
                         /* ready to merge, but nothing says which commit was accepted: Steve does
                          * not merge a head it can't bind to the result */
-                        if accepted == Accepted::Unknown && d.may_merge && pr.mergeable_now() {
+                        if accepted == Accepted::Unknown
+                            && (d.may_merge
+                                || review == "graph"
+                                || receipt
+                                    .as_ref()
+                                    .is_some_and(|d| d.result["approved"] == true))
+                            && pr.mergeable_now()
+                        {
                             ev["pr_problem"] = json!("accepted_unknown");
                             ev["pr_progress"] = json!("accepted_unknown");
                             card = Some((
@@ -1306,10 +1384,17 @@ impl Tx<'_> {
         if let Some((k, _)) = &card {
             all.push(k.clone());
         }
-        let ask_merge = ask_merge.filter(|_| !told.iter().any(|k| k == TOLD_AWAITING));
-        if ask_merge.is_some() {
-            all.push(TOLD_AWAITING.into());
-        }
+        // Open cards dedupe by their frozen target. A revoked answer may request a fresh card;
+        // the old per-result `awaiting` marker must not suppress it forever.
+        let decisions = self.db().decisions_of_item(&i.id)?;
+        let ask_merge = ask_merge.filter(|(target, _)| {
+            !decisions.iter().any(|d| {
+                d.status == "open"
+                    && d.subject_type == PR_AWAITING_MERGE
+                    && d.subject_id == o.id
+                    && MergeTarget::requested(&o, &d.id).as_ref() == Some(target)
+            })
+        });
         if all.len() != told.len() {
             ev["pr_told"] = json!(all);
         }
@@ -1317,6 +1402,9 @@ impl Tx<'_> {
         // the potentially external agent wake and the normal lifecycle gate run after this commit.
         let db = self.db().clone();
         db.atomic(|| {
+            if found {
+                self.pr_expire_merge_requests(&i, &o, target.as_ref())?;
+            }
             db.store()
                 .transaction(|tx| steve_store::operation_set_in(tx, &d.op, "pending", &ev))?;
             if let Some(u) = signal
@@ -1327,8 +1415,8 @@ impl Tx<'_> {
             if let Some((_, why)) = card {
                 self.fail(&i.id, &why)?;
             }
-            if let Some((n, url)) = ask_merge {
-                self.pr_ask_merge(&i, &d.op, n, &url)?;
+            if let Some((target, url)) = ask_merge {
+                self.pr_ask_merge(&i, &d.op, &target, &url)?;
             }
             Ok(())
         })?;
@@ -1371,7 +1459,8 @@ impl Tx<'_> {
 
     /// The "PR awaiting merge" card: a change no independent review passed is merged only once you
     /// said yes. Only you answer it ([`Self::pr_merge_answer`]).
-    fn pr_ask_merge(&mut self, i: &Item, op: &str, number: u64, url: &str) -> Result<()> {
+    fn pr_ask_merge(&mut self, i: &Item, op: &str, target: &MergeTarget, url: &str) -> Result<()> {
+        let number = target.pr;
         let d = self.db().decision_create(NewDecision {
             workspace_id: i.workspace_id.clone(),
             kind: "approve".into(),
@@ -1380,11 +1469,31 @@ impl Tx<'_> {
             item_id: Some(i.id.clone()),
             session_id: None,
             question: format!(
-                "PR #{number} 待合并：这个事项改了代码，但没有经过独立评审（没有带评审的工作图），Steve 不会自己合并它。看过改动后批准，Steve 会在检查都通过后按验收的版本合并；你也可以在 GitHub 上自己合并。"
+                "PR #{number} 待合并：这个事项改了代码，但没有经过独立评审（没有带评审的工作图），Steve 不会自己合并它。看过改动后批准，Steve 会在检查都通过后合并 {} 的 PR #{number}（提交 {}）；同一提交重新交付保留此次批准，你也可以在 GitHub 上自己合并。",
+                target.repo, target.head
             ),
             draft: Some(url.into()),
             options: Some(vec!["yes".into(), "no".into()]),
             requested_by: "steve".into(),
+        })?;
+        let o = self
+            .db()
+            .store()
+            .items()
+            .operation(op)?
+            .ok_or_else(|| conflict("没有这个收尾操作"))?;
+        let mut requests = o.evidence["pr_merge_requests"]
+            .as_object()
+            .cloned()
+            .unwrap_or_default();
+        requests.insert(d.id.clone(), json!(target));
+        self.db().store().transaction(|tx| {
+            steve_store::operation_set_in(
+                tx,
+                op,
+                "pending",
+                &json!({"pr_merge_requests": requests}),
+            )
         })?;
         self.db().timeline_add(
             &i.id,
@@ -1490,21 +1599,27 @@ impl Tx<'_> {
         let (Some(o), Some(i)) = (o, i) else {
             return Err(conflict("这个结果已经完成或作废，不再合并"));
         };
-        if i.phase != CLOSING || o.revision != i.revision {
+        if i.phase != CLOSING
+            || o.kind != OP_RELEASE
+            || o.item_id != i.id
+            || o.cycle != i.cycle
+            || o.revision != i.revision
+            || d.workspace_id != i.workspace_id
+        {
             return Err(conflict("这个结果已经作废，不再合并"));
         }
+        let target = MergeTarget::requested(&o, &d.id)
+            .filter(|t| MergeTarget::observed(&o).as_ref() == Some(t))
+            .ok_or_else(|| conflict("批准卡的仓库、PR 或准确提交无法核验，请等待重新核对"))?;
         self.db().decision_resolve(
             &d.id,
-            json!({"approved": yes, "text": text}),
+            json!({"approved": yes, "text": text, "merge_target": target, "actor": actor}),
             "resolved",
             None,
         )?;
         let pr = o.evidence["pr"].as_u64().unwrap_or(0);
-        let ev = if yes {
-            json!({"pr_merge_ok": true, "pr_merge_by": actor})
-        } else {
-            json!({"pr_merge_declined": true, "pr_merge_by": actor})
-        };
+        let ev = json!({"pr_merge_ok": yes, "pr_merge_declined": !yes,
+            "pr_merge_by": actor, "pr_merge_decision": d.id});
         self.db()
             .store()
             .transaction(|tx| steve_store::operation_set_in(tx, &o.id, "pending", &ev))?;
@@ -1669,6 +1784,7 @@ mod tests {
             json!({"mergeable": "CONFLICTING"}),
             json!({"statusCheckRollup": [{"__typename": "CheckRun", "name": "rust", "status": "QUEUED", "conclusion": ""}]}),
             json!({"statusCheckRollup": [{"__typename": "CheckRun", "name": "rust", "status": "COMPLETED", "conclusion": "FAILURE"}]}),
+            json!({"statusCheckRollup": null}),
             json!({"state": "MERGED"}),
         ] {
             let Look::Found(p) = read(&json!([pr(extra.clone())])) else {

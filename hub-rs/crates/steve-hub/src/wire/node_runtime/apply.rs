@@ -3,7 +3,7 @@
 
 use super::*;
 
-/// Retries of a turn after a passing failure (gateway 5xx) with no tool run, and their waits.
+/// Retries of a turn after a passing gateway failure or a provider stream interruption.
 const RETRY_DELAYS_MS: [i64; 2] = [20_000, 60_000];
 
 /// The most events of one stream applied in one transaction ([`NodeRuntime::apply_some`]).
@@ -90,7 +90,21 @@ impl NodeRuntime {
                 let mut told = Vec::with_capacity(pending.len());
                 let mut through = last;
                 for p in pending {
-                    let ev: NodeEvent = serde_json::from_value(p.payload)?;
+                    let mut ev: NodeEvent = serde_json::from_value(p.payload)?;
+                    if let (
+                        Subject::Execution(ExecutionRef::Turn {
+                            session, attempt, ..
+                        }),
+                        EventBody::AttemptEnded { completion },
+                    ) = (&ev.subject, &mut ev.body)
+                    {
+                        *completion = self.stream_completion_in(
+                            tx,
+                            session.as_str(),
+                            attempt.as_str(),
+                            completion.clone(),
+                        )?;
+                    }
                     let mut ask: Vec<After> =
                         self.permission_event_in(tx, &ev)?.into_iter().collect();
                     for a in &ask {
@@ -712,8 +726,8 @@ impl NodeRuntime {
         roles.insert((session.to_string(), message.to_string()), role);
     }
 
-    /// An attempt is over: the Hub decides. A passing failure with no tool run is tried again as a
-    /// new attempt of the same turn (after a wait); otherwise the turn is over.
+    /// An attempt is over: the Hub decides. A passing failure with no tool run, or an interrupted
+    /// provider stream, is tried again as a new attempt of the same turn after a wait.
     pub(super) fn after_attempt_in(
         &self,
         tx: &Tx,
@@ -726,9 +740,10 @@ impl NodeRuntime {
             [turn],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )?;
+        let stream = c.stop_reason == stream_retry::STREAM_INTERRUPTED;
         let retry = c.outcome == Outcome::Failed
-            && c.transient
-            && !c.acted
+            && ((stream && self.stream_retry_allowed_in(tx, session)?)
+                || (!stream && c.transient && !c.acted))
             && !cancelled
             && self.workflow_blocker_in(tx, session)?.is_none()
             && (ordinal as usize) < RETRY_DELAYS_MS.len();
@@ -766,14 +781,30 @@ impl NodeRuntime {
                 },
                 now(),
             )?;
-            self.attempt_in(tx, session, turn, ordinal + 1, spec.run.prompt)?;
+            let prompt = if stream {
+                stream_retry::stream_retry_prompt(
+                    c.error
+                        .as_ref()
+                        .map(|e| e.safe_detail.as_str())
+                        .unwrap_or("stream interrupted"),
+                    ordinal + 1,
+                )
+            } else {
+                spec.run.prompt
+            };
+            self.attempt_in(tx, session, turn, ordinal + 1, prompt)?;
             let delay = RETRY_DELAYS_MS[ordinal as usize];
             tx.execute(
                 "UPDATE node_commands SET retry_at=? WHERE target_attempt=(SELECT active_attempt FROM runtime_turns WHERE turn_id=?) AND method='start_turn'",
                 rusqlite::params![now() + delay, turn],
             )?;
             let text = format!(
-                "推理网关暂时不可用，{} 秒后自动重试（第 {} 次）",
+                "{}，{} 秒后自动重试（第 {} 次）",
+                if stream {
+                    "模型服务流中断"
+                } else {
+                    "推理网关暂时不可用"
+                },
                 delay / 1000,
                 ordinal + 1
             );
@@ -801,7 +832,13 @@ impl NodeRuntime {
             session: session.to_string(),
             attempt: Some(last_attempt_in(tx, turn)?),
             stop: c.stop_reason.clone(),
-            error: c.error.as_ref().map(said),
+            error: c.error.as_ref().map(|e| {
+                if stream && ordinal as usize >= RETRY_DELAYS_MS.len() {
+                    format!("已自动重试 {ordinal} 次仍失败：{}", said(e))
+                } else {
+                    said(e)
+                }
+            }),
         }))
     }
 

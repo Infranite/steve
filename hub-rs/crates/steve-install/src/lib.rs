@@ -3,6 +3,7 @@ steve_i18n::init!();
 
 pub mod common;
 pub(crate) mod env_file;
+pub mod migration;
 pub mod publish;
 pub mod release;
 pub mod service;

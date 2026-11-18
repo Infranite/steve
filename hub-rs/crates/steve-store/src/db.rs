@@ -1,6 +1,7 @@
 //! Opening the database and the migration runner.
 
 use std::path::Path;
+use std::sync::{Arc, Mutex};
 
 use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior};
 
@@ -322,7 +323,7 @@ pub(crate) fn optimize(c: &Connection, at_open: bool) -> rusqlite::Result<()> {
 }
 
 /// Opens (creating if needed) the write connection and migrates it.
-pub(crate) fn open_writer(path: &Path) -> Result<Connection> {
+pub(crate) fn open_writer(path: &Path, observer: Option<MigrationObserver>) -> Result<Connection> {
     let c = Connection::open_with_flags(
         path,
         OpenFlags::SQLITE_OPEN_READ_WRITE
@@ -336,7 +337,7 @@ pub(crate) fn open_writer(path: &Path) -> Result<Connection> {
     pragmas(&c)?;
     c.pragma_update(None, "cache_size", -32_768)?;
     c.pragma_update(None, "journal_size_limit", JOURNAL_SIZE_LIMIT)?;
-    migrate(&c)?;
+    migrate_observed(&c, observer)?;
     optimize(&c, true)?;
     Ok(c)
 }
@@ -354,6 +355,70 @@ pub(crate) fn open_writer(path: &Path) -> Result<Connection> {
 /// tables reference; `foreign_key_check` must then be empty before the transaction commits. The
 /// pragma cannot change inside a transaction, so it is switched around it and always restored.
 pub fn migrate(c: &Connection) -> Result<()> {
+    migrate_observed(c, None)
+}
+
+/// Actual SQLite execution progress, including inside a single long backfill statement. This is
+/// optional and carries no filesystem or installer dependency. `complete` means the transaction
+/// committed, not that the candidate is healthy. A failed migration never reports completion.
+#[derive(Clone, Copy, Debug)]
+pub struct MigrationProgress {
+    pub migration: u32,
+    pub target: u32,
+    pub vm_steps: u64,
+    pub complete: bool,
+}
+pub type MigrationObserver = Arc<dyn Fn(MigrationProgress) + Send + Sync>;
+
+struct MigrationTracker<'a> {
+    connection: &'a Connection,
+    observer: MigrationObserver,
+    state: Arc<Mutex<MigrationProgress>>,
+}
+impl<'a> MigrationTracker<'a> {
+    fn new(connection: &'a Connection, observer: MigrationObserver) -> Result<Self> {
+        let state = Arc::new(Mutex::new(MigrationProgress {
+            migration: 0,
+            target: SCHEMA_VERSION as u32,
+            vm_steps: 0,
+            complete: false,
+        }));
+        let (progress, report) = (state.clone(), observer.clone());
+        connection.progress_handler(
+            100_000,
+            Some(move || {
+                let snapshot = {
+                    let mut state = progress.lock().unwrap_or_else(|e| e.into_inner());
+                    state.vm_steps = state.vm_steps.saturating_add(100_000);
+                    *state
+                };
+                report(snapshot);
+                false
+            }),
+        )?;
+        Ok(Self {
+            connection,
+            observer,
+            state,
+        })
+    }
+    fn report(&self, migration: u32, complete: bool) {
+        let snapshot = {
+            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            state.migration = migration;
+            state.complete = complete;
+            *state
+        };
+        (self.observer)(snapshot);
+    }
+}
+impl Drop for MigrationTracker<'_> {
+    fn drop(&mut self) {
+        let _ = self.connection.progress_handler(0, None::<fn() -> bool>);
+    }
+}
+
+fn migrate_observed(c: &Connection, observer: Option<MigrationObserver>) -> Result<()> {
     let Compat {
         schema: cur,
         min_reader: needs,
@@ -375,15 +440,26 @@ pub fn migrate(c: &Connection) -> Result<()> {
         );
         return Ok(());
     }
+    let tracker = observer.map(|o| MigrationTracker::new(c, o)).transpose()?;
+    if let Some(progress) = &tracker {
+        progress.report((cur + 1).clamp(1, SCHEMA_VERSION) as u32, false);
+    }
     if cur == SCHEMA_VERSION {
-        return run_pending(c, cur);
+        run_pending(c, cur, tracker.as_ref())?;
+        if let Some(progress) = &tracker {
+            progress.report(SCHEMA_VERSION as u32, true);
+        }
+        return Ok(());
     }
     let fks: i64 = c.query_row("PRAGMA foreign_keys", [], |r| r.get(0))?;
     c.pragma_update(None, "foreign_keys", "OFF")?;
-    let ran = run_pending(c, cur);
+    let ran = run_pending(c, cur, tracker.as_ref());
     let restored = c.pragma_update(None, "foreign_keys", fks);
     ran?;
     restored?;
+    if let Some(progress) = &tracker {
+        progress.report(SCHEMA_VERSION as u32, true);
+    }
     tracing::info!(from = cur, to = SCHEMA_VERSION, "migrated database");
     Ok(())
 }
@@ -391,9 +467,12 @@ pub fn migrate(c: &Connection) -> Result<()> {
 /// The migrations after `cur` and the version row, in one transaction. IMMEDIATE: another process
 /// (the upgrade supervisor) may open the same file, and the write lock is taken up front, where the
 /// busy timeout applies, instead of at the first write.
-fn run_pending(c: &Connection, cur: i64) -> Result<()> {
+fn run_pending(c: &Connection, cur: i64, progress: Option<&MigrationTracker<'_>>) -> Result<()> {
     let tx = Transaction::new_unchecked(c, TransactionBehavior::Immediate)?;
-    for m in MIGRATIONS.iter().skip(cur.max(0) as usize) {
+    for (i, m) in MIGRATIONS.iter().enumerate().skip(cur.max(0) as usize) {
+        if let Some(progress) = progress {
+            progress.report((i + 1) as u32, false);
+        }
         tx.execute_batch(m)?;
     }
     for table in ["bots", "sessions"] {
@@ -454,4 +533,104 @@ fn run_pending(c: &Connection, cur: i64) -> Result<()> {
     tx.execute("INSERT INTO schema_compat (min_reader) VALUES (?)", [stamp])?;
     tx.commit()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod migration_progress_tests {
+    use super::*;
+
+    fn old_database() -> Connection {
+        let c = Connection::open_in_memory().unwrap();
+        for m in &MIGRATIONS[..73] {
+            c.execute_batch(m).unwrap();
+        }
+        c.execute_batch("CREATE TABLE schema_version(v INTEGER NOT NULL); INSERT INTO schema_version VALUES(73);
+            CREATE TABLE schema_compat(min_reader INTEGER NOT NULL); INSERT INTO schema_compat VALUES(73);
+            INSERT INTO workspaces(id,name,created) VALUES('fixture','Fixture',1);
+            INSERT INTO sessions(id,workspace_id,harness,cwd,status,created,updated) VALUES('session','fixture','fixture','.','idle',1,1);
+            INSERT INTO runtime_sessions(session_id,node_id,workspace_ref,node_session_id,config_revision,phase,updated)
+                VALUES('session','node','fixture','session','1','idle',1);
+            INSERT INTO node_streams(node_id,stream,epoch) VALUES('node','events','epoch');").unwrap();
+        for n in 0..30 {
+            c.execute("INSERT INTO runtime_turns(turn_id,session_id,state,created,updated) VALUES(?1,'session','finished',1,1)", [format!("t{n}")]).unwrap();
+            c.execute("INSERT INTO runtime_attempts(attempt_id,turn_id,ordinal,node_id,operation_id,execution,spec,digest,state,created,updated)
+                VALUES(?1,?2,0,'node',?3,'fixture','{}','fixture','finished',1,1)", [format!("a{n}"), format!("t{n}"), format!("o{n}")]).unwrap();
+        }
+        c.execute_batch("WITH RECURSIVE numbers(n) AS (VALUES(0) UNION ALL SELECT n+1 FROM numbers WHERE n<3999)
+            INSERT INTO node_event_inbox SELECT 'node','events','epoch',n+1,'e'||n,
+                json_object('subject',json_object('of','execution','type','turn','session','session','turn','t'||n,'attempt','a'||n),
+                    'body',json_object('type',CASE WHEN n<30 THEN 'attempt_ended' ELSE 'text_delta' END)),1,n+1 FROM numbers;
+            ANALYZE; PRAGMA foreign_keys=ON;").unwrap();
+        c
+    }
+
+    #[test]
+    fn reports_vm_work_inside_original_076_and_completion_only_after_commit() {
+        let c = old_database();
+        let records = Arc::new(Mutex::new(Vec::new()));
+        let observed = records.clone();
+        migrate_observed(
+            &c,
+            Some(Arc::new(move |p| observed.lock().unwrap().push(p))),
+        )
+        .unwrap();
+        let seen = records.lock().unwrap();
+        let inside: Vec<_> = seen.iter().filter(|p| p.migration == 76).collect();
+        assert!(
+            inside.windows(2).any(|p| p[1].vm_steps > p[0].vm_steps),
+            "no evidence within migration 076: {inside:?}"
+        );
+        assert!(
+            seen.windows(2)
+                .all(|p| p[1].vm_steps >= p[0].vm_steps && p[1].migration >= p[0].migration)
+        );
+        assert!(seen.last().unwrap().complete);
+        assert!(seen[..seen.len() - 1].iter().all(|p| !p.complete));
+        assert_eq!(compat(&c).unwrap().schema, SCHEMA_VERSION);
+        assert_eq!(
+            c.query_row(
+                "SELECT count(*) FROM realtime_output_attempts WHERE stop_evidence='node_event'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            30
+        );
+    }
+
+    #[test]
+    fn failed_migration_rolls_back_restores_foreign_keys_and_removes_the_callback() {
+        let c = old_database();
+        for m in &MIGRATIONS[73..75] {
+            c.execute_batch(m).unwrap();
+        }
+        c.execute_batch(
+            "UPDATE schema_version SET v=75; UPDATE schema_compat SET min_reader=75;
+            ALTER TABLE realtime_output_attempts ADD COLUMN stop_evidence TEXT;",
+        )
+        .unwrap();
+        let records = Arc::new(Mutex::new(Vec::new()));
+        let observed = records.clone();
+        assert!(
+            migrate_observed(
+                &c,
+                Some(Arc::new(move |p| observed.lock().unwrap().push(p)))
+            )
+            .is_err()
+        );
+        assert_eq!(compat(&c).unwrap().schema, 75);
+        assert_eq!(
+            c.pragma_query_value(None, "foreign_keys", |r| r.get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        let count = records.lock().unwrap().len();
+        assert!(records.lock().unwrap().iter().all(|p| !p.complete));
+        c.query_row("WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<100000) SELECT sum(x) FROM n", [], |r| r.get::<_, i64>(0)).unwrap();
+        assert_eq!(
+            records.lock().unwrap().len(),
+            count,
+            "observer leaked beyond the failed migration"
+        );
+    }
 }

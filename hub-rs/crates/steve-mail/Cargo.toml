@@ -44,14 +44,19 @@ axum = { version = "=0.8.9", default-features = false, features = ["http1", "jso
 rcgen = { version = "=0.14.10", optional = true }
 
 [dev-dependencies]
+steve-channels = { path = "../steve-channels" }
 # Integration tests use the fakes; this turns the feature on for `cargo test -p steve-mail`.
 steve-mail = { path = ".", features = ["fake"] }
 lettre = { version = "=0.11.23", default-features = false, features = ["smtp-transport", "builder", "hostname", "tokio1-rustls-tls"] }
 reqwest = { version = "=0.12.28", default-features = false, features = ["json"] }
 tempfile = "=3.27.0"
 tower = { version = "=0.5.3", features = ["util"] }
-tokio = { version = "=1.54.1", features = ["net", "io-util", "sync", "rt-multi-thread", "time", "macros"] }
+tokio = { version = "=1.54.1", features = ["net", "io-util", "sync", "rt-multi-thread", "time", "macros", "test-util"] }
 
 [[bin]]
 name = "steve-fake-mail"
+required-features = ["fake"]
+
+[[example]]
+name = "disclosure_fixture"
 required-features = ["fake"]

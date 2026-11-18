@@ -205,6 +205,11 @@ export const st = {
   ver: 0,
 }
 const raw = { state: null as State | null, details: new Map<string, RItemDetail>(), events: new Map<string, REvent[]>(), loadingEv: new Set<string>(), loadingItem: new Set<string>() }
+/* A channel submission receipt is not a provider receipt. Keep all views locked until a newer
+ * state read confirms this decision closed. Failed or pre-submission reads cannot unlock it. */
+let channelStateRead = 0
+const channelAnswers = new Map<string, { read: number; result: RDecision }>()
+export const channelAnswer = (w: Wait) => w.subject === "chan_message" ? channelAnswers.get(w.decision)?.result : undefined
 ;(window as any).__steve = st
 
 const ls = new Set<() => void>()
@@ -603,9 +608,11 @@ export function refresh(): Promise<void> {
   inflight = (async () => {
     /* A stopped turn can leave no reply after a restart. Only retire the same untouched draft;
      * another turn or a chunk received during this request is newer than this state snapshot. */
-    const settled = !st.thinking ? st.draft : null, epoch = scopeEpoch
+    const settled = !st.thinking ? st.draft : null, epoch = scopeEpoch, read = ++channelStateRead
     try {
       const state = await api.state(); if (epoch !== scopeEpoch) return
+      for (const [id, answer] of channelAnswers)
+        if (read > answer.read && !state.decisions.some((d) => d.id === id && d.status === "open")) channelAnswers.delete(id)
       raw.state = state; watermark = cursorOf(state) ?? watermark; setPageWorkspace(state.workspace?.id ?? ""); st.login = null; st.error = ""; build()
       for (const locked of [st.submittedChannelDecisions, st.inactiveChannelDecisions])
         for (const id of locked) if (!state.decisions.some((d) => d.id === id && d.status === "open")) locked.delete(id)
@@ -870,16 +877,14 @@ export function stageOf(i: Item): string {
 /* ───────── actions: conversation ───────── */
 /** how long the conversation keeps talking to an item after the last message sent to it (§5.3) */
 const FOCUS_MS = 10 * 60_000
-const ITEM_REF = /^#([A-Z]{1,6}-\d+)\b/
 /** `clientId`: the send idempotency key (the composer's draft keeps one across retries; a button sends a new one) */
 export async function chatSend(v: string, files: string[] = [], refs: RFile[] = [], mentions: { kind: "party" | "bot"; id: string }[] = [], clientId = newClientId()) {
-  /* a quote of an item's message, or the focus bar, sends straight to that item; `#ST-n` does too and starts the focus */
+  /* Only an explicit quote or focus selects an item. A textual reference never starts a focus. */
   const quoted = st.quote ? st.thread.find((m) => m.id === st.quote) ?? knownMsgs.get(st.quote) : undefined
-  const focus = st.focus && st.focus.until > Date.now() ? st.focus.item : undefined
+  const focus = focusItem() ?? undefined
   const item = quoted?.item ?? (quoted ? undefined : focus)
-  const toItem = item ?? ITEM_REF.exec(v)?.[1]
   const to = { item, reply_to: quoted?.id, client_id: clientId }
-  st.quote = null; st.focus = toItem ? { item: toItem, until: Date.now() + FOCUS_MS } : st.focus
+  st.quote = null; st.focus = item && !closedSt(it(item)?.st) ? { item, until: Date.now() + FOCUS_MS } : null
   /* Steve is on a turn: the message waits in the queue above the composer and goes when the turn ends (the Hub decides) */
   if (chatBusy()) {
     const m: Msg = { clientId: crypto.randomUUID(), k: "me", t: v, files: refs, replyTo: to.reply_to, held: true }
@@ -912,7 +917,7 @@ export async function threadQueuedWithdraw(id: string, composer?: { empty: () =>
 }
 export function quoteMsg(id: string | null) { st.quote = id; emit(); requestAnimationFrame(() => document.querySelector<HTMLTextAreaElement>("[data-composer='chat'] textarea, textarea")?.focus()) }
 export function clearFocus() { st.focus = null; emit() }
-export const focusItem = () => (st.focus && st.focus.until > Date.now() ? st.focus.item : null)
+export const focusItem = () => (st.focus && st.focus.until > Date.now() && !closedSt(it(st.focus.item)?.st) ? st.focus.item : null)
 /* thread routing actions: a 409 (already handled) comes back as its message */
 export async function takeOffer(m: Msg, take: boolean) { if (!m.id) return; const r = await call(api.offer(m.id, take)); if (r?.item) toast(t("core:toast.madeItem", { id: r.item.id })) }
 /** an A2UI button pressed in a reply: `already` when this surface had been submitted (another tab, a double click that got through) */
@@ -1017,10 +1022,19 @@ export const acceptChoosesRelease = (i?: Item) => {
 }
 export async function decide(id: string, c: string, text?: string, decision?: string) {
   const { i, w } = cardOf(id, decision); if (!w) return
+  const accepted = channelAnswer(w); if (accepted) return accepted
   const key = "decision:" + w.decision
   if (st.pendingActions.has(key) || st.submittedChannelDecisions.has(w.decision) || st.inactiveChannelDecisions.has(w.decision)) return
   st.pendingActions.add(key); emit()
   try {
+    if (w.subject === "chan_message" && w.type !== "fail") {
+      let result: RDecision
+      try { result = await api.decide(w.decision, c, text) } catch (e) { fail(e); return }
+      channelAnswers.set(w.decision, { read: channelStateRead, result })
+      toast(decidedText(w, c, i?.b ?? null)); emit()
+      await refresh()
+      return result
+    }
     if (w.subject === "chan_message" && w.type === "fail") {
       // Keep an accepted answer locked until the Hub has confirmed this decision is no longer open.
       // A failed/stale state refresh must not turn an acknowledged retry into a second send request.

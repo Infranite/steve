@@ -122,6 +122,10 @@ pub enum Released {
     Busy,
 }
 
+/// Hub-normalized provider/transport interruption. Its runtime has already applied its own
+/// bounded backoff; it must never spend the no-delivery continue budget at turn end.
+pub const MODEL_STREAM_INTERRUPTED: &str = "model_stream_interrupted";
+
 /// A finished turn, as the runtime hands it to the orchestrator's turn-end handler.
 #[derive(Debug, Clone)]
 pub struct TurnEnd {

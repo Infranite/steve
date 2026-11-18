@@ -1753,6 +1753,17 @@ impl Tx<'_> {
             self.mark(&s.id, Mark::Asked);
             return Ok(());
         };
+        self.with_turn_receipt(s, |tx| tx.save_ask(s, item, question, options, draft))
+    }
+
+    fn save_ask(
+        &mut self,
+        s: &Session,
+        item: &str,
+        question: &str,
+        options: &[String],
+        draft: Option<String>,
+    ) -> Result<()> {
         let db = self.db().clone();
         db.atomic(|| {
             self.dependency_question_guard(item)?;
@@ -1953,6 +1964,39 @@ impl Tx<'_> {
         } else {
             None
         };
+        if checks.iter().any(|c| !c.valid_scope()) {
+            return Err(self.refused(
+                &item,
+                s,
+                reject::SCOPE,
+                crate::cycle::conflict("检查范围 scope 只能是 unit、baseline 或 external"),
+            ));
+        }
+        self.with_turn_receipt(s, |tx| {
+            tx.save_delivery(
+                s,
+                &item,
+                summary,
+                outputs,
+                checks,
+                unfinished,
+                design_report,
+            )
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn save_delivery(
+        &mut self,
+        s: &Session,
+        item: &Item,
+        summary: &str,
+        outputs: &[Output],
+        checks: &[Check],
+        unfinished: &[String],
+        design_report: Option<(String, i64)>,
+    ) -> Result<()> {
+        let item_id = item.id.as_str();
         /* a new delivery also replaces an older one still waiting for acceptance */
         supersede(
             self.db(),
@@ -2030,21 +2074,13 @@ impl Tx<'_> {
             self.mark(&s.id, Mark::Asked);
             return settle(self.db(), item_id);
         }
-        if checks.iter().any(|c| !c.valid_scope()) {
-            return Err(self.refused(
-                &item,
-                s,
-                reject::SCOPE,
-                crate::cycle::conflict("检查范围 scope 只能是 unit、baseline 或 external"),
-            ));
-        }
         let unfinished_note = if unfinished.is_empty() {
             String::new()
         } else {
             format!("\n\n未完成步骤：{}", unfinished.join("；"))
         };
         let evidence: Vec<String> = checks.iter().map(crate::proof::check_line).collect();
-        let policy = match self.accept_of(&item)?.as_str() {
+        let policy = match self.accept_of(item)?.as_str() {
             "waived" => crate::cycle::Policy::Waived,
             "auto" => crate::cycle::Policy::Automatic,
             _ => crate::cycle::Policy::Human,
@@ -2060,7 +2096,7 @@ impl Tx<'_> {
         let has_failed_check = checks
             .iter()
             .any(|c| !c.passed && c.effective_scope() != "baseline");
-        let missing_proof = self.proof_missing(&item, checks)?.is_some();
+        let missing_proof = self.proof_missing(item, checks)?.is_some();
         let clean_for_auto =
             !has_failed_check && !missing_proof && left.is_empty() && unfinished.is_empty();
         if policy == crate::cycle::Policy::Waived
@@ -2273,6 +2309,25 @@ impl Tx<'_> {
         }
         // the end of a turn that is not the one running now came late: that newer turn has its
         // own end, which judges the item; what its tool calls left is kept for it
+        if let Some(e) = &end {
+            let facts = self.db().store().item_facts();
+            if let (Some(turn), Some(latest)) = (
+                facts.turn_of_attempt(&e.attempt)?,
+                facts.latest_turn(&e.session)?,
+            ) && turn != latest.turn_id
+            {
+                self.graph_stop_drop(e)?;
+                self.diagnostic_session(
+                    &e.session,
+                    Some(&e.attempt),
+                    "turn.end_evaluated",
+                    "stale_attempt",
+                    true,
+                    Default::default(),
+                );
+                return Ok(());
+            }
+        }
         let now = end.as_ref().and_then(|_| self.rt().running(&t.session_id));
         if let (Some(e), Some(n)) = (&end, &now)
             && !self.rt().same_turn(e, n)
@@ -2401,7 +2456,12 @@ impl Tx<'_> {
         /* the completion judge's candidate for this turn (#335, shadow: it is only recorded and
          * changes nothing below); the sweep registers one this misses */
         self.judge_register(&session, t.attempt.as_deref(), "turn_end");
-        let mark = self.st.pending.remove(&session.id).map(|(m, _)| m);
+        let mark = self.st.pending.remove(&session.id).and_then(|(m, turn)| {
+            // Delivery/question success comes from the committed receipt, never a mark left by a
+            // refused save or by another turn. Approval/publication retain their existing marks.
+            (m == Mark::Approval && (end.is_none() || self.runs_now(turn.as_ref(), end.as_ref())))
+                .then_some(m)
+        });
         if self.workflow_turn_end(&session, &t)? {
             self.diagnostic_session(
                 &session.id,
@@ -2438,6 +2498,7 @@ impl Tx<'_> {
         let Some(item) = self.db().item(item_id)? else {
             return Ok(());
         };
+        let receipt = self.turn_receipt(&item, &session, t.attempt.as_deref())?;
         /* a closing waits for this turn (among others): look at it again; what it still waits on is said */
         if item.phase == crate::cycle::CLOSING {
             self.diagnostic_session(
@@ -2481,12 +2542,20 @@ impl Tx<'_> {
             return Ok(());
         }
         let error = t.error.as_deref().filter(|e| !e.is_empty());
-        if mark.is_some() {
+        if mark.is_some()
+            || (receipt.is_some()
+                && (error.is_none() || t.stop_reason == crate::runtime::MODEL_STREAM_INTERRUPTED)
+                && t.stop_reason != "cancelled")
+        {
             self.diagnostic_session(
                 &session.id,
                 t.attempt.as_deref(),
                 "turn.end_evaluated",
-                "tool_mark",
+                if receipt.is_some() {
+                    "durable_tool_receipt"
+                } else {
+                    "tool_mark"
+                },
                 true,
                 Default::default(),
             );
@@ -2577,7 +2646,11 @@ impl Tx<'_> {
                  * first, told to check before redoing anything (2026-11-09). So does a turn its Node's
                  * restart cut, once the Node confirmed its harness is gone (B6). Any other outcome
                  * nobody knows (abandoned at your Stop) is never continued blindly: it is yours. */
-                if t.stop_reason == "error" {
+                if t.stop_reason == crate::runtime::MODEL_STREAM_INTERRUPTED {
+                    // The runtime exhausted (or could not safely continue) the same turn's
+                    // provider retries. Do not turn it into another no-delivery continue.
+                    format!("模型服务中断：{e}")
+                } else if t.stop_reason == "error" {
                     match self.takeover_error(item_id, &session.id, &why, e)? {
                         Some(why) => why,
                         None => return Ok(()),

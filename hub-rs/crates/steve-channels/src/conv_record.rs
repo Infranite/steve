@@ -27,7 +27,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use steve_store::base::Viewer;
 
-use crate::conversations::{MAIN_CONV, conv_space, out_state, shown_space};
+use crate::conversations::{MAIN_CONV, NO_REPLY, conv_space, out_state, shown_space};
 use crate::{ChannelResult, Channels, messages, spaces};
 
 /// Messages of a record page when the request names no limit.
@@ -134,8 +134,9 @@ pub struct Facts {
 }
 
 /// [`Handling`] of `f`: a failure wins (it is what you need to see), then a handoff, an answer that
-/// went out, something waiting for you, work in progress, a look without an answer, your decision,
-/// and last the label it was recorded with (unless it only says where the message came from).
+/// went out, something waiting for you, a pending send, an explicit skip, work in progress, a look
+/// without an answer, your decision, and last the label it was recorded with (unless it only says
+/// where the message came from).
 pub fn handling(f: &Facts) -> Handling {
     let answer = f.answer.as_deref();
     if f.turn_failed
@@ -154,17 +155,23 @@ pub fn handling(f: &Facts) -> Handling {
     if f.decision_open {
         return Handling::Waiting;
     }
-    if f.reaction.as_deref() == Some("ack")
-        || f.turn_open
-        || matches!(answer, Some("pending" | "unknown"))
-    {
+    if matches!(answer, Some("pending" | "unknown")) {
         return Handling::Working;
     }
-    if f.turn
+    // A completed skip can leave an old acknowledgement or an unanswered turn behind. The
+    // composer records its skip as `recorded` with NO_REPLY; ordinary recorded events can still
+    // belong to a turn in progress, so `recorded` alone is not enough.
+    if (f.outcome.as_deref() == Some("recorded") && f.label.starts_with(NO_REPLY))
         || f.reaction.as_deref() == Some("cleared")
         || f.outcome.as_deref() == Some("ignored")
         || answer == Some(crate::outbound::DISCARDED)
     {
+        return Handling::Skipped;
+    }
+    if f.reaction.as_deref() == Some("ack") || f.turn_open {
+        return Handling::Working;
+    }
+    if f.turn {
         return Handling::Skipped;
     }
     if f.decision_closed {
@@ -609,6 +616,58 @@ mod tests {
         ] {
             assert_eq!(handling(&x), Handling::Failed, "{x:?}");
         }
+    }
+
+    #[test]
+    fn a_finished_skip_wins_over_stale_processing_markers() {
+        for finished in [
+            Facts {
+                outcome: Some("recorded".into()),
+                label: format!("{}没有明确的请求", crate::conversations::NO_REPLY),
+                ..f()
+            },
+            Facts {
+                outcome: Some("ignored".into()),
+                ..f()
+            },
+            Facts {
+                reaction: Some("cleared".into()),
+                ..f()
+            },
+            Facts {
+                answer: Some(crate::outbound::DISCARDED.into()),
+                ..f()
+            },
+        ] {
+            let x = Facts {
+                reaction: finished.reaction.or(Some("ack".into())),
+                turn: true,
+                turn_open: true,
+                ..finished
+            };
+            assert_eq!(handling(&x), Handling::Skipped, "{x:?}");
+        }
+    }
+
+    #[test]
+    fn an_active_send_or_open_decision_keeps_its_priority() {
+        for answer in ["pending", "unknown"] {
+            let x = Facts {
+                answer: Some(answer.into()),
+                reaction: Some("cleared".into()),
+                ..f()
+            };
+            assert_eq!(handling(&x), Handling::Working, "{x:?}");
+        }
+        let x = Facts {
+            decision_open: true,
+            answer: Some("draft".into()),
+            reaction: Some("cleared".into()),
+            turn: true,
+            turn_open: true,
+            ..f()
+        };
+        assert_eq!(handling(&x), Handling::Waiting);
     }
 
     #[test]

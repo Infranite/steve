@@ -367,6 +367,14 @@ pub enum WritePolicy {
 }
 
 impl WritePolicy {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Allowed => "allowed",
+            Self::Restricted => "restricted",
+            Self::Forbidden => "forbidden",
+        }
+    }
+
     fn parse(s: Option<&str>) -> WritePolicy {
         match s {
             Some("restricted") => Self::Restricted,
