@@ -8,7 +8,7 @@ import { join } from "node:path"
 if (process.argv[2] === "--version") { console.log("1.0.0 fixture"); process.exit(0) }
 const send = m => process.stdout.write(JSON.stringify({ jsonrpc: "2.0", ...m }) + "\n")
 const sid = "mcp-fixture-session"
-let cwd, servers = [], cancel
+let cwd, servers = [], cancel, working = false, providerRetry = false
 const say = text => send({ method: "session/update", params: { sessionId: sid, update: {
   sessionUpdate: "agent_message_chunk", content: { type: "text", text }
 } } })
@@ -26,8 +26,18 @@ async function rpc(server, method, params = {}, allowToolError = false) {
 }
 async function prompt(p) {
   const text = (p.prompt || []).filter(b => b.type === "text").map(b => b.text).join("\n")
-  if (!text.includes("MCP recovery acceptance")) { say("{}"); return { stopReason: "end_turn" } }
+  working ||= text.includes("MCP recovery acceptance")
+  providerRetry ||= text.includes("provider-retry")
+  if (!working) { say("{}"); return { stopReason: "end_turn" } }
   const marker = join(cwd, "mcp-first-session.txt")
+  if (providerRetry && !existsSync(marker)) {
+    const server=servers.find(s=>s.name==="steve")
+    await rpc(server,"initialize",{protocolVersion:"2025-06-18",capabilities:{},clientInfo:{name:"provider-retry",version:"1"}})
+    await rpc(server,"tools/list")
+    await rpc(server,"tools/call",{name:"steve_update",arguments:{now:"上游中断前已成功调用 MCP",plan:[{step:"provider retry initial MCP success",done:true}]}})
+    writeFileSync(marker,"The existing work must survive provider interruption.")
+    throw Error("503 temporary upstream service unavailable")
+  }
   if (!existsSync(marker)) {
     writeFileSync(marker, "The existing work must survive session recovery.")
     say("The adapter opened successfully, but Steve MCP tools are undefined.")

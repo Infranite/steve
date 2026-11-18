@@ -1536,17 +1536,11 @@ struct Tools {
 
 #[async_trait::async_trait]
 impl HubTools for Tools {
+    async fn session_catalog(&self, _session: SessionId) -> ApiResult<Catalog> {
+        Ok(test_tools_catalog())
+    }
     async fn catalog(&self, _e: ExecutionRef) -> ApiResult<Catalog> {
-        Ok(Catalog {
-            revision: Revision::new("c1").unwrap(),
-            tools: vec![ToolDescriptor {
-                name: "steve_update".into(),
-                description: "Update the item.".into(),
-                input_schema: serde_json::json!({"type": "object", "properties": {"now": {"type": "string"}}}),
-                read_only: false,
-                annotations: serde_json::Value::Null,
-            }],
-        })
+        Ok(test_tools_catalog())
     }
     async fn call(&self, q: ToolCall) -> ApiResult<ToolResult> {
         self.calls.lock().unwrap().push(q);
@@ -1563,6 +1557,19 @@ impl HubTools for Tools {
     }
     async fn cancel_call(&self, _k: ToolKey) -> ApiResult<ToolResult> {
         Err(ApiError::new(ErrorCode::Unsupported, "x"))
+    }
+}
+
+fn test_tools_catalog() -> Catalog {
+    Catalog {
+        revision: Revision::new("c1").unwrap(),
+        tools: vec![ToolDescriptor {
+            name: "steve_update".into(),
+            description: "Update the item.".into(),
+            input_schema: serde_json::json!({"type": "object", "properties": {"now": {"type": "string"}}}),
+            read_only: false,
+            annotations: serde_json::Value::Null,
+        }],
     }
 }
 
@@ -1606,7 +1613,10 @@ async fn steves_tools_reach_the_hub_as_the_running_attempt() {
     let log = std::fs::read_to_string(&t.log).unwrap();
     let new = log
         .lines()
-        .find(|l| l.contains("\"method\":\"session/new\""))
+        .rev()
+        .find(|l| {
+            l.contains("\"method\":\"session/new\"") || l.contains("\"method\":\"session/load\"")
+        })
         .unwrap();
     let v: serde_json::Value = serde_json::from_str(new).unwrap();
     let server = &v["params"]["mcpServers"][0];
@@ -1676,7 +1686,11 @@ async fn steves_tools_reach_the_hub_as_the_running_attempt() {
             "params": {"name": "steve_update", "arguments": {"now": "x"}}}),
     )
     .await;
-    assert!(after.get("error").is_some(), "{after}");
+    assert_eq!(after["result"]["isError"], true, "{after}");
+    assert!(
+        after.get("error").is_none(),
+        "a tool refusal keeps the MCP connection/catalog valid"
+    );
     assert_eq!(tools.calls.lock().unwrap().len(), 1);
 }
 
@@ -1700,8 +1714,8 @@ fn tool_server(t: &T) -> (String, String) {
 
 /// A harness lists Steve's tools as soon as it connects to the server, which may be before the
 /// first turn (Claude Code does, when its connection wins the race with the first prompt; it then
-/// keeps the empty list for good). The list waits for the attempt instead of failing, and once the
-/// Node knows the catalog it is listed at idle at once. Calls still need the running attempt.
+/// keeps the empty list for good). Discovery finishes without an attempt, and remains available
+/// at idle. Calls still need the running attempt and fail as tool errors at idle.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn steves_tools_are_listed_before_the_first_turn_and_at_idle() {
     let t = T::new(&[]);
@@ -1711,15 +1725,12 @@ async fn steves_tools_are_listed_before_the_first_turn_and_at_idle() {
     ready(&n, "s_1").await;
     let (url, token) = tool_server(&t);
     let list = serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"});
-    let early = tokio::spawn({
-        let (url, token, list) = (url.clone(), token.clone(), list.clone());
-        async move { mcp(&url, &token, list).await }
-    });
-    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    let (s, early) = tokio::time::timeout(Duration::from_secs(2), mcp(&url, &token, list.clone()))
+        .await
+        .expect("discovery cannot wait for the first turn");
     n.start_turn(now_cmd("op_t", turn("s_1", "t_1", "a_1", "@sleep 3000")))
         .await
         .unwrap();
-    let (s, early) = early.await.unwrap();
     assert_eq!(s, 200, "{early}");
     assert_eq!(
         early["result"]["tools"][0]["name"], "steve_update",
@@ -1748,8 +1759,66 @@ async fn steves_tools_are_listed_before_the_first_turn_and_at_idle() {
             "params": {"name": "steve_update", "arguments": {"now": "x"}}}),
     )
     .await;
-    assert!(call.get("error").is_some(), "no call at idle: {call}");
+    assert_eq!(call["result"]["isError"], true, "no call at idle: {call}");
+    assert!(call.get("error").is_none());
     assert!(tools.calls.lock().unwrap().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn steves_tools_follow_retry_and_continue_attempts_without_stale_identity() {
+    let t = T::new(&[]);
+    let n = t.node();
+    let tools = Arc::new(Tools::default());
+    n.connect_tools(tools.clone()).await.unwrap();
+    ready(&n, "s_1").await;
+    for (i, (turn_id, attempt_id)) in [("t_1", "a_1"), ("t_1", "a_2"), ("t_2", "a_3")]
+        .iter()
+        .enumerate()
+    {
+        n.start_turn(now_cmd(
+            &format!("op_t_{i}"),
+            turn("s_1", turn_id, attempt_id, "@sleep 60000"),
+        ))
+        .await
+        .unwrap();
+        t.until("new prompt", |t| t.sent("session/prompt") == i + 1)
+            .await;
+        let (url, token) = tool_server(&t);
+        let (_,result)=mcp(&url,&token,serde_json::json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"steve_update","arguments":{"now":attempt_id}}})).await;
+        assert_eq!(result["result"]["isError"], false, "{result}");
+        assert_eq!(
+            tools.calls.lock().unwrap().last().unwrap().execution,
+            ExecutionRef::Turn {
+                session: SessionId::new("s_1").unwrap(),
+                turn: TurnId::new(*turn_id).unwrap(),
+                attempt: AttemptId::new(*attempt_id).unwrap()
+            }
+        );
+        n.cancel(now_cmd(
+            &format!("op_cancel_{i}"),
+            Cancel {
+                target: OperationId::new(format!("op_t_{i}")).unwrap(),
+                reason: "between attempts".into(),
+            },
+        ))
+        .await
+        .unwrap();
+        t.until("attempt over", |t| t.ended().len() == i + 1).await;
+        let (_,idle)=mcp(&url,&token,serde_json::json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"steve_update","arguments":{"now":"late old call"}}})).await;
+        assert_eq!(idle["result"]["isError"], true);
+        assert_eq!(
+            tools.calls.lock().unwrap().len(),
+            i + 1,
+            "nothing ran at the idle boundary"
+        );
+        let (_, listed) = mcp(
+            &url,
+            &token,
+            serde_json::json!({"jsonrpc":"2.0","id":3,"method":"tools/list"}),
+        )
+        .await;
+        assert_eq!(listed["result"]["tools"][0]["name"], "steve_update");
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

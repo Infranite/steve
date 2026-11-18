@@ -209,7 +209,10 @@ async fn turns_and_tokens_land_in_the_stats_tables() {
             e.count("SELECT count(*) FROM agent_turns") == 1
         })
         .await,
-        "the first turn starts"
+        "the first turn starts; count={}; sessions={}; commands={}",
+        e.count("SELECT count(*) FROM agent_turns"),
+        e.db().query_row("SELECT json_group_array(json_object('id',id,'status',status,'harness',harness)) FROM sessions",[],|r|r.get::<_,String>(0)).unwrap(),
+        e.db().query_row("SELECT json_group_array(json_object('method',method,'state',state,'receipt',receipt)) FROM node_commands",[],|r|r.get::<_,String>(0)).unwrap()
     );
     let (s, v) = e
         .call(

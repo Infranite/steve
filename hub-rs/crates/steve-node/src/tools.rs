@@ -39,6 +39,9 @@ use steve_node_api::*;
 /// Who is running what: the Node answers which attempt a session runs now.
 pub trait Current: Send + Sync + 'static {
     fn execution(&self, session: &SessionId) -> Option<ExecutionRef>;
+    fn lookup(&self, session: &SessionId) -> ApiResult<Option<ExecutionRef>> {
+        Ok(self.execution(session))
+    }
     /// A call could not be attributed; report facts, never manufacture an execution identity.
     fn missing_attempt(&self, _session: &SessionId) {}
 }
@@ -327,7 +330,9 @@ impl Handler {
         let end = tokio::time::Instant::now() + LIST_WAIT;
         while tokio::time::Instant::now() < end {
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-            if let Some(exec) = self.ep.current.execution(&session.0) {
+            if let Some(exec) = self.ep.current.lookup(&session.0).map_err(|_| {
+                McpError::internal_error("Node execution journal unavailable; no tool ran", None)
+            })? {
                 return self.catalog(&*hub, exec, holder).await;
             }
         }
@@ -338,9 +343,19 @@ impl Handler {
     /// against the token, which goes when the job ends).
     fn execution(&self, holder: &Holder) -> Result<ExecutionRef, McpError> {
         match holder {
-            Holder::Session(session) => self.ep.current.execution(session).ok_or_else(|| {
-                McpError::invalid_request("no attempt of this session is running", None)
-            }),
+            Holder::Session(session) => self
+                .ep
+                .current
+                .lookup(session)
+                .map_err(|_| {
+                    McpError::internal_error(
+                        "Node execution journal unavailable; no tool ran",
+                        None,
+                    )
+                })?
+                .ok_or_else(|| {
+                    McpError::invalid_request("no attempt of this session is running", None)
+                }),
             Holder::Job(exec) => {
                 let live = self.ep.tokens.lock().unwrap().values().any(|h| h == holder);
                 live.then(|| exec.clone())
@@ -426,7 +441,10 @@ impl ServerHandler for Handler {
         let holder = Self::authed(&ctx)?;
         let exec = match self.execution(&holder) {
             Ok(exec) => exec,
-            Err(_) if matches!(&holder, Holder::Session(_)) => {
+            Err(e)
+                if matches!(&holder, Holder::Session(_))
+                    && e.code == rmcp::model::ErrorCode::INVALID_REQUEST =>
+            {
                 if let Holder::Session(session) = &holder {
                     self.ep.current.missing_attempt(session);
                 }
@@ -436,7 +454,11 @@ impl ServerHandler for Handler {
                     "Steve tools are connected, but this session has no active execution attempt. No tool was run. Steve will reconcile an active turn; if the session is idle, send a new message to start a turn.",
                 ))));
             }
-            Err(e) => return Err(e),
+            Err(e) => {
+                return Ok(CallToolResponse::Complete(CallToolResult::error(text(
+                    e.message,
+                ))));
+            }
         };
         let hub = self.hub()?;
         let id = self

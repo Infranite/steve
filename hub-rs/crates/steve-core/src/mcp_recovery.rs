@@ -27,14 +27,18 @@ impl Tx<'_> {
         if a.ready {
             return Ok(false);
         }
-        let sent: Option<i64> = self.db().store().reader(|c| -> Result<_> {
+        let sent = self.mcp_first_input(sid, a.seq)?;
+        Ok(sent.is_some_and(|sent| at - sent >= ATTACH_GRACE_MS))
+    }
+
+    fn mcp_first_input(&self, sid: &str, after: i64) -> Result<Option<i64>> {
+        self.db().store().reader(|c| -> Result<_> {
             Ok(c.query_row(
                 "SELECT MIN(ts) FROM events WHERE session_id=? AND seq>? AND kind='user'",
-                rusqlite::params![sid, a.seq],
+                rusqlite::params![sid, after],
                 |r| r.get(0),
             )?)
-        })?;
-        Ok(sent.is_some_and(|sent| at - sent >= ATTACH_GRACE_MS))
+        })
     }
 
     /// `true`: this missing-tool session is now being replaced or is durably blocked. A manual
@@ -73,6 +77,12 @@ impl Tx<'_> {
             return Ok(false);
         };
         if a.ready && !manual {
+            return Ok(false);
+        }
+        // A configure/reopen may already be queued when the previous turn's end is judged.
+        // Its fresh MCP expectation belongs to the next dispatched input, never to that old
+        // turn. A validated live execution fault is independent of this startup boundary.
+        if !manual && a.fault.is_none() && self.mcp_first_input(sid, a.seq)?.is_none() {
             return Ok(false);
         }
         let cards = self.db().decisions_of_item(item)?;

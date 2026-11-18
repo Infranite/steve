@@ -287,3 +287,23 @@ fn a_catalog_without_a_usable_attempt_does_not_reset_recovery_budget() {
     }
     assert_eq!(k.open_fails(&item).len(), 1);
 }
+
+#[test]
+fn a_next_open_expectation_does_not_replace_the_turn_that_just_ended() {
+    let k = Kit::with(|cfg| cfg.takeover_continues = 0);
+    let (item, sid) = started(&k);
+    k.db()
+        .store()
+        .sessions()
+        .confirm_mcp(&sid, &format!("open-{sid}"))
+        .unwrap();
+    // A mode switch at the idle boundary queues configure before Core sees the old turn end.
+    k.db()
+        .store()
+        .sessions()
+        .expect_mcp(&sid, "next-configure")
+        .unwrap();
+    k.rt.end_turn(&k.core, &sid, "end_turn", None);
+    assert_eq!(latest(&k, &item), sid);
+    assert_ne!(k.db().session(&sid).unwrap().unwrap().status, "ended");
+}

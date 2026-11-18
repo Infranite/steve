@@ -598,13 +598,17 @@ struct CurrentOf(std::sync::Weak<Inner>);
 
 impl tools::Current for CurrentOf {
     fn execution(&self, session: &SessionId) -> Option<ExecutionRef> {
-        let inner = self.0.upgrade()?;
+        self.lookup(session).ok().flatten()
+    }
+    fn lookup(&self, session: &SessionId) -> ApiResult<Option<ExecutionRef>> {
+        let inner = self
+            .0
+            .upgrade()
+            .ok_or_else(|| ApiError::new(ErrorCode::Offline, "Node runtime unavailable"))?;
         inner
             .j
             .read(|t| t.session(session))
-            .ok()
-            .flatten()
-            .and_then(|r| r.view.active)
+            .map(|s| s.and_then(|r| r.view.active))
     }
     fn missing_attempt(&self, session: &SessionId) {
         let Some(inner) = self.0.upgrade() else {

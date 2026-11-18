@@ -208,32 +208,7 @@ async fn acceptance(mode: &str) {
     if mode == "startup-watchdog" || mode == "missing-attempt" {
         assert!(checked_watchdog)
     }
-    let core = e.tools.core.clone();
-    let sid = sessions[1].id.clone();
-    tokio::task::spawn_blocking(move || core.end_session(&sid))
-        .await
-        .unwrap()
-        .unwrap();
-    let mut released = false;
-    for _ in 0..200 {
-        released = store
-            .reader::<_, steve_store::StoreError>(|c| {
-                Ok(c.query_row(
-                    "SELECT phase='released' FROM runtime_sessions WHERE session_id=?",
-                    [&sessions[1].id],
-                    |r| r.get::<_, bool>(0),
-                )?)
-            })
-            .unwrap();
-        if released {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    }
-    assert!(
-        released,
-        "the test's harness must stop before its runtime shuts down"
-    );
+    retire(&e, &store, &sessions[1].id).await;
     eprintln!(
         "{mode}: missing MCP -> new session -> real tools/list + steve_update + steve_deliver; old harness released, workspace retained"
     );
@@ -252,4 +227,91 @@ async fn startup_watchdog_replaces_a_running_agent_without_mcp() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_live_harness_that_lost_its_attempt_keeps_discovery_but_is_replaced_safely() {
     acceptance("missing-attempt").await
+}
+
+async fn retire(e: &Env, store: &steve_store::Store, sid: &str) {
+    let sid_ref = sid;
+    let core = e.tools.core.clone();
+    let sid = sid.to_string();
+    tokio::task::spawn_blocking(move || core.end_session(&sid))
+        .await
+        .unwrap()
+        .unwrap();
+    let mut released = false;
+    for _ in 0..200 {
+        released = store
+            .reader::<_, steve_store::StoreError>(|c| {
+                Ok(c.query_row(
+                    "SELECT phase='released' FROM runtime_sessions WHERE session_id=?",
+                    [sid_ref],
+                    |r| r.get::<_, bool>(0),
+                )?)
+            })
+            .unwrap();
+        if released {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert!(
+        released,
+        "the test's harness must stop before its runtime shuts down"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn provider_interruption_keeps_mcp_usable_on_the_next_attempt_in_the_same_session() {
+    let adapter = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/mcp-recovery.mjs"
+    )
+    .to_string();
+    let e = start_with(&[
+        ("STEVE_ADAPTER_CLAUDE", adapter.clone()),
+        ("STEVE_ADAPTER_CODEX", adapter),
+        ("STEVE_NO_RESUME", "0".into()),
+        ("STEVE_NODE_MODE", "local".into()),
+    ])
+    .await;
+    let (status,item)=e.call("POST","/api/items",Some(json!({"title":"MCP recovery acceptance provider-retry","goal":"MCP recovery acceptance provider-retry","bot":"steve","project":null}))).await;
+    assert_eq!(status, 200, "{item}");
+    let id = item["id"].as_str().unwrap();
+    let store = steve_store::Store::open(&e.db, steve_store::NoPublisher).unwrap();
+    let mut delivered = false;
+    for _ in 0..1200 {
+        let sessions = store.sessions().of_item(id).unwrap();
+        assert!(
+            sessions.len() <= 1,
+            "a successful MCP followed by a provider error must keep the session"
+        );
+        if let Some(s) = sessions.first() {
+            let events = store.events().after(&s.id, 0, 200).unwrap();
+            delivered = events
+                .iter()
+                .any(|ev| ev.kind == "steve_tool_receipt" && ev.data["asked"] == false)
+                && events.iter().any(|ev| ev.kind == "turn_end");
+            if delivered {
+                break;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(
+        delivered,
+        "provider retry did not finish: {:?}",
+        store.items().get(id).unwrap()
+    );
+    let sessions = store.sessions().of_item(id).unwrap();
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(store.reader::<_,steve_store::StoreError>(|c|Ok(c.query_row("SELECT COUNT(*) FROM runtime_attempts a JOIN runtime_turns t USING(turn_id) WHERE t.session_id=?",[&sessions[0].id],|r|r.get::<_,i64>(0))?)).unwrap(),2);
+    assert!(store.items().plan_rounds(id).unwrap().iter().any(|round| {
+        round
+            .steps
+            .iter()
+            .any(|p| p.step == "provider retry initial MCP success" && p.done)
+    }));
+    retire(&e, &store, &sessions[0].id).await;
+    eprintln!(
+        "provider-retry: real MCP call -> 503 -> new attempt in same session -> real MCP delivery"
+    );
 }
