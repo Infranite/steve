@@ -686,10 +686,21 @@ fn publication(c: &Connection, ws: &str, item: &str) -> ApiResult<Option<Value>>
     };
     if let Some(d) = result_decision(c, ws, item)? {
         let effect = repo::effect_of(c, &d.id)?;
+        let state = if d.result["choice"] == "no" {
+            "declined"
+        } else if let Some(e) = &effect {
+            e.state.as_str()
+        } else if d.status == "open" {
+            if local_target(c, ws, &subject)?.is_some() {
+                "approval"
+            } else {
+                "stale"
+            }
+        } else {
+            "closed"
+        };
         return Ok(Some(json!({
-            "state": if d.result["choice"] == "no" { "declined" }
-                else if let Some(e) = &effect { e.state.as_str() }
-                else if d.status == "open" { "approval" } else { "closed" },
+            "state": state,
             "error": effect.as_ref().and_then(|e| e.last_error.as_deref()),
             "url": effect.as_ref().and_then(|e| e.result["url"].as_str()),
         })));

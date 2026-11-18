@@ -152,6 +152,12 @@ impl Registry {
         self.handlers.contains_key(subject_type)
     }
 
+    pub fn retain_on_completed_item_recovery(&self, d: &steve_store::Decision) -> bool {
+        self.handlers
+            .get(&d.subject_type)
+            .is_some_and(|h| h.retain_on_completed_item_recovery(d))
+    }
+
     /// `undoDecision` calls this in its transaction before reopening `d`: the handler of its
     /// `subject_type` may undo its side or refuse (`Err` → the undo is rolled back). No handler = Ok.
     pub fn before_undo(&self, tx: &steve_store::Tx, d: &steve_store::Decision) -> ApiResult<()> {

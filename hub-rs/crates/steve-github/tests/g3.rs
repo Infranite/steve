@@ -1625,8 +1625,8 @@ async fn pr_analysis_pins_revisions_and_reports_the_failing_step() {
         h1,
         json!({"files":[{"filename":"sample.rs","patch":"+fn test() {}"}]}),
     );
-    let d = send_automation(&h, "pull_request", &p).await;
-    let first = trace(&h, &d, Some("done")).await;
+    let old_delivery = send_automation(&h, "pull_request", &p).await;
+    let first = trace(&h, &old_delivery, Some("done")).await;
     assert_eq!(first["head"], h1);
     let item1 = first["runs"][0]["item_id"].as_str().expect("first report");
     assert!(
@@ -1663,6 +1663,8 @@ async fn pr_analysis_pins_revisions_and_reports_the_failing_step() {
     assert_eq!(next["head"], h2);
     let item2 = next["runs"][0]["item_id"].as_str().expect("second report");
     assert_ne!(item1, item2);
+    let previous = trace(&h, &old_delivery, Some("done")).await;
+    assert_eq!(previous["runs"][0]["publication"]["state"], "stale");
     assert!(
         h.env
             .gateway
