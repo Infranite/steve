@@ -36,7 +36,7 @@ pub use config::{
     AcpConfig, default_claude_adapter, default_claude_executable, default_codex_adapter,
     is_executable_file, is_node_script, npm_root, resolve_builtin_adapters, which_in,
 };
-pub use errors::{is_dead_agent, is_transient};
+pub use errors::{is_dead_agent, is_stream_interruption, is_transient, stream_interruption_tail};
 pub use oneshot::{Image, OneShotError, TOOL_REFUSED};
 pub use rollout::find as codex_rollout;
 pub use rpc::RpcError;

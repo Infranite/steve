@@ -458,6 +458,30 @@ fn a_failed_session_continues_with_back_off_and_after_three_tries_stays_for_you(
 }
 
 #[test]
+fn provider_stream_interruption_exhausted_card_is_not_automatically_continued_by_yolo() {
+    let t = t();
+    let (item, sid, _) = t.item();
+    let d = t.card(
+        &item,
+        &sid,
+        "fail",
+        "item",
+        "模型服务中断：已自动重试 2 次仍失败：upstream stream interrupted",
+        "",
+        &["continue", "delivered", "look"],
+    );
+    let a = t.engine.consider(&d).unwrap().unwrap();
+    assert_eq!(
+        (a.outcome.as_str(), a.rule.as_str()),
+        ("declined", "continue.other")
+    );
+    t.clock.advance(3_600_000);
+    assert!(t.engine.tick().is_empty());
+    assert_eq!(t.decision(&d).status, "open");
+    assert!(t.kit.rt.prompts_of(&sid).is_empty());
+}
+
+#[test]
 fn a_stopped_agent_is_continued_at_once() {
     let t = t();
     let (item, sid, _) = t.item();

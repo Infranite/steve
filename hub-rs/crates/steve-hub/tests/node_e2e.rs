@@ -439,6 +439,100 @@ fn attempts(h: &Home, sid: &str, state: &str) -> i64 {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn provider_stream_interruption_is_retried_without_continues_then_shown_as_a_service_card() {
+    let h = Home::new();
+    let _hub = spawn(&h, true, &[]);
+    serving(&h).await;
+    let c = Client::login(&h).await;
+    let sid = c
+        .item(
+            &h,
+            "stream failure acceptance @tool execute Bash\n@streamfail 3",
+        )
+        .await;
+    let item = h
+        .one("SELECT item_id FROM sessions WHERE id=?", &sid)
+        .unwrap();
+    let retry_count = || {
+        h.count("SELECT COUNT(*) FROM runtime_attempts a JOIN runtime_turns t USING(turn_id) WHERE t.session_id=?", &sid)
+    };
+    let cards = || {
+        h.count(
+            "SELECT COUNT(*) FROM decisions WHERE item_id=? AND kind='fail' AND status='open'",
+            &item,
+        )
+    };
+    let continues = || {
+        h.count("SELECT COUNT(*) FROM timeline WHERE item_id=? AND actor='steve' AND text LIKE 'Steve 接手：%'", &item)
+    };
+    assert!(
+        wait(30, || retry_count() == 2).await,
+        "first retry; {}",
+        hub_log(&h)
+    );
+    assert_eq!(cards(), 0, "no card before backoff");
+    assert_eq!(continues(), 0);
+    // At least one tool already ran; this is the mid-work interruption, not the old no-action retry.
+    assert_eq!(
+        h.count(
+            "SELECT COUNT(*) FROM events WHERE session_id=? AND kind='tool'",
+            &sid
+        ),
+        2
+    );
+    assert!(
+        wait(35, || h
+            .prompts()
+            .iter()
+            .filter(|p| p.contains("不占用未交付续跑次数"))
+            .count()
+            >= 1)
+        .await
+    );
+    assert_eq!(cards(), 0);
+    assert!(
+        wait(75, || cards() == 1).await,
+        "exhausted service card; {}",
+        hub_log(&h)
+    );
+    assert_eq!(retry_count(), 3);
+    assert_eq!(continues(), 0);
+    let question = h
+        .one(
+            "SELECT question FROM decisions WHERE item_id=? AND kind='fail' AND status='open'",
+            &item,
+        )
+        .unwrap();
+    assert!(
+        question.starts_with("模型服务中断：") && question.contains("已自动重试 2 次仍失败"),
+        "{question}"
+    );
+    assert!(!question.contains("Agent 停下来了"), "{question}");
+    let prompts = h.prompts();
+    let retries: Vec<_> = prompts
+        .iter()
+        .filter(|p| p.contains("不占用未交付续跑次数"))
+        .collect();
+    assert_eq!(retries.len(), 2);
+    assert!(retries.iter().all(|p| p.contains("不要重做")));
+    assert_eq!(
+        h.one("SELECT status FROM items WHERE id=?", &item)
+            .as_deref(),
+        Some("wait")
+    );
+    let (status, state) = c.call("GET", "/api/state", None).await;
+    assert_eq!(status, 200);
+    assert!(
+        state["decisions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|d| d["question"] == question),
+        "service failure card is returned to the client"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_node_session_end_to_end() {
     let h = Home::new();
     let token = control_token(&h);

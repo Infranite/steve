@@ -30,6 +30,37 @@ fn receipt(core: &Core, s: &Session, attempt: Option<&str>) -> Option<Mark> {
     core.tx().turn_receipt(&item, s, attempt).unwrap()
 }
 
+#[test]
+fn provider_stream_interruption_after_a_committed_delivery_or_question_does_not_resurrect_work() {
+    for deliver in [true, false] {
+        let k = Kit::new();
+        let (id, s) = started(&k);
+        if deliver {
+            k.core.tool_deliver(&s, "Done", &[], &[], &[]).unwrap();
+        } else {
+            k.core.tool_ask(&s, "Missing input", &[]).unwrap();
+        }
+        let prompts = k.rt.prompts_of(&s.id).len();
+        k.rt.end_turn(
+            &k.core,
+            &s.id,
+            crate::runtime::MODEL_STREAM_INTERRUPTED,
+            Some("stream disconnected before completion: upstream stream interrupted"),
+        );
+        assert!(k.open_fails(&id).is_empty());
+        assert_eq!(k.rt.prompts_of(&s.id).len(), prompts);
+        assert_eq!(
+            k.db()
+                .decisions_of_item(&id)
+                .unwrap()
+                .iter()
+                .filter(|d| d.status == "open" && d.kind == if deliver { "accept" } else { "ask" })
+                .count(),
+            1
+        );
+    }
+}
+
 fn detach(k: &Kit, s: &Session) -> String {
     let a = k.rt.running(&s.id).unwrap().attempt;
     k.rt.st().attempts.remove(&s.id);

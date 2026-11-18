@@ -46,6 +46,43 @@ fn started(k: &Kit) -> (String, String) {
 }
 
 #[test]
+fn provider_stream_interruption_never_spends_the_continue_budget_and_deduplicates_the_card() {
+    let k = kit(2);
+    let (item, sid) = started(&k);
+    let error =
+        "已自动重试 2 次仍失败：stream disconnected before completion: upstream stream interrupted";
+    k.rt.end_turn(
+        &k.core,
+        &sid,
+        crate::runtime::MODEL_STREAM_INTERRUPTED,
+        Some(error),
+    );
+    assert!(steve_lines(&k, &item).is_empty());
+    assert_eq!(k.rt.prompts_of(&sid).len(), 1);
+    assert_eq!(k.open_fails(&item), vec![format!("模型服务中断：{error}")]);
+    for _ in 0..3 {
+        k.core
+            .on_turn_end(TurnEnd {
+                session_id: sid.clone(),
+                attempt: None,
+                stop_reason: crate::runtime::MODEL_STREAM_INTERRUPTED.into(),
+                error: Some(error.into()),
+            })
+            .unwrap();
+        k.core.check_stalls().unwrap();
+    }
+    assert_eq!(k.open_fails(&item).len(), 1);
+    assert!(steve_lines(&k, &item).is_empty());
+    // A genuine stop still has both ordinary continues available.
+    let d = k.db().decisions_of_item(&item).unwrap().pop().unwrap();
+    k.core.resolve(&d.id, "continue", "", "me").unwrap();
+    stop(&k, &sid, "继续工作");
+    stop(&k, &sid, "继续工作");
+    assert_eq!(steve_lines(&k, &item).len(), 2);
+    assert!(k.open_fails(&item).is_empty());
+}
+
+#[test]
 fn a_stopped_agent_is_continued_twice_before_you_hear_of_it_once() {
     let k = kit(2);
     let (item, sid) = started(&k);
