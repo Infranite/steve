@@ -11,6 +11,7 @@ mod deliveries;
 mod diagnostics;
 pub(crate) mod feed;
 mod files;
+mod harness_updates;
 mod hub_metadata;
 mod items;
 mod misc;
@@ -799,6 +800,11 @@ pub fn router(st: AppState, modules: Router) -> Router {
             get(node_context::get).put(node_context::put),
         )
         .route("/node-tags", get(node_tags::list))
+        .route("/node-harness-updates/{node}", get(harness_updates::get))
+        .route(
+            "/node-harness-updates/{node}/{harness}",
+            post(harness_updates::start),
+        )
         .route("/node-tags/{node}", put(node_tags::set))
         .route("/items/{id}/node-tag", put(node_tags::set_item))
         .route("/vitals", get(crate::nodes::vitals::get))

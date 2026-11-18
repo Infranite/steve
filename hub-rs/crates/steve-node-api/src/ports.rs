@@ -15,6 +15,7 @@ use crate::blob::*;
 use crate::common::*;
 use crate::discovery::*;
 use crate::events::*;
+use crate::harness_updates::*;
 use crate::ids::*;
 use crate::run::*;
 use crate::tools::*;
@@ -173,6 +174,22 @@ pub trait Discovery: Send + Sync {
         Err(ApiError::new(
             ErrorCode::Unsupported,
             "controlled harness installation unsupported",
+        ))
+    }
+    /// Component checks on this Node, separate from ACP/provider probing. `fresh` starts one
+    /// background check; the reply is a snapshot, not a promise that the check has finished.
+    async fn harness_updates(&self, _fresh: bool) -> ApiResult<HarnessUpdateReport> {
+        Err(ApiError::new(
+            ErrorCode::Unsupported,
+            "upgrade this Node to enable harness-updates-v1",
+        ))
+    }
+    /// Journaled upgrade of installed, managed components only. The authenticated instance
+    /// owner may target a separate Node; the Node's own exec ceiling still applies.
+    async fn upgrade_harness(&self, _c: Command<UpgradeHarness>) -> ApiResult<Receipt> {
+        Err(ApiError::new(
+            ErrorCode::Unsupported,
+            "upgrade this Node to enable harness-updates-v1",
         ))
     }
     async fn history(&self, page: PageRequest) -> ApiResult<Page<HistoryEntry>>;

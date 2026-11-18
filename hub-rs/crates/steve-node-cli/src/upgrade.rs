@@ -228,6 +228,9 @@ fn settle(home: &Path, me: &BuildIdentity) {
 
 #[async_trait]
 impl Upgrader for ServiceUpgrader {
+    fn maintenance_pending(&self) -> bool {
+        records(&self.home).iter().any(|r| !r.state.is_terminal())
+    }
     fn build(&self) -> BuildIdentity {
         self.build.clone()
     }

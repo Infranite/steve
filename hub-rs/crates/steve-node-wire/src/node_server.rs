@@ -74,6 +74,11 @@ impl<N: Node + ?Sized + 'static> Handler for NodeServer<N> {
                 en(&n.probe(a.fresh).await?)
             }
             HARNESS_INSTALL => en(&n.install_harness(de(p)?).await?),
+            HARNESS_UPDATES => {
+                let a: ProbeArgs = de(p)?;
+                en(&n.harness_updates(a.fresh).await?)
+            }
+            HARNESS_UPGRADE => en(&n.upgrade_harness(de(p)?).await?),
             HISTORY_LIST => en(&n.history(de(p)?).await?),
             HISTORY_IMPORT => en(&n.import_history(de(p)?).await?),
             IMPORT_PAGE => {

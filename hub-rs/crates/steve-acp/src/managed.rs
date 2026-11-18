@@ -291,11 +291,34 @@ pub fn install_observed(
     lease: &PrefixLock,
     on_spawn: impl FnOnce(u32) -> Result<(), String>,
 ) -> Result<(), String> {
+    let specs: Vec<String> = packages.iter().map(|p| format!("{p}@latest")).collect();
+    install_specs_observed(npm, home, &specs, lease, on_spawn)
+}
+
+/// Exact registry-checked versions, for a journaled Node upgrade. The Node supplies package
+/// names from its trusted registry, never from an HTTP or wire request.
+pub fn install_versions_observed(
+    npm: &Path,
+    home: &Path,
+    packages: &[(&str, &str)],
+    lease: &PrefixLock,
+    on_spawn: impl FnOnce(u32) -> Result<(), String>,
+) -> Result<(), String> {
+    let specs: Vec<String> = packages.iter().map(|(p, v)| format!("{p}@{v}")).collect();
+    install_specs_observed(npm, home, &specs, lease, on_spawn)
+}
+
+fn install_specs_observed(
+    npm: &Path,
+    home: &Path,
+    specs: &[String],
+    lease: &PrefixLock,
+    on_spawn: impl FnOnce(u32) -> Result<(), String>,
+) -> Result<(), String> {
     let dir = dir(home);
     std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     let grok_install = dir.join(".grok-install");
     let prefix = dir.to_string_lossy().into_owned();
-    let specs: Vec<String> = packages.iter().map(|p| format!("{p}@latest")).collect();
     let mut args = vec![
         "install",
         "--prefix",

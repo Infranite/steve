@@ -371,6 +371,16 @@ impl Discovery for RemoteNode {
         }
         self.cmd(HARNESS_INSTALL, &c, false).await
     }
+    async fn harness_updates(&self, fresh: bool) -> ApiResult<HarnessUpdateReport> {
+        self.go(HARNESS_UPDATES, &ProbeArgs { fresh }, None, false)
+            .await
+    }
+    async fn upgrade_harness(&self, c: Command<UpgradeHarness>) -> ApiResult<Receipt> {
+        // The optional read face is the feature handshake. An old Node refuses it before any
+        // write is sent. Separate Nodes use exactly the same owner-authorized command as local.
+        self.harness_updates(false).await?;
+        self.cmd(HARNESS_UPGRADE, &c, true).await
+    }
     /// A remote Node runs no jobs and no execs in N2 (their sandboxing is local-only so far): its
     /// capacity for them is reported as zero whatever it says.
     async fn probe(&self, fresh: bool) -> ApiResult<Capabilities> {

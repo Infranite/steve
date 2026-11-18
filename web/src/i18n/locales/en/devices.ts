@@ -1,5 +1,45 @@
 /* The devices pages (devices*.tsx, device-model.ts): the Hub, its Nodes and the clients signed in to it, in one place */
 export default {
+  harnessUpdates: {
+  "title": "CLI and ACP updates",
+  "sub": "Check and upgrade managed components on this Node. Providers and sign-in are managed on the device.",
+  "check": "Check for updates",
+  "checking": "Checking component versions on this device…",
+  "observed": "Device read at {{at}}",
+  "checked": "Versions checked at {{at}}",
+  "available": "Update available",
+  "details": "Details",
+  "owner": "Only the instance owner can check and upgrade Node components.",
+  "oldNode": "This Node does not support component updates yet. Upgrade it in the version card first, or update Steve Node on that device with its original installer.",
+  "unavailable": "Unable to read or submit updates. Read the details and retry.",
+  "stale": "Showing the last report. Receipt checks continue when the connection returns.",
+  "loading": "Reading updates from this device…",
+  "empty": "This device has not reported any components to check.",
+  "external": "Managed on the device. Use the original installer on the Node to upgrade it.",
+  "other": "{{count}} runtimes not installed or without update support",
+  "wrongNode": "The update report belongs to another Node. Refresh and retry.",
+  "upgrade": "Upgrade managed components",
+  "retry": "Retry explicitly",
+  "requesting": "Submitting…",
+  "running": "Upgrading…",
+  "unknown": "The outcome is unconfirmed. Checking the same operation; installation is not automatically repeated.",
+  "unknownRetry": "The Node confirmed the old operation has an unknown outcome. An explicit retry first checks that its installer has stopped.",
+  "state": {
+    "unchecked": "Not checked",
+    "current": "Up to date",
+    "available": "Update available",
+    "check_failed": "Check failed",
+    "unsupported": "Automatic updates unsupported",
+    "not_installed": "Not installed"
+  },
+  "result": {
+    "running": "Device is processing; waiting for its final receipt",
+    "unknown": "Outcome unknown",
+    "succeeded": "Upgrade succeeded; installed versions verified",
+    "failed": "Upgrade failed; read the details"
+  }
+},
+
   title: "Devices",
   addDevice: "Add device",
   nodesN_one: "{{count}} Node",
