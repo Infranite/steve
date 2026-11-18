@@ -62,6 +62,7 @@ import pathlib
 import shutil
 import socket
 import sqlite3
+import stat
 import subprocess
 import sys
 import tarfile
@@ -83,6 +84,50 @@ PLIST_DIR = pathlib.Path.home() / "Library/LaunchAgents"
 
 class Refused(Exception):
     """Stopped before anything changed for the running Steve."""
+
+
+class MigrationBudget:
+    """Same optional contract as steve-install::migration: 60 s idle, 15 min total.
+
+    Only this candidate's forward SQLite VM/migration progress refreshes the idle window.
+    Missing/corrupt/foreign/repeated records cannot turn a hung candidate into an endless wait.
+    """
+    def __init__(self, home, ident, pid, idle=60, total=900, clock=time.monotonic):
+        uuid.UUID(ident)
+        self.path = home / 'updates' / f'migration-{ident}.json'
+        self.ident, self.pid, self.idle, self.total, self.clock = ident, pid, idle, total, clock
+        self.started = self.advanced = clock()
+        self.seen = None
+
+    def check(self):
+        now = self.clock()
+        if now - self.started >= self.total:
+            raise RuntimeError(f'candidate maintenance probe exceeded total timeout ({self.total}s); last migration progress: {self.seen}')
+        if now - self.advanced >= self.idle:
+            reason = 'migration completed; health verification timed out after' if self.seen and self.seen['complete'] else 'no migration progress within'
+            raise RuntimeError(f'candidate did not become healthy: {reason} {self.idle}s; last migration progress: {self.seen}')
+        try:
+            mode = self.path.lstat()
+            if not stat.S_ISREG(mode.st_mode) or mode.st_uid != os.getuid() or mode.st_mode & 0o022:
+                return
+            p = json.loads(self.path.read_text())
+            if not isinstance(p, dict) or p.get('format') != 1 or p.get('upgrade_id') != self.ident or p.get('pid') != self.pid:
+                return
+            if type(p['format']) is not int or type(p['pid']) is not int:
+                return
+            if any(type(p.get(k)) is not int or p[k] < 0 for k in ('migration', 'target', 'vm_steps')) or type(p.get('complete')) is not bool:
+                return
+            if any(p[k] > 2**32-1 for k in ('pid', 'migration', 'target')) or p['vm_steps'] > 2**64-1:
+                return
+            if not 0 < p['migration'] <= p['target'] or (p['complete'] and p['migration'] != p['target']):
+                return
+            old = self.seen
+            if old and (old['complete'] or p['target'] != old['target'] or p['migration'] < old['migration'] or p['vm_steps'] < old['vm_steps']
+                        or (p['migration'] == old['migration'] and p['vm_steps'] == old['vm_steps'] and not p['complete'])):
+                return
+            self.advanced, self.seen = now, p
+        except (OSError, ValueError, TypeError):
+            pass
 
 
 class Journal:
@@ -769,10 +814,11 @@ def probe(candidate, version):
     with logf.open("w") as out:
         p = subprocess.Popen([str(candidate / "bin/steve-hub")], env=env, stdout=out, stderr=out)
         try:
-            until = time.monotonic() + 60
-            while time.monotonic() < until:
+            budget = MigrationBudget(HOME, ident, p.pid)
+            while True:
                 if p.poll() is not None:
                     raise RuntimeError(f"the candidate exited during the probe (log {logf})")
+                budget.check()
                 try:
                     with urllib.request.urlopen(f"http://127.0.0.1:{p_port}/healthz", timeout=2) as r:
                         h = json.load(r)
@@ -789,7 +835,6 @@ def probe(candidate, version):
                 except OSError:
                     pass
                 time.sleep(0.2)
-            raise RuntimeError(f"the candidate did not come up in maintenance (log {logf})")
         finally:
             p.terminate()
             try:

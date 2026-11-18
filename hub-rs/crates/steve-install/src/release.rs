@@ -477,12 +477,14 @@ impl Runtime {
             .process_group(0);
         let result = (|| -> Result<Value> {
             let mut process = ProbeProcess(command.spawn()?);
-            let deadline = Instant::now() + self.health_timeout;
+            let mut budget =
+                crate::migration::Budget::new(&id.to_string(), process.0.id(), self.health_timeout);
             loop {
                 ensure!(
                     process.0.try_wait()?.is_none(),
                     "candidate exited during its maintenance probe"
                 );
+                budget.check(crate::migration::read(&self.home, &id.to_string()))?;
                 let health = self
                     .client
                     .get(format!("http://127.0.0.1:{port}/healthz"))
@@ -508,10 +510,6 @@ impl Runtime {
                         return Ok(health);
                     }
                 }
-                ensure!(
-                    Instant::now() < deadline,
-                    "candidate did not become healthy in maintenance"
-                );
                 std::thread::sleep(Duration::from_millis(200));
             }
         })();
@@ -1136,6 +1134,24 @@ mod tests {
             Ok("1"),
             "fixture fails after a migration"
         );
+        if let Ok(mode) = std::env::var("STEVE_NATIVE_TEST_PROGRESS") {
+            let id = std::env::var("STEVE_UPGRADE_ID").unwrap();
+            let mut progress = crate::migration::Reporter::new(&home, &id).unwrap();
+            progress
+                .report(54, 54, 100_000, mode == "finished")
+                .unwrap();
+            if mode == "advancing" {
+                for n in 1..=17 {
+                    std::thread::sleep(Duration::from_millis(400));
+                    progress.report(54, 54, n * 100_000, false).unwrap();
+                }
+                progress.report(54, 54, 1_800_000, true).unwrap();
+            } else {
+                // The parent must stop this candidate and roll back, whether migration stalled or
+                // finished but startup never became healthy. Only the test's own child is stopped.
+                std::thread::sleep(Duration::from_secs(10));
+            }
+        }
         let port: u16 = std::env::var("STEVE_PORT").unwrap().parse().unwrap();
         let listener = TcpListener::bind(("127.0.0.1", port)).unwrap();
         for stream in listener.incoming() {
@@ -1338,6 +1354,53 @@ mod tests {
             fs::read_to_string(dir.path().join("service-state")).unwrap(),
             "start"
         );
+    }
+    #[test]
+    fn advancing_migration_outlives_the_normal_health_window() {
+        let (dir, candidate, mut runtime, _service, journal) = runtime_fixture(false, false);
+        runtime.health_timeout = Duration::from_secs(3);
+        runtime
+            .env
+            .insert("STEVE_NATIVE_TEST_PROGRESS".into(), "advancing".into());
+        let start = Instant::now();
+        let outcome = deploy_with(&runtime, &candidate, &journal, Duration::from_secs(2)).unwrap();
+        assert_eq!(outcome.exit_code, 0, "{}", outcome.receipt);
+        assert!(start.elapsed() > runtime.health_timeout * 2);
+        assert_eq!(
+            schema_state(&dir.path().join("data/steve.sqlite3")).unwrap()["schema"],
+            54
+        );
+    }
+    #[test]
+    fn stalled_and_finished_but_unhealthy_candidates_restore_the_backup() {
+        for mode in ["stalled", "finished"] {
+            let (dir, candidate, mut runtime, _service, journal) = runtime_fixture(false, false);
+            runtime.health_timeout = Duration::from_millis(1600);
+            runtime
+                .env
+                .insert("STEVE_NATIVE_TEST_PROGRESS".into(), mode.into());
+            let start = Instant::now();
+            let outcome =
+                deploy_with(&runtime, &candidate, &journal, Duration::from_secs(2)).unwrap();
+            assert_eq!(outcome.exit_code, 1, "{}", outcome.receipt);
+            assert!(start.elapsed() < Duration::from_secs(8));
+            assert_eq!(
+                json_file(journal.path.as_ref().unwrap()).unwrap()["phase"],
+                "rolled_back"
+            );
+            assert_eq!(
+                schema_state(&dir.path().join("data/steve.sqlite3")).unwrap()["schema"],
+                53
+            );
+            assert_eq!(
+                json_file(&dir.path().join("current/release.json")).unwrap()["version"],
+                "1.2.2"
+            );
+            assert_eq!(
+                fs::read_to_string(dir.path().join("service-state")).unwrap(),
+                "start"
+            );
+        }
     }
     #[test]
     fn failed_start_keeps_new_database_and_reports_committed_failure() {
