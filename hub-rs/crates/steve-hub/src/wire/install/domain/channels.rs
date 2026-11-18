@@ -1,5 +1,10 @@
 use super::*;
 
+install! { scopes(reg, _cx) [mut registry] => [registry] {
+    // C1: `space:<id>` visibility scopes of the spaces a viewer sees
+    registry.viewer_scopes(Box::new(steve_channels::spaces::SpaceScopes));
+}}
+
 install! { prepare(reg, _cx) [mut registry] => [registry] {
     // C8: the `space`, `persona` and `channel` draft targets; capi: the “新群” card
     steve_channels::drafts::register(&mut registry, Arc::new(steve_modules::SystemClock));
