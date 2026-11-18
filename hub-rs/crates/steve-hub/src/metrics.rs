@@ -12,7 +12,9 @@ use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::{Router, routing::get};
 use futures::TryStreamExt;
-use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle, PrometheusRecorder};
+use metrics_exporter_prometheus::{
+    Matcher, PrometheusBuilder, PrometheusHandle, PrometheusRecorder,
+};
 use steve_store::Store;
 
 use crate::config::ConfigError;
@@ -58,6 +60,13 @@ fn recorder() -> PrometheusRecorder {
             0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 100.0,
         ])
         .expect("static nonempty buckets")
+        .set_buckets_for_metric(
+            Matcher::Full("steve_http_store_calls_per_request".into()),
+            &[
+                0.0, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0, 512.0, 1024.0,
+            ],
+        )
+        .expect("static count buckets")
         .build_recorder()
 }
 
@@ -210,7 +219,8 @@ fn http_metrics(route: &str, method: &'static str, status: &'static str) -> Http
     })
 }
 
-/// To be wired after the route refactor. Handler latency excludes SSE and body transmission.
+/// Outermost request observation, including CORS/maintenance/auth short responses. Latency
+/// ends at response headers; body bytes reflect the inner compression layer's actual chunks.
 /// Hub responses carry data frames; the data-stream adapter forwards errors without buffering.
 pub async fn http(request: Request, next: Next) -> Response {
     if !ENABLED.load(Ordering::Relaxed) {
@@ -232,7 +242,8 @@ async fn http_enabled(request: Request, next: Next) -> Response {
         _ => "OTHER",
     };
     let start = Instant::now();
-    let response = next.run(request).await;
+    let calls = steve_store::instrumentation::RequestCalls::default();
+    let response = calls.scope(next.run(request)).await;
     let route = route.as_ref().map_or("unmatched", MatchedPath::as_str);
     if response
         .headers()
@@ -254,6 +265,7 @@ async fn http_enabled(request: Request, next: Next) -> Response {
         4 => "4xx",
         _ => "5xx",
     };
+    store_calls_histogram(route).record(calls.count() as f64);
     let handles = http_metrics(route, method, status);
     handles.requests.increment(1);
     handles.duration.record(start.elapsed().as_secs_f64());
@@ -269,6 +281,28 @@ async fn http_enabled(request: Request, next: Next) -> Response {
         .into_data_stream()
         .inspect_ok(move |chunk| handles.bytes.increment(chunk.len() as u64));
     Response::from_parts(parts, Body::from_stream(stream))
+}
+
+/// Blocking API work keeps the request's storage counter alongside its existing language context.
+pub(crate) fn carry<R>(f: impl FnOnce() -> R) -> impl FnOnce() -> R {
+    steve_store::instrumentation::carry(f)
+}
+
+fn store_calls_histogram(route: &str) -> metrics::Histogram {
+    thread_local! {
+        static HANDLES: std::cell::RefCell<HashMap<String, metrics::Histogram>> =
+            std::cell::RefCell::new(HashMap::new());
+    }
+    HANDLES.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        if let Some(handle) = cache.get(route) {
+            return handle.clone();
+        }
+        let handle =
+            metrics::histogram!("steve_http_store_calls_per_request", "route" => route.to_owned());
+        cache.insert(route.to_owned(), handle.clone());
+        handle
+    })
 }
 
 fn sse_counter(route: &str) -> metrics::Counter {
@@ -494,9 +528,10 @@ mod tests {
         );
         assert!(!text.contains("private-id"), "{text}");
         assert!(
-            !text
-                .lines()
-                .any(|line| line.contains("duration") && line.contains("/metrics-events")),
+            !text.lines().any(
+                |line| (line.contains("duration") || line.contains("store_calls"))
+                    && line.contains("/metrics-events")
+            ),
             "{text}"
         );
     }
@@ -586,6 +621,206 @@ mod tests {
             })
         });
         assert_eq!(handle.render(), "");
+    }
+
+    #[test]
+    fn request_counts_follow_blocking_and_do_not_leak_between_requests() {
+        use steve_store::instrumentation::{RequestCalls, enable_lock_metrics};
+        enable_lock_metrics();
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Store::open(tmp.path().join("request-counts.sqlite3"), NoPublisher).unwrap();
+        let first = RequestCalls::default();
+        let second = RequestCalls::default();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .max_blocking_threads(1)
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let barrier = tokio::sync::Barrier::new(2);
+            let a = first.scope(async {
+                store
+                    .reader(|_| Ok::<_, steve_store::StoreError>(()))
+                    .unwrap();
+                tokio::task::yield_now().await;
+                store.with_conn(|_| Ok(())).unwrap();
+                barrier.wait().await;
+                let store = store.clone();
+                crate::api::blocking(move || {
+                    store.users().count().unwrap();
+                    store
+                        .transaction(|_| {
+                            // Reuse of the active connection does not acquire another read/write lock.
+                            store.reader(|_| Ok::<_, steve_store::StoreError>(()))?;
+                            store.transaction(|_| Ok::<_, steve_store::StoreError>(()))
+                        })
+                        .unwrap();
+                    Ok(())
+                })
+                .await
+                .unwrap();
+            });
+            let b = second.scope(async {
+                barrier.wait().await;
+                let store = store.clone();
+                crate::api::blocking(move || {
+                    store.with_conn(|_| Ok(())).unwrap();
+                    Ok(())
+                })
+                .await
+                .unwrap();
+            });
+            tokio::join!(a, b);
+            // The one blocking worker must have restored its context after both carried requests.
+            let outside = store.clone();
+            crate::api::blocking(move || {
+                outside.users().count().unwrap();
+                Ok(())
+            })
+            .await
+            .unwrap();
+            let uncarried = RequestCalls::default();
+            let store = store.clone();
+            uncarried
+                .scope(async {
+                    tokio::task::spawn_blocking(move || store.with_conn(|_| Ok(())).unwrap())
+                        .await
+                        .unwrap();
+                })
+                .await;
+            assert_eq!(
+                uncarried.count(),
+                0,
+                "raw spawn_blocking does not inherit request context"
+            );
+        });
+        assert_eq!(first.count(), 4);
+        assert_eq!(second.count(), 1);
+    }
+
+    #[test]
+    fn full_router_records_short_responses_and_repeatable_write_store_counts() {
+        use std::sync::Arc;
+        steve_store::instrumentation::enable_lock_metrics();
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Store::open(tmp.path().join("router.sqlite3"), NoPublisher).unwrap();
+        store.ensure_workspace().unwrap();
+        let owner = store
+            .users()
+            .create("fixture", "Owner", None, "owner")
+            .unwrap();
+        store
+            .auth_sessions()
+            .create(&owner, "fixture-session", 60_000)
+            .unwrap();
+        let cfg = crate::config::Config::from_vars(|key| match key {
+            "STEVE_HOME" | "HOME" => Some(tmp.path().to_string_lossy().into_owned()),
+            "STEVE_PORT" => Some("18710".into()),
+            "STEVE_NO_RESUME" => Some("1".into()),
+            "STEVE_CLIENT_ORIGINS" => Some("http://client.example".into()),
+            key if key.starts_with("STEVE_ADAPTER_") => Some("/usr/bin/false".into()),
+            _ => None,
+        })
+        .unwrap();
+        let st = crate::api::AppState::new(
+            Arc::new(cfg),
+            Arc::new(crate::wire::store::StoreBackend::new(store.clone()).unwrap()),
+            Arc::new(crate::backend::NoDomain),
+            crate::bus::Bus::new(),
+        );
+        let recorder = recorder();
+        let handle = recorder.handle();
+        metrics::with_local_recorder(&recorder, || {
+            runtime().block_on(async {
+                // Production's outer metrics layer stays off in unit tests; the forced-enabled test
+                // layer occupies exactly that position and wraps the real CORS/auth/locale pipeline.
+                let app = crate::app::app(st, Router::new(), None, Router::new(), Router::new())
+                    .layer(axum::middleware::from_fn(http_enabled));
+                let preflight = HttpRequest::builder()
+                    .method("OPTIONS")
+                    .uri("/api/notifications/read")
+                    .header(header::HOST, "127.0.0.1:18710")
+                    .header(header::ORIGIN, "http://client.example")
+                    .header(header::ACCESS_CONTROL_REQUEST_METHOD, "POST")
+                    .body(Body::empty())
+                    .unwrap();
+                assert_eq!(
+                    app.clone().oneshot(preflight).await.unwrap().status(),
+                    StatusCode::NO_CONTENT
+                );
+                let anonymous = HttpRequest::builder()
+                    .method("POST")
+                    .uri("/api/notifications/read")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"at":1}"#))
+                    .unwrap();
+                assert_eq!(
+                    app.clone().oneshot(anonymous).await.unwrap().status(),
+                    StatusCode::UNAUTHORIZED
+                );
+                for _ in 0..2 {
+                    let request = HttpRequest::builder()
+                        .method("POST")
+                        .uri("/api/notifications/read")
+                        .header(header::CONTENT_TYPE, "application/json")
+                        .header(header::COOKIE, "steve_session=fixture-session")
+                        .header("x-steve-ws", steve_store::WS)
+                        .body(Body::from(r#"{"at":1}"#))
+                        .unwrap();
+                    let response = app.clone().oneshot(request).await.unwrap();
+                    assert_eq!(response.status(), StatusCode::OK);
+                    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+                    assert_eq!(
+                        serde_json::from_slice::<serde_json::Value>(&bytes).unwrap(),
+                        serde_json::json!({"seen":1})
+                    );
+                }
+            })
+        });
+        assert_eq!(
+            store
+                .settings()
+                .get::<u64>(steve_store::WS, "notifySeen", 0)
+                .unwrap(),
+            1
+        );
+        let text = handle.render();
+        assert!(
+            text.lines()
+                .any(|line| line.starts_with("steve_http_requests_total{")
+                    && line.contains("method=\"OPTIONS\"")
+                    && line.contains("status=\"2xx\"")
+                    && line.ends_with(" 1")),
+            "{text}"
+        );
+        assert!(
+            text.lines()
+                .any(|line| line.starts_with("steve_http_requests_total{")
+                    && line.contains("method=\"POST\"")
+                    && line.contains("status=\"4xx\"")
+                    && line.ends_with(" 1")),
+            "{text}"
+        );
+        assert!(
+            text.contains(
+                "steve_http_store_calls_per_request_count{route=\"/api/notifications/read\"} 4"
+            ),
+            "{text}"
+        );
+        assert!(text.contains("steve_http_store_calls_per_request_bucket{route=\"/api/notifications/read\",le=\"1024\"} 4"), "{text}");
+        let sum = text
+            .lines()
+            .find(|line| line.starts_with("steve_http_store_calls_per_request_sum{"))
+            .unwrap()
+            .split_whitespace()
+            .last()
+            .unwrap()
+            .parse::<u64>()
+            .unwrap();
+        assert!(
+            sum >= 6,
+            "authentication reads and both writes must be carried: {text}"
+        );
     }
 
     #[test]

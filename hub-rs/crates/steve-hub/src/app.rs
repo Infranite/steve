@@ -235,8 +235,9 @@ pub fn app(
         .layer(middleware::from_fn(vary_encoding))
         .layer(middleware::from_fn(slow_requests))
         .layer(middleware::from_fn(locale))
-        // outermost: a cross-origin web client's preflight is answered before anything asks for a login
+        // CORS answers preflight before login; outer metrics also observes these short responses.
         .layer(middleware::from_fn_with_state(st, crate::access::cors))
+        .layer(middleware::from_fn(crate::metrics::http))
 }
 
 fn health_routes(st: &AppState) -> Router {
