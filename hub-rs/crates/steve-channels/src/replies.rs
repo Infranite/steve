@@ -188,7 +188,7 @@ impl Replies {
         let stopped = if earlier.is_empty() {
             ch.owner_stop(plan)?
         } else {
-            ch.store().transaction(|tx| {
+            ch.store().transaction(|tx| -> ChannelResult<_> {
                 let stopped = crate::presence::stop(tx, &plan.ws, &plan.message_id, ch.now())?;
                 if stopped.is_none() {
                     crate::presence::supersede(
