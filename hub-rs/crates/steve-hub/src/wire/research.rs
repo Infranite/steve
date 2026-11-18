@@ -404,6 +404,7 @@ impl ResearchAdapter {
             usage: vec![],
             text: String::new(),
             unavailable: false,
+            calls: 0,
         };
         let last_err = r::drive(&plans, &mut runner).await;
         let ms = runner.t0.elapsed().as_millis() as u64;
@@ -490,6 +491,7 @@ struct OnNode<'a> {
     /// The latest visible draft, kept when the Node disappears before a completion arrives.
     text: String,
     unavailable: bool,
+    calls: u32,
 }
 
 impl r::AttemptRunner for OnNode<'_> {
@@ -522,9 +524,9 @@ impl r::AttemptRunner for OnNode<'_> {
         };
         let mut progressed = false;
         let mut ids = std::collections::HashSet::new();
-        let mut running = None;
-        // when each call was first seen: the adapters report no duration of their own
-        let mut began = HashMap::new();
+        // The adapter's call ID is only stable within this attempt. Publish our own
+        // run-local number and keep terminal transitions for the same call, not same-name guesses.
+        let mut calls = HashMap::new();
         let mut tick = tokio::time::interval(Duration::from_millis(50));
         let mut health = tokio::time::interval(Duration::from_secs(1));
         let end = loop {
@@ -540,29 +542,35 @@ impl r::AttemptRunner for OnNode<'_> {
                         self.text = t;
                     }
                     Some(News::Tool(v)) => {
+                        if v.phase == api::ToolPhase::Pending {
+                            continue;
+                        }
                         progressed = true;
                         let kind = serde_json::to_value(v.category)
                             .ok()
                             .and_then(|c| c.as_str().map(str::to_owned))
                             .unwrap_or_default();
                         let brief = v.target.unwrap_or_default();
-                        let seen = *began.entry(v.id.clone()).or_insert_with(std::time::Instant::now);
+                        let (call, began, last_phase, last_brief) = calls.entry(v.id).or_insert_with(|| {
+                            self.calls += 1;
+                            (self.calls, std::time::Instant::now(), None, String::new())
+                        });
+                        let previous = last_phase.replace(v.phase);
+                        if previous == Some(v.phase) && *last_brief == brief {
+                            continue;
+                        }
+                        last_brief.clone_from(&brief);
                         let ok = match v.phase {
                             api::ToolPhase::Succeeded => true,
                             api::ToolPhase::Failed => false,
-                            // what the run is doing now: a call that takes minutes is seen while it runs
-                            _ => {
-                                let now = (v.id, brief);
-                                if running.as_ref() != Some(&now) {
-                                    self.sink.tool_running(&v.name, &kind, &now.1);
-                                    running = Some(now);
-                                }
+                            api::ToolPhase::Running => {
+                                self.sink.tool_running(Some(*call), &v.name, &kind, &brief);
                                 continue;
                             }
+                            api::ToolPhase::Pending => continue,
                         };
-                        running = None;
-                        began.remove(&v.id);
                         self.sink.tool(&ToolSeen {
+                            call: Some(*call),
                             name: v.name,
                             kind,
                             brief,
@@ -570,7 +578,7 @@ impl r::AttemptRunner for OnNode<'_> {
                             error: v.error,
                             ms: v
                                 .duration_ms
-                                .unwrap_or_else(|| seen.elapsed().as_millis() as u64)
+                                .unwrap_or_else(|| began.elapsed().as_millis() as u64)
                                 as i64,
                         });
                     }

@@ -34,12 +34,6 @@ export default {
     changes_one: "{{count}} change",
     changes_other: "{{count}} changes",
     phase: {
-      route: "Working out how to handle this",
-      answer: "Thinking about the answer",
-      research: "Looking it up",
-      item: "Creating an item",
-      config: "Drafting a config change",
-      supplement: "Sending to the item",
       start: "Reading your message",
     },
     allNotices: "All notifications",

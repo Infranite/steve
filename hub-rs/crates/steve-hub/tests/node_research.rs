@@ -71,7 +71,7 @@ impl ResearchSink for Seen {
     fn tool(&self, t: &ToolSeen) {
         self.tools.lock().unwrap().push(t.clone());
     }
-    fn tool_running(&self, name: &str, kind: &str, brief: &str) {
+    fn tool_running(&self, _call: Option<u32>, name: &str, kind: &str, brief: &str) {
         self.running
             .lock()
             .unwrap()
@@ -631,7 +631,7 @@ async fn the_owners_own_run_acts_on_the_machine() {
     let node = Hub::with(&w, "node", true, 3, steve_research::SandboxMode::Auto).await;
     let made = w.root.join("made-by-the-run");
     let question = format!(
-        "整理一下\n@msg m1\n@asking execute touch x\n@touch {}\n@msg m2\n@say 整理好了",
+        "整理一下\n@msg m1\n@asking execute touch not-started\n@running execute touch x\n@touch {}\n@msg m2\n@say 整理好了",
         made.display()
     );
     let mut req = request(&w, "tr_f", "default", &question);
@@ -640,7 +640,7 @@ async fn the_owners_own_run_acts_on_the_machine() {
     let out = node.adapter.research(req, &seen).await;
     assert_eq!(out.end, RunEnd::Done, "{out:?}");
     assert_eq!(out.text, "整理好了");
-    // the command is said while it runs (here it never ends): once, with its category
+    // Only the reported running call is shown; a pending one has not started.
     let running = seen.running.lock().unwrap().clone();
     assert_eq!(running.len(), 1, "{running:?}");
     assert_eq!(

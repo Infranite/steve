@@ -3,7 +3,7 @@ import { Files } from "@/attach"
 import { MineButton } from "@/mine"
 import { cue, onCue, type HeroCue } from "@/bus"
 import { ChannelMessageBody } from "@/channels/message-body"
-import { ChatRail, LiveSteps, NoticeLine, RailToggle, showNotices, StepsBlock } from "@/chat2"
+import { ChatRail, LiveSteps, NoticeLine, RailToggle, showNotices, StepsBlock, TurnInterruption, type ProcessMemory } from "@/chat2"
 import { A2uiHost } from "@/a2ui/host"
 import { A2uiActionNote } from "@/a2ui/note"
 import { Markdown } from "@/components/markdown"
@@ -34,7 +34,7 @@ import { AskChips, CardLink, ComposerBars, ItemCard, OfferLine, QueuedNote, Quot
 import { Composer, go, ItemRef, openSheet, type ComposerHandle } from "@/ui"
 import { cn } from "cn"
 import { ArrowDownIcon, ListChecksIcon, MessageCircleIcon, MessageSquareReplyIcon, RouteIcon, Undo2Icon } from "lucide-react"
-import { Fragment, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react"
+import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react"
 import { lang, t as tr, useT } from "@/i18n"
 
 
@@ -192,11 +192,12 @@ export function ChatView({ conv }: { conv?: string } = {}) {
   useReplyReading(scroller, conv)
   const working = isThinking() || !!st.live
   const posKey = conv ? "" : st.workspace?.id ?? ""
+  const processMemory = useMemo<ProcessMemory>(() => new Map(), [posKey, conv])
   /* where you were reading last time (ST-50): reopening there, the page does not start at the bottom first */
   const saved = useRef<ReadPos | null | undefined>(undefined)
   if (saved.current === undefined) saved.current = conv ? null : readPos(posKey)
   const stuck = useRef(!saved.current || saved.current.bottom), [unread, setUnread] = useState(false)
-  const unreadNow = useRef(unread); unreadNow.current = unread
+  const held = useRef(false), towardLatest = useRef(false)
   const restoring = useRef(!stuck.current)
   /* new messages since you left the bottom: everything said after the latest one you had */
   const leftAt = useRef(0)
@@ -207,7 +208,7 @@ export function ChatView({ conv }: { conv?: string } = {}) {
   /* handlers set up once read the list as it is now */
   const shown = useRef(list); shown.current = list
   const latest = () => shown.current.findLast((m) => m.created)?.created ?? 0
-  const bottom = () => { stuck.current = true; setUnread(false); setBack(null); scroller.current?.scrollTo({ top: 1e9 }) }
+  const bottom = () => { stuck.current = true; held.current = false; towardLatest.current = false; setUnread(false); setBack(null); scroller.current?.scrollTo({ top: 1e9 }) }
   /** the first message showing at the top of the list, and how far below the top it starts */
   const anchorNow = (): Anchor | null => {
     const el = scroller.current; if (!el) return null
@@ -225,11 +226,13 @@ export function ChatView({ conv }: { conv?: string } = {}) {
     return true
   }
   const leave = () => { if (stuck.current) leftAt.current = latest(); stuck.current = false }
+  // An explicit quote jump or drill-down is a reading action, not a request to follow.
+  const hold = () => { leave(); held.current = true; towardLatest.current = false }
   useEffect(() => {
     if (stuck.current) bottom()
     else if (restoring.current) return
     // An inert upward gesture, or a viewport that now fits every message, is not unseen content.
-    else if (scroller.current && scroller.current.scrollHeight - scroller.current.scrollTop - scroller.current.clientHeight < 40) bottom()
+    else if (!held.current && scroller.current && scroller.current.scrollHeight - scroller.current.scrollTop - scroller.current.clientHeight < 40) bottom()
     else if (list.some((m) => m.created && m.created > leftAt.current && m.k !== "thinking") || (st.draft?.text && !back)) setUnread(true)
   }, [list.length, list.at(-1)?.id, list.at(-1)?.t, st.draft?.text])
   /* older messages came in above: the one you were reading stays where it was */
@@ -237,22 +240,43 @@ export function ChatView({ conv }: { conv?: string } = {}) {
   /* rendered Markdown and folded steps grow after the first scroll: stay at the bottom until the user scrolls away */
   useEffect(() => {
     const el = scroller.current, inner = el?.firstElementChild; if (!el || !inner) return
-    const near = () => { if (el.scrollHeight - el.scrollTop - el.clientHeight >= 40) leave(); else if (!stuck.current) { stuck.current = true; setUnread(false); setBack(null) } }
-    /* only scrolling up leaves the bottom: a wheel or swipe that cannot move further down fires no scroll event to undo it */
+    const gap = () => el.scrollHeight - el.scrollTop - el.clientHeight
+    const near = () => {
+      if (gap() >= 40) leave()
+      else if (!stuck.current && (!held.current || towardLatest.current)) bottom()
+    }
+    // A scroll begun in the bounded process must never change the outer conversation's follow mode.
+    const inProcess = (e: Event) => (e.target as HTMLElement)?.closest?.("[data-chat-process-scroll]")
+    const upward = () => { if (el.scrollTop > 0) { towardLatest.current = false; leave() } }
+    const downward = () => { towardLatest.current = true; if (gap() < 40 && !stuck.current) bottom() }
     let y = 0
-    const wheel = (e: WheelEvent) => { if (e.deltaY < 0 && el.scrollTop > 0) leave() }, touch = (e: TouchEvent) => { y = e.touches[0]?.clientY ?? 0 }
-    const swipe = (e: TouchEvent) => { const t = e.touches[0]?.clientY ?? y; if (t > y && el.scrollTop > 0) leave(); y = t }
-    const key = (e: KeyboardEvent) => { if (el.scrollTop > 0 && ["PageUp", "ArrowUp", "Home"].includes(e.key)) leave() }
-    el.addEventListener("wheel", wheel, { passive: true }); el.addEventListener("touchstart", touch, { passive: true }); el.addEventListener("touchmove", swipe, { passive: true }); el.addEventListener("scroll", near, { passive: true }); el.addEventListener("keydown", key)
-    window.addEventListener("steve-open-steps", leave)
-    /* unfolding something you are reading must not jump you to the bottom */
-    const unfold = (e: Event) => { if ((e.target as HTMLElement).closest?.("[data-steps-toggle]")) leave() }; el.addEventListener("click", unfold)
-    /* the list grows, or the composer and queue above it grow and shrink the viewport */
-    const ro = new ResizeObserver(() => {
-      if (stuck.current) el.scrollTop = el.scrollHeight
-      else if (unreadNow.current && el.scrollHeight - el.scrollTop - el.clientHeight < 40) bottom()
-    }); ro.observe(inner); ro.observe(el)
-    return () => { ro.disconnect(); el.removeEventListener("wheel", wheel); el.removeEventListener("touchstart", touch); el.removeEventListener("touchmove", swipe); el.removeEventListener("scroll", near); el.removeEventListener("keydown", key); window.removeEventListener("steve-open-steps", leave); el.removeEventListener("click", unfold) }
+    const wheel = (e: WheelEvent) => { if (!inProcess(e)) { if (e.deltaY < 0) upward(); else if (e.deltaY > 0) downward() } }
+    const touch = (e: TouchEvent) => { y = e.touches[0]?.clientY ?? 0 }
+    const swipe = (e: TouchEvent) => { const next = e.touches[0]?.clientY ?? y; if (!inProcess(e)) { if (next > y) upward(); else if (next < y) downward() } y = next }
+    const key = (e: KeyboardEvent) => {
+      if (inProcess(e)) return
+      if (["PageUp", "ArrowUp", "Home"].includes(e.key)) upward()
+      else if (["PageDown", "ArrowDown", "End"].includes(e.key)) downward()
+    }
+    el.addEventListener("wheel", wheel, { passive: true }); el.addEventListener("touchstart", touch, { passive: true }); el.addEventListener("touchmove", swipe, { passive: true }); el.addEventListener("scroll", near); el.addEventListener("keydown", key)
+    window.addEventListener("steve-open-steps", hold)
+    const unfold = (e: Event) => {
+      const toggle = (e.target as HTMLElement).closest?.<HTMLElement>("[data-steps-toggle]")
+      if (!toggle) return
+      const wasFollowing = stuck.current
+      if (wasFollowing) setBack("latest")
+      hold()
+      // Unfolding the latest run reveals its bounded panel before we hold the reading position.
+      if (wasFollowing) requestAnimationFrame(() => {
+        if (stuck.current || toggle.getAttribute("aria-expanded") !== "true") return
+        const panel = document.getElementById(toggle.getAttribute("aria-controls") ?? "")
+        const excess = panel ? panel.getBoundingClientRect().bottom - el.getBoundingClientRect().bottom + 48 : 0
+        if (excess > 0) el.scrollTop += excess
+      })
+    }
+    el.addEventListener("click", unfold)
+    const ro = new ResizeObserver(() => { if (stuck.current) el.scrollTop = el.scrollHeight }); ro.observe(inner); ro.observe(el)
+    return () => { ro.disconnect(); el.removeEventListener("wheel", wheel); el.removeEventListener("touchstart", touch); el.removeEventListener("touchmove", swipe); el.removeEventListener("scroll", near); el.removeEventListener("keydown", key); window.removeEventListener("steve-open-steps", hold); el.removeEventListener("click", unfold) }
   }, [])
   /* the top of the list: the conversation before what was loaded comes in (yours only) */
   useEffect(() => {
@@ -271,7 +295,7 @@ export function ChatView({ conv }: { conv?: string } = {}) {
     requestAnimationFrame(() => requestAnimationFrame(() => {
       const el = scroller.current, x = el?.querySelector<HTMLElement>(`[data-msg="${CSS.escape(id)}"]`)
       if (!el || !x) { toast(tr("pages:chat.notInThread")); return }
-      leave()
+      hold()
       /* centred; what was just loaded above still lays out (Markdown, code), so it is put back once more after that */
       const at: Anchor = { id, created: created ?? 0, offset: Math.max(16, (el.clientHeight - x.offsetHeight) / 2) }
       toAnchor(at); setTimeout(() => { if (!stuck.current) toAnchor(at) }, 180)
@@ -345,11 +369,13 @@ export function ChatView({ conv }: { conv?: string } = {}) {
             const head = !(prev?.k === "steve" && !prev.notice && !day && m.created && prev.created && m.created - prev.created < RUN_GAP)
             if (m.k === "me" && conv) return <Fragment key={key}>{dayLabel}<div className="group/me relative flex flex-col gap-1.5" data-msg={m.id} data-im-turn><SenderLine m={rawOf(m)} />{rawOf(m)?.channel_message ? <div className="w-full max-w-[600px] self-end"><ChannelMessageBody message={rawOf(m)!.channel_message!} /></div> : <Me t={m.t!} files={m.files} />}<HandlingLine h={m.id ? woven?.byTurn.get(m.id)?.handling : undefined} reacted={!!rawOf(m)?.reaction && rawOf(m)?.reaction?.state !== "cleared"} /><QueuedNote m={m} /><ImMsgActions url={rawOf(m)?.channel_message?.open_url ?? im?.badge.open_url} side="end" last={m.id === lastMe} /></div></Fragment>
             if (m.k === "me") return <Fragment key={key}>{dayLabel}<div tabIndex={-1} className={cn("group/me relative flex flex-col gap-1.5 rounded-xl outline-none transition-[background-color,box-shadow] duration-260 ease-(--ease-out)", lit)} data-msg={m.id} data-flash={lit ? "" : undefined}><QuoteHead id={replyTo} className="self-end" />{m.a2uiAction ? <A2uiActionNote a={m.a2uiAction} /> : <Me t={m.t!} files={m.files} />}<QueuedNote m={m} /><MeActions m={m} last={m.id === lastMe} /></div></Fragment>
-            if (m.k === "thinking") return <div key={key} className="flex flex-col gap-2" data-chat-draft={st.draft?.mid} aria-busy="true"><LiveSteps />{st.draft?.text && <SteveSays><Markdown text={st.draft.text} streaming /></SteveSays>}</div>
+            if (m.k === "thinking") return <div key={key} className="flex flex-col gap-2" data-chat-draft={st.draft?.mid} aria-busy="true">{st.draft?.text && <SteveSays><Markdown text={st.draft.text} streaming /></SteveSays>}<LiveSteps memory={processMemory} /></div>
             if (m.notice) return <Fragment key={key}>{dayLabel}<NoticeLine m={m} onOpen={showNotices} /></Fragment>
             return <Fragment key={key}>{dayLabel}<div tabIndex={-1} className={cn("group/sm relative flex min-w-0 flex-col gap-2.5 rounded-xl outline-none transition-[background-color,box-shadow] duration-260 ease-(--ease-out)", lit)} data-msg={m.id} data-attention-reply={!conv && m.k === "steve" && m.id !== st.drafted ? m.id : undefined} data-flash={lit ? "" : undefined}>
               {head && <div className="flex min-w-0 items-baseline gap-2 px-1 type-footnote text-tertiary" data-chat-author><span className="truncate type-callout font-semibold text-foreground">{S?.n ?? "Steve"}</span>{m.created && <time className="shrink-0" dateTime={new Date(m.created).toISOString()}>{tm(m.created)}</time>}</div>}
-              <QuoteHead id={replyTo} /><StepsBlock m={m} /><SteveSays still={m.id === st.drafted}>{!m.update && !m.cardOnly && !delivered && <A2uiHost msg={m.id} records={m.a2ui} readonly={conv ? t("pages:chat.readonlyUi") : undefined}><Markdown text={linkCites(m.t ?? "", m.cites)} /></A2uiHost>}{m.item && !m.update && !m.card && (m.wasCard || list.some((x) => x.card?.item === m.item) ? <CardLink id={m.item} from={m.id} /> : <ItemRef id={m.item} />)}{m.card ? <ItemCard c={m.card} /> : <Updates m={m} />}<OfferLine m={m} /><SuggestCard m={m} /><AskChips m={m} conv={!!conv} /><Rerun m={m} conv={!!conv} /></SteveSays>{m.meet && meeting() && m.id === st.settings.onboardFrom && <Button size="sm" variant="ghost" className="-mt-1 self-start text-muted-foreground" onClick={() => void endMeeting()} data-meet-skip>{t("pages:chat.onboard.meetSkip")}</Button>}{m.cfgs && <div className="-mt-1 flex flex-col gap-2 self-start">{m.cfgs.map((p) => <ProposalCard key={p.id} p={p} inChat />)}</div>}<Cites cites={m.cites} />{conv ? <><ChanOutNote m={rawOf(m)} /><ImMsgActions url={im?.badge.open_url} side="start" last={m.id === lastSteve} /></> : <MsgActions m={m} last={m.id === lastSteve} />}</div></Fragment>
+              <QuoteHead id={replyTo} />
+              {conv ? <StepsBlock m={m} memory={processMemory} /> : <TurnInterruption m={m} />}
+              <SteveSays still={m.id === st.drafted}>{!m.update && !m.cardOnly && !delivered && <A2uiHost msg={m.id} records={m.a2ui} readonly={conv ? t("pages:chat.readonlyUi") : undefined}><Markdown text={linkCites(m.t ?? "", m.cites)} /></A2uiHost>}{m.item && !m.update && !m.card && (m.wasCard || list.some((x) => x.card?.item === m.item) ? <CardLink id={m.item} from={m.id} /> : <ItemRef id={m.item} />)}{m.card ? <ItemCard c={m.card} /> : <Updates m={m} />}<OfferLine m={m} /><SuggestCard m={m} /><AskChips m={m} conv={!!conv} /><Rerun m={m} conv={!!conv} /></SteveSays>{m.meet && meeting() && m.id === st.settings.onboardFrom && <Button size="sm" variant="ghost" className="-mt-1 self-start text-muted-foreground" onClick={() => void endMeeting()} data-meet-skip>{t("pages:chat.onboard.meetSkip")}</Button>}{m.cfgs && <div className="-mt-1 flex flex-col gap-2 self-start">{m.cfgs.map((p) => <ProposalCard key={p.id} p={p} inChat />)}</div>}<Cites cites={m.cites} />{!conv && <StepsBlock m={m} memory={processMemory} />}{conv ? <><ChanOutNote m={rawOf(m)} /><ImMsgActions url={im?.badge.open_url} side="start" last={m.id === lastSteve} /></> : <MsgActions m={m} last={m.id === lastSteve} />}</div></Fragment>
           })}
           {!conv && !list.length && st.ready && st.onboard < 0 && <div className="flex flex-col items-center gap-3 px-6 pt-[18vh] text-center anim-in" data-chat-empty>
             <Robot k="steve" size={48} />

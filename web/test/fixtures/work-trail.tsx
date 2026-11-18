@@ -6,8 +6,7 @@ import { TooltipProvider } from "../../src/components/ui/tooltip"
 import { Trail } from "../../src/components/work-trail"
 import { refresh, st, useStore, type Msg } from "../../src/store"
 import { Transcript } from "../../src/ui"
-import { StepsBlock, openSteps } from "../../src/chat2"
-import { ResearchLive } from "../../src/thread/parts"
+import { LiveSteps, StepsBlock, openSteps } from "../../src/chat2"
 
 /* The work trail in both places: an agent's run (`?done`: the turn ended) and Steve's conversation — a finished
  * research folded open, the research under way, and reasoning streaming in. */
@@ -50,9 +49,10 @@ const research: Msg = { id: "r1", k: "steve", t: "", created: T, steps: { ms: 41
     { name: "mcp__steve__steve_knowledge_search", args: { brief: "思考过程展示" }, status: "ok", ms: 300 },
   ] } }
 st.thread = [research]
-st.live = { mid: "m", run: "live", t0: T - 14000, tools: [{ name: "Read", brief: "web/src/chat2.tsx", ok: true, kind: "read" }, { name: "Read", brief: "web/src/ui.tsx", ok: true, kind: "read" }, { name: "Grep", brief: "StepsBlock", ok: true, kind: "search" }], now: { name: "Grep", brief: "LiveSteps", kind: "search" } }
+st.live = { mid: "m", run: "live", startedAt: T - 14000, tools: [{ name: "Read", brief: "web/src/chat2.tsx", ok: true, kind: "read" }, { name: "Read", brief: "web/src/ui.tsx", ok: true, kind: "read" }, { name: "Grep", brief: "StepsBlock", ok: true, kind: "search" }], now: { name: "Grep", brief: "LiveSteps", kind: "search" } }
 void refresh()
 setTimeout(() => openSteps("r1"), 300)
+const memory = new Map()
 function Fixture() {
   useStore()
   return (
@@ -60,8 +60,8 @@ function Fixture() {
       <main className="grid w-full grid-cols-1 gap-10 p-8 lg:grid-cols-2">
         <section data-fixture="run"><h2 className="mb-4 type-label text-muted-foreground">运行详情</h2><Transcript k="s1" /></section>
         <section data-fixture="chat" className="flex flex-col gap-8"><h2 className="type-label text-muted-foreground">对话</h2>
-          <div className="flex flex-col" data-fixture-steps><StepsBlock m={research} /></div>
-          <div className="flex flex-col" data-fixture-live><ResearchLive /></div>
+          <div className="flex flex-col" data-fixture-steps><StepsBlock m={research} memory={memory} /></div>
+          <div className="flex flex-col" data-fixture-live><LiveSteps memory={memory} /></div>
           <div data-fixture-think><Trail items={[{ t: "think", key: "th", text: thought.slice(0, 120), live: true, t0: T - 3000 }]} live /></div>
         </section>
       </main>

@@ -37,12 +37,13 @@ try {
     const steps = page.locator("[data-fixture-steps] .ui-thinkc")
     await steps.locator('[data-step-route]').waitFor()
     assert.equal(await steps.getAttribute('data-status'), 'done')
-    assert.equal(await steps.locator('[data-step-group="read"] .ui-thinkc__source').count(), 3)
-    assert.equal(await steps.locator('[data-step-group="search"] .ui-thinkc__source').count(), 2)
+    assert.equal(await steps.locator('[data-step-tool="Read"]').count(), 3)
+    assert.equal(await steps.locator('[data-step-tool="Grep"]').count(), 2)
     assert.equal(await steps.locator('[data-step-status="error"]').count(), 1)
     assert.equal(await steps.locator('[data-outcome="done"]').count(), 1)
-    assert.match(await steps.innerText(), /npm|git log/)
-    assert.match(await page.locator('[data-research-live]').innerText(), /正在处理[\s\S]*正在搜索/)
+    await steps.locator('[data-step-tool="Bash"] .ui-tclc__head').click()
+    assert.match(await steps.innerText(), /git log/)
+    assert.match(await page.locator('[data-research-live]').innerText(), /Steve · 正在搜索/)
     assert.match(await page.locator("[data-fixture-think] [data-thinking]").textContent(), /正在思考\d+ 秒/)
 
     /* finished: thinking folds to its time, the trail closes with a check */

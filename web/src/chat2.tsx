@@ -1,12 +1,13 @@
 /* Chat page, second pass (ST-6): what Steve did for each message, folded like an agent transcript; notifications and a
  * compact summary in a right rail (a sheet on narrow screens); failures also leave one short line in the conversation.
  * Also: the open cards a session waits on, shown inside the session page. */
-import { useEffect, useState, type ReactNode } from "react"
+import { useEffect, useLayoutEffect, useReducer, useRef, useState, type ReactNode } from "react"
 import { itemDisplayStatus } from "@/item-workflow-relation"
 import { cn } from "cn"
 import { ArchiveIcon, ChevronDownIcon, CircleAlertIcon, CircleCheckIcon, InfoIcon, ListPlusIcon, ListTodoIcon, MegaphoneIcon, SendIcon, SlidersHorizontalIcon, XIcon } from "lucide-react"
 import { Collapsible, CollapsibleContent } from "@/components/ui/collapsible"
 import { type TrailItem } from "@/components/work-trail"
+import { recoveredCalls } from "@/thread/chat-progress"
 import { toolClass } from "@/thread/tools"
 import { steveToolIcon } from "@/tool-icons"
 import { Sheet, SheetContent, SheetTitle } from "@/components/ui/sheet"
@@ -50,12 +51,51 @@ const OPEN_EV = "steve-open-steps"
 /** scroll the conversation to a message's steps and unfold them */
 export function openSteps(id: string) { window.dispatchEvent(new CustomEvent(OPEN_EV, { detail: id })) }
 
-export function StepsBlock({ m }: { m: Msg }) {
-  const s = m.steps ?? (m.stopped ? { tools: [] } : undefined), [open, setOpen] = useState(false), t = useT()
+/** Kept by the conversation page, not shared between workspaces. The research run ID is stable
+ * across streaming and persistence; a direct draft is paired only with the reply that replaced it. */
+export type ProcessMemory = Map<string, { open: boolean; top: number }>
+const draftKeyOf = (mid: string, start: number) => `draft:${mid}:${start}`
+function useProcess(memory: ProcessMemory, key: string, from?: string) {
+  const [, draw] = useReducer((n: number) => n + 1, 0)
+  const saved = memory.get(key) ?? (from ? memory.get(from) : undefined)
+  useLayoutEffect(() => {
+    if (saved && !memory.has(key)) { memory.set(key, saved); if (from) memory.delete(from) }
+  }, [key, from, memory, saved])
+  return {
+    open: saved?.open ?? false, scrollPosition: saved,
+    onOpenChange: (open: boolean) => {
+      const next = saved ?? { open, top: 0 }; next.open = open
+      memory.set(key, next); draw()
+    },
+  }
+}
+type End = "failed" | "user" | "budget" | "violation" | "restart"
+const outcome = (m: Msg): End | undefined => m.steps?.research?.stopped ?? (m.stopped ? "user" : m.steps?.answer?.failed ? "failed" : m.rerun ? "restart" : undefined)
+export function TurnInterruption({ m }: { m: Msg }) {
+  const t = useT(), end = outcome(m)
+  if (!end) return null
+  const detail = end === "budget" || end === "violation" || end === "restart" ? t(`thread:progress.${end}`) : undefined
+  return <div className={cn("flex items-start gap-2 rounded-lg border bg-muted/35 px-3 py-2 type-callout", end === "user" ? "text-muted-foreground" : "text-destructive")} data-chat-interruption={end}>
+    <CircleAlertIcon className="mt-0.5 size-4 shrink-0" aria-hidden />
+    <div><p className="font-medium">{t(end === "user" ? "thread:progress.stopped" : "thread:progress.unfinished")}</p>{detail && <p className="text-foreground">{detail}</p>}</div>
+  </div>
+}
+
+export function StepsBlock({ m, memory }: { m: Msg; memory: ProcessMemory }) {
+  const s = m.steps ?? (m.stopped ? { tools: [] } : undefined), t = useT()
+  const end = outcome(m)
+  const from = m.id === st.drafted && m.origin && st.draftedStart != null ? draftKeyOf(m.origin, st.draftedStart) : undefined
+  const process = useProcess(memory, s?.research?.run ? "run:" + s.research.run : "msg:" + m.id, from)
+  const openFromRail = useRef(process.onOpenChange); openFromRail.current = process.onOpenChange
   useEffect(() => {
-    const h = (e: Event) => { if ((e as CustomEvent).detail !== m.id) return; setOpen(true); document.getElementById("steps-" + m.id)?.scrollIntoView({ behavior: reducedMotion() ? "auto" : "smooth", block: "center" }) }
+    const h = (e: Event) => {
+      if ((e as CustomEvent).detail !== m.id) return
+      openFromRail.current(true)
+      const el = document.getElementById("steps-" + m.id), scroller = el?.closest<HTMLElement>("[data-chat-scroll]")
+      if (el && scroller) scroller.scrollTo({ top: scroller.scrollTop + el.getBoundingClientRect().top - scroller.getBoundingClientRect().top - 24, behavior: reducedMotion() ? "auto" : "smooth" })
+    }
     window.addEventListener(OPEN_EV, h); return () => window.removeEventListener(OPEN_EV, h)
-  }, [m.id])
+  }, [m.id, openFromRail])
   if (!s || (!s.route && !s.tools.length && !s.answer && !s.research && !m.stopped)) return null
   const r = s.route
   const routeDesc = r && [kindLabel(r.kind), r.kind === "item" && botName(r.picked ?? r.bot), r.project && projectName(r.project), ...r.tags.map(tagName), ...r.newTags.map((tag) => t("shell:chat.newTag", { tag }))].filter(Boolean).join(" · ")
@@ -63,12 +103,18 @@ export function StepsBlock({ m }: { m: Msg }) {
   if (r) items.push({ t: "line", key: "route", state: "done", label: <span className="shrink-0">{t("shell:chat.triage")}</span>, detail: <span className="min-w-0 truncate text-foreground/85">{routeDesc}</span>, attrs: { "step-route": "" },
     body: <div className="pb-1 type-callout text-muted-foreground">{r.picked ? t("shell:chat.picked", { bot: botName(r.picked) }) : ""}{r.why}{r.guard && r.modelKind && r.modelKind !== r.kind ? t("shell:chat.guarded", { model: kindLabel(r.modelKind), kind: kindLabel(r.kind) }) : ""}<span className="ml-1.5 type-footnote tabular-nums text-tertiary">{[r.model, secs(r.ms)].filter(Boolean).join(" · ")}</span></div> })
   if (s.answer?.thought) items.push({ t: "think", key: "thought", text: s.answer.thought, live: false, ms: s.answer.ms, attrs: { "step-thought": "" } })
+  const recovered = recoveredCalls(s.tools, step => step.status === "ok")
   s.tools.forEach((tool, n) => {
     const brief = typeof tool.args?.brief === "string" ? tool.args.brief : undefined
     const known = TOOL[tool.name], item = tool.result?.item as string | undefined, state = tool.status === "failed" ? "fail" : "done"
     const err = (tool.error || (s.research && tool.status === "failed")) ? <div className="pb-1 type-callout text-destructive">{s.research ? researchError(tool.error) : tool.error}</div> : undefined
     const extra = tool.ms > 0 ? <span className="shrink-0 tabular-nums text-tertiary">{secs(tool.ms)}</span> : undefined
-    if (!known && (brief !== undefined || steveToolIcon(tool.name))) { items.push(researchStep(String(n), tool.name, tool.kind, brief ?? "", state, { body: err, extra: brief === undefined ? extra : undefined, attrs: { kind: toolClass(tool.name, tool.kind), "step-tool": tool.name } })); return }
+    if (!known && (brief !== undefined || steveToolIcon(tool.name))) {
+      const row = researchStep(String(n), tool.name, tool.kind, brief ?? "", state)
+      items.push({ ...row, card: { name: row.verb[1], args: brief || undefined, result: tool.result, error: state === "fail" ? (s.research ? researchError(tool.error) : tool.error) : undefined, ms: tool.ms },
+        attrs: { kind: toolClass(tool.name, tool.kind), "step-tool": tool.name, recovered: recovered.has(n) ? "" : undefined } })
+      return
+    }
     const desc = tool.name === "create_item" ? [item, botName((tool.result?.bot ?? tool.args.bot) as string), tool.result?.project ? projectName(tool.result.project as string) : t("shell:chat.noProject")].filter(Boolean).join(" · ")
       : tool.name === "draft_config" ? `${tool.result?.target ?? ""}${tool.result ? " · " + t("shell:chat.changes", { count: Number(tool.result.changes) }) : ""}` : tool.name === "supplement" ? String(tool.args.item ?? "") : ""
     const label = known ? known[0]() : tool.name
@@ -77,24 +123,26 @@ export function StepsBlock({ m }: { m: Msg }) {
       detail: <>{desc && (item ? <button type="button" className="min-w-0 truncate text-foreground/85 hover:text-foreground hover:underline" onClick={(e) => { e.stopPropagation(); go("#/items/" + item) }}>{desc}</button> : <span className="min-w-0 truncate text-foreground/85">{desc}</span>)}{extra}</> })
   })
   const took = s.research?.ms ?? s.ms
-  const failed = !!s.answer?.failed || s.research?.stopped === "failed"
-  const stopped = !!m.stopped || !!s.research?.stopped && !failed
-  const status = failed ? "error" : stopped ? "stopped" : "done"
-  return <div id={"steps-" + m.id} className="w-full min-w-0 self-start px-1" data-steps={m.id} data-stopped={m.stopped || undefined}>
-    <ChatThinking items={items} status={status} durationMs={took} summary={s.research ? researchSummary(s, false) : undefined}
-      open={open} onOpenChange={setOpen} endLabel={m.stopped ? t("pages:chat.stopped") : s.research?.stopped ? t(`thread:research.stopped.${s.research.stopped}`) : undefined} headerAttrs={{ "data-steps-toggle": "" }} />
+  const status = end === "failed" || end === "violation" ? "error" : end ? "stopped" : "done"
+  return <div id={"steps-" + m.id} className="w-full min-w-0 self-start" data-steps={m.id} data-stopped={m.stopped || undefined}>
+    <ChatThinking items={items} status={status} durationMs={took} {...process}
+      endLabel={end ? t(`thread:research.stopped.${end}`) : undefined} headerAttrs={{ "data-steps-toggle": "" }} />
   </div>
 }
 
-const PHASE: Record<string, () => string> = { route: () => t("shell:chat.phase.route"), answer: () => t("shell:chat.phase.answer"), research: () => t("shell:chat.phase.research"), item: () => t("shell:chat.phase.item"), config: () => t("shell:chat.phase.config"), supplement: () => t("shell:chat.phase.supplement") }
-/** while Steve works on a message: the research under way, or his reasoning streaming in (one line once the answer starts) */
-export function LiveSteps() {
+/** The summary uses reported categories, never the command, path, tool title or prompt text. */
+const ACTIVE_KIND = { read: "read", search: "search", exec: "exec", edit: "edit", fetch: "fetch" } as const
+export function LiveSteps({ memory }: { memory: ProcessMemory }) {
   const d = st.draft, l = st.live, t = useT()
   const items: TrailItem[] = l ? researchLiveItems(l) : d?.thought ? [{ t: "think", key: "thought", text: d.thought, live: !d.text, t0: d.t0 }] : []
-  const phase = l ? "research" : d?.text ? "reply" : st.phase || "start"
-  const label = l ? t("thread:thinking.working") : d?.text ? t("pages:chat.doing.reply") : PHASE[st.phase]?.() ?? t("shell:chat.phase.start")
-  return <div className="w-full min-w-0 self-start px-1" data-live-steps={phase} data-research-live={l?.run}>
-    <ChatThinking items={items} label={label} startedAt={l?.t0 ?? d?.t0} />
+  const phase = d?.text ? "reply" : l ? "research" : st.phase || "start"
+  const kind = st.down ? undefined : l?.now?.kind
+  const action = kind && Object.hasOwn(ACTIVE_KIND, kind) ? ACTIVE_KIND[kind as keyof typeof ACTIVE_KIND] : undefined
+  const label = st.down ? t("thread:progress.unavailable") : d?.text ? t("pages:chat.doing.reply") : action ? t(`thread:progress.action.${action}`) : t("thread:thinking.working")
+  const process = useProcess(memory, l ? "run:" + l.run : d ? draftKeyOf(d.mid, d.t0) : "starting")
+  return <div className="w-full min-w-0 self-start" data-live-steps={phase} data-research-live={l?.run}>
+    <ChatThinking items={items} label={`${(st.bots.steve ? botName("steve") : "Steve")} · ${label}`} startedAt={!st.down && (action || d?.text || !l?.at) ? l?.startedAt : undefined}
+      lastActivity={!st.down ? l?.at : undefined} {...process} headerAttrs={{ "data-steps-toggle": "" }} />
   </div>
 }
 

@@ -34,12 +34,6 @@ export default {
     noProject: "无项目",
     changes_other: "{{count}} 项改动",
     phase: {
-      route: "正在判断怎么处理",
-      answer: "正在想怎么回答",
-      research: "正在查",
-      item: "正在建事项",
-      config: "正在起草配置改动",
-      supplement: "正在送到事项",
       start: "正在理解",
     },
     allNotices: "所有通知",

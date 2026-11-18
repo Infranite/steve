@@ -5,6 +5,9 @@ const send = (m) => process.stdout.write(JSON.stringify({ jsonrpc: "2.0", ...m }
 let model = "test-model", cancelled = false
 const sessionId = "streaming-session"
 const say = (text) => send({ method: "session/update", params: { sessionId, update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text } } } })
+const tool = (toolCallId, status, query) => send({ method: "session/update", params: { sessionId, update: query == null
+  ? { sessionUpdate: "tool_call_update", toolCallId, status }
+  : { sessionUpdate: "tool_call", toolCallId, kind: "search", status, title: "Search", rawInput: { query } } } })
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 const answer = "首段已经到达，回复还在继续生成。\n\n" +
   "### 流式输出验证\n\n- 中文与 **Markdown** 会逐段显示。\n- 生成过程中可以继续阅读和停止回复。\n\n" +
@@ -20,10 +23,32 @@ async function prompt(params) {
   // The routing call uses this schema; return research only for an explicit test question.
   if (text.includes('"kind"') && text.includes('"confidence"') && !text.includes('"thought"')) {
     const current = JSON.parse(text.match(/User message: ("(?:\\.|[^"\\])*")/)?.[1] || '""')
-    say(JSON.stringify({ kind: current.includes("测试研究") ? "research" : "answer", confidence: 1, title: "流式测试", goal: "", why: "回答问题", signals: {} }))
+    const ask = current.includes("确认夹具")
+    say(JSON.stringify({ kind: ask ? "ask" : current.includes("测试研究") ? "research" : "answer", confidence: 1,
+      title: "流式测试", goal: "", why: "回答问题", signals: {},
+      ...(ask ? { reply: "你想核对哪份记录？", options: ["本周记录", "上周记录"] } : {}) }))
     return { stopReason: "end_turn" }
   }
-  const body = text.includes('"thought"') ? JSON.stringify({ thought: "准备分段展示回答。", answer, offer: null }) : answer
+  const direct = text.includes('"thought"')
+  const question = direct ? "" : text.split("用户的问题：\n").at(-1).trim()
+  if (question.startsWith("测试研究：进度夹具")) {
+    // Two identical searches are separate calls. Only the first reports a later recovery.
+    for (let n = 1; n <= 24; n++) {
+      const id = "find-" + n
+      tool(id, "in_progress", n <= 3 ? "同一搜索参数" : "测试查询 " + n)
+      tool(id, n < 3 ? "failed" : "completed")
+      if (n === 1) tool(id, "completed")
+    }
+    tool("last", "in_progress", "末条搜索")
+    await sleep(5500)
+    tool("last", "completed")
+  }
+  if (question.startsWith("测试研究：阻塞夹具")) {
+    tool("blocked", "in_progress", "查找阻塞夹具")
+    tool("blocked", "failed")
+    throw new Error("offline fixture: no result for this turn")
+  }
+  const body = direct ? JSON.stringify({ thought: "准备分段展示回答。", answer, offer: null }) : answer
   for (let n = 0; n < body.length && !cancelled; n += 42) {
     say(body.slice(n, n + 42))
     await sleep(120)

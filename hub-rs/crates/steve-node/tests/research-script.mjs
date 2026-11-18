@@ -9,6 +9,7 @@
 //   @read <path>         an ACP read of <path> (locations and rawInput.file_path), then done
 //   @asking <kind> <path…> a pending tool call of <kind> on <path…> (an `execute`: the command)
 //                        that never completes
+//   @running <kind> <path…> a tool call that reports in_progress and never completes
 //   @sleep <ms>          waits
 //   @touch <path>        creates the file
 //   @image <base64>      creates a TMPDIR PNG and emits two references
@@ -54,9 +55,9 @@ const options = () => [
 ]
 let calls = 0
 let child
-const tool = (kind, path, done) => {
+const tool = (kind, path, done, status = "pending") => {
   const id = `t${++calls}`
-  update({ sessionUpdate: "tool_call", toolCallId: id, kind, title: `${kind} ${path}`, status: "pending",
+  update({ sessionUpdate: "tool_call", toolCallId: id, kind, title: `${kind} ${path}`, status,
     locations: kind === "execute" ? [] : [{ path }],
     rawInput: kind === "execute" ? { command: path } : { file_path: path } })
   if (done) update({ sessionUpdate: "tool_call_update", toolCallId: id, status: "completed",
@@ -74,6 +75,7 @@ async function run(id, prompt) {
     else if (cmd === "say") say(rest.replaceAll("\\n", "\n"))
     else if (cmd === "read") tool("read", a[0], true)
     else if (cmd === "asking") tool(a[0], a.slice(1).join(" "), false)
+    else if (cmd === "running") tool(a[0], a.slice(1).join(" "), false, "in_progress")
     else if (cmd === "sleep") await sleep(Number(a[0]))
     else if (cmd === "touch") writeFileSync(a[0], "")
     else if (["image", "imagecwd", "urlimage", "semanticimage"].includes(cmd)) {

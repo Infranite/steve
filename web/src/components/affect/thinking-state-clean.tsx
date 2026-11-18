@@ -1,7 +1,7 @@
 /* affectUI Pro – licensed under https://www.affectui.com/license, not under this project's open-source license. Don't copy it out of this project. */
 "use client";
 
-import { useEffect, useId, useRef, useState, type ReactNode } from "react";
+import { useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 
 /* Thinking State (Clean), adapted to Steve's event stream. Only authoritative incoming steps and
  * outcomes drive this panel. There is no demo playback timer and no inferred completion. */
@@ -16,6 +16,7 @@ export type ThinkingStep = {
   icon?: ReactNode;
   sources?: ThinkingSource[];
   body?: ReactNode;
+  render?: ReactNode;
   attrs?: Record<string, string | undefined>;
 };
 export type ThinkingStateProps = {
@@ -25,6 +26,11 @@ export type ThinkingStateProps = {
   endLabel: string;
   summary?: string;
   startedAt?: number;
+  lastActivity?: number;
+  formatActivity?: (seconds: number) => string;
+  disclosure?: [string, string];
+  scrollPosition?: { top: number };
+  scrollLabel?: string;
   durationMs?: number;
   open?: boolean;
   defaultOpen?: boolean;
@@ -35,33 +41,43 @@ export type ThinkingStateProps = {
 };
 
 export function ThinkingState({ steps, status, label, endLabel, summary, startedAt, durationMs,
-  open, defaultOpen, onOpenChange, headerAttrs, formatTime, className }: ThinkingStateProps) {
-  const uid = useId(), observedAt = useRef(Date.now());
+  open, defaultOpen, onOpenChange, headerAttrs, formatTime, className, lastActivity, formatActivity, disclosure, scrollPosition, scrollLabel }: ThinkingStateProps) {
+  const uid = useId(), scroll = useRef<HTMLDivElement>(null);
   const [ownOpen, setOwnOpen] = useState(defaultOpen ?? status === "running");
   const touched = useRef(false), previous = useRef(status);
   const opened = open ?? ownOpen, running = status === "running";
+  useLayoutEffect(() => {
+    if (opened && scroll.current && scrollPosition) scroll.current.scrollTop = scrollPosition.top;
+  }, [opened, scrollPosition]);
   const setOpen = (value: boolean) => { setOwnOpen(value); onOpenChange?.(value) };
   useEffect(() => {
     if (previous.current === "running" && !running && !touched.current) setOpen(false);
     previous.current = status;
   }, [status]);
   const elapsed = durationMs != null && Number.isFinite(durationMs) ? formatTime(Math.max(0, durationMs) / 1000) : null;
-  return <div className={["ui-thinkc", className].filter(Boolean).join(" ")} data-status={status} data-done={!running || undefined} aria-busy={running}>
+  return <div className={["ui-thinkc", className].filter(Boolean).join(" ")} data-compact={!!disclosure || undefined} data-status={status} data-done={!running || undefined} aria-busy={running}>
     <style href="ui-thinking-state-clean" precedence="default">{css}</style>
-    <button type="button" className="ui-thinkc__head" aria-expanded={opened} aria-controls={`${uid}-body`}
+    <button type="button" className="ui-thinkc__head" aria-expanded={opened} aria-controls={`${uid}-body`} disabled={running && steps.length === 0}
       onClick={() => { touched.current = true; setOpen(!opened) }} {...headerAttrs}>
       <span className="ui-thinkc__mark" aria-hidden="true">{Array.from({length:9},(_,i)=><i key={i} style={{animationDelay:`${PIXEL_DELAYS[i]}ms`}} />)}</span>
       <span className="ui-thinkc__title" key={status}>
         <span aria-live="polite" className={running ? "ui-thinkc__shimmer" : undefined} data-text={label}>{label}</span>
-        {(running || elapsed) && <span className="ui-thinkc__time" aria-hidden="true">{running ? <Elapsed since={startedAt ?? observedAt.current} formatTime={formatTime} /> : elapsed}</span>}
+        {running && startedAt != null ? <span className="ui-thinkc__time" aria-hidden="true"><Elapsed since={startedAt} formatTime={formatTime} /></span>
+          : running && lastActivity != null && formatActivity ? <span className="ui-thinkc__time" aria-hidden="true"><Elapsed since={lastActivity} formatTime={formatActivity} /></span>
+          : elapsed && <span className="ui-thinkc__time">{elapsed}</span>}
       </span>
+      {disclosure && (!running || steps.length > 0) && <span className="ui-thinkc__toggle">{disclosure[opened ? 1 : 0]}</span>}
       <span className="ui-thinkc__chevron" aria-hidden="true"><svg viewBox="0 0 16 16"><path d="M4.5 6.25 8 9.75l3.5-3.5" /></svg></span>
     </button>
     {summary && <p className="ui-thinkc__summary">{summary}</p>}
     <div id={`${uid}-body`} className="ui-thinkc__body" data-open={opened} aria-hidden={!opened} inert={!opened}>
-      <div className="ui-thinkc__clip"><ol className="ui-thinkc__list">
+      <div className="ui-thinkc__clip"><div ref={scroll} data-chat-process-scroll={disclosure ? "" : undefined}
+        tabIndex={disclosure && opened ? 0 : undefined} role={disclosure ? "region" : undefined} aria-label={scrollLabel}
+        onScroll={scrollPosition ? e => { scrollPosition.top = e.currentTarget.scrollTop } : undefined}>
+        {opened && <ol className="ui-thinkc__list">
         {steps.map((step) => {
           const active = running && step.status === "running", text = active ? step.activeLabel ?? step.label : step.label;
+          if (step.render) return <li key={step.id} className="ui-thinkc__item" data-card-row="" data-step-status={step.status} {...step.attrs}>{step.render}</li>;
           return <li key={step.id} className="ui-thinkc__item" data-kind={step.kind} data-active={active || undefined} data-step-status={step.status} {...step.attrs}>
             <span className="ui-thinkc__node" aria-hidden="true">{step.status === "error" ? <svg viewBox="0 0 16 16" className="ui-thinkc__outcome"><path d="m4 4 8 8m0-8-8 8" /></svg> : step.icon ?? <span className="ui-thinkc__dot" />}</span>
             <div className="ui-thinkc__content">
@@ -76,7 +92,7 @@ export function ThinkingState({ steps, status, label, endLabel, summary, started
             <circle cx="8" cy="8" r="6.5" />{status === "done" ? <path d="M5.4 8.3l1.75 1.75L10.7 6.4" /> : status === "error" ? <path d="m5.5 5.5 5 5m0-5-5 5" /> : <path d="m4 12 8-8" />}
           </svg></span><div className="ui-thinkc__content"><span className="ui-thinkc__label">{endLabel}</span></div>
         </li>}
-      </ol></div>
+      </ol>}</div></div>
     </div>
   </div>;
 }
@@ -250,6 +266,36 @@ const css = /* css */ `
   transform: none;
 }
 
+
+/* A conversation trace is a local scroll region, not an extension of the message list. At the
+ * normal type size it fits at most eight 36px call rows; short viewports get a smaller region. */
+.ui-thinkc[data-compact] { max-width: none; }
+.ui-thinkc[data-compact] .ui-thinkc__head { width: 100%; min-height: 44px; height: auto; gap: 6px; }
+.ui-thinkc[data-compact] .ui-thinkc__head:disabled { cursor: default; }
+.ui-thinkc[data-compact] .ui-thinkc__head:disabled .ui-thinkc__chevron { visibility: hidden; }
+.ui-thinkc[data-compact] .ui-thinkc__title { white-space: normal; flex-wrap: wrap; gap: 0 8px; }
+.ui-thinkc[data-compact] .ui-thinkc__time { white-space: nowrap; color: var(--ui-tkc-muted); }
+.ui-thinkc[data-compact] .ui-thinkc__toggle { margin-inline-start: auto; white-space: nowrap; color: var(--ui-tkc-muted); font-size: 12px; }
+.ui-thinkc[data-compact] .ui-thinkc__chevron { opacity: 1; }
+.ui-thinkc[data-compact] .ui-thinkc__body { transition: none; }
+.ui-thinkc [data-chat-process-scroll] {
+  max-block-size: min(calc(18rem * var(--type-scale, 1)), 38svh);
+  overflow: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+.ui-thinkc [data-chat-process-scroll]:focus-visible {
+  outline: 2px solid var(--ui-tkc-focus);
+  outline-offset: -2px;
+}
+.ui-thinkc[data-compact] .ui-thinkc__list { padding-block: 3px; }
+.ui-thinkc[data-compact] .ui-thinkc__item[data-card-row] { display: block; min-block-size: calc(2.25rem * var(--type-scale, 1)); padding: 0; animation: none; }
+.ui-thinkc[data-compact] .ui-thinkc__item[data-card-row]::before { content: none; }
+.ui-thinkc[data-compact] .ui-tclc[data-variant="line"] > .ui-tclc__head { min-height: calc(2.25rem * var(--type-scale, 1)); }
+.ui-thinkc[data-compact] .ui-tclc[data-variant="line"] .ui-tclc__chevron { opacity: 1; }
+.ui-thinkc[data-compact][data-done] .ui-thinkc__title,
+.ui-thinkc[data-compact][data-done] .ui-thinkc__mark { color: var(--ui-tkc-muted); }
+.ui-thinkc[data-compact][data-done] .ui-thinkc__mark i { background: var(--ui-tkc-muted); }
 
 /* Body: folds away under a hairline – only this part animates and clips */
 .ui-thinkc__body {

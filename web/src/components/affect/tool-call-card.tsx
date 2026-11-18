@@ -43,6 +43,12 @@ export type ToolCallCardProps = {
   result?: unknown;
   /** Error message, shown when status is "error" */
   error?: string;
+  /** This same call later reported success; keep the original failure in its details. */
+  recoveredLabel?: string;
+  missingResult?: string;
+  lazyDetails?: boolean;
+  /** The main conversation has the run's clock, not a timestamp for each live call. */
+  trackTime?: boolean;
   /** When the call started (ms since epoch, e.g. Date.now()) – the live timer counts from here */
   startedAt?: number;
   /** Final duration in ms – otherwise measured while the card shows "running" */
@@ -90,6 +96,10 @@ export function ToolCallCard({
   args,
   result,
   error,
+  recoveredLabel,
+  missingResult,
+  lazyDetails,
+  trackTime = true,
   startedAt,
   duration,
   defaultOpen = false,
@@ -127,11 +137,11 @@ export function ToolCallCard({
     }
   }
 
-  const measured = useStopwatch(status === "running", startedAt, false);
-  const ms = status === "running" ? (measured ?? 0) : (duration ?? measured);
+  const measured = useStopwatch(trackTime && status === "running", startedAt, false);
+  const ms = status === "running" && trackTime ? (measured ?? 0) : (duration ?? measured);
 
-  const announce =
-    status === "running" ? t("core:toolCard.running", { name }) : status === "success" ? t("core:toolCard.finished", { name }) : `${t("core:toolCard.failedLive", { name })}${error ? `: ${error}` : ""}`;
+  const announce = recoveredLabel ?? (
+    status === "running" ? t("core:toolCard.running", { name }) : status === "success" ? t("core:toolCard.finished", { name }) : `${t("core:toolCard.failedLive", { name })}${error ? `: ${error}` : ""}`);
 
   return (
     <div
@@ -181,7 +191,7 @@ export function ToolCallCard({
           )}
           {status === "error" && <ErrorIcon />}
           <span className="ui-tclc__time">
-            {status === "error" ? t("core:toolCard.failed") : ms != null ? formatMs(ms, status === "running") : null}
+            {recoveredLabel ?? (status === "error" ? t("core:toolCard.failed") : ms != null ? formatMs(ms, status === "running") : null)}
           </span>
         </span>
         <Chevron />
@@ -189,8 +199,8 @@ export function ToolCallCard({
 
       <div className="ui-tclc__body" id={`${id}-body`} inert={!open}>
         <div className="ui-tclc__clip">
-          <div className="ui-tclc__sections">
-            {status === "error" && (
+          {(!lazyDetails || open) && <div className="ui-tclc__sections">
+            {(status === "error" || recoveredLabel) && (
               <div className="ui-tclc__error">
                 <ErrorIcon />
                 <p className="ui-tclc__error-text" dir="auto">{error ?? t("core:toolCard.failedText")}</p>
@@ -216,10 +226,11 @@ export function ToolCallCard({
                 <p className="ui-tclc__pending">{t("core:toolCard.waiting")}</p>
               </div>
             ) : null}
-            {args === undefined && result === undefined && status === "success" && (
+            {missingResult && result === undefined && status !== "running" && <p className="ui-tclc__pending">{missingResult}</p>}
+            {!missingResult && args === undefined && result === undefined && status === "success" && (
               <p className="ui-tclc__pending">{t("core:toolCard.empty")}</p>
             )}
-          </div>
+          </div>}
         </div>
       </div>
     </div>
