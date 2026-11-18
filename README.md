@@ -403,6 +403,7 @@ For an existing Hub that completed managed setup, run `steve setup --reconfigure
 |---|---|
 | `STEVE_HOME` | Data directory (default `~/.steve`) |
 | `STEVE_HOST`, `STEVE_PORT` | Listen addresses, comma-separated, on one port (bare-binary default `127.0.0.1:8440`; `steve setup` writes `0.0.0.0:8440` and enables wildcard listening); for a proxy on another machine add the address it reaches, e.g. `127.0.0.1,100.64.0.2`. `0.0.0.0`/`::` is refused unless `STEVE_ALLOW_ANY_HOST=1` |
+| `LISTEN_FDS`, `LISTEN_PID`, `LISTEN_FDNAMES` | Optional socket activation (as systemd sets them): listening sockets handed to the Hub at start are served instead of binding. One per `STEVE_HOST` address, each on `STEVE_PORT`; one named `local-node` serves as the Hub's own Node listener instead of `STEVE_LOCAL_NODE_PORT`. Whoever holds the sockets keeps the ports across Hub restarts. Processes the Hub starts do not inherit them |
 | `STEVE_WEB_DIR` | The built web UI the Hub serves |
 | `STEVE_WEB_PORT` | Serve the web UI on this port of its own; the Hub's port then answers the API only (new installations: Hub port + 1) |
 | `STEVE_CLIENT_ORIGINS` | Extra web origins that may call the Hub across origins (signed-in web clients are allowed already) |

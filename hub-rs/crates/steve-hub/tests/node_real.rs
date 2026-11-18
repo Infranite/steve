@@ -44,16 +44,11 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 
+mod handed;
+
 const VERSION: &str = "0.9.0";
 /// A real model turn, at most.
 const TURN: u64 = 300;
-
-fn free_port() -> u16 {
-    std::net::TcpListener::bind("127.0.0.1:0")
-        .and_then(|l| l.local_addr())
-        .map(|a| a.port())
-        .expect("port")
-}
 
 /// A token no model guesses (time and pid based, unique per call).
 fn token(tag: &str) -> String {
@@ -73,6 +68,8 @@ fn token(tag: &str) -> String {
 
 struct Home {
     dir: tempfile::TempDir,
+    /// The Hub's port, held by the test for every Hub it starts on this home (#429).
+    socket: handed::Socket,
     port: u16,
     web: PathBuf,
     /// The throwaway git project the items work in.
@@ -120,8 +117,10 @@ impl Home {
         git(&["init", "-q", "-b", "main"]);
         git(&["add", "."]);
         git(&["commit", "-q", "-m", "init"]);
+        let socket = handed::Socket::new();
         Home {
-            port: free_port(),
+            port: socket.port(),
+            socket,
             web,
             project,
             note,
@@ -221,7 +220,7 @@ impl Drop for Hub {
 /// The real Hub with the local Node on (`STEVE_NODE_MODE=local`). On a [`Home::fake`] the scripted agent replaces claude and
 /// `HOME` is the temp dir, so nothing of the user's login is read.
 fn spawn(h: &Home) -> Hub {
-    let mut c = Command::new(env!("CARGO_BIN_EXE_steve-hub"));
+    let mut c = handed::command(env!("CARGO_BIN_EXE_steve-hub"), &[("hub", &h.socket)]);
     c.env("STEVE_HOME", h.steve())
         .env("STEVE_PORT", h.port.to_string())
         .env("STEVE_HOST", "127.0.0.1")

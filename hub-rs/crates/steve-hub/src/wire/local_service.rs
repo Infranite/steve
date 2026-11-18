@@ -8,7 +8,8 @@
 //!   paired Node: the Hub registers it (`nodes`, `local`, active) with a key it writes into the
 //!   Node's home, and the Node checks the Hub's signed welcome. A listener on
 //!   `127.0.0.1:<STEVE_LOCAL_NODE_PORT>` (default: the Hub's port + 3) answers it, whatever
-//!   addresses the Hub's own port is on.
+//!   addresses the Hub's own port is on; a listener handed to the Hub as `local-node`
+//!   ([`crate::config::Handed`]) instead, on its own port.
 //! - The Hub drives it with a coordinator of its own (trusted as the in-process Node is, none of a
 //!   remote Node's limits), and answers the host bridges from the roots it writes to the Node's
 //!   home ([`super::host_node::ServiceNode`]).
@@ -106,7 +107,17 @@ pub(crate) fn host(
     let home = home(cfg);
     let id = identity(&home).map_err(|e| err(&e))?;
     register(store, &id).map_err(|e| err(&e))?;
-    let port = port(cfg, vars);
+    // a listener handed to the Hub when it started (config::Handed) says the port itself
+    let handed = cfg
+        .listen
+        .handed
+        .local_node()
+        .transpose()
+        .map_err(|e| err(&e))?;
+    let port = match &handed {
+        Some(l) => l.local_addr().map_err(|e| err(&e))?.port(),
+        None => port(cfg, vars),
+    };
     let hub_key = svc.identity.get().map(|k| hex::encode(k.public()));
     std::fs::write(
         home.join(LINK),
@@ -141,7 +152,11 @@ pub(crate) fn host(
     // the Node's own way in: loopback, the Node routes only
     let app = crate::nodes::node_router_at(svc.clone(), crate::nodes::link::Door::Colocated);
     let listen = async move {
-        let l = match tokio::net::TcpListener::bind(("127.0.0.1", port)).await {
+        let bound = match handed {
+            Some(l) => Ok(l),
+            None => tokio::net::TcpListener::bind(("127.0.0.1", port)).await,
+        };
+        let l = match bound {
             Ok(l) => l,
             Err(e) => {
                 tracing::error!("the local Node's listener on 127.0.0.1:{port}: {e}");

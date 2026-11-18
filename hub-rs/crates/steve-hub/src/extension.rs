@@ -640,15 +640,20 @@ pub async fn run(asm: Assembly) -> anyhow::Result<()> {
         .init();
 
     crate::wire::tune_sqlite();
-    let cfg = Arc::new(Config::from_env()?);
+    let mut cfg = Config::from_env()?;
     if std::env::args().any(|arg| arg == "--supervise") {
-        return crate::upgrades::supervise((*cfg).clone()).await;
+        return crate::upgrades::supervise(cfg).await;
     }
     // the Hub's own Node in a process of its own (STEVE_NODE_MODE=service, B1): started by the
     // Hub, it outlives the Hub's restarts
     if std::env::args().nth(1).as_deref() == Some("--local-node") {
         return crate::wire::local_service::run(&cfg).await;
     }
+    // listening sockets it was started with (socket activation), before it starts any process
+    cfg.listen
+        .adopt(crate::config::Handed::take()?)
+        .context("the sockets the Hub was started with")?;
+    let cfg = Arc::new(cfg);
     let _instance_lock = crate::upgrades::instance_lock(&cfg)?;
     let supervised_domain: Arc<std::sync::Mutex<Option<Arc<dyn crate::backend::Domain>>>> =
         Arc::new(std::sync::Mutex::new(None));
