@@ -1,4 +1,5 @@
-//! A text guard deliberately checks all Rust source, including test-only source and imports.
+//! Guard ②: the contract never holds a general JSON tree. A text guard over all of `src/`, imports included;
+//! it lives in `tests/` so its own forbidden-pattern fixtures are not scanned.
 use std::{fs, path::Path};
 
 fn violations(source: &str, raw_module: bool) -> Vec<&'static str> {
