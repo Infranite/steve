@@ -932,24 +932,22 @@ impl Channels {
     }
 
     /// `meta.chan_out` on conversation message `m`: what became of it in the space. The status is
-    /// the outbound message's own, read in the same transaction as the write: two deliveries of one
+    /// the outbound message's own, normalized just like the read API (including policy blocks),
+    /// read in the same transaction as the write: two deliveries of one
     /// message ([`conv_operation`]) may finish in either order, and the one that writes last still
     /// writes the newest state (never the `pending` a second pass saw while the first was sending).
     pub(crate) fn mark_out(&self, m: &steve_store::Message, d: &Delivered) -> ChannelResult<()> {
         let said = match d {
             Delivered::Sent { .. } => "sent",
             Delivered::Drafted { .. } => "draft",
-            Delivered::Failed { .. } | Delivered::Blocked { .. } => "failed",
+            Delivered::Failed { .. } => "failed",
+            Delivered::Blocked { .. } => "blocked",
             Delivered::Queued { .. } => "pending",
             Delivered::Skipped => "skipped",
         };
         self.store().transaction(|tx| -> ChannelResult<()> {
             let now: Option<String> = match d.message_id() {
-                Some(id) => tx
-                    .query_row("SELECT status FROM chan_messages WHERE id = ?", [id], |r| {
-                        r.get(0)
-                    })
-                    .optional()?,
+                Some(id) => out_state(tx, &m.workspace_id, id)?.map(|(status, _)| status),
                 None => None,
             };
             let status = now.as_deref().unwrap_or(said);
