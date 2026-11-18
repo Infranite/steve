@@ -72,6 +72,9 @@ flate2 = "=1.1.10"
 zip = { version = "=9.2.0", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 tar = "0.4"
 libc = "0.2"
+# Metrics facade and its in-memory Prometheus recorder; the Hub serves `/metrics` itself (no exporter listener).
+metrics = "=0.24.6"
+metrics-exporter-prometheus = { version = "=0.18.3", default-features = false }
 # the scratch copy of `--stats-snapshot`
 tempfile = "=3.27.0"
 
