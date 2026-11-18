@@ -56,7 +56,7 @@ class StatisticsTests(unittest.TestCase):
 
     def test_bootstrap_determinism_known_shift_and_noise(self):
         a = [row([1, 2, 3], 3000)] * 3
-        b = [row([1.02, 2.04, 3.06], 3060)] * 3
+        b = [row([1.02, 2.04, 3.06], 3060, duration=2 / .98)] * 3
         first = ab.bootstrap(a, b, 1, replicates=100)
         self.assertEqual(first, ab.bootstrap(a, b, 1, replicates=100))
         for key in ab.PRIMARY:
@@ -65,10 +65,10 @@ class StatisticsTests(unittest.TestCase):
             self.assertEqual(first[key]["verdict"], "FAIL")
         noisy = [row([v, v * 2], v * 3000) for v in (1, 2, 3)]
         result = ab.bootstrap(noisy, noisy, 1, replicates=200)
-        ci = result[ab.PRIMARY[0]]["ci95_pct"]
+        ci = result[ab.PRIMARY[1]]["ci95_pct"]
         self.assertLess(ci[0], 0)
         self.assertGreater(ci[1], 1)
-        self.assertEqual(result[ab.PRIMARY[0]]["verdict"], "INCONCLUSIVE")
+        self.assertEqual(result[ab.PRIMARY[1]]["verdict"], "PASS(median)/INCONCLUSIVE(CI)")
 
     def test_verdict_strict_boundaries_and_unavailable(self):
         for interval, expected in (([-2, .99], "PASS"), ([1.01, 2], "FAIL"),

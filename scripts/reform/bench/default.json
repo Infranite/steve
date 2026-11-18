@@ -33,9 +33,16 @@
       "requests": 20
     }
   ],
+  "workload": null,
+  "auth": "cookie",
+  "warmup_s": 5,
+  "load_body": {
+    "at": 1
+  },
   "request_timeout_s": 10,
   "startup_timeout_s": 90,
   "total_timeout_s": 540,
+  "settle_s": 30,
   "idle_s": 30,
   "load_s": 60,
   "clients": 4,
@@ -47,6 +54,5 @@
   "process_interval_s": 1,
   "cpu_top_n": 8,
   "cli_runs": 3,
-  "cli_timeout_s": 10,
-  "settle_s": 30
+  "cli_timeout_s": 10
 }

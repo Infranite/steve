@@ -203,6 +203,9 @@ class RehearsalTests(unittest.TestCase):
         home = self.root / "timeout"
         home.mkdir()
         env = rehearse.environment(home, 18761)
+        for name in rehearse.isolation.ADAPTERS:
+            self.assertEqual(env[f"STEVE_ADAPTER_{name}"], "/usr/bin/false")
+        self.assertEqual(env["STEVE_UPDATE_CHECK"], "0")
         script = """import signal, subprocess, sys, time
 p = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])
 def stop(*args):

@@ -1,45 +1,36 @@
 #!/usr/bin/env python3
-"""Isolated, same-binary environment A/B benchmark (Python 3.11+, stdlib).
+"""Isolated same-binary A/B benchmark (Python 3.11+, stdlib).
 
---rounds is rounds PER variant (minimum 3). Order: ABBA ABBA..., truncated
-at 2*N. Defaults and phase order match run.py; --config overrides the same keys.
-The initial snapshot is copied read-only, owner mapped to dev:local, started
-with A, settled and stopped. Its checkpointed data directory is the golden
-copy; every round clones it (Darwin cp -c, otherwise ordinary copy).
+Run with python3 -I. Never invoke Hub --version/--help: unknown arguments start
+it. Every server/CLI launch uses env -i with asserted STEVE_HOME/STEVE_PORT.
+Every round clones one checkpointed golden snapshot; only --var differs.
+Defaults preserve run.py's original mixed load. --workload read/write disables
+invalidation; warmup_s defaults to 5, before timing. Write performs two strict
+200/{"seen":1} smoke requests. auth=bearer creates an isolated owner token before
+startup, exchanges it via /auth/token, sets X-Steve-Ws and keeps secrets in RAM.
 
---env K=V is repeatable and identical on both sides; --var is the ONLY delta.
-Isolation settings cannot be overridden. Listener addresses must be explicit
-loopback ports, checked for availability before launch (8440 is forbidden).
---probe accepts local paths or full http://127.0.0.1:PORT/path URLs (also
-localhost/[::1]). It sends no credentials, stores only status (or 'refused'),
-and never follows redirects. Expected 401/refused are evidence, not failures.
-No owner token is requested for probes. Matching A/B statuses warn prominently.
+--env K=V is repeatable. Isolation keys are reserved. --a-unset omits the switch.
+--probe records unauthenticated 401/refused without following redirects.
+--scrape URL requires auth=bearer: A must refuse, B must return owner 200/plain
+text and first-B anonymous 401. Full before/after text goes beside --out; JSON
+contains filenames/statuses and numeric differences, never credentials.
 
-All original warm/read latency samples are retained, including request errors.
-Pooled percentiles use linear interpolation at (n-1)*p. Load throughput uses
-actual phase seconds; warm throughput uses summed sequential request times.
-Lock ratio is busy / valid probes; disk bytes are summed over load phases.
-CPU uses Darwin proc_pid_rusage v4 user+system and terminated-child counters,
-plus live descendants, including detached sessions. Per-request CPU divides
-load CPU by ALL load HTTP reads+writes (background work included, CLI excluded).
-Reaped children are covered by parent child counters; an un-reaped child that
-exits between snapshots can be missed. Non-Darwin CPU/disk are unavailable.
+Order: ABBA ABBA...; --rounds defaults to 3 per variant. --smoke allows 1+1 but
+cannot produce a performance acceptance. Each round calculates throughput and
+p50/p95 from full-response samples; primary comparisons use medians of rounds.
+Throughput overhead = 100*(1-B/A); latency overhead = 100*(B/A-1). Improvements
+are negative. Independent whole-round bootstrap: 5000 draws, seed 20261119.
+PASS requires medians and CI upper bounds < --threshold-pct (default 1).
+Median >= threshold: FAIL; median below but CI uncertain:
+PASS(median)/INCONCLUSIVE(CI). HTTP/timeout errors invalidate a round.
+Auxiliary pooled latency, process-tree CPU, disk and SQLite probe data remain.
 
-Bootstrap resamples whole rounds independently within A/B, preserving within-
-round correlation and machine drift, rather than claiming every HTTP sample is
-independent. Percentile 95% CIs use 5000 replicates, fixed seed 20261119. Three
-rounds are a minimum, not a guarantee of precision. Signed changes are (B-A)/A;
-throughput increases have the opposite interpretation to latency increases.
-PASS: upper CI < threshold; FAIL: lower CI > threshold; otherwise INCONCLUSIVE.
-Only load read p50/p99 and CPU/request determine the overall verdict. Missing
-CPU, measurement errors or incomplete rounds prevent an overall PASS. Probe
-warnings do not alter the numeric verdict (required for intentional A/A).
-
-Exit: 0 collected, 2 measurement errors, 1 failed/cleanup failed. Numeric FAIL
-or INCONCLUSIVE alone does not change the exit code. Partial JSON is saved
-between rounds. Each round has config.total_timeout_s; golden preparation has
-its own such budget. Logs and data stay below --work, never production homes.
-Run with python3 -I; do not invoke the Hub for --version/--help.
+Each lifecycle has total_timeout_s. All own process groups, including detached
+Nodes, are stopped on exit/signals/errors. Copied data is removed after safe
+shutdown; raw samples and private logs remain. Never touch production homes or
+8440. No push, release build, or production process management is performed.
+Exit 0: collected; 2: measurement errors; 1: execution/cleanup failure.
+Numeric FAIL/INCONCLUSIVE alone does not change the collection exit code.
 """
 import sys
 if sys.version_info < (3, 11):
@@ -64,6 +55,7 @@ import re
 import shutil
 import signal
 import socket
+import statistics
 import sqlite3
 import subprocess
 import tempfile
@@ -78,7 +70,10 @@ _spec = importlib.util.spec_from_file_location("bench_run", Path(__file__).with_
 run = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(run)
 SEED, REPLICATES = 20261119, 5000
-PRIMARY = ("load.read.p50_ms", "load.read.p99_ms", "load.cpu_us_per_request")
+_spec = importlib.util.spec_from_file_location("bench_telemetry", Path(__file__).with_name("telemetry.py"))
+telemetry = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(telemetry)
+PRIMARY = ("load.requests_per_s", "load.p50_ms", "load.p95_ms")
 
 
 def order(rounds):
@@ -248,12 +243,15 @@ def collect(home, args, config, variant, extra, row, golden=False):
             env[args.var] = args.b if variant == "B" else args.a
         db = home / "data/steve.sqlite3"
         client = run.Client(f"http://127.0.0.1:{args.port}", config["request_timeout_s"])
+        row["stage"] = "owner_token"
+        token = run.access_token(processes, args.hub_bin, env, config["cli_timeout_s"]) if config["auth"] == "bearer" else None
         with (home / "logs/hub.log").open("wb") as log:
             before = time.perf_counter()
             hub = processes.start([str(args.hub_bin)], env, stdout=log, stderr=subprocess.STDOUT)
             row["health"] = run.health(client, hub, config["startup_timeout_s"])
             row["startup_to_health_ms"] = (time.perf_counter() - before) * 1000
-            client.login()
+            row["stage"] = "login"
+            client.login(token)
             row["post_start"] = run.phase("post_start", config["settle_s"], hub, db, client, config, env, processes, args.hub_bin)
             if not golden:
                 row["endpoints"], row["samples"] = {}, {"warm_ms": {}}
@@ -264,10 +262,40 @@ def collect(home, args, config, variant, extra, row, golden=False):
                     row["samples"]["warm_ms"][path] = [r["ms"] for r in rows]
                     row["endpoints"][path] = {"cold": cold, "warm": run.requests_summary(rows)}
                 for name in ("idle", "load"):
+                    if name == "load":
+                        row["stage"] = "write_smoke_and_warmup"
+                        row["warmup"] = run.warmup(hub, db, client, config, env, processes, args.hub_bin)
+                        if getattr(args, "scrape", None):
+                            row["scrapes"] = {}
+                            filename = f"round-{row['index']:02d}-{variant}-before.prom"
+                            row["scrapes"]["before"] = telemetry.scrape(client, args.scrape, args.raw / filename)
+                            if variant == "B" and row.get("check_scrape_auth"):
+                                row["scrapes"]["unauthenticated"] = telemetry.scrape(client, args.scrape, None, False)
+                    row["stage"] = name
                     row[name] = run.phase(name, config[name + "_s"], hub, db, client, config, env, processes,
                                           args.hub_bin, row["samples"], CpuMeter(hub.pid) if name == "load" else None)
+                scrape_failed = False
+                if getattr(args, "scrape", None):
+                    filename = f"round-{row['index']:02d}-{variant}-after.prom"
+                    row["scrapes"]["after"] = telemetry.scrape(client, args.scrape, args.raw / filename)
+                    captures = row["scrapes"]
+                    if variant == "B":
+                        scrape_failed = any(captures[k]["status"] != 200 or not
+                            captures[k].get("content_type", "").startswith("text/plain") for k in ("before", "after"))
+                        scrape_failed |= captures.get("unauthenticated", {"status": 401})["status"] != 401
+                        if not scrape_failed:
+                            row["metrics_delta"] = telemetry.difference(
+                                (args.raw / captures["before"]["file"]).read_text(),
+                                (args.raw / captures["after"]["file"]).read_text(),
+                                config["load_path"], "POST" if config["workload"] == "write" else "GET")
+                            scrape_failed |= bool(row["metrics_delta"]["missing"])
+                    else:
+                        scrape_failed = any(captures[k]["status"] != "refused" for k in ("before", "after"))
                 row["probes"] = {p: probe(probe_url(p, args.port), config["request_timeout_s"]) for p in args.probe}
-                failed = any(e["cold"]["error"] or e["warm"]["errors"] for e in row["endpoints"].values())
+                row["invalid_reasons"] = (["metrics_scrape_contract"] if scrape_failed else [])
+                if row["load"]["errors"]:
+                    row["invalid_reasons"].append("HTTP_error_or_timeout")
+                failed = scrape_failed or any(e["cold"]["error"] or e["warm"]["errors"] for e in row["endpoints"].values())
                 failed |= bool(row["load"]["errors"] or row["load"]["cli"]["errors"])
                 failed |= len(row["load"]["cli"]["runs"]) != config["cli_runs"]
             else:
@@ -319,6 +347,13 @@ def aggregate(rows):
     for field in ("device_bytes", "logical_bytes"):
         values = [r["disk"][field] for r in loads]
         metrics["load.disk_" + field] = sum(values) if all(v is not None for v in values) else None
+    # Thresholds use the median of per-round measurements, never pooled samples.
+    per_round = [{"load.requests_per_s": len(r["samples"].get("workload_ms", r["samples"]["reads_ms"])) / r["load"]["elapsed_s"],
+                  **{"load." + k: v for k, v in percentiles(r["samples"].get("workload_ms", r["samples"]["reads_ms"])).items()}}
+                 for r in rows]
+    for key in PRIMARY:
+        values = [r[key] for r in per_round]
+        metrics[key] = statistics.median(values) if all(v is not None for v in values) else None
     return metrics
 
 
@@ -331,6 +366,19 @@ def verdict(interval, threshold):
         return "INCONCLUSIVE"
     lo, hi = interval
     return "PASS" if hi < threshold else "FAIL" if lo > threshold else "INCONCLUSIVE"
+
+
+def change(key, a, b):
+    value = relative(a, b)
+    return -value if value is not None and key == "load.requests_per_s" else value
+
+
+def median_verdict(overhead, interval, threshold):
+    if overhead is None:
+        return "INCONCLUSIVE"
+    if overhead >= threshold:
+        return "FAIL"
+    return "PASS" if interval is not None and interval[1] < threshold else "PASS(median)/INCONCLUSIVE(CI)"
 
 
 def bootstrap(a, b, threshold, replicates=REPLICATES, seed=SEED):
@@ -346,7 +394,7 @@ def bootstrap(a, b, threshold, replicates=REPLICATES, seed=SEED):
     for _ in range(replicates):
         av, bv = resample(a, "A"), resample(b, "B")
         for key in draws:
-            value = relative(av[key], bv[key])
+            value = change(key, av[key], bv[key])
             if value is not None:
                 draws[key].append(value)
     result = {}
@@ -354,10 +402,12 @@ def bootstrap(a, b, threshold, replicates=REPLICATES, seed=SEED):
         values.sort()
         # Undefined zero/missing denominators must not become a selective CI.
         interval = [quantile(values, .025), quantile(values, .975)] if len(values) == replicates else None
-        result[key] = {"a": left[key], "b": right[key], "overhead_pct": relative(left[key], right[key]),
+        result[key] = {"a": left[key], "b": right[key], "overhead_pct": change(key, left[key], right[key]),
                        "ci95_pct": interval, "ci_width_pct_points": interval[1] - interval[0] if interval else None}
         if key in PRIMARY:
-            result[key]["verdict"] = verdict(interval, threshold)
+            result[key]["median_verdict"] = "PASS" if result[key]["overhead_pct"] is not None and result[key]["overhead_pct"] < threshold else "FAIL"
+            result[key]["ci_verdict"] = verdict(interval, threshold)
+            result[key]["verdict"] = median_verdict(result[key]["overhead_pct"], interval, threshold)
     return result
 
 
@@ -374,10 +424,10 @@ def summarize(result, args):
         if statuses["A"] == statuses["B"]:
             result["warnings"].append(f"PROBE IDENTICAL: {path}: A/B {statuses['A']}; switch effect is unproven")
     decisions = [result["comparison"][key]["verdict"] for key in PRIMARY]
-    result["overall"] = "FAIL" if "FAIL" in decisions else "INCONCLUSIVE" if "INCONCLUSIVE" in decisions else "PASS"
+    result["overall"] = "FAIL" if "FAIL" in decisions else "INCONCLUSIVE" if "INCONCLUSIVE" in decisions else "PASS(median)/INCONCLUSIVE(CI)" if "PASS(median)/INCONCLUSIVE(CI)" in decisions else "PASS"
     if any(r["status"] != "ok" for r in result["rounds"]) or result["status"] != "ok":
         result["overall"] = "INCONCLUSIVE"
-    if result["overall"] == "INCONCLUSIVE":
+    if "INCONCLUSIVE" in result["overall"]:
         result["warnings"].append("Noise/uncertainty exceeds the threshold: use more rounds or a quieter machine; inspect missing data/errors.")
 
 
@@ -397,7 +447,7 @@ def markdown(result):
               "Resample whole rounds independently to preserve within-round correlation and expose between-round noise.",
               "CPU/request includes all load reads+writes and background work; CLI is excluded. Disk is summed load bytes.",
               "", "Config: `" + json.dumps(result["config"], sort_keys=True) + "`", "",
-              "| Metric | A pooled | B pooled | (B-A)/A % | 95% CI % | Width pp | Verdict |",
+              "| Metric | A (primary: round median) | B (primary: round median) | Overhead % | 95% CI % | Width pp | Verdict |",
               "| --- | ---: | ---: | ---: | --- | ---: | --- |"]
     for key, value in result.get("comparison", {}).items():
         ci = value["ci95_pct"]
@@ -407,14 +457,17 @@ def markdown(result):
     lines += ["", "| Round | Variant | Metric | p50 ms | p95 ms | p99 ms |", "| --- | --- | --- | ---: | ---: | ---: |"]
     for row in result["rounds"]:
         if "samples" in row and "reads_ms" in row["samples"]:
-            for name, samples in {"load.read": row["samples"]["reads_ms"], **row["samples"]["warm_ms"]}.items():
+            for name, samples in {"load.workload": row["samples"].get("workload_ms", row["samples"]["reads_ms"]), **row["samples"]["warm_ms"]}.items():
                 q = percentiles(samples)
                 lines.append(f"| {row['index']} | {row['variant']} | {cell(name)} | " +
                              " | ".join(number(q[f"p{p}_ms"]) for p in (50, 95, 99)) + " |")
     for row in result["rounds"]:
         lines += ["", f"Round {row['index']} {row['variant']}: status={row['status']}; "
                   f"load before={row.get('load_average_before')}; after={row.get('load_average_after')}; "
-                  f"cpu_top={cell(row.get('cpu_top'))}; probes={cell(row.get('probes'))}", ""]
+                  f"cpu_top={cell(row.get('cpu_top'))}; probes={cell(row.get('probes'))}; "
+                  f"HTTP errors={row.get('load', {}).get('errors')}; invalid={cell(row.get('invalid_reasons'))}; "
+                  f"stage={row.get('stage')}; failure_type={row.get('failure_type')}; "
+                  f"scrapes={cell(row.get('scrapes'))}", ""]
     return "\n".join(lines) + "\n"
 
 
@@ -422,10 +475,14 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     for flag in ("hub-bin", "snapshot", "work", "out"):
         parser.add_argument("--" + flag, type=Path, required=True)
-    for flag in ("var", "a", "b"):
+    for flag in ("var", "b"):
         parser.add_argument("--" + flag, required=True)
+    parser.add_argument("--a", default="")
     parser.add_argument("--port", type=int, required=True)
     parser.add_argument("--rounds", type=int, default=3)
+    parser.add_argument("--smoke", action="store_true", help="allow one round per side; no acceptance conclusion")
+    parser.add_argument("--workload", choices=("read", "write"))
+    parser.add_argument("--scrape", help="owner-authenticated loopback metrics URL (B only)")
     parser.add_argument("--a-unset", action="store_true")
     parser.add_argument("--config", type=Path)
     parser.add_argument("--md", type=Path)
@@ -433,15 +490,20 @@ def main(argv=None):
     parser.add_argument("--env", action="append", default=[])
     parser.add_argument("--threshold-pct", type=float, default=1)
     args = parser.parse_args(argv)
+    os.umask(0o077)
     args.probe = list(dict.fromkeys(args.probe))
     if args.config:
         args.config = args.config.expanduser().resolve()
-    config = run.configuration(args.config)
+    config = run.configuration(args.config, args.workload)
     args.work = run.safe_work(args.work)
     args.hub_bin, args.snapshot = (p.expanduser().resolve() for p in (args.hub_bin, args.snapshot))
-    if args.rounds < 3 or not math.isfinite(args.threshold_pct) or args.threshold_pct <= 0:
-        parser.error("need >=3 rounds per variant and a finite positive threshold")
+    if args.rounds < (1 if args.smoke else 3) or not math.isfinite(args.threshold_pct) or args.threshold_pct <= 0:
+        parser.error("need >=3 rounds per variant (or --smoke) and a finite positive threshold")
     try:
+        if args.scrape:
+            args.scrape = probe_url(args.scrape, args.port)
+            if config["auth"] != "bearer":
+                raise ValueError("--scrape requires config auth=bearer")
         extra, ports = environment_options(args.env, args.var)
         # Validate variable values for listeners/ports as well as shared --env.
         for value in (args.a, args.b):
@@ -481,11 +543,15 @@ def main(argv=None):
               "bootstrap": {"unit": "round", "seed": SEED, "replicates": REPLICATES, "confidence": .95},
               "warnings": [], "rounds": [], "started_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
     started = time.perf_counter()
-    rc = 1
+    rc, session = 1, None
     try:
         args.work.mkdir(parents=True, exist_ok=True)
         session = Path(tempfile.mkdtemp(prefix="ab-", dir=args.work))
         result["run_directory"] = session.name
+        if args.scrape:
+            args.out.parent.mkdir(parents=True, exist_ok=True)
+            args.raw = Path(tempfile.mkdtemp(prefix=args.out.stem + "-raw-", dir=args.out.parent))
+            result["raw_directory"] = args.raw.name
         golden = session / "golden"
         (golden / "data").mkdir(parents=True)
         db = golden / "data/steve.sqlite3"
@@ -507,7 +573,8 @@ def main(argv=None):
         for index, variant in enumerate(result["order"], 1):
             home = session / f"round-{index:02d}-{variant}"
             home.mkdir(mode=0o700)
-            row = {"index": index, "variant": variant, "status": "copying"}
+            row = {"index": index, "variant": variant, "status": "copying",
+                   "check_scrape_auth": variant == "B" and not any(r["variant"] == "B" for r in result["rounds"])}
             result["rounds"].append(row)
             row["copy_method"] = clone(golden / "data", home / "data")
             collect(home, args, config, variant, extra, row)
@@ -517,10 +584,22 @@ def main(argv=None):
         result["status"] = "ok" if all(r["status"] == "ok" for r in result["rounds"]) else "measurement_errors"
         rc = 0 if result["status"] == "ok" else 2
         summarize(result, args)
+        if args.smoke:
+            result["overall"] = "INCONCLUSIVE(smoke)"
+            result["warnings"].append("Short smoke run: not a 3+3 performance acceptance.")
     except (Exception, KeyboardInterrupt) as exc:
         result.update(status="failed", failure_type=type(exc).__name__, overall="INCONCLUSIVE")
         rc = 1
     finally:
+        if session is not None:
+            cleaned = []
+            for item in [result.get("golden", {}), *result["rounds"]]:
+                if item.get("cleanup", {}).get("process_groups_remaining") == []:
+                    home = session / item.get("run_directory", "golden")
+                    if (home / "data").exists():
+                        shutil.rmtree(home / "data")
+                        cleaned.append(home.name)
+            result["removed_data_copies"] = cleaned
         result["elapsed_s"] = time.perf_counter() - started
         result["finished_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         run.write_result(args.out, result)

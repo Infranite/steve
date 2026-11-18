@@ -23,6 +23,7 @@ The Hub uses tracing text on stdout; we redirect both streams into logs/start-N.
 
 import argparse
 import hashlib
+import importlib.util
 import http.cookiejar
 import json
 import math
@@ -41,6 +42,10 @@ import urllib.request
 from contextlib import closing
 from datetime import datetime, timezone
 
+
+_isolation_spec = importlib.util.spec_from_file_location("bench_isolation", Path(__file__).parent / "bench/isolation.py")
+isolation = importlib.util.module_from_spec(_isolation_spec)
+_isolation_spec.loader.exec_module(isolation)
 
 ENDPOINTS = ["/healthz", "/api/state", "/api/me", "/api/hub-metadata",
              "/api/personas", "/api/spaces", "/api/channels", "/api/stats/summary",
@@ -136,15 +141,14 @@ def environment(work, port):
     work = work.resolve()
     sandbox = work / "sandbox"
     sandbox.mkdir(exist_ok=True)
-    return dict(HOME=str(sandbox), USER="rehearsal", PATH="/usr/bin:/bin:/usr/sbin:/sbin",
+    return isolation.DISABLED_ENV | dict(HOME=str(sandbox), USER="rehearsal", PATH="/usr/bin:/bin:/usr/sbin:/sbin",
                 TMPDIR=str(sandbox), STEVE_HOME=str(work), STEVE_HOST="127.0.0.1",
                 STEVE_PORT=str(port), STEVE_LOCAL_NODE_PORT=str(port + 3),
                 STEVE_PUBLIC_URL=f"http://127.0.0.1:{port}", STEVE_DEV_LOGIN="1",
                 STEVE_NO_RESUME="1", STEVE_NODE_MODE="off", STEVE_NODE_LISTEN="0",
                 STEVE_VAULT_KEYSTORE="file", STEVE_BACKUP="off",
                 STEVE_ADAPTER_UPDATES="off", STEVE_UPDATE_CHECK="0",
-                STEVE_PRICE_CATALOG_URL="off", STEVE_ADAPTER_CLAUDE="/usr/bin/false",
-                STEVE_ADAPTER_CODEX="/usr/bin/false", STEVE_ADAPTER_PI="/usr/bin/false",
+                STEVE_PRICE_CATALOG_URL="off",
                 STEVE_WEB_DIR=str(sandbox / "web"), STEVE_LOG="info", NO_COLOR="1")
 
 

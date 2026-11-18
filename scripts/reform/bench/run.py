@@ -16,9 +16,13 @@ python3 -I -m unittest discover -s scripts/reform/bench -v
 
 `--config custom.json` 覆盖内置默认值的顶层键，`endpoints` 整体替换；默认配置也在 `default.json`。默认每个接口首次请求加 20 次串行请求，启动后稳定采样 30 秒（settle_s）、空闲 30 秒、4 客户端负载 60 秒、每秒 2 次通知写入、负载中运行 CLI 3 次。540 秒总预算包含复制、启动和测量，清理在预算外；正常运行应低于十分钟。慢请求或错误会进入结果，不自动重试。退出码 0 表示采集完成且请求、CLI、探针没有错误；2 表示采集完成但存在测量错误；1 表示运行失败或清理失败。失败时尽量保存部分 JSON。
 
+T0.3 独立负载
+
+`--workload read|write` 或配置 `workload` 选择纯 GET/POST，并强制 `invalidate_rps=0`；未指定时保留旧混合模式。写默认 `/api/notifications/read`、`load_body={"at":1}`，连续两次 200/`{"seen":1}` 冒烟后预热；`warmup_s=5` 使用相同负载且不纳入计时。`auth="bearer"` 在启动前用隔离 CLI 创建短期 owner token，并经 `/auth/token` 换凭据、`/api/me` 取 workspace；凭据只在内存。默认仍为 cookie。`cli_runs=0` 可关闭竞争 CLI；`bench/metrics.json` 是正式指标测量配置。A/B 与抓取入口见 `ab.py --help`。
+
 隔离与生命周期
 
-Hub 和 CLI 都通过 `/usr/bin/env -i` 和相同的干净环境启动，显式设置隔离的 `STEVE_HOME`、Hub 端口、本地 Node 端口（Hub + 3），禁用恢复、备份、适配器更新，三个适配器指向 `/usr/bin/false`。另设私有 `HOME`，不读取当前用户的登录配置。启动点对隔离环境做断言。不要用被测二进制的 `--help` 或 `--version` 探测能力：该构建遇到未知参数会启动 Hub。版本从 `/healthz` 获取。
+Hub 和 CLI 都通过 `/usr/bin/env -i` 和相同的干净环境启动，显式设置隔离的 `STEVE_HOME`、Hub 端口、本地 Node 端口（Hub + 3），禁用恢复、备份、适配器更新，所有 17 个适配器指向 `/usr/bin/false`。另设私有 `HOME`，不读取当前用户的登录配置。启动点对隔离环境做断言。不要用被测二进制的 `--help` 或 `--version` 探测能力：该构建遇到未知参数会启动 Hub。版本从 `/healthz` 获取。
 
 工具拒绝当前用户的 `~/.steve*` 目录及其子目录（解析符号链接后判断），拒绝 Hub/Node 端口 8440，并检查两个端口没有被占用。只修改快照副本中最早 owner 的 subject 为 `dev:local`；通过 `/auth/dev` 获取内存 cookie。HTTP 不使用环境代理，不跟随重定向，不保存 cookie 或响应内容。CLI 使用被测二进制的 `--access token create --name … --json`，输出丢弃，token 只留在隔离数据库内。
 
@@ -74,10 +78,12 @@ if sys.version_info < (3, 11):
 
 import argparse
 import collections
+from contextlib import closing
 import ctypes
 import hashlib
 import http.cookiejar
 import http.client
+import importlib.util
 import json
 import math
 import os
@@ -94,10 +100,18 @@ import time
 import urllib.error
 import urllib.request
 
+_spec = importlib.util.spec_from_file_location("bench_isolation", Path(__file__).with_name("isolation.py"))
+isolation = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(isolation)
+
 DEFAULT = {
     "endpoints": [{"path": p, "requests": 20} for p in (
         "/api/state", "/api/stats/summary", "/api/hub-metadata", "/api/personas",
         "/api/spaces", "/api/channels", "/api/me/attention", "/api/devices")],
+    "workload": None,  # None preserves the original mixed GET + invalidation workload.
+    "auth": "cookie",
+    "warmup_s": 5,
+    "load_body": {"at": 1},
     "request_timeout_s": 10,
     "startup_timeout_s": 90,
     "total_timeout_s": 540,
@@ -130,7 +144,7 @@ def distribution(values):
             "p99": q(.99), "max": ordered[-1] if ordered else None}
 
 
-def configuration(path):
+def configuration(path, workload=None):
     config = json.loads(json.dumps(DEFAULT))
     if path:
         override = json.loads(path.read_text())
@@ -138,13 +152,14 @@ def configuration(path):
             raise ValueError("config must be an object containing known keys")
         config.update(override)
     for key in ("request_timeout_s", "startup_timeout_s", "total_timeout_s", "settle_s", "idle_s",
-                "load_s", "lock_interval_ms", "process_interval_s", "cli_timeout_s"):
+                "load_s", "warmup_s", "lock_interval_ms", "process_interval_s", "cli_timeout_s"):
         value = config[key]
         if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
             raise ValueError(f"{key} must be finite and positive")
     for key in ("clients", "cpu_top_n", "cli_runs"):
-        if type(config[key]) is not int or config[key] < 1:
+        if type(config[key]) is not int or config[key] < (0 if key == "cli_runs" else 1):
             raise ValueError(f"{key} must be a positive integer")
+    configure_workload(config, workload)
     rate = config["invalidate_rps"]
     if isinstance(rate, bool) or not isinstance(rate, (int, float)) or not math.isfinite(rate) or rate < 0:
         raise ValueError("invalidate_rps must be finite and nonnegative")
@@ -166,6 +181,48 @@ def configuration(path):
     return config
 
 
+def configure_workload(config, workload=None):
+    if workload is not None:
+        config["workload"] = workload
+    if config["workload"] not in (None, "read", "write") or config["auth"] not in ("cookie", "bearer"):
+        raise ValueError("workload must be read/write; auth must be cookie/bearer")
+    if not isinstance(config["load_body"], dict):
+        raise ValueError("load_body must be a JSON object")
+    if config["workload"] is not None:
+        config["invalidate_rps"] = 0
+    if config["workload"] == "write" and config["load_path"] == DEFAULT["load_path"]:
+        config["load_path"] = "/api/notifications/read"
+    return config
+
+
+def access_token(processes, binary, env, timeout):
+    # CLI is just as dangerous as a server launch: Processes.start asserts isolation.
+    child = processes.start([str(binary), "--access", "token", "create", "--name",
+                             "metrics-acceptance", "--days", "1", "--json"], env,
+                            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    try:
+        output, _ = child.communicate(timeout=timeout)
+        if child.returncode:
+            raise RuntimeError("isolated access token creation failed")
+        value = json.loads(output)
+        return {key: value[key] for key in ("user", "token")}
+    except subprocess.TimeoutExpired:
+        processes.kill_group(child, signal.SIGKILL)
+        child.communicate(timeout=5)
+        raise TimeoutError("isolated token CLI timed out") from None
+
+
+def warmup(hub, db, client, config, env, processes, binary):
+    if config["workload"] == "write":
+        for _ in range(2):
+            if client.json_request(config["load_path"], config["load_body"]) != {"seen": 1}:
+                raise RuntimeError("write smoke must return 200 and seen=1 twice")
+    result = phase("warmup", config["warmup_s"], hub, db, client, config, env, processes, binary)
+    if not result["requests"] or result["errors"] or result["worker_errors"] or result["lock"]["probe_errors"]:
+        raise RuntimeError("warmup failed")
+    return {"elapsed_s": result["elapsed_s"], "requests": result["requests"]}
+
+
 class NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         return None
@@ -174,11 +231,36 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
 class Client:
     def __init__(self, base, timeout, cookie=""):
         self.base, self.timeout, self.cookie = base, timeout, cookie
+        self.credential, self.workspace = "", ""
         # Do not inherit proxy settings, or follow redirects into another service.
         self.opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
 
-    def request(self, path, data=None):
+    def headers(self):
         headers = {"Cookie": self.cookie, "Accept-Encoding": "gzip", "Origin": self.base}
+        if self.credential:
+            headers["Authorization"] = "Bearer " + self.credential
+        if self.workspace:
+            headers["X-Steve-Ws"] = self.workspace
+        return headers
+
+    def fork(self):
+        local = Client(self.base, self.timeout, self.cookie)
+        local.credential, local.workspace = self.credential, self.workspace
+        return local
+
+    def json_request(self, path, payload=None):
+        headers = self.headers() | {"Accept-Encoding": "identity"}
+        if payload is not None:
+            headers["Content-Type"] = "application/json"
+        req = urllib.request.Request(self.base + path,
+            data=None if payload is None else json.dumps(payload).encode(), headers=headers)
+        with self.opener.open(req, timeout=self.timeout) as response:
+            if response.status != 200:
+                raise RuntimeError("JSON request must return 200")
+            return json.loads(response.read())
+
+    def request(self, path, data=None):
+        headers = self.headers()
         if data is not None:
             headers["Content-Type"] = "application/json"
         req = urllib.request.Request(self.base + path, data=data, headers=headers)
@@ -198,7 +280,15 @@ class Client:
                 "status": code, "bytes": size, "error": error,
                 "accept_encoding": headers["Accept-Encoding"], "content_encoding": content_encoding}
 
-    def login(self):
+    def login(self, token=None):
+        if token is not None:
+            payload = token | {"client": {"kind": "cli", "name": "metrics-acceptance",
+                                          "platform": "macOS", "version": "1"}}
+            self.credential = self.json_request("/auth/token", payload)["credential"]
+            self.workspace = self.json_request("/api/me")["workspace"]
+            if not self.credential or not isinstance(self.workspace, str) or not self.workspace:
+                raise RuntimeError("owner login missing credential/workspace")
+            return
         jar = http.cookiejar.CookieJar()
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}),
                                              urllib.request.HTTPCookieProcessor(jar), NoRedirect())
@@ -232,7 +322,7 @@ class LockProbe:
         self.started = None
 
     def sample(self, stop, deadline):
-        with sqlite3.connect(self.db, timeout=0, isolation_level=None) as conn:
+        with closing(sqlite3.connect(self.db, timeout=0, isolation_level=None)) as conn:
             conn.execute("PRAGMA busy_timeout=0")
             while not stop.is_set() and time.perf_counter() < deadline:
                 now = time.perf_counter()
@@ -365,6 +455,7 @@ class Processes:
         assert 8440 not in (int(env["STEVE_PORT"]), int(env["STEVE_LOCAL_NODE_PORT"]))
         assert env["STEVE_NO_RESUME"] == "1" and env["STEVE_BACKUP"] == "off"
         assert "STEVE_CONFIG" not in env and "INVOCATION_ID" not in env
+        assert all(env.get(k) == v for k, v in isolation.DISABLED_ENV.items())
         self.home = Path(env["STEVE_HOME"])
         with self.lock:
             child = subprocess.Popen(["/usr/bin/env", "-i", *[f"{k}={v}" for k, v in env.items()], *args],
@@ -452,11 +543,12 @@ def phase(name, seconds, hub, db, client, config, env, processes, binary,
         cpu_meter.sample(table, baseline=True)
     reads, writes, cli, thread_errors = [], [], [], []
     def get_loop():
-        local = Client(client.base, client.timeout, client.cookie)
+        local = client.fork()
         while not stop.is_set() and time.perf_counter() < deadline:
-            reads.append(local.request(config["load_path"]))
+            body = json.dumps(config["load_body"]).encode() if config["workload"] == "write" else None
+            (writes if body is not None else reads).append(local.request(config["load_path"], body))
     def invalidate_loop():
-        local = Client(client.base, client.timeout, client.cookie)
+        local = client.fork()
         rate, tick = config["invalidate_rps"], start
         body = json.dumps(config["invalidate_body"]).encode()
         while rate > 0 and not stop.is_set() and tick < deadline:
@@ -490,8 +582,10 @@ def phase(name, seconds, hub, db, client, config, env, processes, binary,
             thread_errors.append(type(exc).__name__)
             stop.set()
     funcs = [lambda: probe.sample(stop, deadline)]
-    if name == "load":
-        funcs += [get_loop] * config["clients"] + [invalidate_loop, cli_loop]
+    if name in ("load", "warmup"):
+        funcs += [get_loop] * config["clients"] + [invalidate_loop]
+        if name == "load":
+            funcs += [cli_loop]
     threads = [threading.Thread(target=guarded, args=(fn,), daemon=True) for fn in funcs]
     try:
         for thread in threads:
@@ -511,9 +605,14 @@ def phase(name, seconds, hub, db, client, config, env, processes, binary,
     disk.sample(table)
     result = {"target_s": seconds, "elapsed_s": duration, "lock": probe.result(),
               "disk": disk.result(duration), "worker_errors": thread_errors}
-    if name == "load":
+    if name in ("load", "warmup"):
+        workload_rows = writes if config["workload"] == "write" else reads
+        result["requests"] = len(workload_rows)
+        result["requests_per_s"] = len(workload_rows) / duration
         if samples is not None:
             samples["reads_ms"] = [r["ms"] for r in reads]
+            samples["workload_ms"] = [r["ms"] for r in workload_rows]
+            samples["workload"] = config["workload"] or "mixed"
         if cpu_meter is not None:
             cpu_meter.sample(table)
             result["cpu"] = cpu_meter.result(len(reads) + len(writes))
@@ -568,13 +667,13 @@ def isolated_environment(home, port):
     # A private HOME also isolates any future subprocess's default config discovery.
     private_home = home / "user-home"
     private_home.mkdir()
-    return {"HOME": str(private_home), "USER": "benchmark", "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+    (home / "web").mkdir()
+    return isolation.DISABLED_ENV | {"STEVE_WEB_DIR": str(home / "web"), "HOME": str(private_home), "USER": "benchmark", "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
             "TMPDIR": str(home / "tmp"), "STEVE_HOME": str(home), "STEVE_HOST": "127.0.0.1",
             "STEVE_PORT": str(port), "STEVE_LOCAL_NODE_PORT": str(port + 3),
             "STEVE_PUBLIC_URL": f"http://127.0.0.1:{port}", "STEVE_DEV_LOGIN": "1",
             "STEVE_NO_RESUME": "1", "STEVE_VAULT_KEYSTORE": "file", "STEVE_BACKUP": "off",
-            "STEVE_ADAPTER_UPDATES": "off", "STEVE_ADAPTER_CLAUDE": "/usr/bin/false",
-            "STEVE_ADAPTER_CODEX": "/usr/bin/false", "STEVE_ADAPTER_PI": "/usr/bin/false",
+            "STEVE_ADAPTER_UPDATES": "off",
             "NO_COLOR": "1", "RUST_LOG": "warn"}
 
 
@@ -610,8 +709,10 @@ def main(argv=None):
     parser.add_argument("--port", required=True, type=int)
     parser.add_argument("--config", type=Path)
     parser.add_argument("--label", default="")
+    parser.add_argument("--workload", choices=("read", "write"))
     args = parser.parse_args(argv)
-    config = configuration(args.config)
+    os.umask(0o077)
+    config = configuration(args.config, args.workload)
     work = safe_work(args.work)
     if not 1024 <= args.port <= 65532 or 8440 in (args.port, args.port + 3):
         parser.error("unsafe Hub/Node port")
@@ -670,12 +771,13 @@ def main(argv=None):
                 raise RuntimeError("snapshot must contain an owner")
         env = isolated_environment(home, args.port)
         client = Client(f"http://127.0.0.1:{args.port}", config["request_timeout_s"])
+        token = access_token(processes, binary, env, config["cli_timeout_s"]) if config["auth"] == "bearer" else None
         with (home / "logs" / "hub.log").open("wb") as log:
             before = time.perf_counter()
             hub = processes.start([str(binary)], env, stdout=log, stderr=subprocess.STDOUT)
             result["health"] = health(client, hub, config["startup_timeout_s"])
             result["startup_to_health_ms"] = (time.perf_counter() - before) * 1000
-            client.login()
+            client.login(token)
             result["post_start"] = phase("post_start", config["settle_s"], hub, db, client, config,
                                          env, processes, binary)
             result["endpoints"] = {}
@@ -684,6 +786,8 @@ def main(argv=None):
                 rows = [client.request(endpoint["path"]) for _ in range(endpoint["requests"])]
                 result["endpoints"][endpoint["path"]] = {"cold": cold, "warm": requests_summary(rows)}
             for name in ("idle", "load"):
+                if name == "load":
+                    result["warmup"] = warmup(hub, db, client, config, env, processes, binary)
                 result[name] = phase(name, config[name + "_s"], hub, db, client, config,
                                      env, processes, binary)
             if hub.poll() is not None:
