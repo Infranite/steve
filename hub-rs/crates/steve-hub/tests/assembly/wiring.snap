@@ -210,6 +210,7 @@ api POST /capabilities/a2a-agents
 api POST /capabilities/a2a-agents/preview
 api POST /capabilities/mcp-servers
 api POST /capabilities/skills
+api POST /chan-messages/x/authorization
 api POST /chan-messages/x/recall
 api POST /channels
 api POST /channels/cleanup

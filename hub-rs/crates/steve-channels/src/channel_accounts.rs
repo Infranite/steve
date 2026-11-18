@@ -189,6 +189,10 @@ struct ConnFacts {
 }
 
 /// The connection `conn` of the viewer's workspace if the viewer may see it (`404 没有这个连接`).
+pub(crate) fn can_manage(c: &Connection, viewer: &Viewer, conn: &str) -> ChannelResult<()> {
+    own_conn(c, viewer, conn).map(|_| ())
+}
+
 fn own_conn(c: &Connection, viewer: &Viewer, conn: &str) -> ChannelResult<ConnFacts> {
     let row = c
         .query_row(

@@ -57,6 +57,8 @@ pub struct World {
     pub profile_calls: Vec<Value>,
     pub limits: Value,
     pub write_policy: String,
+    /// Targets refused before side effects, under the target_forbidden contract.
+    pub forbidden_targets: HashSet<String>,
     pub source_only: bool,
     pub session: String,
     /// The fake's clock (unix ms); `None`: the real one.
@@ -188,6 +190,7 @@ impl FakeExtWs {
                 "history_max_limit": 50, "write_per_sec": 5, "write_burst": 5,
                 "max_attachment_bytes": 104_857_600, "max_inflight_requests": 32}),
             write_policy: "allowed".into(),
+            forbidden_targets: HashSet::new(),
             source_only: false,
             session: "ok".into(),
             now: None,
@@ -704,6 +707,12 @@ fn answer(
 fn write(w: &mut World, method: &str, p: &Value, now: i64) -> Result<Value, RpcError> {
     if w.write_policy == "forbidden" {
         return err(Reason::WriteForbidden, "writes are forbidden");
+    }
+    if p["chat_id"]
+        .as_str()
+        .is_some_and(|id| w.forbidden_targets.contains(id))
+    {
+        return err(Reason::TargetForbidden, "target policy refuses this chat");
     }
     // the signed-in user, before any side effect
     if p["expected_sender"] != w.signed_in

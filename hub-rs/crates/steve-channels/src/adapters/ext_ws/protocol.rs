@@ -154,7 +154,7 @@
 //! ### 3.6 Write policy
 //!
 //! - `allowed`: every write may be attempted.
-//! - `restricted`: only some targets accept writes (for example only the user's own chats). The Hub attempts writes normally. A write to a refused target fails with `target_forbidden` (-32016): that one action is `Blocked` for that chat, and the connection **stays writable**. Nothing flips to read-only. The UI shows "writes limited by the channel service". Repeated refusals for the same chat are remembered for 24 h, so the Hub doesn't draft replies there.
+//! - `restricted`: only some targets accept writes (for example only the user's own chats). The Hub attempts writes normally. A write to a refused target fails with `target_forbidden` (-32016): that one action is `Blocked` for that chat, and the connection **stays writable**. Nothing flips to read-only. The UI shows "writes limited by the channel service". Repeated automatic refusals for the same chat are remembered for 24 h. Explicit mentions, trigger words and manual retries are processed again and keep visible failure cards.
 //! - `forbidden`: see below.
 //!
 //! If `write_policy` is `forbidden`, the connection is **read-only**. The Hub keeps receiving and
@@ -682,8 +682,9 @@
 //!   space (§5.5).
 //! - **Refused writes** (§3.6): a refusal is remembered for 24 h, for the chat (`target_forbidden`)
 //!   or for the whole connection (`forbidden` policy, `write_forbidden`, `forbidden` on a write).
-//!   Meanwhile the Hub drafts no automatic replies there, and only the first refused message asks
-//!   the user (one card explaining how to allow sending); later ones are kept as not sent. A
+//!   Meanwhile the Hub drafts no ordinary automatic replies there, and repeated automatic failures
+//!   share one notice. Explicit requests and manual retries always keep a full-body recovery card
+//!   (retry, rewrite for review, discard); the actual permission and disclosure are rechecked. A
 //!   session that reports a writable policy lifts the connection's memory at once (`allowed` also
 //!   lifts its chats'), and so does a write that goes through.
 //! - **Item types** `message_recalled`, `message_edited` and `chat` with `change: members` are

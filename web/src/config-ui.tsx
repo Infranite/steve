@@ -14,7 +14,7 @@ import { useT } from "@/i18n"
 
 export type Ctx = { kind: "bot" | "project" | "settings" | "models" | "tags" | "global"; id?: string }
 
-export function ProposalCard({ p, inChat = false }: { p: any; inChat?: boolean }) {
+export function ProposalCard({ p, inChat = false, disabled = false, settled }: { p: any; inChat?: boolean; disabled?: boolean; settled?: React.ReactNode }) {
   const [busy, setBusy] = useState(false), t = useT()
   const empty = (v: string) => !v || v === t("shell:config.emptyValue", { lng: "zh-CN" }) || v === t("shell:config.emptyValue", { lng: "en" })
   const added = p.changes.filter((c: any) => empty(c.from) && !empty(c.to)).length
@@ -34,7 +34,7 @@ export function ProposalCard({ p, inChat = false }: { p: any; inChat?: boolean }
           {first && <span className="min-w-0 truncate text-muted-foreground">· {first.label} → {first.to}{more > 0 ? " " + t("shell:config.more", { count: more }) : ""}</span>}
         </button>
         <span className="shrink-0 type-footnote text-tertiary">{done ? t("shell:config.applied") : t("shell:config.dropped")}</span>
-        {done && <Button size="xs" variant="ghost" className="shrink-0 text-muted-foreground" disabled={busy} onClick={() => run(p.undo)} data-undo>{t("shell:config.undo")}</Button>}
+        {done && !settled && <Button size="xs" variant="ghost" className="shrink-0 text-muted-foreground" disabled={busy || disabled} onClick={() => run(p.undo)} data-undo>{t("shell:config.undo")}</Button>}
       </div>
     )
   }
@@ -50,9 +50,9 @@ export function ProposalCard({ p, inChat = false }: { p: any; inChat?: boolean }
           {Math.max(c.from.length, c.to.length) > 120 ? <LongChange before={c.from} after={c.to} /> : <><span className="min-w-0 break-words text-muted-foreground line-through decoration-tertiary">{c.from}</span><ArrowRightIcon className="size-3 shrink-0 self-center text-tertiary" /><span className="min-w-0 break-words text-foreground">{c.to}</span></>}
         </div>))}</div>
       <div className="flex items-center justify-end gap-2 border-t px-3 py-2.5">
-        {done ? <><span className="mr-auto inline-flex items-center gap-1.5 type-footnote text-muted-foreground"><CheckIcon className="size-3.5 text-success" />{t("shell:config.applied")}</span><Button variant="ghost" disabled={busy} onClick={() => run(p.undo)} data-undo>{t("shell:config.undo")}</Button></>
+        {settled ?? (done ? <><span className="mr-auto inline-flex items-center gap-1.5 type-footnote text-muted-foreground"><CheckIcon className="size-3.5 text-success" />{t("shell:config.applied")}</span><Button variant="ghost" disabled={busy || disabled} onClick={() => run(p.undo)} data-undo>{t("shell:config.undo")}</Button></>
           : dropped ? <span className="mr-auto type-footnote text-muted-foreground">{t("shell:config.dropped")}</span>
-          : <><Button variant="ghost" disabled={busy} onClick={() => run(p.drop)} data-drop>{t("shell:config.drop")}</Button><Button disabled={busy} onClick={() => run(p.apply)} data-apply>{busy && <Spinner className="size-3.5" />}{t("shell:config.apply")}</Button></>}
+          : <><Button variant="ghost" disabled={busy || disabled} onClick={() => run(p.drop)} data-drop>{t("shell:config.drop")}</Button><Button disabled={busy || disabled} onClick={() => run(p.apply)} data-apply>{busy && <Spinner className="size-3.5" />}{t("shell:config.apply")}</Button></>)}
       </div>
     </Card>
   )

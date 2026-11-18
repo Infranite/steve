@@ -18,6 +18,7 @@ import type { Cite } from "./api/knowledge"
 import { yoloApi, type RYolo, type RYoloAction } from "./api/yolo"
 import { applyLook } from "./lib/motion"
 import { permissionModes, canConfigurePermission } from "./runtime-status"
+import type { SendRecoveryInfo } from "./api/channels"
 
 /* ───────── view types (from the prototype) ───────── */
 export type Ev = any[] // ['u',text,label?] ['q',string[]] ['th',text,secs] ['tool',kind,title,meta,detail,live?,add?,del?,failed?,tool?,desc?,input?,plan?,endedAt?,steveArgs?] ['a',text] ['ho',text,toSid] ['hi',text] ['ask',text] ['sys',text] ['end',stopReason]
@@ -25,6 +26,7 @@ export type Sess = { id: string; n: number; item: string | null; b: string | nul
   /** not opened on its Node yet: no turn runs, the queue waits for the start; `since` is when it was created */
   starting?: boolean; since?: number }
 export type Wait = { type: "approve" | "ask" | "accept" | "propose" | "fail" | "confirm"; subjectId?: string; q: string; draft?: string; opts?: string[]; since: string; decision: string; subject: string; session: string | null; options: string[]; by: string; busy?: boolean
+  recovery?: SendRecoveryInfo
   /** a chat message's decision: the link that opens it in the platform's own client */
   openUrl?: string }
 export type Done = { id: string; type: Wait["type"]; q: string; choice: string; tm: string; at: number; decision: string; canUndo: boolean; undone?: boolean; how: "chose" | "dismissed" | "expired"; rel?: Rel
@@ -194,6 +196,10 @@ export const st = {
   ch: { personas: [] as any[], spaces: [] as any[], accounts: [] as any[], providers: [] as any[], notify: { acc: "" }, disclosureDefaults: [] as any[] },
   pp: { contacts: [] as any[], orgs: [] as any[], teams: [] as any[], vault: [] as any[], itemPeople: [] as any[], accounts: [] as any[] },
   pendingActions: new Set<string>(),
+  /** An accepted channel recovery must not be submitted again while state readback is stale or unavailable. */
+  submittedChannelDecisions: new Set<string>(),
+  /** The channel record says this old card can no longer recover a send (for example it is pending elsewhere). */
+  inactiveChannelDecisions: new Set<string>(),
   ver: 0,
 }
 const raw = { state: null as State | null, details: new Map<string, RItemDetail>(), events: new Map<string, REvent[]>(), loadingEv: new Set<string>(), loadingItem: new Set<string>() }
@@ -329,7 +335,8 @@ function sessOf(s: RSession, openSessions: Set<string>): Sess {
 }
 function waitOf(d: RDecision): Wait {
   const opts = d.kind === "ask" ? d.options : undefined
-  return { type: d.kind, q: d.question, draft: d.draft, opts, since: since(d.created), decision: d.id, subject: d.subject_type, subjectId: d.subject_id, session: d.session_id, options: d.options, by: d.requested_by, busy: !!d.agent_busy, openUrl: d.open_url }
+  return { type: d.kind, q: d.question, draft: d.draft, opts, since: since(d.created), decision: d.id, subject: d.subject_type, subjectId: d.subject_id, session: d.session_id, options: d.options, by: d.requested_by, busy: !!d.agent_busy, openUrl: d.open_url,
+    recovery: d.subject_type === "chan_message" && d.kind === "fail" ? d.result?.recovery : undefined }
 }
 /** Both pending and recent resolved decisions are returned by state, including orphan sessions. */
 export function permissionDecision(id?: string) {
@@ -589,7 +596,14 @@ export function refresh(): Promise<void> {
     /* A stopped turn can leave no reply after a restart. Only retire the same untouched draft;
      * another turn or a chunk received during this request is newer than this state snapshot. */
     const settled = !st.thinking ? st.draft : null, epoch = scopeEpoch
-    try { const state = await api.state(); if (epoch !== scopeEpoch) return; raw.state = state; watermark = cursorOf(state) ?? watermark; setPageWorkspace(state.workspace?.id ?? ""); st.login = null; st.error = ""; build(); if (settled && st.draft === settled && !st.thinking && !state.thinking) { st.draft = null; build() } emit() }
+    try {
+      const state = await api.state(); if (epoch !== scopeEpoch) return
+      raw.state = state; watermark = cursorOf(state) ?? watermark; setPageWorkspace(state.workspace?.id ?? ""); st.login = null; st.error = ""; build()
+      for (const locked of [st.submittedChannelDecisions, st.inactiveChannelDecisions])
+        for (const id of locked) if (!state.decisions.some((d) => d.id === id && d.status === "open")) locked.delete(id)
+      if (settled && st.draft === settled && !st.thinking && !state.thinking) { st.draft = null; build() }
+      emit()
+    }
     catch (e) { if (epoch !== scopeEpoch) return; if (e instanceof Unauthenticated) st.login = e.login ?? "/auth/login"; else st.error = (e as Error).message; emit() }
     finally { inflight = null; if (again) { again = false; void refresh() } }
   })()
@@ -989,9 +1003,20 @@ export const acceptChoosesRelease = (i?: Item) => {
 export async function decide(id: string, c: string, text?: string, decision?: string) {
   const { i, w } = cardOf(id, decision); if (!w) return
   const key = "decision:" + w.decision
-  if (st.pendingActions.has(key)) return
+  if (st.pendingActions.has(key) || st.submittedChannelDecisions.has(w.decision) || st.inactiveChannelDecisions.has(w.decision)) return
   st.pendingActions.add(key); emit()
   try {
+    if (w.subject === "chan_message" && w.type === "fail") {
+      // Keep an accepted answer locked until the Hub has confirmed this decision is no longer open.
+      // A failed/stale state refresh must not turn an acknowledged retry into a second send request.
+      try {
+        const result = await api.decide(w.decision, c, text)
+        st.submittedChannelDecisions.add(w.decision); emit()
+        toast(c === "retry" ? t("core:sendRecovery.retryRequested") : c === "rewrite" ? t("core:sendRecovery.rewriteRequested") : decidedText(w, c, i?.b ?? null))
+        await refresh()
+        return result
+      } catch (e) { fail(e); await refresh(); return }
+    }
     if (w.subject === "release" && c === "yes") {
       /* the answer already says whether the release started; "已发布" only comes with the result */
       const d = await call(api.decide(w.decision, c, text))

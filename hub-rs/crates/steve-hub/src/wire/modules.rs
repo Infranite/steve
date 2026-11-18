@@ -409,6 +409,7 @@ pub fn build(env: Env<'_>) -> Result<Built, BackendError> {
     let out_link = steve_channels::OutLink::new();
     registry.decision(steve_channels::respond::SUBJECT_MESSAGE, out_link.handler());
     let late = steve_channels::flow_actions::LateChannels::new();
+    steve_channels::recovery::register(&mut registry, late.clone());
     let mut outbox = steve_channels::Outbox::new(out_link.clone());
     for a in &declared.act_as_user {
         outbox = outbox.act_as_user(a.clone());

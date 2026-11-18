@@ -240,7 +240,7 @@ pub struct Outbound {
     pub send_option: Option<String>,
     /// How many times YOLO already sent it again after a failed send.
     pub retries: u32,
-    /// draft | leak_draft | send_failed | handoff
+    /// The send/review boundary, separate from the disclosure verdict.
     pub stage: OutboundStage,
     /// Said as you: the channel's composer wrote it as its reply (steve-channels
     /// `chan_messages.composed`). A text in your name nobody composed (a fixed receipt, a flow's text,
@@ -258,9 +258,11 @@ pub enum OutboundStage {
     Draft,
     /// A draft the disclosure check turned out of a leak.
     LeakDraft,
+    /// A recovery edit that requires the owner's explicit approval, even if disclosure passed.
+    HumanReview,
     /// Sending failed (`retry` / `discard`).
     SendFailed,
-    /// Only `discard` is left (the check blocked it).
+    /// Channel refusal requiring human recovery, or an uncertain result. No automatic retry.
     Blocked,
     /// Someone asked for the user in person.
     Handoff,
@@ -1164,11 +1166,21 @@ fn ask(a: &Ask, p: &Policy) -> Verdict {
 }
 
 fn outbound(o: &Outbound, p: &Policy, what: &str) -> Verdict {
-    // the card's stage first: a hand-off or a blocked text says why, not that it has no send option
+    // Classify the blocking stage before inspecting send options.
     match o.stage {
         OutboundStage::Handoff => return decline(&format!("{what}.handoff"), "别人点名找的是你"),
-        OutboundStage::LeakDraft | OutboundStage::Blocked => {
-            return decline(&format!("{what}.blocked"), "披露检查没通过");
+        OutboundStage::LeakDraft => return decline(&format!("{what}.blocked"), "披露检查没通过"),
+        OutboundStage::Blocked => {
+            return decline(
+                &format!("{what}.blocked"),
+                "渠道拒绝或结果待核实，需人工处理",
+            );
+        }
+        OutboundStage::HumanReview => {
+            return decline(
+                &format!("{what}.human_review"),
+                "恢复后的修改稿需要你明确审阅批准，披露检查通过不代表批准",
+            );
         }
         OutboundStage::Draft | OutboundStage::SendFailed => {}
     }
@@ -1176,9 +1188,10 @@ fn outbound(o: &Outbound, p: &Policy, what: &str) -> Verdict {
         return decline(&format!("{what}.no_option"), "卡上没有发送选项");
     };
     match o.stage {
-        OutboundStage::Handoff | OutboundStage::LeakDraft | OutboundStage::Blocked => {
-            unreachable!("declined above")
-        }
+        OutboundStage::Handoff
+        | OutboundStage::LeakDraft
+        | OutboundStage::Blocked
+        | OutboundStage::HumanReview => unreachable!("declined above"),
         OutboundStage::Draft | OutboundStage::SendFailed => {
             if o.commitment {
                 return decline(

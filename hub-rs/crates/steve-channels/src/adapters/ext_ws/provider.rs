@@ -426,11 +426,17 @@ pub(crate) fn call_err(e: CallError) -> ProviderError {
             }
             Reason::WriteForbidden => ProviderError::Blocked(
                 BlockScope::Connection,
-                steve_i18n::t!("channels.ext_ws.read_only"),
+                format!(
+                    "{} [ext_ws write_forbidden (-32006)]",
+                    steve_i18n::t!("channels.ext_ws.read_only")
+                ),
             ),
             Reason::TargetForbidden => ProviderError::Blocked(
                 BlockScope::Target,
-                steve_i18n::t!("channels.ext_ws.target_forbidden"),
+                format!(
+                    "{} [ext_ws target_forbidden (-32016)]",
+                    steve_i18n::t!("channels.ext_ws.target_forbidden")
+                ),
             ),
             Reason::Invalid
             | Reason::NotFound
@@ -499,7 +505,10 @@ fn writable(s: &Session) -> Result<(), ProviderError> {
     if st.write_policy == WritePolicy::Forbidden {
         return Err(ProviderError::Blocked(
             BlockScope::Connection,
-            steve_i18n::t!("channels.ext_ws.read_only"),
+            format!(
+                "{} [ext_ws session.write_policy=forbidden]",
+                steve_i18n::t!("channels.ext_ws.read_only")
+            ),
         ));
     }
     match st.status {
@@ -977,6 +986,12 @@ impl ExtWs {
 impl ActAsUser for ExtWs {
     fn adapter_id(&self) -> &str {
         self.adapter()
+    }
+
+    fn send_dedup(&self) -> Option<Duration> {
+        // Personal sends use this trait rather than ChannelAdapter. The wire protocol's
+        // mandatory 24-hour guarantee applies to the same key and payload on both paths.
+        Some(Duration::from_secs(24 * 3600))
     }
 
     async fn send(

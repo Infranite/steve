@@ -2533,6 +2533,34 @@ fn full_access_is_forced_off_on_a_production_copy() {
     );
 }
 
+#[test]
+fn a_channel_refusal_with_retry_is_not_a_disclosure_leak_or_an_automatic_retry() {
+    let pl = place();
+    for (disclosure, stage, expected) in [
+        (Disclosure::Pass, OutboundStage::Blocked, "渠道"),
+        (Disclosure::Leak, OutboundStage::LeakDraft, "披露"),
+        (Disclosure::Pass, OutboundStage::HumanReview, "审阅"),
+    ] {
+        let f = facts(
+            "fail",
+            "chan_message",
+            &["retry", "rewrite", "discard"],
+            Subject::Chan(Outbound {
+                send_option: Some("retry".into()),
+                ..outbound(Identity::Bot, disclosure, false, stage)
+            }),
+        );
+        let Verdict::Decline { rule, reason } = run(&f, &pl) else {
+            panic!("must remain a human decision")
+        };
+        assert_eq!(rule, "limit.6");
+        assert!(reason.contains(expected), "{reason}");
+        if stage == OutboundStage::Blocked {
+            assert!(!reason.contains("泄露"));
+        }
+    }
+}
+
 /// A check that did not finish is said as such, never as a leak; one that still runs is waited for.
 #[test]
 fn an_unfinished_check_is_named_honestly() {

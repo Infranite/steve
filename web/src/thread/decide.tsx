@@ -11,6 +11,7 @@ import { Button } from "@/components/ui/button"
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuRadioGroup, DropdownMenuRadioItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
 import { OutContext } from "@/channels/out-context"
 import { OpenInFeishu } from "@/channels/open-in-app"
+import { SendRecovery } from "@/channels/send-recovery"
 import { t as tr, useT } from "@/i18n"
 import { FLOW_SUBJECTS } from "@/auto/decision"
 import { hasOptionIds, WITH_WORDS, WORDS_OPTIONS } from "@/decision-options"
@@ -34,7 +35,7 @@ const toolOptions = (w: Wait) => {
   return { always: opts.find((o) => o.kind === "allow_always"), once: opts.find((o) => o.kind === "allow_once") }
 }
 const kindLabel = (w: Wait) => (w.subject === "tool_call" ? tr("core:wait.tool") : w.subject === "release" ? tr("core:wait.release") : w.subject === PR_AWAITING_MERGE ? tr("core:wait.prMerge") : WT[w.type])
-export const busyOf = (w: Wait) => st.pendingActions.has("decision:" + w.decision)
+export const busyOf = (w: Wait) => st.pendingActions.has("decision:" + w.decision) || st.submittedChannelDecisions.has(w.decision) || st.inactiveChannelDecisions.has(w.decision)
 
 /** the card's labels in the UI language ("later" folds the card here; above the composer it reads Hide, next to the Hub's remind-me-later) */
 export const dcLabels = (): Partial<DecisionCardLabels> => ({
@@ -141,6 +142,12 @@ export function mapDecision(i: Item, w: Wait, where: "inline" | "composer", show
   if (w.type === "propose") return {
     d: { ...base, options: [opt("yes", tr("core:card.start"), { "data-propose-yes": "" }), opt("no", tr("core:card.notNeeded"))], own: false },
     answer: (a) => pick(a, { yes: () => act("yes"), no: () => act("no") }),
+  }
+  // SendRecovery owns recovery.authorization_url -> Proposal -> apply/undo; retry stays a separate decision.
+  if (w.type === "fail" && w.subject === "chan_message") return {
+    d: { ...base, detail: <><SendRecovery key={w.decision} i={i} w={w} /><YoloBadge decision={w.decision} subject={w.subject} /></>,
+      options: w.options.filter((o) => o !== "rewrite").map((o) => opt(o, o === "retry" && w.options.includes("rewrite") ? tr("core:sendRecovery.retry") : optionLabel(w.subject, o), { "data-fail": o })), own: false },
+    answer: (a) => typeof a === "object" && a.option && w.options.includes(a.option) && a.option !== "rewrite" && act(a.option),
   }
   if (w.type === "fail" && hasOptionIds(w.subject)) return {
     /* a module's failure card (a reply that didn't go out): its own options, in the Hub's order, each by its label */
