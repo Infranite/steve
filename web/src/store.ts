@@ -205,6 +205,11 @@ export const st = {
   ver: 0,
 }
 const raw = { state: null as State | null, details: new Map<string, RItemDetail>(), events: new Map<string, REvent[]>(), loadingEv: new Set<string>(), loadingItem: new Set<string>() }
+/* A channel submission receipt is not a provider receipt. Keep all views locked until a newer
+ * state read confirms this decision closed. Failed or pre-submission reads cannot unlock it. */
+let channelStateRead = 0
+const channelAnswers = new Map<string, { read: number; result: RDecision }>()
+export const channelAnswer = (w: Wait) => w.subject === "chan_message" ? channelAnswers.get(w.decision)?.result : undefined
 ;(window as any).__steve = st
 
 const ls = new Set<() => void>()
@@ -603,9 +608,11 @@ export function refresh(): Promise<void> {
   inflight = (async () => {
     /* A stopped turn can leave no reply after a restart. Only retire the same untouched draft;
      * another turn or a chunk received during this request is newer than this state snapshot. */
-    const settled = !st.thinking ? st.draft : null, epoch = scopeEpoch
+    const settled = !st.thinking ? st.draft : null, epoch = scopeEpoch, read = ++channelStateRead
     try {
       const state = await api.state(); if (epoch !== scopeEpoch) return
+      for (const [id, answer] of channelAnswers)
+        if (read > answer.read && !state.decisions.some((d) => d.id === id && d.status === "open")) channelAnswers.delete(id)
       raw.state = state; watermark = cursorOf(state) ?? watermark; setPageWorkspace(state.workspace?.id ?? ""); st.login = null; st.error = ""; build()
       for (const locked of [st.submittedChannelDecisions, st.inactiveChannelDecisions])
         for (const id of locked) if (!state.decisions.some((d) => d.id === id && d.status === "open")) locked.delete(id)
@@ -1015,10 +1022,19 @@ export const acceptChoosesRelease = (i?: Item) => {
 }
 export async function decide(id: string, c: string, text?: string, decision?: string) {
   const { i, w } = cardOf(id, decision); if (!w) return
+  const accepted = channelAnswer(w); if (accepted) return accepted
   const key = "decision:" + w.decision
   if (st.pendingActions.has(key) || st.submittedChannelDecisions.has(w.decision) || st.inactiveChannelDecisions.has(w.decision)) return
   st.pendingActions.add(key); emit()
   try {
+    if (w.subject === "chan_message" && w.type !== "fail") {
+      let result: RDecision
+      try { result = await api.decide(w.decision, c, text) } catch (e) { fail(e); return }
+      channelAnswers.set(w.decision, { read: channelStateRead, result })
+      toast(decidedText(w, c, i?.b ?? null)); emit()
+      await refresh()
+      return result
+    }
     if (w.subject === "chan_message" && w.type === "fail") {
       // Keep an accepted answer locked until the Hub has confirmed this decision is no longer open.
       // A failed/stale state refresh must not turn an acknowledged retry into a second send request.

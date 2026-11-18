@@ -602,7 +602,7 @@ async fn own_draft_uses_verified_connection_user_and_external_space_address() {
         assert!(!layers.persona.contains("Workspace owner public"));
         assert!(!layers.persona.contains("Member private nickname"));
         assert!(steve_channels::decide::names_you(
-            &format!("这条是发给{expected}的"),
+            &format!("这条是发给{expected}的，要不要我回？"),
             &layers.owner_names
         ));
         assert!(!steve_channels::decide::names_you(

@@ -79,7 +79,7 @@ try {
     await page.locator("[data-out-reply-to]").waitFor()
     assert.equal(await page.locator("[data-out-reply-to] [data-reply-sender]").textContent(), "陈宁")
     assert.equal(await page.locator("[data-out-reply-to] [data-reply-text]").textContent(), "明天下午2点对齐方案，可以吗？\n第二行原话。")
-    assert.equal(await page.locator("[data-card-draft] [data-reply-text]").textContent(), "请审阅这条草稿")
+    assert.equal(await page.locator("[data-reply-draft]").textContent(), "请审阅这条草稿")
     await page.locator("[data-out-context] button").last().click()
     await page.locator("[data-out-before]").waitFor()
     assert.match(await page.locator("[data-out-before]").innerText(), /王然[：:]\s*方案已准备好/)

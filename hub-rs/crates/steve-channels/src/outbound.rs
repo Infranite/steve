@@ -180,8 +180,6 @@ pub fn text_hash(text: &str) -> String {
 /// runtime).
 #[derive(Debug, Clone, PartialEq)]
 enum After {
-    /// A handoff answered “to_item”.
-    ToItem { ws: String, message_id: String },
     /// A draft answer you discarded: the message it answers loses its “收到” reaction.
     Discarded { message_id: String },
 }
@@ -585,6 +583,17 @@ fn source_of_row(c: &Connection, row: &OutRow) -> ChannelResult<Option<(String, 
     .optional()?)
 }
 
+/// Resolve the actual inbound source, including thread targets without a reply_to.
+fn draft_source(c: &Connection, row: &OutRow) -> ChannelResult<Option<String>> {
+    Ok(c.query_row(
+        "SELECT m.id FROM chan_messages m WHERE m.workspace_id = ?1 AND m.space_id = ?2 AND m.direction = 'in'
+          AND m.purged IS NULL AND (m.id IN (SELECT message_id FROM chan_reactions WHERE answer_id = ?3)
+               OR m.id IN (SELECT source_message_id FROM output_deliveries WHERE message_id = ?3)
+               OR m.external_id = ?4) ORDER BY m.created DESC LIMIT 1",
+        params![row.ws, row.space_id, row.id, row.reply_to], |r| r.get(0),
+    ).optional()?)
+}
+
 /// What the composer was shown of how you talk, kept with the draft ([`crate::decide::keep_composed`]),
 /// and whether the composer wrote it as its reply.
 fn composed_of(c: &Connection, message: &str) -> ChannelResult<(Vec<String>, bool)> {
@@ -610,6 +619,25 @@ fn composed_of(c: &Connection, message: &str) -> ChannelResult<(Vec<String>, boo
     Ok((samples, v["outcome"] == "reply"))
 }
 
+/// The same choices on initial review, reopening and an asynchronous disclosure result.
+fn approval_options(c: &Connection, row: &OutRow, rewrite: bool) -> ChannelResult<Vec<String>> {
+    let has_source = draft_source(c, row)?.is_some();
+    let base = if rewrite {
+        &REWRITE_OPTIONS[..]
+    } else {
+        &DRAFT_OPTIONS[..]
+    };
+    let mut options: Vec<String> = base
+        .iter()
+        .filter(|o| **o != "to_item" || has_source)
+        .map(|o| o.to_string())
+        .collect();
+    if rewrite && has_source {
+        options.push("to_item".into());
+    }
+    Ok(options)
+}
+
 /// The `approve` decision of a draft. Returns its id.
 fn open_approval(
     tx: &Tx,
@@ -627,11 +655,7 @@ fn open_approval(
            WHERE m.id=? AND m.workspace_id=? AND (d.kind='fail' OR json_extract(d.result,'$.recovery_review')=1))",
         params![id, ws], |r| r.get(0),
     )?;
-    let options = if rewrite {
-        &REWRITE_OPTIONS[..]
-    } else {
-        &DRAFT_OPTIONS[..]
-    };
+    let options = approval_options(tx, &own_out(tx, ws, id)?, rewrite)?;
     let d = base::decisions::open(
         tx,
         &NewDecision {
@@ -643,7 +667,7 @@ fn open_approval(
             session_id: None,
             question,
             draft: Some(text.to_string()),
-            options: Some(options.iter().map(|s| s.to_string()).collect()),
+            options: Some(options),
             requested_by: "steve".into(),
         },
     )?;
@@ -1072,10 +1096,7 @@ async fn check_later(
         if leak && l.composed && !disclosure::not_run(&res) {
             tx.execute(
                 "UPDATE decisions SET options = ? WHERE id = ?",
-                params![
-                    serde_json::to_string(&REWRITE_OPTIONS).unwrap_or_default(),
-                    d
-                ],
+                params![json!(approval_options(tx, &cur, true)?).to_string(), d],
             )?;
         }
         base::audit(
@@ -1955,6 +1976,8 @@ pub struct Outbox {
     pinned: Option<Arc<dyn PinnedModel>>,
     /// Drafts being rewritten now (“改写后再看”), each on a task of its own.
     rewriting: Arc<Mutex<std::collections::HashSet<String>>>,
+    /// Item conversions being resumed from their durable decision results.
+    converting: Arc<Mutex<std::collections::HashSet<String>>>,
     /// Where the sweep of stale cards goes on (`created`, `id` of the last card it looked at), so
     /// cards it leaves open never hold up the ones after them ([`Outbox::expire_stale`]).
     expiry_cursor: Mutex<Option<(i64, String)>>,
@@ -1969,6 +1992,7 @@ impl Outbox {
             as_user: BTreeMap::new(),
             pinned: None,
             rewriting: Arc::default(),
+            converting: Arc::default(),
             expiry_cursor: Mutex::new(None),
             #[cfg(feature = "fake")]
             before_attempt: Mutex::new(None),
@@ -2044,6 +2068,13 @@ impl Outbox {
         envelope: Option<&crate::pipeline::Envelope>,
     ) -> ChannelResult<(Delivered, Option<CheckResult>)> {
         self.bind(ch);
+        if req
+            .generation
+            .as_ref()
+            .is_some_and(|g| g.outcome != crate::deliver::Outcome::Reply)
+        {
+            return Ok((Delivered::Skipped, None));
+        }
         if let Some(e) = envelope
             && let Some(d) = ch.store().reader(|c| crate::pipeline::existing(c, e))?
         {
@@ -3089,21 +3120,10 @@ impl Outbox {
         self.bind(ch);
         for a in self.link.take() {
             match a {
-                After::ToItem { ws, message_id } => {
-                    let plan = ch.store().reader(|c| plan_of(c, &ws, &message_id));
-                    match plan {
-                        Ok(mut plan) => {
-                            plan.act = Act::CreateItem(ItemMode::Start);
-                            if let Err(e) = ch.responder().act(ch, &plan).await {
-                                tracing::warn!(message = message_id, "handoff to item failed: {e}");
-                            }
-                        }
-                        Err(e) => tracing::warn!(message = message_id, "handoff to item: {e}"),
-                    }
-                }
                 After::Discarded { message_id } => ch.react_discarded(&message_id).await,
             }
         }
+        self.convert_due(ch).await;
         // cards about your own account that waited longer than the account allows close
         if let Err(e) = self.expire_stale(ch) {
             tracing::warn!("stale cards: {e}");
@@ -3243,6 +3263,60 @@ impl Outbox {
             }
         }
         n + self.resume_direct(ch, now).await + self.settle_unknown(ch, now).await
+    }
+
+    async fn convert_due(&self, ch: &Channels) {
+        let pending = ch
+            .store()
+            .reader(|c| -> ChannelResult<Vec<(String, String, String)>> {
+                let mut st = c.prepare_cached(
+                "SELECT id, workspace_id, json_extract(result, '$.source_message') FROM decisions
+                  WHERE subject_type = 'chan_message' AND status = 'resolved'
+                    AND json_extract(result, '$.choice') = 'to_item'
+                    AND json_extract(result, '$.source_message') IS NOT NULL
+                    AND json_extract(result, '$.item') IS NULL ORDER BY resolved LIMIT 50",
+            )?;
+                Ok(st
+                    .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+                    .collect::<Result<_, _>>()?)
+            });
+        let pending = match pending {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::warn!("item conversions not read: {e}");
+                return;
+            }
+        };
+        for (decision, ws, source) in pending {
+            if !lock(&self.converting).insert(decision.clone()) {
+                continue;
+            }
+            let result = async {
+                let prior: Option<String> = ch.store().reader(|c| -> ChannelResult<_> { Ok(c.query_row(
+                    "SELECT work_item_id FROM chan_messages WHERE id = ? AND workspace_id = ? AND direction = 'in'",
+                    params![source, ws], |r| r.get(0),
+                )?) })?;
+                let item = match prior {
+                    Some(item) => item,
+                    None => {
+                        let mut plan = ch.store().reader(|c| plan_of(c, &ws, &source))?;
+                        plan.act = Act::CreateItem(ItemMode::Start);
+                        ch.responder().to_item(ch, &plan).await?
+                            .and_then(|a| a.item_id)
+                            .ok_or_else(|| ApiError::rule("转事项尚未完成"))?
+                    }
+                };
+                ch.store().transaction(|tx| -> ChannelResult<()> {
+                    tx.execute("UPDATE decisions SET result = json_set(result, '$.item', ?) WHERE id = ? AND status = 'resolved'", params![item, decision])?;
+                    tx.publish(steve_store::ChangeEvent::Decision { id: decision.clone(), item_id: None });
+                    Ok(())
+                })
+            }.await;
+            lock(&self.converting).remove(&decision);
+            if let Err(e) = result {
+                tracing::warn!(decision, "handoff to item: {e}");
+            }
+        }
     }
 
     /// Direct messages (a rule's or a trigger's reply, no decision) whose send was cut off before
@@ -3944,6 +4018,11 @@ impl MessageDecisions {
                     "UPDATE chan_messages SET text = ?, status = 'pending', sent = NULL WHERE id = ? AND status = 'draft'",
                     params![text, row.id],
                 )?;
+                // Undo reopens this card: its formal draft must match the edited outbound body.
+                tx.execute(
+                    "UPDATE decisions SET draft = ? WHERE id = ?",
+                    params![text, d.id],
+                )?;
                 // approved before its check finished: the record says so
                 basis::checking_stopped(tx, &row.id, R_DEALT_FIRST)?;
                 base::audit(
@@ -3983,6 +4062,24 @@ impl MessageDecisions {
                     "chan_message.reject",
                     &row.id,
                     &json!({"decision": d.id}),
+                )?;
+            }
+            "to_item" if d.options.iter().any(|o| o == "to_item") => {
+                let source =
+                    draft_source(tx, &row)?.ok_or_else(|| ApiError::not_found("原消息"))?;
+                plan_of(tx, cx.ws, &source)?;
+                set_status(tx, &row.id, &["draft"], DISCARDED)?;
+                result["source_message"] = json!(source);
+                self.0.push(After::Discarded {
+                    message_id: row.id.clone(),
+                });
+                base::audit(
+                    tx,
+                    cx.ws,
+                    cx.actor,
+                    "chan_message.to_item",
+                    &row.id,
+                    &json!({"decision": d.id, "source": source}),
                 )?;
             }
             _ => return Err(ApiError::invalid("choice")),
@@ -4142,10 +4239,7 @@ impl MessageDecisions {
             }
             "to_item" => {
                 plan_of(tx, cx.ws, &d.subject_id)?;
-                self.0.push(After::ToItem {
-                    ws: cx.ws.into(),
-                    message_id: d.subject_id.clone(),
-                });
+                result["source_message"] = json!(d.subject_id);
             }
             "done" => {}
             _ => return Err(ApiError::invalid("choice")),
@@ -4242,6 +4336,9 @@ impl DecisionHandler for MessageDecisions {
     /// Undoing an approval within the delay puts the draft back; once it went out, `409`.
     fn before_undo(&self, tx: &Tx, d: &Decision) -> ApiResult<()> {
         let now = self.0.now();
+        if d.result["choice"] == "to_item" {
+            return Err(ApiError::conflict("转事项不能作为发送批准撤销"));
+        }
         if d.kind == "ask" {
             return Ok(());
         }

@@ -123,8 +123,9 @@ pub const KNOWLEDGE_RULES: &str = "使用规则：“仅用于推理”的内容
 /// account ([`OUTPUT`]), so a bot still asks you when unsure and its approval stays
 /// `needs_approval` (promising, spending or deleting), not every “我去查一下”.
 pub const OUTPUT_BOT: &str = "只回答 JSON：{\"outcome\": \"reply\", \"text\": \"回复正文\", \"needs_approval\": false, \"why\": \"一句话说明为什么这样做\"}。\
-outcome 三选一：reply 直接回复这条消息，text 是发到这个聊天里的正文，用这个聊天的语言，像平时在聊天里说话一样简短；\
-ask_owner 这条消息要主人自己判断（拿不准对方想要什么、涉及承诺或私人关系、消息没说完），text 是你私下问主人的一句话，不会发到聊天里；\
+outcome 四选一：reply 回答这条消息，text 是发到这个聊天里的正式正文，用这个聊天的语言，像平时在聊天里说话一样简短；\
+能依据【对外身份】或已知且可披露的事实回答的简单问题（例如“你是谁啊”）用 reply，不因提到 Steve、主人姓名或提供帮助就改为 ask_owner。reply 不等于获准发送；正文需要批准时仍用 reply 并设 needs_approval=true，不把拟发送正文塞进 ask_owner；\
+ask_owner 缺少必须由主人提供的事实或决定（例如尚未确认的承诺、私人关系、无法理解的直接问题），text 只写私下问主人的具体问题，不猜测主人已同意，不夹带对外回复；\
 skip 闲聊、玩笑、寒暄、不需要回的消息，text 写一句原因；\
 need_context 需要先看更早的对话才能理解，text 写缺什么。\
 needs_approval 在回复里有对外承诺、花钱或删除时为 true。";
@@ -134,6 +135,7 @@ needs_approval 在回复里有对外承诺、花钱或删除时为 true。";
 /// wait for you ([`crate::decide::settle`] folds them into one).
 pub const OUTPUT: &str = "只回答 JSON：{\"outcome\": \"reply\", \"reason\": \"原因代码\", \"addressee\": \"owner\", \"summary\": \"一句话：谁找主人、要什么\", \"text\": \"回复正文\", \"draft\": \"\", \"needs_commitment\": false, \"why\": \"一句话说明为什么这样做\"}。\
 outcome 四选一：reply 直接回复这条消息，text 是发到这个聊天里的正文，用这个聊天的语言，像平时在聊天里说话一样简短；\
+能依据当前身份或已知且可披露的事实回答的简单问题用 reply，不因正文提到 Steve 或主人姓名就升级；reply 不等于获准发送，需批准的正式正文仍保留在 text 并标记 needs_approval 或 needs_commitment；\
 ask_owner 这条消息要主人自己来，reason 写为什么：commitment（要答应或安排事情：去查、去做、给时间或结果、花钱、删除、隐私、人际关系）、owner_fact（问的是只有主人知道的情况或判断）、substantive（发给主人的实质性长消息，比如分析、方案）；text 写要主人定的是什么，draft 写主人同意时可以直接发出去的回复（写不出就留空），都不会发到聊天里；\
 skip 闲聊、玩笑、寒暄、不需要回的消息，text 写一句原因；\
 need_context 需要先看更早的对话才能理解，text 写缺什么。\
@@ -1401,19 +1403,20 @@ mod outcome_tests {
         }
     }
 
-    /// The bot's output format is the one before the decisions on your own account, word for word.
+    /// Bots keep the small JSON contract while distinguishing known identity answers, outward
+    /// drafts needing approval, and facts or decisions only the owner can supply.
     #[test]
-    fn a_bots_output_format_is_unchanged() {
-        assert_eq!(
-            super::OUTPUT_BOT,
-            "只回答 JSON：{\"outcome\": \"reply\", \"text\": \"回复正文\", \"needs_approval\": false, \"why\": \"一句话说明为什么这样做\"}。\
-outcome 三选一：reply 直接回复这条消息，text 是发到这个聊天里的正文，用这个聊天的语言，像平时在聊天里说话一样简短；\
-ask_owner 这条消息要主人自己判断（拿不准对方想要什么、涉及承诺或私人关系、消息没说完），text 是你私下问主人的一句话，不会发到聊天里；\
-skip 闲聊、玩笑、寒暄、不需要回的消息，text 写一句原因；\
-need_context 需要先看更早的对话才能理解，text 写缺什么。\
-needs_approval 在回复里有对外承诺、花钱或删除时为 true。"
-        );
-        // your own account's names the safety rules' flag
+    fn a_bots_output_keeps_its_contract_and_separates_drafts_from_owner_questions() {
+        let output = super::OUTPUT_BOT;
+        for field in ["\"outcome\"", "\"text\"", "\"needs_approval\"", "\"why\""] {
+            assert!(output.contains(field), "{field}");
+        }
+        for own_only in ["needs_commitment", "addressee", "summary"] {
+            assert!(!output.contains(own_only), "{own_only}");
+        }
+        assert!(output.contains("你是谁啊"));
+        assert!(output.contains("needs_approval=true"));
+        assert!(output.contains("必须由主人提供的事实或决定"));
         assert!(super::OUTPUT.contains("needs_approval"));
         assert!(super::SAFETY_RULES.contains("needs_approval"));
     }

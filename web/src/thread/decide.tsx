@@ -8,6 +8,7 @@ import { DecisionCard as AuDecisionCard, type Decision, type DecisionAnswer, typ
 import { Markdown } from "@/components/markdown"
 import { PermissionDetails } from "@/components/permission"
 import { Button } from "@/components/ui/button"
+import { TextArea } from "@/components/affect/text-area-clean"
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuRadioGroup, DropdownMenuRadioItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
 import { OutContext } from "@/channels/out-context"
 import { handoffContent } from "@/channels/handoff-content"
@@ -19,12 +20,12 @@ import { FLOW_SUBJECTS } from "@/auto/decision"
 import { hasOptionIds, WITH_WORDS, WORDS_OPTIONS } from "@/decision-options"
 import { MODULE_CARDS } from "@/vault/decisions"
 import { isPeopleDecision } from "@/people/pending"
-import { acceptChoosesRelease, botName, decide, dismiss, FAIL_CHOICE, optionLabel, pendingCards, PR_AWAITING_MERGE, setSt, SNOOZE_KEYS, snooze, snoozeLabel, st, WT, type Item, type Wait } from "@/store"
+import { acceptChoosesRelease, botName, channelAnswer, decide, dismiss, FAIL_CHOICE, optionLabel, pendingCards, PR_AWAITING_MERGE, setSt, SNOOZE_KEYS, snooze, snoozeLabel, st, WT, type Item, type Wait } from "@/store"
 import { permissionCommand } from "@/ui"
 import { YoloBadge } from "@/yolo/badges"
 import { editBot } from "@/manage"
 import { AlarmClockIcon, BanIcon, BellOffIcon, EllipsisIcon } from "lucide-react"
-import type { ReactNode } from "react"
+import { useRef, useState, type ReactNode } from "react"
 
 /** the order of a failure card's choices; "continue" is the own-words field (a note to go on with) */
 const FAIL_ORDER = ["retry", "release_live", "release_retry", "release_waive", "delivered", "tosteve", "drop", "look", "continue"]
@@ -38,7 +39,7 @@ const toolOptions = (w: Wait) => {
   return { always: opts.find((o) => o.kind === "allow_always"), once: opts.find((o) => o.kind === "allow_once") }
 }
 const kindLabel = (w: Wait) => (w.subject === "tool_call" ? tr("core:wait.tool") : w.subject === "release" ? tr("core:wait.release") : w.subject === PR_AWAITING_MERGE ? tr("core:wait.prMerge") : WT[w.type])
-export const busyOf = (w: Wait) => st.pendingActions.has("decision:" + w.decision) || st.submittedChannelDecisions.has(w.decision) || st.inactiveChannelDecisions.has(w.decision)
+export const busyOf = (w: Wait) => st.pendingActions.has("decision:" + w.decision) || st.submittedChannelDecisions.has(w.decision) || st.inactiveChannelDecisions.has(w.decision) || !!channelAnswer(w)
 
 /** the card's labels in the UI language ("later" folds the card here; above the composer it reads Hide, next to the Hub's remind-me-later) */
 export const dcLabels = (): Partial<DecisionCardLabels> => ({
@@ -79,19 +80,84 @@ export function CardTools({ i, w }: { i: Item; w: Wait }) {
 }
 
 /** what the question is about: the conversation a reply goes to, the draft, the YOLO note, the agent still working */
-function Detail({ w, extra }: { w: Wait; extra?: ReactNode }) {
+function Detail({ w, extra, reply = false }: { w: Wait; extra?: ReactNode; reply?: boolean }) {
   const t = useT()
   return <>
     {w.subject === "chan_message" && (w.type === "approve" || w.type === "fail") && <OutContext id={w.subjectId} />}
     {w.subject === "chan_message" && <OpenInFeishu url={w.openUrl} className="-ml-2 self-start" />}
     {w.subject === "session_start" && w.subjectId && <Button variant="outline" size="sm" data-session-config={w.subjectId} onClick={() => w.subjectId && editBot(w.subjectId)}>{t("core:card.fixBotConfig")}</Button>}
     {/* the draft's headings are text: a "## 交付" never outranks the question above it */}
-    {w.draft && !isToolCall(w) && (w.subject === "chan_message" ? <ReplyDraft text={w.draft} /> : <div className="max-h-72 overflow-auto break-words text-muted-foreground [&_:is(h1,h2,h3,h4,h5,h6)]:mt-0! [&_:is(h1,h2,h3,h4,h5,h6)]:mb-1! [&_:is(h1,h2,h3,h4,h5,h6)]:[font:inherit]! [&_:is(h1,h2,h3,h4,h5,h6)]:font-medium! [&_:is(h1,h2,h3,h4,h5,h6)]:text-foreground"><Markdown text={w.draft} /></div>)}
+    {w.draft && !isToolCall(w) && !reply && (w.subject === "chan_message" ? <ReplyDraft text={w.draft} /> : <div className="max-h-72 overflow-auto break-words text-muted-foreground [&_:is(h1,h2,h3,h4,h5,h6)]:mt-0! [&_:is(h1,h2,h3,h4,h5,h6)]:mb-1! [&_:is(h1,h2,h3,h4,h5,h6)]:[font:inherit]! [&_:is(h1,h2,h3,h4,h5,h6)]:font-medium! [&_:is(h1,h2,h3,h4,h5,h6)]:text-foreground"><Markdown text={w.draft} /></div>)}
     {extra}
     <YoloBadge decision={w.decision} subject={w.subject} />
     {w.busy && <div role="status" className="flex items-center gap-1.5 type-footnote text-muted-foreground" data-agent-busy><span className="size-1.5 rounded-full bg-blue dot-running" aria-hidden />{t("core:card.agentBusy")}</div>}
-    {busyOf(w) && <div role="status" className="type-footnote text-muted-foreground">{t("core:card.submitting")}</div>}
+    {st.pendingActions.has("decision:" + w.decision) && !channelAnswer(w) && <div role="status" className="type-footnote text-muted-foreground">{t("core:card.submitting")}</div>}
   </>
+}
+
+const CHANNEL_RESULTS = {
+  yes: "channels:reply.queued", no: "core:decided.chan_message.no", to_item: "core:decided.chan_message.to_item",
+  rewrite: "core:decided.chan_message.rewrite", draft_reply: "core:decided.chan_message.draft_reply", done: "core:decided.chan_message.done",
+  retry: "core:decided.chan_message.retry", discard: "core:decided.chan_message.discard", sent: "core:decided.chan_message.sent",
+} as const
+function ChannelResult({ w }: { w: Wait }) {
+  const t = useT(), choice = channelAnswer(w)?.result?.choice
+  const key = typeof choice === "string" && Object.hasOwn(CHANNEL_RESULTS, choice) ? CHANNEL_RESULTS[choice as keyof typeof CHANNEL_RESULTS] : "core:decided.handled"
+  return <div role="status" className="type-footnote text-muted-foreground" data-reply-result={typeof choice === "string" ? choice : "submitted"}>{t(key)}</div>
+}
+
+/** Only an approval of a channel message can send. Editing is local; yes carries the reviewed text to the
+ * same decision. An ask_owner question stays a question even when its prose happens to contain a reply. */
+function ChannelReply({ i, w }: { i: Item; w: Wait }) {
+  const t = useT(), busy = busyOf(w)
+  const draft = w.draft ?? ""
+  // Capture the current formal draft on entry, not at mount: the same decision can be edited elsewhere and undone.
+  // Keep unsaved input against its base so a received update cannot silently replace either version.
+  const [editor, setEditor] = useState<{ base: string; text: string } | null>(() => draft.trim() ? null : { base: draft, text: draft })
+  const conflict = editor !== null && editor.base !== draft
+  const [error, setError] = useState(false)
+  const sending = useRef(false)
+  const accepted = channelAnswer(w)
+  const canSend = w.options.includes("yes")
+  const submit = async (choice: string, body?: string) => {
+    if (sending.current || busyOf(w) || !w.options.includes(choice)) return
+    if (choice === "yes" && (conflict || !(body ?? draft).trim())) return
+    sending.current = true
+    setError(false)
+    try { if (!await decide(i.id, choice, body, w.decision)) setError(true) }
+    finally { sending.current = false }
+  }
+  return <div className="flex min-w-0 flex-col gap-3" data-channel-reply>
+    {editor && canSend
+      ? <TextArea label={t("channels:reply.draft")} value={editor.text} onChange={(e) => setEditor({ ...editor, text: e.target.value })} disabled={busy} minRows={3} maxRows={12} autoFocus data-reply-editor />
+      : <div>
+        <div className="mb-1 type-footnote font-medium">{t("channels:reply.draft")}</div>
+        <div className="max-h-72 overflow-auto whitespace-pre-wrap break-words" data-reply-draft>{w.draft || t("channels:reply.noDraft")}</div>
+      </div>}
+    {!accepted && <>
+      {conflict && canSend && <div className="flex flex-col gap-2 rounded-md border border-border p-3" data-reply-conflict>
+        <div role="alert" className="type-footnote text-destructive">{t("channels:reply.draftChanged")}</div>
+        <div className="type-footnote font-medium">{t("channels:reply.latestDraft")}</div>
+        <div className="max-h-72 overflow-auto whitespace-pre-wrap break-words" data-reply-latest>{draft || t("channels:reply.noDraft")}</div>
+        <div className="flex flex-wrap gap-2">
+          <Button size="sm" variant="outline" disabled={busy} onClick={() => setEditor({ base: draft, text: draft })} data-reply-use-latest>{t("channels:reply.useLatest")}</Button>
+          <Button size="sm" variant="outline" disabled={busy} onClick={() => setEditor({ ...editor, base: draft })} data-reply-keep-edits>{t("channels:reply.keepEdits")}</Button>
+        </div>
+      </div>}
+      {canSend && <div className="type-footnote text-muted-foreground">{t("channels:reply.reviewNote")}</div>}
+      <div className="flex flex-wrap gap-2">
+        {canSend && <>
+          <Button size="sm" disabled={busy || conflict || !(editor ? editor.text : draft).trim()} onClick={() => void submit("yes", editor ? editor.text.trim() : undefined)} data-approve data-reply-send>{t(editor ? "channels:reply.sendEdited" : "channels:reply.send")}</Button>
+          {editor
+            ? <Button size="sm" variant="ghost" disabled={busy} onClick={() => setEditor(null)} data-reply-cancel>{t("common:action.cancel")}</Button>
+            : <Button size="sm" variant="outline" disabled={busy} onClick={() => setEditor({ base: draft, text: draft })} data-reply-edit>{t("channels:reply.edit")}</Button>}
+        </>}
+        {w.options.filter((o) => o !== "yes").map((o) => <Button key={o} size="sm" variant="outline" disabled={busy} onClick={() => void submit(o)} data-reply-choice={o} data-rewrite={o === "rewrite" ? "" : undefined}>{o === "no" ? t("channels:reply.noReply") : optionLabel(w.subject, o)}</Button>)}
+      </div>
+    </>}
+    {error && <div role="alert" className="type-footnote text-destructive" data-reply-error>{t("channels:reply.submitFailed")}</div>}
+    {accepted && <ChannelResult w={w} />}
+  </div>
 }
 
 type Mapped = { d: Decision; answer: (a: DecisionAnswer) => void }
@@ -102,7 +168,7 @@ export function mapDecision(i: Item, w: Wait, where: "inline" | "composer", show
   const act = (c: string, text?: string) => void decide(i.id, c, text, w.decision)
   const opt = (id: string, title: string, attrs?: Record<string, string | undefined>): DecisionOption => ({ id, title, attrs })
   const base: Decision = {
-    id: w.decision, question: w.q, badge: kindLabel(w), busy: busyOf(w),
+    id: w.decision, question: w.q, badge: kindLabel(w), busy: busyOf(w) && !channelAnswer(w),
     task: showItem || where === "composer" ? <TaskLink i={i} w={w} /> : undefined,
     tools: <CardTools i={i} w={w} />,
     detail: <Detail w={w} />,
@@ -124,6 +190,9 @@ export function mapDecision(i: Item, w: Wait, where: "inline" | "composer", show
     const rows: DecisionOption[] = [...(once ? [opt(once.id, tr("core:card.allowOnce"), { "data-allow": "" })] : []), ...(always ? [opt(always.id, tr("core:card.allowAlways"))] : []), opt("deny", tr("core:card.deny"))]
     return { d: { ...base, question: tr("core:card.allowTool"), detail: <Detail w={w} extra={<PermissionDetails title={permissionCommand(w.q)} input={w.draft} />} />, options: rows, own: false }, answer: (a) => typeof a === "object" && a.option && act(a.option) }
   }
+  if (channelAnswer(w) && w.type !== "approve") return {
+    d: { ...base, detail: <Detail w={w} extra={<ChannelResult w={w} />} />, options: [], own: false }, answer: () => {},
+  }
   if (w.type === "accept") {
     const release = acceptChoosesRelease(i)
     const rows = release
@@ -135,6 +204,10 @@ export function mapDecision(i: Item, w: Wait, where: "inline" | "composer", show
     }
   }
   if (w.type === "approve") {
+    if (w.subject === "chan_message") return {
+      d: { ...base, detail: <Detail w={w} reply extra={<ChannelReply key={w.decision} i={i} w={w} />} />, options: [], own: false },
+      answer: () => {},
+    }
     const rows = [opt("yes", tr(w.subject === "release" ? "core:card.approveRelease" : w.subject === PR_AWAITING_MERGE ? "core:card.approveMerge" : "core:card.approve"), { "data-approve": "" }),
       ...(w.subject === "chan_message" && w.options.includes("rewrite") ? [opt("rewrite", tr("core:card.rewriteFirst"), { "data-rewrite": "" })] : [])]
     /* rejecting is the field: its button sends with or without a reason */

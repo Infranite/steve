@@ -41,6 +41,9 @@ use steve_store::base::Viewer;
 use steve_store::uid;
 use tempfile::TempDir;
 
+#[path = "support/reply_http.rs"]
+mod reply_http;
+
 const REPLY: &str =
     r#"{"text": "先看部署日志，再按回滚手册处理。", "needs_approval": false, "why": "按手册"}"#;
 const PASS: &str = r#"{"verdict": "pass", "spans": []}"#;
@@ -1750,18 +1753,12 @@ async fn a_drafted_answer_is_closed_in_its_own_conversation() {
             .await;
             let ops = conversations::conv_space(&a.space_id);
             let (turn, _) = t.turns.lock().unwrap().last().cloned().expect("a turn");
+            let text = h.ch.conv_answer(WS, &turn).await.unwrap();
             let reply = h
                 .env
                 .store()
                 .messages()
-                .add(
-                    WS,
-                    "steve",
-                    "这条看起来是发给林知远的，要我处理吗？",
-                    None,
-                    &json!({"origin": turn, "ask": {"options": ["不用处理", "请补充完整"]}}),
-                    &ops,
-                )
+                .add(WS, "steve", &text, None, &json!({"origin": turn}), &ops)
                 .unwrap();
             let d =
                 h.ch.conv_deliver(WS, &reply)
@@ -1827,19 +1824,32 @@ async fn a_drafted_answer_is_closed_in_its_own_conversation() {
 #[tokio::test(flavor = "multi_thread")]
 async fn react_settled_synchronizes_with_detached_ack_provider_without_polling() {
     let h = setup(true).await;
-    *h.fake.reaction_delay.lock().unwrap() = Some(std::time::Duration::from_millis(60));
+    let entered = Arc::new(tokio::sync::Barrier::new(2));
+    let release = Arc::new(tokio::sync::Barrier::new(2));
+    *h.fake.reaction_pause.lock().unwrap() = Some((entered.clone(), release.clone()));
     let m = push(
         &h,
         &h.bot.clone(),
         msg("C_OPS", "r1", "ulilei", "部署挂了怎么办", true, false),
     )
     .await;
+    tokio::time::timeout(std::time::Duration::from_secs(10), entered.wait())
+        .await
+        .unwrap();
     assert_eq!(state(&h, &m.message_id), "ack");
     assert!(
         h.fake.reactions_on("r1").is_empty(),
         "detached provider call is still in flight when synchronous FakeThread::say returns"
     );
-    h.ch.react_settled(&m.message_id).await;
+    let settled = h.ch.react_settled(&m.message_id);
+    tokio::pin!(settled);
+    let pending = std::future::poll_fn(|cx| {
+        std::task::Poll::Ready(std::future::Future::poll(settled.as_mut(), cx).is_pending())
+    })
+    .await;
+    assert!(pending, "settling waits for this provider call");
+    release.wait().await;
+    settled.await;
     assert_eq!(h.fake.reactions_on("r1"), [ReactionKind::Ack]);
 }
 
@@ -3070,6 +3080,12 @@ async fn the_routers_queue_and_question_never_become_your_draft() {
     assert_eq!(i.response.unwrap().label, "你的指令，交给对话回答");
     let (turn, _) = t.turns.lock().unwrap().last().cloned().expect("a turn");
     let space = i.space_id.clone();
+    // A real Core only announces an item after storing it. The fixed receipt needs that evidence.
+    exec(
+        &h,
+        "INSERT INTO items (id,workspace_id,no,title,status,stage,source,created,updated) VALUES ('ST-9','default',9,'渠道事项','run','','[]',1,1)",
+        &[],
+    );
     for (text, item, meta) in [
         (
             steve_core::thread::research::QUEUE_FULL,
@@ -3810,15 +3826,71 @@ async fn own_trigger_words(h: &H) {
 /// Two deliveries of one conversation message at the same time: the second finds the first's
 /// outbound message (claimed, being sent) and sends nothing. Returns what each said.
 async fn deliver_twice_at_once(h: &H, mid: &str) -> (Option<Delivered>, Option<Delivered>) {
+    delivery_race(h, mid, false).await
+}
+
+async fn delivery_race(
+    h: &H,
+    mid: &str,
+    before_attempt: bool,
+) -> (Option<Delivered>, Option<Delivered>) {
     let entered = Arc::new(tokio::sync::Barrier::new(2));
     let release = Arc::new(tokio::sync::Barrier::new(2));
-    *h.fake.send_pause.lock().unwrap() = Some((entered.clone(), release.clone()));
+    if before_attempt {
+        h.outbox
+            .pause_before_attempt(entered.clone(), release.clone());
+    } else {
+        *h.fake.send_pause.lock().unwrap() = Some((entered.clone(), release.clone()));
+    }
     let (ch, m) = (h.ch.clone(), mid.to_string());
     let first = tokio::spawn(async move { ch.conv_deliver(WS, &m).await });
-    entered.wait().await;
-    let second = h.ch.conv_deliver(WS, mid).await.unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(10), entered.wait())
+        .await
+        .unwrap();
+    let (cold, _) = cold_runtime(h);
+    let second = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        cold.conv_deliver(WS, mid),
+    )
+    .await
+    .unwrap()
+    .unwrap();
     release.wait().await;
     (first.await.unwrap().unwrap(), second)
+}
+
+/// The ST-164 R3 window: the first pass is paused before its attempt transaction, while another
+/// cold Channels/Outbox sees the same Own + command + meta.error answer.
+#[tokio::test(flavor = "multi_thread")]
+async fn failed_own_trigger_is_claimed_before_attempt_in_a_cold_runtime() {
+    let h = setup(true).await;
+    own_trigger_words(&h).await;
+    let turn = your_trigger(&h, "before-attempt", "/ai 查看状态").await;
+    let answer = failed_answer(&h, &turn, "private failure details");
+    let (first, second) = delivery_race(&h, &answer, true).await;
+    let Some(Delivered::Sent { message_id }) = first else {
+        panic!("{first:?}")
+    };
+    assert_eq!(
+        second,
+        Some(Delivered::Queued {
+            message_id: message_id.clone()
+        })
+    );
+    assert_eq!(attempts(&h, conversations::TRIGGER_FAILED_NOTE), 1);
+    assert_eq!(posted(&h, conversations::TRIGGER_FAILED_NOTE), 1);
+    forget_mark(&h, &answer);
+    let (cold, _) = cold_runtime(&h);
+    assert_eq!(
+        cold.conv_deliver(WS, &answer).await.unwrap(),
+        Some(Delivered::Sent { message_id })
+    );
+    assert_eq!(attempts(&h, conversations::TRIGGER_FAILED_NOTE), 1);
+    assert!(
+        sent(&h)
+            .iter()
+            .all(|s| !s.contains("private failure details"))
+    );
 }
 
 /// Your trigger word's turn failed. However often its failure is delivered — two passes at once, or
@@ -3859,7 +3931,8 @@ async fn a_failed_trigger_words_note_goes_out_once() {
     let d = h.ch.conv_deliver(WS, &err).await.unwrap();
     assert!(matches!(d, Some(Delivered::Sent { .. })), "{d:?}");
     forget_mark(&h, &err);
-    let again = h.ch.conv_deliver(WS, &err).await.unwrap();
+    let (cold, _) = cold_runtime(&h);
+    let again = cold.conv_deliver(WS, &err).await.unwrap();
     assert_eq!(again, d, "what the first delivery did, not a second note");
     assert_eq!(attempts(&h, note), 2, "one per turn");
     assert_eq!(posted(&h, note), 2);
@@ -4013,8 +4086,297 @@ async fn unclassified_research_keeps_its_result_and_an_explicit_eligibility_reas
         m.meta["chan_out"]["reason"]
             .as_str()
             .unwrap()
-            .contains("未核实")
+            .contains("分类或披露依据")
     );
     assert_eq!(h.ch.conv_deliver(WS, &id).await.unwrap(), None);
     assert!(sent(&h).is_empty());
+}
+
+// #291: classification provenance and cold-runtime delivery.
+async fn channel_answer(h: &H, answer: Value) -> (String, String, Inbound) {
+    channel_answer_for(h, answer, "你是谁啊").await
+}
+
+async fn channel_answer_for(h: &H, answer: Value, input: &str) -> (String, String, Inbound) {
+    h.env.gateway.unscript(H_SAFETY);
+    h.env.gateway.script(H_SAFETY, answer.to_string());
+    let source = push(
+        h,
+        &h.bot,
+        msg("C_OPS", "gate-turn", "ulilei", input, true, false),
+    )
+    .await;
+    let (turn, _) = h
+        .thread
+        .as_ref()
+        .unwrap()
+        .turns
+        .lock()
+        .unwrap()
+        .last()
+        .unwrap()
+        .clone();
+    let text = h.ch.conv_answer(WS, &turn).await.unwrap();
+    let reply = h
+        .env
+        .store()
+        .messages()
+        .add(
+            WS,
+            "steve",
+            &text,
+            None,
+            &json!({"origin":turn}),
+            &conversations::conv_space(&source.space_id),
+        )
+        .unwrap();
+    (turn, reply, source)
+}
+
+/// No composer state or Outbox locks are shared with the first Channels runtime.
+fn cold_runtime(h: &H) -> (Channels, Arc<Outbox>) {
+    let link = OutLink::new();
+    link.bind_clock(h.env.clock.clone());
+    let out = Arc::new(Outbox::new(link));
+    let core = Arc::new(FakeCore::default());
+    *core.store.lock().unwrap() = Some(h.env.store().clone());
+    let flow = FlowSetup::new(core)
+        .connections(h.ch.connections().clone())
+        .build(h.env.modules.clone(), Arc::new(LinearExecutor));
+    let ch = Channels::builder(
+        h.env.modules.clone(),
+        h.ch.connections().clone(),
+        Arc::new(flow.clone()),
+    )
+    .adapter(h.fake.clone())
+    .responder(Arc::new(Replies::new().outbound(out.clone())))
+    .flow(flow)
+    .reactor(out.clone())
+    .build();
+    (ch, out)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn identity_reply_uses_current_authorization_and_approval_flag() {
+    for approval in [false, true] {
+        let h = setup(true).await;
+        let (_, reply, _) = channel_answer(&h, json!({"outcome":"reply", "text":"我是 Steve，值班助手。有什么可以帮你处理的？", "needs_approval":approval})).await;
+        let (cold, _) = cold_runtime(&h);
+        let result = cold.conv_deliver(WS, &reply).await.unwrap();
+        if approval {
+            let Some(Delivered::Drafted { decision_id, .. }) = result else {
+                panic!("{result:?}")
+            };
+            // The formal body, rather than a private question, is on the approval.
+            assert_eq!(
+                one(
+                    &h,
+                    "SELECT draft FROM decisions WHERE id = ?",
+                    &[&decision_id]
+                ),
+                json!("我是 Steve，值班助手。有什么可以帮你处理的？")
+            );
+            assert!(sent(&h).is_empty());
+        } else {
+            assert!(matches!(result, Some(Delivered::Sent { .. })), "{result:?}");
+            assert_eq!(sent(&h).len(), 1);
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn private_outcomes_and_unknown_snapshots_never_become_sendable_drafts() {
+    for outcome in ["ask_owner", "skip", "reply"] {
+        for damage in ["missing", "partial", "invalid", "none"] {
+            let h = setup(true).await;
+            let text = if outcome == "ask_owner" {
+                "周四的上线时间你确认了吗？"
+            } else {
+                "我会按已确认的计划交付。"
+            };
+            let (turn, reply, source) = channel_answer(
+                &h,
+                json!({"outcome":outcome, "text":text, "needs_approval":true}),
+            )
+            .await;
+            match damage {
+                "missing" => exec(
+                    &h,
+                    "UPDATE messages SET meta=json_remove(meta, '$.chan_gen') WHERE id=?",
+                    &[&turn],
+                ),
+                "partial" => exec(
+                    &h,
+                    "UPDATE messages SET meta=json_remove(meta, '$.chan_gen.hits') WHERE id=?",
+                    &[&turn],
+                ),
+                "invalid" => exec(
+                    &h,
+                    "UPDATE messages SET meta=json_set(meta, '$.chan_gen', 'corrupt') WHERE id=?",
+                    &[&turn],
+                ),
+                _ => {}
+            }
+            let (cold, _) = cold_runtime(&h);
+            let (a, b) = tokio::join!(h.ch.conv_deliver(WS, &reply), cold.conv_deliver(WS, &reply));
+            let a = a.unwrap();
+            let b = b.unwrap();
+            if damage == "none" && outcome == "reply" {
+                assert!(
+                    matches!(a, Some(Delivered::Drafted { .. }))
+                        || matches!(b, Some(Delivered::Drafted { .. }))
+                );
+            } else {
+                assert_eq!((a, b), (None, None), "{outcome}/{damage}");
+                assert_eq!(
+                    one(
+                        &h,
+                        "SELECT count(*) FROM decisions WHERE subject_type='chan_message' AND subject_id=? AND kind='ask'",
+                        &[&source.message_id]
+                    ),
+                    json!(if damage == "none" && outcome == "skip" {
+                        0
+                    } else {
+                        1
+                    })
+                );
+                assert_eq!(
+                    one(
+                        &h,
+                        "SELECT count(*) FROM decisions WHERE subject_type='chan_message' AND kind='approve'",
+                        &[]
+                    ),
+                    json!(0)
+                );
+            }
+            assert!(sent(&h).is_empty(), "{outcome}/{damage}");
+            assert!(
+                cold.conv_deliver(WS, &reply).await.unwrap().is_none(),
+                "closed or held answers cannot reopen"
+            );
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn replay_cannot_cross_a_workspace_or_conversation() {
+    let h = setup(true).await;
+    let (_, reply, _) = channel_answer(
+        &h,
+        json!({"outcome":"reply","text":"我是值班助手。","needs_approval":false}),
+    )
+    .await;
+    assert!(
+        h.ch.conv_deliver("somewhere-else", &reply)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    exec(
+        &h,
+        "UPDATE messages SET space='chan:another-chat' WHERE id=?",
+        &[&reply],
+    );
+    assert!(h.ch.conv_deliver(WS, &reply).await.unwrap().is_none());
+    assert!(sent(&h).is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_router_question_needs_its_exact_durable_answer_binding() {
+    for bound in [false, true] {
+        let h = setup(true).await;
+        let (turn, _, source) = channel_answer(
+            &h,
+            json!({"outcome":"reply","text":"不用这个旧答案。","needs_approval":false}),
+        )
+        .await;
+        let reply = steve_says(
+            &h,
+            &source.space_id,
+            &turn,
+            "你指的是哪一个服务？",
+            None,
+            json!({"ask":{"options":["前端","后端"]}}),
+        );
+        if bound {
+            exec(
+                &h,
+                "INSERT INTO route_log (id,workspace_id,message_id,reply_id,model_kind,kind,ms,created) VALUES ('fixture-route',?,?,?,'fixture','ask',0,1)",
+                &[WS, &turn, &reply],
+            );
+        }
+        let (cold, _) = cold_runtime(&h);
+        let result = cold.conv_deliver(WS, &reply).await.unwrap();
+        if bound {
+            assert!(matches!(result, Some(Delivered::Sent { .. })), "{result:?}");
+            assert!(sent(&h)[0].contains("你指的是哪一个服务？"));
+        } else {
+            assert!(result.is_none());
+            assert!(sent(&h).is_empty());
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn incomplete_generation_fields_cannot_inherit_default_send_authority() {
+    for key in ["outcome", "needs_approval", "hits", "anchors", "text"] {
+        let h = setup(true).await;
+        let (turn, reply, _) = channel_answer(
+            &h,
+            json!({"outcome":"reply","text":"我会按已确认的计划交付。","needs_approval":true}),
+        )
+        .await;
+        let origin = h.env.store().messages().get(&turn).unwrap().unwrap();
+        let mut meta = origin.meta;
+        meta["chan_gen"].as_object_mut().unwrap().remove(key);
+        h.env.store().messages().patch_meta(&turn, &meta).unwrap();
+        let (cold, _) = cold_runtime(&h);
+        assert!(
+            cold.conv_deliver(WS, &reply).await.unwrap().is_none(),
+            "{key}"
+        );
+        assert!(sent(&h).is_empty(), "{key}");
+        assert_eq!(
+            one(
+                &h,
+                "SELECT count(*) FROM decisions WHERE kind='approve' AND subject_type='chan_message'",
+                &[]
+            ),
+            json!(0)
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn own_identity_answer_is_a_reviewable_reply_not_a_private_meta_question() {
+    let h = setup(false).await;
+    let owner = h
+        .env
+        .store()
+        .reader(|c| steve_channels::personas::owner_name(c, WS))
+        .unwrap();
+    let text = format!("我是{owner}。");
+    h.env.gateway.unscript(H_SAFETY);
+    h.env.gateway.script(
+        H_SAFETY,
+        json!({"outcome":"reply","text":text,"needs_approval":false}).to_string(),
+    );
+    let source = push(
+        &h,
+        &h.me,
+        msg("D_LI", "identity-own", "ulilei", "你是谁啊", false, false),
+    )
+    .await;
+    let r = source.response.unwrap();
+    assert!(r.out_message_id.is_some(), "{r:?}");
+    let d = r.decision_id.unwrap();
+    assert_eq!(
+        one(&h, "SELECT kind FROM decisions WHERE id=?", &[&d]),
+        json!("approve")
+    );
+    assert_eq!(
+        one(&h, "SELECT draft FROM decisions WHERE id=?", &[&d]),
+        json!(text)
+    );
+    assert!(sent(&h).is_empty(), "Own still waits for approval");
 }
