@@ -538,7 +538,11 @@ impl Rig {
                 session: S.into(),
                 resource: "item:i1".into(),
                 prepare: PrepareKind::Scratch,
-                choice: build::choice(),
+                // fake-acp.js reports an empty model list, so only its default is selectable.
+                choice: HarnessChoice {
+                    model: None,
+                    ..build::choice()
+                },
                 policy,
             })
             .unwrap();
@@ -739,13 +743,25 @@ async fn a_harness_whose_process_cannot_be_registered_never_starts() {
     r.bind();
     r.rt.prompt(S, "@say first", "user", &[]).unwrap();
     until("the open fails", || !r.ends().is_empty()).await;
-    assert_eq!(r.ends()[0].1, "error");
+    assert_eq!(r.ends()[0].1, steve_store::SESSION_START_FAILURE);
     assert_eq!(r.spawns(), 0, "no adapter before its process is durable");
     assert_eq!(r.prompts("first"), 0);
     assert!(r.attempts().is_empty(), "nothing was started");
-    // registration works again: the next message opens the session, and what waited goes with it
+    // Repairing registration and adding input do not clear the startup stop. An explicit
+    // human retry opens the session, and what waited goes with it.
     j.execute_batch("DROP TRIGGER fail_proc").unwrap();
-    r.rt.prompt(S, "@say second", "user", &[]).unwrap();
+    assert_eq!(
+        r.rt.prompt(S, "@say second", "user", &[]).unwrap(),
+        steve_hub::wire::node_runtime::Planned::Held
+    );
+    r.rt.retry_open(
+        S,
+        &HarnessChoice {
+            model: None,
+            ..build::choice()
+        },
+    )
+    .unwrap();
     until("the turn ends", || r.ends().len() == 2).await;
     assert_eq!(r.ends()[1].1, "end_turn");
     assert_eq!(r.spawns(), 1);

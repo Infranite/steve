@@ -410,7 +410,7 @@ async fn restart_adopts_unbound_session_and_retry_does_not_duplicate_children_or
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn default_off_restart_holds_durable_followups_and_preserves_results() {
+async fn default_off_restart_retires_followups_when_its_session_ends_and_preserves_results() {
     let dir = tempfile::tempdir().unwrap();
     let f = Fixture::new(dir.path());
     let parent = f.parent(Some("requester"));
@@ -428,6 +428,7 @@ async fn default_off_restart_holds_durable_followups_and_preserves_results() {
             .is_err()
     );
     assert!(off.routed.check_workflow_execution(&parent).is_err());
+    assert_eq!(value::<i64>(&off.store, "SELECT COUNT(*) FROM queued"), 1);
     off.core.lifecycle_tick().unwrap();
     off.node.finish(&execution, build::done()).await.unwrap();
     until(|| {
@@ -438,6 +439,12 @@ async fn default_off_restart_holds_durable_followups_and_preserves_results() {
             .active_attempt(&sid)
             .unwrap()
             .is_none()
+            && off
+                .store
+                .sessions()
+                .get(&sid)
+                .unwrap()
+                .is_some_and(|s| s.status == "ended")
     })
     .await;
     assert_eq!(
@@ -448,7 +455,7 @@ async fn default_off_restart_holds_durable_followups_and_preserves_results() {
         value::<i64>(&off.store, "SELECT COUNT(*) FROM runtime_turns"),
         1
     );
-    assert_eq!(value::<i64>(&off.store, "SELECT COUNT(*) FROM queued"), 1);
+    assert_eq!(value::<i64>(&off.store, "SELECT COUNT(*) FROM queued"), 0);
     assert!(off.unit(&parent, "review").item_id.is_none());
     assert_eq!(off.core.workflow_get(&parent).unwrap()["enabled"], false);
 }
@@ -496,6 +503,7 @@ async fn admission_and_queued_followups_refuse_unknown_changed_principals_bots_a
         &f.store,
         "DELETE FROM workspace_members WHERE user_id='requester'",
     );
+    assert_eq!(value::<i64>(&f.store, "SELECT COUNT(*) FROM queued"), 1);
     f.node.finish(&execution, build::done()).await.unwrap();
     until(|| {
         f.routed
@@ -505,13 +513,20 @@ async fn admission_and_queued_followups_refuse_unknown_changed_principals_bots_a
             .active_attempt(&sid)
             .unwrap()
             .is_none()
+            && f.store
+                .sessions()
+                .get(&sid)
+                .unwrap()
+                .is_some_and(|s| s.status == "ended")
     })
     .await;
     assert_eq!(
         value::<i64>(&f.store, "SELECT COUNT(*) FROM runtime_turns"),
         1
     );
-    assert_eq!(value::<i64>(&f.store, "SELECT COUNT(*) FROM queued"), 1);
+    // The invalid principal prevented the followup turn. Once the graph retires this session,
+    // its unsent input must be discarded rather than left on an ended session (ST-174).
+    assert_eq!(value::<i64>(&f.store, "SELECT COUNT(*) FROM queued"), 0);
     sql(
         &f.store,
         "INSERT INTO workspace_members(workspace_id,user_id,role,created) VALUES ('default','requester','member',1)",

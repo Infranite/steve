@@ -661,7 +661,10 @@ fn single_session_never_ignores_unsettled_cancelled_execution() {
             }
         }
         if unsettled == "queued" {
-            k.db().queue_add(sid, "未结清输入", "me", &[]).unwrap();
+            assert!(k.db().queue_add(sid, "未结清输入", "me", &[]).is_err());
+            // Preserve the defensive legacy-state check without using a current API to
+            // enqueue new input on an ended session.
+            k.db().exec("INSERT INTO queued(id,session_id,text,via,created) VALUES ('legacy-unsettled',?,'未结清输入','me',1)", &[&sid]).unwrap();
         }
         let before = graph(&k, &parent);
         assert!(

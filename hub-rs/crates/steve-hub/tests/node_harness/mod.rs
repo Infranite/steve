@@ -255,7 +255,12 @@ impl Hub {
             session: session.into(),
             resource: format!("item:{session}"),
             prepare: PrepareKind::Scratch,
-            choice: build::choice(),
+            // The scripted ACP adapter reports no selectable models. Use its default rather
+            // than an unadvertised fixture ID; transport tests must pass the real preflight.
+            choice: HarnessChoice {
+                model: None,
+                ..build::choice()
+            },
             policy,
         })
         .unwrap();
