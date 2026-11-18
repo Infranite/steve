@@ -7,7 +7,7 @@ try {
   for (const width of [390, 1280]) {
     const page = await browser.newPage({ locale: "zh-CN", viewport: { width, height: 844 } }), errors = []
     page.on("pageerror", e => errors.push(e.message))
-    const rows = Array.from({ length: 237 }, (_, i) => ({ space: `chan:sp${i}`, space_id: `sp${i}`, name: `项目群 ${i}`, provider: "飞书", dm: false, member_count: 5, last_text: `最近消息 ${i}`, count: 1, last: 237-i, closed: false }))
+    const rows = Array.from({ length: 237 }, (_, i) => ({ space: `chan:sp${i}`, space_id: `sp${i}`, name: `项目群 ${i}`, provider: "飞书", dm: false, member_count: 5, last_text: `最近消息 ${i}`, count: 1, last: 237-i, closed: false, sent: i % 3 === 0, pendingApproval: i % 3 === 1 }))
     let fail = false, releaseMutation, delayed = false
     await page.route("**/api/**", async route => {
       const u = new URL(route.request().url())
@@ -15,7 +15,7 @@ try {
 
       if (u.pathname === "/api/conversations") {
         const q = u.searchParams.get("q") || "", state = u.searchParams.get("state"), offset = Number(u.searchParams.get("offset") || 0)
-        const filtered = rows.filter(r => (!q || r.name.includes(q)) && (state === "all" || (state === "closed" ? r.closed : !r.closed)))
+        const filtered = rows.filter(r => (!q || r.name.includes(q)) && (state === "replied" ? r.sent || r.pendingApproval : state === "all" || (state === "closed" ? r.closed : !r.closed)))
         return route.fulfill({ json: { conversations: filtered.slice(offset, offset+50), has_more: offset+50<filtered.length, next_offset: offset+50, total: filtered.length } })
       }
       /* the list's account filter (#243): this workspace has no channel account to pick */
@@ -37,6 +37,27 @@ try {
     await page.getByRole("button", { name: "加载更多" }).click()
     await page.getByRole("button", { name: "打开：项目群 99", exact: true }).waitFor()
     assert.equal(await page.locator("[data-conversation-row]").count(), 100)
+    // Changing the filter resets pagination; sent and approval-only rows both qualify.
+    const repliedResponse = page.waitForResponse(r => new URL(r.url()).pathname === "/api/conversations" && new URL(r.url()).searchParams.get("state") === "replied")
+    await page.getByRole("radio", { name: "最近回复过的", exact: true }).click()
+    await repliedResponse
+    await page.waitForFunction(() => document.querySelectorAll("[data-conversation-row]").length === 50)
+    await page.getByRole("button", { name: "打开：项目群 73", exact: true }).waitFor()
+    assert.equal(await page.locator("[data-conversation-row]").count(), 50)
+    assert.equal(await page.getByRole("radio", { name: "最近回复过的", exact: true }).getAttribute("aria-checked"), "true")
+    assert.equal(await page.locator('[data-conversation-row="chan:sp0"]').count(), 1)
+    assert.equal(await page.locator('[data-conversation-row="chan:sp1"]').count(), 1)
+    assert.equal(await page.locator('[data-conversation-row="chan:sp2"]').count(), 0)
+    await page.getByRole("button", { name: "加载更多" }).click()
+    await page.getByRole("button", { name: "打开：项目群 148", exact: true }).waitFor()
+    assert.equal(await page.locator("[data-conversation-row]").count(), 100)
+    assert.ok((await page.locator("[data-conversation-row]").evaluateAll(els => els.map(el => el.dataset.conversationRow))).every(id => Number(id.split("sp")[1]) % 3 !== 2))
+    await page.getByRole("textbox", { name: "搜索会话" }).fill("项目群 236")
+    await page.getByText("没有匹配的会话", { exact: true }).waitFor()
+    assert.equal(await page.locator("[data-conversation-row]").count(), 0)
+    await page.getByRole("radio", { name: "未关闭", exact: true }).click()
+    await page.getByRole("button", { name: "打开：项目群 236", exact: true }).waitFor()
+    assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth))
     await page.getByRole("textbox", { name: "搜索会话" }).fill("项目群 236")
     await page.getByRole("button", { name: "打开：项目群 236", exact: true }).waitFor()
     assert.equal(await page.locator("[data-conversation-row]").count(), 1)
@@ -83,7 +104,7 @@ try {
     assert.equal(await page.locator("[data-conversation-manager]").count(), 0)
     assert.ok(page.url().endsWith("#/"))
     assert.deepEqual(errors, [])
-    assertions += 16
+    assertions += 25
     await page.close()
   }
   console.log(JSON.stringify({ passed: true, assertions, viewports: [390,1280], conversations:237 }))
