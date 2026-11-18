@@ -244,6 +244,101 @@ impl RpcError {
     }
 }
 
+impl From<RpcError> for steve_types::Error {
+    fn from(error: RpcError) -> Self {
+        use steve_types::{Code, Params, Retry};
+        let code = match error.reason {
+            Reason::Invalid | Reason::ParseError => Code::Invalid,
+            Reason::Unauthorized | Reason::SessionExpired => Code::Unauthenticated,
+            Reason::Forbidden | Reason::WriteForbidden | Reason::TargetForbidden => Code::Forbidden,
+            Reason::NotFound => Code::NotFound,
+            Reason::IdempotencyConflict | Reason::AccountChanged => Code::Conflict,
+            Reason::UnknownCursor | Reason::CursorTooOld => Code::Stale,
+            Reason::TooLarge => Code::TooLarge,
+            Reason::Unsupported | Reason::UnsupportedVersion => Code::Unsupported,
+            Reason::SessionLocked => Code::Busy,
+            Reason::RateLimited => Code::RateLimited,
+            Reason::NotReady | Reason::UpstreamUnavailable => Code::Unavailable,
+            Reason::Timeout => Code::Timeout,
+            Reason::Internal => Code::Internal,
+        };
+        let retry = error.retry_after_ms().map_or_else(
+            || code.default_retry(),
+            |after_ms| Retry::Later {
+                after_ms: Some(after_ms),
+            },
+        );
+        Self {
+            code,
+            retry,
+            reason: None,
+            params: Params::default(),
+            safe_detail: error.message,
+        }
+    }
+}
+
+#[cfg(test)]
+mod error_contract_tests {
+    use super::*;
+    use steve_types::{Code, Retry};
+
+    #[test]
+    fn every_reason_and_explicit_delay() {
+        let table = [
+            (Reason::ParseError, Code::Invalid),
+            (Reason::Invalid, Code::Invalid),
+            (Reason::Unsupported, Code::Unsupported),
+            (Reason::Internal, Code::Internal),
+            (Reason::NotReady, Code::Unavailable),
+            (Reason::UnsupportedVersion, Code::Unsupported),
+            (Reason::Unauthorized, Code::Unauthenticated),
+            (Reason::SessionExpired, Code::Unauthenticated),
+            (Reason::SessionLocked, Code::Busy),
+            (Reason::AccountChanged, Code::Conflict),
+            (Reason::WriteForbidden, Code::Forbidden),
+            (Reason::RateLimited, Code::RateLimited),
+            (Reason::NotFound, Code::NotFound),
+            (Reason::Forbidden, Code::Forbidden),
+            (Reason::UnknownCursor, Code::Stale),
+            (Reason::CursorTooOld, Code::Stale),
+            (Reason::TooLarge, Code::TooLarge),
+            (Reason::IdempotencyConflict, Code::Conflict),
+            (Reason::UpstreamUnavailable, Code::Unavailable),
+            (Reason::Timeout, Code::Timeout),
+            (Reason::TargetForbidden, Code::Forbidden),
+        ];
+        assert_eq!(table.len(), REASONS.len());
+        for (reason, code) in table {
+            let mut rpc = RpcError::new(reason, "safe detail");
+            let error = steve_types::Error::from(rpc.clone());
+            assert_eq!(error.code, code, "{reason:?}");
+            assert_eq!(error.retry, code.default_retry(), "{reason:?}");
+            assert_eq!(error.safe_detail, "safe detail");
+            assert_eq!(error.reason, None);
+            assert!(error.params.0.is_empty());
+            rpc.data["retry_after_ms"] = json!(42);
+            assert_eq!(
+                steve_types::Error::from(rpc).retry,
+                Retry::Later { after_ms: Some(42) }
+            );
+        }
+        for (wire, expected) in [
+            (json!(0), Some(0)),
+            (json!(900_000), Some(600_000)),
+            (json!(-1), None),
+            (json!("42"), None),
+        ] {
+            let mut rpc = RpcError::new(Reason::RateLimited, "safe detail");
+            rpc.data["retry_after_ms"] = wire;
+            assert_eq!(
+                steve_types::Error::from(rpc).retry,
+                Retry::Later { after_ms: expected }
+            );
+        }
+    }
+}
+
 impl std::fmt::Display for RpcError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         if self.message.is_empty() {

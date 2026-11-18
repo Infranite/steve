@@ -6,6 +6,7 @@ publish.workspace = true
 description = "Shared base of the new Hub modules (contacts, vault, flows, channels): errors, extractors, changeset engine, decision dispatch, SSE scoping"
 
 [dependencies]
+steve-types = { path = "../steve-types" }
 steve-store = { path = "../steve-store" }
 rust-i18n = "=4.2.4"
 steve-i18n = { path = "../steve-i18n" }
