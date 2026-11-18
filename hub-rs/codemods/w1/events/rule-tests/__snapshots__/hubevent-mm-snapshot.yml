@@ -1,0 +1,16 @@
+id: hubevent-mm
+snapshots:
+  "fn f() { send(HubEvent::Mm { id: id }); }":
+    fixed: "fn f() { send(steve_types::ConfigEvent::Mm { id: id }.into()); }"
+    labels:
+    - source: "HubEvent::Mm { id: id }"
+      style: primary
+      start: 14
+      end: 37
+  "fn f() { send(s::HubEvent::Mm { ws, id: make(\"comma,colon:\") }); }":
+    fixed: "fn f() { send(steve_types::ConfigEvent::Mm { ws, id: make(\"comma,colon:\") }.into()); }"
+    labels:
+    - source: "s::HubEvent::Mm { ws, id: make(\"comma,colon:\") }"
+      style: primary
+      start: 14
+      end: 62

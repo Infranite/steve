@@ -1,0 +1,11 @@
+id: changeevent-connection
+language: Rust
+message: Migrate ChangeEvent::Connection; run.py also converts field types.
+severity: hint
+rule:
+  pattern: '$ENUM::Connection { $$$FIELDS }'
+  kind: struct_expression
+constraints:
+  ENUM:
+    regex: '^(.*::)?ChangeEvent$'
+fix: 'steve_types::ChannelsEvent::Connection { $$$FIELDS }.into()'

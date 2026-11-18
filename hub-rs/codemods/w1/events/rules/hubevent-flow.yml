@@ -1,0 +1,11 @@
+id: hubevent-flow
+language: Rust
+message: Migrate HubEvent::Flow; run.py also converts field types.
+severity: hint
+rule:
+  pattern: '$ENUM::Flow { $$$FIELDS }'
+  kind: struct_expression
+constraints:
+  ENUM:
+    regex: '^(.*::)?HubEvent$'
+fix: 'steve_types::AutomationEvent::Flow { $$$FIELDS }.into()'

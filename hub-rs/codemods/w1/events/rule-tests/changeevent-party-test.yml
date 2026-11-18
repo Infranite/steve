@@ -1,0 +1,7 @@
+id: changeevent-party
+valid:
+  - "fn f() { let _ = Other::Party { id: id }; }"
+  - "fn f(e: ChangeEvent) { match e { ChangeEvent::Party { .. } => (), _ => () } }"
+invalid:
+  - "fn f() { send(ChangeEvent::Party { id: id }); }"
+  - "fn f() { send(s::ChangeEvent::Party { ws, id: make(\"comma,colon:\") }); }"

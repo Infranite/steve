@@ -1,0 +1,7 @@
+id: changeevent-stevedraft
+valid:
+  - "fn f() { let _ = Other::SteveDraft { id: id }; }"
+  - "fn f(e: ChangeEvent) { match e { ChangeEvent::SteveDraft { .. } => (), _ => () } }"
+invalid:
+  - "fn f() { send(ChangeEvent::SteveDraft { id: id }); }"
+  - "fn f() { send(s::ChangeEvent::SteveDraft { ws, id: make(\"comma,colon:\") }); }"

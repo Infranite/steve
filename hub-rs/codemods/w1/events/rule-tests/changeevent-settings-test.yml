@@ -1,0 +1,7 @@
+id: changeevent-settings
+valid:
+  - "fn f() { let _ = Other::Settings { id: id }; }"
+  - "fn f(e: ChangeEvent) { match e { ChangeEvent::Settings { .. } => (), _ => () } }"
+invalid:
+  - "fn f() { send(ChangeEvent::Settings { id: id }); }"
+  - "fn f() { send(s::ChangeEvent::Settings { ws, id: make(\"comma,colon:\") }); }"

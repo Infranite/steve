@@ -1,0 +1,11 @@
+id: changeevent-persona
+language: Rust
+message: Migrate ChangeEvent::Persona; run.py also converts field types.
+severity: hint
+rule:
+  pattern: '$ENUM::Persona { $$$FIELDS }'
+  kind: struct_expression
+constraints:
+  ENUM:
+    regex: '^(.*::)?ChangeEvent$'
+fix: 'steve_types::ChannelsEvent::Persona { $$$FIELDS }.into()'

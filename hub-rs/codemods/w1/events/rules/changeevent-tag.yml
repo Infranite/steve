@@ -1,0 +1,11 @@
+id: changeevent-tag
+language: Rust
+message: Migrate ChangeEvent::Tag; run.py also converts field types.
+severity: hint
+rule:
+  pattern: '$ENUM::Tag { $$$FIELDS }'
+  kind: struct_expression
+constraints:
+  ENUM:
+    regex: '^(.*::)?ChangeEvent$'
+fix: 'steve_types::ConfigEvent::Tag { ws: steve_types::ws_todo!(), $$$FIELDS }.into()'

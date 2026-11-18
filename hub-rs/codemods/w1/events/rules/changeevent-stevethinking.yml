@@ -1,0 +1,11 @@
+id: changeevent-stevethinking
+language: Rust
+message: Migrate ChangeEvent::SteveThinking; run.py also converts field types.
+severity: hint
+rule:
+  pattern: '$ENUM::SteveThinking { $$$FIELDS }'
+  kind: struct_expression
+constraints:
+  ENUM:
+    regex: '^(.*::)?ChangeEvent$'
+fix: 'steve_types::WorkLiveEvent::SteveThinking { $$$FIELDS }.into()'

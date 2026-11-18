@@ -1,0 +1,11 @@
+id: hubevent-chanmessage
+language: Rust
+message: Migrate HubEvent::ChanMessage; run.py also converts field types.
+severity: hint
+rule:
+  pattern: '$ENUM::ChanMessage { $$$FIELDS }'
+  kind: struct_expression
+constraints:
+  ENUM:
+    regex: '^(.*::)?HubEvent$'
+fix: 'steve_types::ChannelsEvent::ChanMessage { $$$FIELDS }.into()'

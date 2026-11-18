@@ -1,0 +1,16 @@
+id: hubevent-releasehold
+snapshots:
+  "fn f() { send(HubEvent::ReleaseHold { id: id }); }":
+    fixed: "fn f() { send(steve_types::DevicesEvent::ReleaseHold { id: id }.into()); }"
+    labels:
+    - source: "HubEvent::ReleaseHold { id: id }"
+      style: primary
+      start: 14
+      end: 46
+  "fn f() { send(s::HubEvent::ReleaseHold { ws, id: make(\"comma,colon:\") }); }":
+    fixed: "fn f() { send(steve_types::DevicesEvent::ReleaseHold { ws, id: make(\"comma,colon:\") }.into()); }"
+    labels:
+    - source: "s::HubEvent::ReleaseHold { ws, id: make(\"comma,colon:\") }"
+      style: primary
+      start: 14
+      end: 71

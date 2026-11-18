@@ -1,0 +1,11 @@
+id: changeevent-channel
+language: Rust
+message: Migrate ChangeEvent::Channel; run.py also converts field types.
+severity: hint
+rule:
+  pattern: '$ENUM::Channel { $$$FIELDS }'
+  kind: struct_expression
+constraints:
+  ENUM:
+    regex: '^(.*::)?ChangeEvent$'
+fix: 'steve_types::ChannelsEvent::Channel { $$$FIELDS }.into()'

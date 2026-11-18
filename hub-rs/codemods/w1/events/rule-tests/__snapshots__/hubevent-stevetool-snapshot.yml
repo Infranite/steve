@@ -1,0 +1,16 @@
+id: hubevent-stevetool
+snapshots:
+  "fn f() { send(HubEvent::SteveTool { id: id }); }":
+    fixed: "fn f() { send(steve_types::WorkLiveEvent::SteveTool { id: id }.into()); }"
+    labels:
+    - source: "HubEvent::SteveTool { id: id }"
+      style: primary
+      start: 14
+      end: 44
+  "fn f() { send(s::HubEvent::SteveTool { ws, id: make(\"comma,colon:\") }); }":
+    fixed: "fn f() { send(steve_types::WorkLiveEvent::SteveTool { ws, id: make(\"comma,colon:\") }.into()); }"
+    labels:
+    - source: "s::HubEvent::SteveTool { ws, id: make(\"comma,colon:\") }"
+      style: primary
+      start: 14
+      end: 69

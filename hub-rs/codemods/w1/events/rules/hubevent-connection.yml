@@ -1,0 +1,11 @@
+id: hubevent-connection
+language: Rust
+message: Migrate HubEvent::Connection; run.py also converts field types.
+severity: hint
+rule:
+  pattern: '$ENUM::Connection { $$$FIELDS }'
+  kind: struct_expression
+constraints:
+  ENUM:
+    regex: '^(.*::)?HubEvent$'
+fix: 'steve_types::ChannelsEvent::Connection { $$$FIELDS }.into()'

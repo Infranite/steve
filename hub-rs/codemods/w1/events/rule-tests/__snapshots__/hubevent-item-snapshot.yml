@@ -1,0 +1,16 @@
+id: hubevent-item
+snapshots:
+  "fn f() { send(HubEvent::Item { id: id }); }":
+    fixed: "fn f() { send(steve_types::WorkEvent::Item { ws: steve_types::ws_todo!(), id: id }.into()); }"
+    labels:
+    - source: "HubEvent::Item { id: id }"
+      style: primary
+      start: 14
+      end: 39
+  "fn f() { send(s::HubEvent::Item { ws, id: make(\"comma,colon:\") }); }":
+    fixed: "fn f() { send(steve_types::WorkEvent::Item { ws: steve_types::ws_todo!(), ws, id: make(\"comma,colon:\") }.into()); }"
+    labels:
+    - source: "s::HubEvent::Item { ws, id: make(\"comma,colon:\") }"
+      style: primary
+      start: 14
+      end: 64

@@ -1,0 +1,11 @@
+id: hubevent-client
+language: Rust
+message: Migrate HubEvent::Client; run.py also converts field types.
+severity: hint
+rule:
+  pattern: '$ENUM::Client { $$$FIELDS }'
+  kind: struct_expression
+constraints:
+  ENUM:
+    regex: '^(.*::)?HubEvent$'
+fix: 'steve_types::DevicesEvent::Client { $$$FIELDS }.into()'

@@ -1,0 +1,16 @@
+id: changeevent-chanmessage
+snapshots:
+  "fn f() { send(ChangeEvent::ChanMessage { id: id }); }":
+    fixed: "fn f() { send(steve_types::ChannelsEvent::ChanMessage { id: id }.into()); }"
+    labels:
+    - source: "ChangeEvent::ChanMessage { id: id }"
+      style: primary
+      start: 14
+      end: 49
+  "fn f() { send(s::ChangeEvent::ChanMessage { ws, id: make(\"comma,colon:\") }); }":
+    fixed: "fn f() { send(steve_types::ChannelsEvent::ChanMessage { ws, id: make(\"comma,colon:\") }.into()); }"
+    labels:
+    - source: "s::ChangeEvent::ChanMessage { ws, id: make(\"comma,colon:\") }"
+      style: primary
+      start: 14
+      end: 74

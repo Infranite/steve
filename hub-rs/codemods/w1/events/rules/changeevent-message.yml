@@ -1,0 +1,11 @@
+id: changeevent-message
+language: Rust
+message: Migrate ChangeEvent::Message; run.py also converts field types.
+severity: hint
+rule:
+  pattern: '$ENUM::Message { $$$FIELDS }'
+  kind: struct_expression
+constraints:
+  ENUM:
+    regex: '^(.*::)?ChangeEvent$'
+fix: 'steve_types::WorkEvent::Message { ws: steve_types::ws_todo!(), $$$FIELDS }.into()'

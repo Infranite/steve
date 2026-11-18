@@ -1,0 +1,16 @@
+id: changeevent-party
+snapshots:
+  "fn f() { send(ChangeEvent::Party { id: id }); }":
+    fixed: "fn f() { send(steve_types::PeopleEvent::Party { id: id }.into()); }"
+    labels:
+    - source: "ChangeEvent::Party { id: id }"
+      style: primary
+      start: 14
+      end: 43
+  "fn f() { send(s::ChangeEvent::Party { ws, id: make(\"comma,colon:\") }); }":
+    fixed: "fn f() { send(steve_types::PeopleEvent::Party { ws, id: make(\"comma,colon:\") }.into()); }"
+    labels:
+    - source: "s::ChangeEvent::Party { ws, id: make(\"comma,colon:\") }"
+      style: primary
+      start: 14
+      end: 68

@@ -1,0 +1,7 @@
+id: changeevent-connection
+valid:
+  - "fn f() { let _ = Other::Connection { id: id }; }"
+  - "fn f(e: ChangeEvent) { match e { ChangeEvent::Connection { .. } => (), _ => () } }"
+invalid:
+  - "fn f() { send(ChangeEvent::Connection { id: id }); }"
+  - "fn f() { send(s::ChangeEvent::Connection { ws, id: make(\"comma,colon:\") }); }"

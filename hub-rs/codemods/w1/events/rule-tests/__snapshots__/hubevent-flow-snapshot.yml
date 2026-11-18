@@ -1,0 +1,16 @@
+id: hubevent-flow
+snapshots:
+  "fn f() { send(HubEvent::Flow { id: id }); }":
+    fixed: "fn f() { send(steve_types::AutomationEvent::Flow { id: id }.into()); }"
+    labels:
+    - source: "HubEvent::Flow { id: id }"
+      style: primary
+      start: 14
+      end: 39
+  "fn f() { send(s::HubEvent::Flow { ws, id: make(\"comma,colon:\") }); }":
+    fixed: "fn f() { send(steve_types::AutomationEvent::Flow { ws, id: make(\"comma,colon:\") }.into()); }"
+    labels:
+    - source: "s::HubEvent::Flow { ws, id: make(\"comma,colon:\") }"
+      style: primary
+      start: 14
+      end: 64

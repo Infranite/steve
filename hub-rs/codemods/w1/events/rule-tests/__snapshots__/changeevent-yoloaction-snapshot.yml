@@ -1,0 +1,16 @@
+id: changeevent-yoloaction
+snapshots:
+  "fn f() { send(ChangeEvent::YoloAction { id: id }); }":
+    fixed: "fn f() { send(steve_types::AutonomyEvent::YoloAction { id: id }.into()); }"
+    labels:
+    - source: "ChangeEvent::YoloAction { id: id }"
+      style: primary
+      start: 14
+      end: 48
+  "fn f() { send(s::ChangeEvent::YoloAction { ws, id: make(\"comma,colon:\") }); }":
+    fixed: "fn f() { send(steve_types::AutonomyEvent::YoloAction { ws, id: make(\"comma,colon:\") }.into()); }"
+    labels:
+    - source: "s::ChangeEvent::YoloAction { ws, id: make(\"comma,colon:\") }"
+      style: primary
+      start: 14
+      end: 73

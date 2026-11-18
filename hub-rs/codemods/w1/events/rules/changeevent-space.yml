@@ -1,0 +1,11 @@
+id: changeevent-space
+language: Rust
+message: Migrate ChangeEvent::Space; run.py also converts field types.
+severity: hint
+rule:
+  pattern: '$ENUM::Space { $$$FIELDS }'
+  kind: struct_expression
+constraints:
+  ENUM:
+    regex: '^(.*::)?ChangeEvent$'
+fix: 'steve_types::ChannelsEvent::Space { $$$FIELDS }.into()'

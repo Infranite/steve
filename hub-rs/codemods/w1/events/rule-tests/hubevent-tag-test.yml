@@ -1,0 +1,7 @@
+id: hubevent-tag
+valid:
+  - "fn f() { let _ = Other::Tag { id: id }; }"
+  - "fn f(e: HubEvent) { match e { HubEvent::Tag { .. } => (), _ => () } }"
+invalid:
+  - "fn f() { send(HubEvent::Tag { id: id }); }"
+  - "fn f() { send(s::HubEvent::Tag { ws, id: make(\"comma,colon:\") }); }"

@@ -1,0 +1,7 @@
+id: changeevent-digest
+valid:
+  - "fn f() { let _ = Other::Digest { id: id }; }"
+  - "fn f(e: ChangeEvent) { match e { ChangeEvent::Digest { .. } => (), _ => () } }"
+invalid:
+  - "fn f() { send(ChangeEvent::Digest { id: id }); }"
+  - "fn f() { send(s::ChangeEvent::Digest { ws, id: make(\"comma,colon:\") }); }"

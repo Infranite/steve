@@ -1,0 +1,7 @@
+id: hubevent-bot
+valid:
+  - "fn f() { let _ = Other::Bot { id: id }; }"
+  - "fn f(e: HubEvent) { match e { HubEvent::Bot { .. } => (), _ => () } }"
+invalid:
+  - "fn f() { send(HubEvent::Bot { id: id }); }"
+  - "fn f() { send(s::HubEvent::Bot { ws, id: make(\"comma,colon:\") }); }"

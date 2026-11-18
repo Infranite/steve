@@ -1,0 +1,16 @@
+id: changeevent-stevethinking
+snapshots:
+  "fn f() { send(ChangeEvent::SteveThinking { id: id }); }":
+    fixed: "fn f() { send(steve_types::WorkLiveEvent::SteveThinking { id: id }.into()); }"
+    labels:
+    - source: "ChangeEvent::SteveThinking { id: id }"
+      style: primary
+      start: 14
+      end: 51
+  "fn f() { send(s::ChangeEvent::SteveThinking { ws, id: make(\"comma,colon:\") }); }":
+    fixed: "fn f() { send(steve_types::WorkLiveEvent::SteveThinking { ws, id: make(\"comma,colon:\") }.into()); }"
+    labels:
+    - source: "s::ChangeEvent::SteveThinking { ws, id: make(\"comma,colon:\") }"
+      style: primary
+      start: 14
+      end: 76

@@ -1,0 +1,16 @@
+id: hubevent-threadrun
+snapshots:
+  "fn f() { send(HubEvent::ThreadRun { id: id }); }":
+    fixed: "fn f() { send(steve_types::WorkEvent::ThreadRun { id: id }.into()); }"
+    labels:
+    - source: "HubEvent::ThreadRun { id: id }"
+      style: primary
+      start: 14
+      end: 44
+  "fn f() { send(s::HubEvent::ThreadRun { ws, id: make(\"comma,colon:\") }); }":
+    fixed: "fn f() { send(steve_types::WorkEvent::ThreadRun { ws, id: make(\"comma,colon:\") }.into()); }"
+    labels:
+    - source: "s::HubEvent::ThreadRun { ws, id: make(\"comma,colon:\") }"
+      style: primary
+      start: 14
+      end: 69

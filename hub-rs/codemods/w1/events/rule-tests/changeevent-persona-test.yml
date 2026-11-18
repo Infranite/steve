@@ -1,0 +1,7 @@
+id: changeevent-persona
+valid:
+  - "fn f() { let _ = Other::Persona { id: id }; }"
+  - "fn f(e: ChangeEvent) { match e { ChangeEvent::Persona { .. } => (), _ => () } }"
+invalid:
+  - "fn f() { send(ChangeEvent::Persona { id: id }); }"
+  - "fn f() { send(s::ChangeEvent::Persona { ws, id: make(\"comma,colon:\") }); }"

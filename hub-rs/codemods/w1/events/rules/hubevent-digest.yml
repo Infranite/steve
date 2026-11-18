@@ -1,0 +1,11 @@
+id: hubevent-digest
+language: Rust
+message: Migrate HubEvent::Digest; run.py also converts field types.
+severity: hint
+rule:
+  pattern: '$ENUM::Digest { $$$FIELDS }'
+  kind: struct_expression
+constraints:
+  ENUM:
+    regex: '^(.*::)?HubEvent$'
+fix: 'steve_types::ChannelsEvent::Digest { $$$FIELDS }.into()'

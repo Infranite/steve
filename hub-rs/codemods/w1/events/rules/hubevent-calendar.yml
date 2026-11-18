@@ -1,0 +1,11 @@
+id: hubevent-calendar
+language: Rust
+message: Migrate HubEvent::Calendar; run.py also converts field types.
+severity: hint
+rule:
+  pattern: '$ENUM::Calendar { $$$FIELDS }'
+  kind: struct_expression
+constraints:
+  ENUM:
+    regex: '^(.*::)?HubEvent$'
+fix: 'steve_types::AutomationEvent::Calendar { $$$FIELDS }.into()'

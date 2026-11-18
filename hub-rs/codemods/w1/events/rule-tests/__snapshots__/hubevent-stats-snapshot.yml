@@ -1,0 +1,16 @@
+id: hubevent-stats
+snapshots:
+  "fn f() { send(HubEvent::Stats { id: id }); }":
+    fixed: "fn f() { send(steve_types::StatsEvent::Stats { id: id }.into()); }"
+    labels:
+    - source: "HubEvent::Stats { id: id }"
+      style: primary
+      start: 14
+      end: 40
+  "fn f() { send(s::HubEvent::Stats { ws, id: make(\"comma,colon:\") }); }":
+    fixed: "fn f() { send(steve_types::StatsEvent::Stats { ws, id: make(\"comma,colon:\") }.into()); }"
+    labels:
+    - source: "s::HubEvent::Stats { ws, id: make(\"comma,colon:\") }"
+      style: primary
+      start: 14
+      end: 65

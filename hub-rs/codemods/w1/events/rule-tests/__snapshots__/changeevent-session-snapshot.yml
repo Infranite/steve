@@ -1,0 +1,16 @@
+id: changeevent-session
+snapshots:
+  "fn f() { send(ChangeEvent::Session { id: id }); }":
+    fixed: "fn f() { send(steve_types::WorkEvent::Session { ws: steve_types::ws_todo!(), id: id }.into()); }"
+    labels:
+    - source: "ChangeEvent::Session { id: id }"
+      style: primary
+      start: 14
+      end: 45
+  "fn f() { send(s::ChangeEvent::Session { ws, id: make(\"comma,colon:\") }); }":
+    fixed: "fn f() { send(steve_types::WorkEvent::Session { ws: steve_types::ws_todo!(), ws, id: make(\"comma,colon:\") }.into()); }"
+    labels:
+    - source: "s::ChangeEvent::Session { ws, id: make(\"comma,colon:\") }"
+      style: primary
+      start: 14
+      end: 70

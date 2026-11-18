@@ -1,0 +1,16 @@
+id: changeevent-releasehold
+snapshots:
+  "fn f() { send(ChangeEvent::ReleaseHold { id: id }); }":
+    fixed: "fn f() { send(steve_types::DevicesEvent::ReleaseHold { id: id }.into()); }"
+    labels:
+    - source: "ChangeEvent::ReleaseHold { id: id }"
+      style: primary
+      start: 14
+      end: 49
+  "fn f() { send(s::ChangeEvent::ReleaseHold { ws, id: make(\"comma,colon:\") }); }":
+    fixed: "fn f() { send(steve_types::DevicesEvent::ReleaseHold { ws, id: make(\"comma,colon:\") }.into()); }"
+    labels:
+    - source: "s::ChangeEvent::ReleaseHold { ws, id: make(\"comma,colon:\") }"
+      style: primary
+      start: 14
+      end: 74

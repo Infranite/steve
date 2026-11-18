@@ -1,0 +1,11 @@
+id: changeevent-stevedraft
+language: Rust
+message: Migrate ChangeEvent::SteveDraft; run.py also converts field types.
+severity: hint
+rule:
+  pattern: '$ENUM::SteveDraft { $$$FIELDS }'
+  kind: struct_expression
+constraints:
+  ENUM:
+    regex: '^(.*::)?ChangeEvent$'
+fix: 'steve_types::WorkLiveEvent::SteveDraft { $$$FIELDS }.into()'

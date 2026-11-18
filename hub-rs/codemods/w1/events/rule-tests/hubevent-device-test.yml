@@ -1,0 +1,7 @@
+id: hubevent-device
+valid:
+  - "fn f() { let _ = Other::Device { id: id }; }"
+  - "fn f(e: HubEvent) { match e { HubEvent::Device { .. } => (), _ => () } }"
+invalid:
+  - "fn f() { send(HubEvent::Device { id: id }); }"
+  - "fn f() { send(s::HubEvent::Device { ws, id: make(\"comma,colon:\") }); }"

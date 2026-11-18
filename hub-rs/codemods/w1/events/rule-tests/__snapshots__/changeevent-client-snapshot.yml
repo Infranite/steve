@@ -1,0 +1,16 @@
+id: changeevent-client
+snapshots:
+  "fn f() { send(ChangeEvent::Client { id: id }); }":
+    fixed: "fn f() { send(steve_types::DevicesEvent::Client { id: id }.into()); }"
+    labels:
+    - source: "ChangeEvent::Client { id: id }"
+      style: primary
+      start: 14
+      end: 44
+  "fn f() { send(s::ChangeEvent::Client { ws, id: make(\"comma,colon:\") }); }":
+    fixed: "fn f() { send(steve_types::DevicesEvent::Client { ws, id: make(\"comma,colon:\") }.into()); }"
+    labels:
+    - source: "s::ChangeEvent::Client { ws, id: make(\"comma,colon:\") }"
+      style: primary
+      start: 14
+      end: 69

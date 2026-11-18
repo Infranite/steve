@@ -1,0 +1,7 @@
+id: changeevent-flow
+valid:
+  - "fn f() { let _ = Other::Flow { id: id }; }"
+  - "fn f(e: ChangeEvent) { match e { ChangeEvent::Flow { .. } => (), _ => () } }"
+invalid:
+  - "fn f() { send(ChangeEvent::Flow { id: id }); }"
+  - "fn f() { send(s::ChangeEvent::Flow { ws, id: make(\"comma,colon:\") }); }"

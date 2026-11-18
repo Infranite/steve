@@ -1,0 +1,16 @@
+id: changeevent-workspace
+snapshots:
+  "fn f() { send(ChangeEvent::Workspace { id: id }); }":
+    fixed: "fn f() { send(steve_types::ConfigEvent::Workspace { ws: steve_types::ws_todo!(), id: id }.into()); }"
+    labels:
+    - source: "ChangeEvent::Workspace { id: id }"
+      style: primary
+      start: 14
+      end: 47
+  "fn f() { send(s::ChangeEvent::Workspace { ws, id: make(\"comma,colon:\") }); }":
+    fixed: "fn f() { send(steve_types::ConfigEvent::Workspace { ws: steve_types::ws_todo!(), ws, id: make(\"comma,colon:\") }.into()); }"
+    labels:
+    - source: "s::ChangeEvent::Workspace { ws, id: make(\"comma,colon:\") }"
+      style: primary
+      start: 14
+      end: 72

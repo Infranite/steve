@@ -1,0 +1,11 @@
+id: changeevent-yoloaction
+language: Rust
+message: Migrate ChangeEvent::YoloAction; run.py also converts field types.
+severity: hint
+rule:
+  pattern: '$ENUM::YoloAction { $$$FIELDS }'
+  kind: struct_expression
+constraints:
+  ENUM:
+    regex: '^(.*::)?ChangeEvent$'
+fix: 'steve_types::AutonomyEvent::YoloAction { $$$FIELDS }.into()'

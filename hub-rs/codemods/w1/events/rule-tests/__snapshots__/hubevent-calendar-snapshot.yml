@@ -1,0 +1,16 @@
+id: hubevent-calendar
+snapshots:
+  "fn f() { send(HubEvent::Calendar { id: id }); }":
+    fixed: "fn f() { send(steve_types::AutomationEvent::Calendar { id: id }.into()); }"
+    labels:
+    - source: "HubEvent::Calendar { id: id }"
+      style: primary
+      start: 14
+      end: 43
+  "fn f() { send(s::HubEvent::Calendar { ws, id: make(\"comma,colon:\") }); }":
+    fixed: "fn f() { send(steve_types::AutomationEvent::Calendar { ws, id: make(\"comma,colon:\") }.into()); }"
+    labels:
+    - source: "s::HubEvent::Calendar { ws, id: make(\"comma,colon:\") }"
+      style: primary
+      start: 14
+      end: 68

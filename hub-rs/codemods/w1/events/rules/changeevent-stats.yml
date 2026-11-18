@@ -1,0 +1,11 @@
+id: changeevent-stats
+language: Rust
+message: Migrate ChangeEvent::Stats; run.py also converts field types.
+severity: hint
+rule:
+  pattern: '$ENUM::Stats { $$$FIELDS }'
+  kind: struct_expression
+constraints:
+  ENUM:
+    regex: '^(.*::)?ChangeEvent$'
+fix: 'steve_types::StatsEvent::Stats { $$$FIELDS }.into()'
