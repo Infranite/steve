@@ -24,6 +24,7 @@ pub mod gateway;
 pub mod git;
 pub mod harnesses;
 pub mod housekeeping;
+pub mod judge;
 pub mod kinds;
 pub mod lifecycle;
 mod marks;

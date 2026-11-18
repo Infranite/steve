@@ -22,9 +22,9 @@
 //! The rows, first match wins (numbered as in the design):
 //! 1 done · 2 judged done, undoable for a while · 3 a card or something only you can do ·
 //! 4 a registered wait (prerequisites, quota, a wait, a closing operation) · 5 a turn runs, input or
-//! a dispatch is on its way, or the Hub reconciles · 7 settled, the Hub follows up · 8 settled, out
-//! of follow-ups · 9 nobody can bring it back · 10 not started · 11 none of these (a diagnostic).
-//! Row 6 (settled, being judged) comes with the judge.
+//! a dispatch is on its way, or the Hub reconciles · 6 settled, its turn is being judged
+//! ([`crate::judge`], in shadow) · 7 settled, the Hub follows up · 8 settled, out of follow-ups ·
+//! 9 nobody can bring it back · 10 not started · 11 none of these (a diagnostic).
 
 use serde::Serialize;
 
@@ -149,6 +149,17 @@ pub struct Judged {
     pub created: i64,
 }
 
+/// The judge candidate of the current turn that is not judged yet ([`crate::judge`]).
+#[derive(Debug, Clone, Default)]
+pub struct Judging {
+    pub id: String,
+    pub cycle: i64,
+    pub session_id: String,
+    pub turn_id: String,
+    pub next_check: i64,
+    pub failures: i64,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct Delivered {
     pub cycle: i64,
@@ -186,6 +197,8 @@ pub struct Facts {
     pub cards: Vec<Card>,
     pub waits: Vec<Wait>,
     pub judgements: Vec<Judged>,
+    /// The current turn's judge candidate while it waits to be judged (pending or being judged).
+    pub judging: Option<Judging>,
     pub delivery: Vec<Delivered>,
     /// Operations whose effect nobody knows (they must be reconciled before anything closes).
     pub unknown_effects: Vec<String>,
@@ -248,6 +261,8 @@ pub enum Due {
     StallWatch,
     /// A judged close becomes final.
     Grace,
+    /// The settled turn's judge candidate is looked at (judged, or retried after a failure).
+    Judge,
     /// The work graph's own scheduling.
     Workflow,
     /// A required operation of the closing (a release, a build, a deploy) is followed.
@@ -266,6 +281,7 @@ impl Due {
                 | Due::NodeBack
                 | Due::StallWatch
                 | Due::Grace
+                | Due::Judge
         )
     }
 }
@@ -318,6 +334,70 @@ pub struct Derived {
     pub reviewable: Predicate,
     pub mergeable: Predicate,
     pub closable: Closable,
+}
+
+/// The newest verified fact of `kind` in the current cycle about the current result: about its
+/// commit when one is verified, else one tied to no head (as [`closable`] reads them). Its index in
+/// [`Facts::delivery`], for the judge's evidence references.
+pub fn result_fact(f: &Facts, kind: &str) -> Option<usize> {
+    let head = latest(f, "commit", None)
+        .filter(|d| d.verified())
+        .and_then(|d| d.head.clone());
+    f.delivery
+        .iter()
+        .enumerate()
+        .filter(|(_, d)| d.cycle == f.item.cycle && d.kind == kind && d.head == head)
+        .max_by_key(|(_, d)| d.observed_at)
+        .map(|(i, _)| i)
+}
+
+/// Whether the turn of the current session can be judged now, and why not: [`Settled::Evaluable`]
+/// only when the Hub-visible turn is quiescent and nothing else is going on that a judge would
+/// answer over — no running turn, retry, dispatch without a receipt, queued input, Node away or
+/// unsure runtime (as [`derive`] reads them), no unknown side effect, no card, wait, prerequisite,
+/// quota wait, pause, Stop of yours or busy work graph. It never says the machine has no background
+/// work; it says the Hub sees nothing more coming for this turn.
+pub fn judge_gate(f: &Facts, policy: &WorkPolicy) -> (Settled, &'static str) {
+    /* no session: nothing of a turn to read (before the session's own readings, which say the
+     * same Unknown without a reason) */
+    let Some(s) = &f.session else {
+        return (Settled::Unknown, "no_session");
+    };
+    let (settled, busy) = settled(f, policy);
+    if let Some((code, _)) = busy {
+        return (settled, code);
+    }
+    if settled != Settled::Evaluable {
+        return (settled, "node_away");
+    }
+    if s.turn.is_none() {
+        return (Settled::Unknown, "no_turn");
+    }
+    if !f.unknown_effects.is_empty() {
+        return (Settled::Unknown, "unknown_effects");
+    }
+    let open_wait = f
+        .waits
+        .iter()
+        .any(|w| w.cycle == f.item.cycle && w.cap.is_none_or(|c| w.wakes < c));
+    let busy = if f.item.paused {
+        "paused"
+    } else if s.held_by_you {
+        "your_stop"
+    } else if !f.cards.is_empty() {
+        "card"
+    } else if open_wait {
+        "waiting"
+    } else if f.dependency_wait {
+        "dependency"
+    } else if f.quota_until.is_some_and(|u| u > f.now) {
+        "quota"
+    } else if f.graph_busy.is_some() {
+        "workflow"
+    } else {
+        return (Settled::Evaluable, "settled");
+    };
+    (Settled::Busy, busy)
 }
 
 /// The newest delivery fact of `kind` in the current cycle, about `head` when given.
@@ -749,6 +829,26 @@ fn rows(
             Agent,
             Some(why.clone()),
             due(Due::Workflow, None, None),
+        );
+    }
+    /* 6: settled, and the current turn's judge candidate is due (in shadow: it is only recorded) */
+    if settled == Settled::Evaluable
+        && let (Some(j), Some(s)) = (&f.judging, &f.session)
+        && j.cycle == f.item.cycle
+        && j.session_id == s.id
+        && s.turn.as_deref() == Some(j.turn_id.as_str())
+    {
+        return row(
+            6,
+            "judging",
+            Running,
+            Hub,
+            None,
+            due(
+                Due::Judge,
+                Some(j.id.clone()),
+                Some(j.next_check.max(f.now)),
+            ),
         );
     }
     if f.item.phase == crate::cycle::READY {

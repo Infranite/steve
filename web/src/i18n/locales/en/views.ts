@@ -42,6 +42,10 @@ export default {
     "markRead": "Mark read"
 },
   debug: {
+    judge: "Judge (shadow): {{state}}", judgeOld: "of an earlier turn", judgeWaits: "Not judged yet: {{why}}; looked at again {{time}}", judgeFailures: "{{n}} failed tries: {{error}}", judgeVerdictLine: "Verdict: {{verdict}} · would: {{would}} (not done)",
+    judgeState: { pending: "waiting to be judged", judging: "being judged", judged: "judged", superseded: "superseded by a newer turn", failed: "gave up after failures" },
+    judgeVerdict: { done: "done", not_done: "not done", waiting: "waiting", needs_you: "needs you", unknown: "can't tell" },
+    judgeIndependent: { yes: "another model than the worker's", no: "the worker's own model", unknown: "independence unknown" },
     shadow: "Derived state (shadow)", shadowHint: "Computed from the item's facts next to today's state. Nothing acts on it yet.", shadowLane: "{{lane}} · row {{row}}", shadowAgrees: "Agrees with today's state", shadowDiffers: "Differs from today's state ({{today}})", shadowNext: "Next step: {{step}}", shadowNoNext: "No next step", shadowPredicates: "Reviewable {{review}} · Mergeable {{merge}} · Closable {{close}}", shadowSettled: "Settled: {{settled}}", yes: "yes", no: "no",
     wouldDo: "What the sweep would do", wouldDoHint: "Observe-only: recorded, not carried out. Today's stall watch still acts.", wouldWake: "Wake the agent", wouldCard: "Card for you", wouldRemind: "Remind you", wouldDue: "due now", wouldAt: "due {{time}}", wouldNothing: "Nothing to do", wouldCleared: "cleared {{time}}", wouldOpen: "open",
     settledEvaluable: "evaluable", settledBusy: "known busy", settledUnknown: "unknown", laneNeedsYou: "Needs you", laneRunning: "Running", laneDone: "Done",

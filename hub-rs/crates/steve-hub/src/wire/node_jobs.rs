@@ -911,6 +911,8 @@ impl OneModel for NodePrint {
         };
         waiting.armed = false;
         drop(waiting);
+        // what the harness named itself, before a report without a name is booked under `model`
+        let reported = steve_core::gateway::reported_model(&usage);
         let usage = normalized_usage(usage, model);
         let reply = if end.outcome == Outcome::Succeeded {
             let text = end
@@ -931,7 +933,10 @@ impl OneModel for NodePrint {
         } else {
             Err(call_error(&end, call.timeout))
         };
-        Tried::of(reply, usage)
+        Tried {
+            reported_model: reported,
+            ..Tried::of(reply, usage)
+        }
     }
 }
 

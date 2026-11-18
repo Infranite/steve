@@ -48,7 +48,7 @@ const fn p(key: &'static str, label: &'static str, desc: &'static str, tier: Tie
 }
 
 /// Every purpose, in the order the settings list them.
-pub const PURPOSES: [Purpose; 11] = [
+pub const PURPOSES: [Purpose; 12] = [
     p(
         "route",
         "分流",
@@ -95,6 +95,12 @@ pub const PURPOSES: [Purpose; 11] = [
     ),
     p("mail", "邮件起草", "起草邮件回复", Tier::Smart),
     p("compose", "渠道回复", "在渠道里替你写回复", Tier::Smart),
+    p(
+        "judge",
+        "完成判定",
+        "事项一轮结束后判断做没做完；默认避开干活 Bot 的模型（目前只记录，不改变事项）",
+        Tier::Smart,
+    ),
 ];
 
 pub use crate::harnesses::{Harness, HarnessModel, HarnessSource};
@@ -157,6 +163,7 @@ pub fn purpose_label(key: &str) -> String {
         "flow" => steve_i18n::t!("core.purpose.flow.label"),
         "mail" => steve_i18n::t!("core.purpose.mail.label"),
         "compose" => steve_i18n::t!("core.purpose.compose.label"),
+        "judge" => steve_i18n::t!("core.purpose.judge.label"),
         _ => key.to_string(),
     }
 }
@@ -175,6 +182,7 @@ pub fn purpose_desc(key: &str) -> String {
         "flow" => steve_i18n::t!("core.purpose.flow.desc"),
         "mail" => steve_i18n::t!("core.purpose.mail.desc"),
         "compose" => steve_i18n::t!("core.purpose.compose.desc"),
+        "judge" => steve_i18n::t!("core.purpose.judge.desc"),
         _ => String::new(),
     }
 }
@@ -1681,7 +1689,7 @@ mod tests {
             .unwrap();
         assert_eq!(y["value"]["models"], json!(["g"]));
         assert_eq!(y["effective"]["harness"], json!("codex"));
-        assert_eq!(v["purposes"].as_array().unwrap().len(), 11);
+        assert_eq!(v["purposes"].as_array().unwrap().len(), 12);
         assert_eq!(v["harnesses"][1]["efforts"][0]["key"], json!("low"));
     }
 }

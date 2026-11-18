@@ -39,12 +39,19 @@ export type DebugShadow = {
   agrees: boolean
   /** What the sweep would do (observe-only: its execution switches are off). */
   would_do?: DebugWouldDo
+  /** The completion judge's newest candidate of the cycle and its verdict (shadow: never acted on). */
+  judge?: DebugJudge | null
 }
 export type DebugWouldDoAction = "wake" | "card" | "remind"
 export type DebugWouldDo = {
   current: { action: DebugWouldDoAction; reason: string; label: string; detail?: string; due_at: number; due: boolean; executes: boolean } | null
   log: { id: string; action: DebugWouldDoAction; reason: string; label: string; detail?: string | null; due_at: number; first_seen: number; cleared_at: number | null; episodes: number; executed: boolean }[]
   execute: Record<DebugWouldDoAction, boolean>
+}
+export type DebugJudge = {
+  candidate: { id: string; state: "pending" | "judging" | "judged" | "superseded" | "failed"; settled?: "evaluable" | "busy" | "unknown" | null; why?: string | null; failures: number; last_error?: string | null; next_check: number }
+  current: boolean
+  judgement?: { verdict: "done" | "not_done" | "waiting" | "needs_you" | "unknown"; would?: string | null; decided_by?: string | null; harness?: string | null; model?: string | null; independent?: "yes" | "no" | "unknown" | null; reason?: string | null } | null
 }
 export type DebugSnapshot = {
   observed_at: number

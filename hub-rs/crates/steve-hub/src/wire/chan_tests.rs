@@ -84,6 +84,7 @@ impl steve_core::OneModel for One {
             reply: reply.map(|t| (t, None)),
             usage: vec![],
             timed_out: false,
+            reported_model: None,
         }
     }
 }

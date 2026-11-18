@@ -27,7 +27,12 @@ pub enum Tier {
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Printed {
     pub text: String,
+    /// The model of the tier that was asked (what the call is booked under).
     pub model: String,
+    /// The model the harness itself named for the answering run, in its own reports; `None` when
+    /// it named none (a harness default, a harness that reports no model). Not the model asked for:
+    /// a caller that records who answered takes this one.
+    pub reported_model: Option<String>,
     /// The dollars the answering run reported, when it reports any (module budgets add them up).
     pub cost_usd: Option<f64>,
     /// Tokens per model over every model tried, failed tries included.
@@ -141,6 +146,23 @@ pub struct Tried {
     pub usage: Vec<ModelUsage>,
     /// The try ran out of its time: the next model is not tried (it would most likely wait as long).
     pub timed_out: bool,
+    /// The model the harness named in its own reports of this try ([`reported_model`]), before a
+    /// report without one is booked under the model asked for.
+    pub reported_model: Option<String>,
+}
+
+/// The model a harness named itself in its usage reports of one run: that of its main
+/// conversation, else of its whole run (the last one named); `None` when no report names one.
+pub fn reported_model(reports: &[UsageReport]) -> Option<String> {
+    use steve_node_api::UsageScope;
+    let named = |scope: UsageScope| {
+        reports
+            .iter()
+            .rev()
+            .filter(|r| r.scope == scope)
+            .find_map(|r| r.model.clone().filter(|m| !m.is_empty()))
+    };
+    named(UsageScope::Main).or_else(|| named(UsageScope::All))
 }
 
 impl Tried {
@@ -150,6 +172,7 @@ impl Tried {
             reply: Err(e),
             usage: vec![],
             timed_out: false,
+            reported_model: None,
         }
     }
 
@@ -202,6 +225,8 @@ impl Tried {
                 })
                 .map_err(call_error),
             usage,
+            // a runner that knows sets it: what reaches here may name the model asked for already
+            reported_model: None,
         }
     }
 }
@@ -474,7 +499,10 @@ impl LocalAcp {
         };
         let out = steve_acp::oneshot::run(req, on_spawn, &event).await;
         flush();
-        let usage = merged_usage(usage.into_inner().unwrap(), model);
+        let raw = usage.into_inner().unwrap();
+        // what the harness named itself, before a report without a name is booked under `model`
+        let reported = reported_model(&raw);
+        let usage = merged_usage(raw, model);
         let reply = match out {
             Ok(o) if o.stop_reason == "end_turn" => Ok((o.text, None)),
             Ok(o) => Err(OneShotError::Harness {
@@ -484,7 +512,10 @@ impl LocalAcp {
             }),
             Err(e) => Err(e),
         };
-        Tried::of(reply, usage)
+        Tried {
+            reported_model: reported,
+            ..Tried::of(reply, usage)
+        }
     }
 }
 
@@ -582,6 +613,23 @@ pub async fn with_images<F: std::future::Future>(images: Vec<Value>, f: F) -> F:
     IMAGES.scope(std::sync::Arc::new(images), f).await
 }
 
+tokio::task_local! {
+    /// The harness and models the calls made inside [`with_choice`] run on.
+    static CHOICE: crate::models::Choice;
+}
+
+/// Runs `f` with its model calls on `choice` instead of what 设置 · 模型 says for their purpose: a
+/// caller that resolved the purpose itself and narrowed it (the completion judge keeps off the
+/// worker's model, `crate::judge`). The purpose still books the calls.
+pub async fn with_choice<F: std::future::Future>(choice: crate::models::Choice, f: F) -> F::Output {
+    CHOICE.scope(choice, f).await
+}
+
+/// The choice of [`with_choice`], if the current call runs inside one.
+pub fn current_choice() -> Option<crate::models::Choice> {
+    CHOICE.try_with(Clone::clone).ok()
+}
+
 /// The images of the current call, if any (see [`with_images`]).
 pub fn current_images() -> Option<std::sync::Arc<Vec<Value>>> {
     IMAGES
@@ -636,6 +684,10 @@ impl<M: OneModel> Fallback<M> {
     /// The models (and effort) of this call: its purpose and workspace come from the caller's
     /// [`crate::stats::CallTag`].
     pub fn choice(&self, tier: Tier) -> crate::models::Choice {
+        /* a caller that chose for itself ([`with_choice`]: the judge, kept off the worker's model) */
+        if let Some(c) = current_choice() {
+            return c;
+        }
         match &self.models {
             Some(m) => {
                 let tag = crate::stats::current_tag();
@@ -714,6 +766,7 @@ impl<M: OneModel> Fallback<M> {
                 }
             }
             a.attempts += 1;
+            // the model asked for: the call is booked under it (who answered is `reported_model`)
             a.model = m.clone();
             merge_usage(&mut a.usage, r.usage);
             match r.reply {
@@ -722,6 +775,7 @@ impl<M: OneModel> Fallback<M> {
                     a.result = Ok(Printed {
                         text,
                         model: m.clone(),
+                        reported_model: r.reported_model,
                         cost_usd,
                         usage: a.usage.clone(),
                         attempts: a.attempts,

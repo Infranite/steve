@@ -19,7 +19,7 @@ const HOUR: i64 = 60 * MINUTE;
 pub struct Entry {
     pub name: &'static str,
     pub default: i64,
-    /// `ms` or `count`.
+    /// `ms`, `count` or `switch` (1 on, 0 off).
     pub unit: &'static str,
     pub meaning: &'static str,
 }
@@ -49,6 +49,66 @@ pub const TABLE: &[Entry] = &[
         default: 3,
         unit: "count",
         meaning: "judge failures in a row after which the item is yours",
+    },
+    Entry {
+        name: "judge_model",
+        default: 1,
+        unit: "switch",
+        meaning: "1: the judge asks its model about what facts cannot settle; 0: it records only what facts and rules decide",
+    },
+    Entry {
+        name: "judge_recheck",
+        default: 2 * MINUTE,
+        unit: "ms",
+        meaning: "how soon a finished turn that was busy or unknown is looked at again for judging",
+    },
+    Entry {
+        name: "judge_retry",
+        default: MINUTE,
+        unit: "ms",
+        meaning: "the wait after a failed judge call; it doubles with each failure in a row",
+    },
+    Entry {
+        name: "judge_retry_max",
+        default: 10 * MINUTE,
+        unit: "ms",
+        meaning: "the longest wait between judge calls that failed",
+    },
+    Entry {
+        name: "judge_timeout",
+        default: 2 * MINUTE,
+        unit: "ms",
+        meaning: "how long one judge model call may take",
+    },
+    Entry {
+        name: "judge_claim_stale",
+        default: 10 * MINUTE,
+        unit: "ms",
+        meaning: "a judging pass that has not come back after this long is taken over by the next one",
+    },
+    Entry {
+        name: "judge_text_chars",
+        default: 6_000,
+        unit: "count",
+        meaning: "characters of the turn's final text the judge reads (its end)",
+    },
+    Entry {
+        name: "judge_per_pass",
+        default: 4,
+        unit: "count",
+        meaning: "judge model calls one pass makes",
+    },
+    Entry {
+        name: "judge_every",
+        default: 30_000,
+        unit: "ms",
+        meaning: "the pause between one judging pass ending and the next starting (passes never overlap, and run apart from the stall, build and pull request checks)",
+    },
+    Entry {
+        name: "judge_looks_per_pass",
+        default: 16,
+        unit: "count",
+        meaning: "due judge candidates one pass looks at (most only need their gate read again)",
     },
     Entry {
         name: "transient_max",
@@ -190,6 +250,43 @@ impl WorkPolicy {
     pub fn wait_note_after(&self) -> i64 {
         self.get("wait_note_after")
     }
+    pub fn settle_debounce(&self) -> i64 {
+        self.get("settle_debounce")
+    }
+    pub fn judge_failures(&self) -> i64 {
+        self.get("judge_failures")
+    }
+    pub fn judge_model(&self) -> bool {
+        self.get("judge_model") != 0
+    }
+    pub fn judge_recheck(&self) -> i64 {
+        self.get("judge_recheck")
+    }
+    /// The wait before the next try after `failures` failed judge calls in a row.
+    pub fn judge_retry_after(&self, failures: i64) -> i64 {
+        let base = self.get("judge_retry");
+        let doublings = u32::try_from(failures.saturating_sub(1).clamp(0, 30)).unwrap_or(0);
+        base.saturating_mul(1_i64 << doublings)
+            .min(self.get("judge_retry_max"))
+    }
+    pub fn judge_timeout(&self) -> i64 {
+        self.get("judge_timeout")
+    }
+    pub fn judge_claim_stale(&self) -> i64 {
+        self.get("judge_claim_stale")
+    }
+    pub fn judge_text_chars(&self) -> usize {
+        usize::try_from(self.get("judge_text_chars")).unwrap_or(0)
+    }
+    pub fn judge_per_pass(&self) -> usize {
+        usize::try_from(self.get("judge_per_pass")).unwrap_or(0)
+    }
+    pub fn judge_looks_per_pass(&self) -> usize {
+        usize::try_from(self.get("judge_looks_per_pass")).unwrap_or(0)
+    }
+    pub fn judge_every(&self) -> i64 {
+        self.get("judge_every")
+    }
 
     /// Every entry with the value in force, for the debug view.
     pub fn entries(&self) -> Vec<(&'static str, i64)> {
@@ -214,6 +311,21 @@ mod tests {
         assert_eq!(p.silent_min(), 2 * HOUR);
         assert_eq!(p.build_remind(), 24 * HOUR);
         assert_eq!(p.wait_note_after(), 6);
+        assert_eq!(p.settle_debounce(), 5_000);
+        assert_eq!(p.judge_failures(), 3);
+        assert!(p.judge_model());
+        assert_eq!(p.judge_recheck(), 2 * MINUTE);
+        assert_eq!(p.judge_timeout(), 2 * MINUTE);
+        assert_eq!(p.judge_claim_stale(), 10 * MINUTE);
+        assert_eq!(p.judge_text_chars(), 6_000);
+        assert_eq!(p.judge_per_pass(), 4);
+        assert_eq!(p.judge_looks_per_pass(), 16);
+        assert_eq!(p.judge_every(), 30_000);
+        // the retry waits double up to their cap
+        assert_eq!(p.judge_retry_after(1), MINUTE);
+        assert_eq!(p.judge_retry_after(2), 2 * MINUTE);
+        assert_eq!(p.judge_retry_after(3), 4 * MINUTE);
+        assert_eq!(p.judge_retry_after(9), 10 * MINUTE);
     }
 
     #[test]

@@ -225,6 +225,9 @@ pub const MIGRATIONS: &[&str] = &[
     // 105: what the sweep would do for each open item (#334), in shadow: a log of decisions keyed by
     // (item, cycle, session, turn, scope revision, action, reason, target). Nothing carries them out yet.
     include_str!("../migrations/105.sql"),
+    // 106: the completion judge in shadow (#335): judge candidates per (item, cycle, session, turn,
+    // scope revision) and what a judgement rests on. Nothing acts on them.
+    include_str!("../migrations/106.sql"),
 ];
 
 /// 027's item columns and their one-time backfill (applied by `run_pending` when `items.phase` is missing).

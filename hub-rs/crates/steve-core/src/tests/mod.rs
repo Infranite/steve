@@ -10,6 +10,7 @@ mod flows;
 mod holds;
 mod i18n;
 mod inbox;
+mod judge;
 mod kinds;
 mod lifecycle;
 mod models;

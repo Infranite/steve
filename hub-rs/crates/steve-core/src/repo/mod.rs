@@ -437,6 +437,23 @@ impl Db {
     /// the call may have made moot) is never read as what it waits for now. Only a call's update that
     /// comes late (the call began before the reply) does not count as a call after the reply.
     pub fn final_reply(&self, session: &str) -> Result<String> {
+        Ok(self
+            .final_reply_of(session, None, 0, None)?
+            .unwrap_or_default())
+    }
+    /// [`Db::final_reply`] of one attempt: the events up to `until` (its end; `None`: the session's
+    /// last) and from `since` (its first event, a seq) on — a later attempt's words, or an earlier
+    /// one's (a retry of the same turn), are never this attempt's. With `own` (the seqs confirmed to
+    /// be the attempt's, [`steve_store::item_facts::ItemFacts::attempt_events`]), only those words
+    /// are read, and any assistant text of the range that is not among them makes the reply not
+    /// known (`None`): whose words they are cannot be told.
+    pub fn final_reply_of(
+        &self,
+        session: &str,
+        until: Option<i64>,
+        since: i64,
+        own: Option<&std::collections::HashSet<i64>>,
+    ) -> Result<Option<String>> {
         /// How many of the turn's last events are read: a call whose beginning lies further back
         /// counts as begun at its oldest update read.
         const SCAN: usize = 5000;
@@ -447,7 +464,11 @@ impl Db {
         }
         // the turn, newest first
         let mut turn: Vec<Seen> = vec![];
-        let mut before = 0;
+        let mut before = match until {
+            Some(seq) if seq < 1 => return Ok(Some(String::new())),
+            Some(seq) => seq.saturating_add(1),
+            None => 0,
+        };
         'back: loop {
             let page = self.s.events().before(session, before, 500)?;
             let Some(oldest) = page.last() else {
@@ -455,8 +476,14 @@ impl Db {
             };
             before = oldest.seq;
             for e in &page {
+                if e.seq < since {
+                    break 'back;
+                }
                 read += 1;
                 if let Some(t) = steve_transcript::assistant_text(&e.kind, &e.data) {
+                    if own.is_some_and(|own| !own.contains(&e.seq)) {
+                        return Ok(None);
+                    }
                     turn.push(Seen::Text(t.to_string()));
                     continue;
                 }
@@ -505,7 +532,7 @@ impl Db {
             }
         }
         parts.reverse();
-        Ok(parts.concat().trim().to_string())
+        Ok(Some(parts.concat().trim().to_string()))
     }
     pub fn events_up_to(&self, session: &str, seq: i64) -> Result<Vec<Event>> {
         Ok(self.s.events().up_to(session, seq)?)
