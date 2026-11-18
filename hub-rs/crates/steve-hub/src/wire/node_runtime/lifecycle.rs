@@ -188,7 +188,7 @@ impl NodeRuntime {
                     target_attempt: None,
                     dependency: after,
                 },
-                now(),
+                self.clock.now_ms(),
             )?;
             let open_op = format!("op_open_{}", b.session);
             // the principal's own variables on this Node, as recorded just now (node_env)
@@ -216,7 +216,7 @@ impl NodeRuntime {
                     target_attempt: None,
                     dependency: Some(&prep_op),
                 },
-                now(),
+                self.clock.now_ms(),
             )?;
             let rev = session_revision(tx, &b.session)?;
             rt::session_cas_in(
@@ -315,7 +315,7 @@ impl NodeRuntime {
                 target_attempt: None,
                 dependency,
             },
-            now(),
+            self.clock.now_ms(),
         )?;
         let rev = session_revision(tx, session)?;
         rt::session_cas_in(
@@ -475,8 +475,8 @@ impl NodeRuntime {
                             rusqlite::params![
                                 serde_json::to_string(&req).map_err(conflict)?,
                                 digest,
-                                now(),
-                                now(),
+                                self.clock.now_ms(),
+                                self.clock.now_ms(),
                                 op
                             ],
                         )?;
@@ -535,7 +535,7 @@ impl NodeRuntime {
                 target_attempt: None,
                 dependency: None,
             },
-            now(),
+            self.clock.now_ms(),
         )?;
         Ok(op)
     }

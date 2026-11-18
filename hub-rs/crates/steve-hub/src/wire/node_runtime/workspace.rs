@@ -229,7 +229,7 @@ impl NodeRuntime {
                 target_attempt: None,
                 dependency: None,
             },
-            now(),
+            self.clock.now_ms(),
         )?;
         Ok(Some(op))
     }

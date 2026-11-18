@@ -1,6 +1,10 @@
 use super::*;
 use steve_node_api::testkit::{FakeNode, build};
 
+#[path = "../../../tests/node_runtime/clock.rs"]
+mod test_clock;
+use test_clock::ManualClock;
+
 /// Counts what the runtime books after commits.
 #[derive(Default)]
 struct Seen {
@@ -653,7 +657,22 @@ fn exhausted_delays_double_from_two_seconds_up_to_a_minute() {
 
 #[tokio::test]
 async fn device_pause_keeps_existing_attempt_and_retry_then_holds_followup_until_resume() {
-    let h = super::super::node_tools::tests::fixture(vec![]).await;
+    let mut h = super::super::node_tools::tests::fixture(vec![]).await;
+    let clock = Arc::new(ManualClock::new());
+    // Reassemble the coordinator over the same durable running attempt, with a controllable
+    // retry clock. Keep the Node and domain used by the shared tool fixture.
+    let rt = NodeRuntime::with_clock(
+        h.store.clone(),
+        h._node.clone(),
+        Arc::new(super::super::node_tools::tests::Ends),
+        clock.clone(),
+    );
+    let old = Arc::downgrade(&h._rt);
+    h._rt = rt;
+    until("previous coordinator dropped", || old.upgrade().is_none()).await;
+    h._node.connect(Arc::new(Sink(Arc::downgrade(&h._rt))));
+    h._rt.start();
+    until("coordinator reconciled", || h._rt.is_reconciled()).await;
     until("first attempt reached Node", || {
         h._node.log().iter().any(|(m, _)| *m == "start_turn")
     })
@@ -727,22 +746,40 @@ async fn device_pause_keeps_existing_attempt_and_retry_then_holds_followup_until
         panic!("expected turn attempts")
     };
     assert_eq!(retry_turn, first_turn);
-    // Production retries wait 20 seconds. Observe that real backoff rather than using
-    // the shorter generic fixture timeout or changing its persisted retry deadline.
-    tokio::time::timeout(Duration::from_secs(35), async {
-        while h
-            ._node
+    let at: i64 = h
+        .store
+        .reader::<_, StoreError>(|c| {
+            Ok(c.query_row(
+                "SELECT retry_at FROM node_commands WHERE target_attempt=?",
+                [retry.attempt().as_str()],
+                |r| r.get(0),
+            )?)
+        })
+        .unwrap();
+    assert_eq!(at, clock.now_ms() + 20_000);
+    clock.advance_to(at - 1);
+    until("sender observed time before deadline", || {
+        clock.observed(at - 1)
+    })
+    .await;
+    assert_eq!(
+        h._node
+            .log()
+            .iter()
+            .filter(|(m, _)| *m == "start_turn")
+            .count(),
+        1
+    );
+    clock.advance_to(at);
+    until("retry reached Node while device paused", || {
+        h._node
             .log()
             .iter()
             .filter(|(m, _)| *m == "start_turn")
             .count()
-            != 2
-        {
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
+            == 2
     })
-    .await
-    .expect("retry reached Node while device paused");
+    .await;
     h._node
         .finish(
             &retry,
