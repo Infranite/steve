@@ -31,8 +31,9 @@ const e = encodeURIComponent
 const optional = <T>(p: Promise<T>) => p.catch((x) => (isNotWired(x) ? undefined : Promise.reject(x)))
 
 export type ConvPage = { conversations: ConvRow[]; total?: number; has_more?: boolean; next_offset?: number | null }
+export type ConvState = "open" | "closed" | "all" | "replied"
 export const conversationsApi = {
-  page: (q: string, state: "open" | "closed" | "all", offset = 0, connection = "") => modReq<ConvPage>("GET", `/conversations?q=${e(q)}&state=${state}&offset=${offset}&limit=50${connection ? `&connection=${e(connection)}` : ""}`),
+  page: (q: string, state: ConvState, offset = 0, connection = "") => modReq<ConvPage>("GET", `/conversations?q=${e(q)}&state=${state}&offset=${offset}&limit=50${connection ? `&connection=${e(connection)}` : ""}`),
   /** the channel switcher; undefined on a Hub without it */
   channels: () => optional(modReq<{ channels: ChannelEntry[] }>("GET", "/conversations/channels")).then((r) => r?.channels),
   /** a page of the record, oldest first; undefined on a Hub without it */

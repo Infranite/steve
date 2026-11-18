@@ -197,6 +197,7 @@ export default {
       open: "未关闭",
       closed: "已关闭",
       all: "全部",
+      replied: "最近回复过的",
     },
     updated: "会话有更新，刷新列表",
     restoreOpen: "恢复并打开：{{name}}",

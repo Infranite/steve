@@ -1154,6 +1154,7 @@ fn badge(c: &rusqlite::Connection, space: &crate::spaces::SpaceRow) -> ChannelRe
 #[derive(Debug, Default, serde::Deserialize)]
 pub struct ListQuery {
     pub q: Option<String>,
+    /// `all`, `open`, `closed`, or `replied` (sent a message or awaiting draft approval).
     pub state: Option<String>,
     /// Only the spaces this channel account (connection) sees or was first seen through.
     pub connection: Option<String>,
@@ -1281,11 +1282,12 @@ pub fn list_page(
 ) -> ChannelResult<ListPage> {
     member(c, ws, viewer)?;
     let state = match query.state.as_deref().unwrap_or("all") {
-        "all" => -1,
+        "all" | "replied" => -1,
         "open" => 0,
         "closed" => 1,
         _ => return Err(steve_modules::ApiError::invalid("state")),
     };
+    let replied = query.state.as_deref() == Some("replied");
     let offset = query.offset.unwrap_or(0);
     if offset < 0 || query.limit.is_some_and(|n| !(1..=200).contains(&n)) {
         return Err(steve_modules::ApiError::invalid("pagination"));
@@ -1295,7 +1297,10 @@ pub fn list_page(
         return Err(steve_modules::ApiError::invalid("q"));
     }
     let conn = query.connection.as_deref().unwrap_or("").trim();
-    // Visibility and preferences are applied before pagination. Search is literal, not LIKE wildcards.
+    // Visibility, reply activity and preferences are applied before pagination. A conversation's
+    // internal Steve turns are not proof of sending. Only visible sent messages or drafts with a
+    // still-open approval qualify; failures, queued sends and settled approvals do not.
+    // Search is literal, not LIKE wildcards.
     // The latest visible channel message walks the (space, created) index from the end.
     let cte = format!(
         "WITH grouped AS (
@@ -1309,6 +1314,12 @@ pub fn list_page(
           WHERE s.workspace_id = ?1 AND {visibility}
             AND (?7 = '' OR s.connection_id = ?7 OR EXISTS (SELECT 1 FROM space_identities li
               WHERE li.space_id = s.id AND li.connection_id = ?7 AND li.left_at IS NULL))
+            AND (?8 = 0 OR EXISTS (SELECT 1 FROM chan_messages m
+              WHERE m.workspace_id = ?1 AND m.space_id = s.id AND m.direction = 'out' AND {seen}
+                AND (m.status = 'sent' OR (m.status = 'draft' AND EXISTS (
+                  SELECT 1 FROM decisions d WHERE d.id = m.decision_id AND d.workspace_id = ?1
+                    AND d.kind = 'approve' AND d.status = 'open'
+                    AND d.subject_type = 'chan_message' AND d.subject_id = m.id)))))
         ), joined AS (
           SELECT b.*, cm.created AS chan_last, coalesce(cm.text, '') AS chan_text, cm.direction AS chan_dir
           FROM base b LEFT JOIN chan_messages cm ON cm.id = b.chan_id
@@ -1338,7 +1349,7 @@ pub fn list_page(
     );
     let total: i64 = c.query_row(
         &format!("{cte} SELECT count(*) FROM filtered"),
-        params![ws, viewer.user, state, q, -1, 0, conn],
+        params![ws, viewer.user, state, q, -1, 0, conn, replied],
         |r| r.get(0),
     )?;
     let mut st = c.prepare(&format!("{cte} SELECT id, space, n, last, closed, coalesce(last_text, ''), coalesce(last_author, 'me'), read_up_to
@@ -1353,7 +1364,8 @@ pub fn list_page(
                 q,
                 query.limit.unwrap_or(-1),
                 offset,
-                conn
+                conn,
+                replied
             ],
             |r| -> rusqlite::Result<Row> {
                 Ok((
