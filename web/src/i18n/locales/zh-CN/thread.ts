@@ -238,7 +238,7 @@ export default {
     working: "处理中",
     failureNoticeSent: "失败说明已发出",
     failed: "失败",
-    skipped: "没有回复",
+    skipped: "已跳过",
     decided: "你已处理",
     recorded: "只记录",
     history: "旧消息",

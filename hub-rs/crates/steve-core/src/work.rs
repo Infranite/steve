@@ -218,6 +218,13 @@ impl Tx<'_> {
         if let Some(d) = open.first() {
             return Ok(user(d));
         }
+        if let Some(s) = self.active_session(&item.id)?
+            && self.turn_receipt(item, &s, None)? == Some(crate::Mark::Delivered)
+        {
+            // An accepted delivery can be waiting on its PR/closing gate without an open card.
+            // It is still closing, including after restart, rather than an idle turn to continue.
+            return Ok(Work::Queued(item.now.clone()));
+        }
         Ok(Work::Idle)
     }
 
@@ -227,7 +234,7 @@ impl Tx<'_> {
     /// or was cancelled. Cards about an effect nobody knows, a release, an approval or an acceptance
     /// stay.
     pub(crate) fn work_tidy(&mut self) -> Result<usize> {
-        let mut n = 0;
+        let mut n = self.receipts_tidy()?;
         for g in self.db().store().workflows().all_open()? {
             if g.single_session() {
                 continue;

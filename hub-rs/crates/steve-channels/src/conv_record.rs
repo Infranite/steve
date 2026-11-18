@@ -27,7 +27,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use steve_store::base::Viewer;
 
-use crate::conversations::{MAIN_CONV, conv_space, out_state, shown_space};
+use crate::conversations::{MAIN_CONV, NO_REPLY, conv_space, out_state, shown_space};
 use crate::{ChannelResult, Channels, messages, spaces};
 
 /// Messages of a record page when the request names no limit.
@@ -143,9 +143,9 @@ pub struct Facts {
     pub turn_answered_in_main: bool,
 }
 
-/// [`Handling`] of `f`: a failure wins (it is what you need to see), then a handoff, an answer that
-/// went out, something waiting for you, work in progress, a look without an answer, your decision,
-/// and last the label it was recorded with (unless it only says where the message came from).
+/// A retained outbound result decides delivery. Without one, processing failures, handoffs and
+/// open cards take precedence; an explicit skip then wins over stale processing markers. A reply
+/// available only in Steve stays separate from a confirmed channel send.
 pub fn handling(f: &Facts) -> Handling {
     // A persisted outbound result wins over events and reaction lifecycle state. A failed
     // reaction cannot invalidate a confirmed send, nor can “done” send a draft. Generation
@@ -169,17 +169,25 @@ pub fn handling(f: &Facts) -> Handling {
     if f.item.is_some() {
         return Handling::Item;
     }
-    if f.turn_answered_in_main {
-        return Handling::Local;
-    }
     if f.decision_open {
         return Handling::Waiting;
+    }
+    // A completed skip can leave an old acknowledgement or an unanswered turn behind. Keep
+    // the recorded reason ahead of those stale markers; persisted outbound results above still
+    // decide sent/draft/blocked/failed/unknown outcomes.
+    if (f.outcome.as_deref() == Some("recorded") && f.label.starts_with(NO_REPLY))
+        || f.reaction.as_deref() == Some("cleared")
+        || f.outcome.as_deref() == Some("ignored")
+    {
+        return Handling::Skipped;
+    }
+    if f.turn_answered_in_main {
+        return Handling::Local;
     }
     if f.reaction.as_deref() == Some("ack") || f.turn_open {
         return Handling::Working;
     }
-    if f.turn || f.reaction.as_deref() == Some("cleared") || f.outcome.as_deref() == Some("ignored")
-    {
+    if f.turn {
         return Handling::Skipped;
     }
     if f.decision_closed {
@@ -720,6 +728,85 @@ mod tests {
             }),
             Handling::None
         );
+    }
+
+    #[test]
+    fn a_finished_skip_wins_over_stale_processing_markers() {
+        for finished in [
+            Facts {
+                outcome: Some("recorded".into()),
+                label: format!("{}没有明确的请求", crate::conversations::NO_REPLY),
+                ..f()
+            },
+            Facts {
+                outcome: Some("ignored".into()),
+                ..f()
+            },
+            Facts {
+                reaction: Some("cleared".into()),
+                ..f()
+            },
+            Facts {
+                answer: Some(crate::outbound::DISCARDED.into()),
+                ..f()
+            },
+        ] {
+            let x = Facts {
+                reaction: finished.reaction.or(Some("ack".into())),
+                turn: true,
+                turn_open: true,
+                ..finished
+            };
+            assert_eq!(handling(&x), Handling::Skipped, "{x:?}");
+        }
+    }
+
+    #[test]
+    fn an_active_send_or_open_decision_keeps_its_priority() {
+        for answer in ["pending", "unknown"] {
+            let x = Facts {
+                answer: Some(answer.into()),
+                reaction: Some("cleared".into()),
+                ..f()
+            };
+            let expected = if answer == "unknown" {
+                Handling::Unknown
+            } else {
+                Handling::Working
+            };
+            assert_eq!(handling(&x), expected, "{x:?}");
+        }
+        let x = Facts {
+            decision_open: true,
+            answer: Some("draft".into()),
+            reaction: Some("cleared".into()),
+            turn: true,
+            turn_open: true,
+            ..f()
+        };
+        assert_eq!(handling(&x), Handling::Drafted);
+        assert_eq!(
+            handling(&Facts {
+                decision_open: true,
+                reaction: Some("cleared".into()),
+                ..f()
+            }),
+            Handling::Waiting
+        );
+    }
+
+    #[test]
+    fn a_finished_skip_is_not_a_local_or_channel_reply() {
+        let facts = Facts {
+            outcome: Some("recorded".into()),
+            label: format!("{NO_REPLY}nothing to add"),
+            reaction: Some("ack".into()),
+            turn: true,
+            turn_open: true,
+            turn_answered_in_main: true,
+            ..f()
+        };
+        assert_eq!(handling(&facts), Handling::Skipped);
     }
 
     #[test]

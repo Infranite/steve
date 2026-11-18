@@ -25,6 +25,13 @@ async fn state(Extension(f): F) -> Json<Value> {
 }
 async fn mode(Extension(f): F, Json(v): Json<Value>) -> Json<Value> {
     f.reply(v["approval"] == true);
+    if v["skip"] == true {
+        f.env.gateway.unscript(steve_channels::compose::H_SAFETY);
+        f.env.gateway.script(
+            steve_channels::compose::H_SAFETY,
+            r#"{"outcome":"skip","text":"No action needed","why":"No explicit request","needs_approval":false}"#,
+        );
+    }
     *f.fake.block_target_send.lock().unwrap() =
         (v["blocked"] == true).then(|| "target_forbidden: synthetic fixture policy".into());
     *f.fake.fail_send.lock().unwrap() =

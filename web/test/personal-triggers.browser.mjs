@@ -25,6 +25,12 @@ try {
     await page.getByRole("button", { name: "移除前缀 BROWSER_AUTO:" }).waitFor()
     const filtered = await request("/fixture/inbound", { id: `browser-filter-${width}`, text: "BROWSER_AUTO: /bot ignored" })
     assert.equal(filtered.trigger, false)
+    await request("/fixture/mode", { skip: true })
+    const skipped = await request("/fixture/inbound", { id: `browser-skip-${width}`, text: "/bot synthetic skip" })
+    await page.goto(`${web}/test/fixtures/personal-triggers.html?space=${skipped.space_id}`)
+    const skippedRow = page.locator(`[data-msg="${skipped.message_id}"] [data-handling="skipped"]`)
+    await skippedRow.waitFor()
+    assert.match(await skippedRow.innerText(), /已跳过.*No explicit request/s)
     // Real API states are rendered by the actual record component, including a held draft.
     await request("/fixture/mode", { approval: true })
     const draft = await request("/fixture/inbound", { id: `browser-draft-${width}`, text: "/bot draft synthetic answer" })
@@ -39,5 +45,5 @@ try {
     assert.deepEqual(errors, [])
     await page.close()
   }
-  console.log("passed: real fixture API prefix add/reload/filter/remove and draft-only display at 390/1280px")
+  console.log("passed: real fixture API prefix add/reload/filter/remove, skip reason and draft-only display at 390/1280px")
 } finally { await browser.close() }
