@@ -301,9 +301,9 @@ jobs:
         run: scripts/build-apple-client.sh ios-sim
   test:
     name: CI gate
-    # Superseding a pending workflow cancels that run, not a check of the newer commit. Do not turn
-    # cancellation into a failed gate; an active run still requires all of its own jobs to pass.
-    if: ${{ !cancelled() }}
+    # Always runs, so a cancelled run reports a failed gate: branch rules take a skipped required check
+    # as passed. A superseded run's failure stays on its own commit and never touches the newer one's.
+    if: ${{ always() }}
     needs: [changes, scripts, web, rust-plan, rust-test, rust, apple]
     runs-on: ubuntu-22.04
     timeout-minutes: 5
