@@ -73,6 +73,18 @@ pub fn routes<S: Clone + Send + Sync + 'static>(svc: Capabilities) -> Router<S> 
             patch(skills::update_h).delete(skills::remove_h),
         )
         .route(
+            "/capabilities/skills/{id}/versions",
+            get(skills::versions_h),
+        )
+        .route(
+            "/capabilities/skills/{id}/versions/{version}",
+            get(skills::version_h),
+        )
+        .route(
+            "/capabilities/skills/{id}/publication",
+            put(skills::publish_h),
+        )
+        .route(
             "/capabilities/a2a-agents",
             get(a2a::list_h).post(a2a::create_h),
         )
@@ -308,12 +320,13 @@ impl Capabilities {
                 .collect();
             let skills: Vec<Value> = steve_store::caps::skills::of_bot(c, bot)?
                 .iter()
+                .filter(|(s, _)| s.workspace_id == ws)
                 .map(|(s, on)| {
-                    let mut v = skills::out(s);
+                    let mut v = skills::out(c, s)?;
                     v["enabled"] = json!(on);
-                    v
+                    Ok::<_, ApiError>(v)
                 })
-                .collect();
+                .collect::<Result<_, _>>()?;
             let a2a: Vec<Value> = steve_store::caps::a2a::of_bot(c, bot)?
                 .iter()
                 .map(|(s, on)| {

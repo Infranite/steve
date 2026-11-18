@@ -124,6 +124,12 @@ pub trait Discovery: Send + Sync {
         ))
     }
     async fn probe(&self, fresh: bool) -> ApiResult<Capabilities>;
+    async fn sync_skills(&self, _target: crate::SyncSkills) -> ApiResult<crate::SkillCacheReceipt> {
+        Err(ApiError::new(
+            ErrorCode::Unsupported,
+            "managed skills unsupported",
+        ))
+    }
     /// Stage the Hub's release on this Node ([`NodeUpgrade`]). Only a Node that advertises
     /// [`FEATURE_NODE_UPGRADE`] does.
     async fn upgrade_stage(&self, _u: NodeUpgrade) -> ApiResult<NodeUpgradeState> {

@@ -2,7 +2,7 @@
  * when a session opens, the Node writes the ones its Bot has switched on where the harness reads skills (the harness
  * adapter says whether and where, RRuntime.skills). Each is a card like an MCP server's: in the library with the
  * Bots that use it, on a Bot's tab with that Bot's switch. Editing is a dialog whose body switches between writing
- * and a preview; a whole pasted SKILL.md fills the form from its front matter. */
+ * and a preview. Saving creates a draft; only the explicit action in Versions publishes it. */
 import { useState, type ReactNode } from "react"
 import { ClipboardPasteIcon, PencilIcon, PlusIcon, SparklesIcon, TrashIcon } from "lucide-react"
 import { useT } from "@/i18n"
@@ -17,6 +17,8 @@ import { IntegrationSettings } from "@/components/affect/integration-settings-cl
 import { Section, Empty, Loading, Blank, Segmented, Notice } from "@/ui"
 import { toast } from "@/store"
 import { capsApi, type Skill } from "@/api/caps"
+import { Badge } from "@/components/affect/badge-clean"
+import { SkillHistory, SkillDistributionPanel } from "./skill-history"
 import { parseSkillMd, skillName, skillNameOk, type SkillMd } from "@/skill-md"
 import { AssignMenu, UsedBy, errText, useList } from "./common"
 
@@ -74,7 +76,15 @@ export function SkillCard({ x, aside, footer, enabled, onToggle, switchLabel }: 
   const t = useT()
   return (
     <IntegrationSettings name={x.name} logo={<SparklesIcon className="size-5" />} data-bot-skill={x.name} data-bot-skill-on={enabled}
-      meta={<span className="line-clamp-2 whitespace-normal type-footnote" title={x.description} data-skill-description>{x.description}</span>}
+      meta={<span className="flex min-w-0 flex-col items-start gap-1">
+        <span className="line-clamp-2 whitespace-normal type-footnote" title={x.description} data-skill-description>{x.description}</span>
+        <span className="flex flex-wrap gap-1">
+          <Badge tone={x.published_version ? "success" : "neutral"} data-skill-publication>
+            {x.published_version ? t("caps:skills.publishedV", { version: x.published_version }) : t("caps:skills.unpublished")}
+          </Badge>
+          {x.head_version > 0 && x.head_version !== x.published_version && <Badge>{t("caps:skills.draftV", { version: x.head_version })}</Badge>}
+        </span>
+      </span>}
       pausedMeta={<span className="type-footnote">{t("caps:bot.paused")}</span>}
       enabled={enabled} switchLabel={switchLabel} onToggle={onToggle}
       aside={aside && <span className="flex shrink-0 items-center">{aside}</span>} footer={footer} />
@@ -84,7 +94,10 @@ export function SkillCard({ x, aside, footer, enabled, onToggle, switchLabel }: 
 /** a new skill (with `bot`: also given to that Bot) or an edit of one */
 export function SkillDialog({ e, bot, onClose, onSaved }: { e: Editing; bot?: string; onClose: () => void; onSaved: (s: Skill) => void }) {
   const t = useT()
-  const x = "x" in e ? e.x : null
+  const [x, setKnown] = useState("x" in e ? e.x : null)
+  const [tab, setTab] = useState<"editor" | "versions" | "distribution">("editor")
+  const [note, setNote] = useState("")
+  const [rebased, setRebased] = useState(false)
   const from = "x" in e ? e.x : e.draft
   const [name, setName] = useState(x ? from.name : skillName(from.name))
   const [description, setDescription] = useState(from.description)
@@ -96,17 +109,32 @@ export function SkillDialog({ e, bot, onClose, onSaved }: { e: Editing; bot?: st
   const shared = (x?.bots?.length ?? 0) > 1
   const save = async () => {
     setBusy(true); setErr(null)
-    const b = { name: name.trim(), description: desc, content }
+    const b = { name: name.trim(), description: desc, content, note }
     try {
-      const r = x ? await capsApi.skills.update(x.id, b) : await capsApi.skills.create(bot ? { ...b, bot } : b)
+      const r = x ? await capsApi.skills.update(x.id, { ...b, base_version: x.head_version }) : await capsApi.skills.create(bot ? { ...b, bot } : b)
       toast(t(x ? "caps:skills.saved" : "caps:skills.added", { name: r.name })); onSaved(r)
+    } catch (e) { setErr(errText(e)) } finally { setBusy(false) }
+  }
+  const reload = async () => {
+    if (!x) return
+    setBusy(true)
+    try {
+      const latest = (await capsApi.skills.list()).find((s) => s.id === x.id)
+      if (!latest) throw new Error(t("caps:skills.noLongerHere"))
+      setKnown(latest); setErr(null); setRebased(true); setTab("versions")
     } catch (e) { setErr(errText(e)) } finally { setBusy(false) }
   }
   return (
     <Dialog open onOpenChange={(o) => !o && onClose()}>
-      <DialogContent className="sm:max-w-[720px]" data-skill-dialog>
+      <DialogContent className="max-h-[90dvh] overflow-y-auto sm:max-w-[780px]" data-skill-dialog>
         <DialogHeader><DialogTitle>{x ? t("caps:skills.dialogEdit", { name: x.name }) : t("caps:skills.dialogNew")}</DialogTitle><DialogDescription>{bot && !x ? t("caps:skills.dialogDescBot") : t("caps:skills.dialogDesc")}</DialogDescription></DialogHeader>
+        {x && <Segmented size="sm" label={t("caps:skills.section")} value={tab} onChange={setTab}
+          options={[["editor", t("caps:skills.write")], ["versions", t("caps:skills.versions")], ["distribution", t("caps:skills.distribution")]] as const} />}
+        {tab === "versions" && x && <SkillHistory skill={x} onPublished={onSaved} onReload={() => void reload()} />}
+        {tab === "distribution" && x && <SkillDistributionPanel id={x.id} />}
+        {tab === "editor" && <>
         <div className="flex min-w-0 flex-col gap-4">
+          {rebased && <Notice>{t("caps:skills.reloaded")}</Notice>}
           {shared && <Notice data-skill-shared>{t("caps:skills.shared", { count: x?.bots?.length ?? 0 })}</Notice>}
           <TextField label={t("caps:skills.name")} hint={nameBad ? undefined : t("caps:skills.nameHint")} error={nameBad ? t("caps:skills.nameBad") : undefined} value={name} onChange={(ev) => setName(ev.target.value)} maxLength={64} inputClassName="font-mono" autoComplete="off" spellCheck={false} data-skill-name />
           <TextArea label={t("caps:skills.description")} hint={t("caps:skills.descriptionHint")} minRows={2} maxRows={4} maxLength={1024} value={description} onChange={(ev) => setDescription(ev.target.value)} data-skill-description-edit />
@@ -122,12 +150,17 @@ export function SkillDialog({ e, bot, onClose, onSaved }: { e: Editing; bot?: st
               </div>}
             <span className="type-footnote text-muted-foreground">{t("caps:skills.contentHint")}</span>
           </div>
-          {err && <Notice tone="destructive" data-skill-error>{err}</Notice>}
+          <TextField label={t("caps:skills.noteField")} value={note} maxLength={500} onChange={(e) => setNote(e.target.value)} />
         </div>
         <DialogFooter>
           <Button variant="outline" onClick={onClose}>{t("common:action.cancel")}</Button>
-          <Button disabled={busy || !skillNameOk(name.trim()) || !desc} onClick={() => void save()} data-skill-save>{t("common:action.save")}</Button>
+          <Button disabled={busy || !skillNameOk(name.trim()) || !desc} onClick={() => void save()} data-skill-save>{t("caps:skills.saveDraft")}</Button>
         </DialogFooter>
+        </>}
+        {err && <Notice tone="destructive" data-skill-error>
+          {err}
+          {x && <Button variant="ghost" size="xs" disabled={busy} onClick={() => void reload()}>{t("caps:skills.reloadVersion")}</Button>}
+        </Notice>}
       </DialogContent>
     </Dialog>
   )
@@ -137,10 +170,25 @@ export function SkillDialog({ e, bot, onClose, onSaved }: { e: Editing; bot?: st
 export function ImportDialog({ onClose, onRead }: { onClose: () => void; onRead: (d: SkillMd) => void }) {
   const t = useT()
   const [text, setText] = useState("")
+  const [fileError, setFileError] = useState(false)
+  const loadFile = async (file: File | undefined) => {
+    if (!file) return
+    try {
+      if (file.name.toLowerCase() !== "skill.md" || file.size > 64 * 1024) throw new Error()
+      setText(new TextDecoder("utf-8", { fatal: true }).decode(await file.arrayBuffer()))
+      setFileError(false)
+    } catch { setFileError(true) }
+  }
   return (
     <Dialog open onOpenChange={(o) => !o && onClose()}>
       <DialogContent className="sm:max-w-[640px]" data-skill-import-dialog>
         <DialogHeader><DialogTitle>{t("caps:skills.importTitle")}</DialogTitle><DialogDescription>{t("caps:skills.importDesc")}</DialogDescription></DialogHeader>
+        <label className="flex flex-wrap items-center gap-2 type-footnote">
+          {t("caps:skills.pickFile")}
+          <input className="min-w-0 max-w-full" type="file" accept=".md,text/markdown"
+            onChange={(e) => void loadFile(e.currentTarget.files?.[0])} data-skill-file />
+        </label>
+        {fileError && <Notice tone="destructive">{t("caps:skills.badFile")}</Notice>}
         <Textarea rows={12} value={text} onChange={(e) => setText(e.target.value)} placeholder={"---\nname: code-review\ndescription: …\n---\n\n# …"} aria-label={t("caps:skills.importTitle")} className="max-h-[50vh] font-mono type-footnote" spellCheck={false} data-skill-paste />
         <DialogFooter>
           <Button variant="outline" onClick={onClose}>{t("common:action.cancel")}</Button>

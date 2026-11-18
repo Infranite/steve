@@ -972,6 +972,21 @@ pub fn wire_assembly(
             crate::nodes::handover::minutes(|k| vars(k)),
         )));
     }
+    if !cfg.no_resume {
+        let local_skills = (mode == NodeMode::Local)
+            .then(|| {
+                model_node
+                    .as_ref()
+                    .map(|h| h.node.clone() as Arc<dyn steve_node_api::Node>)
+            })
+            .flatten();
+        jobs.push(Box::pin(bot_skills::run(
+            db.clone(),
+            local_skills,
+            nodes.clone(),
+            principal_state(&vars),
+        )));
+    }
     let local_node = model_node.as_ref().map(|h| h.node.clone());
     // how each machine is doing, for the devices page (B3)
     jobs.push(Box::pin(crate::nodes::vitals::sample(
