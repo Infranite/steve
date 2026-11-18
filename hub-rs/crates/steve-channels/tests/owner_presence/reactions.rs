@@ -8,9 +8,12 @@ fn reaction(h: &H, space: &str, target: &str, from: &str) -> ReactionEvent {
         message_source_id: None,
         actor: FakeChannel::handle(from),
         actor_name: None,
+        actor_is_bot: false,
         origin: ReactionOrigin::Manual,
         emoji: "👍".into(),
         at: h.ch.now() + 30_000,
+        time_source: steve_channels::ReactionTimeSource::Provider,
+        revision: None,
         removed: false,
     }
 }
@@ -20,6 +23,134 @@ fn stop(h: &H, message: &str) -> Option<presence::Stop> {
         .store()
         .reader(|c| presence::stop(c, WS, message, h.ch.now()))
         .unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn producer_revision_orders_same_millisecond_removal_readd_and_replay() {
+    let h = setup().await;
+    let source =
+        h.ch.on_inbound(WS, &h.me, msg(&h, "D_LI", "l1", "ulilei", "请确认", 0))
+            .await
+            .unwrap();
+    let mut ev = reaction(&h, "D_LI", "l1", "upx");
+    ev.time_source = steve_channels::ReactionTimeSource::Observed;
+    ev.revision = Some(10);
+    h.ch.on_reaction(WS, &h.me, ev.clone()).unwrap();
+    assert!(stop(&h, &source.message_id).is_some());
+    ev.removed = true;
+    ev.revision = Some(11);
+    let deleted = ev.clone();
+    h.ch.on_reaction(WS, &h.me, ev.clone()).unwrap();
+    assert_eq!(stop(&h, &source.message_id), None);
+    ev.removed = false;
+    ev.revision = Some(12);
+    h.ch.on_reaction(WS, &h.me, ev.clone()).unwrap();
+    h.ch.on_reaction(WS, &h.me, deleted).unwrap();
+    assert!(
+        stop(&h, &source.message_id).is_some(),
+        "newer revision re-adds even at the same millisecond"
+    );
+    let got = h
+        .env
+        .store()
+        .reader(|c| steve_channels::incoming_reactions::list(c, &source.message_id, -1))
+        .unwrap();
+    assert_eq!(got.len(), 1);
+    assert_eq!(got[0].time_source, "observed");
+    assert_eq!(got[0].revision, Some(12));
+    // An unversioned redelivery cannot replace a versioned state just by carrying a later clock.
+    ev.revision = None;
+    ev.removed = true;
+    ev.at += 50_000;
+    h.ch.on_reaction(WS, &h.me, ev).unwrap();
+    assert!(stop(&h, &source.message_id).is_some());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_newer_revision_wins_when_the_producer_clock_moves_backwards() {
+    let h = setup().await;
+    let source =
+        h.ch.on_inbound(WS, &h.me, msg(&h, "D_LI", "l1", "ulilei", "请确认", 0))
+            .await
+            .unwrap();
+    let mut ev = reaction(&h, "D_LI", "l1", "upx");
+    ev.revision = Some(1);
+    let stale = ev.clone();
+    h.ch.on_reaction(WS, &h.me, ev.clone()).unwrap();
+    ev.revision = Some(2);
+    ev.removed = true;
+    ev.at -= 1000;
+    h.ch.on_reaction(WS, &h.me, ev).unwrap();
+    h.ch.on_reaction(WS, &h.me, stale).unwrap();
+    assert_eq!(stop(&h, &source.message_id), None);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn revisions_follow_the_same_target_when_its_provider_reference_shape_changes() {
+    let h = setup().await;
+    let m = msg(&h, "D_LI", "l1", "ulilei", "请确认", 0).source_id("source_l1");
+    let source = h.ch.on_inbound(WS, &h.me, m).await.unwrap();
+    let mut ev = reaction(&h, "D_LI", "l1", "upx");
+    ev.revision = Some(11);
+    h.ch.on_reaction(WS, &h.me, ev.clone()).unwrap();
+    assert!(stop(&h, &source.message_id).is_some());
+    ev.message_ext_id = None;
+    ev.message_source_id = Some("source_l1".into());
+    ev.revision = Some(12);
+    ev.at -= 1000;
+    ev.removed = true;
+    h.ch.on_reaction(WS, &h.me, ev.clone()).unwrap();
+    assert_eq!(
+        stop(&h, &source.message_id),
+        None,
+        "the delivery-id alias is the same message"
+    );
+    ev.message_ext_id = Some("l1".into());
+    ev.revision = None;
+    ev.at += 60_000;
+    ev.removed = false;
+    h.ch.on_reaction(WS, &h.me, ev).unwrap();
+    assert_eq!(
+        stop(&h, &source.message_id),
+        None,
+        "unversioned alias cannot bypass version ordering"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_automated_action_does_not_turn_its_human_account_into_a_bot() {
+    let h = setup().await;
+    let source =
+        h.ch.on_inbound(WS, &h.me, msg(&h, "D_LI", "l1", "ulilei", "请确认", 0))
+            .await
+            .unwrap();
+    let mut ev = reaction(&h, "D_LI", "l1", "u_new");
+    ev.origin = ReactionOrigin::Automated;
+    assert!(!ev.actor_is_bot);
+    h.ch.on_reaction(WS, &h.me, ev).unwrap();
+    let got = h
+        .env
+        .store()
+        .reader(|c| steve_channels::incoming_reactions::list(c, &source.message_id, -1))
+        .unwrap();
+    let account = got[0].actor.account_id.as_deref().unwrap();
+    assert_eq!(
+        row(&h, "SELECT kind FROM accounts WHERE id=?", &[account])[0],
+        "personal"
+    );
+    let followup =
+        h.ch.on_inbound(
+            WS,
+            &h.me,
+            msg(&h, "D_LI", "l2", "u_new", "now speaking myself", 1),
+        )
+        .await
+        .unwrap();
+    assert_ne!(
+        followup.next,
+        steve_channels::Next::Record(steve_channels::inbound::LABEL_BOT)
+    );
+    assert_eq!(stop(&h, &source.message_id), None);
 }
 
 /// A durable event landed through another worker, without its proactive supersede pass. This

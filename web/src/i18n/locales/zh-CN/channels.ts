@@ -212,6 +212,8 @@ export default {
     reactionManual: "手动表情回应",
     reactionAutomated: "自动化表情，仅作上下文",
     reactionUnknown: "表情来源未明，仅作上下文",
+    reactionObservedTime: "观察时间",
+    reactionActionTime: "表情时间",
     purged: "原文已过保留期限",
     recalled: "消息已撤回",
     draftEmpty: "（草稿还没有正文）",

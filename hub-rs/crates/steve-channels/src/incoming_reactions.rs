@@ -1,7 +1,7 @@
 //! Incoming reactions, including removal tombstones. Only an identified owner's reaction with
 //! explicit manual provenance handles a message. It is never a presence/live signal for later
-//! messages. Unknown provenance is context, including native Feishu user-token events: the native
-//! envelope cannot distinguish an API call on the user's account from a click.
+//! messages. Unknown provenance is context. Provider parsing, write-intent tracking and source
+//! attribution belong to the producer; this module consumes the channel-neutral facts it supplies.
 
 use rusqlite::{Connection, params};
 use serde::Serialize;
@@ -17,6 +17,8 @@ pub struct IncomingReaction {
     pub emoji: String,
     pub origin: String,
     pub at: i64,
+    pub time_source: String,
+    pub revision: Option<i64>,
 }
 
 /// The latest change per actor/emoji wins even when different connections saw it. A removal wins
@@ -24,14 +26,19 @@ pub struct IncomingReaction {
 /// to another member through a shared message.
 pub fn list(c: &Connection, message: &str, mask: i64) -> ChannelResult<Vec<IncomingReaction>> {
     let mut st = c.prepare_cached(
-        "WITH ranked AS (
-           SELECT r.*, row_number() OVER (PARTITION BY r.actor_account_id, r.emoji
-              ORDER BY r.action_at DESC, r.removed DESC, (r.origin <> 'manual') DESC) AS rank
+        "WITH scoped AS (
+           SELECT r.*, row_number() OVER (PARTITION BY r.connection_id, r.actor_account_id, r.emoji
+              ORDER BY (r.source_revision IS NOT NULL) DESC, r.source_revision DESC,
+                       r.action_at DESC, r.removed DESC, (r.origin <> 'manual') DESC) AS connection_rank
              FROM chan_message_reactions r JOIN chan_messages m ON m.id = r.message_id
              JOIN space_identities i ON i.space_id = m.space_id AND i.connection_id = r.connection_id
-            WHERE r.message_id = ?1 AND (?2 = -1 OR (i.ordinal IS NOT NULL AND ((1 << i.ordinal) & ?2) <> 0)))
+            WHERE r.message_id = ?1 AND (?2 = -1 OR (i.ordinal IS NOT NULL AND ((1 << i.ordinal) & ?2) <> 0))),
+         ranked AS (
+           SELECT r.*, row_number() OVER (PARTITION BY r.actor_account_id, r.emoji
+              ORDER BY r.action_at DESC, r.removed DESC, (r.origin <> 'manual') DESC) AS rank
+             FROM scoped r WHERE r.connection_rank = 1)
          SELECT r.actor_account_id, a.party_id, coalesce(nullif(a.display_name, ''), p.name, ''),
-                r.emoji, r.origin, r.action_at
+                r.emoji, r.origin, r.action_at, r.time_source, r.source_revision
            FROM ranked r JOIN accounts a ON a.id = r.actor_account_id LEFT JOIN parties p ON p.id = a.party_id
           WHERE r.rank = 1 AND r.removed = 0 ORDER BY r.action_at, r.actor_account_id, r.emoji",
     )?;
@@ -46,6 +53,8 @@ pub fn list(c: &Connection, message: &str, mask: i64) -> ChannelResult<Vec<Incom
                 emoji: r.get(3)?,
                 origin: r.get(4)?,
                 at: r.get(5)?,
+                time_source: r.get(6)?,
+                revision: r.get(7)?,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?)
@@ -193,8 +202,8 @@ pub fn context(
     })
 }
 
-/// Resolve only targets this connection has actually seen. Feishu omits the chat id; an external
-/// service may omit the platform message id and use the target's delivery id instead.
+/// Resolve only targets this connection has actually seen. A producer may omit the chat id, or
+/// omit the platform message id and use the target's delivery id instead.
 fn resolve(
     c: &Connection,
     ws: &str,
@@ -227,12 +236,13 @@ fn resolve(
 impl Channels {
     /// Store before acknowledging the feed. This never grants send permission, replays a message,
     /// revives a closed card, or resends something already out when a reaction is removed.
-    pub fn on_reaction(&self, ws: &str, conn: &str, ev: ReactionEvent) -> ChannelResult<()> {
+    pub fn on_reaction(&self, ws: &str, conn: &str, mut ev: ReactionEvent) -> ChannelResult<()> {
         let valid = |s: &str, max: usize| {
             !s.is_empty() && s.len() <= max && !s.chars().any(char::is_control)
         };
         if !valid(&ev.emoji, 128)
             || ev.at <= 0
+            || ev.revision.is_some_and(|n| n <= 0)
             || ev
                 .message_ext_id
                 .as_deref()
@@ -246,6 +256,9 @@ impl Channels {
         {
             return Err(ApiError::invalid("reaction"));
         }
+        if ev.actor_is_bot {
+            ev.origin = ReactionOrigin::Automated;
+        }
         let facts = self.facts(ws, conn)?;
         self.store().transaction(|tx| {
             let target = resolve(tx, ws, conn, &ev)?;
@@ -255,7 +268,7 @@ impl Channels {
                 spaces::find(tx, ws, conn, ext)?.map(|s| s.id)
             } else {
                 // With neither a known target nor a chat, the event cannot be checked against
-                // blocked-chat policy (native Feishu omits the chat). Do not collect it blindly.
+                // blocked-chat policy. Do not collect an unscoped event blindly.
                 return Ok(());
             };
             if let Some(space) = space {
@@ -264,22 +277,28 @@ impl Channels {
                 }
             }
             let actor = crate::inbound::identify_handle_as(tx, ws, conn, &facts.created_by,
-                &ev.actor, ev.actor_name.as_deref(), "表情回应", ev.origin == ReactionOrigin::Automated)
+                &ev.actor, ev.actor_name.as_deref(), "表情回应", ev.actor_is_bot)
                 .ok_or_else(|| ApiError::invalid("reaction actor"))?;
             tx.execute(
                 "INSERT INTO chan_message_reactions (workspace_id, connection_id, space_external_id,
-                    message_external_id, message_source_id, message_id, actor_account_id, emoji, origin, removed, action_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+                    message_external_id, message_source_id, message_id, actor_account_id, emoji, origin, removed, action_at,
+                    time_source, source_revision)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
                  ON CONFLICT (workspace_id, connection_id, space_external_id, message_external_id, message_source_id, actor_account_id, emoji)
                  DO UPDATE SET message_id = coalesce(excluded.message_id, chan_message_reactions.message_id),
-                    origin = excluded.origin, removed = excluded.removed, action_at = excluded.action_at
-                 WHERE excluded.action_at > chan_message_reactions.action_at OR
+                    origin = excluded.origin, removed = excluded.removed, action_at = excluded.action_at,
+                    time_source = excluded.time_source, source_revision = excluded.source_revision
+                 WHERE (excluded.source_revision IS NOT NULL AND
+                        (chan_message_reactions.source_revision IS NULL OR excluded.source_revision > chan_message_reactions.source_revision))
+                   OR (excluded.source_revision IS NULL AND chan_message_reactions.source_revision IS NULL AND
+                    (excluded.action_at > chan_message_reactions.action_at OR
                     (excluded.action_at = chan_message_reactions.action_at AND
                      (excluded.removed > chan_message_reactions.removed OR
-                      (excluded.removed = chan_message_reactions.removed AND excluded.origin <> 'manual')))",
+                      (excluded.removed = chan_message_reactions.removed AND excluded.origin <> 'manual')))))",
                 params![ws, conn, ev.space_ext_id.as_deref().unwrap_or(""),
                     ev.message_ext_id.as_deref().unwrap_or(""), ev.message_source_id.as_deref().unwrap_or(""),
-                    target, actor.account_id, ev.emoji, ev.origin.code(), ev.removed, ev.at],
+                    target, actor.account_id, ev.emoji, ev.origin.code(), ev.removed, ev.at,
+                    ev.time_source.code(), ev.revision],
             )?;
             if let Some(id) = target {
                 supersede(tx, ws, &id)?;

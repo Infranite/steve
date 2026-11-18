@@ -161,7 +161,25 @@ impl ReactionOrigin {
     }
 }
 
-/// An incoming reaction change. Missing chat ids are allowed for providers such as Feishu;
+/// Whether the producer has the provider's action time or only a persisted observation time.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReactionTimeSource {
+    #[default]
+    Provider,
+    Observed,
+}
+
+impl ReactionTimeSource {
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::Provider => "provider",
+            Self::Observed => "observed",
+        }
+    }
+}
+
+/// An incoming reaction change. Some providers omit chat ids;
 /// the target must then be resolved through a message seen by this connection.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReactionEvent {
@@ -171,10 +189,16 @@ pub struct ReactionEvent {
     pub message_source_id: Option<String>,
     pub actor: HandleRef,
     pub actor_name: Option<String>,
+    /// Identity, independent from an automated action performed on a person's account.
+    pub actor_is_bot: bool,
     pub origin: ReactionOrigin,
     pub emoji: String,
-    /// Provider action time, Unix ms. Removals at the same time win over additions.
+    /// Unix ms, with its source explicit. Producers keep observed times stable on replay.
     pub at: i64,
+    pub time_source: ReactionTimeSource,
+    /// Increasing producer revision scoped to this receiving connection. It orders delete/re-add
+    /// in the same millisecond without assuming timestamp precision.
+    pub revision: Option<i64>,
     pub removed: bool,
 }
 

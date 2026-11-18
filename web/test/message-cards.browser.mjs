@@ -14,6 +14,8 @@ try {
   assert.equal(await page.locator('[data-message-reactions] .ui-bdgc').count(), 3)
   assert.match(await page.getByText("👍 你", { exact: true }).locator("..").getAttribute("title"), /手动表情回应/)
   assert.match(await page.getByText("✅ 助手", { exact: true }).locator("..").getAttribute("title"), /自动化表情，仅作上下文/)
+  assert.match(await page.getByText("✅ 助手", { exact: true }).locator("..").getAttribute("title"), /观察时间/)
+  assert.match(await page.getByText("👍 你", { exact: true }).locator("..").getAttribute("title"), /表情时间/)
   assert.match(await page.getByText("👀 同事", { exact: true }).locator("..").getAttribute("title"), /来源未明，仅作上下文/)
   await page.locator('[data-streamdown="strong"]').filter({ hasText: "版本 1.0 卡片" }).waitFor()
   assert.equal(await page.getByText("卡片文本回退", { exact: true }).count(), 0)

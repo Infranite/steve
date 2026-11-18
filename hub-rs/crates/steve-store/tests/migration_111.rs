@@ -27,6 +27,8 @@ fn upgrade_keeps_outgoing_reactions_separate_and_cascades_removed_message_data()
         INSERT INTO chan_message_reactions(workspace_id,connection_id,message_external_id,message_id,actor_account_id,emoji,origin,removed,action_at)
           VALUES('default','connection','platform-id','message','account','👍','manual',1,3);").unwrap();
     db::migrate(&c).unwrap();
+    assert_eq!(c.query_row("SELECT time_source, source_revision FROM chan_message_reactions WHERE message_id='message'", [],
+        |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<i64>>(1)?))).unwrap(), ("provider".into(), None));
     assert_eq!(
         c.query_row(
             "SELECT state FROM chan_reactions WHERE message_id='message'",

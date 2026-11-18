@@ -216,6 +216,8 @@ export default {
     reactionManual: "Manual reaction",
     reactionAutomated: "Automated reaction, context only",
     reactionUnknown: "Reaction provenance unknown, context only",
+    reactionObservedTime: "Observed at",
+    reactionActionTime: "Reacted at",
     purged: "Original text is past its retention period",
     recalled: "Message recalled",
     draftEmpty: "(Draft has no text yet)",

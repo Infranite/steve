@@ -531,9 +531,12 @@ pub fn parse_reaction(env: &Value) -> Option<ReactionEvent> {
         message_source_id: None,
         actor,
         actor_name: None,
+        actor_is_bot: origin == ReactionOrigin::Automated,
         origin,
         emoji: opt(&e["reaction_type"], "emoji_type")?,
         at: s(e, "action_time").parse::<i64>().ok().filter(|t| *t > 0)?,
+        time_source: crate::ReactionTimeSource::Provider,
+        revision: None,
         removed,
     })
 }

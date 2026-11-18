@@ -12,6 +12,8 @@ CREATE TABLE chan_message_reactions (
     origin TEXT NOT NULL CHECK (origin IN ('manual', 'automated', 'unknown')),
     removed INTEGER NOT NULL CHECK (removed IN (0, 1)),
     action_at INTEGER NOT NULL,
+    time_source TEXT NOT NULL DEFAULT 'provider' CHECK (time_source IN ('provider', 'observed')),
+    source_revision INTEGER CHECK (source_revision > 0),
     PRIMARY KEY (workspace_id, connection_id, space_external_id, message_external_id,
                  message_source_id, actor_account_id, emoji)
 );

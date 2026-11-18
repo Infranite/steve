@@ -909,15 +909,34 @@ pub fn reaction(v: &Value, now: i64, realm: &str) -> Result<crate::ReactionEvent
     if message_ext_id.is_none() && message_source_id.is_none() {
         return Err("a reaction without target message".into());
     }
+    let revision = match v.get("revision").filter(|v| !v.is_null()) {
+        None => None,
+        Some(n) => Some(
+            n.as_i64()
+                .filter(|n| *n > 0)
+                .ok_or("a reaction without a valid positive revision")?,
+        ),
+    };
+    let time_source = match v.get("time_source").and_then(Value::as_str) {
+        None if v.get("time_source").is_none_or(Value::is_null) => {
+            crate::ReactionTimeSource::Provider
+        }
+        Some("provider") => crate::ReactionTimeSource::Provider,
+        Some("observed") => crate::ReactionTimeSource::Observed,
+        _ => return Err("a reaction with an invalid time source".into()),
+    };
     Ok(crate::ReactionEvent {
         space_ext_id: Some(id(v, "chat_id")?),
         message_ext_id,
         message_source_id,
         actor: crate::HandleRef::new(system, handle),
         actor_name: actor.display,
+        actor_is_bot: actor.is_bot,
         origin,
         emoji,
         at: time(v, "action_ms", now)?,
+        time_source,
+        revision,
         removed,
     })
 }
@@ -1050,6 +1069,41 @@ pub fn idempotency_key(k: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reaction_contract_preserves_identity_revision_and_time_source() {
+        let now = 1_762_430_400_000;
+        let v = json!({"chat_id":"c", "source_id":"m", "actor":{"id":{"kind":"id","value":"u"}},
+            "emoji":"THUMBSUP", "change":"created", "action_ms":now,
+            "origin":"automated", "revision":7, "time_source":"observed"});
+        let got = reaction(&v, now, "realm").unwrap();
+        assert!(
+            !got.actor_is_bot,
+            "an automated user action retains its human account identity"
+        );
+        assert_eq!(got.origin, crate::ReactionOrigin::Automated);
+        assert_eq!(got.revision, Some(7));
+        assert_eq!(got.time_source, crate::ReactionTimeSource::Observed);
+        for value in [json!(0), json!(-1), json!("7"), json!(1.5)] {
+            let mut bad = v.clone();
+            bad["revision"] = value;
+            assert!(reaction(&bad, now, "realm").is_err());
+        }
+        let mut old = v.clone();
+        old.as_object_mut().unwrap().remove("revision");
+        old.as_object_mut().unwrap().remove("time_source");
+        let old = reaction(&old, now, "realm").unwrap();
+        assert_eq!(old.revision, None);
+        assert_eq!(old.time_source, crate::ReactionTimeSource::Provider);
+        let mut bot = v;
+        bot["actor"]["is_bot"] = json!(true);
+        bot["origin"] = json!("manual");
+        let parsed_bot = reaction(&bot, now, "realm").unwrap();
+        assert!(parsed_bot.actor_is_bot);
+        assert_eq!(parsed_bot.origin, crate::ReactionOrigin::Automated);
+        bot["time_source"] = json!("invented");
+        assert!(reaction(&bot, now, "realm").is_err());
+    }
 
     /// V1: version negotiation.
     #[test]

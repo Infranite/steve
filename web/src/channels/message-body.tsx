@@ -103,7 +103,7 @@ export function ChannelMessageBody({ message: m }: { message: Pick<ChanMessage, 
       return <MessageResource key={`${m.id}:${i}`} url={url} name={name} image={a.type === "image"} unavailable={why ? t(why) : undefined} />
     })}
     {!!m.reactions?.length && <div className="flex flex-wrap gap-1" data-message-reactions>
-      {m.reactions.slice(0, 50).map((r, i) => <Badge key={`${r.actor.account_id}:${r.emoji}:${i}`} title={`${t(r.origin === "manual" ? "channels:body.reactionManual" : r.origin === "automated" ? "channels:body.reactionAutomated" : "channels:body.reactionUnknown")} · ${new Date(r.at).toLocaleString()}`}>
+      {m.reactions.slice(0, 50).map((r, i) => <Badge key={`${r.actor.account_id}:${r.emoji}:${i}`} title={`${t(r.origin === "manual" ? "channels:body.reactionManual" : r.origin === "automated" ? "channels:body.reactionAutomated" : "channels:body.reactionUnknown")} · ${t(r.time_source === "observed" ? "channels:body.reactionObservedTime" : "channels:body.reactionActionTime")} ${new Date(r.at).toLocaleString()}`}>
         {r.emoji} {r.actor.name || t("channels:body.someone")}
       </Badge>)}
     </div>}

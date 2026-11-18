@@ -262,7 +262,7 @@ async fn reaction_changes_are_durable_scoped_and_do_not_become_owner_presence() 
     until("message stored", || h.messages("c_reaction").len() == 1).await;
     let event = json!({"type":"reaction", "chat_id":"c_reaction", "source_id":"src_reaction",
         "actor":{"id":{"kind":"id","value":fake::ME}}, "emoji":"👍", "change":"created",
-        "origin":"manual", "action_ms":h.t0+2});
+        "origin":"manual", "action_ms":h.t0+2, "revision":1, "time_source":"observed"});
     let seq = h.fake.push(vec![event.clone()]);
     until("reaction acknowledged", || h.fake.acked() >= seq).await;
     let id = h.rows("SELECT id FROM chan_messages WHERE text='请确认'", &[])[0][0]
@@ -288,8 +288,8 @@ async fn reaction_changes_are_durable_scoped_and_do_not_become_owner_presence() 
     );
     let mut removed = event.clone();
     removed["change"] = json!("removed");
-    removed["action_ms"] = json!(h.t0 + 4);
-    let seq = h.fake.push(vec![removed, event]);
+    removed["revision"] = json!(2);
+    let seq = h.fake.push(vec![removed, event.clone()]);
     until("removal and stale create acknowledged", || {
         h.fake.acked() >= seq
     })
@@ -301,6 +301,21 @@ async fn reaction_changes_are_durable_scoped_and_do_not_become_owner_presence() 
             .unwrap(),
         None
     );
+    let mut readd = event;
+    readd["revision"] = json!(3);
+    let seq = h.fake.push(vec![readd]);
+    until("same millisecond readd acknowledged", || {
+        h.fake.acked() >= seq
+    })
+    .await;
+    let active = h
+        .env
+        .store()
+        .reader(|c| steve_channels::incoming_reactions::list(c, &id, -1))
+        .unwrap();
+    assert_eq!(active.len(), 1);
+    assert_eq!(active[0].revision, Some(3));
+    assert_eq!(active[0].time_source, "observed");
     assert_eq!(
         h.rows(
             "SELECT count(*) FROM chan_message_reactions WHERE connection_id=?",

@@ -341,13 +341,22 @@
 //!   `message_edited` `{…, edited_ms}` and `chat` `{chat_id, change: joined|left|renamed|members}`
 //!   (O; → `ConnSink::space_event`). The Hub skips an unknown type but still acks it.
 //! - Optional `reaction` items: `{type:"reaction", chat_id, id?, source_id?, actor:Sender,
-//!   emoji, change:"created"|"removed", action_ms, origin?:"manual"|"automated"|"unknown"}`.
+//!   emoji, change:"created"|"removed", action_ms, origin?:"manual"|"automated"|"unknown",
+//!   time_source?:"provider"|"observed", revision?:positive_integer}`.
 //!   `id`/`source_id` identify the reacted-to message, not the event (at least one required).
-//!   The action time is Unix ms; removals win ties and stale additions cannot undo a removal.
+//!   The action time is Unix ms. `time_source` defaults to `provider` for older services; a service
+//!   with only an observation time MUST use `observed` and persist it unchanged on replay.
+//!   `revision`, when present, is durable and increasing within the receiving connection, with one
+//!   immutable action per revision. It orders delete/re-add in the same millisecond and wins over
+//!   timestamp order. Once a key is versioned, unversioned events cannot replace it. Without it,
+//!   removals win timestamp ties and stale additions cannot undo a removal.
 //!   `manual` requires affirmative evidence of a human action; a user account, `is_mine`, emoji
 //!   choice or absence of a bot marker is insufficient. Missing/unknown provenance is context only;
 //!   bot actors are always automated. Services unable to distinguish user-token automation from
-//!   clicks MUST send `unknown`. This addition requires no new mandatory capability or subscription.
+//!   clicks MUST send `unknown`. Actor identity (`Sender.is_bot`) is separate from action origin:
+//!   an automated action on a user's account does not make that account a bot.
+//!   Optional `changes.reactions` advertises incoming full-action coverage, separately from the
+//!   existing `reactions` write capability. No new capability is mandatory for existing services.
 //! - Flow control: at most `max_unacked_batches` batches are outstanding. When the window is full
 //!   the server waits; it never drops items silently. If it has to discard, for example when its
 //!   buffer overflows, it emits a `gap` for the affected chats.

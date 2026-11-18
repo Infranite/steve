@@ -25,7 +25,7 @@ const msg = (id: string, card: CardAttachment): ChanMessage => ({ id, space_id: 
 function Fixture() {
   const [one, setOne] = useState<ChanMessage>({ ...msg("card_one", card1), reactions: [
     { actor: { name: "你", party_id: null, account_id: "owner" }, emoji: "👍", origin: "manual", at: 1761900004000 },
-    { actor: { name: "助手", party_id: null, account_id: "assistant" }, emoji: "✅", origin: "automated", at: 1761900005000 },
+    { actor: { name: "助手", party_id: null, account_id: "assistant" }, emoji: "✅", origin: "automated", at: 1761900005000, time_source: "observed" },
     { actor: { name: "同事", party_id: null, account_id: "peer" }, emoji: "👀", origin: "unknown", at: 1761900006000 },
   ] }), [two, setTwo] = useState(msg("card_two", card2))
   useEffect(() => {

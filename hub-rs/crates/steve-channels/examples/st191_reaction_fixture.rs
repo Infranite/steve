@@ -21,6 +21,7 @@ fn ev(h: &H, v: &Value) -> ReactionEvent {
         message_source_id: None,
         actor: FakeChannel::handle(v["actor"].as_str().unwrap_or("upx")),
         actor_name: None,
+        actor_is_bot: v["actor_is_bot"].as_bool().unwrap_or(false),
         origin: match v["origin"].as_str() {
             Some("manual") => ReactionOrigin::Manual,
             Some("automated") => ReactionOrigin::Automated,
@@ -28,6 +29,12 @@ fn ev(h: &H, v: &Value) -> ReactionEvent {
         },
         emoji: v["emoji"].as_str().unwrap_or("👍").into(),
         at: v["at"].as_i64().unwrap_or(h.ch.now()),
+        time_source: if v["time_source"] == "observed" {
+            steve_channels::ReactionTimeSource::Observed
+        } else {
+            steve_channels::ReactionTimeSource::Provider
+        },
+        revision: v["revision"].as_i64(),
         removed: v["removed"].as_bool().unwrap_or(false),
     }
 }

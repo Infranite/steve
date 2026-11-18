@@ -163,8 +163,8 @@ pub mod write_blocks;
 pub use channel::{
     ActAsUser, ActTarget, ChannelAdapter, ChannelFeatures, HandleRef, InboundMessage, MemberInfo,
     Mention, MessageRef, OutContent, Profile, ProfileAdapter, ProfileAnswer, ProfileQuery,
-    PushOutcome, ReactionEvent, ReactionKind, ReactionOrigin, SendKey, SendTarget, Sender, Sent,
-    SpaceEvent, SpaceInfo, SpaceKind, TenantInfo,
+    PushOutcome, ReactionEvent, ReactionKind, ReactionOrigin, ReactionTimeSource, SendKey,
+    SendTarget, Sender, Sent, SpaceEvent, SpaceInfo, SpaceKind, TenantInfo,
 };
 pub use deliver::{Auth, Delivered, DraftOnly, OutRequest, OutTarget, Outbound};
 pub use disclosure::Disclosure;
