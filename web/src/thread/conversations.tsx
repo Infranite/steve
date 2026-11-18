@@ -361,7 +361,7 @@ export function ImMsgActions({ url, side, last }: { url?: string | null; side: "
 
 /* a handling's name; read when it renders so it follows the language */
 const HANDLING: Record<Exclude<Handling["state"], "none">, `thread:record.${string}`> = {
-  answered: "thread:record.answered", waiting: "thread:record.waiting", item: "thread:record.item", working: "thread:record.working",
+  answered: "thread:record.answered", drafted: "thread:record.drafted", blocked: "thread:record.blocked", unknown: "thread:record.unknown", recalled: "thread:record.recalled", local: "thread:record.local", waiting: "thread:record.waiting", item: "thread:record.item", working: "thread:record.working",
   failed: "thread:record.failed", skipped: "thread:record.skipped", decided: "thread:record.decided", recorded: "thread:record.recorded",
 }
 
@@ -370,11 +370,12 @@ const HANDLING: Record<Exclude<Handling["state"], "none">, `thread:record.${stri
  *  reaction chip already says it is being answered or was */
 export function HandlingLine({ h, side = "end", reacted = false }: { h?: Handling; side?: "start" | "end"; reacted?: boolean }) {
   const t = useT()
-  if (!h || h.state === "none" || (reacted && (h.state === "answered" || h.state === "working"))) return null
+  if (!h || h.state === "none" || (reacted && h.state === "working")) return null
   const tone = HANDLING_TONE[h.state] ?? "neutral", detail = handlingDetail(h)
   return (
     <div className={cn("flex min-w-0 max-w-full flex-wrap items-center gap-x-2 gap-y-1 type-footnote", side === "end" ? "justify-end self-end text-right" : "self-start")} data-handling={h.state}>
       <Badge tone={tone} dot live={h.state === "working"}>{t(HANDLING[h.state] as "thread:record.answered")}</Badge>
+      {h.state === "failed" && h.out_status === "sent" && <span className="text-muted-foreground">{t("thread:record.failureNoticeSent")}</span>}
       {detail && <span className={cn("min-w-0 break-words", h.state === "failed" ? "text-destructive" : "text-muted-foreground")} data-handling-detail>{detail}</span>}
       {h.item && <Button size="xs" variant="ghost" className="font-mono tabular-nums" onClick={() => go("#/items/" + h.item)} data-handling-item={h.item}>{h.item}</Button>}
       {h.decision && <Button size="xs" variant="outline" onClick={() => go("#/inbox")} data-handling-decision={h.decision}>{t("thread:record.open")}</Button>}

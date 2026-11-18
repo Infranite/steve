@@ -2218,7 +2218,7 @@ async fn the_record_keeps_a_draft_waiting_for_approval() {
     let draft = response.out_message_id.as_ref().expect("draft");
     let r = record_of(&h, ME, &a.space_id, &Default::default()).unwrap();
     let handling = &rec(&r, &a.message_id)["handling"];
-    assert_eq!(handling["state"], "waiting");
+    assert_eq!(handling["state"], "drafted");
     assert_eq!(handling["decision"], *decision);
     assert_eq!(rec(&r, draft)["out"]["status"], "draft");
     assert!(sent(&h).is_empty());
@@ -2613,7 +2613,7 @@ async fn a_command_answered_in_your_web_conversation_shows_that_answer() {
     let x = handling(&h, &a.message_id);
     assert_eq!(
         (x["state"].clone(), x["main_turn"].clone()),
-        (json!("answered"), json!(t1))
+        (json!("local"), json!(t1))
     );
     exec(
         &h,
@@ -2651,7 +2651,7 @@ async fn a_command_answered_in_your_web_conversation_shows_that_answer() {
         "{x}"
     );
     // another space's command in your web conversation is not this one's
-    assert_eq!(handling(&h, &a.message_id)["state"], "answered");
+    assert_eq!(handling(&h, &a.message_id)["state"], "local");
 
     let c = push(
         &h,

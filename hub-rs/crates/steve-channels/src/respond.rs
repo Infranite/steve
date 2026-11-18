@@ -550,6 +550,10 @@ pub(crate) fn mark_event(tx: &Tx, event_id: &str, r: &Response) -> ChannelResult
     let (outcome, reason) = match (&r.by, r.act) {
         (By::Flow { .. }, _) => return Ok(()),
         (By::Thread { .. }, _) => ("item", rule),
+        (By::Trigger { .. }, _) if r.decision_id.is_some() => {
+            ("need", r.composer_skip.clone().unwrap_or_default())
+        }
+        (By::Trigger { .. }, _) => ("recorded", r.composer_skip.clone().unwrap_or_default()),
         _ if r.composer_skip.is_some() => (
             "recorded",
             trail(

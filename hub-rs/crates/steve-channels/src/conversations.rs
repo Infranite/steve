@@ -1016,24 +1016,22 @@ impl Channels {
     }
 
     /// `meta.chan_out` on conversation message `m`: what became of it in the space. The status is
-    /// the outbound message's own, read in the same transaction as the write: two deliveries of one
+    /// the outbound message's own, normalized just like the read API (including policy blocks),
+    /// read in the same transaction as the write: two deliveries of one
     /// message ([`conv_operation`]) may finish in either order, and the one that writes last still
     /// writes the newest state (never the `pending` a second pass saw while the first was sending).
     pub(crate) fn mark_out(&self, m: &steve_store::Message, d: &Delivered) -> ChannelResult<()> {
         let said = match d {
             Delivered::Sent { .. } => "sent",
             Delivered::Drafted { .. } => "draft",
-            Delivered::Failed { .. } | Delivered::Blocked { .. } => "failed",
+            Delivered::Failed { .. } => "failed",
+            Delivered::Blocked { .. } => "blocked",
             Delivered::Queued { .. } => "pending",
             Delivered::Skipped => "skipped",
         };
         self.store().transaction(|tx| -> ChannelResult<()> {
             let now: Option<String> = match d.message_id() {
-                Some(id) => tx
-                    .query_row("SELECT status FROM chan_messages WHERE id = ?", [id], |r| {
-                        r.get(0)
-                    })
-                    .optional()?,
+                Some(id) => out_state(tx, &m.workspace_id, id)?.map(|(status, _)| status),
                 None => None,
             };
             let status = now.as_deref().unwrap_or(said);
@@ -1210,12 +1208,24 @@ impl Channels {
         if said.trim().is_empty() {
             return Ok(());
         }
+        let (status, decision, reason) = self.store().reader(|c| -> ChannelResult<_> {
+            let state = out
+                .map(|id| out_state(c, &plan.ws, id))
+                .transpose()?
+                .flatten();
+            let (status, decision) = state.unwrap_or_else(|| ("skipped".to_string(), None));
+            let reason = out
+                .map(|id| crate::conv_record::out_error(c, &plan.ws, id))
+                .transpose()?
+                .flatten();
+            Ok((status, decision, reason))
+        })?;
         let reply = msgs.add(
             &plan.ws,
             "steve",
             said,
             item,
-            &json!({"origin": origin, "chan_out": {"message": out, "status": "sent"}}),
+            &json!({"origin": origin, "chan_out": {"message": out, "status": status, "decision": decision, "reason": reason}}),
             &conv,
         )?;
         if let Some(i) = item {
@@ -1617,6 +1627,13 @@ pub fn messages_of(
                     } else {
                         Value::Null
                     };
+            } else if m.meta["chan_out"]["status"] == "sent" {
+                // Older notes could say sent after generation alone, with no outbound row. Do
+                // not keep presenting that legacy assertion as a confirmed provider result.
+                v["meta"]["chan_out"]["status"] = json!("unknown");
+                v["meta"]["chan_out"]["decision"] = Value::Null;
+                v["meta"]["chan_out"]["reason"] =
+                    json!(steve_i18n::t!("channels.notice.delivery_unconfirmed"));
             }
             out.push(v);
         }
@@ -1635,9 +1652,13 @@ pub(crate) fn out_state(
 ) -> ChannelResult<Option<(String, Option<String>)>> {
     let row: Option<(String, Option<String>)> = c
         .query_row(
-            "SELECT m.status, d.id FROM chan_messages m
-               LEFT JOIN decisions d ON d.id = m.decision_id AND d.status = 'open'
-              WHERE m.id = ? AND m.workspace_id = ?",
+            "SELECT CASE WHEN m.status='failed' AND (
+                json_extract(d.result,'$.recovery.kind') IN ('channel_refusal','missing_permission')
+                OR EXISTS (SELECT 1 FROM audit a WHERE a.workspace_id=m.workspace_id AND a.target=m.id
+                    AND a.action='chan_message.send.blocked')) THEN 'blocked' ELSE m.status END,
+                CASE WHEN d.status='open' THEN d.id END FROM chan_messages m
+               LEFT JOIN decisions d ON d.id = m.decision_id
+              WHERE m.id = ? AND m.workspace_id = ? AND m.direction='out'",
             params![id, ws],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )

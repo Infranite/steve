@@ -212,5 +212,6 @@
   "channels.notify.todo_due_many": "Todo reminders: %{count}",
   "channels.notify.snooze_wake_one": "A snoozed todo is back: %{text}",
   "channels.notify.snooze_wake_many": "%{count} snoozed todos are back",
-  "channels.notify.late": "Some came due while they could not be sent (quiet hours, or the Hub was not running); here they are together."
+  "channels.notify.late": "Some came due while they could not be sent (quiet hours, or the Hub was not running); here they are together.",
+  "channels.notice.delivery_unconfirmed": "No retained outbound receipt; delivery is unconfirmed."
 }

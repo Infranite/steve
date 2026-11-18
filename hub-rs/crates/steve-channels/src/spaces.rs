@@ -1248,38 +1248,6 @@ pub fn role_of(set: &SpaceSettings, rules: &Value, voice: Option<Mode>) -> Role 
     }
 }
 
-/// Your trigger settings with the connection of yours they were set on.
-pub fn your_trigger_on(
-    c: &Connection,
-    ws: &str,
-) -> ChannelResult<Option<(String, crate::rules::Trigger)>> {
-    let v: Option<(String, String)> = c
-        .query_row(
-            "SELECT connection_id, trigger FROM channel_settings WHERE workspace_id = ? AND mode = 'self' ORDER BY updated DESC LIMIT 1",
-            [ws],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )
-        .optional()?;
-    Ok(v.and_then(|(conn, s)| {
-        serde_json::from_str::<Value>(&s)
-            .ok()
-            .map(|v| (conn, crate::rules::Trigger::from_value(&v)))
-    }))
-}
-
-/// Your `/bot` settings (your own account's trigger words), wherever they were set.
-pub fn your_trigger(c: &Connection, ws: &str) -> ChannelResult<Option<crate::rules::Trigger>> {
-    let v: Option<String> = c
-        .query_row(
-            "SELECT trigger FROM channel_settings WHERE workspace_id = ? AND mode = 'self' ORDER BY updated DESC LIMIT 1",
-            [ws],
-            |r| r.get(0),
-        )
-        .optional()?;
-    Ok(v.and_then(|s| serde_json::from_str::<Value>(&s).ok())
-        .map(|v| crate::rules::Trigger::from_value(&v)))
-}
-
 /// What [`SpaceOut::conflicts`] says about `reply_as_you` (`key` `reply_as_you`, and `rules` for
 /// the rules it stops): it applies only where your own account speaks, and 不提醒 / 屏蔽 already
 /// stop everything it would.
@@ -1529,15 +1497,6 @@ fn title_of(s: &SpaceRow, counterpart: Option<&Counterpart>, self_chat: bool) ->
 }
 
 pub fn out(c: &Connection, s: &SpaceRow) -> ChannelResult<SpaceOut> {
-    out_with(c, s, &your_trigger(c, &s.workspace_id)?)
-}
-
-/// [`out`] with the workspace's [`your_trigger`] already read (a list of spaces reads it once).
-pub fn out_with(
-    c: &Connection,
-    s: &SpaceRow,
-    trigger: &Option<crate::rules::Trigger>,
-) -> ChannelResult<SpaceOut> {
     let set = settings_or_defaults(c, s)?;
     let account = channel_settings(c, &s.workspace_id, &s.connection_id)?;
     let account_rules = account
@@ -1545,6 +1504,18 @@ pub fn out_with(
         .map(|x| x.rules.clone())
         .unwrap_or_else(default_bot_rules);
     let ids = identities(c, &s.id)?;
+    // Trigger notices describe a personal identity actually present here, never the workspace's
+    // last-edited personal account. Each receiver still applies its own author/scope/filter checks.
+    let mut trigger = None;
+    for id in ids.iter().filter(|id| id.mode == Mode::Own) {
+        if let Some(cs) = channel_settings(c, &s.workspace_id, &id.connection_id)? {
+            let t = crate::rules::Trigger::from_value(&cs.trigger);
+            if t.on && t.applies(&s.id, s.kind == SpaceKind::Dm.code()) {
+                trigger = Some(t);
+                break;
+            }
+        }
+    }
     let chosen = chosen_voice(c, &s.id)?;
     let voice = ids
         .iter()

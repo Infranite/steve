@@ -40,12 +40,12 @@ export function shownUpTo(msgs: readonly MsgLike[], records: readonly ConvRecord
 
 /** how a handling reads: its tone, and whether it is worth a line at all (nothing known says nothing) */
 export const HANDLING_TONE: Record<HandlingState, "success" | "warning" | "danger" | "info" | "neutral" | null> = {
-  answered: "success", waiting: "warning", item: "info", working: "info", failed: "danger", skipped: "neutral", decided: "neutral", recorded: "neutral", none: null,
+  answered: "success", drafted: "warning", blocked: "danger", unknown: "warning", recalled: "neutral", local: "neutral", waiting: "warning", item: "info", working: "info", failed: "danger", skipped: "neutral", decided: "neutral", recorded: "neutral", none: null,
 }
 
 /** the detail after a handling's name: the failure's reason, else what the event was recorded with */
 export function handlingDetail(h: { state: HandlingState; label: string; reason: string; error: string | null }): string {
-  if (h.state === "failed") return h.error || h.reason || h.label
+  if (h.state === "failed" || h.state === "blocked" || h.state === "unknown") return h.error || h.reason || h.label
   if (h.state === "skipped" || h.state === "recorded" || h.state === "decided") return [h.label, h.reason].filter(Boolean).join(" · ")
   return ""
 }

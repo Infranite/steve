@@ -1664,6 +1664,13 @@ Email runs the full check at the final send boundary, after approval and the und
 
 On your own account, trigger words (`/ai`, `/bot`) from anyone but you are screened by a fast model first. A request for your personal details, the deployment or Steve's prompts gets a fixed refusal, and you are told.
 
+Personal triggers use the **actual receiving connection's** settings, including `on`, `words`, `where` and `who`; another account's more recent configuration is not inherited. `me` means the verified owner of that receiving account, not every workspace member or owner. Bot connections keep their own rules, and bot-authored messages do not receive personal trigger authority even when collaboration is enabled. Live human receipts are stored per message and connection; a bot-first copy can later be taken once by the personal receiver. Historical messages and old messages without a live receipt are never replayed or given implicit send authority.
+
+In **Channels → account → trigger words**, add up to 20 automation prefixes (1–100 characters each). The same setting is available as `PATCH /api/channels/{connection}` with `{"trigger":{"ignore_prefixes":["AUTO:","机器人："]}}`; `[]` clears the extra prefixes. Prefixes are trimmed and deduplicated, matched literally and case-sensitively after leading mentions. Built-in automatic-reply markers (`[AI]`, Steve's proxy mark, AI auto-answer notices) remain filtered. The filter also applies to allowed third-party authors and thread follow-ups without a trigger word. Send-time authorization rechecks the same receipt and current settings; removing authority holds unsent output for review. Existing approval, commitment and disclosure checks still run.
+
+Conversation delivery comes from the linked persistent outbound message. A generated answer or a completed reaction does not establish a send. Records distinguish confirmed sent, draft only, sending, blocked, failed, unconfirmed, discarded and recalled. A reply available only in Steve is labelled separately. The record includes `handling.out_message_id` and `handling.out_status`; reaction failures remain reaction errors and cannot turn a confirmed send into a send failure.
+
+
 ## Output intents
 
 The source-reply tool (`steve_reply_source`) now submits to the existing channel outbox through a durable intent ledger. It uses the session's recorded principal, re-resolved against **live workspace membership**. Service work does not borrow the workspace owner's personal access. The same backend is available to authenticated clients:

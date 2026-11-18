@@ -447,7 +447,7 @@ async fn run_research(h: &ChannelFixture) -> steve_store::Message {
 #[tokio::test(flavor = "multi_thread")]
 async fn research_reenters_the_owner_reply_pipeline_and_distinguishes_channel_limits() {
     use steve_core::thread::RunEnd;
-    for limit in ["writable", "connection", "target"] {
+    for limit in ["writable", "connection", "target", "transport"] {
         let (h, models) = research_fixture(Some(RESEARCH_REPLY), None, RunEnd::Done).await;
         if limit == "connection" {
             *h.fake.block_send.lock().unwrap() =
@@ -455,6 +455,8 @@ async fn research_reenters_the_owner_reply_pipeline_and_distinguishes_channel_li
         } else if limit == "target" {
             *h.fake.block_target_send.lock().unwrap() =
                 Some("[ext_ws target_forbidden (-32016)]".into());
+        } else if limit == "transport" {
+            *h.fake.fail_send.lock().unwrap() = Some("fixture transport failed".into());
         }
         let m = run_research(&h).await;
         assert_eq!(m.text, RESEARCH_TEXT);
@@ -482,11 +484,21 @@ async fn research_reenters_the_owner_reply_pipeline_and_distinguishes_channel_li
                 format!("[AI] {RESEARCH_TEXT}")
             );
         } else {
-            assert_ne!(m.meta["chan_out"]["status"], "sent");
+            assert_eq!(
+                m.meta["chan_out"]["status"],
+                if limit == "transport" {
+                    "failed"
+                } else {
+                    "blocked"
+                },
+                "the stored note distinguishes refusal from transport failure"
+            );
             assert!(h.fake.sent.lock().unwrap().is_empty());
             assert!(m.meta["chan_out"]["reason"].as_str().unwrap().contains(
                 if limit == "target" {
                     "target_forbidden"
+                } else if limit == "transport" {
+                    "fixture transport failed"
                 } else {
                     "forbidden"
                 }

@@ -85,7 +85,7 @@ try {
       assert.match(await page.locator('[data-msg="cm_lunch"] [data-handling="recorded"]').innerText(), /只记录.*没有匹配的规则/s)
       await page.locator('[data-msg="cm_wait"] [data-handling-decision="dec_1"]').waitFor()
       assert.match(await page.locator('[data-msg="cm_late"] [data-chan-out="failed"]').innerText(), /没有发出去.*飞书暂时不可用/s)
-      assert.equal(await page.locator('[data-msg="t1"] [data-handling]').count(), 0, "the reaction already says it was answered")
+      assert.equal(await page.locator('[data-msg="t1"] [data-handling="answered"]').count(), 1, "persisted delivery remains visible beside the reaction")
       // read up to the newest message shown
       await page.waitForFunction(() => true)
       for (let i = 0; i < 50 && !reads.length; i++) await page.waitForTimeout(20)

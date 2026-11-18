@@ -87,6 +87,16 @@ fn count_new(c: &Connection, space: &str, user: &str, since: i64, cap: i64) -> C
 pub enum Handling {
     /// Its answer went out.
     Answered,
+    /// A reply was drafted, but has not been sent.
+    Drafted,
+    /// The channel or its permission boundary refused the send.
+    Blocked,
+    /// The provider has not confirmed whether the attempt went out.
+    Unknown,
+    /// The reply was recalled after sending.
+    Recalled,
+    /// An answer exists only in Steve, without a confirmed channel send.
+    Local,
     /// A draft or a card waits for you.
     Waiting,
     /// Handed off to an item.
@@ -133,40 +143,46 @@ pub struct Facts {
     pub turn_answered_in_main: bool,
 }
 
-/// [`Handling`] of `f`: a failure wins (it is what you need to see), then a handoff, an answer that
-/// went out, something waiting for you, a pending send, an explicit skip, work in progress, a look
-/// without an answer, your decision, and last the label it was recorded with (unless it only says
-/// where the message came from).
+/// A retained outbound result decides delivery. Without one, processing failures, handoffs and
+/// open cards take precedence; an explicit skip then wins over stale processing markers. A reply
+/// available only in Steve stays separate from a confirmed channel send.
 pub fn handling(f: &Facts) -> Handling {
-    let answer = f.answer.as_deref();
-    if f.turn_failed
-        || f.reaction.as_deref() == Some("failed")
-        || f.outcome.as_deref() == Some("failed")
-        || answer == Some("failed")
-    {
+    // A persisted outbound result wins over events and reaction lifecycle state. A failed
+    // reaction cannot invalidate a confirmed send, nor can “done” send a draft. Generation
+    // errors remain visible even when the fixed notice explaining the failure went out.
+    match f.answer.as_deref() {
+        // A fixed failure notice can be sent successfully while the answer itself failed.
+        Some("sent") if f.turn_failed => return Handling::Failed,
+        Some("sent") => return Handling::Answered,
+        Some("draft") => return Handling::Drafted,
+        Some("blocked") => return Handling::Blocked,
+        Some("failed") => return Handling::Failed,
+        Some("unknown") => return Handling::Unknown,
+        Some("recalled") => return Handling::Recalled,
+        Some("discarded" | "skipped") => return Handling::Skipped,
+        Some("pending") => return Handling::Working,
+        _ => {}
+    }
+    if f.turn_failed || f.outcome.as_deref() == Some("failed") {
         return Handling::Failed;
     }
     if f.item.is_some() {
         return Handling::Item;
     }
-    if answer == Some("sent") || f.reaction.as_deref() == Some("done") || f.turn_answered_in_main {
-        return Handling::Answered;
-    }
     if f.decision_open {
         return Handling::Waiting;
     }
-    if matches!(answer, Some("pending" | "unknown")) {
-        return Handling::Working;
-    }
-    // A completed skip can leave an old acknowledgement or an unanswered turn behind. The
-    // composer records its skip as `recorded` with NO_REPLY; ordinary recorded events can still
-    // belong to a turn in progress, so `recorded` alone is not enough.
+    // A completed skip can leave an old acknowledgement or an unanswered turn behind. Keep
+    // the recorded reason ahead of those stale markers; persisted outbound results above still
+    // decide sent/draft/blocked/failed/unknown outcomes.
     if (f.outcome.as_deref() == Some("recorded") && f.label.starts_with(NO_REPLY))
         || f.reaction.as_deref() == Some("cleared")
         || f.outcome.as_deref() == Some("ignored")
-        || answer == Some(crate::outbound::DISCARDED)
     {
         return Handling::Skipped;
+    }
+    if f.turn_answered_in_main {
+        return Handling::Local;
     }
     if f.reaction.as_deref() == Some("ack") || f.turn_open {
         return Handling::Working;
@@ -202,6 +218,8 @@ struct Turns {
     main_turn_of: HashMap<String, String>,
     /// sent channel message → Steve's conversation message it said
     said_by: HashMap<String, String>,
+    /// turn → the actual outbound answer linked by chan_out.message
+    answer_of: HashMap<String, String>,
     /// turn → the error its answer was
     failed: HashMap<String, String>,
     /// turns Steve said something to
@@ -245,8 +263,14 @@ impl Turns {
                     if let Some(i) = &r.item {
                         self.item_of.entry(o.clone()).or_insert_with(|| i.clone());
                     }
+                    if !r.error {
+                        self.failed.remove(o);
+                    }
                 }
                 if let Some(o) = r.out {
+                    if let Some(origin) = &r.origin {
+                        self.answer_of.insert(origin.clone(), o.clone());
+                    }
                     self.said_by.insert(o, r.id.clone());
                 }
                 if r.error
@@ -282,7 +306,7 @@ fn row(r: &rusqlite::Row) -> rusqlite::Result<Row> {
 fn turns(c: &Connection, ws: &str, space: &str) -> ChannelResult<Turns> {
     let mut t = Turns::default();
     let mut st = c.prepare_cached(&format!(
-        "SELECT {ROW_COLS} FROM messages WHERE workspace_id = ? AND space = ?"
+        "SELECT {ROW_COLS} FROM messages WHERE workspace_id = ? AND space = ? ORDER BY created, rowid"
     ))?;
     let rows = st
         .query_map(params![ws, conv_space(space)], row)?
@@ -293,7 +317,7 @@ fn turns(c: &Connection, ws: &str, space: &str) -> ChannelResult<Turns> {
             (author = 'me' AND json_extract(meta, '$.chan.space') = ?2)
             OR (author = 'steve' AND json_extract(meta, '$.origin') IN (
                 SELECT id FROM messages WHERE workspace_id = ?1 AND space = ?3 AND author = 'me'
-                   AND json_extract(meta, '$.chan.space') = ?2)))"
+                   AND json_extract(meta, '$.chan.space') = ?2))) ORDER BY created, rowid"
     ))?;
     let rows = st
         .query_map(params![ws, space, MAIN_CONV], row)?
@@ -375,7 +399,14 @@ fn received(
         None => None,
     };
     let reaction = crate::reactions::get(c, &m.id)?;
-    let answer_id = reaction.as_ref().and_then(|r| r.answer_id.clone());
+    let main_turn = t.main_turn_of.get(&m.id);
+    let turn = t.turn_of.get(&m.id).or(main_turn);
+    // The turn/outbound relation is persisted even when reactions fail or a draft is held. A
+    // reaction's answer id is only a legacy fallback; its lifecycle never establishes delivery.
+    let answer_id = turn
+        .and_then(|id| t.answer_of.get(id))
+        .cloned()
+        .or_else(|| reaction.as_ref().and_then(|r| r.answer_id.clone()));
     let answer = match &answer_id {
         Some(a) => out_state(c, ws, a)?,
         None => None,
@@ -393,9 +424,9 @@ fn received(
     }
     if let Some((_, Some(d))) = &answer {
         open = open.or(Some(d.clone()));
+    } else if let Some(id) = &answer_id {
+        open = open.or(open_fail(c, ws, id)?);
     }
-    let main_turn = t.main_turn_of.get(&m.id);
-    let turn = t.turn_of.get(&m.id).or(main_turn);
     let turn_error = turn.and_then(|x| t.failed.get(x));
     let item = m
         .work_item_id
@@ -420,11 +451,13 @@ fn received(
         turn_answered_in_main: main_turn.is_some_and(|x| t.answered.contains(x)),
     };
     let state = handling(&facts);
-    let error = if state == Handling::Failed {
-        match (turn_error, &answer_id) {
-            (Some(e), _) => Some(e.clone()),
-            (None, Some(a)) => out_error(c, ws, a)?,
-            (None, None) => None,
+    let error = if matches!(
+        state,
+        Handling::Failed | Handling::Blocked | Handling::Unknown
+    ) {
+        match &answer_id {
+            Some(a) => out_error(c, ws, a)?.or_else(|| turn_error.cloned()),
+            None => turn_error.cloned(),
         }
     } else {
         None
@@ -437,6 +470,8 @@ fn received(
         "item": item,
         "decision": open,
         "main_turn": main_turn,
+        "out_message_id": answer_id,
+        "out_status": answer.as_ref().map(|(status, _)| status),
     }))
 }
 
@@ -474,7 +509,7 @@ pub fn record(
             v["turn"] = json!(t.said_by.get(&m.id));
             let (status, mut decision) =
                 out_state(c, ws, &m.id)?.unwrap_or_else(|| (m.status.clone(), None));
-            let error = if matches!(status.as_str(), "failed" | "unknown") {
+            let error = if matches!(status.as_str(), "failed" | "blocked" | "unknown") {
                 if decision.is_none() {
                     decision = open_fail(c, ws, &m.id)?;
                 }
@@ -587,35 +622,112 @@ mod tests {
     }
 
     #[test]
-    fn a_failure_wins_over_everything_else() {
-        for x in [
-            Facts {
-                turn_failed: true,
-                item: Some("ST-1".into()),
-                ..f()
-            },
-            Facts {
-                reaction: Some("failed".into()),
+    fn only_the_persisted_outbound_result_confirms_channel_delivery() {
+        for (status, want) in [
+            ("sent", Handling::Answered),
+            ("draft", Handling::Drafted),
+            ("blocked", Handling::Blocked),
+            ("failed", Handling::Failed),
+            ("pending", Handling::Working),
+            ("unknown", Handling::Unknown),
+            ("recalled", Handling::Recalled),
+            ("discarded", Handling::Skipped),
+        ] {
+            for reaction in ["done", "ack", "failed", "cleared"] {
+                assert_eq!(
+                    handling(&Facts {
+                        answer: Some(status.into()),
+                        reaction: Some(reaction.into()),
+                        decision_open: true,
+                        turn: true,
+                        turn_failed: false,
+                        outcome: Some("failed".into()),
+                        ..f()
+                    }),
+                    want
+                );
+            }
+        }
+        assert_eq!(
+            handling(&Facts {
                 answer: Some("sent".into()),
-                ..f()
-            },
-            Facts {
-                outcome: Some("failed".into()),
-                ..f()
-            },
-            Facts {
                 turn_failed: true,
+                ..f()
+            }),
+            Handling::Failed
+        );
+        assert_eq!(
+            handling(&Facts {
+                reaction: Some("done".into()),
+                ..f()
+            }),
+            Handling::None
+        );
+        assert_eq!(
+            handling(&Facts {
+                reaction: Some("failed".into()),
+                ..f()
+            }),
+            Handling::None
+        );
+        assert_eq!(
+            handling(&Facts {
+                turn: true,
                 turn_answered_in_main: true,
                 ..f()
-            },
-            Facts {
-                answer: Some("failed".into()),
+            }),
+            Handling::Local
+        );
+        assert_eq!(
+            handling(&Facts {
                 decision_open: true,
                 ..f()
-            },
-        ] {
-            assert_eq!(handling(&x), Handling::Failed, "{x:?}");
-        }
+            }),
+            Handling::Waiting
+        );
+        assert_eq!(
+            handling(&Facts {
+                turn_failed: true,
+                ..f()
+            }),
+            Handling::Failed
+        );
+        assert_eq!(
+            handling(&Facts {
+                item: Some("ST-2".into()),
+                ..f()
+            }),
+            Handling::Item
+        );
+        assert_eq!(
+            handling(&Facts {
+                turn_open: true,
+                ..f()
+            }),
+            Handling::Working
+        );
+        assert_eq!(handling(&Facts { turn: true, ..f() }), Handling::Skipped);
+        assert_eq!(
+            handling(&Facts {
+                decision_closed: true,
+                ..f()
+            }),
+            Handling::Decided
+        );
+        assert_eq!(
+            handling(&Facts {
+                label: crate::inbound::LABEL_QUIET.into(),
+                ..f()
+            }),
+            Handling::Recorded
+        );
+        assert_eq!(
+            handling(&Facts {
+                label: crate::inbound::LABEL_OWN.into(),
+                ..f()
+            }),
+            Handling::None
+        );
     }
 
     #[test]
@@ -657,7 +769,12 @@ mod tests {
                 reaction: Some("cleared".into()),
                 ..f()
             };
-            assert_eq!(handling(&x), Handling::Working, "{x:?}");
+            let expected = if answer == "unknown" {
+                Handling::Unknown
+            } else {
+                Handling::Working
+            };
+            assert_eq!(handling(&x), expected, "{x:?}");
         }
         let x = Facts {
             decision_open: true,
@@ -667,133 +784,29 @@ mod tests {
             turn_open: true,
             ..f()
         };
-        assert_eq!(handling(&x), Handling::Waiting);
+        assert_eq!(handling(&x), Handling::Drafted);
+        assert_eq!(
+            handling(&Facts {
+                decision_open: true,
+                reaction: Some("cleared".into()),
+                ..f()
+            }),
+            Handling::Waiting
+        );
     }
 
     #[test]
-    fn each_state_from_its_facts() {
-        let cases = [
-            (
-                Facts {
-                    item: Some("ST-2".into()),
-                    reaction: Some("ack".into()),
-                    ..f()
-                },
-                Handling::Item,
-            ),
-            (
-                Facts {
-                    answer: Some("sent".into()),
-                    ..f()
-                },
-                Handling::Answered,
-            ),
-            (
-                Facts {
-                    reaction: Some("done".into()),
-                    ..f()
-                },
-                Handling::Answered,
-            ),
-            (
-                Facts {
-                    decision_open: true,
-                    turn: true,
-                    ..f()
-                },
-                Handling::Waiting,
-            ),
-            (
-                Facts {
-                    reaction: Some("ack".into()),
-                    turn: true,
-                    ..f()
-                },
-                Handling::Working,
-            ),
-            (
-                Facts {
-                    answer: Some("pending".into()),
-                    ..f()
-                },
-                Handling::Working,
-            ),
-            (
-                Facts {
-                    turn: true,
-                    turn_open: true,
-                    ..f()
-                },
-                Handling::Working,
-            ),
-            (Facts { turn: true, ..f() }, Handling::Skipped),
-            // answered in your web conversation: its “处理中” is never taken off in the space
-            (
-                Facts {
-                    reaction: Some("ack".into()),
-                    turn: true,
-                    turn_answered_in_main: true,
-                    ..f()
-                },
-                Handling::Answered,
-            ),
-            (
-                Facts {
-                    reaction: Some("cleared".into()),
-                    ..f()
-                },
-                Handling::Skipped,
-            ),
-            (
-                Facts {
-                    answer: Some("discarded".into()),
-                    ..f()
-                },
-                Handling::Skipped,
-            ),
-            (
-                Facts {
-                    outcome: Some("ignored".into()),
-                    ..f()
-                },
-                Handling::Skipped,
-            ),
-            (
-                Facts {
-                    decision_closed: true,
-                    label: "转给你".into(),
-                    ..f()
-                },
-                Handling::Decided,
-            ),
-            (
-                Facts {
-                    outcome: Some("recorded".into()),
-                    label: crate::inbound::LABEL_QUIET.into(),
-                    ..f()
-                },
-                Handling::Recorded,
-            ),
-            (
-                Facts {
-                    outcome: Some("recorded".into()),
-                    ..f()
-                },
-                Handling::None,
-            ),
-            (
-                Facts {
-                    outcome: Some("recorded".into()),
-                    label: crate::inbound::LABEL_OWN.into(),
-                    ..f()
-                },
-                Handling::None,
-            ),
-            (f(), Handling::None),
-        ];
-        for (x, want) in cases {
-            assert_eq!(handling(&x), want, "{x:?}");
-        }
+    fn a_finished_skip_is_not_a_local_or_channel_reply() {
+        let facts = Facts {
+            outcome: Some("recorded".into()),
+            label: format!("{NO_REPLY}nothing to add"),
+            reaction: Some("ack".into()),
+            turn: true,
+            turn_open: true,
+            turn_answered_in_main: true,
+            ..f()
+        };
+        assert_eq!(handling(&facts), Handling::Skipped);
     }
 
     #[test]

@@ -1740,24 +1740,6 @@ pub fn direct_ok(mode: Mode, auth: &Auth) -> bool {
 /// An inbound message: `(external id, sender account, text)`.
 type Source = (Option<String>, Option<String>, String);
 
-/// The inbound message a reply or trigger reply comes from, in the same space.
-/// The names mentioned in a stored message (trigger words come after leading mentions).
-fn mention_names(c: &Connection, id: &str) -> ChannelResult<Vec<String>> {
-    let raw: Option<String> = c
-        .query_row(
-            "SELECT mentions FROM chan_messages WHERE id = ?",
-            [id],
-            |r| r.get(0),
-        )
-        .optional()?;
-    Ok(raw
-        .and_then(|s| serde_json::from_str::<Vec<Value>>(&s).ok())
-        .unwrap_or_default()
-        .iter()
-        .filter_map(|m| m["name"].as_str().map(String::from))
-        .collect())
-}
-
 fn source_in(c: &Connection, row: &OutRow, source: &str) -> ChannelResult<Option<Source>> {
     Ok(c.query_row(
         "SELECT external_id, sender_account_id, coalesce(text, '') FROM chan_messages
@@ -1865,36 +1847,7 @@ pub fn verify(
                 && src.is_some_and(|(ext, _, _)| ext.is_some() && ext == row.reply_to)
         }
         Auth::Trigger { source } => {
-            let t = spaces::channel_settings(c, &row.ws, &space.connection_id)?
-                .map(|s| Trigger::from_value(&s.trigger));
-            let dm = space.kind == SpaceKind::Dm.code();
-            // 屏蔽 wins over trigger words (不提醒 does not: they are your explicit command)
-            let blocked = spaces::settings(c, &space.id)
-                .is_ok_and(|s| s.attention == spaces::Attention::Blocked);
-            let names = mention_names(c, source)?;
-            match (t, source_in(c, row, source)?) {
-                (Some(t), Some((_, Some(sender), text))) => {
-                    // the sender as the trigger's `who` sees them: you, or a chosen contact
-                    let party: Option<String> = c
-                        .query_row(
-                            "SELECT sender_party_id FROM chan_messages WHERE id = ?",
-                            [source],
-                            |r| r.get(0),
-                        )
-                        .optional()?
-                        .flatten();
-                    let you = sender == account
-                        || crate::arbiter::from_you(c, &row.ws, Some(&sender), party.as_deref())?;
-                    // the word itself, or a conversation it started going on
-                    !blocked
-                        && t.allows(you, party.as_deref())
-                        && (t.instruction(&space.id, dm, &text, &names).is_some()
-                            || (t.on
-                                && t.applies(&space.id, dm)
-                                && crate::arbiter::continues(c, &space.id, source)?))
-                }
-                _ => false,
-            }
+            crate::arbiter::command(c, &row.ws, &space, &space.connection_id, source)?.is_some()
         }
         // only a grant for the flow version the run is running
         Auth::Grant {

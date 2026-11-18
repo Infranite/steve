@@ -228,9 +228,15 @@ export default {
   /* the full record of a channel conversation: what Steve did with each message of the chat */
   record: {
     answered: "已回复",
+    drafted: "仅起草，未发送",
+    blocked: "发送受阻",
+    unknown: "发送结果未确认",
+    recalled: "已撤回",
+    local: "仅在 Steve 中回复",
     waiting: "等你处理",
     item: "转成事项",
     working: "处理中",
+    failureNoticeSent: "失败说明已发出",
     failed: "失败",
     skipped: "已跳过",
     decided: "你已处理",
@@ -243,7 +249,7 @@ export default {
   /* the reaction Steve puts on a chat message */
   reaction: {
     ack: "处理中",
-    done: "已回答",
+    done: "已处理",
     failed: "没答上",
     ackAsUser: "以你本人在消息上加了“处理中”",
     ackAsBot: "机器人在消息上加了“处理中”",

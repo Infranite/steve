@@ -45,3 +45,10 @@ test("a failure says why; a skip what it was recorded with; an answer nothing mo
   assert.equal(handlingDetail(h("skipped", { label: "不需要回复", reason: "起草器：只是寒暄" })), "不需要回复 · 起草器：只是寒暄")
   assert.equal(handlingDetail(h("answered", { label: "已回复" })), "")
 })
+
+
+test("blocked and unconfirmed sends keep their persisted reason", () => {
+  const h = { label: "generated", reason: "", error: "target_forbidden" }
+  assert.equal(handlingDetail({ ...h, state: "blocked" }), "target_forbidden")
+  assert.equal(handlingDetail({ ...h, state: "unknown" }), "target_forbidden")
+})
