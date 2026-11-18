@@ -18,41 +18,51 @@ gives it the next free version (one more than the highest `vX.Y.Z` tag on `origi
 in the order they arrived on the branch into `docs/releases/X.Y.Z.md` and removes them.
 
 The branch takes changes only through pull requests (it may be protected), so the notes go in as one. `cut`
-takes the branch's head as `base`, commits the notes on it (adding `docs/releases/X.Y.Z.md`, removing the
-fragments present at `base`, nothing else), pushes that commit to `release/vX.Y.Z`, opens a pull request into
-the branch, waits for its CI run, merges it with a merge commit (`--match-head-commit`, so exactly that commit
-goes in), and then tags the notes commit itself with the annotated tag `vX.Y.Z`: the tag is the tree that was
-tested, whatever landed on the branch meanwhile. Only the tag is pushed directly; branch rules do not cover tags.
+takes as `base` the newest tested commit of the branch (below), commits the notes on it (adding
+`docs/releases/X.Y.Z.md`, removing the fragments present at `base`, nothing else), pushes that commit to
+`release/vX.Y.Z`, opens a pull request into the branch, waits for its CI run, merges it with a merge commit
+(`--match-head-commit`, so exactly that commit goes in), and then tags the notes commit itself with the annotated
+tag `vX.Y.Z`: the tag is the tree that was tested, whatever landed on the branch meanwhile. Only the tag is
+pushed directly; branch rules do not cover tags.
 
-The branch keeps moving while a release waits for CI (other pull requests merge every few minutes), and that is
-no reason to start again: the merge commit joins the notes commit to whatever the branch has become. Fragments
-that arrived after `base` are not touched by the notes commit, so the merge keeps them for the next release.
-`cut` starts again from the new state, a few times at most, only on a real problem: the pull request does not
-merge cleanly (someone changed a fragment it removes), someone else released the version first, or the release
-branch was taken while pushing it. The pull request is then closed and its branch deleted. A release branch
-already on `origin` is someone else's release in progress (or one left behind: delete it once nobody is
-releasing); `cut` refuses it.
+The branch keeps moving (other pull requests merge every few minutes), and that is no reason to wait or start
+again: the merge commit joins the notes commit to whatever the branch has become. Fragments that arrived after
+`base` are not touched by the notes commit, so the merge keeps them for the next release. `cut` starts again
+from the new state, a few times at most, only on a real problem: the pull request does not merge cleanly
+(someone changed a fragment it removes), someone else released the version first, or the release branch was
+taken while pushing it. The pull request is then closed and its branch deleted. A release branch already on
+`origin` is someone else's release in progress (or one left behind: delete it once nobody is releasing); `cut`
+refuses it.
 
 The tag is pushed after the merge, never before: the tag starts the Release workflow, which publishes it, and a
 tag pushed first would publish a version the branch might never contain when the merge then fails. Before
 tagging, `cut` checks that the notes commit is on origin's branch. A release whose pull request merged but whose
-tag never landed is finished by the next `cut`: the branch then carries `docs/releases/X.Y.Z.md` of an untagged
-version, added by a notes commit of `cut`'s shape, and that commit is tagged as it is (after the same CI
-checks); fragments that arrived since wait for the release after it.
+tag never landed is finished by the next `cut`: the branch's head then carries `docs/releases/X.Y.Z.md` of an
+untagged version, added by a notes commit of `cut`'s shape, and that commit is tagged as it is (after the same
+CI checks); fragments that arrived since wait for the release after it.
 
-Only a tested commit is released: `cut` first asks GitHub (`gh`: $STEVE_GH, else on PATH, else in
-/opt/homebrew/bin, /usr/local/bin or /usr/bin, as the Hub finds it) for the CI workflow's run
-(`.github/workflows/ci.yml`) pushed to the branch at `base`. It waits while that run is queued or running (up to
-`--ci-wait` seconds, default 45 minutes), and refuses when it failed or there is none, naming the run and how to
-run its failed jobs again (`gh run rerun <id> --failed`) when it was only a flake. The notes commit then needs
-its release pull request's run to pass: that run checks the notes (ci.yml skips its Rust and Apple jobs when the
-pull request changes release notes alone and stands right on a main commit whose run passed), so the tagged
-tree is `base`, tested on every platform, plus notes that passed their checks. `--skip-ci` releases without
-either check, on purpose (it says so; a protected branch that requires the run then refuses the merge).
-`--dry-run` asks nothing and pushes nothing.
+Only a tested commit is released. CI (`.github/workflows/ci.yml`) runs every platform on a push to the branch,
+but its push runs share one concurrency group: one runs, at most one waits, and a newer push replaces the
+waiting one (that run ends `cancelled`), so macOS tests the newest head instead of a queue, and not every commit
+gets a run. `base` is therefore the newest commit whose own push run passed: `cut` asks GitHub (`gh`:
+$STEVE_GH, else on PATH, else in /opt/homebrew/bin, /usr/local/bin or /usr/bin, as the Hub finds it) for the
+push run of each commit, walking back from the head along the first parents, 50 commits at most (WALK) and never past
+the newest release on the branch (an older commit would release that release's fragments again). A commit whose
+run is still queued or running, was cancelled (superseded), or that has no run of its own (a pull request
+rebase-merged as several commits gets one run, on its last) is passed over and waits for the next release. A
+run that failed stops the walk: `cut` refuses, naming the run and how to run its failed jobs again (`gh run
+rerun <id> --failed`) when it was only a flake, rather than release an older commit past a failure nobody
+looked at; a newer commit whose run passes ends that refusal. When no commit is releasable yet but a newer run is
+still going, `cut` waits for it (up to `--ci-wait` seconds, default 45 minutes). It says which commit it
+releases and how many newer ones wait. The notes commit then needs its release pull request's run to pass: that
+run checks the notes (ci.yml skips its Rust and Apple jobs when the pull request changes release notes alone and
+stands on a main commit whose run passed), so the tagged tree is `base`, tested on every platform, plus notes
+that passed their checks. `--skip-ci` releases the head without either check, on purpose (it says so; a
+protected branch that requires the run then refuses the merge). `--dry-run` reads CI to show the notes of the
+release `cut` would make now, without waiting, and pushes nothing.
 
-Only `base`'s own push run counts for it. Pull requests run the Linux jobs only (macOS runs on main), so a pull
-request's green run is never taken for the commit it was merged as.
+Only a commit's own push run counts for it. Pull requests run the Linux jobs only (macOS runs on main), so a
+pull request's green run is never taken for the commit it was merged as.
 
 A `docs/releases/X.Y.Z.md` for a version no tag has yet (written ahead the old way) is taken as the
 first fragment of that release.
@@ -85,6 +95,9 @@ CI_POLL = 30
 MERGE_TRIES = 3  # a merge refused because the target moved at that very moment is tried again
 MERGE_RETRY = 5
 CI_APPEAR = 180  # a push's run shows up within seconds; one that never does is no run
+# How many commits of the branch, the head and its first parents, `cut` looks at for the newest tested one. With
+# one push run at a time on main, a few commits land per run; a release further back than this is a CI problem.
+WALK = 50
 # where gh is when PATH is launchd's bare one (a service running `cut` with its environment); the same places
 # the Hub looks (steve-core config.rs gh_cli())
 GH_PLACES = ("/opt/homebrew/bin/gh", "/usr/local/bin/gh", "/usr/bin/gh")
@@ -199,11 +212,12 @@ def rerun_hint(run):
 
 def ci_gate(repo, sha, branch, wait):
     """Return once the CI workflow passed on `sha`; refuse when it failed, is missing, or still runs after
-    `wait` seconds. This is the workflow conclusion, never a successful job."""
+    `wait` seconds. This is the workflow conclusion, never a successful job. It checks the one commit a release
+    left behind stands on (`left_behind`); a new release finds its base with `tested_base`."""
     short = sha[:7]
     start = time.monotonic()
     said = None
-    # Only the head's own push run counts: pull requests run the Linux jobs only, so a pull request's green
+    # Only the commit's own push run counts: pull requests run the Linux jobs only, so a pull request's green
     # run never stands for the macOS half of a release.
     while True:
         run = ci_run(repo, sha, branch)
@@ -230,6 +244,87 @@ def ci_gate(repo, sha, branch, wait):
             print(f"waiting for CI on {short} ({state})", file=sys.stderr)
             said = state
         time.sleep(CI_POLL)
+
+
+def last_release(repo, head):
+    """The newest `vX.Y.Z` tag that `head` contains and its commit, or (None, None)."""
+    tags = git("tag", "--merged", head, "--list", "v*", cwd=repo).stdout.split()
+    found = [(tuple(int(x) for x in m.groups()), t) for t in tags if (m := VERSION_RE.match(t))]
+    if not found:
+        return None, None
+    name = max(found)[1]
+    return name, git("rev-parse", f"{name}^{{commit}}", cwd=repo).stdout.strip()
+
+
+def candidates(repo, head):
+    """The commits `cut` may release from, newest first, and what bounds them: `head` and its first parents,
+    WALK of them at most, each containing the newest release on the branch. An older commit still has that
+    release's fragments and lacks its notes (a release pull request goes in as a merge commit's second
+    parent, so the first parents before that merge never had them): releasing it would release them again."""
+    name, last = last_release(repo, head)
+    out = []
+    for c in git("rev-list", "--first-parent", f"--max-count={WALK}", head, cwd=repo).stdout.split():
+        if last and git("merge-base", "--is-ancestor", last, c, cwd=repo, check=False).returncode != 0:
+            return out, f"since {name} ({len(out)} commits)"
+        out.append(c)
+    return out, (f"in its last {WALK} commits" if len(out) == WALK else f"({len(out)} commits)")
+
+
+def tested_base(repo, branch, head, wait):
+    """The newest commit of `branch` (whose head is `head`) whose own push run of the CI workflow passed, and
+    how many newer commits wait for the next release. This is the workflow conclusion, never a successful job.
+
+    CI's push runs on the branch share one concurrency group (ci.yml), so a commit whose run is queued or
+    running, was cancelled because a newer push replaced it, or that has no run of its own is passed over. A
+    failed run stops the walk and refuses the release. While nothing is releasable but a newer run is still
+    going, `cut` waits for it, up to `wait` seconds. A run seen completed is not asked about again meanwhile."""
+    commits, scope = candidates(repo, head)
+    start, said, done = time.monotonic(), None, {}
+    while True:
+        waited = time.monotonic() - start
+        going, failed = [], None
+        for n, c in enumerate(commits):
+            run = done[c] if c in done else ci_run(repo, c, branch)
+            if run is None:
+                if n == 0 and waited < min(wait, CI_APPEAR):
+                    going.append((c, None))  # a push's run takes a moment to show up
+                else:
+                    done[c] = None
+                continue
+            if run.get("status") != "completed":
+                going.append((c, run))
+                continue
+            done[c] = run
+            if run.get("conclusion") == "success":
+                print(f"CI passed on {c[:7]}: {run.get('html_url', run.get('id'))}", file=sys.stderr)
+                return c, n
+            if run.get("conclusion") == "cancelled":
+                continue  # replaced by a newer push (or cancelled by hand): it says nothing about the commit
+            failed = (c, run)
+            break
+        if going and waited < wait:
+            state = ", ".join(f"{c[:7]} {state_of(run)}" for c, run in going)
+            if state != said:
+                print(f"waiting for CI on {branch} ({state})", file=sys.stderr)
+                said = state
+            time.sleep(CI_POLL)
+            continue
+        if failed:
+            c, run = failed
+            raise Refused(f"CI ({CI_WORKFLOW}) {run.get('conclusion')} on {c[:7]}: "
+                          f"{run.get('html_url', run.get('id'))}. No newer commit of {branch} has passed since, and nothing older than a failed one is "
+                          f"released. " + rerun_hint(run))
+        if going:
+            c, run = going[-1]
+            where = f": {run.get('html_url', run.get('id'))}" if run else ""
+            raise Refused(f"CI ({CI_WORKFLOW}) on {c[:7]} is still {state_of(run)} after {int(waited)}s{where}, and "
+                          f"no commit of {branch} {scope} has passed yet; cut again once it has passed")
+        raise Refused(f"CI ({CI_WORKFLOW}) has no passing push run on {branch} {scope}: only a tested commit is "
+                      f"released (wait for CI on {branch}, or --skip-ci to release untested)")
+
+
+def state_of(run):
+    return "no run yet" if run is None else run.get("status") or "pending"
 
 
 def fragments(wt, version):
@@ -270,12 +365,12 @@ def assemble(version, parts):
 def cut_once(repo, branch, version_arg, minor, dry, ci_wait=CI_WAIT):
     if git("fetch", "--quiet", "--tags", "origin", cwd=repo, check=False, timeout=NET_TIMEOUT).returncode != 0:
         raise Refused("can't fetch origin")
-    base = git("rev-parse", f"refs/remotes/origin/{branch}^{{commit}}", cwd=repo).stdout.strip()
+    head = git("rev-parse", f"refs/remotes/origin/{branch}^{{commit}}", cwd=repo).stdout.strip()
     version = version_arg or next_version(repo, minor)
     taken(repo, version, version_arg)
     with tempfile.TemporaryDirectory(prefix="steve-cut-") as tmp:
         wt = Path(tmp, "wt")
-        git("worktree", "add", "--quiet", "--detach", str(wt), base, cwd=repo)
+        git("worktree", "add", "--quiet", "--detach", str(wt), head, cwd=repo)
         try:
             notes_rel = f"{NOTES}/{version}.md"
             if left := left_behind(wt, version):
@@ -292,17 +387,28 @@ def cut_once(repo, branch, version_arg, minor, dry, ci_wait=CI_WAIT):
                     notes_ci(repo, left, f"notes commit {left[:7]}", ci_wait, branch)
                 tag(repo, wt, left, version, branch)
                 return fetched(repo, version)
+            if ci_wait is None:
+                base, newer = head, 0
+            else:
+                # a dry run shows what would be released now, so it does not wait for CI
+                base, newer = tested_base(repo, branch, head, 0 if dry else ci_wait)
+            subject = git("log", "-1", "--format=%s", base, cwd=repo).stdout.strip()
+            print(f"releasing {base[:7]} ({subject})"
+                  + (f": {newer} newer commit{'s' * (newer != 1)} on {branch} wait for the next release" if newer
+                     else f", the head of {branch}" + (" (untested: --skip-ci)" if ci_wait is None else "")),
+                  file=sys.stderr)
+            if base != head:
+                git("checkout", "--quiet", "--detach", base, cwd=wt)
             parts = fragments(wt, version)
             if not parts:
-                raise Refused(f"no release notes: add {FRAGMENTS}/<item>.md on {branch} first")
+                raise Refused(f"no release notes: add {FRAGMENTS}/<item>.md on {branch} first"
+                              + (" (or wait for CI to pass on a commit that has them)" if base != head else ""))
             # notes of this untagged version written ahead the old way, alone: `base` is tagged as it is
             ready = [p for p, _ in parts] == [notes_rel]
             text = parts[0][1] if ready else assemble(version, parts)
             if dry:
                 print(text, end="")
                 return version
-            if ci_wait is not None:
-                ci_gate(repo, base, branch, ci_wait)
             if ready:
                 target = base
             else:
@@ -565,7 +671,7 @@ def main():
     c.add_argument("--dry-run", action="store_true")
     ci = c.add_mutually_exclusive_group()
     ci.add_argument("--ci-wait", type=int, default=CI_WAIT, metavar="S",
-                    help=f"how long to wait for CI on the branch head (default {CI_WAIT}s)")
+                    help=f"how long to wait for CI while no commit is releasable yet (default {CI_WAIT}s)")
     ci.add_argument("--skip-ci", action="store_true", help="release without checking CI (untested)")
     l = sub.add_parser("lint")
     l.add_argument("--base")

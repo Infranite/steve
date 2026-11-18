@@ -14,7 +14,8 @@ ENV = dict({k: v for k, v in os.environ.items() if k != "STEVE_GH"}, GIT_AUTHOR_
            GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@example.com")
 
 # GitHub's answer for the CI workflow's runs on a commit, from $FAKE_GH_CI: {"conclusion": ..., "status": ...}
-# for the push run of every commit, or {"none": true} (only a pull request's run); each call is logged to
+# for the push run of every commit, or {"none": true} (only a pull request's run), and under "commits" the same
+# for single commits ({"commits": {sha: {"status": "in_progress"}}}); each call is logged to
 # $FAKE_GH_LOG. With {"pull": {"number": N, "head": sha, ...}} every commit asked about is that pull request
 # as merged ("merged_as": another commit instead; "base": its target), and its head has one pull-request run
 # ("conclusion", "status").
@@ -115,11 +116,13 @@ if tested:
 # a green pull-request run of the same commit (Linux only) is always there, and newer: by itself it never counts
 pr = {"id": 99, "run_number": 3, "head_sha": m.group(1), "event": "pull_request", "head_branch": "feature",
       "status": "completed", "conclusion": "success", "html_url": "https://github.example/runs/99"}
-runs = [pr] if ci.get("none") else [
+mine = ci.get("commits", {}).get(m.group(1))  # this commit's own state, instead of everyone's
+state = ci if mine is None else mine
+runs = [pr] if state.get("none") else [
     {"id": 7, "run_number": 1, "head_sha": m.group(1), "event": "push", "head_branch": "main",
      "status": "completed", "conclusion": "failure", "html_url": "https://github.example/runs/7"},
     {"id": 42, "run_number": 2, "head_sha": m.group(1), "event": "push", "head_branch": "main",
-     "status": ci.get("status", "completed"), "conclusion": ci.get("conclusion"),
+     "status": state.get("status", "completed"), "conclusion": state.get("conclusion"),
      "html_url": "https://github.example/runs/42"}, pr]
 print(json.dumps({"total_count": len(runs), "workflow_runs": runs}))
 """
@@ -211,11 +214,14 @@ def main():
         commit(a, {"src/y.txt": "y\n", "docs/releases/unreleased/ST-2.md": "# Steve v9.9.9\n\n- Second change. (ST-2)\n"}, "two")
         git(a, "push", "-q", "origin", "main")
 
+        calls = len(gh_calls())
         r = cut(a, "cut", "--dry-run")
         assert r.returncode == 0 and r.stdout == "# Steve v0.2.25\n\n- First change. (ST-1)\n\n- Second change. (ST-2)\n", r
-        assert git(origin, "tag", "-l", "v0.2.25") == ""
-        assert gh_calls() == [], gh_calls()
-        ok("--dry-run shows the notes and changes nothing, without asking CI")
+        assert git(origin, "tag", "-l", "v0.2.25") == "" and git(origin, "branch", "--list", "release/*") == ""
+        assert gh_calls()[calls:] and all(c.startswith("api ") and "/actions/workflows/ci.yml/runs?" in c
+                                          for c in gh_calls()[calls:]), gh_calls()
+        assert "releasing" in r.stderr and "the head of main" in r.stderr, r.stderr
+        ok("--dry-run shows the notes and changes nothing; it only reads CI, to pick the commit")
 
         head = git(origin, "rev-parse", "main")
         set_ci(conclusion="failure")
@@ -230,14 +236,17 @@ def main():
         set_ci(conclusion="success", status="in_progress")
         r = cut(a, "cut", "--ci-wait", "0")
         assert r.returncode == 1 and "still in_progress" in r.stderr and "runs/42" in r.stderr, r
-        for conclusion in ("cancelled", "skipped", "neutral"):
+        for conclusion in ("skipped", "neutral"):
             set_ci(conclusion=conclusion)
             r = cut(a, "cut", "--ci-wait", "0")
             assert r.returncode == 1 and f"{conclusion} on" in r.stderr, r
             assert git(origin, "tag", "-l", "v0.2.25") == ""
+        set_ci(conclusion="cancelled")
+        r = cut(a, "cut", "--ci-wait", "0")
+        assert r.returncode == 1 and "no passing push run on main (3 commits)" in r.stderr, r
         set_ci(none=True)
         r = cut(a, "cut", "--ci-wait", "0")
-        assert r.returncode == 1 and "has no push run on" in r.stderr, r
+        assert r.returncode == 1 and "no passing push run on" in r.stderr, r
         assert git(origin, "tag", "-l", "v0.2.25") == ""
         set_ci(down=True)
         r = cut(a, "cut", "--ci-wait", "0")
@@ -377,15 +386,18 @@ def main():
         subprocess.run(["git", "-C", str(b), "pull", "-q", "--rebase", "origin", "main"], check=True, env=ENV)
         git(b, "push", "-q", "origin", "main")
         real_run, seen = m.ci_run, []
+        waited = git(origin, "rev-parse", "main")
 
+        # only the head has a run (the release's merge commit before it has none), and it takes a while
         def finishes(repo, sha, branch):
             seen.append(sha)
             states = [None, {"id": 9, "status": "queued"}, {"id": 9, "status": "in_progress"},
                       {"id": 9, "status": "completed", "conclusion": "success"}]
-            return states[min(len(seen) - 1, 3)]
+            return states[min(seen.count(waited) - 1, 3)] if sha == waited else None
         m.ci_run, m.CI_POLL = finishes, 0
         assert m.cut(b, "main", None, False, False) == "0.2.31"
-        assert len(seen) == 4 and set(seen) == {git(origin, "rev-parse", "v0.2.31^{commit}^")}, seen
+        assert git(origin, "rev-parse", "v0.2.31^{commit}^") == waited
+        assert seen.count(waited) == 4 and len(set(seen)) == 2, seen  # the merge commit is asked about once
         seen.clear()
 
         def never(repo, sha, branch):
@@ -483,17 +495,17 @@ def main():
         commit(b, {"src/meanwhile.txt": "m\n"}, "meanwhile")
         git(b, "push", "-q", "origin", "main")
         assert rebase_merge(2) != behind
-        refused("has no push run on", none=True, pull={"number": 7, "head": behind})
+        refused("no passing push run on", none=True, pull={"number": 7, "head": behind})
         ok("a pull request merged onto a branch that had moved: its run does not count")
 
         head = pull_request(8, {"src/p8.txt": "8\n", "src/p8b.txt": "8b\n"})
         merged = rebase_merge(2)
         assert merged != head and git(b, "rev-parse", f"{merged}^{{tree}}") == git(b, "rev-parse", f"{head}^{{tree}}")
         pull = {"number": 8, "head": head}
-        refused("has no push run on", none=True, pull=dict(pull, conclusion="failure"))
-        refused("has no push run on", none=True, pull=dict(pull, status="in_progress", conclusion=None))
-        refused("has no push run on", none=True, pull=dict(pull, merged_as=head))
-        refused("has no push run on", none=True, pull=dict(pull, base="other"))
+        refused("no passing push run on", none=True, pull=dict(pull, conclusion="failure"))
+        refused("no passing push run on", none=True, pull=dict(pull, status="in_progress", conclusion=None))
+        refused("no passing push run on", none=True, pull=dict(pull, merged_as=head))
+        refused("no passing push run on", none=True, pull=dict(pull, base="other"))
         refused(f"failure on {merged[:7]}", conclusion="failure", pull=pull)
         ok("a pull request's run that did not pass, another merge or target, or a red run on the head: no release")
         refused("still in_progress", status="in_progress", conclusion=None, pull=pull)
@@ -630,6 +642,77 @@ def main():
             m2.time.sleep = sleep
         assert git(origin, "tag", "-l", "v0.2.37") == "" and git(b, "tag", "-l", "v0.2.37") == ""
         ok("a commit main does not contain is never tagged")
+
+        # main's push runs share one concurrency group: the head's run waits while older commits have theirs
+        git(b, "checkout", "-q", "-B", "main", "origin/main")
+        tested = fragment("ST-14")  # main now has ST-13 (left from above) and ST-14
+        pending = fragment("ST-15")
+        set_ci(conclusion="success", commits={pending: {"status": "pending", "conclusion": None}})
+        r = cut(a, "cut", "--dry-run")
+        assert r.returncode == 0 and "- ST-14." in r.stdout and "ST-15" not in r.stdout, r
+        assert f"releasing {tested[:7]} (ST-14): 1 newer commit on main wait" in r.stderr, r.stderr
+        before = len(prs())
+        r = cut(a, "cut")
+        assert r.returncode == 0 and "released v0.2.37" in r.stdout and f"CI passed on {tested[:7]}" in r.stderr, r
+        assert git(origin, "rev-parse", "v0.2.37^{commit}^") == tested
+        notes = git(origin, "show", "v0.2.37:docs/releases/0.2.37.md")
+        assert notes == "# Steve v0.2.37\n\n- ST-13.\n\n- ST-14.", notes
+        new = list(prs().values())[before:]
+        assert [p["state"] for p in new] == ["MERGED"] and git(origin, "rev-parse", "main^1") == pending
+        assert git(origin, "ls-tree", "--name-only", "main", "docs/releases/unreleased/") == \
+            "docs/releases/unreleased/ST-15.md"
+        ok("the head's run still waits: the newest commit whose run passed is released, and the fragments that "
+           "landed after it stay on main for the next release")
+
+        # a run replaced by a newer push ends cancelled; a pull request rebase-merged as several commits has
+        # one run, on its last: both are passed over
+        tested, superseded, unrun = fragment("ST-16"), fragment("ST-17"), fragment("ST-18")
+        set_ci(conclusion="success", commits={unrun: {"none": True}, superseded: {"conclusion": "cancelled"}})
+        r = cut(a, "cut", "--ci-wait", "0")
+        assert r.returncode == 0 and "released v0.2.38" in r.stdout, r
+        assert f"releasing {tested[:7]} (ST-16): 2 newer commits on main wait" in r.stderr, r.stderr
+        assert git(origin, "rev-parse", "v0.2.38^{commit}^") == tested
+        notes = git(origin, "show", "v0.2.38:docs/releases/0.2.38.md")
+        assert notes == "# Steve v0.2.38\n\n- ST-15.\n\n- ST-16.", notes
+        ok("a superseded (cancelled) run, or a commit without a run, is passed over")
+
+        # a failed run stops the walk, even with a passed commit behind it, until a newer commit passes
+        merged = git(origin, "rev-parse", "main")  # the release's merge commit
+        head = fragment("ST-19")
+        set_ci(conclusion="success", commits={head: {"status": "in_progress", "conclusion": None},
+                                              merged: {"conclusion": "failure"}})
+        r = cut(a, "cut", "--ci-wait", "0")
+        assert r.returncode == 1 and f"failure on {merged[:7]}" in r.stderr, r
+        assert "gh run rerun 42 --failed" in r.stderr, r.stderr
+        assert "nothing older than a failed one is released" in r.stderr, r.stderr
+        assert git(origin, "tag", "-l", "v0.2.39") == "" and git(origin, "rev-parse", "main") == head
+        set_ci(conclusion="success", commits={merged: {"conclusion": "failure"}})
+        r = cut(a, "cut", "--ci-wait", "0")
+        assert r.returncode == 0 and "released v0.2.39" in r.stdout and f"releasing {head[:7]}" in r.stderr, r
+        ok("a failed run stops the cut and says how to rerun it; a newer commit that passed is released past it")
+
+        # the walk looks WALK commits back at most, and never past the newest release: an older commit still has
+        # that release's fragments and would release them again
+        git(b, "checkout", "-q", "-B", "main", "origin/main")
+        unrun = [git(origin, "rev-parse", "main")] + [fragment(f"ST-2{n}") for n in range(4)]
+        set_ci(conclusion="success", commits={c: {"none": True} for c in unrun})  # all but those before v0.2.39
+        r = cut(a, "cut", "--ci-wait", "0")
+        assert r.returncode == 1 and "no passing push run on main since v0.2.39 (5 commits)" in r.stderr, r
+        assert git(origin, "tag", "-l", "v0.2.40") == ""
+        calls, walk = len(gh_calls()), m.WALK
+        m.WALK = 3
+        try:
+            m.cut(b, "main", None, False, False, ci_wait=0)
+            raise AssertionError("released an untested commit")
+        except m.Refused as e:
+            assert "no passing push run on main in its last 3 commits" in str(e), e
+        finally:
+            m.WALK = walk
+        asked = [c for c in gh_calls()[calls:] if "event=push" in c]
+        assert [c.split("head_sha=")[1][:40] for c in asked] == unrun[::-1][:3], asked
+        assert git(origin, "tag", "-l", "v0.2.40") == ""
+        set_ci(conclusion="success")
+        ok("the walk is bounded, and never goes back past the newest release")
 
         # origin unreachable: an error, not "no tags"
         git(a, "remote", "set-url", "origin", str(Path(tmp, "gone.git")))

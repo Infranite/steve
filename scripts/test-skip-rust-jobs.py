@@ -191,8 +191,27 @@ class MainTests(unittest.TestCase):
         self.assertEqual(hub.asked[0], f"compare/{BEFORE}...{SHA}")
         self.assertIn(f"head_sha={BEFORE}&event=push&branch=main&", hub.asked[1])
         self.out.unlink()
-        # behind its base (the branch moved on after it was opened): the Rust jobs run
+        # forked from an older commit of its base branch (a release pull request stands on the newest main commit
+        # whose push run passed, behind main's head): judged against that commit and its run
+        fork = "d" * 40
+        behind = dict(compare(NOTES, status="diverged", behind=3), merge_base_commit={"sha": fork})
+        hub = Hub(behind, [run(sha=fork)])
+        code, said = self.main(hub, env)
+        self.assertEqual((code, self.out.read_text()), (0, "skip=true\n"))
+        self.assertIn("CI passed on ddddddd", said)
+        self.assertIn(f"head_sha={fork}&event=push&branch=main&", hub.asked[1])
+        self.out.unlink()
+        code, said = self.main(Hub(behind, [run(sha=fork, conclusion="cancelled")]), env)
+        self.assertEqual((code, self.out.read_text()), (0, "skip=false\n"))
+        self.assertIn("ddddddd ended cancelled", said)
+        self.out.unlink()
+        # GitHub names no fork point: the Rust jobs run
         code, said = self.main(Hub(compare(NOTES, status="diverged", behind=1), [run()]), env)
+        self.assertEqual((code, self.out.read_text()), (0, "skip=false\n"))
+        self.assertIn("not a plain step forward", said)
+        self.out.unlink()
+        # a push is never judged against a fork point: one that is not a step forward rewrote the branch
+        code, said = self.main(Hub(behind, [run(sha=fork)]))
         self.assertEqual((code, self.out.read_text()), (0, "skip=false\n"))
         self.assertIn("not a plain step forward", said)
 
