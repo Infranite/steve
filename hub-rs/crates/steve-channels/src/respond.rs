@@ -16,7 +16,7 @@ use steve_store::base::{self, DecisionKind};
 use steve_store::{NewDecision, Tx, uid};
 
 use crate::rules::Act;
-use crate::spaces::{self, Mode, SpaceRow};
+use crate::spaces::{self, Mode};
 use crate::{ChannelResult, Channels, bindings, messages, personas};
 
 /// `subject_type` of decisions about one channel message (C6 registers its handler).
@@ -193,15 +193,6 @@ pub struct Fallback;
 
 impl Responder for Fallback {}
 
-/// A space's name in questions (`私聊` when it has none).
-pub(crate) fn space_label(s: &SpaceRow) -> String {
-    if s.name.trim().is_empty() {
-        "私聊".into()
-    } else {
-        s.name.clone()
-    }
-}
-
 /// The handoff card about the plan's message, as the rules open it ([`crate::decide::open_card`]): the
 /// message is its summary; marked when a contact you starred sent it on your own account. One per
 /// message.
@@ -267,17 +258,18 @@ pub(crate) fn open_draft_as(
             now
         ],
     )?;
+    let name = spaces::display_title(tx, &space)?;
     let question = match (&persona, t.mode) {
-        (Some(p), _) => format!("以{}发到「{}」", p.name, t.space_name),
-        (None, Mode::Own) => format!("以你本人发到「{}」", t.space_name),
+        (Some(p), _) => format!("以{}发到「{name}」", p.name),
+        (None, Mode::Own) => format!("以你本人发到「{name}」"),
         (None, Mode::Bot) => {
             // no persona yet (no Bot to seed “Steve” with): the bot account's own name
-            let name: String = tx.query_row(
+            let account_name: String = tx.query_row(
                 "SELECT coalesce(nullif(display_name, ''), handle_display) FROM accounts WHERE id = ?",
                 [&account],
                 |r| r.get(0),
             )?;
-            format!("以{name}发到「{}」", t.space_name)
+            format!("以{account_name}发到「{name}」")
         }
     };
     let d = base::decisions::open(

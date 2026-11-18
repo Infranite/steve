@@ -133,13 +133,14 @@ fn resolve(c: &rusqlite::Connection, viewer: &Viewer, q: &str) -> ChannelResult<
     }
     let found = spaces::list(c, viewer, None, Some(q))?;
     let key = q.to_lowercase();
-    let exact: Vec<_> = found
-        .iter()
-        .filter(|s| {
-            s.name.trim().to_lowercase() == key
-                || crate::respond::space_label(s).trim().to_lowercase() == key
-        })
-        .collect();
+    let mut exact = Vec::new();
+    for s in &found {
+        if s.name.trim().to_lowercase() == key
+            || spaces::display_title(c, s)?.trim().to_lowercase() == key
+        {
+            exact.push(s);
+        }
+    }
     if exact.len() == 1 {
         return Ok(exact[0].id.clone());
     }
@@ -151,8 +152,8 @@ fn resolve(c: &rusqlite::Connection, viewer: &Viewer, q: &str) -> ChannelResult<
     let names: Vec<String> = pool
         .iter()
         .take(CANDIDATES)
-        .map(|s| format!("{}（{}）", crate::respond::space_label(s), s.id))
-        .collect();
+        .map(|s| Ok(format!("{}（{}）", spaces::display_title(c, s)?, s.id)))
+        .collect::<ChannelResult<_>>()?;
     Err(steve_modules::ApiError::rule(if names.is_empty() {
         steve_i18n::t!("channels.im_read.error.no_space", space = q)
     } else {

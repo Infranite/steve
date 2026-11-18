@@ -689,10 +689,6 @@ fn open_fail(tx: &Tx, row: &OutRow, question: String, options: &[&str]) -> Chann
     Ok(d.id)
 }
 
-fn space_name(s: &SpaceRow) -> String {
-    respond::space_label(s)
-}
-
 /// Recovery facts are additive card data. They describe the refusal, never an authorization.
 fn recovery_metadata(
     tx: &Tx,
@@ -1205,7 +1201,7 @@ async fn rewrite_draft(
             messages::event(tx, &row.ws, &row.space_id, &row.id);
             row.id = next;
         }
-        let mut q = format!("{}发到「{}」", l.p.speaker, space_name(&l.p.space));
+        let mut q = format!("{}发到「{}」", l.p.speaker, spaces::display_title(tx, &l.p.space)?);
         let text = match (&new, &checked) {
             (Some(disclosure::Rewrite::Kept(t)), Some(r)) => {
                 let leak = r.verdict != Verdict::Pass;
@@ -1298,7 +1294,8 @@ fn rewrite_failed(ch: &Channels, message_id: &str, decision_id: &str) -> Channel
             return Ok(());
         }
         let name = spaces::get(tx, &row.space_id)?
-            .map(|s| space_name(&s))
+            .map(|s| spaces::display_title(tx, &s))
+            .transpose()?
             .unwrap_or_default();
         open_approval(
             tx,
@@ -2314,7 +2311,11 @@ impl Outbox {
             let decision = if direct {
                 None
             } else {
-                let mut q = format!("{}发到「{}」", p.speaker, space_name(&p.space));
+                let mut q = format!(
+                    "{}发到「{}」",
+                    p.speaker,
+                    spaces::display_title(tx, &p.space)?
+                );
                 if later {
                     q.push_str(CHECKING_NOTE);
                 } else {
@@ -2519,7 +2520,7 @@ impl Outbox {
                 let speaker = place(tx, &row.ws, &space.connection_id, &row.space_id, row.persona_id.as_deref())?.speaker;
                 let d = match base::decisions::open_for(tx, &row.ws, SUBJECT_MESSAGE, &row.id)? {
                     Some(d) if d.kind == "approve" => d.id,
-                    _ => open_approval(tx, &row.ws, &row.id, format!("{speaker}发到「{}」", space_name(&space)), &row.text, false)?,
+                    _ => open_approval(tx, &row.ws, &row.id, format!("{speaker}发到「{}」", spaces::display_title(tx, &space)?), &row.text, false)?,
                 };
                 base::audit(
                     tx,
@@ -2671,7 +2672,11 @@ impl Outbox {
                         tx,
                         &row.ws,
                         &row.id,
-                        format!("发到「{}」{}", space_name(&space), check_note(&check)),
+                        format!(
+                            "发到「{}」{}",
+                            spaces::display_title(tx, &space)?,
+                            check_note(&check)
+                        ),
                         &row.text,
                         check.verdict == Verdict::Leak && !disclosure::not_run(&check),
                     )?;
@@ -2944,7 +2949,7 @@ impl Outbox {
                     Some(open_fail(
                         tx,
                         row,
-                        blocked_notice(scope, &space_name(&space), error),
+                        blocked_notice(scope, &spaces::display_title(tx, &space)?, error),
                         &BLOCKED_OPTIONS,
                     )?)
                 } else {
@@ -2971,7 +2976,7 @@ impl Outbox {
                     row,
                     format!(
                         "发到「{}」的消息没有发出去：{error}。请先到“接入”核对这项权限：平台缺少 scope 时需管理员开通后重新授权；Steve 本地关闭的代发能力可创建可审阅、可撤销的授权改动。权限处理后点重试；修改会重新审阅；不发送会关闭本条消息。清除拒绝缓存不会授予权限",
-                        space_name(&space)
+                        spaces::display_title(tx, &space)?
                     ),
                     &BLOCKED_OPTIONS,
                 )?
@@ -2979,7 +2984,7 @@ impl Outbox {
                 open_fail(
                     tx,
                     row,
-                    format!("发到「{}」的消息没有发出去：{error}", space_name(&space)),
+                    format!("发到「{}」的消息没有发出去：{error}", spaces::display_title(tx, &space)?),
                     &FAIL_OPTIONS,
                 )?
             };
@@ -3327,7 +3332,7 @@ impl Outbox {
             open_fail(
                 tx,
                 &row,
-                format!("发到「{}」的回复中途被打断，没有及时发出；现在还要发吗", space_name(&space)),
+                format!("发到「{}」的回复中途被打断，没有及时发出；现在还要发吗", spaces::display_title(tx, &space)?),
                 &FAIL_OPTIONS,
             )?;
             messages::event(tx, &row.ws, &row.space_id, id);
@@ -3413,7 +3418,7 @@ impl Outbox {
                 &row,
                 format!(
                     "发到「{}」的消息可能已经发出（没有收到对方的确认），请到那边看一下",
-                    space_name(&space)
+                    spaces::display_title(tx, &space)?
                 ),
                 &UNKNOWN_OPTIONS,
             )?;

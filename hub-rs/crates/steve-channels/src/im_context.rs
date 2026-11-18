@@ -520,7 +520,7 @@ pub fn build(c: &Connection, plan: &Plan) -> ChannelResult<ImContext> {
         persona,
         owner,
         chat_id: space.id.clone(),
-        chat_name: crate::respond::space_label(&space),
+        chat_name: crate::spaces::display_title(c, &space)?,
         chat_kind,
         members: space.people(),
         has_external: space.has_external,

@@ -987,7 +987,8 @@ impl Feed<'_> {
             .store()
             .transaction(|tx| -> Result<(), ApiError> {
                 let label = crate::spaces::find(tx, ws, conn, chat)?
-                    .map(|s| crate::respond::space_label(&s))
+                    .map(|s| crate::spaces::display_title(tx, &s))
+                    .transpose()?
                     .unwrap_or_else(|| chat.to_string());
                 let text = format!(
                     "「{label}」在 {} 到 {} 之间的消息可能不全（渠道服务没能补齐）",

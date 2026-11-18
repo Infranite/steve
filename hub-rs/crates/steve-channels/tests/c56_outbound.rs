@@ -1340,7 +1340,7 @@ async fn a_trigger_reply_that_needs_approval_is_a_draft() {
     // a reply that promises something says so on its card (and YOLO never sends it)
     assert_eq!(
         q[0],
-        format!("以你本人发到「私聊」{}", steve_channels::outbound::COMMITS)
+        format!("以你本人发到「李雷」{}", steve_channels::outbound::COMMITS)
     );
     assert_eq!(
         row(
@@ -2648,6 +2648,136 @@ async fn groups_and_dms_are_named_apart() {
     push(&h, &oncall, msg("D_WANG", "w2", "uwang", "在吗", false)).await;
     let name = row(&h, "SELECT name FROM spaces WHERE id = ?", &[&w.space_id])[0].clone();
     assert_ne!(name, "私聊", "renamed once someone could be named");
+}
+
+/// Some providers name a personal DM after us. The approval (including its asynchronous check),
+/// send failure and retry still name the other party, while the target stays the same DM.
+#[tokio::test(flavor = "multi_thread")]
+async fn owner_voice_cards_name_the_counterpart_instead_of_the_provider_dm_name() {
+    let h = setup().await;
+    checks_pass(&h);
+    h.env.gateway.script(H_SAFETY, REPLY);
+    let owner = row(
+        &h,
+        "SELECT a.display_name FROM accounts a JOIN connections c ON c.account_id=a.id WHERE c.id=?",
+        &[&h.me],
+    )[0].as_str().unwrap().to_string();
+    h.fake.space(
+        "D_LI",
+        &owner,
+        SpaceKind::Dm,
+        false,
+        &[("upx", &owner), ("ulilei", "李雷")],
+    );
+    let i = push(
+        &h,
+        &h.me,
+        msg("D_LI", "owner-name", "ulilei", "周四能上线吗", false),
+    )
+    .await;
+    let space = i.space_id;
+    let r = i.response.unwrap();
+    let (m, d) = (r.out_message_id.unwrap(), r.decision_id.unwrap());
+    assert_eq!(
+        row(&h, "SELECT name FROM spaces WHERE id=?", &[&space])[0],
+        owner
+    );
+    assert_eq!(
+        row(&h, "SELECT question FROM decisions WHERE id=?", &[&d])[0],
+        "以你本人发到「李雷」（披露检查还在跑）"
+    );
+    nothing_sent(&h);
+    checked(&h).await;
+    assert_eq!(
+        row(&h, "SELECT question FROM decisions WHERE id=?", &[&d])[0],
+        "以你本人发到「李雷」"
+    );
+    let shown = req(&h.api, "GET", &format!("/spaces/{space}"), None).await;
+    assert_eq!(shown["title"], "李雷");
+    assert_eq!(shown["counterpart"]["name"], "李雷");
+    let context = req(&h.api, "GET", &format!("/chan-messages/{m}/context"), None).await;
+    assert_eq!(context["space"]["name"], "李雷", "the Web approval context");
+
+    *h.fake.fail_send.lock().unwrap() = Some("fixture send failure".into());
+    decide(&h, &d, "yes", "周四可以").unwrap();
+    assert_eq!(
+        h.outbox.send_due(&h.ch).await,
+        0,
+        "approval delay is unchanged"
+    );
+    h.env.clock.advance(11_000);
+    assert_eq!(h.outbox.send_due(&h.ch).await, 0);
+    assert_eq!(status(&h, &m), "failed");
+    let failure = decision_of(&h, &m);
+    assert_eq!(
+        row(&h, "SELECT question FROM decisions WHERE id=?", &[&failure])[0],
+        "发到「李雷」的消息没有发出去：fixture send failure"
+    );
+    *h.fake.fail_send.lock().unwrap() = None;
+    decide(&h, &failure, "retry", "").unwrap();
+    assert_eq!(h.outbox.send_due(&h.ch).await, 1);
+    assert!(
+        matches!(&sent(&h)[0].0, SendTarget::Reply { ext_msg_id, .. } if ext_msg_id == "owner-name")
+    );
+    assert_eq!(
+        h.fake.sent.lock().unwrap()[0].1.space_ext_id.as_deref(),
+        Some("D_LI")
+    );
+    assert_eq!(sent(&h)[0].1, "周四可以");
+}
+
+/// Fallback approvals and handoffs must also re-read the title, rather than trust a cached Plan or
+/// OutTarget supplied before the counterpart was known. Groups and self chats keep distinct names.
+#[tokio::test(flavor = "multi_thread")]
+async fn fallback_cards_resolve_current_dm_group_and_self_chat_titles() {
+    let h = setup().await;
+    set_rules(&h, &h.me, json!([{"when":{"kind":"all"},"act":"record"}]));
+    h.fake.space(
+        "D_LI",
+        "Provider owner name",
+        SpaceKind::Dm,
+        false,
+        &[("ulilei", "李雷")],
+    );
+    let owner = row(&h, "SELECT a.display_name FROM accounts a JOIN connections c ON c.account_id=a.id WHERE c.id=?", &[&h.me])[0]
+        .as_str().unwrap().to_string();
+    h.fake
+        .space("D_SELF", &owner, SpaceKind::Dm, false, &[("upx", &owner)]);
+    // No members: the counterpart comes from the stored inbound sender instead.
+    h.fake.space("D_HISTORY", &owner, SpaceKind::Dm, false, &[]);
+    for (chat, sender, expected) in [
+        ("D_LI", "ulilei", "李雷"),
+        ("C_DEV", "ulilei", "Steve 开发群"),
+        ("D_SELF", "upx", "你自己"),
+        ("D_HISTORY", "uhan", "韩梅梅"),
+    ] {
+        let mut p = recorded(&h, &h.me, chat, chat, sender, "能确认一下吗").await;
+        let shown = req(&h.api, "GET", &format!("/spaces/{}", p.space_id), None).await;
+        assert_eq!(p.space_name, expected);
+        assert_eq!(shown["title"], expected);
+        assert_eq!(shown["self_chat"], chat == "D_SELF");
+        p.space_name = "stale provider owner name".into();
+        h.env
+            .store()
+            .transaction(|tx| -> ApiResult<()> {
+                let handoff = steve_channels::respond::open_handoff(tx, &p)?;
+                let card = base::decisions::get(tx, &handoff)?.unwrap();
+                assert!(
+                    card.question.starts_with(&format!("「{expected}」里 ")),
+                    "{}",
+                    card.question
+                );
+                let (_, approval) =
+                    steve_channels::respond::open_draft(tx, &p, "我确认一下", h.ch.now())?;
+                assert_eq!(
+                    base::decisions::get(tx, &approval)?.unwrap().question,
+                    format!("以你本人发到「{expected}」")
+                );
+                Ok(())
+            })
+            .unwrap();
+    }
+    nothing_sent(&h);
 }
 
 /// Prod 2026-11-02: an approved message waiting out its delay when you disconnect the app. Its

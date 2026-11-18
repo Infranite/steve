@@ -1100,7 +1100,7 @@ pub fn to_flow(
         Some(reg) => steve_flow::graph::validate(&graph.to_value(), reg).map_err(ApiError::rule)?,
         None => graph,
     };
-    let label = crate::respond::space_label(&s);
+    let label = crate::spaces::display_title(tx, &s)?;
     let name = cut(
         &format!("「{label}」的响应规则"),
         steve_flow::flows::NAME_MAX - 1,
