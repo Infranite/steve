@@ -424,7 +424,13 @@ async fn an_output_on_a_device_that_is_not_there_says_device_offline() {
     let (s, v) = e
         .call("GET", "/api/items/i1/artifacts/doc/preview", None)
         .await;
-    assert_eq!((s, v), (503, json!({"error": "设备离线"})));
+    assert_eq!(
+        (s, v),
+        (
+            503,
+            json!({"error": "设备离线", "code":"unavailable", "retry":{"kind":"later", "after_ms":null}, "reason":null, "params":{}})
+        )
+    );
     let (s, _, b) = e.raw("/api/items/i1/artifacts/clip/raw", None).await;
     assert_eq!(s, 503);
     assert_eq!(

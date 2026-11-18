@@ -160,7 +160,13 @@ async fn switch_scopes_and_resume() {
             Some(json!({"on": true, "until": 1_800_000_000_000_i64})),
         )
         .await;
-    assert_eq!((s, v), (400, json!({"error": "参数不对：until"})));
+    assert_eq!(
+        (s, v),
+        (
+            400,
+            json!({"error": "参数不对：until", "code":"invalid", "retry":{"kind":"never"}, "reason":null, "params":{}})
+        )
+    );
     let (s, v) = h
         .call(
             "PUT",
@@ -225,7 +231,13 @@ async fn switch_scopes_and_resume() {
             Some(json!({"mode": "sometimes"})),
         )
         .await;
-    assert_eq!((s, v), (400, json!({"error": "参数不对：mode"})));
+    assert_eq!(
+        (s, v),
+        (
+            400,
+            json!({"error": "参数不对：mode", "code":"invalid", "retry":{"kind":"never"}, "reason":null, "params":{}})
+        )
+    );
     h.sql(&format!("INSERT INTO workspaces (id, name, created) VALUES ('ws_b', 'b', 1); UPDATE projects SET workspace_id = 'ws_b' WHERE id = '{pid}'"));
     let (s, v) = h
         .call(
@@ -234,7 +246,13 @@ async fn switch_scopes_and_resume() {
             Some(json!({"mode": "off"})),
         )
         .await;
-    assert_eq!((s, v), (404, json!({"error": "没有这个项目"})));
+    assert_eq!(
+        (s, v),
+        (
+            404,
+            json!({"error": "没有这个项目", "code":"not_found", "retry":{"kind":"never"}, "reason":null, "params":{}})
+        )
+    );
     let (s, v) = h
         .call(
             "PUT",
@@ -242,11 +260,23 @@ async fn switch_scopes_and_resume() {
             Some(json!({"mode": "off"})),
         )
         .await;
-    assert_eq!((s, v), (404, json!({"error": "没有这个事项"})));
+    assert_eq!(
+        (s, v),
+        (
+            404,
+            json!({"error": "没有这个事项", "code":"not_found", "retry":{"kind":"never"}, "reason":null, "params":{}})
+        )
+    );
 
     // resume without a trip
     let (s, v) = h.call("POST", "/api/yolo/resume", None).await;
-    assert_eq!((s, v), (409, json!({"error": "YOLO 没有暂停"})));
+    assert_eq!(
+        (s, v),
+        (
+            409,
+            json!({"error": "YOLO 没有暂停", "code":"conflict", "retry":{"kind":"never"}, "reason":null, "params":{}})
+        )
+    );
 
     let (s, v) = h.call("PUT", "/api/yolo", Some(json!({"on": false}))).await;
     assert_eq!(s, 200, "{v}");
@@ -321,7 +351,13 @@ async fn the_ledger_routes() {
     )
     .expect("row");
     let (s, v) = h.call("POST", "/api/yolo/actions/ya_x/undo", None).await;
-    assert_eq!((s, v), (400, json!({"error": "这个决定不能撤销"})));
+    assert_eq!(
+        (s, v),
+        (
+            400,
+            json!({"error": "这个决定不能撤销", "code":"invalid", "retry":{"kind":"never"}, "reason":null, "params":{}})
+        )
+    );
     let (s, v) = h.call("POST", "/api/yolo/actions/ya_x/now", None).await;
     assert_eq!(s, 409, "{v}");
     let _ = &h.home;
