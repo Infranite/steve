@@ -362,7 +362,11 @@ async fn quick_draft_recipients_are_the_servers() {
     );
     assert_eq!(d.author, "steve");
     assert!(d.to.iter().all(|r| r.external));
-    assert_eq!(d.basis.as_ref().unwrap()["verdict"], "unchecked");
+    assert_eq!(
+        d.basis.as_ref().unwrap()["verdict"],
+        "pass",
+        "the transport fixture supplies a working checker"
+    );
     assert_eq!(h.thread(&thread).state, "needs_reply");
     let dec = decision(&h, d.decision_id.as_deref().unwrap());
     assert_eq!(dec.kind, "approve");

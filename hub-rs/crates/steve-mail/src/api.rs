@@ -227,7 +227,7 @@ async fn send_draft(
     to(blocking(move || m.send_draft(&who, &id)).await?)
 }
 
-/// The model's disclosure check on demand (a draft written without YOLO got only the local checks).
+/// Preview the full disclosure check on demand. Sending always checks the final mail again.
 async fn check_draft(
     Extension(m): Extension<Mail>,
     who: Caller,
