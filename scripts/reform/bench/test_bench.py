@@ -1,5 +1,8 @@
 """Fast offline checks: python3 -I -m unittest discover -s scripts/reform/bench."""
 import importlib.util
+from contextlib import nullcontext
+import gzip
+import io
 import json
 import os
 import signal
@@ -9,6 +12,9 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import Mock
+from types import SimpleNamespace
+import urllib.error
 
 HERE = Path(__file__).resolve().parent
 
@@ -43,7 +49,7 @@ class PercentileTests(unittest.TestCase):
             self.assertEqual(run.configuration(path)["clients"], 2)
             self.assertEqual(run.configuration(path)["endpoints"], run.DEFAULT["endpoints"])
             for value in ('{"unknown": 1}', '{"clients": 0}', '{"load_s": -1}',
-                          '{"load_path": "http://example.com"}', '{"idle_s": NaN}'):
+                          '{"load_path": "http://example.com"}', '{"idle_s": NaN}', '{"settle_s": 0}'):
                 path.write_text(value)
                 with self.assertRaises(ValueError):
                     run.configuration(path)
@@ -56,6 +62,34 @@ class PercentileTests(unittest.TestCase):
             alias.symlink_to(Path.home() / ".steve", target_is_directory=True)
             with self.assertRaises(ValueError):
                 run.safe_work(alias / "bench")
+
+
+class DocumentationAndEncodingTests(unittest.TestCase):
+    def test_help_contains_operator_documentation(self):
+        help_text = subprocess.check_output([sys.executable, "-I", str(HERE / "run.py"), "--help"], text=True)
+        for section in ("隔离与生命周期\n", "测量方法\n", "JSON 字段\n", "settle_s", "content_encodings"):
+            self.assertIn(section, help_text)
+
+    def test_request_and_summary_preserve_wire_encodings(self):
+        compressed = gzip.compress(b"x" * 2000)
+        client = run.Client("http://127.0.0.1:1", 1)
+        client.opener = Mock()
+        client.opener.open.side_effect = [
+            nullcontext(SimpleNamespace(status=200, headers={"Content-Encoding": "gzip"}, read=lambda: compressed)),
+            nullcontext(SimpleNamespace(status=200, headers={}, read=lambda: b"plain")),
+            urllib.error.HTTPError("http://127.0.0.1:1/api/test", 503, "unavailable",
+                                   {"Content-Encoding": "gzip"}, io.BytesIO(compressed)),
+            urllib.error.URLError("offline"),
+        ]
+        rows = [client.request("/api/test") for _ in range(4)]
+        self.assertEqual([r["content_encoding"] for r in rows], ["gzip", "identity", "gzip", None])
+        self.assertEqual(rows[0]["bytes"], len(compressed))
+        self.assertEqual(rows[2]["status"], 503)
+        self.assertEqual(client.opener.open.call_args_list[0].args[0].get_header("Accept-encoding"), "gzip")
+        summary = run.requests_summary(rows)
+        self.assertEqual(summary["accept_encodings"], {"gzip": 4})
+        self.assertEqual(summary["content_encodings"], {"gzip": 2, "identity": 1, "unavailable": 1})
+        self.assertEqual(summary["errors"], 2)
 
 
 class LifecycleTests(unittest.TestCase):
@@ -102,6 +136,21 @@ class LifecycleTests(unittest.TestCase):
 
 
 class CompareTests(unittest.TestCase):
+    def test_load_context_and_post_start_measurements(self):
+        a = {"load_average_before": [1, 2, 3], "load_average_after": [4, 5, 6],
+             "cpu_top": [{"name": "fourth", "cpu_percent": 5}, {"name": "third", "cpu_percent": 10},
+                         {"name": "first|worker", "cpu_percent": 50}, {"name": "second", "cpu_percent": 30}],
+             "post_start": {"disk": {"device_bytes": 10}}}
+        b = {"load_average_before": [7, 8, 9], "load_average_after": [10, 11, 12]}
+        table = compare.compare(a, b)
+        preamble = table.split("| Metric |")[0]
+        self.assertIn("A load_average_before: [1, 2, 3]; load_average_after: [4, 5, 6]", preamble)
+        self.assertIn("B load_average_before: [7, 8, 9]; load_average_after: [10, 11, 12]", preamble)
+        self.assertIn("first\\|worker 50%, second 30%, third 10%", preamble)
+        self.assertNotIn("fourth", preamble)
+        self.assertIn("负载不同时，性能数字不可直接比较", preamble)
+        self.assertIn("| post_start.disk.device_bytes | 10 | — | n/a |", table)
+
     def test_percent_missing_and_zero_baselines(self):
         self.assertEqual(compare.percent(20, 10), "-50.00%")
         self.assertEqual(compare.percent(10, 20), "+100.00%")
