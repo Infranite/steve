@@ -36,6 +36,7 @@ async fn snapshot_pages_thousands_of_stream_heads_without_oversized_frames() {
         .unwrap();
     }
     tx.commit().unwrap();
+    n.shutdown().await;
     drop(n);
     let n = t.node(); // Load externally seeded stream fixtures into the startup cache.
 
@@ -5852,7 +5853,9 @@ async fn live_session_capacity_changes_the_actual_limiter_without_stopping_turns
 #[tokio::test]
 async fn pruned_commands_are_stale_recent_commands_deduplicate_and_snapshot_pages_recover() {
     let t = T::new(&[]);
-    drop(LocalNode::open(t.config()).unwrap());
+    let initial = LocalNode::open(t.config()).unwrap();
+    initial.shutdown().await;
+    drop(initial);
     let mut commands: Vec<_> = ["expired", "recent"]
         .into_iter()
         .map(|id| {
@@ -5895,6 +5898,24 @@ async fn pruned_commands_are_stale_recent_commands_deduplicate_and_snapshot_page
     }
     drop(db);
     let n = LocalNode::open(t.config()).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        let db = rusqlite::Connection::open(t.home.join("node.sqlite3")).unwrap();
+        let left: i64 = db
+            .query_row("SELECT count(*) FROM ops WHERE id='expired'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        if left == 0 {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "background pruning did not finish"
+        );
+        tokio::task::yield_now().await;
+    }
+
     assert_eq!(
         n.cancel(commands[0].clone()).await.unwrap_err().code,
         ErrorCode::Stale
@@ -5919,6 +5940,7 @@ async fn pruned_commands_are_stale_recent_commands_deduplicate_and_snapshot_page
     assert_eq!(page.heads, n.streams().await.unwrap());
     assert_eq!(page.heads.len(), 1);
     assert!(page.next.is_none());
+    n.shutdown().await;
     drop(n);
     let n = LocalNode::open(t.config()).unwrap();
     assert_eq!(
@@ -5927,4 +5949,23 @@ async fn pruned_commands_are_stale_recent_commands_deduplicate_and_snapshot_page
     );
     assert_eq!(n.cancel(commands[1].clone()).await.unwrap(), first);
     assert_eq!(n.streams().await.unwrap(), page.heads);
+}
+
+#[tokio::test]
+async fn pruning_failure_does_not_prevent_opening_or_reading_the_node() {
+    let t = T::new(&[]);
+    let initial = LocalNode::open(t.config()).unwrap();
+    initial.shutdown().await;
+    drop(initial);
+    let db = rusqlite::Connection::open(t.home.join("node.sqlite3")).unwrap();
+    // Recovery does not read the retention cursor; only optional pruning will reject it.
+    db.execute(
+        "INSERT OR REPLACE INTO meta VALUES ('prune_cursor','invalid')",
+        [],
+    )
+    .unwrap();
+    drop(db);
+    let n = LocalNode::open(t.config()).expect("optional pruning cannot fail Node startup");
+    assert!(n.streams().await.unwrap().is_empty());
+    n.shutdown().await;
 }

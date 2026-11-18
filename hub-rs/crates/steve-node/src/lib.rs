@@ -1527,7 +1527,6 @@ impl LocalNode {
         // and the throwaway repositories of pushes
         git::cleanup(&cfg.home);
         let (j, incarnation) = Journal::open(&cfg.home.join("node.sqlite3"))?;
-        while j.tx(|t| t.prune(now()))? != 0 {}
         // a group of the old incarnation that is surely gone holds nothing
         j.tx(|t| {
             for p in t.procs()? {
@@ -1539,7 +1538,7 @@ impl LocalNode {
         })?;
         let confine = confine::Confine::open(&cfg.acp.steve_home, &cfg.home);
         let disk = disk_observation::Observer::from_env();
-        Ok(LocalNode(Arc::new_cyclic(|weak| Inner {
+        let node = LocalNode(Arc::new_cyclic(|weak| Inner {
             confine,
             disk,
             roots: std::sync::RwLock::new(Arc::new(cfg.roots.clone())),
@@ -1584,7 +1583,38 @@ impl LocalNode {
             push_timeout: AtomicU64::new(git::PUSH_TIMEOUT.as_millis() as u64),
             tasks: Mutex::new(Vec::new()),
             research: Default::default(),
-        })))
+        }));
+        // Opening is also supported outside a Tokio runtime. In that case delivery will begin
+        // the sweep once connected; maintenance must never prevent the Node from opening.
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            let weak = Arc::downgrade(&node.0);
+            let task = runtime.spawn_blocking(move || {
+                if let Some(me) = weak.upgrade()
+                    && let Err(e) = me.j.tx(|t| t.resume_pruning())
+                {
+                    tracing::warn!("node journal prune: {e}");
+                    return;
+                }
+                loop {
+                    let Some(me) = weak.upgrade() else { break };
+                    if me.closed.load(Ordering::SeqCst) {
+                        break;
+                    }
+                    match me.j.tx(|t| t.prune(now())) {
+                        Ok(0) => break,
+                        Ok(_) => {}
+                        Err(e) => {
+                            tracing::warn!("node journal prune: {e}");
+                            break;
+                        }
+                    }
+                    drop(me); // release both the journal lock and Node handle between batches
+                    std::thread::yield_now();
+                }
+            });
+            node.0.tasks.lock().unwrap().push(task);
+        }
+        Ok(node)
     }
 
     pub fn incarnation(&self) -> u64 {
@@ -2444,7 +2474,12 @@ async fn deliver_loop(inner: std::sync::Weak<Inner>) {
                 *me.hub_down_since.lock().unwrap() = None;
                 let moved = me.j.tx(|t| t.ack(&ack));
                 match moved {
-                    Ok(m) => progress |= m,
+                    Ok(m) => {
+                        progress |= m;
+                        if let Err(e) = me.j.tx(|t| t.prune(now())) {
+                            tracing::warn!("node journal prune after ack: {e}");
+                        }
+                    }
                     Err(e) => {
                         tracing::error!("node ack: {e}");
                         short = true;
