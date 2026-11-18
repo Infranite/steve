@@ -201,9 +201,9 @@ pub(super) fn session_segment(session: &str) -> String {
     format!("session-{}", segment(session))
 }
 
-/// `session`'s principal's own directory for `harness` on `node` (path model §4.5.1): one per
-/// (workspace, principal, bot, adapter), recorded as `runtime_sessions.state_dir`. The principal
-/// who owns the Node starts it from their own settings and login there.
+/// The base harness directory for this session's (workspace, principal, bot, adapter).
+/// Session binding records a private child of this directory so new sessions do not share skills.
+/// The principal who owns the Node starts from their own settings and login there.
 pub fn harness_state_in(
     c: &Connection,
     session: &str,
