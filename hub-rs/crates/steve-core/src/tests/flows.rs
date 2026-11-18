@@ -478,10 +478,14 @@ fn turn_ends_without_a_tool_call_raise_a_fail_card() {
     assert_eq!(k.open_fails(&i.id), vec!["会话出错：boom"]);
     let d = k.db().decisions_of_item(&i.id).unwrap().pop().unwrap();
     k.core.resolve(&d.id, "delivered", "", "me").unwrap();
-    let acc = k.db().decisions_of_item(&i.id).unwrap().pop().unwrap();
-    assert_eq!(
-        (acc.kind.as_str(), acc.question.as_str(), acc.draft.as_str()),
-        ("accept", "请验收", "我觉得做完了")
+    let done = k.db().item(&i.id).unwrap().unwrap();
+    assert_eq!(done.phase, "closed");
+    assert_eq!(done.outcome.as_deref(), Some("completed"));
+    assert_eq!(done.acceptance.as_deref(), Some("human"));
+    assert!(k.open_kinds(&i.id).is_empty());
+    assert!(
+        k.timeline_texts(&i.id)
+            .contains(&"你确认已交付并验收通过".into())
     );
 }
 
