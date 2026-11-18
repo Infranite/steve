@@ -1413,8 +1413,15 @@ impl Tx<'_> {
                 // Traverse archived and successful intermediates too; old attempts can hang off
                 // them. Do not alter an already archived child or its immutable cycle history.
                 pending.push(child.id.clone());
+                let inherited = child.outcome.as_deref() == Some("cancelled")
+                    && child
+                        .closed_reason
+                        .as_deref()
+                        .is_some_and(|r| r.starts_with("随父事项 "));
                 if (child.archived && child.phase == CLOSED)
-                    || (child.phase == CLOSED && child.outcome.as_deref() != Some("failed"))
+                    || (child.phase == CLOSED
+                        && child.outcome.as_deref() != Some("failed")
+                        && !inherited)
                 {
                     continue;
                 }
