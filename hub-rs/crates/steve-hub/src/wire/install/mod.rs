@@ -37,3 +37,4 @@ macro_rules! ordered_installers {
 }
 
 pub(super) mod domain;
+pub(super) mod hub;
