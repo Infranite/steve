@@ -1,25 +1,27 @@
 //! Group 8 owns events and reasons for flows, flow runs, signals and calendars.
 //! Associated ID labels (FlowId, FlowRunId, SignalId, CalendarId) are all defined centrally in `id.rs`.
 
-use crate::event::event_enum;
 use crate::*;
+use serde::Serialize;
 
-event_enum! {
-AutomationEvent {
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, strum::EnumCount)]
+#[serde(tag = "type")]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub enum AutomationEvent {
     #[serde(rename = "signal")]
-    Signal {  id: SignalId, ws: WorkspaceId  },
+    Signal { id: SignalId, ws: WorkspaceId },
     #[serde(rename = "flow")]
-    Flow {  id: FlowId, ws: WorkspaceId  },
+    Flow { id: FlowId, ws: WorkspaceId },
     #[serde(rename = "run")]
     Run {
         id: FlowRunId,
         flow_id: FlowId,
         ws: WorkspaceId,
-     },
+    },
     #[serde(rename = "calendar")]
-    Calendar {  id: CalendarId, ws: WorkspaceId  },
+    Calendar { id: CalendarId, ws: WorkspaceId },
 }
-}
+
 impl Scoped for AutomationEvent {
     fn scope(&self) -> Scope {
         match self {

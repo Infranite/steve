@@ -32,8 +32,8 @@ impl PartialEq for RawJson {
 
 impl Eq for RawJson {}
 
-// Tagged/untagged serde derives buffer their input into Content, which cannot carry opaque raw
-// JSON. Decode directly from validated text instead, preserving the payload's exact bytes.
+// Only DurableFact uses this: adjacent-tag Deserialize buffers payload into Content when it
+// precedes topic, which cannot carry opaque raw JSON. Read the original text to retain its bytes.
 pub(crate) fn deserialize_with<'de, D, T>(
     d: D,
     decode: impl FnOnce(&str) -> Result<T, serde_json::Error>,

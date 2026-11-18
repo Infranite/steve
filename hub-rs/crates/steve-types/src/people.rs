@@ -1,17 +1,19 @@
 //! Group 8 owns events and reasons for parties and accounts.
 //! Associated ID labels (PartyId, AccountId, UserId) are all defined centrally in `id.rs`.
 
-use crate::event::event_enum;
 use crate::*;
+use serde::Serialize;
 
-event_enum! {
-PeopleEvent {
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, strum::EnumCount)]
+#[serde(tag = "type")]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub enum PeopleEvent {
     #[serde(rename = "party")]
-    Party {  id: PartyId, ws: WorkspaceId  },
+    Party { id: PartyId, ws: WorkspaceId },
     #[serde(rename = "account")]
-    Account {  id: AccountId, ws: WorkspaceId  },
+    Account { id: AccountId, ws: WorkspaceId },
 }
-}
+
 impl Scoped for PeopleEvent {
     fn scope(&self) -> Scope {
         match self {

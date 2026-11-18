@@ -1,21 +1,23 @@
 //! Group 4 owns events and reasons for devices, nodes, clients and release holds.
 //! Associated ID labels (DeviceId, NodeId, ClientId, UserId) are all defined centrally in `id.rs`.
 
-use crate::event::event_enum;
 use crate::*;
+use serde::Serialize;
 
-event_enum! {
-DevicesEvent {
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, strum::EnumCount)]
+#[serde(tag = "type")]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub enum DevicesEvent {
     #[serde(rename = "release.hold")]
-    ReleaseHold {  hold: Option<RawJson>  },
+    ReleaseHold { hold: Option<RawJson> },
     #[serde(rename = "device")]
-    Device {  id: DeviceId  },
+    Device { id: DeviceId },
     #[serde(rename = "node")]
-    Node {  id: NodeId, user: UserId  },
+    Node { id: NodeId, user: UserId },
     #[serde(rename = "client")]
-    Client {  id: ClientId, user: UserId  },
+    Client { id: ClientId, user: UserId },
 }
-}
+
 impl Scoped for DevicesEvent {
     fn scope(&self) -> Scope {
         match self {

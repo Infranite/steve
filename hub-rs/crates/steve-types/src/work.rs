@@ -1,35 +1,37 @@
 //! Group 6 owns events and reasons for items, sessions, decisions, main conversation, transcript and threads.
 //! Associated ID labels (ItemId, SessionId, DecisionId, MessageId, ThreadRunId) are all defined centrally in `id.rs`.
 
-use crate::event::event_enum;
 use crate::*;
+use serde::Serialize;
 
-event_enum! {
-WorkEvent {
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, strum::EnumCount)]
+#[serde(tag = "type")]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub enum WorkEvent {
     #[serde(rename = "item")]
-    Item {  id: ItemId, ws: WorkspaceId,
- },
+    Item { id: ItemId, ws: WorkspaceId },
     #[serde(rename = "decision")]
     Decision {
         id: DecisionId,
-        #[serde(default, skip_serializing_if = "Option::is_none", with = "crate::event::double_option")]
-#[cfg_attr(test, ts(optional = nullable, as = "Option<ItemId>"))]
-        item_id: Option<Option<ItemId>>, ws: WorkspaceId,
- },
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(test, ts(optional = nullable, as = "Option<ItemId>"))]
+        item_id: Option<Option<ItemId>>,
+        ws: WorkspaceId,
+    },
     #[serde(rename = "session")]
     Session {
         id: SessionId,
-        #[serde(default, skip_serializing_if = "Option::is_none", with = "crate::event::double_option")]
-#[cfg_attr(test, ts(optional = nullable, as = "Option<ItemId>"))]
-        item_id: Option<Option<ItemId>>, ws: WorkspaceId,
- },
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(test, ts(optional = nullable, as = "Option<ItemId>"))]
+        item_id: Option<Option<ItemId>>,
+        ws: WorkspaceId,
+    },
     #[serde(rename = "message")]
-    Message {  id: MessageId, ws: WorkspaceId,
- },
+    Message { id: MessageId, ws: WorkspaceId },
     #[serde(rename = "thread.run")]
-    ThreadRun {  id: ThreadRunId, ws: WorkspaceId  },
+    ThreadRun { id: ThreadRunId, ws: WorkspaceId },
 }
-}
+
 impl Scoped for WorkEvent {
     fn scope(&self) -> Scope {
         match self {
@@ -42,29 +44,32 @@ impl Scoped for WorkEvent {
     }
 }
 
-event_enum! {
-WorkLiveEvent {
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, strum::EnumCount)]
+#[serde(tag = "type")]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub enum WorkLiveEvent {
     #[serde(rename = "event")]
     Event {
         session_id: SessionId,
         seq: Seq,
         kind: String,
-        data: RawJson, ws: WorkspaceId,
- },
+        data: RawJson,
+        ws: WorkspaceId,
+    },
     #[serde(rename = "steve.thinking")]
     SteveThinking {
         on: bool,
         ws: WorkspaceId,
-                #[serde(skip_serializing_if = "Option::is_none")]
+        #[serde(skip_serializing_if = "Option::is_none")]
         phase: Option<String>,
-     },
+    },
     #[serde(rename = "steve.draft")]
     SteveDraft {
         ws: WorkspaceId,
         mid: MessageId,
         thought: String,
         text: String,
-     },
+    },
     #[serde(rename = "steve.tool")]
     SteveTool {
         ws: WorkspaceId,
@@ -73,19 +78,19 @@ WorkLiveEvent {
         name: String,
         brief: String,
         ok: bool,
-                #[serde(default, skip_serializing_if = "String::is_empty")]
+        #[serde(default, skip_serializing_if = "String::is_empty")]
         kind: String,
-                #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         running: bool,
-                #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         call: Option<u32>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         started_at: Option<Millis>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         at: Option<Millis>,
-     },
+    },
 }
-}
+
 impl Scoped for WorkLiveEvent {
     fn scope(&self) -> Scope {
         match self {
