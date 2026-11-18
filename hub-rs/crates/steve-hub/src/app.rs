@@ -188,13 +188,13 @@ async fn upgrade_drain_call(st: AppState, action: &'static str, req: Request) ->
     }
 }
 
-/// healthz, `/auth` (from steve-auth), `/internal/release/drain`, `/api`, static web; `/mcp` in front of all of it.
-/// `root`: module routes at the root that read the session without requiring it.
 // Heterogeneous Axum layers retain their concrete types and their written order.
 macro_rules! layers {
     ($routes:expr; $($layer:expr),+ $(,)?) => { $routes$(.layer($layer))+ };
 }
 
+/// healthz, `/auth` (from steve-auth), `/internal/release/drain`, `/api`, static web; `/mcp` in front of all of it.
+/// `root`: module routes at the root that read the session without requiring it.
 pub fn app(
     st: AppState,
     auth: Router,
