@@ -5,9 +5,21 @@ name: CI
 # there instead of holding a runner for GitHub's six hours.
 # A pull request runs the Linux jobs (and the Apple job only when it touches the apps, the web client they
 # bundle or this workflow); macOS runners are scarce and were the queue every PR waited in. A push to main
-# and a merge queue run cover both platforms. cut-release.py releases only a main commit whose own push run
-# passed, with its release notes on top, so nothing reaches a release untested on macOS. Branch rules on main
-# require the `CI gate` check, by that name. `merge_group` lets GitHub's own merge queue run it too.
+# and a merge queue run cover both platforms. Branch rules on main require the `CI gate` check, by that name.
+# `merge_group` lets GitHub's own merge queue run it too.
+#
+# Concurrency (see `concurrency:` below). A pull request has one group of its own, and a new push cancels its
+# run in progress. All pushes to main share one group, never cancelled in progress: GitHub keeps one run going
+# and at most one waiting (`pending`), and a newer push's run replaces the waiting one, which ends `cancelled`.
+# So main's runs test its newest head, one after the other, instead of piling up behind the macOS runners while
+# pull requests land every few minutes; a commit whose run was replaced has none that passed. The whole run is
+# in the group, not just its macOS jobs: a run is one commit's verdict, and only a replaced run that ends
+# `cancelled` (rather than macOS jobs cancelled inside a run whose gate then fails) tells "superseded" from
+# "failed". Linux thus has no run of its own on every main commit either; each change had its Linux run as a
+# pull request, and main's next run covers the commits it stands on. cut-release.py releases the newest main
+# commit whose own push run passed (passing over those still waiting or replaced, stopping at a failed one), with
+# its release notes on top, so nothing reaches a release untested on macOS; what landed after it waits for the
+# next release. A merge queue run keeps a group per commit.
 on:
   pull_request:
   push:
@@ -19,8 +31,9 @@ env:
   # How many runners share each platform's Rust tests (`--partition hash:k/N`). Linux runners are
   # plentiful; macOS ones are scarce (and run only on main), so it takes fewer of them.
   RUST_TEST_SHARDS: '{"ubuntu-22.04": 4, "macos-15": 2}'
+# pull request: ci-refs/pull/N/merge; push to main: ci-push-refs/heads/main; merge queue: ci-<sha>
 concurrency:
-  group: ci-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
+  group: ci-${{ github.event_name == 'pull_request' && github.ref || github.event_name == 'push' && format('push-{0}', github.ref) || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
   scripts:

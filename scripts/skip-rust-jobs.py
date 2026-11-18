@@ -9,13 +9,14 @@ onto the branch) would repeat the Rust jobs of the commit it stands on. When thi
 that commit passed, they are skipped: the script waits for that run and writes `skip=true` to
 `$GITHUB_OUTPUT`. A passed run on that commit either ran the Rust jobs or skipped them for the same
 reason, so a passed run always stands on Rust jobs that ran on the same code. On a push the commit is the
-one before it; on a pull request it is the base the pull request was opened on, and the pull request must
-stand right on it (not behind the base branch).
+one before it; on a pull request it is the commit of the base branch the pull request stands on (where it
+forked from it). A release pull request stands on the newest main commit whose push run passed, which is
+usually behind main's head: main's push runs share one concurrency group, so its head waits for its run.
 
 Anything else writes `skip=false` and the Rust jobs run: another file changed, the push rewrote the
-branch or is its first, the pull request is behind its base, that run failed, was cancelled, never
-appeared or is still going when `--wait` runs out, or GitHub did not answer. The exit code is 0 either
-way; the decision is the output.
+branch or is its first, that run failed, was cancelled (a newer push replaced it), never appeared or is
+still going when `--wait` runs out, or GitHub did not answer. The exit code is 0 either way; the decision
+is the output.
 """
 import argparse
 import json
@@ -37,11 +38,18 @@ class Undecided(Exception):
     """Why the Rust jobs run."""
 
 
-def changed(compare):
-    """The paths a compare answer touches, old names of renames included; refuses anything but a plain
-    step forward that fits in one answer."""
-    if compare.get("status") != "ahead" or compare.get("behind_by") != 0:
-        raise Undecided(f"the change is not a plain step forward from its base ({compare.get('status')})")
+def changed(compare, forked=False):
+    """The paths a compare answer touches, old names of renames included, and the commit they change; refuses
+    anything but a plain step forward that fits in one answer. With `forked` (a pull request), a change that
+    forked from its base branch before the branch's head is one too: a step forward from where it forked
+    (GitHub's three-dot compare lists the files changed since then)."""
+    status, fork = compare.get("status"), (compare.get("merge_base_commit") or {}).get("sha")
+    if status == "ahead" and compare.get("behind_by") == 0:
+        stands_on = None
+    elif forked and status == "diverged" and fork:
+        stands_on = fork
+    else:
+        raise Undecided(f"the change is not a plain step forward from its base ({status})")
     files = compare.get("files")
     if not isinstance(files, list) or not files:
         raise Undecided("GitHub lists no changed files")
@@ -50,7 +58,7 @@ def changed(compare):
     paths = []
     for f in files:
         paths += [p for p in (f.get("filename"), f.get("previous_filename")) if p]
-    return paths
+    return paths, stands_on
 
 
 def newest(runs, sha):
@@ -59,14 +67,17 @@ def newest(runs, sha):
     return max(mine, key=lambda r: (r.get("run_number") or 0, r.get("id") or 0), default=None)
 
 
-def decide(get, before, sha, workflow, branch, *, wait=WAIT, appear=APPEAR, poll=POLL,
+def decide(get, before, sha, workflow, branch, *, forked=False, wait=WAIT, appear=APPEAR, poll=POLL,
            clock=time.monotonic, sleep=time.sleep):
-    """Return why the Rust jobs can be skipped, or raise Undecided. `get(path)` reads the repository's API."""
+    """Return why the Rust jobs can be skipped, or raise Undecided. `get(path)` reads the repository's API.
+    `forked`: `sha` is a pull request's head, `before` its base branch's head, which it may stand behind."""
     if not before or set(before) == {"0"}:
         raise Undecided("there is no commit before this push")
-    other = [p for p in changed(get(f"compare/{before}...{sha}")) if not p.startswith(NOTES)]
+    paths, stands_on = changed(get(f"compare/{before}...{sha}"), forked)
+    other = [p for p in paths if not p.startswith(NOTES)]
     if other:
         raise Undecided(f"it changes {other[0]}" + (f" and {len(other) - 1} more" if len(other) > 1 else ""))
+    before = stands_on or before
     start = clock()
     while True:
         try:
@@ -117,7 +128,8 @@ def main(argv=None, env=os.environ, get=None, **timing):
     try:
         with open(env["GITHUB_EVENT_PATH"], encoding="utf-8") as f:
             event = json.load(f)
-        if pr := event.get("pull_request"):
+        forked = bool(pr := event.get("pull_request"))
+        if forked:
             # GITHUB_SHA is GitHub's trial merge here: what counts is the pull request's own head on its base
             before, sha, branch = pr["base"]["sha"], pr["head"]["sha"], pr["base"]["ref"]
         else:
@@ -126,7 +138,7 @@ def main(argv=None, env=os.environ, get=None, **timing):
         workflow = env["GITHUB_WORKFLOW_REF"].split("@")[0].rsplit("/", 1)[-1]
         get = get or api(env["GITHUB_REPOSITORY"], env.get("GITHUB_TOKEN"),
                          env.get("GITHUB_API_URL", "https://api.github.com"))
-        reason = decide(get, before, sha, workflow, branch, wait=args.wait, **timing)
+        reason = decide(get, before, sha, workflow, branch, forked=forked, wait=args.wait, **timing)
         skip = True
     except Undecided as why:
         skip, reason = False, str(why)
