@@ -5,8 +5,8 @@
 #   (data/files), the signing identity a Hub must be signed with to read the vault's master key
 #   (signing, without the keychain's password: the Hub keeps that in the login keychain, and a copy in
 #   a file would unlock the identity for anyone who reads the backup), the secret files the
-#   configuration points at (secrets), item deliverables (workspaces) and the configuration
-#   (steve.env).
+#   configuration points at (secrets), item deliverables (workspaces), delivered files (deliveries) and
+#   the configuration (steve.env). The same parts as the Hub's own daily copy (daily_backup.rs PARTS).
 # Same disk, no restore drill: a copy against mistakes and a corrupt database, not disaster recovery.
 setopt err_return pipe_fail
 HOME_DIR=${STEVE_HOME:-$HOME/.steve}
@@ -27,7 +27,7 @@ fi
 mv -f $tmp $db
 
 parts=()
-for p in data/files signing secrets workspaces steve.env; do
+for p in data/files signing secrets workspaces deliveries steve.env; do
   [[ -e $HOME_DIR/$p ]] && parts+=($p)
 done
 if (( ${#parts} )); then
