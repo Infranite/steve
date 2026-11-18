@@ -1491,6 +1491,8 @@ and stale snapshots are displayed separately.
 
 ## Incoming reactions
 
+The incoming-reaction migration advances the database reader floor on the first upgraded start. Take a consistent database backup before upgrading if you need to return to an older release; restore that backup when downgrading. The upgraded database cannot be opened by the previous reader.
+
 Incoming emoji changes are stored separately from Steve's outgoing acknowledgement reactions. Active reactions appear on the conversation's message with the actor, emoji, provenance and provider action time, and are supplied to the composer as context. Removal tombstones survive reconnects and restarts; an older create event cannot undo a newer removal, and removal wins equal timestamps. Reaction visibility follows the identity that received the event as well as the message's existing visibility.
 
 Only an identified owner's reaction with affirmative `manual` provenance counts as handling a message. A group reaction applies to the exact message; a DM reaction also covers that sender's earlier unanswered messages in the same consecutive burst (the existing one-minute gap and ten-message bound). It does not cover later messages, other senders, another burst or another chat, and is never treated as the owner being live in the chat. Another person's reaction, an automated assistant on the owner's account, and unknown provenance are context only. Steve's own automatic acknowledgement echoes never count as manual responses.
