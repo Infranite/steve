@@ -101,7 +101,7 @@ pub async fn start(st: crate::api::AppState) {
         return;
     }
     steve_store::instrumentation::enable_lock_metrics();
-    ENABLED.store(true, Ordering::Relaxed);
+    ENABLED.store(true, Ordering::Release);
     let app = router(modules.store.clone(), handle);
     tokio::spawn(async move {
         let result = match listener {
@@ -223,7 +223,7 @@ fn http_metrics(route: &str, method: &'static str, status: &'static str) -> Http
 /// ends at response headers; body bytes reflect the inner compression layer's actual chunks.
 /// Hub responses carry data frames; the data-stream adapter forwards errors without buffering.
 pub async fn http(request: Request, next: Next) -> Response {
-    if !ENABLED.load(Ordering::Relaxed) {
+    if !ENABLED.load(Ordering::Acquire) {
         return next.run(request).await;
     }
     http_enabled(request, next).await
