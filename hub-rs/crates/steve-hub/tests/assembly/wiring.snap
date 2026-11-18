@@ -44,6 +44,8 @@ api GET /calendar/sources/x
 api GET /capabilities/a2a-agents
 api GET /capabilities/mcp-servers
 api GET /capabilities/skills
+api GET /capabilities/skills/x/versions
+api GET /capabilities/skills/x/versions/x
 api GET /chan-messages/x/basis
 api GET /chan-messages/x/context
 api GET /chan-messages/x/resources/x
@@ -316,6 +318,7 @@ api POST /yolo/resume
 api PUT /bots/x/capabilities/x/x
 api PUT /bots/x/tool-pins/x/x
 api PUT /calendar/sources/x/ics
+api PUT /capabilities/skills/x/publication
 api PUT /connections/x/credential
 api PUT /digest/bot
 api PUT /flow-settings/allow-private
