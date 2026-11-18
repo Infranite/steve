@@ -109,38 +109,102 @@ try {
   fixture("seed")
   const receipts = {}
   await check("真实文件工具 → steve_deliver → artifacts.delivery_id → Hub生产聊天卡片", async () => {
-    for (const [key, path] of [["md", "report.md"], ["html", "design.zip"], ["image", "pixel.png"], ["pdf", "paper.pdf"]]) receipts[key] = await tool("default", "steve_deliver_file", { path, title: "Delivery " + key, ...(key === "html" ? { entrypoint: "pages/index.html" } : {}) })
-    await tool("default", "steve_deliver", { summary: "Synthetic delivery integration files", outputs: Object.entries(receipts).map(([key, d]) => ({ kind: "file", title: "Delivery " + key, location: d.url })), checks: [{ name: "Actual tool returned received immutable files", passed: true }] })
+    const files = [["md", "report.md", "交付报告"], ["html", "design.zip", "交互原型"], ["image", "pixel.png", "界面截图"], ["pdf", "paper.pdf", "验收清单"]]
+    for (const [key, path, title] of files) receipts[key] = await tool("default", "steve_deliver_file", { path, title, ...(key === "html" ? { entrypoint: "pages/index.html" } : {}) })
+    const summary = "本轮完成对话中的事项卡片更新，桌面和窄屏下都可以先读简短的交付摘要，再按需打开附件。交付包含验收报告、交互原型、界面截图和验收清单，展开后可直接打开、预览或下载。原有操作和交付记录保持不变。\n\n**完整验收说明**：分别验证仅展开摘要、仅展开详情、两者同时展开，以及收起后恢复到默认状态。[事项记录](#/items/ST-1)"
+    await tool("default", "steve_deliver", { summary, outputs: files.map(([key, , title]) => ({ kind: "file", title, location: receipts[key].url })), checks: [{ name: "Actual tool returned received immutable files", passed: true }] })
     const detail = await json("/api/items/ST-1", "default")
     evidence.artifacts = detail.artifacts
     for (const d of Object.values(receipts)) assert.ok(detail.artifacts.some((a) => a.delivery_id === d.id && a.location === d.url), "actual artifact missing delivery_id")
     const state = await json("/api/state", "default")
     assert.ok(state.thread.some((m) => m.meta?.card?.item === "ST-1"), "Hub must generate the chat card")
-    await page.goto(base + "/#/")
-    for (const d of Object.values(receipts)) {
-      const card = page.locator(`[data-item-card="ST-1"] [data-delivery-card="${d.id}"]`)
-      await card.waitFor()
-      for (const action of ["open", "preview", "download"]) assert.equal(await card.locator(`[data-delivery-${action}]`).count(), 1)
-    }
-    await shot(page, "production-chat-cards")
-    return "Four actual tool receipts, exact matching API artifacts, Hub-generated meta.card, production ChatView; no fixture delivery_id/card injection."
+    return "Four actual tool receipts, exact matching API artifacts and Hub-generated meta.card; no fixture delivery_id/card injection."
   })
-  await check("在生产聊天页实际点击打开、预览和原文件下载", async () => {
-    const card = page.locator(`[data-delivery-card="${receipts.md.id}"]`)
-    const opened = page.waitForEvent("popup")
-    await card.locator("[data-delivery-open]").click()
-    const p = await opened
-    await p.locator("[data-out-md]").waitFor()
-    await p.close()
-    const downloaded = page.waitForEvent("download")
-    await card.locator("[data-delivery-download]").click()
-    assert.match(await readFile(await (await downloaded).path(), "utf8"), /Immutable \*\*Markdown\*\*/)
-    await card.locator("[data-delivery-preview]").click()
-    await page.locator("[data-preview] [data-out-md]").waitFor()
-    await shot(page, "production-chat-preview")
-    await page.keyboard.press("Escape")
-    return "Popup rendered Markdown; preview dialog rendered Markdown; downloaded original bytes."
-  })
+  for (const [width, touch] of [[1280, false], [390, true]]) {
+    const context = touch ? await browser.newContext({ locale: "zh-CN", viewport: { width, height: 844 }, reducedMotion: "reduce", isMobile: true, hasTouch: true }) : owner
+    if (touch) await context.addCookies(await owner.cookies())
+    const chat = touch ? await context.newPage() : page
+    if (touch) chat.on("pageerror", (e) => evidence.pageErrors.push(e.message))
+    try {
+      await check(`实际操作 ${width}px 聊天事项卡：两处独立折叠，打开、预览及下载四条交付中的文件`, async () => {
+        const baseCard = chat.locator('[data-item-card="ST-1"]')
+        const summary = baseCard.locator("[data-card-summary]"), expand = baseCard.locator("[data-card-expand]")
+        const details = baseCard.getByRole("button", { name: "交付详情 · 4 条", exact: true })
+        const rows = baseCard.locator("[data-delivery-card]")
+        const full = summary.getByText("完整验收说明", { exact: true })
+        const operate = (locator) => touch ? locator.tap() : locator.click()
+        const state = async (s, d) => {
+          assert.equal(await expand.getAttribute("aria-expanded"), String(s), "summary expansion")
+          assert.equal(await details.getAttribute("aria-expanded"), String(d), "details expansion")
+          await rows.first().waitFor({ state: d ? "visible" : "hidden" })
+        }
+        const noOverflow = () => baseCard.evaluate((el) => ({
+          page: document.documentElement.scrollWidth <= innerWidth,
+          card: el.scrollWidth <= el.clientWidth,
+        })).then((result) => assert.deepEqual(result, { page: true, card: true }))
+        const capture = (name) => baseCard.screenshot({ path: `${output}/chat-card-${width}-${name}.png` })
+
+        await chat.goto(base + "/#/")
+        await details.waitFor()
+        await state(false, false)
+        assert.match(await summary.innerText(), /^本轮完成对话中的事项卡片更新/)
+        assert.ok(await summary.evaluate((el) => el.clientHeight <= 2 * parseFloat(getComputedStyle(el).lineHeight) + 1), "preview fits in two lines")
+        assert.equal(await full.count(), 0)
+        assert.equal(await summary.getByRole("link").count(), 0, "no focusable links in the preview")
+        assert.ok(await baseCard.locator("[data-pass]").isVisible(), "acceptance stays outside both disclosures")
+        await noOverflow()
+        await capture("default")
+
+        if (touch) await operate(expand)
+        else await expand.press("Enter")
+        await full.waitFor()
+        await summary.getByRole("link", { name: "事项记录" }).waitFor()
+        await state(true, false)
+        await capture("summary")
+        await operate(details)
+        await state(true, true)
+        await operate(expand)
+        await state(false, true)
+        assert.equal(await full.count(), 0)
+        assert.equal(await rows.count(), 4)
+        for (const d of Object.values(receipts)) {
+          const row = baseCard.locator(`[data-delivery-card="${d.id}"]`)
+          for (const action of ["open", "preview", "download"]) assert.equal(await row.locator(`[data-delivery-${action}]`).count(), 1)
+        }
+        await noOverflow()
+        await details.scrollIntoViewIfNeeded()
+        await shot(chat, `chat-card-${width}-details`)
+        if (touch) {
+          await rows.last().scrollIntoViewIfNeeded()
+          await shot(chat, `chat-card-${width}-details-scrolled`)
+        }
+
+        const card = baseCard.locator(`[data-delivery-card="${receipts.md.id}"]`)
+        const opened = chat.waitForEvent("popup")
+        await operate(card.locator("[data-delivery-open]"))
+        const popup = await opened
+        await popup.locator("[data-out-md]").waitFor()
+        await popup.close()
+        const downloaded = chat.waitForEvent("download")
+        await operate(card.locator("[data-delivery-download]"))
+        assert.match(await readFile(await (await downloaded).path(), "utf8"), /Immutable \*\*Markdown\*\*/)
+        await operate(card.locator("[data-delivery-preview]"))
+        const preview = chat.locator("[data-preview]")
+        await preview.locator("[data-out-md]").waitFor()
+        await shot(chat, `chat-card-${width}-preview`)
+        if (touch) await operate(preview.getByRole("button", { name: "关闭", exact: true }))
+        else await chat.keyboard.press("Escape")
+        await preview.waitFor({ state: "hidden" })
+
+        await operate(expand)
+        await operate(details)
+        await state(true, false)
+        await operate(expand)
+        await state(false, false)
+        return "Production ChatView: counted row only by default, independent summary/full and details states; all four file cards kept their actions. Opened the Markdown page, previewed it in place, and downloaded the original bytes."
+      })
+    } finally { if (touch) await context.close() }
+  }
   await check("真实切换到工作区B后，用工具给出的A原样URL打开并点击包内链接", async () => {
     const switched = await owner.request.post(base + "/api/workspaces/delivery-b/switch", { headers: { "x-steve-ws": "default" }, data: {} })
     assert.equal(switched.status(), 200)

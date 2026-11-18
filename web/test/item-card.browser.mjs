@@ -21,6 +21,11 @@ try {
     }
     // the misfiled build sentence is a build line, not “已发布 …”
     const legacy = page.locator('[data-item-card="ST-33"]')
+    assert.equal(await legacy.locator("[data-delivery-details]").count(), 0, "a summary without delivery files has no details disclosure")
+    const short = page.locator('[data-item-card="ST-41"]')
+    assert.equal(await short.locator("[data-card-summary]").innerText(), "已交付。")
+    assert.equal(await short.locator("[data-card-expand]").count(), 0, "a complete short summary needs no toggle")
+    assert.equal(await short.locator("[data-delivery-details]").count(), 0, "work records alone do not add a delivery details disclosure")
     assert.equal((await legacy.locator("[data-card-status]").innerText()).trim(), "已完成")
     assert.match(await legacy.locator("[data-card-build]").innerText(), /Release 构建失败/)
     assert.doesNotMatch(await legacy.locator("[data-card-build]").innerText(), /^ST-33/)

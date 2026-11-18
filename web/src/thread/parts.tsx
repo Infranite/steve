@@ -1,7 +1,7 @@
 /* Thread routing in the conversation (thread-routing.md §3.4–§5): the offer under an answer, suggestion cards, ask
  * options, the research being read, queued questions, quotes, flow-back from items and the focus bar. Built from the
  * existing parts (ItemRef, DecisionCard, Trace) — no new colours. */
-import { useEffect, useLayoutEffect, useRef, useState } from "react"
+import { useEffect, useId, useLayoutEffect, useRef, useState } from "react"
 import { itemDisplayState } from "@/item-workflow-relation"
 import { cn } from "cn"
 import { CornerDownRightIcon, FileTextIcon, LibraryIcon, RotateCcwIcon, SearchIcon, XIcon, CircleCheckIcon, BanIcon, CircleAlertIcon, MessageSquareReplyIcon, CheckIcon, ChevronDownIcon, RocketIcon, TerminalIcon, PencilIcon, GlobeIcon } from "lucide-react"
@@ -20,7 +20,6 @@ import { PR_AWAITING_MERGE, STEVE_TOOL, st, tm, emit, chatSend, takeOffer, choos
 import { ItemRef, DecisionCard, ItemNo, AlertClose, go, Pill } from "@/ui"
 import { jumpToMsg, threadMsg } from "@/thread/history"
 import { Trans } from "react-i18next"
-import { flushSync } from "react-dom"
 import { t as tr, useT } from "@/i18n"
 import { toolClass, toolCounts, toolShort, meetStep, type ToolClass } from "@/thread/tools"
 import { steveToolIcon } from "@/tool-icons"
@@ -255,50 +254,31 @@ export function cardLook(i: Item, c?: ItemCardState): Look {
 
 /* inside a card, Markdown headings are text: a summary that starts with "## …" never outranks the card's own title */
 const FLAT = "[&_:is(h1,h2,h3,h4,h5,h6)]:[font:inherit]! [&_:is(h1,h2,h3,h4,h5,h6)]:mt-0! [&_:is(h1,h2,h3,h4,h5,h6)]:mb-0! [&_:is(h1,h2,h3,h4,h5,h6)]:font-medium!"
-/** the delivery summary, two lines until opened; the full text is the acceptance draft when there is one. The fold eases its
- * height (open: from two lines to the content; shut: back, then the ellipsis returns); it is offered only when there is more */
-function DeliveryBlock({ d, open: open0 = false }: { d: NonNullable<ItemCardState["delivery"]>; open?: boolean }) {
-  /* open: what the button says; full: what the box shows (the longer text stays while the fold closes over it) */
-  const [open, setOpen] = useState(open0), [full, setFull] = useState(open0), [more, setMore] = useState(open0), t = useT()
-  const box = useRef<HTMLDivElement>(null), folded = useRef(0), timer = useRef(0)
-  const draft = d.decision ? decisionDraft(d.decision) : undefined, fuller = !!draft && draft.trim() !== d.text.trim()
-  const text = full && fuller ? draft! : d.text
-  /* is anything cut off at two lines? measured while folded, and again when the width changes */
+/** A text-only preview: clamping rich Markdown can leave clipped links focusable and still mount images and widgets. */
+function DeliveryBlock({ d }: { d: NonNullable<ItemCardState["delivery"]> }) {
+  const [open, setOpen] = useState(false), [clipped, setClipped] = useState(false), t = useT()
+  const box = useRef<HTMLDivElement>(null), id = useId()
+  const draft = d.decision ? decisionDraft(d.decision) : undefined
+  const full = draft?.trim() ? draft : d.text
+  const preview = clipPlain(d.text.replace(/!?\[([^\]]*)\]\([^\s)]*\)/g, "$1"), 180)
+  // Even the short text can wrap beyond two lines on a narrow screen.
   useLayoutEffect(() => {
     const el = box.current
-    if (!el || full) return
-    const check = () => setMore(fuller || el.scrollHeight > el.clientHeight + 1)
+    if (!el || open) return
+    const check = () => setClipped(el.scrollHeight > el.clientHeight + 1)
     check()
     const ro = new ResizeObserver(check); ro.observe(el)
     return () => ro.disconnect()
-  }, [full, fuller, d.text])
-  useEffect(() => () => clearTimeout(timer.current), [])
-  /* the height moves between two pixel values only: easing from "auto" would follow the content as it changes */
-  const pin = (el: HTMLElement, px: number) => { el.style.transition = "none"; el.style.height = px + "px"; void el.offsetHeight; el.style.transition = "" }
-  const toggle = () => {
-    const el = box.current
-    if (!el) return
-    clearTimeout(timer.current)
-    if (!open) {
-      folded.current = el.clientHeight
-      pin(el, folded.current)
-      flushSync(() => { setOpen(true); setFull(true) })
-      el.style.height = el.scrollHeight + "px"
-      timer.current = window.setTimeout(() => { el.style.height = "" }, 280)
-    } else {
-      pin(el, el.clientHeight)
-      el.style.height = (folded.current || 40) + "px"
-      setOpen(false)
-      timer.current = window.setTimeout(() => { flushSync(() => setFull(false)); el.style.height = "" }, 280)
-    }
-  }
+  }, [open, preview])
   return (
     <div className="flex min-w-0 flex-col gap-1" data-card-delivery>
       <div className="type-label text-tertiary">{t("thread:card.delivery")}</div>
-      <div ref={box} className={cn("min-h-0 min-w-0 break-words transition-[height] duration-260 ease-(--ease-out)", !full && "line-clamp-2", "overflow-hidden", FLAT)}>
-        <Markdown text={text} className="type-callout" /></div>
-      {more && <button type="button" className="flex items-center gap-0.5 self-start type-callout text-muted-foreground hover:text-foreground" onClick={toggle} aria-expanded={open} data-card-expand>
-        {open ? t("thread:card.collapse") : t("thread:card.expand")}<ChevronDownIcon className={cn("size-3.5 transition-transform duration-260 ease-(--ease-out)", open && "rotate-180")} /></button>}
+      <div id={id} ref={box} className={cn("min-w-0 [overflow-wrap:anywhere]", open ? FLAT : "line-clamp-2 type-callout")} data-card-summary>
+        {open ? <Markdown text={full} className="type-callout" /> : preview}
+      </div>
+      {(open || clipped || preview !== full.trim()) && <Button type="button" size="sm" variant="ghost" className="-ml-2 self-start text-muted-foreground" onClick={() => setOpen(!open)} aria-expanded={open} aria-controls={id} data-card-expand>
+        {t(open ? "thread:card.collapseSummary" : "thread:card.expandSummary")}<ChevronDownIcon aria-hidden className={cn("size-3.5 transition-transform", open && "rotate-180")} />
+      </Button>}
     </div>
   )
 }
@@ -352,7 +332,7 @@ export function ItemCard({ c }: { c: ItemCardState }) {
         <Pill tone={look.tone} className="mt-0.5 h-auto max-w-[45%] py-0.5 leading-4" data-card-status>{look.tone === "done" && c.released ? <RocketIcon className="size-3.5 shrink-0" /> : look.tone === "run" ? <span className="dot-running size-1.5 shrink-0 rounded-full bg-current" aria-hidden /> : null}{look.label}{look.version && <span className="hidden min-w-0 max-w-32 truncate font-mono font-normal sm:inline">{look.version}</span>}</Pill>
       </button>
       {d && <DeliveryBlock key={d.decision ?? d.text} d={d} />}
-      {i.outs.length > 0 && <DeliveryCards item={i.id} outs={i.outs} anns={i.anns} />}
+      {i.outs.length > 0 && <DeliveryCards key={i.id} item={i.id} outs={i.outs} anns={i.anns} />}
       {reply && <div className="flex min-w-0 flex-col gap-1 rounded-lg bg-muted/60 px-3 py-2.5" data-card-reply>
         <div className="type-label text-tertiary">{t("thread:card.reply")}</div><div className={cn("line-clamp-4 min-w-0 break-words", FLAT)}><Markdown text={reply.text} className="type-callout" /></div></div>}
       {c.build && <div className="flex items-start gap-2 type-callout text-muted-foreground" data-card-build><CircleAlertIcon className="mt-0.5 size-4 shrink-0 text-attention" strokeWidth={1.75} />
