@@ -2,8 +2,8 @@
 //! Each `store.x()` returns a borrowed view named like the TS object (`items`, `bots`, …).
 
 pub mod access;
-pub mod attention;
 mod annotations;
+pub mod attention;
 mod bots;
 mod catalog;
 mod core;
@@ -11,8 +11,8 @@ mod decisions;
 mod dependency_waits;
 pub mod feed;
 mod files;
-pub mod item_facts;
 pub mod gateway_ledger;
+pub mod item_facts;
 mod items;
 pub mod jobs;
 pub mod kinds;
@@ -23,6 +23,7 @@ mod stats;
 mod thread;
 mod usage_ledger;
 pub mod workflows;
+pub mod would_do;
 pub mod yolo;
 
 pub use self::annotations::*;

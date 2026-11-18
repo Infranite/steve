@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react"
 import { BugIcon, CheckIcon, CopyIcon, RefreshCwIcon } from "lucide-react"
-import { debugApi, type DebugEvent, type DebugFilter, type DebugPage, type DebugShadow, type DebugSnapshot } from "@/api/debug"
+import { debugApi, type DebugEvent, type DebugFilter, type DebugPage, type DebugShadow, type DebugSnapshot, type DebugWouldDo, type DebugWouldDoAction } from "@/api/debug"
 import { Button } from "@/components/ui/button"
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
@@ -218,6 +218,29 @@ function ShadowState({ shadow }: { shadow: DebugShadow }) {
     <p className={cn("type-footnote", shadow.agrees ? "text-muted-foreground" : "text-attention")} data-debug-shadow-agrees={shadow.agrees}>{shadow.agrees ? t("views:debug.shadowAgrees") : t("views:debug.shadowDiffers", { today: lane(shadow.today.lane) })}</p>
     <p className="break-all type-footnote font-mono text-muted-foreground">{step ? t("views:debug.shadowNext", { step }) : t("views:debug.shadowNoNext")}</p>
     <p className="type-footnote text-muted-foreground">{t("views:debug.shadowSettled", { settled })} · {t("views:debug.shadowPredicates", { review: yes(shadow.reviewable.holds), merge: yes(shadow.mergeable.holds), close: yes(shadow.closable.holds) })}</p>
+    {shadow.would_do && <WouldDo wouldDo={shadow.would_do} />}
+  </div>
+}
+
+/** What the sweep would do for the item: shown only, its execution switches are off. */
+function WouldDo({ wouldDo }: { wouldDo: DebugWouldDo }) {
+  const t = useT()
+  const action = (a: DebugWouldDoAction) => a === "wake" ? t("views:debug.wouldWake") : a === "card" ? t("views:debug.wouldCard") : t("views:debug.wouldRemind")
+  const current = wouldDo.current
+  return <div className="space-y-1 pt-2" data-debug-would-do>
+    <h5 className="type-label text-tertiary">{t("views:debug.wouldDo")}</h5>
+    <p className="type-footnote text-muted-foreground">{t("views:debug.wouldDoHint")}</p>
+    {current
+      ? <p className={cn("break-words type-footnote", current.due && current.action === "card" ? "text-attention" : undefined)} data-debug-would-do-reason={current.reason}>
+          {action(current.action)} · {current.label}{current.detail ? ` (${current.detail})` : ""}
+          <span className="ml-2 font-mono text-muted-foreground">{current.due ? t("views:debug.wouldDue") : t("views:debug.wouldAt", { time: time(current.due_at) })}</span>
+        </p>
+      : <p className="type-footnote text-muted-foreground">{t("views:debug.wouldNothing")}</p>}
+    {wouldDo.log.length > 0 && <ul className="space-y-0.5">
+      {wouldDo.log.map(r => <li key={r.id} className="break-words type-footnote font-mono text-muted-foreground">
+        {time(r.first_seen)} · {action(r.action)} · {r.label}{r.episodes > 1 ? ` ×${r.episodes}` : ""} · {r.cleared_at ? t("views:debug.wouldCleared", { time: time(r.cleared_at) }) : t("views:debug.wouldOpen")}
+      </li>)}
+    </ul>}
   </div>
 }
 

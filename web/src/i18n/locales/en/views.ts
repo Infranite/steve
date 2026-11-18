@@ -43,6 +43,7 @@ export default {
 },
   debug: {
     shadow: "Derived state (shadow)", shadowHint: "Computed from the item's facts next to today's state. Nothing acts on it yet.", shadowLane: "{{lane}} · row {{row}}", shadowAgrees: "Agrees with today's state", shadowDiffers: "Differs from today's state ({{today}})", shadowNext: "Next step: {{step}}", shadowNoNext: "No next step", shadowPredicates: "Reviewable {{review}} · Mergeable {{merge}} · Closable {{close}}", shadowSettled: "Settled: {{settled}}", yes: "yes", no: "no",
+    wouldDo: "What the sweep would do", wouldDoHint: "Observe-only: recorded, not carried out. Today's stall watch still acts.", wouldWake: "Wake the agent", wouldCard: "Card for you", wouldRemind: "Remind you", wouldDue: "due now", wouldAt: "due {{time}}", wouldNothing: "Nothing to do", wouldCleared: "cleared {{time}}", wouldOpen: "open",
     settledEvaluable: "evaluable", settledBusy: "known busy", settledUnknown: "unknown", laneNeedsYou: "Needs you", laneRunning: "Running", laneDone: "Done",
     open: "Debug", title: "{{item}} · Debug", description: "Inspect blockers and execution evidence. New items capture decision details for their first 30 minutes.",
     current: "Current state", stateUnavailable: "The current state can't be read right now.", refresh: "Refresh", loading: "Loading…",

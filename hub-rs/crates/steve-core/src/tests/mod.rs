@@ -29,6 +29,7 @@ mod routing;
 mod stall;
 mod stats_marks;
 mod supersede;
+mod sweep;
 mod takeover;
 mod thread;
 mod work_state;

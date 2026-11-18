@@ -45,6 +45,7 @@ pub mod runtime;
 mod shadow;
 pub mod stall;
 pub mod stats;
+pub mod sweep;
 pub mod takeover;
 pub mod thread;
 pub mod upstream;

@@ -504,5 +504,22 @@
   "core.derive.nobody": "没人在做：没有任何东西能把它带回来",
   "core.derive.follow_up": "停了，Steve 在跟进",
   "core.derive.stopped": "停了，没做完；跟进次数已用完",
-  "core.derive.unknown": "状态不明（诊断）"
+  "core.derive.unknown": "状态不明（诊断）",
+  "core.sweep.merge_declined": "你拒绝了合并，之后没有任何动作：返工、关闭，或保留分支",
+  "core.sweep.node_gone_closing": "正在收尾，但会话的 Node 不在了",
+  "core.sweep.node_gone": "会话的 Node 不在了",
+  "core.sweep.answered_while_paused": "你回答了它的卡片，但它还暂停着",
+  "core.sweep.paused_silent": "暂停后一直没有动静",
+  "core.sweep.deploy_waiting": "收尾在等本机 Hub 运行这个结果：升级，或标记完成",
+  "core.sweep.required_failed": "一项必需的步骤失败了，之后 Agent 的回合已结束",
+  "core.sweep.pr_unfixed": "已告诉 Agent，PR 仍然合并不了，提交没变",
+  "core.sweep.hooks_silent": "收尾模块很久没有回音",
+  "core.sweep.build_long": "必需的构建已运行很久（仍在跟进）",
+  "core.sweep.nobody": "没有任何东西能把它带回来",
+  "core.sweep.stopped": "停了，没做完；跟进次数已用完",
+  "core.sweep.unowned": "停了，现在没有任何机制在看它",
+  "core.sweep.follow_up": "停了，Steve 会跟进",
+  "core.sweep.stall_question": "回合很久没有新输出：问一次进展",
+  "core.sweep.long_wait": "这项等待已查看很多次",
+  "core.sweep.silent": "在等，很久没有任何记录"
 }
