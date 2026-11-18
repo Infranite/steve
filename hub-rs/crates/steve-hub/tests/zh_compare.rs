@@ -89,7 +89,6 @@ fn item_attrs(item: &Item) -> &[syn::Attribute] {
 struct Value {
     literals: Vec<String>,
     table: bool,
-    columns: BTreeMap<usize, Vec<String>>,
 }
 type Constants = BTreeMap<String, Value>;
 
@@ -158,114 +157,147 @@ fn value(expr: &Expr, constants: &Constants, scope: &str) -> Value {
             _ => Value::default(),
         },
         Expr::Path(p) => resolve(&p.path, constants, scope),
+        Expr::Macro(m) if m.mac.path.is_ident("concat") => Value {
+            literals: operand_literals(expr),
+            ..Value::default()
+        },
         Expr::Reference(r) => value(&r.expr, constants, scope),
         Expr::Paren(p) => value(&p.expr, constants, scope),
         Expr::Group(g) => value(&g.expr, constants, scope),
-        Expr::MethodCall(m)
-            if m.args.is_empty()
-                && ["iter", "copied", "cloned"]
-                    .iter()
-                    .any(|name| m.method == *name) =>
-        {
-            value(&m.receiver, constants, scope)
+        // Preserve the source table through arbitrary iterator adapters (including adapters
+        // taking closures), so a later consumer cannot hide the original const/static table.
+        Expr::MethodCall(m) => {
+            let v = value(&m.receiver, constants, scope);
+            if v.table { v } else { Value::default() }
         }
         Expr::Tuple(t) => Value {
-            columns: t
+            literals: t
                 .elems
                 .iter()
-                .enumerate()
-                .map(|(i, e)| (i, value(e, constants, scope).literals))
+                .flat_map(|e| value(e, constants, scope).literals)
                 .collect(),
             ..Value::default()
         },
-        Expr::Array(a) => {
-            let mut out = Value {
-                table: true,
-                ..Value::default()
-            };
-            for e in &a.elems {
-                let v = value(e, constants, scope);
-                out.literals.extend(v.literals);
-                for (i, strings) in v.columns {
-                    out.columns.entry(i).or_default().extend(strings);
-                }
-            }
-            out
-        }
+        Expr::Array(a) => Value {
+            literals: a
+                .elems
+                .iter()
+                .flat_map(|e| expression_literals(e, constants, scope, true))
+                .collect(),
+            table: true,
+        },
         _ => Value::default(),
     }
 }
 
-fn column_compared(predicate: &Expr, column: usize) -> bool {
-    let Expr::Closure(c) = predicate else {
-        return true;
-    };
-    let Some(pat) = c.inputs.first() else {
-        return false;
-    };
-    fn unref(p: &syn::Pat) -> &syn::Pat {
-        match p {
-            syn::Pat::Reference(r) => unref(&r.pat),
-            syn::Pat::Type(t) => unref(&t.pat),
-            _ => p,
-        }
-    }
-    let (row, field) = match unref(pat) {
-        syn::Pat::Ident(p) => (Some(p.ident.to_string()), None),
-        syn::Pat::Tuple(p) => (
-            None,
-            p.elems.iter().nth(column).and_then(|p| match unref(p) {
-                syn::Pat::Ident(i) => Some(i.ident.to_string()),
-                _ => None,
-            }),
-        ),
-        _ => return false,
-    };
-    struct Uses {
-        row: Option<String>,
-        field: Option<String>,
-        column: usize,
-        found: bool,
-    }
-    impl Uses {
-        fn selected(&self, e: &Expr) -> bool {
-            match e {
-                Expr::Path(p) => self.field.as_ref().is_some_and(|f| p.path.is_ident(f)),
-                Expr::Field(f) => {
-                    matches!(&f.member, syn::Member::Unnamed(i) if i.index as usize == self.column)
-                        && matches!(&*f.base, Expr::Path(p) if self.row.as_ref().is_some_and(|r| p.path.is_ident(r)))
+fn tokens(input: syn::parse::ParseStream<'_>, out: &mut Vec<String>) -> syn::Result<()> {
+    while !input.is_empty() {
+        if input.peek(syn::Lit) {
+            if let Lit::Str(s) = input.parse::<Lit>()? {
+                if han(&s.value()) {
+                    out.push(s.value());
                 }
-                Expr::Reference(r) => self.selected(&r.expr),
-                Expr::Unary(u) => self.selected(&u.expr),
-                Expr::Paren(p) => self.selected(&p.expr),
-                Expr::MethodCall(m) => self.selected(&m.receiver),
-                _ => false,
             }
+        } else if input.peek(syn::token::Paren) {
+            let inner;
+            syn::parenthesized!(inner in input);
+            tokens(&inner, out)?;
+        } else if input.peek(syn::token::Bracket) {
+            let inner;
+            syn::bracketed!(inner in input);
+            tokens(&inner, out)?;
+        } else if input.peek(syn::token::Brace) {
+            let inner;
+            syn::braced!(inner in input);
+            tokens(&inner, out)?;
+        } else {
+            input.step(|c| {
+                c.token_tree()
+                    .map(|(_, next)| ((), next))
+                    .ok_or_else(|| c.error("token"))
+            })?;
         }
     }
-    impl<'ast> Visit<'ast> for Uses {
-        fn visit_expr_binary(&mut self, b: &'ast syn::ExprBinary) {
-            if matches!(b.op, syn::BinOp::Eq(_) | syn::BinOp::Ne(_)) {
-                self.found |= self.selected(&b.left) || self.selected(&b.right);
-            }
-            visit::visit_expr_binary(self, b);
-        }
-        fn visit_expr_method_call(&mut self, m: &'ast syn::ExprMethodCall) {
-            if METHODS.contains(&m.method.to_string().as_str()) {
-                self.found |= self.selected(&m.receiver) || m.args.iter().any(|e| self.selected(e));
-            }
-            visit::visit_expr_method_call(self, m);
-        }
-    }
-    let mut uses = Uses {
-        row,
-        field,
-        column,
-        found: false,
-    };
-    uses.visit_expr(&c.body);
-    uses.found
+    Ok(())
 }
+
+/// String literals anywhere under a logic operand. General macro bodies stay opaque;
+/// format!/concat! are string constructors only when their result is itself used by logic.
+fn operand_literals(expr: &Expr) -> Vec<String> {
+    expression_literals(expr, &Constants::new(), "", false)
+}
+fn expression_literals(
+    expr: &Expr,
+    constants: &Constants,
+    scope: &str,
+    resolve_constants: bool,
+) -> Vec<String> {
+    struct Literals<'a> {
+        out: Vec<String>,
+        constants: &'a Constants,
+        scope: &'a str,
+        resolve_constants: bool,
+    }
+    impl<'ast> Visit<'ast> for Literals<'_> {
+        fn visit_expr_path(&mut self, p: &'ast syn::ExprPath) {
+            if self.resolve_constants {
+                self.out
+                    .extend(resolve(&p.path, self.constants, self.scope).literals);
+            }
+        }
+        fn visit_lit_str(&mut self, s: &'ast syn::LitStr) {
+            if han(&s.value()) {
+                self.out.push(s.value());
+            }
+        }
+        fn visit_macro(&mut self, m: &'ast syn::Macro) {
+            let name = m
+                .path
+                .segments
+                .last()
+                .map(|s| s.ident.to_string())
+                .unwrap_or_default();
+            if name == "matches" {
+                (|input: syn::parse::ParseStream<'_>| tokens(input, &mut self.out))
+                    .parse2(m.tokens.clone())
+                    .expect("logic operand tokens");
+            } else if ["format", "concat"].contains(&name.as_str()) {
+                let args = syn::punctuated::Punctuated::<Expr, Token![,]>::parse_terminated
+                    .parse2(m.tokens.clone())
+                    .expect("string constructor arguments");
+                // Visit temporary ASTs with a fresh visitor, preserving opacity of ordinary macros.
+                for arg in args {
+                    self.out.extend(expression_literals(
+                        &arg,
+                        self.constants,
+                        self.scope,
+                        self.resolve_constants,
+                    ));
+                }
+            }
+        }
+    }
+    let mut out = Literals {
+        out: vec![],
+        constants,
+        scope,
+        resolve_constants,
+    };
+    out.visit_expr(expr);
+    out.out
+}
+const ITERATORS: &[&str] = &[
+    "any",
+    "all",
+    "find",
+    "find_map",
+    "position",
+    "rposition",
+    "filter",
+    "filter_map",
+    "map",
+    "contains",
+];
 
 struct Guard<'a> {
     constants: &'a Constants,
@@ -295,17 +327,10 @@ impl<'a> Guard<'a> {
         self.literals
             .extend(value(e, self.constants, &self.scope).literals);
     }
-    fn table(&mut self, e: &Expr, predicate: Option<&Expr>) {
+    fn table(&mut self, e: &Expr) {
         let v = value(e, self.constants, &self.scope);
         if v.table {
             self.literals.extend(v.literals);
-            // Tuple tables often carry an ASCII code plus a display label. Only count a
-            // label column when the iterator predicate actually compares/parses that column.
-            for (i, strings) in v.columns {
-                if predicate.is_none_or(|p| column_compared(p, i)) {
-                    self.literals.extend(strings);
-                }
-            }
         }
     }
     fn define(&mut self, name: &syn::Ident, e: &Expr) {
@@ -380,16 +405,17 @@ impl<'ast> Visit<'ast> for Guard<'_> {
         visit::visit_impl_item_const(self, i);
     }
     fn visit_expr_binary(&mut self, b: &'ast syn::ExprBinary) {
-        if matches!(b.op, syn::BinOp::Eq(_) | syn::BinOp::Ne(_)) {
-            // Equality only requires literals; constants are covered in string method arguments.
-            self.literals
-                .extend(value(&b.left, &Constants::new(), "").literals);
-            self.literals
-                .extend(value(&b.right, &Constants::new(), "").literals);
+        if !self.collect && matches!(b.op, syn::BinOp::Eq(_) | syn::BinOp::Ne(_)) {
+            self.literals.extend(operand_literals(&b.left));
+            self.literals.extend(operand_literals(&b.right));
         }
         visit::visit_expr_binary(self, b);
     }
     fn visit_arm(&mut self, a: &'ast syn::Arm) {
+        if self.collect {
+            visit::visit_arm(self, a);
+            return;
+        }
         struct Pattern(Vec<String>);
         impl<'ast> Visit<'ast> for Pattern {
             fn visit_lit_str(&mut self, s: &'ast syn::LitStr) {
@@ -403,61 +429,64 @@ impl<'ast> Visit<'ast> for Guard<'_> {
         self.literals.extend(p.0);
         visit::visit_arm(self, a);
     }
+    fn visit_expr_call(&mut self, c: &'ast syn::ExprCall) {
+        if self.collect {
+            visit::visit_expr_call(self, c);
+            return;
+        }
+        if let Expr::Path(p) = &*c.func {
+            let parts = p
+                .path
+                .segments
+                .iter()
+                .map(|s| s.ident.to_string())
+                .collect::<Vec<_>>();
+            if parts.last().is_some_and(|s| s == "new")
+                && parts
+                    .iter()
+                    .rev()
+                    .nth(1)
+                    .is_some_and(|s| ["Regex", "RegexBuilder"].contains(&s.as_str()))
+            {
+                for arg in &c.args {
+                    let direct = value(arg, self.constants, &self.scope).literals;
+                    self.literals.extend(if direct.is_empty() {
+                        operand_literals(arg)
+                    } else {
+                        direct
+                    });
+                }
+            }
+        }
+        visit::visit_expr_call(self, c);
+    }
     fn visit_expr_method_call(&mut self, m: &'ast syn::ExprMethodCall) {
-        if METHODS.contains(&m.method.to_string().as_str()) {
+        if self.collect {
+            visit::visit_expr_method_call(self, m);
+            return;
+        }
+        let name = m.method.to_string();
+        if METHODS.contains(&name.as_str()) {
             for arg in &m.args {
                 self.argument(arg);
             }
-            self.table(
-                &m.receiver,
-                if m.method == "contains" {
-                    None
-                } else {
-                    m.args.first()
-                },
-            );
+            // A literal receiver is also text being parsed, e.g. "一二三四五六".find(c).
+            let receiver = value(&m.receiver, &Constants::new(), "");
+            if !receiver.table {
+                self.literals.extend(receiver.literals);
+            }
         }
-        if m.method == "any" {
-            self.table(&m.receiver, m.args.first());
+        if METHODS.contains(&name.as_str()) || ITERATORS.contains(&name.as_str()) {
+            self.table(&m.receiver);
         }
         visit::visit_expr_method_call(self, m);
     }
     fn visit_macro(&mut self, m: &'ast syn::Macro) {
+        if self.collect {
+            return;
+        }
         if m.path.segments.last().is_some_and(|s| s.ident == "matches") {
             // Token scanning also covers nested patterns and raw literals in matches!.
-            fn tokens(
-                input: syn::parse::ParseStream<'_>,
-                out: &mut Vec<String>,
-            ) -> syn::Result<()> {
-                while !input.is_empty() {
-                    if input.peek(syn::Lit) {
-                        if let Lit::Str(s) = input.parse::<Lit>()? {
-                            if han(&s.value()) {
-                                out.push(s.value());
-                            }
-                        }
-                    } else if input.peek(syn::token::Paren) {
-                        let inner;
-                        syn::parenthesized!(inner in input);
-                        tokens(&inner, out)?;
-                    } else if input.peek(syn::token::Bracket) {
-                        let inner;
-                        syn::bracketed!(inner in input);
-                        tokens(&inner, out)?;
-                    } else if input.peek(syn::token::Brace) {
-                        let inner;
-                        syn::braced!(inner in input);
-                        tokens(&inner, out)?;
-                    } else {
-                        input.step(|c| {
-                            c.token_tree()
-                                .map(|(_, next)| ((), next))
-                                .ok_or_else(|| c.error("token"))
-                        })?;
-                    }
-                }
-                Ok(())
-            }
             (|input: syn::parse::ParseStream<'_>| tokens(input, &mut self.literals))
                 .parse2(m.tokens.clone())
                 .expect("matches tokens");
@@ -647,7 +676,7 @@ fn constants_are_collected_across_files_without_confusing_same_named_values() {
                 ("crate/src/associated.rs".to_owned(), "\"关联\"".to_owned()),
                 1
             ),
-            (("crate/src/tuples.rs".to_owned(), "\"标签\"".to_owned()), 3),
+            (("crate/src/tuples.rs".to_owned(), "\"标签\"".to_owned()), 4),
             (
                 ("crate/src/use_words.rs".to_owned(), "\"跨文件\"".to_owned()),
                 1
@@ -659,5 +688,60 @@ fn constants_are_collected_across_files_without_confusing_same_named_values() {
         ]
         .into_iter()
         .collect()
+    );
+}
+
+#[test]
+fn expanded_logic_contexts_cover_nested_operands_iterators_and_regexes() {
+    let source = r##"
+        const WORDS: &[(&str, &[&str])] = &[("code", &["词表"])];
+        static STATIC: &[&str] = &[concat!("静态表")];
+        const PATTERN: &str = "常量正则";
+        const BUILT: &[Row] = &[row("code", "构造表字段")];
+        fn f(s: &str) {
+            if s == format!("格式{}", 1) || Some(s) != Some("包裹") {}
+            if (s, s) == ("元组".to_string(), "转换".to_string()) {}
+            "汉字接收者".find(s);
+            WORDS.into_iter().copied().cloned().filter(|_| true).filter_map(Some)
+                .map(|x| x).all(|_| true);
+            BUILT.iter().map(|r| r.code);
+            WORDS.iter().find_map(Some); WORDS.iter().position(|_| true);
+            WORDS.iter().rposition(|_| true); STATIC.iter().any(|_| true);
+            Regex::new("正则"); regex::bytes::RegexBuilder::new(r"构建器");
+            Regex::new(PATTERN);
+            static RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(concat!("延迟", "拼接")).unwrap());
+            if s == format!("外层{}", opaque!("宏内忽略")) {}
+            ordinary("函数参数忽略"); format!("显示忽略"); t!("翻译忽略");
+            RegexLike::new("非正则忽略"); db("SELECT 'SQL忽略'");
+            if s == opaque!("宏比较忽略") {}
+        }
+    "##;
+    let now = scan_files(&[("fixture".into(), syn::parse_file(source).unwrap())]);
+    let literals: BTreeMap<_, _> = now
+        .into_iter()
+        .map(|((_, s), n)| (serde_json::from_str::<String>(&s).unwrap(), n))
+        .collect();
+    let expected = [
+        ("构造表字段", 1),
+        ("格式{}", 1),
+        ("包裹", 1),
+        ("元组", 1),
+        ("转换", 1),
+        ("汉字接收者", 1),
+        ("词表", 7),
+        ("静态表", 1),
+        ("正则", 1),
+        ("构建器", 1),
+        ("常量正则", 1),
+        ("延迟", 1),
+        ("拼接", 1),
+        ("外层{}", 1),
+    ];
+    assert_eq!(
+        literals,
+        expected
+            .into_iter()
+            .map(|(s, n)| (s.to_owned(), n))
+            .collect()
     );
 }
