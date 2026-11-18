@@ -320,6 +320,38 @@ pub async fn ingest(
     .map_err(|e| ApiError::Internal(format!("task failed: {e}")))?
 }
 
+/// An event staged with its connector receipt. Drive it only after that transaction commits;
+/// the persisted runs are recovered if the process exits between commit and dispatch.
+pub struct IngestCommit(Step);
+
+impl IngestCommit {
+    pub fn outcome(&self) -> Ingested {
+        match &self.0 {
+            Step::Done(out) => out.clone(),
+            Step::Stored(s) => Ingested::Stored {
+                id: s.id.clone(),
+                runs: s.runs.clone(),
+            },
+        }
+    }
+
+    pub fn dispatch(self, cx: &Arc<FlowCx>, ws: &str) {
+        after_store(cx, ws, self.0);
+    }
+}
+
+pub fn ingest_in(
+    tx: &Tx,
+    cx: &Arc<FlowCx>,
+    ws: &str,
+    conn: &str,
+    ev: &RawEvent,
+    now: i64,
+) -> FlowResult<IngestCommit> {
+    check(ev)?;
+    Ok(IngestCommit(store_in(tx, cx, ws, Some(conn), ev, now)?))
+}
+
 /// The stored part of [`ingest`], in the caller's transaction: dedupe, the `ext_events` row, the runs it
 /// opens (`running` at their trigger, so `engine::recover` drives them if the Hub stops before
 /// [`after_store`]), the waits it matches. `ev` passed [`check`].

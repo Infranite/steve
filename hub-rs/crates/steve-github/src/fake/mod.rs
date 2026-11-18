@@ -397,6 +397,13 @@ impl FakeGitHub {
         })
     }
 
+    pub fn set_compare(&self, repo: &str, base: &str, head: &str, comparison: Value) {
+        self.with(|w| {
+            w.comparisons
+                .insert((repo.into(), format!("{base}...{head}")), comparison);
+        });
+    }
+
     /// A new commit on the PR's head (pair with a `pull_request.synchronize` webhook).
     pub fn push_to_pr(&self, repo: &str, number: u64, sha: &str) {
         self.with(|w| {

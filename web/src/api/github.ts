@@ -3,7 +3,7 @@
  * “not wired here”, and the page shows the Unwired placeholder instead. */
 import { modReq as req, qs as q } from "@/api"
 
-export type GhSettings = { after_accept: "ask_pr" | "open_pr" | "none"; finish_on: "accepted" | "merged"; merge_method: "squash" | "merge" | "rebase"; delete_branch: boolean; ci_fail: "supplement" | "signal"; draft_pr: boolean }
+export type GhSettings = { after_accept: "ask_pr" | "open_pr" | "none"; finish_on: "accepted" | "merged"; merge_method: "squash" | "merge" | "rebase"; delete_branch: boolean; ci_fail: "supplement" | "signal"; draft_pr: boolean; pr_review?: boolean; issue_triage?: boolean }
 export type GhConnection = { id: string; kind: "app" | "pat"; account: string; status: string }
 export type GhRepo = {
   id: string; full_name: string; private: boolean; default_branch: string; connection: { id: string; kind: "app" | "pat"; account: string }
@@ -17,7 +17,16 @@ export type GhPr = {
   checks_state: "none" | "pending" | "success" | "failure"; checks: GhCheck[]; review_state: string; mergeable: string | null; item: GhItemRef; link_source: string | null; opened_by: string; updated: number
 }
 export type GhIssue = { id: string; repo_id: string; number: number; title: string; state: string; labels: string[]; url: string; item: GhItemRef }
-export type GhDelivery = { id: string; received: number; event: string; action: string | null; status: "ok" | "ignored" | "failed"; error: string | null; repo_id: string | null }
+export type GhRun = {
+  id: string; flow_id: string; flow_name: string; flow_deleted: boolean; status: string
+  outcome: string | null; label: string; error: string | null; item_id: string | null
+  publication: { state: string; error?: string | null; url?: string | null } | null
+}
+export type GhTrace = {
+  kind: "pr_review" | "issue_triage"; state: "matched" | "skipped" | "failed"; reason: string
+  number: number | null; base: string | null; head: string | null; event_id: string | null; runs: GhRun[]
+}
+export type GhDelivery = { id: string; received: number; event: string; action: string | null; status: "received" | "ok" | "ignored" | "failed"; error: string | null; repo_id: string | null; automation?: GhTrace | null }
 export type GhOverview = { apps: { slug: string; owner: string; html_url: string }[]; connections: GhConnection[]; repos: GhRepo[]; suggestions: { project_id: string; full_name: string; gh_id: number; connection_id: string }[] }
 export type GhAvailable = { gh_id: number; full_name: string; private: boolean; linked: boolean }
 export type GhManifest = { action: string; manifest: unknown; state: string }
@@ -31,7 +40,8 @@ export const gh = {
   sync: (id: string) => req<unknown>("POST", `/github/repos/${encodeURIComponent(id)}/sync`, {}),
   prs: (repo: string, state: "open" | "all") => req<GhPr[]>("GET", "/github/prs" + q({ repo, state })),
   issues: (repo: string, state: "open" | "all") => req<GhIssue[]>("GET", "/github/issues" + q({ repo, state })),
-  deliveries: (repo: string, limit = 50) => req<GhDelivery[]>("GET", "/github/deliveries" + q({ repo, limit })),
+  deliveries: (repo: string, limit = 50, automation?: "only") => req<GhDelivery[]>("GET", "/github/deliveries" + q({ repo, limit, automation })),
+  commentDraft: (item: string) => req<{ id: string }>("POST", `/github/analysis/${encodeURIComponent(item)}/comment-draft`, {}),
   manifest: (owner?: string) => req<GhManifest>("POST", "/github/app/manifest", owner ? { owner } : {}),
   /* a PAT is a generic connection (accounts A2) with the github_pat adapter */
   connectPat: (token: string) => req<{ id: string }>("POST", "/connections", { adapter: "github_pat", fields: { token } }),

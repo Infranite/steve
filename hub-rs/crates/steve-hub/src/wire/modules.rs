@@ -566,6 +566,7 @@ pub fn build(env: Env<'_>) -> Result<Built, BackendError> {
         .action(Arc::new(steve_mail::nodes::WithMailLinks(
             steve_github::flow::GhItemLink,
         )))
+        .action(Arc::new(steve_github::automation::Analyze::new(&gh)))
         .item_finder("gh_pr", Arc::new(steve_github::flow::GhPrFinder))
         // a todo's reminder and snooze wake-up, a member's morning brief (`time_alarms`)
         .alarm_source(Arc::new(steve_digest::todo_alarms::TodoAlarms))

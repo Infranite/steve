@@ -564,7 +564,13 @@ impl GitHub {
             return;
         }
         let out = self
-            .apply_as(&job.source, &job.event, &job.payload, job.late)
+            .apply_as(
+                &job.source,
+                &job.event,
+                &job.payload,
+                job.late,
+                Some(&job.delivery_id),
+            )
             .await;
         self.delivered(&job.delivery_id, &job.event, &out);
     }
@@ -598,6 +604,8 @@ impl GitHub {
         });
         if let Err(e) = r {
             tracing::error!(error = %e, "github delivery result not recorded");
+        } else if let (Some(ws), Some(_)) = (&out.ws, &out.repo_id) {
+            self.notifier().gh(ws, delivery);
         }
     }
 

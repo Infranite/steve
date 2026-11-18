@@ -151,7 +151,11 @@ impl GitHub {
                 let (Some(n), Some(u)) = (pr["number"].as_i64(), pr["updated_at"].as_str()) else {
                     continue;
                 };
-                let key = format!("poll:{}:pr:{n}:{u}", r.id);
+                // GitHub timestamps have second precision; distinct pushes in that second
+                // still need distinct receipts. Semantic dedupe remains the flow event's job.
+                let head = pr["head"]["sha"].as_str().unwrap_or("");
+                let draft = pr["draft"].as_bool().unwrap_or(false);
+                let key = format!("poll:{}:pr:{n}:{u}:{head}:{draft}", r.id);
                 let payload =
                     json!({"action": "poll", "pull_request": pr, "repository": repository});
                 self.poll_change(&r, &key, "pull_request", &payload, &mut rep)
@@ -308,7 +312,9 @@ impl GitHub {
         if !self.take_delivery(key) {
             return Ok(());
         }
-        let out = self.apply(&source, event, payload).await;
+        let out = self
+            .apply_as(&source, event, payload, false, Some(key))
+            .await;
         self.delivered(key, event, &out);
         self.release_delivery(key);
         Ok(())

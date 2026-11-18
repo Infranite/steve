@@ -83,6 +83,7 @@ pub mod adapters;
 pub mod after;
 pub mod api;
 pub mod auth;
+pub mod automation;
 pub mod comment;
 pub mod config;
 pub mod core;

@@ -465,7 +465,9 @@ async fn a_redelivery_is_processed_once() {
     // The same change under a new delivery id is applied again but changes nothing.
     let before = h.sink.notices().len();
     assert_eq!(emit(&h, "pull_request.opened").await, 202);
-    assert_eq!(h.sink.notices().len(), before, "no change, no notice");
+    // Activity subscribers see the new receipt, but the PR did not change.
+    let received = h.fake.deliveries().last().expect("receipt").id.clone();
+    assert_eq!(&h.sink.notices()[before..], &[(WS.to_string(), received)]);
     assert_eq!(q(&h, "SELECT count(*) FROM gh_prs", &[]), json!(1));
     assert!(
         q(

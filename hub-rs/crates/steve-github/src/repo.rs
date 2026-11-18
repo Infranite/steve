@@ -862,12 +862,14 @@ pub fn deliveries(
     ws: &str,
     repo: Option<&str>,
     limit: i64,
+    automation_only: bool,
 ) -> Result<Vec<DeliveryRow>> {
     c.prepare_cached(&format!(
         "SELECT {DELIVERY_COLS} FROM gh_deliveries WHERE workspace_id = ?1 AND (?2 IS NULL OR repo_id = ?2)
+           AND (NOT ?4 OR event IN ('pull_request', 'issues'))
          ORDER BY received DESC, rowid DESC LIMIT ?3"
     ))?
-    .query_map(params![ws, repo, limit], delivery_row)?
+    .query_map(params![ws, repo, limit, automation_only], delivery_row)?
     .collect()
 }
 
