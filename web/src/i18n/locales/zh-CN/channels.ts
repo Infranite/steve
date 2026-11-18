@@ -348,7 +348,6 @@ export default {
     sender: "{{name}}：",
     cleaned: "（已清理）",
     before_other: "看前面 {{count}} 条",
-    replyTo: "下面是要回复给 {{name}} 的内容",
     /* by the space's kind; other = a kind without a name */
     direct: {
       group: "直接发到这个群，不是回复某一条消息",

@@ -117,6 +117,7 @@ const ALLOW = {
   "auto/decision.tsx": [["不执行", "不"], `decision option values: ${HUB}`],
   "auto/schedules.tsx": [["每天", "每周五", "每月", "日", "每周一", "运维", "邮件"], "schedule phrases the Hub's rule parser reads; Bot names matched to pick a template's Bot"],
   "channels/persona-intro.ts": [["（不透露身份，只回答问题本身）", "我是", "，", "。", "助手", "由", "驱动", "归", "管理", "你"], "the Hub's intro_of, ported for the live preview: what the persona says in chats"],
+  "channels/handoff-content.ts": [["最近的对话：", "星标联系人", "「", "」里", "找你：", "："], `legacy handoff question structure emitted by steve-channels/decide.rs: ${HUB}`],
   "chat-view.tsx": [["（附件）", "汇报"], `attachment-only placeholder and the /汇报 command: ${HUB}`],
   "queue.tsx": [["（附件）"], `attachment-only placeholder: ${HUB}`],
   "thread/topics.ts": [["（附件）"], `attachment-only placeholder: ${HUB}`],
