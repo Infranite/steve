@@ -11,6 +11,7 @@
 //   @tool <kind> <toolName> [failed]             tool_call + tool_call_update
 //   @later <ms> <cost>                           after the turn, an autonomous usage_update
 //   @fail <n> <message>    the first n prompts with this exact text fail with a JSON-RPC error <message>
+//   @streamfail <n>        the next n turns end with a stream diagnostic but report end_turn
 //   @crash                 exit(3) mid-turn
 //   @perm <toolName>       Claude-style request_permission; says "perm:<outcome>:<optionId>"
 //   @permexec <command>    request_permission for an `execute` tool call running <command>
@@ -60,14 +61,15 @@ const ask = (method, params) => new Promise((res) => { const id = ++nextId; wait
 const sleep = (ms) => new Promise((r) => { const t = setTimeout(() => r(false), ms); cancel = () => { clearTimeout(t); r(true) } })
 const options = [{ optionId: "allow", name: "Always Allow", kind: "allow_always" }, { optionId: "once", name: "Allow", kind: "allow_once" }, { optionId: "reject", name: "Reject", kind: "reject_once" }]
 
-let toolN = 0
+let toolN = 0, streamFailures = 0
 async function turn(text) {
   const n = (failures.get(text) ?? 0) + 1; failures.set(text, n)
   const out = { stopReason: "end_turn" }
-  for (const [, cmd, arg] of text.matchAll(/@(flood|drip|bigperm|bigreply|sleep|say|usage|tally|quota|tool|later|fail|crash|perm|permtool|permexec|run|codexperm|fsread|cat)\b([^@\n]*)/g)) {
+  for (const [, cmd, arg] of text.matchAll(/@(flood|drip|bigperm|bigreply|sleep|say|usage|tally|quota|tool|later|fail|streamfail|crash|perm|permtool|permexec|run|codexperm|fsread|cat)\b([^@\n]*)/g)) {
     const a = arg.trim()
     if (cmd === "sleep" && (await sleep(Number(a) || 1000))) return { ...out, stopReason: "cancelled" }
     if (cmd === "say") say(a)
+    if (cmd === "streamfail") streamFailures = Number(a)
     if (cmd === "flood") for (let i = 0; i < 2000; i++) {
       const gate = process.env.FAKE_ACP_FLOOD_GATE
       while (gate && !(Number(readFileSync(gate, "utf8")) > i)) if (await sleep(5)) return { ...out, stopReason: "cancelled" }
@@ -121,6 +123,10 @@ async function turn(text) {
     }
     if (cmd === "cat") { try { readFileSync(a); say(`cat:ok `) } catch (e) { say(`cat:${e.code} `) } }
     if (cmd === "fsread") { const r = await ask("fs/read_text_file", { sessionId: sid, path: "/etc/hosts" }); say(`fs:${r.error?.code}:${r.error?.message}`) }
+  }
+  if (streamFailures > 0) {
+    streamFailures--
+    say("\nstream disconnected before completion: upstream stream interrupted")
   }
   return out
 }

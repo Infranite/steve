@@ -53,6 +53,7 @@ mod realtime_tests;
 mod reconcile;
 mod recover;
 mod send;
+mod stream_retry;
 #[cfg(test)]
 mod tests;
 mod workspace;
@@ -902,7 +903,7 @@ fn phase_in(tx: &Tx, session: &str) -> Result<Option<(String, Option<String>)>, 
 
 /// `sessions.status` once a turn is over and nothing follows it: the legacy runner's values.
 fn settled_status(stop_reason: &str) -> &'static str {
-    if stop_reason == "error" {
+    if stop_reason == "error" || stop_reason == stream_retry::STREAM_INTERRUPTED {
         "error"
     } else {
         "idle"

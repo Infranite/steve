@@ -2511,7 +2511,10 @@ impl Tx<'_> {
             return Ok(());
         }
         let error = t.error.as_deref().filter(|e| !e.is_empty());
-        if mark.is_some() || (receipt.is_some() && error.is_none() && t.stop_reason != "cancelled")
+        if mark.is_some()
+            || (receipt.is_some()
+                && (error.is_none() || t.stop_reason == crate::runtime::MODEL_STREAM_INTERRUPTED)
+                && t.stop_reason != "cancelled")
         {
             self.diagnostic_session(
                 &session.id,
@@ -2612,7 +2615,11 @@ impl Tx<'_> {
                  * first, told to check before redoing anything (2026-11-09). So does a turn its Node's
                  * restart cut, once the Node confirmed its harness is gone (B6). Any other outcome
                  * nobody knows (abandoned at your Stop) is never continued blindly: it is yours. */
-                if t.stop_reason == "error" {
+                if t.stop_reason == crate::runtime::MODEL_STREAM_INTERRUPTED {
+                    // The runtime exhausted (or could not safely continue) the same turn's
+                    // provider retries. Do not turn it into another no-delivery continue.
+                    format!("模型服务中断：{e}")
+                } else if t.stop_reason == "error" {
                     match self.takeover_error(item_id, &session.id, &why, e)? {
                         Some(why) => why,
                         None => return Ok(()),
