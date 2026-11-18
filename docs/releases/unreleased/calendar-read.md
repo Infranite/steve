@@ -1,5 +1,0 @@
-Calendars are now data sources. Under **Connections**, connect an **ICS calendar subscription** (an `https://` or `webcal://` address, or an `.ics` file you upload on its card), and Steve keeps a read-only copy of its events. Each calendar on the card says whose it is, you or a contact, how much Steve keeps, and when it was last synced. For a contact's calendar Steve keeps only busy times unless you choose otherwise. A calendar that fails to sync says why and keeps what Steve had. With `STEVE_CALENDAR_DEMO=1`, the Hub also offers a demo calendar with made-up events for trying it out.
-
-Agents can read your calendar: `steve_calendar_agenda` (a day or a range, conflicts marked), `steve_calendar_search`, `steve_calendar_get` (one event, current from the source) and `steve_calendar_find_time` (free times for you and other people, by rule). They change nothing in a calendar.
-
-Connector plugins can declare the `calendar.v1` profile (connector declaration version 2) to bring other calendars in the same way. Reminders and changing events come later.
