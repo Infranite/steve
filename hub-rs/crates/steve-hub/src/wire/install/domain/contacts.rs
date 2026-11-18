@@ -1,0 +1,33 @@
+use super::*;
+use steve_channels::adapters::feishu;
+
+install! { install(reg, cx) [conns, modules] => [conns, directory, modules] {
+    let Env { bus, .. } = cx.clone();
+    // C1/C3: channels on the Feishu bot; F5: its address book feeds the directory sync
+    let directory = steve_modules::contacts::sync::TableConnections::new().with(
+        feishu::directory::ADAPTER,
+        feishu::directory::NAME,
+        feishu::directory::factory(conns.clone()),
+    );
+    let directory =
+        steve_modules::contacts::sync::DirectorySync::new(modules.clone(), Arc::new(directory));
+    drop(directory.spawn());
+    // connected, re-verified, a permission granted: sync the address book again soon
+    drop(directory.spawn_watch(bus.tap(&["connection"])));
+}}
+
+install! { finish(reg, _cx) [directory, mut ports] => [ports] {
+    // contacts ports filled by the other modules, before the contacts routes take them
+    ports.sync = Some(directory);
+    ports.spaces = Some(Arc::new(steve_channels::spaces::Spaces));
+    ports
+        .timelines
+        .push(steve_channels::messages::MessageTimeline::arc());
+    ports
+        .timelines
+        .push(Arc::new(steve_mail::timeline::MailTimeline));
+}}
+
+install! { routes(reg, _cx) [mut module_routes, ports] => [module_routes] {
+    module_routes = module_routes.merge(steve_modules::contacts::routes(ports));
+}}
