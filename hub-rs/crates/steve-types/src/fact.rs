@@ -104,6 +104,9 @@ pub struct AlarmLine {
     pub planned_for: Option<Millis>,
 }
 
+// A plain adjacent-tag derive works with topic first, but buffers payload into serde Content
+// when payload comes first. Content cannot deserialize RawJson. Database JSON key order is not
+// contractual, so only durable facts read from original text; live bus events are Serialize-only.
 impl<'de> Deserialize<'de> for DurableFact {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         crate::raw::deserialize_with(d, |text| {

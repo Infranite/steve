@@ -1,32 +1,29 @@
 //! Group 6 owns events and reasons for bots, projects, tags, workspaces, settings, changesets and memory.
 //! Associated ID labels (BotId, ProjectId, TagId, WorkspaceId, MemoryId, ChangesetId) are all defined centrally in `id.rs`.
 
-use crate::event::event_enum;
 use crate::*;
+use serde::Serialize;
 
-event_enum! {
-ConfigEvent {
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, strum::EnumCount)]
+#[serde(tag = "type")]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub enum ConfigEvent {
     #[serde(rename = "bot")]
-    Bot {  id: BotId, ws: WorkspaceId,
- },
+    Bot { id: BotId, ws: WorkspaceId },
     #[serde(rename = "project")]
-    Project {  id: ProjectId, ws: WorkspaceId,
- },
+    Project { id: ProjectId, ws: WorkspaceId },
     #[serde(rename = "tag")]
-    Tag {  id: TagId, ws: WorkspaceId,
- },
+    Tag { id: TagId, ws: WorkspaceId },
     #[serde(rename = "workspace")]
-    Workspace {  id: WorkspaceId, ws: WorkspaceId,
- },
+    Workspace { id: WorkspaceId, ws: WorkspaceId },
     #[serde(rename = "settings")]
-    Settings {  id: WorkspaceId, ws: WorkspaceId,
- },
+    Settings { id: WorkspaceId, ws: WorkspaceId },
     #[serde(rename = "mm")]
-    Mm {  id: MemoryId, ws: WorkspaceId  },
+    Mm { id: MemoryId, ws: WorkspaceId },
     #[serde(rename = "changeset")]
-    Changeset {  id: ChangesetId, ws: WorkspaceId  },
+    Changeset { id: ChangesetId, ws: WorkspaceId },
 }
-}
+
 impl Scoped for ConfigEvent {
     fn scope(&self) -> Scope {
         match self {

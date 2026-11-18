@@ -1,29 +1,31 @@
 //! Group 7 owns events and reasons for spaces, channel messages, personas, channel configuration, connections and digests.
 //! Associated ID labels (SpaceId, ChanMessageId, PersonaId, ConnectionId) are all defined centrally in `id.rs`.
 
-use crate::event::event_enum;
 use crate::*;
+use serde::Serialize;
 
-event_enum! {
-ChannelsEvent {
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, strum::EnumCount)]
+#[serde(tag = "type")]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub enum ChannelsEvent {
     #[serde(rename = "connection")]
-    Connection {  id: ConnectionId, ws: WorkspaceId  },
+    Connection { id: ConnectionId, ws: WorkspaceId },
     #[serde(rename = "space")]
-    Space {  id: SpaceId, ws: WorkspaceId  },
+    Space { id: SpaceId, ws: WorkspaceId },
     #[serde(rename = "chan_message")]
     ChanMessage {
         id: ChanMessageId,
         space_id: SpaceId,
         ws: WorkspaceId,
-     },
+    },
     #[serde(rename = "persona")]
-    Persona {  id: PersonaId, ws: WorkspaceId  },
+    Persona { id: PersonaId, ws: WorkspaceId },
     #[serde(rename = "digest")]
-    Digest {  id: String, ws: WorkspaceId  },
+    Digest { id: String, ws: WorkspaceId },
     #[serde(rename = "channel")]
-    Channel {  id: ConnectionId, ws: WorkspaceId  },
+    Channel { id: ConnectionId, ws: WorkspaceId },
 }
-}
+
 impl Scoped for ChannelsEvent {
     fn scope(&self) -> Scope {
         match self {
