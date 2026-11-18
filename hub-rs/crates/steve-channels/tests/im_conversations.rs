@@ -2465,7 +2465,7 @@ async fn a_turn_whose_answer_failed_shows_failed_with_the_reason() {
 
 /// Your `/bot` command where your account may not send as you is answered in your web conversation:
 /// the record shows what Steve said there (answered, or failed with the reason) and links that turn,
-/// though the space's “处理中” reaction is never taken off.
+/// and the space's reaction ends without sending anything there.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_command_answered_in_your_web_conversation_shows_that_answer() {
     let h = setup(true).await;
@@ -2512,20 +2512,35 @@ async fn a_command_answered_in_your_web_conversation_shows_that_answer() {
         (json!("working"), json!(t1))
     );
     let msgs = h.env.store().messages();
-    msgs.add(
-        WS,
-        "steve",
-        "还剩 20G。",
-        None,
-        &json!({"origin": t1}),
-        conversations::MAIN_CONV,
-    )
-    .unwrap();
+    let answer = msgs
+        .add(
+            WS,
+            "steve",
+            "还剩 20G。",
+            None,
+            &json!({"origin": t1}),
+            conversations::MAIN_CONV,
+        )
+        .unwrap();
     assert_eq!(state(&h, &a.message_id), json!("ack"));
+    // A grant restored while the web turn ran must not reroute its answer to the channel.
+    exec(
+        &h,
+        "UPDATE connections SET caps = '[\"msg.receive\",\"msg.send_as_user\"]' WHERE id = ?",
+        &[&h.me],
+    );
+    assert!(h.ch.conv_deliver(WS, &answer).await.unwrap().is_none());
+    assert_eq!(state(&h, &a.message_id), "done");
+    assert_eq!(h.fake.reactions_on("d1"), [ReactionKind::Done]);
     let x = handling(&h, &a.message_id);
     assert_eq!(
         (x["state"].clone(), x["main_turn"].clone()),
         (json!("answered"), json!(t1))
+    );
+    exec(
+        &h,
+        "UPDATE connections SET caps = '[\"msg.receive\"]' WHERE id = ?",
+        &[&h.me],
     );
 
     let b = push(
@@ -2535,15 +2550,19 @@ async fn a_command_answered_in_your_web_conversation_shows_that_answer() {
     )
     .await;
     let t2 = main(&h, 1);
-    msgs.add(
-        WS,
-        "steve",
-        "（出错了：只读策略拒绝了工具）",
-        None,
-        &json!({"origin": t2, "error": true}),
-        conversations::MAIN_CONV,
-    )
-    .unwrap();
+    let error = msgs
+        .add(
+            WS,
+            "steve",
+            "（出错了：只读策略拒绝了工具）",
+            None,
+            &json!({"origin": t2, "error": true}),
+            conversations::MAIN_CONV,
+        )
+        .unwrap();
+    assert!(h.ch.conv_deliver(WS, &error).await.unwrap().is_none());
+    assert_eq!(state(&h, &b.message_id), "failed");
+    assert_eq!(h.fake.reactions_on("d2"), [ReactionKind::Failed]);
     let x = handling(&h, &b.message_id);
     assert_eq!(
         (x["state"].clone(), x["main_turn"].clone()),
@@ -2555,6 +2574,182 @@ async fn a_command_answered_in_your_web_conversation_shows_that_answer() {
     );
     // another space's command in your web conversation is not this one's
     assert_eq!(handling(&h, &a.message_id)["state"], "answered");
+
+    let c = push(
+        &h,
+        &me,
+        msg("D_LI", "d3", "upx", "/bot 等一下", false, false),
+    )
+    .await;
+    let stopped = msgs
+        .add(
+            WS,
+            "steve",
+            "好，停下了。",
+            None,
+            &json!({"origin": main(&h, 2), "stopped": true, "system": true}),
+            conversations::MAIN_CONV,
+        )
+        .unwrap();
+    assert!(h.ch.conv_deliver(WS, &stopped).await.unwrap().is_none());
+    assert_eq!(state(&h, &c.message_id), "cleared");
+    assert!(h.fake.reactions_on("d3").is_empty());
+
+    let mut callbacks = vec![answer, error, stopped];
+    for (reason, expected) in [
+        ("user", "cleared"),
+        ("failed", "failed"),
+        ("budget", "failed"),
+        ("violation", "failed"),
+    ] {
+        let n = callbacks.len();
+        let ext = format!("research-{reason}");
+        let inbound = push(
+            &h,
+            &me,
+            msg("D_LI", &ext, "upx", "/bot 研究一下", false, false),
+        )
+        .await;
+        let reply = msgs
+            .add(
+                WS,
+                "steve",
+                "部分研究结果",
+                None,
+                &json!({"origin": main(&h, n), "steps": {"research": {"stopped": reason}}}),
+                conversations::MAIN_CONV,
+            )
+            .unwrap();
+        assert!(h.ch.conv_deliver(WS, &reply).await.unwrap().is_none());
+        assert_eq!(state(&h, &inbound.message_id), expected, "{reason}");
+        assert_eq!(h.fake.reactions_on(&ext).is_empty(), expected == "cleared");
+        callbacks.push(reply);
+    }
+
+    let reactions = log(&h);
+    // A callback replay (including concurrent callbacks) does not repeat provider operations.
+    for id in &callbacks {
+        let (a, b) = tokio::join!(h.ch.conv_deliver(WS, id), h.ch.conv_deliver(WS, id));
+        assert!(a.unwrap().is_none() && b.unwrap().is_none());
+        assert!(
+            msgs.get(id)
+                .unwrap()
+                .unwrap()
+                .meta
+                .get("chan_out")
+                .is_none()
+        );
+    }
+    assert_eq!(log(&h), reactions);
+    assert!(sent(&h).is_empty());
+    assert_eq!(
+        one(
+            &h,
+            "SELECT count(*) FROM chan_messages WHERE direction = 'out'",
+            &[]
+        ),
+        0
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn main_replies_without_a_web_source_do_not_touch_channel_reactions() {
+    let h = setup(true).await;
+    let a = push(
+        &h,
+        &h.bot,
+        msg("C_OPS", "o1", "ulilei", "部署挂了怎么办", true, false),
+    )
+    .await;
+    h.ch.react_settled(&a.message_id).await;
+    let before = log(&h);
+    let msgs = h.env.store().messages();
+    for chan in [
+        Value::Null,
+        json!({"message": a.message_id}),
+        json!({"message": a.message_id, "web": false}),
+    ] {
+        let origin = msgs
+            .add(
+                WS,
+                "me",
+                "网页消息",
+                None,
+                &json!({"chan": chan}),
+                conversations::MAIN_CONV,
+            )
+            .unwrap();
+        let reply = msgs
+            .add(
+                WS,
+                "steve",
+                "网页答复",
+                None,
+                &json!({"origin": origin}),
+                conversations::MAIN_CONV,
+            )
+            .unwrap();
+        assert!(h.ch.conv_deliver(WS, &reply).await.unwrap().is_none());
+    }
+    for meta in [json!({}), json!({"origin": "missing"})] {
+        let reply = msgs
+            .add(
+                WS,
+                "steve",
+                "普通消息",
+                None,
+                &meta,
+                conversations::MAIN_CONV,
+            )
+            .unwrap();
+        assert!(h.ch.conv_deliver(WS, &reply).await.unwrap().is_none());
+    }
+    let (origin, _) = h.thread.as_ref().unwrap().turns.lock().unwrap()[0].clone();
+    let reply = msgs
+        .add(
+            WS,
+            "steve",
+            "不能跨会话发送",
+            None,
+            &json!({"origin": origin}),
+            conversations::MAIN_CONV,
+        )
+        .unwrap();
+    assert!(h.ch.conv_deliver(WS, &reply).await.unwrap().is_none());
+    assert!(
+        h.ch.conv_deliver("another-workspace", &reply)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    // Even a web marker cannot link another workspace's turn or inbound message.
+    let foreign = steve_modules::testkit::WS2;
+    for (turn_ws, reply_ws) in [(foreign, WS), (WS, foreign)] {
+        let origin = msgs
+            .add(
+                turn_ws,
+                "me",
+                "跨工作区来源",
+                None,
+                &json!({"chan": {"message": a.message_id, "web": true}}),
+                conversations::MAIN_CONV,
+            )
+            .unwrap();
+        let reply = msgs
+            .add(
+                reply_ws,
+                "steve",
+                "跨工作区答复",
+                None,
+                &json!({"origin": origin}),
+                conversations::MAIN_CONV,
+            )
+            .unwrap();
+        assert!(h.ch.conv_deliver(reply_ws, &reply).await.unwrap().is_none());
+    }
+    assert_eq!(state(&h, &a.message_id), "ack");
+    assert_eq!(log(&h), before);
+    assert!(sent(&h).is_empty());
 }
 
 /// The event of a message answered on the conversation path (a bot's) says what became of it once

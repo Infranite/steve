@@ -68,7 +68,7 @@ impl Core {
         } else {
             super::lane_key(ws, space)
         };
-        let flag = super::Stop::default();
+        let flag = super::Stop::for_origin(mid);
         lock(&self.0.thread.inflight).insert(lane.clone(), flag.clone());
         /* the web's “thinking” line is about your conversation only, and stays with the turn in progress
         while a message with a fixed way passes it */

@@ -244,7 +244,8 @@ pub trait ConvHost: Send + Sync {
     ) -> std::result::Result<String, String> {
         Ok(text.to_string())
     }
-    /// Steve stored message `id` in guest conversation `space`.
+    /// Steve stored message `id` in guest conversation `space`, or answered a main-conversation
+    /// turn carrying `meta.chan`. The latter only reports its outcome; it grants no channel send.
     fn said(&self, ws: &str, space: &str, id: &str);
 }
 
@@ -349,9 +350,18 @@ pub(crate) struct Stop {
     /// what a research executor reads ([`research::ResearchRequest::stop`])
     flag: Arc<AtomicBool>,
     token: CancellationToken,
+    /// The turn being routed, so a stop before an inline job exists still names its source.
+    origin: Option<String>,
 }
 
 impl Stop {
+    pub(crate) fn for_origin(origin: &str) -> Self {
+        Self {
+            origin: Some(origin.into()),
+            ..Default::default()
+        }
+    }
+
     pub(crate) fn stop(&self) {
         self.flag.store(true, Ordering::SeqCst);
         self.token.cancel();
@@ -502,7 +512,7 @@ impl Core {
         self.store().messages_in(ws, space, 200)
     }
 
-    /// Steve says `text` in conversation `space`; a guest conversation's host hears of it.
+    /// Steve says `text` in conversation `space`; its host hears of guest or channel-sourced replies.
     pub(crate) fn post(
         &self,
         ws: &str,
@@ -523,13 +533,30 @@ impl Core {
         Ok(id)
     }
 
-    /// Tells a guest conversation's host about Steve's message `id`.
+    /// Tells the host about a guest reply, or a main reply whose origin came from a channel.
     pub(crate) fn said(&self, ws: &str, space: &str, id: &str) {
-        if space != MAIN
-            && let Some(h) = self.conv_host()
-        {
-            h.said(ws, space, id);
+        let Some(h) = self.conv_host() else {
+            return;
+        };
+        if space == MAIN {
+            let sourced = || -> Result<bool> {
+                let Some(m) = self.store().message(id)? else {
+                    return Ok(false);
+                };
+                let Some(origin) = m.meta["origin"].as_str() else {
+                    return Ok(false);
+                };
+                Ok(m.workspace_id == ws
+                    && m.space == MAIN
+                    && self.store().message(origin)?.is_some_and(|o| {
+                        o.workspace_id == ws && o.space == MAIN && o.meta["chan"].is_object()
+                    }))
+            };
+            if !sourced().unwrap_or(false) {
+                return;
+            }
         }
+        h.said(ws, space, id);
     }
 
     /// [`Core::say_as`] sent to an item or quoting a message.
