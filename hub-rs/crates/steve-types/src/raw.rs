@@ -29,3 +29,18 @@ impl PartialEq for RawJson {
         self.0.get() == other.0.get()
     }
 }
+
+impl Eq for RawJson {}
+
+// Tagged/untagged serde derives buffer their input into Content, which cannot carry opaque raw
+// JSON. Decode directly from validated text instead, preserving the payload's exact bytes.
+pub(crate) fn deserialize_with<'de, D, T>(
+    d: D,
+    decode: impl FnOnce(&str) -> Result<T, serde_json::Error>,
+) -> Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = RawJson::deserialize(d)?;
+    decode(raw.0.get()).map_err(serde::de::Error::custom)
+}

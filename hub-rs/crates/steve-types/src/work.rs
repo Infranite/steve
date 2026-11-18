@@ -1,2 +1,98 @@
 //! Group 6 owns events and reasons for items, sessions, decisions, main conversation, transcript and threads.
 //! Associated ID labels (ItemId, SessionId, DecisionId, MessageId, ThreadRunId) are all defined centrally in `id.rs`.
+
+use crate::event::event_enum;
+use crate::*;
+
+event_enum! {
+WorkEvent {
+    #[serde(rename = "item")]
+    Item {  id: ItemId, ws: WorkspaceId,
+ },
+    #[serde(rename = "decision")]
+    Decision {
+        id: DecisionId,
+        #[serde(default, skip_serializing_if = "Option::is_none", with = "crate::event::double_option")]
+#[cfg_attr(test, ts(optional = nullable, as = "Option<ItemId>"))]
+        item_id: Option<Option<ItemId>>, ws: WorkspaceId,
+ },
+    #[serde(rename = "session")]
+    Session {
+        id: SessionId,
+        #[serde(default, skip_serializing_if = "Option::is_none", with = "crate::event::double_option")]
+#[cfg_attr(test, ts(optional = nullable, as = "Option<ItemId>"))]
+        item_id: Option<Option<ItemId>>, ws: WorkspaceId,
+ },
+    #[serde(rename = "message")]
+    Message {  id: MessageId, ws: WorkspaceId,
+ },
+    #[serde(rename = "thread.run")]
+    ThreadRun {  id: ThreadRunId, ws: WorkspaceId  },
+}
+}
+impl Scoped for WorkEvent {
+    fn scope(&self) -> Scope {
+        match self {
+            Self::Item { ws, .. } => Scope::Ws(ws.clone()),
+            Self::Decision { ws, .. } => Scope::Ws(ws.clone()),
+            Self::Session { ws, .. } => Scope::Ws(ws.clone()),
+            Self::Message { ws, .. } => Scope::Ws(ws.clone()),
+            Self::ThreadRun { ws, .. } => Scope::Ws(ws.clone()),
+        }
+    }
+}
+
+event_enum! {
+WorkLiveEvent {
+    #[serde(rename = "event")]
+    Event {
+        session_id: SessionId,
+        seq: Seq,
+        kind: String,
+        data: RawJson, ws: WorkspaceId,
+ },
+    #[serde(rename = "steve.thinking")]
+    SteveThinking {
+        on: bool,
+        ws: WorkspaceId,
+                #[serde(skip_serializing_if = "Option::is_none")]
+        phase: Option<String>,
+     },
+    #[serde(rename = "steve.draft")]
+    SteveDraft {
+        ws: WorkspaceId,
+        mid: MessageId,
+        thought: String,
+        text: String,
+     },
+    #[serde(rename = "steve.tool")]
+    SteveTool {
+        ws: WorkspaceId,
+        mid: MessageId,
+        run: ThreadRunId,
+        name: String,
+        brief: String,
+        ok: bool,
+                #[serde(default, skip_serializing_if = "String::is_empty")]
+        kind: String,
+                #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        running: bool,
+                #[serde(default, skip_serializing_if = "Option::is_none")]
+        call: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        started_at: Option<Millis>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        at: Option<Millis>,
+     },
+}
+}
+impl Scoped for WorkLiveEvent {
+    fn scope(&self) -> Scope {
+        match self {
+            Self::Event { ws, .. } => Scope::Ws(ws.clone()),
+            Self::SteveThinking { ws, .. } => Scope::Ws(ws.clone()),
+            Self::SteveDraft { ws, .. } => Scope::Ws(ws.clone()),
+            Self::SteveTool { ws, .. } => Scope::Ws(ws.clone()),
+        }
+    }
+}

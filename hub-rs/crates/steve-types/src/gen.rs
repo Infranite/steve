@@ -71,6 +71,22 @@ fn bindings_match() {
         LiveEvent,
         StreamControl,
         DurableFact,
+        MailDelivery,
+        PrSupplement,
+        AlarmFired,
+        AlarmLine,
+        WorkEvent,
+        ConfigEvent,
+        DevicesEvent,
+        ChannelsEvent,
+        PeopleEvent,
+        VaultEvent,
+        AutomationEvent,
+        AutonomyEvent,
+        StatsEvent,
+        KnowledgeEvent,
+        IntegrationsEvent,
+        WorkLiveEvent,
     );
     let index = files
         .keys()
