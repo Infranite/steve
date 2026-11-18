@@ -18,3 +18,7 @@ install! { install(reg, cx) [core, db, host, node_jobs, yolo_forced] => [core, d
     ));
     jobs.push(Box::pin(engine.clone().run_ticks()));
 }}
+
+install! { routes(reg, _cx) [engine, mut module_routes] => [engine, module_routes] {
+    module_routes = module_routes.merge(crate::api::yolo::routes(engine.clone()));
+}}
