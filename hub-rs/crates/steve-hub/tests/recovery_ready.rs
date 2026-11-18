@@ -18,19 +18,16 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 
+mod handed;
+
 const TOKEN: &str = "恢复验证-UNIQ-7F3";
 /// What the old boot resume put before an interrupted turn: never sent any more.
 const RESUME_HEAD: &str = "Hub 刚重启，上一回合被中断了";
 
-fn free_port() -> u16 {
-    std::net::TcpListener::bind("127.0.0.1:0")
-        .and_then(|l| l.local_addr())
-        .map(|a| a.port())
-        .expect("port")
-}
-
 struct Home {
     dir: tempfile::TempDir,
+    /// The Hub's port, held by the test for every Hub it starts on this home (#429).
+    socket: handed::Socket,
     port: u16,
     log: PathBuf,
     web: PathBuf,
@@ -48,8 +45,10 @@ impl Home {
         )
         .expect("web version");
         let log = dir.path().join("acp.log");
+        let socket = handed::Socket::new();
         Home {
-            port: free_port(),
+            port: socket.port(),
+            socket,
             log,
             web,
             dir,
@@ -128,7 +127,7 @@ fn spawn(h: &Home, upgrade: Option<&str>) -> Hub {
         env!("CARGO_MANIFEST_DIR"),
         "/../steve-acp/tests/fake-acp.js"
     );
-    let mut c = Command::new(env!("CARGO_BIN_EXE_steve-hub"));
+    let mut c = handed::command(env!("CARGO_BIN_EXE_steve-hub"), &[("hub", &h.socket)]);
     c.env("HOME", h.dir.path())
         .env("STEVE_HOME", h.steve())
         .env("STEVE_PORT", h.port.to_string())

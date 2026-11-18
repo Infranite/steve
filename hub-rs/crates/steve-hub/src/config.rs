@@ -10,6 +10,100 @@ pub struct Listen {
     /// Never empty; IPv6 literals without brackets.
     pub hosts: Vec<String>,
     pub port: u16,
+    /// Listening sockets the Hub was started with ([`Handed::take`]), served instead of binding.
+    pub handed: Handed,
+}
+
+/// Listening sockets handed to the Hub when it starts, the way systemd socket activation does:
+/// `LISTEN_PID` is the Hub's process id and `LISTEN_FDS` sockets start at descriptor 3, named by
+/// the colon-separated `LISTEN_FDNAMES`. One named `local-node` is the service Node's listener
+/// (`STEVE_LOCAL_NODE_PORT`); every other one is the Hub's own port, one per `STEVE_HOST` address
+/// on `STEVE_PORT`.
+///
+/// Whoever starts the Hub keeps the port while the Hub restarts, so nothing else can take it in
+/// between. The Hub's children do not inherit the sockets.
+#[derive(Debug, Clone, Default)]
+pub struct Handed(std::sync::Arc<Sockets>);
+
+#[derive(Debug, Default)]
+struct Sockets {
+    hub: Vec<std::net::TcpListener>,
+    local_node: Option<std::net::TcpListener>,
+}
+
+impl PartialEq for Handed {
+    fn eq(&self, other: &Self) -> bool {
+        std::sync::Arc::ptr_eq(&self.0, &other.0) || (self.is_empty() && other.is_empty())
+    }
+}
+
+impl Eq for Handed {}
+
+impl Handed {
+    /// The sockets this process was started with (none unless `LISTEN_PID` is this process).
+    /// Takes the descriptors over: call it once, before the Hub starts any process of its own.
+    pub fn take() -> std::io::Result<Handed> {
+        Self::take_from(|k| std::env::var(k).ok())
+    }
+
+    fn take_from(get: impl Fn(&str) -> Option<String>) -> std::io::Result<Handed> {
+        use std::os::fd::FromRawFd;
+        let invalid = |msg: String| std::io::Error::new(std::io::ErrorKind::InvalidInput, msg);
+        if get("LISTEN_PID").and_then(|p| p.trim().parse::<u32>().ok()) != Some(std::process::id())
+        {
+            return Ok(Handed::default());
+        }
+        let n: usize = get("LISTEN_FDS")
+            .unwrap_or_default()
+            .trim()
+            .parse()
+            .map_err(|_| invalid("LISTEN_FDS is not a number".into()))?;
+        let names: Vec<String> = match get("LISTEN_FDNAMES") {
+            Some(v) => v.split(':').map(str::to_string).collect(),
+            None => vec![String::new(); n],
+        };
+        if names.len() != n {
+            return Err(invalid(format!(
+                "LISTEN_FDNAMES names {} sockets, LISTEN_FDS {n}",
+                names.len()
+            )));
+        }
+        let mut sockets = Sockets::default();
+        for (i, name) in names.into_iter().enumerate() {
+            let fd = 3 + i as i32;
+            // SAFETY: fcntl on a descriptor number only; a closed one fails with EBADF
+            if unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) } != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            // SAFETY: LISTEN_PID names this process: the descriptor was handed to it, and is
+            // owned from here on by this listener alone
+            let l = unsafe { std::net::TcpListener::from_raw_fd(fd) };
+            l.local_addr()
+                .map_err(|e| invalid(format!("handed socket {fd} ({name}): {e}")))?;
+            match name.as_str() {
+                "local-node" if sockets.local_node.is_none() => sockets.local_node = Some(l),
+                "local-node" => return Err(invalid("two handed sockets named local-node".into())),
+                _ => sockets.hub.push(l),
+            }
+        }
+        Ok(Handed(std::sync::Arc::new(sockets)))
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.hub.is_empty() && self.0.local_node.is_none()
+    }
+
+    /// The service Node's listener, if one was handed.
+    pub fn local_node(&self) -> Option<std::io::Result<tokio::net::TcpListener>> {
+        self.0.local_node.as_ref().map(tokio_listener)
+    }
+}
+
+/// A listener of the runtime's on the same socket (each server gets its own descriptor).
+fn tokio_listener(l: &std::net::TcpListener) -> std::io::Result<tokio::net::TcpListener> {
+    let l = l.try_clone()?;
+    l.set_nonblocking(true)?;
+    tokio::net::TcpListener::from_std(l)
 }
 
 impl Listen {
@@ -29,7 +123,11 @@ impl Listen {
         if hosts.is_empty() {
             hosts.push("127.0.0.1".into());
         }
-        let listen = Self { hosts, port };
+        let listen = Self {
+            hosts,
+            port,
+            handed: Handed::default(),
+        };
         if listen.any() && !allow_any {
             return Err(ConfigError::Invalid {
                 var: "STEVE_HOST",
@@ -89,9 +187,39 @@ impl Listen {
             .join(", ")
     }
 
-    /// Bind every host; fails (naming the address) if any one cannot be bound.
+    /// Bind every host; fails (naming the address) if any one cannot be bound. Handed sockets
+    /// ([`Handed`]) are served as they are instead.
     pub async fn bind(&self) -> std::io::Result<Vec<tokio::net::TcpListener>> {
+        if !self.handed.0.hub.is_empty() {
+            return self.handed.0.hub.iter().map(tokio_listener).collect();
+        }
         self.bind_port(self.port).await
+    }
+
+    /// Serve `handed` instead of binding: one socket per host, each on this port.
+    pub fn adopt(&mut self, handed: Handed) -> std::io::Result<()> {
+        let hub = &handed.0.hub;
+        if !hub.is_empty() {
+            let invalid = |msg: String| std::io::Error::new(std::io::ErrorKind::InvalidInput, msg);
+            if hub.len() != self.hosts.len() {
+                return Err(invalid(format!(
+                    "{} handed sockets for the Hub's port, STEVE_HOST names {} addresses",
+                    hub.len(),
+                    self.hosts.len()
+                )));
+            }
+            for l in hub {
+                let addr = l.local_addr()?;
+                if addr.port() != self.port {
+                    return Err(invalid(format!(
+                        "a handed socket listens on {addr}, not on STEVE_PORT ({})",
+                        self.port
+                    )));
+                }
+            }
+        }
+        self.handed = handed;
+        Ok(())
     }
 
     /// Every host on `port` (the web client's own port, [`Config::web_port`]).
@@ -628,6 +756,51 @@ mod tests {
     }
 
     #[test]
+    fn handed_sockets_are_only_this_processs() {
+        // another process's sockets (a child inherits its parent's LISTEN_*): none taken
+        let other = (std::process::id() + 1).to_string();
+        let h = Handed::take_from(|k| match k {
+            "LISTEN_PID" => Some(other.clone()),
+            "LISTEN_FDS" => Some("1".into()),
+            _ => None,
+        })
+        .expect("ignored");
+        assert!(h.is_empty());
+        assert!(Handed::take_from(|_| None).expect("none").is_empty());
+    }
+
+    #[tokio::test]
+    async fn handed_sockets_must_be_the_hubs_port() {
+        let socket = || std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let handed = |hub: Vec<std::net::TcpListener>| {
+            Handed(std::sync::Arc::new(Sockets {
+                hub,
+                local_node: None,
+            }))
+        };
+        let s = socket();
+        let port = s.local_addr().expect("addr").port();
+        let mut l = Listen::parse("127.0.0.1", port, false).expect("listen");
+        l.adopt(handed(vec![s])).expect("on STEVE_PORT");
+        // served as it is, as often as asked (the upgrade gate, then the Hub)
+        for _ in 0..2 {
+            let bound = l.bind().await.expect("handed");
+            assert_eq!(bound[0].local_addr().expect("addr").port(), port);
+        }
+        let mut other = Listen::parse("127.0.0.1", port, false).expect("listen");
+        // a socket of its own: never on the port `s` holds
+        let e = other
+            .adopt(handed(vec![socket()]))
+            .expect_err("another port");
+        assert!(e.to_string().contains("not on STEVE_PORT"), "{e}");
+        let mut two = Listen::parse("127.0.0.1,localhost", port, false).expect("listen");
+        let e = two
+            .adopt(l.handed.clone())
+            .expect_err("one socket, two hosts");
+        assert!(e.to_string().contains("2 addresses"), "{e}");
+    }
+
+    #[test]
     fn defaults_match_ts() {
         let c = cfg(&[("STEVE_HOME", "/tmp/sh/./a/../b")]);
         assert_eq!(c.home, PathBuf::from("/tmp/sh/b"));
@@ -636,7 +809,8 @@ mod tests {
             c.listen,
             Listen {
                 hosts: vec!["127.0.0.1".into()],
-                port: 8440
+                port: 8440,
+                handed: Handed::default(),
             }
         );
         assert_eq!(c.public_url, "http://127.0.0.1:8440");

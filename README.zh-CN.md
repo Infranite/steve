@@ -323,6 +323,7 @@ Steve 从环境变量读取配置。作为服务运行时写在 `$STEVE_HOME/ste
 |---|---|
 | `STEVE_HOME` | 数据目录（默认 `~/.steve`） |
 | `STEVE_HOST`、`STEVE_PORT` | 监听地址，可用逗号分隔多个，共用一个端口（默认 `127.0.0.1:8440`）；反向代理在另一台机器上时，加上它访问的地址，例如 `127.0.0.1,100.64.0.2`。`0.0.0.0`/`::` 会被拒绝，除非设置 `STEVE_ALLOW_ANY_HOST=1` |
+| `LISTEN_FDS`、`LISTEN_PID`、`LISTEN_FDNAMES` | 可选的套接字激活（与 systemd 设置的方式相同）：Hub 启动时交给它的监听套接字直接用来服务，不再自己绑定端口。每个 `STEVE_HOST` 地址一个，都在 `STEVE_PORT` 上；名为 `local-node` 的那个代替 `STEVE_LOCAL_NODE_PORT`，用作本机 Node 的连接端口。持有这些套接字的一方在 Hub 重启期间一直占着端口。Hub 启动的进程不会继承它们 |
 | `STEVE_WEB_DIR` | Hub 提供的 Web 构建产物 |
 | `STEVE_WEB_PORT` | 网页单独使用的端口；设置后 Hub 自己的端口只提供 API（新安装默认是 Hub 端口 + 1） |
 | `STEVE_CLIENT_ORIGINS` | 额外允许跨域调用 Hub 的网页来源（已登录过的网页来源默认允许） |

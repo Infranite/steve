@@ -14,6 +14,7 @@
 //!
 //! No real host, no real agent, never `~/.steve` or the production port.
 
+mod handed;
 mod node_harness;
 
 use std::os::unix::process::CommandExt;
@@ -28,13 +29,6 @@ use steve_node_api::*;
 use steve_node_wire::{Identity, RemoteSink, RemoteTools, identity};
 
 const VERSION: &str = "0.9.0";
-
-fn free_port() -> u16 {
-    std::net::TcpListener::bind("127.0.0.1:0")
-        .and_then(|l| l.local_addr())
-        .map(|a| a.port())
-        .expect("port")
-}
 
 /// SIGKILL `pid`'s process group and every descendant's (adapters run in their own groups).
 fn kill_tree(pid: i32) {
@@ -76,6 +70,8 @@ fn tail(p: &Path) -> String {
 
 struct Home {
     dir: tempfile::TempDir,
+    /// The Hub's port, held by the test for every Hub it starts on this home (#429).
+    socket: handed::Socket,
     port: u16,
     web: PathBuf,
 }
@@ -91,8 +87,10 @@ impl Home {
             json!({"version": VERSION}).to_string(),
         )
         .expect("web version");
+        let socket = handed::Socket::new();
         Home {
-            port: free_port(),
+            port: socket.port(),
+            socket,
             web,
             dir,
         }
@@ -141,7 +139,7 @@ impl Drop for Hub {
 
 /// The Hub with remote Nodes on and no harness of its own; new sessions go to `bind` if given.
 fn spawn_hub(h: &Home, bind: Option<&str>) -> Hub {
-    let mut c = Command::new(env!("CARGO_BIN_EXE_steve-hub"));
+    let mut c = handed::command(env!("CARGO_BIN_EXE_steve-hub"), &[("hub", &h.socket)]);
     c.env("HOME", h.dir.path())
         .env("STEVE_HOME", h.steve())
         .env("STEVE_PORT", h.port.to_string())

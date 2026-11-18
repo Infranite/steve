@@ -13,7 +13,7 @@
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Stdio};
 use std::time::Duration;
 
 use serde_json::{Value, json};
@@ -21,12 +21,7 @@ use serde_json::{Value, json};
 const CC_ID: &str = "3b2c458f-84be-4589-a22c-5bfd2579c313";
 const CX_ID: &str = "01a1a57d-52a0-7111-9c1d-0f8bf59e7c96";
 
-fn free_port() -> u16 {
-    std::net::TcpListener::bind("127.0.0.1:0")
-        .and_then(|l| l.local_addr())
-        .map(|a| a.port())
-        .expect("free port")
-}
+mod handed;
 
 fn write(p: &Path, text: &str) {
     std::fs::create_dir_all(p.parent().expect("parent")).expect("dirs");
@@ -37,6 +32,8 @@ struct Hub {
     child: Child,
     base: String,
     steve: PathBuf,
+    /// Its port, held by the test (#429).
+    _socket: handed::Socket,
 }
 
 impl Drop for Hub {
@@ -49,12 +46,13 @@ impl Drop for Hub {
 }
 
 fn spawn(home: &Path, name: &str, node: bool) -> Hub {
-    let port = free_port();
+    let socket = handed::Socket::new();
+    let port = socket.port();
     let steve = home.join(name);
     let web = steve.join("web");
     write(&web.join("index.html"), "<html><head></head></html>");
     let base = format!("http://127.0.0.1:{port}");
-    let mut c = Command::new(env!("CARGO_BIN_EXE_steve-hub"));
+    let mut c = handed::command(env!("CARGO_BIN_EXE_steve-hub"), &[("hub", &socket)]);
     c.env("HOME", home)
         .env("STEVE_HOME", &steve)
         .env("STEVE_PORT", port.to_string())
@@ -95,6 +93,7 @@ fn spawn(home: &Path, name: &str, node: bool) -> Hub {
         child: c.spawn().expect("spawn hub"),
         base,
         steve,
+        _socket: socket,
     }
 }
 

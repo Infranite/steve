@@ -2,8 +2,7 @@
 //! the workspace, the `tz` setting, and module config drafts dispatched to steve-modules. Runs the real
 //! binary on a temp STEVE_HOME (file keystore, fake claude CLI, no agents).
 
-use std::net::TcpListener;
-use std::process::{Child, Command};
+use std::process::Child;
 use std::time::Duration;
 
 use futures::StreamExt;
@@ -12,10 +11,14 @@ use futures::StreamExt;
 mod wired;
 use serde_json::{Value, json};
 
+mod handed;
+
 struct Hub {
     child: Child,
     base: String,
     home: tempfile::TempDir,
+    /// Its port, held by the test (#429).
+    _socket: handed::Socket,
 }
 
 impl Drop for Hub {
@@ -23,13 +26,6 @@ impl Drop for Hub {
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
-}
-
-fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0")
-        .and_then(|l| l.local_addr())
-        .map(|a| a.port())
-        .expect("port")
 }
 
 async fn start() -> Hub {
@@ -40,49 +36,54 @@ async fn start() -> Hub {
 
 #[allow(clippy::zombie_processes)] // Hub::drop kills and waits
 async fn start_in(home: tempfile::TempDir, web_dir: &std::path::Path) -> Hub {
-    // a free port can be taken by another test's Hub before this one binds it: that Hub would answer
-    // our requests. Ours prints its address once it has bound; a Hub that could not bind exits, and
-    // the start is tried again on another port.
-    let mut last = String::new();
-    for _ in 0..5 {
-        let port = free_port();
-        assert_ne!(port, 8440);
-        let (out, log) = (home.path().join("hub.out"), home.path().join("hub.log"));
-        let mut child = spawn_hub(&home, web_dir, port, &out, &log);
-        let base = format!("http://127.0.0.1:{port}");
-        let bound = format!("on {base}");
-        // 30 s: a loaded machine (load average ~100) has taken more than 10
-        for _ in 0..600 {
-            if child.try_wait().ok().flatten().is_some() {
-                break;
-            }
-            if std::fs::read_to_string(&out).is_ok_and(|o| o.contains(&bound))
-                && reqwest::get(format!("{base}/healthz"))
-                    .await
-                    .is_ok_and(|r| r.status().is_success())
-            {
-                return Hub { child, base, home };
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-        let _ = child.kill();
-        let _ = child.wait();
-        last = std::fs::read_to_string(&log).unwrap_or_default();
-        if !last.contains("Address already in use") {
+    // the port is the test's own from before the Hub starts (handed to it), so no other test's Hub
+    // can be on it
+    let socket = handed::Socket::new();
+    let port = socket.port();
+    assert_ne!(port, 8440);
+    let (out, log) = (home.path().join("hub.out"), home.path().join("hub.log"));
+    let mut child = spawn_hub(&home, web_dir, &socket, &out, &log);
+    let base = format!("http://127.0.0.1:{port}");
+    // 30 s: a loaded machine (load average ~100) has taken more than 10
+    for _ in 0..600 {
+        if child.try_wait().ok().flatten().is_some() {
             break;
         }
+        if reqwest::Client::new()
+            .get(format!("{base}/healthz"))
+            .timeout(Duration::from_secs(2))
+            .send()
+            .await
+            .is_ok_and(|r| r.status().is_success())
+        {
+            return Hub {
+                child,
+                base,
+                home,
+                _socket: socket,
+            };
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    let tail: Vec<&str> = last.lines().rev().take(40).collect();
+    let exited = child.try_wait().ok().flatten();
+    let _ = child.kill();
+    let _ = child.wait();
+    let tail = |p: &std::path::Path| {
+        let s = std::fs::read_to_string(p).unwrap_or_default();
+        let l: Vec<&str> = s.lines().collect();
+        l[l.len().saturating_sub(40)..].join("\n")
+    };
     panic!(
-        "hub did not start; its log ends:\n{}",
-        tail.into_iter().rev().collect::<Vec<_>>().join("\n")
+        "hub did not start (exited: {exited:?}); its output ends:\n{}\nits log ends:\n{}",
+        tail(&out),
+        tail(&log)
     );
 }
 
 fn spawn_hub(
     home: &tempfile::TempDir,
     web_dir: &std::path::Path,
-    port: u16,
+    socket: &handed::Socket,
     out: &std::path::Path,
     log: &std::path::Path,
 ) -> Child {
@@ -90,7 +91,8 @@ fn spawn_hub(
         env!("CARGO_MANIFEST_DIR"),
         "/tests/contract/fake-claude.mjs"
     );
-    Command::new(env!("CARGO_BIN_EXE_steve-hub"))
+    let port = socket.port();
+    handed::command(env!("CARGO_BIN_EXE_steve-hub"), &[("hub", socket)])
         .env("HOME", home.path())
         .env("STEVE_HOME", home.path().join("steve"))
         .env("STEVE_PORT", port.to_string())

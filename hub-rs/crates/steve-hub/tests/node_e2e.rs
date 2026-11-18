@@ -27,21 +27,18 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 
-const VERSION: &str = "0.9.0";
+mod handed;
 
-fn free_port() -> u16 {
-    std::net::TcpListener::bind("127.0.0.1:0")
-        .and_then(|l| l.local_addr())
-        .map(|a| a.port())
-        .expect("port")
-}
+const VERSION: &str = "0.9.0";
 
 struct Home {
     dir: tempfile::TempDir,
+    /// The Hub's port, held by the test for every Hub it starts on this home (#429).
+    socket: handed::Socket,
     port: u16,
-    /// The service Node's loopback port: its own free port, not the Hub's + 3, which on a host
+    /// The service Node's loopback port: its own socket, not the Hub's port + 3, which on a host
     /// handing out ports in order is often another test's Hub.
-    local_port: u16,
+    local: handed::Socket,
     log: PathBuf,
     web: PathBuf,
 }
@@ -57,9 +54,11 @@ impl Home {
             json!({"version": VERSION}).to_string(),
         )
         .expect("web version");
+        let socket = handed::Socket::new();
         Home {
-            port: free_port(),
-            local_port: free_port(),
+            port: socket.port(),
+            socket,
+            local: handed::Socket::new(),
             log: dir.path().join("acp.log"),
             web,
             dir,
@@ -176,11 +175,14 @@ fn spawn_mode(h: &Home, mode: Option<&str>, extra: &[(&str, &str)]) -> Hub {
         .append(true)
         .open(h.dir.path().join("hub.log"))
         .expect("hub log");
-    let mut c = Command::new(env!("CARGO_BIN_EXE_steve-hub"));
+    let mut c = handed::command(
+        env!("CARGO_BIN_EXE_steve-hub"),
+        &[("hub", &h.socket), ("local-node", &h.local)],
+    );
     c.env("HOME", h.dir.path())
         .env("STEVE_HOME", h.steve())
         .env("STEVE_PORT", h.port.to_string())
-        .env("STEVE_LOCAL_NODE_PORT", h.local_port.to_string())
+        .env_remove("STEVE_LOCAL_NODE_PORT")
         .env("STEVE_HOST", "127.0.0.1")
         .env("STEVE_PUBLIC_URL", h.base())
         .env("STEVE_DEV_LOGIN", "1")
@@ -436,6 +438,33 @@ fn attempts(h: &Home, sid: &str, state: &str) -> i64 {
             |r| r.get(0),
         )
         .expect("attempts")
+}
+
+/// #429: the Hub serves on the port the test holds, and nothing else can take that port, neither
+/// before the Hub starts nor while it restarts.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_hubs_port_stays_the_tests_across_restarts() {
+    let h = Home::new();
+    let taken = |port: u16| {
+        std::net::TcpListener::bind(("127.0.0.1", port))
+            .is_err_and(|e| e.kind() == std::io::ErrorKind::AddrInUse)
+    };
+    assert!(taken(h.port), "held before the Hub starts");
+    let mut hub = spawn(&h, true, &[]);
+    serving(&h).await;
+    let local = h.local.port();
+    for _ in 0..2 {
+        hub.kill();
+        assert!(taken(h.port) && taken(local), "held while no Hub runs");
+        hub = spawn(&h, true, &[]);
+        serving(&h).await;
+    }
+    let log = std::fs::read_to_string(h.dir.path().join("hub.log")).unwrap_or_default();
+    assert!(
+        !log.contains("Address already in use"),
+        "no Hub had to bind; log:\n{}",
+        hub_log(&h)
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1350,8 +1379,6 @@ async fn a_git_items_worktree_on_the_service_node() {
 
 async fn git_worktree_case(mode: &str) {
     let h = Home::new();
-    let port = free_port().to_string();
-    let extra = [("STEVE_LOCAL_NODE_PORT", port.as_str())];
     let _guard = ServiceNodeGuard(h.steve().join("data/node/service.pid"));
     let repo = h.dir.path().join("repo");
     std::fs::create_dir_all(&repo).expect("repo");
@@ -1362,7 +1389,7 @@ async fn git_worktree_case(mode: &str) {
     std::fs::write(repo.join("a.txt"), "a\n").expect("file");
     git(&repo, &["add", "."]);
     git(&repo, &["commit", "-q", "-m", "a"]);
-    let _hub = spawn_mode(&h, Some(mode), &extra);
+    let _hub = spawn_mode(&h, Some(mode), &[]);
     serving(&h).await;
     let c = Client::login(&h).await;
     node_health_until(&h, 30, |n| n["reconciled"] == true).await;
@@ -1893,10 +1920,8 @@ impl Drop for ServiceNodeGuard {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_service_node_turn_outlives_the_hub() {
     let h = Home::new();
-    let port = free_port().to_string();
-    let extra = [("STEVE_LOCAL_NODE_PORT", port.as_str())];
     let _guard = ServiceNodeGuard(h.steve().join("data/node/service.pid"));
-    let hub = spawn_mode(&h, Some("service"), &extra);
+    let hub = spawn_mode(&h, Some("service"), &[]);
     serving(&h).await;
     let c = Client::login(&h).await;
     assert!(
@@ -1975,7 +2000,7 @@ async fn a_service_node_turn_outlives_the_hub() {
         "the Node outlived the Hub"
     );
 
-    let _hub = spawn_mode(&h, Some("service"), &extra);
+    let _hub = spawn_mode(&h, Some("service"), &[]);
     serving(&h).await;
     let tail = |p: PathBuf| {
         let s = std::fs::read_to_string(p).unwrap_or_default();
