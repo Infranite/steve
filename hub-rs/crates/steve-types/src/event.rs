@@ -1,6 +1,6 @@
 //! Typed bus envelopes. Domain variants and their scopes are added by W1.3a.
 
-use crate::{UserId, WorkspaceId};
+use crate::{Rev, UserId, WorkspaceId};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -8,7 +8,8 @@ use serde::{Deserialize, Serialize};
 pub struct Envelope<E> {
     #[serde(flatten)]
     pub event: E,
-    pub rev: u64,
+    /// Data, never the SSE cursor: frames of one transaction share it and live events reuse it.
+    pub rev: Rev,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

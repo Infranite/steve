@@ -98,8 +98,10 @@ pub struct Params(pub BTreeMap<String, Param>);
 #[cfg_attr(test, derive(ts_rs::TS))]
 pub enum Reason {}
 
+/// Exported to TypeScript as `SteveError`: a type named `Error` would shadow the global one in the web.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(rename = "SteveError"))]
 pub struct Error {
     pub code: Code,
     pub retry: Retry,

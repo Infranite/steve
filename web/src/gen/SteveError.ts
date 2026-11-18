@@ -5,7 +5,10 @@ import type { Params } from "./Params";
 import type { Reason } from "./Reason";
 import type { Retry } from "./Retry";
 
-export type Error = { code: Code, retry: Retry, reason: Reason | null, params: Params, 
+/**
+ * Exported to TypeScript as `SteveError`: a type named `Error` would shadow the global one in the web.
+ */
+export type SteveError = { code: Code, retry: Retry, reason: Reason | null, params: Params, 
 /**
  * Safe to show and log: no secrets or paths outside the workspace; never parsed by code.
  */

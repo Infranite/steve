@@ -35,8 +35,3 @@ pub use stream::StreamControl;
 
 #[cfg(test)]
 mod r#gen;
-
-// Keep the guard's forbidden-pattern fixtures outside the source tree it scans.
-#[cfg(test)]
-#[path = "../tests/support/opaque_json.rs"]
-mod opaque_json;

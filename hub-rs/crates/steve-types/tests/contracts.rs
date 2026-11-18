@@ -180,7 +180,7 @@ fn envelope_flattens_an_event_and_preserves_its_scope() {
             id: "itm_1".into(),
             ws: "ws_1".into(),
         },
-        rev: 47,
+        rev: Rev(47),
     };
     let text = r#"{"type":"item","id":"itm_1","ws":"ws_1","rev":47}"#;
     assert_eq!(serde_json::to_string(&envelope).unwrap(), text);
