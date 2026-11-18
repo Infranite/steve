@@ -434,7 +434,7 @@ async fn your_own_account_has_a_trigger_and_no_persona() {
     assert_eq!(a["persona"], Value::Null);
     assert_eq!(
         a["trigger"],
-        json!({"on": false, "words": ["/ai", "/bot"], "where": ["*"], "who": ["me"], "reply": "thread", "mark": true}),
+        json!({"on": false, "words": ["/ai", "/bot"], "where": ["*"], "who": ["me"], "reply": "thread", "mark": true, "ignore_prefixes": []}),
         "nothing chosen reads as everywhere"
     );
     assert!(s(&a["platform_name"]).ends_with("（你本人）"));
@@ -461,6 +461,10 @@ async fn your_own_account_has_a_trigger_and_no_persona() {
         json!({"trigger": {"words": ["bot"]}}),
         json!({"trigger": {"words": ["/a", "/b", "/c", "/d", "/e", "/f", "/g", "/h", "/i", "/j", "/k"]}}),
         json!({"trigger": {"where": ["spc_nope"]}}),
+        json!({"trigger": {"ignore_prefixes": [""]}}),
+        json!({"trigger": {"ignore_prefixes": ["AUTO:\n"]}}),
+        json!({"trigger": {"ignore_prefixes": ["a".repeat(101)]}}),
+        json!({"trigger": {"ignore_prefixes": vec!["AUTO:"; 21]}}),
     ] {
         let (st, v) = h
             .call("PATCH", &format!("/channels/{ucon}"), Some(body.clone()))
@@ -479,26 +483,57 @@ async fn your_own_account_has_a_trigger_and_no_persona() {
     assert_eq!(st, 200, "{v}");
     assert_eq!(
         v["trigger"],
-        json!({"on": true, "words": ["/bot"], "where": ["dm:*"], "who": ["me"], "reply": "thread", "mark": true})
+        json!({"on": true, "words": ["/bot"], "where": ["dm:*"], "who": ["me"], "reply": "thread", "mark": true, "ignore_prefixes": []})
     );
     let (st, v) = h
         .call(
             "PATCH",
             &format!("/channels/{ucon}"),
-            Some(json!({"trigger": {"words": ["/bot", "/steve", "/bot"], "mark": false}})),
+            Some(
+                json!({"trigger": {"words": ["/bot", "/steve", "/bot"], "mark": false,
+                "ignore_prefixes": ["  AUTO:  ", "机器人：", "AUTO:"]}}),
+            ),
         )
         .await;
     assert_eq!(st, 200, "{v}");
     assert_eq!(
         v["trigger"],
-        json!({"on": true, "words": ["/bot", "/steve"], "where": ["dm:*"], "who": ["me"], "reply": "thread", "mark": false})
+        json!({"on": true, "words": ["/bot", "/steve"], "where": ["dm:*"], "who": ["me"], "reply": "thread", "mark": false,
+            "ignore_prefixes": ["AUTO:", "机器人："]})
+    );
+    // An unrelated partial update preserves prefixes; an explicit empty list removes them.
+    let (st, _) = h
+        .call(
+            "PATCH",
+            &format!("/channels/{ucon}"),
+            Some(json!({"trigger": {"mark": true}})),
+        )
+        .await;
+    assert_eq!(st, 200);
+    let (st, v) = h.call("GET", &format!("/channels/{ucon}"), None).await;
+    assert_eq!(st, 200, "{v}");
+    assert_eq!(
+        v["trigger"]["ignore_prefixes"],
+        json!(["AUTO:", "机器人："])
+    );
+    let (st, v) = h
+        .call(
+            "PATCH",
+            &format!("/channels/{ucon}"),
+            Some(json!({"trigger": {"ignore_prefixes": []}})),
+        )
+        .await;
+    assert_eq!(st, 200, "{v}");
+    assert_eq!(
+        v["trigger"],
+        json!({"on": true, "words": ["/bot", "/steve"], "where": ["dm:*"], "who": ["me"], "reply": "thread", "mark": true, "ignore_prefixes": []})
     );
     assert_eq!(
         h.n(
             "SELECT count(*) FROM revisions WHERE object_type = 'channel' AND object_id = ?",
             &ucon
         ),
-        2
+        4
     );
 }
 
