@@ -194,6 +194,7 @@ try {
 
   // The production item card reads its artifact associations from the live fixture API.
   await page.goto(base + "/test/fixtures/delivery-cards.html")
+  await page.getByRole("button", { name: "Delivery details · 4 records", exact: true }).click()
   await page.locator('[data-delivery-card="md"]').waitFor()
   const card = page.locator('[data-delivery-card="md"]')
   assert.match(await card.locator("[data-delivery-open]").getAttribute("href"), /\/deliveries\/md\?ws=fixture$/)

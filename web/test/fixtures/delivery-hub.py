@@ -23,7 +23,7 @@ elif action == "seed":
     for ws, item in [("default", "ST-1"), ("delivery-b", "B-1")]:
         source = home / "source" / ws
         source.mkdir(parents=True)
-        c.execute("INSERT INTO items(id,workspace_id,no,title,status,stage,created,updated) VALUES(?,?,1,?,'run','work',?,?)", (item, ws, "Delivery browser " + ws, now, now))
+        c.execute("INSERT INTO items(id,workspace_id,no,title,status,stage,accept_mode,created,updated) VALUES(?,?,1,?,'run','work','manual',?,?)", (item, ws, "事项卡片交付样例" if ws == "default" else "Delivery browser " + ws, now, now))
         c.execute("INSERT INTO item_goals(item_id,version,text,created) VALUES(?,1,'Test immutable file delivery',?)", (item, now))
         token = secrets.token_hex(32)
         (home / (ws + ".token")).write_text(token)
