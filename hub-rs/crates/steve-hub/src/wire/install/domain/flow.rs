@@ -85,3 +85,10 @@ install! { pollers(reg, _cx) [flow, mut jobs] => [flow, jobs] {
     jobs.push(Box::pin(steve_flow::Poller::new(flow.clone()).run()));
     jobs.push(Box::pin(steve_flow::retention::run(flow.clone())));
 }}
+
+install! { root(reg, _cx) [flow, gh, mut root_routes] => [flow, gh, root_routes] {
+    root_routes = root_routes.merge(crate::wire::signals::routes(crate::wire::signals::Hooks::new(
+        flow.clone(),
+        gh.clone(),
+    )));
+}}

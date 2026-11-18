@@ -54,15 +54,9 @@ install! { routes(reg, _cx) [conns, mut module_routes] => [conns, module_routes]
     module_routes = module_routes.merge(connections::routes(conns.clone()));
 }}
 
-install! { root(reg, _cx) [conns, flow, gh, modules] => [conns, flow, gh, modules, root_routes] {
-    // at the root: the OAuth callback (session read, not required) and the webhooks (no session)
-    let root_routes = connections::callback_routes(conns.clone())
-        .with_state(modules.clone())
-        .merge(steve_github::hooks::routes(gh.clone()))
-        .merge(crate::wire::signals::routes(crate::wire::signals::Hooks::new(
-            flow.clone(),
-            gh.clone(),
-        )));
+install! { root(reg, _cx) [conns, modules] => [conns, modules, root_routes] {
+    // at the root: the OAuth callback reads the session without requiring it
+    let root_routes = connections::callback_routes(conns.clone()).with_state(modules.clone());
 }}
 
 install! { start(reg, _cx) [conns] => [] {
