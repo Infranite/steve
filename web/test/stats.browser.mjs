@@ -1,5 +1,5 @@
 // Vite-only fixture (ST-40, stats v2): the stats page by purpose. All /api calls are answered here.
-// Checks the slim 现在 line (with the YOLO run state) and its lists, the realtime headline above the historical key numbers, the daily
+// Checks the slim 现在 line (with the YOLO run state) and its lists, the historical key numbers, the daily
 // output chart (done bars + cost line, day drill), the cost / time split and the most expensive items, the sortable Bot
 // and harness · model tables (a Bot row filters the page), the folded event explorer with its counts said once,
 // and that nothing overflows on a phone.
@@ -138,9 +138,9 @@ try {
     assert.equal(await page.locator("[data-drill]").count(), 0)
     await page.locator("[data-now]").evaluate((el) => { for (let p = el.parentElement; p; p = p.parentElement) p.scrollTop = 0 })
     const nowBox = await page.locator("[data-now]").boundingBox(), keyBox = await page.locator("[data-key-numbers]").boundingBox()
-    const realtimeBox = await page.locator("[data-realtime]").boundingBox(), metricBox = await page.locator("[data-realtime] .ui-kpic__headline").boundingBox()
-    assert.ok(nowBox.y < realtimeBox.y && realtimeBox.y < keyBox.y, "realtime output sits between the now line and the historical key numbers")
-    assert.ok(metricBox.y + metricBox.height < (width === 390 ? 844 : 1000), "both realtime metrics are on the first screen")
+    assert.ok(nowBox.y < keyBox.y && keyBox.y < (width === 390 ? 844 : 1000), "history begins on the first screen below Now")
+    assert.equal(await page.locator("[data-overview] > *").count(), 1, "no extra panel or placeholder below Now and YOLO")
+    assert.equal(await page.getByText("实时输出", { exact: true }).count(), 0)
 
     /* key numbers: the summary's, each against the range before */
     assert.equal(await page.locator("[data-key-numbers]").getAttribute("data-key-numbers"), "6")
@@ -309,6 +309,26 @@ try {
     await page.locator("[data-bots-all]").click()
     await page.waitForFunction(() => !document.querySelector("[data-bots-all]"))
 
+    /* Project and Bot selectors still combine and reset the history scope independently. */
+    const choose = async (filter, name) => {
+      await page.locator(`[data-select="stats-${filter}"]`).click()
+      await page.getByRole("option", { name, exact: true }).click()
+    }
+    const chooseAndCheck = async (filter, name, project, bot) => {
+      const response = page.waitForResponse((r) => {
+        const u = new URL(r.url())
+        return r.ok() && u.pathname === "/api/stats/summary" && u.searchParams.get("range") === "7d"
+          && u.searchParams.get("project") === project && u.searchParams.get("bot") === bot
+      })
+      await choose(filter, name)
+      await response
+      await page.locator("[data-key-numbers]").waitFor()
+    }
+    await chooseAndCheck("project", "Steve", "p1", null)
+    await chooseAndCheck("bot", "Steve 开发 Bot", "p1", "dev")
+    await chooseAndCheck("project", "全部项目", null, "dev")
+    await chooseAndCheck("bot", "全部 Bot", null, null)
+
     /* 今天: by hour (ST-43) */
     await page.locator('[data-stats-toolbar] [data-seg="today"]').click()
     await page.locator('[data-daily] [data-chart="group"] [data-current]').waitFor()
@@ -368,6 +388,7 @@ try {
     await page.locator('[data-stats-toolbar] [data-seg="7d"]').click()
     await page.locator('[data-daily] [data-chart="group"] [data-bar]').nth(days.length - 1).waitFor()
     assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), "no horizontal overflow")
+    assert.ok(!calls.slice(c0).some((c) => c.startsWith("/api/stats/realtime")), "stats never polls output, including after changing filters")
     await page.close()
   }
 
@@ -433,6 +454,15 @@ try {
   assert.equal(await page.locator('[data-yolo-pill="paused"]:visible').count(), 1, "the pill shows on a phone too")
   if (shots) await page.screenshot({ path: `${shots}/inbox-paused-390.png`, animations: "disabled" })
   await page.close()
+
+  /* A Hub without historical statistics still shows Now and only the history-specific fallback. */
+  const absent = await browser.newPage({ locale: "zh-CN" })
+  await absent.route((u) => u.pathname.startsWith("/api/"), (route) => route.fulfill({ status: 404, contentType: "application/json", body: "{}" }))
+  await absent.goto(base + "/test/fixtures/stats.html")
+  await absent.locator("[data-now]").waitFor()
+  await absent.getByText("历史统计暂不可用", { exact: true }).waitFor()
+  assert.equal(await absent.getByText(/实时输出/).count(), 0)
+  await absent.close()
   assert.deepEqual(errors, [])
-  console.log(JSON.stringify({ passed: true, scenarios: ["1440/390px × light/dark", "现在 line + YOLO run state; counts = drill lists", "realtime metrics on the first screen; historical key numbers vs the range before", "daily output: done bars + cost/turns line, day drill", "where: split by Bot/model, cost/time; top items open the cost drill", "Bot table: per-Bot summaries, sortable, row filters the page", "harness · model table: agent turns per harness × model", "event explorer folded, counts said once, window + kind + zoom", "paused alert with 恢复", "no horizontal overflow", "item drill: cost waterfall of turns and sub-items", "今天 by hour: 24 local hours, current marked, future empty, table sums = day totals, hour drill"] }))
+  console.log(JSON.stringify({ passed: true, scenarios: ["1440/390px × light/dark", "现在 line + YOLO run state; counts = drill lists", "no realtime section or polling; historical key numbers and missing-history fallback", "project and Bot selectors combine and reset", "daily output: done bars + cost/turns line, day drill", "where: split by Bot/model, cost/time; top items open the cost drill", "Bot table: per-Bot summaries, sortable, row filters the page", "harness · model table: agent turns per harness × model", "event explorer folded, counts said once, window + kind + zoom", "paused alert with 恢复", "no horizontal overflow", "item drill: cost waterfall of turns and sub-items", "今天 by hour: 24 local hours, current marked, future empty, table sums = day totals, hour drill"] }))
 } finally { await browser.close() }

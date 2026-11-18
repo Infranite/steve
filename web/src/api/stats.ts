@@ -6,16 +6,6 @@ import type { TreeStat } from "@/agent-tree"
 export type RangeKind = "today" | "7d" | "30d" | "custom"
 /** `hour` (0–23): one local hour of a one-day range — the drill-down of an hourly bar (items, usage) */
 export type Filter = { range: RangeKind; from?: string; to?: string; project?: string; bot?: string; model?: string; source?: string; hour?: number }
-/** Realtime output is independent of historical ranges; all timestamps are Unix milliseconds.
- * Coverage counts relevant sessions in the trailing 10s window, not tokens or percentages. */
-export type RealtimeFilter = Pick<Filter, "project" | "bot">
-export type RealtimeState = "measured" | "estimated" | "idle" | "unavailable" | "partial"
-export type RealtimePoint = { at: number; tps: number | null; state: RealtimeState }
-export type Realtime = RealtimePoint & {
-  window_ms: 10000; step_ms: 1000; output_sessions: number | null
-  coverage: { measured: number; estimated: number; unavailable: number }
-  series: RealtimePoint[]
-}
 export type P = { p50: number | null; p85: number | null; avg: number | null; sum: number; n: number }
 /** Accounting coverage; numeric legacy totals remain sums of known fields. */
 export type UsageCoverage = {
@@ -125,7 +115,6 @@ export type EventQuery = { lo?: number; hi?: number; a?: number; b?: number; kin
 export const statsSeed: { next: Filter | null } = { next: null }
 
 export const stats = {
-  realtime: (x: RealtimeFilter, signal: AbortSignal) => req<Realtime>("GET", "/stats/realtime" + qs({ project: x.project, bot: x.bot }), undefined, signal),
   summary: (x: Filter) => req<Summary>("GET", "/stats/summary" + f(x)),
   /** `hourly`: per local hour (only for a one-day range) */
   series: (x: Filter, metric: Metric, group: Group, hourly = false) => req<Series>("GET", "/stats/series" + and({ ...x, hour: undefined }, { metric, group, bucket: hourly ? "hour" : undefined })),
