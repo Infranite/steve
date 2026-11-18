@@ -27,6 +27,8 @@ pub fn default_budget_for(mode: Mode) -> f64 {
     match mode {
         Mode::ItemAuto | Mode::Item => DEFAULT_ITEM_BUDGET_USD,
         Mode::Propose | Mode::Report => DEFAULT_BUDGET_USD,
+        // composed by rule: no model, no session
+        Mode::Brief => 0.0,
     }
 }
 /// Upper bound of `budget_usd`.
@@ -44,6 +46,10 @@ pub enum Mode {
     Propose,
     /// Steve publishes a report to the workspace Feed.
     Report,
+    /// The requester's morning brief (steve-digest `brief`), for them only. Composed by rule, without a
+    /// Bot; its time is expanded into `time_alarms` rows (family `brief`), so it has no `flow_triggers`
+    /// row and the scheduler never runs it.
+    Brief,
 }
 
 impl Mode {
@@ -53,6 +59,7 @@ impl Mode {
             Mode::Item => "item",
             Mode::Propose => "propose",
             Mode::Report => "report",
+            Mode::Brief => "brief",
         }
     }
 
@@ -62,6 +69,7 @@ impl Mode {
             "item" => Mode::Item,
             "propose" => Mode::Propose,
             "report" => Mode::Report,
+            "brief" => Mode::Brief,
             _ => return None,
         })
     }
@@ -73,6 +81,7 @@ impl Mode {
             Mode::Item => steve_i18n::t!("flow.schedule.mode_item"),
             Mode::Propose => steve_i18n::t!("flow.schedule.mode_propose"),
             Mode::Report => steve_i18n::t!("flow.schedule.mode_report"),
+            Mode::Brief => steve_i18n::t!("flow.schedule.mode_brief"),
         }
     }
 
@@ -83,6 +92,7 @@ impl Mode {
             Mode::Item => "建事项",
             Mode::Propose => "先给方案",
             Mode::Report => "发布到信息流，工作空间成员可见",
+            Mode::Brief => "晨报，只发给你自己",
         }
     }
 }
@@ -128,6 +138,7 @@ impl Spec {
     /// The generated graph: `trigger(time) → action`.
     pub fn graph(&self) -> Value {
         let action = match self.mode {
+            Mode::Brief => json!({ "action": "brief", "requester": self.requester }),
             Mode::Report => {
                 json!({ "action": "report", "what": self.what, "bot": self.bot, "destination": "workspace_feed" })
             }
@@ -255,10 +266,42 @@ pub fn bot_of(c: &Connection, ws: &str, id: &str) -> FlowResult<Option<(String, 
     .optional()?)
 }
 
-/// The ownership checks: `bot`, `project_id` and `tags` belong to the workspace.
+/// Whether a brief's cron fires at most once a local day: one minute and one hour.
+pub fn once_a_day(cron: &str) -> bool {
+    let f: Vec<&str> = cron.split_whitespace().collect();
+    f.len() == 5 && f[0].parse::<u8>().is_ok() && f[1].parse::<u8>().is_ok()
+}
+
+impl Schedule {
+    /// Who may see and change it: anyone in the workspace, except a brief, which is its requester's own.
+    pub fn visible_to(&self, user: &str) -> bool {
+        self.spec.mode != Mode::Brief || self.spec.requester.as_deref() == Some(user)
+    }
+}
+
+/// [`own`] for `user`: someone else's brief is not found.
+pub fn own_for(c: &Connection, ws: &str, id: &str, user: &str) -> FlowResult<Schedule> {
+    Some(own(c, ws, id)?)
+        .filter(|s| s.visible_to(user))
+        .ok_or_else(|| ApiError::not_found("定时任务"))
+}
+
+/// The ownership checks: `bot`, `project_id` and `tags` belong to the workspace. A brief is a member's
+/// own (a requester), at most daily, with no Bot, project or tags.
 pub fn check_refs(c: &Connection, ws: &str, s: &Spec) -> FlowResult<()> {
     if s.requester.is_some() && s.mode == Mode::Report {
         return Err(ApiError::invalid("requester"));
+    }
+    if s.mode == Mode::Brief {
+        if s.requester.is_none() {
+            return Err(ApiError::invalid("requester"));
+        }
+        if !s.bot.is_empty() || s.project_id.is_some() || !s.tags.is_empty() {
+            return Err(ApiError::invalid("mode"));
+        }
+        if !once_a_day(&s.cron) {
+            return Err(ApiError::rule(steve_i18n::t!("flow.schedule.brief_daily")));
+        }
     }
     if let Some(user) = &s.requester {
         let member: bool = c.query_row(
@@ -270,7 +313,7 @@ pub fn check_refs(c: &Connection, ws: &str, s: &Spec) -> FlowResult<()> {
             return Err(ApiError::invalid("requester"));
         }
     }
-    if bot_of(c, ws, &s.bot)?.is_none() {
+    if s.mode != Mode::Brief && bot_of(c, ws, &s.bot)?.is_none() {
         return Err(ApiError::not_found("Bot"));
     }
     if let Some(p) = &s.project_id {
@@ -299,7 +342,7 @@ pub fn check_refs(c: &Connection, ws: &str, s: &Spec) -> FlowResult<()> {
 /// The preflight of an enabled schedule that makes items (#222): its principal and Bot can run
 /// ([`crate::Core::can_run`]). A report makes no session; a disabled schedule runs nothing.
 pub fn can_run(core: &dyn crate::Core, c: &Connection, ws: &str, s: &Spec) -> Result<(), String> {
-    if s.mode == Mode::Report {
+    if matches!(s.mode, Mode::Report | Mode::Brief) {
         return Ok(());
     }
     core.can_run(c, ws, s.requester.as_deref(), &s.bot)
@@ -377,11 +420,14 @@ pub fn insert(
         "INSERT INTO flow_versions (flow_id, workspace_id, version, graph, author, note, created) VALUES (?, ?, 1, ?, ?, '', ?)",
         params![id, ws, graph, actor, now],
     )?;
-    let next_at = if enabled { first_run(spec, now)? } else { None };
-    tx.execute(
-        "INSERT INTO flow_triggers (id, workspace_id, flow_id, node_id, kind, source, cron, tz, next_at, missed, enabled) VALUES (?, ?, ?, 't', 'time', 'time', ?, ?, ?, ?, ?)",
-        params![uid("ftr"), ws, id, spec.cron, spec.tz, next_at, spec.missed.as_str(), enabled],
-    )?;
+    // a brief's time is its alarms (`time_alarms`, planned by migration 103's triggers), not a trigger
+    if spec.mode != Mode::Brief {
+        let next_at = if enabled { first_run(spec, now)? } else { None };
+        tx.execute(
+            "INSERT INTO flow_triggers (id, workspace_id, flow_id, node_id, kind, source, cron, tz, next_at, missed, enabled) VALUES (?, ?, ?, 't', 'time', 'time', ?, ?, ?, ?, ?)",
+            params![uid("ftr"), ws, id, spec.cron, spec.tz, next_at, spec.missed.as_str(), enabled],
+        )?;
+    }
     tx.publish(ChangeEvent::Flow {
         id: id.clone(),
         ws: ws.into(),
@@ -561,6 +607,20 @@ pub fn view(c: &Connection, s: &Schedule) -> FlowResult<ScheduleView> {
         .expr()
         .map(|e| e.describe())
         .unwrap_or_else(|_| steve_i18n::t!("flow.cron.raw", cron = s.spec.cron));
+    // a brief: next is its planned alarm, on its requester's clock
+    let (next_at, tz) = match (s.spec.mode, &s.spec.requester) {
+        (Mode::Brief, Some(user)) => {
+            let next: Option<i64> = c.query_row(
+                "SELECT min(max(fire_at, coalesce(hold_until, fire_at))) FROM time_alarms
+                  WHERE workspace_id = ? AND subject = ? AND state = 'planned'",
+                params![s.workspace_id, format!("brief:{}", s.id)],
+                |r| r.get(0),
+            )?;
+            let tz = steve_modules::zone::Zone::of(c, &s.workspace_id, user)?;
+            (next.filter(|_| s.enabled), tz.name().to_string())
+        }
+        _ => (s.next_at, s.spec.tz.clone()),
+    };
     Ok(ScheduleView {
         requester: s.spec.requester.clone(),
         id: s.id.clone(),
@@ -568,7 +628,7 @@ pub fn view(c: &Connection, s: &Schedule) -> FlowResult<ScheduleView> {
         when: s.spec.when.clone(),
         describe,
         cron: s.spec.cron.clone(),
-        tz: s.spec.tz.clone(),
+        tz,
         what: s.spec.what.clone(),
         bot: s.spec.bot.clone(),
         mode: s.spec.mode,
@@ -578,7 +638,7 @@ pub fn view(c: &Connection, s: &Schedule) -> FlowResult<ScheduleView> {
         overlap: s.spec.overlap,
         budget_usd: s.spec.budget_usd,
         enabled: s.enabled,
-        next_at: s.next_at,
+        next_at,
         last,
         blocked: None,
         version: s.version,

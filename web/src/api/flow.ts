@@ -43,7 +43,8 @@ export type Source = {
 }
 export type SourcePatch = { paused?: boolean; triage_bot?: string | null; types?: Record<string, { on?: boolean; param?: string }>; scopes?: { connection_id: string; ext_id: string; mode: ScopeMode }[] }
 
-export type ScheduleMode = "item_auto" | "item" | "propose" | "report"
+/** `brief`: your morning brief (Steve turns it on; only its name, time and switch change) */
+export type ScheduleMode = "item_auto" | "item" | "propose" | "report" | "brief"
 export type ScheduleRun = { id: string; at: number; started: number; ended: number | null; trigger: "time" | "manual" | "catch_up"; status: "done" | "failed" | "skipped" | "running" | "waiting"; outcome_label: string; item_id: string | null; cost_usd: number; error: string | null }
 export type Schedule = {
   id: string; name: string; when: string; describe: string; cron: string; tz: string; what: string; bot: string; mode: ScheduleMode

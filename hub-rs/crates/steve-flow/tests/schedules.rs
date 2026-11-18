@@ -1571,3 +1571,197 @@ async fn report_publication_and_digest_acknowledgement_roll_back_together() {
     );
     assert!(e.core.posts().is_empty());
 }
+
+/// A brief schedule as steve-digest turns it on (the API does not make one).
+fn brief(e: &FlowEnv) -> String {
+    use steve_flow::schedules::{Fields, Mode, Origin, Spec, insert};
+    let spec = Spec {
+        requester: Some(ME.into()),
+        when: "工作日 08:30".into(),
+        cron: "30 8 * * 1-5".into(),
+        tz: "Asia/Taipei".into(),
+        what: String::new(),
+        bot: String::new(),
+        mode: Mode::Brief,
+        project_id: None,
+        tags: vec![],
+        missed: Default::default(),
+        overlap: Default::default(),
+        budget_usd: 0.0,
+    };
+    e.env
+        .store()
+        .transaction(|tx| {
+            steve_flow::schedules::check_refs(tx, WS, &spec)?;
+            insert(
+                tx,
+                WS,
+                ME,
+                &Fields {
+                    name: "晨报",
+                    spec: &spec,
+                    enabled: true,
+                },
+                &Origin::default(),
+                monday_8am(),
+            )
+        })
+        .unwrap()
+}
+
+#[tokio::test]
+async fn a_brief_is_its_owners_alone_and_only_its_name_time_and_switch_change() {
+    use steve_modules::testkit::OTHER;
+    let e = env();
+    let r = e.router();
+    let (me, other) = (caller(WS, ME), caller(WS, OTHER));
+    let id = brief(&e);
+    let path = format!("/schedules/{id}");
+
+    // not made through the API
+    let mut b = daily("brief");
+    b["bot"] = json!("");
+    let (st, _) = call(&r, Some(&me), "POST", "/schedules", Some(&b)).await;
+    assert_eq!(st, 400);
+
+    // listed and readable to its owner only
+    let (_, mine) = call(&r, Some(&me), "GET", "/schedules", None).await;
+    let s = mine
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["id"] == id.as_str())
+        .cloned()
+        .unwrap();
+    assert_eq!(s["mode"], "brief");
+    assert_eq!(s["blocked"], Value::Null);
+    let (_, theirs) = call(&r, Some(&other), "GET", "/schedules", None).await;
+    assert!(
+        !theirs
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|s| s["id"] == id.as_str())
+    );
+    for (m, b) in [
+        ("GET", None),
+        ("PATCH", Some(json!({"enabled": false}))),
+        ("DELETE", None),
+    ] {
+        let (st, _) = call(&r, Some(&other), m, &path, b.as_ref()).await;
+        assert_eq!(st, 404, "{m} by another member");
+    }
+
+    // name, time and switch only; at most once a day; never run by hand or by the scheduler
+    for bad in [
+        json!({"what": "x"}),
+        json!({"mode": "item"}),
+        json!({"tz": "UTC"}),
+        json!({"cron": "0 * * * *"}),
+    ] {
+        let (st, v) = call(&r, Some(&me), "PATCH", &path, Some(&bad)).await;
+        assert_eq!(st, 400, "{bad}: {v}");
+    }
+    let (st, v) = call(
+        &r,
+        Some(&me),
+        "PATCH",
+        &path,
+        Some(&json!({"when": "工作日 09:00", "name": "早上"})),
+    )
+    .await;
+    assert_eq!(st, 200, "{v}");
+    assert_eq!(
+        (v["cron"].as_str(), v["name"].as_str()),
+        (Some("0 9 * * 1-5"), Some("早上"))
+    );
+    let (st, _) = call(&r, Some(&me), "POST", &format!("{path}/run"), None).await;
+    assert_eq!(st, 400);
+    let triggers: i64 = e
+        .env
+        .store()
+        .with_conn(|c| {
+            Ok(c.query_row(
+                "SELECT count(*) FROM flow_triggers WHERE flow_id = ?",
+                [&id],
+                |r| r.get(0),
+            )?)
+        })
+        .unwrap();
+    assert_eq!(triggers, 0, "no flow trigger");
+    e.env.clock.set(monday_8am() + 2 * HOUR);
+    assert!(claim_due(&e.flow).unwrap().is_empty());
+    assert!(runs_of(&e, &id).is_empty());
+}
+
+/// The generic flow and run routes serve a brief under its own visibility: another member does not see it
+/// listed, and gets 404 from its routes and its runs'; nobody runs or dry-runs it by hand.
+#[tokio::test]
+async fn the_flow_routes_keep_a_brief_its_owners_and_never_run_it() {
+    use steve_modules::testkit::OTHER;
+    let e = env();
+    let r = e.router();
+    let (me, other) = (caller(WS, ME), caller(WS, OTHER));
+    let id = brief(&e);
+    let run = e
+        .env
+        .store()
+        .transaction(|tx| {
+            steve_flow::runs::insert(
+                tx,
+                &steve_flow::runs::NewRun {
+                    ws: WS,
+                    flow_id: &id,
+                    flow_version: 1,
+                    trigger_kind: "time",
+                    status: "running",
+                    outcome_label: "已发到私聊：今天到期 2 个待办",
+                    cursor: None,
+                    context: &json!({}),
+                    now: monday_8am(),
+                },
+            )
+        })
+        .unwrap();
+    let listed = |v: &Value| v.as_array().unwrap().iter().any(|f| f["id"] == id.as_str());
+    for q in ["/flows", "/flows?kind=schedule"] {
+        let (st, v) = call(&r, Some(&me), "GET", q, None).await;
+        assert_eq!(st, 200, "{q}");
+        assert!(listed(&v), "{q} lists it to its owner");
+        let (st, v) = call(&r, Some(&other), "GET", q, None).await;
+        assert_eq!(st, 200, "{q}");
+        assert!(!listed(&v), "{q} leaves it out for another member");
+    }
+    let flow = format!("/flows/{id}");
+    let empty = json!({});
+    for (m, p, b) in [
+        ("GET", flow.clone(), None),
+        ("GET", format!("{flow}/versions/1"), None),
+        ("GET", format!("{flow}/runs"), None),
+        ("POST", format!("{flow}/run"), None),
+        ("POST", format!("{flow}/dry-run"), None),
+        ("PATCH", flow.clone(), Some(&empty)),
+        ("DELETE", flow.clone(), None),
+        ("POST", format!("{flow}/duplicate"), None),
+        ("GET", format!("/runs/{run}"), None),
+        ("POST", format!("/runs/{run}/cancel"), None),
+    ] {
+        let (st, v) = call(&r, Some(&other), m, &p, b).await;
+        assert_eq!(st, 404, "{m} {p} by another member: {v}");
+    }
+    // its owner reads it and its runs, but does not run it by hand
+    for p in [
+        flow.clone(),
+        format!("{flow}/versions/1"),
+        format!("{flow}/runs"),
+        format!("/runs/{run}"),
+    ] {
+        let (st, v) = call(&r, Some(&me), "GET", &p, None).await;
+        assert_eq!(st, 200, "GET {p}: {v}");
+    }
+    for p in [format!("{flow}/run"), format!("{flow}/dry-run")] {
+        let (st, v) = call(&r, Some(&me), "POST", &p, None).await;
+        assert_eq!(st, 400, "POST {p}: {v}");
+    }
+    assert_eq!(runs_of(&e, &id).len(), 1, "no run was started");
+}

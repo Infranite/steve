@@ -18,6 +18,10 @@
 //! | `POST /runs/:id/cancel` | `Run` |
 //! | `GET /flow-settings/allow-private` | `{hosts}`: the hosts `http` nodes may reach on internal addresses |
 //! | `PUT /flow-settings/allow-private` | `{hosts}` → `{hosts}` (the workspace's owner; Steve's drafts never write it) |
+//!
+//! A schedule is served here too, under its own visibility ([`schedules::Schedule::visible_to`]): another
+//! member's morning brief is not listed, and its routes and its runs' answer `404`; a brief is not run or
+//! dry-run by hand (`400`, as `POST /schedules/:id/run`).
 
 use std::sync::Arc;
 
@@ -35,6 +39,7 @@ use crate::flows::{self, DESCRIPTION_MAX, FlowRow, NAME_MAX, NewFlow};
 use crate::graph::{self, Graph};
 use crate::nodes::http;
 use crate::runs;
+use crate::schedules::{self, Mode};
 use crate::signals;
 
 type Cx = Extension<Arc<FlowCx>>;
@@ -138,6 +143,25 @@ async fn allow_private_put(
     Ok(Json(json!({ "hosts": hosts })))
 }
 
+/// [`flows::own`] for the caller: a schedule they may not see (another member's morning brief) is not found.
+fn own(c: &Connection, who: &Caller, id: &str) -> ApiResult<FlowRow> {
+    let f = flows::own(c, &who.ws, id)?;
+    if f.kind == "schedule" {
+        schedules::own_for(c, &who.ws, id, &who.me)?;
+    }
+    Ok(f)
+}
+
+/// A brief comes at its time only: it is not run or dry-run by hand.
+fn not_brief(c: &Connection, who: &Caller, f: &FlowRow) -> ApiResult<()> {
+    if f.kind == "schedule"
+        && schedules::own_for(c, &who.ws, &f.id, &who.me)?.spec.mode == Mode::Brief
+    {
+        return Err(ApiError::rule(steve_i18n::t!("flow.schedule.brief_run")));
+    }
+    Ok(())
+}
+
 /// Schedules are edited on their own page (their graph is generated from the form).
 fn not_schedule(f: &FlowRow) -> ApiResult<()> {
     if f.kind == "schedule" {
@@ -184,10 +208,10 @@ pub fn check_graph(c: &Connection, cx: &FlowCx, ws: &str, v: &Value) -> ApiResul
     Ok(g)
 }
 
-fn view(cx: &FlowCx, ws: &str, id: &str) -> ApiResult<Json<Value>> {
+fn view(cx: &FlowCx, who: &Caller, id: &str) -> ApiResult<Json<Value>> {
     let now = cx.now();
     cx.store().reader(|c| -> ApiResult<_> {
-        let f = flows::own(c, ws, id)?;
+        let f = own(c, who, id)?;
         Ok(Json(flows::view(c, &f, now)?))
     })
 }
@@ -210,8 +234,15 @@ async fn list(
     }
     let now = cx.now();
     cx.store().reader(|c| -> ApiResult<_> {
+        // another member's brief is left out
+        let hidden: std::collections::HashSet<String> = schedules::list(c, &who.ws)?
+            .into_iter()
+            .filter(|s| !s.visible_to(&who.me))
+            .map(|s| s.id)
+            .collect();
         let out = flows::list(c, &who.ws, kind.as_deref())?
             .iter()
+            .filter(|f| !hidden.contains(&f.id))
             .map(|f| flows::summary(c, f, now))
             .collect::<ApiResult<Vec<_>>>()?;
         Ok(Json(Value::Array(out)))
@@ -278,11 +309,11 @@ async fn create(
             now,
         )
     })?;
-    view(&cx, &who.ws, &id)
+    view(&cx, &who, &id)
 }
 
 async fn detail(Extension(cx): Cx, who: Caller, Path(id): Path<String>) -> ApiResult<Json<Value>> {
-    view(&cx, &who.ws, &id)
+    view(&cx, &who, &id)
 }
 
 async fn version(
@@ -291,7 +322,7 @@ async fn version(
     Path((id, v)): Path<(String, String)>,
 ) -> ApiResult<Json<Value>> {
     cx.store().reader(|c| -> ApiResult<_> {
-        flows::own(c, &who.ws, &id)?;
+        own(c, &who, &id)?;
         let v = v
             .parse::<i64>()
             .ok()
@@ -320,7 +351,7 @@ async fn save(
     c.done()?;
     let now = cx.now();
     cx.store().transaction(|tx| -> ApiResult<()> {
-        let f = flows::own(tx, &who.ws, &id)?;
+        let f = own(tx, &who, &id)?;
         not_schedule(&f)?;
         let g = check_graph(tx, &cx, &who.ws, &b.graph)?;
         flows::save_version(
@@ -334,7 +365,7 @@ async fn save(
         Ok(())
     })?;
     cx.wake();
-    view(&cx, &who.ws, &id)
+    view(&cx, &who, &id)
 }
 
 #[derive(Debug, Deserialize)]
@@ -356,7 +387,7 @@ async fn patch(
     check_meta(b.name.as_deref(), b.description.as_deref())?;
     let now = cx.now();
     cx.store().transaction(|tx| -> ApiResult<()> {
-        let f = flows::own(tx, &who.ws, &id)?;
+        let f = own(tx, &who, &id)?;
         not_schedule(&f)?;
         if b.enabled == Some(true) {
             // a flow that no longer validates (a node kind went away) cannot be switched on
@@ -373,13 +404,13 @@ async fn patch(
         )
     })?;
     cx.wake();
-    view(&cx, &who.ws, &id)
+    view(&cx, &who, &id)
 }
 
 async fn remove(Extension(cx): Cx, who: Caller, Path(id): Path<String>) -> ApiResult<Json<Value>> {
     let now = cx.now();
     cx.store().transaction(|tx| -> ApiResult<()> {
-        let f = flows::own(tx, &who.ws, &id)?;
+        let f = own(tx, &who, &id)?;
         not_schedule(&f)?;
         flows::delete(tx, &f, &who.me, now)
     })?;
@@ -393,7 +424,7 @@ async fn duplicate(
 ) -> ApiResult<Json<Value>> {
     let now = cx.now();
     let new_id = cx.store().transaction(|tx| -> ApiResult<String> {
-        let f = flows::own(tx, &who.ws, &id)?;
+        let f = own(tx, &who, &id)?;
         not_schedule(&f)?;
         let g = Graph::from_value(&f.graph).map_err(ApiError::rule)?;
         let mut name = format!("{} 副本", f.name);
@@ -423,7 +454,7 @@ async fn duplicate(
             now,
         )
     })?;
-    view(&cx, &who.ws, &new_id)
+    view(&cx, &who, &new_id)
 }
 
 #[derive(Debug, Deserialize)]
@@ -439,7 +470,7 @@ async fn rollback(
 ) -> ApiResult<Json<Value>> {
     let now = cx.now();
     cx.store().transaction(|tx| -> ApiResult<()> {
-        let f = flows::own(tx, &who.ws, &id)?;
+        let f = own(tx, &who, &id)?;
         not_schedule(&f)?;
         let g =
             flows::version_graph(tx, &id, b.version)?.ok_or_else(|| ApiError::not_found("版本"))?;
@@ -448,7 +479,7 @@ async fn rollback(
         Ok(())
     })?;
     cx.wake();
-    view(&cx, &who.ws, &id)
+    view(&cx, &who, &id)
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -503,7 +534,8 @@ async fn dry_run(
     c.that("sample", b.sample.as_ref().is_none_or(Value::is_object));
     c.done()?;
     let (f, event, event_id, graph) = cx.store().reader(|c| -> ApiResult<_> {
-        let f = flows::own(c, &who.ws, &id)?;
+        let f = own(c, &who, &id)?;
+        not_brief(c, &who, &f)?;
         let graph = match &b.graph {
             Some(g) => Some(check_graph(c, &cx, &who.ws, g)?.to_value()),
             None => None,
@@ -545,7 +577,7 @@ async fn dry_run(
         graph,
     )
     .await?;
-    run_json(&cx, &who.ws, &run)
+    run_json(&cx, &who, &run)
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -569,7 +601,11 @@ async fn run_now(
     body: axum::body::Bytes,
 ) -> ApiResult<Json<Value>> {
     let b: RunBody = optional(&body)?;
-    let f = cx.store().reader(|c| flows::own(c, &who.ws, &id))?;
+    let f = cx.store().reader(|c| -> ApiResult<_> {
+        let f = own(c, &who, &id)?;
+        not_brief(c, &who, &f)?;
+        Ok(f)
+    })?;
     if f.kind == "schedule" {
         let (run, go) = crate::scheduler::start_manual(&cx, &who.ws, &id)?;
         if go {
@@ -623,7 +659,7 @@ async fn history(
             Some("0") => Some(false),
             Some(_) => return Err(ApiError::invalid("dry")),
         };
-        flows::own(c, &who.ws, &id)?;
+        own(c, &who, &id)?;
         let rows = runs::page_of(c, &who.ws, &id, None, q.limit.unwrap_or(20), dry)?;
         Ok(Json(Value::Array(
             rows.iter()
@@ -640,11 +676,21 @@ async fn history(
     })
 }
 
-fn run_json(cx: &FlowCx, ws: &str, id: &str) -> ApiResult<Json<Value>> {
+/// A run of `who`'s workspace whose flow they may see: a run of another member's brief (live or deleted)
+/// is not found.
+fn own_run(c: &Connection, who: &Caller, id: &str) -> ApiResult<runs::RunRow> {
+    let r = runs::get(c, id)?
+        .filter(|r| r.workspace_id == who.ws)
+        .ok_or_else(|| ApiError::not_found("运行"))?;
+    if schedules::get_any(c, &r.flow_id)?.is_some_and(|s| !s.visible_to(&who.me)) {
+        return Err(ApiError::not_found("运行"));
+    }
+    Ok(r)
+}
+
+fn run_json(cx: &FlowCx, who: &Caller, id: &str) -> ApiResult<Json<Value>> {
     cx.store().reader(|c| -> ApiResult<_> {
-        let r = runs::get(c, id)?
-            .filter(|r| r.workspace_id == ws)
-            .ok_or_else(|| ApiError::not_found("运行"))?;
+        let r = own_run(c, who, id)?;
         let mut v = signals::run_view(c, id)?.ok_or_else(|| ApiError::not_found("运行"))?;
         v["error"] = json!(r.error);
         Ok(Json(v))
@@ -656,15 +702,13 @@ async fn run_detail(
     who: Caller,
     Path(id): Path<String>,
 ) -> ApiResult<Json<Value>> {
-    run_json(&cx, &who.ws, &id)
+    run_json(&cx, &who, &id)
 }
 
 async fn cancel(Extension(cx): Cx, who: Caller, Path(id): Path<String>) -> ApiResult<Json<Value>> {
     let now = cx.now();
     let evt = cx.store().transaction(|tx| -> ApiResult<Option<String>> {
-        let r = runs::get(tx, &id)?
-            .filter(|r| r.workspace_id == who.ws)
-            .ok_or_else(|| ApiError::not_found("运行"))?;
+        let r = own_run(tx, &who, &id)?;
         if !engine::cancel(tx, &r, now)? {
             return Err(ApiError::conflict(steve_i18n::t!("flow.run.already_ended")));
         }
@@ -674,5 +718,5 @@ async fn cancel(Extension(cx): Cx, who: Caller, Path(id): Path<String>) -> ApiRe
     if let Some(e) = evt {
         cx.signals.signal(cx.store(), &who.ws, &e);
     }
-    run_json(&cx, &who.ws, &id)
+    run_json(&cx, &who, &id)
 }

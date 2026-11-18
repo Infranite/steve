@@ -114,6 +114,7 @@ impl AlarmSource for TodoAlarms {
             text: crate::cut(text.trim(), LINE_MAX),
             detail,
             link: Some(format!("#/todos/{id}")),
+            planned_for: None,
         }))
     }
 }

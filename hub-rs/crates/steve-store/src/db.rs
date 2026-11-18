@@ -216,6 +216,9 @@ pub const MIGRATIONS: &[&str] = &[
     // by triggers on todos); a personal notification's one topic (`personal_notifications.topic`, 101's `kind`
     // folded in and legacy), and the feed kind `reminder`.
     include_str!("../migrations/102.sql"),
+    // 103: the morning brief: its schedule's alarms planned again by triggers, `briefings` (one per member
+    // and local day), the topic `briefing.ready` and the feed kind `briefing`.
+    include_str!("../migrations/103.sql"),
 ];
 
 /// 027's item columns and their one-time backfill (applied by `run_pending` when `items.phase` is missing).

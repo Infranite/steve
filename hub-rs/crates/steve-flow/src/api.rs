@@ -183,6 +183,7 @@ async fn list(Extension(cx): Cx, who: Caller) -> ApiResult<Json<Value>> {
     cx.store().reader(|c| -> ApiResult<_> {
         let out = schedules::list(c, &who.ws)?
             .iter()
+            .filter(|s| s.visible_to(&who.me))
             .map(|s| schedules::view_checked(cx.core.as_ref(), c, s))
             .collect::<ApiResult<Vec<_>>>()?;
         Ok(Json(serde_json::to_value(out)?))
@@ -204,6 +205,9 @@ async fn create(
     let tz = zone(&tz_name)?;
     let (when, expr) = resolve_time(&cx, b.when.as_deref(), b.cron.as_deref(), tz).await?;
     let mode = b.mode.unwrap_or(Mode::ItemAuto);
+    if mode == Mode::Brief {
+        return Err(ApiError::rule(steve_i18n::t!("flow.schedule.brief_mode")));
+    }
     let spec = Spec {
         requester: b.requester.clone().flatten(),
         when,
@@ -301,12 +305,28 @@ async fn patch(
     Body(b): Body<ScheduleBody>,
 ) -> ApiResult<Json<Value>> {
     b.check(false)?;
-    let old = cx.store().reader(|c| schedules::own(c, &who.ws, &id))?;
+    let mut old = cx
+        .store()
+        .reader(|c| schedules::own_for(c, &who.ws, &id, &who.me))?;
+    if b.mode
+        .is_some_and(|m| (m == Mode::Brief) != (old.spec.mode == Mode::Brief))
+    {
+        return Err(ApiError::rule(steve_i18n::t!("flow.schedule.brief_mode")));
+    }
+    if old.spec.mode == Mode::Brief {
+        if !brief_patch(&b) {
+            return Err(ApiError::rule(steve_i18n::t!("flow.schedule.brief_fields")));
+        }
+        // its time is read on its requester's clock, whatever it was made with
+        old.spec.tz = cx
+            .store()
+            .reader(|c| schedules::person_tz(c, &who.ws, &who.me))?;
+    }
     let spec = patched_spec(&cx, &old.spec, &b).await?;
     let now = cx.now();
     cx.store().transaction(|tx| -> ApiResult<_> {
         // Re-read: the row may have changed while the model was thinking.
-        let cur = schedules::own(tx, &who.ws, &id)?;
+        let cur = schedules::own_for(tx, &who.ws, &id, &who.me)?;
         if cur.updated != old.updated {
             return Err(ApiError::Conflict(
                 "Schedule changed; reread before editing".into(),
@@ -340,12 +360,26 @@ async fn patch(
         )
     })?;
     cx.wake();
+    cx.wake_alarms();
     view(&cx, &who.ws, &id)
+}
+
+/// A brief's patch changes only its name, time and switch.
+fn brief_patch(b: &ScheduleBody) -> bool {
+    b.requester.is_none()
+        && b.tz.is_none()
+        && b.what.is_none()
+        && b.bot.is_none()
+        && b.project_id.is_none()
+        && b.tags.is_none()
+        && b.missed.is_none()
+        && b.overlap.is_none()
+        && b.budget_usd.is_none()
 }
 
 async fn detail(Extension(cx): Cx, who: Caller, Path(id): Path<String>) -> ApiResult<Json<Value>> {
     cx.store().reader(|c| -> ApiResult<_> {
-        let s = schedules::own(c, &who.ws, &id)?;
+        let s = schedules::own_for(c, &who.ws, &id, &who.me)?;
         let mut v = serde_json::to_value(schedules::view_checked(cx.core.as_ref(), c, &s)?)?;
         let recent: Vec<RunView> = runs::page(c, &s.workspace_id, &s.id, None, 10)?
             .iter()
@@ -359,15 +393,21 @@ async fn detail(Extension(cx): Cx, who: Caller, Path(id): Path<String>) -> ApiRe
 async fn remove(Extension(cx): Cx, who: Caller, Path(id): Path<String>) -> ApiResult<Json<Value>> {
     let now = cx.now();
     cx.store().transaction(|tx| -> ApiResult<_> {
-        let s = schedules::own(tx, &who.ws, &id)?;
+        let s = schedules::own_for(tx, &who.ws, &id, &who.me)?;
         schedules::delete(tx, &s, now)
     })?;
     cx.wake();
+    cx.wake_alarms();
     Ok(Json(json!({ "ok": true })))
 }
 
 async fn run_now(Extension(cx): Cx, who: Caller, Path(id): Path<String>) -> ApiResult<Json<Value>> {
-    cx.store().reader(|c| schedules::own(c, &who.ws, &id))?;
+    let s = cx
+        .store()
+        .reader(|c| schedules::own_for(c, &who.ws, &id, &who.me))?;
+    if s.spec.mode == Mode::Brief {
+        return Err(ApiError::rule(steve_i18n::t!("flow.schedule.brief_run")));
+    }
     let (run_id, started) = scheduler::start_manual(&cx, &who.ws, &id)?;
     if started {
         scheduler::spawn_drive(cx.clone(), run_id.clone());
@@ -388,7 +428,7 @@ async fn history(
     Query(q): Query<PageParams>,
 ) -> ApiResult<Json<Value>> {
     cx.store().reader(|c| -> ApiResult<_> {
-        let s = schedules::own(c, &who.ws, &id)?;
+        let s = schedules::own_for(c, &who.ws, &id, &who.me)?;
         let page: Vec<RunView> =
             runs::page(c, &s.workspace_id, &s.id, q.before, q.limit.unwrap_or(20))?
                 .iter()

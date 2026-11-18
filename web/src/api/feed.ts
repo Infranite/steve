@@ -1,10 +1,10 @@
 /* The personal reading API: workspace reports, explicitly opted-in personal notifications
- * (work-item completions, starred contacts' messages to you) and your own todo reminders.
+ * (work-item completions, starred contacts' messages to you), your own todo reminders and your morning brief.
  * Capture the Hub and workspace once; never let a mounted reader follow a global scope switch. */
 import { modReq, qs } from "@/api"
 import { currentHub } from "@/hub"
 
-export type FeedKind = "report" | "completion" | "starred" | "reminder"
+export type FeedKind = "report" | "completion" | "starred" | "reminder" | "briefing"
 export type FeedSource = "flow" | "notification"
 export type FeedContent = { title: string; markdown: string; fields: [string, string][]; actions: [string, string][]; references: [string, string][] }
 export type FeedEntry = {

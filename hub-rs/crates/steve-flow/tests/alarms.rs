@@ -63,6 +63,7 @@ impl AlarmSource for Scripted {
             text: t.clone(),
             detail: None,
             link: None,
+            planned_for: None,
         }))
     }
 }

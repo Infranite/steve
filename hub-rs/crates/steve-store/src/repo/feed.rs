@@ -56,7 +56,7 @@ impl Filter {
         if self
             .kind
             .as_deref()
-            .is_some_and(|x| !matches!(x, "report" | "completion" | "starred" | "reminder"))
+            .is_some_and(|x| !matches!(x, "report" | "completion" | "starred" | "reminder" | "briefing"))
             || self
                 .source
                 .as_deref()

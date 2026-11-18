@@ -9,6 +9,8 @@
 //!   `snooze.wake`; steve-flow [`steve_flow::alarms::TOPICS`]). It is for its owner only and always lands in
 //!   their feed; it is sent to their own DM only under a policy that sends now. The alarm clock already held it
 //!   through the quiet hours, and several that came due together are one notification;
+//! - a member's morning brief (`briefing.ready`): its alarm is a `brief` schedule's, and steve-digest has its
+//!   own intake that composes the day ([`own_delivery`], [`record`]); sent like an alarm's;
 //! - a starred contact's message to you on your own account (`contact.starred`, [`queue_starred`], from
 //!   [`crate::starred`]). It is the urgent one: it goes out now under `digest` too, to the private chat you chose
 //!   for it (no route is looked up for you under `digest`: none chosen keeps it in the inbox, as `log` does;
@@ -50,8 +52,8 @@ pub struct Policy {
 
 /// What a personal notification is about (`personal_notifications.topic`). The topic alone decides how it
 /// is sent ([`Topic::sends`], [`Topic::quiet_allowed`], [`Topic::urgency`], [`Topic::reason`],
-/// [`Topic::checks_answered`]) and the feed entry's kind ([`Topic::feed_kind`]; migration 102's insert trigger
-/// maps the topics the same way). Every match on it is exhaustive: a new topic must state each rule.
+/// [`Topic::checks_answered`]) and the feed entry's kind ([`Topic::feed_kind`]; migrations 102 and 103's insert
+/// triggers map the topics the same way). Every match on it is exhaustive: a new topic must state each rule.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Topic {
     /// A work item was done (`work.item.done`).
@@ -62,17 +64,20 @@ pub enum Topic {
     SnoozeWake,
     /// A starred contact wrote to you on your own account (`contact.starred`).
     ContactStarred,
+    /// A member's morning brief is ready (`briefing.ready`; steve-digest `brief`).
+    BriefingReady,
 }
 
 /// The topic of a starred contact's message to you.
 pub const CONTACT_STARRED: &str = "contact.starred";
 
 impl Topic {
-    pub const ALL: [Topic; 4] = [
+    pub const ALL: [Topic; 5] = [
         Topic::ItemDone,
         Topic::TodoDue,
         Topic::SnoozeWake,
         Topic::ContactStarred,
+        Topic::BriefingReady,
     ];
     /// `personal_notifications.topic`.
     pub fn code(self) -> &'static str {
@@ -81,6 +86,7 @@ impl Topic {
             Self::TodoDue => steve_flow::alarms::TODO_DUE,
             Self::SnoozeWake => steve_flow::alarms::SNOOZE_WAKE,
             Self::ContactStarred => CONTACT_STARRED,
+            Self::BriefingReady => steve_flow::alarms::BRIEFING_READY,
         }
     }
     /// The topic stored as `s`; `None` for one this Hub does not know (the column's CHECK refuses those).
@@ -93,6 +99,7 @@ impl Topic {
             Self::ItemDone => "completion",
             Self::TodoDue | Self::SnoozeWake => "reminder",
             Self::ContactStarred => "starred",
+            Self::BriefingReady => "briefing",
         }
     }
     /// Whether a notification of this topic goes out under policy `p` (not only into the inbox):
@@ -103,7 +110,7 @@ impl Topic {
             Mode::Now => true,
             Mode::Digest => match self {
                 Self::ContactStarred => p.space_id.is_some(),
-                Self::ItemDone | Self::TodoDue | Self::SnoozeWake => false,
+                Self::ItemDone | Self::TodoDue | Self::SnoozeWake | Self::BriefingReady => false,
             },
             Mode::Log => false,
         }
@@ -113,14 +120,14 @@ impl Topic {
     pub fn quiet_allowed(self, p: &Policy) -> bool {
         match self {
             Self::ContactStarred => p.starred_in_quiet,
-            Self::ItemDone | Self::TodoDue | Self::SnoozeWake => false,
+            Self::ItemDone | Self::TodoDue | Self::SnoozeWake | Self::BriefingReady => false,
         }
     }
     /// The delivery's urgency.
     pub fn urgency(self) -> &'static str {
         match self {
             Self::ContactStarred => "high",
-            Self::ItemDone | Self::TodoDue | Self::SnoozeWake => "normal",
+            Self::ItemDone | Self::TodoDue | Self::SnoozeWake | Self::BriefingReady => "normal",
         }
     }
     /// Why it goes out (the delivery's stated reason).
@@ -130,6 +137,7 @@ impl Topic {
             Self::TodoDue => "Personal todo reminder (set by the member)",
             Self::SnoozeWake => "Personal snoozed todo is back (set by the member)",
             Self::ContactStarred => "A starred contact's message to you (explicit member policy)",
+            Self::BriefingReady => "Personal morning brief (set by the member)",
         }
     }
     /// Whether it is asked again, before it is submitted and before every attempt, whether it is still wanted
@@ -137,7 +145,7 @@ impl Topic {
     pub fn checks_answered(self) -> bool {
         match self {
             Self::ContactStarred => true,
-            Self::ItemDone | Self::TodoDue | Self::SnoozeWake => false,
+            Self::ItemDone | Self::TodoDue | Self::SnoozeWake | Self::BriefingReady => false,
         }
     }
 }
@@ -495,6 +503,41 @@ impl Consumer for Intake {
     }
 }
 
+/// How a notification a member set up themselves (an alarm's, a morning brief) is kept: sent under a
+/// policy that sends now (`waiting`, for the pump), otherwise only in their feed (`held`, under their
+/// policy's mode, or `log` without one or when it is off).
+pub fn own_delivery(c: &Connection, ws: &str, user: &str) -> ChannelResult<(Mode, &'static str)> {
+    let who = Caller {
+        ws: ws.into(),
+        me: user.into(),
+    };
+    Ok(match load(c, &who)? {
+        Some(p) if p.enabled && p.mode == Mode::Now => (Mode::Now, "waiting"),
+        Some(p) if p.enabled => (p.mode, "held"),
+        _ => (Mode::Log, "held"),
+    })
+}
+
+/// [`insert`] for a module with its own notification topic (steve-digest's morning brief): one inbox row,
+/// and by trigger its feed entry, for `user` about `ev`; nothing when they already have one for it.
+#[allow(clippy::too_many_arguments)]
+pub fn record(
+    tx: &Tx,
+    ws: &str,
+    user: &str,
+    ev: &Event,
+    mode: Mode,
+    body: &str,
+    state: &str,
+    topic: Topic,
+) -> ChannelResult<()> {
+    let who = Caller {
+        ws: ws.into(),
+        me: user.into(),
+    };
+    insert(tx, &who, ev, mode, body, state, topic)
+}
+
 /// One inbox row (and, by trigger, its feed entry) for `who` about event `ev`.
 fn insert(
     tx: &Tx,
@@ -520,7 +563,7 @@ impl AlarmIntake {
     pub fn all() -> Vec<Arc<dyn Consumer>> {
         steve_flow::alarms::TOPICS
             .iter()
-            .filter(|t| t.alarm.is_some())
+            .filter(|t| t.alarm.is_some() && t.from_lines)
             .map(|t| Arc::new(AlarmIntake(t)) as Arc<dyn Consumer>)
             .collect()
     }
@@ -603,11 +646,7 @@ impl Consumer for AlarmIntake {
                 ws: ev.workspace_id.clone(),
                 me: a.owner.clone(),
             };
-            let (mode, state) = match load(tx, &who)? {
-                Some(p) if p.enabled && p.mode == Mode::Now => (Mode::Now, "waiting"),
-                Some(p) if p.enabled => (p.mode, "held"),
-                _ => (Mode::Log, "held"),
-            };
+            let (mode, state) = own_delivery(tx, &who.ws, &who.me)?;
             let topic = Topic::parse(self.0.name)
                 .ok_or_else(|| ApiError::invalid("personal notification topic"))?;
             insert(
@@ -997,7 +1036,7 @@ mod tests {
             assert_eq!(Topic::parse(t.code()), Some(t));
             assert!(matches!(
                 t.feed_kind(),
-                "completion" | "starred" | "reminder"
+                "completion" | "starred" | "reminder" | "briefing"
             ));
             assert!(matches!(t.urgency(), "normal" | "high"));
             assert!(!t.reason().is_empty());
@@ -1037,7 +1076,12 @@ mod tests {
         assert!(!s.sends(&policy(Mode::Digest, false, false)));
         assert!(s.quiet_allowed(&policy(Mode::Now, false, true)));
         assert!(!s.quiet_allowed(&policy(Mode::Now, false, false)));
-        for t in [Topic::ItemDone, Topic::TodoDue, Topic::SnoozeWake] {
+        for t in [
+            Topic::ItemDone,
+            Topic::TodoDue,
+            Topic::SnoozeWake,
+            Topic::BriefingReady,
+        ] {
             assert_eq!(t.urgency(), "normal");
             assert!(!t.checks_answered());
             assert!(t.sends(&policy(Mode::Now, false, false)));

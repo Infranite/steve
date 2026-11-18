@@ -70,11 +70,13 @@ function ScheduleDetail({ s, busy, onRun, onEdit, onDelete }: { s: Schedule; bus
     try { const xs = await flowApi.scheduleRuns(s.id, before, 20); setRuns((r) => (before ? [...(r ?? []), ...xs] : xs)); setMore(xs.length === 20) } catch (e) { if (!(e instanceof HubError && e.status === 404)) toast(errText(e)); setRuns((r) => r ?? []) }
   }
   useEffect(() => { void load() }, [s.id, s.last?.at, busy])
+  /* a morning brief: made by rule for you alone, no Bot; its time follows your own time zone */
+  const brief = s.mode === "brief"
   const rows: [string, ReactNode][] = [
-    [t("auto:schedule.rowWhat"), <span className="whitespace-pre-wrap [overflow-wrap:anywhere]">{s.what}</span>],
+    [t("auto:schedule.rowWhat"), <span className="whitespace-pre-wrap [overflow-wrap:anywhere]">{brief ? t("auto:schedule.briefWhat") : s.what}</span>],
     [t("auto:schedule.rowTime"), <>{s.describe} <span className="type-footnote text-muted-foreground">{s.tz} · <span className="font-mono">{s.cron}</span></span></>],
-    [t("auto:schedule.rowRun"), <span className="inline-flex items-center gap-1.5"><BotAvatar k={s.bot} size={16} />{botName(s.bot)} · {modeLabel(s.mode)}</span>],
-    [t("auto:schedule.rowRules"), <span className="text-muted-foreground">{t("auto:schedule.rules", { missed: t(`auto:schedule.missed.${s.missed}`), overlap: t(`auto:schedule.overlap.${s.overlap}`), budget: usd(s.budget_usd) })}</span>],
+    [t("auto:schedule.rowRun"), brief ? <span>{modeLabel(s.mode)}</span> : <span className="inline-flex items-center gap-1.5"><BotAvatar k={s.bot} size={16} />{botName(s.bot)} · {modeLabel(s.mode)}</span>],
+    [t("auto:schedule.rowRules"), <span className="text-muted-foreground">{brief ? t("auto:schedule.briefRules") : t("auto:schedule.rules", { missed: t(`auto:schedule.missed.${s.missed}`), overlap: t(`auto:schedule.overlap.${s.overlap}`), budget: usd(s.budget_usd) })}</span>],
   ]
   return (
     <div className="flex flex-col gap-4 px-3 pb-4 sm:pl-14" data-schedule-detail={s.id}>
@@ -92,7 +94,7 @@ function ScheduleDetail({ s, busy, onRun, onEdit, onDelete }: { s: Schedule; bus
           </ul>}
         </div>
       </div>
-      <div className="flex flex-wrap gap-2"><Button size="sm" variant="outline" disabled={busy === "run" + s.id} onClick={onRun} data-run-now><PlayIcon />{t("auto:schedule.runNow")}</Button><Button size="sm" variant="ghost" className="text-muted-foreground" onClick={onEdit} data-edit-schedule>{t("common:action.edit")}</Button><span className="flex-1" /><Button size="sm" variant="ghost" className="text-destructive" onClick={onDelete} data-del-schedule>{t("common:action.delete")}</Button></div>
+      <div className="flex flex-wrap gap-2">{!brief && <Button size="sm" variant="outline" disabled={busy === "run" + s.id} onClick={onRun} data-run-now><PlayIcon />{t("auto:schedule.runNow")}</Button>}<Button size="sm" variant="ghost" className="text-muted-foreground" onClick={onEdit} data-edit-schedule>{t("common:action.edit")}</Button><span className="flex-1" /><Button size="sm" variant="ghost" className="text-destructive" onClick={onDelete} data-del-schedule>{t("common:action.delete")}</Button></div>
     </div>
   )
 }
@@ -142,9 +144,11 @@ export function NewScheduleDialog({ edit, bot, onClose, onSaved }: { edit?: Sche
     return () => clearTimeout(timer)
   }, [w, tz, cron])
   const bud = Number(budget), budOk = budget.trim() !== "" && bud >= 0 && bud <= 50
-  const ok = name.trim() && name.trim().length <= 40 && (cron.trim() || (w.trim() && !perr)) && what.trim() && b && budOk
+  /* a morning brief changes only its name and time (its zone is yours, the rest is fixed) */
+  const brief = edit?.mode === "brief"
+  const ok = name.trim() && name.trim().length <= 40 && (cron.trim() || (w.trim() && !perr)) && (brief || (what.trim() && b && budOk))
   const submit = async () => {
-    const body: ScheduleBody = { name: name.trim(), what: what.trim(), bot: b, mode, missed, overlap, budget_usd: bud, ...(tz ? { tz } : {}) }
+    const body: ScheduleBody = brief ? { name: name.trim() } : { name: name.trim(), what: what.trim(), bot: b, mode, missed, overlap, budget_usd: bud, ...(tz ? { tz } : {}) }
     if (cron.trim()) body.cron = cron.trim()
     if (!edit || w.trim() !== edit.when || cron.trim()) { if (w.trim()) body.when = w.trim() }
     setBusy(true)
@@ -166,14 +170,16 @@ export function NewScheduleDialog({ edit, bot, onClose, onSaved }: { edit?: Sche
         <button type="button" className="-mt-2 self-start type-footnote text-muted-foreground hover:text-foreground" aria-expanded={adv} onClick={() => setAdv(!adv)}>{adv ? t("auto:schedule.advHide") : t("auto:schedule.advShow")}</button>
         {adv && <div className="grid grid-cols-2 gap-3 anim-in">
           <Field><FieldLabel htmlFor="sch-cron">{t("auto:schedule.cron")}</FieldLabel><Input id="sch-cron" className="type-code" value={cron} onChange={(e) => setCron(e.target.value)} placeholder={parsed?.cron ?? edit?.cron ?? "30 9 * * 1-5"} /></Field>
-          <Field><FieldLabel>{t("auto:schedule.tz")}</FieldLabel><Pick label={t("auto:schedule.tz")} value={tz || "_"} options={[{ v: "_", l: t("auto:schedule.tzDefault") }, ...TZS.map((v) => ({ v, l: v }))]} onChange={(v) => setTz(v === "_" ? "" : v)} className="w-full" /></Field>
+          {!brief && <><Field><FieldLabel>{t("auto:schedule.tz")}</FieldLabel><Pick label={t("auto:schedule.tz")} value={tz || "_"} options={[{ v: "_", l: t("auto:schedule.tzDefault") }, ...TZS.map((v) => ({ v, l: v }))]} onChange={(v) => setTz(v === "_" ? "" : v)} className="w-full" /></Field>
           <Field><FieldLabel>{t("auto:schedule.missedLabel")}</FieldLabel><Pick label={t("auto:schedule.missedLabel")} value={missed} options={[{ v: "catch_up_once", l: t("auto:schedule.missedCatchUp") }, { v: "skip", l: t("auto:schedule.missed.skip") }]} onChange={setMissed} className="w-full" /></Field>
-          <Field><FieldLabel>{t("auto:schedule.overlapLabel")}</FieldLabel><Pick label={t("auto:schedule.overlapLabel")} value={overlap} options={[{ v: "skip", l: t("auto:schedule.overlap.skip") }, { v: "run", l: t("auto:schedule.overlap.run") }]} onChange={setOverlap} className="w-full" /></Field>
+          <Field><FieldLabel>{t("auto:schedule.overlapLabel")}</FieldLabel><Pick label={t("auto:schedule.overlapLabel")} value={overlap} options={[{ v: "skip", l: t("auto:schedule.overlap.skip") }, { v: "run", l: t("auto:schedule.overlap.run") }]} onChange={setOverlap} className="w-full" /></Field></>}
         </div>}
+        {brief ? <FieldDescription data-brief-note>{t("auto:schedule.briefEdit")}</FieldDescription> : <>
         <Field><FieldLabel htmlFor="sch-what">{t("auto:schedule.what")}</FieldLabel><Textarea id="sch-what" maxLength={2000} className="min-h-16" value={what} onChange={(e) => setWhat(e.target.value)} placeholder={t("auto:schedule.whatPlaceholder")} data-schedule-what /></Field>
         <Field orientation="horizontal" className="justify-between"><FieldLabel>{t("auto:schedule.handTo")}</FieldLabel><Pick label={t("auto:schedule.handToAria")} value={b} options={botOptions()} onChange={setB} testId="sch-bot" /></Field>
         <Field orientation="horizontal" className="justify-between"><FieldLabel>{t("auto:schedule.modeLabel")}</FieldLabel><Pick label={t("auto:schedule.modeLabel")} value={mode} options={MODES.map((v) => ({ v, l: modeLabel(v) }))} onChange={pickMode} testId="sch-mode" /></Field>
         <Field orientation="horizontal" className="justify-between"><FieldLabel htmlFor="sch-budget">{t("auto:schedule.budget")}</FieldLabel><NumberField id="sch-budget" min={0} max={50} step={0.5} className="w-28" value={budget.trim() === "" || isNaN(Number(budget)) ? null : Number(budget)} onValueChange={(v) => { setBudget(v == null ? "" : String(v)); setBudTouched(true) }} aria-invalid={!budOk} /></Field>
+        </>}
       </FieldGroup>
     </Modal>
   )

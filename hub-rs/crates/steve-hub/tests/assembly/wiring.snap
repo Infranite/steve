@@ -67,6 +67,7 @@ api GET /conversations/x/messages
 api GET /conversations/x/record
 api GET /deliveries/x
 api GET /digest/bot
+api GET /digest/briefing/today
 api GET /digest/changes
 api GET /digest/conversations/x
 api GET /digest/matters
