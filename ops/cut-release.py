@@ -13,12 +13,12 @@ the interfaces are declared stable.
 
 Release notes are fragments: each change adds `docs/releases/unreleased/<name>.md` (its item, e.g.
 `ST-38.md`, or its branch), a few sentences or bullets, no version and no `# ` title. `cut` takes the
-target branch as it is on `origin` (in a worktree of its own, so the caller's checkout does not matter),
+target branch on `origin` (in a worktree of its own, so the caller's checkout does not matter),
 gives it the next free version (one more than the highest `vX.Y.Z` tag on `origin`), joins the fragments
 in the order they arrived on the branch into `docs/releases/X.Y.Z.md` and removes them.
 
 The branch takes changes only through pull requests (it may be protected), so the notes go in as one. `cut`
-takes the branch's head as `base`, commits the notes on it (adding `docs/releases/X.Y.Z.md`, removing the
+takes a tested commit as `base`, commits the notes on it (adding `docs/releases/X.Y.Z.md`, removing the
 fragments present at `base`, nothing else), pushes that commit to `release/vX.Y.Z`, opens a pull request into
 the branch, waits for its CI run, merges it with a merge commit (`--match-head-commit`, so exactly that commit
 goes in), and then tags the notes commit itself with the annotated tag `vX.Y.Z`: the tag is the tree that was
@@ -42,14 +42,20 @@ checks); fragments that arrived since wait for the release after it.
 
 Only a tested commit is released: `cut` first asks GitHub (`gh`: $STEVE_GH, else on PATH, else in
 /opt/homebrew/bin, /usr/local/bin or /usr/bin, as the Hub finds it) for the CI workflow's run
-(`.github/workflows/ci.yml`) pushed to the branch at `base`. It waits while that run is queued or running (up to
+(`.github/workflows/ci.yml`) pushed to the branch at `base`. When main's workflow declares
+`RELEASE_BASE_POLICY: latest-tested-push`, it picks the newest first-parent commit since the last release
+whose own latest full push run completed successfully. Newer pending, cancelled or failed commits wait for
+the next release; cancellation never counts as success. With no eligible successful commit it checks the
+head as before. Older workflows and other branches always require the head's run, preserving their release
+policy without relying on a workflow change that has not reached main. It waits while that run is queued or
+running (up to
 `--ci-wait` seconds, default 45 minutes), and refuses when it failed or there is none, naming the run and how to
 run its failed jobs again (`gh run rerun <id> --failed`) when it was only a flake. The notes commit then needs
 its release pull request's run to pass: that run checks the notes (ci.yml skips its Rust and Apple jobs when the
 pull request changes release notes alone and stands right on a main commit whose run passed), so the tagged
 tree is `base`, tested on every platform, plus notes that passed their checks. `--skip-ci` releases without
 either check, on purpose (it says so; a protected branch that requires the run then refuses the merge).
-`--dry-run` asks nothing and pushes nothing.
+`--dry-run` previews the current head's notes without choosing a tested base, asking CI or pushing anything.
 
 Only `base`'s own push run counts for it. Pull requests run the Linux jobs only (macOS runs on main), so a pull
 request's green run is never taken for the commit it was merged as.
@@ -218,6 +224,9 @@ def ci_gate(repo, sha, branch, wait):
             if conclusion == "success":
                 print(f"CI passed on {short}: {run.get('html_url', run.get('id'))}", file=sys.stderr)
                 return run
+            if conclusion == "cancelled":
+                raise Refused(f"CI ({CI_WORKFLOW}) cancelled on {short}: {run.get('html_url', run.get('id'))}. "
+                              "No successful push run verifies this commit; cut again once a tested commit is available.")
             raise Refused(f"CI ({CI_WORKFLOW}) {conclusion} on {short}: {run.get('html_url', run.get('id'))}. "
                           + rerun_hint(run))
         else:
@@ -230,6 +239,27 @@ def ci_gate(repo, sha, branch, wait):
             print(f"waiting for CI on {short} ({state})", file=sys.stderr)
             said = state
         time.sleep(CI_POLL)
+
+
+def release_base(repo, head, branch, wait):
+    """Select a tested first-parent commit when the branch's workflow opts in; older workflows keep
+    requiring the current head. A cancelled run is never success, nor is a pull-request run."""
+    workflow = git("show", f"{head}:.github/workflows/{CI_WORKFLOW}", cwd=repo, check=False)
+    if branch != "main" or not re.search(r"^  RELEASE_BASE_POLICY: latest-tested-push$", workflow.stdout, re.M):
+        return head
+    # Do not go back to code already released. Walk branch order, not run completion order: slow runs
+    # and reruns can finish out of order. First-parent excludes a feature branch's pre-merge SHA.
+    commits = git("rev-list", "--first-parent", head, "--not", "--glob=refs/tags/v[0-9]*", cwd=repo).stdout.split()
+    for sha in commits:
+        run = ci_run(repo, sha, branch)
+        if run and run.get("status") == "completed" and run.get("conclusion") == "success":
+            if sha != head:
+                print(f"releasing tested commit {sha[:7]}; newer commits on {branch} wait for the next release",
+                      file=sys.stderr)
+            return sha
+    # Nothing tested yet: retain the bounded wait and diagnostics on the head, including real failures.
+    ci_gate(repo, head, branch, wait)
+    return head
 
 
 def fragments(wt, version):
@@ -292,6 +322,9 @@ def cut_once(repo, branch, version_arg, minor, dry, ci_wait=CI_WAIT):
                     notes_ci(repo, left, f"notes commit {left[:7]}", ci_wait, branch)
                 tag(repo, wt, left, version, branch)
                 return fetched(repo, version)
+            if not dry and ci_wait is not None:
+                base = release_base(repo, base, branch, ci_wait)
+                git("checkout", "--quiet", "--detach", base, cwd=wt)
             parts = fragments(wt, version)
             if not parts:
                 raise Refused(f"no release notes: add {FRAGMENTS}/<item>.md on {branch} first")
@@ -565,7 +598,7 @@ def main():
     c.add_argument("--dry-run", action="store_true")
     ci = c.add_mutually_exclusive_group()
     ci.add_argument("--ci-wait", type=int, default=CI_WAIT, metavar="S",
-                    help=f"how long to wait for CI on the branch head (default {CI_WAIT}s)")
+                    help=f"how long to wait when no tested base is available (default {CI_WAIT}s)")
     ci.add_argument("--skip-ci", action="store_true", help="release without checking CI (untested)")
     l = sub.add_parser("lint")
     l.add_argument("--base")

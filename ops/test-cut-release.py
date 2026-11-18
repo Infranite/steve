@@ -14,7 +14,8 @@ ENV = dict({k: v for k, v in os.environ.items() if k != "STEVE_GH"}, GIT_AUTHOR_
            GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@example.com")
 
 # GitHub's answer for the CI workflow's runs on a commit, from $FAKE_GH_CI: {"conclusion": ..., "status": ...}
-# for the push run of every commit, or {"none": true} (only a pull request's run); each call is logged to
+# for the push run of every commit, or {"none": true} (only a pull request's run). `commits` overrides
+# these answers per SHA (including `older_conclusion` for a superseded run); each call is logged to
 # $FAKE_GH_LOG. With {"pull": {"number": N, "head": sha, ...}} every commit asked about is that pull request
 # as merged ("merged_as": another commit instead; "base": its target), and its head has one pull-request run
 # ("conclusion", "status").
@@ -113,13 +114,14 @@ if tested:
     print(json.dumps({"total_count": len(runs), "workflow_runs": runs}))
     sys.exit(0)
 # a green pull-request run of the same commit (Linux only) is always there, and newer: by itself it never counts
+state = ci.get("commits", {}).get(m.group(1), ci)
 pr = {"id": 99, "run_number": 3, "head_sha": m.group(1), "event": "pull_request", "head_branch": "feature",
       "status": "completed", "conclusion": "success", "html_url": "https://github.example/runs/99"}
-runs = [pr] if ci.get("none") else [
+runs = [pr] if state.get("none") else [
     {"id": 7, "run_number": 1, "head_sha": m.group(1), "event": "push", "head_branch": "main",
-     "status": "completed", "conclusion": "failure", "html_url": "https://github.example/runs/7"},
+     "status": "completed", "conclusion": state.get("older_conclusion", "failure"), "html_url": "https://github.example/runs/7"},
     {"id": 42, "run_number": 2, "head_sha": m.group(1), "event": "push", "head_branch": "main",
-     "status": ci.get("status", "completed"), "conclusion": ci.get("conclusion"),
+     "status": state.get("status", "completed"), "conclusion": state.get("conclusion"),
      "html_url": "https://github.example/runs/42"}, pr]
 print(json.dumps({"total_count": len(runs), "workflow_runs": runs}))
 """
@@ -636,8 +638,98 @@ def main():
         r = cut(a, "next")
         assert r.returncode == 1 and "can't read the tags" in r.stderr, r
         ok("an unreachable origin is an error, never version 0.1.0")
-    print("All cut-release checks passed")
+
+
+def latest_tested_checks():
+    with tempfile.TemporaryDirectory(prefix="steve-cut-tested-") as tmp:
+        fake_gh(tmp)
+        origin, a = setup(tmp)
+        policy = "env:\n  RELEASE_BASE_POLICY: latest-tested-push\n"
+        commit(a, {".github/workflows/ci.yml": policy, "src/tested.txt": "tested\n",
+                   "docs/releases/unreleased/.gitkeep": "",
+                   "docs/releases/unreleased/tested.md": "- Tested change.\n"}, "tested")
+        tested = git(a, "rev-parse", "HEAD")
+        commit(a, {"src/pending.txt": "pending\n", "docs/releases/unreleased/pending.md": "- Later.\n"}, "pending")
+        pending = git(a, "rev-parse", "HEAD")
+        commit(a, {"src/head.txt": "head\n"}, "head")
+        head = git(a, "rev-parse", "HEAD")
+        git(a, "push", "-q", "origin", "main")
+        states = {tested: {"conclusion": "success"}, pending: {"conclusion": "cancelled", "older_conclusion": "success"},
+                  head: {"status": "queued"}}
+        set_ci(commits=states)
+        spec = importlib.util.spec_from_file_location("cut_tested", CUT)
+        m = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(m)
+        saved_env = dict(os.environ)
+        os.environ.update(ENV)
+        try:
+            assert m.release_base(a, head, "main", 0) == tested
+            states[head] = {"conclusion": "success"}
+            set_ci(commits=states)
+            assert m.release_base(a, head, "main", 0) == head
+            states[head] = {"status": "queued"}
+            # Commit order wins even if an older run completed later or has a higher run number.
+            states[pending] = {"conclusion": "success"}
+            set_ci(commits=states)
+            assert m.release_base(a, head, "main", 0) == pending
+            # A real failed run is not success either; a newer PR-only green never stands for a push.
+            for state in ({"conclusion": "failure"}, {"none": True}, {"conclusion": "neutral"},
+                          {"status": "in_progress", "conclusion": "success"}):
+                states[pending] = state
+                set_ci(commits=states)
+                assert m.release_base(a, head, "main", 0) == tested
+            # A tested feature SHA on a second parent is not a tested main push commit.
+            git(a, "checkout", "-q", "-b", "feature", tested)
+            commit(a, {"src/feature.txt": "feature\n"}, "feature")
+            feature = git(a, "rev-parse", "HEAD")
+            git(a, "checkout", "-q", "main")
+            git(a, "merge", "-q", "--no-ff", "feature", "-m", "merge feature")
+            merged = git(a, "rev-parse", "HEAD")
+            states[feature] = {"conclusion": "success"}
+            states[merged] = {"conclusion": "cancelled"}
+            states[pending] = {"conclusion": "cancelled", "older_conclusion": "success"}
+            set_ci(commits=states)
+            assert m.release_base(a, merged, "main", 0) == tested
+            git(a, "push", "-q", "origin", "main")
+            # Nothing eligible passed: the bounded head gate refuses, without suggesting a cancelled
+            # workflow passed. The already released tag's code is not a candidate for a new release.
+            states[tested] = {"conclusion": "cancelled"}
+            set_ci(commits=states)
+            try:
+                m.release_base(a, merged, "main", 0)
+                raise AssertionError("released without a successful push")
+            except m.Refused as e:
+                assert "cancelled on" in str(e), e
+            set_ci(down=True)
+            try:
+                m.release_base(a, merged, "main", 0)
+                raise AssertionError("released with GitHub unavailable")
+            except m.Refused as e:
+                assert "can't read CI" in str(e), e
+            states[tested] = {"conclusion": "success"}
+            set_ci(commits=states)
+            r = cut(a, "cut", "--ci-wait", "0")
+            assert r.returncode == 0 and "released v0.2.25" in r.stdout, r
+            assert git(origin, "rev-parse", "v0.2.25^{commit}^") == tested
+            assert git(origin, "show", "v0.2.25:docs/releases/0.2.25.md") == "# Steve v0.2.25\n\n- Tested change."
+            assert git(origin, "ls-tree", "--name-only", "v0.2.25", "src/pending.txt") == ""
+            assert git(origin, "show", "main:docs/releases/unreleased/pending.md") == "- Later."
+            assert git(origin, "show", "main:src/pending.txt") == "pending"
+            assert git(origin, "ls-tree", "--name-only", "main", "docs/releases/unreleased/tested.md") == ""
+            # Recovery finds the notes on current main before selecting another tested base.
+            git(origin, "tag", "-d", "v0.2.25")
+            git(a, "tag", "-d", "v0.2.25")
+            r = cut(a, "cut", "--ci-wait", "0")
+            assert r.returncode == 0 and "notes commit" in r.stderr, r
+            assert git(origin, "rev-parse", "v0.2.25^{commit}^") == tested
+        finally:
+            os.environ.clear()
+            os.environ.update(saved_env)
+        ok("latest tested main push is released; cancelled/running/PR-only runs and feature SHAs are excluded; "
+           "newer code and fragments stay on main, and interrupted tagging still recovers")
 
 
 if __name__ == "__main__":
     main()
+    latest_tested_checks()
+    print("All cut-release checks passed")
