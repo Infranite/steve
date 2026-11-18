@@ -1149,6 +1149,9 @@ async fn a_plain_question_skips_the_router() {
         .expect("route log");
     assert_eq!(log.guard.as_deref(), Some("q"));
     assert_eq!(log.model, None);
+    // the answer is written before its turn lets go of the thread: said before that, the next
+    // message is routed once ahead of its turn and once more after the answer (#394)
+    assert!(k.wait(|| !k.core.main_busy(WS).unwrap()), "the turn ended");
     // asking for work: the router decides
     k.core.say(WS, "把检索的打分改成按时间加权", &[]).unwrap();
     settle(&k, 4).await;
