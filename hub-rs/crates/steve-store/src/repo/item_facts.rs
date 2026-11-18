@@ -1,4 +1,4 @@
-//! Shadow facts of an item's work (migration 103, #327): what was delivered (with how far each fact
+//! Shadow facts of an item's work (migration 104, #327): what was delivered (with how far each fact
 //! can be trusted), what the work waits on, what a judge concluded, and the operator's overrides of
 //! the named work policy. Written only here; read by the core's derived state, which nothing acts on
 //! yet. Also the reads of the Node command ledger that state needs (a dispatch whose receipt never
@@ -108,7 +108,7 @@ pub struct Judgement {
     pub harness: Option<String>,
     pub model: Option<String>,
     pub created: i64,
-    /// The candidate it judged (migration 104); `None` for one written without the judge.
+    /// The candidate it judged (migration 106); `None` for one written without the judge.
     pub candidate_id: Option<String>,
     /// `facts` | `rule` | `model`
     pub decided_by: Option<String>,
@@ -142,7 +142,7 @@ pub const CANDIDATE_STATES: [&str; 5] = ["pending", "judging", "judged", "supers
 /// Readings of the settled gate.
 pub const SETTLED: [&str; 3] = ["evaluable", "busy", "unknown"];
 
-/// One judge candidate (migration 104): a terminal turn of an item's current session, to be judged
+/// One judge candidate (migration 106): a terminal turn of an item's current session, to be judged
 /// once per (item, cycle, session, logical turn, scope revision).
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Candidate {
